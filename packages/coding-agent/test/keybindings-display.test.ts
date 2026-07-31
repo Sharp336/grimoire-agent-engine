@@ -93,3 +93,17 @@ describe("formatKeyHint / formatKeyHints (Mac glyphs on darwin)", () => {
 		expect(formatKeyHint("ctrl++", "linux")).toBe("Ctrl++");
 	});
 });
+
+describe("formatKeyHints deduplication", () => {
+	it("collapses distinct keys that share one Mac label", () => {
+		// ctrl and super both render as ⌘, and the shipped paste-image default
+		// carries both, so joining without dedupe reads "⌘V/⌘V".
+		expect(formatKeyHints(getDefaultPasteImageKeys("darwin"), "darwin")).toBe("⌘V");
+		expect(formatKeyHints(["ctrl+v", "super+v"], "darwin")).toBe("⌘V");
+	});
+
+	it("keeps genuinely distinct labels", () => {
+		expect(formatKeyHints(["alt+up", "shift+up"], "darwin")).toBe("⌥↑/⇧↑");
+		expect(formatKeyHints(["ctrl+v", "alt+v"], "win32")).toBe("Ctrl+V/Alt+V");
+	});
+});

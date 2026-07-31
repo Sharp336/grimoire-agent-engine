@@ -746,7 +746,10 @@ export function formatKeyHint(key: KeyId, platform: NodeJS.Platform = process.pl
 
 export function formatKeyHints(keys: KeyId | KeyId[], platform: NodeJS.Platform = process.platform): string {
 	const list = Array.isArray(keys) ? keys : [keys];
-	return list.map(key => formatKeyHint(key, platform)).join("/");
+	// Distinct keys can share one label: on darwin both ctrl and super render as ⌘,
+	// so the ["ctrl+v","super+v"] paste default would otherwise read "⌘V/⌘V".
+	const labels = new Set(list.map(key => formatKeyHint(key, platform)));
+	return [...labels].join("/");
 }
 
 export type { Keybinding, KeybindingsConfig, KeyId };
