@@ -2,16 +2,19 @@
  * Utilities for formatting keybinding hints in the UI.
  */
 import { getKeybindings, type Keybinding, type KeyId } from "@oh-my-pi/pi-tui";
-import type { AppKeybinding, KeybindingsManager } from "../../config/keybindings";
+import { type AppKeybinding, formatKeyHints, type KeybindingsManager } from "../../config/keybindings";
 import { theme } from "../../modes/theme/theme";
 
 /**
- * Format keys array as display string (e.g., ["ctrl+c", "escape"] -> "ctrl+c/escape").
+ * Format keys array as display string (e.g., ["ctrl+c", "escape"] -> "Ctrl+C/Esc").
+ *
+ * Delegates to the central `formatKeyHints` so these hints cannot drift from the
+ * ones `getDisplayString` renders elsewhere — this module used to join raw key ids,
+ * which showed `escape/ctrl+c` in dialogs while other surfaces showed `Esc/Ctrl+C`.
  */
 function formatKeys(keys: KeyId[]): string {
 	if (keys.length === 0) return "";
-	if (keys.length === 1) return keys[0]!;
-	return keys.join("/");
+	return formatKeyHints(keys);
 }
 
 /**
