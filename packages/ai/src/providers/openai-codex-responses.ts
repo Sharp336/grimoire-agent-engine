@@ -62,6 +62,7 @@ import {
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
+	scaleIdleTimeoutByEffort,
 } from "../utils/idle-iterator";
 import { getProxyForUrl } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
@@ -1332,10 +1333,20 @@ function createRequestSetup(options: OpenAICodexResponsesOptions | undefined): C
 	const requestSignal = options?.signal
 		? AbortSignal.any([options.signal, requestAbortController.signal])
 		: requestAbortController.signal;
-	const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs();
-	const websocketIdleTimeoutMs = options?.streamIdleTimeoutMs ?? CODEX_WEBSOCKET_IDLE_TIMEOUT_MS;
-	const firstEventTimeoutMs = options?.streamFirstEventTimeoutMs ?? getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs);
-	const websocketFirstEventTimeoutMs = options?.streamFirstEventTimeoutMs ?? CODEX_WEBSOCKET_FIRST_EVENT_TIMEOUT_MS;
+	const baseIdleTimeoutMs = options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs();
+	const baseFirstEventTimeoutMs =
+		options?.streamFirstEventTimeoutMs ?? getOpenAIStreamFirstEventTimeoutMs(baseIdleTimeoutMs);
+	const reasoningEffort = options?.reasoning;
+	const idleTimeoutMs = scaleIdleTimeoutByEffort(baseIdleTimeoutMs, reasoningEffort);
+	const firstEventTimeoutMs = scaleIdleTimeoutByEffort(baseFirstEventTimeoutMs, reasoningEffort);
+	const websocketIdleTimeoutMs = scaleIdleTimeoutByEffort(
+		options?.streamIdleTimeoutMs ?? CODEX_WEBSOCKET_IDLE_TIMEOUT_MS,
+		reasoningEffort,
+	);
+	const websocketFirstEventTimeoutMs = scaleIdleTimeoutByEffort(
+		options?.streamFirstEventTimeoutMs ?? CODEX_WEBSOCKET_FIRST_EVENT_TIMEOUT_MS,
+		reasoningEffort,
+	);
 	const wrapCodexSseStream = (
 		source: AsyncGenerator<Record<string, unknown>>,
 	): AsyncGenerator<Record<string, unknown>> =>

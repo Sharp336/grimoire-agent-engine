@@ -29,6 +29,7 @@ import {
 	getStreamFirstEventTimeoutMs,
 	getStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
+	scaleIdleTimeoutByEffort,
 } from "../utils/idle-iterator";
 import type { BedrockOptions } from "./amazon-bedrock";
 import type { AnthropicOptions } from "./anthropic";
@@ -240,18 +241,21 @@ function forwardStream<TApi extends Api>(
 	(async () => {
 		try {
 			const providerHandlesStreamTimeouts = limits?.providerHandlesStreamTimeouts === true;
-			const idleTimeoutMs = providerHandlesStreamTimeouts
+			const baseIdleTimeoutMs = providerHandlesStreamTimeouts
 				? undefined
 				: (options.streamIdleTimeoutMs ??
 					(limits?.openAIIdleEnvFloorsFirstEvent
 						? getOpenAIStreamIdleTimeoutMs(limits.defaultIdleTimeoutMs)
 						: getStreamIdleTimeoutMs(limits?.defaultIdleTimeoutMs)));
-			const firstItemTimeoutMs = providerHandlesStreamTimeouts
+			const baseFirstItemTimeoutMs = providerHandlesStreamTimeouts
 				? 0
 				: (options.streamFirstEventTimeoutMs ??
 					(limits?.openAIIdleEnvFloorsFirstEvent
-						? getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs, limits.defaultFirstEventTimeoutMs)
-						: getStreamFirstEventTimeoutMs(idleTimeoutMs, limits?.defaultFirstEventTimeoutMs)));
+						? getOpenAIStreamFirstEventTimeoutMs(baseIdleTimeoutMs, limits.defaultFirstEventTimeoutMs)
+						: getStreamFirstEventTimeoutMs(baseIdleTimeoutMs, limits?.defaultFirstEventTimeoutMs)));
+			const reasoningEffort = (options as { reasoning?: string }).reasoning;
+			const idleTimeoutMs = scaleIdleTimeoutByEffort(baseIdleTimeoutMs, reasoningEffort);
+			const firstItemTimeoutMs = scaleIdleTimeoutByEffort(baseFirstItemTimeoutMs, reasoningEffort);
 			// Providers with a server-driven local tool bridge (e.g. the Cursor
 			// exec channel) mark their stream busy while a local tool runs; the
 			// watchdog must not read that silence as a provider stall (#4593).

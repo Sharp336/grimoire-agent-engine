@@ -28,7 +28,12 @@ import type {
 } from "../types";
 import { createAbortSourceTracker } from "../utils/abort";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
+import {
+	getStreamFirstEventTimeoutMs,
+	getStreamIdleTimeoutMs,
+	iterateWithIdleTimeout,
+	scaleIdleTimeoutByEffort,
+} from "../utils/idle-iterator";
 import { notifyProviderResponse } from "../utils/provider-response";
 
 /**
@@ -200,8 +205,11 @@ export function streamPiNative<TApi extends Api>(
 				return;
 			}
 
-			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs();
-			const firstEventTimeoutMs = options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
+			const baseIdleTimeoutMs = options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs();
+			const baseFirstEventTimeoutMs =
+				options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(baseIdleTimeoutMs);
+			const idleTimeoutMs = scaleIdleTimeoutByEffort(baseIdleTimeoutMs, options?.reasoning);
+			const firstEventTimeoutMs = scaleIdleTimeoutByEffort(baseFirstEventTimeoutMs, options?.reasoning);
 			const source = readSseJson<AssistantMessageEvent>(
 				response.body as ReadableStream<Uint8Array>,
 				abortTracker.requestSignal,

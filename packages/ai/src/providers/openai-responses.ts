@@ -31,6 +31,7 @@ import {
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
+	scaleIdleTimeoutByEffort,
 } from "../utils/idle-iterator";
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
@@ -492,11 +493,13 @@ const streamOpenAIResponsesOnce = (
 			let chained: OpenAIResponsesChainedParams =
 				chainState && !chainState.disabled ? buildOpenAIResponsesChainedParams(params, chainState) : { params };
 			sentPreviousResponseId = chained.previousResponseId;
-			const idleTimeoutMs =
+			const baseIdleTimeoutMs =
 				options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs(model.compat.streamIdleTimeoutMs);
-			const firstEventTimeoutMs =
+			const baseFirstEventTimeoutMs =
 				options?.streamFirstEventTimeoutMs ??
-				getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs, model.compat.streamFirstEventTimeoutMs);
+				getOpenAIStreamFirstEventTimeoutMs(baseIdleTimeoutMs, model.compat.streamFirstEventTimeoutMs);
+			const idleTimeoutMs = scaleIdleTimeoutByEffort(baseIdleTimeoutMs, options?.reasoning);
+			const firstEventTimeoutMs = scaleIdleTimeoutByEffort(baseFirstEventTimeoutMs, options?.reasoning);
 			const requestTimeoutMs =
 				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
 			const requestUrl = `${resolvedBaseUrl}/responses`;

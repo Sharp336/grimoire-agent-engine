@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Streaming idle and first-event timeouts now scale with reasoning effort (high 2×, xhigh 3×, max 4×) so high-effort models that think silently for long periods are no longer killed mid-thought by the default 2-minute watchdog. Applies to all provider SSE paths and the Codex WebSocket transport. The original effort is preserved on the base options so every provider can scale; direct callers that set `effort` instead of `reasoning` are also covered. Ollama's pre-response TTFB guard is intentionally left unscaled (TTFB does not grow with think time).
 ### Added
 
 - Added the `gmi-cloud` provider registry definition with an API-key paste login (validates against `https://api.gmi-serving.com/v1/models`) and wired it into the provider registry, pairing with the catalog entry in `@oh-my-pi/pi-catalog`.

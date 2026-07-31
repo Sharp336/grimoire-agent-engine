@@ -560,7 +560,10 @@ const streamOllamaOnce = (
 				options.streamFirstEventTimeoutMs ?? getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs);
 			// Cleared the instant headers arrive (below) so the pre-response timer
 			// never aborts the actively streaming body — an absolute
-			// `AbortSignal.timeout` would (issue #2422).
+			// `AbortSignal.timeout` would (issue #2422). This guard measures
+			// time-to-first-byte (headers), which does not grow with reasoning
+			// effort — the silent-think window happens in the streamed body and
+			// is governed by the idle watchdog in register-builtins.forwardStream.
 			const watchdog = armPreResponseTimeout(options.signal, firstEventTimeoutMs);
 			let response: Response;
 			try {
