@@ -360,6 +360,51 @@ describe("loadAllMCPConfigs extraConfigPaths", () => {
 		expect(configs.discovered).toMatchObject({ type: "stdio", command: "discovered-server" });
 	});
 
+	// Per-entry checks: `loadCapability` drops invalid discovered servers with a
+	// warning, but extras are merged after that call. Without the same checks, a
+	// typo'd or missing endpoint becomes a blank stdio config and degrades into a
+	// startup connection error instead of the promised hard failure.
+	test.each([
+		["a typo'd command key", { foo: { commmand: "server" } }, /Must have command or url/],
+		["an empty server object", { foo: {} }, /Must have command or url/],
+		["http with no url", { foo: { type: "http" } }, /url/],
+		["stdio with no command", { foo: { type: "stdio", url: "http://localhost:4401/mcp" } }, /command/],
+	])("invalid explicit server entry is a hard error: %s", async (_label, mcpServers, expected) => {
+		const invalidPath = path.join(projectDir, "invalid.json");
+		await fs.writeFile(invalidPath, JSON.stringify({ mcpServers }));
+
+		await expect(loadAllMCPConfigs(projectDir, { extraConfigPaths: [invalidPath] })).rejects.toThrow(expected);
+	});
+
+	// The exemption the checks above must not swallow: a tombstone has no
+	// endpoint by design.
+	test("a transport-less enabled: false entry is still accepted", async () => {
+		await fs.writeFile(
+			path.join(projectDir, ".mcp.json"),
+			JSON.stringify({ mcpServers: { noisy: { command: "noisy-server" }, other: { command: "other-server" } } }),
+		);
+		const tombstonePath = path.join(projectDir, "tombstone.json");
+		await fs.writeFile(tombstonePath, JSON.stringify({ mcpServers: { noisy: { enabled: false } } }));
+
+		const { configs } = await loadAllMCPConfigs(projectDir, { extraConfigPaths: [tombstonePath] });
+
+		expect(configs.noisy).toBeUndefined();
+		expect(configs.other).toMatchObject({ type: "stdio", command: "other-server" });
+	});
+
+	// Discovery keeps the other half of the asymmetry: same defect, warning only.
+	test("an invalid discovered server is dropped rather than raised", async () => {
+		await fs.writeFile(
+			path.join(projectDir, ".mcp.json"),
+			JSON.stringify({ mcpServers: { broken: { commmand: "server" }, fine: { command: "fine-server" } } }),
+		);
+
+		const { configs } = await loadAllMCPConfigs(projectDir);
+
+		expect(configs.broken).toBeUndefined();
+		expect(configs.fine).toMatchObject({ type: "stdio", command: "fine-server" });
+	});
+
 	// `discoverAndLoadMCPTools` degrades discovery failures to a resolved result
 	// with an `errors` entry, which startup only logs. An explicitly named file
 	// has to escape that, or `--mcp-config typo.json` starts a session anyway.

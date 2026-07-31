@@ -114,6 +114,15 @@ export class ExplicitMCPConfigError extends Error {
 }
 
 /**
+ * An `enabled: false` entry with no endpoint. It exists to suppress a name
+ * rather than to describe a server, so it is exempt from the endpoint checks
+ * every real entry has to pass.
+ */
+function isTombstone(server: MCPServer): boolean {
+	return server.enabled === false && !server.command && !server.url;
+}
+
+/**
  * Load MCP servers from explicitly specified `mcpServers` JSON files.
  * Unlike provider discovery, an unreadable or malformed file is a hard error:
  * the caller asked for this exact file.
@@ -148,7 +157,24 @@ export async function loadExtraMCPConfigs(cwd: string, configPaths: string[]): P
 			path: resolved,
 			level: "project",
 		};
-		servers.push(...transformMCPConfig(config, source));
+		// Per-entry checks. Discovered servers get these from `loadCapability`,
+		// which drops the invalid ones with a warning; extras are merged after
+		// that call, so without this an entry with a typo'd or missing endpoint
+		// (`commmand`, or `{}`) would become a blank stdio config and degrade into
+		// a connection error at startup — the silent omission this loader exists
+		// to prevent. Same validator, so both paths agree on what a server is.
+		const fileServers = transformMCPConfig(config, source);
+		for (const server of fileServers) {
+			if (isTombstone(server)) continue;
+			const error = mcpCapability.validate?.(server);
+			if (error) {
+				throw new ExplicitMCPConfigError(
+					resolved,
+					`Invalid MCP config ${resolved}: server "${server.name}": ${error}`,
+				);
+			}
+		}
+		servers.push(...fileServers);
 	}
 	return servers;
 }
@@ -215,17 +241,15 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 		const kept: MCPServer[] = [];
 		const claimed = new Set<string>();
 		for (const server of resolved.values()) {
-			// An `enabled: false` entry with no command or url is a tombstone: it
-			// exists only to suppress the name, so it can never become a config in
-			// its own right — it just takes the same-named discovered server down
-			// with it. When the user's force-enable list stops it from suppressing,
-			// it has to yield the name back to discovery, the only source then
-			// holding a real definition; keeping it would leave a blank stdio config
-			// that fails to connect. An entry carrying a transport is a complete
-			// config that happens to be off, so force-enabling keeps it — the same
-			// way `suppressServer` treats a disabled-but-complete discovered server.
-			const isTombstone = !server.command && !server.url;
-			if (server.enabled === false && forcedEnabled.has(server.name) && isTombstone) continue;
+			// A tombstone can never become a config in its own right — it just takes
+			// the same-named discovered server down with it. When the user's
+			// force-enable list stops it from suppressing, it has to yield the name
+			// back to discovery, the only source then holding a real definition;
+			// keeping it would leave a blank stdio config that fails to connect. An
+			// entry carrying a transport is a complete config that happens to be
+			// off, so force-enabling keeps it — the same way `suppressServer` treats
+			// a disabled-but-complete discovered server.
+			if (isTombstone(server) && forcedEnabled.has(server.name)) continue;
 			claimed.add(server.name);
 			if (!suppressServer(server)) kept.push(server);
 		}
