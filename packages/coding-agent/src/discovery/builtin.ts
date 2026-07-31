@@ -3,9 +3,11 @@
  *
  * Primary provider for OMP native configs. Supports all capabilities.
  */
+
 import * as path from "node:path";
 import { getAgentDir, logger, parseFrontmatter, tryParseJson } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
+
 import { getManagedSkillsDir, MANAGED_SKILLS_PROVIDER_ID } from "../autolearn/managed-skills";
 import { registerProvider } from "../capability";
 import { type ContextFile, contextFileCapability } from "../capability/context-file";
@@ -23,6 +25,7 @@ import { type SlashCommand, slashCommandCapability } from "../capability/slash-c
 import { type SystemPrompt, systemPromptCapability } from "../capability/system-prompt";
 import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult } from "../capability/types";
+import { resolveActivationProjectRootSync } from "../config/activation-paths";
 import { expandTilde } from "../tools/path-utils";
 import {
 	buildRuleFromMarkdown,
@@ -193,9 +196,10 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 	// User scope tracks the active profile via getAgentDir() (not ctx.home), so it
 	// stays in sync with getMCPConfigPath("user") and the /mcp config writer.
 	const userAgentDir = getAgentDir();
+	const projectRoot = resolveActivationProjectRootSync(ctx.cwd);
 	const paths = [
-		{ path: path.join(ctx.cwd, PATHS.projectDir, "mcp.json"), level: "project" as const },
-		{ path: path.join(ctx.cwd, PATHS.projectDir, ".mcp.json"), level: "project" as const },
+		{ path: path.join(projectRoot, PATHS.projectDir, "mcp.json"), level: "project" as const },
+		{ path: path.join(projectRoot, PATHS.projectDir, ".mcp.json"), level: "project" as const },
 		{ path: path.join(userAgentDir, "mcp.json"), level: "user" as const },
 		{ path: path.join(userAgentDir, ".mcp.json"), level: "user" as const },
 	];

@@ -286,9 +286,10 @@ export async function collectMcpServerNames(
 		({ userConfig, projectConfig } = preloaded);
 	} else {
 		const cwd = getProjectDir();
+		const projectRoot = ctx.settings.getActivationProjectRoot(cwd, "project") ?? cwd;
 		[userConfig, projectConfig] = await Promise.all([
 			readMCPConfigFile(getMCPConfigPath("user", cwd)),
-			readMCPConfigFile(getMCPConfigPath("project", cwd)),
+			readMCPConfigFile(getMCPConfigPath("project", projectRoot)),
 		]);
 	}
 
@@ -1033,7 +1034,8 @@ export class MCPCommandController {
 	): Promise<{ filePath: string; scope: "user" | "project"; config: MCPServerConfig } | null> {
 		const cwd = getProjectDir();
 		const userPath = getMCPConfigPath("user", cwd);
-		const projectPath = getMCPConfigPath("project", cwd);
+		const projectRoot = this.ctx.settings.getActivationProjectRoot(cwd, "project") ?? cwd;
+		const projectPath = getMCPConfigPath("project", projectRoot);
 
 		const [userConfig, projectConfig] = await Promise.all([
 			readMCPConfigFile(userPath),

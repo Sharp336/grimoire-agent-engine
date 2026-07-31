@@ -1307,12 +1307,14 @@ export class Settings {
 
 		const projectDisabled = new Set([
 			...normalizeStringArrayForSettings(getByPath(this.#project, [disabledPath])),
+			...normalizeStringArrayForSettings(getByPath(this.#configOverlay, [disabledPath])),
 			...normalizeStringArrayForSettings(getByPath(this.#overrides, [disabledPath])),
 		]);
 		for (const id of projectDisabled) disabled.add(id);
 
 		const projectEnabled = new Set([
 			...normalizeStringArrayForSettings(getByPath(this.#project, [enabledPath])),
+			...normalizeStringArrayForSettings(getByPath(this.#configOverlay, [enabledPath])),
 			...normalizeStringArrayForSettings(getByPath(this.#overrides, [enabledPath])),
 		]);
 		for (const id of projectEnabled) {

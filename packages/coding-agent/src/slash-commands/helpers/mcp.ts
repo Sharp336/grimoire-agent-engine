@@ -357,7 +357,8 @@ async function handleSmitherySearchCommand(rest: string, runtime: SlashCommandRu
 async function handleListCommand(runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
 	try {
 		const userPath = getMCPConfigPath("user", runtime.cwd);
-		const projectPath = getMCPConfigPath("project", runtime.cwd);
+		const projectRoot = runtime.settings.getActivationProjectRoot(runtime.cwd, "project") ?? runtime.cwd;
+		const projectPath = getMCPConfigPath("project", projectRoot);
 		const [userConfig, projectConfig] = await Promise.all([
 			readMCPConfigFile(userPath),
 			readMCPConfigFile(projectPath),

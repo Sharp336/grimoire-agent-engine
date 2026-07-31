@@ -140,5 +140,9 @@ describe("/mcp enable and disable", () => {
 		const [configs] = mcpManager.connectServers.mock.calls[0]!;
 		expect(Object.keys(configs)).toEqual(["mcp1"]);
 		expect(configs.mcp1).toEqual({ type: "stdio", command: "mcp-one", enabled: true });
+		const persisted = (await Bun.file(getMCPConfigPath("project", projectDir)).json()) as {
+			mcpServers: Record<string, MCPServerConfig>;
+		};
+		expect(persisted.mcpServers.mcp1).toEqual({ type: "stdio", command: "mcp-one", enabled: true });
 	});
 });
