@@ -296,6 +296,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 			theme.bold(advisor.name || "(unnamed)"),
 			"",
 			`${theme.fg("dim", "Enabled:")} ${advisor.enabled === false ? "○ off" : "● on"}`,
+			`${theme.fg("dim", "Subagents:")} ${advisor.subagents === undefined ? "◌ inherit" : advisor.subagents ? "● on" : "○ off"}`,
 			`${theme.fg("dim", "Model:")} ${model}`,
 			`${theme.fg("dim", "Tools:")} ${tools}`,
 			"",
@@ -365,11 +366,14 @@ export class AdvisorConfigOverlayComponent implements Component {
 			advisor.subagents === undefined
 		);
 	}
-
 	#advisorSummary(advisor: AdvisorConfig): string {
 		const model = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";
 		const tools = formatAdvisorTools(advisor.tools, "no tools");
-		return `${model} · ${tools}`;
+		const summary = `${model} · ${tools}`;
+		if (advisor.subagents !== undefined) {
+			return `${summary} · subagents: ${advisor.subagents ? "on" : "off"}`;
+		}
+		return summary;
 	}
 
 	#showList(): void {
@@ -451,6 +455,11 @@ export class AdvisorConfigOverlayComponent implements Component {
 				label: "Enabled",
 				description: advisor.enabled === false ? "○ off" : "● on",
 			},
+			{
+				value: "toggleSubagents",
+				label: "Subagents",
+				description: advisor.subagents === undefined ? "inherit" : advisor.subagents ? "● on" : "○ off",
+			},
 			{ value: "model", label: "Model", description: modelDescription },
 		];
 		if (advisor.model?.trim()) {
@@ -473,6 +482,14 @@ export class AdvisorConfigOverlayComponent implements Component {
 			case "toggleEnabled": {
 				const a = this.#doc.advisors[index];
 				a.enabled = a.enabled === false ? undefined : false;
+				this.#dirty = true;
+				this.#showDetail(index);
+				return;
+			}
+			case "toggleSubagents": {
+				const a = this.#doc.advisors[index];
+				// Cycle the tri-state: inherit (undefined) → on (true) → off (false) → inherit.
+				a.subagents = a.subagents === undefined ? true : a.subagents ? false : undefined;
 				this.#dirty = true;
 				this.#showDetail(index);
 				return;
