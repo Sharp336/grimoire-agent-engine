@@ -63312,6 +63312,617 @@
 			}
 		}
 	},
+	"neuralwatt": {
+		"deepseek-ai/DeepSeek-V4-Flash": {
+			"id": "deepseek-ai/DeepSeek-V4-Flash",
+			"name": "DeepSeek V4 Flash 0731 (Canary)",
+			"api": "openai-completions",
+			"provider": "neuralwatt",
+			"baseUrl": "https://api.neuralwatt.com/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.14,
+				"output": 0.28,
+				"cacheRead": 0.028,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048560,
+			"maxTokens": 65536,
+			"supportsTools": true,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"high",
+					"max"
+				],
+				"requiresEffort": false
+			},
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false,
+			"compat": {
+				"supportsReasoningEffort": true,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "qwen-template-false",
+				"whenThinking": {
+					"reasoningDisableMode": "lowest-effort"
+				}
+			}
+		},
+		"deepseek-v4-flash": {
+			"id": "deepseek-v4-flash",
+			"name": "DeepSeek V4 Flash",
+			"api": "openai-completions",
+			"provider": "neuralwatt",
+			"baseUrl": "https://api.neuralwatt.com/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.14,
+				"output": 0.28,
+				"cacheRead": 0.028,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048560,
+			"maxTokens": 65536,
+			"supportsTools": true,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"high",
+					"max"
+				],
+				"requiresEffort": false
+			},
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false,
+			"compat": {
+				"supportsReasoningEffort": true,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "qwen-template-false",
+				"whenThinking": {
+					"reasoningDisableMode": "lowest-effort"
+				}
+			}
+		},
+		"deepseek-v4-flash-flex": {
+			"id": "deepseek-v4-flash-flex",
+			"name": "DeepSeek V4 Flash (flex)",
+			"api": "openai-completions",
+			"provider": "neuralwatt",
+			"baseUrl": "https://api.neuralwatt.com/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.14,
+				"output": 0.28,
+				"cacheRead": 0.028,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048560,
+			"maxTokens": 65536,
+			"supportsTools": true,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"high",
+					"max"
+				],
+				"requiresEffort": false
+			},
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false,
+			"compat": {
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "qwen-template-false",
+				"supportsReasoningEffort": true,
+				"whenThinking": {
+					"reasoningDisableMode": "lowest-effort"
+				}
+			}
+		},
+		"gemma-4-31b": {
+			"id": "gemma-4-31b",
+			"name": "Gemma 4 31B",
+			"api": "openai-completions",
+			"provider": "neuralwatt",
+			"baseUrl": "https://api.neuralwatt.com/v1",
+			"reasoning": false,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.144,
+				"output": 0.42,
+				"cacheRead": 0.0144,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262128,
+			"maxTokens": 16384,
+			"supportsTools": true,
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
+		},
+		"glm-5.2": {
+			"id": "glm-5.2",
+			"name": "GLM-5.2",
+			"api": "openai-completions",
+			"provider": "neuralwatt",
+			"baseUrl": "https://api.neuralwatt.com/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 1.45,
+				"output": 4.5,
+				"cacheRead": 0.145,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048560,
+			"maxTokens": null,
+			"supportsTools": true,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"high",
+					"max"
+				],
+				"requiresEffort": false,
+				"defaultLevel": "max"
+			},
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false,
+			"compat": {
+				"supportsReasoningEffort": true,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "qwen-template-false",
+				"whenThinking": {
+					"reasoningDisableMode": "lowest-effort"
+				}
+			}
+		},
+		"glm-5.2-fast": {
+			"id": "glm-5.2-fast",
+			"name": "GLM-5.2 (fast)",
+			"api": "openai-completions",
+			"provider": "neuralwatt",
+			"baseUrl": "https://api.neuralwatt.com/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 1.45,
+				"output": 4.5,
+				"cacheRead": 0.145,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048560,
+			"maxTokens": null,
+			"supportsTools": true,
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"high",
+					"max"
+				],
+				"requiresEffort": false
+			},
+			"compat": {
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "qwen-template-false",
+				"supportsReasoningEffort": true,
+				"whenThinking": {
+					"reasoningDisableMode": "lowest-effort"
+				}
+			}
+		},
+		"glm-5.2-flex": {
+			"id": "glm-5.2-flex",
+			"name": "GLM-5.2 (flex)",
+			"api": "openai-completions",
+			"provider": "neuralwatt",
+			"baseUrl": "https://api.neuralwatt.com/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 1.45,
+				"output": 4.5,
+				"cacheRead": 0.145,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048560,
+			"maxTokens": null,
+			"supportsTools": true,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"high",
+					"max"
+				],
+				"requiresEffort": false,
+				"defaultLevel": "max"
+			},
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false,
+			"compat": {
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "qwen-template-false",
+				"supportsReasoningEffort": true,
+				"whenThinking": {
+					"reasoningDisableMode": "lowest-effort"
+				}
+			}
+		},
+		"glm-5.2-short": {
+			"id": "glm-5.2-short",
+			"name": "GLM-5.2 (short)",
+			"api": "openai-completions",
+			"provider": "neuralwatt",
+			"baseUrl": "https://api.neuralwatt.com/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 1.45,
+				"output": 4.5,
+				"cacheRead": 0.145,
+				"cacheWrite": 0
+			},
+			"contextWindow": 199984,
+			"maxTokens": 32000,
+			"supportsTools": true,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"high",
+					"max"
+				],
+				"requiresEffort": false,
+				"defaultLevel": "high"
+			},
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false,
+			"compat": {
+				"supportsReasoningEffort": true,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "qwen-template-false",
+				"whenThinking": {
+					"reasoningDisableMode": "lowest-effort"
+				}
+			}
+		},
+		"glm-5.2-short-fast": {
+			"id": "glm-5.2-short-fast",
+			"name": "GLM-5.2 (short, fast)",
+			"api": "openai-completions",
+			"provider": "neuralwatt",
+			"baseUrl": "https://api.neuralwatt.com/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 1.45,
+				"output": 4.5,
+				"cacheRead": 0.145,
+				"cacheWrite": 0
+			},
+			"contextWindow": 199984,
+			"maxTokens": 32000,
+			"supportsTools": true,
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"high",
+					"max"
+				],
+				"requiresEffort": false
+			},
+			"compat": {
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "qwen-template-false",
+				"supportsReasoningEffort": true,
+				"whenThinking": {
+					"reasoningDisableMode": "lowest-effort"
+				}
+			}
+		},
+		"glm-5.2-short-fast-flex": {
+			"id": "glm-5.2-short-fast-flex",
+			"name": "GLM-5.2 (short, fast, flex)",
+			"api": "openai-completions",
+			"provider": "neuralwatt",
+			"baseUrl": "https://api.neuralwatt.com/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 1.45,
+				"output": 4.5,
+				"cacheRead": 0.145,
+				"cacheWrite": 0
+			},
+			"contextWindow": 199984,
+			"maxTokens": 32000,
+			"supportsTools": true,
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"high",
+					"max"
+				],
+				"requiresEffort": false
+			},
+			"compat": {
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "qwen-template-false",
+				"supportsReasoningEffort": true,
+				"whenThinking": {
+					"reasoningDisableMode": "lowest-effort"
+				}
+			}
+		},
+		"glm-5.2-short-flex": {
+			"id": "glm-5.2-short-flex",
+			"name": "GLM-5.2 (short, flex)",
+			"api": "openai-completions",
+			"provider": "neuralwatt",
+			"baseUrl": "https://api.neuralwatt.com/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 1.45,
+				"output": 4.5,
+				"cacheRead": 0.145,
+				"cacheWrite": 0
+			},
+			"contextWindow": 199984,
+			"maxTokens": 32000,
+			"supportsTools": true,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"high",
+					"max"
+				],
+				"requiresEffort": false,
+				"defaultLevel": "high"
+			},
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false,
+			"compat": {
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "qwen-template-false",
+				"supportsReasoningEffort": true,
+				"whenThinking": {
+					"reasoningDisableMode": "lowest-effort"
+				}
+			}
+		},
+		"kimi-k2.7-code": {
+			"id": "kimi-k2.7-code",
+			"name": "Kimi K2.7 Code",
+			"api": "openai-completions",
+			"provider": "neuralwatt",
+			"baseUrl": "https://api.neuralwatt.com/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.95,
+				"output": 4,
+				"cacheRead": 0.095,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262128,
+			"maxTokens": 32768,
+			"supportsTools": true,
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false,
+			"compat": {
+				"supportsReasoningEffort": false,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "qwen-template-false"
+			}
+		},
+		"kimi-k2.7-code-fast": {
+			"id": "kimi-k2.7-code-fast",
+			"name": "Kimi K2.7 Code Fast",
+			"api": "openai-completions",
+			"provider": "neuralwatt",
+			"baseUrl": "https://api.neuralwatt.com/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.95,
+				"output": 4,
+				"cacheRead": 0.095,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262128,
+			"maxTokens": 32768,
+			"supportsTools": true,
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false,
+			"compat": {
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "qwen-template-false",
+				"supportsReasoningEffort": false
+			}
+		},
+		"kimi-k2.7-code-flex": {
+			"id": "kimi-k2.7-code-flex",
+			"name": "Kimi K2.7 Code (flex)",
+			"api": "openai-completions",
+			"provider": "neuralwatt",
+			"baseUrl": "https://api.neuralwatt.com/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.95,
+				"output": 4,
+				"cacheRead": 0.095,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262128,
+			"maxTokens": 32768,
+			"supportsTools": true,
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false,
+			"compat": {
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "qwen-template-false",
+				"supportsReasoningEffort": false
+			}
+		},
+		"kimi-k3": {
+			"id": "kimi-k3",
+			"name": "Kimi K3",
+			"api": "openai-completions",
+			"provider": "neuralwatt",
+			"baseUrl": "https://api.neuralwatt.com/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 3,
+				"output": 15,
+				"cacheRead": 0.3,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048560,
+			"maxTokens": null,
+			"supportsTools": true,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"high",
+					"max"
+				],
+				"requiresEffort": false,
+				"defaultLevel": "max",
+				"effortMap": {
+					"max": "max"
+				}
+			},
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false,
+			"compat": {
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "qwen-template-false",
+				"supportsReasoningEffort": true,
+				"whenThinking": {
+					"reasoningDisableMode": "lowest-effort"
+				}
+			}
+		},
+		"kimi-k3-fast": {
+			"id": "kimi-k3-fast",
+			"name": "Kimi K3 Fast",
+			"api": "openai-completions",
+			"provider": "neuralwatt",
+			"baseUrl": "https://api.neuralwatt.com/v1",
+			"reasoning": false,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 3,
+				"output": 15,
+				"cacheRead": 0.3,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048560,
+			"maxTokens": null,
+			"supportsTools": true,
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
+		},
+		"qwen3.6-35b": {
+			"id": "qwen3.6-35b",
+			"name": "Qwen3.6 35B",
+			"api": "openai-completions",
+			"provider": "neuralwatt",
+			"baseUrl": "https://api.neuralwatt.com/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.29,
+				"output": 1.15,
+				"cacheRead": 0.029,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131056,
+			"maxTokens": null,
+			"supportsTools": true,
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false,
+			"compat": {
+				"supportsReasoningEffort": false,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "qwen-template-false"
+			}
+		},
+		"qwen3.6-35b-fast": {
+			"id": "qwen3.6-35b-fast",
+			"name": "Qwen3.6 35B Fast",
+			"api": "openai-completions",
+			"provider": "neuralwatt",
+			"baseUrl": "https://api.neuralwatt.com/v1",
+			"reasoning": false,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.29,
+				"output": 1.15,
+				"cacheRead": 0.029,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131056,
+			"maxTokens": null,
+			"supportsTools": true,
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
+		}
+	},
 	"novita": {
 		"baichuan/baichuan-m2-32b": {
 			"id": "baichuan/baichuan-m2-32b",

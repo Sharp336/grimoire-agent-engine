@@ -9,6 +9,8 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 			return "http://127.0.0.1:11434";
 		case "litellm":
 			return Bun.env.LITELLM_BASE_URL ?? "http://localhost:4000/v1";
+		case "neuralwatt":
+			return "https://api.neuralwatt.com/v1";
 		case "opencode-go":
 			return "https://opencode.ai/zen/go/v1";
 		case "opencode-zen":
@@ -47,6 +49,13 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 		case "litellm": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			return `litellm:rich-v5:${Bun.hash(baseUrl).toString(36)}`;
+		}
+		case "neuralwatt": {
+			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
+			const trimmedBaseUrl = baseUrl.trim();
+			const discoveryBaseUrl = trimmedBaseUrl.endsWith("/") ? trimmedBaseUrl.slice(0, -1) : trimmedBaseUrl;
+			const scope = `${options.apiKey ?? ""}\u0000${discoveryBaseUrl}`;
+			return `neuralwatt:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
 		case "opencode-go":
 		case "opencode-zen": {

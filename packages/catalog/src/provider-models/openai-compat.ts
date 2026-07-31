@@ -1786,7 +1786,9 @@ export function clampFireworksKimiMaxTokens(modelId: string, candidate: number |
 export const KIMI_K27_CODE_RECOMMENDED_MAX_TOKENS = 32_768;
 
 export function isKimiK27CodeModelId(modelId: string): boolean {
-	return /(?:^|\/)kimi[-._]?k2(?:[._-]?|p)7[-._]?code(?:[-._]?highspeed)?$/i.test(modelId);
+	return /(?:^|\/)kimi[-._]?k2(?:[._-]?|p)7[-._]?code(?:[-._]?(?:fast(?:[-._]?flex)?|flex|highspeed))?$/i.test(
+		modelId,
+	);
 }
 
 export function clampKimiK27CodeMaxTokens(modelId: string, candidate: number): number;
@@ -3593,6 +3595,154 @@ export function basetenModelManagerOptions(
 			};
 		},
 	});
+}
+
+// ---------------------------------------------------------------------------
+// 14.6 Neuralwatt
+// ---------------------------------------------------------------------------
+
+function mapNeuralwattThinking(metadata: Record<string, unknown>): ThinkingConfig | undefined {
+	const reasoning = isRecord(metadata.reasoning) ? metadata.reasoning : undefined;
+	if (!reasoning) return undefined;
+	const supportedEfforts = reasoning.supported_efforts;
+	if (!Array.isArray(supportedEfforts)) return undefined;
+	const efforts = THINKING_EFFORTS.filter(effort => supportedEfforts.includes(effort));
+	if (efforts.length === 0) return undefined;
+	const defaultLevel =
+		typeof reasoning.default_effort === "string"
+			? THINKING_EFFORTS.find(effort => effort === reasoning.default_effort)
+			: undefined;
+	return {
+		mode: "effort",
+		efforts,
+		...(typeof reasoning.mandatory === "boolean" ? { requiresEffort: reasoning.mandatory } : {}),
+		...(defaultLevel !== undefined && efforts.includes(defaultLevel) ? { defaultLevel } : {}),
+	};
+}
+
+export interface NeuralwattModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function neuralwattModelManagerOptions(
+	config?: NeuralwattModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("neuralwatt")!;
+	const references = createBundledReferenceMap<"openai-completions">("neuralwatt");
+	return {
+		providerId: "neuralwatt",
+		cacheProviderId: resolveModelCacheProviderId("neuralwatt", { apiKey, baseUrl }),
+		dynamicModelsAuthoritative: true,
+		// `/v1/models` is public per Neuralwatt's docs (auth only adds private
+		// models), so discovery runs with or without an API key.
+		fetchDynamicModels: () =>
+			fetchOpenAICompatibleModels({
+				api: "openai-completions",
+				provider: "neuralwatt",
+				baseUrl,
+				apiKey,
+				mapModel: (entry, defaults) => {
+					const reference = references.get(defaults.id);
+					const model = mapWithBundledReference(entry, defaults, reference);
+					const raw = entry as Record<string, unknown> & {
+						max_model_len?: unknown;
+						metadata?: Record<string, unknown>;
+					};
+					const metadata = isRecord(raw.metadata) ? raw.metadata : {};
+					if (metadata.deprecated === true) {
+						return null;
+					}
+					const capabilities = isRecord(metadata.capabilities) ? metadata.capabilities : {};
+					const limits = isRecord(metadata.limits) ? metadata.limits : {};
+					const pricing = isRecord(metadata.pricing) ? metadata.pricing : {};
+
+					const thinking = mapNeuralwattThinking(metadata);
+					const declaredReasoning = toBoolean(capabilities.reasoning);
+					// `capabilities.reasoning` describes the route's default state.
+					// Non-`none` live efforts still expose a real opt-in dial.
+					const reasoning = thinking !== undefined || (declaredReasoning ?? model.reasoning);
+					const vision = toBoolean(capabilities.vision);
+					const contextWindow = toPositiveNumber(
+						limits.max_context_length ?? raw.max_model_len,
+						model.contextWindow,
+					);
+					// An explicit `null` means uncapped. A missing field instead
+					// falls back to the same-provider reference, except that Kimi
+					// K2.7 Code's route family has a documented 32K recommendation.
+					const maxTokens = Object.hasOwn(limits, "max_output_tokens")
+						? (toPositiveNumber(limits.max_output_tokens, null) ??
+							(isKimiK27CodeModelId(defaults.id) ? KIMI_K27_CODE_RECOMMENDED_MAX_TOKENS : null))
+						: toPositiveNumber(entry.max_completion_tokens, model.maxTokens);
+					const effortSupport = toBoolean(capabilities.reasoning_effort) ?? (thinking ? true : undefined);
+					// Neuralwatt controls reasoning with OpenAI's `reasoning_effort`,
+					// while its documented off switch is the chat-template flag.
+					// Effort-capable requests switch back to OpenAI's effort field.
+					const { whenThinking: referenceWhenThinking, ...baseCompat } = model.compat ?? {};
+					const compat: OpenAICompat | undefined = reasoning
+						? {
+								...baseCompat,
+								thinkingFormat: "openai",
+								reasoningDisableMode: "qwen-template-false",
+								...(effortSupport === true
+									? {
+											whenThinking: {
+												...referenceWhenThinking,
+												reasoningDisableMode: "lowest-effort",
+											},
+										}
+									: effortSupport === undefined && referenceWhenThinking !== undefined
+										? { whenThinking: referenceWhenThinking }
+										: {}),
+								...(effortSupport !== undefined ? { supportsReasoningEffort: effortSupport } : {}),
+							}
+						: model.compat;
+
+					// Strip the reference's potentially stale ladder, then replace it
+					// only with the live provider-declared surface.
+					const { thinking: _referenceThinking, ...modelWithoutThinking } = model;
+					// Missing prices may use an exact-ID reference from Neuralwatt's
+					// own bundle. Never borrow another provider's rates: hosting
+					// prices are provider-specific. A live TBD marker invalidates
+					// even that cached reference.
+					if (raw.pricing_tbd === true || metadata.pricing_tbd === true || pricing.pricing_tbd === true) {
+						return null;
+					}
+					const inputCost = toNumber(pricing.input_per_million) ?? reference?.cost.input;
+					const outputCost = toNumber(pricing.output_per_million) ?? reference?.cost.output;
+					const cacheReadCost = toNumber(pricing.cached_input_per_million) ?? reference?.cost.cacheRead ?? 0;
+					if (
+						inputCost === undefined ||
+						outputCost === undefined ||
+						inputCost < 0 ||
+						outputCost < 0 ||
+						cacheReadCost < 0
+					) {
+						return null;
+					}
+					return {
+						...modelWithoutThinking,
+						name: toModelName(metadata.display_name, model.name),
+						reasoning,
+						...(thinking ? { thinking } : {}),
+						input: vision === undefined ? model.input : vision ? ["text", "image"] : ["text"],
+						supportsTools: toBoolean(capabilities.tools) ?? model.supportsTools,
+						cost: {
+							input: inputCost,
+							output: outputCost,
+							cacheRead: cacheReadCost,
+							cacheWrite: 0,
+						},
+						contextWindow,
+						maxTokens,
+						compat,
+					};
+				},
+				fetch: config?.fetch,
+			}),
+	};
 }
 
 // ---------------------------------------------------------------------------

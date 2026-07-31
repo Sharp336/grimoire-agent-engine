@@ -179,6 +179,7 @@ export function rebakeModelThinking(model: ModelSpec<Api>): void {
 	) {
 		return;
 	}
+	if (model.provider === "neuralwatt" && model.thinking) return;
 	const requiresProviderAuthoredEffort =
 		model.provider === "umans" && (model.thinking?.requiresEffort === true || model.id === "umans-kimi-k2.7");
 	const thinking = resolveModelThinking({ ...model, thinking: undefined }, buildCompat(model));
@@ -288,7 +289,13 @@ export function applyCanonicalLimitFallback(models: ModelSpec<Api>[]): void {
 			if (model.contextWindow === null && reference.contextWindow !== null) {
 				model.contextWindow = reference.contextWindow;
 			}
-			if (model.maxTokens === null && reference.maxTokens !== null) {
+			// Neuralwatt reports real context windows but `null` output limits for
+			// its uncapped models; backfilling those from a family reference would
+			// invent an arbitrary cap (identical uncapped models resolved to
+			// 128K/131K/256K depending on which reseller won the index), so leave
+			// them unknown. Kimi K2.7 Code's 32K recommended ceiling is already set
+			// by its mapper.
+			if (model.provider !== "neuralwatt" && model.maxTokens === null && reference.maxTokens !== null) {
 				model.maxTokens = reference.maxTokens;
 			}
 			if (model.contextWindow !== null && model.maxTokens !== null) {

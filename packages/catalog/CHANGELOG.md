@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a Neuralwatt provider (`NEURALWATT_API_KEY`, `https://api.neuralwatt.com/v1`) with API-key authentication and credential-scoped runtime discovery from `/v1/models`; bundled catalog generation always uses the public unauthenticated snapshot. Discovery preserves pricing, vision/reasoning/tool capabilities, context and output limits, deprecated-model filtering, and the provider's exact non-`none` reasoning-effort ladder, default, and optional-thinking state—even for fast routes whose reasoning defaults off—while `none`-only routes expose no inert effort selector. Kimi K2.7 Code uses its documented 32K output ceiling while other explicitly uncapped families stay unknown. Missing prices fall back only to a provider-scoped exact-ID bundled reference; models with unresolved or explicitly TBD pricing are omitted rather than mislabeled Free.
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed

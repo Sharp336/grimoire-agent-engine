@@ -34,6 +34,7 @@ import {
 	mistralModelManagerOptions,
 	moonshotModelManagerOptions,
 	nanoGptModelManagerOptions,
+	neuralwattModelManagerOptions,
 	novitaModelManagerOptions,
 	nvidiaModelManagerOptions,
 	ollamaModelManagerOptions,
@@ -309,6 +310,15 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["NANO_GPT_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => nanoGptModelManagerOptions(config),
 		catalogDiscovery: { label: "NanoGPT" },
+	},
+	{
+		id: "neuralwatt",
+		defaultModel: "kimi-k2.7-code",
+		envVars: ["NEURALWATT_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => neuralwattModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		allowUnauthenticated: true,
+		catalogDiscovery: { label: "Neuralwatt", forceUnauthenticated: true },
 	},
 	{
 		id: "nvidia",
