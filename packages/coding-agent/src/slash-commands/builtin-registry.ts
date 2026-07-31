@@ -39,6 +39,7 @@ import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import { theme } from "../modes/theme/theme";
 import type { InteractiveModeContext } from "../modes/types";
 import { extractLastCodeBlock, extractLastCommand } from "../modes/utils/copy-targets";
+import { PANEL_SLASH_COMMAND } from "../panel/command";
 import type { AgentSession, FreshSessionResult } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
@@ -2710,6 +2711,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			await runPauseScreen(runtime.ctx);
 		},
 	},
+	PANEL_SLASH_COMMAND,
 	{
 		name: "quit",
 		aliases: ["q"],
