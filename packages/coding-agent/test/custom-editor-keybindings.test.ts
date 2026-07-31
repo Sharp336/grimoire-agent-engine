@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from "bun:test";
+import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
 import { CustomEditor } from "@oh-my-pi/pi-coding-agent/modes/components/custom-editor";
 import { getEditorTheme, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
@@ -43,5 +44,10 @@ describe("CustomEditor keybindings", () => {
 
 		expect(onCopyPrompt).toHaveBeenCalledTimes(1);
 		expect(onRetry).not.toHaveBeenCalled();
+	});
+
+	it("binds ctrl+shift+up to the follow-up dequeue", () => {
+		const keybindings = KeybindingsManager.inMemory();
+		expect(keybindings.getKeys("app.message.dequeueFollowUp")).toEqual(["ctrl+shift+up"]);
 	});
 });

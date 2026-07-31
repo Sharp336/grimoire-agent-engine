@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Changed `replaceQueues()` to accept `readonly` message arrays; it already copied both arguments, so the mutable parameter type only forced callers into defensive copies.
+
 ## [17.2.0] - 2026-07-30
 
 ### Fixed

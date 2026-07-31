@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a separate `Ctrl+Shift+Up` binding that restores only follow-up messages to the editor; the existing dequeue now restores only steering messages, and the pending-message bar labels each group with its own key. `Esc` still restores everything.
+
 ## [17.2.1] - 2026-07-30
 
 ### Added
