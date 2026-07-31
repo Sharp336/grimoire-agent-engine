@@ -65,6 +65,31 @@ export function dropUnsupportedBedrockGeoIds(models: readonly ModelSpec[]): Mode
 	return models.filter(model => !(model.provider === "amazon-bedrock" && model.id === "jp.anthropic.claude-opus-5"));
 }
 
+const BEDROCK_CONVERSE_UNSUPPORTED_OPENAI_IDS = new Set([
+	"openai.gpt-5.6-sol",
+	"openai.gpt-5.6-terra",
+	"openai.gpt-5.6-luna",
+]);
+
+/**
+ * `models.dev` lists the OpenAI GPT-5.6 models under `amazon-bedrock`, but AWS's
+ * own API-compatibility table marks them **Invoke = NO, Converse = NO,
+ * Responses = YES**, and the model cards list `bedrock-runtime` as an
+ * unsupported endpoint. The generated `bedrock-converse-stream` rows therefore
+ * 4xx on first use. AWS serves these models on the separate `bedrock-mantle`
+ * endpoint instead, which this catalog covers via `BEDROCK_MANTLE_STATIC_MODELS`
+ * on the `openai-responses` transport — so drop the dead Converse rows rather
+ * than ship selectors that cannot work. Keeping this as a policy (not a
+ * one-time edit) is also what stops the upstream rows reappearing on every regen.
+ * https://docs.aws.amazon.com/bedrock/latest/userguide/models-api-compatibility.html
+ * https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-56-sol.html
+ */
+export function dropBedrockConverseOnlyOpenAIIds(models: readonly ModelSpec[]): ModelSpec[] {
+	return models.filter(
+		model => !(model.provider === "amazon-bedrock" && BEDROCK_CONVERSE_UNSUPPORTED_OPENAI_IDS.has(model.id)),
+	);
+}
+
 const CODEX_GPT_5_4_PRIORITY_BY_VARIANT: Partial<Record<OpenAIVariant, number>> = {
 	base: 0,
 	mini: 1,

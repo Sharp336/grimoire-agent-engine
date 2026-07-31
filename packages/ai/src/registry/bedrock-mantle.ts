@@ -1,10 +1,12 @@
 import { $env } from "@oh-my-pi/pi-utils";
 import { AUTHENTICATED_SENTINEL, type ProviderDefinition } from "./types";
 
-export const amazonBedrockProvider = {
-	id: "amazon-bedrock",
-	name: "Amazon Bedrock",
-	// Amazon Bedrock accepts bearer tokens, IAM keys, profiles, ECS/IRSA credential chains.
+export const bedrockMantleProvider = {
+	id: "bedrock-mantle",
+	name: "Amazon Bedrock Mantle",
+	// Same auth surface as `amazon-bedrock`: bearer tokens, IAM keys, profiles,
+	// ECS/IRSA credential chains. Requests are signed (or bearer-authenticated)
+	// by `createBedrockMantleAuthenticatedFetch` in `stream.ts`.
 	envKeys: () => {
 		const hasEcsCredentials =
 			!!$env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI || !!$env.AWS_CONTAINER_CREDENTIALS_FULL_URI;

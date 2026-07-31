@@ -6,6 +6,7 @@ import { amazonBedrockProvider } from "./amazon-bedrock";
 import { anthropicProvider } from "./anthropic";
 import { azureProvider } from "./azure";
 import { basetenProvider } from "./baseten";
+import { bedrockMantleProvider } from "./bedrock-mantle";
 import { cerebrasProvider } from "./cerebras";
 import { cloudflareAiGatewayProvider } from "./cloudflare-ai-gateway";
 import { coreWeaveProvider } from "./coreweave";
@@ -154,6 +155,7 @@ const ALL = [
 	mistralProvider,
 	minimaxProvider,
 	amazonBedrockProvider,
+	bedrockMantleProvider,
 ];
 
 export type RegistryDef = (typeof ALL)[number];

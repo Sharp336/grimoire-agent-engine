@@ -42,6 +42,7 @@
 - Fixed direct Anthropic Claude Opus requests failing with HTTP 400 when the endpoint rejects strict tool fields.
 - Fixed usage-based credential ranking for Anthropic accounts where a missing long-window (7-day) metric was incorrectly treated as a short-window metric.
 - Fixed legacy Codex usage blocks continuing to gate all models after per-meter backoff was introduced, splitting the old shared scope into independent chat and spark blocks while maintaining backward compatibility with older clients and database schemas.
+- Added authentication and region resolution for the new `bedrock-mantle` provider. Requests reuse the existing `openai-responses` transport, with `{region}` in the base URL resolved from the explicit option, `AWS_REGION`, `AWS_DEFAULT_REGION`, then `us-east-1`, and credentials supplied either as a Bedrock API key (`AWS_BEARER_TOKEN_BEDROCK`) or via SigV4 over the standard AWS credential chain.
 - Fixed Anthropic retry loops ignoring `maxRetryDelayMs` for long server `retry-after` hints, so over-budget delays surface immediately without losing response details or abort cleanup ([#7003](https://github.com/can1357/oh-my-pi/issues/7003)).
 - Added interactive xAI API-key login with key validation through the xAI models endpoint.
 - Fixed Google Gemini and Vertex tool declarations carrying numeric, boolean, object-valued, or mixed `enum` arrays that the Google Schema wire type cannot represent. Unsupported enums are omitted while valid string enums remain constrained.

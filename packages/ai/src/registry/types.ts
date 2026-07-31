@@ -19,6 +19,15 @@ import type { OAuthCredentials, OAuthLoginCallbacks } from "./oauth/types";
 export type KeyResolver = string | (() => string | undefined);
 
 /**
+ * `envKeys` result for providers whose credentials are resolved out-of-band (the
+ * AWS credential chain, Vertex ADC) rather than read from an env var. It only
+ * has to be non-empty so the `MissingApiKeyError` gate does not fire; the real
+ * `Authorization` header is set later by the provider's wrapping fetch. Distinct
+ * from `NO_AUTH_SENTINEL` (`"N/A"`), which means "send no Authorization at all".
+ */
+export const AUTHENTICATED_SENTINEL = "<authenticated>";
+
+/**
  * Declarative description of a single provider's auth/login wiring. All
  * fields are optional except `id`/`name`; presence of a field opts the
  * provider into a derived structure:

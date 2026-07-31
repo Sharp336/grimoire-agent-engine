@@ -3354,6 +3354,99 @@ export function metaModelManagerOptions(config?: MetaModelManagerConfig): ModelM
 }
 
 // ---------------------------------------------------------------------------
+// 15.76 Amazon Bedrock Mantle (OpenAI GPT-5.6 Sol/Terra/Luna)
+// ---------------------------------------------------------------------------
+
+/**
+ * AWS serves OpenAI's GPT-5.6 models through the dedicated `bedrock-mantle`
+ * endpoint using the OpenAI Responses API — not `bedrock-runtime`/Converse,
+ * which AWS's own API-compatibility table marks unsupported for these models.
+ *
+ * The path is `/openai/v1`, not the `/v1` used by other Responses-API models on
+ * this endpoint; the model card calls this out explicitly and getting it wrong
+ * yields a silent 404. `{region}` is rewritten at request time by
+ * `createBedrockMantleAuthenticatedFetch` in `@oh-my-pi/pi-ai`.
+ *
+ * https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-mantle.html
+ * https://docs.aws.amazon.com/bedrock/latest/userguide/models-api-compatibility.html
+ */
+const BEDROCK_MANTLE_BASE_URL = "https://bedrock-mantle.{region}.api.aws/openai/v1";
+
+/**
+ * Effort ladder matching the sibling first-party `openai` GPT-5.6 rows.
+ * `Effort` has no `none` member — the ladder is minimal…max.
+ */
+const BEDROCK_MANTLE_GPT_5_6_THINKING: ThinkingConfig = {
+	mode: "effort",
+	efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+};
+
+/**
+ * Pricing per 1M tokens for us-east-1/us-east-2, from AWS's Bedrock pricing
+ * page — deliberately **not** OpenAI's first-party numbers. AWS charges ~10%
+ * more, described on that page as parity with OpenAI's data-residency tier.
+ * `cacheWrite` is the 30-minute retention rate.
+ *
+ * Reflects the 2026-07-30 cut that took Luna down 80% and Terra down 20%; Sol
+ * was unaffected.
+ * https://aws.amazon.com/bedrock/pricing/
+ */
+const BEDROCK_MANTLE_GPT_5_6_SOL_COST = { input: 5.5, output: 33, cacheRead: 0.55, cacheWrite: 6.88 } as const;
+const BEDROCK_MANTLE_GPT_5_6_TERRA_COST = { input: 2.2, output: 13.2, cacheRead: 0.22, cacheWrite: 2.75 } as const;
+const BEDROCK_MANTLE_GPT_5_6_LUNA_COST = { input: 0.22, output: 1.32, cacheRead: 0.022, cacheWrite: 0.275 } as const;
+
+/**
+ * Context window (272K), modalities and Standard-only service tier come from the
+ * model cards. `maxTokens` is *not* documented by AWS for these models; 128000
+ * matches every other GPT-5.6 row in this catalog and is an assumption.
+ *
+ * Names carry no provider-attribution suffix: `cleanModelName` strips those
+ * (`"(Antigravity)"` and friends) during generation, so a suffix here would not
+ * survive into the bundle. The provider column disambiguates instead.
+ */
+export const BEDROCK_MANTLE_STATIC_MODELS: readonly ModelSpec<"openai-responses">[] = [
+	{
+		id: "openai.gpt-5.6-sol",
+		name: "GPT-5.6 Sol",
+		api: "openai-responses",
+		provider: "bedrock-mantle",
+		baseUrl: BEDROCK_MANTLE_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: BEDROCK_MANTLE_GPT_5_6_SOL_COST,
+		contextWindow: 272_000,
+		maxTokens: 128_000,
+		thinking: BEDROCK_MANTLE_GPT_5_6_THINKING,
+	},
+	{
+		id: "openai.gpt-5.6-terra",
+		name: "GPT-5.6 Terra",
+		api: "openai-responses",
+		provider: "bedrock-mantle",
+		baseUrl: BEDROCK_MANTLE_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: BEDROCK_MANTLE_GPT_5_6_TERRA_COST,
+		contextWindow: 272_000,
+		maxTokens: 128_000,
+		thinking: BEDROCK_MANTLE_GPT_5_6_THINKING,
+	},
+	{
+		id: "openai.gpt-5.6-luna",
+		name: "GPT-5.6 Luna",
+		api: "openai-responses",
+		provider: "bedrock-mantle",
+		baseUrl: BEDROCK_MANTLE_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: BEDROCK_MANTLE_GPT_5_6_LUNA_COST,
+		contextWindow: 272_000,
+		maxTokens: 128_000,
+		thinking: BEDROCK_MANTLE_GPT_5_6_THINKING,
+	},
+];
+
+// ---------------------------------------------------------------------------
 // 16. Moonshot
 // ---------------------------------------------------------------------------
 
