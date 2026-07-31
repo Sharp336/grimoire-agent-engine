@@ -188,6 +188,15 @@ function operationFor(params: LaunchParams, session: ToolSession): DaemonOperati
 	}
 }
 
+/** Flatten env keys and values for single-line display: `sanitizeText` strips
+ *  ANSI sequences and C0/C1/DEL controls (keeping `\n` and `\t`), then newlines
+ *  collapse to a space so an arbitrary entry cannot add rows or move the cursor
+ *  in either surface — the spec schema allows arbitrary strings on both sides.
+ *  Tabs are left for `replaceTabs` on the render paths. */
+function flattenEnvValue(value: string): string {
+	return sanitizeText(value).replace(/\n+/g, " ");
+}
+
 function daemonLabel(daemon: DaemonSnapshot): string {
 	const pid = daemon.pid === undefined ? "" : ` pid=${daemon.pid}`;
 	const exit = daemon.exitCode === undefined ? "" : ` exit=${daemon.exitCode}`;
@@ -217,7 +226,8 @@ function readyPendingSummary(daemon: DaemonSnapshot, ready?: LaunchParams["ready
 	return parts;
 }
 
-function toolContent(result: DaemonRpcResult, params: LaunchParams): string {
+/** Exported for unit testing of the describe output contract. */
+export function toolContent(result: DaemonRpcResult, params: LaunchParams): string {
 	switch (result.op) {
 		case "ping":
 		case "shutdown":
@@ -261,13 +271,18 @@ function toolContent(result: DaemonRpcResult, params: LaunchParams): string {
 			return `Stopped ${daemonLabel(result.daemon)}`;
 		case "restart":
 			return `Restarted ${daemonLabel(result.daemon)}`;
-		case "describe":
+		case "describe": {
+			const envEntries = Object.entries(result.spec.env ?? {});
 			return [
 				daemonLabel(result.daemon),
 				`Command: ${[result.spec.application, ...result.spec.args].join(" ")}`,
 				`Cwd: ${shortenPath(result.spec.cwd)}`,
 				`PTY: ${result.spec.pty}; restart=${result.spec.restart}; persist=${result.spec.persist}; detached=${result.spec.detached}`,
+				...(envEntries.length > 0
+					? [`Env: ${envEntries.map(([k, v]) => `${flattenEnvValue(k)}=${flattenEnvValue(v)}`).join("; ")}`]
+					: []),
 			].join("\n");
+		}
 	}
 }
 
@@ -512,6 +527,16 @@ export function launchRenderResult(
 					if (spec.detached) flags.push("detached");
 					else if (spec.persist) flags.push("persistent");
 					body.push(theme.fg("dim", flags.join(theme.sep.dot)));
+					const envEntries = Object.entries(spec.env ?? {});
+					if (envEntries.length > 0)
+						body.push(
+							theme.fg(
+								"dim",
+								replaceTabs(
+									`env ${envEntries.map(([k, v]) => `${flattenEnvValue(k)}=${flattenEnvValue(v)}`).join(" ")}`,
+								),
+							),
+						);
 				}
 				break;
 			}
