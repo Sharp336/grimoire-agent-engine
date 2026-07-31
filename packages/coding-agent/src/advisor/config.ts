@@ -26,6 +26,12 @@ export interface AdvisorConfig {
 	 *  stays in the roster but its runtime is never built — it shows `○` in
 	 *  the status line and `/advisor status` rather than disappearing. */
 	enabled?: boolean;
+	/** Whether this advisor runs in subagent (task/eval) sessions. Unset inherits
+	 *  the global `advisor.subagents` setting; `true` opts this advisor in even
+	 *  while the global default stays off, `false` keeps it main-session-only.
+	 *  Lets a user keep a strong main-session advisor while opting a cheap model
+	 *  into subagent review, without flipping the global kill switch. */
+	subagents?: boolean;
 }
 
 /**
@@ -55,7 +61,25 @@ const advisorEntrySchema = type({
 	"tools?": "string[]",
 	"instructions?": "string",
 	"enabled?": "boolean",
+	"subagents?": "boolean",
 });
+
+/**
+ * Decide whether an advisor should be included in the runtime roster for the
+ * current session kind. In the main session this is always true; in a subagent
+ * session it is resolved from the per-advisor `subagents` field, falling back to
+ * the global `advisor.subagents` setting when the field is unset. This lets a
+ * user keep a strong main-session advisor while opting a cheap model into
+ * subagent review, without flipping the global kill switch.
+ */
+export function advisorRunsForAgentKind(
+	config: AdvisorConfig,
+	agentKind: "main" | "sub",
+	subagentDefault: boolean,
+): boolean {
+	if (agentKind === "main") return true;
+	return config.subagents ?? subagentDefault;
+}
 
 const watchdogYamlSchema = type({
 	"instructions?": "string",
@@ -173,6 +197,7 @@ export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Pr
 				tools: filterAdvisorTools(entry.tools, item.path),
 				instructions,
 				enabled: entry.enabled,
+				subagents: entry.subagents,
 			});
 		}
 	}
@@ -259,6 +284,7 @@ export async function loadWatchdogConfigFile(filePath: string): Promise<Watchdog
 		if (a.tools !== undefined) advisor.tools = [...a.tools];
 		if (a.instructions?.trim()) advisor.instructions = a.instructions;
 		if (a.enabled !== undefined) advisor.enabled = a.enabled;
+		if (a.subagents !== undefined) advisor.subagents = a.subagents;
 		return advisor;
 	});
 	const doc: WatchdogConfigDoc = { advisors };
@@ -317,6 +343,7 @@ export function serializeWatchdogConfig(doc: WatchdogConfigDoc): string {
 				appendYamlString(lines, "    ", "instructions", advisor.instructions);
 			}
 			if (advisor.enabled !== undefined) lines.push(`    enabled: ${advisor.enabled}`);
+			if (advisor.subagents !== undefined) lines.push(`    subagents: ${advisor.subagents}`);
 		}
 	}
 	return lines.length === 0 ? "" : `${lines.join("\n")}\n`;

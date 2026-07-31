@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	advisorConfigFilePath,
+	advisorRunsForAgentKind,
 	discoverAdvisorConfigs,
 	getOrCreateAdvisorProviderSessionId,
 	loadWatchdogConfigFile,
@@ -345,5 +346,58 @@ describe("per-advisor enabled field", () => {
 		expect(text).toContain("enabled: true");
 		expect(text).toContain("enabled: false");
 		expect(text.match(/enabled:/g)).toHaveLength(2);
+	});
+});
+
+describe("per-advisor subagents field", () => {
+	it("preserves explicit true, explicit false, and absence through save and discovery", async () => {
+		const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-advisor-subagents-"));
+		try {
+			const doc: WatchdogConfigDoc = {
+				advisors: [
+					{ name: "Explicit On", model: "test/model-a", subagents: true },
+					{ name: "Explicit Off", model: "test/model-b", subagents: false },
+					{ name: "Default", model: "test/model-c" },
+				],
+			};
+			const file = path.join(tmp, "WATCHDOG.yml");
+			await saveWatchdogConfigFile(file, doc);
+
+			const loaded = await loadWatchdogConfigFile(file);
+			expect(loaded.advisors.map(advisor => advisor.subagents)).toEqual([true, false, undefined]);
+
+			const { advisors } = await discoverAdvisorConfigs(tmp, tmp);
+			expect(advisors.map(advisor => advisor.subagents)).toEqual([true, false, undefined]);
+		} finally {
+			await fsp.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("emits explicit boolean values but omits an absent subagents field", () => {
+		const text = serializeWatchdogConfig({
+			advisors: [
+				{ name: "Explicit On", subagents: true },
+				{ name: "Explicit Off", subagents: false },
+				{ name: "Default" },
+			],
+		});
+		expect(text).toContain("subagents: true");
+		expect(text).toContain("subagents: false");
+		expect(text.match(/subagents:/g)).toHaveLength(2);
+	});
+
+	it("defaults subagent eligibility to the global advisor.subagents setting", () => {
+		const advisor = { name: "Inherit", subagents: undefined };
+		expect(advisorRunsForAgentKind(advisor, "main", false)).toBe(true);
+		expect(advisorRunsForAgentKind(advisor, "main", true)).toBe(true);
+		expect(advisorRunsForAgentKind(advisor, "sub", false)).toBe(false);
+		expect(advisorRunsForAgentKind(advisor, "sub", true)).toBe(true);
+	});
+
+	it("lets per-advisor subagents override the global default", () => {
+		const off = { name: "Off", subagents: false };
+		const on = { name: "On", subagents: true };
+		expect(advisorRunsForAgentKind(off, "sub", true)).toBe(false);
+		expect(advisorRunsForAgentKind(on, "sub", false)).toBe(true);
 	});
 });

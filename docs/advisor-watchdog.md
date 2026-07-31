@@ -260,19 +260,24 @@ Fields:
 - `advisors[].model`: optional model selector with optional `:level` thinking suffix (e.g. `x-ai/grok-code-fast:high`). Omitted → the advisor uses `modelRoles.advisor`.
 - `advisors[].tools`: optional list of built-in tool names to grant. Omitted or empty → the default `read`/`grep`/`glob` subset. Any name in [`BUILTIN_TOOL_NAMES`](../packages/coding-agent/src/tools/builtin-names.ts) is accepted, including mutating tools (`edit`, `write`, `bash`, `eval`, `browser`, `debug`, `ast_edit`, `task`, `hub`, and the memory tools). Legacy aliases (`search`→`grep`, `find`→`glob`) are normalized. Unknown names are dropped with a warning. See [Tools and isolation](#tools-and-isolation) for the safety implications of granting mutating tools.
 - `advisors[].instructions`: this advisor's specialization, appended after the shared baseline. Both instruction fields expand `@path` imports like `WATCHDOG.md`.
-
+- `advisors[].enabled`: optional per-advisor on/off switch. `false` disables this advisor while keeping it visible in `/advisor status`. Defaults to `true`.
+- `advisors[].subagents`: optional per-advisor subagent eligibility. Unset inherits the global `advisor.subagents` setting; `true` opts this advisor into subagent (task/eval) sessions; `false` keeps it main-session-only. Lets you assign a cheap model to subagent review and a strong model to the main session without enabling the global `advisor.subagents` setting. Ignored in the main session.
 ### Discovery locations
 
 `WATCHDOG.yml`/`WATCHDOG.yaml` share the same user + project search path as `WATCHDOG.md`: the user-level `<active agent dir>/WATCHDOG.yml` plus every `WATCHDOG.yml`/`.omp/WATCHDOG.yml` encountered while walking from `cwd` up to the repository root (or the home directory when no repo root is found). All discovered files are loaded together; a more-specific file (project leaf > project ancestor > user) replaces an earlier entry with the same advisor slug.
 
 ## Subagents
 
-`advisor.subagents` controls whether spawned task/eval subagents also get an advisor runtime.
+The global `advisor.subagents` setting is the default for whether spawned task/eval subagents can run an advisor at all. Per-advisor `advisors[].subagents` then narrows the roster:
 
-- `false` (default): only the main session can run an advisor.
-- `true`: eligible subagent sessions build their own advisor with the same settings/model-role resolution, then rerun `WATCHDOG.md` discovery for that subagent session's `cwd` and agent directory.
+- Global `advisor.subagents` defaults to `false`.
+- `advisors[].subagents` unset: this advisor inherits the global setting.
+- `advisors[].subagents: true`: this advisor runs in subagent sessions even when the global setting is `false`.
+- `advisors[].subagents: false`: this advisor never runs in subagent sessions, regardless of the global setting.
 
-Subagent advisors remain isolated from the subagent's primary tool session in the same way the main advisor is isolated from the main agent.
+The main session is unaffected: it always builds the full enabled roster. This lets you configure, for example, a lightweight `glm/mimo/deepseek` advisor for subagent review and a `sol/opus` advisor for the main session.
+
+When subagent advisors are enabled, each eligible subagent session builds its own advisor runtime with its own settings/model-role resolution and reruns `WATCHDOG.md` discovery for that subagent session's `cwd` and agent directory. Subagent advisors remain isolated from the subagent's primary tool session in the same way the main advisor is isolated from the main agent.
 
 ## Cost and context behavior
 

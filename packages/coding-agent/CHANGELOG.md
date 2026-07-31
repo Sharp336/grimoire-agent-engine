@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added per-advisor `subagents` field in `WATCHDOG.yml`. Unset inherits the global `advisor.subagents` setting; `true` opts a specific advisor into task/eval subagent sessions while keeping the global default off; `false` keeps an advisor main-session-only. Lets you assign a cheap model to subagent review and a strong model to the main session.
+
 ## [17.2.1] - 2026-07-30
 
 ### Added
