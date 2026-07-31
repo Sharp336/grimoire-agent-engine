@@ -131,6 +131,14 @@ export interface SessionLockHandle extends PathSessionLockHandle {
 export interface SessionFileIdentity {
 	dev: number;
 	ino: number;
+	/**
+	 * Creation time of the inode, in whole milliseconds. Inode numbers are
+	 * recycled, so the birth stamp keeps a new file that inherited a freed inode
+	 * from colliding with the previous owner's identity claim. Filesystems
+	 * without a birth time report 0, which degrades to the older inode-only
+	 * behavior instead of weakening it.
+	 */
+	birthtimeMs: number;
 }
 
 /** Prepared identity-lock rotation for an atomic session-file publication. */
@@ -899,7 +907,8 @@ function fileIdentity(sessionFile: string): SessionFileIdentity | undefined {
 		if (errorCode(error) === "ENOENT") return undefined;
 		throw error;
 	}
-	return { dev: stat.dev, ino: stat.ino };
+	const birthtimeMs = Number.isFinite(stat.birthtimeMs) ? Math.trunc(stat.birthtimeMs) : 0;
+	return { dev: stat.dev, ino: stat.ino, birthtimeMs: Math.max(0, birthtimeMs) };
 }
 
 function identityLockTarget(identity: SessionFileIdentity): string {
@@ -907,7 +916,17 @@ function identityLockTarget(identity: SessionFileIdentity): string {
 	const identityDir = path.join(os.tmpdir(), `oh-my-pi-session-identities-${uid}`);
 	fs.mkdirSync(identityDir, { recursive: true, mode: 0o700 });
 	fs.chmodSync(identityDir, 0o700);
-	return path.join(identityDir, `${identity.dev.toString(16)}-${identity.ino.toString(16)}.identity`);
+	// The birth stamp separates a recycled inode from the file that previously
+	// held it; an alias to the same live inode keeps the same name and stays
+	// fenced by the same lock.
+	const name = `${identity.dev.toString(16)}-${identity.ino.toString(16)}-${identity.birthtimeMs.toString(16)}`;
+	return path.join(identityDir, `${name}.identity`);
+}
+
+/** Identity equality: same device, inode and inode generation. */
+function sameFileIdentity(a: SessionFileIdentity | undefined, b: SessionFileIdentity | undefined): boolean {
+	if (!a || !b) return a === b;
+	return a.dev === b.dev && a.ino === b.ino && a.birthtimeMs === b.birthtimeMs;
 }
 
 /** Acquire exclusive write ownership for a session until the returned handle is released. */
@@ -931,12 +950,7 @@ export function acquireSessionLock(sessionFile: string, options: SessionLockOpti
 		throw error;
 	}
 	const lockedIdentity = fileIdentity(normalized);
-	if (
-		(ownedIdentity === undefined) !== (lockedIdentity === undefined) ||
-		(ownedIdentity !== undefined &&
-			lockedIdentity !== undefined &&
-			(ownedIdentity.dev !== lockedIdentity.dev || ownedIdentity.ino !== lockedIdentity.ino))
-	) {
+	if (!sameFileIdentity(ownedIdentity, lockedIdentity)) {
 		let releaseError: unknown;
 		try {
 			pathHandle.release();
@@ -968,7 +982,7 @@ export function acquireSessionLock(sessionFile: string, options: SessionLockOpti
 		prepareFileIdentity(filePath: string): SessionFileIdentityClaim {
 			const nextIdentity = fileIdentity(filePath);
 			if (!nextIdentity) throw new Error(`Cannot claim missing session file identity: ${filePath}`);
-			if (ownedIdentity && nextIdentity.dev === ownedIdentity.dev && nextIdentity.ino === ownedIdentity.ino) {
+			if (sameFileIdentity(nextIdentity, ownedIdentity)) {
 				return { identity: nextIdentity, commit() {}, rollback() {} };
 			}
 			const nextHandle = acquirePathSessionLock(identityLockTarget(nextIdentity), options);
@@ -999,12 +1013,7 @@ export function acquireSessionLock(sessionFile: string, options: SessionLockOpti
 		transferFileIdentityTo(target: SessionLockHandle, filePath: string): void {
 			const nextIdentity = fileIdentity(filePath);
 			if (!nextIdentity) throw new Error(`Cannot transfer missing session file identity: ${filePath}`);
-			if (
-				!ownedIdentity ||
-				ownedIdentity.dev !== nextIdentity.dev ||
-				ownedIdentity.ino !== nextIdentity.ino ||
-				!identityHandle
-			) {
+			if (!identityHandle || !sameFileIdentity(ownedIdentity, nextIdentity)) {
 				throw new Error(`Cannot transfer unowned session file identity: ${filePath}`);
 			}
 			const receive = sessionLockIdentityReceivers.get(target);

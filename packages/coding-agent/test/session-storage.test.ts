@@ -278,7 +278,7 @@ describe("FileSessionStorage owned file identity", () => {
 		const movedPath = path.join(dir, "moved.jsonl");
 		await fsp.writeFile(sessionPath, "owned");
 		const owned = await fsp.stat(sessionPath);
-		const expectedFileIdentity = { dev: owned.dev, ino: owned.ino };
+		const expectedFileIdentity = { dev: owned.dev, ino: owned.ino, birthtimeMs: Math.trunc(owned.birthtimeMs) };
 		await fsp.rename(sessionPath, movedPath);
 		await fsp.writeFile(sessionPath, "foreign");
 		const storage = new FileSessionStorage();

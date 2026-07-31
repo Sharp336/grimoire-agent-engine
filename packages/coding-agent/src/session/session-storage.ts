@@ -130,9 +130,12 @@ function openPinnedFileSync(
 	try {
 		const opened = fs.fstatSync(fd);
 		const named = fs.lstatSync(fpath);
+		const openedBirthtimeMs = Number.isFinite(opened.birthtimeMs) ? Math.max(0, Math.trunc(opened.birthtimeMs)) : 0;
 		const changedFromOwned =
 			expectedFileIdentity !== undefined &&
-			(opened.dev !== expectedFileIdentity.dev || opened.ino !== expectedFileIdentity.ino);
+			(opened.dev !== expectedFileIdentity.dev ||
+				opened.ino !== expectedFileIdentity.ino ||
+				openedBirthtimeMs !== expectedFileIdentity.birthtimeMs);
 		if (named.isSymbolicLink() || opened.dev !== named.dev || opened.ino !== named.ino || changedFromOwned) {
 			const error = new Error(`Refusing to follow replacement session symlink: ${fpath}`) as NodeJS.ErrnoException;
 			error.code = "ELOOP";

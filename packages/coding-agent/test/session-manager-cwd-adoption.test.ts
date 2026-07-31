@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeWithRetries, TempDir } from "@oh-my-pi/pi-utils";
 
 const tempDirs: TempDir[] = [];
+const openManagers: SessionManager[] = [];
 
 function makeTempDir(prefix: string): string {
 	const dir = TempDir.createSync(prefix);
@@ -11,7 +13,14 @@ function makeTempDir(prefix: string): string {
 	return dir.path();
 }
 
+/** Track a manager so its ownership lock is released before the temp dirs go. */
+function track(manager: SessionManager): SessionManager {
+	openManagers.push(manager);
+	return manager;
+}
+
 afterEach(async () => {
+	for (const manager of openManagers.splice(0)) await manager.close();
 	await Promise.all(tempDirs.splice(0).map(dir => dir.remove()));
 });
 
@@ -37,13 +46,15 @@ describe("SessionManager cwd adoption on resume", () => {
 		const fileB = await writeSession(projectB, sessionsB);
 
 		// A manager started in project A loads a session that lives in project B.
-		const manager = SessionManager.create(projectA, path.join(projectA, "sessions"));
+		const manager = track(SessionManager.create(projectA, path.join(projectA, "sessions")));
 		expect(manager.getCwd()).toBe(path.resolve(projectA));
 
 		await manager.setSessionFile(fileB);
 
 		expect(manager.getCwd()).toBe(path.resolve(projectB));
-		expect(manager.getSessionDir()).toBe(path.resolve(sessionsB));
+		// The resumed session directory follows the canonical target its ownership
+		// lock pinned.
+		expect(manager.getSessionDir()).toBe(fs.realpathSync(sessionsB));
 		// New session/fork targets must follow the adopted directory, not the launch one.
 		expect(manager.getHeader()?.cwd).toBe(path.resolve(projectB));
 	});
@@ -72,7 +83,7 @@ describe("SessionManager cwd adoption on resume", () => {
 		await Bun.write(fileB, `${lines.join("\n")}\n`);
 
 		const launchDir = path.join(projectA, "sessions");
-		const manager = SessionManager.create(projectA, launchDir);
+		const manager = track(SessionManager.create(projectA, launchDir));
 		await manager.setSessionFile(fileB);
 
 		expect(manager.getCwd()).toBe(path.resolve(projectA));
@@ -86,7 +97,7 @@ describe("SessionManager cwd adoption on resume", () => {
 		const sessionsB = path.join(projectB, "sessions");
 		const fileB = await writeSession(projectB, sessionsB);
 
-		const manager = SessionManager.create(projectA, sessionsA);
+		const manager = track(SessionManager.create(projectA, sessionsA));
 		const snapshot = manager.captureState();
 
 		await manager.setSessionFile(fileB);
@@ -107,7 +118,7 @@ describe("SessionManager cwd adoption on resume", () => {
 		await removeWithRetries(goneProject);
 
 		const launchSessions = path.join(launch, "sessions");
-		const manager = SessionManager.create(launch, launchSessions);
+		const manager = track(SessionManager.create(launch, launchSessions));
 		await manager.setSessionFile(file);
 
 		// Adopting the missing cwd would make the follow-up `setProjectDir` chdir
@@ -123,7 +134,7 @@ describe("SessionManager cwd adoption on resume", () => {
 		const file = await writeSession(goneProject, store);
 		await removeWithRetries(goneProject);
 
-		const manager = await SessionManager.open(file, undefined, undefined, { initialCwd: launch });
+		const manager = track(await SessionManager.open(file, undefined, undefined, { initialCwd: launch }));
 
 		expect(manager.getCwd()).toBe(path.resolve(launch));
 		// /new and /branch anchor to the launch cwd, not the deleted project's store.

@@ -43,6 +43,13 @@ function assistantMessage(provider: string, timestamp: number) {
 describe("credential pins", () => {
 	let tempDir: TempDir;
 	let storage: AuthStorage;
+	const openManagers: SessionManager[] = [];
+
+	/** Release ownership before the temp dir goes, so no lock outlives the test. */
+	function track(manager: SessionManager): SessionManager {
+		openManagers.push(manager);
+		return manager;
+	}
 
 	beforeEach(async () => {
 		for (const key of ANTHROPIC_ENV) {
@@ -57,7 +64,8 @@ describe("credential pins", () => {
 		await storage.reload();
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
+		for (const manager of openManagers.splice(0)) await manager.close();
 		for (const key of ANTHROPIC_ENV) {
 			const value = savedEnv[key];
 			if (value === undefined) delete process.env[key];
@@ -67,7 +75,7 @@ describe("credential pins", () => {
 	});
 
 	test("pin entries survive a session reload and the latest pin per provider wins", async () => {
-		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const manager = track(SessionManager.create(tempDir.path(), tempDir.path()));
 		manager.appendMessage({ role: "user", content: "hello", timestamp: Date.now() });
 		manager.appendMessage(assistantMessage("anthropic", Date.now()));
 		manager.appendCredentialPin("anthropic", "hash-old");
@@ -76,15 +84,21 @@ describe("credential pins", () => {
 		await manager.flush();
 		const file = manager.getSessionFile();
 		if (!file) throw new Error("expected a persisted session file");
+		// Reopening takes write ownership, so the first manager has to let go.
+		await manager.close();
 
 		const reopened = await SessionManager.open(file);
-		const pins = reopened.getCredentialPins();
-		expect(pins.get("anthropic")?.hash).toBe("hash-new");
-		expect(pins.get("openai-codex")?.hash).toBe("hash-codex");
+		try {
+			const pins = reopened.getCredentialPins();
+			expect(pins.get("anthropic")?.hash).toBe("hash-new");
+			expect(pins.get("openai-codex")?.hash).toBe("hash-codex");
+		} finally {
+			await reopened.close();
+		}
 	});
 
 	test("later assistant turns advance the pin's effective last-use; other providers and new pins do not", () => {
-		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const manager = track(SessionManager.create(tempDir.path(), tempDir.path()));
 		const pinId = manager.appendCredentialPin("anthropic", "hash-a");
 		const pinnedAt = new Date(manager.getEntry(pinId)!.timestamp).getTime();
 
@@ -105,7 +119,7 @@ describe("credential pins", () => {
 	});
 
 	test("seeding re-pins the recorded account in a store with no session stickiness", () => {
-		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const manager = track(SessionManager.create(tempDir.path(), tempDir.path()));
 		const sessionId = manager.getSessionId();
 		const hash = credentialPinHash("anthropic", { accountId: "account-b", email: "b@example.com" });
 		if (!hash) throw new Error("expected a pin hash");
@@ -127,7 +141,7 @@ describe("credential pins", () => {
 		const orgStorage = new AuthStorage(store);
 		await orgStorage.reload();
 
-		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const manager = track(SessionManager.create(tempDir.path(), tempDir.path()));
 		const sessionId = manager.getSessionId();
 		const identity = { accountId: "account-x", email: "x@example.com" };
 		const orgTwoHash = credentialPinHash("anthropic", { ...identity, orgId: "org-2" });
@@ -142,7 +156,7 @@ describe("credential pins", () => {
 	});
 
 	test("seeding never clobbers a live sticky from the same process", () => {
-		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const manager = track(SessionManager.create(tempDir.path(), tempDir.path()));
 		const sessionId = manager.getSessionId();
 		const accounts = storage.listOAuthAccounts("anthropic", sessionId);
 		const accountA = accounts.find(account => account.accountId === "account-a");
@@ -157,7 +171,7 @@ describe("credential pins", () => {
 	});
 
 	test("seeding is a no-op when the pinned account is no longer stored", () => {
-		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const manager = track(SessionManager.create(tempDir.path(), tempDir.path()));
 		const sessionId = manager.getSessionId();
 		const hash = credentialPinHash("anthropic", { accountId: "account-gone" });
 		manager.appendCredentialPin("anthropic", hash!);
@@ -168,7 +182,7 @@ describe("credential pins", () => {
 	});
 
 	test("recording appends the serving account's hash once and dedupes repeats", () => {
-		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const manager = track(SessionManager.create(tempDir.path(), tempDir.path()));
 		const sessionId = manager.getSessionId();
 		const accounts = storage.listOAuthAccounts("anthropic", sessionId);
 		const accountA = accounts.find(account => account.accountId === "account-a");

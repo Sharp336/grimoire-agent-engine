@@ -12,6 +12,8 @@ import {
 import { SessionManager, SessionPersistenceIndeterminateError } from "../../src/session/session-manager";
 import { FileSessionStorage } from "../../src/session/session-storage";
 
+const statSync = fs.statSync;
+
 describe("SessionManager persistent lock integration", () => {
 	const dirs: string[] = [];
 
@@ -42,6 +44,46 @@ describe("SessionManager persistent lock integration", () => {
 
 		const reopened = await SessionManager.open(sessionFile);
 		await reopened.close();
+	});
+
+	it("separates a recycled inode from the identity that previously held it", async () => {
+		const { cwd, sessions } = fixture();
+		// A manager that is never closed keeps its identity claim. The filesystem
+		// may hand that inode number to an unrelated new session, which must still
+		// be able to take ownership of its own file.
+		const abandoned = SessionManager.create(cwd, sessions);
+		await abandoned.ensureOnDisk();
+		const abandonedFile = abandoned.getSessionFile();
+		if (!abandonedFile) throw new Error("missing session file");
+		const identity = fs.statSync(abandonedFile);
+		fs.rmSync(abandonedFile);
+
+		const recycled = path.join(sessions, "recycled.jsonl");
+		fs.writeFileSync(recycled, "");
+		const canonicalRecycled = fs.realpathSync(recycled);
+		const recycledIdentity = fs.statSync(canonicalRecycled);
+		if (recycledIdentity.dev !== identity.dev || recycledIdentity.ino !== identity.ino) {
+			// The inode was not reused on this filesystem; simulate the collision by
+			// pointing the new session at the same identity the leak still owns.
+			vi.spyOn(fs, "statSync").mockImplementation(((target: fs.PathLike, opts?: fs.StatSyncOptions) => {
+				const stat = statSync(target, opts as never) as fs.Stats;
+				if (String(target) === canonicalRecycled || String(target) === recycled) {
+					return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, {
+						dev: identity.dev,
+						ino: identity.ino,
+					}) as fs.Stats;
+				}
+				return stat;
+			}) as typeof fs.statSync);
+		}
+		try {
+			const manager = await SessionManager.open(recycled);
+			manager.appendMessage({ role: "user", content: "recycled inode", timestamp: Date.now() });
+			await manager.flush();
+			await manager.close();
+		} finally {
+			vi.restoreAllMocks();
+		}
 	});
 
 	it("allows lock-free snapshots and exports while the writer is active", async () => {
@@ -364,6 +406,8 @@ describe("SessionManager persistent lock integration", () => {
 
 		expect(fs.existsSync(lockPathForSession(oldFile))).toBe(false);
 		expect(inspectSessionLock(newFile).status).toBe("live");
+		// Ownership followed the inode: a hard-link alias to the moved file is
+		// still refused while this manager holds it, and only opens after close.
 		const alias = path.join(sessions, "moved-inode-alias.jsonl");
 		fs.linkSync(newFile, alias);
 		fs.unlinkSync(newFile);
@@ -403,6 +447,8 @@ describe("SessionManager persistent lock integration", () => {
 		expect(fs.existsSync(newFile)).toBe(false);
 		expect(fs.existsSync(lockPathForSession(newFile))).toBe(false);
 		expect(inspectSessionLock(oldFile).status).toBe("live");
+		// Rollback restored the source claim, so an alias onto that same inode is
+		// refused until this manager releases ownership.
 		const alias = path.join(sessions, "rollback-inode-alias.jsonl");
 		fs.linkSync(oldFile, alias);
 		fs.unlinkSync(oldFile);
