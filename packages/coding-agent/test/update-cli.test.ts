@@ -13,17 +13,18 @@ import {
 	buildMiseUpgradeArgs,
 	buildNpmInstallArgs,
 	downloadVerifiedBinary,
-	parseUpdateArgs,
+	getReleaseBinaryAsset,
 	pruneBunInstallCache,
 	replaceBinaryForUpdate,
 	resolveBunGlobalNodeModulesDirFromLocations,
 	resolveReleaseBinaryAsset,
+	resolveUpdateCheckReport,
 	resolveUpdateMethodForTest,
 	sweepStaleBackups,
 	updateViaBinaryAt,
 } from "@oh-my-pi/pi-coding-agent/cli/update-cli";
 import Update from "@oh-my-pi/pi-coding-agent/commands/update";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { removeWithRetries, VERSION } from "@oh-my-pi/pi-utils";
 import type { CliConfig } from "@oh-my-pi/pi-utils/cli";
 
 const tempDirs: string[] = [];
@@ -32,6 +33,24 @@ async function makeTempDir(): Promise<string> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-update-test-"));
 	tempDirs.push(dir);
 	return dir;
+}
+
+type FetchInput = string | URL | Request;
+type FetchInit = RequestInit | BunFetchRequestInit;
+
+function createStalledJsonFetch(): (input: FetchInput, init?: FetchInit) => Promise<Response> {
+	return async (_input, init) => {
+		const signal = init?.signal;
+		if (!signal) throw new Error("Expected timeout signal");
+		const body = new ReadableStream({
+			start(controller) {
+				const abort = () => controller.error(signal.reason);
+				if (signal.aborted) abort();
+				else signal.addEventListener("abort", abort, { once: true });
+			},
+		});
+		return new Response(body, { headers: { "Content-Type": "application/json" } });
+	};
 }
 
 afterEach(async () => {
@@ -64,16 +83,232 @@ describe("update command plugin dispatch", () => {
 		const command = new Update(["--check", "--force"], TEST_CONFIG);
 		await command.run();
 
-		expect(updateSpy).toHaveBeenCalledWith({ force: true, check: true });
+		expect(updateSpy).toHaveBeenCalledWith({ force: true, check: true, json: false });
 		expect(pluginSpy).not.toHaveBeenCalled();
+	});
+
+	it("forwards JSON update checks without installing", async () => {
+		const pluginSpy = spyOn(pluginCli, "runPluginCommand").mockResolvedValue(undefined);
+		const updateSpy = spyOn(updateCli, "runUpdateCommand").mockResolvedValue(undefined);
+
+		const command = new Update(["--json"], TEST_CONFIG);
+		await command.run();
+
+		expect(updateSpy).toHaveBeenCalledWith({ force: false, check: true, json: true });
+		expect(pluginSpy).not.toHaveBeenCalled();
+	});
+
+	it("returns versioned JSON errors for incompatible flags", async () => {
+		const pluginSpy = spyOn(pluginCli, "runPluginCommand").mockResolvedValue(undefined);
+		const updateSpy = spyOn(updateCli, "runUpdateCommand").mockResolvedValue(undefined);
+		const output: string[] = [];
+		spyOn(process.stdout, "write").mockImplementation(chunk => {
+			output.push(String(chunk));
+			return true;
+		});
+		const previousExitCode = process.exitCode;
+
+		try {
+			for (const flag of ["--plugins", "--force"]) {
+				output.length = 0;
+				process.exitCode = 0;
+				await new Update(["--json", flag], TEST_CONFIG).run();
+				expect(process.exitCode).toBe(1);
+				expect(JSON.parse(output.join(""))).toEqual({
+					status: "error",
+					schemaVersion: 1,
+					error: `--json cannot be used with ${flag}`,
+				});
+			}
+		} finally {
+			process.exitCode = previousExitCode ?? 0;
+		}
+
+		expect(pluginSpy).not.toHaveBeenCalled();
+		expect(updateSpy).not.toHaveBeenCalled();
 	});
 });
 
-describe("parseUpdateArgs", () => {
-	it("preserves the legacy plugin update shorthand", () => {
-		expect(parseUpdateArgs(["update", "-l"])).toEqual({ force: false, check: false, plugins: true });
+describe("update-cli JSON checks", () => {
+	it("lists stable installable releases between the current and latest versions", () => {
+		const report = resolveUpdateCheckReport(
+			{
+				"dist-tags": { latest: "17.1.2" },
+				versions: {
+					"17.0.8": {},
+					"17.0.9": {},
+					"17.1.0-beta.1": {},
+					"17.1.0": { deprecated: "known regression" },
+					"17.1.2": {},
+					"17.2.0": {},
+				},
+				time: {
+					"17.0.9": "2026-07-23T10:00:00.000Z",
+					"17.1.0": "2026-07-24T02:00:00.000Z",
+				},
+			},
+			"17.0.8",
+		);
+
+		expect(report).toEqual({
+			status: "ok",
+			schemaVersion: 1,
+			currentVersion: "17.0.8",
+			latestVersion: "17.1.2",
+			updateAvailable: true,
+			releases: [
+				{
+					version: "17.0.9",
+					tag: "v17.0.9",
+					publishedAt: "2026-07-23T10:00:00.000Z",
+					releaseNotesUrl: "https://github.com/can1357/oh-my-pi/releases/tag/v17.0.9",
+				},
+				{
+					version: "17.1.2",
+					tag: "v17.1.2",
+					publishedAt: null,
+					releaseNotesUrl: "https://github.com/can1357/oh-my-pi/releases/tag/v17.1.2",
+				},
+			],
+		});
+	});
+
+	it("compares valid prerelease current versions against stable releases", () => {
+		const metadata = {
+			"dist-tags": { latest: "17.1.2" },
+			versions: { "17.1.1": {}, "17.1.2": {} },
+			time: {},
+		};
+
+		expect(resolveUpdateCheckReport(metadata, "17.1.2-dev.1+local")).toMatchObject({
+			status: "ok",
+			updateAvailable: true,
+			releases: [{ version: "17.1.2" }],
+		});
+		expect(resolveUpdateCheckReport(metadata, "17.1.3-dev")).toMatchObject({
+			status: "ok",
+			updateAvailable: false,
+			releases: [],
+		});
+	});
+
+	it("rejects malformed current, package, and latest metadata", () => {
+		const valid = {
+			"dist-tags": { latest: "17.1.2" },
+			versions: { "17.1.2": {} },
+		};
+		const invalid: Array<[unknown, string, string]> = [
+			[valid, "17.1", "Invalid current version metadata"],
+			[valid, "17.1.2-01", "Invalid current version metadata"],
+			[null, "17.1.1", "Invalid npm package metadata"],
+			[{ "dist-tags": {} }, "17.1.1", "Invalid npm package metadata"],
+			[
+				{ "dist-tags": { latest: "17.1.2-rc.1" }, versions: { "17.1.2-rc.1": {} } },
+				"17.1.1",
+				"Invalid npm latest release metadata",
+			],
+			[{ "dist-tags": { latest: "17.1.2" }, versions: {} }, "17.1.1", "Invalid npm latest release metadata"],
+			[
+				{ "dist-tags": { latest: "17.1.2" }, versions: { "17.1.2": null } },
+				"17.1.1",
+				"Invalid npm latest release metadata",
+			],
+			[
+				{ "dist-tags": { latest: "17.1.2" }, versions: { "17.1.2": { deprecated: "withdrawn" } } },
+				"17.1.1",
+				"Invalid npm latest release metadata",
+			],
+		];
+
+		for (const [metadata, currentVersion, message] of invalid) {
+			expect(() => resolveUpdateCheckReport(metadata, currentVersion)).toThrow(message);
+		}
+	});
+
+	it("returns no releases when the current version is up to date", () => {
+		expect(
+			resolveUpdateCheckReport(
+				{
+					"dist-tags": { latest: "17.1.2" },
+					versions: { "17.1.1": {}, "17.1.2": {} },
+					time: {},
+				},
+				"17.1.2",
+			),
+		).toEqual({
+			status: "ok",
+			schemaVersion: 1,
+			currentVersion: "17.1.2",
+			latestVersion: "17.1.2",
+			updateAvailable: false,
+			releases: [],
+		});
+	});
+
+	it("prints only the update report when JSON output is requested", async () => {
+		const [major, minor, patch] = VERSION.split(".").map(Number);
+		const latestVersion = `${major}.${minor}.${patch + 1}`;
+		const output: string[] = [];
+		const fetchImpl = async () =>
+			new Response(
+				JSON.stringify({
+					"dist-tags": { latest: latestVersion },
+					versions: { [VERSION]: {}, [latestVersion]: {} },
+					time: { [latestVersion]: "2026-07-27T00:00:00.000Z" },
+				}),
+			);
+
+		await updateCli.runUpdateCommand(
+			{ force: false, check: true, json: true },
+			{ fetchImpl, writeStdout: text => output.push(text) },
+		);
+
+		expect(output).toHaveLength(1);
+		expect(JSON.parse(output[0])).toEqual({
+			status: "ok",
+			schemaVersion: 1,
+			currentVersion: VERSION,
+			latestVersion,
+			updateAvailable: true,
+			releases: [
+				{
+					version: latestVersion,
+					tag: `v${latestVersion}`,
+					publishedAt: "2026-07-27T00:00:00.000Z",
+					releaseNotesUrl: `https://github.com/can1357/oh-my-pi/releases/tag/v${latestVersion}`,
+				},
+			],
+		});
+	});
+
+	it("returns a versioned JSON error when a stalled packument body times out", async () => {
+		const output: string[] = [];
+		let exitCode: number | undefined;
+		const timeoutMs = 25;
+
+		await updateCli.runUpdateCommand(
+			{ force: false, check: true, json: true },
+			{
+				fetchImpl: createStalledJsonFetch(),
+				releaseHistoryTimeoutMs: timeoutMs,
+				writeStdout: text => output.push(text),
+				setExitCode: code => {
+					exitCode = code;
+				},
+			},
+		);
+
+		expect(exitCode).toBe(1);
+		expect(output).toHaveLength(1);
+		expect(output[0]).toEndWith("\n");
+		expect(JSON.parse(output[0])).toEqual({
+			status: "error",
+			schemaVersion: 1,
+			error: `Timed out fetching release history after ${timeoutMs / 1000}s`,
+		});
 	});
 });
+
 describe("update-cli install target detection", () => {
 	it("uses bun update when prioritized omp is inside bun global bin", () => {
 		const method = resolveUpdateMethodForTest("/Users/test/.bun/bin/omp", "/Users/test/.bun/bin");
@@ -389,6 +624,40 @@ describe("update-cli release binary integrity", () => {
 			size: Buffer.byteLength(content),
 			digest,
 		});
+	});
+
+	it("wraps stalled release metadata body timeouts", async () => {
+		const timeoutMs = 25;
+
+		await expect(
+			getReleaseBinaryAsset("17.1.2", binaryName, {
+				fetchImpl: createStalledJsonFetch(),
+				timeoutMs,
+			}),
+		).rejects.toThrow(`Timed out fetching GitHub release metadata after ${timeoutMs / 1000}s`);
+	});
+
+	it("falls back to GH_TOKEN when GITHUB_TOKEN is empty", async () => {
+		const previousGitHubToken = Bun.env.GITHUB_TOKEN;
+		const previousGhToken = Bun.env.GH_TOKEN;
+		const authorizations: Array<string | null> = [];
+		Bun.env.GITHUB_TOKEN = "";
+		Bun.env.GH_TOKEN = "fallback-token";
+
+		try {
+			await getReleaseBinaryAsset("17.1.2", binaryName, {
+				fetchImpl: async (_input, init) => {
+					authorizations.push(new Headers(init?.headers).get("Authorization"));
+					return new Response(JSON.stringify(releaseAsset()));
+				},
+			});
+			expect(authorizations).toEqual(["Bearer fallback-token"]);
+		} finally {
+			if (previousGitHubToken === undefined) delete Bun.env.GITHUB_TOKEN;
+			else Bun.env.GITHUB_TOKEN = previousGitHubToken;
+			if (previousGhToken === undefined) delete Bun.env.GH_TOKEN;
+			else Bun.env.GH_TOKEN = previousGhToken;
+		}
 	});
 
 	it("rejects missing and unsupported release asset digests", () => {
