@@ -67,15 +67,22 @@ export const LIVE_LANGUAGE_OPTIONS = [
 /** Accepted values for the live language setting. */
 export type LiveLanguage = (typeof LIVE_LANGUAGE_OPTIONS)[number]["value"];
 
+const DEFAULT_LIVE_LANGUAGE_OPTION = LIVE_LANGUAGE_OPTIONS[0];
+
 /** Accepted values exposed to the settings schema. */
 export const LIVE_LANGUAGE_VALUES = LIVE_LANGUAGE_OPTIONS.map(({ value }) => value);
 
 /** Language behavior used when no preference is configured. */
-export const DEFAULT_LIVE_LANGUAGE: LiveLanguage = "auto";
+export const DEFAULT_LIVE_LANGUAGE: LiveLanguage = DEFAULT_LIVE_LANGUAGE_OPTION.value;
+
+/** Resolves persisted language input, falling back when the catalog no longer contains it. */
+export function resolveLiveLanguage(language: unknown): LiveLanguage {
+	const option = LIVE_LANGUAGE_OPTIONS.find(candidate => candidate.value === language);
+	return option?.value ?? DEFAULT_LIVE_LANGUAGE;
+}
 
 /** Human-readable language name used in realtime instructions. */
-export function getLiveLanguageName(language: LiveLanguage): string {
+export function getLiveLanguageName(language: unknown): string {
 	const option = LIVE_LANGUAGE_OPTIONS.find(candidate => candidate.value === language);
-	if (!option) throw new Error(`Unsupported live language: ${language}`);
-	return option.label;
+	return option?.label ?? DEFAULT_LIVE_LANGUAGE_OPTION.label;
 }
