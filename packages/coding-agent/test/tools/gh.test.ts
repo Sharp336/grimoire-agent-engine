@@ -589,6 +589,24 @@ describe("github tool", () => {
 			};
 		}
 
+		function descendantChainIssueView(reference: string | undefined, leafNumber: number, includeParent: boolean) {
+			const match = reference?.match(/(?:^|\/issues\/)(\d+)$/);
+			if (!match) throw new Error(`Unexpected descendant reference: ${reference}`);
+			const number = Number(match[1]);
+			const issueUrl = (value: number) => `https://github.com/owner/repo/issues/${value}`;
+			const hasChild = number < leafNumber;
+			return {
+				id: `I_${number}`,
+				...(includeParent ? { parent: null } : {}),
+				subIssues: {
+					nodes: hasChild ? [{ id: `I_${number + 1}`, number: number + 1, url: issueUrl(number + 1) }] : [],
+					totalCount: hasChild ? 1 : 0,
+				},
+				number,
+				url: issueUrl(number),
+			};
+		}
+
 		it("exposes hierarchy inputs in the schema and requires exec approval", () => {
 			const tool = new GithubTool(createSession());
 			const wire = toolWireSchema(tool);
@@ -735,6 +753,58 @@ describe("github tool", () => {
 			expect(textSpy).not.toHaveBeenCalled();
 		});
 
+		it("allows an attached sub-issue descendant to land at exactly hierarchy level eight", async () => {
+			const createdUrl = "https://github.com/owner/repo/issues/43";
+			const textSpy = vi.spyOn(git.github, "text").mockResolvedValue(`${createdUrl}\n`);
+			vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				if (args[0] === "repo") return { url: "https://github.com/owner/repo" } as never;
+				if (args[0] === "api") return successfulIssueCreateGraphqlResponse(args) as never;
+				if (args[2] === createdUrl) return { id: "I_created", number: 43, url: createdUrl } as never;
+				const fields = args[args.indexOf("--json") + 1] ?? "";
+				if (fields.includes("subIssues")) {
+					return descendantChainIssueView(args[2], 13, fields.includes("parent")) as never;
+				}
+				return hierarchyChainIssueView(args[2]) as never;
+			});
+
+			const result = await new GithubTool(createSession()).execute("issue-create-descendant-level-eight", {
+				op: "issue_create",
+				repo: "owner/repo",
+				title: "Valid descendant hierarchy",
+				parent: "3",
+				subIssues: ["10"],
+			});
+
+			expect(textSpy).toHaveBeenCalledTimes(1);
+			expect(result.details?.status).toBe("created");
+		});
+
+		it("rejects an attached sub-issue descendant beyond hierarchy level eight before creation", async () => {
+			const textSpy = vi.spyOn(git.github, "text");
+			const jsonSpy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				if (args[0] === "repo") return { url: "https://github.com/owner/repo" } as never;
+				if (args[0] === "api") return successfulIssueCreateGraphqlResponse(args) as never;
+				const fields = args[args.indexOf("--json") + 1] ?? "";
+				if (fields.includes("subIssues")) {
+					return descendantChainIssueView(args[2], 24, fields.includes("parent")) as never;
+				}
+				return hierarchyChainIssueView(args[2]) as never;
+			});
+
+			await expect(
+				new GithubTool(createSession()).execute("issue-create-descendant-level-nine", {
+					op: "issue_create",
+					repo: "owner/repo",
+					title: "Too-deep descendant hierarchy",
+					parent: "3",
+					subIssues: ["20"],
+				}),
+			).rejects.toThrow(/maximum issue hierarchy depth of 8 levels/);
+
+			expect(textSpy).not.toHaveBeenCalled();
+			expect(jsonSpy.mock.calls.some(call => call[1][2]?.endsWith("/issues/24"))).toBe(false);
+		});
+
 		it("uses a body file and repeated assignee and label flags", async () => {
 			const textSpy = vi.spyOn(git.github, "text").mockResolvedValue("https://github.com/owner/repo/issues/43\n");
 			const jsonSpy = vi.spyOn(git.github, "json");
@@ -796,12 +866,19 @@ describe("github tool", () => {
 					return {
 						id: "I_same",
 						parent: null,
+						subIssues: { nodes: [], totalCount: 0 },
 						number: 8,
 						url: "https://github.example.com/owner/repo/issues/8",
 					} as never;
 				}
 				if (reference === crossRepoChild) {
-					return { id: "I_cross", parent: null, number: 9, url: crossRepoChild } as never;
+					return {
+						id: "I_cross",
+						parent: null,
+						subIssues: { nodes: [], totalCount: 0 },
+						number: 9,
+						url: crossRepoChild,
+					} as never;
 				}
 				if (reference === createdUrl) {
 					return { id: "I_created", parent: null, number: 42, url: createdUrl } as never;
@@ -834,8 +911,8 @@ describe("github tool", () => {
 			expect(jsonSpy.mock.invocationCallOrder[6]).toBeGreaterThan(jsonSpy.mock.invocationCallOrder[5] ?? 0);
 			expect(jsonSpy.mock.calls.filter(call => call[1][0] === "issue").map(call => call[1])).toEqual([
 				["issue", "view", "7", "--repo", "owner/repo", "--json", "id,parent,number,url"],
-				["issue", "view", "8", "--repo", "owner/repo", "--json", "id,parent,number,url"],
-				["issue", "view", crossRepoChild, "--json", "id,parent,number,url"],
+				["issue", "view", "8", "--repo", "owner/repo", "--json", "id,parent,subIssues,number,url"],
+				["issue", "view", crossRepoChild, "--json", "id,parent,subIssues,number,url"],
 				["issue", "view", createdUrl, "--json", "id,number,url"],
 			]);
 			expect(jsonSpy).toHaveBeenCalledTimes(7);
@@ -943,7 +1020,7 @@ describe("github tool", () => {
 				"--repo",
 				"owner/repo",
 				"--json",
-				"id,parent,number,url",
+				"id,parent,subIssues,number,url",
 			]);
 			expect(textSpy).not.toHaveBeenCalled();
 		});
@@ -991,6 +1068,7 @@ describe("github tool", () => {
 					return {
 						id: "I_child",
 						parent: { id: "I_old_parent", number: 2, url: "https://github.com/owner/repo/issues/2" },
+						subIssues: { nodes: [], totalCount: 0 },
 						number: 8,
 						url: "https://github.com/owner/repo/issues/8",
 					} as never;
@@ -1021,6 +1099,116 @@ describe("github tool", () => {
 			expect(result.details?.status).toBe("created");
 		});
 
+		it("detaches indirectly nested requested roots before attaching their ancestors", async () => {
+			const ancestorUrl = "https://github.com/owner/repo/issues/8";
+			const nestedUrl = "https://github.com/owner/repo/issues/9";
+			const bridgeUrl = "https://github.com/owner/repo/issues/10";
+			const createdUrl = "https://github.com/owner/repo/issues/45";
+			const textSpy = vi.spyOn(git.github, "text").mockResolvedValue(`${createdUrl}\n`);
+			const jsonSpy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				if (args[0] === "repo") return { url: "https://github.com/owner/repo" } as never;
+				if (args[0] === "api") return successfulIssueCreateGraphqlResponse(args) as never;
+				if (args[2] === "8") {
+					return {
+						id: "I_ancestor",
+						parent: null,
+						subIssues: { nodes: [{ id: "I_bridge", number: 10, url: bridgeUrl }], totalCount: 1 },
+						number: 8,
+						url: ancestorUrl,
+					} as never;
+				}
+				if (args[2] === "9") {
+					return {
+						id: "I_nested",
+						parent: { id: "I_bridge", number: 10, url: bridgeUrl },
+						subIssues: { nodes: [], totalCount: 0 },
+						number: 9,
+						url: nestedUrl,
+					} as never;
+				}
+				if (args[2] === bridgeUrl) {
+					return {
+						id: "I_bridge",
+						subIssues: { nodes: [{ id: "I_nested", number: 9, url: nestedUrl }], totalCount: 1 },
+						number: 10,
+						url: bridgeUrl,
+					} as never;
+				}
+				if (args[2] === createdUrl) {
+					return { id: "I_created", number: 45, url: createdUrl } as never;
+				}
+				throw new Error(`Unexpected mocked gh args: ${args.join(" ")}`);
+			});
+
+			const result = await new GithubTool(createSession()).execute("issue-create-reparent-nested", {
+				op: "issue_create",
+				repo: "owner/repo",
+				title: "Flatten nested roots",
+				subIssues: ["8", "9"],
+				replaceParent: true,
+			});
+
+			const mutationArgs =
+				jsonSpy.mock.calls.find(
+					call => call[1][0] === "api" && call[1].some(arg => arg.startsWith("query=mutation AddSubIssues")),
+				)?.[1] ?? [];
+			expect(mutationArgs.filter(arg => arg.startsWith("childId"))).toEqual([
+				"childId0=I_nested",
+				"childId1=I_ancestor",
+			]);
+			expect(textSpy).toHaveBeenCalledTimes(1);
+			expect(result.details?.status).toBe("created");
+		});
+
+		it("bounds descendant preflight work before creating an issue", async () => {
+			const textSpy = vi.spyOn(git.github, "text");
+			const jsonSpy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				if (args[0] === "repo") return { url: "https://github.com/owner/repo" } as never;
+				if (args[0] === "api") return successfulIssueCreateGraphqlResponse(args) as never;
+				if (args[2] === "1" || args[2] === "2") {
+					const rootNumber = Number(args[2]);
+					const descendantNumbers = Array.from({ length: 100 }, (_, index) => rootNumber * 1000 + index + 1);
+					return {
+						id: `I_root_${rootNumber}`,
+						parent: null,
+						subIssues: {
+							nodes: descendantNumbers.map(number => ({
+								id: `I_${number}`,
+								number,
+								url: `https://github.com/owner/repo/issues/${number}`,
+							})),
+							totalCount: descendantNumbers.length,
+						},
+						number: rootNumber,
+						url: `https://github.com/owner/repo/issues/${rootNumber}`,
+					} as never;
+				}
+				const match = args[2]?.match(/\/issues\/(\d+)$/);
+				if (match) {
+					const number = Number(match[1]);
+					return {
+						id: `I_${number}`,
+						subIssues: { nodes: [], totalCount: 0 },
+						number,
+						url: `https://github.com/owner/repo/issues/${number}`,
+					} as never;
+				}
+				throw new Error(`Unexpected mocked gh args: ${args.join(" ")}`);
+			});
+
+			await expect(
+				new GithubTool(createSession()).execute("issue-create-descendant-preflight-limit", {
+					op: "issue_create",
+					repo: "owner/repo",
+					title: "Bounded hierarchy preflight",
+					subIssues: ["1", "2"],
+				}),
+			).rejects.toThrow(/safe preflight limit of 100 descendant issues/);
+
+			expect(jsonSpy.mock.calls.filter(call => call[1][0] === "issue")).toHaveLength(102);
+			expect(textSpy).not.toHaveBeenCalled();
+		});
+
 		it("deduplicates syntactically distinct references before preflight and attachment", async () => {
 			const childUrl = "https://github.com/owner/repo/issues/8";
 			const createdUrl = "https://github.com/owner/repo/issues/45";
@@ -1032,6 +1220,7 @@ describe("github tool", () => {
 					return {
 						id: "I_child",
 						parent: null,
+						subIssues: { nodes: [], totalCount: 0 },
 						number: 8,
 						url: childUrl,
 					} as never;
@@ -1082,6 +1271,7 @@ describe("github tool", () => {
 					return {
 						id: `I_child_${issueNumber}`,
 						parent: null,
+						subIssues: { nodes: [], totalCount: 0 },
 						number: issueNumber,
 						url: `https://github.com/owner/repo/issues/${issueNumber}`,
 					} as never;
@@ -1236,6 +1426,7 @@ describe("github tool", () => {
 					return {
 						id: "I_child",
 						parent: null,
+						subIssues: { nodes: [], totalCount: 0 },
 						number: 8,
 						url: "https://github.com/owner/repo/issues/8",
 					} as never;
@@ -1286,6 +1477,7 @@ describe("github tool", () => {
 					return {
 						id: "I_child",
 						parent: null,
+						subIssues: { nodes: [], totalCount: 0 },
 						number: 8,
 						url: "https://github.com/owner/repo/issues/8",
 					} as never;

@@ -53,6 +53,7 @@ export {
 
 
 
+
 const GITHUB_READONLY_OPS: ReadonlySet<string> = new Set([
 	"repo_view",
 	"file_read",
@@ -183,6 +184,7 @@ export interface GhRunWatchViewDetails {
 
 
 
+
 export class GithubTool implements AgentTool<typeof githubSchema, GhToolDetails> {
 	readonly name = "github";
 	readonly approval = (args: unknown): ToolApprovalDecision => {
@@ -281,6 +283,7 @@ async function executeFileRead(
 	const sourceUrl = `https://github.com/${repo}/blob/${encodeURIComponent(branch ?? "HEAD")}/${endpointPath}`;
 	return buildTextResult(text, sourceUrl, { repo, branch });
 }
+
 
 
 

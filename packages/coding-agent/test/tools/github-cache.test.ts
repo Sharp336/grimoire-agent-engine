@@ -911,7 +911,13 @@ describe("issue_create cache invalidation", () => {
 				return { errors: [{ message: "GraphQL addSubIssue failed" }] } as never;
 			}
 			if (args[2] === "8") {
-				return { id: "I_child", parent: null, number: 8, url: `https://github.com/${TEST_REPO}/issues/8` } as never;
+				return {
+					id: "I_child",
+					parent: null,
+					subIssues: { nodes: [], totalCount: 0 },
+					number: 8,
+					url: `https://github.com/${TEST_REPO}/issues/8`,
+				} as never;
 			}
 			if (args[2] === createdUrl) {
 				return { id: "I_created", parent: null, number: 42, url: createdUrl } as never;
