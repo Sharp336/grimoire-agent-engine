@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added theme inheritance: a theme may set `extends` to another built-in or custom theme and declare only the sections it overrides. `vars`, `colors`, `export`, and `symbols.overrides` merge key-by-key, `colors` is validated after the chain resolves, and cycles are rejected with the offending chain.
+
+### Changed
+
+- A custom theme file whose name matches a built-in now shadows that built-in and inherits from it, instead of being ignored by the lookup. Customizing a built-in no longer requires a new theme name or a `theme.dark`/`theme.light` change, and `getAvailableThemesWithPaths()` reports the custom file's path for such a name.
+
 ## [17.2.1] - 2026-07-30
 
 ### Added

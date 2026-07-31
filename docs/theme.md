@@ -21,13 +21,33 @@ Theme files are JSON objects validated against the runtime schema in `theme.ts` 
 
 Top-level fields:
 
-- `name` (required)
-- `colors` (required; all color tokens required)
+- `name` (required unless `extends` supplies one; defaults to the file name)
+- `extends` (optional; inherit every section from another theme)
+- `colors` (required; all color tokens required **after** `extends` is resolved)
 - `vars` (optional; reusable color variables)
 - `export` (optional; HTML export colors)
 - `symbols` (optional)
   - `preset` (optional: `unicode | nerd | ascii`)
   - `overrides` (optional: key/value overrides for `SymbolKey`)
+
+### `extends`
+
+A theme that sets `extends` inherits the named theme and overrides only what it declares,
+so changing a few glyphs no longer means copying a full palette:
+
+```json
+{
+  "extends": "titanium",
+  "symbols": { "overrides": { "boxRound.topLeft": "┌", "boxRound.topRight": "┐" } }
+}
+```
+
+- The base may be built-in or another custom theme; chains resolve to any depth.
+- `vars`, `colors`, `export`, and `symbols.overrides` merge key-by-key — a child replaces
+  only the keys it names. `symbols.preset` and `symbols.spinnerFrames` are replaced whole.
+- Validation runs on the **merged** result, so a child may omit `colors` entirely.
+- A cycle is rejected with the offending chain, e.g.
+  `circular extends chain (a -> b -> a)`.
 
 Color values accept:
 
@@ -109,15 +129,27 @@ Override behavior follows from that split:
 
 Theme lookup order (`loadThemeJson`):
 
-1. built-in embedded themes (`dark.json`, `light.json`, and all `defaults/*.json` compiled into `defaultThemes`)
-2. custom theme file: `<customThemesDir>/<name>.json`
+1. custom theme file: `<customThemesDir>/<name>.json`
+2. built-in embedded themes (`dark.json`, `light.json`, and all `defaults/*.json` compiled into `defaultThemes`)
+
+A custom file **shadows** a same-named built-in and implicitly extends it, so a
+`titanium.json` containing only a few overrides customizes built-in `titanium` in place —
+no new theme name, and no change to `theme.dark` / `theme.light`:
+
+```json
+{ "symbols": { "overrides": { "boxRound.topLeft": "┌" } } }
+```
+
+An explicit `extends` in that file wins over the implicit same-name base. Because the
+shadowing file is a real file, the theme watcher live-reloads it on save.
 
 Custom themes directory comes from `getCustomThemesDir()`:
 
 - default: `~/.omp/agent/themes`
 - overridden by `PI_CODING_AGENT_DIR` (`$PI_CODING_AGENT_DIR/themes`)
 
-`getAvailableThemes()` returns merged built-in + custom names, sorted, with built-ins taking precedence on name collision.
+`getAvailableThemes()` returns merged built-in + custom names, sorted and de-duplicated; a
+shadowed name appears once.
 
 ## Loading, validation, and resolution
 
@@ -206,7 +238,7 @@ Settings UI uses this for live preview and restores prior theme on cancel.
 When watcher is enabled (`setTheme(..., true)` / interactive init):
 
 - watches `<customThemesDir>/<currentTheme>.json` only when that file exists
-- built-ins are effectively not watched; built-in theme lookup also takes precedence over same-name custom files
+- a built-in with no custom file of the same name has nothing on disk to watch; a custom file that shadows a built-in is watched like any other custom theme
 - matching file changes schedule a debounced reload; reload errors or temporary file absence keep the last successfully loaded theme
 - the watcher does not perform a delete/rename fallback; it waits for a future successful reload or explicit theme switch
 
@@ -350,7 +382,7 @@ Use this workflow:
 
 ## Real constraints and caveats
 
-- All `colors` tokens are required for custom themes.
+- All `colors` tokens are required for custom themes, checked after `extends` is resolved — a theme that extends another may omit `colors` entirely.
 - `export` and `symbols` are optional.
 - `$schema` in theme JSON is informational; runtime validation is enforced by a Zod schema in code.
 - `setTheme` failure falls back to `dark`; `previewTheme` failure does not replace current theme.

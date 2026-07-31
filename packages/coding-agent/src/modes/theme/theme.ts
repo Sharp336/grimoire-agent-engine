@@ -1118,6 +1118,7 @@ const spinnerFramesSchema = type("unknown").narrow((value): value is SpinnerFram
 const themeJsonSchema = type({
 	"$schema?": "string",
 	name: "string",
+	"extends?": "string",
 	"vars?": "Record<string, string | number>",
 	colors: themeColorsSchema,
 	"export?": {
@@ -1132,7 +1133,28 @@ const themeJsonSchema = type({
 	},
 });
 
+/** A theme file before `extends` is resolved. Every section is optional because a child
+ *  states only what it changes; the merged result is validated by `themeJsonSchema`. */
+const themeSourceSchema = type({
+	"$schema?": "string",
+	"name?": "string",
+	"extends?": "string",
+	"vars?": "Record<string, string | number>",
+	"colors?": "Record<string, string | number>",
+	"export?": {
+		"pageBg?": "string | number",
+		"cardBg?": "string | number",
+		"infoBg?": "string | number",
+	},
+	"symbols?": {
+		"preset?": "'unicode' | 'nerd' | 'ascii'",
+		"overrides?": "Record<string, string>",
+		"spinnerFrames?": spinnerFramesSchema,
+	},
+});
+
 type ThemeJson = typeof themeJsonSchema.infer;
+type ThemeSource = typeof themeSourceSchema.infer;
 
 export type ThemeColor =
 	| "accent"
@@ -2004,16 +2026,18 @@ export async function getAvailableThemesWithPaths(): Promise<ThemeInfo[]> {
 		result.push({ name, path: undefined });
 	}
 
-	// Custom themes
+	// Custom themes. A custom file wins the lookup even when it shadows a built-in, so its
+	// path replaces the built-in's empty metadata rather than being discarded.
 	const customThemesDir = getCustomThemesDir();
 	try {
 		const files = await fs.promises.readdir(customThemesDir);
 		for (const file of files) {
 			if (file.endsWith(".json")) {
 				const name = file.slice(0, -5);
-				if (!result.some(themeInfo => themeInfo.name === name)) {
-					result.push({ name, path: path.join(customThemesDir, file) });
-				}
+				const themePath = path.join(customThemesDir, file);
+				const existing = result.find(themeInfo => themeInfo.name === name);
+				if (existing) existing.path = themePath;
+				else result.push({ name, path: themePath });
 			}
 		}
 	} catch {
@@ -2023,19 +2047,26 @@ export async function getAvailableThemesWithPaths(): Promise<ThemeInfo[]> {
 	return result.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-async function loadThemeJson(name: string): Promise<ThemeJson> {
+/**
+ * Read one theme file, resolving only the implicit same-name base.
+ *
+ * A custom file wins over a same-named built-in and layers over it, so dropping
+ * `titanium.json` into the themes dir customizes built-in `titanium` instead of being
+ * ignored. That implicit hop is merged here rather than emitted as an `extends`, so a
+ * shadowed theme resolves identically wherever it appears in a chain.
+ */
+async function loadThemeSource(name: string): Promise<ThemeSource> {
 	const builtinThemes = getBuiltinThemes();
-	if (name in builtinThemes) {
-		return builtinThemes[name];
-	}
+	const builtin = name in builtinThemes ? builtinThemes[name] : undefined;
 	const customThemesDir = getCustomThemesDir();
 	const themePath = path.join(customThemesDir, `${name}.json`);
 	let content: string;
 	try {
 		content = await Bun.file(themePath).text();
 	} catch (err) {
-		if (isEnoent(err)) throw new Error(`Theme not found: ${name}`);
-		throw err;
+		if (!isEnoent(err)) throw err;
+		if (builtin) return builtin;
+		throw new Error(`Theme not found: ${name}`);
 	}
 	let json: unknown;
 	try {
@@ -2043,15 +2074,53 @@ async function loadThemeJson(name: string): Promise<ThemeJson> {
 	} catch (error) {
 		throw new Error(`Failed to parse theme ${name}: ${error}`);
 	}
-	let parsed: ThemeJson;
-	try {
-		parsed = themeJsonSchema(json) as ThemeJson;
-		if (parsed instanceof type.errors) {
-			throw new Error(parsed.summary);
+	const parsed = themeSourceSchema(json);
+	if (parsed instanceof type.errors) {
+		throw new Error(`Invalid theme "${name}":\n\nValidation error:\n  - ${parsed.summary}`);
+	}
+	const source = parsed as ThemeSource;
+	// A same-named built-in is the implicit base. Merging it here — instead of emitting
+	// `extends: name` — keeps the chain free of self-referencing hops that read as cycles.
+	if (!source.extends && builtin) return mergeThemeSource(builtin, source);
+	return source;
+}
+
+/** Layer `child` over `base`. Sections merge key-by-key so a child overrides only what it names. */
+function mergeThemeSource(base: ThemeSource, child: ThemeSource): ThemeSource {
+	const merged: ThemeSource = { ...base, ...child };
+	merged.vars = { ...base.vars, ...child.vars };
+	merged.colors = { ...base.colors, ...child.colors };
+	if (base.export || child.export) merged.export = { ...base.export, ...child.export };
+	if (base.symbols || child.symbols) {
+		merged.symbols = {
+			...base.symbols,
+			...child.symbols,
+			overrides: { ...base.symbols?.overrides, ...child.symbols?.overrides },
+		};
+	}
+	// The child's `extends` is now satisfied by `base`; what remains unresolved is the
+	// base's own parent, so the chain continues from there.
+	if (base.extends) merged.extends = base.extends;
+	else delete merged.extends;
+	return merged;
+}
+
+async function loadThemeJson(name: string): Promise<ThemeJson> {
+	const chain: string[] = [];
+	let source = await loadThemeSource(name);
+	while (source.extends) {
+		const parent = source.extends;
+		if (parent === name || chain.includes(parent)) {
+			throw new Error(`Invalid theme "${name}": circular extends chain (${[name, ...chain, parent].join(" -> ")})`);
 		}
-	} catch (error) {
-		const errorMessage = error instanceof Error ? error.message : String(error);
-		// Extract color key information if available
+		chain.push(parent);
+		source = mergeThemeSource(await loadThemeSource(parent), source);
+	}
+	// A child inherits its base's name unless it set one; validation requires a name.
+	const named: ThemeSource = { ...source, name: source.name ?? name };
+	const parsed = themeJsonSchema(named);
+	if (parsed instanceof type.errors) {
+		const errorMessage = parsed.summary;
 		const missingColorMatch = errorMessage.match(/missing keys: (.+)/i);
 		const missingColors: string[] = missingColorMatch ? missingColorMatch[1].split(",").map(s => s.trim()) : [];
 
@@ -2059,14 +2128,15 @@ async function loadThemeJson(name: string): Promise<ThemeJson> {
 		if (missingColors.length > 0) {
 			fullErrorMessage += `\nMissing required color tokens:\n`;
 			fullErrorMessage += missingColors.map(c => `  - ${c}`).join("\n");
-			fullErrorMessage += `\n\nPlease add these colors to your theme's "colors" object.`;
+			fullErrorMessage += `\n\nPlease add these colors to your theme's "colors" object,`;
+			fullErrorMessage += `\nor set "extends" to inherit them from another theme.`;
 			fullErrorMessage += `\nSee the built-in themes (dark.json, light.json) for reference values.`;
 		}
 		fullErrorMessage += `\n\nValidation error:\n  - ${errorMessage}`;
 
 		throw new Error(fullErrorMessage);
 	}
-	return parsed;
+	return parsed as ThemeJson;
 }
 
 interface CreateThemeOptions {
@@ -2117,6 +2187,18 @@ function createTheme(themeJson: ThemeJson, options: CreateThemeOptions = {}): Th
 
 async function loadTheme(name: string, options: CreateThemeOptions = {}): Promise<Theme> {
 	const themeJson = await loadThemeJson(name);
+	return createTheme(themeJson, options);
+}
+
+/**
+ * Recovery loader for the fallback paths: the embedded built-in only.
+ *
+ * A custom file shadows a same-named built-in, so `loadTheme("dark")` would re-read a broken
+ * `dark.json` and fail again. Recovery has to reach past it.
+ */
+async function loadBuiltinTheme(name: string, options: CreateThemeOptions = {}): Promise<Theme> {
+	const themeJson = getBuiltinThemes()[name];
+	if (!themeJson) throw new Error(`Theme not found: ${name}`);
 	return createTheme(themeJson, options);
 }
 
@@ -2234,7 +2316,7 @@ export async function initTheme(
 	} catch (err) {
 		logger.debug("Theme loading failed, falling back to dark theme", { error: String(err) });
 		currentThemeName = "dark";
-		theme = await loadTheme("dark", getCurrentThemeOptions());
+		theme = await loadBuiltinTheme("dark", getCurrentThemeOptions());
 		// Don't start watcher for fallback theme
 	}
 }
@@ -2263,7 +2345,7 @@ export async function setTheme(
 		}
 		// Theme is invalid - fall back to dark theme
 		currentThemeName = "dark";
-		theme = await loadTheme("dark", getCurrentThemeOptions());
+		theme = await loadBuiltinTheme("dark", getCurrentThemeOptions());
 		// The active theme just changed to the fallback — bump the epoch so memoized
 		// renderers (e.g. ToolExecutionComponent) re-shape with the fallback colors
 		// instead of holding the failed theme's stale styling.
@@ -2352,7 +2434,7 @@ export async function setSymbolPreset(preset: SymbolPreset): Promise<void> {
 	} catch {
 		if (requestId !== themeLoadRequestId) return;
 		// Fall back to dark theme with new preset
-		theme = await loadTheme("dark", getCurrentThemeOptions());
+		theme = await loadBuiltinTheme("dark", getCurrentThemeOptions());
 		if (requestId !== themeLoadRequestId) return;
 	}
 	notifyThemeChange({ ephemeral: true });
@@ -2381,7 +2463,7 @@ export async function setColorBlindMode(enabled: boolean): Promise<void> {
 	} catch {
 		if (requestId !== themeLoadRequestId) return;
 		// Fall back to dark theme
-		theme = await loadTheme("dark", getCurrentThemeOptions());
+		theme = await loadBuiltinTheme("dark", getCurrentThemeOptions());
 		if (requestId !== themeLoadRequestId) return;
 	}
 	notifyThemeChange({ ephemeral: true });
@@ -2437,8 +2519,9 @@ export function isValidSymbolPreset(preset: string): preset is SymbolPreset {
 async function startThemeWatcher(): Promise<void> {
 	stopThemeWatcher();
 
-	// Only watch if it's a custom theme (not built-in)
-	if (!currentThemeName || currentThemeName === "dark" || currentThemeName === "light") {
+	// Watch whenever a file backs the active theme. A custom file may shadow a built-in name,
+	// so the name alone no longer says whether anything is on disk — the existsSync below does.
+	if (!currentThemeName) {
 		return;
 	}
 
@@ -2862,19 +2945,36 @@ export async function getResolvedThemeColors(themeName?: string): Promise<Record
 export function isLightTheme(themeName?: string): boolean {
 	const name = themeName ?? "dark";
 	const builtinThemes = getBuiltinThemes();
-	let themeJson: ThemeJson | undefined;
-	if (name in builtinThemes) {
-		themeJson = builtinThemes[name];
-	} else {
+	// Mirrors `loadThemeSource` synchronously: callers here run inside settings migration and
+	// the setup wizard, which cannot await. Classification must see inherited colors, or an
+	// inheriting light theme gets filed under `theme.dark`.
+	const readSource = (themeId: string): ThemeSource | undefined => {
+		const builtin = themeId in builtinThemes ? builtinThemes[themeId] : undefined;
+		let source: ThemeSource | undefined;
 		try {
-			const customPath = path.join(getCustomThemesDir(), `${name}.json`);
-			const content = fs.readFileSync(customPath, "utf-8");
-			themeJson = JSON.parse(content) as ThemeJson;
+			const content = fs.readFileSync(path.join(getCustomThemesDir(), `${themeId}.json`), "utf-8");
+			const candidate = themeSourceSchema(JSON.parse(content));
+			if (!(candidate instanceof type.errors)) source = candidate as ThemeSource;
 		} catch {
-			return false;
+			// No readable custom file; the built-in below is the source.
 		}
+		if (!source) return builtin;
+		if (!source.extends && builtin) return mergeThemeSource(builtin, source);
+		return source;
+	};
+
+	let source = readSource(name);
+	if (!source) return false;
+	const chain: string[] = [];
+	while (source.extends) {
+		const parent = source.extends;
+		if (parent === name || chain.includes(parent)) return false;
+		chain.push(parent);
+		const base = readSource(parent);
+		if (!base) return false;
+		source = mergeThemeSource(base, source);
 	}
-	return isLightThemeJson(themeJson);
+	return isLightThemeJson(source as ThemeJson);
 }
 
 /**
