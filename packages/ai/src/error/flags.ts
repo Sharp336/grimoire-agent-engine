@@ -1,5 +1,6 @@
 import { isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils";
 import type { Api, AssistantMessage } from "../types";
+import { UNSUPPORTED_KWARG_NAME_PATTERN } from "../utils/kwarg-retry-ladder";
 import { AwsCredentialsError } from "./aws";
 import {
 	AnthropicConnectionError,
@@ -30,6 +31,8 @@ export const Flag = {
 	FastModeUnsupported: 0x2000_0000,
 	/** OAuth refresh failed definitively — the stored grant is dead, re-login required. */
 	OAuthExpiry: 0x4000_0000,
+	/** 400 rejecting an optional best-effort kwarg named in the error message (temperature, thinking/output_config, reasoning_effort, tool_choice). Not auto-retriable; consumed by the per-provider kwarg-stripping ladder. */
+	UnsupportedKwarg: 0x8000_0000,
 } as const;
 
 export type Flag = (typeof Flag)[keyof typeof Flag];
@@ -50,7 +53,8 @@ const KIND_MASK =
 	Flag.Abort |
 	Flag.Grammar |
 	Flag.FastModeUnsupported |
-	Flag.OAuthExpiry;
+	Flag.OAuthExpiry |
+	Flag.UnsupportedKwarg;
 
 const RETRIABLE_KINDS =
 	Flag.Transient | Flag.UsageLimit | Flag.ThinkingLoop | Flag.StaleResponsesItem | Flag.ProviderFinishError;
@@ -129,6 +133,11 @@ const EXTRA_INPUTS_NOT_PERMITTED_PATTERN = /extra inputs? (?:are|is) not permitt
 // because the account lacks the extra-usage entitlement fast mode requires.
 const FAST_MODE_SPEED_PARAM_PATTERN = /\bspeed\b/i;
 const FAST_MODE_NOT_SUPPORTED_PATTERN = /not support/i;
+// 400 rejecting an optional best-effort kwarg: the message names a strippable
+// field (temperature, thinking/output_config, reasoning_effort, tool_choice,
+// speed, …) and uses a generic "unsupported/unknown/extra inputs" envelope.
+const KWARG_REJECTION_PATTERN =
+	/invalid_request_error|extra inputs? (?:are|is) not permitted|is not supported|does(?: not|n'?t) support|unknown (?:parameter|field)|unrecognized (?:parameter|field|request)|unsupported parameter/i;
 const FAST_MODE_RATE_LIMIT_PATTERN = /rate_limit_error/i;
 const FAST_MODE_ENTITLEMENT_PATTERN = /fast mode/i;
 // Definitive OAuth refresh failure — the stored grant/client is dead.
@@ -166,6 +175,20 @@ function matchesFastModeUnsupported(message: string, errorStatus: number | undef
 	return (
 		errorStatus === 429 && FAST_MODE_RATE_LIMIT_PATTERN.test(message) && FAST_MODE_ENTITLEMENT_PATTERN.test(message)
 	);
+}
+
+/**
+ * 400 rejecting an optional best-effort kwarg named in the error message
+ * (temperature, thinking/output_config, reasoning_effort, tool_choice, …).
+ * The message must both use a generic rejection envelope AND name one of the
+ * strippable wire keys, so a context-overflow 400 or a malformed-schema 400
+ * does not classify here. Not auto-retriable; consumed by the per-provider
+ * kwarg-stripping ladder.
+ */
+function matchesUnsupportedKwarg(message: string, errorStatus: number | undefined): boolean {
+	if (errorStatus !== 400) return false;
+	if (!KWARG_REJECTION_PATTERN.test(message)) return false;
+	return UNSUPPORTED_KWARG_NAME_PATTERN.test(message);
 }
 
 /** Whether an OAuth refresh error message means the grant is definitively dead. */
@@ -341,6 +364,7 @@ function classifyText(errorMessage: string | undefined, errorStatus: number | un
 		if (statusClean === 400 && COPILOT_MODEL_NOT_SUPPORTED_PATTERN.test(cleanMessage)) kinds |= Flag.Transient;
 		if (matchesStrictToolsRejection(cleanMessage, statusClean)) kinds |= Flag.Grammar;
 		if (matchesFastModeUnsupported(cleanMessage, statusClean)) kinds |= Flag.FastModeUnsupported;
+		if (matchesUnsupportedKwarg(cleanMessage, statusClean)) kinds |= Flag.UnsupportedKwarg;
 	}
 	if (kinds !== 0) return create(kinds);
 	const fallbackStatus = errorStatus ?? (errorMessage ? status({ message: errorMessage }) : undefined);
@@ -449,6 +473,16 @@ export function isGrammarError(error: unknown): boolean {
  */
 export function isFastModeUnsupported(error: unknown): boolean {
 	return is(classify(error), Flag.FastModeUnsupported);
+}
+
+/**
+ * 400 rejecting an optional best-effort kwarg named in the error message
+ * (temperature, thinking/output_config, reasoning_effort, tool_choice, …).
+ * Accessor for {@link Flag.UnsupportedKwarg}; consumed by the per-provider
+ * kwarg-stripping retry ladder.
+ */
+export function isUnsupportedKwarg(error: unknown): boolean {
+	return is(classify(error), Flag.UnsupportedKwarg);
 }
 
 /**
