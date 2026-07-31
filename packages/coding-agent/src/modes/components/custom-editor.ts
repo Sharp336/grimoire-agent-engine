@@ -11,7 +11,7 @@ import {
 	TUI,
 } from "@oh-my-pi/pi-tui";
 import { BracketedPasteHandler } from "@oh-my-pi/pi-tui/bracketed-paste";
-import type { AppKeybinding } from "../../config/keybindings";
+import { type AppKeybinding, withMacCommand } from "../../config/keybindings";
 import { isSettingsInitialized, settings } from "../../config/settings";
 import { imageReferenceHyperlink, PLACEHOLDER_REGEX, renderPlaceholders } from "../image-references";
 import { hasMagicKeyword, highlightMagicKeywords } from "../magic-keywords";
@@ -50,17 +50,17 @@ const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.thinking.cycle": ["shift+tab"],
 	"app.model.cycleForward": ["ctrl+p"],
 	"app.model.cycleBackward": ["shift+ctrl+p"],
-	"app.model.select": ["alt+m"],
+	"app.model.select": withMacCommand(["alt+m"], "super+m"),
 	"app.model.selectTemporary": ["alt+p"],
 	"app.tools.expand": ["ctrl+o"],
 	"app.thinking.toggle": ["ctrl+t"],
 	"app.editor.external": ["ctrl+g"],
 	"app.history.search": ["ctrl+r"],
-	"app.message.dequeue": ["alt+up"],
+	"app.message.dequeue": withMacCommand(["alt+up"], "super+up"),
 	"app.retry": ["alt+r"],
 	"app.clipboard.pasteImage": ["ctrl+v"],
 	"app.clipboard.pasteTextRaw": ["ctrl+shift+v", "alt+shift+v"],
-	"app.clipboard.copyPrompt": ["alt+shift+c"],
+	"app.clipboard.copyPrompt": withMacCommand(["alt+shift+c"], "super+shift+c"),
 };
 
 function buildMatchKeys(keys: readonly KeyId[]): Set<string> {

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added macOS Command chords to the alt-only app bindings that the Ctrl mirror cannot reach: dequeue, model select, plan toggle, copy prompt, and copy line. Retry, temporary model select, and the agent hub stay Option-only because a mirrored Ctrl binding already owns their Command chord.
+
 ## [17.2.1] - 2026-07-30
 
 ### Added

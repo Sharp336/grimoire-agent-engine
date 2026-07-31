@@ -70,6 +70,15 @@ export function getDefaultPasteImageKeys(platform: NodeJS.Platform = process.pla
 	return ["ctrl+v"];
 }
 
+/** Alt-only bindings get no Command form from the darwin ctrl→super mirror, so the
+ *  Command chord is spelled out here. Deliberately absent: super+r, super+p and
+ *  super+a, which a mirrored ctrl binding (history.search, model.cycleForward,
+ *  cursorLineStart) already claims — retry, selectTemporary and agents.hub stay
+ *  Option-only rather than shadow them. */
+export function withMacCommand(keys: KeyId[], command: KeyId, platform: NodeJS.Platform = process.platform): KeyId[] {
+	return platform === "darwin" ? [...keys, command] : keys;
+}
+
 /**
  * All keybindings definitions: TUI + app-specific.
  */
@@ -112,7 +121,7 @@ export const KEYBINDINGS = {
 		description: "Cycle to previous model",
 	},
 	"app.model.select": {
-		defaultKeys: "alt+m",
+		defaultKeys: withMacCommand(["alt+m"], "super+m"),
 		description: "Select model",
 	},
 	"app.model.selectTemporary": {
@@ -139,7 +148,7 @@ export const KEYBINDINGS = {
 		description: "Retry last failed assistant turn",
 	},
 	"app.message.dequeue": {
-		defaultKeys: "alt+up",
+		defaultKeys: withMacCommand(["alt+up"], "super+up"),
 		description: "Dequeue message",
 	},
 	"app.clipboard.pasteImage": {
@@ -151,11 +160,11 @@ export const KEYBINDINGS = {
 		description: "Paste text from clipboard as raw text (no collapse)",
 	},
 	"app.clipboard.copyLine": {
-		defaultKeys: "alt+shift+l",
+		defaultKeys: withMacCommand(["alt+shift+l"], "super+shift+l"),
 		description: "Copy current line",
 	},
 	"app.clipboard.copyPrompt": {
-		defaultKeys: "alt+shift+c",
+		defaultKeys: withMacCommand(["alt+shift+c"], "super+shift+c"),
 		description: "Copy prompt",
 	},
 	"app.session.new": {
@@ -211,7 +220,7 @@ export const KEYBINDINGS = {
 		description: "Unfold or move down",
 	},
 	"app.plan.toggle": {
-		defaultKeys: "alt+shift+p",
+		defaultKeys: withMacCommand(["alt+shift+p"], "super+shift+p"),
 		description: "Toggle plan mode",
 	},
 	"app.history.search": {
