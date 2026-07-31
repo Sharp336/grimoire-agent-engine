@@ -104,6 +104,7 @@ export { discoverCommands, expandCommand, getCommand } from "./commands";
 export { discoverAgents, getAgent } from "./discovery";
 export { AgentOutputManager } from "./output-manager";
 export * from "./read-only-policy";
+export { TASK_SUBAGENT_LIFECYCLE_CUSTOM_TYPE } from "./subagent-lifecycle";
 export type {
 	AgentDefinition,
 	AgentProgress,
@@ -111,6 +112,7 @@ export type {
 	SubagentEventPayload,
 	SubagentLifecyclePayload,
 	SubagentProgressPayload,
+	SubagentRunKind,
 	TaskParams,
 	TaskToolDetails,
 } from "./types";

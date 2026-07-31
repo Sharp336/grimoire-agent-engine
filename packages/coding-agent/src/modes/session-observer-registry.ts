@@ -4,6 +4,8 @@ import type { EventBus } from "../utils/event-bus";
 
 export interface ObservableSession {
 	id: string;
+	/** Active logical run id; absent for the main session and progress-only snapshots. */
+	runId?: string;
 	kind: "main" | "subagent";
 	label: string;
 	agent?: string;
@@ -153,10 +155,14 @@ export class SessionObserverRegistry {
 				const status = STATUS_MAP[payload.status];
 				if (!status) return;
 
+				const existing = this.#sessions.get(payload.id);
+				if (existing?.runId !== undefined && payload.status !== "started" && existing.runId !== payload.runId)
+					return;
+
 				const sortOrder = this.#ensureSortOrder(payload.id);
 				this.#ensureParentSortOrder(payload.parentToolCallId, sortOrder);
-				const existing = this.#sessions.get(payload.id);
 				if (existing) {
+					existing.runId = payload.runId;
 					existing.status = status;
 					existing.lastUpdate = Date.now();
 					existing.index = payload.index;
@@ -167,6 +173,7 @@ export class SessionObserverRegistry {
 				} else {
 					this.#sessions.set(payload.id, {
 						id: payload.id,
+						runId: payload.runId,
 						kind: "subagent",
 						label: payload.description ?? `Subagent #${payload.index}`,
 						agent: payload.agent,
@@ -189,10 +196,12 @@ export class SessionObserverRegistry {
 				const progress = payload.progress;
 				const id = progress.id;
 				const existing = this.#sessions.get(id);
+				if (existing?.runId !== undefined && existing.runId !== payload.runId) return;
 
 				const sortOrder = this.#ensureSortOrder(id);
 				this.#ensureParentSortOrder(payload.parentToolCallId, sortOrder);
 				if (existing) {
+					existing.runId = payload.runId;
 					existing.lastUpdate = Date.now();
 					existing.index = payload.index;
 					existing.parentToolCallId = payload.parentToolCallId ?? existing.parentToolCallId;
@@ -203,6 +212,7 @@ export class SessionObserverRegistry {
 				} else {
 					this.#sessions.set(id, {
 						id,
+						runId: payload.runId,
 						kind: "subagent",
 						label: progress.description ?? `Subagent #${payload.index}`,
 						agent: payload.agent,

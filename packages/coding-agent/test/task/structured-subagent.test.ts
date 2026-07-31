@@ -18,7 +18,7 @@ import {
 	StructuredSubagentError,
 	type StructuredSubagentRequest,
 } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
-import type { AgentDefinition, SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { AgentDefinition, SingleResult, SubagentLifecyclePayload } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 const AGENT: AgentDefinition = {
@@ -184,6 +184,43 @@ describe("structured subagent primitive", () => {
 		expect(settled.policy.modelRole).toBe("reviewer");
 		expect(dispatched[0]?.modelRole).toBe("reviewer");
 		expect(settled.result.modelRole).toBe("reviewer");
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+	it("records task lifecycle boundaries only while the parent session is live", async () => {
+		mockDiscovery();
+		const parent = session();
+		const entries: Array<{ customType: string; data: unknown }> = [];
+		let disposed = false;
+		parent.sessionManager = {
+			appendCustomEntry: (customType: string, data?: unknown) => {
+				entries.push({ customType, data });
+				return "entry";
+			},
+		} as ToolSession["sessionManager"];
+		parent.isDisposed = () => disposed;
+		let recordLifecycle: executorModule.ExecutorOptions["recordLifecycle"];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			recordLifecycle = options.recordLifecycle;
+			return result();
+		});
+
+		const settled = await runStructuredSubagent(request({ session: parent, retainArtifacts: true }));
+		const started: SubagentLifecyclePayload = {
+			version: 1,
+			runId: "run-1",
+			runKind: "initial",
+			id: "Worker",
+			agent: "worker",
+			agentSource: "bundled",
+			index: 0,
+			status: "started",
+			startedAt: 1_000,
+		};
+		recordLifecycle?.(started);
+		disposed = true;
+		recordLifecycle?.({ ...started, status: "completed", completedAt: 1_100, durationMs: 100 });
+
+		expect(entries).toEqual([{ customType: "task_subagent_lifecycle", data: started }]);
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 	it("derives modelRole from the raw selector source in request, override, definition order", async () => {

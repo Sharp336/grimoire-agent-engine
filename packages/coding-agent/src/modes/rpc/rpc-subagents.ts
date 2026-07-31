@@ -183,12 +183,14 @@ export class RpcSubagentRegistry {
 		const existing = this.#subagents.get(payload.id);
 		if (existing && !hasSameOwner(payload, existing)) return;
 		if (!existing && payload.status !== "started") return;
+		if (existing && payload.status !== "started" && existing.runId !== payload.runId) return;
 		if (payload.status === "started") {
 			this.#staleSubagentIds.delete(payload.id);
 		}
 		const sessionFile = payload.sessionFile ?? existing?.sessionFile;
 		const snapshot: RpcSubagentSnapshot = {
 			id: payload.id,
+			runId: payload.runId,
 			index: payload.index,
 			agent: payload.agent,
 			agentSource: payload.agentSource,
@@ -218,10 +220,12 @@ export class RpcSubagentRegistry {
 		const existing = this.#subagents.get(progress.id);
 		if (!existing) return;
 		if (!hasSameOwner(payload, existing)) return;
+		if (existing.runId !== payload.runId) return;
 		const sessionFile = payload.sessionFile ?? existing?.sessionFile;
 		this.#rememberTranscriptSession(progress.id, sessionFile);
 		this.#subagents.set(progress.id, {
 			id: progress.id,
+			runId: payload.runId,
 			index: payload.index,
 			agent: payload.agent,
 			agentSource: payload.agentSource,

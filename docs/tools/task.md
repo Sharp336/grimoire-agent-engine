@@ -97,12 +97,13 @@ Artifacts and side channels:
 12. `runSubprocess(...)` creates a child agent session with an isolated settings snapshot (parent settings inherited — `async.enabled` and `bash.autoBackground.enabled` are **inherited** from the parent, not force-disabled; `tier.openai`/`tier.anthropic`/`tier.google` are re-resolved through `tier.subagent`; `tools.approvalMode` is forced to `yolo` because headless subagents have no UI to confirm prompts against; `advisor.enabled` is forced off unless the spawn opts in per agent; per-spawn overrides may disable read summarization and clear extra workspace roots for isolated runs), child `agentId` equal to the allocated id, child internal URL router/`AgentOutputManager`, output schema, the shared `context` (batch calls) in the system prompt's `CONTEXT` section, and the IRC peer roster in the system prompt.
 13. Child tool availability: explicit `agent.tools` if provided; auto-add `task` when the agent has `spawns` and depth allows; strip `task` at `task.maxRecursionDepth`; ensure `hub` is present in explicit tool lists; expand `exec` to `eval` + `bash`; strip parent-owned `todo` — unless the spawn is prewalk-armed, whose plan nudge + todo gate need the child to commit its own todo list before the model hand-off.
 14. The child must finish through the hidden `yield` tool; up to 3 reminder prompts, the last forcing `toolChoice = yield` when supported. `finalizeSubprocessOutput(...)` reconciles raw text, `yield` payloads, structured schemas, and abort states.
-15. End-of-run lifecycle (keep-alive, in the run finalizer):
+15. Logical run lifecycle is independent from session retention: `initial`, `follow_up`, and `irc_wake` executions emit versioned start/terminal payloads with a unique `runId`, epoch boundaries, and monotonic `durationMs`. The parent session persists the same payloads as `task_subagent_lifecycle` custom entries, so task completion does not depend on a later idle-TTL park or process disposal.
+16. End-of-run lifecycle (keep-alive, in the run finalizer):
     - caller signal, wall-clock timeout, or internal hard abort → registry status `aborted`, session disposed — terminal;
     - soft-request-budget abort on a non-isolated kept-alive agent → treated as resumable: the agent becomes `idle` and may receive a follow-up/revival;
     - isolated run → status `parked` without a reviver (workspace is merged + cleaned, so the session is not revivable; transcript stays readable via `history://`), then session disposed and detached;
     - everything else (success and failure alike) → status `idle` with the live session attached, and `AgentLifecycleManager.global().adopt(id, { idleTtlMs, revive })` arms the park timer. The reviver reopens the session JSONL.
-16. Lifecycle thereafter: `idle` agents are parked after `task.agentIdleTtlMs` (session disposed; `AgentRef` + session file retained); messaging (`hub`) or the Agent Hub revives them back to `idle`. `"Main"` is never parked.
+17. Lifecycle thereafter: `idle` agents are parked after `task.agentIdleTtlMs` (session disposed; `AgentRef` + session file retained); messaging (`hub`) or the Agent Hub revives them back to `idle`. `"Main"` is never parked.
 
 ## Modes / Variants
 - Execution mode
@@ -131,7 +132,7 @@ Artifacts and side channels:
   - Creates child `AgentSession` instances with isolated settings snapshots; finished sessions stay registered in the process-global `AgentRegistry` as `idle`/`parked` until process teardown or explicit release.
   - With `async.enabled=true`, registers one async job per spawn in `session.asyncJobManager`; completion is injected into the parent as an async-result message.
   - Arms idle-TTL timers in `AgentLifecycleManager` (unref'd; they never hold the process open).
-  - Emits `task:subagent:event`, `task:subagent:progress`, and `task:subagent:lifecycle` on the parent event bus.
+  - Emits `task:subagent:event`, `task:subagent:progress`, and versioned `task:subagent:lifecycle` payloads on the parent event bus; persists the lifecycle payloads as `task_subagent_lifecycle` custom entries.
   - Allocates session-scoped output ids through `AgentOutputManager` so `agent://` stays unique across invocations.
   - Shares the parent `local://` root and `ArtifactManager` with subagents.
 - Background work / cancellation

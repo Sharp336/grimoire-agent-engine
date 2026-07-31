@@ -64,8 +64,13 @@ export const TASK_SUBAGENT_PROGRESS_CHANNEL = "task:subagent:progress";
 /** EventBus channel for subagent lifecycle (start/end) */
 export const TASK_SUBAGENT_LIFECYCLE_CHANNEL = "task:subagent:lifecycle";
 
+/** A logical execution within a retained subagent session. */
+export type SubagentRunKind = "initial" | "follow_up" | "irc_wake";
+
 /** Payload emitted on TASK_SUBAGENT_PROGRESS_CHANNEL */
 export interface SubagentProgressPayload {
+	/** Logical run that produced this snapshot. */
+	runId: string;
 	index: number;
 	agent: string;
 	agentSource: AgentSource;
@@ -86,6 +91,18 @@ export interface SubagentEventPayload {
 
 /** Payload emitted on TASK_SUBAGENT_LIFECYCLE_CHANNEL */
 export interface SubagentLifecyclePayload {
+	/** Versioned independently from the EventBus channel and session JSONL envelope. */
+	version: 1;
+	/** Unique execution id; one retained agent can have multiple follow-up/wake runs. */
+	runId: string;
+	/** Distinguishes the delegated task from later turns on the retained session. */
+	runKind: SubagentRunKind;
+	/** Epoch milliseconds at the actual run boundary, not session creation/disposal. */
+	startedAt: number;
+	/** Terminal epoch milliseconds. Present only for completed/failed/aborted payloads. */
+	completedAt?: number;
+	/** Monotonic elapsed milliseconds. Present only for terminal payloads. */
+	durationMs?: number;
 	id: string;
 	agent: string;
 	agentSource: AgentSource;

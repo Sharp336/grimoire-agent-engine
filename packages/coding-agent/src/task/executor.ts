@@ -62,6 +62,11 @@ import type { WorkspaceTree } from "../workspace-tree";
 import { generateTaskLabel } from "./label";
 import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
+import {
+	createSubagentLifecycleEmitter,
+	createSubagentLifecycleRun,
+	type SubagentLifecycleRun,
+} from "./subagent-lifecycle";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import {
 	type AgentDefinition,
@@ -72,6 +77,7 @@ import {
 	type StructuredSubagentOutput,
 	type StructuredSubagentSchemaMode,
 	type StructuredSubagentSchemaSource,
+	type SubagentLifecyclePayload,
 	TASK_SUBAGENT_EVENT_CHANNEL,
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
@@ -113,6 +119,16 @@ export function resolveSoftRequestBudget(agentName: string, configuredBudget: nu
 	const normalized = Math.max(0, Math.trunc(configuredBudget));
 	if (normalized === 0) return 0;
 	return Math.min(normalized, SOFT_REQUEST_BUDGET[agentName] ?? normalized);
+}
+
+function lifecycleEmitter(
+	eventBus?: EventBus,
+	recordLifecycle?: (payload: SubagentLifecyclePayload) => void,
+): (payload: SubagentLifecyclePayload) => void {
+	return createSubagentLifecycleEmitter({
+		emitEvent: eventBus ? payload => eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, payload) : undefined,
+		appendEntry: recordLifecycle ? (_customType, payload) => recordLifecycle(payload) : undefined,
+	});
 }
 
 /** Extra requests allowed after a budget stop for the forced yield to land before the run is hard-aborted. */
@@ -427,6 +443,8 @@ export interface ExecutorOptions {
 	persistArtifacts?: boolean;
 	artifactsDir?: string;
 	eventBus?: EventBus;
+	/** Persist versioned run boundaries independently from the retained child session lifetime. */
+	recordLifecycle?: (payload: SubagentLifecyclePayload) => void;
 	contextFiles?: ContextFileEntry[];
 	skills?: Skill[];
 	promptTemplates?: PromptTemplate[];
@@ -913,6 +931,8 @@ const MAX_YIELD_TOOL_ERRORS = 6;
 /** Inputs for the run monitor driving one subagent assignment. */
 interface RunMonitorArgs {
 	index: number;
+	/** Logical run id; set after initial session startup creates its lifecycle boundary. */
+	runId?: string;
 	id: string;
 	agent: AgentDefinition;
 	task: string;
@@ -984,6 +1004,8 @@ interface SubagentRunMonitor {
 	resolveSignalAbortReason(): string;
 	resolveAbortReasonText(): string;
 	setActiveSession(session: AgentSession | null): void;
+	/** Bind progress frames to the logical lifecycle run they describe. */
+	setRunId(runId: string): void;
 	/** Return and clear the active session reference. */
 	takeActiveSession(): AgentSession | null;
 	/** Subscribe the monitor to a session's events. Returns the unsubscribe function. */
@@ -1021,6 +1043,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		maxRuntimeMs,
 	} = args;
 	const startTime = Date.now();
+	let runId = args.runId;
 
 	const progress: AgentProgress = {
 		index,
@@ -1256,8 +1279,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		const activityGist =
 			progress.lastIntent ?? (progress.currentTool ? `running ${progress.currentTool}` : undefined);
 		if (activityGist) AgentRegistry.global().setActivity(id, activityGist);
-		if (args.eventBus) {
+		const activeRunId = runId;
+		if (args.eventBus && activeRunId) {
 			args.eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, {
+				runId: activeRunId,
 				index,
 				agent: agent.name,
 				agentSource: agent.source,
@@ -1819,6 +1844,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		waitForActiveSessionAbort,
 		resolveSignalAbortReason,
 		resolveAbortReasonText,
+		setRunId: value => {
+			runId = value;
+		},
 		setActiveSession: session => {
 			activeSession = session;
 		},
@@ -2123,10 +2151,7 @@ interface FinalizeRunArgs {
 	outputSchemaSource?: StructuredSubagentSchemaSource;
 	signal?: AbortSignal;
 	artifactsDir?: string;
-	eventBus?: EventBus;
-	parentToolCallId?: string;
-	detached?: boolean;
-	sessionFile?: string;
+	lifecycleRun?: SubagentLifecycleRun;
 	startTime: number;
 }
 
@@ -2229,20 +2254,9 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	progress.status = wasAborted ? "aborted" : exitCode === 0 ? "completed" : "failed";
 	monitor.scheduleProgress(true);
 
-	// Emit lifecycle end event after finalization so yield status is reflected
-	if (args.eventBus) {
-		args.eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
-			id,
-			agent: agent.name,
-			parentToolCallId: args.parentToolCallId,
-			detached: args.detached,
-			agentSource: agent.source,
-			description: progress.description,
-			status: progress.status as "completed" | "failed" | "aborted",
-			sessionFile: args.sessionFile,
-			index,
-		});
-	}
+	const completedAt = Date.now();
+	const lifecycle = args.lifecycleRun?.complete(progress.status as "completed" | "failed" | "aborted", completedAt);
+	const durationMs = lifecycle?.durationMs ?? Math.max(0, completedAt - args.startTime);
 
 	return {
 		index,
@@ -2258,7 +2272,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		stderr,
 		truncated: Boolean(truncated),
 		...(finalized.structuredOutput ? { structuredOutput: finalized.structuredOutput } : {}),
-		durationMs: Date.now() - args.startTime,
+		durationMs,
 		tokens: progress.tokens,
 		requests: progress.requests,
 		contextTokens: progress.contextTokens,
@@ -2289,6 +2303,7 @@ export interface IrcWakeTurnMonitorOptions {
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
 	eventBus?: EventBus;
+	recordLifecycle?: (payload: SubagentLifecyclePayload) => void;
 	parentToolCallId?: string;
 	/** Fallback session file when the registry ref carries none. */
 	sessionFile?: string;
@@ -2324,13 +2339,29 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				.filter(Boolean)
 				.join("\n\n") || "IRC follow-up";
 		const turnStartTime = Date.now();
+		const turnStartedMonotonicAt = performance.now();
 		const sessionFile = AgentRegistry.global().get(id)?.sessionFile ?? options.sessionFile ?? undefined;
+		const lifecycleRun = createSubagentLifecycleRun({
+			id,
+			agent: agent.name,
+			agentSource: agent.source,
+			index,
+			runKind: "irc_wake",
+			description: options.description,
+			sessionFile,
+			parentToolCallId: options.parentToolCallId,
+			detached: true,
+			startedAt: turnStartTime,
+			startedMonotonicAt: turnStartedMonotonicAt,
+			emit: lifecycleEmitter(options.eventBus, options.recordLifecycle),
+		});
 		const turnMonitor = createSubagentRunMonitor({
 			index,
 			id,
 			agent,
 			task: ircTask,
 			description: options.description,
+			runId: lifecycleRun.started.runId,
 			modelOverride: options.modelOverride,
 			modelRole: options.modelRole,
 			eventBus: options.eventBus,
@@ -2341,20 +2372,6 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			softRequestBudgetNotice: false,
 			maxRuntimeMs,
 		});
-
-		if (options.eventBus) {
-			options.eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
-				id,
-				agent: agent.name,
-				parentToolCallId: options.parentToolCallId,
-				detached: true,
-				agentSource: agent.source,
-				description: options.description,
-				status: "started",
-				sessionFile,
-				index,
-			});
-		}
 
 		turnMonitor.setActiveSession(session);
 		const unsubscribeTurn = turnMonitor.attach(session);
@@ -2395,10 +2412,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					outputSchemaMode: options.outputSchemaMode,
 					outputSchemaSource: options.outputSchemaSource,
 					artifactsDir: options.artifactsDir,
-					eventBus: options.eventBus,
-					parentToolCallId: options.parentToolCallId,
-					detached: true,
-					sessionFile,
+					lifecycleRun,
 					startTime: turnStartTime,
 				});
 			} catch (finalizeError) {
@@ -2544,6 +2558,7 @@ export interface FollowUpTurnOptions {
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
 	eventBus?: EventBus;
+	recordLifecycle?: (payload: SubagentLifecyclePayload) => void;
 	parentToolCallId?: string;
 	/** When set, the turn's raw output is (re)written to `<artifactsDir>/<id>.md` so `agent://<id>` tracks the latest turn. */
 	artifactsDir?: string;
@@ -2566,9 +2581,24 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	const { id, agent, message, signal } = options;
 	const index = options.index ?? 0;
 	const startTime = Date.now();
+	const startedMonotonicAt = performance.now();
 	const session = await AgentLifecycleManager.global().ensureLive(id);
 	const ref = AgentRegistry.global().get(id);
 	const sessionFile = ref?.sessionFile ?? undefined;
+	const lifecycleRun = createSubagentLifecycleRun({
+		id,
+		agent: agent.name,
+		agentSource: agent.source,
+		index,
+		runKind: "follow_up",
+		description: options.description,
+		sessionFile,
+		parentToolCallId: options.parentToolCallId,
+		detached: true,
+		startedAt: startTime,
+		startedMonotonicAt,
+		emit: lifecycleEmitter(options.eventBus, options.recordLifecycle),
+	});
 
 	const monitor = createSubagentRunMonitor({
 		index,
@@ -2576,6 +2606,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		agent,
 		task: message,
 		description: options.description,
+		runId: lifecycleRun.started.runId,
 		modelRole: options.modelRole,
 		signal,
 		onProgress: options.onProgress,
@@ -2587,20 +2618,6 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		softRequestBudgetNotice: false,
 		maxRuntimeMs: options.maxRuntimeMs ?? 0,
 	});
-
-	if (options.eventBus) {
-		options.eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
-			id,
-			agent: agent.name,
-			parentToolCallId: options.parentToolCallId,
-			detached: true,
-			agentSource: agent.source,
-			description: options.description,
-			status: "started",
-			sessionFile,
-			index,
-		});
-	}
 
 	monitor.setActiveSession(session);
 	const unsubscribe = monitor.attach(session);
@@ -2632,10 +2649,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		outputSchemaSource: options.outputSchemaSource,
 		signal,
 		artifactsDir: options.artifactsDir,
-		eventBus: options.eventBus,
-		parentToolCallId: options.parentToolCallId,
-		detached: true,
-		sessionFile,
+		lifecycleRun,
 		startTime,
 	});
 }
@@ -2662,6 +2676,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	} = options;
 	const cleanupGraceMs = options.cleanupGraceMs ?? TASK_ABORT_CLEANUP_GRACE_MS;
 	const startTime = Date.now();
+	const startedMonotonicAt = performance.now();
 	// Set by the session's onFirstChatDispatch hook the first time the agent
 	// loop dispatches a chat request to the provider — the launch-complete boundary.
 	let firstChatDispatchAt: number | undefined;
@@ -2803,6 +2818,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const progress = monitor.progress;
 	let unsubscribe: (() => void) | null = null;
 	let reviveSession: AgentReviver | null = null;
+	let lifecycleRun: SubagentLifecycleRun | undefined;
 	// Adopted (kept-alive) subagents flip registry status from session events on
 	// later turns: revive/wake → running, turn drained → idle. The subscription
 	// intentionally survives this run; a disposed session emits nothing, so it
@@ -2825,6 +2841,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			modelOverride,
 			modelRole,
 			eventBus: options.eventBus,
+			recordLifecycle: options.recordLifecycle,
 			parentToolCallId: options.parentToolCallId,
 			sessionFile: subtaskSessionFile,
 			maxRuntimeMs,
@@ -3163,6 +3180,21 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 			monitor.setActiveSession(session);
 			installRegistryStatusSync(session);
+			lifecycleRun = createSubagentLifecycleRun({
+				id,
+				agent: agent.name,
+				agentSource: agent.source,
+				index,
+				runKind: "initial",
+				description: options.description,
+				sessionFile: subtaskSessionFile,
+				parentToolCallId: options.parentToolCallId,
+				detached: options.detached,
+				startedAt: startTime,
+				startedMonotonicAt,
+				emit: lifecycleEmitter(options.eventBus, options.recordLifecycle),
+			});
+			monitor.setRunId(lifecycleRun.started.runId);
 			if (sessionFile !== null && worktree === undefined) {
 				// Lifecycle reviver: park closed the JSONL writer, so reopening takes
 				// the single-writer lock cleanly and restores the full message history
@@ -3182,21 +3214,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					installIrcWakeTurnMonitor(revived);
 					return revived;
 				};
-			}
-
-			// Emit lifecycle start event
-			if (options.eventBus) {
-				options.eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
-					id,
-					agent: agent.name,
-					parentToolCallId: options.parentToolCallId,
-					detached: options.detached,
-					agentSource: agent.source,
-					description: options.description,
-					status: "started",
-					sessionFile: subtaskSessionFile,
-					index,
-				});
 			}
 
 			// Todos are parent-owned bookkeeping and stripped from subagents —
@@ -3493,10 +3510,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		outputSchemaSource: options.outputSchemaSource,
 		signal,
 		artifactsDir: options.artifactsDir,
-		eventBus: options.eventBus,
-		parentToolCallId: options.parentToolCallId,
-		detached: options.detached,
-		sessionFile: subtaskSessionFile,
+		lifecycleRun,
 		startTime,
 	});
 	AgentRegistry.global().setHistory(id, { outputPath: result.outputPath });

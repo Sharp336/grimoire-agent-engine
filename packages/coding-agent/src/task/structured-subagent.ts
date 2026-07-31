@@ -34,6 +34,7 @@ import {
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { resolveSpawnPolicy } from "./spawn-policy";
+import { createParentSubagentLifecycleRecorder } from "./subagent-lifecycle";
 import {
 	type AgentDefinition,
 	type AgentProgress,
@@ -424,6 +425,10 @@ function buildExecutorOptions(
 		keepAlive: request.keepAlive,
 		signal: request.signal,
 		eventBus: session.eventBus,
+		recordLifecycle: createParentSubagentLifecycleRecorder({
+			getSessionManager: () => session.sessionManager,
+			isDisposed: () => session.isDisposed?.() ?? false,
+		}),
 		onProgress: request.onProgress,
 		authStorage: session.authStorage,
 		modelRegistry: session.modelRegistry,

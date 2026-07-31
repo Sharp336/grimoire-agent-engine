@@ -13,7 +13,11 @@ import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
-import { resolveSoftRequestBudget, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import {
+	resolveSoftRequestBudget,
+	runSubagentFollowUpTurn,
+	runSubprocess,
+} from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -210,6 +214,55 @@ describe("runSubprocess soft request budget", () => {
 		});
 	}
 
+	it("writes the latest output artifact for a monitored follow-up turn", async () => {
+		const id = "FollowUpScout";
+		const handle = createMockSession(({ emit, pushMessage }) => {
+			const yieldMessage = {
+				role: "assistant" as const,
+				content: [
+					{
+						type: "toolCall" as const,
+						id: "follow-up-yield",
+						name: "yield",
+						arguments: { result: { data: { report: "follow-up findings" } } },
+					},
+				],
+				stopReason: "toolUse" as const,
+			};
+			pushMessage(yieldMessage);
+			emit({ type: "message_end", message: yieldMessage } as unknown as AgentSessionEvent);
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "follow-up-yield",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", data: { report: "follow-up findings" } },
+				},
+				isError: false,
+			} as AgentSessionEvent);
+		});
+		AgentRegistry.global().register({
+			id,
+			displayName: id,
+			kind: "sub",
+			session: handle.session,
+			status: "idle",
+		});
+		AgentLifecycleManager.global().adopt(id, { idleTtlMs: 0 });
+
+		const result = await runSubagentFollowUpTurn({
+			id,
+			agent: baseAgent,
+			message: "continue the inventory",
+			artifactsDir: tempDir.path(),
+		});
+
+		const outputPath = tempDir.join(`${id}.md`);
+		expect(result.outputPath).toBe(outputPath);
+		expect(await Bun.file(outputPath).text()).toContain("follow-up findings");
+	});
+
 	it("a budget stop drives one forced final yield and finishes as a normal completion", async () => {
 		const id = "BudgetScout";
 		let abortCallsAtReminder: number | undefined;
@@ -319,27 +372,38 @@ describe("runSubprocess soft request budget", () => {
 				payload: { id, status: "started" },
 			});
 			expect(frames.some(frame => frame.type === "subagent_progress")).toBe(true);
+			const started = frames[0];
+			if (started?.type !== "subagent_lifecycle") throw new Error("expected lifecycle start");
+			const progressRunIds = frames
+				.filter(frame => frame.type === "subagent_progress")
+				.map(frame => frame.payload.runId);
+			expect(progressRunIds).toEqual(progressRunIds.map(() => started.payload.runId));
 			expect(frames.at(-1)).toMatchObject({
 				type: "subagent_lifecycle",
 				payload: { id, status: "completed" },
 			});
 		};
 
+		const outputPath = tempDir.join(`${id}.md`);
+		await Bun.write(outputPath, "stale");
 		frames.length = 0;
 		const idleTerminal = waitForFollowUpTerminal();
 		const idleReceipt = await new IrcBus().send({ from: "Main", to: id, body: "resume your inventory" });
 		expect(idleReceipt.outcome).toBe("woken");
 		await idleTerminal;
 		expectRpcTurn();
+		expect(await Bun.file(outputPath).text()).toContain("resumed findings");
 
 		await AgentLifecycleManager.global().park(id);
 		expect(AgentRegistry.global().get(id)?.status).toBe("parked");
+		await Bun.write(outputPath, "stale");
 		frames.length = 0;
 		const revivedTerminal = waitForFollowUpTerminal();
 		const revivedReceipt = await new IrcBus().send({ from: "Main", to: id, body: "resume after parking" });
 		expect(revivedReceipt.outcome).toBe("revived");
 		await revivedTerminal;
 		expectRpcTurn();
+		expect(await Bun.file(outputPath).text()).toContain("resumed findings");
 		rpcRegistry.dispose();
 	});
 

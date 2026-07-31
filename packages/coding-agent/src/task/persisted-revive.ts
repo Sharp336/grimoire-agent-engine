@@ -11,6 +11,7 @@ import type { AuthStorage } from "../session/auth-storage";
 import { SessionManager } from "../session/session-manager";
 import type { EventBus } from "../utils/event-bus";
 import { attachIrcWakeTurnMonitor, createMCPProxyTools, createSubagentSettings } from "./executor";
+import { createParentSubagentLifecycleRecorder } from "./subagent-lifecycle";
 import type { AgentDefinition } from "./types";
 
 /**
@@ -173,6 +174,10 @@ export function createPersistedSubagentReviverFactory(
 				id: ref.id,
 				agent: wakeAgent,
 				eventBus: ctx.eventBus,
+				recordLifecycle: createParentSubagentLifecycleRecorder({
+					getSessionManager: () => ctx.session.sessionManager,
+					isDisposed: () => ctx.session.isDisposed,
+				}),
 				sessionFile,
 				outputSchema: init.outputSchema,
 				outputSchemaMode: init.outputSchemaMode,

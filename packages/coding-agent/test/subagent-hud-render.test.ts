@@ -60,6 +60,10 @@ function makeProgress(overrides: Partial<AgentProgress> & { id: string }): Agent
 
 function makeLifecycle(id: string, index: number, description: string, detached?: boolean): SubagentLifecyclePayload {
 	return {
+		version: 1,
+		runId: `run-${id}`,
+		runKind: "initial",
+		startedAt: 1,
 		id,
 		index,
 		agent: "task",
@@ -78,6 +82,7 @@ function makeProgressPayload(
 	detached?: boolean,
 ): SubagentProgressPayload {
 	return {
+		runId: `run-${id}`,
 		index,
 		agent: "task",
 		agentSource: "bundled",
@@ -161,6 +166,53 @@ describe("subagent HUD lines", () => {
 		expect(out).toContain("Detached: background work");
 		expect(out).toContain("FromProgress: background work");
 		expect(out).not.toContain("Inline");
+	});
+
+	it("ignores a terminal lifecycle update from an older retained-agent run", () => {
+		const eventBus = new EventBus();
+		const registry = new SessionObserverRegistry();
+		registry.subscribeToEventBus(eventBus);
+		const firstRun = makeLifecycle("Retained", 0, "initial work", true);
+		const secondRun: SubagentLifecyclePayload = {
+			...firstRun,
+			runId: "run-retained-follow-up",
+			runKind: "follow_up",
+			startedAt: 2,
+			description: "follow-up work",
+		};
+
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, firstRun);
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, secondRun);
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, {
+			...makeProgressPayload("Retained", 0, "stale initial progress", true),
+			runId: firstRun.runId,
+			progress: makeProgress({
+				id: "Retained",
+				status: "completed",
+				description: "stale initial progress",
+			}),
+		});
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			...firstRun,
+			status: "completed",
+			completedAt: 3,
+			durationMs: 2,
+		});
+
+		expect(registry.getSession("Retained")).toMatchObject({
+			runId: "run-retained-follow-up",
+			status: "active",
+			description: "follow-up work",
+		});
+		expect(registry.getSession("Retained")?.progress).toBeUndefined();
+
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			...secondRun,
+			status: "completed",
+			completedAt: 4,
+			durationMs: 2,
+		});
+		expect(registry.getSession("Retained")?.status).toBe("completed");
 	});
 
 	it("renders nested ids as a breadcrumb and truncates long descriptions to the viewport", () => {
