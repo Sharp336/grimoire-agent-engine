@@ -50,7 +50,7 @@ export function isServiceTierForFamily(family: string, tier: unknown): tier is S
  * Inherit-capable single value for the subagent/advisor tiers. The chosen tier
  * is broadcast across families and applied to whichever family the spawned
  * model belongs to (clamped to what that family realizes); `"inherit"` defers
- * to the main agent's live per-family selection.
+ * to the parent agent's live per-family selection.
  */
 export const SERVICE_TIER_INHERIT_SETTING_VALUES = [
 	"inherit",
@@ -108,7 +108,7 @@ export const SERVICE_TIER_GOOGLE_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTie
 ];
 
 export const SERVICE_TIER_INHERIT_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTierInheritSettingValue>> = [
-	{ value: "inherit", label: "Inherit", description: "Match the main agent's live per-family tiers" },
+	{ value: "inherit", label: "Inherit", description: "Match the parent agent's live per-family tiers" },
 	{ value: "none", label: "None", description: "Standard processing" },
 	{ value: "auto", label: "Auto", description: "Provider default tier selection (OpenAI family)" },
 	{ value: "default", label: "Default", description: "Standard priority processing (OpenAI family)" },

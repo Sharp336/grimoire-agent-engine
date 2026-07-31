@@ -5,7 +5,7 @@
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Model } from "@oh-my-pi/pi-ai";
+import type { Model, ServiceTierByFamily } from "@oh-my-pi/pi-ai";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
@@ -21,7 +21,10 @@ import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
-function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent) => void }) => void): AgentSession {
+function createMockSession(
+	onPrompt: (params: { emit: (event: AgentSessionEvent) => void }) => void,
+	onSessionInit?: (parentServiceTier: ServiceTierByFamily | undefined) => void,
+): AgentSession {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
 	const emit = (event: AgentSessionEvent) => {
 		for (const listener of listeners) listener(event);
@@ -31,7 +34,11 @@ function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent)
 		agent: { state: { systemPrompt: ["test"] } },
 		model: undefined,
 		extensionRunner: undefined,
-		sessionManager: { appendSessionInit: () => {} },
+		sessionManager: {
+			appendSessionInit: (init: { parentServiceTier?: ServiceTierByFamily }) => {
+				onSessionInit?.(init.parentServiceTier);
+			},
+		},
 		getActiveToolNames: () => ["read", "yield"],
 		getEnabledToolNames: () => ["read", "yield"],
 		setActiveToolsByName: async (_toolNames: string[]) => {},
@@ -55,7 +62,9 @@ function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent)
 	return session as unknown as AgentSession;
 }
 
-function yieldEmittingSession(): AgentSession {
+function yieldEmittingSession(
+	onSessionInit?: (parentServiceTier: ServiceTierByFamily | undefined) => void,
+): AgentSession {
 	return createMockSession(({ emit }) => {
 		emit({
 			type: "tool_execution_end",
@@ -67,7 +76,7 @@ function yieldEmittingSession(): AgentSession {
 			},
 			isError: false,
 		});
-	});
+	}, onSessionInit);
 }
 
 function createSessionResult(session: AgentSession): CreateAgentSessionResult {
@@ -191,8 +200,11 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(childSettings?.get("tier.google")).toBe("none");
 	});
 
-	it("passes supplied live parent tiers to an agent explicitly configured to inherit", async () => {
-		const session = yieldEmittingSession();
+	it("passes and records immediate parent tiers for an agent explicitly configured to inherit", async () => {
+		let recordedParentServiceTier: ServiceTierByFamily | undefined;
+		const session = yieldEmittingSession(parentServiceTier => {
+			recordedParentServiceTier = parentServiceTier;
+		});
 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
 		const settings = Settings.isolated({
 			"tier.subagent": "none",
@@ -212,6 +224,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(childSettings?.get("tier.openai")).toBe(parentServiceTier.openai);
 		expect(childSettings?.get("tier.anthropic")).toBe(parentServiceTier.anthropic);
 		expect(childSettings?.get("tier.google")).toBe(parentServiceTier.google);
+		expect(recordedParentServiceTier).toEqual(parentServiceTier);
 	});
 
 	it("forwards an exact credential resolver without replacing it", async () => {
