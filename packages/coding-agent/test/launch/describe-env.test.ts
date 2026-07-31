@@ -52,13 +52,18 @@ describe("hub describe env output", () => {
 	it("flattens control characters and ANSI escapes in values", () => {
 		const content = describeContent({ SNEAKY: "a\nb\u001b[2Jc\td" });
 		const envLine = content.split("\n").at(-1);
-		expect(envLine).toBe("Env: SNEAKY=a b c\td");
+		expect(envLine).toBe("Env: SNEAKY=a bc\td");
+	});
+
+	it("strips C1 controls in values", () => {
+		const content = describeContent({ C1: "x\u009b2Jy" });
+		expect(content.split("\n").at(-1)).toBe("Env: C1=x2Jy");
 	});
 
 	it("flattens control characters and ANSI escapes in keys", () => {
 		const content = describeContent({ "BAD\nKEY\u001b[31m": "v" });
 		const lines = content.split("\n");
-		expect(lines.at(-1)).toBe("Env: BAD KEY =v");
+		expect(lines.at(-1)).toBe("Env: BAD KEY=v");
 		expect(lines.filter(line => line.startsWith("Env:")).length).toBe(1);
 	});
 });

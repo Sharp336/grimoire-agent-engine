@@ -188,12 +188,13 @@ function operationFor(params: LaunchParams, session: ToolSession): DaemonOperati
 	}
 }
 
-/** Flatten env keys and values for single-line display: ANSI escapes and
- *  control chars (including newlines; tabs are left for `replaceTabs`) collapse
- *  to a space so an arbitrary entry cannot add rows or move the cursor in
- *  either surface — the spec schema allows arbitrary strings on both sides. */
+/** Flatten env keys and values for single-line display: `sanitizeText` strips
+ *  ANSI sequences and C0/C1/DEL controls (keeping `\n` and `\t`), then newlines
+ *  collapse to a space so an arbitrary entry cannot add rows or move the cursor
+ *  in either surface — the spec schema allows arbitrary strings on both sides.
+ *  Tabs are left for `replaceTabs` on the render paths. */
 function flattenEnvValue(value: string): string {
-	return value.replace(/\u001b\[[0-9;]*[A-Za-z]/g, " ").replace(/[\u0000-\u0008\u000a-\u001f\u007f]+/g, " ");
+	return sanitizeText(value).replace(/\n+/g, " ");
 }
 
 function daemonLabel(daemon: DaemonSnapshot): string {
