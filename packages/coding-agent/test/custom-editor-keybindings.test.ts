@@ -1,10 +1,15 @@
-import { beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { CustomEditor } from "@oh-my-pi/pi-coding-agent/modes/components/custom-editor";
 import { getEditorTheme, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { setSuperMirrorsCtrl } from "@oh-my-pi/pi-tui";
 
 describe("CustomEditor keybindings", () => {
 	beforeAll(async () => {
 		await initTheme();
+	});
+
+	afterEach(() => {
+		setSuperMirrorsCtrl(process.platform === "darwin");
 	});
 
 	it("routes the configured retry chord through handleInput", () => {
@@ -16,6 +21,27 @@ describe("CustomEditor keybindings", () => {
 		editor.handleInput("\x1bR");
 
 		expect(onRetry).toHaveBeenCalledTimes(1);
+	});
+
+	it("lets an extension's explicit Command chord outrank a mirrored built-in", () => {
+		// The mirror must be live before the editor builds its match sets.
+		setSuperMirrorsCtrl(true);
+		const editor = new CustomEditor(getEditorTheme());
+		const onExpandTools = vi.fn();
+		const extension = vi.fn();
+
+		editor.onExpandTools = onExpandTools;
+		editor.setActionKeys("app.tools.expand", ["ctrl+o"]);
+		// Without precedence the mirror of ctrl+o also claims super+o, and
+		// handleInput checks the built-in action before custom handlers.
+		editor.setCustomKeyHandler("super+o", extension);
+		editor.handleInput("\x1b[111;9u");
+
+		expect(extension).toHaveBeenCalledTimes(1);
+		expect(onExpandTools).not.toHaveBeenCalled();
+		// The built-in keeps its own real chord.
+		editor.handleInput("\x0f");
+		expect(onExpandTools).toHaveBeenCalledTimes(1);
 	});
 
 	it("lets custom handlers keep precedence over the default retry chord", () => {

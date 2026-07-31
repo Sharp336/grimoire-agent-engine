@@ -636,12 +636,15 @@ export class CustomEditor extends Editor {
 
 	/** Rebuilds every action's match set together. One action's explicitly-declared
 	 *  chord must suppress another action's generated Command alias, which is only
-	 *  decidable with all actions in view. */
+	 *  decidable with all actions in view. Custom handlers count as explicit: an
+	 *  extension registering `super+o` outranks the mirror of a built-in `ctrl+o`,
+	 *  which `handleInput` would otherwise reach first. */
 	#rebuildActionMatchKeys(): void {
 		const explicit = new Set<string>();
 		for (const keys of this.#actionKeys.values()) {
 			for (const key of keys) explicit.add(canonicalKeyId(key));
 		}
+		for (const key of this.#customKeyHandlers.keys()) explicit.add(canonicalKeyId(key));
 		for (const [action, keys] of this.#actionKeys) {
 			this.#actionMatchKeys.set(action, buildMatchKeys(keys, explicit));
 		}
@@ -668,6 +671,9 @@ export class CustomEditor extends Editor {
 	setCustomKeyHandler(key: KeyId, handler: () => void): void {
 		this.#customKeyHandlers.set(key, handler);
 		this.#rebuildCustomMatchKeys();
+		// Custom chords participate in alias precedence, so the action sets must be
+		// rebuilt too: registering `super+o` has to retract the mirror of `ctrl+o`.
+		this.#rebuildActionMatchKeys();
 	}
 
 	/**
@@ -676,6 +682,7 @@ export class CustomEditor extends Editor {
 	removeCustomKeyHandler(key: KeyId): void {
 		this.#customKeyHandlers.delete(key);
 		this.#rebuildCustomMatchKeys();
+		this.#rebuildActionMatchKeys();
 	}
 
 	/**
@@ -684,6 +691,7 @@ export class CustomEditor extends Editor {
 	clearCustomKeyHandlers(): void {
 		this.#customKeyHandlers.clear();
 		this.#rebuildCustomMatchKeys();
+		this.#rebuildActionMatchKeys();
 	}
 
 	#spaceHoldGestureEnabled(): boolean {
