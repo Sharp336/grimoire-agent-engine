@@ -52,6 +52,7 @@ export {
 } from "./gh-view";
 
 
+
 const GITHUB_READONLY_OPS: ReadonlySet<string> = new Set([
 	"repo_view",
 	"file_read",
@@ -62,12 +63,21 @@ const GITHUB_READONLY_OPS: ReadonlySet<string> = new Set([
 	"search_repos",
 	"run_watch",
 ]);
+const GITHUB_HOST_QUALIFIED_REPO_OPS: ReadonlySet<string> = new Set([
+	"repo_view",
+	"issue_create",
+	"issue_state",
+	"pr_create",
+	"pr_checkout",
+]);
 
 const githubSchema = type({
 	op: type(
 		"'repo_view' | 'file_read' | 'issue_create' | 'issue_state' | 'pr_create' | 'pr_checkout' | 'pr_push' | 'search_issues' | 'search_prs' | 'search_code' | 'search_commits' | 'search_repos' | 'run_watch'",
 	).describe("github operation"),
-	"repo?": type("string").describe("[host/]owner/repo"),
+	"repo?": type("string").describe(
+		"owner/repo; host/owner/repo for repo_view, issue_create, issue_state, pr_create, or pr_checkout",
+	),
 	"branch?": type("string").describe("branch"),
 	"path?": type("string").describe("repository-relative file path"),
 	"pr?": type("string | string[]").describe("pr number, url, or branch"),
@@ -172,6 +182,7 @@ export interface GhRunWatchViewDetails {
 
 
 
+
 export class GithubTool implements AgentTool<typeof githubSchema, GhToolDetails> {
 	readonly name = "github";
 	readonly approval = (args: unknown): ToolApprovalDecision => {
@@ -201,6 +212,7 @@ export class GithubTool implements AgentTool<typeof githubSchema, GhToolDetails>
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<GhToolDetails>> {
 		const op = params.op;
+		assertRepositorySelectorSupportedForOperation(op, normalizeOptionalString(params.repo));
 		if (op === "issue_create") {
 			return executeIssueCreate(this.session, params, signal);
 		}
@@ -269,6 +281,7 @@ async function executeFileRead(
 	const sourceUrl = `https://github.com/${repo}/blob/${encodeURIComponent(branch ?? "HEAD")}/${endpointPath}`;
 	return buildTextResult(text, sourceUrl, { repo, branch });
 }
+
 
 
 

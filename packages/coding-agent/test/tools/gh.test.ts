@@ -463,6 +463,23 @@ describe("github tool", () => {
 		);
 	});
 
+	it("rejects host-qualified repositories for operations without host routing", async () => {
+		const jsonSpy = vi.spyOn(git.github, "json");
+		const textSpy = vi.spyOn(git.github, "text");
+		const tool = new GithubTool(createSession());
+
+		await expect(
+			tool.execute("file-read-host", {
+				op: "file_read",
+				repo: "ghe.example.test/owner/repo",
+				path: "README.md",
+			}),
+		).rejects.toThrow(/host qualification is not supported for file_read/);
+
+		expect(jsonSpy).not.toHaveBeenCalled();
+		expect(textSpy).not.toHaveBeenCalled();
+	});
+
 	it("creates a pull request via gh and renders the resulting summary", async () => {
 		const textCalls: string[][] = [];
 		const textSpy = vi.spyOn(git.github, "text").mockImplementation(async (_cwd, args) => {
@@ -558,6 +575,20 @@ describe("github tool", () => {
 			}
 			return { data: {} };
 		}
+
+		function hierarchyChainIssueView(reference: string | undefined) {
+			const match = reference?.match(/(?:^|\/issues\/)(\d+)$/);
+			if (!match) throw new Error(`Unexpected hierarchy reference: ${reference}`);
+			const number = Number(match[1]);
+			const issueUrl = (value: number) => `https://github.com/owner/repo/issues/${value}`;
+			return {
+				id: `I_${number}`,
+				parent: number === 1 ? null : { id: `I_${number - 1}`, number: number - 1, url: issueUrl(number - 1) },
+				number,
+				url: issueUrl(number),
+			};
+		}
+
 		it("exposes hierarchy inputs in the schema and requires exec approval", () => {
 			const tool = new GithubTool(createSession());
 			const wire = toolWireSchema(tool);
@@ -614,14 +645,19 @@ describe("github tool", () => {
 			expect(result.details?.status).toBe("created");
 		});
 
-		it("attaches a newly created issue beneath an existing parent", async () => {
+		it("pins hierarchy GraphQL calls to an explicit github.com host", async () => {
 			const createdUrl = "https://github.com/owner/repo/issues/43";
 			const textSpy = vi.spyOn(git.github, "text").mockResolvedValue(`${createdUrl}\n`);
 			const jsonSpy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
 				if (args[0] === "repo") return { url: "https://github.com/owner/repo" } as never;
 				if (args[0] === "api") return successfulIssueCreateGraphqlResponse(args) as never;
 				if (args[2] === "7") {
-					return { id: "I_parent", number: 7, url: "https://github.com/owner/repo/issues/7" } as never;
+					return {
+						id: "I_parent",
+						parent: null,
+						number: 7,
+						url: "https://github.com/owner/repo/issues/7",
+					} as never;
 				}
 				if (args[2] === createdUrl) {
 					return { id: "I_created", number: 43, url: createdUrl } as never;
@@ -632,22 +668,71 @@ describe("github tool", () => {
 
 			const result = await tool.execute("issue-create-parent-only", {
 				op: "issue_create",
-				repo: "owner/repo",
+				repo: "github.com/owner/repo",
 				title: "Child issue",
 				parent: "7",
 			});
 
 			expect(jsonSpy.mock.calls.filter(call => call[1][0] === "issue").map(call => call[1])).toEqual([
-				["issue", "view", "7", "--repo", "owner/repo", "--json", "id,number,url"],
+				["issue", "view", "7", "--repo", "github.com/owner/repo", "--json", "id,parent,number,url"],
 				["issue", "view", createdUrl, "--json", "id,number,url"],
 			]);
+			const graphqlCalls = jsonSpy.mock.calls.filter(call => call[1][0] === "api");
+			expect(graphqlCalls).toHaveLength(2);
+			expect(graphqlCalls.every(call => call[1].slice(0, 4).join(" ") === "api graphql --hostname github.com")).toBe(
+				true,
+			);
 			expect(textSpy).toHaveBeenCalledTimes(1);
-			expect(jsonSpy).toHaveBeenCalledTimes(5);
-			const mutationArgs = jsonSpy.mock.calls[4]?.[1] ?? [];
-			expect(mutationArgs.slice(0, 2)).toEqual(["api", "graphql"]);
+			const mutationArgs =
+				graphqlCalls.find(call => call[1].some(arg => arg.startsWith("query=mutation")))?.[1] ?? [];
 			expect(mutationArgs.find(arg => arg.startsWith("query="))).toContain("replaceParent: false");
 			expect(mutationArgs.slice(-4)).toEqual(["-f", "parentId0=I_parent", "-f", "childId0=I_created"]);
 			expect(result.details?.status).toBe("created");
+		});
+
+		it("allows a parent-only issue to be created at exactly hierarchy level eight", async () => {
+			const createdUrl = "https://github.com/owner/repo/issues/43";
+			const textSpy = vi.spyOn(git.github, "text").mockResolvedValue(`${createdUrl}\n`);
+			vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				if (args[0] === "repo") return { url: "https://github.com/owner/repo" } as never;
+				if (args[0] === "api") return successfulIssueCreateGraphqlResponse(args) as never;
+				if (args[2] === createdUrl) {
+					return { id: "I_created", number: 43, url: createdUrl } as never;
+				}
+				return hierarchyChainIssueView(args[2]) as never;
+			});
+
+			const result = await new GithubTool(createSession()).execute("issue-create-level-eight", {
+				op: "issue_create",
+				repo: "owner/repo",
+				title: "Final hierarchy level",
+				parent: "7",
+			});
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+			expect(textSpy).toHaveBeenCalledTimes(1);
+			expect(text).toContain("Hierarchy: attached");
+			expect(result.details?.status).toBe("created");
+		});
+
+		it("rejects a parent-only issue beyond hierarchy level eight before creation", async () => {
+			const textSpy = vi.spyOn(git.github, "text");
+			vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				if (args[0] === "repo") return { url: "https://github.com/owner/repo" } as never;
+				if (args[0] === "api") return successfulIssueCreateGraphqlResponse(args) as never;
+				return hierarchyChainIssueView(args[2]) as never;
+			});
+
+			await expect(
+				new GithubTool(createSession()).execute("issue-create-level-nine", {
+					op: "issue_create",
+					repo: "owner/repo",
+					title: "Too deeply nested",
+					parent: "8",
+				}),
+			).rejects.toThrow(/maximum issue hierarchy depth of 8 levels/);
+
+			expect(textSpy).not.toHaveBeenCalled();
 		});
 
 		it("uses a body file and repeated assignee and label flags", async () => {
@@ -1068,7 +1153,7 @@ describe("github tool", () => {
 			).rejects.toThrow(/does not support issue hierarchy mutations/i);
 
 			expect(jsonSpy).toHaveBeenCalledTimes(2);
-			expect(jsonSpy.mock.calls[1]?.[1].slice(0, 2)).toEqual(["api", "graphql"]);
+			expect(jsonSpy.mock.calls[1]?.[1].slice(0, 4)).toEqual(["api", "graphql", "--hostname", "github.com"]);
 			expect(textSpy).not.toHaveBeenCalled();
 		});
 
@@ -1220,7 +1305,7 @@ describe("github tool", () => {
 			});
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 
-			expect(jsonSpy.mock.calls[4]?.[1].slice(0, 2)).toEqual(["api", "graphql"]);
+			expect(jsonSpy.mock.calls[4]?.[1].slice(0, 4)).toEqual(["api", "graphql", "--hostname", "github.com"]);
 			expect(textSpy).toHaveBeenCalledTimes(1);
 			expect(jsonSpy).toHaveBeenCalledTimes(5);
 			expect(text).toContain("WARNING");
