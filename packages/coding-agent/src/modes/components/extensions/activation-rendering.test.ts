@@ -286,6 +286,10 @@ describe("extension activation rendering", () => {
 		rendered = stripAnsi(inspector.render(80).join("\n"));
 		expect(rendered).toContain("Disabled (manually disabled)");
 		expect(rendered).not.toContain("Activation:");
+
+		inspector.setExtension(extension({ state: "disabled", activationLocked: true }));
+		rendered = stripAnsi(inspector.render(80).join("\n"));
+		expect(rendered).toContain("Disabled (locked)");
 	});
 
 	it("does not toggle shadowed rows", () => {
@@ -298,6 +302,34 @@ describe("extension activation rendering", () => {
 					disabledReason: "shadowed",
 					activationState: "inherit",
 					activationTarget: "project",
+				}),
+			],
+			{
+				onToggle: () => {
+					toggled = true;
+				},
+				onActivationCycle: () => {
+					cycled = true;
+				},
+			},
+		);
+
+		list.handleInput(" ");
+
+		expect(toggled).toBe(false);
+		expect(cycled).toBe(false);
+	});
+
+	it("does not toggle locked rows", () => {
+		let toggled = false;
+		let cycled = false;
+		const list = new ExtensionList(
+			[
+				extension({
+					state: "disabled",
+					activationLocked: true,
+					activationState: "enabled",
+					activationTarget: "global",
 				}),
 			],
 			{

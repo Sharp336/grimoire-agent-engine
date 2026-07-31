@@ -71,6 +71,8 @@ export interface Extension {
 	activationTarget?: ActivationWriteTarget;
 	/** Project-only rows use a binary active/disabled cycle instead of tri-state inherit. */
 	activationMode?: ActivationMode;
+	/** Whether the source configuration prevents changing this row's activation. */
+	activationLocked?: boolean;
 }
 
 /**

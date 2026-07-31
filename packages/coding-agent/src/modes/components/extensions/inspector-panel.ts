@@ -313,6 +313,7 @@ export class InspectorPanel implements Component {
 				return theme.fg("success", `${theme.status.enabled} Active${suffix}`);
 			}
 			case "disabled": {
+				if (ext.activationLocked) return theme.fg("dim", `${theme.status.disabled} Disabled (locked)`);
 				if (
 					ext.activationMode !== "binary" &&
 					ext.activationTarget === "project" &&

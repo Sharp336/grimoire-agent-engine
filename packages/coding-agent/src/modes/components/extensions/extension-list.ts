@@ -438,9 +438,9 @@ export class ExtensionList implements Component {
 		if (item?.type === "master") {
 			this.callbacks.onMasterToggle?.(item.providerId);
 		} else if (item?.type === "extension") {
-			// Only allow toggling if the provider master switch is enabled and the row is not shadowed.
+			// Only allow toggling if the provider master switch is enabled and the row is editable.
 			const masterDisabled = this.#isMasterDisabled();
-			if (!masterDisabled && item.item.state !== "shadowed") {
+			if (!masterDisabled && item.item.state !== "shadowed" && !item.item.activationLocked) {
 				if (item.item.activationState) {
 					this.callbacks.onActivationCycle?.(item.item);
 					return;

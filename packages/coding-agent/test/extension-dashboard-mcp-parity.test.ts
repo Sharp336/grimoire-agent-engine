@@ -37,7 +37,7 @@ describe("Extension Control Center MCP activation", () => {
 		await removeWithRetries(userAgentDir);
 	});
 
-	test("renders shared activation disablement and source hard-disablement", async () => {
+	test("renders shared activation disablement and locks source-hard-disabled MCP servers", async () => {
 		const extensions = await loadAllExtensions(projectDir, ["mcp:settings-disabled"]);
 		const settingsDisabled = extensions.find(extension => extension.id === "mcp:settings-disabled");
 		const sourceDisabled = extensions.find(extension => extension.id === "mcp:source-disabled");

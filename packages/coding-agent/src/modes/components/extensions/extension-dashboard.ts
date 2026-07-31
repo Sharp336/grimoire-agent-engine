@@ -489,7 +489,7 @@ export class ExtensionDashboard implements Component {
 
 	#handleActivationCycle(extension: DashboardState["extensions"][number]): void {
 		const sm = this.settings ?? Settings.instance;
-		if (!extension.activationState || extension.state === "shadowed") return;
+		if (!extension.activationState || extension.state === "shadowed" || extension.activationLocked) return;
 		const parsed = projectActivationKindFromExtensionId(extension.id);
 		if (!parsed) return;
 
