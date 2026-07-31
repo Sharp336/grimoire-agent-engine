@@ -42,6 +42,7 @@ import { AUTO_IMAGE_PROVIDER_ORDER, isImageProviderId } from "../tools/image-pro
 import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
 import { INSPECT_IMAGE_MODES } from "../utils/inspect-image-mode";
 import { isSearchProviderId, SEARCH_PROVIDER_ORDER } from "../web/search/types";
+import type { ServiceTierInheritSettingValue } from "./service-tier";
 import {
 	type BashInterceptorRule,
 	type GroupPrefix,
@@ -353,6 +354,8 @@ export class Settings {
 	#modifiedProjectModelRoles = new Set<string>();
 	/** Individual global model roles modified during this session (for partial save) */
 	#modifiedGlobalModelRoles = new Set<string>();
+	/** Individual global per-agent service tiers modified during this session (for partial save) */
+	#modifiedGlobalAgentServiceTierOverrides = new Set<string>();
 	/**
 	 * Original process-wide model-role overrides captured before a project edit
 	 * temporarily replaced them via `#updateRuntimeModelRoleOverride`. Restored
@@ -606,7 +609,11 @@ export class Settings {
 		if (this.#projectSavePromise) {
 			await this.#projectSavePromise;
 		}
-		if (this.#modified.size > 0 || this.#modifiedGlobalModelRoles.size > 0) {
+		if (
+			this.#modified.size > 0 ||
+			this.#modifiedGlobalModelRoles.size > 0 ||
+			this.#modifiedGlobalAgentServiceTierOverrides.size > 0
+		) {
 			await this.#saveNow();
 		}
 		if (this.#modifiedProjectModelRoles.size > 0) {
@@ -779,6 +786,18 @@ export class Settings {
 		return roles;
 	}
 
+	#agentServiceTierOverridesFromLayer(layer: RawSettings): Record<string, string> {
+		const value = getByPath(layer, ["task", "agentServiceTierOverrides"]);
+		if (!isRecord(value)) return {};
+
+		const overrides: Record<string, string> = {};
+		for (const agentName in value) {
+			if (!Object.hasOwn(value, agentName) || typeof value[agentName] !== "string") continue;
+			overrides[agentName] = value[agentName];
+		}
+		return overrides;
+	}
+
 	#modelRoleLayerOwns(layer: RawSettings, role: ModelRole | string): boolean {
 		const value = getByPath(layer, ["modelRoles"]);
 		if (!isRecord(value)) return false;
@@ -921,6 +940,26 @@ export class Settings {
 		}
 		this.#savedRuntimeModelRoleOverrides.delete(role);
 		this.#updateRuntimeModelRoleOverride(role, modelId);
+	}
+
+	/**
+	 * Set one global per-agent service-tier override without replacing sibling
+	 * entries that another process may have written since this instance loaded.
+	 */
+	setAgentServiceTierOverride(agentName: string, setting: ServiceTierInheritSettingValue | undefined): void {
+		const path = "task.agentServiceTierOverrides";
+		const prev = this.get(path);
+		const current = this.#agentServiceTierOverridesFromLayer(this.#global);
+		if (setting === undefined) {
+			delete current[agentName];
+		} else {
+			current[agentName] = setting;
+		}
+		setByPath(this.#global, ["task", "agentServiceTierOverrides"], current);
+		this.#modifiedGlobalAgentServiceTierOverrides.add(agentName);
+		this.#rebuildMerged();
+		this.#queueSave();
+		this.#fireEffectiveSettingChanged(path, this.get(path), prev);
 	}
 
 	/**
@@ -2058,14 +2097,22 @@ export class Settings {
 
 	async #saveNow(): Promise<void> {
 		if (this.#savesCancelled || !this.#persist || !this.#configPath) return;
-		if (this.#modified.size === 0 && this.#modifiedGlobalModelRoles.size === 0) return;
+		if (
+			this.#modified.size === 0 &&
+			this.#modifiedGlobalModelRoles.size === 0 &&
+			this.#modifiedGlobalAgentServiceTierOverrides.size === 0
+		)
+			return;
 
 		const configPath = this.#configPath;
 		const modifiedPaths = [...this.#modified];
 		const modifiedModelRoles = [...this.#modifiedGlobalModelRoles];
 		const globalRolesAtStart = this.#modelRolesFromLayer(this.#global);
+		const modifiedAgentServiceTierOverrides = [...this.#modifiedGlobalAgentServiceTierOverrides];
+		const globalAgentServiceTierOverridesAtStart = this.#agentServiceTierOverridesFromLayer(this.#global);
 		this.#modified.clear();
 		this.#modifiedGlobalModelRoles.clear();
+		this.#modifiedGlobalAgentServiceTierOverrides.clear();
 
 		try {
 			await this.#withYamlWriteLock(configPath, async writePath => {
@@ -2118,6 +2165,46 @@ export class Settings {
 					setByPath(current, ["modelRoles"], mergedRoles);
 				}
 
+				// Merge only the per-agent tier entries captured by this save.
+				// Preserve newer local edits while the async read/lock was pending.
+				const latestGlobalAgentServiceTierOverrides = this.#agentServiceTierOverridesFromLayer(this.#global);
+				const agentServiceTierOverridesToPreserve = new Set(this.#modifiedGlobalAgentServiceTierOverrides);
+				for (const agentName in globalAgentServiceTierOverridesAtStart) {
+					if (
+						globalAgentServiceTierOverridesAtStart[agentName] !== latestGlobalAgentServiceTierOverrides[agentName]
+					) {
+						agentServiceTierOverridesToPreserve.add(agentName);
+					}
+				}
+				for (const agentName in latestGlobalAgentServiceTierOverrides) {
+					if (
+						globalAgentServiceTierOverridesAtStart[agentName] !== latestGlobalAgentServiceTierOverrides[agentName]
+					) {
+						agentServiceTierOverridesToPreserve.add(agentName);
+					}
+				}
+				if (modifiedAgentServiceTierOverrides.length > 0 || agentServiceTierOverridesToPreserve.size > 0) {
+					const currentOverrides = getByPath(current, ["task", "agentServiceTierOverrides"]);
+					const mergedOverrides: Record<string, unknown> = isRecord(currentOverrides)
+						? { ...currentOverrides }
+						: {};
+					for (const agentName of modifiedAgentServiceTierOverrides) {
+						if (Object.hasOwn(globalAgentServiceTierOverridesAtStart, agentName)) {
+							mergedOverrides[agentName] = globalAgentServiceTierOverridesAtStart[agentName];
+						} else {
+							delete mergedOverrides[agentName];
+						}
+					}
+					for (const agentName of agentServiceTierOverridesToPreserve) {
+						if (Object.hasOwn(latestGlobalAgentServiceTierOverrides, agentName)) {
+							mergedOverrides[agentName] = latestGlobalAgentServiceTierOverrides[agentName];
+						} else {
+							delete mergedOverrides[agentName];
+						}
+					}
+					setByPath(current, ["task", "agentServiceTierOverrides"], mergedOverrides);
+				}
+
 				// Update our global with any external changes we preserved
 				this.#global = current;
 				await this.#writeYamlAtomically(writePath, this.#global);
@@ -2130,6 +2217,15 @@ export class Settings {
 						this.#modifiedGlobalModelRoles.delete(role);
 					}
 				}
+				const globalAgentServiceTierOverridesAfterWrite = this.#agentServiceTierOverridesFromLayer(this.#global);
+				for (const agentName of agentServiceTierOverridesToPreserve) {
+					if (
+						latestGlobalAgentServiceTierOverrides[agentName] ===
+						globalAgentServiceTierOverridesAfterWrite[agentName]
+					) {
+						this.#modifiedGlobalAgentServiceTierOverrides.delete(agentName);
+					}
+				}
 			});
 		} catch (error) {
 			logger.warn("Settings: save failed", { error: String(error) });
@@ -2139,6 +2235,9 @@ export class Settings {
 			}
 			for (const role of modifiedModelRoles) {
 				this.#modifiedGlobalModelRoles.add(role);
+			}
+			for (const agentName of modifiedAgentServiceTierOverrides) {
+				this.#modifiedGlobalAgentServiceTierOverrides.add(agentName);
 			}
 			this.#rebuildMerged();
 			throw error;

@@ -52,7 +52,10 @@ function mockAgents(): void {
 	});
 }
 
-async function createHub(settings: Settings, cwd = tempCwd): Promise<{
+async function createHub(
+	settings: Settings,
+	cwd = tempCwd,
+): Promise<{
 	hub: AgentsHubComponent;
 	strip: () => string;
 	type: (text: string) => void;
@@ -277,6 +280,32 @@ describe("AgentsHub service-tier override", () => {
 		hub.handleInput("\r");
 		expect(settings.get("task.agentServiceTierOverrides")).toEqual({
 			"temporarily-undiscovered-agent": "priority",
+		});
+	});
+
+	test("preserves external sibling tier overrides when setting an agent", async () => {
+		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
+			projectAgentsDir: null,
+			agents: [{ name: "task", description: "Generic task agent", systemPrompt: "", source: "bundled" }],
+		});
+		const cwd = await fs.mkdtemp(path.join(tempCwd, "tier-concurrent-"));
+		const agentDir = path.join(cwd, "agent-config");
+		const configPath = path.join(agentDir, "config.yml");
+		const settings = await Settings.loadIsolated({ cwd, agentDir });
+		const { hub } = await createHub(settings, cwd);
+
+		await Bun.write(configPath, "task:\n  agentServiceTierOverrides:\n    concurrently-added-agent: priority\n");
+		hub.handleInput("\r");
+		for (let i = 0; i < 3; i++) hub.handleInput("\x1b[C");
+		hub.handleInput("\r");
+		hub.handleInput("\x1b[C");
+		hub.handleInput("\r");
+		await settings.flush();
+
+		const reloaded = await Settings.loadIsolated({ cwd, agentDir });
+		expect(reloaded.get("task.agentServiceTierOverrides")).toEqual({
+			task: "inherit",
+			"concurrently-added-agent": "priority",
 		});
 	});
 

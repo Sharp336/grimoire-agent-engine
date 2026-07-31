@@ -436,7 +436,6 @@ export class AgentsHubComponent implements Component {
 		};
 	}
 
-
 	// ═══════════════════════════════════════════════════════════════════════
 	// Mutations
 	// ═══════════════════════════════════════════════════════════════════════
@@ -454,14 +453,11 @@ export class AgentsHubComponent implements Component {
 
 	#persistRecord(changedAgent: HubAgent, property: PropertyKind): void {
 		if (property === "serviceTier") {
-			const overrides = { ...this.#settings.getGlobalSetting("task.agentServiceTierOverrides") };
 			const value = changedAgent.serviceTierOverride;
-			if (isServiceTierInheritSettingValue(value)) {
-				overrides[changedAgent.name] = value;
-			} else {
-				delete overrides[changedAgent.name];
-			}
-			this.#settings.set("task.agentServiceTierOverrides", overrides);
+			this.#settings.setAgentServiceTierOverride(
+				changedAgent.name,
+				isServiceTierInheritSettingValue(value) ? value : undefined,
+			);
 			return;
 		}
 
