@@ -1,14 +1,7 @@
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
 import { connectToServer, disconnectServer, listPrompts, listResources, listTools } from "../../mcp/client";
-import {
-	addMCPServer,
-	readDisabledServers,
-	readMCPConfigFile,
-	removeMCPServer,
-	setServerDisabled,
-	updateMCPServer,
-} from "../../mcp/config-writer";
+import { addMCPServer, readMCPConfigFile, removeMCPServer } from "../../mcp/config-writer";
 import { MCPManager } from "../../mcp/manager";
 import { getSmitheryApiKey } from "../../mcp/smithery-auth";
 import { searchSmitheryRegistry } from "../../mcp/smithery-registry";
@@ -369,7 +362,7 @@ async function handleListCommand(runtime: SlashCommandRuntime): Promise<SlashCom
 			readMCPConfigFile(userPath),
 			readMCPConfigFile(projectPath),
 		]);
-		const disabledSet = new Set(await readDisabledServers(userPath));
+		const disabledSet = new Set(runtime.settings.get("disabledExtensions") as string[]);
 		const entries: Array<{ name: string; config: MCPServerConfig; scope: string }> = [];
 		for (const [name, config] of Object.entries(userConfig.mcpServers ?? {})) {
 			entries.push({ name, config, scope: "user" });
@@ -385,7 +378,7 @@ async function handleListCommand(runtime: SlashCommandRuntime): Promise<SlashCom
 			entries
 				.map(({ name, config, scope }) => {
 					const type = config.type ?? "stdio";
-					const enabled = config.enabled !== false && !disabledSet.has(name) ? "enabled" : "disabled";
+					const enabled = config.enabled !== false && !disabledSet.has(`mcp:${name}`) ? "enabled" : "disabled";
 					let location: string | undefined;
 					if (config.type === "http" || config.type === "sse") {
 						// Strip query string and userinfo from URLs to avoid leaking
@@ -431,19 +424,10 @@ async function handleEnableDisableCommand(
 			readMCPConfigFile(userPath),
 			readMCPConfigFile(projectPath),
 		]);
-		if (projectConfig.mcpServers?.[name] !== undefined) {
-			await updateMCPServer(projectPath, name, { ...projectConfig.mcpServers[name], enabled } as MCPServerConfig);
-			await runtime.output(`Server "${name}" ${enabled ? "enabled" : "disabled"} (project config).`);
-			return commandConsumed();
-		}
-		if (userConfig.mcpServers?.[name] !== undefined) {
-			await updateMCPServer(userPath, name, { ...userConfig.mcpServers[name], enabled } as MCPServerConfig);
-			await runtime.output(`Server "${name}" ${enabled ? "enabled" : "disabled"} (user config).`);
-			return commandConsumed();
-		}
-		const disabledList = await readDisabledServers(userPath);
-		if (!enabled || disabledList.includes(name)) {
-			await setServerDisabled(userPath, name, !enabled);
+		const configured = projectConfig.mcpServers?.[name] !== undefined || userConfig.mcpServers?.[name] !== undefined;
+		const current = runtime.settings.getProjectActivation("mcp", name);
+		if (configured || current === "disabled") {
+			await runtime.settings.setProjectActivation("mcp", name, enabled ? "enabled" : "disabled");
 			await runtime.output(`Server "${name}" ${enabled ? "enabled" : "disabled"}.`);
 			return commandConsumed();
 		}

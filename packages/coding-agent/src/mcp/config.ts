@@ -6,12 +6,10 @@
 import { getMCPConfigPath } from "@oh-my-pi/pi-utils";
 import { mcpCapability } from "../capability/mcp";
 import type { SourceMeta } from "../capability/types";
-import { isGlobalActivationCwd, resolveProjectMcpConfigPath } from "../config/activation-paths";
 import type { MCPServer } from "../discovery";
 import { loadCapability } from "../discovery";
 import { readDisabledServers, readEnabledServers } from "./config-writer";
 import type { MCPServerConfig } from "./types";
-
 /** Options for loading MCP configs */
 export interface LoadMCPConfigsOptions {
 	/** Whether to load project-level config (default: true) */
@@ -96,17 +94,10 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 	const enableProjectConfig = options?.enableProjectConfig ?? true;
 	const filterExa = options?.filterExa ?? true;
 	const filterBrowser = options?.filterBrowser ?? false;
-
-	// Load user-level disable/force-enable lists. The denylist always wins; the
-	// allowlist overrides a non-writable source config's `enabled: false`.
 	const userPath = getMCPConfigPath("user", cwd);
-	const projectPath =
-		enableProjectConfig && !isGlobalActivationCwd(cwd) ? resolveProjectMcpConfigPath(cwd) : undefined;
-	const [userDisabledServers, userForcedEnabled, projectDisabledServers, projectForcedEnabled] = await Promise.all([
-		readDisabledServers(userPath).then(list => new Set(list)),
-		readEnabledServers(userPath).then(list => new Set(list)),
-		projectPath ? readDisabledServers(projectPath).then(list => new Set(list)) : Promise.resolve(new Set<string>()),
-		projectPath ? readEnabledServers(projectPath).then(list => new Set(list)) : Promise.resolve(new Set<string>()),
+	const [disabledServers, forceEnabledServers] = await Promise.all([
+		readDisabledServers(userPath).then(names => new Set(names)),
+		readEnabledServers(userPath).then(names => new Set(names)),
 	]);
 
 	// Scope exclusions drop entries entirely BEFORE deduplication: with project
@@ -114,27 +105,15 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 	const includeServer = (server: MCPServer & { _source: SourceMeta }): boolean =>
 		enableProjectConfig || server._source.level !== "project";
 
-	// Disabled servers are suppressed rather than dropped: they still own their
-	// name at key-level dedupe (a disabled project `foo` keeps a same-named,
-	// lower-priority user `foo` disabled), but never equivalence-shadow a
-	// differently-named enabled server — otherwise the disabled alias would be
-	// removed downstream and starve the surviving connection.
-	const suppressServer = (server: MCPServer & { _source: SourceMeta }): boolean => {
-		const projectDisabled = projectDisabledServers.has(server.name);
-		const projectEnabled = projectForcedEnabled.has(server.name);
-		const userDisabled = userDisabledServers.has(server.name);
-		const userEnabled = userForcedEnabled.has(server.name);
-		const disabledByList = projectDisabled || (!projectEnabled && userDisabled);
-		const forceEnabled = !projectDisabled && (projectEnabled || (!userDisabled && userEnabled));
-		if (disabledByList) return true;
-		if (server.enabled === false && !forceEnabled) return true;
-		return false;
-	};
-
 	const result = await loadCapability<MCPServer>(mcpCapability.id, {
 		cwd,
 		filter: includeServer,
-		suppress: suppressServer,
+		includeDisabled,
+		disabledProviders: includeDisabled ? new Set() : undefined,
+		suppress: server => {
+			if (disabledServers.has(server.name)) return !includeDisabled;
+			return server.enabled === false && !forceEnabledServers.has(server.name) && !includeInactive;
+		},
 	});
 
 	// Convert to legacy format and preserve source metadata.

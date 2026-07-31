@@ -24,6 +24,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
+import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
 import {
 	type ActivationScope,
 	type ActivationWriteTarget,
@@ -32,6 +33,7 @@ import {
 	Settings,
 } from "../../../config/settings";
 import { syncDisabledProviders as syncCapabilityDisabledProviders } from "../../../discovery";
+import { getProjectMCPConfigPath, setMcpServerEnabled } from "../../../mcp/config-writer";
 import { getTabBarTheme } from "../../../modes/shared";
 import { theme } from "../../../modes/theme/theme";
 import { matchesAppInterrupt } from "../../../modes/utils/keybinding-matchers";
@@ -212,7 +214,7 @@ export class ExtensionDashboard implements Component {
 		// Capability discovery marks lower-priority rows as shadowed before the
 		// dashboard applies project activation overrides. If the project row that
 		// caused the shadow is disabled, reveal the user/global peer while preserving
-		// its original disable signals (provider off, global disabled, MCP enabled:false).
+		// its original disable signals (provider off, global disabled, source disabled).
 		const nonProjectIds = new Set(
 			scopedState.extensions.filter(ext => ext.source.level !== "project").map(ext => ext.id),
 		);
@@ -231,13 +233,10 @@ export class ExtensionDashboard implements Component {
 				disabledProjectShadowIds.has(ext.id) &&
 				ext.disabledReason !== "provider-disabled";
 			const revealParsed = revealNonProjectPeer ? projectActivationKindFromExtensionId(ext.id) : null;
-			const rawMcpEnabled = (ext.raw as { enabled?: unknown }).enabled;
-			const sourceMcpDisabled = revealParsed?.kind === "mcp" && rawMcpEnabled === false;
 			const revealAsProviderDisabled =
 				revealNonProjectPeer && sm.isProviderEffectivelyDisabled(ext.source.provider, "project");
 			const revealAsItemDisabled = revealParsed
-				? sm.isGlobalActivationDisabled(revealParsed.kind, revealParsed.name) ||
-					(sourceMcpDisabled && !sm.isGlobalActivationEnabled(revealParsed.kind, revealParsed.name))
+				? sm.isGlobalActivationDisabled(revealParsed.kind, revealParsed.name)
 				: false;
 			const effectiveExt = revealNonProjectPeer
 				? {
@@ -295,6 +294,7 @@ export class ExtensionDashboard implements Component {
 			if (sm.isProviderEffectivelyDisabled(ext.source.provider, "global")) {
 				return { ...ext, state: "disabled", disabledReason: "provider-disabled", shadowedBy: undefined };
 			}
+			if (ext.kind === "mcp" && (ext.raw as { enabled?: unknown }).enabled === false) return ext;
 			if (ext.state !== "disabled" && !(projectIds.has(ext.id) && ext.state === "shadowed")) return ext;
 
 			const active = { ...ext, state: "active" as const };
@@ -507,10 +507,33 @@ export class ExtensionDashboard implements Component {
 			mode: extension.activationMode,
 			rowDisabled: extension.state === "disabled",
 		});
-		void sm.setProjectActivation(parsed.kind, parsed.name, next, this.#activationScope).then(() => {
-			this.#applyDisabledExtensions(sm.getActivationDisabledExtensions(this.#activationScope));
-			void this.#refreshFromState();
-		});
+		const updateMcpOverlay =
+			extension.kind === "mcp" && this.#activationScope === "global"
+				? setMcpServerEnabled({
+						userPath: getMCPConfigPath("user", this.cwd),
+						projectPath: getProjectMCPConfigPath(this.cwd),
+						sourcePath:
+							extension.source.provider === "native" || extension.source.provider === "mcp-json"
+								? extension.path
+								: undefined,
+						name: extension.name,
+						enabled: next === "enabled",
+					})
+				: Promise.resolve();
+		void updateMcpOverlay.then(() =>
+			sm
+				.setProjectActivation(parsed.kind, parsed.name, next, this.#activationScope)
+				.then(() => {
+					this.#applyDisabledExtensions(sm.getActivationDisabledExtensions(this.#activationScope));
+					void this.#refreshFromState();
+				})
+				.catch(error =>
+					logger.warn("Failed to update extension activation", {
+						extensionId: extension.id,
+						error: String(error),
+					}),
+				),
+		);
 	}
 
 	async #refreshFromState(): Promise<void> {

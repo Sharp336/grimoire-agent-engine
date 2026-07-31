@@ -2747,7 +2747,7 @@ const MCP_SERVER_NAME_SUBCOMMANDS: Readonly<Record<string, true>> = {
 	unauth: true,
 };
 
-/** Subcommands that accept names found only in `userConfig.disabledServers`. */
+/** Subcommands that accept names disabled through `disabledExtensions`. */
 const MCP_DISABLED_ONLY_ELIGIBLE_SUBCOMMANDS: Readonly<Record<string, true>> = {
 	enable: true,
 	disable: true,

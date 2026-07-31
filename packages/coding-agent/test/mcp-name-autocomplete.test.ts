@@ -41,14 +41,15 @@ async function writeConfig(
 	await Bun.write(getMCPConfigPath(scope, cwd), `${JSON.stringify({ mcpServers: servers }, null, 2)}\n`);
 }
 
-/** Fake ctx carrying only the mcpManager surface `collectMcpServerNames` reads. */
-function createFakeCtx(discoveredNames: string[]) {
+/** Fake ctx carrying the MCP and activation surfaces `collectMcpServerNames` reads. */
+function createFakeCtx(discoveredNames: string[], disabledNames: string[] = []) {
 	const mcpManager = {
 		getAllServerNames: vi.fn((): string[] => discoveredNames),
 		getSource: vi.fn((): SourceMeta | undefined => undefined),
 		getConnectionStatus: vi.fn(() => "connected" as const),
 	};
-	const ctx = { mcpManager } as never as InteractiveModeContext;
+	const settings = { get: vi.fn(() => disabledNames.map(name => `mcp:${name}`)) };
+	const ctx = { mcpManager, settings } as never as InteractiveModeContext;
 	return { ctx, mcpManager };
 }
 
@@ -87,16 +88,9 @@ describe("MCP server-name autocomplete", () => {
 		expect(names).toEqual(["project-server", "runtime-discovered", "user-disabled", "user-enabled"]);
 	});
 
-	test("collectMcpServerNames includes a discovered server disabled via disabledServers, even once dropped from mcpManager", async () => {
-		// A third-party-discovered server that was `/mcp disable`d: recorded in the user
-		// config's top-level `disabledServers` list, absent from `mcpServers`, and no
-		// longer reported by the manager (loadAllMCPConfigs filters disabled sources out).
-		await Bun.write(
-			getMCPConfigPath("user", projectDir),
-			`${JSON.stringify({ mcpServers: {}, disabledServers: ["discovered-disabled"] }, null, 2)}\n`,
-		);
+	test("collectMcpServerNames includes a discovered server disabled through settings", async () => {
 		await writeConfig("project", projectDir, {});
-		const { ctx } = createFakeCtx([]);
+		const { ctx } = createFakeCtx([], ["discovered-disabled"]);
 
 		const names = await collectMcpServerNames(ctx);
 
@@ -136,18 +130,9 @@ describe("MCP server-name autocomplete", () => {
 		expect(filtered?.[0]?.value).toBe("enable my-server ");
 	});
 
-	test("/mcp getArgumentCompletions offers a disabled-only discovered name for enable/disable but not test/reconnect/reauth/unauth", async () => {
-		// "discovered-disabled" is a third-party server that was /mcp disable'd:
-		// present only in userConfig.disabledServers, absent from mcpServers, and
-		// no longer reported by the manager (loadAllMCPConfigs drops disabled
-		// sources). #resolveServerForAuth/reconnectServer can't resolve it, so
-		// test/reconnect/reauth/unauth must not suggest it.
-		await Bun.write(
-			getMCPConfigPath("user", projectDir),
-			`${JSON.stringify({ mcpServers: {}, disabledServers: ["discovered-disabled"] }, null, 2)}\n`,
-		);
+	test("/mcp getArgumentCompletions offers a settings-disabled name for enable/disable but not test/reconnect/reauth/unauth", async () => {
 		await writeConfig("project", projectDir, {});
-		const { ctx } = createFakeCtx([]);
+		const { ctx } = createFakeCtx([], ["discovered-disabled"]);
 		const runtime: TuiSlashCommandRuntime = { ctx };
 		const mcp = buildTuiBuiltinSlashCommands(runtime).find(c => c.name === "mcp");
 		if (!mcp?.getArgumentCompletions) throw new Error("expected /mcp command with getArgumentCompletions");

@@ -74,7 +74,7 @@ In practice MCP servers also come from higher-priority providers (for example na
 Key behavior:
 
 - transport inferred as `server.transport ?? (command ? "stdio" : url ? "http" : "stdio")`
-- disabled servers (`enabled === false`) and names in the user `disabledServers` list are dropped before connection
+- servers with `enabled === false` and servers named by `disabledExtensions` as `mcp:<name>` are dropped before connection
 - optional fields are preserved when present
 
 ### Environment expansion during discovery

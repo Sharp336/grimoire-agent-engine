@@ -10,7 +10,7 @@
 import * as fsSync from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { CONFIG_DIR_NAME, getAgentDir, getConfigDirName, getConfigRootDir, getMCPConfigPath } from "@oh-my-pi/pi-utils";
+import { CONFIG_DIR_NAME, getAgentDir, getConfigDirName, getConfigRootDir } from "@oh-my-pi/pi-utils";
 
 export type ActivationWriteTarget = "global" | "project";
 export type ActivationScope = ActivationWriteTarget;
@@ -119,8 +119,4 @@ function directoryExistsSync(dir: string): boolean {
 	} catch {
 		return false;
 	}
-}
-
-export function resolveProjectMcpConfigPath(cwd: string): string {
-	return getMCPConfigPath("project", resolveActivationProjectRootSync(cwd));
 }

@@ -15,7 +15,6 @@ import type { Skill } from "../../../capability/skill";
 import type { SlashCommand } from "../../../capability/slash-command";
 import type { CustomTool } from "../../../capability/tool";
 import type { SourceMeta } from "../../../capability/types";
-import { isGlobalActivationCwd, resolveProjectMcpConfigPath } from "../../../config/activation-paths";
 import { getAllProvidersInfo, isProviderEnabled, loadCapability } from "../../../discovery";
 import { readDisabledServers, readEnabledServers } from "../../../mcp/config-writer";
 import type { DashboardState, Extension, ExtensionKind, FlatTreeItem, ProviderTab, TreeNode } from "./types";
@@ -119,47 +118,29 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 		logger.warn("Failed to load extension-modules capability", { error: String(error) });
 	}
 
-	// Load MCP servers. The dashboard mirrors `/mcp list` (issue #3827) by
-	// honoring the same disable signals: the dashboard-private settings list,
-	// per-server `enabled: false`, and the user/project MCP deny/allow lists.
-	// Disabled lists win over enabled lists when both contain the same server.
+	// Load MCP servers. A source-level `enabled:false` remains visible, but its
+	// activation can be overridden by the user MCP allowlist when the source is
+	// owned by another tool.
 	try {
 		const userMcpPath = cwd ? getMCPConfigPath("user", cwd) : undefined;
-		const projectMcpPath = cwd && !isGlobalActivationCwd(cwd) ? resolveProjectMcpConfigPath(cwd) : undefined;
-		const [userDisabledNames, userForcedEnabled, projectDisabledNames, projectForcedEnabled] = await Promise.all([
+		const [disabledServerNames, forceEnabledServers] = await Promise.all([
 			userMcpPath
 				? readDisabledServers(userMcpPath)
-						.then(list => new Set(list))
+						.then(names => new Set(names))
 						.catch(() => new Set<string>())
 				: Promise.resolve(new Set<string>()),
 			userMcpPath
 				? readEnabledServers(userMcpPath)
-						.then(list => new Set(list))
-						.catch(() => new Set<string>())
-				: Promise.resolve(new Set<string>()),
-			projectMcpPath
-				? readDisabledServers(projectMcpPath)
-						.then(list => new Set(list))
-						.catch(() => new Set<string>())
-				: Promise.resolve(new Set<string>()),
-			projectMcpPath
-				? readEnabledServers(projectMcpPath)
-						.then(list => new Set(list))
+						.then(names => new Set(names))
 						.catch(() => new Set<string>())
 				: Promise.resolve(new Set<string>()),
 		]);
 		const mcps = await loadCapability<MCPServer>("mcps", loadOpts);
 		for (const server of mcps.all) {
 			const id = makeExtensionId("mcp", server.name);
-			const projectDisabled = projectDisabledNames.has(server.name);
-			const projectEnabled = projectForcedEnabled.has(server.name);
-			const userDisabled = userDisabledNames.has(server.name);
-			const userEnabled = userForcedEnabled.has(server.name);
-			const disabledByMcpList = projectDisabled || (!projectEnabled && userDisabled);
-			const forced = !projectDisabled && (projectEnabled || (!userDisabled && userEnabled));
-			const sourceSaysDisabled = server.enabled === false && !forced;
+			const sourceSaysDisabled = server.enabled === false && !forceEnabledServers.has(server.name);
 			const { state, disabledReason } = activationRowState({
-				itemDisabled: disabledByMcpList || disabledExtensions.has(id) || sourceSaysDisabled,
+				itemDisabled: disabledExtensions.has(id) || disabledServerNames.has(server.name) || sourceSaysDisabled,
 				shadowed: (server as { _shadowed?: boolean })._shadowed,
 				providerEnabled: isProviderEnabled(server._source.provider),
 			});
@@ -175,6 +156,7 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 				source: sourceFromMeta(server._source),
 				state,
 				disabledReason,
+				activationLocked: sourceSaysDisabled,
 				raw: server,
 			});
 		}

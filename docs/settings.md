@@ -133,6 +133,8 @@ Layers are combined with a deep merge:
 - **Objects are deep-merged** — keys present only in a lower layer are kept; keys present in a higher layer override.
 - **Scalars and arrays are replaced wholesale** by the higher-precedence layer. A higher layer's array does not append to a lower layer's array.
 
+`disabledExtensions` / `enabledExtensions` and `disabledProviders` / `enabledProviders` are activation-list exceptions. A project or overlay `enabled*` entry can re-enable an item disabled globally; a project or overlay `disabled*` entry still wins when both lists name the same item. This supports project-scoped activation without copying every global entry into the project config.
+
 Use nested YAML mappings for dotted setting paths:
 
 ```yaml

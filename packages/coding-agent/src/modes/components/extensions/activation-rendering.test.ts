@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils";
+import { YAML } from "bun";
 import { Settings } from "../../../config/settings";
 import { initTheme, theme } from "../../../modes/theme/theme";
 import {
@@ -137,7 +138,10 @@ describe("extension activation rendering", () => {
 			path.join(agentDir, "mcp.json"),
 			JSON.stringify({ mcpServers: { zzmcpglobal: { command: "echo", args: ["ok"] } } }, null, 2),
 		);
-		await Bun.write(path.join(projectRoot, ".omp", "mcp.json"), JSON.stringify({ enabledServers: ["zzmcpglobal"] }));
+		await Bun.write(
+			path.join(projectRoot, ".omp", "config.yml"),
+			YAML.stringify({ enabledExtensions: ["mcp:zzmcpglobal"] }),
+		);
 
 		setAgentDir(agentDir);
 		try {

@@ -38,6 +38,10 @@ describe("project activation settings", () => {
 			kind: "extensions",
 			name: "module",
 		});
+		expect(projectActivationKindFromExtensionId("slash-command:review")).toEqual({
+			kind: "slash-commands",
+			name: "review",
+		});
 	});
 
 	it("keeps disabledExtensions dominant when a layer contains the same enabled id", () => {
@@ -103,11 +107,11 @@ describe("project activation settings", () => {
 		expect(literalTmpSettings.getActivationWriteTarget(path.join("/tmp", "omp-literal-global"))).toBe("global");
 
 		const globalWrite = await globalSettings.setProjectActivation("mcp", "server", "disabled");
-		expect(globalWrite).toEqual({ target: "global", path: path.join(globalAgentDir, "mcp.json") });
-		const globalMcp = JSON.parse(await fs.readFile(path.join(globalAgentDir, "mcp.json"), "utf8")) as {
-			disabledServers?: string[];
+		expect(globalWrite).toEqual({ target: "global", path: path.join(globalAgentDir, "config.yml") });
+		const globalConfig = YAML.parse(await fs.readFile(path.join(globalAgentDir, "config.yml"), "utf8")) as {
+			disabledExtensions?: string[];
 		};
-		expect(globalMcp.disabledServers).toEqual(["server"]);
+		expect(globalConfig.disabledExtensions).toEqual(["mcp:server"]);
 		await expect(fs.stat(path.join(tmpCwd, ".omp"))).rejects.toThrow();
 	});
 
@@ -252,22 +256,40 @@ describe("project activation settings", () => {
 		await expect(fs.stat(path.join(nestedCwd, ".omp"))).rejects.toThrow();
 	});
 
-	it("lets project MCP enabledServers override global disabledServers", async () => {
+	it("lets project enabledExtensions override global MCP disablement", async () => {
 		const projectRoot = await mkProjectTmp(".tmp-project-mcp-activation-");
 		const agentDir = await mkTmp("omp-mcp-agent-");
 		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
-		await Bun.write(path.join(agentDir, "mcp.json"), JSON.stringify({ disabledServers: ["server"] }, null, 2));
+		await Bun.write(
+			path.join(agentDir, "config.yml"),
+			YAML.stringify({ disabledExtensions: ["mcp:server"] }, null, 2),
+		);
 
 		const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
 		expect(settings.getProjectActivation("mcp", "server")).toBe("inherit");
 		expect(settings.isProjectActivationEffectivelyDisabled("mcp", "server")).toBe(true);
 
 		const write = await settings.setProjectActivation("mcp", "server", "enabled");
-		const projectMcpPath = path.join(projectRoot, ".omp", "mcp.json");
-		expect(write).toEqual({ target: "project", path: projectMcpPath });
-		const projectMcp = JSON.parse(await fs.readFile(projectMcpPath, "utf8")) as { enabledServers?: string[] };
-		expect(projectMcp.enabledServers).toEqual(["server"]);
+		const projectConfigPath = path.join(projectRoot, ".omp", "config.yml");
+		expect(write).toEqual({ target: "project", path: projectConfigPath });
+		const projectConfig = YAML.parse(await fs.readFile(projectConfigPath, "utf8")) as {
+			enabledExtensions?: string[];
+		};
+		expect(projectConfig.enabledExtensions).toEqual(["mcp:server"]);
 		expect(settings.isProjectActivationEffectivelyDisabled("mcp", "server")).toBe(false);
+	});
+
+	it("writes file slash-command activation to the shared extension lists", async () => {
+		const projectRoot = await mkProjectTmp(".tmp-project-command-activation-");
+		const agentDir = await mkTmp("omp-command-agent-");
+		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
+		const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
+
+		await settings.setProjectActivation("slash-commands", "review", "disabled");
+		const projectConfig = YAML.parse(await fs.readFile(path.join(projectRoot, ".omp", "config.yml"), "utf8")) as {
+			disabledExtensions?: string[];
+		};
+		expect(projectConfig.disabledExtensions).toEqual(["slash-command:review"]);
 	});
 
 	it("lets project enabledProviders override global disabledProviders", async () => {
@@ -300,28 +322,53 @@ describe("project activation settings", () => {
 		expect(globalConfig.disabledProviders).toEqual(["mcp-json"]);
 	});
 
-	it("applies project MCP enabledServers over global disabledServers during loading", async () => {
+	it("applies project enabledExtensions over global MCP disablement during loading", async () => {
 		const previousAgentDir = getAgentDir();
 		const projectRoot = await mkProjectTmp(".tmp-project-mcp-load-");
 		const agentDir = await mkTmp("omp-mcp-load-agent-");
 		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
 		await Bun.write(
 			path.join(agentDir, "mcp.json"),
-			JSON.stringify(
-				{ mcpServers: { server: { command: "echo", args: ["ok"] } }, disabledServers: ["server"] },
-				null,
-				2,
-			),
+			JSON.stringify({ mcpServers: { server: { command: "echo", args: ["ok"] } } }, null, 2),
 		);
 		await Bun.write(
-			path.join(projectRoot, ".omp", "mcp.json"),
-			JSON.stringify({ enabledServers: ["server"] }, null, 2),
+			path.join(agentDir, "config.yml"),
+			YAML.stringify({ disabledExtensions: ["mcp:server"] }, null, 2),
+		);
+		await Bun.write(
+			path.join(projectRoot, ".omp", "config.yml"),
+			YAML.stringify({ enabledExtensions: ["mcp:server"] }, null, 2),
 		);
 
 		setAgentDir(agentDir);
 		try {
+			initializeWithSettings(await Settings.loadIsolated({ cwd: projectRoot, agentDir }));
 			const mcp = await loadAllMCPConfigs(projectRoot, { filterExa: false });
 			expect(Object.keys(mcp.configs)).toContain("server");
+		} finally {
+			setAgentDir(previousAgentDir);
+		}
+	});
+
+	it("keeps source enabled:false hard-disabled after an activation override", async () => {
+		const previousAgentDir = getAgentDir();
+		const projectRoot = await mkProjectTmp(".tmp-project-mcp-hard-disable-");
+		const agentDir = await mkTmp("omp-mcp-hard-disable-agent-");
+		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
+		await Bun.write(
+			path.join(agentDir, "mcp.json"),
+			JSON.stringify({ mcpServers: { server: { command: "echo", enabled: false } } }, null, 2),
+		);
+		await Bun.write(
+			path.join(projectRoot, ".omp", "config.yml"),
+			YAML.stringify({ enabledExtensions: ["mcp:server"] }, null, 2),
+		);
+
+		setAgentDir(agentDir);
+		try {
+			initializeWithSettings(await Settings.loadIsolated({ cwd: projectRoot, agentDir }));
+			const mcp = await loadAllMCPConfigs(projectRoot, { filterExa: false });
+			expect(Object.keys(mcp.configs)).not.toContain("server");
 		} finally {
 			setAgentDir(previousAgentDir);
 		}
@@ -355,11 +402,7 @@ describe("project activation settings", () => {
 		);
 		await fs.writeFile(
 			path.join(cwd, ".omp", "mcp.json"),
-			JSON.stringify(
-				{ mcpServers: { server: { command: "echo", args: ["ok"] } }, disabledServers: ["server"] },
-				null,
-				2,
-			),
+			JSON.stringify({ mcpServers: { server: { command: "echo", args: ["ok"] } } }, null, 2),
 		);
 		await fs.writeFile(
 			path.join(cwd, ".omp", "rules", "policy.md"),
@@ -367,7 +410,7 @@ describe("project activation settings", () => {
 		);
 		await Bun.write(
 			path.join(cwd, ".omp", "config.yml"),
-			YAML.stringify({ disabledExtensions: ["rule:policy", "skill:alpha"] }, null, 2),
+			YAML.stringify({ disabledExtensions: ["mcp:server", "rule:policy", "skill:alpha"] }, null, 2),
 		);
 
 		const sm = await Settings.loadIsolated({ cwd, agentDir });

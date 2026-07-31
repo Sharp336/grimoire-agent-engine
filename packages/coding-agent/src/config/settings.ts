@@ -18,7 +18,6 @@ import * as path from "node:path";
 import { configureCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
 import {
-	CONFIG_DIR_NAME,
 	getAgentDbPath,
 	getAgentDir,
 	getLastChangelogVersionPath,
@@ -36,7 +35,6 @@ import { invalidate as invalidateCapabilityFsCache } from "../capability/fs";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
 import type { ModelRole } from "../config/model-roles";
 import { invalidate as invalidateDiscoveryCache, loadCapability } from "../discovery";
-import { setServerDisabled, setServerForceEnabled } from "../mcp/config-writer";
 import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "../modes/theme/theme";
 import { AgentStorage } from "../session/agent-storage";
 import { AUTO_IMAGE_PROVIDER_ORDER, isImageProviderId } from "../tools/image-providers";
@@ -185,11 +183,15 @@ function deleteByPath(obj: RawSettings, segments: string[]): void {
 
 export type { ActivationScope, ActivationWriteTarget } from "./activation-paths";
 
-const ACTIVATION_EXTENSION_PREFIXES: Record<ProjectActivationKind, "skill" | "mcp" | "rule" | "extension-module"> = {
+const ACTIVATION_EXTENSION_PREFIXES: Record<
+	ProjectActivationKind,
+	"skill" | "mcp" | "rule" | "extension-module" | "slash-command"
+> = {
 	skills: "skill",
 	mcp: "mcp",
 	rules: "rule",
 	extensions: "extension-module",
+	"slash-commands": "slash-command",
 };
 
 export function projectActivationKindFromExtensionId(id: string): { kind: ProjectActivationKind; name: string } | null {
@@ -201,6 +203,7 @@ export function projectActivationKindFromExtensionId(id: string): { kind: Projec
 	if (prefix === "mcp") return { kind: "mcp", name };
 	if (prefix === "rule") return { kind: "rules", name };
 	if (prefix === "extension-module") return { kind: "extensions", name };
+	if (prefix === "slash-command") return { kind: "slash-commands", name };
 	return null;
 }
 
@@ -1215,8 +1218,6 @@ export class Settings {
 		if (!trimmed) return "inherit";
 
 		const targetInfo = this.#resolveActivationTarget(this.#cwd, scope);
-		if (kind === "mcp") return this.#getMcpActivation(targetInfo, trimmed);
-
 		return this.#getConfigActivation(
 			targetInfo,
 			extensionIdForProjectActivation(kind, trimmed),
@@ -1225,20 +1226,11 @@ export class Settings {
 		);
 	}
 
-	#getMcpActivation(targetInfo: ActivationTargetInfo, name: string): ProjectActivation {
-		return this.#activationFromLists(
-			this.#readMcpActivationLists(this.#mcpActivationPath(targetInfo)),
-			name,
-			targetInfo.target === "global" ? "enabled" : "inherit",
-		);
-	}
-
 	isProjectActivationEffectivelyDisabled(kind: ProjectActivationKind, name: string, scope?: ActivationScope): boolean {
 		const trimmed = name.trim();
 		if (!trimmed) return false;
 
 		const targetInfo = this.#resolveActivationTarget(this.#cwd, scope);
-		if (kind === "mcp") return this.#isMcpEffectivelyDisabled(targetInfo, trimmed);
 		return this.#isConfigActivationEffectivelyDisabled(
 			targetInfo,
 			extensionIdForProjectActivation(kind, trimmed),
@@ -1246,39 +1238,9 @@ export class Settings {
 		);
 	}
 
-	#isMcpEffectivelyDisabled(targetInfo: ActivationTargetInfo, name: string): boolean {
-		const globalLists = this.#readMcpActivationLists(path.join(this.#agentDir, "mcp.json"));
-		if (targetInfo.target === "global") return globalLists.disabled.has(name);
-
-		const projectLists = this.#readMcpActivationLists(this.#mcpActivationPath(targetInfo));
-		if (projectLists.disabled.has(name)) return true;
-		if (projectLists.enabled.has(name)) return false;
-		return globalLists.disabled.has(name);
-	}
-
-	#readMcpActivationLists(configPath: string): ActivationLists {
-		try {
-			const parsed = JSON.parse(fs.readFileSync(configPath, "utf8")) as {
-				disabledServers?: unknown;
-				enabledServers?: unknown;
-			};
-			return {
-				disabled: new Set(normalizeStringArrayForSettings(parsed.disabledServers)),
-				enabled: new Set(normalizeStringArrayForSettings(parsed.enabledServers)),
-			};
-		} catch (error) {
-			if (!isEnoent(error))
-				logger.warn("Settings: failed to read MCP activation", { path: configPath, error: String(error) });
-			return { disabled: new Set(), enabled: new Set() };
-		}
-	}
-
 	isGlobalActivationDisabled(kind: ProjectActivationKind, name: string): boolean {
 		const trimmed = name.trim();
 		if (!trimmed) return false;
-		if (kind === "mcp") {
-			return this.#readMcpActivationLists(path.join(this.#agentDir, "mcp.json")).disabled.has(trimmed);
-		}
 		const id = extensionIdForProjectActivation(kind, trimmed);
 		return this.#isConfigActivationEffectivelyDisabled(
 			this.#resolveActivationTarget(this.#cwd, "global"),
@@ -1287,11 +1249,6 @@ export class Settings {
 		);
 	}
 
-	isGlobalActivationEnabled(kind: ProjectActivationKind, name: string): boolean {
-		const trimmed = name.trim();
-		if (!trimmed || kind !== "mcp") return false;
-		return this.#readMcpActivationLists(path.join(this.#agentDir, "mcp.json")).enabled.has(trimmed);
-	}
 	async setProjectActivation(
 		kind: ProjectActivationKind,
 		name: string,
@@ -1302,11 +1259,6 @@ export class Settings {
 		if (!trimmed) throw new Error("Activation name must not be empty.");
 
 		const targetInfo = this.#resolveActivationTarget(this.#cwd, scope);
-		if (kind === "mcp") {
-			const writtenPath = await this.#setMcpActivation(targetInfo, trimmed, state);
-			return { target: targetInfo.target, path: writtenPath };
-		}
-
 		const id = extensionIdForProjectActivation(kind, trimmed);
 		if (targetInfo.target === "global") {
 			await this.#setGlobalActivationList("disabledExtensions", id, state);
@@ -1339,6 +1291,10 @@ export class Settings {
 		return this.#resolveEffectiveDisabledList(baseValue, "disabledProviders", "enabledProviders");
 	}
 
+	/**
+	 * Activation lists are the exception to ordinary array replacement: a project
+	 * enabled entry can lift a global disable, while a project disable always wins.
+	 */
 	#resolveEffectiveDisabledList(
 		baseValue: unknown,
 		disabledPath: ActivationDisabledPath,
@@ -1366,31 +1322,6 @@ export class Settings {
 		return [...disabled].sort();
 	}
 
-	#mcpActivationPath(targetInfo: ActivationTargetInfo): string {
-		return targetInfo.target === "global"
-			? path.join(this.#agentDir, "mcp.json")
-			: path.join(targetInfo.projectRoot, CONFIG_DIR_NAME, "mcp.json");
-	}
-
-	async #setMcpActivation(
-		targetInfo: ActivationTargetInfo,
-		name: string,
-		state: ProjectActivation,
-	): Promise<string | null> {
-		if (!this.#persist) return null;
-		const configPath = this.#mcpActivationPath(targetInfo);
-		if (state === "disabled") {
-			await setServerForceEnabled(configPath, name, false);
-			await setServerDisabled(configPath, name, true);
-		} else if (state === "enabled") {
-			await setServerDisabled(configPath, name, false);
-			await setServerForceEnabled(configPath, name, true);
-		} else {
-			await setServerDisabled(configPath, name, false);
-			await setServerForceEnabled(configPath, name, false);
-		}
-		return configPath;
-	}
 	async #saveProjectActivationList(
 		configPath: string,
 		id: string,

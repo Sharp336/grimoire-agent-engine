@@ -308,7 +308,7 @@ export interface ModelTagsSettings {
 }
 
 export type ProjectActivation = "inherit" | "enabled" | "disabled";
-export type ProjectActivationKind = "skills" | "mcp" | "rules" | "extensions";
+export type ProjectActivationKind = "skills" | "mcp" | "rules" | "extensions" | "slash-commands";
 
 // Typed defaults for array/record settings — named constants avoid `as` casts
 // under `as const` while still letting SettingValue infer the correct element type.

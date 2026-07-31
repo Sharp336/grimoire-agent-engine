@@ -19,10 +19,11 @@ import {
 import { connectToServer, disconnectServer, listTools } from "../../mcp/client";
 import {
 	addMCPServer,
+	getProjectMCPConfigPath,
 	readDisabledServers,
 	readMCPConfigFile,
 	removeMCPServer,
-	setServerDisabled,
+	setMcpServerEnabled,
 	updateMCPServer,
 } from "../../mcp/config-writer";
 import {
@@ -259,9 +260,9 @@ type MCPSearchParsed = {
  * covers connections, pending connections, and discovered-but-not-yet-
  * connected sources).
  *
- * `includeDisabledOnly` controls names found only in
- * `userConfig.disabledServers`, while `includeDisabledConfigured` controls
- * config entries whose `enabled` flag is false. Both default to true because
+ * `includeDisabledOnly` controls names disabled through `disabledExtensions`,
+ * while `includeDisabledConfigured` controls config entries whose `enabled`
+ * flag is false. Both default to true because
  * callers such as `/mcp list` need the complete union. Autocomplete callers
  * must disable the categories their target operation cannot accept.
  *
@@ -291,7 +292,12 @@ export async function collectMcpServerNames(
 		]);
 	}
 
-	const names = new Set<string>(includeDisabledOnly ? (userConfig.disabledServers ?? []) : []);
+	const names = new Set<string>(includeDisabledOnly ? userConfig.disabledServers : []);
+	if (includeDisabledOnly) {
+		for (const id of ctx.settings.get("disabledExtensions") as string[]) {
+			if (id.startsWith("mcp:")) names.add(id.slice("mcp:".length));
+		}
+	}
 	const addConfiguredNames = (config: MCPConfigFile): void => {
 		const servers = config.mcpServers;
 		if (!servers) return;
@@ -1335,8 +1341,27 @@ export class MCPCommandController {
 
 			// Collect runtime-discovered servers not in config files
 			const configServerNames = new Set([...userServers, ...projectServers]);
-			const disabledServerNames = new Set(userConfig.disabledServers ?? []);
-			const discoveredServers: { name: string; source: SourceMeta }[] = [];
+			const disabledServerNames = new Set([
+				...(userConfig.disabledServers ?? []),
+				...(this.ctx.settings.get("disabledExtensions") as string[])
+					.filter(id => id.startsWith("mcp:"))
+					.map(id => id.slice("mcp:".length)),
+			]);
+			const nativeDisabled = this.ctx.settings.isProviderEffectivelyDisabled("native");
+			const projectConfigEnabled = this.ctx.settings.get("mcp.enableProjectConfig") !== false;
+			const discoveredServerSources = new Map<string, { source: SourceMeta; config?: MCPServerConfig }>();
+			const { configs: discoveredConfigs, sources: discoveredSources } = await loadAllMCPConfigs(cwd, {
+				enableProjectConfig: projectConfigEnabled,
+				includeDisabled: true,
+				includeInactive: true,
+				filterExa: false,
+			});
+			for (const name of Object.keys(discoveredConfigs)) {
+				if (configServerNames.has(name)) continue;
+				const source = discoveredSources[name];
+				const config = discoveredConfigs[name];
+				if (source && config) discoveredServerSources.set(name, { source, config });
+			}
 			if (this.ctx.mcpManager) {
 				const allServerNames = await collectMcpServerNames(this.ctx, { userConfig, projectConfig });
 				for (const name of allServerNames) {
@@ -1433,7 +1458,7 @@ export class MCPCommandController {
 				}
 			}
 
-			// Show servers disabled via /mcp disable (from third-party configs)
+			// Show discovered servers disabled via the shared extension activation list.
 			const relevantDisabled = [...disabledServerNames].filter(n => !configServerNames.has(n));
 			if (relevantDisabled.length > 0) {
 				lines.push(theme.fg("accent", "Disabled") + theme.fg("muted", " (discovered servers):"));
@@ -1605,53 +1630,20 @@ export class MCPCommandController {
 		}
 
 		try {
-			const found = await this.#findConfiguredServer(name);
-			if (!found) {
-				// Check if this is a discovered server from a third-party config
-				const userConfigPath = getMCPConfigPath("user", getProjectDir());
-				const disabledServers = new Set(await readDisabledServers(userConfigPath));
-				const isDiscovered = this.ctx.mcpManager?.getSource(name);
-				const isCurrentlyDisabled = disabledServers.has(name);
-				if (!isDiscovered && !isCurrentlyDisabled) {
-					this.ctx.showError(`Server "${name}" not found.`);
-					return;
-				}
-				if (isCurrentlyDisabled === !enabled) {
-					this.#showMessage(
-						["", theme.fg("muted", `Server "${name}" is already ${enabled ? "enabled" : "disabled"}.`), ""].join(
-							"\n",
-						),
-					);
-					return;
-				}
-				await setServerDisabled(userConfigPath, name, !enabled);
-				if (enabled) {
-					await this.#connectEnabledMCPServer(name);
-					const state = await this.#waitForServerConnectionWithAnimation(name);
-					const status =
-						state === "connected"
-							? theme.fg("success", "Connected")
-							: state === "connecting"
-								? theme.fg("muted", "Connecting")
-								: theme.fg("warning", "Not connected yet");
-					this.#showMessage(
-						[
-							"",
-							theme.fg("success", `${theme.status.enabled} Enabled "${name}"`),
-							"",
-							`  Status: ${status}`,
-							"",
-						].join("\n"),
-					);
-				} else {
-					await this.ctx.mcpManager?.disconnectServer(name);
-					await this.ctx.session.refreshMCPTools(this.ctx.mcpManager?.getTools() ?? []);
-					this.#showMessage(["", theme.fg("muted", `${theme.status.disabled} Disabled "${name}"`), ""].join("\n"));
-				}
+			const names = await collectMcpServerNames(this.ctx);
+			if (!names.includes(name)) {
+				this.ctx.showError(`Server "${name}" not found.`);
 				return;
 			}
-
-			if ((found.config.enabled ?? true) === enabled) {
+			const configured = enabled ? await this.#findConfiguredServer(name) : null;
+			const sourceDisabled = configured?.config.enabled === false;
+			const userPath = getMCPConfigPath("user", getProjectDir());
+			const legacyDisabled = new Set(await readDisabledServers(userPath));
+			const current = this.ctx.settings.getProjectActivation("mcp", name);
+			if (
+				(enabled && current === "enabled" && !sourceDisabled && !legacyDisabled.has(name)) ||
+				(!enabled && current === "disabled")
+			) {
 				this.#showMessage(
 					["", theme.fg("muted", `Server "${name}" is already ${enabled ? "enabled" : "disabled"}.`), ""].join(
 						"\n",
@@ -1660,8 +1652,15 @@ export class MCPCommandController {
 				return;
 			}
 
-			const updated: MCPServerConfig = { ...found.config, enabled };
-			await updateMCPServer(found.filePath, name, updated);
+			const source = this.ctx.mcpManager?.getSource(name);
+			await setMcpServerEnabled({
+				userPath,
+				projectPath: getProjectMCPConfigPath(getProjectDir()),
+				sourcePath: source?.provider === "native" || source?.provider === "mcp-json" ? source.path : undefined,
+				name,
+				enabled,
+			});
+			await this.ctx.settings.setProjectActivation("mcp", name, enabled ? "enabled" : "disabled");
 			if (enabled) {
 				await this.#connectEnabledMCPServer(name);
 			} else {
@@ -1683,8 +1682,8 @@ export class MCPCommandController {
 			const lines = [
 				"",
 				enabled
-					? theme.fg("success", `${theme.status.enabled} Enabled "${name}" (${found.scope} config)`)
-					: theme.fg("muted", `${theme.status.disabled} Disabled "${name}" (${found.scope} config)`),
+					? theme.fg("success", `${theme.status.enabled} Enabled "${name}"`)
+					: theme.fg("muted", `${theme.status.disabled} Disabled "${name}"`),
 			];
 			if (status) {
 				lines.push("");

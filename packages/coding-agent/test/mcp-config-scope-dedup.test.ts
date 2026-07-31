@@ -106,4 +106,23 @@ describe("MCP scope filtering precedes connection-equivalence deduplication", ()
 		expect(Object.keys(result.configs)).toEqual(["shared"]);
 		expect(result.sources.shared?.level).toBe("user");
 	});
+
+	test("honors user denylist and force-enable overlays", async () => {
+		await writeMcpJson(path.join(projectDir, ".omp"), {
+			denied: CONNECTION,
+			forced: { type: "http", url: "https://forced.example/mcp", enabled: false },
+		});
+		await fs.writeFile(
+			path.join(userAgentDir, "mcp.json"),
+			JSON.stringify({
+				mcpServers: {},
+				disabledServers: ["denied"],
+				enabledServers: ["forced"],
+			}),
+		);
+
+		const result = await loadAllMCPConfigs(projectDir, { filterExa: false });
+		expect(Object.keys(result.configs)).toEqual(["forced"]);
+		expect(result.sources.forced?.level).toBe("project");
+	});
 });

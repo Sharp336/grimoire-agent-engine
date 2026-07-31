@@ -66,7 +66,8 @@ OMP supports this top-level structure:
       "args": ["-y", "some-mcp-server"]
     }
   },
-  "disabledServers": ["server-name"]
+  "disabledServers": ["server-name"],
+  "enabledServers": ["other-server"]
 }
 ```
 
@@ -74,7 +75,8 @@ Top-level keys:
 
 - `$schema` — optional JSON Schema URL for tooling
 - `mcpServers` — map of server name to server config
-- `disabledServers` — user-level denylist used to turn off discovered servers by name; runtime loading reads this list from the active profile's user MCP file (`~/.omp/agent/mcp.json`, or `~/.omp/profiles/<name>/agent/mcp.json` under a named profile)
+- `disabledServers` — user-level denylist for suppressing any discovered server by name
+- `enabledServers` — user-level allowlist overriding `enabled: false` from a third-party source; `disabledServers` still wins
 
 Server names must match `^[a-zA-Z0-9_.-]{1,100}$`.
 
@@ -411,18 +413,28 @@ That means this is valid and convenient for local secrets:
 - `"Authorization": "Bearer hardcoded-token"` → use the literal value
 - `"Authorization": "!printf 'Bearer %s' \"$GITHUB_TOKEN\""` → build the header from a command
 
-## `disabledServers`
+## Activation
 
-`disabledServers` is read from the user config file (`~/.omp/agent/mcp.json`) when a server is discovered from any source and you want OMP to ignore it without editing that other tool's config.
+Keep MCP server definitions portable. The Extension Center enables and disables a server through the shared extension activation lists in `config.yml`.
 
-Example:
+```yaml
+# <repo>/.omp/config.yml
+disabledExtensions:
+  - mcp:github
 
-```json
-{
-  "$schema": "https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/src/config/mcp-schema.json",
-  "disabledServers": ["github", "slack"]
-}
+# Explicitly re-enable a globally disabled server in this project.
+enabledExtensions:
+  - mcp:github
 ```
+
+`disabledExtensions` prevents the server from connecting and prevents its tools from being exposed to the model. `enabledExtensions` is a project-level override for a global disable.
+
+The active user MCP config also supports compatibility overlays for servers discovered from another tool:
+
+- `disabledServers` is the highest-precedence denylist. It suppresses a server by name regardless of its source or `enabled` flag.
+- `enabledServers` force-enables a server whose non-OMP-owned source has `enabled: false`. It does not override `disabledServers`.
+
+Use these overlays when you need an OMP-only choice without editing a third-party configuration file. `/mcp enable` and `/mcp disable` preserve them when toggling a discovered server.
 
 ## `/mcp add` vs editing JSON directly
 
@@ -459,13 +471,13 @@ Practical implications:
 
 ## Discovery and precedence
 
-OMP does not merge duplicate server definitions across files. Discovery providers are prioritized, and the higher-priority definition wins. Separately, `disabledServers` from `~/.omp/agent/mcp.json` can suppress a discovered server by name.
+OMP does not merge duplicate server definitions across files. Discovery providers are prioritized, and the higher-priority definition wins.
 
 In practice:
 
-- prefer `.omp/mcp.json` or `~/.omp/agent/mcp.json` when you want an OMP-specific override
+- prefer `.omp/mcp.json` or `~/.omp/agent/mcp.json` when OMP should own the server definition
 - keep server names unique across tools when possible
-- use `disabledServers` in the user config when a third-party config keeps reintroducing a server you do not want
+- use `disabledExtensions: [mcp:<name>]` in `config.yml` when a third-party config keeps reintroducing a server you do not want
 
 ## Troubleshooting
 
@@ -488,7 +500,7 @@ The JSON is valid, but the server may still be unreachable. Use `/mcp test <name
 
 ### The server exists in another tool's config but not in OMP
 
-Run `/mcp list`. OMP discovers many third-party MCP files, but project-level loading can also be disabled via the `mcp.enableProjectConfig` setting, and a user-level `disabledServers` entry can suppress a server by name.
+Run `/mcp list`. OMP discovers many third-party MCP files, but project-level loading can also be disabled via the `mcp.enableProjectConfig` setting, a shared `disabledExtensions` entry such as `mcp:<name>`, or the server definition's `enabled: false` flag.
 
 ## References
 
