@@ -554,6 +554,8 @@ export class SessionAdvisors {
 		const roster: AdvisorConfig[] = legacy ? [{ name: "default" }] : this.#advisorConfigs!;
 		const descriptors: AdvisorRuntimeDescriptor[] = [];
 		const usedSlugs = new Set<string>();
+		const agentKind = this.#host.agentKind();
+		const subagentDefault = this.#host.settings.get("advisor.subagents");
 		for (const config of roster) {
 			let slug = legacy ? "" : slugifyAdvisorName(config.name);
 			if (slug) {
@@ -573,8 +575,6 @@ export class SessionAdvisors {
 			// Session-kind gate: skip advisors not eligible for subagent sessions.
 			// Main sessions include the full roster; unset `subagents` inherits the
 			// global `advisor.subagents` setting to preserve existing behavior.
-			const agentKind = this.#host.agentKind();
-			const subagentDefault = this.#host.settings.get("advisor.subagents");
 			if (agentKind !== "main" && !advisorRunsForAgentKind(config, agentKind, subagentDefault)) {
 				this.#advisorStatuses.set(slug, { name: config.name, status: "paused" });
 				continue;
