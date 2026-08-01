@@ -76,7 +76,6 @@ export class SideController {
 		const parentSessionId = session.sessionId;
 		const parentPromptCacheKey = session.agent.promptCacheKey ?? parentSessionId;
 		const thinkingLevel = session.configuredThinkingLevel();
-		const systemPrompt = [...session.systemPrompt];
 		const toolNames = session.getActiveToolNames();
 		const extensionPaths = session.extensionPaths;
 		const modelRegistry = session.modelRegistry;
@@ -116,7 +115,6 @@ export class SideController {
 				sessionManager: sideManager,
 				model,
 				thinkingLevel,
-				systemPrompt,
 				toolNames: toolNames.filter(name => name !== "task" && name !== "hub"),
 				spawns: "",
 				providerSessionId: `${parentSessionId}:side:${Snowflake.next()}`,
@@ -159,7 +157,7 @@ export class SideController {
 			// 3. Append session-init so a cold Agent Hub revival describes the side
 			//    correctly, using the post-filter tool list.
 			sideManager.appendSessionInit({
-				systemPrompt: side.systemPrompt ? side.systemPrompt.join("\n\n") : systemPrompt.join("\n\n"),
+				systemPrompt: side.systemPrompt.join("\n\n"),
 				task: question || "side conversation",
 				tools: side.getActiveToolNames(),
 			});
