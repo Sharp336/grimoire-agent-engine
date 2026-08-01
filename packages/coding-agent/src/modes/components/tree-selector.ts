@@ -1,15 +1,13 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import {
 	type Component,
-	Container,
 	extractPrintableText,
 	fuzzyMatch,
 	Input,
 	matchesKey,
-	Spacer,
-	Text,
-	TruncatedText,
+	replaceTabs,
 	truncateToWidth,
+	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import type { TreeFilterMode } from "../../config/settings-schema";
 import { theme } from "../../modes/theme/theme";
@@ -21,6 +19,10 @@ import { canonicalizeMessage } from "../../utils/thinking-display";
 import { resolveAssistantErrorPresentation } from "../utils/transcript-render-helpers";
 import { DynamicBorder } from "./dynamic-border";
 import { centeredWindow, contentRowWidth, renderScrollableList } from "./selector-helpers";
+
+const MIN_SPLIT_WIDTH = 100;
+
+type TreeViewMode = "list" | "map" | "split";
 
 /** Gutter info: position (displayIndent where connector was) and whether to show │ */
 interface GutterInfo {
@@ -56,6 +58,7 @@ interface ToolCallInfo {
 }
 
 class TreeList implements Component {
+	#roots: SessionTreeNode[];
 	#flatNodes: FlatNode[] = [];
 	#filteredNodes: FlatNode[] = [];
 	#selectedIndex = 0;
@@ -77,6 +80,7 @@ class TreeList implements Component {
 		initialFilterMode: FilterMode = "default",
 		initialSelectedId?: string,
 	) {
+		this.#roots = tree;
 		this.#filterMode = initialFilterMode;
 		this.#multipleRoots = tree.length > 1;
 		this.#flatNodes = this.#flattenTree(tree);
@@ -416,12 +420,86 @@ class TreeList implements Component {
 		return this.#filteredNodes[this.#selectedIndex]?.node;
 	}
 
+	getFilterMode(): FilterMode {
+		return this.#filterMode;
+	}
+
+	getVisibleCurrentLeafId(): string | null {
+		if (this.#filteredNodes.length === 0) return null;
+		return this.#filteredNodes[this.#findNearestVisibleIndex(this.currentLeafId)]?.node.entry.id ?? null;
+	}
+
+	getVisibleTree(): SessionTreeNode[] {
+		const visibleIds = new Set(this.#filteredNodes.map(node => node.node.entry.id));
+		const project = (node: SessionTreeNode): SessionTreeNode[] => {
+			const children = node.children.flatMap(project);
+			if (!visibleIds.has(node.entry.id)) return children;
+			return [{ ...node, children }];
+		};
+		return this.#roots.flatMap(project);
+	}
+
 	updateNodeLabel(entryId: string, label: string | undefined): void {
 		for (const flatNode of this.#flatNodes) {
 			if (flatNode.node.entry.id === entryId) {
 				flatNode.node.label = label;
 				break;
 			}
+		}
+	}
+
+	#selectFirstVisibleInSubtree(root: SessionTreeNode): boolean {
+		const visibleIndices = new Map<string, number>(
+			this.#filteredNodes.map((node, index) => [node.node.entry.id, index]),
+		);
+		const stack = [root];
+		while (stack.length > 0) {
+			const node = stack.pop()!;
+			const index = visibleIndices.get(node.entry.id);
+			if (index !== undefined) {
+				this.#selectedIndex = index;
+				this.#lastSelectedId = node.entry.id;
+				return true;
+			}
+			for (let childIndex = node.children.length - 1; childIndex >= 0; childIndex--) {
+				stack.push(node.children[childIndex]!);
+			}
+		}
+		return false;
+	}
+
+	#moveToSiblingBranch(direction: -1 | 1): void {
+		const selected = this.getSelectedNode();
+		if (!selected) return;
+
+		const nodeById = new Map<string, SessionTreeNode>(this.#flatNodes.map(node => [node.node.entry.id, node.node]));
+		if (selected.children.length > 1) {
+			const target = selected.children[direction === 1 ? 0 : selected.children.length - 1]!;
+			this.#selectFirstVisibleInSubtree(target);
+			return;
+		}
+
+		let branchChild = selected;
+		let parentId = selected.entry.parentId;
+		while (parentId) {
+			const parent = nodeById.get(parentId);
+			if (!parent) return;
+			if (parent.children.length > 1) {
+				const currentIndex = parent.children.findIndex(child => child.entry.id === branchChild.entry.id);
+				if (currentIndex === -1) return;
+				const targetIndex = (currentIndex + direction + parent.children.length) % parent.children.length;
+				this.#selectFirstVisibleInSubtree(parent.children[targetIndex]!);
+				return;
+			}
+			branchChild = parent;
+			parentId = parent.entry.parentId;
+		}
+
+		if (this.#roots.length > 1) {
+			const currentIndex = this.#roots.findIndex(root => root.entry.id === branchChild.entry.id);
+			if (currentIndex === -1) return;
+			const targetIndex = (currentIndex + direction + this.#roots.length) % this.#roots.length;
+			this.#selectFirstVisibleInSubtree(this.#roots[targetIndex]!);
 		}
 	}
 
@@ -786,6 +864,10 @@ class TreeList implements Component {
 			this.#selectedIndex = this.#selectedIndex === 0 ? this.#filteredNodes.length - 1 : this.#selectedIndex - 1;
 		} else if (matchesSelectDown(keyData)) {
 			this.#selectedIndex = this.#selectedIndex === this.#filteredNodes.length - 1 ? 0 : this.#selectedIndex + 1;
+		} else if (matchesKey(keyData, "shift+left")) {
+			this.#moveToSiblingBranch(-1);
+		} else if (matchesKey(keyData, "shift+right")) {
+			this.#moveToSiblingBranch(1);
 		} else if (matchesKey(keyData, "left")) {
 			// Page up
 			this.#selectedIndex = Math.max(0, this.#selectedIndex - this.maxVisibleLines);
@@ -916,14 +998,266 @@ class LabelInput implements Component {
 	}
 }
 
+interface BranchMapNode {
+	node: SessionTreeNode;
+	number: number;
+	children: BranchMapNode[];
+	x: number;
+	y: number;
+	width: number;
+}
+
 /**
- * Component that renders a session tree selector for navigation
+ * A top-down tree view. Nodes remain visible instead of collapsing linear
+ * runs, so the drawing retains the familiar trunk-and-branches shape.
  */
-export class TreeSelectorComponent extends Container {
+class BranchMap implements Component {
+	constructor(
+		private readonly getVisibleTree: () => SessionTreeNode[],
+		private readonly getVisibleCurrentLeafId: () => string | null,
+		private readonly getSelectedId: () => string | null,
+		private readonly maxVisibleLines: number,
+	) {}
+
+	invalidate(): void {}
+
+	#toMapNodes(): BranchMapNode[] {
+		let number = 1;
+		const create = (node: SessionTreeNode): BranchMapNode => ({
+			node,
+			number: number++,
+			children: node.children.map(create),
+			x: 0,
+			y: 0,
+			width: 0,
+		});
+		return this.getVisibleTree().map(create);
+	}
+
+	#layout(nodes: BranchMapNode[], nodeWidth: number): { width: number; height: number } {
+		const siblingGap = 4;
+		let maxY = 0;
+		const measure = (node: BranchMapNode): number => {
+			const childrenWidth = node.children.reduce((total, child, index) => {
+				return total + measure(child) + (index > 0 ? siblingGap : 0);
+			}, 0);
+			node.width = Math.max(nodeWidth, childrenWidth);
+			return node.width;
+		};
+		const position = (node: BranchMapNode, left: number, depth: number): void => {
+			node.x = left + Math.floor(node.width / 2);
+			node.y = depth * 4;
+			maxY = Math.max(maxY, node.y);
+			const childrenWidth = node.children.reduce(
+				(total, child, index) => total + child.width + (index > 0 ? siblingGap : 0),
+				0,
+			);
+			let childLeft = left + Math.floor((node.width - childrenWidth) / 2);
+			for (const child of node.children) {
+				position(child, childLeft, depth + 1);
+				childLeft += child.width + siblingGap;
+			}
+		};
+
+		const width = nodes.reduce((total, node, index) => total + measure(node) + (index > 0 ? siblingGap : 0), 0);
+		let left = 0;
+		for (const node of nodes) {
+			position(node, left, 0);
+			left += node.width + siblingGap;
+		}
+		return { width, height: maxY + 1 };
+	}
+
+	render(width: number, showSummaries = true): readonly string[] {
+		const nodeWidth = showSummaries ? Math.max(18, Math.min(30, width - 4)) : Math.max(11, Math.min(14, width - 4));
+		const mapRoots = this.#toMapNodes();
+		const { width: mapWidth, height } = this.#layout(mapRoots, nodeWidth);
+		const north = 1;
+		const east = 2;
+		const south = 4;
+		const west = 8;
+		const canvas = Array.from({ length: height }, () => Array.from({ length: mapWidth }, () => 0));
+		const connect = (x: number, y: number, dx: number, dy: number): void => {
+			const nextX = x + dx;
+			const nextY = y + dy;
+			if (
+				x < 0 ||
+				x >= mapWidth ||
+				y < 0 ||
+				y >= height ||
+				nextX < 0 ||
+				nextX >= mapWidth ||
+				nextY < 0 ||
+				nextY >= height
+			)
+				return;
+			if (dx === 0 && dy === 1) {
+				canvas[y]![x]! |= south;
+				canvas[nextY]![nextX]! |= north;
+			} else if (dx === 1 && dy === 0) {
+				canvas[y]![x]! |= east;
+				canvas[nextY]![nextX]! |= west;
+			}
+		};
+		const vertical = (x: number, from: number, to: number): void => {
+			for (let y = from; y < to; y++) connect(x, y, 0, 1);
+		};
+		const horizontal = (from: number, to: number, y: number): void => {
+			for (let x = from; x < to; x++) connect(x, y, 1, 0);
+		};
+		const drawBranches = (node: BranchMapNode): void => {
+			if (node.children.length === 1) {
+				vertical(node.x, node.y + 1, node.children[0]!.y);
+			} else if (node.children.length > 1) {
+				const branchY = node.children[0]!.y - 2;
+				vertical(node.x, node.y + 1, branchY + 1);
+				horizontal(node.children[0]!.x, node.children[node.children.length - 1]!.x, branchY);
+				for (const child of node.children) vertical(child.x, branchY, child.y);
+			}
+			for (const child of node.children) drawBranches(child);
+		};
+		for (const root of mapRoots) drawBranches(root);
+
+		const selectedId = this.getSelectedId();
+		const allNodes = mapRoots.flatMap(root => this.#flatten(root));
+		const selected = allNodes.find(node => node.node.entry.id === selectedId);
+		const graphWidth = Math.max(1, width - 2);
+		const selectedLeft = selected ? selected.x - Math.floor(nodeWidth / 2) : 0;
+		const startX = Math.max(0, Math.min(selectedLeft - 2, mapWidth - graphWidth));
+		const endX = Math.min(mapWidth, startX + graphWidth);
+		const visibleRows = Math.max(1, this.maxVisibleLines - 2);
+		const startY = Math.max(0, Math.min((selected?.y ?? 0) - Math.floor(visibleRows / 2), height - visibleRows));
+		const endY = Math.min(height, startY + visibleRows);
+		const lines: string[] = [];
+		for (let y = startY; y < endY; y++) {
+			const row = canvas[y]!.slice(startX, endX)
+				.map(cell => this.#connector(cell))
+				.join("");
+			const rowNodes = allNodes
+				.filter(
+					node =>
+						node.y === y &&
+						node.x - Math.floor(nodeWidth / 2) >= startX &&
+						node.x + Math.ceil(nodeWidth / 2) <= endX,
+				)
+				.toSorted((a, b) => a.x - b.x);
+			const parts: string[] = [];
+			let cursor = 0;
+			for (const node of rowNodes) {
+				const left = node.x - Math.floor(nodeWidth / 2) - startX;
+				const label = this.#nodeLabel(node, nodeWidth, showSummaries, selectedId);
+				parts.push(row.slice(cursor, left), label);
+				cursor = left + nodeWidth;
+			}
+			parts.push(row.slice(cursor));
+			let rendered = parts.join("");
+			if (startX > 0) rendered = `…${rendered.slice(1)}`;
+			if (endX < mapWidth) rendered = `${rendered.slice(0, -1)}…`;
+			lines.push(truncateToWidth(`  ${rendered.trimEnd()}`, width));
+		}
+		if (startY > 0 && lines.length > 0) lines[0] = theme.fg("muted", "  … ↑");
+		if (endY < height && lines.length > 0) lines[lines.length - 1] = theme.fg("muted", "  … ↓");
+		lines.push(truncateToWidth(theme.fg("muted", "  › selected  • current session"), width));
+		return lines;
+	}
+
+	#flatten(node: BranchMapNode): BranchMapNode[] {
+		return [node, ...node.children.flatMap(child => this.#flatten(child))];
+	}
+
+	#connector(cell: number): string {
+		if (theme.tree.horizontal === "-") {
+			return cell === 0 ? " " : cell === 1 || cell === 4 || cell === 5 ? "|" : cell === 10 ? "-" : "+";
+		}
+		switch (cell) {
+			case 0:
+				return " ";
+			case 1:
+			case 4:
+			case 5:
+				return "│";
+			case 2:
+			case 8:
+			case 10:
+				return "─";
+			case 3:
+				return "└";
+			case 6:
+				return "┌";
+			case 9:
+				return "┘";
+			case 12:
+				return "┐";
+			case 7:
+				return "├";
+			case 13:
+				return "┤";
+			case 11:
+				return "┴";
+			case 14:
+				return "┬";
+			default:
+				return "┼";
+		}
+	}
+
+	#nodeLabel(node: BranchMapNode, nodeWidth: number, showSummary: boolean, selectedId: string | null): string {
+		const entry = node.node.entry;
+		const selected = entry.id === selectedId;
+		const current = entry.id === this.getVisibleCurrentLeafId();
+		const role = entry.type === "message" ? entry.message.role : entry.type.replaceAll("_", " ");
+		const summary = showSummary ? this.#summary(entry) : "";
+		const prefix = selected ? "›" : current ? "•" : " ";
+		const content = `${prefix}#${node.number} ${role}${summary ? `: ${summary}` : ""}`;
+		const truncated = truncateToWidth(content, nodeWidth - 2, "");
+		const label = `[${truncated}${" ".repeat(Math.max(0, nodeWidth - 2 - visibleWidth(truncated)))}]`;
+		if (selected) return theme.bg("selectedBg", theme.bold(theme.fg("accent", label)));
+		return current ? theme.fg("success", label) : theme.fg("dim", label);
+	}
+
+	#summary(entry: SessionTreeNode["entry"]): string {
+		if (entry.type === "message") {
+			const message = entry.message as { content?: unknown; command?: string };
+			if (typeof message.content === "string") return this.#normalizeSummary(message.content);
+			if (Array.isArray(message.content)) {
+				const text = message.content
+					.filter(
+						(block): block is { type: "text"; text: string } =>
+							typeof block === "object" &&
+							block !== null &&
+							"type" in block &&
+							block.type === "text" &&
+							"text" in block &&
+							typeof block.text === "string",
+					)
+					.map(block => block.text)
+					.join(" ");
+				if (text) return this.#normalizeSummary(text);
+			}
+			return message.command ? this.#normalizeSummary(message.command) : "";
+		}
+		if (entry.type === "branch_summary") return this.#normalizeSummary(entry.summary);
+		if (entry.type === "label") return this.#normalizeSummary(entry.label ?? "");
+		return "";
+	}
+
+	#normalizeSummary(text: string): string {
+		return replaceTabs(text).replace(/\s+/g, " ").trim();
+	}
+}
+
+/**
+ * Component that renders a session tree selector for navigation.
+ *
+ * The entry list stays the interaction surface. The adjacent branch map is a
+ * read-only topology overview that can be hidden or expanded with Ctrl+G.
+ */
+export class TreeSelectorComponent implements Component {
 	#treeList: TreeList;
+	#branchMap: BranchMap;
 	#labelInput: LabelInput | null = null;
-	#labelInputContainer: Container;
-	#treeContainer: Container;
+	#viewMode: TreeViewMode = "split";
+	#border = new DynamicBorder();
 
 	constructor(
 		tree: SessionTreeNode[],
@@ -934,39 +1268,18 @@ export class TreeSelectorComponent extends Container {
 		private readonly onLabelChangeCallback?: (entryId: string, label: string | undefined) => void,
 		initialFilterMode: FilterMode = "default",
 	) {
-		super();
 		const maxVisibleLines = Math.max(5, Math.floor(terminalHeight / 2));
 
 		this.#treeList = new TreeList(tree, currentLeafId, maxVisibleLines, initialFilterMode);
 		this.#treeList.onSelect = onSelect;
 		this.#treeList.onCancel = onCancel;
 		this.#treeList.onLabelEdit = (entryId, currentLabel) => this.#showLabelInput(entryId, currentLabel);
-
-		this.#treeContainer = new Container();
-		this.#treeContainer.addChild(this.#treeList);
-
-		this.#labelInputContainer = new Container();
-
-		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
-		this.addChild(new Text(theme.bold("  Session Tree"), 1, 0));
-		this.addChild(
-			new TruncatedText(
-				theme.fg(
-					"muted",
-					"Enter: switch. Shift+Enter: summarize & switch. Shift+L: label. Ctrl+O: filter. Alt+D/T/U/L/A: filter. Type to search",
-				),
-				0,
-				0,
-			),
+		this.#branchMap = new BranchMap(
+			() => this.#treeList.getVisibleTree(),
+			() => this.#treeList.getVisibleCurrentLeafId(),
+			() => this.#treeList.getSelectedNode()?.entry.id ?? null,
+			maxVisibleLines,
 		);
-		this.addChild(new SearchLine(this.#treeList));
-		this.addChild(new DynamicBorder());
-		this.addChild(new Spacer(1));
-		this.addChild(this.#treeContainer);
-		this.addChild(this.#labelInputContainer);
-		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
 
 		if (tree.length === 0) {
 			setTimeout(() => onCancel(), 100);
@@ -981,22 +1294,130 @@ export class TreeSelectorComponent extends Container {
 			this.#hideLabelInput();
 		};
 		this.#labelInput.onCancel = () => this.#hideLabelInput();
-
-		this.#treeContainer.clear();
-		this.#labelInputContainer.clear();
-		this.#labelInputContainer.addChild(this.#labelInput);
 	}
 
 	#hideLabelInput(): void {
 		this.#labelInput = null;
-		this.#labelInputContainer.clear();
-		this.#treeContainer.clear();
-		this.#treeContainer.addChild(this.#treeList);
+	}
+
+	invalidate(): void {
+		this.#treeList.invalidate();
+		this.#branchMap.invalidate();
+		this.#labelInput?.invalidate();
+		this.#border.invalidate();
+	}
+
+	render(width: number): readonly string[] {
+		const lines: string[] = [""];
+		const border = this.#border.render(width)[0]!;
+		lines.push(border);
+		if (this.#labelInput) {
+			lines.push(truncateToWidth(theme.bold("  Session Tree"), width));
+			lines.push(border);
+			lines.push("");
+			lines.push(...this.#labelInput.render(width));
+		} else {
+			const effectiveMode = this.#viewMode === "split" && width < MIN_SPLIT_WIDTH ? "list" : this.#viewMode;
+			const title =
+				effectiveMode === "map"
+					? "  Branch Map"
+					: effectiveMode === "split"
+						? `  Session Tree${" ".repeat(
+								Math.max(2, this.#splitListWidth(width) + 3 - visibleWidth("  Session Tree")),
+							)}Branch Map`
+						: "  Session Tree";
+			lines.push(truncateToWidth(theme.bold(title), width));
+			lines.push(...this.#renderFilterStatus(width));
+			lines.push(...this.#renderShortcutHelp(width));
+			if (effectiveMode !== "map") lines.push(new SearchLine(this.#treeList).render(width)[0]!);
+			lines.push(border);
+			lines.push("");
+			if (effectiveMode === "split") {
+				lines.push(...this.#renderSplitView(width));
+			} else if (effectiveMode === "map") {
+				lines.push(...this.#branchMap.render(width, true));
+			} else {
+				lines.push(...this.#treeList.render(width));
+			}
+		}
+		lines.push("");
+		lines.push(border);
+		return lines;
+	}
+
+	#renderSplitView(width: number): readonly string[] {
+		const separator = " │ ";
+		const listWidth = this.#splitListWidth(width);
+		const mapWidth = Math.max(1, width - separator.length - listWidth);
+		const listLines = this.#treeList.render(listWidth);
+		const mapLines = this.#branchMap.render(mapWidth, false);
+		const rowCount = Math.max(listLines.length, mapLines.length);
+		const lines: string[] = [];
+		for (let index = 0; index < rowCount; index++) {
+			const left = truncateToWidth(listLines[index] ?? "", listWidth);
+			const paddedLeft = left + " ".repeat(Math.max(0, listWidth - visibleWidth(left)));
+			const right = truncateToWidth(mapLines[index] ?? "", mapWidth);
+			lines.push(truncateToWidth(`${paddedLeft}${theme.fg("border", separator)}${right}`, width));
+		}
+		return lines;
+	}
+
+	#renderShortcutHelp(width: number): readonly string[] {
+		const line = (section: string, text: string): string =>
+			truncateToWidth(`  ${theme.fg("accent", section.padEnd(11))}${theme.fg("muted", text)}`, width);
+		return [
+			line("Navigate", "↑/↓ select   Shift+←/→ sibling branch (wraps)   Enter confirm"),
+			line("Actions", "Shift+Enter summarize + switch   Shift+L label   Ctrl+O filter"),
+			line("View", "Ctrl+G list / tree / split   Type to search"),
+		];
+	}
+
+	#renderFilterStatus(width: number): readonly string[] {
+		const mode = this.#treeList.getFilterMode();
+		const filters: Array<{ mode: FilterMode; label: string }> = [
+			{ mode: "default", label: "Default" },
+			{ mode: "no-tools", label: "No tools" },
+			{ mode: "user-only", label: "User only" },
+			{ mode: "labeled-only", label: "Labeled" },
+			{ mode: "all", label: "All" },
+		];
+		const chips = filters
+			.map(filter =>
+				filter.mode === mode
+					? theme.bg("selectedBg", theme.bold(theme.fg("accent", `[${filter.label}]`)))
+					: theme.fg("muted", filter.label),
+			)
+			.join("  ");
+		const description = (() => {
+			switch (mode) {
+				case "no-tools":
+					return "content entries; tool results hidden";
+				case "user-only":
+					return "user messages only";
+				case "labeled-only":
+					return "labeled entries only";
+				case "all":
+					return "all persisted entries";
+				default:
+					return "content entries; labels and internal events hidden";
+			}
+		})();
+		return [
+			truncateToWidth(`  ${theme.fg("muted", "Filter")}  ${chips}`, width),
+			truncateToWidth(`  ${theme.fg("muted", "Showing:")} ${theme.fg("dim", description)}`, width),
+		];
+	}
+
+	#splitListWidth(width: number): number {
+		return Math.max(40, Math.floor((width - 3) * 0.62));
 	}
 
 	handleInput(keyData: string): void {
 		if (this.#labelInput) {
 			this.#labelInput.handleInput(keyData);
+		} else if (matchesKey(keyData, "ctrl+g")) {
+			const modes: TreeViewMode[] = ["split", "map", "list"];
+			this.#viewMode = modes[(modes.indexOf(this.#viewMode) + 1) % modes.length]!;
 		} else {
 			this.#treeList.handleInput(keyData);
 		}

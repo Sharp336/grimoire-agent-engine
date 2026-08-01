@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a top-down Branch Map to `/tree` and `/branch` navigation. Wide terminals show compact numbered role labels beside the session entry list, while the standalone map shows message summaries; both views share one filter projection, the active filter is highlighted with an explanation, `Ctrl+G` cycles between list, map, and split views, and `Shift+Left`/`Shift+Right` cycle sibling branches before Enter confirms navigation.
+
 ## [17.2.1] - 2026-07-30
 
 ### Added
