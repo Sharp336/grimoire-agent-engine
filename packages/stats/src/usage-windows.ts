@@ -59,6 +59,11 @@ export function readUsageSnapshots(sinceMs: number, dbPath = getAgentDbPath()): 
 	let db: Database | null = null;
 	try {
 		db = new Database(dbPath, { readonly: true });
+		// Match every other agent.db opener: without this the reader inherits
+		// busy_timeout = 0 and throws SQLITE_BUSY immediately on a race with a
+		// concurrent WAL checkpoint, which the catch below would silently report
+		// as "no usage history".
+		db.run("PRAGMA busy_timeout = 5000");
 		const rows = db
 			.prepare(
 				`SELECT recorded_at, provider, account_key, email, account_id, limit_id, label, window_label, used_fraction, status

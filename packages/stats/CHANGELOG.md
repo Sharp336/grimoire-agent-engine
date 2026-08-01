@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the read-only usage-snapshot reader inheriting `busy_timeout = 0` and throwing `SQLITE_BUSY` immediately on a race with a concurrent WAL checkpoint, which the catch turned into a silently empty usage view; it now installs `PRAGMA busy_timeout = 5000` right after open.
+
 ## [17.1.2] - 2026-07-24
 
 ### Added
