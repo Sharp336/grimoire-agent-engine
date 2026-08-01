@@ -164,8 +164,23 @@ describe("omp doctor", () => {
 		const backupRoot = path.join(path.dirname(dbPath), ".omp-doctor-backups");
 		const backups = (await fs.readdir(backupRoot)).filter(name => name.startsWith("agent.db."));
 		expect(backups).toHaveLength(1);
+		// The dump's INSERT spelling varies across sqlite3 versions; the contract
+		// is that the 500 orphaned rows survive as data. `.dbconfig` lines are CLI
+		// dot-commands, not SQL, so strip them before loading.
 		const dump = await Bun.file(path.join(backupRoot, backups[0] as string, "recovery.sql")).text();
-		expect(dump).toContain("INSERT INTO lost_and_found");
+		const salvageDb = new Database(path.join(root, "salvage-check.db"));
+		try {
+			salvageDb.exec(
+				dump
+					.split("\n")
+					.filter(line => !line.startsWith("."))
+					.join("\n"),
+			);
+			const stranded = salvageDb.query("SELECT count(*) AS n FROM lost_and_found").get() as { n: number };
+			expect(stranded.n).toBe(500);
+		} finally {
+			salvageDb.close();
+		}
 	});
 
 	test("freelist-only corruption: salvaged when the CLI supports it, refused safely otherwise", async () => {
@@ -185,13 +200,12 @@ describe("omp doctor", () => {
 			expect(finding?.summary).toMatch(/salvaged|rescued/);
 			expect(quickCheck(dbPath)).toBe("ok");
 		} else {
-			// Older sqlite3: plain .recover strands the deleted rows in
-			// lost_and_found, so the fidelity guard must refuse the swap and keep
-			// the original plus the dump.
+			// Older sqlite3: plain .recover may strand the deleted rows (or fail
+			// outright on the corrupted freelist) — either way the swap must be
+			// refused and the corrupt original left in place.
 			expect(finding?.status).toBe("error");
 			expect(finding?.fixed).toBeUndefined();
 			expect(quickCheck(dbPath)).not.toBe("ok");
-			expect(finding?.details.join("\n")).toContain("recovery dump preserved at");
 		}
 		const backups = await fs.readdir(path.join(path.dirname(dbPath), ".omp-doctor-backups"));
 		expect(backups.some(name => name.startsWith("agent.db."))).toBe(true);
