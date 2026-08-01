@@ -72,8 +72,7 @@ export type SessionChannelOperation =
 	| { op: "unregister"; sessionId: string }
 	| { op: "list"; sessionId: string }
 	| { op: "open"; sessionId: string; memberIds: string[]; name?: string }
-	| { op: "add"; sessionId: string; channelId: string; memberIds: string[] }
-	| { op: "remove"; sessionId: string; channelId: string; memberId: string }
+	| { op: "set-members"; sessionId: string; channelId: string; memberIds: string[] }
 	| { op: "close"; sessionId: string; channelId: string }
 	| { op: "leave"; sessionId: string; channelId: string; reason: "user" | "agent" }
 	| { op: "update"; session: ChannelSessionSnapshot }
@@ -94,8 +93,7 @@ export type SessionChannelResult =
 	| { op: "unregister" }
 	| { op: "list"; sessions: ChannelSessionSnapshot[]; channels: SessionChannelSnapshot[] }
 	| { op: "open"; channel: SessionChannelSnapshot }
-	| { op: "add"; channel: SessionChannelSnapshot }
-	| { op: "remove"; channel: SessionChannelSnapshot | null }
+	| { op: "set-members"; channel: SessionChannelSnapshot }
 	| { op: "close" }
 	| { op: "leave"; channel: SessionChannelSnapshot | null }
 	| { op: "update"; session: ChannelSessionSnapshot }
@@ -267,19 +265,12 @@ export function parseSessionChannelOperation(value: unknown): SessionChannelOper
 				memberIds: stringArray(source.memberIds, "operation.memberIds"),
 				name: optionalString(source.name, "operation.name", CHANNEL_NAME_MAX),
 			};
-		case "add":
+		case "set-members":
 			return {
 				op,
 				sessionId: runtimeId(source.sessionId, "operation.sessionId"),
 				channelId: runtimeId(source.channelId, "operation.channelId"),
 				memberIds: stringArray(source.memberIds, "operation.memberIds"),
-			};
-		case "remove":
-			return {
-				op,
-				sessionId: runtimeId(source.sessionId, "operation.sessionId"),
-				channelId: runtimeId(source.channelId, "operation.channelId"),
-				memberId: runtimeId(source.memberId, "operation.memberId"),
 			};
 		case "close":
 			return {
@@ -342,9 +333,8 @@ export function parseSessionChannelResult(operation: SessionChannelOperation, va
 				channels: source.channels.map(parseSessionChannelSnapshot),
 			};
 		case "open":
-		case "add":
+		case "set-members":
 			return { op: operation.op, channel: parseSessionChannelSnapshot(source.channel) };
-		case "remove":
 		case "leave":
 			return {
 				op: operation.op,

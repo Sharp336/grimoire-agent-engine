@@ -133,6 +133,9 @@
 - Fixed explicit `thinking` metadata in `models.yml` custom definitions and `modelOverrides` being replaced by canonical catalog policy during model rebuilding. ([#7307](https://github.com/can1357/oh-my-pi/issues/7307))
 - Fixed the auto-titler installing a model's whole answer as the session title when the tiny title model ignored the titling task and answered the first user message instead. `normalizeGeneratedTitle` now rejects overlong output (>80 chars or >12 words) so the caller defers titling to the next user turn rather than accepting a full sentence ([#7303](https://github.com/can1357/oh-my-pi/issues/7303)).
 - Fixed the in-process `kill` builtin to validate signals, preserve negative PID operands, signal every process in pipeline jobs, continue after bad targets, and refuse non-probe signals aimed at the host process or process group.
+### Added
+
+- Added opt-in, user-authorized cross-session agent channels with interactive multi-select membership, multiple concurrent groups, channel-scoped recipient fanout, revocation, and termination notifications.
 
 ## [17.2.3] - 2026-08-01
 
@@ -147,9 +150,6 @@
 - Fixed ephemeral side turns and native compaction bypassing an explicit or fork-inherited prompt cache key ([#7218](https://github.com/can1357/oh-my-pi/issues/7218)).
 - Fixed the live Ask dialog crashing the whole session with a `replaceTabs` TypeError when a question reached `AskDialogComponent` without a string `question` field; questions are now normalized at dialog entry, mirroring the transcript renderer ([#7211](https://github.com/can1357/oh-my-pi/issues/7211)).
 - Fixed Codex web search collapsing backend errors to `Codex error (): Unknown error`; the SSE error parser now preserves the backend code and message from top-level, nested `error`, and `response.error` envelopes ([#7200](https://github.com/can1357/oh-my-pi/issues/7200)).
-### Added
-
-- Added user-authorized cross-session agent channels with bidirectional group messaging, channel-scoped recipient fanout, user and agent revocation, and member termination notifications.
 
 ## [17.2.2] - 2026-07-31
 

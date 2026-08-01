@@ -3496,7 +3496,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			throw new Error(`Agent "${resolvedAgentId}" was replaced during session initialization.`);
 		}
 		hasRegistered = true;
-		if (agentKind === "main" && options.hasUI && !options.parentTaskPrefix) {
+		const sessionChannelsEnabled =
+			settings.get("channels.enabled") ||
+			process.env.OMP_SESSION_CHANNELS === "1" ||
+			process.env.PI_SESSION_CHANNELS === "1";
+		if (agentKind === "main" && options.hasUI && !options.parentTaskPrefix && sessionChannelsEnabled) {
 			try {
 				sessionChannelManager = await SessionChannelManager.start(session, agentRegistry);
 			} catch (error) {

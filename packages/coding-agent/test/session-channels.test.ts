@@ -1,15 +1,22 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as net from "node:net";
+import {
+	type ExtensionUISelectItem,
+	getExtensionUISelectOptionLabel,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import type { DaemonBrokerClient } from "@oh-my-pi/pi-coding-agent/launch/client";
 import * as launchClient from "@oh-my-pi/pi-coding-agent/launch/client";
 import type { DaemonOperation } from "@oh-my-pi/pi-coding-agent/launch/protocol";
+import type { InteractiveSelectorDialogOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { SessionChannelBroker } from "@oh-my-pi/pi-coding-agent/session-channels/broker";
+import { handleSessionChannelTuiCommand } from "@oh-my-pi/pi-coding-agent/session-channels/command";
 import { SessionChannelManager } from "@oh-my-pi/pi-coding-agent/session-channels/manager";
 import type { ChannelAgentSnapshot, ChannelSessionSnapshot } from "@oh-my-pi/pi-coding-agent/session-channels/protocol";
+import type { TuiSlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 
 function agent(id: string, kind: "main" | "sub" = "main"): ChannelAgentSnapshot {
 	return { id, displayName: id, kind, status: "running", lastActivity: Date.now() };
@@ -253,7 +260,7 @@ describe("cross-session channels", () => {
 		).rejects.toThrow("Unknown or closed channel");
 	});
 
-	it("supports user removal and full closure while notifying every affected member", async () => {
+	it("keeps multiple channels for one session independent", async () => {
 		const broker = new SessionChannelBroker();
 		const socketA = new net.Socket();
 		const socketB = new net.Socket();
@@ -262,6 +269,50 @@ describe("cross-session channels", () => {
 			[socketA, channelSession("aaaaaaaaaaaaaaaa")],
 			[socketB, channelSession("bbbbbbbbbbbbbbbb")],
 			[socketC, channelSession("cccccccccccccccc")],
+		] as const) {
+			await broker.dispatch({ op: "register", session: snapshot }, socket);
+		}
+
+		const first = await broker.dispatch(
+			{ op: "open", sessionId: "aaaaaaaaaaaaaaaa", memberIds: ["bbbbbbbbbbbbbbbb"] },
+			socketA,
+		);
+		if (first.op !== "open") throw new Error("Expected first open result");
+		await drainChannelUpdate(broker, socketA, "aaaaaaaaaaaaaaaa");
+		await drainChannelUpdate(broker, socketB, "bbbbbbbbbbbbbbbb");
+		const second = await broker.dispatch(
+			{ op: "open", sessionId: "aaaaaaaaaaaaaaaa", memberIds: ["cccccccccccccccc"] },
+			socketA,
+		);
+		if (second.op !== "open") throw new Error("Expected second open result");
+		await drainChannelUpdate(broker, socketA, "aaaaaaaaaaaaaaaa");
+		await drainChannelUpdate(broker, socketC, "cccccccccccccccc");
+
+		const beforeClose = await broker.dispatch({ op: "list", sessionId: "aaaaaaaaaaaaaaaa" }, socketA);
+		if (beforeClose.op !== "list") throw new Error("Expected list result");
+		expect(beforeClose.channels).toHaveLength(2);
+		expect(beforeClose.channels.map(channel => channel.id)).toEqual(
+			expect.arrayContaining([first.channel.id, second.channel.id]),
+		);
+
+		await broker.dispatch({ op: "close", sessionId: "aaaaaaaaaaaaaaaa", channelId: first.channel.id }, socketA);
+		await broker.dispatch({ op: "wait", sessionId: "aaaaaaaaaaaaaaaa", timeoutMs: 1 }, socketA);
+		await broker.dispatch({ op: "wait", sessionId: "bbbbbbbbbbbbbbbb", timeoutMs: 1 }, socketB);
+		const afterClose = await broker.dispatch({ op: "list", sessionId: "aaaaaaaaaaaaaaaa" }, socketA);
+		expect(afterClose.op === "list" && afterClose.channels.map(channel => channel.id)).toEqual([second.channel.id]);
+	});
+
+	it("atomically toggles user-selected members and notifies removed sessions", async () => {
+		const broker = new SessionChannelBroker();
+		const socketA = new net.Socket();
+		const socketB = new net.Socket();
+		const socketC = new net.Socket();
+		const socketD = new net.Socket();
+		for (const [socket, snapshot] of [
+			[socketA, channelSession("aaaaaaaaaaaaaaaa")],
+			[socketB, channelSession("bbbbbbbbbbbbbbbb")],
+			[socketC, channelSession("cccccccccccccccc")],
+			[socketD, channelSession("dddddddddddddddd")],
 		] as const) {
 			await broker.dispatch({ op: "register", session: snapshot }, socket);
 		}
@@ -274,15 +325,20 @@ describe("cross-session channels", () => {
 		await drainChannelUpdate(broker, socketB, "bbbbbbbbbbbbbbbb");
 		await drainChannelUpdate(broker, socketC, "cccccccccccccccc");
 
-		await broker.dispatch(
+		const toggled = await broker.dispatch(
 			{
-				op: "remove",
+				op: "set-members",
 				sessionId: "aaaaaaaaaaaaaaaa",
 				channelId: opened.channel.id,
-				memberId: "cccccccccccccccc",
+				memberIds: ["bbbbbbbbbbbbbbbb", "dddddddddddddddd"],
 			},
 			socketA,
 		);
+		expect(toggled.op === "set-members" && toggled.channel.members.map(member => member.id)).toEqual([
+			"aaaaaaaaaaaaaaaa",
+			"bbbbbbbbbbbbbbbb",
+			"dddddddddddddddd",
+		]);
 		for (const [socket, sessionId] of [
 			[socketA, "aaaaaaaaaaaaaaaa"],
 			[socketB, "bbbbbbbbbbbbbbbb"],
@@ -295,11 +351,15 @@ describe("cross-session channels", () => {
 				closed: false,
 			});
 		}
+		await drainChannelUpdate(broker, socketA, "aaaaaaaaaaaaaaaa");
+		await drainChannelUpdate(broker, socketB, "bbbbbbbbbbbbbbbb");
+		await drainChannelUpdate(broker, socketD, "dddddddddddddddd");
 
 		await broker.dispatch({ op: "close", sessionId: "aaaaaaaaaaaaaaaa", channelId: opened.channel.id }, socketA);
 		for (const [socket, sessionId] of [
 			[socketA, "aaaaaaaaaaaaaaaa"],
 			[socketB, "bbbbbbbbbbbbbbbb"],
+			[socketD, "dddddddddddddddd"],
 		] as const) {
 			const result = await broker.dispatch({ op: "wait", sessionId, timeoutMs: 1 }, socket);
 			expect(result.op === "wait" && result.event).toMatchObject({ type: "channel-closed", reason: "user" });
@@ -318,6 +378,80 @@ describe("cross-session channels", () => {
 				socketB,
 			),
 		).rejects.toThrow("Unknown or closed channel");
+	});
+
+	it("opens and toggles among multiple channels through checkbox selectors", async () => {
+		const broker = new SessionChannelBroker();
+		vi.spyOn(launchClient, "createDaemonBrokerClient").mockImplementation(async () => {
+			const socket = new net.Socket();
+			return {
+				request: async (operation: DaemonOperation) => {
+					if (operation.op !== "channel") throw new Error("Expected channel operation");
+					return { op: "channel", result: await broker.dispatch(operation.operation, socket) };
+				},
+				close: () => broker.disconnectSocket(socket),
+			} as unknown as DaemonBrokerClient;
+		});
+
+		const a = participant("A");
+		const b = participant("B");
+		const c = participant("C");
+		const managerA = await SessionChannelManager.start(a.session, a.registry, a.bus);
+		const managerB = await SessionChannelManager.start(b.session, b.registry, b.bus);
+		const managerC = await SessionChannelManager.start(c.session, c.registry, c.bus);
+		managers.push(managerA, managerB, managerC);
+
+		type SelectorChoice = (labels: string[]) => string | undefined;
+		const choices: SelectorChoice[] = [
+			labels => labels.find(label => label.startsWith(managerB.id)),
+			labels => labels.find(label => label.startsWith(managerC.id)),
+			labels => labels.find(label => label === "Done (2 selected)"),
+		];
+		const selectorStates: Array<{ title: string; checked: readonly number[] | undefined }> = [];
+		const statuses: string[] = [];
+		const errors: string[] = [];
+		const ctx = {
+			session: a.session,
+			editor: { setText: () => {} },
+			showStatus: (message: string) => statuses.push(message),
+			showError: (message: string) => errors.push(message),
+			showHookSelector: async (
+				title: string,
+				options: ExtensionUISelectItem[],
+				dialogOptions?: InteractiveSelectorDialogOptions,
+			) => {
+				const labels = options.map(getExtensionUISelectOptionLabel);
+				selectorStates.push({ title, checked: dialogOptions?.checkedIndices });
+				return choices.shift()?.(labels);
+			},
+		};
+		// InteractiveModeContext is intentionally narrowed to the fields used by the command handler.
+		const runtime = { ctx } as unknown as TuiSlashCommandRuntime;
+
+		await handleSessionChannelTuiCommand({ name: "channel", args: "open", text: "/channel open" }, runtime);
+		const openedState = await managerA.state();
+		expect(openedState.channels).toHaveLength(1);
+		expect(openedState.channels[0]?.members).toHaveLength(3);
+		expect(selectorStates.filter(state => state.title === "Open channel with sessions").at(-1)?.checked).toHaveLength(
+			2,
+		);
+
+		const second = await managerA.open([managerB.id]);
+		choices.push(
+			labels => labels.find(label => label.startsWith(second.id)),
+			labels => labels.find(label => label.startsWith(managerB.id)),
+			labels => labels.find(label => label.startsWith(managerC.id)),
+			labels => labels.find(label => label === "Done (1 selected)"),
+		);
+		await handleSessionChannelTuiCommand({ name: "channel", args: "toggle", text: "/channel toggle" }, runtime);
+
+		const toggledState = await managerA.state();
+		expect(toggledState.channels).toHaveLength(2);
+		const toggled = toggledState.channels.find(channel => channel.id === second.id);
+		expect(toggled?.members).toHaveLength(2);
+		expect(toggled?.members.map(member => member.id)).toEqual(expect.arrayContaining([managerA.id, managerC.id]));
+		expect(statuses.some(message => message.includes("opened with 3 sessions"))).toBe(true);
+		expect(errors).toEqual([]);
 	});
 
 	it("delivers session and subagent termination notices to every local channel agent", async () => {
@@ -375,5 +509,38 @@ describe("cross-session channels", () => {
 		expect(managerA.listPeers().every(peer => peer.channelId === channel.id && !peer.id.includes(managerB.id))).toBe(
 			true,
 		);
+	});
+	it("notifies local agents when the broker connection drops their channels", async () => {
+		const broker = new SessionChannelBroker();
+		const sockets: net.Socket[] = [];
+		vi.spyOn(Bun, "sleep").mockResolvedValue();
+		vi.spyOn(launchClient, "createDaemonBrokerClient").mockImplementation(async () => {
+			const socket = new net.Socket();
+			sockets.push(socket);
+			return {
+				request: async (operation: DaemonOperation) => {
+					if (operation.op !== "channel") throw new Error("Expected channel operation");
+					return { op: "channel", result: await broker.dispatch(operation.operation, socket) };
+				},
+				close: () => broker.disconnectSocket(socket),
+			} as unknown as DaemonBrokerClient;
+		});
+
+		const a = participant("A");
+		const b = participant("B");
+		const managerA = await SessionChannelManager.start(a.session, a.registry, a.bus);
+		const managerB = await SessionChannelManager.start(b.session, b.registry, b.bus);
+		managers.push(managerA, managerB);
+		await managerA.open([managerB.id]);
+		await waitForPeers(managerB, () => managerB.listPeers().length === 1);
+
+		const notice = a.waitForMessage(
+			message => message.body.includes("channel broker disconnected") && message.body.includes("authorization"),
+		);
+		const socketA = sockets[0];
+		if (!socketA) throw new Error("Expected manager A broker socket");
+		broker.disconnectSocket(socketA);
+		await notice;
+		expect(managerA.listPeers()).toEqual([]);
 	});
 });

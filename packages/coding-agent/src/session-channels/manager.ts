@@ -33,7 +33,7 @@ function channelAddress(channelId: string, sessionId: string, agentId: string): 
 }
 
 function sessionLabel(session: ChannelSessionSnapshot): string {
-	return session.title ?? path.basename(session.cwd) ?? session.id;
+	return session.title?.trim() || path.basename(session.cwd) || session.id;
 }
 
 interface ParsedChannelAddress {
@@ -114,31 +114,19 @@ export class SessionChannelManager implements IrcExternalTransport {
 		return result.channel;
 	}
 
-	async add(channelQuery: string, memberQueries: readonly string[]): Promise<SessionChannelSnapshot> {
-		if (memberQueries.length === 0) throw new Error("Adding members requires at least one target session");
+	async setMembers(channelQuery: string, memberQueries: readonly string[]): Promise<SessionChannelSnapshot> {
+		if (memberQueries.length === 0) throw new Error("A channel requires at least one other running session");
 		const state = await this.state();
 		const channel = this.#resolveChannel(channelQuery, state.channels);
 		const memberIds = memberQueries.map(query => this.#resolveSession(query, state.sessions).id);
-		const result = await this.#request({ op: "add", sessionId: this.id, channelId: channel.id, memberIds });
-		if (result.op !== "add") throw new Error(`Unexpected channel ${result.op} result`);
-		this.#channels.set(result.channel.id, result.channel);
-		this.#notifyPeerListeners();
-		return result.channel;
-	}
-
-	async remove(channelQuery: string, memberQuery: string): Promise<SessionChannelSnapshot | null> {
-		const state = await this.state();
-		const channel = this.#resolveChannel(channelQuery, state.channels);
-		const member = this.#resolveSession(memberQuery, channel.members);
 		const result = await this.#request({
-			op: "remove",
+			op: "set-members",
 			sessionId: this.id,
 			channelId: channel.id,
-			memberId: member.id,
+			memberIds,
 		});
-		if (result.op !== "remove") throw new Error(`Unexpected channel ${result.op} result`);
-		if (result.channel) this.#channels.set(result.channel.id, result.channel);
-		else this.#channels.delete(channel.id);
+		if (result.op !== "set-members") throw new Error(`Unexpected channel ${result.op} result`);
+		this.#channels.set(result.channel.id, result.channel);
 		this.#notifyPeerListeners();
 		return result.channel;
 	}
@@ -280,8 +268,19 @@ export class SessionChannelManager implements IrcExternalTransport {
 				if (result.event) await this.#handleEvent(result.event);
 			} catch (error) {
 				if (this.#closed) return;
+				const lostChannels = [...this.#channels.values()];
 				this.#channels.clear();
 				this.#notifyPeerListeners();
+				await Promise.all(
+					lostChannels.map(channel =>
+						this.#notifyLocalAgents(
+							channel.id,
+							`Connection to channel ${channel.name ?? channel.id} was lost when the channel broker disconnected. New user authorization is required to reconnect. No response is expected.`,
+						),
+					),
+				).catch(notifyError => {
+					logger.debug("Session channel disconnect notification failed", { error: String(notifyError) });
+				});
 				logger.debug("Session channel event wait failed; reconnecting", { error: String(error) });
 				await Bun.sleep(RECONNECT_DELAY_MS);
 				try {

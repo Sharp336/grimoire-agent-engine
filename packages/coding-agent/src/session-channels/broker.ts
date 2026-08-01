@@ -59,25 +59,11 @@ export class SessionChannelBroker {
 			case "open":
 				this.#assertSocketSession(operation.sessionId, socket);
 				return { op: "open", channel: this.#open(operation.sessionId, operation.memberIds, operation.name) };
-			case "add":
+			case "set-members":
 				this.#assertSocketSession(operation.sessionId, socket);
 				return {
-					op: "add",
-					channel: this.#add(operation.sessionId, operation.channelId, operation.memberIds),
-				};
-			case "remove":
-				this.#assertSocketSession(operation.sessionId, socket);
-				if (operation.memberId === operation.sessionId) {
-					throw new Error("Use leave to remove the initiating session from a channel");
-				}
-				return {
-					op: "remove",
-					channel: this.#removeMember(
-						this.#memberChannel(operation.channelId, operation.sessionId),
-						operation.memberId,
-						"user",
-						operation.sessionId,
-					),
+					op: "set-members",
+					channel: this.#setMembers(operation.sessionId, operation.channelId, operation.memberIds),
 				};
 			case "close":
 				this.#assertSocketSession(operation.sessionId, socket);
@@ -173,12 +159,36 @@ export class SessionChannelBroker {
 		return snapshot;
 	}
 
-	#add(sessionId: string, channelId: string, requestedMemberIds: string[]): SessionChannelSnapshot {
+	#setMembers(sessionId: string, channelId: string, requestedMemberIds: string[]): SessionChannelSnapshot {
 		const channel = this.#memberChannel(channelId, sessionId);
-		for (const memberId of new Set(requestedMemberIds)) {
-			this.#session(memberId);
-			channel.members.add(memberId);
+		const nextMemberIds = [...new Set([sessionId, ...requestedMemberIds])];
+		if (nextMemberIds.length < 2) throw new Error("A channel requires at least one other running session");
+		for (const memberId of nextMemberIds) this.#session(memberId);
+
+		const previousMemberIds = new Set(channel.members);
+		const nextMembers = new Set(nextMemberIds);
+		const removedIds = [...previousMemberIds].filter(memberId => !nextMembers.has(memberId));
+		const retainedIds = nextMemberIds.filter(memberId => previousMemberIds.has(memberId));
+		channel.members = nextMembers;
+		const remainingMembers = nextMemberIds.map(memberId => this.#session(memberId).snapshot);
+
+		for (const removedId of removedIds) {
+			const member = this.#session(removedId).snapshot;
+			this.#purgeMessages(channel.id, removedId);
+			const event: SessionChannelEvent = {
+				type: "member-left",
+				channelId: channel.id,
+				channelName: channel.name,
+				member,
+				reason: "user",
+				actorSessionId: sessionId,
+				remainingMembers,
+				closed: false,
+			};
+			for (const retainedId of retainedIds) this.#enqueue(this.#session(retainedId), event);
+			this.#enqueue(this.#session(removedId), event);
 		}
+
 		const snapshot = this.#snapshot(channel);
 		this.#broadcast(channel, { type: "channel-updated", channel: snapshot });
 		return snapshot;

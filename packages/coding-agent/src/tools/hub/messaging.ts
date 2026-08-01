@@ -170,9 +170,10 @@ export async function executeSend(
 		return hubErrorResult("`await` requires exactly one recipient.", { op: "send", from: senderId, to: toLabel });
 	}
 	const singleRecipient = recipients[0] ?? "";
-	const isBroadcast = !recipientArray && singleRecipient === "all";
-	if (isBroadcast && params.await) {
-		return hubErrorResult('`await` is invalid with to:"all" — broadcasts have no single replier.', {
+	const isLocalBroadcast = !recipientArray && singleRecipient === "all";
+	const isChannelBroadcast = !recipientArray && singleRecipient.endsWith("/all");
+	if ((isLocalBroadcast || isChannelBroadcast) && params.await) {
+		return hubErrorResult("`await` is invalid for broadcasts because replies come from individual agents.", {
 			op: "send",
 			from: senderId,
 			to: toLabel,
@@ -217,8 +218,8 @@ export async function executeSend(
 	try {
 		// `all` retains the process-local broadcast contract. Cross-session
 		// broadcasts use `<channel-id>/all` so one channel cannot leak into another.
-		const targets = isBroadcast ? registry.listVisibleTo(senderId).map(ref => ref.id) : recipients;
-		const suppressRelay = isBroadcast && targets.includes(MAIN_AGENT_ID);
+		const targets = isLocalBroadcast ? registry.listVisibleTo(senderId).map(ref => ref.id) : recipients;
+		const suppressRelay = isLocalBroadcast && targets.includes(MAIN_AGENT_ID);
 		const receipts = await Promise.all(
 			targets.map(target =>
 				bus.send(

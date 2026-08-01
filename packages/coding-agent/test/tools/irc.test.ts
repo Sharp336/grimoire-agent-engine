@@ -713,6 +713,15 @@ describe("IRC", () => {
 			expect(crossChannel.isError).toBe(true);
 			expect(sent).toHaveLength(2);
 
+			const awaitedBroadcast = await tool.execute("call-awaited-all", {
+				op: "send",
+				to: "channel-a/all",
+				message: "who replies?",
+				await: true,
+			});
+			expect(awaitedBroadcast.isError).toBe(true);
+			expect(sent).toHaveLength(2);
+
 			const all = await tool.execute("call-all", {
 				op: "send",
 				to: "channel-a/all",
