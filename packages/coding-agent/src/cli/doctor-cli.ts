@@ -188,10 +188,24 @@ async function collectConfigFindings(flags: DoctorCommandFlags): Promise<DoctorF
 	const agentDir = flags.agentDir ?? getAgentDir();
 	const findings: DoctorFinding[] = [];
 	findings.push(await diagnoseSettingsConfig(agentDir));
-	// relocateReadOnly points at the scoped path without running the JSON→YAML
-	// migration; diagnose() parses/classifies without quarantining or caching.
-	const modelsResult = ModelsConfigFile.relocateReadOnly(path.join(agentDir, "models.yml")).diagnose();
-	findings.push(loadResultConfigFinding("models", "models.yml", modelsResult));
+	// diagnose(path) parses/classifies at an explicit path without running the
+	// JSON→YAML migration, quarantining, or caching — read-only.
+	const modelsYml = path.join(agentDir, "models.yml");
+	let modelsResult = ModelsConfigFile.diagnose(modelsYml);
+	let modelsFilename = "models.yml";
+	if (modelsResult.status === "not-found") {
+		// Legacy models.json: startup feeds it through #ensureMigrated(), but that
+		// writes to disk — the read-only diagnostic must classify the JSON source
+		// directly so a broken legacy models.json surfaces as an error instead of
+		// a false "absent". diagnose() on the .json path reads/parses it as JSONC
+		// without any migration or write.
+		const jsonResult = ModelsConfigFile.diagnose(path.join(agentDir, "models.json"));
+		if (jsonResult.status !== "not-found") {
+			modelsResult = jsonResult;
+			modelsFilename = "models.json";
+		}
+	}
+	findings.push(loadResultConfigFinding("models", modelsFilename, modelsResult));
 	findings.push(...(await collectQuarantinedConfigs(agentDir)));
 	return findings;
 }
@@ -199,14 +213,14 @@ async function collectConfigFindings(flags: DoctorCommandFlags): Promise<DoctorF
 async function diagnoseSettingsConfig(agentDir: string): Promise<DoctorFinding> {
 	// The loader tries MAIN_CONFIG_FILENAMES in order and uses the first present
 	// file; diagnose that one. Absent-with-defaults is ok, not a problem finding.
+	// classifySettingsYaml already distinguishes missing (ENOENT) from unreadable
+	// (EACCES etc.) — only a true "missing" result advances to the next candidate;
+	// any other access/read failure becomes an error finding instead of a false
+	// "absent".
 	for (const filename of MAIN_CONFIG_FILENAMES) {
 		const candidate = path.join(agentDir, filename);
-		try {
-			await fs.promises.access(candidate);
-		} catch {
-			continue;
-		}
 		const result = await classifySettingsYaml(candidate);
+		if (result.kind === "missing") continue;
 		return yamlConfigFinding("settings", filename, result);
 	}
 	return {
@@ -261,29 +275,46 @@ function loadResultConfigFinding(name: string, filename: string, result: LoadRes
 }
 
 async function collectQuarantinedConfigs(agentDir: string): Promise<DoctorFinding[]> {
-	// Settings quarantine naming: `${filePath}.broken-${stamp}`. Each is an
-	// error: the config was moved aside after failing to load.
+	// Quarantine naming: `${filePath}.broken-${stamp}`. Only files whose base
+	// name matches a known omp config filename are omp configs — an unrelated
+	// `foo.broken-*` is not ours to report. Aggregate every matched quarantine
+	// into a single `config.quarantined` finding (one id, each file listed in
+	// details) so repeated backups of the same config do not duplicate ids.
+	const knownConfigBasenames: Record<string, true> = {
+		"config.yml": true,
+		"config.yaml": true,
+		"settings.yml": true,
+		"settings.yaml": true,
+		"models.yml": true,
+		"models.yaml": true,
+		"models.json": true,
+	};
 	let entries: string[];
 	try {
 		entries = await fs.promises.readdir(agentDir);
 	} catch {
 		return [];
 	}
-	const findings: DoctorFinding[] = [];
+	const quarantined: string[] = [];
 	for (const entry of entries) {
 		const match = /^(.+)\.broken-.+$/.exec(entry);
 		if (!match) continue;
 		const original = match[1] as string;
-		findings.push({
-			id: `config.${original}`,
+		if (!(original in knownConfigBasenames)) continue;
+		quarantined.push(entry);
+	}
+	if (quarantined.length === 0) return [];
+	quarantined.sort();
+	return [
+		{
+			id: "config.quarantined",
 			category: "config",
 			status: "error",
-			summary: `${original}: config was quarantined after failing to load`,
-			details: [],
-			remedy: `Review ${entry} and restore or delete it`,
-		});
-	}
-	return findings;
+			summary: `${quarantined.length} quarantined config backup${quarantined.length === 1 ? "" : "s"} after failed loads`,
+			details: quarantined,
+			remedy: "Review each backup and restore or delete it",
+		},
+	];
 }
 
 async function collectStorageFindings(flags: DoctorCommandFlags): Promise<DoctorFinding[]> {

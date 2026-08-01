@@ -368,10 +368,60 @@ describe("omp doctor", () => {
 		await fs.writeFile(path.join(root, "settings.yaml.broken-1700000000000-12345-deadbeef"), "garbage", "utf8");
 
 		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
-		const quarantine = report.findings.find(entry => entry.id === "config.settings.yaml");
+		const quarantine = report.findings.find(entry => entry.id === "config.quarantined");
 		expect(quarantine?.status).toBe("error");
 		expect(quarantine?.summary).toContain("quarantined");
-		expect(quarantine?.remedy).toContain("settings.yaml.broken-");
+		expect(quarantine?.details).toContain("settings.yaml.broken-1700000000000-12345-deadbeef");
+	});
+
+	test("a broken legacy models.json surfaces a config error, not absent", async () => {
+		const modelsJson = path.join(root, "models.json");
+		const broken = "{ not valid json ";
+		await fs.writeFile(modelsJson, broken, "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const finding = report.findings.find(entry => entry.id === "config.models");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.length).toBeGreaterThan(0);
+		// Read-only probe: the file is byte-identical after the run.
+		expect(await fs.readFile(modelsJson, "utf8")).toBe(broken);
+	});
+
+	test("an unreadable settings file surfaces an error, not absent", async () => {
+		// root bypasses Unix file permissions, so this cannot exercise EACCES.
+		if (process.getuid?.() === 0) return;
+		const configPath = path.join(root, "config.yml");
+		await fs.writeFile(configPath, "theme:\n  dark: true\n", "utf8");
+		await fs.chmod(configPath, 0o000);
+		try {
+			const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+			const finding = report.findings.find(entry => entry.id === "config.settings");
+			expect(finding?.status).toBe("error");
+			expect(finding?.summary).toContain("unreadable");
+		} finally {
+			// Restore permissions so afterEach cleanup can remove the file.
+			await fs.chmod(configPath, 0o644);
+		}
+	});
+
+	test("two broken backups of the same config produce one finding with both files", async () => {
+		await fs.writeFile(path.join(root, "models.yml.broken-1700000000000-aaa"), "garbage1", "utf8");
+		await fs.writeFile(path.join(root, "models.yml.broken-1700000000001-bbb"), "garbage2", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const quarantine = report.findings.filter(entry => entry.id === "config.quarantined");
+		expect(quarantine).toHaveLength(1);
+		expect(quarantine[0]?.details).toHaveLength(2);
+		expect(quarantine[0]?.details).toContain("models.yml.broken-1700000000000-aaa");
+		expect(quarantine[0]?.details).toContain("models.yml.broken-1700000000001-bbb");
+	});
+
+	test("an unrelated broken file is ignored by the quarantine scan", async () => {
+		await fs.writeFile(path.join(root, "foo.broken-1700000000000-xyz"), "garbage", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const quarantine = report.findings.filter(entry => entry.id === "config.quarantined");
+		expect(quarantine).toHaveLength(0);
 	});
 
 	test("a clean temp dir yields ok config findings", async () => {
