@@ -15,6 +15,7 @@ import {
 	type DbRepair,
 	FREE_PAGE_VACUUM_RATIO,
 	probeDatabase,
+	recoverInterruptedSwap,
 	repairDatabase,
 	resolveDoctorDatabases,
 } from "./doctor-sqlite";
@@ -95,12 +96,14 @@ function collectToolFindings(): DoctorFinding[] {
 }
 
 function storageFinding(probe: DbProbe, repair: DbRepair | null): DoctorFinding {
+	const details = [
+		`size ${formatBytes(probe.dbBytes)} · wal ${formatBytes(probe.walBytes)} · journal ${probe.journalMode ?? "unknown"}`,
+	];
+	if (repair?.quarantinePath) details.push(`originals preserved at ${repair.quarantinePath}`);
 	const base = {
 		id: `storage.${probe.label}`,
 		category: "storage" as const,
-		details: [
-			`size ${formatBytes(probe.dbBytes)} · wal ${formatBytes(probe.walBytes)} · journal ${probe.journalMode ?? "unknown"}`,
-		],
+		details,
 	};
 	if (probe.busy || repair?.busy === true) {
 		return {
@@ -179,10 +182,27 @@ async function collectStorageFindings(flags: DoctorCommandFlags): Promise<Doctor
 		const findings: DoctorFinding[] = [];
 		// Sequential probes: parallel opens of sibling databases multiply lock pressure for no real gain.
 		for (const db of databases) {
+			const swap = await recoverInterruptedSwap(db, flags.fix === true);
+			if (swap.found && !swap.restored) {
+				findings.push({
+					id: `storage.${db.label}`,
+					category: "storage",
+					status: flags.fix === true ? "error" : "warning",
+					summary:
+						flags.fix === true
+							? `${db.label}: interrupted swap rollback failed`
+							: `${db.label}: interrupted swap detected`,
+					details: swap.error === null ? [] : [swap.error],
+					remedy: "Run `omp doctor --fix` to restore from the archived original",
+				});
+				continue;
+			}
 			const probe = await probeDatabase(db);
 			if (!probe.present) continue;
 			const repair = flags.fix === true ? await repairDatabase(probe) : null;
-			findings.push(storageFinding(probe, repair));
+			const finding = storageFinding(probe, repair);
+			if (swap.restored) finding.details.push("restored from archive after an interrupted swap");
+			findings.push(finding);
 		}
 		return findings;
 	};

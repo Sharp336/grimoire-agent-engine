@@ -138,22 +138,69 @@ describe("omp doctor", () => {
 		expect(siblings.filter(name => name.startsWith("models.db.corrupt-"))).toHaveLength(1);
 	});
 
-	test("corrupt precious database is rescued or left untouched, never deleted", async () => {
+	test("data-destroying corruption refuses the swap but preserves a recovery dump", async () => {
 		const dbPath = getAgentDbPath(root);
 		await createDatabaseWithRows(dbPath, 500);
+		// Destroying the table's root page strands every row in lost_and_found,
+		// so no faithful candidate exists and the original must stay in place.
 		await corruptInteriorPages(dbPath);
 
 		const after = await runDoctorCommand({ flags: { agentDir: root, fix: true } });
-		const siblings = await fs.readdir(path.dirname(dbPath));
-		const quarantined = siblings.filter(name => name.startsWith("agent.db.corrupt-"));
-		// Both branches keep a database at the original path: the swapped-in
-		// rescue, or the untouched original after a failed rescue.
+		const finding = after.findings.find(entry => entry.id === "storage.agent.db");
+		expect(finding?.status).toBe("error");
+		expect(finding?.fixed).toBeUndefined();
+		expect(finding?.details.join("\n")).toContain("recovery dump preserved at");
+		// The corrupt original is untouched, and the dump keeps the orphaned rows for manual salvage.
 		expect(await pathExists(dbPath)).toBe(true);
-		if (quarantined.length > 0) {
-			expect(quarantined).toHaveLength(1);
-			const finding = after.findings.find(entry => entry.id === "storage.agent.db");
-			expect(finding?.summary).toContain("rescued");
-		}
+		expect(quickCheck(dbPath)).not.toBe("ok");
+		const backupRoot = path.join(path.dirname(dbPath), ".omp-doctor-backups");
+		const backups = (await fs.readdir(backupRoot)).filter(name => name.startsWith("agent.db."));
+		expect(backups).toHaveLength(1);
+		const dump = await Bun.file(path.join(backupRoot, backups[0] as string, "recovery.sql")).text();
+		expect(dump).toContain("INSERT INTO lost_and_found");
+	});
+
+	test("freelist-only corruption is salvaged into a verified replacement", async () => {
+		const dbPath = getAgentDbPath(root);
+		await createDatabaseWithRows(dbPath, 500);
+		const db = new Database(dbPath);
+		db.run("DELETE FROM t");
+		db.close();
+		// The deleted pages are now freelist; corrupting them loses no user rows.
+		await corruptInteriorPages(dbPath);
+
+		const after = await runDoctorCommand({ flags: { agentDir: root, fix: true } });
+		const finding = after.findings.find(entry => entry.id === "storage.agent.db");
+		expect(finding?.fixed).toBe(true);
+		expect(finding?.summary).toMatch(/salvaged|rescued/);
+		expect(quickCheck(dbPath)).toBe("ok");
+		const backups = await fs.readdir(path.join(path.dirname(dbPath), ".omp-doctor-backups"));
+		expect(backups.some(name => name.startsWith("agent.db."))).toBe(true);
+	});
+
+	test("interrupted swap marker: warning read-only, restored under --fix", async () => {
+		const dbPath = getAgentDbPath(root);
+		await createDatabaseWithRows(dbPath, 10);
+		// Simulate a crashed repair: a verified archive of the good database
+		// alongside a swap marker, with the live file damaged afterwards.
+		const archiveDir = path.join(root, ".omp-doctor-backups", "agent.db.test");
+		await fs.mkdir(archiveDir, { recursive: true });
+		await fs.copyFile(dbPath, path.join(archiveDir, "agent.db"));
+		await Bun.write(dbPath, "garbage-not-sqlite");
+		const marker = path.join(root, ".agent.db.omp-doctor-swap.json");
+		await Bun.write(marker, JSON.stringify({ archive: archiveDir }));
+
+		const readOnly = await runDoctorCommand({ flags: { agentDir: root } });
+		const warning = readOnly.findings.find(entry => entry.id === "storage.agent.db");
+		expect(warning?.status).toBe("warning");
+		expect(warning?.summary).toContain("interrupted swap detected");
+		expect(await pathExists(marker)).toBe(true);
+
+		const fixed = await runDoctorCommand({ flags: { agentDir: root, fix: true } });
+		expect(quickCheck(dbPath)).toBe("ok");
+		expect(await pathExists(marker)).toBe(false);
+		const finding = fixed.findings.find(entry => entry.id === "storage.agent.db");
+		expect(finding?.details.join("\n")).toContain("restored from archive");
 	});
 
 	test("missing databases produce no storage findings", async () => {
