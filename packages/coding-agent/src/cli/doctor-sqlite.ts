@@ -13,8 +13,8 @@
  * ~/.omp/agent/scripts/fix_sqlite_databases.py.
  */
 import { Database } from "bun:sqlite";
-import * as fs from "node:fs/promises";
 import * as fsSync from "node:fs";
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { isSqliteBusyError } from "@oh-my-pi/pi-ai/auth-storage";
@@ -435,8 +435,7 @@ async function swapInCandidate(
 		} catch (renameError) {
 			if (lockHandle === null) throw renameError;
 			// Re-check while the lock is still held — no lock-free window yet.
-			if ((await hasHolders(dbPath)) === true)
-				throw new Error("database acquired a holder during swap; aborting");
+			if ((await hasHolders(dbPath)) === true) throw new Error("database acquired a holder during swap; aborting");
 			try {
 				if (!snapshotsEqual(expected, await snapshotTrio(dbPath)))
 					throw new Error("database changed during swap; aborting");
@@ -478,9 +477,10 @@ async function swapInCandidate(
 			await fs.rm(marker, { force: true });
 			await fsyncDir(path.dirname(dbPath));
 		} catch (error) {
-			if (swapCommitted) markerRemovalError = new Error(
-				`swap succeeded but swap marker could not be removed; the database is repaired but a stale marker remains at ${marker}: ${messageOf(error)}`,
-			);
+			if (swapCommitted)
+				markerRemovalError = new Error(
+					`swap succeeded but swap marker could not be removed; the database is repaired but a stale marker remains at ${marker}: ${messageOf(error)}`,
+				);
 			// Rollback succeeded; a leftover marker without swapped:true causes
 			// the next --fix to re-restore the same archive (a benign no-op).
 		}

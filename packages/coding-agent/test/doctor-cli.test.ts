@@ -404,12 +404,15 @@ describe("omp doctor", () => {
 
 	test("a readdir failure on the agent dir surfaces a quarantine error", async () => {
 		const realReaddir = nodeFs.promises.readdir.bind(nodeFs.promises);
-		const readdirSpy = spyOn(nodeFs.promises, "readdir").mockImplementation(async (dirPath, options) => {
+		const readdirSpy = spyOn(nodeFs.promises, "readdir").mockImplementation((async (
+			dirPath: unknown,
+			options: unknown,
+		) => {
 			if (path.resolve(String(dirPath)) === path.resolve(root)) {
 				throw Object.assign(new Error("EACCES: permission denied, scandir"), { code: "EACCES" });
 			}
 			return realReaddir(dirPath as never, options as never);
-		});
+		}) as never);
 		try {
 			const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
 			const quarantine = report.findings.find(entry => entry.id === "config.quarantined");
