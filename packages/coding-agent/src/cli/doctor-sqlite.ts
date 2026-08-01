@@ -554,6 +554,10 @@ export async function probeDatabase(db: DoctorDatabase): Promise<DbProbe> {
 		probe.dbBytes = (await fs.stat(db.path)).size;
 	} catch (error) {
 		if (isEnoent(error)) return probe;
+		// A non-ENOENT stat failure (EACCES, EIO, …) means the file exists but
+		// is inaccessible — report it as present-but-broken, not as absent, so
+		// the collector surfaces it instead of silently skipping it.
+		probe.present = true;
 		probe.openError = messageOf(error);
 		return probe;
 	}
@@ -572,10 +576,19 @@ export async function probeDatabase(db: DoctorDatabase): Promise<DbProbe> {
 		probe.freelistCount = freelist?.freelist_count ?? null;
 		probe.pageSize = pageSize?.page_size ?? null;
 		probe.journalMode = journalMode?.journal_mode ?? null;
-		// quick_check, not integrity_check: integrity_check is O(database size) and doctor must stay bounded.
+		// quick_check performs a full table/index scan but returns only the
+		// first error row — the (1) argument caps the result set, not the scan.
+		// integrity_check is even heavier and unbounded in result rows; doctor
+		// stays bounded by using quick_check and capping its output.
 		const quickCheck = handle.query("PRAGMA quick_check(1)").get() as Pick<PragmaRow, "quick_check"> | null;
 		probe.quickCheck = quickCheck?.quick_check ?? null;
-		probe.foreignKeyViolations = handle.query("PRAGMA foreign_key_check").all().length;
+		// Count FK violations inside SQLite instead of materializing every row;
+		// the table-valued form is available in SQLite ≥ 3.16 (bun:sqlite ≥ 3.40).
+		const fkCount = handle.query("SELECT count(*) AS n FROM pragma_foreign_key_check").get() as Pick<
+			PragmaRow,
+			"n"
+		> | null;
+		probe.foreignKeyViolations = fkCount?.n ?? 0;
 	} catch (error) {
 		probe.openError = messageOf(error);
 		probe.busy = isSqliteBusyError(error);
