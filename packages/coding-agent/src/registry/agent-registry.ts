@@ -37,7 +37,7 @@ type AgentDurationKind = "active" | "span" | "unknown";
  *   attribution and Agent Hub observability, but never a peer — hidden from
  *   agent-facing rosters (`hub`, `history://`) and not messageable/revivable.
  */
-export type AgentKind = "main" | "sub" | "advisor";
+export type AgentKind = "main" | "sub" | "advisor" | "remote";
 
 /** Persisted per-agent totals reconstructed from the child session transcript. */
 export interface AgentMetricsSummary {
@@ -266,7 +266,10 @@ export class AgentRegistry {
 	 */
 	listVisibleTo(id: string): AgentRef[] {
 		return this.list().filter(
-			ref => ref.id !== id && ref.kind !== "advisor" && (ref.status === "running" || ref.status === "idle"),
+			ref =>
+				ref.id !== id &&
+				ref.kind !== "advisor" &&
+				(ref.status === "running" || ref.status === "idle" || ref.kind === "remote"),
 		);
 	}
 
