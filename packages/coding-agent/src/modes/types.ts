@@ -17,7 +17,7 @@ import type {
 import type { CompactOptions } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { MCPManager } from "../mcp";
-import type { PanelRunResult } from "../panel/runtime";
+import type { PanelRunOptions, PanelRunResult } from "../panel/runtime";
 import type { PanelSettings, PanelTaskMode } from "../panel/types";
 import type { PlanApprovalDetails } from "../plan-mode/approved-plan";
 import type { AgentSession } from "../session/agent-session";
@@ -390,6 +390,9 @@ export interface InteractiveModeContext {
 	showAgentsDashboard(): void;
 	showModelSelector(options?: { temporaryOnly?: boolean }): void;
 	showPanelRolePicker(settings: PanelSettings): Promise<string | undefined>;
+	runPanelWithConfirmation(
+		options: Omit<PanelRunOptions, "onProgress" | "plan" | "session" | "signal">,
+	): Promise<PanelRunResult | undefined>;
 	showPanelLineupBuilder(taskMode: PanelTaskMode, request: string): Promise<PanelRunResult | undefined>;
 	showPanelPersonaEditor(): void;
 	showPluginSelector(mode?: "install" | "uninstall"): void;
