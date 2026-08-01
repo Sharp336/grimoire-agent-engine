@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { MnemopiOptions } from "@oh-my-pi/pi-mnemopi";
 import { getMemoriesDir, logger } from "@oh-my-pi/pi-utils";
+import { shellQuote } from "@oh-my-pi/pi-utils/shell";
 import { isSqliteCorruptError, openSqliteDatabase } from "@oh-my-pi/pi-utils/sqlite";
 import type { Settings } from "../config/settings";
 
@@ -243,7 +244,7 @@ function bankOnlyHasCwd(dbPath: string, cwd: string): boolean {
 			damagedBankDbs.add(dbPath);
 			logger.error(
 				`Mnemopi: legacy bank database is damaged; this bank is skipped for the rest of the process. ` +
-					`Repair with: sqlite3 '${dbPath}' '.recover' | sqlite3 '${dbPath}.fixed'`,
+					`Repair with: sqlite3 ${shellQuote(dbPath)} '.recover --ignore-freelist' | sqlite3 ${shellQuote(`${dbPath}.fixed`)}`,
 				{ dbPath, error: String(error) },
 			);
 		} else {

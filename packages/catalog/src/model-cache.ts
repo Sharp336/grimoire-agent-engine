@@ -4,6 +4,7 @@
  */
 import { Database } from "bun:sqlite";
 import { getModelDbPath, logger } from "@oh-my-pi/pi-utils";
+import { shellQuote } from "@oh-my-pi/pi-utils/shell";
 import { configureSqliteDatabase, isSqliteCorruptError } from "@oh-my-pi/pi-utils/sqlite";
 import type { Api, Model, ModelSpec } from "./types";
 
@@ -128,7 +129,7 @@ function latchCorruptCacheDb(resolvedPath: string, err: unknown): void {
 	}
 	logger.error(
 		`Model cache database is damaged; cache reads and writes are disabled for this process. ` +
-			`Repair with: sqlite3 '${resolvedPath}' '.recover' | sqlite3 '${resolvedPath}.fixed'`,
+			`Repair with: sqlite3 ${shellQuote(resolvedPath)} '.recover --ignore-freelist' | sqlite3 ${shellQuote(`${resolvedPath}.fixed`)}`,
 		{ err, dbPath: resolvedPath },
 	);
 }

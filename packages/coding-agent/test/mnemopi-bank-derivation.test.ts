@@ -9,6 +9,7 @@ import {
 	resetLegacyBankCorruptLatchForTests,
 } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
 import { logger, removeWithRetries, TempDir } from "@oh-my-pi/pi-utils";
+import { shellQuote } from "@oh-my-pi/pi-utils/shell";
 
 // Set up a fixture filesystem we can reuse across the two regression
 // suites — same shape as `~/.omp/memories/mnemopi/` on a real install.
@@ -183,6 +184,11 @@ describe("bankOnlyHasCwd corrupt-store latch", () => {
 		);
 		expect(damagedErrors).toHaveLength(1);
 		expect(String(damagedErrors[0]?.[0])).toContain(corruptDbPath);
+		// The repair command shell-quotes the path and uses --ignore-freelist.
+		expect(String(damagedErrors[0]?.[0])).toContain(
+			`sqlite3 ${shellQuote(corruptDbPath)} '.recover --ignore-freelist'`,
+		);
+		expect(String(damagedErrors[0]?.[0])).toContain(`sqlite3 ${shellQuote(`${corruptDbPath}.fixed`)}`);
 
 		// Non-corrupt errors still use debug, not error.
 		const legacyDebugs = debugSpy.mock.calls.filter(

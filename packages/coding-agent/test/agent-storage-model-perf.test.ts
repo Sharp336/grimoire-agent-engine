@@ -5,6 +5,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { getAgentDbPath, getAgentDir, getStatsDbPath, logger, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { shellQuote } from "@oh-my-pi/pi-utils/shell";
 
 describe("AgentStorage model perf aggregates", () => {
 	let tempDir: TempDir;
@@ -186,6 +187,11 @@ describe("AgentStorage model perf aggregates", () => {
 		);
 		expect(damagedErrors).toHaveLength(1);
 		expect(String(damagedErrors[0]?.[0])).toContain(statsDbPath);
+		// The repair command shell-quotes the path and uses --ignore-freelist.
+		expect(String(damagedErrors[0]?.[0])).toContain(
+			`sqlite3 ${shellQuote(statsDbPath)} '.recover --ignore-freelist'`,
+		);
+		expect(String(damagedErrors[0]?.[0])).toContain(`sqlite3 ${shellQuote(`${statsDbPath}.fixed`)}`);
 	});
 
 	it("does not mark the backfill complete when stats.db is corrupt, and a different valid path still imports", async () => {

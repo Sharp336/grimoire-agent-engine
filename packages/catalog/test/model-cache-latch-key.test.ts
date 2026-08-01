@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { readModelCache, resetModelCacheCorruptLatchForTests } from "@oh-my-pi/pi-catalog/model-cache";
 import { getModelDbPath, logger } from "@oh-my-pi/pi-utils";
 import { refreshDirsFromEnv } from "@oh-my-pi/pi-utils/dirs";
+import { shellQuote } from "@oh-my-pi/pi-utils/shell";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const tempDirs: string[] = [];
@@ -62,6 +63,11 @@ describe("model-cache latch key matches the open fallback", () => {
 			call => typeof call[0] === "string" && call[0].includes("Model cache database is damaged"),
 		);
 		expect(damagedErrors).toHaveLength(1);
+		// The repair command shell-quotes the path and uses --ignore-freelist.
+		expect(String(damagedErrors[0]?.[0])).toContain(
+			`sqlite3 ${shellQuote(malformedDbPath)} '.recover --ignore-freelist'`,
+		);
+		expect(String(damagedErrors[0]?.[0])).toContain(`sqlite3 ${shellQuote(`${malformedDbPath}.fixed`)}`);
 
 		// Second call with undefined — must hit the latch (same resolved path)
 		// and return null WITHOUT probing the store again.

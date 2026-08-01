@@ -642,7 +642,7 @@ LIMIT ?4`,
 				this.#statsDbDamagedPaths.add(statsDbPath);
 				logger.error(
 					`Stats database is damaged; model-perf backfill is disabled for this path. ` +
-						`Repair with: sqlite3 '${statsDbPath}' '.recover' | sqlite3 '${statsDbPath}.fixed'`,
+						`Repair with: sqlite3 ${shellQuote(statsDbPath)} '.recover --ignore-freelist' | sqlite3 ${shellQuote(`${statsDbPath}.fixed`)}`,
 					{ err, statsDbPath },
 				);
 				return -1;
