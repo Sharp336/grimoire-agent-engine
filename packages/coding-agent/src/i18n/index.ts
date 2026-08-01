@@ -14,6 +14,7 @@ import * as path from "node:path";
 import { getAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { settings } from "../config/settings";
 import { EMBEDDED_TRANSLATIONS } from "./embedded-translations";
 
 /** 包内 bundled 翻译目录 */
@@ -163,12 +164,22 @@ class I18nManager {
 	}
 
 	/**
-	 * 仅从 config.yml 检测语言（不检查环境变量）
+	 * 检测语言：优先从 Settings（支持 --config overlay），fallback 解析主配置文件
 	 */
 	async #detectLanguageFromConfig(): Promise<string | null> {
+		// Try to read from Settings if initialized (respects --config overlay)
+		try {
+			const settingsLang = settings.get("i18n.language");
+			if (settingsLang === "zh" || settingsLang === "en") {
+				return settingsLang;
+			}
+		} catch {
+			// Settings not initialized yet, fall back to parsing config file
+		}
+		
+		// Fallback: parse main config file
 		try {
 			const agentDir = getAgentDir();
-			// 尝试 config.yml 和 config.yaml
 			for (const basename of ["config.yml", "config.yaml"]) {
 				const configPath = path.join(agentDir, basename);
 				let content: string;
@@ -186,7 +197,7 @@ class I18nManager {
 				}
 			}
 		} catch {
-			// config.yml/config.yaml 不存在或读取失败
+			// config file doesn't exist or can't be read
 		}
 		return null;
 	}
@@ -282,13 +293,13 @@ class I18nManager {
 
 		// 先尝试直接查找扁平 key
 		let value = this.#dict[key];
-		if (value !== undefined && typeof value === "string") {
+		if (value !== undefined && typeof value === "string" && value !== "") {
 			return params ? this.#interpolate(value, params) : value;
 		}
 
 		// 再尝试嵌套查找
 		value = this.#getNestedValue(this.#dict, key);
-		if (value !== undefined && typeof value === "string") {
+		if (value !== undefined && typeof value === "string" && value !== "") {
 			return params ? this.#interpolate(value, params) : value;
 		}
 

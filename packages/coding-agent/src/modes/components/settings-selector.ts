@@ -1282,8 +1282,16 @@ export class SettingsSelectorComponent implements Component {
 			settings.set(path, parsed as never);
 		} else if (schemaType === "number") {
 			// Parse numeric value; empty string clears to undefined for automatic behavior
-			const parsed = value.trim() === "" ? undefined : Number(value);
-			settings.set(path, parsed as never);
+			const trimmed = value.trim();
+			if (trimmed === "") {
+				settings.set(path, undefined as never);
+			} else {
+				const parsed = Number(trimmed);
+				if (!Number.isFinite(parsed)) {
+					throw new Error("Value must be a finite number.");
+				}
+				settings.set(path, parsed as never);
+			}
 		} else if (typeof currentValue === "boolean") {
 			settings.set(path, (value === "true") as never);
 		} else {

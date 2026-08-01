@@ -95,14 +95,31 @@ function extractArgsAndFlagsScoped(content: string, commandName: string): Record
 	return result;
 }
 
+function buildFileNameToPublicNameMap(): Record<string, string> {
+	const registryPath = path.join(process.cwd(), "packages/coding-agent/src/cli-commands.ts");
+	const content = fs.readFileSync(registryPath, "utf-8");
+	const map: Record<string, string> = {};
+	// Match lines like: { name: "search", load: () => import("./commands/web-search").then(m => m.default), aliases: ["q"] },
+	const regex = /name:\s*"([^"]+)",\s*load:\s*\(\)\s*=>\s*import\("\.\/commands\/([^"]+)"\)/g;
+	let match: RegExpExecArray | null;
+	while ((match = regex.exec(content)) !== null) {
+		const publicName = match[1];
+		const fileName = match[2];
+		map[fileName] = publicName;
+	}
+	return map;
+}
+
 function extractCommandsTranslations(): TranslationData {
 	const commandsDir = path.join(process.cwd(), "packages/coding-agent/src/commands");
+	const fileNameToPublicName = buildFileNameToPublicNameMap();
 	const translations: TranslationData = {};
 	const files = fs.readdirSync(commandsDir).filter(f => f.endsWith(".ts"));
 
 	for (const file of files) {
 		const content = fs.readFileSync(path.join(commandsDir, file), "utf-8");
-		const commandName = file.replace(".ts", "");
+		const fileName = file.replace(".ts", "");
+		const commandName = fileNameToPublicName[fileName] ?? fileName;
 
 		// Command class description
 		Object.assign(translations, extractCommandClassDesc(content, commandName));
