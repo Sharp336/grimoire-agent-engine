@@ -31,9 +31,10 @@ function restoreAgentDir(): void {
 	delete Bun.env.PI_CODING_AGENT_DIR;
 }
 
-function createController() {
+function createController(disabledExtensions: string[] = []) {
 	const refreshMCPTools = vi.fn(async () => {});
 	const showError = vi.fn();
+	const presentCommandOutput = vi.fn();
 	const mcpManager = {
 		disconnectAll: vi.fn(async () => {}),
 		discoverAndConnect: vi.fn(async () => ({ errors: new Map<string, string>() })),
@@ -56,7 +57,7 @@ function createController() {
 	const controller = new MCPCommandController({
 		chatContainer: { addChild: vi.fn() },
 		present: vi.fn(),
-		presentCommandOutput: vi.fn(),
+		presentCommandOutput,
 		ui: { requestRender: vi.fn() },
 		editor: {},
 		showError,
@@ -73,14 +74,14 @@ function createController() {
 		},
 		mcpManager,
 		settings: {
-			get: vi.fn(() => []),
+			get: vi.fn((key: string) => (key === "disabledExtensions" ? disabledExtensions : [])),
 			getActivationProjectRoot: vi.fn((cwd: string) => cwd),
 			getProjectActivation: vi.fn(() => "inherit"),
 			setProjectActivation: vi.fn(async () => {}),
 		},
 	} as never);
 
-	return { controller, mcpManager, refreshMCPTools, showError };
+	return { controller, mcpManager, presentCommandOutput, refreshMCPTools, showError };
 }
 
 async function writeProjectConfig(projectDir: string, servers: Record<string, MCPServerConfig>): Promise<void> {
@@ -155,6 +156,33 @@ describe("/mcp enable and disable", () => {
 			mcpServers: Record<string, MCPServerConfig>;
 		};
 		expect(persisted.mcpServers.mcp1).toEqual({ type: "stdio", command: "mcp-one", enabled: true });
+	});
+
+	test("lists activation-disabled user and project servers as disabled", async () => {
+		await Bun.write(
+			getMCPConfigPath("user", projectDir),
+			`${JSON.stringify(
+				{
+					mcpServers: { "user-server": { type: "stdio", command: "user-server" } },
+				},
+				null,
+				2,
+			)}\n`,
+		);
+		await writeProjectConfig(projectDir, {
+			"project-server": { type: "stdio", command: "project-server" },
+		});
+		const { controller, presentCommandOutput } = createController(["mcp:user-server", "mcp:project-server"]);
+
+		await controller.handle("/mcp list");
+
+		const output = presentCommandOutput.mock.calls[0]?.[0] as { render(width: number): string[] } | undefined;
+		if (!output) throw new Error("expected /mcp list to render command output");
+		const rendered = Bun.stripANSI(output.render(120).join("\n"));
+		expect(rendered).toContain("user-server ◌ disabled");
+		expect(rendered).toContain("project-server ◌ disabled");
+		expect(rendered).not.toContain("user-server ○ not connected");
+		expect(rendered).not.toContain("project-server ○ not connected");
 	});
 
 	test("removes a project server from the ancestor project root", async () => {

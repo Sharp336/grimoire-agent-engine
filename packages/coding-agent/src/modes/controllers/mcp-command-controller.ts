@@ -1404,15 +1404,19 @@ export class MCPCommandController {
 					const state =
 						config.enabled === false
 							? "inactive"
-							: (this.ctx.mcpManager?.getConnectionStatus(name) ?? "disconnected");
+							: disabledServerNames.has(name)
+								? "disabled"
+								: (this.ctx.mcpManager?.getConnectionStatus(name) ?? "disconnected");
 					const status =
 						state === "inactive"
 							? theme.fg("warning", " ◌ inactive")
-							: state === "connected"
-								? theme.fg("success", " ● connected")
-								: state === "connecting"
-									? theme.fg("muted", " ◌ connecting")
-									: theme.fg("muted", " ○ not connected");
+							: state === "disabled"
+								? theme.fg("warning", " ◌ disabled")
+								: state === "connected"
+									? theme.fg("success", " ● connected")
+									: state === "connecting"
+										? theme.fg("muted", " ◌ connecting")
+										: theme.fg("muted", " ○ not connected");
 					lines.push(`  ${theme.fg("accent", name)}${status} ${theme.fg("dim", `[${type}]`)}`);
 				}
 				lines.push("");
@@ -1427,15 +1431,19 @@ export class MCPCommandController {
 					const state =
 						config.enabled === false
 							? "inactive"
-							: (this.ctx.mcpManager?.getConnectionStatus(name) ?? "disconnected");
+							: disabledServerNames.has(name)
+								? "disabled"
+								: (this.ctx.mcpManager?.getConnectionStatus(name) ?? "disconnected");
 					const status =
 						state === "inactive"
 							? theme.fg("warning", " ◌ inactive")
-							: state === "connected"
-								? theme.fg("success", " ● connected")
-								: state === "connecting"
-									? theme.fg("muted", " ◌ connecting")
-									: theme.fg("muted", " ○ not connected");
+							: state === "disabled"
+								? theme.fg("warning", " ◌ disabled")
+								: state === "connected"
+									? theme.fg("success", " ● connected")
+									: state === "connecting"
+										? theme.fg("muted", " ◌ connecting")
+										: theme.fg("muted", " ○ not connected");
 					lines.push(`  ${theme.fg("accent", name)}${status} ${theme.fg("dim", `[${type}]`)}`);
 				}
 				lines.push("");

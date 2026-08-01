@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Extended `/reload-plugins` to reload rules, rebuild rule-driven system prompt context, and refresh the `rule://` inventory.
+
+### Fixed
+
+- Fixed scoped extension activation showing ACP and same-ID fallback rows with provider or item states from a different activation scope, and aligned MCP commands with ancestor project discovery.
+- Fixed scoped extension activation showing ACP and same-ID fallback rows with provider or item states from a different activation scope, made `/mcp list` show activation-disabled configured servers as disabled, and aligned MCP commands with ancestor project discovery.
+
 ## [17.2.3] - 2026-08-01
 
 ### Changed
