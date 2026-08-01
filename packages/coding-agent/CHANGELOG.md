@@ -13,6 +13,7 @@
 ### Fixed
 
 - Fixed Branch Map rendering for deep or large session trees and terminals with limited height. Maps now avoid recursive traversal and full-size canvas allocation, fall back to the list when more than 5,000 visible entries remain, and compact the selector chrome to preserve the active content.
+- Fixed Branch Map scroll indicators obscuring selected nodes on short terminals, and made narrow terminals cycle only through their visible list and map views.
 
 ## [17.2.1] - 2026-07-30
 

@@ -1316,6 +1316,7 @@ export class SelectorController {
 				},
 				settings.get("treeFilterMode"),
 				() => this.ctx.ui.terminal.rows,
+				() => this.ctx.ui.terminal.columns,
 			);
 			return { component: selector, focus: selector };
 		});

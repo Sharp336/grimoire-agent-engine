@@ -1179,9 +1179,17 @@ class BranchMap implements Component {
 		const selectedLeft = selected ? selected.x - Math.floor(nodeWidth / 2) : 0;
 		const startX = Math.max(0, Math.min(selectedLeft - 2, mapWidth - graphWidth));
 		const endX = Math.min(mapWidth, startX + graphWidth);
-		const visibleRows = Math.max(1, this.#maxVisibleLines - 1);
-		const startY = Math.max(0, Math.min((selected?.y ?? 0) - Math.floor(visibleRows / 2), height - visibleRows));
-		const endY = Math.min(height, startY + visibleRows);
+		const maxGraphRows = Math.max(1, this.#maxVisibleLines - 1);
+		const viewport = (graphRows: number): { startY: number; endY: number } => {
+			const startY = Math.max(0, Math.min((selected?.y ?? 0) - Math.floor(graphRows / 2), height - graphRows));
+			return { startY, endY: Math.min(height, startY + graphRows) };
+		};
+		let { startY, endY } = viewport(maxGraphRows);
+		// Preserve a graph row for the selected node instead of overwriting it with
+		// a scroll indicator. When possible, reserve one separate row for it.
+		if ((startY > 0 || endY < height) && maxGraphRows > 1) {
+			({ startY, endY } = viewport(maxGraphRows - 1));
+		}
 		const north = 1;
 		const east = 2;
 		const south = 4;
@@ -1262,8 +1270,21 @@ class BranchMap implements Component {
 			const rendered = `${showLeftEllipsis ? "…" : ""}${parts.join("")}${showRightEllipsis ? "…" : ""}`;
 			lines.push(truncateToWidth(`  ${rendered.trimEnd()}`, width));
 		}
-		if (startY > 0 && lines.length > 0) lines[0] = theme.fg("muted", "  … ↑");
-		if (endY < height && lines.length > 0) lines[lines.length - 1] = theme.fg("muted", "  … ↓");
+		const scrollIndicator =
+			maxGraphRows > 1
+				? startY > 0 && endY < height
+					? "  … ↑↓"
+					: startY > 0
+						? "  … ↑"
+						: endY < height
+							? "  … ↓"
+							: undefined
+				: undefined;
+		if (scrollIndicator) {
+			const indicatorLine = truncateToWidth(theme.fg("muted", scrollIndicator), width);
+			if (startY > 0) lines.unshift(indicatorLine);
+			else lines.push(indicatorLine);
+		}
 		lines.push(truncateToWidth(theme.fg("muted", "  › selected  • current session"), width));
 		return lines;
 	}
@@ -1373,6 +1394,7 @@ export class TreeSelectorComponent extends Container {
 	#labelInput: LabelInput | null = null;
 	#viewMode: TreeViewMode = "split";
 	#border = new DynamicBorder();
+	#lastRenderWidth = MIN_SPLIT_WIDTH;
 
 	constructor(
 		tree: SessionTreeNode[],
@@ -1383,6 +1405,7 @@ export class TreeSelectorComponent extends Container {
 		private readonly onLabelChangeCallback?: (entryId: string, label: string | undefined) => void,
 		initialFilterMode: FilterMode = "default",
 		private readonly getTerminalRows: () => number = () => terminalHeight,
+		private readonly getTerminalColumns?: () => number,
 	) {
 		super();
 		const maxVisibleLines = Math.max(1, terminalHeight);
@@ -1427,6 +1450,7 @@ export class TreeSelectorComponent extends Container {
 	}
 
 	#renderTree(width: number): readonly string[] {
+		this.#lastRenderWidth = width;
 		const terminalRows = Math.max(1, this.getTerminalRows());
 		const lines: string[] = [""];
 		const border = this.#border.render(width)[0]!;
@@ -1438,7 +1462,7 @@ export class TreeSelectorComponent extends Container {
 			const bodyRows = Math.max(1, terminalRows - 7);
 			lines.push(...this.#labelInput.render(width).slice(0, bodyRows));
 		} else {
-			const requestedMode = this.#viewMode === "split" && width < MIN_SPLIT_WIDTH ? "list" : this.#viewMode;
+			const requestedMode = this.#getVisibleViewMode(width);
 			const visibleNodeCount = this.#treeList.getVisibleNodeCount();
 			const mapUnavailable = requestedMode !== "list" && visibleNodeCount > MAX_BRANCH_MAP_NODES;
 			const effectiveMode = mapUnavailable ? "list" : requestedMode;
@@ -1592,12 +1616,18 @@ export class TreeSelectorComponent extends Container {
 		return Math.max(40, Math.floor((width - 3) * 0.62));
 	}
 
+	#getVisibleViewMode(width: number): TreeViewMode {
+		return this.#viewMode === "split" && width < MIN_SPLIT_WIDTH ? "list" : this.#viewMode;
+	}
+
 	handleInput(keyData: string): void {
 		if (this.#labelInput) {
 			this.#labelInput.handleInput(keyData);
 		} else if (matchesKey(keyData, "ctrl+g")) {
-			const modes: TreeViewMode[] = ["split", "map", "list"];
-			this.#viewMode = modes[(modes.indexOf(this.#viewMode) + 1) % modes.length]!;
+			const width = Math.max(1, this.getTerminalColumns?.() ?? this.#lastRenderWidth);
+			const modes: readonly TreeViewMode[] = width < MIN_SPLIT_WIDTH ? ["list", "map"] : ["split", "map", "list"];
+			const visibleMode = this.#getVisibleViewMode(width);
+			this.#viewMode = modes[(modes.indexOf(visibleMode) + 1) % modes.length]!;
 		} else {
 			this.#treeList.handleInput(keyData);
 		}

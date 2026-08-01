@@ -254,12 +254,17 @@ describe("TreeSelectorComponent branch map", () => {
 
 	it("falls back to the list on narrow terminals but shows message summaries in the standalone tree", () => {
 		const { tree, currentLeafId } = branchyTree();
+		const terminalColumns = 80;
 		const selector = new TreeSelectorComponent(
 			tree,
 			currentLeafId,
 			60,
 			() => {},
 			() => {},
+			undefined,
+			"default",
+			() => 60,
+			() => terminalColumns,
 		);
 
 		expect(render(selector, 80)).toContain("Session Tree");
@@ -271,6 +276,39 @@ describe("TreeSelectorComponent branch map", () => {
 		expect(mapOnly).not.toContain("Session Tree");
 		expect(mapOnly).toContain("left branch");
 		expect(mapOnly).toContain("›#3 user");
+
+		selector.handleInput("\x07"); // ctrl+g: map -> list
+		expect(render(selector, terminalColumns)).toContain("Session Tree");
+		expect(render(selector, terminalColumns)).not.toContain("Branch Map");
+
+		selector.handleInput("\x07"); // ctrl+g: list -> map
+		expect(render(selector, terminalColumns)).toContain("Branch Map");
+	});
+
+	it("keeps selected map nodes visible when a short viewport needs scroll indicators", () => {
+		const { tree, currentLeafId } = linearUserTree(3);
+		const leafSelector = new TreeSelectorComponent(
+			tree,
+			currentLeafId,
+			10,
+			() => {},
+			() => {},
+		);
+		leafSelector.handleInput("\x07"); // ctrl+g: split -> map
+		expect(render(leafSelector, 120)).toContain("›#3 user");
+
+		const middleSelector = new TreeSelectorComponent(
+			tree,
+			currentLeafId,
+			11,
+			() => {},
+			() => {},
+		);
+		middleSelector.handleInput("\x1b[A"); // up: leaf -> middle node
+		middleSelector.handleInput("\x07"); // ctrl+g: split -> map
+		const output = render(middleSelector, 120);
+		expect(output).toContain("›#2 user");
+		expect(output).toContain("↑↓");
 	});
 
 	it("crops a styled label at the horizontal map edge without emitting an incomplete ANSI sequence", () => {
