@@ -118,11 +118,10 @@ class TreeList implements Component {
 	}
 
 	/**
-	 * Find the index of the nearest visible entry, walking up the parent chain if needed.
-	 * Returns the index in filteredNodes, or the last index as fallback.
+	 * Find the index of a visible entry or ancestor, without selecting an unrelated fallback.
 	 */
-	#findNearestVisibleIndex(entryId: string | null): number {
-		if (this.#filteredNodes.length === 0) return 0;
+	#findVisibleAncestorIndex(entryId: string | null): number | null {
+		if (this.#filteredNodes.length === 0) return null;
 
 		// Build a map for parent lookup
 		const entryMap = new Map<string, FlatNode>();
@@ -143,8 +142,12 @@ class TreeList implements Component {
 			currentId = node.node.entry.parentId ?? null;
 		}
 
-		// Fallback: last visible entry
-		return this.#filteredNodes.length - 1;
+		return null;
+	}
+
+	/** Find the nearest visible entry, falling back to the last row for cursor selection. */
+	#findNearestVisibleIndex(entryId: string | null): number {
+		return this.#findVisibleAncestorIndex(entryId) ?? Math.max(0, this.#filteredNodes.length - 1);
 	}
 
 	#flattenTree(roots: SessionTreeNode[]): FlatNode[] {
@@ -437,8 +440,8 @@ class TreeList implements Component {
 	}
 
 	getVisibleCurrentLeafId(): string | null {
-		if (this.#filteredNodes.length === 0) return null;
-		return this.#filteredNodes[this.#findNearestVisibleIndex(this.currentLeafId)]?.node.entry.id ?? null;
+		const index = this.#findVisibleAncestorIndex(this.currentLeafId);
+		return index === null ? null : (this.#filteredNodes[index]?.node.entry.id ?? null);
 	}
 
 	getVisibleTree(): SessionTreeNode[] {

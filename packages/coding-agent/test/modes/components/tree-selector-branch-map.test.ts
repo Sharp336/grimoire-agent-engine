@@ -35,6 +35,19 @@ function wideRootTree(): { tree: SessionTreeNode[]; currentLeafId: string } {
 	return { tree: [first, second, third], currentLeafId: first.entry.id };
 }
 
+function treeWithOffBranchSearchMatches(): { tree: SessionTreeNode[]; currentLeafId: string } {
+	const root = userNode("root");
+	const activeParent = userNode("active parent", root.entry.id);
+	const activeLeaf = userNode("active leaf", activeParent.entry.id);
+	const otherParent = userNode("other parent", root.entry.id);
+	const firstMatch = userNode("needle first", otherParent.entry.id);
+	const secondMatch = userNode("needle second", otherParent.entry.id);
+	root.children.push(activeParent, otherParent);
+	activeParent.children.push(activeLeaf);
+	otherParent.children.push(firstMatch, secondMatch);
+	return { tree: [root], currentLeafId: activeLeaf.entry.id };
+}
+
 function treeWithHiddenInternalNode(): { tree: SessionTreeNode[]; currentLeafId: string } {
 	const root = userNode("before internal event");
 	const internalEntry: SessionEntry = {
@@ -258,6 +271,25 @@ describe("TreeSelectorComponent branch map", () => {
 		const output = renderStyled(selector, 66);
 		expect(Bun.stripANSI(output)).toContain("…");
 		expect(hasOnlyCompleteCsiSequences(output)).toBe(true);
+	});
+
+	it("does not mark an off-branch search result as the current session", () => {
+		const { tree, currentLeafId } = treeWithOffBranchSearchMatches();
+		const selector = new TreeSelectorComponent(
+			tree,
+			currentLeafId,
+			60,
+			() => {},
+			() => {},
+		);
+		for (const character of "needle") selector.handleInput(character);
+		selector.handleInput("\x07"); // ctrl+g: split -> map
+		expect(render(selector, 80)).toContain("›#2 user: needle second");
+
+		selector.handleInput("\x1b[A");
+		const moved = render(selector, 80);
+		expect(moved).toContain("›#1 user: needle first");
+		expect(moved).not.toContain("•#");
 	});
 
 	it("moves the tree highlight with the list selection", () => {
