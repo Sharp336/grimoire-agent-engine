@@ -301,4 +301,114 @@ describe("provider prompt-cache key session affinity", () => {
 			authStorage.close();
 		}
 	});
+
+	// Session file with a persisted agent_change; used to drive the resume paths.
+	async function createPersonaResumeFixture(
+		tempDir: TempDir,
+		id: string,
+		agentName: string,
+	): Promise<{ cwd: string; sessionFile: string; sessionDir: string }> {
+		const cwd = tempDir.join("project");
+		const sessionDir = tempDir.join("sessions");
+		await fs.mkdir(cwd, { recursive: true });
+		await fs.mkdir(sessionDir, { recursive: true });
+		const sessionFile = path.join(sessionDir, `${id}.jsonl`);
+		const timestamp = "2026-06-01T00:00:00.000Z";
+		await Bun.write(
+			sessionFile,
+			`${[
+				{ type: "session", version: 3, id, timestamp, cwd },
+				{ type: "agent_change", id: "agent-1", parentId: null, timestamp, agent: agentName, source: "bundled" },
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+		return { cwd, sessionFile, sessionDir };
+	}
+
+	it("does not apply a rehydrated persona's model/thinking on resume", async () => {
+		using tempDir = TempDir.createSync("@omp-resume-rehydrated-persona-");
+		const { cwd, sessionFile, sessionDir } = await createPersonaResumeFixture(
+			tempDir,
+			"resume-rehydrated",
+			"persona-x",
+		);
+		const manager = await SessionManager.open(sessionFile, sessionDir);
+		const authStorage = await AuthStorage.create(tempDir.join("agent-auth.db"));
+		const persona = {
+			name: "persona-x",
+			description: "A persona",
+			systemPrompt: "You are persona x.",
+			model: ["anthropic/claude-sonnet-4-5"],
+			thinkingLevel: ThinkingLevel.High,
+			source: "bundled" as const,
+		};
+		try {
+			vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
+				agents: [persona],
+				projectAgentsDir: null,
+			});
+			const parsed = parseArgs(["--cwd", cwd, "--continue"]);
+
+			const options = await buildSessionOptions(
+				parsed,
+				[],
+				manager,
+				new ModelRegistry(authStorage, tempDir.join("models.yml")),
+				Settings.isolated({ "marketplace.autoUpdate": "off" }),
+			);
+
+			// Rehydrated from the transcript: persona frontmatter must not override
+			// the transcript's own model/thinking entries (thread main.ts:1147).
+			expect(options.agentPersona).toBe(persona);
+			expect(options.model).toBeUndefined();
+			expect(options.thinkingLevel).toBeUndefined();
+		} finally {
+			authStorage.close();
+		}
+	});
+
+	it("applies an explicit --agent persona's model/thinking on resume", async () => {
+		using tempDir = TempDir.createSync("@omp-resume-explicit-agent-");
+		const { cwd, sessionFile, sessionDir } = await createPersonaResumeFixture(
+			tempDir,
+			"resume-explicit",
+			"persona-x",
+		);
+		const manager = await SessionManager.open(sessionFile, sessionDir);
+		const authStorage = await AuthStorage.create(tempDir.join("agent-auth.db"));
+		const persona = {
+			name: "persona-x",
+			description: "A persona",
+			systemPrompt: "You are persona x.",
+			model: ["anthropic/claude-sonnet-4-5"],
+			thinkingLevel: ThinkingLevel.High,
+			source: "bundled" as const,
+		};
+		try {
+			authStorage.setRuntimeApiKey("anthropic", "test-key");
+			vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
+				agents: [persona],
+				projectAgentsDir: null,
+			});
+			const parsed = parseArgs(["--cwd", cwd, "--continue", "--agent", "persona-x"]);
+
+			const options = await buildSessionOptions(
+				parsed,
+				[],
+				manager,
+				new ModelRegistry(authStorage, tempDir.join("models.yml")),
+				Settings.isolated({ "marketplace.autoUpdate": "off" }),
+			);
+
+			// Explicit --agent on a resume is a fresh selection: its frontmatter
+			// model/thinking apply (thread main.ts:1068).
+			expect(options.agentPersona).toBe(persona);
+			expect(options.model).toBeDefined();
+			expect(options.model?.provider).toBe("anthropic");
+			expect(options.thinkingLevel).toBe(ThinkingLevel.High);
+		} finally {
+			authStorage.close();
+		}
+	});
 });

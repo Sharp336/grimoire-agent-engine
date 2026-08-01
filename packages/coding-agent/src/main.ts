@@ -943,8 +943,8 @@ export async function buildSessionOptions(
 
 	// Resume: re-resolve agent from persisted session context
 	// --agent CLI flag takes precedence (the !parsed.agent guard ensures this).
-	if (!parsed.agent && sessionManager) {
-		const sessionContext = sessionManager.buildSessionContext();
+	const sessionContext = sessionManager?.buildSessionContext();
+	if (!parsed.agent && sessionContext) {
 		if (sessionContext.agentPersona) {
 			const { agent: name, source } = sessionContext.agentPersona;
 			const discovery = await discoverAgents(options.cwd ?? getProjectDir(), undefined, {
@@ -960,6 +960,11 @@ export async function buildSessionOptions(
 			// If agent .md was deleted or changed to subagent-only, silently fall back to default main
 		}
 	}
+
+	// Rehydrated from session context: the persona's model/thinking must not
+	// override what the transcript records. An explicit --agent on a resume
+	// is a fresh selection and MAY apply its frontmatter (unless --model/--thinking).
+	const agentRehydratedFromContext = !parsed.agent && Boolean(sessionContext?.agentPersona);
 
 	const agentPolicy = agentPersona ? resolveAgentSessionPolicy(agentPersona) : undefined;
 
@@ -1061,12 +1066,7 @@ export async function buildSessionOptions(
 		// escape it — keep pinning the first scoped model there.
 		deferredDefaultRole = !options.model && Boolean(remembered) && !((parsed.models?.length ?? 0) > 0);
 		if (!options.model && !deferredDefaultRole) options.model = scopedModels[0].model;
-	} else if (
-		agentPolicy?.modelPatterns &&
-		agentPolicy.modelPatterns.length > 0 &&
-		!parsed.continue &&
-		!parsed.resume
-	) {
+	} else if (agentPolicy?.modelPatterns && agentPolicy.modelPatterns.length > 0 && !agentRehydratedFromContext) {
 		const resolved = resolveModelOverride(agentPolicy.modelPatterns, modelRegistry, activeSettings);
 		if (resolved.model) {
 			options.model = resolved.model;
@@ -1143,7 +1143,7 @@ export async function buildSessionOptions(
 		!restoringSession
 	) {
 		options.thinkingLevel = scopedModels[0].thinkingLevel;
-	} else if (agentPolicy?.thinkingLevel) {
+	} else if (agentPolicy?.thinkingLevel && !agentRehydratedFromContext) {
 		options.thinkingLevel = agentPolicy.thinkingLevel;
 	}
 
