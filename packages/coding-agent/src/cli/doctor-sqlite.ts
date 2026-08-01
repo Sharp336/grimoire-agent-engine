@@ -374,10 +374,11 @@ function swapMarkerPath(dbPath: string): string {
  *
  * `lockHandle` holds a RESERVED write lock on the live database; it stays
  * open through the rename on Linux/macOS (an open handle does not block
- * rename). On Windows, renaming over an open handle fails; in that case the
- * handle is closed, a fresh holder + trio-snapshot re-check runs, and only
- * if clean is the rename retried immediately. This bounds the lock-free
- * window to one event-loop tick with no concurrent holder.
+ * rename). On Windows, renaming over an open handle fails; in that case a
+ * fresh holder + main-file snapshot re-check runs at the point of failure
+ * (sidecars are already retired, so only the main db entry is compared),
+ * and only if clean is the handle closed and the rename retried via a
+ * synchronous close+rename pair with a microsecond gap.
  * `expected` is the verified trio snapshot from before the lock was acquired.
  */
 async function swapInCandidate(
@@ -408,20 +409,6 @@ async function swapInCandidate(
 	let swapCommitted = false;
 	let markerRemovalError: Error | null = null;
 	try {
-		// Under-lock re-check for the Windows fallback: run holder + snapshot
-		// verification BEFORE retiring sidecars, since retiring -wal/-shm/-journal
-		// changes the trio and would make snapshotTrio always differ from expected.
-		let windowsFallbackClean = false;
-		if (lockHandle !== null) {
-			if ((await hasHolders(dbPath)) === true) throw new Error("database acquired a holder during swap; aborting");
-			try {
-				if (!snapshotsEqual(expected, await snapshotTrio(dbPath)))
-					throw new Error("database changed during swap; aborting");
-			} catch (error) {
-				throw error instanceof Error ? error : new Error(messageOf(error));
-			}
-			windowsFallbackClean = true;
-		}
 		for (const suffix of ["-wal", "-shm", "-journal"]) {
 			const sidecar = `${dbPath}${suffix}`;
 			try {
@@ -437,15 +424,32 @@ async function swapInCandidate(
 		}
 		await fsyncDir(path.dirname(dbPath));
 		// On Linux/macOS an open handle does not block rename. On Windows,
-		// renaming over an open handle fails. The under-lock re-check already
-		// ran above (before sidecar retirement); if it was clean, close the
+		// renaming over an open handle fails. On rename failure, run a FRESH
+		// holder + main-file snapshot re-check AT THAT POINT (sidecars are
+		// already retired, so compare only the main db entry against expected).
+		// The invariant is "old main unchanged since quiescence, no writer
+		// present". If dirty, abort with archive intact. If clean, close the
 		// handle (sync) and rename (fsSync.renameSync) as a synchronous pair
 		// with no await between them, giving a microsecond gap.
 		try {
 			await fs.rename(candidate, dbPath);
 		} catch (renameError) {
 			if (lockHandle === null) throw renameError;
-			if (!windowsFallbackClean) throw renameError;
+			// Fresh re-check at the point of failure: sidecars are retired,
+			// so compare only the main file's snapshot entry + no holders.
+			if ((await hasHolders(dbPath)) === true)
+				throw new Error("database acquired a holder during swap; aborting");
+			const expectedMain = expected.find(e => e.name === path.basename(dbPath));
+			const currentMain = await snapshotTrio(dbPath);
+			const currentEntry = currentMain.find(e => e.name === path.basename(dbPath));
+			if (
+				expectedMain === undefined ||
+				currentEntry === undefined ||
+				expectedMain.size !== currentEntry.size ||
+				expectedMain.hash !== currentEntry.hash
+			) {
+				throw new Error("database main file changed during swap; aborting");
+			}
 			// Synchronous close + rename: microsecond gap, no await between.
 			releaseWriteLock(lockHandle);
 			lockHandle = null;
