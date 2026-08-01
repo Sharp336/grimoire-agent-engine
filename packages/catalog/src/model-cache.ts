@@ -3,8 +3,8 @@
  * Replaces per-provider JSON files with a single cache.db.
  */
 import { Database } from "bun:sqlite";
-import { getModelDbPath } from "@oh-my-pi/pi-utils";
-import { configureSqliteDatabase } from "@oh-my-pi/pi-utils/sqlite";
+import { getModelDbPath, logger } from "@oh-my-pi/pi-utils";
+import { configureSqliteDatabase, isSqliteCorruptError } from "@oh-my-pi/pi-utils/sqlite";
 import type { Api, Model, ModelSpec } from "./types";
 
 // Rows persist ModelSpec JSON (sparse `compat`, never the resolved record);
@@ -65,29 +65,37 @@ interface CacheEntry<TApi extends Api = Api> {
 let sharedDb: Database | null = null;
 let sharedDbPath: string | null = null;
 
+/** Latched cache.db paths that reported unrecoverable damage. */
+const damagedCacheDbs = new Set<string>();
+
 function openDb(resolvedPath: string): Database {
 	const db = new Database(resolvedPath, { create: true });
-	// Install the busy handler BEFORE any lock-taking statement. See
-	// https://github.com/can1357/oh-my-pi/issues/2421.
-	// Schema invalidation can delete rows containing credentials written by old
-	// versions. Overwrite deleted SQLite cells instead of leaving their bytes in
-	// free pages where a raw scan of models.db can still recover them (#5780).
-	configureSqliteDatabase(db, { busyTimeoutMs: 3000, secureDelete: true, wal: true });
-	db.run(`
-		CREATE TABLE IF NOT EXISTS model_cache (
-			provider_id TEXT PRIMARY KEY,
-			version INTEGER NOT NULL,
-			updated_at INTEGER NOT NULL,
-			authoritative INTEGER NOT NULL DEFAULT 0,
-			static_fingerprint TEXT NOT NULL DEFAULT '',
-			header_omitted_model_ids TEXT NOT NULL DEFAULT '[]',
-			unrestorable_header_model_ids TEXT NOT NULL DEFAULT '[]',
-			header_restore_version INTEGER NOT NULL DEFAULT 0,
-			models TEXT NOT NULL
-		)
-	`);
-	migrateCacheSchema(db);
-	return db;
+	try {
+		// Install the busy handler BEFORE any lock-taking statement. See
+		// https://github.com/can1357/oh-my-pi/issues/2421.
+		// Schema invalidation can delete rows containing credentials written by old
+		// versions. Overwrite deleted SQLite cells instead of leaving their bytes in
+		// free pages where a raw scan of models.db can still recover them (#5780).
+		configureSqliteDatabase(db, { busyTimeoutMs: 3000, secureDelete: true, wal: true });
+		db.run(`
+			CREATE TABLE IF NOT EXISTS model_cache (
+				provider_id TEXT PRIMARY KEY,
+				version INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL,
+				authoritative INTEGER NOT NULL DEFAULT 0,
+				static_fingerprint TEXT NOT NULL DEFAULT '',
+				header_omitted_model_ids TEXT NOT NULL DEFAULT '[]',
+				unrestorable_header_model_ids TEXT NOT NULL DEFAULT '[]',
+				header_restore_version INTEGER NOT NULL DEFAULT 0,
+				models TEXT NOT NULL
+			)
+		`);
+		migrateCacheSchema(db);
+		return db;
+	} catch (err) {
+		db.close();
+		throw err;
+	}
 }
 
 function getSharedDb(): Database {
@@ -102,6 +110,27 @@ function getSharedDb(): Database {
 	sharedDb = db;
 	sharedDbPath = resolvedPath;
 	return db;
+}
+
+/**
+ * Latches a cache.db path as damaged on the first unrecoverable SQLite error.
+ * Logs once at `error` level with a repair one-liner, then short-circuits every
+ * later read/write for the life of the process. If the damaged path is the one
+ * backing the shared handle, the handle is closed and cleared so the operator
+ * can run the repair command without omp holding the file open.
+ */
+function latchCorruptCacheDb(resolvedPath: string, err: unknown): void {
+	damagedCacheDbs.add(resolvedPath);
+	if (sharedDb && sharedDbPath === resolvedPath) {
+		sharedDb.close();
+		sharedDb = null;
+		sharedDbPath = null;
+	}
+	logger.error(
+		`Model cache database is damaged; cache reads and writes are disabled for this process. ` +
+			`Repair with: sqlite3 '${resolvedPath}' '.recover' | sqlite3 '${resolvedPath}.fixed'`,
+		{ err, dbPath: resolvedPath },
+	);
 }
 
 function withModelCacheDb<T>(dbPath: string | undefined, useDb: (db: Database) => T): T {
@@ -150,6 +179,8 @@ export function readModelCache<TApi extends Api>(
 	now: () => number,
 	dbPath?: string,
 ): CacheEntry<TApi> | null {
+	const resolvedPath = dbPath ?? getModelDbPath();
+	if (damagedCacheDbs.has(resolvedPath)) return null;
 	try {
 		return withModelCacheDb(dbPath, db => {
 			const stmt = db.query<CacheRow, [string]>("SELECT * FROM model_cache WHERE provider_id = ?");
@@ -183,7 +214,10 @@ export function readModelCache<TApi extends Api>(
 				stmt.finalize();
 			}
 		});
-	} catch {
+	} catch (err) {
+		if (isSqliteCorruptError(err)) {
+			latchCorruptCacheDb(resolvedPath, err);
+		}
 		return null;
 	}
 }
@@ -231,6 +265,8 @@ export function writeModelCache<TApi extends Api>(
 	staticHeaderSources: readonly Model<TApi>[] = [],
 	restorableHeaderFallback?: Record<string, string>,
 ): void {
+	const resolvedPath = dbPath ?? getModelDbPath();
+	if (damagedCacheDbs.has(resolvedPath)) return;
 	try {
 		withModelCacheDb(dbPath, db => {
 			const headerOmittedModelIds: string[] = [];
@@ -278,7 +314,15 @@ export function writeModelCache<TApi extends Api>(
 				],
 			);
 		});
-	} catch {
+	} catch (err) {
+		if (isSqliteCorruptError(err)) {
+			latchCorruptCacheDb(resolvedPath, err);
+		}
 		// Cache writes are best-effort; failures should not break model resolution.
 	}
+}
+
+/** @internal Reset the corrupt-cache latch — test-only. */
+export function resetModelCacheCorruptLatchForTests(): void {
+	damagedCacheDbs.clear();
 }

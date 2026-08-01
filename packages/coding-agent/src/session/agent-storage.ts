@@ -11,7 +11,7 @@ import {
 import { AsyncDrain, getAgentDbPath, getStatsDbPath, isRecord, logger } from "@oh-my-pi/pi-utils";
 import { shellQuote } from "@oh-my-pi/pi-utils/shell";
 import { isSqliteCorruptError } from "@oh-my-pi/pi-utils/sqlite";
-import { configureSqliteDatabase, openSqliteDatabase } from "@oh-my-pi/pi-utils/sqlite";
+import { configureSqliteDatabase, isSqliteCorruptError, openSqliteDatabase } from "@oh-my-pi/pi-utils/sqlite";
 import type { RawSettings as Settings } from "../config/settings";
 
 /** Row shape for settings table queries */
@@ -146,6 +146,8 @@ export class AgentStorage {
 	#perfBackfillChecked = false;
 	/** Coalesces per-turn perf samples into one deferred transaction off the turn's hot path. */
 	#perfDrain = new AsyncDrain<ModelPerfInsert>(MODEL_PERF_FLUSH_DELAY_MS);
+	/** Latched once the stats.db reader reports unrecoverable damage; backfill is skipped for the rest of this process. */
+	#statsDbDamaged = false;
 
 	private constructor(dbPath: string) {
 		this.#autoPerfBackfill = dbPath === getAgentDbPath();
@@ -582,8 +584,12 @@ FROM model_usage_legacy
 	 * @throws When the stats db cannot be opened or queried
 	 */
 	async backfillModelPerfFromStats(statsDbPath: string): Promise<number> {
-		const statsDb = openSqliteDatabase(statsDbPath, { readonly: true });
+		if (this.#statsDbDamaged) return 0;
+		let statsDb: Database | undefined;
+		let sums: Map<string, PerfAccum>;
+		let imported = 0;
 		try {
+			statsDb = openSqliteDatabase(statsDbPath, { readonly: true });
 			const select = statsDb.prepare(
 				`SELECT rowid, timestamp, provider, model, output_tokens, duration, ttft
 FROM messages
@@ -594,11 +600,10 @@ ORDER BY timestamp DESC, rowid DESC
 LIMIT ?4`,
 			);
 			const cutoff = Date.now() - MODEL_PERF_BACKFILL_MAX_AGE_MS;
-			const sums = new Map<string, PerfAccum>();
+			sums = new Map<string, PerfAccum>();
 			let cursorTimestamp = Number.MAX_SAFE_INTEGER;
 			let cursorRowid = Number.MAX_SAFE_INTEGER;
 			let scanned = 0;
-			let imported = 0;
 			while (scanned < MODEL_PERF_BACKFILL_MAX_ROWS) {
 				const chunk = Math.min(MODEL_PERF_BACKFILL_CHUNK, MODEL_PERF_BACKFILL_MAX_ROWS - scanned);
 				const rows = select.all(cursorTimestamp, cursorRowid, cutoff, chunk) as StatsMessageRow[];
@@ -632,9 +637,26 @@ LIMIT ?4`,
 				// Yield so a chunked walk never freezes the TUI (bun:sqlite is sync).
 				await Bun.sleep(0);
 			}
-			if (sums.size > 0) {
-				const upsert = this.#db.prepare(
-					`INSERT INTO model_perf (model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms, updated_at)
+		} catch (err) {
+			if (isSqliteCorruptError(err)) {
+				this.#statsDbDamaged = true;
+				logger.error(
+					`Stats database is damaged; model-perf backfill is disabled for this process. ` +
+						`Repair with: sqlite3 '${statsDbPath}' '.recover' | sqlite3 '${statsDbPath}.fixed'`,
+					{ err, statsDbPath },
+				);
+				return 0;
+			}
+			throw err;
+		} finally {
+			statsDb?.close();
+		}
+		// The destination transaction runs OUTSIDE the stats-db catch so a
+		// corrupt agent.db (this.#db) propagates to the caller's existing warn
+		// instead of being mislabelled as a damaged stats.db.
+		if (sums && sums.size > 0) {
+			const upsert = this.#db.prepare(
+				`INSERT INTO model_perf (model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms, updated_at)
 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ${SQLITE_NOW_EPOCH})
 ON CONFLICT(model_key) DO UPDATE SET
 	samples = model_perf.samples + excluded.samples,
@@ -643,17 +665,14 @@ ON CONFLICT(model_key) DO UPDATE SET
 	ttft_samples = model_perf.ttft_samples + excluded.ttft_samples,
 	ttft_ms = model_perf.ttft_ms + excluded.ttft_ms,
 	updated_at = ${SQLITE_NOW_EPOCH}`,
-				);
-				this.#db.transaction(() => {
-					for (const [key, accum] of sums) {
-						upsert.run(key, accum.samples, accum.outputTokens, accum.genMs, accum.ttftSamples, accum.ttftMs);
-					}
-				})();
-			}
-			return imported;
-		} finally {
-			statsDb.close();
+			);
+			this.#db.transaction(() => {
+				for (const [key, accum] of sums) {
+					upsert.run(key, accum.samples, accum.outputTokens, accum.genMs, accum.ttftSamples, accum.ttftMs);
+				}
+			})();
 		}
+		return imported;
 	}
 
 	/**

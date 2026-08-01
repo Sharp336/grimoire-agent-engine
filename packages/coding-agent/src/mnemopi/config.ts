@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { MnemopiOptions } from "@oh-my-pi/pi-mnemopi";
 import { getMemoriesDir, logger } from "@oh-my-pi/pi-utils";
-import { openSqliteDatabase } from "@oh-my-pi/pi-utils/sqlite";
+import { isSqliteCorruptError, openSqliteDatabase } from "@oh-my-pi/pi-utils/sqlite";
 import type { Settings } from "../config/settings";
 
 export type MnemopiLlmMode = "none" | "smol" | "remote";
@@ -107,6 +107,9 @@ const DEFAULT_SHARED_BANK = "default";
 // Cap legacy-bank scanning at session start so a pathological banks/
 // directory cannot dominate startup latency.
 const LEGACY_BANK_SCAN_LIMIT = 64;
+
+/** Latched bank mnemopi.db paths that reported unrecoverable damage. */
+const damagedBankDbs = new Set<string>();
 
 export interface MnemopiBankScope {
 	baseBank: string;
@@ -222,6 +225,7 @@ export function extendRecallWithLegacyBanks(
 }
 
 function bankOnlyHasCwd(dbPath: string, cwd: string): boolean {
+	if (damagedBankDbs.has(dbPath)) return false;
 	let db: Database | undefined;
 	try {
 		db = openSqliteDatabase(dbPath, { readonly: true });
@@ -235,7 +239,16 @@ function bankOnlyHasCwd(dbPath: string, cwd: string): boolean {
 			.get(cwd, cwd);
 		return (row?.matching ?? 0) > 0 && (row?.unsafe ?? 0) === 0;
 	} catch (error) {
-		logger.debug("Mnemopi: legacy bank probe failed", { dbPath, error: String(error) });
+		if (isSqliteCorruptError(error)) {
+			damagedBankDbs.add(dbPath);
+			logger.error(
+				`Mnemopi: legacy bank database is damaged; this bank is skipped for the rest of the process. ` +
+					`Repair with: sqlite3 '${dbPath}' '.recover' | sqlite3 '${dbPath}.fixed'`,
+				{ dbPath, error: String(error) },
+			);
+		} else {
+			logger.debug("Mnemopi: legacy bank probe failed", { dbPath, error: String(error) });
+		}
 		return false;
 	} finally {
 		try {
@@ -265,4 +278,9 @@ export function truncateApproxTokens(text: string, tokenLimit: number): string {
 	const maxChars = Math.max(0, tokenLimit * 4);
 	if (text.length <= maxChars) return text;
 	return `${text.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+}
+
+/** @internal Reset the legacy-bank corrupt latch — test-only. */
+export function resetLegacyBankCorruptLatchForTests(): void {
+	damagedBankDbs.clear();
 }

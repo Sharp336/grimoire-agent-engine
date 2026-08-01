@@ -1,11 +1,13 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { readModelCache, resetModelCacheCorruptLatchForTests, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import * as piUtils from "@oh-my-pi/pi-utils";
+import { logger } from "@oh-my-pi/pi-utils";
 import { removeWithRetries } from "../../utils/src/temp";
 
 const TTL_MS = 24 * 60 * 60 * 1000;
@@ -117,5 +119,107 @@ describe("model cache migrations", () => {
 		expect(cached?.models[0]?.headers).toBeUndefined();
 		expect(cached?.headerOmittedModelIds).toEqual(["gated-model"]);
 		expect(cached?.unrestorableHeaderModelIds).toEqual(["gated-model"]);
+	});
+});
+
+async function writeMalformedCacheDb(dir: string): Promise<string> {
+	const dbPath = path.join(dir, "malformed.db");
+	await fs.writeFile(dbPath, "this is not a sqlite database");
+	return dbPath;
+}
+
+describe("model cache corrupt-store latch", () => {
+	let tempDir = "";
+
+	beforeEach(async () => {
+		resetModelCacheCorruptLatchForTests();
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-corrupt-cache-"));
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		if (tempDir) {
+			await removeWithRetries(tempDir);
+			tempDir = "";
+		}
+	});
+
+	it("latches after one corrupt read and stops re-opening the damaged file", async () => {
+		const malformedDbPath = await writeMalformedCacheDb(tempDir);
+		const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => {});
+
+		// First call hits the malformed file, throws SQLITE_NOTADB, and latches.
+		const result1 = readModelCache("ollama-cloud", TTL_MS, Date.now, malformedDbPath);
+		expect(result1).toBeNull();
+
+		// Second call short-circuits before touching SQLite.
+		const result2 = readModelCache("ollama-cloud", TTL_MS, Date.now, malformedDbPath);
+		expect(result2).toBeNull();
+
+		const damagedErrors = errorSpy.mock.calls.filter(
+			call => typeof call[0] === "string" && call[0].includes("Model cache database is damaged"),
+		);
+		expect(damagedErrors).toHaveLength(1);
+		expect(String(damagedErrors[0]?.[0])).toContain(malformedDbPath);
+	});
+
+	it("closes the shared cache handle when the latch fires on the shared path", async () => {
+		// 1. Set up a valid cache db at a temp path and route the no-dbPath
+		//    calls through it so getSharedDb() assigns the shared handle.
+		const validDbPath = path.join(tempDir, "shared.db");
+		const pathSpy = vi.spyOn(piUtils, "getModelDbPath").mockReturnValue(validDbPath);
+
+		// Write through the shared path — this opens and caches sharedDb.
+		writeModelCache("ollama-cloud", Date.now(), [createModel("warm-model", "Warm")], true, "static-v1");
+		// Confirm the shared handle is live: a read returns the cached row.
+		const warm = readModelCache<"openai-completions">("ollama-cloud", TTL_MS, Date.now);
+		expect(warm?.models.map(m => m.id)).toEqual(["warm-model"]);
+
+		// 2. Capture a real SQLITE_NOTADB error from a malformed file, then
+		//    make the shared handle's next query throw it.
+		const malformedDbPath = await writeMalformedCacheDb(tempDir);
+		const realErr = (() => {
+			const db = new Database(malformedDbPath);
+			try {
+				db.run("PRAGMA integrity_check");
+			} catch (err) {
+				return err as Error;
+			} finally {
+				db.close();
+			}
+			throw new Error("expected SQLITE_NOTADB");
+		})();
+
+		const querySpy = vi.spyOn(Database.prototype, "query").mockImplementation(() => {
+			throw realErr;
+		});
+		const closeSpy = vi.spyOn(Database.prototype, "close");
+		const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => {});
+
+		// 3. Drive the read again through the shared path. The shared handle's
+		//    query throws SQLITE_NOTADB → latch fires → sharedDb.close() is
+		//    called and sharedDb/sharedDbPath are cleared.
+		const result = readModelCache("ollama-cloud", TTL_MS, Date.now);
+		expect(result).toBeNull();
+
+		const damagedErrors = errorSpy.mock.calls.filter(
+			call => typeof call[0] === "string" && call[0].includes("Model cache database is damaged"),
+		);
+		expect(damagedErrors).toHaveLength(1);
+		expect(String(damagedErrors[0]?.[0])).toContain(validDbPath);
+
+		// The latch closed the shared handle.
+		expect(closeSpy).toHaveBeenCalled();
+
+		// 4. Second call short-circuits via the latch — query is not called again.
+		const queryCallsBefore = querySpy.mock.calls.length;
+		const result2 = readModelCache("ollama-cloud", TTL_MS, Date.now);
+		expect(result2).toBeNull();
+		expect(querySpy.mock.calls.length).toBe(queryCallsBefore);
+
+		pathSpy.mockRestore();
+		querySpy.mockRestore();
+		closeSpy.mockRestore();
+		errorSpy.mockRestore();
 	});
 });
