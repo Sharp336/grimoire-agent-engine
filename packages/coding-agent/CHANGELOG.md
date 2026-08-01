@@ -9,6 +9,7 @@
 - Fixed mid-turn steering/peer-interrupt tool skips rendering as errors (red ✘, red border/text) in the TUI; pending and in-flight interrupt placeholders now render as neutral info cards while preserving whether `tool.execute` started ([#7199](https://github.com/can1357/oh-my-pi/issues/7199)).
 - Added `Shift+Up` as a second default for the message dequeue, so the shortcut is reachable in macOS Terminal.app where Option is consumed for character composition.
 - Added in-process `pgrep`, `pkill`, `pidwait`, and `top` shell builtins with cross-platform process discovery, BSD/procps-style filters, pidfile handling, signal selection, waiting, and snapshots.
+- Added a `config` sanity section to `omp doctor` that surfaces settings and models-config parse/schema errors through a read-only diagnostic load (no migration, no quarantine, no disk writes) and reports `*.broken-*` quarantined config siblings as errors.
 
 ### Changed
 

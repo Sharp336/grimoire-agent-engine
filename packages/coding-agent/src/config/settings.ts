@@ -65,11 +65,44 @@ export interface RawSettings {
 	[key: string]: unknown;
 }
 
-type YamlLoadResult =
+export type YamlLoadResult =
 	| { kind: "missing" }
 	| { kind: "loaded"; settings: RawSettings }
 	| { kind: "invalid"; error: unknown; backupPath?: string }
 	| { kind: "unreadable"; error: unknown };
+
+/**
+ * Read-only settings-YAML classify: the same read/parse/classify path
+ * {@link Settings.#loadYamlIfPresent} uses, extracted so `omp doctor` can
+ * surface parse errors without constructing a Settings instance, opening
+ * agent.db, or touching disk. Never migrates or quarantines.
+ */
+export async function classifySettingsYaml(filePath: string): Promise<YamlLoadResult> {
+	let content: string;
+	try {
+		content = await fs.promises.readFile(filePath, "utf8");
+	} catch (error) {
+		if (isEnoent(error)) return { kind: "missing" };
+		return { kind: "unreadable", error };
+	}
+
+	let parsed: unknown;
+	try {
+		parsed = YAML.parse(content);
+	} catch (error) {
+		return { kind: "invalid", error };
+	}
+	if (parsed === null || parsed === undefined) {
+		return { kind: "loaded", settings: {} };
+	}
+	if (typeof parsed !== "object" || Array.isArray(parsed)) {
+		return {
+			kind: "invalid",
+			error: new Error("Settings YAML must contain a mapping at the document root"),
+		};
+	}
+	return { kind: "loaded", settings: parsed as RawSettings };
+}
 
 export interface SettingsOptions {
 	/** Current working directory for project settings discovery */
@@ -1088,30 +1121,11 @@ export class Settings {
 	}
 
 	async #loadYamlIfPresent(filePath: string): Promise<YamlLoadResult> {
-		let content: string;
-		try {
-			content = await fs.promises.readFile(filePath, "utf8");
-		} catch (error) {
-			if (isEnoent(error)) return { kind: "missing" };
-			return { kind: "unreadable", error };
+		const result = await classifySettingsYaml(filePath);
+		if (result.kind === "loaded") {
+			return { kind: "loaded", settings: this.#migrateRawSettings(result.settings) };
 		}
-
-		let parsed: unknown;
-		try {
-			parsed = YAML.parse(content);
-		} catch (error) {
-			return { kind: "invalid", error };
-		}
-		if (parsed === null || parsed === undefined) {
-			return { kind: "loaded", settings: {} };
-		}
-		if (typeof parsed !== "object" || Array.isArray(parsed)) {
-			return {
-				kind: "invalid",
-				error: new Error("Settings YAML must contain a mapping at the document root"),
-			};
-		}
-		return { kind: "loaded", settings: this.#migrateRawSettings(parsed as RawSettings) };
+		return result;
 	}
 
 	async #resolveYamlWritePath(filePath: string): Promise<string> {

@@ -329,7 +329,7 @@ describe("omp doctor", () => {
 		expect(["ok", "warning", "error"]).toContain(parsed.overallStatus);
 		for (const finding of parsed.findings) {
 			expect(typeof finding.id).toBe("string");
-			expect(["environment", "tools", "storage", "plugins"]).toContain(finding.category);
+			expect(["environment", "config", "tools", "storage", "plugins"]).toContain(finding.category);
 			expect(["ok", "warning", "error"]).toContain(finding.status);
 			expect(typeof finding.summary).toBe("string");
 			expect(Array.isArray(finding.details)).toBe(true);
@@ -343,5 +343,41 @@ describe("omp doctor", () => {
 
 		await runCli(["doctor", "--agent-dir", root]);
 		expect(process.exitCode).toBe(1);
+	});
+
+	test("broken settings yaml surfaces a config error and leaves the file untouched", async () => {
+		const configPath = path.join(root, "config.yml");
+		const broken = "theme:\n  dark: [unterminated\n  : : :\n";
+		await fs.writeFile(configPath, broken, "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const finding = report.findings.find(entry => entry.id === "config.settings");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.length).toBeGreaterThan(0);
+		// The JSON report carries the loader's classify message.
+		const parsed = JSON.parse(writes.join("")) as DoctorReport;
+		const jsonFinding = parsed.findings.find(entry => entry.id === "config.settings");
+		expect(jsonFinding?.status).toBe("error");
+		expect(typeof jsonFinding?.details[0]).toBe("string");
+		expect((jsonFinding?.details[0] ?? "").length).toBeGreaterThan(0);
+		// Read-only probe: the file is byte-identical after the run.
+		expect(await fs.readFile(configPath, "utf8")).toBe(broken);
+	});
+
+	test("a quarantined config sibling is reported as an error", async () => {
+		await fs.writeFile(path.join(root, "settings.yaml.broken-1700000000000-12345-deadbeef"), "garbage", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const quarantine = report.findings.find(entry => entry.id === "config.settings.yaml");
+		expect(quarantine?.status).toBe("error");
+		expect(quarantine?.summary).toContain("quarantined");
+		expect(quarantine?.remedy).toContain("settings.yaml.broken-");
+	});
+
+	test("a clean temp dir yields ok config findings", async () => {
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const configFindings = report.findings.filter(entry => entry.category === "config");
+		expect(configFindings.length).toBeGreaterThan(0);
+		for (const finding of configFindings) expect(finding.status).toBe("ok");
 	});
 });

@@ -5,7 +5,12 @@
  * the human or JSON report, and owns the single stdout write — the command
  * wrapper stays thin. Mirrors the gc-cli.ts / stats-cli.ts split.
  */
-import { $which, formatBytes, getAgentDir, VERSION } from "@oh-my-pi/pi-utils";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { $which, formatBytes, getAgentDir, MAIN_CONFIG_FILENAMES, VERSION } from "@oh-my-pi/pi-utils";
+import type { LoadResult } from "../config/config-file";
+import { ModelsConfigFile } from "../config/models-config";
+import { classifySettingsYaml, type YamlLoadResult } from "../config/settings";
 import { collectSystemInfo, formatSystemInfo } from "../debug/system-info";
 import { PluginManager } from "../extensibility/plugins/manager";
 import { theme } from "../modes/theme/theme";
@@ -23,7 +28,7 @@ import { withGcLock } from "./gc-cli";
 
 export type DoctorStatus = "ok" | "warning" | "error";
 
-export type DoctorCategory = "environment" | "tools" | "storage" | "plugins";
+export type DoctorCategory = "environment" | "config" | "tools" | "storage" | "plugins";
 
 export interface DoctorFinding {
 	/** Stable dotted id, e.g. "storage.history.db" or "tools.git". */
@@ -56,7 +61,7 @@ export interface DoctorReport {
 	findings: DoctorFinding[];
 }
 
-const CATEGORY_ORDER: readonly DoctorCategory[] = ["environment", "tools", "storage", "plugins"];
+const CATEGORY_ORDER: readonly DoctorCategory[] = ["environment", "config", "tools", "storage", "plugins"];
 
 const TOOL_CHECKS: ReadonlyArray<{ name: string; missingStatus: DoctorStatus; remedy: string }> = [
 	// git is the one hard requirement: all VCS integration routes through src/utils/git.ts.
@@ -176,6 +181,111 @@ function storageFinding(probe: DbProbe, repair: DbRepair | null): DoctorFinding 
 	return { ...base, status: "ok", summary: `${probe.label}: healthy` };
 }
 
+async function collectConfigFindings(flags: DoctorCommandFlags): Promise<DoctorFinding[]> {
+	// All config paths resolve under the scoped agent dir, matching the storage
+	// section's --agent-dir gating: a run restricted to a temp dir must never
+	// diagnose (or scan for quarantines under) the real ~/.omp/agent.
+	const agentDir = flags.agentDir ?? getAgentDir();
+	const findings: DoctorFinding[] = [];
+	findings.push(await diagnoseSettingsConfig(agentDir));
+	// relocateReadOnly points at the scoped path without running the JSON→YAML
+	// migration; diagnose() parses/classifies without quarantining or caching.
+	const modelsResult = ModelsConfigFile.relocateReadOnly(path.join(agentDir, "models.yml")).diagnose();
+	findings.push(loadResultConfigFinding("models", "models.yml", modelsResult));
+	findings.push(...(await collectQuarantinedConfigs(agentDir)));
+	return findings;
+}
+
+async function diagnoseSettingsConfig(agentDir: string): Promise<DoctorFinding> {
+	// The loader tries MAIN_CONFIG_FILENAMES in order and uses the first present
+	// file; diagnose that one. Absent-with-defaults is ok, not a problem finding.
+	for (const filename of MAIN_CONFIG_FILENAMES) {
+		const candidate = path.join(agentDir, filename);
+		try {
+			await fs.promises.access(candidate);
+		} catch {
+			continue;
+		}
+		const result = await classifySettingsYaml(candidate);
+		return yamlConfigFinding("settings", filename, result);
+	}
+	return {
+		id: "config.settings",
+		category: "config",
+		status: "ok",
+		summary: "settings: absent (using defaults)",
+		details: [],
+	};
+}
+
+function yamlConfigFinding(name: string, filename: string, result: YamlLoadResult): DoctorFinding {
+	const base = { id: `config.${name}`, category: "config" as const };
+	switch (result.kind) {
+		case "missing":
+			return { ...base, status: "ok", summary: `${name}: absent (using defaults)`, details: [] };
+		case "loaded":
+			return { ...base, status: "ok", summary: `${name}: valid`, details: [] };
+		case "invalid":
+			return {
+				...base,
+				status: "error",
+				summary: `${name}: failed to load`,
+				details: [String(result.error ?? "invalid YAML")],
+				remedy: `Fix ${filename} or remove it to use defaults`,
+			};
+		case "unreadable":
+			return {
+				...base,
+				status: "error",
+				summary: `${name}: unreadable`,
+				details: [String(result.error)],
+			};
+	}
+}
+
+function loadResultConfigFinding(name: string, filename: string, result: LoadResult<unknown>): DoctorFinding {
+	const base = { id: `config.${name}`, category: "config" as const };
+	if (result.status === "not-found") {
+		return { ...base, status: "ok", summary: `${name}: absent (using defaults)`, details: [] };
+	}
+	if (result.status === "error") {
+		return {
+			...base,
+			status: "error",
+			summary: `${name}: failed to load`,
+			details: [result.error.message],
+			remedy: `Fix ${filename} or remove it to use defaults`,
+		};
+	}
+	return { ...base, status: "ok", summary: `${name}: valid`, details: [] };
+}
+
+async function collectQuarantinedConfigs(agentDir: string): Promise<DoctorFinding[]> {
+	// Settings quarantine naming: `${filePath}.broken-${stamp}`. Each is an
+	// error: the config was moved aside after failing to load.
+	let entries: string[];
+	try {
+		entries = await fs.promises.readdir(agentDir);
+	} catch {
+		return [];
+	}
+	const findings: DoctorFinding[] = [];
+	for (const entry of entries) {
+		const match = /^(.+)\.broken-.+$/.exec(entry);
+		if (!match) continue;
+		const original = match[1] as string;
+		findings.push({
+			id: `config.${original}`,
+			category: "config",
+			status: "error",
+			summary: `${original}: config was quarantined after failing to load`,
+			details: [],
+			remedy: `Review ${entry} and restore or delete it`,
+		});
+	}
+	return findings;
+}
+
 async function collectStorageFindings(flags: DoctorCommandFlags): Promise<DoctorFinding[]> {
 	const databases = resolveDoctorDatabases(flags.agentDir, flags.agentDir !== undefined);
 	const collect = async (): Promise<DoctorFinding[]> => {
@@ -229,6 +339,7 @@ async function collectPluginFindings(flags: DoctorCommandFlags): Promise<DoctorF
 export async function collectDoctorReport(flags: DoctorCommandFlags): Promise<DoctorReport> {
 	const findings: DoctorFinding[] = [
 		await collectEnvironmentFinding(),
+		...(await collectConfigFindings(flags)),
 		...collectToolFindings(),
 		...(await collectStorageFindings(flags)),
 		...(await collectPluginFindings(flags)),
