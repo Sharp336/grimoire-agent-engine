@@ -165,6 +165,9 @@ export class AgentStorage {
 		try {
 			this.#initializeSchema();
 		} catch (err) {
+			// The instance never escapes a throwing constructor; close the
+			// handle here or the damaged file stays open until GC.
+			this.#db.close();
 			if (isSqliteCorruptError(err)) {
 				throw new Error(
 					`Agent database at ${shellQuote(dbPath)} is damaged. Stop omp, back up the store (including -wal/-shm), then repair with: sqlite3 ${shellQuote(dbPath)} '.recover --ignore-freelist' | sqlite3 ${shellQuote(`${dbPath}.fixed`)} && chmod 600 ${shellQuote(`${dbPath}.fixed`)}`,
