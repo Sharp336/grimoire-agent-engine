@@ -1,7 +1,6 @@
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import { logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import backgroundTanDispatchPrompt from "../../prompts/system/background-tan-dispatch.md" with { type: "text" };
 import tanContextSwitchPrompt from "../../prompts/system/tan-context-switch.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
@@ -28,13 +27,6 @@ function extractAssistantText(message: AssistantMessage | undefined): string {
 		.map(content => content.text)
 		.join("")
 		.trim();
-}
-
-async function removeCloneSession(cloneFile: string): Promise<void> {
-	await Promise.allSettled([
-		fs.rm(cloneFile, { force: true }),
-		fs.rm(cloneFile.slice(0, -6), { recursive: true, force: true }),
-	]);
 }
 
 export class TanCommandController {
@@ -216,7 +208,10 @@ export class TanCommandController {
 				{ ownerId, agentId: cloneId },
 			);
 		} catch (error) {
-			if (cloneFile) await removeCloneSession(cloneFile);
+			if (cloneFile)
+				await SessionManager.removeSessionFiles(cloneFile).catch(err =>
+					logger.warn("Failed to remove /tan clone", { cloneFile, error: String(err) }),
+				);
 			this.ctx.showError(error instanceof Error ? error.message : String(error));
 			return;
 		}

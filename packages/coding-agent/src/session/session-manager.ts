@@ -2392,6 +2392,18 @@ export class SessionManager {
 		return file;
 	}
 
+	/** Delete a session file and its artifact directory by path. ENOENT is success. */
+	static async removeSessionFiles(
+		sessionPath: string,
+		storage: SessionStorage = new FileSessionStorage(),
+	): Promise<void> {
+		try {
+			await storage.deleteSessionWithArtifacts(sessionPath);
+		} catch (err) {
+			if (!isEnoent(err)) throw err;
+		}
+	}
+
 	/**
 	 * Fork a session into the current project directory: copy history from another
 	 * session file while creating a fresh session file in this sessionDir.
