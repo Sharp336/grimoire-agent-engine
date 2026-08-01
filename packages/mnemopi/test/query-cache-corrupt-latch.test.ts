@@ -167,6 +167,10 @@ describe("QueryCache corrupt-persistence latch", () => {
 		expect(damagedErrors).toHaveLength(1);
 		// The error message names the db path.
 		expect(String(damagedErrors[0]?.[0])).toContain(dbPath);
+		// The repair command interpolates the real path (no literal <dbpath>).
+		expect(String(damagedErrors[0]?.[0])).toContain(`sqlite3 '${dbPath}' '.recover --ignore-freelist'`);
+		expect(String(damagedErrors[0]?.[0])).toContain(`sqlite3 '${dbPath}.recovered'`);
+		expect(String(damagedErrors[0]?.[0])).not.toContain("<dbpath>");
 	});
 
 	test("non-corrupt errors keep their current best-effort handling", () => {
@@ -302,6 +306,9 @@ describe("QueryCache corrupt-persistence latch", () => {
 		);
 		expect(damagedErrors).toHaveLength(1);
 		expect(String(damagedErrors[0]?.[0])).toContain(malformedDbPath);
+		// The repair command interpolates the real path (no literal <dbpath>).
+		expect(String(damagedErrors[0]?.[0])).toContain(`sqlite3 '${malformedDbPath}' '.recover --ignore-freelist'`);
+		expect(String(damagedErrors[0]?.[0])).not.toContain("<dbpath>");
 
 		// In-memory put/get works without touching SQLite.
 		cache!.put("hello world", [{ id: 1, text: "result" }]);

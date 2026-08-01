@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Migrated the stats database opener to the shared `configureSqliteDatabase` helper, centralizing WAL/busy-handler pragmas across packages (behavior-preserving).
+
 ## [17.1.2] - 2026-07-24
 
 ### Added

@@ -146,8 +146,8 @@ export class AgentStorage {
 	#perfBackfillChecked = false;
 	/** Coalesces per-turn perf samples into one deferred transaction off the turn's hot path. */
 	#perfDrain = new AsyncDrain<ModelPerfInsert>(MODEL_PERF_FLUSH_DELAY_MS);
-	/** Latched once the stats.db reader reports unrecoverable damage; backfill is skipped for the rest of this process. */
-	#statsDbDamaged = false;
+	/** Per-path latch: stats.db paths that reported unrecoverable corruption. Backfill is skipped for each latched path, but a different valid path still imports. */
+	#statsDbDamagedPaths = new Set<string>();
 
 	private constructor(dbPath: string) {
 		this.#autoPerfBackfill = dbPath === getAgentDbPath();
@@ -555,6 +555,7 @@ FROM model_usage_legacy
 			if (!fs.existsSync(statsDbPath)) return;
 			void this.backfillModelPerfFromStats(statsDbPath)
 				.then(imported => {
+					if (imported < 0) return;
 					this.#db
 						.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
 						.run(MODEL_PERF_BACKFILL_KEY, "complete");
@@ -580,11 +581,11 @@ FROM model_usage_legacy
 	 * Sums land in one additive transaction at the end, so concurrent live
 	 * samples merge correctly regardless of order.
 	 * @param statsDbPath - Path to a stats.db file; opened read-only
-	 * @returns Number of rows folded in
-	 * @throws When the stats db cannot be opened or queried
+	 * @returns Number of rows folded in, or `-1` when the source store is damaged/latched (the import is skipped and the persistent completion marker must NOT be written so a later repair retries)
+	 * @throws When the stats db cannot be opened or queried for a non-corrupt reason
 	 */
 	async backfillModelPerfFromStats(statsDbPath: string): Promise<number> {
-		if (this.#statsDbDamaged) return 0;
+		if (this.#statsDbDamagedPaths.has(statsDbPath)) return -1;
 		let statsDb: Database | undefined;
 		let sums: Map<string, PerfAccum>;
 		let imported = 0;
@@ -639,13 +640,13 @@ LIMIT ?4`,
 			}
 		} catch (err) {
 			if (isSqliteCorruptError(err)) {
-				this.#statsDbDamaged = true;
+				this.#statsDbDamagedPaths.add(statsDbPath);
 				logger.error(
-					`Stats database is damaged; model-perf backfill is disabled for this process. ` +
+					`Stats database is damaged; model-perf backfill is disabled for this path. ` +
 						`Repair with: sqlite3 '${statsDbPath}' '.recover' | sqlite3 '${statsDbPath}.fixed'`,
 					{ err, statsDbPath },
 				);
-				return 0;
+				return -1;
 			}
 			throw err;
 		} finally {

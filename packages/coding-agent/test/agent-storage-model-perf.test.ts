@@ -1,9 +1,10 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
-import { logger, TempDir } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getAgentDir, getStatsDbPath, logger, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 describe("AgentStorage model perf aggregates", () => {
 	let tempDir: TempDir;
@@ -163,7 +164,7 @@ describe("AgentStorage model perf aggregates", () => {
 		expect(stats?.tps).toBeCloseTo(100, 5);
 	});
 
-	it("latches after one corrupt stats.db and returns 0 without re-opening", async () => {
+	it("latches after one corrupt stats.db and returns -1 without re-opening", async () => {
 		const storage = await openStorage();
 
 		// Write a malformed stats.db — bytes that are not a valid SQLite file.
@@ -174,17 +175,89 @@ describe("AgentStorage model perf aggregates", () => {
 
 		// First call hits the malformed file, throws SQLITE_NOTADB, and latches.
 		const imported1 = await storage.backfillModelPerfFromStats(statsDbPath);
-		expect(imported1).toBe(0);
+		expect(imported1).toBe(-1);
 
 		// Second call short-circuits before touching SQLite.
 		const imported2 = await storage.backfillModelPerfFromStats(statsDbPath);
-		expect(imported2).toBe(0);
+		expect(imported2).toBe(-1);
 
 		const damagedErrors = errorSpy.mock.calls.filter(
 			call => typeof call[0] === "string" && call[0].includes("Stats database is damaged"),
 		);
 		expect(damagedErrors).toHaveLength(1);
 		expect(String(damagedErrors[0]?.[0])).toContain(statsDbPath);
+	});
+
+	it("does not mark the backfill complete when stats.db is corrupt, and a different valid path still imports", async () => {
+		// This exercises the full kick path (#kickModelPerfBackfill): the
+		// persistent completion marker must NOT be written when the source
+		// store is corrupt (returns -1), so a later repair retries. It also
+		// proves the per-path latch: corruption in one stats path does not
+		// suppress backfill against a different valid path.
+		const configRoot = TempDir.createSync("@omp-perf-marker-config-");
+		const agentDir = TempDir.createSync("@omp-perf-marker-agent-");
+
+		// Redirect both getAgentDbPath() and getStatsDbPath() into temp dirs.
+		// PI_CONFIG_DIR (absolute) overrides the config root; setAgentDir
+		// rebuilds the resolver so getAgentDbPath() resolves under agentDir.
+		const prevConfigDir = process.env.PI_CONFIG_DIR;
+		process.env.PI_CONFIG_DIR = configRoot.path();
+		const prevAgentDir = getAgentDir();
+		setAgentDir(agentDir.path());
+		AgentStorage.resetInstance();
+		try {
+			// Corrupt stats.db at the redirected stats path.
+			const statsDbPath = getStatsDbPath();
+			fsSync.mkdirSync(path.dirname(statsDbPath), { recursive: true });
+			fsSync.writeFileSync(statsDbPath, "this is not a sqlite database");
+
+			const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => {});
+
+			// Open at the default agent path so #autoPerfBackfill is true.
+			const agentDbPath = getAgentDbPath();
+			const storage = await AgentStorage.open(agentDbPath);
+
+			// Trigger the kick via getModelPerf(); the backfill promise fires
+			// synchronously (corrupt db throws before any await), so the .then
+			// microtask drains after one microtask tick.
+			storage.getModelPerf();
+			await Promise.resolve();
+
+			// The corrupt-latch error must have fired.
+			const damagedErrors = errorSpy.mock.calls.filter(
+				call => typeof call[0] === "string" && call[0].includes("Stats database is damaged"),
+			);
+			expect(damagedErrors).toHaveLength(1);
+
+			// The completion marker must NOT be written — meta stays empty.
+			const probe = new Database(agentDbPath);
+			const marker = probe.prepare("SELECT value FROM meta WHERE key = ?").get("model_perf_backfill") as {
+				value?: string;
+			} | null;
+			probe.close();
+			expect(marker).toBeNull();
+
+			// Per-path latch: a different valid stats path still imports.
+			const validStatsPath = path.join(configRoot.path(), "valid-stats.db");
+			const validStats = new Database(validStatsPath);
+			validStats.run(`CREATE TABLE messages (
+				provider TEXT, model TEXT, output_tokens INTEGER, duration INTEGER,
+				ttft INTEGER, stop_reason TEXT, timestamp INTEGER
+			)`);
+			validStats
+				.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)")
+				.run("openai", "gpt-5", 1000, 4000, null, "stop", Date.now() - 1000);
+			validStats.close();
+
+			const imported = await storage.backfillModelPerfFromStats(validStatsPath);
+			expect(imported).toBe(1);
+			const gpt = storage.getModelPerf().get("openai/gpt-5");
+			expect(gpt?.samples).toBe(1);
+		} finally {
+			AgentStorage.resetInstance();
+			process.env.PI_CONFIG_DIR = prevConfigDir;
+			setAgentDir(prevAgentDir);
+		}
 	});
 
 	it("propagates destination-side transaction failure without latching or mislabelling the stats path", async () => {

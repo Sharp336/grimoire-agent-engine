@@ -270,7 +270,7 @@ export class QueryCache {
 		}
 		logger.error(
 			`Query-cache persistence store is damaged (${this.#dbPath}); persistence is disabled for this process. ` +
-				"In-memory tiers keep working. Repair with: sqlite3 <dbpath> '.recover' | sqlite3 <dbpath>.recovered",
+				`In-memory tiers keep working. Repair with: sqlite3 '${this.#dbPath}' '.recover --ignore-freelist' | sqlite3 '${this.#dbPath}.recovered'`,
 			{ err, dbPath: this.#dbPath },
 		);
 	}
