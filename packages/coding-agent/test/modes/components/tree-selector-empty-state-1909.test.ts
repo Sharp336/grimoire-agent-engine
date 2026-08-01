@@ -89,6 +89,37 @@ describe("issue #1909: tree-selector empty-state messaging", () => {
 		expect(text).not.toContain("hidden by the current filter");
 	});
 
+	it("preserves the zero-result search explanation in standalone map mode", () => {
+		const selector = new TreeSelectorComponent(
+			userMessageTree(),
+			"e1",
+			60,
+			() => {},
+			() => {},
+		);
+		selector.handleInput("\x07"); // ctrl+g: split -> map
+		selector.handleInput("z");
+		const text = renderSelector(selector);
+
+		expect(text).toContain('No entries match search "z"');
+		expect(text.toLowerCase()).toContain("backspace");
+	});
+
+	it("preserves the filter explanation in standalone map mode", () => {
+		const selector = new TreeSelectorComponent(
+			freshSessionTree(),
+			"e2",
+			60,
+			() => {},
+			() => {},
+		);
+		selector.handleInput("\x07"); // ctrl+g: split -> map
+		const text = renderSelector(selector);
+
+		expect(text).toContain("hidden by the current filter");
+		expect(text.toLowerCase()).toContain("alt+a");
+	});
+
 	it("falls back to the bare 'No entries found' line when the tree is genuinely empty", () => {
 		const selector = new TreeSelectorComponent(
 			[],

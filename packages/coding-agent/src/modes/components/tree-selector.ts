@@ -1435,7 +1435,7 @@ export class TreeSelectorComponent implements Component {
 			let bodyLines: readonly string[];
 			if (effectiveMode === "split") {
 				bodyLines = this.#renderSplitView(width);
-			} else if (effectiveMode === "map") {
+			} else if (effectiveMode === "map" && visibleNodeCount > 0) {
 				bodyLines = this.#branchMap.render(width, true);
 			} else {
 				bodyLines = this.#treeList.render(width);
