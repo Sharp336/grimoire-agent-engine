@@ -27,6 +27,13 @@ function branchyTree(): { tree: SessionTreeNode[]; currentLeafId: string } {
 	return { tree: [root], currentLeafId: right.entry.id };
 }
 
+function wideRootTree(): { tree: SessionTreeNode[]; currentLeafId: string } {
+	const first = userNode("first root");
+	const second = userNode("second root");
+	const third = userNode("third root");
+	return { tree: [first, second, third], currentLeafId: first.entry.id };
+}
+
 function treeWithHiddenInternalNode(): { tree: SessionTreeNode[]; currentLeafId: string } {
 	const root = userNode("before internal event");
 	const internalEntry: SessionEntry = {
@@ -89,6 +96,24 @@ function render(selector: TreeSelectorComponent, width: number): string {
 
 function renderStyled(selector: TreeSelectorComponent, width: number): string {
 	return selector.render(width).join("\n");
+}
+
+function hasOnlyCompleteCsiSequences(text: string): boolean {
+	for (let index = 0; index < text.length; index++) {
+		if (text[index] !== "\x1b" || text[index + 1] !== "[") continue;
+		index += 2;
+		while (index < text.length) {
+			const code = text.charCodeAt(index);
+			if ((code >= 0x30 && code <= 0x3f) || (code >= 0x20 && code <= 0x2f)) {
+				index++;
+				continue;
+			}
+			if (code < 0x40 || code > 0x7e) return false;
+			break;
+		}
+		if (index === text.length) return false;
+	}
+	return true;
 }
 
 describe("TreeSelectorComponent branch map", () => {
@@ -179,6 +204,22 @@ describe("TreeSelectorComponent branch map", () => {
 		expect(mapOnly).not.toContain("Session Tree");
 		expect(mapOnly).toContain("left branch");
 		expect(mapOnly).toContain("›#3 user");
+	});
+
+	it("crops a styled label at the horizontal map edge without emitting an incomplete ANSI sequence", () => {
+		const { tree, currentLeafId } = wideRootTree();
+		const selector = new TreeSelectorComponent(
+			tree,
+			currentLeafId,
+			60,
+			() => {},
+			() => {},
+		);
+		selector.handleInput("\x07"); // ctrl+g: split -> map
+
+		const output = renderStyled(selector, 66);
+		expect(Bun.stripANSI(output)).toContain("…");
+		expect(hasOnlyCompleteCsiSequences(output)).toBe(true);
 	});
 
 	it("moves the tree highlight with the list selection", () => {

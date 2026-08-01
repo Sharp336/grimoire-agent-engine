@@ -1220,27 +1220,31 @@ class BranchMap implements Component {
 
 		const lines: string[] = [];
 		for (let y = startY; y < endY; y++) {
-			const row = canvas[y - startY]!.map(cell => this.#connector(cell)).join("");
+			const showLeftEllipsis = startX > 0;
+			const showRightEllipsis = endX < mapWidth && (!showLeftEllipsis || graphWidth > 1);
+			const contentStartX = startX + (showLeftEllipsis ? 1 : 0);
+			const contentEndX = endX - (showRightEllipsis ? 1 : 0);
+			const row = canvas[y - startY]!.slice(contentStartX - startX, contentEndX - startX)
+				.map(cell => this.#connector(cell))
+				.join("");
 			const rowNodes = (layout.nodesByY.get(y) ?? [])
 				.filter(
 					node =>
 						node.y === y &&
-						node.x - Math.floor(nodeWidth / 2) >= startX &&
-						node.x + Math.ceil(nodeWidth / 2) <= endX,
+						node.x - Math.floor(nodeWidth / 2) >= contentStartX &&
+						node.x + Math.ceil(nodeWidth / 2) <= contentEndX,
 				)
 				.toSorted((a, b) => a.x - b.x);
 			const parts: string[] = [];
 			let cursor = 0;
 			for (const node of rowNodes) {
-				const left = node.x - Math.floor(nodeWidth / 2) - startX;
+				const left = node.x - Math.floor(nodeWidth / 2) - contentStartX;
 				const label = this.#nodeLabel(node, nodeWidth, showSummaries, selectedId);
 				parts.push(row.slice(cursor, left), label);
 				cursor = left + nodeWidth;
 			}
 			parts.push(row.slice(cursor));
-			let rendered = parts.join("");
-			if (startX > 0) rendered = `…${rendered.slice(1)}`;
-			if (endX < mapWidth) rendered = `${rendered.slice(0, -1)}…`;
+			const rendered = `${showLeftEllipsis ? "…" : ""}${parts.join("")}${showRightEllipsis ? "…" : ""}`;
 			lines.push(truncateToWidth(`  ${rendered.trimEnd()}`, width));
 		}
 		if (startY > 0 && lines.length > 0) lines[0] = theme.fg("muted", "  … ↑");
