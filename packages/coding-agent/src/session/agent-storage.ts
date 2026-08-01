@@ -10,7 +10,6 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { AsyncDrain, getAgentDbPath, getStatsDbPath, isRecord, logger } from "@oh-my-pi/pi-utils";
 import { shellQuote } from "@oh-my-pi/pi-utils/shell";
-import { isSqliteCorruptError } from "@oh-my-pi/pi-utils/sqlite";
 import { configureSqliteDatabase, isSqliteCorruptError, openSqliteDatabase } from "@oh-my-pi/pi-utils/sqlite";
 import type { RawSettings as Settings } from "../config/settings";
 

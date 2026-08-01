@@ -14,7 +14,6 @@ import * as path from "node:path";
 import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 import { $env, getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
 import { shellQuote } from "@oh-my-pi/pi-utils/shell";
-import { isSqliteCorruptError } from "@oh-my-pi/pi-utils/sqlite";
 import { configureSqliteDatabase, isSqliteCorruptError } from "@oh-my-pi/pi-utils/sqlite";
 import type { ApiKeyResolver } from "./auth-retry";
 import * as AIError from "./error";

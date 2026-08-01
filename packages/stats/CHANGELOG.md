@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Migrated the stats database opener to the shared `configureSqliteDatabase` helper, centralizing WAL/busy-handler pragmas across packages (behavior-preserving).
+- Migrated the stats database opener to the shared `configureSqliteDatabase` helper, centralizing WAL/busy-handler pragmas across packages (behavior-preserving). ([#7302](https://github.com/can1357/oh-my-pi/issues/7302))
 
 ## [17.1.2] - 2026-07-24
 

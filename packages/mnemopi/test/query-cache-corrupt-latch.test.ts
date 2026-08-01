@@ -22,6 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { QueryCache } from "@oh-my-pi/pi-mnemopi/core/query-cache";
 import { logger } from "@oh-my-pi/pi-utils";
+import { shellQuote } from "@oh-my-pi/pi-utils/shell";
 import { isSqliteCorruptError } from "@oh-my-pi/pi-utils/sqlite";
 
 const EMPTY_CHANGES: Changes = { changes: 0, lastInsertRowid: 0 };
@@ -167,9 +168,9 @@ describe("QueryCache corrupt-persistence latch", () => {
 		expect(damagedErrors).toHaveLength(1);
 		// The error message names the db path.
 		expect(String(damagedErrors[0]?.[0])).toContain(dbPath);
-		// The repair command interpolates the real path (no literal <dbpath>).
-		expect(String(damagedErrors[0]?.[0])).toContain(`sqlite3 '${dbPath}' '.recover --ignore-freelist'`);
-		expect(String(damagedErrors[0]?.[0])).toContain(`sqlite3 '${dbPath}.recovered'`);
+		// The repair command shell-quotes the real path (no literal <dbpath>).
+		expect(String(damagedErrors[0]?.[0])).toContain(`sqlite3 ${shellQuote(dbPath)} '.recover --ignore-freelist'`);
+		expect(String(damagedErrors[0]?.[0])).toContain(`sqlite3 ${shellQuote(`${dbPath}.recovered`)}`);
 		expect(String(damagedErrors[0]?.[0])).not.toContain("<dbpath>");
 	});
 
@@ -306,8 +307,10 @@ describe("QueryCache corrupt-persistence latch", () => {
 		);
 		expect(damagedErrors).toHaveLength(1);
 		expect(String(damagedErrors[0]?.[0])).toContain(malformedDbPath);
-		// The repair command interpolates the real path (no literal <dbpath>).
-		expect(String(damagedErrors[0]?.[0])).toContain(`sqlite3 '${malformedDbPath}' '.recover --ignore-freelist'`);
+		// The repair command shell-quotes the real path (no literal <dbpath>).
+		expect(String(damagedErrors[0]?.[0])).toContain(
+			`sqlite3 ${shellQuote(malformedDbPath)} '.recover --ignore-freelist'`,
+		);
 		expect(String(damagedErrors[0]?.[0])).not.toContain("<dbpath>");
 
 		// In-memory put/get works without touching SQLite.
@@ -331,5 +334,47 @@ describe("QueryCache corrupt-persistence latch", () => {
 		cache!.get("hello world");
 		cache!.invalidate();
 		expect(reachedRun).toBe(false);
+	});
+
+	test("shell-quotes the repair command when the db path contains a single quote", () => {
+		// A POSIX path may legitimately contain single quotes. The manually
+		// single-quoted form `sqlite3 '${path}'` breaks copy-paste for such
+		// paths; shellQuote closes/reopens the surrounding quotes so the
+		// result is always balanced.
+		const quoteDir = mkdtempSync(join(tmpdir(), "mnemopi-qc-quote-"));
+		tempDirs.push(quoteDir);
+		const quotedName = "it's a db.db";
+		const quoteDbPath = join(quoteDir, quotedName);
+		writeFileSync(quoteDbPath, "this is not a sqlite database");
+
+		const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => {});
+
+		let cache: QueryCache;
+		expect(() => {
+			cache = new QueryCache({ dbPath: quoteDbPath, maxSize: 10 });
+			openCaches.push(cache);
+		}).not.toThrow();
+
+		const damagedErrors = errorSpy.mock.calls.filter(
+			call => typeof call[0] === "string" && call[0].includes("Query-cache persistence store is damaged"),
+		);
+		expect(damagedErrors).toHaveLength(1);
+		const msg = String(damagedErrors[0]?.[0]);
+		// The repair command uses the shell-quoted form, not the raw path in
+		// bare single quotes.
+		expect(msg).toContain(`sqlite3 ${shellQuote(quoteDbPath)} '.recover --ignore-freelist'`);
+		expect(msg).toContain(`sqlite3 ${shellQuote(`${quoteDbPath}.recovered`)}`);
+		// The single quotes in the repair command are balanced: every `'` that
+		// opens is matched by one that closes. This catches the old bug where an
+		// embedded quote left an unbalanced command.
+		const repairSegment = msg.slice(msg.indexOf("Repair with:"));
+		let depth = 0;
+		for (const ch of repairSegment) {
+			if (ch === "'") depth += 1;
+		}
+		expect(depth % 2).toBe(0);
+		// The raw unquoted path does not appear bare inside the command.
+		const commandPart = repairSegment.slice("Repair with: ".length);
+		expect(commandPart).not.toContain(`'${quoteDbPath}'`);
 	});
 });

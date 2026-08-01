@@ -4,8 +4,8 @@
 
 ### Fixed
 
-- Fixed the recall query cache continuing to touch a damaged SQLite file after the first unrecoverable error: on `SQLITE_CORRUPT`/`SQLITE_NOTADB` it now closes and latches the connection, logs once at error level with the path and repair guidance, and keeps serving from in-memory tiers.
-- Fixed three SQLite openers missing the busy handler required by the issue-#2421 invariant: the recall query cache ran `PRAGMA journal_mode=WAL` with `busy_timeout` still 0, and the cost log and disaster-recovery scratch databases installed no pragmas at all. All three now go through the shared `configureSqliteDatabase`, and each carries a pragma-order regression test.
+- Fixed the recall query cache continuing to touch a damaged SQLite file after the first unrecoverable error: on `SQLITE_CORRUPT`/`SQLITE_NOTADB` it now closes and latches the connection, logs once at error level with the path and repair guidance, and keeps serving from in-memory tiers. ([#7302](https://github.com/can1357/oh-my-pi/issues/7302))
+- Fixed three SQLite openers missing the busy handler required by the issue-#2421 invariant: the recall query cache ran `PRAGMA journal_mode=WAL` with `busy_timeout` still 0, and the cost log and disaster-recovery scratch databases installed no pragmas at all. All three now go through the shared `configureSqliteDatabase`, and each carries a pragma-order regression test. ([#7302](https://github.com/can1357/oh-my-pi/issues/7302))
 
 ## [17.2.3] - 2026-08-01
 

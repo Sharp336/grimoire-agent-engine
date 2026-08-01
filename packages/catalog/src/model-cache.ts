@@ -179,7 +179,7 @@ export function readModelCache<TApi extends Api>(
 	now: () => number,
 	dbPath?: string,
 ): CacheEntry<TApi> | null {
-	const resolvedPath = dbPath ?? getModelDbPath();
+	const resolvedPath = dbPath || getModelDbPath();
 	if (damagedCacheDbs.has(resolvedPath)) return null;
 	try {
 		return withModelCacheDb(dbPath, db => {
@@ -265,7 +265,7 @@ export function writeModelCache<TApi extends Api>(
 	staticHeaderSources: readonly Model<TApi>[] = [],
 	restorableHeaderFallback?: Record<string, string>,
 ): void {
-	const resolvedPath = dbPath ?? getModelDbPath();
+	const resolvedPath = dbPath || getModelDbPath();
 	if (damagedCacheDbs.has(resolvedPath)) return;
 	try {
 		withModelCacheDb(dbPath, db => {
