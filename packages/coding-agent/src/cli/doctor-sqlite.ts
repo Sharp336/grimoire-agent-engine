@@ -420,7 +420,33 @@ export async function recoverInterruptedSwap(db: DoctorDatabase, restore: boolea
 	}
 }
 
-/** Run sqlite3 `.recover` against the archived copy and build a verified fresh candidate. Never touches the live file. */
+/**
+ * Write a `.recover` dump of `workDb` to `dumpPath`. Prefers `--ignore-freelist`
+ * (older sqlite3 builds reject it — CI runners ship one); on an
+ * "unexpected option" rejection, truncates the partial dump and retries plain
+ * `.recover`. Plain recovery can resurrect deleted rows from freelist pages,
+ * but those land in lost_and_found, which the stranded-rows guard in
+ * `salvageViaRecover` refuses to swap in — fidelity is enforced either way.
+ */
+async function runRecoverDump(sqlite: string, workDb: string, dumpPath: string): Promise<void> {
+	for (const recoverCommand of [".recover --ignore-freelist", ".recover"]) {
+		await fs.rm(dumpPath, { force: true }).catch(() => undefined);
+		const recover = Bun.spawn([sqlite, workDb, recoverCommand], {
+			stdout: Bun.file(dumpPath),
+			stderr: "pipe",
+		});
+		const stderr = await new Response(recover.stderr as ReadableStream<Uint8Array>).text();
+		if ((await recover.exited) === 0) {
+			if ((await fs.stat(dumpPath)).size === 0) throw new Error("sqlite .recover produced no SQL");
+			return;
+		}
+		if (!/unexpected option/i.test(stderr)) {
+			throw new Error(`sqlite .recover failed: ${stderr.trim().slice(0, 300)}`);
+		}
+		// older sqlite3 without --ignore-freelist; fall through to the plain form
+	}
+	throw new Error("sqlite .recover failed: CLI rejects --ignore-freelist and plain form");
+}
 async function salvageViaRecover(dbPath: string, archiveDir: string): Promise<string> {
 	const sqlite = $which("sqlite3");
 	if (sqlite === null) throw new Error("sqlite3 CLI not found for .recover salvage");
@@ -431,15 +457,7 @@ async function salvageViaRecover(dbPath: string, archiveDir: string): Promise<st
 		await fs.copyFile(archivedMain, workDb);
 		if (await pathExists(`${archivedMain}-wal`)) await fs.copyFile(`${archivedMain}-wal`, `${workDb}-wal`);
 		const dumpPath = path.join(workDir, "recovery.sql");
-		const recover = Bun.spawn([sqlite, workDb, ".recover --ignore-freelist"], {
-			stdout: Bun.file(dumpPath),
-			stderr: "pipe",
-		});
-		if ((await recover.exited) !== 0) {
-			const stderr = await new Response(recover.stderr as ReadableStream<Uint8Array>).text();
-			throw new Error(`sqlite .recover failed: ${stderr.trim().slice(0, 300)}`);
-		}
-		if ((await fs.stat(dumpPath)).size === 0) throw new Error("sqlite .recover produced no SQL");
+		await runRecoverDump(sqlite, workDb, dumpPath);
 		const candidate = path.join(workDir, "candidate.db");
 		const load = Bun.spawn([sqlite, candidate, `.read ${dumpPath}`], { stderr: "pipe" });
 		if ((await load.exited) !== 0) {

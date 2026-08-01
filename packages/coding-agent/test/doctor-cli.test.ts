@@ -99,6 +99,14 @@ function quickCheck(dbPath: string): string | null {
 	}
 }
 
+/** Mirrors the engine's runtime behavior: `--ignore-freelist` exists only on newer sqlite3 CLIs (CI runners may ship an older one). */
+async function recoverSupportsIgnoreFreelist(): Promise<boolean> {
+	const sqlite = Bun.which("sqlite3");
+	if (sqlite === null) return false;
+	const probe = Bun.spawn([sqlite, ":memory:", ".recover --ignore-freelist"], { stdout: "ignore", stderr: "ignore" });
+	return (await probe.exited) === 0;
+}
+
 describe("omp doctor", () => {
 	test("free pages warn without --fix and are reclaimed with --fix", async () => {
 		const dbPath = getHistoryDbPath(root);
@@ -160,7 +168,7 @@ describe("omp doctor", () => {
 		expect(dump).toContain("INSERT INTO lost_and_found");
 	});
 
-	test("freelist-only corruption is salvaged into a verified replacement", async () => {
+	test("freelist-only corruption: salvaged when the CLI supports it, refused safely otherwise", async () => {
 		const dbPath = getAgentDbPath(root);
 		await createDatabaseWithRows(dbPath, 500);
 		const db = new Database(dbPath);
@@ -171,9 +179,20 @@ describe("omp doctor", () => {
 
 		const after = await runDoctorCommand({ flags: { agentDir: root, fix: true } });
 		const finding = after.findings.find(entry => entry.id === "storage.agent.db");
-		expect(finding?.fixed).toBe(true);
-		expect(finding?.summary).toMatch(/salvaged|rescued/);
-		expect(quickCheck(dbPath)).toBe("ok");
+		if (await recoverSupportsIgnoreFreelist()) {
+			// Modern sqlite3: freelist pages are skipped, nothing strands, swap proceeds.
+			expect(finding?.fixed).toBe(true);
+			expect(finding?.summary).toMatch(/salvaged|rescued/);
+			expect(quickCheck(dbPath)).toBe("ok");
+		} else {
+			// Older sqlite3: plain .recover strands the deleted rows in
+			// lost_and_found, so the fidelity guard must refuse the swap and keep
+			// the original plus the dump.
+			expect(finding?.status).toBe("error");
+			expect(finding?.fixed).toBeUndefined();
+			expect(quickCheck(dbPath)).not.toBe("ok");
+			expect(finding?.details.join("\n")).toContain("recovery dump preserved at");
+		}
 		const backups = await fs.readdir(path.join(path.dirname(dbPath), ".omp-doctor-backups"));
 		expect(backups.some(name => name.startsWith("agent.db."))).toBe(true);
 	});
