@@ -758,19 +758,22 @@ async function vacuumIntoRescue(dbPath: string): Promise<string> {
 /**
  * Acquire a RESERVED write lock (BEGIN IMMEDIATE) on the live database to
  * exclude concurrent writers during repair. Returns an open handle holding
- * the transaction, or null when the database cannot be opened at all (not a
- * valid SQLite file, missing, etc.) — an unopenable file has no SQLite
- * writers, so the caller may proceed without a lock. Throws on any BEGIN
- * IMMEDIATE failure (BUSY or otherwise): a lockable database that cannot be
- * locked means exclusion is unavailable and the caller must refuse.
+ * the transaction, or null when the file is not a valid SQLite database
+ * (SQLITE_NOTADB) — an unopenable file has no SQLite writers, so the caller
+ * may proceed without a lock (gated by hasHolders). Throws on BUSY or any
+ * other failure: a lockable database that cannot be locked means exclusion
+ * is unavailable and the caller must refuse.
+ *
+ * bun:sqlite opens lazily: `new Database("garbage")` succeeds and NOTADB
+ * surfaces at the first statement (BEGIN IMMEDIATE), so the classification
+ * must inspect the error message, not the constructor.
  */
 async function acquireWriteLock(dbPath: string): Promise<Database | null> {
 	let handle: Database;
 	try {
 		handle = new Database(dbPath);
 	} catch {
-		// Unopenable (NOTADB, ENOENT, …): no SQLite writer can exist — the
-		// caller proceeds without a lock.
+		// Constructor failed (permissions, I/O): treat as unopenable.
 		return null;
 	}
 	try {
@@ -782,7 +785,10 @@ async function acquireWriteLock(dbPath: string): Promise<Database | null> {
 		} catch {
 			// secondary to the lock failure
 		}
-		// Lockable but could not lock — refuse (caller's catch handles it).
+		// bun:sqlite opens lazily: NOTADB surfaces here, not at the constructor.
+		// A non-database file can't have SQLite writers → return null (holder-gated).
+		if (/not a database/i.test(messageOf(error))) return null;
+		// BUSY or any other failure on a real database → refuse.
 		throw error;
 	}
 	return handle;
