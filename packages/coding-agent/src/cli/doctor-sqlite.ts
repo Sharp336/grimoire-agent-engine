@@ -530,13 +530,29 @@ export async function recoverInterruptedSwap(db: DoctorDatabase, restore: boolea
 		// Hold a RESERVED write lock through the restore so no writer commits
 		// between the quiescence proof and the file swap. If the file is not a
 		// valid SQLite database (NOTADB), acquireWriteLock returns null — an
-		// unopenable file has no SQLite writers, so proceed without a lock.
+		// unopenable file can't take a SQLite lock, but a process may still
+		// hold it open from before it became garbage. Gate on hasHolders:
+		// proceed only when it returns exactly false; true or unavailable → refuse.
 		// BEGIN IMMEDIATE failures throw and are caught above (refuse).
 		let lockHandle: Database | null = null;
 		try {
 			lockHandle = await acquireWriteLock(db.path);
 		} catch {
 			return { found: true, restored: false, error: "database busy; close running omp sessions and re-run" };
+		}
+		if (lockHandle === null) {
+			let holders: boolean | null;
+			try {
+				holders = await hasHolders(db.path);
+			} catch {
+				holders = null;
+			}
+			if (holders !== false)
+				return {
+					found: true,
+					restored: false,
+					error: "database busy or holder check unavailable; close running omp sessions and re-run",
+				};
 		}
 		try {
 			await restoreFromArchive(db.path, archiveDir);
@@ -932,7 +948,9 @@ async function repairCorruptDatabase(probe: DbProbe, repair: DbRepair): Promise<
 	// swap (marker, sidecar retirement, rename, verify). swapInCandidate
 	// releases the lock in its finally. If BEGIN IMMEDIATE fails, the throw
 	// is caught below (busy/error, refuse). A null lock (unopenable file)
-	// proceeds — no SQLite writers can exist on an unopenable file.
+	// gates on hasHolders: proceed only when exactly false; true or
+	// unavailable → refuse (a process may hold the file open from before it
+	// became garbage).
 	let lockHandle: Database | null = null;
 	try {
 		lockHandle = await acquireWriteLock(probe.path);
@@ -944,10 +962,19 @@ async function repairCorruptDatabase(probe: DbProbe, repair: DbRepair): Promise<
 		repair.error = messageOf(error);
 		return;
 	}
-	// A null lock means the file is unopenable (NOTADB, ENOENT) — no SQLite
-	// writer can exist, so proceed without a lock. The salvage ladder will
-	// fail gracefully on true garbage and report repair.error; the original
-	// is preserved in the archive regardless.
+	if (lockHandle === null) {
+		let holders: boolean | null;
+		try {
+			holders = await hasHolders(probe.path);
+		} catch {
+			holders = null;
+		}
+		if (holders !== false) {
+			repair.busy = true;
+			repair.error = "database busy or holder check unavailable; close running omp sessions and re-run";
+			return;
+		}
+	}
 	try {
 		let archiveDir: string;
 		try {
