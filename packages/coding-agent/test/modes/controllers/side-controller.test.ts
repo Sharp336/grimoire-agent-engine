@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
+import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionAPI, ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
@@ -96,7 +97,9 @@ function createSideStub(overrides?: {
 }
 
 function createContext(tempDir: TempDir) {
-	const parentManager = SessionManager.create(tempDir.path());
+	// Isolate the parent session inside the TempDir — the default session dir is
+	// the real user store (~/.omp/agent/sessions), which tests would pollute.
+	const parentManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
 	const parentFile = parentManager.getSessionFile();
 	if (!parentFile) throw new Error("parent session file was not created");
 
