@@ -12,6 +12,10 @@ describe("AgentStorage model perf aggregates", () => {
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
+		// Close singleton handles BEFORE removing the temp dir so later
+		// default-path reads don't miss a stale, closed handle left in the
+		// instances map by a unique temp path that no longer exists.
+		AgentStorage.resetInstance();
 		if (tempDir) {
 			try {
 				await tempDir.remove();
@@ -19,7 +23,6 @@ describe("AgentStorage model perf aggregates", () => {
 			tempDir = undefined as unknown as TempDir;
 		}
 	});
-
 	async function openStorage(): Promise<AgentStorage> {
 		tempDir = TempDir.createSync("@omp-agent-storage-perf-");
 		return AgentStorage.open(path.join(tempDir.path(), "agent.db"));

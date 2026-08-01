@@ -14,7 +14,11 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readModelCache, resetModelCacheCorruptLatchForTests } from "@oh-my-pi/pi-catalog/model-cache";
+import {
+	readModelCache,
+	resetModelCacheCorruptLatchForTests,
+	resetModelCacheSharedHandleForTests,
+} from "@oh-my-pi/pi-catalog/model-cache";
 import { getModelDbPath, logger } from "@oh-my-pi/pi-utils";
 import { refreshDirsFromEnv } from "@oh-my-pi/pi-utils/dirs";
 import { shellQuote } from "@oh-my-pi/pi-utils/shell";
@@ -25,6 +29,7 @@ const tempDirs: string[] = [];
 afterEach(() => {
 	vi.restoreAllMocks();
 	resetModelCacheCorruptLatchForTests();
+	resetModelCacheSharedHandleForTests();
 	if (originalAgentDir === undefined) {
 		delete process.env.PI_CODING_AGENT_DIR;
 	} else {
@@ -39,6 +44,9 @@ describe("model-cache latch key matches the open fallback", () => {
 	let malformedDbPath: string;
 
 	beforeEach(() => {
+		// Drop any shared default handle a prior suite cached against the real
+		// agent dir, so this test opens against our temp dir from a clean state.
+		resetModelCacheSharedHandleForTests();
 		dir = mkdtempSync(join(tmpdir(), "pi-catalog-latch-key-"));
 		tempDirs.push(dir);
 		// Point the shared default db path at our temp dir.

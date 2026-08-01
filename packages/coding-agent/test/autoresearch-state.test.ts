@@ -393,6 +393,26 @@ describe("AutoresearchStorage round-trip", () => {
 		// The only foreign_keys pragma is the one from the configurator.
 		expect(schemaStatements.filter(s => /foreign_keys/i.test(s))).toHaveLength(1);
 	});
+
+	it("enforces foreign keys on the live connection (observable)", () => {
+		// Observable contract: a run referencing a non-existent session must be
+		// rejected by the foreign-key constraint. This proves PRAGMA foreign_keys
+		// is actually ON on the connection — not merely that the pragma string
+		// was issued during construction. The wiring spy test above would pass
+		// even if foreign keys were never enabled; this one cannot.
+		const storage = openStorage();
+		expect(() =>
+			storage.insertRun({
+				sessionId: 999999,
+				segment: 0,
+				command: "bun bench",
+				logPath: "/tmp/run.log",
+				preRunDirtyPaths: [],
+				startedAt: 1,
+			}),
+		).toThrow(/FOREIGN KEY|foreign key|constraint/i);
+		storage.close();
+	});
 });
 
 describe("autoresearch control state", () => {

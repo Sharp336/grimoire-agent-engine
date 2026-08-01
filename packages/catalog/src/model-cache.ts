@@ -327,3 +327,12 @@ export function writeModelCache<TApi extends Api>(
 export function resetModelCacheCorruptLatchForTests(): void {
 	damagedCacheDbs.clear();
 }
+
+/** @internal Close and clear the shared default handle — test-only. */
+export function resetModelCacheSharedHandleForTests(): void {
+	if (sharedDb) {
+		sharedDb.close();
+	}
+	sharedDb = null;
+	sharedDbPath = null;
+}
