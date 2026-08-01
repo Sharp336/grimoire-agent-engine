@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `@oh-my-pi/pi-utils/sqlite` with `isSqliteCorruptError`, the shared classifier for SQLite's unrecoverable-file result codes (`SQLITE_CORRUPT` family plus `SQLITE_NOTADB`).
+- Added `@oh-my-pi/pi-utils/sqlite` with `isSqliteCorruptError`, the shared classifier for SQLite's unrecoverable-file result codes (`SQLITE_CORRUPT` family plus `SQLITE_NOTADB`). ([#7296](https://github.com/can1357/oh-my-pi/issues/7296))
 
 ## [17.2.1] - 2026-07-30
 

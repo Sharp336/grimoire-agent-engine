@@ -23,6 +23,7 @@ import * as path from "node:path";
 import { AuthStorage, type OAuthCredential, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { logger } from "@oh-my-pi/pi-utils";
+import { shellQuote } from "@oh-my-pi/pi-utils/shell";
 import { isSqliteCorruptError } from "@oh-my-pi/pi-utils/sqlite";
 import { removeWithRetries } from "../../utils/src/temp";
 
@@ -285,6 +286,147 @@ describe("AuthStorage corrupt-store generation notification", () => {
 	});
 });
 
+describe("AuthStorage corrupt-store shell-balanced repair guidance", () => {
+	let tempDir = "";
+	let store: SqliteAuthCredentialStore;
+	let storage: AuthStorage;
+
+	beforeEach(async () => {
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-corrupt-shell-"));
+		// Use a path containing a single quote to exercise shell quoting.
+		const quoteDir = path.join(tempDir, "omp's agent");
+		await fs.mkdir(quoteDir, { recursive: true });
+		const dbPath = path.join(quoteDir, "agent.db");
+		store = await SqliteAuthCredentialStore.open(dbPath);
+		store.saveOAuth(PROVIDER, oauthCredential("1"));
+		storage = new AuthStorage(store);
+		await storage.reload();
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		storage.close();
+		store.close();
+		if (tempDir) {
+			await removeWithRetries(tempDir);
+			tempDir = "";
+		}
+	});
+
+	test("F2: latch message emits a shell-balanced repair command for a quote-containing path", async () => {
+		const malformedDbPath = await writeMalformedDb(tempDir);
+		vi.spyOn(store, "getCredentialBlock").mockImplementation(() => {
+			throw realCorruptError(malformedDbPath);
+		});
+		const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => {});
+
+		await storage.getApiKey(PROVIDER, "session-shell-1");
+
+		const damagedCall = errorSpy.mock.calls.find(
+			call => typeof call[0] === "string" && call[0].includes("Credential store is damaged"),
+		);
+		expect(damagedCall).toBeDefined();
+		const message = String(damagedCall?.[0]);
+		expect(message).toContain("--ignore-freelist");
+		expect(message).toContain("chmod 600");
+		// The repair command must be shell-balanced: every unescaped single
+		// quote toggles open/close state, so the string ends closed.
+		let open = false;
+		for (let i = 0; i < message.length; i++) {
+			if (message[i] === "'" && message[i - 1] !== "\\") open = !open;
+		}
+		expect(open).toBe(false);
+	});
+
+	test("F2: damagedStoreError emits a shell-balanced repair command for a quote-containing path", async () => {
+		const quoteDir = path.join(tempDir, "omp's agent");
+		const dbPath = path.join(quoteDir, "agent.db");
+		// Force the static error helper through the open() path by corrupting
+		// the file after the store was successfully opened in beforeEach.
+		store.close();
+		await fs.writeFile(dbPath, "this is not a sqlite database");
+
+		expect(SqliteAuthCredentialStore.open(dbPath)).rejects.toThrow();
+		try {
+			await SqliteAuthCredentialStore.open(dbPath);
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			expect(message).toContain(".recover --ignore-freelist");
+			expect(message).toContain(shellQuote(dbPath));
+			// Shell-balanced check.
+			let open = false;
+			for (let i = 0; i < message.length; i++) {
+				if (message[i] === "'" && message[i - 1] !== "\\") open = !open;
+			}
+			expect(open).toBe(false);
+		}
+	});
+});
+
+describe("AuthStorage corrupt-store bump skips acknowledge when latched", () => {
+	let tempDir = "";
+	let dbPath = "";
+	let store: SqliteAuthCredentialStore;
+	let storage: AuthStorage;
+
+	beforeEach(async () => {
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-corrupt-ack-"));
+		dbPath = path.join(tempDir, "agent.db");
+		store = await SqliteAuthCredentialStore.open(dbPath);
+		store.saveOAuth(PROVIDER, oauthCredential("1"));
+		storage = new AuthStorage(store);
+		await storage.reload();
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		storage.close();
+		store.close();
+		if (tempDir) {
+			await removeWithRetries(tempDir);
+			tempDir = "";
+		}
+	});
+
+	test("F3: latch bump does not call acknowledgeLocalChanges but listeners still fire", async () => {
+		const malformedDbPath = await writeMalformedDb(tempDir);
+		vi.spyOn(store, "getCredentialBlock").mockImplementation(() => {
+			throw realCorruptError(malformedDbPath);
+		});
+		vi.spyOn(logger, "error").mockImplementation(() => {});
+		const ackSpy = vi.spyOn(store, "acknowledgeLocalChanges");
+
+		const generations: number[] = [];
+		storage.onGenerationChanged(gen => generations.push(gen));
+		const generationBefore = storage.getGeneration();
+
+		// Trigger the latch: getCredentialBlock throws SQLITE_NOTADB → latch → bump.
+		await storage.getApiKey(PROVIDER, "session-ack-1");
+
+		// Mutation proof: acknowledgeLocalChanges must NOT have been called on
+		// the latch bump — the store is damaged and acknowledging is meaningless.
+		expect(ackSpy).not.toHaveBeenCalled();
+		// The generation listener still fired despite the skipped acknowledge.
+		expect(generations).toHaveLength(1);
+		expect(generations[0]).toBe(generationBefore + 1);
+	});
+
+	test("F3: a healthy bump still calls acknowledgeLocalChanges", async () => {
+		const ackSpy = vi.spyOn(store, "acknowledgeLocalChanges");
+
+		const generations: number[] = [];
+		storage.onGenerationChanged(gen => generations.push(gen));
+		const generationBefore = storage.getGeneration();
+
+		// A normal credential save + reload triggers a healthy bump (no latch).
+		store.saveApiKey(PROVIDER, "sk-healthy-bump-test");
+		await storage.reload();
+
+		expect(ackSpy).toHaveBeenCalled();
+		expect(generations).toHaveLength(1);
+		expect(generations[0]).toBe(generationBefore + 1);
+	});
+});
 describe("AuthStorage corrupt-store heal while latched", () => {
 	let tempDir = "";
 	let dbPath = "";

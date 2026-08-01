@@ -13,6 +13,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 import { $env, getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
+import { shellQuote } from "@oh-my-pi/pi-utils/shell";
 import { isSqliteCorruptError } from "@oh-my-pi/pi-utils/sqlite";
 import type { ApiKeyResolver } from "./auth-retry";
 import * as AIError from "./error";
@@ -1389,7 +1390,7 @@ export class AuthStorage {
 
 	#bumpGeneration(reason: string): void {
 		this.#generation += 1;
-		this.#store.acknowledgeLocalChanges?.();
+		if (!this.#storeDamaged) this.#store.acknowledgeLocalChanges?.();
 		for (const listener of [...this.#generationListeners]) {
 			try {
 				listener(this.#generation);
@@ -1717,7 +1718,7 @@ export class AuthStorage {
 		logger.error(
 			storePath
 				? `Credential store is damaged; persisted rate-limit blocks are disabled for this process. ` +
-						`Stop omp, back up the store (including -wal/-shm), then repair with: sqlite3 '${storePath}' '.recover --ignore-freelist' | sqlite3 '${storePath}.fixed' && chmod 600 '${storePath}.fixed'`
+						`Stop omp, back up the store (including -wal/-shm), then repair with: sqlite3 ${shellQuote(storePath)} '.recover --ignore-freelist' | sqlite3 ${shellQuote(`${storePath}.fixed`)} && chmod 600 ${shellQuote(`${storePath}.fixed`)}`
 				: "Credential store is damaged; persisted rate-limit blocks are disabled for this process. " +
 						"Repair the store file with sqlite3's .recover and restart.",
 			{ err, op, storePath, ...context },
@@ -7048,7 +7049,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	static #damagedStoreError(dbPath: string | undefined, cause: unknown): Error {
 		return new Error(
 			dbPath
-				? `Credential store at '${dbPath}' is damaged. Stop omp, back up the store (including -wal/-shm), then repair with: sqlite3 '${dbPath}' '.recover --ignore-freelist' | sqlite3 '${dbPath}.fixed' && chmod 600 '${dbPath}.fixed'`
+				? `Credential store at ${shellQuote(dbPath)} is damaged. Stop omp, back up the store (including -wal/-shm), then repair with: sqlite3 ${shellQuote(dbPath)} '.recover --ignore-freelist' | sqlite3 ${shellQuote(`${dbPath}.fixed`)} && chmod 600 ${shellQuote(`${dbPath}.fixed`)}`
 				: "Credential store is damaged. Repair the store file with sqlite3's .recover and restart.",
 			{ cause },
 		);

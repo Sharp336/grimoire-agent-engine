@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed the credential store corruption latch not clearing in-memory rate-limit blocks on healthy usage reports, not notifying generation listeners on latch, and not surfacing repair guidance when the store file is malformed at startup; the database path is now passed through all SqliteAuthCredentialStore construction sites (AgentStorage and the legacy pi-coding-agent shim) so corruption reports always identify the file.
+- Fixed the credential store corruption latch not clearing in-memory rate-limit blocks on healthy usage reports, not notifying generation listeners on latch, and not surfacing repair guidance when the store file is malformed at startup; the database path is now passed through all SqliteAuthCredentialStore construction sites (AgentStorage and the legacy pi-coding-agent shim) so corruption reports always identify the file. ([#7296](https://github.com/can1357/oh-my-pi/issues/7296))
 
 ## [17.2.3] - 2026-08-01
 

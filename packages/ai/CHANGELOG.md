@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed a damaged `agent.db` silently disabling every persisted rate-limit block: `AuthStorage` swallowed all credential-store errors at debug level and re-queried on every credential evaluation. The first unrecoverable SQLite error (`SQLITE_CORRUPT` family / `SQLITE_NOTADB`) now latches the store as damaged, logs once at error level with a repair one-liner pointing at the actual store path, and short-circuits every later persisted-block read and write for the process. Fail-open is preserved via the in-memory backoff map.
+- Fixed a damaged `agent.db` silently disabling every persisted rate-limit block: `AuthStorage` swallowed all credential-store errors at debug level and re-queried on every credential evaluation. The first unrecoverable SQLite error (`SQLITE_CORRUPT` family / `SQLITE_NOTADB`) now latches the store as damaged, logs once at error level with a repair one-liner pointing at the actual store path, and short-circuits every later persisted-block read and write for the process. Fail-open is preserved via the in-memory backoff map. ([#7296](https://github.com/can1357/oh-my-pi/issues/7296))
 
 ## [17.2.3] - 2026-08-01
 

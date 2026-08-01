@@ -9,6 +9,8 @@ import {
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai";
 import { AsyncDrain, getAgentDbPath, getStatsDbPath, isRecord, logger } from "@oh-my-pi/pi-utils";
+import { shellQuote } from "@oh-my-pi/pi-utils/shell";
+import { isSqliteCorruptError } from "@oh-my-pi/pi-utils/sqlite";
 import type { RawSettings as Settings } from "../config/settings";
 
 /** Row shape for settings table queries */
@@ -160,7 +162,17 @@ export class AgentStorage {
 			);
 		}
 
-		this.#initializeSchema();
+		try {
+			this.#initializeSchema();
+		} catch (err) {
+			if (isSqliteCorruptError(err)) {
+				throw new Error(
+					`Agent database at ${shellQuote(dbPath)} is damaged. Stop omp, back up the store (including -wal/-shm), then repair with: sqlite3 ${shellQuote(dbPath)} '.recover --ignore-freelist' | sqlite3 ${shellQuote(`${dbPath}.fixed`)} && chmod 600 ${shellQuote(`${dbPath}.fixed`)}`,
+					{ cause: err },
+				);
+			}
+			throw err;
+		}
 		this.#hardenPermissions(dbPath);
 
 		// Create AuthCredentialStore with our open database
