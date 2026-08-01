@@ -8,6 +8,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import type { Component, TUI } from "@oh-my-pi/pi-tui";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { Settings } from "../../config/settings";
+import { localizeUiText } from "../../i18n";
 import type { ResolvedRoleModel } from "../../session/agent-session";
 import { theme } from "../theme/theme";
 import {
@@ -98,7 +99,7 @@ export class ModelPickerComponent implements Component {
 		this.#browser = new ModelBrowser(settings, {
 			currentContextTokens: options.currentContextTokens,
 			disableOverContext: true,
-			emptyText: () => (this.#roleMode ? "  No quick roles in the Ctrl+P cycle" : undefined),
+			emptyText: () => (this.#roleMode ? `  ${localizeUiText("No quick roles in the Ctrl+P cycle")}` : undefined),
 		});
 		this.#browser.onActivate = item => {
 			const quickRole = this.#quickRoles.get(item.selector);
@@ -218,15 +219,15 @@ export class ModelPickerComponent implements Component {
 		const inner = Math.max(1, width - 4);
 		const status = this.#configError
 			? theme.fg("error", ` ${this.#configError}`)
-			: theme.fg("muted", ` ${this.#roleMode ? QUICK_ROLE_STATUS_HINT : STATUS_HINT}`);
+			: theme.fg("muted", ` ${localizeUiText(this.#roleMode ? QUICK_ROLE_STATUS_HINT : STATUS_HINT)}`);
 
 		const out: string[] = [];
-		out.push(topBorder(width, "Switch Model"));
+		out.push(topBorder(width, localizeUiText("Switch Model")));
 		out.push(row(status, width));
 		for (const line of this.#browser.render(inner)) {
 			out.push(row(line, width));
 		}
-		out.push(row(theme.fg("dim", this.#roleMode ? QUICK_ROLE_FOOTER_HINT : FOOTER_HINT), width));
+		out.push(row(theme.fg("dim", localizeUiText(this.#roleMode ? QUICK_ROLE_FOOTER_HINT : FOOTER_HINT)), width));
 		out.push(bottomBorder(width));
 		return out;
 	}

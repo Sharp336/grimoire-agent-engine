@@ -18,6 +18,7 @@ import { Container, Ellipsis, matchesKey, type OverlayHandle, padding, type TUI,
 import { formatAge, getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import type { KeyId } from "../../config/keybindings";
 import type { MessageRenderer } from "../../extensibility/extensions/types";
+import { localizeUiText } from "../../i18n";
 import { IrcBus } from "../../irc/bus";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, type AgentStatus, MAIN_AGENT_ID } from "../../registry/agent-registry";
@@ -452,7 +453,7 @@ export class AgentHubOverlayComponent extends Container {
 			lines.push(` ${theme.fg("error", sanitizeLine(this.#notice, Math.max(10, width - 2)))}`);
 		}
 		lines.push("");
-		lines.push(` ${theme.fg("dim", "j/k:select  Enter:open  r:revive  x:kill  Esc/←←:close")}`);
+		lines.push(` ${theme.fg("dim", localizeUiText("j/k:select  Enter:open  r:revive  x:kill  Esc/←←:close"))}`);
 		lines.push(...new DynamicBorder().render(width));
 		return lines;
 	}

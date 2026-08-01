@@ -31,6 +31,7 @@ import {
 	getPluginsCacheDir,
 	MarketplaceManager,
 } from "../extensibility/plugins/marketplace";
+import { getLanguage, localizeUiText, normalizeLanguage, setLanguage } from "../i18n";
 import { readMCPConfigFile } from "../mcp/config-writer";
 import { resolveMemoryBackend } from "../memory-backend";
 import { runPauseScreen } from "../modes/components/pause-screen";
@@ -400,6 +401,40 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		description: "Open settings menu",
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showSettingsSelector();
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "language",
+		description: "Switch interface language",
+		allowArgs: true,
+		subcommands: [
+			{ name: "en", description: "Use the English interface" },
+			{ name: "zh-CN", description: "使用简体中文界面" },
+		],
+		handleTui: async (command, runtime) => {
+			const requested = command.args.trim();
+			if (!requested) {
+				const language = getLanguage();
+				const label = language === "zh-CN" ? "简体中文 (zh-CN)" : "English (en)";
+				runtime.ctx.showStatus(`${localizeUiText("Current language:")} ${label}`);
+				runtime.ctx.editor.setText("");
+				return;
+			}
+
+			const language = normalizeLanguage(requested);
+			if (!language) {
+				runtime.ctx.showWarning(localizeUiText("Unknown language. Use /language en or /language zh-CN."));
+				runtime.ctx.editor.setText("");
+				return;
+			}
+
+			runtime.ctx.settings.set("language", language);
+			setLanguage(language);
+			await runtime.ctx.refreshSlashCommandState();
+			runtime.ctx.ui.requestRender();
+			const label = language === "zh-CN" ? "简体中文 (zh-CN)" : "English (en)";
+			runtime.ctx.showStatus(`${localizeUiText("Language changed to:")} ${label}`);
 			runtime.ctx.editor.setText("");
 		},
 	},
@@ -3015,7 +3050,14 @@ function materializeTuiBuiltinSlashCommand(
 	cmd: BuiltinSlashCommand,
 	runtime?: TuiSlashCommandRuntime,
 ): TuiBuiltinSlashCommand {
-	const materialized: TuiBuiltinSlashCommand = { ...cmd };
+	const materialized: TuiBuiltinSlashCommand = {
+		...cmd,
+		description: localizeUiText(cmd.description),
+		subcommands: cmd.subcommands?.map(subcommand => ({
+			...subcommand,
+			description: localizeUiText(subcommand.description),
+		})),
+	};
 	if (cmd.subcommands) {
 		materialized.getArgumentCompletions =
 			cmd.name === "mcp" && runtime
@@ -3029,7 +3071,10 @@ function materializeTuiBuiltinSlashCommand(
 		materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
 	}
 	if (runtime && cmd.getTuiAutocompleteDescription) {
-		materialized.getAutocompleteDescription = () => cmd.getTuiAutocompleteDescription?.(runtime);
+		materialized.getAutocompleteDescription = () => {
+			const description = cmd.getTuiAutocompleteDescription?.(runtime);
+			return description ? localizeUiText(description) : description;
+		};
 	}
 	return materialized;
 }

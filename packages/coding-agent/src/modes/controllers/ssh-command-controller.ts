@@ -7,6 +7,7 @@ import { getProjectDir, getSSHConfigPath } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../../capability";
 import { type SSHHost, sshCapability } from "../../capability/ssh";
 import { loadCapability } from "../../discovery";
+import { localizeUiText } from "../../i18n";
 import { addSSHHost, readSSHConfigFile, removeSSHHost, type SSHHostConfig } from "../../ssh/config-writer";
 import { parseCommandArgs } from "../shared";
 import { theme } from "../theme/theme";
@@ -229,7 +230,9 @@ export class SSHCommandController {
 
 			let helpText = "";
 			if (errorMsg.includes("already exists")) {
-				helpText = `\n\nTip: Use ${theme.fg("accent", "/ssh remove")} first, or choose a different name.`;
+				helpText = `\n\n${localizeUiText("Tip: Use")} ${theme.fg("accent", "/ssh remove")}${localizeUiText(
+					"first, or choose a different name.",
+				)}`;
 			}
 
 			this.ctx.showError(`Failed to add host: ${errorMsg}${helpText}`);

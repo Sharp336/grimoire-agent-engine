@@ -117,4 +117,11 @@ describe("TabBar", () => {
 		expect(tabBar.tabAt(0, 10)?.id).toBe("second");
 		expect(tabBar.tabAt(1, 1)).toBeUndefined();
 	});
+
+	it("renders a caller-provided navigation hint", () => {
+		const tabBar = new TabBar("设置", [{ id: "appearance", label: "外观" }], ansiTheme, 0, "（按 Tab 切换）");
+
+		expect(tabBar.render(80)[0]).toContain("（按 Tab 切换）");
+		expect(tabBar.render(80)[0]).not.toContain("(tab to cycle)");
+	});
 });

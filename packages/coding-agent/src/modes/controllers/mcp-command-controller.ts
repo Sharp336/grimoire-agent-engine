@@ -8,6 +8,7 @@ import { type Component, replaceTabs, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
 import type { SourceMeta } from "../../capability/types";
 import { expandEnvVarsDeep } from "../../discovery/helpers";
+import { localizeUiText } from "../../i18n";
 import {
 	analyzeAuthError,
 	discoverOAuthEndpoints,
@@ -1289,11 +1290,13 @@ export class MCPCommandController {
 			// Provide helpful error messages
 			let helpText = "";
 			if (errorMsg.includes("EACCES") || errorMsg.includes("permission denied")) {
-				helpText = "\n\nTip: Check file permissions for the config directory.";
+				helpText = `\n\n${localizeUiText("Tip: Check file permissions for the config directory.")}`;
 			} else if (errorMsg.includes("ENOSPC")) {
-				helpText = "\n\nTip: Insufficient disk space.";
+				helpText = `\n\n${localizeUiText("Tip: Insufficient disk space.")}`;
 			} else if (errorMsg.includes("already exists")) {
-				helpText = `\n\nTip: Use ${theme.fg("accent", "/mcp list")} to see existing servers.`;
+				helpText = `\n\n${localizeUiText("Tip: Use")} ${theme.fg("accent", "/mcp list")} ${localizeUiText(
+					"to see existing servers.",
+				)}`;
 			}
 
 			this.ctx.showError(`Failed to add server: ${errorMsg}${helpText}`);
@@ -1306,7 +1309,7 @@ export class MCPCommandController {
 				"",
 				theme.fg("muted", "Server creation cancelled."),
 				"",
-				theme.fg("dim", "Tip: Press Ctrl+C or Esc anytime to cancel"),
+				theme.fg("dim", localizeUiText("Tip: Press Ctrl+C or Esc anytime to cancel")),
 				"",
 			].join("\n"),
 		);
@@ -1515,7 +1518,9 @@ export class MCPCommandController {
 
 			if (!found) {
 				this.ctx.showError(
-					`Server "${name}" not found.\n\nTip: Run ${theme.fg("accent", "/mcp list")} to see available servers.`,
+					`Server "${name}" not found.\n\n${localizeUiText("Tip: Run")} ${theme.fg("accent", "/mcp list")} ${localizeUiText(
+						"to see available servers.",
+					)}`,
 				);
 				return;
 			}
@@ -1577,15 +1582,15 @@ export class MCPCommandController {
 			// Provide helpful error messages
 			let helpText = "";
 			if (errorMsg.includes("ENOENT") || errorMsg.includes("not found")) {
-				helpText = "\n\nTip: Check that the command or URL is correct.";
+				helpText = `\n\n${localizeUiText("Tip: Check that the command or URL is correct.")}`;
 			} else if (errorMsg.includes("EACCES")) {
-				helpText = "\n\nTip: Check file/command permissions.";
+				helpText = `\n\n${localizeUiText("Tip: Check file/command permissions.")}`;
 			} else if (errorMsg.includes("ECONNREFUSED")) {
-				helpText = "\n\nTip: Check that the server is running and the URL/port is correct.";
+				helpText = `\n\n${localizeUiText("Tip: Check that the server is running and the URL/port is correct.")}`;
 			} else if (errorMsg.includes("timeout")) {
-				helpText = "\n\nTip: The server may be slow or unresponsive. Try increasing the timeout.";
+				helpText = `\n\n${localizeUiText("Tip: The server may be slow or unresponsive. Try increasing the timeout.")}`;
 			} else if (errorMsg.includes("401") || errorMsg.includes("403")) {
-				helpText = "\n\nTip: Check your authentication credentials.";
+				helpText = `\n\n${localizeUiText("Tip: Check your authentication credentials.")}`;
 			}
 
 			this.ctx.showError(`Failed to connect to "${name}": ${errorMsg}${helpText}`);

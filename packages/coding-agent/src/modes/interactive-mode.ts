@@ -80,6 +80,7 @@ import type { CompactOptions } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import { loadSlashCommands } from "../extensibility/slash-commands";
 import type { Goal, GoalModeState } from "../goals/state";
+import { localizeUiText } from "../i18n";
 import { resolveLocalUrlToPath } from "../internal-urls";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
 import type { MCPManager } from "../mcp";
@@ -425,9 +426,9 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 		theme,
 	);
 	if (hiddenCount > 0) {
-		rows.push(theme.fg("dim", `… ${hiddenCount} more running — open Agent Hub for full list`));
+		rows.push(theme.fg("dim", `… ${hiddenCount} ${localizeUiText("more running — open Agent Hub for full list")}`));
 	}
-	return ["", theme.bold(theme.fg("accent", "Subagents")), ...rows.map(line => ` ${line}`)];
+	return ["", theme.bold(theme.fg("accent", localizeUiText("Subagents"))), ...rows.map(line => ` ${line}`)];
 }
 
 const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
@@ -522,7 +523,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#workingMessageAccentCacheValue?: WorkingMessageAccent;
 	#workingMessageAccentCacheHasValue = false;
 	get #defaultWorkingMessage(): string {
-		return `Working…${interruptHint()}`;
+		return localizeUiText("Working…") + interruptHint();
 	}
 	unsubscribe?: () => void;
 	onInputCallback?: (input: SubmittedUserInput) => void;
@@ -932,7 +933,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#welcomeComponent = undefined;
 
 		for (const warning of this.session.configWarnings) {
-			this.ui.addChild(new Text(theme.fg("warning", `Warning: ${warning}`), 1, 0));
+			this.ui.addChild(new Text(theme.fg("warning", `${localizeUiText("Warning:")} ${warning}`), 1, 0));
 			this.ui.addChild(new Spacer(1));
 		}
 
@@ -957,7 +958,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			// Add changelog if provided
 			if (this.#startupChangelog && settings.get("startup.changelogMode") !== "hidden") {
 				this.ui.addChild(new DynamicBorder());
-				this.ui.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
+				this.ui.addChild(new Text(theme.bold(theme.fg("accent", localizeUiText("What's New"))), 1, 0));
 				this.ui.addChild(new Spacer(1));
 				if (settings.get("startup.changelogMode") === "summary") {
 					const summary = formatStartupChangelogSummary(this.#startupChangelog).replace(
@@ -1913,7 +1914,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			case "abandoned":
 				return theme.fg("error", `${prefix}${checkbox.unchecked} ${chalk.strikethrough(todo.content)}`) + marker;
 			case "blocked":
-				return theme.fg("warning", `${prefix}${checkbox.unchecked} ${todo.content} (blocked)`) + marker;
+				return (
+					theme.fg("warning", `${prefix}${checkbox.unchecked} ${todo.content} ${localizeUiText("(blocked)")}`) +
+					marker
+				);
 			default:
 				if (matched) return theme.fg("accent", `${prefix}${checkbox.unchecked} ${todo.content}`) + marker;
 				return theme.fg("dim", `${prefix}${checkbox.unchecked} ${todo.content}`) + marker;
@@ -2166,7 +2170,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Header carries overall stage progression, e.g. "Todos · 1/8".
 		const root =
-			theme.bold(theme.fg("accent", "Todos")) +
+			theme.bold(theme.fg("accent", localizeUiText("Todos"))) +
 			(multiPhase ? theme.fg("dim", ` · ${activeIdx + 1}/${phases.length}`) : "");
 		const lines = ["", root, ...phaseTreeLines.map(line => ` ${line}`)];
 		this.todoContainer.addChild(new Text(lines.join("\n"), 1, 0));

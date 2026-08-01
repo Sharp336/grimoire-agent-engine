@@ -10,6 +10,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
+import { localizeUiText } from "../../i18n";
 import { theme } from "../../modes/theme/theme";
 import {
 	matchesAppInterrupt,
@@ -102,7 +103,7 @@ class HistoryResultsList implements Component {
 		const lines: string[] = [];
 
 		if (this.#results.length === 0) {
-			const message = this.#tokens.length > 0 ? "No matching history" : "No history yet";
+			const message = localizeUiText(this.#tokens.length > 0 ? "No matching history" : "No history yet");
 			lines.push(theme.fg("muted", `  ${theme.status.info} ${message}`));
 			return lines;
 		}

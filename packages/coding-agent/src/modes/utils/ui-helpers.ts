@@ -7,6 +7,7 @@ import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../coll
 import { settings } from "../../config/settings";
 import { getEditClipboard } from "../../edit/edit-clipboard";
 import { getFileSnapshotStore } from "../../edit/file-snapshot-store";
+import { localizeUiText } from "../../i18n";
 import { createAdvisorMessageCard } from "../../modes/components/advisor-message";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import { createBackgroundTanDispatchBlock } from "../../modes/components/background-tan-message";
@@ -109,6 +110,7 @@ export class UiHelpers {
 	 * we update the previous status line instead of appending new ones to avoid log spam.
 	 */
 	showStatus(message: string, options?: { dim?: boolean }): void {
+		message = localizeUiText(message);
 		const children = this.ctx.chatContainer.children;
 		const last = children.length > 0 ? children[children.length - 1] : undefined;
 		const secondLast = children.length > 1 ? children[children.length - 2] : undefined;
@@ -734,20 +736,24 @@ export class UiHelpers {
 	}
 
 	showError(errorMessage: string): void {
-		const text = new Text(`Error: ${errorMessage}`, 1, 0).setStyleFn(t => theme.fg("error", t));
+		const text = new Text(`${localizeUiText("Error:")} ${localizeUiText(errorMessage)}`, 1, 0).setStyleFn(t =>
+			theme.fg("error", t),
+		);
 		this.ctx.present([new Spacer(1), text]);
 	}
 
 	showWarning(warningMessage: string): void {
-		const text = new Text(`Warning: ${warningMessage}`, 1, 0).setStyleFn(t => theme.fg("warning", t));
+		const text = new Text(`${localizeUiText("Warning:")} ${localizeUiText(warningMessage)}`, 1, 0).setStyleFn(t =>
+			theme.fg("warning", t),
+		);
 		this.ctx.present([new Spacer(1), text]);
 	}
 
 	showNewVersionNotification(newVersion: string): void {
 		const block = new TranscriptBlock();
 		block.addChild(new DynamicBorder(text => theme.fg("warning", text)));
-		const title = "Update Available";
-		const prefix = `New version ${newVersion} is available. Run: `;
+		const title = localizeUiText("Update Available");
+		const prefix = `${localizeUiText("New version")} ${newVersion} ${localizeUiText("is available. Run:")} `;
 		const command = "omp update";
 		block.addChild(
 			new Text(`${title}\n${prefix}${command}`, 1, 0).setStyleFn(
@@ -774,8 +780,8 @@ export class UiHelpers {
 		}
 
 		const groups = [
-			{ label: "Steering", messages: steeringMessages },
-			{ label: "After yield", messages: followUpMessages },
+			{ label: localizeUiText("Steering"), messages: steeringMessages },
+			{ label: localizeUiText("After yield"), messages: followUpMessages },
 		].filter(group => group.messages.length > 0);
 		if (groups.length > 0) {
 			this.ctx.pendingMessagesContainer.addChild(new Spacer(1));

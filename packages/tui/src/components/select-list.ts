@@ -54,6 +54,12 @@ export interface SelectListLayoutOptions {
 	minPrimaryColumnWidth?: number;
 	maxPrimaryColumnWidth?: number;
 	truncatePrimary?: (context: SelectListTruncatePrimaryContext) => string;
+	/** Localized text shown before a typed filter query. */
+	searchLabel?: string;
+	/** Localized hint shown while the filter query is empty. */
+	searchHint?: string;
+	/** Localized empty-result message. */
+	noMatchText?: string;
 	/** Enable type-to-filter search when the item count exceeds maxVisible. Defaults to true. */
 	overflowSearch?: boolean;
 	/**
@@ -167,7 +173,7 @@ export class SelectList implements Component, MouseRoutable {
 			if (showSearchStatus) {
 				lines.push(this.#renderStatusLine(width));
 			}
-			lines.push(this.theme.noMatch("  No matching items"));
+			lines.push(this.theme.noMatch(`  ${this.layout.noMatchText ?? "No matching items"}`));
 			return lines;
 		}
 
@@ -460,7 +466,9 @@ export class SelectList implements Component, MouseRoutable {
 
 	#renderStatusLine(width: number): string {
 		const query = sanitizeSingleLine(this.#filterQuery);
-		const statusText = query ? `  Search: ${query}` : "  Type to search";
+		const statusText = query
+			? `  ${this.layout.searchLabel ?? "Search"}: ${query}`
+			: `  ${this.layout.searchHint ?? "Type to search"}`;
 		return this.theme.scrollInfo(truncateToWidth(statusText, Math.max(1, width - 2), Ellipsis.Omit));
 	}
 

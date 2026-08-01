@@ -573,6 +573,22 @@ export const SETTINGS_SCHEMA = {
 	// Appearance
 	// ────────────────────────────────────────────────────────────────────────
 
+	language: {
+		type: "enum",
+		values: ["en", "zh-CN"] as const,
+		default: "en",
+		ui: {
+			tab: "appearance",
+			group: "Theme",
+			label: "Language",
+			description: "Language used for the OMP user interface",
+			options: [
+				{ value: "en", label: "English", description: "Use the English interface" },
+				{ value: "zh-CN", label: "简体中文", description: "使用简体中文界面" },
+			],
+		},
+	},
+
 	// Theme
 	"theme.dark": {
 		type: "string",

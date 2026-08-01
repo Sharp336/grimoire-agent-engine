@@ -25,6 +25,7 @@ import { formatNumber } from "@oh-my-pi/pi-utils";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../../config/model-resolver";
 import { getKnownRoleIds, getRoleInfo, MODEL_ROLE_IDS } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
+import { localizeUiText } from "../../i18n";
 import type { ModelPerfStats } from "../../session/agent-storage";
 import { AUTO_THINKING, type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../../thinking";
 import { type ThemeColor, theme } from "../theme/theme";
@@ -815,7 +816,10 @@ export class ModelBrowser implements Component {
 
 		if (total === 0) {
 			const message =
-				this.#emptyText?.() ?? (this.query.trim() ? "  No matching models" : "  No models available in this scope");
+				this.#emptyText?.() ??
+				(this.query.trim()
+					? `  ${localizeUiText("No matching models")}`
+					: `  ${localizeUiText("No models available in this scope")}`);
 			lines.push(truncateToWidth(theme.fg("muted", message), width));
 			for (let i = 1; i < this.#maxVisible; i++) lines.push("");
 		} else {

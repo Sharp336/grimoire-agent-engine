@@ -45,6 +45,30 @@ describe("SettingsList", () => {
 		expect(changes).toEqual([["mode", "on"]]);
 	});
 
+	it("renders translated value labels without changing the raw callback value", () => {
+		const changes: string[] = [];
+		const list = new SettingsList(
+			[
+				{
+					id: "mode",
+					label: "模式",
+					currentValue: "off",
+					values: ["off", "on"],
+					valueLabels: { off: "关闭", on: "开启" },
+				},
+			],
+			5,
+			testTheme,
+			(_id, value) => changes.push(value),
+			() => {},
+		);
+
+		expect(list.render(40)[0]).toContain("关闭");
+		list.handleInput("\n");
+		expect(changes).toEqual(["on"]);
+		expect(list.render(40)[0]).toContain("开启");
+	});
+
 	it("passes changed state to item label and value renderers", () => {
 		const themed: SettingsListTheme = {
 			label: (text: string, _selected: boolean, changed: boolean) => (changed ? `[changed-label]${text}` : text),

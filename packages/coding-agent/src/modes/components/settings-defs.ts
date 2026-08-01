@@ -25,6 +25,7 @@ import {
 	type SubmenuOption,
 	TAB_GROUPS,
 } from "../../config/settings-schema";
+import { localizeUiText, onLanguageChanged } from "../../i18n";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // UI Definition Types
@@ -153,7 +154,11 @@ const CONDITIONS: Record<string, () => boolean> = {
 function resolveOptions(ui: AnyUiMetadata): OptionList | "runtime" | undefined {
 	if (!ui.options) return undefined;
 	if (ui.options === "runtime") return "runtime";
-	return ui.options;
+	return ui.options.map(option => ({
+		...option,
+		label: localizeUiText(option.label),
+		description: option.description ? localizeUiText(option.description) : option.description,
+	}));
 }
 
 function pathToSettingDef(path: SettingPath): SettingDef | null {
@@ -162,7 +167,14 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 
 	const schemaType = getType(path);
 	const condition = ui.condition ? CONDITIONS[ui.condition] : undefined;
-	const base = { path, label: ui.label, description: ui.description, tab: ui.tab, group: ui.group, condition };
+	const base = {
+		path,
+		label: localizeUiText(ui.label),
+		description: localizeUiText(ui.description),
+		tab: ui.tab,
+		group: ui.group,
+		condition,
+	};
 
 	if (schemaType === "boolean") {
 		return { ...base, type: "boolean" };
@@ -221,6 +233,10 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 
 /** Cache of generated definitions */
 let cachedDefs: SettingDef[] | null = null;
+
+onLanguageChanged(() => {
+	cachedDefs = null;
+});
 
 /** Get all setting definitions with UI */
 export function getAllSettingDefs(): SettingDef[] {

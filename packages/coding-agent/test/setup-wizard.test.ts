@@ -3,6 +3,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { runOnboardingSetup } from "@oh-my-pi/pi-coding-agent/commands/setup";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { initializeLanguage } from "@oh-my-pi/pi-coding-agent/i18n";
 import {
 	ALL_SCENES,
 	CURRENT_SETUP_VERSION,
@@ -45,6 +46,7 @@ function testScene(id: string, minVersion: number, shouldRun?: () => boolean): S
 }
 
 afterEach(async () => {
+	initializeLanguage("en");
 	await initTheme(false, "unicode", false, "titanium", "light");
 });
 
@@ -486,6 +488,48 @@ describe("setup wizard glyph scene", () => {
 });
 
 describe("setup wizard web search tab", () => {
+	it("localizes provider setup chrome and web-search copy", async () => {
+		await initTheme(false, "unicode", false, "titanium", "light");
+		initializeLanguage("zh-CN");
+		const settings = Settings.isolated();
+		const host = {
+			ctx: {
+				settings,
+				session: {
+					modelRegistry: {
+						authStorage: {
+							has: () => false,
+							hasAuth: () => false,
+							getCredentialOrigin: () => undefined,
+						},
+					},
+				},
+			},
+			requestRender: () => {},
+			finish: () => {},
+			setFocus: () => {},
+			restoreFocus: () => {},
+		} as unknown as SetupSceneHost;
+		const providers = providersSetupScene.mount(host);
+		const webSearch = new WebSearchTab(host);
+		try {
+			expect(providers.title).toBe("设置提供商");
+			expect(providers.subtitle).toContain("登录并选择网页搜索提供商");
+			const providerFrame = providers.render(120).join("\n");
+			expect(providerFrame).toContain("提供商:");
+			expect(providerFrame).toContain("登录");
+			expect(providerFrame).toContain("（按 Tab 切换）");
+
+			const searchFrame = webSearch.render(120).join("\n");
+			expect(searchFrame).toContain("选择 web_search 工具优先使用的提供商");
+			expect(searchFrame).toContain("输入以搜索");
+			expect(searchFrame).not.toContain("Type to search");
+		} finally {
+			providers.dispose?.();
+			webSearch.dispose();
+		}
+	});
+
 	it("exposes every web-search provider preference in the shared TUI list", () => {
 		expect(SEARCH_PROVIDER_OPTIONS[0]?.value).toBe("auto");
 		expect(SEARCH_PROVIDER_OPTIONS.slice(1).map(option => option.value)).toEqual([...SEARCH_PROVIDER_ORDER]);
