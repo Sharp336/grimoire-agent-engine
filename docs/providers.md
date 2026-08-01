@@ -116,6 +116,7 @@ Each provider has one or more environment variables that supply a key when no st
 | `kilo` | `KILO_API_KEY` |
 | `zai` | `ZAI_API_KEY` |
 | `zenmux` | `ZENMUX_API_KEY` |
+| `orcarouter` | `ORCAROUTER_API_KEY` |
 | `zhipu-coding-plan` | `ZHIPU_API_KEY` |
 | `umans` | `UMANS_AI_CODING_PLAN_API_KEY` |
 | `qianfan` | `QIANFAN_API_KEY` |

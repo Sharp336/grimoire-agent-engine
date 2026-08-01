@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added support for the OrcaRouter provider (`orcarouter`), an OpenAI-compatible model routing gateway with dynamic model discovery (context windows, max output, input modalities, and per-million USD pricing from the keyless `/v1/models` endpoint) and API-key authentication via the `ORCAROUTER_API_KEY` environment variable.
+
 ## [17.2.3] - 2026-08-01
 
 ### Added

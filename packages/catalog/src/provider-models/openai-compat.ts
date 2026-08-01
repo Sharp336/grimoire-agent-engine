@@ -2527,6 +2527,114 @@ export function openrouterModelManagerOptions(
 	};
 }
 
+// ---------------------------------------------------------------------------
+// 10.4 OrcaRouter
+// ---------------------------------------------------------------------------
+
+const ORCAROUTER_BASE_URL = "https://api.orcarouter.ai/v1";
+
+/**
+ * Endpoint types OrcaRouter advertises for models reachable over the OpenAI
+ * chat-completions wire. `/v1/models` also lists embedding, image-generation,
+ * video, and Gemini-only entries that this provider's `openai-completions`
+ * dialect cannot drive, so they are filtered out of the picker. A missing or
+ * empty list means "unspecified" and is kept: a handful of chat models
+ * (`google/gemma-4-31b-it`, `qwen/qwen3-vl-235b-a22b-instruct`, …) ship
+ * without the field, and hiding a usable model is worse than listing one that
+ * errors on first use.
+ */
+const ORCAROUTER_CHAT_ENDPOINT_TYPES = new Set(["openai", "openai-response", "anthropic"]);
+
+export function isOrcaRouterChatModelEntry(entry: OpenAICompatibleModelRecord): boolean {
+	const endpointTypes = entry.supported_endpoint_types;
+	if (!Array.isArray(endpointTypes) || endpointTypes.length === 0) {
+		return true;
+	}
+	return endpointTypes.some(type => typeof type === "string" && ORCAROUTER_CHAT_ENDPOINT_TYPES.has(type));
+}
+
+/**
+ * Bundled seed for OrcaRouter, mirroring the GMI Cloud seed rationale: catalog
+ * generation may run before the gateway is reachable, and without a seed the
+ * descriptor's `defaultModel` would be unresolvable on a fresh install until
+ * the async runtime discovery fires. Live `/v1/models` discovery is
+ * authoritative and replaces this row.
+ *
+ * Cost, context window, max output, and modalities are the values OrcaRouter
+ * publishes for this id in its own `/v1/models` catalog. It publishes no
+ * cached-token tariff, so cache costs stay 0. `reasoning`/`thinking` mirror
+ * the bundled reference the repo already ships for the same model id rather
+ * than being inferred from the gateway accepting a `reasoning_effort` value.
+ */
+export const ORCAROUTER_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	{
+		id: "anthropic/claude-opus-4.8",
+		name: "Claude Opus 4.8",
+		api: "openai-completions",
+		provider: "orcarouter",
+		baseUrl: ORCAROUTER_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 5, output: 25, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1000000,
+		maxTokens: 128000,
+		thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max] },
+	},
+];
+
+export interface OrcaRouterModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function orcarouterModelManagerOptions(
+	config?: OrcaRouterModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const baseUrl = config?.baseUrl ?? ORCAROUTER_BASE_URL;
+	const resolveReference = createReferenceResolver(() =>
+		createBundledReferenceMap<"openai-completions">("orcarouter"),
+	);
+	return {
+		providerId: "orcarouter",
+		dynamicModelsAuthoritative: true,
+		// `/v1/models` is public on this gateway (200 without an Authorization
+		// header), so discovery is not gated on `apiKey`: the picker fills in
+		// before the user has pasted a key, and the key is still sent when present.
+		fetchDynamicModels: () =>
+			fetchOpenAICompatibleModels({
+				api: "openai-completions",
+				provider: "orcarouter",
+				baseUrl,
+				apiKey: config?.apiKey,
+				filterModel: entry => isOrcaRouterChatModelEntry(entry),
+				mapModel: (entry, defaults) => {
+					// Ids are upstream-namespaced (`openai/gpt-5.5`,
+					// `anthropic/claude-opus-4.8`), so the cross-provider reference
+					// index supplies reasoning/thinking/compat for models the bundle
+					// already knows from another gateway.
+					const baseModel = mapWithBundledReference(entry, defaults, resolveReference(defaults.id));
+					const pricing = entry.pricing as Record<string, unknown> | undefined;
+					const inputModalities = (entry.architecture as Record<string, unknown> | undefined)?.input_modalities;
+					// OrcaRouter publishes both per-token strings and pre-divided
+					// per-million numbers; the latter needs no unit conversion.
+					const inputCost = toNumber(pricing?.prompt_per_million);
+					const outputCost = toNumber(pricing?.completion_per_million);
+					return {
+						...baseModel,
+						...(Array.isArray(inputModalities) && { input: toInputCapabilities(inputModalities) }),
+						cost: {
+							...baseModel.cost,
+							...(inputCost !== undefined && { input: inputCost }),
+							...(outputCost !== undefined && { output: outputCost }),
+						},
+					};
+				},
+				fetch: config?.fetch,
+			}),
+	};
+}
+
 const ZENMUX_OPENAI_BASE_URL = "https://zenmux.ai/api/v1";
 const ZENMUX_ANTHROPIC_BASE_URL = "https://zenmux.ai/api/anthropic";
 
