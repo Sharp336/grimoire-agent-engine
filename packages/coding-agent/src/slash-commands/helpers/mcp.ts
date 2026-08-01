@@ -435,7 +435,7 @@ async function handleEnableDisableCommand(
 		const userServer = userConfig.mcpServers?.[name];
 		const configured = projectServer !== undefined || userServer !== undefined;
 		const current = runtime.settings.getProjectActivation("mcp", name);
-		if (configured || current === "disabled") {
+		if (!enabled || configured || current === "disabled") {
 			const sourceDisabled =
 				projectServer?.enabled === false
 					? { config: projectServer, path: projectPath }

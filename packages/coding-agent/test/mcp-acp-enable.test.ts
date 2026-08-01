@@ -13,7 +13,7 @@ afterEach(async () => {
 	await Promise.all(cleanupPaths.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
 });
 
-describe("ACP /mcp enable", () => {
+describe("ACP /mcp enable and disable", () => {
 	test("updates a source-disabled project server before enabling its activation", async () => {
 		const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-mcp-project-"));
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-mcp-agent-"));
@@ -66,5 +66,30 @@ describe("ACP /mcp enable", () => {
 
 		expect((await readMCPConfigFile(configPath)).mcpServers?.ancestor?.enabled).toBe(true);
 		expect(output).toEqual(['Server "ancestor" enabled.']);
+	});
+
+	test("disables an unconfigured discovered server through activation", async () => {
+		const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-mcp-project-"));
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-mcp-agent-"));
+		cleanupPaths.push(projectDir, agentDir);
+		const settings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
+		const output: string[] = [];
+		const runtime = {
+			cwd: projectDir,
+			settings,
+			output: (text: string) => {
+				output.push(text);
+			},
+		} as SlashCommandRuntime;
+		const command: ParsedSlashCommand = {
+			name: "mcp",
+			args: "disable discovered-server",
+			text: "mcp disable discovered-server",
+		};
+
+		await handleMcpAcp(command, runtime);
+
+		expect(settings.getProjectActivation("mcp", "discovered-server")).toBe("disabled");
+		expect(output).toEqual(['Server "discovered-server" disabled.']);
 	});
 });
