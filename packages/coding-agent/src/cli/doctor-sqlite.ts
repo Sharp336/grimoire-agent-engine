@@ -24,6 +24,7 @@ import {
 	getAutoresearchDir,
 	getGithubCacheDbPath,
 	getHistoryDbPath,
+	getMemoriesDir,
 	getModelDbPath,
 	getStatsDbPath,
 	isEnoent,
@@ -127,12 +128,30 @@ function listAutoresearchDatabases(): string[] {
 	}
 }
 
+/** Mnemopi databases under the agent-scoped memories tree; a missing directory yields no entries. */
+function listMnemopiDatabases(agentDir: string | undefined): DoctorDatabase[] {
+	const mnemopiDir = path.join(getMemoriesDir(agentDir), "mnemopi");
+	const databases: DoctorDatabase[] = [
+		{ label: "mnemopi/mnemopi.db", path: path.join(mnemopiDir, "mnemopi.db"), policy: "precious" },
+	];
+	try {
+		for (const entry of new Bun.Glob("banks/*/mnemopi.db").scanSync({ cwd: mnemopiDir })) {
+			databases.push({ label: `mnemopi/${entry}`, path: path.join(mnemopiDir, entry), policy: "precious" });
+		}
+	} catch {
+		// missing mnemopi directory — no bank databases
+	}
+	return databases;
+}
+
 export function resolveDoctorDatabases(agentDir: string | undefined, scopedToAgentDir: boolean): DoctorDatabase[] {
 	const databases: DoctorDatabase[] = [
 		{ label: "agent.db", path: getAgentDbPath(agentDir), policy: "precious" },
 		{ label: "history.db", path: getHistoryDbPath(agentDir), policy: "precious" },
 		{ label: "models.db", path: getModelDbPath(agentDir), policy: "regenerable" },
 	];
+	// Mnemopi databases follow agentDir; always agent-scoped.
+	databases.push(...listMnemopiDatabases(agentDir));
 	if (scopedToAgentDir) return databases;
 	// Root-scoped paths resolve through dirs.rootSubdir, which --agent-dir does
 	// not redirect; only include them for a real (unscoped) run.
