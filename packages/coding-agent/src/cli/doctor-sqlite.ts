@@ -548,6 +548,11 @@ export async function recoverInterruptedSwap(db: DoctorDatabase, restore: boolea
 		} catch {
 			return { found: true, restored: false, error: "database busy; close running omp sessions and re-run" };
 		}
+		// A null lock means the database could not be opened or BEGIN IMMEDIATE
+		// failed for a non-BUSY reason. Refuse the restore so it never proceeds
+		// without exclusion, matching the guard in repairCorruptDatabase.
+		if (lockHandle === null)
+			return { found: true, restored: false, error: "repair lock unavailable; another process may be writing" };
 		try {
 			await restoreFromArchive(db.path, archiveDir);
 		} finally {
