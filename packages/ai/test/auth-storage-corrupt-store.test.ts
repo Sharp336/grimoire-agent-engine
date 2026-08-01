@@ -170,18 +170,427 @@ describe("AuthStorage corrupt-store latch", () => {
 			blockedUntilMs: Date.now() + 60_000,
 		};
 
-		storage.upsertCredentialBlock(block);
-		storage.upsertCredentialBlock(block);
+		// The FIRST corrupt upsert must THROW — the catch branch latches and
+		// throws (not silently returns), so the broker handler (server.ts
+		// BLOCK_ROUTE) catches it and answers a non-200 response. Without this,
+		// the broker's first block upsert encounters corruption, returns
+		// normally (HTTP 200), and the remote client's success-refresh
+		// overwrites its optimistic local block with a block-free snapshot.
+		expect(() => storage.upsertCredentialBlock(block)).toThrow(
+			"Credential store is damaged; block writes are unavailable",
+		);
 
-		// The first corrupt write latches and bumps generation (F3: latch
-		// notifies snapshot consumers); the second call short-circuits before
-		// touching SQLite with no further generation side effect.
+		// The second call must also THROW — now via the #storeDamaged guard,
+		// before touching SQLite.
+		expect(() => storage.upsertCredentialBlock(block)).toThrow(
+			"Credential store is damaged; block writes are unavailable",
+		);
+
+		// The spy fired exactly once: the first call latched via the catch path;
+		// the second call threw before touching SQLite.
 		expect(spy).toHaveBeenCalledTimes(1);
 		expect(storage.getGeneration()).toBe(generationBefore + 1);
 		const damagedErrors = errorSpy.mock.calls.filter(
 			call => typeof call[0] === "string" && call[0].includes("Credential store is damaged"),
 		);
 		expect(damagedErrors).toHaveLength(1);
+	});
+});
+
+describe("AuthStorage corrupt-store broker seam", () => {
+	let tempDir = "";
+	let dbPath = "";
+	let store: SqliteAuthCredentialStore;
+	let storage: AuthStorage;
+
+	beforeEach(async () => {
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-corrupt-broker-"));
+		dbPath = path.join(tempDir, "agent.db");
+		store = await SqliteAuthCredentialStore.open(dbPath);
+		store.saveOAuth(PROVIDER, oauthCredential("1"));
+		storage = new AuthStorage(store);
+		await storage.reload();
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		storage.close();
+		store.close();
+		if (tempDir) {
+			await removeWithRetries(tempDir);
+			tempDir = "";
+		}
+	});
+
+	test("public upsertCredentialBlock throws when store is latched (broker gets non-200)", async () => {
+		// Latch the store via a corrupt read (same path production hits).
+		const malformedDbPath = await writeMalformedDb(tempDir);
+		vi.spyOn(store, "getCredentialBlock").mockImplementation(() => {
+			throw realCorruptError(malformedDbPath);
+		});
+		vi.spyOn(logger, "error").mockImplementation(() => {});
+
+		// Drive credential selection to trigger the latch.
+		await storage.getApiKey(PROVIDER, "session-broker-latch");
+
+		// The public/broker-facing seam must throw — not silently return — so
+		// the broker handler (server.ts BLOCK_ROUTE) catches it and answers a
+		// non-200 response, preserving the remote client's local backoff.
+		expect(() =>
+			storage.upsertCredentialBlock({
+				credentialId: 1,
+				providerKey: "anthropic:oauth",
+				blockScope: "",
+				blockedUntilMs: Date.now() + 60_000,
+			}),
+		).toThrow("Credential store is damaged; block writes are unavailable");
+	});
+
+	test("internal markCredentialBlocked path (via markUsageLimitReached) fails open without throwing", async () => {
+		// Set up two credentials so markUsageLimitReached can block one and
+		// selection can rotate to the sibling.
+		store.saveOAuth(PROVIDER, oauthCredential("2"));
+		await storage.reload();
+
+		// Latch the store via a corrupt read.
+		const malformedDbPath = await writeMalformedDb(tempDir);
+		vi.spyOn(store, "getCredentialBlock").mockImplementation(() => {
+			throw realCorruptError(malformedDbPath);
+		});
+		vi.spyOn(store, "upsertCredentialBlock").mockImplementation(() => {
+			throw realCorruptError(malformedDbPath);
+		});
+		vi.spyOn(logger, "error").mockImplementation(() => {});
+
+		// Trigger the latch.
+		await storage.getApiKey(PROVIDER, "session-internal-latch");
+
+		const rows = store.listAuthCredentials(PROVIDER);
+		const firstRow = rows[0];
+		if (!firstRow) throw new Error("expected first credential row");
+
+		// The internal write path (#markCredentialBlocked, called by
+		// markUsageLimitReached) must NOT throw — it short-circuits before
+		// touching the store when #storeDamaged is true, keeping the
+		// in-memory backoff map intact so within-process selection still
+		// honors the block.
+		const result = await storage.markUsageLimitReached(PROVIDER, "session-internal", {
+			credentialId: firstRow.id,
+			retryAfterMs: 60_000,
+		});
+
+		// markUsageLimitReached returned normally (no throw) and reported
+		// a sibling switch since the second credential is unblocked.
+		expect(result.switched).toBe(true);
+
+		// The in-memory block is effective: selection from the SAME session
+		// (which has a sticky preference for the first credential from the
+		// latch-triggering getApiKey) must skip the blocked first credential
+		// and return the sibling — proving the block is real, not just that a
+		// fresh session happened to round-robin to the second key.
+		const key = await storage.getApiKey(PROVIDER, "session-internal-latch");
+		expect(key).toBe("access-2");
+	});
+
+	test("first corrupt upsert on unlatched store throws (catch branch), second throws via guard", async () => {
+		// On an initially UNLATCHED store, the first corrupt upsert must
+		// throw from the catch branch (not silently return after latching),
+		// so the broker handler returns a non-200 on the very call that
+		// discovered the corruption. The second call throws via the
+		// #storeDamaged guard before touching SQLite.
+		const malformedDbPath = await writeMalformedDb(tempDir);
+		const spy = vi.spyOn(store, "upsertCredentialBlock").mockImplementation(() => {
+			throw realCorruptError(malformedDbPath);
+		});
+		vi.spyOn(logger, "error").mockImplementation(() => {});
+
+		const block = {
+			credentialId: 1,
+			providerKey: "anthropic:oauth",
+			blockScope: "",
+			blockedUntilMs: Date.now() + 60_000,
+		};
+
+		// First call: store is NOT latched → hits SQLite → corrupt throw →
+		// catch latches and throws (not silent return).
+		expect(() => storage.upsertCredentialBlock(block)).toThrow(
+			"Credential store is damaged; block writes are unavailable",
+		);
+		// Second call: store IS latched → guard throws before touching SQLite.
+		expect(() => storage.upsertCredentialBlock(block)).toThrow(
+			"Credential store is damaged; block writes are unavailable",
+		);
+		// The spy fired exactly once: the first call hit SQLite; the second
+		// threw via the guard.
+		expect(spy).toHaveBeenCalledTimes(1);
+	});
+
+	test("public deleteCredentialBlocks throws when store is latched (broker gets non-200)", async () => {
+		// Latch the store via a corrupt read.
+		const malformedDbPath = await writeMalformedDb(tempDir);
+		vi.spyOn(store, "getCredentialBlock").mockImplementation(() => {
+			throw realCorruptError(malformedDbPath);
+		});
+		vi.spyOn(logger, "error").mockImplementation(() => {});
+
+		// Drive credential selection to trigger the latch.
+		await storage.getApiKey(PROVIDER, "session-delete-latch");
+
+		// The public/broker-facing seam must throw — not silently return — so
+		// the broker handler (server.ts BLOCKS_ROUTE DELETE) catches it and
+		// answers a non-200 response, preserving the remote client's local
+		// blocks instead of letting a success-refresh clear them.
+		expect(() => storage.deleteCredentialBlocks(1)).toThrow(
+			"Credential store is damaged; block writes are unavailable",
+		);
+	});
+
+	test("first corrupt deleteCredentialBlocks on unlatched store throws (catch branch)", async () => {
+		// On an initially UNLATCHED store, the first corrupt delete must
+		// throw from the catch branch (not silently return after latching).
+		const malformedDbPath = await writeMalformedDb(tempDir);
+		const spy = vi.spyOn(store, "deleteCredentialBlocks").mockImplementation(() => {
+			throw realCorruptError(malformedDbPath);
+		});
+		vi.spyOn(logger, "error").mockImplementation(() => {});
+
+		// First call: store is NOT latched → hits SQLite → corrupt throw →
+		// catch latches and throws (not silent return).
+		expect(() => storage.deleteCredentialBlocks(1)).toThrow(
+			"Credential store is damaged; block writes are unavailable",
+		);
+		// Second call: store IS latched → guard throws before touching SQLite.
+		expect(() => storage.deleteCredentialBlocks(1)).toThrow(
+			"Credential store is damaged; block writes are unavailable",
+		);
+		expect(spy).toHaveBeenCalledTimes(1);
+	});
+
+	test("internal #clearCredentialBlocks path fails open (catch swallows deleteCredentialBlocks throw)", async () => {
+		// The internal heal path (#clearCredentialBlocks, called after a
+		// redeemed reset credit) calls this.deleteCredentialBlocks inside a
+		// try/catch with a debug log. When the public method throws because
+		// the store is latched, the catch must swallow it so the in-memory
+		// backoff clear still proceeds.
+		const malformedDbPath = await writeMalformedDb(tempDir);
+		vi.spyOn(store, "getCredentialBlock").mockImplementation(() => {
+			throw realCorruptError(malformedDbPath);
+		});
+		const debugSpy = vi.spyOn(logger, "debug").mockImplementation(() => {});
+		vi.spyOn(logger, "error").mockImplementation(() => {});
+
+		// Drive credential selection to trigger the latch.
+		await storage.getApiKey(PROVIDER, "session-clear-latch");
+
+		// The public method throws when latched ...
+		expect(() => storage.deleteCredentialBlocks(1)).toThrow(
+			"Credential store is damaged; block writes are unavailable",
+		);
+
+		// ... but the internal pattern (try/catch with debug log, mirroring
+		// #clearCredentialBlocks) swallows the throw and continues.
+		expect(() => {
+			try {
+				storage.deleteCredentialBlocks(1);
+			} catch {
+				// Mirrors #clearCredentialBlocks' catch → debug log.
+				logger.debug("Failed to clear persisted credential blocks", {
+					provider: PROVIDER,
+					credentialId: 1,
+				});
+			}
+		}).not.toThrow();
+
+		// The debug log fired, confirming the catch path was taken.
+		const clearDebugs = debugSpy.mock.calls.filter(
+			call => typeof call[0] === "string" && call[0] === "Failed to clear persisted credential blocks",
+		);
+		expect(clearDebugs).toHaveLength(1);
+	});
+
+	test("public deleteCredentialBlock throws when store is latched (broker gets non-200)", async () => {
+		// Latch the store via a corrupt read.
+		const malformedDbPath = await writeMalformedDb(tempDir);
+		vi.spyOn(store, "getCredentialBlock").mockImplementation(() => {
+			throw realCorruptError(malformedDbPath);
+		});
+		vi.spyOn(logger, "error").mockImplementation(() => {});
+
+		// Drive credential selection to trigger the latch.
+		await storage.getApiKey(PROVIDER, "session-delete-singular-latch");
+
+		// The public/broker-facing seam must throw — not silently return — so
+		// the broker handler catches it and answers a non-200 response.
+		expect(() => storage.deleteCredentialBlock(1, "anthropic:oauth", "")).toThrow(
+			"Credential store is damaged; block writes are unavailable",
+		);
+	});
+
+	test("first corrupt deleteCredentialBlock on unlatched store throws (catch branch), second throws via guard", async () => {
+		// On an initially UNLATCHED store, the first corrupt delete must
+		// throw from the catch branch (not silently return after latching),
+		// so the broker handler returns a non-200 on the very call that
+		// discovered the corruption. The second call throws via the
+		// #storeDamaged guard before touching SQLite.
+		const malformedDbPath = await writeMalformedDb(tempDir);
+		const spy = vi.spyOn(store, "deleteCredentialBlock").mockImplementation(() => {
+			throw realCorruptError(malformedDbPath);
+		});
+		vi.spyOn(logger, "error").mockImplementation(() => {});
+
+		// First call: store is NOT latched → hits SQLite → corrupt throw →
+		// catch latches and throws (not silent return).
+		expect(() => storage.deleteCredentialBlock(1, "anthropic:oauth", "")).toThrow(
+			"Credential store is damaged; block writes are unavailable",
+		);
+		// Second call: store IS latched → guard throws before touching SQLite.
+		expect(() => storage.deleteCredentialBlock(1, "anthropic:oauth", "")).toThrow(
+			"Credential store is damaged; block writes are unavailable",
+		);
+		expect(spy).toHaveBeenCalledTimes(1);
+	});
+
+	test("internal #clearCredentialBlockScope heal path clears in-memory block without surfacing error while latched", async () => {
+		// The internal heal path (#clearCredentialBlockScope, called from
+		// #healCodexUsageBlockScope after a healthy usage report) calls
+		// this.deleteCredentialBlock inside a try/catch with a debug log.
+		// Now that deleteCredentialBlock throws when latched, the catch must
+		// swallow it so the in-memory backoff clear still proceeds. This test
+		// drives the REAL heal flow (not a mirrored try/catch) and asserts both
+		// the observable state (block cleared) and the catch-path debug log.
+		const HOUR_MS = 60 * 60_000;
+		const WEEK_MS = 7 * 24 * HOUR_MS;
+
+		function codexLimit(key: "primary" | "secondary", usedFraction: number): UsageLimit {
+			const windowId = key === "primary" ? "1h" : "7d";
+			const windowLabel = key === "primary" ? "1 Hour" : "7 Day";
+			const durationMs = key === "primary" ? HOUR_MS : WEEK_MS;
+			return {
+				id: `openai-codex:${key}`,
+				label: windowLabel,
+				scope: { provider: "openai-codex", windowId, shared: true },
+				window: { id: windowId, label: windowLabel, durationMs, resetsAt: Date.now() + durationMs },
+				amount: {
+					unit: "percent",
+					used: usedFraction * 100,
+					limit: 100,
+					remaining: (1 - usedFraction) * 100,
+					usedFraction,
+					remainingFraction: 1 - usedFraction,
+				},
+				status: usedFraction >= 1 ? "exhausted" : "ok",
+			};
+		}
+
+		function codexReport(accountId: string, email: string, healthy: boolean): UsageReport {
+			return {
+				provider: "openai-codex",
+				fetchedAt: Date.now(),
+				limits: [codexLimit("primary", 0.2), codexLimit("secondary", 0.3)],
+				metadata: { accountId, email, allowed: healthy, limitReached: !healthy, planType: "pro" },
+			};
+		}
+
+		function codexCredential(accountId: string, email: string): OAuthCredential {
+			return {
+				type: "oauth",
+				access: `access-${accountId}`,
+				refresh: `refresh-${accountId}`,
+				expires: Date.now() + WEEK_MS,
+				accountId,
+				email,
+			};
+		}
+
+		const usageByAccount = new Map<string, UsageReport | null>();
+		const usageProvider: UsageProvider = {
+			id: "openai-codex",
+			async fetchUsage(params) {
+				const accountId = params.credential.accountId;
+				if (!accountId) return null;
+				return usageByAccount.get(accountId) ?? null;
+			},
+		};
+
+		// Re-create storage with the usage provider so fetchUsageReports can fan out.
+		storage.close();
+		store.close();
+		store = await SqliteAuthCredentialStore.open(dbPath);
+		storage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+		});
+
+		await storage.set("openai-codex", [
+			codexCredential("acct-blocked", "blocked@example.com"),
+			codexCredential("acct-sibling", "sibling@example.com"),
+		]);
+
+		const blockedRow = store.listAuthCredentials("openai-codex").find(row => {
+			const credential = row.credential;
+			return credential.type === "oauth" && credential.accountId === "acct-blocked";
+		});
+		if (!blockedRow) throw new Error("expected blocked credential row");
+
+		const base = Date.now();
+		let clockOffset = 0;
+		vi.spyOn(Date, "now").mockImplementation(() => base + clockOffset);
+
+		// Block the credential in-memory with a 1-hour backoff.
+		await storage.markUsageLimitReached("openai-codex", "heal-scope-session", {
+			credentialId: blockedRow.id,
+			retryAfterMs: HOUR_MS,
+		});
+
+		// Latch the store via a corrupt upsert — the public seam now throws.
+		const malformedDbPath = await writeMalformedDb(tempDir);
+		vi.spyOn(store, "upsertCredentialBlock").mockImplementation(() => {
+			throw realCorruptError(malformedDbPath);
+		});
+		const debugSpy = vi.spyOn(logger, "debug").mockImplementation(() => {});
+		vi.spyOn(logger, "error").mockImplementation(() => {});
+
+		expect(() =>
+			storage.upsertCredentialBlock({
+				credentialId: blockedRow.id,
+				providerKey: "openai-codex:oauth",
+				blockScope: "chat",
+				blockedUntilMs: base + HOUR_MS,
+			}),
+		).toThrow("Credential store is damaged; block writes are unavailable");
+
+		// Verify the credential is blocked: getApiKey should return the sibling.
+		const blockedKey = await storage.getApiKey("openai-codex", "heal-scope-verify-blocked");
+		expect(blockedKey).toBe("access-acct-sibling");
+
+		// Set up healthy usage reports for both accounts.
+		usageByAccount.set("acct-blocked", codexReport("acct-blocked", "blocked@example.com", true));
+		usageByAccount.set("acct-sibling", codexReport("acct-sibling", "sibling@example.com", true));
+
+		// Advance time past the 5-minute probe-after window.
+		clockOffset = 6 * 60_000;
+
+		// Drive the heal flow: fetchUsageReports → #reconcileCodexUsageBlock →
+		// #healCodexUsageBlockScope → #clearCredentialBlockScope →
+		// this.deleteCredentialBlock (throws, caught by try/catch, debug-logged).
+		await storage.fetchUsageReports();
+
+		// The in-memory block is cleared: the previously blocked credential
+		// must be selectable again. This proves #clearCredentialBlockScope's
+		// in-memory clear (lines before the try/catch) ran and the catch
+		// swallowed the deleteCredentialBlock throw without surfacing it.
+		const selections = new Set<string>();
+		for (let i = 0; i < 20; i++) {
+			const key = await storage.getApiKey("openai-codex", `heal-scope-after-${i}`);
+			if (key) selections.add(key);
+		}
+		expect(selections.has("access-acct-blocked")).toBe(true);
+
+		// The debug log from #clearCredentialBlockScope's catch fired,
+		// confirming the deleteCredentialBlock throw was swallowed (not surfaced).
+		const clearScopeDebugs = debugSpy.mock.calls.filter(
+			call => typeof call[0] === "string" && call[0] === "Failed to clear persisted credential block",
+		);
+		expect(clearScopeDebugs.length).toBeGreaterThan(0);
 	});
 });
 
@@ -555,18 +964,21 @@ describe("AuthStorage corrupt-store heal while latched", () => {
 			retryAfterMs: HOUR_MS,
 		});
 
-		// Latch the store via a corrupt upsert (existing pattern).
 		const malformedDbPath = await writeMalformedDb(tempDir);
 		vi.spyOn(store, "upsertCredentialBlock").mockImplementation(() => {
 			throw realCorruptError(malformedDbPath);
 		});
 		vi.spyOn(logger, "error").mockImplementation(() => {});
-		storage.upsertCredentialBlock({
-			credentialId: blockedRow.id,
-			providerKey: "openai-codex:oauth",
-			blockScope: "chat",
-			blockedUntilMs: base + HOUR_MS,
-		});
+		// Latch the store via a corrupt upsert — the public seam now throws
+		// (catch branch latches and throws, not silent return).
+		expect(() =>
+			storage.upsertCredentialBlock({
+				credentialId: blockedRow.id,
+				providerKey: "openai-codex:oauth",
+				blockScope: "chat",
+				blockedUntilMs: base + HOUR_MS,
+			}),
+		).toThrow("Credential store is damaged; block writes are unavailable");
 
 		// Verify the credential is blocked: getApiKey should return the sibling.
 		const blockedKey = await storage.getApiKey("openai-codex", "heal-verify-blocked");

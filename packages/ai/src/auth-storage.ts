@@ -6403,7 +6403,9 @@ export class AuthStorage {
 	 * Broker-server seam: persist one credential block and notify snapshot waiters.
 	 */
 	upsertCredentialBlock(block: StoredCredentialBlock): void {
-		if (this.#storeDamaged) return;
+		if (this.#storeDamaged) {
+			throw new Error("Credential store is damaged; block writes are unavailable");
+		}
 		const upsertCredentialBlock = this.#store.upsertCredentialBlock?.bind(this.#store);
 		if (!upsertCredentialBlock) return;
 		try {
@@ -6415,7 +6417,7 @@ export class AuthStorage {
 					providerKey: block.providerKey,
 				})
 			) {
-				return;
+				throw new Error("Credential store is damaged; block writes are unavailable", { cause: err });
 			}
 			throw err;
 		}
@@ -6427,14 +6429,16 @@ export class AuthStorage {
 	 * Broker-server seam: clear all persisted blocks for one credential and notify snapshot waiters.
 	 */
 	deleteCredentialBlock(credentialId: number, providerKey: string, blockScope: string): void {
-		if (this.#storeDamaged) return;
+		if (this.#storeDamaged) {
+			throw new Error("Credential store is damaged; block writes are unavailable");
+		}
 		const deleteCredentialBlock = this.#store.deleteCredentialBlock?.bind(this.#store);
 		if (!deleteCredentialBlock) return;
 		try {
 			deleteCredentialBlock(credentialId, providerKey, blockScope);
 		} catch (err) {
 			if (this.#latchStoreDamage(err, "deleteCredentialBlock", { credentialId, providerKey, blockScope })) {
-				return;
+				throw new Error("Credential store is damaged; block writes are unavailable", { cause: err });
 			}
 			throw err;
 		}
@@ -6443,13 +6447,17 @@ export class AuthStorage {
 	}
 
 	deleteCredentialBlocks(credentialId: number): void {
-		if (this.#storeDamaged) return;
+		if (this.#storeDamaged) {
+			throw new Error("Credential store is damaged; block writes are unavailable");
+		}
 		const deleteCredentialBlocks = this.#store.deleteCredentialBlocks?.bind(this.#store);
 		if (!deleteCredentialBlocks) return;
 		try {
 			deleteCredentialBlocks(credentialId);
 		} catch (err) {
-			if (this.#latchStoreDamage(err, "deleteCredentialBlocks", { credentialId })) return;
+			if (this.#latchStoreDamage(err, "deleteCredentialBlocks", { credentialId })) {
+				throw new Error("Credential store is damaged; block writes are unavailable", { cause: err });
+			}
 			throw err;
 		}
 		this.#bumpGeneration("credential-block");
