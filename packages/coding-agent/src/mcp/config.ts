@@ -247,6 +247,20 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 			resolved.set(server.name, server);
 		}
 
+		// `/mcp reauth` and `/mcp unauth` persist auth for an explicitly configured
+		// server into the writable user config, because a generated `--mcp-config`
+		// file is not omp's to edit (`#resolveServerForAuth` falls back to the user
+		// path for anything it cannot find in a discovery config). That makes the
+		// user entry the live record of auth for these servers, so its `auth` and
+		// `oauth` win here — including their absence, which is what `unauth` leaves
+		// behind. Only those two fields: the explicit file stays the source of
+		// truth for the endpoint, so a regenerated config can still move a port
+		// without the user copy masking it.
+		const userEntries = new Map<string, MCPServer>();
+		for (const server of result.items) {
+			if (server._source.path === userPath) userEntries.set(server.name, server);
+		}
+
 		const kept: MCPServer[] = [];
 		const claimed = new Set<string>();
 		for (const server of resolved.values()) {
@@ -266,9 +280,11 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 			// it loads, including two names for one endpoint inside a single file.
 			// Later wins, matching the same-name rule above — whichever entry the
 			// caller wrote last is the one whose name the endpoint keeps.
-			const aliasIndex = kept.findIndex(existing => mcpCapability.equivalent?.(existing, server) ?? false);
+			const userEntry = userEntries.get(server.name);
+			const merged = userEntry ? { ...server, auth: userEntry.auth, oauth: userEntry.oauth } : server;
+			const aliasIndex = kept.findIndex(existing => mcpCapability.equivalent?.(existing, merged) ?? false);
 			if (aliasIndex >= 0) kept.splice(aliasIndex, 1);
-			kept.push(server);
+			kept.push(merged);
 		}
 		// Same-endpoint aliases shadow each other inside `loadCapability` via
 		// `mcpCapability.equivalent`; extras are merged after that, so a discovered

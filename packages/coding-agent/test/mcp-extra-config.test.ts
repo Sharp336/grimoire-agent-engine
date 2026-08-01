@@ -480,6 +480,77 @@ describe("loadAllMCPConfigs extraConfigPaths", () => {
 		expect(configs.alias).toBeUndefined();
 	});
 
+	// `/mcp reauth` and `/mcp unauth` cannot write to a generated `--mcp-config`
+	// file, so they persist auth for these servers into the writable user config
+	// instead. That entry shares the name, so the merge would otherwise discard
+	// it and reconnect with the auth the explicit file was written with.
+	describe("auth persisted to the user config for an explicit server", () => {
+		const writeUserConfig = async (servers: object) => {
+			const userConfigPath = path.join(tempHome, ".omp", "agent", "mcp.json");
+			await fs.mkdir(path.dirname(userConfigPath), { recursive: true });
+			await fs.writeFile(userConfigPath, JSON.stringify({ mcpServers: servers }));
+			clearFsCache();
+		};
+
+		test("a reauth recorded in the user config wins over the explicit entry", async () => {
+			await writeUserConfig({
+				secure: { url: "http://localhost:1111/mcp", auth: { type: "oauth", credentialId: "new" } },
+			});
+			const explicitPath = path.join(projectDir, "explicit.json");
+			await fs.writeFile(
+				explicitPath,
+				JSON.stringify({
+					mcpServers: {
+						secure: { url: "http://localhost:4401/mcp", auth: { type: "oauth", credentialId: "old" } },
+					},
+				}),
+			);
+
+			const { configs } = await loadAllMCPConfigs(projectDir, { extraConfigPaths: [explicitPath] });
+
+			// Auth from the user config, endpoint still from the explicit file — a
+			// wholesale shadow would take the stale url along with the fresh auth.
+			expect(configs.secure).toMatchObject({
+				url: "http://localhost:4401/mcp",
+				auth: { type: "oauth", credentialId: "new" },
+			});
+		});
+
+		test("an unauth recorded in the user config clears the explicit entry's auth", async () => {
+			await writeUserConfig({ secure: { url: "http://localhost:4401/mcp" } });
+			const explicitPath = path.join(projectDir, "explicit.json");
+			await fs.writeFile(
+				explicitPath,
+				JSON.stringify({
+					mcpServers: {
+						secure: { url: "http://localhost:4401/mcp", auth: { type: "oauth", credentialId: "old" } },
+					},
+				}),
+			);
+
+			const { configs } = await loadAllMCPConfigs(projectDir, { extraConfigPaths: [explicitPath] });
+
+			expect(configs.secure?.auth).toBeUndefined();
+			expect(configs.secure).toMatchObject({ url: "http://localhost:4401/mcp" });
+		});
+
+		test("an explicit entry with no user-config counterpart keeps its own auth", async () => {
+			const explicitPath = path.join(projectDir, "explicit.json");
+			await fs.writeFile(
+				explicitPath,
+				JSON.stringify({
+					mcpServers: {
+						secure: { url: "http://localhost:4401/mcp", auth: { type: "oauth", credentialId: "own" } },
+					},
+				}),
+			);
+
+			const { configs } = await loadAllMCPConfigs(projectDir, { extraConfigPaths: [explicitPath] });
+
+			expect(configs.secure).toMatchObject({ auth: { type: "oauth", credentialId: "own" } });
+		});
+	});
+
 	test("explicit entries for different endpoints all survive", async () => {
 		const explicitPath = path.join(projectDir, "explicit.json");
 		await fs.writeFile(
