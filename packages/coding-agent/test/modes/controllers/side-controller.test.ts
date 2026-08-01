@@ -293,20 +293,18 @@ describe("SideController", () => {
 		// already ran them). The parent should not be modified by the side.
 		const parentEntryIds = harness.parentManager.getEntries().map(e => e.id);
 
-		// --- Stage 3: Both compaction re-injection paths ---
+		// --- Stage 3: Boundary re-injection after compaction ---
 
+		// 3a: The controller no longer subscribes to the session event stream —
+		// automatic compaction's "auto_compaction_end" event must NOT re-inject.
+		// The single mechanism is the inline "session_compact" extension handler,
+		// which covers both manual and automatic compaction (both emit
+		// "session_compact" on success). Assert no subscriber was registered,
+		// and that emitting the event (a no-op with no listener) adds no message.
+		expect(sideStub.compactionListener).toBeUndefined();
 		const appendCountBefore = appendMessage.mock.calls.length;
-		// 3a: auto_compaction_end path — emit through the session subscriber.
 		sideStub.compactionListener?.({ type: "auto_compaction_end", result: {}, aborted: false });
-		expect(appendMessage.mock.calls.length).toBe(appendCountBefore + 1);
-		expect(appendMessage.mock.calls[appendMessage.mock.calls.length - 1]?.[0]).toEqual(
-			expect.objectContaining({
-				role: "developer",
-				content: expect.stringContaining('<system-notice cause="side-conversation">'),
-			}),
-		);
-		// No second persisted side-boundary entry — re-injection appends a
-		// plain developer message to agent state, not a custom_message entry.
+		expect(appendMessage.mock.calls.length).toBe(appendCountBefore);
 		expect(
 			recordedEntries.filter(e => e.type === "custom_message" && e.customType === SIDE_BOUNDARY_MESSAGE_TYPE),
 		).toHaveLength(1);

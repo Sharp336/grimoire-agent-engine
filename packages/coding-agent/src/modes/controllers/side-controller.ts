@@ -19,8 +19,6 @@ const DISPOSE_FAILURE_MESSAGE = "Side conversation ended, but its file could not
 export class SideController {
 	constructor(private readonly ctx: InteractiveModeContext) {}
 
-	#unsubscribeCompaction: (() => void) | undefined;
-
 	// Operations are serialized through this queue so start()/dispose() cannot
 	// interleave at await points — a /side end fired during an in-flight create
 	// now waits for the create to finish, then disposes the live session, rather
@@ -164,14 +162,11 @@ export class SideController {
 				tools: side.getActiveToolNames(),
 			});
 
-			// 4. Re-inject the boundary after any successful compaction.
-			//    Manual compaction emits "session_compact" through the extension
-			//    runner (handled by the inline extension factory above).
-			//    Automatic compaction emits "auto_compaction_end" through the
-			//    session event stream — subscribe here.
-			this.#unsubscribeCompaction = side.subscribe(event => {
-				if (event.type === "auto_compaction_end" && event.result && !event.aborted) reinject();
-			});
+			// 4. Re-inject the boundary after any successful compaction. Both
+			//    manual and automatic compaction emit "session_compact" through
+			//    the extension runner on success (session-maintenance.ts:863 and
+			//    :2747), so the inline extension factory above is the single
+			//    mechanism — no separate event-stream subscription is needed.
 
 			// Focus, then overwrite the status string focusAgent emits (it is
 			// written for viewing a subagent and is wrong for a side conversation).
@@ -181,8 +176,8 @@ export class SideController {
 			if (question) await this.#submitQuestion(side, question);
 		} catch (error) {
 			if (side) {
-				// A session was constructed — dispose it fully (clears
-				// #unsubscribeCompaction, disposes the session, removes files).
+				// A session was constructed — dispose it fully (disposes the
+				// session, removes files).
 				await this.#disposeImpl();
 				await ctx.unfocusSession().catch(() => {});
 				ctx.showError(error instanceof Error ? error.message : String(error));
@@ -233,12 +228,6 @@ export class SideController {
 			} catch (error) {
 				logger.warn("Failed to unfocus side session before disposal", { error: String(error) });
 			}
-		}
-		// Compaction subscription is controller-owned, not ref-owned: clear it
-		// once before the loop regardless of which ref is eventually disposed.
-		if (this.#unsubscribeCompaction) {
-			this.#unsubscribeCompaction();
-			this.#unsubscribeCompaction = undefined;
 		}
 		let cleanupFailed = false;
 
