@@ -614,6 +614,7 @@ export class AgentSession {
 	#setAgentPersona: ((agent: AgentDefinition | undefined) => void) | undefined;
 	#getSessionSpawns: (() => string | undefined) | undefined;
 	#setSessionSpawns: ((spawns: string) => void) | undefined;
+	#getExtensionDiscoveryMode: (() => "explicit-only" | "merge") | undefined;
 	#agentToolOverlay: { restore: () => Promise<void> } | undefined;
 	#cliToolsLocked = false;
 	#cliModelLocked = false;
@@ -1218,6 +1219,7 @@ export class AgentSession {
 		this.#setAgentPersona = config.setAgentPersona;
 		this.#getSessionSpawns = config.getSessionSpawns;
 		this.#setSessionSpawns = config.setSessionSpawns;
+		this.#getExtensionDiscoveryMode = config.getExtensionDiscoveryMode;
 		this.#cliToolsLocked = config.cliToolsLocked ?? false;
 		this.#cliModelLocked = config.cliModelLocked ?? false;
 		this.#cliThinkingLocked = config.cliThinkingLocked ?? false;
@@ -4075,6 +4077,15 @@ export class AgentSession {
 	/** Names of dynamic tools mounted under `xd://`. */
 	getMountedXdevToolNames(): string[] {
 		return this.#tools.getMountedXdevToolNames();
+	}
+
+	/**
+	 * Extension-agent discovery mode this session was started with: "explicit-only"
+	 * under --no-extensions (only CLI-named roots), "merge" otherwise. Live /agent
+	 * lookups and the persona picker rediscover under this same mode.
+	 */
+	getExtensionDiscoveryMode(): "explicit-only" | "merge" {
+		return this.#getExtensionDiscoveryMode?.() ?? "merge";
 	}
 
 	/** Whether the edit tool is registered in this session. */

@@ -683,7 +683,12 @@ export class SelectorController {
 			this.ctx.showWarning("Cannot switch agent during vibe mode. Exit vibe mode first.");
 			return;
 		}
-		const discovery = await discoverAgents(this.ctx.sessionManager.getCwd());
+		// Rediscover under the session's extension mode so a --no-extensions
+		// session's picker cannot offer extension/plugin personas startup suppressed.
+		const discovery = await discoverAgents(this.ctx.sessionManager.getCwd(), undefined, {
+			includeExtensions: true,
+			extensionMode: this.ctx.session.getExtensionDiscoveryMode(),
+		});
 		const disabled = new Set((this.ctx.settings.get("task.disabledAgents") as string[] | undefined) ?? []);
 		const available = discovery.agents.filter(a => a.availability !== "subagent" && !disabled.has(a.name));
 		if (available.length === 0) {

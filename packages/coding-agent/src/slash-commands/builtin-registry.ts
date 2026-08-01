@@ -607,7 +607,12 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				return commandConsumed();
 			}
 
-			const discovery = await discoverAgents(runtime.cwd);
+			// Rediscover under the session's extension mode so a --no-extensions
+			// session cannot switch to an extension/plugin persona startup suppressed.
+			const discovery = await discoverAgents(runtime.cwd, undefined, {
+				includeExtensions: true,
+				extensionMode: runtime.session.getExtensionDiscoveryMode(),
+			});
 			const disabled = new Set((runtime.settings.get("task.disabledAgents") as string[] | undefined) ?? []);
 			const agent = getAgent(discovery.agents, agentName);
 			if (agent && disabled.has(agent.name)) {
@@ -660,7 +665,10 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			}
 			const agentName = command.args.trim();
 			if (agentName) {
-				const discovery = await discoverAgents(runtime.ctx.sessionManager.getCwd());
+				const discovery = await discoverAgents(runtime.ctx.sessionManager.getCwd(), undefined, {
+					includeExtensions: true,
+					extensionMode: runtime.ctx.session.getExtensionDiscoveryMode(),
+				});
 				const disabled = new Set((runtime.ctx.settings.get("task.disabledAgents") as string[] | undefined) ?? []);
 				const agent = getAgent(discovery.agents, agentName);
 				if (agent && disabled.has(agent.name)) {

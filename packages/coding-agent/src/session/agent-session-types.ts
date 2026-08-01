@@ -285,6 +285,14 @@ export interface AgentSessionConfig {
 	cliThinkingLocked?: boolean;
 	/** True when the tool set came from an agent persona's frontmatter; baseline restore then uses the registry default instead of the persona list. */
 	toolNamesFromAgent?: boolean;
+	/**
+	 * Extension-agent discovery mode for this session: "explicit-only" under
+	 * --no-extensions (only CLI-named roots), "merge" otherwise. Live /agent
+	 * lookups and the persona picker must rediscover under the same mode so a
+	 * session launched with extensions disabled cannot switch to an extension
+	 * persona that startup suppressed.
+	 */
+	getExtensionDiscoveryMode?: () => "explicit-only" | "merge";
 }
 
 /** Options for AgentSession.prompt(). */

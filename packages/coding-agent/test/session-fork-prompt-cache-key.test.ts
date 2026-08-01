@@ -48,6 +48,26 @@ async function createSourceSessionFixture(tempDir: TempDir, parentId: string): P
 	return { cwd, sourceFile, sourceHeader, forkSessionDir };
 }
 
+async function createPersonaRecordedSessionFixture(
+	tempDir: TempDir,
+	parentId: string,
+	agentName: string,
+	source: "bundled" | "user" | "project",
+): Promise<SourceSessionFixture> {
+	const fixture = await createSourceSessionFixture(tempDir, parentId);
+	const timestamp = new Date().toISOString();
+	const agentChange = {
+		type: "agent_change",
+		id: "agent-1",
+		parentId: null,
+		timestamp,
+		agent: agentName,
+		source,
+	};
+	await Bun.write(fixture.sourceFile, `${JSON.stringify(fixture.sourceHeader)}\n${JSON.stringify(agentChange)}\n`);
+	return fixture;
+}
+
 async function createMinimalSession(
 	tempDir: TempDir,
 	options: CreateAgentSessionOptions,
@@ -409,6 +429,119 @@ describe("provider prompt-cache key session affinity", () => {
 			expect(options.thinkingLevel).toBe(ThinkingLevel.High);
 		} finally {
 			authStorage.close();
+		}
+	});
+
+	it("prefers the persona's model over the remembered scoped default", async () => {
+		using tempDir = TempDir.createSync("@omp-prompt-cache-persona-model-");
+		const source = await createSourceSessionFixture(tempDir, "parent-cache-persona-model");
+		const forkedManager = await SessionManager.forkFrom(source.sourceFile, source.cwd, source.forkSessionDir);
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		authStorage.setRuntimeApiKey(OPENAI_TEST_MODEL.provider, "test-key");
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const persona = {
+			name: "model-persona",
+			description: "Persona with a model",
+			systemPrompt: "You are model-persona.",
+			model: ["anthropic/claude-sonnet-4-5"],
+			source: "bundled" as const,
+		};
+		try {
+			vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
+				agents: [persona],
+				projectAgentsDir: null,
+			});
+			const parsed = parseArgs(["--cwd", source.cwd, "--agent", "model-persona"]);
+			const scopedModels: ScopedModel[] = [{ model: OPENAI_TEST_MODEL, explicitThinkingLevel: false }];
+			const settings = Settings.isolated({ "marketplace.autoUpdate": "off" });
+			settings.setModelRole("default", `${OPENAI_TEST_MODEL.provider}/${OPENAI_TEST_MODEL.id}`);
+
+			const options = await buildSessionOptions(
+				parsed,
+				scopedModels,
+				forkedManager,
+				new ModelRegistry(authStorage, tempDir.join("models.yml")),
+				settings,
+			);
+
+			// The persona is an explicit selection: its model frontmatter wins
+			// over the remembered scoped default (thread main.ts:1042).
+			expect(options.model?.provider).toBe("anthropic");
+		} finally {
+			authStorage.close();
+		}
+	});
+
+	it("keeps an inline --model thinking suffix over persona thinking frontmatter", async () => {
+		using tempDir = TempDir.createSync("@omp-prompt-cache-thinking-suffix-");
+		const source = await createSourceSessionFixture(tempDir, "parent-cache-thinking-suffix");
+		const forkedManager = await SessionManager.forkFrom(source.sourceFile, source.cwd, source.forkSessionDir);
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		authStorage.setRuntimeApiKey(OPENAI_TEST_MODEL.provider, "test-key");
+		const persona = {
+			name: "high-thinking-persona",
+			description: "Persona with high thinking",
+			systemPrompt: "You are high-thinking-persona.",
+			thinkingLevel: ThinkingLevel.High,
+			source: "bundled" as const,
+		};
+		try {
+			vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
+				agents: [persona],
+				projectAgentsDir: null,
+			});
+			// `slow:low` — an explicit inline thinking suffix on --model.
+			const parsed = parseArgs(["--cwd", source.cwd, "--agent", "high-thinking-persona", "--model", "slow:low"]);
+
+			const options = await buildSessionOptions(
+				parsed,
+				[],
+				forkedManager,
+				new ModelRegistry(authStorage, tempDir.join("models.yml")),
+				Settings.isolated({ "marketplace.autoUpdate": "off" }),
+			);
+
+			// The explicit CLI model's :low suffix must not be clobbered by the
+			// persona's thinkingLevel (thread main.ts:1146).
+			expect(options.cliThinkingLocked).toBe(true);
+			expect(options.thinkingLevel).toBe(ThinkingLevel.Low);
+		} finally {
+			authStorage.close();
+		}
+	});
+
+	it("does not inherit the provider prompt-cache key when an SDK fork changes the persona", async () => {
+		using tempDir = TempDir.createSync("@omp-prompt-cache-sdk-persona-");
+		const source = await createPersonaRecordedSessionFixture(
+			tempDir,
+			"parent-cache-sdk-persona",
+			"old-persona",
+			"user",
+		);
+		const forkedManager = await SessionManager.forkFrom(source.sourceFile, source.cwd, source.forkSessionDir);
+		let session: AgentSession | undefined;
+		let authStorage: AuthStorage | undefined;
+		try {
+			const created = await createMinimalSession(tempDir, {
+				cwd: source.cwd,
+				sessionManager: forkedManager,
+				agentPersona: {
+					name: "new-persona",
+					description: "New persona",
+					systemPrompt: "You are new-persona.",
+					source: "project" as const,
+				},
+			});
+			session = created.session;
+			authStorage = created.authStorage;
+
+			// The transcript recorded user/old-persona; the SDK call switches to
+			// project/new-persona, so the inherited header cache key must be
+			// dropped (thread sdk.ts:1702).
+			expect(session.agent.promptCacheKey).toBeUndefined();
+		} finally {
+			await session?.dispose();
+			authStorage?.close();
 		}
 	});
 });

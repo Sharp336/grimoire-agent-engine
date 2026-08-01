@@ -14,6 +14,7 @@ describe("showAgentPersonaSelector", () => {
 				cwd: "/test",
 				agentPersona: undefined,
 				switchAgentPersona: vi.fn(),
+				getExtensionDiscoveryMode: () => "merge" as const,
 			},
 			sessionManager: {
 				getCwd: () => "/test",
@@ -129,6 +130,7 @@ describe("showAgentPersonaSelector", () => {
 				cwd: "/test",
 				agentPersona: undefined,
 				switchAgentPersona,
+				getExtensionDiscoveryMode: () => "merge" as const,
 			},
 			ui: {
 				showOverlay,

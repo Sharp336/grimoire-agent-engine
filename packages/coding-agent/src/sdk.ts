@@ -1239,6 +1239,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 }
 
 async function createAgentSessionScoped(options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> {
+	const rootMode = options.disableExtensionDiscovery ? "explicit-only" : "merge";
 	const cwd = options.cwd ?? getProjectDir();
 	const agentDir = options.agentDir ?? getAgentDir();
 	const eventBus = options.eventBus ?? new EventBus();
@@ -1359,6 +1360,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		await sessionManager.setAdditionalDirectories(merged);
 	}
 	const providerSessionId = options.providerSessionId ?? sessionManager.getSessionId();
+	// A changed persona changes the system prompt the cache prefix is built
+	// from. Compare against the transcript's recorded persona so a plain resume
+	// (rehydrating the same persona) keeps cache continuity while an explicit or
+	// differently-resolved persona invalidates the inherited key.
+	const persistedPersona = sessionManager.buildSessionContext().agentPersona;
+	const personaChanged =
+		options.agentPersona !== undefined &&
+		(persistedPersona?.agent !== options.agentPersona.name ||
+			persistedPersona?.source !== options.agentPersona.source);
 	const forkCacheShapeChanged =
 		options.model !== undefined ||
 		options.modelPattern !== undefined ||
@@ -1367,7 +1377,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		options.customSystemPrompt !== undefined ||
 		options.appendSystemPrompt !== undefined ||
 		options.toolNames !== undefined ||
-		options.customTools !== undefined;
+		options.customTools !== undefined ||
+		personaChanged;
 	const inheritedPromptCacheKey = forkCacheShapeChanged
 		? undefined
 		: sessionManager.getHeader()?.providerPromptCacheKey;
@@ -3490,6 +3501,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				sessionSpawns = spawns;
 			},
 			getSessionSpawns: () => sessionSpawns,
+			getExtensionDiscoveryMode: () => rootMode,
 			setAgentPersona: (agent: AgentDefinition | undefined) => {
 				activeAgentPersona = agent;
 			},

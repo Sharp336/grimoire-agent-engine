@@ -1009,11 +1009,32 @@ export async function buildSessionOptions(
 			});
 			if (!parsed.thinking && resolved.thinkingLevel) {
 				options.thinkingLevel = resolved.thinkingLevel;
+				// An inline thinking suffix on --model (e.g. `--model gpt-5:low`) is
+				// an explicit thinking choice: lock it so a persona's thinkingLevel
+				// frontmatter or a later persona switch cannot clobber it.
+				options.cliThinkingLocked = true;
 			}
 		}
 	} else if (scopedModels.length > 0 && !restoringSession) {
+		// Agent persona model takes precedence over the remembered scoped default:
+		// the persona is an explicit selection, so its model frontmatter wins
+		// unless the user picked a model with --model (resolved above). Only when
+		// the persona has no model do we fall back to the remembered default.
+		if (agentPolicy?.modelPatterns?.length && !agentRehydratedFromContext) {
+			const resolved = resolveModelOverride(agentPolicy.modelPatterns, modelRegistry, activeSettings);
+			if (resolved.model) {
+				options.model = resolved.model;
+				if (resolved.thinkingLevel && !agentPolicy.thinkingLevel) {
+					options.thinkingLevel = resolved.thinkingLevel;
+				}
+			}
+			if (resolved.warning) {
+				process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}
+`);
+			}
+		}
 		const remembered = activeSettings.getModelRole("default");
-		if (remembered) {
+		if (!options.model && remembered) {
 			const rememberedSpec = resolveModelRoleValue(
 				remembered,
 				scopedModels.map(scopedModel => scopedModel.model),
@@ -1036,20 +1057,6 @@ export async function buildSessionOptions(
 				if (!parsed.thinking && rememberedSpec.explicitThinkingLevel && rememberedSpec.thinkingLevel) {
 					options.thinkingLevel = rememberedSpec.thinkingLevel;
 				}
-			}
-		}
-		// Agent persona model takes precedence over the scoped fallback
-		if (!options.model && agentPolicy?.modelPatterns?.length) {
-			const resolved = resolveModelOverride(agentPolicy.modelPatterns, modelRegistry, activeSettings);
-			if (resolved.model) {
-				options.model = resolved.model;
-				if (resolved.thinkingLevel && !agentPolicy.thinkingLevel) {
-					options.thinkingLevel = resolved.thinkingLevel;
-				}
-			}
-			if (resolved.warning) {
-				process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}
-`);
 			}
 		}
 		// A configured `default` role that doesn't resolve within the startup
@@ -1143,7 +1150,7 @@ export async function buildSessionOptions(
 		!restoringSession
 	) {
 		options.thinkingLevel = scopedModels[0].thinkingLevel;
-	} else if (agentPolicy?.thinkingLevel && !agentRehydratedFromContext) {
+	} else if (agentPolicy?.thinkingLevel && !agentRehydratedFromContext && options.thinkingLevel === undefined) {
 		options.thinkingLevel = agentPolicy.thinkingLevel;
 	}
 

@@ -25,7 +25,11 @@ describe("/agent slash command", () => {
 			ctx: {
 				showAgentPersonaSelector,
 				editor: { setText },
-				session: { isStreaming: false, getPlanModeState: () => undefined },
+				session: {
+					isStreaming: false,
+					getPlanModeState: () => undefined,
+					getExtensionDiscoveryMode: () => "merge",
+				},
 				planModeEnabled: false,
 				goalModeEnabled: false,
 				vibeModeEnabled: false,
@@ -50,7 +54,12 @@ describe("/agent slash command", () => {
 			ctx: {
 				showWarning,
 				editor: { setText },
-				session: { isStreaming: false, getPlanModeState: () => undefined, switchAgentPersona: switchPersona },
+				session: {
+					isStreaming: false,
+					getPlanModeState: () => undefined,
+					switchAgentPersona: switchPersona,
+					getExtensionDiscoveryMode: () => "merge",
+				},
 				planModeEnabled: false,
 				goalModeEnabled: false,
 				vibeModeEnabled: false,
@@ -78,7 +87,11 @@ describe("/agent slash command", () => {
 				showAgentPersonaSelector,
 				showWarning,
 				editor: { setText },
-				session: { isStreaming: false, getPlanModeState: () => undefined },
+				session: {
+					isStreaming: false,
+					getPlanModeState: () => undefined,
+					getExtensionDiscoveryMode: () => "merge",
+				},
 				planModeEnabled: false,
 				goalModeEnabled: false,
 				vibeModeEnabled: false,
@@ -107,6 +120,7 @@ describe("/agent slash command", () => {
 				getPlanModeState: () => undefined,
 				getGoalModeState: () => (getter === "getGoalModeState" ? { enabled: true } : undefined),
 				getVibeModeState: () => (getter === "getVibeModeState" ? { enabled: true } : undefined),
+				getExtensionDiscoveryMode: () => "merge",
 			},
 			cwd: "/test",
 			output,
@@ -134,6 +148,7 @@ describe("/agent slash command", () => {
 				getPlanModeState: () => undefined,
 				getGoalModeState: () => undefined,
 				getVibeModeState: () => undefined,
+				getExtensionDiscoveryMode: () => "merge",
 			},
 			cwd: "/test",
 			output,
@@ -165,6 +180,7 @@ describe("/agent slash command", () => {
 				getPlanModeState: () => undefined,
 				getGoalModeState: () => undefined,
 				getVibeModeState: () => undefined,
+				getExtensionDiscoveryMode: () => "merge",
 			},
 			cwd: "/test",
 			output,
@@ -202,6 +218,7 @@ describe("/agent slash command", () => {
 				getPlanModeState: () => undefined,
 				getGoalModeState: () => undefined,
 				getVibeModeState: () => undefined,
+				getExtensionDiscoveryMode: () => "merge",
 			},
 			cwd: "/test",
 			output,
@@ -234,6 +251,7 @@ describe("/agent slash command", () => {
 				getPlanModeState: () => undefined,
 				getGoalModeState: () => undefined,
 				getVibeModeState: () => undefined,
+				getExtensionDiscoveryMode: () => "merge",
 			},
 			cwd: "/test",
 			output,
@@ -260,5 +278,44 @@ describe("/agent slash command", () => {
 		const switchCmd = lookupBuiltinSlashCommand("switch-agent");
 		expect(switchCmd).toBeDefined();
 		expect(switchCmd!.name).toBe("agent");
+	});
+
+	test("handle rediscovery carries the session's extension mode", async () => {
+		const mockAgent = { name: "test", description: "", systemPrompt: "", source: "project" as const };
+		const switchPersona = vi.fn().mockResolvedValue(undefined);
+		const output = vi.fn();
+		const runtime = {
+			session: {
+				switchAgentPersona: switchPersona,
+				isStreaming: false,
+				getPlanModeState: () => undefined,
+				getGoalModeState: () => undefined,
+				getVibeModeState: () => undefined,
+				getExtensionDiscoveryMode: () => "explicit-only" as const,
+			},
+			cwd: "/test",
+			output,
+			sessionManager: {} as any,
+			settings: { get: () => undefined } as any,
+			refreshCommands: vi.fn(),
+			reloadPlugins: vi.fn(),
+		} as unknown as SlashCommandRuntime;
+
+		const discoverSpy = vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
+			agents: [mockAgent],
+			projectAgentsDir: null,
+		});
+		vi.spyOn(discovery, "getAgent").mockImplementation((agents, name) => agents.find(a => a.name === name));
+
+		const cmd = getAgentCommand();
+		await cmd.handle!(makeCommand("test"), runtime);
+
+		// A --no-extensions session must rediscover under explicit-only so it
+		// cannot switch to a plugin/extension persona startup suppressed.
+		expect(discoverSpy).toHaveBeenCalledWith("/test", undefined, {
+			includeExtensions: true,
+			extensionMode: "explicit-only",
+		});
+		expect(switchPersona).toHaveBeenCalledWith(mockAgent);
 	});
 });
