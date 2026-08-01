@@ -40,6 +40,7 @@ import {
 	opencodeGoModelManagerOptions,
 	opencodeZenModelManagerOptions,
 	openrouterModelManagerOptions,
+	orcarouterModelManagerOptions,
 	qianfanModelManagerOptions,
 	qwenPortalModelManagerOptions,
 	sakanaModelManagerOptions,
@@ -363,6 +364,14 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["OPENROUTER_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => openrouterModelManagerOptions(config),
 		catalogDiscovery: { label: "OpenRouter", allowUnauthenticated: true },
+	},
+	{
+		id: "orcarouter",
+		defaultModel: "anthropic/claude-opus-4.8",
+		envVars: ["ORCAROUTER_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => orcarouterModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "OrcaRouter", allowUnauthenticated: true },
 	},
 	{
 		id: "qianfan",

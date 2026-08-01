@@ -44,6 +44,7 @@ import {
 	META_MUSE_STATIC_MODELS,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
 	mapModelsDevToModels,
+	ORCAROUTER_STATIC_MODELS,
 	projectOpenAIProReasoningAliases,
 	SAKANA_FUGU_STATIC_MODELS,
 	stripFireworksDeepSeekThinkingToggle,
@@ -572,6 +573,14 @@ async function generateModels() {
 	// at boot. If live `/v1/models` discovery succeeds, it is authoritative.
 	if (!authoritativeCatalogProviders.has("gmi-cloud")) {
 		allModels.push(...GMI_CLOUD_STATIC_MODELS);
+	}
+	// Seed the OrcaRouter default model for the same reason as GMI Cloud above:
+	// a regen that cannot reach the gateway would otherwise leave the provider
+	// slice empty and the declared `defaultModel` unresolvable at boot. Live
+	// `/v1/models` discovery is keyless and authoritative, so a successful
+	// generation replaces this row with the full catalog.
+	if (!authoritativeCatalogProviders.has("orcarouter")) {
+		allModels.push(...ORCAROUTER_STATIC_MODELS);
 	}
 	// Seed the GitLab Duo Agent fallback model so a fresh install (no credentialed
 	// dynamic discovery/cache yet) still surfaces the provider's default model in the
