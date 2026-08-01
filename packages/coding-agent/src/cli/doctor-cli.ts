@@ -7,7 +7,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { $which, formatBytes, getAgentDir, MAIN_CONFIG_FILENAMES, VERSION } from "@oh-my-pi/pi-utils";
+import { $which, formatBytes, getAgentDir, isEnoent, MAIN_CONFIG_FILENAMES, VERSION } from "@oh-my-pi/pi-utils";
 import type { LoadResult } from "../config/config-file";
 import { ModelsConfigFile } from "../config/models-config";
 import { classifySettingsYaml, type YamlLoadResult } from "../config/settings";
@@ -190,20 +190,18 @@ async function collectConfigFindings(flags: DoctorCommandFlags): Promise<DoctorF
 	findings.push(await diagnoseSettingsConfig(agentDir));
 	// diagnose(path) parses/classifies at an explicit path without running the
 	// JSON→YAML migration, quarantining, or caching — read-only.
-	const modelsYml = path.join(agentDir, "models.yml");
-	let modelsResult = ModelsConfigFile.diagnose(modelsYml);
-	let modelsFilename = "models.yml";
-	if (modelsResult.status === "not-found") {
-		// Legacy models.json: startup feeds it through #ensureMigrated(), but that
-		// writes to disk — the read-only diagnostic must classify the JSON source
-		// directly so a broken legacy models.json surfaces as an error instead of
-		// a false "absent". diagnose() on the .json path reads/parses it as JSONC
-		// without any migration or write.
-		const jsonResult = ModelsConfigFile.diagnose(path.join(agentDir, "models.json"));
-		if (jsonResult.status !== "not-found") {
-			modelsResult = jsonResult;
-			modelsFilename = "models.json";
-		}
+	// Startup order (ConfigFile.#resolveReadPath + #jsonMigrationPath):
+	// models.yml → models.yaml → models.json. diagnose(explicitPath) skips the
+	// built-in .yaml fallback, so walk the same chain here without migrate/write.
+	const modelsCandidates = ["models.yml", "models.yaml", "models.json"] as const;
+	let modelsResult: LoadResult<unknown> = { status: "not-found" };
+	let modelsFilename: string = modelsCandidates[0];
+	for (const filename of modelsCandidates) {
+		const result = ModelsConfigFile.diagnose(path.join(agentDir, filename));
+		if (result.status === "not-found") continue;
+		modelsResult = result;
+		modelsFilename = filename;
+		break;
 	}
 	findings.push(loadResultConfigFinding("models", modelsFilename, modelsResult));
 	findings.push(...(await collectQuarantinedConfigs(agentDir)));
@@ -292,8 +290,17 @@ async function collectQuarantinedConfigs(agentDir: string): Promise<DoctorFindin
 	let entries: string[];
 	try {
 		entries = await fs.promises.readdir(agentDir);
-	} catch {
-		return [];
+	} catch (error) {
+		if (isEnoent(error)) return [];
+		return [
+			{
+				id: "config.quarantined",
+				category: "config",
+				status: "error",
+				summary: "quarantine scan: cannot read agent directory",
+				details: [error instanceof Error ? error.message : String(error)],
+			},
+		];
 	}
 	const quarantined: string[] = [];
 	for (const entry of entries) {

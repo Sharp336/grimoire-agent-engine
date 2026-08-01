@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -385,6 +386,39 @@ describe("omp doctor", () => {
 		expect(finding?.details.length).toBeGreaterThan(0);
 		// Read-only probe: the file is byte-identical after the run.
 		expect(await fs.readFile(modelsJson, "utf8")).toBe(broken);
+	});
+
+	test("a broken models.yaml surfaces a config error, not absent", async () => {
+		const modelsYaml = path.join(root, "models.yaml");
+		const broken = "providers:\n  openai: [unterminated\n";
+		await fs.writeFile(modelsYaml, broken, "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const finding = report.findings.find(entry => entry.id === "config.models");
+		expect(finding?.status).toBe("error");
+		expect(finding?.summary).not.toContain("absent");
+		expect(finding?.details.length).toBeGreaterThan(0);
+		// Read-only probe: the file is byte-identical after the run.
+		expect(await fs.readFile(modelsYaml, "utf8")).toBe(broken);
+	});
+
+	test("a readdir failure on the agent dir surfaces a quarantine error", async () => {
+		const realReaddir = nodeFs.promises.readdir.bind(nodeFs.promises);
+		const readdirSpy = spyOn(nodeFs.promises, "readdir").mockImplementation(async (dirPath, options) => {
+			if (path.resolve(String(dirPath)) === path.resolve(root)) {
+				throw Object.assign(new Error("EACCES: permission denied, scandir"), { code: "EACCES" });
+			}
+			return realReaddir(dirPath as never, options as never);
+		});
+		try {
+			const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+			const quarantine = report.findings.find(entry => entry.id === "config.quarantined");
+			expect(quarantine?.status).toBe("error");
+			expect(quarantine?.summary).toContain("cannot read agent directory");
+			expect((quarantine?.details[0] ?? "").length).toBeGreaterThan(0);
+		} finally {
+			readdirSpy.mockRestore();
+		}
 	});
 
 	test("an unreadable settings file surfaces an error, not absent", async () => {
