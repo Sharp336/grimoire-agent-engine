@@ -48,7 +48,10 @@ function createFakeCtx(discoveredNames: string[], disabledNames: string[] = []) 
 		getSource: vi.fn((): SourceMeta | undefined => undefined),
 		getConnectionStatus: vi.fn(() => "connected" as const),
 	};
-	const settings = { get: vi.fn(() => disabledNames.map(name => `mcp:${name}`)) };
+	const settings = {
+		get: vi.fn(() => disabledNames.map(name => `mcp:${name}`)),
+		getActivationProjectRoot: vi.fn((cwd: string) => cwd),
+	};
 	const ctx = { mcpManager, settings } as never as InteractiveModeContext;
 	return { ctx, mcpManager };
 }
