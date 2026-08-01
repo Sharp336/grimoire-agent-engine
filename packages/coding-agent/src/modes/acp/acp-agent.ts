@@ -1012,7 +1012,8 @@ export class AcpAgent implements Agent {
 				const sm = cwd ? await settings.cloneForCwd(cwd) : settings;
 				const scope = cwd ? sm.getDefaultActivationScope(cwd) : "global";
 				const disabledIds = sm.getActivationDisabledExtensions(scope);
-				const extensions = await loadAllExtensions(cwd, disabledIds);
+				const disabledProviders = sm.getActivationDisabledProviders(scope);
+				const extensions = await loadAllExtensions(cwd, disabledIds, disabledProviders);
 				return { extensions: extensions as unknown as Array<{ [key: string]: unknown }> };
 			}
 			case "_omp/extensions/toggle": {

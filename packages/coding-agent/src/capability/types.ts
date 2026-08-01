@@ -64,6 +64,8 @@ export interface LoadOptions<T = unknown> {
 	providers?: string[];
 	/** Exclude these providers (by ID). Default: none */
 	excludeProviders?: string[];
+	/** Explicit disabled provider IDs to apply instead of the runtime registry. */
+	disabledProviders?: ReadonlySet<string>;
 	/** Custom cwd. Default: getProjectDir() */
 	cwd?: string;
 	/** Include items even if they fail validation. Default: false */

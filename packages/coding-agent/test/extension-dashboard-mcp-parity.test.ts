@@ -66,7 +66,6 @@ describe("Extension Control Center MCP activation", () => {
 		expect(denylisted).toMatchObject({ state: "disabled", disabledReason: "item-disabled" });
 		expect(forceEnabled).toMatchObject({ state: "active", activationLocked: false });
 	});
-
 	test("uses request-scoped provider activation instead of the runtime registry", async () => {
 		const projectEnabled = await loadAllExtensions(projectDir, [], []);
 		const projectDisabled = await loadAllExtensions(projectDir, [], ["native"]);

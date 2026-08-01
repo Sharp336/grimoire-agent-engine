@@ -127,6 +127,37 @@ describe("extension activation rendering", () => {
 		}
 	});
 
+	it("does not present a same-id user skill as an active project fallback", async () => {
+		const previousAgentDir = getAgentDir();
+		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-shadowed-row-"));
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
+		cleanupPaths.push(projectRoot, agentDir);
+		await fs.mkdir(path.join(projectRoot, ".omp", "skills", "zzsameid"), { recursive: true });
+		await fs.mkdir(path.join(agentDir, "skills", "zzsameid"), { recursive: true });
+		await Bun.write(
+			path.join(projectRoot, ".omp", "skills", "zzsameid", "SKILL.md"),
+			"---\nname: zzsameid\ndescription: Project skill\n---\nProject skill\n",
+		);
+		await Bun.write(
+			path.join(agentDir, "skills", "zzsameid", "SKILL.md"),
+			"---\nname: zzsameid\ndescription: User skill\n---\nUser skill\n",
+		);
+		await Bun.write(path.join(projectRoot, ".omp", "config.yml"), "disabledExtensions:\n  - skill:zzsameid\n");
+
+		setAgentDir(agentDir);
+		try {
+			const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
+			const dashboard = await ExtensionDashboard.create(projectRoot, settings, 28);
+			for (const char of "zzsameid") dashboard.handleInput(char);
+
+			const rendered = stripAnsi(dashboard.render(120).join("\n"));
+			expect(rendered).toContain("Disabled (manually disabled)");
+			expect(rendered).not.toContain("● Active");
+		} finally {
+			setAgentDir(previousAgentDir);
+		}
+	});
+
 	it("disables global MCP rows even when project forces them enabled", async () => {
 		const previousAgentDir = getAgentDir();
 		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-global-mcp-"));

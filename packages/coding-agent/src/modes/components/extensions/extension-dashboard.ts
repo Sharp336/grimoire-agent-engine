@@ -211,60 +211,24 @@ export class ExtensionDashboard implements Component {
 		const sm = this.settings ?? Settings.instance;
 		const target = sm.getActivationWriteTarget(this.cwd, this.#activationScope);
 		const scopedState = target === "global" ? this.#withoutProjectRows(state) : state;
-		// Capability discovery marks lower-priority rows as shadowed before the
-		// dashboard applies project activation overrides. If the project row that
-		// caused the shadow is disabled, reveal the user/global peer while preserving
-		// its original disable signals (provider off, global disabled, source disabled).
 		const nonProjectIds = new Set(
 			scopedState.extensions.filter(ext => ext.source.level !== "project").map(ext => ext.id),
 		);
-		const disabledProjectShadowIds = new Set(
-			scopedState.extensions
-				.filter(ext => {
-					if (ext.source.level !== "project" || !nonProjectIds.has(ext.id)) return false;
-					const parsed = projectActivationKindFromExtensionId(ext.id);
-					return !!parsed && sm.getProjectActivation(parsed.kind, parsed.name, "project") === "disabled";
-				})
-				.map(ext => ext.id),
-		);
 		const annotate = (ext: DashboardState["extensions"][number]): DashboardState["extensions"][number] => {
-			const revealNonProjectPeer =
-				ext.source.level !== "project" &&
-				disabledProjectShadowIds.has(ext.id) &&
-				ext.disabledReason !== "provider-disabled";
-			const revealParsed = revealNonProjectPeer ? projectActivationKindFromExtensionId(ext.id) : null;
-			const revealAsProviderDisabled =
-				revealNonProjectPeer && sm.isProviderEffectivelyDisabled(ext.source.provider, "project");
-			const revealAsItemDisabled = revealParsed
-				? sm.isGlobalActivationDisabled(revealParsed.kind, revealParsed.name)
-				: false;
-			const effectiveExt = revealNonProjectPeer
-				? {
-						...ext,
-						state: revealAsProviderDisabled || revealAsItemDisabled ? ("disabled" as const) : ("active" as const),
-						disabledReason: revealAsProviderDisabled
-							? ("provider-disabled" as const)
-							: revealAsItemDisabled
-								? ("item-disabled" as const)
-								: undefined,
-						shadowedBy: undefined,
-					}
-				: ext;
-			const parsed = projectActivationKindFromExtensionId(effectiveExt.id);
-			if (!parsed || effectiveExt.state === "shadowed") {
+			const parsed = projectActivationKindFromExtensionId(ext.id);
+			if (!parsed || ext.state === "shadowed") {
 				return {
-					...effectiveExt,
+					...ext,
 					activationState: undefined,
 					activationTarget: undefined,
 					activationMode: undefined,
 				};
 			}
-			const hasNonProjectPeer = nonProjectIds.has(effectiveExt.id);
-			const projectOnly = target === "project" && effectiveExt.source.level === "project" && !hasNonProjectPeer;
+			const projectOnly = target === "project" && ext.source.level === "project" && !nonProjectIds.has(ext.id);
 			const storedState = sm.getProjectActivation(parsed.kind, parsed.name, this.#activationScope);
 			const activationMode: ActivationMode = projectOnly || target === "global" ? "binary" : "tri-state";
 			return {
-				...effectiveExt,
+				...ext,
 				activationState: normalizeBinaryActivationState(storedState, activationMode, "enabled"),
 				activationTarget: target,
 				activationMode,

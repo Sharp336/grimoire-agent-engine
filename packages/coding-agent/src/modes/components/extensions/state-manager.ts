@@ -36,9 +36,14 @@ function activationRowState(input: {
 /**
  * Load all extensions from all capabilities.
  */
-export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): Promise<Extension[]> {
+export async function loadAllExtensions(
+	cwd?: string,
+	disabledIds?: string[],
+	disabledProviderIds?: string[],
+): Promise<Extension[]> {
 	const extensions: Extension[] = [];
 	const disabledExtensions = new Set<string>(disabledIds ?? []);
+	const disabledProviders = disabledProviderIds ? new Set(disabledProviderIds) : null;
 
 	// Helper to convert capability items to extensions
 	function addItems<T extends { name: string; path: string; _source: SourceMeta }>(
@@ -55,7 +60,9 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 			const { state, disabledReason } = activationRowState({
 				itemDisabled: disabledExtensions.has(id),
 				shadowed: (item as { _shadowed?: boolean })._shadowed,
-				providerEnabled: isProviderEnabled(item._source.provider),
+				providerEnabled: disabledProviders
+					? !disabledProviders.has(item._source.provider)
+					: isProviderEnabled(item._source.provider),
 			});
 
 			extensions.push({
@@ -75,7 +82,11 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 		}
 	}
 
-	const loadOpts = cwd ? { cwd, includeDisabled: true } : { includeDisabled: true };
+	const loadOpts = {
+		...(cwd ? { cwd } : {}),
+		...(disabledProviders ? { disabledProviders } : {}),
+		includeDisabled: true,
+	};
 
 	// Load skills
 	try {
@@ -142,7 +153,9 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 			const { state, disabledReason } = activationRowState({
 				itemDisabled: disabledExtensions.has(id) || disabledServerNames.has(server.name) || sourceSaysDisabled,
 				shadowed: (server as { _shadowed?: boolean })._shadowed,
-				providerEnabled: isProviderEnabled(server._source.provider),
+				providerEnabled: disabledProviders
+					? !disabledProviders.has(server._source.provider)
+					: isProviderEnabled(server._source.provider),
 			});
 
 			extensions.push({
@@ -194,7 +207,9 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 			const { state, disabledReason } = activationRowState({
 				itemDisabled: disabledExtensions.has(id),
 				shadowed: (hook as { _shadowed?: boolean })._shadowed,
-				providerEnabled: isProviderEnabled(hook._source.provider),
+				providerEnabled: disabledProviders
+					? !disabledProviders.has(hook._source.provider)
+					: isProviderEnabled(hook._source.provider),
 			});
 
 			extensions.push({
@@ -225,7 +240,9 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 			const { state, disabledReason } = activationRowState({
 				itemDisabled: disabledExtensions.has(id),
 				shadowed: (file as { _shadowed?: boolean })._shadowed,
-				providerEnabled: isProviderEnabled(file._source.provider),
+				providerEnabled: disabledProviders
+					? !disabledProviders.has(file._source.provider)
+					: isProviderEnabled(file._source.provider),
 			});
 
 			extensions.push({
