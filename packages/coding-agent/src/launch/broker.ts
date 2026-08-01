@@ -6,6 +6,7 @@ import { Process, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
 import { isEexist, isEnoent, logger, postmortem, procmgr, sanitizeText, setProcessName } from "@oh-my-pi/pi-utils";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
 import { truncateHead, truncateHeadBytes, truncateTail, truncateTailBytes } from "../session/streaming-output";
+import { SessionChannelBroker } from "../session-channels/broker";
 import { workerEnvFromParent } from "../subprocess/worker-client";
 import { daemonBrokerEndpoint } from "./paths";
 import { hasLiveDaemonProjectPresence } from "./presence";
@@ -361,6 +362,7 @@ class DaemonBroker {
 	 * profile lock) or keeps running untracked.
 	 */
 	readonly #startingNames = new Set<string>();
+	readonly #sessionChannels = new SessionChannelBroker();
 	readonly #clients = new Set<net.Socket>();
 	readonly #ownerSockets = new Map<string, { socket: net.Socket; subscriptionId: string | undefined }>();
 	readonly #completionSubscriptions = new Map<string, string | undefined>();
@@ -407,6 +409,7 @@ class DaemonBroker {
 			await record.persistQueue;
 		}
 		this.#ownerSockets.clear();
+		this.#sessionChannels.shutdown();
 		for (const socket of this.#sockets) socket.destroy();
 		this.#sockets.clear();
 		this.#clients.clear();
@@ -450,6 +453,7 @@ class DaemonBroker {
 		});
 		socket.on("close", () => {
 			this.#sockets.delete(socket);
+			this.#sessionChannels.disconnectSocket(socket);
 			if (!authenticated) return;
 			this.#clients.delete(socket);
 			this.#scheduleIdleShutdown();
@@ -539,7 +543,7 @@ class DaemonBroker {
 					if (registration?.subscriptionId === request.completionSubscriptionId) this.#ownerSockets.delete(owner);
 				}
 			}
-			const result = await this.#dispatch(request.operation);
+			const result = await this.#dispatch(request.operation, socket);
 			socket.write(`${JSON.stringify({ id, ok: true, result })}\n`);
 			if (request.operation.op === "shutdown") setTimeout(() => void this.shutdown(), 10);
 		} catch (error) {
@@ -548,7 +552,7 @@ class DaemonBroker {
 		}
 	}
 
-	async #dispatch(operation: DaemonOperation): Promise<DaemonRpcResult> {
+	async #dispatch(operation: DaemonOperation, socket: net.Socket): Promise<DaemonRpcResult> {
 		switch (operation.op) {
 			case "ping":
 				return { op: "ping", projectDir: this.#projectDir };
@@ -579,6 +583,8 @@ class DaemonBroker {
 				await this.#refreshDetached(record);
 				return { op: "describe", daemon: record.snapshot, spec: record.spec };
 			}
+			case "channel":
+				return { op: "channel", result: await this.#sessionChannels.dispatch(operation.operation, socket) };
 			case "shutdown":
 				return { op: "shutdown" };
 		}

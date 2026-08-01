@@ -44,6 +44,7 @@ import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { resolveResumableSession } from "../session/session-listing";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
+import { handleSessionChannelCommand } from "../session-channels/command";
 import type { ComputerTool } from "../tools/computer";
 import { computerExposureMode } from "../tools/computer/exposure";
 import { expandTilde, resolveToCwd } from "../tools/path-utils";
@@ -964,6 +965,21 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			await runtime.ctx.handleShareCommand();
 			runtime.ctx.editor.setText("");
 		},
+	},
+	{
+		name: "channel",
+		description: "Authorize cross-session agent communication",
+		inlineHint: "[list|open|add|remove|leave|close] ...",
+		subcommands: [
+			{ name: "list", description: "List running sessions and open channels" },
+			{ name: "open", description: "Authorize a channel with one or more sessions", usage: "<session-id>..." },
+			{ name: "add", description: "Authorize more sessions on an open channel", usage: "<channel> <session-id>..." },
+			{ name: "remove", description: "Remove a session from a channel", usage: "<channel> <session-id>" },
+			{ name: "leave", description: "Leave a channel from this session", usage: "<channel>" },
+			{ name: "close", description: "Close a channel for every member", usage: "<channel>" },
+		],
+		allowArgs: true,
+		handle: handleSessionChannelCommand,
 	},
 	{
 		name: "collab",

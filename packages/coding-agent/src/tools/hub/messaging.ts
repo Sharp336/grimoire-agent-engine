@@ -97,18 +97,21 @@ export async function executeList(
 	}
 
 	const bus = IrcBus.global();
-	const peers = refs
-		.filter(ref => ref.id !== senderId && ref.status !== "aborted" && ref.kind !== "advisor")
-		.map(ref => ({
-			id: ref.id,
-			displayName: ref.displayName,
-			kind: ref.kind,
-			status: ref.status,
-			parentId: ref.parentId,
-			unread: bus.unreadCount(ref.id),
-			lastActivity: ref.lastActivity,
-			activity: ref.activity,
-		}));
+	const peers = [
+		...refs
+			.filter(ref => ref.id !== senderId && ref.status !== "aborted" && ref.kind !== "advisor")
+			.map(ref => ({
+				id: ref.id,
+				displayName: ref.displayName,
+				kind: ref.kind,
+				status: ref.status,
+				parentId: ref.parentId,
+				unread: bus.unreadCount(ref.id),
+				lastActivity: ref.lastActivity,
+				activity: ref.activity,
+			})),
+		...bus.listExternalPeers().map(peer => ({ ...peer, unread: 0 })),
+	];
 	const lines: string[] = [];
 	if (peers.length === 0) {
 		lines.push("No other agents.");
@@ -119,6 +122,7 @@ export async function executeList(
 				peer.activity || undefined,
 				peer.unread > 0 ? `unread ${peer.unread}` : undefined,
 				peer.parentId ? `parent ${peer.parentId}` : undefined,
+				"channelId" in peer ? `channel ${peer.channelId}` : undefined,
 				`active ${formatDuration(Date.now() - peer.lastActivity)} ago`,
 			].filter(Boolean);
 			lines.push(`- ${peer.id} [${peer.displayName} · ${peer.kind} · ${peer.status}] — ${extras.join(", ")}`);
@@ -135,7 +139,7 @@ export async function executeList(
 }
 
 export interface HubSendParams {
-	to?: string;
+	to?: string | string[];
 	message?: string;
 	replyTo?: string;
 	await?: boolean;
@@ -148,27 +152,38 @@ export async function executeSend(
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<CoordinationDetails>> {
 	const { registry, senderId, settings } = deps;
-	const to = params.to?.trim();
+	const recipientArray = Array.isArray(params.to);
+	const rawRecipients: string[] = Array.isArray(params.to) ? params.to : [params.to ?? ""];
+	const recipients = [...new Set(rawRecipients.map(recipient => recipient.trim()).filter(Boolean))];
+	const toLabel = recipients.join(", ");
 	const message = params.message?.trim();
-	if (!to) {
-		return hubErrorResult('`to` is required for op="send".', { op: "send", from: senderId });
+	if (recipients.length === 0) {
+		return hubErrorResult('`to` requires one or more recipients for op="send".', { op: "send", from: senderId });
 	}
 	if (!message) {
-		return hubErrorResult('`message` is required for op="send".', { op: "send", from: senderId });
+		return hubErrorResult('`message` is required for op="send".', { op: "send", from: senderId, to: toLabel });
 	}
-	if (to === senderId) {
-		return hubErrorResult("Cannot send a message to yourself.", { op: "send", from: senderId, to });
+	if (recipients.includes(senderId)) {
+		return hubErrorResult("Cannot send a message to yourself.", { op: "send", from: senderId, to: toLabel });
 	}
-	const isBroadcast = to === "all";
+	if (params.await && recipients.length !== 1) {
+		return hubErrorResult("`await` requires exactly one recipient.", { op: "send", from: senderId, to: toLabel });
+	}
+	const singleRecipient = recipients[0] ?? "";
+	const isBroadcast = !recipientArray && singleRecipient === "all";
 	if (isBroadcast && params.await) {
 		return hubErrorResult('`await` is invalid with to:"all" — broadcasts have no single replier.', {
 			op: "send",
 			from: senderId,
-			to,
+			to: toLabel,
 		});
 	}
 
 	const bus = IrcBus.global();
+	if (recipientArray) {
+		const validationError = bus.validateExternalTargets(recipients);
+		if (validationError) return hubErrorResult(validationError, { op: "send", from: senderId, to: toLabel });
+	}
 	let waited: IrcMessage | null | undefined;
 	const timeoutMs = params.await ? resolveMessageTimeoutMs(settings, params.timeoutMs) : undefined;
 	const awaitAbort = params.await ? new AbortController() : undefined;
@@ -176,7 +191,7 @@ export async function executeSend(
 	let removeAwaitAbortListener: (() => void) | undefined;
 	const waiting = params.await
 		? bus
-				.wait(senderId, { from: to }, timeoutMs ?? DEFAULT_IRC_TIMEOUT_MS, awaitAbort?.signal, {
+				.wait(senderId, { from: singleRecipient }, timeoutMs ?? DEFAULT_IRC_TIMEOUT_MS, awaitAbort?.signal, {
 					drainPending: false,
 				})
 				.then(
@@ -200,21 +215,14 @@ export async function executeSend(
 	}
 
 	try {
-		// Broadcasts fan out to live peers only (running | idle); reviving every
-		// parked agent on a broadcast would be a stampede. Direct sends go
-		// through the bus unfiltered so parked recipients are revived.
-		const targets = isBroadcast ? registry.listVisibleTo(senderId).map(ref => ref.id) : [to];
-		// A broadcast that also reaches the main agent delivers the body to it
-		// directly (its own incoming card); relaying the sibling legs to the
-		// main UI would then show the same body once per other recipient.
+		// `all` retains the process-local broadcast contract. Cross-session
+		// broadcasts use `<channel-id>/all` so one channel cannot leak into another.
+		const targets = isBroadcast ? registry.listVisibleTo(senderId).map(ref => ref.id) : recipients;
 		const suppressRelay = isBroadcast && targets.includes(MAIN_AGENT_ID);
 		const receipts = await Promise.all(
 			targets.map(target =>
 				bus.send(
 					{ from: senderId, to: target, body: message, replyTo: params.replyTo },
-					// Awaited sends mark the sender as blocked on an answer so a
-					// busy recipient that cannot reach a step boundary (async
-					// disabled) auto-replies instead of stranding the sender.
 					{ expectsReply: params.await || undefined, suppressRelay: suppressRelay || undefined },
 				),
 			),
@@ -242,13 +250,9 @@ export async function executeSend(
 			if (delivered.length > 0) {
 				const reply = await waiting;
 				if (reply.error) {
-					// The send already succeeded; if the wait was interrupted by our
-					// caller signal (steering / messaging), preserve the delivery receipt
-					// so the agent loop keeps this tool as "sent" instead of marking it
-					// skipped, which would prompt a duplicate resend on the next turn.
 					if (signal?.aborted) {
 						lines.push(
-							`Send delivered but the reply wait was interrupted before ${to} answered. ` +
+							`Send delivered but the reply wait was interrupted before ${singleRecipient} answered. ` +
 								"Check `inbox` or `wait` again after handling the interrupt.",
 						);
 					} else {
@@ -261,7 +265,7 @@ export async function executeSend(
 						lines.push(waited.body);
 					} else {
 						lines.push(
-							`No reply from ${to} within ${formatDuration(timeoutMs)}. ` +
+							`No reply from ${singleRecipient} within ${formatDuration(timeoutMs)}. ` +
 								"They may answer later — check `inbox` or `wait` again.",
 						);
 					}
@@ -278,7 +282,7 @@ export async function executeSend(
 			details: {
 				op: "send",
 				from: senderId,
-				to,
+				to: toLabel,
 				receipts,
 				...(waited !== undefined ? { waited } : {}),
 			},
@@ -422,11 +426,15 @@ function bodyLines(
 	return lines;
 }
 
+function recipientLabel(to: string | string[] | undefined): string {
+	return Array.isArray(to) ? to.join(", ") : (to?.trim() ?? "");
+}
+
 /** Header title carrying the op direction: `IRC ➤ peer` out, `IRC ⟵ peer` in. */
 function callTitle(args: HubRenderArgs | undefined, theme: Theme): string {
 	switch (args?.op) {
 		case "send":
-			return `IRC ${theme.nav.selected} ${args.to?.trim() || "…"}`;
+			return `IRC ${theme.nav.selected} ${recipientLabel(args.to) || "…"}`;
 		case "wait":
 			return `IRC ${theme.nav.back} ${args.from?.trim() || "anyone"}`;
 		case "inbox":
@@ -515,7 +523,7 @@ function renderSendResult(
 	theme: Theme,
 ): string[] {
 	const receipts = details.receipts ?? [];
-	const to = details.to ?? args?.to?.trim() ?? "?";
+	const to = (details.to ?? recipientLabel(args?.to)) || "?";
 	const title = `IRC ${theme.nav.selected} ${to}`;
 
 	// Pre-delivery failures (validation) and empty broadcasts carry no receipts.

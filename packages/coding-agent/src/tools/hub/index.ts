@@ -31,6 +31,7 @@ import { IrcBus } from "../../irc/bus";
 import type { Theme } from "../../modes/theme/theme";
 import hubDescription from "../../prompts/tools/hub.md" with { type: "text" };
 import type { AgentRegistry } from "../../registry/agent-registry";
+import { SessionChannelManager } from "../../session-channels/manager";
 import type { ToolSession } from "..";
 import {
 	buildJobResult,
@@ -72,9 +73,9 @@ export * from "./types";
 
 const hubSchema = type({
 	op: type(
-		"'send' | 'wait' | 'inbox' | 'list' | 'jobs' | 'cancel' | 'start' | 'ps' | 'logs' | 'stop' | 'restart' | 'describe'",
+		"'send' | 'wait' | 'inbox' | 'list' | 'channels' | 'disconnect' | 'jobs' | 'cancel' | 'start' | 'ps' | 'logs' | 'stop' | 'restart' | 'describe'",
 	).describe("hub operation"),
-	"to?": type("string").describe('send: recipient agent id or "all"'),
+	"to?": type("string | string[]").describe('send: recipient agent id, same-channel agent id array, or "all"'),
 	"message?": type("string").describe("send: message body"),
 	"replyTo?": type("string").describe("send: message id being answered"),
 	"await?": type("boolean").describe('send: wait for the recipient\'s reply (invalid with to:"all")'),
@@ -82,6 +83,7 @@ const hubSchema = type({
 	"ids?": type("string[]").describe("wait: job ids to watch (omit = all running jobs); cancel: job ids to kill"),
 	"timeoutMs?": type("number").describe("wait (messages/jobs): timeout in milliseconds (0 waits indefinitely)"),
 	"peek?": type("boolean").describe("inbox: list messages without consuming them"),
+	"channel?": type("string").describe("disconnect: channel id or unique name/prefix"),
 	"name?": type("string <= 48").describe("process ops: stable project-scoped launch name"),
 	"application?": type("string > 0").describe("start: executable or application path"),
 	"args?": type("string[]").describe("start: argv passed directly to the application"),
@@ -134,6 +136,8 @@ function hubApproval(params: unknown): ToolApprovalDecision {
 		case "inbox":
 		case "list":
 		case "jobs":
+		case "channels":
+		case "disconnect":
 		case "cancel":
 		case "ps":
 		case "logs":
@@ -256,8 +260,71 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 				if (!messaging) return hubErrorResult("Peer messaging is unavailable in this session.", { op: "list" });
 				return executeList(messaging.registry, messaging.senderId);
 			}
+			case "channels": {
+				const messaging = this.#messaging();
+				if (!messaging) return hubErrorResult("Peer messaging is unavailable in this session.", { op: "channels" });
+				const manager = SessionChannelManager.forRegistry(messaging.registry);
+				if (!manager) {
+					return hubErrorResult("No cross-session channel manager is active.", {
+						op: "channels",
+						from: messaging.senderId,
+					});
+				}
+				const state = await manager.state();
+				const lines =
+					state.channels.length === 0
+						? ["No cross-session channels are open."]
+						: [
+								`${state.channels.length} open channel(s):`,
+								...state.channels.map(channel => {
+									const remoteAgents = channel.members
+										.filter(member => member.id !== state.self.id)
+										.flatMap(member =>
+											member.agents.map(
+												agent => `${channel.id}/${member.id}/${agent.id} (${agent.displayName})`,
+											),
+										);
+									const name = channel.name ? ` ${channel.name}` : "";
+									return `- ${channel.id}${name}: ${channel.members.length} sessions; all ${channel.id}/all; peers ${remoteAgents.join(", ") || "none"}`;
+								}),
+							];
+				return {
+					content: [{ type: "text", text: lines.join("\n") }],
+					details: { op: "channels", from: messaging.senderId, channels: state.channels },
+				};
+			}
+			case "disconnect": {
+				const messaging = this.#messaging();
+				if (!messaging) {
+					return hubErrorResult("Peer messaging is unavailable in this session.", { op: "disconnect" });
+				}
+				const channel = params.channel?.trim();
+				if (!channel) {
+					return hubErrorResult('`channel` is required for op="disconnect".', {
+						op: "disconnect",
+						from: messaging.senderId,
+					});
+				}
+				const manager = SessionChannelManager.forRegistry(messaging.registry);
+				if (!manager) {
+					return hubErrorResult("No cross-session channel manager is active.", {
+						op: "disconnect",
+						from: messaging.senderId,
+					});
+				}
+				await manager.leave(channel, "agent");
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Left channel ${channel}. Rejoining requires new user authorization.`,
+						},
+					],
+					details: { op: "disconnect", from: messaging.senderId },
+				};
+			}
 			case "send": {
-				const toPeer = params.to?.trim();
+				const toPeer = Array.isArray(params.to) ? params.to.length > 0 : !!params.to?.trim();
 				const toProcess = params.name?.trim();
 				if (toPeer && toProcess) {
 					return hubErrorResult('`to` (peer) and `name` (process) are mutually exclusive for op="send".', {
@@ -375,9 +442,9 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 				// A bare wait can only be satisfied by a running peer eventually
 				// sending something; with none, return the snapshot immediately
 				// instead of blocking a full message-timeout window.
-				const hasRunningPeer = messaging.registry
-					.listVisibleTo(messaging.senderId)
-					.some(ref => ref.status === "running");
+				const hasRunningPeer =
+					messaging.registry.listVisibleTo(messaging.senderId).some(ref => ref.status === "running") ||
+					IrcBus.global().hasRunningExternalPeers();
 				if (!hasRunningPeer) return nothingToWaitForResult(this.session);
 			}
 			return executeMessageWait(messaging, { from, timeoutMs: params.timeoutMs }, signal);

@@ -37,6 +37,28 @@ export interface IrcDeliveryReceipt {
 	outcome: "injected" | "woken" | "revived" | "failed";
 	error?: string;
 }
+export interface IrcExternalPeer {
+	id: string;
+	displayName: string;
+	kind: string;
+	status: string;
+	parentId?: string;
+	lastActivity: number;
+	activity?: string;
+	channelId: string;
+}
+
+export interface IrcExternalTransport {
+	handles(address: string): boolean;
+	validateTargets(addresses: readonly string[]): string | undefined;
+	send(
+		message: Omit<IrcMessage, "id" | "ts">,
+		options?: { expectsReply?: boolean; suppressRelay?: boolean },
+	): Promise<IrcDeliveryReceipt>;
+	listPeers(): IrcExternalPeer[];
+	isPeerRunning(address: string): boolean;
+	onPeersChanged(listener: () => void): () => void;
+}
 
 interface IrcWaiter {
 	from?: string;
@@ -66,12 +88,36 @@ export class IrcBus {
 	readonly #lifecycle: () => AgentLifecycleManager;
 	readonly #mailboxes = new Map<string, IrcMessage[]>();
 	readonly #waiters = new Map<string, IrcWaiter[]>();
+	#externalTransport: IrcExternalTransport | undefined;
 
 	constructor(registry: AgentRegistry = AgentRegistry.global(), lifecycle?: AgentLifecycleManager) {
 		this.#registry = registry;
 		// Lazy: the lifecycle global self-constructs against the global registry,
 		// so only touch it when a parked recipient actually needs reviving.
 		this.#lifecycle = () => lifecycle ?? AgentLifecycleManager.global();
+	}
+
+	setExternalTransport(transport: IrcExternalTransport): void {
+		this.#externalTransport = transport;
+	}
+
+	clearExternalTransport(transport: IrcExternalTransport): void {
+		if (this.#externalTransport === transport) this.#externalTransport = undefined;
+	}
+
+	listExternalPeers(): IrcExternalPeer[] {
+		return this.#externalTransport?.listPeers() ?? [];
+	}
+
+	hasRunningExternalPeers(): boolean {
+		return this.listExternalPeers().some(peer => peer.status === "running");
+	}
+
+	validateExternalTargets(addresses: readonly string[]): string | undefined {
+		const transport = this.#externalTransport;
+		return transport
+			? transport.validateTargets(addresses)
+			: "Recipient arrays require an open cross-session channel.";
 	}
 
 	/**
@@ -105,10 +151,12 @@ export class IrcBus {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
 		const ref = this.#registry.get(message.to);
 		if (!ref) {
+			const external = this.#externalTransport;
+			if (external?.handles(message.to)) return external.send(msg, opts);
 			return {
 				to: message.to,
 				outcome: "failed",
-				error: `Unknown agent "${message.to}" — check \`irc list\` for live peers.`,
+				error: `Unknown agent "${message.to}" — check \`hub list\` for addressable peers.`,
 			};
 		}
 		if (ref.status === "aborted") {
@@ -221,6 +269,7 @@ export class IrcBus {
 		let timer: NodeJS.Timeout | undefined;
 		let onAbort: (() => void) | undefined;
 		let unsubscribeLiveness: (() => void) | undefined;
+		let unsubscribeExternalLiveness: (() => void) | undefined;
 
 		const liveness = options?.liveness;
 		const livenessReason = filter.from
@@ -245,6 +294,7 @@ export class IrcBus {
 			clearTimeout(timer);
 			if (signal && onAbort) signal.removeEventListener("abort", onAbort);
 			unsubscribeLiveness?.();
+			unsubscribeExternalLiveness?.();
 		};
 
 		const waiter: IrcWaiter = {
@@ -275,17 +325,21 @@ export class IrcBus {
 
 		if (liveness) {
 			const { registry, senderId } = liveness;
-			const hasRunningSender = (from?: string): boolean =>
-				registry.listVisibleTo(senderId).some(ref => ref.status === "running" && (!from || ref.id === from));
+			const hasRunningSender = (from?: string): boolean => {
+				const local = registry
+					.listVisibleTo(senderId)
+					.some(ref => ref.status === "running" && (!from || ref.id === from));
+				if (local) return true;
+				const external = this.#externalTransport;
+				return from ? external?.isPeerRunning(from) === true : this.hasRunningExternalPeers();
+			};
 			const check = filter.from ? () => hasRunningSender(filter.from) : () => hasRunningSender();
-			unsubscribeLiveness = registry.onChange(() => {
-				if (!check()) {
-					settle({ kind: "abort", error: new Error(livenessReason) });
-				}
-			});
-			if (!check()) {
-				settle({ kind: "abort", error: new Error(livenessReason) });
-			}
+			const checkLiveness = (): void => {
+				if (!check()) settle({ kind: "abort", error: new Error(livenessReason) });
+			};
+			unsubscribeLiveness = registry.onChange(checkLiveness);
+			unsubscribeExternalLiveness = this.#externalTransport?.onPeersChanged(checkLiveness);
+			checkLiveness();
 		}
 
 		return promise;

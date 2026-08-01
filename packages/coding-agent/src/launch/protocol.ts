@@ -1,3 +1,10 @@
+import {
+	parseSessionChannelOperation,
+	parseSessionChannelResult,
+	type SessionChannelOperation,
+	type SessionChannelResult,
+} from "../session-channels/protocol";
+
 /**
  * Cross-process daemon broker protocol shared by the tool, client, and broker.
  */
@@ -92,6 +99,7 @@ export type DaemonOperation =
 	| { op: "stop"; name: string; timeoutMs: number }
 	| { op: "restart"; name: string }
 	| { op: "describe"; name: string }
+	| { op: "channel"; operation: SessionChannelOperation }
 	| { op: "shutdown" };
 
 /** Typed broker result decoded before it reaches tool code. */
@@ -116,6 +124,7 @@ export type DaemonRpcResult =
 	| { op: "stop"; daemon: DaemonSnapshot }
 	| { op: "restart"; daemon: DaemonSnapshot }
 	| { op: "describe"; daemon: DaemonSnapshot; spec: DaemonSpec }
+	| { op: "channel"; result: SessionChannelResult }
 	| { op: "shutdown" };
 
 /** Authenticated request envelope used by socket clients. */
@@ -389,6 +398,8 @@ function parseDaemonOperation(value: unknown): DaemonOperation {
 		case "restart":
 		case "describe":
 			return { op, name: stringValue(source.name, "operation.name") };
+		case "channel":
+			return { op, operation: parseSessionChannelOperation(source.operation) };
 		default:
 			throw new Error(`Unknown daemon operation: ${op}`);
 	}
@@ -442,6 +453,8 @@ export function parseDaemonRpcResult(operation: DaemonOperation, value: unknown)
 				daemon: parseDaemonSnapshot(source.daemon),
 				spec: parseDaemonSpec(source.spec),
 			};
+		case "channel":
+			return { op: "channel", result: parseSessionChannelResult(operation.operation, source.result) };
 		case "shutdown":
 			return { op: "shutdown" };
 	}

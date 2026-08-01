@@ -161,6 +161,7 @@ import { collectMountedMCPToolRoutes, projectMountedMCPXdevGuidance } from "./se
 import { createSettingsAwareStreamFn } from "./session/settings-stream-fn";
 import { SnapcompactInlineTransformer } from "./session/snapcompact-inline";
 import { createSnapcompactSavingsRecorder } from "./session/snapcompact-savings-journal";
+import { SessionChannelManager } from "./session-channels/manager";
 import { closeAllConnections } from "./ssh/connection-manager";
 import { unmountAll } from "./ssh/sshfs-mount";
 import {
@@ -1656,6 +1657,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		options.agentDisplayName ?? ((options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? "sub" : "main");
 	const agentKind = (options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? ("sub" as const) : ("main" as const);
 	let registeredAgentRef: AgentRef | undefined;
+	let sessionChannelManager: SessionChannelManager | undefined;
 	/**
 	 * Forget the agent ref on teardown — unless it is a retained terminal ref.
 	 * Parking disposes the session but keeps the ref addressable (history://,
@@ -3494,6 +3496,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			throw new Error(`Agent "${resolvedAgentId}" was replaced during session initialization.`);
 		}
 		hasRegistered = true;
+		if (agentKind === "main" && options.hasUI && !options.parentTaskPrefix) {
+			try {
+				sessionChannelManager = await SessionChannelManager.start(session, agentRegistry);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				session.configWarnings.push(`Cross-session channels unavailable: ${message}`);
+				logger.warn("Failed to start cross-session channel manager", { error: message });
+			}
+		}
 		// MCP notification bridge cleanup — assigned when the bridge is wired below,
 		// invoked from the dispose wrapper AND registered as a postmortem so both
 		// explicit-dispose (SDK embedders that reuse the process across sessions) and
@@ -3511,6 +3522,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// begins — the lifecycle await below opens an async gap before
 					// AgentSession.dispose() would otherwise set its guards.
 					session.beginDispose();
+					await sessionChannelManager?.close();
 					if (agentKind === "main") {
 						// Top-level teardown owns the global agent lifecycle: park timers,
 						// adopted subagent sessions, revivers. Tear it down while shared
