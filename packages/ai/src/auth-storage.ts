@@ -6919,6 +6919,10 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				} catch {
 					// Ignore chmod failures (e.g., Windows)
 				}
+				// Same invariant as `#initializeSchema`: the busy handler must be
+				// installed before the first lock-taking statement, and the DDL
+				// below takes locks. See issue #2421.
+				db.run("PRAGMA busy_timeout = 5000");
 				SqliteAuthCredentialStore.#ensureAuthCredentialRefreshLeasesTable(db);
 				return new SqliteAuthCredentialStore(db);
 			} catch (err) {
