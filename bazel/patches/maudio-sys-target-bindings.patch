@@ -1,8 +1,9 @@
 diff --git a/native/miniaudio_version_check.c b/native/miniaudio_version_check.c
-index 58b5fee..4df5150 100644
+index 58b5fee..23662b4 100644
 --- a/native/miniaudio_version_check.c
 +++ b/native/miniaudio_version_check.c
-@@ -6,0 +7,27 @@
+@@ -2,2 +2,29 @@
+ 
 +/* Cross-build baseline: validate the C target without executing its binary. */
 +#if defined(__linux__)
 +#if defined(__aarch64__) && defined(__GLIBC__)
@@ -30,11 +31,13 @@ index 58b5fee..4df5150 100644
 +size_t omp_maudio_sizeof_device(void) { return sizeof(ma_device); }
 +size_t omp_maudio_alignof_device(void) { return _Alignof(ma_device); }
 +
+ #if MA_VERSION_MAJOR != 0 || MA_VERSION_MINOR != 11 || MA_VERSION_REVISION != 23
 diff --git a/src/lib.rs b/src/lib.rs
 index 479fc91..04c3b65 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -10,0 +11,29 @@ pub mod ffi {
+@@ -10 +10,30 @@ pub mod ffi {
+ }
 +
 +// These target-gated checks pair with the C static assertions in
 +// miniaudio_version_check.c, so cross-builds validate both sides without
