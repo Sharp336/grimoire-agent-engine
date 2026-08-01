@@ -870,7 +870,7 @@ async function openGcLock(lockPath: string): Promise<fs.FileHandle> {
 	}
 }
 
-async function withGcLock<T>(agentDir: string, fn: (lockPath: string) => Promise<T>): Promise<T> {
+export async function withGcLock<T>(agentDir: string, fn: (lockPath: string) => Promise<T>): Promise<T> {
 	const lockPath = path.join(agentDir, "gc.lock");
 	await fs.mkdir(agentDir, { recursive: true });
 	const handle = await openGcLock(lockPath);
