@@ -40,7 +40,8 @@
 - Fixed explicit `thinking` metadata in `models.yml` custom definitions and `modelOverrides` being replaced by canonical catalog policy during model rebuilding. ([#7307](https://github.com/can1357/oh-my-pi/issues/7307))
 - Fixed the auto-titler installing a model's whole answer as the session title when the tiny title model ignored the titling task and answered the first user message instead. `normalizeGeneratedTitle` now rejects overlong output (>80 chars or >12 words) so the caller defers titling to the next user turn rather than accepting a full sentence ([#7303](https://github.com/can1357/oh-my-pi/issues/7303)).
 - Fixed the in-process `kill` builtin to validate signals, preserve negative PID operands, signal every process in pipeline jobs, continue after bad targets, and refuse non-probe signals aimed at the host process or process group.
-
+- Fixed Escape immediately after sending a message discarding that message entirely: the pre-flight chain in `AgentSession#promptWithMessage` bails out before `agent.prompt()` ever commits the turn, so the message reached no session entry, was unreachable from `/tree`, and could not be undone. It now commits as a genuine aborted turn (user message plus an `aborted` assistant reply) through the normal event pipeline.
+- Fixed the interactive transcript keeping a phantom user-message row after such an abort, the `Working...` loader staying frozen on screen because the cleanup path never requested a repaint, and Escape appearing to do nothing for several seconds while the auto-thinking classifier ran out its own timeout instead of being cancelled with the turn.
 
 ## [17.2.3] - 2026-08-01
 

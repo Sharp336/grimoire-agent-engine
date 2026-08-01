@@ -1568,6 +1568,27 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#optimisticUserMessageComponents = [];
 	}
 
+	/**
+	 * Same bookkeeping reset as `clearOptimisticUserMessage`, but for a
+	 * submission that will never be committed at all -- cancelled before
+	 * dispatch, or bailed out of `AgentSession#promptWithMessage` before
+	 * `agent.prompt()` ever ran (e.g. an Esc-triggered abort racing the
+	 * pre-flight setup) -- so the optimistic row it painted must actually be
+	 * detached from `chatContainer` too. `clearOptimisticUserMessage` is
+	 * reserved for the opposite case, where the real `message_start` event
+	 * for this exact text just arrived (`EventController`'s `wasOptimistic`
+	 * branch): the already-rendered optimistic row IS the correct permanent
+	 * render, so touching `chatContainer` there would remove the user's
+	 * message with nothing to replace it -- every plain submission would
+	 * vanish from the transcript the instant its own turn started streaming.
+	 */
+	detachOptimisticUserMessage(): void {
+		for (const component of this.#optimisticUserMessageComponents) {
+			this.chatContainer.removeChild(component);
+		}
+		this.clearOptimisticUserMessage();
+	}
+
 	replaceOptimisticUserMessage(
 		message: AgentMessage,
 		options?: { imageLinks?: readonly (string | undefined)[] },
@@ -1618,7 +1639,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				);
 			});
 		} else {
-			this.clearOptimisticUserMessage();
+			this.detachOptimisticUserMessage();
 		}
 		this.editor.setText("");
 		this.editor.imageLinks = undefined;
@@ -1635,7 +1656,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		submission.cancelled = true;
 		this.#pendingSubmittedInput = undefined;
-		this.clearOptimisticUserMessage();
+		this.detachOptimisticUserMessage();
 		this.#pendingWorkingMessage = undefined;
 		if (submission.customType === "goal-continuation") {
 			this.#goalContinuationTurnInFlight = false;
@@ -1680,13 +1701,20 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		if (wasPendingSubmission && !this.session.isStreaming && !this.streamingComponent) {
-			this.optimisticUserMessageSignature = undefined;
 			pendingSubmissionDispose?.();
-			this.#optimisticUserMessageComponents = [];
+			this.detachOptimisticUserMessage();
 			this.#pendingWorkingMessage = undefined;
 			if (this.loadingAnimation) {
 				this.#stopLoadingAnimation(true);
 			}
+			// Every sibling mutator that tears down the optimistic row and loader
+			// (`startPendingSubmission`, `cancelPendingSubmission`) ends with this
+			// call; this cleanup branch mutated the same state without ever asking
+			// for a repaint. The next real render (an unrelated log line, a resize,
+			// a keystroke) painted over it, but nothing forced that render, so an
+			// Esc-abort mid pre-flight left the "Working... [esc]" loader frozen on
+			// screen indefinitely even though the state it reflected was gone.
+			this.ui.requestRender();
 		}
 	}
 
@@ -4182,7 +4210,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showError(message: string): void {
 		this.#pendingSubmittedInput = undefined;
-		this.clearOptimisticUserMessage();
+		this.detachOptimisticUserMessage();
 		this.#pendingWorkingMessage = undefined;
 		if (this.loadingAnimation) {
 			this.#stopLoadingAnimation(true);

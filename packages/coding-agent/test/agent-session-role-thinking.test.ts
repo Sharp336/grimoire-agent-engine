@@ -17,6 +17,14 @@ import {
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
+async function pollUntil(predicate: () => boolean, timeoutMs: number): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!predicate()) {
+		if (Date.now() >= deadline) throw new Error("pollUntil timed out");
+		await Bun.sleep(0);
+	}
+}
+
 describe("AgentSession role model thinking behavior", () => {
 	let tempDir: TempDir;
 	let session: AgentSession;
@@ -626,6 +634,44 @@ describe("AgentSession role model thinking behavior", () => {
 		expect(classifierSpy).not.toHaveBeenCalled();
 		expect(session.thinkingLevel).toBe(Effort.Max);
 		expect(session.autoResolvedThinkingLevel()).toBe(Effort.Max);
+	});
+
+	it("cancels an in-flight classifier request immediately when the turn is aborted", async () => {
+		// Regression test: Escape racing a just-submitted message used to abort
+		// the turn (bumping promptGeneration) without cancelling the auto-thinking
+		// classifier's own network call, which kept running until its internal
+		// AUTO_THINKING_TIMEOUT_MS fallback fired. Any UI relying on the abort
+		// settling promptly (e.g. detaching the optimistic user-message row) sat
+		// stuck for that whole window. `abort()` must now cancel the classifier's
+		// signal directly instead of waiting it out.
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		await createSession({
+			initialModelId: model.id,
+			initialThinkingLevel: Effort.High,
+			modelRoles: { default: `${model.provider}/${model.id}` },
+		});
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+
+		let capturedSignal: AbortSignal | undefined;
+		vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockImplementation((_text, options) => {
+			const { promise, reject } = Promise.withResolvers<Effort>();
+			capturedSignal = options.signal;
+			options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+			return promise;
+		});
+
+		session.setThinkingLevel(AUTO_THINKING);
+
+		const promptPromise = session.prompt("Investigate a regression");
+		await pollUntil(() => capturedSignal !== undefined, 2_000);
+
+		await session.abort({ reason: "test interrupt" });
+		await promptPromise;
+
+		// The abort must short-circuit the classifier request itself rather than
+		// leaving it to run out the multi-second internal fallback timeout, which
+		// is what kept post-abort UI cleanup waiting.
+		expect(capturedSignal?.aborted).toBe(true);
 	});
 
 	it("keeps auto effectively off for non-reasoning models", async () => {

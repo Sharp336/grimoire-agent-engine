@@ -303,7 +303,16 @@ export interface InteractiveModeContext {
 	 * delivery error should leave the signature set untouched.
 	 */
 	withLocalSubmission<T>(text: string, fn: () => Promise<T>, options?: { imageCount?: number }): Promise<T>;
-	/** Clears bookkeeping for an optimistic local user message once the matching session event arrives. */
+	/**
+	 * Clears bookkeeping for an optimistic local user message once the matching
+	 * session `message_start` event for that exact text arrives. Deliberately
+	 * leaves the already-rendered optimistic row attached to `chatContainer` --
+	 * it already shows the correct final content, so it simply becomes
+	 * permanent history. A submission that will never be committed (cancelled,
+	 * aborted, or replaced by different final text) needs the row actually
+	 * removed instead; see `InteractiveMode#detachOptimisticUserMessage` /
+	 * `replaceOptimisticUserMessage` for that.
+	 */
 	clearOptimisticUserMessage(): void;
 	/** Replaces the raw optimistic user render with the canonical message emitted by the session. */
 	replaceOptimisticUserMessage(
