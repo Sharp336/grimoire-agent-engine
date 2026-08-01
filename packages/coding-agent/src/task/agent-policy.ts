@@ -38,6 +38,15 @@ export function resolveAgentSessionPolicy(agent: AgentDefinition): AgentSessionP
 		// `yield` is auto-added by parseAgentFields for non-primary agents
 		// (helpers.ts:271) but has no meaningful behavior in the main session.
 		toolNames = toolNames.filter(n => n !== "yield");
+		// `exec` is a subagent pseudo-tool (executor.ts expands it into bash +
+		// eval); it is not a registered tool name, so activation would silently
+		// drop it. Expand it the same way for the main persona (eval gates its
+		// own backends at execution time).
+		if (toolNames.includes("exec")) {
+			const expanded = toolNames.filter(n => n !== "exec");
+			expanded.push("bash", "eval");
+			toolNames = Array.from(new Set(expanded));
+		}
 		if (spawns && spawns !== "" && !toolNames.includes("task")) {
 			toolNames = [...toolNames, "task"];
 		}

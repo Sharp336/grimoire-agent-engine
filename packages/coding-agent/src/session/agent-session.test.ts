@@ -37,4 +37,16 @@ describe("resolveAgentSessionPolicy main-persona edge cases", () => {
 		expect(result.toolNames).toBeUndefined();
 		expect(result.spawns).toBe("scout");
 	});
+
+	test("exec pseudo-tool expands to bash and eval", () => {
+		const result = resolveAgentSessionPolicy({
+			name: "t",
+			description: "d",
+			systemPrompt: "",
+			tools: ["exec", "read"],
+			source: "project",
+		});
+		expect(result.toolNames).toEqual(expect.arrayContaining(["bash", "eval", "read"]));
+		expect(result.toolNames).not.toContain("exec");
+	});
 });
