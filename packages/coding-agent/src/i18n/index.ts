@@ -140,13 +140,20 @@ class I18nManager {
 				}
 			}
 			// 加载用户目录覆盖
-			await this.#loadTranslationFromDir(this.#lang, this.#lanDir, this.#dict);
+			// 调用所有注册的缓存失效回调（如 settings-defs、welcome tips）
+			for (const invalidator of cacheInvalidators) {
+				invalidator();
+			}
 			return;
 		}
 
 		this.#lang = await this.#detectLanguage();
 		await this.#loadTranslation(this.#lang, this.#dict);
 		this.#initialized = true;
+		// 调用所有注册的缓存失效回调
+		for (const invalidator of cacheInvalidators) {
+			invalidator();
+		}
 	}
 
 	/**

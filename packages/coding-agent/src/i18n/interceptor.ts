@@ -145,6 +145,8 @@ const TIP_KEYS: readonly string[] = [
 	"tips.usage_reset",
 	"tips.pi_dialect",
 	"tips.advisor",
+	"tips.prompt_with_arrow",
+	"tips.shift_tab_effort",
 ];
 
 /**

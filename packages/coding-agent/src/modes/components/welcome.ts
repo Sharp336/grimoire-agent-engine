@@ -34,6 +34,10 @@ export function invalidateTipsCache(): void {
 	_tips = null;
 }
 
+// Register cache invalidator with i18n system (like settings-defs.ts)
+import { registerCacheInvalidator } from "../../i18n";
+registerCacheInvalidator(invalidateTipsCache);
+
 /**
  * Fixed number of session rows in the welcome box so its height stays stable
  * across recent-session updates.
