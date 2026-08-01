@@ -174,6 +174,7 @@ import { MCPCommandController } from "./controllers/mcp-command-controller";
 import { OmfgController } from "./controllers/omfg-controller";
 import { SelectorController } from "./controllers/selector-controller";
 import { SessionFocusController } from "./controllers/session-focus-controller";
+import { SideController } from "./controllers/side-controller";
 import { SSHCommandController } from "./controllers/ssh-command-controller";
 import { TanCommandController } from "./controllers/tan-command-controller";
 import { TodoCommandController } from "./controllers/todo-command-controller";
@@ -592,6 +593,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #codexResetFireworksController: CodexResetFireworksController;
 	readonly #btwController: BtwController;
 	readonly #tanCommandController: TanCommandController;
+	readonly #sideController: SideController;
 	readonly #omfgController: OmfgController;
 	readonly #commandController: CommandController;
 	readonly #todoCommandController: TodoCommandController;
@@ -804,6 +806,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#uiHelpers = new UiHelpers(this);
 		this.#btwController = new BtwController(this);
 		this.#tanCommandController = new TanCommandController(this);
+		this.#sideController = new SideController(this);
 		this.#omfgController = new OmfgController(this);
 		this.#extensionUiController = new ExtensionUiController(this);
 		this.#eventController = new EventController(this);
@@ -4019,6 +4022,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#liveCommandController.stop();
 
 		this.#btwController.dispose();
+		await this.#sideController.dispose();
 		this.#omfgController.dispose();
 		this.#focusController.dispose();
 
@@ -4493,8 +4497,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		return true;
 	}
 
-	#prepareSessionSwitch(): void {
+	async #prepareSessionSwitch(): Promise<void> {
 		this.#btwController.dispose();
+		await this.#sideController.dispose();
 		this.#omfgController.dispose();
 		this.#extensionUiController.clearExtensionTerminalInputListeners();
 		this.clearPinnedError();
@@ -4503,7 +4508,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async handleClearCommand(): Promise<void> {
 		if (this.#vibeSessionTransitionBlocked()) return;
-		this.#prepareSessionSwitch();
+		await this.#prepareSessionSwitch();
 		await this.#commandController.handleClearCommand();
 	}
 
@@ -4513,13 +4518,14 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async handleDropCommand(): Promise<void> {
 		if (this.#vibeSessionTransitionBlocked()) return;
-		this.#prepareSessionSwitch();
+		await this.#prepareSessionSwitch();
 		await this.#commandController.handleDropCommand();
 	}
 
 	async handleForkCommand(): Promise<void> {
 		if (this.#vibeSessionTransitionBlocked()) return;
 		this.#btwController.dispose();
+		await this.#sideController.dispose();
 		this.#omfgController.dispose();
 		await this.#commandController.handleForkCommand();
 	}
@@ -4746,6 +4752,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		this.#btwController.dispose();
+		await this.#sideController.dispose();
 		this.#omfgController.dispose();
 		this.resetObserverRegistry();
 		await this.#selectorController.handleResumeSession(sessionPath, { settingsFlushed: true });
@@ -4830,6 +4837,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#tanCommandController.start(work);
 	}
 
+	handleSideCommand(args: string): Promise<void> {
+		return this.#sideController.start(args);
+	}
+
 	hasActiveBtw(): boolean {
 		return this.#btwController.hasActiveRequest();
 	}
@@ -4862,6 +4873,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				return;
 			}
 			this.#btwController.dispose();
+			await this.#sideController.dispose();
 			this.#omfgController.dispose();
 			this.renderInitialMessages({ clearTerminalHistory: true });
 			this.updateEditorBorderColor();
