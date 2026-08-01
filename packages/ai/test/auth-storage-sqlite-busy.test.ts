@@ -62,20 +62,32 @@ describe("SqliteAuthCredentialStore.open SQLITE_BUSY handling", () => {
 	});
 
 	test("installs busy_timeout BEFORE any lock-taking statement", async () => {
+		// Spy on `Database.prototype.run` to record every SQL statement `open()`
+		// issues, in call order. The fix's invariant is that the busy handler
+		// (`PRAGMA busy_timeout = 5000`) runs before the first lock-taking DDL
+		// (`CREATE TABLE IF NOT EXISTS auth_credential_refresh_leases`), so
+		// assert the pragma appears at a strictly lower call index than that DDL.
+		const realRun = Database.prototype.run;
+		const runStatements: string[] = [];
+		vi.spyOn(Database.prototype, "run").mockImplementation(function (
+			this: Database,
+			...args: Parameters<typeof realRun>
+		) {
+			const sql = typeof args[0] === "string" ? args[0] : String(args[0] ?? "");
+			runStatements.push(sql);
+			return realRun.apply(this, args);
+		});
+
 		const store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
 		try {
-			// The store doesn't expose the handle, so open a sibling read-only
-			// connection and verify the persisted side-effect of the open: WAL
-			// mode is set (PRAGMA journal_mode=WAL persists to the header), and
-			// the busy_timeout PRAGMA executed without throwing — the latter is
-			// proven by `open()` returning a store at all.
-			const observer = new Database(path.join(tempDir, "agent.db"));
-			try {
-				const row = observer.query("PRAGMA journal_mode").get() as { journal_mode: string };
-				expect(row.journal_mode).toBe("wal");
-			} finally {
-				observer.close();
-			}
+			const busyTimeoutIndex = runStatements.findIndex(s => s.includes("PRAGMA busy_timeout = 5000"));
+			const leasesDdlIndex = runStatements.findIndex(s =>
+				s.includes("CREATE TABLE IF NOT EXISTS auth_credential_refresh_leases"),
+			);
+			expect(busyTimeoutIndex).toBeGreaterThanOrEqual(0);
+			expect(leasesDdlIndex).toBeGreaterThanOrEqual(0);
+			// The busy handler MUST be installed before the first lock-taking DDL.
+			expect(busyTimeoutIndex).toBeLessThan(leasesDdlIndex);
 		} finally {
 			store.close();
 		}
@@ -85,9 +97,9 @@ describe("SqliteAuthCredentialStore.open SQLITE_BUSY handling", () => {
 		const dbPath = path.join(tempDir, "retry.db");
 		let throws = 2;
 		// Synthesize the WAL-recovery race: the first two `db.run` calls in
-		// `#initializeSchema` (the first being `PRAGMA busy_timeout = 5000`)
-		// throw `SQLITE_BUSY_RECOVERY`, then the third attempt sees the spy
-		// drained and falls through to the real implementation.
+		// `open()` (the first being `PRAGMA busy_timeout = 5000`) throw
+		// `SQLITE_BUSY_RECOVERY`, then the third attempt sees the spy drained
+		// and falls through to the real implementation.
 		const realRun = Database.prototype.run;
 		const spy = vi.spyOn(Database.prototype, "run").mockImplementation(function (
 			this: Database,

@@ -5,7 +5,6 @@
 ### Fixed
 
 - Fixed `SqliteAuthCredentialStore.open()` running the refresh-leases `CREATE TABLE`/`CREATE INDEX` DDL while `busy_timeout` was still Bun's default of 0, violating the issue-#2421 invariant that the busy handler must be installed before the first lock-taking statement; `PRAGMA busy_timeout = 5000` now runs immediately after open, before that DDL.
-- Fixed a damaged `agent.db` silently disabling every persisted rate-limit block: `AuthStorage` swallowed all credential-store errors at debug level and re-queried on every credential evaluation. The first unrecoverable SQLite error (`SQLITE_CORRUPT` family / `SQLITE_NOTADB`) now latches the store as damaged, logs once at error level with a repair one-liner pointing at the actual store path, and short-circuits every later persisted-block read and write for the process. Fail-open is preserved via the in-memory backoff map.
 
 ## [17.2.3] - 2026-08-01
 
