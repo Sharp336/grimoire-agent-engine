@@ -89,6 +89,7 @@
 
 ### Added
 
+- Added `collab.allowRemoteControl` (default off): lets full-link collab peers change model and thinking level, compact, list and switch sessions on the host via the new wire control frames. ([#6999](https://github.com/can1357/oh-my-pi/pull/6999) by [@metaphorics](https://github.com/metaphorics))
 - Added server-name autocomplete for `/mcp` commands (`enable`, `disable`, `test`, `remove`, `reconnect`, `reauth`, `unauth`) using configured and runtime-discovered MCP servers.
 - Added `CUT` and `PASTE` ops to the hashline edit tool for moving code without retyping it: `CUT N.=M` (and `.BLK` block forms) capture lines into a clipboard register, and `PASTE` operations insert them. The register flows across sections within a patch (cross-file moves) and persists across edit calls per session.
 - Added `--from-claude` and `--from-codex` session imports (including compaction state for Codex), also available from `/resume @claude` and `/resume @codex`.

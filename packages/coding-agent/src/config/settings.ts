@@ -2144,6 +2144,24 @@ export class Settings {
 		this.#merged = this.#deepMerge(this.#deepMerge({}, this.#global), this.#projectSettingsForMerge());
 		this.#merged = this.#deepMerge(this.#merged, this.#configOverlay);
 		this.#merged = this.#deepMerge(this.#merged, this.#overrides);
+		// Security: collab.allowRemoteControl is user-level consent only. A
+		// checked-out project (`.claude/settings.json`) must not be able to grant
+		// remote control, so re-derive this one slot from the non-project layers
+		// (global -> --config overlay -> runtime override), ignoring any value the
+		// project layer supplied. #deepMerge can alias a nested source object, so
+		// rebuild the collab subtree on a fresh copy rather than mutating #merged.
+		const remoteControlSegments = SETTING_PATH_SEGMENTS["collab.allowRemoteControl"];
+		const userConsent = getByPath(
+			this.#deepMerge(this.#deepMerge(this.#deepMerge({}, this.#global), this.#configOverlay), this.#overrides),
+			remoteControlSegments,
+		);
+		const mergedCollab = getByPath(this.#merged, ["collab"]);
+		if (isRecord(mergedCollab) || userConsent !== undefined) {
+			const collabPatch: RawSettings = isRecord(mergedCollab) ? { ...mergedCollab } : {};
+			if (userConsent === undefined) delete collabPatch.allowRemoteControl;
+			else collabPatch.allowRemoteControl = userConsent;
+			this.#merged = { ...this.#merged, collab: collabPatch };
+		}
 		this.#resolvedCache.clear();
 		this.#editVariantCache = undefined;
 	}

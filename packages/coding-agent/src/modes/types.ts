@@ -274,6 +274,8 @@ export interface InteractiveModeContext {
 	updatePendingMessagesDisplay(): void;
 	queueCompactionMessage(text: string, mode: "steer" | "followUp", images?: ImageContent[]): void;
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void>;
+	/** Rebuild and refresh the interactive UI after a successful compaction. */
+	finishCompaction(): void;
 	flushPendingBashComponents(): void;
 	flushPendingModelSwitch(): Promise<void>;
 	setWorkingMessage(message?: string): void;
@@ -385,8 +387,8 @@ export interface InteractiveModeContext {
 	showUserMessageSelector(): void;
 	showCopySelector(): void;
 	showTreeSelector(): void;
+	handleResumeSession(sessionPath: string): Promise<boolean>;
 	showSessionSelector(source?: ForeignSessionSource): void;
-	handleResumeSession(sessionPath: string): Promise<void>;
 	handleSessionDeleteCommand(): Promise<void>;
 	showOAuthSelector(mode: "login" | "logout", providerId?: string): Promise<void>;
 	showSessionPinSelector(): Promise<void>;

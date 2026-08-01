@@ -11,10 +11,12 @@
 
 import { timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs/promises";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { logger } from "@oh-my-pi/pi-utils";
+import type { ImageContent, Model, TextContent } from "@oh-my-pi/pi-ai";
+import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import type {
 	BusChannel,
+	CollabControlCommand,
+	CollabPublicModel,
 	CollabUiRequest,
 	CollabUiRequestDraft,
 	CollabUiResponseValue,
@@ -27,7 +29,9 @@ import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
 import { stripImagesFromMessage, USER_INTERRUPT_LABEL } from "../session/messages";
 import type { SessionEntry as StoredSessionEntry } from "../session/session-entries";
+import { SessionManager } from "../session/session-manager";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task/types";
+import { parseConfiguredThinkingLevel } from "../thinking";
 import { generateRoomKey, generateWriteToken, importRoomKey } from "./crypto";
 import { collabDisplayName } from "./display-name";
 import {
@@ -100,6 +104,65 @@ function isWireAgentEvent(event: AgentSessionEvent): event is AgentSessionEvent 
 function isWireSessionEntry(entry: StoredSessionEntry): entry is StoredSessionEntry & WireSessionEntry {
 	return entry.type in WIRE_SESSION_ENTRY_TYPES;
 }
+
+/** Validate decrypted control input before it can enter the host mutation queue. */
+function parseControlCommand(value: unknown): CollabControlCommand | null {
+	if (!isRecord(value) || typeof value.k !== "string") return null;
+	switch (value.k) {
+		case "sessions-list":
+			return value.limit === undefined || (typeof value.limit === "number" && Number.isFinite(value.limit))
+				? { k: value.k, ...(value.limit === undefined ? {} : { limit: value.limit }) }
+				: null;
+		case "models-list":
+		case "session-stats":
+			return { k: value.k };
+		case "set-model":
+			return typeof value.provider === "string" && typeof value.modelId === "string"
+				? { k: value.k, provider: value.provider, modelId: value.modelId }
+				: null;
+		case "set-thinking-level":
+			return typeof value.level === "string" ? { k: value.k, level: value.level } : null;
+		case "compact":
+			return value.customInstructions === undefined || typeof value.customInstructions === "string"
+				? {
+						k: value.k,
+						...(value.customInstructions === undefined ? {} : { customInstructions: value.customInstructions }),
+					}
+				: null;
+		case "switch-session":
+			return typeof value.sessionId === "string" ? { k: value.k, sessionId: value.sessionId } : null;
+		default:
+			return null;
+	}
+}
+
+function isSessionTransition(cmd: CollabControlCommand): boolean {
+	return cmd.k === "compact" || cmd.k === "switch-session";
+}
+
+class CollabControlError extends Error {
+	constructor(
+		message: string,
+		readonly code?: string,
+		readonly endCollab = false,
+	) {
+		super(message);
+	}
+}
+
+/** Project a raw model through the collab wire's deliberately small public allowlist. */
+function toCollabPublicModel(model: Model): CollabPublicModel {
+	return {
+		provider: model.provider,
+		id: model.id,
+		name: model.name,
+		reasoning: model.reasoning,
+		input: [...model.input],
+		...(model.supportsTools === undefined ? {} : { supportsTools: model.supportsTools }),
+		contextWindow: model.contextWindow,
+		maxTokens: model.maxTokens,
+	};
+}
 const CONNECT_TIMEOUT_MS = 15_000;
 /** Max bytes served per fetch-transcript reply (guest re-requests from `newSize`). */
 export const TRANSCRIPT_READ_CAP = 4 * 1024 * 1024;
@@ -129,7 +192,10 @@ export class CollabHost {
 	#writeToken: Uint8Array | null = null;
 	#sessionId = "";
 	#unsubscribe?: () => void;
-	#peers = new Map<number, { name: string; canWrite: boolean }>();
+	#peers = new Map<number, { name: string; canWrite: boolean; welcomed: boolean }>();
+	#mutationTail: Promise<void> = Promise.resolve();
+	/** Counts accepted compact/switch requests, including queued ones. */
+	#sessionTransitions = 0;
 	#uiReqSeq = 0;
 	#pendingUi = new Map<number, { request: CollabUiRequest; settle(result: CollabGuestUiResult): void }>();
 	#lastStateJson = "";
@@ -139,6 +205,7 @@ export class CollabHost {
 	#busUnsubscribers: (() => void)[] = [];
 	#registryUnsubscribe?: () => void;
 	#stopped = false;
+	#resumingSession = false;
 
 	constructor(ctx: InteractiveModeContext) {
 		this.#ctx = ctx;
@@ -172,7 +239,11 @@ export class CollabHost {
 	}
 
 	requestGuestUi(request: CollabUiRequestDraft, signal?: AbortSignal): Promise<CollabGuestUiResult> | null {
-		if (!this.#socket || !this.#hasWritablePeers()) return null;
+		// While a cross-project session switch is mid-resume, the destination
+		// project's collab.allowRemoteControl has not been rechecked yet, so do
+		// not let writable guests read/answer host UI (e.g. a hook dialog) for
+		// the session being loaded — handle it locally instead.
+		if (!this.#socket || !this.#hasWritablePeers() || this.#resumingSession) return null;
 		const reqId = ++this.#uiReqSeq;
 		const fullRequest: CollabUiRequest = { ...request, reqId };
 		const { promise, resolve } = Promise.withResolvers<CollabGuestUiResult>();
@@ -313,6 +384,10 @@ export class CollabHost {
 		for (const pending of this.#pendingUi.values()) pending.settle({ kind: "unavailable" });
 		this.#pendingUi.clear();
 		this.#peers.clear();
+		// Flush any correlated reply still buffered under backpressure (e.g. a
+		// control-disabled ctl-result sent just before this teardown) so close()
+		// does not drop it from the reconnect buffer.
+		await this.#socket?.flush();
 		this.#socket?.close();
 		this.#socket = null;
 		this.#ctx.collabHost = undefined;
@@ -323,6 +398,7 @@ export class CollabHost {
 	#broadcast(frame: CollabFrame): void {
 		if (this.#stopped || !this.#socket) return;
 		if (this.#ctx.sessionManager.getSessionId() !== this.#sessionId) {
+			if (this.#resumingSession) return;
 			void this.stop("session switched");
 			this.#ctx.session.emitNotice("warning", "Collab ended: session switched", "collab");
 			return;
@@ -331,6 +407,10 @@ export class CollabHost {
 	}
 
 	#handleFrame(frame: CollabFrame, fromPeer: number): void {
+		if (!isRecord(frame) || typeof frame.t !== "string") {
+			logger.debug("collab host ignoring malformed frame", { fromPeer });
+			return;
+		}
 		switch (frame.t) {
 			case "hello":
 				this.#handleHello(frame.name, frame.proto, frame.writeToken, fromPeer);
@@ -349,6 +429,9 @@ export class CollabHost {
 				break;
 			case "fetch-transcript":
 				void this.#handleFetchTranscript(frame.reqId, frame.agentId, frame.fromByte, fromPeer);
+				break;
+			case "ctl":
+				this.#handleCtl(frame.reqId, frame.cmd, fromPeer);
 				break;
 			default:
 				logger.debug("collab host ignoring unexpected frame", { type: frame.t, fromPeer });
@@ -378,8 +461,19 @@ export class CollabHost {
 		}
 		const cleanName = name.trim().slice(0, 64) || `guest-${fromPeer}`;
 		const canWrite = this.#verifyWriteToken(writeToken);
-		this.#peers.set(fromPeer, { name: cleanName, canWrite });
+		this.#peers.set(fromPeer, { name: cleanName, canWrite, welcomed: false });
+		if (!this.#resumingSession) this.#sendWelcomeSnapshot(fromPeer, canWrite);
+		this.#ctx.session.emitNotice(
+			"info",
+			`${cleanName} joined the collab session${canWrite ? "" : " (read-only)"}`,
+			"collab",
+		);
+		this.#updateStatusSegment();
+		this.#scheduleStateBroadcast();
+	}
 
+	/** Send a complete replacement snapshot without changing room membership or peer permissions. */
+	#sendWelcomeSnapshot(fromPeer: number, canWrite: boolean): void {
 		// Snapshot and send synchronously: no awaits between snapshot, welcome,
 		// and chunk sends, so subsequent broadcast frames (entry/event/state/bus)
 		// queue behind the snapshot on the same socket and the guest can't
@@ -413,13 +507,8 @@ export class CollabHost {
 				socket.send({ t: "ui-request", request: pending.request }, fromPeer);
 			}
 		}
-		this.#ctx.session.emitNotice(
-			"info",
-			`${cleanName} joined the collab session${canWrite ? "" : " (read-only)"}`,
-			"collab",
-		);
-		this.#updateStatusSegment();
-		this.#scheduleStateBroadcast();
+		const peer = this.#peers.get(fromPeer);
+		if (peer) peer.welcomed = true;
 	}
 
 	/**
@@ -472,43 +561,72 @@ export class CollabHost {
 			this.#rejectReadOnly("prompting", fromPeer);
 			return;
 		}
-		const name = peer.name;
-		const content: string | (TextContent | ImageContent)[] =
-			images && images.length > 0 ? [{ type: "text", text }, ...images] : text;
-		const details: CollabPromptDetails = { from: name };
-		if (this.#ctx.session.isStreaming) {
-			this.#ctx.updatePendingMessagesDisplay();
-			this.#ctx.ui.requestRender();
-			this.#scheduleStateBroadcast();
+		if (this.#sessionTransitions > 0) {
+			this.#socket?.send(
+				{ t: "error", message: "prompt rejected while a remote session transition is in progress" },
+				fromPeer,
+			);
+			return;
 		}
-		this.#ctx.session
-			.promptCustomMessage(
-				{
-					customType: COLLAB_PROMPT_MESSAGE_TYPE,
-					content,
-					display: true,
-					details,
-					attribution: "user",
-				},
-				{ streamingBehavior: "steer", queueChipText: text },
-			)
-			.catch(err => {
+		void this.#enqueueMutation(async () => {
+			const livePeer = this.#peers.get(fromPeer);
+			if (this.#stopped || !livePeer?.canWrite) return;
+			const name = livePeer.name;
+			const content: string | (TextContent | ImageContent)[] =
+				images && images.length > 0 ? [{ type: "text", text }, ...images] : text;
+			const details: CollabPromptDetails = { from: name };
+			if (this.#ctx.session.isStreaming) {
+				this.#ctx.updatePendingMessagesDisplay();
+				this.#ctx.ui.requestRender();
+				this.#scheduleStateBroadcast();
+			}
+			try {
+				await this.#ctx.session.promptCustomMessage(
+					{
+						customType: COLLAB_PROMPT_MESSAGE_TYPE,
+						content,
+						display: true,
+						details,
+						attribution: "user",
+					},
+					{ streamingBehavior: "steer", queueChipText: text },
+				);
+			} catch (err) {
 				logger.warn("collab guest prompt failed", { error: String(err) });
-				this.#socket?.send({ t: "error", message: `prompt failed: ${String(err)}` }, fromPeer);
-			});
+				if (this.#peers.has(fromPeer)) {
+					this.#socket?.send({ t: "error", message: `prompt failed: ${String(err)}` }, fromPeer);
+				}
+			}
+		});
 	}
 
 	#handleAbort(fromPeer: number): void {
-		const peer = this.#peers.get(fromPeer);
-		if (!peer?.canWrite) {
+		if (!this.#peers.get(fromPeer)?.canWrite) {
 			this.#rejectReadOnly("interrupting", fromPeer);
 			return;
 		}
-		const name = peer.name;
-		void this.#ctx.session
-			.abort({ reason: USER_INTERRUPT_LABEL })
-			.then(() => this.#ctx.session.emitNotice("info", `${name} interrupted`, "collab"))
-			.catch(err => logger.warn("collab guest abort failed", { error: String(err) }));
+		if (this.#sessionTransitions > 0) {
+			this.#socket?.send(
+				{ t: "error", message: "interrupt rejected while a remote session transition is in progress" },
+				fromPeer,
+			);
+			return;
+		}
+		// Dispatch directly, NOT through #mutationTail: a prompt task holds that
+		// queue for a whole agent turn, so an abort queued behind it would only
+		// fire after the turn it is meant to interrupt has already finished.
+		void this.#dispatchAbort(fromPeer);
+	}
+
+	async #dispatchAbort(fromPeer: number): Promise<void> {
+		const peer = this.#peers.get(fromPeer);
+		if (this.#stopped || !peer?.canWrite) return;
+		try {
+			await this.#ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
+			this.#ctx.session.emitNotice("info", `${peer.name} interrupted`, "collab");
+		} catch (err) {
+			logger.warn("collab guest abort failed", { error: String(err) });
+		}
 	}
 
 	#handlePeerLeft(peer: number): void {
@@ -588,45 +706,75 @@ export class CollabHost {
 			this.#rejectReadOnly("agent control", fromPeer);
 			return;
 		}
-		// Advisor refs are excluded from snapshots, but reject control by id defensively:
-		// a stale/malicious client must never chat/kill/revive a read-only advisor transcript.
+		if (this.#sessionTransitions > 0) {
+			this.#socket?.send(
+				{ t: "error", message: "agent control rejected while a remote session transition is in progress" },
+				fromPeer,
+			);
+			return;
+		}
+		// `kill` must reach a running subagent immediately: a `chat` task holds
+		// #mutationTail for the whole subagent turn, so queueing kill behind it
+		// would make cancellation fire only after the turn it should stop. Chat
+		// and revive stay serialized so concurrent prompts to one agent order.
+		if (cmd === "kill") {
+			void this.#dispatchAgentKill(agentId, fromPeer);
+			return;
+		}
+		void this.#enqueueMutation(async () => {
+			if (this.#stopped || !this.#peers.get(fromPeer)?.canWrite) return;
+			if (AgentRegistry.global().get(agentId)?.kind === "advisor") {
+				this.#socket?.send(
+					{ t: "error", message: `agent ${agentId}: advisor transcripts are read-only` },
+					fromPeer,
+				);
+				return;
+			}
+			const fail = (err: unknown) => {
+				logger.warn("collab agent-cmd failed", { cmd, agentId, error: String(err) });
+				if (this.#peers.has(fromPeer)) {
+					this.#socket?.send({ t: "error", message: `agent ${agentId}: ${String(err)}` }, fromPeer);
+				}
+			};
+			try {
+				switch (cmd) {
+					case "chat": {
+						const trimmed = text?.trim();
+						if (!trimmed) {
+							this.#socket?.send({ t: "error", message: `agent ${agentId}: empty chat message` }, fromPeer);
+							return;
+						}
+						await AgentLifecycleManager.global()
+							.ensureLive(agentId)
+							.then(session => session.prompt(trimmed, { streamingBehavior: "steer" }));
+						return;
+					}
+					case "revive":
+						await AgentLifecycleManager.global().ensureLive(agentId);
+						return;
+				}
+			} catch (err) {
+				fail(err);
+			}
+		});
+	}
+
+	async #dispatchAgentKill(agentId: string, fromPeer: number): Promise<void> {
+		if (this.#stopped || !this.#peers.get(fromPeer)?.canWrite) return;
 		if (AgentRegistry.global().get(agentId)?.kind === "advisor") {
 			this.#socket?.send({ t: "error", message: `agent ${agentId}: advisor transcripts are read-only` }, fromPeer);
 			return;
 		}
-		const fail = (err: unknown) => {
-			logger.warn("collab agent-cmd failed", { cmd, agentId, error: String(err) });
-			this.#socket?.send({ t: "error", message: `agent ${agentId}: ${String(err)}` }, fromPeer);
-		};
-		switch (cmd) {
-			case "chat": {
-				const trimmed = text?.trim();
-				if (!trimmed) {
-					this.#socket?.send({ t: "error", message: `agent ${agentId}: empty chat message` }, fromPeer);
-					return;
-				}
-				// Mirrors the hub's #submitChatMessage: revive if parked, steer if mid-turn.
-				AgentLifecycleManager.global()
-					.ensureLive(agentId)
-					.then(session => session.prompt(trimmed, { streamingBehavior: "steer" }))
-					.catch(fail);
-				break;
+		try {
+			const ref = AgentRegistry.global().get(agentId);
+			if (!ref) return;
+			if (ref.status === "running" && ref.session) await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
+			await AgentLifecycleManager.global().release(agentId, ref);
+		} catch (err) {
+			logger.warn("collab agent-cmd failed", { cmd: "kill", agentId, error: String(err) });
+			if (this.#peers.has(fromPeer)) {
+				this.#socket?.send({ t: "error", message: `agent ${agentId}: ${String(err)}` }, fromPeer);
 			}
-			case "kill": {
-				const kill = async () => {
-					const ref = AgentRegistry.global().get(agentId);
-					if (!ref) return;
-					if (ref.status === "running" && ref.session) {
-						await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
-					}
-					await AgentLifecycleManager.global().release(agentId, ref);
-				};
-				kill().catch(fail);
-				break;
-			}
-			case "revive":
-				AgentLifecycleManager.global().ensureLive(agentId).catch(fail);
-				break;
 		}
 	}
 
@@ -669,6 +817,241 @@ export class CollabHost {
 		} catch (err) {
 			logger.debug("collab transcript read failed", { agentId, error: String(err) });
 			reply("", fromByte, String(err));
+		}
+	}
+
+	/**
+	 * Control surface for full-link peers: `ctl`/`ctl-result` frames let a
+	 * remote app change model, thinking level, compact, and switch sessions.
+	 * Every command requires a verified write token (read-only peers are
+	 * rejected) AND the host opt-in `collab.allowRemoteControl` (default off),
+	 * so no link already in circulation silently gains control. Replies
+	 * exactly once per `reqId` via `ctl-result`, including on throw; success
+	 * payloads are shrunk so a large `sessions-list`/`models-list` cannot
+	 * exceed the relay's per-frame ceiling and drop the frame.
+	 */
+	#handleCtl(reqId: number, cmd: CollabControlCommand, fromPeer: number): void {
+		const parsed = parseControlCommand(cmd);
+		if (!Number.isSafeInteger(reqId) || reqId < 0) {
+			logger.debug("collab control rejected malformed request id", { fromPeer });
+			return;
+		}
+		if (!parsed) {
+			void this.#sendCtlResult(
+				{ t: "ctl-result", reqId, ok: false, error: "invalid control command", code: "invalid-command" },
+				fromPeer,
+			);
+			return;
+		}
+		if (!this.#peers.get(fromPeer)?.canWrite) {
+			void this.#sendCtlResult(
+				{
+					t: "ctl-result",
+					reqId,
+					ok: false,
+					error: "control is disabled on a read-only link",
+					code: "control-disabled",
+				},
+				fromPeer,
+			);
+			return;
+		}
+		if (!this.#ctx.settings.get("collab.allowRemoteControl")) {
+			void this.#sendCtlResult(
+				{
+					t: "ctl-result",
+					reqId,
+					ok: false,
+					error: "remote control is disabled on the host (enable collab.allowRemoteControl)",
+					code: "control-disabled",
+				},
+				fromPeer,
+			);
+			return;
+		}
+
+		const transition = isSessionTransition(parsed);
+		void this.#enqueueMutation(async () => {
+			let endCollab = false;
+			// Count the transition only once it is actually running, not while it is
+			// still queued behind another mutation (e.g. a guest prompt holding
+			// #mutationTail). Otherwise the prompt/interrupt/agent-control guards
+			// reject an interrupt of a hung turn before the transition can start.
+			if (transition) this.#sessionTransitions++;
+			try {
+				this.#assertLiveControl(fromPeer);
+				const data = await this.#runControlCommand(parsed, fromPeer);
+				await this.#sendSuccessfulCtlResult(reqId, data, fromPeer);
+			} catch (err) {
+				const controlError =
+					err instanceof CollabControlError
+						? err
+						: new CollabControlError(err instanceof Error ? err.message : String(err));
+				endCollab = controlError.endCollab;
+				logger.warn("collab control command failed", { command: parsed.k, error: controlError.message });
+				await this.#sendCtlResult(
+					controlError.code
+						? { t: "ctl-result", reqId, ok: false, error: controlError.message, code: controlError.code }
+						: { t: "ctl-result", reqId, ok: false, error: controlError.message },
+					fromPeer,
+				);
+			} finally {
+				if (transition) this.#sessionTransitions--;
+				if (endCollab) await this.#teardown();
+			}
+		});
+	}
+
+	#enqueueMutation(task: () => Promise<void>): Promise<void> {
+		const scheduled = this.#mutationTail.then(task, task);
+		this.#mutationTail = scheduled.catch(err => logger.warn("collab mutation failed", { error: String(err) }));
+		return scheduled;
+	}
+
+	#assertLiveControl(fromPeer: number): void {
+		if (this.#stopped || !this.#socket || !this.#peers.has(fromPeer)) {
+			throw new CollabControlError("control peer disconnected");
+		}
+		if (!this.#peers.get(fromPeer)?.canWrite) {
+			throw new CollabControlError("control is disabled on a read-only link", "control-disabled");
+		}
+		if (!this.#ctx.settings.get("collab.allowRemoteControl")) {
+			throw new CollabControlError(
+				"remote control is disabled on the host (enable collab.allowRemoteControl)",
+				"control-disabled",
+			);
+		}
+	}
+
+	async #prepareLiveControl<T>(fromPeer: number, preparation: () => Promise<T>): Promise<T> {
+		const prepared = await preparation();
+		this.#assertLiveControl(fromPeer);
+		return prepared;
+	}
+
+	#sendSuccessfulCtlResult(reqId: number, data: unknown, fromPeer: number): Promise<void> {
+		this.#assertLiveControl(fromPeer);
+		return this.#sendCtlResult({ t: "ctl-result", reqId, ok: true, data: shrinkForReplication(data) }, fromPeer);
+	}
+
+	#sendCtlResult(frame: Extract<CollabFrame, { t: "ctl-result" }>, fromPeer: number): Promise<void> {
+		if (!this.#socket || !this.#peers.has(fromPeer)) return Promise.resolve();
+		return this.#socket.send(frame, fromPeer);
+	}
+
+	#releaseDeferredPeersAfterResume(): void {
+		for (const [peer, { canWrite, welcomed }] of this.#peers) {
+			if (!welcomed) this.#sendWelcomeSnapshot(peer, canWrite);
+		}
+	}
+
+	#rebindAndResyncPeersAfterResume(): void {
+		this.#sessionId = this.#ctx.sessionManager.getSessionId();
+		this.#lastStateJson = "";
+		for (const [peer, { canWrite }] of this.#peers) this.#sendWelcomeSnapshot(peer, canWrite);
+		this.#scheduleStateBroadcast();
+	}
+
+	/**
+	 * Run one control command after #assertLiveControl has checked the current
+	 * peer and setting. Every switch case returns a value; unknown runtime input
+	 * cannot accidentally produce a successful undefined payload.
+	 */
+	async #runControlCommand(cmd: CollabControlCommand, fromPeer: number): Promise<unknown> {
+		const session = this.#ctx.session;
+		switch (cmd.k) {
+			case "sessions-list": {
+				const limit = typeof cmd.limit === "number" ? Math.max(1, Math.min(5000, cmd.limit)) : 1000;
+				const sessions = await this.#prepareLiveControl(fromPeer, () => SessionManager.listAll());
+				const sorted = sessions.sort((l, r) => r.modified.getTime() - l.modified.getTime()).slice(0, limit);
+				return {
+					sessions: sorted.map(s => ({
+						sessionId: s.id,
+						cwd: s.cwd,
+						title: s.title,
+						updatedAt: s.modified.toISOString(),
+						_meta: { messageCount: s.messageCount, size: s.size },
+					})),
+					total: sessions.length,
+				};
+			}
+			case "models-list": {
+				await this.#prepareLiveControl(fromPeer, () => session.modelRegistry.awaitBackgroundRefresh());
+				return { models: session.getAvailableModels().map(toCollabPublicModel) };
+			}
+			case "session-stats":
+				return session.getSessionStats();
+			case "set-model": {
+				let model = session.getAvailableModels().find(m => m.provider === cmd.provider && m.id === cmd.modelId);
+				if (!model) {
+					await this.#prepareLiveControl(fromPeer, () => session.modelRegistry.awaitBackgroundRefresh());
+					model = session.getAvailableModels().find(m => m.provider === cmd.provider && m.id === cmd.modelId);
+				}
+				if (!model) throw new Error(`Model not found: ${cmd.provider}/${cmd.modelId}`);
+				this.#assertLiveControl(fromPeer);
+				await session.setModel(model);
+				return toCollabPublicModel(model);
+			}
+			case "set-thinking-level": {
+				const level = parseConfiguredThinkingLevel(cmd.level);
+				if (!level) throw new Error(`Unknown thinking level: ${cmd.level}`);
+				session.setThinkingLevel(level);
+				return { level };
+			}
+			case "compact": {
+				try {
+					const result = await session.compact(cmd.customInstructions);
+					this.#ctx.finishCompaction();
+					return result;
+				} finally {
+					// Failure-safe cleanup: a cancelled/failed compact must still release
+					// queued user input, mirroring CommandController's path. The
+					// finishCompaction transcript rebuild stays success-only.
+					await this.#ctx.flushCompactionQueue({ willRetry: false });
+				}
+			}
+			case "switch-session": {
+				const target = (await this.#prepareLiveControl(fromPeer, () => SessionManager.listAll())).find(
+					candidate => candidate.id === cmd.sessionId,
+				);
+				if (!target) throw new Error(`Session not found: ${cmd.sessionId}`);
+				this.#resumingSession = true;
+				try {
+					this.#assertLiveControl(fromPeer);
+					let success = false;
+					let resumeError: unknown;
+					try {
+						success = await this.#ctx.handleResumeSession(target.path);
+					} catch (err) {
+						resumeError = err;
+					}
+
+					if (!this.#ctx.settings.get("collab.allowRemoteControl")) {
+						throw new CollabControlError(
+							"remote control is disabled in the resumed project; collab ended without sharing its snapshot",
+							"control-disabled",
+							true,
+						);
+					}
+
+					const sessionChanged = this.#ctx.sessionManager.getSessionId() !== this.#sessionId;
+					if (success || sessionChanged) this.#rebindAndResyncPeersAfterResume();
+					else this.#releaseDeferredPeersAfterResume();
+
+					if (resumeError) {
+						throw new CollabControlError(
+							resumeError instanceof Error ? resumeError.message : String(resumeError),
+						);
+					}
+
+					this.#assertLiveControl(fromPeer);
+					return { cancelled: !success };
+				} finally {
+					this.#resumingSession = false;
+				}
+			}
+			default:
+				throw new CollabControlError("invalid control command", "invalid-command");
 		}
 	}
 

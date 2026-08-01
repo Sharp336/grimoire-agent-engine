@@ -321,6 +321,22 @@ export type CollabUiRequestDraft =
 
 export type CollabUiRequest = CollabUiRequestDraft & { reqId: number };
 
+/**
+ * Control command a full-link peer sends via the `ctl` guest frame when the
+ * host has opted in with `collab.allowRemoteControl`. Transplanted from the
+ * RPC surface (`get_available_models`, `set_model`, …) — only the read/state
+ * operations that are safe to expose to a remote peer. No `bash`, host tools,
+ * or host URI schemes: those grant arbitrary execution on the host machine.
+ */
+export type CollabControlCommand =
+	| { k: "sessions-list"; limit?: number }
+	| { k: "models-list" }
+	| { k: "session-stats" }
+	| { k: "set-model"; provider: string; modelId: string }
+	| { k: "set-thinking-level"; level: string }
+	| { k: "compact"; customInstructions?: string }
+	| { k: "switch-session"; sessionId: string };
+
 export type GuestFrame =
 	| {
 			t: "hello";
@@ -337,7 +353,20 @@ export type GuestFrame =
 	| { t: "ui-response"; reqId: number; value?: CollabUiResponseValue }
 	| { t: "abort" }
 	| { t: "agent-cmd"; cmd: "chat" | "kill" | "revive"; agentId: string; text?: string }
-	| { t: "fetch-transcript"; reqId: number; agentId: string; fromByte: number };
+	| { t: "fetch-transcript"; reqId: number; agentId: string; fromByte: number }
+	| { t: "ctl"; reqId: number; cmd: CollabControlCommand };
+
+/** Safe model metadata exposed to collab peers. Transport, credential, and compatibility fields stay host-local. */
+export interface CollabPublicModel {
+	provider: string;
+	id: string;
+	name: string;
+	reasoning: boolean;
+	input: ("text" | "image")[];
+	supportsTools?: boolean;
+	contextWindow: number | null;
+	maxTokens: number | null;
+}
 
 /** EventBus channels mirrored to guests (task subagent traffic only). */
 export type BusChannel = "task:subagent:progress" | "task:subagent:lifecycle";
@@ -376,6 +405,9 @@ export type HostFrame =
 	| { t: "ui-request-end"; reqId: number }
 	/** Targeted reply to fetch-transcript; `text` is decoded JSONL from `fromByte`, `newSize` the next offset base. */
 	| { t: "transcript"; reqId: number; text: string; newSize: number; error?: string }
+	/** Reply to a `ctl` guest frame, correlated by `reqId`. Success carries `data` (run through `shrinkForReplication`); failure carries `error` and an optional machine-readable `code`. */
+	| { t: "ctl-result"; reqId: number; ok: true; data: unknown }
+	| { t: "ctl-result"; reqId: number; ok: false; error: string; code?: string }
 	| { t: "bye"; reason: string }
 	| { t: "error"; message: string };
 
@@ -393,8 +425,12 @@ export type WireFrame = GuestFrame | HostFrame;
  *   answered by the `ui-response` guest frame. Guests that predate the
  *   grammar would silently drop `ui-request` (asks hang forever on the
  *   host), so they must be rejected at hello.
+ * - `4`: guest `ctl` / host `ctl-result` control frames let full-link peers
+ *   change model, thinking level, compact, and switch sessions when the host
+ *   opts in via `collab.allowRemoteControl`. Predates-`4` guests would drop
+ *   `ctl-result`, so they are rejected at hello.
  */
-export const COLLAB_PROTO = 3;
+export const COLLAB_PROTO = 4;
 
 /** Parameter key used for intent tracing (e.g. prompt explanation/reasoning) */
 export const INTENT_FIELD = "i";

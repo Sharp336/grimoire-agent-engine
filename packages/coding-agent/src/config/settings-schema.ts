@@ -2015,6 +2015,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"collab.allowRemoteControl": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "interaction",
+			group: "Collab",
+			label: "Allow Remote Control",
+			description:
+				"Let full-link collab peers change model, change thinking level, compact, and switch sessions on the host",
+		},
+	},
+
 	"share.serverUrl": {
 		type: "string",
 		default: DEFAULT_SHARE_URL,
