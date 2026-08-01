@@ -1717,11 +1717,12 @@ export class AuthStorage {
 		logger.error(
 			storePath
 				? `Credential store is damaged; persisted rate-limit blocks are disabled for this process. ` +
-						`Repair with: sqlite3 '${storePath}' '.recover' | sqlite3 '${storePath}.fixed'`
+						`Stop omp, back up the store (including -wal/-shm), then repair with: sqlite3 '${storePath}' '.recover --ignore-freelist' | sqlite3 '${storePath}.fixed' && chmod 600 '${storePath}.fixed'`
 				: "Credential store is damaged; persisted rate-limit blocks are disabled for this process. " +
 						"Repair the store file with sqlite3's .recover and restart.",
 			{ err, op, storePath, ...context },
 		);
+		this.#bumpGeneration("store-damaged");
 		return true;
 	}
 
@@ -5899,18 +5900,19 @@ export class AuthStorage {
 		const scopedBackoffKey = this.#toScopedBackoffKey(providerKey, blockScope);
 		const globalProbeAfterMs = this.#credentialBackoffProbeAfter.get(providerKey)?.get(credentialIndex) ?? 0;
 		const scopedProbeAfterMs = this.#credentialBackoffProbeAfter.get(scopedBackoffKey)?.get(credentialIndex) ?? 0;
-		if (this.#storeDamaged) return;
-		const getStoreReconcileAfter = this.#store.getCredentialBlockReconcileAfter?.bind(this.#store);
 		let storeGlobalProbeAfterMs = 0;
 		let storeScopedProbeAfterMs = 0;
-		try {
-			storeGlobalProbeAfterMs = getStoreReconcileAfter?.(credentialId, providerKey, "") ?? 0;
-			storeScopedProbeAfterMs = getStoreReconcileAfter?.(credentialId, providerKey, blockScope ?? "") ?? 0;
-		} catch (err) {
-			if (this.#latchStoreDamage(err, "getCredentialBlockReconcileAfter", { credentialId, providerKey })) {
-				return;
+		if (!this.#storeDamaged) {
+			const getStoreReconcileAfter = this.#store.getCredentialBlockReconcileAfter?.bind(this.#store);
+			try {
+				storeGlobalProbeAfterMs = getStoreReconcileAfter?.(credentialId, providerKey, "") ?? 0;
+				storeScopedProbeAfterMs = getStoreReconcileAfter?.(credentialId, providerKey, blockScope ?? "") ?? 0;
+			} catch (err) {
+				if (this.#latchStoreDamage(err, "getCredentialBlockReconcileAfter", { credentialId, providerKey })) {
+					return;
+				}
+				throw err;
 			}
-			throw err;
 		}
 		if (Math.max(globalProbeAfterMs, scopedProbeAfterMs, storeGlobalProbeAfterMs, storeScopedProbeAfterMs) > nowMs) {
 			return;
@@ -6846,9 +6848,19 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#localAuthRevision: number;
 	#closed = false;
 
-	constructor(db: Database, readonly databasePath?: string) {
+	constructor(
+		db: Database,
+		readonly databasePath?: string,
+	) {
 		this.#db = db;
-		this.#initializeSchema();
+		try {
+			this.#initializeSchema();
+		} catch (err) {
+			if (isSqliteCorruptError(err)) {
+				throw SqliteAuthCredentialStore.#damagedStoreError(this.databasePath, err);
+			}
+			throw err;
+		}
 		this.#dataVersion = this.#readDataVersion();
 		this.#authRevision = this.#readAuthRevision();
 		this.#localAuthRevision = this.#readLocalAuthRevision();
@@ -7003,6 +7015,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				return new SqliteAuthCredentialStore(db, dbPath);
 			} catch (err) {
 				db?.close();
+				if (isSqliteCorruptError(err)) {
+					throw SqliteAuthCredentialStore.#damagedStoreError(dbPath, err);
+				}
 				if (!isSqliteBusyError(err)) {
 					throw err;
 				}
@@ -7028,6 +7043,15 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			);
 			CREATE INDEX IF NOT EXISTS idx_auth_credential_refresh_leases_expires ON auth_credential_refresh_leases(expires_at_ms);
 		`);
+	}
+
+	static #damagedStoreError(dbPath: string | undefined, cause: unknown): Error {
+		return new Error(
+			dbPath
+				? `Credential store at '${dbPath}' is damaged. Stop omp, back up the store (including -wal/-shm), then repair with: sqlite3 '${dbPath}' '.recover --ignore-freelist' | sqlite3 '${dbPath}.fixed' && chmod 600 '${dbPath}.fixed'`
+				: "Credential store is damaged. Repair the store file with sqlite3's .recover and restart.",
+			{ cause },
+		);
 	}
 
 	#initializeSchema(): void {

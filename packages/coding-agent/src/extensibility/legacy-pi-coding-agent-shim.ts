@@ -1367,7 +1367,8 @@ export class AuthStorage {
 	}
 
 	get(provider: string): AuthCredential | undefined {
-		const store = new SqliteAuthCredentialStore(new Database(getAgentDbPath()));
+		const dbPath = getAgentDbPath();
+		const store = new SqliteAuthCredentialStore(new Database(dbPath), dbPath);
 		try {
 			return store.listAuthCredentials(provider)[0]?.credential;
 		} finally {
@@ -1376,7 +1377,8 @@ export class AuthStorage {
 	}
 
 	set(provider: string, credential: AuthCredential): void {
-		const store = new SqliteAuthCredentialStore(new Database(getAgentDbPath()));
+		const dbPath = getAgentDbPath();
+		const store = new SqliteAuthCredentialStore(new Database(dbPath), dbPath);
 		try {
 			store.upsertAuthCredentialForProvider(provider, credential);
 		} finally {

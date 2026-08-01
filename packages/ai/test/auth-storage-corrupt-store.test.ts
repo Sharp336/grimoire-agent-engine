@@ -21,6 +21,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage, type OAuthCredential, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
+import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { logger } from "@oh-my-pi/pi-utils";
 import { isSqliteCorruptError } from "@oh-my-pi/pi-utils/sqlite";
 import { removeWithRetries } from "../../utils/src/temp";
@@ -171,11 +172,11 @@ describe("AuthStorage corrupt-store latch", () => {
 		storage.upsertCredentialBlock(block);
 		storage.upsertCredentialBlock(block);
 
-		// The first corrupt write latches; the second call short-circuits
-		// before touching SQLite, and the invalidation/generation side effects
-		// are skipped — a latched write is a true no-op, not a swallowed error.
+		// The first corrupt write latches and bumps generation (F3: latch
+		// notifies snapshot consumers); the second call short-circuits before
+		// touching SQLite with no further generation side effect.
 		expect(spy).toHaveBeenCalledTimes(1);
-		expect(storage.getGeneration()).toBe(generationBefore);
+		expect(storage.getGeneration()).toBe(generationBefore + 1);
 		const damagedErrors = errorSpy.mock.calls.filter(
 			call => typeof call[0] === "string" && call[0].includes("Credential store is damaged"),
 		);
@@ -226,10 +227,247 @@ describe("AuthStorage corrupt-store reporting", () => {
 		// The repair guidance must point at the actual store file, not a
 		// hardcoded default path (profiles relocate agent.db).
 		expect(String(damagedErrors[0]?.[0])).toContain(dbPath);
+		// F2: repair guidance must preserve credential-file permissions.
+		expect(String(damagedErrors[0]?.[0])).toContain("chmod 600");
+		expect(String(damagedErrors[0]?.[0])).toContain("--ignore-freelist");
 
 		const swallowDebugs = debugSpy.mock.calls.filter(
 			call => typeof call[0] === "string" && call[0] === "Failed to read credential block from persistent store",
 		);
 		expect(swallowDebugs).toHaveLength(0);
+	});
+});
+
+describe("AuthStorage corrupt-store generation notification", () => {
+	let tempDir = "";
+	let dbPath = "";
+	let store: SqliteAuthCredentialStore;
+	let storage: AuthStorage;
+
+	beforeEach(async () => {
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-corrupt-gen-"));
+		dbPath = path.join(tempDir, "agent.db");
+		store = await SqliteAuthCredentialStore.open(dbPath);
+		store.saveOAuth(PROVIDER, oauthCredential("1"));
+		storage = new AuthStorage(store);
+		await storage.reload();
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		storage.close();
+		store.close();
+		if (tempDir) {
+			await removeWithRetries(tempDir);
+			tempDir = "";
+		}
+	});
+
+	test("F3: onGenerationChanged fires exactly once on the first corrupt error and not on the second", async () => {
+		const malformedDbPath = await writeMalformedDb(tempDir);
+		vi.spyOn(store, "getCredentialBlock").mockImplementation(() => {
+			throw realCorruptError(malformedDbPath);
+		});
+		vi.spyOn(logger, "error").mockImplementation(() => {});
+
+		const generations: number[] = [];
+		storage.onGenerationChanged(gen => generations.push(gen));
+		const generationBefore = storage.getGeneration();
+
+		// First call: hits the store, throws SQLITE_NOTADB, latches, bumps generation.
+		await storage.getApiKey(PROVIDER, "session-gen-1");
+		// Second call: store is already latched, short-circuits before touching SQLite.
+		await storage.getApiKey(PROVIDER, "session-gen-1");
+
+		// F3: the generation listener fires exactly once — only on the first latch.
+		expect(generations).toHaveLength(1);
+		expect(generations[0]).toBe(generationBefore + 1);
+	});
+});
+
+describe("AuthStorage corrupt-store heal while latched", () => {
+	let tempDir = "";
+	let dbPath = "";
+	let store: SqliteAuthCredentialStore;
+	let storage: AuthStorage;
+
+	const HOUR_MS = 60 * 60 * 1000;
+	const WEEK_MS = 7 * 24 * HOUR_MS;
+
+	function codexLimit(key: "primary" | "secondary", usedFraction: number): UsageLimit {
+		const windowId = key === "primary" ? "1h" : "7d";
+		const windowLabel = key === "primary" ? "1 Hour" : "7 Day";
+		const durationMs = key === "primary" ? HOUR_MS : WEEK_MS;
+		return {
+			id: `openai-codex:${key}`,
+			label: windowLabel,
+			scope: { provider: "openai-codex", windowId, shared: true },
+			window: {
+				id: windowId,
+				label: windowLabel,
+				durationMs,
+				resetsAt: Date.now() + durationMs,
+			},
+			amount: {
+				unit: "percent",
+				used: usedFraction * 100,
+				limit: 100,
+				remaining: (1 - usedFraction) * 100,
+				usedFraction,
+				remainingFraction: 1 - usedFraction,
+			},
+			status: usedFraction >= 1 ? "exhausted" : "ok",
+		};
+	}
+
+	function codexReport(
+		accountId: string,
+		email: string,
+		primaryUsed: number,
+		secondaryUsed: number,
+		healthy: boolean,
+	): UsageReport {
+		return {
+			provider: "openai-codex",
+			fetchedAt: Date.now(),
+			limits: [codexLimit("primary", primaryUsed), codexLimit("secondary", secondaryUsed)],
+			metadata: {
+				accountId,
+				email,
+				allowed: healthy,
+				limitReached: !healthy,
+				planType: "pro",
+			},
+		};
+	}
+
+	function codexCredential(accountId: string, email: string): OAuthCredential {
+		return {
+			type: "oauth",
+			access: `access-${accountId}`,
+			refresh: `refresh-${accountId}`,
+			expires: Date.now() + WEEK_MS,
+			accountId,
+			email,
+		};
+	}
+
+	beforeEach(async () => {
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-corrupt-heal-"));
+		dbPath = path.join(tempDir, "agent.db");
+		store = await SqliteAuthCredentialStore.open(dbPath);
+		storage = new AuthStorage(store);
+		await storage.reload();
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		storage.close();
+		store.close();
+		if (tempDir) {
+			await removeWithRetries(tempDir);
+			tempDir = "";
+		}
+	});
+
+	test("F1: healthy usage report clears in-memory Codex block while store is latched", async () => {
+		const usageByAccount = new Map<string, UsageReport | null>();
+		const usageProvider: UsageProvider = {
+			id: "openai-codex",
+			async fetchUsage(params) {
+				const accountId = params.credential.accountId;
+				if (!accountId) return null;
+				return usageByAccount.get(accountId) ?? null;
+			},
+		};
+
+		// Re-create storage with the usage provider so fetchUsageReports can fan out.
+		storage.close();
+		store.close();
+		store = await SqliteAuthCredentialStore.open(dbPath);
+		storage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+		});
+
+		await storage.set("openai-codex", [
+			codexCredential("acct-blocked", "blocked@example.com"),
+			codexCredential("acct-sibling", "sibling@example.com"),
+		]);
+
+		const blockedRow = store.listAuthCredentials("openai-codex").find(row => {
+			const credential = row.credential;
+			return credential.type === "oauth" && credential.accountId === "acct-blocked";
+		});
+		if (!blockedRow) throw new Error("expected blocked credential row");
+
+		// Start with no usage reports — markUsageLimitReached will use retryAfterMs.
+		const base = Date.now();
+		let clockOffset = 0;
+		vi.spyOn(Date, "now").mockImplementation(() => base + clockOffset);
+
+		// Block the credential in-memory with a 1-hour backoff.
+		// With no usage report, blockedUntil = now + retryAfterMs.
+		// probeAfter = min(blockedUntil, now + 5min TTL) = now + 5min.
+		await storage.markUsageLimitReached("openai-codex", "heal-session", {
+			credentialId: blockedRow.id,
+			retryAfterMs: HOUR_MS,
+		});
+
+		// Latch the store via a corrupt upsert (existing pattern).
+		const malformedDbPath = await writeMalformedDb(tempDir);
+		vi.spyOn(store, "upsertCredentialBlock").mockImplementation(() => {
+			throw realCorruptError(malformedDbPath);
+		});
+		vi.spyOn(logger, "error").mockImplementation(() => {});
+		storage.upsertCredentialBlock({
+			credentialId: blockedRow.id,
+			providerKey: "openai-codex:oauth",
+			blockScope: "chat",
+			blockedUntilMs: base + HOUR_MS,
+		});
+
+		// Verify the credential is blocked: getApiKey should return the sibling.
+		const blockedKey = await storage.getApiKey("openai-codex", "heal-verify-blocked");
+		expect(blockedKey).toBe("access-acct-sibling");
+
+		// Set up a healthy usage report for the blocked account.
+		usageByAccount.set("acct-blocked", codexReport("acct-blocked", "blocked@example.com", 0.2, 0.3, true));
+		usageByAccount.set("acct-sibling", codexReport("acct-sibling", "sibling@example.com", 0.2, 0.3, true));
+
+		// Advance time past the 5-minute probe-after window.
+		clockOffset = 6 * 60 * 1000;
+
+		// Drive the heal path: fetchUsageReports fans out per-credential,
+		// each report triggers #reconcileCodexUsageBlock → #healCodexUsageBlockScope.
+		await storage.fetchUsageReports();
+
+		// The in-memory block should now be cleared. With both credentials
+		// unblocked, the previously blocked one must be selectable.
+		const selections = new Set<string>();
+		for (let i = 0; i < 20; i++) {
+			const key = await storage.getApiKey("openai-codex", `heal-after-${i}`);
+			if (key) selections.add(key);
+		}
+		expect(selections.has("access-acct-blocked")).toBe(true);
+	});
+});
+
+describe("SqliteAuthCredentialStore corrupt-store open guidance", () => {
+	test("F4: open(malformedPath) rejects with .recover and the path", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-corrupt-open-"));
+		try {
+			const malformedDbPath = await writeMalformedDb(tempDir);
+			expect(SqliteAuthCredentialStore.open(malformedDbPath)).rejects.toThrow();
+			try {
+				await SqliteAuthCredentialStore.open(malformedDbPath);
+			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				expect(message).toContain(".recover");
+				expect(message).toContain(malformedDbPath);
+				expect(message).toContain("--ignore-freelist");
+			}
+		} finally {
+			await removeWithRetries(tempDir);
+		}
 	});
 });

@@ -164,7 +164,7 @@ export class AgentStorage {
 		this.#hardenPermissions(dbPath);
 
 		// Create AuthCredentialStore with our open database
-		this.#authStore = new SqliteAuthCredentialStore(this.#db);
+		this.#authStore = new SqliteAuthCredentialStore(this.#db, dbPath);
 
 		this.#listSettingsStmt = this.#db.prepare("SELECT key, value FROM settings");
 		this.#upsertModelUsageStmt = this.#db.prepare(

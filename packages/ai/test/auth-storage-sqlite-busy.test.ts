@@ -127,7 +127,7 @@ describe("SqliteAuthCredentialStore.open SQLITE_BUSY handling", () => {
 			return realRun.apply(this, args);
 		});
 
-		await expect(SqliteAuthCredentialStore.open(dbPath)).rejects.toThrow("disk image malformed");
+		await expect(SqliteAuthCredentialStore.open(dbPath)).rejects.toThrow("damaged");
 		// Single attempt: the retry loop must NOT keep banging on a fatal error.
 		expect(runCalls).toBe(1);
 	});
