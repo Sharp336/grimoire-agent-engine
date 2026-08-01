@@ -17,5 +17,15 @@ async function chromiumCanLaunch(): Promise<boolean> {
 	}
 }
 
-/** Gate for tests that launch a real Chromium: `describe.skipIf(!CHROMIUM_AVAILABLE)`. */
-export const CHROMIUM_AVAILABLE = await chromiumCanLaunch();
+/**
+ * Gate for tests that launch a real Chromium. Exported as a function, NOT an
+ * awaited value binding: a cross-module top-level-await export is read from
+ * its temporal dead zone by importers that consume it synchronously at module
+ * scope (test.skipIf/describe.skipIf), crashing bun with "Cannot access before
+ * initialization" regardless of how fast the probe resolves. Consumers do
+ * `const CHROMIUM_AVAILABLE = await isChromiumAvailable()` in their own module
+ * body, where same-module top-level await is guaranteed to complete first.
+ */
+export async function isChromiumAvailable(): Promise<boolean> {
+	return chromiumCanLaunch();
+}
