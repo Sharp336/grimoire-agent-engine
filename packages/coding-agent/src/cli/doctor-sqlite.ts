@@ -14,6 +14,7 @@
  */
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
+import * as fsSync from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { isSqliteBusyError } from "@oh-my-pi/pi-ai/auth-storage";
@@ -422,30 +423,29 @@ async function swapInCandidate(
 		}
 		await fsyncDir(path.dirname(dbPath));
 		// On Linux/macOS an open handle does not block rename. On Windows,
-		// renaming over an open handle fails; close the lock, run a fresh
-		// holder + trio-snapshot re-check, and only if clean retry the rename.
-		// This bounds the lock-free window to one event-loop tick with no
-		// concurrent holder, matching the pre-lock safety bar plus detection.
+		// renaming over an open handle fails. Reorder so the lock-free gap
+		// is a microsecond pair of sync calls, not an async window:
+		// 1. While STILL HOLDING the lock, run a fresh hasHolders + trio
+		//    re-check against the expected snapshot.
+		// 2. If dirty, abort with the archive intact (safe refusal).
+		// 3. If clean, close the handle (sync) and rename (fs.renameSync)
+		//    as a synchronous pair with no await between them.
 		try {
 			await fs.rename(candidate, dbPath);
 		} catch (renameError) {
-			if (lockHandle !== null) {
-				releaseWriteLock(lockHandle);
-				lockHandle = null;
-				// Fresh re-check: if a writer appeared or the trio diverged,
-				// abort with the archive intact (safe refusal).
-				if ((await hasHolders(dbPath)) === true)
-					throw new Error("database acquired a holder after lock release; aborting swap");
-				try {
-					if (!snapshotsEqual(expected, await snapshotTrio(dbPath)))
-						throw new Error("database changed after lock release; aborting swap");
-				} catch (error) {
-					throw error instanceof Error ? error : new Error(messageOf(error));
-				}
-				await fs.rename(candidate, dbPath);
-			} else {
-				throw renameError;
+			if (lockHandle === null) throw renameError;
+			// Re-check while the lock is still held — no lock-free window yet.
+			if ((await hasHolders(dbPath)) === true)
+				throw new Error("database acquired a holder during swap; aborting");
+			try {
+				if (!snapshotsEqual(expected, await snapshotTrio(dbPath)))
+					throw new Error("database changed during swap; aborting");
+			} catch (error) {
+				throw error instanceof Error ? error : new Error(messageOf(error));
 			}
+			// Synchronous close + rename: microsecond gap, no await between.
+			releaseWriteLock(lockHandle);
+			fsSync.renameSync(candidate, dbPath);
 		}
 		if (originalMode !== null) await fs.chmod(dbPath, originalMode);
 		await fsyncDir(path.dirname(dbPath));
