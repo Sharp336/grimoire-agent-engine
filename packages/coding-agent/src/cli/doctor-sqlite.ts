@@ -776,23 +776,27 @@ async function vacuumIntoRescue(dbPath: string): Promise<string> {
 /**
  * Acquire a RESERVED write lock (BEGIN IMMEDIATE) on the live database to
  * exclude concurrent writers during repair. Returns an open handle holding
- * the transaction, or null when the file is not a valid SQLite database
- * (SQLITE_NOTADB) — an unopenable file has no SQLite writers, so the caller
- * may proceed without a lock (gated by hasHolders). Throws on BUSY or any
- * other failure: a lockable database that cannot be locked means exclusion
- * is unavailable and the caller must refuse.
+ * the transaction, or null when the file does not exist (ENOENT) or is not
+ * a valid SQLite database (SQLITE_NOTADB) — neither can have SQLite writers,
+ * so the caller may proceed without a lock (gated by hasHolders). Throws on
+ * EACCES, BUSY, or any other failure: exclusion is unavailable and the
+ * caller must refuse.
  *
- * bun:sqlite opens lazily: `new Database("garbage")` succeeds and NOTADB
- * surfaces at the first statement (BEGIN IMMEDIATE), so the classification
- * must inspect the error message, not the constructor.
+ * `new Database(path)` with default options CREATES a missing file. Opening
+ * with `{ readwrite: true, create: false }` prevents that atomically (no
+ * stat-then-open window). SQLite collapses all open failures into
+ * SQLITE_CANTOPEN ("unable to open database file"), so a post-failure
+ * `fs.stat` classifies the error: ENOENT → null, everything else → throw.
+ * NOTADB surfaces at BEGIN IMMEDIATE (lazy open), not at the constructor.
  */
 async function acquireWriteLock(dbPath: string): Promise<Database | null> {
 	let handle: Database;
 	try {
-		handle = new Database(dbPath);
-	} catch {
-		// Constructor failed (permissions, I/O): treat as unopenable.
-		return null;
+		handle = new Database(dbPath, { readwrite: true, create: false });
+	} catch (error) {
+		// CANTOPEN covers ENOENT, EACCES, EIO, … — classify via stat.
+		if (isEnoent(await fs.stat(dbPath).catch(error2 => error2))) return null;
+		throw error;
 	}
 	try {
 		handle.run("PRAGMA busy_timeout = 2000");
