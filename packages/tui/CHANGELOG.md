@@ -13,6 +13,10 @@
 - Fixed animated Loader paints saturating a CPU core on slow WSL/ConPTY terminals by applying cost-aware cadence backpressure while preserving 30fps on cheap frames ([#7290](https://github.com/can1357/oh-my-pi/issues/7290)).
 - Fixed interactive terminals suppressing all output and input when the host project sets `NODE_ENV=test` or `BUN_ENV=test` ([#7261](https://github.com/can1357/oh-my-pi/issues/7261)).
 
+### Added
+
+- Added an opt-in Vim input mode to the editor with normal/insert/visual states, characterwise and highlighted line selection, visual deletion and change, grapheme-safe motions and edits, counts, inner/around word and paragraph text objects, and shared undo/redo history ([#1834](https://github.com/can1357/oh-my-pi/issues/1834)).
+
 ## [17.2.2] - 2026-07-31
 
 ### Added
@@ -36,10 +40,6 @@
 - Fixed high CPU usage in the Loader spinner during idle waits by optimizing text wrapping and caching during frame updates.
 - Fixed hash-prefixed UUIDs in prose being misclassified as 8-digit CSS colors and receiving spurious swatches.
 - Fixed unbounded memory growth and potential host freezes when a PTY consumer stalls by capping the pending stdout backlog and treating undrained consumers as a disconnect.
-
-### Added
-
-- Added an opt-in Vim input mode to the editor with normal/insert/visual states, characterwise and highlighted line selection, visual deletion and change, grapheme-safe motions and edits, counts, inner/around word and paragraph text objects, and shared undo/redo history ([#1834](https://github.com/can1357/oh-my-pi/issues/1834)).
 
 ## [17.1.8] - 2026-07-28
 

@@ -91,6 +91,10 @@
 - Fixed the auto-titler installing a model's whole answer as the session title when the tiny title model ignored the titling task and answered the first user message instead. `normalizeGeneratedTitle` now rejects overlong output (>80 chars or >12 words) so the caller defers titling to the next user turn rather than accepting a full sentence ([#7303](https://github.com/can1357/oh-my-pi/issues/7303)).
 - Fixed the in-process `kill` builtin to validate signals, preserve negative PID operands, signal every process in pipeline jobs, continue after bad targets, and refuse non-probe signals aimed at the host process or process group.
 
+### Added
+
+- Added a configurable `inputMode: vim` setting for modal prompt editing, including visible mode labels, Vim normal-mode Ctrl-R redo, and safe interaction with autocomplete, paste, voice input, app shortcuts, and editor replacement ([#1834](https://github.com/can1357/oh-my-pi/issues/1834)).
+
 ## [17.2.3] - 2026-08-01
 
 ### Changed
@@ -262,10 +266,6 @@
 
 - Removed the dangling `MCPManager.setOnNotification` single-slot setter, which had no callers in the runtime. Replaced by `MCPManager.addNotificationListener` — multi-listener, per-listener error isolation, returns an unsubscribe function.
 
-### Added
-
-- Added a configurable `inputMode: vim` setting for modal prompt editing, including visible mode labels, Vim normal-mode Ctrl-R redo, and safe interaction with app shortcuts and editor replacement ([#1834](https://github.com/can1357/oh-my-pi/issues/1834)).
-
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes
@@ -354,10 +354,6 @@
 - Fixed `/live` sideband WebSockets ignoring standard proxy environment variables and `NO_PROXY`, which left proxied sessions stuck while the rest of the Codex connection succeeded ([#6770](https://github.com/can1357/oh-my-pi/issues/6770)).
 - Fixed the bash tool's `kill` builtin rejecting numeric signals and multiple process operands, stopping after the first failed target, and defaulting to `SIGKILL` instead of the standard `SIGTERM`. Negative PID operands (process groups per `kill(2)`) and the `--` end-of-options marker are now handled instead of being misparsed as signals ([#6779](https://github.com/can1357/oh-my-pi/issues/6779)).
 - Fixed `learned.md` saves growing a blank line on every write (trailing-newline split artifact) and hoisting all headings/prose above all bullets, which re-scoped lessons under the wrong heading in hand-organized files. Saves are now byte-idempotent and preserve mixed Markdown ordering: non-list lines keep their positions, new lessons insert newest-first at the head of the first bullet run, and dedupe/cap operate on bullet lines in place.
-
-### Added
-
-- Added an `inputMode: vim` setting for modal prompt editing, including a visible mode label and safe interaction with autocomplete, paste, voice input, app shortcuts, and editor replacement ([#1834](https://github.com/can1357/oh-my-pi/issues/1834)).
 
 ## [17.1.5] - 2026-07-27
 

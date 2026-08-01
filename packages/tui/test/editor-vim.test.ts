@@ -395,6 +395,36 @@ describe("Editor Vim input mode", () => {
 	});
 
 	it.each([
+		{
+			name: "PageDown",
+			start: "gg",
+			key: "\x1b[6~",
+			cursor: { line: 0, col: 0 },
+			expected: "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9",
+		},
+		{
+			name: "PageUp",
+			start: "G",
+			key: "\x1b[5~",
+			cursor: { line: 9, col: 0 },
+			expected: "l0\nl1\nl2\nl3\nl4\nl5\nl6\nl7\nl8",
+		},
+	])("keeps $name from bypassing visual selection tracking", ({ start, key, cursor, expected }) => {
+		const editor = createVimEditor();
+		editor.setMaxHeight(6);
+		editor.setText("l0\nl1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9");
+		typeText(editor, start);
+		editor.handleInput("V");
+
+		editor.handleInput(key);
+		expect(editor.getCursor()).toEqual(cursor);
+		editor.handleInput("d");
+
+		expect(editor.getText()).toBe(expected);
+		expect(editor.getVimMode()).toBe("normal");
+	});
+
+	it.each([
 		{ mode: "normal", enterMode: "" },
 
 		{ mode: "visual", enterMode: "0v" },

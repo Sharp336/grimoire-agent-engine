@@ -325,7 +325,12 @@ export class VimEditorController {
 		} else if (kb.matches(data, "tui.editor.cursorLineEnd") || matchesKey(data, "ctrl+e")) {
 			this.#count = "";
 			this.#setCursor(this.#cursor().line, this.#lineLastCol(this.#currentLine()));
-		} else if (kb.matches(data, "tui.editor.jumpForward") || kb.matches(data, "tui.editor.jumpBackward")) {
+		} else if (
+			kb.matches(data, "tui.editor.pageUp") ||
+			kb.matches(data, "tui.editor.pageDown") ||
+			kb.matches(data, "tui.editor.jumpForward") ||
+			kb.matches(data, "tui.editor.jumpBackward")
+		) {
 			this.#count = "";
 			return true;
 		} else {
