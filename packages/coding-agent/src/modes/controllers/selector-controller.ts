@@ -667,6 +667,14 @@ export class SelectorController {
 	}
 
 	async showAgentPersonaSelector(): Promise<void> {
+		if (this.ctx.goalModeEnabled) {
+			this.ctx.showWarning("Cannot switch agent during goal mode. Exit goal mode first.");
+			return;
+		}
+		if (this.ctx.vibeModeEnabled) {
+			this.ctx.showWarning("Cannot switch agent during vibe mode. Exit vibe mode first.");
+			return;
+		}
 		const discovery = await discoverAgents(this.ctx.sessionManager.getCwd());
 		const disabled = new Set((this.ctx.settings.get("task.disabledAgents") as string[] | undefined) ?? []);
 		const available = discovery.agents.filter(a => a.availability !== "subagent" && !disabled.has(a.name));

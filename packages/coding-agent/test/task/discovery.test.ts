@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { disableProvider, enableProvider } from "@oh-my-pi/pi-coding-agent/capability";
 import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
+import { clearClaudePluginRootsCache } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import {
 	clearOmpExtensionCliRoots,
 	injectOmpExtensionCliRoots,
@@ -38,6 +39,14 @@ const CLAUDE_AGENT_MD = [
 	"You are a Claude Code custom subagent.",
 ].join("\n");
 
+const PLUGIN_AGENT_MD = [
+	"---",
+	"name: simplifier",
+	"description: A code simplifier agent from a Claude plugin",
+	"---",
+	"Simplify code.",
+].join("\n");
+
 async function writeOmpPluginAgent(home: string): Promise<void> {
 	const userPluginsRoot = path.join(home, ".omp", "plugins");
 	const pluginRoot = path.join(userPluginsRoot, "node_modules", "loom");
@@ -70,6 +79,7 @@ describe("discoverAgents", () => {
 	afterEach(async () => {
 		enableProvider("omp-plugins");
 		clearOmpExtensionCliRoots();
+		clearClaudePluginRootsCache();
 		clearFsCache();
 		await removeWithRetries(tempHome);
 	});
@@ -108,6 +118,56 @@ describe("discoverAgents", () => {
 		const names = agents.map(agent => agent.name);
 
 		expect(names).not.toContain("loom-verify-spec");
+	});
+
+	test("includeExtensions: false skips extension-package and Claude plugin agent roots", async () => {
+		// OMP extension-package fixture: npm plugin under <home>/.omp/plugins/node_modules
+		await writeOmpPluginAgent(tempHome);
+
+		// Claude marketplace plugin fixture
+		const pluginInstallPath = path.join(tempHome, "plugin-cache", "code-simplifier");
+		await fs.mkdir(path.join(pluginInstallPath, "agents"), { recursive: true });
+		await fs.writeFile(path.join(pluginInstallPath, "agents", "simplifier.md"), PLUGIN_AGENT_MD);
+		const claudePluginsDir = path.join(tempHome, ".claude", "plugins");
+		await fs.mkdir(claudePluginsDir, { recursive: true });
+		await fs.writeFile(
+			path.join(claudePluginsDir, "installed_plugins.json"),
+			JSON.stringify({
+				version: 2,
+				plugins: {
+					"code-simplifier@claude-plugins-official": [
+						{
+							installPath: pluginInstallPath,
+							version: "1.0.0",
+							scope: "user",
+							installedAt: "2025-01-01T00:00:00Z",
+							lastUpdated: "2025-01-01T00:00:00Z",
+						},
+					],
+				},
+			}),
+		);
+		clearClaudePluginRootsCache();
+
+		// Project agent must still resolve
+		await fs.mkdir(path.join(projectDir, ".omp", "agents"), { recursive: true });
+		await fs.writeFile(path.join(projectDir, ".omp", "agents", "omp-test-agent.md"), OMP_AGENT_MD);
+
+		// Sanity: default discovery still surfaces both extension agents
+		const withExtensions = await discoverAgents(projectDir, tempHome);
+		expect(withExtensions.agents.map(a => a.name)).toEqual(
+			expect.arrayContaining(["loom-verify-spec", "simplifier"]),
+		);
+
+		// Contract: includeExtensions: false excludes both extension roots while
+		// project and bundled agents still resolve
+		const { agents } = await discoverAgents(projectDir, tempHome, { includeExtensions: false });
+		const names = agents.map(agent => agent.name);
+		expect(names).not.toContain("loom-verify-spec");
+		expect(names).not.toContain("simplifier");
+		expect(names).toContain("omp-test-agent");
+		expect(names).toContain("task");
+		expect(names).toContain("sonic");
 	});
 
 	test("CLI extension agents win over project `extensions:` settings on dedup", async () => {

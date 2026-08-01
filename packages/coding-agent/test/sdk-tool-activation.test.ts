@@ -599,4 +599,48 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			await session.dispose();
 		}
 	});
+
+	it("rejects a subagent-only persona passed as agentPersona", async () => {
+		const tempDir = makeTempDir();
+
+		await expect(
+			createAgentSession({
+				...baseOptions(tempDir),
+				agentPersona: {
+					name: "sub-only",
+					description: "Subagent only",
+					systemPrompt: "",
+					availability: "subagent" as const,
+					source: "project" as const,
+				},
+			}),
+		).rejects.toThrow('Agent "sub-only" is subagent-only and cannot be selected as main persona.');
+	});
+
+	it("switchAgentPersona rejects a subagent-only persona without mutating session state", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession(baseOptions(tempDir));
+
+		try {
+			const personaBefore = session.agentPersona;
+			const toolsBefore = session.getEnabledToolNames();
+			const modelBefore = session.model;
+
+			await expect(
+				session.switchAgentPersona({
+					name: "sub-only",
+					description: "Subagent only",
+					systemPrompt: "",
+					availability: "subagent" as const,
+					source: "project" as const,
+				}),
+			).rejects.toThrow('Agent "sub-only" is subagent-only and cannot be selected as main persona.');
+
+			expect(session.agentPersona).toBe(personaBefore);
+			expect(session.getEnabledToolNames()).toEqual(toolsBefore);
+			expect(session.model).toBe(modelBefore);
+		} finally {
+			await session.dispose();
+		}
+	});
 });

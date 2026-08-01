@@ -570,6 +570,14 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				await runtime.output("Cannot switch agent during plan mode. Exit plan mode first.");
 				return commandConsumed();
 			}
+			if (runtime.session.getGoalModeState()?.enabled) {
+				await runtime.output("Cannot switch agent during goal mode. Exit goal mode first.");
+				return commandConsumed();
+			}
+			if (runtime.session.getVibeModeState()?.enabled) {
+				await runtime.output("Cannot switch agent during vibe mode. Exit vibe mode first.");
+				return commandConsumed();
+			}
 			const agentName = command.args.trim();
 			if (!agentName) {
 				await runtime.output("Usage: /agent <name>");
@@ -609,6 +617,16 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			}
 			if (runtime.ctx.planModeEnabled) {
 				runtime.ctx.showWarning("Cannot switch agent during plan mode. Exit plan mode first.");
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			if (runtime.ctx.goalModeEnabled) {
+				runtime.ctx.showWarning("Cannot switch agent during goal mode. Exit goal mode first.");
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			if (runtime.ctx.vibeModeEnabled) {
+				runtime.ctx.showWarning("Cannot switch agent during vibe mode. Exit vibe mode first.");
 				runtime.ctx.editor.setText("");
 				return;
 			}

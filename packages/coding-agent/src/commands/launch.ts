@@ -108,6 +108,9 @@ export default class Index extends Command {
 		models: Flags.string({
 			description: "Comma-separated model patterns for Ctrl+P cycling",
 		}),
+		agent: Flags.string({
+			description: "Select an agent definition (.agent.md) as the main-session persona",
+		}),
 		"no-tools": Flags.boolean({
 			description: "Disable all built-in tools",
 		}),

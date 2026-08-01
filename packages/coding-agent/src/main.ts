@@ -894,6 +894,7 @@ export async function buildSessionOptions(
 			parsed.systemPrompt !== undefined ||
 			parsed.appendSystemPrompt !== undefined ||
 			parsed.tools !== undefined ||
+			parsed.agent !== undefined ||
 			parsed.noTools === true;
 		if (!forkCacheShapeChanged && header?.providerPromptCacheKey) {
 			options.providerPromptCacheKey = header.providerPromptCacheKey;
@@ -905,7 +906,9 @@ export async function buildSessionOptions(
 	// so agentPolicy is available for the agent model else-if branch.
 	let agentPersona: AgentDefinition | undefined;
 	if (parsed.agent) {
-		const discovery = await discoverAgents(options.cwd ?? getProjectDir());
+		const discovery = await discoverAgents(options.cwd ?? getProjectDir(), undefined, {
+			includeExtensions: !parsed.noExtensions,
+		});
 		agentPersona = getAgent(discovery.agents, parsed.agent);
 		if (!agentPersona) {
 			const available = discovery.agents.map(a => a.name).join(", ") || "none";
@@ -922,7 +925,9 @@ export async function buildSessionOptions(
 		const sessionContext = sessionManager.buildSessionContext();
 		if (sessionContext.agentPersona) {
 			const { agent: name, source } = sessionContext.agentPersona;
-			const discovery = await discoverAgents(options.cwd ?? getProjectDir());
+			const discovery = await discoverAgents(options.cwd ?? getProjectDir(), undefined, {
+				includeExtensions: !parsed.noExtensions,
+			});
 			// Prefer source-stable match, fall back to name-only (e.g. if source was deleted)
 			const agent =
 				discovery.agents.find(a => a.name === name && a.source === source) ?? getAgent(discovery.agents, name);

@@ -27,6 +27,8 @@ describe("/agent slash command", () => {
 				editor: { setText },
 				session: { isStreaming: false, getPlanModeState: () => undefined },
 				planModeEnabled: false,
+				goalModeEnabled: false,
+				vibeModeEnabled: false,
 			},
 		} as unknown as TuiSlashCommandRuntime;
 
@@ -37,12 +39,101 @@ describe("/agent slash command", () => {
 		expect(setText).toHaveBeenCalledWith("");
 	});
 
+	test.each([
+		{ flag: "goalModeEnabled", message: "Cannot switch agent during goal mode. Exit goal mode first." },
+		{ flag: "vibeModeEnabled", message: "Cannot switch agent during vibe mode. Exit vibe mode first." },
+	])("handleTui with args during $flag warns and does not switch", async ({ flag, message }) => {
+		const switchPersona = vi.fn();
+		const showWarning = vi.fn();
+		const setText = vi.fn();
+		const runtime = {
+			ctx: {
+				showWarning,
+				editor: { setText },
+				session: { isStreaming: false, getPlanModeState: () => undefined, switchAgentPersona: switchPersona },
+				planModeEnabled: false,
+				goalModeEnabled: false,
+				vibeModeEnabled: false,
+				[flag]: true,
+			},
+		} as unknown as TuiSlashCommandRuntime;
+
+		const cmd = getAgentCommand();
+		await cmd.handleTui!(makeCommand("test"), runtime);
+
+		expect(showWarning).toHaveBeenCalledWith(message);
+		expect(setText).toHaveBeenCalledWith("");
+		expect(switchPersona).not.toHaveBeenCalled();
+	});
+
+	test.each([
+		{ flag: "goalModeEnabled", message: "Cannot switch agent during goal mode. Exit goal mode first." },
+		{ flag: "vibeModeEnabled", message: "Cannot switch agent during vibe mode. Exit vibe mode first." },
+	])("handleTui with no args during $flag warns and does not open picker", async ({ flag, message }) => {
+		const showAgentPersonaSelector = vi.fn();
+		const showWarning = vi.fn();
+		const setText = vi.fn();
+		const runtime = {
+			ctx: {
+				showAgentPersonaSelector,
+				showWarning,
+				editor: { setText },
+				session: { isStreaming: false, getPlanModeState: () => undefined },
+				planModeEnabled: false,
+				goalModeEnabled: false,
+				vibeModeEnabled: false,
+				[flag]: true,
+			},
+		} as unknown as TuiSlashCommandRuntime;
+
+		const cmd = getAgentCommand();
+		await cmd.handleTui!(makeCommand(""), runtime);
+
+		expect(showWarning).toHaveBeenCalledWith(message);
+		expect(setText).toHaveBeenCalledWith("");
+		expect(showAgentPersonaSelector).not.toHaveBeenCalled();
+	});
+
+	test.each([
+		{ getter: "getGoalModeState", message: "Cannot switch agent during goal mode. Exit goal mode first." },
+		{ getter: "getVibeModeState", message: "Cannot switch agent during vibe mode. Exit vibe mode first." },
+	])("handle during $getter warns and does not switch", async ({ getter, message }) => {
+		const switchPersona = vi.fn();
+		const output = vi.fn();
+		const runtime = {
+			session: {
+				switchAgentPersona: switchPersona,
+				isStreaming: false,
+				getPlanModeState: () => undefined,
+				[getter]: () => ({ enabled: true }),
+			},
+			cwd: "/test",
+			output,
+			sessionManager: {} as any,
+			settings: {} as any,
+			refreshCommands: vi.fn(),
+			reloadPlugins: vi.fn(),
+		} as unknown as SlashCommandRuntime;
+
+		const cmd = getAgentCommand();
+		await cmd.handle!(makeCommand("test"), runtime);
+
+		expect(output).toHaveBeenCalledWith(message);
+		expect(switchPersona).not.toHaveBeenCalled();
+	});
+
 	test("handle with valid agent calls switchAgentPersona", async () => {
 		const mockAgent = { name: "test", description: "", systemPrompt: "", source: "project" as const };
 		const switchPersona = vi.fn().mockResolvedValue(undefined);
 		const output = vi.fn();
 		const runtime = {
-			session: { switchAgentPersona: switchPersona, isStreaming: false, getPlanModeState: () => undefined },
+			session: {
+				switchAgentPersona: switchPersona,
+				isStreaming: false,
+				getPlanModeState: () => undefined,
+				getGoalModeState: () => undefined,
+				getVibeModeState: () => undefined,
+			},
 			cwd: "/test",
 			output,
 			sessionManager: {} as any,
@@ -67,7 +158,13 @@ describe("/agent slash command", () => {
 	test("handle with unknown agent prints error", async () => {
 		const output = vi.fn();
 		const runtime = {
-			session: { switchAgentPersona: vi.fn(), isStreaming: false, getPlanModeState: () => undefined },
+			session: {
+				switchAgentPersona: vi.fn(),
+				isStreaming: false,
+				getPlanModeState: () => undefined,
+				getGoalModeState: () => undefined,
+				getVibeModeState: () => undefined,
+			},
 			cwd: "/test",
 			output,
 			sessionManager: {} as any,
@@ -98,7 +195,13 @@ describe("/agent slash command", () => {
 		};
 		const output = vi.fn();
 		const runtime = {
-			session: { switchAgentPersona: vi.fn(), isStreaming: false, getPlanModeState: () => undefined },
+			session: {
+				switchAgentPersona: vi.fn(),
+				isStreaming: false,
+				getPlanModeState: () => undefined,
+				getGoalModeState: () => undefined,
+				getVibeModeState: () => undefined,
+			},
 			cwd: "/test",
 			output,
 			sessionManager: {} as any,

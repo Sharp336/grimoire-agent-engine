@@ -1197,6 +1197,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	registerSshCleanup();
 	registerEvalCleanup();
 
+	// Subagent-only personas cannot be main-session personas; reject before any
+	// authStorage/modelRegistry construction so nothing needs cleanup on throw.
+	if (options.agentPersona?.availability === "subagent") {
+		throw new Error(`Agent "${options.agentPersona.name}" is subagent-only and cannot be selected as main persona.`);
+	}
+
 	// Pin authStorage to modelRegistry.authStorage: ModelRegistry.getApiKey() routes refresh
 	// failures through that instance, so any divergent storage handed to the bridge / mcpManager
 	// / session would silently miss credential_disabled events.

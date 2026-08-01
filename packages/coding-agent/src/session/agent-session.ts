@@ -6218,6 +6218,9 @@ export class AgentSession {
 
 	/** Live-switches the agent persona: tools, spawns, model, thinking, system prompt. */
 	async switchAgentPersona(agent: AgentDefinition): Promise<void> {
+		if (agent.availability === "subagent") {
+			throw new Error(`Agent "${agent.name}" is subagent-only and cannot be selected as main persona.`);
+		}
 		const policy = resolveAgentSessionPolicy(agent);
 		const previousPersona = this.#agentPersona;
 		const previousOverlay = this.#agentToolOverlay;

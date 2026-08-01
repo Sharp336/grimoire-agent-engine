@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
@@ -13,6 +13,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { CURRENT_SESSION_VERSION, type SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as discovery from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const OPENAI_TEST_MODEL = getBundledModel("openai", "gpt-4o-mini");
@@ -86,6 +87,10 @@ async function createMinimalSession(
 }
 
 describe("provider prompt-cache key session affinity", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
 	it("parses --prompt-cache-key without folding it into provider session id or prompt text", () => {
 		const parsed = parseArgs([
 			"--provider-session-id",
@@ -225,6 +230,40 @@ describe("provider prompt-cache key session affinity", () => {
 			);
 
 			expect(options.model).toBe(OPENAI_TEST_MODEL);
+			expect(options.providerPromptCacheKey).toBeUndefined();
+		} finally {
+			authStorage.close();
+		}
+	});
+
+	it("does not auto-inherit parent prompt-cache affinity when fork startup changes the agent persona", async () => {
+		using tempDir = TempDir.createSync("@omp-prompt-cache-agent-");
+		const source = await createSourceSessionFixture(tempDir, "parent-cache-session-agent");
+		const forkedManager = await SessionManager.forkFrom(source.sourceFile, source.cwd, source.forkSessionDir);
+		const authStorage = await AuthStorage.create(tempDir.join("agent-auth.db"));
+		const agentPersona = {
+			name: "test-agent",
+			description: "A test agent",
+			systemPrompt: "You are a test agent.",
+			source: "bundled" as const,
+		};
+		try {
+			vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
+				agents: [agentPersona],
+				projectAgentsDir: null,
+			});
+			const parsed = parseArgs(["--cwd", source.cwd, "--agent", "test-agent"]);
+
+			const options = await buildSessionOptions(
+				parsed,
+				[],
+				forkedManager,
+				new ModelRegistry(authStorage, tempDir.join("models.yml")),
+				Settings.isolated({ "marketplace.autoUpdate": "off" }),
+			);
+
+			expect(forkedManager.getHeader()?.parentSession).toBe(source.sourceHeader.id);
+			expect(options.agentPersona).toBe(agentPersona);
 			expect(options.providerPromptCacheKey).toBeUndefined();
 		} finally {
 			authStorage.close();
