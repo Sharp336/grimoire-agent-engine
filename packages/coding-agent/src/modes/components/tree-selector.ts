@@ -1,6 +1,7 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import {
 	type Component,
+	Container,
 	extractPrintableText,
 	fuzzyMatch,
 	Input,
@@ -1334,13 +1335,25 @@ class BranchMap implements Component {
 	}
 }
 
+class TreeSelectorRenderer implements Component {
+	#renderTree: (width: number) => readonly string[];
+
+	constructor(renderTree: (width: number) => readonly string[]) {
+		this.#renderTree = renderTree;
+	}
+
+	render(width: number): readonly string[] {
+		return this.#renderTree(width);
+	}
+}
+
 /**
  * Component that renders a session tree selector for navigation.
  *
  * The entry list stays the interaction surface. The adjacent branch map is a
  * read-only topology overview that can be hidden or expanded with Ctrl+G.
  */
-export class TreeSelectorComponent implements Component {
+export class TreeSelectorComponent extends Container {
 	#treeList: TreeList;
 	#branchMap: BranchMap;
 	#labelInput: LabelInput | null = null;
@@ -1357,6 +1370,7 @@ export class TreeSelectorComponent implements Component {
 		initialFilterMode: FilterMode = "default",
 		private readonly getTerminalRows: () => number = () => terminalHeight,
 	) {
+		super();
 		const maxVisibleLines = Math.max(1, terminalHeight);
 
 		this.#treeList = new TreeList(tree, currentLeafId, maxVisibleLines, initialFilterMode);
@@ -1369,6 +1383,7 @@ export class TreeSelectorComponent implements Component {
 			() => this.#treeList.getSelectedNode()?.entry.id ?? null,
 			maxVisibleLines,
 		);
+		this.addChild(new TreeSelectorRenderer(width => this.#renderTree(width)));
 
 		if (tree.length === 0) {
 			setTimeout(() => onCancel(), 100);
@@ -1394,9 +1409,10 @@ export class TreeSelectorComponent implements Component {
 		this.#branchMap.invalidate();
 		this.#labelInput?.invalidate();
 		this.#border.invalidate();
+		super.invalidate();
 	}
 
-	render(width: number): readonly string[] {
+	#renderTree(width: number): readonly string[] {
 		const terminalRows = Math.max(1, this.getTerminalRows());
 		const lines: string[] = [""];
 		const border = this.#border.render(width)[0]!;

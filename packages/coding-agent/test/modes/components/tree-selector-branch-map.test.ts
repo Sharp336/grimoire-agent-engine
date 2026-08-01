@@ -3,6 +3,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tree-selector";
 import * as themeModule from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { SessionEntry, SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import type { Component } from "@oh-my-pi/pi-tui";
 
 let nextId = 0;
 
@@ -153,6 +154,43 @@ describe("TreeSelectorComponent branch map", () => {
 		expect(forkRow).toBeGreaterThan(rootRow);
 		expect(selectedRow).toBeGreaterThan(forkRow);
 		expect(graphRows.join("\n")).not.toContain("left branch");
+	});
+
+	it("preserves Container extension child rendering and lifecycle propagation", () => {
+		const { tree, currentLeafId } = branchyTree();
+		const selector = new TreeSelectorComponent(
+			tree,
+			currentLeafId,
+			60,
+			() => {},
+			() => {},
+		);
+		let invalidated = false;
+		let disposed = false;
+		let ignoresTight = false;
+		const extension: Component = {
+			render: () => ["extension child"],
+			invalidate: () => {
+				invalidated = true;
+			},
+			setIgnoreTight: ignore => {
+				ignoresTight = ignore;
+			},
+			dispose: () => {
+				disposed = true;
+			},
+		};
+
+		selector.addChild(extension);
+		expect(selector.children).toContain(extension);
+		expect(render(selector, 120)).toContain("extension child");
+		selector.setIgnoreTight(true);
+		selector.invalidate();
+		expect(ignoresTight).toBe(true);
+		expect(invalidated).toBe(true);
+		selector.disposeChildren();
+		expect(disposed).toBe(true);
+		expect(selector.children).toEqual([]);
 	});
 
 	it("uses the accent color for shortcut keys and muted text for their descriptions", () => {
