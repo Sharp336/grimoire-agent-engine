@@ -479,10 +479,10 @@ class TreeList implements Component {
 		this.#visibleTree = undefined;
 	}
 
-	#selectFirstVisibleInSubtree(root: SessionTreeNode): boolean {
-		const visibleIndices = new Map<string, number>(
-			this.#filteredNodes.map((node, index) => [node.node.entry.id, index]),
-		);
+	#selectFirstVisibleInSubtree(
+		root: SessionTreeNode,
+		visibleIndices = new Map<string, number>(this.#filteredNodes.map((node, index) => [node.node.entry.id, index])),
+	): boolean {
 		const stack = [root];
 		while (stack.length > 0) {
 			const node = stack.pop()!;
@@ -499,14 +499,25 @@ class TreeList implements Component {
 		return false;
 	}
 
+	#selectVisibleBranch(branches: SessionTreeNode[], startIndex: number, direction: -1 | 1): boolean {
+		const visibleIndices = new Map<string, number>(
+			this.#filteredNodes.map((node, index) => [node.node.entry.id, index]),
+		);
+		for (let offset = 0; offset < branches.length; offset++) {
+			const targetIndex = (startIndex + direction * offset + branches.length) % branches.length;
+			if (this.#selectFirstVisibleInSubtree(branches[targetIndex]!, visibleIndices)) return true;
+		}
+		return false;
+	}
+
 	#moveToSiblingBranch(direction: -1 | 1): void {
 		const selected = this.getSelectedNode();
 		if (!selected) return;
 
 		const nodeById = new Map<string, SessionTreeNode>(this.#flatNodes.map(node => [node.node.entry.id, node.node]));
 		if (selected.children.length > 1) {
-			const target = selected.children[direction === 1 ? 0 : selected.children.length - 1]!;
-			this.#selectFirstVisibleInSubtree(target);
+			const targetIndex = direction === 1 ? 0 : selected.children.length - 1;
+			this.#selectVisibleBranch(selected.children, targetIndex, direction);
 			return;
 		}
 
@@ -519,7 +530,7 @@ class TreeList implements Component {
 				const currentIndex = parent.children.findIndex(child => child.entry.id === branchChild.entry.id);
 				if (currentIndex === -1) return;
 				const targetIndex = (currentIndex + direction + parent.children.length) % parent.children.length;
-				this.#selectFirstVisibleInSubtree(parent.children[targetIndex]!);
+				this.#selectVisibleBranch(parent.children, targetIndex, direction);
 				return;
 			}
 			branchChild = parent;
@@ -530,7 +541,7 @@ class TreeList implements Component {
 			const currentIndex = this.#roots.findIndex(root => root.entry.id === branchChild.entry.id);
 			if (currentIndex === -1) return;
 			const targetIndex = (currentIndex + direction + this.#roots.length) % this.#roots.length;
-			this.#selectFirstVisibleInSubtree(this.#roots[targetIndex]!);
+			this.#selectVisibleBranch(this.#roots, targetIndex, direction);
 		}
 	}
 

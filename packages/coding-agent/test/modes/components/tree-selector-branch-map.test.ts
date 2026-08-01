@@ -64,6 +64,22 @@ function treeWithHiddenInternalNode(): { tree: SessionTreeNode[]; currentLeafId:
 	return { tree: [root], currentLeafId: child.entry.id };
 }
 
+function treeWithHiddenMiddleSibling(): { tree: SessionTreeNode[]; currentLeafId: string; thirdChildId: string } {
+	const root = userNode("root");
+	const firstChild = userNode("first visible branch", root.entry.id);
+	const hiddenEntry: SessionEntry = {
+		type: "custom",
+		id: `entry-${nextId++}`,
+		parentId: root.entry.id,
+		timestamp: new Date().toISOString(),
+		customType: "internal-marker",
+	};
+	const hiddenChild: SessionTreeNode = { entry: hiddenEntry, children: [] };
+	const thirdChild = userNode("third visible branch", root.entry.id);
+	root.children.push(firstChild, hiddenChild, thirdChild);
+	return { tree: [root], currentLeafId: firstChild.entry.id, thirdChildId: thirdChild.entry.id };
+}
+
 function linearUserTree(
 	count: number,
 	textAt: (index: number) => string = index => `node ${index}`,
@@ -334,6 +350,21 @@ describe("TreeSelectorComponent branch map", () => {
 
 		selector.handleInput("\n");
 		expect(selectedEntries).toEqual([currentLeafId]);
+	});
+
+	it("skips a fully hidden sibling branch with Shift+Right in the default filter", () => {
+		const { tree, currentLeafId, thirdChildId } = treeWithHiddenMiddleSibling();
+		const selector = new TreeSelectorComponent(
+			tree,
+			currentLeafId,
+			60,
+			() => {},
+			() => {},
+		);
+
+		selector.handleInput("\x1b[1;2C"); // shift+right: first visible branch -> third visible branch
+
+		expect(selector.getTreeList().getSelectedNode()?.entry.id).toBe(thirdChildId);
 	});
 
 	it("projects the same filtered nodes into the branch map and updates the filter status", () => {
