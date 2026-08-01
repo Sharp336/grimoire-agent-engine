@@ -11,7 +11,7 @@ import { shortenPath } from "../../tools/render-utils";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "../../tools/todo";
 import type { InteractiveModeContext } from "../types";
 
-export const SIDE_AGENT_ID = "Side";
+export const SIDE_AGENT_ID = "side.internal";
 
 const SIDE_STATUS = "Side conversation — Esc returns to main, /side end discards it";
 const DISPOSE_FAILURE_MESSAGE = "Side conversation ended, but its file could not be deleted";
@@ -220,7 +220,7 @@ export class SideController {
 	async #disposeImpl(): Promise<boolean> {
 		// A focused side must be unfocused BEFORE disposal unregisters it: the
 		// registry-event auto-unfocus is fire-and-forget, and its in-flight
-		// #attach(main) can race a subsequent focusAgentSession("Side") into a
+		// #attach(main) can race a subsequent focusAgentSession("side.internal") into a
 		// wrong final focus state.
 		if (this.ctx.focusedAgentId === SIDE_AGENT_ID) {
 			try {
@@ -232,7 +232,7 @@ export class SideController {
 		let cleanupFailed = false;
 
 		// Reclassifying loop. Each iteration re-reads the registry, so every
-		// success exit is preceded by a fresh read showing nothing named Side
+		// success exit is preceded by a fresh read showing nothing named side.internal
 		// remains. The body never assumes a ref stays classified the same
 		// across an await: the SDK dispose wrapper unregisters in its `finally`
 		// UNLESS the lifecycle manager is parking the ref (sdk.ts:1632-1640,
@@ -244,13 +244,13 @@ export class SideController {
 		// practice.
 		//
 		// Invariant: every `return true` is preceded by a registry read
-		// showing nothing named Side; every `return false` is preceded by one
+		// showing nothing named side.internal; every `return false` is preceded by one
 		// shown error per remnant that remains (a leaked file or a surviving
 		// generation — one remnant means one error, two remnants two); a
 		// captured ref's file is deleted only when its ref is
 		// gone from the registry or its unregister was won; a lost unregister
 		// never deletes anything. Side filenames are unique per generation
-		// (Side-<snowflake>.jsonl), so a captured ref's file is never a
+		// (side.internal-<snowflake>.jsonl), so a captured ref's file is never a
 		// replacement generation's file — deleting it after the ref left the
 		// registry, or after a won unregister, is always safe.
 		for (;;) {
@@ -311,7 +311,7 @@ export class SideController {
 	 * never existed — `removeSessionFiles` swallows ENOENT); `false` when the
 	 * deletion failed, in which case the user has already been shown the error
 	 * (the caller-supplied `failureMessage` prefix plus the shortened path) and
-	 * a warning logged. Never rejects: a leaked `Side-*.jsonl` must not break
+	 * a warning logged. Never rejects: a leaked `side.internal-*.jsonl` must not break
 	 * shutdown or session transitions that await disposal.
 	 */
 	async #removeSideFile(sessionFile: string, failureMessage: string): Promise<boolean> {

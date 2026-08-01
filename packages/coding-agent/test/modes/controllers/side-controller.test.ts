@@ -258,9 +258,9 @@ describe("SideController", () => {
 		const controller = new SideController(harness.ctx);
 		await controller.start("what changed");
 
-		// Stage 1: forkFrom received the parent file and a Side-*.jsonl.
+		// Stage 1: forkFrom received the parent file and a side.internal-*.jsonl.
 		expect(capturedForkArgs?.[0]).toBe(harness.parentFile);
-		expect(capturedForkArgs?.[4]?.sessionFile).toMatch(/Side-[0-9a-f]+\.jsonl$/);
+		expect(capturedForkArgs?.[4]?.sessionFile).toMatch(/side\.internal-[0-9a-f]+\.jsonl$/);
 
 		// Stage 1: createAgentSession received the exact field set.
 		expect(capturedCreateOpts?.expectedAgentRef).toBeNull();
