@@ -35,6 +35,8 @@ export const FREE_PAGE_VACUUM_RATIO = 0.25;
 const VACUUM_MIN_BYTES = 1_048_576;
 /** Quiescence proof waits this long between the two content snapshots. */
 const QUIESCENCE_WINDOW_MS = 200;
+/** Suffixes for the database file and all its sidecars (WAL, shared-memory, rollback journal). */
+const TRIO_SUFFIXES = ["", "-wal", "-shm", "-journal"] as const;
 
 export type DoctorDbPolicy = "precious" | "regenerable";
 
@@ -203,10 +205,10 @@ async function fsyncDir(directory: string): Promise<void> {
 	}
 }
 
-/** Content snapshot of the database trio (main, -wal, -shm), skipping files that do not exist. */
+/** Content snapshot of the database file and all sidecars, skipping files that do not exist. */
 async function snapshotTrio(dbPath: string): Promise<TrioSnapshotEntry[]> {
 	const entries: TrioSnapshotEntry[] = [];
-	for (const suffix of ["", "-wal", "-shm"]) {
+	for (const suffix of TRIO_SUFFIXES) {
 		const file = `${dbPath}${suffix}`;
 		try {
 			const stat = await fs.stat(file);
@@ -242,7 +244,7 @@ async function hasHolders(dbPath: string): Promise<boolean | null> {
 	const fuser = $which("fuser");
 	if (fuser === null) return null;
 	const files: string[] = [];
-	for (const suffix of ["", "-wal", "-shm"]) {
+	for (const suffix of TRIO_SUFFIXES) {
 		const file = `${dbPath}${suffix}`;
 		if (await pathExists(file)) files.push(file);
 	}
@@ -257,15 +259,13 @@ async function hasHolders(dbPath: string): Promise<boolean | null> {
 	return pids.some(pid => pid !== process.pid);
 }
 
-/** Quarantine a database and its WAL companions under one stamp; rolls partial moves back so the trio never splits. */
+/** Quarantine a database and all its sidecars under one stamp; rolls partial moves back so the set never splits. */
 async function quarantineFiles(dbPath: string, quarantinePath: string): Promise<void> {
 	const moved: Array<readonly [string, string]> = [];
 	try {
-		for (const [from, to] of [
-			[dbPath, quarantinePath],
-			[`${dbPath}-wal`, `${quarantinePath}-wal`],
-			[`${dbPath}-shm`, `${quarantinePath}-shm`],
-		] as const) {
+		for (const suffix of TRIO_SUFFIXES) {
+			const from = `${dbPath}${suffix}`;
+			const to = `${quarantinePath}${suffix}`;
 			try {
 				await fs.rename(from, to);
 				moved.push([from, to]);
@@ -308,7 +308,7 @@ async function archiveTrio(dbPath: string, expected: TrioSnapshotEntry[]): Promi
 /** Restore the trio from a verified archive, removing sidecars the archive does not have. */
 async function restoreFromArchive(dbPath: string, archiveDir: string): Promise<void> {
 	const directory = path.dirname(dbPath);
-	for (const suffix of ["", "-wal", "-shm"]) {
+	for (const suffix of TRIO_SUFFIXES) {
 		const name = `${path.basename(dbPath)}${suffix}`;
 		const source = path.join(archiveDir, name);
 		const target = path.join(directory, name);
@@ -346,7 +346,7 @@ async function swapInCandidate(dbPath: string, candidate: string, archiveDir: st
 	// the swap or a full rollback has succeeded, never after a failed rollback.
 	let clearMarker = false;
 	try {
-		for (const suffix of ["-wal", "-shm"]) {
+		for (const suffix of ["-wal", "-shm", "-journal"]) {
 			const sidecar = `${dbPath}${suffix}`;
 			try {
 				const retiredPath = path.join(
@@ -702,6 +702,28 @@ async function repairCorruptDatabase(probe: DbProbe, repair: DbRepair): Promise<
 	}
 }
 
+/**
+ * Open the database read-write with a busy_timeout so SQLite can roll back a
+ * hot rollback journal left by a crash. A read-only probe fails with
+ * SQLITE_READONLY on a hot journal and gets misclassified as corrupt; this
+ * lets the repair path recover the journal data before attempting salvage.
+ * Returns true when the open succeeded (journal rolled back or none present).
+ */
+async function rollbackHotJournal(dbPath: string): Promise<boolean> {
+	let handle: Database | null = null;
+	try {
+		handle = new Database(dbPath);
+		handle.run("PRAGMA busy_timeout = 5000");
+		// A trivial read triggers hot-journal rollback on open.
+		handle.query("PRAGMA journal_mode").get();
+		return true;
+	} catch {
+		return false;
+	} finally {
+		handle?.close();
+	}
+}
+
 export async function repairDatabase(probe: DbProbe): Promise<DbRepair> {
 	const repair: DbRepair = {
 		label: probe.label,
@@ -721,7 +743,20 @@ export async function repairDatabase(probe: DbProbe): Promise<DbRepair> {
 	if (probe.quickCheck === "ok" && probe.openError === null) {
 		await repairHealthyDatabase(probe, repair);
 	} else {
-		await repairCorruptDatabase(probe, repair);
+		// A DELETE-journal database with a hot journal after a crash fails the
+		// read-only probe (SQLITE_READONLY). Open read-write so SQLite rolls
+		// back the journal, then re-probe before declaring corruption.
+		if (await rollbackHotJournal(probe.path)) {
+			const reprobed = await probeDatabase({ label: probe.label, path: probe.path, policy: probe.policy });
+			if (reprobed.quickCheck === "ok" && reprobed.openError === null) {
+				await repairHealthyDatabase(reprobed, repair);
+				repair.bytesAfter = await statSizeOr(probe.path, repair.bytesBefore);
+				return repair;
+			}
+			await repairCorruptDatabase(reprobed, repair);
+		} else {
+			await repairCorruptDatabase(probe, repair);
+		}
 	}
 	repair.bytesAfter = await statSizeOr(probe.path, repair.bytesBefore);
 	return repair;
