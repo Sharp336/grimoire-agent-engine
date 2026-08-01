@@ -171,6 +171,21 @@ Valid rule approvals are `allow`, `prompt`, and `deny`. Critical bash commands s
 
 Matching is asymmetric so that rules mean what they appear to: `deny` and `prompt` rules fire when the glob matches the whole command **or any single segment** of a compound line (split on `&&`, `||`, `;`, `|`, a single `&`, subshells, and newlines), so `match: "rm -rf *"` still denies `cd /tmp && rm -rf build` and `sleep 1 & rm -rf build`. `allow` rules must match the **entire** command and never apply to a compound line, so a narrow allow such as `match: "git *"` cannot vouch for `git status && rm -rf /`.
 
+### Bash interceptor patterns
+
+`bashInterceptor` is separate from `bash.patterns`: it redirects Bash commands to dedicated tools rather than defining whether a command may execute. Enable it explicitly and configure regular-expression patterns with a replacement tool and a model-facing message:
+
+```yaml
+bashInterceptor:
+  enabled: true
+  patterns:
+    - pattern: '^\s*(cat|head|tail)\s+'
+      tool: read
+      message: "Use the read tool instead."
+```
+
+The named replacement tool must be available in the current session or the interceptor does not block the Bash call. For a detailed comparison of permission policy and dedicated-tool routing, including compound-command behavior and ordering, see [the Bash tool documentation](tools/bash.md#command-policy-and-dedicated-tool-routing).
+
 ### Worked example: global vs. project
 
 ```yaml
@@ -385,6 +400,7 @@ thinkingBudgets:
 | `thinkingBudgets.high` | number | `16384` | Token budget for `high`. |
 | `thinkingBudgets.xhigh` | number | `32768` | Token budget for `xhigh`. |
 | `thinkingBudgets.max` | number | `32768` | Token budget for `max`. |
+| `providers.autoThinkingMaxEffort` | enum | `xhigh` | Highest effort `defaultThinkingLevel: auto` may resolve. `xhigh` keeps the classifier one tier below the top, so only `ultrathink` reaches `max`; `max` lets the classifier bill the top tier on models that expose it. The local on-device classifier stays capped at `xhigh` either way. This governs what `auto` *resolves*: a model whose ladder offers nothing under the ceiling gets no auto level at all, and one that also sets `thinking.requiresEffort` still receives its lowest supported effort from the transport — on a `["max"]` ladder that is `max`, because the model accepts nothing else. |
 
 ### Sampling
 

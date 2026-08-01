@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [17.2.2] - 2026-07-31
+
+### Added
+
+- Added request tokens to explicit OSC 11 appearance refreshes to allow consumers to correlate responses across queued and coalesced terminal probes.
+
+### Fixed
+
+- Fixed the event-loop watchdog incorrectly reporting system sleep or suspension as a synchronous ui.loop-blocked stall.
+- Fixed terminal copies of fenced-code blocks retaining margins from components, lists, or blockquotes in assistant messages (#7055 by @GratefulDave).
+
+## [17.2.0] - 2026-07-30
+
+### Added
+
+- Added response-level OSC 11 appearance subscriptions to help terminal consumers distinguish confirmed unchanged background classifications from missing replies.
+
+### Fixed
+
+- Fixed native Windows terminal panes freezing their host during forced closure by skipping the stdout-drain wait after ConPTY disconnects.
+- Fixed high CPU usage in the Loader spinner during idle waits by optimizing text wrapping and caching during frame updates.
+- Fixed hash-prefixed UUIDs in prose being misclassified as 8-digit CSS colors and receiving spurious swatches.
+- Fixed unbounded memory growth and potential host freezes when a PTY consumer stalls by capping the pending stdout backlog and treating undrained consumers as a disconnect.
+
 ## [17.1.8] - 2026-07-28
 
 ### Fixed
