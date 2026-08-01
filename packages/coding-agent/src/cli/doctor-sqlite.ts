@@ -945,6 +945,14 @@ async function repairCorruptDatabase(probe: DbProbe, repair: DbRepair): Promise<
 		repair.error = messageOf(error);
 		return;
 	}
+	// A null lock means the database could not be opened or BEGIN IMMEDIATE
+	// failed for a non-BUSY reason. A failed BEGIN IMMEDIATE does not prove no
+	// writer exists — refuse the swap so it never proceeds without exclusion.
+	if (lockHandle === null) {
+		repair.busy = true;
+		repair.error = "repair lock unavailable; another process may be writing";
+		return;
+	}
 	try {
 		let archiveDir: string;
 		try {
