@@ -374,14 +374,17 @@ function swapMarkerPath(dbPath: string): string {
  * `lockHandle` holds a RESERVED write lock on the live database; it stays
  * open through the rename on Linux/macOS (an open handle does not block
  * rename). On Windows, renaming over an open handle fails; in that case the
- * handle is closed and the rename retried once immediately. The crash marker
- * and rollback keep that one-tick window safe.
+ * handle is closed, a fresh holder + trio-snapshot re-check runs, and only
+ * if clean is the rename retried immediately. This bounds the lock-free
+ * window to one event-loop tick with no concurrent holder.
+ * `expected` is the verified trio snapshot from before the lock was acquired.
  */
 async function swapInCandidate(
 	dbPath: string,
 	candidate: string,
 	archiveDir: string,
 	lockHandle: Database | null,
+	expected: TrioSnapshotEntry[],
 ): Promise<void> {
 	const marker = swapMarkerPath(dbPath);
 	// Resolve the archive path so a recovery run from a different cwd can find it.
@@ -419,14 +422,26 @@ async function swapInCandidate(
 		}
 		await fsyncDir(path.dirname(dbPath));
 		// On Linux/macOS an open handle does not block rename. On Windows,
-		// renaming over an open handle fails; close the lock and retry once.
-		// The crash marker + rollback keeps that one-tick window safe.
+		// renaming over an open handle fails; close the lock, run a fresh
+		// holder + trio-snapshot re-check, and only if clean retry the rename.
+		// This bounds the lock-free window to one event-loop tick with no
+		// concurrent holder, matching the pre-lock safety bar plus detection.
 		try {
 			await fs.rename(candidate, dbPath);
 		} catch (renameError) {
 			if (lockHandle !== null) {
 				releaseWriteLock(lockHandle);
 				lockHandle = null;
+				// Fresh re-check: if a writer appeared or the trio diverged,
+				// abort with the archive intact (safe refusal).
+				if ((await hasHolders(dbPath)) === true)
+					throw new Error("database acquired a holder after lock release; aborting swap");
+				try {
+					if (!snapshotsEqual(expected, await snapshotTrio(dbPath)))
+						throw new Error("database changed after lock release; aborting swap");
+				} catch (error) {
+					throw error instanceof Error ? error : new Error(messageOf(error));
+				}
 				await fs.rename(candidate, dbPath);
 			} else {
 				throw renameError;
@@ -968,7 +983,7 @@ async function repairCorruptDatabase(probe: DbProbe, repair: DbRepair): Promise<
 		const swapLockHandle = lockHandle;
 		lockHandle = null;
 		try {
-			await swapInCandidate(probe.path, candidate, archiveDir, swapLockHandle);
+			await swapInCandidate(probe.path, candidate, archiveDir, swapLockHandle, expected);
 			repair.actions.push(salvageError === null ? "salvaged" : "rescued");
 			candidate = null;
 		} catch (error) {
