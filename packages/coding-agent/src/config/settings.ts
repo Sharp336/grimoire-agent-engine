@@ -1368,8 +1368,15 @@ export class Settings {
 
 		try {
 			await fs.promises.mkdir(path.dirname(configPath), { recursive: true });
-			await withFileLock(configPath, async () => {
-				const current = await this.#loadYaml(configPath);
+			await this.#withYamlWriteLock(configPath, async writePath => {
+				let current: RawSettings;
+				const wasQuarantined = this.#quarantinedYamlTargets.has(configPath);
+				try {
+					current = (await this.#loadYamlIfPresentForWriteLocked(configPath, writePath)) ?? {};
+				} catch (error) {
+					if (wasQuarantined || !this.#quarantinedYamlTargets.has(configPath)) throw error;
+					current = {};
+				}
 				const disabled = new Set(normalizeStringArrayForSettings(getByPath(current, [disabledPath])));
 				const enabled = new Set(normalizeStringArrayForSettings(getByPath(current, [enabledPath])));
 
@@ -1389,7 +1396,8 @@ export class Settings {
 				if (enabled.size === 0) deleteByPath(current, [enabledPath]);
 				else setByPath(current, [enabledPath], [...enabled].sort());
 
-				await Bun.write(configPath, YAML.stringify(current, null, 2));
+				await this.#writeYamlAtomically(writePath, current);
+				this.#quarantinedYamlTargets.delete(configPath);
 				invalidateDiscoveryCache(configPath);
 			});
 		} catch (error) {

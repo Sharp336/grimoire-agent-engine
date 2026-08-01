@@ -1229,7 +1229,7 @@ export class MCPCommandController {
 		try {
 			// Determine file path
 			const cwd = getProjectDir();
-			const filePath = getMCPConfigPath(scope, cwd);
+			const filePath = scope === "project" ? getProjectMCPConfigPath(cwd) : getMCPConfigPath("user", cwd);
 
 			// Add server to config
 			await addMCPServer(filePath, name, config);
@@ -2329,7 +2329,8 @@ export class MCPCommandController {
 	}
 
 	async #nextAvailableServerName(scope: MCPAddScope, baseName: string): Promise<string> {
-		const filePath = getMCPConfigPath(scope, getProjectDir());
+		const cwd = getProjectDir();
+		const filePath = scope === "project" ? getProjectMCPConfigPath(cwd) : getMCPConfigPath("user", cwd);
 		const config = await readMCPConfigFile(filePath);
 		const existingNames = new Set(Object.keys(config.mcpServers ?? {}));
 		if (!existingNames.has(baseName)) return baseName;
@@ -2349,7 +2350,8 @@ export class MCPCommandController {
 				this.ctx.showError("Server name cannot be empty.");
 				continue;
 			}
-			const filePath = getMCPConfigPath(scope, getProjectDir());
+			const cwd = getProjectDir();
+			const filePath = scope === "project" ? getProjectMCPConfigPath(cwd) : getMCPConfigPath("user", cwd);
 			const config = await readMCPConfigFile(filePath);
 			if (config.mcpServers?.[proposed]) {
 				this.ctx.showError(`Server "${proposed}" already exists in ${scope} config.`);

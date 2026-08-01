@@ -152,6 +152,22 @@ describe("project activation settings", () => {
 		expect(projectConfig.enabledExtensions).toEqual(["skill:alpha", "skill:beta", "skill:gamma"]);
 	});
 
+	it("quarantines a malformed activation config before replacing it", async () => {
+		const projectRoot = await mkProjectTmp(".tmp-project-activation-invalid-");
+		const agentDir = await mkTmp("omp-project-agent-");
+		const configPath = path.join(projectRoot, ".omp", "config.yml");
+		await Bun.write(configPath, "disabledExtensions: []\n");
+		const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
+		await Bun.write(configPath, "disabledExtensions: [\n");
+
+		await settings.setProjectActivation("skills", "alpha", "disabled", "project");
+
+		const config = YAML.parse(await Bun.file(configPath).text()) as { disabledExtensions?: string[] };
+		expect(config.disabledExtensions).toEqual(["skill:alpha"]);
+		const siblingFiles = await fs.readdir(path.dirname(configPath));
+		expect(siblingFiles.some(file => file.startsWith("config.yml.broken-"))).toBe(true);
+	});
+
 	it("keeps global activation scope independent from project disabled extensions", async () => {
 		const projectRoot = await mkProjectTmp(".tmp-project-global-scope-");
 		const agentDir = await mkTmp("omp-project-agent-");
