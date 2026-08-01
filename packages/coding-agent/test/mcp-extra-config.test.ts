@@ -370,6 +370,10 @@ describe("loadAllMCPConfigs extraConfigPaths", () => {
 		["an empty server object", { foo: {} }, /Must have command or url/],
 		["http with no url", { foo: { type: "http" } }, /url/],
 		["stdio with no command", { foo: { type: "stdio", url: "http://localhost:4401/mcp" } }, /command/],
+		// An unknown type falls through `convertToLegacyConfig` to stdio, so it
+		// either degrades to a connection error or quietly runs a command the
+		// entry did not ask to be run that way.
+		["an unknown transport type", { foo: { type: "htt", url: "http://localhost:4401/mcp" } }, /unknown.*type/i],
 	])("invalid explicit server entry is a hard error: %s", async (_label, mcpServers, expected) => {
 		const invalidPath = path.join(projectDir, "invalid.json");
 		await fs.writeFile(invalidPath, JSON.stringify({ mcpServers }));
@@ -493,8 +497,10 @@ describe("loadAllMCPConfigs extraConfigPaths", () => {
 		};
 
 		test("a reauth recorded in the user config wins over the explicit entry", async () => {
+			// `timeout` stands in for everything that is not auth: the overlay must
+			// contribute credentials only, so a wholesale shadow would leak it.
 			await writeUserConfig({
-				secure: { url: "http://localhost:1111/mcp", auth: { type: "oauth", credentialId: "new" } },
+				secure: { url: "http://localhost:4401/mcp", timeout: 999, auth: { type: "oauth", credentialId: "new" } },
 			});
 			const explicitPath = path.join(projectDir, "explicit.json");
 			await fs.writeFile(
@@ -506,14 +512,11 @@ describe("loadAllMCPConfigs extraConfigPaths", () => {
 				}),
 			);
 
-			const { configs } = await loadAllMCPConfigs(projectDir, { extraConfigPaths: [explicitPath] });
+			const { configs, sources } = await loadAllMCPConfigs(projectDir, { extraConfigPaths: [explicitPath] });
 
-			// Auth from the user config, endpoint still from the explicit file — a
-			// wholesale shadow would take the stale url along with the fresh auth.
-			expect(configs.secure).toMatchObject({
-				url: "http://localhost:4401/mcp",
-				auth: { type: "oauth", credentialId: "new" },
-			});
+			expect(configs.secure).toMatchObject({ auth: { type: "oauth", credentialId: "new" } });
+			expect(configs.secure?.timeout).toBeUndefined();
+			expect(sources.secure.provider).toBe("mcp-config-flag");
 		});
 
 		test("an unauth recorded in the user config clears the explicit entry's auth", async () => {
@@ -532,6 +535,30 @@ describe("loadAllMCPConfigs extraConfigPaths", () => {
 
 			expect(configs.secure?.auth).toBeUndefined();
 			expect(configs.secure).toMatchObject({ url: "http://localhost:4401/mcp" });
+		});
+
+		// A user config is a general store, not only what the auth commands write.
+		// A stale same-named entry for some other endpoint must not be read as an
+		// auth overlay, or it would start an authenticated explicit server without
+		// credentials.
+		test("a same-named user entry for a different endpoint does not touch explicit auth", async () => {
+			await writeUserConfig({ secure: { url: "http://localhost:9999/mcp" } });
+			const explicitPath = path.join(projectDir, "explicit.json");
+			await fs.writeFile(
+				explicitPath,
+				JSON.stringify({
+					mcpServers: {
+						secure: { url: "http://localhost:4401/mcp", auth: { type: "oauth", credentialId: "own" } },
+					},
+				}),
+			);
+
+			const { configs } = await loadAllMCPConfigs(projectDir, { extraConfigPaths: [explicitPath] });
+
+			expect(configs.secure).toMatchObject({
+				url: "http://localhost:4401/mcp",
+				auth: { type: "oauth", credentialId: "own" },
+			});
 		});
 
 		test("an explicit entry with no user-config counterpart keeps its own auth", async () => {

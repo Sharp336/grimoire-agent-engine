@@ -123,6 +123,23 @@ function isTombstone(server: MCPServer): boolean {
 }
 
 /**
+ * Whether two servers address the same endpoint, ignoring credentials.
+ *
+ * `mcpCapability.equivalent` folds `auth`/`oauth` into the comparison, which is
+ * right for deduplication but wrong for recognising an auth overlay — the whole
+ * point of which is that the credentials differ. Same predicate, auth terms
+ * neutralised, so the two stay in step on what an endpoint is.
+ */
+function sameEndpoint(left: MCPServer, right: MCPServer): boolean {
+	return (
+		mcpCapability.equivalent?.(
+			{ ...left, auth: undefined, oauth: undefined },
+			{ ...right, auth: undefined, oauth: undefined },
+		) ?? false
+	);
+}
+
+/**
  * Load MCP servers from explicitly specified `mcpServers` JSON files.
  * Unlike provider discovery, an unreadable or malformed file is a hard error:
  * the caller asked for this exact file.
@@ -256,6 +273,12 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 		// behind. Only those two fields: the explicit file stays the source of
 		// truth for the endpoint, so a regenerated config can still move a port
 		// without the user copy masking it.
+		//
+		// The name alone does not identify an overlay, though: a user config is a
+		// general store, and a stale entry for some other endpoint that happens to
+		// share a name would otherwise strip an explicit server's credentials. The
+		// auth commands write back the endpoint they were run against, so an
+		// overlay is a same-named entry describing the same endpoint.
 		const userEntries = new Map<string, MCPServer>();
 		for (const server of result.items) {
 			if (server._source.path === userPath) userEntries.set(server.name, server);
@@ -281,7 +304,8 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 			// Later wins, matching the same-name rule above — whichever entry the
 			// caller wrote last is the one whose name the endpoint keeps.
 			const userEntry = userEntries.get(server.name);
-			const merged = userEntry ? { ...server, auth: userEntry.auth, oauth: userEntry.oauth } : server;
+			const isAuthOverlay = userEntry !== undefined && sameEndpoint(userEntry, server);
+			const merged = isAuthOverlay ? { ...server, auth: userEntry.auth, oauth: userEntry.oauth } : server;
 			const aliasIndex = kept.findIndex(existing => mcpCapability.equivalent?.(existing, merged) ?? false);
 			if (aliasIndex >= 0) kept.splice(aliasIndex, 1);
 			kept.push(merged);
