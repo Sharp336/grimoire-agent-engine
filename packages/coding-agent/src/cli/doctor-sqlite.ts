@@ -523,9 +523,68 @@ async function runRecoverDump(sqlite: string, workDb: string, dumpPath: string):
 	}
 	throw new Error("sqlite .recover failed: CLI rejects --ignore-freelist and plain form");
 }
+
+/** Result of probing whether the installed sqlite3 CLI can `.recover` a corrupted database. */
+export interface SqliteRecoverCapability {
+	available: boolean;
+	detail: string;
+}
+
+let recoverCapabilityCache: SqliteRecoverCapability | null = null;
+
+/**
+ * Probe whether the installed sqlite3 CLI can `.recover` a deliberately
+ * corrupted fixture database. Memoized so the cost is paid once per process.
+ * doctor-cli.ts consumes this export for a tools-section finding.
+ */
+export async function probeSqliteRecoverCapability(): Promise<SqliteRecoverCapability> {
+	if (recoverCapabilityCache !== null) return recoverCapabilityCache;
+	const sqlite = $which("sqlite3");
+	if (sqlite === null) {
+		recoverCapabilityCache = { available: false, detail: "sqlite3 CLI not found" };
+		return recoverCapabilityCache;
+	}
+	const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-doctor-cap-"));
+	try {
+		const fixtureDb = path.join(workDir, "fixture.db");
+		const db = new Database(fixtureDb);
+		db.run("PRAGMA journal_mode=DELETE");
+		db.run("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)");
+		db.run("INSERT INTO t (v) VALUES ('hello')");
+		db.close();
+		// Corrupt a page past the header (bytes [4096, 6144)) — never touch
+		// the first 100 bytes or the file becomes unopenable.
+		const fd = await fs.open(fixtureDb, "r+");
+		await fd.write(Buffer.alloc(2048, 0xff), 0, 2048, 4096);
+		await fd.close();
+		const dumpPath = path.join(workDir, "recovery.sql");
+		const recover = Bun.spawn([sqlite, fixtureDb, ".recover"], {
+			stdout: Bun.file(dumpPath),
+			stderr: "pipe",
+		});
+		const stderr = await new Response(recover.stderr as ReadableStream<Uint8Array>).text();
+		const exitCode = await recover.exited;
+		const dumpSize = await statSizeOr(dumpPath, 0);
+		if (exitCode === 0 && dumpSize > 0) {
+			recoverCapabilityCache = { available: true, detail: "sqlite3 .recover available" };
+		} else {
+			recoverCapabilityCache = {
+				available: false,
+				detail: `sqlite3 .recover failed on test fixture: ${stderr.trim().slice(0, 200) || `exit ${exitCode}`}`,
+			};
+		}
+	} catch (error) {
+		recoverCapabilityCache = { available: false, detail: `capability probe failed: ${messageOf(error)}` };
+	} finally {
+		await fs.rm(workDir, { recursive: true, force: true }).catch(() => undefined);
+	}
+	return recoverCapabilityCache;
+}
 async function salvageViaRecover(dbPath: string, archiveDir: string): Promise<string> {
 	const sqlite = $which("sqlite3");
 	if (sqlite === null) throw new Error("sqlite3 CLI not found for .recover salvage");
+	const cap = await probeSqliteRecoverCapability();
+	if (!cap.available) throw new Error(`sqlite3 CLI cannot recover on this system (${cap.detail})`);
 	const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-doctor-salvage-"));
 	try {
 		const archivedMain = path.join(archiveDir, path.basename(dbPath));
