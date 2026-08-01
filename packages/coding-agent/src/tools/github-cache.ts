@@ -21,6 +21,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getGithubCacheDbPath, logger } from "@oh-my-pi/pi-utils";
+import { configureSqliteDatabase } from "@oh-my-pi/pi-utils/sqlite";
 import type { Settings } from "../config/settings";
 import { ToolAbortError } from "./tool-errors";
 
@@ -96,11 +97,7 @@ export function openDb(): Database | null {
 		ensureParentDir(dbPath);
 		const db = new Database(dbPath);
 		// Install the busy handler BEFORE any lock-taking statement. See #2421.
-		db.run("PRAGMA busy_timeout = 5000");
-		db.run(`
-			PRAGMA journal_mode=WAL;
-			PRAGMA synchronous=NORMAL;
-		`);
+		configureSqliteDatabase(db, { wal: true, synchronousNormal: true });
 		// Migrate any pre-existing table whose key/check constraint predates
 		// the current schema. The cache is regenerable, so we drop rows rather
 		// than running an in-place ALTER dance.

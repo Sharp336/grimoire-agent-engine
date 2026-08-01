@@ -4,6 +4,7 @@ import type { Usage } from "@oh-my-pi/pi-ai";
 import type { GeneratedProvider } from "@oh-my-pi/pi-catalog/models";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { getConfigRootDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
+import { configureSqliteDatabase } from "@oh-my-pi/pi-utils/sqlite";
 import { classifyAgentType } from "./parser";
 import type {
 	AgentType,
@@ -78,8 +79,7 @@ export async function initDb(): Promise<Database> {
 	db = new Database(getStatsDbPath());
 	// Install the busy handler BEFORE any lock-taking statement. See
 	// https://github.com/can1357/oh-my-pi/issues/2421.
-	db.run("PRAGMA busy_timeout = 5000");
-	db.run("PRAGMA journal_mode = WAL");
+	configureSqliteDatabase(db, { wal: true });
 
 	// Whether `messages` predates this init — drives the one-time agent_type
 	// backfill below, so it must be sampled before CREATE TABLE adds the table.

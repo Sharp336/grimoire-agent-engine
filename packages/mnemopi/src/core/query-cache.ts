@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { configureSqliteDatabase } from "@oh-my-pi/pi-utils/sqlite";
 import { type Env, enhancedRecallEnabled } from "../config";
 import { cosineSimilarity } from "./vector-math";
 
@@ -83,7 +84,10 @@ export class QueryCache {
 		if (dbPath !== ":memory:") mkdirSync(dirname(dbPath), { recursive: true });
 		const db = new Database(dbPath, { create: true, readwrite: true, strict: true });
 		this.#conn = db;
-		if (dbPath !== ":memory:") db.exec("PRAGMA journal_mode=WAL");
+		// Issue #2421: install the busy handler before the schema DDL below
+		// (CREATE TABLE/INDEX take locks). Replaces a bare journal_mode=WAL
+		// exec that left busy_timeout at the default of 0.
+		configureSqliteDatabase(db, { wal: dbPath !== ":memory:" });
 		db.exec(`
 			CREATE TABLE IF NOT EXISTS query_cache (
 				normalized TEXT PRIMARY KEY,

@@ -11,6 +11,7 @@ import {
 import { AsyncDrain, getAgentDbPath, getStatsDbPath, isRecord, logger } from "@oh-my-pi/pi-utils";
 import { shellQuote } from "@oh-my-pi/pi-utils/shell";
 import { isSqliteCorruptError } from "@oh-my-pi/pi-utils/sqlite";
+import { configureSqliteDatabase, openSqliteDatabase } from "@oh-my-pi/pi-utils/sqlite";
 import type { RawSettings as Settings } from "../config/settings";
 
 /** Row shape for settings table queries */
@@ -215,11 +216,8 @@ ON CONFLICT(model_key) DO UPDATE SET
 		// `PRAGMA journal_mode=WAL`, which acquires an exclusive lock during WAL
 		// recovery). Without this, concurrent omp startups can crash here with
 		// `SQLITE_BUSY` / `SQLITE_BUSY_RECOVERY`. See issue #2421.
-		this.#db.run("PRAGMA busy_timeout = 5000");
+		configureSqliteDatabase(this.#db, { wal: true, synchronousNormal: true });
 		this.#db.run(`
-PRAGMA journal_mode=WAL;
-PRAGMA synchronous=NORMAL;
-
 CREATE TABLE IF NOT EXISTS model_usage (
 	model_key TEXT PRIMARY KEY,
 	last_used_at INTEGER NOT NULL DEFAULT (${SQLITE_NOW_EPOCH})
@@ -584,9 +582,8 @@ FROM model_usage_legacy
 	 * @throws When the stats db cannot be opened or queried
 	 */
 	async backfillModelPerfFromStats(statsDbPath: string): Promise<number> {
-		const statsDb = new Database(statsDbPath, { readonly: true });
+		const statsDb = openSqliteDatabase(statsDbPath, { readonly: true });
 		try {
-			statsDb.run("PRAGMA busy_timeout = 5000");
 			const select = statsDb.prepare(
 				`SELECT rowid, timestamp, provider, model, output_tokens, duration, ttft
 FROM messages

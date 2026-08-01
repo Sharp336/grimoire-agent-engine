@@ -15,6 +15,7 @@ import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/aliba
 import { $env, getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
 import { shellQuote } from "@oh-my-pi/pi-utils/shell";
 import { isSqliteCorruptError } from "@oh-my-pi/pi-utils/sqlite";
+import { configureSqliteDatabase, isSqliteCorruptError } from "@oh-my-pi/pi-utils/sqlite";
 import type { ApiKeyResolver } from "./auth-retry";
 import * as AIError from "./error";
 import { isUsageLimitOutcome } from "./error/rate-limit";
@@ -7060,10 +7061,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		// `PRAGMA journal_mode=WAL`, which acquires an exclusive lock during WAL
 		// recovery). Without this, concurrent omp startups can crash here with
 		// `SQLITE_BUSY` / `SQLITE_BUSY_RECOVERY`. See issue #2421.
-		this.#db.run("PRAGMA busy_timeout = 5000");
+		configureSqliteDatabase(this.#db, { wal: true, synchronousNormal: true });
 		this.#db.run(`
-			PRAGMA journal_mode=WAL;
-			PRAGMA synchronous=NORMAL;
 			CREATE TABLE IF NOT EXISTS auth_schema_version (
 				id INTEGER PRIMARY KEY CHECK (id = 1),
 				version INTEGER NOT NULL

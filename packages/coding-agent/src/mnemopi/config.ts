@@ -1,8 +1,9 @@
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { MnemopiOptions } from "@oh-my-pi/pi-mnemopi";
 import { getMemoriesDir, logger } from "@oh-my-pi/pi-utils";
+import { openSqliteDatabase } from "@oh-my-pi/pi-utils/sqlite";
 import type { Settings } from "../config/settings";
 
 export type MnemopiLlmMode = "none" | "smol" | "remote";
@@ -223,7 +224,7 @@ export function extendRecallWithLegacyBanks(
 function bankOnlyHasCwd(dbPath: string, cwd: string): boolean {
 	let db: Database | undefined;
 	try {
-		db = new Database(dbPath, { readonly: true });
+		db = openSqliteDatabase(dbPath, { readonly: true });
 		const row = db
 			.prepare<{ matching: number; unsafe: number }, [string, string]>(`
 				SELECT

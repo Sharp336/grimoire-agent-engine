@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { configureSqliteDatabase } from "@oh-my-pi/pi-utils/sqlite";
 
 export const DEFAULT_LOG_DIR = join(homedir(), ".mnemopi", "data");
 export const DEFAULT_LOG_DB = join(DEFAULT_LOG_DIR, "cost_log.db");
@@ -23,7 +24,12 @@ type AggregateRow = {
 export function getConn(dbPath?: string): Database {
 	const path = dbPath ?? DEFAULT_LOG_DB;
 	mkdirSync(dirname(path), { recursive: true });
-	return new Database(path, { create: true, readwrite: true, strict: true });
+	const db = new Database(path, { create: true, readwrite: true, strict: true });
+	// Issue #2421: install the busy handler before any lock-taking statement.
+	// This opener previously set no pragmas at all; preserve that pragma set
+	// (busy_timeout only — no WAL, no foreign_keys) and only add the handler.
+	configureSqliteDatabase(db);
+	return db;
 }
 
 export function initCostLog(dbPath?: string): void {

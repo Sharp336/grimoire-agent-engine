@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed three SQLite openers missing the busy handler required by the issue-#2421 invariant: the recall query cache ran `PRAGMA journal_mode=WAL` with `busy_timeout` still 0, and the cost log and disaster-recovery scratch databases installed no pragmas at all. All three now go through the shared `configureSqliteDatabase`, and each carries a pragma-order regression test.
+
 ## [17.2.3] - 2026-08-01
 
 ### Fixed

@@ -4,6 +4,7 @@
  */
 import { Database } from "bun:sqlite";
 import { getModelDbPath } from "@oh-my-pi/pi-utils";
+import { configureSqliteDatabase } from "@oh-my-pi/pi-utils/sqlite";
 import type { Api, Model, ModelSpec } from "./types";
 
 // Rows persist ModelSpec JSON (sparse `compat`, never the resolved record);
@@ -68,12 +69,10 @@ function openDb(resolvedPath: string): Database {
 	const db = new Database(resolvedPath, { create: true });
 	// Install the busy handler BEFORE any lock-taking statement. See
 	// https://github.com/can1357/oh-my-pi/issues/2421.
-	db.run("PRAGMA busy_timeout = 3000");
 	// Schema invalidation can delete rows containing credentials written by old
 	// versions. Overwrite deleted SQLite cells instead of leaving their bytes in
 	// free pages where a raw scan of models.db can still recover them (#5780).
-	db.run("PRAGMA secure_delete = ON");
-	db.run("PRAGMA journal_mode = WAL");
+	configureSqliteDatabase(db, { busyTimeoutMs: 3000, secureDelete: true, wal: true });
 	db.run(`
 		CREATE TABLE IF NOT EXISTS model_cache (
 			provider_id TEXT PRIMARY KEY,

@@ -36,6 +36,7 @@ import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import { $env, $flag, getAutoQaDbPath, getInstallId, logger, VERSION } from "@oh-my-pi/pi-utils";
+import { configureSqliteDatabase } from "@oh-my-pi/pi-utils/sqlite";
 import type { Settings } from "..";
 import type { Theme } from "../modes/theme/theme";
 import { renderStatusLine, truncateToWidth } from "../tui";
@@ -266,7 +267,7 @@ export function openAutoQaDb(): Database | null {
 		fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 		const db = new Database(dbPath, { create: true });
 		// Install the busy handler BEFORE any lock-taking statement. See #2421.
-		db.run("PRAGMA busy_timeout = 5000");
+		configureSqliteDatabase(db);
 		db.exec(`
 			CREATE TABLE IF NOT EXISTS grievances (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,

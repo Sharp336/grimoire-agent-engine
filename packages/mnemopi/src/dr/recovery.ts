@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
+import { configureSqliteDatabase } from "@oh-my-pi/pi-utils/sqlite";
 import { dataDir as configuredDataDir, dbPath as configuredDbPath, type Env } from "../config";
 import { closeQuietly, openDatabase } from "../db";
 
@@ -189,6 +190,11 @@ function writeGzippedSqlDump(sql: string, tempPath: string): void {
 	let db: Database | null = null;
 	try {
 		db = new Database(tempPath, { create: true, readwrite: true, strict: true });
+		// Issue #2421: install the busy handler before db.exec(sql) below,
+		// which replays a .dump stream of lock-taking DDL. This scratch db is
+		// short-lived and renamed into place by the caller, so WAL is not set
+		// (it would orphan -wal/-shm sidecars beside the temp path).
+		configureSqliteDatabase(db);
 		db.exec(sql);
 	} finally {
 		closeQuietly(db);
