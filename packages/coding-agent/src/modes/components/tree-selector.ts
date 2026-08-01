@@ -21,6 +21,7 @@ import { DynamicBorder } from "./dynamic-border";
 import { centeredWindow, contentRowWidth, renderScrollableList } from "./selector-helpers";
 
 const MIN_SPLIT_WIDTH = 100;
+const MAX_BRANCH_MAP_NODES = 5_000;
 
 type TreeViewMode = "list" | "map" | "split";
 
@@ -68,6 +69,7 @@ class TreeList implements Component {
 	#multipleRoots = false;
 	#activePathIds: Set<string> = new Set();
 	#lastSelectedId: string | null = null;
+	#visibleTree: SessionTreeNode[] | undefined;
 
 	onSelect?: (entryId: string, options: { summarize: boolean }) => void;
 	onCancel?: () => void;
@@ -76,7 +78,7 @@ class TreeList implements Component {
 	constructor(
 		tree: SessionTreeNode[],
 		private readonly currentLeafId: string | null,
-		private readonly maxVisibleLines: number,
+		private maxVisibleLines: number,
 		initialFilterMode: FilterMode = "default",
 		initialSelectedId?: string,
 	) {
@@ -280,6 +282,7 @@ class TreeList implements Component {
 		if (this.#filteredNodes.length > 0) {
 			this.#lastSelectedId = this.#filteredNodes[this.#selectedIndex]?.node.entry.id ?? this.#lastSelectedId;
 		}
+		this.#visibleTree = undefined;
 
 		const searchTokens = this.#searchQuery.toLowerCase().split(/\s+/).filter(Boolean);
 
@@ -424,19 +427,42 @@ class TreeList implements Component {
 		return this.#filterMode;
 	}
 
+	getVisibleNodeCount(): number {
+		return this.#filteredNodes.length;
+	}
+
+	setMaxVisibleLines(maxVisibleLines: number): void {
+		this.maxVisibleLines = Math.max(1, maxVisibleLines);
+	}
+
 	getVisibleCurrentLeafId(): string | null {
 		if (this.#filteredNodes.length === 0) return null;
 		return this.#filteredNodes[this.#findNearestVisibleIndex(this.currentLeafId)]?.node.entry.id ?? null;
 	}
 
 	getVisibleTree(): SessionTreeNode[] {
+		if (this.#visibleTree) return this.#visibleTree;
+
 		const visibleIds = new Set(this.#filteredNodes.map(node => node.node.entry.id));
-		const project = (node: SessionTreeNode): SessionTreeNode[] => {
-			const children = node.children.flatMap(project);
-			if (!visibleIds.has(node.entry.id)) return children;
-			return [{ ...node, children }];
-		};
-		return this.#roots.flatMap(project);
+		const roots: SessionTreeNode[] = [];
+		type ProjectionItem = { node: SessionTreeNode; destination: SessionTreeNode[] };
+		const stack: ProjectionItem[] = [];
+		for (let index = this.#roots.length - 1; index >= 0; index--) {
+			stack.push({ node: this.#roots[index]!, destination: roots });
+		}
+		while (stack.length > 0) {
+			const { node, destination } = stack.pop()!;
+			const children: SessionTreeNode[] = [];
+			const visible = visibleIds.has(node.entry.id);
+			if (visible) destination.push({ ...node, children });
+			const childDestination = visible ? children : destination;
+			for (let index = node.children.length - 1; index >= 0; index--) {
+				stack.push({ node: node.children[index]!, destination: childDestination });
+			}
+		}
+
+		this.#visibleTree = roots;
+		return roots;
 	}
 
 	updateNodeLabel(entryId: string, label: string | undefined): void {
@@ -446,6 +472,7 @@ class TreeList implements Component {
 				break;
 			}
 		}
+		this.#visibleTree = undefined;
 	}
 
 	#selectFirstVisibleInSubtree(root: SessionTreeNode): boolean {
@@ -1007,105 +1034,179 @@ interface BranchMapNode {
 	width: number;
 }
 
+interface BranchMapLayout {
+	tree: SessionTreeNode[];
+	nodeWidth: number;
+	roots: BranchMapNode[];
+	nodes: BranchMapNode[];
+	nodesById: Map<string, BranchMapNode>;
+	nodesByY: Map<number, BranchMapNode[]>;
+	width: number;
+	height: number;
+}
+
 /**
  * A top-down tree view. Nodes remain visible instead of collapsing linear
  * runs, so the drawing retains the familiar trunk-and-branches shape.
  */
 class BranchMap implements Component {
+	#layoutCache: BranchMapLayout | undefined;
+	#maxVisibleLines: number;
+
 	constructor(
 		private readonly getVisibleTree: () => SessionTreeNode[],
 		private readonly getVisibleCurrentLeafId: () => string | null,
 		private readonly getSelectedId: () => string | null,
-		private readonly maxVisibleLines: number,
-	) {}
-
-	invalidate(): void {}
-
-	#toMapNodes(): BranchMapNode[] {
-		let number = 1;
-		const create = (node: SessionTreeNode): BranchMapNode => ({
-			node,
-			number: number++,
-			children: node.children.map(create),
-			x: 0,
-			y: 0,
-			width: 0,
-		});
-		return this.getVisibleTree().map(create);
+		maxVisibleLines: number,
+	) {
+		this.#maxVisibleLines = maxVisibleLines;
 	}
 
-	#layout(nodes: BranchMapNode[], nodeWidth: number): { width: number; height: number } {
+	invalidate(): void {
+		this.#layoutCache = undefined;
+	}
+
+	setMaxVisibleLines(maxVisibleLines: number): void {
+		this.#maxVisibleLines = Math.max(1, maxVisibleLines);
+	}
+
+	#getLayout(nodeWidth: number): BranchMapLayout {
+		const tree = this.getVisibleTree();
+		if (this.#layoutCache?.tree === tree && this.#layoutCache.nodeWidth === nodeWidth) return this.#layoutCache;
+
+		let number = 1;
+		const roots: BranchMapNode[] = [];
+		const nodes: BranchMapNode[] = [];
+		const nodesById = new Map<string, BranchMapNode>();
+		type BuildItem = { node: SessionTreeNode; destination: BranchMapNode[] };
+		const buildStack: BuildItem[] = [];
+		for (let index = tree.length - 1; index >= 0; index--) {
+			buildStack.push({ node: tree[index]!, destination: roots });
+		}
+		while (buildStack.length > 0) {
+			const { node, destination } = buildStack.pop()!;
+			const mapNode: BranchMapNode = { node, number: number++, children: [], x: 0, y: 0, width: 0 };
+			destination.push(mapNode);
+			nodes.push(mapNode);
+			nodesById.set(node.entry.id, mapNode);
+			for (let index = node.children.length - 1; index >= 0; index--) {
+				buildStack.push({ node: node.children[index]!, destination: mapNode.children });
+			}
+		}
+
 		const siblingGap = 4;
+		type MeasureItem = { node: BranchMapNode; measured: boolean };
+		const measureStack: MeasureItem[] = roots.map(node => ({ node, measured: false }));
+		while (measureStack.length > 0) {
+			const item = measureStack.pop()!;
+			if (item.measured) {
+				const childrenWidth = item.node.children.reduce(
+					(total, child, index) => total + child.width + (index > 0 ? siblingGap : 0),
+					0,
+				);
+				item.node.width = Math.max(nodeWidth, childrenWidth);
+				continue;
+			}
+			measureStack.push({ node: item.node, measured: true });
+			for (const child of item.node.children) measureStack.push({ node: child, measured: false });
+		}
+
+		const width = roots.reduce((total, node, index) => total + node.width + (index > 0 ? siblingGap : 0), 0);
+		let left = 0;
 		let maxY = 0;
-		const measure = (node: BranchMapNode): number => {
-			const childrenWidth = node.children.reduce((total, child, index) => {
-				return total + measure(child) + (index > 0 ? siblingGap : 0);
-			}, 0);
-			node.width = Math.max(nodeWidth, childrenWidth);
-			return node.width;
-		};
-		const position = (node: BranchMapNode, left: number, depth: number): void => {
-			node.x = left + Math.floor(node.width / 2);
-			node.y = depth * 4;
+		type PositionItem = { node: BranchMapNode; left: number; depth: number };
+		const positionStack: PositionItem[] = [];
+		const rootPositions: PositionItem[] = [];
+		for (const node of roots) {
+			rootPositions.push({ node, left, depth: 0 });
+			left += node.width + siblingGap;
+		}
+		for (let index = rootPositions.length - 1; index >= 0; index--) positionStack.push(rootPositions[index]!);
+		while (positionStack.length > 0) {
+			const item = positionStack.pop()!;
+			const { node } = item;
+			node.x = item.left + Math.floor(node.width / 2);
+			node.y = item.depth * 4;
 			maxY = Math.max(maxY, node.y);
 			const childrenWidth = node.children.reduce(
 				(total, child, index) => total + child.width + (index > 0 ? siblingGap : 0),
 				0,
 			);
-			let childLeft = left + Math.floor((node.width - childrenWidth) / 2);
+			let childLeft = item.left + Math.floor((node.width - childrenWidth) / 2);
+			const childPositions: PositionItem[] = [];
 			for (const child of node.children) {
-				position(child, childLeft, depth + 1);
+				childPositions.push({ node: child, left: childLeft, depth: item.depth + 1 });
 				childLeft += child.width + siblingGap;
 			}
-		};
-
-		const width = nodes.reduce((total, node, index) => total + measure(node) + (index > 0 ? siblingGap : 0), 0);
-		let left = 0;
-		for (const node of nodes) {
-			position(node, left, 0);
-			left += node.width + siblingGap;
+			for (let index = childPositions.length - 1; index >= 0; index--) positionStack.push(childPositions[index]!);
 		}
-		return { width, height: maxY + 1 };
+
+		const nodesByY = new Map<number, BranchMapNode[]>();
+		for (const node of nodes) {
+			const row = nodesByY.get(node.y);
+			if (row) row.push(node);
+			else nodesByY.set(node.y, [node]);
+		}
+		for (const row of nodesByY.values()) row.sort((a, b) => a.x - b.x);
+
+		const layout = { tree, nodeWidth, roots, nodes, nodesById, nodesByY, width, height: maxY + 1 };
+		this.#layoutCache = layout;
+		return layout;
 	}
 
 	render(width: number, showSummaries = true): readonly string[] {
 		const nodeWidth = showSummaries ? Math.max(18, Math.min(30, width - 4)) : Math.max(11, Math.min(14, width - 4));
-		const mapRoots = this.#toMapNodes();
-		const { width: mapWidth, height } = this.#layout(mapRoots, nodeWidth);
+		const layout = this.#getLayout(nodeWidth);
+		const { width: mapWidth, height } = layout;
+		const selectedId = this.getSelectedId();
+		const selected = selectedId ? layout.nodesById.get(selectedId) : undefined;
+		const graphWidth = Math.max(1, width - 2);
+		const selectedLeft = selected ? selected.x - Math.floor(nodeWidth / 2) : 0;
+		const startX = Math.max(0, Math.min(selectedLeft - 2, mapWidth - graphWidth));
+		const endX = Math.min(mapWidth, startX + graphWidth);
+		const visibleRows = Math.max(1, this.#maxVisibleLines - 1);
+		const startY = Math.max(0, Math.min((selected?.y ?? 0) - Math.floor(visibleRows / 2), height - visibleRows));
+		const endY = Math.min(height, startY + visibleRows);
 		const north = 1;
 		const east = 2;
 		const south = 4;
 		const west = 8;
-		const canvas = Array.from({ length: height }, () => Array.from({ length: mapWidth }, () => 0));
+		const canvas = Array.from({ length: Math.max(0, endY - startY) }, () =>
+			Array.from({ length: graphWidth }, () => 0),
+		);
 		const connect = (x: number, y: number, dx: number, dy: number): void => {
 			const nextX = x + dx;
 			const nextY = y + dy;
 			if (
-				x < 0 ||
-				x >= mapWidth ||
-				y < 0 ||
-				y >= height ||
-				nextX < 0 ||
-				nextX >= mapWidth ||
-				nextY < 0 ||
-				nextY >= height
+				x < startX ||
+				x >= endX ||
+				y < startY ||
+				y >= endY ||
+				nextX < startX ||
+				nextX >= endX ||
+				nextY < startY ||
+				nextY >= endY
 			)
 				return;
 			if (dx === 0 && dy === 1) {
-				canvas[y]![x]! |= south;
-				canvas[nextY]![nextX]! |= north;
+				canvas[y - startY]![x - startX]! |= south;
+				canvas[nextY - startY]![nextX - startX]! |= north;
 			} else if (dx === 1 && dy === 0) {
-				canvas[y]![x]! |= east;
-				canvas[nextY]![nextX]! |= west;
+				canvas[y - startY]![x - startX]! |= east;
+				canvas[nextY - startY]![nextX - startX]! |= west;
 			}
 		};
 		const vertical = (x: number, from: number, to: number): void => {
-			for (let y = from; y < to; y++) connect(x, y, 0, 1);
+			if (x < startX || x >= endX) return;
+			for (let y = Math.max(from, startY); y < Math.min(to, endY); y++) connect(x, y, 0, 1);
 		};
 		const horizontal = (from: number, to: number, y: number): void => {
-			for (let x = from; x < to; x++) connect(x, y, 1, 0);
+			if (y < startY || y >= endY) return;
+			for (let x = Math.max(from, startX); x < Math.min(to, endX); x++) connect(x, y, 1, 0);
 		};
-		const drawBranches = (node: BranchMapNode): void => {
+		const drawStack = [...layout.roots];
+		while (drawStack.length > 0) {
+			const node = drawStack.pop()!;
 			if (node.children.length === 1) {
 				vertical(node.x, node.y + 1, node.children[0]!.y);
 			} else if (node.children.length > 1) {
@@ -1114,26 +1215,13 @@ class BranchMap implements Component {
 				horizontal(node.children[0]!.x, node.children[node.children.length - 1]!.x, branchY);
 				for (const child of node.children) vertical(child.x, branchY, child.y);
 			}
-			for (const child of node.children) drawBranches(child);
-		};
-		for (const root of mapRoots) drawBranches(root);
+			for (let index = node.children.length - 1; index >= 0; index--) drawStack.push(node.children[index]!);
+		}
 
-		const selectedId = this.getSelectedId();
-		const allNodes = mapRoots.flatMap(root => this.#flatten(root));
-		const selected = allNodes.find(node => node.node.entry.id === selectedId);
-		const graphWidth = Math.max(1, width - 2);
-		const selectedLeft = selected ? selected.x - Math.floor(nodeWidth / 2) : 0;
-		const startX = Math.max(0, Math.min(selectedLeft - 2, mapWidth - graphWidth));
-		const endX = Math.min(mapWidth, startX + graphWidth);
-		const visibleRows = Math.max(1, this.maxVisibleLines - 2);
-		const startY = Math.max(0, Math.min((selected?.y ?? 0) - Math.floor(visibleRows / 2), height - visibleRows));
-		const endY = Math.min(height, startY + visibleRows);
 		const lines: string[] = [];
 		for (let y = startY; y < endY; y++) {
-			const row = canvas[y]!.slice(startX, endX)
-				.map(cell => this.#connector(cell))
-				.join("");
-			const rowNodes = allNodes
+			const row = canvas[y - startY]!.map(cell => this.#connector(cell)).join("");
+			const rowNodes = (layout.nodesByY.get(y) ?? [])
 				.filter(
 					node =>
 						node.y === y &&
@@ -1159,10 +1247,6 @@ class BranchMap implements Component {
 		if (endY < height && lines.length > 0) lines[lines.length - 1] = theme.fg("muted", "  … ↓");
 		lines.push(truncateToWidth(theme.fg("muted", "  › selected  • current session"), width));
 		return lines;
-	}
-
-	#flatten(node: BranchMapNode): BranchMapNode[] {
-		return [node, ...node.children.flatMap(child => this.#flatten(child))];
 	}
 
 	#connector(cell: number): string {
@@ -1267,8 +1351,9 @@ export class TreeSelectorComponent implements Component {
 		onCancel: () => void,
 		private readonly onLabelChangeCallback?: (entryId: string, label: string | undefined) => void,
 		initialFilterMode: FilterMode = "default",
+		private readonly getTerminalRows: () => number = () => terminalHeight,
 	) {
-		const maxVisibleLines = Math.max(5, Math.floor(terminalHeight / 2));
+		const maxVisibleLines = Math.max(1, terminalHeight);
 
 		this.#treeList = new TreeList(tree, currentLeafId, maxVisibleLines, initialFilterMode);
 		this.#treeList.onSelect = onSelect;
@@ -1308,6 +1393,7 @@ export class TreeSelectorComponent implements Component {
 	}
 
 	render(width: number): readonly string[] {
+		const terminalRows = Math.max(1, this.getTerminalRows());
 		const lines: string[] = [""];
 		const border = this.#border.render(width)[0]!;
 		lines.push(border);
@@ -1315,9 +1401,15 @@ export class TreeSelectorComponent implements Component {
 			lines.push(truncateToWidth(theme.bold("  Session Tree"), width));
 			lines.push(border);
 			lines.push("");
-			lines.push(...this.#labelInput.render(width));
+			const bodyRows = Math.max(1, terminalRows - 7);
+			lines.push(...this.#labelInput.render(width).slice(0, bodyRows));
 		} else {
-			const effectiveMode = this.#viewMode === "split" && width < MIN_SPLIT_WIDTH ? "list" : this.#viewMode;
+			const requestedMode = this.#viewMode === "split" && width < MIN_SPLIT_WIDTH ? "list" : this.#viewMode;
+			const visibleNodeCount = this.#treeList.getVisibleNodeCount();
+			const mapUnavailable = requestedMode !== "list" && visibleNodeCount > MAX_BRANCH_MAP_NODES;
+			const effectiveMode = mapUnavailable ? "list" : requestedMode;
+			const compactChrome = terminalRows < 24;
+			const minimalChrome = terminalRows < 16;
 			const title =
 				effectiveMode === "map"
 					? "  Branch Map"
@@ -1327,22 +1419,32 @@ export class TreeSelectorComponent implements Component {
 							)}Branch Map`
 						: "  Session Tree";
 			lines.push(truncateToWidth(theme.bold(title), width));
-			lines.push(...this.#renderFilterStatus(width));
-			lines.push(...this.#renderShortcutHelp(width));
-			if (effectiveMode !== "map") lines.push(new SearchLine(this.#treeList).render(width)[0]!);
+			const filterLines = this.#renderFilterStatus(width, compactChrome);
+			const shortcutLines = this.#renderShortcutHelp(width, compactChrome, minimalChrome);
+			const searchLines = effectiveMode !== "map" ? [new SearchLine(this.#treeList).render(width)[0]!] : [];
+			const mapLimitLines = mapUnavailable ? [this.#renderMapLimitStatus(width, visibleNodeCount)] : [];
+			const bodyRows = Math.max(
+				1,
+				terminalRows - 7 - filterLines.length - shortcutLines.length - searchLines.length - mapLimitLines.length,
+			);
+			this.#treeList.setMaxVisibleLines(bodyRows);
+			this.#branchMap.setMaxVisibleLines(bodyRows);
+			lines.push(...filterLines, ...mapLimitLines, ...shortcutLines, ...searchLines);
 			lines.push(border);
 			lines.push("");
+			let bodyLines: readonly string[];
 			if (effectiveMode === "split") {
-				lines.push(...this.#renderSplitView(width));
+				bodyLines = this.#renderSplitView(width);
 			} else if (effectiveMode === "map") {
-				lines.push(...this.#branchMap.render(width, true));
+				bodyLines = this.#branchMap.render(width, true);
 			} else {
-				lines.push(...this.#treeList.render(width));
+				bodyLines = this.#treeList.render(width);
 			}
+			lines.push(...bodyLines.slice(0, bodyRows));
 		}
 		lines.push("");
 		lines.push(border);
-		return lines;
+		return lines.slice(0, terminalRows);
 	}
 
 	#renderSplitView(width: number): readonly string[] {
@@ -1362,7 +1464,16 @@ export class TreeSelectorComponent implements Component {
 		return lines;
 	}
 
-	#renderShortcutHelp(width: number): readonly string[] {
+	#renderShortcutHelp(width: number, compact: boolean, minimal: boolean): readonly string[] {
+		if (minimal) return [];
+		if (compact) {
+			return [
+				truncateToWidth(
+					`  ${theme.fg("muted", "↑/↓ select   Enter confirm   Ctrl+G view   Ctrl+O filter")}`,
+					width,
+				),
+			];
+		}
 		const line = (section: string, text: string): string =>
 			truncateToWidth(`  ${theme.fg("accent", section.padEnd(11))}${theme.fg("muted", text)}`, width);
 		return [
@@ -1372,7 +1483,7 @@ export class TreeSelectorComponent implements Component {
 		];
 	}
 
-	#renderFilterStatus(width: number): readonly string[] {
+	#renderFilterStatus(width: number, compact: boolean): readonly string[] {
 		const mode = this.#treeList.getFilterMode();
 		const filters: Array<{ mode: FilterMode; label: string }> = [
 			{ mode: "default", label: "Default" },
@@ -1402,10 +1513,29 @@ export class TreeSelectorComponent implements Component {
 					return "content entries; labels and internal events hidden";
 			}
 		})();
+		if (compact) {
+			const active = filters.find(filter => filter.mode === mode)!;
+			return [
+				truncateToWidth(
+					`  ${theme.fg("muted", "Filter:")} ${theme.bold(theme.fg("accent", active.label))} ${theme.fg("dim", `— ${description}`)}`,
+					width,
+				),
+			];
+		}
 		return [
 			truncateToWidth(`  ${theme.fg("muted", "Filter")}  ${chips}`, width),
 			truncateToWidth(`  ${theme.fg("muted", "Showing:")} ${theme.fg("dim", description)}`, width),
 		];
+	}
+
+	#renderMapLimitStatus(width: number, visibleNodeCount: number): string {
+		return truncateToWidth(
+			theme.fg(
+				"warning",
+				`  Branch Map unavailable for ${visibleNodeCount.toLocaleString()} visible entries (limit ${MAX_BRANCH_MAP_NODES.toLocaleString()}). Search or filter to narrow the tree.`,
+			),
+			width,
+		);
 	}
 
 	#splitListWidth(width: number): number {

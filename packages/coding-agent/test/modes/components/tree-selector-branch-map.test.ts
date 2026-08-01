@@ -43,6 +43,46 @@ function treeWithHiddenInternalNode(): { tree: SessionTreeNode[]; currentLeafId:
 	return { tree: [root], currentLeafId: child.entry.id };
 }
 
+function linearUserTree(
+	count: number,
+	textAt: (index: number) => string = index => `node ${index}`,
+): {
+	tree: SessionTreeNode[];
+	currentLeafId: string;
+} {
+	const root = userNode(textAt(0));
+	let current = root;
+	for (let index = 1; index < count; index++) {
+		const child = userNode(textAt(index), current.entry.id);
+		current.children.push(child);
+		current = child;
+	}
+	return { tree: [root], currentLeafId: current.entry.id };
+}
+
+function deepProjectedTree(): { tree: SessionTreeNode[]; currentLeafId: string } {
+	const root = userNode("visible root");
+	let current = root;
+	for (let index = 1; index <= 20_000; index++) {
+		let child: SessionTreeNode;
+		if (index % 5 === 0) {
+			child = userNode(`visible ${index}`, current.entry.id);
+		} else {
+			const entry: SessionEntry = {
+				type: "custom",
+				id: `entry-${nextId++}`,
+				parentId: current.entry.id,
+				timestamp: new Date().toISOString(),
+				customType: "hidden-marker",
+			};
+			child = { entry, children: [] };
+		}
+		current.children.push(child);
+		current = child;
+	}
+	return { tree: [root], currentLeafId: current.entry.id };
+}
+
 function render(selector: TreeSelectorComponent, width: number): string {
 	return Bun.stripANSI(selector.render(width).join("\n"));
 }
@@ -172,5 +212,72 @@ describe("TreeSelectorComponent branch map", () => {
 		expect(allMap).toContain("[All]");
 		expect(allMap).toContain("all persisted entries");
 		expect(allMap).toContain("#2 custom");
+	});
+
+	it("renders a 20,001-entry chain iteratively when filtering leaves a map-sized projection", () => {
+		const { tree, currentLeafId } = deepProjectedTree();
+		const selector = new TreeSelectorComponent(
+			tree,
+			currentLeafId,
+			60,
+			() => {},
+			() => {},
+		);
+
+		const splitView = render(selector, 120);
+		expect(splitView).toContain("Branch Map");
+		expect(splitView).toContain("›#4001 user");
+
+		selector.handleInput("\x07"); // ctrl+g: split -> map
+		const mapOnly = render(selector, 80);
+		expect(mapOnly).toContain("›#4001 user");
+	});
+
+	it("falls back to the full-width list above the map node limit and restores the map after search", () => {
+		const { tree, currentLeafId } = linearUserTree(5_001, index => (index === 0 ? "needle" : `node ${index}`));
+		const selector = new TreeSelectorComponent(
+			tree,
+			currentLeafId,
+			60,
+			() => {},
+			() => {},
+		);
+
+		const limited = render(selector, 120);
+		expect(limited).toContain("Branch Map unavailable for 5,001 visible entries");
+		expect(limited).not.toContain("#1 user");
+		selector.handleInput("\x07"); // ctrl+g: split -> map
+		expect(render(selector, 120)).toContain("Branch Map unavailable for 5,001 visible entries");
+
+		for (const key of "needle") selector.handleInput(key);
+		const restored = render(selector, 120);
+		expect(restored).not.toContain("Branch Map unavailable");
+		expect(restored).toContain("Branch Map");
+		expect(restored).toContain("#1 user");
+	});
+
+	it("keeps every view within the live terminal height while it shrinks", () => {
+		const { tree, currentLeafId } = linearUserTree(10);
+		let terminalRows = 30;
+		const selector = new TreeSelectorComponent(
+			tree,
+			currentLeafId,
+			terminalRows,
+			() => {},
+			() => {},
+			undefined,
+			"default",
+			() => terminalRows,
+		);
+
+		expect(selector.render(120)).toHaveLength(30);
+		terminalRows = 20;
+		for (let index = 0; index < 3; index++) {
+			const output = render(selector, 120);
+			expect(selector.render(120).length).toBeLessThanOrEqual(20);
+			expect(output).toContain(index === 1 ? "Branch Map" : "Session Tree");
+			expect(output).toContain("Filter:");
+			selector.handleInput("\x07"); // ctrl+g: split -> map -> list -> split
+		}
 	});
 });
