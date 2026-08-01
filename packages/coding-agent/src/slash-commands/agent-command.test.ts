@@ -138,7 +138,7 @@ describe("/agent slash command", () => {
 			cwd: "/test",
 			output,
 			sessionManager: {} as any,
-			settings: {} as any,
+			settings: { get: () => undefined } as any,
 			refreshCommands: vi.fn(),
 			reloadPlugins: vi.fn(),
 		} as unknown as SlashCommandRuntime;
@@ -169,7 +169,7 @@ describe("/agent slash command", () => {
 			cwd: "/test",
 			output,
 			sessionManager: {} as any,
-			settings: {} as any,
+			settings: { get: () => undefined } as any,
 			refreshCommands: vi.fn(),
 			reloadPlugins: vi.fn(),
 		} as unknown as SlashCommandRuntime;
@@ -206,7 +206,7 @@ describe("/agent slash command", () => {
 			cwd: "/test",
 			output,
 			sessionManager: {} as any,
-			settings: {} as any,
+			settings: { get: () => undefined } as any,
 			refreshCommands: vi.fn(),
 			reloadPlugins: vi.fn(),
 		} as unknown as SlashCommandRuntime;
@@ -221,6 +221,39 @@ describe("/agent slash command", () => {
 		await cmd.handle!(makeCommand("sub"), runtime);
 
 		expect(output).toHaveBeenCalledWith(expect.stringContaining("subagent-only"));
+	});
+
+	test("handle with disabled agent prints disabled error", async () => {
+		const mockAgent = { name: "disabled-agent", description: "", systemPrompt: "", source: "project" as const };
+		const switchPersona = vi.fn();
+		const output = vi.fn();
+		const runtime = {
+			session: {
+				switchAgentPersona: switchPersona,
+				isStreaming: false,
+				getPlanModeState: () => undefined,
+				getGoalModeState: () => undefined,
+				getVibeModeState: () => undefined,
+			},
+			cwd: "/test",
+			output,
+			sessionManager: {} as any,
+			settings: { get: () => ["disabled-agent"] } as any,
+			refreshCommands: vi.fn(),
+			reloadPlugins: vi.fn(),
+		} as unknown as SlashCommandRuntime;
+
+		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
+			agents: [mockAgent],
+			projectAgentsDir: null,
+		});
+		vi.spyOn(discovery, "getAgent").mockImplementation((agents, name) => agents.find(a => a.name === name));
+
+		const cmd = getAgentCommand();
+		await cmd.handle!(makeCommand("disabled-agent"), runtime);
+
+		expect(switchPersona).not.toHaveBeenCalled();
+		expect(output).toHaveBeenCalledWith(expect.stringContaining("disabled"));
 	});
 
 	test("/switch-agent alias resolves to same command", async () => {

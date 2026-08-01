@@ -959,6 +959,7 @@ export async function buildSessionOptions(
 	// scoped thinking-level seed below must be deferred along with the model.
 	let deferredDefaultRole = false;
 	if (parsed.model) {
+		options.cliModelLocked = true;
 		const resolved = resolveCliModel({
 			cliProvider: parsed.provider,
 			cliModel: parsed.model,
@@ -1118,6 +1119,7 @@ export async function buildSessionOptions(
 	// Thinking level
 	if (parsed.thinking) {
 		options.thinkingLevel = parsed.thinking;
+		options.cliThinkingLocked = true;
 	} else if (
 		scopedModels.length > 0 &&
 		scopedModels[0].explicitThinkingLevel === true &&
@@ -1163,10 +1165,13 @@ export async function buildSessionOptions(
 	// Tools
 	if (parsed.noTools) {
 		options.toolNames = parsed.tools && parsed.tools.length > 0 ? parsed.tools : [];
+		options.cliToolsLocked = true;
 	} else if (parsed.tools) {
 		options.toolNames = parsed.tools;
+		options.cliToolsLocked = true;
 	} else if (agentPolicy?.toolNames) {
 		options.toolNames = agentPolicy.toolNames;
+		options.toolNamesFromAgent = true;
 	}
 
 	if (parsed.noLsp) {

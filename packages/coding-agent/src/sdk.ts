@@ -354,6 +354,14 @@ export interface CreateAgentSessionOptions {
 
 	/** Agent persona to apply as main-session policy (from --agent or /agent). */
 	agentPersona?: AgentDefinition;
+	/** Explicit CLI tool selection (`--tools`/`--no-tools`) is not a persona overlay and must survive persona switches. */
+	cliToolsLocked?: boolean;
+	/** Explicit CLI model selection (`--model`) must survive persona switches. */
+	cliModelLocked?: boolean;
+	/** Explicit CLI thinking selection (`--thinking`) must survive persona switches. */
+	cliThinkingLocked?: boolean;
+	/** True when the tool set came from an agent persona's frontmatter; baseline restore then uses the registry default instead of the persona list. */
+	toolNamesFromAgent?: boolean;
 
 	/** Auth storage for credentials. Default: discoverAuthStorage(agentDir) */
 	authStorage?: AuthStorage;
@@ -2983,10 +2991,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 		// Baseline tool set for persona overlay restore: what the session would have
 		// without the agent persona's toolNames filter. Computed before alwaysInclude
-		// widening so it matches the non-persona startup path.
-		const baselineToolNames = options.toolNames
-			? requestedActiveToolNames.filter(name => !defaultInactiveToolNames.has(name))
-			: undefined;
+		// widening so it matches the non-persona startup path. When the tool set came
+		// from an agent persona's frontmatter (toolNamesFromAgent), the pre-persona
+		// baseline is the full registry default — not the persona's own list — mirroring
+		// the non-persona startup path.
+		const baselineToolNames =
+			options.toolNamesFromAgent === true
+				? toolNamesFromRegistry.filter(name => !defaultInactiveToolNames.has(name) && name !== "goal")
+				: options.toolNames
+					? requestedActiveToolNames.filter(name => !defaultInactiveToolNames.has(name))
+					: undefined;
 
 		// Custom tools and extension-registered tools are always included regardless of toolNames filter.
 		// Restricted callers own the list, so never widen it with registered tools.
@@ -3397,6 +3411,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				activeAgentPersona = agent;
 			},
 			agentPersona: options.agentPersona,
+			cliToolsLocked: options.cliToolsLocked,
+			cliModelLocked: options.cliModelLocked,
+			cliThinkingLocked: options.cliThinkingLocked,
+			toolNamesFromAgent: options.toolNamesFromAgent,
 			initialToolOverlayRestore:
 				options.agentPersona?.tools?.length && baselineToolNames
 					? async () => {

@@ -608,7 +608,12 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			}
 
 			const discovery = await discoverAgents(runtime.cwd);
+			const disabled = new Set((runtime.settings.get("task.disabledAgents") as string[] | undefined) ?? []);
 			const agent = getAgent(discovery.agents, agentName);
+			if (agent && disabled.has(agent.name)) {
+				await runtime.output(`Agent "${agentName}" is disabled in settings (task.disabledAgents).`);
+				return commandConsumed();
+			}
 			if (!agent) {
 				const available =
 					discovery.agents
@@ -656,7 +661,13 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			const agentName = command.args.trim();
 			if (agentName) {
 				const discovery = await discoverAgents(runtime.ctx.sessionManager.getCwd());
+				const disabled = new Set((runtime.ctx.settings.get("task.disabledAgents") as string[] | undefined) ?? []);
 				const agent = getAgent(discovery.agents, agentName);
+				if (agent && disabled.has(agent.name)) {
+					runtime.ctx.showWarning(`Agent "${agentName}" is disabled in settings (task.disabledAgents).`);
+					runtime.ctx.editor.setText("");
+					return;
+				}
 				if (!agent) {
 					runtime.ctx.showWarning(`Unknown agent "${agentName}".`);
 					runtime.ctx.editor.setText("");

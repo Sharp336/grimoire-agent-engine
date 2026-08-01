@@ -277,6 +277,14 @@ export interface AgentSessionConfig {
 	agentPersona?: AgentDefinition;
 	/** Restores the pre-overlay tool set when an initial persona had explicit tools. */
 	initialToolOverlayRestore?: () => Promise<void>;
+	/** Explicit CLI tool selection (`--tools`/`--no-tools`) is not a persona overlay and must survive persona switches. */
+	cliToolsLocked?: boolean;
+	/** Explicit CLI model selection (`--model`) must survive persona switches. */
+	cliModelLocked?: boolean;
+	/** Explicit CLI thinking selection (`--thinking`) must survive persona switches. */
+	cliThinkingLocked?: boolean;
+	/** True when the tool set came from an agent persona's frontmatter; baseline restore then uses the registry default instead of the persona list. */
+	toolNamesFromAgent?: boolean;
 }
 
 /** Options for AgentSession.prompt(). */

@@ -615,6 +615,9 @@ export class AgentSession {
 	#getSessionSpawns: (() => string | undefined) | undefined;
 	#setSessionSpawns: ((spawns: string) => void) | undefined;
 	#agentToolOverlay: { restore: () => Promise<void> } | undefined;
+	#cliToolsLocked = false;
+	#cliModelLocked = false;
+	#cliThinkingLocked = false;
 	readonly #memory: SessionMemory;
 	readonly rawSseDebugBuffer: RawSseDebugBuffer;
 
@@ -1215,6 +1218,9 @@ export class AgentSession {
 		this.#setAgentPersona = config.setAgentPersona;
 		this.#getSessionSpawns = config.getSessionSpawns;
 		this.#setSessionSpawns = config.setSessionSpawns;
+		this.#cliToolsLocked = config.cliToolsLocked ?? false;
+		this.#cliModelLocked = config.cliModelLocked ?? false;
+		this.#cliThinkingLocked = config.cliThinkingLocked ?? false;
 		if (config.agentPersona?.tools?.length && config.initialToolOverlayRestore) {
 			this.#agentToolOverlay = { restore: config.initialToolOverlayRestore };
 		}
@@ -6389,24 +6395,27 @@ export class AgentSession {
 		const previousMounted = this.getMountedXdevToolNames();
 		const previousSpawns = this.#getSessionSpawns?.();
 		try {
-			// 1. Tools: overlay
-			if (this.#agentToolOverlay) await this.#agentToolOverlay.restore();
-			if (policy.toolNames) {
-				this.#agentToolOverlay = await this.applyToolOverlay(policy.toolNames);
-			} else {
-				this.#agentToolOverlay = undefined;
+			// 1. Tools: overlay (skipped entirely when the CLI explicitly selected the
+			// tool set — the explicit CLI set is not a persona overlay).
+			if (!this.#cliToolsLocked) {
+				if (this.#agentToolOverlay) await this.#agentToolOverlay.restore();
+				if (policy.toolNames) {
+					this.#agentToolOverlay = await this.applyToolOverlay(policy.toolNames);
+				} else {
+					this.#agentToolOverlay = undefined;
+				}
 			}
 			// 2. Spawns
 			if (policy.spawns !== undefined) this.#setSessionSpawns?.(policy.spawns);
-			// 3. Model
-			if (policy.modelPatterns?.length) {
+			// 3. Model (skipped when the CLI explicitly selected the model)
+			if (!this.#cliModelLocked && policy.modelPatterns?.length) {
 				const resolved = resolveModelOverride(policy.modelPatterns, this.modelRegistry, this.settings);
 				if (resolved.model) await this.setModel(resolved.model, "default");
 				if (resolved.thinkingLevel && !policy.thinkingLevel) this.setThinkingLevel(resolved.thinkingLevel);
 				if (resolved.warning) this.emitNotice("warning", resolved.warning);
 			}
-			// 4. Thinking
-			if (policy.thinkingLevel) this.setThinkingLevel(policy.thinkingLevel);
+			// 4. Thinking (skipped when the CLI explicitly selected thinking)
+			if (!this.#cliThinkingLocked && policy.thinkingLevel) this.setThinkingLevel(policy.thinkingLevel);
 			// 5. System prompt
 			this.#agentPersona = agent;
 			this.#setAgentPersona?.(agent);

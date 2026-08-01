@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:te
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { StreamFn } from "@oh-my-pi/pi-agent-core";
+import { type StreamFn, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -664,6 +664,103 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(session.model).toBe(modelBefore);
 		} finally {
 			await session.dispose();
+		}
+	});
+
+	it("keeps explicit CLI tool/model/thinking selections across a persona switch", async () => {
+		const tempDir = makeTempDir();
+		// A reasoning-capable model so the thinking-level assertion is meaningful:
+		// on gpt-4o-mini (no reasoning) every selector clamps to undefined and the
+		// lock would pass vacuously.
+		const reasoningModel = getBundledModel("openai", "gpt-5");
+		if (!reasoningModel) throw new Error("expected bundled OpenAI gpt-5 model");
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			model: reasoningModel,
+			toolNames: ["read", "write"],
+			thinkingLevel: ThinkingLevel.Low,
+			cliToolsLocked: true,
+			cliModelLocked: true,
+			cliThinkingLocked: true,
+			// Startup persona with a tool set that differs from the explicit CLI selection.
+			agentPersona: {
+				name: "locked-start",
+				description: "Startup persona with differing tools",
+				systemPrompt: "",
+				tools: ["glob"],
+				source: "project" as const,
+			},
+		});
+
+		try {
+			const modelBefore = session.model;
+			const thinkingBefore = session.configuredThinkingLevel();
+
+			// Target persona whose tools/model/thinking would all override the
+			// explicit CLI selections — none of them may apply while locked.
+			await session.switchAgentPersona({
+				name: "locked-target",
+				description: "Target persona",
+				systemPrompt: "",
+				tools: ["read"],
+				model: ["openai/gpt-4o"],
+				thinkingLevel: ThinkingLevel.High,
+				source: "project" as const,
+			});
+
+			const enabled = session.getEnabledToolNames();
+			expect(enabled).toEqual(expect.arrayContaining(["read", "write"]));
+			// The target persona's restricted policy (auto-widened to include task/hub)
+			// must not replace the locked explicit set.
+			expect(enabled).not.toContain("task");
+			expect(enabled).not.toContain("hub");
+			expect(session.model).toBe(modelBefore);
+			expect(session.configuredThinkingLevel()).toBe(thinkingBefore);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("restores the registry-default tool set after a persona switch leaves the agent tool policy", async () => {
+		const tempDir = makeTempDir();
+		// Control session with no persona: its enabled set IS the registry default
+		// that the persona-restored session must return to.
+		const { session: control } = await createAgentSession(baseOptions(tempDir));
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolNamesFromAgent: true,
+			// Startup persona with an explicit tool list: the pre-persona baseline
+			// must be the registry default, not this persona's restricted list.
+			agentPersona: {
+				name: "restricted-start",
+				description: "Startup persona with explicit tools",
+				systemPrompt: "",
+				tools: ["read"],
+				source: "project" as const,
+			},
+		});
+
+		try {
+			const controlDefault = control.getEnabledToolNames();
+			// The registry default is a meaningful superset of the persona's
+			// restricted policy (read + auto-added task/hub).
+			expect(controlDefault).toEqual(expect.arrayContaining(["read", "write", "grep"]));
+
+			await session.switchAgentPersona({
+				name: "unrestricted-target",
+				description: "Target persona without tools",
+				systemPrompt: "",
+				source: "project" as const,
+			});
+
+			// Switching away from a persona with tools must restore the pre-persona
+			// baseline — the registry default, not the persona's restricted list.
+			// Compared as sets: presentation order may differ between the control
+			// session's startup partition and the restored session's re-apply.
+			expect([...session.getEnabledToolNames()].sort()).toEqual([...controlDefault].sort());
+		} finally {
+			await session.dispose();
+			await control.dispose();
 		}
 	});
 
