@@ -408,6 +408,20 @@ async function swapInCandidate(
 	let swapCommitted = false;
 	let markerRemovalError: Error | null = null;
 	try {
+		// Under-lock re-check for the Windows fallback: run holder + snapshot
+		// verification BEFORE retiring sidecars, since retiring -wal/-shm/-journal
+		// changes the trio and would make snapshotTrio always differ from expected.
+		let windowsFallbackClean = false;
+		if (lockHandle !== null) {
+			if ((await hasHolders(dbPath)) === true) throw new Error("database acquired a holder during swap; aborting");
+			try {
+				if (!snapshotsEqual(expected, await snapshotTrio(dbPath)))
+					throw new Error("database changed during swap; aborting");
+			} catch (error) {
+				throw error instanceof Error ? error : new Error(messageOf(error));
+			}
+			windowsFallbackClean = true;
+		}
 		for (const suffix of ["-wal", "-shm", "-journal"]) {
 			const sidecar = `${dbPath}${suffix}`;
 			try {
@@ -423,27 +437,18 @@ async function swapInCandidate(
 		}
 		await fsyncDir(path.dirname(dbPath));
 		// On Linux/macOS an open handle does not block rename. On Windows,
-		// renaming over an open handle fails. Reorder so the lock-free gap
-		// is a microsecond pair of sync calls, not an async window:
-		// 1. While STILL HOLDING the lock, run a fresh hasHolders + trio
-		//    re-check against the expected snapshot.
-		// 2. If dirty, abort with the archive intact (safe refusal).
-		// 3. If clean, close the handle (sync) and rename (fs.renameSync)
-		//    as a synchronous pair with no await between them.
+		// renaming over an open handle fails. The under-lock re-check already
+		// ran above (before sidecar retirement); if it was clean, close the
+		// handle (sync) and rename (fsSync.renameSync) as a synchronous pair
+		// with no await between them, giving a microsecond gap.
 		try {
 			await fs.rename(candidate, dbPath);
 		} catch (renameError) {
 			if (lockHandle === null) throw renameError;
-			// Re-check while the lock is still held — no lock-free window yet.
-			if ((await hasHolders(dbPath)) === true) throw new Error("database acquired a holder during swap; aborting");
-			try {
-				if (!snapshotsEqual(expected, await snapshotTrio(dbPath)))
-					throw new Error("database changed during swap; aborting");
-			} catch (error) {
-				throw error instanceof Error ? error : new Error(messageOf(error));
-			}
+			if (!windowsFallbackClean) throw renameError;
 			// Synchronous close + rename: microsecond gap, no await between.
 			releaseWriteLock(lockHandle);
+			lockHandle = null;
 			fsSync.renameSync(candidate, dbPath);
 		}
 		if (originalMode !== null) await fs.chmod(dbPath, originalMode);
