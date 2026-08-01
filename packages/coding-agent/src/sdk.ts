@@ -3297,6 +3297,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Restore messages if session has existing data
 		if (hasExistingSession) {
 			agent.replaceMessages(existingSession.messages);
+			// Record an explicit startup persona (--agent) on resumed/continued/
+			// forked transcripts too, so the next resume rehydrates it instead of
+			// silently losing the selection to the transcript's prior persona (or
+			// none). Plain resumes rehydrate the persisted persona as
+			// options.agentPersona, so skip the append when it matches what the
+			// transcript already records.
+			if (options.agentPersona && existingSession.agentPersona?.agent !== options.agentPersona.name) {
+				sessionManager.appendAgentChange(options.agentPersona.name, options.agentPersona.source);
+			}
 		} else {
 			// Save initial model, thinking level, service tier, and agent persona for new sessions
 			// so they can be restored on resume.

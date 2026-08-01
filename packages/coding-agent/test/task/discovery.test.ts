@@ -231,4 +231,48 @@ describe("discoverAgents", () => {
 		expect(names).toContain("explicit-agent");
 		expect(names).not.toEqual(expect.arrayContaining(["stale-agent", "settings-agent", "loom-verify-spec"]));
 	});
+
+	test("explicit-only extension mode keeps CLI roots but drops market plugins under includeExtensions: false", async () => {
+		const explicitExt = path.join(tempHome, "explicit-ext");
+		await fs.mkdir(path.join(explicitExt, "agents"), { recursive: true });
+		await fs.writeFile(
+			path.join(explicitExt, "agents", "explicit-agent.md"),
+			["---", "name: explicit-agent", "description: explicitly requested", "---", "body"].join("\n"),
+		);
+		injectOmpExtensionCliRoots([explicitExt], tempHome, projectDir, { mode: "explicit-only", replace: true });
+
+		// Claude marketplace plugin fixture — must stay out under explicit-only
+		const pluginInstallPath = path.join(tempHome, "plugin-cache", "code-simplifier");
+		await fs.mkdir(path.join(pluginInstallPath, "agents"), { recursive: true });
+		await fs.writeFile(path.join(pluginInstallPath, "agents", "simplifier.md"), PLUGIN_AGENT_MD);
+		const claudePluginsDir = path.join(tempHome, ".claude", "plugins");
+		await fs.mkdir(claudePluginsDir, { recursive: true });
+		await fs.writeFile(
+			path.join(claudePluginsDir, "installed_plugins.json"),
+			JSON.stringify({
+				version: 2,
+				plugins: {
+					"code-simplifier@claude-plugins-official": [
+						{
+							installPath: pluginInstallPath,
+							version: "1.0.0",
+							scope: "user",
+							installedAt: "2025-01-01T00:00:00Z",
+							lastUpdated: "2025-01-01T00:00:00Z",
+						},
+					],
+				},
+			}),
+		);
+		clearClaudePluginRootsCache();
+
+		const { agents } = await discoverAgents(projectDir, tempHome, {
+			includeExtensions: true,
+			extensionMode: "explicit-only",
+		});
+		const names = agents.map(agent => agent.name);
+
+		expect(names).toContain("explicit-agent");
+		expect(names).not.toContain("simplifier");
+	});
 });

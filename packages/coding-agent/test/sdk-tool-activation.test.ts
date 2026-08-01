@@ -772,6 +772,37 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("persists an explicit startup persona onto a resumed transcript", async () => {
+		const tempDir = makeTempDir();
+		const sessionManager = SessionManager.inMemory();
+		// Seed a prior transcript so the session is a resume, not a fresh one.
+		sessionManager.appendMessage({ role: "user", content: "prior turn", timestamp: Date.now() });
+		expect(sessionManager.buildSessionContext().agentPersona).toBeUndefined();
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			sessionManager,
+			agentPersona: {
+				name: "resumed-persona",
+				description: "Startup persona on a resumed transcript",
+				systemPrompt: "",
+				source: "project" as const,
+			},
+		});
+
+		try {
+			// The explicit startup persona must be recorded on the resumed
+			// transcript so the next resume rehydrates it (thread: persist
+			// explicit persona changes on resume).
+			expect(sessionManager.buildSessionContext().agentPersona).toEqual({
+				agent: "resumed-persona",
+				source: "project",
+			});
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	// A session created on another provider keeps its configured-mode `edit` in
 	// the registry (only a Cursor-created session moves it out) and the tool
 	// roster is built once, at creation — switching to Cursor later does not

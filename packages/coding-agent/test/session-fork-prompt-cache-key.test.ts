@@ -269,4 +269,36 @@ describe("provider prompt-cache key session affinity", () => {
 			authStorage.close();
 		}
 	});
+
+	it("rejects a startup --agent that is listed in task.disabledAgents", async () => {
+		using tempDir = TempDir.createSync("@omp-prompt-cache-disabled-agent-");
+		const source = await createSourceSessionFixture(tempDir, "parent-cache-disabled-agent");
+		const forkedManager = await SessionManager.forkFrom(source.sourceFile, source.cwd, source.forkSessionDir);
+		const authStorage = await AuthStorage.create(tempDir.join("agent-auth.db"));
+		const agentPersona = {
+			name: "disabled-agent",
+			description: "A disabled test agent",
+			systemPrompt: "You are a disabled test agent.",
+			source: "bundled" as const,
+		};
+		try {
+			vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
+				agents: [agentPersona],
+				projectAgentsDir: null,
+			});
+			const parsed = parseArgs(["--cwd", source.cwd, "--agent", "disabled-agent"]);
+
+			await expect(
+				buildSessionOptions(
+					parsed,
+					[],
+					forkedManager,
+					new ModelRegistry(authStorage, tempDir.join("models.yml")),
+					Settings.isolated({ "task.disabledAgents": ["disabled-agent"] }),
+				),
+			).rejects.toThrow('Agent "disabled-agent" is disabled in settings (task.disabledAgents).');
+		} finally {
+			authStorage.close();
+		}
+	});
 });

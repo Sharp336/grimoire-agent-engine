@@ -915,14 +915,26 @@ export async function buildSessionOptions(
 	// Agent persona selection (--agent) — must be before model resolution
 	// so agentPolicy is available for the agent model else-if branch.
 	let agentPersona: AgentDefinition | undefined;
+	const disabledAgents = new Set((activeSettings.get("task.disabledAgents") as string[] | undefined) ?? []);
+	// --no-extensions suppresses ambient agent roots (settings/installed/marketplace
+	// extensions) but keeps explicitly-requested -e/--hook roots discoverable via
+	// listOmpExtensionRoots' explicit-only mode (injectedCliRootMode set in
+	// runRootCommand), matching how the rest of startup treats extension packages.
+	const cliExtensionPaths = [...(parsed.extensions ?? []), ...(parsed.hooks ?? [])];
+	const agentExtensionMode: "merge" | "explicit-only" = parsed.noExtensions ? "explicit-only" : "merge";
+	const agentIncludeExtensions = !parsed.noExtensions || cliExtensionPaths.length > 0;
 	if (parsed.agent) {
 		const discovery = await discoverAgents(options.cwd ?? getProjectDir(), undefined, {
-			includeExtensions: !parsed.noExtensions,
+			includeExtensions: agentIncludeExtensions,
+			extensionMode: agentExtensionMode,
 		});
 		agentPersona = getAgent(discovery.agents, parsed.agent);
 		if (!agentPersona) {
 			const available = discovery.agents.map(a => a.name).join(", ") || "none";
 			throw new Error(`Unknown agent "${parsed.agent}". Available: ${available}`);
+		}
+		if (disabledAgents.has(parsed.agent)) {
+			throw new Error(`Agent "${parsed.agent}" is disabled in settings (task.disabledAgents).`);
 		}
 		if (agentPersona.availability === "subagent") {
 			throw new Error(`Agent "${parsed.agent}" is subagent-only and cannot be selected as main persona.`);
@@ -936,12 +948,13 @@ export async function buildSessionOptions(
 		if (sessionContext.agentPersona) {
 			const { agent: name, source } = sessionContext.agentPersona;
 			const discovery = await discoverAgents(options.cwd ?? getProjectDir(), undefined, {
-				includeExtensions: !parsed.noExtensions,
+				includeExtensions: agentIncludeExtensions,
+				extensionMode: agentExtensionMode,
 			});
 			// Prefer source-stable match, fall back to name-only (e.g. if source was deleted)
 			const agent =
 				discovery.agents.find(a => a.name === name && a.source === source) ?? getAgent(discovery.agents, name);
-			if (agent && agent.availability !== "subagent") {
+			if (agent && agent.availability !== "subagent" && !disabledAgents.has(agent.name)) {
 				agentPersona = agent;
 			}
 			// If agent .md was deleted or changed to subagent-only, silently fall back to default main
@@ -1192,7 +1205,6 @@ export async function buildSessionOptions(
 	}
 
 	// Additional extension paths from CLI
-	const cliExtensionPaths = [...(parsed.extensions ?? []), ...(parsed.hooks ?? [])];
 	if (cliExtensionPaths.length > 0) {
 		options.additionalExtensionPaths = cliExtensionPaths;
 	}
