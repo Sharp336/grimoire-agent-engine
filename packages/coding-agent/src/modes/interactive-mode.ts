@@ -1343,6 +1343,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		return await promise;
 	}
 
+	/** Wake the main input loop so a completed executable update can hand off safely. */
+	interruptIdleInputForAutoRestart(): void {
+		this.onInputCallback?.({ text: "", cancelled: true, started: false });
+	}
+
 	#scheduleLoopAutoSubmit(): void {
 		this.#cancelLoopAutoSubmit();
 		if (!this.loopModeEnabled || !this.loopPrompt) return;
@@ -4015,6 +4020,15 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async shutdown(): Promise<void> {
+		await this.#shutdown(true, true);
+	}
+
+	/** Dispose terminal and session resources without terminating this process. */
+	async shutdownForAutoRestart(): Promise<void> {
+		await this.#shutdown(false, false);
+	}
+
+	async #shutdown(showResumeHint: boolean, exit: boolean): Promise<void> {
 		if (this.#isShuttingDown) return;
 		this.#isShuttingDown = true;
 
@@ -4064,14 +4078,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		popTerminalTitle();
 		this.stop();
 
-		// Print resumption hint if this is a persisted session
-		const sessionId = this.sessionManager.getSessionId();
-		const sessionFile = this.sessionManager.getSessionFile();
-		if (sessionId && sessionFile) {
-			process.stderr.write(`\n${chalk.dim(`Resume this session with ${APP_NAME} --resume ${sessionId}`)}\n`);
+		if (showResumeHint) {
+			const sessionId = this.sessionManager.getSessionId();
+			const sessionFile = this.sessionManager.getSessionFile();
+			if (sessionId && sessionFile) {
+				process.stderr.write(`\n${chalk.dim(`Resume this session with ${APP_NAME} --resume ${sessionId}`)}\n`);
+			}
 		}
 
-		await postmortem.quit(0);
+		if (exit) await postmortem.quit(0);
 	}
 
 	async checkShutdownRequested(): Promise<void> {
