@@ -31,7 +31,7 @@ function restoreAgentDir(): void {
 	delete Bun.env.PI_CODING_AGENT_DIR;
 }
 
-function createController() {
+function createController(options?: { extraConfigPaths?: string[]; source?: SourceMeta }) {
 	const refreshMCPTools = vi.fn(async () => {});
 	const mcpManager = {
 		disconnectAll: vi.fn(async () => {}),
@@ -48,7 +48,8 @@ function createController() {
 		getTools: vi.fn(() => []),
 		waitForConnection: vi.fn(async () => ({})),
 		getConnectionStatus: vi.fn(() => "connected"),
-		getSource: vi.fn(() => undefined),
+		getSource: vi.fn((): SourceMeta | undefined => options?.source),
+		getExtraConfigPaths: vi.fn(() => options?.extraConfigPaths),
 	};
 	const controller = new MCPCommandController({
 		chatContainer: { addChild: vi.fn() },
@@ -140,5 +141,28 @@ describe("/mcp enable and disable", () => {
 		const [configs] = mcpManager.connectServers.mock.calls[0]!;
 		expect(Object.keys(configs)).toEqual(["mcp1"]);
 		expect(configs.mcp1).toEqual({ type: "stdio", command: "mcp-one", enabled: true });
+	});
+
+	// A server that exists only in a `--mcp-config` file is absent from plain
+	// discovery, so the re-enable reload has to be given the session's explicit
+	// paths — otherwise `/mcp enable` reports success and leaves it disconnected
+	// until a full `/mcp reload`.
+	test("re-enabling a server defined only in an explicit --mcp-config file reconnects it", async () => {
+		const extraPath = path.join(projectDir, "extra.json");
+		await Bun.write(extraPath, JSON.stringify({ mcpServers: { generated: { command: "generated-server" } } }));
+		const { controller, mcpManager } = createController({
+			extraConfigPaths: [extraPath],
+			source: { provider: "mcp-config-flag", providerName: "--mcp-config", path: extraPath, level: "project" },
+		});
+
+		await controller.handle("/mcp disable generated");
+		expect(mcpManager.disconnectServer).toHaveBeenCalledWith("generated");
+
+		await controller.handle("/mcp enable generated");
+
+		expect(mcpManager.connectServers).toHaveBeenCalledTimes(1);
+		const [configs] = mcpManager.connectServers.mock.calls[0]!;
+		expect(Object.keys(configs)).toEqual(["generated"]);
+		expect(configs.generated).toMatchObject({ type: "stdio", command: "generated-server" });
 	});
 });

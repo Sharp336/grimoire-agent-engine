@@ -53,6 +53,9 @@ export interface MCPServer {
 	_source: SourceMeta;
 }
 
+/** Transports an MCP server config may name. Runtime counterpart of `MCPServer["transport"]`. */
+const MCP_TRANSPORTS: readonly string[] = ["stdio", "sse", "http"];
+
 /** Compare the transport inputs that determine which MCP endpoint gets connected. */
 function isSameMCPConnection(left: MCPServer, right: MCPServer): boolean {
 	if (!Bun.deepEquals(left.auth, right.auth) || !Bun.deepEquals(left.oauth, right.oauth)) return false;
@@ -83,6 +86,24 @@ export const mcpCapability = defineCapability<MCPServer>({
 	validate: server => {
 		if (!server.name) return "Missing server name";
 		if (!server.command && !server.url) return "Must have command or url";
+
+		// Conflicting endpoints have to be caught here, not downstream: the
+		// conversion to legacy config infers stdio from the command and drops the
+		// url, so `validateServerConfig` never sees both fields and the server
+		// silently runs a command that a stale generated config left behind next
+		// to a new url.
+		if (server.command && server.url) {
+			return 'both "command" and "url" are set - use one transport, not both';
+		}
+
+		// An unrecognised transport falls through `convertToLegacyConfig` to the
+		// stdio branch, so it either fails to connect or silently runs a command
+		// the entry asked to be reached some other way. `mcpServers` JSON is
+		// untyped at runtime, so a typo (`"htt"`) reaches here. Mirrors the
+		// unknown-type rejection `validateServerConfig` already performs.
+		if (server.transport !== undefined && !MCP_TRANSPORTS.includes(server.transport)) {
+			return `unknown transport type "${server.transport}"`;
+		}
 
 		// Validate transport-endpoint pairing
 		if (server.transport === "stdio" && !server.command) {

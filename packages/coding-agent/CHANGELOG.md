@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a repeatable `--mcp-config <path>` flag that loads MCP servers from explicit `mcpServers` JSON files (Claude Code format), overriding same-named discovered servers ([#7101](https://github.com/can1357/oh-my-pi/pull/7101) by [@alvorithm](https://github.com/alvorithm)).
+
 ## [17.2.3] - 2026-08-01
 
 ### Changed

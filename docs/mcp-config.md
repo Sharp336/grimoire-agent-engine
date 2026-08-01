@@ -467,6 +467,18 @@ In practice:
 - keep server names unique across tools when possible
 - use `disabledServers` in the user config when a third-party config keeps reintroducing a server you do not want
 
+### Explicit config files: `--mcp-config`
+
+`omp --mcp-config <path>` loads servers from an explicit `mcpServers` JSON file (the same shape as `.mcp.json`). The flag is repeatable, accepts paths relative to the working directory (with `~` expansion), and its servers override same-named discovered servers. This is useful when a development environment generates per-workspace configs outside the discovery paths (for example `.devenv/mcp/claude-code.json` with workspace-specific ports):
+
+```bash
+omp --mcp-config .devenv/mcp/claude-code.json
+```
+
+When the flag is repeated and two files define the same server name, the last one wins — including when the later entry only sets `"enabled": false`, which turns off a server an earlier file defined. Two names for one endpoint collapse to a single server, the last one written, whether the other name comes from discovery or from another explicit entry — so renaming a server in a generated config never connects it twice.
+
+Unlike discovery, a `--mcp-config` file that cannot be read, is not valid JSON, or has the wrong shape is a hard error that aborts startup — it never degrades to a session silently missing those servers. The file must be an object with an `mcpServers` object mapping server names to server objects; an empty `mcpServers` is fine, but the key has to be there, so pointing the flag at some other valid JSON file (`package.json`, say) fails instead of contributing nothing. Each entry must also name an endpoint the way a discovered server does — a typo like `"commmand"` is rejected outright rather than dropped with a warning. An entry with `"enabled": false` disables the same-named discovered server; that is the one case where an entry may omit the endpoint, since it suppresses a name instead of describing a server. Servers loaded this way still pass through `disabledServers` filtering, and `/mcp reload` re-reads the same files.
+
 ## Troubleshooting
 
 ### `Server "name": stdio server requires "command" field`

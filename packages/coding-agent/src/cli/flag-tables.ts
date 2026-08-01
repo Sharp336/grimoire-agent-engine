@@ -120,6 +120,9 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--add-dir": (result, value) => {
 		result.addDir = [...(result.addDir ?? []), value];
 	},
+	"--mcp-config": (result, value) => {
+		result.mcpConfig = [...(result.mcpConfig ?? []), value];
+	},
 	"--mode": (result, value) => {
 		if (value === "text" || value === "json" || value === "rpc" || value === "acp" || value === "rpc-ui") {
 			result.mode = value;

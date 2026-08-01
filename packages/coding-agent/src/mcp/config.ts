@@ -4,11 +4,14 @@
  * Uses the capability system to load MCP servers from multiple sources.
  */
 
-import { getMCPConfigPath } from "@oh-my-pi/pi-utils";
+import * as path from "node:path";
+import { getMCPConfigPath, tryParseJson } from "@oh-my-pi/pi-utils";
 import { mcpCapability } from "../capability/mcp";
 import type { SourceMeta } from "../capability/types";
 import type { MCPServer } from "../discovery";
 import { loadCapability } from "../discovery";
+import { type MCPConfigFile, transformMCPConfig, validateMCPConfigFile } from "../discovery/mcp-json";
+import { expandTilde } from "../tools/path-utils";
 import { readDisabledServers, readEnabledServers } from "./config-writer";
 import type { MCPServerConfig } from "./types";
 
@@ -20,6 +23,11 @@ export interface LoadMCPConfigsOptions {
 	filterExa?: boolean;
 	/** Whether to filter out browser MCP servers when builtin browser tool is enabled (default: false) */
 	filterBrowser?: boolean;
+	/**
+	 * Extra MCP config files (`mcpServers` JSON, e.g. from `--mcp-config`).
+	 * Servers from these files override same-named discovered servers.
+	 */
+	extraConfigPaths?: string[];
 }
 
 /** Result of loading MCP configs */
@@ -85,6 +93,92 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 	};
 }
 
+/** Provider id attached to servers loaded from explicit config paths (--mcp-config). */
+const EXTRA_CONFIG_PROVIDER_ID = "mcp-config-flag";
+
+/**
+ * An explicitly named MCP config file (`--mcp-config`) could not be used.
+ *
+ * Distinct from discovery failures so the layers that degrade discovery to a
+ * best-effort result — `discoverAndLoadMCPTools`, session startup — can let
+ * this one through instead of starting without the servers the caller named.
+ */
+export class ExplicitMCPConfigError extends Error {
+	constructor(
+		readonly configPath: string,
+		message: string,
+	) {
+		super(message);
+		this.name = "ExplicitMCPConfigError";
+	}
+}
+
+/**
+ * An `enabled: false` entry with no endpoint. It exists to suppress a name
+ * rather than to describe a server, so it is exempt from the endpoint checks
+ * every real entry has to pass.
+ */
+function isTombstone(server: MCPServer): boolean {
+	return server.enabled === false && !server.command && !server.url;
+}
+
+/**
+ * Whether two servers address the same endpoint, ignoring credentials.
+ *
+ * `mcpCapability.equivalent` folds `auth`/`oauth` into the comparison, which is
+ * right for deduplication but wrong for recognising an auth overlay — the whole
+ * point of which is that the credentials differ. Same predicate, auth terms
+ * neutralised, so the two stay in step on what an endpoint is.
+ */
+function sameEndpoint(left: MCPServer, right: MCPServer): boolean {
+	return (
+		mcpCapability.equivalent?.(
+			{ ...left, auth: undefined, oauth: undefined },
+			{ ...right, auth: undefined, oauth: undefined },
+		) ?? false
+	);
+}
+
+/**
+ * Load MCP servers from explicitly specified `mcpServers` JSON files.
+ * Unlike provider discovery, an unreadable or malformed file is a hard error:
+ * the caller asked for this exact file.
+ */
+async function loadExtraMCPConfigs(cwd: string, configPaths: string[]): Promise<MCPServer[]> {
+	const servers: MCPServer[] = [];
+	for (const configPath of configPaths) {
+		const resolved = path.resolve(cwd, expandTilde(configPath));
+		let content: string;
+		try {
+			content = await Bun.file(resolved).text();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			throw new ExplicitMCPConfigError(resolved, `Cannot read MCP config ${resolved}: ${message}`);
+		}
+		const config = tryParseJson<MCPConfigFile>(content);
+		if (!config) {
+			throw new ExplicitMCPConfigError(resolved, `Invalid JSON in MCP config ${resolved}`);
+		}
+		// Syntactically valid JSON of the wrong shape would otherwise be iterated
+		// into blank servers named by character/array index. `mcpServers` must be
+		// present too: pointing the flag at some other valid JSON file (say
+		// `package.json`) is a mistake, and accepting it would start the session
+		// with none of the servers the caller asked for.
+		const invalid = validateMCPConfigFile(config, { strict: true });
+		if (invalid) {
+			throw new ExplicitMCPConfigError(resolved, `Invalid MCP config ${resolved}: ${invalid}`);
+		}
+		const source: SourceMeta = {
+			provider: EXTRA_CONFIG_PROVIDER_ID,
+			providerName: "--mcp-config",
+			path: resolved,
+			level: "project",
+		};
+		servers.push(...transformMCPConfig(config, source));
+	}
+	return servers;
+}
+
 /**
  * Load all MCP server configs from standard locations.
  * Uses the capability system for multi-source discovery.
@@ -127,10 +221,111 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 		suppress: suppressServer,
 	});
 
+	// Servers from explicitly named config files (--mcp-config) take the name
+	// over same-named discovered ones. They skip the project-scope gate — the
+	// caller named this exact file — but still honour the user denylist and
+	// their own `enabled: false`, so an `enabled: false` entry here also drops
+	// the discovered server that shares its name. Merged before the Exa/browser
+	// filters below so those apply uniformly to every source.
+	let servers = result.items;
+	if (options?.extraConfigPaths?.length) {
+		const extraServers = await loadExtraMCPConfigs(cwd, options.extraConfigPaths);
+		// The flag is repeatable, and later files win per name. Resolve that
+		// precedence BEFORE suppression: filtering first would drop a later
+		// `enabled: false` entry and leave the earlier enabled definition
+		// standing, so a downstream file could never turn off a server an
+		// upstream one generated.
+		const resolved = new Map<string, MCPServer>();
+		for (const server of extraServers) {
+			// Re-insert rather than overwrite in place: `Map#set` on an existing key
+			// keeps the original slot, which would walk a redefined name at its
+			// first-appearance position. The alias collapse below reads this order as
+			// "who was written last", so a later file redefining an earlier name has
+			// to sort after everything written before it — otherwise it loses to an
+			// alias for the same endpoint that it was meant to supersede.
+			resolved.delete(server.name);
+			resolved.set(server.name, server);
+		}
+
+		// `/mcp reauth` and `/mcp unauth` persist auth for an explicitly configured
+		// server into the writable user config, because a generated `--mcp-config`
+		// file is not omp's to edit (`#resolveServerForAuth` falls back to the user
+		// path for anything it cannot find in a discovery config). That makes the
+		// user entry the live record of auth for these servers, so its `auth` and
+		// `oauth` win here — including their absence, which is what `unauth` leaves
+		// behind. Only those two fields: the explicit file stays the source of
+		// truth for the endpoint, so a regenerated config can still move a port
+		// without the user copy masking it.
+		//
+		// The name alone does not identify an overlay, though: a user config is a
+		// general store, and a stale entry for some other endpoint that happens to
+		// share a name would otherwise strip an explicit server's credentials. The
+		// auth commands write back the endpoint they were run against, so an
+		// overlay is a same-named entry describing the same endpoint.
+		const userEntries = new Map<string, MCPServer>();
+		for (const server of result.items) {
+			if (server._source.path === userPath) userEntries.set(server.name, server);
+		}
+
+		const kept: MCPServer[] = [];
+		const claimed = new Set<string>();
+		for (const server of resolved.values()) {
+			// A tombstone can never become a config in its own right — it just takes
+			// the same-named discovered server down with it. When the user's
+			// force-enable list stops it from suppressing, it has to yield the name
+			// back to discovery, the only source then holding a real definition;
+			// keeping it would leave a blank stdio config that fails to connect. An
+			// entry carrying a transport is a complete config that happens to be
+			// off, so force-enabling keeps it — the same way `suppressServer` treats
+			// a disabled-but-complete discovered server.
+			if (isTombstone(server) && forcedEnabled.has(server.name)) continue;
+			claimed.add(server.name);
+			if (suppressServer(server)) continue;
+			// Aliases collapse among the explicit entries too, not just against
+			// discovered ones: `loadCapability` applies the same rule to everything
+			// it loads, including two names for one endpoint inside a single file.
+			// Later wins, matching the same-name rule above — whichever entry the
+			// caller wrote last is the one whose name the endpoint keeps.
+			const userEntry = userEntries.get(server.name);
+			const isAuthOverlay = userEntry !== undefined && sameEndpoint(userEntry, server);
+			const merged = isAuthOverlay ? { ...server, auth: userEntry.auth, oauth: userEntry.oauth } : server;
+			const aliasIndex = kept.findIndex(existing => mcpCapability.equivalent?.(existing, merged) ?? false);
+			if (aliasIndex >= 0) kept.splice(aliasIndex, 1);
+			kept.push(merged);
+		}
+
+		// Validation runs last, over survivors only, exactly where `loadCapability`
+		// puts it: it validates `deduped`, so an entry that was suppressed or
+		// shadowed is never checked. Validating at load time instead would abort
+		// startup over a server the user had switched off, or over one a later
+		// file replaced. Discovered servers get this from the pipeline; explicit
+		// ones raise instead of being dropped, because the caller named the file.
+		for (const server of kept) {
+			const error = mcpCapability.validate?.(server);
+			if (error) {
+				const configPath = server._source.path;
+				throw new ExplicitMCPConfigError(
+					configPath,
+					`Invalid MCP config ${configPath}: server "${server.name}": ${error}`,
+				);
+			}
+		}
+
+		// Same-endpoint aliases shadow each other inside `loadCapability` via
+		// `mcpCapability.equivalent`; extras are merged after that, so a discovered
+		// server the caller renamed in an explicit file has to be dropped here too.
+		// Otherwise the manager opens a second connection to the one endpoint and
+		// mounts its tools twice — the exact case this flag invites, since a
+		// generated per-workspace config renames what the project file already has.
+		const shadowedByExtra = (server: MCPServer): boolean =>
+			kept.some(extra => mcpCapability.equivalent?.(extra, server) ?? false);
+		servers = [...kept, ...servers.filter(server => !claimed.has(server.name) && !shadowedByExtra(server))];
+	}
+
 	// Convert to legacy format and preserve source metadata.
 	let configs: Record<string, MCPServerConfig> = {};
 	let sources: Record<string, SourceMeta> = {};
-	for (const server of result.items) {
+	for (const server of servers) {
 		configs[server.name] = convertToLegacyConfig(server);
 		sources[server.name] = server._source;
 	}

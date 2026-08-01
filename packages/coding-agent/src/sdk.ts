@@ -105,6 +105,7 @@ import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-e
 import {
 	deduplicateMCPToolsByName,
 	discoverAndLoadMCPTools,
+	loadAllMCPConfigs,
 	type MCPLoadResult,
 	MCPManager,
 	MCPToolCache,
@@ -479,6 +480,11 @@ export interface CreateAgentSessionOptions {
 	enableMCP?: boolean;
 	/** Existing MCP manager to reuse when MCP is enabled (skips discovery, propagates to toolSession). */
 	mcpManager?: MCPManager;
+	/**
+	 * Extra MCP config files (`mcpServers` JSON, e.g. from `--mcp-config`).
+	 * Servers from these files override same-named discovered servers.
+	 */
+	mcpConfigPaths?: string[];
 
 	/** Enable LSP integration (tool, formatting, diagnostics, warmup). Default: true */
 	enableLsp?: boolean;
@@ -1842,7 +1848,25 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			filterExa: true,
 			// Filter browser MCP servers when builtin browser tool is active
 			filterBrowser: settings.get("browser.enabled") ?? false,
+			extraConfigPaths: options.mcpConfigPaths,
 		};
+		// `--mcp-config` names exact files, so one that cannot be used has to fail
+		// startup instead of degrading to a session missing those servers. Checked
+		// up front because the deferred-UI branch below runs discovery in a
+		// detached promise, where a rejection can no longer abort startup — and
+		// `discoverAndLoadMCPTools` is reached only in the other branch.
+		//
+		// This rehearses the whole load rather than just re-reading the files:
+		// whether an entry is fatal depends on what survives suppression and
+		// shadowing, so a server the user disabled must not abort startup over a
+		// stale endpoint. Only when the flag is present, and the file reads are
+		// cached for the discovery that follows.
+		if (enableMCP && !mcpManager && options.mcpConfigPaths?.length) {
+			await loadAllMCPConfigs(cwd, {
+				enableProjectConfig: mcpDiscoverOptions.enableProjectConfig,
+				extraConfigPaths: options.mcpConfigPaths,
+			});
+		}
 		if (enableMCP && !mcpManager) {
 			if (deferMCPDiscoveryForUI) {
 				const cacheStorage = settings.getStorage();

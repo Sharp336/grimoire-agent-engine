@@ -165,6 +165,11 @@ export interface MCPDiscoverOptions {
 	filterExa?: boolean;
 	/** Whether to filter out browser MCP servers when builtin browser tool is enabled (default: false) */
 	filterBrowser?: boolean;
+	/**
+	 * Extra MCP config files (`mcpServers` JSON, e.g. from `--mcp-config`).
+	 * Servers from these files override same-named discovered servers.
+	 */
+	extraConfigPaths?: string[];
 	/** Called when MCP server connection state changes. */
 	onStatus?: (event: McpConnectionStatusEvent) => void;
 }
@@ -226,6 +231,8 @@ export class MCPManager {
 	#reconnectHistory = new Map<string, number[]>();
 	/** Monotonic epoch incremented on disconnectAll to invalidate stale reconnections. */
 	#epoch = 0;
+	/** Extra config paths remembered so option-less rediscovery (e.g. /mcp reload) keeps them. */
+	#extraConfigPaths: string[] | undefined;
 
 	constructor(
 		private cwd: string,
@@ -391,12 +398,16 @@ export class MCPManager {
 	 * Returns tools and any connection errors.
 	 */
 	async discoverAndConnect(options?: MCPDiscoverOptions): Promise<MCPLoadResult> {
+		if (options?.extraConfigPaths) {
+			this.#extraConfigPaths = options.extraConfigPaths;
+		}
 		let loadedConfigs: LoadMCPConfigsResult;
 		try {
 			loadedConfigs = await loadAllMCPConfigs(this.cwd, {
 				enableProjectConfig: options?.enableProjectConfig,
 				filterExa: options?.filterExa,
 				filterBrowser: options?.filterBrowser,
+				extraConfigPaths: this.#extraConfigPaths,
 			});
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -798,6 +809,18 @@ export class MCPManager {
 	 */
 	getSource(name: string): SourceMeta | undefined {
 		return this.#sources.get(name) ?? this.#connections.get(name)?._source;
+	}
+
+	/**
+	 * Explicit MCP config files (`--mcp-config`) this manager was started with.
+	 *
+	 * Callers that reload configs outside {@link discoverAndConnect} — `/mcp
+	 * enable` re-reads them to find the server it just took off the denylist —
+	 * have to pass these back, or a server defined only in an explicit file is
+	 * invisible to the reload and silently never reconnects.
+	 */
+	getExtraConfigPaths(): string[] | undefined {
+		return this.#extraConfigPaths;
 	}
 
 	/**

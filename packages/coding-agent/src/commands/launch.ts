@@ -87,6 +87,11 @@ export default class Index extends Command {
 			description: "Add a workspace directory beyond the working directory (repeatable)",
 			multiple: true,
 		}),
+		"mcp-config": Flags.string({
+			description:
+				"Load MCP servers from a JSON file with an mcpServers map (repeatable; overrides same-named discovered servers)",
+			multiple: true,
+		}),
 		print: Flags.boolean({
 			char: "p",
 			description: "Non-interactive mode: process prompt and exit",

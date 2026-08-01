@@ -7,6 +7,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { LoadedCustomTool } from "../extensibility/custom-tools/types";
 import { AgentStorage } from "../session/agent-storage";
 import type { AuthStorage } from "../session/auth-storage";
+import { ExplicitMCPConfigError } from "./config";
 import { type MCPLoadResult, MCPManager } from "./manager";
 import type { McpConnectionStatusEvent } from "./startup-events";
 import { MCPToolCache } from "./tool-cache";
@@ -35,6 +36,11 @@ export interface MCPToolsLoadOptions {
 	filterExa?: boolean;
 	/** Whether to filter out browser MCP servers when builtin browser tool is enabled (default: false) */
 	filterBrowser?: boolean;
+	/**
+	 * Extra MCP config files (`mcpServers` JSON, e.g. from `--mcp-config`).
+	 * Servers from these files override same-named discovered servers.
+	 */
+	extraConfigPaths?: string[];
 	/** SQLite storage for MCP tool cache (null disables cache) */
 	cacheStorage?: AgentStorage | null;
 	/** Auth storage used to resolve OAuth credentials before initial MCP connect */
@@ -73,8 +79,13 @@ export async function discoverAndLoadMCPTools(cwd: string, options?: MCPToolsLoa
 			enableProjectConfig: options?.enableProjectConfig,
 			filterExa: options?.filterExa,
 			filterBrowser: options?.filterBrowser,
+			extraConfigPaths: options?.extraConfigPaths,
 		});
 	} catch (error) {
+		// A config file the caller named explicitly (--mcp-config) is a hard
+		// error, not a discovery miss: degrading it to an entry in `errors` would
+		// start a session silently missing the servers that were asked for.
+		if (error instanceof ExplicitMCPConfigError) throw error;
 		// If discovery fails entirely, return empty result
 		const message = error instanceof Error ? error.message : String(error);
 		return {

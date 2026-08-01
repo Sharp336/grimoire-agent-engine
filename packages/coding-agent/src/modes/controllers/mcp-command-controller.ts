@@ -1952,7 +1952,12 @@ export class MCPCommandController {
 			return;
 		}
 
-		const { configs, sources } = await loadAllMCPConfigs(getProjectDir());
+		// Include the session's `--mcp-config` files: a server defined only there
+		// is absent from plain discovery, so re-enabling it would report success
+		// and leave it disconnected until a full `/mcp reload`.
+		const { configs, sources } = await loadAllMCPConfigs(getProjectDir(), {
+			extraConfigPaths: this.ctx.mcpManager.getExtraConfigPaths(),
+		});
 		const config = configs[name];
 		if (!config) {
 			await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
