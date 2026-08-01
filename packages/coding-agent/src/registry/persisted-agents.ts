@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { ADVISOR_TRANSCRIPT_FILENAME, isAdvisorTranscriptName } from "../advisor/transcript-recorder";
 import { SessionManager } from "../session/session-manager";
+import { SIDE_SESSION_FILE_PREFIX } from "../session/side-conversation";
 import { persistedVibeChildIds } from "../vibe/runtime";
 import { type AgentRegistry, MAIN_AGENT_ID } from "./agent-registry";
 
@@ -53,7 +54,7 @@ async function registerPersistedSubagentsFromDir(
 		// cold-revive as generic subagents — after process exit their controller and
 		// compaction hooks are gone, and the reference-only boundary contract would
 		// degrade after the first compaction.
-		if (entry.name.startsWith("side.internal-")) continue;
+		if (entry.name.startsWith(SIDE_SESSION_FILE_PREFIX)) continue;
 		const sessionFile = path.join(dir, entry.name);
 		// The advisor transcript is observability-only: register it as a non-peer
 		// `advisor` kind under its owning session so the Hub can show its read-only

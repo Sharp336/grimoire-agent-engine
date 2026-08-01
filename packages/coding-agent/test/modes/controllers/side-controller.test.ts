@@ -4,7 +4,7 @@ import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionAPI, ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
-import { SIDE_AGENT_ID, SideController } from "@oh-my-pi/pi-coding-agent/modes/controllers/side-controller";
+import { SideController } from "@oh-my-pi/pi-coding-agent/modes/controllers/side-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -12,6 +12,7 @@ import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SIDE_BOUNDARY_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SIDE_AGENT_ID } from "@oh-my-pi/pi-coding-agent/session/side-conversation";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const model = { provider: "anthropic", id: "claude-sonnet-4-5" } as Model;

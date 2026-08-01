@@ -6,12 +6,11 @@ import * as sdk from "../../sdk";
 import type { AgentSession } from "../../session/agent-session";
 import { SIDE_BOUNDARY_MESSAGE_TYPE } from "../../session/messages";
 import { SessionManager } from "../../session/session-manager";
+import { SIDE_AGENT_ID, SIDE_SESSION_FILE_PREFIX } from "../../session/side-conversation";
 import { createMCPProxyTools } from "../../task/executor";
 import { shortenPath } from "../../tools/render-utils";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "../../tools/todo";
 import type { InteractiveModeContext } from "../types";
-
-export const SIDE_AGENT_ID = "side.internal";
 
 const SIDE_STATUS = "Side conversation — Esc returns to main, /side end discards it";
 const DISPOSE_FAILURE_MESSAGE = "Side conversation ended, but its file could not be deleted";
@@ -105,7 +104,7 @@ export class SideController {
 		};
 
 		const sessionDir = parentFile.slice(0, -6);
-		const sideFile = path.join(sessionDir, `${SIDE_AGENT_ID}-${Snowflake.next()}.jsonl`);
+		const sideFile = path.join(sessionDir, `${SIDE_SESSION_FILE_PREFIX}${Snowflake.next()}.jsonl`);
 
 		await ctx.sessionManager.ensureOnDisk();
 		await ctx.sessionManager.flush();
@@ -169,8 +168,9 @@ export class SideController {
 				{ triggerTurn: false, deliverAs: "nextTurn" },
 			);
 
-			// 3. Append session-init so a cold Agent Hub revival describes the side
-			//    correctly, using the post-filter tool list.
+			// 3. Append session-init so the side transcript describes itself for
+			//    inspection and export (cold revival is excluded from the persisted
+			//    agent scan), using the post-filter tool list.
 			sideManager.appendSessionInit({
 				systemPrompt: side.systemPrompt.join("\n\n"),
 				task: question || "side conversation",
