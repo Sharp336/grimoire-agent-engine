@@ -3375,6 +3375,114 @@ describe("openai-codex streaming", () => {
 		});
 	});
 
+	it("chains websocket tool output after normalizing an oversized call id", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-tool-delta-");
+		setAgentDir(tempDir.path());
+		const token = createCodexTestToken();
+		const sentRequests: Array<Record<string, unknown>> = [];
+		const longCallId = `call_${"x".repeat(80)}`;
+		const fetchMock = vi.fn(async () => {
+			throw new Error("SSE fallback should not be called");
+		});
+
+		class ToolDeltaWebSocket extends MockWebSocket {
+			constructor(url: string, options?: WsOptions) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+
+			send(data: string): void {
+				sentRequests.push(JSON.parse(data) as Record<string, unknown>);
+				if (sentRequests.length === 1) {
+					this.sendJson({ type: "response.created", response: { id: "resp_tool_1" } });
+					this.sendJson({
+						type: "response.output_item.added",
+						item: {
+							type: "function_call",
+							id: "fc_tool_1",
+							call_id: longCallId,
+							name: "read",
+							arguments: "",
+						},
+					});
+					this.sendJson({
+						type: "response.output_item.done",
+						item: {
+							type: "function_call",
+							id: "fc_tool_1",
+							call_id: longCallId,
+							name: "read",
+							arguments: '{"path":"README.md"}',
+						},
+					});
+					this.sendJson({
+						type: "response.completed",
+						response: { id: "resp_tool_1", status: "completed", usage: DEFAULT_USAGE },
+					});
+					return;
+				}
+				this.emitCodexResponse({
+					messageId: "msg_tool_2",
+					responseId: "resp_tool_2",
+					text: "Done",
+					terminalType: "response.completed",
+				});
+			}
+		}
+
+		global.WebSocket = ToolDeltaWebSocket as unknown as typeof WebSocket;
+		const model = createCodexTestModel("https://chatgpt.com/backend-api");
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const firstUser = { role: "user" as const, content: "Read README", timestamp: Date.now() };
+		const baseContext: Context = {
+			systemPrompt: ["You are a helpful assistant."],
+			messages: [firstUser],
+			tools: [
+				{
+					name: "read",
+					description: "Read a file",
+					parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+				},
+			],
+		};
+		const options = {
+			fetch: fetchMock as FetchImpl,
+			apiKey: token,
+			sessionId: "ws-tool-delta-session",
+			providerSessionState,
+		};
+
+		const firstResponse = await streamOpenAICodexResponses(model, baseContext, options).result();
+		const toolCall = firstResponse.content.find(block => block.type === "toolCall");
+		if (toolCall?.type !== "toolCall") throw new Error("expected tool call");
+		await streamOpenAICodexResponses(
+			model,
+			{
+				...baseContext,
+				messages: [
+					firstUser,
+					firstResponse,
+					{
+						role: "toolResult",
+						toolCallId: toolCall.id,
+						toolName: toolCall.name,
+						content: [{ type: "text", text: "file contents" }],
+						isError: false,
+						timestamp: Date.now(),
+					},
+				],
+			},
+			options,
+		).result();
+
+		expect(sentRequests).toHaveLength(2);
+		expect(sentRequests[1]?.previous_response_id).toBe("resp_tool_1");
+		expect(sentRequests[1]?.input).toEqual([
+			expect.objectContaining({ type: "function_call_output", output: "file contents" }),
+		]);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
 	it("drops a stale terminal frame from the prior response leaking onto a reused websocket", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stale-frame-");
 		setAgentDir(tempDir.path());
