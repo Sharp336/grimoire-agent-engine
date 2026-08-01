@@ -420,6 +420,60 @@ describe("loadAllMCPConfigs extraConfigPaths", () => {
 		expect(configs.unrelated).toMatchObject({ type: "http", url: "http://localhost:9999/mcp" });
 	});
 
+	// The same dedupe contract inside the explicit set: two names for one endpoint
+	// would otherwise open two connections and mount the tools twice, which is
+	// what `loadCapability` prevents for everything it loads, single file included.
+	test("two explicit files naming one endpoint collapse to the later name", async () => {
+		const firstPath = path.join(projectDir, "first.json");
+		const secondPath = path.join(projectDir, "second.json");
+		await fs.writeFile(firstPath, JSON.stringify({ mcpServers: { penpot: { url: "http://localhost:14401/mcp" } } }));
+		await fs.writeFile(
+			secondPath,
+			JSON.stringify({ mcpServers: { "penpot-ws1": { url: "http://localhost:14401/mcp" } } }),
+		);
+
+		const { configs } = await loadAllMCPConfigs(projectDir, { extraConfigPaths: [firstPath, secondPath] });
+
+		expect(configs["penpot-ws1"]).toMatchObject({ type: "http", url: "http://localhost:14401/mcp" });
+		expect(configs.penpot).toBeUndefined();
+	});
+
+	test("two entries in one explicit file naming one endpoint collapse", async () => {
+		const explicitPath = path.join(projectDir, "explicit.json");
+		await fs.writeFile(
+			explicitPath,
+			JSON.stringify({
+				mcpServers: {
+					penpot: { url: "http://localhost:14401/mcp" },
+					"penpot-alias": { url: "http://localhost:14401/mcp" },
+				},
+			}),
+		);
+
+		const { configs } = await loadAllMCPConfigs(projectDir, { extraConfigPaths: [explicitPath] });
+
+		expect(configs["penpot-alias"]).toMatchObject({ type: "http", url: "http://localhost:14401/mcp" });
+		expect(configs.penpot).toBeUndefined();
+	});
+
+	test("explicit entries for different endpoints all survive", async () => {
+		const explicitPath = path.join(projectDir, "explicit.json");
+		await fs.writeFile(
+			explicitPath,
+			JSON.stringify({
+				mcpServers: {
+					ws0: { url: "http://localhost:4401/mcp" },
+					ws1: { url: "http://localhost:14401/mcp" },
+				},
+			}),
+		);
+
+		const { configs } = await loadAllMCPConfigs(projectDir, { extraConfigPaths: [explicitPath] });
+
+		expect(configs.ws0).toMatchObject({ url: "http://localhost:4401/mcp" });
+		expect(configs.ws1).toMatchObject({ url: "http://localhost:14401/mcp" });
+	});
+
 	test("a stdio alias with different args is not shadowed", async () => {
 		await fs.writeFile(
 			path.join(projectDir, ".mcp.json"),

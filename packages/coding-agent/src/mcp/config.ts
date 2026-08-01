@@ -251,7 +251,15 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 			// a disabled-but-complete discovered server.
 			if (isTombstone(server) && forcedEnabled.has(server.name)) continue;
 			claimed.add(server.name);
-			if (!suppressServer(server)) kept.push(server);
+			if (suppressServer(server)) continue;
+			// Aliases collapse among the explicit entries too, not just against
+			// discovered ones: `loadCapability` applies the same rule to everything
+			// it loads, including two names for one endpoint inside a single file.
+			// Later wins, matching the same-name rule above — whichever entry the
+			// caller wrote last is the one whose name the endpoint keeps.
+			const aliasIndex = kept.findIndex(existing => mcpCapability.equivalent?.(existing, server) ?? false);
+			if (aliasIndex >= 0) kept.splice(aliasIndex, 1);
+			kept.push(server);
 		}
 		// Same-endpoint aliases shadow each other inside `loadCapability` via
 		// `mcpCapability.equivalent`; extras are merged after that, so a discovered
