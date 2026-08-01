@@ -370,8 +370,19 @@ function swapMarkerPath(dbPath: string): string {
  * Atomically swap a rebuilt candidate into place behind a crash marker.
  * Any failure after the marker lands restores the archived originals; a crash
  * leaves the marker for `recoverInterruptedSwap` on the next run.
+ *
+ * `lockHandle` holds a RESERVED write lock on the live database; it stays
+ * open through the rename on Linux/macOS (an open handle does not block
+ * rename). On Windows, renaming over an open handle fails; in that case the
+ * handle is closed and the rename retried once immediately. The crash marker
+ * and rollback keep that one-tick window safe.
  */
-async function swapInCandidate(dbPath: string, candidate: string, archiveDir: string): Promise<void> {
+async function swapInCandidate(
+	dbPath: string,
+	candidate: string,
+	archiveDir: string,
+	lockHandle: Database | null,
+): Promise<void> {
 	const marker = swapMarkerPath(dbPath);
 	// Resolve the archive path so a recovery run from a different cwd can find it.
 	const resolvedArchive = path.resolve(archiveDir);
@@ -407,7 +418,20 @@ async function swapInCandidate(dbPath: string, candidate: string, archiveDir: st
 			}
 		}
 		await fsyncDir(path.dirname(dbPath));
-		await fs.rename(candidate, dbPath);
+		// On Linux/macOS an open handle does not block rename. On Windows,
+		// renaming over an open handle fails; close the lock and retry once.
+		// The crash marker + rollback keeps that one-tick window safe.
+		try {
+			await fs.rename(candidate, dbPath);
+		} catch (renameError) {
+			if (lockHandle !== null) {
+				releaseWriteLock(lockHandle);
+				lockHandle = null;
+				await fs.rename(candidate, dbPath);
+			} else {
+				throw renameError;
+			}
+		}
 		if (originalMode !== null) await fs.chmod(dbPath, originalMode);
 		await fsyncDir(path.dirname(dbPath));
 		const check = new Database(dbPath, { readonly: true });
@@ -433,6 +457,7 @@ async function swapInCandidate(dbPath: string, candidate: string, archiveDir: st
 		}
 		throw error;
 	} finally {
+		releaseWriteLock(lockHandle);
 		for (const retiredPath of retired) await fs.rm(retiredPath, { force: true }).catch(() => undefined);
 		try {
 			await fs.rm(marker, { force: true });
@@ -885,9 +910,10 @@ async function repairCorruptDatabase(probe: DbProbe, repair: DbRepair): Promise<
 		repair.error = messageOf(error);
 		return;
 	}
-	// Hold a RESERVED write lock from the quiescence proof through candidate
-	// validation and the swap decision; release immediately before the rename.
-	// If the lock cannot be acquired, report busy — never swap without it.
+	// Hold a RESERVED write lock from the quiescence proof through the entire
+	// swap (marker, sidecar retirement, rename, verify). swapInCandidate
+	// releases the lock in its finally. If the lock cannot be acquired,
+	// report busy — never swap without it.
 	let lockHandle: Database | null = null;
 	try {
 		lockHandle = await acquireWriteLock(probe.path);
@@ -936,11 +962,13 @@ async function repairCorruptDatabase(probe: DbProbe, repair: DbRepair): Promise<
 			repair.error = messageOf(error);
 			return;
 		}
-		// Release the lock immediately before the rename.
-		releaseWriteLock(lockHandle);
+		// Hold the lock through the entire swap: marker write, sidecar
+		// retirement, rename, and verify. swapInCandidate releases the lock
+		// in its finally (or closes it on Windows rename retry).
+		const swapLockHandle = lockHandle;
 		lockHandle = null;
 		try {
-			await swapInCandidate(probe.path, candidate, archiveDir);
+			await swapInCandidate(probe.path, candidate, archiveDir, swapLockHandle);
 			repair.actions.push(salvageError === null ? "salvaged" : "rescued");
 			candidate = null;
 		} catch (error) {
