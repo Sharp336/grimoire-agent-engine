@@ -16,26 +16,40 @@ export const SIDE_AGENT_ID = "side.internal";
 const SIDE_STATUS = "Side conversation — Esc returns to main, /side end discards it";
 const DISPOSE_FAILURE_MESSAGE = "Side conversation ended, but its file could not be deleted";
 
+/** A deferred question submit, run outside the lifecycle queue. */
+type SubmitClosure = () => Promise<void>;
+
+/** Outcome of {@link SideController.#handleExistingRef}: proceed to create, or done (optionally submit). */
+type RefHandling = { outcome: "proceed" } | { outcome: "done"; submit?: SubmitClosure };
+
 export class SideController {
 	constructor(private readonly ctx: InteractiveModeContext) {}
 
-	// Operations are serialized through this queue so start()/dispose() cannot
-	// interleave at await points — a /side end fired during an in-flight create
-	// now waits for the create to finish, then disposes the live session, rather
-	// than early-returning and leaving the side alive. The registry ref
-	// classification below stays as defense-in-depth for refs created outside
-	// the queue (a failed create the SDK did not clean up, platform lifecycle
-	// actions); the queue is the primary mechanism.
+	// Lifecycle operations (dispatch, preconditions, reuse/stale handling,
+	// create, focus, status overwrite) are serialized through this queue so
+	// start()/dispose() cannot interleave at await points — a /side end fired
+	// during an in-flight create waits for the create to finish, then disposes
+	// the live session, rather than early-returning and leaving the side alive.
+	// The question submit runs AFTER the queued op resolves (in start()), so a
+	// /side end, session transition, or shutdown during a long side turn is not
+	// blocked by the in-flight prompt — AgentSession.dispose handles in-flight
+	// turns. The registry ref classification below stays as defense-in-depth for
+	// refs created outside the queue (a failed create the SDK did not clean up,
+	// platform lifecycle actions); the queue is the primary mechanism.
 	#queue: Promise<void> = Promise.resolve();
 
 	/** `/side` (create+focus), `/side <question>` (create+focus+ask), `/side end` (discard). */
 	async start(args: string): Promise<void> {
-		const op = this.#queue.then(() => this.#startImpl(args));
-		this.#queue = op.catch(() => {});
-		return op;
+		const lifecycleOp = this.#queue.then(() => this.#startImpl(args));
+		this.#queue = lifecycleOp.then(
+			() => {},
+			() => {},
+		);
+		const submit = await lifecycleOp;
+		if (submit) await submit();
 	}
 
-	async #startImpl(args: string): Promise<void> {
+	async #startImpl(args: string): Promise<SubmitClosure | undefined> {
 		const trimmed = args.trim();
 		if (trimmed === "end") {
 			const existed = AgentRegistry.global().get(SIDE_AGENT_ID) !== undefined;
@@ -70,7 +84,8 @@ export class SideController {
 		}
 
 		// Reuse, busy, or stale-ref reclaim — shared with the create-race catch.
-		if (await this.#handleExistingRef(question)) return;
+		const handling = await this.#handleExistingRef(question);
+		if (handling.outcome === "done") return handling.submit;
 
 		// --- Create path ---
 		const parentSessionId = session.sessionId;
@@ -173,7 +188,12 @@ export class SideController {
 			await ctx.focusAgentSession(SIDE_AGENT_ID);
 			ctx.showStatus(SIDE_STATUS);
 
-			if (question) await this.#submitQuestion(side, question);
+			// Return a submit closure so the question is asked outside the
+			// lifecycle queue — a /side end or shutdown during the turn is not
+			// blocked by it. The status overwrite above is the last status the
+			// controller emits on this path.
+			const sideSession = side;
+			return question ? () => this.#submitQuestion(sideSession, question) : undefined;
 		} catch (error) {
 			if (side) {
 				// A session was constructed — dispose it fully (disposes the
@@ -181,21 +201,20 @@ export class SideController {
 				await this.#disposeImpl();
 				await ctx.unfocusSession().catch(() => {});
 				ctx.showError(error instanceof Error ? error.message : String(error));
-			} else {
-				// createAgentSession threw before a session existed (the
-				// expectedAgentRef:null race or another failure). Clear the orphan
-				// fork, then route the winning ref through the same handling the
-				// top of start() uses — a mid-init winner (session: null, status:
-				// "running") surfaces the clean "still starting" error instead of
-				// the raw registration exception.
-				await this.#removeSideFile(
-					sideFile,
-					"Side conversation setup failed, and its fork file could not be deleted",
-				);
-				if (await this.#handleExistingRef(question)) return;
-				await ctx.unfocusSession().catch(() => {});
-				ctx.showError(error instanceof Error ? error.message : String(error));
+				return undefined;
 			}
+			// createAgentSession threw before a session existed (the
+			// expectedAgentRef:null race or another failure). Clear the orphan
+			// fork, then route the winning ref through the same handling the
+			// top of start() uses — a mid-init winner (session: null, status:
+			// "running") surfaces the clean "still starting" error instead of
+			// the raw registration exception.
+			await this.#removeSideFile(sideFile, "Side conversation setup failed, and its fork file could not be deleted");
+			const catchHandling = await this.#handleExistingRef(question);
+			if (catchHandling.outcome === "done") return catchHandling.submit;
+			await ctx.unfocusSession().catch(() => {});
+			ctx.showError(error instanceof Error ? error.message : String(error));
+			return undefined;
 		}
 	}
 
@@ -338,17 +357,17 @@ export class SideController {
 
 	/**
 	 * Handle an existing Side registry ref: reuse a live session, report a busy
-	 * initializing one, or reclaim a stale one. Returns true if the caller
-	 * should return (ref was reused, is busy, or a lost-race reuse was taken);
-	 * returns false if the ref was reclaimed or there was no ref, and the
-	 * caller should proceed to create (top of start) or surface its own error
-	 * (create-race catch).
+	 * initializing one, or reclaim a stale one. Returns `{ outcome: "proceed" }`
+	 * when the caller should create (no ref, or a stale ref was reclaimed);
+	 * returns `{ outcome: "done", submit? }` when the ref was reused or is busy
+	 * — the caller returns, optionally running the submit closure outside the
+	 * lifecycle queue.
 	 */
-	async #handleExistingRef(question: string): Promise<boolean> {
+	async #handleExistingRef(question: string): Promise<RefHandling> {
 		const ctx = this.ctx;
 		const registry = AgentRegistry.global();
 		const existing = registry.get(SIDE_AGENT_ID);
-		if (!existing) return false;
+		if (!existing) return { outcome: "proceed" };
 
 		// Reuse path: a live side session already exists — focus it, no new fork.
 		// Registry ids are re-resolved across awaits (SessionFocusController
@@ -365,10 +384,10 @@ export class SideController {
 				const current = registry.get(SIDE_AGENT_ID);
 				if (current?.session !== existing.session) {
 					ctx.showError("Side conversation is still starting — try again in a moment");
-					return true;
+					return { outcome: "done" };
 				}
 				ctx.showError(error instanceof Error ? error.message : String(error));
-				return true;
+				return { outcome: "done" };
 			}
 			// Focus succeeded — re-read the registry and confirm the generation
 			// is still the one we captured. If a concurrent dispose + create
@@ -376,11 +395,15 @@ export class SideController {
 			// stale captured session.
 			if (registry.get(SIDE_AGENT_ID)?.session !== existing.session) {
 				ctx.showError("Side conversation is still starting — try again in a moment");
-				return true;
+				return { outcome: "done" };
 			}
 			ctx.showStatus(SIDE_STATUS);
-			if (question) await this.#submitQuestion(existing.session, question);
-			return true;
+			// Capture the session for the closure; the revalidation above
+			// confirmed the registry still holds it. The closure runs outside
+			// the queue, so a concurrent dispose may still land first —
+			// #submitQuestion's try/catch handles a prompt on a disposed session.
+			const session = existing.session;
+			return { outcome: "done", submit: question ? () => this.#submitQuestion(session, question) : undefined };
 		}
 
 		// Stale-ref path: ref exists but session is null. A genuinely stale ref
@@ -392,7 +415,7 @@ export class SideController {
 		// generation-checked attach fail — losing the user's side conversation.
 		if (existing.status === "running") {
 			ctx.showError("Side conversation is still starting — try again in a moment");
-			return true;
+			return { outcome: "done" };
 		}
 
 		// Stale: parked/aborted. Reclaim the slot before any await — a concurrent
@@ -413,6 +436,6 @@ export class SideController {
 		if (existing.sessionFile) {
 			await this.#removeSideFile(existing.sessionFile, "Failed to delete the previous side conversation file");
 		}
-		return false;
+		return { outcome: "proceed" };
 	}
 }
