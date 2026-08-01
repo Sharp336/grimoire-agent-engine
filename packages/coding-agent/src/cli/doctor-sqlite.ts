@@ -195,12 +195,24 @@ async function statSizeOr(filePath: string, fallback: number): Promise<number> {
 	}
 }
 
+/** True only when the file exists; non-ENOENT errors (EACCES, EIO) propagate. */
 async function pathExists(filePath: string): Promise<boolean> {
 	try {
 		await fs.stat(filePath);
 		return true;
-	} catch {
-		return false;
+	} catch (error) {
+		if (isEnoent(error)) return false;
+		throw error;
+	}
+}
+
+/** True when the file exists or is merely inaccessible; false only on ENOENT. Use when probing for optional files under partially-accessible dirs. */
+async function fileExistsOr(filePath: string): Promise<boolean> {
+	try {
+		await fs.stat(filePath);
+		return true;
+	} catch (error) {
+		return !isEnoent(error);
 	}
 }
 
@@ -281,7 +293,7 @@ async function hasHolders(dbPath: string): Promise<boolean | null> {
 	const files: string[] = [];
 	for (const suffix of TRIO_SUFFIXES) {
 		const file = `${dbPath}${suffix}`;
-		if (await pathExists(file)) files.push(file);
+		if (await fileExistsOr(file)) files.push(file);
 	}
 	if (files.length === 0) return false;
 	const result = Bun.spawnSync([fuser, ...files]);
@@ -491,7 +503,13 @@ async function swapInCandidate(
  */
 export async function recoverInterruptedSwap(db: DoctorDatabase, restore: boolean): Promise<SwapRecovery> {
 	const marker = swapMarkerPath(db.path);
-	if (!(await pathExists(marker))) return { found: false, restored: false, error: null };
+	let markerExists: boolean;
+	try {
+		markerExists = await pathExists(marker);
+	} catch (error) {
+		return { found: true, restored: false, error: `cannot check swap marker: ${messageOf(error)}` };
+	}
+	if (!markerExists) return { found: false, restored: false, error: null };
 	if (!restore) return { found: true, restored: false, error: null };
 	try {
 		const payload: unknown = JSON.parse(await Bun.file(marker).text());
@@ -661,7 +679,7 @@ async function salvageViaRecover(dbPath: string, archiveDir: string): Promise<st
 		const archivedMain = path.join(archiveDir, path.basename(dbPath));
 		const workDb = path.join(workDir, path.basename(dbPath));
 		await fs.copyFile(archivedMain, workDb);
-		if (await pathExists(`${archivedMain}-wal`)) await fs.copyFile(`${archivedMain}-wal`, `${workDb}-wal`);
+		if (await fileExistsOr(`${archivedMain}-wal`)) await fs.copyFile(`${archivedMain}-wal`, `${workDb}-wal`);
 		const dumpPath = path.join(workDir, "recovery.sql");
 		await runRecoverDump(sqlite, workDb, dumpPath);
 		const candidate = path.join(workDir, "candidate.db");
