@@ -3100,6 +3100,36 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (mountedNames.length > 0 && !initialToolNames.includes("write")) initialToolNames.push("write");
 		}
 
+		// Snapshot the baseline's xd:// partition for persona-overlay restore. The
+		// overlay restore must bring back the exact top-level vs mounted split a
+		// fresh non-persona startup would produce; setActiveToolsByName() alone
+		// classifies mounts against the persona's current mounted set, so
+		// default-mountable baseline tools the persona never had mounted would come
+		// back top-level instead of under xd://. setActiveToolPresentation expects
+		// the FULL enabled list (mounted names included) plus the mounted subset.
+		let baselineEnabledToolNames: string[] | undefined;
+		let baselineMountedToolNames: string[] | undefined;
+		if (baselineToolNames) {
+			const mounted: string[] = [];
+			if (toolSession.xdev) {
+				for (const name of baselineToolNames) {
+					const tool = toolRegistry.get(name);
+					const explicitlyRequested = explicitlyRequestedToolNameSet?.has(name) === true;
+					if (
+						tool &&
+						xdevReadAvailable &&
+						xdevWriteAvailable &&
+						!explicitlyRequested &&
+						isMountableUnderXdev(tool)
+					)
+						mounted.push(name);
+				}
+			}
+			baselineEnabledToolNames = [...baselineToolNames];
+			if (mounted.length > 0 && !baselineEnabledToolNames.includes("write")) baselineEnabledToolNames.push("write");
+			baselineMountedToolNames = mounted;
+		}
+
 		setActiveToolNames(initialToolNames);
 
 		const { systemPrompt } = await logger.time(
@@ -3300,10 +3330,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// Record an explicit startup persona (--agent) on resumed/continued/
 			// forked transcripts too, so the next resume rehydrates it instead of
 			// silently losing the selection to the transcript's prior persona (or
-			// none). Plain resumes rehydrate the persisted persona as
-			// options.agentPersona, so skip the append when it matches what the
-			// transcript already records.
-			if (options.agentPersona && existingSession.agentPersona?.agent !== options.agentPersona.name) {
+			// none). Compare name AND source: the same name may resolve to a
+			// different precedence root since the session was saved (e.g. a newly
+			// added project/foo shadowing user/foo), and that switch must be
+			// persisted or the next resume would silently revert.
+			if (
+				options.agentPersona &&
+				(existingSession.agentPersona?.agent !== options.agentPersona.name ||
+					existingSession.agentPersona?.source !== options.agentPersona.source)
+			) {
 				sessionManager.appendAgentChange(options.agentPersona.name, options.agentPersona.source);
 			}
 		} else {
@@ -3464,9 +3499,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			cliThinkingLocked: options.cliThinkingLocked,
 			toolNamesFromAgent: options.toolNamesFromAgent,
 			initialToolOverlayRestore:
-				options.agentPersona?.tools?.length && baselineToolNames
+				options.agentPersona?.tools?.length && baselineEnabledToolNames && baselineMountedToolNames
 					? async () => {
-							await session.setActiveToolsByName(baselineToolNames);
+							await session.setActiveToolPresentation(baselineEnabledToolNames!, baselineMountedToolNames!);
 						}
 					: undefined,
 			ensureWriteRegistered,

@@ -803,6 +803,67 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("re-appends the explicit persona when the resumed name resolves to a different source", async () => {
+		const tempDir = makeTempDir();
+		const sessionManager = SessionManager.inMemory();
+		// Transcript records user/foo; the explicit --agent foo now resolves to a
+		// newly added project/foo. Only the name matches, so the append must still
+		// fire or the next resume would silently rehydrate the old user/foo.
+		sessionManager.appendAgentChange("foo", "user");
+		sessionManager.appendMessage({ role: "user", content: "prior turn", timestamp: Date.now() });
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			sessionManager,
+			agentPersona: {
+				name: "foo",
+				description: "Newly added project persona",
+				systemPrompt: "",
+				source: "project" as const,
+			},
+		});
+
+		try {
+			expect(sessionManager.buildSessionContext().agentPersona).toEqual({
+				agent: "foo",
+				source: "project",
+			});
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("skips the append when the resumed persona matches name and source", async () => {
+		const tempDir = makeTempDir();
+		const sessionManager = SessionManager.inMemory();
+		// Plain resume rehydrates the persisted persona; a matching append would
+		// only duplicate the entry.
+		sessionManager.appendAgentChange("foo", "project");
+		sessionManager.appendMessage({ role: "user", content: "prior turn", timestamp: Date.now() });
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			sessionManager,
+			agentPersona: {
+				name: "foo",
+				description: "Persisted persona",
+				systemPrompt: "",
+				source: "project" as const,
+			},
+		});
+
+		try {
+			expect(sessionManager.buildSessionContext().agentPersona).toEqual({
+				agent: "foo",
+				source: "project",
+			});
+			// Exactly one agent_change entry: the guard did not append a duplicate.
+			expect(sessionManager.getEntries().filter(e => e.type === "agent_change")).toHaveLength(1);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	// A session created on another provider keeps its configured-mode `edit` in
 	// the registry (only a Cursor-created session moves it out) and the tool
 	// roster is built once, at creation — switching to Cursor later does not
