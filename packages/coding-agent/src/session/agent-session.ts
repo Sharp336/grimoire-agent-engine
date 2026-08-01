@@ -570,6 +570,23 @@ export class AgentSession {
 	#planInternalAbortPending = false;
 	#pendingAbortErrorId?: number;
 
+	/**
+	 * The user's own message, captured the instant `#promptWithMessage` is
+	 * entered, cleared the instant it hands off to `agent.prompt()` (from
+	 * there, the normal event pipeline owns persistence). If a bail-out
+	 * fires before that hand-off -- Escape racing the pre-flight chain
+	 * (recovery, bash/eval/irc flush, before_agent_start, auto-thinking
+	 * classification; the classifier's genuine several-hundred-ms local-
+	 * model-load window is the realistic way this actually gets hit) --
+	 * `#commitAbortedPromptIfPending` still commits it as a real aborted
+	 * turn instead of discarding it with no trace: not doing so left the
+	 * message unrecoverable and invisible in `/tree`, the originally
+	 * reported bug. `generation` lets a superseding newer call (which
+	 * captures and stores its own pair here first) suppress this one's
+	 * now-stale commit.
+	 */
+	#pendingUncommittedPrompt?: { message: AgentMessage; generation: number };
+
 	#postPromptTasks = new Set<Promise<unknown>>();
 	#postPromptTasksPromise: Promise<void> | undefined = undefined;
 	#postPromptTasksResolve: (() => void) | undefined = undefined;
@@ -5005,9 +5022,22 @@ export class AgentSession {
 	): Promise<void> {
 		this.#beginInFlight();
 		const generation = this.#promptGeneration;
+		if (message.role === "user") {
+			this.#pendingUncommittedPrompt = { message, generation };
+		}
 		try {
 			await this.#recovery.maybeRestoreRetryFallbackPrimary();
-			if (!(await this.#runUsageAwarePreflight())) return;
+			if (!(await this.#runUsageAwarePreflight())) {
+				// `abort()` cancels every controller in `#usagePreflightAbortControllers`
+				// (this preflight registers its own) *and* bumps `#promptGeneration`, so an
+				// Escape landing inside the preflight surfaces here as a plain `false` and
+				// returns before any generation checkpoint below can observe it. Commit the
+				// pending message for that case only: a `false` from a genuine usage/reserve
+				// decision is a precondition failure, which commits nothing (same as a
+				// pre-flight step throwing).
+				if (this.#promptGeneration !== generation) await this.#commitAbortedPromptIfPending(generation);
+				return;
+			}
 			// Flush any pending bash messages before the new prompt
 			await this.#bash.flushPending();
 			this.#eval.flushPending();
@@ -5075,6 +5105,7 @@ export class AgentSession {
 			// Early bail-out: if a newer abort/prompt cycle started during setup,
 			// return before mutating shared state (nextTurn messages, system prompt).
 			if (this.#promptGeneration !== generation) {
+				await this.#commitAbortedPromptIfPending(generation);
 				return;
 			}
 
@@ -5110,7 +5141,10 @@ export class AgentSession {
 			// resuming would start a turn on a torn-down session.
 			const disposingBeforeTransition = this.#isDisposed;
 			await this.#memory.transition;
-			if ((this.#isDisposed && !disposingBeforeTransition) || this.#promptGeneration !== generation) return;
+			if ((this.#isDisposed && !disposingBeforeTransition) || this.#promptGeneration !== generation) {
+				if (!this.#isDisposed || disposingBeforeTransition) await this.#commitAbortedPromptIfPending(generation);
+				return;
+			}
 			const beforeAgentStartSystemPrompt = await this.#buildSystemPromptForAgentStart(expandedText);
 
 			let baseXdevCatalogDelivered = true;
@@ -5159,6 +5193,7 @@ export class AgentSession {
 
 			// Bail out if a newer abort/prompt cycle has started since we began setup
 			if (this.#promptGeneration !== generation) {
+				await this.#commitAbortedPromptIfPending(generation);
 				return;
 			}
 
@@ -5167,8 +5202,21 @@ export class AgentSession {
 			// custom roles) and non-auto sessions are skipped. Never blocks the turn —
 			// failures fall back to a concrete level inside the helper.
 			if (this.isAutoThinking && message.role === "user") {
-				await this.#models.applyAutoThinkingLevel(expandedText, generation);
+				// Track a dedicated controller in the existing preflight-abort set
+				// (see `#runUsageAwarePreflight`) so an Escape-triggered `abort()`
+				// cancels the in-flight classifier request instead of leaving it to
+				// run out the classifier's own fallback timeout — otherwise the
+				// aborted turn's optimistic user-message row stays visible for that
+				// whole window before `finishPendingSubmission` can clean it up.
+				const autoThinkingAbort = new AbortController();
+				this.#usagePreflightAbortControllers.add(autoThinkingAbort);
+				try {
+					await this.#models.applyAutoThinkingLevel(expandedText, generation, autoThinkingAbort.signal);
+				} finally {
+					this.#usagePreflightAbortControllers.delete(autoThinkingAbort);
+				}
 				if (this.#promptGeneration !== generation) {
+					await this.#commitAbortedPromptIfPending(generation);
 					return;
 				}
 			}
@@ -5181,6 +5229,7 @@ export class AgentSession {
 
 			await this.#maintenance.runPrePromptCompactionIfNeeded(messages);
 			if (this.#promptGeneration !== generation) {
+				await this.#commitAbortedPromptIfPending(generation);
 				return;
 			}
 
@@ -5209,6 +5258,7 @@ export class AgentSession {
 			if (planReferenceMessage) {
 				this.#planReferenceSent = true;
 			}
+			this.#clearPendingUncommittedPrompt(generation);
 			try {
 				await this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions);
 			} finally {
@@ -5218,8 +5268,78 @@ export class AgentSession {
 				await this.#waitForPostPromptRecovery(generation);
 			}
 		} finally {
+			this.#clearPendingUncommittedPrompt(generation);
 			this.#endInFlight();
 		}
+	}
+
+	/**
+	 * Drops `#pendingUncommittedPrompt` once it's no longer this call's to
+	 * commit: either it just handed off to `agent.prompt()` (which owns
+	 * persistence from here), or its own call is exiting (success, bail-out
+	 * after already committing, or an uncaught exception) and a newer call
+	 * may have since overwritten the slot with its own pending pair, which
+	 * this generation check leaves untouched.
+	 */
+	#clearPendingUncommittedPrompt(generation: number): void {
+		if (this.#pendingUncommittedPrompt?.generation === generation) {
+			this.#pendingUncommittedPrompt = undefined;
+		}
+	}
+
+	/**
+	 * Commits `message` (plus a synthetic aborted assistant turn) when
+	 * `#promptWithMessage` bails out of its pre-flight chain before ever
+	 * reaching `agent.prompt()` -- the point that normally owns commit.
+	 * Mirrors exactly what a genuine in-flight abort produces (see
+	 * `emitAbortedAssistantMessage` in agent-loop.ts): an empty,
+	 * `stopReason: "aborted"` assistant reply parented off the user's own
+	 * message, fed through the same `#handleAgentEvent` pipeline a real
+	 * agent-emitted event uses -- so persistence, `/tree`, and the live
+	 * chat render exactly as they would for any other aborted turn, with
+	 * no new UI-side logic to get wrong.
+	 *
+	 * No-ops when nothing is pending for `generation`: either this call's
+	 * own turn already handed off to `agent.prompt()` (which cleared the
+	 * slot itself), or a newer `#promptWithMessage` call has since
+	 * overwritten it with its own pending pair -- in which case that
+	 * newer call's own bail-out/hand-off owns the outcome, not this one.
+	 */
+	async #commitAbortedPromptIfPending(generation: number): Promise<void> {
+		const pending = this.#pendingUncommittedPrompt;
+		if (!pending || pending.generation !== generation) return;
+		this.#pendingUncommittedPrompt = undefined;
+		const userMessage = pending.message;
+		this.agent.appendMessage(userMessage);
+		await this.#handleAgentEvent({ type: "message_start", message: userMessage });
+		await this.#handleAgentEvent({ type: "message_end", message: userMessage });
+		// No model resolved (session created but never assigned one): still land
+		// the user's own message -- unresolvable but reachable via `/tree` beats
+		// vanishing outright -- but there's no model identity left to attribute a
+		// synthetic reply to, so skip it rather than fabricate one.
+		const model = this.model;
+		if (!model) return;
+		const assistantMessage: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "aborted",
+			errorMessage: this.#pendingAbortErrorId ? USER_INTERRUPT_LABEL : "Request was aborted",
+			timestamp: Date.now(),
+		};
+		this.agent.appendMessage(assistantMessage);
+		await this.#handleAgentEvent({ type: "message_start", message: assistantMessage });
+		await this.#handleAgentEvent({ type: "message_end", message: assistantMessage });
 	}
 
 	/**

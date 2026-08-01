@@ -583,9 +583,13 @@ export class ModelControls {
 	 * Classify the current user turn and set the effective thinking level for it.
 	 * Bounded by a timeout + abort; on failure it preserves the last classified
 	 * level, or uses the provisional concrete level before the first resolution.
-	 * Never throws into the turn, and never clears `#autoThinking`.
+	 * `abortSignal` (typically the caller's per-turn preflight-abort controller)
+	 * is combined with the internal timeout via `AbortSignal.any` so an aborted
+	 * turn cancels the in-flight classifier request immediately instead of
+	 * waiting out the timeout. Never throws into the turn, and never clears
+	 * `#autoThinking`.
 	 */
-	async applyAutoThinkingLevel(promptText: string, generation: number): Promise<void> {
+	async applyAutoThinkingLevel(promptText: string, generation: number, abortSignal?: AbortSignal): Promise<void> {
 		const model = this.#model;
 		if (!model?.reasoning) return;
 		// Models with reasoning but no controllable effort surface (devin-agent
@@ -600,15 +604,22 @@ export class ModelControls {
 			// to the highest supported level for this model.
 			resolved = clampAutoThinkingEffort(model, Effort.Max);
 		} else {
-			const controller = new AbortController();
-			const timer = setTimeout(() => controller.abort(), ModelControls.#AUTO_THINKING_TIMEOUT_MS);
+			const timeoutController = new AbortController();
+			const timer = setTimeout(() => timeoutController.abort(), ModelControls.#AUTO_THINKING_TIMEOUT_MS);
+			// An external abort (e.g. Escape racing this classification call) must cancel
+			// the request immediately rather than waiting out the fallback timeout below —
+			// otherwise the aborted turn's optimistic UI lingers for up to
+			// AUTO_THINKING_TIMEOUT_MS after the user already interrupted it.
+			const signal = abortSignal
+				? AbortSignal.any([abortSignal, timeoutController.signal])
+				: timeoutController.signal;
 			try {
 				resolved = await classifyDifficulty(promptText, {
 					settings: this.#host.settings,
 					registry: this.#host.modelRegistry,
 					model,
 					sessionId: this.#host.sessionId(),
-					signal: controller.signal,
+					signal,
 					metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
 				});
 			} catch (error) {
