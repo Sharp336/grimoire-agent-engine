@@ -60,6 +60,28 @@ describe("ProcessTerminal kitty keyboard progressive-enhancement ordering", () =
 		expect(out).not.toContain("\x1b[>4;2m");
 	});
 
+	it("keeps alternate-key reporting without event types after a previous fresh session", async () => {
+		harness = createProcessTerminalRenderHarness(100, 30);
+		await harness.settle();
+		harness.writes.length = 0;
+
+		await harness.feed("\x1b[?5u");
+
+		const out = harness.writes.join("");
+		expect(out).toContain("\x1b[>5u");
+		expect(out).not.toContain("\x1b[>7u");
+	});
+
+	it("preserves parent event-type reporting", async () => {
+		harness = createProcessTerminalRenderHarness(100, 30);
+		await harness.settle();
+		harness.writes.length = 0;
+
+		await harness.feed("\x1b[?3u");
+
+		expect(harness.writes.join("")).toContain("\x1b[>7u");
+	});
+
 	it("enables kitty when the DA1 sentinel arrives before the kitty reply (#2042)", async () => {
 		harness = createProcessTerminalRenderHarness(100, 30);
 		await harness.settle();
