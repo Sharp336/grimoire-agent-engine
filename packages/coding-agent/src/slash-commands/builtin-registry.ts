@@ -592,6 +592,33 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "viewport",
+		description: "Switch between native scrollback and the full-screen mouse-driven viewport",
+		acpDescription: "Switch viewport mode",
+		acpInputHint: "[append|fullscreen]",
+		subcommands: [
+			{ name: "append", description: "Transcript in the terminal's own scrollback" },
+			{ name: "fullscreen", description: "Full-screen viewport with click and hover" },
+		],
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime => `Viewport: ${runtime.ctx.ui.viewportMode}`,
+		// TUI-only: the mode describes how the terminal is painted, so it means
+		// nothing to the ACP/RPC transports, which never own a screen.
+		handleTui: (command, runtime) => {
+			const arg = command.args.trim().toLowerCase();
+			runtime.ctx.editor.setText("");
+			if (arg === "append" || arg === "fullscreen") {
+				if (runtime.ctx.ui.viewportMode !== arg) runtime.ctx.setViewportMode(arg);
+				return;
+			}
+			if (arg) {
+				runtime.ctx.showStatus("Usage: /viewport [append|fullscreen]");
+				return;
+			}
+			runtime.ctx.toggleViewportMode();
+		},
+	},
+	{
 		name: "fast",
 		description: "Toggle priority service tier (OpenAI service_tier=priority, Anthropic speed=fast)",
 		acpDescription: "Toggle fast mode",
