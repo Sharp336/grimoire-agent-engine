@@ -49,6 +49,11 @@ async function registerPersistedSubagentsFromDir(
 	}
 	for (const entry of entries) {
 		if (!entry.isFile() || !entry.name.endsWith(".jsonl") || entry.name.includes(".bak")) continue;
+		// Throwaway side conversations (`side.internal-<snowflake>.jsonl`) must not
+		// cold-revive as generic subagents — after process exit their controller and
+		// compaction hooks are gone, and the reference-only boundary contract would
+		// degrade after the first compaction.
+		if (entry.name.startsWith("side.internal-")) continue;
 		const sessionFile = path.join(dir, entry.name);
 		// The advisor transcript is observability-only: register it as a non-peer
 		// `advisor` kind under its owning session so the Hub can show its read-only
