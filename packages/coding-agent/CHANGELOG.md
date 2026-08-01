@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [17.2.4] - 2026-08-01
+
 ### Added
 
 - Agent definition files can now be selected as the main-session persona via `--agent <name>`, `/agent <name>`, and `/switch-agent`. The agent's frontmatter (tools, model, thinking, system prompt) becomes the session policy, with explicit CLI flags taking precedence. Live switching mutates the session in place. Agent identity persists across resume/fork, and an explicit `--agent` selection on a resumed transcript is recorded so it survives the next resume. OpenCode `mode: primary|subagent|all` and Copilot `user-invocable`/`disable-model-invocation` frontmatter control availability; `task.disabledAgents` is honored at startup, in the picker, and by direct `/agent` switches; `tools: exec` expands to `bash`/`eval` like the subagent path; and explicitly requested `-e`/`--hook` extension packages stay discoverable under `--no-extensions` while ambient extension agents are suppressed. ([#6836](https://github.com/can1357/oh-my-pi/issues/6836))
@@ -45,7 +47,6 @@
 - Fixed explicit `thinking` metadata in `models.yml` custom definitions and `modelOverrides` being replaced by canonical catalog policy during model rebuilding. ([#7307](https://github.com/can1357/oh-my-pi/issues/7307))
 - Fixed the auto-titler installing a model's whole answer as the session title when the tiny title model ignored the titling task and answered the first user message instead. `normalizeGeneratedTitle` now rejects overlong output (>80 chars or >12 words) so the caller defers titling to the next user turn rather than accepting a full sentence ([#7303](https://github.com/can1357/oh-my-pi/issues/7303)).
 - Fixed the in-process `kill` builtin to validate signals, preserve negative PID operands, signal every process in pipeline jobs, continue after bad targets, and refuse non-probe signals aimed at the host process or process system group.
-
 
 ## [17.2.3] - 2026-08-01
 
