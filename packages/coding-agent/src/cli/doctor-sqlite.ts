@@ -339,12 +339,15 @@ function swapMarkerPath(dbPath: string): string {
  */
 async function swapInCandidate(dbPath: string, candidate: string, archiveDir: string): Promise<void> {
 	const marker = swapMarkerPath(dbPath);
-	await fs.writeFile(marker, JSON.stringify({ archive: archiveDir }), { flag: "wx" });
+	// Resolve the archive path so a recovery run from a different cwd can find it.
+	const resolvedArchive = path.resolve(archiveDir);
+	await fs.writeFile(marker, JSON.stringify({ archive: resolvedArchive }), { flag: "wx" });
+	// Fsync the marker FILE itself — fsyncing only the directory entry would
+	// persist an empty/truncated marker on power loss, breaking rollback.
+	await fsyncFile(marker);
 	await fsyncDir(path.dirname(dbPath));
 	const retired: string[] = [];
-	// The marker is the only pointer back to the archive; clear it only once
-	// the swap or a full rollback has succeeded, never after a failed rollback.
-	let clearMarker = false;
+	let swapCommitted = false;
 	try {
 		for (const suffix of ["-wal", "-shm", "-journal"]) {
 			const sidecar = `${dbPath}${suffix}`;
@@ -369,11 +372,15 @@ async function swapInCandidate(dbPath: string, candidate: string, archiveDir: st
 		} finally {
 			check.close();
 		}
-		clearMarker = true;
+		// Record swap-committed state in the marker before attempting removal.
+		// If removal fails, the marker still says swapped:true and recovery
+		// will NOT restore the old archive over new commits.
+		await fs.writeFile(marker, JSON.stringify({ archive: resolvedArchive, swapped: true }));
+		await fsyncFile(marker);
+		swapCommitted = true;
 	} catch (error) {
 		try {
 			await restoreFromArchive(dbPath, archiveDir);
-			clearMarker = true;
 		} catch (rollbackError) {
 			throw new Error(
 				`replacement failed and rollback failed; restore manually from ${archiveDir}: ${messageOf(rollbackError)}`,
@@ -382,9 +389,16 @@ async function swapInCandidate(dbPath: string, candidate: string, archiveDir: st
 		throw error;
 	} finally {
 		for (const retiredPath of retired) await fs.rm(retiredPath, { force: true }).catch(() => undefined);
-		if (clearMarker) {
-			await fs.rm(marker, { force: true }).catch(() => undefined);
+		try {
+			await fs.rm(marker, { force: true });
 			await fsyncDir(path.dirname(dbPath));
+		} catch (error) {
+			if (swapCommitted)
+				throw new Error(
+					`swap succeeded but swap marker could not be removed; the database is repaired but a stale marker remains at ${marker}: ${messageOf(error)}`,
+				);
+			// Rollback succeeded; a leftover marker without swapped:true causes
+			// the next --fix to re-restore the same archive (a benign no-op).
 		}
 	}
 }
@@ -408,10 +422,20 @@ export async function recoverInterruptedSwap(db: DoctorDatabase, restore: boolea
 		) {
 			throw new Error(`interrupted swap marker has no archive path: ${marker}`);
 		}
-		const archivedMain = path.join(payload.archive, path.basename(db.path));
+		// If the swap was committed before the crash, the live database IS the
+		// repaired candidate — do NOT restore the old archive over new commits.
+		if ("swapped" in payload && payload.swapped === true) {
+			await fs.rm(marker, { force: true });
+			await fsyncDir(path.dirname(db.path));
+			return { found: true, restored: false, error: null };
+		}
+		// Resolve relative archive paths against the marker's directory so a
+		// recovery run from a different cwd can find the archive.
+		const archiveDir = path.resolve(path.dirname(marker), payload.archive);
+		const archivedMain = path.join(archiveDir, path.basename(db.path));
 		if (!(await pathExists(archivedMain)))
 			throw new Error(`interrupted swap archive is missing the database: ${archivedMain}`);
-		await restoreFromArchive(db.path, payload.archive);
+		await restoreFromArchive(db.path, archiveDir);
 		await fs.rm(marker, { force: true });
 		await fsyncDir(path.dirname(db.path));
 		return { found: true, restored: true, error: null };
