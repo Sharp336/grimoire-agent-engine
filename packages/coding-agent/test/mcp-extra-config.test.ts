@@ -456,6 +456,30 @@ describe("loadAllMCPConfigs extraConfigPaths", () => {
 		expect(configs.penpot).toBeUndefined();
 	});
 
+	// `Map#set` on an existing key updates the value but keeps the original
+	// insertion slot, so a redefined name would be walked at its first-appearance
+	// position and lose the alias collapse to an entry written before it. Server
+	// names decide MCP tool names, so which one survives is user-visible.
+	test("a redefined name outranks an alias introduced before the redefinition", async () => {
+		const firstPath = path.join(projectDir, "first.json");
+		const secondPath = path.join(projectDir, "second.json");
+		await fs.writeFile(
+			firstPath,
+			JSON.stringify({
+				mcpServers: {
+					penpot: { url: "http://localhost:14401/mcp" },
+					alias: { url: "http://localhost:14401/mcp" },
+				},
+			}),
+		);
+		await fs.writeFile(secondPath, JSON.stringify({ mcpServers: { penpot: { url: "http://localhost:14401/mcp" } } }));
+
+		const { configs } = await loadAllMCPConfigs(projectDir, { extraConfigPaths: [firstPath, secondPath] });
+
+		expect(configs.penpot).toMatchObject({ type: "http", url: "http://localhost:14401/mcp" });
+		expect(configs.alias).toBeUndefined();
+	});
+
 	test("explicit entries for different endpoints all survive", async () => {
 		const explicitPath = path.join(projectDir, "explicit.json");
 		await fs.writeFile(

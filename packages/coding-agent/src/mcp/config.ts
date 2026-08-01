@@ -236,7 +236,16 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 		// standing, so a downstream file could never turn off a server an
 		// upstream one generated.
 		const resolved = new Map<string, MCPServer>();
-		for (const server of extraServers) resolved.set(server.name, server);
+		for (const server of extraServers) {
+			// Re-insert rather than overwrite in place: `Map#set` on an existing key
+			// keeps the original slot, which would walk a redefined name at its
+			// first-appearance position. The alias collapse below reads this order as
+			// "who was written last", so a later file redefining an earlier name has
+			// to sort after everything written before it — otherwise it loses to an
+			// alias for the same endpoint that it was meant to supersede.
+			resolved.delete(server.name);
+			resolved.set(server.name, server);
+		}
 
 		const kept: MCPServer[] = [];
 		const claimed = new Set<string>();
