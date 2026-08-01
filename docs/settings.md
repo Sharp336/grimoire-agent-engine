@@ -651,6 +651,7 @@ images:
   blockImages: false
 tui:
   hyperlinks: auto           # off, auto, always
+  viewport: append           # append, fullscreen
 ```
 
 | Key | Type | Default | Values |
@@ -669,6 +670,7 @@ tui:
 | `images.autoResize` | boolean | `true` | Resize large images for model compatibility. |
 | `images.blockImages` | boolean | `false` | Never send images to providers. |
 | `tui.hyperlinks` | enum | `auto` | `off`, `auto`, `always`. |
+| `tui.viewport` | enum | `append` | `append`, `fullscreen`. `append` keeps the transcript in the terminal's own scrollback. `fullscreen` takes over the window: the transcript scrolls inside omp, blocks collapse and expand on click, and rows highlight on hover, at the cost of native scrollback and native selection (omp provides drag to select, release to copy). |
 
 For a custom status line, set `statusLine.preset: custom` and configure `statusLine.leftSegments`, `statusLine.rightSegments`, and `statusLine.segmentOptions`.
 

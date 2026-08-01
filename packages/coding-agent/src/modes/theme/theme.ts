@@ -18,7 +18,16 @@ import type {
 	Terminal,
 	TerminalAppearance,
 } from "@oh-my-pi/pi-tui";
-import { adjustHsv, colorLuma, getCustomThemesDir, isEnoent, logger, relativeLuminance } from "@oh-my-pi/pi-utils";
+import {
+	adjustHsv,
+	colorLuma,
+	getCustomThemesDir,
+	hexToRgb,
+	isEnoent,
+	logger,
+	relativeLuminance,
+	rgbToHex,
+} from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import chalk from "chalk";
 import { LRUCache } from "lru-cache/raw";
@@ -1479,6 +1488,73 @@ function resolveToHex(value: string | number, isLight: boolean): string {
 	return value;
 }
 
+/**
+ * Minimum luma separation (0..1) at which one background reads as a different
+ * surface from another. Below this a hovered row just looks like the page; much
+ * above it the row reads as a hard selection bar rather than a hover hint.
+ */
+const HOVER_WASH_MIN_DELTA = 0.035;
+
+/** Per-channel step for surfaces with no headroom left for a value multiplier. */
+const HOVER_WASH_FALLBACK_STEP = 20;
+
+/**
+ * Resolve a theme *background* value to a CSS hex string.
+ *
+ * Separate from {@link resolveToHex} because the terminal default means something
+ * different behind text than it does in text: it is the page, so it maps to the
+ * extreme matching the theme's appearance rather than to the default text color.
+ * Also drops the alpha byte a few themes carry on `selectedBg` (`#rrggbbaa`), which
+ * the shared color helpers reject outright.
+ */
+function resolveBgToHex(value: string | number, isLight: boolean): string {
+	if (typeof value === "number") return ansi256ToHex(value);
+	if (value === "") return isLight ? "#ffffff" : "#000000";
+	return value.length === 9 ? value.slice(0, 7) : value;
+}
+
+/**
+ * Push a surface color away from itself: brighter on dark themes, darker on light
+ * ones. Moving away from the background rather than always darkening is what keeps
+ * the wash visible in both appearances.
+ */
+function washAwayFromSurface(hex: string, isLight: boolean): string {
+	const from = colorLuma(hex) ?? 0;
+	const scaled = adjustHsv(hex, { v: isLight ? 0.9 : 1.7 });
+	if (Math.abs((colorLuma(scaled) ?? from) - from) >= HOVER_WASH_MIN_DELTA) return scaled;
+	// A near-black surface has no value left to multiply and a clipped-white one has
+	// no room left to grow, so step the channels instead of scaling them.
+	const step = isLight ? -HOVER_WASH_FALLBACK_STEP : HOVER_WASH_FALLBACK_STEP;
+	const rgb = hexToRgb(hex);
+	return rgbToHex({ r: rgb.r + step, g: rgb.g + step, b: rgb.b + step });
+}
+
+/**
+ * Background marking the hovered interactive row, derived rather than declared.
+ *
+ * Every theme predates mouse support, and user themes sit on disk unversioned, so
+ * asking for a new key would leave those themes with no hover color at all. Instead
+ * reuse `selectedBg`, which is already the "this row is picked" surface that select
+ * lists and the settings list paint hover with, so hover looks the same everywhere.
+ * Themes that set `selectedBg` equal to their own surface (several do) would render
+ * an invisible wash, so those nudge the surface itself instead.
+ *
+ * Undefined when the theme leaves both background roles at the terminal default: it
+ * has told us nothing about its surface, and a guessed wash would fight the real one.
+ */
+function deriveHoverBg(bgColors: Record<ThemeBg, string | number>, isLight: boolean): string | undefined {
+	if (bgColors.selectedBg === "" && bgColors.statusLineBg === "") return undefined;
+	const surface = resolveBgToHex(bgColors.statusLineBg, isLight);
+	const selected = resolveBgToHex(bgColors.selectedBg, isLight);
+	const surfaceLuma = colorLuma(surface);
+	const selectedLuma = colorLuma(selected);
+	if (selectedLuma !== undefined) {
+		const separation = surfaceLuma === undefined ? Infinity : Math.abs(selectedLuma - surfaceLuma);
+		if (separation >= HOVER_WASH_MIN_DELTA) return selected;
+	}
+	return washAwayFromSurface(surface, isLight);
+}
+
 export class Theme {
 	#fgColors: Record<ThemeColor, string>;
 	#bgColors: Record<ThemeBg, string>;
@@ -1498,6 +1574,12 @@ export class Theme {
 	readonly statusLineLuminance: number | undefined;
 	/** WCAG relative luminance of the status-line background — basis for accent contrast. */
 	readonly #statusLineContrastLuminance: number | undefined;
+	/**
+	 * Background escape for the hovered interactive row, or undefined when the theme
+	 * declines to paint backgrounds at all. Derived once at construction because it
+	 * depends only on the theme's own colors.
+	 */
+	readonly #hoverBgAnsi: string | undefined;
 	constructor(
 		fgColors: Record<ThemeColor, string | number>,
 		bgColors: Record<ThemeBg, string | number>,
@@ -1522,6 +1604,8 @@ export class Theme {
 			this.#bgColors[key] = bgAnsi(value, mode);
 			this.#hexBgColors[key] = resolveToHex(value, slIsLight);
 		}
+		const hoverBgHex = deriveHoverBg(bgColors, slIsLight);
+		this.#hoverBgAnsi = hoverBgHex === undefined ? undefined : bgAnsi(hoverBgHex, mode);
 		// Build symbol map from preset + overrides
 		const baseSymbols = SYMBOL_PRESETS[symbolPreset];
 		this.#symbols = { ...baseSymbols };
@@ -1622,6 +1706,34 @@ export class Theme {
 		const ansi = this.#bgColors[color];
 		if (!ansi) throw new Error(`Unknown theme background color: ${color}`);
 		return `${ansi}${text}\x1b[49m`; // Reset only background color
+	}
+
+	/**
+	 * Background wash marking the row the pointer is over.
+	 *
+	 * Derived from the theme's own colors instead of a dedicated key: every theme was
+	 * written before mouse support, and user themes live unversioned in the themes
+	 * directory, so a new key would leave all of them with no hover color at all. See
+	 * {@link deriveHoverBg} for the derivation. Themes that paint no backgrounds get
+	 * the text back untouched rather than a guessed wash.
+	 */
+	hoverBg(text: string): string {
+		if (this.#hoverBgAnsi === undefined) return text;
+		return `${this.#hoverBgAnsi}${text}\x1b[49m`; // Reset only background color
+	}
+
+	/**
+	 * Foreground for affordance text such as a disclosure hint.
+	 *
+	 * Maps to the existing `dim` role, which is already how this palette spells
+	 * "present but not competing for attention" (editor hints, settings hints,
+	 * descriptions), so themes need no new key and hints stay consistent with the
+	 * rest of the UI. A theme that leaves `dim` at the terminal default gets plain
+	 * text back instead of a pair of no-op escapes.
+	 */
+	interactiveHint(text: string): string {
+		if (this.#fgColors.dim === "\x1b[39m") return text;
+		return this.fg("dim", text);
 	}
 
 	bold(text: string): string {
@@ -1761,6 +1873,11 @@ export class Theme {
 			expand: this.#symbols["nav.expand"],
 			collapse: this.#symbols["nav.collapse"],
 			back: this.#symbols["nav.back"],
+			// A collapsed row offers "expand" and an expanded row offers "collapse", so
+			// the disclosure marker is the matching nav glyph under a state-shaped name.
+			// Aliasing keeps a theme's `nav.expand`/`nav.collapse` overrides effective.
+			disclosureCollapsed: this.#symbols["nav.expand"],
+			disclosureExpanded: this.#symbols["nav.collapse"],
 		};
 	}
 
@@ -3005,6 +3122,8 @@ export function getSymbolTheme(): SymbolTheme {
 			table: box,
 			quoteBorder: "|",
 			hrChar: "-",
+			disclosureCollapsed: "+",
+			disclosureExpanded: "-",
 			colorSwatch: "[]",
 			spinnerFrames: ["-", "\\", "|", "/"],
 		};
@@ -3019,6 +3138,8 @@ export function getSymbolTheme(): SymbolTheme {
 		table: theme.boxSharp,
 		quoteBorder: theme.md.quoteBorder,
 		hrChar: theme.md.hrChar,
+		disclosureCollapsed: theme.nav.disclosureCollapsed,
+		disclosureExpanded: theme.nav.disclosureExpanded,
 		colorSwatch: theme.md.colorSwatch,
 		spinnerFrames: theme.getSpinnerFrames("activity"),
 	};
@@ -3113,7 +3234,10 @@ export function getSelectListTheme(): SelectListTheme {
 		scrollInfo: (text: string) => theme.fg("muted", text),
 		noMatch: (text: string) => theme.fg("muted", text),
 		symbols: getSymbolTheme(),
-		hovered: (text: string) => theme.bg("selectedBg", text),
+		// Not raw `selectedBg`: dozens of themes set it to their own surface, which
+		// left the hover band invisible. Both lists skip the wash on the keyboard-
+		// selected row, so it never competes with the cursor + accent selection.
+		hovered: (text: string) => theme.hoverBg(text),
 	};
 }
 
@@ -3166,6 +3290,6 @@ export function getSettingsListTheme(): SettingsListTheme {
 			dimmed ? theme.fg("dim", theme.underline(text)) : theme.fg("muted", theme.bold(theme.underline(text))),
 		section: (text: string, active: boolean) =>
 			active ? theme.fg("accent", theme.bold(text)) : theme.fg("muted", text),
-		hovered: (text: string) => theme.bg("selectedBg", text),
+		hovered: (text: string) => theme.hoverBg(text),
 	};
 }

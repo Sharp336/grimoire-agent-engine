@@ -38,6 +38,9 @@ app.history.search: []
 | `app.message.dequeue`       | `Alt+Up`                               | Dequeue a queued message back into the editor |
 | `app.retry`                 | `Alt+R`                                | Retry the last failed assistant turn          |
 | `app.display.reset`         | `Alt+L`                                | Reset terminal display                        |
+| `app.session.parent`        | `Alt+Up`                               | Return to the parent session                  |
+| `app.session.sibling.next`  | `Alt+Right`                            | View the next sibling agent                   |
+| `app.session.sibling.prev`  | `Alt+Left`                             | View the previous sibling agent               |
 | `app.clipboard.copyLine`    | `Alt+Shift+L`                          | Copy the current line                         |
 | `app.clipboard.copyPrompt`  | `Alt+Shift+C`                          | Copy the whole prompt                         |
 | `app.clipboard.pasteImage`  | `Ctrl+V` (`Alt+V` fallback on Windows) | Paste from the clipboard (image preferred, text fallback) |
@@ -45,6 +48,8 @@ app.history.search: []
 | `app.live.toggle`           | `Ctrl+L`                               | Start or stop live voice mode (same as `/live`) |
 
 On Windows Terminal, `Ctrl+V` may be handled by the terminal paste command before `omp` sees it; use the `Alt+V` fallback when clipboard image paste appears to do nothing. When the clipboard holds no image, `app.clipboard.pasteImage` pastes the clipboard text instead, so hosts that deliver only this chord (VS Code's integrated terminal when configured to forward `Ctrl+V`, Windows clipboard history via `Win+V`) work for both payload kinds. Windows Terminal also swallows `Ctrl+Enter`, so the `app.message.followUp` chord also binds `Ctrl+Q` — the same chord GitHub Copilot CLI uses — and the same chord submits the agent dashboard's new-agent description and hook-editor prompts. If your existing `keybindings.yml` already assigns `Ctrl+Q` to another action, that user remap wins and follow-up keeps `Ctrl+Enter` unless you explicitly bind `app.message.followUp`.
+
+The session-navigation chords are shared. `app.session.parent` uses the same `Alt+Up` as `app.message.dequeue`, and `app.session.sibling.prev` / `app.session.sibling.next` use the same `Alt+Left` / `Alt+Right` as editor word motion. They only claim the chord while you are viewing a subagent; on the main session they decline and the editor behavior applies.
 
 Terminals that implement OSC 5522 enhanced paste can send clipboard MIME data directly to `omp`; image pastes are attached as `[Image #N]`, while text/plain paste events keep normal paste behavior. When OSC 5522 is unavailable, bracketed paste still handles text, and a pasted single image-file path is loaded as an image when the file is readable from the `omp` host.
 
