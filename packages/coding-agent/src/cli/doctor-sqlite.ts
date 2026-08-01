@@ -347,6 +347,15 @@ async function swapInCandidate(dbPath: string, candidate: string, archiveDir: st
 	await fsyncFile(marker);
 	await fsyncDir(path.dirname(dbPath));
 	const retired: string[] = [];
+	// Capture the original file mode so a 0600 credentials-bearing database
+	// does not become world-readable after the candidate (created with the
+	// process umask) is renamed into place.
+	let originalMode: number | null = null;
+	try {
+		originalMode = (await fs.stat(dbPath)).mode & 0o777;
+	} catch {
+		// original may not exist — the candidate's default mode is acceptable
+	}
 	let swapCommitted = false;
 	try {
 		for (const suffix of ["-wal", "-shm", "-journal"]) {
@@ -364,6 +373,7 @@ async function swapInCandidate(dbPath: string, candidate: string, archiveDir: st
 		}
 		await fsyncDir(path.dirname(dbPath));
 		await fs.rename(candidate, dbPath);
+		if (originalMode !== null) await fs.chmod(dbPath, originalMode);
 		await fsyncDir(path.dirname(dbPath));
 		const check = new Database(dbPath, { readonly: true });
 		try {
@@ -506,7 +516,9 @@ async function salvageViaRecover(dbPath: string, archiveDir: string): Promise<st
 		const dumpPath = path.join(workDir, "recovery.sql");
 		await runRecoverDump(sqlite, workDb, dumpPath);
 		const candidate = path.join(workDir, "candidate.db");
-		const load = Bun.spawn([sqlite, candidate, `.read ${dumpPath}`], { stderr: "pipe" });
+		// Stream the dump via stdin instead of `.read <path>`: the dot-command
+		// splits on whitespace, breaking on TMPDIR values with spaces.
+		const load = Bun.spawn([sqlite, candidate], { stdin: Bun.file(dumpPath), stderr: "pipe" });
 		if ((await load.exited) !== 0) {
 			const stderr = await new Response(load.stderr as ReadableStream<Uint8Array>).text();
 			throw new Error(`recovery SQL could not load: ${stderr.trim().slice(0, 300)}`);
@@ -536,6 +548,20 @@ async function salvageViaRecover(dbPath: string, archiveDir: string): Promise<st
 						`salvage left ${stranded.n} rows orphaned outside their tables; recovery dump preserved at ${keptDump}`,
 					);
 				}
+			}
+			// .recover can drop damaged parent rows while keeping child rows,
+			// producing a relationally inconsistent candidate that passes
+			// integrity_check. Refuse the swap when FK violations remain.
+			const fkCount = check.query("SELECT count(*) AS n FROM pragma_foreign_key_check").get() as Pick<
+				PragmaRow,
+				"n"
+			> | null;
+			if ((fkCount?.n ?? 0) > 0) {
+				const keptDump = path.join(archiveDir, "recovery.sql");
+				await fs.copyFile(dumpPath, keptDump);
+				throw new Error(
+					`salvaged candidate has ${fkCount?.n ?? 0} foreign-key violations; recovery dump preserved at ${keptDump}`,
+				);
 			}
 		} finally {
 			check.close();
