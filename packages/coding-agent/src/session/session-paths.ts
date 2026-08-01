@@ -59,12 +59,22 @@ function getDefaultSessionDirName(cwd: string): { encodedDirName: string; resolv
 }
 
 /**
- * Migrate old `--<home-encoded>-*--` session dirs to the new `-*` format.
- * Runs once per sessions root on first access, best-effort.
+ * Migrate the old `--<home-encoded>-*--` session dir for the CURRENT cwd to
+ * the new `-*` format. Runs once per sessions root on first access,
+ * best-effort.
+ *
+ * Deliberately scoped to the current cwd instead of sweeping every matching
+ * directory in the root: omp and pi (or two omp instances) often share one
+ * sessions root, and a global rename would move directories a concurrently
+ * running process is actively appending to, silently breaking its writes with
+ * ENOENT (issue #7183). A stale dir for another cwd stays untouched until a
+ * session opens that cwd again.
  */
-function migrateHomeSessionDirs(sessionsRoot: string): void {
+function migrateHomeSessionDirs(sessionsRoot: string, cwd: string): void {
 	if (migratedSessionRoots.has(sessionsRoot)) return;
 	migratedSessionRoots.add(sessionsRoot);
+
+	const { encodedDirName } = getDefaultSessionDirName(cwd);
 
 	const home = os.homedir();
 	const homeEncoded = home.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-");
@@ -89,6 +99,10 @@ function migrateHomeSessionDirs(sessionsRoot: string): void {
 		}
 
 		const newName = remainder ? `-${remainder}` : "-";
+		// Only migrate the directory this cwd maps to. A global sweep would
+		// rename dirs another process is writing (see above).
+		if (newName !== encodedDirName) continue;
+
 		const oldPath = path.join(sessionsRoot, entry);
 		const newPath = path.join(sessionsRoot, newName);
 
@@ -131,7 +145,7 @@ export function computeDefaultSessionDir(
 	sessionsRoot: string = getSessionsDir(),
 ): string {
 	const { encodedDirName, resolvedCwd } = getDefaultSessionDirName(cwd);
-	migrateHomeSessionDirs(sessionsRoot);
+	migrateHomeSessionDirs(sessionsRoot, cwd);
 	const sessionDir = path.join(sessionsRoot, encodedDirName);
 	migrateLegacyAbsoluteSessionDir(resolvedCwd, sessionDir, sessionsRoot);
 	storage.ensureDirSync(sessionDir);

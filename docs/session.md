@@ -44,7 +44,7 @@ Default session file location:
 - inside the OS temp root: `-tmp-<relative-path>` with the same replacement
 - anywhere else: legacy absolute form `--<cwd-without-leading-slash-with-same-replacement>--`
 
-Old `--<home-encoded>-*--` directories are migrated to the new home-relative names once per sessions root on first access (best-effort).
+Old `--<home-encoded>-*--` directories are migrated to the new home-relative names once per sessions root on first access (best-effort). Migration is scoped to the current cwd's directory only — a global sweep would rename dirs a concurrently running process (e.g. pi, or another omp instance sharing the sessions root) is actively appending to, silently breaking its writes with ENOENT. A stale dir for another cwd stays untouched until a session opens that cwd again.
 
 Blob store location:
 
