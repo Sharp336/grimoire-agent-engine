@@ -2,15 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Agent definition files can now be selected as the main-session persona via `--agent <name>`, `/agent <name>`, and `/switch-agent`. The agent's frontmatter (tools, model, thinking, system prompt) becomes the session policy, with explicit CLI flags taking precedence. Live switching mutates the session in place. Agent identity persists across resume/fork, and an explicit `--agent` selection on a resumed transcript is recorded so it survives the next resume. OpenCode `mode: primary|subagent|all` and Copilot `user-invocable`/`disable-model-invocation` frontmatter control availability; `task.disabledAgents` is honored at startup, in the picker, and by direct `/agent` switches; `tools: exec` expands to `bash`/`eval` like the subagent path; explicitly requested `-e`/`--hook` extension packages stay discoverable under `--no-extensions` while ambient extension agents are suppressed; a persona's model frontmatter wins over the remembered scoped default, and an inline `--model` thinking suffix is preserved; the persona's identity is re-resolved by name against current discovery on resume (representing current config, not the saved definition), and explicit `--agent` selections on resumed/continued/forked transcripts are persisted so the next resume rehydrates them. ([#6836](https://github.com/can1357/oh-my-pi/issues/6836))
+- `applyToolOverlay` primitive extracted on AgentSession, generalizing the snapshot/apply/restore pattern shared by plan mode, plan-yolo, print-mode, and agent-selection. ([#6836](https://github.com/can1357/oh-my-pi/issues/6836))
+
 ## [17.2.4] - 2026-08-01
 
 ### Added
 
-- Agent definition files can now be selected as the main-session persona via `--agent <name>`, `/agent <name>`, and `/switch-agent`. The agent's frontmatter (tools, model, thinking, system prompt) becomes the session policy, with explicit CLI flags taking precedence. Live switching mutates the session in place. Agent identity persists across resume/fork, and an explicit `--agent` selection on a resumed transcript is recorded so it survives the next resume. OpenCode `mode: primary|subagent|all` and Copilot `user-invocable`/`disable-model-invocation` frontmatter control availability; `task.disabledAgents` is honored at startup, in the picker, and by direct `/agent` switches; `tools: exec` expands to `bash`/`eval` like the subagent path; and explicitly requested `-e`/`--hook` extension packages stay discoverable under `--no-extensions` while ambient extension agents are suppressed. ([#6836](https://github.com/can1357/oh-my-pi/issues/6836))
-
-### Changed
-
-- `applyToolOverlay` primitive extracted on AgentSession, generalizing the snapshot/apply/restore pattern shared by plan mode, plan-yolo, print-mode, and agent-selection. ([#6836](https://github.com/can1357/oh-my-pi/issues/6836))
 - Added `requestIdFormat` (`"string"` | `"number"`, default `"number"`) to MCP server config, honored by the stdio, HTTP, and SSE transports. JSON-RPC 2.0 permits both id shapes, but Apple's `xcrun mcpbridge` decodes `id` as an integer only and silently drops string ids (`mcpbridge.DecodeError Code=1`), hanging every request until it times out. The option is OMP-specific, so set it in an OMP-owned config (`.omp/mcp.json`, `~/.omp/agent/mcp.json`, a project `mcp.json`/`.mcp.json`, or an OMP plugin); servers imported from another tool's config ignore it ([#7053](https://github.com/can1357/oh-my-pi/issues/7053)).
 - Fixed Anthropic web search sending unsupported temperature parameters to sampling-restricted Claude models ([#7195](https://github.com/can1357/oh-my-pi/pull/7195) by [@will-bogusz](https://github.com/will-bogusz)).
 - Fixed mid-turn steering/peer-interrupt tool skips rendering as errors (red ✘, red border/text) in the TUI; pending and in-flight interrupt placeholders now render as neutral info cards while preserving whether `tool.execute` started ([#7199](https://github.com/can1357/oh-my-pi/issues/7199)).
@@ -46,7 +46,8 @@
   capabilities from settings or installed OMP packages.
 - Fixed explicit `thinking` metadata in `models.yml` custom definitions and `modelOverrides` being replaced by canonical catalog policy during model rebuilding. ([#7307](https://github.com/can1357/oh-my-pi/issues/7307))
 - Fixed the auto-titler installing a model's whole answer as the session title when the tiny title model ignored the titling task and answered the first user message instead. `normalizeGeneratedTitle` now rejects overlong output (>80 chars or >12 words) so the caller defers titling to the next user turn rather than accepting a full sentence ([#7303](https://github.com/can1357/oh-my-pi/issues/7303)).
-- Fixed the in-process `kill` builtin to validate signals, preserve negative PID operands, signal every process in pipeline jobs, continue after bad targets, and refuse non-probe signals aimed at the host process or process system group.
+- Fixed the in-process `kill` builtin to validate signals, preserve negative PID operands, signal every process in pipeline jobs, continue after bad targets, and refuse non-probe signals aimed at the host process or process group.
+
 
 ## [17.2.3] - 2026-08-01
 
