@@ -13,6 +13,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 import { $env, getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
+import { isSqliteCorruptError } from "@oh-my-pi/pi-utils/sqlite";
 import type { ApiKeyResolver } from "./auth-retry";
 import * as AIError from "./error";
 import { isUsageLimitOutcome } from "./error/rate-limit";
@@ -375,6 +376,8 @@ export interface CredentialRefreshLeaseFence {
 
 export interface AuthCredentialStore {
 	close(): void;
+	/** Filesystem path of the backing SQLite file when the store is file-backed; used in operator-facing repair guidance. */
+	readonly databasePath?: string;
 	/**
 	 * Stateful probe for commits made by another process to the backing store.
 	 * Returns true once per observed change.
@@ -1264,6 +1267,8 @@ export class AuthStorage {
 	#credentialBackoff: Map<string, Map<number, number>> = new Map();
 	/** Earliest time a freshly-set in-memory block may be cleared by live usage reconciliation. */
 	#credentialBackoffProbeAfter: Map<string, Map<number, number>> = new Map();
+	/** Latched once the persistent store reports damage; persisted blocks are skipped for the rest of this process. */
+	#storeDamaged = false;
 	#usageProviderResolver?: (provider: Provider) => UsageProvider | undefined;
 	#rankingStrategyResolver?: (provider: Provider) => CredentialRankingStrategy | undefined;
 	#usageCache: UsageCache;
@@ -1696,16 +1701,44 @@ export class AuthStorage {
 		return blockedUntil;
 	}
 
+	/**
+	 * Latch off the persisted block table after unrecoverable store damage.
+	 * Returns true when the error is corruption — the caller then fails open.
+	 * The first damaged operation logs once at error level with repair
+	 * guidance; every later block-table operation short-circuits silently,
+	 * since nothing in the process can repair the file and a retry only
+	 * re-fails.
+	 */
+	#latchStoreDamage(err: unknown, op: string, context: Record<string, unknown>): boolean {
+		if (!isSqliteCorruptError(err)) return false;
+		if (this.#storeDamaged) return true;
+		this.#storeDamaged = true;
+		const storePath = this.#store.databasePath;
+		logger.error(
+			storePath
+				? `Credential store is damaged; persisted rate-limit blocks are disabled for this process. ` +
+						`Repair with: sqlite3 '${storePath}' '.recover' | sqlite3 '${storePath}.fixed'`
+				: "Credential store is damaged; persisted rate-limit blocks are disabled for this process. " +
+						"Repair the store file with sqlite3's .recover and restart.",
+			{ err, op, storePath, ...context },
+		);
+		return true;
+	}
+
 	#readPersistedCredentialBlock(
 		credentialId: number,
 		providerKey: string,
 		blockScope: string | undefined,
 	): number | undefined {
+		if (this.#storeDamaged) return undefined;
 		const getCredentialBlock = this.#store.getCredentialBlock?.bind(this.#store);
 		if (!getCredentialBlock) return undefined;
 		try {
 			return getCredentialBlock(credentialId, providerKey, blockScope ?? "");
 		} catch (err) {
+			if (this.#latchStoreDamage(err, "getCredentialBlock", { credentialId, providerKey, blockScope })) {
+				return undefined;
+			}
 			logger.debug("Failed to read credential block from persistent store", {
 				err,
 				credentialId,
@@ -1791,6 +1824,7 @@ export class AuthStorage {
 		this.#credentialBackoffProbeAfter.set(backoffKey, probeAfterMap);
 		this.#invalidateUsageReportCache(provider);
 
+		if (this.#storeDamaged) return;
 		const upsertCredentialBlock = this.#store.upsertCredentialBlock?.bind(this.#store);
 		if (!upsertCredentialBlock) return;
 		const credentialId = this.#getStoredCredentials(provider)[credentialIndex]?.id;
@@ -1803,6 +1837,9 @@ export class AuthStorage {
 				blockedUntilMs: nextBlockedUntil,
 			});
 		} catch (err) {
+			if (this.#latchStoreDamage(err, "upsertCredentialBlock", { credentialId, providerKey, blockScope })) {
+				return;
+			}
 			logger.debug("Failed to persist credential block", {
 				err,
 				credentialId,
@@ -5862,9 +5899,19 @@ export class AuthStorage {
 		const scopedBackoffKey = this.#toScopedBackoffKey(providerKey, blockScope);
 		const globalProbeAfterMs = this.#credentialBackoffProbeAfter.get(providerKey)?.get(credentialIndex) ?? 0;
 		const scopedProbeAfterMs = this.#credentialBackoffProbeAfter.get(scopedBackoffKey)?.get(credentialIndex) ?? 0;
+		if (this.#storeDamaged) return;
 		const getStoreReconcileAfter = this.#store.getCredentialBlockReconcileAfter?.bind(this.#store);
-		const storeGlobalProbeAfterMs = getStoreReconcileAfter?.(credentialId, providerKey, "") ?? 0;
-		const storeScopedProbeAfterMs = getStoreReconcileAfter?.(credentialId, providerKey, blockScope ?? "") ?? 0;
+		let storeGlobalProbeAfterMs = 0;
+		let storeScopedProbeAfterMs = 0;
+		try {
+			storeGlobalProbeAfterMs = getStoreReconcileAfter?.(credentialId, providerKey, "") ?? 0;
+			storeScopedProbeAfterMs = getStoreReconcileAfter?.(credentialId, providerKey, blockScope ?? "") ?? 0;
+		} catch (err) {
+			if (this.#latchStoreDamage(err, "getCredentialBlockReconcileAfter", { credentialId, providerKey })) {
+				return;
+			}
+			throw err;
+		}
 		if (Math.max(globalProbeAfterMs, scopedProbeAfterMs, storeGlobalProbeAfterMs, storeScopedProbeAfterMs) > nowMs) {
 			return;
 		}
@@ -6340,16 +6387,35 @@ export class AuthStorage {
 	 * Broker-server seam: list non-expired persisted blocks for snapshot entries.
 	 */
 	listCredentialBlocks(credentialIds: readonly number[]): StoredCredentialBlock[] {
-		return this.#store.listCredentialBlocks?.(credentialIds) ?? [];
+		if (this.#storeDamaged) return [];
+		try {
+			return this.#store.listCredentialBlocks?.(credentialIds) ?? [];
+		} catch (err) {
+			if (this.#latchStoreDamage(err, "listCredentialBlocks", {})) return [];
+			throw err;
+		}
 	}
 
 	/**
 	 * Broker-server seam: persist one credential block and notify snapshot waiters.
 	 */
 	upsertCredentialBlock(block: StoredCredentialBlock): void {
+		if (this.#storeDamaged) return;
 		const upsertCredentialBlock = this.#store.upsertCredentialBlock?.bind(this.#store);
 		if (!upsertCredentialBlock) return;
-		upsertCredentialBlock(block);
+		try {
+			upsertCredentialBlock(block);
+		} catch (err) {
+			if (
+				this.#latchStoreDamage(err, "upsertCredentialBlock", {
+					credentialId: block.credentialId,
+					providerKey: block.providerKey,
+				})
+			) {
+				return;
+			}
+			throw err;
+		}
 		this.#invalidateUsageReportCacheForProviderKey(block.providerKey);
 		this.#bumpGeneration("credential-block");
 	}
@@ -6358,17 +6424,31 @@ export class AuthStorage {
 	 * Broker-server seam: clear all persisted blocks for one credential and notify snapshot waiters.
 	 */
 	deleteCredentialBlock(credentialId: number, providerKey: string, blockScope: string): void {
+		if (this.#storeDamaged) return;
 		const deleteCredentialBlock = this.#store.deleteCredentialBlock?.bind(this.#store);
 		if (!deleteCredentialBlock) return;
-		deleteCredentialBlock(credentialId, providerKey, blockScope);
+		try {
+			deleteCredentialBlock(credentialId, providerKey, blockScope);
+		} catch (err) {
+			if (this.#latchStoreDamage(err, "deleteCredentialBlock", { credentialId, providerKey, blockScope })) {
+				return;
+			}
+			throw err;
+		}
 		this.#invalidateUsageReportCacheForProviderKey(providerKey);
 		this.#bumpGeneration("credential-block");
 	}
 
 	deleteCredentialBlocks(credentialId: number): void {
+		if (this.#storeDamaged) return;
 		const deleteCredentialBlocks = this.#store.deleteCredentialBlocks?.bind(this.#store);
 		if (!deleteCredentialBlocks) return;
-		deleteCredentialBlocks(credentialId);
+		try {
+			deleteCredentialBlocks(credentialId);
+		} catch (err) {
+			if (this.#latchStoreDamage(err, "deleteCredentialBlocks", { credentialId })) return;
+			throw err;
+		}
 		this.#bumpGeneration("credential-block");
 	}
 
@@ -6766,7 +6846,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#localAuthRevision: number;
 	#closed = false;
 
-	constructor(db: Database) {
+	constructor(db: Database, readonly databasePath?: string) {
 		this.#db = db;
 		this.#initializeSchema();
 		this.#dataVersion = this.#readDataVersion();
@@ -6920,7 +7000,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 					// Ignore chmod failures (e.g., Windows)
 				}
 				SqliteAuthCredentialStore.#ensureAuthCredentialRefreshLeasesTable(db);
-				return new SqliteAuthCredentialStore(db);
+				return new SqliteAuthCredentialStore(db, dbPath);
 			} catch (err) {
 				db?.close();
 				if (!isSqliteBusyError(err)) {
