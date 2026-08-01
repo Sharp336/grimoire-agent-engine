@@ -144,7 +144,7 @@ function sameEndpoint(left: MCPServer, right: MCPServer): boolean {
  * Unlike provider discovery, an unreadable or malformed file is a hard error:
  * the caller asked for this exact file.
  */
-export async function loadExtraMCPConfigs(cwd: string, configPaths: string[]): Promise<MCPServer[]> {
+async function loadExtraMCPConfigs(cwd: string, configPaths: string[]): Promise<MCPServer[]> {
 	const servers: MCPServer[] = [];
 	for (const configPath of configPaths) {
 		const resolved = path.resolve(cwd, expandTilde(configPath));
@@ -174,24 +174,7 @@ export async function loadExtraMCPConfigs(cwd: string, configPaths: string[]): P
 			path: resolved,
 			level: "project",
 		};
-		// Per-entry checks. Discovered servers get these from `loadCapability`,
-		// which drops the invalid ones with a warning; extras are merged after
-		// that call, so without this an entry with a typo'd or missing endpoint
-		// (`commmand`, or `{}`) would become a blank stdio config and degrade into
-		// a connection error at startup — the silent omission this loader exists
-		// to prevent. Same validator, so both paths agree on what a server is.
-		const fileServers = transformMCPConfig(config, source);
-		for (const server of fileServers) {
-			if (isTombstone(server)) continue;
-			const error = mcpCapability.validate?.(server);
-			if (error) {
-				throw new ExplicitMCPConfigError(
-					resolved,
-					`Invalid MCP config ${resolved}: server "${server.name}": ${error}`,
-				);
-			}
-		}
-		servers.push(...fileServers);
+		servers.push(...transformMCPConfig(config, source));
 	}
 	return servers;
 }
@@ -310,6 +293,24 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 			if (aliasIndex >= 0) kept.splice(aliasIndex, 1);
 			kept.push(merged);
 		}
+
+		// Validation runs last, over survivors only, exactly where `loadCapability`
+		// puts it: it validates `deduped`, so an entry that was suppressed or
+		// shadowed is never checked. Validating at load time instead would abort
+		// startup over a server the user had switched off, or over one a later
+		// file replaced. Discovered servers get this from the pipeline; explicit
+		// ones raise instead of being dropped, because the caller named the file.
+		for (const server of kept) {
+			const error = mcpCapability.validate?.(server);
+			if (error) {
+				const configPath = server._source.path;
+				throw new ExplicitMCPConfigError(
+					configPath,
+					`Invalid MCP config ${configPath}: server "${server.name}": ${error}`,
+				);
+			}
+		}
+
 		// Same-endpoint aliases shadow each other inside `loadCapability` via
 		// `mcpCapability.equivalent`; extras are merged after that, so a discovered
 		// server the caller renamed in an explicit file has to be dropped here too.

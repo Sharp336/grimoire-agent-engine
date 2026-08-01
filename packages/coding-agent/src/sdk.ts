@@ -105,7 +105,7 @@ import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-e
 import {
 	deduplicateMCPToolsByName,
 	discoverAndLoadMCPTools,
-	loadExtraMCPConfigs,
+	loadAllMCPConfigs,
 	type MCPLoadResult,
 	MCPManager,
 	MCPToolCache,
@@ -1850,14 +1850,22 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			filterBrowser: settings.get("browser.enabled") ?? false,
 			extraConfigPaths: options.mcpConfigPaths,
 		};
-		// `--mcp-config` names exact files, so an unreadable or malformed one has
-		// to fail startup instead of degrading to a session missing those
-		// servers. Checked up front because the deferred-UI branch below runs
-		// discovery in a detached promise, where a rejection can no longer abort
-		// startup — and `discoverAndLoadMCPTools` is reached only in the other
-		// branch. Costs one extra read of a small JSON file.
+		// `--mcp-config` names exact files, so one that cannot be used has to fail
+		// startup instead of degrading to a session missing those servers. Checked
+		// up front because the deferred-UI branch below runs discovery in a
+		// detached promise, where a rejection can no longer abort startup — and
+		// `discoverAndLoadMCPTools` is reached only in the other branch.
+		//
+		// This rehearses the whole load rather than just re-reading the files:
+		// whether an entry is fatal depends on what survives suppression and
+		// shadowing, so a server the user disabled must not abort startup over a
+		// stale endpoint. Only when the flag is present, and the file reads are
+		// cached for the discovery that follows.
 		if (enableMCP && !mcpManager && options.mcpConfigPaths?.length) {
-			await loadExtraMCPConfigs(cwd, options.mcpConfigPaths);
+			await loadAllMCPConfigs(cwd, {
+				enableProjectConfig: mcpDiscoverOptions.enableProjectConfig,
+				extraConfigPaths: options.mcpConfigPaths,
+			});
 		}
 		if (enableMCP && !mcpManager) {
 			if (deferMCPDiscoveryForUI) {

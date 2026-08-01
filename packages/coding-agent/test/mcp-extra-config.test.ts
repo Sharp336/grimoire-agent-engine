@@ -388,6 +388,57 @@ describe("loadAllMCPConfigs extraConfigPaths", () => {
 		await expect(loadAllMCPConfigs(projectDir, { extraConfigPaths: [invalidPath] })).rejects.toThrow(expected);
 	});
 
+	// Validation runs over survivors, as it does inside `loadCapability`. A server
+	// the user switched off is not a server the session needs, so a stale or
+	// conflicting endpoint on it must not abort startup.
+	test("an entry disabled in its own file is not validated", async () => {
+		const explicitPath = path.join(projectDir, "explicit.json");
+		await fs.writeFile(
+			explicitPath,
+			JSON.stringify({
+				mcpServers: {
+					retired: { enabled: false, command: "stale-server", url: "http://localhost:4401/mcp" },
+					live: { command: "live-server" },
+				},
+			}),
+		);
+
+		const { configs } = await loadAllMCPConfigs(projectDir, { extraConfigPaths: [explicitPath] });
+
+		expect(configs.retired).toBeUndefined();
+		expect(configs.live).toMatchObject({ type: "stdio", command: "live-server" });
+	});
+
+	test("an entry on the user denylist is not validated", async () => {
+		const userConfigPath = path.join(tempHome, ".omp", "agent", "mcp.json");
+		await fs.mkdir(path.dirname(userConfigPath), { recursive: true });
+		await fs.writeFile(userConfigPath, JSON.stringify({ disabledServers: ["retired"] }));
+		clearFsCache();
+		const explicitPath = path.join(projectDir, "explicit.json");
+		await fs.writeFile(
+			explicitPath,
+			JSON.stringify({ mcpServers: { retired: { command: "stale-server", url: "http://localhost:4401/mcp" } } }),
+		);
+
+		const { configs } = await loadAllMCPConfigs(projectDir, { extraConfigPaths: [explicitPath] });
+
+		expect(configs.retired).toBeUndefined();
+	});
+
+	test("an entry a later file replaces is not validated", async () => {
+		const firstPath = path.join(projectDir, "first.json");
+		const secondPath = path.join(projectDir, "second.json");
+		await fs.writeFile(
+			firstPath,
+			JSON.stringify({ mcpServers: { srv: { command: "stale-server", url: "http://localhost:4401/mcp" } } }),
+		);
+		await fs.writeFile(secondPath, JSON.stringify({ mcpServers: { srv: { command: "fixed-server" } } }));
+
+		const { configs } = await loadAllMCPConfigs(projectDir, { extraConfigPaths: [firstPath, secondPath] });
+
+		expect(configs.srv).toMatchObject({ type: "stdio", command: "fixed-server" });
+	});
+
 	// The exemption the checks above must not swallow: a tombstone has no
 	// endpoint by design.
 	test("a transport-less enabled: false entry is still accepted", async () => {
