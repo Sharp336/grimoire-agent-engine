@@ -39,6 +39,21 @@ const QUIESCENCE_WINDOW_MS = 200;
 /** Suffixes for the database file and all its sidecars (WAL, shared-memory, rollback journal). */
 const TRIO_SUFFIXES = ["", "-wal", "-shm", "-journal"] as const;
 
+/**
+ * True when a database has enough free pages and is large enough that a VACUUM
+ * reclaims more space than it costs. Exported so doctor-cli.ts uses one source
+ * of truth for the free-page warning and the repair vacuum decision.
+ */
+export function vacuumEligible(probe: DbProbe): boolean {
+	return (
+		probe.pageCount !== null &&
+		probe.pageCount > 0 &&
+		probe.freelistCount !== null &&
+		probe.freelistCount / probe.pageCount >= FREE_PAGE_VACUUM_RATIO &&
+		probe.pageCount * (probe.pageSize ?? 0) >= VACUUM_MIN_BYTES
+	);
+}
+
 export type DoctorDbPolicy = "precious" | "regenerable";
 
 export interface DoctorDatabase {
@@ -811,14 +826,7 @@ async function repairHealthyDatabase(probe: DbProbe, repair: DbRepair): Promise<
 		// optimize analyzes only tables with stale statistics, replacing a blind ANALYZE.
 		handle.run("PRAGMA optimize");
 		repair.actions.push("optimized");
-		const dbBytes = (probe.pageCount ?? 0) * (probe.pageSize ?? 0);
-		if (
-			probe.pageCount !== null &&
-			probe.pageCount > 0 &&
-			probe.freelistCount !== null &&
-			probe.freelistCount / probe.pageCount >= FREE_PAGE_VACUUM_RATIO &&
-			dbBytes >= VACUUM_MIN_BYTES
-		) {
+		if (vacuumEligible(probe)) {
 			// VACUUM is transactional: a crash leaves the original intact, so no archive is taken on this path.
 			handle.run("VACUUM");
 			repair.actions.push("vacuumed");
