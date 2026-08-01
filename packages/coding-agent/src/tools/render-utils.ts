@@ -171,7 +171,10 @@ export function formatStatusIcon(status: ToolUIStatus, theme: Theme, spinnerFram
 			}
 			return theme.styledSymbol("status.running", "accent");
 		case "aborted":
-			return theme.styledSymbol("status.aborted", "error");
+			// An interrupted tool (queued steering message, user interrupt) is
+			// normal control flow, not an error the operator caused — keep it
+			// visually neutral instead of red.
+			return theme.styledSymbol("status.aborted", "muted");
 	}
 }
 

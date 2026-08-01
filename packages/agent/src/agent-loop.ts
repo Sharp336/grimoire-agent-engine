@@ -2510,7 +2510,15 @@ async function executeToolCalls(
 				caughtError = e;
 				result = {
 					content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }],
-					details: {},
+					details: record.signal.aborted
+						? {
+								// The tool was interrupted mid-flight (e.g. a queued
+								// steering message or user interrupt), not a failure
+								// the operator caused. Renderers use this to show a
+								// neutral state instead of an error.
+								aborted: true,
+							}
+						: {},
 				};
 				isError = true;
 			}
@@ -2840,7 +2848,12 @@ function createToolSignalAbortedResult(signal: AbortSignal): AgentToolResult<unk
 	const reason = abortReasonText(signal);
 	return {
 		content: [{ type: "text", text: `Tool was not executed because the run was aborted: ${reason}.` }],
-		details: {},
+		details: {
+			// Distinguishes an interrupted/skipped tool (e.g. mid-turn steering,
+			// user interrupt) from a genuine failure: the tool did not run, which
+			// is expected control flow, not an error the operator caused.
+			aborted: true,
+		},
 	};
 }
 
@@ -2864,6 +2877,11 @@ function createSkippedToolResult(source: SteeringInterruptSource | "irc" | undef
 				text: `Skipped due to ${reason}. Do not count this skipped result as completed work or verification. After the ${blocker} is handled on the next step, retry the skipped tool if it is still needed.`,
 			},
 		],
-		details: {},
+		details: {
+			// The tool was skipped for a queued steering message / peer interrupt —
+			// normal control flow, not a failure the operator caused. Renderers use
+			// this to show a neutral state instead of an error.
+			aborted: true,
+		},
 	};
 }

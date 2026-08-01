@@ -283,6 +283,9 @@ export interface BashToolDetails {
 	exitCode?: number;
 	/** True when the command was killed by its timeout deadline (not a failure). */
 	timedOut?: boolean;
+	/** True when the command was interrupted mid-flight (queued steering
+	 *  message, user interrupt) rather than failing on its own. */
+	aborted?: boolean;
 	terminalId?: string;
 	async?: {
 		state: "running" | "completed" | "failed";
@@ -1562,6 +1565,10 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			const cmdLines = args ? formatBashCommandLines(renderArgs, uiTheme) : undefined;
 			const isError = result.isError === true;
 			const isPartial = options.isPartial === true;
+			// A tool interrupted mid-flight (queued steering message, user
+			// interrupt) is normal control flow, not a failure the operator
+			// caused — render it with a neutral state instead of an error.
+			const isAborted = isError && result.details?.aborted === true;
 			const success = !isPartial && !isError;
 			const details = result.details;
 			const isTimeout = details?.timedOut === true;
@@ -1575,7 +1582,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 										title: config.resolveTitle(args, options),
 									}
 								: {
-										icon: isPartial ? "pending" : isTimeout ? "warning" : "error",
+										icon: isPartial ? "pending" : isAborted ? "aborted" : isTimeout ? "warning" : "error",
 										title: config.resolveTitle(args, options),
 									},
 							uiTheme,

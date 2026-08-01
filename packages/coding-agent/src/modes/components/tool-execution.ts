@@ -999,7 +999,17 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		// Non-self-framing tools (custom/extension renderers and the generic
 		// fallback) get a padded, state-tinted block — built-ins that draw their
 		// own frame opt out below via the framed-component mark.
-		const stateBgKey = this.#isPartial ? "toolPendingBg" : this.#result?.isError ? "toolErrorBg" : "toolSuccessBg";
+		// An aborted/skipped tool (mid-turn steering, user interrupt) is normal
+		// control flow, not an error the operator caused, so it renders with the
+		// neutral pending tint instead of the red error tint.
+		const isAborted = this.#result?.isError === true && this.#result?.details?.aborted === true;
+		const stateBgKey = this.#isPartial
+			? "toolPendingBg"
+			: isAborted
+				? "toolPendingBg"
+				: this.#result?.isError
+					? "toolErrorBg"
+					: "toolSuccessBg";
 		const stateBgFn = (t: string) => theme.bg(stateBgKey, t);
 
 		// Check for custom tool rendering

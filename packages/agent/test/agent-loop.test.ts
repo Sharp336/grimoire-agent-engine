@@ -1768,6 +1768,73 @@ describe("agentLoop with AgentMessage", () => {
 		).toBe(true);
 	});
 
+	it("marks a steering-interrupted tool result as aborted instead of a plain error (#7199)", async () => {
+		// A steer lands while an interruptible tool is in flight, aborting its
+		// shared signal. The tool observes the abort and throws (the bash tool
+		// path surfaces as a ToolAbortError). The loop must keep `isError` for
+		// the LLM ("the tool did not run") but stamp `details.aborted` so TUI
+		// renderers can show a neutral state instead of a red error.
+		const toolSchema = type({});
+		let steerReady = false;
+		let drained = false;
+
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "waitabort",
+			label: "WaitAbort",
+			description: "Throws when its signal aborts (mimics bash ToolAbortError)",
+			parameters: toolSchema,
+			interruptible: true,
+			async execute(_toolCallId, _params, signal) {
+				steerReady = true;
+				if (!signal?.aborted) {
+					const { promise, resolve } = Promise.withResolvers<void>();
+					signal?.addEventListener("abort", () => resolve(), { once: true });
+					await promise;
+				}
+				throw new Error("Operation aborted");
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "waitabort", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			hasSteeringMessages: () => steerReady && !drained,
+			getSteeringMessages: async () => {
+				if (steerReady && !drained) {
+					drained = true;
+					return [createUserMessage("interrupt")];
+				}
+				return [];
+			},
+		};
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, mock.stream)) {
+			events.push(event);
+		}
+
+		const toolEnds = events.filter(
+			(e): e is Extract<AgentEvent, { type: "tool_execution_end" }> => e.type === "tool_execution_end",
+		);
+		expect(toolEnds.length).toBe(1);
+		// The LLM still needs to know the tool did not run.
+		expect(toolEnds[0].isError).toBe(true);
+		// Renderers use this to show a neutral (not red/error) state.
+		expect((toolEnds[0].result.details as { aborted?: boolean } | undefined)?.aborted).toBe(true);
+		// The steer is still delivered at the injection boundary.
+		expect(
+			events.some(e => e.type === "message_start" && e.message.role === "user" && e.message.content === "interrupt"),
+		).toBe(true);
+	});
+
 	it("drains queued IRC interrupts by aborting an interruptible tool mid-wait", async () => {
 		const toolSchema = type({});
 		let ircReady = false;
