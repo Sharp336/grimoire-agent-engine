@@ -435,7 +435,30 @@ export async function recoverInterruptedSwap(db: DoctorDatabase, restore: boolea
 		const archivedMain = path.join(archiveDir, path.basename(db.path));
 		if (!(await pathExists(archivedMain)))
 			throw new Error(`interrupted swap archive is missing the database: ${archivedMain}`);
-		await restoreFromArchive(db.path, archiveDir);
+		// Gate the restore the same way the corrupt-repair path does: if a live
+		// omp process holds the database, restoring would overwrite an inode
+		// that process is still writing to. Report busy instead of restoring.
+		if ((await hasHolders(db.path)) === true)
+			return { found: true, restored: false, error: "database busy; close running omp sessions and re-run" };
+		const before = await snapshotTrio(db.path);
+		await Bun.sleep(QUIESCENCE_WINDOW_MS);
+		if ((await hasHolders(db.path)) === true)
+			return { found: true, restored: false, error: "database busy; close running omp sessions and re-run" };
+		if (!snapshotsEqual(before, await snapshotTrio(db.path)))
+			return { found: true, restored: false, error: "database changed during quiescence check" };
+		// Hold a RESERVED write lock through the restore so no writer commits
+		// between the quiescence proof and the file swap.
+		let lockHandle: Database | null = null;
+		try {
+			lockHandle = await acquireWriteLock(db.path);
+		} catch {
+			return { found: true, restored: false, error: "database busy; close running omp sessions and re-run" };
+		}
+		try {
+			await restoreFromArchive(db.path, archiveDir);
+		} finally {
+			releaseWriteLock(lockHandle);
+		}
 		await fs.rm(marker, { force: true });
 		await fsyncDir(path.dirname(db.path));
 		return { found: true, restored: true, error: null };
@@ -554,6 +577,50 @@ async function vacuumIntoRescue(dbPath: string): Promise<string> {
 	} catch (error) {
 		await fs.rm(rescuePath, { force: true }).catch(() => undefined);
 		throw error;
+	}
+}
+
+/**
+ * Acquire a RESERVED write lock (BEGIN IMMEDIATE) on the live database to
+ * exclude concurrent writers during repair. Returns an open handle holding
+ * the transaction, or null when the database cannot be opened (corrupt — no
+ * writer can write to an unopenable file). Throws on BUSY: the caller reports
+ * busy and does not proceed with the swap.
+ */
+async function acquireWriteLock(dbPath: string): Promise<Database | null> {
+	let handle: Database;
+	try {
+		handle = new Database(dbPath);
+	} catch {
+		return null;
+	}
+	try {
+		handle.run("PRAGMA busy_timeout = 2000");
+		handle.run("BEGIN IMMEDIATE");
+	} catch (error) {
+		try {
+			handle.close();
+		} catch {
+			// secondary to the lock failure
+		}
+		if (isSqliteBusyError(error)) throw error;
+		return null;
+	}
+	return handle;
+}
+
+/** Roll back and close a handle returned by `acquireWriteLock`. */
+function releaseWriteLock(handle: Database | null): void {
+	if (handle === null) return;
+	try {
+		handle.run("ROLLBACK");
+	} catch {
+		// best effort — the lock is released on close regardless
+	}
+	try {
+		handle.close();
+	} catch {
+		// best effort
 	}
 }
 
@@ -676,53 +743,100 @@ async function repairCorruptDatabase(probe: DbProbe, repair: DbRepair): Promise<
 		}
 		return;
 	}
-	// Precious: prove the file is offline and stable, archive the trio with a
-	// verified content snapshot, then climb the salvage ladder. The originals
-	// stay in the archive no matter how the swap ends.
+	// Precious: prove the file is offline and stable, archive with a verified
+	// content snapshot, then climb the salvage ladder under a RESERVED write
+	// lock that excludes concurrent writers. The originals stay in the archive
+	// no matter how the swap ends.
 	if ((await hasHolders(probe.path)) === true) {
 		repair.busy = true;
 		return;
 	}
-	const expected = await snapshotTrio(probe.path);
+	let expected: TrioSnapshotEntry[];
+	try {
+		expected = await snapshotTrio(probe.path);
+	} catch (error) {
+		repair.error = messageOf(error);
+		return;
+	}
 	await Bun.sleep(QUIESCENCE_WINDOW_MS);
 	if ((await hasHolders(probe.path)) === true) {
 		repair.busy = true;
 		return;
 	}
-	if (!snapshotsEqual(expected, await snapshotTrio(probe.path))) {
-		repair.error = "database changed while checking quiescence";
-		return;
-	}
-	let archiveDir: string;
 	try {
-		archiveDir = await archiveTrio(probe.path, expected);
+		if (!snapshotsEqual(expected, await snapshotTrio(probe.path))) {
+			repair.error = "database changed while checking quiescence";
+			return;
+		}
 	} catch (error) {
 		repair.error = messageOf(error);
 		return;
 	}
-	repair.quarantinePath = archiveDir;
-	let salvageError: string | null = null;
-	let candidate: string | null = null;
+	// Hold a RESERVED write lock from the quiescence proof through candidate
+	// validation and the swap decision; release immediately before the rename.
+	// If the lock cannot be acquired, report busy — never swap without it.
+	let lockHandle: Database | null = null;
 	try {
-		candidate = await salvageViaRecover(probe.path, archiveDir);
-		await swapInCandidate(probe.path, candidate, archiveDir);
-		repair.actions.push("salvaged");
-		candidate = null;
+		lockHandle = await acquireWriteLock(probe.path);
 	} catch (error) {
-		salvageError = messageOf(error);
-	} finally {
-		if (candidate !== null) await fs.rm(candidate, { force: true }).catch(() => undefined);
+		if (isSqliteBusyError(error)) {
+			repair.busy = true;
+			return;
+		}
+		repair.error = messageOf(error);
+		return;
 	}
-	if (repair.actions.length > 0) return;
 	try {
-		candidate = await vacuumIntoRescue(probe.path);
-		await swapInCandidate(probe.path, candidate, archiveDir);
-		repair.actions.push("rescued");
-		candidate = null;
-	} catch (error) {
-		repair.error = `Salvage failed: ${salvageError ?? "not attempted"}; rescue failed: ${messageOf(error)}`;
+		let archiveDir: string;
+		try {
+			archiveDir = await archiveTrio(probe.path, expected);
+		} catch (error) {
+			repair.error = messageOf(error);
+			return;
+		}
+		repair.quarantinePath = archiveDir;
+		let salvageError: string | null = null;
+		let candidate: string | null = null;
+		// Salvage ladder: .recover first, VACUUM INTO second. Build the
+		// candidate under the lock, then re-validate and release before swap.
+		try {
+			candidate = await salvageViaRecover(probe.path, archiveDir);
+		} catch (error) {
+			salvageError = messageOf(error);
+		}
+		if (candidate === null) {
+			try {
+				candidate = await vacuumIntoRescue(probe.path);
+			} catch (error) {
+				repair.error = `Salvage failed: ${salvageError ?? "not attempted"}; rescue failed: ${messageOf(error)}`;
+				return;
+			}
+		}
+		// Belt-and-braces: re-snapshot under the lock. The lock should prevent
+		// any change; if the snapshot differs, abort without swapping.
+		try {
+			if (!snapshotsEqual(expected, await snapshotTrio(probe.path))) {
+				repair.error = "database changed during repair despite write lock";
+				return;
+			}
+		} catch (error) {
+			repair.error = messageOf(error);
+			return;
+		}
+		// Release the lock immediately before the rename.
+		releaseWriteLock(lockHandle);
+		lockHandle = null;
+		try {
+			await swapInCandidate(probe.path, candidate, archiveDir);
+			repair.actions.push(salvageError === null ? "salvaged" : "rescued");
+			candidate = null;
+		} catch (error) {
+			repair.error = messageOf(error);
+		} finally {
+			if (candidate !== null) await fs.rm(candidate, { force: true }).catch(() => undefined);
+		}
 	} finally {
-		if (candidate !== null) await fs.rm(candidate, { force: true }).catch(() => undefined);
+		releaseWriteLock(lockHandle);
 	}
 }
 
