@@ -48,6 +48,15 @@ describe("matchesKey", () => {
 		setKittyProtocolActive(false);
 	});
 
+	it("matches Cyrillic Kitty events through base-layout shortcut keys", () => {
+		setKittyProtocolActive(true);
+		const russianCtrlC = "\x1b[1089::99;5u";
+		const russianCtrlP = "\x1b[1087::112;5u";
+		expect(matchesKey(russianCtrlC, "ctrl+c")).toBe(true);
+		expect(matchesKey(russianCtrlP, "ctrl+p")).toBe(true);
+		setKittyProtocolActive(false);
+	});
+
 	it("should prefer codepoint for symbol keys even when base layout differs", () => {
 		setKittyProtocolActive(true);
 		// Dvorak Ctrl+/ reports codepoint '/' (47) and base layout '[' (91)
