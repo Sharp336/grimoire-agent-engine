@@ -3352,6 +3352,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			promptTemplates,
 			slashCommands,
 			extensionRunner,
+			extensionPaths,
 			customCommands: customCommandsResult.commands,
 			skills,
 			skillWarnings,

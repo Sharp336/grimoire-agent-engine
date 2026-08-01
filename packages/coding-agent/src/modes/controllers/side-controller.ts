@@ -78,6 +78,7 @@ export class SideController {
 		const thinkingLevel = session.configuredThinkingLevel();
 		const systemPrompt = [...session.systemPrompt];
 		const toolNames = session.getActiveToolNames();
+		const extensionPaths = session.extensionPaths;
 		const modelRegistry = session.modelRegistry;
 		const ownerId = session.getAgentId() ?? MAIN_AGENT_ID;
 		const mcpManager = ctx.mcpManager;
@@ -134,6 +135,7 @@ export class SideController {
 				agentRegistry: AgentRegistry.global(),
 				expectedAgentRef: null,
 				disableExtensionDiscovery: true,
+				preloadedExtensionPaths: extensionPaths,
 				extensions: [pi => pi.on("session_compact", reinject)],
 				localProtocolOptions,
 			});
