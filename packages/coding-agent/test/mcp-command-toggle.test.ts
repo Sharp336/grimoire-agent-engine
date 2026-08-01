@@ -33,6 +33,7 @@ function restoreAgentDir(): void {
 
 function createController() {
 	const refreshMCPTools = vi.fn(async () => {});
+	const showError = vi.fn();
 	const mcpManager = {
 		disconnectAll: vi.fn(async () => {}),
 		discoverAndConnect: vi.fn(async () => ({ errors: new Map<string, string>() })),
@@ -46,6 +47,8 @@ function createController() {
 			}),
 		),
 		getTools: vi.fn(() => []),
+		getAllServerNames: vi.fn(() => []),
+		getConnection: vi.fn(() => undefined),
 		waitForConnection: vi.fn(async () => ({})),
 		getConnectionStatus: vi.fn(() => "connected"),
 		getSource: vi.fn(() => undefined),
@@ -56,7 +59,7 @@ function createController() {
 		presentCommandOutput: vi.fn(),
 		ui: { requestRender: vi.fn() },
 		editor: {},
-		showError: vi.fn(),
+		showError,
 		showStatus: vi.fn(),
 		oauthManualInput: {
 			hasPending: vi.fn(() => false),
@@ -65,12 +68,19 @@ function createController() {
 		},
 		session: {
 			refreshMCPTools,
+			setMCPPromptCommands: vi.fn(),
 			modelRegistry: { authStorage: undefined },
 		},
 		mcpManager,
+		settings: {
+			get: vi.fn(() => []),
+			getActivationProjectRoot: vi.fn((cwd: string) => cwd),
+			getProjectActivation: vi.fn(() => "inherit"),
+			setProjectActivation: vi.fn(async () => {}),
+		},
 	} as never);
 
-	return { controller, mcpManager, refreshMCPTools };
+	return { controller, mcpManager, refreshMCPTools, showError };
 }
 
 async function writeProjectConfig(projectDir: string, servers: Record<string, MCPServerConfig>): Promise<void> {
@@ -114,10 +124,11 @@ describe("/mcp enable and disable", () => {
 			mcp1: { type: "stdio", command: "mcp-one" },
 			mcp2: { type: "stdio", command: "mcp-two" },
 		});
-		const { controller, mcpManager, refreshMCPTools } = createController();
+		const { controller, mcpManager, refreshMCPTools, showError } = createController();
 
 		await controller.handle("/mcp disable mcp1");
 
+		expect(showError.mock.calls).toEqual([]);
 		expect(mcpManager.disconnectServer).toHaveBeenCalledWith("mcp1");
 		expect(refreshMCPTools).toHaveBeenCalledWith([]);
 		expect(mcpManager.disconnectAll).not.toHaveBeenCalled();
@@ -144,5 +155,23 @@ describe("/mcp enable and disable", () => {
 			mcpServers: Record<string, MCPServerConfig>;
 		};
 		expect(persisted.mcpServers.mcp1).toEqual({ type: "stdio", command: "mcp-one", enabled: true });
+	});
+
+	test("removes a project server from the ancestor project root", async () => {
+		await writeProjectConfig(projectDir, {
+			ancestor: { type: "stdio", command: "ancestor-server" },
+		});
+		const nestedDir = path.join(projectDir, "packages", "nested");
+		await fs.mkdir(nestedDir, { recursive: true });
+		setProjectDir(nestedDir);
+		const { controller, showError } = createController();
+
+		await controller.handle("/mcp remove ancestor");
+
+		expect(showError.mock.calls).toEqual([]);
+		const persisted = (await Bun.file(getMCPConfigPath("project", projectDir)).json()) as {
+			mcpServers: Record<string, MCPServerConfig>;
+		};
+		expect(persisted.mcpServers.ancestor).toBeUndefined();
 	});
 });

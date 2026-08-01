@@ -1,7 +1,13 @@
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
 import { connectToServer, disconnectServer, listPrompts, listResources, listTools } from "../../mcp/client";
-import { addMCPServer, readMCPConfigFile, removeMCPServer, updateMCPServer } from "../../mcp/config-writer";
+import {
+	addMCPServer,
+	getProjectMCPConfigPath,
+	readMCPConfigFile,
+	removeMCPServer,
+	updateMCPServer,
+} from "../../mcp/config-writer";
 import { MCPManager } from "../../mcp/manager";
 import { getSmitheryApiKey } from "../../mcp/smithery-auth";
 import { searchSmitheryRegistry } from "../../mcp/smithery-registry";
@@ -74,7 +80,7 @@ async function getMcpConfiguredServers(
 	cwd: string,
 ): Promise<Array<{ name: string; config: MCPServerConfig; scope: AcpMcpScope }>> {
 	const userPath = getMCPConfigPath("user", cwd);
-	const projectPath = getMCPConfigPath("project", cwd);
+	const projectPath = getProjectMCPConfigPath(cwd);
 	const [userConfig, projectConfig] = await Promise.all([readMCPConfigFile(userPath), readMCPConfigFile(projectPath)]);
 	const servers: Array<{ name: string; config: MCPServerConfig; scope: AcpMcpScope }> = [];
 	const seen = new Set<string>();
@@ -310,7 +316,8 @@ async function handleAddCommand(rest: string, runtime: SlashCommandRuntime): Pro
 	const config = buildMcpServerConfig(parsed);
 	if (!config) return usage(MCP_ADD_USAGE, runtime);
 	try {
-		const filePath = getMCPConfigPath(parsed.scope, runtime.cwd);
+		const filePath =
+			parsed.scope === "project" ? getProjectMCPConfigPath(runtime.cwd) : getMCPConfigPath("user", runtime.cwd);
 		await addMCPServer(filePath, parsed.name, config);
 		await runtime.output(`Added MCP server "${parsed.name}" (${parsed.scope}).`);
 		return commandConsumed();
@@ -357,8 +364,7 @@ async function handleSmitherySearchCommand(rest: string, runtime: SlashCommandRu
 async function handleListCommand(runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
 	try {
 		const userPath = getMCPConfigPath("user", runtime.cwd);
-		const projectRoot = runtime.settings.getActivationProjectRoot(runtime.cwd, "project") ?? runtime.cwd;
-		const projectPath = getMCPConfigPath("project", projectRoot);
+		const projectPath = getProjectMCPConfigPath(runtime.cwd);
 		const [userConfig, projectConfig] = await Promise.all([
 			readMCPConfigFile(userPath),
 			readMCPConfigFile(projectPath),
@@ -420,7 +426,7 @@ async function handleEnableDisableCommand(
 	const enabled = verb === "enable";
 	try {
 		const userPath = getMCPConfigPath("user", runtime.cwd);
-		const projectPath = getMCPConfigPath("project", runtime.cwd);
+		const projectPath = getProjectMCPConfigPath(runtime.cwd);
 		const [userConfig, projectConfig] = await Promise.all([
 			readMCPConfigFile(userPath),
 			readMCPConfigFile(projectPath),
@@ -454,7 +460,8 @@ async function handleRemoveCommand(rest: string, runtime: SlashCommandRuntime): 
 	if (parsed.error) return usage(parsed.error, runtime);
 	if (!parsed.name) return usage("Usage: /mcp remove <name> [--scope project|user]", runtime);
 	try {
-		const filePath = getMCPConfigPath(parsed.scope, runtime.cwd);
+		const filePath =
+			parsed.scope === "project" ? getProjectMCPConfigPath(runtime.cwd) : getMCPConfigPath("user", runtime.cwd);
 		await removeMCPServer(filePath, parsed.name);
 		await runtime.output(`Removed server "${parsed.name}" from ${parsed.scope} config.`);
 		return commandConsumed();

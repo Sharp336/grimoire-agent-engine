@@ -14,7 +14,7 @@ import {
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
-import { validateServerName } from "../../mcp/config-writer";
+import { getProjectMCPConfigPath, validateServerName } from "../../mcp/config-writer";
 import { analyzeAuthError, discoverOAuthEndpoints, fetchResourceMetadataScopes } from "../../mcp/oauth-discovery";
 import type { MCPHttpServerConfig, MCPServerConfig, MCPSseServerConfig, MCPStdioServerConfig } from "../../mcp/types";
 import { shortenPath } from "../../tools/render-utils";
@@ -418,7 +418,7 @@ export class MCPAddWizard extends Container {
 		const cwd = getProjectDir();
 
 		const userPathLabel = shortenPath(getMCPConfigPath("user", cwd));
-		const projectPathLabel = shortenPath(getMCPConfigPath("project", cwd));
+		const projectPathLabel = shortenPath(getProjectMCPConfigPath(cwd));
 		const options = [
 			{ value: "user" as const, label: `User level (${userPathLabel})` },
 			{ value: "project" as const, label: `Project level (${projectPathLabel})` },

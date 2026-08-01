@@ -286,10 +286,9 @@ export async function collectMcpServerNames(
 		({ userConfig, projectConfig } = preloaded);
 	} else {
 		const cwd = getProjectDir();
-		const projectRoot = ctx.settings.getActivationProjectRoot(cwd, "project") ?? cwd;
 		[userConfig, projectConfig] = await Promise.all([
 			readMCPConfigFile(getMCPConfigPath("user", cwd)),
-			readMCPConfigFile(getMCPConfigPath("project", projectRoot)),
+			readMCPConfigFile(getProjectMCPConfigPath(cwd)),
 		]);
 	}
 
@@ -1035,7 +1034,7 @@ export class MCPCommandController {
 		const cwd = getProjectDir();
 		const userPath = getMCPConfigPath("user", cwd);
 		const projectRoot = this.ctx.settings.getActivationProjectRoot(cwd, "project") ?? cwd;
-		const projectPath = getMCPConfigPath("project", projectRoot);
+		const projectPath = getProjectMCPConfigPath(cwd);
 
 		const [userConfig, projectConfig] = await Promise.all([
 			readMCPConfigFile(userPath),
@@ -1053,7 +1052,7 @@ export class MCPCommandController {
 		// these match the discovery paths used by the mcp-json provider. Reads run in
 		// parallel (mirroring user/project above) but precedence is preserved by the
 		// for-loop's iteration order: mcp.json wins over .mcp.json on a same-name hit.
-		const standalonePaths = [path.join(cwd, "mcp.json"), path.join(cwd, ".mcp.json")];
+		const standalonePaths = [path.join(projectRoot, "mcp.json"), path.join(projectRoot, ".mcp.json")];
 		const fallbackConfigs = await Promise.all(
 			standalonePaths.map(async fallbackPath => {
 				try {
@@ -1329,7 +1328,7 @@ export class MCPCommandController {
 
 			// Load from both user and project configs
 			const userPath = getMCPConfigPath("user", cwd);
-			const projectPath = getMCPConfigPath("project", cwd);
+			const projectPath = getProjectMCPConfigPath(cwd);
 
 			const userPathLabel = shortenPath(userPath);
 			const projectPathLabel = shortenPath(projectPath);
@@ -1496,7 +1495,7 @@ export class MCPCommandController {
 		try {
 			const cwd = getProjectDir();
 			const userPath = getMCPConfigPath("user", cwd);
-			const projectPath = getMCPConfigPath("project", cwd);
+			const projectPath = getProjectMCPConfigPath(cwd);
 			const filePath = scope === "user" ? userPath : projectPath;
 			const config = await readMCPConfigFile(filePath);
 			if (!config.mcpServers?.[name]) {

@@ -31,7 +31,7 @@ import {
 	getPluginsCacheDir,
 	MarketplaceManager,
 } from "../extensibility/plugins/marketplace";
-import { readMCPConfigFile } from "../mcp/config-writer";
+import { getProjectMCPConfigPath, readMCPConfigFile } from "../mcp/config-writer";
 import { resolveMemoryBackend } from "../memory-backend";
 import { runPauseScreen } from "../modes/components/pause-screen";
 import { collectMcpServerNames, MCPCommandController } from "../modes/controllers/mcp-command-controller";
@@ -2831,7 +2831,7 @@ async function buildMcpRemoveCompletions(
 	let userNames: string[];
 	try {
 		const [projectConfig, userConfig] = await Promise.all([
-			readMCPConfigFile(getMCPConfigPath("project", cwd)),
+			readMCPConfigFile(getProjectMCPConfigPath(cwd)),
 			readMCPConfigFile(getMCPConfigPath("user", cwd)),
 		]);
 		projectNames = Object.keys(projectConfig.mcpServers ?? {});

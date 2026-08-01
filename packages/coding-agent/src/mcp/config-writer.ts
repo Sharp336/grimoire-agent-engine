@@ -6,12 +6,18 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { getMCPConfigPath, isEnoent } from "@oh-my-pi/pi-utils";
 import { invalidate as invalidateFsCache } from "../capability/fs";
+import { resolveActivationProjectRootSync } from "../config/activation-paths";
 import { withFileLock } from "../config/file-lock";
 
 import { validateServerConfig } from "./config";
 import { MCP_CONFIG_SCHEMA_URL, type MCPConfigFile, type MCPServerConfig } from "./types";
+
+/** Resolve the project MCP config against the nearest ancestor project root. */
+export function getProjectMCPConfigPath(cwd: string): string {
+	return getMCPConfigPath("project", resolveActivationProjectRootSync(cwd));
+}
 
 function withSchema(config: MCPConfigFile): MCPConfigFile {
 	return {
