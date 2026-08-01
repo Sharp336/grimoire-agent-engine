@@ -1466,20 +1466,36 @@ export class TreeSelectorComponent implements Component {
 
 	#renderShortcutHelp(width: number, compact: boolean, minimal: boolean): readonly string[] {
 		if (minimal) return [];
+		const key = (text: string): string => theme.fg("accent", text);
+		const description = (text: string): string => theme.fg("muted", text);
 		if (compact) {
 			return [
 				truncateToWidth(
-					`  ${theme.fg("muted", "↑/↓ select   Enter confirm   Ctrl+G view   Ctrl+O filter")}`,
+					`  ${key("↑/↓")}${description(" select   ")}${key("Enter")}${description(" confirm   ")}${key("Ctrl+G")}${description(" view   ")}${key("Ctrl+O")}${description(" filter")}`,
 					width,
 				),
 			];
 		}
-		const line = (section: string, text: string): string =>
-			truncateToWidth(`  ${theme.fg("accent", section.padEnd(11))}${theme.fg("muted", text)}`, width);
+		const line = (section: string, parts: readonly string[]): string =>
+			truncateToWidth(`  ${theme.fg("accent", section.padEnd(11))}${parts.join("")}`, width);
 		return [
-			line("Navigate", "↑/↓ select   Shift+←/→ sibling branch (wraps)   Enter confirm"),
-			line("Actions", "Shift+Enter summarize + switch   Shift+L label   Ctrl+O filter"),
-			line("View", "Ctrl+G list / tree / split   Type to search"),
+			line("Navigate", [
+				key("↑/↓"),
+				description(" select   "),
+				key("Shift+←/→"),
+				description(" sibling branch (wraps)   "),
+				key("Enter"),
+				description(" confirm"),
+			]),
+			line("Actions", [
+				key("Shift+Enter"),
+				description(" summarize + switch   "),
+				key("Shift+L"),
+				description(" label   "),
+				key("Ctrl+O"),
+				description(" filter"),
+			]),
+			line("View", [key("Ctrl+G"), description(" list / tree / split   "), key("Type"), description(" to search")]),
 		];
 	}
 

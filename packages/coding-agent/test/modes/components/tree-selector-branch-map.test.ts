@@ -87,6 +87,10 @@ function render(selector: TreeSelectorComponent, width: number): string {
 	return Bun.stripANSI(selector.render(width).join("\n"));
 }
 
+function renderStyled(selector: TreeSelectorComponent, width: number): string {
+	return selector.render(width).join("\n");
+}
+
 describe("TreeSelectorComponent branch map", () => {
 	beforeAll(async () => {
 		await themeModule.initTheme(false, undefined, undefined, "dark", "light");
@@ -124,6 +128,36 @@ describe("TreeSelectorComponent branch map", () => {
 		expect(forkRow).toBeGreaterThan(rootRow);
 		expect(selectedRow).toBeGreaterThan(forkRow);
 		expect(graphRows.join("\n")).not.toContain("left branch");
+	});
+
+	it("uses the accent color for shortcut keys and muted text for their descriptions", () => {
+		const { tree, currentLeafId } = branchyTree();
+		const output = renderStyled(
+			new TreeSelectorComponent(
+				tree,
+				currentLeafId,
+				60,
+				() => {},
+				() => {},
+			),
+			120,
+		);
+
+		expect(output).toContain(themeModule.theme.fg("accent", "Shift+←/→"));
+		expect(output).toContain(themeModule.theme.fg("muted", " sibling branch (wraps)   "));
+
+		const compactOutput = renderStyled(
+			new TreeSelectorComponent(
+				tree,
+				currentLeafId,
+				20,
+				() => {},
+				() => {},
+			),
+			120,
+		);
+		expect(compactOutput).toContain(themeModule.theme.fg("accent", "Ctrl+G"));
+		expect(compactOutput).toContain(themeModule.theme.fg("muted", " view   "));
 	});
 
 	it("falls back to the list on narrow terminals but shows message summaries in the standalone tree", () => {
