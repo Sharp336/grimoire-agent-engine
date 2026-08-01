@@ -374,6 +374,13 @@ describe("loadAllMCPConfigs extraConfigPaths", () => {
 		// either degrades to a connection error or quietly runs a command the
 		// entry did not ask to be run that way.
 		["an unknown transport type", { foo: { type: "htt", url: "http://localhost:4401/mcp" } }, /unknown.*type/i],
+		// `convertToLegacyConfig` infers stdio from the command and drops the url,
+		// so the conflict is gone before `validateServerConfig` could report it.
+		[
+			"both command and url",
+			{ foo: { command: "stale-server", url: "http://localhost:4401/mcp" } },
+			/both "command" and "url"/,
+		],
 	])("invalid explicit server entry is a hard error: %s", async (_label, mcpServers, expected) => {
 		const invalidPath = path.join(projectDir, "invalid.json");
 		await fs.writeFile(invalidPath, JSON.stringify({ mcpServers }));
@@ -611,6 +618,23 @@ describe("loadAllMCPConfigs extraConfigPaths", () => {
 
 		expect(configs.local).toMatchObject({ command: "srv" });
 		expect(configs.other).toMatchObject({ command: "srv" });
+	});
+
+	test("a discovered server with conflicting endpoints is dropped, not run as stdio", async () => {
+		await fs.writeFile(
+			path.join(projectDir, ".mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					conflicted: { command: "stale-server", url: "http://localhost:4401/mcp" },
+					fine: { command: "fine-server" },
+				},
+			}),
+		);
+
+		const { configs } = await loadAllMCPConfigs(projectDir);
+
+		expect(configs.conflicted).toBeUndefined();
+		expect(configs.fine).toMatchObject({ type: "stdio", command: "fine-server" });
 	});
 
 	// Discovery keeps the other half of the asymmetry: same defect, warning only.

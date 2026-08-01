@@ -87,6 +87,15 @@ export const mcpCapability = defineCapability<MCPServer>({
 		if (!server.name) return "Missing server name";
 		if (!server.command && !server.url) return "Must have command or url";
 
+		// Conflicting endpoints have to be caught here, not downstream: the
+		// conversion to legacy config infers stdio from the command and drops the
+		// url, so `validateServerConfig` never sees both fields and the server
+		// silently runs a command that a stale generated config left behind next
+		// to a new url.
+		if (server.command && server.url) {
+			return 'both "command" and "url" are set - use one transport, not both';
+		}
+
 		// An unrecognised transport falls through `convertToLegacyConfig` to the
 		// stdio branch, so it either fails to connect or silently runs a command
 		// the entry asked to be reached some other way. `mcpServers` JSON is
