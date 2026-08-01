@@ -203,6 +203,100 @@ describe("omp doctor", () => {
 		expect(finding?.details.join("\n")).toContain("restored from archive");
 	});
 
+	test("WAL is reported uncheckpointed and truncated under --fix", async () => {
+		const dbPath = getHistoryDbPath(root);
+		await fs.mkdir(path.dirname(dbPath), { recursive: true });
+		// The writer stays open for the whole test: a clean close auto-checkpoints
+		// and removes the WAL (gc's fixtures use the same pattern). Our own
+		// process holding it is fine — the holder gate excludes self.
+		const db = new Database(dbPath);
+		db.run("PRAGMA journal_mode=WAL");
+		db.run("CREATE TABLE t (id INTEGER PRIMARY KEY, prompt TEXT)");
+		db.run("INSERT INTO t (prompt) VALUES ('hello')");
+		const walPath = `${dbPath}-wal`;
+		expect((await fs.stat(walPath)).size).toBeGreaterThan(0);
+
+		const before = await runDoctorCommand({ flags: { agentDir: root } });
+		const warning = before.findings.find(entry => entry.id === "storage.history.db");
+		expect(warning?.status).toBe("warning");
+		expect(warning?.summary).toContain("uncheckpointed");
+
+		const after = await runDoctorCommand({ flags: { agentDir: root, fix: true } });
+		const fixed = after.findings.find(entry => entry.id === "storage.history.db");
+		expect(fixed?.status).toBe("ok");
+		expect(fixed?.summary).toContain("checkpointed");
+		expect((await fs.stat(walPath)).size).toBe(0);
+		db.close();
+	});
+
+	test("a foreign process holding the database blocks repair with a busy warning", async () => {
+		const dbPath = getHistoryDbPath(root);
+		await createDatabaseWithRows(dbPath, 100);
+		const holder = Bun.spawn({
+			cmd: [
+				"bun",
+				"-e",
+				`import { Database } from "bun:sqlite"; const db = new Database(${JSON.stringify(dbPath)}); const { promise } = Promise.withResolvers(); await promise;`,
+			],
+			stdout: "ignore",
+			stderr: "ignore",
+		});
+		const foreignHolders = (): boolean => {
+			const result = Bun.spawnSync(["fuser", dbPath]);
+			return result.stdout
+				.toString()
+				.split(/\s+/)
+				.some(pid => Number.parseInt(pid, 10) !== process.pid && Number.isFinite(Number.parseInt(pid, 10)));
+		};
+		try {
+			// Real cross-process wait: the condition is an OS-level holder reported by
+			// fuser, not wall-clock time, so fake timers cannot drive it. Poll the
+			// condition itself instead of sleeping a fixed delay.
+			let held = false;
+			for (let attempt = 0; attempt < 50 && !held; attempt++) {
+				await Bun.sleep(100);
+				held = foreignHolders();
+			}
+			expect(held).toBe(true);
+
+			const report = await runDoctorCommand({ flags: { agentDir: root, fix: true } });
+			const finding = report.findings.find(entry => entry.id === "storage.history.db");
+			expect(finding?.status).toBe("warning");
+			expect(finding?.summary).toContain("busy");
+			expect(finding?.fixed).toBeUndefined();
+		} finally {
+			holder.kill();
+		}
+		// Once the holder is gone, the same repair proceeds.
+		let released = false;
+		for (let attempt = 0; attempt < 50 && !released; attempt++) {
+			await Bun.sleep(100);
+			released = !foreignHolders();
+		}
+		expect(released).toBe(true);
+		const after = await runDoctorCommand({ flags: { agentDir: root, fix: true } });
+		const finding = after.findings.find(entry => entry.id === "storage.history.db");
+		expect(finding?.status).toBe("ok");
+		expect(finding?.fixed).toBe(true);
+	});
+
+	test("foreign-key violations are reported as a warning", async () => {
+		const dbPath = getAgentDbPath(root);
+		await fs.mkdir(path.dirname(dbPath), { recursive: true });
+		const db = new Database(dbPath);
+		db.run("PRAGMA journal_mode=DELETE");
+		db.run("PRAGMA foreign_keys=OFF");
+		db.run("CREATE TABLE parent (id INTEGER PRIMARY KEY)");
+		db.run("CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id))");
+		db.run("INSERT INTO child (parent_id) VALUES (999)");
+		db.close();
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "storage.agent.db");
+		expect(finding?.status).toBe("warning");
+		expect(finding?.summary).toContain("1 foreign-key violations");
+	});
+
 	test("missing databases produce no storage findings", async () => {
 		const report = await runDoctorCommand({ flags: { agentDir: root } });
 		expect(report.findings.filter(finding => finding.category === "storage")).toHaveLength(0);
