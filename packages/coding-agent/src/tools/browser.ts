@@ -95,6 +95,11 @@ function resolveBrowserKind(params: BrowserParams, session: ToolSession): Browse
 		const exe = resolveToCwd(app.path, session.cwd);
 		return { kind: "spawned", path: exe };
 	}
+	// A configured endpoint is a default, not an override: explicit app options win.
+	const configuredCdpUrl = (session.settings.get("browser.cdpUrl") as string | undefined)?.trim();
+	if (configuredCdpUrl) {
+		return { kind: "connected", cdpUrl: configuredCdpUrl.replace(/\/+$/, "") };
+	}
 	const cmuxKind = resolveCmuxKind({
 		settingEnabled: session.settings.get("browser.cmux") as boolean | undefined,
 	});
@@ -417,7 +422,7 @@ function describeBrowser(handle: BrowserHandle): string {
 	}
 	switch (handle.kind.kind) {
 		case "headless":
-			return `headless browser (${handle.kind.headless ? "hidden" : "visible"})`;
+			return `headless browser (${handle.kind.headless ? "hidden" : "visible"}${handle.sharedDaemon ? ", shared" : ""})`;
 		case "spawned":
 			return `spawned ${handle.kind.path} (pid ${handle.pid ?? "?"})`;
 		case "connected":

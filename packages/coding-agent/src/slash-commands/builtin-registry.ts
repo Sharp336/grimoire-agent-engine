@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { type AutocompleteItem, Spacer } from "@oh-my-pi/pi-tui";
-import { APP_NAME, getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { APP_NAME, getMCPConfigPath, getProjectDir, logger, setProjectDir } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../capability";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
 import { CollabHost } from "../collab/host";
@@ -31,8 +31,10 @@ import {
 	getPluginsCacheDir,
 	MarketplaceManager,
 } from "../extensibility/plugins/marketplace";
+import { readMCPConfigFile } from "../mcp/config-writer";
 import { resolveMemoryBackend } from "../memory-backend";
 import { runPauseScreen } from "../modes/components/pause-screen";
+import { collectMcpServerNames, MCPCommandController } from "../modes/controllers/mcp-command-controller";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import { theme } from "../modes/theme/theme";
 import type { InteractiveModeContext } from "../modes/types";
@@ -61,6 +63,7 @@ import { createMarketplaceManager } from "./helpers/marketplace-manager";
 import { handleMcpAcp } from "./helpers/mcp";
 import { commandConsumed, errorMessage, parseSlashCommand, parseSubcommand, usage } from "./helpers/parse";
 import { describeRedeemOutcome, type ResetUsageAccount, toResetUsageAccounts } from "./helpers/reset-usage";
+import { handleSecurityCommand } from "./helpers/security";
 import { matchSessionPinAccounts, toSessionPinAccounts } from "./helpers/session-pin";
 import { handleSshAcp } from "./helpers/ssh";
 import { launchStatsDashboard, parseStatsDashboardArgs } from "./helpers/stats-dashboard";
@@ -372,6 +375,26 @@ function formatWorkspaceDirectories(runtime: SlashCommandRuntime, note?: string)
 }
 
 const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
+	{
+		name: "security",
+		description: "Plan, run, inspect, import, and compare OMP-native security scans",
+		allowArgs: true,
+		acpInputHint: "<plan|scan|status|cancel|scans|show|import|export|validate|compare|disposition>",
+		subcommands: [
+			{ name: "plan", description: "Create an immutable security scan plan" },
+			{ name: "scan", description: "Start a planned or newly planned native scan" },
+			{ name: "status", description: "Show native scan operation status" },
+			{ name: "cancel", description: "Cancel a running native scan" },
+			{ name: "scans", description: "List stored project security scans" },
+			{ name: "show", description: "Render a scan or security:// resource" },
+			{ name: "import", description: "Import SARIF or a Codex Security bundle" },
+			{ name: "export", description: "Export a canonical bundle, SARIF, or report" },
+			{ name: "validate", description: "Validate one finding with OMP-native tools" },
+			{ name: "compare", description: "Compare finding lineage across two scans" },
+			{ name: "disposition", description: "Set a finding disposition with rationale" },
+		],
+		handle: handleSecurityCommand,
+	},
 	{
 		name: "settings",
 		description: "Open settings menu",
@@ -1790,11 +1813,16 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "resume",
 		description: "Resume a different session",
-		inlineHint: "[session id]",
+		inlineHint: "[session id|@claude|@codex]",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			const sessionArg = command.args.trim();
 			runtime.ctx.editor.setText("");
+			const foreignSource = sessionArg === "@claude" ? "claude" : sessionArg === "@codex" ? "codex" : undefined;
+			if (foreignSource) {
+				runtime.ctx.showSessionSelector(foreignSource);
+				return;
+			}
 			if (!sessionArg) {
 				runtime.ctx.showSessionSelector();
 				return;
@@ -2600,13 +2628,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			return commandConsumed();
 		},
 		handleTui: async (_command, runtime) => {
-			// Invalidate registry fs caches and the plugin roots cache so
-			// listClaudePluginRoots re-reads from disk on next access.
-			const projectPath = await resolveActiveProjectRegistryPath(runtime.ctx.sessionManager.getCwd());
-			clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
-			await runtime.ctx.refreshSkillState();
-			await runtime.ctx.refreshSlashCommandState();
-			resetCapabilities();
+			await reloadTuiPluginState(runtime.ctx);
 			runtime.ctx.showStatus("Plugins reloaded.");
 			runtime.ctx.editor.setText("");
 		},
@@ -2712,6 +2734,124 @@ function buildArgumentCompletions(subcommands: SubcommandDef[]): (prefix: string
 			}));
 		return matches.length > 0 ? matches : null;
 	};
+}
+
+/** /mcp subcommands whose argument is a server name (per their `usage: "<name>..."`). */
+const MCP_SERVER_NAME_SUBCOMMANDS: Readonly<Record<string, true>> = {
+	enable: true,
+	disable: true,
+	test: true,
+	remove: true,
+	reconnect: true,
+	reauth: true,
+	unauth: true,
+};
+
+/** Subcommands that accept names found only in `userConfig.disabledServers`. */
+const MCP_DISABLED_ONLY_ELIGIBLE_SUBCOMMANDS: Readonly<Record<string, true>> = {
+	enable: true,
+	disable: true,
+};
+
+/**
+ * Subcommands that accept configured servers whose `enabled` flag is false.
+ * `unauth` can clear persisted credentials without connecting; test,
+ * reconnect, and reauth explicitly require an enabled server.
+ */
+const MCP_DISABLED_CONFIG_ELIGIBLE_SUBCOMMANDS: Readonly<Record<string, true>> = {
+	enable: true,
+	disable: true,
+	unauth: true,
+};
+
+/**
+ * Build getArgumentCompletions for /mcp. Delegates to the generic
+ * declarative subcommand completer while the subcommand name itself is
+ * still being typed, then switches to MCP server-name completion (sourced
+ * from {@link collectMcpServerNames}) once a recognized server-name
+ * subcommand (enable/disable/test/remove/reconnect/reauth/unauth) is
+ * followed by a space. `remove` gets its own scope-aware completions (see
+ * {@link buildMcpRemoveCompletions}) since — unlike the others —
+ * it only ever succeeds against a config-file entry. Subcommands with a
+ * different argument shape (add, smithery-search, ...) get no argument
+ * completion.
+ */
+function buildMcpArgumentCompletions(
+	subcommands: SubcommandDef[],
+	runtime: TuiSlashCommandRuntime,
+): (argumentPrefix: string) => Promise<AutocompleteItem[] | null> {
+	const genericCompletions = buildArgumentCompletions(subcommands);
+	return async (argumentPrefix: string) => {
+		const spaceIndex = argumentPrefix.indexOf(" ");
+		if (spaceIndex === -1) return genericCompletions(argumentPrefix);
+
+		const rawSubcommand = argumentPrefix.slice(0, spaceIndex);
+		const lowerSubcommand = rawSubcommand.toLowerCase();
+		if (MCP_SERVER_NAME_SUBCOMMANDS[lowerSubcommand] !== true) return null;
+		const namePrefix = argumentPrefix.slice(spaceIndex + 1).toLowerCase();
+		if (lowerSubcommand === "remove") {
+			return await buildMcpRemoveCompletions(rawSubcommand, namePrefix);
+		}
+
+		let serverNames: string[];
+		try {
+			serverNames = await collectMcpServerNames(
+				runtime.ctx,
+				undefined,
+				MCP_DISABLED_ONLY_ELIGIBLE_SUBCOMMANDS[lowerSubcommand] === true,
+				MCP_DISABLED_CONFIG_ELIGIBLE_SUBCOMMANDS[lowerSubcommand] === true,
+			);
+		} catch (error) {
+			logger.warn("MCP server-name autocomplete failed to read config", { error });
+			return null;
+		}
+		const matches: AutocompleteItem[] = serverNames
+			.filter(name => name.toLowerCase().startsWith(namePrefix))
+			.map(name => ({ value: `${rawSubcommand} ${name} `, label: name }));
+		return matches.length > 0 ? matches : null;
+	};
+}
+
+/**
+ * Build `/mcp remove <name>` completions. Unlike the other server-name
+ * subcommands, `#handleRemove` only ever succeeds against a config-file
+ * `mcpServers` entry in the target scope (project by default, user with an
+ * explicit `--scope user`) — a purely runtime-discovered server has no
+ * config entry to remove and always fails with `Server "<name>" not found
+ * in <scope> config.`. Completions are therefore restricted to config-file
+ * names, and a name that exists only in the user config is completed with
+ * `--scope user` appended so the inserted command is directly executable.
+ */
+async function buildMcpRemoveCompletions(
+	rawSubcommand: string,
+	namePrefix: string,
+): Promise<AutocompleteItem[] | null> {
+	const cwd = getProjectDir();
+	let projectNames: string[];
+	let userNames: string[];
+	try {
+		const [projectConfig, userConfig] = await Promise.all([
+			readMCPConfigFile(getMCPConfigPath("project", cwd)),
+			readMCPConfigFile(getMCPConfigPath("user", cwd)),
+		]);
+		projectNames = Object.keys(projectConfig.mcpServers ?? {});
+		userNames = Object.keys(userConfig.mcpServers ?? {});
+	} catch (error) {
+		logger.warn("MCP remove autocomplete failed to read config", { error });
+		return null;
+	}
+
+	const projectNameSet = new Set(projectNames);
+	const allNames = new Set([...projectNames, ...userNames]);
+	const matches: AutocompleteItem[] = [...allNames]
+		.filter(name => name.toLowerCase().startsWith(namePrefix))
+		.map(name =>
+			projectNameSet.has(name)
+				? { value: `${rawSubcommand} ${name} `, label: name }
+				: { value: `${rawSubcommand} ${name} --scope user `, label: `${name} (user)` },
+		)
+		.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" }));
+	return matches.length > 0 ? matches : null;
 }
 
 /**
@@ -2877,7 +3017,10 @@ function materializeTuiBuiltinSlashCommand(
 ): TuiBuiltinSlashCommand {
 	const materialized: TuiBuiltinSlashCommand = { ...cmd };
 	if (cmd.subcommands) {
-		materialized.getArgumentCompletions = buildArgumentCompletions(cmd.subcommands);
+		materialized.getArgumentCompletions =
+			cmd.name === "mcp" && runtime
+				? buildMcpArgumentCompletions(cmd.subcommands, runtime)
+				: buildArgumentCompletions(cmd.subcommands);
 		materialized.getInlineHint = buildSubcommandInlineHint(cmd.subcommands);
 	} else if (cmd.name === "move") {
 		materialized.getArgumentCompletions = buildDirectoryArgumentCompletions();
@@ -2909,6 +3052,24 @@ export function buildTuiBuiltinSlashCommands(runtime: TuiSlashCommandRuntime): R
  * ACP dispatcher requires `handle` and skips TUI-only entries.
  */
 export const BUILTIN_SLASH_COMMANDS_INTERNAL: ReadonlyArray<SlashCommandSpec> = BUILTIN_SLASH_COMMAND_REGISTRY;
+
+/**
+ * Reload the interactive session's plugin runtime: invalidate fs/plugin-root
+ * caches, rediscover skills and file slash commands, reset the capability
+ * cache, and reconnect MCP servers (rebinding the session's MCP tools). Shared
+ * by `/reload-plugins`'s TUI handler and the `handle`-adapter's `reloadPlugins`
+ * hook so both honor the command's documented MCP reload scope (#7189).
+ */
+async function reloadTuiPluginState(ctx: InteractiveModeContext): Promise<void> {
+	const projectPath = await resolveActiveProjectRegistryPath(ctx.sessionManager.getCwd());
+	clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
+	await ctx.refreshSkillState();
+	await ctx.refreshSlashCommandState();
+	resetCapabilities();
+	if (ctx.mcpManager) {
+		await new MCPCommandController(ctx).reloadServers();
+	}
+}
 
 /**
  * Execute a builtin slash command in the interactive TUI.
@@ -2958,13 +3119,7 @@ export async function executeBuiltinSlashCommand(
 				ctx.showStatus(text);
 			},
 			refreshCommands: () => ctx.refreshSlashCommandState(),
-			reloadPlugins: async () => {
-				const projectPath = await resolveActiveProjectRegistryPath(ctx.sessionManager.getCwd());
-				clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
-				await ctx.refreshSkillState();
-				await ctx.refreshSlashCommandState();
-				resetCapabilities();
-			},
+			reloadPlugins: () => reloadTuiPluginState(ctx),
 		};
 		const result = await command.handle(parsed, adapted);
 		ctx.editor.setText("");

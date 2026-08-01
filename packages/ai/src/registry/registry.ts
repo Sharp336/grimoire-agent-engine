@@ -1,4 +1,5 @@
 import type { KnownProvider } from "@oh-my-pi/pi-catalog";
+import { aiandProvider } from "./aiand";
 import { aimlApiProvider } from "./aimlapi";
 import { alibabaCodingPlanProvider } from "./alibaba-coding-plan";
 import { alibabaTokenPlanProvider } from "./alibaba-token-plan";
@@ -12,12 +13,14 @@ import { coreWeaveProvider } from "./coreweave";
 import { cursorProvider } from "./cursor";
 import { deepseekProvider } from "./deepseek";
 import { devinProvider } from "./devin";
+import { exaProvider } from "./exa";
 import { firepassProvider } from "./firepass";
 import { fireworksProvider } from "./fireworks";
 import { friendliProvider } from "./friendli";
 import { githubCopilotProvider } from "./github-copilot";
 import { gitlabDuoProvider } from "./gitlab-duo";
 import { gitLabDuoWorkflowProvider } from "./gitlab-duo-workflow";
+import { gmiCloudProvider } from "./gmi-cloud";
 import { googleProvider } from "./google";
 import { googleAntigravityProvider } from "./google-antigravity";
 import { googleGeminiCliProvider } from "./google-gemini-cli";
@@ -94,11 +97,13 @@ const ALL = [
 	googleAntigravityProvider,
 	googleGeminiCliProvider,
 	openaiCodexDeviceProvider,
+	xaiProvider,
 	xaiOauthProvider,
 	gitlabDuoProvider,
 	gitLabDuoWorkflowProvider,
 	alibabaCodingPlanProvider,
 	alibabaTokenPlanProvider,
+	aiandProvider,
 	aimlApiProvider,
 	zhipuCodingPlanProvider,
 	umansProvider,
@@ -140,6 +145,7 @@ const ALL = [
 	opencodeGoProvider,
 	tavilyProvider,
 	kagiProvider,
+	exaProvider,
 	parallelProvider,
 	ollamaProvider,
 	ollamaCloudProvider,
@@ -149,11 +155,11 @@ const ALL = [
 	openaiProvider,
 	googleProvider,
 	googleVertexProvider,
-	xaiProvider,
 	groqProvider,
 	mistralProvider,
 	minimaxProvider,
 	amazonBedrockProvider,
+	gmiCloudProvider,
 ];
 
 export type RegistryDef = (typeof ALL)[number];

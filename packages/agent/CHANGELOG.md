@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [17.2.2] - 2026-07-31
+
+### Fixed
+
+- Fixed an issue where response-only usage records were incorrectly treated as authoritative context anchors, while ensuring prompt and total-only provider telemetry remains preserved.
+- Fixed context compaction summaries growing excessively with large context windows by capping the summary output budget to 16,384 tokens, ensuring conversations are properly compressed rather than duplicated.
+
+## [17.2.0] - 2026-07-30
+
+### Fixed
+
+- Provider-native compaction failures now surface their transport error instead of silently switching to generic summarization; streaming V2 still falls back to native V1 when available.
+
 ## [17.1.7] - 2026-07-27
 
 ### Changed

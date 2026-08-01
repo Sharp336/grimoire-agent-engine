@@ -965,6 +965,48 @@ more text`,
 			}
 		});
 
+		it("keeps coding-agent's padded fenced code body at column zero", () => {
+			const markdown = new Markdown("```sh\ncat <<'EOF'\nEOF\n```", 1, 0, defaultMarkdownTheme, undefined, 0);
+
+			const plainLines = markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(plainLines).toEqual([" ```sh", "cat <<'EOF'", "EOF", " ```"]);
+		});
+
+		it("keeps literal code body rows unprefixed through nested container wrapping", () => {
+			const longCodeLine = "x".repeat(24);
+			const cases = [
+				`- shell:
+
+  \`\`\`sh
+  ${longCodeLine}
+  EOF
+  \`\`\``,
+				`> \`\`\`sh
+> ${longCodeLine}
+> EOF
+> \`\`\``,
+			];
+
+			for (const text of cases) {
+				const markdown = new Markdown(text, 1, 0, defaultMarkdownTheme, undefined, 0);
+				const plainLines = markdown.render(12).map(line => stripVTControlCharacters(line).trimEnd());
+				const literalRows = plainLines.filter(line => line.includes("x") || line === "EOF");
+
+				expect(literalRows.join("")).toBe(`${longCodeLine}EOF`);
+				expect(literalRows.length).toBeGreaterThan(2);
+				expect(literalRows.every(line => line.startsWith("x") || line === "EOF")).toBe(true);
+			}
+		});
+
+		it("keeps ordinary prose NUL bytes as ordinary padded text", () => {
+			const markdown = new Markdown("before\0after", 1, 0, defaultMarkdownTheme);
+
+			const plainLines = markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(plainLines).toEqual([" before\0after"]);
+		});
+
 		it("should not add a trailing blank line when code block is the last rendered block", () => {
 			const cases = ["```js\nconst hello = 'world';\n```", "hello world\n\n```js\nconst hello = 'world';\n```"];
 
@@ -998,6 +1040,21 @@ more text`,
 			expect(seenSources).toEqual([mermaidSource]);
 			expect(plainLines).toEqual(["Start", "  |", "Stop"]);
 			expect(plainLines.some(line => line.includes("```mermaid"))).toBeFalsy();
+		});
+
+		it("keeps resolved Mermaid art inside the coding-agent margin", () => {
+			const markdown = new Markdown(
+				"```mermaid\nflowchart TD\n```",
+				1,
+				0,
+				{ ...defaultMarkdownTheme, resolveMermaidAscii: () => "Start\n  |\nStop" },
+				undefined,
+				0,
+			);
+
+			const plainLines = markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(plainLines).toEqual([" Start", "   |", " Stop"]);
 		});
 
 		it("falls back to the original fenced code block when mermaid resolution returns null", () => {
@@ -1749,6 +1806,21 @@ describe("Inline color swatches", () => {
 		expect(prose.includes("■")).toBe(false);
 		const code = new Markdown("Tag `#6C5E` stays plain.", 0, 0, defaultMarkdownTheme).render(80).join("");
 		expect(code.includes("■")).toBe(false);
+	});
+
+	it("does not swatch hash-prefixed UUIDs in prose", () => {
+		const uuid = new Markdown(
+			"Use feedback ID #6635765d-4a44-4a5e-a536-a8b72b0395b5 for testing.",
+			0,
+			0,
+			defaultMarkdownTheme,
+		)
+			.render(80)
+			.join("");
+		expect(uuid.includes("■")).toBe(false);
+
+		const color = new Markdown("Use color #6635765d.", 0, 0, defaultMarkdownTheme).render(80).join("");
+		expect(color.includes(swatchFor("6635765d"))).toBeTruthy();
 	});
 
 	it("uses the theme's colorSwatch symbol when provided", () => {

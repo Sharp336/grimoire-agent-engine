@@ -11,6 +11,7 @@
   - `packages/coding-agent/src/tools/browser/tab-worker-entry.ts` — worker-thread transport bootstrap.
   - `packages/coding-agent/src/tools/browser/registry.ts` — browser-handle registry keyed by browser kind.
   - `packages/coding-agent/src/tools/browser/launch.ts` — Puppeteer loading, Chromium resolution/download, headless launch, stealth injection.
+  - `packages/coding-agent/src/tools/browser/shared-daemon.ts` — project-shared broker-owned Chromium (ensure/attach over the daemon broker).
   - `packages/coding-agent/src/tools/browser/attach.ts` — CDP attach/reuse, target picking, spawned-app process handling.
   - `packages/coding-agent/src/tools/browser/tab-protocol.ts` — worker init/run/result message schema.
   - `packages/coding-agent/src/tools/browser/readable.ts` — `tab.extract()` readability extraction.
@@ -55,7 +56,7 @@
 | `viewport` | `{ width: number; height: number; scale?: number }` | No | Requested viewport. For headless launch this becomes the initial viewport; for a page it is applied with `page.setViewport()`. `scale` maps to Puppeteer `deviceScaleFactor`. |
 | `wait_until` | `"load" \| "domcontentloaded" \| "networkidle0" \| "networkidle2"` | No | Navigation wait condition. Defaults to `"load"` where omitted, including `open` navigation and later `tab.goto(...)`. |
 | `dialogs` | `"accept" \| "dismiss"` | No | Installs a page `dialog` handler that auto-accepts or auto-dismisses dialogs. Omitted means no handler. |
-| `app` | `{ path?: string; cdp_url?: string; args?: string[]; target?: string }` | No | Selects browser kind. With no `app`, the cmux backend is used when a cmux socket is available (`CMUX_SOCKET_PATH`, gated by the `browser.cmux` setting / `PI_BROWSER_CMUX` override); otherwise the session `browser.headless` setting applies. `app.path` is resolved against the session cwd and used as the executable path for spawn/attach reuse. `app.cdp_url` connects to an existing CDP endpoint. `args` are appended only when spawning `app.path`. `target` is only used for attached/spawned-app page selection. |
+| `app` | `{ path?: string; cdp_url?: string; args?: string[]; target?: string }` | No | Selects browser kind. With no `app`, a configured `browser.cdpUrl` setting attaches to that endpoint; otherwise the cmux backend is used when a cmux socket is available (`CMUX_SOCKET_PATH`, gated by the `browser.cmux` setting / `PI_BROWSER_CMUX` override); otherwise the session `browser.headless` setting applies. `app.path` is resolved against the session cwd and used as the executable path for spawn/attach reuse. `app.cdp_url` connects to an existing CDP endpoint. `args` are appended only when spawning `app.path`. `target` is only used for attached/spawned-app page selection. |
 
 ### `action: "close"`
 
@@ -92,13 +93,14 @@ The tool returns one result per call; no streaming partial output is emitted fro
 2. `open` resolves browser kind with `resolveBrowserKind()`:
    - `app.cdp_url` → `{ kind: "connected" }` after trimming trailing slashes.
    - `app.path` → `{ kind: "spawned" }` after resolving against session cwd.
+   - otherwise, a non-empty `browser.cdpUrl` setting → `{ kind: "connected" }` after trimming whitespace and trailing slashes.
    - otherwise, `resolveCmuxKind()` → `{ kind: "cmux", socketPath, password?, surface? }` when `CMUX_SOCKET_PATH` is set and cmux is enabled (`browser.cmux` setting, overridable by `PI_BROWSER_CMUX`).
    - otherwise → `{ kind: "headless", headless: session.settings.get("browser.headless") }`.
 3. `open` rejects reusing the same tab name across different browser kinds (`sameBrowserKind()`); callers must close first.
 4. `open` acquires a browser handle through `acquireBrowser()` (`packages/coding-agent/src/tools/browser/registry.ts`):
    - existing connected handle is reused by browser-kind key;
    - stale disconnected handles are disposed and recreated;
-   - headless launches via `launchHeadlessBrowser()`;
+   - headless attaches to the project-shared broker-owned Chromium (`ensureSharedBrowser()`); in a CLI-host process a broker failure is a hard error, while non-CLI hosts (`bun test`, SDK embedding) launch a process-local Chromium via `launchHeadlessBrowser()`;
    - `connected` waits for `${cdpUrl}/json/version`, then `puppeteer.connect()`;
    - `spawned` first tries `findReusableCdp()`, else kills same-path processes, allocates a free loopback port, spawns the executable with `--remote-debugging-port=<port>`, waits for CDP, then connects.
    - `cmux` connects a `CmuxSocketClient` to the cmux unix socket; existing cmux handles are reused unconditionally (no connection-liveness recheck).
@@ -161,9 +163,9 @@ The tool returns one result per call; no streaming partial output is emitted fro
   - `close` — release one tab or all tabs.
   - `run` — execute JS inside the tab worker.
 - **Browser kind**
-  - **Headless**: launches local Chromium with Puppeteer, applies stealth patches, and creates a fresh page per tab.
+  - **Headless**: attaches to one project-shared Chromium supervised by the daemon broker (`omp.browser.headless` / `omp.browser.headed` in `hub ps`), applies stealth patches, and creates a fresh page per tab. The daemon stops with the last omp client in the project. Non-CLI hosts launch a private local Chromium instead.
   - **Spawned app (`app.path`)**: reuses an existing CDP-enabled process for that executable when possible; otherwise kills same-path processes, spawns the executable with remote debugging enabled, then attaches. No stealth patches are injected.
-  - **Connected browser (`app.cdp_url`)**: attaches to an already-running CDP endpoint. No process ownership; close only disconnects.
+  - **Connected browser (`app.cdp_url`, or the `browser.cdpUrl` setting when the call carries no `app`)**: attaches to an already-running CDP endpoint. No process ownership; close only disconnects.
   - **Cmux surface (`browser.cmux`)**: with no `app` and a cmux socket available (`CMUX_SOCKET_PATH`, enabled by the `browser.cmux` setting / `PI_BROWSER_CMUX` override), drives a cmux WKWebView surface over a unix-socket JSON-RPC client instead of Puppeteer. No Bun worker and no stealth patches; `open` opens a split (owning that surface), `run` executes via `runCmuxCode()`, and `close` issues `surface.close` for surfaces it owns (leaving the workspace's last surface open).
 - **Target selection for attached/spawned browsers**
   - With `app.target`, `pickElectronTarget()` returns the first page whose URL or title contains the case-insensitive substring.
@@ -240,7 +242,7 @@ The tool returns one result per call; no streaming partial output is emitted fro
 - `loadPuppeteer()` and `loadPuppeteerInWorker()` temporarily redirect `cwd` to a safe Puppeteer directory before importing `puppeteer-core`, because Puppeteer probes the current working directory during module load.
 - Headless launch prefers a detected system Chrome/Chromium, then `PUPPETEER_EXECUTABLE_PATH`, and only then downloads Chromium.
 - Headless launch always passes `--no-sandbox`, `--disable-setuid-sandbox`, `--disable-blink-features=AutomationControlled`, and a `--window-size=...` matching the initial viewport. It also ignores Puppeteer default args `--disable-extensions`, `--disable-default-apps`, and `--disable-component-extensions-with-background-pages`.
-- Proxy-related env vars only affect headless launch: `PUPPETEER_PROXY`, `PUPPETEER_PROXY_BYPASS_LOOPBACK`, and `PUPPETEER_PROXY_IGNORE_CERT_ERRORS`.
+- Proxy-related env vars only affect headless launch argv (shared and local): `PUPPETEER_PROXY`, `PUPPETEER_PROXY_BYPASS_LOOPBACK`, and `PUPPETEER_PROXY_IGNORE_CERT_ERRORS`. For the shared daemon they are baked in at first launch and take effect again after the daemon's next cold start.
 - Stealth patches are applied only in headless mode. Spawned or externally connected browsers are intentionally left untouched.
 - `applyStealthPatches()` also strips Puppeteer's `//# sourceURL=__puppeteer_evaluation_script__` suffix from CDP `Runtime.evaluate` / `Runtime.callFunctionOn` payloads.
 - `tab.extract()` reads `page.content()`, runs Readability first, then falls back to the first non-empty of `[data-pagefind-body]`/`main article`/`article`/`main`/`[role='main']`/`body`, and returns `null` if neither extraction path yields content.
