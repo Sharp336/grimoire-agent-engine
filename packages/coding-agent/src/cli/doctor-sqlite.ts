@@ -391,6 +391,7 @@ async function swapInCandidate(dbPath: string, candidate: string, archiveDir: st
 		// original may not exist — the candidate's default mode is acceptable
 	}
 	let swapCommitted = false;
+	let markerRemovalError: Error | null = null;
 	try {
 		for (const suffix of ["-wal", "-shm", "-journal"]) {
 			const sidecar = `${dbPath}${suffix}`;
@@ -437,14 +438,14 @@ async function swapInCandidate(dbPath: string, candidate: string, archiveDir: st
 			await fs.rm(marker, { force: true });
 			await fsyncDir(path.dirname(dbPath));
 		} catch (error) {
-			if (swapCommitted)
-				throw new Error(
-					`swap succeeded but swap marker could not be removed; the database is repaired but a stale marker remains at ${marker}: ${messageOf(error)}`,
-				);
+			if (swapCommitted) markerRemovalError = new Error(
+				`swap succeeded but swap marker could not be removed; the database is repaired but a stale marker remains at ${marker}: ${messageOf(error)}`,
+			);
 			// Rollback succeeded; a leftover marker without swapped:true causes
 			// the next --fix to re-restore the same archive (a benign no-op).
 		}
 	}
+	if (markerRemovalError !== null) throw markerRemovalError;
 }
 
 /**
