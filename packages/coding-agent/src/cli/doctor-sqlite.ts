@@ -528,18 +528,16 @@ export async function recoverInterruptedSwap(db: DoctorDatabase, restore: boolea
 		if (!snapshotsEqual(before, await snapshotTrio(db.path)))
 			return { found: true, restored: false, error: "database changed during quiescence check" };
 		// Hold a RESERVED write lock through the restore so no writer commits
-		// between the quiescence proof and the file swap.
+		// between the quiescence proof and the file swap. If the file is not a
+		// valid SQLite database (NOTADB), acquireWriteLock returns null — an
+		// unopenable file has no SQLite writers, so proceed without a lock.
+		// BEGIN IMMEDIATE failures throw and are caught above (refuse).
 		let lockHandle: Database | null = null;
 		try {
 			lockHandle = await acquireWriteLock(db.path);
 		} catch {
 			return { found: true, restored: false, error: "database busy; close running omp sessions and re-run" };
 		}
-		// A null lock means the database could not be opened or BEGIN IMMEDIATE
-		// failed for a non-BUSY reason. Refuse the restore so it never proceeds
-		// without exclusion, matching the guard in repairCorruptDatabase.
-		if (lockHandle === null)
-			return { found: true, restored: false, error: "repair lock unavailable; another process may be writing" };
 		try {
 			await restoreFromArchive(db.path, archiveDir);
 		} finally {
@@ -744,15 +742,19 @@ async function vacuumIntoRescue(dbPath: string): Promise<string> {
 /**
  * Acquire a RESERVED write lock (BEGIN IMMEDIATE) on the live database to
  * exclude concurrent writers during repair. Returns an open handle holding
- * the transaction, or null when the database cannot be opened (corrupt — no
- * writer can write to an unopenable file). Throws on BUSY: the caller reports
- * busy and does not proceed with the swap.
+ * the transaction, or null when the database cannot be opened at all (not a
+ * valid SQLite file, missing, etc.) — an unopenable file has no SQLite
+ * writers, so the caller may proceed without a lock. Throws on any BEGIN
+ * IMMEDIATE failure (BUSY or otherwise): a lockable database that cannot be
+ * locked means exclusion is unavailable and the caller must refuse.
  */
 async function acquireWriteLock(dbPath: string): Promise<Database | null> {
 	let handle: Database;
 	try {
 		handle = new Database(dbPath);
 	} catch {
+		// Unopenable (NOTADB, ENOENT, …): no SQLite writer can exist — the
+		// caller proceeds without a lock.
 		return null;
 	}
 	try {
@@ -764,8 +766,8 @@ async function acquireWriteLock(dbPath: string): Promise<Database | null> {
 		} catch {
 			// secondary to the lock failure
 		}
-		if (isSqliteBusyError(error)) throw error;
-		return null;
+		// Lockable but could not lock — refuse (caller's catch handles it).
+		throw error;
 	}
 	return handle;
 }
@@ -928,8 +930,9 @@ async function repairCorruptDatabase(probe: DbProbe, repair: DbRepair): Promise<
 	}
 	// Hold a RESERVED write lock from the quiescence proof through the entire
 	// swap (marker, sidecar retirement, rename, verify). swapInCandidate
-	// releases the lock in its finally. If the lock cannot be acquired,
-	// report busy — never swap without it.
+	// releases the lock in its finally. If BEGIN IMMEDIATE fails, the throw
+	// is caught below (busy/error, refuse). A null lock (unopenable file)
+	// proceeds — no SQLite writers can exist on an unopenable file.
 	let lockHandle: Database | null = null;
 	try {
 		lockHandle = await acquireWriteLock(probe.path);
@@ -941,14 +944,10 @@ async function repairCorruptDatabase(probe: DbProbe, repair: DbRepair): Promise<
 		repair.error = messageOf(error);
 		return;
 	}
-	// A null lock means the database could not be opened or BEGIN IMMEDIATE
-	// failed for a non-BUSY reason. A failed BEGIN IMMEDIATE does not prove no
-	// writer exists — refuse the swap so it never proceeds without exclusion.
-	if (lockHandle === null) {
-		repair.busy = true;
-		repair.error = "repair lock unavailable; another process may be writing";
-		return;
-	}
+	// A null lock means the file is unopenable (NOTADB, ENOENT) — no SQLite
+	// writer can exist, so proceed without a lock. The salvage ladder will
+	// fail gracefully on true garbage and report repair.error; the original
+	// is preserved in the archive regardless.
 	try {
 		let archiveDir: string;
 		try {
