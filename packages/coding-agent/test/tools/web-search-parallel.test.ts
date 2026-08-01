@@ -38,9 +38,13 @@ describe("Parallel web search", () => {
 	} as unknown as AuthStorage;
 
 	let capturedRequestBody: unknown;
+	let capturedRequestUrl: string | undefined;
+	let capturedRequestHeaders: HeadersInit | undefined;
 
 	beforeEach(() => {
 		capturedRequestBody = undefined;
+		capturedRequestUrl = undefined;
+		capturedRequestHeaders = undefined;
 		process.env.PARALLEL_API_KEY = "test-parallel-key";
 	});
 
@@ -50,7 +54,9 @@ describe("Parallel web search", () => {
 	});
 
 	function mockFetch(responseBody: unknown, status = 200): FetchImpl {
-		return (_url, init) => {
+		return (url, init) => {
+			capturedRequestUrl = typeof url === "string" ? url : String(url);
+			capturedRequestHeaders = init?.headers;
 			if (typeof init?.body === "string") {
 				capturedRequestBody = JSON.parse(init.body);
 			}
@@ -63,7 +69,7 @@ describe("Parallel web search", () => {
 		};
 	}
 
-	it("sends the expected Parallel search request and parses results", async () => {
+	it("sends the expected Parallel V1 turbo search request and parses results", async () => {
 		const fetchMock = mockFetch({
 			search_id: "search-parallel-1",
 			results: [
@@ -79,11 +85,20 @@ describe("Parallel web search", () => {
 		});
 
 		const result = await searchWithParallel("parallel query", ["parallel query"], { fetch: fetchMock }, fakeStorage);
+		expect(capturedRequestUrl).toBe("https://api.parallel.ai/v1/search");
+		expect(capturedRequestHeaders).toMatchObject({
+			Accept: "application/json",
+			"Content-Type": "application/json",
+			"x-api-key": "test-parallel-key",
+		});
+		expect(capturedRequestHeaders).not.toHaveProperty("parallel-beta");
 		expect(capturedRequestBody).toEqual({
 			objective: "parallel query",
 			search_queries: ["parallel query"],
-			mode: "fast",
-			excerpts: { max_chars_per_result: 10_000 },
+			mode: "turbo",
+			advanced_settings: {
+				excerpt_settings: { max_chars_per_result: 10_000 },
+			},
 		});
 		expect(result).toEqual({
 			requestId: "search-parallel-1",
@@ -143,9 +158,11 @@ describe("Parallel web search", () => {
 		expect(capturedRequestBody).toEqual({
 			objective: "web api",
 			search_queries: ["web api"],
-			mode: "fast",
-			excerpts: { max_chars_per_result: 10_000 },
-			source_policy: { include_domains: ["parallel.ai"] },
+			mode: "turbo",
+			advanced_settings: {
+				excerpt_settings: { max_chars_per_result: 10_000 },
+				source_policy: { include_domains: ["parallel.ai"] },
+			},
 		});
 	});
 
@@ -164,9 +181,11 @@ describe("Parallel web search", () => {
 		expect(capturedRequestBody).toEqual({
 			objective: '"web api" -legacy',
 			search_queries: ['"web api" -legacy'],
-			mode: "fast",
-			excerpts: { max_chars_per_result: 10_000 },
-			source_policy: { exclude_domains: ["reddit.com"], after_date: "2025-06-01" },
+			mode: "turbo",
+			advanced_settings: {
+				excerpt_settings: { max_chars_per_result: 10_000 },
+				source_policy: { exclude_domains: ["reddit.com"], after_date: "2025-06-01" },
+			},
 		});
 	});
 
