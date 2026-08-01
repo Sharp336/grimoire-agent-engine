@@ -466,7 +466,7 @@ export class ExtensionDashboard implements Component {
 		void sm
 			.setProviderActivation(providerId, next, this.#activationScope)
 			.then(() => {
-				syncCapabilityDisabledProviders((sm.get("disabledProviders") as string[]) ?? []);
+				syncCapabilityDisabledProviders(sm.getActivationDisabledProviders(this.#activationScope));
 				void this.#refreshFromState();
 			})
 			.catch(error =>
@@ -589,6 +589,7 @@ export class ExtensionDashboard implements Component {
 		if (!this.#canUseProjectScope) return;
 		const sm = this.settings ?? Settings.instance;
 		this.#activationScope = this.#activationScope === "project" ? "global" : "project";
+		syncCapabilityDisabledProviders(sm.getActivationDisabledProviders(this.#activationScope));
 		this.#applyDisabledExtensions(sm.getActivationDisabledExtensions(this.#activationScope));
 		void this.#refreshFromState();
 	}

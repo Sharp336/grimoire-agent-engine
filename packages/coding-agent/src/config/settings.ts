@@ -734,12 +734,16 @@ export class Settings {
 	async reloadForCwd(cwd: string): Promise<void> {
 		const normalized = path.normalize(cwd);
 		if (normalized === this.#cwd) return;
+		await this.flush();
+		this.#restoreRuntimeModelRoleOverrides();
+		const prevModelRoles = this.get("modelRoles");
 
 		this.#cwd = normalized;
 		if (this.#persist) {
 			this.#project = await this.#loadProjectSettings();
 		}
 		this.#rebuildMerged();
+		this.#fireEffectiveSettingChanged("modelRoles", this.get("modelRoles"), prevModelRoles);
 		this.#fireAllHooks();
 	}
 
@@ -905,6 +909,27 @@ export class Settings {
 		const runtimeOverrides = getByPath(this.#overrides, ["modelRoles"]);
 		if (!isRecord(runtimeOverrides) || !Object.hasOwn(runtimeOverrides, role)) return;
 		this.#savedRuntimeModelRoleOverrides.set(role, this.#modelRolesFromLayer(this.#overrides)[role]);
+	}
+
+	/**
+	 * Restore original process-wide model-role overrides that project edits
+	 * temporarily replaced. Caller rebuilds the merged view afterward.
+	 */
+	#restoreRuntimeModelRoleOverrides(): void {
+		if (this.#savedRuntimeModelRoleOverrides.size === 0) return;
+		const runtimeRoles = getByPath(this.#overrides, ["modelRoles"]);
+		if (!isRecord(runtimeRoles)) {
+			this.#savedRuntimeModelRoleOverrides.clear();
+			return;
+		}
+		for (const [role, originalValue] of this.#savedRuntimeModelRoleOverrides) {
+			if (originalValue === undefined) {
+				delete runtimeRoles[role];
+			} else {
+				runtimeRoles[role] = originalValue;
+			}
+		}
+		this.#savedRuntimeModelRoleOverrides.clear();
 	}
 
 	/**
@@ -1203,6 +1228,14 @@ export class Settings {
 			return normalizeStringArrayForSettings(getByPath(this.#global, ["disabledExtensions"])).sort();
 		}
 		return (this.get("disabledExtensions") as string[]) ?? [];
+	}
+
+	getActivationDisabledProviders(scope?: ActivationScope): string[] {
+		const targetInfo = this.#resolveActivationTarget(this.#cwd, scope);
+		if (targetInfo.target === "global") {
+			return normalizeStringArrayForSettings(getByPath(this.#global, ["disabledProviders"])).sort();
+		}
+		return (this.get("disabledProviders") as string[]) ?? [];
 	}
 
 	canUseProjectActivation(cwd: string = this.#cwd): boolean {
@@ -1577,10 +1610,20 @@ export class Settings {
 			}
 		} catch {}
 
+		const projectConfigPath = path.join(this.#cwd, ".omp", "config.yml");
+		const nativeProject = await this.#loadYaml(projectConfigPath);
+		this.#projectFileSettings = structuredClone(nativeProject);
+		const nativeModelRoles = getByPath(nativeProject, ["modelRoles"]);
+		if (nativeModelRoles !== undefined) {
+			merged = this.#deepMerge(merged, { modelRoles: nativeModelRoles });
+		}
+
 		const targetInfo = this.#resolveActivationTarget(this.#cwd, "project");
 		if (targetInfo.target === "project") {
 			deleteProjectActivationSettings(merged);
-			merged = this.#deepMerge(merged, pickProjectActivationSettings(await this.#loadYaml(targetInfo.configPath)));
+			const activationProject =
+				targetInfo.configPath === projectConfigPath ? nativeProject : await this.#loadYaml(targetInfo.configPath);
+			merged = this.#deepMerge(merged, pickProjectActivationSettings(activationProject));
 		}
 		return this.#migrateRawSettings(merged);
 	}

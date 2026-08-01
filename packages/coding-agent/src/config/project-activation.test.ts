@@ -158,11 +158,11 @@ describe("project activation settings", () => {
 		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
 		await Bun.write(
 			path.join(agentDir, "config.yml"),
-			YAML.stringify({ disabledExtensions: ["extension-module:rtk"] }, null, 2),
+			YAML.stringify({ disabledExtensions: ["extension-module:rtk"], disabledProviders: ["native"] }, null, 2),
 		);
 		await Bun.write(
 			path.join(projectRoot, ".omp", "config.yml"),
-			YAML.stringify({ disabledExtensions: ["skill:find-skills"] }, null, 2),
+			YAML.stringify({ disabledExtensions: ["skill:find-skills"], disabledProviders: ["claude"] }, null, 2),
 		);
 
 		const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
@@ -172,6 +172,8 @@ describe("project activation settings", () => {
 			"extension-module:rtk",
 			"skill:find-skills",
 		]);
+		expect(settings.getActivationDisabledProviders("global")).toEqual(["native"]);
+		expect(settings.getActivationDisabledProviders("project")).toEqual(["claude", "native"]);
 	});
 
 	it("loads only activation keys from ancestor project config", async () => {
