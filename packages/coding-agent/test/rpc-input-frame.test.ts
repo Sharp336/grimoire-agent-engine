@@ -318,6 +318,7 @@ describe("RpcInputDispatcher", () => {
 					data: {
 						thinkingLevel: undefined,
 						isStreaming: false,
+						activityPhase: "idle",
 						isCompacting: false,
 						steeringMode: "all",
 						followUpMode: "all",

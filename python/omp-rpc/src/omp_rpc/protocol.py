@@ -18,6 +18,7 @@ ThinkingLevel: TypeAlias = Literal[
 StreamingBehavior: TypeAlias = Literal["steer", "followUp"]
 SteeringMode: TypeAlias = Literal["all", "one-at-a-time"]
 InterruptMode: TypeAlias = Literal["immediate", "wait"]
+SessionActivityPhase: TypeAlias = Literal["provider", "maintenance", "idle"]
 RpcOperationCommand: TypeAlias = Literal["prompt", "abort_and_prompt"]
 RpcOperationCancellationReason: TypeAlias = Literal[
     "user", "replaced", "session_transition", "client_disconnected"
@@ -82,6 +83,9 @@ _EFFORT_VALUES: Final[frozenset[str]] = frozenset(
 _THINKING_LEVEL_VALUES: Final[frozenset[str]] = _EFFORT_VALUES | frozenset({"off"})
 _STEERING_MODE_VALUES: Final[frozenset[str]] = frozenset({"all", "one-at-a-time"})
 _INTERRUPT_MODE_VALUES: Final[frozenset[str]] = frozenset({"immediate", "wait"})
+_SESSION_ACTIVITY_PHASE_VALUES: Final[frozenset[str]] = frozenset(
+    {"provider", "maintenance", "idle"}
+)
 _STOP_REASON_VALUES: Final[frozenset[str]] = frozenset(
     {"stop", "length", "toolUse", "error", "aborted"}
 )
@@ -810,6 +814,7 @@ class SessionState:
     model: ModelInfo | None
     thinking_level: ThinkingLevel | None
     is_streaming: bool
+    activity_phase: SessionActivityPhase
     is_compacting: bool
     steering_mode: SteeringMode
     follow_up_mode: SteeringMode
@@ -1425,6 +1430,21 @@ def parse_todo_phases(payload: JsonValue | None) -> tuple[TodoPhase, ...]:
     return tuple(parse_todo_phase(cast(JsonObject, item)) for item in payload)
 
 
+def _parse_session_activity_phase(payload: JsonObject) -> SessionActivityPhase:
+    if "activityPhase" not in payload:
+        # Legacy isStreaming conflates provider work with prompt settlement.
+        # Preserve terminal idle, but never claim provider activity without the
+        # authoritative field.
+        return "maintenance" if bool(payload.get("isStreaming", False)) else "idle"
+    value = payload["activityPhase"]
+    if isinstance(value, str) and value in _SESSION_ACTIVITY_PHASE_VALUES:
+        return cast(SessionActivityPhase, value)
+    # Present null, invalid values, and future phases are conservatively treated
+    # as non-idle maintenance so an additive or malformed server response cannot
+    # make an older client report terminal idle.
+    return "maintenance"
+
+
 def parse_session_state(payload: JsonObject) -> SessionState:
     dump_tools = tuple(
         parse_tool_descriptor(_clone_json_object(item, field="dumpTools[]"))
@@ -1441,6 +1461,7 @@ def parse_session_state(payload: JsonObject) -> SessionState:
             ),
         ),
         is_streaming=bool(payload.get("isStreaming", False)),
+        activity_phase=_parse_session_activity_phase(payload),
         is_compacting=bool(payload.get("isCompacting", False)),
         steering_mode=cast(
             SteeringMode,

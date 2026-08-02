@@ -199,13 +199,18 @@ for await (const raw of console) {
 			}
 			if (
 				frame.type === "get_state" &&
-				(Bun.env.MOCK_RPC_LEGACY_STATE === "1" || Bun.env.MOCK_RPC_INVALID_TPS === "1")
+				(Bun.env.MOCK_RPC_LEGACY_STATE === "1" ||
+					Bun.env.MOCK_RPC_LEGACY_STREAMING === "1" ||
+					Bun.env.MOCK_RPC_INVALID_TPS === "1" ||
+					Bun.env.MOCK_RPC_ACTIVITY_PHASE)
 			) {
 				const data = {
 					...legacyState,
+					...(Bun.env.MOCK_RPC_LEGACY_STREAMING === "1" ? { isStreaming: true } : {}),
 					...(Bun.env.MOCK_RPC_INVALID_TPS === "1"
 						? { fastModeEnabled: false, fastModeActive: false, tokensPerSecond: "invalid" }
 						: {}),
+					...(Bun.env.MOCK_RPC_ACTIVITY_PHASE ? { activityPhase: Bun.env.MOCK_RPC_ACTIVITY_PHASE } : {}),
 				};
 				writeFrame({
 					id,

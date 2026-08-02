@@ -85,6 +85,7 @@ FAKE_SERVER = textwrap.dedent(
             "model": model_info(model_id, model_provider),
             "thinkingLevel": thinking_level,
             "isStreaming": False,
+            "activityPhase": "idle",
             "isCompacting": False,
             "steeringMode": steering_mode,
             "followUpMode": follow_up_mode,
@@ -1121,6 +1122,7 @@ class RpcClientTests(unittest.TestCase):
             self.assertEqual(
                 state.model.id if state.model else None, "claude-sonnet-4-5"
             )
+            self.assertEqual(state.activity_phase, "idle")
             self.assertFalse(state.fast_mode_enabled)
             self.assertTrue(state.fast_mode_active)
             self.assertEqual(state.tokens_per_second, 7.25)

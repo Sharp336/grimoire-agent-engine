@@ -98,10 +98,14 @@ export type RpcCommand =
 // RPC State
 // ============================================================================
 
+export type RpcSessionActivityPhase = "provider" | "maintenance" | "idle";
+
 export interface RpcSessionState {
 	model?: Model;
 	thinkingLevel: ThinkingLevel | undefined;
 	isStreaming: boolean;
+	/** Provider generation, post-turn maintenance, or terminal idle. */
+	activityPhase: RpcSessionActivityPhase;
 	isCompacting: boolean;
 	steeringMode: "all" | "one-at-a-time";
 	followUpMode: "all" | "one-at-a-time";

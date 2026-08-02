@@ -271,6 +271,17 @@ allowing a client that missed frames to reconcile.
 
 ### `get_state` payload
 
+`activityPhase` is the authoritative activity signal:
+
+- `provider`: the core provider loop is streaming.
+- `maintenance`: provider streaming has stopped, but the prompt is still
+  settling or tracked post-prompt work remains.
+- `idle`: neither provider nor maintenance work remains.
+
+The legacy `isStreaming` field is unchanged and remains `true` for both provider
+streaming and an in-flight prompt, so use `activityPhase` when the distinction
+matters.
+
 `tokensPerSecond` is a number when output throughput is available and `null`
 otherwise. `fastModeEnabled` reports the session setting, while
 `fastModeActive` reports the actual computed active state. For Fireworks,
@@ -289,6 +300,7 @@ is re-armed.
   "model": { "provider": "...", "id": "..." },
   "thinkingLevel": "off|minimal|low|medium|high|xhigh|max",
   "isStreaming": false,
+  "activityPhase": "provider|maintenance|idle",
   "isCompacting": false,
   "steeringMode": "all|one-at-a-time",
   "followUpMode": "all|one-at-a-time",

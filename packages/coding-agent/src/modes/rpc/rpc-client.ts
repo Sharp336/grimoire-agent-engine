@@ -925,8 +925,16 @@ export class RpcClient {
 	async getState(): Promise<RpcSessionState> {
 		const response = await this.#send({ type: "get_state" });
 		const state = this.#getData<RpcSessionState>(response);
+		const rawActivityPhase: unknown = state.activityPhase;
+		const activityPhase: RpcSessionState["activityPhase"] =
+			rawActivityPhase === "provider" || rawActivityPhase === "maintenance" || rawActivityPhase === "idle"
+				? rawActivityPhase
+				: rawActivityPhase === undefined && !state.isStreaming
+					? "idle"
+					: "maintenance";
 		return {
 			...state,
+			activityPhase,
 			fastModeEnabled: state.fastModeEnabled === true,
 			fastModeActive: state.fastModeActive === true,
 			tokensPerSecond:

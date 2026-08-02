@@ -608,6 +608,8 @@ export class AgentSession {
 	#promptGeneration = 0;
 	#pendingAgentEndEmit: AgentSessionEvent | undefined;
 	#inFlightSettledCallbacks: Array<() => void | Promise<void>> = [];
+	#inFlightSettledCallbacksDrain: Promise<void> | undefined;
+	#inFlightSettledCallbacksDrainResolve: (() => void) | undefined;
 	#sessionStopContinuationCount = 0;
 	#sessionStopHookActive = false;
 	#obfuscator: SecretObfuscator | undefined;
@@ -679,23 +681,67 @@ export class AgentSession {
 		if (this.#promptInFlightCount !== 0) return;
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
-		this.#flushPendingAgentEnd();
-		if (this.#inFlightSettledCallbacks.length === 0) {
+		this.#finishInFlightSettlement();
+	}
+
+	#finishInFlightSettlement(): void {
+		const hasActiveDrain = this.#inFlightSettledCallbacksDrain !== undefined;
+		if (!hasActiveDrain && this.#inFlightSettledCallbacks.length === 0) {
+			this.#notifyYieldQueueIfSettled();
+			this.#flushPendingAgentEnd();
 			this.#drainStrandedQueuedMessages();
 			return;
 		}
-		void this.#flushInFlightSettledCallbacks().finally(() => this.#drainStrandedQueuedMessages());
+
+		let startDrain = false;
+		if (!hasActiveDrain) {
+			const { promise, resolve } = Promise.withResolvers<void>();
+			this.#inFlightSettledCallbacksDrain = promise;
+			this.#inFlightSettledCallbacksDrainResolve = resolve;
+			startDrain = true;
+		}
+		// Preserve the wire ordering: pending agent_end is emitted before its
+		// settlement observers run, while the explicit drain state keeps the
+		// session authoritatively busy throughout those observers.
+		this.#flushPendingAgentEnd();
+		if (startDrain) void this.#flushInFlightSettledCallbacks();
+	}
+
+	#finalizeInFlightSettledCallbacksDrain(): void {
+		const resolve = this.#inFlightSettledCallbacksDrainResolve;
+		this.#inFlightSettledCallbacksDrain = undefined;
+		this.#inFlightSettledCallbacksDrainResolve = undefined;
+		this.#notifyYieldQueueIfSettled();
+		this.#drainStrandedQueuedMessages();
+		resolve?.();
+	}
+
+	#notifyYieldQueueIfSettled(): void {
+		if (
+			this.agent.state.isStreaming ||
+			this.#promptInFlightCount > 0 ||
+			this.#postPromptTasks.size > 0 ||
+			this.#inFlightSettledCallbacksDrain
+		)
+			return;
+		this.yieldQueue.notifySettled();
 	}
 
 	async #flushInFlightSettledCallbacks(): Promise<void> {
-		const callbacks = this.#inFlightSettledCallbacks;
-		this.#inFlightSettledCallbacks = [];
-		for (const callback of callbacks) {
-			try {
-				await callback();
-			} catch (error) {
-				logger.warn("In-flight settle callback failed", { error: String(error) });
+		try {
+			while (this.#inFlightSettledCallbacks.length > 0) {
+				const callbacks = this.#inFlightSettledCallbacks;
+				this.#inFlightSettledCallbacks = [];
+				for (const callback of callbacks) {
+					try {
+						await callback();
+					} catch (error) {
+						logger.warn("In-flight settle callback failed", { error: String(error) });
+					}
+				}
 			}
+		} finally {
+			this.#finalizeInFlightSettledCallbacksDrain();
 		}
 	}
 
@@ -865,12 +911,7 @@ export class AgentSession {
 		this.#promptInFlightCount = 0;
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
-		this.#flushPendingAgentEnd();
-		if (this.#inFlightSettledCallbacks.length === 0) {
-			this.#drainStrandedQueuedMessages();
-			return;
-		}
-		void this.#flushInFlightSettledCallbacks().finally(() => this.#drainStrandedQueuedMessages());
+		this.#finishInFlightSettlement();
 	}
 
 	#flushPendingAgentEnd(): void {
@@ -1169,7 +1210,10 @@ export class AgentSession {
 			await this.#maintenance.maintainContextMidRun(messages, signal, context);
 		});
 		this.yieldQueue = new YieldQueue({
-			isStreaming: () => this.isStreaming,
+			isStreaming: () =>
+				this.agent.state.isStreaming ||
+				this.#promptInFlightCount > 0 ||
+				this.#inFlightSettledCallbacksDrain !== undefined,
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
@@ -3002,6 +3046,7 @@ export class AgentSession {
 				this.#postPromptTasks.delete(task);
 				if (this.#postPromptTasks.size === 0) {
 					this.#resolvePostPromptTasks();
+					this.#notifyYieldQueueIfSettled();
 				}
 			});
 	}
@@ -4200,15 +4245,37 @@ export class AgentSession {
 		return this.agent.state.isStreaming || this.#promptInFlightCount > 0;
 	}
 
+	/**
+	 * Authoritative session activity phase. Unlike `isStreaming`, this separates
+	 * the core provider loop from prompt settlement and tracked post-prompt work.
+	 */
+	get activityPhase(): "provider" | "maintenance" | "idle" {
+		if (this.agent.state.isStreaming) return "provider";
+		if (this.#promptInFlightCount > 0 || this.#postPromptTasks.size > 0 || this.#inFlightSettledCallbacksDrain)
+			return "maintenance";
+		return "idle";
+	}
+
 	get isAborting(): boolean {
 		return this.agent.isAborting;
 	}
 
 	/** Wait until streaming, event persistence, and deferred recovery work are fully settled. */
 	async waitForIdle(): Promise<void> {
-		await this.agent.waitForIdle();
-		await this.#advisors.waitForPendingCardEvents();
-		await this.#waitForPostPromptRecovery();
+		while (true) {
+			await this.agent.waitForIdle();
+			await this.#advisors.waitForPendingCardEvents();
+			await this.#waitForPostPromptRecovery();
+			const settlementCallbacks = this.#inFlightSettledCallbacksDrain;
+			if (settlementCallbacks) {
+				await settlementCallbacks;
+				continue;
+			}
+			if (this.activityPhase === "idle") return;
+			// The provider promise can settle one microtask before the enclosing
+			// prompt finalizer transitions into callback draining.
+			await Promise.resolve();
+		}
 	}
 	/**
 	 * Prevent advisor notes from starting hidden primary turns while a headless
@@ -4485,7 +4552,7 @@ export class AgentSession {
 	 * to avoid racing against the delivery turn.
 	 */
 	get hasPostPromptWork(): boolean {
-		return this.#postPromptTasks.size > 0;
+		return this.#postPromptTasks.size > 0 || this.#inFlightSettledCallbacksDrain !== undefined;
 	}
 
 	/** Register post-prompt work in tests without driving a full agent turn. */

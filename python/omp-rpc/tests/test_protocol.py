@@ -101,6 +101,7 @@ class ProtocolParsingTests(unittest.TestCase):
                 },
                 "thinkingLevel": "medium",
                 "isStreaming": False,
+                "activityPhase": "maintenance",
                 "isCompacting": False,
                 "steeringMode": "one-at-a-time",
                 "followUpMode": "all",
@@ -147,6 +148,7 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertIsInstance(state, SessionState)
         self.assertEqual(state.session_id, "session-123")
         self.assertEqual(state.follow_up_mode, "all")
+        self.assertEqual(state.activity_phase, "maintenance")
         self.assertEqual(state.model.id if state.model else None, "claude-sonnet-4-5")
         self.assertEqual(state.todo_phases[0].tasks[0].status, "in_progress")
         # Legacy bare-string systemPrompt is accepted and wrapped to a tuple.
@@ -376,6 +378,34 @@ class ProtocolParsingTests(unittest.TestCase):
                     "interruptMode": "immediate",
                 }
             )
+
+    def test_parse_session_state_activity_phases_are_forward_compatible(self) -> None:
+        base_state = {
+            "sessionId": "session-123",
+            "steeringMode": "one-at-a-time",
+            "followUpMode": "one-at-a-time",
+            "interruptMode": "immediate",
+        }
+        for activity_phase in ("provider", "maintenance", "idle"):
+            with self.subTest(activity_phase=activity_phase):
+                state = parse_session_state(
+                    {**base_state, "activityPhase": activity_phase}
+                )
+                self.assertEqual(state.activity_phase, activity_phase)
+
+        future = parse_session_state(
+            {**base_state, "activityPhase": "future-settlement-phase"}
+        )
+        self.assertEqual(future.activity_phase, "maintenance")
+        explicit_null = parse_session_state(
+            {**base_state, "activityPhase": None, "isStreaming": False}
+        )
+        self.assertEqual(explicit_null.activity_phase, "maintenance")
+
+        legacy_streaming = parse_session_state({**base_state, "isStreaming": True})
+        legacy_idle = parse_session_state(base_state)
+        self.assertEqual(legacy_streaming.activity_phase, "maintenance")
+        self.assertEqual(legacy_idle.activity_phase, "idle")
 
     def test_parse_model_info_rejects_unknown_effort(self) -> None:
         with self.assertRaises(ValueError):
