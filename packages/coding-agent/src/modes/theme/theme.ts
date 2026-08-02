@@ -1593,11 +1593,12 @@ function deriveSelectionWash(panel: string, accent: string, element: string, ste
 }
 
 /**
- * Canvas, panel, and element backgrounds as hex, darkest-surface first, plus
- * the composer selection wash — not a rung of its own, but derived here so it
- * inherits the ladder's step direction instead of deciding appearance twice.
+ * Canvas, panel, element and floating-overlay backgrounds as hex,
+ * darkest-surface first, plus the composer selection wash — not a rung of its
+ * own, but derived here so it inherits the ladder's step direction instead of
+ * deciding appearance twice.
  */
-type SurfaceLadder = readonly [canvas: string, panel: string, element: string, selection: string];
+type SurfaceLadder = readonly [canvas: string, panel: string, element: string, selection: string, overlay: string];
 
 /**
  * Three stacked surfaces derived from the theme rather than declared by it.
@@ -1629,7 +1630,12 @@ function deriveSurfaceLadder(
 	const step = isLight ? -SURFACE_STEP_LIGHT : SURFACE_STEP_DARK;
 	const panel = stepChannels(canvas, step);
 	const element = stepChannels(canvas, step * 2);
-	return [canvas, panel, element, deriveSelectionWash(panel, accent, element, step)];
+	// A floating panel needs a rung nothing in the transcript uses. `element` is
+	// not free: it is what a select list's own selected row and hover band paint
+	// on, so filling an overlay with it makes the selection inside that overlay
+	// pixel-identical to its background. One more step clears both.
+	const overlay = stepChannels(canvas, step * 3);
+	return [canvas, panel, element, deriveSelectionWash(panel, accent, element, step), overlay];
 }
 
 /**
@@ -1764,6 +1770,13 @@ export class Theme {
 	 * {@link selectionBg} for why it needs its own surface.
 	 */
 	readonly selectionBgAnsi: string;
+	/**
+	 * Background open for a floating overlay: one rung above `element`, because
+	 * `element` is what a select list's selected row and hover band paint on and
+	 * an overlay filled with it swallows its own selection.
+	 */
+	readonly overlayBgAnsi: string;
+
 	constructor(
 		fgColors: Record<ThemeColor, string | number>,
 		bgColors: Record<ThemeBg, string | number>,
@@ -1793,6 +1806,7 @@ export class Theme {
 		this.panelBgAnsi = ladder === undefined ? "" : bgAnsi(ladder[1], mode);
 		this.elementBgAnsi = ladder === undefined ? "" : bgAnsi(ladder[2], mode);
 		this.selectionBgAnsi = ladder === undefined ? "" : bgAnsi(ladder[3], mode);
+		this.overlayBgAnsi = ladder === undefined ? "" : bgAnsi(ladder[4], mode);
 		// Build symbol map from preset + overrides
 		const baseSymbols = SYMBOL_PRESETS[symbolPreset];
 		this.#symbols = { ...baseSymbols };
@@ -1935,6 +1949,23 @@ export class Theme {
 	 */
 	selectionBg(text: string, width?: number): string {
 		return paintSurface(this.selectionBgAnsi, text, width);
+	}
+
+	/**
+	 * Surface of a floating overlay in the fullscreen viewport.
+	 *
+	 * Three rungs up rather than two. A modal there draws no rule — its fill is
+	 * the only thing defining it — so it needs a surface the transcript never
+	 * uses, and `panelBg` is exactly what every card uses, which left a panel
+	 * landing over one with no perceptible edge. `elementBg` is not free either:
+	 * a select list's own selected row and hover band paint on it, so filling an
+	 * overlay with it makes the selection inside that overlay invisible. This
+	 * rung clears the transcript by two steps and leaves `element` free to mark
+	 * selection against it by one, which is the same relative separation those
+	 * bands had against a panel-filled overlay.
+	 */
+	overlayBg(text: string, width?: number): string {
+		return paintSurface(this.overlayBgAnsi, text, width);
 	}
 
 	/**
