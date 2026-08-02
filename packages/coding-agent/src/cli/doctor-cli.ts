@@ -927,8 +927,9 @@ async function diagnoseProjectSettingsConfig(agentDir: string, scoped: boolean):
 		// includes its absolute source path. Surface only warnings from a
 		// project source; user-level warnings are unrelated to this finding.
 		for (const warning of capResult.warnings) {
-			if (!warning.includes(projectPathPrefix) || warning.includes(nativeProjectConfigPath)) continue;
-			errors.push(shortenPath(warning));
+			const warningPathStart = warning.indexOf(projectPathPrefix);
+			if (warningPathStart < 0 || warning.includes(nativeProjectConfigPath)) continue;
+			errors.push(`${warning.slice(0, warningPathStart)}${shortenPath(warning.slice(warningPathStart))}`);
 		}
 	} catch {
 		// Capability loader failure must not crash the report; the strict

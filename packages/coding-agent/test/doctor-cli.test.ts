@@ -1813,6 +1813,25 @@ describe("omp doctor", () => {
 		expect(finding?.details.some(d => d.includes("Failed to parse JSON") && d.includes("settings.json"))).toBe(true);
 	}, 30000);
 
+	test("malformed project capability settings redact a home-directory path", async () => {
+		const projectDir = await fs.mkdtemp(path.join(os.homedir(), "omp-doctor-capability-"));
+		try {
+			setProjectDir(projectDir);
+			setAgentDir(root);
+			const claudeDir = path.join(projectDir, ".claude");
+			await fs.mkdir(claudeDir, { recursive: true });
+			await fs.writeFile(path.join(claudeDir, "settings.json"), "{ broken json", "utf8");
+
+			const report = await runDoctorCommand({ flags: { json: true } });
+			const finding = report.findings.find(entry => entry.id === "config.settings.project");
+			const detail = finding?.details.find(d => d.includes("Failed to parse JSON"));
+			expect(detail).toContain("~");
+			expect(detail).not.toContain(projectDir);
+		} finally {
+			await fs.rm(projectDir, { recursive: true, force: true });
+		}
+	}, 30000);
+
 	test("valid non-native project settings source remains clean", async () => {
 		setProjectDir(root);
 		setAgentDir(root);
