@@ -19,6 +19,8 @@ from omp_rpc import (
     PlanApprovalSettledEvent,
     PlanStateUpdateEvent,
     QueueUpdateEvent,
+    ProviderAuthRequest,
+    ProviderAuthUpdate,
     SessionState,
     TodoReminderEvent,
     ToolActivationResult,
@@ -960,7 +962,6 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertTrue(queue.queue["future"])
         self.assertIsInstance(jobs, JobUpdateEvent)
         self.assertEqual(jobs.jobs[0]["id"], "job-1")
-
 
 
 if __name__ == "__main__":

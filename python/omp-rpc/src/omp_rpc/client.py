@@ -60,6 +60,7 @@ from .protocol import (
     OperationStartedEvent,
     PlanState,
     PlanWorkflow,
+    ProviderAuthState,
     ReadyEvent,
     RenameSessionResult,
     ResumeSessionResult,
@@ -126,6 +127,7 @@ from .protocol import (
     parse_session_catalog_page,
     parse_session_info_result,
     parse_plan_state,
+    parse_provider_auth_state,
     parse_session_state,
     parse_session_stats,
     parse_session_workspace_roots,
@@ -1028,6 +1030,7 @@ class RpcClient:
             raise RpcError("begin_provider_auth returned a malformed operation handle")
         return operation_id
 
+
     def cancel_provider_auth(self, operation_id: str) -> CancelOperationResult:
         payload = self._request("cancel_provider_auth", operationId=operation_id)
         return self._parse_cancel_operation_result(operation_id, payload)
@@ -1038,6 +1041,7 @@ class RpcClient:
         if not isinstance(state, dict):
             raise RpcError("remove_provider_auth returned malformed state")
         return parse_provider_auth_state(state)
+
     def get_state(self) -> SessionState:
         payload = self._request("get_state")
         return parse_session_state(payload)
@@ -1630,9 +1634,14 @@ class RpcClient:
 
     def cancel_operation(self, operation_id: str) -> CancelOperationResult:
         payload = self._request("cancel_operation", operationId=operation_id)
+        return self._parse_cancel_operation_result(operation_id, payload)
+
+    def _parse_cancel_operation_result(
+        self, operation_id: str, payload: JsonObject
+    ) -> CancelOperationResult:
         status = payload.get("status")
-        if status not in {"cancelled", "completed", "failed", "not_found"}:
-            raise RpcError("cancel_operation response has an invalid status")
+        if not isinstance(status, str):
+            raise RpcError("cancel operation response has an invalid status")
         terminal_payload = payload.get("terminal")
         terminal: RpcOperationTerminalEvent | None = None
         if isinstance(terminal_payload, dict):
@@ -1645,13 +1654,11 @@ class RpcClient:
                     OperationCancelledEvent,
                 ),
             ):
-                raise RpcError("cancel_operation response has an invalid terminal")
+                raise RpcError("cancel operation response has an invalid terminal")
             terminal = parsed
         return CancelOperationResult(
             operation_id=operation_id,
-            status=cast(
-                Literal["cancelled", "completed", "failed", "not_found"], status
-            ),
+            status=status,
             terminal=terminal,
         )
 
@@ -1673,8 +1680,8 @@ class RpcClient:
             accepted_at = item.get("acceptedAt")
             if (
                 not isinstance(operation_id, str)
-                or command not in {"prompt", "abort_and_prompt", "eval_execute"}
-                or status not in {"accepted", "started"}
+                or not isinstance(command, str)
+                or not isinstance(status, str)
                 or not isinstance(accepted_at, (int, float))
                 or isinstance(accepted_at, bool)
             ):

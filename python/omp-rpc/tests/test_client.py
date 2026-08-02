@@ -2317,11 +2317,13 @@ class ProviderAuthClientTests(unittest.TestCase):
         inventory = client.list_provider_auth()
         self.assertEqual(inventory[0].methods[0].method, "future_method")
         operation_id = client.begin_provider_auth("openrouter", "future_method")
+
         self.assertEqual(
             client.cancel_provider_auth(operation_id).status, "future_status"
         )
         self.assertFalse(client.remove_provider_auth("openrouter").authenticated)
         self.assertNotIn("secret-test-value", repr(inventory))
+
 
 if __name__ == "__main__":
     unittest.main()

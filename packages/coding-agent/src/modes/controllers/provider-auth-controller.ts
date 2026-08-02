@@ -6,6 +6,7 @@ import type { RpcOperationHandle, RpcOperationManager } from "../rpc/rpc-operati
 
 export type ProviderAuthMethod = "oauth_callback" | "paste_code" | "device_code" | "api_key";
 
+
 export interface ProviderAuthMethodCapability {
 	method: ProviderAuthMethod;
 	available: boolean;
@@ -175,6 +176,7 @@ export class ProviderAuthService {
 		};
 	}
 }
+
 
 type ActiveAuthOperation = {
 	handle: RpcOperationHandle;

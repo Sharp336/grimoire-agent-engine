@@ -24,13 +24,7 @@ AdvisorRuntimeStatus: TypeAlias = Literal[
     "running", "paused", "quota_exhausted", "error", "no_model"
 ]
 RpcEvalLanguage: TypeAlias = Literal["py", "js", "rb", "jl"]
-RpcOperationCommand: TypeAlias = Literal[
-    "prompt",
-    "abort_and_prompt",
-    "set_mode",
-    "resolve_plan_approval",
-    "eval_execute",
-]
+RpcOperationCommand: TypeAlias = str
 SessionMode: TypeAlias = Literal["none", "plan", "plan_paused"]
 PlanWorkflow: TypeAlias = Literal["parallel", "iterative"]
 RpcOperationCancellationReason: TypeAlias = Literal[
@@ -1286,7 +1280,6 @@ class ProviderAuthRequest:
     instructions: str | None = None
     type: Literal["provider_auth_request"] = "provider_auth_request"
 
-
 @dataclass(slots=True, frozen=True)
 class ProviderAuthUpdate:
     state: ProviderAuthState
@@ -1336,6 +1329,7 @@ class OperationCompletedEvent:
     command: RpcOperationCommand
     agent_invoked: bool
     settled_at: float
+    state: ProviderAuthState | None = None
     request_id: str | None = None
     type: Literal["operation_completed"] = "operation_completed"
 
@@ -1372,7 +1366,7 @@ RpcOperationEvent: TypeAlias = OperationStartedEvent | RpcOperationTerminalEvent
 class ActiveOperation:
     operation_id: str
     command: RpcOperationCommand
-    status: Literal["accepted", "started"]
+    status: str
     accepted_at: float
     request_id: str | None = None
     started_at: float | None = None
@@ -1387,7 +1381,7 @@ class OperationsSnapshot:
 @dataclass(slots=True, frozen=True)
 class CancelOperationResult:
     operation_id: str
-    status: Literal["cancelled", "completed", "failed", "not_found"]
+    status: str
     terminal: RpcOperationTerminalEvent | None = None
 
 
@@ -1670,6 +1664,8 @@ RpcNotification: TypeAlias = (
     | RpcOperationEvent
     | EvalOutputEvent
     | EvalCompleteEvent
+    | ProviderAuthRequest
+    | ProviderAuthUpdate
     | ExtensionUiRequest
     | ExtensionError
     | SettingsUpdateEvent
@@ -2633,6 +2629,47 @@ def parse_context_usage(payload: JsonObject | None) -> ContextUsage | None:
     )
 
 
+def parse_provider_auth_state(payload: JsonObject) -> ProviderAuthState:
+    raw_methods = payload.get("methods")
+    methods: list[ProviderAuthMethodCapability] = []
+    if isinstance(raw_methods, list):
+        for raw_method in raw_methods:
+            if not isinstance(raw_method, dict) or not isinstance(
+                raw_method.get("method"), str
+            ):
+                continue
+            methods.append(
+                ProviderAuthMethodCapability(
+                    method=raw_method["method"],
+                    available=raw_method.get("available") is True,
+                    exclusive=raw_method.get("exclusive") is True,
+                )
+            )
+    raw_identity = payload.get("identity")
+    identity = (
+        ProviderAuthIdentity(
+            email=_optional_str(raw_identity, "email"),
+            account_id=_optional_str(raw_identity, "accountId"),
+            project_id=_optional_str(raw_identity, "projectId"),
+            org_id=_optional_str(raw_identity, "orgId"),
+            org_name=_optional_str(raw_identity, "orgName"),
+        )
+        if isinstance(raw_identity, dict)
+        else None
+    )
+    return ProviderAuthState(
+        provider_id=_require_str(payload, "providerId"),
+        name=_require_str(payload, "name"),
+        authenticated=payload.get("authenticated") is True,
+        disabled=payload.get("disabled") is True,
+        available=payload.get("available") is True,
+        credential_origin=_optional_str(payload, "credentialOrigin"),
+        unavailable_reason=_optional_str(payload, "unavailableReason"),
+        identity=identity,
+        methods=tuple(methods),
+    )
+
+
 def parse_extension_ui_request(payload: JsonObject) -> ExtensionUiRequest:
     return ExtensionUiRequest(
         id=_require_str(payload, "id"),
@@ -2885,22 +2922,7 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
         "operation_cancelled",
     }:
         operation_id = _require_str(payload, "operationId")
-        command = cast(
-            RpcOperationCommand,
-            _require_literal(
-                payload.get("command"),
-                frozenset(
-                    {
-                        "prompt",
-                        "abort_and_prompt",
-                        "set_mode",
-                        "resolve_plan_approval",
-                        "eval_execute",
-                    }
-                ),
-                field=f"{event_type}.command",
-            ),
-        )
+        command = _require_str(payload, "command")
         request_id = _optional_str(payload, "requestId")
         if event_type == "operation_started":
             started_at = _optional_float(payload, "startedAt")
@@ -2919,12 +2941,17 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
             agent_invoked = _optional_bool(payload, "agentInvoked")
             if agent_invoked is None:
                 raise ValueError("operation_completed.agentInvoked must be a boolean")
+            raw_data = payload.get("data")
+            state: ProviderAuthState | None = None
+            if isinstance(raw_data, dict) and isinstance(raw_data.get("state"), dict):
+                state = parse_provider_auth_state(raw_data["state"])
             return OperationCompletedEvent(
                 operation_id=operation_id,
                 request_id=request_id,
                 command=command,
                 agent_invoked=agent_invoked,
                 settled_at=settled_at,
+                state=state,
             )
         if event_type == "operation_failed":
             return OperationFailedEvent(

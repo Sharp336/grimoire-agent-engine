@@ -80,13 +80,18 @@ export class RpcOperationManager {
 		return this.#active.has(handle.operationId);
 	}
 
-	complete(handle: RpcOperationHandle, agentInvoked: boolean): boolean {
+	complete(
+		handle: RpcOperationHandle,
+		agentInvoked: boolean,
+		data?: Extract<RpcOperationTerminalFrame, { type: "operation_completed" }>["data"],
+	): boolean {
 		return this.#settle(handle, {
 			type: "operation_completed",
 			operationId: handle.operationId,
 			requestId: handle.requestId,
 			command: handle.command,
 			agentInvoked,
+			data,
 		});
 	}
 

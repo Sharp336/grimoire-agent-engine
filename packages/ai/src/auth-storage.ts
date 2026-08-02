@@ -2858,7 +2858,7 @@ export class AuthStorage {
 		if (!def?.login) {
 			throw new AIError.ConfigurationError(`Unknown OAuth provider: ${provider}`);
 		}
-		const result = await def.login({
+		let result: OAuthCredentials | string | undefined = await def.login({
 			onAuth: ctrl.onAuth,
 			onProgress: ctrl.onProgress,
 			onPrompt: ctrl.onPrompt,
@@ -2866,6 +2866,13 @@ export class AuthStorage {
 			signal: ctrl.signal,
 			fetch: ctrl.fetch,
 		});
+		// A provider may finish after cancellation even when its own polling
+		// implementation does not observe AbortSignal. Gate persistence here so
+		// cancelled/disconnected headless flows can never commit credentials.
+		if (ctrl.signal?.aborted) {
+			result = undefined;
+			throw new AIError.LoginCancelledError();
+		}
 		if (typeof result === "string") {
 			// Some flows (e.g. ollama) return "" to signal that no key was entered.
 			if (!result) {
@@ -2881,6 +2888,7 @@ export class AuthStorage {
 			const stored = this.#store.upsertAuthCredentialRemote
 				? await this.#store.upsertAuthCredentialRemote(provider, newCredential)
 				: this.#store.upsertAuthCredentialForProvider(provider, newCredential);
+			newCredential = undefined;
 			this.#setStoredCredentials(
 				provider,
 				stored.map(entry => ({ id: entry.id, credential: entry.credential })),
@@ -2891,12 +2899,14 @@ export class AuthStorage {
 		// Stamp the interactive-login instant: providers with an absolute grant
 		// lifetime (Anthropic) need it to surface re-login deadlines, and token
 		// refreshes only ever merge over this credential without clearing it.
-		const newCredential: OAuthCredential = { type: "oauth", ...result, authorizedAt: Date.now() };
-		// Use #upsertOAuthCredential to upsert the new credential.
-		// Any legacy api_key rows from older versions will be cleaned up so they do not
-		// shadow the new OAuth row, while preserving other active OAuth credentials.
-		await this.#upsertOAuthCredential(def.storeCredentialsAs ?? provider, newCredential);
-		return {
+		let newCredential: OAuthCredential | undefined = {
+			type: "oauth",
+			...result,
+			authorizedAt: Date.now(),
+		};
+		result = undefined;
+		const storageProvider = def.storeCredentialsAs ?? provider;
+		const identity: OAuthLoginIdentity = {
 			type: "oauth",
 			email: newCredential.email,
 			accountId: newCredential.accountId,

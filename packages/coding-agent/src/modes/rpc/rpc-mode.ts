@@ -14,7 +14,6 @@ import { once } from "node:events";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { serviceTierFamily } from "@oh-my-pi/pi-ai";
-import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { $env, isEnoent, isRecord, readLines, Snowflake } from "@oh-my-pi/pi-utils";
 import { JobProjectionService } from "../../async";
@@ -51,6 +50,12 @@ import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { EvalTool } from "../../tools/eval";
 import type { EventBus } from "../../utils/event-bus";
 import { calculateTokensPerSecond } from "../../utils/token-rate";
+import {
+	ProviderAuthController,
+	ProviderAuthError,
+	ProviderAuthService,
+	type ProviderAuthUpdate,
+} from "../controllers/provider-auth-controller";
 import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
@@ -2494,65 +2499,6 @@ export async function runRpcMode(
 			}
 
 			// =================================================================
-			// Login
-			// =================================================================
-
-			case "get_login_providers": {
-				const providers = getOAuthProviders().map(provider => ({
-					id: provider.id,
-					name: provider.name,
-					available: provider.available,
-					authenticated: session.modelRegistry.authStorage.hasAuth(provider.id),
-				}));
-				return success(id, "get_login_providers", { providers });
-			}
-
-			case "login": {
-				const knownProvider = getOAuthProviders().find(p => p.id === command.providerId);
-				if (!knownProvider) {
-					return error(id, "login", `Unknown OAuth provider: ${command.providerId}`);
-				}
-				const uiCtx = new RpcExtensionUIContext(pendingExtensionRequests, output);
-				// Track whether onAuth has fired. Providers that require interactive
-				// input before a browser URL cannot be satisfied headlessly; after
-				// onAuth, prompt input is the pasted OAuth code/redirect URL path.
-				let authEmitted = false;
-				try {
-					await session.modelRegistry.authStorage.login(command.providerId, {
-						onAuth: info => {
-							authEmitted = true;
-							output({
-								type: "extension_ui_request",
-								id: Snowflake.next() as string,
-								method: "open_url",
-								url: info.url,
-								launchUrl: info.launchUrl,
-								instructions: info.instructions,
-							} as RpcExtensionUIRequest);
-						},
-						onProgress: message => {
-							uiCtx.notify(message, "info");
-						},
-						onPrompt: async prompt => {
-							if (!authEmitted) {
-								return Promise.reject(
-									new Error(
-										`Provider '${command.providerId}' requires interactive prompts ` +
-											"which are not supported in RPC mode. Use the terminal UI to log in.",
-									),
-								);
-							}
-							return (await uiCtx.input(prompt.message, prompt.placeholder, { timeout: 600_000 })) ?? "";
-						},
-					});
-					await session.modelRegistry.refreshProvider(command.providerId, "online");
-					return success(id, "login", { providerId: command.providerId });
-				} catch (err: unknown) {
-					return error(id, "login", err instanceof Error ? err.message : String(err));
-				}
-			}
-
-			// =================================================================
 			// Provider authentication
 			// =================================================================
 
@@ -2635,6 +2581,7 @@ export async function runRpcMode(
 			process.exit(0);
 		},
 	});
+	providerAuthTaskTracker = task => shutdownCoordinator.track(task);
 
 	const dispatchFrameDeps: RpcInputFrameDeps = {
 		handleCommand,
