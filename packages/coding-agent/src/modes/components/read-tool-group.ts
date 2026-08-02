@@ -534,7 +534,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	 */
 	override publishHitZones(sink: HitZoneSink): void {
 		this.#card.publishSelectionInset(sink, this.#cardRows);
-		sink.withOffset(this.#card.topRows, () => super.publishHitZones(sink));
+		this.#card.publishContentGeometry(sink, () => super.publishHitZones(sink));
 		this.#header.publish(sink, 0, this.#cardRows);
 	}
 
@@ -548,10 +548,10 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	#copySource(): string | undefined {
 		const sections: string[] = [];
 		for (const entry of this.#entries.values()) {
-			const content = entry.contentText?.trimEnd();
-			if (!content) continue;
+			if (entry.contentText === undefined) continue;
+			const content = entry.contentText.trimEnd();
 			const path = entry.path.trim() || "unknown";
-			sections.push(`Read: ${path}\n\n${content}`);
+			sections.push(content.length > 0 ? `Read: ${path}\n\n${content}` : `Read: ${path}`);
 		}
 		return sections.length > 0 ? sections.join("\n\n") : undefined;
 	}
