@@ -928,6 +928,32 @@ describe("Editor Vim input mode", () => {
 		expect(editor.getText()).toBe("/");
 	});
 
+	it("invalidates pending autocomplete before leaving Vim insert mode", async () => {
+		const editor = createVimEditor();
+		const request = Promise.withResolvers<{
+			items: Array<{ label: string; value: string }>;
+			prefix: string;
+		}>();
+		editor.setAutocompleteProvider({
+			getSuggestions() {
+				return request.promise;
+			},
+			applyCompletion(lines, cursorLine, cursorCol) {
+				return { lines, cursorLine, cursorCol };
+			},
+		});
+		typeText(editor, "i/");
+		expect(editor.isShowingAutocomplete()).toBe(false);
+
+		editor.handleInput("\x1b");
+		request.resolve({ items: [{ label: "/help", value: "/help" }], prefix: "/" });
+		await request.promise;
+		await Promise.resolve();
+
+		expect(editor.isShowingAutocomplete()).toBe(false);
+		expect(editor.getVimMode()).toBe("normal");
+	});
+
 	it("keeps Vim normal-mode undo and redo from reopening autocomplete", async () => {
 		const editor = createVimEditor();
 		const getSuggestions = vi.fn(async () => ({

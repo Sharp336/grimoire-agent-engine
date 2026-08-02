@@ -1244,7 +1244,7 @@ export class Editor implements Component, Focusable {
 		const canonical = parsedKey === undefined ? undefined : canonicalKeyId(parsedKey);
 
 		if (this.isVimModeEscape(data)) {
-			if (this.#autocompleteState) this.#cancelAutocomplete(true);
+			this.#cancelAutocomplete(true);
 			this.#jumpMode = null;
 			this.#vim.enterNormalMode();
 			return;
