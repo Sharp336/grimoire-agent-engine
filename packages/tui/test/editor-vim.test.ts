@@ -471,6 +471,18 @@ describe("Editor Vim input mode", () => {
 		expect(editor.getVimMode()).toBe("normal");
 	});
 
+	it("clears pending visual text objects before navigation", () => {
+		const editor = createVimEditor();
+		editor.setText("abc");
+		typeText(editor, "0vi");
+
+		editor.handleInput("\x1b[C");
+		editor.handleInput("d");
+
+		expect(editor.getText()).toBe("c");
+		expect(editor.getVimMode()).toBe("normal");
+	});
+
 	it.each([
 		{ name: "Down Arrow", start: "gg", key: "\x1b[B", expected: "three" },
 		{ name: "Up Arrow", start: "G", key: "\x1b[A", expected: "one" },

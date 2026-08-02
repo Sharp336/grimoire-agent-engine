@@ -576,6 +576,10 @@ export class Editor implements Component, Focusable {
 		if (this.#inputMode === "vim") this.#vim.clearPendingCommand();
 	}
 
+	prepareVimPaste(): void {
+		if (this.#inputMode === "vim" && this.#vim.mode === "insert") this.#vim.preparePaste();
+	}
+
 	isVimModeEscape(data: string): boolean {
 		return this.#inputMode === "vim" && this.#vim.isModeEscape(data);
 	}
@@ -2016,7 +2020,7 @@ export class Editor implements Component, Focusable {
 			this.#vim.clearPendingCommand();
 			return;
 		}
-		if (this.#inputMode === "vim") this.#vim.preparePaste();
+		this.prepareVimPaste();
 		this.#handlePaste(text);
 	}
 

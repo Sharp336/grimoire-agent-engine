@@ -141,7 +141,10 @@ describe("CustomEditor keybindings", () => {
 
 	it("allows clipboard image paste only from Vim insert mode", () => {
 		const editor = new CustomEditor(getEditorTheme());
-		const onPasteImage = vi.fn();
+		const onPasteImage = vi.fn(async () => {
+			editor.insertText("[Image] ");
+			return true;
+		});
 		editor.setInputMode("vim");
 		editor.setActionKeys("app.clipboard.pasteImage", ["alt+p"]);
 		editor.onPasteImage = onPasteImage;
@@ -159,6 +162,10 @@ describe("CustomEditor keybindings", () => {
 		editor.handleInput("i");
 		editor.handleInput("\x1bp");
 		expect(onPasteImage).toHaveBeenCalledTimes(1);
+		editor.handleInput("!");
+		editor.handleInput("\x1b");
+		editor.handleInput("u");
+		expect(editor.getText()).toBe("text");
 	});
 	it("keeps configured app shortcuts reachable from Vim normal mode", () => {
 		const editor = new CustomEditor(getEditorTheme());
@@ -209,7 +216,7 @@ describe("CustomEditor keybindings", () => {
 
 	it("allows configured raw-text paste only from Vim insert mode", () => {
 		const editor = new CustomEditor(getEditorTheme());
-		const onPasteTextRaw = vi.fn();
+		const onPasteTextRaw = vi.fn(() => editor.insertText("pasted"));
 		editor.setInputMode("vim");
 		editor.setActionKeys("app.clipboard.pasteTextRaw", ["alt+t"]);
 		editor.onPasteTextRaw = onPasteTextRaw;
@@ -227,6 +234,10 @@ describe("CustomEditor keybindings", () => {
 		editor.handleInput("i");
 		editor.handleInput("\x1bt");
 		expect(onPasteTextRaw).toHaveBeenCalledTimes(1);
+		editor.handleInput("!");
+		editor.handleInput("\x1b");
+		editor.handleInput("u");
+		expect(editor.getText()).toBe("text");
 	});
 });
 

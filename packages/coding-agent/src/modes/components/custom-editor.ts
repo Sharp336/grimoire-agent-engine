@@ -818,11 +818,13 @@ export class CustomEditor extends Editor {
 				return;
 			}
 			if (content.length === 0 && this.onPasteImage) {
+				this.prepareVimPaste();
 				this.#trackAsyncPaste(Promise.resolve(this.onPasteImage()));
 				return;
 			}
 			const imagePaths = extractImagePastePathsFromText(content);
 			if (imagePaths && this.onPasteImagePath) {
+				this.prepareVimPaste();
 				this.#trackAsyncPaste(
 					(async () => {
 						for (const p of imagePaths) await this.onPasteImagePath?.(p);
@@ -869,12 +871,14 @@ export class CustomEditor extends Editor {
 			if (!acceptsTextEntry) this.clearVimPendingCommand();
 			// Intercept configured image paste (async - fires and handles result)
 			if (acceptsTextEntry && this.#matchesAction(canonical, "app.clipboard.pasteImage") && this.onPasteImage) {
+				this.prepareVimPaste();
 				void this.onPasteImage();
 				return;
 			}
 
 			// Intercept configured raw text paste (fires and handles result)
 			if (acceptsTextEntry && this.#matchesAction(canonical, "app.clipboard.pasteTextRaw") && this.onPasteTextRaw) {
+				this.prepareVimPaste();
 				this.onPasteTextRaw();
 				return;
 			}

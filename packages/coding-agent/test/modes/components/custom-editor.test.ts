@@ -259,6 +259,24 @@ describe("CustomEditor bracketed path paste", () => {
 		expect(editor.getText()).toBe("text");
 	});
 
+	it("groups bracketed image insertion with Vim insert undo", async () => {
+		const { editor } = makeEditor();
+		editor.onPasteImagePath = () => {
+			editor.insertText("[Image] ");
+		};
+		editor.setInputMode("vim");
+		editor.handleInput("i");
+
+		editor.handleInput(bracketedPaste("/tmp/image.png"));
+		await Promise.resolve();
+		await Promise.resolve();
+		editor.handleInput("!");
+		editor.handleInput("\x1b");
+		editor.handleInput("u");
+
+		expect(editor.getText()).toBe("");
+	});
+
 	it("keeps a two-file drag with unescaped spaces as text instead of attaching one fused path", () => {
 		// PR #6582 review: selecting two screenshots and dropping them together
 		// emits a single space-separated payload the splitter also refuses

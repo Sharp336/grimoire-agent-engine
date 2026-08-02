@@ -354,10 +354,12 @@ export class VimEditorController {
 			kb.matches(data, "tui.editor.jumpBackward")
 		) {
 			this.#count = "";
+			this.clearPendingCommand();
 			return true;
 		} else {
 			return false;
 		}
+		this.clearPendingCommand();
 		this.#updateVisualSelection();
 		return true;
 	}
