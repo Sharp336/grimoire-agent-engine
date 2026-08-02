@@ -39,6 +39,7 @@ import {
 	SessionCatalogError,
 } from "../../session/session-catalog";
 import { FileSessionStorage } from "../../session/session-storage";
+import { ToolInventoryUnavailableError } from "../../session/session-tools";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
@@ -47,7 +48,7 @@ import { calculateTokensPerSecond } from "../../utils/token-rate";
 import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
-import { getRpcCapabilityManifest, validateRpcCommand } from "./rpc-command-registry";
+import { getRpcCapabilityManifest, RPC_APPLICATION_API_VERSION, validateRpcCommand } from "./rpc-command-registry";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
 import { handleGetSettings } from "./rpc-get-settings";
 import { claimRpcInput } from "./rpc-input";
@@ -1092,6 +1093,9 @@ export async function runRpcMode(
 	session.subscribeCommandMetadataChanged(() => {
 		void emitAvailableCommandsUpdate();
 	});
+	session.subscribeToolInventoryChanged(() => {
+		output({ type: "tool_inventory_update" });
+	});
 	await emitAvailableCommandsUpdate();
 
 	const completeSessionTransition = async (
@@ -1325,6 +1329,29 @@ export async function runRpcMode(
 			// =================================================================
 			case "get_operations": {
 				return success(id, "get_operations", operationManager.snapshot());
+			}
+			case "get_tool_inventory": {
+				try {
+					const response = success(
+						id,
+						"get_tool_inventory",
+						session.getToolInventory(RPC_APPLICATION_API_VERSION),
+					);
+					if (Buffer.byteLength(`${JSON.stringify(response)}\n`, "utf8") > MAX_RPC_FRAME_BYTES) {
+						return error(
+							id,
+							"get_tool_inventory",
+							"Authoritative tool inventory does not fit the protocol frame",
+							"tool_inventory_unavailable",
+						);
+					}
+					return response;
+				} catch (cause) {
+					if (cause instanceof ToolInventoryUnavailableError) {
+						return error(id, "get_tool_inventory", cause.message, "tool_inventory_unavailable");
+					}
+					throw cause;
+				}
 			}
 
 			case "get_state": {

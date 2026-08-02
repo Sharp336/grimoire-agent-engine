@@ -16,6 +16,7 @@ from .client import (
     RpcProtocolError,
     RpcTimeoutError,
     SettingsUpdateListener,
+    ToolInventoryUpdateListener,
     UiRequestListener,
 )
 from .host_tools import (
@@ -124,7 +125,12 @@ from .protocol import (
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolExecutionUpdateEvent,
+    ToolInventory,
+    ToolInventoryEntry,
+    ToolInventoryUpdateEvent,
+    ToolInventoryXdev,
     ToolResultMessage,
+    ToolSource,
     TurnEndEvent,
     TurnStartEvent,
     UnknownNotification,
@@ -148,6 +154,7 @@ from .protocol import (
     parse_session_workspace_roots,
     parse_settings_snapshot,
     parse_todo_phases,
+    parse_tool_inventory,
 )
 
 __all__ = [
@@ -268,7 +275,13 @@ __all__ = [
     "ToolExecutionEndEvent",
     "ToolExecutionStartEvent",
     "ToolExecutionUpdateEvent",
+    "ToolInventory",
+    "ToolInventoryEntry",
+    "ToolInventoryUpdateEvent",
+    "ToolInventoryUpdateListener",
+    "ToolInventoryXdev",
     "ToolResultMessage",
+    "ToolSource",
     "TurnEndEvent",
     "TurnStartEvent",
     "UiRequestListener",
@@ -295,4 +308,5 @@ __all__ = [
     "parse_session_workspace_roots",
     "parse_settings_snapshot",
     "parse_todo_phases",
+    "parse_tool_inventory",
 ]

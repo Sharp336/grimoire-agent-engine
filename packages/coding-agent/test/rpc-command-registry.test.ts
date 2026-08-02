@@ -34,6 +34,18 @@ describe("RPC command registry", () => {
 		}
 	});
 
+	test("advertises authoritative serial tool inventory reads and update signals in API v2", () => {
+		const manifest = getRpcCapabilityManifest();
+		expect(manifest.applicationApiVersion).toBe(2);
+		expect(RPC_COMMAND_DEFINITIONS.get_tool_inventory.scheduling).toBe("serial");
+		expect(manifest.commands.find(command => command.name === "get_tool_inventory")).toMatchObject({
+			scope: "session",
+			concurrencyClass: "serial",
+			availability: "available",
+		});
+		expect(manifest.events).toContain("tool_inventory_update");
+	});
+
 	test("evaluates runtime-gated availability on every manifest query", () => {
 		const unavailable = getRpcCapabilityManifest();
 		const available = getRpcCapabilityManifest({ features: new Set(["subagent-event-bus", "model.fast-mode"]) });

@@ -210,6 +210,7 @@ export const RPC_COMMAND_DEFINITIONS = {
 	get_operations: sessionCommand({ type: "get_operations" }, {}, "concurrent"),
 	get_advisor_state: sessionCommand({ type: "get_advisor_state" }, {}, "concurrent"),
 	set_advisor_enabled: sessionCommand({ type: "set_advisor_enabled", enabled: false }, { enabled: booleanField }),
+	get_tool_inventory: sessionCommand({ type: "get_tool_inventory" }),
 	set_fast_mode: sessionCommand(
 		{ type: "set_fast_mode", enabled: false },
 		{ enabled: booleanField },
