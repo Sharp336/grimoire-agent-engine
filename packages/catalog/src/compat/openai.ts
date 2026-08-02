@@ -25,6 +25,7 @@ import {
 	isQwen38PlusTemplateEffortModelId,
 	isQwenModelId,
 } from "../identity/family";
+import { hasFriendliTemplateReasoningEffort } from "../model-thinking";
 import type {
 	ModelSpec,
 	OpenAICompat,
@@ -614,7 +615,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		// `reasoning_effort`, so the flag is gated to Friendli reasoning models that
 		// declare `thinking.efforts` (discovered via `/v1/models` `reasoning_options`
 		// `type: "effort"`, or the static seed for GLM-5.2's offline fallback).
-		friendliTemplateReasoningEffort: isFriendli && spec.reasoning && Boolean(spec.thinking?.efforts?.length),
+		friendliTemplateReasoningEffort: hasFriendliTemplateReasoningEffort(spec),
 		requiresAssistantContentForToolCalls: isKimiModel || isDirectDeepseekReasoning,
 		cacheControlFormat: isOpenRouter && spec.id.startsWith("anthropic/") ? "anthropic" : undefined,
 		supportsPromptCacheBreakpoints,

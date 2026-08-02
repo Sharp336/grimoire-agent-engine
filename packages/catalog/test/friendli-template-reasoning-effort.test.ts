@@ -58,6 +58,27 @@ describe("Friendli template reasoning effort flag", () => {
 		expect(compat.friendliTemplateReasoningEffort).toBe(false);
 	});
 
+	it("enables the flag for GLM-5.2 on a custom Friendli-pointed provider without spec.thinking", () => {
+		// A custom provider pointing at api.friendli.ai serves GLM-5.2 but
+		// without an explicit thinking block. `hasFriendliTemplateReasoningEffort`
+		// must detect the GLM-5.2 identity and enable the flag — otherwise the
+		// resolved thinking metadata (HIGH_MAX from getModelDefinedEfforts) and
+		// the wire flag disagree, collapsing every effort tier to the same request.
+		const custom: ModelSpec<"openai-completions"> = {
+			api: "openai-completions",
+			id: "zai-org/GLM-5.2",
+			name: "GLM-5.2",
+			provider: "my-custom-friendli",
+			baseUrl: "https://api.friendli.ai/serverless/v1",
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			maxTokens: 8192,
+			contextWindow: 131072,
+			reasoning: true,
+		};
+		expect(buildOpenAICompat(custom).friendliTemplateReasoningEffort).toBe(true);
+	});
+
 	it("leaves the flag off for the other qwen-chat-template host (NVIDIA NIM)", () => {
 		// NIM is the precedent for routing to `qwen-chat-template`; its strict
 		// schema rejects top-level `reasoning_effort`, so the flag must NOT flip
