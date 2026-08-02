@@ -4,7 +4,13 @@ import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type DoctorReport, runDoctorCommand } from "@oh-my-pi/pi-coding-agent/cli/doctor-cli";
+import {
+	type DoctorFinding,
+	type DoctorReport,
+	renderDoctorReport,
+	runDoctorCommand,
+} from "@oh-my-pi/pi-coding-agent/cli/doctor-cli";
+import { PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/manager";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { getAgentDbPath, getHistoryDbPath, getModelDbPath } from "@oh-my-pi/pi-utils";
 import { runCli } from "../src/cli";
@@ -15,6 +21,7 @@ let writes: string[] = [];
 let stderrWrites: string[] = [];
 let stdoutSpy: { mockRestore(): void } | undefined;
 let stderrSpy: { mockRestore(): void } | undefined;
+let pluginDoctorSpy: { mockRestore(): void } | undefined;
 let settingsState: SettingsTestState | undefined;
 const originalExitCode = process.exitCode;
 
@@ -44,6 +51,8 @@ afterEach(async () => {
 	stdoutSpy = undefined;
 	stderrSpy?.mockRestore();
 	stderrSpy = undefined;
+	pluginDoctorSpy?.mockRestore();
+	pluginDoctorSpy = undefined;
 	process.exitCode = originalExitCode;
 	restoreSettingsTestState(settingsState);
 	settingsState = undefined;
@@ -66,7 +75,11 @@ async function createDatabaseWithRows(dbPath: string, rows: number): Promise<voi
 	db.run("PRAGMA journal_mode=DELETE");
 	db.run("CREATE TABLE t (id INTEGER PRIMARY KEY, blob TEXT)");
 	const insert = db.prepare("INSERT INTO t (blob) VALUES (?)");
+	// Wrap in one transaction: autocommit (DELETE-journal mode) fsyncs per row,
+	// making 2000 inserts take ~21s and time out under default settings.
+	db.run("BEGIN");
 	for (let index = 0; index < rows; index++) insert.run("x".repeat(1024));
+	db.run("COMMIT");
 	db.close();
 }
 
@@ -219,6 +232,7 @@ describe("omp doctor", () => {
 		expect(quickCheck(dbPath)).toBe("ok");
 		expect(await pathExists(marker)).toBe(false);
 		const finding = fixed.findings.find(entry => entry.id === "storage.agent.db");
+		expect(finding?.summary).toContain("restored from archive");
 		expect(finding?.details.join("\n")).toContain("restored from archive");
 	});
 
@@ -249,6 +263,9 @@ describe("omp doctor", () => {
 	});
 
 	test("a foreign process holding the database blocks repair with a busy warning", async () => {
+		// fuser is Linux-only and absent on Windows and minimal containers; skip
+		// where it is unavailable rather than failing the suite on those hosts.
+		if (Bun.which("fuser") === null) return;
 		const dbPath = getHistoryDbPath(root);
 		await createDatabaseWithRows(dbPath, 100);
 		const holder = Bun.spawn({
@@ -466,5 +483,138 @@ describe("omp doctor", () => {
 		const configFindings = report.findings.filter(entry => entry.category === "config");
 		expect(configFindings.length).toBeGreaterThan(0);
 		for (const finding of configFindings) expect(finding.status).toBe("ok");
+	});
+
+	test("FK violations stay warning after --fix ran maintenance", async () => {
+		const dbPath = getAgentDbPath(root);
+		await fs.mkdir(path.dirname(dbPath), { recursive: true });
+		const db = new Database(dbPath);
+		db.run("PRAGMA journal_mode=DELETE");
+		db.run("PRAGMA foreign_keys=OFF");
+		db.run("CREATE TABLE parent (id INTEGER PRIMARY KEY)");
+		db.run("CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id))");
+		db.run("INSERT INTO child (parent_id) VALUES (999)");
+		db.close();
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, fix: true } });
+		const finding = report.findings.find(entry => entry.id === "storage.agent.db");
+		// Maintenance actions (optimize) ran but FK violations are unresolved;
+		// the finding must stay warning, not collapse to ok. The FK issue itself
+		// was not repaired, so no fixed flag even though actions ran.
+		expect(finding?.status).toBe("warning");
+		expect(finding?.summary).toContain("foreign-key violations");
+		expect(finding?.fixed).toBeUndefined();
+	});
+
+	test("plugin doctor throw produces a plugins error finding without aborting the report", async () => {
+		pluginDoctorSpy = spyOn(PluginManager.prototype, "doctor").mockImplementation(() => {
+			throw new Error("malformed plugins/package.json");
+		});
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const pluginFinding = report.findings.find(entry => entry.category === "plugins");
+		expect(pluginFinding?.status).toBe("error");
+		expect(pluginFinding?.summary).toContain("plugin doctor failed");
+		// Other sections still collected — environment and tools are present.
+		expect(report.findings.some(entry => entry.category === "environment")).toBe(true);
+		expect(report.findings.some(entry => entry.category === "tools")).toBe(true);
+	});
+
+	test("a small free-heavy database does not warn (threshold alignment)", async () => {
+		const dbPath = getHistoryDbPath(root);
+		await fs.mkdir(path.dirname(dbPath), { recursive: true });
+		const db = new Database(dbPath);
+		db.run("PRAGMA journal_mode=DELETE");
+		db.run("CREATE TABLE t (id INTEGER PRIMARY KEY, blob TEXT)");
+		db.run("BEGIN");
+		const insert = db.prepare("INSERT INTO t (blob) VALUES (?)");
+		for (let index = 0; index < 20; index++) insert.run("x".repeat(100));
+		db.run("COMMIT");
+		db.run("DELETE FROM t");
+		db.close();
+		// The db is well under the 1 MiB vacuum floor; vacuumEligible returns
+		// false, so the free-page warning must NOT fire.
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "storage.history.db");
+		expect(finding?.status).toBe("ok");
+		expect(finding?.summary).not.toContain("free pages");
+	});
+
+	test("renderer sanitizes a finding id containing a tab", async () => {
+		// A tab in an id tail (plugin name or autoresearch filename) would break
+		// terminal alignment; the renderer must replaceTabs it before emitting.
+		const report: DoctorReport = {
+			schemaVersion: 1,
+			generatedAt: new Date().toISOString(),
+			ompVersion: "test",
+			fix: false,
+			overallStatus: "ok",
+			findings: [
+				{
+					id: "plugins.bad\tname",
+					category: "plugins",
+					status: "ok",
+					summary: "ok",
+					details: [],
+				} satisfies DoctorFinding,
+			],
+		};
+		const rendered = renderDoctorReport(report);
+		expect(rendered).not.toContain("\t");
+	});
+
+	test("a salvage swap preserves the original file mode", async () => {
+		const dbPath = getAgentDbPath(root);
+		await createDatabaseWithRows(dbPath, 500);
+		const db = new Database(dbPath);
+		db.run("DELETE FROM t");
+		db.close();
+		await corruptInteriorPages(dbPath);
+		await fs.chmod(dbPath, 0o600);
+
+		await runDoctorCommand({ flags: { agentDir: root, fix: true } });
+		// The swapped-in candidate must inherit the original 0600 mode, not the
+		// process umask default (which could be world-readable).
+		const mode = (await fs.stat(dbPath)).mode & 0o777;
+		expect(mode).toBe(0o600);
+	});
+
+	test("a successful swap cleans up the marker and does not trigger a false rollback", async () => {
+		const dbPath = getAgentDbPath(root);
+		await createDatabaseWithRows(dbPath, 500);
+		const db = new Database(dbPath);
+		db.run("DELETE FROM t");
+		db.close();
+		await corruptInteriorPages(dbPath);
+
+		await runDoctorCommand({ flags: { agentDir: root, fix: true } });
+		// The marker must be gone after a successful swap.
+		const marker = path.join(path.dirname(dbPath), ".agent.db.omp-doctor-swap.json");
+		expect(await pathExists(marker)).toBe(false);
+		// A subsequent read-only run must NOT report an interrupted swap.
+		const readOnly = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = readOnly.findings.find(entry => entry.id === "storage.agent.db");
+		expect(finding?.summary).not.toContain("interrupted swap");
+	});
+
+	test("a non-ENOENT stat error surfaces as an error finding, not silently skipped", async () => {
+		const dbPath = getHistoryDbPath(root);
+		await createDatabaseWithRows(dbPath, 10);
+		const realStat = fs.stat.bind(fs);
+		const statSpy = spyOn(fs, "stat").mockImplementation((async (target: unknown) => {
+			if (path.resolve(String(target)) === path.resolve(dbPath)) {
+				throw Object.assign(new Error("EACCES: permission denied, stat"), { code: "EACCES" });
+			}
+			return realStat(target as never);
+		}) as never);
+		try {
+			const report = await runDoctorCommand({ flags: { agentDir: root } });
+			const finding = report.findings.find(entry => entry.id === "storage.history.db");
+			// The engine marks non-ENOENT stat failures as present+openError;
+			// the collector must surface it as an error, not skip it.
+			expect(finding?.status).toBe("error");
+			expect(finding?.summary).toContain("cannot open");
+		} finally {
+			statSpy.mockRestore();
+		}
 	});
 });
