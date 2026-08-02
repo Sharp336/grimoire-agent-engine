@@ -61,4 +61,26 @@ describe("config-writer concurrent mutations", () => {
 		expect((await readMCPConfigFile(projectPath)).mcpServers?.shared?.enabled).toBe(true);
 		expect((await readMCPConfigFile(userPath)).disabledServers).toEqual(["shared"]);
 	});
+
+	it("clears a force-enable overlay when disabling a standalone definition", async () => {
+		const userPath = path.join(dir, "user", "mcp.json");
+		const projectPath = path.join(dir, "project", "mcp.json");
+		const standalonePath = path.join(dir, "standalone", "mcp.json");
+		await Bun.write(userPath, JSON.stringify({ enabledServers: ["shared"] }));
+		await Bun.write(
+			standalonePath,
+			JSON.stringify({ mcpServers: { shared: { type: "stdio", command: "standalone", enabled: true } } }),
+		);
+
+		await setMcpServerEnabled({
+			userPath,
+			projectPath,
+			sourcePath: standalonePath,
+			name: "shared",
+			enabled: false,
+		});
+
+		expect((await readMCPConfigFile(standalonePath)).mcpServers?.shared?.enabled).toBe(false);
+		expect((await readMCPConfigFile(userPath)).enabledServers).toBeUndefined();
+	});
 });

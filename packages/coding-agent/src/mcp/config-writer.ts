@@ -313,21 +313,21 @@ export async function setMcpServerEnabled(options: SetMcpServerEnabledOptions): 
 		break;
 	}
 
-	const updatedUserConfig = updatedPath === userPath;
+	const userOverlayApplies = updatedPath !== projectPath;
 	if (enabled) {
-		if ((await readDisabledServers(userPath)).includes(name) && (!updatedInConfig || updatedUserConfig)) {
+		if ((await readDisabledServers(userPath)).includes(name) && (!updatedInConfig || userOverlayApplies)) {
 			await setServerDisabled(userPath, name, false);
 		}
 		const forced = (await readEnabledServers(userPath)).includes(name);
 		if (!updatedInConfig && !forced) {
 			await setServerForceEnabled(userPath, name, true);
-		} else if (updatedUserConfig && forced) {
+		} else if (updatedInConfig && userOverlayApplies && forced) {
 			await setServerForceEnabled(userPath, name, false);
 		}
 		return;
 	}
 
-	if (updatedUserConfig && (await readEnabledServers(userPath)).includes(name)) {
+	if (updatedInConfig && userOverlayApplies && (await readEnabledServers(userPath)).includes(name)) {
 		await setServerForceEnabled(userPath, name, false);
 	}
 	if (!updatedInConfig) {
