@@ -205,6 +205,32 @@ describe("STTController preflight", () => {
 		expect(options.onStateChange).toHaveBeenLastCalledWith("idle");
 	});
 
+	it("ignores a final STT flush after cancellation", async () => {
+		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
+		vi.spyOn(downloader, "downloadSttModel").mockResolvedValue(undefined);
+		const stopped = Promise.withResolvers<string>();
+		const cancelStream = vi.fn(() => stopped.resolve(""));
+		vi.spyOn(asrClient.sttClient, "startStream").mockReturnValue({
+			pushAudio: vi.fn(),
+			stop: vi.fn(() => stopped.promise),
+			cancel: cancelStream,
+		});
+		const editor = makeEditor();
+		const options = makeOptions();
+		controller = new STTController(() => ({ stop: vi.fn() }));
+		await controller.toggle(editor, options);
+
+		const stopping = controller.toggle(editor, options);
+		expect(controller.state).toBe("transcribing");
+		controller.cancel();
+		await stopping;
+
+		expect(controller.state).toBe("idle");
+		expect(options.onStateChange).toHaveBeenCalledTimes(3);
+		expect(options.showStatus).not.toHaveBeenCalledWith("No speech detected.");
+		expect(cancelStream).toHaveBeenCalledTimes(1);
+	});
+
 	it("cancels a pending preflight before microphone capture starts", async () => {
 		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(false);
 		const download = Promise.withResolvers<void>();

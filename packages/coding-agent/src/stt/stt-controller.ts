@@ -261,6 +261,7 @@ export class STTController {
 		try {
 			finalText = (await stream.stop()).trim();
 		} catch (err) {
+			if (this.#stream !== stream) return;
 			failed = true;
 			if (!this.#disposed) {
 				const msg = err instanceof Error ? err.message : "Transcription failed";
@@ -268,6 +269,7 @@ export class STTController {
 				logger.error("STT live transcription failed", { error: msg });
 			}
 		}
+		if (this.#stream !== stream) return;
 		if (this.#disposed) {
 			this.#cleanupStream();
 			return;
