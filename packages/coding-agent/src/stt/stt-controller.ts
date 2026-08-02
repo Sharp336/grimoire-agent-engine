@@ -176,17 +176,18 @@ export class STTController {
 		this.#streamEditor = editor;
 		this.#streamCommitted = false;
 		this.#streamUtterance = "";
-		this.#streamAbort = new AbortController();
+		const streamAbort = new AbortController();
+		this.#streamAbort = streamAbort;
 		const stream = sttClient.startStream(modelKey, {
 			language: language || undefined,
-			signal: this.#streamAbort.signal,
+			signal: streamAbort.signal,
 			onPartial: text => {
-				if (this.#disposed || this.#state !== "recording") return;
+				if (this.#disposed || this.#streamAbort !== streamAbort || this.#state !== "recording") return;
 				this.#streamEditor?.setVolatileText(this.#prefixed(text));
 				options.requestRender?.();
 			},
 			onSegment: text => {
-				if (this.#disposed) return;
+				if (this.#disposed || this.#streamAbort !== streamAbort) return;
 				const prefixed = this.#prefixed(text);
 				if (prefixed) {
 					this.#streamEditor?.commitVolatileText(prefixed);

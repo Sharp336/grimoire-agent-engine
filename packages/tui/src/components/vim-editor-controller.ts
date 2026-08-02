@@ -632,6 +632,15 @@ export class VimEditorController {
 			return true;
 		}
 
+		if (char === "j" || char === "k") {
+			const lines = this.#lines();
+			const startLine = this.#cursor().line;
+			const delta = char === "j" ? count : -count;
+			const targetLine = Math.max(0, Math.min(lines.length - 1, startLine + delta));
+			this.#deleteLineRange(Math.min(startLine, targetLine), Math.max(startLine, targetLine) + 1, enterInsert);
+			return true;
+		}
+
 		const start = this.#absoluteCursor();
 		let endpoint: number | undefined;
 		switch (char) {
@@ -667,6 +676,9 @@ export class VimEditorController {
 			}
 			case "0":
 				endpoint = this.#absoluteLineStart(this.#cursor().line);
+				break;
+			case "^":
+				endpoint = this.#absoluteLineStart(this.#cursor().line) + this.#firstNonBlankCol(this.#currentLine());
 				break;
 			case "$":
 				endpoint = this.#lineEndAbsolute(Math.min(this.#lines().length - 1, this.#cursor().line + count - 1));

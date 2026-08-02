@@ -441,6 +441,23 @@ describe("Editor Vim input mode", () => {
 		expect(changed.getText()).toBe("one\ntwo\nthree");
 	});
 
+	it("applies vertical and caret motions to pending operators", () => {
+		const down = createVimEditor();
+		down.setText("one\ntwo\nthree\nfour");
+		typeText(down, "ggd2j");
+		expect(down.getText()).toBe("four");
+
+		const up = createVimEditor();
+		up.setText("one\ntwo\nthree\nfour");
+		typeText(up, "Gdk");
+		expect(up.getText()).toBe("one\ntwo");
+
+		const caret = createVimEditor();
+		caret.setText("  alpha beta");
+		typeText(caret, "0wwd^");
+		expect(caret.getText()).toBe("  beta");
+	});
+
 	it("does not wrap h and l across logical lines", () => {
 		const editor = createVimEditor();
 		editor.setText("a\nb");

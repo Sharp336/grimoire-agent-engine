@@ -205,6 +205,38 @@ describe("STTController preflight", () => {
 		expect(options.onStateChange).toHaveBeenLastCalledWith("idle");
 	});
 
+	it("ignores canceled stream callbacks after a new recording starts", async () => {
+		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
+		vi.spyOn(downloader, "downloadSttModel").mockResolvedValue(undefined);
+		let firstPartial: ((text: string) => void) | undefined;
+		let firstSegment: ((text: string, index: number) => void) | undefined;
+		let starts = 0;
+		vi.spyOn(asrClient.sttClient, "startStream").mockImplementation((_model, callbacks) => {
+			if (starts++ === 0) {
+				firstPartial = callbacks?.onPartial;
+				firstSegment = callbacks?.onSegment;
+			}
+			return {
+				pushAudio: vi.fn(),
+				stop: vi.fn().mockResolvedValue(""),
+				cancel: vi.fn(),
+			};
+		});
+		const editor = makeEditor();
+		const options = makeOptions();
+		controller = new STTController(() => ({ stop: vi.fn() }));
+		await controller.toggle(editor, options);
+		controller.cancel();
+		await controller.toggle(editor, options);
+
+		firstPartial?.("stale partial");
+		firstSegment?.("stale segment", 0);
+
+		expect(controller.state).toBe("recording");
+		expect(editor.setVolatileText).not.toHaveBeenCalled();
+		expect(editor.commitVolatileText).not.toHaveBeenCalled();
+	});
+
 	it("ignores a final STT flush after cancellation", async () => {
 		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
 		vi.spyOn(downloader, "downloadSttModel").mockResolvedValue(undefined);
