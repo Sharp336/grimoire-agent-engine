@@ -4,10 +4,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import {
+	__packageNeedsGraphHooksForTests,
 	__rewriteLegacyExtensionSourceForTests,
 	loadLegacyPiModule,
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { removeWithRetries, TempDir } from "@oh-my-pi/pi-utils";
 
 // Issue #1674: legacy Pi extensions load browser-UI assets (HTML/CSS) at module
 // init via `readFileSync(join(__dirname, "ui.html"))`. The compat layer must run
@@ -17,10 +18,14 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 // public `loadLegacyPiModule` entry point.
 
 const tempRoots: string[] = [];
+const gateTempDirs: TempDir[] = [];
 
 afterAll(async () => {
 	for (const dir of tempRoots) {
 		await removeWithRetries(dir);
+	}
+	for (const dir of gateTempDirs) {
+		await dir.remove();
 	}
 });
 
@@ -33,6 +38,18 @@ async function writePackage(files: Record<string, string>): Promise<string> {
 		await fs.writeFile(abs, files[rel], "utf8");
 	}
 	return dir;
+}
+
+/** Gate fixtures use the central TempDir helper so cleanup stays full-suite safe. */
+async function writeGatePackage(files: Record<string, string>): Promise<string> {
+	const tempDir = await TempDir.create("@omp-legacy-graph-gate-");
+	gateTempDirs.push(tempDir);
+	for (const rel in files) {
+		const abs = tempDir.join(rel);
+		await fs.mkdir(path.dirname(abs), { recursive: true });
+		await fs.writeFile(abs, files[rel], "utf8");
+	}
+	return tempDir.path();
 }
 
 describe("legacy-pi in-place module loading (issue #1674)", () => {
@@ -1252,5 +1269,79 @@ describe("legacy-pi in-place module loading (issue #1674)", () => {
 		// extension's rewrite hook; its fork-scope import stays unresolved.
 		const siblingUrl = `${url.pathToFileURL(await fs.realpath(path.join(dir, "unrelated.ts"))).href}?nonce=${Date.now()}`;
 		await expect(import(siblingUrl)).rejects.toThrow(/@earendil-works\/pi-ai/);
+	});
+});
+
+describe("third-party graph-crawl gate", () => {
+	it("skips a pure-ESM package with plain dependencies and no exports map", async () => {
+		const dir = await writeGatePackage({
+			"package.json": JSON.stringify({
+				name: "pure-esm",
+				version: "1.0.0",
+				type: "module",
+				dependencies: { "lru-cache": "^11" },
+			}),
+		});
+		expect(await __packageNeedsGraphHooksForTests(dir)).toBe(false);
+	});
+
+	it("skips an ESM package whose exports map has only import/default conditions", async () => {
+		const dir = await writeGatePackage({
+			"package.json": JSON.stringify({
+				name: "esm-exports",
+				version: "1.0.0",
+				type: "module",
+				exports: { ".": { import: "./index.js", default: "./index.js" } },
+			}),
+		});
+		expect(await __packageNeedsGraphHooksForTests(dir)).toBe(false);
+	});
+
+	it("crawls a package whose exports map nests a require condition", async () => {
+		const dir = await writeGatePackage({
+			"package.json": JSON.stringify({
+				name: "dual-format",
+				version: "1.0.0",
+				type: "module",
+				exports: { ".": { node: { require: "./index.cjs", import: "./index.js" } } },
+			}),
+		});
+		expect(await __packageNeedsGraphHooksForTests(dir)).toBe(true);
+	});
+
+	it("crawls an implicit-CommonJS package (no type field)", async () => {
+		const dir = await writeGatePackage({
+			"package.json": JSON.stringify({ name: "implicit-cjs", version: "1.0.0" }),
+		});
+		expect(await __packageNeedsGraphHooksForTests(dir)).toBe(true);
+	});
+
+	it("crawls an ESM package that depends on a host pi package", async () => {
+		const dir = await writeGatePackage({
+			"package.json": JSON.stringify({
+				name: "pi-dependent",
+				version: "1.0.0",
+				type: "module",
+				dependencies: { "@oh-my-pi/pi-ai": "*" },
+			}),
+		});
+		expect(await __packageNeedsGraphHooksForTests(dir)).toBe(true);
+	});
+
+	it("crawls an ESM package that ships a native addon build", async () => {
+		const dir = await writeGatePackage({
+			"package.json": JSON.stringify({
+				name: "native-esm",
+				version: "1.0.0",
+				type: "module",
+				gypfile: true,
+			}),
+		});
+		expect(await __packageNeedsGraphHooksForTests(dir)).toBe(true);
+	});
+
+	it("fails open when the package manifest is unreadable", async () => {
+		const dir = await writeGatePackage({ "readme.md": "no manifest here" });
+		expect(await __packageNeedsGraphHooksForTests(dir)).toBe(true);
 	});
 });
