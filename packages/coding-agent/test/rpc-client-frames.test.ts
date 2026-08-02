@@ -112,6 +112,23 @@ describe("RpcClient frame coverage", () => {
 		expect(promptResults[0]?.id).toMatch(/^req_/);
 	});
 
+	test("waitForIdle keeps a legacy prompt pending until delayed terminal agent_end", async () => {
+		using client = new RpcClient({
+			cliPath: MOCK_AGENT,
+			env: { MOCK_RPC_CLIENT_FRAMES: "1" },
+		});
+		let terminalSeen = false;
+		client.onEvent(event => {
+			if (event.type === "agent_end" && Reflect.get(event, "isTerminal") !== false) terminalSeen = true;
+		});
+
+		await client.start();
+		expect(await client.prompt("hello")).toBeUndefined();
+		await client.waitForIdle(2_000);
+
+		expect(terminalSeen).toBe(true);
+	});
+
 	test("completes local-only prompts from response data", async () => {
 		using client = new RpcClient({
 			cliPath: MOCK_AGENT,

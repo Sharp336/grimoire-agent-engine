@@ -78,7 +78,7 @@ Legacy clients may ignore the added ready fields and remain on v1. V1 retains it
 6. Host URI requests/cancellations (`host_uri_request`, `host_uri_cancel`)
 7. Extension errors (`{ type: "extension_error", extensionPath, event, error }`)
 8. Available-commands updates (`{ type: "available_commands_update", commands }`), emitted at startup and whenever command metadata changes
-9. Exactly-once operation outcomes (`operation_completed`, `operation_failed`, `operation_aborted`)
+9. Operation lifecycle frames (`operation_started`, `operation_completed`, `operation_failed`, `operation_cancelled`)
 10. Legacy prompt lifecycle hints (`{ type: "prompt_result", id?, operationId?, agentInvoked }`) for local-only prompts
 11. Subagent frames (`subagent_lifecycle`, `subagent_progress`, `subagent_event`), gated by `set_subagent_subscription`
 12. Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
@@ -100,24 +100,20 @@ All commands accept optional `id?: string`.
 Important edge behavior from runtime:
 
 - Unknown command responses are emitted with `id: undefined` (even if the request had an `id`).
-- Malformed JSON and synchronous dispatch failures emit `command: "parse"` with `id: undefined`. Exceptions while handling a recognized command emit a failure with that command's `type` and `id`.
-- `prompt` and `abort_and_prompt` return immediate success, then may emit a later error response with the **same** id if async prompt scheduling fails.
-- `prompt` success responses may include `data.agentInvoked`. `false` means the prompt completed locally without an agent turn; `true` means the prompt produced agent lifecycle events; omitted means the host must rely on session events for completion.
-- `abort_and_prompt` does not currently emit `data.agentInvoked` or `prompt_result`; hosts should treat it as the legacy abort-then-schedule path and rely on session events or same-id scheduling errors.
-- Runtime validation rejects unknown commands and malformed fields before a
-  handler runs. Error responses preserve a valid request `id` and use
-  `code: "unsupported_command"` or `code: "invalid_request"`.
-- Each command has an advertised scheduling class. `serial` commands preserve
-  input order, `concurrent` commands run independently, and `control` commands
-  can overtake blocked serial work so abort and steering remain responsive.
-- Accepted `prompt` and `abort_and_prompt` responses carry
-  `data.operationId`. The request `id` acknowledges transport acceptance; the
-  operation ID correlates the eventual semantic result.
-- Every accepted operation emits exactly one `operation_completed`,
-  `operation_failed`, or `operation_aborted` frame. A scheduling failure is
-  never emitted as a second response with the already-consumed request ID.
+- Parse/handler exceptions in the input loop emit `command: "parse"` with `id: undefined`.
+- `prompt` and `abort_and_prompt` synchronously acknowledge accepted work with
+  server-generated `data.operationId` and `data.accepted: true`.
+- The request `id`, operation ID, and any session turn ID are distinct
+  identities and are never derived from one another.
+- `operation_started` is emitted only when accepted work actually begins.
+- Every accepted operation emits exactly one terminal `operation_completed`,
+  `operation_failed`, or `operation_cancelled` frame. Post-accept scheduling
+  failures are terminal operation frames, not a second response using the
+  already-consumed request ID.
 - `agent_end` remains a streaming session event. It is not the operation
   completion primitive, and `agent_end.isTerminal: false` never settles a wait.
+- Unknown command responses and parse/handler exceptions retain their legacy
+  correlation behavior described above.
 
 ## Command Schema (canonical)
 
@@ -130,6 +126,7 @@ Important edge behavior from runtime:
 - `{ id?, type: "follow_up", message: string, images?: ImageContent[] }`
 - `{ id?, type: "abort" }`
 - `{ id?, type: "abort_and_prompt", message: string, images?: ImageContent[] }`
+- `{ id?, type: "cancel_operation", operationId: string }`
 - `{ id?, type: "new_session", parentSession?: string }`
 
 ### Protocol
@@ -138,6 +135,7 @@ Important edge behavior from runtime:
 
 ### State
 
+- `{ id?, type: "get_operations" }`
 - `{ id?, type: "get_state" }`
 - `{ id?, type: "set_fast_mode", enabled: boolean }`
 - `{ id?, type: "get_available_commands" }`
@@ -233,12 +231,18 @@ Data payloads are command-specific and defined in `rpc-types.ts`.
   "success": true,
   "data": {
     "operationId": "op_123",
-    "agentInvoked": false
+    "accepted": true
   }
 }
 ```
 
 The acknowledgement is followed by exactly one correlated terminal frame:
+
+Work beginning is a separate event:
+
+```json
+{ "type": "operation_started", "operationId": "op_123", "requestId": "req_1", "command": "prompt", "startedAt": 1785661200000 }
+```
 
 ```json
 {
@@ -246,21 +250,24 @@ The acknowledgement is followed by exactly one correlated terminal frame:
   "operationId": "op_123",
   "requestId": "req_1",
   "command": "prompt",
-  "agentInvoked": false
+  "agentInvoked": false,
+  "settledAt": 1785661200100
 }
 ```
 
 Failures and cancellation use the same correlation key:
 
 ```json
-{ "type": "operation_failed", "operationId": "op_123", "requestId": "req_1", "command": "prompt", "error": "No model configured", "code": "prompt_scheduling_failed" }
-{ "type": "operation_aborted", "operationId": "op_123", "requestId": "req_1", "command": "prompt", "reason": "user" }
+{ "type": "operation_failed", "operationId": "op_123", "requestId": "req_1", "command": "prompt", "error": "No model configured", "code": "prompt_scheduling_failed", "settledAt": 1785661200100 }
+{ "type": "operation_cancelled", "operationId": "op_123", "requestId": "req_1", "command": "prompt", "reason": "user", "code": "cancelled_by_client", "settledAt": 1785661200100 }
 ```
 
 Local-only slash commands may emit `command_output` and the legacy
 `prompt_result` hint before their operation completes; they do not need to emit
-`agent_end`. Older servers may omit `operationId`, in which case current clients
-fall back to the legacy terminal `agent_end`/`prompt_result` behavior.
+`agent_end`. `cancel_operation` is target-specific and idempotently returns the
+authoritative terminal outcome. `get_operations` returns live accepted/started
+operations plus up to 128 recent terminal outcomes retained for five minutes,
+allowing a client that missed frames to reconcile.
 
 ### `get_state` payload
 
@@ -578,14 +585,14 @@ Once `prompt` or `abort_and_prompt` accepts asynchronous work, its single
 response carries an operation ID:
 
 ```json
-{ "id": "req_1", "type": "response", "command": "prompt", "success": true, "data": { "operationId": "op_123" } }
+{ "id": "req_1", "type": "response", "command": "prompt", "success": true, "data": { "operationId": "op_123", "accepted": true } }
 ```
 
 That means:
 
 - command acceptance != run completion
 - all accepted prompt-like operations settle through one correlated
-  `operation_completed`, `operation_failed`, or `operation_aborted`
+  `operation_completed`, `operation_failed`, or `operation_cancelled`
 - `agent_end` continues to describe the session stream but does not settle an
   operation by itself
 

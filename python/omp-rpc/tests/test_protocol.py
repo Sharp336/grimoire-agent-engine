@@ -7,9 +7,10 @@ from omp_rpc import (
     AutoCompactionEndEvent,
     AutoCompactionStartEvent,
     ExtensionUiRequest,
-    OperationAbortedEvent,
+    OperationCancelledEvent,
     OperationCompletedEvent,
     OperationFailedEvent,
+    OperationStartedEvent,
     SessionState,
     TodoReminderEvent,
     assistant_text,
@@ -20,7 +21,17 @@ from omp_rpc import (
 
 
 class ProtocolParsingTests(unittest.TestCase):
-    def test_parse_operation_terminal_notifications(self) -> None:
+    def test_parse_operation_lifecycle_notifications(self) -> None:
+        started = parse_notification(
+            {
+                "type": "operation_started",
+                "operationId": "operation-1",
+                "requestId": "request-1",
+                "command": "prompt",
+                "startedAt": 10,
+                "futureField": True,
+            }
+        )
         completed = parse_notification(
             {
                 "type": "operation_completed",
@@ -28,6 +39,7 @@ class ProtocolParsingTests(unittest.TestCase):
                 "requestId": "request-1",
                 "command": "prompt",
                 "agentInvoked": True,
+                "settledAt": 11,
             }
         )
         failed = parse_notification(
@@ -37,24 +49,29 @@ class ProtocolParsingTests(unittest.TestCase):
                 "command": "prompt",
                 "error": "no model",
                 "code": "prompt_scheduling_failed",
+                "settledAt": 12,
             }
         )
-        aborted = parse_notification(
+        cancelled = parse_notification(
             {
-                "type": "operation_aborted",
+                "type": "operation_cancelled",
                 "operationId": "operation-3",
                 "command": "abort_and_prompt",
                 "reason": "user",
+                "code": "cancelled_by_client",
+                "settledAt": 13,
             }
         )
 
+        self.assertIsInstance(started, OperationStartedEvent)
         self.assertIsInstance(completed, OperationCompletedEvent)
         self.assertTrue(completed.agent_invoked)
         self.assertEqual(completed.request_id, "request-1")
         self.assertIsInstance(failed, OperationFailedEvent)
         self.assertEqual(failed.code, "prompt_scheduling_failed")
-        self.assertIsInstance(aborted, OperationAbortedEvent)
-        self.assertEqual(aborted.reason, "user")
+        self.assertIsInstance(cancelled, OperationCancelledEvent)
+        self.assertEqual(cancelled.reason, "user")
+
     def test_parse_session_state(self) -> None:
         state = parse_session_state(
             {

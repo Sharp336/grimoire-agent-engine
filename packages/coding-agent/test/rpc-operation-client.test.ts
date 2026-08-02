@@ -52,16 +52,46 @@ describe("RpcClient operation lifecycle", () => {
 		expect(Reflect.get(events[1] ?? {}, "isTerminal")).toBe(false);
 	});
 
-	test("surfaces operation failures instead of relying on a late response", async () => {
+	test("keeps post-accept failures observable without changing promptAndWait returns", async () => {
 		const client = await startClient();
+		const terminal: RpcOperationTerminalFrame[] = [];
+		client.onOperationTerminal(frame => terminal.push(frame));
 
-		await expect(client.promptAndWait("fail", undefined, 1_000)).rejects.toEqual(
+		expect(await client.promptAndWait("fail", undefined, 1_000)).toEqual([]);
+		expect(terminal).toEqual([
 			expect.objectContaining({
-				name: "RpcCommandError",
-				message: "fixture scheduling failure",
-				command: "prompt",
+				type: "operation_failed",
+				error: "fixture scheduling failure",
 				code: "prompt_scheduling_failed",
 			}),
-		);
+		]);
+	});
+
+	test("observes acceptance before started and terminal frames", async () => {
+		const client = await startClient();
+		const order: string[] = [];
+		client.onOperationStarted(() => order.push("started"));
+		client.onOperationTerminal(() => order.push("terminal"));
+
+		const accepted = await client.prompt("local");
+		order.unshift(accepted?.accepted ? "accepted" : "missing");
+		await client.waitForIdle(1_000);
+
+		expect(order).toEqual(["accepted", "started", "terminal"]);
+	});
+
+	test("cancels only the target idempotently and reconciles snapshots", async () => {
+		const client = await startClient();
+		const accepted = await client.prompt("hold");
+		expect(accepted?.operationId).toBeString();
+		const operationId = accepted!.operationId;
+
+		const first = await client.cancelOperation(operationId);
+		const second = await client.cancelOperation(operationId);
+		expect(first).toEqual(second);
+		expect(first.status).toBe("cancelled");
+		const snapshot = await client.getOperations();
+		expect(snapshot.active).toEqual([]);
+		expect(snapshot.recent).toEqual([expect.objectContaining({ operationId, type: "operation_cancelled" })]);
 	});
 });

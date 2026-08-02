@@ -36,6 +36,7 @@ describe("reportLocalOnlyPromptResult", () => {
 		const manager = new RpcOperationManager(
 			frame => output.push(frame),
 			() => "operation-1",
+			() => 100,
 		);
 		const operation = manager.start("req_1", "prompt");
 		const prompt = Promise.resolve(false);
@@ -60,6 +61,7 @@ describe("reportLocalOnlyPromptResult", () => {
 				requestId: "req_1",
 				command: "prompt",
 				agentInvoked: false,
+				settledAt: 100,
 			},
 		]);
 	});
@@ -69,6 +71,7 @@ describe("reportLocalOnlyPromptResult", () => {
 		const manager = new RpcOperationManager(
 			frame => output.push(frame),
 			() => "operation-2",
+			() => 100,
 		);
 		const operation = manager.start("req_2", "prompt");
 		const prompt = Promise.reject(new Error("no model"));
@@ -91,6 +94,7 @@ describe("reportLocalOnlyPromptResult", () => {
 				command: "prompt",
 				error: "no model",
 				code: "prompt_scheduling_failed",
+				settledAt: 100,
 			},
 		]);
 	});

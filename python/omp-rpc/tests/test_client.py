@@ -21,6 +21,7 @@ from omp_rpc import (
     host_tool,
 )
 from omp_rpc.client import _RpcFrameDecoder
+from omp_rpc.protocol import JsonObject, JsonValue
 
 FAKE_SERVER = textwrap.dedent(
     """
@@ -880,8 +881,78 @@ OPERATION_SERVER = textwrap.dedent(
 
     print(json.dumps({"type": "ready"}), flush=True)
     sequence = 0
+    active = {}
+    recent = {}
     for raw_line in sys.stdin:
         command = json.loads(raw_line)
+        if command["type"] == "cancel_operation":
+            operation_id = command["operationId"]
+            terminal = recent.get(operation_id)
+            if operation_id in active:
+                request_id = active.pop(operation_id)
+                terminal = {
+                    "type": "operation_cancelled",
+                    "operationId": operation_id,
+                    "requestId": request_id,
+                    "command": "prompt",
+                    "reason": "user",
+                    "code": "cancelled_by_client",
+                    "settledAt": sequence + 0.5,
+                }
+                recent[operation_id] = terminal
+                print(json.dumps(terminal), flush=True)
+            status = (
+                "not_found"
+                if terminal is None
+                else "cancelled"
+                if terminal["type"] == "operation_cancelled"
+                else "completed"
+                if terminal["type"] == "operation_completed"
+                else "failed"
+            )
+            data = {"operationId": operation_id, "status": status}
+            if terminal is not None:
+                data["terminal"] = terminal
+            print(
+                json.dumps(
+                    {
+                        "id": command.get("id"),
+                        "type": "response",
+                        "command": "cancel_operation",
+                        "success": True,
+                        "data": data,
+                    }
+                ),
+                flush=True,
+            )
+            continue
+        if command["type"] == "get_operations":
+            print(
+                json.dumps(
+                    {
+                        "id": command.get("id"),
+                        "type": "response",
+                        "command": "get_operations",
+                        "success": True,
+                        "data": {
+                            "active": [
+                                {
+                                    "operationId": operation_id,
+                                    "requestId": request_id,
+                                    "command": "prompt",
+                                    "status": "started",
+                                    "acceptedAt": 1,
+                                    "startedAt": 2,
+                                }
+                                for operation_id, request_id in active.items()
+                            ],
+                            "recent": list(recent.values()),
+                        },
+                    }
+                ),
+                flush=True,
+            )
+            continue
         if command["type"] != "prompt":
             continue
         sequence += 1
@@ -894,11 +965,26 @@ OPERATION_SERVER = textwrap.dedent(
                     "type": "response",
                     "command": "prompt",
                     "success": True,
-                    "data": {"operationId": operation_id},
+                    "data": {"operationId": operation_id, "accepted": True},
                 }
             ),
             flush=True,
         )
+        print(
+            json.dumps(
+                {
+                    "type": "operation_started",
+                    "operationId": operation_id,
+                    "requestId": request_id,
+                    "command": "prompt",
+                    "startedAt": sequence,
+                }
+            ),
+            flush=True,
+        )
+        active[operation_id] = request_id
+        if command["message"] == "hold":
+            continue
         if command["message"] == "local":
             terminal = {
                 "type": "operation_completed",
@@ -906,6 +992,7 @@ OPERATION_SERVER = textwrap.dedent(
                 "requestId": request_id,
                 "command": "prompt",
                 "agentInvoked": False,
+                "settledAt": sequence + 0.5,
             }
         elif command["message"] == "fail":
             terminal = {
@@ -915,6 +1002,7 @@ OPERATION_SERVER = textwrap.dedent(
                 "command": "prompt",
                 "error": "fixture scheduling failure",
                 "code": "prompt_scheduling_failed",
+                "settledAt": sequence + 0.5,
             }
         else:
             print(json.dumps({"type": "agent_start"}), flush=True)
@@ -936,7 +1024,10 @@ OPERATION_SERVER = textwrap.dedent(
                 "requestId": request_id,
                 "command": "prompt",
                 "agentInvoked": True,
+                "settledAt": sequence + 0.5,
             }
+        active.pop(operation_id, None)
+        recent[operation_id] = terminal
         print(json.dumps(terminal), flush=True)
     """
 )
@@ -1062,22 +1153,57 @@ class RpcClientTests(unittest.TestCase):
         )
         self.assertEqual(terminal_types, ["operation_completed", "operation_completed"])
 
-    def test_prompt_operation_failure_is_correlated(self) -> None:
-        with (
-            self.make_client(OPERATION_SERVER) as client,
-            self.assertRaisesRegex(
-                RpcCommandError, "prompt: fixture scheduling failure"
-            ) as raised,
-        ):
-            client.prompt_and_wait("fail", timeout=2.0)
+    def test_prompt_operation_failure_is_correlated_without_changing_return(
+        self,
+    ) -> None:
+        terminal_types: list[str] = []
+        with self.make_client(OPERATION_SERVER) as client:
+            client.on_operation_terminal(
+                lambda event: terminal_types.append(event.type)
+            )
+            turn = client.prompt_and_wait("fail", timeout=2.0)
 
-        self.assertEqual(raised.exception.code, "prompt_scheduling_failed")
+        self.assertEqual(turn.events, ())
+        self.assertEqual(terminal_types, ["operation_failed"])
 
     def test_wait_for_idle_tracks_local_prompt_operation(self) -> None:
         with self.make_client(OPERATION_SERVER) as client:
             operation_id = client.prompt("local")
             self.assertIsNotNone(operation_id)
             client.wait_for_idle(timeout=2.0)
+
+    def test_snapshot_operation_terminals_share_live_history_bound(self) -> None:
+        class SnapshotClient(RpcClient):
+            def _request(self, command_type: str, **payload: JsonValue) -> JsonObject:
+                self.assert_request(command_type, payload)
+                return {
+                    "active": [],
+                    "recent": [
+                        {
+                            "type": "operation_completed",
+                            "operationId": f"snapshot-{index}",
+                            "command": "prompt",
+                            "agentInvoked": False,
+                            "settledAt": index,
+                        }
+                        for index in range(140)
+                    ],
+                }
+
+            @staticmethod
+            def assert_request(
+                command_type: str, payload: dict[str, JsonValue]
+            ) -> None:
+                if command_type != "get_operations" or payload:
+                    raise AssertionError("unexpected snapshot request")
+
+        client = SnapshotClient()
+        snapshot = client.get_operations()
+
+        self.assertEqual(len(snapshot.recent), 140)
+        self.assertEqual(len(client._operation_results), 128)
+        self.assertNotIn("snapshot-0", client._operation_results)
+        self.assertIn("snapshot-139", client._operation_results)
 
     def test_prompt_and_wait_returns_assistant_text(self) -> None:
         with self.make_client() as client:
@@ -1454,9 +1580,7 @@ class RpcClientTests(unittest.TestCase):
             client.on_unknown_notification(
                 lambda event: unknown_errors.append(event.parse_error)
             )
-            with self.assertRaisesRegex(
-                RpcError, "Failed to parse terminal agent_end"
-            ):
+            with self.assertRaisesRegex(RpcError, "Failed to parse terminal agent_end"):
                 client.prompt_and_wait("malformed terminal", timeout=1.0)
 
         self.assertEqual(len(unknown_errors), 1)

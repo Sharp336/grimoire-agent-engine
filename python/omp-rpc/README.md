@@ -219,9 +219,13 @@ allows:
 
 - id-less `parse` and unknown-command failures are correlated back to the
   waiting request when they can be matched unambiguously
-- accepted `prompt` / `abort_and_prompt` calls return an operation ID, and
-  `prompt_and_wait()` settles on the correlated completed, failed, or aborted
-  operation instead of guessing from `agent_end`
+- accepted `prompt` / `abort_and_prompt` calls return a server-generated
+  operation ID; `operation_started` marks actual execution and exactly one
+  completed, failed, or cancelled event settles the operation
+- `cancel_operation(operation_id)` is target-specific and idempotent, while
+  `get_operations()` reconciles live work with the bounded recent outcome set
+- `prompt_and_wait()` preserves its legacy `PromptTurn` return behavior while
+  using correlated operation settlement rather than guessing from `agent_end`
 - unmatched background error responses are exposed through
   `client.protocol_errors` and `client.on_protocol_error(...)`
 - listener exceptions no longer kill the stdout reader thread; they are exposed

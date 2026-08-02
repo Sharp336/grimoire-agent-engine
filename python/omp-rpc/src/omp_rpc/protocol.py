@@ -4,7 +4,7 @@ import base64
 import mimetypes
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Final, Literal, NotRequired, TypedDict, TypeAlias, cast
+from typing import Any, Final, Literal, NotRequired, TypeAlias, TypedDict, cast
 
 JsonPrimitive: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonPrimitive | list["JsonValue"] | dict[str, "JsonValue"]
@@ -19,6 +19,15 @@ StreamingBehavior: TypeAlias = Literal["steer", "followUp"]
 SteeringMode: TypeAlias = Literal["all", "one-at-a-time"]
 InterruptMode: TypeAlias = Literal["immediate", "wait"]
 RpcOperationCommand: TypeAlias = Literal["prompt", "abort_and_prompt"]
+RpcOperationCancellationReason: TypeAlias = Literal[
+    "user", "replaced", "session_transition", "client_disconnected"
+]
+RpcOperationCancellationCode: TypeAlias = Literal[
+    "cancelled_by_client",
+    "replaced_by_prompt",
+    "session_changed",
+    "client_disconnected",
+]
 StopReason: TypeAlias = Literal["stop", "length", "toolUse", "error", "aborted"]
 NotifyType: TypeAlias = Literal["info", "warning", "error"]
 WidgetPlacement: TypeAlias = Literal["aboveEditor", "belowEditor"]
@@ -911,10 +920,20 @@ class ReadyEvent:
 
 
 @dataclass(slots=True, frozen=True)
+class OperationStartedEvent:
+    operation_id: str
+    command: RpcOperationCommand
+    started_at: float
+    request_id: str | None = None
+    type: Literal["operation_started"] = "operation_started"
+
+
+@dataclass(slots=True, frozen=True)
 class OperationCompletedEvent:
     operation_id: str
     command: RpcOperationCommand
     agent_invoked: bool
+    settled_at: float
     request_id: str | None = None
     type: Literal["operation_completed"] = "operation_completed"
 
@@ -924,23 +943,50 @@ class OperationFailedEvent:
     operation_id: str
     command: RpcOperationCommand
     error: str
+    settled_at: float
     request_id: str | None = None
     code: str | None = None
     type: Literal["operation_failed"] = "operation_failed"
 
 
 @dataclass(slots=True, frozen=True)
-class OperationAbortedEvent:
+class OperationCancelledEvent:
     operation_id: str
     command: RpcOperationCommand
-    reason: str
+    reason: RpcOperationCancellationReason
+    code: RpcOperationCancellationCode
+    settled_at: float
     request_id: str | None = None
-    type: Literal["operation_aborted"] = "operation_aborted"
+    type: Literal["operation_cancelled"] = "operation_cancelled"
 
 
-RpcOperationEvent: TypeAlias = (
-    OperationCompletedEvent | OperationFailedEvent | OperationAbortedEvent
+RpcOperationTerminalEvent: TypeAlias = (
+    OperationCompletedEvent | OperationFailedEvent | OperationCancelledEvent
 )
+RpcOperationEvent: TypeAlias = OperationStartedEvent | RpcOperationTerminalEvent
+
+
+@dataclass(slots=True, frozen=True)
+class ActiveOperation:
+    operation_id: str
+    command: RpcOperationCommand
+    status: Literal["accepted", "started"]
+    accepted_at: float
+    request_id: str | None = None
+    started_at: float | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class OperationsSnapshot:
+    active: tuple[ActiveOperation, ...]
+    recent: tuple[RpcOperationTerminalEvent, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class CancelOperationResult:
+    operation_id: str
+    status: Literal["cancelled", "completed", "failed", "not_found"]
+    terminal: RpcOperationTerminalEvent | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -1643,9 +1689,10 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
     if event_type == "extension_error":
         return parse_extension_error(payload)
     if event_type in {
+        "operation_started",
         "operation_completed",
         "operation_failed",
-        "operation_aborted",
+        "operation_cancelled",
     }:
         operation_id = _require_str(payload, "operationId")
         command = cast(
@@ -1657,6 +1704,19 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
             ),
         )
         request_id = _optional_str(payload, "requestId")
+        if event_type == "operation_started":
+            started_at = _optional_float(payload, "startedAt")
+            if started_at is None:
+                raise ValueError("operation_started.startedAt must be a number")
+            return OperationStartedEvent(
+                operation_id=operation_id,
+                request_id=request_id,
+                command=command,
+                started_at=started_at,
+            )
+        settled_at = _optional_float(payload, "settledAt")
+        if settled_at is None:
+            raise ValueError(f"{event_type}.settledAt must be a number")
         if event_type == "operation_completed":
             agent_invoked = _optional_bool(payload, "agentInvoked")
             if agent_invoked is None:
@@ -1666,6 +1726,7 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
                 request_id=request_id,
                 command=command,
                 agent_invoked=agent_invoked,
+                settled_at=settled_at,
             )
         if event_type == "operation_failed":
             return OperationFailedEvent(
@@ -1674,12 +1735,43 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
                 command=command,
                 error=_require_str(payload, "error"),
                 code=_optional_str(payload, "code"),
+                settled_at=settled_at,
             )
-        return OperationAbortedEvent(
+        return OperationCancelledEvent(
             operation_id=operation_id,
             request_id=request_id,
             command=command,
-            reason=_require_str(payload, "reason"),
+            reason=cast(
+                RpcOperationCancellationReason,
+                _require_literal(
+                    payload.get("reason"),
+                    frozenset(
+                        {
+                            "user",
+                            "replaced",
+                            "session_transition",
+                            "client_disconnected",
+                        }
+                    ),
+                    field="operation_cancelled.reason",
+                ),
+            ),
+            code=cast(
+                RpcOperationCancellationCode,
+                _require_literal(
+                    payload.get("code"),
+                    frozenset(
+                        {
+                            "cancelled_by_client",
+                            "replaced_by_prompt",
+                            "session_changed",
+                            "client_disconnected",
+                        }
+                    ),
+                    field="operation_cancelled.code",
+                ),
+            ),
+            settled_at=settled_at,
         )
     if event_type == "agent_start":
         return AgentStartEvent()
