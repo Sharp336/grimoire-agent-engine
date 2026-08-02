@@ -460,9 +460,28 @@ describe("InputController keybinding setup", () => {
 	});
 
 	it.each([
-		{ name: "clears pending Vim state in normal mode", mode: "normal" as const, clearCalls: 1, prepareCalls: 0 },
-		{ name: "prepares Vim insert undo", mode: "insert" as const, clearCalls: 0, prepareCalls: 1 },
-	])("$name before tracking an enhanced image paste", async ({ mode, clearCalls, prepareCalls }) => {
+		{
+			name: "drops the paste and clears pending Vim state in normal mode",
+			mode: "normal" as const,
+			trackCalls: 0,
+			clearCalls: 1,
+			prepareCalls: 0,
+		},
+		{
+			name: "prepares Vim insert undo",
+			mode: "insert" as const,
+			trackCalls: 1,
+			clearCalls: 0,
+			prepareCalls: 1,
+		},
+		{
+			name: "tracks the paste in default input mode",
+			mode: undefined,
+			trackCalls: 1,
+			clearCalls: 0,
+			prepareCalls: 0,
+		},
+	])("$name for an enhanced image paste", async ({ mode, trackCalls, clearCalls, prepareCalls }) => {
 		await Settings.init({ inMemory: true });
 		try {
 			const { InputController, ctx, spies } = await createContext();
@@ -484,7 +503,7 @@ describe("InputController keybinding setup", () => {
 			);
 			dispatchInput(listeners, packet("type=read:status=DONE"));
 
-			expect(spies.trackAsyncPaste).toHaveBeenCalledTimes(1);
+			expect(spies.trackAsyncPaste).toHaveBeenCalledTimes(trackCalls);
 			expect(spies.clearVimPendingCommand).toHaveBeenCalledTimes(clearCalls);
 			expect(spies.prepareVimInsertMutation).toHaveBeenCalledTimes(prepareCalls);
 			await spies.trackAsyncPaste.mock.calls[0]?.[0];

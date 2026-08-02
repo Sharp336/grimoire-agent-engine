@@ -587,7 +587,10 @@ export class InputController {
 			},
 			pasteImage: image => {
 				const vimMode = this.ctx.editor.getVimMode();
-				if (vimMode !== "insert") this.ctx.editor.clearVimPendingCommand();
+				if (vimMode !== undefined && vimMode !== "insert") {
+					this.ctx.editor.clearVimPendingCommand();
+					return;
+				}
 				// Images can only land in the main editor — when a modal Input is
 				// focused, refuse rather than dump the binary blob in a hidden buffer.
 				const focused = this.ctx.ui.getFocused();
