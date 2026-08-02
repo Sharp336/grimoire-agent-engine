@@ -42,7 +42,27 @@ describe("resolveStdioSpawnCommand", () => {
 	it("does not report an unresolved Windows executable as found", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-stdio-resolve-"));
 		try {
-			await expect(resolveStdioCommandPath("missing.exe", root, { PATH: root }, "win32")).resolves.toBeNull();
+			await expect(resolveStdioCommandPath("missing.exe", root, { PATH: root }, "win32")).resolves.toEqual({
+				kind: "command-not-found",
+			});
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects a missing or non-directory working directory", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-stdio-cwd-"));
+		try {
+			const file = path.join(root, "file");
+			await fs.writeFile(file, "");
+			await expect(
+				resolveStdioCommandPath(process.execPath, path.join(root, "missing"), {}, "linux"),
+			).resolves.toEqual({
+				kind: "cwd-unusable",
+			});
+			await expect(resolveStdioCommandPath(process.execPath, file, {}, "linux")).resolves.toEqual({
+				kind: "cwd-unusable",
+			});
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });
 		}

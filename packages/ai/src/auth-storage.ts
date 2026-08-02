@@ -6633,12 +6633,32 @@ function serializeCredential(provider: string, credential: AuthCredential): Seri
 }
 
 /**
+ * True when `data` has the OAuth fields runtime deserialization requires:
+ * non-empty string `access`, string `refresh` (empty allowed — some providers
+ * mint access-only grants; broker snapshots use {@link REMOTE_REFRESH_SENTINEL}),
+ * and finite numeric `expires` (including `0` force-refresh and long-lived
+ * finite values such as `Number.MAX_SAFE_INTEGER`). Shared by
+ * {@link validateCredentialPayload} and {@link deserializeCredential} so doctor
+ * and the production store cannot drift.
+ */
+function isStoredOAuthPayload(data: Record<string, unknown>): boolean {
+	return (
+		typeof data.access === "string" &&
+		data.access.length > 0 &&
+		typeof data.refresh === "string" &&
+		typeof data.expires === "number" &&
+		Number.isFinite(data.expires)
+	);
+}
+
+/**
  * Validate a stored credential payload's shape without returning secret
  * material. Mirrors the acceptance logic of {@link deserializeCredential} so
  * `omp doctor` can detect malformed rows (e.g. `api_key` with `{}` payload,
- * missing `data.key`) the production store would silently reject. Returns
- * `true` when the payload is well-formed for its `credential_type`, `false`
- * otherwise — never throws, never exposes the key or token bytes.
+ * missing `data.key`, OAuth with non-string `access`) the production store
+ * would silently reject. Returns `true` when the payload is well-formed for
+ * its `credential_type`, `false` otherwise — never throws, never exposes the
+ * key or token bytes.
  */
 export function validateCredentialPayload(credentialType: string, data: string): boolean {
 	let parsed: unknown;
@@ -6654,10 +6674,7 @@ export function validateCredentialPayload(credentialType: string, data: string):
 		return typeof (parsed as Record<string, unknown>).key === "string";
 	}
 	if (credentialType === "oauth") {
-		// deserializeCredential accepts any object for oauth; the refresh/access
-		// fields are validated lazily by the refresh path. A non-empty object is
-		// the minimum shape the store requires to not return null.
-		return true;
+		return isStoredOAuthPayload(parsed as Record<string, unknown>);
 	}
 	return false;
 }
@@ -6701,7 +6718,9 @@ function deserializeCredential(row: AuthRow): AuthCredential | null {
 		}
 	}
 	if (row.credential_type === "oauth") {
-		return { type: "oauth", ...(parsed as Record<string, unknown>) } as AuthCredential;
+		const data = parsed as Record<string, unknown>;
+		if (!isStoredOAuthPayload(data)) return null;
+		return { type: "oauth", ...data } as AuthCredential;
 	}
 	return null;
 }

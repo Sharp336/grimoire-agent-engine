@@ -9,6 +9,8 @@ import {
 	probeDatabase,
 	recoverInterruptedSwap,
 	repairDatabase,
+	resolveDoctorDatabases,
+	scanAutoresearchDatabases,
 } from "@oh-my-pi/pi-coding-agent/cli/doctor-sqlite";
 import * as piUtils from "@oh-my-pi/pi-utils";
 
@@ -619,5 +621,41 @@ describe("regenerable quarantine backups", () => {
 		expect(repair.error).toContain("backup failed");
 		expect(repair.error).toContain("ENOSPC");
 		expect(await fs.readFile(dbPath, "utf8")).toBe(original);
+	});
+});
+
+describe("autoresearch directory scan", () => {
+	test("missing state directory is not an error", async () => {
+		const missing = path.join(root, "missing-autoresearch");
+		spies.push(spyOn(piUtils, "getAutoresearchDir").mockReturnValue(missing));
+		const scan = scanAutoresearchDatabases();
+		expect(scan.names).toEqual([]);
+		expect(scan.error).toBeNull();
+	});
+
+	test("non-ENOENT scan failure returns an error string", async () => {
+		// Point the state dir at a regular file so Bun.Glob.scanSync fails with ENOTDIR.
+		const notADir = path.join(root, "autoresearch-file");
+		await fs.writeFile(notADir, "x");
+		spies.push(spyOn(piUtils, "getAutoresearchDir").mockReturnValue(notADir));
+		const scan = scanAutoresearchDatabases();
+		expect(scan.names).toEqual([]);
+		expect(scan.error).toMatch(/ENOTDIR|EACCES/);
+	});
+
+	test("resolveDoctorDatabases surfaces scan errors alongside other databases", async () => {
+		const notADir = path.join(root, "autoresearch-file");
+		await fs.writeFile(notADir, "x");
+		spies.push(spyOn(piUtils, "getAutoresearchDir").mockReturnValue(notADir));
+		spies.push(spyOn(piUtils, "getStatsDbPath").mockReturnValue(path.join(root, "stats.db")));
+		spies.push(spyOn(piUtils, "getAutoQaDbPath").mockReturnValue(path.join(root, "autoqa.db")));
+		spies.push(spyOn(piUtils, "getGithubCacheDbPath").mockReturnValue(path.join(root, "github-cache.db")));
+
+		const resolved = resolveDoctorDatabases(root, false);
+		expect(resolved.discoveryErrors).toHaveLength(1);
+		expect(resolved.discoveryErrors[0]?.label).toBe("autoresearch");
+		expect(resolved.discoveryErrors[0]?.message).toMatch(/ENOTDIR|EACCES/);
+		expect(resolved.databases.some(db => db.label === "history.db")).toBe(true);
+		expect(resolved.databases.some(db => db.label.startsWith("autoresearch/"))).toBe(false);
 	});
 });

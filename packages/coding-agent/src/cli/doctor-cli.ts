@@ -26,6 +26,7 @@ import {
 	isEnoent,
 	MAIN_CONFIG_FILENAMES,
 	parseFrontmatter,
+	sanitizeText,
 	tryParseJson,
 	VERSION,
 } from "@oh-my-pi/pi-utils";
@@ -1100,9 +1101,19 @@ async function collectQuarantinedConfigs(agentDir: string): Promise<DoctorFindin
 }
 
 async function collectStorageFindings(flags: DoctorCommandFlags): Promise<DoctorFinding[]> {
-	const databases = resolveDoctorDatabases(flags.agentDir, flags.agentDir !== undefined);
+	const { databases, discoveryErrors } = resolveDoctorDatabases(flags.agentDir, flags.agentDir !== undefined);
 	const collect = async (): Promise<DoctorFinding[]> => {
 		const findings: DoctorFinding[] = [];
+		for (const discovery of discoveryErrors) {
+			findings.push({
+				id: `storage.${discovery.label}`,
+				category: "storage",
+				status: "error",
+				summary: `${discovery.label}: cannot scan state directory`,
+				details: [discovery.message],
+				remedy: "Check permissions on the autoresearch state directory and re-run `omp doctor`",
+			});
+		}
 		// Sequential probes: parallel opens of sibling databases multiply lock pressure for no real gain.
 		for (const db of databases) {
 			const swap = await recoverInterruptedSwap(db, flags.fix === true);
@@ -1419,7 +1430,7 @@ function validateMcpFieldShapes(name: string, server: MCPServer, raw: unknown): 
  * cwd default and merged environment as `StdioTransport.connect()`, so doctor
  * never drifts from the transport's resolution semantics.
  */
-async function resolveStdioCommand(command: string, config: MCPServerConfig): Promise<string | null> {
+async function resolveStdioCommand(command: string, config: MCPServerConfig) {
 	const cwd = "cwd" in config && typeof config.cwd === "string" ? config.cwd : getProjectDir();
 	const configEnv = "env" in config && config.env ? config.env : {};
 	return resolveStdioCommandPath(command, cwd, { ...Bun.env, ...configEnv });
@@ -1465,14 +1476,20 @@ async function diagnoseMcpServer(name: string, server: MCPServer, raw?: unknown)
 		// validator already guaranteed command is present and non-empty.
 		let command = "";
 		if ("command" in config && typeof config.command === "string") command = config.command;
-		// Resolve the command the way the transport does: honor config.cwd for
-		// relative commands and config.env.PATH for PATH lookup. The real
-		// transport (mcp/transports/stdio.ts) merges config.env and uses
-		// config.cwd before spawning; Bun.which here mirrors that resolution
-		// without spawning. A relative command (e.g. ./bin/server) resolves
-		// against the configured cwd, not the doctor's process cwd.
-		const resolved = await resolveStdioCommand(command, config);
-		if (resolved === null) {
+		// Resolve the same preconditions that `StdioTransport.connect()` needs:
+		// an existing working directory plus a launchable command.
+		const resolution = await resolveStdioCommand(command, config);
+		if (resolution.kind === "cwd-unusable") {
+			const cwd = "cwd" in config && typeof config.cwd === "string" ? config.cwd : getProjectDir();
+			return {
+				...base,
+				status: "error",
+				summary: `${name}: working directory unavailable`,
+				details: [`cwd "${cwd}" does not exist or is not a directory`],
+				remedy: `Create the configured cwd or fix the "cwd" for server "${name}" in mcp.json`,
+			};
+		}
+		if (resolution.kind === "command-not-found") {
 			return {
 				...base,
 				status: "error",
@@ -1481,7 +1498,7 @@ async function diagnoseMcpServer(name: string, server: MCPServer, raw?: unknown)
 				remedy: `Install "${command}" or fix the command/cwd/env.PATH in mcp.json`,
 			};
 		}
-		return { ...base, status: "ok", summary: `${name}: ${resolved}`, details: [] };
+		return { ...base, status: "ok", summary: `${name}: ${resolution.path}`, details: [] };
 	}
 	// http/sse: validate URL syntax only — no live connects, no OAuth probes.
 	// "url" in config narrows to the http/sse members; the validator guaranteed url.
@@ -2313,8 +2330,10 @@ export async function collectDoctorReport(flags: DoctorCommandFlags): Promise<Do
 
 export function renderDoctorReport(report: DoctorReport): string {
 	// Raw check output (SQLite errors, plugin messages) is untrusted terminal
-	// input: tabs break alignment, long lines overflow, home paths leak.
-	const sanitize = (text: string): string => truncateToWidth(replaceTabs(shortenPath(text)), TRUNCATE_LENGTHS.CONTENT);
+	// input: ANSI/C0 can recolor or clear the terminal, tabs break alignment,
+	// long lines overflow, home paths leak.
+	const sanitize = (text: string): string =>
+		truncateToWidth(replaceTabs(shortenPath(sanitizeText(text))), TRUNCATE_LENGTHS.CONTENT);
 	const lines: string[] = [`omp doctor v${report.ompVersion}${report.fix ? " (--fix)" : ""}`];
 	for (const category of CATEGORY_ORDER) {
 		const group = report.findings.filter(finding => finding.category === category);

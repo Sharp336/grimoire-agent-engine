@@ -135,12 +135,28 @@ interface CodedError extends Error {
 	code?: string;
 }
 
-/** Autoresearch database filenames under the state dir; a missing directory is normal, not an error. */
-function listAutoresearchDatabases(): string[] {
+/** Result of scanning the autoresearch state directory for `*.db` files. */
+export interface AutoresearchDatabaseScan {
+	names: string[];
+	/** Non-ENOENT failure while scanning; missing directory yields `null`. */
+	error: string | null;
+}
+
+/**
+ * Autoresearch database filenames under the state dir.
+ * A missing directory is normal (empty list, no error). Permission/I/O failures
+ * return an error string so the storage collector can emit a finding without
+ * aborting other database probes.
+ */
+export function scanAutoresearchDatabases(): AutoresearchDatabaseScan {
 	try {
-		return Array.from(new Bun.Glob("*.db").scanSync({ cwd: getAutoresearchDir() })).sort();
-	} catch {
-		return [];
+		return {
+			names: Array.from(new Bun.Glob("*.db").scanSync({ cwd: getAutoresearchDir() })).sort(),
+			error: null,
+		};
+	} catch (error) {
+		if (isEnoent(error)) return { names: [], error: null };
+		return { names: [], error: messageOf(error) };
 	}
 }
 
@@ -160,15 +176,30 @@ function listMnemopiDatabases(agentDir: string | undefined): DoctorDatabase[] {
 	return databases;
 }
 
-export function resolveDoctorDatabases(agentDir: string | undefined, scopedToAgentDir: boolean): DoctorDatabase[] {
+/** Databases to probe plus optional discovery failures for root-scoped trees. */
+export interface ResolvedDoctorDatabases {
+	databases: DoctorDatabase[];
+	/**
+	 * Non-ENOENT failures discovering optional database trees (e.g. autoresearch).
+	 * Present so the storage collector can emit an error finding and still probe
+	 * every other database.
+	 */
+	discoveryErrors: Array<{ label: string; message: string }>;
+}
+
+export function resolveDoctorDatabases(
+	agentDir: string | undefined,
+	scopedToAgentDir: boolean,
+): ResolvedDoctorDatabases {
 	const databases: DoctorDatabase[] = [
 		{ label: "agent.db", path: getAgentDbPath(agentDir), policy: "precious" },
 		{ label: "history.db", path: getHistoryDbPath(agentDir), policy: "precious" },
 		{ label: "models.db", path: getModelDbPath(agentDir), policy: "regenerable" },
 	];
+	const discoveryErrors: Array<{ label: string; message: string }> = [];
 	// Mnemopi databases follow agentDir; always agent-scoped.
 	databases.push(...listMnemopiDatabases(agentDir));
-	if (scopedToAgentDir) return databases;
+	if (scopedToAgentDir) return { databases, discoveryErrors };
 	// Root-scoped paths resolve through dirs.rootSubdir, which --agent-dir does
 	// not redirect; only include them for a real (unscoped) run.
 	databases.push(
@@ -176,10 +207,19 @@ export function resolveDoctorDatabases(agentDir: string | undefined, scopedToAge
 		{ label: "autoqa.db", path: getAutoQaDbPath(), policy: "precious" },
 		{ label: "cache/github-cache.db", path: getGithubCacheDbPath(), policy: "regenerable" },
 	);
-	for (const name of listAutoresearchDatabases()) {
-		databases.push({ label: `autoresearch/${name}`, path: `${getAutoresearchDir()}/${name}`, policy: "precious" });
+	const autoresearch = scanAutoresearchDatabases();
+	if (autoresearch.error !== null) {
+		discoveryErrors.push({ label: "autoresearch", message: autoresearch.error });
+	} else {
+		for (const name of autoresearch.names) {
+			databases.push({
+				label: `autoresearch/${name}`,
+				path: `${getAutoresearchDir()}/${name}`,
+				policy: "precious",
+			});
+		}
 	}
-	return databases;
+	return { databases, discoveryErrors };
 }
 
 function messageOf(error: unknown): string {

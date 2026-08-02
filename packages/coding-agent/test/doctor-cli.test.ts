@@ -576,6 +576,59 @@ describe("omp doctor", () => {
 		expect(rendered).not.toContain("\t");
 	});
 
+	test("renderer strips terminal controls; JSON keeps raw finding text", async () => {
+		// Untrusted finding fields (plugin messages) may embed ANSI/C0. Human
+		// output must strip them; --json must leave the report payload raw.
+		const rawMessage = "plugin\u001b[31m red\u001b[0m \u0007bell";
+		pluginDoctorSpy = spyOn(PluginManager.prototype, "doctor").mockImplementation(async () => [
+			{ name: "evil\u001b[31m", status: "error", message: rawMessage },
+		]);
+
+		writes = [];
+		const jsonReport = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const jsonOut = writes.join("");
+		expect(jsonOut).toContain("\\u001b[31m");
+		expect(jsonOut).toContain("\\u0007bell");
+		const jsonFinding = jsonReport.findings.find(entry => entry.summary === rawMessage);
+		expect(jsonFinding?.status).toBe("error");
+		expect(jsonFinding?.summary).toBe(rawMessage);
+
+		writes = [];
+		await runDoctorCommand({ flags: { agentDir: root } });
+		const humanOut = writes.join("");
+		expect(humanOut).not.toContain("\u001b");
+		expect(humanOut).not.toContain("\u0007");
+		expect(humanOut).toContain("plugin red bell");
+	});
+
+	test("autoresearch scan failure surfaces alongside another storage finding", async () => {
+		// Root-scoped autoresearch discovery must not swallow non-ENOENT failures,
+		// and must not prevent probing other databases in the same report.
+		setAgentDir(root);
+		await createDatabaseWithRows(getHistoryDbPath(root), 10);
+		const notADir = path.join(root, "autoresearch-file");
+		await fs.writeFile(notADir, "x");
+		const autoSpy = spyOn(piUtils, "getAutoresearchDir").mockReturnValue(notADir);
+		const statsSpy = spyOn(piUtils, "getStatsDbPath").mockReturnValue(path.join(root, "stats.db"));
+		const autoqaSpy = spyOn(piUtils, "getAutoQaDbPath").mockReturnValue(path.join(root, "autoqa.db"));
+		const ghSpy = spyOn(piUtils, "getGithubCacheDbPath").mockReturnValue(path.join(root, "github-cache.db"));
+		try {
+			const report = await runDoctorCommand({ flags: { json: true } });
+			const scanFinding = report.findings.find(entry => entry.id === "storage.autoresearch");
+			expect(scanFinding?.status).toBe("error");
+			expect(scanFinding?.summary).toContain("cannot scan");
+			expect(scanFinding?.details.some(detail => /ENOTDIR|EACCES/.test(detail))).toBe(true);
+			const history = report.findings.find(entry => entry.id === "storage.history.db");
+			expect(history).toBeDefined();
+			expect(history?.status).toBe("ok");
+		} finally {
+			autoSpy.mockRestore();
+			statsSpy.mockRestore();
+			autoqaSpy.mockRestore();
+			ghSpy.mockRestore();
+		}
+	});
+
 	test("a salvage swap preserves the original file mode", async () => {
 		const dbPath = getAgentDbPath(root);
 		await createDatabaseWithRows(dbPath, 500);
@@ -2013,6 +2066,29 @@ describe("omp doctor", () => {
 		},
 	);
 
+	test("MCP stdio server with a missing configured cwd is an error", async () => {
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(
+			mcpJson,
+			JSON.stringify({
+				mcpServers: {
+					missingCwd: {
+						type: "stdio",
+						command: process.execPath,
+						cwd: path.join(root, "missing-cwd"),
+					},
+				},
+			}),
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const finding = report.findings.find(entry => entry.id === "mcp.missingCwd");
+		expect(finding?.status).toBe("error");
+		expect(finding?.summary).toContain("working directory unavailable");
+		expect(finding?.details.some(detail => detail.includes("does not exist or is not a directory"))).toBe(true);
+	});
+
 	// ── Item G: invalid URL must not leak credentials via parse-error text ──
 
 	test("MCP http server with a malformed URL containing credentials never leaks them in the report", async () => {
@@ -2102,19 +2178,50 @@ describe("omp doctor", () => {
 
 	// ── Item G: managed Chromium cache ───────────────────────────────────────
 
+	/**
+	 * Compute the REAL exact Browser.CHROME target @puppeteer/browsers
+	 * produces on this host (platform + puppeteer-core-pinned
+	 * PUPPETEER_REVISIONS.chrome build id) under `cacheDir`, plus the
+	 * chrome-headless-shell path sharing that build id. Mirrors
+	 * `resolveManagedChromiumTarget` in launch.ts so the fixture lands at the
+	 * path the launcher actually probes — not a stale chrome-1234/linux-64
+	 * layout that only satisfied the old directory walk. Dynamic imports mirror
+	 * the SUT's lazy load, keeping puppeteer out of the test module's eager
+	 * graph.
+	 */
+	async function resolveManagedChromeTarget(cacheDir: string): Promise<{
+		chromePath: string;
+		shellPath: string;
+	}> {
+		const browsers = await import("@puppeteer/browsers");
+		const platform = browsers.detectBrowserPlatform();
+		if (!platform) throw new Error("detectBrowserPlatform returned undefined on test host");
+		const { PUPPETEER_REVISIONS } = await import("puppeteer-core/internal/revisions.js");
+		const buildId = await browsers.resolveBuildId(browsers.Browser.CHROME, platform, PUPPETEER_REVISIONS.chrome);
+		const chromePath = browsers.computeExecutablePath({
+			browser: browsers.Browser.CHROME,
+			buildId,
+			cacheDir,
+			platform,
+		});
+		const shellPath = browsers.computeExecutablePath({
+			browser: browsers.Browser.CHROMEHEADLESSSHELL,
+			buildId,
+			cacheDir,
+			platform,
+		});
+		return { chromePath, shellPath };
+	}
+
 	test("browser: cached Chromium executable → ok, not first-use warning", async () => {
-		// Fabricate the @puppeteer/browsers 3.x cache layout:
-		//   <cacheDir>/chrome/<platform>-<buildId>/<archive-dir>/chrome
-		// The doctor delegates to resolveCachedChromiumExecutable, which
-		// enumerates installed browsers via the library's own
-		// getInstalledBrowsers (no buildId guessing, no download). System
-		// Chrome and env override are absent so the cache probe is reached.
+		// Place a binary at the REAL exact path @puppeteer/browsers computes
+		// for Browser.CHROME + this platform + the pinned build id, under the
+		// mocked getPuppeteerDir. System Chrome and env override are absent so
+		// the cache probe is reached.
 		const fakeCacheDir = path.join(root, "fake-puppeteer-cache");
-		const buildDir = path.join(fakeCacheDir, "chrome", "linux-1234");
-		const archiveDir = path.join(buildDir, "chrome-linux64");
-		await fs.mkdir(archiveDir, { recursive: true });
-		const fakeChrome = path.join(archiveDir, "chrome");
-		await fs.writeFile(fakeChrome, "fake-binary", "utf8");
+		const { chromePath } = await resolveManagedChromeTarget(fakeCacheDir);
+		await fs.mkdir(path.dirname(chromePath), { recursive: true });
+		await fs.writeFile(chromePath, "fake-binary", "utf8");
 
 		const chromeSpy = spyOn(browserLaunch, "resolveSystemChromium").mockReturnValue(undefined);
 		const envSpy = spyOn(browserLaunch, "readChromiumEnvOverride").mockReturnValue(undefined);
@@ -2123,8 +2230,33 @@ describe("omp doctor", () => {
 			const report = await runDoctorCommand({ flags: { agentDir: root } });
 			const finding = report.findings.find(entry => entry.id === "browser.chromium");
 			expect(finding?.status).toBe("ok");
-			expect(finding?.summary).toContain("chrome");
+			expect(finding?.summary).toBe(chromePath);
 			expect(finding?.details.some(d => d.includes("Puppeteer cache"))).toBe(true);
+		} finally {
+			chromeSpy.mockRestore();
+			envSpy.mockRestore();
+			cacheSpy.mockRestore();
+		}
+	});
+
+	test("browser: mismatched Chrome-family artifact → warning, not ok", async () => {
+		// A chrome-headless-shell download (a different Browser.* target) must
+		// NOT satisfy the Browser.CHROME cache probe. The old directory walk
+		// matched `headless_shell` by name and reported ok; the exact-target
+		// probe correctly falls through to the first-use download warning.
+		const fakeCacheDir = path.join(root, "fake-puppeteer-cache-shell");
+		const { shellPath } = await resolveManagedChromeTarget(fakeCacheDir);
+		await fs.mkdir(path.dirname(shellPath), { recursive: true });
+		await fs.writeFile(shellPath, "fake-headless-shell", "utf8");
+
+		const chromeSpy = spyOn(browserLaunch, "resolveSystemChromium").mockReturnValue(undefined);
+		const envSpy = spyOn(browserLaunch, "readChromiumEnvOverride").mockReturnValue(undefined);
+		const cacheSpy = spyOn(piUtils, "getPuppeteerDir").mockReturnValue(fakeCacheDir);
+		try {
+			const report = await runDoctorCommand({ flags: { agentDir: root } });
+			const finding = report.findings.find(entry => entry.id === "browser.chromium");
+			expect(finding?.status).toBe("warning");
+			expect(finding?.summary.toLowerCase()).toContain("download");
 		} finally {
 			chromeSpy.mockRestore();
 			envSpy.mockRestore();

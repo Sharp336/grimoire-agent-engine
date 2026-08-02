@@ -157,51 +157,51 @@ async function resolveWindowsCommandPath(
 	return null;
 }
 
+export type StdioCommandPathResolution =
+	| { kind: "resolved"; path: string }
+	| { kind: "command-not-found" }
+	| { kind: "cwd-unusable" };
+
 /**
- * Resolve a stdio MCP server command to a concrete file path — the
- * non-spawning subset of {@link resolveStdioSpawnCommand}. Returns the
- * resolved path or `null` when the command cannot be located.
+ * Resolve a stdio MCP server command without spawning it.
  *
- * On Windows, delegates to {@link resolveWindowsCommandPath} so the same
- * cwd-first, PATHEXT-aware lookup the transport uses at spawn time runs
- * here. On POSIX, a path-qualified command resolves against the configured
- * cwd; a bare command resolves via `Bun.which` with the config's PATH
- * override (if any) — authoritative, never falling back to the process
- * PATH, mirroring the transport's `config.env` merge that replaces PATH.
+ * The result distinguishes a missing command from an unusable configured
+ * working directory: either condition makes a later spawn fail. On Windows,
+ * command lookup uses the transport's cwd-first, PATHEXT-aware resolver. On
+ * POSIX, a path-qualified command resolves against cwd; a bare command uses
+ * the config's authoritative PATH override when present.
  *
- * Exported so `omp doctor` can probe command resolvability without spawning
- * and without maintaining a second resolver that drifts from the transport.
+ * Exported so `omp doctor` can probe launch preconditions without maintaining
+ * a second resolver that drifts from the transport.
  */
 export async function resolveStdioCommandPath(
 	command: string,
 	cwd: string,
 	env: Record<string, string | undefined>,
 	platform: NodeJS.Platform = process.platform,
-): Promise<string | null> {
+): Promise<StdioCommandPathResolution> {
+	try {
+		if (!(await fs.stat(cwd)).isDirectory()) return { kind: "cwd-unusable" };
+	} catch {
+		return { kind: "cwd-unusable" };
+	}
+
+	let resolved: string | null;
 	if (platform === "win32") {
-		return resolveWindowsCommandPath(command, cwd, env);
-	}
-	// POSIX: path-qualified commands must be regular files the child can execute.
-	if (hasPathSegment(command)) {
-		const resolved = path.isAbsolute(command) ? command : path.resolve(cwd, command);
+		resolved = await resolveWindowsCommandPath(command, cwd, env);
+	} else if (hasPathSegment(command)) {
+		const candidate = path.isAbsolute(command) ? command : path.resolve(cwd, command);
 		try {
-			if (!(await fs.stat(resolved)).isFile()) return null;
-			await fs.access(resolved, fsNative.constants.X_OK);
-			return resolved;
+			resolved = (await fs.stat(candidate)).isFile() ? candidate : null;
+			if (resolved !== null) await fs.access(resolved, fsNative.constants.X_OK);
 		} catch {
-			return null;
+			resolved = null;
 		}
+	} else {
+		const envPath = getCaseInsensitiveEnv(env, "PATH");
+		resolved = envPath === undefined ? Bun.which(command) : Bun.which(command, { PATH: envPath });
 	}
-	// Bare command: resolve via Bun.which with the config's PATH override
-	// when present. The transport merges config.env into the spawn
-	// environment, so config.env.PATH REPLACES the process PATH — an
-	// authoritative restricted PATH that lacks the command must report
-	// "not found", never fall back to the doctor's own process PATH.
-	const envPath = getCaseInsensitiveEnv(env, "PATH");
-	if (envPath !== undefined) {
-		return Bun.which(command, { PATH: envPath });
-	}
-	return Bun.which(command);
+	return resolved === null ? { kind: "command-not-found" } : { kind: "resolved", path: resolved };
 }
 
 function resolveWindowsShimPath(value: string, shimDir: string): string | null {

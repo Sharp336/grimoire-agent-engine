@@ -121,7 +121,19 @@ export function validateSettingsValues(raw: RawSettings): { errors: string[]; wa
 		if (value === undefined) continue;
 		const def = SETTINGS_SCHEMA[settingPath];
 		const error = validateSettingValueType(settingPath, value, def);
-		if (error) errors.push(error);
+		if (error) {
+			errors.push(error);
+			continue;
+		}
+		// Record containers pass the shape check above; member values that
+		// startup would reject via the settings hook must surface here too.
+		if (settingPath === "providers.maxInFlightRequests") {
+			try {
+				validateProviderMaxInFlightRequests(value);
+			} catch (err) {
+				errors.push(err instanceof Error ? err.message : String(err));
+			}
+		}
 	}
 
 	// Detect unknown keys (forward-compat: warn, never error) and namespace
@@ -168,6 +180,17 @@ function validateSettingValueType(
 		case "array": {
 			if (!Array.isArray(value))
 				return `Settings key "${path}" must be an array, got ${value === null ? "null" : typeof value}`;
+			// enabledModels / disabledProviders accept plain strings or the same
+			// path-scoped object entries resolvePathScopedStringArray understands.
+			if (path === "enabledModels" || path === "disabledProviders") {
+				for (let i = 0; i < value.length; i++) {
+					const parsed = parsePathScopedStringArrayEntry(path as PathScopedArraySetting, value[i]);
+					if (parsed.kind === "invalid") {
+						return `Settings key "${path}[${i}]" must be a string or path-scoped object, got ${parsed.actual}`;
+					}
+				}
+				return null;
+			}
 			// When the schema declares an element type, validate each element
 			// so a typed array with a null/wrong-typed member is caught here
 			// rather than crashing a downstream consumer (e.g. compileRules
@@ -311,16 +334,16 @@ export function validateProviderMaxInFlightRequests(value: unknown): Record<stri
 }
 
 const PATH_SCOPED_ARRAY_SETTINGS = new Set<SettingPath>(["enabledModels", "disabledProviders"]);
-type PathScopedStringArrayEntry = {
-	path?: unknown;
-	paths?: unknown;
-	pathPrefix?: unknown;
-	pathPrefixes?: unknown;
-	values?: unknown;
-	items?: unknown;
-	models?: unknown;
-	providers?: unknown;
-};
+const PATH_SCOPED_PREFIX_KEYS = ["path", "paths", "pathPrefix", "pathPrefixes"] as const;
+const PATH_SCOPED_VALUE_KEYS = {
+	enabledModels: ["values", "items", "models"],
+	disabledProviders: ["values", "items", "providers"],
+} as const;
+type PathScopedArraySetting = keyof typeof PATH_SCOPED_VALUE_KEYS;
+type ParsedPathScopedStringArrayEntry =
+	| { kind: "string"; value: string }
+	| { kind: "scoped"; prefixes: string[]; values: string[] }
+	| { kind: "invalid"; actual: string };
 
 function expandTilde(p: string): string {
 	return p === "~" ? os.homedir() : p.startsWith("~/") ? path.join(os.homedir(), p.slice(2)) : p;
@@ -343,6 +366,27 @@ function stringArrayFromUnknown(value: unknown): string[] {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * Shared string-or-path-scoped-object contract for enabledModels / disabledProviders.
+ * Validation and runtime resolution both parse entries through this helper so the
+ * accepted keys/shapes cannot drift.
+ */
+function parsePathScopedStringArrayEntry(
+	settingPath: PathScopedArraySetting,
+	entry: unknown,
+): ParsedPathScopedStringArrayEntry {
+	if (typeof entry === "string") return { kind: "string", value: entry };
+	if (!isRecord(entry)) {
+		return {
+			kind: "invalid",
+			actual: entry === null ? "null" : Array.isArray(entry) ? "array" : typeof entry,
+		};
+	}
+	const prefixes = PATH_SCOPED_PREFIX_KEYS.flatMap(key => stringArrayFromUnknown(entry[key]));
+	const values = PATH_SCOPED_VALUE_KEYS[settingPath].flatMap(key => stringArrayFromUnknown(entry[key]));
+	return { kind: "scoped", prefixes, values };
 }
 
 /**
@@ -440,34 +484,14 @@ function resolvePathScopedStringArray(settingPath: SettingPath, value: unknown, 
 
 	const resolved: string[] = [];
 	for (const entry of value) {
-		if (typeof entry === "string") {
-			resolved.push(entry);
+		const parsed = parsePathScopedStringArrayEntry(settingPath as PathScopedArraySetting, entry);
+		if (parsed.kind === "string") {
+			resolved.push(parsed.value);
 			continue;
 		}
-		if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
-
-		const scoped = entry as PathScopedStringArrayEntry;
-		const prefixes = [
-			...stringArrayFromUnknown(scoped.path),
-			...stringArrayFromUnknown(scoped.paths),
-			...stringArrayFromUnknown(scoped.pathPrefix),
-			...stringArrayFromUnknown(scoped.pathPrefixes),
-		];
-		if (prefixes.length === 0 || !prefixes.some(prefix => pathMatchesPrefix(cwd, prefix))) continue;
-
-		const values =
-			settingPath === "enabledModels"
-				? [
-						...stringArrayFromUnknown(scoped.values),
-						...stringArrayFromUnknown(scoped.items),
-						...stringArrayFromUnknown(scoped.models),
-					]
-				: [
-						...stringArrayFromUnknown(scoped.values),
-						...stringArrayFromUnknown(scoped.items),
-						...stringArrayFromUnknown(scoped.providers),
-					];
-		resolved.push(...values);
+		if (parsed.kind !== "scoped") continue;
+		if (parsed.prefixes.length === 0 || !parsed.prefixes.some(prefix => pathMatchesPrefix(cwd, prefix))) continue;
+		resolved.push(...parsed.values);
 	}
 
 	return resolved;
