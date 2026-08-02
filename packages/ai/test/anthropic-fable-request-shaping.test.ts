@@ -70,6 +70,7 @@ function abortedSignal(): AbortSignal {
 
 type CapturedPayload = {
 	thinking?: { type: string; display?: string };
+	model?: string;
 	tool_choice?: { type: string };
 	output_config?: { effort?: string };
 };
@@ -171,9 +172,8 @@ describe("Anthropic adaptive thinking mode", () => {
 		expect(payload.output_config?.effort).toBeUndefined();
 	});
 
-	// The hand-built `adaptiveModel` specs above omit `supportsDisabledThinking`
-	// and `disabledThinkingMaxEffort`, so they cannot catch a wire payload that
-	// the vendor rejects. These run against the real bundled catalog entries.
+	// These run against real bundled catalog IDs so the request-shaping tests
+	// cover the metadata shipped to users, not only synthetic model specs.
 	it("clamps disabled thinking to the documented ceiling on bundled Opus 5", async () => {
 		const model = bundledAnthropicModel("claude-opus-5");
 		// Opus 5 returns 400 for `thinking:{type:"disabled"}` above `high`.
@@ -186,6 +186,47 @@ describe("Anthropic adaptive thinking mode", () => {
 		// Below the ceiling the caller's effort must survive untouched.
 		const medium = await captureSimplePayload(model, { thinkingMode: "off", reasoning: Effort.Medium });
 		expect(medium.output_config?.effort).toBe("medium");
+	});
+
+	it("routes thinking-off requests to the off SKU while preserving effort", async () => {
+		const routed = buildModel({
+			...makeAnthropicModel("claude-routed"),
+			thinking: {
+				mode: "anthropic-adaptive",
+				efforts: [Effort.Low, Effort.High],
+				effortRouting: {
+					off: "claude-routed",
+					[Effort.High]: "claude-routed-thinking",
+				},
+				supportsDisabledThinking: true,
+			},
+		} as ModelSpec<"anthropic-messages">);
+
+		for (const opts of [{ thinkingMode: "off" as const }, { disableReasoning: true }] as const) {
+			const payload = await captureSimplePayload(routed, { ...opts, reasoning: Effort.High });
+
+			expect(payload.model).toBe("claude-routed");
+			expect(payload.thinking).toEqual({ type: "disabled" });
+			expect(payload.output_config?.effort).toBe("high");
+		}
+	});
+
+	it("preserves disabled thinking on forced-tool turns for bundled Opus 5 and Sonnet 5", async () => {
+		const opus = await captureSimplePayload(bundledAnthropicModel("claude-opus-5"), {
+			thinkingMode: "off",
+			reasoning: Effort.Max,
+			toolChoice: "any",
+		});
+		expect(opus.thinking).toEqual({ type: "disabled" });
+		expect(opus.output_config?.effort).toBe("high");
+
+		const sonnet = await captureSimplePayload(bundledAnthropicModel("claude-sonnet-5"), {
+			thinkingMode: "off",
+			reasoning: Effort.Max,
+			toolChoice: "any",
+		});
+		expect(sonnet.thinking).toEqual({ type: "disabled" });
+		expect(sonnet.output_config?.effort).toBe("max");
 	});
 
 	it("turns thinking off at max effort on bundled Sonnet 5, which has no ceiling", async () => {

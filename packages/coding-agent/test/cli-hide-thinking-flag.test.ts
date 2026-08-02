@@ -78,6 +78,10 @@ describe("parseArgs — thinking mode and effort flags", () => {
 		expect(off).toContain("--thinking off is deprecated");
 		expect(off).toContain("--effort off");
 
+		const abbreviatedOff = (parseArgs(["--thinking", "of"]).warnings ?? []).join("\n");
+		expect(abbreviatedOff).toContain("--thinking of is deprecated");
+		expect(abbreviatedOff).toContain("--effort off");
+
 		// A real mode selector is not deprecated and must stay silent.
 		// `warnings` is allocated only when a notice exists, so absent == silent.
 		expect(parseArgs(["--thinking", "adaptive"]).warnings ?? []).toEqual([]);

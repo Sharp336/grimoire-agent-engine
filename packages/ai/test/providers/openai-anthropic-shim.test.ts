@@ -32,15 +32,17 @@ const offCapableOpenAIClaude: Model<"openai-completions"> = buildModel({
 	name: "Claude Opus 5 via shim",
 	api: "openai-completions",
 	provider: "synthetic",
-	baseUrl: "https://api.synthetic.new/openai/v1",
 	reasoning: true,
 	input: ["text"],
 	contextWindow: 200_000,
 	maxTokens: 64_000,
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	baseUrl: "https://api.anthropic.com",
 	thinking: {
 		mode: "effort",
 		efforts: [Effort.Low, Effort.High],
+		supportsDisabledThinking: true,
+		disabledThinkingMaxEffort: Effort.High,
 	},
 } satisfies ModelSpec<"openai-completions">);
 
@@ -164,6 +166,7 @@ describe("OpenAI/Anthropic shim thinking transport", () => {
 			{
 				anthropicBaseUrl: "https://api.synthetic.new/anthropic",
 				defaultFormat: "anthropic",
+				anthropicThinkingMode: "anthropic-adaptive",
 			},
 		);
 		await stream.result();

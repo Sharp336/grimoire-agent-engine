@@ -1518,7 +1518,7 @@ function mapOptionsForApi<TApi extends Api>(
 			if (explicitThinkingOff) {
 				return castApi<"anthropic-messages">({
 					...base,
-					requestModelId: resolveWireModelId(model, reasoning),
+					requestModelId: resolveWireModelId(model, undefined),
 					thinkingEnabled: false,
 					reasoning,
 					toolChoice: mapAnthropicToolChoice(options?.toolChoice),

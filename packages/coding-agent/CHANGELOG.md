@@ -87,7 +87,7 @@
 
 ### Changed
 
-- `--thinking` now selects a thinking *mode*; reasoning intensity moved to `--effort`. Effort values passed to `--thinking` (e.g. `--thinking high`, `--thinking off`) still work and are routed to `--effort` with a deprecation warning on stderr. Scripts that pass an effort to `--thinking` keep working unchanged; only the stderr notice is new.
+- `--thinking` now selects a thinking *mode*; reasoning intensity moved to `--effort`. Effort values passed to `--thinking` (e.g. `--thinking high`, `--thinking off`) still work and are routed to `--effort` with a deprecation warning on stderr. Invalid `--thinking`/`--effort` values now fail fast instead of silently falling back to the default.
 - Thinking-off session state now keeps the last supported reasoning effort available for providers that separate thinking mode from effort.
 
 ### Fixed

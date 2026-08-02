@@ -37,6 +37,7 @@ import type {
 	CompatOf,
 	Model,
 	ModelSpec,
+	ResolvedAnthropicCompat,
 	ResolvedDevinCompat,
 	ResolvedOpenAICompat,
 	ResolvedOpenAIResponsesCompat,
@@ -180,13 +181,18 @@ function fillThinkingWireDefaults<TApi extends Api>(
 	// Explicit thinking metadata wins outright; the wire fact below is the only
 	// value backfilled from identity.
 	const supportsDisabledThinking =
-		thinking.supportsDisabledThinking === undefined ? inferSupportsDisabledThinking(spec, thinking.mode) : undefined;
+		thinking.supportsDisabledThinking === undefined
+			? inferSupportsDisabledThinking(spec, compat, thinking.mode)
+			: undefined;
+	const effectiveSupportsDisabledThinking = thinking.supportsDisabledThinking ?? supportsDisabledThinking;
 	const needsSupportsDisabledThinking = supportsDisabledThinking !== undefined;
 	const disabledThinkingMaxEffort =
-		thinking.disabledThinkingMaxEffort === undefined
-			? inferDisabledThinkingMaxEffort(spec, thinking.mode)
+		effectiveSupportsDisabledThinking === true && thinking.disabledThinkingMaxEffort === undefined
+			? inferDisabledThinkingMaxEffort(spec, compat, thinking.mode)
 			: undefined;
 	const needsDisabledThinkingMaxEffort = disabledThinkingMaxEffort !== undefined;
+	const shouldRemoveDisabledThinkingMaxEffort =
+		effectiveSupportsDisabledThinking !== true && thinking.disabledThinkingMaxEffort !== undefined;
 	const needsDefaultLevel = thinking.defaultLevel === undefined && isKimiK3ModelId(spec.id);
 	if (
 		!effortsChanged &&
@@ -195,7 +201,8 @@ function fillThinkingWireDefaults<TApi extends Api>(
 		!needsRequiresEffort &&
 		!needsDefaultLevel &&
 		!needsSupportsDisabledThinking &&
-		!needsDisabledThinkingMaxEffort
+		!needsDisabledThinkingMaxEffort &&
+		!shouldRemoveDisabledThinkingMaxEffort
 	) {
 		return thinking;
 	}
@@ -225,6 +232,9 @@ function fillThinkingWireDefaults<TApi extends Api>(
 	if (needsDisabledThinkingMaxEffort) {
 		filled.disabledThinkingMaxEffort = disabledThinkingMaxEffort;
 	}
+	if (shouldRemoveDisabledThinkingMaxEffort) {
+		delete filled.disabledThinkingMaxEffort;
+	}
 	return filled;
 }
 
@@ -252,9 +262,9 @@ export function deriveThinking<TApi extends Api>(spec: ModelSpec<TApi>, compat: 
 	) {
 		config.supportsDisplay = true;
 	}
-	if (inferSupportsDisabledThinking(spec, config.mode) !== undefined) {
+	if (inferSupportsDisabledThinking(spec, compat, config.mode) !== undefined) {
 		config.supportsDisabledThinking = true;
-		const disabledCeiling = inferDisabledThinkingMaxEffort(spec, config.mode);
+		const disabledCeiling = inferDisabledThinkingMaxEffort(spec, compat, config.mode);
 		if (disabledCeiling !== undefined) {
 			config.disabledThinkingMaxEffort = disabledCeiling;
 		}
@@ -446,9 +456,12 @@ function getAnthropicAdaptiveEfforts<TApi extends Api>(spec: ModelSpec<TApi>): r
  */
 function inferSupportsDisabledThinking<TApi extends Api>(
 	spec: ModelSpec<TApi>,
+	compat: CompatOf<TApi>,
 	mode: ThinkingConfig["mode"],
 ): boolean | undefined {
 	if (mode !== "anthropic-adaptive" || spec.api !== "anthropic-messages") return undefined;
+	const anthropicCompat = compat as ResolvedAnthropicCompat;
+	if (!anthropicCompat.officialEndpoint) return undefined;
 	const parsed = parseAnthropicModel(bareModelId(spec.id));
 	if (parsed === null) return undefined;
 	if (parsed.kind !== "opus" && parsed.kind !== "sonnet") return undefined;
@@ -461,9 +474,10 @@ function inferSupportsDisabledThinking<TApi extends Api>(
  */
 function inferDisabledThinkingMaxEffort<TApi extends Api>(
 	spec: ModelSpec<TApi>,
+	compat: CompatOf<TApi>,
 	mode: ThinkingConfig["mode"],
 ): Effort | undefined {
-	if (inferSupportsDisabledThinking(spec, mode) === undefined) return undefined;
+	if (inferSupportsDisabledThinking(spec, compat, mode) === undefined) return undefined;
 	const parsed = parseAnthropicModel(bareModelId(spec.id));
 	return parsed?.kind === "opus" ? Effort.High : undefined;
 }

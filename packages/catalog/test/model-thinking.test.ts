@@ -252,11 +252,18 @@ describe("model thinking derivation", () => {
 		});
 	});
 
-	it("derives disabled-thinking support only for Anthropic Messages Opus 5 models that can shape it", () => {
+	it("derives disabled-thinking support only for official Anthropic Messages Opus 5 models", () => {
 		const messagesOpus5 = createModel({
 			id: "claude-opus-5",
 			api: "anthropic-messages",
 			provider: "anthropic",
+			baseUrl: "https://api.anthropic.com",
+		});
+		const proxyOpus5 = createModel({
+			id: "github-copilot/claude-opus-5",
+			api: "anthropic-messages",
+			provider: "github-copilot",
+			baseUrl: "https://api.githubcopilot.com/chat/completions",
 		});
 		const bedrockOpus5 = createModel({
 			id: "global.anthropic.claude-opus-5",
@@ -267,9 +274,22 @@ describe("model thinking derivation", () => {
 			id: "claude-opus-5",
 			api: "anthropic-messages",
 			provider: "anthropic",
+			baseUrl: "https://api.anthropic.com",
 			thinking: {
 				mode: "anthropic-adaptive",
 				efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+			},
+		});
+		const explicitUnsupportedOpus5 = createModel({
+			id: "claude-opus-5",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			baseUrl: "https://api.anthropic.com",
+			thinking: {
+				mode: "anthropic-adaptive",
+				efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+				supportsDisabledThinking: false,
+				disabledThinkingMaxEffort: Effort.High,
 			},
 		});
 		const cachedBedrockOpus5 = createModel({
@@ -282,13 +302,20 @@ describe("model thinking derivation", () => {
 			},
 		});
 
-		// Accepting `thinking.type: "disabled"` is a wire capability derived from
-		// identity; the adaptive transport itself is what gates the mode axis.
+		// Accepting `thinking.type: "disabled"` is documented for the native
+		// Anthropic Messages API. Anthropic-compatible proxy rows share the wire
+		// dialect but not necessarily that capability.
 		expect(messagesOpus5.thinking?.supportsDisabledThinking).toBe(true);
+		expect(messagesOpus5.thinking?.disabledThinkingMaxEffort).toBe(Effort.High);
+		expect(proxyOpus5.thinking?.supportsDisabledThinking).toBeUndefined();
+		expect(proxyOpus5.thinking?.disabledThinkingMaxEffort).toBeUndefined();
 		expect(bedrockOpus5.thinking?.supportsDisabledThinking).toBeUndefined();
-		// Backfilled onto explicit thinking too: it is a wire fact, not a
-		// user-facing capability surface.
+		// Backfilled onto explicit thinking when it is absent; explicit false wins
+		// and must not leave a contradictory ceiling behind.
 		expect(cachedMessagesOpus5.thinking?.supportsDisabledThinking).toBe(true);
+		expect(cachedMessagesOpus5.thinking?.disabledThinkingMaxEffort).toBe(Effort.High);
+		expect(explicitUnsupportedOpus5.thinking?.supportsDisabledThinking).toBe(false);
+		expect(explicitUnsupportedOpus5.thinking?.disabledThinkingMaxEffort).toBeUndefined();
 		expect(cachedBedrockOpus5.thinking?.supportsDisabledThinking).toBeUndefined();
 	});
 

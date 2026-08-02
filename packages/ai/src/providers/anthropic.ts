@@ -1066,6 +1066,20 @@ const ANTHROPIC_OUTPUT_EFFORTS: readonly AnthropicOutputEffort[] = ["low", "medi
 export type AnthropicEffort = AnthropicOutputEffort | "adaptive";
 export type AnthropicThinkingDisplay = "summarized" | "omitted";
 
+function clampDisabledThinkingEffort(
+	model: Model<"anthropic-messages">,
+	effort: AnthropicOutputEffort,
+): AnthropicOutputEffort {
+	// Opus 5+ rejects `thinking.type: "disabled"` above its documented effort
+	// ceiling with a 400. The comparison runs in the wire domain:
+	// `AnthropicOutputEffort` has no `minimal`, so the catalog ladder would not
+	// index it.
+	const ceiling = model.thinking?.disabledThinkingMaxEffort;
+	const ceilingIndex = ceiling ? ANTHROPIC_OUTPUT_EFFORTS.indexOf(ceiling as AnthropicOutputEffort) : -1;
+	const effortIndex = ANTHROPIC_OUTPUT_EFFORTS.indexOf(effort);
+	return ceilingIndex >= 0 && effortIndex > ceilingIndex ? ANTHROPIC_OUTPUT_EFFORTS[ceilingIndex] : effort;
+}
+
 export interface AnthropicOptions extends StreamOptions {
 	/**
 	 * Enable extended thinking.
@@ -3094,17 +3108,33 @@ function disableThinkingIfToolChoiceForced(
 	if (!toolChoice) return;
 	if (toolChoice.type !== "any" && toolChoice.type !== "tool") return;
 
+	if (
+		isAdaptiveOnlyThinking(model) &&
+		model.thinking?.supportsDisabledThinking &&
+		model.provider !== "google-vertex"
+	) {
+		params.thinking = { type: "disabled" };
+		delete params.context_management;
+		const outputConfig = params.output_config as AnthropicOutputConfig | undefined;
+		if (outputConfig?.effort) {
+			outputConfig.effort = clampDisabledThinkingEffort(model, outputConfig.effort);
+		}
+		return;
+	}
+
 	delete params.thinking;
 	delete params.context_management;
 
-	// Adaptive-only models can't be switched off by omitting `thinking` — a bare
-	// omission defaults to adaptive thinking ON, so a forced-tool turn would still
-	// reason instead of calling the tool (#6589). Pin the lowest adaptive effort
-	// instead of dropping it, mirroring the disable branch in buildParams. Vertex
-	// rawPredict is the sole exception: it can only carry the effort beta in the
-	// body (dropped there too, see buildParams), so it keeps the delete behavior.
-	// The effort beta itself is attached at the request site — including per-request
-	// for injected SDK clients that bypass client-level beta construction.
+	// Adaptive-only models that do not support explicit disabled thinking can't
+	// be switched off by omitting `thinking` — a bare omission defaults to
+	// adaptive thinking ON, so a forced-tool turn would still reason instead of
+	// calling the tool (#6589). Pin the lowest adaptive effort instead of
+	// dropping it, mirroring the disable branch in buildParams. Vertex rawPredict
+	// is the sole exception: it can only carry the effort beta in the body
+	// (dropped there too, see buildParams), so it keeps the delete behavior.
+	// The effort beta itself is attached at the request site — including
+	// per-request for injected SDK clients that bypass client-level beta
+	// construction.
 	if (isAdaptiveOnlyThinking(model) && model.provider !== "google-vertex") {
 		const outputConfig = (params.output_config as AnthropicOutputConfig | undefined) ?? {};
 		outputConfig.effort = "low";
@@ -3527,19 +3557,8 @@ function buildParams(
 				const disabledEffort = isAdaptiveOnlyThinking(model)
 					? resolveAnthropicAdaptiveEffort(model, options ?? {})
 					: undefined;
-				// Opus 5+ rejects `thinking.type: "disabled"` above its documented
-				// effort ceiling with a 400, enforced per request, so clamp rather
-				// than dropping the caller's effort entirely. The comparison runs in
-				// the wire domain: `AnthropicOutputEffort` has no `minimal`, so the
-				// catalog ladder would not index it.
-				const ceiling = model.thinking?.disabledThinkingMaxEffort;
 				if (disabledEffort && disabledEffort !== "adaptive") {
-					const ceilingIndex = ceiling ? ANTHROPIC_OUTPUT_EFFORTS.indexOf(ceiling as AnthropicOutputEffort) : -1;
-					const effortIndex = ANTHROPIC_OUTPUT_EFFORTS.indexOf(disabledEffort);
-					outputConfigEffort =
-						ceilingIndex >= 0 && effortIndex > ceilingIndex
-							? ANTHROPIC_OUTPUT_EFFORTS[ceilingIndex]
-							: disabledEffort;
+					outputConfigEffort = clampDisabledThinkingEffort(model, disabledEffort);
 				}
 			}
 		}

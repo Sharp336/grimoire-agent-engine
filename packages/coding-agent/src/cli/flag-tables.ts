@@ -54,7 +54,15 @@ export interface ParseDeps {
 	effortLevels: readonly string[];
 }
 
-export type StringSetter = (result: Args, value: string, deps: ParseDeps) => void;
+export interface ParseState {
+	explicitEffort: boolean;
+}
+
+export function createParseState(): ParseState {
+	return { explicitEffort: false };
+}
+
+export type StringSetter = (result: Args, value: string, deps: ParseDeps, state: ParseState) => void;
 
 /**
  * Setter for a flag that may or may not consume the next argv token.
@@ -107,12 +115,8 @@ function parseMaxTimeSeconds(value: string): number {
 	);
 }
 
-/**
- * Results whose effort came from an explicit `--effort`. The deprecated
- * `--thinking <effort>` alias routes onto the same field, so it must never
- * overwrite an explicit flag regardless of argument order.
- */
-const EXPLICIT_EFFORT = new WeakSet<Args>();
+// Per-parse state tracks whether `--effort` has been seen, so deprecated
+// `--thinking <effort>` aliases never overwrite an explicit effort.
 
 /**
  * Setters for flags with string values. Most built-ins consume the next argv
@@ -209,7 +213,7 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 		}
 		result.tools = names;
 	},
-	"--thinking": (result, value, deps) => {
+	"--thinking": (result, value, deps, state) => {
 		const thinkingMode = deps.parseThinkingMode(value);
 		if (thinkingMode !== undefined) {
 			result.thinkingMode = thinkingMode;
@@ -222,10 +226,10 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 		if (effort !== undefined) {
 			// An explicit `--effort` always wins, in either argument order; among
 			// deprecated aliases themselves, last one still wins.
-			if (!EXPLICIT_EFFORT.has(result)) result.effort = effort;
+			if (!state.explicitEffort) result.effort = effort;
 			result.warnings = result.warnings ?? [];
 			result.warnings.push(
-				`--thinking ${value} is deprecated; use --effort ${value}. --thinking now selects a thinking mode (${deps.thinkingModes.join(", ")}).`,
+				`--thinking ${value} is deprecated; use --effort ${effort}. --thinking now selects a thinking mode (${deps.thinkingModes.join(", ")}).`,
 			);
 			return;
 		}
@@ -233,7 +237,7 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 			`Invalid --thinking value: ${JSON.stringify(value)}. Expected one of: ${deps.thinkingModes.join(", ")}, or an effort level (${deps.effortLevels.join(", ")}) which routes to --effort.`,
 		);
 	},
-	"--effort": (result, value, deps) => {
+	"--effort": (result, value, deps, state) => {
 		const effort = deps.parseEffort(value);
 		if (effort === undefined) {
 			throw new CliUsageError(
@@ -241,7 +245,7 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 			);
 		}
 		result.effort = effort;
-		EXPLICIT_EFFORT.add(result);
+		state.explicitEffort = true;
 	},
 	"--export": (result, value) => {
 		result.export = value;

@@ -156,6 +156,8 @@ export interface ModelChangeEntry extends EntryBase {
 export interface ThinkingLevelChangeEntry extends EntryBase {
 	type: "thinking_level_change";
 	thinkingLevel?: string | null;
+	configured?: string | null;
+	thinkingMode?: string | null;
 }
 
 export type SessionEntry =
