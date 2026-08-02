@@ -1593,12 +1593,23 @@ function deriveSelectionWash(panel: string, accent: string, element: string, ste
 }
 
 /**
- * Canvas, panel, element and floating-overlay backgrounds as hex,
- * darkest-surface first, plus the composer selection wash — not a rung of its
- * own, but derived here so it inherits the ladder's step direction instead of
- * deciding appearance twice.
+ * The ladder's surfaces as hex, in derivation order, plus the two selection
+ * washes — not rungs of their own, but derived here so they inherit the
+ * ladder's step direction instead of deciding appearance twice.
+ *
+ * There are two because the wash's contrast floor is measured against the
+ * surface it is painted on, and an editor inside a floating overlay is two
+ * rungs above the composer. One wash cannot be both subtle on `panel` and
+ * legible on `overlay`.
  */
-type SurfaceLadder = readonly [canvas: string, panel: string, element: string, selection: string, overlay: string];
+type SurfaceLadder = readonly [
+	canvas: string,
+	panel: string,
+	element: string,
+	selection: string,
+	overlay: string,
+	selectionOverlay: string,
+];
 
 /**
  * Four stacked surfaces derived from the theme rather than declared by it.
@@ -1638,8 +1649,28 @@ function deriveSurfaceLadder(
 	// not free: it is what a select list's own selected row and hover band paint
 	// on, so filling an overlay with it makes the selection inside that overlay
 	// pixel-identical to its background. One more step clears both.
+	//
+	// Every rung steps toward the theme's foreground, so this one is also the
+	// most expensive: against the panel fill overlays used before, `dim` drops
+	// below 3:1 on 19 more themes and `muted` on 4. Backing off does not buy
+	// that back - a 2.5-step rung rescues 5 of the 71 themes that fail the 3:1
+	// floor here, because 50 of them already fail it on `panel`. The separation
+	// a modal needs is simply not free on the lightness axis; buying it back
+	// means scrimming the transcript behind the modal instead of raising the
+	// modal, which is a real design change and not a constant to retune.
 	const overlay = stepChannels(canvas, step * 3);
-	return [canvas, panel, element, deriveSelectionWash(panel, accent, element, step), overlay];
+	return [
+		canvas,
+		panel,
+		element,
+		deriveSelectionWash(panel, accent, element, step),
+		overlay,
+		// The same derivation re-anchored: an editor inside a floating overlay
+		// paints its selection on `overlay`, two rungs above the composer, so the
+		// panel-anchored wash lands there at 1.10-1.14:1 on most themes - the
+		// exact invisibility this ladder exists to prevent.
+		deriveSelectionWash(overlay, accent, element, step),
+	];
 }
 
 /**
@@ -1778,6 +1809,12 @@ export class Theme {
 	 */
 	readonly selectionBgAnsi: string;
 	/**
+	 * The same wash re-anchored on {@link overlayBgAnsi}, for an editor hosted
+	 * inside a floating overlay. Its contrast floor is measured against the
+	 * surface it lands on, and that surface is two rungs above the composer.
+	 */
+	readonly selectionOverlayBgAnsi: string;
+	/**
 	 * Background open for a floating overlay: one rung above `element`, because
 	 * `element` is what a select list's selected row and hover band paint on and
 	 * an overlay filled with it swallows its own selection.
@@ -1814,6 +1851,7 @@ export class Theme {
 		this.elementBgAnsi = ladder === undefined ? "" : bgAnsi(ladder[2], mode);
 		this.selectionBgAnsi = ladder === undefined ? "" : bgAnsi(ladder[3], mode);
 		this.overlayBgAnsi = ladder === undefined ? "" : bgAnsi(ladder[4], mode);
+		this.selectionOverlayBgAnsi = ladder === undefined ? "" : bgAnsi(ladder[5], mode);
 		// Build symbol map from preset + overrides
 		const baseSymbols = SYMBOL_PRESETS[symbolPreset];
 		this.#symbols = { ...baseSymbols };
@@ -1956,6 +1994,19 @@ export class Theme {
 	 */
 	selectionBg(text: string, width?: number): string {
 		return paintSurface(this.selectionBgAnsi, text, width);
+	}
+
+	/**
+	 * {@link selectionBg} for an editor hosted inside a floating overlay.
+	 *
+	 * Two rungs of separation is exactly the gap that made this necessary: the
+	 * panel-anchored wash lands on `overlay` at 1.10-1.14:1 on 95 of the 98
+	 * bundled themes, which is the invisibility {@link deriveSelectionWash}
+	 * exists to rule out. One wash cannot serve both surfaces — clearing the
+	 * floor against `overlay` would overshoot on the composer.
+	 */
+	selectionOverlayBg(text: string, width?: number): string {
+		return paintSurface(this.selectionOverlayBgAnsi, text, width);
 	}
 
 	/**
@@ -3509,7 +3560,31 @@ export function getSelectListTheme(): SelectListTheme {
 	};
 }
 
-export function getEditorTheme(): EditorTheme {
+/**
+ * Which surface the editor will be drawn on. Only the selection wash depends
+ * on it: its contrast floor is measured against the background it lands on,
+ * and a floating overlay is two rungs above the composer.
+ */
+export type EditorSurface = "panel" | "overlay";
+
+/**
+ * The wash an editor on `surface` paints selected text with.
+ *
+ * A theme that leaves `statusLineBg` at the terminal default derives no surface
+ * ladder, so there is no rung to tint and either wash would paint nothing at
+ * all. Reverse video needs no palette and inverts whatever the row already
+ * carries, which is what the transcript's own drag-select uses for exactly this
+ * reason.
+ */
+function selectionWashFor(surface: EditorSurface): (text: string) => string {
+	const open = surface === "overlay" ? theme.selectionOverlayBgAnsi : theme.selectionBgAnsi;
+	if (open === "") return (text: string) => `\x1b[7m${text}\x1b[27m`;
+	return surface === "overlay"
+		? (text: string) => theme.selectionOverlayBg(text)
+		: (text: string) => theme.selectionBg(text);
+}
+
+export function getEditorTheme(surface: EditorSurface = "panel"): EditorTheme {
 	// Guard against `theme` being undefined (pre-init or cross-module-instance
 	// plugin calls). See #2998.
 	if (typeof theme === "undefined") {
@@ -3535,10 +3610,7 @@ export function getEditorTheme(): EditorTheme {
 		// paint nothing at all. Reverse video needs no palette and inverts
 		// whatever the row already carries, which is what the transcript's own
 		// drag-select uses for exactly this reason.
-		selectionWash:
-			theme.selectionBgAnsi === ""
-				? (text: string) => `\x1b[7m${text}\x1b[27m`
-				: (text: string) => theme.selectionBg(text),
+		selectionWash: selectionWashFor(surface),
 	};
 }
 
