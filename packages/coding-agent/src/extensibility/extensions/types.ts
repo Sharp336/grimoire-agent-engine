@@ -103,6 +103,7 @@ import type {
 } from "../shared-events";
 import type { SlashCommandInfo } from "../slash-commands";
 import type * as TypeBox from "../typebox";
+import type { RequiredExtensionOptions } from "./required";
 
 export type { AppKeybinding, KeybindingsManager } from "../../config/keybindings";
 export type { ExecOptions, ExecResult } from "../../exec/exec";
@@ -1557,6 +1558,8 @@ export interface LoadExtensionsResult {
 	extensions: Extension[];
 	errors: Array<{ path: string; error: string }>;
 	runtime: ExtensionRuntime;
+	/** Effective required-mode options, including verified source snapshots. */
+	requiredExtensionOptions?: RequiredExtensionOptions;
 }
 
 // ============================================================================

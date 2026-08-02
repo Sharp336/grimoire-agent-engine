@@ -51,6 +51,7 @@ import {
 } from "./discovery/helpers";
 import { injectOmpExtensionCliRoots } from "./discovery/omp-extension-roots";
 import { formatExtensionLoadNotifications } from "./extensibility/extensions/load-errors";
+import { validateRequiredExtensionOptions } from "./extensibility/extensions/required";
 import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
@@ -372,6 +373,7 @@ export interface AcpSessionFactoryOptions {
  * tool registry and shadow the client-supplied servers (issue #1234).
  */
 export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSessionFactory {
+	let requiredExtensionOptions = args.baseOptions.requiredExtensionOptions;
 	return async cwd => {
 		const nextSettings = await args.settings.cloneForCwd(cwd);
 		const nextSessionManager = SessionManager.create(cwd, args.sessionDir);
@@ -383,7 +385,7 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 		// policy (PR #3736 follow-up).
 		const titleSystemPromptSource = discoverTitleSystemPromptFile(cwd);
 		const titleSystemPrompt = await resolvePromptInput(titleSystemPromptSource, "title system prompt");
-		const { session: nextSession } = await args.createSession({
+		const result = await args.createSession({
 			...args.baseOptions,
 			cwd,
 			sessionManager: nextSessionManager,
@@ -391,12 +393,17 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			authStorage: args.authStorage,
 			modelRegistry: args.modelRegistry,
 			agentId,
+			requiredExtensionOptions,
+			eventBus: undefined,
+			preloadedExtensions: undefined,
 			// Preserve reserve-policy confirmation until ACP capabilities are known
 			// without enabling AskTool or other UI-only session behavior.
 			deferUsageReserveConfirmation: true,
 			enableMCP: false,
 			titleSystemPrompt,
 		});
+		const { session: nextSession } = result;
+		requiredExtensionOptions = result.extensionsResult.requiredExtensionOptions ?? requiredExtensionOptions;
 		if (args.parsedArgs.apiKey && !args.baseOptions.model && nextSession.model) {
 			args.authStorage.setRuntimeApiKey(nextSession.model.provider, args.parsedArgs.apiKey);
 		}
@@ -1114,6 +1121,12 @@ export async function buildSessionOptions(
 	if (cliExtensionPaths.length > 0) {
 		options.additionalExtensionPaths = cliExtensionPaths;
 	}
+	const requiredExtensions = validateRequiredExtensionOptions(parsed);
+	if (requiredExtensions) {
+		options.additionalExtensionPaths = requiredExtensions.requiredExtensions.map(extension => extension.path);
+		options.disableExtensionDiscovery = true;
+		options.requiredExtensionOptions = requiredExtensions;
+	}
 
 	if (parsed.noExtensions) {
 		options.disableExtensionDiscovery = true;
@@ -1542,7 +1555,15 @@ export async function runRootCommand(
 		}
 
 		const eventBus = new EventBus();
-		const extensionsResult = await loadSessionExtensions(sessionOptions, cwd, settingsInstance, eventBus);
+		const extensionsResult = await loadSessionExtensions(sessionOptions, cwd, settingsInstance, eventBus, {
+			requiredExtensions: parsedArgs.requiredExtensions,
+			requiredExtensionSha256: parsedArgs.requiredExtensionSha256,
+			extensionLoadReceipt: parsedArgs.extensionLoadReceipt,
+			extensions: parsedArgs.extensions,
+			hooks: parsedArgs.hooks,
+		});
+		sessionOptions.requiredExtensionOptions =
+			extensionsResult.requiredExtensionOptions ?? sessionOptions.requiredExtensionOptions;
 		const extensionFlagSink: ExtensionFlagSink = {
 			getFlags: () => ExtensionRunner.aggregateFlags(extensionsResult.extensions),
 			setFlagValue: (name, value) => {

@@ -428,6 +428,7 @@ function buildExecutorOptions(
 		rules: session.rules,
 		preloadedExtensionPaths: restrictToolNames ? [] : session.extensionPaths,
 		preloadedCustomToolPaths: restrictToolNames ? [] : session.customToolPaths,
+		requiredExtensionOptions: session.requiredExtensionOptions,
 		localProtocolOptions,
 		parentArtifactManager: session.getArtifactManager?.() ?? undefined,
 		parentHindsightSessionState: session.getHindsightSessionState?.(),

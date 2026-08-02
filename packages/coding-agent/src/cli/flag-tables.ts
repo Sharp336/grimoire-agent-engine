@@ -210,6 +210,17 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 		result.hooks.push(value);
 	},
 	"--extension": setExtension,
+	"--required-extension": (result, value) => {
+		result.requiredExtensions = result.requiredExtensions ?? [];
+		result.requiredExtensions.push(value);
+	},
+	"--required-extension-sha256": (result, value) => {
+		result.requiredExtensionSha256 = result.requiredExtensionSha256 ?? [];
+		result.requiredExtensionSha256.push(value);
+	},
+	"--extension-load-receipt": (result, value) => {
+		result.extensionLoadReceipt = value;
+	},
 	"-e": setExtension,
 	"--plugin-dir": (result, value) => {
 		result.pluginDirs = result.pluginDirs ?? [];

@@ -403,6 +403,8 @@ export interface ExecutorOptions {
 	 * extension against its own `ExtensionAPI` (cwd, eventBus, runtime).
 	 */
 	preloadedExtensionPaths?: string[];
+	/** Verified required-extension specs and snapshots forwarded to child sessions. */
+	requiredExtensionOptions?: CreateAgentSessionOptions["requiredExtensionOptions"];
 	/**
 	 * Parent's discovered custom-tool source paths. Forwarded to skip the
 	 * `.omp/tools/` FS scan in the subagent; the subagent then re-binds each
@@ -2957,6 +2959,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				promptTemplates: options.promptTemplates,
 				workspaceTree: options.workspaceTree,
 				rules: options.rules,
+				requiredExtensionOptions: options.requiredExtensionOptions,
 				preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
 				preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
 				systemPrompt: defaultPrompt => {

@@ -90,7 +90,10 @@ import {
 	type LoadExtensionsResult,
 	loadExtensionFromFactory,
 	loadExtensions,
+	type RequiredExtensionOptions,
+	type RequiredExtensionOptionsInput,
 	type ToolDefinition,
+	validateRequiredExtensionOptions,
 	wrapRegisteredTools,
 } from "./extensibility/extensions";
 import {
@@ -443,6 +446,12 @@ export interface CreateAgentSessionOptions {
 	 * This is the safe pass-through for parent → subagent forwarding.
 	 */
 	preloadedExtensionPaths?: string[];
+
+	/**
+	 * Required extension specs and their verified in-process source snapshots.
+	 * Forwarded to every child session; ambient discovery is disabled.
+	 */
+	requiredExtensionOptions?: RequiredExtensionOptions;
 	/**
 	 * Pre-discovered custom-tool source paths from `.omp/tools/`, `.claude/tools/`,
 	 * plugins, etc. When provided, the filesystem-scan inside
@@ -721,7 +730,19 @@ export async function loadSessionExtensions(
 	cwd: string,
 	settings: Settings,
 	eventBus: EventBus,
+	requiredOptions?: RequiredExtensionOptionsInput,
 ): Promise<LoadExtensionsResult> {
+	const required = validateRequiredExtensionOptions(requiredOptions ?? {});
+	if (required) {
+		return logger.time(
+			"loadRequiredExtensions",
+			loadExtensions,
+			required.requiredExtensions.map(extension => extension.path),
+			cwd,
+			eventBus,
+			required,
+		);
+	}
 	const paths = await discoverSessionExtensionPaths(options, cwd, settings);
 	const result = await logger.time("loadExtensions", loadExtensions, paths, cwd, eventBus);
 	for (const { path, error } of result.errors) {
@@ -2005,21 +2026,30 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// the flag and pre-resolved the result already reflects that choice.
 		let extensionPaths: string[];
 		let extensionsResult: LoadExtensionsResult;
-		if (restrictToolNames) {
-			// Allocate a session runtime without evaluating caller-provided extension
-			// instances, paths, or factories.
-			extensionPaths = [];
-			extensionsResult = await loadExtensions([], cwd, eventBus);
-		} else if (options.preloadedExtensions) {
+		if (options.preloadedExtensions) {
 			extensionsResult = {
 				...options.preloadedExtensions,
 				extensions: [...options.preloadedExtensions.extensions],
 			};
-			// Capture paths for downstream forwarding; filter inline-factory
-			// entries (`<inline-N>`) — those are per-session, not source paths.
 			extensionPaths = extensionsResult.extensions
 				.map(ext => ext.resolvedPath)
 				.filter(p => !p.startsWith("<inline"));
+		} else if (options.requiredExtensionOptions) {
+			extensionPaths = options.requiredExtensionOptions.requiredExtensions.map(extension => extension.path);
+			extensionsResult = await logger.time(
+				"loadRequiredExtensions",
+				loadExtensions,
+				extensionPaths,
+				cwd,
+				eventBus,
+				options.requiredExtensionOptions,
+			);
+			for (const { path, error } of extensionsResult.errors) {
+				logger.error("Failed to load extension", { path, error });
+			}
+		} else if (restrictToolNames) {
+			extensionPaths = [];
+			extensionsResult = await loadExtensions([], cwd, eventBus);
 		} else if (options.preloadedExtensionPaths) {
 			extensionPaths = options.preloadedExtensionPaths;
 			extensionsResult = await logger.time("loadExtensions", loadExtensions, extensionPaths, cwd, eventBus);
@@ -2039,6 +2069,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// rebuild their own session-scoped extensions.
 		toolSession.extensionPaths = extensionPaths;
 
+		toolSession.requiredExtensionOptions =
+			extensionsResult.requiredExtensionOptions ?? options.requiredExtensionOptions;
 		// Load inline extensions from factories
 		if (inlineExtensions.length > 0) {
 			for (let i = 0; i < inlineExtensions.length; i++) {

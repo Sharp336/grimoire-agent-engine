@@ -1294,6 +1294,7 @@ export class VibeSessionRegistry {
 			rules: session.rules,
 			preloadedExtensionPaths: session.extensionPaths,
 			preloadedCustomToolPaths: session.customToolPaths,
+			requiredExtensionOptions: session.requiredExtensionOptions,
 			localProtocolOptions,
 			parentArtifactManager: session.getArtifactManager?.() ?? undefined,
 			parentHindsightSessionState: session.getHindsightSessionState?.(),

@@ -3,6 +3,7 @@
  */
 import { APP_NAME, CONFIG_DIR_NAME, logger } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
+import { validateRequiredExtensionOptions } from "../extensibility/extensions/required";
 import { CLI_THINKING_LEVELS, type ConfiguredThinkingLevel, parseCliThinkingLevel } from "../thinking";
 import { BUILTIN_TOOL_NAMES, HIDDEN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import {
@@ -63,6 +64,9 @@ export interface Args {
 	noPty?: boolean;
 	hooks?: string[];
 	extensions?: string[];
+	requiredExtensions?: string[];
+	requiredExtensionSha256?: string[];
+	extensionLoadReceipt?: string;
 	noExtensions?: boolean;
 	pluginDirs?: string[];
 	print?: boolean;
@@ -105,7 +109,7 @@ const PARSE_DEPS: ParseDeps = {
 	thinkingEfforts: CLI_THINKING_LEVELS,
 };
 
-const WINDOWS_PATH_VALUE_FLAGS: ReadonlySet<string> = new Set(["--extension", "-e", "--hook"]);
+const WINDOWS_PATH_VALUE_FLAGS: ReadonlySet<string> = new Set(["--extension", "-e", "--hook", "--required-extension"]);
 const WINDOWS_PATH_START_RE =
 	/^(?:[A-Za-z]:[\\/]|\\\\[?]\\(?:[A-Za-z]:[\\/]|UNC[\\/])|\\\\[^\\/]+[\\/][^\\/]+[\\/]|\/\/[?]\/(?:[A-Za-z]:\/|UNC\/)|\/\/[^/]+\/[^/]+\/)/;
 const WINDOWS_MODULE_PATH_SUFFIX_RE = /\.(?:[cm]?[jt]sx?)$/i;
@@ -298,6 +302,7 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 		}
 	}
 
+	validateRequiredExtensionOptions(result);
 	return result;
 }
 
