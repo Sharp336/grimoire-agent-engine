@@ -21,7 +21,7 @@
 
 - Exposed the script-driven `computer` schema to every model, including models with provider-native Computer Use support, because native action declarations cannot express persistent desktop sessions or accessibility handles.
 - Reduced `omp --help` cold-start latency and memory use by rendering lightweight command metadata without loading every runtime command and provider graph.
-- Loaded independent extensions with bounded concurrency while preserving declared-path order for extensions, errors, and provider registration precedence.
+- Loaded independent extensions with bounded concurrency while preserving declared-path order for extensions, errors, provider registrations, and flag defaults.
 
 ### Fixed
 
