@@ -1022,6 +1022,35 @@ describe("Editor Vim input mode", () => {
 		expect(editor.getText()).toBe("abcQx");
 	});
 
+	it("cancels an insert-mode character jump when Escape enters normal mode", () => {
+		const editor = createVimEditor();
+		editor.setText("abxc");
+		typeText(editor, "0i");
+		editor.handleInput("\x1d");
+
+		editor.handleInput("\x1b");
+		editor.handleInput("x");
+
+		expect(editor.getText()).toBe("bxc");
+		expect(editor.getCursor()).toEqual({ line: 0, col: 0 });
+	});
+
+	it.each([
+		{ pending: "d", key: "w", expected: "one two", cursor: { line: 0, col: 4 } },
+		{ pending: "3", key: "x", expected: "ne two", cursor: { line: 0, col: 0 } },
+	])("clears pending '$pending' before reserved Ctrl-C", ({ pending, key, expected, cursor }) => {
+		const editor = createVimEditor();
+		editor.setText("one two");
+		editor.handleInput("0");
+		editor.handleInput(pending);
+
+		editor.handleInput("\x03");
+		editor.handleInput(key);
+
+		expect(editor.getText()).toBe(expected);
+		expect(editor.getCursor()).toEqual(cursor);
+	});
+
 	it("cleanly switches back to default editing behavior", () => {
 		const editor = createVimEditor();
 		editor.setText("ab");

@@ -1245,6 +1245,7 @@ export class Editor implements Component, Focusable {
 
 		if (this.isVimModeEscape(data)) {
 			if (this.#autocompleteState) this.#cancelAutocomplete(true);
+			this.#jumpMode = null;
 			this.#vim.enterNormalMode();
 			return;
 		}
@@ -1308,6 +1309,7 @@ export class Editor implements Component, Focusable {
 		// Do not consume arbitrary user-bound "copy" keys here, since the editor
 		// has no copy implementation and would make those keys disappear.
 		if (matchesKey(data, "ctrl+c")) {
+			if (this.#inputMode === "vim") this.#vim.clearPendingCommand();
 			return;
 		}
 
