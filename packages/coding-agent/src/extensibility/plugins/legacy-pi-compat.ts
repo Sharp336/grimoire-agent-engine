@@ -2403,6 +2403,27 @@ function installPrebuiltExtensionHook(entryRealPath: string, source: string): vo
 	}
 }
 
+// Promise-tail map that serializes the complete source-preparation→import→cleanup
+// lifetime per real entry path. Distinct paths stay concurrent; same-path loads wait
+// until the prior load's `finally` releases retained state before reading/validating
+// source or choosing prebuilt vs graph fallback.
+const legacyPiModuleLoadTails = new Map<string, Promise<void>>();
+
+async function runSerializedLegacyPiModuleLoad<T>(entryRealPath: string, run: () => Promise<T>): Promise<T> {
+	const previous = legacyPiModuleLoadTails.get(entryRealPath) ?? Promise.resolve();
+	const { promise: gate, resolve: release } = Promise.withResolvers<void>();
+	legacyPiModuleLoadTails.set(entryRealPath, gate);
+	try {
+		await previous.catch(() => undefined);
+		return await run();
+	} finally {
+		release();
+		if (legacyPiModuleLoadTails.get(entryRealPath) === gate) {
+			legacyPiModuleLoadTails.delete(entryRealPath);
+		}
+	}
+}
+
 /**
  * Load a legacy Pi extension module from its real on-disk location.
  *
@@ -2419,42 +2440,44 @@ export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown>
 	// `bun link`/pnpm installs) so the rewrite filter matches the path Bun
 	// actually hands the hook.
 	const entryRealPath = await realpathOrSelf(path.resolve(resolvedPath));
-	await ensureLegacyPiOverridesReady();
-	const prebuiltSource = await preparePrebuiltExtensionEntry(entryRealPath);
-	let pendingSources: { clear(): void } | undefined;
-	let retainedPrebuiltPath: string | undefined;
-	if (prebuiltSource === null) {
-		// A sidecar that went missing or stale must stop the retained fast-path source
-		// from serving this entry, so the graph hook below takes over cleanly. Force-evict
-		// even if another load's retain count is non-zero: serving a stale rewritten snapshot
-		// would defeat the hash check that rejected this sidecar.
-		prebuiltExtensionSources.delete(entryRealPath);
-		prebuiltExtensionSourceRetainCounts.delete(entryRealPath);
-		pendingSources = await ensureExtensionGraphHook(entryRealPath);
-	} else {
-		installPrebuiltExtensionHook(entryRealPath, prebuiltSource);
-		retainedPrebuiltPath = entryRealPath;
-	}
-	try {
-		// Dynamic import is required: legacy extension entry paths are user/plugin supplied at runtime.
-		// On POSIX, use the raw filesystem path so Bun keys the `?mtime`
-		// suffix as part of the module identity; Bun ignores query strings on
-		// `file://` specifiers, which would serve stale edited source.
-		const entrySpecifier =
-			process.platform === "win32" || isBundledVirtualSpecifier(entryRealPath)
-				? toImportSpecifier(entryRealPath)
-				: entryRealPath;
-		return await import(`${entrySpecifier}?mtime=${nextLegacyPiLoadTag()}`);
-	} finally {
-		// Drop graph snapshots the initial import didn't consume: graph modules only
-		// reached by lazy dynamic imports must be read from disk at their actual import
-		// time, not served from this load-time snapshot. Release the prebuilt source once
-		// the last in-flight load for this path finishes (success or error).
-		pendingSources?.clear();
-		if (retainedPrebuiltPath !== undefined) {
-			releasePrebuiltExtensionSource(retainedPrebuiltPath);
+	return runSerializedLegacyPiModuleLoad(entryRealPath, async () => {
+		await ensureLegacyPiOverridesReady();
+		const prebuiltSource = await preparePrebuiltExtensionEntry(entryRealPath);
+		let pendingSources: { clear(): void } | undefined;
+		let retainedPrebuiltPath: string | undefined;
+		if (prebuiltSource === null) {
+			// A sidecar that went missing or stale must stop the retained fast-path source
+			// from serving this entry, so the graph hook below takes over cleanly. Force-evict
+			// even if another load's retain count is non-zero: serving a stale rewritten snapshot
+			// would defeat the hash check that rejected this sidecar.
+			prebuiltExtensionSources.delete(entryRealPath);
+			prebuiltExtensionSourceRetainCounts.delete(entryRealPath);
+			pendingSources = await ensureExtensionGraphHook(entryRealPath);
+		} else {
+			installPrebuiltExtensionHook(entryRealPath, prebuiltSource);
+			retainedPrebuiltPath = entryRealPath;
 		}
-	}
+		try {
+			// Dynamic import is required: legacy extension entry paths are user/plugin supplied at runtime.
+			// On POSIX, use the raw filesystem path so Bun keys the `?mtime`
+			// suffix as part of the module identity; Bun ignores query strings on
+			// `file://` specifiers, which would serve stale edited source.
+			const entrySpecifier =
+				process.platform === "win32" || isBundledVirtualSpecifier(entryRealPath)
+					? toImportSpecifier(entryRealPath)
+					: entryRealPath;
+			return await import(`${entrySpecifier}?mtime=${nextLegacyPiLoadTag()}`);
+		} finally {
+			// Drop graph snapshots the initial import didn't consume: graph modules only
+			// reached by lazy dynamic imports must be read from disk at their actual import
+			// time, not served from this load-time snapshot. Release the prebuilt source once
+			// the last in-flight load for this path finishes (success or error).
+			pendingSources?.clear();
+			if (retainedPrebuiltPath !== undefined) {
+				releasePrebuiltExtensionSource(retainedPrebuiltPath);
+			}
+		}
+	});
 }
 
 function getLoader(path: string): "js" | "jsx" | "ts" | "tsx" {

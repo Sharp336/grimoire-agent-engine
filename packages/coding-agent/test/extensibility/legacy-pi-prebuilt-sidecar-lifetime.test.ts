@@ -64,7 +64,9 @@ describe("legacy-pi-compat prebuilt sidecar lifetime", () => {
 		fileSpy?.mockRestore();
 		__resetLegacyPiResolutionCache();
 		tempDir?.removeSync();
-		delete (globalThis as { __ompPrebuiltTestGate?: Promise<void> }).__ompPrebuiltTestGate;
+		delete (globalThis as { __ompPrebuiltTestGateA?: Promise<void> }).__ompPrebuiltTestGateA;
+		delete (globalThis as { __ompPrebuiltTestEnteredA?: () => void }).__ompPrebuiltTestEnteredA;
+		delete (globalThis as { __ompPrebuiltTestEnteredB?: () => void }).__ompPrebuiltTestEnteredB;
 	});
 
 	it("releases the retained prebuilt source after a successful import completes", async () => {
@@ -93,32 +95,51 @@ describe("legacy-pi-compat prebuilt sidecar lifetime", () => {
 		expect(__getPrebuiltExtensionSourceRetainCountForTests(entryRealPath)).toBe(0);
 	});
 
-	it("keeps the prebuilt source for overlapping loads and releases only after the last finishes", async () => {
+	it("serializes same-path loads so a later snapshot cannot evaluate while an earlier load is still in-flight", async () => {
 		const entryPath = path.join(tempDir.absolute(), "overlap.js");
-		const { promise: gate, resolve: releaseGate } = Promise.withResolvers<void>();
-		(globalThis as { __ompPrebuiltTestGate?: Promise<void> }).__ompPrebuiltTestGate = gate;
-		const source = `await globalThis.__ompPrebuiltTestGate;\nexport const marker = "overlap";\n`;
-		fs.writeFileSync(entryPath, source, "utf8");
-		writeValidSidecar(entryPath, source);
+		const { promise: gateA, resolve: releaseA } = Promise.withResolvers<void>();
+		const { promise: enteredA, resolve: markEnteredA } = Promise.withResolvers<void>();
+		const { promise: enteredB, resolve: markEnteredB } = Promise.withResolvers<void>();
+		(globalThis as { __ompPrebuiltTestGateA?: Promise<void> }).__ompPrebuiltTestGateA = gateA;
+		(globalThis as { __ompPrebuiltTestEnteredA?: () => void }).__ompPrebuiltTestEnteredA = markEnteredA;
+		(globalThis as { __ompPrebuiltTestEnteredB?: () => void }).__ompPrebuiltTestEnteredB = markEnteredB;
+
+		const sourceV1 =
+			`globalThis.__ompPrebuiltTestEnteredA?.();\n` +
+			`await globalThis.__ompPrebuiltTestGateA;\n` +
+			`export const marker = "v1";\n`;
+		fs.writeFileSync(entryPath, sourceV1, "utf8");
+		writeValidSidecar(entryPath, sourceV1);
 		const entryRealPath = fs.realpathSync(entryPath);
 
 		const loadA = loadLegacyPiModule(entryPath);
+		await enteredA;
+
+		const sourceV2 = `globalThis.__ompPrebuiltTestEnteredB?.();\nexport const marker = "v2";\n`;
+		fs.writeFileSync(entryPath, sourceV2, "utf8");
+		writeValidSidecar(entryPath, sourceV2);
+
 		const loadB = loadLegacyPiModule(entryPath);
 
-		// Both imports are blocked on the shared gate inside module evaluation, so both
-		// retains must still be held (neither finally has run yet).
-		for (let i = 0; i < 50 && __getPrebuiltExtensionSourceRetainCountForTests(entryRealPath) < 2; i++) {
-			await Bun.sleep(5);
-		}
-		expect(__getPrebuiltExtensionSourceRetainCountForTests(entryRealPath)).toBe(2);
+		// Without same-path serialization, B can prepare+evaluate v2 while A is still gated.
+		let v2EvaluatedEarly = false;
+		await Promise.race([
+			enteredB.then(() => {
+				v2EvaluatedEarly = true;
+			}),
+			Bun.sleep(50),
+		]);
+		expect(v2EvaluatedEarly).toBe(false);
 		expect(__hasRetainedPrebuiltExtensionSourceForTests(entryRealPath)).toBe(true);
-		releaseGate();
+
+		releaseA();
 
 		const [a, b] = (await Promise.all([loadA, loadB])) as [{ marker: string }, { marker: string }];
-		expect(a.marker).toBe("overlap");
-		expect(b.marker).toBe("overlap");
+		expect(a.marker).toBe("v1");
+		expect(b.marker).toBe("v2");
 		expect(__hasRetainedPrebuiltExtensionSourceForTests(entryRealPath)).toBe(false);
 		expect(__getPrebuiltExtensionSourceRetainCountForTests(entryRealPath)).toBe(0);
+		expect(__hasGraphPreparedExtensionSourceForTests(entryRealPath)).toBe(false);
 	});
 
 	it("reuses the graph-prepared entry on a stale-sidecar reload instead of a third disk read", async () => {
