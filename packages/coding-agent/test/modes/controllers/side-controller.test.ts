@@ -297,6 +297,7 @@ describe("SideController", () => {
 		expect(capturedCreateOpts?.spawns).toBe("");
 		expect(capturedCreateOpts?.taskDepth).toBe(1);
 		expect(capturedCreateOpts?.parentTaskPrefix).toBeUndefined();
+		expect(capturedCreateOpts?.initializeCapabilitySettings).toBe(false);
 		// Settings must be an isolated snapshot: parent values preserved, only
 		// compaction.strategy forced to context-full (handoff would strand the side).
 		const sideSettings = capturedCreateOpts?.settings;
