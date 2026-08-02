@@ -6,6 +6,7 @@ import {
 	Editor,
 	type EditorTheme,
 	type KeyId,
+	matchesKey,
 	parseKey,
 	parseKittySequence,
 	TUI,
@@ -39,6 +40,7 @@ type ConfigurableEditorAction = Extract<
 	| "app.clipboard.pasteImage"
 	| "app.clipboard.pasteTextRaw"
 	| "app.clipboard.copyPrompt"
+	| "app.stt.toggle"
 >;
 
 const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
@@ -61,6 +63,7 @@ const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.clipboard.pasteImage": ["ctrl+v"],
 	"app.clipboard.pasteTextRaw": ["ctrl+shift+v", "alt+shift+v"],
 	"app.clipboard.copyPrompt": ["alt+shift+c"],
+	"app.stt.toggle": [],
 };
 
 function buildMatchKeys(keys: readonly KeyId[]): Set<string> {
@@ -414,6 +417,23 @@ export class CustomEditor extends Editor {
 	constructor(...args: readonly unknown[]) {
 		super(pickEditorTheme(args));
 		if (args[0] instanceof TUI) this.tui = args[0];
+		this.undoStateHooks = {
+			capture: () => ({
+				imageLinks: this.imageLinks,
+				pendingImages: this.pendingImages,
+				pendingImageLinks: this.pendingImageLinks,
+			}),
+			restore: state => {
+				const draft = state as {
+					imageLinks: (string | undefined)[] | undefined;
+					pendingImages: ImageContent[];
+					pendingImageLinks: (string | undefined)[];
+				};
+				this.imageLinks = draft.imageLinks;
+				this.pendingImages = draft.pendingImages;
+				this.pendingImageLinks = draft.pendingImageLinks;
+			},
+		};
 	}
 
 	/** Clear the composer draft: optionally commit `historyText` to history, then
@@ -562,11 +582,13 @@ export class CustomEditor extends Editor {
 	/** Called when a bracketed paste contains one or more image-file paths. */
 	onPasteImagePath?: (path: string) => void | Promise<void>;
 	/** Called when the configured raw text-paste shortcut is pressed. */
-	onPasteTextRaw?: () => void;
+	onPasteTextRaw?: () => void | Promise<void>;
 	/** Called when the configured dequeue shortcut is pressed. */
 	onDequeue?: () => void;
 	/** Called when the configured retry shortcut is pressed. */
 	onRetry?: () => void;
+	/** Called when the configured speech-to-text toggle is pressed. */
+	onSTTToggle?: () => void;
 	/** Called when Caps Lock is pressed. */
 	onCapsLock?: () => void;
 	/** Called when left-arrow is pressed while the editor is empty (cursor necessarily at start). */
@@ -595,6 +617,9 @@ export class CustomEditor extends Editor {
 	 *  dispatching them so a trailing `Enter` after `Cmd+V` can't submit before the image lands on
 	 *  `pendingImages` (Codex PR #3602 review). */
 	#pasteInFlight = 0;
+	/** Aborted when an editor cancellation shortcut releases the current async-paste gate. Async
+	 *  producers capture the signal before their first await so canceled results cannot commit. */
+	#asyncPasteAbort = new AbortController();
 	/** Input chunks deferred behind an in-flight paste, drained in FIFO order once the paste
 	 *  count returns to zero. */
 	#pendingInput: string[] = [];
@@ -740,7 +765,7 @@ export class CustomEditor extends Editor {
 		this.#spaceHoldTimer.unref?.();
 	}
 
-	#endSpaceHold(): void {
+	cancelSpaceHold(): void {
 		if (!this.#spaceHoldActive) return;
 		this.#spaceHoldActive = false;
 		this.#resetSpaceRun();
@@ -748,36 +773,60 @@ export class CustomEditor extends Editor {
 			clearTimeout(this.#spaceHoldTimer);
 			this.#spaceHoldTimer = undefined;
 		}
+	}
+
+	#endSpaceHold(): void {
+		if (!this.#spaceHoldActive) return;
+		this.cancelSpaceHold();
 		this.onSpaceHoldEnd?.();
 	}
 
-	/** Decrement {@link #pasteInFlight} once an async paste settles and, when the count returns
-	 *  to zero, drain {@link #pendingInput} through `handleInput` so requeueing still works if a
-	 *  drained chunk triggers another async paste. Bound member so it can be passed straight to
-	 *  `Promise.then(callback, callback)`. */
-	#onPasteSettled = (): void => {
+	/** Signal scoped to the current async-paste generation. Producers must check it before
+	 *  committing an awaited result to the editor. */
+	getAsyncPasteSignal(): AbortSignal {
+		return this.#asyncPasteAbort.signal;
+	}
+
+	/** Decrement {@link #pasteInFlight} once a non-canceled async paste settles and, when the
+	 *  count returns to zero, drain {@link #pendingInput} through `handleInput`. */
+	#onPasteSettled(signal: AbortSignal): void {
+		if (signal.aborted) return;
 		this.#pasteInFlight--;
 		if (this.#pasteInFlight > 0) return;
 		const drained = this.#pendingInput.splice(0);
 		for (const chunk of drained) this.handleInput(chunk);
-	};
+	}
 
-	/** Track `promise` as an in-flight paste so subsequent `handleInput` calls queue behind it,
-	 *  then drain the queue once it settles. Codex PR #3602 review: without this, a trailing
-	 *  keystroke (Enter most painfully) in the same stdin read processes synchronously while the
-	 *  clipboard read is still pending — submit fires with the text but `pendingImages` is still
-	 *  empty and the image lands on the *next* draft instead. */
-	#trackAsyncPaste(promise: Promise<unknown>): void {
+	/** Track an in-flight paste so subsequent input cannot overtake its editor mutation. */
+	trackAsyncPaste<T>(promise: Promise<T>): Promise<T> {
+		const signal = this.#asyncPasteAbort.signal;
 		this.#pasteInFlight++;
-		void promise.then(this.#onPasteSettled, this.#onPasteSettled);
+		const onSettled = (): void => this.#onPasteSettled(signal);
+		void promise.then(onSettled, onSettled);
+		return promise;
 	}
 
 	handleInput(data: string): void {
 		// Serialize behind any in-flight async paste so a trailing Enter / follow-up key can't
 		// submit before the clipboard image reaches `pendingImages` (Codex PR #3602 review).
+		// Cancellation shortcuts abort this paste generation, discard queued input, and continue
+		// through normal routing immediately; async producers discard any later result.
 		if (this.#pasteInFlight > 0) {
-			this.#pendingInput.push(data);
-			return;
+			const parsed = parseKey(data);
+			const canonical = parsed !== undefined ? canonicalKeyId(parsed) : undefined;
+			const cancelsPaste =
+				(this.getVimMode() === "insert" && matchesKey(data, "escape")) ||
+				this.#matchesAction(canonical, "app.interrupt") ||
+				this.#matchesAction(canonical, "app.clear") ||
+				this.#matchesAction(canonical, "app.exit");
+			if (!cancelsPaste) {
+				this.#pendingInput.push(data);
+				return;
+			}
+			this.#pendingInput.length = 0;
+			this.#asyncPasteAbort.abort();
+			this.#asyncPasteAbort = new AbortController();
+			this.#pasteInFlight = 0;
 		}
 		// textEquals avoids getText()'s O(buffer) join on every keystroke; kitty
 		// sequences always start with ESC, so plain bytes skip the native parse.
@@ -810,15 +859,28 @@ export class CustomEditor extends Editor {
 			// Enter that the user pressed right after Cmd+V) so they only fire *after* the paste
 			// completes — fixes the race where submit runs against an empty `pendingImages`.
 			if (remaining.length > 0) this.#pendingInput.push(remaining);
+			const pasteVimMode = this.getVimMode();
+			if (pasteVimMode !== undefined && pasteVimMode !== "insert") {
+				this.pasteText(content);
+				const drained = this.#pendingInput.splice(0);
+				for (const chunk of drained) this.handleInput(chunk);
+				return;
+			}
 			if (content.length === 0 && this.onPasteImage) {
-				this.#trackAsyncPaste(Promise.resolve(this.onPasteImage()));
+				this.prepareVimInsertMutation();
+				void this.trackAsyncPaste(Promise.resolve(this.onPasteImage()));
 				return;
 			}
 			const imagePaths = extractImagePastePathsFromText(content);
 			if (imagePaths && this.onPasteImagePath) {
-				this.#trackAsyncPaste(
+				this.prepareVimInsertMutation();
+				const pasteSignal = this.getAsyncPasteSignal();
+				void this.trackAsyncPaste(
 					(async () => {
-						for (const p of imagePaths) await this.onPasteImagePath?.(p);
+						for (const p of imagePaths) {
+							if (pasteSignal.aborted) return;
+							await this.onPasteImagePath?.(p);
+						}
 					})(),
 				);
 				return;
@@ -833,16 +895,25 @@ export class CustomEditor extends Editor {
 		const parsedKey = parseKey(data);
 		const canonical = parsedKey !== undefined ? canonicalKeyId(parsedKey) : undefined;
 
+		const vimMode = this.getVimMode();
+		// Vim owns Ctrl-R outside insert mode; history search remains available while editing text.
+		if (canonical === "ctrl+r" && vimMode !== undefined && vimMode !== "insert") {
+			super.handleInput(data);
+			return;
+		}
+
 		// Left-arrow on an empty editor: surface for the agent-hub double-tap
 		// gesture. Plain "left" only — modified arrows and any in-text cursor
 		// movement fall through to normal handling.
 		if (canonical === "left" && this.onLeftAtStart && this.getText().trim() === "") {
+			if (vimMode !== undefined && vimMode !== "insert") this.clearVimPendingCommand();
 			this.onLeftAtStart();
 			return;
 		}
 
-		// Space-hold push-to-talk: a sustained space bar starts/stops STT instead of typing spaces.
-		if (this.#handleSpaceHold(data, canonical)) return;
+		// Space-hold push-to-talk is text-entry behavior: visual and normal modes must not mutate the prompt.
+		const acceptsTextEntry = vimMode === undefined || vimMode === "insert";
+		if (acceptsTextEntry && this.#handleSpaceHold(data, canonical)) return;
 
 		// One union probe decides whether any per-action interception below can
 		// match — plain typing then skips the ~20 per-action set lookups per key.
@@ -850,15 +921,28 @@ export class CustomEditor extends Editor {
 			canonical !== undefined &&
 			(this.#actionMatchKeyUnion.has(canonical) || this.#customMatchKeys.has(canonical))
 		) {
-			// Intercept configured image paste (async - fires and handles result)
-			if (this.#matchesAction(canonical, "app.clipboard.pasteImage") && this.onPasteImage) {
-				void this.onPasteImage();
+			const clearedVimPending = !acceptsTextEntry && this.clearVimPendingCommand();
+			if (clearedVimPending && (matchesKey(data, "escape") || matchesKey(data, "esc"))) {
+				super.handleInput(data);
+				return;
+			}
+			if (acceptsTextEntry && this.#matchesAction(canonical, "app.stt.toggle") && this.onSTTToggle) {
+				this.prepareVimInsertMutation();
+				this.onSTTToggle();
 				return;
 			}
 
-			// Intercept configured raw text paste (fires and handles result)
-			if (this.#matchesAction(canonical, "app.clipboard.pasteTextRaw") && this.onPasteTextRaw) {
-				this.onPasteTextRaw();
+			// Intercept configured image paste (async - fires and handles result)
+			if (acceptsTextEntry && this.#matchesAction(canonical, "app.clipboard.pasteImage") && this.onPasteImage) {
+				this.prepareVimInsertMutation();
+				void this.trackAsyncPaste(Promise.resolve(this.onPasteImage()));
+				return;
+			}
+
+			// Intercept configured raw text paste and serialize follow-up input until it settles.
+			if (acceptsTextEntry && this.#matchesAction(canonical, "app.clipboard.pasteTextRaw") && this.onPasteTextRaw) {
+				this.prepareVimInsertMutation();
+				void this.trackAsyncPaste(Promise.resolve(this.onPasteTextRaw()));
 				return;
 			}
 
@@ -934,8 +1018,14 @@ export class CustomEditor extends Editor {
 			// The user can press ESC again afterward to fire the global interrupt
 			// handler. This matches the standard TUI/IDE pattern and prevents a
 			// single ESC from both closing an @ completion and aborting an active
-			// agent run (#1655).
-			if (this.#matchesAction(canonical, "app.interrupt") && this.onEscape && !this.isShowingAutocomplete()) {
+			// agent run (#1655). In Vim insert or visual mode, ESC first returns to
+			// normal mode before it can act as the app interrupt.
+			if (
+				this.#matchesAction(canonical, "app.interrupt") &&
+				this.onEscape &&
+				!this.isShowingAutocomplete() &&
+				!this.isVimModeEscape(data)
+			) {
 				this.onEscape();
 				return;
 			}

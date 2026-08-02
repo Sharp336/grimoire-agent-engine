@@ -229,6 +229,54 @@ describe("CustomEditor bracketed path paste", () => {
 		expect(editor.getText()).toBe("");
 	});
 
+	it("does not attach an empty bracketed image paste in Vim visual mode", () => {
+		const { editor } = makeEditor();
+		const onPasteImage = vi.fn();
+		editor.onPasteImage = onPasteImage;
+		editor.setInputMode("vim");
+		editor.setText("text");
+		editor.handleInput("v");
+		expect(editor.getVimMode()).toBe("visual");
+
+		editor.handleInput(bracketedPaste(""));
+
+		expect(onPasteImage).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("text");
+	});
+
+	it("does not attach bracketed image paths in Vim visual mode", () => {
+		const { editor } = makeEditor();
+		const onPasteImagePath = vi.fn();
+		editor.onPasteImagePath = onPasteImagePath;
+		editor.setInputMode("vim");
+		editor.setText("text");
+		editor.handleInput("v");
+		expect(editor.getVimMode()).toBe("visual");
+
+		editor.handleInput(bracketedPaste("/tmp/image.png"));
+
+		expect(onPasteImagePath).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("text");
+	});
+
+	it("groups bracketed image insertion with Vim insert undo", async () => {
+		const { editor } = makeEditor();
+		editor.onPasteImagePath = () => {
+			editor.insertText("[Image] ");
+		};
+		editor.setInputMode("vim");
+		editor.handleInput("i");
+
+		editor.handleInput(bracketedPaste("/tmp/image.png"));
+		await Promise.resolve();
+		await Promise.resolve();
+		editor.handleInput("!");
+		editor.handleInput("\x1b");
+		editor.handleInput("u");
+
+		expect(editor.getText()).toBe("");
+	});
+
 	it("keeps a two-file drag with unescaped spaces as text instead of attaching one fused path", () => {
 		// PR #6582 review: selecting two screenshots and dropping them together
 		// emits a single space-separated payload the splitter also refuses
@@ -500,6 +548,19 @@ describe("CustomEditor space-hold push-to-talk", () => {
 		expect(events).toEqual(["start", "end"]);
 	});
 
+	it("leaves visual selections untouched by space-hold push-to-talk", () => {
+		const { editor, events } = makeEditor();
+		editor.setInputMode("vim");
+		editor.setText("hello");
+		editor.handleInput("v");
+		expect(editor.getVimMode()).toBe("visual");
+
+		feedSpaces(editor, SPACE_HOLD_MECHANICAL_RUN + 2, REPEAT_GAP_MS);
+
+		expect(editor.getText()).toBe("hello");
+		expect(events).toEqual([]);
+	});
+
 	it("does not trigger when the space bar is smashed at an irregular cadence", () => {
 		const { editor, events } = makeEditor();
 		// Fast but jittery, the way a human mashes — not the metronomic delta of OS auto-repeat.
@@ -526,6 +587,17 @@ describe("CustomEditor space-hold push-to-talk", () => {
 		editor.handleInput("x");
 		feedSpaces(editor, 3, REPEAT_GAP_MS);
 		expect(events).toEqual([]);
+	});
+
+	it("cancels an active hold without firing its release callback", () => {
+		const { editor, events } = makeEditor();
+		feedSpaces(editor, SPACE_HOLD_MECHANICAL_RUN + 2, REPEAT_GAP_MS);
+		expect(events).toEqual(["start"]);
+
+		editor.cancelSpaceHold();
+		vi.advanceTimersByTime(SPACE_HOLD_RELEASE_MS + 1);
+
+		expect(events).toEqual(["start"]);
 	});
 
 	it("leaves the space bar typing normally when the gesture is disabled", () => {

@@ -28,6 +28,38 @@ export function shiftImageMarkers(text: string, offset: number): string {
 	);
 }
 
+export interface ReconciledImageReferences {
+	text: string;
+	images: ImageContent[];
+	imageLinks: (string | undefined)[];
+}
+
+/** Keep only image sidecars referenced by `text` and compact their marker indices
+ * in first-appearance order. Invalid marker indices remain ordinary text. */
+export function reconcileImageReferences(
+	text: string,
+	images: readonly ImageContent[],
+	imageLinks: readonly (string | undefined)[],
+): ReconciledImageReferences {
+	const reconciledImages: ImageContent[] = [];
+	const reconciledLinks: (string | undefined)[] = [];
+	const remappedIndices = new Map<number, number>();
+	const reconciledText = text.replace(IMAGE_MARKER_REGEX, (marker, indexText: string, tail: string) => {
+		const sourceIndex = Number(indexText) - 1;
+		const image = images[sourceIndex];
+		if (image === undefined) return marker;
+		let targetIndex = remappedIndices.get(sourceIndex);
+		if (targetIndex === undefined) {
+			reconciledImages.push(image);
+			reconciledLinks.push(imageLinks[sourceIndex]);
+			targetIndex = reconciledImages.length;
+			remappedIndices.set(sourceIndex, targetIndex);
+		}
+		return `[Image #${targetIndex}${tail}]`;
+	});
+	return { text: reconciledText, images: reconciledImages, imageLinks: reconciledLinks };
+}
+
 type ImageBlobWriter = (data: Buffer, options?: { extension?: string }) => Promise<BlobPutResult>;
 type ImageBlobWriterSync = (data: Buffer, options?: { extension?: string }) => BlobPutResult;
 

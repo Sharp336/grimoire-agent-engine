@@ -13,16 +13,29 @@ import * as path from "node:path";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 
-function createContext(options?: { threshold?: number; choice?: string; artifactsDir?: string }) {
+function createContext(options?: {
+	threshold?: number;
+	choice?: string | Promise<string | undefined>;
+	artifactsDir?: string;
+	pasteSignal?: AbortSignal;
+}) {
 	const insertPaste = vi.fn();
 	const insertText = vi.fn();
 	const pasteText = vi.fn();
 	const requestRender = vi.fn();
 	const showStatus = vi.fn();
 	const showError = vi.fn();
+	const pasteSignal = options?.pasteSignal ?? new AbortController().signal;
+	const trackAsyncPaste = vi.fn(<T>(promise: Promise<T>) => promise);
 	const showHookSelector = vi.fn(async (_title: string, _options: unknown, _dialog?: unknown) => options?.choice);
 	const ctx = {
-		editor: { insertPaste, insertText, pasteText } as unknown as InteractiveModeContext["editor"],
+		editor: {
+			insertPaste,
+			insertText,
+			pasteText,
+			getAsyncPasteSignal: () => pasteSignal,
+			trackAsyncPaste,
+		} as unknown as InteractiveModeContext["editor"],
 		ui: { requestRender } as unknown as InteractiveModeContext["ui"],
 		settings: { get: () => options?.threshold ?? 100 } as unknown as InteractiveModeContext["settings"],
 		sessionManager: {
@@ -37,7 +50,16 @@ function createContext(options?: { threshold?: number; choice?: string; artifact
 	const controller = new InputController(ctx);
 	return {
 		controller,
-		spies: { insertPaste, insertText, pasteText, requestRender, showStatus, showError, showHookSelector },
+		spies: {
+			insertPaste,
+			insertText,
+			pasteText,
+			requestRender,
+			showStatus,
+			showError,
+			showHookSelector,
+			trackAsyncPaste,
+		},
 	};
 }
 
@@ -68,6 +90,16 @@ describe("InputController.handleLargePaste gate", () => {
 
 		expect(controller.handleLargePaste("payload", 100)).toBe(true);
 		expect(menu).toHaveBeenCalledWith("payload", 100);
+	});
+
+	it("tracks the deferred menu promise", () => {
+		const menu = Promise.withResolvers<void>();
+		const { controller, spies } = createContext({ threshold: 100 });
+		vi.spyOn(controller, "presentLargePasteMenu").mockReturnValue(menu.promise);
+
+		expect(controller.handleLargePaste("payload", 100)).toBe(true);
+		expect(spies.trackAsyncPaste).toHaveBeenCalledWith(menu.promise);
+		menu.resolve();
 	});
 });
 
@@ -116,6 +148,24 @@ describe("InputController.presentLargePasteMenu actions", () => {
 
 		expect(spies.showHookSelector.mock.calls[0][0]).toBe("Pasted 123 lines");
 	});
+
+	it("drops the deferred menu choice after its paste generation is canceled", async () => {
+		const choice = Promise.withResolvers<string | undefined>();
+		const pasteAbort = new AbortController();
+		const { controller, spies } = createContext({
+			choice: choice.promise,
+			pasteSignal: pasteAbort.signal,
+		});
+
+		expect(controller.handleLargePaste("payload", 100)).toBe(true);
+		pasteAbort.abort();
+		choice.resolve("Paste inline");
+		await spies.trackAsyncPaste.mock.calls[0]?.[0];
+
+		expect(spies.insertPaste).not.toHaveBeenCalled();
+		expect(spies.insertText).not.toHaveBeenCalled();
+		expect(spies.requestRender).not.toHaveBeenCalled();
+	});
 });
 
 describe("InputController.presentLargePasteMenu file attachment", () => {
@@ -149,5 +199,33 @@ describe("InputController.presentLargePasteMenu file attachment", () => {
 		expect(spies.insertText).toHaveBeenCalledWith("local://paste-2.md ");
 		expect(await Bun.file(path.join(dir, "local", "paste-1.md")).text()).toBe("previous");
 		expect(await Bun.file(path.join(dir, "local", "paste-2.md")).text()).toBe("fresh");
+	});
+
+	it("does not commit a local-file reference after Vim cancels the pending write", async () => {
+		dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-paste-test-"));
+		const pasteAbort = new AbortController();
+		const writeStarted = Promise.withResolvers<void>();
+		const releaseWrite = Promise.withResolvers<void>();
+		vi.spyOn(Bun, "write").mockImplementation(async () => {
+			writeStarted.resolve();
+			await releaseWrite.promise;
+			return 7;
+		});
+		const { controller, spies } = createContext({
+			choice: "Attach as local file",
+			artifactsDir: dir,
+			pasteSignal: pasteAbort.signal,
+		});
+
+		expect(controller.handleLargePaste("payload", 100)).toBe(true);
+		await writeStarted.promise;
+		pasteAbort.abort();
+		releaseWrite.resolve();
+		await spies.trackAsyncPaste.mock.calls[0]?.[0];
+
+		expect(spies.insertText).not.toHaveBeenCalled();
+		expect(spies.insertPaste).not.toHaveBeenCalled();
+		expect(spies.showStatus).not.toHaveBeenCalled();
+		expect(spies.requestRender).not.toHaveBeenCalled();
 	});
 });

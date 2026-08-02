@@ -6,6 +6,10 @@
 
 - Fixed Kitty/Ghostty shortcuts on non-Latin keyboard layouts by requesting base-layout key reporting from the terminal ([#7320](https://github.com/can1357/oh-my-pi/issues/7320)).
 
+### Added
+
+- Added an opt-in Vim input mode to the editor with normal/insert/visual states, characterwise and highlighted line selection, visual deletion and change, grapheme-safe motions and edits, bounded command counts, inner/around word and paragraph text objects, and shared undo/redo history ([#1834](https://github.com/can1357/oh-my-pi/issues/1834)).
+
 ## [17.2.4] - 2026-08-01
 
 ### Fixed

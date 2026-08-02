@@ -733,6 +733,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		this.editor.setImeSafeCursorLayout(settings.get("tui.imeSafeCursor"));
 		this.editor.setAutocompleteMaxVisible(settings.get("autocompleteMaxVisible"));
+		this.editor.setInputMode(this.settings.get("inputMode"));
 		this.editor.onAutocompleteCancel = () => {
 			this.ui.requestRender(true);
 		};
@@ -776,7 +777,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		// (#4145). The TUI throttles renders at ~30fps, so a long-running eval
 		// spraying events no longer runs `getTopBorder` synchronously in the
 		// hot path where the render never gets to paint the result.
-		this.editor.setTopBorderProvider(availableWidth => this.statusLine.getTopBorder(availableWidth));
+		this.editor.onInputModeChange = mode => {
+			if (mode !== undefined && mode !== "insert") {
+				this.editor.cancelSpaceHold();
+				this.#sttController?.cancel();
+			}
+			this.ui.requestComponentRender(this.editor);
+		};
+		this.editor.setTopBorderProvider(availableWidth => this.#getEditorTopBorder(this.editor, availableWidth));
 
 		this.hideThinkingBlock = settings.get("hideThinkingBlock");
 		this.proseOnlyThinking = settings.get("proseOnlyThinking");
@@ -4086,6 +4094,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#extensionUiController.initializeHookRunner(uiContext, hasUI);
 	}
 
+	#getEditorTopBorder(editor: CustomEditor, availableWidth: number): { content: string; width: number } {
+		const mode = editor.getVimMode();
+		if (!mode) return this.statusLine.getTopBorder(availableWidth);
+		const label = theme.bold(theme.fg(mode === "normal" ? "accent" : "muted", ` ${mode.toUpperCase()} `));
+		const labelWidth = visibleWidth(label);
+		const status = this.statusLine.getTopBorder(Math.max(0, availableWidth - labelWidth));
+		return { content: label + status.content, width: labelWidth + status.width };
+	}
+
 	setEditorComponent(
 		factory: ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => CustomEditor) | undefined,
 	): void {
@@ -4099,14 +4116,22 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		nextEditor.setImeSafeCursorLayout(this.settings.get("tui.imeSafeCursor"));
 		nextEditor.setAutocompleteMaxVisible(this.settings.get("autocompleteMaxVisible"));
+		nextEditor.setInputMode(this.settings.get("inputMode"));
 		nextEditor.onAutocompleteCancel = () => {
 			this.ui.requestRender(true);
 		};
 		nextEditor.onAutocompleteUpdate = () => {
 			this.ui.requestRender();
 		};
+		nextEditor.onInputModeChange = mode => {
+			if (mode !== undefined && mode !== "insert") {
+				nextEditor.cancelSpaceHold();
+				this.#sttController?.cancel();
+			}
+			this.ui.requestComponentRender(nextEditor);
+		};
 		nextEditor.setShimmerRepaintHandler(() => this.ui.requestComponentRender(this.editor));
-		nextEditor.setTopBorderProvider(availableWidth => this.statusLine.getTopBorder(availableWidth));
+		nextEditor.setTopBorderProvider(availableWidth => this.#getEditorTopBorder(nextEditor, availableWidth));
 		nextEditor.setMaxHeight(this.#computeEditorMaxHeight());
 		if (this.historyStorage) {
 			nextEditor.setHistoryStorage(this.historyStorage);

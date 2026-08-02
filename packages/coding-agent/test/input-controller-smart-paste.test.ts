@@ -10,13 +10,23 @@ import { describe, expect, it, vi } from "bun:test";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 
-function createContext(options?: { focused?: { pasteText(text: string): void } }) {
+function createContext(options?: {
+	focused?: { pasteText(text: string): void };
+	getVimMode?: () => "insert" | "normal" | "visual" | undefined;
+	pasteSignal?: AbortSignal;
+}) {
 	const pasteText = vi.fn();
 	const insertText = vi.fn();
 	const requestRender = vi.fn();
 	const showStatus = vi.fn();
+	const asyncPasteSignal = options?.pasteSignal ?? new AbortController().signal;
 	const ctx = {
-		editor: { pasteText, insertText } as unknown as InteractiveModeContext["editor"],
+		editor: {
+			pasteText,
+			insertText,
+			getVimMode: options?.getVimMode ?? (() => undefined),
+			getAsyncPasteSignal: () => asyncPasteSignal,
+		} as unknown as InteractiveModeContext["editor"],
 		ui: { requestRender, getFocused: () => options?.focused ?? null } as unknown as InteractiveModeContext["ui"],
 		showStatus,
 	} as unknown as InteractiveModeContext;
@@ -116,6 +126,45 @@ describe("InputController.handleClipboardTextRawPaste", () => {
 
 		expect(spies.insertText).toHaveBeenCalledWith("raw $TEXT");
 		expect(spies.showStatus).not.toHaveBeenCalled();
+	});
+
+	it("drops a pending raw paste after Vim leaves insert mode", async () => {
+		let vimMode: "insert" | "normal" = "insert";
+		const request = Promise.withResolvers<string>();
+		const { ctx, spies } = createContext({ getVimMode: () => vimMode });
+		const controller = new InputController(ctx, {
+			readImage: async () => null,
+			readText: () => request.promise,
+		});
+
+		const paste = controller.handleClipboardTextRawPaste();
+		vimMode = "normal";
+		request.resolve("late paste");
+		await paste;
+
+		expect(spies.insertText).not.toHaveBeenCalled();
+		expect(spies.requestRender).not.toHaveBeenCalled();
+	});
+
+	it("drops a canceled raw paste after Vim re-enters insert mode", async () => {
+		const request = Promise.withResolvers<string>();
+		const pasteAbort = new AbortController();
+		const { ctx, spies } = createContext({
+			getVimMode: () => "insert",
+			pasteSignal: pasteAbort.signal,
+		});
+		const controller = new InputController(ctx, {
+			readImage: async () => null,
+			readText: () => request.promise,
+		});
+
+		const paste = controller.handleClipboardTextRawPaste();
+		pasteAbort.abort();
+		request.resolve("stale paste");
+		await paste;
+
+		expect(spies.insertText).not.toHaveBeenCalled();
+		expect(spies.requestRender).not.toHaveBeenCalled();
 	});
 
 	it("shows the empty-clipboard status only when there is no text", async () => {

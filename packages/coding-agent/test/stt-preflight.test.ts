@@ -174,6 +174,146 @@ describe("STTController preflight", () => {
 		// Preflight ran again for the new tier rather than short-circuiting.
 		expect(isCached).toHaveBeenLastCalledWith("turbo");
 	});
+
+	it("cancels an active stream without allowing later editor mutations", async () => {
+		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
+		vi.spyOn(downloader, "downloadSttModel").mockResolvedValue(undefined);
+		const cancelStream = vi.fn();
+		let onSegment: ((text: string, index: number) => void) | undefined;
+		vi.spyOn(asrClient.sttClient, "startStream").mockImplementation((_model, callbacks) => {
+			onSegment = callbacks?.onSegment;
+			return {
+				pushAudio: vi.fn(),
+				stop: vi.fn().mockResolvedValue(""),
+				cancel: cancelStream,
+			};
+		});
+		const stopCapture = vi.fn();
+		const editor = makeEditor();
+		const options = makeOptions();
+		controller = new STTController(() => ({ stop: stopCapture }));
+		await controller.toggle(editor, options);
+
+		controller.cancel();
+		onSegment?.("late transcript", 0);
+
+		expect(controller.state).toBe("idle");
+		expect(stopCapture).toHaveBeenCalledTimes(1);
+		expect(cancelStream).toHaveBeenCalledTimes(1);
+		expect(editor.clearVolatileText).toHaveBeenCalledTimes(1);
+		expect(editor.commitVolatileText).not.toHaveBeenCalled();
+		expect(options.onStateChange).toHaveBeenLastCalledWith("idle");
+	});
+
+	it("ignores canceled stream callbacks after a new recording starts", async () => {
+		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
+		vi.spyOn(downloader, "downloadSttModel").mockResolvedValue(undefined);
+		let firstPartial: ((text: string) => void) | undefined;
+		let firstSegment: ((text: string, index: number) => void) | undefined;
+		let starts = 0;
+		vi.spyOn(asrClient.sttClient, "startStream").mockImplementation((_model, callbacks) => {
+			if (starts++ === 0) {
+				firstPartial = callbacks?.onPartial;
+				firstSegment = callbacks?.onSegment;
+			}
+			return {
+				pushAudio: vi.fn(),
+				stop: vi.fn().mockResolvedValue(""),
+				cancel: vi.fn(),
+			};
+		});
+		const editor = makeEditor();
+		const options = makeOptions();
+		controller = new STTController(() => ({ stop: vi.fn() }));
+		await controller.toggle(editor, options);
+		controller.cancel();
+		await controller.toggle(editor, options);
+
+		firstPartial?.("stale partial");
+		firstSegment?.("stale segment", 0);
+
+		expect(controller.state).toBe("recording");
+		expect(editor.setVolatileText).not.toHaveBeenCalled();
+		expect(editor.commitVolatileText).not.toHaveBeenCalled();
+	});
+
+	it("ignores a final STT flush after cancellation", async () => {
+		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
+		vi.spyOn(downloader, "downloadSttModel").mockResolvedValue(undefined);
+		const stopped = Promise.withResolvers<string>();
+		const cancelStream = vi.fn(() => stopped.resolve(""));
+		vi.spyOn(asrClient.sttClient, "startStream").mockReturnValue({
+			pushAudio: vi.fn(),
+			stop: vi.fn(() => stopped.promise),
+			cancel: cancelStream,
+		});
+		const editor = makeEditor();
+		const options = makeOptions();
+		controller = new STTController(() => ({ stop: vi.fn() }));
+		await controller.toggle(editor, options);
+
+		const stopping = controller.toggle(editor, options);
+		expect(controller.state).toBe("transcribing");
+		controller.cancel();
+		await stopping;
+
+		expect(controller.state).toBe("idle");
+		expect(options.onStateChange).toHaveBeenCalledTimes(3);
+		expect(options.showStatus).not.toHaveBeenCalledWith("No speech detected.");
+		expect(cancelStream).toHaveBeenCalledTimes(1);
+	});
+
+	it("cancels a pending preflight before microphone capture starts", async () => {
+		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(false);
+		const download = Promise.withResolvers<void>();
+		vi.spyOn(downloader, "downloadSttModel").mockReturnValue(download.promise);
+		const createCapture = vi.fn(() => ({ stop: vi.fn() }));
+		const options = makeOptions();
+		controller = new STTController(createCapture);
+
+		const start = controller.toggle(makeEditor(), options);
+		await Promise.resolve();
+		controller.cancel();
+		download.resolve();
+		await start;
+
+		expect(controller.state).toBe("idle");
+		expect(createCapture).not.toHaveBeenCalled();
+		expect(asrClient.sttClient.startStream).not.toHaveBeenCalled();
+	});
+
+	it("suppresses late preflight progress and failure UI after cancellation", async () => {
+		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(false);
+		const download = Promise.withResolvers<void>();
+		let reportProgress: Parameters<typeof downloader.downloadSttModel>[1];
+		vi.spyOn(downloader, "downloadSttModel").mockImplementation((_key, onProgress) => {
+			reportProgress = onProgress;
+			return download.promise;
+		});
+		const options = makeOptions();
+		controller = new STTController(() => ({ stop: vi.fn() }));
+
+		const progress = {
+			status: "progress" as const,
+			percent: 42,
+			loaded: 1,
+			total: 2,
+			repo: WHISPER_BASE_REPO,
+			label: "Whisper base",
+		};
+		const start = controller.toggle(makeEditor(), options);
+		await Promise.resolve();
+		reportProgress?.(progress);
+		controller.cancel();
+		reportProgress?.(progress);
+		download.reject(new Error("stale preflight failure"));
+		await start;
+
+		expect(controller.state).toBe("idle");
+		expect(options.showStatus.mock.calls).toEqual([["Downloading speech model Whisper base (42%)"], [""]]);
+		expect(options.showWarning).not.toHaveBeenCalled();
+	});
+
 	it("stops recording and surfaces asynchronous microphone failures", async () => {
 		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
 		vi.spyOn(downloader, "downloadSttModel").mockReturnValue(new Promise<void>(() => {}));

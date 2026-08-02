@@ -1,5 +1,6 @@
 import { describe, expect, it, type Mock, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { type KeyId, matchesKey } from "@oh-my-pi/pi-tui";
@@ -23,6 +24,7 @@ type FakeEditor = {
 	onToggleThinking?: () => void;
 	onExternalEditor?: () => void;
 	onRetry?: () => void;
+	onSTTToggle?: () => void;
 	onChange?: (text: string) => void;
 	onSubmit?: (text: string) => Promise<void>;
 	setText(text: string): void;
@@ -33,6 +35,12 @@ type FakeEditor = {
 	setCustomKeyHandler(key: string, handler: () => void): void;
 	clearCustomKeyHandlers(): void;
 	pasteText(text: string): void;
+	insertText(text: string): void;
+	trackAsyncPaste(promise: Promise<unknown>): Promise<unknown>;
+	getAsyncPasteSignal(): AbortSignal;
+	getVimMode(): "insert" | "normal" | "visual" | undefined;
+	clearVimPendingCommand(): void;
+	prepareVimInsertMutation(): void;
 	imageLinks?: (string | undefined)[];
 	pendingImages: ImageContent[];
 	pendingImageLinks: (string | undefined)[];
@@ -62,6 +70,7 @@ async function createContext() {
 		"app.model.select": ["alt+m"],
 		"app.retry": ["alt+r"],
 		"app.clipboard.pasteImage": ["ctrl+v"],
+		"app.stt.toggle": ["alt+s"],
 	};
 	const customHandlers = new Map<string, () => void>();
 	const setActionKeys = vi.fn();
@@ -74,6 +83,14 @@ async function createContext() {
 	const resetDisplay = vi.fn();
 	const showModelSelector = vi.fn();
 	const requestRender = vi.fn();
+	const trackAsyncPaste = vi.fn((promise: Promise<unknown>) => {
+		void promise.catch(() => {});
+		return promise;
+	});
+	const getVimMode = vi.fn<() => "insert" | "normal" | "visual" | undefined>(() => undefined);
+	const clearVimPendingCommand = vi.fn();
+	const prepareVimInsertMutation = vi.fn();
+	const asyncPasteSignal = new AbortController().signal;
 	const showError = vi.fn();
 	let focused: unknown;
 	const addInputListener = vi.fn((listener: InputListener) => {
@@ -120,6 +137,14 @@ async function createContext() {
 		pasteText(text: string) {
 			editorText += text;
 		},
+		insertText(text: string) {
+			editorText += text;
+		},
+		trackAsyncPaste,
+		getAsyncPasteSignal: () => asyncPasteSignal,
+		getVimMode,
+		clearVimPendingCommand,
+		prepareVimInsertMutation,
 		setActionKeys,
 		setCustomKeyHandler,
 		clearCustomKeyHandlers,
@@ -150,6 +175,9 @@ async function createContext() {
 		retryLoader: undefined,
 		autoCompactionEscapeHandler: undefined,
 		retryEscapeHandler: undefined,
+		sessionManager: {
+			putBlob: vi.fn(async () => ({ displayPath: "blob:image" })),
+		},
 		session: session as unknown as InteractiveModeContext["session"],
 		viewSession: session as unknown as InteractiveModeContext["viewSession"],
 		keybindings: {
@@ -235,6 +263,10 @@ async function createContext() {
 			canBranchBtw,
 			handleBtwCopyKey,
 			canCopyBtw,
+			trackAsyncPaste,
+			getVimMode,
+			clearVimPendingCommand,
+			prepareVimInsertMutation,
 			showError,
 		},
 	};
@@ -262,6 +294,17 @@ describe("InputController keybinding setup", () => {
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(1, { temporaryOnly: true });
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(2);
 		expect(spies.resetDisplayAfterAppearanceRefresh).toHaveBeenCalledTimes(1);
+	});
+
+	it("registers STT as a text-entry editor action", async () => {
+		const { InputController, ctx, editor, customHandlers, spies } = await createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+
+		expect(spies.setActionKeys).toHaveBeenCalledWith("app.stt.toggle", ["alt+s"]);
+		expect(editor.onSTTToggle).toBeDefined();
+		expect(customHandlers.has("alt+s")).toBe(false);
 	});
 
 	it("does not mark pasted shell prompts as Python mode while editing", async () => {
@@ -418,6 +461,79 @@ describe("InputController keybinding setup", () => {
 		expect(result).toBeUndefined();
 		expect(spies.handleBtwBranchKey).not.toHaveBeenCalled();
 	});
+
+	it.each([
+		{
+			name: "drops the paste and clears pending Vim state in normal mode",
+			mode: "normal" as const,
+			focusedPrompt: false,
+			trackCalls: 0,
+			clearCalls: 1,
+			prepareCalls: 0,
+			statusCalls: 0,
+		},
+		{
+			name: "prepares Vim insert undo",
+			mode: "insert" as const,
+			focusedPrompt: false,
+			trackCalls: 1,
+			clearCalls: 0,
+			prepareCalls: 1,
+			statusCalls: 0,
+		},
+		{
+			name: "tracks the paste in default input mode",
+			mode: undefined,
+			focusedPrompt: false,
+			trackCalls: 1,
+			clearCalls: 0,
+			prepareCalls: 0,
+			statusCalls: 0,
+		},
+		{
+			name: "reports an unsupported paste to a focused prompt before the Vim mode guard",
+			mode: "normal" as const,
+			focusedPrompt: true,
+			trackCalls: 0,
+			clearCalls: 0,
+			prepareCalls: 0,
+			statusCalls: 1,
+		},
+	])(
+		"$name for an enhanced image paste",
+		async ({ mode, focusedPrompt, trackCalls, clearCalls, prepareCalls, statusCalls }) => {
+			await Settings.init({ inMemory: true });
+			try {
+				const { InputController, ctx, setFocused, spies } = await createContext();
+				const controller = new InputController(ctx);
+				spies.getVimMode.mockReturnValue(mode);
+				if (focusedPrompt) setFocused({ pasteText: vi.fn() });
+				controller.setupKeyHandlers();
+				const packet = (metadata: string, payload?: string) =>
+					`\x1b]5522;${metadata}${payload === undefined ? "" : `;${payload}`}\x1b\\`;
+				const listeners = registeredInputListeners(spies.addInputListener);
+				const imageMime = Buffer.from("image/png", "utf8").toString("base64");
+
+				dispatchInput(listeners, packet("type=read:status=OK:pw=c2VjcmV0"));
+				dispatchInput(listeners, packet(`type=read:status=DATA:mime=${imageMime}`));
+				dispatchInput(listeners, packet("type=read:status=DONE"));
+				dispatchInput(listeners, packet("type=read:status=OK"));
+				dispatchInput(
+					listeners,
+					packet(`type=read:status=DATA:mime=${imageMime}`, Buffer.from("image-bytes").toString("base64")),
+				);
+				dispatchInput(listeners, packet("type=read:status=DONE"));
+
+				expect(spies.trackAsyncPaste).toHaveBeenCalledTimes(trackCalls);
+				expect(spies.clearVimPendingCommand).toHaveBeenCalledTimes(clearCalls);
+				expect(spies.prepareVimInsertMutation).toHaveBeenCalledTimes(prepareCalls);
+				expect(ctx.showStatus).toHaveBeenCalledTimes(statusCalls);
+				await spies.trackAsyncPaste.mock.calls[0]?.[0];
+			} finally {
+				resetSettingsForTest();
+			}
+		},
+	);
 
 	it("routes the smart-paste shortcut to a focused login input", async () => {
 		const { promise: pasted, resolve: resolvePaste } = Promise.withResolvers<string>();
@@ -593,6 +709,44 @@ describe("InputController keybinding setup", () => {
 		expect(spies.showError).toHaveBeenCalledWith("queue full");
 		expect(editor.getText()).toBe("queued during stream");
 		expect(ctx.locallySubmittedUserSignatures.has("queued during stream\u00000")).toBe(false);
+	});
+
+	it("drops image sidecars whose markers were deleted before submit", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		const session = ctx.session as unknown as { isStreaming: boolean };
+		session.isStreaming = true;
+		editor.pendingImages = [{ type: "image", mimeType: "image/png", data: "deleted" }];
+		editor.pendingImageLinks = ["local://deleted.png"];
+		editor.imageLinks = editor.pendingImageLinks;
+		const controller = new InputController(ctx);
+
+		controller.setupEditorSubmitHandler();
+		await editor.onSubmit?.("");
+
+		expect(spies.prompt).not.toHaveBeenCalled();
+		expect(editor.pendingImages).toEqual([]);
+		expect(editor.pendingImageLinks).toEqual([]);
+		expect(editor.imageLinks).toBeUndefined();
+	});
+
+	it("compacts surviving image markers and sidecars before submit", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		const session = ctx.session as unknown as { isStreaming: boolean };
+		session.isStreaming = true;
+		const deleted = { type: "image" as const, mimeType: "image/png", data: "deleted" };
+		const kept = { type: "image" as const, mimeType: "image/png", data: "kept" };
+		editor.pendingImages = [deleted, kept];
+		editor.pendingImageLinks = ["local://deleted.png", "local://kept.png"];
+		editor.imageLinks = editor.pendingImageLinks;
+		const controller = new InputController(ctx);
+
+		controller.setupEditorSubmitHandler();
+		await editor.onSubmit?.("[Image #2]");
+
+		expect(spies.prompt).toHaveBeenCalledWith("[Image #1]", {
+			streamingBehavior: "steer",
+			images: [kept],
+		});
 	});
 
 	it("continue shortcuts submit a hidden synthetic developer directive", async () => {

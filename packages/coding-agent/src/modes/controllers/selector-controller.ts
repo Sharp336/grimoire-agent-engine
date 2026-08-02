@@ -469,6 +469,10 @@ export class SelectorController {
 				});
 				break;
 
+			case "inputMode":
+				this.ctx.editor.setInputMode(value === "vim" ? "vim" : "default");
+				break;
+
 			case "autocompleteMaxVisible":
 				this.ctx.editor.setAutocompleteMaxVisible(typeof value === "number" ? value : Number(value));
 				break;

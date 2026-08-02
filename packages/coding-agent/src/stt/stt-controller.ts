@@ -38,6 +38,9 @@ export class STTController {
 	#resolvedModelKey: string | null = null;
 	#toggling = false;
 	#stopAfterStart = false;
+	#cancelRequested = false;
+	#activeOptions: ToggleOptions | null = null;
+	#preflightStatusActive = false;
 	#disposed = false;
 	readonly #createCapture: CaptureFactory;
 
@@ -68,6 +71,8 @@ export class STTController {
 			if (this.#state === "idle" || this.#state === "recording") this.#stopAfterStart = true;
 			return;
 		}
+		this.#cancelRequested = false;
+		this.#activeOptions = options;
 		this.#toggling = true;
 		try {
 			switch (this.#state) {
@@ -89,6 +94,7 @@ export class STTController {
 			}
 		} finally {
 			this.#toggling = false;
+			if (this.#state === "idle") this.#activeOptions = null;
 		}
 	}
 
@@ -103,7 +109,9 @@ export class STTController {
 			// cached-model fast path emits nothing.
 			let wroteStatus = false;
 			const status = (msg: string): void => {
+				if (this.#cancelRequested || this.#disposed) return;
 				wroteStatus = true;
+				this.#preflightStatusActive = true;
 				options.showStatus(msg);
 			};
 			// Loading the multi-hundred-MB speech model into the worker is what made
@@ -118,10 +126,13 @@ export class STTController {
 			} else {
 				await downloadSttModel(modelKey, p => status(`Downloading speech model ${p.label} (${p.percent}%)`));
 			}
-			if (wroteStatus) options.showStatus("");
+			if (wroteStatus && !this.#cancelRequested && !this.#disposed) options.showStatus("");
+			this.#preflightStatusActive = false;
 			this.#resolvedModelKey = modelKey;
 			return true;
 		} catch (err) {
+			this.#preflightStatusActive = false;
+			if (this.#cancelRequested || this.#disposed) return false;
 			const msg = err instanceof Error ? err.message : "Failed to setup STT dependencies";
 			options.showWarning(msg);
 			logger.error("STT dependency setup failed", { error: msg });
@@ -147,6 +158,7 @@ export class STTController {
 
 	async #start(editor: Editor, options: ToggleOptions): Promise<void> {
 		if (!(await this.#ensureDeps(options))) return;
+		if (this.#cancelRequested) return;
 		await this.#startStreaming(editor, options);
 	}
 
@@ -170,17 +182,18 @@ export class STTController {
 		this.#streamEditor = editor;
 		this.#streamCommitted = false;
 		this.#streamUtterance = "";
-		this.#streamAbort = new AbortController();
+		const streamAbort = new AbortController();
+		this.#streamAbort = streamAbort;
 		const stream = sttClient.startStream(modelKey, {
 			language: language || undefined,
-			signal: this.#streamAbort.signal,
+			signal: streamAbort.signal,
 			onPartial: text => {
-				if (this.#disposed || this.#state !== "recording") return;
+				if (this.#disposed || this.#streamAbort !== streamAbort || this.#state !== "recording") return;
 				this.#streamEditor?.setVolatileText(this.#prefixed(text));
 				options.requestRender?.();
 			},
 			onSegment: text => {
-				if (this.#disposed) return;
+				if (this.#disposed || this.#streamAbort !== streamAbort) return;
 				const prefixed = this.#prefixed(text);
 				if (prefixed) {
 					this.#streamEditor?.commitVolatileText(prefixed);
@@ -255,6 +268,7 @@ export class STTController {
 		try {
 			finalText = (await stream.stop()).trim();
 		} catch (err) {
+			if (this.#stream !== stream) return;
 			failed = true;
 			if (!this.#disposed) {
 				const msg = err instanceof Error ? err.message : "Transcription failed";
@@ -262,6 +276,7 @@ export class STTController {
 				logger.error("STT live transcription failed", { error: msg });
 			}
 		}
+		if (this.#stream !== stream) return;
 		if (this.#disposed) {
 			this.#cleanupStream();
 			return;
@@ -301,6 +316,33 @@ export class STTController {
 		this.#streamUtterance = "";
 	}
 
+	cancel(): void {
+		this.#cancelRequested = true;
+		if (this.#state === "idle" && !this.#toggling) return;
+
+		const options = this.#activeOptions;
+		if (this.#preflightStatusActive) {
+			options?.showStatus("");
+			this.#preflightStatusActive = false;
+		}
+		this.#streamAbort?.abort();
+		this.#stream?.cancel();
+		try {
+			this.#streamRecorder?.stop();
+		} catch {
+			// best effort cleanup
+		}
+		this.#streamEditor?.clearVolatileText();
+		this.#cleanupStream();
+		if (options) {
+			this.#setState("idle", options);
+			options.requestRender?.();
+		} else {
+			this.#state = "idle";
+		}
+		this.#activeOptions = null;
+	}
+
 	dispose(): void {
 		this.#disposed = true;
 		if (this.#streamAbort) {
@@ -314,6 +356,7 @@ export class STTController {
 			// best effort cleanup
 		}
 		this.#cleanupStream();
+		this.#preflightStatusActive = false;
 		this.#state = "idle";
 		this.#resolvedModelKey = null;
 	}

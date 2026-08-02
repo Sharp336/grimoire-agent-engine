@@ -36,15 +36,18 @@ const ONE_PX_PNG = Buffer.from(
 	"base64",
 );
 
-function createContext() {
+function createContext(getVimMode: () => "insert" | "normal" | "visual" | undefined = () => undefined) {
 	const pasteText = vi.fn();
 	const insertText = vi.fn();
 	const requestRender = vi.fn();
 	const showStatus = vi.fn();
+	const asyncPasteSignal = new AbortController().signal;
 	const ctx = {
 		editor: {
 			pasteText,
 			insertText,
+			getVimMode,
+			getAsyncPasteSignal: () => asyncPasteSignal,
 			imageLinks: undefined,
 			pendingImages: [] as ImageContent[],
 			pendingImageLinks: [] as (string | undefined)[],
@@ -157,6 +160,52 @@ describe("InputController.handleImagePathPaste (issue #2375)", () => {
 		expect(spies.showStatus).not.toHaveBeenCalled();
 		expect(ctx.editor.pendingImages.length).toBe(1);
 		expect(ctx.editor.pendingImages[0]?.mimeType).toBe("image/png");
+	});
+
+	it("drops a pending clipboard image after Vim leaves insert mode", async () => {
+		let vimMode: "insert" | "normal" = "insert";
+		const image = Promise.withResolvers<{ data: Buffer; mimeType: string } | null>();
+		const { ctx, spies } = createContext(() => vimMode);
+		const controller = new InputController(ctx, {
+			readImage: () => image.promise,
+			readText: async () => "",
+		});
+
+		const paste = controller.handleImagePaste();
+		vimMode = "normal";
+		image.resolve({ data: ONE_PX_PNG, mimeType: "image/png" });
+		await paste;
+
+		expect(ctx.editor.pendingImages).toHaveLength(0);
+		expect(spies.insertText).not.toHaveBeenCalled();
+		expect(spies.requestRender).not.toHaveBeenCalled();
+	});
+
+	it("drops a canceled image-path fallback after the clipboard read", async () => {
+		const clipboardRead = Promise.withResolvers<{ data: Buffer; mimeType: string } | null>();
+		const readStarted = Promise.withResolvers<void>();
+		const { ctx, spies } = createContext();
+		const controller = new InputController(ctx, {
+			readImage: () => {
+				readStarted.resolve();
+				return clipboardRead.promise;
+			},
+			readText: async () => "",
+		});
+		const pasteController = new AbortController();
+		const paste = controller.handleImagePathPaste(
+			"/tmp/definitely-does-not-exist-canceled-image-path.png",
+			pasteController.signal,
+		);
+		await readStarted.promise;
+
+		pasteController.abort();
+		clipboardRead.resolve(null);
+		await paste;
+
+		expect(spies.pasteText).not.toHaveBeenCalled();
+		expect(spies.showStatus).not.toHaveBeenCalled();
+		expect(spies.requestRender).not.toHaveBeenCalled();
 	});
 
 	it("locally: attaches the clipboard image when the pasted path resolves to a non-image file", async () => {
