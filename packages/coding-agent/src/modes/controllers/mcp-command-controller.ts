@@ -7,11 +7,13 @@ import * as path from "node:path";
 import { type Component, replaceTabs, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
 import type { SourceMeta } from "../../capability/types";
+import { requireProjectConfigRootSync, resolveProjectConfigRootSync } from "../../config/activation-paths";
 import { expandEnvVarsDeep } from "../../discovery/helpers";
 import {
 	analyzeAuthError,
 	discoverOAuthEndpoints,
 	fetchResourceMetadataScopes,
+	isMCPServerEffectivelyEnabled,
 	loadAllMCPConfigs,
 	MCPManager,
 	type OAuthEndpoints,
@@ -259,9 +261,9 @@ type MCPSearchParsed = {
  * covers connections, pending connections, and discovered-but-not-yet-
  * connected sources).
  *
- * `includeDisabledOnly` controls names found only in
- * `userConfig.disabledServers`, while `includeDisabledConfigured` controls
- * config entries whose `enabled` flag is false. Both default to true because
+ * `includeDisabledOnly` controls names in the MCP denylist, while
+ * `includeDisabledConfigured` controls config entries whose `enabled` flag is
+ * false. Both default to true because
  * callers such as `/mcp list` need the complete union. Autocomplete callers
  * must disable the categories their target operation cannot accept.
  *
@@ -285,13 +287,19 @@ export async function collectMcpServerNames(
 		({ userConfig, projectConfig } = preloaded);
 	} else {
 		const cwd = getProjectDir();
+		const projectEnabled = ctx.settings.get("mcp.enableProjectConfig") !== false;
 		[userConfig, projectConfig] = await Promise.all([
 			readMCPConfigFile(getMCPConfigPath("user", cwd)),
-			readMCPConfigFile(getMCPConfigPath("project", cwd)),
+			projectEnabled && resolveProjectConfigRootSync(cwd)
+				? readMCPConfigFile(getMCPConfigPath("project", resolveProjectConfigRootSync(cwd)!))
+				: Promise.resolve({} as MCPConfigFile),
 		]);
 	}
+	if (ctx.settings.get("mcp.enableProjectConfig") === false) projectConfig = {};
 
-	const names = new Set<string>(includeDisabledOnly ? (userConfig.disabledServers ?? []) : []);
+	const names = new Set<string>(
+		includeDisabledOnly ? [...(userConfig.disabledServers ?? []), ...(projectConfig.disabledServers ?? [])] : [],
+	);
 	const addConfiguredNames = (config: MCPConfigFile): void => {
 		const servers = config.mcpServers;
 		if (!servers) return;
@@ -611,6 +619,16 @@ export class MCPCommandController {
 			this.ctx.showError(parsed.error);
 			return;
 		}
+		const projectConfigEnabled = this.ctx.settings.get("mcp.enableProjectConfig") !== false;
+		const projectConfigAvailable = projectConfigEnabled && resolveProjectConfigRootSync(getProjectDir()) !== null;
+		if (parsed.quickConfig && parsed.scope === "project" && !projectConfigAvailable) {
+			this.ctx.showError(
+				projectConfigEnabled
+					? "Project configuration is unavailable from global configuration."
+					: "Project MCP configuration is disabled.",
+			);
+			return;
+		}
 		if (parsed.quickConfig && parsed.initialName) {
 			let finalConfig = parsed.quickConfig;
 
@@ -728,6 +746,7 @@ export class MCPCommandController {
 				this.ctx.ui.requestRender();
 			},
 			parsed.initialName,
+			projectConfigAvailable ? undefined : ["user"],
 		);
 
 		// Replace editor with wizard
@@ -1027,25 +1046,28 @@ export class MCPCommandController {
 	): Promise<{ filePath: string; scope: "user" | "project"; config: MCPServerConfig } | null> {
 		const cwd = getProjectDir();
 		const userPath = getMCPConfigPath("user", cwd);
-		const projectPath = getMCPConfigPath("project", cwd);
+		const projectRoot = resolveProjectConfigRootSync(cwd);
+		const projectPath = projectRoot ? getMCPConfigPath("project", projectRoot) : null;
+		const projectConfigEnabled = this.ctx.settings.get("mcp.enableProjectConfig") !== false;
 
 		const [userConfig, projectConfig] = await Promise.all([
 			readMCPConfigFile(userPath),
-			readMCPConfigFile(projectPath),
+			projectConfigEnabled && projectPath ? readMCPConfigFile(projectPath) : Promise.resolve({} as MCPConfigFile),
 		]);
 
+		if (projectConfigEnabled && projectPath && projectConfig.mcpServers?.[name]) {
+			return { filePath: projectPath, scope: "project", config: projectConfig.mcpServers[name] };
+		}
 		if (userConfig.mcpServers?.[name]) {
 			return { filePath: userPath, scope: "user", config: userConfig.mcpServers[name] };
 		}
-		if (projectConfig.mcpServers?.[name]) {
-			return { filePath: projectPath, scope: "project", config: projectConfig.mcpServers[name] };
-		}
+		if (!projectConfigEnabled || !projectRoot) return null;
 
 		// Check standalone fallback files (mcp.json, .mcp.json) in the project root —
 		// these match the discovery paths used by the mcp-json provider. Reads run in
 		// parallel (mirroring user/project above) but precedence is preserved by the
 		// for-loop's iteration order: mcp.json wins over .mcp.json on a same-name hit.
-		const standalonePaths = [path.join(cwd, "mcp.json"), path.join(cwd, ".mcp.json")];
+		const standalonePaths = [path.join(projectRoot, "mcp.json"), path.join(projectRoot, ".mcp.json")];
 		const fallbackConfigs = await Promise.all(
 			standalonePaths.map(async fallbackPath => {
 				try {
@@ -1220,9 +1242,22 @@ export class MCPCommandController {
 
 	async #handleWizardComplete(name: string, config: MCPServerConfig, scope: "user" | "project"): Promise<void> {
 		try {
+			if (scope === "project") {
+				if (this.ctx.settings.get("mcp.enableProjectConfig") === false) {
+					this.ctx.showError("Project MCP configuration is disabled.");
+					return;
+				}
+				if (!resolveProjectConfigRootSync(getProjectDir())) {
+					this.ctx.showError("Project configuration is unavailable from global configuration.");
+					return;
+				}
+			}
 			// Determine file path
 			const cwd = getProjectDir();
-			const filePath = getMCPConfigPath(scope, cwd);
+			const filePath =
+				scope === "project"
+					? getMCPConfigPath("project", requireProjectConfigRootSync(cwd))
+					: getMCPConfigPath("user", cwd);
 
 			// Add server to config
 			await addMCPServer(filePath, name, config);
@@ -1321,21 +1356,32 @@ export class MCPCommandController {
 
 			// Load from both user and project configs
 			const userPath = getMCPConfigPath("user", cwd);
-			const projectPath = getMCPConfigPath("project", cwd);
+			const projectRoot = resolveProjectConfigRootSync(cwd);
+			const projectPath = projectRoot ? getMCPConfigPath("project", projectRoot) : null;
 
 			const userPathLabel = shortenPath(userPath);
-			const projectPathLabel = shortenPath(projectPath);
+			const projectPathLabel = projectPath ? shortenPath(projectPath) : "";
+			const projectConfigEnabled = this.ctx.settings.get("mcp.enableProjectConfig") !== false;
 			const [userConfig, projectConfig] = await Promise.all([
 				readMCPConfigFile(userPath),
-				readMCPConfigFile(projectPath),
+				projectConfigEnabled && projectPath ? readMCPConfigFile(projectPath) : Promise.resolve({} as MCPConfigFile),
 			]);
 
-			const userServers = Object.keys(userConfig.mcpServers ?? {});
 			const projectServers = Object.keys(projectConfig.mcpServers ?? {});
+			const projectServerNames = new Set(projectServers);
+			const userServers = Object.keys(userConfig.mcpServers ?? {}).filter(name => !projectServerNames.has(name));
 
 			// Collect runtime-discovered servers not in config files
 			const configServerNames = new Set([...userServers, ...projectServers]);
-			const disabledServerNames = new Set(userConfig.disabledServers ?? []);
+			const userDisabledServerNames = new Set(userConfig.disabledServers ?? []);
+			const projectDisabledServerNames = new Set(projectConfig.disabledServers ?? []);
+			const projectForceEnabledServerNames = new Set(projectConfig.enabledServers ?? []);
+			const userForceEnabledServerNames = new Set(userConfig.enabledServers ?? []);
+			const disabledServerNames = new Set<string>();
+			for (const name of userDisabledServerNames) {
+				if (!projectForceEnabledServerNames.has(name)) disabledServerNames.add(name);
+			}
+			for (const name of projectDisabledServerNames) disabledServerNames.add(name);
 			const discoveredServers: { name: string; source: SourceMeta }[] = [];
 			if (this.ctx.mcpManager) {
 				const allServerNames = await collectMcpServerNames(this.ctx, { userConfig, projectConfig });
@@ -1375,18 +1421,36 @@ export class MCPCommandController {
 				for (const name of userServers) {
 					const config = userConfig.mcpServers![name];
 					const type = config.type ?? "stdio";
-					const state =
-						config.enabled === false
-							? "inactive"
-							: (this.ctx.mcpManager?.getConnectionStatus(name) ?? "disconnected");
+					const projectDisabled = projectDisabledServerNames.has(name);
+					const projectForceEnabled = projectForceEnabledServerNames.has(name);
+					const userDisabled = userDisabledServerNames.has(name);
+					const userForceEnabled = userForceEnabledServerNames.has(name);
+					const enabled = isMCPServerEffectivelyEnabled(config, {
+						projectDefinition: false,
+						projectDisabled,
+						projectEnabled: projectForceEnabled,
+						userDisabled,
+						userEnabled: userForceEnabled,
+					});
+					const overlayDisabled = projectDisabled || (userDisabled && !projectForceEnabled);
+					const sourceDisabled = config.enabled === false && !userForceEnabled && !projectForceEnabled;
+					const state = !enabled
+						? overlayDisabled
+							? "disabled"
+							: sourceDisabled
+								? "inactive"
+								: "disabled"
+						: (this.ctx.mcpManager?.getConnectionStatus(name) ?? "disconnected");
 					const status =
 						state === "inactive"
 							? theme.fg("warning", " ◌ inactive")
-							: state === "connected"
-								? theme.fg("success", " ● connected")
-								: state === "connecting"
-									? theme.fg("muted", " ◌ connecting")
-									: theme.fg("muted", " ○ not connected");
+							: state === "disabled"
+								? theme.fg("warning", " ◌ disabled")
+								: state === "connected"
+									? theme.fg("success", " ● connected")
+									: state === "connecting"
+										? theme.fg("muted", " ◌ connecting")
+										: theme.fg("muted", " ○ not connected");
 					lines.push(`  ${theme.fg("accent", name)}${status} ${theme.fg("dim", `[${type}]`)}`);
 				}
 				lines.push("");
@@ -1398,18 +1462,29 @@ export class MCPCommandController {
 				for (const name of projectServers) {
 					const config = projectConfig.mcpServers![name];
 					const type = config.type ?? "stdio";
-					const state =
-						config.enabled === false
+					const enabled = isMCPServerEffectivelyEnabled(config, {
+						projectDefinition: true,
+						projectDisabled: false,
+						projectEnabled: false,
+						userDisabled: false,
+						userEnabled: false,
+					});
+					const sourceDisabled = config.enabled === false;
+					const state = !enabled
+						? sourceDisabled
 							? "inactive"
-							: (this.ctx.mcpManager?.getConnectionStatus(name) ?? "disconnected");
+							: "disabled"
+						: (this.ctx.mcpManager?.getConnectionStatus(name) ?? "disconnected");
 					const status =
 						state === "inactive"
 							? theme.fg("warning", " ◌ inactive")
-							: state === "connected"
-								? theme.fg("success", " ● connected")
-								: state === "connecting"
-									? theme.fg("muted", " ◌ connecting")
-									: theme.fg("muted", " ○ not connected");
+							: state === "disabled"
+								? theme.fg("warning", " ◌ disabled")
+								: state === "connected"
+									? theme.fg("success", " ● connected")
+									: state === "connecting"
+										? theme.fg("muted", " ◌ connecting")
+										: theme.fg("muted", " ○ not connected");
 					lines.push(`  ${theme.fg("accent", name)}${status} ${theme.fg("dim", `[${type}]`)}`);
 				}
 				lines.push("");
@@ -1433,7 +1508,7 @@ export class MCPCommandController {
 				}
 			}
 
-			// Show servers disabled via /mcp disable (from third-party configs)
+			// Show discovered servers disabled via the shared extension activation list.
 			const relevantDisabled = [...disabledServerNames].filter(n => !configServerNames.has(n));
 			if (relevantDisabled.length > 0) {
 				lines.push(theme.fg("accent", "Disabled") + theme.fg("muted", " (discovered servers):"));
@@ -1465,12 +1540,15 @@ export class MCPCommandController {
 			this.ctx.showError("Server name required. Usage: /mcp remove <name> [--scope project|user]");
 			return;
 		}
+		if (scope === "project" && this.ctx.settings.get("mcp.enableProjectConfig") === false) {
+			this.ctx.showError("Project MCP configuration is disabled.");
+			return;
+		}
 
 		try {
 			const cwd = getProjectDir();
 			const userPath = getMCPConfigPath("user", cwd);
-			const projectPath = getMCPConfigPath("project", cwd);
-			const filePath = scope === "user" ? userPath : projectPath;
+			const filePath = scope === "user" ? userPath : getMCPConfigPath("project", requireProjectConfigRootSync(cwd));
 			const config = await readMCPConfigFile(filePath);
 			if (!config.mcpServers?.[name]) {
 				this.ctx.showError(`Server "${name}" not found in ${scope} config.`);
@@ -1521,7 +1599,24 @@ export class MCPCommandController {
 			}
 
 			const { config } = found;
-			if (config.enabled === false) {
+			const cwd = getProjectDir();
+			const userPath = getMCPConfigPath("user", cwd);
+			const projectConfigEnabled = this.ctx.settings.get("mcp.enableProjectConfig") !== false;
+			const projectRoot = resolveProjectConfigRootSync(cwd);
+			const projectPath = projectRoot ? getMCPConfigPath("project", projectRoot) : null;
+			const [userConfig, projectConfig] = await Promise.all([
+				readMCPConfigFile(userPath),
+				projectConfigEnabled && projectPath ? readMCPConfigFile(projectPath) : Promise.resolve({} as MCPConfigFile),
+			]);
+			const projectDefinition = projectConfig.mcpServers?.[name] !== undefined;
+			const enabled = isMCPServerEffectivelyEnabled(config, {
+				projectDefinition,
+				projectDisabled: !projectDefinition && (projectConfig.disabledServers ?? []).includes(name),
+				projectEnabled: !projectDefinition && (projectConfig.enabledServers ?? []).includes(name),
+				userDisabled: (userConfig.disabledServers ?? []).includes(name),
+				userEnabled: (userConfig.enabledServers ?? []).includes(name),
+			});
+			if (!enabled) {
 				this.ctx.showError(`Server "${name}" is disabled. Run /mcp enable ${name} first.`);
 				return;
 			}
@@ -1607,9 +1702,8 @@ export class MCPCommandController {
 		try {
 			const found = await this.#findConfiguredServer(name);
 			if (!found) {
-				// Check if this is a discovered server from a third-party config
-				const userConfigPath = getMCPConfigPath("user", getProjectDir());
-				const disabledServers = new Set(await readDisabledServers(userConfigPath));
+				const userPath = getMCPConfigPath("user", getProjectDir());
+				const disabledServers = new Set(await readDisabledServers(userPath));
 				const isDiscovered = this.ctx.mcpManager?.getSource(name);
 				const isCurrentlyDisabled = disabledServers.has(name);
 				if (!isDiscovered && !isCurrentlyDisabled) {
@@ -1624,30 +1718,22 @@ export class MCPCommandController {
 					);
 					return;
 				}
-				await setServerDisabled(userConfigPath, name, !enabled);
+				await setServerDisabled(userPath, name, !enabled);
 				if (enabled) {
 					await this.#connectEnabledMCPServer(name);
-					const state = await this.#waitForServerConnectionWithAnimation(name);
-					const status =
-						state === "connected"
-							? theme.fg("success", "Connected")
-							: state === "connecting"
-								? theme.fg("muted", "Connecting")
-								: theme.fg("warning", "Not connected yet");
-					this.#showMessage(
-						[
-							"",
-							theme.fg("success", `${theme.status.enabled} Enabled "${name}"`),
-							"",
-							`  Status: ${status}`,
-							"",
-						].join("\n"),
-					);
 				} else {
 					await this.ctx.mcpManager?.disconnectServer(name);
 					await this.ctx.session.refreshMCPTools(this.ctx.mcpManager?.getTools() ?? []);
-					this.#showMessage(["", theme.fg("muted", `${theme.status.disabled} Disabled "${name}"`), ""].join("\n"));
 				}
+				this.#showMessage(
+					[
+						"",
+						enabled
+							? theme.fg("success", `${theme.status.enabled} Enabled "${name}"`)
+							: theme.fg("muted", `${theme.status.disabled} Disabled "${name}"`),
+						"",
+					].join("\n"),
+				);
 				return;
 			}
 
@@ -1683,8 +1769,8 @@ export class MCPCommandController {
 			const lines = [
 				"",
 				enabled
-					? theme.fg("success", `${theme.status.enabled} Enabled "${name}" (${found.scope} config)`)
-					: theme.fg("muted", `${theme.status.disabled} Disabled "${name}" (${found.scope} config)`),
+					? theme.fg("success", `${theme.status.enabled} Enabled "${name}"`)
+					: theme.fg("muted", `${theme.status.disabled} Disabled "${name}"`),
 			];
 			if (status) {
 				lines.push("");
@@ -1952,7 +2038,11 @@ export class MCPCommandController {
 			return;
 		}
 
-		const { configs, sources } = await loadAllMCPConfigs(getProjectDir());
+		const { configs, sources } = await loadAllMCPConfigs(getProjectDir(), {
+			enableProjectConfig: this.ctx.settings.get("mcp.enableProjectConfig") ?? true,
+			filterExa: true,
+			filterBrowser: this.ctx.settings.get("browser.enabled") ?? false,
+		});
 		const config = configs[name];
 		if (!config) {
 			await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
@@ -2329,7 +2419,11 @@ export class MCPCommandController {
 	}
 
 	async #nextAvailableServerName(scope: MCPAddScope, baseName: string): Promise<string> {
-		const filePath = getMCPConfigPath(scope, getProjectDir());
+		const cwd = getProjectDir();
+		const filePath =
+			scope === "project"
+				? getMCPConfigPath("project", requireProjectConfigRootSync(cwd))
+				: getMCPConfigPath("user", cwd);
 		const config = await readMCPConfigFile(filePath);
 		const existingNames = new Set(Object.keys(config.mcpServers ?? {}));
 		if (!existingNames.has(baseName)) return baseName;
@@ -2349,7 +2443,11 @@ export class MCPCommandController {
 				this.ctx.showError("Server name cannot be empty.");
 				continue;
 			}
-			const filePath = getMCPConfigPath(scope, getProjectDir());
+			const cwd = getProjectDir();
+			const filePath =
+				scope === "project"
+					? getMCPConfigPath("project", requireProjectConfigRootSync(cwd))
+					: getMCPConfigPath("user", cwd);
 			const config = await readMCPConfigFile(filePath);
 			if (config.mcpServers?.[proposed]) {
 				this.ctx.showError(`Server "${proposed}" already exists in ${scope} config.`);

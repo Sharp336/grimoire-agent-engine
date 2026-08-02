@@ -14,6 +14,7 @@ import {
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
+import { resolveProjectConfigRootSync } from "../../config/activation-paths";
 import { validateServerName } from "../../mcp/config-writer";
 import { analyzeAuthError, discoverOAuthEndpoints, fetchResourceMetadataScopes } from "../../mcp/oauth-discovery";
 import type { MCPHttpServerConfig, MCPServerConfig, MCPSseServerConfig, MCPStdioServerConfig } from "../../mcp/types";
@@ -146,6 +147,7 @@ export class MCPAddWizard extends Container {
 		| null = null;
 	#onTestConnectionCallback: ((config: MCPServerConfig) => Promise<void>) | null = null;
 	#onRenderCallback: (() => void) | null = null;
+	#allowedScopes: readonly Scope[];
 	/**
 	 * Set while the OAuth callback is in flight; populated by
 	 * {@link #launchOAuthFlow} and consumed by {@link handleInput} so Esc
@@ -167,6 +169,7 @@ export class MCPAddWizard extends Container {
 		onTestConnection?: (config: MCPServerConfig) => Promise<void>,
 		onRender?: () => void,
 		initialName?: string,
+		allowedScopes: readonly Scope[] = ["user", "project"],
 	) {
 		super();
 		this.#onCompleteCallback = onComplete;
@@ -174,6 +177,7 @@ export class MCPAddWizard extends Container {
 		this.#onOAuthCallback = onOAuth ?? null;
 		this.#onTestConnectionCallback = onTestConnection ?? null;
 		this.#onRenderCallback = onRender ?? null;
+		this.#allowedScopes = allowedScopes;
 		if (initialName && initialName.trim().length > 0) {
 			this.#state.name = initialName.trim();
 			this.#currentStep = "transport";
@@ -418,11 +422,12 @@ export class MCPAddWizard extends Container {
 		const cwd = getProjectDir();
 
 		const userPathLabel = shortenPath(getMCPConfigPath("user", cwd));
-		const projectPathLabel = shortenPath(getMCPConfigPath("project", cwd));
+		const projectRoot = resolveProjectConfigRootSync(cwd);
+		const projectPathLabel = projectRoot ? shortenPath(getMCPConfigPath("project", projectRoot)) : null;
 		const options = [
 			{ value: "user" as const, label: `User level (${userPathLabel})` },
-			{ value: "project" as const, label: `Project level (${projectPathLabel})` },
-		];
+			...(projectPathLabel ? [{ value: "project" as const, label: `Project level (${projectPathLabel})` }] : []),
+		].filter(option => this.#allowedScopes.includes(option.value));
 
 		for (let i = 0; i < options.length; i++) {
 			const option = options[i];
@@ -703,8 +708,7 @@ export class MCPAddWizard extends Container {
 				break;
 			}
 			case "scope": {
-				const scopes: Scope[] = ["user", "project"];
-				this.#state.scope = scopes[this.#selectedIndex];
+				this.#state.scope = this.#allowedScopes[this.#selectedIndex];
 				this.#currentStep = "confirm";
 				this.#selectedIndex = 0;
 				break;
@@ -741,7 +745,7 @@ export class MCPAddWizard extends Container {
 			case "auth-location":
 				return 1; // 2 options
 			case "scope":
-				return 1; // 2 options
+				return this.#allowedScopes.length - 1;
 			case "confirm":
 				return 1; // 2 options
 			default:
@@ -827,7 +831,7 @@ export class MCPAddWizard extends Container {
 				break;
 			case "confirm":
 				this.#currentStep = "scope";
-				this.#selectedIndex = this.#state.scope === "user" ? 0 : 1;
+				this.#selectedIndex = Math.max(0, this.#allowedScopes.indexOf(this.#state.scope ?? "user"));
 				break;
 		}
 

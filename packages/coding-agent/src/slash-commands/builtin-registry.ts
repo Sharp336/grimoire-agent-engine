@@ -7,6 +7,7 @@ import { APP_NAME, getMCPConfigPath, getProjectDir, logger, setProjectDir } from
 import { reset as resetCapabilities } from "../capability";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
 import { CollabHost } from "../collab/host";
+import { resolveProjectConfigRootSync } from "../config/activation-paths";
 import {
 	expandRoleAlias,
 	formatModelString,
@@ -32,6 +33,7 @@ import {
 	MarketplaceManager,
 } from "../extensibility/plugins/marketplace";
 import { readMCPConfigFile } from "../mcp/config-writer";
+import type { MCPConfigFile } from "../mcp/types";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
 import { runPauseScreen } from "../modes/components/pause-screen";
 import { collectMcpServerNames, MCPCommandController } from "../modes/controllers/mcp-command-controller";
@@ -2747,7 +2749,7 @@ const MCP_SERVER_NAME_SUBCOMMANDS: Readonly<Record<string, true>> = {
 	unauth: true,
 };
 
-/** Subcommands that accept names found only in `userConfig.disabledServers`. */
+/** Subcommands that accept names present only in MCP `disabledServers` overlays. */
 const MCP_DISABLED_ONLY_ELIGIBLE_SUBCOMMANDS: Readonly<Record<string, true>> = {
 	enable: true,
 	disable: true,
@@ -2830,8 +2832,11 @@ async function buildMcpRemoveCompletions(
 	let projectNames: string[];
 	let userNames: string[];
 	try {
+		const projectRoot = resolveProjectConfigRootSync(cwd);
 		const [projectConfig, userConfig] = await Promise.all([
-			readMCPConfigFile(getMCPConfigPath("project", cwd)),
+			projectRoot
+				? readMCPConfigFile(getMCPConfigPath("project", projectRoot))
+				: Promise.resolve({} as MCPConfigFile),
 			readMCPConfigFile(getMCPConfigPath("user", cwd)),
 		]);
 		projectNames = Object.keys(projectConfig.mcpServers ?? {});

@@ -133,6 +133,8 @@ Layers are combined with a deep merge:
 - **Objects are deep-merged** — keys present only in a lower layer are kept; keys present in a higher layer override.
 - **Scalars and arrays are replaced wholesale** by the higher-precedence layer. A higher layer's array does not append to a lower layer's array.
 
+`disabledExtensions` / `enabledExtensions` and `disabledProviders` / `enabledProviders` are activation-list exceptions. A project or overlay `enabled*` entry can re-enable an item disabled globally; a project or overlay `disabled*` entry still wins when both lists name the same item. This supports project-scoped activation without copying every global entry into the project config.
+
 Use nested YAML mappings for dotted setting paths:
 
 ```yaml
@@ -217,10 +219,13 @@ tools:
     bash: allow         # overridden by project
     read: allow         # kept from global
 disabledProviders:
-  - groq                # project array REPLACES the global array
+  - anthropic
+  - openai
+  - gemini
+  - groq                # activation lists merge across scopes
 ```
 
-Array replacement is the most common surprise: the project's `disabledProviders` does not extend the global list — it becomes the entire list for that project. The same applies to `enabledModels`, `cycleOrder`, `extensions`, and every other array-typed setting.
+Array replacement is the most common surprise for ordinary settings arrays. Activation lists (`disabledExtensions` / `enabledExtensions` and `disabledProviders` / `enabledProviders`) are the exception: project disables extend global disables, while project enables can lift global disables. The same ordinary replacement rule still applies to `enabledModels`, `cycleOrder`, `extensions`, and other array-typed settings.
 
 ## Project-local config
 

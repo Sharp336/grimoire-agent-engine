@@ -1,7 +1,9 @@
 /**
  * Types for the Extension Control Center dashboard.
  */
+
 import type { SourceMeta } from "../../../capability/types";
+import type { ActivationWriteTarget, ProjectActivation } from "../../../config/settings";
 
 /**
  * Extension kinds matching capability types.
@@ -22,6 +24,8 @@ export type ExtensionKind =
  * Extension state (active, disabled, or shadowed).
  */
 export type ExtensionState = "active" | "disabled" | "shadowed";
+
+export type ActivationMode = "tri-state" | "binary";
 
 /**
  * Reason why an extension is disabled.
@@ -61,6 +65,22 @@ export interface Extension {
 	shadowedBy?: string;
 	/** Raw item data for inspector */
 	raw: unknown;
+	/** Project/global activation override shown for rows that can cycle activation. */
+	activationState?: ProjectActivation;
+	/** Where edits for activationState are persisted in this workspace. */
+	activationTarget?: ActivationWriteTarget;
+	/** Project-only rows use a binary active/disabled cycle instead of tri-state inherit. */
+	activationMode?: ActivationMode;
+	/** Whether the source configuration prevents changing this row's activation. */
+	activationLocked?: boolean;
+	/** Project MCP overlay state for inherited servers. */
+	mcpProjectActivation?: ProjectActivation;
+	/** Whether this server has a complete project MCP definition. */
+	mcpProjectDefinition?: boolean;
+	/** Whether the user MCP denylist disables this server. */
+	mcpUserDisabled?: boolean;
+	/** Whether the user MCP allowlist force-enables this server. */
+	mcpUserEnabled?: boolean;
 }
 
 /**

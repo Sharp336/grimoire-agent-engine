@@ -2311,6 +2311,11 @@ export const repo = {
 		return result.stdout.trim() || null;
 	},
 
+	/** Resolve the repository root synchronously (may be a worktree root). */
+	rootSync(cwd: string): string | null {
+		return resolveRepositorySync(cwd)?.repoRoot ?? null;
+	},
+
 	/** Resolve the primary checkout root, or the shared common dir for bare-repo worktrees. */
 	async primaryRoot(cwd: string, signal?: AbortSignal): Promise<string | null> {
 		const repository = await resolveRepository(cwd);

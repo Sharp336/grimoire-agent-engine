@@ -74,4 +74,21 @@ describe("applyDisabledExtensionsToState", () => {
 		});
 		expect(next.selected).toMatchObject({ id: "skill:shadowed", state: "shadowed", disabledReason: "shadowed" });
 	});
+
+	test("keeps source-locked extensions disabled during immediate state updates", () => {
+		const locked = extension({
+			id: "mcp:source-disabled",
+			state: "disabled",
+			disabledReason: "item-disabled",
+			activationLocked: true,
+		});
+
+		const next = applyDisabledExtensionsToState(dashboardState([locked]), []);
+
+		expect(next.extensions[0]).toMatchObject({
+			id: "mcp:source-disabled",
+			state: "disabled",
+			activationLocked: true,
+		});
+	});
 });

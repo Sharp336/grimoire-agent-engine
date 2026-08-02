@@ -307,6 +307,9 @@ export interface ModelTagsSettings {
 	[key: string]: ModelTagDef;
 }
 
+export type ProjectActivation = "inherit" | "enabled" | "disabled";
+export type ProjectActivationKind = "skills" | "rules" | "extensions" | "slash-commands";
+
 // Typed defaults for array/record settings — named constants avoid `as` casts
 // under `as const` while still letting SettingValue infer the correct element type.
 const EMPTY_STRING_ARRAY: string[] = [];
@@ -522,6 +525,7 @@ export const SETTINGS_SCHEMA = {
 	enabledModels: { type: "array", default: EMPTY_STRING_ARRAY },
 
 	disabledProviders: { type: "array", default: EMPTY_STRING_ARRAY },
+	enabledProviders: { type: "array", default: EMPTY_STRING_ARRAY },
 
 	"providers.maxInFlightRequests": {
 		type: "record",
@@ -536,6 +540,7 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	disabledExtensions: { type: "array", default: EMPTY_STRING_ARRAY },
+	enabledExtensions: { type: "array", default: EMPTY_STRING_ARRAY },
 
 	modelRoleStorage: {
 		type: "enum",
@@ -560,7 +565,6 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
-
 	modelRoles: { type: "record", default: EMPTY_STRING_RECORD },
 
 	modelTags: { type: "record", default: EMPTY_MODEL_TAGS_RECORD },
@@ -5717,6 +5721,7 @@ export interface SkillsSettings {
 	ignoredSkills?: string[];
 	includeSkills?: string[];
 	disabledExtensions?: string[];
+	enabledExtensions?: string[];
 }
 
 export interface CommitSettings {

@@ -66,7 +66,8 @@ OMP supports this top-level structure:
       "args": ["-y", "some-mcp-server"]
     }
   },
-  "disabledServers": ["server-name"]
+  "disabledServers": ["server-name"],
+  "enabledServers": ["other-server"]
 }
 ```
 
@@ -74,9 +75,10 @@ Top-level keys:
 
 - `$schema` — optional JSON Schema URL for tooling
 - `mcpServers` — map of server name to server config
-- `disabledServers` — user-level denylist used to turn off discovered servers by name; runtime loading reads this list from the active profile's user MCP file (`~/.omp/agent/mcp.json`, or `~/.omp/profiles/<name>/agent/mcp.json` under a named profile)
+- `disabledServers` — denylist for suppressing a discovered server by name
+- `enabledServers` — allowlist for explicitly enabling an inherited or third-party server
 
-Server names must match `^[a-zA-Z0-9_.-]{1,100}$`.
+Server names must match `^[a-zA-Z0-9_.:-]{1,100}$`.
 
 ## Supported server fields
 
@@ -411,18 +413,33 @@ That means this is valid and convenient for local secrets:
 - `"Authorization": "Bearer hardcoded-token"` → use the literal value
 - `"Authorization": "!printf 'Bearer %s' \"$GITHUB_TOKEN\""` → build the header from a command
 
-## `disabledServers`
+## Activation
 
-`disabledServers` is read from the user config file (`~/.omp/agent/mcp.json`) when a server is discovered from any source and you want OMP to ignore it without editing that other tool's config.
+Keep MCP server definitions portable. The Extension Center persists MCP state in `mcp.json`, not `config.yml` shared extension activation lists.
 
-Example:
+### Project overrides for inherited servers
+
+If the user config defines a server and the project does not define the same name, project `.omp/mcp.json` has a three-state overlay:
 
 ```json
-{
-  "$schema": "https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/src/config/mcp-schema.json",
-  "disabledServers": ["github", "slack"]
-}
+// inherit: omit both arrays
+
+// disabled in this project
+{ "disabledServers": ["github"] }
+
+// enabled in this project, even when its inherited definition is disabled
+{ "enabledServers": ["github"] }
 ```
+
+The project overlay does not copy `command`, `args`, `env`, or other server fields. Changes to the inherited user definition remain visible to the project. Project `disabledServers` wins over project `enabledServers`.
+
+If `.omp/mcp.json` instead contains a complete same-name entry under `mcpServers`, that definition shadows the user definition. It has only its own `enabled` / `disabled` state; fields are not merged and the project overlay state is not shown.
+
+User `disabledServers` and `enabledServers` remain useful for servers discovered from other tools. A project `enabledServers` entry overrides a user denylist for that project; otherwise the user denylist wins. A user `enabledServers` entry can enable a source definition with `enabled: false` but does not override the user denylist.
+
+When `mcp.enableProjectConfig: false`, OMP does not load project MCP definitions or project overlays. Extension Center project-view MCP rows are read-only.
+
+`/mcp enable` and `/mcp disable` update the highest-precedence OMP-managed server definition's `enabled` field. For a discovered server without an OMP-managed definition, they use the user MCP denylist/allowlist overlay. Extension Center MCP toggles likewise do not write `mcp:<name>` entries to `config.yml`.
 
 ## `/mcp add` vs editing JSON directly
 
@@ -459,13 +476,13 @@ Practical implications:
 
 ## Discovery and precedence
 
-OMP does not merge duplicate server definitions across files. Discovery providers are prioritized, and the higher-priority definition wins. Separately, `disabledServers` from `~/.omp/agent/mcp.json` can suppress a discovered server by name.
+OMP does not merge duplicate server definitions across files. Discovery providers are prioritized, and the higher-priority definition wins.
 
 In practice:
 
-- prefer `.omp/mcp.json` or `~/.omp/agent/mcp.json` when you want an OMP-specific override
+- prefer `.omp/mcp.json` or `~/.omp/agent/mcp.json` when OMP should own the server definition
 - keep server names unique across tools when possible
-- use `disabledServers` in the user config when a third-party config keeps reintroducing a server you do not want
+- use `disabledServers` in OMP `mcp.json` when a third-party config keeps reintroducing a server you do not want
 
 ## Troubleshooting
 
@@ -488,7 +505,7 @@ The JSON is valid, but the server may still be unreachable. Use `/mcp test <name
 
 ### The server exists in another tool's config but not in OMP
 
-Run `/mcp list`. OMP discovers many third-party MCP files, but project-level loading can also be disabled via the `mcp.enableProjectConfig` setting, and a user-level `disabledServers` entry can suppress a server by name.
+Run `/mcp list`. OMP discovers many third-party MCP files, but project-level loading can be disabled by `mcp.enableProjectConfig`; a server can also be disabled by an MCP overlay, `/mcp` activation state, or its definition's `enabled: false` flag.
 
 ## References
 

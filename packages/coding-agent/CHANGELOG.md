@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Enhanced the Extension Control Center with Global and Project scopes, allowing each project to tailor its providers, skills, MCP servers, rules, extension modules, and file-based slash commands without changing global defaults.
+- Added `enabledExtensions` and `enabledProviders` settings so project configuration can explicitly re-enable globally disabled items, alongside project MCP `enabledServers` and `disabledServers` overlays in `.omp/mcp.json`.
+
+### Changed
+
+- Extension and MCP activation now follows the nearest `.omp` project or Git worktree root, shows inherited and effective state in the Extension Control Center, and keeps `/mcp list`, enable, disable, add, and remove behavior aligned with the same project configuration.
+
 ## [17.2.4] - 2026-08-01
 
 ### Added

@@ -7,11 +7,12 @@
  * Priority: 5 (low, as this is a fallback after tool-specific providers)
  */
 import * as path from "node:path";
-import { logger, tryParseJson } from "@oh-my-pi/pi-utils";
+import { getAgentDir, logger, tryParseJson } from "@oh-my-pi/pi-utils";
 import { registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
+import { isPathInside, resolveProjectConfigRootSync } from "../config/activation-paths";
 import { createSourceMeta, expandEnvVarsDeep, parseRequestIdFormat } from "./helpers";
 
 const PROVIDER_ID = "mcp-json";
@@ -158,9 +159,18 @@ async function loadMCPJsonFile(
  * MCP JSON Provider loader.
  */
 async function load(ctx: LoadContext): Promise<LoadResult<MCPServer>> {
+	// The native provider already loads the active agent profile's mcp.json as
+	// user configuration. Do not rediscover that same file as a standalone
+	// project config when the session runs from the profile directory.
+	if (isPathInside(getAgentDir(), ctx.cwd)) {
+		return { items: [] };
+	}
+
+	const projectRoot = resolveProjectConfigRootSync(ctx.cwd);
+	if (!projectRoot) return { items: [] };
 	const filenames = ["mcp.json", ".mcp.json"];
 	const results = await Promise.all(
-		filenames.map(filename => loadMCPJsonFile(ctx, path.join(ctx.cwd, filename), "project")),
+		filenames.map(filename => loadMCPJsonFile(ctx, path.join(projectRoot, filename), "project")),
 	);
 
 	const allItems = results.flatMap(r => r.items);

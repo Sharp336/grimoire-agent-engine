@@ -43,7 +43,7 @@ import {
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { getBlobsDir, isEnoent, logger, type postmortem, VERSION } from "@oh-my-pi/pi-utils";
-import { disableProvider, enableProvider, reset as resetCapabilities } from "../../capability";
+import { reset as resetCapabilities, syncDisabledProviders } from "../../capability";
 import { Settings } from "../../config/settings";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
@@ -1008,20 +1008,30 @@ export class AcpAgent implements Agent {
 			}
 			case "_omp/extensions": {
 				const cwd = typeof params.cwd === "string" ? (params.cwd as string) : undefined;
-				const sm = await Settings.init();
-				const disabledIds = (sm.get("disabledExtensions") as string[] | undefined) ?? [];
-				const extensions = await loadAllExtensions(cwd, disabledIds);
+				const settings = await Settings.init();
+				const sm = cwd ? await settings.cloneForCwd(cwd) : settings;
+				const scope = cwd ? sm.getDefaultActivationScope(cwd) : "global";
+				const disabledIds = sm.getActivationDisabledExtensions(scope);
+				const disabledProviders = sm.getActivationDisabledProviders(scope);
+				const extensions = await loadAllExtensions(
+					cwd,
+					disabledIds,
+					disabledProviders,
+					sm.get("mcp.enableProjectConfig") !== false,
+				);
 				return { extensions: extensions as unknown as Array<{ [key: string]: unknown }> };
 			}
 			case "_omp/extensions/toggle": {
 				const providerId = params.providerId;
 				if (typeof providerId !== "string") throw new Error("providerId required");
-				if (params.enabled === false) {
-					disableProvider(providerId);
-					return { enabled: false };
-				}
-				enableProvider(providerId);
-				return { enabled: true };
+				const cwd = typeof params.cwd === "string" ? (params.cwd as string) : undefined;
+				const settings = await Settings.init();
+				const sm = cwd ? await settings.cloneForCwd(cwd) : settings;
+				const scope = cwd ? sm.getDefaultActivationScope(cwd) : "global";
+				const enabled = params.enabled !== false;
+				await sm.setProviderActivation(providerId, enabled ? "enabled" : "disabled", scope);
+				if (scope === "global") syncDisabledProviders(sm.get("disabledProviders") as string[]);
+				return { enabled };
 			}
 			default:
 				throw new Error(`Unknown ACP ext method: ${method}`);
