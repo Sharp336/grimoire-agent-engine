@@ -91,4 +91,27 @@ describe("RPC command registry", () => {
 			enum: ["steer", "followUp", null],
 		});
 	});
+
+	test("advertises the complete session catalog surface with truthful concurrency", () => {
+		const manifest = getRpcCapabilityManifest();
+		const expected = {
+			list_sessions: ["host", "concurrent"],
+			get_session_info: ["host", "concurrent"],
+			list_workspace_roots: ["host", "concurrent"],
+			resume_session: ["session", "serial"],
+			fork_session: ["session", "serial"],
+			rename_session: ["host", "serial"],
+			delete_session: ["host", "serial"],
+		} as const;
+
+		for (const [name, [scope, concurrencyClass]] of Object.entries(expected)) {
+			const command = manifest.commands.find(candidate => candidate.name === name);
+			expect(command).toMatchObject({
+				availability: "available",
+				execution: "sync",
+				scope,
+				concurrencyClass,
+			});
+		}
+	});
 });

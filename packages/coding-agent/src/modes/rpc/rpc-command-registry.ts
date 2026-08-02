@@ -86,6 +86,9 @@ const positiveIntegerField = optional("a positive integer", value => Number.isSa
 	type: ["integer", "null"],
 	minimum: 1,
 });
+const optionalIntegerField = optional("an integer", value => Number.isSafeInteger(value), {
+	type: ["integer", "null"],
+});
 
 function enumField<const TValue extends string>(...values: readonly TValue[]): RpcFieldDefinition {
 	return required(values.map(value => JSON.stringify(value)).join(" or "), value => values.includes(value as TValue), {
@@ -302,6 +305,36 @@ export const RPC_COMMAND_DEFINITIONS = {
 	switch_session: sessionCommand(
 		{ type: "switch_session", sessionPath: "/tmp/session.jsonl" },
 		{ sessionPath: stringField },
+	),
+	list_sessions: hostCommand(
+		{ type: "list_sessions", scope: "cwd", cwd: "/workspace", limit: 50 },
+		{
+			scope: optionalEnumField("cwd", "all"),
+			cwd: optionalStringField,
+			cursor: optionalStringField,
+			limit: optionalIntegerField,
+			search: optionalStringField,
+		},
+		"concurrent",
+	),
+	get_session_info: hostCommand(
+		{ type: "get_session_info", session: "01901234" },
+		{ session: stringField, scope: optionalEnumField("cwd", "all"), cwd: optionalStringField },
+		"concurrent",
+	),
+	list_workspace_roots: hostCommand({ type: "list_workspace_roots" }, {}, "concurrent"),
+	resume_session: sessionCommand(
+		{ type: "resume_session", session: "01901234" },
+		{ session: stringField, scope: optionalEnumField("cwd", "all"), cwd: optionalStringField },
+	),
+	fork_session: sessionCommand({ type: "fork_session" }),
+	rename_session: hostCommand(
+		{ type: "rename_session", session: "01901234", name: "Investigation" },
+		{ session: stringField, name: stringField, scope: optionalEnumField("cwd", "all"), cwd: optionalStringField },
+	),
+	delete_session: hostCommand(
+		{ type: "delete_session", session: "01901234" },
+		{ session: stringField, scope: optionalEnumField("cwd", "all"), cwd: optionalStringField },
 	),
 	branch: sessionCommand({ type: "branch", entryId: "entry-1" }, { entryId: stringField }),
 	get_branch_messages: sessionCommand({ type: "get_branch_messages" }),
