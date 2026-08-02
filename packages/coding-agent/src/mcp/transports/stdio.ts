@@ -5,6 +5,7 @@
  * Messages are newline-delimited JSON.
  */
 
+import * as fsNative from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getProjectDir, readJsonl } from "@oh-my-pi/pi-utils";
@@ -102,10 +103,9 @@ function getWindowsPathExt(env: Record<string, string | undefined>): string[] {
 	return extensions.length > 0 ? extensions : DEFAULT_WINDOWS_PATHEXT;
 }
 
-async function fileExists(filePath: string): Promise<boolean> {
+async function isFile(filePath: string): Promise<boolean> {
 	try {
-		await fs.access(filePath);
-		return true;
+		return (await fs.stat(filePath)).isFile();
 	} catch {
 		return false;
 	}
@@ -133,9 +133,9 @@ async function resolveWindowsCommandPath(
 	if (hasPathSegment(command)) {
 		for (const candidate of candidates) {
 			const resolved = path.isAbsolute(candidate) ? candidate : path.resolve(cwd, candidate);
-			if (await fileExists(resolved)) return resolved;
+			if (await isFile(resolved)) return resolved;
 		}
-		return hasExt ? command : null;
+		return null;
 	}
 
 	// Match cmd.exe's lookup order for an unqualified name: current directory
@@ -151,10 +151,57 @@ async function resolveWindowsCommandPath(
 	for (const dir of searchDirs) {
 		for (const candidate of candidates) {
 			const resolved = path.join(dir, candidate);
-			if (await fileExists(resolved)) return resolved;
+			if (await isFile(resolved)) return resolved;
 		}
 	}
-	return hasExt ? command : null;
+	return null;
+}
+
+/**
+ * Resolve a stdio MCP server command to a concrete file path — the
+ * non-spawning subset of {@link resolveStdioSpawnCommand}. Returns the
+ * resolved path or `null` when the command cannot be located.
+ *
+ * On Windows, delegates to {@link resolveWindowsCommandPath} so the same
+ * cwd-first, PATHEXT-aware lookup the transport uses at spawn time runs
+ * here. On POSIX, a path-qualified command resolves against the configured
+ * cwd; a bare command resolves via `Bun.which` with the config's PATH
+ * override (if any) — authoritative, never falling back to the process
+ * PATH, mirroring the transport's `config.env` merge that replaces PATH.
+ *
+ * Exported so `omp doctor` can probe command resolvability without spawning
+ * and without maintaining a second resolver that drifts from the transport.
+ */
+export async function resolveStdioCommandPath(
+	command: string,
+	cwd: string,
+	env: Record<string, string | undefined>,
+	platform: NodeJS.Platform = process.platform,
+): Promise<string | null> {
+	if (platform === "win32") {
+		return resolveWindowsCommandPath(command, cwd, env);
+	}
+	// POSIX: path-qualified commands must be regular files the child can execute.
+	if (hasPathSegment(command)) {
+		const resolved = path.isAbsolute(command) ? command : path.resolve(cwd, command);
+		try {
+			if (!(await fs.stat(resolved)).isFile()) return null;
+			await fs.access(resolved, fsNative.constants.X_OK);
+			return resolved;
+		} catch {
+			return null;
+		}
+	}
+	// Bare command: resolve via Bun.which with the config's PATH override
+	// when present. The transport merges config.env into the spawn
+	// environment, so config.env.PATH REPLACES the process PATH — an
+	// authoritative restricted PATH that lacks the command must report
+	// "not found", never fall back to the doctor's own process PATH.
+	const envPath = getCaseInsensitiveEnv(env, "PATH");
+	if (envPath !== undefined) {
+		return Bun.which(command, { PATH: envPath });
+	}
+	return Bun.which(command);
 }
 
 function resolveWindowsShimPath(value: string, shimDir: string): string | null {
@@ -208,7 +255,7 @@ async function resolveWindowsNpmShimCommand(
 	if (!target) return null;
 
 	const siblingNode = path.join(path.dirname(commandPath), "node.exe");
-	const nodeCommand = (await fileExists(siblingNode)) ? siblingNode : "node";
+	const nodeCommand = (await isFile(siblingNode)) ? siblingNode : "node";
 	return {
 		cmd: [nodeCommand, target, ...args],
 		windowsHide,
@@ -339,14 +386,13 @@ export async function resolveStdioSpawnCommand(
 	const npmShimCommand = await resolveWindowsNpmShimCommand(resolvedCommand, args, options.cwd, windowsHide);
 	if (npmShimCommand) return npmShimCommand;
 
-	// Direct-spawn only when we resolved to a concrete file AND its extension
-	// is not a batch script. Everything else (resolved .cmd/.bat, or an
-	// unresolved extensionless command) goes through cmd.exe so PATHEXT runs.
-	// Windows stdio servers stay attached so wrapper grandchildren inherit the
-	// same console session. Only hide the child when OMP itself has no console
-	// to share; CREATE_NO_WINDOW breaks console inheritance for nested wrappers.
 	const detached = false;
-	const needsCmdExe = resolved === null || isWindowsBatchCommand(resolvedCommand);
+
+	// An explicit executable extension retains the direct-spawn behavior even
+	// when the preflight lookup cannot see it. The doctor-facing resolver stays
+	// strict: only an existing path is reported as found.
+	const directExecutable = resolved !== null || hasExecutableExtension(config.command, getWindowsPathExt(options.env));
+	const needsCmdExe = !directExecutable || isWindowsBatchCommand(resolvedCommand);
 	if (!needsCmdExe) return { cmd: [resolvedCommand, ...args], windowsHide, detached };
 
 	return {

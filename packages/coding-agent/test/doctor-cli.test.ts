@@ -212,11 +212,9 @@ describe("omp doctor", () => {
 		expect(backups.some(name => name.startsWith("agent.db."))).toBe(true);
 	});
 
-	test("interrupted swap marker: warning read-only, restored under --fix", async () => {
+	test("interrupted legacy marker with unrecognized live data requires manual recovery", async () => {
 		const dbPath = getAgentDbPath(root);
 		await createDatabaseWithRows(dbPath, 10);
-		// Simulate a crashed repair: a verified archive of the good database
-		// alongside a swap marker, with the live file damaged afterwards.
 		const archiveDir = path.join(root, ".omp-doctor-backups", "agent.db.test");
 		await fs.mkdir(archiveDir, { recursive: true });
 		await fs.copyFile(dbPath, path.join(archiveDir, "agent.db"));
@@ -231,11 +229,12 @@ describe("omp doctor", () => {
 		expect(await pathExists(marker)).toBe(true);
 
 		const fixed = await runDoctorCommand({ flags: { agentDir: root, fix: true } });
-		expect(quickCheck(dbPath)).toBe("ok");
-		expect(await pathExists(marker)).toBe(false);
 		const finding = fixed.findings.find(entry => entry.id === "storage.agent.db");
-		expect(finding?.summary).toContain("restored from archive");
-		expect(finding?.details.join("\n")).toContain("restored from archive");
+		expect(finding?.status).toBe("error");
+		expect(finding?.summary).toContain("recovery did not complete");
+		expect(finding?.details.join("\n")).toContain("unrecognized live database state");
+		expect(await Bun.file(dbPath).text()).toBe("garbage-not-sqlite");
+		expect(await pathExists(marker)).toBe(true);
 	});
 
 	test("WAL is reported uncheckpointed and truncated under --fix", async () => {
@@ -438,7 +437,7 @@ describe("omp doctor", () => {
 			const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
 			const quarantine = report.findings.find(entry => entry.id === "config.quarantined");
 			expect(quarantine?.status).toBe("error");
-			expect(quarantine?.summary).toContain("cannot read agent directory");
+			expect(quarantine?.summary).toContain("cannot read config directory");
 			expect((quarantine?.details[0] ?? "").length).toBeGreaterThan(0);
 		} finally {
 			readdirSpy.mockRestore();
@@ -912,10 +911,10 @@ describe("omp doctor", () => {
 			envSpy.mockRestore();
 		}
 	});
-
 	test("browser: PUPPETEER_EXECUTABLE_PATH pointing at an existing file → ok", async () => {
 		const fakePath = path.join(root, "env-chrome");
 		await fs.writeFile(fakePath, "fake", "utf8");
+		await fs.chmod(fakePath, 0o755);
 		const chromeSpy = spyOn(browserLaunch, "resolveSystemChromium").mockReturnValue(undefined);
 		const envSpy = spyOn(browserLaunch, "readChromiumEnvOverride").mockReturnValue(fakePath);
 		try {
@@ -925,6 +924,26 @@ describe("omp doctor", () => {
 			expect(finding?.status).toBe("ok");
 			expect(finding?.summary).toBe(fakePath);
 			expect(finding?.details).toContain("resolved via PUPPETEER_EXECUTABLE_PATH");
+		} finally {
+			chromeSpy.mockRestore();
+			envSpy.mockRestore();
+		}
+	});
+
+	test("browser: PUPPETEER_EXECUTABLE_PATH pointing at a non-executable file → error (POSIX)", async () => {
+		if (process.platform === "win32") return; // X_OK not enforced on win32
+		const fakePath = path.join(root, "env-chrome-noexec");
+		await fs.writeFile(fakePath, "fake", "utf8");
+		await fs.chmod(fakePath, 0o644); // readable but not executable
+		const chromeSpy = spyOn(browserLaunch, "resolveSystemChromium").mockReturnValue(undefined);
+		const envSpy = spyOn(browserLaunch, "readChromiumEnvOverride").mockReturnValue(fakePath);
+		try {
+			const report = await runDoctorCommand({ flags: { agentDir: root } });
+			const finding = report.findings.find(entry => entry.id === "browser.chromium");
+			expect(finding?.category).toBe("browser");
+			expect(finding?.status).toBe("error");
+			expect(finding?.summary).toContain("not executable");
+			expect(finding?.remedy).toBeDefined();
 		} finally {
 			chromeSpy.mockRestore();
 			envSpy.mockRestore();
@@ -1530,6 +1549,21 @@ describe("omp doctor", () => {
 		}
 	});
 
+	test("gc lock non-contention filesystem error produces a storage error, not a warning", async () => {
+		// A regular file cannot serve as the agent directory on any platform.
+		// withGcLock fails during mkdir before it can classify a contention.
+		const agentDirFile = path.join(root, "not-an-agent-dir");
+		await fs.writeFile(agentDirFile, "not a directory", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: agentDirFile, fix: true } });
+		const errFinding = report.findings.find(entry => entry.id === "storage.maintenance-error");
+		expect(errFinding?.status).toBe("error");
+		expect(errFinding?.summary).toContain("storage maintenance failed");
+		// The gc-lock warning must NOT appear — this is not contention.
+		const lockFinding = report.findings.find(entry => entry.id === "storage.gc-lock");
+		expect(lockFinding).toBeUndefined();
+	});
+
 	// ── Item A: settings schema validation ──────────────────────────────────
 
 	test('settings: wrong-typed boolean (autoResume: "yes") is an error, not valid', async () => {
@@ -1638,9 +1672,9 @@ describe("omp doctor", () => {
 		expect(errorFinding?.details.some(d => d.includes("invalid JSON"))).toBe(true);
 	});
 
-	// ── Item C: committed marker misread as rollback failure ─────────────────
+	// ── Item C: legacy marker requires manual recovery ────────────────────────
 
-	test("committed swap marker (swapped:true) under --fix reports ok, not rollback failed", async () => {
+	test("legacy swapped marker under --fix requires manual recovery", async () => {
 		const dbPath = getAgentDbPath(root);
 		await createDatabaseWithRows(dbPath, 10);
 		// Simulate a crash AFTER the swap committed but BEFORE marker removal:
@@ -1653,12 +1687,11 @@ describe("omp doctor", () => {
 
 		const report = await runDoctorCommand({ flags: { agentDir: root, fix: true } });
 		const finding = report.findings.find(entry => entry.id === "storage.agent.db");
-		// Must NOT report "rollback failed".
-		expect(finding?.summary).not.toContain("rollback failed");
-		// The database should be probed normally (ok or warning, not error from rollback).
-		expect(finding?.status).not.toBe("error");
-		// Exit code should be zero (no error findings from this db).
-		expect(process.exitCode).toBe(0);
+		expect(finding?.status).toBe("error");
+		expect(finding?.summary).toContain("recovery did not complete");
+		expect(finding?.details.join("\n")).toContain("unrecognized live database state");
+		expect(await pathExists(marker)).toBe(true);
+		expect(quickCheck(dbPath)).toBe("ok");
 	});
 
 	// ── Item D: MCP URL credential leak ──────────────────────────────────────
@@ -1711,6 +1744,73 @@ describe("omp doctor", () => {
 		expect(finding?.status).toBe("ok");
 		expect(finding?.summary).not.toContain("command not found");
 	});
+
+	test("MCP stdio server without cwd resolves relative commands from the project directory", async () => {
+		setProjectDir(root);
+		const serverBin = path.join(root, "project-server.exe");
+		await fs.writeFile(serverBin, "fixture", "utf8");
+		await fs.chmod(serverBin, 0o755);
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(
+			mcpJson,
+			JSON.stringify({
+				mcpServers: {
+					projectDefault: { type: "stdio", command: "./project-server.exe" },
+				},
+			}),
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const finding = report.findings.find(entry => entry.id === "mcp.projectDefault");
+		expect(finding?.status).toBe("ok");
+		expect(finding?.summary).not.toContain("command not found");
+	});
+
+	test("MCP stdio server command naming a directory reports command not found", async () => {
+		setProjectDir(root);
+		await fs.mkdir(path.join(root, "not-a-server"), { recursive: true });
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(
+			mcpJson,
+			JSON.stringify({
+				mcpServers: {
+					directory: { type: "stdio", command: "./not-a-server" },
+				},
+			}),
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const finding = report.findings.find(entry => entry.id === "mcp.directory");
+		expect(finding?.status).toBe("error");
+		expect(finding?.summary).toContain("command not found");
+	});
+
+	test.skipIf(process.platform === "win32")(
+		"MCP stdio server command naming a non-executable file reports command not found",
+		async () => {
+			setProjectDir(root);
+			const serverPath = path.join(root, "not-executable");
+			await fs.writeFile(serverPath, "fixture", "utf8");
+			await fs.chmod(serverPath, 0o644);
+			const mcpJson = path.join(root, "mcp.json");
+			await fs.writeFile(
+				mcpJson,
+				JSON.stringify({
+					mcpServers: {
+						nonExecutable: { type: "stdio", command: "./not-executable" },
+					},
+				}),
+				"utf8",
+			);
+
+			const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+			const finding = report.findings.find(entry => entry.id === "mcp.nonExecutable");
+			expect(finding?.status).toBe("error");
+			expect(finding?.summary).toContain("command not found");
+		},
+	);
 
 	// ── Item F: skills known-set too narrow ──────────────────────────────────
 
@@ -1780,5 +1880,120 @@ describe("omp doctor", () => {
 		expect(await browserLaunch.resolveCachedChromiumExecutable(emptyCacheDir)).toBeUndefined();
 		// A nonexistent cache dir is also undefined, never a throw.
 		expect(await browserLaunch.resolveCachedChromiumExecutable(path.join(root, "no-such-cache"))).toBeUndefined();
+	});
+
+	// ── Round-5 regression tests ─────────────────────────────────────────────
+
+	test("settings: legacy inlineToolDescriptors:true is valid after migration (not an invalid enum)", async () => {
+		const configPath = path.join(root, "config.yml");
+		await fs.writeFile(configPath, "inlineToolDescriptors: true\n", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const finding = report.findings.find(entry => entry.id === "config.settings");
+		expect(finding?.status).toBe("ok");
+		expect(finding?.summary).toContain("valid");
+	});
+
+	test("settings: legacy boolean task.eager is valid after migration", async () => {
+		const configPath = path.join(root, "config.yml");
+		await fs.writeFile(configPath, "task:\n  eager: true\n", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const finding = report.findings.find(entry => entry.id === "config.settings");
+		expect(finding?.status).not.toBe("error");
+	});
+
+	test("settings: namespace prefix with non-object value (task: string) is an error", async () => {
+		const configPath = path.join(root, "config.yml");
+		await fs.writeFile(configPath, 'task: "not-a-mapping"\n', "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const finding = report.findings.find(entry => entry.id === "config.settings");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(d => d.includes("task") && d.includes("mapping"))).toBe(true);
+	});
+
+	test("settings: namespace prefix with array value (statusLine: []) is an error", async () => {
+		const configPath = path.join(root, "config.yml");
+		await fs.writeFile(configPath, "statusLine: []\n", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const finding = report.findings.find(entry => entry.id === "config.settings");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(d => d.includes("statusLine") && d.includes("mapping"))).toBe(true);
+	});
+
+	test("auth: malformed api_key payload ({} missing key) → error finding naming the row id", async () => {
+		const dbPath = getAgentDbPath(root);
+		await createAuthCredential(dbPath, "openai", "api_key", {});
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "auth.openai");
+		expect(finding).toBeDefined();
+		if (finding === undefined) return;
+		expect(finding.category).toBe("auth");
+		expect(finding.status).toBe("error");
+		expect(finding.summary).toContain("malformed");
+		expect(finding.details.some(d => d.includes("row id") && d.includes("api_key"))).toBe(true);
+		// Never surface the secret payload.
+		expect(JSON.stringify(finding)).not.toContain("sk-");
+	});
+
+	test("auth: invalid JSON credential payload is a provider-level malformed finding", async () => {
+		const dbPath = getAgentDbPath(root);
+		await createAuthCredential(dbPath, "openai", "api_key", { key: "sk-valid" });
+		const db = new Database(dbPath);
+		db.run("UPDATE auth_credentials SET data = ?", ["{not-json"]);
+		db.close();
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "auth.openai");
+		expect(finding?.status).toBe("error");
+		expect(finding?.summary).toContain("malformed");
+		expect(finding?.details.some(d => d.includes("row id") && d.includes("api_key"))).toBe(true);
+		expect(report.findings.find(entry => entry.id === "auth.storage")).toBeUndefined();
+	});
+
+	test("auth: valid api_key payload with data.key → ok, not malformed", async () => {
+		const dbPath = getAgentDbPath(root);
+		await createAuthCredential(dbPath, "openai", "api_key", { key: "sk-valid" });
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "auth.openai");
+		expect(finding?.status).toBe("ok");
+		expect(finding?.summary).toContain("credentials present");
+	});
+
+	test("a quarantined project .omp/config.yml.broken-* is reported alongside agent-dir backups", async () => {
+		setProjectDir(root);
+		const projectOmpDir = path.join(root, ".omp");
+		await fs.mkdir(projectOmpDir, { recursive: true });
+		await fs.writeFile(path.join(projectOmpDir, "config.yml.broken-123"), "garbage", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const quarantine = report.findings.find(entry => entry.id === "config.quarantined");
+		expect(quarantine?.status).toBe("error");
+		expect(quarantine?.details).toContain(".omp/config.yml.broken-123");
+	});
+
+	test("a quarantined agent-dir config.yml.broken-* is still reported when project .omp has none", async () => {
+		setProjectDir(root);
+		await fs.writeFile(path.join(root, "config.yml.broken-456"), "garbage", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const quarantine = report.findings.find(entry => entry.id === "config.quarantined");
+		expect(quarantine?.status).toBe("error");
+		expect(quarantine?.details).toContain("config.yml.broken-456");
+	});
+
+	test("agent quarantines remain visible when the project .omp scan fails", async () => {
+		setProjectDir(root);
+		await fs.writeFile(path.join(root, "config.yml.broken-456"), "garbage", "utf8");
+		// A regular file makes project `.omp` readdir fail on every platform.
+		await fs.writeFile(path.join(root, ".omp"), "not a directory", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const quarantine = report.findings.find(entry => entry.id === "config.quarantined");
+		expect(quarantine?.status).toBe("error");
+		expect(quarantine?.details).toContain("config.yml.broken-456");
+		expect(quarantine?.summary).not.toContain("cannot read config directory");
 	});
 });

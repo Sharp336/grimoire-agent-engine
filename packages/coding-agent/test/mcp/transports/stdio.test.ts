@@ -3,7 +3,12 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { resolveStdioSpawnCommand, StdioTransport, terminateStdioProcess } from "../../../src/mcp/transports/stdio";
+import {
+	resolveStdioCommandPath,
+	resolveStdioSpawnCommand,
+	StdioTransport,
+	terminateStdioProcess,
+} from "../../../src/mcp/transports/stdio";
 
 describe("resolveStdioSpawnCommand", () => {
 	it("hides Windows executable MCP servers when the host has no console", async () => {
@@ -32,6 +37,15 @@ describe("resolveStdioSpawnCommand", () => {
 			windowsHide: false,
 			detached: false,
 		});
+	});
+
+	it("does not report an unresolved Windows executable as found", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-stdio-resolve-"));
+		try {
+			await expect(resolveStdioCommandPath("missing.exe", root, { PATH: root }, "win32")).resolves.toBeNull();
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
 	});
 
 	it("keeps Darwin stdio MCP servers attached so TCC Apple Events prompts can resolve", async () => {

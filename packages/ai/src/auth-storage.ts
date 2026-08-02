@@ -6632,6 +6632,36 @@ function serializeCredential(provider: string, credential: AuthCredential): Seri
 	return null;
 }
 
+/**
+ * Validate a stored credential payload's shape without returning secret
+ * material. Mirrors the acceptance logic of {@link deserializeCredential} so
+ * `omp doctor` can detect malformed rows (e.g. `api_key` with `{}` payload,
+ * missing `data.key`) the production store would silently reject. Returns
+ * `true` when the payload is well-formed for its `credential_type`, `false`
+ * otherwise — never throws, never exposes the key or token bytes.
+ */
+export function validateCredentialPayload(credentialType: string, data: string): boolean {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(data);
+	} catch {
+		return false;
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+		return false;
+	}
+	if (credentialType === "api_key") {
+		return typeof (parsed as Record<string, unknown>).key === "string";
+	}
+	if (credentialType === "oauth") {
+		// deserializeCredential accepts any object for oauth; the refresh/access
+		// fields are validated lazily by the refresh path. A non-empty object is
+		// the minimum shape the store requires to not return null.
+		return true;
+	}
+	return false;
+}
+
 function deserializeCredential(row: AuthRow): AuthCredential | null {
 	let parsed: unknown;
 	try {

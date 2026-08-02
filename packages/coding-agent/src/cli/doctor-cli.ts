@@ -5,12 +5,12 @@
  * the human or JSON report, and owns the single stdout write — the command
  * wrapper stays thin. Mirrors the gc-cli.ts / stats-cli.ts split.
  */
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type AuthBrokerClientConfig, resolveAuthBrokerConfig } from "@oh-my-pi/pi-ai/auth-broker/discover";
-import { isSqliteBusyError } from "@oh-my-pi/pi-ai/auth-storage";
+import { isSqliteBusyError, validateCredentialPayload } from "@oh-my-pi/pi-ai/auth-storage";
 import {
 	$which,
 	formatBytes,
@@ -34,7 +34,12 @@ import { type Skill, skillCapability } from "../capability/skill";
 import type { LoadResult } from "../config/config-file";
 import { KEYBINDINGS, KeybindingsManager, resolveKeybindingsConfigPaths } from "../config/keybindings";
 import { ModelsConfigFile } from "../config/models-config";
-import { classifySettingsYaml, validateSettingsValues, type YamlLoadResult } from "../config/settings";
+import {
+	classifySettingsYaml,
+	migrateRawSettingsShape,
+	validateSettingsValues,
+	type YamlLoadResult,
+} from "../config/settings";
 import { collectSystemInfo, formatSystemInfo } from "../debug/system-info";
 import { loadCapability } from "../discovery";
 import { type ParsedAgentFields, parseAgentFields } from "../discovery/helpers";
@@ -43,9 +48,11 @@ import { readExtensionManifest } from "../extensibility/extensions/loader";
 import { PluginManager } from "../extensibility/plugins/manager";
 import type { DoctorCheck } from "../extensibility/plugins/types";
 import { convertToLegacyConfig, validateServerConfig } from "../mcp/config";
+import { resolveStdioCommandPath } from "../mcp/transports/stdio";
 import type { MCPServerConfig } from "../mcp/types";
 import { theme, themeJsonSchema } from "../modes/theme/theme";
 import { loadBundledAgents } from "../task/agents";
+import { discoverAgents } from "../task/discovery";
 import {
 	readChromiumEnvOverride,
 	resolveCachedChromiumExecutable,
@@ -64,7 +71,7 @@ import {
 	resolveDoctorDatabases,
 	vacuumEligible,
 } from "./doctor-sqlite";
-import { withGcLock } from "./gc-cli";
+import { isGcLockContention, withGcLock } from "./gc-cli";
 
 export type DoctorStatus = "ok" | "warning" | "error";
 
@@ -196,6 +203,28 @@ async function collectBrowserFindings(): Promise<DoctorFinding[]> {
 		try {
 			const st = await fs.promises.stat(envPath);
 			if (st.isFile()) {
+				// On POSIX, a regular file can lack execute permission; Puppeteer
+				// fails at launch with EACCES when it tries to exec it. Check
+				// executable access before reporting ok so doctor catches the
+				// broken override it claims to diagnose. Skip on win32 where
+				// execute permission is not enforced the same way.
+				if (process.platform !== "win32") {
+					try {
+						await fs.promises.access(envPath, fs.constants.X_OK);
+					} catch {
+						return [
+							{
+								id: "browser.chromium",
+								category: "browser",
+								status: "error",
+								summary: "PUPPETEER_EXECUTABLE_PATH is not executable",
+								details: [envPath],
+								remedy:
+									"Make the file executable (chmod +x) or set PUPPETEER_EXECUTABLE_PATH to a Chrome/Chromium binary with execute permission, or unset it to fall back to system detection",
+							},
+						];
+					}
+				}
 				return [
 					{
 						id: "browser.chromium",
@@ -433,18 +462,22 @@ async function collectAuthFindings(flags: DoctorCommandFlags): Promise<DoctorFin
 		if (tableRow?.present !== 1) {
 			return [{ id: "auth.storage", category: "auth", status: "ok", summary: "no credentials stored", details: [] }];
 		}
-		// Read only provider / type / disabled / expiry — never the secret
-		// payload columns. JSON_EXTRACT pulls `expires` without loading the
-		// access/refresh tokens into JS.
+		// Read provider / type / disabled / expiry / row id / payload. The
+		// payload (`data` column) is validated for shape only via
+		// validateCredentialPayload — secret key/token bytes are never read
+		// into JS or included in findings. Invalid JSON must remain a row-level
+		// malformed-credential finding rather than aborting the whole scan.
 		type AuthProbeRow = {
+			id: number;
 			provider: string;
 			credential_type: string;
 			disabled_cause: string | null;
 			expires: number | null;
+			data: string;
 		};
 		const rows = db
 			.query(
-				"SELECT provider, credential_type, disabled_cause, JSON_EXTRACT(data, '$.expires') AS expires FROM auth_credentials ORDER BY provider ASC, id ASC",
+				"SELECT id, provider, credential_type, disabled_cause, data, CASE WHEN JSON_VALID(data) THEN JSON_EXTRACT(data, '$.expires') ELSE NULL END AS expires FROM auth_credentials ORDER BY provider ASC, id ASC",
 			)
 			.all() as AuthProbeRow[];
 		if (rows.length === 0) {
@@ -470,6 +503,23 @@ async function collectAuthFindings(flags: DoctorCommandFlags): Promise<DoctorFin
 					summary: `no credentials for ${provider}`,
 					details: [],
 					remedy: "Run `omp login`",
+				});
+				continue;
+			}
+			// Validate each active row's payload shape — a row whose
+			// credential_type is `api_key` but whose data lacks `data.key` is
+			// rejected by the production store (deserializeCredential returns
+			// null), leaving the provider unauthenticated. Report the row id
+			// (sanitized — it's just an integer) without exposing the payload.
+			const malformed = active.filter(row => !validateCredentialPayload(row.credential_type, row.data));
+			if (malformed.length > 0) {
+				findings.push({
+					id: `auth.${provider}`,
+					category: "auth",
+					status: "error",
+					summary: `${malformed.length} malformed credential row${malformed.length === 1 ? "" : "s"} for ${provider}`,
+					details: malformed.map(row => `row id ${row.id}: invalid ${row.credential_type} payload`),
+					remedy: "Run `omp login` to replace the broken credential",
 				});
 				continue;
 			}
@@ -697,11 +747,13 @@ async function diagnoseSettingsConfig(agentDir: string): Promise<DoctorFinding> 
 		const result = await classifySettingsYaml(candidate);
 		if (result.kind === "missing") continue;
 		if (result.kind === "loaded") {
-			// Validate loaded values against the real SETTINGS_SCHEMA so
-			// wrong-typed booleans/numbers/enums and non-iterable arrays are
-			// caught — a syntactically valid YAML mapping is not necessarily a
-			// valid settings config.
-			const { errors, warnings } = validateSettingsValues(result.settings);
+			// Apply the same legacy-value migrations the runtime's
+			// Settings.#migrateRawSettings performs at startup (boolean → enum,
+			// renamed keys, etc.) before validating against SETTINGS_SCHEMA, so
+			// supported legacy values like `inlineToolDescriptors: true` or
+			// boolean `task.eager` are not falsely reported as invalid.
+			const migrated = migrateRawSettingsShape(result.settings);
+			const { errors, warnings } = validateSettingsValues(migrated);
 			if (errors.length > 0) {
 				return {
 					id: "config.settings",
@@ -757,7 +809,8 @@ async function diagnoseProjectSettingsConfig(): Promise<DoctorFinding> {
 		};
 	}
 	if (result.kind === "loaded") {
-		const { errors, warnings } = validateSettingsValues(result.settings);
+		const migrated = migrateRawSettingsShape(result.settings);
+		const { errors, warnings } = validateSettingsValues(migrated);
 		if (errors.length > 0) {
 			return {
 				id: "config.settings.project",
@@ -841,6 +894,11 @@ async function collectQuarantinedConfigs(agentDir: string): Promise<DoctorFindin
 	// `foo.broken-*` is not ours to report. Aggregate every matched quarantine
 	// into a single `config.quarantined` finding (one id, each file listed in
 	// details) so repeated backups of the same config do not duplicate ids.
+	//
+	// Startup quarantines broken project settings beside `<cwd>/.omp/config.yml`
+	// as `config.yml.broken-*`, so scan the project `.omp` directory too —
+	// not just the agent dir. Project-dir entries are prefixed with `.omp/` in
+	// the details so the user can tell where each backup lives.
 	const knownConfigBasenames: Record<string, true> = {
 		"config.yml": true,
 		"config.yaml": true,
@@ -850,28 +908,50 @@ async function collectQuarantinedConfigs(agentDir: string): Promise<DoctorFindin
 		"models.yaml": true,
 		"models.json": true,
 	};
-	let entries: string[];
+	const scanDir = async (dir: string, prefix: string): Promise<string[]> => {
+		let entries: string[];
+		try {
+			entries = await fs.promises.readdir(dir);
+		} catch (error) {
+			if (isEnoent(error)) return [];
+			throw error;
+		}
+		const matched: string[] = [];
+		for (const entry of entries) {
+			const match = /^(.+)\.broken-.+$/.exec(entry);
+			if (!match) continue;
+			const original = match[1] as string;
+			if (!(original in knownConfigBasenames)) continue;
+			matched.push(prefix ? `${prefix}${entry}` : entry);
+		}
+		return matched;
+	};
+	const quarantined: string[] = [];
+	let scanError: Error | null = null;
 	try {
-		entries = await fs.promises.readdir(agentDir);
+		quarantined.push(...(await scanDir(agentDir, "")));
 	} catch (error) {
-		if (isEnoent(error)) return [];
+		scanError = error instanceof Error ? error : new Error(String(error));
+	}
+	// The project dir is always getProjectDir() — even under --agent-dir
+	// scoping — mirroring diagnoseProjectSettingsConfig.
+	try {
+		quarantined.push(...(await scanDir(path.join(getProjectDir(), ".omp"), ".omp/")));
+	} catch {
+		// The project scan is supplemental. A readable agent directory still
+		// yields its quarantine findings if `<project>/.omp` cannot be read.
+		// An earlier agent-dir failure remains in `scanError`.
+	}
+	if (scanError !== null) {
 		return [
 			{
 				id: "config.quarantined",
 				category: "config",
 				status: "error",
-				summary: "quarantine scan: cannot read agent directory",
-				details: [error instanceof Error ? error.message : String(error)],
+				summary: "quarantine scan: cannot read config directory",
+				details: [scanError.message],
 			},
 		];
-	}
-	const quarantined: string[] = [];
-	for (const entry of entries) {
-		const match = /^(.+)\.broken-.+$/.exec(entry);
-		if (!match) continue;
-		const original = match[1] as string;
-		if (!(original in knownConfigBasenames)) continue;
-		quarantined.push(entry);
 	}
 	if (quarantined.length === 0) return [];
 	quarantined.sort();
@@ -894,16 +974,10 @@ async function collectStorageFindings(flags: DoctorCommandFlags): Promise<Doctor
 		// Sequential probes: parallel opens of sibling databases multiply lock pressure for no real gain.
 		for (const db of databases) {
 			const swap = await recoverInterruptedSwap(db, flags.fix === true);
-			// The engine returns {found:true, restored:false, error:null} in
-			// two distinct situations:
-			//   (a) read-only run: a marker exists but was not examined (no
-			//       payload read) — warn so the user runs --fix.
-			//   (b) --fix run with a committed marker (swapped:true): the swap
-			//       succeeded, the stale marker was cleaned up — this is NOT a
-			//       rollback failure; fall through to the normal probe.
-			// A genuine rollback failure (--fix run, error !== null) is an error.
-			// Distinguish (a) from (b) by checking the fix flag: read-only always
-			// warns; --fix only errors when error is non-null.
+			// A read-only run leaves any marker for --fix. A successful --fix
+			// removes a provenance-verified marker and probes normally. Any
+			// --fix error retains the marker and archive; it is not necessarily
+			// a rollback failure, so report the recovery state accurately.
 			if (swap.found && !swap.restored && (flags.fix !== true || swap.error !== null)) {
 				findings.push({
 					id: `storage.${db.label}`,
@@ -911,10 +985,13 @@ async function collectStorageFindings(flags: DoctorCommandFlags): Promise<Doctor
 					status: flags.fix === true ? "error" : "warning",
 					summary:
 						flags.fix === true
-							? `${db.label}: interrupted swap rollback failed`
+							? `${db.label}: interrupted swap recovery did not complete`
 							: `${db.label}: interrupted swap detected`,
 					details: swap.error === null ? [] : [swap.error],
-					remedy: "Run `omp doctor --fix` to restore from the archived original",
+					remedy:
+						flags.fix === true
+							? "Follow the archive path in the details to restore manually, then re-run `omp doctor`"
+							: "Run `omp doctor --fix` to recover from the archived original",
 				});
 				continue;
 			}
@@ -943,15 +1020,30 @@ async function collectStorageFindings(flags: DoctorCommandFlags): Promise<Doctor
 	if (flags.fix === true) {
 		try {
 			return await withGcLock(flags.agentDir ?? getAgentDir(), collect);
-		} catch {
+		} catch (error) {
+			// Lock contention → warning so other sections still report.
+			// Any other failure (EACCES/ENOSPC on gc.lock, probe/repair bugs)
+			// → storage error so --fix cannot exit green while maintenance failed.
+			if (isGcLockContention(error)) {
+				return [
+					{
+						id: "storage.gc-lock",
+						category: "storage",
+						status: "warning",
+						summary: "another omp gc/doctor --fix holds the maintenance lock",
+						details: [],
+						remedy: "Re-run after it finishes",
+					},
+				];
+			}
 			return [
 				{
-					id: "storage.gc-lock",
+					id: "storage.maintenance-error",
 					category: "storage",
-					status: "warning",
-					summary: "another omp gc/doctor --fix holds the maintenance lock",
+					status: "error",
+					summary: `storage maintenance failed: ${error instanceof Error ? error.message : String(error)}`,
 					details: [],
-					remedy: "Re-run after it finishes",
+					remedy: "Check disk space and permissions on the agent directory, then re-run `omp doctor --fix`",
 				},
 			];
 		}
@@ -1083,8 +1175,8 @@ async function collectMcpFindings(flags: DoctorCommandFlags): Promise<DoctorFind
 	// that would otherwise fall through to mcp.none with status ok.
 	const parseErrors = await probeMcpSourceParseErrors(flags.agentDir, getProjectDir(), scoped);
 	const allSourceErrors = [...sourceErrors, ...parseErrors];
-	const findings: DoctorFinding[] = result.items.map(server =>
-		diagnoseMcpServer(server.name, server, rawEntries.get(server.name)),
+	const findings: DoctorFinding[] = await Promise.all(
+		result.items.map(server => diagnoseMcpServer(server.name, server, rawEntries.get(server.name))),
 	);
 	// A vanished/unreadable/unparseable source file must surface as an error
 	// finding — it must not degrade silently to the normalized item.
@@ -1178,41 +1270,19 @@ function validateMcpFieldShapes(name: string, server: MCPServer, raw: unknown): 
 }
 
 /**
- * Resolve a stdio MCP server command the way the transport does — honoring
- * `config.cwd` for relative commands and `config.env.PATH` for PATH lookup —
- * without spawning. Mirrors `resolveStdioSpawnCommand` in
- * mcp/transports/stdio.ts: a command with a path separator resolves against
- * the configured cwd; a bare command resolves via Bun.which with the
- * config's PATH override (if any). Returns the resolved path or null.
+ * Resolve a stdio MCP server command the way the transport does — without
+ * spawning — by delegating to the transport's own resolution logic
+ * (`resolveStdioCommandPath` in mcp/transports/stdio.ts). It uses the same
+ * cwd default and merged environment as `StdioTransport.connect()`, so doctor
+ * never drifts from the transport's resolution semantics.
  */
-function resolveStdioCommand(command: string, config: MCPServerConfig): string | null {
-	// A relative or absolute command (has a path separator) resolves against
-	// the configured cwd, not the doctor's process cwd. The transport's
-	// resolveStdioSpawnCommand uses config.cwd the same way.
-	if (command.includes("/") || command.includes("\\") || path.isAbsolute(command)) {
-		const cwd = "cwd" in config && typeof config.cwd === "string" ? config.cwd : process.cwd();
-		const resolved = path.resolve(cwd, command);
-		try {
-			const st = fs.statSync(resolved);
-			if (st.isFile()) return resolved;
-		} catch {
-			// Fall through to null below.
-		}
-		return null;
-	}
-	// Bare command: resolve via Bun.which with the config's PATH override
-	// when present. The transport merges config.env into the spawn
-	// environment, so config.env.PATH REPLACES the process PATH — an
-	// authoritative restricted PATH that lacks the command must report
-	// "not found", never fall back to the doctor's own process PATH.
-	const envPath = "env" in config && config.env && typeof config.env.PATH === "string" ? config.env.PATH : undefined;
-	if (envPath !== undefined) {
-		return Bun.which(command, { PATH: envPath });
-	}
-	return Bun.which(command);
+async function resolveStdioCommand(command: string, config: MCPServerConfig): Promise<string | null> {
+	const cwd = "cwd" in config && typeof config.cwd === "string" ? config.cwd : getProjectDir();
+	const configEnv = "env" in config && config.env ? config.env : {};
+	return resolveStdioCommandPath(command, cwd, { ...Bun.env, ...configEnv });
 }
 
-function diagnoseMcpServer(name: string, server: MCPServer, raw?: unknown): DoctorFinding {
+async function diagnoseMcpServer(name: string, server: MCPServer, raw?: unknown): Promise<DoctorFinding> {
 	const base = { id: `mcp.${name}`, category: "mcp" as const };
 	// Shape validation runs BEFORE the disabled shortcut so a disabled server
 	// with a malformed spec (e.g. enabled:false, command:7) still reports the
@@ -1258,7 +1328,7 @@ function diagnoseMcpServer(name: string, server: MCPServer, raw?: unknown): Doct
 		// config.cwd before spawning; Bun.which here mirrors that resolution
 		// without spawning. A relative command (e.g. ./bin/server) resolves
 		// against the configured cwd, not the doctor's process cwd.
-		const resolved = resolveStdioCommand(command, config);
+		const resolved = await resolveStdioCommand(command, config);
 		if (resolved === null) {
 			return {
 				...base,
@@ -1325,11 +1395,29 @@ async function scanMarkdownDir(dir: string): Promise<Array<{ filePath: string; c
 	return results;
 }
 
-/** Build the set of known agent names (discovered + bundled) for spawns validation. */
-function buildKnownAgentNames(discovered: ParsedAgentFields[]): Set<string> {
+/** Build the set of known agent names for `spawns` validation. When
+ * unscoped, delegates to the runtime's `discoverAgents` so ancestor `.omp/agents`
+ * dirs and Claude marketplace plugin agents are included — the same surface
+ * the task tool resolves `spawns` against at runtime. When scoped, only the
+ * locally-parsed agents plus bundled agents are used, matching the scoped
+ * scan dirs. */
+async function buildKnownAgentNames(
+	discovered: ParsedAgentFields[],
+	projectDir: string,
+	scoped: boolean,
+): Promise<Set<string>> {
 	const names = new Set<string>();
 	for (const fields of discovered) names.add(fields.name);
 	for (const bundled of loadBundledAgents()) names.add(bundled.name);
+	if (!scoped) {
+		try {
+			const { agents } = await discoverAgents(projectDir);
+			for (const agent of agents) names.add(agent.name);
+		} catch {
+			// Discovery failure must not crash the report; the locally-parsed
+			// and bundled names still cover the common case.
+		}
+	}
 	return names;
 }
 
@@ -1508,7 +1596,7 @@ async function collectAgentSetupFinding(agentDir: string, projectDir: string, sc
 
 	// Validate references only when agents were successfully parsed.
 	if (parsed.length > 0) {
-		const knownAgentNames = buildKnownAgentNames(parsed);
+		const knownAgentNames = await buildKnownAgentNames(parsed, projectDir, scoped);
 		const knownSkillNames = await discoverSkillNames(agentDir, projectDir, scoped);
 		// Build the known tool name set from the same static tool-discovery sources
 		// the runtime uses: built-in names + custom tools from <configDir>/tools/.
