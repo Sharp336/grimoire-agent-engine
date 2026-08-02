@@ -412,11 +412,34 @@ function resolveActivationStringArray(
 	return resolvePathScopedStringArray(settingPath, value, cwd) ?? normalizeStringArrayForSettings(value);
 }
 
-function updateBareActivationEntry(value: unknown, id: string, present: boolean): unknown[] {
-	const ids = new Set(normalizeStringArrayForSettings(value));
+function updateActivationEntry(
+	settingPath: ActivationDisabledPath | ActivationEnabledPath,
+	value: unknown,
+	cwd: string,
+	id: string,
+	present: boolean,
+	removeMatchingScoped: boolean,
+): unknown[] {
+	const entries = Array.isArray(value) ? value : [];
+	const scopedEntries = entries.flatMap(entry => {
+		if (typeof entry === "string") return [];
+		if (!removeMatchingScoped || !isRecord(entry)) return [entry];
+		if (!resolveActivationStringArray(settingPath, [entry], cwd).includes(id)) return [entry];
+
+		const updated = { ...entry };
+		for (const key of ["values", "items", "providers"] as const) {
+			const current = updated[key];
+			if (typeof current === "string") {
+				if (current === id) updated[key] = [];
+			} else if (Array.isArray(current)) {
+				updated[key] = current.filter(item => item !== id);
+			}
+		}
+		return resolveActivationStringArray(settingPath, [updated], cwd).length > 0 ? [updated] : [];
+	});
+	const ids = new Set(normalizeStringArrayForSettings(entries));
 	if (present) ids.add(id);
 	else ids.delete(id);
-	const scopedEntries = Array.isArray(value) ? value.filter(entry => typeof entry !== "string") : [];
 	return [...[...ids].sort(), ...scopedEntries];
 }
 
@@ -1143,8 +1166,8 @@ export class Settings {
 		enabledPath: ActivationEnabledPath,
 	): ActivationLists {
 		return {
-			disabled: new Set(normalizeStringArrayForSettings(getByPath(config, [disabledPath]))),
-			enabled: new Set(normalizeStringArrayForSettings(getByPath(config, [enabledPath]))),
+			disabled: new Set(resolveActivationStringArray(disabledPath, getByPath(config, [disabledPath]), this.#cwd)),
+			enabled: new Set(resolveActivationStringArray(enabledPath, getByPath(config, [enabledPath]), this.#cwd)),
 		};
 	}
 
@@ -1174,7 +1197,9 @@ export class Settings {
 		disabledPath: ActivationDisabledPath,
 	): boolean {
 		if (targetInfo.target === "global") {
-			return new Set(normalizeStringArrayForSettings(getByPath(this.#global, [disabledPath]))).has(id);
+			return new Set(
+				resolveActivationStringArray(disabledPath, getByPath(this.#global, [disabledPath]), this.#cwd),
+			).has(id);
 		}
 		return new Set(this.get(disabledPath) as string[]).has(id);
 	}
@@ -1334,7 +1359,14 @@ export class Settings {
 
 	async #setGlobalActivationList(path: ActivationDisabledPath, id: string, state: ProjectActivation): Promise<void> {
 		if (!this.#persist || !this.#configPath) {
-			const disabled = updateBareActivationEntry(getByPath(this.#global, [path]), id, state === "disabled");
+			const disabled = updateActivationEntry(
+				path,
+				getByPath(this.#global, [path]),
+				this.#cwd,
+				id,
+				state === "disabled",
+				state !== "disabled",
+			);
 			if (disabled.length === 0) deleteByPath(this.#global, [path]);
 			else setByPath(this.#global, [path], disabled);
 			this.#rebuildMerged();
@@ -1344,7 +1376,14 @@ export class Settings {
 		const configPath = this.#configPath;
 		await this.#withYamlWriteLock(configPath, async writePath => {
 			const current = (await this.#loadYamlIfPresentForWriteLocked(configPath, writePath)) ?? {};
-			const disabled = updateBareActivationEntry(getByPath(current, [path]), id, state === "disabled");
+			const disabled = updateActivationEntry(
+				path,
+				getByPath(current, [path]),
+				this.#cwd,
+				id,
+				state === "disabled",
+				state !== "disabled",
+			);
 			if (disabled.length === 0) deleteByPath(current, [path]);
 			else setByPath(current, [path], disabled);
 			await this.#writeYamlAtomically(writePath, current);
@@ -1417,8 +1456,22 @@ export class Settings {
 					if (wasQuarantined || !this.#quarantinedYamlTargets.has(configPath)) throw error;
 					current = {};
 				}
-				const disabled = updateBareActivationEntry(getByPath(current, [disabledPath]), id, state === "disabled");
-				const enabled = updateBareActivationEntry(getByPath(current, [enabledPath]), id, state === "enabled");
+				const disabled = updateActivationEntry(
+					disabledPath,
+					getByPath(current, [disabledPath]),
+					this.#cwd,
+					id,
+					state === "disabled",
+					true,
+				);
+				const enabled = updateActivationEntry(
+					enabledPath,
+					getByPath(current, [enabledPath]),
+					this.#cwd,
+					id,
+					state === "enabled",
+					true,
+				);
 
 				if (disabled.length === 0) deleteByPath(current, [disabledPath]);
 				else setByPath(current, [disabledPath], disabled);

@@ -464,6 +464,27 @@ describe("project activation settings", () => {
 		expect(projectConfig.enabledProviders).toEqual(["mcp-json", projectScoped]);
 	});
 
+	it("enables a provider disabled by a matching path-scoped global entry", async () => {
+		const projectRoot = await mkProjectTmp(".tmp-project-provider-scoped-global-toggle-");
+		const otherRoot = await mkProjectTmp(".tmp-project-provider-other-global-toggle-");
+		const agentDir = await mkTmp("omp-provider-agent-");
+		const configPath = path.join(agentDir, "config.yml");
+		const matchingEntry = { pathPrefix: projectRoot, providers: ["claude", "mcp-json"] };
+		const otherEntry = { pathPrefix: otherRoot, providers: ["mcp-json"] };
+		await Bun.write(configPath, YAML.stringify({ disabledProviders: [matchingEntry, otherEntry] }, null, 2));
+		const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
+
+		expect(settings.getProviderActivation("mcp-json", "global")).toBe("disabled");
+		expect(settings.isProviderEffectivelyDisabled("mcp-json", "global")).toBe(true);
+
+		await settings.setProviderActivation("mcp-json", "enabled", "global");
+
+		expect(settings.getProviderActivation("mcp-json", "global")).toBe("enabled");
+		expect(settings.isProviderEffectivelyDisabled("mcp-json", "global")).toBe(false);
+		const config = YAML.parse(await Bun.file(configPath).text()) as { disabledProviders?: unknown[] };
+		expect(config.disabledProviders).toEqual([{ pathPrefix: projectRoot, providers: ["claude"] }, otherEntry]);
+	});
+
 	it("ignores legacy extension activation when loading MCP servers", async () => {
 		const previousAgentDir = getAgentDir();
 		const projectRoot = await mkProjectTmp(".tmp-project-mcp-load-");
