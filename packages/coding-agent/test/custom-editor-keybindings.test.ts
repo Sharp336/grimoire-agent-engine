@@ -139,6 +139,31 @@ describe("CustomEditor keybindings", () => {
 		expect(onSpaceHoldStart).not.toHaveBeenCalled();
 	});
 
+	it("allows configured STT toggles only from Vim insert mode", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onSTTToggle = vi.fn();
+		editor.setInputMode("vim");
+		editor.setActionKeys("app.stt.toggle", ["alt+s"]);
+		editor.onSTTToggle = onSTTToggle;
+		editor.setText("one two");
+
+		editor.handleInput("0");
+		editor.handleInput("d");
+		editor.handleInput("\x1bs");
+		editor.handleInput("w");
+		expect(onSTTToggle).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("one two");
+
+		editor.handleInput("v");
+		editor.handleInput("\x1bs");
+		expect(onSTTToggle).not.toHaveBeenCalled();
+		editor.handleInput("\x1b");
+
+		editor.handleInput("i");
+		editor.handleInput("\x1bs");
+		expect(onSTTToggle).toHaveBeenCalledTimes(1);
+	});
+
 	it("allows clipboard image paste only from Vim insert mode", () => {
 		const editor = new CustomEditor(getEditorTheme());
 		const onPasteImage = vi.fn(async () => {

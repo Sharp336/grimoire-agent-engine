@@ -378,6 +378,35 @@ describe("Editor Vim input mode", () => {
 		expect(editor.getText()).toBe("four");
 	});
 
+	it("applies G and gg as linewise operator motions", () => {
+		const toEnd = createVimEditor();
+		toEnd.setText("one\ntwo\nthree");
+		typeText(toEnd, "ggdG");
+		expect(toEnd.getText()).toBe("");
+
+		const toStart = createVimEditor();
+		toStart.setText("one\ntwo\nthree");
+		typeText(toStart, "Gdgg");
+		expect(toStart.getText()).toBe("");
+
+		const countedEnd = createVimEditor();
+		countedEnd.setText("one\ntwo\nthree\nfour");
+		typeText(countedEnd, "ggd2G");
+		expect(countedEnd.getText()).toBe("three\nfour");
+
+		const countedStart = createVimEditor();
+		countedStart.setText("one\ntwo\nthree\nfour");
+		typeText(countedStart, "G2dgg");
+		expect(countedStart.getText()).toBe("one");
+
+		const changed = createVimEditor();
+		changed.setText("one\ntwo\nthree");
+		typeText(changed, "Gcggreplacement\u001b");
+		expect(changed.getText()).toBe("replacement");
+		changed.handleInput("u");
+		expect(changed.getText()).toBe("one\ntwo\nthree");
+	});
+
 	it("does not wrap h and l across logical lines", () => {
 		const editor = createVimEditor();
 		editor.setText("a\nb");

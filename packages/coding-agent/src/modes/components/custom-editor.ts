@@ -39,6 +39,7 @@ type ConfigurableEditorAction = Extract<
 	| "app.clipboard.pasteImage"
 	| "app.clipboard.pasteTextRaw"
 	| "app.clipboard.copyPrompt"
+	| "app.stt.toggle"
 >;
 
 const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
@@ -61,6 +62,7 @@ const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.clipboard.pasteImage": ["ctrl+v"],
 	"app.clipboard.pasteTextRaw": ["ctrl+shift+v", "alt+shift+v"],
 	"app.clipboard.copyPrompt": ["alt+shift+c"],
+	"app.stt.toggle": [],
 };
 
 function buildMatchKeys(keys: readonly KeyId[]): Set<string> {
@@ -567,6 +569,8 @@ export class CustomEditor extends Editor {
 	onDequeue?: () => void;
 	/** Called when the configured retry shortcut is pressed. */
 	onRetry?: () => void;
+	/** Called when the configured speech-to-text toggle is pressed. */
+	onSTTToggle?: () => void;
 	/** Called when Caps Lock is pressed. */
 	onCapsLock?: () => void;
 	/** Called when left-arrow is pressed while the editor is empty (cursor necessarily at start). */
@@ -869,6 +873,11 @@ export class CustomEditor extends Editor {
 			(this.#actionMatchKeyUnion.has(canonical) || this.#customMatchKeys.has(canonical))
 		) {
 			if (!acceptsTextEntry) this.clearVimPendingCommand();
+			if (acceptsTextEntry && this.#matchesAction(canonical, "app.stt.toggle") && this.onSTTToggle) {
+				this.onSTTToggle();
+				return;
+			}
+
 			// Intercept configured image paste (async - fires and handles result)
 			if (acceptsTextEntry && this.#matchesAction(canonical, "app.clipboard.pasteImage") && this.onPasteImage) {
 				this.prepareVimPaste();

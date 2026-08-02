@@ -6,7 +6,13 @@ const segmenter = getSegmenter();
 const MAX_VIM_COUNT = 1000;
 
 type VimPendingCommand =
-	| { kind: "operator"; operator: "d" | "c"; prefixCount: number; textObject?: "inner" | "around" }
+	| {
+			kind: "operator";
+			operator: "d" | "c";
+			prefixCount: number | undefined;
+			textObject?: "inner" | "around";
+			motion?: "g";
+	  }
 	| { kind: "g"; count: number | undefined }
 	| { kind: "visualTextObject"; textObject: "inner" | "around"; count: number };
 
@@ -313,7 +319,7 @@ export class VimEditorController {
 				return true;
 			case "d":
 			case "c":
-				this.#pending = { kind: "operator", operator: char, prefixCount: this.#takeCount() };
+				this.#pending = { kind: "operator", operator: char, prefixCount: this.#takeOptionalCount() };
 				return true;
 			case "u": {
 				const count = this.#takeCount();
@@ -583,14 +589,29 @@ export class VimEditorController {
 			return true;
 		}
 
-		if ((char === "i" || char === "a") && pending.textObject === undefined) {
+		if ((char === "i" || char === "a") && pending.textObject === undefined && pending.motion === undefined) {
 			this.#pending = { ...pending, textObject: char === "i" ? "inner" : "around" };
+			return true;
+		}
+		if (char === "g" && pending.textObject === undefined && pending.motion === undefined) {
+			this.#pending = { ...pending, motion: "g" };
 			return true;
 		}
 
 		this.#pending = undefined;
-		const count = Math.min(MAX_VIM_COUNT, pending.prefixCount * this.#takeCount());
+		const suffixCount = this.#takeOptionalCount();
+		const hasCount = pending.prefixCount !== undefined || suffixCount !== undefined;
+		const count = Math.min(MAX_VIM_COUNT, (pending.prefixCount ?? 1) * (suffixCount ?? 1));
 		const enterInsert = pending.operator === "c";
+		if (pending.motion === "g") {
+			if (char === "g") {
+				const startLine = this.#cursor().line;
+				const targetLine = Math.min(this.#lines().length - 1, count - 1);
+				this.#deleteLineRange(Math.min(startLine, targetLine), Math.max(startLine, targetLine) + 1, enterInsert);
+			}
+			return true;
+		}
+
 		if (pending.textObject !== undefined) {
 			if (char === "w" || char === "W") {
 				const range = this.#wordTextObjectRange(
@@ -609,6 +630,13 @@ export class VimEditorController {
 		if (char === pending.operator) {
 			const startLine = this.#cursor().line;
 			this.#deleteLineRange(startLine, startLine + count, enterInsert);
+			return true;
+		}
+
+		if (char === "G") {
+			const startLine = this.#cursor().line;
+			const targetLine = hasCount ? Math.min(this.#lines().length - 1, count - 1) : this.#lines().length - 1;
+			this.#deleteLineRange(Math.min(startLine, targetLine), Math.max(startLine, targetLine) + 1, enterInsert);
 			return true;
 		}
 
