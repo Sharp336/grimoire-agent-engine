@@ -474,6 +474,25 @@ describe("Editor Vim input mode", () => {
 		expect(editor.getVimMode()).toBe("normal");
 	});
 
+	it("blocks remapped submit keys outside Vim insert mode", () => {
+		setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS, { "tui.input.submit": "ctrl+s" }));
+		const editor = createVimEditor();
+		const onSubmit = vi.fn();
+		editor.setText("send");
+		editor.onSubmit = onSubmit;
+
+		editor.handleInput("\x13");
+		expect(onSubmit).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("send");
+		expect(editor.getVimMode()).toBe("normal");
+
+		typeText(editor, "0v");
+		editor.handleInput("\x13");
+		expect(onSubmit).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("send");
+		expect(editor.getVimMode()).toBe("visual");
+	});
+
 	it("groups remapped base mutations into the Vim insert undo session", () => {
 		setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS, { "tui.editor.deleteToLineEnd": "alt+g" }));
 		const editor = createVimEditor();

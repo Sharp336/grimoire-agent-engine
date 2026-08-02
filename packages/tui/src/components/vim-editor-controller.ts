@@ -165,6 +165,7 @@ export class VimEditorController {
 			return true;
 		}
 		if (
+			kb.matches(data, "tui.input.submit") ||
 			kb.matches(data, "tui.input.tab") ||
 			kb.matches(data, "tui.input.newLine") ||
 			matchesKey(data, "alt+enter") ||
