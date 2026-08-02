@@ -221,7 +221,7 @@ describe("RPC tool activation", () => {
 			},
 		});
 
-		await tools.setActiveToolsByName(["read", "deferred"], false);
+		await tools.setActiveToolsByName(["read", "deferred"]);
 		expect(registrations).toBe(0);
 		expect(tools.getEnabledToolNames()).toEqual(["read", "deferred"]);
 	});

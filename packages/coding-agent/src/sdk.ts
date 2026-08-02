@@ -1695,8 +1695,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getEvalSessionId: () =>
 				session?.getEvalSessionId() ?? options.parentEvalSessionId ?? defaultEvalSessionId(toolSession),
 			assertEvalExecutionAllowed: () => session?.assertEvalExecutionAllowed(),
-			trackEvalExecution: (execution, abortController) =>
-				session ? session.trackEvalExecution(execution, abortController) : execution,
+			trackEvalExecution: (execution, abortController, executionId) =>
+				session ? session.trackEvalExecution(execution, abortController, executionId) : execution,
 			getSessionId: () => sessionManager.getSessionId?.() ?? null,
 			isDisposed: () => session?.isDisposed ?? false,
 			getHindsightSessionState: () => session?.getHindsightSessionState(),

@@ -33,6 +33,7 @@ from .protocol import (
     CancelOperationResult,
     CompactionResult,
     DeleteSessionResult,
+    EvalHistoryEntry,
     ExtensionError,
     ExtensionUiRequest,
     FastModeResult,
@@ -61,6 +62,7 @@ from .protocol import (
     RetryFallbackSucceededEvent,
     RpcAgentEvent,
     RpcCapabilityManifest,
+    RpcEvalLanguage,
     RpcNotification,
     RpcOperationCommand,
     RpcOperationTerminalEvent,
@@ -102,6 +104,7 @@ from .protocol import (
     parse_cancellation_result,
     parse_compaction_result,
     parse_delete_session_result,
+    parse_eval_history_entry,
     parse_fast_mode_result,
     parse_fork_session_result,
     parse_model_cycle_result,
@@ -1485,6 +1488,46 @@ class RpcClient:
         self._register_legacy_agent_run(start_event_index)
         return None
 
+    def eval_execute(
+        self,
+        language: RpcEvalLanguage,
+        code: str,
+        *,
+        title: str | None = None,
+        timeout: int | None = None,
+        reset: bool | None = None,
+        exclude_from_context: bool | None = None,
+    ) -> str:
+        """Request a confirmed eval. Code runs only after the server-issued UI request is approved."""
+        response = self._request(
+            "eval_execute",
+            language=language,
+            code=code,
+            title=title,
+            timeout=timeout,
+            reset=reset,
+            excludeFromContext=exclude_from_context,
+        )
+        operation_id = response.get("operationId")
+        if not isinstance(operation_id, str):
+            raise RpcError("eval_execute response is missing operationId")
+        self._register_operation(operation_id)
+        return operation_id
+
+    def get_eval_history(
+        self, *, limit: int | None = None
+    ) -> tuple[EvalHistoryEntry, ...]:
+        payload = self._request("get_eval_history", limit=limit)
+        raw_entries = payload.get("entries")
+        if not isinstance(raw_entries, list):
+            raise RpcError("get_eval_history response must contain an entries array")
+        entries: list[EvalHistoryEntry] = []
+        for item in raw_entries:
+            if not isinstance(item, dict):
+                raise RpcError("get_eval_history entry must be an object")
+            entries.append(parse_eval_history_entry(cast(JsonObject, item)))
+        return tuple(entries)
+
     def cancel_operation(self, operation_id: str) -> CancelOperationResult:
         payload = self._request("cancel_operation", operationId=operation_id)
         status = payload.get("status")
@@ -1530,7 +1573,7 @@ class RpcClient:
             accepted_at = item.get("acceptedAt")
             if (
                 not isinstance(operation_id, str)
-                or command not in {"prompt", "abort_and_prompt"}
+                or command not in {"prompt", "abort_and_prompt", "eval_execute"}
                 or status not in {"accepted", "started"}
                 or not isinstance(accepted_at, (int, float))
                 or isinstance(accepted_at, bool)
