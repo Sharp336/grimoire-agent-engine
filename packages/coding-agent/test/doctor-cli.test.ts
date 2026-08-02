@@ -14,7 +14,7 @@ import { PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/m
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import * as browserLaunch from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import * as piUtils from "@oh-my-pi/pi-utils";
-import { getAgentDbPath, getHistoryDbPath, getModelDbPath, setProjectDir } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getHistoryDbPath, getModelDbPath, setAgentDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import { runCli } from "../src/cli";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
@@ -966,6 +966,10 @@ describe("omp doctor", () => {
 		const db = new Database(dbPath);
 		db.run("PRAGMA journal_mode=DELETE");
 		db.run(`
+			CREATE TABLE auth_schema_version (
+				id INTEGER PRIMARY KEY CHECK (id = 1),
+				version INTEGER NOT NULL
+			);
 			CREATE TABLE auth_credentials (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				provider TEXT NOT NULL,
@@ -977,6 +981,7 @@ describe("omp doctor", () => {
 				updated_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))
 			);
 		`);
+		db.run("INSERT INTO auth_schema_version (id, version) VALUES (1, 7)");
 		db.run("INSERT INTO auth_credentials (provider, credential_type, data) VALUES (?, ?, ?)", [
 			provider,
 			credentialType,
@@ -985,11 +990,66 @@ describe("omp doctor", () => {
 		db.close();
 	}
 
-	test("auth: expired OAuth token → warning", async () => {
+	/** Create agent.db with a legacy v0 auth_credentials schema (no disabled_cause). */
+	async function createAuthCredentialV0(
+		dbPath: string,
+		provider: string,
+		credentialType: "api_key" | "oauth",
+		data: Record<string, unknown>,
+		disabled?: boolean,
+	): Promise<void> {
+		await fs.mkdir(path.dirname(dbPath), { recursive: true });
+		const db = new Database(dbPath);
+		db.run("PRAGMA journal_mode=DELETE");
+		db.run(`
+			CREATE TABLE auth_credentials (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				provider TEXT NOT NULL,
+				credential_type TEXT NOT NULL,
+				data TEXT NOT NULL,
+				disabled INTEGER NOT NULL DEFAULT 0,
+				created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+				updated_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))
+			);
+		`);
+		db.run("INSERT INTO auth_credentials (provider, credential_type, data, disabled) VALUES (?, ?, ?, ?)", [
+			provider,
+			credentialType,
+			JSON.stringify(data),
+			disabled ? 1 : 0,
+		]);
+		db.close();
+	}
+
+	test("auth: expired OAuth token with non-empty refresh → ok (refreshable at runtime)", async () => {
 		const dbPath = getAgentDbPath(root);
 		// Real OAuth `data` shape: { refresh, access, expires, ... } (type stripped by serializeCredential).
+		// An expired access token with a non-empty refresh field is usable at runtime
+		// — the runtime refreshes transparently — so doctor must report ok, not a
+		// re-login warning. The remote sentinel ("__remote__") also counts as non-empty.
 		await createAuthCredential(dbPath, "anthropic", "oauth", {
 			refresh: "r",
+			access: "a",
+			expires: Date.now() - 1000,
+		});
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "auth.anthropic");
+		expect(finding).toBeDefined();
+		if (finding === undefined) return;
+		expect(finding.category).toBe("auth");
+		expect(finding.status).toBe("ok");
+		expect(finding.summary).toContain("credentials present");
+		// Never surface secret material.
+		expect(JSON.stringify(finding)).not.toContain("refresh");
+		expect(JSON.stringify(finding)).not.toContain('"a"');
+	});
+
+	test("auth: expired OAuth token with empty/whitespace refresh → warning", async () => {
+		const dbPath = getAgentDbPath(root);
+		// An expired OAuth token whose refresh field is empty or whitespace-only
+		// cannot be refreshed at runtime — doctor must warn (re-login required).
+		await createAuthCredential(dbPath, "anthropic", "oauth", {
+			refresh: "   ",
 			access: "a",
 			expires: Date.now() - 1000,
 		});
@@ -1004,6 +1064,49 @@ describe("omp doctor", () => {
 		// Never surface secret material.
 		expect(JSON.stringify(finding)).not.toContain("refresh");
 		expect(JSON.stringify(finding)).not.toContain('"a"');
+	});
+
+	test("auth: v0 legacy schema with active row → ok with migration-pending warning", async () => {
+		const dbPath = getAgentDbPath(root);
+		// Legacy v0 schema: no disabled_cause, has disabled integer column.
+		// An active row (disabled=0) must be recognized as usable, and the
+		// pending migration must be reported as a warning finding.
+		await createAuthCredentialV0(dbPath, "openai", "api_key", { key: "sk-v0" });
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const providerFinding = report.findings.find(entry => entry.id === "auth.openai");
+		expect(providerFinding).toBeDefined();
+		expect(providerFinding?.status).toBe("ok");
+		expect(providerFinding?.summary).toContain("credentials present");
+		const migrationFinding = report.findings.find(entry => entry.id === "auth.storage");
+		expect(migrationFinding).toBeDefined();
+		expect(migrationFinding?.status).toBe("warning");
+		expect(migrationFinding?.summary).toContain("pending automatic migration");
+		// Never surface the secret key.
+		expect(JSON.stringify(report)).not.toContain("sk-v0");
+	});
+
+	test("auth: v0 legacy schema with disabled row → no-credentials warning with migration-pending warning", async () => {
+		const dbPath = getAgentDbPath(root);
+		// Legacy v0 schema: a disabled row (disabled=1) must be recognized as a
+		// soft-deleted tombstone (matching v0→v1 migration semantics), so the
+		// provider has no active credentials. Both the no-credentials warning and
+		// the migration-pending warning must appear.
+		await createAuthCredentialV0(
+			dbPath,
+			"anthropic",
+			"oauth",
+			{ refresh: "r", access: "a", expires: Date.now() + 60000 },
+			true,
+		);
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const providerFinding = report.findings.find(entry => entry.id === "auth.anthropic");
+		expect(providerFinding).toBeDefined();
+		expect(providerFinding?.status).toBe("warning");
+		expect(providerFinding?.summary).toContain("no credentials");
+		const migrationFinding = report.findings.find(entry => entry.id === "auth.storage");
+		expect(migrationFinding).toBeDefined();
+		expect(migrationFinding?.status).toBe("warning");
+		expect(migrationFinding?.summary).toContain("pending automatic migration");
 	});
 
 	test("auth: valid stored credential → ok", async () => {
@@ -1444,6 +1547,29 @@ describe("omp doctor", () => {
 		expect(finding?.details.some(d => d.includes("unknown tool") && d.includes("empty-subdir"))).toBe(true);
 	});
 
+	test("setup: custom tool from non-native runtime provider (.claude/tools) → no false unknown-tool warning", async () => {
+		// A custom tool discoverable only through a non-native runtime provider
+		// (e.g. Claude's .claude/tools/) must be recognized via
+		// loadCapability(toolCapability.id, …), not just the literal
+		// <agentDir>/tools and <project>/.omp/tools dirs.
+		setProjectDir(root);
+		setAgentDir(root);
+		const claudeToolsDir = path.join(root, ".claude", "tools");
+		await fs.mkdir(claudeToolsDir, { recursive: true });
+		await fs.writeFile(path.join(claudeToolsDir, "claude-only-tool.ts"), "export default {};", "utf8");
+		const agentsDir = path.join(root, ".omp", "agents");
+		await fs.mkdir(agentsDir, { recursive: true });
+		await fs.writeFile(
+			path.join(agentsDir, "good.md"),
+			"---\nname: good\ndescription: test\ntools: [claude-only-tool]\n---\nBody\n",
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { json: true } });
+		const finding = report.findings.find(entry => entry.id === "setup.agents");
+		expect(finding?.details.some(d => d.includes("unknown tool") && d.includes("claude-only-tool"))).toBe(false);
+	}, 30000);
+
 	test("setup: SKILL.md deleted between readdir and readFile → skip, not error", async () => {
 		// An ENOENT race on SKILL.md (file removed after readdir) must be silently
 		// skipped, not surfaced as an error.
@@ -1654,6 +1780,51 @@ describe("omp doctor", () => {
 		expect(finding?.summary).toContain("valid");
 	});
 
+	// ── Project settings capability-source diagnosis ───────────────────────
+
+	test("invalid non-native project settings source (.claude/settings.json) is surfaced", async () => {
+		// Settings.#loadProjectSettings merges project-level items from all
+		// registered settings providers, not just .omp/config.yml. A broken
+		// .claude/settings.json at the project level must be surfaced.
+		setProjectDir(root);
+		setAgentDir(root);
+		const claudeDir = path.join(root, ".claude");
+		await fs.mkdir(claudeDir, { recursive: true });
+		await fs.writeFile(path.join(claudeDir, "settings.json"), '{"extensions":["valid-ext",42]}', "utf8");
+
+		const report = await runDoctorCommand({ flags: { json: true } });
+		const finding = report.findings.find(entry => entry.id === "config.settings.project");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(d => d.includes("extensions[1]") && d.includes("string"))).toBe(true);
+		// Source path must be reported so the user knows which file to fix.
+		expect(finding?.details.some(d => d.includes("settings.json"))).toBe(true);
+	}, 30000);
+
+	test("malformed non-native project settings source is surfaced", async () => {
+		setProjectDir(root);
+		setAgentDir(root);
+		const claudeDir = path.join(root, ".claude");
+		await fs.mkdir(claudeDir, { recursive: true });
+		await fs.writeFile(path.join(claudeDir, "settings.json"), "{ broken json", "utf8");
+
+		const report = await runDoctorCommand({ flags: { json: true } });
+		const finding = report.findings.find(entry => entry.id === "config.settings.project");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(d => d.includes("Failed to parse JSON") && d.includes("settings.json"))).toBe(true);
+	}, 30000);
+
+	test("valid non-native project settings source remains clean", async () => {
+		setProjectDir(root);
+		setAgentDir(root);
+		const claudeDir = path.join(root, ".claude");
+		await fs.mkdir(claudeDir, { recursive: true });
+		await fs.writeFile(path.join(claudeDir, "settings.json"), '{"extensions":["valid-ext"]}', "utf8");
+
+		const report = await runDoctorCommand({ flags: { json: true } });
+		const finding = report.findings.find(entry => entry.id === "config.settings.project");
+		expect(finding?.status).toBe("ok");
+	}, 30000);
+
 	// ── Item B: malformed MCP JSON invisible ─────────────────────────────────
 
 	test("malformed MCP JSON in scoped agent dir produces an error, not mcp.none ok", async () => {
@@ -1811,6 +1982,65 @@ describe("omp doctor", () => {
 			expect(finding?.summary).toContain("command not found");
 		},
 	);
+
+	// ── Item G: invalid URL must not leak credentials via parse-error text ──
+
+	test("MCP http server with a malformed URL containing credentials never leaks them in the report", async () => {
+		// The URL constructor's error message echoes the input verbatim. A
+		// malformed URL with userinfo or query secrets must produce a generic
+		// error detail — never the raw parse-error text.
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(
+			mcpJson,
+			JSON.stringify({
+				mcpServers: {
+					badUrl: { type: "http", url: "https://user:secret@bad host/sse?token=hidden" },
+				},
+			}),
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const finding = report.findings.find(entry => entry.id === "mcp.badUrl");
+		expect(finding?.status).toBe("error");
+		expect(finding?.summary).toContain("invalid url");
+		// Neither the userinfo secret nor the query token may appear anywhere.
+		const json = JSON.stringify(report);
+		expect(json).not.toContain("user:secret");
+		expect(json).not.toContain("hidden");
+		expect(json).not.toContain("=hidden");
+		expect(json).not.toContain("bad host");
+	});
+
+	// ── Item H: non-string cwd on a stdio server is an error ─────────────────
+
+	test("MCP stdio server with a non-string cwd is an invalid-spec error, not a silent project-cwd fallback", async () => {
+		// A non-string cwd (e.g. a number) is malformed. The provider may drop
+		// it, leaving doctor to silently fall back to project cwd while the
+		// runtime spawn would fail. The shape validator must catch it first.
+		const serverBinDir = path.join(root, "serverbin");
+		await fs.mkdir(serverBinDir, { recursive: true });
+		const serverBin = path.join(serverBinDir, "server");
+		await fs.writeFile(serverBin, "#!/bin/sh\nexit 0\n", "utf8");
+		await fs.chmod(serverBin, 0o755);
+
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(
+			mcpJson,
+			JSON.stringify({
+				mcpServers: {
+					badCwd: { type: "stdio", command: "./server", cwd: 7 },
+				},
+			}),
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const finding = report.findings.find(entry => entry.id === "mcp.badCwd");
+		expect(finding?.status).toBe("error");
+		expect(finding?.summary).toContain("invalid spec");
+		expect(finding?.details.some(d => d.includes("cwd") && d.includes("string"))).toBe(true);
+	});
 
 	// ── Item F: skills known-set too narrow ──────────────────────────────────
 

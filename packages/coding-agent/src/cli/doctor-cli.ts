@@ -10,7 +10,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type AuthBrokerClientConfig, resolveAuthBrokerConfig } from "@oh-my-pi/pi-ai/auth-broker/discover";
-import { isSqliteBusyError, validateCredentialPayload } from "@oh-my-pi/pi-ai/auth-storage";
+import {
+	AUTH_SCHEMA_VERSION,
+	inferAuthSchemaVersionFromColumns,
+	isSqliteBusyError,
+	validateCredentialPayload,
+} from "@oh-my-pi/pi-ai/auth-storage";
 import {
 	$which,
 	formatBytes,
@@ -30,7 +35,9 @@ import { watchdogYamlSchema } from "../advisor/config";
 import { collectConfigCandidates } from "../advisor/watchdog";
 import { type Hook, hookCapability } from "../capability/hook";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
+import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
 import { type Skill, skillCapability } from "../capability/skill";
+import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadResult } from "../config/config-file";
 import { KEYBINDINGS, KeybindingsManager, resolveKeybindingsConfigPaths } from "../config/keybindings";
 import { ModelsConfigFile } from "../config/models-config";
@@ -462,26 +469,87 @@ async function collectAuthFindings(flags: DoctorCommandFlags): Promise<DoctorFin
 		if (tableRow?.present !== 1) {
 			return [{ id: "auth.storage", category: "auth", status: "ok", summary: "no credentials stored", details: [] }];
 		}
+		// Classify the auth_credentials schema version from its columns — the
+		// same pure inference the production store uses — so a legacy v0 table
+		// (no disabled_cause column) is probed read-only instead of failing the
+		// query that references disabled_cause. Doctor never runs the migration;
+		// it only warns that the next normal omp run will migrate automatically.
+		// Read the recorded schema version first (same as the production store),
+		// falling back to column-based inference only when the version table is
+		// absent (legacy databases created before the auth_schema_version table).
+		const authCols = db.query("PRAGMA table_info(auth_credentials)").all() as Array<{ name?: string }>;
+		let authSchemaVersion: number;
+		try {
+			const versionRow = db.query("SELECT version FROM auth_schema_version WHERE id = 1").get() as
+				| { version?: number }
+				| undefined;
+			authSchemaVersion =
+				typeof versionRow?.version === "number" ? versionRow.version : inferAuthSchemaVersionFromColumns(authCols);
+		} catch {
+			authSchemaVersion = inferAuthSchemaVersionFromColumns(authCols);
+		}
+		const isLegacyV0 = authSchemaVersion === 0;
 		// Read provider / type / disabled / expiry / row id / payload. The
 		// payload (`data` column) is validated for shape only via
 		// validateCredentialPayload — secret key/token bytes are never read
 		// into JS or included in findings. Invalid JSON must remain a row-level
 		// malformed-credential finding rather than aborting the whole scan.
+		//
+		// `has_refresh` is computed entirely in SQL (a boolean 0/1) so
+		// refresh-token bytes never enter JS — only the boolean is projected,
+		// preserving the no-secret reporting contract. A non-empty (after
+		// trim) refresh field means the runtime can refresh the access token,
+		// so an expired OAuth row with has_refresh=1 is usable, not expired.
+		//
+		// On a v0 schema (no disabled_cause), the disabled state is derived
+		// from the legacy `disabled` integer column if present (matching the
+		// v0→v1 migration semantics: disabled=1 → disabled_cause='disabled',
+		// else NULL). If neither column exists, all rows are treated as active.
 		type AuthProbeRow = {
 			id: number;
 			provider: string;
 			credential_type: string;
 			disabled_cause: string | null;
 			expires: number | null;
+			has_refresh: number;
 			data: string;
 		};
+		const disabledCauseExpr = isLegacyV0
+			? authCols.some(col => col.name === "disabled")
+				? "CASE WHEN disabled = 1 THEN 'disabled' ELSE NULL END"
+				: "NULL"
+			: "disabled_cause";
 		const rows = db
 			.query(
-				"SELECT id, provider, credential_type, disabled_cause, data, CASE WHEN JSON_VALID(data) THEN JSON_EXTRACT(data, '$.expires') ELSE NULL END AS expires FROM auth_credentials ORDER BY provider ASC, id ASC",
+				`SELECT id, provider, credential_type, ${disabledCauseExpr} AS disabled_cause, data, ` +
+					"CASE WHEN JSON_VALID(data) THEN JSON_EXTRACT(data, '$.expires') ELSE NULL END AS expires, " +
+					"CASE WHEN JSON_VALID(data) AND JSON_EXTRACT(data, '$.refresh') IS NOT NULL " +
+					"AND TRIM(JSON_EXTRACT(data, '$.refresh')) != '' THEN 1 ELSE 0 END AS has_refresh " +
+					"FROM auth_credentials ORDER BY provider ASC, id ASC",
 			)
 			.all() as AuthProbeRow[];
+		const findings: DoctorFinding[] = [];
+		if (authSchemaVersion < AUTH_SCHEMA_VERSION) {
+			findings.push({
+				id: "auth.storage",
+				category: "auth",
+				status: "warning",
+				summary: "auth database schema is pending automatic migration",
+				details: [`schema version ${authSchemaVersion} (current ${AUTH_SCHEMA_VERSION})`],
+				remedy: "Run `omp` normally; the schema will be migrated automatically on the next startup",
+			});
+		}
 		if (rows.length === 0) {
-			return [{ id: "auth.storage", category: "auth", status: "ok", summary: "no credentials stored", details: [] }];
+			if (findings.length === 0) {
+				findings.push({
+					id: "auth.storage",
+					category: "auth",
+					status: "ok",
+					summary: "no credentials stored",
+					details: [],
+				});
+			}
+			return findings;
 		}
 		const now = Date.now();
 		const byProvider = new Map<string, AuthProbeRow[]>();
@@ -490,7 +558,6 @@ async function collectAuthFindings(flags: DoctorCommandFlags): Promise<DoctorFin
 			list.push(row);
 			byProvider.set(row.provider, list);
 		}
-		const findings: DoctorFinding[] = [];
 		for (const [provider, providerRows] of byProvider) {
 			const active = providerRows.filter(row => row.disabled_cause === null);
 			if (active.length === 0) {
@@ -526,7 +593,8 @@ async function collectAuthFindings(flags: DoctorCommandFlags): Promise<DoctorFin
 			const hasValid = active.some(
 				row =>
 					row.credential_type === "api_key" ||
-					(row.credential_type === "oauth" && row.expires !== null && row.expires > now),
+					(row.credential_type === "oauth" && row.expires !== null && row.expires > now) ||
+					(row.credential_type === "oauth" && row.expires !== null && row.expires <= now && row.has_refresh === 1),
 			);
 			if (hasValid) {
 				findings.push({
@@ -705,16 +773,20 @@ async function collectConfigFindings(flags: DoctorCommandFlags): Promise<DoctorF
 	// section's --agent-dir gating: a run restricted to a temp dir must never
 	// diagnose (or scan for quarantines under) the real ~/.omp/agent.
 	const agentDir = flags.agentDir ?? getAgentDir();
+	const scoped = flags.agentDir !== undefined;
 	const findings: DoctorFinding[] = [];
 	findings.push(await diagnoseSettingsConfig(agentDir));
-	// Diagnose the project settings file (<cwd>/.omp/config.yml) through the
-	// same read-only classify path. The project dir is always getProjectDir()
-	// — even under --agent-dir scoping — mirroring how the MCP and setup
-	// sections treat projectDir: --agent-dir scopes the USER config only, not
-	// the project. Settings.#loadProjectSettings reads exactly this path at
-	// startup and quarantines+throws on malformed YAML, so a broken project
-	// config is an invisible startup failure that doctor must surface.
-	findings.push(await diagnoseProjectSettingsConfig());
+	// Diagnose the project settings surface (<cwd>/.omp/config.yml plus all
+	// project-level capability sources) through the same read-only paths the
+	// runtime uses. The project dir is always getProjectDir() — even under
+	// --agent-dir scoping — mirroring how the MCP and setup sections treat
+	// projectDir: --agent-dir scopes the USER config only, not the project.
+	// Settings.#loadProjectSettings reads .omp/config.yml via the strict
+	// #loadYaml path (quarantines+throws on malformed YAML) AND merges
+	// project-level items from loadCapability(settingsCapability.id, …) — so
+	// doctor must cover both surfaces. A broken project config from either
+	// path is an invisible startup failure that doctor must surface.
+	findings.push(await diagnoseProjectSettingsConfig(agentDir, scoped));
 	// diagnose(path) parses/classifies at an explicit path without running the
 	// JSON→YAML migration, quarantining, or caching — read-only.
 	// Startup order (ConfigFile.#resolveReadPath + #jsonMigrationPath):
@@ -787,19 +859,102 @@ async function diagnoseSettingsConfig(agentDir: string): Promise<DoctorFinding> 
 }
 
 /**
- * Diagnose the project settings file (`<cwd>/.omp/config.yml`) through the
- * same read-only {@link classifySettingsYaml} path used by
- * {@link diagnoseSettingsConfig}. At startup, `Settings.#loadProjectSettings`
- * reads this file via the strict `#loadYaml` path which quarantines and
- * throws on malformed YAML — a broken project config is an invisible startup
- * failure. This surfaces it without constructing a Settings instance,
- * quarantining, or writing. Absent file = ok (using defaults), matching the
- * agent-dir absent convention.
+ * Diagnose the project settings surface — the strict native
+ * `<cwd>/.omp/config.yml` path AND the same project-level capability sources
+ * `Settings.#loadProjectSettings` merges via
+ * `loadCapability(settingsCapability.id, …)`. At startup,
+ * `#loadProjectSettings` reads `.omp/config.yml` through the strict `#loadYaml`
+ * path (quarantines+throws on malformed YAML) and separately merges
+ * project-level items from every registered settings provider (native,
+ * Claude, Codex, Cursor, Gemini, OpenCode, …). A broken source from either
+ * path is an invisible startup failure.
+ *
+ * The strict native `.omp/config.yml` is also read by the native capability
+ * provider, so it is skipped in the capability loop to avoid duplicate
+ * diagnostics. Source paths are included in detail strings so the user can
+ * tell which file triggered each error. Absent native file + no capability
+ * sources = ok (using defaults), matching the agent-dir absent convention.
  */
-async function diagnoseProjectSettingsConfig(): Promise<DoctorFinding> {
-	const projectConfigPath = path.join(getProjectDir(), ".omp", "config.yml");
+async function diagnoseProjectSettingsConfig(agentDir: string, scoped: boolean): Promise<DoctorFinding> {
+	const projectDir = getProjectDir();
+	const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+	const projectPathPrefix = `${path.resolve(projectDir)}${path.sep}`;
+	const nativeProjectConfigPath = path.resolve(projectConfigPath);
+
+	const errors: string[] = [];
+	const warnings: string[] = [];
+	let nativeAbsent = false;
+
+	// ── Strict native path ──────────────────────────────────────────────
+	// Mirrors Settings.#loadYaml: quarantines+throws on malformed YAML.
 	const result = await classifySettingsYaml(projectConfigPath);
 	if (result.kind === "missing") {
+		nativeAbsent = true;
+	} else if (result.kind === "loaded") {
+		const migrated = migrateRawSettingsShape(result.settings);
+		const { errors: validationErrors, warnings: validationWarnings } = validateSettingsValues(migrated);
+		errors.push(...validationErrors);
+		warnings.push(...validationWarnings);
+	} else if (result.kind === "invalid") {
+		errors.push(`${shortenPath(projectConfigPath)}: ${result.error ?? "invalid YAML"}`);
+	} else if (result.kind === "unreadable") {
+		errors.push(`${shortenPath(projectConfigPath)}: ${result.error}`);
+	}
+
+	// ── Capability sources ──────────────────────────────────────────────
+	// Mirrors Settings.#loadProjectSettings: loadCapability with the project
+	// cwd, scoped userAgentDir, and provider filtering matching the runtime.
+	// When scoped, only the native provider runs (external tool configs stay
+	// out of the scoped run); when unscoped, all providers contribute.
+	let capabilitySourceCount = 0;
+	try {
+		const capResult = await loadCapability<SettingsCapabilityItem>(settingsCapability.id, {
+			cwd: projectDir,
+			userAgentDir: agentDir,
+			providers: scoped ? ["native"] : undefined,
+		});
+		for (const item of capResult.items) {
+			if (item.level !== "project") continue;
+			// Skip the native .omp/config.yml — already diagnosed above.
+			if (path.resolve(item.path) === nativeProjectConfigPath) continue;
+			capabilitySourceCount++;
+			const migrated = migrateRawSettingsShape(item.data);
+			const { errors: validationErrors, warnings: validationWarnings } = validateSettingsValues(migrated);
+			for (const e of validationErrors) errors.push(`${shortenPath(item.path)}: ${e}`);
+			for (const w of validationWarnings) warnings.push(`${shortenPath(item.path)}: ${w}`);
+		}
+		// Capability warnings lack source metadata, but every settings provider
+		// includes its absolute source path. Surface only warnings from a
+		// project source; user-level warnings are unrelated to this finding.
+		for (const warning of capResult.warnings) {
+			if (!warning.includes(projectPathPrefix) || warning.includes(nativeProjectConfigPath)) continue;
+			errors.push(shortenPath(warning));
+		}
+	} catch {
+		// Capability loader failure must not crash the report; the strict
+		// native path above remains authoritative for .omp/config.yml.
+	}
+
+	if (errors.length > 0) {
+		return {
+			id: "config.settings.project",
+			category: "config",
+			status: "error",
+			summary: `project settings: ${errors.length} error${errors.length === 1 ? "" : "s"}`,
+			details: errors,
+			remedy: `Fix the reported project settings source(s) or remove them to use defaults`,
+		};
+	}
+	if (warnings.length > 0) {
+		return {
+			id: "config.settings.project",
+			category: "config",
+			status: "warning",
+			summary: `project settings: valid (${warnings.length} warning${warnings.length === 1 ? "" : "s"})`,
+			details: warnings,
+		};
+	}
+	if (nativeAbsent && capabilitySourceCount === 0) {
 		return {
 			id: "config.settings.project",
 			category: "config",
@@ -808,37 +963,13 @@ async function diagnoseProjectSettingsConfig(): Promise<DoctorFinding> {
 			details: [],
 		};
 	}
-	if (result.kind === "loaded") {
-		const migrated = migrateRawSettingsShape(result.settings);
-		const { errors, warnings } = validateSettingsValues(migrated);
-		if (errors.length > 0) {
-			return {
-				id: "config.settings.project",
-				category: "config",
-				status: "error",
-				summary: `project settings: ${errors.length} invalid value${errors.length === 1 ? "" : "s"}`,
-				details: errors,
-				remedy: `Fix .omp/config.yml or remove it to use defaults`,
-			};
-		}
-		if (warnings.length > 0) {
-			return {
-				id: "config.settings.project",
-				category: "config",
-				status: "warning",
-				summary: `project settings: valid (${warnings.length} unknown key${warnings.length === 1 ? "" : "s"})`,
-				details: warnings,
-			};
-		}
-		return {
-			id: "config.settings.project",
-			category: "config",
-			status: "ok",
-			summary: "project settings: valid",
-			details: [],
-		};
-	}
-	return yamlConfigFinding("project settings", ".omp/config.yml", result, "config.settings.project");
+	return {
+		id: "config.settings.project",
+		category: "config",
+		status: "ok",
+		summary: "project settings: valid",
+		details: [],
+	};
 }
 
 function yamlConfigFinding(
@@ -1231,6 +1362,17 @@ function validateMcpFieldShapes(name: string, server: MCPServer, raw: unknown): 
 			);
 		}
 	}
+	// cwd: must be a string if present on a stdio server. A non-string cwd
+	// is malformed; the provider may drop it, leaving doctor to silently fall
+	// back to project cwd while the runtime spawn would fail with the bad value.
+	if ("cwd" in rawEntry && rawEntry.cwd !== undefined) {
+		const isStdio = rawEntry.type !== "http" && rawEntry.type !== "sse";
+		if (isStdio && typeof rawEntry.cwd !== "string") {
+			errors.push(
+				`Server "${name}": "cwd" must be a string, got ${rawEntry.cwd === null ? "null" : typeof rawEntry.cwd}`,
+			);
+		}
+	}
 	if (server.command !== undefined && typeof server.command !== "string") {
 		errors.push(`Server "${name}": "command" must be a string, got ${typeof server.command}`);
 	}
@@ -1346,12 +1488,16 @@ async function diagnoseMcpServer(name: string, server: MCPServer, raw?: unknown)
 	if ("url" in config && typeof config.url === "string") url = config.url;
 	try {
 		new URL(url);
-	} catch (error) {
+	} catch {
+		// The URL constructor's error message echoes the input URL verbatim,
+		// which can embed userinfo credentials or query-string secrets. Never
+		// surface raw parse-error text — return a generic, input-free detail.
 		return {
 			...base,
 			status: "error",
 			summary: `${name}: invalid url`,
-			details: [error instanceof Error ? error.message : String(error)],
+			details: ["URL is malformed and could not be parsed"],
+			remedy: `Fix the "url" for server "${name}" in mcp.json`,
 		};
 	}
 	// Sanitize the URL for the report: origin only (no userinfo, query, or
@@ -1526,42 +1672,6 @@ async function resolveAgentScanDirs(
 	return baseDirs;
 }
 
-/** File extensions the runtime loadTools scans for custom tool files. */
-const TOOL_FILE_EXTS = [".json", ".md", ".ts", ".js", ".sh", ".bash", ".py"];
-
-/** Check if a file exists (ENOENT → false, other errors → false). */
-async function fileExists(filePath: string): Promise<boolean> {
-	try {
-		await fs.promises.stat(filePath);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-/** Derive the runtime tool name from a tool file, reading metadata when present.
- * Mirrors loadTools in builtin.ts: JSON files use the `name` field (or basename),
- * MD files use frontmatter `name` (or basename), executable files use basename. */
-async function deriveToolName(filePath: string, fileName: string): Promise<string | null> {
-	const ext = path.extname(fileName);
-	const baseName = fileName.replace(/\.(json|md|ts|js|sh|bash|py)$/, "");
-	try {
-		if (ext === ".json") {
-			const content = await fs.promises.readFile(filePath, "utf-8");
-			const data = tryParseJson<{ name?: string }>(content);
-			return data?.name || baseName;
-		}
-		if (ext === ".md") {
-			const content = await fs.promises.readFile(filePath, "utf-8");
-			const { frontmatter } = parseFrontmatter(content, { source: filePath });
-			return (frontmatter.name as string) || baseName;
-		}
-	} catch {
-		// Unreadable file — fall back to basename.
-	}
-	return baseName;
-}
-
 async function collectAgentSetupFinding(agentDir: string, projectDir: string, scoped: boolean): Promise<DoctorFinding> {
 	const errors: string[] = [];
 	const warnings: string[] = [];
@@ -1598,39 +1708,31 @@ async function collectAgentSetupFinding(agentDir: string, projectDir: string, sc
 	if (parsed.length > 0) {
 		const knownAgentNames = await buildKnownAgentNames(parsed, projectDir, scoped);
 		const knownSkillNames = await discoverSkillNames(agentDir, projectDir, scoped);
-		// Build the known tool name set from the same static tool-discovery sources
-		// the runtime uses: built-in names + custom tools from <configDir>/tools/.
-		// Scans the same directories and extensions as loadTools in builtin.ts:
-		// .json/.md/.ts/.js/.sh/.bash/.py files + subdirs with index.ts/index.js.
+		// Build the known tool name set from the same runtime toolCapability
+		// discovery the task tool uses: built-in names + custom tools from all
+		// registered providers (native <configDir>/tools/, Claude .claude/tools/,
+		// Codex .codex/tools/, extension plugins, …). When scoped, only the
+		// native provider runs; when unscoped, all providers contribute — so a
+		// tool discoverable only through a non-native provider is recognized.
 		const knownTools = new Set<string>(KNOWN_TOOL_NAMES);
-		const toolDirs = [path.join(agentDir, "tools"), path.join(projectDir, ".omp", "tools")];
-		for (const toolDir of toolDirs) {
-			let toolEntries: fs.Dirent[];
-			try {
-				toolEntries = await fs.promises.readdir(toolDir, { withFileTypes: true });
-			} catch (error) {
-				if (isEnoent(error)) continue;
-				errors.push(`tools: ${error instanceof Error ? error.message : String(error)}`);
-				continue;
+		try {
+			const toolResult = await loadCapability<CustomTool>(toolCapability.id, {
+				cwd: projectDir,
+				userAgentDir: agentDir,
+				providers: scoped ? ["native"] : undefined,
+			});
+			for (const tool of toolResult.items) {
+				knownTools.add(tool.name);
 			}
-			for (const toolEntry of toolEntries) {
-				if (toolEntry.name.startsWith(".")) continue;
-				if (toolEntry.isFile() || toolEntry.isSymbolicLink()) {
-					const ext = path.extname(toolEntry.name);
-					if (!TOOL_FILE_EXTS.includes(ext)) continue;
-					const toolPath = path.join(toolDir, toolEntry.name);
-					const derivedName = await deriveToolName(toolPath, toolEntry.name);
-					if (derivedName) knownTools.add(derivedName);
-				} else if (toolEntry.isDirectory()) {
-					// Subdirectory tools: only register when the runtime-expected
-					// index file exists (mirrors loadTools in builtin.ts).
-					const indexPath = path.join(toolDir, toolEntry.name, "index.ts");
-					const indexJsPath = path.join(toolDir, toolEntry.name, "index.js");
-					if ((await fileExists(indexPath)) || (await fileExists(indexJsPath))) {
-						knownTools.add(toolEntry.name);
-					}
-				}
+			// Surface loader warnings as setup errors — the old manual scan
+			// reported readdir failures as errors, so capability warnings
+			// (parse failures, unreadable files) take the same severity.
+			for (const warning of toolResult.warnings) {
+				errors.push(`tools: ${warning}`);
 			}
+		} catch {
+			// Capability loader failure must not crash the report; an empty
+			// set degrades to warnings for unknown tool references.
 		}
 		for (const fields of parsed) {
 			for (const tool of fields.tools ?? []) {
