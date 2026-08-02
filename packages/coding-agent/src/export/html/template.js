@@ -410,6 +410,74 @@
         });
       }
 
+      /**
+       * Contract hidden nodes out of the displayed tree and recompute connector
+       * metadata against the visible ancestry. Keeping metadata from the full tree
+       * leaves orphan gutters when a branch head is filtered out.
+       */
+      function projectFilteredNodes(flatNodes, visibleNodes) {
+        const visibleIds = new Set(visibleNodes.map(flatNode => flatNode.node.entry.id));
+        const projectedById = new Map();
+        const nearestVisibleById = new Map();
+        const roots = [];
+
+        // flatNodes is pre-order, so the nearest visible ancestor of each
+        // parent is already known when its children are visited.
+        for (const flatNode of flatNodes) {
+          const id = flatNode.node.entry.id;
+          const parentId = flatNode.node.entry.parentId;
+          const visibleParentId = parentId ? nearestVisibleById.get(parentId) : undefined;
+          if (!visibleIds.has(id)) {
+            if (visibleParentId) nearestVisibleById.set(id, visibleParentId);
+            continue;
+          }
+
+          const projected = { flatNode, children: [] };
+          projectedById.set(id, projected);
+          const parent = visibleParentId ? projectedById.get(visibleParentId) : undefined;
+          if (parent) {
+            parent.children.push(projected);
+          } else {
+            roots.push(projected);
+          }
+          nearestVisibleById.set(id, id);
+        }
+
+        const result = [];
+        const multipleRoots = roots.length > 1;
+        const stack = [];
+        for (let i = roots.length - 1; i >= 0; i--) {
+          stack.push([roots[i], multipleRoots ? 1 : 0, multipleRoots, multipleRoots, i === roots.length - 1, [], multipleRoots]);
+        }
+
+        while (stack.length > 0) {
+          const [projected, indent, justBranched, showConnector, isLast, gutters, isVirtualRootChild] = stack.pop();
+          result.push({ ...projected.flatNode, indent, showConnector, isLast, gutters, isVirtualRootChild, multipleRoots });
+
+          const multipleChildren = projected.children.length > 1;
+          const childIndent = multipleChildren || (justBranched && indent > 0) ? indent + 1 : indent;
+          const connectorDisplayed = showConnector && !isVirtualRootChild;
+          const displayIndent = multipleRoots ? Math.max(0, indent - 1) : indent;
+          const childGutters = connectorDisplayed
+            ? [...gutters, { position: Math.max(0, displayIndent - 1), show: !isLast }]
+            : gutters;
+
+          for (let i = projected.children.length - 1; i >= 0; i--) {
+            stack.push([
+              projected.children[i],
+              childIndent,
+              multipleChildren,
+              multipleChildren,
+              i === projected.children.length - 1,
+              childGutters,
+              false
+            ]);
+          }
+        }
+
+        return result;
+      }
+
       // ============================================================
       // TREE DISPLAY TEXT (pure data -> string)
       // ============================================================
@@ -572,7 +640,7 @@
         const tree = buildTree();
         const activePathIds = buildActivePathIds(currentLeafId);
         const flatNodes = flattenTree(tree, activePathIds);
-        const filtered = filterNodes(flatNodes, currentLeafId);
+        const filtered = projectFilteredNodes(flatNodes, filterNodes(flatNodes, currentLeafId));
         const container = document.getElementById('tree-container');
 
         // Full render only on first call or when filter/search changes

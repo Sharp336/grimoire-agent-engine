@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed session tree connectors being computed from the unfiltered tree, so hiding a branch head via filter or search left dangling connectors and orphan gutters beside the nodes that survived, in both the TUI tree selector and the HTML export.
+
 ## [17.2.9] - 2026-08-05
 
 ### Breaking Changes

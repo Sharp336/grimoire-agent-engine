@@ -146,9 +146,9 @@ class TreeList implements Component {
 		return this.#filteredNodes.length - 1;
 	}
 
-	#flattenTree(roots: SessionTreeNode[]): FlatNode[] {
+	#flattenTree(roots: SessionTreeNode[], collectToolCalls = true): FlatNode[] {
 		const result: FlatNode[] = [];
-		this.#toolCallMap.clear();
+		if (collectToolCalls) this.#toolCallMap.clear();
 
 		// A real branch point adds one indentation level. Linear conversation
 		// chains retain that level so their text stays aligned with the branch
@@ -201,7 +201,7 @@ class TreeList implements Component {
 
 			// Extract tool calls from assistant messages for later lookup
 			const entry = node.entry;
-			if (entry.type === "message" && entry.message.role === "assistant") {
+			if (collectToolCalls && entry.type === "message" && entry.message.role === "assistant") {
 				const content = (entry.message as { content?: unknown }).content;
 				if (Array.isArray(content)) {
 					for (const block of content) {
@@ -243,7 +243,7 @@ class TreeList implements Component {
 			const connectorDisplayed = showConnector && !isVirtualRootChild;
 			// When connector is displayed, add a gutter entry at the connector's position
 			// Connector is at position (displayIndent - 1), so gutter should be there too
-			const currentDisplayIndent = this.#multipleRoots ? Math.max(0, indent - 1) : indent;
+			const currentDisplayIndent = multipleRoots ? Math.max(0, indent - 1) : indent;
 			const connectorPosition = Math.max(0, currentDisplayIndent - 1);
 			const childGutters: GutterInfo[] = connectorDisplayed
 				? [...gutters, { position: connectorPosition, show: !isLast }]
@@ -259,6 +259,50 @@ class TreeList implements Component {
 		return result;
 	}
 
+	/**
+	 * Contract hidden nodes out of the displayed tree and recompute connector
+	 * metadata against the visible ancestry. Keeping metadata from the full tree
+	 * leaves orphan gutters when a branch head is filtered out.
+	 *
+	 * The contracted tree is laid out by {@link #flattenTree} rather than a
+	 * second walk, so filtered rows and unfiltered ones can never disagree about
+	 * indentation, branch ordering or gutters.
+	 */
+	#projectFilteredNodes(visibleNodes: FlatNode[]): FlatNode[] {
+		const visibleIds = new Set(visibleNodes.map(flatNode => flatNode.node.entry.id));
+		const contractedById = new Map<string, SessionTreeNode>();
+		const nearestVisibleById = new Map<string, string>();
+		const roots: SessionTreeNode[] = [];
+
+		// #flatNodes is pre-order, so the nearest visible ancestor of each
+		// parent is already known when its children are visited.
+		for (const flatNode of this.#flatNodes) {
+			const id = flatNode.node.entry.id;
+			const parentId = flatNode.node.entry.parentId;
+			const visibleParentId = parentId ? nearestVisibleById.get(parentId) : undefined;
+			if (!visibleIds.has(id)) {
+				if (visibleParentId) nearestVisibleById.set(id, visibleParentId);
+				continue;
+			}
+
+			// A copy, because the children we hand the layout are the visible ones.
+			const contracted: SessionTreeNode = { ...flatNode.node, children: [] };
+			contractedById.set(id, contracted);
+			const parent = visibleParentId ? contractedById.get(visibleParentId) : undefined;
+			if (parent) {
+				parent.children.push(contracted);
+			} else {
+				roots.push(contracted);
+			}
+			nearestVisibleById.set(id, id);
+		}
+
+		this.#multipleRoots = roots.length > 1;
+		// Tool calls stay indexed off the full tree: a visible tool result can
+		// belong to a call on a row the filter hid.
+		return this.#flattenTree(roots, false);
+	}
+
 	#applyFilter(): void {
 		// Update lastSelectedId only when we have a valid selection (non-empty list)
 		// This preserves the selection when switching through empty filter results
@@ -268,7 +312,7 @@ class TreeList implements Component {
 
 		const searchTokens = this.#searchQuery.toLowerCase().split(/\s+/).filter(Boolean);
 
-		this.#filteredNodes = this.#flatNodes.filter(flatNode => {
+		const visibleNodes = this.#flatNodes.filter(flatNode => {
 			const entry = flatNode.node.entry;
 			const isCurrentLeaf = entry.id === this.currentLeafId;
 
@@ -326,6 +370,7 @@ class TreeList implements Component {
 
 			return true;
 		});
+		this.#filteredNodes = this.#projectFilteredNodes(visibleNodes);
 
 		// Try to preserve cursor on the same node, or find nearest visible ancestor
 		if (this.#lastSelectedId) {
