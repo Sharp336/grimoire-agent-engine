@@ -104,7 +104,13 @@ function createSideStub(overrides?: {
 	};
 }
 
-function createContext(tempDir: TempDir) {
+function createContext(
+	tempDir: TempDir,
+	options?: {
+		toolNames?: string[];
+		mcpTools?: ReadonlyArray<{ name: string; mcpServerName?: string; mcpToolName?: string }>;
+	},
+) {
 	// Isolate the parent session inside the TempDir — the default session dir is
 	// the real user store (~/.omp/agent/sessions), which tests would pollute.
 	const parentManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
@@ -117,7 +123,7 @@ function createContext(tempDir: TempDir) {
 		agent: { promptCacheKey: undefined },
 		configuredThinkingLevel: vi.fn(() => undefined),
 		systemPrompt: ["system prompt"],
-		getActiveToolNames: vi.fn(() => ["read", "bash", "task", "hub"]),
+		getEnabledToolNames: vi.fn(() => options?.toolNames ?? ["read", "bash", "task", "hub"]),
 		modelRegistry: { authStorage: { marker: "auth" } },
 		getAgentId: vi.fn(() => undefined),
 	} as unknown as InteractiveModeContext["session"];
@@ -128,11 +134,26 @@ function createContext(tempDir: TempDir) {
 	// focusing into the side, since the ctx type marks focusedAgentId readonly.
 	const focusState: { current: string | undefined } = { current: undefined };
 
+	const mcpManager = options?.mcpTools
+		? {
+				getTools: () =>
+					options.mcpTools?.map(tool => ({
+						name: tool.name,
+						label: tool.name,
+						description: "",
+						parameters: {},
+						strict: false,
+						mcpServerName: tool.mcpServerName ?? "s",
+						mcpToolName: tool.mcpToolName ?? tool.name,
+					})) ?? [],
+			}
+		: undefined;
+
 	const ctx = {
 		session,
 		sessionManager: parentManager,
 		settings,
-		mcpManager: undefined,
+		mcpManager,
 		collabGuest: undefined,
 		get focusedAgentId() {
 			return focusState.current;
@@ -276,7 +297,13 @@ describe("SideController", () => {
 		expect(capturedCreateOpts?.spawns).toBe("");
 		expect(capturedCreateOpts?.taskDepth).toBe(1);
 		expect(capturedCreateOpts?.parentTaskPrefix).toBeUndefined();
-		expect(capturedCreateOpts?.settings).toBe(harness.ctx.settings);
+		// Settings must be an isolated snapshot: parent values preserved, only
+		// compaction.strategy forced to context-full (handoff would strand the side).
+		const sideSettings = capturedCreateOpts?.settings;
+		expect(sideSettings).not.toBe(harness.ctx.settings);
+		expect(sideSettings?.get("compaction.strategy")).toBe("context-full");
+		expect(sideSettings?.get("tools.approvalMode")).toBe(harness.ctx.settings.get("tools.approvalMode"));
+		expect(sideSettings?.get("task.enableLsp")).toBe(true);
 		const toolNames = capturedCreateOpts?.toolNames;
 		expect(toolNames).not.toContain("task");
 		expect(toolNames).not.toContain("hub");
@@ -647,5 +674,42 @@ describe("SideController", () => {
 		// Release the prompt gate and await start — it resolves cleanly.
 		promptGate.resolve();
 		await startPromise;
+	});
+
+	it("inherits xd-mounted tool names and filters MCP proxies to enabled tools", async () => {
+		tempDir = TempDir.createSync("@omp-side-tools-");
+		const harness = createContext(tempDir, {
+			toolNames: ["read", "bash", "task", "hub", "xd_mounted_tool", "mcp__s_enabled"],
+			mcpTools: [{ name: "mcp__s_enabled" }, { name: "mcp__s_disabled" }],
+		});
+		const { stub } = createSideStub({ activeToolNames: ["read", "bash"] });
+
+		let sideFile: string | undefined;
+		const realForkFrom = SessionManager.forkFrom;
+		vi.spyOn(SessionManager, "forkFrom").mockImplementation(async (...args) => {
+			sideFile = args[4]?.sessionFile;
+			return realForkFrom(...args);
+		});
+		let capturedCreateOpts: CreateAgentSessionOptions | undefined;
+		const createSpy = createAgentSessionSpy(stub, vi.fn(), () => sideFile);
+		const origImpl = createSpy.getMockImplementation();
+		if (!origImpl) throw new Error("createAgentSession spy has no implementation");
+		createSpy.mockImplementation(async (options?: CreateAgentSessionOptions) => {
+			if (!options) throw new Error("options required");
+			capturedCreateOpts = options;
+			return origImpl(options);
+		});
+
+		const controller = new SideController(harness.ctx);
+		await controller.start("q");
+
+		// getEnabledToolNames (not getActiveToolNames) drives the grant:
+		// xd-mounted names survive, builtin task/hub are filtered out.
+		expect(capturedCreateOpts?.toolNames).toContain("xd_mounted_tool");
+		expect(capturedCreateOpts?.toolNames).not.toContain("task");
+		expect(capturedCreateOpts?.toolNames).not.toContain("hub");
+		// Only the MCP tool the parent has enabled is proxied; customTools are
+		// always included regardless of the toolNames filter.
+		expect(capturedCreateOpts?.customTools?.map(tool => tool.name)).toEqual(["mcp__s_enabled"]);
 	});
 });
