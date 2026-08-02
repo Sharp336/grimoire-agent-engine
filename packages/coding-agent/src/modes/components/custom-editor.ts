@@ -847,9 +847,13 @@ export class CustomEditor extends Editor {
 			const imagePaths = extractImagePastePathsFromText(content);
 			if (imagePaths && this.onPasteImagePath) {
 				this.prepareVimInsertMutation();
+				const pasteSignal = this.getAsyncPasteSignal();
 				void this.trackAsyncPaste(
 					(async () => {
-						for (const p of imagePaths) await this.onPasteImagePath?.(p);
+						for (const p of imagePaths) {
+							if (pasteSignal.aborted) return;
+							await this.onPasteImagePath?.(p);
+						}
 					})(),
 				);
 				return;

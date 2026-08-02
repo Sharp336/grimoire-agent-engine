@@ -378,6 +378,33 @@ describe("CustomEditor keybindings", () => {
 		expect(editor.getText()).toBe("");
 	});
 
+	it("stops a multi-image path paste after Vim Escape cancels its generation", async () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const firstImage = Promise.withResolvers<void>();
+		const onPasteImagePath = vi.fn(async () => {
+			if (onPasteImagePath.mock.calls.length === 1) await firstImage.promise;
+			else editor.insertText("[stale image] ");
+		});
+		editor.setInputMode("vim");
+		editor.onPasteImagePath = onPasteImagePath;
+		editor.setText("draft");
+		editor.handleInput("i");
+
+		editor.handleInput("\x1b[200~/tmp/first.png\n/tmp/second.png\x1b[201~");
+		expect(onPasteImagePath).toHaveBeenCalledTimes(1);
+		editor.handleInput("\x1b");
+		editor.handleInput("i");
+		editor.handleInput("!");
+		firstImage.resolve();
+		await firstImage.promise;
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(onPasteImagePath).toHaveBeenCalledTimes(1);
+		expect(editor.getText()).not.toContain("[stale image]");
+		expect(editor.getVimMode()).toBe("insert");
+	});
+
 	it("allows configured raw-text paste only from Vim insert mode", async () => {
 		const editor = new CustomEditor(getEditorTheme());
 		const onPasteTextRaw = vi.fn(() => editor.insertText("pasted"));
