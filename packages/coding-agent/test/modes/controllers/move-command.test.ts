@@ -98,3 +98,82 @@ describe("CommandController /move", () => {
 		}
 	});
 });
+
+function createSwitchContext(sourceDir: string, newSession: (options?: unknown) => Promise<boolean>) {
+	const base = createMoveContext(sourceDir);
+	const session = {
+		isStreaming: false,
+		isCompacting: false,
+		moveSession: base.moveSession,
+		newSession,
+	};
+	const sessionManager = {
+		getCwd: () => sourceDir,
+		getSessionName: () => undefined,
+		getSessionFile: () => path.join(sourceDir, "session.jsonl"),
+		dropSession: vi.fn(async () => {}),
+	};
+	const statusLine = { invalidate: vi.fn(), resetActiveTime: vi.fn() };
+	// Object.assign keeps the existing harness context type while overriding the
+	// members the new-session flow touches (no re-cast needed).
+	Object.assign(base.ctx, {
+		session,
+		sessionManager,
+		statusLine,
+		clearTransientSessionUi: vi.fn(),
+		resetObserverRegistry: vi.fn(),
+		resetTranscript: vi.fn(),
+	});
+	return { ...base, newSession };
+}
+
+describe("CommandController /clear and /drop side disposal", () => {
+	beforeAll(async () => {
+		const theme = await getThemeByName("dark");
+		if (!theme) throw new Error("Expected dark theme");
+		setThemeInstance(theme);
+	});
+
+	it("does not dispose the side when the session switch is cancelled", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-switch-source-"));
+		try {
+			const newSession = vi.fn(async () => false);
+			const { ctx, disposeSideConversation } = createSwitchContext(sourceDir, newSession);
+			const controller = new CommandController(ctx);
+
+			await controller.handleClearCommand();
+
+			expect(newSession).toHaveBeenCalledTimes(1);
+			expect(disposeSideConversation).not.toHaveBeenCalled();
+		} finally {
+			await fs.rm(sourceDir, { recursive: true, force: true });
+		}
+	});
+
+	it("disposes the side only after a successful session switch", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-switch-source-"));
+		try {
+			const entered = Promise.withResolvers<void>();
+			const gate = Promise.withResolvers<boolean>();
+			const newSession = vi.fn(() => {
+				entered.resolve();
+				return gate.promise;
+			});
+			const { ctx, disposeSideConversation } = createSwitchContext(sourceDir, newSession);
+			const controller = new CommandController(ctx);
+
+			const drop = controller.handleDropCommand();
+			await entered.promise;
+			expect(newSession).toHaveBeenCalledTimes(1);
+			// Not disposed while the switch outcome is pending.
+			expect(disposeSideConversation).not.toHaveBeenCalled();
+
+			gate.resolve(true);
+			await drop;
+
+			expect(disposeSideConversation).toHaveBeenCalledTimes(1);
+		} finally {
+			await fs.rm(sourceDir, { recursive: true, force: true });
+		}
+	});
+});
