@@ -765,7 +765,7 @@ export class CustomEditor extends Editor {
 		this.#spaceHoldTimer.unref?.();
 	}
 
-	#endSpaceHold(): void {
+	cancelSpaceHold(): void {
 		if (!this.#spaceHoldActive) return;
 		this.#spaceHoldActive = false;
 		this.#resetSpaceRun();
@@ -773,6 +773,11 @@ export class CustomEditor extends Editor {
 			clearTimeout(this.#spaceHoldTimer);
 			this.#spaceHoldTimer = undefined;
 		}
+	}
+
+	#endSpaceHold(): void {
+		if (!this.#spaceHoldActive) return;
+		this.cancelSpaceHold();
 		this.onSpaceHoldEnd?.();
 	}
 

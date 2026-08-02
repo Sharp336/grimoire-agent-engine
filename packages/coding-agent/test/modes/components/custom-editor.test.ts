@@ -589,6 +589,17 @@ describe("CustomEditor space-hold push-to-talk", () => {
 		expect(events).toEqual([]);
 	});
 
+	it("cancels an active hold without firing its release callback", () => {
+		const { editor, events } = makeEditor();
+		feedSpaces(editor, SPACE_HOLD_MECHANICAL_RUN + 2, REPEAT_GAP_MS);
+		expect(events).toEqual(["start"]);
+
+		editor.cancelSpaceHold();
+		vi.advanceTimersByTime(SPACE_HOLD_RELEASE_MS + 1);
+
+		expect(events).toEqual(["start"]);
+	});
+
 	it("leaves the space bar typing normally when the gesture is disabled", () => {
 		const { editor, events } = makeEditor();
 		editor.sttHoldEnabled = () => false;

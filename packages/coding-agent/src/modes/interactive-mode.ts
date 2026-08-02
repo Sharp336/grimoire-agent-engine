@@ -778,7 +778,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		// spraying events no longer runs `getTopBorder` synchronously in the
 		// hot path where the render never gets to paint the result.
 		this.editor.onInputModeChange = mode => {
-			if (mode !== undefined && mode !== "insert") this.#sttController?.cancel();
+			if (mode !== undefined && mode !== "insert") {
+				this.editor.cancelSpaceHold();
+				this.#sttController?.cancel();
+			}
 			this.ui.requestComponentRender(this.editor);
 		};
 		this.editor.setTopBorderProvider(availableWidth => this.#getEditorTopBorder(this.editor, availableWidth));
