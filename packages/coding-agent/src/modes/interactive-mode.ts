@@ -4499,7 +4499,6 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async #prepareSessionSwitch(): Promise<void> {
 		this.#btwController.dispose();
-		await this.#sideController.dispose();
 		this.#omfgController.dispose();
 		this.#extensionUiController.clearExtensionTerminalInputListeners();
 		this.clearPinnedError();

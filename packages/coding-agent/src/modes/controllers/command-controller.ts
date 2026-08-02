@@ -931,6 +931,9 @@ export class CommandController {
 			}
 		}
 		if (!(await this.ctx.session.newSession(options))) return;
+		// The switch committed (a session_before_switch cancel returns above) —
+		// now discard the side conversation forked from the old session.
+		await this.ctx.disposeSideConversation();
 		this.ctx.resetObserverRegistry();
 		setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
 
