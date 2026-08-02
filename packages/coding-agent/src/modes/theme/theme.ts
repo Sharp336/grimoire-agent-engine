@@ -18,6 +18,7 @@ import type {
 	Terminal,
 	TerminalAppearance,
 } from "@oh-my-pi/pi-tui";
+import { applyBackgroundToLine } from "@oh-my-pi/pi-tui/utils";
 import {
 	adjustHsv,
 	colorLuma,
@@ -31,6 +32,7 @@ import {
 import { type } from "arktype";
 import chalk from "chalk";
 import { LRUCache } from "lru-cache/raw";
+import { isFullscreenViewport } from "../../tools/render-utils";
 // Embed theme JSON files at build time
 import darkThemeJson from "./dark.json" with { type: "json" };
 import { defaultThemes } from "./defaults";
@@ -1489,14 +1491,17 @@ function resolveToHex(value: string | number, isLight: boolean): string {
 }
 
 /**
- * Minimum luma separation (0..1) at which one background reads as a different
- * surface from another. Below this a hovered row just looks like the page; much
- * above it the row reads as a hard selection bar rather than a hover hint.
+ * Per-channel distance between neighbouring rungs of the surface ladder.
+ *
+ * `colorLuma` weights sum to 1, so moving every channel by `k` shifts luma by
+ * exactly `k / 255`: the dark step is 3.9%, the light one 2.0%. Sized off
+ * opencode's own ladder (`#0a0a0a -> #141414 -> #1e1e1e` dark,
+ * `#ffffff -> #fafafa -> #f5f5f5` light), which is where those two numbers come
+ * from. Light surfaces take the smaller step because a difference that close to
+ * white already reads clearly; the dark step at that size would be invisible.
  */
-const HOVER_WASH_MIN_DELTA = 0.035;
-
-/** Per-channel step for surfaces with no headroom left for a value multiplier. */
-const HOVER_WASH_FALLBACK_STEP = 20;
+const SURFACE_STEP_DARK = 10;
+const SURFACE_STEP_LIGHT = 5;
 
 /**
  * Resolve a theme *background* value to a CSS hex string.
@@ -1514,45 +1519,140 @@ function resolveBgToHex(value: string | number, isLight: boolean): string {
 }
 
 /**
- * Push a surface color away from itself: brighter on dark themes, darker on light
- * ones. Moving away from the background rather than always darkening is what keeps
- * the wash visible in both appearances.
+ * Move every channel by `step`, clamped to the byte range.
+ *
+ * A uniform channel step is the one nudge whose luma delta is exactly
+ * predictable (see {@link SURFACE_STEP_DARK}), which is what lets the ladder
+ * promise evenly spaced rungs on any theme. It costs a little saturation on a
+ * strongly tinted surface, and at these step sizes that is not perceptible.
  */
-function washAwayFromSurface(hex: string, isLight: boolean): string {
-	const from = colorLuma(hex) ?? 0;
-	const scaled = adjustHsv(hex, { v: isLight ? 0.9 : 1.7 });
-	if (Math.abs((colorLuma(scaled) ?? from) - from) >= HOVER_WASH_MIN_DELTA) return scaled;
-	// A near-black surface has no value left to multiply and a clipped-white one has
-	// no room left to grow, so step the channels instead of scaling them.
-	const step = isLight ? -HOVER_WASH_FALLBACK_STEP : HOVER_WASH_FALLBACK_STEP;
+function stepChannels(hex: string, step: number): string {
 	const rgb = hexToRgb(hex);
 	return rgbToHex({ r: rgb.r + step, g: rgb.g + step, b: rgb.b + step });
 }
 
+/** Canvas, panel, and element backgrounds as hex, darkest-surface first. */
+type SurfaceLadder = readonly [canvas: string, panel: string, element: string];
+
 /**
- * Background marking the hovered interactive row, derived rather than declared.
+ * Three stacked surfaces derived from the theme rather than declared by it.
  *
- * Every theme predates mouse support, and user themes sit on disk unversioned, so
- * asking for a new key would leave those themes with no hover color at all. Instead
- * reuse `selectedBg`, which is already the "this row is picked" surface that select
- * lists and the settings list paint hover with, so hover looks the same everywhere.
- * Themes that set `selectedBg` equal to their own surface (several do) would render
- * an invisible wash, so those nudge the surface itself instead.
+ * Every theme predates the fullscreen viewport, and user themes sit on disk
+ * unversioned, so asking for three new keys would leave all of them flat. The
+ * anchor is `statusLineBg`: it is already the theme's own base surface and the
+ * value that classifies the theme light or dark, so anchoring anywhere else
+ * could hand a light theme a dark canvas. Each rung then steps *away* from that
+ * anchor, up on dark themes and down on light ones, which is the direction that
+ * keeps a card reading as raised in both appearances.
  *
- * Undefined when the theme leaves both background roles at the terminal default: it
- * has told us nothing about its surface, and a guessed wash would fight the real one.
+ * Rungs cannot collapse into each other: the anchor's own luma picks the
+ * direction, so a dark anchor (luma <= 0.5) always has a channel below 255 to
+ * raise and a light one always has a channel above 0 to lower. A saturated
+ * anchor may clip one channel and take a slightly shorter step, never a zero one.
+ *
+ * Undefined when the theme leaves `statusLineBg` at the terminal default. That
+ * theme has declined to paint a surface at all, and covering the terminal's own
+ * background with a guess would fight whatever the user set it to.
  */
-function deriveHoverBg(bgColors: Record<ThemeBg, string | number>, isLight: boolean): string | undefined {
-	if (bgColors.selectedBg === "" && bgColors.statusLineBg === "") return undefined;
-	const surface = resolveBgToHex(bgColors.statusLineBg, isLight);
-	const selected = resolveBgToHex(bgColors.selectedBg, isLight);
-	const surfaceLuma = colorLuma(surface);
-	const selectedLuma = colorLuma(selected);
-	if (selectedLuma !== undefined) {
-		const separation = surfaceLuma === undefined ? Infinity : Math.abs(selectedLuma - surfaceLuma);
-		if (separation >= HOVER_WASH_MIN_DELTA) return selected;
+function deriveSurfaceLadder(bgColors: Record<ThemeBg, string | number>, isLight: boolean): SurfaceLadder | undefined {
+	if (bgColors.statusLineBg === "") return undefined;
+	const canvas = resolveBgToHex(bgColors.statusLineBg, isLight);
+	const step = isLight ? -SURFACE_STEP_LIGHT : SURFACE_STEP_DARK;
+	return [canvas, stepChannels(canvas, step), stepChannels(canvas, step * 2)];
+}
+
+/**
+ * Index just past the escape sequence starting at `i`: a CSI run ends at its
+ * final byte (0x40..0x7e), an OSC run (hyperlinks) at BEL or ST.
+ */
+function skipEscape(row: string, i: number): number {
+	if (row[i + 1] === "]") {
+		const bel = row.indexOf("\x07", i);
+		const st = row.indexOf("\x1b\\", i + 2);
+		if (bel === -1 && st === -1) return row.length;
+		return bel !== -1 && (st === -1 || bel < st) ? bel + 1 : st + 2;
 	}
-	return washAwayFromSurface(surface, isLight);
+	let end = i + 2;
+	while (end < row.length && (row.charCodeAt(end) < 0x40 || row.charCodeAt(end) > 0x7e)) end++;
+	return end + 1;
+}
+
+/**
+ * Whether an SGR parameter list drops back to the default background: a full
+ * reset (`0`, or an omitted parameter, which defaults to 0) or `49`.
+ *
+ * Extended-color introducers are stepped over rather than scanned, because
+ * their operands are plain numbers: `38;5;0` selects black *text* and
+ * `48;2;0;0;0` a black background, and neither clears anything.
+ */
+function sgrClearsBackground(params: string): boolean {
+	if (params === "") return true;
+	const tokens = params.split(";");
+	for (let i = 0; i < tokens.length; i++) {
+		const token = tokens[i];
+		if (token === "38" || token === "48") {
+			// Sub-parameter counts per ITU-T T.416: `5` takes one index, `2` takes
+			// three components. A malformed introducer falls through to the scan,
+			// where the worst case is one redundant re-open.
+			const mode = tokens[i + 1];
+			if (mode === "5") i += 2;
+			else if (mode === "2") i += 4;
+			continue;
+		}
+		if (token === "" || Number(token) === 0 || token === "49") return true;
+	}
+	return false;
+}
+
+/**
+ * Re-open `open` after every SGR in `text` that clears the background.
+ *
+ * Rendered rows carry their own `\x1b[0m` and `\x1b[49m` partway through, and a
+ * plain open/close wrapper would lose the fill from the first such reset to the
+ * end of the row. On screen that reads as a torn panel: the right-hand gutter
+ * reverts to the terminal default on exactly the rows that have styled content.
+ *
+ * Only the background is re-asserted. A `\x1b[0m` also drops the foreground, but
+ * whatever the row does with its own text after that reset is the row's business.
+ */
+function reassertBackground(text: string, open: string): string {
+	if (!text.includes("\x1b")) return text;
+	let out = "";
+	let copied = 0;
+	let i = 0;
+	while (i < text.length) {
+		if (text.charCodeAt(i) !== 0x1b) {
+			i++;
+			continue;
+		}
+		const end = skipEscape(text, i);
+		// `m` is the SGR final byte; OSC hyperlinks and non-SGR CSI carry no color.
+		if (text[i + 1] === "[" && text[end - 1] === "m" && sgrClearsBackground(text.slice(i + 2, end - 1))) {
+			out += text.slice(copied, end) + open;
+			copied = end;
+		}
+		i = end;
+	}
+	return copied === 0 ? text : out + text.slice(copied);
+}
+
+/**
+ * Paint `text` on `open`, unbroken across inner resets and filled to `width`
+ * visible columns. Padding before the close is what makes a short row cover the
+ * whole panel instead of stopping at its last glyph.
+ *
+ * A nested surface that closes itself with `\x1b[49m` is repaired by
+ * `reassertBackground`, which re-opens `open` after every inner reset — so the
+ * padding lands on this surface's colour rather than the inner one, and an
+ * inset composer does not bleed its panel to the frame edge.
+ *
+ * An empty `open` means the theme paints no surface, so the text comes back
+ * untouched rather than wrapped in a pair of no-op escapes.
+ */
+function paintSurface(open: string, text: string, width?: number): string {
+	if (open === "") return text;
+	// Width 0 pads nothing, which is exactly the unsized behaviour.
+	return applyBackgroundToLine(reassertBackground(text, open), width ?? 0, row => `${open}${row}\x1b[49m`);
 }
 
 export class Theme {
@@ -1575,11 +1675,19 @@ export class Theme {
 	/** WCAG relative luminance of the status-line background — basis for accent contrast. */
 	readonly #statusLineContrastLuminance: number | undefined;
 	/**
-	 * Background escape for the hovered interactive row, or undefined when the theme
-	 * declines to paint backgrounds at all. Derived once at construction because it
-	 * depends only on the theme's own colors.
+	 * Raw background opens for the three surface rungs, in ladder order, or empty
+	 * strings when the theme paints no surface at all (see
+	 * {@link deriveSurfaceLadder}). Derived once at construction because they
+	 * depend only on the theme's own colors.
+	 *
+	 * Public so callers assembling their own rows (the viewport fill, hand-built
+	 * status rows) can emit the sequence directly. Anything that is just text
+	 * should go through {@link surfaceBg}/{@link panelBg}/{@link elementBg}, which
+	 * also survive inner resets and fill to width.
 	 */
-	readonly #hoverBgAnsi: string | undefined;
+	readonly surfaceBgAnsi: string;
+	readonly panelBgAnsi: string;
+	readonly elementBgAnsi: string;
 	constructor(
 		fgColors: Record<ThemeColor, string | number>,
 		bgColors: Record<ThemeBg, string | number>,
@@ -1604,8 +1712,10 @@ export class Theme {
 			this.#bgColors[key] = bgAnsi(value, mode);
 			this.#hexBgColors[key] = resolveToHex(value, slIsLight);
 		}
-		const hoverBgHex = deriveHoverBg(bgColors, slIsLight);
-		this.#hoverBgAnsi = hoverBgHex === undefined ? undefined : bgAnsi(hoverBgHex, mode);
+		const ladder = deriveSurfaceLadder(bgColors, slIsLight);
+		this.surfaceBgAnsi = ladder === undefined ? "" : bgAnsi(ladder[0], mode);
+		this.panelBgAnsi = ladder === undefined ? "" : bgAnsi(ladder[1], mode);
+		this.elementBgAnsi = ladder === undefined ? "" : bgAnsi(ladder[2], mode);
 		// Build symbol map from preset + overrides
 		const baseSymbols = SYMBOL_PRESETS[symbolPreset];
 		this.#symbols = { ...baseSymbols };
@@ -1709,17 +1819,36 @@ export class Theme {
 	}
 
 	/**
+	 * The app canvas: the darkest surface on a dark theme, the lightest on a light
+	 * one. Everything else in the fullscreen viewport sits on top of it.
+	 *
+	 * `width` fills the row out to that many visible columns, so a short line still
+	 * paints edge to edge. Leave it off when the caller already padded the row (a
+	 * {@link Box} bgFn, for instance) or the padding would be applied twice.
+	 */
+	surfaceBg(text: string, width?: number): string {
+		return paintSurface(this.surfaceBgAnsi, text, width);
+	}
+
+	/** One rung up from the canvas: tool cards and the composer. */
+	panelBg(text: string, width?: number): string {
+		return paintSurface(this.panelBgAnsi, text, width);
+	}
+
+	/** Two rungs up: a raised or hovered surface, read against a panel beneath it. */
+	elementBg(text: string, width?: number): string {
+		return paintSurface(this.elementBgAnsi, text, width);
+	}
+
+	/**
 	 * Background wash marking the row the pointer is over.
 	 *
-	 * Derived from the theme's own colors instead of a dedicated key: every theme was
-	 * written before mouse support, and user themes live unversioned in the themes
-	 * directory, so a new key would leave all of them with no hover color at all. See
-	 * {@link deriveHoverBg} for the derivation. Themes that paint no backgrounds get
-	 * the text back untouched rather than a guessed wash.
+	 * The same surface as {@link elementBg}, because hovered and raised are one
+	 * state: a row the pointer lifts off the panel. Keeping them separate let a
+	 * hovered card and a raised card sit on different greys in the same frame.
 	 */
-	hoverBg(text: string): string {
-		if (this.#hoverBgAnsi === undefined) return text;
-		return `${this.#hoverBgAnsi}${text}\x1b[49m`; // Reset only background color
+	hoverBg(text: string, width?: number): string {
+		return this.elementBg(text, width);
 	}
 
 	/**
@@ -3234,10 +3363,14 @@ export function getSelectListTheme(): SelectListTheme {
 		scrollInfo: (text: string) => theme.fg("muted", text),
 		noMatch: (text: string) => theme.fg("muted", text),
 		symbols: getSymbolTheme(),
-		// Not raw `selectedBg`: dozens of themes set it to their own surface, which
-		// left the hover band invisible. Both lists skip the wash on the keyboard-
-		// selected row, so it never competes with the cursor + accent selection.
+		// Both bands are the same rung of the surface ladder, not raw `selectedBg`:
+		// dozens of themes set that equal to their own surface, which left the band
+		// invisible. Hovered and selected share the rung the way opencode does, and
+		// the accent `selectedText` plus the cursor glyph is what tells them apart.
 		hovered: (text: string) => theme.hoverBg(text),
+		// Append mode has no pointer and no panel behind the list, so a wash there
+		// would be a band floating on native scrollback. Leave it untouched.
+		selectedRow: (text: string) => (isFullscreenViewport() ? theme.elementBg(text) : text),
 	};
 }
 
