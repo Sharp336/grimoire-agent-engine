@@ -950,6 +950,53 @@ describe("Editor Vim input mode", () => {
 		expect(editor.getText()).toBe("replacement");
 	});
 
+	it("does not retrigger autocomplete after a normal-mode mutation", async () => {
+		const editor = createVimEditor();
+		const getSuggestions = vi.fn(async () => ({
+			items: [{ label: "/help", value: "/help" }],
+			prefix: "/",
+		}));
+		const { promise, resolve } = Promise.withResolvers<void>();
+		editor.setAutocompleteProvider({
+			getSuggestions,
+			applyCompletion(lines, cursorLine, cursorCol) {
+				return { lines, cursorLine, cursorCol };
+			},
+		});
+		editor.onAutocompleteUpdate = resolve;
+		typeText(editor, "i/he");
+		await promise;
+		editor.handleInput("\x1b");
+		expect(editor.isShowingAutocomplete()).toBe(false);
+		const callsBeforeMutation = getSuggestions.mock.calls.length;
+
+		editor.handleInput("x");
+
+		expect(getSuggestions).toHaveBeenCalledTimes(callsBeforeMutation);
+		expect(editor.isShowingAutocomplete()).toBe(false);
+		expect(editor.getVimMode()).toBe("normal");
+	});
+
+	it("retriggers autocomplete after a Vim change enters insert mode", () => {
+		const editor = createVimEditor();
+		const getSuggestions = vi.fn(async () => ({
+			items: [{ label: "/help", value: "/help" }],
+			prefix: "/h",
+		}));
+		editor.setAutocompleteProvider({
+			getSuggestions,
+			applyCompletion(lines, cursorLine, cursorCol) {
+				return { lines, cursorLine, cursorCol };
+			},
+		});
+		editor.setText("/he");
+
+		editor.handleInput("C");
+
+		expect(getSuggestions).toHaveBeenCalledTimes(1);
+		expect(editor.getVimMode()).toBe("insert");
+	});
+
 	it("cancels a pending character jump when enabling Vim mode", () => {
 		const editor = new Editor(defaultEditorTheme);
 		editor.setText("abcx");

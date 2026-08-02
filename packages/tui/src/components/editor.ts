@@ -3450,7 +3450,7 @@ export class Editor implements Component, Focusable {
 		this.#state.cursorLine = Math.min(boundedStart, this.#state.lines.length - 1);
 		this.#setCursorCol(0);
 		this.#recordKill(deleted, "forward");
-		this.#notifyVimMutation();
+		this.#notifyVimMutation(enterInsert);
 	}
 
 	#openVimLines(line: number, count: number): void {
@@ -3461,7 +3461,7 @@ export class Editor implements Component, Focusable {
 		this.#state.lines.splice(targetLine, 0, ...Array.from({ length: count }, () => ""));
 		this.#state.cursorLine = targetLine + count - 1;
 		this.#setCursorCol(0);
-		this.#notifyVimMutation();
+		this.#notifyVimMutation(true);
 	}
 
 	#deleteVimRange(start: number, end: number, enterInsert: boolean): void {
@@ -3485,7 +3485,7 @@ export class Editor implements Component, Focusable {
 		if (this.#state.lines.length === 0) this.#state.lines = [""];
 		this.#setVimAbsoluteCursor(from, enterInsert);
 		this.#recordKill(deleted, start <= end ? "forward" : "backward");
-		this.#notifyVimMutation();
+		this.#notifyVimMutation(enterInsert);
 	}
 
 	#vimGraphemeStartAtOrBefore(text: string, col: number): number {
@@ -3538,10 +3538,10 @@ export class Editor implements Component, Focusable {
 		return { start: expandedStart, end: expandedEnd };
 	}
 
-	#notifyVimMutation(): void {
+	#notifyVimMutation(retriggerAutocomplete: boolean): void {
 		this.#preferredVisualCol = null;
 		this.onChange?.(this.getText());
-		this.#retriggerAutocompleteAtCursor();
+		if (retriggerAutocomplete) this.#retriggerAutocompleteAtCursor();
 	}
 
 	/**
