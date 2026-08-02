@@ -285,12 +285,16 @@ function isRpcHostToolCancelRequest(value: unknown): value is RpcHostToolCancelR
 
 function isRpcHostUriRequest(value: unknown): value is RpcHostUriRequest {
 	if (!isRecord(value)) return false;
+	const hasValidContent =
+		value.operation === "write"
+			? typeof value.content === "string"
+			: value.content === undefined || typeof value.content === "string";
 	return (
 		value.type === "host_uri_request" &&
 		typeof value.id === "string" &&
 		(value.operation === "read" || value.operation === "write") &&
 		typeof value.url === "string" &&
-		(value.content === undefined || typeof value.content === "string")
+		hasValidContent
 	);
 }
 
@@ -1048,7 +1052,8 @@ export class RpcClient {
 
 	/** Set the active session's display name. */
 	async setSessionName(name: string): Promise<void> {
-		await this.#send({ type: "set_session_name", name });
+		const response = await this.#send({ type: "set_session_name", name });
+		this.#getData<void>(response);
 	}
 
 	/**

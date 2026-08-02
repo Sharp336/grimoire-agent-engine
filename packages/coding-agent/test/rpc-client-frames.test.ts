@@ -173,6 +173,42 @@ describe("RpcClient frame coverage", () => {
 		await expect(aborted.promise).resolves.toBeUndefined();
 	});
 
+	test("ignores malformed host URI writes without content", async () => {
+		using tempDir = TempDir.createSync("@omp-rpc-client-host-uri-malformed-");
+		const captureFile = tempDir.join("captured.jsonl");
+		using client = new RpcClient({
+			cliPath: MOCK_AGENT,
+			env: {
+				MOCK_RPC_CLIENT_FRAMES: "1",
+				MOCK_RPC_CAPTURE_FILE: captureFile,
+				MOCK_RPC_MALFORMED_HOST_URI_WRITE: "1",
+			},
+		});
+		let handlerCalled = false;
+		client.registerHostUriHandler(() => {
+			handlerCalled = true;
+		});
+
+		await client.start();
+		await client.getState();
+		const captured = await waitForCapturedFrames(captureFile, frames =>
+			frames.some(frame => frame.type === "get_state"),
+		);
+
+		expect(handlerCalled).toBe(false);
+		expect(captured.some(frame => frame.type === "host_uri_result" && frame.id === "host-uri-1")).toBe(false);
+	});
+
+	test("propagates rejected session name updates", async () => {
+		using client = new RpcClient({
+			cliPath: MOCK_AGENT,
+			env: { MOCK_RPC_REJECT_SESSION_NAME: "1" },
+		});
+
+		await client.start();
+		await expect(client.setSessionName(" ")).rejects.toThrow("Session name cannot be empty");
+	});
+
 	test("restores host URI schemes after restarting the client", async () => {
 		using tempDir = TempDir.createSync("@omp-rpc-client-host-uri-restart-");
 		const captureFile = tempDir.join("captured.jsonl");
