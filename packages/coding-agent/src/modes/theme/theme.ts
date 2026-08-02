@@ -1601,10 +1601,10 @@ function deriveSelectionWash(panel: string, accent: string, element: string, ste
 type SurfaceLadder = readonly [canvas: string, panel: string, element: string, selection: string, overlay: string];
 
 /**
- * Three stacked surfaces derived from the theme rather than declared by it.
+ * Four stacked surfaces derived from the theme rather than declared by it.
  *
  * Every theme predates the fullscreen viewport, and user themes sit on disk
- * unversioned, so asking for three new keys would leave all of them flat. The
+ * unversioned, so asking for four new keys would leave all of them flat. The
  * anchor is `statusLineBg`: it is already the theme's own base surface and the
  * value that classifies the theme light or dark, so anchoring anywhere else
  * could hand a light theme a dark canvas. Each rung then steps *away* from that
@@ -1613,8 +1613,12 @@ type SurfaceLadder = readonly [canvas: string, panel: string, element: string, s
  *
  * Rungs cannot collapse into each other: the anchor's own luma picks the
  * direction, so a dark anchor (luma <= 0.5) always has a channel below 255 to
- * raise and a light one always has a channel above 0 to lower. A saturated
- * anchor may clip one channel and take a slightly shorter step, never a zero one.
+ * raise and a light one always has a channel above 0 to lower. That holds at
+ * the furthest rung too — a colour whose channels are all >= 225 has a luma
+ * around 0.88 and could never have been classified dark, and the mirror bound
+ * rules out the light case — so even a three-step move leaves a channel free.
+ * A saturated anchor may clip one channel and take a slightly shorter step,
+ * never a zero one.
  *
  * Undefined when the theme leaves `statusLineBg` at the terminal default. That
  * theme has declined to paint a surface at all, and covering the terminal's own
@@ -1752,10 +1756,13 @@ export class Theme {
 	/** WCAG relative luminance of the status-line background — basis for accent contrast. */
 	readonly #statusLineContrastLuminance: number | undefined;
 	/**
-	 * Raw background opens for the three surface rungs, in ladder order, or empty
-	 * strings when the theme paints no surface at all (see
-	 * {@link deriveSurfaceLadder}). Derived once at construction because they
-	 * depend only on the theme's own colors.
+	 * Raw background opens for the bottom three surface rungs, in ladder order,
+	 * or empty strings when the theme paints no surface at all (see
+	 * {@link deriveSurfaceLadder}). The fourth rung is {@link overlayBgAnsi},
+	 * declared below the selection wash rather than here because the wash is not
+	 * a rung and the tuple keeps them in derivation order, not luma order.
+	 * Derived once at construction because they depend only on the theme's own
+	 * colors.
 	 *
 	 * Public so callers assembling their own rows (the viewport fill, hand-built
 	 * status rows) can emit the sequence directly. Anything that is just text
