@@ -41,11 +41,13 @@ function createContext(getVimMode: () => "insert" | "normal" | "visual" | undefi
 	const insertText = vi.fn();
 	const requestRender = vi.fn();
 	const showStatus = vi.fn();
+	const asyncPasteSignal = new AbortController().signal;
 	const ctx = {
 		editor: {
 			pasteText,
 			insertText,
 			getVimMode,
+			getAsyncPasteSignal: () => asyncPasteSignal,
 			imageLinks: undefined,
 			pendingImages: [] as ImageContent[],
 			pendingImageLinks: [] as (string | undefined)[],

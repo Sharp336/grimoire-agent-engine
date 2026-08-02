@@ -587,10 +587,6 @@ export class InputController {
 			},
 			pasteImage: image => {
 				const vimMode = this.ctx.editor.getVimMode();
-				if (vimMode !== undefined && vimMode !== "insert") {
-					this.ctx.editor.clearVimPendingCommand();
-					return;
-				}
 				// Images can only land in the main editor — when a modal Input is
 				// focused, refuse rather than dump the binary blob in a hidden buffer.
 				const focused = this.ctx.ui.getFocused();
@@ -598,10 +594,19 @@ export class InputController {
 					this.ctx.showStatus("Image paste is not supported in this prompt");
 					return;
 				}
+				if (vimMode !== undefined && vimMode !== "insert") {
+					this.ctx.editor.clearVimPendingCommand();
+					return;
+				}
+				const pasteSignal = this.ctx.editor.getAsyncPasteSignal();
 				if (vimMode === "insert") this.ctx.editor.prepareVimInsertMutation();
 				return this.ctx.editor
 					.trackAsyncPaste(
-						this.#normalizeAndInsertPastedImage(image, `Unsupported pasted image format: ${image.mimeType}`),
+						this.#normalizeAndInsertPastedImage(
+							image,
+							`Unsupported pasted image format: ${image.mimeType}`,
+							pasteSignal,
+						),
 					)
 					.then(() => {});
 			},
@@ -1424,7 +1429,7 @@ export class InputController {
 		return allQueued.length;
 	}
 
-	async #insertPendingImage(imageData: ImageContent): Promise<void> {
+	async #insertPendingImage(imageData: ImageContent, pasteSignal: AbortSignal): Promise<void> {
 		const imageLink = (
 			await materializeImageReferenceLinks(
 				[
@@ -1439,7 +1444,7 @@ export class InputController {
 		)?.[0];
 		const dims = await this.#imageDimensions(imageData);
 		const vimMode = this.ctx.editor.getVimMode?.();
-		if (vimMode !== undefined && vimMode !== "insert") return;
+		if (pasteSignal.aborted || (vimMode !== undefined && vimMode !== "insert")) return;
 		this.ctx.editor.pendingImages.push({
 			type: "image",
 			data: imageData.data,
@@ -1465,8 +1470,13 @@ export class InputController {
 		return undefined;
 	}
 
-	async #normalizeAndInsertPastedImage(image: ImageContent, unsupportedMessage: string): Promise<boolean> {
+	async #normalizeAndInsertPastedImage(
+		image: ImageContent,
+		unsupportedMessage: string,
+		pasteSignal: AbortSignal,
+	): Promise<boolean> {
 		let imageData = await ensureSupportedImageInput(image);
+		if (pasteSignal.aborted) return false;
 		if (!imageData) {
 			this.ctx.showStatus(unsupportedMessage);
 			return false;
@@ -1483,7 +1493,7 @@ export class InputController {
 				// Keep the normalized image when resize fails.
 			}
 		}
-		await this.#insertPendingImage(imageData);
+		await this.#insertPendingImage(imageData, pasteSignal);
 		return true;
 	}
 
@@ -1500,15 +1510,16 @@ export class InputController {
 	 * the outcome (image attached, or an unsupported-format status surfaced), so
 	 * the caller stops without emitting its own degraded diagnostic.
 	 */
-	async #tryPasteClipboardImage(): Promise<boolean> {
+	async #tryPasteClipboardImage(pasteSignal: AbortSignal): Promise<boolean> {
 		const env = process.env;
 		if (env.SSH_CONNECTION || env.SSH_TTY || env.SSH_CLIENT) return false;
 		try {
 			const image = await this.clipboard.readImage();
-			if (!image) return false;
+			if (pasteSignal.aborted || !image) return false;
 			await this.#normalizeAndInsertPastedImage(
 				{ type: "image", data: image.data.toBase64(), mimeType: image.mimeType },
 				`Unsupported clipboard image format: ${image.mimeType}`,
+				pasteSignal,
 			);
 			return true;
 		} catch {
@@ -1516,17 +1527,18 @@ export class InputController {
 		}
 	}
 
-	async handleImagePathPaste(path: string): Promise<void> {
+	async handleImagePathPaste(path: string, pasteSignal = this.ctx.editor.getAsyncPasteSignal()): Promise<void> {
 		try {
 			const image = await loadImageInput({
 				path,
 				cwd: this.ctx.sessionManager.getCwd(),
 				autoResize: false,
 			});
+			if (pasteSignal.aborted) return;
 			if (!image) {
 				// Path resolved but is not a readable image (e.g. a zero-byte or
 				// locked transient screenshot file). Prefer the clipboard bytes.
-				if (await this.#tryPasteClipboardImage()) return;
+				if (await this.#tryPasteClipboardImage(pasteSignal)) return;
 				this.ctx.editor.pasteText(path);
 				this.ctx.ui.requestRender();
 				this.ctx.showStatus("Pasted path is not a supported image");
@@ -1535,8 +1547,10 @@ export class InputController {
 			await this.#normalizeAndInsertPastedImage(
 				{ type: "image", data: image.data, mimeType: image.mimeType },
 				`Unsupported pasted image format: ${image.mimeType}`,
+				pasteSignal,
 			);
 		} catch (error) {
+			if (pasteSignal.aborted) return;
 			if (error instanceof ImageInputTooLargeError) {
 				this.ctx.editor.pasteText(path);
 				this.ctx.ui.requestRender();
@@ -1547,7 +1561,7 @@ export class InputController {
 				// #2375: the bracketed paste forwarded by a local terminal carries a
 				// path on the *local* filesystem. The bytes may still be on the
 				// clipboard (Win+Shift+S), so try those before giving up.
-				if (await this.#tryPasteClipboardImage()) return;
+				if (await this.#tryPasteClipboardImage(pasteSignal)) return;
 				// Over SSH the clipboard lives on the remote host, so the path is
 				// genuinely unreachable; pasting it as text would look like the
 				// image was attached when nothing was sent. Surface an SSH-aware
@@ -1571,7 +1585,7 @@ export class InputController {
 				);
 				return;
 			}
-			if (await this.#tryPasteClipboardImage()) return;
+			if (await this.#tryPasteClipboardImage(pasteSignal)) return;
 			this.ctx.editor.pasteText(path);
 			this.ctx.ui.requestRender();
 			this.ctx.showStatus("Failed to read pasted image path");
@@ -1579,6 +1593,7 @@ export class InputController {
 	}
 
 	async handleImagePaste(): Promise<boolean> {
+		const pasteSignal = this.ctx.editor.getAsyncPasteSignal();
 		try {
 			// When a modal paste-capable prompt (login/API-key Input) owns focus,
 			// only clipboard text may land there. Image payloads must not mutate
@@ -1588,6 +1603,7 @@ export class InputController {
 			const promptTarget =
 				focusedNow && focusedNow !== this.ctx.editor && hasPasteText(focusedNow) ? focusedNow : null;
 			const image = await this.clipboard.readImage();
+			if (pasteSignal.aborted) return false;
 			if (image) {
 				if (promptTarget) {
 					this.ctx.showStatus("Image paste is not supported in this prompt");
@@ -1600,6 +1616,7 @@ export class InputController {
 						mimeType: image.mimeType,
 					},
 					`Unsupported clipboard image format: ${image.mimeType}`,
+					pasteSignal,
 				);
 			}
 			// #3506: macOS Finder `Cmd+C` puts only a `public.file-url`
@@ -1615,11 +1632,12 @@ export class InputController {
 			// `readMacFileUrls` returns an empty list off Darwin, so the
 			// check is free on every other platform.
 			const fileUrls = promptTarget ? [] : ((await this.clipboard.readMacFileUrls?.()) ?? []);
+			if (pasteSignal.aborted) return false;
 			let attachedFromFileUrls = false;
 			for (const url of fileUrls) {
 				const candidate = extractImagePathFromText(url);
 				if (!candidate) continue;
-				await this.handleImagePathPaste(candidate);
+				await this.handleImagePathPaste(candidate, pasteSignal);
 				attachedFromFileUrls = true;
 			}
 			if (attachedFromFileUrls) return true;
@@ -1629,6 +1647,7 @@ export class InputController {
 			// integrated terminal, Win+V clipboard history) deliver only
 			// this keypress, so a miss here must not dead-end.
 			const text = await this.clipboard.readText();
+			if (pasteSignal.aborted) return false;
 			if (!text) {
 				this.ctx.showStatus("Clipboard is empty");
 				return false;
@@ -1641,7 +1660,7 @@ export class InputController {
 			// terminals do this for image clipboards).
 			const imagePath = promptTarget ? null : extractImagePathFromText(text);
 			if (imagePath) {
-				await this.handleImagePathPaste(imagePath);
+				await this.handleImagePathPaste(imagePath, pasteSignal);
 				return true;
 			}
 			// Route to the focused component when it accepts pastes (modal
@@ -1651,16 +1670,18 @@ export class InputController {
 			this.ctx.ui.requestRender();
 			return true;
 		} catch {
+			if (pasteSignal.aborted) return false;
 			this.ctx.showStatus("Failed to read clipboard");
 			return false;
 		}
 	}
 
 	async handleClipboardTextRawPaste(): Promise<void> {
+		const pasteSignal = this.ctx.editor.getAsyncPasteSignal();
 		try {
 			const text = await this.clipboard.readText();
 			const vimMode = this.ctx.editor.getVimMode();
-			if (vimMode !== undefined && vimMode !== "insert") return;
+			if (pasteSignal.aborted || (vimMode !== undefined && vimMode !== "insert")) return;
 			if (text) {
 				this.ctx.editor.insertText(text);
 				this.ctx.ui.requestRender();
@@ -1668,6 +1689,7 @@ export class InputController {
 				this.ctx.showStatus("No text in clipboard to paste raw");
 			}
 		} catch {
+			if (pasteSignal.aborted) return;
 			this.ctx.showStatus("Failed to paste raw text from clipboard");
 		}
 	}

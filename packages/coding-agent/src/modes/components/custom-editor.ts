@@ -600,6 +600,9 @@ export class CustomEditor extends Editor {
 	 *  dispatching them so a trailing `Enter` after `Cmd+V` can't submit before the image lands on
 	 *  `pendingImages` (Codex PR #3602 review). */
 	#pasteInFlight = 0;
+	/** Aborted when Vim Escape releases the current async-paste gate. Async producers capture
+	 *  the signal before their first await so a later insert session cannot accept stale results. */
+	#asyncPasteAbort = new AbortController();
 	/** Input chunks deferred behind an in-flight paste, drained in FIFO order once the paste
 	 *  count returns to zero. */
 	#pendingInput: string[] = [];
@@ -756,32 +759,42 @@ export class CustomEditor extends Editor {
 		this.onSpaceHoldEnd?.();
 	}
 
-	/** Decrement {@link #pasteInFlight} once an async paste settles and, when the count returns
-	 *  to zero, drain {@link #pendingInput} through `handleInput` so requeueing still works if a
-	 *  drained chunk triggers another async paste. Bound member so it can be passed straight to
-	 *  `Promise.then(callback, callback)`. */
-	#onPasteSettled = (): void => {
+	/** Signal scoped to the current async-paste generation. Producers must check it before
+	 *  committing an awaited result to the editor. */
+	getAsyncPasteSignal(): AbortSignal {
+		return this.#asyncPasteAbort.signal;
+	}
+
+	/** Decrement {@link #pasteInFlight} once a non-canceled async paste settles and, when the
+	 *  count returns to zero, drain {@link #pendingInput} through `handleInput`. */
+	#onPasteSettled(signal: AbortSignal): void {
+		if (signal.aborted) return;
 		this.#pasteInFlight--;
 		if (this.#pasteInFlight > 0) return;
 		const drained = this.#pendingInput.splice(0);
 		for (const chunk of drained) this.handleInput(chunk);
-	};
+	}
 
 	/** Track an in-flight paste so subsequent input cannot overtake its editor mutation. */
 	trackAsyncPaste<T>(promise: Promise<T>): Promise<T> {
+		const signal = this.#asyncPasteAbort.signal;
 		this.#pasteInFlight++;
-		void promise.then(this.#onPasteSettled, this.#onPasteSettled);
+		const onSettled = (): void => this.#onPasteSettled(signal);
+		void promise.then(onSettled, onSettled);
 		return promise;
 	}
 
 	handleInput(data: string): void {
 		// Serialize behind any in-flight async paste so a trailing Enter / follow-up key can't
 		// submit before the clipboard image reaches `pendingImages` (Codex PR #3602 review).
-		// Escape remains immediate in Vim insert mode: it cancels queued input, switches to normal,
-		// and lets the commit-time mode guard discard the eventual paste result.
+		// Vim Escape cancels this paste generation and releases queued input immediately; async
+		// producers use getAsyncPasteSignal() to discard any result that finishes after canceling.
 		if (this.#pasteInFlight > 0) {
 			if (this.getVimMode() === "insert" && matchesKey(data, "escape")) {
 				this.#pendingInput.length = 0;
+				this.#asyncPasteAbort.abort();
+				this.#asyncPasteAbort = new AbortController();
+				this.#pasteInFlight = 0;
 				super.handleInput(data);
 			} else {
 				this.#pendingInput.push(data);

@@ -37,6 +37,7 @@ type FakeEditor = {
 	pasteText(text: string): void;
 	insertText(text: string): void;
 	trackAsyncPaste(promise: Promise<unknown>): Promise<unknown>;
+	getAsyncPasteSignal(): AbortSignal;
 	getVimMode(): "insert" | "normal" | "visual" | undefined;
 	clearVimPendingCommand(): void;
 	prepareVimInsertMutation(): void;
@@ -89,6 +90,7 @@ async function createContext() {
 	const getVimMode = vi.fn<() => "insert" | "normal" | "visual" | undefined>(() => undefined);
 	const clearVimPendingCommand = vi.fn();
 	const prepareVimInsertMutation = vi.fn();
+	const asyncPasteSignal = new AbortController().signal;
 	const showError = vi.fn();
 	let focused: unknown;
 	const addInputListener = vi.fn((listener: InputListener) => {
@@ -139,6 +141,7 @@ async function createContext() {
 			editorText += text;
 		},
 		trackAsyncPaste,
+		getAsyncPasteSignal: () => asyncPasteSignal,
 		getVimMode,
 		clearVimPendingCommand,
 		prepareVimInsertMutation,
@@ -463,54 +466,74 @@ describe("InputController keybinding setup", () => {
 		{
 			name: "drops the paste and clears pending Vim state in normal mode",
 			mode: "normal" as const,
+			focusedPrompt: false,
 			trackCalls: 0,
 			clearCalls: 1,
 			prepareCalls: 0,
+			statusCalls: 0,
 		},
 		{
 			name: "prepares Vim insert undo",
 			mode: "insert" as const,
+			focusedPrompt: false,
 			trackCalls: 1,
 			clearCalls: 0,
 			prepareCalls: 1,
+			statusCalls: 0,
 		},
 		{
 			name: "tracks the paste in default input mode",
 			mode: undefined,
+			focusedPrompt: false,
 			trackCalls: 1,
 			clearCalls: 0,
 			prepareCalls: 0,
+			statusCalls: 0,
 		},
-	])("$name for an enhanced image paste", async ({ mode, trackCalls, clearCalls, prepareCalls }) => {
-		await Settings.init({ inMemory: true });
-		try {
-			const { InputController, ctx, spies } = await createContext();
-			const controller = new InputController(ctx);
-			spies.getVimMode.mockReturnValue(mode);
-			controller.setupKeyHandlers();
-			const packet = (metadata: string, payload?: string) =>
-				`\x1b]5522;${metadata}${payload === undefined ? "" : `;${payload}`}\x1b\\`;
-			const listeners = registeredInputListeners(spies.addInputListener);
-			const imageMime = Buffer.from("image/png", "utf8").toString("base64");
+		{
+			name: "reports an unsupported paste to a focused prompt before the Vim mode guard",
+			mode: "normal" as const,
+			focusedPrompt: true,
+			trackCalls: 0,
+			clearCalls: 0,
+			prepareCalls: 0,
+			statusCalls: 1,
+		},
+	])(
+		"$name for an enhanced image paste",
+		async ({ mode, focusedPrompt, trackCalls, clearCalls, prepareCalls, statusCalls }) => {
+			await Settings.init({ inMemory: true });
+			try {
+				const { InputController, ctx, setFocused, spies } = await createContext();
+				const controller = new InputController(ctx);
+				spies.getVimMode.mockReturnValue(mode);
+				if (focusedPrompt) setFocused({ pasteText: vi.fn() });
+				controller.setupKeyHandlers();
+				const packet = (metadata: string, payload?: string) =>
+					`\x1b]5522;${metadata}${payload === undefined ? "" : `;${payload}`}\x1b\\`;
+				const listeners = registeredInputListeners(spies.addInputListener);
+				const imageMime = Buffer.from("image/png", "utf8").toString("base64");
 
-			dispatchInput(listeners, packet("type=read:status=OK:pw=c2VjcmV0"));
-			dispatchInput(listeners, packet(`type=read:status=DATA:mime=${imageMime}`));
-			dispatchInput(listeners, packet("type=read:status=DONE"));
-			dispatchInput(listeners, packet("type=read:status=OK"));
-			dispatchInput(
-				listeners,
-				packet(`type=read:status=DATA:mime=${imageMime}`, Buffer.from("image-bytes").toString("base64")),
-			);
-			dispatchInput(listeners, packet("type=read:status=DONE"));
+				dispatchInput(listeners, packet("type=read:status=OK:pw=c2VjcmV0"));
+				dispatchInput(listeners, packet(`type=read:status=DATA:mime=${imageMime}`));
+				dispatchInput(listeners, packet("type=read:status=DONE"));
+				dispatchInput(listeners, packet("type=read:status=OK"));
+				dispatchInput(
+					listeners,
+					packet(`type=read:status=DATA:mime=${imageMime}`, Buffer.from("image-bytes").toString("base64")),
+				);
+				dispatchInput(listeners, packet("type=read:status=DONE"));
 
-			expect(spies.trackAsyncPaste).toHaveBeenCalledTimes(trackCalls);
-			expect(spies.clearVimPendingCommand).toHaveBeenCalledTimes(clearCalls);
-			expect(spies.prepareVimInsertMutation).toHaveBeenCalledTimes(prepareCalls);
-			await spies.trackAsyncPaste.mock.calls[0]?.[0];
-		} finally {
-			resetSettingsForTest();
-		}
-	});
+				expect(spies.trackAsyncPaste).toHaveBeenCalledTimes(trackCalls);
+				expect(spies.clearVimPendingCommand).toHaveBeenCalledTimes(clearCalls);
+				expect(spies.prepareVimInsertMutation).toHaveBeenCalledTimes(prepareCalls);
+				expect(ctx.showStatus).toHaveBeenCalledTimes(statusCalls);
+				await spies.trackAsyncPaste.mock.calls[0]?.[0];
+			} finally {
+				resetSettingsForTest();
+			}
+		},
+	);
 
 	it("routes the smart-paste shortcut to a focused login input", async () => {
 		const { promise: pasted, resolve: resolvePaste } = Promise.withResolvers<string>();

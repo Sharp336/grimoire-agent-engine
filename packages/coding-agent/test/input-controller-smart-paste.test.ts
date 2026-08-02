@@ -13,16 +13,19 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 function createContext(options?: {
 	focused?: { pasteText(text: string): void };
 	getVimMode?: () => "insert" | "normal" | "visual" | undefined;
+	pasteSignal?: AbortSignal;
 }) {
 	const pasteText = vi.fn();
 	const insertText = vi.fn();
 	const requestRender = vi.fn();
 	const showStatus = vi.fn();
+	const asyncPasteSignal = options?.pasteSignal ?? new AbortController().signal;
 	const ctx = {
 		editor: {
 			pasteText,
 			insertText,
 			getVimMode: options?.getVimMode ?? (() => undefined),
+			getAsyncPasteSignal: () => asyncPasteSignal,
 		} as unknown as InteractiveModeContext["editor"],
 		ui: { requestRender, getFocused: () => options?.focused ?? null } as unknown as InteractiveModeContext["ui"],
 		showStatus,
@@ -137,6 +140,27 @@ describe("InputController.handleClipboardTextRawPaste", () => {
 		const paste = controller.handleClipboardTextRawPaste();
 		vimMode = "normal";
 		request.resolve("late paste");
+		await paste;
+
+		expect(spies.insertText).not.toHaveBeenCalled();
+		expect(spies.requestRender).not.toHaveBeenCalled();
+	});
+
+	it("drops a canceled raw paste after Vim re-enters insert mode", async () => {
+		const request = Promise.withResolvers<string>();
+		const pasteAbort = new AbortController();
+		const { ctx, spies } = createContext({
+			getVimMode: () => "insert",
+			pasteSignal: pasteAbort.signal,
+		});
+		const controller = new InputController(ctx, {
+			readImage: async () => null,
+			readText: () => request.promise,
+		});
+
+		const paste = controller.handleClipboardTextRawPaste();
+		pasteAbort.abort();
+		request.resolve("stale paste");
 		await paste;
 
 		expect(spies.insertText).not.toHaveBeenCalled();

@@ -273,6 +273,64 @@ describe("CustomEditor keybindings", () => {
 		expect(editor.getText()).toBe("draft");
 		expect(onSubmit).not.toHaveBeenCalled();
 	});
+
+	it("releases the async paste gate when Vim Escape cancels", async () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const image = Promise.withResolvers<void>();
+		const onEscape = vi.fn();
+		editor.setInputMode("vim");
+		editor.setActionKeys("app.clipboard.pasteImage", ["alt+p"]);
+		editor.onPasteImage = () => image.promise.then(() => true);
+		editor.onEscape = onEscape;
+		editor.setText("draft");
+		editor.handleInput("i");
+
+		editor.handleInput("\x1bp");
+		editor.handleInput("\r");
+		editor.handleInput("\x1b");
+		expect(editor.getVimMode()).toBe("normal");
+
+		editor.handleInput("\x1b");
+		expect(onEscape).toHaveBeenCalledTimes(1);
+		editor.handleInput("i");
+		editor.handleInput("!");
+		expect(editor.getText()).toBe("draf!t");
+
+		image.resolve();
+		await image.promise;
+		await Promise.resolve();
+		expect(editor.getText()).toBe("draf!t");
+	});
+
+	it("does not let a canceled paste settlement release a newer paste gate", async () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const first = Promise.withResolvers<void>();
+		const second = Promise.withResolvers<void>();
+		const onSubmit = vi.fn();
+		let pasteNumber = 0;
+		editor.setInputMode("vim");
+		editor.setActionKeys("app.clipboard.pasteImage", ["alt+p"]);
+		editor.onPasteImage = () => (++pasteNumber === 1 ? first.promise : second.promise).then(() => true);
+		editor.onSubmit = onSubmit;
+		editor.handleInput("i");
+
+		editor.handleInput("\x1bp");
+		editor.handleInput("\x1b");
+		editor.handleInput("i");
+		editor.handleInput("\x1bp");
+		editor.handleInput("\r");
+
+		first.resolve();
+		await first.promise;
+		await Promise.resolve();
+		expect(onSubmit).not.toHaveBeenCalled();
+
+		second.resolve();
+		await second.promise;
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+	});
 	it("keeps configured app shortcuts reachable from Vim normal mode", () => {
 		const editor = new CustomEditor(getEditorTheme());
 		const onRetry = vi.fn();
