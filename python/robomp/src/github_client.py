@@ -179,9 +179,18 @@ def _parse_retry_after(resp: httpx.Response) -> float | None:
 class GitHubClient:
     """Async + sync facades over a small slice of the GitHub REST API."""
 
-    def __init__(self, token: str, *, transport: httpx.BaseTransport | None = None, base_url: str = GITHUB_API, auth_prefix: str = "Bearer") -> None:
+    def __init__(
+        self,
+        token: str,
+        *,
+        transport: httpx.BaseTransport | None = None,
+        base_url: str = GITHUB_API,
+        auth_prefix: str = "Bearer",
+        platform: str = "github",
+    ) -> None:
         self._token = token
         self._base_url = base_url
+        self._platform = platform
         self._headers = {
             "Authorization": f"{auth_prefix} {token}",
             "Accept": ACCEPT,
@@ -582,6 +591,20 @@ class GitHubClient:
             f"/repos/{repo}/issues/{number}/labels/{encoded}",
         )
 
+    def _review_comments_payload(self, comments: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        """Adapt canonical host-tool comment shape to the wire schema for this platform.
+
+        GitHub keeps line/side/start_line/start_side; Forgejo/Gitea only reads
+        path/body/new_position (+old_position), so github-only keys are dropped and
+        `line` is mapped to `new_position`.
+        """
+        if self._platform != "forgejo":
+            return [dict(c) for c in comments]
+        return [
+            {"path": c["path"], "body": c["body"], "new_position": c["line"]}
+            for c in comments
+        ]
+
     async def submit_pr_review(
         self,
         *,
@@ -594,7 +617,7 @@ class GitHubClient:
         data = await self.request(
             "POST",
             f"/repos/{repo}/pulls/{pr_number}/reviews",
-            json={"body": body, "event": event, "comments": comments},
+            json={"body": body, "event": event, "comments": self._review_comments_payload(comments)},
         )
         return _pr_review_from_payload(data)
 

@@ -1769,7 +1769,53 @@ def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
             )
         except GitHubError as exc:
             _audit(bindings, "submit_pr_review", args, error=str(exc))
-            _raise_command(f"GitHub rejected PR review: {exc.status} {exc.message}")
+            if exc.status != 422:
+                _raise_command(f"GitHub rejected PR review: {exc.status} {exc.message}")
+
+            # 422 = the host rejected the batched review (e.g. Forgejo can't anchor
+            # the inline comments). Degrade to visible issue comments (mirrors mira)
+            # so the findings still land instead of vanishing.
+            def _note(comment: Any) -> str:
+                return f"**`{comment.path}:{comment.line}`**\n\n{comment.body}"
+
+            posted_inline = 0
+            try:
+                _run_coro(
+                    bindings.loop,
+                    bindings.github.post_comment(
+                        bindings.repo.full_name, bindings.default_comment_number, body.strip()
+                    ),
+                )
+                for comment in staged:
+                    _run_coro(
+                        bindings.loop,
+                        bindings.github.post_comment(
+                            bindings.repo.full_name, bindings.default_comment_number, _note(comment)
+                        ),
+                    )
+                    posted_inline += 1
+            except GitHubError as fexc:
+                _audit(bindings, "submit_pr_review", args, error=str(fexc))
+                _raise_command(
+                    f"Review rejected (422) and fallback comment posting failed: {fexc.status} {fexc.message}"
+                )
+
+            cleared = bindings.db.clear_staged_review_comments(bindings.issue_key)
+            _audit(
+                bindings,
+                "submit_pr_review",
+                args,
+                result={
+                    "fallback": "issue_comments",
+                    "summary": True,
+                    "inline": posted_inline,
+                    "cleared": cleared,
+                },
+            )
+            return (
+                f"review rejected (422); posted summary + {posted_inline} inline comment(s) "
+                "as issue comments"
+            )
         cleared = bindings.db.clear_staged_review_comments(bindings.issue_key)
         _audit(
             bindings,
