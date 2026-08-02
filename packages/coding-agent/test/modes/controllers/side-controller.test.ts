@@ -495,4 +495,76 @@ describe("SideController", () => {
 		if (!sideFile) throw new Error("side file path was not captured");
 		expect(fs.existsSync(sideFile)).toBe(false);
 	});
+
+	it("disposes a foreign side and recreates when the parent session changes", async () => {
+		tempDir = TempDir.createSync("@omp-side-foreign-");
+		const harness = createContext(tempDir);
+		const { stub } = createSideStub({ activeToolNames: ["read", "bash"] });
+		const setToolUIContext = vi.fn();
+
+		// Mutable side-file tracker — the createAgentSession spy reads through
+		// this closure to create the file on disk.
+		let currentSideFile: string | undefined;
+		const realForkFrom = SessionManager.forkFrom;
+
+		// Stage 1: Create side from parent A.
+		let forkArgsA: Parameters<typeof SessionManager.forkFrom> | undefined;
+		vi.spyOn(SessionManager, "forkFrom").mockImplementation(async (...args) => {
+			forkArgsA = args;
+			currentSideFile = args[4]?.sessionFile;
+			return realForkFrom(...args);
+		});
+		createAgentSessionSpy(stub, setToolUIContext, () => currentSideFile);
+
+		const controller = new SideController(harness.ctx);
+		await controller.start("question");
+
+		// Side exists from parent A.
+		expect(AgentRegistry.global().get(SIDE_AGENT_ID)).toBeDefined();
+		const sideFileA = currentSideFile;
+		if (!sideFileA) throw new Error("side file A was not created");
+		expect(fs.existsSync(sideFileA)).toBe(true);
+		expect(forkArgsA?.[0]).toBe(harness.parentFile);
+
+		// Simulate a parent-session transition that does NOT invoke this
+		// controller's dispose (SelectorController.handleResumeSession from the
+		// blank /resume picker, handoff): create a second parent in a different
+		// session directory and swap it onto the ctx.
+		const parentB = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions-b"));
+		const parentBFile = parentB.getSessionFile();
+		if (!parentBFile) throw new Error("parent B session file was not created");
+		harness.ctx.sessionManager = parentB;
+
+		// Stage 2: /side again — should detect the foreign side (its file is
+		// in parent A's artifact dir, not parent B's), dispose it, and create
+		// fresh from parent B.
+		let forkArgsB: Parameters<typeof SessionManager.forkFrom> | undefined;
+		vi.spyOn(SessionManager, "forkFrom").mockImplementation(async (...args) => {
+			forkArgsB = args;
+			currentSideFile = args[4]?.sessionFile;
+			return realForkFrom(...args);
+		});
+
+		await controller.start("another question");
+
+		// Old side file (from parent A) is deleted.
+		expect(fs.existsSync(sideFileA)).toBe(false);
+		// New side file (from parent B) exists.
+		const sideFileB = currentSideFile;
+		if (!sideFileB) throw new Error("side file B was not created");
+		expect(fs.existsSync(sideFileB)).toBe(true);
+		// forkFrom received parent B's file, not parent A's.
+		expect(forkArgsB?.[0]).toBe(parentBFile);
+		// The new side file is inside parent B's artifact directory.
+		const parentBArtifactDir = parentBFile.slice(0, -6) + path.sep;
+		expect(sideFileB.startsWith(parentBArtifactDir)).toBe(true);
+		// The old side file was NOT inside parent B's artifact directory.
+		expect(sideFileA.startsWith(parentBArtifactDir)).toBe(false);
+		// The registry holds a live ref (the new side, not the old one).
+		expect(AgentRegistry.global().get(SIDE_AGENT_ID)).toBeDefined();
+
+		// Cleanup.
+		await controller.start("end");
+		expect(AgentRegistry.global().get(SIDE_AGENT_ID)).toBeUndefined();
+	});
 });

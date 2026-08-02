@@ -369,6 +369,26 @@ export class SideController {
 		const existing = registry.get(SIDE_AGENT_ID);
 		if (!existing) return { outcome: "proceed" };
 
+		// Parentage validation: the side file lives at <parentArtifactDir>/<name>.jsonl.
+		// Some parent-session transitions (SelectorController.handleResumeSession from
+		// the blank /resume picker, handoff) do not invoke this controller's dispose,
+		// so after switching from parent A to parent B the registry can still hold A's
+		// Side ref. Reusing it would fork from the wrong context (possibly wrong cwd).
+		// On mismatch, dispose the foreign side (its file is deleted from the OLD
+		// parent's artifact dir — correct) and fall through to create against the
+		// current parent. If disposal cannot complete (a running foreign ref another
+		// process is still creating), surface the busy error and stop — do not fall
+		// through to a create that will fail the registration race.
+		const currentParentFile = ctx.sessionManager.getSessionFile();
+		if (currentParentFile && existing.sessionFile) {
+			const currentArtifactDir = currentParentFile.slice(0, -6) + path.sep;
+			if (!existing.sessionFile.startsWith(currentArtifactDir)) {
+				const disposed = await this.#disposeImpl();
+				if (!disposed) return { outcome: "done" };
+				return { outcome: "proceed" };
+			}
+		}
+
 		// Reuse path: a live side session already exists — focus it, no new fork.
 		// Registry ids are re-resolved across awaits (SessionFocusController
 		// .focusAgent → AgentLifecycleManager.ensureLive re-reads by id), so a
