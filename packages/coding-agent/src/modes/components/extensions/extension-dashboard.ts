@@ -483,14 +483,15 @@ export class ExtensionDashboard implements Component {
 		const extension = this.#state.extensions.find(item => item.id === extensionId);
 		if (!extension) return;
 		const name = extensionId.slice("mcp:".length);
+		const userPath = getMCPConfigPath("user", this.cwd);
 		const projectPath = getMCPConfigPath(
 			"project",
 			resolveExistingActivationProjectRootSync(this.cwd) ?? path.resolve(this.cwd),
 		);
 		try {
 			await setMcpServerEnabled({
-				userPath: getMCPConfigPath("user", this.cwd),
-				projectPath,
+				userPath,
+				projectPath: this.#activationScope === "project" ? projectPath : userPath,
 				sourcePath:
 					extension.source.provider === "native" || extension.source.provider === "mcp-json"
 						? extension.path
@@ -498,6 +499,10 @@ export class ExtensionDashboard implements Component {
 				name,
 				enabled,
 			});
+			const sm = this.settings ?? Settings.instance;
+			if (enabled && sm?.getProjectActivation("mcp", name, this.#activationScope) === "disabled") {
+				await sm.setProjectActivation("mcp", name, "inherit", this.#activationScope);
+			}
 		} catch (error) {
 			logger.warn("Failed to persist MCP toggle", { name, enabled, error: String(error) });
 		}
