@@ -37,6 +37,8 @@ type FakeEditor = {
 	pasteText(text: string): void;
 	insertText(text: string): void;
 	trackAsyncPaste(promise: Promise<unknown>): Promise<unknown>;
+	getVimMode(): "insert" | "normal" | "visual" | undefined;
+	clearVimPendingCommand(): void;
 	imageLinks?: (string | undefined)[];
 	pendingImages: ImageContent[];
 	pendingImageLinks: (string | undefined)[];
@@ -83,6 +85,8 @@ async function createContext() {
 		void promise.catch(() => {});
 		return promise;
 	});
+	const getVimMode = vi.fn<() => "insert" | "normal" | "visual" | undefined>(() => undefined);
+	const clearVimPendingCommand = vi.fn();
 	const showError = vi.fn();
 	let focused: unknown;
 	const addInputListener = vi.fn((listener: InputListener) => {
@@ -133,6 +137,8 @@ async function createContext() {
 			editorText += text;
 		},
 		trackAsyncPaste,
+		getVimMode,
+		clearVimPendingCommand,
 		setActionKeys,
 		setCustomKeyHandler,
 		clearCustomKeyHandlers,
@@ -252,6 +258,8 @@ async function createContext() {
 			handleBtwCopyKey,
 			canCopyBtw,
 			trackAsyncPaste,
+			getVimMode,
+			clearVimPendingCommand,
 			showError,
 		},
 	};
@@ -452,6 +460,7 @@ describe("InputController keybinding setup", () => {
 		try {
 			const { InputController, ctx, spies } = await createContext();
 			const controller = new InputController(ctx);
+			spies.getVimMode.mockReturnValue("normal");
 			controller.setupKeyHandlers();
 			const packet = (metadata: string, payload?: string) =>
 				`\x1b]5522;${metadata}${payload === undefined ? "" : `;${payload}`}\x1b\\`;
@@ -469,6 +478,7 @@ describe("InputController keybinding setup", () => {
 			dispatchInput(listeners, packet("type=read:status=DONE"));
 
 			expect(spies.trackAsyncPaste).toHaveBeenCalledTimes(1);
+			expect(spies.clearVimPendingCommand).toHaveBeenCalledTimes(1);
 			await spies.trackAsyncPaste.mock.calls[0]?.[0];
 		} finally {
 			resetSettingsForTest();
