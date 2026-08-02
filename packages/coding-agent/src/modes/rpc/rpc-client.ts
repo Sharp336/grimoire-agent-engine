@@ -818,12 +818,15 @@ export class RpcClient {
 
 	/** Replace the URI schemes served by the embedding host. */
 	async setHostUriSchemes(schemes: RpcHostUriSchemeDefinition[]): Promise<string[]> {
-		this.#hostUriSchemes = structuredClone(schemes);
+		const nextSchemes = structuredClone(schemes);
 		if (!this.#process) {
+			this.#hostUriSchemes = nextSchemes;
 			return this.#hostUriSchemes.map(scheme => scheme.scheme);
 		}
-		const response = await this.#send({ type: "set_host_uri_schemes", schemes: this.#hostUriSchemes });
-		return this.#getData<{ schemes: string[] }>(response).schemes;
+		const response = await this.#send({ type: "set_host_uri_schemes", schemes: nextSchemes });
+		const accepted = this.#getData<{ schemes: string[] }>(response).schemes;
+		this.#hostUriSchemes = nextSchemes;
+		return accepted;
 	}
 
 	/** Register the handler for requests targeting host-owned URI schemes. */
