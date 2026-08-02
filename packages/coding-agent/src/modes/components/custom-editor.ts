@@ -565,7 +565,7 @@ export class CustomEditor extends Editor {
 	/** Called when a bracketed paste contains one or more image-file paths. */
 	onPasteImagePath?: (path: string) => void | Promise<void>;
 	/** Called when the configured raw text-paste shortcut is pressed. */
-	onPasteTextRaw?: () => void;
+	onPasteTextRaw?: () => void | Promise<void>;
 	/** Called when the configured dequeue shortcut is pressed. */
 	onDequeue?: () => void;
 	/** Called when the configured retry shortcut is pressed. */
@@ -894,10 +894,10 @@ export class CustomEditor extends Editor {
 				return;
 			}
 
-			// Intercept configured raw text paste (fires and handles result)
+			// Intercept configured raw text paste and serialize follow-up input until it settles.
 			if (acceptsTextEntry && this.#matchesAction(canonical, "app.clipboard.pasteTextRaw") && this.onPasteTextRaw) {
 				this.prepareVimInsertMutation();
-				this.onPasteTextRaw();
+				this.#trackAsyncPaste(Promise.resolve(this.onPasteTextRaw()));
 				return;
 			}
 

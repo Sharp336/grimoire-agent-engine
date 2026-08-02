@@ -302,7 +302,7 @@ describe("CustomEditor keybindings", () => {
 		expect(editor.getText()).toBe("");
 	});
 
-	it("allows configured raw-text paste only from Vim insert mode", () => {
+	it("allows configured raw-text paste only from Vim insert mode", async () => {
 		const editor = new CustomEditor(getEditorTheme());
 		const onPasteTextRaw = vi.fn(() => editor.insertText("pasted"));
 		editor.setInputMode("vim");
@@ -322,10 +322,39 @@ describe("CustomEditor keybindings", () => {
 		editor.handleInput("i");
 		editor.handleInput("\x1bt");
 		expect(onPasteTextRaw).toHaveBeenCalledTimes(1);
+		await Promise.resolve();
+		await Promise.resolve();
 		editor.handleInput("!");
 		editor.handleInput("\x1b");
 		editor.handleInput("u");
 		expect(editor.getText()).toBe("text");
+	});
+
+	it("queues Vim submit until a configured raw paste settles", async () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const clipboard = Promise.withResolvers<void>();
+		const onSubmit = vi.fn();
+		editor.setInputMode("vim");
+		editor.setActionKeys("app.clipboard.pasteTextRaw", ["alt+t"]);
+		editor.onPasteTextRaw = async () => {
+			await clipboard.promise;
+			editor.insertText("pasted");
+		};
+		editor.onSubmit = onSubmit;
+		editor.handleInput("i");
+
+		editor.handleInput("\x1bt");
+		editor.handleInput("\r");
+		expect(onSubmit).not.toHaveBeenCalled();
+		expect(editor.getVimMode()).toBe("insert");
+
+		clipboard.resolve();
+		await clipboard.promise;
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(onSubmit).toHaveBeenCalledWith("pasted");
+		expect(editor.getVimMode()).toBe("normal");
 	});
 });
 
