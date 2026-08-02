@@ -2384,11 +2384,12 @@ export function friendliModelManagerOptions(
 						);
 
 						const pricing = raw.pricing ?? {};
+						const refCost = reference?.cost;
 						const cost = {
-							input: toPositiveNumber(pricing.input, 0) * 1_000_000,
-							output: toPositiveNumber(pricing.output, 0) * 1_000_000,
-							cacheRead: toPositiveNumber(pricing.input_cache_read, 0) * 1_000_000,
-							cacheWrite: toPositiveNumber(pricing.cache_write, 0) * 1_000_000,
+							input: toPositiveNumber(pricing.input, refCost?.input ?? 0) * 1_000_000,
+							output: toPositiveNumber(pricing.output, refCost?.output ?? 0) * 1_000_000,
+							cacheRead: toPositiveNumber(pricing.input_cache_read, refCost?.cacheRead ?? 0) * 1_000_000,
+							cacheWrite: toPositiveNumber(pricing.cache_write, refCost?.cacheWrite ?? 0) * 1_000_000,
 						};
 
 						const functionality = raw.functionality ?? {};
