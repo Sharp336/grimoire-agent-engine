@@ -11,7 +11,7 @@
 ### Fixed
 
 - Fixed a heap corruption crash when opening PulseAudio on Linux ARM64 by shipping target-specific miniaudio Rust layouts for GNU and musl native addons.
-- Fixed local Bazel addon builds on NixOS by exposing system CMake tools to sandboxed build scripts and correctly bundling Opus.
+- Fixed local Bazel addon builds on NixOS by exposing system CMake tools to sandboxed build scripts and correctly bundling Opus ([#7136](https://github.com/can1357/oh-my-pi/pull/7136) by [@olegpulatov](https://github.com/olegpulatov)).
 - Fixed workspace native addon loading to correctly prefer the workspace build over an installed leaf package.
 - Fixed process crashes caused by pathological HTML inputs; conversions that exceed the native-stack DOM depth limit now reject instead of returning silently truncated Markdown.
 
