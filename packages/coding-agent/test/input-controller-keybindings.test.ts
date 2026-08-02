@@ -39,6 +39,7 @@ type FakeEditor = {
 	trackAsyncPaste(promise: Promise<unknown>): Promise<unknown>;
 	getVimMode(): "insert" | "normal" | "visual" | undefined;
 	clearVimPendingCommand(): void;
+	prepareVimInsertMutation(): void;
 	imageLinks?: (string | undefined)[];
 	pendingImages: ImageContent[];
 	pendingImageLinks: (string | undefined)[];
@@ -87,6 +88,7 @@ async function createContext() {
 	});
 	const getVimMode = vi.fn<() => "insert" | "normal" | "visual" | undefined>(() => undefined);
 	const clearVimPendingCommand = vi.fn();
+	const prepareVimInsertMutation = vi.fn();
 	const showError = vi.fn();
 	let focused: unknown;
 	const addInputListener = vi.fn((listener: InputListener) => {
@@ -139,6 +141,7 @@ async function createContext() {
 		trackAsyncPaste,
 		getVimMode,
 		clearVimPendingCommand,
+		prepareVimInsertMutation,
 		setActionKeys,
 		setCustomKeyHandler,
 		clearCustomKeyHandlers,
@@ -260,6 +263,7 @@ async function createContext() {
 			trackAsyncPaste,
 			getVimMode,
 			clearVimPendingCommand,
+			prepareVimInsertMutation,
 			showError,
 		},
 	};
@@ -455,12 +459,15 @@ describe("InputController keybinding setup", () => {
 		expect(spies.handleBtwBranchKey).not.toHaveBeenCalled();
 	});
 
-	it("tracks enhanced image paste before accepting follow-up input", async () => {
+	it.each([
+		{ name: "clears pending Vim state in normal mode", mode: "normal" as const, clearCalls: 1, prepareCalls: 0 },
+		{ name: "prepares Vim insert undo", mode: "insert" as const, clearCalls: 0, prepareCalls: 1 },
+	])("$name before tracking an enhanced image paste", async ({ mode, clearCalls, prepareCalls }) => {
 		await Settings.init({ inMemory: true });
 		try {
 			const { InputController, ctx, spies } = await createContext();
 			const controller = new InputController(ctx);
-			spies.getVimMode.mockReturnValue("normal");
+			spies.getVimMode.mockReturnValue(mode);
 			controller.setupKeyHandlers();
 			const packet = (metadata: string, payload?: string) =>
 				`\x1b]5522;${metadata}${payload === undefined ? "" : `;${payload}`}\x1b\\`;
@@ -478,7 +485,8 @@ describe("InputController keybinding setup", () => {
 			dispatchInput(listeners, packet("type=read:status=DONE"));
 
 			expect(spies.trackAsyncPaste).toHaveBeenCalledTimes(1);
-			expect(spies.clearVimPendingCommand).toHaveBeenCalledTimes(1);
+			expect(spies.clearVimPendingCommand).toHaveBeenCalledTimes(clearCalls);
+			expect(spies.prepareVimInsertMutation).toHaveBeenCalledTimes(prepareCalls);
 			await spies.trackAsyncPaste.mock.calls[0]?.[0];
 		} finally {
 			resetSettingsForTest();

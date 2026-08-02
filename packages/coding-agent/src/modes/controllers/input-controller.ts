@@ -586,7 +586,8 @@ export class InputController {
 				this.ctx.ui.requestRender();
 			},
 			pasteImage: image => {
-				if (this.ctx.editor.getVimMode() !== "insert") this.ctx.editor.clearVimPendingCommand();
+				const vimMode = this.ctx.editor.getVimMode();
+				if (vimMode !== "insert") this.ctx.editor.clearVimPendingCommand();
 				// Images can only land in the main editor — when a modal Input is
 				// focused, refuse rather than dump the binary blob in a hidden buffer.
 				const focused = this.ctx.ui.getFocused();
@@ -594,6 +595,7 @@ export class InputController {
 					this.ctx.showStatus("Image paste is not supported in this prompt");
 					return;
 				}
+				if (vimMode === "insert") this.ctx.editor.prepareVimInsertMutation();
 				return this.ctx.editor
 					.trackAsyncPaste(
 						this.#normalizeAndInsertPastedImage(image, `Unsupported pasted image format: ${image.mimeType}`),
