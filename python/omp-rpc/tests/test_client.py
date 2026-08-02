@@ -7,11 +7,11 @@ import shutil
 import signal
 import sys
 import tempfile
-from pathlib import Path
 import textwrap
 import threading
 import time
 import unittest
+from pathlib import Path
 
 from omp_rpc import (
     AgentEndEvent,

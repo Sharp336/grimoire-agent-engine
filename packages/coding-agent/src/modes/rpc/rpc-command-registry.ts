@@ -197,8 +197,14 @@ export const RPC_COMMAND_DEFINITIONS = {
 		"control",
 		{ execution: "operation" },
 	),
+	cancel_operation: turnCommand(
+		{ type: "cancel_operation", operationId: "operation-1" },
+		{ operationId: stringField },
+		"control",
+	),
 	new_session: sessionCommand({ type: "new_session" }, { parentSession: optionalStringField }),
 	get_state: sessionCommand({ type: "get_state" }),
+	get_operations: sessionCommand({ type: "get_operations" }, {}, "concurrent"),
 	set_fast_mode: sessionCommand(
 		{ type: "set_fast_mode", enabled: false },
 		{ enabled: booleanField },

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import unittest
 import json
+import unittest
 from pathlib import Path
 
 from omp_rpc import (
@@ -74,6 +74,7 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertEqual(failed.code, "prompt_scheduling_failed")
         self.assertIsInstance(cancelled, OperationCancelledEvent)
         self.assertEqual(cancelled.reason, "user")
+
     def test_parse_ready_capability_manifest(self) -> None:
         manifest = json.loads(
             (
