@@ -90,10 +90,11 @@ const piSegment: StatusLineSegment = {
 			const icon = theme.icon.ghost ? `${theme.icon.ghost} ` : "";
 			// Render the focused agent's display name, not its registry id — ids
 			// may be internal (e.g. collision-proof `side.internal`) and are not
-			// user-facing labels. oneLineLabel flattens control characters and
-			// caps length: agent display names are arbitrary frontmatter strings.
+			// user-facing labels. Strip ANSI first (oneLineLabel alone would leave
+			// the printable `[31m` payload), then flatten and cap: agent display
+			// names are arbitrary frontmatter strings.
 			const displayName = AgentRegistry.global().get(ctx.focusedAgentId)?.displayName ?? ctx.focusedAgentId;
-			const label = oneLineLabel(displayName);
+			const label = oneLineLabel(Bun.stripANSI(displayName));
 			return { content: theme.fg("warning", `${icon}${label} `), visible: true };
 		}
 		const content = theme.icon.pi ? `${theme.icon.pi} ` : "";

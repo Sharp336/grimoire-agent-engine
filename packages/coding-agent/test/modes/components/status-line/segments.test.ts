@@ -73,4 +73,25 @@ describe("status line pi segment focused badge", () => {
 		const content = Bun.stripANSI(renderSegment("pi", createFocusedContext("side.internal")).content);
 		expect(content).toContain("side.internal");
 	});
+
+	it("flattens control characters and bounds the focused display name", () => {
+		AgentRegistry.global().register({
+			id: "agent-1",
+			displayName: `evil\tname\nwith\x1b[31mansi ${"x".repeat(200)}`,
+			kind: "sub",
+			session: null,
+			sessionFile: null,
+			status: "idle",
+		});
+
+		const raw = renderSegment("pi", createFocusedContext("agent-1")).content;
+		// The injected escape must not survive into the rendered label (before
+		// any stripping — stripping here would make this assertion vacuous).
+		expect(raw).not.toContain("\x1b[31m");
+		const content = Bun.stripANSI(raw);
+		expect(content).not.toContain("[31m");
+		expect(content).not.toContain("\t");
+		expect(content).not.toContain("\n");
+		expect(content.length).toBeLessThan(120);
+	});
 });
