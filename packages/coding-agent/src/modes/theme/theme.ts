@@ -1564,27 +1564,32 @@ const SELECTION_MIN_CONTRAST = 1.5;
  *
  * The walk starts at zero and takes the smallest offset that reads, so a theme
  * whose accent already separates the two surfaces keeps its accent colour
- * untouched and only the washed-out ones get pushed. It always terminates well
- * inside the byte range: `step` points away from the anchor's own luma, which
- * is by construction the direction with the most headroom, and the far end of
- * that direction is pure black or pure white.
+ * untouched and only the washed-out ones get pushed. `step` points away from
+ * the anchor's own luma, which is by construction the direction with the most
+ * headroom — but a user theme whose declared appearance disagrees with its own
+ * `statusLineBg` can walk the short way and saturate, so the opposite
+ * direction is tried before conceding.
  *
  * Falls back to the element rung when either colour is unparseable — a user
  * theme with a `var` ref or a named colour in `accent` gets the pre-existing
- * behaviour rather than a crash.
+ * behaviour rather than a crash — and when neither direction can clear the
+ * floor, which needs a panel already at an extreme of the range.
  */
 function deriveSelectionWash(panel: string, accent: string, element: string, step: number): string {
 	const panelLuma = relativeLuminance(panel);
 	if (panelLuma === undefined || relativeLuminance(accent) === undefined) return element;
 	const tinted = mixHex(panel, accent, SELECTION_ACCENT_MIX);
-	for (let offset = 0; offset <= 255; offset++) {
-		const candidate = stepChannels(tinted, step > 0 ? offset : -offset);
+	const clears = (candidate: string): boolean => {
 		const luma = relativeLuminance(candidate) ?? panelLuma;
-		if ((Math.max(panelLuma, luma) + 0.05) / (Math.min(panelLuma, luma) + 0.05) >= SELECTION_MIN_CONTRAST) {
-			return candidate;
+		return (Math.max(panelLuma, luma) + 0.05) / (Math.min(panelLuma, luma) + 0.05) >= SELECTION_MIN_CONTRAST;
+	};
+	for (const direction of step > 0 ? [1, -1] : [-1, 1]) {
+		for (let offset = 0; offset <= 255; offset++) {
+			const candidate = stepChannels(tinted, direction * offset);
+			if (clears(candidate)) return candidate;
 		}
 	}
-	return stepChannels(tinted, step > 0 ? 255 : -255);
+	return element;
 }
 
 /**
@@ -3486,7 +3491,16 @@ export function getEditorTheme(): EditorTheme {
 		// pointer affordance with nothing behind it in append mode, but selected
 		// composer text is a direct answer to the user's own drag and has to show
 		// up wherever the composer is drawn.
-		selectionWash: (text: string) => theme.selectionBg(text),
+		//
+		// A theme that leaves `statusLineBg` at the terminal default derives no
+		// surface ladder, so there is no rung to tint and `selectionBg` would
+		// paint nothing at all. Reverse video needs no palette and inverts
+		// whatever the row already carries, which is what the transcript's own
+		// drag-select uses for exactly this reason.
+		selectionWash:
+			theme.selectionBgAnsi === ""
+				? (text: string) => `\x1b[7m${text}\x1b[27m`
+				: (text: string) => theme.selectionBg(text),
 	};
 }
 
