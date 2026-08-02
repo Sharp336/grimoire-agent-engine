@@ -40,6 +40,7 @@ export class STTController {
 	#stopAfterStart = false;
 	#cancelRequested = false;
 	#activeOptions: ToggleOptions | null = null;
+	#preflightStatusActive = false;
 	#disposed = false;
 	readonly #createCapture: CaptureFactory;
 
@@ -108,7 +109,9 @@ export class STTController {
 			// cached-model fast path emits nothing.
 			let wroteStatus = false;
 			const status = (msg: string): void => {
+				if (this.#cancelRequested || this.#disposed) return;
 				wroteStatus = true;
+				this.#preflightStatusActive = true;
 				options.showStatus(msg);
 			};
 			// Loading the multi-hundred-MB speech model into the worker is what made
@@ -123,10 +126,13 @@ export class STTController {
 			} else {
 				await downloadSttModel(modelKey, p => status(`Downloading speech model ${p.label} (${p.percent}%)`));
 			}
-			if (wroteStatus) options.showStatus("");
+			if (wroteStatus && !this.#cancelRequested && !this.#disposed) options.showStatus("");
+			this.#preflightStatusActive = false;
 			this.#resolvedModelKey = modelKey;
 			return true;
 		} catch (err) {
+			this.#preflightStatusActive = false;
+			if (this.#cancelRequested || this.#disposed) return false;
 			const msg = err instanceof Error ? err.message : "Failed to setup STT dependencies";
 			options.showWarning(msg);
 			logger.error("STT dependency setup failed", { error: msg });
@@ -314,6 +320,11 @@ export class STTController {
 		this.#cancelRequested = true;
 		if (this.#state === "idle" && !this.#toggling) return;
 
+		const options = this.#activeOptions;
+		if (this.#preflightStatusActive) {
+			options?.showStatus("");
+			this.#preflightStatusActive = false;
+		}
 		this.#streamAbort?.abort();
 		this.#stream?.cancel();
 		try {
@@ -323,7 +334,6 @@ export class STTController {
 		}
 		this.#streamEditor?.clearVolatileText();
 		this.#cleanupStream();
-		const options = this.#activeOptions;
 		if (options) {
 			this.#setState("idle", options);
 			options.requestRender?.();
@@ -346,6 +356,7 @@ export class STTController {
 			// best effort cleanup
 		}
 		this.#cleanupStream();
+		this.#preflightStatusActive = false;
 		this.#state = "idle";
 		this.#resolvedModelKey = null;
 	}

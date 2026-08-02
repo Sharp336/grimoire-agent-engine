@@ -282,6 +282,38 @@ describe("STTController preflight", () => {
 		expect(asrClient.sttClient.startStream).not.toHaveBeenCalled();
 	});
 
+	it("suppresses late preflight progress and failure UI after cancellation", async () => {
+		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(false);
+		const download = Promise.withResolvers<void>();
+		let reportProgress: Parameters<typeof downloader.downloadSttModel>[1];
+		vi.spyOn(downloader, "downloadSttModel").mockImplementation((_key, onProgress) => {
+			reportProgress = onProgress;
+			return download.promise;
+		});
+		const options = makeOptions();
+		controller = new STTController(() => ({ stop: vi.fn() }));
+
+		const progress = {
+			status: "progress" as const,
+			percent: 42,
+			loaded: 1,
+			total: 2,
+			repo: WHISPER_BASE_REPO,
+			label: "Whisper base",
+		};
+		const start = controller.toggle(makeEditor(), options);
+		await Promise.resolve();
+		reportProgress?.(progress);
+		controller.cancel();
+		reportProgress?.(progress);
+		download.reject(new Error("stale preflight failure"));
+		await start;
+
+		expect(controller.state).toBe("idle");
+		expect(options.showStatus.mock.calls).toEqual([["Downloading speech model Whisper base (42%)"], [""]]);
+		expect(options.showWarning).not.toHaveBeenCalled();
+	});
+
 	it("stops recording and surfaces asynchronous microphone failures", async () => {
 		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
 		vi.spyOn(downloader, "downloadSttModel").mockReturnValue(new Promise<void>(() => {}));
