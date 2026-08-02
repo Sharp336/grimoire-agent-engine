@@ -1669,6 +1669,11 @@ export class SessionManager {
 		return this.#cwd;
 	}
 
+	/** The storage backend this manager reads and writes through. */
+	getStorage(): SessionStorage {
+		return this.#storage;
+	}
+
 	/** Additional workspace directories beyond cwd (multi-root), absolute and normalized. */
 	getAdditionalDirectories(): string[] {
 		return [...this.#additionalDirectories];

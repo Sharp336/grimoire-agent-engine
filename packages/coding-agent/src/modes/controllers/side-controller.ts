@@ -96,6 +96,7 @@ export class SideController {
 		const ownerId = session.getAgentId() ?? MAIN_AGENT_ID;
 		const mcpManager = ctx.mcpManager;
 		const cwd = ctx.sessionManager.getCwd();
+		const parentStorage = ctx.sessionManager.getStorage();
 		const parentArtifactsDir = ctx.sessionManager.getArtifactsDir();
 		const parentLocalSessionId = ctx.sessionManager.getSessionId();
 		const localProtocolOptions = {
@@ -119,7 +120,7 @@ export class SideController {
 			});
 
 		try {
-			const sideManager = await SessionManager.forkFrom(parentFile, cwd, sessionDir, undefined, {
+			const sideManager = await SessionManager.forkFrom(parentFile, cwd, sessionDir, parentStorage, {
 				suppressBreadcrumb: true,
 				sessionFile: sideFile,
 			});
@@ -335,7 +336,7 @@ export class SideController {
 	 */
 	async #removeSideFile(sessionFile: string, failureMessage: string): Promise<boolean> {
 		try {
-			await SessionManager.removeSessionFiles(sessionFile);
+			await SessionManager.removeSessionFiles(sessionFile, this.ctx.sessionManager.getStorage());
 			return true;
 		} catch (err) {
 			logger.warn("Failed to remove side session file", { sessionFile, error: String(err) });

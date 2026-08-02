@@ -452,7 +452,7 @@ describe("SideController", () => {
 		// Assert: the side file is gone, deletion was called with the side
 		// file path, and the registry is empty.
 		expect(fs.existsSync(sideFile2)).toBe(false);
-		expect(removeSessionFilesSpy).toHaveBeenCalledWith(sideFile2);
+		expect(removeSessionFilesSpy).toHaveBeenCalledWith(sideFile2, harness2.parentManager.getStorage());
 		expect(AgentRegistry.global().get(SIDE_AGENT_ID)).toBeUndefined();
 	});
 
