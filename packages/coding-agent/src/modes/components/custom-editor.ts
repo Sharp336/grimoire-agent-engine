@@ -6,6 +6,7 @@ import {
 	Editor,
 	type EditorTheme,
 	type KeyId,
+	matchesKey,
 	parseKey,
 	parseKittySequence,
 	TUI,
@@ -779,8 +780,15 @@ export class CustomEditor extends Editor {
 	handleInput(data: string): void {
 		// Serialize behind any in-flight async paste so a trailing Enter / follow-up key can't
 		// submit before the clipboard image reaches `pendingImages` (Codex PR #3602 review).
+		// Escape remains immediate in Vim insert mode: it cancels queued input, switches to normal,
+		// and lets the commit-time mode guard discard the eventual paste result.
 		if (this.#pasteInFlight > 0) {
-			this.#pendingInput.push(data);
+			if (this.getVimMode() === "insert" && matchesKey(data, "escape")) {
+				this.#pendingInput.length = 0;
+				super.handleInput(data);
+			} else {
+				this.#pendingInput.push(data);
+			}
 			return;
 		}
 		// textEquals avoids getText()'s O(buffer) join on every keystroke; kitty
@@ -882,7 +890,7 @@ export class CustomEditor extends Editor {
 			// Intercept configured image paste (async - fires and handles result)
 			if (acceptsTextEntry && this.#matchesAction(canonical, "app.clipboard.pasteImage") && this.onPasteImage) {
 				this.prepareVimInsertMutation();
-				void this.onPasteImage();
+				this.#trackAsyncPaste(Promise.resolve(this.onPasteImage()));
 				return;
 			}
 

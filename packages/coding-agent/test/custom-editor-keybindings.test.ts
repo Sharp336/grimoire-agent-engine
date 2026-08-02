@@ -168,7 +168,7 @@ describe("CustomEditor keybindings", () => {
 		expect(editor.getText()).toBe("one two");
 	});
 
-	it("allows clipboard image paste only from Vim insert mode", () => {
+	it("allows clipboard image paste only from Vim insert mode", async () => {
 		const editor = new CustomEditor(getEditorTheme());
 		const onPasteImage = vi.fn(async () => {
 			editor.insertText("[Image] ");
@@ -191,10 +191,69 @@ describe("CustomEditor keybindings", () => {
 		editor.handleInput("i");
 		editor.handleInput("\x1bp");
 		expect(onPasteImage).toHaveBeenCalledTimes(1);
+		await Promise.resolve();
+		await Promise.resolve();
 		editor.handleInput("!");
 		editor.handleInput("\x1b");
 		editor.handleInput("u");
 		expect(editor.getText()).toBe("text");
+	});
+
+	it("queues Vim submit until a configured image paste settles", async () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const image = Promise.withResolvers<void>();
+		const onSubmit = vi.fn();
+		editor.setInputMode("vim");
+		editor.setActionKeys("app.clipboard.pasteImage", ["alt+p"]);
+		editor.onPasteImage = async () => {
+			await image.promise;
+			editor.insertText("[Image] ");
+			return true;
+		};
+		editor.onSubmit = onSubmit;
+		editor.handleInput("i");
+
+		editor.handleInput("\x1bp");
+		editor.handleInput("\r");
+		expect(onSubmit).not.toHaveBeenCalled();
+		expect(editor.getVimMode()).toBe("insert");
+
+		image.resolve();
+		await image.promise;
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(onSubmit).toHaveBeenCalledWith("[Image]");
+		expect(editor.getVimMode()).toBe("normal");
+	});
+
+	it("lets Vim escape cancel queued input during a configured image paste", async () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const image = Promise.withResolvers<void>();
+		const onSubmit = vi.fn();
+		editor.setInputMode("vim");
+		editor.setActionKeys("app.clipboard.pasteImage", ["alt+p"]);
+		editor.onPasteImage = async () => {
+			await image.promise;
+			if (editor.getVimMode() === "insert") editor.insertText("[Image] ");
+			return true;
+		};
+		editor.onSubmit = onSubmit;
+		editor.setText("draft");
+		editor.handleInput("i");
+
+		editor.handleInput("\x1bp");
+		editor.handleInput("\r");
+		editor.handleInput("\x1b");
+		expect(editor.getVimMode()).toBe("normal");
+
+		image.resolve();
+		await image.promise;
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(editor.getText()).toBe("draft");
+		expect(onSubmit).not.toHaveBeenCalled();
 	});
 	it("keeps configured app shortcuts reachable from Vim normal mode", () => {
 		const editor = new CustomEditor(getEditorTheme());
