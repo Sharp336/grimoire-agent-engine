@@ -44,6 +44,20 @@ describe("RPC command registry", () => {
 			availability: "available",
 		});
 		expect(manifest.events).toContain("tool_inventory_update");
+		expect(RPC_COMMAND_DEFINITIONS.set_tool_activation.scheduling).toBe("serial");
+		expect(manifest.commands.find(command => command.name === "set_tool_activation")).toMatchObject({
+			scope: "session",
+			execution: "sync",
+			concurrencyClass: "serial",
+			availability: "available",
+			inputSchema: {
+				properties: {
+					activate: { type: "array", maxItems: 2048, items: { "x-maxUtf8Bytes": 256 } },
+					deactivate: { type: "array", maxItems: 2048, items: { "x-maxUtf8Bytes": 256 } },
+				},
+				required: ["type"],
+			},
+		});
 	});
 
 	test("evaluates runtime-gated availability on every manifest query", () => {

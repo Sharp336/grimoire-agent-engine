@@ -80,6 +80,7 @@ from .protocol import (
     TodoPhase,
     TodoReminderEvent,
     TodoStatus,
+    ToolActivationResult,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolExecutionUpdateEvent,
@@ -114,6 +115,7 @@ from .protocol import (
     parse_settings_snapshot,
     parse_thinking_level_cycle_result,
     parse_todo_phases,
+    parse_tool_activation_result,
     parse_tool_inventory,
 )
 
@@ -1016,6 +1018,21 @@ class RpcClient:
         return parse_settings_snapshot(self._request("set_settings", changes=payload))
     def get_tool_inventory(self) -> ToolInventory:
         return parse_tool_inventory(self._request("get_tool_inventory"))
+
+    def set_tool_activation(
+        self,
+        *,
+        activate: Sequence[str] | None = None,
+        deactivate: Sequence[str] | None = None,
+    ) -> ToolActivationResult:
+        fields: dict[str, JsonValue] = {}
+        if activate is not None:
+            fields["activate"] = list(activate)
+        if deactivate is not None:
+            fields["deactivate"] = list(deactivate)
+        return parse_tool_activation_result(
+            self._request("set_tool_activation", **fields)
+        )
 
     def set_model(self, provider: str, model_id: str) -> ModelInfo:
         payload = self._request("set_model", provider=provider, modelId=model_id)

@@ -72,6 +72,7 @@ import type {
 	RpcSubagentProgressFrame,
 	RpcSubagentSnapshot,
 	RpcSubagentSubscriptionLevel,
+	RpcToolActivationResult,
 	RpcToolInventoryUpdateFrame,
 } from "./rpc-types";
 
@@ -981,6 +982,11 @@ export class RpcClient {
 	/** Read the authoritative tool registry at the session command boundary. */
 	async getToolInventory(): Promise<ToolInventory> {
 		const response = await this.#send({ type: "get_tool_inventory" });
+		return this.#getData(response);
+	}
+	/** Atomically activate and deactivate already-registered tools for this session. */
+	async setToolActivation(options: { activate?: string[]; deactivate?: string[] }): Promise<RpcToolActivationResult> {
+		const response = await this.#send({ type: "set_tool_activation", ...options });
 		return this.#getData(response);
 	}
 

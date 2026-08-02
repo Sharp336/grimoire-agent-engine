@@ -297,6 +297,22 @@ FAKE_SERVER = textwrap.dedent(
                     "xdev": {"prefix": "xd://", "mountedCount": 0},
                 },
             )
+        elif command_type == "set_tool_activation":
+            print(json.dumps({"type": "tool_inventory_update"}), flush=True)
+            activated = command.get("activate", [])
+            respond(
+                request_id,
+                "set_tool_activation",
+                {
+                    "enabledToolNames": ["read", *activated],
+                    "activeToolNames": ["read", *activated],
+                    "mountedToolNames": [],
+                    "activated": activated,
+                    "deactivated": command.get("deactivate", []),
+                    "inventoryAvailable": False,
+                    "futureResultField": True,
+                },
+            )
         elif command_type == "get_state":
             respond(request_id, "get_state", current_state())
         elif command_type == "get_advisor_state":
@@ -1411,6 +1427,51 @@ class RpcClientTests(unittest.TestCase):
         inventory = InventoryClient().get_tool_inventory()
         self.assertEqual(inventory.application_api_version, 2)
         self.assertEqual(inventory.tools[0].source.kind, "builtin")
+
+    def test_set_tool_activation_sends_optional_lists_and_parses_achieved_state(
+        self,
+    ) -> None:
+        requests: list[tuple[str, dict[str, JsonValue]]] = []
+
+        class ActivationClient(RpcClient):
+            def _request(self, command_type: str, **payload: JsonValue) -> JsonObject:
+                requests.append((command_type, payload))
+                return {
+                    "enabledToolNames": ["read", "hidden_tool"],
+                    "activeToolNames": ["read"],
+                    "mountedToolNames": ["hidden_tool"],
+                    "activated": ["hidden_tool"],
+                    "deactivated": [],
+                    "inventoryAvailable": False,
+                    "futureResultField": True,
+                }
+
+        result = ActivationClient().set_tool_activation(
+            activate=["hidden_tool"], deactivate=[]
+        )
+        self.assertEqual(
+            requests,
+            [
+                (
+                    "set_tool_activation",
+                    {"activate": ["hidden_tool"], "deactivate": []},
+                )
+            ],
+        )
+        self.assertEqual(result.enabled_tool_names, ("read", "hidden_tool"))
+        self.assertEqual(result.mounted_tool_names, ("hidden_tool",))
+        self.assertEqual(result.activated, ("hidden_tool",))
+        self.assertFalse(result.inventory_available)
+
+    def test_set_tool_activation_delivers_one_inventory_update(self) -> None:
+        inventory_updates: list[str] = []
+        with self.make_client() as client:
+            client.on_tool_inventory_update(
+                lambda event: inventory_updates.append(event.type)
+            )
+            result = client.set_tool_activation(activate=["hidden_tool"])
+        self.assertEqual(result.activated, ("hidden_tool",))
+        self.assertEqual(inventory_updates, ["tool_inventory_update"])
 
     def test_tool_inventory_update_has_dedicated_listener_not_agent_event(self) -> None:
         inventory_updates: list[str] = []

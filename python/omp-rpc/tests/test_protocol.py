@@ -16,12 +16,14 @@ from omp_rpc import (
     ReadyEvent,
     SessionState,
     TodoReminderEvent,
+    ToolActivationResult,
     ToolInventoryUpdateEvent,
     assistant_text,
     assistant_text_with_thinking,
     parse_advisor_state,
     parse_notification,
     parse_session_state,
+    parse_tool_activation_result,
     parse_tool_inventory,
 )
 
@@ -106,6 +108,14 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertEqual(capability.required_features, ())
         self.assertEqual(capability.input_schema["type"], "object")
         self.assertIn("future_event", notification.capabilities.events)
+        activation = next(
+            command
+            for command in notification.capabilities.commands
+            if command.name == "set_tool_activation"
+        )
+        self.assertEqual(activation.scope, "session")
+        self.assertEqual(activation.execution, "sync")
+        self.assertEqual(activation.concurrency_class, "serial")
 
     def test_parse_ready_preserves_future_capability_classifiers(self) -> None:
         manifest = json.loads(
@@ -785,6 +795,45 @@ class ProtocolParsingTests(unittest.TestCase):
     def test_parse_tool_inventory_update_notification(self) -> None:
         event = parse_notification({"type": "tool_inventory_update", "future": True})
         self.assertIsInstance(event, ToolInventoryUpdateEvent)
+
+    def test_parse_tool_activation_result_available_and_unavailable(self) -> None:
+        available = parse_tool_activation_result(
+            {
+                "enabledToolNames": ["read", "mcp__server_tool"],
+                "activeToolNames": ["read"],
+                "mountedToolNames": ["mcp__server_tool"],
+                "activated": ["mcp__server_tool"],
+                "deactivated": [],
+                "inventoryAvailable": True,
+                "inventory": {
+                    "applicationApiVersion": 2,
+                    "tools": [],
+                    "xdev": {"prefix": "xd://", "mountedCount": 1},
+                    "futureInventoryField": True,
+                },
+                "futureResultField": {"safeToIgnore": True},
+            }
+        )
+        self.assertIsInstance(available, ToolActivationResult)
+        self.assertEqual(available.enabled_tool_names, ("read", "mcp__server_tool"))
+        self.assertEqual(available.mounted_tool_names, ("mcp__server_tool",))
+        self.assertEqual(available.activated, ("mcp__server_tool",))
+        self.assertEqual(available.deactivated, ())
+        self.assertEqual(available.inventory.application_api_version, 2)
+
+        unavailable = parse_tool_activation_result(
+            {
+                "enabledToolNames": ["read"],
+                "activeToolNames": ["read"],
+                "mountedToolNames": [],
+                "activated": [],
+                "deactivated": ["mcp__server_tool"],
+                "inventoryAvailable": False,
+                "futureResultField": True,
+            }
+        )
+        self.assertFalse(unavailable.inventory_available)
+        self.assertIsNone(unavailable.inventory)
 
 
 if __name__ == "__main__":

@@ -48,7 +48,13 @@ import { calculateTokensPerSecond } from "../../utils/token-rate";
 import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
-import { getRpcCapabilityManifest, RPC_APPLICATION_API_VERSION, validateRpcCommand } from "./rpc-command-registry";
+import {
+	getRpcCapabilityManifest,
+	RPC_APPLICATION_API_VERSION,
+	RpcToolActivationValidationError,
+	validateRpcCommand,
+	validateRpcToolActivationBatch,
+} from "./rpc-command-registry";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
 import { handleGetSettings } from "./rpc-get-settings";
 import { claimRpcInput } from "./rpc-input";
@@ -77,6 +83,7 @@ import type {
 	RpcSessionInfoResult,
 	RpcSessionState,
 	RpcSubagentSubscriptionLevel,
+	RpcToolActivationResult,
 } from "./rpc-types";
 
 // Re-export types for consumers
@@ -751,6 +758,79 @@ export function requestRpcDialog<T>(
 	output({ type: "extension_ui_request", id, ...request } as RpcExtensionUIRequest);
 	return promise;
 }
+export type RpcToolActivationSession = Pick<
+	AgentSession,
+	| "activityPhase"
+	| "getActiveToolNames"
+	| "getAllToolNames"
+	| "getEnabledToolNames"
+	| "getMountedXdevToolNames"
+	| "getToolInventory"
+	| "isCompacting"
+	| "isStreaming"
+	| "setActiveToolsByName"
+>;
+
+export class RpcToolActivationBusyError extends Error {
+	constructor() {
+		super("Session is busy; tool activation cannot change during active work");
+		this.name = "RpcToolActivationBusyError";
+	}
+}
+
+/** Validate and atomically reconcile one session's enabled tool set. */
+export async function applyRpcToolActivation(
+	session: RpcToolActivationSession,
+	command: Extract<RpcCommand, { type: "set_tool_activation" }>,
+	hasActiveOperation = false,
+): Promise<RpcToolActivationResult> {
+	const { activate, deactivate } = validateRpcToolActivationBatch(command, session.getAllToolNames());
+	if (hasActiveOperation || session.activityPhase !== "idle" || session.isStreaming || session.isCompacting) {
+		throw new RpcToolActivationBusyError();
+	}
+	const previousEnabled = [...new Set(session.getEnabledToolNames())];
+	const deactivateSet = new Set(deactivate);
+	const next = previousEnabled.filter(name => !deactivateSet.has(name));
+	const nextSet = new Set(next);
+	for (const name of activate) {
+		if (!nextSet.has(name)) {
+			next.push(name);
+			nextSet.add(name);
+		}
+	}
+
+	await session.setActiveToolsByName(next, false);
+
+	const enabledToolNames = [...new Set(session.getEnabledToolNames())];
+	const activeToolNames = [...new Set(session.getActiveToolNames())];
+	const mountedToolNames = [...new Set(session.getMountedXdevToolNames())];
+	const previousSet = new Set(previousEnabled);
+	const achievedSet = new Set(enabledToolNames);
+	const activated = enabledToolNames.filter(name => !previousSet.has(name));
+	const deactivated = previousEnabled.filter(name => !achievedSet.has(name));
+	try {
+		return {
+			enabledToolNames,
+			activeToolNames,
+			mountedToolNames,
+			activated,
+			deactivated,
+			inventoryAvailable: true,
+			inventory: session.getToolInventory(RPC_APPLICATION_API_VERSION),
+		};
+	} catch (cause) {
+		if (!(cause instanceof ToolInventoryUnavailableError)) throw cause;
+		return {
+			enabledToolNames,
+			activeToolNames,
+			mountedToolNames,
+			activated,
+			deactivated,
+			inventoryAvailable: false,
+		};
+	}
+}
+
 /**
  * Run in RPC mode.
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
@@ -1109,6 +1189,7 @@ export async function runRpcMode(
 		}
 		return success(id, command, data);
 	};
+	let toolActivationInFlight = false;
 
 	// Handle a single command
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
@@ -1228,11 +1309,17 @@ export async function runRpcMode(
 			}
 
 			case "steer": {
+				if (toolActivationInFlight) {
+					return error(id, "steer", "Session tool activation is in progress", "session_busy");
+				}
 				await session.steer(command.message, command.images);
 				return success(id, "steer");
 			}
 
 			case "follow_up": {
+				if (toolActivationInFlight) {
+					return error(id, "follow_up", "Session tool activation is in progress", "session_busy");
+				}
 				await session.followUp(command.message, command.images);
 				return success(id, "follow_up");
 			}
@@ -1244,6 +1331,9 @@ export async function runRpcMode(
 			}
 
 			case "abort_and_prompt": {
+				if (toolActivationInFlight) {
+					return error(id, "abort_and_prompt", "Session tool activation is in progress", "session_busy");
+				}
 				operationManager.cancelAll("replaced", "replaced_by_prompt");
 				const operation = operationManager.start(id, "abort_and_prompt");
 				setImmediate(() => {
@@ -1351,6 +1441,26 @@ export async function runRpcMode(
 						return error(id, "get_tool_inventory", cause.message, "tool_inventory_unavailable");
 					}
 					throw cause;
+				}
+			}
+			case "set_tool_activation": {
+				toolActivationInFlight = true;
+				try {
+					return success(
+						id,
+						"set_tool_activation",
+						await applyRpcToolActivation(session, command, operationManager.snapshot().active.length > 0),
+					);
+				} catch (cause) {
+					if (cause instanceof RpcToolActivationValidationError) {
+						return error(id, "set_tool_activation", cause.message, "invalid_request");
+					}
+					if (cause instanceof RpcToolActivationBusyError) {
+						return error(id, "set_tool_activation", cause.message, "session_busy");
+					}
+					throw cause;
+				} finally {
+					toolActivationInFlight = false;
 				}
 			}
 

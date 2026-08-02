@@ -68,6 +68,7 @@ export type RpcCommand =
 	| { id?: string; type: "get_state" }
 	| { id?: string; type: "get_operations" }
 	| { id?: string; type: "get_tool_inventory" }
+	| { id?: string; type: "set_tool_activation"; activate?: string[]; deactivate?: string[] }
 	| { id?: string; type: "set_fast_mode"; enabled: boolean }
 	| { id?: string; type: "get_advisor_state" }
 	| { id?: string; type: "set_advisor_enabled"; enabled: boolean }
@@ -194,6 +195,22 @@ export interface RpcAvailableCommandsUpdateFrame {
 }
 export interface RpcToolInventoryUpdateFrame {
 	type: "tool_inventory_update";
+}
+
+export interface RpcToolActivationResult {
+	/** Enabled names after authoritative reconciliation (top-level plus mounted). */
+	enabledToolNames: string[];
+	/** Top-level names after authoritative reconciliation. */
+	activeToolNames: string[];
+	/** Names mounted under `xd://` after authoritative reconciliation. */
+	mountedToolNames: string[];
+	/** Actual enabled-set additions, not an echo of the request. */
+	activated: string[];
+	/** Actual enabled-set removals, not an echo of the request. */
+	deactivated: string[];
+	inventoryAvailable: boolean;
+	/** Present only when the just-committed authoritative inventory is representable. */
+	inventory?: ToolInventory;
 }
 
 export interface RpcPromptResultFrame {
@@ -462,6 +479,13 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "get_advisor_state"; success: true; data: RpcAdvisorState }
 	| { id?: string; type: "response"; command: "set_advisor_enabled"; success: true; data: RpcAdvisorState }
 	| { id?: string; type: "response"; command: "get_tool_inventory"; success: true; data: ToolInventory }
+	| {
+			id?: string;
+			type: "response";
+			command: "set_tool_activation";
+			success: true;
+			data: RpcToolActivationResult;
+	  }
 	| {
 			id?: string;
 			type: "response";

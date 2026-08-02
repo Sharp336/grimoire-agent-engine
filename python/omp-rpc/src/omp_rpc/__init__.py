@@ -121,6 +121,7 @@ from .protocol import (
     TodoPhase,
     TodoReminderEvent,
     TodoStatus,
+    ToolActivationResult,
     ToolDescriptor,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
@@ -154,6 +155,7 @@ from .protocol import (
     parse_session_workspace_roots,
     parse_settings_snapshot,
     parse_todo_phases,
+    parse_tool_activation_result,
     parse_tool_inventory,
 )
 
@@ -271,6 +273,7 @@ __all__ = [
     "TodoPhase",
     "TodoReminderEvent",
     "TodoStatus",
+    "ToolActivationResult",
     "ToolDescriptor",
     "ToolExecutionEndEvent",
     "ToolExecutionStartEvent",
@@ -308,5 +311,6 @@ __all__ = [
     "parse_session_workspace_roots",
     "parse_settings_snapshot",
     "parse_todo_phases",
+    "parse_tool_activation_result",
     "parse_tool_inventory",
 ]

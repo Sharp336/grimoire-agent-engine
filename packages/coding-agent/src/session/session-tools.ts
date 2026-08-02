@@ -986,10 +986,10 @@ export class SessionTools {
 	}
 
 	/** Applies an enabled tool set and reconciles its `xd://` partition. */
-	async applyActiveToolsByName(toolNames: string[]): Promise<void> {
+	async applyActiveToolsByName(toolNames: string[], allowToolRegistration = true): Promise<void> {
 		toolNames = normalizeToolNames(toolNames);
 		let builtInWriteAvailable = this.#builtInToolNames.has("write");
-		if (toolNames.includes("write") && !builtInWriteAvailable) {
+		if (allowToolRegistration && toolNames.includes("write") && !builtInWriteAvailable) {
 			builtInWriteAvailable = (await this.#ensureWriteRegistered?.()) === true;
 			if (builtInWriteAvailable) this.#builtInToolNames.add("write");
 		}
@@ -1021,7 +1021,7 @@ export class SessionTools {
 		const pinnedWrite = isPresentationPinned("write");
 		const activeDeferrableTool = tools.some(tool => tool.deferrable === true);
 		const transportNeeded = mountNames.size > 0 || activeDeferrableTool || this.#host.planModeEnabled();
-		if (transportNeeded && !builtInWriteAvailable) {
+		if (allowToolRegistration && transportNeeded && !builtInWriteAvailable) {
 			builtInWriteAvailable = (await this.#ensureWriteRegistered?.()) === true;
 			if (builtInWriteAvailable) this.#builtInToolNames.add("write");
 		}
@@ -1271,7 +1271,7 @@ export class SessionTools {
 	}
 
 	/** Selects enabled tools, ignoring names absent from the registry. */
-	async setActiveToolsByName(toolNames: string[]): Promise<void> {
+	async setActiveToolsByName(toolNames: string[], allowToolRegistration = true): Promise<void> {
 		const normalized = normalizeToolNames(toolNames);
 		// Transport-write eligibility keys off the *current* active set: an ordinary
 		// selection change should not demote `write` unless it is already active.
@@ -1279,6 +1279,7 @@ export class SessionTools {
 			normalized,
 			this.#xdev?.mountedNames ?? new Set(),
 			this.getActiveToolNames().includes("write"),
+			allowToolRegistration,
 		);
 	}
 
@@ -1316,6 +1317,7 @@ export class SessionTools {
 		normalized: string[],
 		mounted: ReadonlySet<string>,
 		writeSelected: boolean,
+		allowToolRegistration = true,
 	): Promise<void> {
 		const transportWriteActive =
 			writeSelected &&
@@ -1328,7 +1330,7 @@ export class SessionTools {
 			normalized.filter(name => !mounted.has(name) && !(name === "write" && transportWriteActive)),
 		);
 		try {
-			await this.applyActiveToolsByName(normalized);
+			await this.applyActiveToolsByName(normalized, allowToolRegistration);
 		} catch (error) {
 			this.#runtimeSelectedToolNames = previousRuntimeSelectedToolNames;
 			throw error;

@@ -4444,8 +4444,8 @@ export class AgentSession {
 	}
 
 	/** Selects enabled tools, ignoring names absent from the registry. */
-	setActiveToolsByName(toolNames: string[]): Promise<void> {
-		return this.#tools.setActiveToolsByName(toolNames);
+	setActiveToolsByName(toolNames: string[], allowToolRegistration = true): Promise<void> {
+		return this.#tools.setActiveToolsByName(toolNames, allowToolRegistration);
 	}
 
 	/** Restores an exact top-level versus `xd://` tool partition. */
