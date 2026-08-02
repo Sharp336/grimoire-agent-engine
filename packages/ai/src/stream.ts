@@ -1750,7 +1750,12 @@ function mapOptionsForApi<TApi extends Api>(
 				return castApi<"google-generative-ai">({
 					...base,
 					serviceTier: options?.serviceTier,
-					thinking: { enabled: false },
+					thinking: model.thinking?.suppressWhenOff
+						? {
+								enabled: false,
+								suppress: model.thinking.mode === "google-level" ? { level: "MINIMAL" } : { budget: 0 },
+							}
+						: { enabled: false },
 					toolChoice: mapGoogleToolChoice(options?.toolChoice),
 					cachedContent: options?.cachedContent,
 				});
@@ -1856,7 +1861,12 @@ function mapOptionsForApi<TApi extends Api>(
 				return castApi<"google-vertex">({
 					...base,
 					serviceTier: options?.serviceTier,
-					thinking: { enabled: false },
+					thinking: model.thinking?.suppressWhenOff
+						? {
+								enabled: false,
+								suppress: model.thinking.mode === "google-level" ? { level: "MINIMAL" } : { budget: 0 },
+							}
+						: { enabled: false },
 					toolChoice: mapGoogleToolChoice(options?.toolChoice),
 					cachedContent: options?.cachedContent,
 				});

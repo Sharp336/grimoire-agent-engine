@@ -183,6 +183,7 @@ import {
 	parseThinkingLevel,
 	resolveProvisionalAutoLevel,
 	resolveThinkingLevelForModel,
+	resolveThinkingModeForModel,
 	shouldDisableReasoning,
 	toProviderThinkingMode,
 	toReasoningEffort,
@@ -1567,6 +1568,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const initialThinkingMode =
 		requestedThinkingMode === ThinkingLevel.Off ? undefined : toProviderThinkingMode(requestedThinkingMode);
 	let thinkingLevel = thinkingModeIsOff ? ThinkingLevel.Off : pickInitialThinkingLevel(model);
+	const parsedLastNonOffThinkingLevel =
+		hasExistingSession && hasThinkingEntry ? parseThinkingLevel(existingSession.lastNonOffThinkingLevel) : undefined;
 	let autoThinking = thinkingLevel === AUTO_THINKING;
 	// Concrete level the agent/session start with. With `auto` this is the
 	// provisional level shown until the first per-turn classification resolves;
@@ -3223,12 +3226,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		};
 		const kimiApiFormatSetting = settings.get("providers.kimiApiFormat");
 		const kimiApiFormat = kimiApiFormatSetting === "auto" ? undefined : kimiApiFormatSetting;
+		const resolvedInitialThinkingMode = resolveThinkingModeForModel(model, initialThinkingMode);
 		agent = new Agent({
 			initialState: {
 				systemPrompt,
 				model,
 				thinkingLevel: toReasoningEffort(effectiveThinkingLevel),
-				thinkingMode: initialThinkingMode,
+				thinkingMode: resolvedInitialThinkingMode,
 				disableReasoning: shouldDisableReasoning(effectiveThinkingLevel),
 				tools: initialTools,
 			},
@@ -3308,12 +3312,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (model) {
 				sessionManager.appendModelChange(`${model.provider}/${model.id}`);
 			}
-			if (autoThinking && initialThinkingMode !== undefined) {
-				sessionManager.appendThinkingLevelChange(undefined, AUTO_THINKING, initialThinkingMode);
+			if (autoThinking && resolvedInitialThinkingMode !== undefined) {
+				sessionManager.appendThinkingLevelChange(undefined, AUTO_THINKING, resolvedInitialThinkingMode);
 			} else if (!autoThinking) {
 				// Do not write the `auto` selector before the first turn resolves unless
 				// an explicit mode must be preserved for resume/fork.
-				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, undefined, initialThinkingMode);
+				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, undefined, resolvedInitialThinkingMode);
 			}
 			if (options.openAIServiceTier !== undefined || Object.keys(initialServiceTierByFamily).length > 0) {
 				sessionManager.appendServiceTierChange(
@@ -3387,7 +3391,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			agent,
 			pruneToolDescriptions: inlineToolDescriptors,
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
-			thinkingMode: initialThinkingMode,
+			lastNonOffThinkingLevel: parsedLastNonOffThinkingLevel,
+			thinkingMode: resolvedInitialThinkingMode,
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
 			initialRetryFallback,
 			prewalk: options.prewalk,

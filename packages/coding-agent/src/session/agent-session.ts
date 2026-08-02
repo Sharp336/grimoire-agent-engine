@@ -175,7 +175,12 @@ import {
 	obfuscateProviderContext,
 	type SecretObfuscator,
 } from "../secrets/obfuscator";
-import { AUTO_THINKING, type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../thinking";
+import {
+	AUTO_THINKING,
+	type ConfiguredThinkingLevel,
+	parseConfiguredThinkingLevel,
+	parseThinkingLevel,
+} from "../thinking";
 import { isLowSignalTitleInput } from "../tiny/text";
 import { shutdownTinyTitleClient } from "../tiny/title-client";
 import { resolveApproval } from "../tools/approval";
@@ -993,6 +998,7 @@ export class AgentSession {
 			scopedModels: config.scopedModels,
 			thinkingMode: config.thinkingMode,
 			thinkingLevel: config.thinkingLevel,
+			lastNonOffThinkingLevel: config.lastNonOffThinkingLevel,
 			thinkingLevelCeiling: config.thinkingLevelCeiling,
 			serviceTierByFamily: config.serviceTierByFamily,
 		});
@@ -7365,7 +7371,10 @@ export class AgentSession {
 						: (sessionContext.thinkingLevel as ThinkingLevel | undefined)
 					: defaultThinkingLevel;
 			const restoredThinkingMode = sessionContext.thinkingMode === "adaptive" ? "adaptive" : undefined;
-			this.#models.restoreThinkingLevel(restoredThinkingLevel);
+			this.#models.restoreThinkingLevel(
+				restoredThinkingLevel,
+				parseThinkingLevel(sessionContext.lastNonOffThinkingLevel),
+			);
 			this.#models.restoreThinkingMode(hasThinkingEntry ? restoredThinkingMode : undefined);
 			this.#models.restoreServiceTiers(
 				hasServiceTierEntry ? (sessionContext.serviceTier ?? {}) : configuredServiceTierByFamily,

@@ -74,6 +74,11 @@ export interface GoogleSharedStreamOptions extends StreamOptions {
 		enabled: boolean;
 		budgetTokens?: number;
 		level?: GoogleThinkingLevel;
+		/**
+		 * Explicit wire suppression for models that re-apply a baked thinking
+		 * default whenever `thinkingConfig` is omitted.
+		 */
+		suppress?: { budget: number } | { level: GoogleThinkingLevel };
 	};
 	/** Request that Google omit human-readable thought summaries while still allowing internal reasoning. */
 	hideThinkingSummary?: boolean;
@@ -858,13 +863,19 @@ export function buildGoogleGenerateContentParams<T extends "google-generative-ai
 		config.toolConfig = undefined;
 	}
 
-	if (options.thinking?.enabled && model.reasoning) {
-		const cfg: ThinkingConfig = { includeThoughts: !options.hideThinkingSummary };
-		if (options.thinking.level !== undefined) {
+	if (options.thinking && model.reasoning && (options.thinking.enabled || options.thinking.suppress)) {
+		const cfg: ThinkingConfig = { includeThoughts: options.thinking.enabled && !options.hideThinkingSummary };
+		if (options.thinking.enabled && options.thinking.level !== undefined) {
 			// GoogleThinkingLevel mirrors the SDK's `ThinkingLevel` string enum values 1:1.
 			cfg.thinkingLevel = options.thinking.level as ThinkingLevel;
-		} else if (options.thinking.budgetTokens !== undefined) {
+		} else if (options.thinking.enabled && options.thinking.budgetTokens !== undefined) {
 			cfg.thinkingBudget = options.thinking.budgetTokens;
+		} else if (!options.thinking.enabled && options.thinking.suppress) {
+			if ("level" in options.thinking.suppress) {
+				cfg.thinkingLevel = options.thinking.suppress.level as ThinkingLevel;
+			} else {
+				cfg.thinkingBudget = options.thinking.suppress.budget;
+			}
 		}
 		config.thinkingConfig = cfg;
 	}

@@ -90,6 +90,7 @@ export class ModelControls {
 			thinkingMode?: ThinkingMode;
 			thinkingLevel?: ConfiguredThinkingLevel;
 			thinkingLevelCeiling?: Effort;
+			lastNonOffThinkingLevel?: ThinkingLevel;
 			serviceTierByFamily?: ServiceTierByFamily;
 		},
 	) {
@@ -113,7 +114,10 @@ export class ModelControls {
 				this.#thinkingLevelCeiling,
 			);
 		}
-		this.#lastReasoningEffort = toReasoningEffort(this.#thinkingLevel) ?? resolveProvisionalAutoLevel(this.#model);
+		this.#lastReasoningEffort =
+			this.#thinkingLevel === ThinkingLevel.Off && options.lastNonOffThinkingLevel !== undefined
+				? (toReasoningEffort(options.lastNonOffThinkingLevel) ?? resolveProvisionalAutoLevel(this.#model))
+				: (toReasoningEffort(this.#thinkingLevel) ?? resolveProvisionalAutoLevel(this.#model));
 		this.#applyThinkingLevelToAgent(this.#thinkingLevel);
 	}
 
@@ -162,7 +166,7 @@ export class ModelControls {
 	}
 
 	/** Restores thinking state from a transcript without persisting a new entry. */
-	restoreThinkingLevel(level: ConfiguredThinkingLevel | undefined): void {
+	restoreThinkingLevel(level: ConfiguredThinkingLevel | undefined, lastNonOffLevel?: ThinkingLevel): void {
 		this.#autoThinking = level === AUTO_THINKING;
 		this.#autoResolvedLevel = undefined;
 		this.#thinkingLevel =
@@ -176,6 +180,9 @@ export class ModelControls {
 						this.#model,
 						clampThinkingLevelToCeiling(this.#model, level, this.#thinkingLevelCeiling),
 					);
+		if (this.#thinkingLevel === ThinkingLevel.Off) {
+			this.#lastReasoningEffort = toReasoningEffort(lastNonOffLevel) ?? resolveProvisionalAutoLevel(this.#model);
+		}
 		this.#applyThinkingLevelToAgent(this.#thinkingLevel);
 	}
 

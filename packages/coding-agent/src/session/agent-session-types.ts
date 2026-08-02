@@ -120,6 +120,8 @@ export interface AgentSessionConfig {
 	thinkingMode?: ThinkingMode;
 	/** Initial session effort selector. */
 	thinkingLevel?: ConfiguredThinkingLevel;
+	/** Last concrete non-off effort retained when initial thinking is off. */
+	lastNonOffThinkingLevel?: ThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); every later change, including retry-fallback recovery, is re-clamped to it. */
 	thinkingLevelCeiling?: Effort;
 	/** Retry chain ownership when startup selected one of its fallback entries. */
