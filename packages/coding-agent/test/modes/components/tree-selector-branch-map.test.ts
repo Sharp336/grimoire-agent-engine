@@ -346,6 +346,24 @@ describe("TreeSelectorComponent branch map", () => {
 		expect(moved).not.toContain("•#");
 	});
 
+	it("keeps an active search query visible and editable in the standalone map", () => {
+		const { tree, currentLeafId } = treeWithOffBranchSearchMatches();
+		const selector = new TreeSelectorComponent(
+			tree,
+			currentLeafId,
+			60,
+			() => {},
+			() => {},
+		);
+
+		selector.handleInput("\x07"); // ctrl+g: split -> map
+		for (const character of "needle") selector.handleInput(character);
+		expect(render(selector, 80)).toContain("Search: needle");
+
+		selector.handleInput("\x7f"); // backspace
+		expect(render(selector, 80)).toContain("Search: needl");
+	});
+
 	it("moves the tree highlight with the list selection", () => {
 		const { tree, currentLeafId } = branchyTree();
 		const selector = new TreeSelectorComponent(

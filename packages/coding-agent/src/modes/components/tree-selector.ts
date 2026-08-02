@@ -1479,7 +1479,9 @@ export class TreeSelectorComponent extends Container {
 			lines.push(truncateToWidth(theme.bold(title), width));
 			const filterLines = this.#renderFilterStatus(width, compactChrome);
 			const shortcutLines = this.#renderShortcutHelp(width, compactChrome, minimalChrome);
-			const searchLines = effectiveMode !== "map" ? [new SearchLine(this.#treeList).render(width)[0]!] : [];
+			const hasSearchQuery = this.#treeList.getSearchQuery().length > 0;
+			const searchLines =
+				effectiveMode !== "map" || hasSearchQuery ? [new SearchLine(this.#treeList).render(width)[0]!] : [];
 			const mapLimitLines = mapUnavailable ? [this.#renderMapLimitStatus(width, visibleNodeCount)] : [];
 			const bodyRows = Math.max(
 				1,
