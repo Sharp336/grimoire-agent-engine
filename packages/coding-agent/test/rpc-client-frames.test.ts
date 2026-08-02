@@ -196,4 +196,32 @@ describe("RpcClient frame coverage", () => {
 			schemes: [{ scheme: "fixture", immutable: true }],
 		});
 	});
+
+	test("retains the last accepted host URI schemes when an update is rejected", async () => {
+		using tempDir = TempDir.createSync("@omp-rpc-client-host-uri-rejected-");
+		const captureFile = tempDir.join("captured.jsonl");
+		using client = new RpcClient({
+			cliPath: MOCK_AGENT,
+			env: {
+				MOCK_RPC_CLIENT_FRAMES: "1",
+				MOCK_RPC_CAPTURE_FILE: captureFile,
+				MOCK_RPC_REJECT_HOST_URI_SCHEME: "rejected",
+			},
+		});
+
+		await client.start();
+		expect(await client.setHostUriSchemes([{ scheme: "fixture", immutable: true }])).toEqual(["fixture"]);
+		await expect(client.setHostUriSchemes([{ scheme: "rejected" }])).rejects.toThrow(
+			"Host URI scheme rejected by fixture: rejected",
+		);
+		await client.stop();
+		await client.start();
+
+		const captured = await waitForCapturedFrames(captureFile, frames =>
+			frames.some(frame => frame.type === "set_host_uri_schemes"),
+		);
+		expect(captured.find(frame => frame.type === "set_host_uri_schemes")).toMatchObject({
+			schemes: [{ scheme: "fixture", immutable: true }],
+		});
+	});
 });

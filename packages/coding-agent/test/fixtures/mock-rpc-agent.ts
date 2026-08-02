@@ -230,6 +230,16 @@ for await (const raw of console) {
 							.map(scheme => (scheme && typeof scheme === "object" ? Reflect.get(scheme, "scheme") : undefined))
 							.filter((scheme): scheme is string => typeof scheme === "string")
 					: [];
+				if (Bun.env.MOCK_RPC_REJECT_HOST_URI_SCHEME && schemes.includes(Bun.env.MOCK_RPC_REJECT_HOST_URI_SCHEME)) {
+					writeFrame({
+						id,
+						type: "response",
+						command: frame.type,
+						success: false,
+						error: `Host URI scheme rejected by fixture: ${Bun.env.MOCK_RPC_REJECT_HOST_URI_SCHEME}`,
+					});
+					continue;
+				}
 				writeFrame({
 					id,
 					type: "response",
