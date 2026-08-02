@@ -93,6 +93,16 @@ export interface NativeLaunchEnvironment {
   readonly __opaque: unique symbol;
 }
 
+export type NativeBrowserFeatureToggle =
+  | "disable-background-networking"
+  | "disable-component-update"
+  | "disable-default-apps";
+
+export interface NativeBrowserLaunchOptions {
+  readonly headed: boolean;
+  readonly featureToggles?: readonly NativeBrowserFeatureToggle[];
+}
+
 export function openVerifiedExecutable(spec: {
   path: string;
   sha256: string;
@@ -108,21 +118,26 @@ export function launchVerifiedProcess(spec: {
   args: readonly string[];
   environment: NativeLaunchEnvironment;
 }): Promise<NativeOwnedProcess>;
-export interface NativeBrowserTransport {
+
+export interface NativeBrowserPipe {
+  /** Reads only Chromium's response side: fd/handle 4 from the inherited remote-debugging pipe. */
   read(): AsyncIterable<Uint8Array>;
+  /** Writes only Chromium's command side: fd/handle 3 from the inherited remote-debugging pipe. */
   write(bytes: Uint8Array): Promise<void>;
+  /** Closes both inherited sides exactly once; child ownership remains on NativeOwnedBrowserProcess. */
   close(): Promise<void>;
 }
 
 export interface NativeOwnedBrowserProcess {
   readonly process: NativeOwnedProcess;
-  readonly transport: NativeBrowserTransport;
+  /** Private inherited Chromium --remote-debugging-pipe byte stream; never a URL. */
+  readonly pipe: NativeBrowserPipe;
 }
 
 export function launchVerifiedBrowser(spec: {
   executable: NativeVerifiedExecutable;
-  args: readonly string[];
   environment: NativeLaunchEnvironment;
+  options: NativeBrowserLaunchOptions;
 }): Promise<NativeOwnedBrowserProcess>;
 
 export interface NativePeerConnection {
@@ -217,7 +232,7 @@ On Linux use Unix-domain peer credentials plus `/proc` start-time/executable ide
 - Create: `packages/chatgpt-web-launcher/electron/runtime-supervisor.cjs` — runtime/tunnel health, broker-first startup, drain, restart, and shutdown.
 - Create: `packages/chatgpt-web-launcher/electron/runtime-install.cjs` — atomic runtime bundle installation.
 - Create/adapt: `packages/chatgpt-web-launcher/electron/{autostart,logging,process-tree,runtime,state,window-state,browser-state,cdp-input,browser-helper-verifier,atomic-file,runtime-command}.cjs` — only source contracts required by the launcher, with allowlisted logging, authenticated browser transport, and start/executable-identity-safe process teardown.
-- Create: `packages/chatgpt-web-launcher/src/App.tsx`, `packages/chatgpt-web-launcher/electron/preload.cjs`, `packages/chatgpt-web-launcher/src/types.ts`, `packages/chatgpt-web-launcher/src/i18n.ts`, `packages/chatgpt-web-launcher/src/styles.css`, `packages/chatgpt-web-launcher/vite.config.ts`, and `packages/chatgpt-web-launcher/index.html` — setup/browser/activity/settings UI and narrow IPC; `BrowserWindow.webPreferences.preload`, electron-builder `files`, and `tsconfig` must point to these exact paths.
+- Create: `packages/chatgpt-web-launcher/src/main.tsx`, `packages/chatgpt-web-launcher/src/App.tsx`, `packages/chatgpt-web-launcher/electron/preload.cjs`, `packages/chatgpt-web-launcher/src/types.ts`, `packages/chatgpt-web-launcher/src/i18n.ts`, `packages/chatgpt-web-launcher/src/icons.tsx`, `packages/chatgpt-web-launcher/src/tokens.css`, `packages/chatgpt-web-launcher/src/styles.css`, `packages/chatgpt-web-launcher/vite.config.ts`, and `packages/chatgpt-web-launcher/index.html` — renderer entry/imports and setup/browser/activity/settings UI; `BrowserWindow.webPreferences.preload`, electron-builder `files`, Vite entry, and `tsconfig` must point to these exact paths.
 - Create: `packages/chatgpt-web-launcher/test/` — browser-host, control-server, supervisor, installer, IPC, logging, and package smoke tests.
 
 - Modify: `packages/chatgpt-web/src/runtime/host.ts` — keep the narrow page/locator facade stable.
@@ -226,7 +241,7 @@ On Linux use Unix-domain peer credentials plus `/proc` start-time/executable ide
 - Modify: `bun.lock` — refresh after the provider package, coding-agent workspace edge, and finalized launcher manifest are all present; inspect workspace entries, package-local versions, and duplicate Chromium BiDi trees before every `--frozen-lockfile` gate.
 
 - Modify: `package.json` — add exact root catalog entries for `@modelcontextprotocol/sdk` `1.26.0`; keep existing OMP catalog pins for Turndown `7.2.4`, GFM `1.0.2`, Zod `4.4.3` as resolved by the lockfile, fflate `0.8.3`, React `19.2.7`, Vite `8.1.5`, and TypeScript `7.0.2`; do not add Electron to the core workspace catalog.
-- Create: `packages/chatgpt-web/LICENSES/NOTICE.md` and `OpenCodex-MIT.txt` — preserved/adapted notices for copied substantial code.
+- Create: `packages/chatgpt-web/LICENSES/NOTICE.md` and `packages/chatgpt-web/LICENSES/OpenCodex-MIT.txt` — preserved/adapted notices for copied substantial code.
 - Create conditionally: `packages/chatgpt-web/LICENSES/Bun-runtime.md` — generated from the actual redistributed Bun/runtime version only when the launcher bundles one; never copy stale source notices.
 - Create: `packages/chatgpt-web/test/` and `packages/chatgpt-web-launcher/test/` — focused unit/fixture/integration tests.
 
@@ -255,9 +270,10 @@ On Linux use Unix-domain peer credentials plus `/proc` start-time/executable ide
 - [ ] **Step 1: Implement the platform-native contract.**
 
 Extend the existing `@oh-my-pi/pi-natives` N-API package rather than adding a sidecar executable or a UID/mode-only fallback. Implement native local listener/connector creation so the broker and `mcp/main.ts` never depend on undocumented Node/Bun socket handles. Return peer PID plus start-time and executable identity on every accepted connection. Implement stable opened-file identity and held-handle `read()`, `consume()`, and `cleanup()` primitives; broker-side authenticator CAS, peer proof, and same-handle authorization remain the authority for bootstrap consumption. Add verified process launch/termination primitives: use an opened identity or `fexecve`/`openat` equivalent where supported; otherwise re-check native file identity immediately after process creation and before any bootstrap/key capability is admitted, and refuse PID-only termination when start/executable identity no longer matches.
+The browser launch API must expose only the closed `NativeBrowserLaunchOptions` (`headed` plus the allowlisted `NativeBrowserFeatureToggle` union), never caller-supplied Chromium argv. Native code unwraps the held `browser-child.profileRoot` from `NativeLaunchEnvironment`, derives the profile path, injects exactly one `--user-data-dir` and one inherited `--remote-debugging-pipe`, and appends only the pinned allowlisted Chromium flags. Attempts to inject `--remote-debugging-port`, override the profile, disable sandbox/security, duplicate the pipe/profile flags, or pass unknown feature toggles are rejected before spawn. Add native seam tests for those forbidden/duplicate cases and assert the launch record contains no endpoint or caller path.
 
 Linux must use Unix-domain peer credentials and `/proc` identity, macOS its native local-peer PID option and process identity, and Windows a restrictive named-pipe security descriptor, `PIPE_REJECT_REMOTE_CLIENTS`, `GetNamedPipeClientProcessId`, `QueryFullProcessNameW`/creation-time identity, and reparse-safe file handles. Unsupported identity APIs fail closed. Keep no-follow/file identity and verified browser launch available in browser-only mode; load peer transport and tunnel process-control portions lazily only for full mode or launcher startup.
-The shipped native matrix is explicit: Linux x64 baseline/modern plus arm64 (and existing musl variants), macOS x64/arm64, and Windows x64/arm64. Add `win32-arm64` end to end rather than claiming a target the current Bazel graph cannot build: the platform, Rust target, clang/lld target, Windows SDK/CRT sysroot, addon output, aggregate labels, host selection, loader metadata, and release artifact manifest must agree. If the pinned toolchain cannot produce a verified Windows ARM64 addon, the implementation must stop and narrow the documented support matrix before packaging; it must not emit a placeholder or fall back to x64.
+The native build matrix is explicit: Linux x64 baseline/modern plus arm64, macOS x64/arm64, and Windows x64/arm64. Musl is a build-only/staged Linux verification using the existing plain-linux filenames; it is not a concurrent libc variant, loader tuple, launcher runtime resource, or published leaf package. Add `win32-arm64` end to end rather than claiming a target the current Bazel graph cannot build: the platform, Rust target, clang/lld target, Windows SDK/CRT sysroot, addon output, aggregate labels, host selection, loader metadata, and release artifact manifest must agree. If the pinned toolchain cannot produce a verified Windows ARM64 addon, the implementation must stop and narrow the documented support matrix before packaging; it must not emit a placeholder or fall back to x64.
 Update `packages/natives/native/loader-state.js`, `embedded-addon.js`, generated declarations, leaf-package generation, and release/publish manifests together: `win32-arm64` must resolve to its own package/artifact and target-specific hash/ABI metadata, never to `win32-x64`. The loader test matrix must exercise host selection, installed leaf resolution, embedded-resource selection, missing leaf, wrong architecture, ABI mismatch, and checksum mismatch.
 
 Run the native build to regenerate declarations/loader exports. Test peer PID and ancestry matching, complete native identity equality (including process start and executable identity rather than PID-only), cross-user and competing same-user rejection, stable file identity across replacement, consume-after-proof only, PID reuse, executable replacement immediately before launch, verified termination, unsupported-API failure, and every declared host/target tuple. Use injected native seams for deterministic tests plus one real local listener test on each supported OS. Run the Bazel target resolver tests and analyze/build each declared target on its supported runner; a missing ARM64 target, wrong ABI, checksum drift, or loader mismatch fails closed.
@@ -296,11 +312,11 @@ git commit -m "feat: add native local-peer security primitives"
 
 - [ ] **Step 1: Add the package manifest and workspace dependencies.**
 
-Use exact, reviewable versions for dependencies not already in the OMP catalog: `@modelcontextprotocol/sdk` `1.26.0` from the new root catalog entry and `playwright-core` `1.62.0` as a package-local dependency. Use catalog pins for `@oh-my-pi/pi-ai`, `@oh-my-pi/pi-catalog`, `@oh-my-pi/pi-natives`, `@types/bun`, `fflate` `0.8.3`, Turndown `7.2.4`, GFM `1.0.2`, and Zod `4.4.3`; use `@types/turndown` `5.0.6` as a package dev dependency. Declare `@types/bun: "catalog:"` explicitly because the isolated package check extends `tsconfig.base.json` with Bun globals. The package-contract test must assert both catalog entries and fail if the provider relies on root-only type resolution. Do not add direct `chromium-bidi`: the source has no import and Playwright owns the transport dependency. Add a peer dependency only if the published extension loader requires one; source activation remains explicit through `settings.extensions`, not ambient `omp.extensions` metadata.
+Use exact, reviewable versions for dependencies not already in the OMP catalog: `@modelcontextprotocol/sdk` `1.26.0` from the new root catalog entry and `playwright-core` `1.62.1` as a package-local dependency. Use catalog pins for `@oh-my-pi/pi-ai`, `@oh-my-pi/pi-catalog`, `@oh-my-pi/pi-natives`, `@types/bun`, `fflate` `0.8.3`, Turndown `7.2.4`, GFM `1.0.2`, Zod `4.4.3`, and `@types/turndown` `5.0.6`; declare `@types/turndown: "catalog:"` as a package dev dependency. Declare `@types/bun: "catalog:"` explicitly because the isolated package check extends `tsconfig.base.json` with Bun globals. The package-contract test must assert both catalog entries and fail if the provider relies on root-only type resolution. Do not add direct `chromium-bidi`: the source has no import and Playwright owns the transport dependency.
 
 Set the provider package version to the current OMP workspace release (`17.2.4` at this planning baseline), not the source package's `1.1.0`; use `@oh-my-pi/pi-chatgpt-web`, OMP repository metadata, MIT license metadata, a `chatgpt-web` bin pointing at `src/cli.ts`, and `files` entries for `src`, `README.md`, and `LICENSES`. This is a public workspace package like `@oh-my-pi/pi-natives`, so omit `"private": true`; keep only the separately bundled Electron launcher private.
 
-The package manifest must keep `engines.bun >= 1.3.14`, export `.`, `./extension`, and `./cli`, and define sibling-compatible `check` (`biome check . && bun run check:types`), `check:types`, and `test` (`bun test --parallel`) scripts using `bun run` where chaining is required. Add `@modelcontextprotocol/sdk` `1.26.0` to the root catalog and resolve the package-local `playwright-core` `1.62.0` plus all catalog versions in `bun.lock`; do not copy the source's Bun 1.3.11, TypeScript 5.9.3, Turndown 7.2.0, or Chromium BiDi `12.1.0` pins.
+The package manifest must keep `engines.bun >= 1.3.14`, export `.`, `./extension`, and `./cli`, and define sibling-compatible `check` (`biome check . && bun run check:types`), `check:types`, and `test` (`bun test --parallel`) scripts using `bun run` where chaining is required. Add `@modelcontextprotocol/sdk` `1.26.0` to the root catalog and resolve the package-local `playwright-core` `1.62.1` plus all catalog versions in `bun.lock`; do not copy the source's Bun 1.3.11, TypeScript 5.9.3, Turndown 7.2.0, or Chromium BiDi `12.1.0` pins.
 
 - [ ] **Step 2: Add the package TypeScript boundary.**
 
@@ -499,6 +515,7 @@ git commit -m "feat: add ChatGPT Web profile and model configuration"
 **Files:**
 - Create: `packages/chatgpt-web/src/runtime/host.ts`
 - Create: `packages/chatgpt-web/src/runtime/local-host.ts`
+- Create: `packages/chatgpt-web/src/runtime/playwright-transport.ts` — package-private adapter from the native inherited byte pipe to the pinned Playwright `ConnectOverCDPTransport` object contract; it implements Chromium remote-debugging-pipe UTF-8 JSON/NUL framing with incremental bounded parsing, malformed/oversized-message rejection, close/error propagation, and no endpoint/path exposure.
 - Create: `packages/chatgpt-web/src/browser/browser-worker.ts`
 - Create: `packages/chatgpt-web/src/browser/chatgpt-session.ts`
 - Create: `packages/chatgpt-web/src/browser/markdown.ts`
@@ -507,6 +524,8 @@ git commit -m "feat: add ChatGPT Web profile and model configuration"
 - Create: `packages/chatgpt-web/src/runtime/logging.ts` — shared provider structured-log/diagnostic allowlist.
 - Create: `packages/chatgpt-web/test/browser-worker.test.ts`
 - Create: `packages/chatgpt-web/test/browser-contract.test.ts`
+- Create: `packages/chatgpt-web/test/playwright-transport.test.ts` — compile/runtime contract for the pinned transport overload, framing bounds, malformed-message close, and pipe teardown without Chrome/network access.
+- Create: `packages/chatgpt-web/test/native-browser-transport.integration.test.ts` — real local Chromium gate for `launchVerifiedBrowser()` plus inherited `--remote-debugging-pipe`, `connectOverCDP`, `Browser.getVersion`/`about:blank`, and clean child/pipe teardown; no account or network.
 - Create: `packages/chatgpt-web/test/logging.test.ts`
 
 **Interfaces:**
@@ -619,7 +638,7 @@ The host mints each `BrowserAttachment` reference; `stageAttachment()` bounds an
 All browser-host extraction has hard caps before allocation or model emission: composer/response/reasoning text, generation IDs, locator counts and `allInnerTexts`/`textContent`, attachment names/bytes, and error fields use fixed byte/count/depth limits. Oversized, malformed, or unexpectedly deep DOM data returns a typed fail-closed error rather than being silently truncated; tests inject oversized/malformed snapshots and verify no unbounded result reaches the provider.
 
 
-`local-host.ts` is the only implementation in the provider milestone and uses `playwright-core@1.62.0` internally behind a package-owned transport adapter. Before `login()` or `lease()` starts a browser, it resolves the executable/profile through the native browser-safe no-follow/ACL adapter, binds the marker/profile generation and owner lock, and calls `launchVerifiedBrowser()` with the digest-bound `NativeVerifiedExecutable` and owner-controlled `NativeLaunchEnvironment`; it never passes a path string or ambient environment to Playwright. The adapter implements the exact public Playwright `ConnectOverCDPTransport` contract (`send`, `close`, and message delivery) over the private inherited Chromium pipe returned by `NativeBrowserTransport`, then calls `chromium.connectOverCDP(transport)` with no endpoint URL, websocket URL, or TCP listener. The native owner/job boundary kills the complete Chrome descendant tree on lease/host shutdown. If the pinned Playwright version cannot attach through that documented transport contract, the package must fail closed rather than fall back to `launchPersistentContext`, `executablePath`, a path-only check-then-launch, or an exposed endpoint.
+`local-host.ts` is the only implementation in the provider milestone and uses the exact locked `playwright-core@1.62.1` API internally. Before `login()` or `lease()` starts a browser, it resolves the executable/profile through the native browser-safe no-follow/ACL adapter, verifies digest/version and immutable identity, binds the marker/profile generation and owner lock, calls `launchVerifiedBrowser()` with the digest-bound `NativeVerifiedExecutable` and owner-controlled `NativeLaunchEnvironment`, and adapts the returned private byte pipe to Playwright's public `ConnectOverCDPTransport` shape (`open?`, `send(message)`, `close`, `onmessage?`, `onclose?`). It then calls `chromium.connectOverCDP(transport, { isLocal: true, noDefaults: true })`; this is an in-process inherited-pipe connection, never a URL, websocket, TCP listener, or endpoint fallback. Playwright receives no executable/profile path; the native `NativeOwnedBrowserProcess` owns the child and pipe, and a transport/identity mismatch closes both and fails closed. Add a compile contract against the pinned package types so a future Playwright upgrade cannot silently remove this overload.
 The marker and spawn contract binds the executable to a cryptographic digest/version plus immutable opened identity or a non-writable trusted root, not only a path/file ID; same-file content mutation between validation and spawn is rejected. The owner lock is a held native OS lock/dir handle with no-delete semantics and a fencing nonce checked on every host operation; atomic marker replacement alone never transfers ownership. Tests cover same-file executable mutation and delete/replace races while the incumbent owner remains alive.
 Keep `BrowserHost` free of Electron, coding-agent, and Codex types. The request contains only a package-owned profile reference, headed/headless mode, turn ID, and abort signal; it never accepts a filesystem path or executable. The runtime admission gate is checked atomically before lease creation and rechecked immediately before browser start; a draining/stale `ChatGptWebRuntimeAdmission` is rejected. Acquire one cross-process profile owner before creating leases; an owner lock includes a random generation/nonce and verified process identity, a second owner fails explicitly, and stale recovery requires proof the recorded owner is dead. Revalidate the current login marker, profile generation, executable identity, and owner identity immediately before every login/lease browser spawn, including Pro routes; a mismatch or replacement fails closed. A lease close is idempotent and destroys only its page. The host must close all leases and release ownership on shutdown.
 The launcher control service uses the same owner-controlled native local listener/pipe as the provider broker, not a loopback TCP bearer endpoint. A client must present the opaque native connection/peer proof and remain the expected descendant or explicitly authorized owner process; `NativePeerConnection.currentPeer()` is revalidated before every request. The control token, owner/epoch, lease capability, connection nonce, and sequence are necessary but not sufficient, so a same-user process that steals a token or replays a descriptor on another connection is rejected before browser state is touched. Tests cover stolen-token clients, cross-connection handles, reparent/exec/PID-reuse, and peer mutation during an in-flight request.
@@ -655,19 +674,21 @@ Health/status/UI adapters map unknown browser or Playwright failures to the clos
 Use a fake page/locator implementation to verify selector contracts without a live browser. Cover login-host close paths, effort selection, attachment/send readiness, completion tracker settle delay, DOM health failure, abort cleanup, five leases, sixth rejection, two competing owners, stale-owner recovery, idempotent lease close, sibling-turn survival, and helper EOF. Add one fixture per source regression represented by recent commits `2441ff6`, `2dfc791`, and `20c21b0`.
 The test harness must also create two stream factories against the same profile owner, prove the five-slot cap is shared within that owner, and assert cancellation is an idempotent transition: page closes, lease releases once, pending broker invocation rejects, active counters reach zero, the slot is reusable, late results reject, and sibling turns remain live. `logging.test.ts` injects high-entropy cookie, control-token, runtime-key, profile-path, prompt, URL-query, authorization-header, and unknown-format canaries and scans logger memory/diagnostics plus every captured stdout/stderr sink after success and each failure path.
 Browser fixtures must cover cross-session/turn attachment refs, replacement after validation and before `setInputFiles()`, marker/profile/executable swaps while the runtime is active (including Pro), oversized/deep/malformed DOM snapshots, unsafe Markdown URL schemes with OSC8 disabled, and high-entropy attachment/log payload canaries.
+`native-browser-transport.integration.test.ts` is a separate real-OS gate, not a fake-host test: resolve only the CI-provisioned pinned Chromium executable and its verified identity, launch it through `launchVerifiedBrowser()` with inherited `--remote-debugging-pipe`, prove the parent-to-child command mapping uses fd/handle 3 and child-to-parent response mapping uses fd/handle 4 on POSIX/macOS/Windows, connect through the package-private `ConnectOverCDPTransport` adapter, assert Chromium's exact UTF-8 JSON/NUL framing while issuing `Browser.getVersion` and opening `about:blank`, then close the transport and prove the child exits with no orphan or leaked handle. The fixture must fail when `CHATGPT_WEB_TEST_CHROMIUM` is absent and must not download, log in, contact a connector, or access the network.
 
 - [ ] **Step 5: Run focused browser tests.**
 
 ```text
-bun test packages/chatgpt-web/test/browser-worker.test.ts packages/chatgpt-web/test/browser-contract.test.ts packages/chatgpt-web/test/logging.test.ts
+bun test packages/chatgpt-web/test/browser-worker.test.ts packages/chatgpt-web/test/browser-contract.test.ts packages/chatgpt-web/test/playwright-transport.test.ts packages/chatgpt-web/test/logging.test.ts
+bun test packages/chatgpt-web/test/native-browser-transport.integration.test.ts
 ```
 
-Expected: tests pass without Chrome, CDP, ChatGPT, or network access.
+Expected: unit tests pass without Chrome, CDP, ChatGPT, or network access; the separate native integration passes only with the verified CI Chromium executable and still uses no account, connector, or network.
 
 - [ ] **Step 6: Commit the browser runtime.**
 
 ```text
-git add packages/chatgpt-web/src/runtime packages/chatgpt-web/src/browser packages/chatgpt-web/test
+git add packages/chatgpt-web/src/runtime/host.ts packages/chatgpt-web/src/runtime/local-host.ts packages/chatgpt-web/src/runtime/playwright-transport.ts packages/chatgpt-web/src/runtime/logging.ts packages/chatgpt-web/src/browser/browser-worker.ts packages/chatgpt-web/src/browser/chatgpt-session.ts packages/chatgpt-web/src/browser/markdown.ts packages/chatgpt-web/src/browser/concurrency.ts packages/chatgpt-web/src/browser/process-line-writer.ts packages/chatgpt-web/test/browser-worker.test.ts packages/chatgpt-web/test/browser-contract.test.ts packages/chatgpt-web/test/playwright-transport.test.ts packages/chatgpt-web/test/native-browser-transport.integration.test.ts packages/chatgpt-web/test/logging.test.ts
 git commit -m "feat: add ChatGPT Web browser runtime"
 ```
 
@@ -745,7 +766,7 @@ Expected: all event/continuation tests pass with fake browser events, no network
 - [ ] **Step 8: Commit the native provider adapter.**
 
 ```text
-git add packages/chatgpt-web/src/provider packages/chatgpt-web/test/provider packages/chatgpt-web/test/fixtures
+git add packages/chatgpt-web/src/provider/prompt.ts packages/chatgpt-web/src/provider/session.ts packages/chatgpt-web/src/provider/orchestration.ts packages/chatgpt-web/src/provider/stream.ts packages/chatgpt-web/src/index.ts packages/chatgpt-web/test/provider/prompt.test.ts packages/chatgpt-web/test/provider/stream.test.ts packages/chatgpt-web/test/provider/continuation.test.ts packages/chatgpt-web/test/fixtures/chatgpt-events.ts
 git commit -m "feat: expose ChatGPT Web as an OMP stream provider"
 ```
 
@@ -828,7 +849,7 @@ Expected: custom keyless API registration, source cleanup, model capability meta
 - [ ] **Step 6: Commit host enablement.**
 
 ```text
-git add packages/chatgpt-web/src/extension.ts packages/chatgpt-web/test/extension.test.ts packages/coding-agent/src/extensibility/extensions/types.ts packages/coding-agent/src/config/model-registry.ts packages/coding-agent/src/commands/chatgpt-web.ts packages/coding-agent/src/cli-commands.ts packages/coding-agent/package.json packages/coding-agent/test/chatgpt-web-command.test.ts packages/coding-agent/test/model-registry-runtime-provider.test.ts bun.lock
+git add packages/chatgpt-web/src/extension.ts packages/chatgpt-web/test/extension.test.ts packages/coding-agent/src/extensibility/extensions/keyless-provider.ts packages/coding-agent/src/extensibility/extensions/loader.ts packages/coding-agent/src/extensibility/extensions/types.ts packages/coding-agent/src/config/model-registry.ts packages/coding-agent/src/commands/chatgpt-web.ts packages/coding-agent/src/cli-commands.ts packages/coding-agent/package.json packages/coding-agent/test/chatgpt-web-command.test.ts packages/coding-agent/test/model-registry-runtime-provider.test.ts bun.lock
 git commit -m "feat: register ChatGPT Web as a keyless OMP provider"
 ```
 
@@ -842,9 +863,6 @@ git commit -m "feat: register ChatGPT Web as a keyless OMP provider"
 - Create: `packages/chatgpt-web/test/browser-only-e2e.test.ts`
 - Create: `packages/chatgpt-web/test/browser-only-cli.test.ts` — execute the package CLI with fake host/process seams and assert browser-only topology.
 - Create: `packages/chatgpt-web/test/evidence-schema.test.ts`
-- Modify: `docs/models.md`
-- Modify: `docs/providers.md`
-- Modify: `docs/user-facing-packages.md`
 
 **Interfaces:**
 - Consumes: native provider, keyless registration, and login command from Tasks 2–5.
@@ -885,7 +903,7 @@ Expected: package checks, host checks, and deterministic OMP smoke pass; no MCP/
 - [ ] **Step 5: Commit the browser-only milestone.**
 
 ```text
-git add packages/chatgpt-web packages/coding-agent docs/models.md docs/providers.md docs/user-facing-packages.md
+git add packages/chatgpt-web/src/cli.ts packages/chatgpt-web/src/provider/stream.ts packages/chatgpt-web/test/browser-only-e2e.test.ts packages/chatgpt-web/test/browser-only-cli.test.ts packages/chatgpt-web/test/evidence-schema.test.ts
 git commit -m "feat: validate ChatGPT Web browser-only mode"
 ```
 
@@ -1051,7 +1069,7 @@ Expected: all capability and continuation tests pass, including parallel invocat
 - [ ] **Step 6: Commit the full-mode broker.**
 
 ```text
-git add packages/chatgpt-web/src/mcp packages/chatgpt-web/src/provider packages/chatgpt-web/src/cli.ts packages/chatgpt-web/test/mcp packages/chatgpt-web/test/provider/continuation.test.ts
+git add packages/chatgpt-web/src/mcp/broker.ts packages/chatgpt-web/src/mcp/server.ts packages/chatgpt-web/src/mcp/main.ts packages/chatgpt-web/src/mcp/bootstrap.ts packages/chatgpt-web/src/cli.ts packages/chatgpt-web/src/provider/session.ts packages/chatgpt-web/src/provider/stream.ts packages/chatgpt-web/test/mcp/broker.test.ts packages/chatgpt-web/test/mcp/server.test.ts packages/chatgpt-web/test/mcp/stdio-child.test.ts
 git commit -m "feat: bind ChatGPT Web MCP calls to OMP turns"
 ```
 ---
@@ -1062,7 +1080,6 @@ git commit -m "feat: bind ChatGPT Web MCP calls to OMP turns"
 - Create: `packages/chatgpt-web/test/mcp/runtime-command.test.ts`
 - Create: `packages/chatgpt-web/src/mcp/tunnel.ts` — broker-first tunnel lifecycle, pinned artifact handoff, owned process cleanup, and epoch/drain controls.
 - Create: `packages/chatgpt-web/test/lifecycle.test.ts`
-- Modify: `docs/providers.md`
 
 **Interfaces:**
 - Consumes: `OmpTurnBroker`, secure paths, package CLI, and source tunnel behavior.
@@ -1070,7 +1087,7 @@ git commit -m "feat: bind ChatGPT Web MCP calls to OMP turns"
 
 - [ ] **Step 1: Define the tunnel artifact manifest.**
 
-Pin `openai/tunnel-client` `0.0.10` in a checked-in manifest for exactly `darwin-arm64`, `darwin-x64`, `linux-arm64`, `linux-x64`, `win32-arm64`, and `win32-x64`, with one URL, SHA-256, executable name, expected version, and expected native file identity per tuple. The manifest is complete before implementation begins; an absent tuple, mismatched checksum/version/file identity, or unsupported host fails closed. Download into a temporary file, verify SHA-256 before rename, validate executable identity/version with no-follow/reparse-safe handles, and make the installed file non-writable by ordinary runtime code where the platform permits. Re-check parent and final path identity immediately before every launch/spawn; reject symlink/junction/reparse swaps. The notice generator must include the actual bundled runtime/dependency versions.
+Pin `openai/tunnel-client` `0.0.10` in a checked-in typed `TUNNEL_ARTIFACTS` constant owned by `packages/chatgpt-web/src/mcp/tunnel.ts` for exactly `darwin-arm64`, `darwin-x64`, `linux-arm64`, `linux-x64`, `win32-arm64`, and `win32-x64`, with one URL, SHA-256, executable name, and semantic/binary version per tuple. The manifest is complete before implementation begins; an absent tuple, mismatched checksum/version, or unsupported host fails closed. `packages/chatgpt-web/test/mcp/tunnel.test.ts` must assert all six entries and their closed schema. Download into a temporary file, verify SHA-256 before rename, validate executable version and no-follow/reparse-safe path, atomically install it, then capture the local opened native file identity in owner-controlled install metadata/held handle; the captured identity plus digest/version must match immediately before every launch/spawn. Make the installed file non-writable by ordinary runtime code where the platform permits, re-check parent and final path identity, and reject symlink/junction/reparse swaps. The notice generator must include the actual bundled runtime/dependency versions.
 
 - [ ] **Step 2: Implement broker-first tunnel lifecycle.**
 The `runtime-key` handoff is handle-bound: `consumeTunnelSpawnEnvironment()` reads the validated key through its held native handle and creates the opaque `NativeLaunchEnvironment`; a later tunnel operation cannot reopen the configured pathname. If the pinned client only accepts a path-based `file:` option, the package must launch the MCP entry through the native argv/environment adapter that materializes the key inside the owned child, or fail closed; post-launch identity checks are not a substitute for pre-open binding.
@@ -1103,7 +1120,7 @@ Expected: lifecycle tests pass without downloading a real tunnel binary or conta
 - [ ] **Step 7: Commit full-mode lifecycle.**
 
 ```text
-git add packages/chatgpt-web/src/mcp/tunnel.ts packages/chatgpt-web/src/config.ts packages/chatgpt-web/src/cli.ts packages/chatgpt-web/test docs/providers.md
+git add packages/chatgpt-web/src/mcp/runtime-command.ts packages/chatgpt-web/src/mcp/tunnel.ts packages/chatgpt-web/src/config.ts packages/chatgpt-web/src/cli.ts packages/chatgpt-web/test/mcp/runtime-command.test.ts packages/chatgpt-web/test/mcp/tunnel.test.ts packages/chatgpt-web/test/lifecycle.test.ts
 git commit -m "feat: add ChatGPT Web full-mode lifecycle"
 ```
 
@@ -1166,7 +1183,7 @@ Record a schema-valid, redacted JSON evidence file under the ignored local evide
 - [ ] **Step 5: Commit full-mode validation.**
 
 ```text
-git add packages/chatgpt-web packages/coding-agent
+git add packages/coding-agent/test/chatgpt-web-full-mode.test.ts packages/chatgpt-web/test/full-mode-e2e.test.ts packages/chatgpt-web/test/full-mode-evidence.test.ts packages/chatgpt-web/src/provider/stream.ts packages/chatgpt-web/src/mcp/server.ts
 git commit -m "test: validate ChatGPT Web full mode with OMP tools"
 ```
 
@@ -1190,8 +1207,10 @@ Launcher work is blocked until this provider-first acceptance matrix passes.
 - Create: `packages/chatgpt-web-launcher/test/design-contract.test.cjs`
 - Create: `packages/chatgpt-web-launcher/test/runtime-host.test.cjs`
 - Modify: `packages/chatgpt-web/src/runtime/host.ts`
+- Create: `packages/chatgpt-web/src/runtime/launcher-host.ts` — authenticated host-RPC client for browser login/lease and descriptor refresh; it never accepts or returns a path, endpoint, websocket, or raw transport.
 Test descriptor schema/owner/epoch/PID validation, per-request nonce/sequence replay and reordering, helper executable/script path identity/hash mismatch, arbitrary existing helper rejection, post-validation replacement, symlink/reparse and broad-ACL rejection, minimal child environment, forged/stale control tokens, direct unauthenticated CDP enumeration/attachment rejection, absence of endpoint/attach/evaluate/cookies/storageState operations and fields, five leases shared by two clients, sixth rejection, lease close idempotence, cancellation isolation, persistent partition lifecycle, process exit, and no secret exposure through descriptor/preload/control responses. Also test `BrowserWindow` security settings, CSP, packaged-origin navigation/redirect/window-open rejection, disabled webviews/remote access, and the absence of raw CDP/control secrets in renderer/IPC payloads.
-- Create: package assets/icons required by the selected electron-builder targets.
+The browser-host fixture must stub `launchVerifiedBrowser()` and the package-private byte-pipe adapter, then assert that only the native-prepared executable identity, owner-controlled profile handle, inherited pipe, and sanitized environment reach the host. It must compile and exercise the pinned Playwright `ConnectOverCDPTransport` overload; no caller path, `launchPersistentContext`, endpoint URL, websocket, TCP listener, or raw custom transport is accepted at the BrowserHost boundary. A native descendant/identity fixture must bind the launched child before lease admission and reject ambiguous or replaced children.
+- Create: `packages/chatgpt-web-launcher/assets/icon.png` and `packages/chatgpt-web-launcher/assets/icon.ico` required by the selected electron-builder targets.
 - Modify: `bun.lock` — refresh after the launcher manifest and runtime dependency graph are finalized.
 
 **Interfaces:**
@@ -1199,10 +1218,10 @@ Test descriptor schema/owner/epoch/PID validation, per-request nonce/sequence re
 - Produces a launcher-owned browser host that keeps Playwright/CDP internal and exposes only authenticated per-lease page operations to the provider runtime.
 
 - [ ] **Step 1: Create the isolated launcher package and build contract.**
+Create `@oh-my-pi/pi-chatgpt-web-launcher` at the current OMP workspace version (`17.2.4` baseline) with OMP-owned product metadata, `engines.bun >= 1.3.14`, and scripts `check`, `check:types` (`tsgo -p tsconfig.json --noEmit`), `test` (`node --test test/*.test.cjs`, with CJS tests outside the TypeScript include), `build`, `build:runtime`, and `package`. Declare runtime `react: "catalog:"`, `react-dom: "catalog:"`, `playwright-core: "1.62.1"`, and `@oh-my-pi/pi-natives: "catalog:"`; the launcher must not rely on provider/root hoisting for either browser transport or native loader resolution. Declare dev `@types/react: "catalog:"`, `@types/react-dom: "catalog:"`, `typescript: "catalog:"`, `vite: "catalog:"`, and `@types/bun: "catalog:"` so the isolated package check resolves the workspace's React/Vite/Bun types without root-only lookup. Pin package-local Electron integration to `electron` `41.7.1`, `electron-builder` `26.8.1`, `motion` `12.42.2`, `@vitejs/plugin-react` `5.2.0`, and `@types/node` `22.10.2`; the package-contract test must assert those manifest entries, the exact Playwright/native versions, and the resolved lockfile/package-resource layout. Keep Electron/electron-builder package-local and isolated; do not add Electron to `packages/coding-agent`. Include `assets/icon.png`, `assets/icon.ico` where required, renderer CSS/assets, and a package-local runtime-bundle contract.
 
-Create `@oh-my-pi/pi-chatgpt-web-launcher` at the current OMP workspace version (`17.2.4` baseline) with OMP-owned product metadata, `engines.bun >= 1.3.14`, and scripts `check`, `check:types` (`tsgo -p tsconfig.json --noEmit`), `test` (`node --test test/*.test.cjs`, with CJS tests outside the TypeScript include), `build`, `build:runtime`, and `package`. Declare runtime `react: "catalog:"` and `react-dom: "catalog:"`; declare dev `@types/react: "catalog:"`, `@types/react-dom: "catalog:"`, `typescript: "catalog:"`, `vite: "catalog:"`, and `@types/bun: "catalog:"` so the isolated package check resolves the workspace's React/Vite/Bun types without root-only lookup. Pin package-local Electron integration to `electron` `41.7.1`, `electron-builder` `26.8.1`, `motion` `12.42.2`, `@vitejs/plugin-react` `5.2.0`, and `@types/node` `22.10.2`; the package-contract test must assert those manifest entries and the resolved lockfile versions. Keep Electron/electron-builder package-local and isolated; do not add Electron to `packages/coding-agent`. Include `assets/icon.png`, `assets/icon.ico` where required, renderer CSS/assets, and a package-local runtime-bundle contract.
+The launcher must start and own the persistent browser through the same native verified-browser/private-pipe adapter used by the provider; it must not expose `remote-debugging-port`, `/json/version`, a websocket URL, an endpoint-based attach, a raw endpoint, or an attach capability. The host adapts the inherited byte pipe to the pinned Playwright v1.62.1 `ConnectOverCDPTransport` contract and calls `chromium.connectOverCDP(transport, { isLocal: true, noDefaults: true })` only inside the Electron main/browser-host process. This overload is compile-tested against the pinned package; any package upgrade that removes it fails the build rather than falling back to a URL/path spawn. Add adversarial direct-enumeration/attachment tests and assert the renderer, provider, descriptor, and control responses contain no endpoint or reusable channel.
 
-The launcher must start and own the persistent browser through Playwright behind the same native verified-browser/private-pipe adapter; it must not expose `remote-debugging-port`, `/json/version`, a websocket URL, an endpoint-based attach, a raw endpoint, or an attach capability. A package-private `chromium.connectOverCDP(transport)` call is allowed only for the exact `ConnectOverCDPTransport` over the native owned pipe, with no URL/TCP listener, and is never exposed to the renderer, provider, descriptor, or control API. If Chromium protocol input is unavoidable, use only this Playwright-owned in-process/pipe channel and expose typed `cdp-input.cjs` operations over the authenticated allowlist; never bind a TCP debugging server. Add adversarial direct-enumeration/attachment tests and assert the renderer, provider, descriptor, and control responses contain no endpoint or reusable channel.
 
 - [ ] **Step 2: Port the persistent browser host as an authenticated RPC service.**
 
@@ -1228,7 +1247,7 @@ Expected: the package type boundary and authenticated browser transport pass wit
 - [ ] **Step 5: Commit the launcher browser boundary separately.**
 
 ```text
-git add packages/chatgpt-web-launcher packages/chatgpt-web/src/runtime/host.ts packages/chatgpt-web/src/runtime/launcher-host.ts
+git add packages/chatgpt-web-launcher/package.json packages/chatgpt-web-launcher/tsconfig.json packages/chatgpt-web-launcher/electron/main.cjs packages/chatgpt-web-launcher/electron/browser-host.cjs packages/chatgpt-web-launcher/electron/control-server.cjs packages/chatgpt-web-launcher/electron/cdp-input.cjs packages/chatgpt-web-launcher/src/types.ts packages/chatgpt-web-launcher/test/browser-host.test.cjs packages/chatgpt-web-launcher/test/control-server.test.cjs packages/chatgpt-web-launcher/test/cdp-input.test.cjs packages/chatgpt-web-launcher/test/design-contract.test.cjs packages/chatgpt-web-launcher/test/runtime-host.test.cjs packages/chatgpt-web-launcher/assets/icon.png packages/chatgpt-web-launcher/assets/icon.ico packages/chatgpt-web/src/runtime/host.ts packages/chatgpt-web/src/runtime/launcher-host.ts bun.lock
 git commit -m "feat: add authenticated ChatGPT Web launcher browser host"
 ```
 
@@ -1243,8 +1262,8 @@ git commit -m "feat: add authenticated ChatGPT Web launcher browser host"
 - Create: `packages/chatgpt-web-launcher/test/stale-identifiers.test.cjs` — package-wide copied-name/ID/env scan with license-path allowlist.
 - Modify: `bun.lock` — refresh after the finalized launcher/runtime manifest graph.
 - Modify: `packages/chatgpt-web-launcher/electron/control-server.cjs`
-- Create: `packages/chatgpt-web-launcher/src/App.tsx`, `packages/chatgpt-web-launcher/electron/preload.cjs`, `packages/chatgpt-web-launcher/src/i18n.ts`, `packages/chatgpt-web-launcher/src/styles.css`, `packages/chatgpt-web-launcher/vite.config.ts`, and `packages/chatgpt-web-launcher/index.html`
-- Create: `packages/chatgpt-web-launcher/scripts/build-runtime-bundle.ts`, `scripts/prepare-runtime.cjs`, and `scripts/package.cjs`
+- Create: `packages/chatgpt-web-launcher/src/main.tsx`, `packages/chatgpt-web-launcher/src/App.tsx`, `packages/chatgpt-web-launcher/electron/preload.cjs`, `packages/chatgpt-web-launcher/src/i18n.ts`, `packages/chatgpt-web-launcher/src/icons.tsx`, `packages/chatgpt-web-launcher/src/tokens.css`, `packages/chatgpt-web-launcher/src/styles.css`, `packages/chatgpt-web-launcher/vite.config.ts`, and `packages/chatgpt-web-launcher/index.html`
+- Create: `packages/chatgpt-web-launcher/scripts/build-runtime-bundle.ts`, `packages/chatgpt-web-launcher/scripts/prepare-runtime.cjs`, `packages/chatgpt-web-launcher/scripts/package.cjs`, and `packages/chatgpt-web-launcher/scripts/smoke-package.cjs`
 - Create: `packages/chatgpt-web-launcher/test/{atomic-file,autostart,browser-helper-verifier,logging,packaging-contract,runtime-install,runtime-supervisor,state,window-state}.test.cjs`
 - Create: launcher assets/icons and runtime bundle metadata.
 - Modify: `packages/chatgpt-web/src/runtime/launcher-host.ts` only for finalized control/schema compatibility.
@@ -1256,7 +1275,9 @@ git commit -m "feat: add authenticated ChatGPT Web launcher browser host"
 - [ ] **Step 1: Port runtime supervision without Codex coupling.**
 
 Create the launcher manifest with `"name": "@oh-my-pi/pi-chatgpt-web-launcher"`, the current OMP version (`17.2.4` baseline), `appId: "sh.omp.chatgpt-web"`, `productName: "OMP ChatGPT Web"`, `artifactName: "omp-chatgpt-web-${version}-${os}-${arch}.${ext}"`, and only the `OMP_CHATGPT_WEB_*` environment namespace. Add `"@oh-my-pi/pi-chatgpt-web": "workspace:*"` as the explicit runtime dependency; the launcher UI may not import coding-agent. Adapt source helpers only after removing copied Codex URLs, names, IDs, `CODEX_HOME`, integration journals, route setup, catalog monitors, and `CODEX_WEB_GPT_*` environment names. The supervisor starts the provider runtime epoch, binds the broker once, calls `prepareTunnelSpawn()` for each tunnel start/restart, launches through `launchVerifiedProcess()` to retain the opaque `NativeOwnedProcess`, waits for versioned health/handshake identity, drains before replacement, uses bounded restart recovery, and reports crash loops explicitly. Every control request requires the random bearer token and expected epoch plus native owner-local peer/connection/descendant proof, complete identity equality, and a `currentPeer()` re-check; the token is supplemental and a same-user process with a stolen token is rejected.
-`scripts/build-runtime-bundle.ts` has explicit Bun.build entrypoints for `packages/chatgpt-web/src/cli.ts` (lifecycle/`mcp`) and `packages/chatgpt-web/src/mcp/main.ts` where a separate child entry is required. Set `packages: "bundle"` so provider and OMP utility dependencies are actually embedded; set `external` to exactly `["playwright-core", "@modelcontextprotocol/sdk"]` only when the selected runtime requires installed copies, and copy an exact runtime `package.json`/lockfile for those externals. Do not use `packages: "external"` or an unbounded external list, because that leaves the provider graph unresolved offline. The bundle smoke test must resolve the provider CLI and MCP entrypoints without importing `@oh-my-pi/pi-coding-agent`; no launcher/UI code is allowed to become a provider dependency.
+Add `"smoke:package": "node scripts/smoke-package.cjs"` to the launcher manifest. `scripts/smoke-package.cjs` must locate the deterministic per-OS artifact in the package output, run it with an isolated temporary application directory and `--smoke`, wait for the authenticated readiness marker, verify clean shutdown and runtime-install persistence, reject endpoint/credential/path leakage in captured output, and remove the temporary directory; it must never require a live account, tunnel, browser session, or network.
+`scripts/build-runtime-bundle.ts` has explicit Bun.build entrypoints for `packages/chatgpt-web/src/cli.ts` (lifecycle/`mcp`) and `packages/chatgpt-web/src/mcp/main.ts` where a separate child entry is required. Set `packages: "bundle"` so provider and OMP utility dependencies are actually embedded; the only permitted externals are `["playwright-core", "@modelcontextprotocol/sdk", "@oh-my-pi/pi-natives"]` when the selected runtime requires installed copies. For `@oh-my-pi/pi-natives`, copy the exact package plus the target leaf package/resource layout (`native/index.js`, loader state, embedded metadata, and the verified `.node` addon) without flattening or rewriting loader paths, and copy exact runtime manifests/lockfile entries for all externals. Verify native package/version, ABI, architecture, hash, no-follow identity, and owner ACL before startup. Do not use `packages: "external"` or an unbounded external list, because that leaves the provider graph unresolved offline or breaks native loader resolution. The bundle smoke test must resolve the provider CLI and MCP entrypoints without importing `@oh-my-pi/pi-coding-agent`; no launcher/UI code is allowed to become a provider dependency.
+`prepare-runtime.cjs` must resolve `ompRoot = path.resolve(launcherRoot, "../..")`, `providerRoot = path.join(ompRoot, "packages", "chatgpt-web")`, and `launcherRoot` from the script location; it must pass those explicit roots to the local bundler, copy only the provider's declared CLI/MCP entrypoints and launcher-owned runtime metadata, and copy `providerRoot/LICENSES/NOTICE.md` plus `providerRoot/LICENSES/OpenCodex-MIT.txt` into the launcher runtime's `LICENSES` extra-resources directory. When a Bun runtime is redistributed, generate the launcher-owned `LICENSES/Bun-runtime.md` from the exact bundled version and include it in the packaged artifact; `runtime-bundle.test.cjs` and `smoke-package.cjs` must verify these notices exist, are attributable to the actual bundle, and contain no stale source paths. Do not retain the source repository's `path.resolve(launcherRoot, "..")` assumption, `generate-third-party-notices` step, root-license lookup, or any source-relative Codex path.
 Keep the launcher manifest `"private": true`; it is a bundled desktop artifact, not an npm-published package. Its only workspace consumer is the local provider/runtime bundle, and release packaging must not add a registry publish step or expose private runtime paths/credentials in package metadata.
 The runtime bundle must include exactly one verified `@oh-my-pi/pi-natives` native addon/resource set for each `win32/darwin/linux` × `x64/arm64` target, with target-specific hash, ABI, owner/ACL, no-follow path, and loader metadata checked before startup. Bundle smoke must load the local-peer/file/process APIs on every supported tuple, reject missing or mismatched addons, and never fall back to Node handles, UID/mode checks, or a different architecture's binary. If runtime resources are unpacked, reject traversal, symlink, junction, and hardlink entries before extraction.
 
@@ -1274,6 +1295,7 @@ Use an allowlisted structured logger: stage enum, bounded duration/counts, exit 
 
 The stale-identifier test must reject `codex-web-gpt`, `dev.codexwebgpt`, `CODEX_WEB_GPT_`, `CODEX_HOME`, copied Codex product labels, and source-specific route names across launcher/runtime manifests, source, bundle metadata, renderer, preload, and generated artifacts; only deliberate third-party license/attribution files are allowlisted.
 Cover atomic-file behavior, browser-helper verification, state/window state, input allow-list, native owner-local listener/peer proof, complete identity/currentPeer checks, reparent/exec/PID-reuse and same-user stolen-token rejection, per-request nonce/sequence replay, unknown RPC operation/evaluate/cookies/storageState/raw-CDP rejection, logging, runtime installation, supervisor process ordering/drain/restart, lifecycle generation races, helper arbitrary-path/link/replacement rejection, minimal child environments, packaging assets/runtime resources, AppImage/ASAR paths, IPC allow-list, package-wide stale-identifier scan, and high-entropy canaries for cookies, control tokens, runtime keys, profile IDs/paths, prompt secrets, URL queries, authorization headers, and unknown-format secrets. Scan disk/rotated logs, in-memory/UI payloads, returned health/preload data, stdout, and stderr after every failure path.
+The package smoke must exercise the actual produced artifact on each target OS: install into a fresh temporary application root, start with the authenticated `--smoke` mode, wait for the durable readiness marker, verify runtime-bundle identity and clean supervisor shutdown, and reject endpoint/credential/path leakage. A package that only exists on disk or passes an unpacked-file test is insufficient.
 
 - [ ] **Step 5: Build and package on each target OS.**
 
@@ -1284,6 +1306,7 @@ bun --cwd=packages/chatgpt-web-launcher run build
 bun --cwd=packages/chatgpt-web-launcher run test
 bun --cwd=packages/chatgpt-web-launcher run build:runtime
 bun --cwd=packages/chatgpt-web-launcher run package
+bun --cwd=packages/chatgpt-web-launcher run smoke:package
 ```
 
 Expected: unsigned local package artifacts build with required icons/runtime resources on Windows, macOS, and Linux CI runners. No signed release, account credential, live tunnel, or upstream action is required.
@@ -1291,7 +1314,7 @@ Expected: unsigned local package artifacts build with required icons/runtime res
 - [ ] **Step 6: Commit launcher supervision and packaging separately.**
 
 ```text
-git add packages/chatgpt-web-launcher packages/chatgpt-web/src/runtime/launcher-host.ts
+git add packages/chatgpt-web-launcher/package.json packages/chatgpt-web-launcher/electron/autostart.cjs packages/chatgpt-web-launcher/electron/logging.cjs packages/chatgpt-web-launcher/electron/process-tree.cjs packages/chatgpt-web-launcher/electron/runtime.cjs packages/chatgpt-web-launcher/electron/state.cjs packages/chatgpt-web-launcher/electron/window-state.cjs packages/chatgpt-web-launcher/electron/browser-state.cjs packages/chatgpt-web-launcher/electron/browser-helper-verifier.cjs packages/chatgpt-web-launcher/electron/atomic-file.cjs packages/chatgpt-web-launcher/electron/runtime-command.cjs packages/chatgpt-web-launcher/electron/runtime-install.cjs packages/chatgpt-web-launcher/electron/runtime-supervisor.cjs packages/chatgpt-web-launcher/electron/control-server.cjs packages/chatgpt-web-launcher/src/main.tsx packages/chatgpt-web-launcher/src/App.tsx packages/chatgpt-web-launcher/electron/preload.cjs packages/chatgpt-web-launcher/src/i18n.ts packages/chatgpt-web-launcher/src/icons.tsx packages/chatgpt-web-launcher/src/tokens.css packages/chatgpt-web-launcher/src/styles.css packages/chatgpt-web-launcher/vite.config.ts packages/chatgpt-web-launcher/index.html packages/chatgpt-web-launcher/scripts/build-runtime-bundle.ts packages/chatgpt-web-launcher/scripts/prepare-runtime.cjs packages/chatgpt-web-launcher/scripts/package.cjs packages/chatgpt-web-launcher/scripts/smoke-package.cjs packages/chatgpt-web-launcher/test/runtime-bundle.test.cjs packages/chatgpt-web-launcher/test/stale-identifiers.test.cjs packages/chatgpt-web-launcher/test/atomic-file.test.cjs packages/chatgpt-web-launcher/test/autostart.test.cjs packages/chatgpt-web-launcher/test/browser-helper-verifier.test.cjs packages/chatgpt-web-launcher/test/logging.test.cjs packages/chatgpt-web-launcher/test/packaging-contract.test.cjs packages/chatgpt-web-launcher/test/runtime-install.test.cjs packages/chatgpt-web-launcher/test/runtime-supervisor.test.cjs packages/chatgpt-web-launcher/test/state.test.cjs packages/chatgpt-web-launcher/test/window-state.test.cjs packages/chatgpt-web-launcher/assets/icon.png packages/chatgpt-web-launcher/assets/icon.ico packages/chatgpt-web/src/runtime/launcher-host.ts bun.lock
 git commit -m "feat: add ChatGPT Web launcher supervision and packaging"
 ```
 
@@ -1312,7 +1335,7 @@ The launcher remains independently revertible from the native provider milestone
 - Create: `packages/chatgpt-web/LICENSES/OpenCodex-MIT.txt`
 - Create conditionally: `packages/chatgpt-web/LICENSES/Bun-runtime.md` — generated from the actual redistributed Bun/runtime version only when the launcher bundles one; never copy a stale source notice.
 - Modify: `.github/workflows/ci.yml`
-- Create: `.github/workflows/release.yml` — define the tag/manual release workflow and its complete native/launcher matrix: Linux x64 baseline/modern plus arm64 and musl leaves, macOS x64/arm64, Windows x64/arm64, native ABI/hash/loader checks, launcher package artifacts, and the six native leaf-package manifests. Publish only after all matrix jobs and package/license checks pass; keep credentials out of logs and never publish a target whose loader metadata was not generated from that exact artifact.
+- Create: `.github/workflows/release.yml` — define the tag/manual release workflow and its complete native/launcher matrix: Linux x64 baseline/modern plus arm64, a non-published musl build-only/staged verification, macOS x64/arm64, Windows x64/arm64, native ABI/hash/loader checks, launcher package artifacts, and exactly six publishable native leaf-package manifests (`linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, `win32-x64`, `win32-arm64`). Publish only after all matrix jobs and package/license checks pass; keep credentials out of logs and never publish a target whose loader metadata was not generated from that exact artifact.
 - Modify: `package.json` — add the package check/build/test scripts used by local and CI commands.
 
 **Interfaces:**
@@ -1343,6 +1366,7 @@ Copy/adapt the source notices and add every dependency actually present in `bun.
 - [ ] **Step 4: Add focused CI jobs.**
 
 Run package type checks/unit tests on the existing OMP CI matrix. Add an explicit native/provider matrix for Linux, macOS, and Windows x64 plus arm64/cross-compile jobs: build the Rust N-API addon, regenerate bindings, run `packages/natives/test/local-peer.test.ts`, load the no-follow/file-identity and verified browser-launch subset in browser-only mode while excluding only broker peer-listener and tunnel process-control symbols, and exercise full peer/process APIs on supported targets. Unsupported API, missing addon, wrong ABI, and unsupported architecture must fail closed rather than falling back to Node, UID/mode checks, or a wrong binary. Add browser fixtures without requiring ChatGPT credentials. Add negative security fixtures for replay/unknown RPC operations, tool-hash/schema drift including every OMP `Tool` field, marker/profile swaps, path replacement, broker peer/connector isolation, child/grandchild environment canaries, approval-policy precedence, stale launcher identifiers, archive traversal/symlink/hardlink extraction, and autostart cleanup. Gate live browser and tunnel smoke behind an explicit local/manual workflow; never put account secrets in the normal PR workflow.
+Each supported OS/arch job must provision the same pinned Chromium test artifact, expose its verified executable through `CHATGPT_WEB_TEST_CHROMIUM`, and run `bun test packages/chatgpt-web/test/native-browser-transport.integration.test.ts`. That gate must exercise actual OS handle/file-descriptor inheritance, Chromium's `--remote-debugging-pipe` framing, `Browser.getVersion` or `about:blank`, and child/pipe teardown; it is account-, connector-, and network-free. Musl remains build-only/staged and does not publish a separate runtime or native leaf.
 
 - [ ] **Step 5: Run final local validation.**
 
@@ -1363,7 +1387,7 @@ For the launcher, also run its package check/build/test/package commands from Ta
 - [ ] **Step 6: Commit documentation and CI separately.**
 
 ```text
-git add packages/chatgpt-web packages/chatgpt-web-launcher docs .github/workflows package.json bun.lock
+git add docs/models.md docs/providers.md docs/user-facing-packages.md packages/chatgpt-web/README.md packages/chatgpt-web/docs/security-model.md packages/chatgpt-web/docs/architecture.md packages/chatgpt-web/LICENSES/NOTICE.md packages/chatgpt-web/LICENSES/OpenCodex-MIT.txt .github/workflows/ci.yml .github/workflows/release.yml package.json bun.lock
 git commit -m "docs: document and validate ChatGPT Web integration"
 ```
 
@@ -1412,7 +1436,7 @@ Only after the local branch is green and the packet is reviewed by the project o
 - [ ] `omp chatgpt-web enable` activates exactly one extension path and package dependency/lock entries are frozen-valid.
 - [ ] The native model picker lists all non-Pro routes after login and Pro only when entitled.
 - [ ] Text, reasoning, image, cancellation, restart, and five-way parallel browser-only scenarios pass.
-- [ ] Browser-only and full-mode Chrome login/lease starts use the digest-bound native verified executable/profile handle, private pipe transport, and owned descendant teardown; path-based Playwright spawn, endpoint fallback, replacement, orphan, PID-reuse, and stale-owner tests fail closed.
+- [ ] Browser-only and full-mode Chrome login/lease starts use the digest/version-bound native verified executable/profile handle, the inherited private pipe adapted to the pinned Playwright `ConnectOverCDPTransport` contract, and owned descendant teardown; arbitrary/untrusted path-based spawn, endpoint/URL fallback, replacement, orphan, PID-reuse, stale-owner, and direct-enumeration/attachment tests fail closed, while no executable/profile path, endpoint, or reusable channel crosses the host/provider/RPC boundary.
 - [ ] A sixth concurrent browser turn fails explicitly; browser-only/Pro prompts contain no local tool schemas or turn token.
 - [ ] Full-mode issues a separate model-facing turn token, requires the dedicated `chatgpt_web_bind_turn` handshake before action, and keeps control/bootstrap/connector secrets off the model channel.
 - [ ] Full-mode MCP calls map only to the current canonical OMP tool set, reject schema/hash drift and alias collisions, isolate two concurrent connector sessions, preserve bounded batches, and require OMP approval.
