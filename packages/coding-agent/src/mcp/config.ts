@@ -3,10 +3,11 @@
  *
  * Uses the capability system to load MCP servers from multiple sources.
  */
+import * as path from "node:path";
 import { getMCPConfigPath } from "@oh-my-pi/pi-utils";
 import { mcpCapability } from "../capability/mcp";
 import type { SourceMeta } from "../capability/types";
-import { resolveActivationProjectRootSync } from "../config/activation-paths";
+import { resolveExistingActivationProjectRootSync } from "../config/activation-paths";
 import type { MCPServer } from "../discovery";
 import { loadCapability } from "../discovery";
 import { readDisabledServers, readEnabledServers, readMCPConfigFile } from "./config-writer";
@@ -125,7 +126,7 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 	const filterExa = options?.filterExa ?? true;
 	const filterBrowser = options?.filterBrowser ?? false;
 	const userPath = getMCPConfigPath("user", cwd);
-	const projectPath = getMCPConfigPath("project", resolveActivationProjectRootSync(cwd));
+	const projectPath = getMCPConfigPath("project", resolveExistingActivationProjectRootSync(cwd) ?? path.resolve(cwd));
 	const [userDisabledServers, forceEnabledServers, projectConfig] = await Promise.all([
 		readDisabledServers(userPath).then(names => new Set(names)),
 		readEnabledServers(userPath).then(names => new Set(names)),

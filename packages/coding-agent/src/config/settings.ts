@@ -45,7 +45,6 @@ import {
 	type ActivationScope,
 	type ActivationTargetInfo,
 	type ActivationWriteTarget,
-	canUseProjectActivation,
 	getDefaultActivationScope,
 	resolveActivationTarget,
 } from "./activation-paths";
@@ -1236,10 +1235,6 @@ export class Settings {
 			return normalizeStringArrayForSettings(getByPath(this.#global, ["disabledProviders"])).sort();
 		}
 		return (this.get("disabledProviders") as string[]) ?? [];
-	}
-
-	canUseProjectActivation(cwd: string = this.#cwd): boolean {
-		return canUseProjectActivation(cwd, this.#agentDir);
 	}
 
 	#resolveActivationTarget(cwd: string = this.#cwd, scope?: ActivationScope): ActivationTargetInfo {

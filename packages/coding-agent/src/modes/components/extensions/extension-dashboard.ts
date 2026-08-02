@@ -13,6 +13,7 @@
  * - Wheel over the inspector: scroll the detail pane
  * - Esc: clear search (if active) then close
  */
+import * as path from "node:path";
 import {
 	type Component,
 	matchesKey,
@@ -25,6 +26,7 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
+import { resolveExistingActivationProjectRootSync } from "../../../config/activation-paths";
 import {
 	type ActivationScope,
 	type ActivationWriteTarget,
@@ -33,12 +35,7 @@ import {
 	Settings,
 } from "../../../config/settings";
 import { syncDisabledProviders as syncCapabilityDisabledProviders } from "../../../discovery";
-import {
-	getProjectMCPConfigPath,
-	setMcpServerEnabled,
-	setServerDisabled,
-	setServerForceEnabled,
-} from "../../../mcp/config-writer";
+import { setMcpServerEnabled, setServerDisabled, setServerForceEnabled } from "../../../mcp/config-writer";
 import { getTabBarTheme } from "../../../modes/shared";
 import { theme } from "../../../modes/theme/theme";
 import { matchesAppInterrupt } from "../../../modes/utils/keybinding-matchers";
@@ -142,7 +139,7 @@ export class ExtensionDashboard implements Component {
 
 	async #init(): Promise<void> {
 		const sm = this.settings ?? (await Settings.init());
-		this.#canUseProjectScope = sm.canUseProjectActivation(this.cwd);
+		this.#canUseProjectScope = sm.getActivationWriteTarget(this.cwd, "project") === "project";
 		this.#activationScope = sm.getDefaultActivationScope(this.cwd);
 		const disabledIds = sm.getActivationDisabledExtensions(this.#activationScope);
 		this.#state = this.#withActivationMetadata(await createInitialState(this.cwd, disabledIds));
@@ -486,7 +483,10 @@ export class ExtensionDashboard implements Component {
 		const extension = this.#state.extensions.find(item => item.id === extensionId);
 		if (!extension) return;
 		const name = extensionId.slice("mcp:".length);
-		const projectPath = getProjectMCPConfigPath(this.cwd);
+		const projectPath = getMCPConfigPath(
+			"project",
+			resolveExistingActivationProjectRootSync(this.cwd) ?? path.resolve(this.cwd),
+		);
 		try {
 			await setMcpServerEnabled({
 				userPath: getMCPConfigPath("user", this.cwd),
@@ -515,7 +515,10 @@ export class ExtensionDashboard implements Component {
 				mode: "tri-state",
 				rowDisabled: extension.state === "disabled",
 			});
-			const projectPath = getProjectMCPConfigPath(this.cwd);
+			const projectPath = getMCPConfigPath(
+				"project",
+				resolveExistingActivationProjectRootSync(this.cwd) ?? path.resolve(this.cwd),
+			);
 			void Promise.all([
 				setServerDisabled(projectPath, extension.name, next === "disabled"),
 				setServerForceEnabled(projectPath, extension.name, next === "enabled"),

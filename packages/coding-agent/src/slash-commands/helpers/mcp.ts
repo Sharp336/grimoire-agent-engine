@@ -1,10 +1,11 @@
+import * as path from "node:path";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
+import { resolveExistingActivationProjectRootSync } from "../../config/activation-paths";
 import { connectToServer, disconnectServer, listPrompts, listResources, listTools } from "../../mcp/client";
 import { isMCPServerEffectivelyEnabled } from "../../mcp/config";
 import {
 	addMCPServer,
-	getProjectMCPConfigPath,
 	readDisabledServers,
 	readEnabledServers,
 	readMCPConfigFile,
@@ -93,7 +94,7 @@ async function getMcpConfiguredServers(
 ): Promise<ConfiguredMcpServer[]> {
 	const cwd = runtime.cwd;
 	const userPath = getMCPConfigPath("user", cwd);
-	const projectPath = getProjectMCPConfigPath(cwd);
+	const projectPath = getMCPConfigPath("project", resolveExistingActivationProjectRootSync(cwd) ?? path.resolve(cwd));
 	const projectEnabled = runtime.settings.get("mcp.enableProjectConfig") !== false;
 	const [userConfig, projectConfig, userDisabled, userEnabled, projectDisabled, projectForceEnabled] =
 		await Promise.all([
@@ -366,7 +367,12 @@ async function handleAddCommand(rest: string, runtime: SlashCommandRuntime): Pro
 	}
 	try {
 		const filePath =
-			parsed.scope === "project" ? getProjectMCPConfigPath(runtime.cwd) : getMCPConfigPath("user", runtime.cwd);
+			parsed.scope === "project"
+				? getMCPConfigPath(
+						"project",
+						resolveExistingActivationProjectRootSync(runtime.cwd) ?? path.resolve(runtime.cwd),
+					)
+				: getMCPConfigPath("user", runtime.cwd);
 		await addMCPServer(filePath, parsed.name, config);
 		await runtime.output(`Added MCP server "${parsed.name}" (${parsed.scope}).`);
 		return commandConsumed();
@@ -462,7 +468,10 @@ async function handleEnableDisableCommand(
 	const enabled = verb === "enable";
 	try {
 		const userPath = getMCPConfigPath("user", runtime.cwd);
-		const projectPath = getProjectMCPConfigPath(runtime.cwd);
+		const projectPath = getMCPConfigPath(
+			"project",
+			resolveExistingActivationProjectRootSync(runtime.cwd) ?? path.resolve(runtime.cwd),
+		);
 		const projectEnabled = runtime.settings.get("mcp.enableProjectConfig") !== false;
 		const [userConfig, projectConfig] = await Promise.all([
 			readMCPConfigFile(userPath),
@@ -498,7 +507,12 @@ async function handleRemoveCommand(rest: string, runtime: SlashCommandRuntime): 
 	}
 	try {
 		const filePath =
-			parsed.scope === "project" ? getProjectMCPConfigPath(runtime.cwd) : getMCPConfigPath("user", runtime.cwd);
+			parsed.scope === "project"
+				? getMCPConfigPath(
+						"project",
+						resolveExistingActivationProjectRootSync(runtime.cwd) ?? path.resolve(runtime.cwd),
+					)
+				: getMCPConfigPath("user", runtime.cwd);
 		await removeMCPServer(filePath, parsed.name);
 		await runtime.output(`Removed server "${parsed.name}" from ${parsed.scope} config.`);
 		return commandConsumed();

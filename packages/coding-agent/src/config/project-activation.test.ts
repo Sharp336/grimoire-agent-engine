@@ -63,7 +63,7 @@ describe("project activation settings", () => {
 		const projectSettings = await Settings.loadIsolated({ cwd: projectCwd, agentDir: projectAgentDir });
 		const projectConfigPath = path.join(projectCwd, ".omp", "config.yml");
 
-		expect(projectSettings.canUseProjectActivation(projectCwd)).toBe(true);
+		expect(projectSettings.getActivationWriteTarget(projectCwd, "project")).toBe("project");
 		expect(projectSettings.getDefaultActivationScope(projectCwd)).toBe("global");
 		expect(projectSettings.getActivationWriteTarget(projectCwd)).toBe("global");
 		expect(projectSettings.getActivationProjectRoot(projectCwd)).toBeNull();

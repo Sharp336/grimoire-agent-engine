@@ -187,7 +187,7 @@ describe("/mcp enable and disable", () => {
 	});
 
 	test("disables an unconfigured server through the user denylist fallback", async () => {
-		const { controller, mcpManager, setProjectActivation, showError } = createController([], true, {} as SourceMeta);
+		const { controller, setProjectActivation, showError } = createController([], true, {} as SourceMeta);
 
 		await controller.handle("/mcp disable discovered");
 

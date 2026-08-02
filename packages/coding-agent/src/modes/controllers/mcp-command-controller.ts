@@ -7,6 +7,7 @@ import * as path from "node:path";
 import { type Component, replaceTabs, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
 import type { SourceMeta } from "../../capability/types";
+import { resolveExistingActivationProjectRootSync } from "../../config/activation-paths";
 import { expandEnvVarsDeep } from "../../discovery/helpers";
 import {
 	analyzeAuthError,
@@ -20,7 +21,6 @@ import {
 import { connectToServer, disconnectServer, listTools } from "../../mcp/client";
 import {
 	addMCPServer,
-	getProjectMCPConfigPath,
 	readDisabledServers,
 	readMCPConfigFile,
 	removeMCPServer,
@@ -290,7 +290,11 @@ export async function collectMcpServerNames(
 		const projectEnabled = ctx.settings.get("mcp.enableProjectConfig") !== false;
 		[userConfig, projectConfig] = await Promise.all([
 			readMCPConfigFile(getMCPConfigPath("user", cwd)),
-			projectEnabled ? readMCPConfigFile(getProjectMCPConfigPath(cwd)) : Promise.resolve({} as MCPConfigFile),
+			projectEnabled
+				? readMCPConfigFile(
+						getMCPConfigPath("project", resolveExistingActivationProjectRootSync(cwd) ?? path.resolve(cwd)),
+					)
+				: Promise.resolve({} as MCPConfigFile),
 		]);
 	}
 	if (ctx.settings.get("mcp.enableProjectConfig") === false) projectConfig = {};
@@ -1037,7 +1041,10 @@ export class MCPCommandController {
 		const cwd = getProjectDir();
 		const userPath = getMCPConfigPath("user", cwd);
 		const projectRoot = this.ctx.settings.getActivationProjectRoot(cwd, "project") ?? cwd;
-		const projectPath = getProjectMCPConfigPath(cwd);
+		const projectPath = getMCPConfigPath(
+			"project",
+			resolveExistingActivationProjectRootSync(cwd) ?? path.resolve(cwd),
+		);
 		const projectConfigEnabled = this.ctx.settings.get("mcp.enableProjectConfig") !== false;
 
 		const [userConfig, projectConfig] = await Promise.all([
@@ -1238,7 +1245,10 @@ export class MCPCommandController {
 			}
 			// Determine file path
 			const cwd = getProjectDir();
-			const filePath = scope === "project" ? getProjectMCPConfigPath(cwd) : getMCPConfigPath("user", cwd);
+			const filePath =
+				scope === "project"
+					? getMCPConfigPath("project", resolveExistingActivationProjectRootSync(cwd) ?? path.resolve(cwd))
+					: getMCPConfigPath("user", cwd);
 
 			// Add server to config
 			await addMCPServer(filePath, name, config);
@@ -1337,7 +1347,10 @@ export class MCPCommandController {
 
 			// Load from both user and project configs
 			const userPath = getMCPConfigPath("user", cwd);
-			const projectPath = getProjectMCPConfigPath(cwd);
+			const projectPath = getMCPConfigPath(
+				"project",
+				resolveExistingActivationProjectRootSync(cwd) ?? path.resolve(cwd),
+			);
 
 			const userPathLabel = shortenPath(userPath);
 			const projectPathLabel = shortenPath(projectPath);
@@ -1538,7 +1551,10 @@ export class MCPCommandController {
 		try {
 			const cwd = getProjectDir();
 			const userPath = getMCPConfigPath("user", cwd);
-			const projectPath = getProjectMCPConfigPath(cwd);
+			const projectPath = getMCPConfigPath(
+				"project",
+				resolveExistingActivationProjectRootSync(cwd) ?? path.resolve(cwd),
+			);
 			const filePath = scope === "user" ? userPath : projectPath;
 			const config = await readMCPConfigFile(filePath);
 			if (!config.mcpServers?.[name]) {
@@ -1593,7 +1609,10 @@ export class MCPCommandController {
 			const cwd = getProjectDir();
 			const userPath = getMCPConfigPath("user", cwd);
 			const projectConfigEnabled = this.ctx.settings.get("mcp.enableProjectConfig") !== false;
-			const projectPath = getProjectMCPConfigPath(cwd);
+			const projectPath = getMCPConfigPath(
+				"project",
+				resolveExistingActivationProjectRootSync(cwd) ?? path.resolve(cwd),
+			);
 			const [userConfig, projectConfig] = await Promise.all([
 				readMCPConfigFile(userPath),
 				projectConfigEnabled ? readMCPConfigFile(projectPath) : Promise.resolve({} as MCPConfigFile),
@@ -2411,7 +2430,10 @@ export class MCPCommandController {
 
 	async #nextAvailableServerName(scope: MCPAddScope, baseName: string): Promise<string> {
 		const cwd = getProjectDir();
-		const filePath = scope === "project" ? getProjectMCPConfigPath(cwd) : getMCPConfigPath("user", cwd);
+		const filePath =
+			scope === "project"
+				? getMCPConfigPath("project", resolveExistingActivationProjectRootSync(cwd) ?? path.resolve(cwd))
+				: getMCPConfigPath("user", cwd);
 		const config = await readMCPConfigFile(filePath);
 		const existingNames = new Set(Object.keys(config.mcpServers ?? {}));
 		if (!existingNames.has(baseName)) return baseName;
@@ -2432,7 +2454,10 @@ export class MCPCommandController {
 				continue;
 			}
 			const cwd = getProjectDir();
-			const filePath = scope === "project" ? getProjectMCPConfigPath(cwd) : getMCPConfigPath("user", cwd);
+			const filePath =
+				scope === "project"
+					? getMCPConfigPath("project", resolveExistingActivationProjectRootSync(cwd) ?? path.resolve(cwd))
+					: getMCPConfigPath("user", cwd);
 			const config = await readMCPConfigFile(filePath);
 			if (config.mcpServers?.[proposed]) {
 				this.ctx.showError(`Server "${proposed}" already exists in ${scope} config.`);

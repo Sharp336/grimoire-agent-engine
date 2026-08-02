@@ -200,7 +200,7 @@ describe("extension activation rendering", () => {
 
 	it("writes a project denylist entry when toggling an inherited MCP server", async () => {
 		const previousAgentDir = getAgentDir();
-		const projectRoot = await fs.mkdtemp(path.join(process.cwd(), ".tmp-omp-extension-inherited-mcp-"));
+		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-inherited-mcp-"));
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
 		cleanupPaths.push(projectRoot, agentDir);
 		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
@@ -221,7 +221,7 @@ describe("extension activation rendering", () => {
 			const projectConfig = await readMCPConfigFile(path.join(projectRoot, ".omp", "mcp.json"));
 			const userConfig = await readMCPConfigFile(path.join(agentDir, "mcp.json"));
 			expect(projectConfig.disabledServers).toEqual(["inherited"]);
-			expect(projectConfig.mcpServers).toBeUndefined();
+			expect(projectConfig.mcpServers).toEqual({});
 			expect(userConfig.mcpServers?.inherited).toMatchObject({ args: ["global"] });
 
 			dashboard.handleInput(" ");
@@ -243,33 +243,33 @@ describe("extension activation rendering", () => {
 
 	it("uses a binary toggle for a complete project MCP definition", async () => {
 		const previousAgentDir = getAgentDir();
-		const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-local-mcp-"));
+		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-zzlocal-mcp-"));
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
 		cleanupPaths.push(projectRoot, agentDir);
 		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
 		await Bun.write(
 			path.join(projectRoot, ".omp", "mcp.json"),
-			JSON.stringify({ mcpServers: { local: { command: "echo", args: ["local"] } } }),
+			JSON.stringify({ mcpServers: { zzlocalmcp: { command: "echo", args: ["zzlocalmcp"] } } }),
 		);
 
 		setAgentDir(agentDir);
 		try {
 			const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
 			const dashboard = await ExtensionDashboard.create(projectRoot, settings, 28);
-			for (const char of "local") dashboard.handleInput(char);
+			for (const char of "zzlocalmcp") dashboard.handleInput(char);
 			await Bun.sleep(50);
 			expect(stripAnsi(dashboard.render(120).join("\n"))).not.toContain("inherit");
 
 			dashboard.handleInput(" ");
 			await Bun.sleep(100);
-			expect((await readMCPConfigFile(path.join(projectRoot, ".omp", "mcp.json"))).mcpServers?.local?.enabled).toBe(
-				false,
-			);
+			expect(
+				(await readMCPConfigFile(path.join(projectRoot, ".omp", "mcp.json"))).mcpServers?.zzlocalmcp?.enabled,
+			).toBe(false);
 			dashboard.handleInput(" ");
 			await Bun.sleep(100);
-			expect((await readMCPConfigFile(path.join(projectRoot, ".omp", "mcp.json"))).mcpServers?.local?.enabled).toBe(
-				true,
-			);
+			expect(
+				(await readMCPConfigFile(path.join(projectRoot, ".omp", "mcp.json"))).mcpServers?.zzlocalmcp?.enabled,
+			).toBe(true);
 		} finally {
 			setAgentDir(previousAgentDir);
 		}
@@ -277,13 +277,13 @@ describe("extension activation rendering", () => {
 
 	it("locks MCP toggles without changing their state when project MCP config loading is disabled", async () => {
 		const previousAgentDir = getAgentDir();
-		const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-project-mcp-"));
+		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-project-zzlocal-mcp-"));
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
 		cleanupPaths.push(projectRoot, agentDir);
 		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
 		await Bun.write(
 			path.join(projectRoot, ".omp", "mcp.json"),
-			JSON.stringify({ mcpServers: { local: { command: "echo", args: ["local"] } } }),
+			JSON.stringify({ mcpServers: { zzlocalmcp: { command: "echo", args: ["zzlocalmcp"] } } }),
 		);
 
 		setAgentDir(agentDir);
@@ -291,7 +291,7 @@ describe("extension activation rendering", () => {
 			const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
 			settings.set("mcp.enableProjectConfig", false);
 			const dashboard = await ExtensionDashboard.create(projectRoot, settings, 28);
-			for (const char of "local") dashboard.handleInput(char);
+			for (const char of "zzlocalmcp") dashboard.handleInput(char);
 			await Bun.sleep(50);
 
 			const rendered = stripAnsi(dashboard.render(120).join("\n"));
@@ -300,7 +300,7 @@ describe("extension activation rendering", () => {
 			dashboard.handleInput(" ");
 			await Bun.sleep(50);
 			expect(
-				(await readMCPConfigFile(path.join(projectRoot, ".omp", "mcp.json"))).mcpServers?.local?.enabled,
+				(await readMCPConfigFile(path.join(projectRoot, ".omp", "mcp.json"))).mcpServers?.zzlocalmcp?.enabled,
 			).toBeUndefined();
 		} finally {
 			setAgentDir(previousAgentDir);

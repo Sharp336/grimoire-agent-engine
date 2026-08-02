@@ -69,10 +69,6 @@ export function isGlobalActivationCwd(cwd: string, agentDir: string = getAgentDi
 	);
 }
 
-export function canUseProjectActivation(cwd: string, agentDir: string = getAgentDir()): boolean {
-	return !isGlobalActivationCwd(cwd, agentDir);
-}
-
 export function resolveExistingActivationProjectRootSync(cwd: string): string | null {
 	const resolved = path.resolve(cwd);
 	const home = path.resolve(os.homedir());
@@ -86,13 +82,7 @@ export function resolveExistingActivationProjectRootSync(cwd: string): string | 
 }
 
 export function getDefaultActivationScope(cwd: string, agentDir: string = getAgentDir()): ActivationScope {
-	return canUseProjectActivation(cwd, agentDir) && resolveExistingActivationProjectRootSync(cwd)
-		? "project"
-		: "global";
-}
-
-export function resolveActivationProjectRootSync(cwd: string): string {
-	return resolveExistingActivationProjectRootSync(cwd) ?? path.resolve(cwd);
+	return !isGlobalActivationCwd(cwd, agentDir) && resolveExistingActivationProjectRootSync(cwd) ? "project" : "global";
 }
 
 export function resolveActivationTarget(
@@ -101,8 +91,8 @@ export function resolveActivationTarget(
 	configPath: string | null,
 	scope: ActivationScope = getDefaultActivationScope(cwd, agentDir),
 ): ActivationTargetInfo {
-	if (scope === "project" && canUseProjectActivation(cwd, agentDir)) {
-		const projectRoot = resolveActivationProjectRootSync(cwd);
+	if (scope === "project" && !isGlobalActivationCwd(cwd, agentDir)) {
+		const projectRoot = resolveExistingActivationProjectRootSync(cwd) ?? path.resolve(cwd);
 		return {
 			target: "project",
 			configPath: path.join(projectRoot, CONFIG_DIR_NAME, "config.yml"),

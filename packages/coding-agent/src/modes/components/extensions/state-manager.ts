@@ -15,14 +15,10 @@ import type { Skill } from "../../../capability/skill";
 import type { SlashCommand } from "../../../capability/slash-command";
 import type { CustomTool } from "../../../capability/tool";
 import type { SourceMeta } from "../../../capability/types";
+import { resolveExistingActivationProjectRootSync } from "../../../config/activation-paths";
 import { getAllProvidersInfo, isProviderEnabled, loadCapability } from "../../../discovery";
 import { isMCPServerEffectivelyEnabled } from "../../../mcp/config";
-import {
-	getProjectMCPConfigPath,
-	readDisabledServers,
-	readEnabledServers,
-	readMCPConfigFile,
-} from "../../../mcp/config-writer";
+import { readDisabledServers, readEnabledServers, readMCPConfigFile } from "../../../mcp/config-writer";
 import type { MCPConfigFile } from "../../../mcp/types";
 import type { DashboardState, Extension, ExtensionKind, FlatTreeItem, ProviderTab, TreeNode } from "./types";
 import { makeExtensionId, sourceFromMeta } from "./types";
@@ -141,7 +137,9 @@ export async function loadAllExtensions(
 	// owned by another tool.
 	try {
 		const userMcpPath = cwd ? getMCPConfigPath("user", cwd) : undefined;
-		const projectMcpPath = cwd ? getProjectMCPConfigPath(cwd) : undefined;
+		const projectMcpPath = cwd
+			? getMCPConfigPath("project", resolveExistingActivationProjectRootSync(cwd) ?? path.resolve(cwd))
+			: undefined;
 		const [userDisabledServerNames, forceEnabledServers, projectConfig] = await Promise.all([
 			userMcpPath
 				? readDisabledServers(userMcpPath)

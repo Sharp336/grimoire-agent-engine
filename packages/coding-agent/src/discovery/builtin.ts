@@ -25,7 +25,7 @@ import { type SlashCommand, slashCommandCapability } from "../capability/slash-c
 import { type SystemPrompt, systemPromptCapability } from "../capability/system-prompt";
 import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult } from "../capability/types";
-import { resolveActivationProjectRootSync } from "../config/activation-paths";
+import { resolveExistingActivationProjectRootSync } from "../config/activation-paths";
 import { expandTilde } from "../tools/path-utils";
 import {
 	buildRuleFromMarkdown,
@@ -196,7 +196,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 	// User scope tracks the active profile via getAgentDir() (not ctx.home), so it
 	// stays in sync with getMCPConfigPath("user") and the /mcp config writer.
 	const userAgentDir = getAgentDir();
-	const projectRoot = resolveActivationProjectRootSync(ctx.cwd);
+	const projectRoot = resolveExistingActivationProjectRootSync(ctx.cwd) ?? path.resolve(ctx.cwd);
 	const paths = [
 		{ path: path.join(projectRoot, PATHS.projectDir, "mcp.json"), level: "project" as const },
 		{ path: path.join(projectRoot, PATHS.projectDir, ".mcp.json"), level: "project" as const },
