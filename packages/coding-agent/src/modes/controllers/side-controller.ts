@@ -7,7 +7,7 @@ import type { AgentSession } from "../../session/agent-session";
 import { SIDE_BOUNDARY_MESSAGE_TYPE } from "../../session/messages";
 import { SessionManager } from "../../session/session-manager";
 import { SIDE_AGENT_ID, SIDE_SESSION_FILE_PREFIX } from "../../session/side-conversation";
-import { createMCPProxyTools } from "../../task/executor";
+import { createIsolatedSettingsSnapshot, createMCPProxyTools } from "../../task/executor";
 import { shortenPath } from "../../tools/render-utils";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "../../tools/todo";
 import type { InteractiveModeContext } from "../types";
@@ -90,7 +90,12 @@ export class SideController {
 		const parentSessionId = session.sessionId;
 		const parentPromptCacheKey = session.agent.promptCacheKey ?? parentSessionId;
 		const thinkingLevel = session.configuredThinkingLevel();
-		const toolNames = session.getActiveToolNames();
+		// getEnabledToolNames includes xd://-mounted names the active list omits.
+		// The SDK keeps explicitly granted names top-level, so mounted tools lose
+		// their xd:// presentation in the side — availability is preserved, the
+		// prompt-size partition is not (acceptable in a throwaway session).
+		const toolNames = session.getEnabledToolNames();
+		const enabledNames = new Set(toolNames);
 		const extensionPaths = session.extensionPaths;
 		const modelRegistry = session.modelRegistry;
 		const ownerId = session.getAgentId() ?? MAIN_AGENT_ID;
@@ -139,10 +144,19 @@ export class SideController {
 				providerPromptCacheKey: parentPromptCacheKey,
 				modelRegistry,
 				authStorage: modelRegistry.authStorage,
-				settings: this.ctx.settings,
+				settings: createIsolatedSettingsSnapshot(this.ctx.settings, {
+					// A handoff would replace the side with a fresh file and strand the
+					// transcript as a revivable session; force normal compaction so the
+					// throwaway contract and the boundary re-injection both hold.
+					"compaction.strategy": "context-full",
+				}),
 				hasUI: true,
 				enableMCP: false,
-				customTools: mcpManager ? createMCPProxyTools(mcpManager) : undefined,
+				customTools: mcpManager
+					? // Only proxy MCP tools the parent actually has enabled — customTools
+						// are always included regardless of the toolNames filter.
+						createMCPProxyTools(mcpManager).filter(tool => enabledNames.has(tool.name))
+					: undefined,
 				enableLsp: this.ctx.settings.get("task.enableLsp") !== false,
 				agentId: SIDE_AGENT_ID,
 				agentDisplayName: "side",
