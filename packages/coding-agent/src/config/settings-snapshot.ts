@@ -156,7 +156,7 @@ export function buildSettingsSnapshot(settings: Settings, tab?: SettingTab): Set
 							description: ui.description,
 							renderable,
 							control: getSettingPanelControlKind(path),
-							visible: renderable && isSettingPanelVisible(path, settings),
+							visible: renderable && isSettingPanelVisible(path, settings, disclosesValue),
 							...(isCredential(path) ? { secret: true } : {}),
 							...(options === undefined ? {} : { options }),
 							...(ui.ordered === undefined ? {} : { ordered: ui.ordered }),
