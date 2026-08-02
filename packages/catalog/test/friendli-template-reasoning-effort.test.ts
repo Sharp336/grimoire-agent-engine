@@ -102,13 +102,24 @@ describe("Friendli reasoning effort compat", () => {
 		const compat = buildOpenAICompat(suppressed);
 		expect(compat.supportsReasoningEffort).toBe(false);
 		expect(compat.omitReasoningEffort).toBe(true);
+		// The model is identity-known to have an effort surface (GLM-5.2), so
+		// the disable mode must stay `qwen-template-false` — NOT collapse to
+		// "omit". With "omit" the enabled request path emits neither
+		// `reasoning_effort` (suppressed by omitReasoningEffort) nor
+		// `chat_template_kwargs.enable_thinking` (omitted by the default branch),
+		// so the user could never turn thinking on. The override only suppresses
+		// the top-level effort field; the template toggle must survive.
+		expect(compat.reasoningDisableMode).toBe("qwen-template-false");
 	});
 
-	it("uses omit reasoningDisableMode for toggle-only Friendli reasoning models", () => {
-		// GLM-4.5 reasons but has no effort control (only toggle + budget_tokens).
-		// reasoningDisableMode must be "omit" (not "qwen-template-false") so the
-		// encoder doesn't send enable_thinking:false when no reasoning level is
-		// explicitly requested — that would make reasoning impossible.
+	it("uses qwen-template-false for toggle-only Friendli reasoning models", () => {
+		// GLM-4.5 reasons but has no effort control — only a toggle +
+		// budget_tokens. The model's single-tier thinking config from
+		// `mapFriendliThinking` lets the binary-collapse path expose an
+		// on/off control. `qwen-template-false` sends `enable_thinking: false`
+		// on the not-requested default AND on an explicit `disableReasoning`,
+		// and `enable_thinking: true` when the binary tier is selected —
+		// callers can turn the model off, which `"omit"` couldn't do.
 		const toggleOnly: ModelSpec<"openai-completions"> = {
 			api: "openai-completions",
 			id: "zai-org/GLM-4.5",
@@ -122,9 +133,9 @@ describe("Friendli reasoning effort compat", () => {
 			reasoning: true,
 		};
 		const compat = buildOpenAICompat(toggleOnly);
-		expect(compat.reasoningDisableMode).toBe("omit");
 		expect(compat.supportsReasoningEffort).toBe(false);
 		expect(compat.thinkingFormat).toBe("qwen-chat-template");
+		expect(compat.reasoningDisableMode).toBe("qwen-template-false");
 	});
 
 	it("keeps qwen-template-false for Friendli reasoning models with effort", () => {

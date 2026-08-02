@@ -152,14 +152,16 @@ export function resolveModelThinking<TApi extends Api>(
 	if (spec.thinking && Array.isArray(spec.thinking.efforts) && spec.thinking.efforts.length > 0) {
 		thinking = fillThinkingWireDefaults(spec, compat, spec.thinking);
 	} else {
-		// Friendli: discovery is authoritative. When `/v1/models` returns
-		// `reasoning: true` without `type: "effort"`, the model thinks but
-		// exposes no effort control — return undefined instead of fabricating
-		// a generic effort ladder from identity inference (which would
-		// advertise tiers the Friendli endpoint rejects). The static seed
-		// and live `reasoning_options` populate `spec.thinking` for
-		// effort-capable models like GLM-5.2, so this only fires for
-		// toggle-only reasoning models (e.g. GLM-4.5).
+		// Friendli: discovery is authoritative. `mapFriendliThinking` gives
+		// effort models their API ladder and toggle-only models (e.g.
+		// GLM-4.5) a single-tier binary config, so `spec.thinking` is
+		// populated for every Friendli reasoning model the endpoint
+		// advertises a control surface for. This early-return only fires for
+		// a Friendli model with `spec.thinking === undefined` AND no
+		// identity-known effort ladder — i.e. the API reported reasoning
+		// with neither a `type: "effort"` nor a `type: "toggle"` entry. Return
+		// undefined instead of fabricating a generic effort ladder the
+		// endpoint rejects.
 		// A custom provider pointing at Friendli with GLM-5.2 but no
 		// `thinking` block is identity-known → getModelDefinedEfforts returns
 		// HIGH_MAX → fall through to deriveThinking.

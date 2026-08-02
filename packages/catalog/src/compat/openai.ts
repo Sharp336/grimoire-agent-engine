@@ -673,11 +673,20 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		compat.extraBody = Object.keys(extraBody).length > 0 ? extraBody : undefined;
 	}
 	if (spec.compat?.reasoningDisableMode === undefined) {
+		// Friendli toggle-only reasoning models (e.g. GLM-4.5 with only a
+		// `type: "toggle"` in reasoning_options) get a single-tier thinking
+		// config from `mapFriendliThinking` so the binary-collapse path
+		// exposes an on/off control. Like every other `qwen-chat-template`
+		// model, they use `qwen-template-false` — enabled sends
+		// `enable_thinking: true`, the not-requested default and an explicit
+		// `disableReasoning` both send `enable_thinking: false`. The former
+		// `"omit"` special case left an explicit disable emitting only
+		// `delete params.reasoning` (the default branch) with no toggle at
+		// all, so callers could never turn these models off despite the
+		// endpoint advertising the toggle.
 		compat.reasoningDisableMode = requiresEnabledThinking
 			? "omit"
-			: isDirectDeepseekReasoning
-				? "zai-thinking-disabled"
-				: resolveReasoningDisableMode(compat.thinkingFormat);
+			: resolveReasoningDisableMode(compat.thinkingFormat);
 	}
 	if (spec.compat?.omitReasoningEffort === undefined && !compat.supportsReasoningEffort) {
 		compat.omitReasoningEffort = true;

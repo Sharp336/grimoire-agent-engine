@@ -268,6 +268,10 @@
 
 - Added FriendliAI provider with API key login and model validation
 
+### Changed
+
+- `applyOpenAIExtraBody` now strips reasoning-specific keys (`thinking` for DeepSeek, `parse_reasoning`/`include_reasoning` for Friendli) from `extraBody` when the request disables thinking, instead of skipping the entire merge. The fields are no-ops on the disabled path, but `extraBody` is an arbitrary record that commonly carries gateway routing and controller fields — skipping the whole merge would drop provider-required configuration and route the request to the wrong backend. Only the known reasoning-only keys are removed; the rest flows through unchanged. DeepSeek always-reasoning models are unaffected (`reasoning.disabled` is never true for them).
+
 ## [17.2.4] - 2026-08-01
 
 ### Fixed

@@ -2324,6 +2324,15 @@ export const FRIENDLI_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] 
  * an OpenRouter or Hugging Face entry sharing the same model id) may
  * advertise effort tiers the Friendli endpoint rejects, so it must never
  * be borrowed.
+ *
+ * When the API exposes only a `type: "toggle"` entry (no effort ladder),
+ * the endpoint still advertises the `enable_thinking` binary toggle. Give
+ * the model a single-tier thinking config so the binary-collapse path
+ * (`collapseQwenTemplateBinaryThinking`) exposes an on/off control and the
+ * `qwen-template-false` disable mode can emit `enable_thinking: false` on
+ * an explicit disable. Without it, `thinking` is undefined — the picker
+ * offers no control and callers can neither enable nor disable reasoning,
+ * even though the endpoint supports the toggle.
  */
 function mapFriendliThinking(
 	reasoning: boolean,
@@ -2342,7 +2351,25 @@ function mapFriendliThinking(
 			}
 		}
 	}
-	return reference?.provider === "friendli" ? reference.thinking : undefined;
+	// The API didn't expose `type: "effort"` for this model. Fall back to the
+	// reference's `thinking` first — but only when the reference is from
+	// Friendli's own bundled seed (`provider === "friendli"`). Pre-rollout,
+	// the static seed's effort ladder (e.g. GLM-5.2's high/max) is the
+	// authoritative surface, and downgrading it to a binary toggle would lose
+	// the effort tiers the endpoint accepts alongside the template toggle.
+	if (reference?.provider === "friendli" && reference.thinking) {
+		return reference.thinking;
+	}
+	// No Friendli reference and no `type: "effort"`. If the endpoint
+	// advertises a `type: "toggle"` entry, the model supports the binary
+	// `enable_thinking` control. Give it a single-tier thinking config so
+	// the binary-collapse path and the `qwen-template-false` disable mode can
+	// drive it on/off — without it, `thinking` is undefined and callers can
+	// neither enable nor disable reasoning despite the toggle.
+	if (Array.isArray(reasoningOptions) && reasoningOptions.some(opt => isRecord(opt) && opt.type === "toggle")) {
+		return { mode: "effort", efforts: [Effort.High] };
+	}
+	return undefined;
 }
 
 export interface FriendliModelManagerConfig {

@@ -167,10 +167,14 @@ describe("Friendli provider discovery", () => {
 		expect(glm.thinking?.efforts).toEqual([Effort.High, Effort.Max]);
 	});
 
-	test("returns undefined thinking for reasoning model with no reference and no effort option", async () => {
-		// A model not in any bundled catalog: reasoning: true but no
-		// `type: "effort"` in reasoning_options, and no static seed or global
-		// reference. thinking is undefined until the API exposes effort support.
+	test("returns binary thinking for toggle-only reasoning model with no reference", async () => {
+		// A model not in any bundled catalog: reasoning: true with a
+		// `type: "toggle"` in reasoning_options but no `type: "effort"`.
+		// The toggle advertises the `enable_thinking` binary control, so the
+		// mapper gives the model a single-tier thinking config representing
+		// it — without this, `thinking` would be undefined and callers could
+		// neither enable nor disable reasoning despite the endpoint
+		// supporting the toggle.
 		const fetchMock: FetchImpl = async (_input: string | URL | Request, _init?: RequestInit) => {
 			return new Response(
 				JSON.stringify({
@@ -204,8 +208,9 @@ describe("Friendli provider discovery", () => {
 		expect(models).toHaveLength(1);
 		const m = models![0];
 		expect(m.reasoning).toBe(true);
-		// No reference, no `type: "effort"` → thinking undefined until API rollout
-		expect(m.thinking).toBeUndefined();
+		// Toggle-only → single-tier binary thinking config (not undefined)
+		expect(m.thinking).toBeDefined();
+		expect(m.thinking?.efforts).toEqual([Effort.High]);
 	});
 
 	test("does not borrow effort metadata from a cross-provider reference", async () => {
@@ -214,7 +219,9 @@ describe("Friendli provider discovery", () => {
 		// type: "effort" in reasoning_options. The cross-provider reference's
 		// effort ladder must NOT leak into the Friendli model — doing so would
 		// set supportsReasoningEffort and send reasoning_effort the
-		// Friendli endpoint rejects.
+		// Friendli endpoint rejects. The model still gets a single-tier binary
+		// thinking config from its `type: "toggle"` entry, but NOT the
+		// multi-tier effort ladder the cross-provider reference advertises.
 		const fetchMock: FetchImpl = async (_input: string | URL | Request, _init?: RequestInit) => {
 			return new Response(
 				JSON.stringify({
@@ -244,10 +251,11 @@ describe("Friendli provider discovery", () => {
 		expect(models).toHaveLength(1);
 		const m = models![0];
 		expect(m.reasoning).toBe(true);
-		// Friendli API did not advertise type: "effort" and the model is not in
-		// Friendli's own static seed → thinking must be undefined, regardless
-		// of what other providers' bundled catalogs say about this model id.
-		expect(m.thinking).toBeUndefined();
+		// Toggle-only → binary thinking config from Friendli's own toggle
+		// entry — NOT the multi-tier effort ladder a cross-provider reference
+		// might advertise for the same model id.
+		expect(m.thinking).toBeDefined();
+		expect(m.thinking?.efforts).toEqual([Effort.High]);
 	});
 
 	test("uses the bundled reference cost as-is when /v1/models omits a pricing field", async () => {
@@ -290,5 +298,44 @@ describe("Friendli provider discovery", () => {
 		expect(glm.cost.output).toBe(2.2);
 		expect(glm.cost.cacheRead).toBe(0);
 		expect(glm.cost.cacheWrite).toBe(0);
+	});
+
+	test("accepts zero API prices for free or promotional models", async () => {
+		// When Friendli reports "0" for an input/output price (e.g. a free or
+		// promotional model), the mapper must accept it as an authoritative
+		// API price — not fall back to the reference. The seeded GLM-5.2
+		// reference carries 0.6/2.2, so a zero-reporting free model would
+		// incorrectly show 0.6/2.2 if zero were rejected.
+		const fetchMock: FetchImpl = async (_input: string | URL | Request, _init?: RequestInit) => {
+			return new Response(
+				JSON.stringify({
+					data: [
+						{
+							id: "zai-org/GLM-5.2",
+							object: "model",
+							name: "GLM-5.2",
+							context_length: 131072,
+							max_completion_tokens: 8192,
+							pricing: { input: "0", output: "0" },
+							functionality: { tool_call: true },
+							reasoning: true,
+							input_modalities: ["text"],
+							reasoning_options: [{ type: "toggle" }, { type: "budget_tokens", min: -1, max: 1048576 }],
+						},
+					],
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		};
+
+		const options = friendliModelManagerOptions({ apiKey: "test-key", fetch: fetchMock });
+		const models = await options.fetchDynamicModels?.();
+
+		expect(models).toBeDefined();
+		expect(models).toHaveLength(1);
+		const glm = models![0];
+		// Zero is a valid API price — NOT the reference fallback (0.6/2.2).
+		expect(glm.cost.input).toBe(0);
+		expect(glm.cost.output).toBe(0);
 	});
 });
