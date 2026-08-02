@@ -11,7 +11,7 @@ import {
 	type UsageReport,
 } from "@oh-my-pi/pi-ai";
 import { Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@oh-my-pi/pi-tui";
-import { formatDuration, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatDuration, isEnoent, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
 import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-executor";
 import { type LoadedCustomShare, loadCustomShare } from "../../export/custom-share";
@@ -44,7 +44,9 @@ import type { AsyncJobSnapshotItem } from "../../session/agent-session";
 import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-storage";
 import type { CompactMode } from "../../session/compact-modes";
 import type { NewSessionOptions } from "../../session/session-entries";
+import { SessionManager } from "../../session/session-manager";
 import { formatShakeSummary, type ShakeMode, type ShakeResult } from "../../session/shake-types";
+import { SIDE_SESSION_FILE_PREFIX } from "../../session/side-conversation";
 import { formatActiveAccountLabel, limitMatchesActiveAccount } from "../../slash-commands/helpers/active-oauth-account";
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
@@ -931,6 +933,9 @@ export class CommandController {
 			}
 		}
 		if (!(await this.ctx.session.newSession(options))) return;
+		// The switch committed (a session_before_switch cancel returns above) —
+		// now discard the side conversation forked from the old session.
+		await this.ctx.disposeSideConversation();
 		this.ctx.resetObserverRegistry();
 		setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
 
@@ -984,6 +989,33 @@ export class CommandController {
 		if (!success) {
 			this.ctx.showError("Fork failed (session not persisted or cancelled)");
 			return;
+		}
+
+		// The fork committed (streaming refusal and session_before_switch cancel
+		// both return above) — now discard the side conversation.
+		await this.ctx.disposeSideConversation();
+		// fork() copies the parent's whole artifact directory, including any
+		// side.internal-*.jsonl transcripts and their nested artifacts. Delete
+		// the copies from the new session's artifact dir — they are duplicates,
+		// possibly torn, and the persisted scan deliberately skips them.
+		const forkedSessionFile = this.ctx.sessionManager.getSessionFile();
+		if (forkedSessionFile) {
+			const forkedArtifactDir = forkedSessionFile.slice(0, -6);
+			try {
+				const entries = await fs.readdir(forkedArtifactDir);
+				for (const entry of entries) {
+					if (!entry.startsWith(SIDE_SESSION_FILE_PREFIX) || !entry.endsWith(".jsonl")) continue;
+					// Per-entry catch: one stubborn copy must not strand the rest.
+					try {
+						await SessionManager.removeSessionFiles(path.join(forkedArtifactDir, entry));
+					} catch (entryError) {
+						logger.warn("Failed to remove copied side transcript", { file: entry, error: String(entryError) });
+					}
+				}
+			} catch (error) {
+				if (!isEnoent(error))
+					logger.warn("Failed to sweep copied side transcripts after fork", { error: String(error) });
+			}
 		}
 
 		this.ctx.statusLine.invalidate();
@@ -1071,6 +1103,10 @@ export class CommandController {
 			this.ctx.showError(`Failed to save pending settings: ${err instanceof Error ? err.message : String(err)}`);
 			return;
 		}
+
+		// Moving renames the artifact dir out from under a live side — dispose only
+		// after cancellable validation (path overlay, create-dir confirm, invalid target).
+		await this.ctx.disposeSideConversation();
 
 		try {
 			await this.ctx.session.moveSession(resolvedPath);
@@ -1160,6 +1196,9 @@ export class CommandController {
 	}
 
 	async #moveInteractiveCwd(resolvedPath: string): Promise<void> {
+		// Relocation renames the artifact dir out from under a live side —
+		// dispose it before the move (same rule as the explicit /move path).
+		await this.ctx.disposeSideConversation();
 		await this.ctx.sessionManager.moveTo(resolvedPath);
 		await this.ctx.applyCwdChange(resolvedPath);
 		this.ctx.updateEditorBorderColor();

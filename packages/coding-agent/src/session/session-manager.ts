@@ -1669,6 +1669,11 @@ export class SessionManager {
 		return this.#cwd;
 	}
 
+	/** The storage backend this manager reads and writes through. */
+	getStorage(): SessionStorage {
+		return this.#storage;
+	}
+
 	/** Additional workspace directories beyond cwd (multi-root), absolute and normalized. */
 	getAdditionalDirectories(): string[] {
 		return [...this.#additionalDirectories];
@@ -2390,6 +2395,18 @@ export class SessionManager {
 		const file = path.join(sessionDir, `${fileSafeTimestamp(timestamp)}_${id}.jsonl`);
 		storage.writeTextSync(file, `${serializeTitleSlot({ updatedAt: timestamp })}${JSON.stringify(header)}\n`);
 		return file;
+	}
+
+	/** Delete a session file and its artifact directory by path. ENOENT is success. */
+	static async removeSessionFiles(
+		sessionPath: string,
+		storage: SessionStorage = new FileSessionStorage(),
+	): Promise<void> {
+		try {
+			await storage.deleteSessionWithArtifacts(sessionPath);
+		} catch (err) {
+			if (!isEnoent(err)) throw err;
+		}
 	}
 
 	/**

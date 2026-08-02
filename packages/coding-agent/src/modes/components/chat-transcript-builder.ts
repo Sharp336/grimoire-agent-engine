@@ -22,6 +22,7 @@ import {
 	BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
 	type CustomMessage,
 	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
+	SIDE_BOUNDARY_MESSAGE_TYPE,
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
 } from "../../session/messages";
@@ -52,6 +53,7 @@ import { CustomMessageComponent } from "./custom-message";
 import { EvalExecutionComponent } from "./eval-execution";
 import { type LateDiagnosticsFile, LateDiagnosticsMessageComponent } from "./late-diagnostics-message";
 import { groupedReadUsageCallIds, ReadToolGroupComponent, readArgsCollapseIntoGroup } from "./read-tool-group";
+import { createSideBoundaryBlock } from "./side-boundary-message";
 import { SkillMessageComponent } from "./skill-message";
 import { ToolExecutionComponent } from "./tool-execution";
 import { TranscriptContainer } from "./transcript-container";
@@ -492,6 +494,10 @@ export class ChatTranscriptBuilder {
 		if (message.customType === "advisor") {
 			const details = (message as CustomMessage<AdvisorMessageDetails>).details;
 			this.container.addChild(createAdvisorMessageCard(details, () => this.#expanded, theme));
+			return;
+		}
+		if (message.customType === SIDE_BOUNDARY_MESSAGE_TYPE) {
+			this.container.addChild(createSideBoundaryBlock());
 			return;
 		}
 		if (message.customType === BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE) {

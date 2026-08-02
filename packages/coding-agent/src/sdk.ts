@@ -420,6 +420,12 @@ export interface CreateAgentSessionOptions {
 	/** Disable extension discovery (explicit paths still load). */
 	disableExtensionDiscovery?: boolean;
 	/**
+	 * Re-bind the process-global capability settings to this session's settings
+	 * (default true). Child sessions with isolated settings pass false so the
+	 * parent's binding — and provider persistence — stays untouched.
+	 */
+	initializeCapabilitySettings?: boolean;
+	/**
 	 * Pre-loaded extensions (skips file discovery and the per-session factory
 	 * call). Used by the CLI when extensions are loaded early to parse custom
 	 * flags — the same process owns the returned instances, so reusing them is
@@ -1266,7 +1272,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const settings = await (options.settings ??
 		options.settingsManager ??
 		logger.time("settings", Settings.init, { cwd, agentDir }));
-	logger.time("initializeWithSettings", initializeWithSettings, settings);
+	if (options.initializeCapabilitySettings !== false) {
+		logger.time("initializeWithSettings", initializeWithSettings, settings);
+	}
 	if (!options.modelRegistry) {
 		modelRegistry.refreshInBackground();
 	}
@@ -3352,6 +3360,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			promptTemplates,
 			slashCommands,
 			extensionRunner,
+			extensionPaths,
 			customCommands: customCommandsResult.commands,
 			skills,
 			skillWarnings,

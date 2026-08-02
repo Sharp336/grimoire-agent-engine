@@ -30,6 +30,7 @@ import {
 	ReadToolGroupComponent,
 	readArgsCollapseIntoGroup,
 } from "../../modes/components/read-tool-group";
+import { createSideBoundaryBlock } from "../../modes/components/side-boundary-message";
 import { SkillMessageComponent } from "../../modes/components/skill-message";
 import { ToolExecutionComponent } from "../../modes/components/tool-execution";
 import { TranscriptBlock } from "../../modes/components/transcript-container";
@@ -43,6 +44,7 @@ import {
 	BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
 	type CustomMessage,
 	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
+	SIDE_BOUNDARY_MESSAGE_TYPE,
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
 } from "../../session/messages";
@@ -198,6 +200,10 @@ export class UiHelpers {
 						this.ctx.chatContainer.addChild(
 							createAdvisorMessageCard(details, () => this.ctx.toolOutputExpanded, theme),
 						);
+						break;
+					}
+					if (message.customType === SIDE_BOUNDARY_MESSAGE_TYPE) {
+						this.ctx.chatContainer.addChild(createSideBoundaryBlock());
 						break;
 					}
 					if (message.customType === BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE) {

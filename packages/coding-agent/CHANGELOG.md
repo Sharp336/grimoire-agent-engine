@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/side [question]`: open a throwaway side conversation forked from the current session. The fork inherits the transcript as reference-only context behind a boundary marker, runs with full tools (minus `task` and `hub`), and focuses the TUI until Esc. `/side end` discards it: the side session file and its artifacts are deleted, and the side never appends entries to the parent session's transcript.
+
 ## [17.2.4] - 2026-08-01
 
 ### Added
@@ -103,7 +107,6 @@
 - Fixed the Python RPC client dropping context, compaction, OAuth URL, and terminal-settlement fields.
 - Fixed the browser tool ignoring the url parameter when opening a new tab on an attached browser.
 - Fixed browser automation disrupting attached browsers by adopting the active foreground tab and avoiding raising new tabs during screenshots.
-
 ## [17.2.1] - 2026-07-30
 
 ### Added

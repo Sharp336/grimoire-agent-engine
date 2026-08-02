@@ -1852,6 +1852,18 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "side",
+		description: "Open a throwaway side conversation forked from this session",
+		subcommands: [{ name: "end", description: "Discard the side conversation" }],
+		inlineHint: "[question]",
+		allowArgs: true,
+		handleTui: async (command, runtime) => {
+			const args = command.text.slice(`/${command.name}`.length).trim();
+			runtime.ctx.editor.setText("");
+			await runtime.ctx.handleSideCommand(args);
+		},
+	},
+	{
 		name: "tan",
 		description: "Run a full background agent on tangential work",
 		inlineHint: "<work>",

@@ -413,6 +413,9 @@ export interface InteractiveModeContext {
 	handleQueueCommand(message: string): Promise<void>;
 	handleBtwCommand(question: string): Promise<void>;
 	handleTanCommand(work: string): Promise<void>;
+	handleSideCommand(args: string): Promise<void>;
+	/** Tear down a live side conversation (e.g. before relocating the parent session). */
+	disposeSideConversation(): Promise<void>;
 	hasActiveBtw(): boolean;
 	handleBtwEscape(): boolean;
 	handleBtwBranchKey(): Promise<boolean>;

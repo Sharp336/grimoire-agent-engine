@@ -131,6 +131,8 @@ export interface AgentSessionConfig {
 	slashCommands?: FileSlashCommand[];
 	/** Extension runner created with wrapped tools. */
 	extensionRunner?: ExtensionRunner;
+	/** Source paths of loaded extensions, for forwarding to forked sub-sessions. */
+	extensionPaths?: string[];
 	/** Loaded skills already discovered by the SDK. */
 	skills?: Skill[];
 	/** Skill loading warnings already captured by the SDK. */

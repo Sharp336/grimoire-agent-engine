@@ -528,6 +528,8 @@ export class AgentSession {
 	#codexResetCoordinator: CodexAutoRedeemCoordinator;
 	// Extension system
 	#extensionRunner: ExtensionRunner | undefined = undefined;
+	/** Source paths of loaded extensions, forwarded to forked sub-sessions. */
+	#extensionPaths: string[] = [];
 	/**
 	 * Backs `ctx.setInterval`/`setTimeout`/`clearTimer` for the runner-less
 	 * command-context fallback (SDK embeddings with no extension runner). Lazily
@@ -1003,6 +1005,7 @@ export class AgentSession {
 		this.#promptTemplates = config.promptTemplates ?? [];
 		this.#slashCommands = config.slashCommands ?? [];
 		this.#extensionRunner = config.extensionRunner;
+		this.#extensionPaths = config.extensionPaths ?? [];
 		this.#customCommands = config.customCommands ?? [];
 		const recoveryHost: TurnRecoveryHost = {
 			agent: this.agent,
@@ -8819,5 +8822,10 @@ export class AgentSession {
 	 */
 	get extensionRunner(): ExtensionRunner | undefined {
 		return this.#extensionRunner;
+	}
+
+	/** Source paths of loaded extensions, for forwarding to forked sub-sessions. */
+	get extensionPaths(): string[] {
+		return this.#extensionPaths;
 	}
 }
