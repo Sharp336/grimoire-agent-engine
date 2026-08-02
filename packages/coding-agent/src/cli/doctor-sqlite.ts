@@ -12,7 +12,7 @@
  * The quiescence/archive/marker protocol mirrors the proven design of
  * ~/.omp/agent/scripts/fix_sqlite_databases.py.
  */
-import { Database } from "bun:sqlite";
+import { constants, Database } from "bun:sqlite";
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -352,27 +352,86 @@ async function archiveTrio(dbPath: string, expected: TrioSnapshotEntry[]): Promi
 	return archiveDir;
 }
 
-/** Restore the trio from a verified archive, removing sidecars the archive does not have. */
-async function restoreFromArchive(dbPath: string, archiveDir: string): Promise<void> {
+/** One trio member's staged restore: a fsynced staging file to rename over the target, or a target to remove when the archive lacks that sidecar. */
+interface RestoreCommitEntry {
+	target: string;
+	/** Staging path to rename over the target; null when the archive lacks this sidecar and the target should be removed instead. */
+	staging: string | null;
+	remove: boolean;
+}
+
+/** A staged restore ready for synchronous commit: the directory to fsync and the per-member rename/remove plan. */
+interface RestoreCommitPlan {
+	directory: string;
+	entries: RestoreCommitEntry[];
+}
+
+/**
+ * Stage the trio restore: copy each archive member to a fsynced staging path
+ * next to the target. Writes go to NEW staging files, never the live target,
+ * so this is safe to run while a write lock is still held. Returns the plan
+ * {@link commitRestoreFromArchive} renames into place synchronously after the
+ * lock is released — the same close-before-rename protocol `swapInCandidate`
+ * uses (Windows rejects replacing an open SQLite file). Cleans up partial
+ * staging files on failure.
+ */
+async function stageRestoreFromArchive(dbPath: string, archiveDir: string): Promise<RestoreCommitPlan> {
 	const directory = path.dirname(dbPath);
+	const entries: RestoreCommitEntry[] = [];
 	for (const suffix of TRIO_SUFFIXES) {
 		const name = `${path.basename(dbPath)}${suffix}`;
 		const source = path.join(archiveDir, name);
 		const target = path.join(directory, name);
+		let staging: string | null = null;
 		try {
-			const staging = path.join(directory, `.${name}.restore-${process.pid}-${Date.now()}`);
+			staging = path.join(directory, `.${name}.restore-${process.pid}-${Date.now()}`);
 			await fs.copyFile(source, staging);
 			await fsyncFile(staging);
-			await fs.rename(staging, target);
 		} catch (error) {
 			if (suffix !== "" && isEnoent(error)) {
-				await fs.rm(target, { force: true }).catch(() => undefined);
+				// The archive lacks this sidecar — remove the live target at commit.
+				if (staging !== null) await fs.rm(staging, { force: true }).catch(() => undefined);
+				entries.push({ target, staging: null, remove: true });
 				continue;
 			}
+			if (staging !== null) await fs.rm(staging, { force: true }).catch(() => undefined);
 			throw error;
 		}
+		entries.push({ target, staging, remove: false });
 	}
-	await fsyncDir(directory);
+	return { directory, entries };
+}
+
+/**
+ * Synchronously commit a staged restore: rename each fsynced staging file
+ * over its target (or remove absent sidecars), then fsync the directory. No
+ * `await` between the caller's `releaseWriteLock` and these renames — the
+ * microsecond gap is bounded by the re-check that proved no holders, matching
+ * `swapInCandidate`'s close+renameSync protocol. Best-effort directory fsync
+ * where the platform allows it; the rename is atomic regardless.
+ */
+function commitRestoreFromArchive(plan: RestoreCommitPlan): void {
+	for (const entry of plan.entries) {
+		if (entry.staging !== null) {
+			fsSync.renameSync(entry.staging, entry.target);
+		} else if (entry.remove) {
+			try {
+				fsSync.rmSync(entry.target, { force: true });
+			} catch {
+				// best effort — a missing sidecar is the intended end state
+			}
+		}
+	}
+	try {
+		const handle = fsSync.openSync(plan.directory, "r");
+		try {
+			fsSync.fsyncSync(handle);
+		} finally {
+			fsSync.closeSync(handle);
+		}
+	} catch {
+		// best effort: some platforms cannot fsync a directory handle
+	}
 }
 
 function swapMarkerPath(dbPath: string): string {
@@ -418,6 +477,7 @@ async function swapInCandidate(
 		// original may not exist — the candidate's default mode is acceptable
 	}
 	let swapCommitted = false;
+	let rollbackFailed = false;
 	let markerRemovalError: Error | null = null;
 	try {
 		// Under-lock re-check: prove no writer appeared and the main file is
@@ -470,9 +530,18 @@ async function swapInCandidate(
 		await fsyncFile(marker);
 		swapCommitted = true;
 	} catch (error) {
+		// Rollback uses the same close-before-rename protocol as the swap:
+		// stage the archive copies (writes go to staging files, not the live
+		// target), release the write lock, then rename synchronously. Renaming
+		// over the live file while the lock handle is still open fails on
+		// Windows (open SQLite file cannot be replaced).
 		try {
-			await restoreFromArchive(dbPath, archiveDir);
+			const rollbackPlan = await stageRestoreFromArchive(dbPath, archiveDir);
+			releaseWriteLock(lockHandle);
+			lockHandle = null;
+			commitRestoreFromArchive(rollbackPlan);
 		} catch (rollbackError) {
+			rollbackFailed = true;
 			throw new Error(
 				`replacement failed and rollback failed; restore manually from ${archiveDir}: ${messageOf(rollbackError)}`,
 			);
@@ -481,16 +550,22 @@ async function swapInCandidate(
 	} finally {
 		releaseWriteLock(lockHandle);
 		for (const retiredPath of retired) await fs.rm(retiredPath, { force: true }).catch(() => undefined);
-		try {
-			await fs.rm(marker, { force: true });
-			await fsyncDir(path.dirname(dbPath));
-		} catch (error) {
-			if (swapCommitted)
-				markerRemovalError = new Error(
-					`swap succeeded but swap marker could not be removed; the database is repaired but a stale marker remains at ${marker}: ${messageOf(error)}`,
-				);
-			// Rollback succeeded; a leftover marker without swapped:true causes
-			// the next --fix to re-restore the same archive (a benign no-op).
+		// The marker is the durable pointer the next doctor run needs for
+		// recovery. Clear it only after a verified swap (swapCommitted) or a
+		// completed rollback — never when rollback failed, or the archive
+		// pointer is lost in exactly the path that most needs it.
+		if (!rollbackFailed) {
+			try {
+				await fs.rm(marker, { force: true });
+				await fsyncDir(path.dirname(dbPath));
+			} catch (error) {
+				if (swapCommitted)
+					markerRemovalError = new Error(
+						`swap succeeded but swap marker could not be removed; the database is repaired but a stale marker remains at ${marker}: ${messageOf(error)}`,
+					);
+				// Rollback succeeded; a leftover marker without swapped:true causes
+				// the next --fix to re-restore the same archive (a benign no-op).
+			}
 		}
 	}
 	if (markerRemovalError !== null) throw markerRemovalError;
@@ -550,7 +625,9 @@ export async function recoverInterruptedSwap(db: DoctorDatabase, restore: boolea
 		// valid SQLite database (NOTADB), acquireWriteLock returns null — an
 		// unopenable file can't take a SQLite lock, but a process may still
 		// hold it open from before it became garbage. Gate on hasHolders:
-		// proceed only when it returns exactly false; true or unavailable → refuse.
+		// proceed only when it returns exactly false. A `true` result refuses
+		// as busy; a `null` result (fuser unavailable, e.g. macOS/Windows)
+		// refuses as an unsupported repair naming the missing dependency.
 		// BEGIN IMMEDIATE failures throw and are caught above (refuse).
 		let lockHandle: Database | null = null;
 		try {
@@ -565,15 +642,35 @@ export async function recoverInterruptedSwap(db: DoctorDatabase, restore: boolea
 			} catch {
 				holders = null;
 			}
-			if (holders !== false)
+			// Distinguish "another process holds it" from "holder detection is
+			// unavailable on this platform" (no fuser). The latter is an
+			// unsupported repair, not a generic busy — surface what to install
+			// so the dependency is actionable on every platform where this path
+			// is used, not only where the tools-section warning mentions it.
+			if (holders === true)
 				return {
 					found: true,
 					restored: false,
-					error: "database busy or holder check unavailable; close running omp sessions and re-run",
+					error: "database busy; close running omp sessions and re-run",
+				};
+			if (holders === null)
+				return {
+					found: true,
+					restored: false,
+					error: "holder detection unavailable on this platform (fuser not found); install psmisc or close all omp sessions and re-run — automatic recovery of an unopenable database is unsupported without holder detection",
 				};
 		}
+		// Stage the archive copies while the lock is held (writes go to staging
+		// files, not the live target), then release the lock and commit the
+		// rename synchronously — the same close-before-rename protocol
+		// swapInCandidate uses. Renaming over the live file while the lock
+		// handle is still open fails on Windows (open SQLite file cannot be
+		// replaced); no reopen, no await between release and rename.
 		try {
-			await restoreFromArchive(db.path, archiveDir);
+			const restorePlan = await stageRestoreFromArchive(db.path, archiveDir);
+			releaseWriteLock(lockHandle);
+			lockHandle = null;
+			commitRestoreFromArchive(restorePlan);
 		} finally {
 			releaseWriteLock(lockHandle);
 		}
@@ -600,8 +697,14 @@ async function runRecoverDump(sqlite: string, workDb: string, dumpPath: string):
 			stdout: Bun.file(dumpPath),
 			stderr: "pipe",
 		});
-		const stderr = await new Response(recover.stderr as ReadableStream<Uint8Array>).text();
-		if ((await recover.exited) === 0) {
+		// Drain stderr concurrently with awaiting exit: a large dump can
+		// produce more stderr than the pipe buffer holds, and awaiting exit
+		// before draining deadlocks the process on stderr write.
+		const [stderr, exitCode] = await Promise.all([
+			new Response(recover.stderr as ReadableStream<Uint8Array>).text(),
+			recover.exited,
+		]);
+		if (exitCode === 0) {
 			if ((await fs.stat(dumpPath)).size === 0) throw new Error("sqlite .recover produced no SQL");
 			return;
 		}
@@ -651,8 +754,12 @@ export async function probeSqliteRecoverCapability(): Promise<SqliteRecoverCapab
 			stdout: Bun.file(dumpPath),
 			stderr: "pipe",
 		});
-		const stderr = await new Response(recover.stderr as ReadableStream<Uint8Array>).text();
-		const exitCode = await recover.exited;
+		// Drain stderr concurrently with exit to avoid a pipe-buffer deadlock
+		// when the corrupt fixture produces more stderr than the buffer holds.
+		const [stderr, exitCode] = await Promise.all([
+			new Response(recover.stderr as ReadableStream<Uint8Array>).text(),
+			recover.exited,
+		]);
 		const dumpSize = await statSizeOr(dumpPath, 0);
 		if (exitCode === 0 && dumpSize > 0) {
 			recoverCapabilityCache = { available: true, detail: "sqlite3 .recover available" };
@@ -669,6 +776,29 @@ export async function probeSqliteRecoverCapability(): Promise<SqliteRecoverCapab
 	}
 	return recoverCapabilityCache;
 }
+/**
+ * Validate a rescue/salvage candidate before swapping it in: full
+ * `integrity_check` plus `pragma_foreign_key_check`. Both the `.recover` and
+ * `VACUUM INTO` rescue paths call this — a candidate that drops or omits a
+ * parent row can pass `quick_check`/`integrity_check` alone while carrying
+ * relational corruption. Throws on any violation; the caller refuses the
+ * swap and keeps the archive.
+ */
+function validateCandidate(candidatePath: string): void {
+	const check = new Database(candidatePath, { readonly: true });
+	try {
+		check.run("PRAGMA busy_timeout = 5000");
+		const integrity = check.query("PRAGMA integrity_check").get() as Pick<PragmaRow, "integrity_check"> | null;
+		if (integrity?.integrity_check !== "ok") throw new Error("candidate failed integrity_check");
+		const fkCount = check.query("SELECT count(*) AS n FROM pragma_foreign_key_check").get() as Pick<
+			PragmaRow,
+			"n"
+		> | null;
+		if ((fkCount?.n ?? 0) > 0) throw new Error(`candidate has ${fkCount?.n ?? 0} foreign-key violations`);
+	} finally {
+		check.close();
+	}
+}
 async function salvageViaRecover(dbPath: string, archiveDir: string): Promise<string> {
 	const sqlite = $which("sqlite3");
 	if (sqlite === null) throw new Error("sqlite3 CLI not found for .recover salvage");
@@ -683,17 +813,21 @@ async function salvageViaRecover(dbPath: string, archiveDir: string): Promise<st
 		const dumpPath = path.join(workDir, "recovery.sql");
 		await runRecoverDump(sqlite, workDb, dumpPath);
 		const candidate = path.join(workDir, "candidate.db");
-		// Stream the dump via stdin instead of `.read <path>`: the dot-command
-		// splits on whitespace, breaking on TMPDIR values with spaces.
 		const load = Bun.spawn([sqlite, candidate], { stdin: Bun.file(dumpPath), stderr: "pipe" });
-		if ((await load.exited) !== 0) {
-			const stderr = await new Response(load.stderr as ReadableStream<Uint8Array>).text();
+		// Drain stderr concurrently with exit: a large damaged recovery dump
+		// can produce more stderr than the pipe buffer holds, and awaiting
+		// exit before draining deadlocks the process on stderr write.
+		const [stderr, exitCode] = await Promise.all([
+			new Response(load.stderr as ReadableStream<Uint8Array>).text(),
+			load.exited,
+		]);
+		if (exitCode !== 0) {
 			throw new Error(`recovery SQL could not load: ${stderr.trim().slice(0, 300)}`);
 		}
+		// Salvage-specific checks: schema presence and stranded rows. The
+		// shared integrity + FK gate runs via validateCandidate below.
 		const check = new Database(candidate, { readonly: true });
 		try {
-			const integrity = check.query("PRAGMA integrity_check").get() as Pick<PragmaRow, "integrity_check"> | null;
-			if (integrity?.integrity_check !== "ok") throw new Error("salvaged candidate failed integrity_check");
 			const schema = check.query("SELECT count(*) AS n FROM sqlite_master WHERE type = 'table'").get() as Pick<
 				PragmaRow,
 				"n"
@@ -716,22 +850,20 @@ async function salvageViaRecover(dbPath: string, archiveDir: string): Promise<st
 					);
 				}
 			}
-			// .recover can drop damaged parent rows while keeping child rows,
-			// producing a relationally inconsistent candidate that passes
-			// integrity_check. Refuse the swap when FK violations remain.
-			const fkCount = check.query("SELECT count(*) AS n FROM pragma_foreign_key_check").get() as Pick<
-				PragmaRow,
-				"n"
-			> | null;
-			if ((fkCount?.n ?? 0) > 0) {
-				const keptDump = path.join(archiveDir, "recovery.sql");
-				await fs.copyFile(dumpPath, keptDump);
-				throw new Error(
-					`salvaged candidate has ${fkCount?.n ?? 0} foreign-key violations; recovery dump preserved at ${keptDump}`,
-				);
-			}
 		} finally {
 			check.close();
+		}
+		// Shared integrity + foreign-key gate (same as the VACUUM INTO fallback).
+		// .recover can drop damaged parent rows while keeping child rows,
+		// producing a relationally inconsistent candidate that passes
+		// integrity_check alone. Refuse the swap when violations remain and
+		// preserve the dump for manual salvage.
+		try {
+			validateCandidate(candidate);
+		} catch (error) {
+			const keptDump = path.join(archiveDir, "recovery.sql");
+			await fs.copyFile(dumpPath, keptDump).catch(() => undefined);
+			throw new Error(`${messageOf(error)}; recovery dump preserved at ${keptDump}`);
 		}
 		// Stage next to the target so the swap rename is same-filesystem.
 		const staging = path.join(path.dirname(dbPath), `.${path.basename(dbPath)}.salvage-${process.pid}-${Date.now()}`);
@@ -755,16 +887,12 @@ async function vacuumIntoRescue(dbPath: string): Promise<string> {
 		} finally {
 			source.close();
 		}
-		const copy = new Database(rescuePath, { readonly: true });
-		let copyOk = false;
-		try {
-			copy.run("PRAGMA busy_timeout = 5000");
-			const row = copy.query("PRAGMA quick_check(1)").get() as Pick<PragmaRow, "quick_check"> | null;
-			copyOk = row?.quick_check === "ok";
-		} finally {
-			copy.close();
-		}
-		if (!copyOk) throw new Error("rescue copy failed quick_check");
+		// Shared candidate gate: integrity_check + foreign_key_check. A
+		// VACUUM INTO copy preserves orphaned child rows, so a rescue that
+		// drops a parent row can pass quick_check while carrying relational
+		// corruption — refuse the swap when FK violations remain, matching the
+		// `.recover` path which calls the same helper.
+		validateCandidate(rescuePath);
 		await fsyncFile(rescuePath);
 		return rescuePath;
 	} catch (error) {
@@ -830,6 +958,29 @@ function releaseWriteLock(handle: Database | null): void {
 		// best effort
 	}
 }
+/**
+ * Read the journal mode from the SQLite header (bytes 18-19): both `2` → WAL,
+ * else non-WAL. Avoids opening a handle that would create WAL sidecars on a
+ * cleanly closed database. Returns `"wal"`, `"non-wal"`, or `null` when the
+ * header cannot be read (missing file or non-SQLite content).
+ */
+async function headerJournalMode(dbPath: string): Promise<"wal" | "non-wal" | null> {
+	try {
+		const handle = await fs.open(dbPath, "r");
+		try {
+			const buf = Buffer.alloc(2);
+			await handle.read(buf, 0, 2, 18);
+			return buf[0] === 2 && buf[1] === 2 ? "wal" : "non-wal";
+		} finally {
+			await handle.close();
+		}
+	} catch (error) {
+		if (isEnoent(error)) return null;
+		// A non-SQLite file or unreadable header → treat as non-WAL so the
+		// normal read-only open is used (and fails with the real error).
+		return "non-wal";
+	}
+}
 
 export async function probeDatabase(db: DoctorDatabase): Promise<DbProbe> {
 	const probe: DbProbe = {
@@ -862,18 +1013,44 @@ export async function probeDatabase(db: DoctorDatabase): Promise<DbProbe> {
 	probe.present = true;
 	probe.walBytes = await statSizeOr(`${db.path}-wal`, 0);
 	let handle: Database | null = null;
+	// A cleanly closed WAL-mode database with sidecars removed gains -wal and
+	// -shm when opened read-only via the default path, mutating the directory
+	// and contradicting the read-only contract. When no -wal sidecar exists
+	// and the header says WAL, open via an immutable URI instead — SQLite
+	// creates no files and reads the main file directly. When a -wal sidecar
+	// IS present, use the normal read-only open (the sidecars already exist,
+	// so nothing new is created; immutable would ignore the WAL and read a
+	// stale snapshot).
+	const walSidecarExists = await fileExistsOr(`${db.path}-wal`);
+	const headerMode = await headerJournalMode(db.path);
+	const useImmutable = !walSidecarExists && headerMode === "wal";
 	try {
-		handle = new Database(db.path, { readonly: true });
+		if (useImmutable) {
+			// Percent-escape each path segment for SQLite URI form; immutable=1
+			// tells SQLite the file cannot change, so it skips -wal/-shm creation.
+			handle = new Database(
+				"file:" + db.path.split(/[\\/]/).map(encodeURIComponent).join("/") + "?immutable=1",
+				constants.SQLITE_OPEN_READONLY | constants.SQLITE_OPEN_URI,
+			);
+		} else {
+			handle = new Database(db.path, { readonly: true });
+		}
 		// busy_timeout must precede the first lock-taking statement (issue #2421).
 		handle.run("PRAGMA busy_timeout = 5000");
 		const pageCount = handle.query("PRAGMA page_count").get() as Pick<PragmaRow, "page_count"> | null;
 		const freelist = handle.query("PRAGMA freelist_count").get() as Pick<PragmaRow, "freelist_count"> | null;
 		const pageSize = handle.query("PRAGMA page_size").get() as Pick<PragmaRow, "page_size"> | null;
-		const journalMode = handle.query("PRAGMA journal_mode").get() as Pick<PragmaRow, "journal_mode"> | null;
 		probe.pageCount = pageCount?.page_count ?? null;
 		probe.freelistCount = freelist?.freelist_count ?? null;
 		probe.pageSize = pageSize?.page_size ?? null;
-		probe.journalMode = journalMode?.journal_mode ?? null;
+		if (useImmutable) {
+			// immutable=1 masks PRAGMA journal_mode (reports the default, not
+			// WAL); the header already proved WAL, so report it directly.
+			probe.journalMode = "wal";
+		} else {
+			const journalMode = handle.query("PRAGMA journal_mode").get() as Pick<PragmaRow, "journal_mode"> | null;
+			probe.journalMode = journalMode?.journal_mode ?? null;
+		}
 		// quick_check performs a full table/index scan but returns only the
 		// first error row — the (1) argument caps the result set, not the scan.
 		// integrity_check is even heavier and unbounded in result rows; doctor
@@ -997,9 +1174,18 @@ async function repairCorruptDatabase(probe: DbProbe, repair: DbRepair): Promise<
 		} catch {
 			holders = null;
 		}
-		if (holders !== false) {
+		// Distinguish "another process holds it" from "holder detection
+		// unavailable on this platform" (no fuser). The latter is an
+		// unsupported repair, not a generic busy — surface the missing
+		// dependency so it is actionable wherever this path runs.
+		if (holders === true) {
 			repair.busy = true;
-			repair.error = "database busy or holder check unavailable; close running omp sessions and re-run";
+			repair.error = "database busy; close running omp sessions and re-run";
+			return;
+		}
+		if (holders === null) {
+			repair.error =
+				"holder detection unavailable on this platform (fuser not found); install psmisc or close all omp sessions and re-run — automatic repair of an unopenable database is unsupported without holder detection";
 			return;
 		}
 	}
