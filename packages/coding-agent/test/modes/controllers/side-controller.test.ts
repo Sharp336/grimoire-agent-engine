@@ -713,4 +713,18 @@ describe("SideController", () => {
 		// always included regardless of the toolNames filter.
 		expect(capturedCreateOpts?.customTools?.map(tool => tool.name)).toEqual(["mcp__s_enabled"]);
 	});
+
+	it("surfaces parent persistence failures without starting creation", async () => {
+		tempDir = TempDir.createSync("@omp-side-flush-");
+		const harness = createContext(tempDir);
+		const forkSpy = vi.spyOn(SessionManager, "forkFrom");
+		vi.spyOn(harness.parentManager, "ensureOnDisk").mockRejectedValueOnce(new Error("disk full"));
+
+		const controller = new SideController(harness.ctx);
+		await controller.start("what changed");
+
+		expect(harness.ctx.showError).toHaveBeenCalledWith("disk full");
+		expect(forkSpy).not.toHaveBeenCalled();
+		expect(AgentRegistry.global().get(SIDE_AGENT_ID)).toBeUndefined();
+	});
 });

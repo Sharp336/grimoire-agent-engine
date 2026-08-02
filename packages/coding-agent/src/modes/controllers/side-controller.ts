@@ -114,8 +114,15 @@ export class SideController {
 		const sessionDir = parentFile.slice(0, -6);
 		const sideFile = path.join(sessionDir, `${SIDE_SESSION_FILE_PREFIX}${Snowflake.next()}.jsonl`);
 
-		await ctx.sessionManager.ensureOnDisk();
-		await ctx.sessionManager.flush();
+		try {
+			await ctx.sessionManager.ensureOnDisk();
+			await ctx.sessionManager.flush();
+		} catch (error) {
+			// The slash handler already cleared the editor — surface the failure
+			// here instead of letting it escape as an unhandled rejection.
+			ctx.showError(error instanceof Error ? error.message : String(error));
+			return;
+		}
 
 		let side: AgentSession | undefined;
 		let capturedRef: AgentRef | undefined;

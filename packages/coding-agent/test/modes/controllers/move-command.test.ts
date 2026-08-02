@@ -99,6 +99,12 @@ describe("CommandController /move", () => {
 	});
 });
 
+const pathExists = (target: string) =>
+	fs.stat(target).then(
+		() => true,
+		() => false,
+	);
+
 function createSwitchContext(
 	sourceDir: string,
 	newSession: (options?: unknown) => Promise<boolean>,
@@ -115,9 +121,10 @@ function createSwitchContext(
 	const sessionManager = {
 		getCwd: () => sourceDir,
 		getSessionName: () => undefined,
-		getSessionFile: () => path.join(sourceDir, "session.jsonl"),
+		getSessionFile: vi.fn(() => currentFile),
 		dropSession: vi.fn(async () => {}),
 	};
+	let currentFile = path.join(sourceDir, "session.jsonl");
 	const statusLine = { invalidate: vi.fn(), resetActiveTime: vi.fn() };
 	const statusContainer = { disposeChildren: vi.fn() };
 	// Object.assign keeps the existing harness context type while overriding the
@@ -131,7 +138,13 @@ function createSwitchContext(
 		resetObserverRegistry: vi.fn(),
 		resetTranscript: vi.fn(),
 	});
-	return { ...base, newSession };
+	return {
+		...base,
+		newSession,
+		setCurrentFile: (file: string) => {
+			currentFile = file;
+		},
+	};
 }
 
 describe("CommandController /clear and /drop side disposal", () => {
@@ -225,6 +238,44 @@ describe("CommandController /clear and /drop side disposal", () => {
 			await controller.handleForkCommand();
 
 			expect(disposeSideConversation).not.toHaveBeenCalled();
+		} finally {
+			await fs.rm(sourceDir, { recursive: true, force: true });
+		}
+	});
+
+	it("sweeps copied side transcripts after a fork commits, keeping other artifacts", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-switch-source-"));
+		try {
+			const { ctx, disposeSideConversation, setCurrentFile } = createSwitchContext(
+				sourceDir,
+				vi.fn(async () => true),
+			);
+			// Pre-populate the FORKED session's artifact dir (the sweep reads the
+			// post-fork sessionFile): one side transcript with its paired artifact
+			// dir, plus ordinary unrelated artifacts that must survive.
+			const artifactDir = path.join(sourceDir, "forked");
+			const sideFile = path.join(artifactDir, "side.internal-0123abcd.jsonl");
+			const sidePairedDir = path.join(artifactDir, "side.internal-0123abcd");
+			await fs.mkdir(sidePairedDir, { recursive: true });
+			await fs.writeFile(sideFile, "{}\n");
+			await fs.writeFile(path.join(sidePairedDir, "blob"), "x");
+			await fs.writeFile(path.join(artifactDir, "RegularAgent.jsonl"), "{}\n");
+			await fs.writeFile(path.join(artifactDir, "keep.txt"), "keep");
+			const controller = new CommandController(ctx);
+			// fork() switches the session — the sweep must read the FORKED file.
+			const forkStub = vi.fn(async () => {
+				setCurrentFile(path.join(sourceDir, "forked.jsonl"));
+				return true;
+			});
+			Object.assign(ctx.session, { fork: forkStub });
+
+			await controller.handleForkCommand();
+
+			expect(disposeSideConversation).toHaveBeenCalledTimes(1);
+			expect(await pathExists(sideFile)).toBe(false);
+			expect(await pathExists(sidePairedDir)).toBe(false);
+			expect(await pathExists(path.join(artifactDir, "RegularAgent.jsonl"))).toBe(true);
+			expect(await pathExists(path.join(artifactDir, "keep.txt"))).toBe(true);
 		} finally {
 			await fs.rm(sourceDir, { recursive: true, force: true });
 		}
