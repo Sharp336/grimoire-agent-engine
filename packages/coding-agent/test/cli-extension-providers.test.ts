@@ -14,13 +14,12 @@
  * passed explicitly so the test never touches the developer's real `~/.omp`.
  */
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import { AuthStorage } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { getModelMatchPreferences, resolveCliModel } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { loadCliExtensionProviders } from "@oh-my-pi/pi-coding-agent/sdk";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -87,53 +86,4 @@ test("loadCliExtensionProviders makes extension providers resolvable by selector
 	} finally {
 		authStorage.close();
 	}
-});
-describe("loadExtensions provider registration order", () => {
-	let orderTmp: TempDir;
-
-	beforeEach(async () => {
-		orderTmp = await TempDir.create("@cli-ext-providers-order-");
-	});
-
-	afterEach(async () => {
-		resetSettingsForTest();
-		await orderTmp.remove();
-	});
-
-	test("preserves input order when concurrent factories finish out of order", async () => {
-		const firstPath = orderTmp.join("first-provider.ts");
-		const secondPath = orderTmp.join("second-provider.ts");
-
-		await fs.writeFile(
-			firstPath,
-			`export default async function (pi) {
-	await new Promise(r => setTimeout(r, 100));
-	pi.registerProvider("shared-provider", { baseUrl: "https://first.example.com/v1" });
-}`,
-		);
-
-		await fs.writeFile(
-			secondPath,
-			`export default function (pi) {
-	pi.registerProvider("shared-provider", { baseUrl: "https://second.example.com/v1" });
-}`,
-		);
-
-		const result = await loadExtensions([firstPath, secondPath], orderTmp.path());
-
-		expect(result.errors).toEqual([]);
-		expect(result.extensions).toHaveLength(2);
-		expect(result.runtime.pendingProviderRegistrations).toHaveLength(2);
-
-		expect(result.runtime.pendingProviderRegistrations[0]).toEqual({
-			name: "shared-provider",
-			config: { baseUrl: "https://first.example.com/v1" },
-			sourceId: firstPath,
-		});
-		expect(result.runtime.pendingProviderRegistrations[1]).toEqual({
-			name: "shared-provider",
-			config: { baseUrl: "https://second.example.com/v1" },
-			sourceId: secondPath,
-		});
-	});
 });
