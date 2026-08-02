@@ -111,16 +111,12 @@ export class VimEditorController {
 			kb.matches(data, "tui.editor.deleteCharForward") ||
 			matchesKey(data, "shift+backspace") ||
 			matchesKey(data, "shift+delete") ||
-			matchesKey(data, "ctrl+k") ||
-			matchesKey(data, "ctrl+u") ||
-			matchesKey(data, "ctrl+w") ||
-			matchesKey(data, "alt+backspace") ||
-			matchesKey(data, "super+alt+backspace") ||
-			matchesKey(data, "alt+d") ||
-			matchesKey(data, "alt+delete") ||
-			matchesKey(data, "super+alt+d") ||
-			matchesKey(data, "super+alt+delete") ||
-			matchesKey(data, "ctrl+y") ||
+			kb.matches(data, "tui.editor.deleteToLineEnd") ||
+			kb.matches(data, "tui.editor.deleteToLineStart") ||
+			kb.matches(data, "tui.editor.deleteWordBackward") ||
+			kb.matches(data, "tui.editor.deleteWordForward") ||
+			kb.matches(data, "tui.editor.yank") ||
+			kb.matches(data, "tui.editor.yankPop") ||
 			data === "\n" ||
 			(data.length > 1 && data.includes("\r"));
 		if (!mutates) return;
@@ -183,17 +179,12 @@ export class VimEditorController {
 			kb.matches(data, "tui.editor.deleteCharForward") ||
 			matchesKey(data, "shift+backspace") ||
 			matchesKey(data, "shift+delete") ||
-			matchesKey(data, "ctrl+k") ||
-			matchesKey(data, "ctrl+u") ||
-			matchesKey(data, "ctrl+w") ||
-			matchesKey(data, "alt+backspace") ||
-			matchesKey(data, "super+alt+backspace") ||
-			matchesKey(data, "alt+d") ||
-			matchesKey(data, "alt+delete") ||
-			matchesKey(data, "super+alt+d") ||
-			matchesKey(data, "super+alt+delete") ||
-			matchesKey(data, "ctrl+y") ||
-			matchesKey(data, "alt+y")
+			kb.matches(data, "tui.editor.deleteToLineEnd") ||
+			kb.matches(data, "tui.editor.deleteToLineStart") ||
+			kb.matches(data, "tui.editor.deleteWordBackward") ||
+			kb.matches(data, "tui.editor.deleteWordForward") ||
+			kb.matches(data, "tui.editor.yank") ||
+			kb.matches(data, "tui.editor.yankPop")
 		) {
 			this.clearPendingCommand();
 			return true;

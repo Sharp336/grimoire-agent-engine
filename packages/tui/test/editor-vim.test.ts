@@ -1,6 +1,11 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Editor } from "@oh-my-pi/pi-tui/components/editor";
+import { KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@oh-my-pi/pi-tui/keybindings";
 import { defaultEditorTheme } from "./test-themes";
+
+afterEach(() => {
+	setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+});
 
 function createVimEditor(): Editor {
 	const editor = new Editor(defaultEditorTheme);
@@ -455,6 +460,31 @@ describe("Editor Vim input mode", () => {
 		editor.handleInput("x");
 
 		expect(editor.getText()).toBe("ab");
+	});
+
+	it("blocks remapped base mutations in Vim normal mode", () => {
+		setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS, { "tui.editor.deleteToLineEnd": "alt+g" }));
+		const editor = createVimEditor();
+		editor.setText("abc");
+		editor.handleInput("0");
+
+		editor.handleInput("\x1bg");
+
+		expect(editor.getText()).toBe("abc");
+		expect(editor.getVimMode()).toBe("normal");
+	});
+
+	it("groups remapped base mutations into the Vim insert undo session", () => {
+		setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS, { "tui.editor.deleteToLineEnd": "alt+g" }));
+		const editor = createVimEditor();
+		editor.setText("abc");
+		typeText(editor, "0i");
+
+		editor.handleInput("\x1bg");
+		typeText(editor, "X\u001bu");
+
+		expect(editor.getText()).toBe("abc");
+		expect(editor.getVimMode()).toBe("normal");
 	});
 
 	it("clears pending counts and operators before non-command keys", () => {
