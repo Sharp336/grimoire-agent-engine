@@ -36,6 +36,9 @@ from .host_uris import (
 )
 from .protocol import (
     ActiveOperation,
+    AdvisorRuntimeState,
+    AdvisorRuntimeStatus,
+    AdvisorState,
     AgentEndEvent,
     AgentMessage,
     AssistantMessage,
@@ -127,6 +130,7 @@ from .protocol import (
     message_text_with_thinking,
     parse_delete_session_result,
     parse_fork_session_result,
+    parse_advisor_state,
     parse_notification,
     parse_rename_session_result,
     parse_resume_session_result,
@@ -141,6 +145,9 @@ from .protocol import (
 
 __all__ = [
     "ActiveOperation",
+    "AdvisorRuntimeState",
+    "AdvisorRuntimeStatus",
+    "AdvisorState",
     "AgentEndEvent",
     "AgentEventListener",
     "AgentMessage",
@@ -263,6 +270,7 @@ __all__ = [
     "message_text_with_thinking",
     "parse_delete_session_result",
     "parse_fork_session_result",
+    "parse_advisor_state",
     "parse_notification",
     "parse_rename_session_result",
     "parse_resume_session_result",
