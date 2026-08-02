@@ -801,7 +801,6 @@ class ContextUsage:
 class SessionState:
     model: ModelInfo | None
     thinking_level: ThinkingLevel | None
-    thinking_mode: ThinkingMode | None
     is_streaming: bool
     is_compacting: bool
     steering_mode: SteeringMode
@@ -820,6 +819,7 @@ class SessionState:
     fast_mode_active: bool = False
     tokens_per_second: float | None = None
     context_usage: ContextUsage | None = None
+    thinking_mode: ThinkingMode | None = None
 
 
 @dataclass(slots=True, frozen=True)

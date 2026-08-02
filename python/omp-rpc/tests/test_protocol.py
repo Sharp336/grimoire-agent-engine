@@ -144,6 +144,27 @@ class ProtocolParsingTests(unittest.TestCase):
                     (False, False, expected),
                 )
 
+    def test_session_state_constructor_keeps_existing_positional_shape(self) -> None:
+        state = SessionState(
+            None,
+            "medium",
+            False,
+            False,
+            "one-at-a-time",
+            "all",
+            "immediate",
+            None,
+            "session-123",
+            "Scratchpad",
+            True,
+            4,
+            1,
+        )
+
+        self.assertEqual(state.thinking_level, "medium")
+        self.assertIsNone(state.thinking_mode)
+        self.assertEqual(state.session_id, "session-123")
+
     def test_parse_agent_end_notification(self) -> None:
         notification = parse_notification(
             {
