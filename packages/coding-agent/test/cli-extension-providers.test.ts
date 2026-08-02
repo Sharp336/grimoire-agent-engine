@@ -88,45 +88,14 @@ test("loadCliExtensionProviders makes extension providers resolvable by selector
 		authStorage.close();
 	}
 });
-
-type CliExtProvidersOrderTestGlobals = typeof globalThis & {
-	__cliExtProvidersTestWaitProviderSecondGate?: () => Promise<void>;
-	__cliExtProvidersTestReleaseProviderSecondGate?: () => void;
-	__cliExtProvidersTestWaitFlagSecondGate?: () => Promise<void>;
-	__cliExtProvidersTestReleaseFlagSecondGate?: () => void;
-};
-
-function cliExtProvidersOrderTestGlobals(): CliExtProvidersOrderTestGlobals {
-	return globalThis as CliExtProvidersOrderTestGlobals;
-}
-
 describe("loadExtensions provider registration order", () => {
 	let orderTmp: TempDir;
 
 	beforeEach(async () => {
 		orderTmp = await TempDir.create("@cli-ext-providers-order-");
-
-		const providerSecondGate = Promise.withResolvers<void>();
-		const flagSecondGate = Promise.withResolvers<void>();
-		const globals = cliExtProvidersOrderTestGlobals();
-
-		globals.__cliExtProvidersTestWaitProviderSecondGate = () => providerSecondGate.promise;
-		globals.__cliExtProvidersTestReleaseProviderSecondGate = () => {
-			providerSecondGate.resolve();
-		};
-		globals.__cliExtProvidersTestWaitFlagSecondGate = () => flagSecondGate.promise;
-		globals.__cliExtProvidersTestReleaseFlagSecondGate = () => {
-			flagSecondGate.resolve();
-		};
 	});
 
 	afterEach(async () => {
-		const globals = cliExtProvidersOrderTestGlobals();
-		delete globals.__cliExtProvidersTestWaitProviderSecondGate;
-		delete globals.__cliExtProvidersTestReleaseProviderSecondGate;
-		delete globals.__cliExtProvidersTestWaitFlagSecondGate;
-		delete globals.__cliExtProvidersTestReleaseFlagSecondGate;
-
 		resetSettingsForTest();
 		await orderTmp.remove();
 	});
@@ -138,7 +107,7 @@ describe("loadExtensions provider registration order", () => {
 		await fs.writeFile(
 			firstPath,
 			`export default async function (pi) {
-	await globalThis.__cliExtProvidersTestWaitProviderSecondGate();
+	await new Promise(r => setTimeout(r, 100));
 	pi.registerProvider("shared-provider", { baseUrl: "https://first.example.com/v1" });
 }`,
 		);
@@ -147,7 +116,6 @@ describe("loadExtensions provider registration order", () => {
 			secondPath,
 			`export default function (pi) {
 	pi.registerProvider("shared-provider", { baseUrl: "https://second.example.com/v1" });
-	globalThis.__cliExtProvidersTestReleaseProviderSecondGate();
 }`,
 		);
 
@@ -167,38 +135,5 @@ describe("loadExtensions provider registration order", () => {
 			config: { baseUrl: "https://second.example.com/v1" },
 			sourceId: secondPath,
 		});
-	});
-
-	test("preserves flag default input order when concurrent factories finish out of order", async () => {
-		const firstPath = orderTmp.join("first-flag.ts");
-		const secondPath = orderTmp.join("second-flag.ts");
-
-		await fs.writeFile(
-			firstPath,
-			`export default async function (pi) {
-	await globalThis.__cliExtProvidersTestWaitFlagSecondGate();
-	pi.registerFlag("shared-flag", { type: "string", default: "first" });
-	if (pi.getFlag("shared-flag") !== "first") {
-		throw new Error("expected local getFlag to observe first default");
-	}
-}`,
-		);
-
-		await fs.writeFile(
-			secondPath,
-			`export default function (pi) {
-	pi.registerFlag("shared-flag", { type: "string", default: "second" });
-	if (pi.getFlag("shared-flag") !== "second") {
-		throw new Error("expected local getFlag to observe second default");
-	}
-	globalThis.__cliExtProvidersTestReleaseFlagSecondGate();
-}`,
-		);
-
-		const result = await loadExtensions([firstPath, secondPath], orderTmp.path());
-
-		expect(result.errors).toEqual([]);
-		expect(result.extensions).toHaveLength(2);
-		expect(result.runtime.flagValues.get("shared-flag")).toBe("second");
 	});
 });

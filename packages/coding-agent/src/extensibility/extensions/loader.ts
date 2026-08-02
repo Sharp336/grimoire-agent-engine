@@ -157,7 +157,6 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		private readonly cwd: string,
 		public readonly events: EventBus,
 		private readonly providerSink?: Array<{ name: string; config: ProviderConfig; sourceId: string }>,
-		private readonly flagSink?: Map<string, boolean | string>,
 	) {}
 
 	on<F extends HandlerFn>(event: string, handler: F): void {
@@ -204,12 +203,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	): void {
 		this.extension.flags.set(name, { name, extensionPath: this.extension.path, ...options });
 		if (options.default !== undefined) {
-			this.flagValues.set(name, options.default);
-			if (this.flagSink) {
-				this.flagSink.set(name, options.default);
-			} else {
-				this.runtime.flagValues.set(name, options.default);
-			}
+			this.runtime.flagValues.set(name, options.default);
 		}
 	}
 
@@ -223,7 +217,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 
 	getFlag(name: string): boolean | string | undefined {
 		if (!this.extension.flags.has(name)) return undefined;
-		return this.flagValues.get(name) ?? this.runtime.flagValues.get(name);
+		return this.runtime.flagValues.get(name);
 	}
 
 	sendMessage<T = unknown>(
@@ -331,7 +325,6 @@ async function loadExtension(
 	extension: Extension | null;
 	error: string | null;
 	providers: Array<{ name: string; config: ProviderConfig; sourceId: string }>;
-	flags: Map<string, boolean | string>;
 }> {
 	const resolvedPath = resolvePath(extensionPath, cwd);
 	try {
@@ -343,22 +336,20 @@ async function loadExtension(
 				extension: null,
 				error: `Extension does not export a valid factory function: ${extensionPath}`,
 				providers: [],
-				flags: new Map(),
 			};
 		}
 
 		const extension = createExtension(extensionPath, resolvedPath);
 		const providers: Array<{ name: string; config: ProviderConfig; sourceId: string }> = [];
-		const flags = new Map<string, boolean | string>();
-		const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus, providers, flags);
+		const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus, providers);
 		await withHostGuard(async () => {
 			await factory(api);
 		});
 
-		return { extension, error: null, providers, flags };
+		return { extension, error: null, providers };
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		return { extension: null, error: `Failed to load extension: ${message}`, providers: [], flags: new Map() };
+		return { extension: null, error: `Failed to load extension: ${message}`, providers: [] };
 	}
 }
 
@@ -385,8 +376,8 @@ const LOAD_CONCURRENCY = 8;
  *
  * Loads up to {@link LOAD_CONCURRENCY} extensions concurrently. Results are
  * written into a pre-sized array by input index, so `extensions`, `errors`,
- * `runtime.pendingProviderRegistrations`, and `runtime.flagValues` preserve
- * the `paths` order regardless of completion order.
+ * and `runtime.pendingProviderRegistrations` preserve the `paths` order
+ * regardless of completion order.
  */
 export async function loadExtensions(paths: string[], cwd: string, eventBus?: EventBus): Promise<LoadExtensionsResult> {
 	const extensions: Extension[] = [];
@@ -397,7 +388,6 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 		extension: Extension | null;
 		error: string | null;
 		providers: Array<{ name: string; config: ProviderConfig; sourceId: string }>;
-		flags: Map<string, boolean | string>;
 	}> = new Array(paths.length);
 	let next = 0;
 	const workers = Array.from({ length: Math.min(LOAD_CONCURRENCY, paths.length) }, async () => {
@@ -409,14 +399,11 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 	});
 	await Promise.all(workers);
 
-	for (const [index, { extension, error, providers, flags }] of settled.entries()) {
+	for (const [index, { extension, error, providers }] of settled.entries()) {
 		if (error) errors.push({ path: paths[index], error });
 		else if (extension) {
 			extensions.push(extension);
 			runtime.pendingProviderRegistrations.push(...providers);
-			for (const [name, value] of flags) {
-				runtime.flagValues.set(name, value);
-			}
 		}
 	}
 
