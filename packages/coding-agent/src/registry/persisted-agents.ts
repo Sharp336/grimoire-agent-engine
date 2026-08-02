@@ -57,13 +57,27 @@ async function registerPersistedSubagentsFromDir(
 		// degrade after the first compaction. Delete abandoned side files (and their
 		// artifact dirs) during the scan so crashed transcripts do not linger forever.
 		if (entry.name.startsWith(SIDE_SESSION_FILE_PREFIX)) {
-			try {
-				await SessionManager.removeSessionFiles(path.join(dir, entry.name));
-			} catch (err) {
-				logger.warn("Failed to delete abandoned side transcript", {
-					file: entry.name,
-					error: String(err),
-				});
+			const sideFile = path.join(dir, entry.name);
+			// Live if a current registry ref owns the exact path — including a
+			// mid-registration null-session `running` ref, so the Hub opening while
+			// a side is focused (or starting) cannot delete it.
+			const owned = registry.list().some(ref => ref.sessionFile === sideFile);
+			if (!owned) {
+				// Only files proven to predate this process are abandoned:
+				// forkFrom writes the side file before createAgentSession registers
+				// its ref, so a fresh unowned file may be an initializing fork, not
+				// garbage (TOCTOU window the ownership check cannot close).
+				const { mtimeMs } = await fs.promises.stat(sideFile);
+				if (mtimeMs < performance.timeOrigin) {
+					try {
+						await SessionManager.removeSessionFiles(sideFile);
+					} catch (err) {
+						logger.warn("Failed to delete abandoned side transcript", {
+							file: entry.name,
+							error: String(err),
+						});
+					}
+				}
 			}
 			continue;
 		}
