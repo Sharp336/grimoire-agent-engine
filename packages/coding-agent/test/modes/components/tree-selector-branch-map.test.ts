@@ -80,6 +80,45 @@ function treeWithHiddenMiddleSibling(): { tree: SessionTreeNode[]; currentLeafId
 	return { tree: [root], currentLeafId: firstChild.entry.id, thirdChildId: thirdChild.entry.id };
 }
 
+function treeWithPromotedHiddenBranches(hiddenType: "custom" | "label"): {
+	tree: SessionTreeNode[];
+	currentLeafId: string;
+	rootId: string;
+	firstChildId: string;
+	secondChildId: string;
+} {
+	const root = userNode("root");
+	const hiddenEntry: SessionEntry =
+		hiddenType === "custom"
+			? {
+					type: "custom",
+					id: `entry-${nextId++}`,
+					parentId: root.entry.id,
+					timestamp: new Date().toISOString(),
+					customType: "internal-marker",
+				}
+			: {
+					type: "label",
+					id: `entry-${nextId++}`,
+					parentId: root.entry.id,
+					timestamp: new Date().toISOString(),
+					targetId: root.entry.id,
+					label: "bookmark",
+				};
+	const hiddenNode: SessionTreeNode = { entry: hiddenEntry, children: [] };
+	const firstChild = userNode("first visible branch", hiddenNode.entry.id);
+	const secondChild = userNode("second visible branch", hiddenNode.entry.id);
+	root.children.push(hiddenNode);
+	hiddenNode.children.push(firstChild, secondChild);
+	return {
+		tree: [root],
+		currentLeafId: firstChild.entry.id,
+		rootId: root.entry.id,
+		firstChildId: firstChild.entry.id,
+		secondChildId: secondChild.entry.id,
+	};
+}
+
 function linearUserTree(
 	count: number,
 	textAt: (index: number) => string = index => `node ${index}`,
@@ -422,6 +461,30 @@ describe("TreeSelectorComponent branch map", () => {
 
 		expect(selector.getTreeList().getSelectedNode()?.entry.id).toBe(thirdChildId);
 	});
+
+	for (const hiddenType of ["custom", "label"] as const) {
+		it(`follows branches promoted through a hidden ${hiddenType} node`, () => {
+			const { tree, currentLeafId, rootId, firstChildId, secondChildId } =
+				treeWithPromotedHiddenBranches(hiddenType);
+			const selector = new TreeSelectorComponent(
+				tree,
+				currentLeafId,
+				60,
+				() => {},
+				() => {},
+			);
+			selector.handleInput("\x07"); // ctrl+g: split -> map
+			selector.handleInput("\x1b[A"); // up: first visible branch -> root
+			expect(selector.getTreeList().getSelectedNode()?.entry.id).toBe(rootId);
+
+			selector.handleInput("\x1b[1;2C"); // shift+right: root -> first promoted branch
+			expect(selector.getTreeList().getSelectedNode()?.entry.id).toBe(firstChildId);
+
+			selector.handleInput("\x1b[A"); // up: first visible branch -> root
+			selector.handleInput("\x1b[1;2D"); // shift+left: root -> last promoted branch
+			expect(selector.getTreeList().getSelectedNode()?.entry.id).toBe(secondChildId);
+		});
+	}
 
 	it("projects the same filtered nodes into the branch map and updates the filter status", () => {
 		const { tree, currentLeafId } = treeWithHiddenInternalNode();

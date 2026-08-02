@@ -511,10 +511,27 @@ class TreeList implements Component {
 	}
 
 	#moveToSiblingBranch(direction: -1 | 1): void {
-		const selected = this.getSelectedNode();
-		if (!selected) return;
+		const visibleTree = this.getVisibleTree();
+		const nodeById = new Map<string, SessionTreeNode>();
+		const parentById = new Map<string, SessionTreeNode | null>();
+		type VisibleTreeItem = { node: SessionTreeNode; parent: SessionTreeNode | null };
+		const stack: VisibleTreeItem[] = [];
+		for (let index = visibleTree.length - 1; index >= 0; index--) {
+			stack.push({ node: visibleTree[index]!, parent: null });
+		}
+		while (stack.length > 0) {
+			const { node, parent } = stack.pop()!;
+			nodeById.set(node.entry.id, node);
+			parentById.set(node.entry.id, parent);
+			for (let index = node.children.length - 1; index >= 0; index--) {
+				stack.push({ node: node.children[index]!, parent: node });
+			}
+		}
 
-		const nodeById = new Map<string, SessionTreeNode>(this.#flatNodes.map(node => [node.node.entry.id, node.node]));
+		const selectedId = this.getSelectedNode()?.entry.id;
+		if (!selectedId) return;
+		const selected = nodeById.get(selectedId);
+		if (!selected) return;
 		if (selected.children.length > 1) {
 			const targetIndex = direction === 1 ? 0 : selected.children.length - 1;
 			this.#selectVisibleBranch(selected.children, targetIndex, direction);
@@ -522,10 +539,8 @@ class TreeList implements Component {
 		}
 
 		let branchChild = selected;
-		let parentId = selected.entry.parentId;
-		while (parentId) {
-			const parent = nodeById.get(parentId);
-			if (!parent) return;
+		let parent = parentById.get(selected.entry.id) ?? null;
+		while (parent) {
 			if (parent.children.length > 1) {
 				const currentIndex = parent.children.findIndex(child => child.entry.id === branchChild.entry.id);
 				if (currentIndex === -1) return;
@@ -534,14 +549,14 @@ class TreeList implements Component {
 				return;
 			}
 			branchChild = parent;
-			parentId = parent.entry.parentId;
+			parent = parentById.get(parent.entry.id) ?? null;
 		}
 
-		if (this.#roots.length > 1) {
-			const currentIndex = this.#roots.findIndex(root => root.entry.id === branchChild.entry.id);
+		if (visibleTree.length > 1) {
+			const currentIndex = visibleTree.findIndex(root => root.entry.id === branchChild.entry.id);
 			if (currentIndex === -1) return;
-			const targetIndex = (currentIndex + direction + this.#roots.length) % this.#roots.length;
-			this.#selectVisibleBranch(this.#roots, targetIndex, direction);
+			const targetIndex = (currentIndex + direction + visibleTree.length) % visibleTree.length;
+			this.#selectVisibleBranch(visibleTree, targetIndex, direction);
 		}
 	}
 
