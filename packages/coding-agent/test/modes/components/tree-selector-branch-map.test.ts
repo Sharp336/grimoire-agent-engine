@@ -324,6 +324,25 @@ describe("TreeSelectorComponent branch map", () => {
 		expect(render(selector, terminalColumns)).toContain("Branch Map");
 	});
 
+	it("keeps a selected branch root visible in narrow standalone maps", () => {
+		const { tree, currentLeafId } = branchyTree();
+		for (const width of [21, 34]) {
+			const selector = new TreeSelectorComponent(
+				tree,
+				currentLeafId,
+				60,
+				() => {},
+				() => {},
+			);
+			selector.handleInput("\x1b[A"); // leaf -> branch root
+			selector.handleInput("\x07"); // ctrl+g: split -> map
+
+			const output = render(selector, width);
+			expect(output).toContain("›#1 user");
+			for (const line of output.split("\n")) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(width);
+		}
+	});
+
 	it("keeps selected map nodes visible when a short viewport needs scroll indicators", () => {
 		const { tree, currentLeafId } = linearUserTree(3);
 		const leafSelector = new TreeSelectorComponent(

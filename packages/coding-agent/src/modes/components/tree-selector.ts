@@ -1185,14 +1185,21 @@ class BranchMap implements Component {
 	}
 
 	render(width: number, showSummaries = true): readonly string[] {
-		const nodeWidth = showSummaries ? Math.max(18, Math.min(30, width - 4)) : Math.max(11, Math.min(14, width - 4));
+		const graphWidth = Math.max(1, width - 2);
+		const preferredNodeWidth = showSummaries
+			? Math.max(18, Math.min(30, width - 4))
+			: Math.max(11, Math.min(14, width - 4));
+		// Reserve one cell for each horizontal ellipsis so a fully rendered node
+		// remains visible even when the viewport crops both sides of the graph.
+		const maxNodeWidth = Math.max(2, graphWidth - 2);
+		const nodeWidth = Math.min(preferredNodeWidth, maxNodeWidth);
 		const layout = this.#getLayout(nodeWidth);
 		const { width: mapWidth, height } = layout;
 		const selectedId = this.getSelectedId();
 		const selected = selectedId ? layout.nodesById.get(selectedId) : undefined;
-		const graphWidth = Math.max(1, width - 2);
 		const selectedLeft = selected ? selected.x - Math.floor(nodeWidth / 2) : 0;
-		const startX = Math.max(0, Math.min(selectedLeft - 2, mapWidth - graphWidth));
+		const selectedMargin = nodeWidth === maxNodeWidth ? 1 : 2;
+		const startX = Math.max(0, Math.min(selectedLeft - selectedMargin, mapWidth - graphWidth));
 		const endX = Math.min(mapWidth, startX + graphWidth);
 		const maxGraphRows = Math.max(1, this.#maxVisibleLines - 1);
 		const viewport = (graphRows: number): { startY: number; endY: number } => {
