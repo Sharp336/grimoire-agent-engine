@@ -62,6 +62,8 @@ export interface SessionContext {
 	thinkingLevel?: string;
 	/** Configured thinking selector (`"auto"` or a concrete level) from the latest change. */
 	configuredThinkingLevel?: string;
+	/** Provider-neutral thinking mode from the latest thinking/effort change. */
+	thinkingMode?: string;
 	serviceTier?: ServiceTierByFamily;
 	/** Model roles: { default: "provider/modelId", small: "provider/modelId", ... } */
 	models: Record<string, string>;
@@ -230,6 +232,7 @@ export function buildSessionContext(
 	// Extract settings and find compaction
 	let thinkingLevel: string | undefined = "off";
 	let configuredThinkingLevel: string | undefined;
+	let thinkingMode: string | undefined;
 	let serviceTier: ServiceTierByFamily | undefined;
 	const models: Record<string, string> = {};
 	let compaction: CompactionEntry | null = null;
@@ -247,8 +250,9 @@ export function buildSessionContext(
 
 	for (const entry of path) {
 		if (entry.type === "thinking_level_change") {
-			thinkingLevel = entry.thinkingLevel ?? "off";
+			thinkingLevel = entry.thinkingLevel ?? (Object.hasOwn(entry, "thinkingMode") ? undefined : "off");
 			configuredThinkingLevel = entry.configured ?? entry.thinkingLevel ?? undefined;
+			thinkingMode = entry.thinkingMode ?? undefined;
 		} else if (entry.type === "model_change") {
 			// New format: { model: "provider/id", role?: string }
 			if (entry.model) {
@@ -549,6 +553,7 @@ export function buildSessionContext(
 		cacheMissExplainedAt: options?.transcript ? cacheMissExplainedAt : undefined,
 		thinkingLevel,
 		configuredThinkingLevel,
+		thinkingMode,
 		serviceTier,
 		models,
 		injectedTtsrRules,

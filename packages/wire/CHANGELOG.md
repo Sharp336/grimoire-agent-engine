@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an optional `thinkingMode` field to the collab `SessionState` so hosts can broadcast an additive provider thinking mode alongside `thinkingLevel`.
+
 ## [16.3.0] - 2026-07-02
 
 ### Breaking Changes

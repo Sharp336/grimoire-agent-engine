@@ -1,5 +1,12 @@
 import { type Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Model, ProviderSessionState, ServiceTier, ServiceTierByFamily, ServiceTierFamily } from "@oh-my-pi/pi-ai";
+import type {
+	Model,
+	ProviderSessionState,
+	ServiceTier,
+	ServiceTierByFamily,
+	ServiceTierFamily,
+	ThinkingMode,
+} from "@oh-my-pi/pi-ai";
 import {
 	clearAnthropicFastModeFallback,
 	Effort,
@@ -31,6 +38,7 @@ import {
 	clampThinkingLevelToCeiling,
 	resolveProvisionalAutoLevel,
 	resolveThinkingLevelForModel,
+	resolveThinkingModeForModel,
 	shouldDisableReasoning,
 	toReasoningEffort,
 } from "../thinking";
@@ -67,16 +75,19 @@ export class ModelControls {
 	readonly #host: ModelControlsHost;
 	#scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	#thinkingLevel: ThinkingLevel | undefined;
+	#thinkingMode: ThinkingMode | undefined;
 	/** Hard per-session effort ceiling (e.g. a task spawn's `task.maxEffort` cap); recovery paths re-clamp to it. */
 	readonly #thinkingLevelCeiling: Effort | undefined;
 	#autoThinking = false;
 	#autoResolvedLevel: Effort | undefined;
+	#lastReasoningEffort: Effort | undefined;
 	#serviceTierByFamily: ServiceTierByFamily;
 
 	constructor(
 		host: ModelControlsHost,
 		options: {
 			scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
+			thinkingMode?: ThinkingMode;
 			thinkingLevel?: ConfiguredThinkingLevel;
 			thinkingLevelCeiling?: Effort;
 			serviceTierByFamily?: ServiceTierByFamily;
@@ -86,6 +97,7 @@ export class ModelControls {
 		this.#scopedModels = options.scopedModels ?? [];
 		this.#serviceTierByFamily = options.serviceTierByFamily ?? {};
 		this.#thinkingLevelCeiling = options.thinkingLevelCeiling;
+		this.#thinkingMode = resolveThinkingModeForModel(this.#model, options.thinkingMode);
 		if (options.thinkingLevel === AUTO_THINKING) {
 			// Keep auto pending until the first turn while exposing a valid wire effort.
 			this.#autoThinking = true;
@@ -101,6 +113,7 @@ export class ModelControls {
 				this.#thinkingLevelCeiling,
 			);
 		}
+		this.#lastReasoningEffort = toReasoningEffort(this.#thinkingLevel) ?? resolveProvisionalAutoLevel(this.#model);
 		this.#applyThinkingLevelToAgent(this.#thinkingLevel);
 	}
 
@@ -116,6 +129,11 @@ export class ModelControls {
 	/** Hard per-session effort ceiling every thinking-level change is clamped to. */
 	get thinkingLevelCeiling(): Effort | undefined {
 		return this.#thinkingLevelCeiling;
+	}
+
+	/** Configured thinking mode, separate from effort. */
+	get thinkingMode(): ThinkingMode | undefined {
+		return this.#thinkingMode;
 	}
 
 	/** Configured selector, preserving `auto` while classification is active. */
@@ -161,9 +179,21 @@ export class ModelControls {
 		this.#applyThinkingLevelToAgent(this.#thinkingLevel);
 	}
 
+	/** Restores thinking mode from a transcript without persisting a new entry. */
+	restoreThinkingMode(mode: ThinkingMode | undefined): void {
+		this.#thinkingMode = resolveThinkingModeForModel(this.#model, mode);
+		this.#applyThinkingLevelToAgent(this.#thinkingLevel);
+	}
+
 	/** Restores an exact thinking snapshot after a failed session switch. */
-	restoreThinkingSnapshot(level: ThinkingLevel | undefined, auto: boolean, resolved: Effort | undefined): void {
+	restoreThinkingSnapshot(
+		level: ThinkingLevel | undefined,
+		mode: ThinkingMode | undefined,
+		auto: boolean,
+		resolved: Effort | undefined,
+	): void {
 		this.#thinkingLevel = level;
+		this.#thinkingMode = resolveThinkingModeForModel(this.#model, mode);
 		this.#autoThinking = auto;
 		this.#autoResolvedLevel = resolved;
 		this.#applyThinkingLevelToAgent(level);
@@ -482,8 +512,39 @@ export class ModelControls {
 	// =========================================================================
 
 	#applyThinkingLevelToAgent(level: ThinkingLevel | undefined): void {
-		this.#host.agent.setThinkingLevel(toReasoningEffort(level));
+		const reasoning = toReasoningEffort(level);
+		if (reasoning !== undefined) this.#lastReasoningEffort = reasoning;
+		this.#thinkingMode = resolveThinkingModeForModel(this.#model, this.#thinkingMode);
+		// Thinking-off keeps the last supported effort on the wire: providers that
+		// separate mode from intensity (Claude 4.6+/5) honor `output_config.effort`
+		// even with the thinking block disabled.
+		const offReasoning =
+			level === ThinkingLevel.Off
+				? toReasoningEffort(
+						resolveThinkingLevelForModel(
+							this.#model,
+							clampThinkingLevelToCeiling(this.#model, this.#lastReasoningEffort, this.#thinkingLevelCeiling),
+						),
+					)
+				: undefined;
+		this.#host.agent.setThinkingLevel(reasoning ?? offReasoning);
+		this.#host.agent.setThinkingMode(this.#thinkingMode);
 		this.#host.agent.setDisableReasoning(shouldDisableReasoning(level));
+	}
+
+	/** Selects provider-side thinking mode without changing effort intensity. */
+	setThinkingMode(mode: ThinkingMode | undefined): void {
+		const resolvedMode = resolveThinkingModeForModel(this.#model, mode);
+		if (this.#thinkingMode === resolvedMode) return;
+		this.#thinkingMode = resolvedMode;
+		this.#applyThinkingLevelToAgent(this.#thinkingLevel);
+		this.#host.clearInheritedProviderPromptCacheKey();
+		this.#host.sessionManager.appendThinkingLevelChange(
+			this.#thinkingLevel,
+			this.configuredThinkingLevel(),
+			resolvedMode,
+		);
+		this.#host.emit({ type: "thinking_level_changed", thinkingLevel: this.#thinkingLevel });
 	}
 
 	/**
@@ -501,6 +562,7 @@ export class ModelControls {
 			);
 			const wasAuto = this.#autoThinking;
 			const previousLevel = this.#thinkingLevel;
+			const previousMode = this.#thinkingMode;
 			this.#autoThinking = true;
 			this.#autoResolvedLevel = undefined;
 			this.#thinkingLevel = provisional;
@@ -511,32 +573,33 @@ export class ModelControls {
 			if (persist) {
 				this.#host.settings.set("defaultThinkingLevel", AUTO_THINKING);
 			}
-			const isChanging = !wasAuto || previousLevel !== provisional;
+			const isChanging = !wasAuto || previousLevel !== provisional || previousMode !== this.#thinkingMode;
 			if (isChanging) {
-				this.#host.sessionManager.appendThinkingLevelChange(provisional, AUTO_THINKING);
+				this.#host.sessionManager.appendThinkingLevelChange(provisional, AUTO_THINKING, this.#thinkingMode);
 				this.#host.emit({ type: "thinking_level_changed", thinkingLevel: provisional, configured: AUTO_THINKING });
 			}
 			return;
 		}
 
 		const wasAuto = this.#autoThinking;
+		const previousLevel = this.#thinkingLevel;
+		const previousMode = this.#thinkingMode;
 		this.#autoThinking = false;
 		this.#autoResolvedLevel = undefined;
 		const effectiveLevel = resolveThinkingLevelForModel(
 			this.#model,
 			clampThinkingLevelToCeiling(this.#model, level, this.#thinkingLevelCeiling),
 		);
+		this.#thinkingLevel = effectiveLevel;
+		this.#applyThinkingLevelToAgent(effectiveLevel);
 		// Leaving auto must persist even when the resolved effort is unchanged (e.g.
 		// auto resolved to medium, then the user pins medium): otherwise the latest
 		// session entry keeps `configured: "auto"` and resume re-enables auto.
-		const isChanging = wasAuto || effectiveLevel !== this.#thinkingLevel;
-
-		this.#thinkingLevel = effectiveLevel;
-		this.#applyThinkingLevelToAgent(effectiveLevel);
+		const isChanging = wasAuto || effectiveLevel !== previousLevel || previousMode !== this.#thinkingMode;
 
 		if (isChanging) {
 			this.#host.clearInheritedProviderPromptCacheKey();
-			this.#host.sessionManager.appendThinkingLevelChange(effectiveLevel, effectiveLevel);
+			this.#host.sessionManager.appendThinkingLevelChange(effectiveLevel, effectiveLevel, this.#thinkingMode);
 			if (persist && effectiveLevel !== undefined && effectiveLevel !== ThinkingLevel.Off) {
 				this.#host.settings.set("defaultThinkingLevel", effectiveLevel);
 			}
@@ -634,7 +697,7 @@ export class ModelControls {
 		this.#thinkingLevel = effort;
 		this.#applyThinkingLevelToAgent(effort);
 		if (shouldPersistResolution) {
-			this.#host.sessionManager.appendThinkingLevelChange(effort, AUTO_THINKING);
+			this.#host.sessionManager.appendThinkingLevelChange(effort, AUTO_THINKING, this.#thinkingMode);
 		}
 		this.#host.emit({
 			type: "thinking_level_changed",

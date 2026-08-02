@@ -1061,6 +1061,8 @@ function convertContentBlocks(
 }
 
 export type AnthropicOutputEffort = "low" | "medium" | "high" | "xhigh" | "max";
+/** Wire effort tiers, least -> most intensive. Narrower than the catalog ladder (no `minimal`). */
+const ANTHROPIC_OUTPUT_EFFORTS: readonly AnthropicOutputEffort[] = ["low", "medium", "high", "xhigh", "max"];
 export type AnthropicEffort = AnthropicOutputEffort | "adaptive";
 export type AnthropicThinkingDisplay = "summarized" | "omitted";
 
@@ -1099,6 +1101,11 @@ export interface AnthropicOptions extends StreamOptions {
 	 * Converted to adaptive effort when effort is not explicitly provided.
 	 */
 	reasoning?: SimpleStreamOptions["reasoning"];
+	/**
+	 * Anthropic `thinking.type` when it is independent from `output_config.effort`.
+	 * Used to preserve adaptive Claude requests that omit an explicit effort.
+	 */
+	anthropicThinkingMode?: "adaptive";
 	/**
 	 * Controls how Anthropic returns thinking content when the selected thinking
 	 * transport supports a display option. Defaults to "summarized" where the
@@ -1871,10 +1878,22 @@ const streamAnthropicOnce = (
 					isAdaptiveOnlyThinking(model) &&
 					(options?.thinkingEnabled === false ||
 						(model.compat.supportsForcedToolChoice && isForcedToolChoice(options?.toolChoice)));
+				const thinkingMode = model.thinking?.mode;
+				const thinkingOn =
+					options?.thinkingEnabled === true ||
+					options?.anthropicThinkingMode === "adaptive" ||
+					model.compat.requiresThinkingEnabled;
+				const emitsOutputConfigEffort =
+					thinkingOn &&
+					((thinkingMode === "anthropic-adaptive" && !model.compat.disableAdaptiveThinking) ||
+						thinkingMode === "anthropic-budget-effort");
+				const requestedAdaptiveEffort = emitsOutputConfigEffort
+					? resolveAnthropicAdaptiveEffort(model, options ?? {})
+					: undefined;
 				if (
-					model.reasoning &&
 					model.provider !== "google-vertex" &&
-					((options?.thinkingEnabled && options.effort !== "adaptive") || sendsAdaptiveEffortPin) &&
+					((requestedAdaptiveEffort !== undefined && requestedAdaptiveEffort !== "adaptive") ||
+						sendsAdaptiveEffortPin) &&
 					!extraBetas.includes(effortBeta)
 				) {
 					extraBetas.push(effortBeta);
@@ -1896,7 +1915,7 @@ const streamAnthropicOnce = (
 				// `context_management` field (#6510).
 				if (
 					model.reasoning &&
-					options?.thinkingEnabled &&
+					(options?.thinkingEnabled || options?.anthropicThinkingMode === "adaptive") &&
 					model.provider !== "github-copilot" &&
 					model.provider !== "google-vertex" &&
 					model.provider !== "opencode-zen" &&
@@ -3466,7 +3485,11 @@ function buildParams(
 	let thinking: MessageCreateParamsStreaming["thinking"] | undefined;
 	let outputConfigEffort: AnthropicOutputEffort | undefined;
 	if (model.reasoning) {
-		if (options?.thinkingEnabled || model.compat.requiresThinkingEnabled) {
+		if (
+			options?.thinkingEnabled ||
+			options?.anthropicThinkingMode === "adaptive" ||
+			model.compat.requiresThinkingEnabled
+		) {
 			const thinkingOptions = options ?? {};
 			const mode = model.thinking?.mode;
 			const effort = resolveAnthropicAdaptiveEffort(model, thinkingOptions);
@@ -3493,17 +3516,31 @@ function buildParams(
 				if (mode === "anthropic-budget-effort" && effort && effort !== "adaptive") outputConfigEffort = effort;
 			}
 		} else if (options?.thinkingEnabled === false) {
-			if (isAdaptiveOnlyThinking(model)) {
-				// Adaptive-only Claude models (Opus 4.6+, Sonnet 4.6+, Fable/Mythos 5) reject
-				// `thinking.type: "disabled"` — adaptive thinking cannot be switched off.
-				// Omit the thinking field (the API defaults to adaptive) and pin the
-				// lowest effort so "thinking off" calls stay cheap instead of failing
-				// the request with a 400 (a hidden-thinking toggle must never break it).
-				// The effort field requires the `effort-2025-11-24` beta; it is attached
-				// at the request site, including per-request for injected SDK clients.
+			if (isAdaptiveOnlyThinking(model) && !model.thinking?.supportsDisabledThinking) {
+				// Preserve the legacy safe fallback for adaptive Claude models that
+				// still cannot accept `thinking.type: "disabled"`. Models flagged
+				// `supportsDisabledThinking` keep the caller's effort and send
+				// disabled thinking below.
 				outputConfigEffort = "low";
 			} else {
 				thinking = { type: "disabled" };
+				const disabledEffort = isAdaptiveOnlyThinking(model)
+					? resolveAnthropicAdaptiveEffort(model, options ?? {})
+					: undefined;
+				// Opus 5+ rejects `thinking.type: "disabled"` above its documented
+				// effort ceiling with a 400, enforced per request, so clamp rather
+				// than dropping the caller's effort entirely. The comparison runs in
+				// the wire domain: `AnthropicOutputEffort` has no `minimal`, so the
+				// catalog ladder would not index it.
+				const ceiling = model.thinking?.disabledThinkingMaxEffort;
+				if (disabledEffort && disabledEffort !== "adaptive") {
+					const ceilingIndex = ceiling ? ANTHROPIC_OUTPUT_EFFORTS.indexOf(ceiling as AnthropicOutputEffort) : -1;
+					const effortIndex = ANTHROPIC_OUTPUT_EFFORTS.indexOf(disabledEffort);
+					outputConfigEffort =
+						ceilingIndex >= 0 && effortIndex > ceilingIndex
+							? ANTHROPIC_OUTPUT_EFFORTS[ceilingIndex]
+							: disabledEffort;
+				}
 			}
 		}
 	}

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
-import type { Context, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
+import type { Context, Model, ModelSpec, SimpleStreamOptions } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 function makeAnthropicModel(id: string): Model<"anthropic-messages"> {
 	return buildModel({
@@ -47,6 +49,14 @@ function adaptiveModel(id: string): Model<"anthropic-messages"> {
 	} as ModelSpec<"anthropic-messages">);
 }
 
+/** Real catalog entry — carries shipped `thinking` capability metadata. */
+function bundledAnthropicModel(id: string): Model<"anthropic-messages"> {
+	const model = getBundledModel<"anthropic-messages">("anthropic", id);
+	// The signature is non-nullable but the lookup is a map miss away from undefined.
+	if (!model) throw new Error(`missing bundled model ${id}`);
+	return model;
+}
+
 const CONTEXT: Context = {
 	systemPrompt: ["Stay concise."],
 	messages: [{ role: "user", content: "weather in paris?", timestamp: Date.now() }],
@@ -59,7 +69,7 @@ function abortedSignal(): AbortSignal {
 }
 
 type CapturedPayload = {
-	thinking?: { type: string };
+	thinking?: { type: string; display?: string };
 	tool_choice?: { type: string };
 	output_config?: { effort?: string };
 };
@@ -72,6 +82,17 @@ function capturePayload(
 	streamAnthropic(model, CONTEXT, {
 		apiKey: "sk-ant-oat-test",
 		isOAuth: true,
+		signal: abortedSignal(),
+		onPayload: payload => resolve(payload as CapturedPayload),
+		...opts,
+	});
+	return promise;
+}
+
+function captureSimplePayload(model: Model<"anthropic-messages">, opts: SimpleStreamOptions): Promise<CapturedPayload> {
+	const { promise, resolve } = Promise.withResolvers<CapturedPayload>();
+	streamSimple(model, CONTEXT, {
+		apiKey: "sk-ant-oat-test",
 		signal: abortedSignal(),
 		onPayload: payload => resolve(payload as CapturedPayload),
 		...opts,
@@ -111,11 +132,79 @@ describe("Anthropic adaptive-only thinking disable", () => {
 		expect(payload.output_config?.effort).toBe("low");
 	});
 
-	it("still sends thinking.type:'disabled' for budget-based (non-adaptive) models", async () => {
+	it("sends thinking.type:'disabled' without output_config effort for budget-based models", async () => {
 		const payload = await capturePayload(makeAnthropicModel("claude-3-7-sonnet-20250219"), {
 			thinkingEnabled: false,
+			reasoning: Effort.High,
 		});
 		expect(payload.thinking?.type).toBe("disabled");
+		expect(payload.output_config?.effort).toBeUndefined();
+	});
+});
+
+describe("Anthropic adaptive thinking mode", () => {
+	it("preserves adaptive thinking mode without fabricating an effort", async () => {
+		const payload = await captureSimplePayload(adaptiveModel("claude-opus-4-8"), {
+			anthropicThinkingMode: "adaptive",
+		});
+
+		expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
+		expect(payload.output_config?.effort).toBeUndefined();
+	});
+
+	it("preserves neutral off mode with caller effort on off-capable Opus 5", async () => {
+		const payload = await captureSimplePayload(adaptiveModel("claude-opus-5"), {
+			thinkingMode: "off",
+			reasoning: Effort.High,
+		});
+
+		expect(payload.thinking).toEqual({ type: "disabled" });
+		expect(payload.output_config?.effort).toBe("high");
+	});
+
+	it("maps neutral adaptive mode without fabricating an effort", async () => {
+		const payload = await captureSimplePayload(adaptiveModel("claude-opus-4-8"), {
+			thinkingMode: "adaptive",
+		});
+
+		expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
+		expect(payload.output_config?.effort).toBeUndefined();
+	});
+
+	// The hand-built `adaptiveModel` specs above omit `supportsDisabledThinking`
+	// and `disabledThinkingMaxEffort`, so they cannot catch a wire payload that
+	// the vendor rejects. These run against the real bundled catalog entries.
+	it("clamps disabled thinking to the documented ceiling on bundled Opus 5", async () => {
+		const model = bundledAnthropicModel("claude-opus-5");
+		// Opus 5 returns 400 for `thinking:{type:"disabled"}` above `high`.
+		for (const effort of [Effort.Max, Effort.XHigh] as const) {
+			const payload = await captureSimplePayload(model, { thinkingMode: "off", reasoning: effort });
+			expect(payload.thinking).toEqual({ type: "disabled" });
+			expect(payload.output_config?.effort).toBe("high");
+		}
+
+		// Below the ceiling the caller's effort must survive untouched.
+		const medium = await captureSimplePayload(model, { thinkingMode: "off", reasoning: Effort.Medium });
+		expect(medium.output_config?.effort).toBe("medium");
+	});
+
+	it("turns thinking off at max effort on bundled Sonnet 5, which has no ceiling", async () => {
+		const payload = await captureSimplePayload(bundledAnthropicModel("claude-sonnet-5"), {
+			thinkingMode: "off",
+			reasoning: Effort.Max,
+		});
+
+		expect(payload.thinking).toEqual({ type: "disabled" });
+		expect(payload.output_config?.effort).toBe("max");
+	});
+
+	it("direct provider options preserve adaptive thinking mode without effort", async () => {
+		const payload = await capturePayload(adaptiveModel("claude-opus-4-8"), {
+			anthropicThinkingMode: "adaptive",
+		});
+
+		expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
+		expect(payload.output_config?.effort).toBeUndefined();
 	});
 });
 

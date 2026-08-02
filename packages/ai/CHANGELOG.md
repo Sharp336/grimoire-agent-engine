@@ -16,6 +16,18 @@
 - Fixed an issue where Codex Responses dropped native image-generation results from assistant content and replays due to stale `generating` statuses.
 - Fixed Anthropic stream truncation handling where unexpected connection closures were incorrectly treated as clean stops, causing the agent loop to halt silently mid-sentence.
 - Optimized Anthropic prompt caching to prevent unnecessary cache invalidation of the entire system prefix when volatile project footer details (such as current working directory, date, or workspace tree) change.
+- Fixed Anthropic streams truncated mid-generation (connection closed with neither a `message_delta` stop_reason nor a `message_stop` frame) finalizing the partial message as a clean `stop`, which made the agent loop treat a truncated turn as complete and halt silently mid-sentence. Such streams raise the stream-envelope error again: transparently retried before replay-unsafe content streams; afterwards the turn surfaces as an error whose complete tool calls the agent loop still runs (`recoverTransientErrorToolTurn` now recognizes the envelope-error text after `retainCompletedToolCalls` drops half-streamed calls). Streams that delivered a `stop_reason` (or `message_stop`) keep degrading to best-effort content when the other terminal frame is missing.
+- Fixed Anthropic prompt caching writing a fresh entry for the entire system prefix whenever the project footer (cwd, date, workspace tree) changed. `applyPromptCaching` placed its only system breakpoint on the last block — normally the volatile footer — so starting omp in a new directory or crossing midnight re-wrote the whole cached system prefix instead of reusing it (issue [#7324](https://github.com/can1357/oh-my-pi/issues/7324)). System caching now marks up to the last three eligible blocks, covering both `[stable prefix, project footer]` and `[stable prefix, project footer, active-repo context]` layouts while skipping the OAuth cloak blocks (billing header + Claude Code identity). Message caching also skips the synthetic trailing `Continue.` pad and anchors on the preceding real assistant turn when the four-breakpoint budget is tight. This does not address open-weight chat templates that render tool schemas after the system block; keeping those cached requires relocating the per-request footer out of the system message.
+### Added
+
+- Added provider-neutral `thinkingMode` request options so Claude thinking mode can be selected independently from reasoning effort.
+
+### Fixed
+
+- Fixed Claude Opus 5 and Sonnet 5 thinking-off requests falling back to low effort instead of sending an explicit `thinking.type: "disabled"` with the caller's effort. Opus 5 rejects that combination above `high` with a 400, so its effort is clamped to `high` rather than dropped; Sonnet 5 has no such ceiling.
+- Fixed `thinkingMode: "off"` being ignored by the Google (Generative AI, Gemini CLI, Vertex), Ollama, and Devin request mappings, which kept sending reasoning-enabled requests whenever an effort was also set.
+- Fixed the GitLab Duo and OpenAI/Anthropic shim providers dropping the explicit thinking-off signal on their OpenAI-format transports.
+- Fixed Anthropic Messages gateway requests that set `thinking.type: "adaptive"` without `output_config.effort` being translated as thinking-off. The gateway, direct Anthropic provider, Bedrock Claude, GitLab Duo Anthropic proxy, OpenAI/Anthropic shim providers, and pi-native forwarding path now preserve Claude adaptive thinking mode separately from effort.
 
 ## [17.2.4] - 2026-08-01
 

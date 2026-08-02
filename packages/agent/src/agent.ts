@@ -19,6 +19,7 @@ import {
 	streamSimple,
 	type TextContent,
 	type ThinkingBudgets,
+	type ThinkingMode,
 	type ToolChoice,
 	type ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
@@ -355,6 +356,7 @@ export class Agent {
 		systemPrompt: [],
 		model: getBundledModel("google", "gemini-2.5-flash-lite-preview-06-17"),
 		thinkingLevel: undefined,
+		thinkingMode: undefined,
 		disableReasoning: false,
 		tools: [],
 		messages: [],
@@ -874,6 +876,10 @@ export class Agent {
 		this.#state.thinkingLevel = l;
 	}
 
+	setThinkingMode(mode: ThinkingMode | undefined) {
+		this.#state.thinkingMode = mode;
+	}
+
 	setDisableReasoning(disabled: boolean) {
 		this.#state.disableReasoning = disabled;
 	}
@@ -1287,6 +1293,7 @@ export class Agent {
 		const config: AgentLoopConfig = {
 			model,
 			reasoning,
+			thinkingMode: this.#state.thinkingMode,
 			disableReasoning: this.#state.disableReasoning,
 			temperature: this.#temperature,
 			topP: this.#topP,
@@ -1360,6 +1367,7 @@ export class Agent {
 			},
 			getModel: () => this.#state.model ?? model,
 			getReasoning: () => this.#state.thinkingLevel,
+			getThinkingMode: () => this.#state.thinkingMode,
 			getDisableReasoning: () => this.#state.disableReasoning,
 			getServiceTier: this.#serviceTierResolver,
 			getSteeringMessages: async () => {

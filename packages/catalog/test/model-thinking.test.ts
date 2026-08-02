@@ -252,6 +252,46 @@ describe("model thinking derivation", () => {
 		});
 	});
 
+	it("derives disabled-thinking support only for Anthropic Messages Opus 5 models that can shape it", () => {
+		const messagesOpus5 = createModel({
+			id: "claude-opus-5",
+			api: "anthropic-messages",
+			provider: "anthropic",
+		});
+		const bedrockOpus5 = createModel({
+			id: "global.anthropic.claude-opus-5",
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+		});
+		const cachedMessagesOpus5 = createModel({
+			id: "claude-opus-5",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			thinking: {
+				mode: "anthropic-adaptive",
+				efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+			},
+		});
+		const cachedBedrockOpus5 = createModel({
+			id: "global.anthropic.claude-opus-5",
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+			thinking: {
+				mode: "anthropic-adaptive",
+				efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.Max],
+			},
+		});
+
+		// Accepting `thinking.type: "disabled"` is a wire capability derived from
+		// identity; the adaptive transport itself is what gates the mode axis.
+		expect(messagesOpus5.thinking?.supportsDisabledThinking).toBe(true);
+		expect(bedrockOpus5.thinking?.supportsDisabledThinking).toBeUndefined();
+		// Backfilled onto explicit thinking too: it is a wire fact, not a
+		// user-facing capability surface.
+		expect(cachedMessagesOpus5.thinking?.supportsDisabledThinking).toBe(true);
+		expect(cachedBedrockOpus5.thinking?.supportsDisabledThinking).toBeUndefined();
+	});
+
 	it("maps GLM-5.2 reasoning effort per host dialect", () => {
 		const zai = createModel({
 			id: "glm-5.2",

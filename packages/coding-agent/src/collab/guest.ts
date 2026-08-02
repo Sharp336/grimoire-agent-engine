@@ -593,6 +593,9 @@ export class CollabGuestLink {
 		}
 		const level = state.thinkingLevel as ThinkingLevel | undefined;
 		session.agent.setThinkingLevel(toReasoningEffort(level));
+		// Additive modes only: a pre-split host may still send `off`, which belongs
+		// to the effort axis and would otherwise latch thinking off on the guest.
+		session.agent.setThinkingMode(state.thinkingMode === "adaptive" ? "adaptive" : undefined);
 		session.agent.setDisableReasoning(shouldDisableReasoning(level));
 	}
 

@@ -901,7 +901,8 @@ export async function buildSessionOptions(
 		const forkCacheShapeChanged =
 			scopedModelOverride ||
 			parsed.model !== undefined ||
-			parsed.thinking !== undefined ||
+			parsed.thinkingMode !== undefined ||
+			parsed.effort !== undefined ||
 			parsed.systemPrompt !== undefined ||
 			parsed.appendSystemPrompt !== undefined ||
 			parsed.tools !== undefined ||
@@ -950,7 +951,7 @@ export async function buildSessionOptions(
 			activeSettings.overrideModelRoles({
 				default: resolved.selector ?? `${resolved.model.provider}/${resolved.model.id}`,
 			});
-			if (!parsed.thinking && resolved.thinkingLevel) {
+			if (!parsed.effort && resolved.thinkingLevel) {
 				options.thinkingLevel = resolved.thinkingLevel;
 			}
 		}
@@ -975,8 +976,7 @@ export async function buildSessionOptions(
 				: scopedModels.find(scopedModel => scopedModel.model.id.toLowerCase() === remembered.toLowerCase());
 			if (rememberedModel) {
 				options.model = rememberedModel.model;
-				// Apply explicit thinking level from remembered role value
-				if (!parsed.thinking && rememberedSpec.explicitThinkingLevel && rememberedSpec.thinkingLevel) {
+				if (!parsed.effort && rememberedSpec.explicitThinkingLevel && rememberedSpec.thinkingLevel) {
 					options.thinkingLevel = rememberedSpec.thinkingLevel;
 				}
 			}
@@ -1047,14 +1047,17 @@ export async function buildSessionOptions(
 		options.planYolo = { target: resolved.model, thinkingLevel: resolved.thinkingLevel };
 	}
 
-	// Thinking level
-	if (parsed.thinking) {
-		options.thinkingLevel = parsed.thinking;
+	// Thinking mode and effort
+	if (parsed.thinkingMode) {
+		options.thinkingMode = parsed.thinkingMode;
+	}
+	if (parsed.effort) {
+		options.thinkingLevel = parsed.effort;
 	} else if (
 		scopedModels.length > 0 &&
 		scopedModels[0].explicitThinkingLevel === true &&
 		// A deferred default role resolves its own model (and any explicit
-		// thinking suffix) after extensions register; seeding the fallback
+		// effort suffix) after extensions register; seeding the fallback
 		// scoped model's level here would override it in createAgentSession.
 		!deferredDefaultRole &&
 		!restoringSession

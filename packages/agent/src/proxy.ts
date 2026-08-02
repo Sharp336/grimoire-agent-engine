@@ -147,6 +147,8 @@ export function streamProxy(model: Model, context: Context, options: ProxyStream
 						repetitionPenalty: options.repetitionPenalty,
 						maxTokens: options.maxTokens,
 						reasoning: options.reasoning,
+						thinkingMode: options.thinkingMode,
+						disableReasoning: options.disableReasoning,
 					},
 				}),
 				signal: options.signal,

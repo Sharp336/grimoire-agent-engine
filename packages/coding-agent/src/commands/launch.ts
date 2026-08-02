@@ -3,7 +3,7 @@
  */
 
 import { Command } from "@oh-my-pi/pi-utils/cli";
-import { type Args as ParsedArgs, parseArgs, reportCliUsageError } from "../cli/args";
+import { type Args as ParsedArgs, parseArgs, reportCliUsageError, reportCliWarnings } from "../cli/args";
 import { runRootCommand } from "../main";
 import { prepareAcpTerminalAuthArgs } from "../modes/acp/terminal-auth";
 import { launchHelp } from "./launch-help";
@@ -29,6 +29,7 @@ export default class Index extends Command {
 			}
 			throw error;
 		}
+		reportCliWarnings(parsed);
 		await runRootCommand(parsed, args);
 	}
 }

@@ -60,6 +60,7 @@ function makeGuestContext(counts: number[]): InteractiveModeContext {
 				state: { model: undefined },
 				setModel: () => {},
 				setThinkingLevel: () => {},
+				setThinkingMode: () => {},
 				setDisableReasoning: () => {},
 			},
 		},

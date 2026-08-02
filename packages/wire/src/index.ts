@@ -230,6 +230,8 @@ export interface SessionState {
 	cwd: string;
 	model?: WireModel;
 	thinkingLevel?: string;
+	/** Additive provider thinking mode (e.g. Claude `adaptive`); off travels on `thinkingLevel`. */
+	thinkingMode?: string;
 	contextUsage?: ContextUsage;
 	participants: Participant[];
 	isAborting?: boolean;

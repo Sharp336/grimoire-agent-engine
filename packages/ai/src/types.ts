@@ -34,7 +34,16 @@ import type {
 } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { isOpenAIModelId } from "@oh-my-pi/pi-catalog/identity/family";
-import type { Api, FetchImpl, KnownApi, Model, Provider, ThinkingBudgets, Usage } from "@oh-my-pi/pi-catalog/types";
+import type {
+	Api,
+	FetchImpl,
+	KnownApi,
+	Model,
+	Provider,
+	ThinkingBudgets,
+	ThinkingMode,
+	Usage,
+} from "@oh-my-pi/pi-catalog/types";
 import type { Type } from "arktype";
 import type { ZodType, z } from "zod/v4";
 import type { ApiKey } from "./auth-retry";
@@ -572,14 +581,29 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	apiKey?: ApiKey;
 	reasoning?: Effort;
 	/**
-	 * Force-disable reasoning for the request even when the model supports it.
-	 * Takes precedence over `reasoning`. Useful for fast utility calls
-	 * (e.g. title generation) where the model would otherwise burn the entire
-	 * output budget on internal thinking. Provider support is format-specific:
-	 * some transports can disable reasoning directly, while generic
-	 * effort-based OpenAI-compatible endpoints use the lowest supported effort.
+	 * Thinking-mode selector, separate from effort intensity. Thinking-aware
+	 * transports honor supported modes directly; other transports should prefer
+	 * {@link disableReasoning} for generic off/lowest-effort behavior.
+	 *
+	 * `"off"` is accepted for compatibility and normalized to
+	 * {@link disableReasoning} before provider dispatch; it is not a mode.
+	 */
+	thinkingMode?: ThinkingMode | "off";
+	/**
+	 * Force-disable the provider-side thinking mode for the request.
+	 * Non-Anthropic effort-only transports may still collapse this into "omit
+	 * reasoning" or the lowest supported effort, but Anthropic can carry disabled
+	 * `thinking.type` and `reasoning`/`output_config.effort` independently.
+	 * Useful for fast utility calls (e.g. title generation) where the model would
+	 * otherwise burn the entire output budget on internal thinking.
 	 */
 	disableReasoning?: boolean;
+	/**
+	 * Preserve an Anthropic `thinking.type` request separately from effort.
+	 * `reasoning` controls `output_config.effort`; this controls the Claude
+	 * adaptive thinking mode when no effort was supplied.
+	 */
+	anthropicThinkingMode?: "adaptive";
 	/**
 	 * If true, request that the provider omit thinking/reasoning summaries
 	 * from the response (e.g. Anthropic `thinking.display = "omitted"`,

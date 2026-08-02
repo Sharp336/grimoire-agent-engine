@@ -203,6 +203,7 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 				state: { model: undefined },
 				setModel: () => {},
 				setThinkingLevel: () => {},
+				setThinkingMode: () => {},
 				setDisableReasoning: () => {},
 			},
 		},

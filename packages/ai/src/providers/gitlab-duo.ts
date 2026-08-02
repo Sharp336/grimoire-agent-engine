@@ -269,6 +269,9 @@ export function streamGitLabDuo(
 				...options.headers,
 			};
 
+			const explicitThinkingOff = options.thinkingMode === "off" || options.disableReasoning === true;
+			const adaptiveThinkingMode =
+				options.anthropicThinkingMode ?? (options.thinkingMode === "adaptive" ? "adaptive" : undefined);
 			const reasoningEffort = options.reasoning;
 
 			const inner =
@@ -278,6 +281,9 @@ export function streamGitLabDuo(
 								...model,
 								id: mapping.model,
 								api: "anthropic-messages",
+								// Re-derive Claude thinking metadata from the upstream model id;
+								// the Duo alias carries alias-derived metadata from buildModel().
+								thinking: undefined,
 								baseUrl: ANTHROPIC_PROXY_URL,
 								compat: model.compatConfig,
 							} as ModelSpec<"anthropic-messages">),
@@ -304,11 +310,13 @@ export function streamGitLabDuo(
 								onResponse: options.onResponse,
 								onSseEvent: options.onSseEvent,
 								fetch: options.fetch,
-								thinkingEnabled: Boolean(reasoningEffort) && model.reasoning,
-								thinkingBudgetTokens: reasoningEffort
-									? (options.thinkingBudgets?.[reasoningEffort] ?? ANTHROPIC_THINKING[reasoningEffort])
-									: undefined,
+								thinkingEnabled: Boolean(reasoningEffort) && model.reasoning && !explicitThinkingOff,
+								thinkingBudgetTokens:
+									reasoningEffort && !explicitThinkingOff
+										? (options.thinkingBudgets?.[reasoningEffort] ?? ANTHROPIC_THINKING[reasoningEffort])
+										: undefined,
 								reasoning: reasoningEffort,
+								anthropicThinkingMode: explicitThinkingOff ? undefined : adaptiveThinkingMode,
 								toolChoice: mapAnthropicToolChoice(options.toolChoice),
 							},
 						)
@@ -344,7 +352,8 @@ export function streamGitLabDuo(
 									onResponse: options.onResponse,
 									onSseEvent: options.onSseEvent,
 									fetch: options.fetch,
-									reasoning: reasoningEffort,
+									reasoning: explicitThinkingOff ? undefined : reasoningEffort,
+									disableReasoning: explicitThinkingOff ? true : options.disableReasoning,
 									toolChoice: options.toolChoice,
 								} satisfies OpenAIResponsesOptions,
 							)
@@ -378,7 +387,8 @@ export function streamGitLabDuo(
 									onResponse: options.onResponse,
 									onSseEvent: options.onSseEvent,
 									fetch: options.fetch,
-									reasoning: reasoningEffort,
+									reasoning: explicitThinkingOff ? undefined : reasoningEffort,
+									disableReasoning: explicitThinkingOff ? true : options.disableReasoning,
 									toolChoice: options.toolChoice,
 								} satisfies OpenAICompletionsOptions,
 							);

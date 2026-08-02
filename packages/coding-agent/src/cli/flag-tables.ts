@@ -31,7 +31,7 @@
  */
 
 import { isServiceTierOpenAISettingValue, SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
-import type { ConfiguredThinkingLevel } from "../thinking";
+import type { ConfiguredThinkingLevel, ConfiguredThinkingMode } from "../thinking";
 import type { Args } from "./args";
 import { CliUsageError } from "./usage-error";
 
@@ -46,10 +46,12 @@ import { CliUsageError } from "./usage-error";
  */
 export interface ParseDeps {
 	logger: { warn: (message: string, meta?: Record<string, unknown>) => void };
-	parseThinking: (value: string | null | undefined) => ConfiguredThinkingLevel | undefined;
+	parseThinkingMode: (value: string | null | undefined) => ConfiguredThinkingMode | undefined;
+	parseEffort: (value: string | null | undefined) => ConfiguredThinkingLevel | undefined;
 	builtinToolNames: readonly string[];
 	normalizeToolNames: (values: Iterable<string>) => string[];
-	thinkingEfforts: readonly string[];
+	thinkingModes: readonly string[];
+	effortLevels: readonly string[];
 }
 
 export type StringSetter = (result: Args, value: string, deps: ParseDeps) => void;
@@ -104,6 +106,13 @@ function parseMaxTimeSeconds(value: string): number {
 		`Invalid --max-time value: ${JSON.stringify(value)}. Expected a positive number of seconds or duration like "5s", "10m", "1h".`,
 	);
 }
+
+/**
+ * Results whose effort came from an explicit `--effort`. The deprecated
+ * `--thinking <effort>` alias routes onto the same field, so it must never
+ * overwrite an explicit flag regardless of argument order.
+ */
+const EXPLICIT_EFFORT = new WeakSet<Args>();
 
 /**
  * Setters for flags with string values. Most built-ins consume the next argv
@@ -201,15 +210,38 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 		result.tools = names;
 	},
 	"--thinking": (result, value, deps) => {
-		const thinking = deps.parseThinking(value);
-		if (thinking !== undefined) {
-			result.thinking = thinking;
-		} else {
-			deps.logger.warn("Invalid thinking level passed to --thinking", {
-				level: value,
-				validThinkingLevels: deps.thinkingEfforts,
-			});
+		const thinkingMode = deps.parseThinkingMode(value);
+		if (thinkingMode !== undefined) {
+			result.thinkingMode = thinkingMode;
+			return;
 		}
+		// Compat: `--thinking` used to own the effort ladder. Those values now
+		// belong to `--effort`; route them so existing invocations keep working
+		// and surface a deprecation notice the user actually sees.
+		const effort = deps.parseEffort(value);
+		if (effort !== undefined) {
+			// An explicit `--effort` always wins, in either argument order; among
+			// deprecated aliases themselves, last one still wins.
+			if (!EXPLICIT_EFFORT.has(result)) result.effort = effort;
+			result.warnings = result.warnings ?? [];
+			result.warnings.push(
+				`--thinking ${value} is deprecated; use --effort ${value}. --thinking now selects a thinking mode (${deps.thinkingModes.join(", ")}).`,
+			);
+			return;
+		}
+		throw new CliUsageError(
+			`Invalid --thinking value: ${JSON.stringify(value)}. Expected one of: ${deps.thinkingModes.join(", ")}, or an effort level (${deps.effortLevels.join(", ")}) which routes to --effort.`,
+		);
+	},
+	"--effort": (result, value, deps) => {
+		const effort = deps.parseEffort(value);
+		if (effort === undefined) {
+			throw new CliUsageError(
+				`Invalid --effort value: ${JSON.stringify(value)}. Expected one of: ${deps.effortLevels.join(", ")}.`,
+			);
+		}
+		result.effort = effort;
+		EXPLICIT_EFFORT.add(result);
 	},
 	"--export": (result, value) => {
 		result.export = value;
