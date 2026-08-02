@@ -520,6 +520,7 @@ describe("AgentSession dispose releases retained memory", () => {
 		expect(String(await settled)).toContain("injected atomic write failure");
 		expect(atomicWrites).toBe(1);
 		expect(await Bun.file(sessionFile).text()).toBe(bytesBeforeBatch);
+		await expect(sessionManager.close()).rejects.toThrow("injected atomic write failure");
 
 		// The transcript survives for revival.
 		const reopened = await SessionManager.open(sessionFile, tempDir.path());

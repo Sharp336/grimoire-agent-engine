@@ -3083,7 +3083,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				},
 			});
 
-
 			const sessionPromise = createAgentSession(buildSubagentSessionOptions(sessionManager, null));
 			let session: AgentSession;
 			try {
@@ -3128,7 +3127,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						else await reopened.close();
 						throw error;
 					}
-
 				};
 			}
 

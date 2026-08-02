@@ -91,7 +91,7 @@ export class SessionLockError extends Error {
 	readonly lockPath: string;
 	readonly inspection?: SessionLockInspection;
 	readonly owner?: SessionLockRecord;
-	readonly cause?: unknown;
+	override readonly cause?: unknown;
 
 	constructor(
 		code: SessionLockErrorCode,

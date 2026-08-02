@@ -137,7 +137,7 @@ function openPinnedFileSync(
 				opened.ino !== expectedFileIdentity.ino ||
 				openedBirthtimeMs !== expectedFileIdentity.birthtimeMs);
 		if (named.isSymbolicLink() || opened.dev !== named.dev || opened.ino !== named.ino || changedFromOwned) {
-			const error = new Error(`Refusing to follow replacement session symlink: ${fpath}`) as NodeJS.ErrnoException;
+			const error = new Error(`Refusing to open replaced session file: ${fpath}`) as NodeJS.ErrnoException;
 			error.code = "ELOOP";
 			throw error;
 		}

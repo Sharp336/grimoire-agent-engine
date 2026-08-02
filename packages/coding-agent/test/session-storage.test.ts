@@ -283,14 +283,16 @@ describe("FileSessionStorage owned file identity", () => {
 		await fsp.writeFile(sessionPath, "foreign");
 		const storage = new FileSessionStorage();
 
-		expect(() => storage.openWriter(sessionPath, { expectedFileIdentity })).toThrow();
+		expect(() => storage.openWriter(sessionPath, { expectedFileIdentity })).toThrow(
+			"Refusing to open replaced session file",
+		);
 		await expect(
 			storage.updateSessionTitle(
 				sessionPath,
 				{ title: "Nope", source: "user", updatedAt: "t2" },
 				{ expectedFileIdentity },
 			),
-		).rejects.toThrow();
+		).rejects.toThrow("Refusing to open replaced session file");
 
 		await fsp.rm(dir, { recursive: true, force: true });
 	});
