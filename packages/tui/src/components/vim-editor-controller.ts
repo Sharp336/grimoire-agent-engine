@@ -3,7 +3,7 @@ import { extractPrintableText, matchesKey } from "../keys";
 import { getSegmenter, getWordNavKind } from "../utils";
 
 const segmenter = getSegmenter();
-const MAX_VIM_OPEN_LINES = 1000;
+const MAX_VIM_COUNT = 1000;
 
 type VimPendingCommand =
 	| { kind: "operator"; operator: "d" | "c"; prefixCount: number; textObject?: "inner" | "around" }
@@ -192,7 +192,7 @@ export class VimEditorController {
 		}
 
 		if (/[1-9]/u.test(char) || (char === "0" && this.#count.length > 0)) {
-			this.#count += char;
+			this.#appendCountDigit(char);
 			return true;
 		}
 
@@ -439,7 +439,7 @@ export class VimEditorController {
 		}
 
 		if (/[1-9]/u.test(char) || (char === "0" && this.#count.length > 0)) {
-			this.#count += char;
+			this.#appendCountDigit(char);
 			return true;
 		}
 
@@ -502,7 +502,7 @@ export class VimEditorController {
 		if (pending?.kind !== "operator") return false;
 
 		if (/[1-9]/u.test(char) || (char === "0" && this.#count.length > 0)) {
-			this.#count += char;
+			this.#appendCountDigit(char);
 			return true;
 		}
 
@@ -512,7 +512,7 @@ export class VimEditorController {
 		}
 
 		this.#pending = undefined;
-		const count = pending.prefixCount * this.#takeCount();
+		const count = Math.min(MAX_VIM_COUNT, pending.prefixCount * this.#takeCount());
 		const enterInsert = pending.operator === "c";
 		if (pending.textObject !== undefined) {
 			if (char === "w" || char === "W") {
@@ -581,10 +581,15 @@ export class VimEditorController {
 		return true;
 	}
 
+	#appendCountDigit(digit: string): void {
+		const current = this.#count.length === 0 ? 0 : Number(this.#count);
+		this.#count = String(Math.min(MAX_VIM_COUNT, current * 10 + Number(digit)));
+	}
+
 	#takeCount(): number {
 		const count = this.#count.length === 0 ? 1 : Number(this.#count);
 		this.#count = "";
-		return Number.isSafeInteger(count) && count > 0 ? count : 1;
+		return Number.isSafeInteger(count) && count > 0 ? Math.min(count, MAX_VIM_COUNT) : 1;
 	}
 
 	#takeOptionalCount(): number | undefined {
@@ -646,14 +651,6 @@ export class VimEditorController {
 		return previous;
 	}
 
-	#nextGraphemeStart(text: string, col: number): number {
-		const bounded = Math.max(0, Math.min(text.length, Math.trunc(col)));
-		for (const grapheme of segmenter.segment(text)) {
-			if (grapheme.index > bounded) return grapheme.index;
-		}
-		return text.length;
-	}
-
 	#setCursor(line: number, col: number): void {
 		const lines = this.#lines();
 		const targetLine = Math.max(0, Math.min(lines.length - 1, Math.trunc(line)));
@@ -663,13 +660,27 @@ export class VimEditorController {
 
 	#moveCol(direction: -1 | 1, count: number): number {
 		const line = this.#currentLine();
-		let col = this.#cursor().col;
-		for (let i = 0; i < count; i++) {
-			const next = direction < 0 ? this.#previousGraphemeStart(line, col) : this.#nextGraphemeStart(line, col);
-			if (next >= line.length || next === col) break;
-			col = next;
+		const col = this.#cursor().col;
+		if (direction > 0) {
+			let remaining = count;
+			let target = col;
+			for (const grapheme of segmenter.segment(line)) {
+				if (grapheme.index <= col) continue;
+				target = grapheme.index;
+				if (--remaining === 0) break;
+			}
+			return target;
 		}
-		return col;
+
+		const priorStarts = new Array<number>(count);
+		let seen = 0;
+		for (const grapheme of segmenter.segment(line)) {
+			if (grapheme.index >= col) break;
+			priorStarts[seen % count] = grapheme.index;
+			seen++;
+		}
+		if (seen === 0) return col;
+		return priorStarts[seen <= count ? 0 : (seen - count) % count] ?? 0;
 	}
 
 	#moveHorizontal(direction: -1 | 1, count: number): void {
@@ -783,8 +794,8 @@ export class VimEditorController {
 		const text = this.#adapter.getText();
 		const segments = this.#segments(text, bigWord);
 		let pos = start;
+		let index = this.#segmentIndexAt(segments, pos);
 		for (let step = 0; step < count; step++) {
-			let index = this.#segmentIndexAt(segments, pos);
 			if (index >= segments.length) return text.length;
 			const kind = segments[index]?.kind;
 			if (kind !== "whitespace") {
@@ -799,8 +810,8 @@ export class VimEditorController {
 	#wordBackwardPosition(start: number, count: number, bigWord: boolean): number {
 		const segments = this.#segments(this.#adapter.getText(), bigWord);
 		let pos = start;
+		let index = this.#segmentIndexAt(segments, pos);
 		for (let step = 0; step < count; step++) {
-			let index = this.#segmentIndexAt(segments, pos);
 			if (index >= segments.length || segments[index]?.index === pos) index--;
 			while (index >= 0 && segments[index]?.kind === "whitespace") index--;
 			if (index < 0) return 0;
@@ -815,8 +826,8 @@ export class VimEditorController {
 		const text = this.#adapter.getText();
 		const segments = this.#segments(text, bigWord);
 		let pos = start;
+		let index = this.#segmentIndexAt(segments, pos);
 		for (let step = 0; step < count; step++) {
-			let index = this.#segmentIndexAt(segments, pos);
 			if (index >= segments.length) return this.#previousGraphemeStart(text, text.length);
 			const kind = segments[index]?.kind;
 			if (kind !== "whitespace" && index + 1 < segments.length && segments[index + 1]?.kind === kind) {
@@ -827,7 +838,9 @@ export class VimEditorController {
 				const nextKind = segments[index]?.kind;
 				while (index + 1 < segments.length && segments[index + 1]?.kind === nextKind) index++;
 			}
-			pos = segments[index]?.index ?? this.#previousGraphemeStart(text, text.length);
+			const next = segments[index]?.index ?? this.#previousGraphemeStart(text, text.length);
+			if (next === pos) return pos;
+			pos = next;
 		}
 		return pos;
 	}
@@ -850,6 +863,7 @@ export class VimEditorController {
 		while (endLine < lines.length && !isBlank(lines[endLine] ?? "")) endLine++;
 
 		for (let step = 1; step < count; step++) {
+			if (endLine >= lines.length) break;
 			while (endLine < lines.length && isBlank(lines[endLine] ?? "")) endLine++;
 			while (endLine < lines.length && !isBlank(lines[endLine] ?? "")) endLine++;
 		}
@@ -866,11 +880,13 @@ export class VimEditorController {
 
 	#deleteCharacters(count: number): void {
 		const start = this.#absoluteCursor();
-		let endCol = this.#cursor().col;
-		for (let i = 0; i < count; i++) {
-			const next = this.#graphemeEndAt(this.#currentLine(), endCol);
-			if (next === endCol) break;
-			endCol = next;
+		const startCol = this.#cursor().col;
+		let endCol = startCol;
+		let remaining = count;
+		for (const grapheme of segmenter.segment(this.#currentLine())) {
+			if (grapheme.index < startCol) continue;
+			endCol = grapheme.index + grapheme.segment.length;
+			if (--remaining === 0) break;
 		}
 		this.#deleteRange(start, this.#absoluteLineStart(this.#cursor().line) + endCol, false);
 	}
@@ -898,8 +914,7 @@ export class VimEditorController {
 	}
 
 	#openLines(offset: 0 | 1, count: number): void {
-		const boundedCount = Math.min(count, MAX_VIM_OPEN_LINES);
-		this.#adapter.openLines(this.#cursor().line + offset, boundedCount);
+		this.#adapter.openLines(this.#cursor().line + offset, Math.min(count, MAX_VIM_COUNT));
 		this.#enterInsertMode(true, 0);
 	}
 }

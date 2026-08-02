@@ -50,6 +50,10 @@
 - Fixed image paste failing on Wayland-only Linux sessions by reading PNG clipboard payloads through `wl-paste` before falling back to the native bridge ([#7316](https://github.com/can1357/oh-my-pi/issues/7316)).
 - Fixed prewalk switching to the fast model during read-only investigation: `xd://` devices are dispatched through the `write` tool, so a read-only call such as an `lsp` navigation counted as the first edit/write and armed the one-way hand-off mid-planning. Device dispatches now carry the wrapped tool's approval tier and only trigger the switch at a `write`/`exec` tier — read-only `lsp`, `debug` inspection, and internal-URL `ast_edit` calls no longer downgrade the model ([#7312](https://github.com/can1357/oh-my-pi/issues/7312)).
 
+### Added
+
+- Added a configurable `inputMode: vim` setting for modal prompt editing, including visible mode labels, Vim normal-mode Ctrl-R redo, and safe interaction with autocomplete, paste, voice input, app shortcuts, and editor replacement ([#1834](https://github.com/can1357/oh-my-pi/issues/1834)).
+
 ## [17.2.4] - 2026-08-01
 
 ### Added
@@ -90,10 +94,6 @@
 - Fixed explicit `thinking` metadata in `models.yml` custom definitions and `modelOverrides` being replaced by canonical catalog policy during model rebuilding. ([#7307](https://github.com/can1357/oh-my-pi/issues/7307))
 - Fixed the auto-titler installing a model's whole answer as the session title when the tiny title model ignored the titling task and answered the first user message instead. `normalizeGeneratedTitle` now rejects overlong output (>80 chars or >12 words) so the caller defers titling to the next user turn rather than accepting a full sentence ([#7303](https://github.com/can1357/oh-my-pi/issues/7303)).
 - Fixed the in-process `kill` builtin to validate signals, preserve negative PID operands, signal every process in pipeline jobs, continue after bad targets, and refuse non-probe signals aimed at the host process or process group.
-
-### Added
-
-- Added a configurable `inputMode: vim` setting for modal prompt editing, including visible mode labels, Vim normal-mode Ctrl-R redo, and safe interaction with autocomplete, paste, voice input, app shortcuts, and editor replacement ([#1834](https://github.com/can1357/oh-my-pi/issues/1834)).
 
 ## [17.2.3] - 2026-08-01
 

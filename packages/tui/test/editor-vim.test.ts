@@ -137,6 +137,28 @@ describe("Editor Vim input mode", () => {
 		expect(editor.getVimMode()).toBe("normal");
 	});
 
+	it("caps huge word and paragraph counts without spinning at buffer boundaries", () => {
+		const word = createVimEditor();
+		word.setText("one");
+		typeText(word, "999999999999e");
+		expect(word.getCursor()).toEqual({ line: 0, col: 2 });
+
+		const paragraph = createVimEditor();
+		paragraph.setText("one\n\ntwo");
+		typeText(paragraph, "gg999999999999dap");
+		expect(paragraph.getText()).toBe("");
+		expect(paragraph.getVimMode()).toBe("normal");
+	});
+
+	it("caps multiplied operator counts before applying them", () => {
+		const editor = createVimEditor();
+		editor.setText(Array.from({ length: 1100 }, (_, index) => `line ${index}`).join("\n"));
+		typeText(editor, "gg2d600d");
+
+		expect(editor.getLines()).toHaveLength(100);
+		expect(editor.getLines()[0]).toBe("line 1000");
+	});
+
 	it("keeps change-word whitespace and folds replacement text into one undo", () => {
 		const editor = createVimEditor();
 		editor.setText("one two");
@@ -709,6 +731,76 @@ describe("Editor Vim input mode", () => {
 		expect(editor.isShowingAutocomplete()).toBe(false);
 		expect(editor.getVimMode()).toBe("normal");
 		expect(editor.getText()).toBe("/");
+	});
+
+	it("cancels active autocomplete when enabling Vim mode", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		const { promise, resolve } = Promise.withResolvers<void>();
+		editor.setAutocompleteProvider({
+			async getSuggestions() {
+				return { items: [{ label: "/help", value: "/help" }], prefix: "/" };
+			},
+			applyCompletion(lines, cursorLine, cursorCol) {
+				return { lines, cursorLine, cursorCol };
+			},
+		});
+		editor.onAutocompleteUpdate = resolve;
+		editor.handleInput("/");
+		await promise;
+		expect(editor.isShowingAutocomplete()).toBe(true);
+
+		editor.setInputMode("vim");
+
+		expect(editor.isShowingAutocomplete()).toBe(false);
+		expect(editor.getVimMode()).toBe("normal");
+	});
+
+	it("cancels autocomplete when replacing a Vim draft", async () => {
+		const editor = createVimEditor();
+		const { promise, resolve } = Promise.withResolvers<void>();
+		editor.setAutocompleteProvider({
+			async getSuggestions() {
+				return { items: [{ label: "/help", value: "/help" }], prefix: "/" };
+			},
+			applyCompletion(lines, cursorLine, cursorCol) {
+				return { lines, cursorLine, cursorCol };
+			},
+		});
+		editor.onAutocompleteUpdate = resolve;
+		typeText(editor, "i/");
+		await promise;
+		expect(editor.isShowingAutocomplete()).toBe(true);
+
+		editor.setText("replacement");
+
+		expect(editor.isShowingAutocomplete()).toBe(false);
+		expect(editor.getVimMode()).toBe("normal");
+		expect(editor.getText()).toBe("replacement");
+	});
+
+	it("cancels a pending character jump when enabling Vim mode", () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setText("abcx");
+		editor.handleInput("\x1b[H");
+		editor.handleInput("\x1d");
+
+		editor.setInputMode("vim");
+		editor.handleInput("x");
+
+		expect(editor.getText()).toBe("bcx");
+		expect(editor.getCursor()).toEqual({ line: 0, col: 0 });
+	});
+
+	it("cancels a pending character jump when replacing a Vim draft", () => {
+		const editor = createVimEditor();
+		editor.handleInput("i");
+		editor.handleInput("\x1d");
+
+		editor.setText("abcx");
+		editor.setInputMode("default");
+		editor.handleInput("Q");
+
+		expect(editor.getText()).toBe("abcQx");
 	});
 
 	it("cleanly switches back to default editing behavior", () => {

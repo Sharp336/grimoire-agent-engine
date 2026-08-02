@@ -557,6 +557,8 @@ export class Editor implements Component, Focusable {
 
 	setInputMode(mode: EditorInputMode): void {
 		if (this.#inputMode === mode) return;
+		this.#jumpMode = null;
+		if (mode === "vim") this.#cancelAutocomplete(true);
 		this.#inputMode = mode;
 		this.#vim.setEnabled(mode === "vim");
 		this.onInputModeChange?.(this.getVimMode());
@@ -1888,6 +1890,8 @@ export class Editor implements Component, Focusable {
 	}
 
 	setText(text: string): void {
+		this.#cancelAutocomplete(true);
+		this.#jumpMode = null;
 		this.#vim.finishInsertUndo();
 		if (this.#inputMode === "vim") this.#vim.enterNormalMode();
 		this.#historyIndex = -1; // Exit history browsing mode
