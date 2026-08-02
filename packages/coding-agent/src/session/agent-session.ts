@@ -7235,6 +7235,7 @@ export class AgentSession {
 		const previousThinkingMode = this.thinkingMode;
 		const previousAutoThinking = this.isAutoThinking;
 		const previousAutoResolvedLevel = this.autoResolvedThinkingLevel();
+		const previousLastReasoningEffort = this.#models.lastReasoningEffort;
 		const previousServiceTierByFamily = this.serviceTierByFamily;
 		const previousTools = [...this.agent.state.tools];
 		const previousBaseSystemPrompt = this.#tools.baseSystemPrompt;
@@ -7457,6 +7458,7 @@ export class AgentSession {
 				previousThinkingMode,
 				previousAutoThinking,
 				previousAutoResolvedLevel,
+				previousLastReasoningEffort,
 			);
 			this.#models.restoreServiceTiers(previousServiceTierByFamily);
 			if (modelRolledBack) {

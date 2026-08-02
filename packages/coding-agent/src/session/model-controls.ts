@@ -155,6 +155,11 @@ export class ModelControls {
 		return this.#autoResolvedLevel;
 	}
 
+	/** Last concrete effort retained for thinking-off wire requests. */
+	get lastReasoningEffort(): Effort | undefined {
+		return this.#lastReasoningEffort;
+	}
+
 	/** Models explicitly scoped to the session's cycle command. */
 	get scopedModels(): ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }> {
 		return this.#scopedModels;
@@ -198,11 +203,13 @@ export class ModelControls {
 		mode: ThinkingMode | undefined,
 		auto: boolean,
 		resolved: Effort | undefined,
+		lastReasoningEffort: Effort | undefined,
 	): void {
 		this.#thinkingLevel = level;
 		this.#thinkingMode = resolveThinkingModeForModel(this.#model, mode);
 		this.#autoThinking = auto;
 		this.#autoResolvedLevel = resolved;
+		this.#lastReasoningEffort = lastReasoningEffort;
 		this.#applyThinkingLevelToAgent(level);
 	}
 
