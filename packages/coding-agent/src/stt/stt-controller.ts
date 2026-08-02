@@ -38,6 +38,8 @@ export class STTController {
 	#resolvedModelKey: string | null = null;
 	#toggling = false;
 	#stopAfterStart = false;
+	#cancelRequested = false;
+	#activeOptions: ToggleOptions | null = null;
 	#disposed = false;
 	readonly #createCapture: CaptureFactory;
 
@@ -68,6 +70,8 @@ export class STTController {
 			if (this.#state === "idle" || this.#state === "recording") this.#stopAfterStart = true;
 			return;
 		}
+		this.#cancelRequested = false;
+		this.#activeOptions = options;
 		this.#toggling = true;
 		try {
 			switch (this.#state) {
@@ -89,6 +93,7 @@ export class STTController {
 			}
 		} finally {
 			this.#toggling = false;
+			if (this.#state === "idle") this.#activeOptions = null;
 		}
 	}
 
@@ -147,6 +152,7 @@ export class STTController {
 
 	async #start(editor: Editor, options: ToggleOptions): Promise<void> {
 		if (!(await this.#ensureDeps(options))) return;
+		if (this.#cancelRequested) return;
 		await this.#startStreaming(editor, options);
 	}
 
@@ -299,6 +305,29 @@ export class STTController {
 		this.#streamCommitted = false;
 		this.#streamAbort = null;
 		this.#streamUtterance = "";
+	}
+
+	cancel(): void {
+		this.#cancelRequested = true;
+		if (this.#state === "idle" && !this.#toggling) return;
+
+		this.#streamAbort?.abort();
+		this.#stream?.cancel();
+		try {
+			this.#streamRecorder?.stop();
+		} catch {
+			// best effort cleanup
+		}
+		this.#streamEditor?.clearVolatileText();
+		this.#cleanupStream();
+		const options = this.#activeOptions;
+		if (options) {
+			this.#setState("idle", options);
+			options.requestRender?.();
+		} else {
+			this.#state = "idle";
+		}
+		this.#activeOptions = null;
 	}
 
 	dispose(): void {

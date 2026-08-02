@@ -777,7 +777,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		// (#4145). The TUI throttles renders at ~30fps, so a long-running eval
 		// spraying events no longer runs `getTopBorder` synchronously in the
 		// hot path where the render never gets to paint the result.
-		this.editor.onInputModeChange = () => this.ui.requestComponentRender(this.editor);
+		this.editor.onInputModeChange = mode => {
+			if (mode !== undefined && mode !== "insert") this.#sttController?.cancel();
+			this.ui.requestComponentRender(this.editor);
+		};
 		this.editor.setTopBorderProvider(availableWidth => this.#getEditorTopBorder(this.editor, availableWidth));
 
 		this.hideThinkingBlock = settings.get("hideThinkingBlock");
@@ -4117,7 +4120,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.onAutocompleteUpdate = () => {
 			this.ui.requestRender();
 		};
-		nextEditor.onInputModeChange = () => this.ui.requestComponentRender(nextEditor);
+		nextEditor.onInputModeChange = mode => {
+			if (mode !== undefined && mode !== "insert") this.#sttController?.cancel();
+			this.ui.requestComponentRender(nextEditor);
+		};
 		nextEditor.setShimmerRepaintHandler(() => this.ui.requestComponentRender(this.editor));
 		nextEditor.setTopBorderProvider(availableWidth => this.#getEditorTopBorder(nextEditor, availableWidth));
 		nextEditor.setMaxHeight(this.#computeEditorMaxHeight());

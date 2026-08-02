@@ -1427,6 +1427,9 @@ export class InputController {
 				this.ctx.sessionManager.putBlob.bind(this.ctx.sessionManager),
 			)
 		)?.[0];
+		const dims = await this.#imageDimensions(imageData);
+		const vimMode = this.ctx.editor.getVimMode?.();
+		if (vimMode !== undefined && vimMode !== "insert") return;
 		this.ctx.editor.pendingImages.push({
 			type: "image",
 			data: imageData.data,
@@ -1435,7 +1438,6 @@ export class InputController {
 		this.ctx.editor.pendingImageLinks.push(imageLink);
 		this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
 		const imageNum = this.ctx.editor.pendingImages.length;
-		const dims = await this.#imageDimensions(imageData);
 		const label = dims ? `[Image #${imageNum}, ${dims.width}x${dims.height}]` : `[Image #${imageNum}]`;
 		this.ctx.editor.insertText(`${label} `);
 		this.ctx.ui.requestRender();

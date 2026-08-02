@@ -174,6 +174,56 @@ describe("STTController preflight", () => {
 		// Preflight ran again for the new tier rather than short-circuiting.
 		expect(isCached).toHaveBeenLastCalledWith("turbo");
 	});
+
+	it("cancels an active stream without allowing later editor mutations", async () => {
+		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
+		vi.spyOn(downloader, "downloadSttModel").mockResolvedValue(undefined);
+		const cancelStream = vi.fn();
+		let onSegment: ((text: string, index: number) => void) | undefined;
+		vi.spyOn(asrClient.sttClient, "startStream").mockImplementation((_model, callbacks) => {
+			onSegment = callbacks?.onSegment;
+			return {
+				pushAudio: vi.fn(),
+				stop: vi.fn().mockResolvedValue(""),
+				cancel: cancelStream,
+			};
+		});
+		const stopCapture = vi.fn();
+		const editor = makeEditor();
+		const options = makeOptions();
+		controller = new STTController(() => ({ stop: stopCapture }));
+		await controller.toggle(editor, options);
+
+		controller.cancel();
+		onSegment?.("late transcript", 0);
+
+		expect(controller.state).toBe("idle");
+		expect(stopCapture).toHaveBeenCalledTimes(1);
+		expect(cancelStream).toHaveBeenCalledTimes(1);
+		expect(editor.clearVolatileText).toHaveBeenCalledTimes(1);
+		expect(editor.commitVolatileText).not.toHaveBeenCalled();
+		expect(options.onStateChange).toHaveBeenLastCalledWith("idle");
+	});
+
+	it("cancels a pending preflight before microphone capture starts", async () => {
+		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(false);
+		const download = Promise.withResolvers<void>();
+		vi.spyOn(downloader, "downloadSttModel").mockReturnValue(download.promise);
+		const createCapture = vi.fn(() => ({ stop: vi.fn() }));
+		const options = makeOptions();
+		controller = new STTController(createCapture);
+
+		const start = controller.toggle(makeEditor(), options);
+		await Promise.resolve();
+		controller.cancel();
+		download.resolve();
+		await start;
+
+		expect(controller.state).toBe("idle");
+		expect(createCapture).not.toHaveBeenCalled();
+		expect(asrClient.sttClient.startStream).not.toHaveBeenCalled();
+	});
+
 	it("stops recording and surfaces asynchronous microphone failures", async () => {
 		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
 		vi.spyOn(downloader, "downloadSttModel").mockReturnValue(new Promise<void>(() => {}));
