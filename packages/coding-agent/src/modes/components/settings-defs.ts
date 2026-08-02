@@ -190,32 +190,31 @@ export function isSettingPanelRenderable(path: SettingPath): boolean {
 	return getSettingPanelControlKind(path) !== null;
 }
 
-/**
- * Evaluate the same visibility condition used by the built-in settings panel.
- *
- * `canReadSetting` is an optional disclosure boundary for external
- * serializers. The panel omits it and preserves its established behavior.
- */
-export function isSettingPanelVisible(
+/** Evaluate visibility for an external serializer without crossing its disclosure boundary. */
+export function getSettingPanelVisibility(
 	path: SettingPath,
-	settings?: Settings,
-	canReadSetting?: (dependency: SettingPath) => boolean,
-): boolean {
+	settings: Settings,
+	canReadSetting: (dependency: SettingPath) => boolean,
+): boolean | undefined {
+	const conditionName = getUi(path)?.condition;
+	if (conditionName === undefined) return true;
+	const condition = CONDITIONS[conditionName];
+	if (!condition) return undefined;
+	// A newly registered state-reading predicate is indeterminate for
+	// serialization until its dependencies are explicitly classified above.
+	if (!Object.hasOwn(CONDITION_SETTING_DEPENDENCIES, conditionName)) return undefined;
+	if (CONDITION_SETTING_DEPENDENCIES[conditionName].some(dependency => !canReadSetting(dependency))) return undefined;
+	return condition(settings);
+}
+
+/** Evaluate the same visibility condition used by the built-in settings panel. */
+export function isSettingPanelVisible(path: SettingPath, settings?: Settings): boolean {
 	const conditionName = getUi(path)?.condition;
 	if (conditionName === undefined) return true;
 	const condition = CONDITIONS[conditionName];
 	// Preserve the panel's established behavior for an unknown condition name:
-	// without a registered predicate, the setting remains unconditionally
-	// visible. RPC serialization must instead fail closed because it cannot
-	// classify what state an unknown predicate would disclose.
-	if (!condition) return canReadSetting ? false : true;
-	if (canReadSetting) {
-		// A newly registered state-reading predicate is unsafe for serialization
-		// until its dependencies are explicitly classified above.
-		if (!Object.hasOwn(CONDITION_SETTING_DEPENDENCIES, conditionName)) return false;
-		if (CONDITION_SETTING_DEPENDENCIES[conditionName].some(dependency => !canReadSetting(dependency))) return false;
-	}
-	return condition(settings);
+	// without a registered predicate, the setting remains unconditionally visible.
+	return condition ? condition(settings) : true;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

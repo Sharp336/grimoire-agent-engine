@@ -9,8 +9,8 @@
  */
 import {
 	getSettingPanelControlKind,
+	getSettingPanelVisibility,
 	isSettingPanelRenderable,
-	isSettingPanelVisible,
 	type SettingPanelControlKind,
 } from "../modes/components/settings-defs";
 import type { Settings } from "./settings";
@@ -81,8 +81,8 @@ export interface SettingSnapshotEntry {
 		/** Exact control variant used by the built-in settings panel, or null when config-only. */
 		control: SettingPanelControlKind | null;
 		renderable: boolean;
-		/** Whether that control is currently visible after evaluating its condition. */
-		visible: boolean;
+		/** Whether that control is visible, omitted when visibility cannot be safely determined. */
+		visible?: boolean;
 		/** Present only when the panel treats the setting value as secret. */
 		secret?: true;
 		/**
@@ -139,6 +139,7 @@ export function buildSettingsSnapshot(settings: Settings, tab?: SettingTab): Set
 		const options = getSnapshotOptions(path);
 		const renderable = isSettingPanelRenderable(path);
 		if (tab !== undefined && ui?.tab !== tab) continue;
+		const visible = renderable ? getSettingPanelVisibility(path, settings, disclosesValue) : false;
 		const values = getEnumValues(path);
 		const description = getDescription(path);
 		const entry: SettingSnapshotEntry = {
@@ -156,7 +157,7 @@ export function buildSettingsSnapshot(settings: Settings, tab?: SettingTab): Set
 							description: ui.description,
 							renderable,
 							control: getSettingPanelControlKind(path),
-							visible: renderable && isSettingPanelVisible(path, settings, disclosesValue),
+							...(visible === undefined ? {} : { visible }),
 							...(isCredential(path) ? { secret: true } : {}),
 							...(options === undefined ? {} : { options }),
 							...(ui.ordered === undefined ? {} : { ordered: ui.ordered }),
