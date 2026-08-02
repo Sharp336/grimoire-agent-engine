@@ -404,6 +404,22 @@ function resolvePathScopedStringArray(settingPath: SettingPath, value: unknown, 
 	return resolved;
 }
 
+function resolveActivationStringArray(
+	settingPath: ActivationDisabledPath | ActivationEnabledPath,
+	value: unknown,
+	cwd: string,
+): string[] {
+	return resolvePathScopedStringArray(settingPath, value, cwd) ?? normalizeStringArrayForSettings(value);
+}
+
+function updateBareActivationEntry(value: unknown, id: string, present: boolean): unknown[] {
+	const ids = new Set(normalizeStringArrayForSettings(value));
+	if (present) ids.add(id);
+	else ids.delete(id);
+	const scopedEntries = Array.isArray(value) ? value.filter(entry => typeof entry !== "string") : [];
+	return [...[...ids].sort(), ...scopedEntries];
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Settings Class
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1230,7 +1246,11 @@ export class Settings {
 	getActivationDisabledProviders(scope?: ActivationScope): string[] {
 		const targetInfo = this.#resolveActivationTarget(this.#cwd, scope);
 		if (targetInfo.target === "global") {
-			return normalizeStringArrayForSettings(getByPath(this.#global, ["disabledProviders"])).sort();
+			return resolveActivationStringArray(
+				"disabledProviders",
+				getByPath(this.#global, ["disabledProviders"]),
+				this.#cwd,
+			).sort();
 		}
 		return (this.get("disabledProviders") as string[]) ?? [];
 	}
@@ -1314,11 +1334,9 @@ export class Settings {
 
 	async #setGlobalActivationList(path: ActivationDisabledPath, id: string, state: ProjectActivation): Promise<void> {
 		if (!this.#persist || !this.#configPath) {
-			const disabled = new Set(normalizeStringArrayForSettings(getByPath(this.#global, [path])));
-			if (state === "disabled") disabled.add(id);
-			else disabled.delete(id);
-			if (disabled.size === 0) deleteByPath(this.#global, [path]);
-			else setByPath(this.#global, [path], [...disabled].sort());
+			const disabled = updateBareActivationEntry(getByPath(this.#global, [path]), id, state === "disabled");
+			if (disabled.length === 0) deleteByPath(this.#global, [path]);
+			else setByPath(this.#global, [path], disabled);
 			this.#rebuildMerged();
 			return;
 		}
@@ -1326,11 +1344,9 @@ export class Settings {
 		const configPath = this.#configPath;
 		await this.#withYamlWriteLock(configPath, async writePath => {
 			const current = (await this.#loadYamlIfPresentForWriteLocked(configPath, writePath)) ?? {};
-			const disabled = new Set(normalizeStringArrayForSettings(getByPath(current, [path])));
-			if (state === "disabled") disabled.add(id);
-			else disabled.delete(id);
-			if (disabled.size === 0) deleteByPath(current, [path]);
-			else setByPath(current, [path], [...disabled].sort());
+			const disabled = updateBareActivationEntry(getByPath(current, [path]), id, state === "disabled");
+			if (disabled.length === 0) deleteByPath(current, [path]);
+			else setByPath(current, [path], disabled);
 			await this.#writeYamlAtomically(writePath, current);
 			this.#quarantinedYamlTargets.delete(configPath);
 			const currentValue = getByPath(current, [path]);
@@ -1357,22 +1373,22 @@ export class Settings {
 		disabledPath: ActivationDisabledPath,
 		enabledPath: ActivationEnabledPath,
 	): string[] {
-		const disabled = new Set(normalizeStringArrayForSettings(baseValue));
-		for (const id of normalizeStringArrayForSettings(getByPath(this.#global, [disabledPath]))) {
+		const disabled = new Set(resolveActivationStringArray(disabledPath, baseValue, this.#cwd));
+		for (const id of resolveActivationStringArray(disabledPath, getByPath(this.#global, [disabledPath]), this.#cwd)) {
 			disabled.add(id);
 		}
 
 		const projectDisabled = new Set([
-			...normalizeStringArrayForSettings(getByPath(this.#project, [disabledPath])),
-			...normalizeStringArrayForSettings(getByPath(this.#configOverlay, [disabledPath])),
-			...normalizeStringArrayForSettings(getByPath(this.#overrides, [disabledPath])),
+			...resolveActivationStringArray(disabledPath, getByPath(this.#project, [disabledPath]), this.#cwd),
+			...resolveActivationStringArray(disabledPath, getByPath(this.#configOverlay, [disabledPath]), this.#cwd),
+			...resolveActivationStringArray(disabledPath, getByPath(this.#overrides, [disabledPath]), this.#cwd),
 		]);
 		for (const id of projectDisabled) disabled.add(id);
 
 		const projectEnabled = new Set([
-			...normalizeStringArrayForSettings(getByPath(this.#project, [enabledPath])),
-			...normalizeStringArrayForSettings(getByPath(this.#configOverlay, [enabledPath])),
-			...normalizeStringArrayForSettings(getByPath(this.#overrides, [enabledPath])),
+			...resolveActivationStringArray(enabledPath, getByPath(this.#project, [enabledPath]), this.#cwd),
+			...resolveActivationStringArray(enabledPath, getByPath(this.#configOverlay, [enabledPath]), this.#cwd),
+			...resolveActivationStringArray(enabledPath, getByPath(this.#overrides, [enabledPath]), this.#cwd),
 		]);
 		for (const id of projectEnabled) {
 			if (!projectDisabled.has(id)) disabled.delete(id);
@@ -1401,24 +1417,13 @@ export class Settings {
 					if (wasQuarantined || !this.#quarantinedYamlTargets.has(configPath)) throw error;
 					current = {};
 				}
-				const disabled = new Set(normalizeStringArrayForSettings(getByPath(current, [disabledPath])));
-				const enabled = new Set(normalizeStringArrayForSettings(getByPath(current, [enabledPath])));
+				const disabled = updateBareActivationEntry(getByPath(current, [disabledPath]), id, state === "disabled");
+				const enabled = updateBareActivationEntry(getByPath(current, [enabledPath]), id, state === "enabled");
 
-				if (state === "disabled") {
-					enabled.delete(id);
-					disabled.add(id);
-				} else if (state === "enabled") {
-					disabled.delete(id);
-					enabled.add(id);
-				} else {
-					disabled.delete(id);
-					enabled.delete(id);
-				}
-
-				if (disabled.size === 0) deleteByPath(current, [disabledPath]);
-				else setByPath(current, [disabledPath], [...disabled].sort());
-				if (enabled.size === 0) deleteByPath(current, [enabledPath]);
-				else setByPath(current, [enabledPath], [...enabled].sort());
+				if (disabled.length === 0) deleteByPath(current, [disabledPath]);
+				else setByPath(current, [disabledPath], disabled);
+				if (enabled.length === 0) deleteByPath(current, [enabledPath]);
+				else setByPath(current, [enabledPath], enabled);
 
 				await this.#writeYamlAtomically(writePath, current);
 				this.#quarantinedYamlTargets.delete(configPath);

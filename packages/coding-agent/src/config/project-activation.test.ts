@@ -420,6 +420,50 @@ describe("project activation settings", () => {
 		expect(globalConfig.disabledProviders).toEqual(["mcp-json"]);
 	});
 
+	it("resolves path-scoped project provider allowlists", async () => {
+		const projectRoot = await mkProjectTmp(".tmp-project-provider-path-activation-");
+		const agentDir = await mkTmp("omp-provider-agent-");
+		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
+		await Bun.write(path.join(agentDir, "config.yml"), YAML.stringify({ disabledProviders: ["mcp-json"] }, null, 2));
+		await Bun.write(
+			path.join(projectRoot, ".omp", "config.yml"),
+			YAML.stringify(
+				{
+					enabledProviders: [{ pathPrefix: projectRoot, providers: ["mcp-json"] }],
+				},
+				null,
+				2,
+			),
+		);
+
+		const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
+
+		expect(settings.get("disabledProviders")).toEqual([]);
+		expect(settings.isProviderEffectivelyDisabled("mcp-json")).toBe(false);
+		expect(settings.isProviderEffectivelyDisabled("mcp-json", "global")).toBe(true);
+	});
+
+	it("preserves path-scoped provider entries when toggling bare activation", async () => {
+		const projectRoot = await mkProjectTmp(".tmp-project-provider-path-toggle-");
+		const agentDir = await mkTmp("omp-provider-agent-");
+		const globalConfigPath = path.join(agentDir, "config.yml");
+		const projectConfigPath = path.join(projectRoot, ".omp", "config.yml");
+		const globalScoped = { pathPrefix: projectRoot, providers: ["claude"] };
+		const projectScoped = { pathPrefix: projectRoot, providers: ["native"] };
+		await fs.mkdir(path.dirname(projectConfigPath), { recursive: true });
+		await Bun.write(globalConfigPath, YAML.stringify({ disabledProviders: [globalScoped] }, null, 2));
+		await Bun.write(projectConfigPath, YAML.stringify({ enabledProviders: [projectScoped] }, null, 2));
+		const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
+
+		await settings.setProviderActivation("mcp-json", "disabled", "global");
+		await settings.setProviderActivation("mcp-json", "enabled", "project");
+
+		const globalConfig = YAML.parse(await Bun.file(globalConfigPath).text()) as { disabledProviders?: unknown[] };
+		const projectConfig = YAML.parse(await Bun.file(projectConfigPath).text()) as { enabledProviders?: unknown[] };
+		expect(globalConfig.disabledProviders).toEqual(["mcp-json", globalScoped]);
+		expect(projectConfig.enabledProviders).toEqual(["mcp-json", projectScoped]);
+	});
+
 	it("ignores legacy extension activation when loading MCP servers", async () => {
 		const previousAgentDir = getAgentDir();
 		const projectRoot = await mkProjectTmp(".tmp-project-mcp-load-");
