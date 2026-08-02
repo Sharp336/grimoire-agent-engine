@@ -290,6 +290,8 @@ type GithubInput = typeof githubSchema.infer;
 
 export interface GhToolDetails {
 	meta?: OutputMeta;
+	/** Set when the tool was interrupted/skipped by steering or a user interrupt — normal control flow, not a failure. */
+	aborted?: boolean;
 	artifactId?: string;
 	repo?: string;
 	branch?: string;

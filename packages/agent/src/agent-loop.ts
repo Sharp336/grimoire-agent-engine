@@ -2740,6 +2740,8 @@ export interface SyntheticToolResultDetails {
 	source: "assistant_stop_aborted" | "assistant_stop_error" | "assistant_stop_skipped" | "assistant_stop_length";
 	executed: false;
 	upstreamError?: string;
+	/** Set for aborted/skipped calls: expected control flow, not a failure the operator caused. */
+	aborted?: boolean;
 }
 
 /**
@@ -2776,6 +2778,7 @@ function syntheticDetailsFor(
 		source,
 		executed: false,
 		...(reason === "error" && errorMessage ? { upstreamError: errorMessage } : {}),
+		...(reason === "aborted" || reason === "skipped" ? { aborted: true } : {}),
 	};
 }
 

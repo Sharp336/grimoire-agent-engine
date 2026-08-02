@@ -1726,7 +1726,15 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					const framed = outputBlock.render(
 						{
 							header,
-							state: isPartial ? "pending" : isError ? (isTimeout ? "warning" : "error") : "success",
+							state: isPartial
+								? "pending"
+								: isAborted
+									? "aborted"
+									: isError
+										? isTimeout
+											? "warning"
+											: "error"
+										: "success",
 							sections: [
 								{
 									// Viewport-sized tail window in every state — streaming and final

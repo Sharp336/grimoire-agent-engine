@@ -318,7 +318,7 @@ function extractText(content: Array<{ type: string; text?: string }>): string {
 }
 
 function renderFallbackComponent(
-	result: { content: Array<{ type: string; text?: string }>; isError?: boolean },
+	result: { content: Array<{ type: string; text?: string }>; details?: GhToolDetails; isError?: boolean },
 	options: RenderResultOptions,
 	theme: Theme,
 	args: GithubToolRenderArgs,
@@ -327,6 +327,9 @@ function renderFallbackComponent(
 	const title = formatOpTitle(args.op);
 	const meta = buildOpMeta(args);
 	const isError = result.isError === true;
+	// An interrupted/skipped tool (mid-turn steering, user interrupt) is normal
+	// control flow, not a failure the operator caused — render it neutral.
+	const isAborted = isError && result.details?.aborted === true;
 	const success = !isError && Boolean(text);
 	const header = renderStatusLine(
 		success
@@ -336,18 +339,25 @@ function renderFallbackComponent(
 					titleColor: "accent",
 					meta,
 				}
-			: {
-					icon: isError ? "error" : "warning",
-					title,
-					titleColor: isError ? "error" : "accent",
-					meta,
-				},
+			: isAborted
+				? {
+						icon: "aborted",
+						title,
+						titleColor: "muted",
+						meta,
+					}
+				: {
+						icon: isError ? "error" : "warning",
+						title,
+						titleColor: isError ? "error" : "accent",
+						meta,
+					},
 		theme,
 	);
 
 	if (!text) {
-		const empty = isError ? "request failed" : "no output";
-		return new Text(`${header}\n${theme.fg("dim", empty)}`, 0, 0);
+		const empty = isAborted ? "skipped" : isError ? "request failed" : "no output";
+		return new Text(`${header}\n${theme.fg(isAborted ? "dim" : isError ? "error" : "dim", empty)}`, 0, 0);
 	}
 
 	const allLines = replaceTabs(text).split("\n");
@@ -383,8 +393,8 @@ function renderFallbackComponent(
 		return {
 			header,
 			sections: out.length > 0 ? [{ lines: out }] : [],
-			state: isError ? "error" : "success",
-			borderColor: isError ? "error" : "borderMuted",
+			state: isAborted ? "aborted" : isError ? "error" : "success",
+			borderColor: isAborted ? "dim" : isError ? "error" : "borderMuted",
 			applyBg: false,
 			width,
 		};
@@ -447,14 +457,22 @@ export const githubToolRenderer = {
 		const watch = result.details?.watch;
 		if (watch) {
 			const isError = result.isError === true;
+			const isAborted = isError && result.details?.aborted === true;
 			const header = renderStatusLine(
 				isError
-					? {
-							icon: "error",
-							title: "GitHub Run Watch",
-							titleColor: "error",
-							meta: [getWatchHeader(watch)],
-						}
+					? isAborted
+						? {
+								icon: "aborted",
+								title: "GitHub Run Watch",
+								titleColor: "muted",
+								meta: [getWatchHeader(watch)],
+							}
+						: {
+								icon: "error",
+								title: "GitHub Run Watch",
+								titleColor: "error",
+								meta: [getWatchHeader(watch)],
+							}
 					: {
 							iconOverride: uiTheme.styledSymbol("tool.gh", "accent"),
 							title: "GitHub Run Watch",
@@ -469,8 +487,8 @@ export const githubToolRenderer = {
 				return {
 					header,
 					sections,
-					state: isError ? "error" : "success",
-					borderColor: isError ? "error" : "borderMuted",
+					state: isAborted ? "aborted" : isError ? "error" : "success",
+					borderColor: isAborted ? "dim" : isError ? "error" : "borderMuted",
 					applyBg: false,
 					width,
 				};

@@ -227,6 +227,29 @@ describe("bashToolRenderer", () => {
 		expect(rendered).not.toContain(errorAnsi);
 	});
 
+	it("renders a steering-aborted command with a neutral frame instead of an error frame", async () => {
+		const theme = await getThemeByName("dark");
+		expect(theme).toBeDefined();
+		const uiTheme = theme!;
+		const component = bashToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "[Command aborted]\n" }],
+				details: { aborted: true },
+				isError: true,
+			},
+			{ expanded: false, isPartial: false },
+			uiTheme,
+			{ command: "sleep 3" },
+		);
+		const rendered = component.render(120).join("\n");
+		const errorAnsi = uiTheme.fg("error", "").replace("\x1b[39m", "");
+
+		expect(rendered).not.toContain(errorAnsi);
+		// The neutral frame still renders the aborted status so the operator can
+		// distinguish it from an untouched success block.
+		expect(rendered).toContain("aborted");
+	});
+
 	it("omits the status footer for a successful command", async () => {
 		const theme = await getThemeByName("dark");
 		expect(theme).toBeDefined();

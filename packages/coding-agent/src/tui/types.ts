@@ -3,7 +3,7 @@
  */
 import type { Theme } from "../modes/theme/theme";
 
-export type State = "pending" | "running" | "success" | "error" | "warning";
+export type State = "pending" | "running" | "success" | "error" | "warning" | "aborted";
 
 export interface TreeContext {
 	index: number;

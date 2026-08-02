@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed steering-interrupted tools still rendering as red errors: aborted/skipped Bash results now use a neutral "aborted" block state instead of the error frame, and the GitHub (hub wait) and vibe renderers no longer tint interrupted results red ([#7199](https://github.com/can1357/oh-my-pi/issues/7199)).
+
 ## [17.2.3] - 2026-08-01
 
 ### Changed

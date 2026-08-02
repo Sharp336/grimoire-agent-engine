@@ -77,6 +77,8 @@ type VibeOp = "spawn" | "send" | "wait" | "kill" | "list";
 /** Details payload shared by every vibe tool for TUI rendering. */
 export interface VibeToolDetails {
 	op: VibeOp;
+	/** Set when the tool was interrupted/skipped by steering or a user interrupt — normal control flow, not a failure. */
+	aborted?: boolean;
 	/** Live TV-wall snapshot of the owner's worker sessions at (or during) the call. */
 	screens: VibeScreenSnapshot[];
 	spawned?: { id: string; cli: VibeCli; jobId: string };
@@ -510,14 +512,22 @@ export function createVibeToolRenderer(op: VibeOp) {
 			args?: VibeRenderArgs,
 		): Component {
 			const details = result.details;
+			// An interrupted/skipped tool (mid-turn steering, user interrupt) is
+			// normal control flow, not a failure the operator caused — render it
+			// neutral instead of red.
+			const isAborted = result.isError === true && result.details?.aborted === true;
 			if (!details || result.isError) {
 				const fallback = result.content.find(part => part.type === "text")?.text ?? "";
 				const header = renderStatusLine(
-					{ icon: result.isError ? "error" : "done", title: `vibe ${describeCall(op, args)}` },
+					{
+						icon: isAborted ? "aborted" : result.isError ? "error" : "done",
+						title: `vibe ${describeCall(op, args)}`,
+						titleColor: isAborted ? "muted" : undefined,
+					},
 					uiTheme,
 				);
 				const body = fallback
-					? `\n  ${uiTheme.fg(result.isError ? "error" : "dim", frameText(fallback, TV_LINE_MAX))}`
+					? `\n  ${uiTheme.fg(isAborted ? "dim" : result.isError ? "error" : "dim", frameText(fallback, TV_LINE_MAX))}`
 					: "";
 				return new Text(`${header}${body}`, 0, 0);
 			}

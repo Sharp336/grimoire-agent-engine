@@ -207,4 +207,23 @@ describe("vibe tool renderers", () => {
 			expect(line.length).toBeLessThanOrEqual(width);
 		}
 	});
+
+	it("renders an aborted vibe result neutrally instead of as an error", () => {
+		const renderer = createVibeToolRenderer("wait");
+		const component = renderer.renderResult(
+			{
+				content: [{ type: "text", text: "Skipped due to pending steering message." }],
+				details: { op: "wait", screens: [], aborted: true },
+				isError: true,
+			},
+			{ expanded: false, isPartial: false },
+			uiTheme,
+			{ sessions: [] },
+		) as { render(width: number): readonly string[] };
+		const rendered = component.render(100).join("\n");
+		const errorAnsi = uiTheme.fg("error", "").replace("\x1b[39m", "");
+
+		expect(rendered).not.toContain(errorAnsi);
+		expect(rendered).toContain("vibe wait");
+	});
 });
