@@ -50,7 +50,11 @@ export function createMCPTimeout(
 	}
 
 	const abortController = new AbortController();
-	const timeoutId = setTimeout(() => abortController.abort(), timeoutMs);
+	let didTimeout = false;
+	const timeoutId = setTimeout(() => {
+		didTimeout = true;
+		abortController.abort();
+	}, timeoutMs);
 	const operationSignal = signal ? AbortSignal.any([signal, abortController.signal]) : abortController.signal;
 
 	return {
@@ -58,6 +62,6 @@ export function createMCPTimeout(
 		clear: () => clearTimeout(timeoutId),
 		isTimeoutAbort: error =>
 			error instanceof Error && error.name === "AbortError" && abortController.signal.aborted && !signal?.aborted,
-		timedOut: () => abortController.signal.aborted && !signal?.aborted,
+		timedOut: () => didTimeout,
 	};
 }

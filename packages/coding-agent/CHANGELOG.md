@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed MCP Streamable HTTP transport requests aborting mid-JSON-body-read surfacing `Unexpected end of JSON input` instead of the configured request timeout; the abort now latches the timeout contract.
+
 ## [17.2.4] - 2026-08-01
 
 ### Added
