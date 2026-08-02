@@ -100,6 +100,50 @@ describe("Friendli template reasoning effort flag", () => {
 		expect(buildOpenAICompat(suppressed).friendliTemplateReasoningEffort).toBe(false);
 	});
 
+	it("uses omit reasoningDisableMode for toggle-only Friendli reasoning models", () => {
+		// GLM-4.5 reasons but has no effort control (only toggle + budget_tokens).
+		// reasoningDisableMode must be "omit" (not "qwen-template-false") so the
+		// encoder doesn't send enable_thinking:false when no reasoning level is
+		// explicitly requested — that would make reasoning impossible.
+		const toggleOnly: ModelSpec<"openai-completions"> = {
+			api: "openai-completions",
+			id: "zai-org/GLM-4.5",
+			name: "GLM-4.5",
+			provider: "friendli",
+			baseUrl: "https://api.friendli.ai/serverless/v1",
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			maxTokens: 8192,
+			contextWindow: 131072,
+			reasoning: true,
+		};
+		const compat = buildOpenAICompat(toggleOnly);
+		expect(compat.reasoningDisableMode).toBe("omit");
+		expect(compat.friendliTemplateReasoningEffort).toBe(false);
+		expect(compat.thinkingFormat).toBe("qwen-chat-template");
+	});
+
+	it("keeps qwen-template-false for Friendli reasoning models with effort", () => {
+		// GLM-5.2 with thinking.efforts should keep the normal disable mode
+		// so the user can toggle thinking off via enable_thinking:false.
+		const withEffort: ModelSpec<"openai-completions"> = {
+			api: "openai-completions",
+			id: "zai-org/GLM-5.2",
+			name: "GLM-5.2",
+			provider: "friendli",
+			baseUrl: "https://api.friendli.ai/serverless/v1",
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			maxTokens: 8192,
+			contextWindow: 131072,
+			reasoning: true,
+			thinking: HIGH_MAX,
+		};
+		const compat = buildOpenAICompat(withEffort);
+		expect(compat.reasoningDisableMode).toBe("qwen-template-false");
+		expect(compat.friendliTemplateReasoningEffort).toBe(true);
+	});
+
 	it("leaves the flag off for the other qwen-chat-template host (NVIDIA NIM)", () => {
 		// NIM is the precedent for routing to `qwen-chat-template`; its strict
 		// schema rejects top-level `reasoning_effort`, so the flag must NOT flip
