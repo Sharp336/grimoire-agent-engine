@@ -723,6 +723,25 @@ describe("Editor Vim input mode", () => {
 		expect(editor.getVimMode()).toBe("normal");
 	});
 
+	it("stays in insert mode when submit is disabled", () => {
+		const editor = createVimEditor();
+		const onSubmit = vi.fn();
+		editor.onSubmit = onSubmit;
+		editor.disableSubmit = true;
+		editor.handleInput("i");
+		typeText(editor, "wait");
+
+		editor.handleInput("\r");
+		expect(onSubmit).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("wait");
+		expect(editor.getVimMode()).toBe("insert");
+
+		editor.disableSubmit = false;
+		editor.handleInput("\r");
+		expect(onSubmit).toHaveBeenCalledWith("wait");
+		expect(editor.getVimMode()).toBe("normal");
+	});
+
 	it("finishes the insert session before a direct submit", () => {
 		const editor = createVimEditor();
 		const onSubmit = vi.fn();

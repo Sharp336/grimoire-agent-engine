@@ -98,10 +98,6 @@ export class VimEditorController {
 	}
 
 	prepareInsertInput(data: string, kb: KeybindingsManager): void {
-		if (!this.#adapter.isShowingAutocomplete() && data !== "\n" && kb.matches(data, "tui.input.submit")) {
-			this.enterNormalMode();
-			return;
-		}
 		if (this.#insertUndoActive) return;
 
 		const mutates =
