@@ -819,15 +819,26 @@ export function createMCPProxyTools(mcpManager: MCPManager): CustomTool[] {
 	});
 }
 
-export function createSubagentSettings(
+/**
+ * Snapshot every schema setting from `baseSettings` into an in-memory Settings
+ * with `overrides` applied. No disk writes — the parent's live config is untouched.
+ */
+export function createIsolatedSettingsSnapshot(
 	baseSettings: Settings,
 	overrides?: Partial<Record<SettingPath, unknown>>,
-	inheritedServiceTier?: ServiceTierByFamily | null,
 ): Settings {
 	const snapshot: Partial<Record<SettingPath, unknown>> = {};
 	for (const key of Object.keys(SETTINGS_SCHEMA) as SettingPath[]) {
 		snapshot[key] = baseSettings.get(key);
 	}
+	return Settings.isolated({ ...snapshot, ...overrides });
+}
+
+export function createSubagentSettings(
+	baseSettings: Settings,
+	overrides?: Partial<Record<SettingPath, unknown>>,
+	inheritedServiceTier?: ServiceTierByFamily | null,
+): Settings {
 	// Resolve the subagent's per-family tiers from `tier.subagent` ("inherit" =
 	// match the parent's live tiers when a live session supplied them, else the
 	// subagent's own configured tier.* settings). The result is stamped back onto
@@ -841,11 +852,10 @@ export function createSubagentSettings(
 				)
 			: (inheritedServiceTier ?? {});
 	const subagentTiers = resolveSubagentServiceTier(baseSettings.get("tier.subagent"), inheritedTiers);
-	snapshot["tier.openai"] = subagentTiers.openai ?? "none";
-	snapshot["tier.anthropic"] = subagentTiers.anthropic ?? "none";
-	snapshot["tier.google"] = subagentTiers.google ?? "none";
-	return Settings.isolated({
-		...snapshot,
+	return createIsolatedSettingsSnapshot(baseSettings, {
+		"tier.openai": subagentTiers.openai ?? "none",
+		"tier.anthropic": subagentTiers.anthropic ?? "none",
+		"tier.google": subagentTiers.google ?? "none",
 		// Async jobs and bash auto-backgrounding are inherited from the parent:
 		// background jobs are owner-routed to the subagent's own session, and
 		// the run driver's quiescence barrier + teardown reap guarantee no
