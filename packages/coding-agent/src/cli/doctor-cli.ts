@@ -13,16 +13,18 @@ import { ModelsConfigFile } from "../config/models-config";
 import { classifySettingsYaml, type YamlLoadResult } from "../config/settings";
 import { collectSystemInfo, formatSystemInfo } from "../debug/system-info";
 import { PluginManager } from "../extensibility/plugins/manager";
+import type { DoctorCheck } from "../extensibility/plugins/types";
 import { theme } from "../modes/theme/theme";
 import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
 import {
 	type DbProbe,
 	type DbRepair,
-	FREE_PAGE_VACUUM_RATIO,
 	probeDatabase,
+	probeSqliteRecoverCapability,
 	recoverInterruptedSwap,
 	repairDatabase,
 	resolveDoctorDatabases,
+	vacuumEligible,
 } from "./doctor-sqlite";
 import { withGcLock } from "./gc-cli";
 
@@ -84,7 +86,7 @@ async function collectEnvironmentFinding(): Promise<DoctorFinding> {
 }
 
 function collectToolFindings(): DoctorFinding[] {
-	return TOOL_CHECKS.map(tool => {
+	const findings: DoctorFinding[] = TOOL_CHECKS.map(tool => {
 		const resolved = $which(tool.name);
 		if (resolved !== null) {
 			return { id: `tools.${tool.name}`, category: "tools", status: "ok", summary: resolved, details: [] };
@@ -98,6 +100,29 @@ function collectToolFindings(): DoctorFinding[] {
 			remedy: tool.remedy,
 		};
 	});
+	return findings;
+}
+
+async function collectSqliteRecoverFinding(): Promise<DoctorFinding> {
+	// The engine memoizes this probe; the cost is paid once per process.
+	const capability = await probeSqliteRecoverCapability();
+	if (capability.available) {
+		return {
+			id: "tools.sqlite3-recover",
+			category: "tools",
+			status: "ok",
+			summary: capability.detail,
+			details: [],
+		};
+	}
+	return {
+		id: "tools.sqlite3-recover",
+		category: "tools",
+		status: "warning",
+		summary: capability.detail,
+		details: [],
+		remedy: "Install a newer sqlite3; salvage repairs unavailable",
+	};
 }
 
 function storageFinding(probe: DbProbe, repair: DbRepair | null): DoctorFinding {
@@ -110,6 +135,7 @@ function storageFinding(probe: DbProbe, repair: DbRepair | null): DoctorFinding 
 		category: "storage" as const,
 		details,
 	};
+	// (1) A locked database is an expected condition, not a failure.
 	if (probe.busy || repair?.busy === true) {
 		return {
 			...base,
@@ -118,6 +144,7 @@ function storageFinding(probe: DbProbe, repair: DbRepair | null): DoctorFinding 
 			remedy: "Close running omp sessions and re-run `omp doctor --fix`",
 		};
 	}
+	// (2) A repair was attempted and failed; the file is left untouched.
 	if (repair?.error !== null && repair?.error !== undefined) {
 		return {
 			...base,
@@ -126,6 +153,19 @@ function storageFinding(probe: DbProbe, repair: DbRepair | null): DoctorFinding 
 			details: [...base.details, repair.error],
 		};
 	}
+	// (3) FK violations are not resolved by maintenance actions (checkpoint/optimize/vacuum);
+	// a db with unresolved violations stays warning even when --fix ran maintenance.
+	// No fixed flag: the FK issue itself was not repaired, though actions are noted.
+	if (probe.foreignKeyViolations > 0) {
+		const actions = repair !== null && repair.actions.length > 0 ? `${repair.actions.join(", ")}; ` : "";
+		return {
+			...base,
+			status: "warning",
+			summary: `${probe.label}: ${actions}${probe.foreignKeyViolations} foreign-key violations`,
+		};
+	}
+	// (4) Successful repair actions override the stale pre-repair probe: a corrupt
+	// db that was quarantined, salvaged, or rescued is now ok.
 	if (repair !== null && repair.actions.length > 0) {
 		let summary = `${probe.label}: ${repair.actions.join(", ")}`;
 		if (repair.bytesAfter < repair.bytesBefore) {
@@ -133,6 +173,9 @@ function storageFinding(probe: DbProbe, repair: DbRepair | null): DoctorFinding 
 		}
 		return { ...base, status: "ok", summary, fixed: true };
 	}
+	// (5) Pre-repair probe failures — only reached when no repair actions ran
+	// (read-only mode, or repair did nothing). A stat-failure probe (present +
+	// openError) surfaces as error here.
 	if (probe.openError !== null) {
 		return {
 			...base,
@@ -141,28 +184,18 @@ function storageFinding(probe: DbProbe, repair: DbRepair | null): DoctorFinding 
 			details: [...base.details, probe.openError],
 		};
 	}
-	if (probe.quickCheck !== "ok") {
+	if (probe.quickCheck !== "ok" && probe.quickCheck !== null) {
 		return {
 			...base,
 			status: "error",
 			summary: `${probe.label}: corrupt`,
-			details: [...base.details, probe.quickCheck ?? "quick_check unavailable"],
+			details: [...base.details, probe.quickCheck],
 		};
 	}
-	if (probe.foreignKeyViolations > 0) {
-		return {
-			...base,
-			status: "warning",
-			summary: `${probe.label}: ${probe.foreignKeyViolations} foreign-key violations`,
-		};
-	}
-	if (
-		probe.pageCount !== null &&
-		probe.pageCount > 0 &&
-		probe.freelistCount !== null &&
-		probe.freelistCount / probe.pageCount >= FREE_PAGE_VACUUM_RATIO
-	) {
-		const pct = Math.round((probe.freelistCount / probe.pageCount) * 100);
+	// (6) Free-page warning uses the engine's vacuumEligible so warn and repair agree;
+	// a small free-heavy db does not warn forever and --fix does not falsely claim fixed.
+	if (vacuumEligible(probe)) {
+		const pct = Math.round(((probe.freelistCount ?? 0) / (probe.pageCount ?? 1)) * 100);
 		return {
 			...base,
 			status: "warning",
@@ -349,7 +382,12 @@ async function collectStorageFindings(flags: DoctorCommandFlags): Promise<Doctor
 			if (!probe.present) continue;
 			const repair = flags.fix === true ? await repairDatabase(probe) : null;
 			const finding = storageFinding(probe, repair);
-			if (swap.restored) finding.details.push("restored from archive after an interrupted swap");
+			if (swap.restored) {
+				// The renderer suppresses details on ok findings, so surface the
+				// rollback in the summary — never conceal a restoration.
+				finding.summary = `restored from archive; ${finding.summary}`;
+				finding.details.push("restored from archive after an interrupted swap");
+			}
 			findings.push(finding);
 		}
 		return findings;
@@ -363,15 +401,45 @@ async function collectPluginFindings(flags: DoctorCommandFlags): Promise<DoctorF
 	// Plugin state is root-scoped; a run restricted to --agent-dir must not
 	// repair (and thereby mutate) state outside its scope.
 	const fix = flags.fix === true && flags.agentDir === undefined;
-	const checks = await new PluginManager().doctor({ fix });
-	return checks.map(check => ({
-		id: `plugins.${check.name}`,
-		category: "plugins" as const,
-		status: check.status,
-		summary: check.message,
-		details: [],
-		fixed: check.fixed,
-	}));
+	let checks: DoctorCheck[];
+	try {
+		checks = await new PluginManager().doctor({ fix });
+	} catch (error) {
+		// A malformed plugins/package.json makes PluginManager.doctor() rethrow;
+		// catch so the rest of the report still renders.
+		return [
+			{
+				id: "plugins.doctor",
+				category: "plugins",
+				status: "error",
+				summary: `plugin doctor failed: ${error instanceof Error ? error.message : String(error)}`,
+				details: [],
+			},
+		];
+	}
+	return checks.map(check => {
+		// PluginManager.doctor({fix:true}) returns the ORIGINAL error/warning status
+		// with fixed:true; the plugin CLI excludes fixed checks from error totals.
+		// Mirror that semantics: a fixed check normalizes to ok, preserving the
+		// original problem text so the user sees what was repaired.
+		if (check.fixed === true) {
+			return {
+				id: `plugins.${check.name}`,
+				category: "plugins" as const,
+				status: "ok",
+				summary: `fixed: ${check.message}`,
+				details: [],
+				fixed: true,
+			};
+		}
+		return {
+			id: `plugins.${check.name}`,
+			category: "plugins" as const,
+			status: check.status,
+			summary: check.message,
+			details: [],
+		};
+	});
 }
 
 export async function collectDoctorReport(flags: DoctorCommandFlags): Promise<DoctorReport> {
@@ -379,6 +447,7 @@ export async function collectDoctorReport(flags: DoctorCommandFlags): Promise<Do
 		await collectEnvironmentFinding(),
 		...(await collectConfigFindings(flags)),
 		...collectToolFindings(),
+		await collectSqliteRecoverFinding(),
 		...(await collectStorageFindings(flags)),
 		...(await collectPluginFindings(flags)),
 	];
@@ -414,7 +483,7 @@ export function renderDoctorReport(report: DoctorReport): string {
 						? theme.status.warning
 						: theme.status.error;
 			const tail = finding.id.startsWith(`${category}.`) ? finding.id.slice(category.length + 1) : finding.id;
-			lines.push(`  ${glyph} ${tail.padEnd(14)}  ${sanitize(finding.summary)}`);
+			lines.push(`  ${glyph} ${sanitize(tail).padEnd(14)}  ${sanitize(finding.summary)}`);
 			if (finding.status === "ok") continue;
 			for (const detail of finding.details) lines.push(`      ${sanitize(detail)}`);
 			if (finding.remedy !== undefined) lines.push(`      → ${sanitize(finding.remedy)}`);
