@@ -3464,7 +3464,10 @@ export class Editor implements Component, Focusable {
 		const text = this.getText();
 		let from = Math.max(0, Math.min(start, end));
 		let to = Math.max(from, Math.min(text.length, Math.max(start, end)));
-		if (from === to) return;
+		if (from === to) {
+			if (enterInsert) this.#recordUndoState();
+			return;
+		}
 
 		const expanded = this.#expandVimRangeOverAtomicTokens(from, to);
 		from = expanded.start;

@@ -112,6 +112,16 @@ describe("Editor Vim input mode", () => {
 
 		expect(editor.getText()).toBe("");
 	});
+
+	it("undoes replacement text after changing an empty range", () => {
+		const editor = createVimEditor();
+
+		typeText(editor, "Creplacement\u001b");
+		expect(editor.getText()).toBe("replacement");
+
+		editor.handleInput("u");
+		expect(editor.getText()).toBe("");
+	});
 	it("redoes an undone change with Ctrl-R in normal mode", () => {
 		const editor = createVimEditor();
 
