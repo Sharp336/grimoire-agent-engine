@@ -1,6 +1,5 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
 import { ADVISOR_TRANSCRIPT_FILENAME, isAdvisorTranscriptName } from "../advisor/transcript-recorder";
 import { SessionManager } from "../session/session-manager";
 import { SIDE_SESSION_FILE_PREFIX } from "../session/side-conversation";
@@ -54,33 +53,12 @@ async function registerPersistedSubagentsFromDir(
 		// Throwaway side conversations (`side.internal-<snowflake>.jsonl`) must not
 		// cold-revive as generic subagents — after process exit their controller and
 		// compaction hooks are gone, and the reference-only boundary contract would
-		// degrade after the first compaction. Delete abandoned side files (and their
-		// artifact dirs) during the scan so crashed transcripts do not linger forever.
-		if (entry.name.startsWith(SIDE_SESSION_FILE_PREFIX)) {
-			const sideFile = path.join(dir, entry.name);
-			// Live if a current registry ref owns the exact path — including a
-			// mid-registration null-session `running` ref, so the Hub opening while
-			// a side is focused (or starting) cannot delete it.
-			const owned = registry.list().some(ref => ref.sessionFile === sideFile);
-			if (!owned) {
-				// Only files proven to predate this process are abandoned:
-				// forkFrom writes the side file before createAgentSession registers
-				// its ref, so a fresh unowned file may be an initializing fork, not
-				// garbage (TOCTOU window the ownership check cannot close).
-				const { mtimeMs } = await fs.promises.stat(sideFile);
-				if (mtimeMs < performance.timeOrigin) {
-					try {
-						await SessionManager.removeSessionFiles(sideFile);
-					} catch (err) {
-						logger.warn("Failed to delete abandoned side transcript", {
-							file: entry.name,
-							error: String(err),
-						});
-					}
-				}
-			}
-			continue;
-		}
+		// degrade after the first compaction. They are only SKIPPED, never deleted:
+		// a second process opening the Hub would see another process's live side as
+		// unowned and there is no cheap cross-process liveness check, so deleting
+		// here can destroy an active transcript. Abandoned files stay inert on
+		// disk for the user to clean up.
+		if (entry.name.startsWith(SIDE_SESSION_FILE_PREFIX)) continue;
 		const sessionFile = path.join(dir, entry.name);
 		// The advisor transcript is observability-only: register it as a non-peer
 		// `advisor` kind under its owning session so the Hub can show its read-only

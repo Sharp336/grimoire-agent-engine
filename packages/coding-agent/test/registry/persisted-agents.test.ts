@@ -46,9 +46,6 @@ describe("registerPersistedSubagents", () => {
 		const sideFile = path.join(artifactDir, `${sideStem}.jsonl`);
 		const sideArtifactDir = path.join(artifactDir, sideStem);
 		writeJsonl(sideFile);
-		// The mtime guard only deletes files proven to predate this process, so
-		// the abandoned fixture must be older than the runner's timeOrigin.
-		fs.utimesSync(sideFile, new Date(0), new Date(0));
 		fs.mkdirSync(sideArtifactDir, { recursive: true });
 		fs.writeFileSync(path.join(sideArtifactDir, "marker.txt"), "abandoned");
 		writeJsonl(path.join(artifactDir, "RegularAgent.jsonl"));
@@ -59,28 +56,23 @@ describe("registerPersistedSubagents", () => {
 		// absence proves the exclusion — not a malformed-fixture artifact.
 		expect(AgentRegistry.global().get(sideStem)).toBeUndefined();
 		expect(AgentRegistry.global().get("RegularAgent")).toBeDefined();
-		// Abandoned side transcripts (and their artifact dirs) are deleted during
-		// the scan so crashed leftovers do not linger on disk forever.
-		expect(fs.existsSync(sideFile)).toBe(false);
-		expect(fs.existsSync(sideArtifactDir)).toBe(false);
+		// Side files are skipped, never deleted: a second process opening the Hub
+		// cannot tell another process's live side from an abandoned one, so the
+		// scan must leave every side file on disk.
+		expect(fs.existsSync(sideFile)).toBe(true);
+		expect(fs.existsSync(sideArtifactDir)).toBe(true);
 	});
 
-	it("keeps fresh unowned and live-owned side files during the scan", async () => {
+	it("does not re-register a live-owned side file", async () => {
 		tempDir = TempDir.createSync("@omp-persisted-scan-live-");
 		parentManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
 		const parentFile = parentManager.getSessionFile();
 		if (!parentFile) throw new Error("parent session file was not created");
 
 		const artifactDir = parentFile.slice(0, -6);
-		// Fresh unowned file (mtime now): may be an initializing fork, not garbage.
-		const freshStem = `${SIDE_SESSION_FILE_PREFIX}f1e57unowned`;
-		const freshFile = path.join(artifactDir, `${freshStem}.jsonl`);
-		writeJsonl(freshFile);
-		// Old but owned by a live ref: owned beats the mtime guard.
 		const ownedStem = `${SIDE_SESSION_FILE_PREFIX}0123owned89abcdef`;
 		const ownedFile = path.join(artifactDir, `${ownedStem}.jsonl`);
 		writeJsonl(ownedFile);
-		fs.utimesSync(ownedFile, new Date(0), new Date(0));
 		AgentRegistry.global().register({
 			id: "side.internal",
 			displayName: "side",
@@ -92,9 +84,9 @@ describe("registerPersistedSubagents", () => {
 
 		await registerPersistedSubagents(AgentRegistry.global(), parentFile);
 
-		expect(fs.existsSync(freshFile)).toBe(true);
-		expect(fs.existsSync(ownedFile)).toBe(true);
-		expect(AgentRegistry.global().get(freshStem)).toBeUndefined();
+		// Skipped like any side file: no second ref under the stem, file intact.
 		expect(AgentRegistry.global().get(ownedStem)).toBeUndefined();
+		expect(fs.existsSync(ownedFile)).toBe(true);
+		expect(AgentRegistry.global().get("side.internal")).toBeDefined();
 	});
 });
