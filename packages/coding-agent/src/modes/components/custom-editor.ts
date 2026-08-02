@@ -417,6 +417,23 @@ export class CustomEditor extends Editor {
 	constructor(...args: readonly unknown[]) {
 		super(pickEditorTheme(args));
 		if (args[0] instanceof TUI) this.tui = args[0];
+		this.undoStateHooks = {
+			capture: () => ({
+				imageLinks: this.imageLinks,
+				pendingImages: this.pendingImages,
+				pendingImageLinks: this.pendingImageLinks,
+			}),
+			restore: state => {
+				const draft = state as {
+					imageLinks: (string | undefined)[] | undefined;
+					pendingImages: ImageContent[];
+					pendingImageLinks: (string | undefined)[];
+				};
+				this.imageLinks = draft.imageLinks;
+				this.pendingImages = draft.pendingImages;
+				this.pendingImageLinks = draft.pendingImageLinks;
+			},
+		};
 	}
 
 	/** Clear the composer draft: optionally commit `historyText` to history, then

@@ -378,6 +378,31 @@ describe("CustomEditor keybindings", () => {
 		expect(editor.getText()).toBe("");
 	});
 
+	it("undoes and redoes pasted image sidecars with their Vim marker", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const image = { type: "image" as const, mimeType: "image/png", data: "aW1hZ2U=" };
+		editor.setInputMode("vim");
+		editor.handleInput("i");
+		editor.prepareVimInsertMutation();
+		editor.pendingImages.push(image);
+		editor.pendingImageLinks.push("local://draft.png");
+		editor.imageLinks = editor.pendingImageLinks;
+		editor.insertText("[Image #1] ");
+		editor.handleInput("\x1b");
+
+		editor.handleInput("u");
+		expect(editor.getText()).toBe("");
+		expect(editor.pendingImages).toEqual([]);
+		expect(editor.pendingImageLinks).toEqual([]);
+		expect(editor.imageLinks).toBeUndefined();
+
+		editor.handleInput("\x12");
+		expect(editor.getText()).toBe("[Image #1] ");
+		expect(editor.pendingImages).toEqual([image]);
+		expect(editor.pendingImageLinks).toEqual(["local://draft.png"]);
+		expect(editor.imageLinks).toEqual(["local://draft.png"]);
+	});
+
 	it("stops a multi-image path paste after Vim Escape cancels its generation", async () => {
 		const editor = new CustomEditor(getEditorTheme());
 		const firstImage = Promise.withResolvers<void>();

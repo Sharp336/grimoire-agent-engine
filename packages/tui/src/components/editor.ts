@@ -409,6 +409,11 @@ interface HistoryStorage {
 
 type HistoryCursorAnchor = "start" | "end";
 
+export interface EditorUndoStateHooks {
+	capture: () => unknown;
+	restore: (state: unknown) => void;
+}
+
 export type EditorInputMode = "default" | "vim";
 
 export class Editor implements Component, Focusable {
@@ -500,6 +505,7 @@ export class Editor implements Component, Focusable {
 	#undoStack: EditorState[] = [];
 	#redoStack: EditorState[] = [];
 	#suspendUndo = false;
+	#auxiliaryUndoStates = new WeakMap<EditorState, unknown>();
 
 	#inputMode: EditorInputMode = "default";
 	#vim: VimEditorController;
@@ -511,6 +517,8 @@ export class Editor implements Component, Focusable {
 	onAltEnter?: (text: string) => void;
 	onChange?: (text: string) => void;
 	onInputModeChange?: (mode: VimEditorMode | undefined) => void;
+	/** Optional host state captured and restored atomically with editor text undo/redo snapshots. */
+	undoStateHooks: EditorUndoStateHooks | undefined;
 	/** Called for a "marker-sized" paste — the point where the editor would otherwise collapse it
 	 *  into a `[Paste #N]` token (> 10 lines or > 1000 characters). Return `true` to intercept:
 	 *  the editor inserts nothing and records no undo state, leaving insertion to the host (e.g. a
@@ -2559,16 +2567,23 @@ export class Editor implements Component, Focusable {
 	#recordUndoState(): void {
 		if (this.#suspendUndo) return;
 		this.#redoStack.length = 0;
-		this.#undoStack.push(structuredClone(this.#state));
+		this.#undoStack.push(this.#snapshotUndoState());
 		if (this.#undoStack.length > MAX_UNDO_STACK) {
 			this.#undoStack.shift();
 		}
 	}
 
+	#snapshotUndoState(): EditorState {
+		const snapshot = structuredClone(this.#state);
+		const hooks = this.undoStateHooks;
+		if (hooks) this.#auxiliaryUndoStates.set(snapshot, structuredClone(hooks.capture()));
+		return snapshot;
+	}
+
 	#applyUndo(): boolean {
 		const snapshot = this.#undoStack.pop();
 		if (!snapshot) return false;
-		this.#redoStack.push(structuredClone(this.#state));
+		this.#redoStack.push(this.#snapshotUndoState());
 		if (this.#redoStack.length > MAX_UNDO_STACK) this.#redoStack.shift();
 		this.#restoreUndoState(snapshot);
 		return true;
@@ -2577,7 +2592,7 @@ export class Editor implements Component, Focusable {
 		const snapshot = this.#redoStack.pop();
 		if (!snapshot) return false;
 
-		this.#undoStack.push(structuredClone(this.#state));
+		this.#undoStack.push(this.#snapshotUndoState());
 		if (this.#undoStack.length > MAX_UNDO_STACK) this.#undoStack.shift();
 		this.#restoreUndoState(snapshot);
 		return true;
@@ -2588,6 +2603,10 @@ export class Editor implements Component, Focusable {
 		this.#resetKillSequence();
 		this.#preferredVisualCol = null;
 		Object.assign(this.#state, snapshot);
+		const hooks = this.undoStateHooks;
+		if (hooks && this.#auxiliaryUndoStates.has(snapshot)) {
+			hooks.restore(structuredClone(this.#auxiliaryUndoStates.get(snapshot)));
+		}
 
 		if (this.onChange) {
 			this.onChange(this.getText());
