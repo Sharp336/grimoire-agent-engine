@@ -268,10 +268,21 @@ export function deriveThinking<TApi extends Api>(spec: ModelSpec<TApi>, compat: 
  * through other request fields.
  */
 function omitsWireReasoningEffort(api: Api, compat: CompatOf<Api>): boolean {
-	if (api !== "openai-responses" && api !== "openai-codex-responses" && api !== "azure-openai-responses") {
-		return false;
+	if (api === "openai-responses" || api === "openai-codex-responses" || api === "azure-openai-responses") {
+		return (compat as ResolvedOpenAIResponsesCompat | undefined)?.supportsReasoningEffort === false;
 	}
-	return (compat as ResolvedOpenAIResponsesCompat | undefined)?.supportsReasoningEffort === false;
+	// openai-completions qwen-chat-template: when the resolved compat suppresses
+	// reasoning_effort (omitReasoningEffort: true), the effort ladder produces
+	// identical wire bodies — the only tier-specific field (reasoning_effort) is
+	// never emitted, and the template toggle (enable_thinking: true) is the same
+	// for every tier. Drop the effort surface so the picker doesn't offer
+	// indistinguishable controls. Other formats (zai, openai, openrouter) still
+	// produce distinct wire bodies through their own dialect fields.
+	if (api === "openai-completions" || api === "openrouter") {
+		const resolved = compat as ResolvedOpenAICompat | undefined;
+		return resolved?.thinkingFormat === "qwen-chat-template" && resolved?.omitReasoningEffort === true;
+	}
+	return false;
 }
 
 function inferEffortMap<TApi extends Api>(
