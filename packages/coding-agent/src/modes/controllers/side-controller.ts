@@ -156,7 +156,11 @@ export class SideController {
 				localProtocolOptions,
 			});
 			side = created.session;
-			capturedRef = AgentRegistry.global().get(SIDE_AGENT_ID);
+			// Capture the ref ONLY if it owns the session we just constructed — an
+			// external replacement between the SDK's attach and this read would
+			// otherwise be unregistered by captured-generation cleanup.
+			const registered = AgentRegistry.global().get(SIDE_AGENT_ID);
+			capturedRef = registered?.session === side ? registered : undefined;
 			const uiContext = this.ctx.getToolUIContext();
 			if (uiContext) created.setToolUIContext(uiContext, true);
 

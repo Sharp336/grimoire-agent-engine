@@ -77,7 +77,7 @@ function createSideStub(overrides?: {
 				// appends to the agent list only (no second persisted entry).
 				if (options?.deliverAs === "nextTurn" && !options?.triggerTurn) {
 					appendMessage({
-						role: "user",
+						role: "custom",
 						content: message.content,
 						attribution: message.attribution,
 					});
@@ -305,7 +305,7 @@ describe("SideController", () => {
 			(msg as { content?: string } | undefined)?.content?.includes('<system-notice cause="side-conversation">'),
 		);
 		expect(agentBoundaryMessages).toHaveLength(1);
-		expect((agentBoundaryMessages[0]?.[0] as { role?: string } | undefined)?.role).toBe("user");
+		expect((agentBoundaryMessages[0]?.[0] as { role?: string } | undefined)?.role).toBe("custom");
 
 		// Snapshot parent entry ids AFTER ensureOnDisk/flush (the create path
 		// already ran them). The parent should not be modified by the side.
