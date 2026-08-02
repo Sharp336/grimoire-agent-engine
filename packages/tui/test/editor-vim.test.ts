@@ -521,6 +521,20 @@ describe("Editor Vim input mode", () => {
 		expect(editor.getVimMode()).toBe("normal");
 	});
 
+	it.each(["d", "3"])("consumes Enter while %s is pending", pending => {
+		const editor = createVimEditor();
+		const onSubmit = vi.fn();
+		editor.setText("abc");
+		editor.onSubmit = onSubmit;
+		editor.handleInput(pending);
+
+		editor.handleInput("\r");
+
+		expect(editor.getText()).toBe("abc");
+		expect(onSubmit).not.toHaveBeenCalled();
+		expect(editor.getVimMode()).toBe("normal");
+	});
+
 	it("blocks remapped submit keys outside Vim insert mode", () => {
 		setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS, { "tui.input.submit": "ctrl+s" }));
 		const editor = createVimEditor();

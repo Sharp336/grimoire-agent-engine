@@ -572,8 +572,8 @@ export class Editor implements Component, Focusable {
 		return this.#inputMode === "vim" ? this.#vim.mode : undefined;
 	}
 
-	clearVimPendingCommand(): void {
-		if (this.#inputMode === "vim") this.#vim.clearPendingCommand();
+	clearVimPendingCommand(): boolean {
+		return this.#inputMode === "vim" && this.#vim.clearPendingCommand();
 	}
 
 	prepareVimInsertMutation(): void {

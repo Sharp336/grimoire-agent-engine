@@ -132,9 +132,11 @@ export class VimEditorController {
 		if (this.#mode === "insert" && !this.#insertUndoActive) this.#beginInsertUndo();
 	}
 
-	clearPendingCommand(): void {
+	clearPendingCommand(): boolean {
+		const hadPending = this.#pending !== undefined || this.#count.length > 0;
 		this.#pending = undefined;
 		this.#count = "";
+		return hadPending;
 	}
 
 	handleNormalInput(data: string, kb: KeybindingsManager): boolean {
@@ -164,8 +166,8 @@ export class VimEditorController {
 			return true;
 		}
 		if (matchesKey(data, "enter") || matchesKey(data, "return")) {
-			this.clearPendingCommand();
-			return this.#mode === "visual" || matchesBaseMutation;
+			const hadPending = this.clearPendingCommand();
+			return this.#mode === "visual" || matchesBaseMutation || hadPending;
 		}
 		if (matchesKey(data, "ctrl+r")) {
 			if (this.#mode === "visual") {

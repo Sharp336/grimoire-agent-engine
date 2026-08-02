@@ -877,7 +877,11 @@ export class CustomEditor extends Editor {
 			canonical !== undefined &&
 			(this.#actionMatchKeyUnion.has(canonical) || this.#customMatchKeys.has(canonical))
 		) {
-			if (!acceptsTextEntry) this.clearVimPendingCommand();
+			const clearedVimPending = !acceptsTextEntry && this.clearVimPendingCommand();
+			if (clearedVimPending && (matchesKey(data, "escape") || matchesKey(data, "esc"))) {
+				super.handleInput(data);
+				return;
+			}
 			if (acceptsTextEntry && this.#matchesAction(canonical, "app.stt.toggle") && this.onSTTToggle) {
 				this.prepareVimInsertMutation();
 				this.onSTTToggle();

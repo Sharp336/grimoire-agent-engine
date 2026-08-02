@@ -96,6 +96,24 @@ describe("CustomEditor keybindings", () => {
 		expect(onEscape).toHaveBeenCalledTimes(1);
 	});
 
+	it("lets Escape cancel a pending Vim command before interrupting the app", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onEscape = vi.fn();
+		editor.setInputMode("vim");
+		editor.setText("abc");
+		editor.onEscape = onEscape;
+		editor.handleInput("d");
+
+		editor.handleInput("\x1b");
+
+		expect(editor.getVimMode()).toBe("normal");
+		expect(editor.getText()).toBe("abc");
+		expect(onEscape).not.toHaveBeenCalled();
+
+		editor.handleInput("\x1b");
+		expect(onEscape).toHaveBeenCalledTimes(1);
+	});
+
 	it("keeps Ctrl-R for Vim redo instead of opening history search", () => {
 		const editor = new CustomEditor(getEditorTheme());
 		const onHistorySearch = vi.fn();
