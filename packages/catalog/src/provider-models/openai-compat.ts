@@ -34,7 +34,15 @@ import type {
 	Provider,
 	ThinkingConfig,
 } from "../types";
-import { discoveryFetch, isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
+import {
+	discoveryFetch,
+	isAnthropicOAuthToken,
+	isRecord,
+	toBoolean,
+	toNumber,
+	toPositiveNumber,
+	toPositiveNumberOrNull,
+} from "../utils";
 import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "../wire/alibaba-token-plan";
 import { coreWeaveProjectHeaders } from "../wire/coreweave";
 import {
@@ -2385,11 +2393,22 @@ export function friendliModelManagerOptions(
 
 						const pricing = raw.pricing ?? {};
 						const refCost = reference?.cost;
+						// Friendli's `pricing.*` fields are per-token USD strings, so a parsed
+						// API price is scaled by 1e6 to reach the per-million-token unit the
+						// catalog stores. The reference fallback (`refCost`) is already in
+						// per-million units (the seeded GLM-5.2 carries 0.6/2.2), so it must
+						// pass through unscaled — the unconditional multiplier previously
+						// turned the fallback into 600000/2200000. Apply the multiplier only
+						// to a parsed API price and fall back to the reference afterward.
+						const apiInput = toPositiveNumberOrNull(pricing.input);
+						const apiOutput = toPositiveNumberOrNull(pricing.output);
+						const apiCacheRead = toPositiveNumberOrNull(pricing.input_cache_read);
+						const apiCacheWrite = toPositiveNumberOrNull(pricing.cache_write);
 						const cost = {
-							input: toPositiveNumber(pricing.input, refCost?.input ?? 0) * 1_000_000,
-							output: toPositiveNumber(pricing.output, refCost?.output ?? 0) * 1_000_000,
-							cacheRead: toPositiveNumber(pricing.input_cache_read, refCost?.cacheRead ?? 0) * 1_000_000,
-							cacheWrite: toPositiveNumber(pricing.cache_write, refCost?.cacheWrite ?? 0) * 1_000_000,
+							input: apiInput !== null ? apiInput * 1_000_000 : (refCost?.input ?? 0),
+							output: apiOutput !== null ? apiOutput * 1_000_000 : (refCost?.output ?? 0),
+							cacheRead: apiCacheRead !== null ? apiCacheRead * 1_000_000 : (refCost?.cacheRead ?? 0),
+							cacheWrite: apiCacheWrite !== null ? apiCacheWrite * 1_000_000 : (refCost?.cacheWrite ?? 0),
 						};
 
 						const functionality = raw.functionality ?? {};

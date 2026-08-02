@@ -249,4 +249,46 @@ describe("Friendli provider discovery", () => {
 		// of what other providers' bundled catalogs say about this model id.
 		expect(m.thinking).toBeUndefined();
 	});
+
+	test("uses the bundled reference cost as-is when /v1/models omits a pricing field", async () => {
+		// The seeded GLM-5.2 carries the authoritative per-million fallback
+		// (input 0.6 / output 2.2). When Friendli omits a pricing field, the
+		// reference cost must pass through unscaled — it is already in
+		// per-million-token units. Scaling it by 1e6 would report
+		// 600000/2200000 instead of the intended 0.6/2.2.
+		const fetchMock: FetchImpl = async (_input: string | URL | Request, _init?: RequestInit) => {
+			return new Response(
+				JSON.stringify({
+					data: [
+						{
+							id: "zai-org/GLM-5.2",
+							object: "model",
+							name: "GLM-5.2",
+							context_length: 131072,
+							max_completion_tokens: 8192,
+							// pricing omitted entirely
+							functionality: { tool_call: true },
+							reasoning: true,
+							input_modalities: ["text"],
+							reasoning_options: [{ type: "toggle" }, { type: "budget_tokens", min: -1, max: 1048576 }],
+						},
+					],
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		};
+
+		const options = friendliModelManagerOptions({ apiKey: "test-key", fetch: fetchMock });
+		const models = await options.fetchDynamicModels?.();
+
+		expect(models).toBeDefined();
+		expect(models).toHaveLength(1);
+		const glm = models![0];
+		// Reference fallback (per-million) flows through unscaled — NOT
+		// multiplied by 1e6.
+		expect(glm.cost.input).toBe(0.6);
+		expect(glm.cost.output).toBe(2.2);
+		expect(glm.cost.cacheRead).toBe(0);
+		expect(glm.cost.cacheWrite).toBe(0);
+	});
 });

@@ -238,6 +238,7 @@
 ### Fixed
 
 - Fixed NVIDIA NIM (and other `qwen-chat-template` hosts with `omitReasoningEffort: true`) reasoning Qwen models exposing no thinking control at all: `resolveModelThinking` discarded their bundled effort ladder to avoid indistinguishable wire tiers, which left `thinking` undefined, clamped every effort to `undefined`, and forced `chat_template_kwargs.enable_thinking: false` on every request — users could not enable reasoning. The ladder now collapses to a single binary tier so the picker offers one on/off control instead of dropping thinking entirely.
+- Fixed Friendli dynamic discovery inflating the seeded GLM-5.2 reference cost by 1e6 when `/v1/models` omits a pricing field. The reference fallback (`refCost.input`/`output`) is already stored in per-million-token units (0.6/2.2), so the unconditional `* 1_000_000` turned the fallback into 600000/2200000. The per-million multiplier is now applied only to a parsed API price, with the reference cost flowing through unscaled.
 
 ## [17.2.4] - 2026-08-01
 
