@@ -5,11 +5,15 @@
  * the human or JSON report, and owns the single stdout write — the command
  * wrapper stays thin. Mirrors the gc-cli.ts / stats-cli.ts split.
  */
+import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { type AuthBrokerClientConfig, resolveAuthBrokerConfig } from "@oh-my-pi/pi-ai/auth-broker/discover";
+import { isSqliteBusyError } from "@oh-my-pi/pi-ai/auth-storage";
 import {
 	$which,
 	formatBytes,
+	getAgentDbPath,
 	getAgentDir,
 	getProjectDir,
 	isEnoent,
@@ -44,7 +48,7 @@ import { withGcLock } from "./gc-cli";
 
 export type DoctorStatus = "ok" | "warning" | "error";
 
-export type DoctorCategory = "environment" | "config" | "tools" | "storage" | "mcp" | "browser" | "plugins";
+export type DoctorCategory = "environment" | "config" | "tools" | "storage" | "mcp" | "browser" | "auth" | "plugins";
 
 export interface DoctorFinding {
 	/** Stable dotted id, e.g. "storage.history.db" or "tools.git". */
@@ -84,6 +88,7 @@ const CATEGORY_ORDER: readonly DoctorCategory[] = [
 	"storage",
 	"mcp",
 	"browser",
+	"auth",
 	"plugins",
 ];
 
@@ -220,6 +225,254 @@ async function collectBrowserFindings(): Promise<DoctorFinding[]> {
 			remedy: "Install Chrome/Chromium or set PUPPETEER_EXECUTABLE_PATH to avoid the first-use download",
 		},
 	];
+}
+/**
+ * Render only the origin (scheme://host:port) of a broker URL so no
+ * userinfo, query, or fragment, any of which may carry credentials,
+ * ever reaches a finding. Unparseable values are replaced with a
+ * redaction placeholder rather than echoed raw.
+ */
+function sanitizeBrokerUrl(raw: string): string {
+	try {
+		const url = new URL(raw);
+		return url.origin;
+	} catch {
+		return "<unparseable broker URL>";
+	}
+}
+/**
+ * Probe auth/setup: credential presence per configured provider, OAuth token
+ * expiry, and broker mode. Bounded to local file checks — no network, no
+ * broker reachability probe, no token refresh, no shell execution — and never
+ * any secret material in the output (presence/absence and expiry only).
+ *
+ * Broker detection reuses the real `resolveAuthBrokerConfig` (the shared
+ * resolver) but injects a doctor-specific config-value resolver that handles
+ * only literal and env-var references. A `!command`-backed broker URL or token
+ * is reported as a finding (command-backed, not resolved) rather than executed,
+ * so a health check never spawns a shell. The local credential read is a
+ * read-only SQL probe of the `auth_credentials` table that
+ * `SqliteAuthCredentialStore` owns: doctor never opens the auth DB read-write,
+ * never runs `AuthStorage.reload`, and never triggers OAuth refresh, so a
+ * health check cannot mutate credentials or block on a refresh.
+ * `JSON_EXTRACT(data, '$.expires')` pulls the expiry without loading access or
+ * refresh tokens into JS. Broker URLs are rendered as origin-only (no
+ * userinfo, query, or fragment) so embedded credentials in any URL component
+ * never leak. When --agent-dir is set, `allowTokenFile: false` is passed to
+ * `resolveAuthBrokerConfig` so the global broker token file is never read; a
+ * broker finding is emitted only when the token comes from env or the scoped
+ * config.yml.
+ */
+async function collectAuthFindings(flags: DoctorCommandFlags): Promise<DoctorFinding[]> {
+	const agentDir = flags.agentDir ?? getAgentDir();
+
+	// Broker config resolution reads env, <agentDir>/config.yml, and the
+	// broker token file only — no HTTP. A configured broker means credentials
+	// live remotely; report it and skip the local store (no reachability
+	// probe). The doctor-specific resolver handles only literal/env
+	// references; a `!command` value is recorded (never executed) and surfaced
+	// as a finding.
+	//
+	// When --agent-dir is set (scoped), the global broker token file
+	// (`~/.omp/auth-broker.token`) is OUTSIDE the scope and must not be read.
+	// `allowTokenFile: false` makes resolveAuthBrokerConfig skip the file
+	// fallback entirely, so a scoped run can only see tokens from env or the
+	// scoped config.yml — never the user's real global token.
+	const scoped = flags.agentDir !== undefined;
+	let commandBackedField: string | null = null;
+	const doctorConfigValueResolver = async (config: string): Promise<string | undefined> => {
+		if (config.startsWith("!")) {
+			commandBackedField = config;
+			return undefined;
+		}
+		const envValue = process.env[config];
+		return envValue || config;
+	};
+	let brokerConfig: AuthBrokerClientConfig | null;
+	try {
+		brokerConfig = await resolveAuthBrokerConfig({
+			agentDir,
+			configValueResolver: doctorConfigValueResolver,
+			allowTokenFile: !scoped,
+		});
+	} catch {
+		// The only throw from resolveAuthBrokerConfig is "URL set but no
+		// token". Do NOT forward the raw error text — it embeds the URL.
+		// Report a sanitized finding instead. When scoped, the token file
+		// is out of scope, so the remedy points to scoped sources only.
+		return [
+			{
+				id: "auth.broker",
+				category: "auth",
+				status: "error",
+				summary: "auth broker URL configured but no bearer token is available",
+				details: [],
+				remedy: scoped
+					? "Set OMP_AUTH_BROKER_TOKEN or the `auth.broker.token` config entry under the scoped agent dir"
+					: "Set OMP_AUTH_BROKER_TOKEN, the `auth.broker.token` config entry, or place a token at the broker token file",
+			},
+		];
+	}
+	if (commandBackedField !== null) {
+		return [
+			{
+				id: "auth.broker",
+				category: "auth",
+				status: "warning",
+				summary: "auth broker config is command-backed; doctor cannot resolve it without executing a shell command",
+				details: [],
+				remedy: "Run `omp doctor` in a context where the broker command resolves, or use a literal URL/token",
+			},
+		];
+	}
+	if (brokerConfig) {
+		return [
+			{
+				id: "auth.broker",
+				category: "auth",
+				status: "ok",
+				summary: "credentials served by remote auth broker",
+				details: [sanitizeBrokerUrl(brokerConfig.url)],
+			},
+		];
+	}
+
+	// Local SQLite store. Stat first so a fresh install (no agent.db) is a
+	// single ok finding, not an open error. Open read-only; never create,
+	// never migrate.
+	const dbPath = getAgentDbPath(agentDir);
+	try {
+		await fs.promises.stat(dbPath);
+	} catch (error) {
+		if (isEnoent(error)) {
+			return [{ id: "auth.storage", category: "auth", status: "ok", summary: "no credentials stored", details: [] }];
+		}
+		return [
+			{
+				id: "auth.storage",
+				category: "auth",
+				status: "error",
+				summary: `cannot stat auth database: ${error instanceof Error ? error.message : String(error)}`,
+				details: [],
+			},
+		];
+	}
+
+	let db: Database | undefined;
+	try {
+		db = new Database(dbPath, { readonly: true, create: false });
+		db.run("PRAGMA busy_timeout = 5000");
+		const tableRow = db
+			.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'auth_credentials'")
+			.get() as { present?: number } | undefined;
+		if (tableRow?.present !== 1) {
+			return [{ id: "auth.storage", category: "auth", status: "ok", summary: "no credentials stored", details: [] }];
+		}
+		// Read only provider / type / disabled / expiry — never the secret
+		// payload columns. JSON_EXTRACT pulls `expires` without loading the
+		// access/refresh tokens into JS.
+		type AuthProbeRow = {
+			provider: string;
+			credential_type: string;
+			disabled_cause: string | null;
+			expires: number | null;
+		};
+		const rows = db
+			.query(
+				"SELECT provider, credential_type, disabled_cause, JSON_EXTRACT(data, '$.expires') AS expires FROM auth_credentials ORDER BY provider ASC, id ASC",
+			)
+			.all() as AuthProbeRow[];
+		if (rows.length === 0) {
+			return [{ id: "auth.storage", category: "auth", status: "ok", summary: "no credentials stored", details: [] }];
+		}
+		const now = Date.now();
+		const byProvider = new Map<string, AuthProbeRow[]>();
+		for (const row of rows) {
+			const list = byProvider.get(row.provider) ?? [];
+			list.push(row);
+			byProvider.set(row.provider, list);
+		}
+		const findings: DoctorFinding[] = [];
+		for (const [provider, providerRows] of byProvider) {
+			const active = providerRows.filter(row => row.disabled_cause === null);
+			if (active.length === 0) {
+				// Only disabled (soft-deleted) tombstones remain — the user once
+				// configured this provider; report absence, not silence.
+				findings.push({
+					id: `auth.${provider}`,
+					category: "auth",
+					status: "warning",
+					summary: `no credentials for ${provider}`,
+					details: [],
+					remedy: "Run `omp login`",
+				});
+				continue;
+			}
+			const hasValid = active.some(
+				row =>
+					row.credential_type === "api_key" ||
+					(row.credential_type === "oauth" && row.expires !== null && row.expires > now),
+			);
+			if (hasValid) {
+				findings.push({
+					id: `auth.${provider}`,
+					category: "auth",
+					status: "ok",
+					summary: `credentials present for ${provider}`,
+					details: [],
+				});
+				continue;
+			}
+			const hasExpiredOauth = active.some(
+				row => row.credential_type === "oauth" && (row.expires === null || row.expires <= now),
+			);
+			if (hasExpiredOauth) {
+				findings.push({
+					id: `auth.${provider}`,
+					category: "auth",
+					status: "warning",
+					summary: `token expired for ${provider}`,
+					details: [],
+					remedy: "Run `omp login`",
+				});
+				continue;
+			}
+			// Active rows of an unrecognized type — treat as present rather than
+			// falsely reporting absence.
+			findings.push({
+				id: `auth.${provider}`,
+				category: "auth",
+				status: "ok",
+				summary: `credentials present for ${provider}`,
+				details: [],
+			});
+		}
+		return findings;
+	} catch (error) {
+		if (isSqliteBusyError(error)) {
+			return [
+				{
+					id: "auth.storage",
+					category: "auth",
+					status: "warning",
+					summary: "auth database busy",
+					details: [],
+					remedy: "Close running omp sessions and re-run `omp doctor`",
+				},
+			];
+		}
+		return [
+			{
+				id: "auth.storage",
+				category: "auth",
+				status: "error",
+				summary: `cannot read auth database: ${error instanceof Error ? error.message : String(error)}`,
+				details: [],
+			},
+		];
+	} finally {
+		db?.close();
+	}
 }
 async function collectSqliteRecoverFinding(): Promise<DoctorFinding> {
 	// The engine memoizes this probe; the cost is paid once per process.
@@ -796,6 +1049,7 @@ export async function collectDoctorReport(flags: DoctorCommandFlags): Promise<Do
 		...(await collectStorageFindings(flags)),
 		...(await collectMcpFindings(flags)),
 		...(await collectBrowserFindings()),
+		...(await collectAuthFindings(flags)),
 		...(await collectPluginFindings(flags)),
 	];
 	const overallStatus: DoctorStatus = findings.some(f => f.status === "error")

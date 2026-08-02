@@ -348,7 +348,9 @@ describe("omp doctor", () => {
 		expect(["ok", "warning", "error"]).toContain(parsed.overallStatus);
 		for (const finding of parsed.findings) {
 			expect(typeof finding.id).toBe("string");
-			expect(["environment", "config", "tools", "storage", "mcp", "browser", "plugins"]).toContain(finding.category);
+			expect(["environment", "config", "tools", "storage", "mcp", "browser", "auth", "plugins"]).toContain(
+				finding.category,
+			);
 			expect(["ok", "warning", "error"]).toContain(finding.status);
 			expect(typeof finding.summary).toBe("string");
 			expect(Array.isArray(finding.details)).toBe(true);
@@ -902,6 +904,172 @@ describe("omp doctor", () => {
 			chromeSpy.mockRestore();
 			envSpy.mockRestore();
 		}
+	});
+
+	// ── auth section ────────────────────────────────────────────────────────
+	// Fixtures build the REAL auth_credentials layout that SqliteAuthCredentialStore
+	// owns (same DDL, same `data` JSON shape serializeCredential writes), so the
+	// doctor's read-only probe reads exactly what a real store would persist.
+
+	/** Create agent.db with the real auth_credentials schema and one credential row. */
+	async function createAuthCredential(
+		dbPath: string,
+		provider: string,
+		credentialType: "api_key" | "oauth",
+		data: Record<string, unknown>,
+	): Promise<void> {
+		await fs.mkdir(path.dirname(dbPath), { recursive: true });
+		const db = new Database(dbPath);
+		db.run("PRAGMA journal_mode=DELETE");
+		db.run(`
+			CREATE TABLE auth_credentials (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				provider TEXT NOT NULL,
+				credential_type TEXT NOT NULL,
+				data TEXT NOT NULL,
+				disabled_cause TEXT DEFAULT NULL,
+				identity_key TEXT DEFAULT NULL,
+				created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+				updated_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))
+			);
+		`);
+		db.run("INSERT INTO auth_credentials (provider, credential_type, data) VALUES (?, ?, ?)", [
+			provider,
+			credentialType,
+			JSON.stringify(data),
+		]);
+		db.close();
+	}
+
+	test("auth: expired OAuth token → warning", async () => {
+		const dbPath = getAgentDbPath(root);
+		// Real OAuth `data` shape: { refresh, access, expires, ... } (type stripped by serializeCredential).
+		await createAuthCredential(dbPath, "anthropic", "oauth", {
+			refresh: "r",
+			access: "a",
+			expires: Date.now() - 1000,
+		});
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "auth.anthropic");
+		expect(finding).toBeDefined();
+		if (finding === undefined) return;
+		expect(finding.category).toBe("auth");
+		expect(finding.status).toBe("warning");
+		expect(finding.summary).toContain("expired");
+		expect(finding.remedy).toContain("omp login");
+		// Never surface secret material.
+		expect(JSON.stringify(finding)).not.toContain("refresh");
+		expect(JSON.stringify(finding)).not.toContain('"a"');
+	});
+
+	test("auth: valid stored credential → ok", async () => {
+		const dbPath = getAgentDbPath(root);
+		// Real api_key `data` shape: { key }.
+		await createAuthCredential(dbPath, "openai", "api_key", { key: "sk-test" });
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "auth.openai");
+		expect(finding).toBeDefined();
+		if (finding === undefined) return;
+		expect(finding.category).toBe("auth");
+		expect(finding.status).toBe("ok");
+		expect(finding.summary).toContain("credentials present");
+		// Never surface the secret key.
+		expect(JSON.stringify(finding)).not.toContain("sk-test");
+	});
+
+	test("auth: no auth storage → single ok finding", async () => {
+		// Fresh temp root: no agent.db, no config.yml, no broker env.
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const authFindings = report.findings.filter(entry => entry.category === "auth");
+		expect(authFindings).toHaveLength(1);
+		const authFinding = authFindings[0];
+		expect(authFinding).toBeDefined();
+		if (authFinding === undefined) return;
+		expect(authFinding.status).toBe("ok");
+		expect(authFinding.summary).toContain("no credentials stored");
+	});
+
+	test("auth: !command-backed broker URL is not executed and reports command-backed", async () => {
+		// Write a real config.yml under the temp agent dir with a !-prefixed
+		// broker URL. The doctor-specific resolver must NOT execute the command;
+		// if it did, "PWNED" (the command stdout) would become the broker URL.
+		const configPath = path.join(root, "config.yml");
+		await fs.writeFile(configPath, `${["auth:", "  broker:", '    url: "!echo PWNED"'].join("\n")}\n`, "utf8");
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const brokerFinding = report.findings.find(entry => entry.id === "auth.broker");
+		expect(brokerFinding).toBeDefined();
+		if (brokerFinding === undefined) return;
+		expect(brokerFinding.category).toBe("auth");
+		expect(brokerFinding.status).toBe("warning");
+		expect(brokerFinding.summary).toContain("command-backed");
+		// The command stdout must never appear anywhere in the report.
+		expect(JSON.stringify(report)).not.toContain("PWNED");
+	});
+
+	test("auth: broker URL with userinfo is sanitized in JSON output", async () => {
+		// A broker URL carrying embedded credentials (user:secret@) must have
+		// the userinfo stripped before reaching any finding; the password must
+		// not appear in the human or JSON report.
+		const configPath = path.join(root, "config.yml");
+		await fs.writeFile(
+			configPath,
+			`${["auth:", "  broker:", '    url: "https://user:secret@broker.example"', '    token: "tok"'].join("\n")}\n`,
+			"utf8",
+		);
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const brokerFinding = report.findings.find(entry => entry.id === "auth.broker");
+		expect(brokerFinding).toBeDefined();
+		if (brokerFinding === undefined) return;
+		expect(brokerFinding.category).toBe("auth");
+		expect(brokerFinding.status).toBe("ok");
+		// The origin (scheme://host) should appear in details, not the full URL.
+		expect(brokerFinding.details.some(d => d === "https://broker.example")).toBe(true);
+		// The password must not appear anywhere in the report.
+		expect(JSON.stringify(report)).not.toContain("secret");
+		expect(JSON.stringify(report)).not.toContain("user:secret");
+	});
+
+	test("auth: broker URL with query-string token is sanitized in JSON output", async () => {
+		// A broker URL carrying a token in the query string (?token=secret) must
+		// have the query stripped (origin-only) before reaching any finding.
+		const configPath = path.join(root, "config.yml");
+		await fs.writeFile(
+			configPath,
+			`${["auth:", "  broker:", '    url: "https://broker.example?token=secret"', '    token: "tok"'].join("\n")}\n`,
+			"utf8",
+		);
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const brokerFinding = report.findings.find(entry => entry.id === "auth.broker");
+		expect(brokerFinding).toBeDefined();
+		if (brokerFinding === undefined) return;
+		expect(brokerFinding.category).toBe("auth");
+		expect(brokerFinding.status).toBe("ok");
+		expect(brokerFinding.details.some(d => d === "https://broker.example")).toBe(true);
+		// The query-string token must not appear anywhere in the report.
+		expect(JSON.stringify(report)).not.toContain("token=secret");
+		expect(JSON.stringify(report)).not.toContain("=secret");
+	});
+
+	test("auth: scoped run with broker URL but no scoped token does not see the global token file", async () => {
+		// When --agent-dir is set, the global broker token file
+		// (~/.omp/auth-broker.token) is outside scope. A broker URL in the
+		// scoped config.yml with NO scoped token (env or config) must NOT
+		// resolve via the global file — the broker finding is suppressed and
+		// the local store is probed instead.
+		const configPath = path.join(root, "config.yml");
+		await fs.writeFile(
+			configPath,
+			`${["auth:", "  broker:", '    url: "https://broker.example"'].join("\n")}\n`,
+			"utf8",
+		);
+		// No OMP_AUTH_BROKER_TOKEN env, no auth.broker.token in config.yml.
+		// Even if a global token file exists, the scoped run must not read it.
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const brokerFinding = report.findings.find(entry => entry.id === "auth.broker");
+		// The broker finding must NOT be an ok "credentials served by remote
+		// auth broker" — that would mean the global token file was read.
+		expect(brokerFinding?.status).not.toBe("ok");
+		expect(brokerFinding?.summary).not.toContain("credentials served by remote auth broker");
 	});
 
 	test("tools section includes a fuser finding on Linux", async () => {
