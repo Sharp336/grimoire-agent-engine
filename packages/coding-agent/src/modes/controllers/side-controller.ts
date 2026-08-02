@@ -97,11 +97,13 @@ export class SideController {
 		const mcpManager = ctx.mcpManager;
 		const cwd = ctx.sessionManager.getCwd();
 		const parentStorage = ctx.sessionManager.getStorage();
-		const parentArtifactsDir = ctx.sessionManager.getArtifactsDir();
-		const parentLocalSessionId = ctx.sessionManager.getSessionId();
 		const localProtocolOptions = {
-			getArtifactsDir: () => parentArtifactsDir,
-			getSessionId: () => parentLocalSessionId,
+			// Live getters, not captured values: the SDK installs these as the
+			// process-global local:// mapping, so they must track the CURRENT
+			// parent. A committed session switch then repoints the mapping without
+			// any restore-on-dispose work.
+			getArtifactsDir: () => ctx.sessionManager.getArtifactsDir(),
+			getSessionId: () => ctx.sessionManager.getSessionId(),
 		};
 
 		const sessionDir = parentFile.slice(0, -6);
