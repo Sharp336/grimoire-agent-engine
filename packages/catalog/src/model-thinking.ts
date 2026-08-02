@@ -148,28 +148,32 @@ export function resolveModelThinking<TApi extends Api>(
 ): ThinkingConfig | undefined {
 	if (!spec.reasoning) return undefined;
 	if (omitsWireReasoningEffort(spec.api, compat)) return undefined;
+	let thinking: ThinkingConfig;
 	if (spec.thinking && Array.isArray(spec.thinking.efforts) && spec.thinking.efforts.length > 0) {
-		return fillThinkingWireDefaults(spec, compat, spec.thinking);
+		thinking = fillThinkingWireDefaults(spec, compat, spec.thinking);
+	} else {
+		// Friendli: discovery is authoritative. When `/v1/models` returns
+		// `reasoning: true` without `type: "effort"`, the model thinks but
+		// exposes no effort control — return undefined instead of fabricating
+		// a generic effort ladder from identity inference (which would
+		// advertise tiers the Friendli endpoint rejects). The static seed
+		// and live `reasoning_options` populate `spec.thinking` for
+		// effort-capable models like GLM-5.2, so this only fires for
+		// toggle-only reasoning models (e.g. GLM-4.5).
+		// A custom provider pointing at Friendli with GLM-5.2 but no
+		// `thinking` block is identity-known → getModelDefinedEfforts returns
+		// HIGH_MAX → fall through to deriveThinking.
+		if (modelMatchesHost(spec, "friendli") && spec.thinking === undefined) {
+			if (getModelDefinedEfforts(spec, compat) === undefined) return undefined;
+		}
+		// Cascade selects effort only by routing to a sibling model id, so a
+		// Devin model with no explicit routed thinking has no controllable
+		// surface — never fabricate an effort ladder from identity.
+		if ((compat as ResolvedDevinCompat | undefined)?.trustExplicitThinkingOnly === true) return undefined;
+		// Empty/malformed explicit metadata is treated as absent — infer instead.
+		thinking = deriveThinking(spec, compat);
 	}
-	// Friendli: discovery is authoritative. When `/v1/models` returns
-	// `reasoning: true` without `type: "effort"`, the model thinks but exposes
-	// no effort control — return undefined instead of fabricating a generic
-	// effort ladder from identity inference (which would advertise tiers the
-	// Friendli endpoint rejects). The static seed and live `reasoning_options`
-	// populate `spec.thinking` for effort-capable models like GLM-5.2, so this
-	// only fires for toggle-only reasoning models (e.g. GLM-4.5).
-	// A custom provider pointing at Friendli with GLM-5.2 but no `thinking`
-	// block is identity-known → getModelDefinedEfforts returns HIGH_MAX → fall
-	// through to deriveThinking.
-	if (modelMatchesHost(spec, "friendli") && spec.thinking === undefined) {
-		if (getModelDefinedEfforts(spec, compat) === undefined) return undefined;
-	}
-	// Cascade selects effort only by routing to a sibling model id, so a Devin
-	// model with no explicit routed thinking has no controllable surface —
-	// never fabricate an effort ladder from identity.
-	if ((compat as ResolvedDevinCompat | undefined)?.trustExplicitThinkingOnly === true) return undefined;
-	// Empty/malformed explicit metadata is treated as absent — infer instead.
-	return deriveThinking(spec, compat);
+	return collapseQwenTemplateBinaryThinking(thinking, spec, compat);
 }
 
 /**
@@ -265,24 +269,60 @@ export function deriveThinking<TApi extends Api>(spec: ModelSpec<TApi>, compat: 
  * (xAI Grok off the `isGrokReasoningEffortCapable` allowlist: grok-build,
  * grok-4.20-0309-reasoning). openai-completions keeps its thinking config even
  * without effort support — binary thinking formats (zai/qwen) drive reasoning
- * through other request fields.
+ * through other request fields, and qwen-chat-template models whose compat
+ * suppresses `reasoning_effort` collapse to a binary `enable_thinking` toggle
+ * in `collapseQwenTemplateBinaryThinking` rather than dropping thinking here.
  */
 function omitsWireReasoningEffort(api: Api, compat: CompatOf<Api>): boolean {
 	if (api === "openai-responses" || api === "openai-codex-responses" || api === "azure-openai-responses") {
 		return (compat as ResolvedOpenAIResponsesCompat | undefined)?.supportsReasoningEffort === false;
 	}
-	// openai-completions qwen-chat-template: when the resolved compat suppresses
-	// reasoning_effort (omitReasoningEffort: true), the effort ladder produces
-	// identical wire bodies — the only tier-specific field (reasoning_effort) is
-	// never emitted, and the template toggle (enable_thinking: true) is the same
-	// for every tier. Drop the effort surface so the picker doesn't offer
-	// indistinguishable controls. Other formats (zai, openai, openrouter) still
-	// produce distinct wire bodies through their own dialect fields.
-	if (api === "openai-completions" || api === "openrouter") {
-		const resolved = compat as ResolvedOpenAICompat | undefined;
-		return resolved?.thinkingFormat === "qwen-chat-template" && resolved?.omitReasoningEffort === true;
-	}
 	return false;
+}
+
+/**
+ * openai-completions qwen-chat-template whose compat suppresses
+ * `reasoning_effort` (`omitReasoningEffort: true`, e.g. NVIDIA NIM). The wire
+ * body carries only the binary `chat_template_kwargs.enable_thinking` toggle,
+ * so every effort tier produces an identical body — the only tier-specific
+ * field (`reasoning_effort`) is never emitted. Friendli's GLM-5.2 route keeps
+ * `omitReasoningEffort: false` (it accepts `reasoning_effort`), so it stays on
+ * the multi-tier path and is not detected here.
+ */
+function isQwenTemplateBinaryThinking(api: Api, compat: CompatOf<Api>): boolean {
+	if (api !== "openai-completions" && api !== "openrouter") return false;
+	const resolved = compat as ResolvedOpenAICompat | undefined;
+	return resolved?.thinkingFormat === "qwen-chat-template" && resolved?.omitReasoningEffort === true;
+}
+
+/**
+ * Collapse the resolved effort ladder to a single binary tier for
+ * qwen-chat-template models whose compat suppresses `reasoning_effort`. The
+ * wire exposes only `chat_template_kwargs.enable_thinking` (true/false), so
+ * the picker should offer one binary on/off control rather than the bundled
+ * multi-tier ladder (whose tiers are indistinguishable on the wire).
+ *
+ * Without this collapse, `resolveModelThinking` would have to drop thinking
+ * entirely to avoid the indistinguishable tiers, which forces
+ * `enable_thinking: false` on every request and leaves users unable to enable
+ * reasoning. The single tier is the model's `defaultLevel` when present, else
+ * the highest bundled effort.
+ */
+function collapseQwenTemplateBinaryThinking<TApi extends Api>(
+	thinking: ThinkingConfig,
+	spec: ModelSpec<TApi>,
+	compat: CompatOf<TApi>,
+): ThinkingConfig {
+	if (!isQwenTemplateBinaryThinking(spec.api, compat)) return thinking;
+	if (thinking.efforts.length <= 1) return thinking;
+	const tier = thinking.defaultLevel ?? thinking.efforts[thinking.efforts.length - 1];
+	const collapsed: ThinkingConfig = { ...thinking, efforts: [tier] };
+	// The wire carries only the binary `enable_thinking` toggle
+	// (`omitReasoningEffort` suppresses `reasoning_effort`), so the per-tier
+	// `effortMap` is no longer consulted. Drop it rather than keep a stale
+	// multi-tier map pointing at tiers the collapsed ladder no longer exposes.
+	delete collapsed.effortMap;
+	return collapsed;
 }
 
 function inferEffortMap<TApi extends Api>(
