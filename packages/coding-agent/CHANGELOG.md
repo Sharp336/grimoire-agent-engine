@@ -376,6 +376,9 @@
 - Fixed the Python RPC client dropping context, compaction, OAuth URL, and terminal-settlement fields.
 - Fixed the browser tool ignoring the url parameter when opening a new tab on an attached browser.
 - Fixed browser automation disrupting attached browsers by adopting the active foreground tab and avoiding raising new tabs during screenshots.
+### Added
+
+- Added a `get_settings` RPC command that describes the settings schema to an external client, optionally scoped to one settings tab. Metadata is returned for every setting because `SETTINGS_SCHEMA` is compiled-in public information; a configured value is disclosed only for settings the schema explicitly marks `rpcReadable`, and everything else carries `redacted: true` with no value and no configured status. The initial allowlist covers the appearance tab's boolean and enum settings. `RpcClient.getSettings()` exposes it to TypeScript consumers. The snapshot carries the rendering metadata a client would otherwise have to duplicate: `ui.options` (including the literal `"runtime"` marker for registry-populated choices), `ui.ordered`, and the top-level `description` used by settings with no panel entry.
 
 ## [17.2.1] - 2026-07-30
 
@@ -575,9 +578,6 @@
 - Fixed `/live` sideband WebSockets ignoring standard proxy environment variables and `NO_PROXY`, which left proxied sessions stuck while the rest of the Codex connection succeeded ([#6770](https://github.com/can1357/oh-my-pi/issues/6770)).
 - Fixed the bash tool's `kill` builtin rejecting numeric signals and multiple process operands, stopping after the first failed target, and defaulting to `SIGKILL` instead of the standard `SIGTERM`. Negative PID operands (process groups per `kill(2)`) and the `--` end-of-options marker are now handled instead of being misparsed as signals ([#6779](https://github.com/can1357/oh-my-pi/issues/6779)).
 - Fixed `learned.md` saves growing a blank line on every write (trailing-newline split artifact) and hoisting all headings/prose above all bullets, which re-scoped lessons under the wrong heading in hand-organized files. Saves are now byte-idempotent and preserve mixed Markdown ordering: non-list lines keep their positions, new lessons insert newest-first at the head of the first bullet run, and dedupe/cap operate on bullet lines in place.
-### Added
-
-- Added a `get_settings` RPC command that describes the settings schema to an external client, optionally scoped to one settings tab. Metadata is returned for every setting because `SETTINGS_SCHEMA` is compiled-in public information; a configured value is disclosed only for settings the schema explicitly marks `rpcReadable`, and everything else carries `redacted: true` with no value and no configured status. The initial allowlist covers the appearance tab's boolean and enum settings. `RpcClient.getSettings()` exposes it to TypeScript consumers. The snapshot carries the rendering metadata a client would otherwise have to duplicate: `ui.options` (including the literal `"runtime"` marker for registry-populated choices), `ui.ordered`, and the top-level `description` used by settings with no panel entry.
 
 ## [17.1.5] - 2026-07-27
 

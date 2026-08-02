@@ -14,7 +14,7 @@ import { isRecord, readJsonl, removeWithRetries, Snowflake } from "@oh-my-pi/pi-
  * real stdio protects the public wiring.
  */
 describe("get_settings over the RPC server", () => {
-	test("answers a real frame with disclosed appearance settings and redacts the rest", async () => {
+	test("answers real frames, including malformed tab input, without widening disclosure", async () => {
 		// A private agent directory: this command reads configured values, so an
 		// inherited config would make the assertions depend on whoever runs them
 		// and would print their settings into test output.
@@ -33,6 +33,7 @@ describe("get_settings over the RPC server", () => {
 
 		let unscoped: Record<string, unknown> | undefined;
 		let scoped: Record<string, unknown> | undefined;
+		let invalidTab: Record<string, unknown> | undefined;
 		// This bounds a real child-process stream; aborting the read also cancels
 		// its reader so the finally block can terminate the child immediately.
 		const responseSignal = AbortSignal.timeout(10_000);
@@ -41,16 +42,20 @@ describe("get_settings over the RPC server", () => {
 		try {
 			child.stdin.write(`${JSON.stringify({ type: "get_settings", id: "settings-probe" })}\n`);
 			child.stdin.write(`${JSON.stringify({ type: "get_settings", id: "tab-probe", tab: "appearance" })}\n`);
+			child.stdin.write(
+				`${JSON.stringify({ type: "get_settings", id: "invalid-tab-probe", tab: { toString: null } })}\n`,
+			);
 			await child.stdin.flush();
 
 			for await (const frame of readJsonl<unknown>(child.stdout as ReadableStream<Uint8Array>, responseSignal)) {
 				if (!isRecord(frame) || frame.type !== "response") continue;
 				if (frame.id === "settings-probe") unscoped = frame;
 				if (frame.id === "tab-probe") scoped = frame;
-				if (unscoped && scoped) break;
+				if (frame.id === "invalid-tab-probe") invalidTab = frame;
+				if (unscoped && scoped && invalidTab) break;
 			}
-			if (!unscoped || !scoped) {
-				throw new Error("the RPC server did not answer both get_settings probes before the response deadline");
+			if (!unscoped || !scoped || !invalidTab) {
+				throw new Error("the RPC server did not answer all get_settings probes before the response deadline");
 			}
 		} finally {
 			child.stdin.end();
@@ -60,6 +65,13 @@ describe("get_settings over the RPC server", () => {
 		}
 
 		expect(unscoped).toMatchObject({ success: true, command: "get_settings" });
+		expect(invalidTab).toMatchObject({
+			id: "invalid-tab-probe",
+			success: false,
+			command: "get_settings",
+			code: "invalid_tab",
+			error: "Settings tab must be a string",
+		});
 		interface Entry {
 			path: string;
 			type: string;

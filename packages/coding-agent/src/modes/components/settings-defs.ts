@@ -146,6 +146,22 @@ const CONDITIONS: Record<string, (settings?: Settings) => boolean> = {
 	},
 };
 
+/**
+ * Settings read by visibility predicates. External serializers use this map
+ * to refuse evaluation when a predicate would reveal a setting they cannot
+ * otherwise disclose; the built-in panel remains unrestricted.
+ */
+const CONDITION_SETTING_DEPENDENCIES: Record<string, readonly SettingPath[]> = {
+	hasImageProtocol: [],
+	advisorEnabled: ["advisor.enabled"],
+	hindsightActive: ["memory.backend"],
+	mnemopiActive: ["memory.backend"],
+	autolearnActive: ["autolearn.enabled"],
+	autoThinkingActive: ["defaultThinkingLevel"],
+	usageAwareFallbackEnabled: ["retry.usageAwareFallback"],
+	planModeEnabled: ["plan.enabled"],
+};
+
 export type SettingPanelControlKind = SettingDef["type"];
 
 /** The exact control kind used by the built-in settings panel, or `null` when config-only. */
@@ -174,14 +190,32 @@ export function isSettingPanelRenderable(path: SettingPath): boolean {
 	return getSettingPanelControlKind(path) !== null;
 }
 
-/** Evaluate the same visibility condition used by the built-in settings panel. */
-export function isSettingPanelVisible(path: SettingPath, settings?: Settings): boolean {
+/**
+ * Evaluate the same visibility condition used by the built-in settings panel.
+ *
+ * `canReadSetting` is an optional disclosure boundary for external
+ * serializers. The panel omits it and preserves its established behavior.
+ */
+export function isSettingPanelVisible(
+	path: SettingPath,
+	settings?: Settings,
+	canReadSetting?: (dependency: SettingPath) => boolean,
+): boolean {
 	const conditionName = getUi(path)?.condition;
 	if (conditionName === undefined) return true;
 	const condition = CONDITIONS[conditionName];
 	// Preserve the panel's established behavior for an unknown condition name:
-	// without a registered predicate, the setting remains unconditionally visible.
-	return condition?.(settings) ?? true;
+	// without a registered predicate, the setting remains unconditionally
+	// visible. RPC serialization must instead fail closed because it cannot
+	// classify what state an unknown predicate would disclose.
+	if (!condition) return canReadSetting ? false : true;
+	if (canReadSetting) {
+		// A newly registered state-reading predicate is unsafe for serialization
+		// until its dependencies are explicitly classified above.
+		if (!Object.hasOwn(CONDITION_SETTING_DEPENDENCIES, conditionName)) return false;
+		if (CONDITION_SETTING_DEPENDENCIES[conditionName].some(dependency => !canReadSetting(dependency))) return false;
+	}
+	return condition(settings);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

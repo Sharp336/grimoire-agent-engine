@@ -9,6 +9,7 @@ import {
 	TAB_METADATA,
 } from "../src/config/settings-schema";
 import { buildSettingsSnapshot, isSettingTab } from "../src/config/settings-snapshot";
+import { isSettingPanelVisible } from "../src/modes/components/settings-defs";
 
 const paths = Object.keys(SETTINGS_SCHEMA) as SettingPath[];
 
@@ -254,33 +255,56 @@ describe("settings snapshot", () => {
 		expect(entries.find(entry => entry.path === "retry.fallbackChains")?.ui?.control).toBe("text");
 	});
 
-	it("serializes evaluated visibility instead of private condition names", () => {
-		const inactive = buildSettingsSnapshot(Settings.isolated()).settings.find(
-			entry => entry.path === "mnemopi.dbPath",
-		);
-		const active = buildSettingsSnapshot(Settings.isolated({ "memory.backend": "mnemopi" })).settings.find(
-			entry => entry.path === "mnemopi.dbPath",
-		);
-		const ui = {
-			tab: "memory",
-			group: "Mnemopi",
-			label: "Mnemopi DB Path",
-			description: "Optional SQLite DB path. Defaults to the agent memories directory.",
-			renderable: true,
-			control: "text",
+	it("fails closed when mnemopi visibility depends on a redacted setting", () => {
+		const inactiveSettings = Settings.isolated();
+		const activeSettings = Settings.isolated({ "memory.backend": "mnemopi" });
+		const inactive = buildSettingsSnapshot(inactiveSettings).settings.find(entry => entry.path === "mnemopi.dbPath");
+		const active = buildSettingsSnapshot(activeSettings).settings.find(entry => entry.path === "mnemopi.dbPath");
+		const expected = {
+			path: "mnemopi.dbPath",
+			type: "string",
+			redacted: true,
+			ui: {
+				tab: "memory",
+				group: "Mnemopi",
+				label: "Mnemopi DB Path",
+				description: "Optional SQLite DB path. Defaults to the agent memories directory.",
+				renderable: true,
+				control: "text",
+				visible: false,
+			},
 		} as const;
-		expect(inactive).toEqual({
-			path: "mnemopi.dbPath",
-			type: "string",
-			redacted: true,
-			ui: { ...ui, visible: false },
-		});
-		expect(active).toEqual({
-			path: "mnemopi.dbPath",
-			type: "string",
-			redacted: true,
-			ui: { ...ui, visible: true },
-		});
+		expect(inactive).toEqual(expected);
+		expect(active).toEqual(expected);
+
+		// The disclosure policy applies only to serialization. The ordinary
+		// settings panel still evaluates the same condition against live state.
+		expect(isSettingPanelVisible("mnemopi.dbPath", inactiveSettings)).toBe(false);
+		expect(isSettingPanelVisible("mnemopi.dbPath", activeSettings)).toBe(true);
+	});
+
+	it("fails closed for an unregistered RPC condition without changing panel behavior", () => {
+		const settings = Settings.isolated();
+		expect(getUi("providers.unexpectedStopModel")?.condition).toBe("unexpectedStopDetection");
+		const entry = buildSettingsSnapshot(settings).settings.find(
+			item => item.path === "providers.unexpectedStopModel",
+		);
+		expect(entry?.ui?.visible).toBe(false);
+		expect(isSettingPanelVisible("providers.unexpectedStopModel", settings)).toBe(true);
+	});
+
+	it("does not let redacted visibility dependencies change the RPC snapshot", () => {
+		const baseline = buildSettingsSnapshot(Settings.isolated());
+		const variants = [
+			Settings.isolated({ "advisor.enabled": true }),
+			Settings.isolated({ "memory.backend": "hindsight" }),
+			Settings.isolated({ "memory.backend": "mnemopi" }),
+			Settings.isolated({ "autolearn.enabled": true }),
+			Settings.isolated({ defaultThinkingLevel: "auto" }),
+			Settings.isolated({ "retry.usageAwareFallback": true }),
+			Settings.isolated({ "plan.enabled": false }),
+		];
+		for (const settings of variants) expect(buildSettingsSnapshot(settings)).toEqual(baseline);
 	});
 
 	it("preserves canonical tab and section ordering", () => {
