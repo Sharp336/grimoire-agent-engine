@@ -159,10 +159,12 @@ export async function loadAllExtensions(
 		const projectDisabledServerNames = new Set(projectConfig.disabledServers ?? []);
 		const projectForceEnabledServers = new Set(projectConfig.enabledServers ?? []);
 		const projectDefinitions = new Set(Object.keys(projectConfig.mcpServers ?? {}));
-		const mcps = await loadCapability<MCPServer>("mcps", loadOpts);
-		for (const server of enableProjectMcpConfig
-			? mcps.all
-			: mcps.all.filter(server => server._source.level !== "project")) {
+		const mcps = await loadCapability<MCPServer>("mcps", {
+			...loadOpts,
+			// Exclude project servers before capability deduplication so they do not shadow user servers.
+			...(enableProjectMcpConfig ? {} : { filter: server => server._source.level !== "project" }),
+		});
+		for (const server of mcps.all) {
 			const id = makeExtensionId("mcp", server.name);
 			const mcpProjectDefinition = projectDefinitions.has(server.name);
 			const mcpProjectActivation = mcpProjectDefinition
@@ -451,8 +453,9 @@ function getKindDisplayName(kind: ExtensionKind): string {
 /**
  * Build provider tabs from extensions.
  */
-export function buildProviderTabs(extensions: Extension[]): ProviderTab[] {
+export function buildProviderTabs(extensions: Extension[], disabledProviderIds?: readonly string[]): ProviderTab[] {
 	const providers = getAllProvidersInfo();
+	const disabledProviders = disabledProviderIds ? new Set(disabledProviderIds) : null;
 	const tabs: ProviderTab[] = [];
 
 	// Count extensions per provider
@@ -477,7 +480,7 @@ export function buildProviderTabs(extensions: Extension[]): ProviderTab[] {
 		tabs.push({
 			id: provider.id,
 			label: provider.displayName,
-			enabled: provider.enabled,
+			enabled: disabledProviders ? !disabledProviders.has(provider.id) : provider.enabled,
 			count,
 		});
 	}
@@ -567,7 +570,7 @@ export async function createInitialState(
 	enableProjectMcpConfig = true,
 ): Promise<DashboardState> {
 	const extensions = await loadAllExtensions(cwd, disabledIds, disabledProviderIds, enableProjectMcpConfig);
-	const tabs = buildProviderTabs(extensions);
+	const tabs = buildProviderTabs(extensions, disabledProviderIds);
 	const tabFiltered = extensions; // "all" tab by default
 	const searchFiltered = tabFiltered;
 
@@ -607,7 +610,7 @@ export async function refreshState(
 	enableProjectMcpConfig = true,
 ): Promise<DashboardState> {
 	const extensions = await loadAllExtensions(cwd, disabledIds, disabledProviderIds, enableProjectMcpConfig);
-	const tabs = buildProviderTabs(extensions);
+	const tabs = buildProviderTabs(extensions, disabledProviderIds);
 
 	// Get current provider from tabs
 	const activeTab = state.tabs[state.activeTabIndex];

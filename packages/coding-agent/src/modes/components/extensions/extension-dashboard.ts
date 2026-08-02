@@ -293,9 +293,7 @@ export class ExtensionDashboard implements Component {
 		};
 
 		const extensions = state.extensions.filter(ext => ext.source.level !== "project").map(normalizeGlobalRow);
-		const tabs = buildProviderTabs(extensions).map(tab =>
-			tab.id === "all" ? tab : { ...tab, enabled: !sm.isProviderEffectivelyDisabled(tab.id, "global") },
-		);
+		const tabs = buildProviderTabs(extensions, sm.getActivationDisabledProviders("global"));
 		const currentTabId = state.tabs[state.activeTabIndex]?.id ?? "all";
 		const activeTabIndex = Math.max(
 			0,
@@ -471,7 +469,7 @@ export class ExtensionDashboard implements Component {
 			return;
 		}
 		if (this.#activationScope === "project") return;
-		const disabled = ((sm.get("disabledExtensions") as string[]) ?? []).slice();
+		const disabled = sm.getActivationDisabledExtensions("global");
 		if (enabled) {
 			const index = disabled.indexOf(extensionId);
 			if (index !== -1) {

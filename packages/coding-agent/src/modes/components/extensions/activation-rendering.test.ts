@@ -16,7 +16,7 @@ import {
 } from "./extension-dashboard";
 import { ExtensionList } from "./extension-list";
 import { InspectorPanel } from "./inspector-panel";
-import { extensionRowKey, loadAllExtensions, selectAfterRefresh } from "./state-manager";
+import { buildProviderTabs, extensionRowKey, loadAllExtensions, selectAfterRefresh } from "./state-manager";
 import type { DashboardState, Extension } from "./types";
 
 const cleanupPaths: string[] = [];
@@ -125,6 +125,18 @@ describe("extension activation rendering", () => {
 			expect(rendered).toContain("zzsharedonly");
 			expect(rendered).toContain("● Active");
 			expect(rendered).not.toContain("Disabled (manually disabled)");
+
+			dashboard.handleInput(" ");
+			await Bun.sleep(100);
+
+			const globalConfig = YAML.parse(await Bun.file(path.join(agentDir, "config.yml")).text()) as {
+				disabledExtensions?: string[];
+			};
+			const projectConfig = YAML.parse(await Bun.file(path.join(projectRoot, ".omp", "config.yml")).text()) as {
+				disabledExtensions?: string[];
+			};
+			expect(globalConfig.disabledExtensions).toEqual(["skill:zzsharedonly"]);
+			expect(projectConfig.disabledExtensions).toEqual(["skill:zzsharedonly"]);
 		} finally {
 			setAgentDir(previousAgentDir);
 		}
@@ -336,6 +348,7 @@ describe("extension activation rendering", () => {
 			);
 			expect(server?.source.level).toBe("user");
 			expect((server?.raw as { args?: string[] } | undefined)?.args).toEqual(["user"]);
+			expect(server?.state).toBe("active");
 			const dashboard = await ExtensionDashboard.create(projectRoot, settings, 28);
 			for (const char of "zzlocalmcp") dashboard.handleInput(char);
 			await Bun.sleep(50);
@@ -414,6 +427,28 @@ describe("extension activation rendering", () => {
 		};
 
 		expect(selectAfterRefresh(state, "claude", [ext])).toBeNull();
+	});
+
+	it("uses scoped provider disablement when building provider tabs", () => {
+		const previousDisabledProviders = getDisabledProviders();
+		syncDisabledProviders(previousDisabledProviders.filter(providerId => providerId !== "claude"));
+		try {
+			const tabs = buildProviderTabs(
+				[
+					extension({
+						id: "skill:provider-child",
+						name: "provider-child",
+						displayName: "provider-child",
+						source: { provider: "claude", providerName: "Claude Code", level: "user" },
+					}),
+				],
+				["claude"],
+			);
+
+			expect(tabs.find(tab => tab.id === "claude")).toMatchObject({ enabled: false, count: 1 });
+		} finally {
+			syncDisabledProviders(previousDisabledProviders);
+		}
 	});
 
 	it("renders inherited project activation as a leading icon without a text badge", () => {
