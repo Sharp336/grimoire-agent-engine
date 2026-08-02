@@ -278,6 +278,7 @@ export async function setMcpServerEnabled(options: SetMcpServerEnabledOptions): 
 	const { userPath, projectPath, sourcePath, name, enabled } = options;
 	const candidatePaths = [...new Set([sourcePath, projectPath, userPath].filter(path => path !== undefined))];
 	let updatedInConfig = false;
+	let updatedPath: string | undefined;
 
 	for (const filePath of candidatePaths) {
 		const config = await readMCPConfigFile(filePath);
@@ -285,23 +286,25 @@ export async function setMcpServerEnabled(options: SetMcpServerEnabledOptions): 
 		if (server === undefined) continue;
 		await updateMCPServer(filePath, name, { ...server, enabled });
 		updatedInConfig = true;
+		updatedPath = filePath;
 		break;
 	}
 
+	const updatedUserConfig = updatedPath === userPath;
 	if (enabled) {
-		if ((await readDisabledServers(userPath)).includes(name)) {
+		if ((await readDisabledServers(userPath)).includes(name) && (!updatedInConfig || updatedUserConfig)) {
 			await setServerDisabled(userPath, name, false);
 		}
 		const forced = (await readEnabledServers(userPath)).includes(name);
 		if (!updatedInConfig && !forced) {
 			await setServerForceEnabled(userPath, name, true);
-		} else if (updatedInConfig && forced) {
+		} else if (updatedUserConfig && forced) {
 			await setServerForceEnabled(userPath, name, false);
 		}
 		return;
 	}
 
-	if ((await readEnabledServers(userPath)).includes(name)) {
+	if (updatedUserConfig && (await readEnabledServers(userPath)).includes(name)) {
 		await setServerForceEnabled(userPath, name, false);
 	}
 	if (!updatedInConfig) {

@@ -33,7 +33,12 @@ import {
 	Settings,
 } from "../../../config/settings";
 import { syncDisabledProviders as syncCapabilityDisabledProviders } from "../../../discovery";
-import { getProjectMCPConfigPath, setMcpServerEnabled } from "../../../mcp/config-writer";
+import {
+	getProjectMCPConfigPath,
+	setMcpServerEnabled,
+	setServerDisabled,
+	setServerForceEnabled,
+} from "../../../mcp/config-writer";
 import { getTabBarTheme } from "../../../modes/shared";
 import { theme } from "../../../modes/theme/theme";
 import { matchesAppInterrupt } from "../../../modes/utils/keybinding-matchers";
@@ -216,6 +221,21 @@ export class ExtensionDashboard implements Component {
 		);
 		const annotate = (ext: DashboardState["extensions"][number]): DashboardState["extensions"][number] => {
 			const parsed = projectActivationKindFromExtensionId(ext.id);
+			const projectMcpToggleLocked =
+				ext.kind === "mcp" && this.#activationScope === "project" && sm.get("mcp.enableProjectConfig") === false;
+			if (ext.kind === "mcp") {
+				const inheritedProjectMcp =
+					this.#activationScope === "project" &&
+					sm.get("mcp.enableProjectConfig") !== false &&
+					!ext.mcpProjectDefinition;
+				return {
+					...ext,
+					activationLocked: projectMcpToggleLocked || (!inheritedProjectMcp && ext.activationLocked),
+					activationState: inheritedProjectMcp ? (ext.mcpProjectActivation ?? "inherit") : undefined,
+					activationTarget: inheritedProjectMcp ? "project" : undefined,
+					activationMode: inheritedProjectMcp ? "tri-state" : undefined,
+				};
+			}
 			if (!parsed || ext.state === "shadowed") {
 				return {
 					...ext,
@@ -439,8 +459,13 @@ export class ExtensionDashboard implements Component {
 	}
 
 	#handleExtensionToggle(extensionId: string, enabled: boolean): void {
-		if (this.#activationScope === "project") return;
 		const sm = this.settings ?? Settings.instance;
+		if (extensionId.startsWith("mcp:")) {
+			if (this.#activationScope === "project" && sm.get("mcp.enableProjectConfig") === false) return;
+			void this.#toggleMcpExtension(extensionId, enabled);
+			return;
+		}
+		if (this.#activationScope === "project") return;
 		const disabled = ((sm.get("disabledExtensions") as string[]) ?? []).slice();
 		if (enabled) {
 			const index = disabled.indexOf(extensionId);
@@ -457,9 +482,50 @@ export class ExtensionDashboard implements Component {
 		void this.#refreshFromState();
 	}
 
+	async #toggleMcpExtension(extensionId: string, enabled: boolean): Promise<void> {
+		const extension = this.#state.extensions.find(item => item.id === extensionId);
+		if (!extension) return;
+		const name = extensionId.slice("mcp:".length);
+		const projectPath = getProjectMCPConfigPath(this.cwd);
+		try {
+			await setMcpServerEnabled({
+				userPath: getMCPConfigPath("user", this.cwd),
+				projectPath,
+				sourcePath:
+					extension.source.provider === "native" || extension.source.provider === "mcp-json"
+						? extension.path
+						: undefined,
+				name,
+				enabled,
+			});
+		} catch (error) {
+			logger.warn("Failed to persist MCP toggle", { name, enabled, error: String(error) });
+		}
+		await this.#refreshFromState();
+	}
+
 	#handleActivationCycle(extension: DashboardState["extensions"][number]): void {
 		const sm = this.settings ?? Settings.instance;
 		if (!extension.activationState || extension.state === "shadowed" || extension.activationLocked) return;
+		if (extension.kind === "mcp") {
+			const next = nextExtensionActivationState({
+				current: extension.activationState,
+				currentlyDisabled: extension.state === "disabled",
+				target: "project",
+				mode: "tri-state",
+				rowDisabled: extension.state === "disabled",
+			});
+			const projectPath = getProjectMCPConfigPath(this.cwd);
+			void Promise.all([
+				setServerDisabled(projectPath, extension.name, next === "disabled"),
+				setServerForceEnabled(projectPath, extension.name, next === "enabled"),
+			])
+				.catch(error =>
+					logger.warn("Failed to update project MCP activation", { name: extension.name, error: String(error) }),
+				)
+				.then(() => this.#refreshFromState());
+			return;
+		}
 		const parsed = projectActivationKindFromExtensionId(extension.id);
 		if (!parsed) return;
 
@@ -477,33 +543,18 @@ export class ExtensionDashboard implements Component {
 			mode: extension.activationMode,
 			rowDisabled: extension.state === "disabled",
 		});
-		const updateMcpOverlay =
-			extension.kind === "mcp" && this.#activationScope === "global"
-				? setMcpServerEnabled({
-						userPath: getMCPConfigPath("user", this.cwd),
-						projectPath: getProjectMCPConfigPath(this.cwd),
-						sourcePath:
-							extension.source.provider === "native" || extension.source.provider === "mcp-json"
-								? extension.path
-								: undefined,
-						name: extension.name,
-						enabled: next === "enabled",
-					})
-				: Promise.resolve();
-		void updateMcpOverlay.then(() =>
-			sm
-				.setProjectActivation(parsed.kind, parsed.name, next, this.#activationScope)
-				.then(() => {
-					this.#applyDisabledExtensions(sm.getActivationDisabledExtensions(this.#activationScope));
-					void this.#refreshFromState();
-				})
-				.catch(error =>
-					logger.warn("Failed to update extension activation", {
-						extensionId: extension.id,
-						error: String(error),
-					}),
-				),
-		);
+		void sm
+			.setProjectActivation(parsed.kind, parsed.name, next, this.#activationScope)
+			.then(() => {
+				this.#applyDisabledExtensions(sm.getActivationDisabledExtensions(this.#activationScope));
+				void this.#refreshFromState();
+			})
+			.catch(error =>
+				logger.warn("Failed to update extension activation", {
+					extensionId: extension.id,
+					error: String(error),
+				}),
+			);
 	}
 
 	async #refreshFromState(): Promise<void> {

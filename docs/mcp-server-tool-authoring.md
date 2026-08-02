@@ -8,7 +8,7 @@ This document explains how MCP server definitions become callable `mcp__*` tools
 Config sources (.omp/.claude/.cursor/.vscode/mcp.json, mcp.json, etc.)
   -> discovery providers normalize to canonical MCPServer
   -> capability loader dedupes by server name (higher provider priority wins)
-  -> loadAllMCPConfigs converts to MCPServerConfig + skips enabled:false
+  -> loadAllMCPConfigs applies definition precedence and OMP enable/disable overlays
   -> MCPManager connects/listTools (with auth/header/env resolution)
   -> manager best-effort loads resources/prompts and subscribes to resource updates when enabled
   -> MCPTool/DeferredMCPTool bridge exposes tools as mcp__<server>_<tool>
@@ -57,6 +57,22 @@ The capability layer (`src/capability/index.ts`) then:
 
 Result: duplicate server names across sources are not merged. One definition wins; lower-priority duplicates are shadowed.
 
+### OMP project overlays
+
+An OMP project can control an inherited server without copying its definition. For example, if `~/.omp/agent/mcp.json` defines `github`, the project can write only this to `.omp/mcp.json`:
+
+```json
+{ "disabledServers": ["github"] }
+```
+
+The project then inherits later changes to the user definition while `github` remains disabled locally. With project MCP config enabled, an inherited server has three project states:
+
+- `inherit` — no entry in either project overlay list
+- `disabled` — name in project `disabledServers`
+- `enabled` — name in project `enabledServers`, which overrides a global disabled definition or user denylist
+
+A complete same-name `mcpServers.github` definition in `.omp/mcp.json` shadows the user definition instead. It is binary: its own `enabled` field controls it, and its other fields are not merged with the user definition.
+
 ### `.mcp.json` and related files
 
 The dedicated fallback provider in `src/discovery/mcp-json.ts` reads project-root `mcp.json` and `.mcp.json` (low priority).
@@ -74,7 +90,7 @@ In practice MCP servers also come from higher-priority providers (for example na
 Key behavior:
 
 - transport inferred as `server.transport ?? (command ? "stdio" : url ? "http" : "stdio")`
-- servers with `enabled === false` and servers named by `disabledExtensions` as `mcp:<name>` are dropped before connection
+- source-disabled servers and names selected by MCP overlay lists are excluded before connection
 - optional fields are preserved when present
 
 ### Environment expansion during discovery
@@ -212,7 +228,7 @@ For robust MCP authoring in this codebase:
 1. Keep server names globally unique across all MCP-capable config sources.
 2. Prefer names that remain distinct after MCP tool-name sanitization to avoid generated `mcp__` collisions.
 3. Use explicit `type` to avoid accidental stdio defaults.
-4. Treat `enabled: false` as hard-off: server is omitted from runtime connect set.
+4. Treat `enabled: false` as disabled by default. A project `enabledServers` overlay or user `enabledServers` overlay can explicitly enable an inherited or third-party server.
 5. For OAuth configs, store a valid `credentialId`; otherwise auth injection is skipped.
 6. If using command-based secret resolution (`!cmd`), verify command output is stable and non-empty.
 

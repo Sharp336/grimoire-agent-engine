@@ -16,7 +16,14 @@ import type { SlashCommand } from "../../../capability/slash-command";
 import type { CustomTool } from "../../../capability/tool";
 import type { SourceMeta } from "../../../capability/types";
 import { getAllProvidersInfo, isProviderEnabled, loadCapability } from "../../../discovery";
-import { readDisabledServers, readEnabledServers } from "../../../mcp/config-writer";
+import { isMCPServerEffectivelyEnabled } from "../../../mcp/config";
+import {
+	getProjectMCPConfigPath,
+	readDisabledServers,
+	readEnabledServers,
+	readMCPConfigFile,
+} from "../../../mcp/config-writer";
+import type { MCPConfigFile } from "../../../mcp/types";
 import type { DashboardState, Extension, ExtensionKind, FlatTreeItem, ProviderTab, TreeNode } from "./types";
 import { makeExtensionId, sourceFromMeta } from "./types";
 export function extensionRowKey(ext: Pick<Extension, "id" | "path" | "source">): string {
@@ -134,7 +141,8 @@ export async function loadAllExtensions(
 	// owned by another tool.
 	try {
 		const userMcpPath = cwd ? getMCPConfigPath("user", cwd) : undefined;
-		const [disabledServerNames, forceEnabledServers] = await Promise.all([
+		const projectMcpPath = cwd ? getProjectMCPConfigPath(cwd) : undefined;
+		const [userDisabledServerNames, forceEnabledServers, projectConfig] = await Promise.all([
 			userMcpPath
 				? readDisabledServers(userMcpPath)
 						.then(names => new Set(names))
@@ -145,13 +153,38 @@ export async function loadAllExtensions(
 						.then(names => new Set(names))
 						.catch(() => new Set<string>())
 				: Promise.resolve(new Set<string>()),
+			projectMcpPath ? readMCPConfigFile(projectMcpPath) : Promise.resolve({} as MCPConfigFile),
 		]);
+		const projectDisabledServerNames = new Set(projectConfig.disabledServers ?? []);
+		const projectForceEnabledServers = new Set(projectConfig.enabledServers ?? []);
+		const projectDefinitions = new Set(Object.keys(projectConfig.mcpServers ?? {}));
 		const mcps = await loadCapability<MCPServer>("mcps", loadOpts);
 		for (const server of mcps.all) {
 			const id = makeExtensionId("mcp", server.name);
-			const sourceSaysDisabled = server.enabled === false && !forceEnabledServers.has(server.name);
+			const mcpProjectDefinition = projectDefinitions.has(server.name);
+			const mcpProjectActivation = mcpProjectDefinition
+				? undefined
+				: projectDisabledServerNames.has(server.name)
+					? "disabled"
+					: projectForceEnabledServers.has(server.name)
+						? "enabled"
+						: "inherit";
+			const projectForceEnabled = !mcpProjectDefinition && projectForceEnabledServers.has(server.name);
+			const projectDisabled = !mcpProjectDefinition && projectDisabledServerNames.has(server.name);
+			const sourceSaysDisabled =
+				server.enabled === false &&
+				(mcpProjectDefinition || (!projectForceEnabled && !forceEnabledServers.has(server.name)));
+			const enabled = isMCPServerEffectivelyEnabled(server, {
+				activationDisabled: disabledExtensions.has(id),
+				projectDefinition: mcpProjectDefinition,
+				projectDisabled,
+				projectEnabled: projectForceEnabled,
+				userDisabled: userDisabledServerNames.has(server.name),
+				userEnabled: forceEnabledServers.has(server.name),
+			});
+			const sourceWritable = server._source.provider === "native" || server._source.provider === "mcp-json";
 			const { state, disabledReason } = activationRowState({
-				itemDisabled: disabledExtensions.has(id) || disabledServerNames.has(server.name) || sourceSaysDisabled,
+				itemDisabled: !enabled,
 				shadowed: (server as { _shadowed?: boolean })._shadowed,
 				providerEnabled: disabledProviders
 					? !disabledProviders.has(server._source.provider)
@@ -169,7 +202,9 @@ export async function loadAllExtensions(
 				source: sourceFromMeta(server._source),
 				state,
 				disabledReason,
-				activationLocked: sourceSaysDisabled,
+				activationLocked: sourceSaysDisabled && !sourceWritable,
+				mcpProjectActivation,
+				mcpProjectDefinition,
 				raw: server,
 			});
 		}

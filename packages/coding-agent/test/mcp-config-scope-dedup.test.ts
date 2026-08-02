@@ -97,6 +97,30 @@ describe("MCP scope filtering precedes connection-equivalence deduplication", ()
 		expect(result.sources.usercontext?.level).toBe("user");
 	});
 
+	test("project denylist disables an inherited user server without copying its definition", async () => {
+		await Bun.write(
+			path.join(projectDir, ".omp", "mcp.json"),
+			JSON.stringify({ disabledServers: ["usercontext"] }, null, 2),
+		);
+
+		const result = await loadAllMCPConfigs(projectDir, { filterExa: false });
+
+		expect(result.configs.usercontext).toBeUndefined();
+	});
+
+	test("project allowlist enables an inherited user server without copying its definition", async () => {
+		await writeMcpJson(userAgentDir, { usercontext: { ...CONNECTION, enabled: false } });
+		await Bun.write(
+			path.join(projectDir, ".omp", "mcp.json"),
+			JSON.stringify({ enabledServers: ["usercontext"] }, null, 2),
+		);
+
+		const result = await loadAllMCPConfigs(projectDir, { filterExa: false });
+
+		expect(Object.keys(result.configs)).toEqual(["usercontext"]);
+		expect(result.sources.usercontext?.level).toBe("user");
+	});
+
 	test("same-named user server survives when project config is scope-disabled", async () => {
 		// Scope exclusion removes the project entry entirely — unlike a disabled
 		// entry, it must not claim the key and shadow the user server.
@@ -107,7 +131,30 @@ describe("MCP scope filtering precedes connection-equivalence deduplication", ()
 		expect(result.sources.shared?.level).toBe("user");
 	});
 
-	test("honors user denylist and force-enable overlays", async () => {
+	test("complete project definitions ignore user MCP overlays", async () => {
+		await writeMcpJson(userAgentDir, {
+			shared: { ...CONNECTION, enabled: false },
+		});
+		await fs.writeFile(
+			path.join(userAgentDir, "mcp.json"),
+			JSON.stringify({
+				mcpServers: { shared: { ...CONNECTION, enabled: false } },
+				disabledServers: ["project-disabled"],
+				enabledServers: ["shared"],
+			}),
+		);
+		await writeMcpJson(path.join(projectDir, ".omp"), {
+			shared: { ...CONNECTION, enabled: false },
+			"project-disabled": CONNECTION,
+		});
+
+		const result = await loadAllMCPConfigs(projectDir, { filterExa: false });
+
+		expect(result.configs.shared).toBeUndefined();
+		expect(result.configs["project-disabled"]).toBeDefined();
+	});
+
+	test("ignores user overlays for complete project definitions", async () => {
 		await writeMcpJson(path.join(projectDir, ".omp"), {
 			denied: CONNECTION,
 			forced: { type: "http", url: "https://forced.example/mcp", enabled: false },
@@ -122,7 +169,7 @@ describe("MCP scope filtering precedes connection-equivalence deduplication", ()
 		);
 
 		const result = await loadAllMCPConfigs(projectDir, { filterExa: false });
-		expect(Object.keys(result.configs)).toEqual(["forced"]);
-		expect(result.sources.forced?.level).toBe("project");
+		expect(Object.keys(result.configs)).toEqual(["denied"]);
+		expect(result.sources.denied?.level).toBe("project");
 	});
 });

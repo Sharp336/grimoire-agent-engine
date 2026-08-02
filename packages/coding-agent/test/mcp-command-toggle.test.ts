@@ -31,10 +31,11 @@ function restoreAgentDir(): void {
 	delete Bun.env.PI_CODING_AGENT_DIR;
 }
 
-function createController(disabledExtensions: string[] = []) {
+function createController(disabledExtensions: string[] = [], enableProjectConfig = true, source?: SourceMeta) {
 	const refreshMCPTools = vi.fn(async () => {});
 	const showError = vi.fn();
 	const presentCommandOutput = vi.fn();
+	const setProjectActivation = vi.fn(async () => {});
 	const mcpManager = {
 		disconnectAll: vi.fn(async () => {}),
 		discoverAndConnect: vi.fn(async () => ({ errors: new Map<string, string>() })),
@@ -52,7 +53,7 @@ function createController(disabledExtensions: string[] = []) {
 		getConnection: vi.fn(() => undefined),
 		waitForConnection: vi.fn(async () => ({})),
 		getConnectionStatus: vi.fn(() => "connected"),
-		getSource: vi.fn(() => undefined),
+		getSource: vi.fn(() => source),
 	};
 	const controller = new MCPCommandController({
 		chatContainer: { addChild: vi.fn() },
@@ -74,14 +75,20 @@ function createController(disabledExtensions: string[] = []) {
 		},
 		mcpManager,
 		settings: {
-			get: vi.fn((key: string) => (key === "disabledExtensions" ? disabledExtensions : [])),
+			get: vi.fn((key: string) =>
+				key === "disabledExtensions"
+					? disabledExtensions
+					: key === "mcp.enableProjectConfig"
+						? enableProjectConfig
+						: [],
+			),
 			getActivationProjectRoot: vi.fn((cwd: string) => cwd),
 			getProjectActivation: vi.fn(() => "inherit"),
-			setProjectActivation: vi.fn(async () => {}),
+			setProjectActivation,
 		},
 	} as never);
 
-	return { controller, mcpManager, presentCommandOutput, refreshMCPTools, showError };
+	return { controller, mcpManager, presentCommandOutput, refreshMCPTools, setProjectActivation, showError };
 }
 
 async function writeProjectConfig(projectDir: string, servers: Record<string, MCPServerConfig>): Promise<void> {
@@ -142,13 +149,14 @@ describe("/mcp enable and disable", () => {
 			mcp1: { type: "stdio", command: "mcp-one", enabled: false },
 			mcp2: { type: "stdio", command: "mcp-two" },
 		});
-		const { controller, mcpManager } = createController();
+		const { controller, mcpManager, setProjectActivation } = createController();
 
 		await controller.handle("/mcp enable mcp1");
 
 		expect(mcpManager.disconnectAll).not.toHaveBeenCalled();
 		expect(mcpManager.discoverAndConnect).not.toHaveBeenCalled();
 		expect(mcpManager.connectServers).toHaveBeenCalledTimes(1);
+		expect(setProjectActivation).not.toHaveBeenCalled();
 		const [configs] = mcpManager.connectServers.mock.calls[0]!;
 		expect(Object.keys(configs)).toEqual(["mcp1"]);
 		expect(configs.mcp1).toEqual({ type: "stdio", command: "mcp-one", enabled: true });
@@ -156,6 +164,63 @@ describe("/mcp enable and disable", () => {
 			mcpServers: Record<string, MCPServerConfig>;
 		};
 		expect(persisted.mcpServers.mcp1).toEqual({ type: "stdio", command: "mcp-one", enabled: true });
+	});
+
+	test("enabling an inherited server changes only its user definition", async () => {
+		await Bun.write(
+			getMCPConfigPath("user", projectDir),
+			JSON.stringify({ mcpServers: { inherited: { type: "stdio", command: "user", enabled: false } } }),
+		);
+		await Bun.write(getMCPConfigPath("project", projectDir), JSON.stringify({ disabledServers: ["inherited"] }));
+		const { controller, mcpManager, showError } = createController();
+
+		await controller.handle("/mcp enable inherited");
+
+		expect(showError.mock.calls).toEqual([]);
+		expect(mcpManager.connectServers).not.toHaveBeenCalled();
+		expect(await Bun.file(getMCPConfigPath("user", projectDir)).json()).toMatchObject({
+			mcpServers: { inherited: { enabled: true } },
+		});
+		expect(await Bun.file(getMCPConfigPath("project", projectDir)).json()).toMatchObject({
+			disabledServers: ["inherited"],
+		});
+	});
+
+	test("disables an unconfigured server through the user denylist fallback", async () => {
+		const { controller, mcpManager, setProjectActivation, showError } = createController([], true, {} as SourceMeta);
+
+		await controller.handle("/mcp disable discovered");
+
+		expect(showError.mock.calls).toEqual([]);
+		expect(await Bun.file(getMCPConfigPath("user", projectDir)).json()).toMatchObject({
+			disabledServers: ["discovered"],
+		});
+		expect(setProjectActivation).not.toHaveBeenCalled();
+	});
+
+	test("does not test a server disabled by the project denylist", async () => {
+		await Bun.write(
+			getMCPConfigPath("user", projectDir),
+			JSON.stringify({ mcpServers: { inherited: { type: "stdio", command: "user" } } }),
+		);
+		await Bun.write(getMCPConfigPath("project", projectDir), JSON.stringify({ disabledServers: ["inherited"] }));
+		const { controller, showError } = createController();
+
+		await controller.handle("/mcp test inherited");
+
+		expect(showError).toHaveBeenCalledWith('Server "inherited" is disabled. Run /mcp enable inherited first.');
+	});
+
+	test("does not enable a project server when project MCP loading is disabled", async () => {
+		await writeProjectConfig(projectDir, {
+			projectOnly: { type: "stdio", command: "project-only", enabled: false },
+		});
+		const { controller, mcpManager, showError } = createController([], false);
+
+		await controller.handle("/mcp enable projectOnly");
+
+		expect(mcpManager.connectServers).not.toHaveBeenCalled();
+		expect(showError).toHaveBeenCalledWith('Server "projectOnly" not found.');
 	});
 
 	test("lists activation-disabled user and project servers as disabled", async () => {

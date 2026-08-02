@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { Settings } from "../../../config/settings";
+import { readMCPConfigFile } from "../../../mcp/config-writer";
 import { initTheme, theme } from "../../../modes/theme/theme";
 import {
 	ExtensionDashboard,
@@ -158,7 +159,7 @@ describe("extension activation rendering", () => {
 		}
 	});
 
-	it("disables global MCP rows even when project forces them enabled", async () => {
+	it("writes MCP toggles to mcp.json instead of extension activation settings", async () => {
 		const previousAgentDir = getAgentDir();
 		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-global-mcp-"));
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
@@ -188,8 +189,119 @@ describe("extension activation rendering", () => {
 			await Bun.sleep(200);
 
 			const rendered = stripAnsi(dashboard.render(120).join("\n"));
-			expect(settings.getProjectActivation("mcp", "zzmcpglobal", "global")).toBe("disabled");
+			const config = await readMCPConfigFile(path.join(agentDir, "mcp.json"));
+			expect(config.mcpServers?.zzmcpglobal?.enabled).toBe(false);
+			expect(settings.getProjectActivation("mcp", "zzmcpglobal", "global")).toBe("enabled");
 			expect(rendered).toContain("Disabled (manually disabled)");
+		} finally {
+			setAgentDir(previousAgentDir);
+		}
+	});
+
+	it("writes a project denylist entry when toggling an inherited MCP server", async () => {
+		const previousAgentDir = getAgentDir();
+		const projectRoot = await fs.mkdtemp(path.join(process.cwd(), ".tmp-omp-extension-inherited-mcp-"));
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
+		cleanupPaths.push(projectRoot, agentDir);
+		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
+		await Bun.write(
+			path.join(agentDir, "mcp.json"),
+			JSON.stringify({ mcpServers: { inherited: { command: "echo", args: ["global"] } } }),
+		);
+
+		setAgentDir(agentDir);
+		try {
+			const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
+			const dashboard = await ExtensionDashboard.create(projectRoot, settings, 28);
+			for (const char of "inherited") dashboard.handleInput(char);
+			await Bun.sleep(50);
+			dashboard.handleInput(" ");
+			await Bun.sleep(100);
+
+			const projectConfig = await readMCPConfigFile(path.join(projectRoot, ".omp", "mcp.json"));
+			const userConfig = await readMCPConfigFile(path.join(agentDir, "mcp.json"));
+			expect(projectConfig.disabledServers).toEqual(["inherited"]);
+			expect(projectConfig.mcpServers).toBeUndefined();
+			expect(userConfig.mcpServers?.inherited).toMatchObject({ args: ["global"] });
+
+			dashboard.handleInput(" ");
+			await Bun.sleep(100);
+			expect((await readMCPConfigFile(path.join(projectRoot, ".omp", "mcp.json"))).enabledServers).toEqual([
+				"inherited",
+			]);
+			expect((await readMCPConfigFile(path.join(projectRoot, ".omp", "mcp.json"))).disabledServers).toBeUndefined();
+
+			dashboard.handleInput(" ");
+			await Bun.sleep(100);
+			const restoredProjectConfig = await readMCPConfigFile(path.join(projectRoot, ".omp", "mcp.json"));
+			expect(restoredProjectConfig.disabledServers).toBeUndefined();
+			expect(restoredProjectConfig.enabledServers).toBeUndefined();
+		} finally {
+			setAgentDir(previousAgentDir);
+		}
+	});
+
+	it("uses a binary toggle for a complete project MCP definition", async () => {
+		const previousAgentDir = getAgentDir();
+		const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-local-mcp-"));
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
+		cleanupPaths.push(projectRoot, agentDir);
+		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
+		await Bun.write(
+			path.join(projectRoot, ".omp", "mcp.json"),
+			JSON.stringify({ mcpServers: { local: { command: "echo", args: ["local"] } } }),
+		);
+
+		setAgentDir(agentDir);
+		try {
+			const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
+			const dashboard = await ExtensionDashboard.create(projectRoot, settings, 28);
+			for (const char of "local") dashboard.handleInput(char);
+			await Bun.sleep(50);
+			expect(stripAnsi(dashboard.render(120).join("\n"))).not.toContain("inherit");
+
+			dashboard.handleInput(" ");
+			await Bun.sleep(100);
+			expect((await readMCPConfigFile(path.join(projectRoot, ".omp", "mcp.json"))).mcpServers?.local?.enabled).toBe(
+				false,
+			);
+			dashboard.handleInput(" ");
+			await Bun.sleep(100);
+			expect((await readMCPConfigFile(path.join(projectRoot, ".omp", "mcp.json"))).mcpServers?.local?.enabled).toBe(
+				true,
+			);
+		} finally {
+			setAgentDir(previousAgentDir);
+		}
+	});
+
+	it("locks MCP toggles without changing their state when project MCP config loading is disabled", async () => {
+		const previousAgentDir = getAgentDir();
+		const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-project-mcp-"));
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
+		cleanupPaths.push(projectRoot, agentDir);
+		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
+		await Bun.write(
+			path.join(projectRoot, ".omp", "mcp.json"),
+			JSON.stringify({ mcpServers: { local: { command: "echo", args: ["local"] } } }),
+		);
+
+		setAgentDir(agentDir);
+		try {
+			const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
+			settings.set("mcp.enableProjectConfig", false);
+			const dashboard = await ExtensionDashboard.create(projectRoot, settings, 28);
+			for (const char of "local") dashboard.handleInput(char);
+			await Bun.sleep(50);
+
+			const rendered = stripAnsi(dashboard.render(120).join("\n"));
+			expect(rendered).toContain("Type: mcp");
+			expect(rendered).not.toContain("inherit");
+			dashboard.handleInput(" ");
+			await Bun.sleep(50);
+			expect(
+				(await readMCPConfigFile(path.join(projectRoot, ".omp", "mcp.json"))).mcpServers?.local?.enabled,
+			).toBeUndefined();
 		} finally {
 			setAgentDir(previousAgentDir);
 		}
@@ -317,10 +429,6 @@ describe("extension activation rendering", () => {
 		rendered = stripAnsi(inspector.render(80).join("\n"));
 		expect(rendered).toContain("Disabled (manually disabled)");
 		expect(rendered).not.toContain("Activation:");
-
-		inspector.setExtension(extension({ state: "disabled", activationLocked: true }));
-		rendered = stripAnsi(inspector.render(80).join("\n"));
-		expect(rendered).toContain("Disabled (locked)");
 	});
 
 	it("does not toggle shadowed rows", () => {

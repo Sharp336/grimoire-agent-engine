@@ -73,6 +73,10 @@ export interface Extension {
 	activationMode?: ActivationMode;
 	/** Whether the source configuration prevents changing this row's activation. */
 	activationLocked?: boolean;
+	/** Project MCP overlay state for inherited servers. */
+	mcpProjectActivation?: ProjectActivation;
+	/** Whether this server has a complete project MCP definition. */
+	mcpProjectDefinition?: boolean;
 }
 
 /**

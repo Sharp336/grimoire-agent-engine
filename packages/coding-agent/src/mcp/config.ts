@@ -6,14 +6,19 @@
 import { getMCPConfigPath } from "@oh-my-pi/pi-utils";
 import { mcpCapability } from "../capability/mcp";
 import type { SourceMeta } from "../capability/types";
+import { resolveActivationProjectRootSync } from "../config/activation-paths";
 import type { MCPServer } from "../discovery";
 import { loadCapability } from "../discovery";
-import { readDisabledServers, readEnabledServers } from "./config-writer";
-import type { MCPServerConfig } from "./types";
+import { readDisabledServers, readEnabledServers, readMCPConfigFile } from "./config-writer";
+import type { MCPConfigFile, MCPServerConfig } from "./types";
 /** Options for loading MCP configs */
 export interface LoadMCPConfigsOptions {
 	/** Whether to load project-level config (default: true) */
 	enableProjectConfig?: boolean;
+	/** Whether disabled servers are retained for status displays. */
+	includeDisabled?: boolean;
+	/** Whether source-disabled servers are retained for status displays. */
+	includeInactive?: boolean;
 	/** Whether to filter out Exa MCP servers (default: true) */
 	filterExa?: boolean;
 	/** Whether to filter out browser MCP servers when builtin browser tool is enabled (default: false) */
@@ -28,6 +33,29 @@ export interface LoadMCPConfigsResult {
 	exaApiKeys: string[];
 	/** Source metadata for each server */
 	sources: Record<string, SourceMeta>;
+}
+
+/** Inputs that determine whether an MCP server is active in the current project. */
+export interface MCPServerEnablement {
+	activationDisabled: boolean;
+	projectDefinition: boolean;
+	projectDisabled: boolean;
+	projectEnabled: boolean;
+	userDisabled: boolean;
+	userEnabled: boolean;
+}
+
+/** Resolve MCP source state together with user and project overlays. */
+export function isMCPServerEffectivelyEnabled(
+	config: Pick<MCPServerConfig, "enabled">,
+	enablement: MCPServerEnablement,
+): boolean {
+	if (enablement.activationDisabled) return false;
+	if (enablement.projectDefinition) return config.enabled !== false;
+	if (enablement.projectDisabled) return false;
+	if (enablement.projectEnabled) return true;
+	if (enablement.userDisabled) return false;
+	return config.enabled !== false || enablement.userEnabled;
 }
 
 /**
@@ -92,13 +120,20 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
  */
 export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOptions): Promise<LoadMCPConfigsResult> {
 	const enableProjectConfig = options?.enableProjectConfig ?? true;
+	const includeDisabled = options?.includeDisabled ?? false;
+	const includeInactive = options?.includeInactive ?? false;
 	const filterExa = options?.filterExa ?? true;
 	const filterBrowser = options?.filterBrowser ?? false;
 	const userPath = getMCPConfigPath("user", cwd);
-	const [disabledServers, forceEnabledServers] = await Promise.all([
+	const projectPath = getMCPConfigPath("project", resolveActivationProjectRootSync(cwd));
+	const [userDisabledServers, forceEnabledServers, projectConfig] = await Promise.all([
 		readDisabledServers(userPath).then(names => new Set(names)),
 		readEnabledServers(userPath).then(names => new Set(names)),
+		enableProjectConfig ? readMCPConfigFile(projectPath) : Promise.resolve({} as MCPConfigFile),
 	]);
+	const projectDisabledServers = new Set(projectConfig.disabledServers ?? []);
+	const projectForceEnabledServers = new Set(projectConfig.enabledServers ?? []);
+	const projectDefinitions = new Set(Object.keys(projectConfig.mcpServers ?? {}));
 
 	// Scope exclusions drop entries entirely BEFORE deduplication: with project
 	// config disabled, a project entry must not shadow anything.
@@ -111,8 +146,17 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 		includeDisabled,
 		disabledProviders: includeDisabled ? new Set() : undefined,
 		suppress: server => {
-			if (disabledServers.has(server.name)) return !includeDisabled;
-			return server.enabled === false && !forceEnabledServers.has(server.name) && !includeInactive;
+			const inherited = !projectDefinitions.has(server.name);
+			if (!inherited) return server.enabled === false && !includeInactive;
+			const projectDisabled = inherited && projectDisabledServers.has(server.name);
+			const projectForceEnabled = inherited && projectForceEnabledServers.has(server.name);
+			if (projectDisabled || (userDisabledServers.has(server.name) && !projectForceEnabled)) return !includeDisabled;
+			return (
+				server.enabled === false &&
+				!projectForceEnabled &&
+				!forceEnabledServers.has(server.name) &&
+				!includeInactive
+			);
 		},
 	});
 

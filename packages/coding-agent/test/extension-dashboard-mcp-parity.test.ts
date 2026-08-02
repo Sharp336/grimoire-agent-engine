@@ -37,7 +37,7 @@ describe("Extension Control Center MCP activation", () => {
 		await removeWithRetries(userAgentDir);
 	});
 
-	test("renders shared activation disablement and locks source-hard-disabled MCP servers", async () => {
+	test("renders shared activation disablement and keeps writable MCP definitions toggleable", async () => {
 		const extensions = await loadAllExtensions(projectDir, ["mcp:settings-disabled"]);
 		const settingsDisabled = extensions.find(extension => extension.id === "mcp:settings-disabled");
 		const sourceDisabled = extensions.find(extension => extension.id === "mcp:source-disabled");
@@ -45,10 +45,10 @@ describe("Extension Control Center MCP activation", () => {
 		expect(settingsDisabled?.state).toBe("disabled");
 		expect(settingsDisabled?.disabledReason).toBe("item-disabled");
 		expect(sourceDisabled?.state).toBe("disabled");
-		expect(sourceDisabled?.activationLocked).toBe(true);
+		expect(sourceDisabled?.activationLocked).toBe(false);
 	});
 
-	test("honors the user MCP denylist and force-enable allowlist", async () => {
+	test("does not apply user overlays to complete project definitions", async () => {
 		await Bun.write(
 			path.join(userAgentDir, "mcp.json"),
 			JSON.stringify({
@@ -63,8 +63,8 @@ describe("Extension Control Center MCP activation", () => {
 		const denylisted = extensions.find(extension => extension.id === "mcp:settings-disabled");
 		const forceEnabled = extensions.find(extension => extension.id === "mcp:source-disabled");
 
-		expect(denylisted).toMatchObject({ state: "disabled", disabledReason: "item-disabled" });
-		expect(forceEnabled).toMatchObject({ state: "active", activationLocked: false });
+		expect(denylisted).toMatchObject({ state: "active", disabledReason: undefined });
+		expect(forceEnabled).toMatchObject({ state: "disabled", activationLocked: false });
 	});
 	test("uses request-scoped provider activation instead of the runtime registry", async () => {
 		const projectEnabled = await loadAllExtensions(projectDir, [], []);

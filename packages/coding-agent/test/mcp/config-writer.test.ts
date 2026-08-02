@@ -2,7 +2,13 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { addMCPServer, readDisabledServers, readMCPConfigFile, setServerDisabled } from "../../src/mcp/config-writer";
+import {
+	addMCPServer,
+	readDisabledServers,
+	readMCPConfigFile,
+	setMcpServerEnabled,
+	setServerDisabled,
+} from "../../src/mcp/config-writer";
 
 describe("config-writer concurrent mutations", () => {
 	let dir: string;
@@ -39,5 +45,20 @@ describe("config-writer concurrent mutations", () => {
 
 		const config = await readMCPConfigFile(nestedPath);
 		expect(Object.keys(config.mcpServers ?? {})).toEqual(["alpha"]);
+	});
+
+	it("does not clear user overlays when toggling a project definition", async () => {
+		const userPath = path.join(dir, "user", "mcp.json");
+		const projectPath = path.join(dir, "project", "mcp.json");
+		await Bun.write(userPath, JSON.stringify({ disabledServers: ["shared"] }));
+		await Bun.write(
+			projectPath,
+			JSON.stringify({ mcpServers: { shared: { type: "stdio", command: "project", enabled: false } } }),
+		);
+
+		await setMcpServerEnabled({ userPath, projectPath, name: "shared", enabled: true });
+
+		expect((await readMCPConfigFile(projectPath)).mcpServers?.shared?.enabled).toBe(true);
+		expect((await readMCPConfigFile(userPath)).disabledServers).toEqual(["shared"]);
 	});
 });
