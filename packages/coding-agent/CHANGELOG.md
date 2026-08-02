@@ -238,6 +238,15 @@
 - Fixed heavily branched conversation trees shifting linear continuations into disconnected columns.
 - Fixed plugin installation validation failures for legacy compatibility shims.
 - Removed hard-coded references to disabled or absent agents in system and tool prompts.
+- Fixed project-scoped session directories using leading-hyphen names and collapsing distinct paths such as `~/project/hail-mary` and `~/project-hail-mary` into one bucket; directory names now use a portable readable prefix plus the canonical cwd hash, and colliding legacy buckets are split by their recorded session cwd during migration ([#7396](https://github.com/can1357/oh-my-pi/issues/7396)).
+- Fixed manual `/shake` leaving the context budget and next pre-turn compaction decision anchored to the stale pre-shake provider token count until another model response arrived.
+- Fixed Mnemopi scoped recall reporting "No relevant memories found" when every scoped target failed internally; target failures now warn, and total recall failure preserves the underlying engine error while healthy targets remain available ([#7364](https://github.com/can1357/oh-my-pi/issues/7364)).
+- Fixed `skill://` resolution ignoring explicitly configured `skills.customDirectories` entries when a same-named skill existed in a default discovery path: the custom-directory skill now wins as the higher-priority source ([#7190](https://github.com/can1357/oh-my-pi/issues/7190)).
+- Fixed image paste failing on Wayland-only Linux sessions by reading PNG clipboard payloads through `wl-paste` before falling back to the native bridge ([#7316](https://github.com/can1357/oh-my-pi/issues/7316)).
+- Fixed prewalk switching to the fast model during read-only investigation: `xd://` devices are dispatched through the `write` tool, so a read-only call such as an `lsp` navigation counted as the first edit/write and armed the one-way hand-off mid-planning. Device dispatches now carry the wrapped tool's approval tier and only trigger the switch at a `write`/`exec` tier — read-only `lsp`, `debug` inspection, and internal-URL `ast_edit` calls no longer downgrade the model ([#7312](https://github.com/can1357/oh-my-pi/issues/7312)).
+### Fixed
+
+- Fixed the TypeScript RPC client silently dropping prompt results, extension output and errors, session/config updates, host URI requests, and unknown future frames.
 
 ## [17.2.4] - 2026-08-01
 
@@ -358,9 +367,6 @@
 - Fixed remote or LAN local-engine endpoints being ignored during model discovery: the llama.cpp and Ollama probes used timeouts tuned for loopback, so a host reached over the network could exceed them and return no models, while changing `OLLAMA_BASE_URL`/`OLLAMA_HOST` could keep reusing a fresh cache from the previous endpoint. Non-loopback hosts now get a generous discovery timeout, and Ollama cache rows are scoped to the normalized endpoint ([#7087](https://github.com/can1357/oh-my-pi/issues/7087)).
 - Fixed `omp install` failing extension validation for pi extensions that import `createEditTool` or `createWriteTool` (e.g. gentle-pi) — the legacy `@oh-my-pi/pi-coding-agent` shim exported the read/bash/grep/find/ls tool factories but omitted the edit and write ones, so a named import threw Bun's static "Export named X not found" error. Added `createEditTool`/`createEditToolDefinition` and `createWriteTool`/`createWriteToolDefinition` to match the upstream pi surface ([#7094](https://github.com/can1357/oh-my-pi/issues/7094)).
 - Fixed Python eval's loopback tool bridge being routed through macOS system HTTP proxies, which caused `parallel()` tool reads to fail with `ConnectionRefusedError` after a local proxy stopped.
-### Fixed
-
-- Fixed the TypeScript RPC client silently dropping prompt results, extension output and errors, session/config updates, host URI requests, and unknown future frames.
 
 ## [17.2.0] - 2026-07-30
 
