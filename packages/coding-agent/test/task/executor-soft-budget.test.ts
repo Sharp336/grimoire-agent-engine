@@ -11,6 +11,7 @@ import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
+import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { resolveSoftRequestBudget, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -35,6 +36,7 @@ interface MockSessionHandle {
 	prompts: Array<{ text: string; options?: PromptOptions }>;
 	abortCalls: () => number;
 	disposeCalls: () => number;
+	adoptSessionManager: (manager: SessionManager) => void;
 }
 
 function assistantText(text: string, stopReason: "stop" | "aborted" = "stop") {
@@ -54,6 +56,7 @@ function createMockSession(
 	let abortCount = 0;
 	let disposeCount = 0;
 	let promptIndex = 0;
+	let ownedSessionManager: SessionManager | undefined;
 	let ircWakeTurnObserver:
 		| ((records: CustomMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined)
 		| undefined;
@@ -67,7 +70,9 @@ function createMockSession(
 		agent: { state: { systemPrompt: ["test"] } } as never,
 		model: { api: "anthropic-messages" } as never,
 		extensionRunner: undefined as never,
-		sessionManager: { appendSessionInit: () => {} } as never,
+		get sessionManager() {
+			return ownedSessionManager ?? ({ appendSessionInit: () => {} } as never);
+		},
 		getActiveToolNames: () => ["read", "yield"],
 		getEnabledToolNames: () => ["read", "yield"],
 		setActiveToolsByName: async () => {},
@@ -135,6 +140,9 @@ function createMockSession(
 		},
 		dispose: async () => {
 			disposeCount += 1;
+			const manager = ownedSessionManager;
+			ownedSessionManager = undefined;
+			await manager?.close();
 		},
 	};
 
@@ -143,16 +151,24 @@ function createMockSession(
 		prompts,
 		abortCalls: () => abortCount,
 		disposeCalls: () => disposeCount,
+		adoptSessionManager: manager => {
+			ownedSessionManager = manager;
+		},
 	};
 }
 
-function mockCreateAgentSession(session: AgentSession) {
-	return vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
-		session,
-		extensionsResult: {} as unknown as LoadExtensionsResult,
-		setToolUIContext: () => {},
-		eventBus: new EventBus(),
-	} satisfies CreateAgentSessionResult);
+function mockCreateAgentSession(handle: MockSessionHandle) {
+	return vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+		const manager = options?.sessionManager;
+		if (!manager) throw new Error("Expected a persisted session manager");
+		handle.adoptSessionManager(manager);
+		return {
+			session: handle.session,
+			extensionsResult: {} as unknown as LoadExtensionsResult,
+			setToolUIContext: () => {},
+			eventBus: new EventBus(),
+		} satisfies CreateAgentSessionResult;
+	});
 }
 // Use a bundled scout so these runSubprocess tests exercise the built-in
 // ceiling together with a lower task.softRequestBudget setting.
@@ -244,7 +260,7 @@ describe("runSubprocess soft request budget", () => {
 				isError: false,
 			} as AgentSessionEvent);
 		});
-		mockCreateAgentSession(handle.session);
+		mockCreateAgentSession(handle);
 		registerRunning(id, handle.session);
 
 		const result = await runSubprocess(baseOptions(id));
@@ -296,7 +312,7 @@ describe("runSubprocess soft request budget", () => {
 				emit({ type: "message_end", message } as unknown as AgentSessionEvent);
 			}
 		});
-		mockCreateAgentSession(handle.session);
+		mockCreateAgentSession(handle);
 		registerRunning(id, handle.session);
 
 		const result = await runSubprocess(baseOptions(id, eventBus));
@@ -348,7 +364,7 @@ describe("runSubprocess soft request budget", () => {
 			emit({ type: "message_end", message } as unknown as AgentSessionEvent);
 			controller.abort();
 		});
-		mockCreateAgentSession(handle.session);
+		mockCreateAgentSession(handle);
 		registerRunning(id, handle.session);
 
 		const result = await runSubprocess({ ...baseOptions(id), signal: controller.signal });
