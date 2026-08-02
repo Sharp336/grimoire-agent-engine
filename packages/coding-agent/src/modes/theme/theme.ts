@@ -1531,8 +1531,68 @@ function stepChannels(hex: string, step: number): string {
 	return rgbToHex({ r: rgb.r + step, g: rgb.g + step, b: rgb.b + step });
 }
 
-/** Canvas, panel, and element backgrounds as hex, darkest-surface first. */
-type SurfaceLadder = readonly [canvas: string, panel: string, element: string];
+/** Linear interpolation from `a` to `b`, `t` in 0..1. */
+function mixHex(a: string, b: string, t: number): string {
+	const ra = hexToRgb(a);
+	const rb = hexToRgb(b);
+	return rgbToHex({ r: ra.r + (rb.r - ra.r) * t, g: ra.g + (rb.g - ra.g) * t, b: ra.b + (rb.b - ra.b) * t });
+}
+
+/**
+ * How far the selection wash is pulled toward the theme's accent, and how far
+ * apart from the panel it must end up.
+ *
+ * Two knobs because the accent supplies only *hue*: measured over the 98
+ * bundled themes that derive a ladder, a pure 26% accent blend leaves the panel
+ * anywhere from 1.06:1 (`light-retro`, whose amber accent is almost exactly as
+ * bright as its paper) to 2.0:1, and no blend ratio fixes the low end — even at
+ * 100% accent `light-retro` reaches only 1.18:1. So the blend carries the tint
+ * and {@link SELECTION_MIN_CONTRAST} carries the separation.
+ *
+ * 1.5:1 is where editors that have solved this already sit: VS Code ships
+ * `#ADD6FF` on white (1.44:1) and `#264F78` on `#1E1E1E` (2.06:1). It is also
+ * shallow enough that the panel's own foreground colours keep working on top of
+ * the wash, which is the whole point of not simply inverting.
+ */
+const SELECTION_ACCENT_MIX = 0.26;
+const SELECTION_MIN_CONTRAST = 1.5;
+
+/**
+ * The wash marking selected composer text: the panel rung, tinted toward the
+ * theme's accent and then walked along the ladder direction until it clears
+ * {@link SELECTION_MIN_CONTRAST} against that same panel.
+ *
+ * The walk starts at zero and takes the smallest offset that reads, so a theme
+ * whose accent already separates the two surfaces keeps its accent colour
+ * untouched and only the washed-out ones get pushed. It always terminates well
+ * inside the byte range: `step` points away from the anchor's own luma, which
+ * is by construction the direction with the most headroom, and the far end of
+ * that direction is pure black or pure white.
+ *
+ * Falls back to the element rung when either colour is unparseable — a user
+ * theme with a `var` ref or a named colour in `accent` gets the pre-existing
+ * behaviour rather than a crash.
+ */
+function deriveSelectionWash(panel: string, accent: string, element: string, step: number): string {
+	const panelLuma = relativeLuminance(panel);
+	if (panelLuma === undefined || relativeLuminance(accent) === undefined) return element;
+	const tinted = mixHex(panel, accent, SELECTION_ACCENT_MIX);
+	for (let offset = 0; offset <= 255; offset++) {
+		const candidate = stepChannels(tinted, step > 0 ? offset : -offset);
+		const luma = relativeLuminance(candidate) ?? panelLuma;
+		if ((Math.max(panelLuma, luma) + 0.05) / (Math.min(panelLuma, luma) + 0.05) >= SELECTION_MIN_CONTRAST) {
+			return candidate;
+		}
+	}
+	return stepChannels(tinted, step > 0 ? 255 : -255);
+}
+
+/**
+ * Canvas, panel, and element backgrounds as hex, darkest-surface first, plus
+ * the composer selection wash — not a rung of its own, but derived here so it
+ * inherits the ladder's step direction instead of deciding appearance twice.
+ */
+type SurfaceLadder = readonly [canvas: string, panel: string, element: string, selection: string];
 
 /**
  * Three stacked surfaces derived from the theme rather than declared by it.
@@ -1554,11 +1614,17 @@ type SurfaceLadder = readonly [canvas: string, panel: string, element: string];
  * theme has declined to paint a surface at all, and covering the terminal's own
  * background with a guess would fight whatever the user set it to.
  */
-function deriveSurfaceLadder(bgColors: Record<ThemeBg, string | number>, isLight: boolean): SurfaceLadder | undefined {
+function deriveSurfaceLadder(
+	bgColors: Record<ThemeBg, string | number>,
+	accent: string,
+	isLight: boolean,
+): SurfaceLadder | undefined {
 	if (bgColors.statusLineBg === "") return undefined;
 	const canvas = resolveBgToHex(bgColors.statusLineBg, isLight);
 	const step = isLight ? -SURFACE_STEP_LIGHT : SURFACE_STEP_DARK;
-	return [canvas, stepChannels(canvas, step), stepChannels(canvas, step * 2)];
+	const panel = stepChannels(canvas, step);
+	const element = stepChannels(canvas, step * 2);
+	return [canvas, panel, element, deriveSelectionWash(panel, accent, element, step)];
 }
 
 /**
@@ -1688,6 +1754,11 @@ export class Theme {
 	readonly surfaceBgAnsi: string;
 	readonly panelBgAnsi: string;
 	readonly elementBgAnsi: string;
+	/**
+	 * Background open for the composer selection wash. Not a rung — see
+	 * {@link selectionBg} for why it needs its own surface.
+	 */
+	readonly selectionBgAnsi: string;
 	constructor(
 		fgColors: Record<ThemeColor, string | number>,
 		bgColors: Record<ThemeBg, string | number>,
@@ -1712,10 +1783,11 @@ export class Theme {
 			this.#bgColors[key] = bgAnsi(value, mode);
 			this.#hexBgColors[key] = resolveToHex(value, slIsLight);
 		}
-		const ladder = deriveSurfaceLadder(bgColors, slIsLight);
+		const ladder = deriveSurfaceLadder(bgColors, this.#hexFgColors.accent, slIsLight);
 		this.surfaceBgAnsi = ladder === undefined ? "" : bgAnsi(ladder[0], mode);
 		this.panelBgAnsi = ladder === undefined ? "" : bgAnsi(ladder[1], mode);
 		this.elementBgAnsi = ladder === undefined ? "" : bgAnsi(ladder[2], mode);
+		this.selectionBgAnsi = ladder === undefined ? "" : bgAnsi(ladder[3], mode);
 		// Build symbol map from preset + overrides
 		const baseSymbols = SYMBOL_PRESETS[symbolPreset];
 		this.#symbols = { ...baseSymbols };
@@ -1838,6 +1910,26 @@ export class Theme {
 	/** Two rungs up: a raised or hovered surface, read against a panel beneath it. */
 	elementBg(text: string, width?: number): string {
 		return paintSurface(this.elementBgAnsi, text, width);
+	}
+
+	/**
+	 * Wash marking selected text in the composer.
+	 *
+	 * Its own surface rather than {@link elementBg} because composer selection is
+	 * the only selection signal in the app that carries nothing else: `SelectList`
+	 * pairs `selectedRow` with an accent `selectedText` and a `selectedPrefix`
+	 * glyph, so its band can afford to be a whisper, while selected composer text
+	 * keeps its ordinary foreground and gains no marker. The background is the
+	 * entire signal.
+	 *
+	 * Borrowing the element rung made that signal one ladder step — 10 channels on
+	 * a dark theme, 5 on a light one — and the rung was sized to read against the
+	 * canvas, not against the panel the composer already paints. Stacked on the
+	 * panel it measured 1.13:1 on `dark` and 1.05:1 on `alabaster`/`birch`, which
+	 * is invisible. See {@link deriveSelectionWash} for what replaces it.
+	 */
+	selectionBg(text: string, width?: number): string {
+		return paintSurface(this.selectionBgAnsi, text, width);
 	}
 
 	/**
@@ -3390,6 +3482,11 @@ export function getEditorTheme(): EditorTheme {
 		selectList: getSelectListTheme(),
 		symbols: getSymbolTheme(),
 		hintStyle: (text: string) => theme.fg("dim", text),
+		// Unconditional, unlike `selectList.selectedRow` above: that band is a
+		// pointer affordance with nothing behind it in append mode, but selected
+		// composer text is a direct answer to the user's own drag and has to show
+		// up wherever the composer is drawn.
+		selectionWash: (text: string) => theme.selectionBg(text),
 	};
 }
 
