@@ -1698,12 +1698,13 @@ export class InputController {
 	 * Editor `onLargePaste` hook: gate a marker-sized paste behind the large-paste menu. Returns
 	 * `true` to intercept (the editor skips its default `[Paste]` marker) once the paste reaches the
 	 * configured `paste.largeMenuThreshold` line count; otherwise `false` for default collapse-to-marker
-	 * behavior. The async menu is fired and forgotten — the editor only needs the synchronous verdict.
+	 * behavior. The intercepted promise is tracked so Vim Escape can cancel its generation and
+	 * subsequent input cannot overtake the deferred menu/file commit.
 	 */
 	handleLargePaste(text: string, lineCount: number): boolean {
 		const threshold = this.ctx.settings.get("paste.largeMenuThreshold");
 		if (!(threshold > 0) || lineCount < threshold) return false;
-		void this.presentLargePasteMenu(text, lineCount);
+		void this.ctx.editor.trackAsyncPaste(this.presentLargePasteMenu(text, lineCount));
 		return true;
 	}
 
@@ -1714,6 +1715,7 @@ export class InputController {
 	 * inline paste marker, so the pasted content is never lost.
 	 */
 	async presentLargePasteMenu(text: string, lineCount: number): Promise<void> {
+		const pasteSignal = this.ctx.editor.getAsyncPasteSignal();
 		const WRAPPED_BLOCK = "Attach as a wrapped block";
 		const LOCAL_FILE = "Attach as local file";
 		const INLINE = "Paste inline";
@@ -1733,13 +1735,14 @@ export class InputController {
 			logger.warn("large-paste menu failed", { error: error instanceof Error ? error.message : String(error) });
 			choice = undefined;
 		}
+		if (pasteSignal.aborted) return;
 
 		switch (choice) {
 			case WRAPPED_BLOCK:
 				this.ctx.editor.insertPaste(wrapPasteInAttachmentBlock(text));
 				break;
 			case LOCAL_FILE:
-				await this.#attachPasteAsFile(text, lineCount);
+				await this.#attachPasteAsFile(text, lineCount, pasteSignal);
 				break;
 			case INLINE:
 				this.ctx.editor.insertPaste(text);
@@ -1749,6 +1752,7 @@ export class InputController {
 				this.ctx.editor.insertPaste(text);
 				break;
 		}
+		if (pasteSignal.aborted) return;
 		this.ctx.ui.requestRender();
 	}
 
@@ -1758,8 +1762,9 @@ export class InputController {
 	 * leaking a raw temp path. Falls back to an inline paste marker when the write fails, so the
 	 * content is never lost.
 	 */
-	async #attachPasteAsFile(text: string, lineCount: number): Promise<void> {
+	async #attachPasteAsFile(text: string, lineCount: number, pasteSignal: AbortSignal): Promise<void> {
 		try {
+			if (pasteSignal.aborted) return;
 			// Mirror the exact mapping the read tool's local:// resolver uses so a later
 			// `read local://paste-N.md` lands on the file written here.
 			const localRoot = resolveLocalRoot({
@@ -1773,10 +1778,13 @@ export class InputController {
 				name = `paste-${this.#pasteCounter}.md`;
 				filePath = path.join(localRoot, name);
 			} while (await Bun.file(filePath).exists());
+			if (pasteSignal.aborted) return;
 			await Bun.write(filePath, text);
+			if (pasteSignal.aborted) return;
 			this.ctx.editor.insertText(`local://${name} `);
 			this.ctx.showStatus(`Saved ${lineCount} pasted lines to local://${name}`);
 		} catch (error) {
+			if (pasteSignal.aborted) return;
 			logger.warn("failed to save large paste to file", {
 				error: error instanceof Error ? error.message : String(error),
 			});
