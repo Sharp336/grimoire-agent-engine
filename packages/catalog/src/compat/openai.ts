@@ -607,13 +607,14 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 			isQwen38PlusTemplateEffortModelId(spec.id),
 		// Friendli serves GLM-5.2 reasoning models via `chat_template_kwargs.enable_thinking`
 		// (so `thinkingFormat` resolves to `qwen-chat-template` like NVIDIA NIM Qwen), but
-		// unlike NIM it ALSO accepts top-level `reasoning_effort` for the `high`/`max`
-		// ladder exposed by `getModelDefinedEfforts`. The encoder reads this to emit
-		// `reasoning_effort` alongside the template kwarg — otherwise selecting high vs max
+		// unlike NIM it ALSO accepts top-level `reasoning_effort` for the effort ladder
+		// exposed by `getModelDefinedEfforts`. The encoder reads this to emit
+		// `reasoning_effort` alongside the template kwarg — otherwise every effort tier
 		// produces identical wire bodies. NIM's strict schema rejects top-level
-		// `reasoning_effort`, so the flag is gated to Friendli GLM-5.2 reasoning models only.
-		friendliTemplateReasoningEffort:
-			isFriendli && isGlm52ReasoningEffortModelId(spec.id.toLowerCase()) && Boolean(spec.reasoning),
+		// `reasoning_effort`, so the flag is gated to Friendli reasoning models that
+		// declare `thinking.efforts` (discovered via `/v1/models` `reasoning_options`
+		// `type: "effort"`, or the static seed for GLM-5.2's offline fallback).
+		friendliTemplateReasoningEffort: isFriendli && spec.reasoning && Boolean(spec.thinking?.efforts?.length),
 		requiresAssistantContentForToolCalls: isKimiModel || isDirectDeepseekReasoning,
 		cacheControlFormat: isOpenRouter && spec.id.startsWith("anthropic/") ? "anthropic" : undefined,
 		supportsPromptCacheBreakpoints,
@@ -624,7 +625,11 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		wireModelIdMode,
 		isVercelGatewayHost: isVercelGateway,
 		supportsStrictMode: detectStrictModeSupport(provider, baseUrl),
-		extraBody: undefined,
+		extraBody: isDirectDeepseekReasoning
+			? { thinking: { type: "enabled" } }
+			: isFriendli && spec.reasoning
+				? { parse_reasoning: true, include_reasoning: true }
+				: undefined,
 		toolStrictMode: isCerebras ? "all_strict" : "mixed",
 		// Kimi-family ids trigger MFJS on any host, not just native base URLs:
 		// proxies (OpenRouter, custom gateways) forward `tools.function.parameters`

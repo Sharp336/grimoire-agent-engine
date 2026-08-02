@@ -2303,6 +2303,37 @@ export const FRIENDLI_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] 
 	},
 ];
 
+/**
+ * Derive `thinking` from Friendli `/v1/models` `reasoning_options`.
+ *
+ * The API returns `reasoning_options` as a coexisting array of toggle,
+ * effort, and budget_tokens entries. Only `type: "effort"` resolves to an
+ * effort ladder; the rest describe the wire surface but don't determine
+ * the user-facing effort tiers. When the API does not yet expose
+ * `type: "effort"` for a model (pre-rollout), the resolver returns `undefined`
+ * so the static seed's `thinking` (via `mapWithBundledReference`) remains
+ * the fallback.
+ */
+function mapFriendliThinking(
+	reasoning: boolean,
+	reasoningOptions: unknown,
+	reference: ModelSpec<"openai-completions"> | undefined,
+): ThinkingConfig | undefined {
+	if (!reasoning) return undefined;
+	if (Array.isArray(reasoningOptions)) {
+		const effortOption = reasoningOptions.find(
+			(opt): opt is { type: "effort"; values: unknown } => isRecord(opt) && opt.type === "effort",
+		);
+		if (effortOption && Array.isArray(effortOption.values)) {
+			const efforts = THINKING_EFFORTS.filter(effort => (effortOption.values as readonly string[]).includes(effort));
+			if (efforts.length > 0) {
+				return { mode: "effort", efforts };
+			}
+		}
+	}
+	return reference?.thinking;
+}
+
 export interface FriendliModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
@@ -2375,12 +2406,14 @@ export function friendliModelManagerOptions(
 
 						const reasoning = toBoolean(raw.reasoning) ?? reference?.reasoning ?? false;
 						const interleaved = raw.interleaved === "reasoning_content";
+						const thinking = mapFriendliThinking(reasoning, raw.reasoning_options, reference);
 
 						const baseModel = mapWithBundledReference(entry, defaults, reference);
 
 						return {
 							...baseModel,
 							reasoning,
+							...(thinking !== undefined ? { thinking } : {}),
 							input: vision ? ["text", "image"] : ["text"],
 							cost,
 							contextWindow,

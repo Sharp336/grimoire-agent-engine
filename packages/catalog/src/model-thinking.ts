@@ -330,6 +330,13 @@ function getModelDefinedEfforts<TApi extends Api>(
 		return LOW_HIGH_MAX_REASONING_EFFORTS;
 	}
 	const isFriendliHost = modelMatchesHost(spec, "friendli");
+	// Friendli: `thinking.efforts` is resolved at discovery time from
+	// `/v1/models` `reasoning_options` (`type: "effort"`), or from the
+	// static seed for GLM-5.2's offline fallback. When present it is the
+	// authoritative effort ladder — no identity-based derivation needed.
+	if (isFriendliHost && spec.reasoning && spec.thinking?.efforts?.length) {
+		return spec.thinking.efforts;
+	}
 	// Friendli serves GLM under uppercase ids (`zai-org/GLM-5.2`); the
 	// caseInsensitive parser is scoped to this code path only.
 	if (isGlm52ReasoningEffortModelId(isFriendliHost ? spec.id.toLowerCase() : spec.id)) {

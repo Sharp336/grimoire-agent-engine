@@ -20,6 +20,7 @@ import {
 	type OpenAICompletionsParams,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 function friendliModel(reasoning: boolean): Model<"openai-completions"> {
@@ -34,6 +35,7 @@ function friendliModel(reasoning: boolean): Model<"openai-completions"> {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 131_072,
 		maxTokens: 8_192,
+		thinking: { mode: "effort", efforts: [Effort.High, Effort.Max] },
 	} satisfies ModelSpec<"openai-completions">);
 }
 

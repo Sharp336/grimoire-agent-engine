@@ -8,14 +8,16 @@
  *   - `functionality.tool_call` (boolean) → `supportsTools: false` when absent
  *   - `input_modalities` (array) → vision flag
  *   - `reasoning` (boolean) → reasoning flag
+ *   - `reasoning_options` (array) → `thinking.efforts` when `type: "effort"` present
  *   - `interleaved: "reasoning_content"` → `reasoningContentField` compat override
  *   - `context_length` / `max_completion_tokens` → numeric limits
  *
- * The bundled `friendli` slice in `models.json` is empty, so `mapModel`
- * also exercises the `createReferenceResolver` cross-provider fallback to
- * recover reasoning/thinking metadata from other providers' bundled entries.
+ * The bundled `friendli` slice in `models.json` carries the GLM-5.2 seed, so
+ * `mapModel` exercises `createReferenceResolver` as the offline fallback when
+ * `/v1/models` does not yet expose `reasoning_options` `type: "effort"`.
  */
 import { describe, expect, test } from "bun:test";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { friendliModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
@@ -43,6 +45,11 @@ describe("Friendli provider discovery", () => {
 							reasoning: true,
 							interleaved: "reasoning_content",
 							input_modalities: ["text", "image"],
+							reasoning_options: [
+								{ type: "toggle" },
+								{ type: "effort", values: ["high", "max"] },
+								{ type: "budget_tokens", min: -1, max: 1048576 },
+							],
 						},
 						{
 							id: "meta-llama/Llama-4-9B",
@@ -67,13 +74,13 @@ describe("Friendli provider discovery", () => {
 			);
 		};
 
-		const options = friendliModelManagerOptions({ apiKey: "flp_test_key", fetch: fetchMock });
+		const options = friendliModelManagerOptions({ apiKey: "test-key", fetch: fetchMock });
 		const models = await options.fetchDynamicModels?.();
 
 		expect(models).toBeDefined();
 		expect(models).toHaveLength(2);
 
-		// GLM-5.2 — reasoning + vision + interleaved
+		// GLM-5.2 — reasoning + vision + interleaved + effort ladder from API
 		// functionality.tool_call: true → supportsTools: true
 		const glm = models!.find(m => m.id === "zai-org/GLM-5.2");
 		expect(glm).toBeDefined();
@@ -94,6 +101,9 @@ describe("Friendli provider discovery", () => {
 		// Explicit tool_call: true must set supportsTools: true, overriding any
 		// reference's host-specific false.
 		expect(glm?.supportsTools).toBe(true);
+		// reasoning_options `type: "effort"` → thinking.efforts resolved from API
+		expect(glm?.thinking).toBeDefined();
+		expect(glm?.thinking?.efforts).toEqual([Effort.High, Effort.Max]);
 
 		// Llama 4 9B — no reasoning, no vision, tools disabled
 		const llama = models!.find(m => m.id === "meta-llama/Llama-4-9B");
@@ -112,5 +122,89 @@ describe("Friendli provider discovery", () => {
 		expect(llama?.cost.cacheWrite).toBe(0);
 		// functionality.tool_call === false → supportsTools: false
 		expect(llama?.supportsTools).toBe(false);
+		// No reasoning → no thinking
+		expect(llama?.thinking).toBeUndefined();
+	});
+
+	test("falls back to reference thinking when reasoning_options lacks type:effort", async () => {
+		// Pre-rollout: API returns reasoning_options with toggle + budget_tokens
+		// but no `type: "effort"`. The static seed's `thinking` must be used.
+		const fetchMock: FetchImpl = async (_input: string | URL | Request, _init?: RequestInit) => {
+			return new Response(
+				JSON.stringify({
+					data: [
+						{
+							id: "zai-org/GLM-5.2",
+							object: "model",
+							name: "GLM-5.2",
+							context_length: 131072,
+							max_completion_tokens: 8192,
+							pricing: {
+								input: "0.0000006",
+								output: "0.0000022",
+							},
+							functionality: { tool_call: true },
+							reasoning: true,
+							interleaved: "reasoning_content",
+							input_modalities: ["text"],
+							reasoning_options: [{ type: "toggle" }, { type: "budget_tokens", min: -1, max: 1048576 }],
+						},
+					],
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		};
+
+		const options = friendliModelManagerOptions({ apiKey: "test-key", fetch: fetchMock });
+		const models = await options.fetchDynamicModels?.();
+
+		expect(models).toBeDefined();
+		expect(models).toHaveLength(1);
+		const glm = models![0];
+		expect(glm.reasoning).toBe(true);
+		// No `type: "effort"` in reasoning_options → fallback to reference (static seed)
+		expect(glm.thinking).toBeDefined();
+		expect(glm.thinking?.efforts).toEqual([Effort.High, Effort.Max]);
+	});
+
+	test("returns undefined thinking for reasoning model with no reference and no effort option", async () => {
+		// A model not in any bundled catalog: reasoning: true but no
+		// `type: "effort"` in reasoning_options, and no static seed or global
+		// reference. thinking is undefined until the API exposes effort support.
+		const fetchMock: FetchImpl = async (_input: string | URL | Request, _init?: RequestInit) => {
+			return new Response(
+				JSON.stringify({
+					data: [
+						{
+							id: "friendli/fictional-reasoning-model",
+							object: "model",
+							name: "Fictional Reasoning Model",
+							context_length: 163840,
+							max_completion_tokens: 163840,
+							pricing: {
+								input: "0.0000005",
+								output: "0.0000015",
+							},
+							functionality: { tool_call: true },
+							reasoning: true,
+							interleaved: false,
+							input_modalities: ["text"],
+							reasoning_options: [{ type: "toggle" }, { type: "budget_tokens", min: -1, max: 163840 }],
+						},
+					],
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		};
+
+		const options = friendliModelManagerOptions({ apiKey: "test-key", fetch: fetchMock });
+		const models = await options.fetchDynamicModels?.();
+
+		expect(models).toBeDefined();
+		expect(models).toHaveLength(1);
+		const m = models![0];
+		expect(m.reasoning).toBe(true);
+		// No reference, no `type: "effort"` → thinking undefined until API rollout
+		expect(m.thinking).toBeUndefined();
 	});
 });
