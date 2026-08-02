@@ -2309,10 +2309,13 @@ export const FRIENDLI_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] 
  * The API returns `reasoning_options` as a coexisting array of toggle,
  * effort, and budget_tokens entries. Only `type: "effort"` resolves to an
  * effort ladder; the rest describe the wire surface but don't determine
- * the user-facing effort tiers. When the API does not yet expose
- * `type: "effort"` for a model (pre-rollout), the resolver returns `undefined`
- * so the static seed's `thinking` (via `mapWithBundledReference`) remains
- * the fallback.
+ * the user-facing effort tiers. When the API does not expose
+ * `type: "effort"` for a model, fall back to the reference's `thinking`
+ * — but only when the reference is from Friendli's own bundled seed
+ * (`provider === "friendli"`). A cross-provider global reference (e.g.
+ * an OpenRouter or Hugging Face entry sharing the same model id) may
+ * advertise effort tiers the Friendli endpoint rejects, so it must never
+ * be borrowed.
  */
 function mapFriendliThinking(
 	reasoning: boolean,
@@ -2331,7 +2334,7 @@ function mapFriendliThinking(
 			}
 		}
 	}
-	return reference?.thinking;
+	return reference?.provider === "friendli" ? reference.thinking : undefined;
 }
 
 export interface FriendliModelManagerConfig {
@@ -2413,7 +2416,7 @@ export function friendliModelManagerOptions(
 						return {
 							...baseModel,
 							reasoning,
-							...(thinking !== undefined ? { thinking } : {}),
+							...(thinking !== undefined ? { thinking } : { thinking: undefined }),
 							input: vision ? ["text", "image"] : ["text"],
 							cost,
 							contextWindow,

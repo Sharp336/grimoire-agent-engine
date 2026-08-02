@@ -207,4 +207,46 @@ describe("Friendli provider discovery", () => {
 		// No reference, no `type: "effort"` → thinking undefined until API rollout
 		expect(m.thinking).toBeUndefined();
 	});
+
+	test("does not borrow effort metadata from a cross-provider reference", async () => {
+		// A model id that exists in a different provider's bundled catalog with
+		// thinking.efforts, but Friendli returns reasoning: true without
+		// type: "effort" in reasoning_options. The cross-provider reference's
+		// effort ladder must NOT leak into the Friendli model — doing so would
+		// set friendliTemplateReasoningEffort and send reasoning_effort the
+		// Friendli endpoint rejects.
+		const fetchMock: FetchImpl = async (_input: string | URL | Request, _init?: RequestInit) => {
+			return new Response(
+				JSON.stringify({
+					data: [
+						{
+							id: "zai-org/GLM-4.5",
+							object: "model",
+							name: "GLM-4.5",
+							context_length: 131072,
+							max_completion_tokens: 8192,
+							pricing: { input: "0.0000004", output: "0.0000016" },
+							functionality: { tool_call: true },
+							reasoning: true,
+							input_modalities: ["text"],
+							reasoning_options: [{ type: "toggle" }],
+						},
+					],
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		};
+
+		const options = friendliModelManagerOptions({ apiKey: "test", fetch: fetchMock });
+		const models = await options.fetchDynamicModels?.();
+
+		expect(models).toBeDefined();
+		expect(models).toHaveLength(1);
+		const m = models![0];
+		expect(m.reasoning).toBe(true);
+		// Friendli API did not advertise type: "effort" and the model is not in
+		// Friendli's own static seed → thinking must be undefined, regardless
+		// of what other providers' bundled catalogs say about this model id.
+		expect(m.thinking).toBeUndefined();
+	});
 });
