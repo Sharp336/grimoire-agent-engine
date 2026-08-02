@@ -18,6 +18,7 @@ import { invokeSkillCommandFromText, isKnownSkillCommand } from "../../modes/ski
 import type { InteractiveModeContext } from "../../modes/types";
 import manualContinuePrompt from "../../prompts/system/manual-continue.md" with { type: "text" };
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
+import { SIDE_AGENT_ID } from "../../session/side-conversation";
 import { executeBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { isTinyTitleLocalModelKey } from "../../tiny/models";
 import { tinyTitleClient } from "../../tiny/title-client";
@@ -936,7 +937,7 @@ export class InputController {
 			}
 			return;
 		}
-		if (text.trim() === "/side end") {
+		if (text.trim() === "/side end" && this.ctx.focusedAgentId === SIDE_AGENT_ID) {
 			// The one focus-scoped command: discarding the side is meaningful from
 			// inside it (disposal unfocuses first), so route instead of refusing.
 			this.ctx.editor.clearDraft(text);
