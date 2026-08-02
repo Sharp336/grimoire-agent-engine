@@ -14,6 +14,9 @@ from omp_rpc import (
     OperationFailedEvent,
     OperationStartedEvent,
     ReadyEvent,
+    PlanApprovalRequestEvent,
+    PlanApprovalSettledEvent,
+    PlanStateUpdateEvent,
     SessionState,
     TodoReminderEvent,
     ToolActivationResult,
@@ -145,6 +148,49 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertEqual(parsed.execution, "future-execution")
         self.assertEqual(parsed.availability, "future-availability")
         self.assertEqual(parsed.concurrency_class, "future-concurrency")
+    def test_parse_plan_notifications_with_unknown_fields(self) -> None:
+        state = parse_notification(
+            {
+                "type": "plan_state_update",
+                "state": {
+                    "mode": "future-plan-mode",
+                    "planFilePath": "local://PLAN.md",
+                    "workflow": "parallel",
+                    "futureField": True,
+                },
+                "futureEnvelopeField": True,
+            }
+        )
+        request = parse_notification(
+            {
+                "type": "plan_approval_request",
+                "approvalId": "approval-1",
+                "planFilePath": "local://PLAN.md",
+                "title": "Fixture plan",
+                "planContent": "# Fixture plan",
+                "futureField": True,
+            }
+        )
+        settled = parse_notification(
+            {
+                "type": "plan_approval_settled",
+                "approvalId": "approval-1",
+                "result": {
+                    "approvalId": "approval-1",
+                    "decision": "refine",
+                    "executionDispatched": False,
+                    "planFilePath": "local://PLAN.md",
+                    "futureField": True,
+                },
+            }
+        )
+
+        self.assertIsInstance(state, PlanStateUpdateEvent)
+        self.assertEqual(state.state.mode, "none")
+        self.assertIsInstance(request, PlanApprovalRequestEvent)
+        self.assertEqual(request.approval_id, "approval-1")
+        self.assertIsInstance(settled, PlanApprovalSettledEvent)
+        self.assertEqual(settled.result.decision, "refine")
 
     def test_parse_session_state(self) -> None:
         state = parse_session_state(
