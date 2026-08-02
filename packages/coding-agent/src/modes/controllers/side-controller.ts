@@ -168,6 +168,7 @@ export class SideController {
 				preloadedExtensionPaths: extensionPaths,
 				extensions: [pi => pi.on("session_compact", reinject)],
 				localProtocolOptions,
+				initializeCapabilitySettings: false,
 			});
 			side = created.session;
 			// Capture the ref ONLY if it owns the session we just constructed — an
@@ -472,6 +473,13 @@ export class SideController {
 			} catch (error) {
 				const current = registry.get(SIDE_AGENT_ID);
 				if (current?.session !== existing.session) {
+					// Focus attached a replacement generation — undo it before
+					// reporting, so the UI is not left on a session we rejected.
+					try {
+						await ctx.unfocusSession();
+					} catch (unfocusError) {
+						logger.warn("Failed to unfocus replaced side generation", { error: String(unfocusError) });
+					}
 					ctx.showError("Side conversation is still starting — try again in a moment");
 					return { outcome: "done" };
 				}
@@ -483,6 +491,13 @@ export class SideController {
 			// swapped in a new session, do not submit the question against the
 			// stale captured session.
 			if (registry.get(SIDE_AGENT_ID)?.session !== existing.session) {
+				// Focus attached a replacement generation — undo it before
+				// reporting, so the UI is not left on a session we rejected.
+				try {
+					await ctx.unfocusSession();
+				} catch (unfocusError) {
+					logger.warn("Failed to unfocus replaced side generation", { error: String(unfocusError) });
+				}
 				ctx.showError("Side conversation is still starting — try again in a moment");
 				return { outcome: "done" };
 			}
