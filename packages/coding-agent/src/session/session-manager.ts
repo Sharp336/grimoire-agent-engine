@@ -2014,8 +2014,14 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	appendAgentChange(agent: string, source: "bundled" | "user" | "project"): string {
-		const entry: AgentChangeEntry = { type: "agent_change", ...this.#freshEntryFields(), agent, source };
+	appendAgentChange(agent: string, source: "bundled" | "user" | "project", fingerprint?: string): string {
+		const entry: AgentChangeEntry = {
+			type: "agent_change",
+			...this.#freshEntryFields(),
+			agent,
+			source,
+			...(fingerprint !== undefined ? { fingerprint } : {}),
+		};
 		this.#recordEntry(entry);
 		return entry.id;
 	}

@@ -63,3 +63,24 @@ export function resolveAgentSessionPolicy(agent: AgentDefinition): AgentSessionP
 		systemPromptBody: agent.systemPrompt,
 	};
 }
+
+/**
+ * Fingerprint the content of an agent definition: everything that shapes the
+ * session's system prompt, tool set, model, or thinking (system prompt body,
+ * tools, model patterns, thinking level). Used to detect that a persona's
+ * content changed between saves without its name/source changing, so the
+ * inherited provider prompt-cache key can be dropped on resume.
+ */
+export function fingerprintAgentContent(agent: AgentDefinition): string {
+	const policy = resolveAgentSessionPolicy(agent);
+	return String(
+		Bun.hash(
+			[
+				policy.systemPromptBody,
+				...(policy.toolNames ? [...policy.toolNames].sort() : []),
+				...(policy.modelPatterns ? [...policy.modelPatterns] : []),
+				policy.thinkingLevel ?? "",
+			].join("\u0000"),
+		),
+	);
+}

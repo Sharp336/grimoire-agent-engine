@@ -794,10 +794,9 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			// The explicit startup persona must be recorded on the resumed
 			// transcript so the next resume rehydrates it (thread: persist
 			// explicit persona changes on resume).
-			expect(sessionManager.buildSessionContext().agentPersona).toEqual({
-				agent: "resumed-persona",
-				source: "project",
-			});
+			expect(sessionManager.buildSessionContext().agentPersona).toEqual(
+				expect.objectContaining({ agent: "resumed-persona", source: "project" }),
+			);
 		} finally {
 			await session.dispose();
 		}
@@ -824,10 +823,11 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		});
 
 		try {
-			expect(sessionManager.buildSessionContext().agentPersona).toEqual({
-				agent: "foo",
-				source: "project",
-			});
+			expect(sessionManager.buildSessionContext().agentPersona).toEqual(
+				// fingerprint is present on entries the SDK wrote; assert the
+				// stable identity fields.
+				expect.objectContaining({ agent: "foo", source: "project" }),
+			);
 		} finally {
 			await session.dispose();
 		}

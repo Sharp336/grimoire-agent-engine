@@ -56,6 +56,7 @@ import {
 	resolveAllowedModels,
 	resolveCliModel,
 	resolveConfiguredModelPatterns,
+	resolveModelOverride,
 	resolveModelRoleValue,
 } from "./config/model-resolver";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
@@ -167,7 +168,7 @@ import {
 	loadProjectContextFiles as loadContextFilesInternal,
 	projectSystemPromptToolMetadata,
 } from "./system-prompt";
-import { resolveAgentSessionPolicy } from "./task/agent-policy";
+import { fingerprintAgentContent, resolveAgentSessionPolicy } from "./task/agent-policy";
 import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
 import type { AgentDefinition, StructuredSubagentSchemaMode } from "./task/types";
@@ -1363,12 +1364,53 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// A changed persona changes the system prompt the cache prefix is built
 	// from. Compare against the transcript's recorded persona so a plain resume
 	// (rehydrating the same persona) keeps cache continuity while an explicit or
-	// differently-resolved persona invalidates the inherited key.
+	// differently-resolved persona invalidates the inherited key. When name and
+	// source still match, fall back to the definition content fingerprint: the
+	// persona file may have changed since the transcript was saved, and the
+	// cache prefix would be built for the old system prompt/tool set.
 	const persistedPersona = sessionManager.buildSessionContext().agentPersona;
+	const personaFingerprint = options.agentPersona ? fingerprintAgentContent(options.agentPersona) : undefined;
+	// A persona rehydrated from the transcript (same name+source) must not
+	// reapply its model/thinking — the transcript records the authoritative
+	// values, mirroring the CLI's agentRehydratedFromContext gate. Tools still
+	// re-resolve from the current definition (documented resume behavior).
+	const personaIdentityRehydrated =
+		options.agentPersona !== undefined &&
+		persistedPersona?.agent === options.agentPersona.name &&
+		persistedPersona?.source === options.agentPersona.source;
+	// Content fingerprint additionally drives cache invalidation: the persona
+	// file may have changed since the transcript was saved, and the cache
+	// prefix would be built for the old system prompt/tool set.
 	const personaChanged =
 		options.agentPersona !== undefined &&
-		(persistedPersona?.agent !== options.agentPersona.name ||
-			persistedPersona?.source !== options.agentPersona.source);
+		(!personaIdentityRehydrated ||
+			(persistedPersona?.fingerprint !== undefined && persistedPersona.fingerprint !== personaFingerprint));
+	// Apply the persona policy for SDK/embedding callers that pass agentPersona
+	// directly (the CLI path pre-resolves these in buildSessionOptions).
+	const personaPolicy = options.agentPersona ? resolveAgentSessionPolicy(options.agentPersona) : undefined;
+	if (personaPolicy) {
+		if (options.toolNames === undefined && personaPolicy.toolNames) {
+			options.toolNames = personaPolicy.toolNames;
+			options.toolNamesFromAgent = true;
+		}
+		if (
+			options.model === undefined &&
+			options.modelPattern === undefined &&
+			!personaIdentityRehydrated &&
+			personaPolicy.modelPatterns?.length
+		) {
+			const resolved = resolveModelOverride(personaPolicy.modelPatterns, modelRegistry, settings);
+			if (resolved.model) {
+				options.model = resolved.model;
+				if (resolved.thinkingLevel && !personaPolicy.thinkingLevel && options.thinkingLevel === undefined) {
+					options.thinkingLevel = resolved.thinkingLevel;
+				}
+			}
+		}
+		if (options.thinkingLevel === undefined && !personaIdentityRehydrated && personaPolicy.thinkingLevel) {
+			options.thinkingLevel = personaPolicy.thinkingLevel;
+		}
+	}
 	const forkCacheShapeChanged =
 		options.model !== undefined ||
 		options.modelPattern !== undefined ||
@@ -1881,8 +1923,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			options.parentTaskPrefix ? { parentPrefix: options.parentTaskPrefix } : undefined,
 		);
 
-		// Create built-in tools (already wrapped with meta notice formatting)
-		await logger.time("createAllTools", createTools, toolSession, options.toolNames);
+		// Create built-in tools (already wrapped with meta notice formatting).
+		// Persona-sourced tool lists (toolNamesFromAgent) restrict only the
+		// initial ACTIVE set below — the registry stays full so persona-overlay
+		// restore can return to the default tool set; an explicit CLI/sdk
+		// toolNames (not from a persona) restricts the registry itself.
+		await logger.time(
+			"createAllTools",
+			createTools,
+			toolSession,
+			options.toolNamesFromAgent ? undefined : options.toolNames,
+		);
 
 		// Restricted sessions cannot inherit or discover MCP capabilities.
 		const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
@@ -3350,7 +3401,26 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				(existingSession.agentPersona?.agent !== options.agentPersona.name ||
 					existingSession.agentPersona?.source !== options.agentPersona.source)
 			) {
-				sessionManager.appendAgentChange(options.agentPersona.name, options.agentPersona.source);
+				sessionManager.appendAgentChange(
+					options.agentPersona.name,
+					options.agentPersona.source,
+					personaFingerprint,
+				);
+				// An explicit --agent whose frontmatter selected a model/thinking
+				// level applied them for this run; without entries the next resume
+				// would rehydrate the transcript's older values. Record the
+				// applied selection when it differs from what the transcript has.
+				if (model && formatModelString(model) !== existingSession.models.default) {
+					sessionManager.appendModelChange(formatModelString(model));
+				}
+				if (
+					options.thinkingLevel !== undefined &&
+					!autoThinking &&
+					effectiveThinkingLevel !== undefined &&
+					String(options.thinkingLevel) !== existingSession.configuredThinkingLevel
+				) {
+					sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, String(options.thinkingLevel));
+				}
 			}
 		} else {
 			// Save initial model, thinking level, service tier, and agent persona for new sessions
@@ -3367,7 +3437,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				sessionManager.appendServiceTierChange(initialServiceTierByFamily);
 			}
 			if (options.agentPersona) {
-				sessionManager.appendAgentChange(options.agentPersona.name, options.agentPersona.source);
+				sessionManager.appendAgentChange(
+					options.agentPersona.name,
+					options.agentPersona.source,
+					personaFingerprint,
+				);
 			}
 		}
 

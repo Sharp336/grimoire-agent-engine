@@ -220,6 +220,14 @@ export interface AgentChangeEntry extends SessionEntryBase {
 	agent: string;
 	/** Agent source for disambiguation (mirrors task/types.ts AgentSource). */
 	source: "bundled" | "user" | "project";
+	/**
+	 * Content fingerprint of the persona definition at save time (system
+	 * prompt, tools, model patterns, thinking level). On resume it lets the
+	 * SDK drop the inherited provider prompt-cache key when the same
+	 * name/source now resolves to a definition whose content changed; absent
+	 * on legacy transcripts, where the conservative path also applies.
+	 */
+	fingerprint?: string;
 }
 
 /**
