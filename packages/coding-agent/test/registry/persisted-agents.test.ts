@@ -43,7 +43,11 @@ describe("registerPersistedSubagents", () => {
 
 		const artifactDir = parentFile.slice(0, -6);
 		const sideStem = `${SIDE_SESSION_FILE_PREFIX}0123456789abcdef`;
-		writeJsonl(path.join(artifactDir, `${sideStem}.jsonl`));
+		const sideFile = path.join(artifactDir, `${sideStem}.jsonl`);
+		const sideArtifactDir = path.join(artifactDir, sideStem);
+		writeJsonl(sideFile);
+		fs.mkdirSync(sideArtifactDir, { recursive: true });
+		fs.writeFileSync(path.join(sideArtifactDir, "marker.txt"), "abandoned");
 		writeJsonl(path.join(artifactDir, "RegularAgent.jsonl"));
 
 		await registerPersistedSubagents(AgentRegistry.global(), parentFile);
@@ -52,5 +56,9 @@ describe("registerPersistedSubagents", () => {
 		// absence proves the exclusion — not a malformed-fixture artifact.
 		expect(AgentRegistry.global().get(sideStem)).toBeUndefined();
 		expect(AgentRegistry.global().get("RegularAgent")).toBeDefined();
+		// Abandoned side transcripts (and their artifact dirs) are deleted during
+		// the scan so crashed leftovers do not linger on disk forever.
+		expect(fs.existsSync(sideFile)).toBe(false);
+		expect(fs.existsSync(sideArtifactDir)).toBe(false);
 	});
 });

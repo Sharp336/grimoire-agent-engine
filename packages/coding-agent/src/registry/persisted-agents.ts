@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { logger } from "@oh-my-pi/pi-utils";
 import { ADVISOR_TRANSCRIPT_FILENAME, isAdvisorTranscriptName } from "../advisor/transcript-recorder";
 import { SessionManager } from "../session/session-manager";
 import { SIDE_SESSION_FILE_PREFIX } from "../session/side-conversation";
@@ -53,8 +54,19 @@ async function registerPersistedSubagentsFromDir(
 		// Throwaway side conversations (`side.internal-<snowflake>.jsonl`) must not
 		// cold-revive as generic subagents — after process exit their controller and
 		// compaction hooks are gone, and the reference-only boundary contract would
-		// degrade after the first compaction.
-		if (entry.name.startsWith(SIDE_SESSION_FILE_PREFIX)) continue;
+		// degrade after the first compaction. Delete abandoned side files (and their
+		// artifact dirs) during the scan so crashed transcripts do not linger forever.
+		if (entry.name.startsWith(SIDE_SESSION_FILE_PREFIX)) {
+			try {
+				await SessionManager.removeSessionFiles(path.join(dir, entry.name));
+			} catch (err) {
+				logger.warn("Failed to delete abandoned side transcript", {
+					file: entry.name,
+					error: String(err),
+				});
+			}
+			continue;
+		}
 		const sessionFile = path.join(dir, entry.name);
 		// The advisor transcript is observability-only: register it as a non-peer
 		// `advisor` kind under its owning session so the Hub can show its read-only
