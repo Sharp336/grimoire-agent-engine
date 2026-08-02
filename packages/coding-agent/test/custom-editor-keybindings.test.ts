@@ -97,6 +97,66 @@ describe("CustomEditor keybindings", () => {
 
 		expect(editor.getText()).not.toBe("git status");
 	});
+
+	it('notifies onOutcome with "accepted" exactly once when Tab consumes the suggestion', () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onOutcome = vi.fn();
+
+		editor.setTabSuggestion("git status", onOutcome);
+		editor.handleInput("\t");
+
+		expect(onOutcome).toHaveBeenCalledTimes(1);
+		expect(onOutcome).toHaveBeenCalledWith("accepted");
+	});
+
+	it('notifies onOutcome with "dismissed" when another keystroke drops the suggestion', () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onOutcome = vi.fn();
+
+		editor.setTabSuggestion("git status", onOutcome);
+		editor.handleInput("x");
+
+		expect(onOutcome).toHaveBeenCalledTimes(1);
+		expect(onOutcome).toHaveBeenCalledWith("dismissed");
+	});
+
+	it('notifies onOutcome with "dismissed" when a new suggestion supersedes an unresolved one', () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const first = vi.fn();
+		const second = vi.fn();
+
+		editor.setTabSuggestion("git status", first);
+		editor.setTabSuggestion("git log", second);
+
+		expect(first).toHaveBeenCalledTimes(1);
+		expect(first).toHaveBeenCalledWith("dismissed");
+		expect(second).not.toHaveBeenCalled();
+
+		editor.handleInput("\t");
+		expect(editor.getText()).toBe("git log");
+		expect(second).toHaveBeenCalledWith("accepted");
+	});
+
+	it('notifies onOutcome with "dismissed" when the caller clears the suggestion early', () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onOutcome = vi.fn();
+
+		editor.setTabSuggestion("git status", onOutcome);
+		editor.setTabSuggestion(undefined);
+
+		expect(onOutcome).toHaveBeenCalledTimes(1);
+		expect(onOutcome).toHaveBeenCalledWith("dismissed");
+	});
+
+	it("never fires onOutcome when nothing was pending", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onOutcome = vi.fn();
+
+		editor.setTabSuggestion(undefined, onOutcome);
+		editor.handleInput("x");
+
+		expect(onOutcome).not.toHaveBeenCalled();
+	});
 });
 
 describe("shipped dequeue defaults", () => {

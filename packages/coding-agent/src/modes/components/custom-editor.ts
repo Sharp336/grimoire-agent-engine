@@ -11,8 +11,10 @@ import {
 	TUI,
 } from "@oh-my-pi/pi-tui";
 import { BracketedPasteHandler } from "@oh-my-pi/pi-tui/bracketed-paste";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { AppKeybinding } from "../../config/keybindings";
 import { isSettingsInitialized, settings } from "../../config/settings";
+import type { SuggestionOutcome } from "../../extensibility/extensions/types";
 import { imageReferenceHyperlink, PLACEHOLDER_REGEX, renderPlaceholders } from "../image-references";
 import { hasMagicKeyword, highlightMagicKeywords } from "../magic-keywords";
 import { isQueuedMessageList, parseQueueShorthand, QUEUE_LIST_MARKER_RE } from "../queue-input";
@@ -392,6 +394,9 @@ export class CustomEditor extends Editor {
 	/** Text a hook registered via `setSuggestion` for Tab to insert on an empty
 	 *  editor. See the Tab-accept branch in {@link handleInput}. */
 	#tabSuggestion: string | undefined;
+	/** Callback to notify with the outcome ("accepted"/"dismissed") of the
+	 *  pending {@link #tabSuggestion}, set alongside it. */
+	#tabSuggestionOnOutcome: ((outcome: SuggestionOutcome) => void) | undefined;
 
 	/**
 	 * The host {@link TUI}, captured when a plugin constructs this editor through
@@ -432,9 +437,26 @@ export class CustomEditor extends Editor {
 	}
 
 	/** Register (or clear, with `undefined`) the text Tab will insert on an
-	 *  empty editor. See the Tab-accept branch in {@link handleInput}. */
-	setTabSuggestion(text: string | undefined): void {
+	 *  empty editor. See the Tab-accept branch in {@link handleInput}. `onOutcome`
+	 *  fires exactly once, resolving whatever suggestion is currently pending
+	 *  (superseding a prior unresolved one as "dismissed" first). */
+	setTabSuggestion(text: string | undefined, onOutcome?: (outcome: SuggestionOutcome) => void): void {
+		this.#resolveTabSuggestion("dismissed");
 		this.#tabSuggestion = text;
+		this.#tabSuggestionOnOutcome = text !== undefined ? onOutcome : undefined;
+	}
+
+	/** Resolve the pending Tab suggestion (if any) with `outcome`: clears the
+	 *  pending state, records telemetry, and notifies the registering hook's
+	 *  `onOutcome`. No-op when nothing is pending. */
+	#resolveTabSuggestion(outcome: SuggestionOutcome): void {
+		if (this.#tabSuggestion === undefined) return;
+		const length = this.#tabSuggestion.length;
+		const onOutcome = this.#tabSuggestionOnOutcome;
+		this.#tabSuggestion = undefined;
+		this.#tabSuggestionOnOutcome = undefined;
+		logger.debug("tab-suggestion: resolved", { outcome, length });
+		onOutcome?.(outcome);
 	}
 
 	/** Replace the composer draft with a restored historical prompt: sets the text and
@@ -862,11 +884,11 @@ export class CustomEditor extends Editor {
 		if (this.#tabSuggestion !== undefined) {
 			if (canonical === "tab" && !this.isShowingAutocomplete() && this.getText().trim() === "") {
 				const suggestion = this.#tabSuggestion;
-				this.#tabSuggestion = undefined;
+				this.#resolveTabSuggestion("accepted");
 				this.setText(suggestion);
 				return;
 			}
-			this.#tabSuggestion = undefined;
+			this.#resolveTabSuggestion("dismissed");
 		}
 
 		// Space-hold push-to-talk: a sustained space bar starts/stops STT instead of typing spaces.

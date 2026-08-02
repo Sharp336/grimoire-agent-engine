@@ -48,6 +48,10 @@ import type * as TypeBox from "../typebox";
 // Re-export for backward compatibility
 export type { ExecOptions, ExecResult } from "../../exec/exec";
 
+/** Why a Tab suggestion registered via {@link HookUIContext.setSuggestion} stopped
+ *  being pending. */
+export type SuggestionOutcome = "accepted" | "dismissed";
+
 /**
  * UI context for hooks to request interactive UI from the harness.
  * Each mode (interactive, RPC, print) provides its own implementation.
@@ -146,8 +150,13 @@ export interface HookUIContext {
 	 * touches the buffer directly — nothing to delete if the reader just
 	 * starts typing their own message instead. Cleared automatically after
 	 * one use, or by any other keystroke; pass `undefined` to clear early.
+	 *
+	 * `onOutcome`, if given, fires exactly once for a non-`undefined` `text`:
+	 * `"accepted"` when Tab inserts it, `"dismissed"` for any other keystroke,
+	 * an early `undefined` clear, or a later `setSuggestion` call that
+	 * replaces it unresolved.
 	 */
-	setSuggestion(text: string | undefined): void;
+	setSuggestion(text: string | undefined, onOutcome?: (outcome: SuggestionOutcome) => void): void;
 
 	/**
 	 * Show a multi-line editor for text editing.

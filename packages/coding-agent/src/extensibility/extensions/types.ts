@@ -216,6 +216,10 @@ export type ExtensionWidgetContent = string[] | ExtensionUiComponentFactory | un
 /** Wrap the current autocomplete provider with additional behavior (pi-compatible). */
 export type AutocompleteProviderFactory = (current: AutocompleteProvider) => AutocompleteProvider;
 
+/** Why a Tab suggestion registered via {@link ExtensionUIContext.setSuggestion} stopped
+ *  being pending. */
+export type SuggestionOutcome = "accepted" | "dismissed";
+
 /**
  * UI context for extensions to request interactive UI.
  * Each mode (interactive, RPC, print) provides its own implementation.
@@ -303,8 +307,13 @@ export interface ExtensionUIContext {
 	 * touches the buffer directly — nothing to delete if the reader just
 	 * starts typing their own message instead. Cleared automatically after
 	 * one use, or by any other keystroke; pass `undefined` to clear early.
+	 *
+	 * `onOutcome`, if given, fires exactly once for a non-`undefined` `text`:
+	 * `"accepted"` when Tab inserts it, `"dismissed"` for any other keystroke,
+	 * an early `undefined` clear, or a later `setSuggestion` call that
+	 * replaces it unresolved.
 	 */
-	setSuggestion(text: string | undefined): void;
+	setSuggestion(text: string | undefined, onOutcome?: (outcome: SuggestionOutcome) => void): void;
 
 	/** Show a multi-line editor for text editing. */
 	editor(
