@@ -1858,6 +1858,7 @@ export class Editor implements Component, Focusable {
 	 * Used for command-like autocomplete actions whose typed trigger should not count as the edit being undone.
 	 */
 	undoPastTransientText(transientText: string): void {
+		if (this.#inputMode === "vim") this.#vim.finishInsertUndo();
 		if (transientText.length === 0) {
 			this.#applyUndo();
 			return;

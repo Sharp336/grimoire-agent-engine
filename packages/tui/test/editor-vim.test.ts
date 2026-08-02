@@ -1290,6 +1290,41 @@ describe("Editor Vim input mode", () => {
 		expect(editor.getText()).toBe("");
 	});
 
+	it("starts a new insert undo group after a prompt-action undo completion", async () => {
+		const editor = createVimEditor();
+		const ready = Promise.withResolvers<void>();
+		editor.setText("base");
+		editor.setAutocompleteProvider({
+			async getSuggestions(lines, cursorLine, cursorCol) {
+				if (!lines[cursorLine]?.slice(0, cursorCol).endsWith("#undo")) return null;
+				ready.resolve();
+				return { items: [{ label: "Undo", value: "Undo" }], prefix: "#undo" };
+			},
+			applyCompletion(lines, cursorLine, cursorCol) {
+				return {
+					lines,
+					cursorLine,
+					cursorCol,
+					onApplied: () => editor.undoPastTransientText("#undo"),
+				};
+			},
+		});
+		editor.handleInput("A");
+		typeText(editor, " prior");
+		editor.handleInput("\x1b");
+		editor.handleInput("A");
+		typeText(editor, "#undo");
+		await ready.promise;
+
+		editor.handleInput("\t");
+		expect(editor.getText()).toBe("base");
+		typeText(editor, " next");
+		editor.handleInput("\x1b");
+		editor.handleInput("u");
+
+		expect(editor.getText()).toBe("base");
+	});
+
 	it("undoes a forced completion accepted before typing in insert mode", async () => {
 		const editor = createVimEditor();
 		const { promise, resolve } = Promise.withResolvers<void>();
