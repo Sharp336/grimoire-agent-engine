@@ -954,6 +954,35 @@ describe("Editor Vim input mode", () => {
 		expect(editor.getVimMode()).toBe("normal");
 	});
 
+	it("invalidates pending autocomplete before submitting from Vim insert mode", async () => {
+		const editor = createVimEditor();
+		const onSubmit = vi.fn();
+		const request = Promise.withResolvers<{
+			items: Array<{ label: string; value: string }>;
+			prefix: string;
+		}>();
+		editor.onSubmit = onSubmit;
+		editor.setAutocompleteProvider({
+			getSuggestions() {
+				return request.promise;
+			},
+			applyCompletion(lines, cursorLine, cursorCol) {
+				return { lines, cursorLine, cursorCol };
+			},
+		});
+		typeText(editor, "i@");
+
+		editor.handleInput("\r");
+		request.resolve({ items: [{ label: "@file", value: "@file" }], prefix: "@" });
+		await request.promise;
+		await Promise.resolve();
+
+		expect(onSubmit).toHaveBeenCalledWith("@");
+		expect(editor.getText()).toBe("");
+		expect(editor.isShowingAutocomplete()).toBe(false);
+		expect(editor.getVimMode()).toBe("normal");
+	});
+
 	it("keeps Vim normal-mode undo and redo from reopening autocomplete", async () => {
 		const editor = createVimEditor();
 		const getSuggestions = vi.fn(async () => ({

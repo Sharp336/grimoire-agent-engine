@@ -1916,8 +1916,6 @@ export class Editor implements Component, Focusable {
 	}
 	submit(): void {
 		if (this.disableSubmit) return;
-		this.#cancelAutocomplete(true);
-		this.#jumpMode = null;
 		this.#submitValue();
 	}
 
@@ -2277,6 +2275,8 @@ export class Editor implements Component, Focusable {
 	}
 
 	#submitValue(): void {
+		this.#cancelAutocomplete(true);
+		this.#jumpMode = null;
 		if (this.#inputMode === "vim" && this.#vim.mode === "insert") this.#vim.enterNormalMode();
 		this.#resetKillSequence();
 
