@@ -1059,6 +1059,22 @@ describe("Editor Vim input mode", () => {
 		expect(editor.getVimMode()).toBe("normal");
 	});
 
+	it("clamps a newer history recall before the next normal command", () => {
+		const editor = createVimEditor();
+		editor.addToHistory("older");
+		editor.addToHistory("newer");
+		editor.setText("");
+
+		editor.handleInput("\x1b[A");
+		editor.handleInput("\x1b[A");
+		editor.handleInput("\x1b[B");
+		expect(editor.getText()).toBe("newer");
+		expect(editor.getCursor()).toEqual({ line: 0, col: 4 });
+
+		editor.handleInput("x");
+		expect(editor.getText()).toBe("newe");
+	});
+
 	it("cancels autocomplete before leaving Vim insert mode", async () => {
 		const editor = createVimEditor();
 		const { promise, resolve } = Promise.withResolvers<void>();
