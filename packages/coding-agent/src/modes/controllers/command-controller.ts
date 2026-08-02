@@ -1171,6 +1171,9 @@ export class CommandController {
 	}
 
 	async #moveInteractiveCwd(resolvedPath: string): Promise<void> {
+		// Relocation renames the artifact dir out from under a live side —
+		// dispose it before the move (same rule as the explicit /move path).
+		await this.ctx.disposeSideConversation();
 		await this.ctx.sessionManager.moveTo(resolvedPath);
 		await this.ctx.applyCwdChange(resolvedPath);
 		this.ctx.updateEditorBorderColor();
