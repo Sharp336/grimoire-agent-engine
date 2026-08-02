@@ -269,7 +269,7 @@ export class VimEditorController {
 			case "G": {
 				const lines = this.#lines();
 				const count = this.#takeOptionalCount();
-				const targetLine = count === undefined ? lines.length - 1 : count - 1;
+				const targetLine = count === undefined ? lines.length - 1 : Math.min(lines.length - 1, count - 1);
 				this.#setCursor(targetLine, this.#firstNonBlankCol(lines[targetLine] ?? ""));
 				return true;
 			}
@@ -540,7 +540,7 @@ export class VimEditorController {
 			case "G": {
 				const lines = this.#lines();
 				const count = this.#takeOptionalCount();
-				const targetLine = count === undefined ? lines.length - 1 : count - 1;
+				const targetLine = count === undefined ? lines.length - 1 : Math.min(lines.length - 1, count - 1);
 				this.#setCursor(targetLine, this.#firstNonBlankCol(lines[targetLine] ?? ""));
 				return this.#finishVisualMotion();
 			}

@@ -393,6 +393,19 @@ describe("Editor Vim input mode", () => {
 		expect(editor.getCursor().line).toBe(2);
 	});
 
+	it("clamps oversized counted G before choosing the target column", () => {
+		const normal = createVimEditor();
+		normal.setText("one\n   final");
+		typeText(normal, "999G");
+		expect(normal.getCursor()).toEqual({ line: 1, col: 3 });
+
+		const visual = createVimEditor();
+		visual.setText("one\n   final");
+		typeText(visual, "v999G");
+		expect(visual.getCursor()).toEqual({ line: 1, col: 3 });
+		expect(visual.getVimMode()).toBe("visual");
+	});
+
 	it("supports counts after an operator", () => {
 		const editor = createVimEditor();
 		editor.setText("one two three");
