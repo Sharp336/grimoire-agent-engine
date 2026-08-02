@@ -223,6 +223,16 @@ describe("/mcp enable and disable", () => {
 		expect(showError).toHaveBeenCalledWith('Server "projectOnly" not found.');
 	});
 
+	test("rejects quick project add before probing a connection when project MCP loading is disabled", async () => {
+		const { controller, mcpManager, showError } = createController([], false);
+
+		await controller.handle("/mcp add blocked --scope project --url https://example.com/mcp");
+
+		expect(showError).toHaveBeenCalledWith("Project MCP configuration is disabled.");
+		expect(mcpManager.connectServers).not.toHaveBeenCalled();
+		expect(await Bun.file(getMCPConfigPath("project", projectDir)).exists()).toBe(false);
+	});
+
 	test("lists activation-disabled user and project servers as disabled", async () => {
 		await Bun.write(
 			getMCPConfigPath("user", projectDir),

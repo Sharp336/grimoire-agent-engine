@@ -77,6 +77,10 @@ export interface Extension {
 	mcpProjectActivation?: ProjectActivation;
 	/** Whether this server has a complete project MCP definition. */
 	mcpProjectDefinition?: boolean;
+	/** Whether the user MCP denylist disables this server. */
+	mcpUserDisabled?: boolean;
+	/** Whether the user MCP allowlist force-enables this server. */
+	mcpUserEnabled?: boolean;
 }
 
 /**

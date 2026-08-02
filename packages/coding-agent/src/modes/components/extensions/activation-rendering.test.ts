@@ -212,6 +212,348 @@ describe("extension activation rendering", () => {
 		}
 	});
 
+	it("does not apply a project MCP allowlist in the global edit scope", async () => {
+		const previousAgentDir = getAgentDir();
+		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-global-mcp-overlay-"));
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
+		cleanupPaths.push(projectRoot, agentDir);
+		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
+		await Bun.write(
+			path.join(agentDir, "mcp.json"),
+			JSON.stringify({ mcpServers: { sourceDisabled: { command: "echo", enabled: false } } }),
+		);
+		await Bun.write(
+			path.join(projectRoot, ".omp", "mcp.json"),
+			JSON.stringify({ enabledServers: ["sourceDisabled"] }),
+		);
+
+		setAgentDir(agentDir);
+		try {
+			const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
+			const dashboard = await ExtensionDashboard.create(projectRoot, settings, 28);
+			for (const char of "sourceDisabled") dashboard.handleInput(char);
+			expect(stripAnsi(dashboard.render(120).join("\n"))).toContain("● Active");
+
+			dashboard.handleInput("\u0010");
+			await Bun.sleep(50);
+			expect(stripAnsi(dashboard.render(120).join("\n"))).toContain("Disabled (manually disabled)");
+
+			dashboard.handleInput(" ");
+			await Bun.sleep(100);
+			expect((await readMCPConfigFile(path.join(agentDir, "mcp.json"))).mcpServers?.sourceDisabled?.enabled).toBe(
+				true,
+			);
+		} finally {
+			setAgentDir(previousAgentDir);
+		}
+	});
+
+	it("preserves a user MCP allowlist over a project denylist in the global edit scope", async () => {
+		const previousAgentDir = getAgentDir();
+		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-global-user-allow-"));
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
+		cleanupPaths.push(projectRoot, agentDir);
+		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
+		await Bun.write(
+			path.join(agentDir, "mcp.json"),
+			JSON.stringify({
+				mcpServers: { userAllowed: { command: "echo", enabled: false } },
+				enabledServers: ["userAllowed"],
+			}),
+		);
+		await Bun.write(path.join(projectRoot, ".omp", "mcp.json"), JSON.stringify({ disabledServers: ["userAllowed"] }));
+
+		setAgentDir(agentDir);
+		try {
+			const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
+			const dashboard = await ExtensionDashboard.create(projectRoot, settings, 28);
+			for (const char of "userAllowed") dashboard.handleInput(char);
+			dashboard.handleInput("\u0010");
+			await Bun.sleep(50);
+
+			expect(stripAnsi(dashboard.render(120).join("\n"))).toContain("● Active");
+		} finally {
+			setAgentDir(previousAgentDir);
+		}
+	});
+
+	it("activates a source-disabled user MCP after hiding a same-name project definition", async () => {
+		const previousAgentDir = getAgentDir();
+		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-source-disabled-shadow-"));
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
+		cleanupPaths.push(projectRoot, agentDir);
+		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
+		await Bun.write(
+			path.join(projectRoot, ".omp", "mcp.json"),
+			JSON.stringify({ mcpServers: { foo: { command: "project" } } }),
+		);
+		await Bun.write(
+			path.join(agentDir, "mcp.json"),
+			JSON.stringify({
+				mcpServers: { foo: { command: "user", enabled: false } },
+				enabledServers: ["foo"],
+			}),
+		);
+
+		setAgentDir(agentDir);
+		try {
+			const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
+			const dashboard = await ExtensionDashboard.create(projectRoot, settings, 28);
+			for (const char of "foo") dashboard.handleInput(char);
+			dashboard.handleInput("\u0010");
+			await Bun.sleep(50);
+
+			const rendered = stripAnsi(dashboard.render(120).join("\n"));
+			expect(rendered).toContain(`${theme.status.enabled} foo`);
+			expect(rendered).not.toContain(`${theme.status.shadowed} foo`);
+		} finally {
+			setAgentDir(previousAgentDir);
+		}
+	});
+
+	it("disables a source-disabled user MCP after hiding a same-name project definition without a user allowlist", async () => {
+		const previousAgentDir = getAgentDir();
+		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-source-disabled-global-"));
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
+		cleanupPaths.push(projectRoot, agentDir);
+		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
+		await Bun.write(
+			path.join(projectRoot, ".omp", "mcp.json"),
+			JSON.stringify({ mcpServers: { foo: { command: "project" } } }),
+		);
+		await Bun.write(
+			path.join(agentDir, "mcp.json"),
+			JSON.stringify({ mcpServers: { foo: { command: "user", enabled: false } } }),
+		);
+
+		setAgentDir(agentDir);
+		try {
+			const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
+			const dashboard = await ExtensionDashboard.create(projectRoot, settings, 28);
+			for (const char of "foo") dashboard.handleInput(char);
+			dashboard.handleInput("\u0010");
+			await Bun.sleep(50);
+
+			const rendered = stripAnsi(dashboard.render(120).join("\n"));
+			expect(rendered).toContain(`${theme.status.disabled} foo`);
+			expect(rendered).not.toContain(`${theme.status.shadowed} foo`);
+		} finally {
+			setAgentDir(previousAgentDir);
+		}
+	});
+
+	it("does not let a disabled high-priority MCP alias shadow a working user alias", async () => {
+		const previousAgentDir = getAgentDir();
+		const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-disabled-alias-home-"));
+		const projectRoot = await fs.mkdtemp(path.join(homeDir, "project-"));
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
+		cleanupPaths.push(homeDir, agentDir);
+		vi.spyOn(os, "homedir").mockReturnValue(homeDir);
+		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
+		await Bun.write(
+			path.join(agentDir, "mcp.json"),
+			JSON.stringify({ mcpServers: { "disabled-alias": { command: "shared", enabled: false } } }),
+		);
+		await Bun.write(
+			path.join(homeDir, ".claude.json"),
+			JSON.stringify({ mcpServers: { "working-alias": { command: "shared" } } }),
+		);
+
+		setAgentDir(agentDir);
+		try {
+			const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
+			const dashboard = await ExtensionDashboard.create(projectRoot, settings, 28);
+			for (const char of "alias") dashboard.handleInput(char);
+			dashboard.handleInput("\u0010");
+			await Bun.sleep(50);
+
+			const rendered = stripAnsi(dashboard.render(120).join("\n"));
+			expect(rendered).toContain(`${theme.status.disabled} disabled-alias`);
+			expect(rendered).toContain(`${theme.status.enabled} working-alias`);
+			expect(rendered).not.toContain(`${theme.status.shadowed} working-alias`);
+		} finally {
+			setAgentDir(previousAgentDir);
+		}
+	});
+
+	it("keeps an allowlisted source-disabled MCP alias shadowed when another alias wins", async () => {
+		const previousAgentDir = getAgentDir();
+		const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-allowlisted-alias-home-"));
+		const projectRoot = await fs.mkdtemp(path.join(homeDir, "project-"));
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
+		cleanupPaths.push(homeDir, agentDir);
+		vi.spyOn(os, "homedir").mockReturnValue(homeDir);
+		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
+		await Bun.write(
+			path.join(agentDir, "mcp.json"),
+			JSON.stringify({
+				mcpServers: { first: { command: "shared" } },
+				enabledServers: ["second"],
+			}),
+		);
+		await Bun.write(
+			path.join(homeDir, ".claude.json"),
+			JSON.stringify({ mcpServers: { second: { command: "shared", enabled: false } } }),
+		);
+
+		setAgentDir(agentDir);
+		try {
+			const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
+			const dashboard = await ExtensionDashboard.create(projectRoot, settings, 28);
+			for (const char of "shared") dashboard.handleInput(char);
+			dashboard.handleInput("\u0010");
+			await Bun.sleep(50);
+
+			const rendered = stripAnsi(dashboard.render(120).join("\n"));
+			expect(rendered).toContain(`${theme.status.enabled} first`);
+			expect(rendered).toContain(`${theme.status.shadowed} second`);
+			expect(rendered).not.toContain(`${theme.status.enabled} second`);
+		} finally {
+			setAgentDir(previousAgentDir);
+		}
+	});
+
+	it("keeps a project-shadowed user denylist row disabled and toggleable in the global edit scope", async () => {
+		const previousAgentDir = getAgentDir();
+		const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-denylisted-shadow-home-"));
+		const projectRoot = await fs.mkdtemp(path.join(homeDir, "project-"));
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
+		cleanupPaths.push(homeDir, agentDir);
+		vi.spyOn(os, "homedir").mockReturnValue(homeDir);
+		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
+		await Bun.write(
+			path.join(projectRoot, ".omp", "mcp.json"),
+			JSON.stringify({ mcpServers: { foo: { command: "project" } } }),
+		);
+		await Bun.write(
+			path.join(agentDir, "mcp.json"),
+			JSON.stringify({
+				mcpServers: { foo: { command: "user" } },
+				disabledServers: ["foo"],
+			}),
+		);
+
+		setAgentDir(agentDir);
+		try {
+			const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
+			const dashboard = await ExtensionDashboard.create(projectRoot, settings, 28);
+			for (const char of "foo") dashboard.handleInput(char);
+			dashboard.handleInput("\u0010");
+			await Bun.sleep(50);
+			expect(stripAnsi(dashboard.render(120).join("\n"))).toContain("Disabled (manually disabled)");
+
+			dashboard.handleInput(" ");
+			await Bun.sleep(100);
+			expect((await readMCPConfigFile(path.join(agentDir, "mcp.json"))).disabledServers).toBeUndefined();
+		} finally {
+			setAgentDir(previousAgentDir);
+		}
+	});
+
+	it("preserves a user MCP denylist in the global edit scope", async () => {
+		const previousAgentDir = getAgentDir();
+		const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-denylist-home-"));
+		const projectRoot = await fs.mkdtemp(path.join(homeDir, "project-"));
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
+		cleanupPaths.push(homeDir, agentDir);
+		vi.spyOn(os, "homedir").mockReturnValue(homeDir);
+		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
+		await Bun.write(path.join(projectRoot, ".omp", "mcp.json"), JSON.stringify({ enabledServers: ["denylisted"] }));
+		await Bun.write(path.join(agentDir, "mcp.json"), JSON.stringify({ disabledServers: ["denylisted"] }));
+		await Bun.write(
+			path.join(homeDir, ".claude.json"),
+			JSON.stringify({ mcpServers: { denylisted: { command: "claude-user" } } }),
+		);
+
+		setAgentDir(agentDir);
+		try {
+			const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
+			const dashboard = await ExtensionDashboard.create(projectRoot, settings, 28);
+			for (const char of "denylisted") dashboard.handleInput(char);
+			expect(stripAnsi(dashboard.render(120).join("\n"))).toContain("● Active");
+			dashboard.handleInput("\u0010");
+			await Bun.sleep(50);
+			expect(stripAnsi(dashboard.render(120).join("\n"))).toContain("Disabled (manually disabled)");
+
+			dashboard.handleInput(" ");
+			await Bun.sleep(100);
+			expect((await readMCPConfigFile(path.join(agentDir, "mcp.json"))).disabledServers).toBeUndefined();
+			expect(stripAnsi(dashboard.render(120).join("\n"))).toContain("● Active");
+		} finally {
+			setAgentDir(previousAgentDir);
+		}
+	});
+
+	it("keeps lower-priority user rows shadowed after hiding a same-name project MCP", async () => {
+		const previousAgentDir = getAgentDir();
+		const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-shadow-home-"));
+		const projectRoot = await fs.mkdtemp(path.join(homeDir, "project-"));
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
+		cleanupPaths.push(homeDir, agentDir);
+		vi.spyOn(os, "homedir").mockReturnValue(homeDir);
+		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
+		await Bun.write(
+			path.join(projectRoot, ".omp", "mcp.json"),
+			JSON.stringify({ mcpServers: { shared: { command: "project" } } }),
+		);
+		await Bun.write(
+			path.join(agentDir, "mcp.json"),
+			JSON.stringify({ mcpServers: { shared: { command: "native-user" } } }),
+		);
+		await Bun.write(
+			path.join(homeDir, ".claude.json"),
+			JSON.stringify({ mcpServers: { shared: { command: "claude-user" } } }),
+		);
+
+		setAgentDir(agentDir);
+		try {
+			const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
+			const dashboard = await ExtensionDashboard.create(projectRoot, settings, 28);
+			for (const char of "shared") dashboard.handleInput(char);
+			dashboard.handleInput("\u0010");
+			await Bun.sleep(50);
+
+			const rendered = stripAnsi(dashboard.render(120).join("\n"));
+			expect(rendered.match(new RegExp(`${theme.status.enabled} shared`, "g"))?.length).toBe(1);
+			expect(rendered.match(new RegExp(`${theme.status.shadowed} shared`, "g"))?.length).toBe(1);
+		} finally {
+			setAgentDir(previousAgentDir);
+		}
+	});
+
+	it("activates a different-name user MCP after hiding an equivalent project definition", async () => {
+		const previousAgentDir = getAgentDir();
+		const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-alias-home-"));
+		const projectRoot = await fs.mkdtemp(path.join(homeDir, "project-"));
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
+		cleanupPaths.push(homeDir, agentDir);
+		vi.spyOn(os, "homedir").mockReturnValue(homeDir);
+		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
+		await Bun.write(
+			path.join(projectRoot, ".omp", "mcp.json"),
+			JSON.stringify({ mcpServers: { "project-name": { command: "shared-command" } } }),
+		);
+		await Bun.write(
+			path.join(homeDir, ".claude.json"),
+			JSON.stringify({ mcpServers: { "user-name": { command: "shared-command" } } }),
+		);
+
+		setAgentDir(agentDir);
+		try {
+			const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
+			const dashboard = await ExtensionDashboard.create(projectRoot, settings, 28);
+			for (const char of "user-name") dashboard.handleInput(char);
+			dashboard.handleInput("\u0010");
+			await Bun.sleep(50);
+
+			const rendered = stripAnsi(dashboard.render(120).join("\n"));
+			expect(rendered).toContain(`${theme.status.enabled} user-name`);
+			expect(rendered).not.toContain(`${theme.status.shadowed} user-name`);
+		} finally {
+			setAgentDir(previousAgentDir);
+		}
+	});
+
 	it("writes a project denylist entry when toggling an inherited MCP server", async () => {
 		const previousAgentDir = getAgentDir();
 		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-inherited-mcp-"));

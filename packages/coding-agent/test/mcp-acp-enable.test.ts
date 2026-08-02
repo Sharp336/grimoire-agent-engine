@@ -101,12 +101,11 @@ describe("ACP /mcp enable and disable", () => {
 		expect(output).toEqual(['Server "ancestor" enabled.']);
 	});
 
-	test("disables an unconfigured discovered server through the user denylist fallback", async () => {
+	test("rejects an unconfigured server instead of creating a future denylist entry", async () => {
 		const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-mcp-project-"));
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-mcp-agent-"));
 		cleanupPaths.push(projectDir, agentDir);
 		const settings = await loadSettings(projectDir, agentDir);
-		const setProjectActivation = vi.spyOn(settings, "setProjectActivation");
 		const output: string[] = [];
 		const runtime = {
 			cwd: projectDir,
@@ -123,11 +122,60 @@ describe("ACP /mcp enable and disable", () => {
 
 		await handleMcpAcp(command, runtime);
 
-		expect(await readMCPConfigFile(path.join(agentDir, "mcp.json"))).toMatchObject({
-			disabledServers: ["discovered-server"],
-		});
-		expect(setProjectActivation).not.toHaveBeenCalled();
-		expect(output).toEqual(['Server "discovered-server" disabled.']);
+		expect(await Bun.file(path.join(agentDir, "mcp.json")).exists()).toBe(false);
+		expect(output).toEqual(['Server "discovered-server" not found in user or project config.']);
+	});
+
+	test("does not treat a disabled project MCP source as discovered", async () => {
+		const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-mcp-project-"));
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-mcp-agent-"));
+		cleanupPaths.push(projectDir, agentDir);
+		await Bun.write(
+			path.join(projectDir, ".omp", "mcp.json"),
+			JSON.stringify({ mcpServers: { projectOnly: { command: "echo" } } }),
+		);
+		const settings = await loadSettings(projectDir, agentDir);
+		settings.set("mcp.enableProjectConfig", false);
+		const output: string[] = [];
+		const runtime = {
+			cwd: projectDir,
+			settings,
+			output: (text: string) => {
+				output.push(text);
+			},
+		} as SlashCommandRuntime;
+
+		await handleMcpAcp({ name: "mcp", args: "disable projectOnly", text: "mcp disable projectOnly" }, runtime);
+
+		expect(await Bun.file(path.join(agentDir, "mcp.json")).exists()).toBe(false);
+		expect(output).toEqual(['Server "projectOnly" not found in user or project config.']);
+	});
+
+	test("disables a discovered non-project MCP server through the user denylist", async () => {
+		const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-mcp-home-"));
+		const projectDir = await fs.mkdtemp(path.join(homeDir, "project-"));
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-mcp-agent-"));
+		cleanupPaths.push(homeDir, agentDir);
+		vi.spyOn(os, "homedir").mockReturnValue(homeDir);
+		await fs.mkdir(path.join(projectDir, ".omp"), { recursive: true });
+		await Bun.write(
+			path.join(homeDir, ".claude.json"),
+			JSON.stringify({ mcpServers: { discovered: { command: "echo" } } }),
+		);
+		const settings = await loadSettings(projectDir, agentDir);
+		const output: string[] = [];
+		const runtime = {
+			cwd: projectDir,
+			settings,
+			output: (text: string) => {
+				output.push(text);
+			},
+		} as SlashCommandRuntime;
+
+		await handleMcpAcp({ name: "mcp", args: "disable discovered", text: "mcp disable discovered" }, runtime);
+
+		expect((await readMCPConfigFile(path.join(agentDir, "mcp.json"))).disabledServers).toEqual(["discovered"]);
+		expect(output).toEqual(['Server "discovered" disabled.']);
 	});
 
 	test("does not fall back to a user server behind a disabled project definition", async () => {

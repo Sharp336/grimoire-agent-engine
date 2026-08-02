@@ -26,6 +26,8 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
+import type { MCPServer } from "../../../capability/mcp";
+import { areMCPConnectionsEquivalent } from "../../../capability/mcp";
 import { resolveExistingActivationProjectRootSync } from "../../../config/activation-paths";
 import {
 	type ActivationScope,
@@ -274,8 +276,38 @@ export class ExtensionDashboard implements Component {
 
 	#withoutProjectRows(state: DashboardState): DashboardState {
 		const sm = this.settings ?? Settings.instance;
-		const projectIds = new Set(state.extensions.filter(ext => ext.source.level === "project").map(ext => ext.id));
+		const isDisabledInGlobalScope = (ext: DashboardState["extensions"][number]): boolean => {
+			const parsed = projectActivationKindFromExtensionId(ext.id);
+			if (parsed && sm.isProjectActivationEffectivelyDisabled(parsed.kind, parsed.name, "global")) return true;
+			if (sm.isProviderEffectivelyDisabled(ext.source.provider, "global")) return true;
+			if (ext.kind !== "mcp") return false;
+			if (ext.mcpUserDisabled) return true;
+			return (ext.raw as { enabled?: unknown }).enabled === false && !ext.mcpUserEnabled;
+		};
+		const globalClaimedIds = new Set<string>();
+		const globalClaimedRowKeys = new Set<string>();
+		const globalWinnerMcpRows: DashboardState["extensions"][number][] = [];
+		const globalWinnerKeys = new Set<string>();
+		for (const ext of state.extensions) {
+			if (ext.source.level === "project") continue;
+			if (globalClaimedIds.has(ext.id)) continue;
+			globalClaimedIds.add(ext.id);
+			globalClaimedRowKeys.add(extensionRowKey(ext));
+			if (isDisabledInGlobalScope(ext)) continue;
+			if (
+				ext.kind === "mcp" &&
+				globalWinnerMcpRows.some(winner =>
+					areMCPConnectionsEquivalent(winner.raw as MCPServer, ext.raw as MCPServer),
+				)
+			) {
+				continue;
+			}
+			if (ext.kind === "mcp") globalWinnerMcpRows.push(ext);
+			globalWinnerKeys.add(extensionRowKey(ext));
+		}
 		const normalizeGlobalRow = (ext: DashboardState["extensions"][number]): DashboardState["extensions"][number] => {
+			const rowKey = extensionRowKey(ext);
+			const rawShadowed = Boolean((ext.raw as { _shadowed?: boolean })._shadowed);
 			const parsed = projectActivationKindFromExtensionId(ext.id);
 			if (parsed && sm.isProjectActivationEffectivelyDisabled(parsed.kind, parsed.name, "global")) {
 				return { ...ext, state: "disabled", disabledReason: "item-disabled", shadowedBy: undefined };
@@ -283,11 +315,32 @@ export class ExtensionDashboard implements Component {
 			if (sm.isProviderEffectivelyDisabled(ext.source.provider, "global")) {
 				return { ...ext, state: "disabled", disabledReason: "provider-disabled", shadowedBy: undefined };
 			}
-			if (ext.kind === "mcp" && (ext.raw as { enabled?: unknown }).enabled === false) return ext;
-			if (ext.state !== "disabled" && !(projectIds.has(ext.id) && ext.state === "shadowed")) return ext;
+			if (ext.kind === "mcp" && ext.mcpUserDisabled) {
+				if (!globalClaimedRowKeys.has(rowKey)) {
+					return { ...ext, state: "shadowed", disabledReason: "shadowed" };
+				}
+				return { ...ext, state: "disabled", disabledReason: "item-disabled", shadowedBy: undefined };
+			}
+			if (ext.kind === "mcp" && (ext.raw as { enabled?: unknown }).enabled === false) {
+				if (ext.mcpUserEnabled) {
+					if (!globalWinnerKeys.has(rowKey)) {
+						return { ...ext, state: "shadowed", disabledReason: "shadowed" };
+					}
+					const active = { ...ext, state: "active" as const, shadowedBy: undefined };
+					delete active.disabledReason;
+					return active;
+				}
+				if (!globalClaimedRowKeys.has(rowKey)) {
+					return { ...ext, state: "shadowed", disabledReason: "shadowed" };
+				}
+				return { ...ext, state: "disabled", disabledReason: "item-disabled", shadowedBy: undefined };
+			}
+			const shadowsAnotherGlobalRow = !globalWinnerKeys.has(rowKey) && rawShadowed;
+			if (shadowsAnotherGlobalRow) return { ...ext, state: "shadowed", disabledReason: "shadowed" };
+			if (ext.state !== "disabled" && !(globalWinnerKeys.has(rowKey) && ext.state === "shadowed")) return ext;
 
 			const active = { ...ext, state: "active" as const };
-			if (projectIds.has(ext.id)) active.shadowedBy = undefined;
+			if (globalWinnerKeys.has(rowKey)) active.shadowedBy = undefined;
 			delete active.disabledReason;
 			return active;
 		};
@@ -469,25 +522,25 @@ export class ExtensionDashboard implements Component {
 			return;
 		}
 		if (this.#activationScope === "project") return;
-		const disabled = sm.getActivationDisabledExtensions("global");
-		if (enabled) {
-			const index = disabled.indexOf(extensionId);
-			if (index !== -1) {
-				disabled.splice(index, 1);
-				sm.set("disabledExtensions", disabled);
-			}
-		} else if (!disabled.includes(extensionId)) {
-			disabled.push(extensionId);
-			sm.set("disabledExtensions", disabled);
-		}
-
-		this.#applyDisabledExtensions(disabled);
-		void this.#refreshFromState();
+		void sm
+			.setExtensionActivation(extensionId, enabled ? "enabled" : "disabled", "global")
+			.then(() => {
+				this.#applyDisabledExtensions(sm.getActivationDisabledExtensions("global"));
+				void this.#refreshFromState();
+			})
+			.catch(error =>
+				logger.warn("Failed to update extension activation", {
+					extensionId,
+					enabled,
+					error: String(error),
+				}),
+			);
 	}
 
 	async #toggleMcpExtension(extensionId: string, enabled: boolean): Promise<void> {
 		const extension = this.#state.extensions.find(item => item.id === extensionId);
 		if (!extension) return;
+		const activationScope = this.#activationScope;
 		const name = extensionId.slice("mcp:".length);
 		const userPath = getMCPConfigPath("user", this.cwd);
 		const projectPath = getMCPConfigPath(
@@ -497,7 +550,7 @@ export class ExtensionDashboard implements Component {
 		try {
 			await setMcpServerEnabled({
 				userPath,
-				projectPath: this.#activationScope === "project" ? projectPath : userPath,
+				projectPath: activationScope === "project" ? projectPath : userPath,
 				sourcePath:
 					extension.source.provider === "native" || extension.source.provider === "mcp-json"
 						? extension.path
@@ -506,8 +559,8 @@ export class ExtensionDashboard implements Component {
 				enabled,
 			});
 			const sm = this.settings ?? Settings.instance;
-			if (enabled && sm?.getProjectActivation("mcp", name, this.#activationScope) === "disabled") {
-				await sm.setProjectActivation("mcp", name, "inherit", this.#activationScope);
+			if (enabled && sm?.getProjectActivation("mcp", name, activationScope) === "disabled") {
+				await sm.setProjectActivation("mcp", name, "inherit", activationScope);
 			}
 		} catch (error) {
 			logger.warn("Failed to persist MCP toggle", { name, enabled, error: String(error) });

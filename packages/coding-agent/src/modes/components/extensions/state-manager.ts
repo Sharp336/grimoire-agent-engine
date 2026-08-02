@@ -210,6 +210,8 @@ export async function loadAllExtensions(
 				activationLocked: sourceSaysDisabled && !sourceWritable,
 				mcpProjectActivation,
 				mcpProjectDefinition,
+				mcpUserDisabled: userDisabledServerNames.has(server.name),
+				mcpUserEnabled: forceEnabledServers.has(server.name),
 				raw: server,
 			});
 		}

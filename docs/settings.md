@@ -219,10 +219,13 @@ tools:
     bash: allow         # overridden by project
     read: allow         # kept from global
 disabledProviders:
-  - groq                # project array REPLACES the global array
+  - anthropic
+  - openai
+  - gemini
+  - groq                # activation lists merge across scopes
 ```
 
-Array replacement is the most common surprise: the project's `disabledProviders` does not extend the global list — it becomes the entire list for that project. The same applies to `enabledModels`, `cycleOrder`, `extensions`, and every other array-typed setting.
+Array replacement is the most common surprise for ordinary settings arrays. Activation lists (`disabledExtensions` / `enabledExtensions` and `disabledProviders` / `enabledProviders`) are the exception: project disables extend global disables, while project enables can lift global disables. The same ordinary replacement rule still applies to `enabledModels`, `cycleOrder`, `extensions`, and other array-typed settings.
 
 ## Project-local config
 

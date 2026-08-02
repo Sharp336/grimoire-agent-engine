@@ -81,8 +81,8 @@ export function resolveExistingActivationProjectRootSync(cwd: string): string | 
 	}
 }
 
-export function getDefaultActivationScope(cwd: string, agentDir: string = getAgentDir()): ActivationScope {
-	return !isGlobalActivationCwd(cwd, agentDir) && resolveExistingActivationProjectRootSync(cwd) ? "project" : "global";
+export function getDefaultActivationScope(cwd: string, _agentDir: string = getAgentDir()): ActivationScope {
+	return resolveExistingActivationProjectRootSync(cwd) ? "project" : "global";
 }
 
 export function resolveActivationTarget(
@@ -91,8 +91,9 @@ export function resolveActivationTarget(
 	configPath: string | null,
 	scope: ActivationScope = getDefaultActivationScope(cwd, agentDir),
 ): ActivationTargetInfo {
-	if (scope === "project" && !isGlobalActivationCwd(cwd, agentDir)) {
-		const projectRoot = resolveExistingActivationProjectRootSync(cwd) ?? path.resolve(cwd);
+	const existingProjectRoot = resolveExistingActivationProjectRootSync(cwd);
+	if (scope === "project" && (existingProjectRoot || !isGlobalActivationCwd(cwd, agentDir))) {
+		const projectRoot = existingProjectRoot ?? path.resolve(cwd);
 		return {
 			target: "project",
 			configPath: path.join(projectRoot, CONFIG_DIR_NAME, "config.yml"),

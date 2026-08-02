@@ -1,7 +1,9 @@
 import * as path from "node:path";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
+import type { MCPServer } from "../../capability/mcp";
 import { resolveExistingActivationProjectRootSync } from "../../config/activation-paths";
+import { loadCapability } from "../../discovery";
 import { connectToServer, disconnectServer, listPrompts, listResources, listTools } from "../../mcp/client";
 import { isMCPServerEffectivelyEnabled } from "../../mcp/config";
 import {
@@ -487,10 +489,22 @@ async function handleEnableDisableCommand(
 			return commandConsumed();
 		}
 		const disabledServers = await readDisabledServers(userPath);
-		if (!enabled || disabledServers.includes(name)) {
+		if (disabledServers.includes(name)) {
 			await setServerDisabled(userPath, name, !enabled);
 			await runtime.output(`Server "${name}" ${enabled ? "enabled" : "disabled"}.`);
 			return commandConsumed();
+		}
+		if (!enabled) {
+			const discovered = await loadCapability<MCPServer>("mcps", {
+				cwd: runtime.cwd,
+				includeDisabled: true,
+				...(projectEnabled ? {} : { filter: server => server._source.level !== "project" }),
+			});
+			if (discovered.all.some(server => server.name === name)) {
+				await setServerDisabled(userPath, name, true);
+				await runtime.output(`Server "${name}" disabled.`);
+				return commandConsumed();
+			}
 		}
 		return usage(`Server "${name}" not found in user or project config.`, runtime);
 	} catch (err) {

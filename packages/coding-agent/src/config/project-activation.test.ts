@@ -115,6 +115,25 @@ describe("project activation settings", () => {
 		await expect(fs.stat(path.join(tmpCwd, ".omp"))).rejects.toThrow();
 	});
 
+	it("uses an existing project config inside temporary directories", async () => {
+		const projectRoot = await mkTmp("omp-activation-project-");
+		const agentDir = await mkTmp("omp-activation-agent-");
+		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
+		const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
+
+		expect(settings.getDefaultActivationScope(projectRoot)).toBe("project");
+		expect(settings.getActivationWriteTarget(projectRoot, "project")).toBe("project");
+
+		await settings.setProjectActivation("skills", "temp-project", "disabled");
+		const projectConfig = YAML.parse(await Bun.file(path.join(projectRoot, ".omp", "config.yml")).text()) as {
+			disabledExtensions?: string[];
+		};
+		expect(projectConfig.disabledExtensions).toEqual(["skill:temp-project"]);
+		const globalConfigFile = Bun.file(path.join(agentDir, "config.yml"));
+		const globalConfig = (await globalConfigFile.exists()) ? await globalConfigFile.text() : "";
+		expect(globalConfig).not.toContain("skill:temp-project");
+	});
+
 	it("does not resurrect stale project activation keys after a write deletes them", async () => {
 		const projectRoot = await mkProjectTmp(".tmp-project-activation-cache-");
 		const agentDir = await mkTmp("omp-project-agent-");
@@ -190,6 +209,25 @@ describe("project activation settings", () => {
 		]);
 		expect(settings.getActivationDisabledProviders("global")).toEqual(["native"]);
 		expect(settings.getActivationDisabledProviders("project")).toEqual(["claude", "native"]);
+	});
+
+	it("preserves concurrent global dashboard extension toggles", async () => {
+		const agentDir = await mkTmp("omp-global-activation-lock-");
+		const cwd = await mkTmp("omp-global-activation-cwd-");
+		const [first, second] = await Promise.all([
+			Settings.loadIsolated({ cwd, agentDir }),
+			Settings.loadIsolated({ cwd, agentDir }),
+		]);
+
+		await Promise.all([
+			first.setExtensionActivation("skill:alpha", "disabled", "global"),
+			second.setExtensionActivation("tool:beta", "disabled", "global"),
+		]);
+
+		const config = YAML.parse(await Bun.file(path.join(agentDir, "config.yml")).text()) as {
+			disabledExtensions?: string[];
+		};
+		expect(config.disabledExtensions).toEqual(["skill:alpha", "tool:beta"]);
 	});
 
 	it("loads only activation keys from ancestor project config", async () => {

@@ -624,6 +624,11 @@ export class MCPCommandController {
 			this.ctx.showError(parsed.error);
 			return;
 		}
+		const projectConfigEnabled = this.ctx.settings.get("mcp.enableProjectConfig") !== false;
+		if (parsed.quickConfig && parsed.scope === "project" && !projectConfigEnabled) {
+			this.ctx.showError("Project MCP configuration is disabled.");
+			return;
+		}
 		if (parsed.quickConfig && parsed.initialName) {
 			let finalConfig = parsed.quickConfig;
 
@@ -741,6 +746,7 @@ export class MCPCommandController {
 				this.ctx.ui.requestRender();
 			},
 			parsed.initialName,
+			projectConfigEnabled ? undefined : ["user"],
 		);
 
 		// Replace editor with wizard

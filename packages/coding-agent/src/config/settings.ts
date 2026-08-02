@@ -1277,17 +1277,15 @@ export class Settings {
 		);
 	}
 
-	async setProjectActivation(
-		kind: ProjectActivationKind,
-		name: string,
+	async setExtensionActivation(
+		extensionId: string,
 		state: ProjectActivation,
 		scope?: ActivationScope,
 	): Promise<{ target: ActivationWriteTarget; path: string | null }> {
-		const trimmed = name.trim();
-		if (!trimmed) throw new Error("Activation name must not be empty.");
+		const id = extensionId.trim();
+		if (!id) throw new Error("Extension id must not be empty.");
 
 		const targetInfo = this.#resolveActivationTarget(this.#cwd, scope);
-		const id = extensionIdForProjectActivation(kind, trimmed);
 		if (targetInfo.target === "global") {
 			await this.#setGlobalActivationList("disabledExtensions", id, state);
 			return { target: targetInfo.target, path: targetInfo.configPath };
@@ -1303,12 +1301,45 @@ export class Settings {
 		return { target: targetInfo.target, path: writtenPath };
 	}
 
+	async setProjectActivation(
+		kind: ProjectActivationKind,
+		name: string,
+		state: ProjectActivation,
+		scope?: ActivationScope,
+	): Promise<{ target: ActivationWriteTarget; path: string | null }> {
+		const trimmed = name.trim();
+		if (!trimmed) throw new Error("Activation name must not be empty.");
+
+		const id = extensionIdForProjectActivation(kind, trimmed);
+		return await this.setExtensionActivation(id, state, scope);
+	}
+
 	async #setGlobalActivationList(path: ActivationDisabledPath, id: string, state: ProjectActivation): Promise<void> {
-		const disabled = new Set(normalizeStringArrayForSettings(getByPath(this.#global, [path])));
-		if (state === "disabled") disabled.add(id);
-		else disabled.delete(id);
-		this.set(path, [...disabled].sort() as never);
-		await this.flush();
+		if (!this.#persist || !this.#configPath) {
+			const disabled = new Set(normalizeStringArrayForSettings(getByPath(this.#global, [path])));
+			if (state === "disabled") disabled.add(id);
+			else disabled.delete(id);
+			if (disabled.size === 0) deleteByPath(this.#global, [path]);
+			else setByPath(this.#global, [path], [...disabled].sort());
+			this.#rebuildMerged();
+			return;
+		}
+
+		const configPath = this.#configPath;
+		await this.#withYamlWriteLock(configPath, async writePath => {
+			const current = (await this.#loadYamlIfPresentForWriteLocked(configPath, writePath)) ?? {};
+			const disabled = new Set(normalizeStringArrayForSettings(getByPath(current, [path])));
+			if (state === "disabled") disabled.add(id);
+			else disabled.delete(id);
+			if (disabled.size === 0) deleteByPath(current, [path]);
+			else setByPath(current, [path], [...disabled].sort());
+			await this.#writeYamlAtomically(writePath, current);
+			this.#quarantinedYamlTargets.delete(configPath);
+			const currentValue = getByPath(current, [path]);
+			if (currentValue === undefined) deleteByPath(this.#global, [path]);
+			else setByPath(this.#global, [path], currentValue);
+		});
+		this.#rebuildMerged();
 	}
 
 	#resolveEffectiveDisabledExtensions(baseValue: unknown): string[] {

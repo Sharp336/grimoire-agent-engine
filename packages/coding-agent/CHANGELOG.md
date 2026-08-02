@@ -4,7 +4,9 @@
 
 ### Fixed
 
-- Fixed Extension Control Center scoped activation so global toggles do not persist project disables, project provider tabs use scoped state, and disabled project MCP sources cannot shadow user MCP servers.
+- Fixed project activation selection in temporary, system-mounted, and external-volume worktrees; hardened Extension Control Center MCP scope switching, global MCP overlay rendering, and user-row shadow recovery; and prevented concurrent global activation writes from losing updates.
+- Fixed `/mcp disable` from persisting unknown server names, and restricted the MCP add wizard and quick-add flow to user scope before connection or OAuth work when project MCP configuration is disabled.
+- Fixed Extension Control Center scoped activation so global toggles do not persist project disables, project provider tabs use scoped state, and opt-out project MCP sources cannot shadow user MCP servers.
 - Fixed Extension Control Center MCP toggles to persist MCP configuration and project overlays in `mcp.json`, with three-state inherited-server overrides and read-only project rows when project MCP loading is disabled.
 - Fixed scoped extension activation state in ACP and fallback rows; `/mcp` now honors ancestor project configuration, shows disabled configured servers, and can disable discovered servers through ACP.
 
