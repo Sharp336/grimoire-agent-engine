@@ -274,6 +274,60 @@ describe("CustomEditor keybindings", () => {
 		expect(onSubmit).not.toHaveBeenCalled();
 	});
 
+	it("lets default-mode cancellation shortcuts bypass a configured image paste", async () => {
+		const cases = [
+			{
+				name: "interrupt",
+				action: "app.interrupt",
+				key: "escape",
+				input: "\x1b",
+				wire: (editor: CustomEditor, callback: () => void) => {
+					editor.onEscape = callback;
+				},
+			},
+			{
+				name: "clear",
+				action: "app.clear",
+				key: "ctrl+c",
+				input: "\x03",
+				wire: (editor: CustomEditor, callback: () => void) => {
+					editor.onClear = callback;
+				},
+			},
+			{
+				name: "exit",
+				action: "app.exit",
+				key: "ctrl+d",
+				input: "\x04",
+				wire: (editor: CustomEditor, callback: () => void) => {
+					editor.onExit = callback;
+				},
+			},
+		] as const;
+
+		for (const testCase of cases) {
+			const editor = new CustomEditor(getEditorTheme());
+			const image = Promise.withResolvers<void>();
+			const onCancel = vi.fn();
+			editor.setActionKeys("app.clipboard.pasteImage", ["alt+p"]);
+			editor.setActionKeys(testCase.action, [testCase.key]);
+			editor.onPasteImage = () => image.promise.then(() => true);
+			testCase.wire(editor, onCancel);
+
+			editor.handleInput("\x1bp");
+			editor.handleInput("queued");
+			editor.handleInput(testCase.input);
+
+			expect(onCancel, testCase.name).toHaveBeenCalledTimes(1);
+			expect(editor.getText(), testCase.name).toBe("");
+
+			image.resolve();
+			await image.promise;
+			await Promise.resolve();
+			expect(editor.getText(), testCase.name).toBe("");
+		}
+	});
+
 	it("releases the async paste gate when Vim Escape cancels", async () => {
 		const editor = new CustomEditor(getEditorTheme());
 		const image = Promise.withResolvers<void>();

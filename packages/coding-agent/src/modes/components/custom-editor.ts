@@ -617,8 +617,8 @@ export class CustomEditor extends Editor {
 	 *  dispatching them so a trailing `Enter` after `Cmd+V` can't submit before the image lands on
 	 *  `pendingImages` (Codex PR #3602 review). */
 	#pasteInFlight = 0;
-	/** Aborted when Vim Escape releases the current async-paste gate. Async producers capture
-	 *  the signal before their first await so a later insert session cannot accept stale results. */
+	/** Aborted when an editor cancellation shortcut releases the current async-paste gate. Async
+	 *  producers capture the signal before their first await so canceled results cannot commit. */
 	#asyncPasteAbort = new AbortController();
 	/** Input chunks deferred behind an in-flight paste, drained in FIFO order once the paste
 	 *  count returns to zero. */
@@ -809,19 +809,24 @@ export class CustomEditor extends Editor {
 	handleInput(data: string): void {
 		// Serialize behind any in-flight async paste so a trailing Enter / follow-up key can't
 		// submit before the clipboard image reaches `pendingImages` (Codex PR #3602 review).
-		// Vim Escape cancels this paste generation and releases queued input immediately; async
-		// producers use getAsyncPasteSignal() to discard any result that finishes after canceling.
+		// Cancellation shortcuts abort this paste generation, discard queued input, and continue
+		// through normal routing immediately; async producers discard any later result.
 		if (this.#pasteInFlight > 0) {
-			if (this.getVimMode() === "insert" && matchesKey(data, "escape")) {
-				this.#pendingInput.length = 0;
-				this.#asyncPasteAbort.abort();
-				this.#asyncPasteAbort = new AbortController();
-				this.#pasteInFlight = 0;
-				super.handleInput(data);
-			} else {
+			const parsed = parseKey(data);
+			const canonical = parsed !== undefined ? canonicalKeyId(parsed) : undefined;
+			const cancelsPaste =
+				(this.getVimMode() === "insert" && matchesKey(data, "escape")) ||
+				this.#matchesAction(canonical, "app.interrupt") ||
+				this.#matchesAction(canonical, "app.clear") ||
+				this.#matchesAction(canonical, "app.exit");
+			if (!cancelsPaste) {
 				this.#pendingInput.push(data);
+				return;
 			}
-			return;
+			this.#pendingInput.length = 0;
+			this.#asyncPasteAbort.abort();
+			this.#asyncPasteAbort = new AbortController();
+			this.#pasteInFlight = 0;
 		}
 		// textEquals avoids getText()'s O(buffer) join on every keystroke; kitty
 		// sequences always start with ESC, so plain bytes skip the native parse.
