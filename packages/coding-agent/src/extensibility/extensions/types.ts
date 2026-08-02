@@ -296,6 +296,16 @@ export interface ExtensionUIContext {
 	/** Get the current text from the core input editor. */
 	getEditorText(): string;
 
+	/**
+	 * Register text that Tab will insert when pressed on a genuinely empty
+	 * editor (the same condition under which Tab's file/slash completion
+	 * already has nothing to offer). Unlike `setEditorText`, this never
+	 * touches the buffer directly — nothing to delete if the reader just
+	 * starts typing their own message instead. Cleared automatically after
+	 * one use, or by any other keystroke; pass `undefined` to clear early.
+	 */
+	setSuggestion(text: string | undefined): void;
+
 	/** Show a multi-line editor for text editing. */
 	editor(
 		title: string,

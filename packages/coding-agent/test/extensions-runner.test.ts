@@ -1712,6 +1712,7 @@ describe("ExtensionRunner", () => {
 					pasteToEditor: () => {},
 					setEditorText: () => {},
 					getEditorText: () => "",
+					setSuggestion: () => {},
 					editor: async () => undefined,
 					addAutocompleteProvider: () => {},
 					setEditorComponent: () => {},

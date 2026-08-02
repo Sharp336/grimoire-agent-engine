@@ -389,6 +389,10 @@ export class CustomEditor extends Editor {
 	 *  `undefined` entries are images without a backing reference yet. */
 	pendingImageLinks: (string | undefined)[] = [];
 
+	/** Text a hook registered via `setSuggestion` for Tab to insert on an empty
+	 *  editor. See the Tab-accept branch in {@link handleInput}. */
+	#tabSuggestion: string | undefined;
+
 	/**
 	 * The host {@link TUI}, captured when a plugin constructs this editor through
 	 * the upstream-pi `(tui, theme, keybindings)` convention. Undefined for omp's
@@ -425,6 +429,12 @@ export class CustomEditor extends Editor {
 		this.imageLinks = undefined;
 		this.pendingImages = [];
 		this.pendingImageLinks = [];
+	}
+
+	/** Register (or clear, with `undefined`) the text Tab will insert on an
+	 *  empty editor. See the Tab-accept branch in {@link handleInput}. */
+	setTabSuggestion(text: string | undefined): void {
+		this.#tabSuggestion = text;
 	}
 
 	/** Replace the composer draft with a restored historical prompt: sets the text and
@@ -839,6 +849,24 @@ export class CustomEditor extends Editor {
 		if (canonical === "left" && this.onLeftAtStart && this.getText().trim() === "") {
 			this.onLeftAtStart();
 			return;
+		}
+
+		// Tab-accept: a hook registered a suggestion (via `ctx.ui.setSuggestion`)
+		// that lives only in the status line, never the buffer — `setEditorText`
+		// writes real, literal text with no way to grey it out or dismiss on the
+		// next keystroke, so this is the alternative accept gesture. Only claims
+		// Tab when the editor is genuinely empty: the same condition under which
+		// Tab's file/slash completion already has nothing to offer, so this never
+		// shadows real completion. Any other keystroke invalidates a stale
+		// suggestion rather than letting it resurface later.
+		if (this.#tabSuggestion !== undefined) {
+			if (canonical === "tab" && !this.isShowingAutocomplete() && this.getText().trim() === "") {
+				const suggestion = this.#tabSuggestion;
+				this.#tabSuggestion = undefined;
+				this.setText(suggestion);
+				return;
+			}
+			this.#tabSuggestion = undefined;
 		}
 
 		// Space-hold push-to-talk: a sustained space bar starts/stops STT instead of typing spaces.

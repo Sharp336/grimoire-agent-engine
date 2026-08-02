@@ -881,6 +881,10 @@ export async function runRpcMode(
 			return "";
 		}
 
+		setSuggestion(): void {
+			// No local editor/Tab-accept concept in RPC mode.
+		}
+
 		async editor(
 			title: string,
 			prefill?: string,

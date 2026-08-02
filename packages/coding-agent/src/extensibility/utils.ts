@@ -36,6 +36,7 @@ export function createNoOpUIContext(): HookUIContext {
 		custom: async () => undefined as never,
 		setEditorText: () => {},
 		getEditorText: () => "",
+		setSuggestion: () => {},
 		editor: async () => undefined,
 		get theme() {
 			return theme;

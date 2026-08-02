@@ -319,6 +319,7 @@ const noOpUIContext: ExtensionUIContext = {
 	setEditorText: () => {},
 	pasteToEditor: () => {},
 	getEditorText: () => "",
+	setSuggestion: () => {},
 	editor: async () => undefined,
 	addAutocompleteProvider: () => {},
 	setEditorComponent: () => {},

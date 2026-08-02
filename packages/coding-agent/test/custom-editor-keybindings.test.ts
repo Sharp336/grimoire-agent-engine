@@ -62,6 +62,41 @@ describe("CustomEditor keybindings", () => {
 		expect(onDisplayReset).toHaveBeenCalledTimes(1);
 		expect(onLiveToggle).toHaveBeenCalledTimes(1);
 	});
+
+	it("accepts a Tab suggestion on an empty editor and consumes it once", () => {
+		const editor = new CustomEditor(getEditorTheme());
+
+		editor.setTabSuggestion("git status");
+		editor.handleInput("\t");
+
+		expect(editor.getText()).toBe("git status");
+
+		// Second Tab is plain input now that the suggestion was consumed.
+		editor.setText("");
+		editor.handleInput("\t");
+		expect(editor.getText()).toBe("");
+	});
+
+	it("drops a Tab suggestion on any other keystroke instead of letting it resurface", () => {
+		const editor = new CustomEditor(getEditorTheme());
+
+		editor.setTabSuggestion("git status");
+		editor.handleInput("x");
+		editor.setText("");
+		editor.handleInput("\t");
+
+		expect(editor.getText()).toBe("");
+	});
+
+	it("never claims Tab for a suggestion once the editor has text", () => {
+		const editor = new CustomEditor(getEditorTheme());
+
+		editor.setText("already typing");
+		editor.setTabSuggestion("git status");
+		editor.handleInput("\t");
+
+		expect(editor.getText()).not.toBe("git status");
+	});
 });
 
 describe("shipped dequeue defaults", () => {
