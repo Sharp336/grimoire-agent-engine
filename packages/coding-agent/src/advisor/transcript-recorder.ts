@@ -191,13 +191,16 @@ export class AdvisorTranscriptRecorder {
 
 	async #closeManager(): Promise<void> {
 		const manager = this.#manager;
-		this.#manager = undefined;
-		this.#file = undefined;
 		if (!manager) return;
 		try {
 			await manager.close();
+			if (this.#manager === manager) {
+				this.#manager = undefined;
+				this.#file = undefined;
+			}
 		} catch (err) {
 			logger.debug("advisor transcript close failed", { err: String(err) });
+			throw err;
 		}
 	}
 

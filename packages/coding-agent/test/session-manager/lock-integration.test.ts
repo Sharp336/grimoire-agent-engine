@@ -370,6 +370,39 @@ describe("SessionManager persistent lock integration", () => {
 		await manager.close();
 	});
 
+	it("delivers shared-lock heartbeat failures to a detached clone", async () => {
+		vi.useFakeTimers();
+		const { cwd, sessions } = fixture();
+		const manager = SessionManager.create(cwd, sessions);
+		let lockPath: string | undefined;
+		try {
+			await manager.ensureOnDisk();
+			const sessionFile = manager.getSessionFile();
+			if (!sessionFile) throw new Error("missing session file");
+			const detached = manager.cloneCurrentSession();
+			await manager.newSession();
+			lockPath = lockPathForSession(sessionFile);
+			const record = inspectSessionLock(sessionFile).record;
+			if (!record) throw new Error("missing session lock record");
+			fs.writeFileSync(lockPath, JSON.stringify({ ...record, ownerId: Bun.randomUUIDv7() }));
+
+			vi.advanceTimersByTime(SESSION_LOCK_HEARTBEAT_MS);
+			await Promise.resolve();
+			expect(() =>
+				detached.appendMessage({ role: "user", content: "must observe lost lock", timestamp: Date.now() }),
+			).toThrow(SessionLockError);
+			await detached.close().catch(error => {
+				if (!(error instanceof SessionLockError)) throw error;
+			});
+		} finally {
+			await manager.close().catch(error => {
+				if (!(error instanceof SessionLockError)) throw error;
+			});
+			if (lockPath && fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+			vi.useRealTimers();
+		}
+	});
+
 	it("refuses deletion while a detached clone shares write ownership", async () => {
 		const { cwd, sessions } = fixture();
 		const manager = SessionManager.create(cwd, sessions);
@@ -458,6 +491,50 @@ describe("SessionManager persistent lock integration", () => {
 		await aliasManager.close();
 	});
 
+	it("retains a rollback target lock when its first cleanup fails", async () => {
+		const { cwd, sessions } = fixture();
+		const targetCwd = path.join(path.dirname(cwd), "target-cwd-release-retry");
+		const targetSessions = path.join(path.dirname(sessions), "target-sessions-release-retry");
+		fs.mkdirSync(targetCwd);
+		const manager = SessionManager.create(cwd, sessions);
+		await manager.ensureOnDisk();
+		const oldFile = manager.getSessionFile();
+		if (!oldFile) throw new Error("missing session file");
+		const newFile = path.join(targetSessions, path.basename(oldFile));
+		const oldLockPath = lockPathForSession(oldFile);
+		const unlinkSync = fs.unlinkSync;
+		let sourceFailed = false;
+		let targetFailed = false;
+		const unlinkSpy = vi.spyOn(fs, "unlinkSync").mockImplementation(target => {
+			if (!sourceFailed && String(target) === oldLockPath) {
+				sourceFailed = true;
+				const error = new Error("source release failed") as NodeJS.ErrnoException;
+				error.code = "EIO";
+				throw error;
+			}
+			if (!targetFailed && String(target).endsWith(`${path.basename(newFile)}.lock`)) {
+				targetFailed = true;
+				const error = new Error("target rollback release failed") as NodeJS.ErrnoException;
+				error.code = "EIO";
+				throw error;
+			}
+			return unlinkSync(target);
+		});
+		try {
+			await expect(manager.moveTo(targetCwd, targetSessions)).rejects.toBeInstanceOf(SessionLockError);
+			expect(fs.existsSync(oldFile)).toBe(true);
+			expect(fs.existsSync(newFile)).toBe(false);
+			expect(fs.existsSync(lockPathForSession(newFile))).toBe(true);
+		} finally {
+			unlinkSpy.mockRestore();
+		}
+
+		await manager.close().catch(error => {
+			if (!(error instanceof SessionPersistenceIndeterminateError)) throw error;
+		});
+		expect(fs.existsSync(lockPathForSession(newFile))).toBe(false);
+	});
+
 	it("keeps target ownership when move rollback leaves the journal there", async () => {
 		const { cwd, sessions } = fixture();
 		const targetCwd = path.join(path.dirname(cwd), "target-cwd");
@@ -536,6 +613,32 @@ describe("SessionManager persistent lock integration", () => {
 		manager.appendMessage({ role: "user", content: "still owned", timestamp: Date.now() });
 		await manager.flush();
 		await manager.close();
+	});
+
+	it("retains a foreign deletion lock when its first release fails", async () => {
+		const { cwd, sessions } = fixture();
+		fs.mkdirSync(sessions, { recursive: true });
+		const target = path.join(sessions, "delete-release-retry.jsonl");
+		fs.writeFileSync(target, "session");
+		const manager = SessionManager.create(cwd, sessions);
+		const targetLockPath = lockPathForSession(target);
+		const unlinkSync = fs.unlinkSync;
+		let failed = false;
+		const unlinkSpy = vi.spyOn(fs, "unlinkSync").mockImplementation(targetPath => {
+			if (!failed && String(targetPath) === targetLockPath) {
+				failed = true;
+				const error = new Error("transient target release failure") as NodeJS.ErrnoException;
+				error.code = "EIO";
+				throw error;
+			}
+			return unlinkSync(targetPath);
+		});
+		await expect(manager.dropSession(target)).rejects.toBeInstanceOf(SessionLockError);
+		expect(fs.existsSync(targetLockPath)).toBe(true);
+		unlinkSpy.mockRestore();
+
+		await manager.close();
+		expect(fs.existsSync(targetLockPath)).toBe(false);
 	});
 
 	it("refuses to delete a session owned by another manager", async () => {
@@ -634,6 +737,21 @@ describe("SessionManager persistent lock integration", () => {
 		writeSpy.mockRestore();
 
 		expect(fs.existsSync(lockPathForSession(targetFile))).toBe(false);
+	});
+
+	it("releases a persist-copy target lock when publication fails", async () => {
+		const { cwd, sessions } = fixture();
+		const source = SessionManager.inMemory(cwd);
+		source.appendMessage({ role: "user", content: "copy source", timestamp: Date.now() });
+		const storage = new FileSessionStorage();
+		const writeSpy = vi.spyOn(storage, "writeTextAtomic").mockRejectedValueOnce(new Error("copy publish failed"));
+		await expect(source.persistCopy({ sessionDir: sessions }, storage)).rejects.toThrow("copy publish failed");
+		writeSpy.mockRestore();
+
+		const leakedLocks = fs.existsSync(sessions)
+			? fs.readdirSync(sessions).filter(name => name.endsWith(".jsonl.lock"))
+			: [];
+		expect(leakedLocks).toEqual([]);
 	});
 
 	it("refuses deletion after a heartbeat loses ownership", async () => {

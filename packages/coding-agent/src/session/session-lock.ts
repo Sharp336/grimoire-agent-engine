@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getSessionsDir } from "@oh-my-pi/pi-utils";
 
 /** On-disk format version for session lock records. */
 export const SESSION_LOCK_PROTOCOL_VERSION = 1;
@@ -66,6 +67,11 @@ export interface SessionLockOptions {
 	processProbe?: SessionLockProcessProbe;
 	heartbeatIntervalMs?: number;
 	onHeartbeatError?: (error: SessionLockError) => void;
+	/**
+	 * Shared namespace for inode claims. Every writer that can access the same
+	 * session storage must use the same directory.
+	 */
+	identityLockDirectory?: string;
 }
 
 /** Observed lock state and stale-recovery eligibility. */
@@ -911,9 +917,14 @@ function fileIdentity(sessionFile: string): SessionFileIdentity | undefined {
 	return { dev: stat.dev, ino: stat.ino, birthtimeMs: Math.max(0, birthtimeMs) };
 }
 
-function identityLockTarget(identity: SessionFileIdentity): string {
-	const uid = typeof process.getuid === "function" ? process.getuid() : "user";
-	const identityDir = path.join(os.tmpdir(), `oh-my-pi-session-identities-${uid}`);
+function identityLockTarget(identity: SessionFileIdentity, options: SessionLockOptions): string {
+	// Keep inode claims with the configured session data, not in host-local
+	// temporary storage. A shared PI_CODING_AGENT_DIR therefore gives every
+	// container/host the same namespace; embedders with custom session storage
+	// can provide its shared lock directory explicitly.
+	const identityDir = path.resolve(
+		options.identityLockDirectory ?? path.join(getSessionsDir(), ".locks", "identities"),
+	);
 	fs.mkdirSync(identityDir, { recursive: true, mode: 0o700 });
 	fs.chmodSync(identityDir, 0o700);
 	// The birth stamp separates a recycled inode from the file that previously
@@ -933,7 +944,9 @@ function sameFileIdentity(a: SessionFileIdentity | undefined, b: SessionFileIden
 export function acquireSessionLock(sessionFile: string, options: SessionLockOptions = {}): SessionLockHandle {
 	const normalized = normalizeSessionFile(sessionFile);
 	let ownedIdentity = fileIdentity(normalized);
-	let identityHandle = ownedIdentity ? acquirePathSessionLock(identityLockTarget(ownedIdentity), options) : undefined;
+	let identityHandle = ownedIdentity
+		? acquirePathSessionLock(identityLockTarget(ownedIdentity, options), options)
+		: undefined;
 	const supersededIdentityHandles = new Set<PathSessionLockHandle>();
 	let pathHandle: PathSessionLockHandle;
 	try {
@@ -985,7 +998,7 @@ export function acquireSessionLock(sessionFile: string, options: SessionLockOpti
 			if (sameFileIdentity(nextIdentity, ownedIdentity)) {
 				return { identity: nextIdentity, commit() {}, rollback() {} };
 			}
-			const nextHandle = acquirePathSessionLock(identityLockTarget(nextIdentity), options);
+			const nextHandle = acquirePathSessionLock(identityLockTarget(nextIdentity, options), options);
 			let settled = false;
 			return {
 				identity: nextIdentity,
@@ -1028,25 +1041,15 @@ export function acquireSessionLock(sessionFile: string, options: SessionLockOpti
 			pathHandle.heartbeat();
 		},
 		release(): void {
-			let pathError: unknown;
-			try {
-				pathHandle.release();
-			} catch (error) {
-				pathError = error;
+			// The path record is the public ownership fence. If it cannot be
+			// removed, retain the inode claim too so a hard-link alias cannot open
+			// the still-owned file while this composite handle remains retryable.
+			pathHandle.release();
+			identityHandle?.release();
+			for (const handle of supersededIdentityHandles) {
+				handle.release();
+				supersededIdentityHandles.delete(handle);
 			}
-			try {
-				identityHandle?.release();
-				for (const handle of supersededIdentityHandles) {
-					handle.release();
-					supersededIdentityHandles.delete(handle);
-				}
-			} catch (identityError) {
-				if (pathError) {
-					throw new AggregateError([pathError, identityError], "Failed to release session locks");
-				}
-				throw identityError;
-			}
-			if (pathError) throw pathError;
 		},
 		get released() {
 			return (

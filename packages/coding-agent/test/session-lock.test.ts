@@ -456,6 +456,51 @@ describe("session lock", () => {
 		aliasLock.release();
 	});
 
+	it("keeps inode ownership when path-lock release must be retried", () => {
+		const { dir, session } = fixture();
+		fs.writeFileSync(session, "session");
+		const options = {
+			pid: 42,
+			processStartMarker: "marker",
+			processProbe: probe(true),
+			identityLockDirectory: path.join(dir, "shared-identities"),
+		};
+		const lock = acquireSessionLock(session, options);
+		const alias = path.join(dir, "release-retry-alias.jsonl");
+		fs.linkSync(session, alias);
+		fs.unlinkSync(session);
+
+		const unlinkSync = fs.unlinkSync;
+		const unlinkSpy = vi.spyOn(fs, "unlinkSync").mockImplementation(target => {
+			if (String(target) === lock.lockPath) {
+				const error = new Error("path release failed") as NodeJS.ErrnoException;
+				error.code = "EIO";
+				throw error;
+			}
+			return unlinkSync(target);
+		});
+		expect(() => lock.release()).toThrow(SessionLockError);
+		expect(() => acquireSessionLock(alias, { ...options, ownerId: OWNER_B })).toThrow(
+			expect.objectContaining({ name: "SessionLockError", code: "locked" }),
+		);
+		unlinkSpy.mockRestore();
+
+		lock.release();
+		const aliasLock = acquireSessionLock(alias, { ...options, ownerId: OWNER_B });
+		aliasLock.release();
+	});
+
+	it("stores inode claims in the configured shared session namespace", () => {
+		const { dir, session } = fixture();
+		fs.writeFileSync(session, "session");
+		const sharedIdentities = path.join(dir, "mounted-session-storage", ".locks");
+		const lock = acquireSessionLock(session, { identityLockDirectory: sharedIdentities });
+		const identityLocks = fs.readdirSync(sharedIdentities).filter(name => name.endsWith(".identity.lock"));
+		expect(identityLocks).toHaveLength(1);
+		lock.release();
+		expect(fs.readdirSync(sharedIdentities).filter(name => name.endsWith(".identity.lock"))).toHaveLength(0);
+	});
+
 	it("rejects ownership when the session inode changes during acquisition", () => {
 		const { dir, session } = fixture();
 		fs.writeFileSync(session, "original");

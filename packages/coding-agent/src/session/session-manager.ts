@@ -440,25 +440,25 @@ export class SessionPersistenceIndeterminateError extends AggregateError {
  * repointed.
  */
 export class SessionManager {
-	static readonly #failedOpenManagers = new Set<SessionManager>();
-	static #failedOpenCleanupScheduled = false;
+	static readonly #failedCleanupManagers = new Set<SessionManager>();
+	static #failedCleanupScheduled = false;
 
-	static #retainFailedOpenManager(manager: SessionManager): void {
-		SessionManager.#failedOpenManagers.add(manager);
-		if (SessionManager.#failedOpenCleanupScheduled) return;
-		SessionManager.#failedOpenCleanupScheduled = true;
+	static #retainFailedCleanupManager(manager: SessionManager): void {
+		SessionManager.#failedCleanupManagers.add(manager);
+		if (SessionManager.#failedCleanupScheduled) return;
+		SessionManager.#failedCleanupScheduled = true;
 		const timer = setTimeout(() => {
-			SessionManager.#failedOpenCleanupScheduled = false;
-			for (const pending of SessionManager.#failedOpenManagers) {
+			SessionManager.#failedCleanupScheduled = false;
+			for (const pending of SessionManager.#failedCleanupManagers) {
 				try {
 					pending.#releaseAllSessionLocks();
-					SessionManager.#failedOpenManagers.delete(pending);
+					SessionManager.#failedCleanupManagers.delete(pending);
 				} catch {
 					// Keep the manager reachable and retry transient cleanup later.
 				}
 			}
-			if (SessionManager.#failedOpenManagers.size > 0) {
-				SessionManager.#retainFailedOpenManager(SessionManager.#failedOpenManagers.values().next().value!);
+			if (SessionManager.#failedCleanupManagers.size > 0) {
+				SessionManager.#retainFailedCleanupManager(SessionManager.#failedCleanupManagers.values().next().value!);
 			}
 		}, SESSION_LOCK_HEARTBEAT_MS);
 		timer.unref?.();
@@ -707,11 +707,21 @@ export class SessionManager {
 		return lock.handle.prepareFileIdentity(stagedPath);
 	}
 
-	#retainSessionLock(): SharedSessionLock | undefined {
+	#retainSessionLock(
+		errorHandler: (error: Error) => void = this.#sessionLockErrorHandler,
+	): SharedSessionLock | undefined {
 		if (!this.#sessionLock) return undefined;
 		this.#sessionLock.references++;
-		this.#sessionLock.errorHandlers.add(this.#sessionLockErrorHandler);
+		this.#sessionLock.errorHandlers.add(errorHandler);
 		return this.#sessionLock;
+	}
+
+	#retainDetachedSessionLock(
+		handle: SessionLockHandle,
+		errorHandlers: Set<(error: Error) => void> = new Set([this.#sessionLockErrorHandler]),
+		state: SharedSessionLock["state"] = { invalid: false },
+	): void {
+		this.#supersededSessionLocks.add({ handle, references: 1, errorHandlers, state });
 	}
 
 	#adoptRetainedSessionLock(source: SessionManager, sessionFile: string): boolean {
@@ -1432,7 +1442,7 @@ export class SessionManager {
 		const persist = options?.persist ?? this.#persist;
 		const clone = new SessionManager(this.#cwd, this.#sessionDir, persist, this.#storage);
 		clone.#suppressBreadcrumb = true;
-		if (persist) clone.#sessionLock = this.#retainSessionLock();
+		if (persist) clone.#sessionLock = this.#retainSessionLock(clone.#sessionLockErrorHandler);
 		clone.restoreState(this.captureState());
 		if (!persist) {
 			clone.#sessionFile = undefined;
@@ -1610,6 +1620,7 @@ export class SessionManager {
 		const targetLock = ownsDeletion ? undefined : this.#lockForeignSessionDeletion(resolvedSessionPath);
 		const deletionLock = ownsDeletion ? ownedLock : targetLock;
 		const ownedSessionPath = deletionLock?.record.sessionFile ?? resolvedSessionPath;
+		let deletionError: unknown;
 		try {
 			try {
 				await this.#storage.deleteSessionWithArtifacts(ownedSessionPath);
@@ -1623,12 +1634,22 @@ export class SessionManager {
 					if (!isEnoent(err)) throw err;
 				}
 			}
-		} finally {
-			// targetLock is only set when this manager does not already own the
-			// session, so exactly one of these releases applies per call.
-			targetLock?.release();
-			if (ownsDeletion) this.#releaseSessionLock();
+		} catch (error) {
+			deletionError = error;
 		}
+		// targetLock is only set when this manager does not already own the
+		// session, so exactly one of these releases applies per call.
+		try {
+			if (targetLock) targetLock.release();
+			if (ownsDeletion) this.#releaseSessionLock();
+		} catch (releaseError) {
+			if (targetLock) this.#retainDetachedSessionLock(targetLock);
+			if (deletionError) {
+				throw new AggregateError([deletionError, releaseError], "Failed to delete and release session ownership");
+			}
+			throw releaseError;
+		}
+		if (deletionError) throw deletionError;
 	}
 
 	/**
@@ -1805,7 +1826,13 @@ export class SessionManager {
 						}
 					}
 					if (rollbackErrors.length === 0) {
-						targetLock?.release();
+						if (targetLock) {
+							try {
+								targetLock.release();
+							} catch {
+								this.#retainDetachedSessionLock(targetLock, targetErrorHandlers, targetLockState);
+							}
+						}
 						throw err;
 					}
 
@@ -1837,8 +1864,13 @@ export class SessionManager {
 						this.#sessionDir = nextSessionDir;
 						this.#artifactManager = null;
 						this.#artifactManagerSessionFile = null;
-					} else {
-						targetLock?.release();
+					} else if (targetLock) {
+						try {
+							targetLock.release();
+						} catch (releaseError) {
+							this.#retainDetachedSessionLock(targetLock, targetErrorHandlers, targetLockState);
+							rollbackErrors.push(toError(releaseError));
+						}
 					}
 					throw this.#latchIndeterminate(toError(err), rollbackErrors);
 				}
@@ -1921,8 +1953,21 @@ export class SessionManager {
 		manager.#entries = structuredClone(this.#entries);
 		manager.#index.rebuild(manager.#entries);
 		manager.#forceFileCreation = true;
-		await manager.#rewriteAtomically();
-		return manager;
+		try {
+			await manager.#rewriteAtomically();
+			return manager;
+		} catch (error) {
+			try {
+				await manager.close();
+			} catch {
+				try {
+					manager.#releaseAllSessionLocks();
+				} catch {
+					SessionManager.#retainFailedCleanupManager(manager);
+				}
+			}
+			throw error;
+		}
 	}
 
 	/**
@@ -2993,7 +3038,7 @@ export class SessionManager {
 			try {
 				manager.#releaseAllSessionLocks();
 			} catch {
-				SessionManager.#retainFailedOpenManager(manager);
+				SessionManager.#retainFailedCleanupManager(manager);
 			}
 			throw error;
 		}
@@ -3199,7 +3244,7 @@ export class SessionManager {
 			try {
 				manager.#releaseAllSessionLocks();
 			} catch {
-				SessionManager.#retainFailedOpenManager(manager);
+				SessionManager.#retainFailedCleanupManager(manager);
 			}
 			throw error;
 		}
