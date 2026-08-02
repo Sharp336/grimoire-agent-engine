@@ -4124,7 +4124,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.requestRender();
 		};
 		nextEditor.onInputModeChange = mode => {
-			if (mode !== undefined && mode !== "insert") this.#sttController?.cancel();
+			if (mode !== undefined && mode !== "insert") {
+				nextEditor.cancelSpaceHold();
+				this.#sttController?.cancel();
+			}
 			this.ui.requestComponentRender(nextEditor);
 		};
 		nextEditor.setShimmerRepaintHandler(() => this.ui.requestComponentRender(this.editor));
