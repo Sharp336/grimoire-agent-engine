@@ -12,6 +12,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/cli/doctor-cli";
 import { PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/manager";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import * as browserLaunch from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import { getAgentDbPath, getHistoryDbPath, getModelDbPath, setProjectDir } from "@oh-my-pi/pi-utils";
 import { runCli } from "../src/cli";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
@@ -347,7 +348,7 @@ describe("omp doctor", () => {
 		expect(["ok", "warning", "error"]).toContain(parsed.overallStatus);
 		for (const finding of parsed.findings) {
 			expect(typeof finding.id).toBe("string");
-			expect(["environment", "config", "tools", "storage", "mcp", "plugins"]).toContain(finding.category);
+			expect(["environment", "config", "tools", "storage", "mcp", "browser", "plugins"]).toContain(finding.category);
 			expect(["ok", "warning", "error"]).toContain(finding.status);
 			expect(typeof finding.summary).toBe("string");
 			expect(Array.isArray(finding.details)).toBe(true);
@@ -832,5 +833,89 @@ describe("omp doctor", () => {
 		const finding = report.findings.find(entry => entry.id === "mcp.nullTimeout");
 		expect(finding?.status).toBe("error");
 		expect(finding?.details.some(d => d.includes("timeout") && d.includes("null"))).toBe(true);
+	});
+
+	test("browser: PUPPETEER_EXECUTABLE_PATH pointing at a missing file is an error", async () => {
+		// Spy on the resolution seams (not process.env) so the test is hermetic.
+		// resolveSystemChromium returns undefined so the env override is actually evaluated.
+		const chromeSpy = spyOn(browserLaunch, "resolveSystemChromium").mockReturnValue(undefined);
+		const envSpy = spyOn(browserLaunch, "readChromiumEnvOverride").mockReturnValue(
+			path.join(root, "nonexistent-chrome"),
+		);
+		try {
+			const report = await runDoctorCommand({ flags: { agentDir: root } });
+			const finding = report.findings.find(entry => entry.id === "browser.chromium");
+			expect(finding?.category).toBe("browser");
+			expect(finding?.status).toBe("error");
+			expect(finding?.summary).toContain("missing file");
+			expect(finding?.remedy).toBeDefined();
+		} finally {
+			chromeSpy.mockRestore();
+			envSpy.mockRestore();
+		}
+	});
+
+	test("browser: system Chrome resolution returns a path → ok", async () => {
+		const fakePath = path.join(root, "fake-chrome");
+		await fs.writeFile(fakePath, "fake", "utf8");
+		const chromeSpy = spyOn(browserLaunch, "resolveSystemChromium").mockReturnValue(fakePath);
+		try {
+			const report = await runDoctorCommand({ flags: { agentDir: root } });
+			const finding = report.findings.find(entry => entry.id === "browser.chromium");
+			expect(finding?.category).toBe("browser");
+			expect(finding?.status).toBe("ok");
+			expect(finding?.summary).toBe(fakePath);
+		} finally {
+			chromeSpy.mockRestore();
+		}
+	});
+
+	test("browser: nothing resolvable → warning", async () => {
+		const chromeSpy = spyOn(browserLaunch, "resolveSystemChromium").mockReturnValue(undefined);
+		const envSpy = spyOn(browserLaunch, "readChromiumEnvOverride").mockReturnValue(undefined);
+		try {
+			const report = await runDoctorCommand({ flags: { agentDir: root } });
+			const finding = report.findings.find(entry => entry.id === "browser.chromium");
+			expect(finding?.category).toBe("browser");
+			expect(finding?.status).toBe("warning");
+			expect(finding?.summary).toContain("no system Chrome/Chromium");
+			expect(finding?.remedy).toBeDefined();
+		} finally {
+			chromeSpy.mockRestore();
+			envSpy.mockRestore();
+		}
+	});
+
+	test("browser: PUPPETEER_EXECUTABLE_PATH pointing at an existing file → ok", async () => {
+		const fakePath = path.join(root, "env-chrome");
+		await fs.writeFile(fakePath, "fake", "utf8");
+		const chromeSpy = spyOn(browserLaunch, "resolveSystemChromium").mockReturnValue(undefined);
+		const envSpy = spyOn(browserLaunch, "readChromiumEnvOverride").mockReturnValue(fakePath);
+		try {
+			const report = await runDoctorCommand({ flags: { agentDir: root } });
+			const finding = report.findings.find(entry => entry.id === "browser.chromium");
+			expect(finding?.category).toBe("browser");
+			expect(finding?.status).toBe("ok");
+			expect(finding?.summary).toBe(fakePath);
+			expect(finding?.details).toContain("resolved via PUPPETEER_EXECUTABLE_PATH");
+		} finally {
+			chromeSpy.mockRestore();
+			envSpy.mockRestore();
+		}
+	});
+
+	test("tools section includes a fuser finding on Linux", async () => {
+		// fuser is Linux-only; the finding must be present on Linux and absent elsewhere.
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const fuserFinding = report.findings.find(entry => entry.id === "tools.fuser");
+		if (process.platform === "linux") {
+			expect(fuserFinding).toBeDefined();
+			if (fuserFinding === undefined) return; // narrows type for the status assertion below
+			expect(fuserFinding.category).toBe("tools");
+			// Status depends on whether fuser is installed on the test host.
+			expect(["ok", "warning"]).toContain(fuserFinding.status);
+		} else {
+			expect(fuserFinding).toBeUndefined();
+		}
 	});
 });

@@ -11,6 +11,7 @@
 - Added in-process `pgrep`, `pkill`, `pidwait`, and `top` shell builtins with cross-platform process discovery, BSD/procps-style filters, pidfile handling, signal selection, waiting, and snapshots.
 - Added a `config` sanity section to `omp doctor` that surfaces settings and models-config parse/schema errors through a read-only diagnostic load (no migration, no quarantine, no disk writes) and reports `*.broken-*` quarantined config siblings as errors.
 - Added an `mcp` sanity section to `omp doctor` that validates MCP server specs via the real `validateServerConfig`, resolves stdio commands with `Bun.which`, and checks http/sse URL syntax — a static sanity pass with no live connections, OAuth probes, or spawned handshakes.
+- Added a `browser` sanity section to `omp doctor` that reports how the browser tool would resolve a Chromium executable — system Chrome/Chromium found (ok), `PUPPETEER_EXECUTABLE_PATH` honored but pointing at a missing file (error), or nothing resolvable (warning, Chromium may be downloaded on first browser use) — without downloading or launching anything. The tools section also now probes `fuser` on Linux, warning when the cross-process holder detection used by `--fix` repairs is degraded.
 
 ### Changed
 

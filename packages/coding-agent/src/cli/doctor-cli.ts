@@ -28,6 +28,7 @@ import type { DoctorCheck } from "../extensibility/plugins/types";
 import { convertToLegacyConfig, validateServerConfig } from "../mcp/config";
 import type { MCPServerConfig } from "../mcp/types";
 import { theme } from "../modes/theme/theme";
+import { readChromiumEnvOverride, resolveSystemChromium } from "../tools/browser/launch";
 import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
 import {
 	type DbProbe,
@@ -43,7 +44,7 @@ import { withGcLock } from "./gc-cli";
 
 export type DoctorStatus = "ok" | "warning" | "error";
 
-export type DoctorCategory = "environment" | "config" | "tools" | "storage" | "mcp" | "plugins";
+export type DoctorCategory = "environment" | "config" | "tools" | "storage" | "mcp" | "browser" | "plugins";
 
 export interface DoctorFinding {
 	/** Stable dotted id, e.g. "storage.history.db" or "tools.git". */
@@ -76,7 +77,15 @@ export interface DoctorReport {
 	findings: DoctorFinding[];
 }
 
-const CATEGORY_ORDER: readonly DoctorCategory[] = ["environment", "config", "tools", "storage", "mcp", "plugins"];
+const CATEGORY_ORDER: readonly DoctorCategory[] = [
+	"environment",
+	"config",
+	"tools",
+	"storage",
+	"mcp",
+	"browser",
+	"plugins",
+];
 
 const TOOL_CHECKS: ReadonlyArray<{ name: string; missingStatus: DoctorStatus; remedy: string }> = [
 	// git is the one hard requirement: all VCS integration routes through src/utils/git.ts.
@@ -113,9 +122,105 @@ function collectToolFindings(): DoctorFinding[] {
 			remedy: tool.remedy,
 		};
 	});
+	// On Linux, fuser backs cross-process holder detection (doctor-sqlite hasHolders);
+	// without it, busy-database checks degrade to null (proceed-and-let-locks-decide).
+	if (process.platform === "linux") {
+		const fuser = $which("fuser");
+		if (fuser !== null) {
+			findings.push({ id: "tools.fuser", category: "tools", status: "ok", summary: fuser, details: [] });
+		} else {
+			findings.push({
+				id: "tools.fuser",
+				category: "tools",
+				status: "warning",
+				summary: "fuser not found on PATH",
+				details: [],
+				remedy:
+					"Install psmisc (provides fuser) so doctor can detect foreign database holders; busy-database checks are degraded without it",
+			});
+		}
+	}
 	return findings;
 }
 
+/**
+ * Probe how the browser tool would resolve a Chromium executable — without
+ * downloading or launching anything. Mirrors `ensureChromiumExecutable`'s
+ * precedence (system detection first, then the env override) but stats the
+ * override path, which the real launcher does not (it trusts the value and
+ * lets puppeteer fail at launch). The doctor catches a stale override before
+ * the user hits a confusing launch error.
+ */
+async function collectBrowserFindings(): Promise<DoctorFinding[]> {
+	const sysChrome = resolveSystemChromium();
+	if (sysChrome) {
+		return [{ id: "browser.chromium", category: "browser", status: "ok", summary: sysChrome, details: [] }];
+	}
+	const envPath = readChromiumEnvOverride();
+	if (envPath) {
+		try {
+			const st = await fs.promises.stat(envPath);
+			if (st.isFile()) {
+				return [
+					{
+						id: "browser.chromium",
+						category: "browser",
+						status: "ok",
+						summary: envPath,
+						details: ["resolved via PUPPETEER_EXECUTABLE_PATH"],
+					},
+				];
+			}
+			return [
+				{
+					id: "browser.chromium",
+					category: "browser",
+					status: "error",
+					summary: "PUPPETEER_EXECUTABLE_PATH is not a regular file",
+					details: [envPath],
+					remedy:
+						"Set PUPPETEER_EXECUTABLE_PATH to an existing Chrome/Chromium binary, or unset it to fall back to system detection",
+				},
+			];
+		} catch (error) {
+			if (isEnoent(error)) {
+				return [
+					{
+						id: "browser.chromium",
+						category: "browser",
+						status: "error",
+						summary: "PUPPETEER_EXECUTABLE_PATH points at a missing file",
+						details: [envPath],
+						remedy:
+							"Set PUPPETEER_EXECUTABLE_PATH to an existing Chrome/Chromium binary, or unset it to fall back to system detection",
+					},
+				];
+			}
+			return [
+				{
+					id: "browser.chromium",
+					category: "browser",
+					status: "error",
+					summary: `cannot stat PUPPETEER_EXECUTABLE_PATH: ${(error as Error).message}`,
+					details: [envPath],
+					remedy:
+						"Fix the path or permissions of PUPPETEER_EXECUTABLE_PATH, or unset it to fall back to system detection",
+				},
+			];
+		}
+	}
+	return [
+		{
+			id: "browser.chromium",
+			category: "browser",
+			status: "warning",
+			summary:
+				"no system Chrome/Chromium found and PUPPETEER_EXECUTABLE_PATH is unset; Chromium may be downloaded on first browser use",
+			details: [],
+			remedy: "Install Chrome/Chromium or set PUPPETEER_EXECUTABLE_PATH to avoid the first-use download",
+		},
+	];
+}
 async function collectSqliteRecoverFinding(): Promise<DoctorFinding> {
 	// The engine memoizes this probe; the cost is paid once per process.
 	const capability = await probeSqliteRecoverCapability();
@@ -690,6 +795,7 @@ export async function collectDoctorReport(flags: DoctorCommandFlags): Promise<Do
 		await collectSqliteRecoverFinding(),
 		...(await collectStorageFindings(flags)),
 		...(await collectMcpFindings(flags)),
+		...(await collectBrowserFindings()),
 		...(await collectPluginFindings(flags)),
 	];
 	const overallStatus: DoctorStatus = findings.some(f => f.status === "error")
