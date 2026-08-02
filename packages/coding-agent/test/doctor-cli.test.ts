@@ -601,6 +601,29 @@ describe("omp doctor", () => {
 		expect(humanOut).toContain("plugin red bell");
 	});
 
+	test("mnemopi bank scan failure surfaces as storage.mnemopi alongside other probes", async () => {
+		// Agent-scoped mnemopi bank discovery must not swallow non-ENOENT failures,
+		// and must not prevent probing other databases in the same report.
+		setAgentDir(root);
+		await createDatabaseWithRows(getHistoryDbPath(root), 10);
+		const memories = path.join(root, "memories");
+		await fs.mkdir(memories, { recursive: true });
+		await fs.writeFile(path.join(memories, "mnemopi"), "x");
+		const memSpy = spyOn(piUtils, "getMemoriesDir").mockReturnValue(memories);
+		try {
+			const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+			const scanFinding = report.findings.find(entry => entry.id === "storage.mnemopi");
+			expect(scanFinding?.status).toBe("error");
+			expect(scanFinding?.summary).toContain("cannot scan");
+			expect(scanFinding?.details.some(detail => /ENOTDIR|EACCES/.test(detail))).toBe(true);
+			const history = report.findings.find(entry => entry.id === "storage.history.db");
+			expect(history).toBeDefined();
+			expect(history?.status).toBe("ok");
+		} finally {
+			memSpy.mockRestore();
+		}
+	});
+
 	test("autoresearch scan failure surfaces alongside another storage finding", async () => {
 		// Root-scoped autoresearch discovery must not swallow non-ENOENT failures,
 		// and must not prevent probing other databases in the same report.
@@ -1421,12 +1444,31 @@ describe("omp doctor", () => {
 		expect(finding?.details.some(d => d.includes("WATCHDOG.yml"))).toBe(true);
 	});
 
-	test("setup: SKILL.md with broken frontmatter → error", async () => {
-		const skillsDir = path.join(root, "skills", "broken-skill");
+	test("setup: valid SKILL.md via runtime capability path → ok", async () => {
+		setProjectDir(root);
+		const skillsDir = path.join(root, "skills", "good-skill");
 		await fs.mkdir(skillsDir, { recursive: true });
 		await fs.writeFile(
 			path.join(skillsDir, "SKILL.md"),
-			"---\nname: [unclosed\ndescription: test\n---\nBody\n",
+			"---\nname: good-skill\ndescription: test\n---\nBody\n",
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "setup.skills");
+		expect(finding?.category).toBe("setup");
+		expect(finding?.status).toBe("ok");
+		expect(finding?.summary).toMatch(/skills: \d+ valid/);
+		expect(Number(finding?.summary.match(/(\d+)/)?.[1] ?? 0)).toBeGreaterThanOrEqual(1);
+	});
+
+	test("setup: skills.customDirectories warning is surfaced", async () => {
+		setProjectDir(root);
+		const customPath = path.join(root, "not-a-skills-dir.txt");
+		await fs.writeFile(customPath, "not a directory\n", "utf8");
+		await fs.writeFile(
+			path.join(root, "config.yml"),
+			`${["skills:", "  customDirectories:", `    - ${customPath}`].join("\n")}\n`,
 			"utf8",
 		);
 
@@ -1434,7 +1476,26 @@ describe("omp doctor", () => {
 		const finding = report.findings.find(entry => entry.id === "setup.skills");
 		expect(finding?.category).toBe("setup");
 		expect(finding?.status).toBe("error");
-		expect(finding?.details.some(d => d.includes("broken-skill"))).toBe(true);
+		expect(finding?.details.some(d => d.includes("Failed to read skills directory") && d.includes(customPath))).toBe(
+			true,
+		);
+	});
+
+	test("setup: honors runtime skills.enablePiUser filtering", async () => {
+		setProjectDir(root);
+		const skillsDir = path.join(root, "skills", "filtered-skill");
+		await fs.mkdir(skillsDir, { recursive: true });
+		await fs.writeFile(
+			path.join(skillsDir, "SKILL.md"),
+			"---\nname: filtered-skill\ndescription: test\n---\nBody\n",
+			"utf8",
+		);
+		await fs.writeFile(path.join(root, "config.yml"), "skills:\n  enablePiUser: false\n", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "setup.skills");
+		expect(finding?.status).toBe("ok");
+		expect(finding?.summary).toBe("skills: 0 valid");
 	});
 
 	test("setup: theme json failing themeJsonSchema → error", async () => {
@@ -1924,6 +1985,44 @@ describe("omp doctor", () => {
 		const errorFinding = mcpFindings.find(entry => entry.status === "error");
 		expect(errorFinding).toBeDefined();
 		expect(errorFinding?.details.some(d => d.includes("invalid JSON"))).toBe(true);
+	});
+
+	test("primitive mcpServers produces an MCP error finding, not mcp.none", async () => {
+		setProjectDir(root);
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(mcpJson, JSON.stringify({ mcpServers: true }), "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const mcpFindings = report.findings.filter(entry => entry.category === "mcp");
+		const noneOk = mcpFindings.find(entry => entry.id === "mcp.none" && entry.status === "ok");
+		expect(noneOk).toBeUndefined();
+		const mapError = mcpFindings.find(
+			entry =>
+				entry.status === "error" &&
+				entry.details.some(
+					d => d.includes("mcpServers") && (d.includes("object map") || d.includes("Invalid mcpServers")),
+				),
+		);
+		expect(mapError).toBeDefined();
+	});
+
+	test("array mcpServers produces an MCP error finding, not mcp.none", async () => {
+		setProjectDir(root);
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(mcpJson, JSON.stringify({ mcpServers: [{ name: "x" }] }), "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const mcpFindings = report.findings.filter(entry => entry.category === "mcp");
+		const noneOk = mcpFindings.find(entry => entry.id === "mcp.none" && entry.status === "ok");
+		expect(noneOk).toBeUndefined();
+		const mapError = mcpFindings.find(
+			entry =>
+				entry.status === "error" &&
+				entry.details.some(
+					d => d.includes("mcpServers") && (d.includes("object map") || d.includes("Invalid mcpServers")),
+				),
+		);
+		expect(mapError).toBeDefined();
 	});
 
 	// ── Item C: legacy marker requires manual recovery ────────────────────────

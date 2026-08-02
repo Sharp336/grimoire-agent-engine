@@ -160,8 +160,20 @@ export function scanAutoresearchDatabases(): AutoresearchDatabaseScan {
 	}
 }
 
-/** Mnemopi databases under the agent-scoped memories tree; a missing directory yields no entries. */
-function listMnemopiDatabases(agentDir: string | undefined): DoctorDatabase[] {
+/** Result of resolving known mnemopi databases under the agent-scoped memories tree. */
+interface MnemopiDatabaseScan {
+	databases: DoctorDatabase[];
+	/** Non-ENOENT failure while scanning bank databases; missing directory yields `null`. */
+	error: string | null;
+}
+
+/**
+ * Mnemopi databases under the agent-scoped memories tree.
+ * A missing directory is normal (top-level entry only, no error). Permission/I/O
+ * failures scanning bank databases under banks/ return an error string so the
+ * storage collector can emit a finding without aborting other database probes.
+ */
+function listMnemopiDatabases(agentDir: string | undefined): MnemopiDatabaseScan {
 	const mnemopiDir = path.join(getMemoriesDir(agentDir), "mnemopi");
 	const databases: DoctorDatabase[] = [
 		{ label: "mnemopi/mnemopi.db", path: path.join(mnemopiDir, "mnemopi.db"), policy: "precious" },
@@ -170,17 +182,18 @@ function listMnemopiDatabases(agentDir: string | undefined): DoctorDatabase[] {
 		for (const entry of new Bun.Glob("banks/*/mnemopi.db").scanSync({ cwd: mnemopiDir })) {
 			databases.push({ label: `mnemopi/${entry}`, path: path.join(mnemopiDir, entry), policy: "precious" });
 		}
-	} catch {
-		// missing mnemopi directory — no bank databases
+		return { databases, error: null };
+	} catch (error) {
+		if (isEnoent(error)) return { databases, error: null };
+		return { databases, error: messageOf(error) };
 	}
-	return databases;
 }
 
-/** Databases to probe plus optional discovery failures for root-scoped trees. */
+/** Databases to probe plus optional discovery failures for optional/agent trees. */
 export interface ResolvedDoctorDatabases {
 	databases: DoctorDatabase[];
 	/**
-	 * Non-ENOENT failures discovering optional database trees (e.g. autoresearch).
+	 * Non-ENOENT failures discovering optional database trees (e.g. autoresearch, mnemopi banks).
 	 * Present so the storage collector can emit an error finding and still probe
 	 * every other database.
 	 */
@@ -198,7 +211,11 @@ export function resolveDoctorDatabases(
 	];
 	const discoveryErrors: Array<{ label: string; message: string }> = [];
 	// Mnemopi databases follow agentDir; always agent-scoped.
-	databases.push(...listMnemopiDatabases(agentDir));
+	const mnemopi = listMnemopiDatabases(agentDir);
+	databases.push(...mnemopi.databases);
+	if (mnemopi.error !== null) {
+		discoveryErrors.push({ label: "mnemopi", message: mnemopi.error });
+	}
 	if (scopedToAgentDir) return { databases, discoveryErrors };
 	// Root-scoped paths resolve through dirs.rootSubdir, which --agent-dir does
 	// not redirect; only include them for a real (unscoped) run.
@@ -1275,7 +1292,9 @@ export async function probeDatabase(db: DoctorDatabase): Promise<DbProbe> {
 async function repairHealthyDatabase(probe: DbProbe, repair: DbRepair): Promise<void> {
 	let handle: Database | null = null;
 	try {
-		handle = new Database(probe.path);
+		// Match acquireWriteLock: never create a replacement if the file vanished
+		// between probe and repair.
+		handle = new Database(probe.path, { readwrite: true, create: false });
 		handle.run("PRAGMA busy_timeout = 5000");
 		if (probe.walBytes > 0) {
 			const checkpoint = handle.query("PRAGMA wal_checkpoint(TRUNCATE)").get() as Pick<
@@ -1485,7 +1504,9 @@ async function repairCorruptDatabase(probe: DbProbe, repair: DbRepair): Promise<
 async function rollbackHotJournal(dbPath: string): Promise<boolean> {
 	let handle: Database | null = null;
 	try {
-		handle = new Database(dbPath);
+		// Match acquireWriteLock / repairHealthyDatabase: a vanished path must not
+		// create an empty database that looks like a successful journal rollback.
+		handle = new Database(dbPath, { readwrite: true, create: false });
 		handle.run("PRAGMA busy_timeout = 5000");
 		// A trivial read triggers hot-journal rollback on open.
 		handle.query("PRAGMA journal_mode").get();

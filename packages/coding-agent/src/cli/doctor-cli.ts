@@ -24,6 +24,7 @@ import {
 	getCustomThemesDir,
 	getProjectDir,
 	isEnoent,
+	isRecord,
 	MAIN_CONFIG_FILENAMES,
 	parseFrontmatter,
 	sanitizeText,
@@ -45,6 +46,7 @@ import { ModelsConfigFile } from "../config/models-config";
 import {
 	classifySettingsYaml,
 	migrateRawSettingsShape,
+	Settings,
 	validateSettingsValues,
 	type YamlLoadResult,
 } from "../config/settings";
@@ -55,6 +57,7 @@ import { listOmpExtensionRoots } from "../discovery/omp-extension-roots";
 import { readExtensionManifest } from "../extensibility/extensions/loader";
 import { PluginManager } from "../extensibility/plugins/manager";
 import type { DoctorCheck } from "../extensibility/plugins/types";
+import { loadSkills } from "../extensibility/skills";
 import { convertToLegacyConfig, validateServerConfig } from "../mcp/config";
 import { resolveStdioCommandPath } from "../mcp/transports/stdio";
 import type { MCPServerConfig } from "../mcp/types";
@@ -1212,8 +1215,16 @@ async function loadRawMcpEntries(
 		if (!rawByPath.has(filePath)) {
 			try {
 				const content = await fs.promises.readFile(filePath, "utf8");
-				const parsed = tryParseJson<{ mcpServers?: Record<string, unknown> }>(content);
-				rawByPath.set(filePath, parsed?.mcpServers ?? {});
+				const parsed = tryParseJson<{ mcpServers?: unknown }>(content);
+				const mcpServers = parsed?.mcpServers;
+				if (mcpServers === undefined) {
+					rawByPath.set(filePath, {});
+				} else if (!isRecord(mcpServers)) {
+					rawByPath.set(filePath, {});
+					sourceErrors.push(`${filePath}: mcpServers must be a non-null object map`);
+				} else {
+					rawByPath.set(filePath, mcpServers);
+				}
 			} catch (error) {
 				rawByPath.set(filePath, {});
 				sourceErrors.push(
@@ -1942,44 +1953,34 @@ async function collectWatchdogSetupFinding(agentDir: string, projectDir: string)
 	};
 }
 
-async function collectSkillsSetupFinding(agentDir: string, projectDir: string): Promise<DoctorFinding> {
-	const dirs = [
-		path.join(agentDir, "skills"),
-		path.join(agentDir, "managed-skills"),
-		path.join(projectDir, ".omp", "skills"),
-	];
+async function collectSkillsSetupFinding(
+	agentDir: string,
+	projectDir: string,
+	scoped: boolean,
+): Promise<DoctorFinding> {
+	// Use the runtime selection path so the report applies the same source
+	// toggles, include/ignore patterns, disabled skills, and collision handling.
+	// `loadSkills` only reads metadata; it does not execute skill code or write.
 	const errors: string[] = [];
 	let count = 0;
-	for (const dir of dirs) {
-		let entries: fs.Dirent[];
-		try {
-			entries = await fs.promises.readdir(dir, { withFileTypes: true });
-		} catch (error) {
-			if (isEnoent(error)) continue;
-			errors.push(`${path.basename(dir)}: ${error instanceof Error ? error.message : String(error)}`);
-			continue;
+	try {
+		const settings = await Settings.loadReadOnly({ agentDir, cwd: projectDir });
+		const skillsSettings = settings.getGroup("skills");
+		const result = await loadSkills({
+			...skillsSettings,
+			cwd: projectDir,
+			userAgentDir: agentDir,
+			providers: scoped ? ["native", "omp-managed"] : undefined,
+			disabledExtensions: settings.get("disabledExtensions") ?? [],
+		});
+		count = result.skills.length;
+		for (const warning of result.warnings) {
+			errors.push(warning.skillPath ? `${warning.skillPath}: ${warning.message}` : warning.message);
 		}
-		for (const entry of entries) {
-			if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-			if (entry.name.startsWith(".")) continue;
-			const skillPath = path.join(dir, entry.name, "SKILL.md");
-			try {
-				const content = await fs.promises.readFile(skillPath, "utf-8");
-				const { frontmatter } = parseFrontmatter(content, { source: skillPath, level: "fatal" });
-				const name = typeof frontmatter.name === "string" ? frontmatter.name.trim() : undefined;
-				const description =
-					typeof frontmatter.description === "string" ? frontmatter.description.trim() : undefined;
-				if (!name || !description) {
-					errors.push(`${entry.name}/SKILL.md: missing name or description`);
-					continue;
-				}
-				count++;
-			} catch (error) {
-				if (isEnoent(error)) continue;
-				errors.push(`${entry.name}/SKILL.md: ${error instanceof Error ? error.message : String(error)}`);
-			}
-		}
+	} catch (error) {
+		errors.push(`Failed to load skills: ${error instanceof Error ? error.message : String(error)}`);
 	}
+
 	if (errors.length > 0) {
 		return {
 			id: "setup.skills",
@@ -2249,7 +2250,7 @@ async function collectSetupFindings(flags: DoctorCommandFlags): Promise<DoctorFi
 		await collectAgentSetupFinding(agentDir, projectDir, flags.agentDir !== undefined),
 		await collectKeybindingsSetupFinding(agentDir),
 		await collectWatchdogSetupFinding(agentDir, projectDir),
-		await collectSkillsSetupFinding(agentDir, projectDir),
+		await collectSkillsSetupFinding(agentDir, projectDir, flags.agentDir !== undefined),
 		await collectThemesSetupFinding(agentDir),
 		await collectExtensionsSetupFinding(agentDir, projectDir, flags.agentDir !== undefined),
 	];

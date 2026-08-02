@@ -659,3 +659,61 @@ describe("autoresearch directory scan", () => {
 		expect(resolved.databases.some(db => db.label.startsWith("autoresearch/"))).toBe(false);
 	});
 });
+
+describe("mnemopi bank directory scan", () => {
+	test("missing mnemopi directory is not an error", async () => {
+		const missingMemories = path.join(root, "missing-memories");
+		spies.push(spyOn(piUtils, "getMemoriesDir").mockReturnValue(missingMemories));
+		const resolved = resolveDoctorDatabases(root, true);
+		expect(resolved.discoveryErrors).toEqual([]);
+		expect(resolved.databases.some(db => db.label === "mnemopi/mnemopi.db")).toBe(true);
+		expect(resolved.databases.some(db => db.label.includes("banks/"))).toBe(false);
+	});
+
+	test("non-ENOENT bank scan failure surfaces as discoveryErrors.mnemopi", async () => {
+		// Point mnemopi at a regular file so Bun.Glob.scanSync fails with ENOTDIR.
+		const memories = path.join(root, "memories");
+		await fs.mkdir(memories, { recursive: true });
+		await fs.writeFile(path.join(memories, "mnemopi"), "x");
+		spies.push(spyOn(piUtils, "getMemoriesDir").mockReturnValue(memories));
+
+		const resolved = resolveDoctorDatabases(root, true);
+		expect(resolved.discoveryErrors).toHaveLength(1);
+		expect(resolved.discoveryErrors[0]?.label).toBe("mnemopi");
+		expect(resolved.discoveryErrors[0]?.message).toMatch(/ENOTDIR|EACCES/);
+		// Top-level mnemopi.db and other known DBs remain probeable.
+		expect(resolved.databases.some(db => db.label === "mnemopi/mnemopi.db")).toBe(true);
+		expect(resolved.databases.some(db => db.label === "history.db")).toBe(true);
+		expect(resolved.databases.some(db => db.label.includes("banks/"))).toBe(false);
+	});
+});
+
+describe("repair open create:false", () => {
+	test("healthy repair does not recreate a vanished database", async () => {
+		const dbPath = path.join(root, "vanish-healthy.db");
+		await createDatabaseWithRows(dbPath, 10);
+		const probe = await probeDatabase(makeDb(dbPath));
+		expect(probe.present).toBe(true);
+		expect(probe.quickCheck).toBe("ok");
+		await fs.unlink(dbPath);
+
+		const repair = await repairDatabase(probe);
+		expect(await pathExists(dbPath)).toBe(false);
+		expect(repair.error).toMatch(/unable to open|CANTOPEN|ENOENT/i);
+		expect(repair.actions).not.toContain("optimized");
+	});
+
+	test("hot-journal rollback does not recreate a vanished database", async () => {
+		const dbPath = path.join(root, "vanish-corrupt.db");
+		await createDatabaseWithRows(dbPath, 10);
+		await fs.writeFile(dbPath, "not a sqlite database");
+		const probe = await probeDatabase(makeDb(dbPath));
+		expect(probe.quickCheck === "ok" && probe.openError === null).toBe(false);
+		await fs.unlink(dbPath);
+
+		const repair = await repairDatabase(probe);
+		expect(await pathExists(dbPath)).toBe(false);
+		// rollbackHotJournal must fail closed (false) rather than create+succeed.
+		expect(repair.actions).not.toContain("optimized");
+	});
+});

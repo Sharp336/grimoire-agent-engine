@@ -114,6 +114,10 @@ export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Prom
 export interface LoadSkillsOptions extends SkillsSettings {
 	/** Working directory for project-local skills. Default: getProjectDir() */
 	cwd?: string;
+	/** Scoped user agent directory for native user-level skills. */
+	userAgentDir?: string;
+	/** Restrict capability discovery to these provider IDs. Default: all providers. */
+	providers?: string[];
 }
 
 /**
@@ -123,6 +127,8 @@ export interface LoadSkillsOptions extends SkillsSettings {
 export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadSkillsResult> {
 	const {
 		cwd = getProjectDir(),
+		userAgentDir,
+		providers,
 		enabled = true,
 		enableCodexUser = true,
 		enableClaudeUser = true,
@@ -169,7 +175,12 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	}
 
 	// Use capability API to load all skills
-	const result = await loadCapability<CapabilitySkill>(skillCapability.id, { cwd, disabledExtensions });
+	const result = await loadCapability<CapabilitySkill>(skillCapability.id, {
+		cwd,
+		userAgentDir,
+		providers,
+		disabledExtensions,
+	});
 
 	const skillMap = new Map<string, Skill>();
 	const realPathSet = new Set<string>();
@@ -250,7 +261,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		customDirectories.map(async dir => {
 			const expandedDir = expandTilde(dir);
 			const scanResult = await scanSkillsFromDir(
-				{ cwd, home: os.homedir(), repoRoot: null },
+				{ cwd, home: os.homedir(), repoRoot: null, userAgentDir },
 				{
 					dir: expandedDir,
 					providerId: "custom",
