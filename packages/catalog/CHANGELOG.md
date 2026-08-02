@@ -233,7 +233,7 @@
 ### Added
 
 - Added FriendliAI provider with dynamic model discovery ([#4770](https://github.com/can1357/oh-my-pi/discussions/4770))
-- Added `OpenAICompat.friendliTemplateReasoningEffort` compat flag. Friendli serves GLM-5.2 reasoning via the same `chat_template_kwargs.enable_thinking` toggle NVIDIA NIM Qwen uses but, unlike NIM, also accepts top-level `reasoning_effort` for the `high`/`max` ladder. The flag tells the chat-completions encoder to emit `reasoning_effort` alongside the template kwarg; without it, selecting high vs max collapsed to identical wire bodies and silently dropped the user's selected effort. Gated to Friendli GLM-5.2 reasoning models since NIM's strict `additionalProperties: false` schema rejects the field.
+- Friendli reasoning models now emit `reasoning_effort` via the existing `supportsReasoningEffort` / `omitReasoningEffort` compat fields instead of a dedicated flag. Friendli serves GLM-5.2 reasoning via the same `chat_template_kwargs.enable_thinking` toggle NVIDIA NIM Qwen uses but, unlike NIM, also accepts top-level `reasoning_effort` for the `high`/`max` ladder. The `qwen-template-false` encoder branch emits `reasoning_effort` when `!omitReasoningEffort && wireEffort !== undefined`, so NIM (strict schema, `omitReasoningEffort: true`) stays safe.
 
 ## [17.2.4] - 2026-08-01
 

@@ -25,7 +25,6 @@ import {
 	isQwen38PlusTemplateEffortModelId,
 	isQwenModelId,
 } from "../identity/family";
-import { hasFriendliTemplateReasoningEffort } from "../model-thinking";
 import type {
 	ModelSpec,
 	OpenAICompat,
@@ -478,6 +477,18 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 								? "qwen"
 								: "openai";
 
+	// Friendli: only reasoning models with a real effort surface (discovered
+	// `thinking.efforts` or identity-known GLM-5.2) should accept top-level
+	// `reasoning_effort`. Toggle-only models (e.g. GLM-4.5) reject the field —
+	// `supportsReasoningEffort: false` flows to `omitReasoningEffort: true` and
+	// suppresses emission in the `qwen-template-false` branch. NIM's strict
+	// schema already rejects the field; it stays off because NIM models never
+	// reach this Friendli-specific check.
+	const friendliHasEffortSurface =
+		isFriendli &&
+		spec.reasoning &&
+		((spec.thinking?.efforts?.length ?? 0) > 0 || isGlm52ReasoningEffortModelId(spec.id.toLowerCase()));
+
 	const compat: ResolvedOpenAICompat = {
 		supportsStore: !isNonStandard,
 		// `developer` is an OpenAI-Responses-era extension to the chat-completions schema. Almost
@@ -488,7 +499,15 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		// OpenAI's reasoning-API surface.
 		supportsDeveloperRole: isOpenAIHost || isAzureHost,
 		supportsMultipleSystemMessages: supportsMultipleSystemMessagesDefault,
-		supportsReasoningEffort: !isGrok && !isXiaomiMimo && (!(isZai || isZhipu) || supportsZaiReasoningEffort),
+		supportsReasoningEffort:
+			!isGrok &&
+			!isXiaomiMimo &&
+			(!(isZai || isZhipu) || supportsZaiReasoningEffort) &&
+			// `qwen-chat-template` hosts reject top-level `reasoning_effort`
+			// (NIM's strict `additionalProperties: false` schema 400s on it).
+			// Friendli is the sole exception: it accepts the field alongside
+			// the template toggle when the model has an effort surface.
+			(thinkingFormat !== "qwen-chat-template" || friendliHasEffortSurface),
 		// GitHub Copilot's chat-completions endpoint rejects reasoning params wholesale.
 		supportsReasoningParams: provider !== "github-copilot",
 		// OpenAI proprietary reasoning models (o-series, gpt-5+) reject explicit
@@ -606,16 +625,6 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 			isLocalOpenAICompatBackend &&
 			provider !== "ollama" &&
 			isQwen38PlusTemplateEffortModelId(spec.id),
-		// Friendli serves GLM-5.2 reasoning models via `chat_template_kwargs.enable_thinking`
-		// (so `thinkingFormat` resolves to `qwen-chat-template` like NVIDIA NIM Qwen), but
-		// unlike NIM it ALSO accepts top-level `reasoning_effort` for the effort ladder
-		// exposed by `getModelDefinedEfforts`. The encoder reads this to emit
-		// `reasoning_effort` alongside the template kwarg — otherwise every effort tier
-		// produces identical wire bodies. NIM's strict schema rejects top-level
-		// `reasoning_effort`, so the flag is gated to Friendli reasoning models that
-		// declare `thinking.efforts` (discovered via `/v1/models` `reasoning_options`
-		// `type: "effort"`, or the static seed for GLM-5.2's offline fallback).
-		friendliTemplateReasoningEffort: hasFriendliTemplateReasoningEffort(spec),
 		requiresAssistantContentForToolCalls: isKimiModel || isDirectDeepseekReasoning,
 		cacheControlFormat: isOpenRouter && spec.id.startsWith("anthropic/") ? "anthropic" : undefined,
 		supportsPromptCacheBreakpoints,
@@ -673,13 +682,6 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 	if (spec.compat?.omitReasoningEffort === undefined && !compat.supportsReasoningEffort) {
 		compat.omitReasoningEffort = true;
 	}
-	// A model config that suppresses reasoning_effort (via
-	// `supportsReasoningEffort: false` or `omitReasoningEffort: true`) must not
-	// emit the field even when the Friendli template flag would otherwise allow
-	// it — the endpoint rejects the explicitly suppressed parameter with a 400.
-	if (compat.omitReasoningEffort) {
-		compat.friendliTemplateReasoningEffort = false;
-	}
 	mergeModelReasoningEffortMap(compat, spec.id, isMimoReasoningEffortModel);
 
 	const whenThinkingPolicy =
@@ -697,9 +699,6 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		}
 		if (whenThinkingPolicy.omitReasoningEffort === undefined && !variant.supportsReasoningEffort) {
 			variant.omitReasoningEffort = true;
-		}
-		if (variant.omitReasoningEffort) {
-			variant.friendliTemplateReasoningEffort = false;
 		}
 		mergeModelReasoningEffortMap(variant, spec.id, isMimoReasoningEffortModel);
 		compat.whenThinking = variant;
@@ -805,9 +804,6 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 		// the chat-completions wire shape, never on Responses.
 		qwenPreserveThinking: false,
 		qwenTemplateReasoningEffort: false,
-		// Friendli's chat-completions-only `reasoning_effort` alongside the template
-		// toggle is never exercised on the Responses path.
-		friendliTemplateReasoningEffort: false,
 		requiresThinkingAsText: false,
 		requiresMistralToolIds: false,
 		requiresToolResultName: false,

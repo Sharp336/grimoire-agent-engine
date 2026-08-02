@@ -3,14 +3,15 @@
  * `chat_template_kwargs.enable_thinking` toggle NVIDIA NIM Qwen uses (so
  * `buildOpenAICompat` resolves them to `thinkingFormat: "qwen-chat-template"`),
  * but unlike NIM it ALSO accepts top-level `reasoning_effort` for the effort
- * ladder `getModelDefinedEfforts` exposes. The
- * `friendliTemplateReasoningEffort` compat flag tells the encoder to emit
- * `reasoning_effort` alongside the template kwarg; without it, every effort
- * tier collapses to identical wire bodies and silently drops the user's effort.
- * NIM's strict `additionalProperties: false` schema 400s on top-level
- * `reasoning_effort`, so the flag must stay Friendli-specific. The flag is
- * gated on `spec.thinking?.efforts?.length` — resolved at discovery time from
- * `/v1/models` `reasoning_options` (`type: "effort"`) or the static seed.
+ * ladder `getModelDefinedEfforts` exposes. The `supportsReasoningEffort` flag
+ * tells the encoder to emit `reasoning_effort` alongside the template kwarg;
+ * without it, every effort tier collapses to identical wire bodies and silently
+ * drops the user's effort. NIM's strict `additionalProperties: false` schema
+ * 400s on top-level `reasoning_effort`, so `supportsReasoningEffort` is false
+ * for NIM. The flag is gated on `spec.thinking?.efforts` — resolved at discovery
+ * time from `/v1/models` `reasoning_options` (`type: "effort"`) or the static
+ * seed — plus identity-known GLM-5.2 (for custom Friendli-pointed providers
+ * that lack a `thinking` block).
  */
 import { describe, expect, it } from "bun:test";
 import { buildOpenAICompat } from "@oh-my-pi/pi-catalog/compat/openai";
@@ -39,31 +40,33 @@ function friendliSpec(
 
 const HIGH_MAX = { mode: "effort" as const, efforts: [Effort.High, Effort.Max] };
 
-describe("Friendli template reasoning effort flag", () => {
-	it("enables friendliTemplateReasoningEffort when thinking.efforts is declared", () => {
+describe("Friendli reasoning effort compat", () => {
+	it("enables supportsReasoningEffort when thinking.efforts is declared", () => {
 		const compat = buildOpenAICompat(friendliSpec("zai-org/GLM-5.2", true, HIGH_MAX));
 		expect(compat.thinkingFormat).toBe("qwen-chat-template");
-		expect(compat.friendliTemplateReasoningEffort).toBe(true);
+		expect(compat.supportsReasoningEffort).toBe(true);
+		expect(compat.omitReasoningEffort).toBe(false);
 	});
 
-	it("keeps the flag off for Friendli reasoning models without thinking.efforts", () => {
+	it("keeps supportsReasoningEffort off for Friendli reasoning models without thinking.efforts", () => {
 		// Pre-rollout: reasoning: true but no `type: "effort"` in reasoning_options
-		// and no static seed → thinking is undefined → flag stays off.
+		// and no static seed → thinking is undefined → no effort surface.
 		const compat = buildOpenAICompat(friendliSpec("deepseek-ai/DeepSeek-V3.2", true));
-		expect(compat.friendliTemplateReasoningEffort).toBe(false);
+		expect(compat.supportsReasoningEffort).toBe(false);
+		expect(compat.omitReasoningEffort).toBe(true);
 	});
 
-	it("keeps the flag off when the Friendli model is not marked reasoning", () => {
+	it("keeps supportsReasoningEffort off when the Friendli model is not marked reasoning", () => {
 		const compat = buildOpenAICompat(friendliSpec("zai-org/GLM-5.2", false, HIGH_MAX));
-		expect(compat.friendliTemplateReasoningEffort).toBe(false);
+		expect(compat.supportsReasoningEffort).toBe(false);
 	});
 
-	it("enables the flag for GLM-5.2 on a custom Friendli-pointed provider without spec.thinking", () => {
+	it("enables supportsReasoningEffort for GLM-5.2 on a custom Friendli-pointed provider without spec.thinking", () => {
 		// A custom provider pointing at api.friendli.ai serves GLM-5.2 but
-		// without an explicit thinking block. `hasFriendliTemplateReasoningEffort`
-		// must detect the GLM-5.2 identity and enable the flag — otherwise the
-		// resolved thinking metadata (HIGH_MAX from getModelDefinedEfforts) and
-		// the wire flag disagree, collapsing every effort tier to the same request.
+		// without an explicit thinking block. Identity detection must recognize
+		// GLM-5.2 and enable supportsReasoningEffort — otherwise the resolved
+		// thinking metadata (HIGH_MAX from getModelDefinedEfforts) and the wire
+		// flag disagree, collapsing every effort tier to the same request.
 		const custom: ModelSpec<"openai-completions"> = {
 			api: "openai-completions",
 			id: "zai-org/GLM-5.2",
@@ -76,13 +79,12 @@ describe("Friendli template reasoning effort flag", () => {
 			contextWindow: 131072,
 			reasoning: true,
 		};
-		expect(buildOpenAICompat(custom).friendliTemplateReasoningEffort).toBe(true);
+		expect(buildOpenAICompat(custom).supportsReasoningEffort).toBe(true);
 	});
 
-	it("suppresses the flag when the model config sets omitReasoningEffort", () => {
+	it("suppresses supportsReasoningEffort when the model config sets supportsReasoningEffort: false", () => {
 		// A Friendli GLM-5.2 model with an explicit compat override that
-		// suppresses reasoning_effort must NOT emit the field even though
-		// the Friendli template flag would otherwise allow it.
+		// suppresses reasoning_effort must NOT emit the field.
 		const suppressed: ModelSpec<"openai-completions"> = {
 			api: "openai-completions",
 			id: "zai-org/GLM-5.2",
@@ -97,7 +99,9 @@ describe("Friendli template reasoning effort flag", () => {
 			thinking: HIGH_MAX,
 			compat: { supportsReasoningEffort: false } as never,
 		};
-		expect(buildOpenAICompat(suppressed).friendliTemplateReasoningEffort).toBe(false);
+		const compat = buildOpenAICompat(suppressed);
+		expect(compat.supportsReasoningEffort).toBe(false);
+		expect(compat.omitReasoningEffort).toBe(true);
 	});
 
 	it("uses omit reasoningDisableMode for toggle-only Friendli reasoning models", () => {
@@ -119,7 +123,7 @@ describe("Friendli template reasoning effort flag", () => {
 		};
 		const compat = buildOpenAICompat(toggleOnly);
 		expect(compat.reasoningDisableMode).toBe("omit");
-		expect(compat.friendliTemplateReasoningEffort).toBe(false);
+		expect(compat.supportsReasoningEffort).toBe(false);
 		expect(compat.thinkingFormat).toBe("qwen-chat-template");
 	});
 
@@ -141,17 +145,18 @@ describe("Friendli template reasoning effort flag", () => {
 		};
 		const compat = buildOpenAICompat(withEffort);
 		expect(compat.reasoningDisableMode).toBe("qwen-template-false");
-		expect(compat.friendliTemplateReasoningEffort).toBe(true);
+		expect(compat.supportsReasoningEffort).toBe(true);
 	});
 
-	it("leaves the flag off for the other qwen-chat-template host (NVIDIA NIM)", () => {
+	it("leaves supportsReasoningEffort off for the other qwen-chat-template host (NVIDIA NIM)", () => {
 		// NIM is the precedent for routing to `qwen-chat-template`; its strict
-		// schema rejects top-level `reasoning_effort`, so the flag must NOT flip
-		// for it even on a GLM-5.2-shaped id with thinking.efforts.
+		// schema rejects top-level `reasoning_effort`, so supportsReasoningEffort
+		// must be false for qwen-chat-template models that aren't Friendli.
+		// Use a Qwen id so the format genuinely resolves to qwen-chat-template.
 		const nim: ModelSpec<"openai-completions"> = {
 			api: "openai-completions",
-			id: "zai-org/GLM-5.2",
-			name: "GLM-5.2",
+			id: "qwen/qwen3.5-397b-a17b",
+			name: "Qwen3.5-397B-A17B",
 			provider: "nvidia",
 			baseUrl: "https://integrate.api.nvidia.com/v1",
 			input: ["text"],
@@ -161,6 +166,9 @@ describe("Friendli template reasoning effort flag", () => {
 			reasoning: true,
 			thinking: HIGH_MAX,
 		};
-		expect(buildOpenAICompat(nim).friendliTemplateReasoningEffort).toBe(false);
+		const compat = buildOpenAICompat(nim);
+		expect(compat.thinkingFormat).toBe("qwen-chat-template");
+		expect(compat.supportsReasoningEffort).toBe(false);
+		expect(compat.omitReasoningEffort).toBe(true);
 	});
 });

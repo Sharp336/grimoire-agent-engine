@@ -151,16 +151,18 @@ export function resolveModelThinking<TApi extends Api>(
 	if (spec.thinking && Array.isArray(spec.thinking.efforts) && spec.thinking.efforts.length > 0) {
 		return fillThinkingWireDefaults(spec, compat, spec.thinking);
 	}
-	// Friendli: when /v1/models returns reasoning: true without type: "effort",
-	// the model thinks but may expose no effort control. Don't fabricate a generic
-	// effort ladder from identity inference (which would advertise tiers the Friendli
-	// endpoint rejects). However, GLM-5.2 is identity-known to accept high/max, so
-	// getModelDefinedEfforts returns HIGH_MAX for it — let that path through.
+	// Friendli: discovery is authoritative. When `/v1/models` returns
+	// `reasoning: true` without `type: "effort"`, the model thinks but exposes
+	// no effort control — return undefined instead of fabricating a generic
+	// effort ladder from identity inference (which would advertise tiers the
+	// Friendli endpoint rejects). The static seed and live `reasoning_options`
+	// populate `spec.thinking` for effort-capable models like GLM-5.2, so this
+	// only fires for toggle-only reasoning models (e.g. GLM-4.5).
+	// A custom provider pointing at Friendli with GLM-5.2 but no `thinking`
+	// block is identity-known → getModelDefinedEfforts returns HIGH_MAX → fall
+	// through to deriveThinking.
 	if (modelMatchesHost(spec, "friendli") && spec.thinking === undefined) {
-		const friendliEfforts = getModelDefinedEfforts(spec, compat);
-		if (friendliEfforts === undefined) return undefined;
-		// GLM-5.2 or other identity-known effort: fall through to deriveThinking
-		// which will pick up the model-defined efforts.
+		if (getModelDefinedEfforts(spec, compat) === undefined) return undefined;
 	}
 	// Cascade selects effort only by routing to a sibling model id, so a Devin
 	// model with no explicit routed thinking has no controllable surface —
@@ -224,20 +226,6 @@ function fillThinkingWireDefaults<TApi extends Api>(
 		filled.requiresEffort = true;
 	}
 	return filled;
-}
-
-/**
- * Whether a Friendli reasoning model should emit top-level `reasoning_effort`
- * alongside the `qwen-chat-template` toggle. True when the model has an effort
- * ladder — either from discovery (`spec.thinking.efforts`) or from identity
- * (`isGlm52ReasoningEffortModelId`). Used by the compat builder so the wire flag
- * matches the resolved thinking metadata.
- */
-export function hasFriendliTemplateReasoningEffort<TApi extends Api>(spec: ModelSpec<TApi>): boolean {
-	if (!modelMatchesHost(spec, "friendli") || !spec.reasoning) return false;
-	if (spec.thinking?.efforts && spec.thinking.efforts.length > 0) return true;
-	// Friendli serves GLM under uppercase ids (zai-org/GLM-5.2); match case-insensitively.
-	return isGlm52ReasoningEffortModelId(spec.id.toLowerCase());
 }
 
 /** Derive thinking from identity + resolved compat, ignoring any baked value. Generator-side entry. */

@@ -4,12 +4,13 @@
  * `thinkingFormat: "qwen-chat-template"`, `reasoningDisableMode: "qwen-template-false"`).
  * Unlike NIM, Friendli additionally accepts top-level `reasoning_effort` for the
  * `high`/`max` ladder `getModelDefinedEfforts` exposes. The
- * `friendliTemplateReasoningEffort` compat flag tells `applyChatCompletionsCompatPolicy`
+ * `supportsReasoningEffort` flag tells `applyChatCompletionsCompatPolicy`
  * to emit `reasoning_effort` ALONGSIDE the template kwarg. Without it, the
  * `qwen-template-false` branch would write only `chat_template_kwargs.enable_thinking`
  * and collapse `high` vs `max` effort tiers to identical wire bodies — silently
  * dropping the user's selected effort. NIM's strict `additionalProperties: false`
- * schema 400s on top-level `reasoning_effort`, so the flag stays Friendli-only.
+ * schema 400s on top-level `reasoning_effort`, so `supportsReasoningEffort` is
+ * false for NIM (and `omitReasoningEffort` is true).
  *
  * Tests target `applyChatCompletionsReasoningParams` directly so they don't
  * depend on the native text-wrapping addon the streaming path pulls in.
@@ -55,7 +56,7 @@ describe("Friendli GLM-5.2 template + reasoning_effort wire shape", () => {
 	it("emits chat_template_kwargs.enable_thinking AND reasoning_effort (max) — distinct from high", () => {
 		// Contract: distinct effort tiers MUST produce distinct wire bodies.
 		// Collapsing to the same body is exactly the regression the
-		// `friendliTemplateReasoningEffort` flag prevents.
+		// `supportsReasoningEffort` flag prevents.
 		const high = apply(friendliModel(true), "high");
 		const max = apply(friendliModel(true), "max");
 		expect(max.chat_template_kwargs).toEqual({ enable_thinking: true });
@@ -92,7 +93,7 @@ describe("Friendli GLM-5.2 template + reasoning_effort wire shape", () => {
 			maxTokens: 8_192,
 		} satisfies ModelSpec<"openai-completions">);
 		expect(model.compat.thinkingFormat).toBe("qwen-chat-template");
-		expect(model.compat.friendliTemplateReasoningEffort).toBe(false);
+		expect(model.compat.supportsReasoningEffort).toBe(false);
 
 		const params = apply(model, "high");
 		expect(params.chat_template_kwargs).toEqual({ enable_thinking: true });

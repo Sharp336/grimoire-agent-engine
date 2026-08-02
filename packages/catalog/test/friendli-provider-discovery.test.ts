@@ -213,7 +213,7 @@ describe("Friendli provider discovery", () => {
 		// thinking.efforts, but Friendli returns reasoning: true without
 		// type: "effort" in reasoning_options. The cross-provider reference's
 		// effort ladder must NOT leak into the Friendli model — doing so would
-		// set friendliTemplateReasoningEffort and send reasoning_effort the
+		// set supportsReasoningEffort and send reasoning_effort the
 		// Friendli endpoint rejects.
 		const fetchMock: FetchImpl = async (_input: string | URL | Request, _init?: RequestInit) => {
 			return new Response(
