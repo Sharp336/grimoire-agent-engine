@@ -1746,16 +1746,17 @@ function mapOptionsForApi<TApi extends Api>(
 			// disabled it, or the model doesn't support it. Gemini has "dynamic
 			// thinking" enabled by default, so off must be stated on the wire.
 			const reasoning = explicitThinkingOff ? undefined : options?.reasoning;
+			const thinkingOff: GoogleOptions["thinking"] = model.thinking
+				? {
+						enabled: false,
+						suppress: model.thinking.mode === "google-level" ? { level: "MINIMAL" } : { budget: 0 },
+					}
+				: { enabled: false };
 			if (!reasoning || !model.reasoning) {
 				return castApi<"google-generative-ai">({
 					...base,
 					serviceTier: options?.serviceTier,
-					thinking: model.thinking?.suppressWhenOff
-						? {
-								enabled: false,
-								suppress: model.thinking.mode === "google-level" ? { level: "MINIMAL" } : { budget: 0 },
-							}
-						: { enabled: false },
+					thinking: thinkingOff,
 					toolChoice: mapGoogleToolChoice(options?.toolChoice),
 					cachedContent: options?.cachedContent,
 				});
@@ -1782,6 +1783,7 @@ function mapOptionsForApi<TApi extends Api>(
 
 			return castApi<"google-generative-ai">({
 				...base,
+				serviceTier: options?.serviceTier,
 				thinking: {
 					enabled: true,
 					budgetTokens: getGoogleBudget(googleModel, effort, options?.thinkingBudgets),
@@ -1839,9 +1841,7 @@ function mapOptionsForApi<TApi extends Api>(
 			}
 
 			const thinking: GoogleGeminiCliOptions["thinking"] = { enabled: false };
-			if (model.reasoning && model.thinking?.suppressWhenOff) {
-				// CCA re-applies the per-id baked server default when the config
-				// is omitted; suppression must be explicit on the wire.
+			if (model.reasoning && model.thinking) {
 				thinking.suppress = model.thinking.mode === "google-level" ? { level: "MINIMAL" } : { budget: 0 };
 			}
 			return castApi<"google-gemini-cli">({
@@ -1861,7 +1861,7 @@ function mapOptionsForApi<TApi extends Api>(
 				return castApi<"google-vertex">({
 					...base,
 					serviceTier: options?.serviceTier,
-					thinking: model.thinking?.suppressWhenOff
+					thinking: model.thinking
 						? {
 								enabled: false,
 								suppress: model.thinking.mode === "google-level" ? { level: "MINIMAL" } : { budget: 0 },

@@ -66,6 +66,40 @@ const geminiModel: Model<"google-generative-ai"> = buildModel({
 	},
 });
 
+const geminiBudgetModel: Model<"google-generative-ai"> = buildModel({
+	id: "gemini-2.5-flash",
+	name: "Gemini 2.5 Flash",
+	api: "google-generative-ai",
+	provider: "google",
+	baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 200_000,
+	maxTokens: 32_000,
+	thinking: {
+		mode: "budget",
+		efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+	},
+});
+
+const vertexBudgetModel: Model<"google-vertex"> = buildModel({
+	id: "gemini-2.5-flash",
+	name: "Gemini 2.5 Flash (Vertex)",
+	api: "google-vertex",
+	provider: "google-vertex",
+	baseUrl: "",
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 200_000,
+	maxTokens: 32_000,
+	thinking: {
+		mode: "budget",
+		efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+	},
+});
+
 const vertexModel: Model<"google-vertex"> = buildModel({
 	id: "gemini-3-flash",
 	name: "Gemini 3 Flash (Vertex)",
@@ -120,6 +154,37 @@ describe("Google service tier wire encoding", () => {
 		expect((captured().body.generationConfig as { thinkingConfig?: unknown } | undefined)?.thinkingConfig).toEqual({
 			includeThoughts: false,
 			thinkingLevel: "MINIMAL",
+		});
+	});
+	it.each([
+		["Gemini API", geminiBudgetModel, {}],
+		["Gemini API explicit off", geminiBudgetModel, { disableReasoning: true }],
+		["Vertex", vertexBudgetModel, {}],
+		["Vertex explicit off", vertexBudgetModel, { disableReasoning: true }],
+	] as const)("sends zero budget for thinking off on %s budget models", async (_name, model, options) => {
+		const { fetch, captured } = capturingFetch();
+		await streamSimple(model, context, { apiKey: "k", fetch, ...options }).result();
+
+		expect((captured().body.generationConfig as { thinkingConfig?: unknown } | undefined)?.thinkingConfig).toEqual({
+			includeThoughts: false,
+			thinkingBudget: 0,
+		});
+	});
+
+	it("Gemini API keeps service tier with budget thinking requests", async () => {
+		const { fetch, captured } = capturingFetch();
+		await streamSimple(geminiBudgetModel, context, {
+			apiKey: "k",
+			fetch,
+			reasoning: Effort.Low,
+			serviceTier: "priority",
+		}).result();
+
+		const body = captured().body;
+		expect(body.serviceTier).toBe("priority");
+		expect((body.generationConfig as { thinkingConfig?: unknown } | undefined)?.thinkingConfig).toEqual({
+			includeThoughts: true,
+			thinkingBudget: 2_048,
 		});
 	});
 
