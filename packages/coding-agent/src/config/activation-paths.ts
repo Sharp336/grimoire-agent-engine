@@ -11,6 +11,7 @@ import * as fsSync from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir, getConfigDirName, getConfigRootDir } from "@oh-my-pi/pi-utils";
+import * as git from "../utils/git";
 
 export type ActivationWriteTarget = "global" | "project";
 export type ActivationScope = ActivationWriteTarget;
@@ -69,20 +70,71 @@ export function isGlobalActivationCwd(cwd: string, agentDir: string = getAgentDi
 	);
 }
 
+function isGlobalActivationConfigCwd(cwd: string, agentDir: string): boolean {
+	const resolved = path.resolve(cwd);
+	return (
+		resolved === path.resolve(os.homedir()) ||
+		isPathInside(baseConfigRoot(), resolved) ||
+		isPathInside(getConfigRootDir(), resolved) ||
+		isPathInside(agentDir, resolved)
+	);
+}
+
 export function resolveExistingActivationProjectRootSync(cwd: string): string | null {
 	const resolved = path.resolve(cwd);
 	const home = path.resolve(os.homedir());
 	let current = resolved;
 	while (true) {
-		if (current !== home && directoryExistsSync(path.join(current, CONFIG_DIR_NAME))) return current;
+		if (isActivationTraversalBoundary(current, home)) return null;
+		if (directoryExistsSync(path.join(current, CONFIG_DIR_NAME))) return current;
 		const parent = path.dirname(current);
-		if (parent === current || current === home) return null;
+		if (parent === current) return null;
 		current = parent;
 	}
 }
 
-export function getDefaultActivationScope(cwd: string, _agentDir: string = getAgentDir()): ActivationScope {
-	return resolveExistingActivationProjectRootSync(cwd) ? "project" : "global";
+function resolveGitProjectRootSync(cwd: string): string | null {
+	const home = path.resolve(os.homedir());
+	const root = git.repo.rootSync(cwd);
+	return root && !isActivationTraversalBoundary(root, home) ? root : null;
+}
+
+function isActivationTraversalBoundary(candidate: string, home: string): boolean {
+	return (
+		candidate === home ||
+		candidate === path.resolve(os.tmpdir()) ||
+		candidate === "/tmp" ||
+		candidate === "/private/tmp"
+	);
+}
+
+/** Resolve the nearest OMP project root or enclosing Git worktree root. */
+export function resolveActivationProjectRootSync(cwd: string, agentDir: string = getAgentDir()): string | null {
+	if (isGlobalActivationConfigCwd(cwd, agentDir)) return null;
+	return resolveExistingActivationProjectRootSync(cwd) ?? resolveGitProjectRootSync(cwd);
+}
+
+/**
+ * Resolve the root for project-owned configuration. A regular directory without
+ * an OMP marker is still a valid first-write target; global configuration
+ * directories are never one.
+ */
+export function resolveProjectConfigRootSync(cwd: string, agentDir: string = getAgentDir()): string | null {
+	const projectRoot = resolveActivationProjectRootSync(cwd, agentDir);
+	if (projectRoot) return projectRoot;
+	return isGlobalActivationCwd(cwd, agentDir) ? null : path.resolve(cwd);
+}
+
+/** Require a project configuration target rather than nesting one in global configuration. */
+export function requireProjectConfigRootSync(cwd: string, agentDir: string = getAgentDir()): string {
+	const projectRoot = resolveProjectConfigRootSync(cwd, agentDir);
+	if (!projectRoot) throw new Error("Project configuration is unavailable from global configuration.");
+	return projectRoot;
+}
+
+export function getDefaultActivationScope(cwd: string, agentDir: string = getAgentDir()): ActivationScope {
+	if (isGlobalActivationConfigCwd(cwd, agentDir)) return "global";
+	return resolveActivationProjectRootSync(cwd, agentDir) ? "project" : "global";
 }
 
 export function resolveActivationTarget(
@@ -91,13 +143,16 @@ export function resolveActivationTarget(
 	configPath: string | null,
 	scope: ActivationScope = getDefaultActivationScope(cwd, agentDir),
 ): ActivationTargetInfo {
-	const existingProjectRoot = resolveExistingActivationProjectRootSync(cwd);
-	if (scope === "project" && (existingProjectRoot || !isGlobalActivationCwd(cwd, agentDir))) {
-		const projectRoot = existingProjectRoot ?? path.resolve(cwd);
+	if (isGlobalActivationConfigCwd(cwd, agentDir)) {
+		return { target: "global", configPath, projectRoot: null };
+	}
+	const projectRoot = resolveActivationProjectRootSync(cwd, agentDir);
+	if (scope === "project" && (projectRoot || !isGlobalActivationCwd(cwd, agentDir))) {
+		const targetRoot = projectRoot ?? path.resolve(cwd);
 		return {
 			target: "project",
-			configPath: path.join(projectRoot, CONFIG_DIR_NAME, "config.yml"),
-			projectRoot,
+			configPath: path.join(targetRoot, CONFIG_DIR_NAME, "config.yml"),
+			projectRoot: targetRoot,
 		};
 	}
 

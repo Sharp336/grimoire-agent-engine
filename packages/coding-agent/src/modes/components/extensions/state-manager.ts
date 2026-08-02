@@ -15,7 +15,7 @@ import type { Skill } from "../../../capability/skill";
 import type { SlashCommand } from "../../../capability/slash-command";
 import type { CustomTool } from "../../../capability/tool";
 import type { SourceMeta } from "../../../capability/types";
-import { resolveExistingActivationProjectRootSync } from "../../../config/activation-paths";
+import { resolveProjectConfigRootSync } from "../../../config/activation-paths";
 import { getAllProvidersInfo, isProviderEnabled, loadCapability } from "../../../discovery";
 import { isMCPServerEffectivelyEnabled } from "../../../mcp/config";
 import { readDisabledServers, readEnabledServers, readMCPConfigFile } from "../../../mcp/config-writer";
@@ -138,9 +138,8 @@ export async function loadAllExtensions(
 	// owned by another tool.
 	try {
 		const userMcpPath = cwd ? getMCPConfigPath("user", cwd) : undefined;
-		const projectMcpPath = cwd
-			? getMCPConfigPath("project", resolveExistingActivationProjectRootSync(cwd) ?? path.resolve(cwd))
-			: undefined;
+		const projectRoot = cwd ? resolveProjectConfigRootSync(cwd) : null;
+		const projectMcpPath = projectRoot ? getMCPConfigPath("project", projectRoot) : undefined;
 		const [userDisabledServerNames, forceEnabledServers, projectConfig] = await Promise.all([
 			userMcpPath
 				? readDisabledServers(userMcpPath)
@@ -180,7 +179,6 @@ export async function loadAllExtensions(
 				server.enabled === false &&
 				(mcpProjectDefinition || (!projectForceEnabled && !forceEnabledServers.has(server.name)));
 			const enabled = isMCPServerEffectivelyEnabled(server, {
-				activationDisabled: disabledExtensions.has(id),
 				projectDefinition: mcpProjectDefinition,
 				projectDisabled,
 				projectEnabled: projectForceEnabled,

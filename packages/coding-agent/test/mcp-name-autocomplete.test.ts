@@ -41,7 +41,7 @@ async function writeConfig(
 	await Bun.write(getMCPConfigPath(scope, cwd), `${JSON.stringify({ mcpServers: servers }, null, 2)}\n`);
 }
 
-/** Fake ctx carrying the MCP and activation surfaces `collectMcpServerNames` reads. */
+/** Fake ctx carrying the MCP surfaces `collectMcpServerNames` reads. */
 function createFakeCtx(discoveredNames: string[], disabledNames: string[] = []) {
 	const mcpManager = {
 		getAllServerNames: vi.fn((): string[] => discoveredNames),
@@ -91,13 +91,22 @@ describe("MCP server-name autocomplete", () => {
 		expect(names).toEqual(["project-server", "runtime-discovered", "user-disabled", "user-enabled"]);
 	});
 
-	test("collectMcpServerNames includes a discovered server disabled through settings", async () => {
+	test("collectMcpServerNames ignores legacy extension activation entries", async () => {
 		await writeConfig("project", projectDir, {});
 		const { ctx } = createFakeCtx([], ["discovered-disabled"]);
 
 		const names = await collectMcpServerNames(ctx);
 
-		expect(names).toEqual(["discovered-disabled"]);
+		expect(names).toEqual([]);
+	});
+
+	test("collectMcpServerNames includes a source disabled through the project MCP denylist", async () => {
+		await Bun.write(getMCPConfigPath("project", projectDir), JSON.stringify({ disabledServers: ["project-denied"] }));
+		const { ctx } = createFakeCtx([]);
+
+		const names = await collectMcpServerNames(ctx);
+
+		expect(names).toEqual(["project-denied"]);
 	});
 
 	test("collectMcpServerNames accepts preloaded configs and skips re-reading them from disk", async () => {
@@ -133,9 +142,12 @@ describe("MCP server-name autocomplete", () => {
 		expect(filtered?.[0]?.value).toBe("enable my-server ");
 	});
 
-	test("/mcp getArgumentCompletions offers a settings-disabled name for enable/disable but not test/reconnect/reauth/unauth", async () => {
-		await writeConfig("project", projectDir, {});
-		const { ctx } = createFakeCtx([], ["discovered-disabled"]);
+	test("/mcp getArgumentCompletions offers a project-denylisted name for enable/disable but not test/reconnect/reauth/unauth", async () => {
+		await Bun.write(
+			getMCPConfigPath("project", projectDir),
+			JSON.stringify({ disabledServers: ["discovered-disabled"] }),
+		);
+		const { ctx } = createFakeCtx([]);
 		const runtime: TuiSlashCommandRuntime = { ctx };
 		const mcp = buildTuiBuiltinSlashCommands(runtime).find(c => c.name === "mcp");
 		if (!mcp?.getArgumentCompletions) throw new Error("expected /mcp command with getArgumentCompletions");

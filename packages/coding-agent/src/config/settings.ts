@@ -184,10 +184,9 @@ export type { ActivationScope, ActivationWriteTarget } from "./activation-paths"
 
 const ACTIVATION_EXTENSION_PREFIXES: Record<
 	ProjectActivationKind,
-	"skill" | "mcp" | "rule" | "extension-module" | "slash-command"
+	"skill" | "rule" | "extension-module" | "slash-command"
 > = {
 	skills: "skill",
-	mcp: "mcp",
 	rules: "rule",
 	extensions: "extension-module",
 	"slash-commands": "slash-command",
@@ -199,7 +198,6 @@ export function projectActivationKindFromExtensionId(id: string): { kind: Projec
 	const prefix = id.slice(0, colon);
 	const name = id.slice(colon + 1);
 	if (prefix === "skill") return { kind: "skills", name };
-	if (prefix === "mcp") return { kind: "mcp", name };
 	if (prefix === "rule") return { kind: "rules", name };
 	if (prefix === "extension-module") return { kind: "extensions", name };
 	if (prefix === "slash-command") return { kind: "slash-commands", name };

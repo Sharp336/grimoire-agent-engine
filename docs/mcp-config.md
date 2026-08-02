@@ -78,7 +78,7 @@ Top-level keys:
 - `disabledServers` — denylist for suppressing a discovered server by name
 - `enabledServers` — allowlist for explicitly enabling an inherited or third-party server
 
-Server names must match `^[a-zA-Z0-9_.-]{1,100}$`.
+Server names must match `^[a-zA-Z0-9_.:-]{1,100}$`.
 
 ## Supported server fields
 
@@ -439,7 +439,7 @@ User `disabledServers` and `enabledServers` remain useful for servers discovered
 
 When `mcp.enableProjectConfig: false`, OMP does not load project MCP definitions or project overlays. Extension Center project-view MCP rows are read-only.
 
-`/mcp` retains its separate global/project activation behavior for compatibility. Extension Center MCP toggles do not write `mcp:<name>` entries to `config.yml`.
+`/mcp enable` and `/mcp disable` update the highest-precedence OMP-managed server definition's `enabled` field. For a discovered server without an OMP-managed definition, they use the user MCP denylist/allowlist overlay. Extension Center MCP toggles likewise do not write `mcp:<name>` entries to `config.yml`.
 
 ## `/mcp add` vs editing JSON directly
 

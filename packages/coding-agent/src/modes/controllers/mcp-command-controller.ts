@@ -7,7 +7,7 @@ import * as path from "node:path";
 import { type Component, replaceTabs, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
 import type { SourceMeta } from "../../capability/types";
-import { resolveExistingActivationProjectRootSync } from "../../config/activation-paths";
+import { requireProjectConfigRootSync, resolveProjectConfigRootSync } from "../../config/activation-paths";
 import { expandEnvVarsDeep } from "../../discovery/helpers";
 import {
 	analyzeAuthError,
@@ -261,9 +261,9 @@ type MCPSearchParsed = {
  * covers connections, pending connections, and discovered-but-not-yet-
  * connected sources).
  *
- * `includeDisabledOnly` controls names disabled through `disabledExtensions`,
- * while `includeDisabledConfigured` controls config entries whose `enabled`
- * flag is false. Both default to true because
+ * `includeDisabledOnly` controls names in the MCP denylist, while
+ * `includeDisabledConfigured` controls config entries whose `enabled` flag is
+ * false. Both default to true because
  * callers such as `/mcp list` need the complete union. Autocomplete callers
  * must disable the categories their target operation cannot accept.
  *
@@ -290,21 +290,16 @@ export async function collectMcpServerNames(
 		const projectEnabled = ctx.settings.get("mcp.enableProjectConfig") !== false;
 		[userConfig, projectConfig] = await Promise.all([
 			readMCPConfigFile(getMCPConfigPath("user", cwd)),
-			projectEnabled
-				? readMCPConfigFile(
-						getMCPConfigPath("project", resolveExistingActivationProjectRootSync(cwd) ?? path.resolve(cwd)),
-					)
+			projectEnabled && resolveProjectConfigRootSync(cwd)
+				? readMCPConfigFile(getMCPConfigPath("project", resolveProjectConfigRootSync(cwd)!))
 				: Promise.resolve({} as MCPConfigFile),
 		]);
 	}
 	if (ctx.settings.get("mcp.enableProjectConfig") === false) projectConfig = {};
 
-	const names = new Set<string>(includeDisabledOnly ? userConfig.disabledServers : []);
-	if (includeDisabledOnly) {
-		for (const id of ctx.settings.get("disabledExtensions") as string[]) {
-			if (id.startsWith("mcp:")) names.add(id.slice("mcp:".length));
-		}
-	}
+	const names = new Set<string>(
+		includeDisabledOnly ? [...(userConfig.disabledServers ?? []), ...(projectConfig.disabledServers ?? [])] : [],
+	);
 	const addConfiguredNames = (config: MCPConfigFile): void => {
 		const servers = config.mcpServers;
 		if (!servers) return;
@@ -625,8 +620,13 @@ export class MCPCommandController {
 			return;
 		}
 		const projectConfigEnabled = this.ctx.settings.get("mcp.enableProjectConfig") !== false;
-		if (parsed.quickConfig && parsed.scope === "project" && !projectConfigEnabled) {
-			this.ctx.showError("Project MCP configuration is disabled.");
+		const projectConfigAvailable = projectConfigEnabled && resolveProjectConfigRootSync(getProjectDir()) !== null;
+		if (parsed.quickConfig && parsed.scope === "project" && !projectConfigAvailable) {
+			this.ctx.showError(
+				projectConfigEnabled
+					? "Project configuration is unavailable from global configuration."
+					: "Project MCP configuration is disabled.",
+			);
 			return;
 		}
 		if (parsed.quickConfig && parsed.initialName) {
@@ -746,7 +746,7 @@ export class MCPCommandController {
 				this.ctx.ui.requestRender();
 			},
 			parsed.initialName,
-			projectConfigEnabled ? undefined : ["user"],
+			projectConfigAvailable ? undefined : ["user"],
 		);
 
 		// Replace editor with wizard
@@ -1046,25 +1046,22 @@ export class MCPCommandController {
 	): Promise<{ filePath: string; scope: "user" | "project"; config: MCPServerConfig } | null> {
 		const cwd = getProjectDir();
 		const userPath = getMCPConfigPath("user", cwd);
-		const projectRoot = this.ctx.settings.getActivationProjectRoot(cwd, "project") ?? cwd;
-		const projectPath = getMCPConfigPath(
-			"project",
-			resolveExistingActivationProjectRootSync(cwd) ?? path.resolve(cwd),
-		);
+		const projectRoot = resolveProjectConfigRootSync(cwd);
+		const projectPath = projectRoot ? getMCPConfigPath("project", projectRoot) : null;
 		const projectConfigEnabled = this.ctx.settings.get("mcp.enableProjectConfig") !== false;
 
 		const [userConfig, projectConfig] = await Promise.all([
 			readMCPConfigFile(userPath),
-			projectConfigEnabled ? readMCPConfigFile(projectPath) : Promise.resolve({} as MCPConfigFile),
+			projectConfigEnabled && projectPath ? readMCPConfigFile(projectPath) : Promise.resolve({} as MCPConfigFile),
 		]);
 
-		if (projectConfigEnabled && projectConfig.mcpServers?.[name]) {
+		if (projectConfigEnabled && projectPath && projectConfig.mcpServers?.[name]) {
 			return { filePath: projectPath, scope: "project", config: projectConfig.mcpServers[name] };
 		}
 		if (userConfig.mcpServers?.[name]) {
 			return { filePath: userPath, scope: "user", config: userConfig.mcpServers[name] };
 		}
-		if (!projectConfigEnabled) return null;
+		if (!projectConfigEnabled || !projectRoot) return null;
 
 		// Check standalone fallback files (mcp.json, .mcp.json) in the project root —
 		// these match the discovery paths used by the mcp-json provider. Reads run in
@@ -1245,15 +1242,21 @@ export class MCPCommandController {
 
 	async #handleWizardComplete(name: string, config: MCPServerConfig, scope: "user" | "project"): Promise<void> {
 		try {
-			if (scope === "project" && this.ctx.settings.get("mcp.enableProjectConfig") === false) {
-				this.ctx.showError("Project MCP configuration is disabled.");
-				return;
+			if (scope === "project") {
+				if (this.ctx.settings.get("mcp.enableProjectConfig") === false) {
+					this.ctx.showError("Project MCP configuration is disabled.");
+					return;
+				}
+				if (!resolveProjectConfigRootSync(getProjectDir())) {
+					this.ctx.showError("Project configuration is unavailable from global configuration.");
+					return;
+				}
 			}
 			// Determine file path
 			const cwd = getProjectDir();
 			const filePath =
 				scope === "project"
-					? getMCPConfigPath("project", resolveExistingActivationProjectRootSync(cwd) ?? path.resolve(cwd))
+					? getMCPConfigPath("project", requireProjectConfigRootSync(cwd))
 					: getMCPConfigPath("user", cwd);
 
 			// Add server to config
@@ -1353,17 +1356,15 @@ export class MCPCommandController {
 
 			// Load from both user and project configs
 			const userPath = getMCPConfigPath("user", cwd);
-			const projectPath = getMCPConfigPath(
-				"project",
-				resolveExistingActivationProjectRootSync(cwd) ?? path.resolve(cwd),
-			);
+			const projectRoot = resolveProjectConfigRootSync(cwd);
+			const projectPath = projectRoot ? getMCPConfigPath("project", projectRoot) : null;
 
 			const userPathLabel = shortenPath(userPath);
-			const projectPathLabel = shortenPath(projectPath);
+			const projectPathLabel = projectPath ? shortenPath(projectPath) : "";
 			const projectConfigEnabled = this.ctx.settings.get("mcp.enableProjectConfig") !== false;
 			const [userConfig, projectConfig] = await Promise.all([
 				readMCPConfigFile(userPath),
-				projectConfigEnabled ? readMCPConfigFile(projectPath) : Promise.resolve({} as MCPConfigFile),
+				projectConfigEnabled && projectPath ? readMCPConfigFile(projectPath) : Promise.resolve({} as MCPConfigFile),
 			]);
 
 			const projectServers = Object.keys(projectConfig.mcpServers ?? {});
@@ -1376,15 +1377,11 @@ export class MCPCommandController {
 			const projectDisabledServerNames = new Set(projectConfig.disabledServers ?? []);
 			const projectForceEnabledServerNames = new Set(projectConfig.enabledServers ?? []);
 			const userForceEnabledServerNames = new Set(userConfig.enabledServers ?? []);
-			const disabledSet = new Set(this.ctx.settings.get("disabledExtensions") as string[]);
 			const disabledServerNames = new Set<string>();
 			for (const name of userDisabledServerNames) {
 				if (!projectForceEnabledServerNames.has(name)) disabledServerNames.add(name);
 			}
 			for (const name of projectDisabledServerNames) disabledServerNames.add(name);
-			for (const id of disabledSet) {
-				if (id.startsWith("mcp:")) disabledServerNames.add(id.slice("mcp:".length));
-			}
 			const discoveredServers: { name: string; source: SourceMeta }[] = [];
 			if (this.ctx.mcpManager) {
 				const allServerNames = await collectMcpServerNames(this.ctx, { userConfig, projectConfig });
@@ -1424,20 +1421,18 @@ export class MCPCommandController {
 				for (const name of userServers) {
 					const config = userConfig.mcpServers![name];
 					const type = config.type ?? "stdio";
-					const activationDisabled = disabledSet.has(`mcp:${name}`);
 					const projectDisabled = projectDisabledServerNames.has(name);
 					const projectForceEnabled = projectForceEnabledServerNames.has(name);
 					const userDisabled = userDisabledServerNames.has(name);
 					const userForceEnabled = userForceEnabledServerNames.has(name);
 					const enabled = isMCPServerEffectivelyEnabled(config, {
-						activationDisabled,
 						projectDefinition: false,
 						projectDisabled,
 						projectEnabled: projectForceEnabled,
 						userDisabled,
 						userEnabled: userForceEnabled,
 					});
-					const overlayDisabled = activationDisabled || projectDisabled || (userDisabled && !projectForceEnabled);
+					const overlayDisabled = projectDisabled || (userDisabled && !projectForceEnabled);
 					const sourceDisabled = config.enabled === false && !userForceEnabled && !projectForceEnabled;
 					const state = !enabled
 						? overlayDisabled
@@ -1467,9 +1462,7 @@ export class MCPCommandController {
 				for (const name of projectServers) {
 					const config = projectConfig.mcpServers![name];
 					const type = config.type ?? "stdio";
-					const activationDisabled = disabledSet.has(`mcp:${name}`);
 					const enabled = isMCPServerEffectivelyEnabled(config, {
-						activationDisabled,
 						projectDefinition: true,
 						projectDisabled: false,
 						projectEnabled: false,
@@ -1478,11 +1471,9 @@ export class MCPCommandController {
 					});
 					const sourceDisabled = config.enabled === false;
 					const state = !enabled
-						? activationDisabled
-							? "disabled"
-							: sourceDisabled
-								? "inactive"
-								: "disabled"
+						? sourceDisabled
+							? "inactive"
+							: "disabled"
 						: (this.ctx.mcpManager?.getConnectionStatus(name) ?? "disconnected");
 					const status =
 						state === "inactive"
@@ -1557,11 +1548,7 @@ export class MCPCommandController {
 		try {
 			const cwd = getProjectDir();
 			const userPath = getMCPConfigPath("user", cwd);
-			const projectPath = getMCPConfigPath(
-				"project",
-				resolveExistingActivationProjectRootSync(cwd) ?? path.resolve(cwd),
-			);
-			const filePath = scope === "user" ? userPath : projectPath;
+			const filePath = scope === "user" ? userPath : getMCPConfigPath("project", requireProjectConfigRootSync(cwd));
 			const config = await readMCPConfigFile(filePath);
 			if (!config.mcpServers?.[name]) {
 				this.ctx.showError(`Server "${name}" not found in ${scope} config.`);
@@ -1615,17 +1602,14 @@ export class MCPCommandController {
 			const cwd = getProjectDir();
 			const userPath = getMCPConfigPath("user", cwd);
 			const projectConfigEnabled = this.ctx.settings.get("mcp.enableProjectConfig") !== false;
-			const projectPath = getMCPConfigPath(
-				"project",
-				resolveExistingActivationProjectRootSync(cwd) ?? path.resolve(cwd),
-			);
+			const projectRoot = resolveProjectConfigRootSync(cwd);
+			const projectPath = projectRoot ? getMCPConfigPath("project", projectRoot) : null;
 			const [userConfig, projectConfig] = await Promise.all([
 				readMCPConfigFile(userPath),
-				projectConfigEnabled ? readMCPConfigFile(projectPath) : Promise.resolve({} as MCPConfigFile),
+				projectConfigEnabled && projectPath ? readMCPConfigFile(projectPath) : Promise.resolve({} as MCPConfigFile),
 			]);
 			const projectDefinition = projectConfig.mcpServers?.[name] !== undefined;
 			const enabled = isMCPServerEffectivelyEnabled(config, {
-				activationDisabled: (this.ctx.settings.get("disabledExtensions") as string[]).includes(`mcp:${name}`),
 				projectDefinition,
 				projectDisabled: !projectDefinition && (projectConfig.disabledServers ?? []).includes(name),
 				projectEnabled: !projectDefinition && (projectConfig.enabledServers ?? []).includes(name),
@@ -2438,7 +2422,7 @@ export class MCPCommandController {
 		const cwd = getProjectDir();
 		const filePath =
 			scope === "project"
-				? getMCPConfigPath("project", resolveExistingActivationProjectRootSync(cwd) ?? path.resolve(cwd))
+				? getMCPConfigPath("project", requireProjectConfigRootSync(cwd))
 				: getMCPConfigPath("user", cwd);
 		const config = await readMCPConfigFile(filePath);
 		const existingNames = new Set(Object.keys(config.mcpServers ?? {}));
@@ -2462,7 +2446,7 @@ export class MCPCommandController {
 			const cwd = getProjectDir();
 			const filePath =
 				scope === "project"
-					? getMCPConfigPath("project", resolveExistingActivationProjectRootSync(cwd) ?? path.resolve(cwd))
+					? getMCPConfigPath("project", requireProjectConfigRootSync(cwd))
 					: getMCPConfigPath("user", cwd);
 			const config = await readMCPConfigFile(filePath);
 			if (config.mcpServers?.[proposed]) {

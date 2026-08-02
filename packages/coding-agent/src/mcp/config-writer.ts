@@ -254,6 +254,35 @@ export async function setServerForceEnabled(filePath: string, name: string, forc
 	});
 }
 
+/** Atomically set an inherited server's project activation overlay. */
+export async function setServerOverlayActivation(
+	filePath: string,
+	name: string,
+	state: "disabled" | "enabled" | "inherit",
+): Promise<void> {
+	await withConfigLock(filePath, async () => {
+		const config = await readMCPConfigFile(filePath);
+		const disabled = new Set(config.disabledServers ?? []);
+		const enabled = new Set(config.enabledServers ?? []);
+		if (state === "disabled") {
+			enabled.delete(name);
+			disabled.add(name);
+		} else if (state === "enabled") {
+			disabled.delete(name);
+			enabled.add(name);
+		} else {
+			disabled.delete(name);
+			enabled.delete(name);
+		}
+		const updated: MCPConfigFile = { ...config };
+		if (disabled.size === 0) delete updated.disabledServers;
+		else updated.disabledServers = [...disabled].sort();
+		if (enabled.size === 0) delete updated.enabledServers;
+		else updated.enabledServers = [...enabled].sort();
+		await writeMCPConfigFile(filePath, updated);
+	});
+}
+
 /** Paths and target state for toggling one MCP server across known config files. */
 export interface SetMcpServerEnabledOptions {
 	userPath: string;

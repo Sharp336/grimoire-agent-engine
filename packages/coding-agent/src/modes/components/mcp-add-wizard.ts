@@ -3,7 +3,6 @@
  *
  * Interactive multi-step wizard for adding MCP servers.
  */
-import * as path from "node:path";
 import {
 	Container,
 	Input,
@@ -15,7 +14,7 @@ import {
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
-import { resolveExistingActivationProjectRootSync } from "../../config/activation-paths";
+import { resolveProjectConfigRootSync } from "../../config/activation-paths";
 import { validateServerName } from "../../mcp/config-writer";
 import { analyzeAuthError, discoverOAuthEndpoints, fetchResourceMetadataScopes } from "../../mcp/oauth-discovery";
 import type { MCPHttpServerConfig, MCPServerConfig, MCPSseServerConfig, MCPStdioServerConfig } from "../../mcp/types";
@@ -423,12 +422,11 @@ export class MCPAddWizard extends Container {
 		const cwd = getProjectDir();
 
 		const userPathLabel = shortenPath(getMCPConfigPath("user", cwd));
-		const projectPathLabel = shortenPath(
-			getMCPConfigPath("project", resolveExistingActivationProjectRootSync(cwd) ?? path.resolve(cwd)),
-		);
+		const projectRoot = resolveProjectConfigRootSync(cwd);
+		const projectPathLabel = projectRoot ? shortenPath(getMCPConfigPath("project", projectRoot)) : null;
 		const options = [
 			{ value: "user" as const, label: `User level (${userPathLabel})` },
-			{ value: "project" as const, label: `Project level (${projectPathLabel})` },
+			...(projectPathLabel ? [{ value: "project" as const, label: `Project level (${projectPathLabel})` }] : []),
 		].filter(option => this.#allowedScopes.includes(option.value));
 
 		for (let i = 0; i < options.length; i++) {

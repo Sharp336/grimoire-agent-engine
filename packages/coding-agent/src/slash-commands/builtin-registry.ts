@@ -7,7 +7,7 @@ import { APP_NAME, getMCPConfigPath, getProjectDir, logger, setProjectDir } from
 import { reset as resetCapabilities } from "../capability";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
 import { CollabHost } from "../collab/host";
-import { resolveExistingActivationProjectRootSync } from "../config/activation-paths";
+import { resolveProjectConfigRootSync } from "../config/activation-paths";
 import {
 	expandRoleAlias,
 	formatModelString,
@@ -33,6 +33,7 @@ import {
 	MarketplaceManager,
 } from "../extensibility/plugins/marketplace";
 import { readMCPConfigFile } from "../mcp/config-writer";
+import type { MCPConfigFile } from "../mcp/types";
 import { resolveMemoryBackend } from "../memory-backend";
 import { runPauseScreen } from "../modes/components/pause-screen";
 import { collectMcpServerNames, MCPCommandController } from "../modes/controllers/mcp-command-controller";
@@ -2831,10 +2832,11 @@ async function buildMcpRemoveCompletions(
 	let projectNames: string[];
 	let userNames: string[];
 	try {
+		const projectRoot = resolveProjectConfigRootSync(cwd);
 		const [projectConfig, userConfig] = await Promise.all([
-			readMCPConfigFile(
-				getMCPConfigPath("project", resolveExistingActivationProjectRootSync(cwd) ?? path.resolve(cwd)),
-			),
+			projectRoot
+				? readMCPConfigFile(getMCPConfigPath("project", projectRoot))
+				: Promise.resolve({} as MCPConfigFile),
 			readMCPConfigFile(getMCPConfigPath("user", cwd)),
 		]);
 		projectNames = Object.keys(projectConfig.mcpServers ?? {});

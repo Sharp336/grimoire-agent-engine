@@ -79,7 +79,6 @@ export const mcpCapability = defineCapability<MCPServer>({
 	description: "Model Context Protocol server configurations for external tool integrations",
 	key: server => server.name,
 	equivalent: areMCPConnectionsEquivalent,
-	toExtensionId: server => `mcp:${server.name}`,
 	validate: server => {
 		if (!server.name) return "Missing server name";
 		if (!server.command && !server.url) return "Must have command or url";

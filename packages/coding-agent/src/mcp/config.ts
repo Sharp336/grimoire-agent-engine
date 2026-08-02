@@ -3,11 +3,11 @@
  *
  * Uses the capability system to load MCP servers from multiple sources.
  */
-import * as path from "node:path";
+
 import { getMCPConfigPath } from "@oh-my-pi/pi-utils";
 import { mcpCapability } from "../capability/mcp";
 import type { SourceMeta } from "../capability/types";
-import { resolveExistingActivationProjectRootSync } from "../config/activation-paths";
+import { resolveProjectConfigRootSync } from "../config/activation-paths";
 import type { MCPServer } from "../discovery";
 import { loadCapability } from "../discovery";
 import { readDisabledServers, readEnabledServers, readMCPConfigFile } from "./config-writer";
@@ -16,6 +16,8 @@ import type { MCPConfigFile, MCPServerConfig } from "./types";
 export interface LoadMCPConfigsOptions {
 	/** Whether to load project-level config (default: true) */
 	enableProjectConfig?: boolean;
+	/** Provider IDs excluded from discovery. Defaults to the capability registry state. */
+	disabledProviders?: ReadonlySet<string>;
 	/** Whether disabled servers are retained for status displays. */
 	includeDisabled?: boolean;
 	/** Whether source-disabled servers are retained for status displays. */
@@ -38,7 +40,6 @@ export interface LoadMCPConfigsResult {
 
 /** Inputs that determine whether an MCP server is active in the current project. */
 export interface MCPServerEnablement {
-	activationDisabled: boolean;
 	projectDefinition: boolean;
 	projectDisabled: boolean;
 	projectEnabled: boolean;
@@ -51,7 +52,6 @@ export function isMCPServerEffectivelyEnabled(
 	config: Pick<MCPServerConfig, "enabled">,
 	enablement: MCPServerEnablement,
 ): boolean {
-	if (enablement.activationDisabled) return false;
 	if (enablement.projectDefinition) return config.enabled !== false;
 	if (enablement.projectDisabled) return false;
 	if (enablement.projectEnabled) return true;
@@ -126,11 +126,12 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 	const filterExa = options?.filterExa ?? true;
 	const filterBrowser = options?.filterBrowser ?? false;
 	const userPath = getMCPConfigPath("user", cwd);
-	const projectPath = getMCPConfigPath("project", resolveExistingActivationProjectRootSync(cwd) ?? path.resolve(cwd));
+	const projectRoot = resolveProjectConfigRootSync(cwd);
+	const projectPath = projectRoot ? getMCPConfigPath("project", projectRoot) : null;
 	const [userDisabledServers, forceEnabledServers, projectConfig] = await Promise.all([
 		readDisabledServers(userPath).then(names => new Set(names)),
 		readEnabledServers(userPath).then(names => new Set(names)),
-		enableProjectConfig ? readMCPConfigFile(projectPath) : Promise.resolve({} as MCPConfigFile),
+		enableProjectConfig && projectPath ? readMCPConfigFile(projectPath) : Promise.resolve({} as MCPConfigFile),
 	]);
 	const projectDisabledServers = new Set(projectConfig.disabledServers ?? []);
 	const projectForceEnabledServers = new Set(projectConfig.enabledServers ?? []);
@@ -143,9 +144,9 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 
 	const result = await loadCapability<MCPServer>(mcpCapability.id, {
 		cwd,
+		disabledProviders: includeDisabled ? new Set() : options?.disabledProviders,
 		filter: includeServer,
 		includeDisabled,
-		disabledProviders: includeDisabled ? new Set() : undefined,
 		suppress: server => {
 			const inherited = !projectDefinitions.has(server.name);
 			if (!inherited) return server.enabled === false && !includeInactive;

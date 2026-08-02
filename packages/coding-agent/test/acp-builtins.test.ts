@@ -1013,12 +1013,13 @@ describe("wave 5 — adapters and polish", () => {
 
 	// /mcp add — verify parsing and output message
 	it("/mcp add foo --url https://example.com --token X --scope project: outputs success or propagates write error", async () => {
-		// Uses project scope so it writes to /tmp/project/.omp/mcp.json which test infra controls.
-		// We verify the command either reports success or a meaningful error (not a parse error).
+		const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-builtins-project-"));
+		await fs.mkdir(path.join(projectDir, ".git"));
 		const mcpModule = await import("@oh-my-pi/pi-coding-agent/mcp/config-writer");
 		const spy = spyOn(mcpModule, "addMCPServer").mockResolvedValue(undefined);
 		try {
 			const { output, runtime } = createRuntime();
+			runtime.cwd = projectDir;
 			const result = await executeAcpBuiltinSlashCommand(
 				"/mcp add foo --url https://example.com --token X --scope project",
 				runtime,
@@ -1030,7 +1031,7 @@ describe("wave 5 — adapters and polish", () => {
 			// `--url` / `--token` / `--scope` parsing fail this test instead of
 			// silently writing a different config.
 			const [configPath, serverName, serverConfig] = spy.mock.calls[0]!;
-			expect(configPath).toContain("project");
+			expect(configPath).toBe(path.join(projectDir, ".omp", "mcp.json"));
 			expect(serverName).toBe("foo");
 			expect(serverConfig).toMatchObject({
 				type: "http",
@@ -1039,6 +1040,7 @@ describe("wave 5 — adapters and polish", () => {
 			});
 		} finally {
 			spy.mockRestore();
+			await removeWithRetries(projectDir);
 		}
 	});
 

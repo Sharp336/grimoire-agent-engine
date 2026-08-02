@@ -61,7 +61,7 @@ describe("extension activation rendering", () => {
 
 	it("hides project-only rows from the global edit scope", async () => {
 		const previousAgentDir = getAgentDir();
-		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-global-scope-"));
+		const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-global-scope-"));
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
 		cleanupPaths.push(projectRoot, agentDir);
 		await fs.mkdir(path.join(projectRoot, ".omp", "skills", "zzlocalonly"), { recursive: true });
@@ -98,7 +98,7 @@ describe("extension activation rendering", () => {
 
 	it("keeps project-disabled user rows active in the global edit scope", async () => {
 		const previousAgentDir = getAgentDir();
-		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-global-row-"));
+		const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-global-row-"));
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
 		cleanupPaths.push(projectRoot, agentDir);
 		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
@@ -144,7 +144,7 @@ describe("extension activation rendering", () => {
 
 	it("does not present a same-id user skill as an active project fallback", async () => {
 		const previousAgentDir = getAgentDir();
-		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-shadowed-row-"));
+		const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-shadowed-row-"));
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
 		cleanupPaths.push(projectRoot, agentDir);
 		await fs.mkdir(path.join(projectRoot, ".omp", "skills", "zzsameid"), { recursive: true });
@@ -175,7 +175,7 @@ describe("extension activation rendering", () => {
 
 	it("writes MCP toggles to mcp.json instead of extension activation settings", async () => {
 		const previousAgentDir = getAgentDir();
-		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-global-mcp-"));
+		const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-global-mcp-"));
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
 		cleanupPaths.push(projectRoot, agentDir);
 		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
@@ -205,7 +205,6 @@ describe("extension activation rendering", () => {
 			const rendered = stripAnsi(dashboard.render(120).join("\n"));
 			const config = await readMCPConfigFile(path.join(agentDir, "mcp.json"));
 			expect(config.mcpServers?.zzmcpglobal?.enabled).toBe(false);
-			expect(settings.getProjectActivation("mcp", "zzmcpglobal", "global")).toBe("enabled");
 			expect(rendered).toContain("Disabled (manually disabled)");
 		} finally {
 			setAgentDir(previousAgentDir);
@@ -214,7 +213,7 @@ describe("extension activation rendering", () => {
 
 	it("does not apply a project MCP allowlist in the global edit scope", async () => {
 		const previousAgentDir = getAgentDir();
-		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-global-mcp-overlay-"));
+		const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-global-mcp-overlay-"));
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
 		cleanupPaths.push(projectRoot, agentDir);
 		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
@@ -250,7 +249,7 @@ describe("extension activation rendering", () => {
 
 	it("preserves a user MCP allowlist over a project denylist in the global edit scope", async () => {
 		const previousAgentDir = getAgentDir();
-		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-global-user-allow-"));
+		const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-global-user-allow-"));
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
 		cleanupPaths.push(projectRoot, agentDir);
 		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
@@ -279,7 +278,7 @@ describe("extension activation rendering", () => {
 
 	it("activates a source-disabled user MCP after hiding a same-name project definition", async () => {
 		const previousAgentDir = getAgentDir();
-		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-source-disabled-shadow-"));
+		const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-source-disabled-shadow-"));
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
 		cleanupPaths.push(projectRoot, agentDir);
 		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
@@ -313,7 +312,7 @@ describe("extension activation rendering", () => {
 
 	it("disables a source-disabled user MCP after hiding a same-name project definition without a user allowlist", async () => {
 		const previousAgentDir = getAgentDir();
-		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-source-disabled-global-"));
+		const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-source-disabled-global-"));
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
 		cleanupPaths.push(projectRoot, agentDir);
 		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
@@ -556,7 +555,7 @@ describe("extension activation rendering", () => {
 
 	it("writes a project denylist entry when toggling an inherited MCP server", async () => {
 		const previousAgentDir = getAgentDir();
-		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-inherited-mcp-"));
+		const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-inherited-mcp-"));
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
 		cleanupPaths.push(projectRoot, agentDir);
 		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
@@ -597,9 +596,9 @@ describe("extension activation rendering", () => {
 		}
 	});
 
-	it("clears project legacy MCP activation when enabling an inherited server", async () => {
+	it("ignores project legacy MCP activation when rendering and toggling an inherited server", async () => {
 		const previousAgentDir = getAgentDir();
-		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-project-legacy-mcp-"));
+		const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-project-legacy-mcp-"));
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
 		cleanupPaths.push(projectRoot, agentDir);
 		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
@@ -616,17 +615,18 @@ describe("extension activation rendering", () => {
 		try {
 			const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
 			const dashboard = await ExtensionDashboard.create(projectRoot, settings, 28);
+			expect(stripAnsi(dashboard.render(120).join("\n"))).toContain("Active");
 			for (const char of "legacyinherited") dashboard.handleInput(char);
 			dashboard.handleInput(" ");
 			await Bun.sleep(250);
 
-			expect((await readMCPConfigFile(path.join(projectRoot, ".omp", "mcp.json"))).enabledServers).toEqual([
+			expect((await readMCPConfigFile(path.join(projectRoot, ".omp", "mcp.json"))).disabledServers).toEqual([
 				"legacyinherited",
 			]);
 			const config = YAML.parse(await Bun.file(path.join(projectRoot, ".omp", "config.yml")).text()) as {
 				disabledExtensions?: string[];
 			};
-			expect(config.disabledExtensions ?? []).not.toContain("mcp:legacyinherited");
+			expect(config.disabledExtensions).toEqual(["mcp:legacyinherited"]);
 		} finally {
 			setAgentDir(previousAgentDir);
 		}
@@ -634,7 +634,7 @@ describe("extension activation rendering", () => {
 
 	it("uses a binary toggle for a complete project MCP definition", async () => {
 		const previousAgentDir = getAgentDir();
-		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-zzlocal-mcp-"));
+		const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-zzlocal-mcp-"));
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
 		cleanupPaths.push(projectRoot, agentDir);
 		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
@@ -668,7 +668,7 @@ describe("extension activation rendering", () => {
 
 	it("locks MCP toggles without changing their state when project MCP config loading is disabled", async () => {
 		const previousAgentDir = getAgentDir();
-		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-project-zzlocal-mcp-"));
+		const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-project-zzlocal-mcp-"));
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
 		cleanupPaths.push(projectRoot, agentDir);
 		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
@@ -710,7 +710,7 @@ describe("extension activation rendering", () => {
 
 	it("uses binary provider activation for project-only AGENTS.md", async () => {
 		const previousAgentDir = getAgentDir();
-		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), "tmp-omp-extension-agents-provider-"));
+		const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agents-provider-"));
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
 		cleanupPaths.push(projectRoot, agentDir);
 		await fs.mkdir(path.join(projectRoot, ".git"), { recursive: true });
@@ -985,7 +985,7 @@ describe("extension activation rendering", () => {
 	it("does not replace the shared provider registry while switching activation scope", async () => {
 		const previousAgentDir = getAgentDir();
 		const previousDisabledProviders = getDisabledProviders();
-		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-provider-scope-"));
+		const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-provider-scope-"));
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
 		cleanupPaths.push(projectRoot, agentDir);
 		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
@@ -1009,9 +1009,9 @@ describe("extension activation rendering", () => {
 		}
 	});
 
-	it("clears a legacy MCP activation entry when enabling the server", async () => {
+	it("does not change a legacy MCP activation entry when enabling the server", async () => {
 		const previousAgentDir = getAgentDir();
-		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-legacy-mcp-"));
+		const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-legacy-mcp-"));
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
 		cleanupPaths.push(projectRoot, agentDir);
 		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
@@ -1035,7 +1035,7 @@ describe("extension activation rendering", () => {
 			const config = YAML.parse(await Bun.file(path.join(agentDir, "config.yml")).text()) as {
 				disabledExtensions?: string[];
 			};
-			expect(config.disabledExtensions ?? []).not.toContain("mcp:legacymcp");
+			expect(config.disabledExtensions).toEqual(["mcp:legacymcp"]);
 		} finally {
 			setAgentDir(previousAgentDir);
 		}

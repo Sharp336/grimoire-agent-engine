@@ -12,7 +12,7 @@ import { registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
-import { isPathInside } from "../config/activation-paths";
+import { isPathInside, resolveProjectConfigRootSync } from "../config/activation-paths";
 import { createSourceMeta, expandEnvVarsDeep } from "./helpers";
 
 const PROVIDER_ID = "mcp-json";
@@ -156,9 +156,11 @@ async function load(ctx: LoadContext): Promise<LoadResult<MCPServer>> {
 		return { items: [] };
 	}
 
+	const projectRoot = resolveProjectConfigRootSync(ctx.cwd);
+	if (!projectRoot) return { items: [] };
 	const filenames = ["mcp.json", ".mcp.json"];
 	const results = await Promise.all(
-		filenames.map(filename => loadMCPJsonFile(ctx, path.join(ctx.cwd, filename), "project")),
+		filenames.map(filename => loadMCPJsonFile(ctx, path.join(projectRoot, filename), "project")),
 	);
 
 	const allItems = results.flatMap(r => r.items);

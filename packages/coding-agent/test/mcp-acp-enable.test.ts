@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { readMCPConfigFile } from "@oh-my-pi/pi-coding-agent/mcp/config-writer";
 import { handleMcpAcp } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/mcp";
 import type { ParsedSlashCommand, SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
@@ -23,6 +24,39 @@ afterEach(async () => {
 });
 
 describe("ACP /mcp enable and disable", () => {
+	test("lists, enables, and removes a user server from a Git-managed agent directory", async () => {
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-mcp-agent-"));
+		cleanupPaths.push(agentDir);
+		await fs.mkdir(path.join(agentDir, ".git"), { recursive: true });
+		const configPath = path.join(agentDir, "mcp.json");
+		await Bun.write(
+			configPath,
+			JSON.stringify({ mcpServers: { userOnly: { type: "stdio", command: "echo", enabled: false } } }),
+		);
+		const settings = await loadSettings(agentDir, agentDir);
+		const output: string[] = [];
+		const runtime = {
+			cwd: agentDir,
+			settings,
+			output: (text: string) => {
+				output.push(text);
+			},
+		} as SlashCommandRuntime;
+
+		await handleMcpAcp({ name: "mcp", args: "list", text: "mcp list" }, runtime);
+		expect(output[0]).toContain("userOnly | stdio | disabled | echo [user]");
+
+		await handleMcpAcp({ name: "mcp", args: "enable userOnly", text: "mcp enable userOnly" }, runtime);
+		expect((await readMCPConfigFile(configPath)).mcpServers?.userOnly?.enabled).toBe(true);
+
+		await handleMcpAcp(
+			{ name: "mcp", args: "remove userOnly --scope user", text: "mcp remove userOnly --scope user" },
+			runtime,
+		);
+		expect((await readMCPConfigFile(configPath)).mcpServers?.userOnly).toBeUndefined();
+		expect(output.slice(1)).toEqual(['Server "userOnly" enabled.', 'Removed server "userOnly" from user config.']);
+	});
+
 	test("updates a source-disabled project definition", async () => {
 		const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-mcp-project-"));
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-mcp-agent-"));
@@ -282,9 +316,11 @@ describe("ACP /mcp enable and disable", () => {
 	});
 
 	test("ignores project MCP config when project loading is disabled", async () => {
+		const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-mcp-home-"));
 		const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-mcp-project-"));
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-mcp-agent-"));
-		cleanupPaths.push(projectDir, agentDir);
+		cleanupPaths.push(homeDir, projectDir, agentDir);
+		vi.spyOn(os, "homedir").mockReturnValue(homeDir);
 		await Bun.write(
 			path.join(projectDir, ".omp", "mcp.json"),
 			JSON.stringify({ mcpServers: { projectOnly: { type: "stdio", command: "echo" } } }),
@@ -303,6 +339,98 @@ describe("ACP /mcp enable and disable", () => {
 		await handleMcpAcp({ name: "mcp", args: "list", text: "mcp list" }, runtime);
 
 		expect(output).toEqual(["No MCP servers configured."]);
+	});
+
+	test("lists a standalone project MCP config discovered through mcp-json", async () => {
+		const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-mcp-home-"));
+		const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-mcp-project-"));
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-mcp-agent-"));
+		cleanupPaths.push(homeDir, projectDir, agentDir);
+		vi.spyOn(os, "homedir").mockReturnValue(homeDir);
+		await fs.mkdir(path.join(projectDir, ".git"), { recursive: true });
+		await Bun.write(
+			path.join(projectDir, "mcp.json"),
+			JSON.stringify({ mcpServers: { standalone: { command: "echo" } } }),
+		);
+		const settings = await loadSettings(projectDir, agentDir);
+		const output: string[] = [];
+		const runtime = {
+			cwd: projectDir,
+			settings,
+			output: (text: string) => {
+				output.push(text);
+			},
+		} as SlashCommandRuntime;
+
+		await handleMcpAcp({ name: "mcp", args: "list", text: "mcp list" }, runtime);
+
+		expect(output).toEqual(["standalone | stdio | enabled | echo [project]"]);
+	});
+
+	test("lists a native .omp/.mcp.json fallback definition", async () => {
+		const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-mcp-home-"));
+		const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-mcp-project-"));
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-mcp-agent-"));
+		cleanupPaths.push(homeDir, projectDir, agentDir);
+		vi.spyOn(os, "homedir").mockReturnValue(homeDir);
+		await Bun.write(
+			path.join(projectDir, ".omp", ".mcp.json"),
+			JSON.stringify({ mcpServers: { nativeFallback: { command: "echo" } } }),
+		);
+		const settings = await loadSettings(projectDir, agentDir);
+		const output: string[] = [];
+		const runtime = {
+			cwd: projectDir,
+			settings,
+			session: { modelRegistry: { authStorage: undefined } } as never,
+			output: (text: string) => {
+				output.push(text);
+			},
+		} as unknown as SlashCommandRuntime;
+
+		await handleMcpAcp({ name: "mcp", args: "list", text: "mcp list" }, runtime);
+
+		expect(output).toEqual(["nativeFallback | stdio | enabled | echo [project]"]);
+		const connectToServer = vi.spyOn(mcpClient, "connectToServer").mockResolvedValue({} as never);
+		vi.spyOn(mcpClient, "listTools").mockResolvedValue([]);
+		vi.spyOn(mcpClient, "disconnectServer").mockResolvedValue();
+		await handleMcpAcp({ name: "mcp", args: "test nativeFallback", text: "mcp test nativeFallback" }, runtime);
+		expect(connectToServer).toHaveBeenCalledWith("nativeFallback", expect.objectContaining({ command: "echo" }));
+		expect(output).toEqual([
+			"nativeFallback | stdio | enabled | echo [project]",
+			'Server "nativeFallback" connected (0 tools).',
+		]);
+	});
+
+	test("lists disabled-provider MCP servers as disabled and does not test them", async () => {
+		const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-mcp-home-"));
+		const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-mcp-project-"));
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-mcp-agent-"));
+		cleanupPaths.push(homeDir, projectDir, agentDir);
+		vi.spyOn(os, "homedir").mockReturnValue(homeDir);
+		await Bun.write(
+			path.join(homeDir, ".claude.json"),
+			JSON.stringify({ mcpServers: { claudeServer: { command: "echo" } } }),
+		);
+		const settings = await loadSettings(projectDir, agentDir);
+		settings.set("disabledProviders", ["claude"]);
+		const output: string[] = [];
+		const runtime = {
+			cwd: projectDir,
+			settings,
+			output: (text: string) => {
+				output.push(text);
+			},
+		} as SlashCommandRuntime;
+
+		await handleMcpAcp({ name: "mcp", args: "list", text: "mcp list" }, runtime);
+		expect(output).toEqual(["claudeServer | stdio | disabled | echo [user]"]);
+
+		await handleMcpAcp({ name: "mcp", args: "test claudeServer", text: "mcp test claudeServer" }, runtime);
+		expect(output).toEqual([
+			"claudeServer | stdio | disabled | echo [user]",
+			'Server "claudeServer" not found. Run /mcp list to see configured servers.',
+		]);
 	});
 
 	test("does not add a project MCP server when project loading is disabled", async () => {

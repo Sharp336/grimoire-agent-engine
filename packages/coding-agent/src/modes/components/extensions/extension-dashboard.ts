@@ -13,7 +13,6 @@
  * - Wheel over the inspector: scroll the detail pane
  * - Esc: clear search (if active) then close
  */
-import * as path from "node:path";
 import {
 	type Component,
 	matchesKey,
@@ -28,7 +27,7 @@ import {
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
 import type { MCPServer } from "../../../capability/mcp";
 import { areMCPConnectionsEquivalent } from "../../../capability/mcp";
-import { resolveExistingActivationProjectRootSync } from "../../../config/activation-paths";
+import { resolveProjectConfigRootSync } from "../../../config/activation-paths";
 import {
 	type ActivationScope,
 	type ActivationWriteTarget,
@@ -37,7 +36,7 @@ import {
 	Settings,
 } from "../../../config/settings";
 import { syncDisabledProviders as syncCapabilityDisabledProviders } from "../../../discovery";
-import { setMcpServerEnabled, setServerDisabled, setServerForceEnabled } from "../../../mcp/config-writer";
+import { setMcpServerEnabled, setServerOverlayActivation } from "../../../mcp/config-writer";
 import { getTabBarTheme } from "../../../modes/shared";
 import { theme } from "../../../modes/theme/theme";
 import { matchesAppInterrupt } from "../../../modes/utils/keybinding-matchers";
@@ -493,6 +492,7 @@ export class ExtensionDashboard implements Component {
 
 	#handleProviderToggle(providerId: string): void {
 		const sm = this.settings ?? Settings.instance;
+		const activationScope = this.#activationScope;
 		const current = sm.getProviderActivation(providerId, this.#activationScope);
 		const target = sm.getActivationWriteTarget(this.cwd, this.#activationScope);
 		const currentlyDisabled = sm.isProviderEffectivelyDisabled(providerId, this.#activationScope);
@@ -504,9 +504,9 @@ export class ExtensionDashboard implements Component {
 			rowDisabled: currentlyDisabled,
 		});
 		void sm
-			.setProviderActivation(providerId, next, this.#activationScope)
+			.setProviderActivation(providerId, next, activationScope)
 			.then(() => {
-				if (target === "global") syncCapabilityDisabledProviders(sm.getActivationDisabledProviders("global"));
+				syncCapabilityDisabledProviders(sm.getActivationDisabledProviders(activationScope));
 				void this.#refreshFromState();
 			})
 			.catch(error =>
@@ -543,14 +543,12 @@ export class ExtensionDashboard implements Component {
 		const activationScope = this.#activationScope;
 		const name = extensionId.slice("mcp:".length);
 		const userPath = getMCPConfigPath("user", this.cwd);
-		const projectPath = getMCPConfigPath(
-			"project",
-			resolveExistingActivationProjectRootSync(this.cwd) ?? path.resolve(this.cwd),
-		);
+		const projectRoot = resolveProjectConfigRootSync(this.cwd);
+		const projectPath = projectRoot ? getMCPConfigPath("project", projectRoot) : null;
 		try {
 			await setMcpServerEnabled({
 				userPath,
-				projectPath: activationScope === "project" ? projectPath : userPath,
+				projectPath: activationScope === "project" && projectPath ? projectPath : userPath,
 				sourcePath:
 					extension.source.provider === "native" || extension.source.provider === "mcp-json"
 						? extension.path
@@ -558,10 +556,6 @@ export class ExtensionDashboard implements Component {
 				name,
 				enabled,
 			});
-			const sm = this.settings ?? Settings.instance;
-			if (enabled && sm?.getProjectActivation("mcp", name, activationScope) === "disabled") {
-				await sm.setProjectActivation("mcp", name, "inherit", activationScope);
-			}
 		} catch (error) {
 			logger.warn("Failed to persist MCP toggle", { name, enabled, error: String(error) });
 		}
@@ -579,19 +573,10 @@ export class ExtensionDashboard implements Component {
 				mode: "tri-state",
 				rowDisabled: extension.state === "disabled",
 			});
-			const projectPath = getMCPConfigPath(
-				"project",
-				resolveExistingActivationProjectRootSync(this.cwd) ?? path.resolve(this.cwd),
-			);
-			const clearLegacyActivation =
-				next === "enabled" && sm.getProjectActivation("mcp", extension.name, "project") === "disabled";
-			void Promise.all([
-				setServerDisabled(projectPath, extension.name, next === "disabled"),
-				setServerForceEnabled(projectPath, extension.name, next === "enabled"),
-			])
-				.then(async () => {
-					if (clearLegacyActivation) await sm.setProjectActivation("mcp", extension.name, "inherit", "project");
-				})
+			const projectRoot = resolveProjectConfigRootSync(this.cwd);
+			if (!projectRoot) return;
+			const projectPath = getMCPConfigPath("project", projectRoot);
+			void setServerOverlayActivation(projectPath, extension.name, next)
 				.catch(error =>
 					logger.warn("Failed to update project MCP activation", { name: extension.name, error: String(error) }),
 				)
@@ -631,8 +616,6 @@ export class ExtensionDashboard implements Component {
 
 	async #refreshFromState(): Promise<void> {
 		const refreshToken = ++this.#refreshToken;
-		// Remember the current tab so it survives the re-sort.
-		const currentTabId = this.#state.tabs[this.#state.activeTabIndex]?.id;
 
 		const sm = this.settings ?? Settings.instance;
 		const disabledIds = sm.getActivationDisabledExtensions(this.#activationScope);
@@ -644,6 +627,8 @@ export class ExtensionDashboard implements Component {
 			sm.get("mcp.enableProjectConfig") !== false,
 		);
 		if (refreshToken !== this.#refreshToken) return;
+		// Navigation may have changed the selected tab while loading state.
+		const currentTabId = this.#state.tabs[this.#state.activeTabIndex]?.id;
 		this.#state = this.#withActivationMetadata(nextState);
 
 		// Re-anchor on the same tab id in the (re-sorted) list.
