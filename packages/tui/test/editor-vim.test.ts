@@ -1326,6 +1326,18 @@ describe("Editor Vim input mode", () => {
 		expect(editor.getText()).toBe("aXb");
 	});
 
+	it("starts a new undo unit when switching from Vim insert to default mode", () => {
+		const editor = createVimEditor();
+		typeText(editor, "iabc");
+
+		editor.setInputMode("default");
+		editor.handleInput("d");
+		expect(editor.getText()).toBe("abcd");
+
+		editor.handleInput("\x1f");
+		expect(editor.getText()).toBe("abc");
+	});
+
 	it("expands operator ranges over host-owned atomic placeholders", () => {
 		const editor = createVimEditor();
 		editor.atomicTokenPattern = /\[Image #[^\]]+\]/g;

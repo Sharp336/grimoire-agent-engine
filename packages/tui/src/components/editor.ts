@@ -558,6 +558,7 @@ export class Editor implements Component, Focusable {
 	setInputMode(mode: EditorInputMode): void {
 		if (this.#inputMode === mode) return;
 		this.#jumpMode = null;
+		this.#lastAction = null;
 		if (mode === "vim") this.#cancelAutocomplete(true);
 		this.#inputMode = mode;
 		this.#vim.setEnabled(mode === "vim");
