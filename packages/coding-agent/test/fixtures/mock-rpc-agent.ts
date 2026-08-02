@@ -86,7 +86,7 @@ if (Bun.env.MOCK_RPC_CLIENT_FRAMES === "1") {
 	writeFrame({
 		type: "host_uri_request",
 		id: "host-uri-1",
-		operation: "read",
+		operation: Bun.env.MOCK_RPC_MALFORMED_HOST_URI_WRITE === "1" ? "write" : "read",
 		url: "fixture://resource/1",
 	});
 	if (Bun.env.MOCK_RPC_HOST_URI_CANCEL === "1") {
@@ -221,6 +221,16 @@ for await (const raw of console) {
 					command: frame.type,
 					success: true,
 					data: { todoPhases: frame.phases },
+				});
+				continue;
+			}
+			if (Bun.env.MOCK_RPC_REJECT_SESSION_NAME === "1" && frame.type === "set_session_name") {
+				writeFrame({
+					id,
+					type: "response",
+					command: frame.type,
+					success: false,
+					error: "Session name cannot be empty",
 				});
 				continue;
 			}
