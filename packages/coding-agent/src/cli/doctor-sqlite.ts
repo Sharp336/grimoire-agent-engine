@@ -1266,14 +1266,45 @@ async function repairHealthyDatabase(probe: DbProbe, repair: DbRepair): Promise<
 }
 
 async function repairCorruptDatabase(probe: DbProbe, repair: DbRepair): Promise<void> {
-	const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 	if (probe.policy === "regenerable") {
-		// Caches rebuild on next use (model-cache.ts getDb, github-cache.ts openGithubCacheDb).
+		// Rebuildable caches still preserve bytes first. The verified archive and
+		// re-snapshot catch every change through the backup window; the final
+		// gap before rename is deliberately best effort.
+		let expected: TrioSnapshotEntry[];
+		try {
+			expected = await snapshotTrio(probe.path);
+		} catch (error) {
+			repair.error = messageOf(error);
+			return;
+		}
+		if (mainEntryOf(expected, probe.path) === null) {
+			repair.error = "database disappeared before backup";
+			return;
+		}
+		let archiveDir: string;
+		try {
+			archiveDir = await archiveTrio(probe.path, expected);
+		} catch (error) {
+			repair.error = `backup failed, database left in place: ${messageOf(error)}`;
+			return;
+		}
+		repair.quarantinePath = archiveDir;
+		let current: TrioSnapshotEntry[];
+		try {
+			current = await snapshotTrio(probe.path);
+		} catch (error) {
+			repair.error = messageOf(error);
+			return;
+		}
+		if (!snapshotsEqual(expected, current)) {
+			repair.error = "database changed after the verified backup; not quarantined";
+			return;
+		}
+		const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 		const quarantinePath = `${probe.path}.corrupt-${stamp}`;
 		try {
 			await quarantineFiles(probe.path, quarantinePath);
 			repair.actions.push("quarantined");
-			repair.quarantinePath = quarantinePath;
 		} catch (error) {
 			repair.error = messageOf(error);
 		}

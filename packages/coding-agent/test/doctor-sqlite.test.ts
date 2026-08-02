@@ -550,3 +550,74 @@ describe("Item M: read-only probe does not create WAL sidecars", () => {
 		expect(probe.quickCheck).toBe("ok");
 	});
 });
+
+function makeRegenerableDb(dbPath: string): DoctorDatabase {
+	return { label: path.basename(dbPath), path: dbPath, policy: "regenerable" };
+}
+
+describe("regenerable quarantine backups", () => {
+	test("archives the verified trio before quarantining it", async () => {
+		const dbPath = path.join(root, "model.db");
+		const original = "garbage-not-sqlite";
+		await fs.writeFile(dbPath, original);
+		// `repairDatabase` first attempts hot-journal recovery, which can consume
+		// a synthetic WAL before the archive path runs. This asserts the main
+		// backup contract; Item I covers raw sidecar round-tripping separately.
+		const probe = await probeDatabase(makeRegenerableDb(dbPath));
+		const repair = await repairDatabase(probe);
+
+		expect(repair.error).toBeNull();
+		expect(repair.actions).toEqual(["quarantined"]);
+		const archivePath = repair.quarantinePath;
+		if (archivePath === null) throw new Error("missing verified backup path");
+		expect(await fs.readFile(path.join(archivePath, "model.db"), "utf8")).toBe(original);
+		expect(await pathExists(dbPath)).toBe(false);
+	});
+
+	test.serial("keeps the live trio when it changes after the verified backup", async () => {
+		const dbPath = path.join(root, "model.db");
+		const original = "garbage-not-sqlite";
+		const changed = `${original}-changed`;
+		await fs.writeFile(dbPath, original);
+
+		const copyFile = fs.copyFile;
+		let mutated = false;
+		const copySpy = spyOn(fs, "copyFile").mockImplementation(async (source, destination, mode) => {
+			await copyFile(source, destination, mode);
+			if (!mutated && source === dbPath) {
+				mutated = true;
+				await fs.writeFile(dbPath, changed);
+			}
+		});
+		spies.push(copySpy);
+
+		const repair = await repairDatabase(await probeDatabase(makeRegenerableDb(dbPath)));
+
+		expect(repair.actions).toEqual([]);
+		expect(repair.error).toContain("changed after the verified backup");
+		const archivePath = repair.quarantinePath;
+		if (archivePath === null) throw new Error("missing verified backup path");
+		expect(await fs.readFile(path.join(archivePath, "model.db"), "utf8")).toBe(original);
+		expect(await fs.readFile(dbPath, "utf8")).toBe(changed);
+		expect(await pathExists(`${dbPath}.corrupt`)).toBe(false);
+	});
+
+	test.serial("leaves the live trio in place when backup creation fails", async () => {
+		const dbPath = path.join(root, "model.db");
+		const original = "garbage-not-sqlite";
+		await fs.writeFile(dbPath, original);
+
+		const copySpy = spyOn(fs, "copyFile").mockRejectedValue(
+			Object.assign(new Error("ENOSPC: no space left on device, copyfile"), { code: "ENOSPC" }),
+		);
+		spies.push(copySpy);
+
+		const repair = await repairDatabase(await probeDatabase(makeRegenerableDb(dbPath)));
+
+		expect(repair.actions).toEqual([]);
+		expect(repair.quarantinePath).toBeNull();
+		expect(repair.error).toContain("backup failed");
+		expect(repair.error).toContain("ENOSPC");
+		expect(await fs.readFile(dbPath, "utf8")).toBe(original);
+	});
+});

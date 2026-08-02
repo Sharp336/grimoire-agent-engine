@@ -141,6 +141,7 @@ describe("omp doctor", () => {
 		const dbPath = getModelDbPath(root);
 		await createDatabaseWithRows(dbPath, 500);
 		await corruptInteriorPages(dbPath);
+		const corruptBytes = await fs.readFile(dbPath);
 
 		const before = await runDoctorCommand({ flags: { agentDir: root } });
 		expect(before.findings.find(finding => finding.id === "storage.models.db")?.status).toBe("error");
@@ -149,9 +150,19 @@ describe("omp doctor", () => {
 		const finding = after.findings.find(entry => entry.id === "storage.models.db");
 		expect(finding?.status).toBe("ok");
 		expect(finding?.fixed).toBe(true);
+		expect(
+			finding?.details.some(
+				detail => detail.includes("originals preserved at") && detail.includes(".omp-doctor-backups"),
+			),
+		).toBe(true);
 		expect(await pathExists(dbPath)).toBe(false);
 		const siblings = await fs.readdir(path.dirname(dbPath));
 		expect(siblings.filter(name => name.startsWith("models.db.corrupt-"))).toHaveLength(1);
+		const backupRoot = path.join(path.dirname(dbPath), ".omp-doctor-backups");
+		const backups = (await fs.readdir(backupRoot)).filter(name => name.startsWith("models.db."));
+		const [backup] = backups;
+		if (!backup) throw new Error("missing model database backup");
+		expect((await fs.readFile(path.join(backupRoot, backup, "models.db"))).equals(corruptBytes)).toBe(true);
 	});
 
 	test("data-destroying corruption refuses the swap but preserves a recovery dump", async () => {
