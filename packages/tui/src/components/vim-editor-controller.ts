@@ -147,13 +147,25 @@ export class VimEditorController {
 			return true;
 		}
 		if (this.#mode === "visual" && this.#handleVisualNavigation(data, kb)) return true;
+		const matchesBaseMutation =
+			kb.matches(data, "tui.input.newLine") ||
+			kb.matches(data, "tui.editor.deleteCharBackward") ||
+			kb.matches(data, "tui.editor.deleteCharForward") ||
+			matchesKey(data, "shift+backspace") ||
+			matchesKey(data, "shift+delete") ||
+			kb.matches(data, "tui.editor.deleteToLineEnd") ||
+			kb.matches(data, "tui.editor.deleteToLineStart") ||
+			kb.matches(data, "tui.editor.deleteWordBackward") ||
+			kb.matches(data, "tui.editor.deleteWordForward") ||
+			kb.matches(data, "tui.editor.yank") ||
+			kb.matches(data, "tui.editor.yankPop");
 		if (data === "\n") {
 			this.clearPendingCommand();
 			return true;
 		}
 		if (matchesKey(data, "enter") || matchesKey(data, "return")) {
 			this.clearPendingCommand();
-			return this.#mode === "visual";
+			return this.#mode === "visual" || matchesBaseMutation;
 		}
 		if (matchesKey(data, "ctrl+r")) {
 			if (this.#mode === "visual") {
@@ -171,21 +183,11 @@ export class VimEditorController {
 		if (
 			kb.matches(data, "tui.input.submit") ||
 			kb.matches(data, "tui.input.tab") ||
-			kb.matches(data, "tui.input.newLine") ||
 			matchesKey(data, "alt+enter") ||
 			matchesKey(data, "ctrl+enter") ||
 			data === "\x1b[13;2~" ||
 			(data.length > 1 && (data.charCodeAt(0) === 10 || data.includes("\r"))) ||
-			kb.matches(data, "tui.editor.deleteCharBackward") ||
-			kb.matches(data, "tui.editor.deleteCharForward") ||
-			matchesKey(data, "shift+backspace") ||
-			matchesKey(data, "shift+delete") ||
-			kb.matches(data, "tui.editor.deleteToLineEnd") ||
-			kb.matches(data, "tui.editor.deleteToLineStart") ||
-			kb.matches(data, "tui.editor.deleteWordBackward") ||
-			kb.matches(data, "tui.editor.deleteWordForward") ||
-			kb.matches(data, "tui.editor.yank") ||
-			kb.matches(data, "tui.editor.yankPop")
+			matchesBaseMutation
 		) {
 			this.clearPendingCommand();
 			return true;
