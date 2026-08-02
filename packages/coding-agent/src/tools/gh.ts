@@ -19,6 +19,7 @@ import type { ToolSession } from ".";
 import { formatShortSha } from "./gh-format";
 import { type CacheStatus, getOrFetchView, invalidateAllForNumber, resolveGithubCacheAuthKey } from "./github-cache";
 import type { OutputMeta } from "./output-meta";
+import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth as truncateVisualWidth } from "./render-utils";
 import { ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
@@ -247,6 +248,20 @@ const RUN_URL_PATTERN = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/actions\/runs\/
 const RUN_SUCCESS_CONCLUSIONS = new Set(["success", "neutral", "skipped"]);
 const RUN_FAILURE_CONCLUSIONS = new Set(["failure", "timed_out", "cancelled", "action_required", "startup_failure"]);
 const JOB_FAILURE_CONCLUSIONS = new Set(["failure", "timed_out", "cancelled", "action_required"]);
+const PROJECT_ITEM_LIMIT_DEFAULT = 30;
+const PROJECT_ITEM_LIMIT_MAX = 100;
+const PROJECT_BOARD_FIELD_DEFAULT = "Status";
+const PROJECT_NO_STATUS_GROUP = "No status";
+const PROJECT_INLINE_ITEMS_PER_COLUMN = 8;
+const PROJECT_SPILL_THRESHOLD = 30;
+// Cap for the project_view RENDER path only. Resolution lookups
+// (contentUrl -> item, itemId find) use PROJECT_ITEM_LOOKUP_LIMIT instead so
+// they are not capped at 100 on large boards.
+const PROJECT_ITEM_LOOKUP_LIMIT = 1000;
+// `gh project field-list` defaults to 30; boards with >30 fields would drop the
+// Status field off the page. Field counts are tiny, so over-fetch at 100.
+const PROJECT_FIELD_LOOKUP_LIMIT = 100;
+const PROJECT_URL_PATTERN = /^https:\/\/github\.com\/(?:orgs|users)\/([^/]+)\/projects\/(\d+)(?:\/.*)?$/;
 const GITHUB_READONLY_OPS: ReadonlySet<string> = new Set([
 	"repo_view",
 	"file_read",
@@ -256,11 +271,12 @@ const GITHUB_READONLY_OPS: ReadonlySet<string> = new Set([
 	"search_commits",
 	"search_repos",
 	"run_watch",
+	"project_view",
 ]);
 
 const githubSchema = type({
 	op: type(
-		"'repo_view' | 'file_read' | 'pr_create' | 'pr_checkout' | 'pr_push' | 'search_issues' | 'search_prs' | 'search_code' | 'search_commits' | 'search_repos' | 'run_watch'",
+		"'repo_view' | 'file_read' | 'pr_create' | 'pr_checkout' | 'pr_push' | 'search_issues' | 'search_prs' | 'search_code' | 'search_commits' | 'search_repos' | 'run_watch' | 'project_view' | 'project_item_add' | 'project_item_create' | 'project_item_edit' | 'project_item_delete' | 'project_create'",
 	).describe("github operation"),
 	"repo?": type("string").describe("owner/repo"),
 	"branch?": type("string").describe("branch"),
@@ -284,6 +300,20 @@ const githubSchema = type({
 	"limit?": type("number").describe("max results"),
 	"run?": type("string").describe("actions run id or url"),
 	"tail?": type("number").describe("log lines per failed job"),
+	"project?": type("string").describe("project number or full github project url"),
+	"owner?": type("string").describe("org or user login owning the project"),
+	"itemId?": type("string").describe("project item node id (edit/delete)"),
+	"contentUrl?": type("string").describe("issue or pr url to add, or item backed by it (edit/delete)"),
+	"itemStatus?": type("string").describe("target status column name (project_item_edit)"),
+	"field?": type("string").describe("single-select field used as board column (defaults to Status)"),
+	"archive?": type("boolean").describe("archive instead of delete (project_item_delete)"),
+	"template?": type("string").describe(
+		"project template id for project_create (kanban, team_planning, feature_release, bug_tracker, iterative_development, product_launch, roadmap, team_retrospective)",
+	),
+	"copyFrom?": type("string").describe("source project number or url to clone via gh project copy (project_create)"),
+	"sourceOwner?": type("string").describe(
+		"owner of the copyFrom source project (required when copyFrom is a bare number)",
+	),
 });
 
 type GithubInput = typeof githubSchema.infer;
@@ -624,6 +654,74 @@ interface GhFailedJobLog {
 	full?: string;
 	tail?: string;
 	available: boolean;
+}
+// ────────────────────────────────────────────────────────────────────────────
+// GitHub Projects (V2) — response shapes observed from `gh project ... --format json`.
+// Projects V2 is GraphQL-only; the `gh` CLI wraps it. Single-select field values
+// are flattened onto each item keyed by field name (e.g. item.status for "Status").
+// ────────────────────────────────────────────────────────────────────────────
+
+interface GhProjectOwner {
+	login?: string;
+	type?: string;
+}
+
+interface GhProjectView {
+	closed?: boolean;
+	id?: string;
+	number?: number;
+	title?: string;
+	url?: string;
+	shortDescription?: string | null;
+	public?: boolean;
+	readme?: string;
+	owner?: GhProjectOwner | null;
+	fields?: { totalCount?: number };
+	items?: { totalCount?: number };
+}
+
+interface GhProjectFieldOption {
+	id?: string;
+	name?: string;
+}
+
+interface GhProjectField {
+	id?: string;
+	name?: string;
+	type?: string;
+	options?: GhProjectFieldOption[];
+}
+
+interface GhProjectFieldList {
+	fields?: GhProjectField[];
+}
+
+interface GhProjectItemContent {
+	id?: string;
+	title?: string;
+	body?: string | null;
+	type?: string;
+	url?: string;
+	number?: number;
+	repository?: string;
+}
+
+type GhProjectItem = {
+	id?: string;
+	title?: string;
+	content?: GhProjectItemContent | null;
+} & Record<string, unknown>;
+
+interface GhProjectItemList {
+	items?: GhProjectItem[];
+}
+
+interface GhProjectItemMutation {
+	id?: string;
+	title?: string;
+	body?: string | null;
+	type?: string;
+	url?: string;
 }
 
 function normalizeText(value: string | null | undefined): string {
@@ -1150,6 +1248,40 @@ function parseRunReference(value: string | undefined): GhRunReference {
 		repo: match[1],
 		runId: Number(match[2]),
 	};
+}
+
+/**
+ * Resolve a GitHub Projects V2 reference into its owner login + project number.
+ * Accepts a bare number (requires `owner`) or a full project URL
+ * (`https://github.com/orgs|users/<login>/projects/<n>`). For URLs the owner is
+ * taken from the URL; an explicit `owner` argument is ignored in that case.
+ */
+export function parseProjectReference(
+	value: string | undefined,
+	owner: string | undefined,
+): { owner: string; number: number } {
+	const normalized = normalizeOptionalString(value);
+	if (!normalized) {
+		throw new ToolError("project must be a project number or a full GitHub project URL");
+	}
+
+	if (/^\d+$/.test(normalized)) {
+		const resolvedOwner = normalizeOptionalString(owner);
+		if (!resolvedOwner) {
+			throw new ToolError("owner is required when project is a bare number");
+		}
+		return { owner: resolvedOwner, number: Number(normalized) };
+	}
+
+	const match = normalized.match(PROJECT_URL_PATTERN);
+	if (!match) {
+		throw new ToolError(
+			"project must be a bare number (with owner) or a full GitHub project URL " +
+				"(https://github.com/orgs/<login>/projects/<n> or https://github.com/users/<login>/projects/<n>)",
+		);
+	}
+
+	return { owner: match[1], number: Number(match[2]) };
 }
 
 function parsePullRequestUrl(value: string | undefined): { repo?: string; prNumber?: number } {
@@ -2502,6 +2634,18 @@ export class GithubTool implements AgentTool<typeof githubSchema, GhToolDetails>
 					return executeSearchRepos(this.session, params, signal);
 				case "run_watch":
 					return executeRunWatch(this.session, this.name, params, signal, onUpdate);
+				case "project_view":
+					return executeProjectView(this.session, params, signal);
+				case "project_item_add":
+					return executeProjectItemAdd(this.session, params, signal);
+				case "project_item_create":
+					return executeProjectItemCreate(this.session, params, signal);
+				case "project_item_edit":
+					return executeProjectItemEdit(this.session, params, signal);
+				case "project_item_delete":
+					return executeProjectItemDelete(this.session, params, signal);
+				case "project_create":
+					return executeProjectCreate(this.session, params, signal);
 			}
 		});
 	}
@@ -3956,4 +4100,781 @@ async function executeRunWatch(
 		}
 		await scheduler.wait(currentIntervalSeconds() * 1000, { signal });
 	}
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// GitHub Projects (V2)
+//
+// Projects V2 is GraphQL-only; `gh project ... --format json` wraps it. The `gh`
+// CLI does not request the `project` OAuth scope by default, so every project
+// call 403s until the user runs `gh auth refresh -s project`. `runProjectJson`
+// centralizes that detection so all project ops surface the remediation.
+// ────────────────────────────────────────────────────────────────────────────
+
+function resolveProjectItemLimit(value: number | undefined): number {
+	if (value === undefined) {
+		return PROJECT_ITEM_LIMIT_DEFAULT;
+	}
+	if (!Number.isFinite(value) || value <= 0) {
+		throw new ToolError("limit must be a positive number");
+	}
+	return Math.min(Math.floor(value), PROJECT_ITEM_LIMIT_MAX);
+}
+
+function isProjectScopeError(err: unknown): boolean {
+	if (!(err instanceof Error)) return false;
+	const message = err.message.toLowerCase();
+	// Matches both gh's own pre-flight message ("...missing required scopes ['project']")
+	// and the GraphQL API error ("Your token has not been granted the required scopes
+	// ... ['read:project']"). Both contain "required scopes" and "project".
+	return message.includes("required scopes") && message.includes("project");
+}
+
+async function runProjectJson<T>(cwd: string, args: string[], signal: AbortSignal | undefined): Promise<T> {
+	try {
+		return await git.github.json<T>(cwd, args, signal);
+	} catch (err) {
+		if (isProjectScopeError(err)) {
+			throw new ToolError(
+				"GitHub Projects requires the 'project' OAuth scope. Run `gh auth refresh -s project` and retry.",
+			);
+		}
+		throw err;
+	}
+}
+
+async function fetchProjectFields(
+	session: ToolSession,
+	owner: string,
+	number: number,
+	signal: AbortSignal | undefined,
+): Promise<GhProjectField[]> {
+	const data = await runProjectJson<GhProjectFieldList>(
+		session.cwd,
+		[
+			"project",
+			"field-list",
+			String(number),
+			"--owner",
+			owner,
+			"--format",
+			"json",
+			"--limit",
+			String(PROJECT_FIELD_LOOKUP_LIMIT),
+		],
+		signal,
+	);
+	return data.fields ?? [];
+}
+
+async function fetchProjectItems(
+	session: ToolSession,
+	owner: string,
+	number: number,
+	limit: number,
+	signal: AbortSignal | undefined,
+): Promise<GhProjectItem[]> {
+	const data = await runProjectJson<GhProjectItemList>(
+		session.cwd,
+		["project", "item-list", String(number), "--owner", owner, "--format", "json", "--limit", String(limit)],
+		signal,
+	);
+	return data.items ?? [];
+}
+
+async function fetchProjectView(
+	session: ToolSession,
+	owner: string,
+	number: number,
+	signal: AbortSignal | undefined,
+): Promise<GhProjectView> {
+	return runProjectJson<GhProjectView>(
+		session.cwd,
+		["project", "view", String(number), "--owner", owner, "--format", "json"],
+		signal,
+	);
+}
+
+/**
+ * Resolve the single-select field used as the board column. Field name match is
+ * case-insensitive; throws when the field is absent or not a single-select,
+ * listing the available single-select field names.
+ */
+export function resolveProjectBoardField(
+	fields: GhProjectField[],
+	fieldName: string,
+): { field: GhProjectField; options: GhProjectFieldOption[] } {
+	const target = fieldName.trim().toLowerCase();
+	const singleSelectNames = fields
+		.filter(f => f.type === "ProjectV2SingleSelectField")
+		.map(f => f.name ?? "")
+		.filter(name => name.length > 0);
+	const match = fields.find(f => (f.name ?? "").trim().toLowerCase() === target);
+	const list = singleSelectNames.map(name => `"${name}"`).join(", ");
+	const missingMessage = `project has no single-select field named "${fieldName}".${list ? ` Available single-select fields: ${list}.` : ""}`;
+	if (!match) {
+		throw new ToolError(missingMessage);
+	}
+	if (match.type !== "ProjectV2SingleSelectField") {
+		throw new ToolError(missingMessage);
+	}
+	const options = match.options ?? [];
+	if (options.length === 0) {
+		throw new ToolError(`project field "${fieldName}" has no options configured.`);
+	}
+	return { field: match, options };
+}
+
+function findProjectFieldOption(options: GhProjectFieldOption[], value: string): GhProjectFieldOption | undefined {
+	const target = value.trim().toLowerCase();
+	return options.find(option => (option.name ?? "").trim().toLowerCase() === target);
+}
+
+/**
+ * Read an item's value for a flattened single-select field. `gh project
+ * item-list` flattens each single-select field value onto the item keyed by the
+ * field name (e.g. "Status" → `status`); matching is case- and whitespace-insensitive.
+ */
+export function getProjectItemFieldValue(item: GhProjectItem, fieldName: string): string | undefined {
+	const target = fieldName.trim().toLowerCase().replace(/\s+/g, "");
+	for (const [key, value] of Object.entries(item)) {
+		if (key === "id" || key === "title" || key === "content") continue;
+		if (key.toLowerCase().replace(/\s+/g, "") === target && typeof value === "string") {
+			return value;
+		}
+	}
+	return undefined;
+}
+
+export function normalizeGithubContentUrl(url: string): string {
+	let normalized = url.trim().split("#")[0]?.split("?")[0];
+	if (normalized === undefined) return "";
+	while (normalized.endsWith("/")) normalized = normalized.slice(0, -1);
+	// Canonicalize issue/PR subpage URLs down to /issues/<n> or /pull/<n> (e.g.
+	// /pull/7/files -> /pull/7) so a contentUrl with a subpage path matches the
+	// item's canonical content.url. Non-issue/PR URLs are left unchanged.
+	const subpage = normalized.match(/^(https:\/\/github\.com\/[^/]+\/[^/]+\/(?:issues|pull)\/\d+)/);
+	if (subpage) normalized = subpage[1];
+	return normalized;
+}
+
+export function findProjectItemByContentUrl(items: GhProjectItem[], contentUrl: string): GhProjectItem | undefined {
+	const target = normalizeGithubContentUrl(contentUrl);
+	if (!target) return undefined;
+	return items.find(item => {
+		const url = item.content?.url;
+		return url !== undefined && normalizeGithubContentUrl(url) === target;
+	});
+}
+
+function formatProjectItemLine(item: GhProjectItem): string {
+	const id = replaceTabs(item.id ?? "?");
+	const content = item.content;
+	const type = content?.type;
+	let marker: string;
+	if (type === "Issue") {
+		marker = "ISSUE";
+	} else if (type === "PullRequest") {
+		marker = "PR";
+	} else {
+		marker = "DRAFT";
+	}
+	let suffix = "";
+	if ((type === "Issue" || type === "PullRequest") && content?.number !== undefined) {
+		const repo = content.repository ? ` ${replaceTabs(content.repository)}` : "";
+		suffix = ` (#${content.number}${repo})`;
+	}
+	const rawTitle = content?.title ?? item.title ?? "(untitled)";
+	const title = truncateVisualWidth(replaceTabs(rawTitle), TRUNCATE_LENGTHS.TITLE);
+	return `- [${id}] ${marker} ${title}${suffix}`;
+}
+
+function formatProjectColumn(lines: string[], name: string, colItems: GhProjectItem[], itemsPerColumn: number): void {
+	lines.push(`## ${replaceTabs(name)} (${colItems.length})`);
+	if (colItems.length === 0) {
+		lines.push("");
+		return;
+	}
+	const shown = colItems.slice(0, itemsPerColumn);
+	for (const item of shown) lines.push(formatProjectItemLine(item));
+	if (colItems.length > itemsPerColumn) {
+		lines.push(`... and ${colItems.length - itemsPerColumn} more`);
+	}
+	lines.push("");
+}
+
+export function formatProjectBoard(
+	project: GhProjectView,
+	fieldName: string,
+	options: GhProjectFieldOption[],
+	items: GhProjectItem[],
+	itemsPerColumn: number,
+	totalCount?: number,
+): string {
+	const lines: string[] = [];
+	const title = replaceTabs(project.title ?? "GitHub Project");
+	const numberSuffix = project.number !== undefined ? ` #${project.number}` : "";
+	lines.push(`# ${title}${numberSuffix}`);
+	if (project.url) lines.push(replaceTabs(project.url));
+	lines.push("");
+	lines.push(`Column field: ${replaceTabs(fieldName)}`);
+	const countLine =
+		totalCount !== undefined && totalCount > items.length
+			? `Items: ${items.length} of ${totalCount}`
+			: `Items: ${items.length}`;
+	lines.push(countLine);
+	lines.push("");
+
+	// A real option literally named "No status" is the home for empty-value items;
+	// only render the synthetic bucket when no such option exists (otherwise an
+	// external board like kourierai #2 would render two "No status" headers).
+	const orderedNames = options.map(option => option.name ?? "").filter(name => name.length > 0);
+	const realNoStatusName = orderedNames.find(
+		name => name.trim().toLowerCase() === PROJECT_NO_STATUS_GROUP.toLowerCase(),
+	);
+	const bucketMap = new Map<string, GhProjectItem[]>();
+	const noStatus: GhProjectItem[] = [];
+	for (const item of items) {
+		const status = getProjectItemFieldValue(item, fieldName);
+		if (!status) {
+			// An item with no Status is visually equivalent to "No status": fold it into
+			// the real option when one exists, else defer to the synthetic bucket below.
+			if (realNoStatusName) {
+				const existing = bucketMap.get(realNoStatusName);
+				if (existing) existing.push(item);
+				else bucketMap.set(realNoStatusName, [item]);
+			} else {
+				noStatus.push(item);
+			}
+			continue;
+		}
+		const existing = bucketMap.get(status);
+		if (existing) existing.push(item);
+		else bucketMap.set(status, [item]);
+	}
+	const extraNames = [...bucketMap.keys()].filter(
+		name => !orderedNames.some(ordered => ordered.toLowerCase() === name.toLowerCase()),
+	);
+	const columnNames = [...orderedNames, ...extraNames];
+	for (const name of columnNames) {
+		formatProjectColumn(lines, name, bucketMap.get(name) ?? [], itemsPerColumn);
+	}
+	if (!realNoStatusName && noStatus.length > 0) {
+		formatProjectColumn(lines, PROJECT_NO_STATUS_GROUP, noStatus, itemsPerColumn);
+	}
+	return lines.join("\n").trim();
+}
+
+function formatProjectItemMutationResult(verb: string, item: GhProjectItemMutation, projectUrl?: string): string {
+	const lines: string[] = [`${verb} project item.`];
+	const title = truncateVisualWidth(replaceTabs(item.title ?? "(untitled)"), TRUNCATE_LENGTHS.TITLE);
+	const id = item.id ? ` [${replaceTabs(item.id)}]` : "";
+	lines.push(`Item: ${title}${id}`);
+	if (item.type && item.type !== "DraftIssue" && item.url) {
+		lines.push(`URL: ${replaceTabs(item.url)}`);
+	}
+	if (projectUrl) lines.push(`Project: ${replaceTabs(projectUrl)}`);
+	return lines.join("\n");
+}
+
+async function executeProjectView(
+	session: ToolSession,
+	params: GithubInput,
+	signal: AbortSignal | undefined,
+): Promise<AgentToolResult<GhToolDetails>> {
+	const { owner, number } = parseProjectReference(params.project, params.owner);
+	const inlineLimit = resolveProjectItemLimit(params.limit);
+	const fieldName = normalizeOptionalString(params.field) ?? PROJECT_BOARD_FIELD_DEFAULT;
+	const [fields, inlineItems, project] = await Promise.all([
+		fetchProjectFields(session, owner, number, signal),
+		fetchProjectItems(session, owner, number, inlineLimit, signal),
+		fetchProjectView(session, owner, number, signal),
+	]);
+	const { options } = resolveProjectBoardField(fields, fieldName);
+	const sourceUrl = project.url;
+	// `inlineItems` is capped at `inlineLimit` (≤30), so the spill decision is driven
+	// by the board's real `totalCount` (not items.length, which is just the page size).
+	const totalCount = project.items?.totalCount;
+	const large = totalCount !== undefined && totalCount > PROJECT_SPILL_THRESHOLD;
+	const details: GhToolDetails = {};
+	let text: string;
+	if (large) {
+		// Spill the full board (all items, no per-column cap) to a session artifact and
+		// render a truncated inline preview (capped fetch, 8 items per column).
+		const allItems = await fetchProjectItems(session, owner, number, PROJECT_ITEM_LOOKUP_LIMIT, signal);
+		const fullBoard = formatProjectBoard(project, fieldName, options, allItems, Number.POSITIVE_INFINITY, totalCount);
+		const artifactId = await saveArtifactText(session, "github", fullBoard);
+		if (artifactId) details.artifactId = artifactId;
+		const inline = formatProjectBoard(
+			project,
+			fieldName,
+			options,
+			inlineItems,
+			PROJECT_INLINE_ITEMS_PER_COLUMN,
+			totalCount,
+		);
+		const boardLabel =
+			totalCount !== undefined && totalCount > allItems.length
+				? `Full board (first ${allItems.length})`
+				: "Full board";
+		text = appendArtifactReference(inline, artifactId, boardLabel);
+	} else {
+		text = formatProjectBoard(project, fieldName, options, inlineItems, Number.POSITIVE_INFINITY, totalCount);
+	}
+	return buildTextResult(text, sourceUrl, Object.keys(details).length > 0 ? details : undefined);
+}
+
+async function executeProjectItemAdd(
+	session: ToolSession,
+	params: GithubInput,
+	signal: AbortSignal | undefined,
+): Promise<AgentToolResult<GhToolDetails>> {
+	const { owner, number } = parseProjectReference(params.project, params.owner);
+	const contentUrl = requireNonEmpty(normalizeOptionalString(params.contentUrl), "contentUrl");
+	// Fetch the project view BEFORE the mutation so a transient read failure cannot
+	// orphan a successful write (or duplicate it on retry).
+	const project = await fetchProjectView(session, owner, number, signal);
+	const item = await runProjectJson<GhProjectItemMutation>(
+		session.cwd,
+		["project", "item-add", String(number), "--owner", owner, "--url", contentUrl, "--format", "json"],
+		signal,
+	);
+	return buildTextResult(formatProjectItemMutationResult("Added", item, project.url), project.url);
+}
+
+async function executeProjectItemCreate(
+	session: ToolSession,
+	params: GithubInput,
+	signal: AbortSignal | undefined,
+): Promise<AgentToolResult<GhToolDetails>> {
+	const { owner, number } = parseProjectReference(params.project, params.owner);
+	const title = requireNonEmpty(normalizeOptionalString(params.title), "title");
+	const project = await fetchProjectView(session, owner, number, signal);
+	const args = ["project", "item-create", String(number), "--owner", owner, "--title", title];
+	if (params.body !== undefined) args.push("--body", params.body);
+	args.push("--format", "json");
+	const item = await runProjectJson<GhProjectItemMutation>(session.cwd, args, signal);
+	return buildTextResult(formatProjectItemMutationResult("Created draft", item, project.url), project.url);
+}
+
+async function executeProjectItemEdit(
+	session: ToolSession,
+	params: GithubInput,
+	signal: AbortSignal | undefined,
+): Promise<AgentToolResult<GhToolDetails>> {
+	const { owner, number } = parseProjectReference(params.project, params.owner);
+	const itemId = normalizeOptionalString(params.itemId);
+	const contentUrl = normalizeOptionalString(params.contentUrl);
+	if ((itemId !== undefined) === (contentUrl !== undefined)) {
+		throw new ToolError("provide exactly one of itemId or contentUrl");
+	}
+	const itemStatus = normalizeOptionalString(params.itemStatus);
+	const title = normalizeOptionalString(params.title);
+	const bodyProvided = params.body !== undefined;
+	if (!itemStatus && !title && !bodyProvided) {
+		throw new ToolError("provide at least one of itemStatus, title, or body");
+	}
+	const fieldName = normalizeOptionalString(params.field) ?? PROJECT_BOARD_FIELD_DEFAULT;
+
+	// ── resolve the target item node id (PVTI) ───────────────────────────────
+	let resolvedItemId = itemId;
+	let itemRecord: GhProjectItem | undefined;
+	if (contentUrl) {
+		const items = await fetchProjectItems(session, owner, number, PROJECT_ITEM_LOOKUP_LIMIT, signal);
+		itemRecord = findProjectItemByContentUrl(items, contentUrl);
+		if (!itemRecord?.id) {
+			throw new ToolError(`no project item found for ${contentUrl}`);
+		}
+		resolvedItemId = itemRecord.id;
+	}
+
+	// ── VALIDATION PHASE — every check completes before the first mutation ──
+	const project = await fetchProjectView(session, owner, number, signal);
+	let statusTarget:
+		| { clear: true; fieldId: string; projectId: string }
+		| { clear: false; fieldId: string; optionId: string; optionName: string; projectId: string }
+		| undefined;
+	if (itemStatus) {
+		const fields = await fetchProjectFields(session, owner, number, signal);
+		const { field, options } = resolveProjectBoardField(fields, fieldName);
+		if (!field.id) throw new ToolError("could not resolve project field id");
+		if (!project.id) throw new ToolError("could not resolve project node id");
+		if (itemStatus.toLowerCase() === PROJECT_NO_STATUS_GROUP.toLowerCase()) {
+			// "No status" universally means "remove the Status value": always --clear the
+			// board field, never set a real option, so the same input round-trips identically
+			// on bare and templated boards (no behavior split on whether a real "No status"
+			// option exists). The renderer merges cleared items into the "No status" group.
+			statusTarget = { clear: true, fieldId: field.id, projectId: project.id };
+		} else {
+			const option = findProjectFieldOption(options, itemStatus);
+			if (!option?.id || !option.name) {
+				const valid = options
+					.map(o => o.name ?? "")
+					.filter(name => name.length > 0)
+					.join(", ");
+				throw new ToolError(
+					`"${itemStatus}" is not a valid option for field "${fieldName}". Valid options: ${valid}`,
+				);
+			}
+			statusTarget = {
+				clear: false,
+				fieldId: field.id,
+				optionId: option.id,
+				optionName: option.name,
+				projectId: project.id,
+			};
+		}
+	}
+	let draftContentId: string | undefined;
+	if (title || bodyProvided) {
+		if (!itemRecord) {
+			const items = await fetchProjectItems(session, owner, number, PROJECT_ITEM_LOOKUP_LIMIT, signal);
+			itemRecord = items.find(item => item.id === resolvedItemId);
+		}
+		if (!itemRecord) {
+			throw new ToolError(
+				`could not locate item ${resolvedItemId ?? "?"} in the project (it may be beyond the first ${PROJECT_ITEM_LOOKUP_LIMIT} items).`,
+			);
+		}
+		if (itemRecord.content?.type !== "DraftIssue") {
+			throw new ToolError(
+				`title/body can only be edited for draft items; this item is ${itemRecord.content?.type ?? "not a draft"}. ` +
+					"Edit issue/PR content with `gh issue edit` or `gh pr edit`.",
+			);
+		}
+		draftContentId = itemRecord.content?.id;
+		if (!draftContentId) throw new ToolError("could not resolve draft content id for title/body edit");
+	}
+
+	// ── MUTATION PHASE — all validation has passed ──────────────────────────
+	const changes: string[] = [];
+	if (statusTarget) {
+		const editArgs = [
+			"project",
+			"item-edit",
+			"--id",
+			resolvedItemId ?? "",
+			"--project-id",
+			statusTarget.projectId,
+			"--field-id",
+			statusTarget.fieldId,
+		];
+		if (statusTarget.clear) {
+			editArgs.push("--clear");
+			changes.push(`status → ${PROJECT_NO_STATUS_GROUP} (cleared)`);
+		} else {
+			editArgs.push("--single-select-option-id", statusTarget.optionId);
+			changes.push(`status → ${statusTarget.optionName}`);
+		}
+		editArgs.push("--format", "json");
+		await runProjectJson<GhProjectItemMutation>(session.cwd, editArgs, signal);
+	}
+	if (title) {
+		await runProjectJson<GhProjectItemMutation>(
+			session.cwd,
+			["project", "item-edit", "--id", draftContentId ?? "", "--title", title, "--format", "json"],
+			signal,
+		);
+		changes.push("title updated");
+	}
+	if (bodyProvided) {
+		await runProjectJson<GhProjectItemMutation>(
+			session.cwd,
+			["project", "item-edit", "--id", draftContentId ?? "", "--body", params.body ?? "", "--format", "json"],
+			signal,
+		);
+		changes.push("body updated");
+	}
+
+	const summary = changes.length > 0 ? changes.join("; ") : "no changes";
+	const text = `Updated project item ${replaceTabs(resolvedItemId ?? "?")} (${replaceTabs(summary)}).\nProject: ${replaceTabs(project.url ?? "")}`;
+	return buildTextResult(text, project.url);
+}
+
+async function executeProjectItemDelete(
+	session: ToolSession,
+	params: GithubInput,
+	signal: AbortSignal | undefined,
+): Promise<AgentToolResult<GhToolDetails>> {
+	const { owner, number } = parseProjectReference(params.project, params.owner);
+	const itemId = normalizeOptionalString(params.itemId);
+	const contentUrl = normalizeOptionalString(params.contentUrl);
+	if ((itemId !== undefined) === (contentUrl !== undefined)) {
+		throw new ToolError("provide exactly one of itemId or contentUrl");
+	}
+	const archive = params.archive === true;
+	let resolvedItemId = itemId;
+	if (contentUrl) {
+		const items = await fetchProjectItems(session, owner, number, PROJECT_ITEM_LOOKUP_LIMIT, signal);
+		const item = findProjectItemByContentUrl(items, contentUrl);
+		if (!item?.id) {
+			throw new ToolError(`no project item found for ${contentUrl}`);
+		}
+		resolvedItemId = item.id;
+	}
+	const project = await fetchProjectView(session, owner, number, signal);
+	const subcommand = archive ? "item-archive" : "item-delete";
+	await runProjectJson<{ id?: string }>(
+		session.cwd,
+		["project", subcommand, String(number), "--owner", owner, "--id", resolvedItemId ?? "", "--format", "json"],
+		signal,
+	);
+	const verb = archive ? "Archived" : "Deleted";
+	const itemIdSafe = replaceTabs(resolvedItemId ?? "?");
+	const urlSafe = replaceTabs(project.url ?? "");
+	return buildTextResult(`${verb} project item ${itemIdSafe}.\nProject: ${urlSafe}`, project.url);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// GitHub Projects (V2) — project creation + template emulation
+//
+// GitHub exposes NO API to clone a project template (that is a github.com
+// web-UI feature with server-side logic). A blank `gh project create` already
+// ships a default Status field (Todo / In Progress / Done), so applying a
+// template REWRITES that field's options via the `updateProjectV2Field` GraphQL
+// mutation (no CLI field-edit exists) and adds any extra single-select fields
+// via `gh project field-create`. This replicates the template's FIELD SCHEMA —
+// not its built-in views, insights, or automations.
+// ────────────────────────────────────────────────────────────────────────────
+
+const PROJECT_OPTION_COLORS = ["GRAY", "BLUE", "GREEN", "YELLOW", "ORANGE", "RED", "PINK", "PURPLE"] as const;
+const PROJECT_FIELD_REWRITE_MUTATION =
+	"mutation($input: UpdateProjectV2FieldInput!) { updateProjectV2Field(input: $input) { projectV2Field { ... on ProjectV2SingleSelectField { name } } } }";
+
+type ProjectTemplateField =
+	| { name: string; dataType: "SINGLE_SELECT"; options: string[] }
+	| { name: string; dataType: "DATE" }
+	| { name: string; dataType: "NUMBER" };
+
+interface ProjectTemplate {
+	label: string;
+	statusOptions: string[];
+	fields?: ProjectTemplateField[];
+}
+
+/**
+ * Built-in GitHub project templates, emulated by their Status options + signature
+ * fields. `gh project field-create` supports TEXT/SINGLE_SELECT/DATE/NUMBER (NOT
+ * ITERATION), so iteration-style templates substitute a NUMBER field and date-style
+ * templates carry a real DATE field. Presets approximate GitHub's gallery templates
+ * — they replicate the field SCHEMA (Status board + signature fields), not the
+ * built-in views, insights, or automations.
+ */
+const PROJECT_TEMPLATES: Record<string, ProjectTemplate> = {
+	bug_tracker: {
+		label: "Bug tracker",
+		statusOptions: ["No status", "Needs triage", "In progress", "Done"],
+		fields: [
+			{ name: "Priority", dataType: "SINGLE_SELECT", options: ["P0", "P1", "P2", "P3"] },
+			{ name: "Severity", dataType: "SINGLE_SELECT", options: ["Low", "Medium", "High", "Critical"] },
+		],
+	},
+	feature_release: {
+		label: "Feature release",
+		statusOptions: ["No status", "Backlog", "In progress", "In review", "Done"],
+		fields: [{ name: "Target date", dataType: "DATE" }],
+	},
+	iterative_development: {
+		label: "Iterative development",
+		statusOptions: ["No status", "Backlog", "In progress", "In review", "Done"],
+		fields: [{ name: "Story points", dataType: "NUMBER" }],
+	},
+	kanban: { label: "Kanban", statusOptions: ["Todo", "In progress", "Done"] },
+	product_launch: {
+		label: "Product launch",
+		statusOptions: ["No status", "Planning", "In progress", "In review", "Done"],
+		fields: [{ name: "Launch date", dataType: "DATE" }],
+	},
+	roadmap: {
+		label: "Roadmap",
+		statusOptions: ["No status", "Planning", "In progress", "Ready", "Done"],
+		fields: [{ name: "Target date", dataType: "DATE" }],
+	},
+	team_planning: {
+		label: "Team planning",
+		statusOptions: ["No status", "Backlog", "Ready", "In progress", "In review", "Done"],
+	},
+	team_retrospective: {
+		label: "Team retrospective",
+		statusOptions: ["No status", "Went well", "Didn't go well", "Action items"],
+	},
+};
+const PROJECT_TEMPLATE_IDS = Object.keys(PROJECT_TEMPLATES);
+
+/**
+ * Resolve a `template` param to its preset. Returns `undefined` for a blank
+ * project (omitted, empty, or the sentinel "blank"); throws listing the valid
+ * template ids for anything else.
+ */
+export function resolveProjectTemplate(value: string | undefined): ProjectTemplate | undefined {
+	const normalized = value?.trim().toLowerCase();
+	if (!normalized || normalized === "blank") return undefined;
+	const template = PROJECT_TEMPLATES[normalized];
+	if (!template) {
+		throw new ToolError(`unknown project template "${value}". Valid templates: ${PROJECT_TEMPLATE_IDS.join(", ")}.`);
+	}
+	return template;
+}
+
+/**
+ * Rewrite an existing single-select field's options via `updateProjectV2Field`.
+ * `singleSelectOptions` REPLACES the whole option set — omitted options are
+ * DELETED, which breaks items referencing them on a populated board. This is
+ * therefore only safe on a fresh project with no items; it is never reused
+ * against an existing board or exposed as a public op. `gh` has no
+ * field-option-edit CLI, so this posts the GraphQL mutation through
+ * `gh api graphql --input <body>`, routed via `runProjectJson` for scope gating.
+ */
+async function rewriteProjectFieldOptions(
+	session: ToolSession,
+	fieldId: string,
+	options: string[],
+	signal: AbortSignal | undefined,
+): Promise<void> {
+	const singleSelectOptions = options.map((name, index) => ({
+		name,
+		color: PROJECT_OPTION_COLORS[index % PROJECT_OPTION_COLORS.length],
+		description: "",
+	}));
+	const body = JSON.stringify({
+		query: PROJECT_FIELD_REWRITE_MUTATION,
+		variables: { input: { fieldId, singleSelectOptions } },
+	});
+	const bodyPath = path.join(os.tmpdir(), `gh-project-field-${hashPath(fieldId)}.json`);
+	await Bun.write(bodyPath, body);
+	try {
+		const result = await runProjectJson<{
+			data?: { updateProjectV2Field?: { projectV2Field?: { name?: string } } };
+			errors?: unknown;
+		}>(session.cwd, ["api", "graphql", "--input", bodyPath], signal);
+		if (result.errors) {
+			throw new ToolError(`GraphQL rejected field option update: ${JSON.stringify(result.errors)}`);
+		}
+	} finally {
+		await fs.rm(bodyPath, { force: true });
+	}
+}
+
+/**
+ * Apply a template preset to a freshly-created (blank) project: rewrite the
+ * default Status field's options, then create any extra single-select fields.
+ * Throws on the first failure, leaving the project partially configured; the
+ * caller includes the project URL in the surfaced error.
+ */
+async function applyProjectTemplate(
+	session: ToolSession,
+	owner: string,
+	number: number,
+	template: ProjectTemplate,
+	signal: AbortSignal | undefined,
+): Promise<string[]> {
+	const applied: string[] = [];
+	const fields = await fetchProjectFields(session, owner, number, signal);
+	const statusField = fields.find(field => (field.name ?? "").toLowerCase() === "status");
+	if (!statusField?.id) {
+		throw new ToolError("could not find the default Status field to rewrite");
+	}
+	await rewriteProjectFieldOptions(session, statusField.id, template.statusOptions, signal);
+	applied.push(`status options → ${template.statusOptions.join(", ")}`);
+	for (const field of template.fields ?? []) {
+		const fieldArgs = [
+			"project",
+			"field-create",
+			String(number),
+			"--owner",
+			owner,
+			"--name",
+			field.name,
+			"--data-type",
+			field.dataType,
+		];
+		let detail: string;
+		if (field.dataType === "SINGLE_SELECT") {
+			fieldArgs.push("--single-select-options", field.options.join(","));
+			detail = field.options.join(", ");
+		} else {
+			detail = field.dataType.toLowerCase();
+		}
+		fieldArgs.push("--format", "json");
+		await runProjectJson<GhProjectField>(session.cwd, fieldArgs, signal);
+		applied.push(`field "${field.name}" (${detail})`);
+	}
+	return applied;
+}
+
+async function executeProjectCreate(
+	session: ToolSession,
+	params: GithubInput,
+	signal: AbortSignal | undefined,
+): Promise<AgentToolResult<GhToolDetails>> {
+	const owner = requireNonEmpty(normalizeOptionalString(params.owner), "owner");
+	const title = requireNonEmpty(normalizeOptionalString(params.title), "title");
+	const titleSafe = truncateVisualWidth(replaceTabs(title), TRUNCATE_LENGTHS.TITLE);
+	const copyFrom = normalizeOptionalString(params.copyFrom);
+	const template = resolveProjectTemplate(params.template);
+	if (copyFrom && template) {
+		throw new ToolError("provide at most one of template or copyFrom, not both");
+	}
+
+	const lines: string[] = [];
+	let projectUrl: string | undefined;
+
+	if (copyFrom) {
+		// Exact-fidelity clone via `gh project copy` (copyProjectV2): brings the
+		// source's fields + views, so no preset is applied afterward.
+		const source = parseProjectReference(copyFrom, params.sourceOwner);
+		const cloned = await runProjectJson<{ number?: number; url?: string; title?: string }>(
+			session.cwd,
+			[
+				"project",
+				"copy",
+				String(source.number),
+				"--source-owner",
+				source.owner,
+				"--target-owner",
+				owner,
+				"--title",
+				title,
+				"--drafts",
+				"--format",
+				"json",
+			],
+			signal,
+		);
+		const projectNumber = cloned.number;
+		projectUrl = cloned.url;
+		if (projectNumber === undefined) {
+			throw new ToolError("GitHub did not return a project number for the copied project.");
+		}
+		lines.push(`Copied project ${titleSafe} #${projectNumber} from ${replaceTabs(source.owner)}/${source.number}.`);
+	} else {
+		const created = await runProjectJson<{ number?: number; url?: string; title?: string }>(
+			session.cwd,
+			["project", "create", "--owner", owner, "--title", title, "--format", "json"],
+			signal,
+		);
+		const projectNumber = created.number;
+		projectUrl = created.url;
+		if (projectNumber === undefined) {
+			throw new ToolError("GitHub did not return a project number for the created project.");
+		}
+		lines.push(`Created project ${titleSafe} #${projectNumber}.`);
+		if (template) {
+			try {
+				const applied = await applyProjectTemplate(session, owner, projectNumber, template, signal);
+				lines.push(
+					`Template: ${replaceTabs(template.label)} (applied ${applied.length} change(s): ${replaceTabs(applied.join("; "))})`,
+				);
+			} catch (err) {
+				throw new ToolError(
+					`Project ${titleSafe} was created at ${replaceTabs(projectUrl ?? "?")} but template "${replaceTabs(template.label)}" could not be fully applied: ${(err as Error).message}`,
+				);
+			}
+		} else {
+			lines.push("Template: blank (default Status field left untouched)");
+		}
+	}
+
+	if (projectUrl) lines.push(`URL: ${replaceTabs(projectUrl)}`);
+	return buildTextResult(lines.join("\n"), projectUrl);
 }

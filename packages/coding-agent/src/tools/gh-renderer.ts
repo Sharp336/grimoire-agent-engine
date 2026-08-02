@@ -29,6 +29,7 @@ type GithubToolRenderArgs = {
 	repo?: string;
 	pr?: string | string[];
 	query?: string;
+	project?: string;
 };
 
 const SUCCESS_CONCLUSIONS = new Set(["success", "neutral", "skipped"]);
@@ -47,6 +48,12 @@ const OP_TITLES: Record<string, string> = {
 	search_commits: "GitHub Search Commits",
 	search_repos: "GitHub Search Repos",
 	run_watch: "GitHub Run Watch",
+	project_view: "GitHub Project",
+	project_item_add: "GitHub Project Item Add",
+	project_item_create: "GitHub Project Item Create",
+	project_item_edit: "GitHub Project Item Edit",
+	project_item_delete: "GitHub Project Item Delete",
+	project_create: "GitHub Project Create",
 };
 
 function formatOpTitle(op: string | undefined): string {
@@ -104,6 +111,15 @@ function buildOpMeta(args: GithubToolRenderArgs): string[] {
 		case "repo_view": {
 			if (args.repo) meta.push(args.repo);
 			if (args.branch) meta.push(args.branch);
+			break;
+		}
+		case "project_view":
+		case "project_item_add":
+		case "project_item_create":
+		case "project_item_edit":
+		case "project_item_delete":
+		case "project_create": {
+			if (args.project) meta.push(truncateVisualWidth(args.project, TRUNCATE_LENGTHS.SHORT));
 			break;
 		}
 		case "run_watch":
