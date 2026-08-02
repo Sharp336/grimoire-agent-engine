@@ -212,7 +212,14 @@ export class VimEditorController {
 			const pending = this.#pending;
 			this.#pending = undefined;
 			this.#count = "";
-			if (char === "g") this.#setCursor(pending.count === undefined ? 0 : pending.count - 1, 0);
+			if (char === "g") {
+				const lines = this.#lines();
+				const targetLine = Math.max(
+					0,
+					Math.min(lines.length - 1, pending.count === undefined ? 0 : pending.count - 1),
+				);
+				this.#setCursor(targetLine, this.#firstNonBlankCol(lines[targetLine] ?? ""));
+			}
 			return true;
 		}
 
@@ -454,7 +461,12 @@ export class VimEditorController {
 			this.#pending = undefined;
 			this.#count = "";
 			if (char === "g") {
-				this.#setCursor(pending.count === undefined ? 0 : pending.count - 1, 0);
+				const lines = this.#lines();
+				const targetLine = Math.max(
+					0,
+					Math.min(lines.length - 1, pending.count === undefined ? 0 : pending.count - 1),
+				);
+				this.#setCursor(targetLine, this.#firstNonBlankCol(lines[targetLine] ?? ""));
 				this.#updateVisualSelection();
 			}
 			return true;

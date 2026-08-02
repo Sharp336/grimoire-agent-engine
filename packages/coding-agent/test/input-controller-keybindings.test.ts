@@ -711,6 +711,44 @@ describe("InputController keybinding setup", () => {
 		expect(ctx.locallySubmittedUserSignatures.has("queued during stream\u00000")).toBe(false);
 	});
 
+	it("drops image sidecars whose markers were deleted before submit", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		const session = ctx.session as unknown as { isStreaming: boolean };
+		session.isStreaming = true;
+		editor.pendingImages = [{ type: "image", mimeType: "image/png", data: "deleted" }];
+		editor.pendingImageLinks = ["local://deleted.png"];
+		editor.imageLinks = editor.pendingImageLinks;
+		const controller = new InputController(ctx);
+
+		controller.setupEditorSubmitHandler();
+		await editor.onSubmit?.("");
+
+		expect(spies.prompt).not.toHaveBeenCalled();
+		expect(editor.pendingImages).toEqual([]);
+		expect(editor.pendingImageLinks).toEqual([]);
+		expect(editor.imageLinks).toBeUndefined();
+	});
+
+	it("compacts surviving image markers and sidecars before submit", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		const session = ctx.session as unknown as { isStreaming: boolean };
+		session.isStreaming = true;
+		const deleted = { type: "image" as const, mimeType: "image/png", data: "deleted" };
+		const kept = { type: "image" as const, mimeType: "image/png", data: "kept" };
+		editor.pendingImages = [deleted, kept];
+		editor.pendingImageLinks = ["local://deleted.png", "local://kept.png"];
+		editor.imageLinks = editor.pendingImageLinks;
+		const controller = new InputController(ctx);
+
+		controller.setupEditorSubmitHandler();
+		await editor.onSubmit?.("[Image #2]");
+
+		expect(spies.prompt).toHaveBeenCalledWith("[Image #1]", {
+			streamingBehavior: "steer",
+			images: [kept],
+		});
+	});
+
 	it("continue shortcuts submit a hidden synthetic developer directive", async () => {
 		for (const shortcut of [".", "c"]) {
 			const { InputController, ctx, editor } = await createContext();

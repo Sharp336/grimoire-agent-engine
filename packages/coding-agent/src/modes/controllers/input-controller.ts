@@ -11,7 +11,12 @@ import { extractImagePathFromText } from "../../modes/components/custom-editor";
 import { renderSegmentTrack } from "../../modes/components/segment-track";
 import { TinyTitleDownloadProgressComponent } from "../../modes/components/tiny-title-download-progress";
 import { expandEmoticons } from "../../modes/emoji-autocomplete";
-import { materializeImageReferenceLinks, shiftImageMarkers } from "../../modes/image-references";
+import {
+	materializeImageReferenceLinks,
+	type ReconciledImageReferences,
+	reconcileImageReferences,
+	shiftImageMarkers,
+} from "../../modes/image-references";
 import { createPromptActionAutocompleteProvider } from "../../modes/prompt-action-autocomplete";
 import { parseQueueShorthand, splitQueuedMessages } from "../../modes/queue-input";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "../../modes/skill-command";
@@ -616,10 +621,23 @@ export class InputController {
 		this.ctx.ui.addStartListener(() => this.#enhancedPaste?.enable());
 	}
 
+	#reconcileEditorImageReferences(text: string): ReconciledImageReferences {
+		const reconciled = reconcileImageReferences(
+			text,
+			this.ctx.editor.pendingImages,
+			this.ctx.editor.pendingImageLinks,
+		);
+		this.ctx.editor.pendingImages = reconciled.images;
+		this.ctx.editor.pendingImageLinks = reconciled.imageLinks;
+		this.ctx.editor.imageLinks = reconciled.images.length > 0 ? reconciled.imageLinks : undefined;
+		return reconciled;
+	}
+
 	setupEditorSubmitHandler(): void {
 		this.ctx.editor.onSubmit = async (text: string) => {
-			text = text.trim();
-			const hasPendingImages = this.ctx.editor.pendingImages.length > 0;
+			const editorInput = this.#reconcileEditorImageReferences(text.trim());
+			text = editorInput.text;
+			const hasPendingImages = editorInput.images.length > 0;
 			if ((!isSettingsInitialized() || settings.get("emojiAutocomplete")) && text) text = expandEmoticons(text);
 
 			// Focused subagent session: the editor is a plain chat box for it.
@@ -1157,10 +1175,10 @@ export class InputController {
 
 	/** Queue `/queue` input behind an active turn, or start it immediately when idle. */
 	async handleQueueCommand(text: string): Promise<void> {
-		const images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
-		const imageLinks =
-			images && this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
-		await this.#queueForYield(text, { images, imageLinks });
+		const input = this.#reconcileEditorImageReferences(text);
+		const images = input.images.length > 0 ? [...input.images] : undefined;
+		const imageLinks = images ? [...input.imageLinks] : undefined;
+		await this.#queueForYield(input.text, { images, imageLinks });
 	}
 
 	async #queueForYield(
@@ -1278,9 +1296,10 @@ export class InputController {
 	/** Send editor text as a follow-up message (queued behind current stream). */
 	async handleFollowUp(): Promise<void> {
 		let text = this.ctx.editor.getExpandedText().trim();
-		const images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
-		const imageLinks =
-			images && this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
+		const input = this.#reconcileEditorImageReferences(text);
+		text = input.text;
+		const images = input.images.length > 0 ? [...input.images] : undefined;
+		const imageLinks = images ? [...input.imageLinks] : undefined;
 		if (!text && !images) return;
 
 		// Focused subagent session: follow-ups go to it; non-chat input is gated.

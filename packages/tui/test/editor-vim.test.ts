@@ -393,6 +393,21 @@ describe("Editor Vim input mode", () => {
 		expect(editor.getCursor().line).toBe(2);
 	});
 
+	it("moves gg to the target line's first nonblank column", () => {
+		const normal = createVimEditor();
+		normal.setText("  first\nplain\n   third");
+		typeText(normal, "gg");
+		expect(normal.getCursor()).toEqual({ line: 0, col: 2 });
+		typeText(normal, "3gg");
+		expect(normal.getCursor()).toEqual({ line: 2, col: 3 });
+
+		const visual = createVimEditor();
+		visual.setText("  first\nplain\n   third");
+		typeText(visual, "3Gvgg");
+		expect(visual.getCursor()).toEqual({ line: 0, col: 2 });
+		expect(visual.getVimMode()).toBe("visual");
+	});
+
 	it("clamps oversized counted G before choosing the target column", () => {
 		const normal = createVimEditor();
 		normal.setText("one\n   final");
