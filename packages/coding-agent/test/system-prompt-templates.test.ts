@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	buildSystemPrompt,
 	buildSystemPromptToolMetadata,
@@ -15,10 +16,12 @@ import Handlebars from "handlebars";
 import * as z from "zod/v4";
 import type { Args } from "../src/cli/args";
 import { inspectSystemPrompt } from "../src/commands/system-prompt";
+import { ModelRegistry } from "../src/config/model-registry";
 import { Settings } from "../src/config/settings";
 import { runRootCommand } from "../src/main";
-import type { CreateAgentSessionOptions } from "../src/sdk";
+import { type CreateAgentSessionOptions, createAgentSession } from "../src/sdk";
 import { AuthStorage } from "../src/session/auth-storage";
+import { SessionManager } from "../src/session/session-manager";
 
 const baseGitContext = {
 	isRepo: true,
@@ -328,6 +331,84 @@ describe("system Handlebars prompt templates", () => {
 
 			expect(options.systemPromptTemplate).toBeUndefined();
 			expect(applyCapturedSystemPromptOverride(options)[0]).toBe("Literal {{cwd}}");
+
+			const authStorage = await AuthStorage.create(path.join(dir, "sdk-auth.db"));
+			try {
+				authStorage.setRuntimeApiKey("openai", "test-key");
+				const modelRegistry = new ModelRegistry(authStorage);
+				let transformInputFirstBlock = "";
+				let transformInputLength = 0;
+				const transformedBlock = "Transformed metadata block";
+				const rawAppend = "Raw append {{cwd}}";
+				const result = await createAgentSession({
+					cwd: dir,
+					agentDir: dir,
+					authStorage,
+					modelRegistry,
+					model: getBundledModel("openai", "gpt-4o-mini"),
+					sessionManager: SessionManager.inMemory(dir),
+					settings: Settings.isolated({ "async.enabled": false }),
+					disableExtensionDiscovery: true,
+					skills: [],
+					rules: [],
+					contextFiles: [],
+					workspaceTree: createEmptyWorkspaceTree(dir),
+					promptTemplates: [],
+					slashCommands: [],
+					enableMCP: false,
+					enableLsp: false,
+					skipPythonPreflight: true,
+					toolNames: [],
+					restrictToolNames: true,
+					systemPrompt: defaultPrompt => ["Literal {{cwd}}", ...defaultPrompt.slice(1), rawAppend],
+					systemPromptTransform: defaultResult => {
+						transformInputFirstBlock = defaultResult.systemPrompt[0] ?? "";
+						transformInputLength = defaultResult.systemPrompt.length;
+						return {
+							...defaultResult,
+							systemPrompt: [...defaultResult.systemPrompt, transformedBlock],
+							xdevCatalogNames: ["transform-device"],
+							dynamicParts: [
+								...defaultResult.dynamicParts,
+								{
+									id: "transform-inserted",
+									source: "append-system-prompt",
+									providerBlockIndex: defaultResult.systemPrompt.length,
+									text: transformedBlock,
+								},
+							],
+						};
+					},
+				});
+				try {
+					const promptResult = result.systemPromptResult;
+					expect(promptResult).toBeDefined();
+					if (!promptResult) throw new Error("Expected SDK system prompt metadata");
+
+					expect(transformInputFirstBlock).not.toBe("Literal {{cwd}}");
+					expect(promptResult.systemPrompt[0]).toBe("Literal {{cwd}}");
+					expect(promptResult.systemPrompt).toHaveLength(transformInputLength + 2);
+					expect(promptResult.systemPrompt[transformInputLength]).toBe(transformedBlock);
+					expect(promptResult.systemPrompt[transformInputLength + 1]).toBe(rawAppend);
+					expect(promptResult.xdevCatalogNames).toEqual(["transform-device"]);
+					expect(promptResult.dynamicParts).toContainEqual({
+						id: "transform-inserted",
+						source: "append-system-prompt",
+						providerBlockIndex: transformInputLength,
+						text: transformedBlock,
+					});
+					expect(promptResult.dynamicParts).toContainEqual({
+						id: "append-system-prompt",
+						source: "append-system-prompt",
+						providerBlockIndex: transformInputLength + 1,
+						text: rawAppend,
+					});
+				} finally {
+					await result.session.dispose();
+				}
+			} finally {
+				authStorage.close();
+			}
 		});
 	});
 

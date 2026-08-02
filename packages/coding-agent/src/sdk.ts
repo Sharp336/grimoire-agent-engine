@@ -343,6 +343,8 @@ function applyMCPEnvironment(result: { exaApiKeys: string[] }): void {
 }
 
 // Types
+export type SystemPromptTransform = (result: BuildSystemPromptResult) => BuildSystemPromptResult;
+
 export interface CreateAgentSessionOptions {
 	/** Working directory for project-local discovery. Default: getProjectDir() */
 	cwd?: string;
@@ -391,6 +393,8 @@ export interface CreateAgentSessionOptions {
 
 	/** Provider-facing system prompt override. Replaces the fully rendered default blocks. */
 	systemPrompt?: string | string[] | ((defaultPrompt: string[]) => string | string[]);
+	/** Structured system prompt transform applied before the raw provider-facing override. */
+	systemPromptTransform?: SystemPromptTransform;
 	/** Already-loaded custom prompt text rendered through the bundled custom system prompt template. */
 	customSystemPrompt?: string;
 	/** Already-loaded text appended through the bundled system prompt templates. */
@@ -2959,34 +2963,38 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				renderMermaid: settings.get("tui.renderMermaid"),
 				activeRepoContext,
 			});
+			const transformedPrompt = options.systemPromptTransform?.(defaultPrompt) ?? defaultPrompt;
 
 			if (options.systemPrompt === undefined) {
-				return defaultPrompt;
+				return transformedPrompt;
 			}
 			const customPrompt =
 				typeof options.systemPrompt === "function"
-					? options.systemPrompt(defaultPrompt.systemPrompt)
+					? options.systemPrompt(transformedPrompt.systemPrompt)
 					: options.systemPrompt;
 			const customSystemPrompt = typeof customPrompt === "string" ? [customPrompt] : customPrompt;
-			const defaultSystemBlockPreserved = customSystemPrompt[0] === defaultPrompt.systemPrompt[0];
+			const defaultSystemBlockPreserved = customSystemPrompt[0] === transformedPrompt.systemPrompt[0];
 			const dynamicParts: DynamicPromptPart[] =
 				typeof options.systemPrompt === "function"
-					? defaultPrompt.dynamicParts.filter(part => defaultSystemBlockPreserved || part.providerBlockIndex !== 0)
+					? transformedPrompt.dynamicParts.filter(
+							part => defaultSystemBlockPreserved || part.providerBlockIndex !== 0,
+						)
 					: [];
 			if (
 				typeof options.systemPrompt === "function" &&
-				customSystemPrompt.length > defaultPrompt.systemPrompt.length
+				customSystemPrompt.length > transformedPrompt.systemPrompt.length
 			) {
-				for (const [index, text] of customSystemPrompt.slice(defaultPrompt.systemPrompt.length).entries()) {
+				for (const [index, text] of customSystemPrompt.slice(transformedPrompt.systemPrompt.length).entries()) {
 					dynamicParts.push({
 						id: index === 0 ? "append-system-prompt" : `append-system-prompt-${index + 1}`,
 						source: "append-system-prompt",
-						providerBlockIndex: defaultPrompt.systemPrompt.length + index,
+						providerBlockIndex: transformedPrompt.systemPrompt.length + index,
 						text,
 					});
 				}
 			}
 			return {
+				...transformedPrompt,
 				systemPrompt: customSystemPrompt,
 				dynamicParts,
 			};
@@ -3464,6 +3472,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			preferWebsockets: preferOpenAICodexWebsockets,
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
+			initialSystemPromptResult: systemPromptResult,
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
 			xdev: toolSession.xdev,
 			presentationPinnedToolNames: explicitlyRequestedToolNameSet,

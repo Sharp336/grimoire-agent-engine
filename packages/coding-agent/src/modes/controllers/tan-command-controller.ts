@@ -9,7 +9,8 @@ import * as sdk from "../../sdk";
 import type { AgentSession } from "../../session/agent-session";
 import { BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE } from "../../session/messages";
 import { SessionManager } from "../../session/session-manager";
-import { createMCPProxyTools, createSubagentSettings } from "../../task/executor";
+import { createMCPProxyTools } from "../../task/executor";
+import { createSubagentSettings } from "../../task/subagent-runtime-config";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "../../tools/todo";
 import type { InteractiveModeContext } from "../types";
 

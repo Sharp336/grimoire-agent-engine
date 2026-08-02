@@ -22,9 +22,7 @@ import {
 	resolveModelOverrideWithAuthFallback,
 } from "../config/model-resolver";
 import type { PromptTemplate } from "../config/prompt-templates";
-import { buildServiceTierByFamily, resolveSubagentServiceTier } from "../config/service-tier";
 import { Settings } from "../config/settings";
-import { SETTINGS_SCHEMA, type SettingPath } from "../config/settings-schema";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import { runExtensionCompact, runExtensionSetModel } from "../extensibility/extensions/compact-handler";
@@ -35,7 +33,6 @@ import type { LocalProtocolOptions } from "../internal-urls";
 import type { MCPManager } from "../mcp/manager";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pending.md" with { type: "text" };
-import defaultSubagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
@@ -47,14 +44,11 @@ import type { AuthStorage } from "../session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
-import { discoverSubagentBaseSystemPromptTemplate, discoverSubagentSystemPromptTemplate } from "../system-prompt";
 import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
-import type { ContextFileEntry, ToolSession } from "../tools";
-import { resolveEvalBackends } from "../tools/eval-backends";
+import type { ContextFileEntry } from "../tools";
 import { isIrcEnabled } from "../tools/hub";
 import { normalizeSchema } from "../tools/jtd-to-json-schema";
 import { buildOutputValidator, summarizeValidationFailure } from "../tools/output-schema-validator";
-import { shortenPath } from "../tools/render-utils";
 import { ToolAbortError } from "../tools/tool-errors";
 import type { EventBus } from "../utils/event-bus";
 import { trackLateCleanup } from "../utils/late-cleanup";
@@ -63,6 +57,8 @@ import type { WorkspaceTree } from "../workspace-tree";
 import { generateTaskLabel } from "./label";
 import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
+import { createSubagentSettings, resolveSubagentCapabilities } from "./subagent-runtime-config";
+import { resolveSubagentSystemPrompt } from "./subagent-system-prompt";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import {
 	type AgentDefinition,
@@ -853,49 +849,6 @@ export function createMCPProxyTools(mcpManager: MCPManager): CustomTool[] {
 	});
 }
 
-export function createSubagentSettings(
-	baseSettings: Settings,
-	overrides?: Partial<Record<SettingPath, unknown>>,
-	inheritedServiceTier?: ServiceTierByFamily | null,
-): Settings {
-	const snapshot: Partial<Record<SettingPath, unknown>> = {};
-	for (const key of Object.keys(SETTINGS_SCHEMA) as SettingPath[]) {
-		snapshot[key] = baseSettings.get(key);
-	}
-	// Resolve the subagent's per-family tiers from `tier.subagent` ("inherit" =
-	// match the parent's live tiers when a live session supplied them, else the
-	// subagent's own configured tier.* settings). The result is stamped back onto
-	// the snapshot so createAgentSession's tier.* reads pick it up.
-	const inheritedTiers =
-		inheritedServiceTier === undefined
-			? buildServiceTierByFamily(
-					baseSettings.get("tier.openai"),
-					baseSettings.get("tier.anthropic"),
-					baseSettings.get("tier.google"),
-				)
-			: (inheritedServiceTier ?? {});
-	const subagentTiers = resolveSubagentServiceTier(baseSettings.get("tier.subagent"), inheritedTiers);
-	snapshot["tier.openai"] = subagentTiers.openai ?? "none";
-	snapshot["tier.anthropic"] = subagentTiers.anthropic ?? "none";
-	snapshot["tier.google"] = subagentTiers.google ?? "none";
-	return Settings.isolated(
-		{
-			...snapshot,
-			// Async jobs and bash auto-backgrounding are inherited from the parent:
-			// background jobs are owner-routed to the subagent's own session, and
-			// the run driver's quiescence barrier + teardown reap guarantee no
-			// owner job outlives the run, so worktree capture/cleanup stays
-			// race-free (previously both were force-disabled here).
-
-			// Subagents run headless — there is no UI to confirm prompts against, so
-			// the parent task approval is the authorization boundary. Use yolo mode
-			// to preserve unattended subagent execution. User `tools.approval` policies still apply.
-			"tools.approvalMode": "yolo",
-			...overrides,
-		},
-		{ storage: baseSettings.getStorage() },
-	);
-}
 
 export type AbortReason = "signal" | "terminate" | "timeout" | "budget";
 
@@ -2658,7 +2611,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		},
 		options.parentServiceTier,
 	);
-	const maxRecursionDepth = settings.get("task.maxRecursionDepth") ?? 2;
+	const {
+		childDepth,
+		toolNames,
+		spawns: spawnsEnv,
+	} = resolveSubagentCapabilities(agent, subagentSettings, {
+		parentDepth: options.taskDepth,
+		restrictToolNames: options.restrictToolNames,
+	});
+	const ircEnabled = options.enableIrc !== false && isIrcEnabled(subagentSettings, childDepth);
+	const modelPatterns = normalizeModelPatterns(modelOverride ?? agent.model);
+	const sessionFile = subtaskSessionFile ?? null;
 	const maxRuntimeMs = Math.max(
 		0,
 		Math.trunc(Number(options.maxRuntimeMs ?? settings.get("task.maxRuntimeMs") ?? 0) || 0),
@@ -2672,46 +2635,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	);
 	const softRequestBudget = resolveSoftRequestBudget(agent.name, configuredDefaultBudget);
 	const softRequestBudgetNotice = settings.get("task.softRequestBudgetNotice") ?? false;
-	const parentDepth = options.taskDepth ?? 0;
-	const childDepth = parentDepth + 1;
-	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
-	const ircEnabled = options.enableIrc !== false && isIrcEnabled(subagentSettings, childDepth);
-
-	// Add tools if specified
-	let toolNames: string[] | undefined;
-	if (agent.tools && agent.tools.length > 0) {
-		toolNames = agent.tools;
-		// Auto-include task tool if spawns defined but task not in tools
-		if (agent.spawns !== undefined && !toolNames.includes("task") && !atMaxDepth) {
-			toolNames = [...toolNames, "task"];
-		}
-	}
-
-	if (atMaxDepth && toolNames?.includes("task")) {
-		toolNames = toolNames.filter(name => name !== "task");
-	}
-	// Ordinary agents retain the host's always-on collaboration capability.
-	// Restricted sessions must not widen their explicit host tool list with hub.
-	if (toolNames && !options.restrictToolNames && !toolNames.includes("hub")) {
-		toolNames = [...toolNames, "hub"];
-	}
-	if (toolNames?.includes("exec")) {
-		const backends = resolveEvalBackends({ settings } as ToolSession);
-		const expanded = toolNames.filter(name => name !== "exec");
-		if (backends.python || backends.js || backends.ruby || backends.julia) expanded.push("eval");
-		expanded.push("bash");
-		toolNames = Array.from(new Set(expanded));
-	}
-
-	const modelPatterns = normalizeModelPatterns(modelOverride ?? agent.model);
-	const sessionFile = subtaskSessionFile ?? null;
-	const spawnsEnv = atMaxDepth
-		? ""
-		: agent.spawns === undefined
-			? ""
-			: agent.spawns === "*"
-				? "*"
-				: agent.spawns.join(",");
 
 	const lspEnabled = enableLsp ?? true;
 	const skipPythonPreflight = Array.isArray(toolNames) && !toolNames.includes("eval");
@@ -2995,24 +2918,16 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				});
 			}
 
-			const childSystemPromptTemplatePath = discoverSubagentBaseSystemPromptTemplate(options.cwd);
-			const customSubagentTemplatePath = discoverSubagentSystemPromptTemplate(options.cwd);
-			let effectiveSubagentSystemPromptTemplate = defaultSubagentSystemPromptTemplate;
-			if (customSubagentTemplatePath) {
-				try {
-					effectiveSubagentSystemPromptTemplate = await Bun.file(customSubagentTemplatePath).text();
-				} catch (error) {
-					throw new Error(
-						`Could not read subagent system prompt template: ${shortenPath(customSubagentTemplatePath)}`,
-						{ cause: error },
-					);
-				}
-				if (effectiveSubagentSystemPromptTemplate.replace(/^\uFEFF/, "").trim().length === 0) {
-					throw new Error(`Subagent system prompt template is empty: ${shortenPath(customSubagentTemplatePath)}`);
-				}
-			}
-
-			const { normalized: normalizedOutputSchema } = normalizeSchema(outputSchema);
+			const subagentSystemPrompt = await resolveSubagentSystemPrompt(options.cwd, {
+				agent: agent.systemPrompt,
+				context: options.context,
+				planReference: options.planReference,
+				worktree,
+				outputSchema,
+				outputSchemaOverridesAgent: options.outputSchemaOverridesAgent,
+				ircPeers: ircEnabled ? renderIrcPeerRoster(id) : "",
+				ircSelfId: ircEnabled ? id : "",
+			});
 
 			// Captured by the lifecycle reviver: rebuilding an equivalent session from
 			// the same JSONL file re-invokes createAgentSession with the exact options
@@ -3050,23 +2965,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				rules: options.rules,
 				preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
 				preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
-				systemPromptTemplate: childSystemPromptTemplatePath,
-				systemPrompt: defaultPrompt => {
-					const subagentPrompt = prompt.render(effectiveSubagentSystemPromptTemplate, {
-						agent: agent.systemPrompt,
-						context: options.context?.trim() ?? "",
-						planReference: options.planReference?.content ?? "",
-						planReferencePath: options.planReference?.path ?? "",
-						worktree: worktree ?? "",
-						outputSchema: normalizedOutputSchema,
-						outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
-						ircPeers: ircEnabled ? renderIrcPeerRoster(id) : "",
-						ircSelfId: ircEnabled ? id : "",
-					});
-					return defaultPrompt.length === 0
-						? [subagentPrompt]
-						: [...defaultPrompt.slice(0, -1), subagentPrompt, defaultPrompt[defaultPrompt.length - 1]];
-				},
+				systemPromptTemplate: subagentSystemPrompt.systemPromptTemplate,
+				systemPromptTransform: subagentSystemPrompt.transform,
 				sessionManager: sessionManagerForRun,
 				hasUI: false,
 				prewalk,

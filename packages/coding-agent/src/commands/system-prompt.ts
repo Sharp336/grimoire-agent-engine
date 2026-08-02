@@ -10,10 +10,17 @@ import { Args, Command, Flags, renderCommandHelp } from "@oh-my-pi/pi-utils/cli"
 import { APP_DISPLAY_NAME } from "../app-version";
 import { systemPromptHelp as commandHelp } from "../cli/command-help";
 import { ModelRegistry } from "../config/model-registry";
+import { resolveAgentModelPatterns } from "../config/model-resolver";
+import { Settings } from "../config/settings";
 import { buildDiscoveredSystemPromptOptions } from "../main";
 import { type CreateAgentSessionResult, createAgentSession, discoverAuthStorage } from "../sdk";
 import { SessionManager } from "../session/session-manager";
 import type { BuildSystemPromptResult, DynamicPromptPart } from "../system-prompt";
+import { discoverAgents, getAgent } from "../task/discovery";
+import { createSubagentSettings, resolveSubagentCapabilities } from "../task/subagent-runtime-config";
+import { resolveSubagentSystemPrompt } from "../task/subagent-system-prompt";
+import type { AgentSource } from "../task/types";
+import { shortenPath } from "../tools/render-utils";
 
 const ACTIONS = ["inspect"] as const;
 type SystemPromptAction = (typeof ACTIONS)[number];
@@ -21,6 +28,23 @@ type SystemPromptAction = (typeof ACTIONS)[number];
 const BREAKDOWN_ENCODING = Encoding.O200kBase;
 const BREAKDOWN_ENCODING_LABEL = "o200k_base";
 
+export interface SubagentInspectTarget {
+	kind: "subagent";
+	name: string;
+	source: AgentSource;
+	filePath: string | null;
+	fidelity: "configured-preview";
+	baseTemplate: string | "bundled";
+	wrapperTemplate: string | "bundled";
+	omittedRuntimeInputs: [
+		"batch-context",
+		"plan-reference",
+		"worktree",
+		"irc-peers",
+		"parent-mcp-state",
+		"prewalk-handoff",
+	];
+}
 interface ProviderBlock {
 	index: number;
 	text: string;
@@ -30,12 +54,14 @@ interface ProviderInspectJson {
 	cwd: string;
 	mode: "provider";
 	blocks: ProviderBlock[];
+	target?: SubagentInspectTarget;
 }
 
 interface DynamicInspectJson {
 	cwd: string;
 	mode: "dynamic-parts";
 	blocks: DynamicPromptPart[];
+	target?: SubagentInspectTarget;
 }
 
 interface TokenMeasurement {
@@ -66,6 +92,7 @@ interface BreakdownTool {
 interface BreakdownInspectJson {
 	cwd: string;
 	mode: "breakdown";
+	target?: SubagentInspectTarget;
 	tokenizer: {
 		provider: "openai";
 		encoding: typeof BREAKDOWN_ENCODING_LABEL;
@@ -91,6 +118,7 @@ interface BreakdownInspectJson {
 export interface SystemPromptInspection extends BuildSystemPromptResult {
 	providerTools: Tool[];
 	model: { provider: string; id: string } | null;
+	target?: SubagentInspectTarget;
 }
 
 export interface FormatInspectOptions {
@@ -174,6 +202,7 @@ function buildBreakdown(cwd: string, result: SystemPromptInspection): BreakdownI
 	return {
 		cwd,
 		mode: "breakdown",
+		...(result.target ? { target: result.target } : {}),
 		tokenizer: { provider: "openai", encoding: BREAKDOWN_ENCODING_LABEL },
 		model: result.model,
 		measurementScope: {
@@ -231,28 +260,52 @@ function renderBreakdown(output: BreakdownInspectJson): string {
 	return lines.join("\n");
 }
 
+function renderSubagentTarget(target: SubagentInspectTarget): string {
+	const targetSource = target.filePath ? `${target.source}: ${shortenPath(target.filePath)}` : target.source;
+	const baseTemplate = target.baseTemplate === "bundled" ? target.baseTemplate : shortenPath(target.baseTemplate);
+	const wrapperTemplate =
+		target.wrapperTemplate === "bundled" ? target.wrapperTemplate : shortenPath(target.wrapperTemplate);
+	return [
+		`Target: subagent ${target.name} (${targetSource})`,
+		`Templates: base=${baseTemplate}, wrapper=${wrapperTemplate}`,
+		`Omitted runtime inputs: ${target.omittedRuntimeInputs.join(", ")}`,
+	].join("\n");
+}
+
 export function formatInspectOutput(
 	cwd: string,
 	result: BuildSystemPromptResult | SystemPromptInspection,
 	options: FormatInspectOptions,
 ): string {
+	const target = "target" in result ? result.target : undefined;
+	const targetPrefix = target ? `${renderSubagentTarget(target)}\n\n` : "";
 	if (options.mode === "dynamic-parts") {
-		const output: DynamicInspectJson = { cwd, mode: "dynamic-parts", blocks: result.dynamicParts };
-		return options.json ? `${JSON.stringify(output, null, 2)}\n` : `${renderDynamicParts(result.dynamicParts)}\n`;
+		const output: DynamicInspectJson = {
+			cwd,
+			mode: "dynamic-parts",
+			blocks: result.dynamicParts,
+			...(target ? { target } : {}),
+		};
+		return options.json
+			? `${JSON.stringify(output, null, 2)}\n`
+			: `${targetPrefix}${renderDynamicParts(result.dynamicParts)}\n`;
 	}
 	if (options.mode === "breakdown") {
 		if (!("providerTools" in result)) {
 			throw new Error("System prompt breakdown requires provider tool metadata");
 		}
 		const output = buildBreakdown(cwd, result);
-		return options.json ? `${JSON.stringify(output, null, 2)}\n` : `${renderBreakdown(output)}\n`;
+		return options.json ? `${JSON.stringify(output, null, 2)}\n` : `${targetPrefix}${renderBreakdown(output)}\n`;
 	}
 	const output: ProviderInspectJson = {
 		cwd,
 		mode: "provider",
 		blocks: result.systemPrompt.map((text, index) => ({ index, text })),
+		...(target ? { target } : {}),
 	};
-	return options.json ? `${JSON.stringify(output, null, 2)}\n` : `${renderProviderBlocks(result.systemPrompt)}\n`;
+	return options.json
+		? `${JSON.stringify(output, null, 2)}\n`
+		: `${targetPrefix}${renderProviderBlocks(result.systemPrompt)}\n`;
 }
 
 async function writeStdout(text: string): Promise<void> {
@@ -309,6 +362,113 @@ export async function inspectSystemPrompt(cwd: string): Promise<SystemPromptInsp
 	}
 }
 
+export async function inspectSubagentSystemPrompt(cwd: string, rawName: string): Promise<SystemPromptInspection> {
+	const name = rawName.trim();
+	if (!name) throw new Error("--subagent requires a non-empty agent name");
+
+	setProjectDir(cwd);
+	const settings = await Settings.loadReadOnly({ cwd });
+	const discovery = await discoverAgents(cwd);
+	const agent = getAgent(discovery.agents, name);
+	if (!agent) {
+		const available = discovery.agents.map(candidate => candidate.name).join(", ") || "none";
+		throw new Error(`Unknown agent "${name}". Available: ${available}`);
+	}
+	const disabledAgents = settings.get("task.disabledAgents");
+	if (disabledAgents.includes(name)) {
+		const enabled = discovery.agents
+			.filter(candidate => !disabledAgents.includes(candidate.name))
+			.map(candidate => candidate.name);
+		throw new Error(
+			`Agent "${name}" is disabled in settings. Enable it via /agents, or use a different agent type.${enabled.length > 0 ? ` Available: ${enabled.join(", ")}` : ""}`,
+		);
+	}
+
+	const subagentSettings = createSubagentSettings(
+		settings,
+		agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined,
+	);
+	const defaultModelPattern = settings.getModelRole("default");
+	const modelPatterns = resolveAgentModelPatterns({
+		settingsOverride: settings.get("task.agentModelOverrides")[name],
+		agentModel: agent.model,
+		settings,
+		activeModelPattern: defaultModelPattern,
+		fallbackModelPattern: defaultModelPattern,
+	});
+	const capabilities = resolveSubagentCapabilities(agent, subagentSettings);
+	const subagentPrompt = await resolveSubagentSystemPrompt(cwd, {
+		agent: agent.systemPrompt,
+		outputSchema: agent.output,
+	});
+	const authStorage = await discoverAuthStorage();
+	let result: CreateAgentSessionResult | undefined;
+	try {
+		const modelRegistry = new ModelRegistry(authStorage);
+		result = await createAgentSession({
+			cwd,
+			authStorage,
+			modelRegistry,
+			settings: subagentSettings,
+			modelPattern: modelPatterns,
+			modelPatternAuthFallback: defaultModelPattern,
+			thinkingLevel: agent.thinkingLevel,
+			toolNames: capabilities.toolNames,
+			outputSchema: agent.output,
+			requireYieldTool: true,
+			hasUI: false,
+			sessionManager: SessionManager.inMemory(cwd),
+			spawns: capabilities.spawns,
+			taskDepth: capabilities.childDepth,
+			enableLsp: settings.get("task.enableLsp"),
+			enableIrc: false,
+			enableMCP: false,
+			systemPromptTemplate: subagentPrompt.systemPromptTemplate,
+			systemPromptTransform: subagentPrompt.transform,
+		});
+		const enabledToolNames = result.session.getEnabledToolNames();
+		const childToolNames = enabledToolNames.filter(toolName => toolName !== "todo");
+		if (childToolNames.length !== enabledToolNames.length) {
+			await result.session.setActiveToolsByName(childToolNames);
+		}
+		const promptResult = result.session.getSystemPromptResult();
+		const providerContext = await result.session.agent.buildSideRequestContext([], promptResult.systemPrompt);
+		const model = result.session.model;
+		return {
+			...promptResult,
+			providerTools: providerContext.tools ?? [],
+			model: model ? { provider: model.provider, id: model.id } : null,
+			target: {
+				kind: "subagent",
+				name,
+				source: agent.source,
+				filePath: agent.filePath ? path.resolve(agent.filePath) : null,
+				fidelity: "configured-preview",
+				baseTemplate: subagentPrompt.systemPromptTemplate
+					? path.resolve(subagentPrompt.systemPromptTemplate)
+					: "bundled",
+				wrapperTemplate: subagentPrompt.wrapperTemplatePath
+					? path.resolve(subagentPrompt.wrapperTemplatePath)
+					: "bundled",
+				omittedRuntimeInputs: [
+					"batch-context",
+					"plan-reference",
+					"worktree",
+					"irc-peers",
+					"parent-mcp-state",
+					"prewalk-handoff",
+				],
+			},
+		};
+	} finally {
+		try {
+			await result?.session.dispose();
+		} finally {
+			authStorage.close();
+		}
+	}
+}
+
 export default class SystemPrompt extends Command {
 	static description = commandHelp.description;
 
@@ -322,6 +482,7 @@ export default class SystemPrompt extends Command {
 
 	static flags = {
 		cwd: Flags.string({ description: "Project directory to inspect" }),
+		subagent: Flags.string({ description: "Inspect the configured prompt for a named subagent" }),
 		"dynamic-parts": Flags.boolean({ description: "Output dynamic prompt parts only" }),
 		provider: Flags.boolean({ description: "Output complete provider-facing prompt blocks" }),
 		breakdown: Flags.boolean({ description: "Output token shares for prompt sources and provider tools" }),
@@ -333,6 +494,12 @@ export default class SystemPrompt extends Command {
 		`# Inspect dynamic prompt parts\n  ${APP_DISPLAY_NAME} system-prompt inspect --cwd /root/projects/project-paperless-go-classifier --dynamic-parts`,
 		`# Inspect dynamic prompt parts as JSON\n  ${APP_DISPLAY_NAME} system-prompt inspect --cwd /root/projects/project-paperless-go-classifier --dynamic-parts --json`,
 		`# Inspect token shares by prompt source and provider tool\n  ${APP_DISPLAY_NAME} system-prompt inspect --cwd /root/projects/project-paperless-go-classifier --breakdown --json`,
+		`# Inspect a configured subagent's provider-facing blocks
+  ${APP_DISPLAY_NAME} system-prompt inspect --subagent scout --provider`,
+		`# Inspect a configured subagent's dynamic prompt parts
+  ${APP_DISPLAY_NAME} system-prompt inspect --subagent scout --dynamic-parts --json`,
+		`# Inspect a configured subagent's model and tool-aware token breakdown
+  ${APP_DISPLAY_NAME} system-prompt inspect --subagent scout --breakdown --json`,
 	];
 
 	async run(): Promise<void> {
@@ -351,7 +518,10 @@ export default class SystemPrompt extends Command {
 		}
 
 		const cwd = await resolveCwd(flags.cwd);
-		const result = await inspectSystemPrompt(cwd);
+		const result =
+			flags.subagent === undefined
+				? await inspectSystemPrompt(cwd)
+				: await inspectSubagentSystemPrompt(cwd, flags.subagent);
 		const mode = flags.breakdown ? "breakdown" : flags["dynamic-parts"] ? "dynamic-parts" : "provider";
 		await writeStdout(formatInspectOutput(cwd, result, { mode, json: flags.json === true }));
 		await postmortem.quit(0);

@@ -7,6 +7,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { BuildSystemPromptResult } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 
@@ -99,14 +100,30 @@ async function withTemplateEnvironment(
 
 async function executeAndCaptureSystemPrompt(
 	cwd: string,
-): Promise<{ blocks: string[]; systemPromptTemplate: string | undefined }> {
-	let capturedPrompt: string[] | undefined;
+): Promise<{ promptResult: BuildSystemPromptResult; systemPromptTemplate: string | undefined }> {
+	let capturedPromptResult: BuildSystemPromptResult | undefined;
 	let capturedSystemPromptTemplate: string | undefined;
 	vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 		if (!options) throw new Error("Expected createAgentSession options");
-		if (typeof options.systemPrompt !== "function") throw new Error("Expected a child system prompt callback");
-		const renderedPrompt = options.systemPrompt(["base-block", "project-block"]);
-		capturedPrompt = typeof renderedPrompt === "string" ? [renderedPrompt] : renderedPrompt;
+		if (!options.systemPromptTransform) throw new Error("Expected a child system prompt transform");
+		capturedPromptResult = options.systemPromptTransform({
+			systemPrompt: ["base-block", "project-block"],
+			dynamicParts: [
+				{
+					id: "base-part",
+					source: "system-prompt.md",
+					providerBlockIndex: 0,
+					text: "base-block",
+				},
+				{
+					id: "project-part",
+					source: "project-prompt.md",
+					providerBlockIndex: 1,
+					text: "project-block",
+				},
+			],
+			xdevCatalogNames: ["fixture-device"],
+		});
 		capturedSystemPromptTemplate = options.systemPromptTemplate;
 		return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
 	});
@@ -133,8 +150,8 @@ async function executeAndCaptureSystemPrompt(
 		enableLsp: false,
 	});
 	if (result.error) throw new Error(result.error);
-	if (!capturedPrompt) throw new Error("Expected the child system prompt to be captured");
-	return { blocks: capturedPrompt, systemPromptTemplate: capturedSystemPromptTemplate };
+	if (!capturedPromptResult) throw new Error("Expected the child system prompt to be captured");
+	return { promptResult: capturedPromptResult, systemPromptTemplate: capturedSystemPromptTemplate };
 }
 
 describe("subagent system prompt templates", () => {
@@ -144,11 +161,27 @@ describe("subagent system prompt templates", () => {
 
 	test.serial("uses the bundled wrapper between provider sentinel blocks", async () => {
 		await withTemplateEnvironment(async ({ projectDir }) => {
-			const { blocks, systemPromptTemplate } = await executeAndCaptureSystemPrompt(projectDir);
-			expect(blocks[0]).toBe("base-block");
-			expect(blocks[1]).toContain("COOP");
-			expect(blocks[1]).toContain("Rendered scout role");
-			expect(blocks[2]).toBe("project-block");
+			const { promptResult, systemPromptTemplate } = await executeAndCaptureSystemPrompt(projectDir);
+			expect(promptResult.systemPrompt[0]).toBe("base-block");
+			expect(promptResult.systemPrompt[1]).toContain("COOP");
+			expect(promptResult.systemPrompt[1]).toContain("Rendered scout role");
+			expect(promptResult.systemPrompt[2]).toBe("project-block");
+			expect(promptResult.dynamicParts.map(part => part.id)).toEqual([
+				"base-part",
+				"subagent-wrapper",
+				"project-part",
+			]);
+			expect(promptResult.dynamicParts[1]).toMatchObject({
+				source: "subagent-system-prompt.md",
+				providerBlockIndex: 1,
+			});
+			expect(promptResult.dynamicParts[2]?.providerBlockIndex).toBe(2);
+			expect(
+				promptResult.dynamicParts.every(part =>
+					promptResult.systemPrompt[part.providerBlockIndex]?.includes(part.text),
+				),
+			).toBe(true);
+			expect(promptResult.xdevCatalogNames).toEqual(["fixture-device"]);
 			expect(systemPromptTemplate).toBeUndefined();
 		});
 	});
@@ -158,8 +191,13 @@ describe("subagent system prompt templates", () => {
 			await fs.mkdir(path.dirname(userTemplate), { recursive: true });
 			await fs.writeFile(userTemplate, "USER-SUBAGENT-MARKER {{agent}}");
 			await fs.writeFile(userBaseTemplate, "USER-BASE-MARKER {{cwd}}");
-			const { blocks, systemPromptTemplate } = await executeAndCaptureSystemPrompt(projectDir);
-			expect(blocks).toEqual(["base-block", "USER-SUBAGENT-MARKER Rendered scout role", "project-block"]);
+			const { promptResult, systemPromptTemplate } = await executeAndCaptureSystemPrompt(projectDir);
+			expect(promptResult.systemPrompt).toEqual([
+				"base-block",
+				"USER-SUBAGENT-MARKER Rendered scout role",
+				"project-block",
+			]);
+			expect(promptResult.dynamicParts[1]?.source).toBe("SUBAGENT-SYSTEM.template.md");
 			expect(systemPromptTemplate).toBe(userBaseTemplate);
 		});
 	});
@@ -173,8 +211,13 @@ describe("subagent system prompt templates", () => {
 				await fs.writeFile(projectTemplate, "PROJECT-SUBAGENT-MARKER {{agent}}");
 				await fs.writeFile(userBaseTemplate, "USER-BASE-MARKER {{cwd}}");
 				await fs.writeFile(projectBaseTemplate, "PROJECT-BASE-MARKER {{cwd}}");
-				const { blocks, systemPromptTemplate } = await executeAndCaptureSystemPrompt(projectDir);
-				expect(blocks).toEqual(["base-block", "PROJECT-SUBAGENT-MARKER Rendered scout role", "project-block"]);
+				const { promptResult, systemPromptTemplate } = await executeAndCaptureSystemPrompt(projectDir);
+				expect(promptResult.systemPrompt).toEqual([
+					"base-block",
+					"PROJECT-SUBAGENT-MARKER Rendered scout role",
+					"project-block",
+				]);
+				expect(promptResult.dynamicParts[1]?.source).toBe("SUBAGENT-SYSTEM.template.md");
 				expect(systemPromptTemplate).toBe(projectBaseTemplate);
 			},
 		);

@@ -183,6 +183,7 @@ import {
 	obfuscateProviderContext,
 } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
+import type { BuildSystemPromptResult } from "../system-prompt";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -1256,6 +1257,7 @@ export class AgentSession {
 			presentationPinnedToolNames: config.presentationPinnedToolNames,
 			ensureWriteRegistered: config.ensureWriteRegistered,
 			rebuildSystemPrompt: config.rebuildSystemPrompt,
+			initialSystemPromptResult: config.initialSystemPromptResult,
 			getLocalCalendarDate: config.getLocalCalendarDate,
 			getMcpServerInstructions: config.getMcpServerInstructions,
 			xdev: config.xdev,
@@ -4274,6 +4276,9 @@ export class AgentSession {
 	/** Marks streamed text as committed or buffered for turn-recovery replay decisions. */
 	setTextOutputCommitted(committed: boolean): void {
 		this.#textOutputCommitted = committed;
+	/** Latest accepted structured system prompt build. */
+	getSystemPromptResult(): BuildSystemPromptResult {
+		return this.#tools.systemPromptResult;
 	}
 
 	/** Current retry attempt (0 if not retrying) */

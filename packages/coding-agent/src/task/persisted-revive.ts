@@ -10,7 +10,8 @@ import type { AgentSession } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
 import { SessionManager } from "../session/session-manager";
 import type { EventBus } from "../utils/event-bus";
-import { attachIrcWakeTurnMonitor, createMCPProxyTools, createSubagentSettings } from "./executor";
+import { attachIrcWakeTurnMonitor, createMCPProxyTools } from "./executor";
+import { createSubagentSettings } from "./subagent-runtime-config";
 import type { AgentDefinition } from "./types";
 
 /**

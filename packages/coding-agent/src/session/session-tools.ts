@@ -16,6 +16,7 @@ import { resolveMemoryBackend } from "../memory-backend/resolve";
 import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
+import type { BuildSystemPromptResult, DynamicPromptPart } from "../system-prompt";
 import { usesCodexTaskPrompt } from "../task/prompt-policy";
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
 import { computerExposureMode } from "../tools/computer/exposure";
@@ -75,7 +76,12 @@ interface SessionToolsOptions {
 	rebuildSystemPrompt?: (
 		toolNames: string[],
 		tools: Map<string, AgentTool>,
-	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
+	) => Promise<{
+		systemPrompt: string[];
+		xdevCatalogNames?: readonly string[];
+		dynamicParts?: DynamicPromptPart[];
+	}>;
+	initialSystemPromptResult?: BuildSystemPromptResult;
 	getLocalCalendarDate?: () => string;
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
 	xdev?: XdevState;
@@ -207,6 +213,7 @@ export class SessionTools {
 	 * drop it before the request. Cleared when the turn ends.
 	 */
 	#turnSystemPromptOverride: string[] | undefined;
+	#systemPromptResult: BuildSystemPromptResult;
 	#lastAppliedToolSignature: string | undefined;
 	/**
 	 * `xd://` device names the current base system prompt renders in its catalog
@@ -249,6 +256,10 @@ export class SessionTools {
 		if (this.#xdev) this.#xdev.decorateExecution = tool => this.#wrapToolForAcpPermission(tool);
 		this.#setActiveToolNames = options.setActiveToolNames;
 		this.#baseSystemPrompt = options.baseSystemPrompt;
+		const initialSystemPromptResult = options.initialSystemPromptResult;
+		this.#systemPromptResult = initialSystemPromptResult
+			? { ...initialSystemPromptResult, dynamicParts: initialSystemPromptResult.dynamicParts ?? [] }
+			: { systemPrompt: options.baseSystemPrompt, dynamicParts: [] };
 		this.#skills = options.skills ?? [];
 		this.#skillWarnings = options.skillWarnings ?? [];
 		this.#skillsSettings = options.skillsSettings;
@@ -264,6 +275,11 @@ export class SessionTools {
 	/** Current stable base system prompt. */
 	get baseSystemPrompt(): string[] {
 		return this.#baseSystemPrompt;
+	}
+
+	/** Latest accepted structured system prompt build. */
+	get systemPromptResult(): BuildSystemPromptResult {
+		return this.#systemPromptResult;
 	}
 
 	/** Replaces the controller-owned base prompt without applying it to the agent. */
@@ -693,17 +709,15 @@ export class SessionTools {
 		this.#setMountedNames(mountNames);
 		this.#setActiveToolNames?.(validToolNames);
 
-		let rebuiltSystemPrompt: string[] | undefined;
+		let rebuiltResult: BuildSystemPromptResult | undefined;
 		let rebuiltSignature: string | undefined;
-		let rebuiltXdevCatalogNames: readonly string[] | undefined;
 		try {
 			if (this.#rebuildSystemPrompt) {
 				const signature = this.#computeAppliedToolSignature(validToolNames, tools);
 				if (signature !== this.#lastAppliedToolSignature) {
 					const built = await this.#rebuildSystemPrompt(validToolNames, this.#toolRegistry);
-					rebuiltSystemPrompt = built.systemPrompt;
+					rebuiltResult = { ...built, dynamicParts: built.dynamicParts ?? [] };
 					rebuiltSignature = signature;
-					rebuiltXdevCatalogNames = built.xdevCatalogNames;
 				}
 			}
 		} catch (error) {
@@ -720,14 +734,15 @@ export class SessionTools {
 
 		this.#notifyXdevMountDelta(previousMounted);
 		this.#host.agent.setTools(tools);
-		if (rebuiltSystemPrompt && rebuiltSignature) {
+		if (rebuiltResult && rebuiltSignature) {
 			if (this.#lastAppliedToolSignature !== undefined) this.#host.clearInheritedProviderPromptCacheKey();
-			this.#baseSystemPrompt = rebuiltSystemPrompt;
+			this.#baseSystemPrompt = rebuiltResult.systemPrompt;
+			this.#systemPromptResult = rebuiltResult;
 			this.#host.clearMemoryPromotionSnapshot();
 			this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
 			this.#lastAppliedToolSignature = rebuiltSignature;
 			this.#promptModelKey = this.#currentPromptModelKey();
-			this.#basePromptXdevNames = new Set(rebuiltXdevCatalogNames);
+			this.#basePromptXdevNames = new Set(rebuiltResult.xdevCatalogNames);
 		}
 	}
 
@@ -1155,8 +1170,10 @@ export class SessionTools {
 		const previousBaseSystemPrompt = this.#baseSystemPrompt;
 		const built = await this.#rebuildSystemPrompt(activeToolNames, this.#toolRegistry);
 		if (this.#host.isDisposed()) return;
-		this.#baseSystemPrompt = built.systemPrompt;
-		this.#basePromptXdevNames = new Set(built.xdevCatalogNames);
+		const result: BuildSystemPromptResult = { ...built, dynamicParts: built.dynamicParts ?? [] };
+		this.#baseSystemPrompt = result.systemPrompt;
+		this.#systemPromptResult = result;
+		this.#basePromptXdevNames = new Set(result.xdevCatalogNames);
 		this.#host.clearMemoryPromotionSnapshot();
 		if (
 			previousBaseSystemPrompt.length !== this.#baseSystemPrompt.length ||

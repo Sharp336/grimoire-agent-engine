@@ -3,7 +3,11 @@ import * as path from "node:path";
 import { countTokens, Encoding } from "@oh-my-pi/pi-natives";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { CliConfig } from "@oh-my-pi/pi-utils/cli";
-import SystemPromptCommand, { formatInspectOutput, type SystemPromptInspection } from "../src/commands/system-prompt";
+import SystemPromptCommand, {
+	formatInspectOutput,
+	type SubagentInspectTarget,
+	type SystemPromptInspection,
+} from "../src/commands/system-prompt";
 import { buildSystemPrompt, type DynamicPromptPart, type SystemPromptToolMetadata } from "../src/system-prompt";
 
 const TEST_CONFIG: CliConfig = {
@@ -211,6 +215,24 @@ describe("system-prompt inspect output", () => {
 		],
 	};
 
+	const target: SubagentInspectTarget = {
+		kind: "subagent",
+		name: "scout",
+		source: "project",
+		filePath: "/tmp/project/.omp/agents/scout.md",
+		fidelity: "configured-preview",
+		baseTemplate: "/tmp/project/.omp/SYSTEM.template.md",
+		wrapperTemplate: "/tmp/project/.omp/SUBAGENT-SYSTEM.template.md",
+		omittedRuntimeInputs: [
+			"batch-context",
+			"plan-reference",
+			"worktree",
+			"irc-peers",
+			"parent-mcp-state",
+			"prewalk-handoff",
+		],
+	};
+
 	test("system-prompt inspect --json exposes provider blocks", () => {
 		const parsed = JSON.parse(formatInspectOutput("/tmp/project", result, { mode: "provider", json: true }));
 		expect(parsed).toEqual({
@@ -221,6 +243,26 @@ describe("system-prompt inspect output", () => {
 				{ index: 1, text: "Project block" },
 			],
 		});
+		const subagentParsed = JSON.parse(
+			formatInspectOutput("/tmp/project", { ...result, target }, { mode: "provider", json: true }),
+		);
+		expect(subagentParsed.target).toEqual(target);
+		const subagentHuman = formatInspectOutput(
+			"/tmp/project",
+			{ ...result, target },
+			{ mode: "provider", json: false },
+		);
+		expect(subagentHuman).toContain("Target: subagent scout (project: /tmp/project/.omp/agents/scout.md)");
+		expect(subagentHuman).toContain(
+			"Templates: base=/tmp/project/.omp/SYSTEM.template.md, wrapper=/tmp/project/.omp/SUBAGENT-SYSTEM.template.md",
+		);
+		expect(subagentHuman).toContain(
+			"Omitted runtime inputs: batch-context, plan-reference, worktree, irc-peers, parent-mcp-state, prewalk-handoff",
+		);
+		expect(subagentHuman).toContain("\n\n--- provider block 0 ---\nSystem block");
+
+		const mainHuman = formatInspectOutput("/tmp/project", result, { mode: "provider", json: false });
+		expect(mainHuman).toBe("--- provider block 0 ---\nSystem block\n\n--- provider block 1 ---\nProject block\n");
 	});
 
 	test("system-prompt inspect --dynamic-parts --json exposes provider block indexes", () => {
@@ -230,6 +272,10 @@ describe("system-prompt inspect output", () => {
 			mode: "dynamic-parts",
 			blocks: result.dynamicParts,
 		});
+		const subagentParsed = JSON.parse(
+			formatInspectOutput("/tmp/project", { ...result, target }, { mode: "dynamic-parts", json: true }),
+		);
+		expect(subagentParsed.target).toEqual(target);
 	});
 
 	test("system-prompt inspect --breakdown --json separates source, tool prompt, and schema shares", () => {
@@ -287,6 +333,11 @@ describe("system-prompt inspect output", () => {
 			totalMeasuredContextTokens: providerTokens + promptTokens + schemaTokens,
 			dynamicPercentagesMayOverlap: true,
 		});
+		expect(parsed).not.toHaveProperty("target");
+		const subagentParsed = JSON.parse(
+			formatInspectOutput("/tmp/project", { ...inspection, target }, { mode: "breakdown", json: true }),
+		);
+		expect(subagentParsed.target).toEqual(target);
 		expect(parsed.categories.providerPrompt.tokens).toBe(providerTokens);
 		expect(parsed.categories.toolPrompts.tokens).toBe(promptTokens);
 		expect(parsed.categories.toolSchemas.tokens).toBe(schemaTokens);
@@ -322,10 +373,14 @@ describe("system-prompt inspect output", () => {
 
 describe("system-prompt command", () => {
 	test("parses inspect flags", async () => {
-		const command = new SystemPromptCommand(["inspect", "--cwd", "/tmp", "--dynamic-parts", "--json"], TEST_CONFIG);
+		const command = new SystemPromptCommand(
+			["inspect", "--cwd", "/tmp", "--subagent", "scout", "--dynamic-parts", "--json"],
+			TEST_CONFIG,
+		);
 		const parsed = await command.parse(SystemPromptCommand);
 		expect(parsed.args.action).toBe("inspect");
 		expect(parsed.flags.cwd).toBe("/tmp");
+		expect(parsed.flags.subagent).toBe("scout");
 		expect(parsed.flags["dynamic-parts"]).toBe(true);
 		expect(parsed.flags.json).toBe(true);
 	});

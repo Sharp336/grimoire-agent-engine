@@ -198,21 +198,31 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		});
 		// The session constructor does not run rebuildSystemPrompt; baseline=0.
 		expect(rebuildCount).toBe(0);
+		const initialPromptResult = session.getSystemPromptResult();
+		expect(initialPromptResult).toEqual({ systemPrompt: ["initial"], dynamicParts: [] });
 
 		const initialMcp = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
 
 		// First refresh: no signature recorded yet, must rebuild.
 		await session.refreshMCPTools([initialMcp]);
 		expect(rebuildCount).toBe(1);
+		const firstPromptResult = session.getSystemPromptResult();
+		expect(firstPromptResult).not.toBe(initialPromptResult);
+		expect(firstPromptResult).toEqual({
+			systemPrompt: ["tools:read,mcp__nucleus_search"],
+			dynamicParts: [],
+		});
 
 		// Second refresh with byte-identical metadata: must NOT rebuild.
 		await session.refreshMCPTools([initialMcp]);
 		expect(rebuildCount).toBe(1);
+		expect(session.getSystemPromptResult()).toBe(firstPromptResult);
 
 		// Third refresh, again identical: still no rebuild.
 
 		await session.refreshMCPTools([initialMcp]);
 		expect(rebuildCount).toBe(1);
+		expect(session.getSystemPromptResult()).toBe(firstPromptResult);
 	});
 
 	it("warns and keeps the stable winner when distinct MCP tools mint the same name", async () => {

@@ -653,6 +653,8 @@ export type DynamicPromptPartSource =
 	| "active-repo-context.md"
 	| "SYSTEM.md"
 	| "SYSTEM.template.md"
+	| "subagent-system-prompt.md"
+	| "SUBAGENT-SYSTEM.template.md"
 	| "memory"
 	| "mcp"
 	| "auto-learn"
