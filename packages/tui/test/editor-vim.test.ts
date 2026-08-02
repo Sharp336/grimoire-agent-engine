@@ -681,6 +681,18 @@ describe("Editor Vim input mode", () => {
 		expect(editor.getVimMode()).toBe("normal");
 	});
 
+	it("groups modified Enter with the surrounding insert session", () => {
+		const editor = createVimEditor();
+		editor.handleInput("i");
+		editor.handleInput("\x1b[13;5u");
+		editor.handleInput("x");
+		editor.handleInput("\x1b");
+
+		editor.handleInput("u");
+
+		expect(editor.getText()).toBe("");
+	});
+
 	it.each([
 		{ mode: "normal", enterMode: "" },
 

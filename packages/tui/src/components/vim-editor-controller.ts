@@ -103,6 +103,10 @@ export class VimEditorController {
 		const mutates =
 			extractPrintableText(data) !== undefined ||
 			kb.matches(data, "tui.input.newLine") ||
+			matchesKey(data, "alt+enter") ||
+			(data.charCodeAt(0) === 10 && data.length > 1) ||
+			matchesKey(data, "ctrl+enter") ||
+			data === "\x1b[13;2~" ||
 			kb.matches(data, "tui.editor.deleteCharBackward") ||
 			kb.matches(data, "tui.editor.deleteCharForward") ||
 			matchesKey(data, "shift+backspace") ||
