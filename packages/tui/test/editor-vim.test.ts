@@ -774,6 +774,29 @@ describe("Editor Vim input mode", () => {
 		expect(lineEnd.getText()).toBe("one ");
 	});
 
+	it.each([
+		{ command: "dl", expected: "bc", mode: "normal" },
+		{ command: "d2l", expected: "c", mode: "normal" },
+		{ command: "clX\u001b", expected: "Xbc", mode: "normal" },
+		{ command: "c2lX\u001b", expected: "Xc", mode: "normal" },
+	])("applies $command to exactly its rightward character count", ({ command, expected, mode }) => {
+		const editor = createVimEditor();
+		editor.setText("abc");
+		typeText(editor, `0${command}`);
+
+		expect(editor.getText()).toBe(expected);
+		expect(editor.getVimMode()).toBe(mode);
+	});
+
+	it("counts graphemes in rightward operator motions", () => {
+		const editor = createVimEditor();
+		editor.setText("ae\u0301c");
+
+		typeText(editor, "0d2l");
+
+		expect(editor.getText()).toBe("c");
+	});
+
 	it("multiplies counts before and after operators", () => {
 		const editor = createVimEditor();
 		editor.setText("one two three four five six");
@@ -903,6 +926,38 @@ describe("Editor Vim input mode", () => {
 		expect(editor.isShowingAutocomplete()).toBe(false);
 		expect(editor.getVimMode()).toBe("normal");
 		expect(editor.getText()).toBe("/");
+	});
+
+	it("keeps Vim normal-mode undo and redo from reopening autocomplete", async () => {
+		const editor = createVimEditor();
+		const getSuggestions = vi.fn(async () => ({
+			items: [{ label: "/help", value: "/help" }],
+			prefix: "/",
+		}));
+		const { promise, resolve } = Promise.withResolvers<void>();
+		editor.setAutocompleteProvider({
+			getSuggestions,
+			applyCompletion(lines, cursorLine, cursorCol) {
+				return { lines, cursorLine, cursorCol };
+			},
+		});
+		editor.onAutocompleteUpdate = resolve;
+		typeText(editor, "i/");
+		await promise;
+		editor.handleInput("\x1b");
+		const callsBeforeRestore = getSuggestions.mock.calls.length;
+
+		editor.handleInput("u");
+		expect(editor.getText()).toBe("");
+		editor.handleInput("\x12");
+		expect(editor.getText()).toBe("/");
+		editor.handleInput("x");
+		editor.handleInput("u");
+
+		expect(editor.getText()).toBe("/");
+		expect(getSuggestions).toHaveBeenCalledTimes(callsBeforeRestore);
+		expect(editor.isShowingAutocomplete()).toBe(false);
+		expect(editor.getVimMode()).toBe("normal");
 	});
 
 	it("cancels active autocomplete when enabling Vim mode", async () => {

@@ -667,11 +667,12 @@ export class VimEditorController {
 			case "h":
 				endpoint = this.#absoluteLineStart(this.#cursor().line) + this.#moveCol(-1, count);
 				break;
-			case "l":
+			case "l": {
+				const targetCol = count === 1 ? this.#cursor().col : this.#moveCol(1, count - 1);
 				endpoint =
-					this.#absoluteLineStart(this.#cursor().line) +
-					this.#graphemeEndAt(this.#currentLine(), this.#moveCol(1, count));
+					this.#absoluteLineStart(this.#cursor().line) + this.#graphemeEndAt(this.#currentLine(), targetCol);
 				break;
+			}
 			case "0":
 				endpoint = this.#absoluteLineStart(this.#cursor().line);
 				break;

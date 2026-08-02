@@ -2589,21 +2589,11 @@ export class Editor implements Component, Focusable {
 			this.onChange(this.getText());
 		}
 
-		if (this.#autocompleteState) {
-			this.#debouncedUpdateAutocomplete();
-		} else {
-			const currentLine = this.#state.lines[this.#state.cursorLine] || "";
-			const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
-			if (this.#isInSlashAutocompleteContext()) {
-				this.#tryTriggerAutocomplete();
-			} else if (textBeforeCursor.match(/(?:^|[\s])@[^\s]*$/)) {
-				this.#tryTriggerAutocomplete();
-			} else if (textBeforeCursor.match(/#[^\s#]*$/)) {
-				this.#tryTriggerAutocomplete();
-			} else if (this.#textTriggersUrlAutocomplete(textBeforeCursor)) {
-				this.#tryTriggerAutocomplete();
-			}
+		if (this.#inputMode === "vim" && this.#vim.mode !== "insert") {
+			this.#cancelAutocomplete(true);
+			return;
 		}
+		this.#retriggerAutocompleteAtCursor();
 	}
 
 	#matchesTransientUndoSnapshot(
