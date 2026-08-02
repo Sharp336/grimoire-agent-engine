@@ -1072,6 +1072,10 @@ export class CommandController {
 			return;
 		}
 
+		// Moving renames the artifact dir out from under a live side — dispose only
+		// after cancellable validation (path overlay, create-dir confirm, invalid target).
+		await this.ctx.disposeSideConversation();
+
 		try {
 			await this.ctx.session.moveSession(resolvedPath);
 		} catch (err) {

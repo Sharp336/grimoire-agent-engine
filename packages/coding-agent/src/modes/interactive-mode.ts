@@ -4532,8 +4532,6 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async handleMoveCommand(targetPath?: string): Promise<void> {
 		if (this.#vibeSessionTransitionBlocked()) return;
-		// Moving renames the artifact dir out from under a live side.
-		await this.#sideController.dispose();
 		await this.#commandController.handleMoveCommand(targetPath);
 	}
 
@@ -4841,6 +4839,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleSideCommand(args: string): Promise<void> {
 		return this.#sideController.start(args);
+	}
+
+	disposeSideConversation(): Promise<void> {
+		return this.#sideController.dispose();
 	}
 
 	hasActiveBtw(): boolean {

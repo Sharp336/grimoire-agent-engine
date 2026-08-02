@@ -9,6 +9,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void>) {
 	const state = { cwd: sourceDir, movedTo: undefined as string | undefined };
 	const present = vi.fn();
+	const disposeSideConversation = vi.fn(async () => {});
 	const applyCwdChange = vi.fn(async (cwd: string) => {
 		expect(state.cwd).toBe(cwd);
 	});
@@ -16,6 +17,7 @@ function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void
 		state.cwd = cwd;
 		state.movedTo = cwd;
 	});
+
 	const ctx = {
 		session: { isStreaming: false, moveSession },
 		sessionManager: {
@@ -25,6 +27,7 @@ function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void
 		settings: {
 			flush: vi.fn(settingsFlush ?? (async () => {})),
 		},
+		disposeSideConversation,
 		showHookCustom: vi.fn(),
 		showHookConfirm: vi.fn(),
 		showError: vi.fn(),
@@ -35,7 +38,7 @@ function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void
 		ui: { requestRender: vi.fn() },
 		present,
 	} as unknown as InteractiveModeContext;
-	return { ctx, state, present };
+	return { ctx, state, present, disposeSideConversation, moveSession };
 }
 
 describe("CommandController /move", () => {
@@ -49,12 +52,16 @@ describe("CommandController /move", () => {
 		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-source-"));
 		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-target-"));
 		try {
-			const { ctx, state, present } = createMoveContext(sourceDir);
+			const { ctx, state, present, disposeSideConversation, moveSession } = createMoveContext(sourceDir);
 			const controller = new CommandController(ctx);
 
 			await controller.handleMoveCommand(targetDir);
 
 			expect(state.movedTo).toBe(targetDir);
+			expect(disposeSideConversation).toHaveBeenCalledTimes(1);
+			expect(disposeSideConversation.mock.invocationCallOrder[0]).toBeLessThan(
+				moveSession.mock.invocationCallOrder[0],
+			);
 			expect(ctx.sessionManager.dropSession).not.toHaveBeenCalled();
 			expect(ctx.applyCwdChange).toHaveBeenCalledWith(targetDir);
 			expect(ctx.updateEditorBorderColor).toHaveBeenCalled();
@@ -72,7 +79,7 @@ describe("CommandController /move", () => {
 		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-source-"));
 		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-target-"));
 		try {
-			const { ctx, state } = createMoveContext(sourceDir, async () => {
+			const { ctx, state, disposeSideConversation, moveSession } = createMoveContext(sourceDir, async () => {
 				throw new Error("disk full");
 			});
 			const controller = new CommandController(ctx);
@@ -80,7 +87,8 @@ describe("CommandController /move", () => {
 			await controller.handleMoveCommand(targetDir);
 
 			expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("disk full"));
-			expect(ctx.session.moveSession).not.toHaveBeenCalled();
+			expect(disposeSideConversation).not.toHaveBeenCalled();
+			expect(moveSession).not.toHaveBeenCalled();
 			expect(ctx.applyCwdChange).not.toHaveBeenCalled();
 			expect(state.movedTo).toBeUndefined();
 			expect(state.cwd).toBe(sourceDir);
