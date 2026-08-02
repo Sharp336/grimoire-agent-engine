@@ -151,7 +151,10 @@ export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
 				const glob = new Bun.Glob(`**/*${pattern.sourceSuffix}`);
 				const matches: string[] = [];
 				for await (const match of glob.scan({ cwd: sourceDir, onlyFiles: true })) {
-					matches.push(match);
+					// Bun.Glob.scan() on Windows yields backslash-separated paths; every
+					// downstream consumer here (segment splitting, binding-name generation)
+					// assumes POSIX separators, same as the exports-pattern `*` semantics.
+					matches.push(match.replaceAll("\\", "/"));
 				}
 				matches.sort();
 				for (const match of matches) {
