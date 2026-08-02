@@ -673,6 +673,13 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 	if (spec.compat?.omitReasoningEffort === undefined && !compat.supportsReasoningEffort) {
 		compat.omitReasoningEffort = true;
 	}
+	// A model config that suppresses reasoning_effort (via
+	// `supportsReasoningEffort: false` or `omitReasoningEffort: true`) must not
+	// emit the field even when the Friendli template flag would otherwise allow
+	// it — the endpoint rejects the explicitly suppressed parameter with a 400.
+	if (compat.omitReasoningEffort) {
+		compat.friendliTemplateReasoningEffort = false;
+	}
 	mergeModelReasoningEffortMap(compat, spec.id, isMimoReasoningEffortModel);
 
 	const whenThinkingPolicy =
@@ -690,6 +697,9 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		}
 		if (whenThinkingPolicy.omitReasoningEffort === undefined && !variant.supportsReasoningEffort) {
 			variant.omitReasoningEffort = true;
+		}
+		if (variant.omitReasoningEffort) {
+			variant.friendliTemplateReasoningEffort = false;
 		}
 		mergeModelReasoningEffortMap(variant, spec.id, isMimoReasoningEffortModel);
 		compat.whenThinking = variant;

@@ -79,6 +79,27 @@ describe("Friendli template reasoning effort flag", () => {
 		expect(buildOpenAICompat(custom).friendliTemplateReasoningEffort).toBe(true);
 	});
 
+	it("suppresses the flag when the model config sets omitReasoningEffort", () => {
+		// A Friendli GLM-5.2 model with an explicit compat override that
+		// suppresses reasoning_effort must NOT emit the field even though
+		// the Friendli template flag would otherwise allow it.
+		const suppressed: ModelSpec<"openai-completions"> = {
+			api: "openai-completions",
+			id: "zai-org/GLM-5.2",
+			name: "GLM-5.2",
+			provider: "friendli",
+			baseUrl: "https://api.friendli.ai/serverless/v1",
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			maxTokens: 8192,
+			contextWindow: 131072,
+			reasoning: true,
+			thinking: HIGH_MAX,
+			compat: { supportsReasoningEffort: false } as never,
+		};
+		expect(buildOpenAICompat(suppressed).friendliTemplateReasoningEffort).toBe(false);
+	});
+
 	it("leaves the flag off for the other qwen-chat-template host (NVIDIA NIM)", () => {
 		// NIM is the precedent for routing to `qwen-chat-template`; its strict
 		// schema rejects top-level `reasoning_effort`, so the flag must NOT flip
