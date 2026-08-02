@@ -445,6 +445,28 @@ describe("Editor Vim input mode", () => {
 		undone.handleInput("w");
 		expect(undone.getText()).toBe("one two");
 		expect(undone.getCursor()).toEqual({ line: 0, col: 4 });
+
+		const redone = createVimEditor();
+		redone.setText("one two");
+		typeText(redone, "0d");
+		redone.handleInput("\x12");
+		redone.handleInput("w");
+		expect(redone.getText()).toBe("one two");
+		expect(redone.getCursor()).toEqual({ line: 0, col: 4 });
+
+		const jumped = createVimEditor();
+		jumped.setText("abc");
+		jumped.handleInput("g");
+		jumped.handleInput("\x12");
+		jumped.handleInput("x");
+		expect(jumped.getText()).toBe("ab");
+
+		const visual = createVimEditor();
+		visual.setText("abc");
+		typeText(visual, "0vi");
+		visual.handleInput("\x12");
+		visual.handleInput("d");
+		expect(visual.getText()).toBe("bc");
 	});
 
 	it.each([

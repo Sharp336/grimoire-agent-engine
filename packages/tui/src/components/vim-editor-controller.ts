@@ -155,9 +155,10 @@ export class VimEditorController {
 		}
 		if (matchesKey(data, "ctrl+r")) {
 			if (this.#mode === "visual") {
-				this.#count = "";
+				this.clearPendingCommand();
 				return true;
 			}
+			if (this.#pending !== undefined) this.clearPendingCommand();
 			const count = this.#takeCount();
 			for (let i = 0; i < count; i++) {
 				if (!this.#adapter.applyRedo()) break;
