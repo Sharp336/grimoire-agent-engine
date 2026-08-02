@@ -348,7 +348,7 @@ describe("omp doctor", () => {
 		expect(["ok", "warning", "error"]).toContain(parsed.overallStatus);
 		for (const finding of parsed.findings) {
 			expect(typeof finding.id).toBe("string");
-			expect(["environment", "config", "tools", "storage", "mcp", "browser", "auth", "plugins"]).toContain(
+			expect(["environment", "config", "tools", "storage", "mcp", "browser", "auth", "setup", "plugins"]).toContain(
 				finding.category,
 			);
 			expect(["ok", "warning", "error"]).toContain(finding.status);
@@ -1085,5 +1085,311 @@ describe("omp doctor", () => {
 		} else {
 			expect(fuserFinding).toBeUndefined();
 		}
+	});
+	// ── setup section ────────────────────────────────────────────────────────
+
+	test("setup: agent .md with missing description → error naming the file", async () => {
+		const agentsDir = path.join(root, "agents");
+		await fs.mkdir(agentsDir, { recursive: true });
+		await fs.writeFile(path.join(agentsDir, "broken.md"), "---\nname: broken\ntools: read\n---\nBody\n", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "setup.agents");
+		expect(finding?.category).toBe("setup");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(d => d.includes("broken.md"))).toBe(true);
+	});
+
+	test("setup: agent referencing a nonexistent spawns target → warning", async () => {
+		const agentsDir = path.join(root, "agents");
+		await fs.mkdir(agentsDir, { recursive: true });
+		await fs.writeFile(
+			path.join(agentsDir, "spawner.md"),
+			"---\nname: spawner\ndescription: test\nspawns: [nonexistent-agent]\ntools: task\n---\nBody\n",
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "setup.agents");
+		expect(finding?.category).toBe("setup");
+		expect(finding?.status).toBe("warning");
+		expect(finding?.details.some(d => d.includes("nonexistent-agent"))).toBe(true);
+	});
+
+	test("setup: keybindings.yml with an unknown action → warning", async () => {
+		await fs.writeFile(path.join(root, "keybindings.yml"), "nonexistent.action: ctrl+a\n", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "setup.keybindings");
+		expect(finding?.category).toBe("setup");
+		expect(finding?.status).toBe("warning");
+		expect(finding?.details.some(d => d.includes("nonexistent.action"))).toBe(true);
+	});
+
+	test("setup: two actions bound to the same chord → conflict warning", async () => {
+		await fs.writeFile(path.join(root, "keybindings.yml"), "app.interrupt: ctrl+x\napp.clear: ctrl+x\n", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "setup.keybindings");
+		expect(finding?.category).toBe("setup");
+		expect(finding?.status).toBe("warning");
+		expect(finding?.details.some(d => d.includes("ctrl+x"))).toBe(true);
+	});
+
+	test("setup: WATCHDOG.yml failing the schema → error", async () => {
+		await fs.writeFile(path.join(root, "WATCHDOG.yml"), "advisors:\n  - name: test\n    tools: 123\n", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "setup.watchdog");
+		expect(finding?.category).toBe("setup");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(d => d.includes("WATCHDOG.yml"))).toBe(true);
+	});
+
+	test("setup: SKILL.md with broken frontmatter → error", async () => {
+		const skillsDir = path.join(root, "skills", "broken-skill");
+		await fs.mkdir(skillsDir, { recursive: true });
+		await fs.writeFile(
+			path.join(skillsDir, "SKILL.md"),
+			"---\nname: [unclosed\ndescription: test\n---\nBody\n",
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "setup.skills");
+		expect(finding?.category).toBe("setup");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(d => d.includes("broken-skill"))).toBe(true);
+	});
+
+	test("setup: theme json failing themeJsonSchema → error", async () => {
+		const themesDir = path.join(root, "themes");
+		await fs.mkdir(themesDir, { recursive: true });
+		// Missing required "colors" and "name" fields.
+		await fs.writeFile(path.join(themesDir, "bad.json"), '{"foo": "bar"}', "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "setup.themes");
+		expect(finding?.category).toBe("setup");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(d => d.includes("bad.json"))).toBe(true);
+	});
+
+	test("setup: extension with a broken manifest → error detail", async () => {
+		const extDir = path.join(root, "extensions", "broken-ext");
+		await fs.mkdir(extDir, { recursive: true });
+		await fs.writeFile(path.join(extDir, "package.json"), "{ not valid json ", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "setup.extensions");
+		expect(finding?.category).toBe("setup");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(d => d.includes("broken-ext"))).toBe(true);
+	});
+
+	test("setup: clean temp dirs → all six ok", async () => {
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const setupFindings = report.findings.filter(entry => entry.category === "setup");
+		expect(setupFindings).toHaveLength(6);
+		for (const finding of setupFindings) expect(finding.status).toBe("ok");
+	});
+
+	test("setup: agent referencing a custom tool from an extension → no false unknown-tool warning", async () => {
+		// A custom tool defined under <agentDir>/tools/ must be discovered by the
+		// same static tool-discovery the runtime uses, so an agent referencing it
+		// does NOT produce a false "unknown tool" warning.
+		const toolsDir = path.join(root, "tools");
+		await fs.mkdir(toolsDir, { recursive: true });
+		await fs.writeFile(
+			path.join(toolsDir, "my-custom-tool.json"),
+			'{"name":"my-custom-tool","description":"test tool"}',
+			"utf8",
+		);
+		const agentsDir = path.join(root, "agents");
+		await fs.mkdir(agentsDir, { recursive: true });
+		await fs.writeFile(
+			path.join(agentsDir, "good.md"),
+			"---\nname: good\ndescription: test\ntools: [my-custom-tool]\n---\nBody\n",
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "setup.agents");
+		expect(finding?.status).toBe("ok");
+		expect(finding?.details.some(d => d.includes("unknown tool"))).toBe(false);
+	});
+
+	test("setup: non-ENOENT readdir on extension agents dir → error finding", async () => {
+		// A non-ENOENT readdir failure (e.g. EACCES) on an extension agents dir
+		// must surface as an error, not be silently swallowed.
+		const extDir = path.join(root, "extensions", "my-ext", "agents");
+		await fs.mkdir(extDir, { recursive: true });
+		const realReaddir = nodeFs.promises.readdir.bind(nodeFs.promises);
+		const readdirSpy = spyOn(nodeFs.promises, "readdir").mockImplementation((async (
+			dirPath: unknown,
+			_options: unknown,
+		) => {
+			if (typeof dirPath === "string" && path.resolve(dirPath) === path.resolve(extDir)) {
+				const err = new Error("EACCES: permission denied") as NodeJS.ErrnoException;
+				err.code = "EACCES";
+				throw err;
+			}
+			return realReaddir(dirPath as string, _options as object);
+		}) as typeof nodeFs.promises.readdir);
+		try {
+			const report = await runDoctorCommand({ flags: { agentDir: root } });
+			const finding = report.findings.find(entry => entry.id === "setup.agents");
+			expect(finding?.status).toBe("error");
+			expect(finding?.details.some(d => d.includes("EACCES"))).toBe(true);
+		} finally {
+			readdirSpy.mockRestore();
+		}
+	});
+
+	test("setup: non-ENOENT readdir on hooks dir → error finding", async () => {
+		// A non-ENOENT readdir failure on a hooks dir must surface as an error,
+		// not be silently discarded.
+		const hooksDir = path.join(root, "hooks", "pre");
+		await fs.mkdir(hooksDir, { recursive: true });
+		const realReaddir = nodeFs.promises.readdir.bind(nodeFs.promises);
+		const readdirSpy = spyOn(nodeFs.promises, "readdir").mockImplementation((async (
+			dirPath: unknown,
+			_options: unknown,
+		) => {
+			if (typeof dirPath === "string" && path.resolve(dirPath) === path.resolve(hooksDir)) {
+				const err = new Error("EACCES: permission denied") as NodeJS.ErrnoException;
+				err.code = "EACCES";
+				throw err;
+			}
+			return realReaddir(dirPath as string, _options as object);
+		}) as typeof nodeFs.promises.readdir);
+		try {
+			const report = await runDoctorCommand({ flags: { agentDir: root } });
+			const finding = report.findings.find(entry => entry.id === "setup.extensions");
+			expect(finding?.status).toBe("error");
+			expect(finding?.details.some(d => d.includes("EACCES"))).toBe(true);
+		} finally {
+			readdirSpy.mockRestore();
+		}
+	});
+
+	test("setup: tool name from JSON name field, not basename → no false unknown-tool warning", async () => {
+		// A JSON tool file named foo.json with {name:"bar"} must register tool
+		// name "bar" (matching runtime loadTools), not "foo".
+		const toolsDir = path.join(root, "tools");
+		await fs.mkdir(toolsDir, { recursive: true });
+		await fs.writeFile(path.join(toolsDir, "foo.json"), '{"name":"bar","description":"test tool"}', "utf8");
+		const agentsDir = path.join(root, "agents");
+		await fs.mkdir(agentsDir, { recursive: true });
+		await fs.writeFile(
+			path.join(agentsDir, "good.md"),
+			"---\nname: good\ndescription: test\ntools: [bar]\n---\nBody\n",
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "setup.agents");
+		expect(finding?.status).toBe("ok");
+		expect(finding?.details.some(d => d.includes("unknown tool"))).toBe(false);
+	});
+
+	test("setup: empty tools subdir without index file → no false known-tool suppression", async () => {
+		// A tools/ subdir without index.ts/index.js must NOT register as a known
+		// tool — the runtime loadTools only registers subdirs with an index file.
+		const toolsDir = path.join(root, "tools");
+		await fs.mkdir(path.join(toolsDir, "empty-subdir"), { recursive: true });
+		const agentsDir = path.join(root, "agents");
+		await fs.mkdir(agentsDir, { recursive: true });
+		await fs.writeFile(
+			path.join(agentsDir, "good.md"),
+			"---\nname: good\ndescription: test\ntools: [empty-subdir]\n---\nBody\n",
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "setup.agents");
+		expect(finding?.status).toBe("warning");
+		expect(finding?.details.some(d => d.includes("unknown tool") && d.includes("empty-subdir"))).toBe(true);
+	});
+
+	test("setup: SKILL.md deleted between readdir and readFile → skip, not error", async () => {
+		// An ENOENT race on SKILL.md (file removed after readdir) must be silently
+		// skipped, not surfaced as an error.
+		const skillsDir = path.join(root, "skills", "race-skill");
+		await fs.mkdir(skillsDir, { recursive: true });
+		await fs.writeFile(
+			path.join(skillsDir, "SKILL.md"),
+			"---\nname: race-skill\ndescription: test\n---\nBody\n",
+			"utf8",
+		);
+		const realReadFile = fs.readFile.bind(fs);
+		const readFileSpy = spyOn(fs, "readFile").mockImplementation((async (filePath: unknown) => {
+			if (
+				typeof filePath === "string" &&
+				filePath.endsWith("SKILL.md") &&
+				path.basename(path.dirname(filePath)) === "race-skill"
+			) {
+				await fs.unlink(filePath);
+				const err = new Error("ENOENT") as NodeJS.ErrnoException;
+				err.code = "ENOENT";
+				throw err;
+			}
+			return realReadFile(filePath as string);
+		}) as typeof fs.readFile);
+		try {
+			const report = await runDoctorCommand({ flags: { agentDir: root } });
+			const finding = report.findings.find(entry => entry.id === "setup.skills");
+			expect(finding?.status).toBe("ok");
+			expect(finding?.details.some(d => d.includes("ENOENT"))).toBe(false);
+		} finally {
+			readFileSpy.mockRestore();
+		}
+	});
+	test("setup: theme .json deleted between readdir and read → skip, not error", async () => {
+		// An ENOENT race on a theme .json file (removed after readdir) must be
+		// silently skipped, not surfaced as an error.
+		const themesDir = path.join(root, "themes");
+		await fs.mkdir(themesDir, { recursive: true });
+		const themePath = path.join(themesDir, "race.json");
+		await fs.writeFile(themePath, '{"name":"race","colors":{}}', "utf8");
+		// Intercept readdir on the themes dir: after returning the entries,
+		// delete the file so the subsequent Bun.file().json() hits ENOENT.
+		const realReaddir = nodeFs.promises.readdir.bind(nodeFs.promises);
+		const readdirSpy = spyOn(nodeFs.promises, "readdir").mockImplementation((async (
+			dirPath: unknown,
+			options: unknown,
+		) => {
+			const result = await realReaddir(dirPath as string, options as object);
+			if (typeof dirPath === "string" && path.resolve(dirPath) === path.resolve(themesDir)) {
+				await fs.unlink(themePath).catch(() => {});
+			}
+			return result;
+		}) as typeof nodeFs.promises.readdir);
+		try {
+			const report = await runDoctorCommand({ flags: { agentDir: root } });
+			const finding = report.findings.find(entry => entry.id === "setup.themes");
+			expect(finding?.status).toBe("ok");
+			expect(finding?.details.some(d => d.includes("ENOENT"))).toBe(false);
+		} finally {
+			readdirSpy.mockRestore();
+		}
+	});
+
+	test("setup: extensions scoped scan validates extension package → ok", async () => {
+		// When scoped (--agent-dir set), extensions are scanned from explicit dirs.
+		// This test verifies the scoped path still works after the unscoped refactor.
+		const extDir = path.join(root, "extensions", "test-ext");
+		await fs.mkdir(extDir, { recursive: true });
+		await fs.writeFile(
+			path.join(extDir, "package.json"),
+			JSON.stringify({ name: "test-ext", omp: { extensions: ["./index.ts"] } }),
+			"utf8",
+		);
+		await fs.writeFile(path.join(extDir, "index.ts"), "export {};", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "setup.extensions");
+		expect(finding?.status).toBe("ok");
+		expect(finding?.summary).toContain("1 valid");
 	});
 });

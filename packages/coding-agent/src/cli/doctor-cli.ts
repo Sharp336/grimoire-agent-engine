@@ -7,6 +7,7 @@
  */
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { type AuthBrokerClientConfig, resolveAuthBrokerConfig } from "@oh-my-pi/pi-ai/auth-broker/discover";
 import { isSqliteBusyError } from "@oh-my-pi/pi-ai/auth-storage";
@@ -15,24 +16,37 @@ import {
 	formatBytes,
 	getAgentDbPath,
 	getAgentDir,
+	getCustomThemesDir,
 	getProjectDir,
 	isEnoent,
 	MAIN_CONFIG_FILENAMES,
+	parseFrontmatter,
 	tryParseJson,
 	VERSION,
 } from "@oh-my-pi/pi-utils";
+import { type } from "arktype";
+import { JSONC, YAML } from "bun";
+import { watchdogYamlSchema } from "../advisor/config";
+import { collectConfigCandidates } from "../advisor/watchdog";
+import { type Hook, hookCapability } from "../capability/hook";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
 import type { LoadResult } from "../config/config-file";
+import { KEYBINDINGS, KeybindingsManager, resolveKeybindingsConfigPaths } from "../config/keybindings";
 import { ModelsConfigFile } from "../config/models-config";
 import { classifySettingsYaml, type YamlLoadResult } from "../config/settings";
 import { collectSystemInfo, formatSystemInfo } from "../debug/system-info";
 import { loadCapability } from "../discovery";
+import { type ParsedAgentFields, parseAgentFields } from "../discovery/helpers";
+import { listOmpExtensionRoots } from "../discovery/omp-extension-roots";
+import { readExtensionManifest } from "../extensibility/extensions/loader";
 import { PluginManager } from "../extensibility/plugins/manager";
 import type { DoctorCheck } from "../extensibility/plugins/types";
 import { convertToLegacyConfig, validateServerConfig } from "../mcp/config";
 import type { MCPServerConfig } from "../mcp/types";
-import { theme } from "../modes/theme/theme";
+import { theme, themeJsonSchema } from "../modes/theme/theme";
+import { loadBundledAgents } from "../task/agents";
 import { readChromiumEnvOverride, resolveSystemChromium } from "../tools/browser/launch";
+import { BUILTIN_TOOL_NAMES, HIDDEN_TOOL_NAMES } from "../tools/builtin-names";
 import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
 import {
 	type DbProbe,
@@ -48,7 +62,16 @@ import { withGcLock } from "./gc-cli";
 
 export type DoctorStatus = "ok" | "warning" | "error";
 
-export type DoctorCategory = "environment" | "config" | "tools" | "storage" | "mcp" | "browser" | "auth" | "plugins";
+export type DoctorCategory =
+	| "environment"
+	| "config"
+	| "tools"
+	| "storage"
+	| "mcp"
+	| "browser"
+	| "auth"
+	| "setup"
+	| "plugins";
 
 export interface DoctorFinding {
 	/** Stable dotted id, e.g. "storage.history.db" or "tools.git". */
@@ -89,6 +112,7 @@ const CATEGORY_ORDER: readonly DoctorCategory[] = [
 	"mcp",
 	"browser",
 	"auth",
+	"setup",
 	"plugins",
 ];
 
@@ -994,6 +1018,727 @@ function diagnoseMcpServer(name: string, server: MCPServer, raw?: unknown): Doct
 	}
 	return { ...base, status: "ok", summary: `${name}: ${url}`, details: [] };
 }
+// ── setup section ──────────────────────────────────────────────────────────
+// Read-only sanity probes over user/project config surfaces (agents,
+// keybindings, watchdog, skills, themes, extensions/hooks). Each probe parses
+// and validates through the real loaders' read-only seams — no factory
+// execution, no hook script execution, no writes, no manager instantiation
+// that migrates or persists.
+
+/** Known tool name set for agent `tools` reference validation. */
+const KNOWN_TOOL_NAMES = new Set<string>([...BUILTIN_TOOL_NAMES, ...HIDDEN_TOOL_NAMES]);
+
+/** Scan a directory for `.md` files, returning `{ filePath, content }` sorted by name. */
+async function scanMarkdownDir(dir: string): Promise<Array<{ filePath: string; content: string }>> {
+	let entries: fs.Dirent[];
+	try {
+		entries = await fs.promises.readdir(dir, { withFileTypes: true });
+	} catch (error) {
+		if (isEnoent(error)) return [];
+		throw error;
+	}
+	const files = entries
+		.filter(entry => (entry.isFile() || entry.isSymbolicLink()) && entry.name.endsWith(".md"))
+		.sort((a, b) => a.name.localeCompare(b.name));
+	const results: Array<{ filePath: string; content: string }> = [];
+	for (const file of files) {
+		const filePath = path.join(dir, file.name);
+		try {
+			const content = await fs.promises.readFile(filePath, "utf-8");
+			results.push({ filePath, content });
+		} catch (error) {
+			if (isEnoent(error)) continue;
+			throw error;
+		}
+	}
+	return results;
+}
+
+/** Build the set of known agent names (discovered + bundled) for spawns validation. */
+function buildKnownAgentNames(discovered: ParsedAgentFields[]): Set<string> {
+	const names = new Set<string>();
+	for (const fields of discovered) names.add(fields.name);
+	for (const bundled of loadBundledAgents()) names.add(bundled.name);
+	return names;
+}
+
+/** Discover skill names from the three skill roots for autoloadSkills validation. */
+async function discoverSkillNames(agentDir: string, projectDir: string, errors: string[]): Promise<Set<string>> {
+	const dirs = [
+		path.join(agentDir, "skills"),
+		path.join(agentDir, "managed-skills"),
+		path.join(projectDir, ".omp", "skills"),
+	];
+	const names = new Set<string>();
+	for (const dir of dirs) {
+		let entries: fs.Dirent[];
+		try {
+			entries = await fs.promises.readdir(dir, { withFileTypes: true });
+		} catch (error) {
+			if (isEnoent(error)) continue;
+			errors.push(`skills: ${error instanceof Error ? error.message : String(error)}`);
+			continue;
+		}
+		for (const entry of entries) {
+			if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+			if (entry.name.startsWith(".")) continue;
+			const skillPath = path.join(dir, entry.name, "SKILL.md");
+			try {
+				const content = await fs.promises.readFile(skillPath, "utf-8");
+				const { frontmatter } = parseFrontmatter(content, { source: skillPath, level: "off" });
+				const rawName = frontmatter.name;
+				if (typeof rawName === "string" && rawName.trim()) names.add(rawName.trim());
+				else names.add(entry.name);
+			} catch (error) {
+				if (isEnoent(error)) continue;
+				// Skip unreadable skill files — the skills collector reports them.
+			}
+		}
+	}
+	return names;
+}
+
+/** Resolve agent scan dirs: user/project roots plus extension-package agents/ dirs.
+ * When unscoped (agentDir === undefined), uses `listOmpExtensionRoots` to resolve
+ * the same extension roots the runtime discovers (CLI, settings, installed plugins).
+ * When scoped, scans only explicit dirs under the scoped agentDir/projectDir. */
+async function resolveAgentScanDirs(
+	agentDir: string,
+	projectDir: string,
+	scoped: boolean,
+	errors: string[],
+): Promise<string[]> {
+	const baseDirs = [path.join(agentDir, "agents"), path.join(projectDir, ".omp", "agents")];
+	if (!scoped) {
+		// Use the same side-effect-free extension-root resolution as the runtime.
+		// listOmpExtensionRoots is read-only (stats dirs, reads settings.json, lists
+		// installed plugins) — no factory execution, no hook script execution.
+		try {
+			const roots = await listOmpExtensionRoots({ cwd: projectDir, home: os.homedir(), repoRoot: null });
+			for (const root of roots) baseDirs.push(path.join(root.path, "agents"));
+		} catch (error) {
+			errors.push(`extension roots: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	} else {
+		// Scoped: scan only explicit extension dirs under the scoped dirs.
+		const extRoots = [path.join(agentDir, "extensions"), path.join(projectDir, ".omp", "extensions")];
+		for (const extRoot of extRoots) {
+			let entries: fs.Dirent[];
+			try {
+				entries = await fs.promises.readdir(extRoot, { withFileTypes: true });
+			} catch (error) {
+				if (isEnoent(error)) continue;
+				errors.push(`${path.basename(extRoot)}: ${error instanceof Error ? error.message : String(error)}`);
+				continue;
+			}
+			for (const entry of entries) {
+				if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+				if (entry.name.startsWith(".")) continue;
+				baseDirs.push(path.join(extRoot, entry.name, "agents"));
+			}
+		}
+	}
+	return baseDirs;
+}
+
+/** File extensions the runtime loadTools scans for custom tool files. */
+const TOOL_FILE_EXTS = [".json", ".md", ".ts", ".js", ".sh", ".bash", ".py"];
+
+/** Check if a file exists (ENOENT → false, other errors → false). */
+async function fileExists(filePath: string): Promise<boolean> {
+	try {
+		await fs.promises.stat(filePath);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** Derive the runtime tool name from a tool file, reading metadata when present.
+ * Mirrors loadTools in builtin.ts: JSON files use the `name` field (or basename),
+ * MD files use frontmatter `name` (or basename), executable files use basename. */
+async function deriveToolName(filePath: string, fileName: string): Promise<string | null> {
+	const ext = path.extname(fileName);
+	const baseName = fileName.replace(/\.(json|md|ts|js|sh|bash|py)$/, "");
+	try {
+		if (ext === ".json") {
+			const content = await fs.promises.readFile(filePath, "utf-8");
+			const data = tryParseJson<{ name?: string }>(content);
+			return data?.name || baseName;
+		}
+		if (ext === ".md") {
+			const content = await fs.promises.readFile(filePath, "utf-8");
+			const { frontmatter } = parseFrontmatter(content, { source: filePath });
+			return (frontmatter.name as string) || baseName;
+		}
+	} catch {
+		// Unreadable file — fall back to basename.
+	}
+	return baseName;
+}
+
+async function collectAgentSetupFinding(agentDir: string, projectDir: string, scoped: boolean): Promise<DoctorFinding> {
+	const errors: string[] = [];
+	const warnings: string[] = [];
+	const parsed: ParsedAgentFields[] = [];
+	const dirs = await resolveAgentScanDirs(agentDir, projectDir, scoped, errors);
+
+	for (const dir of dirs) {
+		let files: Array<{ filePath: string; content: string }>;
+		try {
+			files = await scanMarkdownDir(dir);
+		} catch (error) {
+			errors.push(
+				`${path.basename(path.dirname(dir))}/agents: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			continue;
+		}
+		for (const { filePath, content } of files) {
+			const baseName = path.basename(filePath);
+			try {
+				const { frontmatter } = parseFrontmatter(content, { source: filePath, level: "fatal" });
+				const fields = parseAgentFields(frontmatter);
+				if (!fields) {
+					errors.push(`${baseName}: missing name or description`);
+					continue;
+				}
+				parsed.push(fields);
+			} catch (error) {
+				errors.push(`${baseName}: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+	}
+
+	// Validate references only when agents were successfully parsed.
+	if (parsed.length > 0) {
+		const knownAgentNames = buildKnownAgentNames(parsed);
+		const knownSkillNames = await discoverSkillNames(agentDir, projectDir, errors);
+		// Build the known tool name set from the same static tool-discovery sources
+		// the runtime uses: built-in names + custom tools from <configDir>/tools/.
+		// Scans the same directories and extensions as loadTools in builtin.ts:
+		// .json/.md/.ts/.js/.sh/.bash/.py files + subdirs with index.ts/index.js.
+		const knownTools = new Set<string>(KNOWN_TOOL_NAMES);
+		const toolDirs = [path.join(agentDir, "tools"), path.join(projectDir, ".omp", "tools")];
+		for (const toolDir of toolDirs) {
+			let toolEntries: fs.Dirent[];
+			try {
+				toolEntries = await fs.promises.readdir(toolDir, { withFileTypes: true });
+			} catch (error) {
+				if (isEnoent(error)) continue;
+				errors.push(`tools: ${error instanceof Error ? error.message : String(error)}`);
+				continue;
+			}
+			for (const toolEntry of toolEntries) {
+				if (toolEntry.name.startsWith(".")) continue;
+				if (toolEntry.isFile() || toolEntry.isSymbolicLink()) {
+					const ext = path.extname(toolEntry.name);
+					if (!TOOL_FILE_EXTS.includes(ext)) continue;
+					const toolPath = path.join(toolDir, toolEntry.name);
+					const derivedName = await deriveToolName(toolPath, toolEntry.name);
+					if (derivedName) knownTools.add(derivedName);
+				} else if (toolEntry.isDirectory()) {
+					// Subdirectory tools: only register when the runtime-expected
+					// index file exists (mirrors loadTools in builtin.ts).
+					const indexPath = path.join(toolDir, toolEntry.name, "index.ts");
+					const indexJsPath = path.join(toolDir, toolEntry.name, "index.js");
+					if ((await fileExists(indexPath)) || (await fileExists(indexJsPath))) {
+						knownTools.add(toolEntry.name);
+					}
+				}
+			}
+		}
+		for (const fields of parsed) {
+			for (const tool of fields.tools ?? []) {
+				if (!knownTools.has(tool) && !tool.startsWith("mcp__")) {
+					warnings.push(`${fields.name}: unknown tool "${tool}"`);
+				}
+			}
+			if (fields.spawns !== undefined && fields.spawns !== "*") {
+				for (const target of fields.spawns) {
+					if (!knownAgentNames.has(target)) {
+						warnings.push(`${fields.name}: spawns references unknown agent "${target}"`);
+					}
+				}
+			}
+			for (const skill of fields.autoloadSkills ?? []) {
+				if (!knownSkillNames.has(skill)) {
+					warnings.push(`${fields.name}: autoloadSkills references unknown skill "${skill}"`);
+				}
+			}
+		}
+	}
+
+	if (errors.length > 0) {
+		return {
+			id: "setup.agents",
+			category: "setup",
+			status: "error",
+			summary: `agents: ${errors.length} error${errors.length === 1 ? "" : "s"}`,
+			details: errors,
+		};
+	}
+	if (warnings.length > 0) {
+		return {
+			id: "setup.agents",
+			category: "setup",
+			status: "warning",
+			summary: `agents: ${warnings.length} warning${warnings.length === 1 ? "" : "s"}`,
+			details: warnings,
+		};
+	}
+	return {
+		id: "setup.agents",
+		category: "setup",
+		status: "ok",
+		summary: `agents: ${parsed.length} valid`,
+		details: [],
+	};
+}
+async function collectKeybindingsSetupFinding(agentDir: string): Promise<DoctorFinding> {
+	const { readPath } = resolveKeybindingsConfigPaths(agentDir);
+	let content: string;
+	try {
+		content = await fs.promises.readFile(readPath, "utf-8");
+	} catch (error) {
+		if (isEnoent(error)) {
+			return {
+				id: "setup.keybindings",
+				category: "setup",
+				status: "ok",
+				summary: "keybindings: defaults in use",
+				details: [],
+			};
+		}
+		return {
+			id: "setup.keybindings",
+			category: "setup",
+			status: "error",
+			summary: "keybindings: cannot read config",
+			details: [error instanceof Error ? error.message : String(error)],
+		};
+	}
+	// Parse YAML/JSONC per extension — same parsers loadRawConfig uses.
+	let rawConfig: unknown;
+	try {
+		if (readPath.endsWith(".json")) {
+			rawConfig = JSONC.parse(content);
+		} else {
+			rawConfig = YAML.parse(content);
+		}
+	} catch (error) {
+		return {
+			id: "setup.keybindings",
+			category: "setup",
+			status: "error",
+			summary: "keybindings: syntax error",
+			details: [error instanceof Error ? error.message : String(error)],
+		};
+	}
+	if (!rawConfig || typeof rawConfig !== "object" || Array.isArray(rawConfig)) {
+		return {
+			id: "setup.keybindings",
+			category: "setup",
+			status: "error",
+			summary: "keybindings: expected a mapping",
+			details: [],
+		};
+	}
+	const config = rawConfig as Record<string, unknown>;
+	const warnings: string[] = [];
+	for (const key of Object.keys(config)) {
+		if (!(key in KEYBINDINGS)) {
+			warnings.push(`unknown action "${key}"`);
+		}
+	}
+	// Detect chord conflicts via the TUI's in-memory manager (no file persistence, no global set).
+	try {
+		const manager = KeybindingsManager.inMemory(config as Parameters<typeof KeybindingsManager.inMemory>[0]);
+		for (const conflict of manager.getConflicts()) {
+			warnings.push(`chord conflict: "${conflict.key}" bound to ${conflict.keybindings.join(", ")}`);
+		}
+	} catch (error) {
+		return {
+			id: "setup.keybindings",
+			category: "setup",
+			status: "error",
+			summary: "keybindings: validation failed",
+			details: [error instanceof Error ? error.message : String(error)],
+		};
+	}
+	if (warnings.length > 0) {
+		return {
+			id: "setup.keybindings",
+			category: "setup",
+			status: "warning",
+			summary: `keybindings: ${warnings.length} issue${warnings.length === 1 ? "" : "s"}`,
+			details: warnings,
+		};
+	}
+	return { id: "setup.keybindings", category: "setup", status: "ok", summary: "keybindings: valid", details: [] };
+}
+
+async function collectWatchdogSetupFinding(agentDir: string, projectDir: string): Promise<DoctorFinding> {
+	let candidates: Array<{ path: string; content: string }>;
+	try {
+		candidates = await collectConfigCandidates(projectDir, agentDir, ["WATCHDOG.yml", "WATCHDOG.yaml"]);
+	} catch (error) {
+		return {
+			id: "setup.watchdog",
+			category: "setup",
+			status: "error",
+			summary: "watchdog: discovery failed",
+			details: [error instanceof Error ? error.message : String(error)],
+		};
+	}
+	if (candidates.length === 0) {
+		return {
+			id: "setup.watchdog",
+			category: "setup",
+			status: "ok",
+			summary: "watchdog: no watchdog config",
+			details: [],
+		};
+	}
+	const errors: string[] = [];
+	for (const candidate of candidates) {
+		let parsed: unknown;
+		try {
+			parsed = YAML.parse(candidate.content);
+		} catch (error) {
+			errors.push(
+				`${path.basename(candidate.path)}: YAML syntax error — ${error instanceof Error ? error.message : String(error)}`,
+			);
+			continue;
+		}
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+			errors.push(`${path.basename(candidate.path)}: expected a YAML mapping`);
+			continue;
+		}
+		const result = watchdogYamlSchema(parsed);
+		if (result instanceof type.errors) {
+			errors.push(`${path.basename(candidate.path)}: schema error — ${result.summary}`);
+		}
+	}
+	if (errors.length > 0) {
+		return {
+			id: "setup.watchdog",
+			category: "setup",
+			status: "error",
+			summary: `watchdog: ${errors.length} error${errors.length === 1 ? "" : "s"}`,
+			details: errors,
+		};
+	}
+	return {
+		id: "setup.watchdog",
+		category: "setup",
+		status: "ok",
+		summary: `watchdog: ${candidates.length} config${candidates.length === 1 ? "" : "s"} valid`,
+		details: [],
+	};
+}
+
+async function collectSkillsSetupFinding(agentDir: string, projectDir: string): Promise<DoctorFinding> {
+	const dirs = [
+		path.join(agentDir, "skills"),
+		path.join(agentDir, "managed-skills"),
+		path.join(projectDir, ".omp", "skills"),
+	];
+	const errors: string[] = [];
+	let count = 0;
+	for (const dir of dirs) {
+		let entries: fs.Dirent[];
+		try {
+			entries = await fs.promises.readdir(dir, { withFileTypes: true });
+		} catch (error) {
+			if (isEnoent(error)) continue;
+			errors.push(`${path.basename(dir)}: ${error instanceof Error ? error.message : String(error)}`);
+			continue;
+		}
+		for (const entry of entries) {
+			if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+			if (entry.name.startsWith(".")) continue;
+			const skillPath = path.join(dir, entry.name, "SKILL.md");
+			try {
+				const content = await fs.promises.readFile(skillPath, "utf-8");
+				const { frontmatter } = parseFrontmatter(content, { source: skillPath, level: "fatal" });
+				const name = typeof frontmatter.name === "string" ? frontmatter.name.trim() : undefined;
+				const description =
+					typeof frontmatter.description === "string" ? frontmatter.description.trim() : undefined;
+				if (!name || !description) {
+					errors.push(`${entry.name}/SKILL.md: missing name or description`);
+					continue;
+				}
+				count++;
+			} catch (error) {
+				if (isEnoent(error)) continue;
+				errors.push(`${entry.name}/SKILL.md: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+	}
+	if (errors.length > 0) {
+		return {
+			id: "setup.skills",
+			category: "setup",
+			status: "error",
+			summary: `skills: ${errors.length} error${errors.length === 1 ? "" : "s"}`,
+			details: errors,
+		};
+	}
+	return { id: "setup.skills", category: "setup", status: "ok", summary: `skills: ${count} valid`, details: [] };
+}
+
+async function collectThemesSetupFinding(agentDir: string): Promise<DoctorFinding> {
+	const themesDir = getCustomThemesDir(agentDir);
+	let entries: fs.Dirent[];
+	try {
+		entries = await fs.promises.readdir(themesDir, { withFileTypes: true });
+	} catch (error) {
+		if (isEnoent(error)) {
+			return {
+				id: "setup.themes",
+				category: "setup",
+				status: "ok",
+				summary: "themes: no custom themes",
+				details: [],
+			};
+		}
+		return {
+			id: "setup.themes",
+			category: "setup",
+			status: "error",
+			summary: "themes: cannot read themes directory",
+			details: [error instanceof Error ? error.message : String(error)],
+		};
+	}
+	const errors: string[] = [];
+	let count = 0;
+	for (const entry of entries) {
+		if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+		if (!entry.name.endsWith(".json")) continue;
+		const themePath = path.join(themesDir, entry.name);
+		try {
+			const json: unknown = await Bun.file(themePath).json();
+			const result = themeJsonSchema(json);
+			if (result instanceof type.errors) {
+				errors.push(`${entry.name}: ${result.summary}`);
+				continue;
+			}
+			count++;
+		} catch (error) {
+			if (isEnoent(error)) continue;
+			errors.push(`${entry.name}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+	if (errors.length > 0) {
+		return {
+			id: "setup.themes",
+			category: "setup",
+			status: "error",
+			summary: `themes: ${errors.length} error${errors.length === 1 ? "" : "s"}`,
+			details: errors,
+		};
+	}
+	return { id: "setup.themes", category: "setup", status: "ok", summary: `themes: ${count} valid`, details: [] };
+}
+
+/** Validate a single extension package: manifest + hook files. */
+async function validateExtensionPackage(pkgRoot: string, errors: string[]): Promise<boolean> {
+	const pkgName = path.basename(pkgRoot);
+	const packageJsonPath = path.join(pkgRoot, "package.json");
+	// Statically validate the manifest — read the JSON ourselves so a
+	// broken parse surfaces as an error (readExtensionManifest swallows
+	// parse errors and returns null). No factory execution, no import.
+	let pkgExists = true;
+	try {
+		await fs.promises.stat(packageJsonPath);
+	} catch (error) {
+		if (isEnoent(error)) {
+			pkgExists = false;
+		} else {
+			errors.push(`${pkgName}: ${error instanceof Error ? error.message : String(error)}`);
+			return false;
+		}
+	}
+	if (pkgExists) {
+		try {
+			await Bun.file(packageJsonPath).json();
+		} catch (error) {
+			if (isEnoent(error)) {
+				pkgExists = false;
+			} else {
+				errors.push(`${pkgName}: broken manifest — ${error instanceof Error ? error.message : String(error)}`);
+				return false;
+			}
+		}
+	}
+	if (pkgExists) {
+		const manifest = await readExtensionManifest(packageJsonPath);
+		if (manifest?.extensions?.length) {
+			for (const extPath of manifest.extensions) {
+				const resolved = path.resolve(pkgRoot, extPath);
+				try {
+					await fs.promises.stat(resolved);
+				} catch (error) {
+					if (isEnoent(error)) {
+						errors.push(`${pkgName}: manifest references missing file "${extPath}"`);
+					} else {
+						errors.push(`${pkgName}: ${error instanceof Error ? error.message : String(error)}`);
+					}
+				}
+			}
+		}
+	}
+	// Validate hook files in this extension's hooks/pre|post dirs.
+	for (const hookType of ["pre", "post"] as const) {
+		const hookDir = path.join(pkgRoot, "hooks", hookType);
+		let hookEntries: fs.Dirent[];
+		try {
+			hookEntries = await fs.promises.readdir(hookDir, { withFileTypes: true });
+		} catch (error) {
+			if (isEnoent(error)) continue;
+			errors.push(`${pkgName}/hooks/${hookType}: ${error instanceof Error ? error.message : String(error)}`);
+			continue;
+		}
+		for (const hookEntry of hookEntries) {
+			if (!hookEntry.isFile() && !hookEntry.isSymbolicLink()) continue;
+			if (hookEntry.name.startsWith(".")) continue;
+			const hookPath = path.join(hookDir, hookEntry.name);
+			const baseName = hookEntry.name.includes(".")
+				? hookEntry.name.slice(0, hookEntry.name.lastIndexOf("."))
+				: hookEntry.name;
+			const tool = baseName === "*" ? "*" : baseName;
+			const hook: Hook = {
+				name: hookEntry.name,
+				path: hookPath,
+				type: hookType,
+				tool,
+				level: "user",
+				_source: { provider: "doctor", path: hookPath, level: "user" } as never,
+			};
+			const validationError = hookCapability.validate?.(hook);
+			if (validationError !== undefined) {
+				errors.push(`${pkgName}/hooks/${hookType}/${hookEntry.name}: ${validationError}`);
+			}
+		}
+	}
+	return true;
+}
+
+/** Scan a hooks/pre|post dir pair under a base dir for hook validation. */
+async function scanTopLevelHooks(base: string, errors: string[]): Promise<void> {
+	for (const hookType of ["pre", "post"] as const) {
+		const hookDir = path.join(base, "hooks", hookType);
+		let hookEntries: fs.Dirent[];
+		try {
+			hookEntries = await fs.promises.readdir(hookDir, { withFileTypes: true });
+		} catch (error) {
+			if (isEnoent(error)) continue;
+			errors.push(`hooks/${hookType}: ${error instanceof Error ? error.message : String(error)}`);
+			continue;
+		}
+		for (const hookEntry of hookEntries) {
+			if (!hookEntry.isFile() && !hookEntry.isSymbolicLink()) continue;
+			if (hookEntry.name.startsWith(".")) continue;
+			const hookPath = path.join(hookDir, hookEntry.name);
+			const baseName = hookEntry.name.includes(".")
+				? hookEntry.name.slice(0, hookEntry.name.lastIndexOf("."))
+				: hookEntry.name;
+			const tool = baseName === "*" ? "*" : baseName;
+			const hook: Hook = {
+				name: hookEntry.name,
+				path: hookPath,
+				type: hookType,
+				tool,
+				level: "user",
+				_source: { provider: "doctor", path: hookPath, level: "user" } as never,
+			};
+			const validationError = hookCapability.validate?.(hook);
+			if (validationError !== undefined) {
+				errors.push(`hooks/${hookType}/${hookEntry.name}: ${validationError}`);
+			}
+		}
+	}
+}
+
+async function collectExtensionsSetupFinding(
+	agentDir: string,
+	projectDir: string,
+	scoped: boolean,
+): Promise<DoctorFinding> {
+	const errors: string[] = [];
+	let count = 0;
+
+	// Build the list of extension package roots to validate.
+	let pkgRoots: string[] = [];
+	if (!scoped) {
+		// Use the same side-effect-free extension-root resolution as the runtime.
+		// listOmpExtensionRoots returns individual extension root paths directly.
+		try {
+			const roots = await listOmpExtensionRoots({ cwd: projectDir, home: os.homedir(), repoRoot: null });
+			pkgRoots = roots.map(root => root.path);
+		} catch (error) {
+			errors.push(`extension roots: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	} else {
+		// Scoped: scan explicit extensions dirs under the scoped dirs.
+		const extDirs = [path.join(agentDir, "extensions"), path.join(projectDir, ".omp", "extensions")];
+		for (const extDir of extDirs) {
+			let entries: fs.Dirent[];
+			try {
+				entries = await fs.promises.readdir(extDir, { withFileTypes: true });
+			} catch (error) {
+				if (isEnoent(error)) continue;
+				errors.push(`${path.basename(extDir)}: ${error instanceof Error ? error.message : String(error)}`);
+				continue;
+			}
+			for (const entry of entries) {
+				if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+				if (entry.name.startsWith(".")) continue;
+				pkgRoots.push(path.join(extDir, entry.name));
+			}
+		}
+	}
+
+	for (const pkgRoot of pkgRoots) {
+		const validated = await validateExtensionPackage(pkgRoot, errors);
+		if (validated) count++;
+	}
+
+	// Also scan top-level hooks/pre|post dirs (not inside an extension package).
+	for (const base of [agentDir, path.join(projectDir, ".omp")]) {
+		await scanTopLevelHooks(base, errors);
+	}
+
+	if (errors.length > 0) {
+		return {
+			id: "setup.extensions",
+			category: "setup",
+			status: "error",
+			summary: `extensions: ${errors.length} error${errors.length === 1 ? "" : "s"}`,
+			details: errors,
+		};
+	}
+	return {
+		id: "setup.extensions",
+		category: "setup",
+		status: "ok",
+		summary: `extensions: ${count} valid`,
+		details: [],
+	};
+}
+
+async function collectSetupFindings(flags: DoctorCommandFlags): Promise<DoctorFinding[]> {
+	const agentDir = flags.agentDir ?? getAgentDir();
+	const projectDir = getProjectDir();
+	return [
+		await collectAgentSetupFinding(agentDir, projectDir, flags.agentDir !== undefined),
+		await collectKeybindingsSetupFinding(agentDir),
+		await collectWatchdogSetupFinding(agentDir, projectDir),
+		await collectSkillsSetupFinding(agentDir, projectDir),
+		await collectThemesSetupFinding(agentDir),
+		await collectExtensionsSetupFinding(agentDir, projectDir, flags.agentDir !== undefined),
+	];
+}
 
 async function collectPluginFindings(flags: DoctorCommandFlags): Promise<DoctorFinding[]> {
 	// Plugin state is root-scoped; a run restricted to --agent-dir must not
@@ -1050,6 +1795,7 @@ export async function collectDoctorReport(flags: DoctorCommandFlags): Promise<Do
 		...(await collectMcpFindings(flags)),
 		...(await collectBrowserFindings()),
 		...(await collectAuthFindings(flags)),
+		...(await collectSetupFindings(flags)),
 		...(await collectPluginFindings(flags)),
 	];
 	const overallStatus: DoctorStatus = findings.some(f => f.status === "error")

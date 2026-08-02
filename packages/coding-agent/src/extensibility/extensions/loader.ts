@@ -386,13 +386,13 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 	};
 }
 
-interface ExtensionManifest {
+export interface ExtensionManifest {
 	extensions?: string[];
 	themes?: string[];
 	skills?: string[];
 }
 
-async function readExtensionManifest(packageJsonPath: string): Promise<ExtensionManifest | null> {
+export async function readExtensionManifest(packageJsonPath: string): Promise<ExtensionManifest | null> {
 	try {
 		const pkg = (await Bun.file(packageJsonPath).json()) as { omp?: ExtensionManifest; pi?: ExtensionManifest };
 		const manifest = pkg.omp ?? pkg.pi;

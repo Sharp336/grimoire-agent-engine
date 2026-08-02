@@ -1115,7 +1115,7 @@ const spinnerFramesSchema = type("unknown").narrow((value): value is SpinnerFram
 	}
 	return false;
 });
-const themeJsonSchema = type({
+export const themeJsonSchema = type({
 	"$schema?": "string",
 	name: "string",
 	"vars?": "Record<string, string | number>",
@@ -1131,7 +1131,6 @@ const themeJsonSchema = type({
 		"spinnerFrames?": spinnerFramesSchema,
 	},
 });
-
 type ThemeJson = typeof themeJsonSchema.infer;
 
 export type ThemeColor =

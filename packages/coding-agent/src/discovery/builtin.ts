@@ -64,7 +64,7 @@ async function getConfigDirs(ctx: LoadContext): Promise<Array<{ dir: string; lev
 	}
 	// Native user config is profile-scoped: getAgentDir() points at the active
 	// profile's agent dir (~/.omp/profiles/<name>/agent), like sessions and MCP.
-	const userDir = await ifNonEmptyDir(getAgentDir());
+	const userDir = await ifNonEmptyDir(ctx.userAgentDir ?? getAgentDir());
 	if (userDir) {
 		result.push({ dir: userDir, level: "user" });
 	}

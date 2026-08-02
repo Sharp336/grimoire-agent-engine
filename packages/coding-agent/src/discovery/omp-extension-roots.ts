@@ -133,7 +133,7 @@ interface ScopeDirs {
 function scopeDirs(ctx: LoadContext): ScopeDirs {
 	return {
 		project: path.join(ctx.cwd, ".omp"),
-		user: getAgentDir(),
+		user: ctx.userAgentDir ?? getAgentDir(),
 	};
 }
 
