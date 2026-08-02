@@ -1653,6 +1653,7 @@ export class Editor implements Component, Focusable {
 				this.#insertCharacter(printableText);
 			}
 		}
+		if (this.#inputMode === "vim" && this.#vim.mode === "normal") this.#vim.clampNormalCursor();
 	}
 
 	/** Cached per-line measurement: exact visible width now, wrap chunks on demand. */
@@ -1901,6 +1902,9 @@ export class Editor implements Component, Focusable {
 	}
 	submit(): void {
 		if (this.disableSubmit) return;
+		if (this.#inputMode === "vim" && this.#vim.mode === "insert") this.#vim.enterNormalMode();
+		this.#cancelAutocomplete(true);
+		this.#jumpMode = null;
 		this.#submitValue();
 	}
 

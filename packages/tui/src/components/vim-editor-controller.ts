@@ -523,8 +523,8 @@ export class VimEditorController {
 					pending.textObject === "around",
 				);
 				this.#deleteRange(range.start, range.end, enterInsert);
-			} else if (char === "p" && pending.textObject === "around") {
-				this.#deleteParagraphs(count, enterInsert);
+			} else if (char === "p") {
+				this.#deleteParagraphs(count, enterInsert, pending.textObject === "around");
 			}
 			return true;
 		}
@@ -896,8 +896,8 @@ export class VimEditorController {
 		this.#deleteRange(this.#absoluteCursor(), this.#lineEndAbsolute(targetLine), enterInsert);
 	}
 
-	#deleteParagraphs(count: number, enterInsert: boolean): void {
-		const range = this.#paragraphLineRange(count, true);
+	#deleteParagraphs(count: number, enterInsert: boolean, around: boolean): void {
+		const range = this.#paragraphLineRange(count, around);
 		this.#deleteLineRange(range.startLine, range.endLine, enterInsert);
 	}
 

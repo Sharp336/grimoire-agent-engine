@@ -226,6 +226,20 @@ describe("Editor Vim input mode", () => {
 		expect(last.getText()).toBe("one\ntwo");
 	});
 
+	it("deletes and changes inner paragraphs without consuming surrounding blank lines", () => {
+		const deleted = createVimEditor();
+		deleted.setText("one\ntwo\n\nthree");
+		typeText(deleted, "ggdip");
+		expect(deleted.getText()).toBe("\nthree");
+
+		const changed = createVimEditor();
+		changed.setText("one\ntwo\n\nthree");
+		typeText(changed, "ggcipreplacement\u001b");
+		expect(changed.getText()).toBe("replacement\n\nthree");
+		changed.handleInput("u");
+		expect(changed.getText()).toBe("one\ntwo\n\nthree");
+	});
+
 	it("changes a paragraph linewise and groups replacement undo", () => {
 		const editor = createVimEditor();
 		editor.setText("one\n\ntwo\n\nthree");
@@ -377,6 +391,21 @@ describe("Editor Vim input mode", () => {
 	});
 
 	it.each([
+		{ name: "Right Arrow", key: "\x1b[C" },
+		{ name: "End", key: "\x1b[F" },
+		{ name: "Ctrl-E", key: "\x05" },
+	])("keeps the normal cursor on a grapheme after $name fallback", ({ key }) => {
+		const editor = createVimEditor();
+		editor.setText("abc");
+		editor.handleInput("$");
+
+		editor.handleInput(key);
+		editor.handleInput("x");
+
+		expect(editor.getText()).toBe("ab");
+	});
+
+	it.each([
 		{ name: "Right Arrow", text: "abc", start: "0", key: "\x1b[C", expected: "c" },
 		{ name: "Left Arrow", text: "abc", start: "$", key: "\x1b[D", expected: "a" },
 		{ name: "Down Arrow", text: "a\nb", start: "gg", key: "\x1b[B", expected: "" },
@@ -521,6 +550,21 @@ describe("Editor Vim input mode", () => {
 		expect(onSubmit).toHaveBeenCalledWith("ship it");
 		expect(editor.getText()).toBe("");
 		expect(editor.getVimMode()).toBe("normal");
+	});
+
+	it("finishes the insert session before a direct submit", () => {
+		const editor = createVimEditor();
+		const onSubmit = vi.fn();
+		editor.onSubmit = onSubmit;
+		typeText(editor, "ifirst");
+
+		editor.submit();
+
+		expect(onSubmit).toHaveBeenCalledWith("first");
+		expect(editor.getVimMode()).toBe("normal");
+		typeText(editor, "inext\u001b");
+		editor.handleInput("u");
+		expect(editor.getText()).toBe("");
 	});
 
 	it("accepts bracketed paste only in insert mode and groups it with insert undo", () => {
