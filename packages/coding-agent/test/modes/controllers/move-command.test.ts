@@ -99,13 +99,18 @@ describe("CommandController /move", () => {
 	});
 });
 
-function createSwitchContext(sourceDir: string, newSession: (options?: unknown) => Promise<boolean>) {
+function createSwitchContext(
+	sourceDir: string,
+	newSession: (options?: unknown) => Promise<boolean>,
+	fork: (() => Promise<boolean>) | undefined = undefined,
+) {
 	const base = createMoveContext(sourceDir);
 	const session = {
 		isStreaming: false,
 		isCompacting: false,
 		moveSession: base.moveSession,
 		newSession,
+		fork: fork ?? vi.fn(async () => true),
 	};
 	const sessionManager = {
 		getCwd: () => sourceDir,
@@ -114,12 +119,14 @@ function createSwitchContext(sourceDir: string, newSession: (options?: unknown) 
 		dropSession: vi.fn(async () => {}),
 	};
 	const statusLine = { invalidate: vi.fn(), resetActiveTime: vi.fn() };
+	const statusContainer = { disposeChildren: vi.fn() };
 	// Object.assign keeps the existing harness context type while overriding the
 	// members the new-session flow touches (no re-cast needed).
 	Object.assign(base.ctx, {
 		session,
 		sessionManager,
 		statusLine,
+		statusContainer,
 		clearTransientSessionUi: vi.fn(),
 		resetObserverRegistry: vi.fn(),
 		resetTranscript: vi.fn(),
@@ -172,6 +179,52 @@ describe("CommandController /clear and /drop side disposal", () => {
 			await drop;
 
 			expect(disposeSideConversation).toHaveBeenCalledTimes(1);
+		} finally {
+			await fs.rm(sourceDir, { recursive: true, force: true });
+		}
+	});
+
+	it("disposes the side only after a fork commits", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-switch-source-"));
+		try {
+			const entered = Promise.withResolvers<void>();
+			const gate = Promise.withResolvers<boolean>();
+			const forkStub = vi.fn(() => {
+				entered.resolve();
+				return gate.promise;
+			});
+			const { ctx, disposeSideConversation } = createSwitchContext(
+				sourceDir,
+				vi.fn(async () => true),
+				forkStub,
+			);
+			const controller = new CommandController(ctx);
+
+			const fork = controller.handleForkCommand();
+			await entered.promise;
+			expect(disposeSideConversation).not.toHaveBeenCalled();
+
+			gate.resolve(true);
+			await fork;
+			expect(disposeSideConversation).toHaveBeenCalledTimes(1);
+		} finally {
+			await fs.rm(sourceDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps the side when a fork is refused or cancelled", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-switch-source-"));
+		try {
+			const { ctx, disposeSideConversation } = createSwitchContext(
+				sourceDir,
+				vi.fn(async () => true),
+				vi.fn(async () => false),
+			);
+			const controller = new CommandController(ctx);
+
+			await controller.handleForkCommand();
+
+			expect(disposeSideConversation).not.toHaveBeenCalled();
 		} finally {
 			await fs.rm(sourceDir, { recursive: true, force: true });
 		}

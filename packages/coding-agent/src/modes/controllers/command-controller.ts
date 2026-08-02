@@ -989,6 +989,10 @@ export class CommandController {
 			return;
 		}
 
+		// The fork committed (streaming refusal and session_before_switch cancel
+		// both return above) — now discard the side conversation.
+		await this.ctx.disposeSideConversation();
+
 		this.ctx.statusLine.invalidate();
 		this.ctx.ui.requestRender();
 

@@ -4524,7 +4524,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	async handleForkCommand(): Promise<void> {
 		if (this.#vibeSessionTransitionBlocked()) return;
 		this.#btwController.dispose();
-		await this.#sideController.dispose();
 		this.#omfgController.dispose();
 		await this.#commandController.handleForkCommand();
 	}
