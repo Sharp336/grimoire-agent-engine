@@ -128,7 +128,7 @@ export class VimEditorController {
 		this.#beginInsertUndo();
 	}
 
-	preparePaste(): void {
+	prepareInsertMutation(): void {
 		if (!this.#insertUndoActive) this.#beginInsertUndo();
 	}
 
