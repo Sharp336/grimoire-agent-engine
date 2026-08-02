@@ -430,8 +430,15 @@ export class FileSessionStorage implements SessionStorage {
 	 * Artifacts are stored in a sibling directory with the same name minus .jsonl extension.
 	 */
 	async deleteSessionWithArtifacts(sessionPath: string): Promise<void> {
-		// Delete the session file itself
-		await this.unlink(sessionPath);
+		// Delete the session file itself. Tolerate ENOENT so a prior partial
+		// delete still gets a chance to remove the artifacts directory.
+		try {
+			await this.unlink(sessionPath);
+		} catch (err) {
+			if (!isEnoent(err)) {
+				throw toError(err);
+			}
+		}
 
 		// Compute artifacts directory: /path/to/session.jsonl -> /path/to/session
 		const artifactsDir = sessionPath.slice(0, -6);

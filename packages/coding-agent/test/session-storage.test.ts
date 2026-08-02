@@ -169,6 +169,20 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 		expect(fs.existsSync(artifactsDir)).toBe(false);
 	});
 
+	it("removes artifact directory when the session file is already gone", async () => {
+		const sessionPath = path.join(tempDir, "orphan-artifacts.jsonl");
+		const artifactsDir = sessionPath.slice(0, -6);
+		await fsp.mkdir(artifactsDir, { recursive: true });
+		await Bun.write(path.join(artifactsDir, "artifact.txt"), "artifact payload");
+
+		expect(fs.existsSync(sessionPath)).toBe(false);
+		expect(fs.existsSync(artifactsDir)).toBe(true);
+
+		await expect(storage.deleteSessionWithArtifacts(sessionPath)).resolves.toBeUndefined();
+		expect(fs.existsSync(sessionPath)).toBe(false);
+		expect(fs.existsSync(artifactsDir)).toBe(false);
+	});
+
 	it("throws when artifact cleanup fails after the session file is deleted", async () => {
 		const sessionPath = await createSessionFile("cleanup-failure");
 		const artifactsDir = sessionPath.slice(0, -6);
