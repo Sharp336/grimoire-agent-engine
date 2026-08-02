@@ -329,7 +329,10 @@ function getModelDefinedEfforts<TApi extends Api>(
 		// impliesMandatoryReasoning), and the default effort is `max`.
 		return LOW_HIGH_MAX_REASONING_EFFORTS;
 	}
-	if (isGlm52ReasoningEffortModelId(spec.id)) {
+	const isFriendliHost = modelMatchesHost(spec, "friendli");
+	// Friendli serves GLM under uppercase ids (`zai-org/GLM-5.2`); the
+	// caseInsensitive parser is scoped to this code path only.
+	if (isGlm52ReasoningEffortModelId(isFriendliHost ? spec.id.toLowerCase() : spec.id)) {
 		// GLM-5.2's reasoning_effort dialect is host-specific (verified against
 		// live endpoints):
 		//   - Z.ai/Zhipu ("zai" dialect) expose only high/max ("none" is the
@@ -349,7 +352,7 @@ function getModelDefinedEfforts<TApi extends Api>(
 			isAnthropicMessagesGlm52ReasoningEffortModel(spec) ||
 			isOllamaCloudGlm52ReasoningEffortModel(spec) ||
 			spec.provider === "baseten" ||
-			spec.provider === "friendli"
+			isFriendliHost
 		) {
 			return HIGH_MAX_REASONING_EFFORTS;
 		}

@@ -50030,7 +50030,34 @@
 			"supportsComputerUse": false
 		}
 	},
-	"friendli": {},
+	"friendli": {
+		"zai-org/GLM-5.2": {
+			"id": "zai-org/GLM-5.2",
+			"name": "GLM 5.2",
+			"api": "openai-completions",
+			"provider": "friendli",
+			"baseUrl": "https://api.friendli.ai/serverless/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.6,
+				"output": 2.2,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 32768,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"high",
+					"max"
+				]
+			}
+		}
+	},
 	"github-copilot": {
 		"claude-fable-5": {
 			"id": "claude-fable-5",

@@ -612,7 +612,8 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		// `reasoning_effort` alongside the template kwarg — otherwise selecting high vs max
 		// produces identical wire bodies. NIM's strict schema rejects top-level
 		// `reasoning_effort`, so the flag is gated to Friendli GLM-5.2 reasoning models only.
-		friendliTemplateReasoningEffort: isFriendli && isGlm52ReasoningEffortModelId(spec.id) && Boolean(spec.reasoning),
+		friendliTemplateReasoningEffort:
+			isFriendli && isGlm52ReasoningEffortModelId(spec.id.toLowerCase()) && Boolean(spec.reasoning),
 		requiresAssistantContentForToolCalls: isKimiModel || isDirectDeepseekReasoning,
 		cacheControlFormat: isOpenRouter && spec.id.startsWith("anthropic/") ? "anthropic" : undefined,
 		supportsPromptCacheBreakpoints,

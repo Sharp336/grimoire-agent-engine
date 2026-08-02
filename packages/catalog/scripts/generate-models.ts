@@ -39,6 +39,7 @@ import {
 	buildXaiOAuthStaticSeed,
 	clampFireworksKimiMaxTokens,
 	clampKimiK27CodeMaxTokens,
+	FRIENDLI_STATIC_MODELS,
 	fetchWellKnownModels,
 	GMI_CLOUD_STATIC_MODELS,
 	isFireworksKimiK2ModelId,
@@ -598,6 +599,15 @@ async function generateModels() {
 	// at boot. If live `/v1/models` discovery succeeds, it is authoritative.
 	if (!authoritativeCatalogProviders.has("gmi-cloud")) {
 		allModels.push(...GMI_CLOUD_STATIC_MODELS);
+	}
+
+	// Seed the Friendli default model so a fresh install (and a regen without a
+	// `FRIENDLI_API_KEY`) still resolves the descriptor's `defaultModel`
+	// synchronously at boot. The empty `friendli` slice is also load-bearing for
+	// `createBundledReferenceMap<"openai-completions">("friendli")` type
+	// resolution, so this seed ensures it survives `bun run gen:models`.
+	if (!authoritativeCatalogProviders.has("friendli")) {
+		allModels.push(...FRIENDLI_STATIC_MODELS);
 	}
 	// Seed the GitLab Duo Agent fallback model so a fresh install (no credentialed
 	// dynamic discovery/cache yet) still surfaces the provider's default model in the

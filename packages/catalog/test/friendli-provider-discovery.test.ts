@@ -21,7 +21,7 @@ import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
 describe("Friendli provider discovery", () => {
 	test("maps /v1/models metadata to resolved model specs", async () => {
-		const fetchMock: FetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
+		const fetchMock: FetchImpl = async (_input: string | URL | Request, _init?: RequestInit) => {
 			return new Response(
 				JSON.stringify({
 					data: [

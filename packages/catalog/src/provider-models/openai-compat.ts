@@ -2280,6 +2280,29 @@ export function fireworksModelManagerOptions(
 // 7.55 FriendliAI
 // ---------------------------------------------------------------------------
 
+/**
+ * Bundled seed for FriendliAI. Generation has no `FRIENDLI_API_KEY`, so a regen
+ * without credentials would leave the provider slice empty and the declared
+ * `defaultModel` unresolvable on a fresh install before the async runtime
+ * discovery fires. Live `/v1/models` discovery is authoritative for the model
+ * ID set and overrides context/max-token limits.
+ */
+export const FRIENDLI_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	{
+		id: "zai-org/GLM-5.2",
+		name: "GLM-5.2",
+		api: "openai-completions",
+		provider: "friendli",
+		baseUrl: "https://api.friendli.ai/serverless/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0.6, output: 2.2, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1048576,
+		maxTokens: 32768,
+		thinking: { mode: "effort", efforts: [Effort.High, Effort.Max] },
+	},
+];
+
 export interface FriendliModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
@@ -2506,7 +2529,7 @@ function mapWaferModel(
 		cost,
 		contextWindow,
 		maxTokens,
-		...(supportsTools !== undefined ? { supportsTools } : {}),
+		...(supportsTools === false ? { supportsTools } : {}),
 	};
 	if (reasoning) {
 		// Wafer's `wafer.provider` envelope tells us which upstream backend serves
