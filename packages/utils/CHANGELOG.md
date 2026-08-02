@@ -5,6 +5,7 @@
 ### Added
 
 - Added `@oh-my-pi/pi-utils/sqlite` with `isSqliteCorruptError`, the shared classifier for SQLite's unrecoverable-file result codes (`SQLITE_CORRUPT` family plus `SQLITE_NOTADB`). ([#7296](https://github.com/can1357/oh-my-pi/issues/7296))
+- Added `isSqliteBusyError` to `@oh-my-pi/pi-utils/sqlite`, co-locating the busy-family classifier (`SQLITE_BUSY`, `SQLITE_BUSY_RECOVERY`, `SQLITE_BUSY_SNAPSHOT`, `SQLITE_BUSY_TIMEOUT`) with its corrupt counterpart; moved from `@oh-my-pi/pi-ai`.
 
 ## [17.2.1] - 2026-07-30
 

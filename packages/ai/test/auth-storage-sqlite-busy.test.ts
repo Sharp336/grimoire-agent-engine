@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { isSqliteBusyError, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import { SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { removeWithRetries } from "../../utils/src/temp";
 
 interface SqliteBusyShape extends Error {
@@ -27,24 +27,6 @@ function makeBusyError(code: string, errno: number): SqliteBusyShape {
 	err.errno = errno;
 	return err;
 }
-
-describe("isSqliteBusyError", () => {
-	test("recognizes every documented BUSY family code", () => {
-		expect(isSqliteBusyError(makeBusyError("SQLITE_BUSY", 5))).toBe(true);
-		expect(isSqliteBusyError(makeBusyError("SQLITE_BUSY_RECOVERY", 261))).toBe(true);
-		expect(isSqliteBusyError(makeBusyError("SQLITE_BUSY_SNAPSHOT", 517))).toBe(true);
-		expect(isSqliteBusyError(makeBusyError("SQLITE_BUSY_TIMEOUT", 773))).toBe(true);
-	});
-
-	test("rejects non-BUSY codes and non-error values", () => {
-		expect(isSqliteBusyError(makeBusyError("SQLITE_LOCKED", 6))).toBe(false);
-		expect(isSqliteBusyError(makeBusyError("SQLITE_CORRUPT", 11))).toBe(false);
-		expect(isSqliteBusyError(new Error("plain"))).toBe(false);
-		expect(isSqliteBusyError(null)).toBe(false);
-		expect(isSqliteBusyError(undefined)).toBe(false);
-		expect(isSqliteBusyError("SQLITE_BUSY")).toBe(false);
-	});
-});
 
 describe("SqliteAuthCredentialStore.open SQLITE_BUSY handling", () => {
 	let tempDir = "";
