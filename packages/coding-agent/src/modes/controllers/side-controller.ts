@@ -339,8 +339,8 @@ export class SideController {
 			// Storage of the CURRENT parent manager. Documented limitation: a side
 			// inherited from a different-backend session (crashed previous process,
 			// or a backend switch while the side was live) may not be deletable
-			// through this backend and lingers as inert files until the
-			// filesystem-bound persisted-scan cleanup.
+			// through this backend; such files stay inert on disk until the user
+			// removes them (the persisted scan skips side files without deleting).
 			await SessionManager.removeSessionFiles(sessionFile, this.ctx.sessionManager.getStorage());
 			return true;
 		} catch (err) {
