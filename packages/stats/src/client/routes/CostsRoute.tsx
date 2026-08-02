@@ -16,7 +16,7 @@ import {
 import { formatCost, useFormatCost } from "../data/formatters";
 import { useResource } from "../data/useResource";
 import { buildCostSummary } from "../data/view-models";
-import { useLocale, useTranslation } from "../i18n";
+import { useTranslation } from "../i18n";
 import type { CostTimeSeriesPoint, TimeRange } from "../types";
 import { AsyncBoundary, Panel, SegmentedControl } from "../ui";
 
@@ -123,8 +123,7 @@ function makeBarLabelPlugin(color: string, locale: "en" | "zh"): Plugin<"bar"> {
 }
 
 function CostTrendPanel({ costSeries }: { costSeries: CostTimeSeriesPoint[] }) {
-	const { t } = useTranslation();
-	const { locale } = useLocale();
+	const { t, locale } = useTranslation();
 	const formatCost = useFormatCost();
 	const [byModel, setByModel] = useState(false);
 	const theme = useSystemTheme();

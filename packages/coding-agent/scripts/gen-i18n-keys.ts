@@ -160,12 +160,22 @@ function generateTranslationFiles() {
 	fs.writeFileSync(enFile, JSON.stringify(allTranslations, null, 2));
 	console.log(`Generated: ${enFile}`);
 
-	const zhTranslations: Record<string, string> = {};
-	for (const key of Object.keys(allTranslations)) {
-		zhTranslations[key] = "";
+	const zhFile = path.join(LAN_DIR, "zh-commands.json");
+
+	// Read existing translations to preserve non-empty values
+	let existingZh: Record<string, string> = {};
+	try {
+		existingZh = JSON.parse(fs.readFileSync(zhFile, "utf-8"));
+	} catch {
+		/* file doesn't exist yet */
 	}
 
-	const zhFile = path.join(LAN_DIR, "zh-commands.json");
+	// Merge: preserve existing non-empty values, use empty for new keys
+	const zhTranslations: Record<string, string> = {};
+	for (const key of Object.keys(allTranslations)) {
+		zhTranslations[key] = existingZh[key] || "";
+	}
+
 	fs.writeFileSync(zhFile, JSON.stringify(zhTranslations, null, 2));
 	console.log(`Generated: ${zhFile}`);
 

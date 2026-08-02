@@ -83,12 +83,15 @@ class I18nManager {
 
 	/**
 	 * 从嵌入式 bundle 加载翻译（同步，立即可用）
+	 * @param lang 语言代码
+	 * @param target 目标字典，默认为 this.#dict
 	 */
-	#loadEmbedded(lang: string): void {
+	#loadEmbedded(lang: string, target?: TranslationFile): void {
+		const dict = target ?? this.#dict;
 		const prefix = `${lang}-`;
 		for (const [key, data] of Object.entries(EMBEDDED_TRANSLATIONS)) {
 			if (key !== lang && !key.startsWith(prefix)) continue;
-			this.#mergeTranslations(this.#dict, data);
+			this.#mergeTranslations(dict, data);
 		}
 	}
 
@@ -127,47 +130,23 @@ class I18nManager {
 	 * 初始化 i18n 系统（异步补充：可加载用户覆盖 + config.yml 语言检测）
 	 */
 	async init(): Promise<void> {
-		if (this.#initialized) {
-			// 构造函数已从嵌入式数据同步初始化；异步检查 config.yml 覆盖
-			// 但如果 OMP_LANG 环境变量已设置，跳过 config 读取（env 优先级高于 config）
-			const ompLangSet = process.env.OMP_LANG === "zh" || process.env.OMP_LANG === "en";
-			if (!ompLangSet) {
-				const configLang = await this.#detectLanguageFromConfig();
-				if (configLang && configLang !== this.#lang) {
-					this.#lang = configLang;
-					this.#dict = {};
-					this.#loadEmbedded(configLang);
-				}
+		// 构造函数已从嵌入式数据同步初始化；异步检查 config.yml 覆盖
+		// 但如果 OMP_LANG 环境变量已设置，跳过 config 读取（env 优先级高于 config）
+		const ompLangSet = process.env.OMP_LANG === "zh" || process.env.OMP_LANG === "en";
+		if (!ompLangSet) {
+			const configLang = await this.#detectLanguageFromConfig();
+			if (configLang && configLang !== this.#lang) {
+				this.#lang = configLang;
+				this.#dict = {};
+				this.#loadEmbedded(configLang);
 			}
-			// 加载用户目录覆盖
-			// 调用所有注册的缓存失效回调（如 settings-defs、welcome tips）
-			for (const invalidator of cacheInvalidators) {
-				invalidator();
-			}
-			return;
 		}
-
-		this.#lang = await this.#detectLanguage();
+		// 加载用户目录覆盖（从 ~/.omp/lang/ 加载用户自定义翻译）
 		await this.#loadTranslation(this.#lang, this.#dict);
-		this.#initialized = true;
-		// 调用所有注册的缓存失效回调
+		// 调用所有注册的缓存失效回调（如 settings-defs、welcome tips）
 		for (const invalidator of cacheInvalidators) {
 			invalidator();
 		}
-	}
-
-	/**
-	 * 检测语言设置
-	 * 优先读取 OMP_LANG 环境变量，其次从 config.yml 读取 i18n.language
-	 */
-	async #detectLanguage(): Promise<string> {
-		// 环境变量优先（仅接受合法值）
-		if (process.env.OMP_LANG === "zh" || process.env.OMP_LANG === "en") {
-			return process.env.OMP_LANG;
-		}
-
-		const configLang = await this.#detectLanguageFromConfig();
-		return configLang ?? "en";
 	}
 
 	/**
@@ -228,8 +207,8 @@ class I18nManager {
 	async #loadTranslationFromDir(lang: string, dir: string, target: TranslationFile): Promise<void> {
 		// 优先从嵌入的翻译表加载（编译到二进制中的）
 		if (dir === BUNDLED_LAN_DIR) {
-			const loaded = this.#loadEmbeddedTranslations(lang, target);
-			if (loaded) return;
+			this.#loadEmbedded(lang, target);
+			return;
 		}
 
 		try {
@@ -252,19 +231,6 @@ class I18nManager {
 				logger.warn(`Failed to read translation directory: ${dir}`, { error });
 			}
 		}
-	}
-
-	/** 从嵌入的翻译表中加载指定语言的文件 */
-	#loadEmbeddedTranslations(lang: string, target: TranslationFile): boolean {
-		let found = false;
-		const prefix = `${lang}-`;
-		for (const [name, content] of Object.entries(EMBEDDED_TRANSLATIONS)) {
-			if (name === lang || name.startsWith(prefix)) {
-				this.#mergeTranslations(target, content as TranslationFile);
-				found = true;
-			}
-		}
-		return found;
 	}
 
 	/**
@@ -352,6 +318,10 @@ class I18nManager {
 	 * 设置语言（用于运行时切换，需要重新加载）
 	 */
 	async setLanguage(lang: string): Promise<void> {
+		// 验证语言参数（仅支持 en 和 zh）
+		if (lang !== "en" && lang !== "zh") {
+			logger.warn(`Unsupported language: ${lang}. Supported languages are: en, zh`);
+		}
 		this.#lang = lang;
 		this.#dict = {};
 		this.#initialized = false;

@@ -1,6 +1,6 @@
 import { Menu } from "lucide-react";
 import { useEffect } from "react";
-import { getLocale, setLocale, useTranslation } from "../i18n";
+import { setLocale, useTranslation } from "../i18n";
 import type { TimeRange } from "../types";
 import { refreshExchangeRate, useExchangeRate, useExchangeRateTimestamp } from "../useExchangeRate";
 import { RangeControl } from "./RangeControl";
@@ -30,8 +30,7 @@ export function TopBar({
 	onMenuToggle,
 	className = "",
 }: TopBarProps) {
-	const { t } = useTranslation();
-	const locale = getLocale();
+	const { t, locale } = useTranslation();
 	const exchangeRate = useExchangeRate();
 	const rateTimestamp = useExchangeRateTimestamp();
 
@@ -77,7 +76,7 @@ export function TopBar({
 
 				<RangeControl value={range} onChange={onRangeChange} />
 				<select
-					value={getLocale()}
+					value={locale}
 					onChange={e => setLocale(e.target.value as "en" | "zh")}
 					className="stats-language-select"
 					aria-label={t("topBar.languageToggle")}

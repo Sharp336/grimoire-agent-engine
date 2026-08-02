@@ -990,7 +990,7 @@ export function t(key: string, params?: TranslationParams): string {
 
 	let result = template;
 	for (const [paramKey, paramValue] of Object.entries(params)) {
-		result = result.replace(new RegExp(`\\{${paramKey}\\}`, "g"), String(paramValue));
+		result = result.split(`{${paramKey}}`).join(String(paramValue));
 	}
 	return result;
 }
@@ -1000,16 +1000,8 @@ export function useTranslation() {
 	const locale = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 
 	const translate = useCallback(
-		(key: string, params?: TranslationParams) => {
-			const template = translations[locale]?.[key] ?? translations.en[key] ?? key;
-			if (!params) return template;
-			let result = template;
-			for (const [paramKey, paramValue] of Object.entries(params)) {
-				result = result.replace(new RegExp(`\\{${paramKey}\\}`, "g"), String(paramValue));
-			}
-			return result;
-		},
-		[locale],
+		(key: string, params?: TranslationParams) => t(key, params),
+		[],
 	);
 
 	const changeLocale = useCallback((newLocale: Locale) => setLocale(newLocale), []);

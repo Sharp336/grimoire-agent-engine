@@ -5,6 +5,8 @@
  * 使用免费公开 API，缓存 24 小时。
  */
 
+// node:fs sync API needed because getExchangeRateSync() must work in non-async contexts.
+// Bun.file().text() is async-only; no sync equivalent exists in Bun.
 import * as fsSync from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -49,6 +51,10 @@ export function initCache(): void {
 	ensureCacheInitialized();
 }
 
+/**
+ * Fetch latest USD→CNY rate from API.
+ * NOTE: This is zh-specific — hardcoded to CNY.
+ */
 async function fetchRate(): Promise<number> {
 	const resp = await fetch(API_URL, { signal: AbortSignal.timeout(5_000) });
 	if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -158,16 +164,19 @@ export function getExchangeRateSync(): number {
 }
 
 /**
- * 判断当前 locale 是否需要汇率转换（非 en 时启用）
+ * 判断当前 locale 是否需要汇率转换（仅中文启用）。
+ * NOTE: Currently zh-specific — returns CNY conversion. When adding other
+ * languages, this check must be updated to match the target language(s).
  */
 export function shouldConvertCurrency(): boolean {
 	const lang = getLanguage();
-	return lang !== "en";
+	return lang === "zh";
 }
 
 /**
  * 格式化成本，locale 为中文时附加 CNY 换算
  * @returns [usd 字符串，cny 字符串 | null]
+ * NOTE: CNY formatting (¥) is zh-specific.
  */
 export async function formatCostWithExchange(usdAmount: number): Promise<[string, string | null]> {
 	const usd = formatUSDFormat(usdAmount);
@@ -182,6 +191,7 @@ export async function formatCostWithExchange(usdAmount: number): Promise<[string
 /**
  * Sync cost formatter. Returns "$X.XX" for en locale, "$X.XX (≈¥Y.YY)" for zh.
  * Honors user-configured exchange rate via getExchangeRateSync().
+ * NOTE: CNY formatting (¥) is zh-specific.
  */
 
 export function formatCost(usdAmount: number): string {
