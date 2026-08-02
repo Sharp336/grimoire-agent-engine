@@ -21,6 +21,8 @@ import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../tools/hub";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
+import { runClaudeCodeSubprocess } from "./claude-code-runtime";
+import { type ClaudeCodeSelection, resolveClaudeCodeSelection } from "./claude-code-selector";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
 import { type ExecutorOptions, runSubprocess } from "./executor";
 import {
@@ -123,6 +125,8 @@ export interface EffectiveSubagentPolicy {
 	agent: AgentDefinition;
 	effectiveAgent: AgentDefinition;
 	modelOverride?: string | string[];
+	/** Set when the selector set names the Claude runtime instead of Pi. */
+	claudeCode?: ClaudeCodeSelection;
 	parentActiveModelPattern?: string;
 	schema: StructuredSubagentSchemaResolution;
 	planMode: boolean;
@@ -285,6 +289,25 @@ export async function resolveEffectiveSubagentPolicy(
 		activeModelPattern: parentActiveModelPattern,
 		fallbackModelPattern: request.session.getModelString?.(),
 	});
+	// Runtime selection reads the raw selector set, before Pi model resolution:
+	// `claude-code` is a task-runtime namespace, not a provider.
+	let claudeCode: ClaudeCodeSelection | undefined;
+	try {
+		claudeCode = resolveClaudeCodeSelection(modelOverride);
+	} catch (error) {
+		throw new StructuredSubagentError("preflight", error instanceof Error ? error.message : String(error), {
+			cause: error,
+		});
+	}
+	if (request.invocationKind !== "task" && claudeCode) {
+		throw new StructuredSubagentError("preflight", "The Claude Code runtime is available only for task invocations.");
+	}
+	if (planMode && claudeCode) {
+		throw new StructuredSubagentError(
+			"preflight",
+			"Plan mode is unavailable for subagents selected with a claude-code/ model.",
+		);
+	}
 	const isolationMode = request.session.settings.get("task.isolation.mode");
 	const isIsolated = request.isolation?.requested === true;
 	if (isIsolated && isolationMode === "none") {
@@ -299,6 +322,7 @@ export async function resolveEffectiveSubagentPolicy(
 		agent,
 		effectiveAgent,
 		modelOverride,
+		claudeCode,
 		parentActiveModelPattern,
 		schema,
 		planMode,
@@ -419,6 +443,7 @@ function buildExecutorOptions(
 		authStorage: session.authStorage,
 		modelRegistry: session.modelRegistry,
 		settings: session.settings,
+		asyncJobManager: session.asyncJobManager,
 		mcpManager: enableMCP ? (session.mcpManager ?? MCPManager.instance()) : undefined,
 		enableMCP,
 		contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
@@ -565,10 +590,16 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				);
 			}
 		}
+		const claudeCode = policy.claudeCode;
+		const runSubagent = claudeCode
+			? (options: ExecutorOptions) =>
+					runClaudeCodeSubprocess({ options, model: claudeCode.model, effort: claudeCode.effort })
+			: runSubprocess;
 		const result = !isolationContext
-			? await runSubprocess(baseOptions)
+			? await runSubagent(baseOptions)
 			: await runIsolatedSubprocess({
 					baseOptions,
+					runSubagent,
 					context: isolationContext,
 					preferredBackend: parseIsolationMode(request.session.settings.get("task.isolation.mode")),
 					agentId: id,
