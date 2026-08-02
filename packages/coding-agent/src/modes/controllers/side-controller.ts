@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import sideBoundaryPrompt from "../../prompts/system/side-boundary.md" with { type: "text" };
-import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
+import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import * as sdk from "../../sdk";
 import type { AgentSession } from "../../session/agent-session";
 import { SIDE_BOUNDARY_MESSAGE_TYPE } from "../../session/messages";
@@ -111,6 +111,7 @@ export class SideController {
 		await ctx.sessionManager.flush();
 
 		let side: AgentSession | undefined;
+		let capturedRef: AgentRef | undefined;
 		const reinject = () =>
 			side?.agent.appendMessage({
 				role: "developer",
@@ -153,6 +154,7 @@ export class SideController {
 				localProtocolOptions,
 			});
 			side = created.session;
+			capturedRef = AgentRegistry.global().get(SIDE_AGENT_ID);
 			const uiContext = this.ctx.getToolUIContext();
 			if (uiContext) created.setToolUIContext(uiContext, true);
 
@@ -187,6 +189,17 @@ export class SideController {
 			// Focus, then overwrite the status string focusAgent emits (it is
 			// written for viewing a subagent and is wrong for a side conversation).
 			await ctx.focusAgentSession(SIDE_AGENT_ID);
+			// Revalidate: an external generation may have replaced ours during
+			// the focus await (a concurrent dispose + create, or a platform
+			// lifecycle action). If so, do not submit against the stale captured
+			// session — surface the busy error and clean up only the captured
+			// generation, never the replacement.
+			if (AgentRegistry.global().get(SIDE_AGENT_ID)?.session !== side) {
+				ctx.showError("Side conversation is still starting — try again in a moment");
+				await this.#cleanupCapturedGeneration(side, capturedRef, sideFile);
+				await ctx.unfocusSession().catch(() => {});
+				return undefined;
+			}
 			ctx.showStatus(SIDE_STATUS);
 
 			// Return a submit closure so the question is asked outside the
@@ -197,9 +210,12 @@ export class SideController {
 			return question ? () => this.#submitQuestion(sideSession, question) : undefined;
 		} catch (error) {
 			if (side) {
-				// A session was constructed — dispose it fully (disposes the
-				// session, removes files).
-				await this.#disposeImpl();
+				// A session was constructed — clean up the CAPTURED generation
+				// only, not whatever owns the id now. An external replacement
+				// may have won the slot during the failed operation; routing
+				// through #disposeImpl would destroy the replacement while
+				// leaking the captured session and its file.
+				await this.#cleanupCapturedGeneration(side, capturedRef, sideFile);
 				await ctx.unfocusSession().catch(() => {});
 				ctx.showError(error instanceof Error ? error.message : String(error));
 				return undefined;
@@ -348,6 +364,33 @@ export class SideController {
 			this.ctx.showError(`${failureMessage}: ${shortenPath(sessionFile)}`);
 			return false;
 		}
+	}
+
+	/**
+	 * Clean up the CAPTURED side generation only: dispose its session directly,
+	 * generation-checked unregister its ref, and delete its file. Never touches
+	 * a replacement generation that won the id — `unregister` is generation-
+	 * checked (returns false when `capturedRef` is no longer the registered
+	 * ref), and `sideFile` is unique per generation. Used by both the create-
+	 * failure catch and the post-focus revalidation, so neither routes through
+	 * the id-wide `#disposeImpl` loop that could destroy an external
+	 * replacement while leaking the captured session and file.
+	 */
+	async #cleanupCapturedGeneration(
+		side: AgentSession,
+		capturedRef: AgentRef | undefined,
+		sideFile: string,
+	): Promise<void> {
+		try {
+			await side.dispose();
+		} catch (error) {
+			logger.warn("Failed to dispose captured side session", { error: String(error) });
+		}
+		// Generation-checked: a no-op if dispose already unregistered the ref,
+		// or if a replacement won the id. Reclaims a parked ref the SDK wrapper
+		// left behind for revival.
+		if (capturedRef) AgentRegistry.global().unregister(SIDE_AGENT_ID, capturedRef);
+		await this.#removeSideFile(sideFile, "Side conversation setup failed, and its fork file could not be deleted");
 	}
 
 	async #submitQuestion(side: AgentSession, question: string): Promise<void> {
