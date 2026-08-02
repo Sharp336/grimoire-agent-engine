@@ -1647,6 +1647,8 @@ export class InputController {
 	async handleClipboardTextRawPaste(): Promise<void> {
 		try {
 			const text = await this.clipboard.readText();
+			const vimMode = this.ctx.editor.getVimMode();
+			if (vimMode !== undefined && vimMode !== "insert") return;
 			if (text) {
 				this.ctx.editor.insertText(text);
 				this.ctx.ui.requestRender();
