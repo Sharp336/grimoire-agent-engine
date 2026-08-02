@@ -17,7 +17,7 @@
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `op` | `"repo_view" \| "pr_create" \| "pr_checkout" \| "pr_push" \| "search_issues" \| "search_prs" \| "search_code" \| "search_commits" \| "search_repos" \| "run_watch"` | Yes | Dispatch selector. `GithubTool.execute()` switches only on this field. |
+| `op` | `"repo_view" \| "pr_create" \| "pr_checkout" \| "pr_push" \| "search_issues" \| "search_prs" \| "search_code" \| "search_commits" \| "search_repos" \| "run_watch" \| "project_view" \| "project_item_add" \| "project_item_create" \| "project_item_edit" \| "project_item_delete" \| "project_create"` | Yes | Dispatch selector. `GithubTool.execute()` switches only on this field. |
 | `repo` | `string` | No | `owner/repo` override. Ignored when the identifier argument is already a full GitHub URL. For `search_issues`/`search_prs`/`search_code`/`search_commits`, defaults to the current checkout's `owner/repo` when omitted (skipped when the query already contains a `repo:`/`org:`/`user:`/`owner:` qualifier or when current-repo resolution fails). Required in practice when `gh` cannot infer repo context from the current checkout. |
 | `branch` | `string` | No | Used by `repo_view`, `pr_push`, and `run_watch`. `run_watch` falls back to current git branch when `run` is omitted; `pr_push` falls back to current branch. |
 | `pr` | `string \| string[]` | No | Used by `pr_checkout`. Each item may be a PR number, branch name, or GitHub PR URL. Array form enables batching. Omitted means current branch PR. |
@@ -36,9 +36,19 @@
 | `since` | `string` | No | Lower date bound for `search_issues`, `search_prs`, `search_commits`, and `search_repos`. Accepts relative durations (`3d`, `12h`, `2w`, `2mo`, `1y`), `YYYY-MM-DD`, or an ISO datetime. Rejected for `search_code`. |
 | `until` | `string` | No | Upper date bound for `search_issues`, `search_prs`, `search_commits`, and `search_repos`. Same formats as `since`. Rejected for `search_code`. |
 | `dateField` | `"created" \| "updated"` | No | Date qualifier field for issue/PR/repo search. Defaults to `created`; repo search maps `updated` to GitHub's `pushed:` qualifier. Ignored for commit search, which always uses `committer-date:`. |
-| `limit` | `number` | No | Used by all `search_*` ops. Defaults to `10`, floored, clamped to `50`, and must be `> 0`. |
+| `limit` | `number` | No | Used by all `search_*` ops (default `10`, max `50`) and `project_view` (default `30`, max `100`). Floored, clamped, and must be `> 0`. |
 | `run` | `string` | No | Used only by `run_watch`. Must be a numeric run ID or full GitHub Actions run URL. |
 | `tail` | `number` | No | Used only by `run_watch`. Defaults to `15`, floored, clamped to `200`, and must be `> 0`. |
+| `project` | `string` | No | Used by all `project_*` ops except `project_create`. A bare project number (then `owner` is required) or a full project URL (`https://github.com/orgs\|users/<login>/projects/<n>`); a URL's owner wins over an explicit `owner`. |
+| `owner` | `string` | No | Org/user login owning the project. Required when `project` is a bare number. |
+| `itemId` | `string` | No | Project item node id (`PVTI_…`) for `project_item_edit`/`project_item_delete`. Mutually exclusive with `contentUrl`. |
+| `contentUrl` | `string` | No | Issue/PR URL. For `project_item_add` it is the content to add; for `project_item_edit`/`project_item_delete` it identifies the project item backed by that issue/PR (resolved via one `item-list` lookup). Mutually exclusive with `itemId` in edit/delete. |
+| `itemStatus` | `string` | No | Target column name for `project_item_edit`; resolved to an option id within the board `field` (case-insensitive). |
+| `field` | `string` | No | Single-select field used as the board column by `project_view` and resolved by `project_item_edit`'s `itemStatus`. Defaults to `"Status"`; must name an existing single-select field. |
+| `archive` | `boolean` | No | Used only by `project_item_delete`. Defaults to `false` (delete); `true` archives instead. |
+| `template` | `string` | No | Used only by `project_create`. One of `kanban`, `team_planning`, `feature_release`, `bug_tracker`, `iterative_development`, `product_launch`, `roadmap`, `team_retrospective`; omit (or `blank`) for a bare project with the default Status field. |
+| `copyFrom` | `string` | No | Used only by `project_create`. Source project number or full URL to clone via `gh project copy` (exact fidelity — fields + views). Mutually exclusive with `template`. |
+| `sourceOwner` | `string` | No | Owner of the `copyFrom` source project (required when `copyFrom` is a bare number; parsed from the URL otherwise). |
 
 ## Outputs
 The tool returns a single text result built by `buildTextResult()` in `packages/coding-agent/src/tools/gh.ts`.
@@ -219,6 +229,89 @@ Watch flow:
 - Inline result includes only the last `tail` lines per failed job. The saved artifact contains full logs (`mode: "full"`).
 - In commit mode, success is intentionally double-checked: once all known runs are successful, the tool waits one more poll interval and succeeds only if the set of run IDs is unchanged. This avoids returning before late workflow runs appear for the same commit.
 - `details.watch` drives a specialized renderer in `packages/coding-agent/src/tools/gh-renderer.ts`; non-watch results fall back to generic text rendering.
+
+### `project_view`
+
+| Aspect | Value |
+| --- | --- |
+| Required fields | `op`, `project` |
+| Optional fields | `owner`, `field`, `limit` |
+| `gh` command | `gh project field-list <num> --owner <owner> --format json` (column field/options), `gh project item-list <num> --owner <owner> --format json --limit <limit>` (items), `gh project view <num> --owner <owner> --format json` (title/url). The three run in parallel. |
+| Batching | None |
+| Output | `# <title> #<num>` header with project URL, `Column field: <field>`, `Items: <n>` (or `Items: <shown> of <totalCount>` on large boards), then one `## <column> (<count>)` section per option of the board field (empty columns shown) plus a trailing `## No status` group. Each item line is `- [PVTI_…] ISSUE\|PR\|DRAFT <title> (#<num> <repo>)`. `sourceUrl` is the project web URL. |
+
+The board column is the single-select field named by `field` (default `"Status"`), resolved case-insensitively from `field-list`; if it is missing or not a single-select, the error lists the available single-select field names. `limit` defaults to `30` and caps at `100`, but caps only the inline item fetch. The spill decision is driven by the board's real `totalCount` (`gh project view`), NOT the page size: when `totalCount` exceeds 30, the full board (all items, no per-column cap) is spilled to a session artifact (`details.artifactId`) and the inline view renders a truncated preview (8 items per column) with a `Full board: artifact://<id>` trailer and an `Items: <shown> of <totalCount>` header. All titles are tab-sanitized and width-truncated; item ids are never truncated.
+
+### `project_item_add`
+
+| Aspect | Value |
+| --- | --- |
+| Required fields | `op`, `project`, `contentUrl` |
+| Optional fields | `owner` |
+| `gh` command | `gh project item-add <num> --owner <owner> --url <contentUrl> --format json` |
+| Batching | None |
+| Output | Confirmation with the added item title, node id, content URL (for issue/PR items), and project URL. `sourceUrl` is the project URL. |
+
+### `project_item_create`
+
+| Aspect | Value |
+| --- | --- |
+| Required fields | `op`, `project`, `title` |
+| Optional fields | `owner`, `body` |
+| `gh` command | `gh project item-create <num> --owner <owner> --title <title> [--body <body>] --format json` |
+| Batching | None |
+| Output | Confirmation with the new draft item title, node id, and project URL. |
+
+### `project_item_edit`
+
+| Aspect | Value |
+| --- | --- |
+| Required fields | `op`, `project`, and exactly one of `itemId` or `contentUrl` |
+| Optional fields | `owner`, `field`, and at least one of `itemStatus` / `title` / `body` |
+| `gh` command | Status move: `gh project item-edit --id <PVTI> --project-id <PVT> --field-id <PVTSSF> --single-select-option-id <opt> --format json` (project/field/option ids resolved from `gh project view`/`field-list`). Draft title/body: `gh project item-edit --id <DI_> --title\|--body … --format json`. |
+| Batching | None |
+| Output | Summary of what changed (e.g. `status → In progress; title updated`), the item id, and the project URL. |
+
+`itemStatus` resolves the option whose name matches case-insensitively within the board `field` (default `"Status"`); an unknown name throws listing the valid options. The project node id comes from `gh project view`. Title/body edits target the draft **content** id (`DI_…`, fetched from `item-list`) and are rejected for issue/PR-backed items — edit those with `gh issue edit`/`gh pr edit`. `contentUrl` is resolved to the backing item via one `item-list` lookup matching `content.url` (trailing slash, query, and fragment stripped on both sides); no match throws `no project item found for <url>`.
+
+### `project_item_delete`
+
+| Aspect | Value |
+| --- | --- |
+| Required fields | `op`, `project`, and exactly one of `itemId` or `contentUrl` |
+| Optional fields | `owner`, `archive` |
+| `gh` command | `gh project item-delete <num> --owner <owner> --id <PVTI> --format json`, or `gh project item-archive …` when `archive` is `true`. |
+| Batching | None |
+| Output | `Deleted`/`Archived project item <id>.` plus the project URL. |
+
+`contentUrl` resolves to the item id via one `item-list` lookup (same matching as `project_item_edit`).
+
+### `project_create`
+
+| Aspect | Value |
+| --- | --- |
+| Required fields | `op`, `owner`, `title` |
+| Optional fields | `template`, `copyFrom`, `sourceOwner` (at most one of `template`/`copyFrom`) |
+| `gh` command | `copyFrom`: `gh project copy <srcNumber> --source-owner <srcOwner> --target-owner <owner> --title <title> --format json`. `template`: `gh project create --owner <owner> --title <title> --format json`, then `gh project field-list <num> --owner <owner> --format json` (find the default Status field id), `gh api graphql --input <body>` (`updateProjectV2Field` to rewrite the Status options), then `gh project field-create <num> --owner <owner> --name <field> --data-type SINGLE_SELECT --single-select-options <csv>` per extra field. `blank`: `gh project create` only. |
+| Batching | None |
+| Output | `Created project <title> #<num>.` with URL and, for a template, the applied Status options + extra fields. `sourceUrl` is the new project URL. |
+
+GitHub has NO API to clone a project template (that is a github.com web-UI feature). Templates are therefore EMULATED: a blank project already ships a default Status field (Todo / In Progress / Done), so a template REWRITES that field's options to the preset's set via the `updateProjectV2Field` GraphQL mutation (gh has no field-option-edit CLI), then adds signature fields. This replicates the template's FIELD SCHEMA — not its built-in views, insights, or automations. `field-create` supports TEXT/SINGLE_SELECT/DATE/NUMBER (NOT ITERATION), so iteration-style templates substitute a NUMBER field and date-style templates carry a real DATE field. Presets:
+- `team_planning` — Status: No status, Backlog, Ready, In progress, In review, Done.
+- `kanban` — Status: Todo, In progress, Done (classic 3-state board).
+- `feature_release` — Status: No status, Backlog, In progress, In review, Done; + DATE "Target date".
+- `iterative_development` — Status: No status, Backlog, In progress, In review, Done; + NUMBER "Story points".
+- `bug_tracker` — Status: No status, Needs triage, In progress, Done; + Priority (P0–P3); + Severity (Low, Medium, High, Critical).
+- `product_launch` — Status: No status, Planning, In progress, In review, Done; + DATE "Launch date".
+- `roadmap` — Status: No status, Planning, In progress, Ready, Done; + DATE "Target date".
+- `team_retrospective` — Status: No status, Went well, Didn't go well, Action items.
+- Omit `template` (or `blank`) — bare project, default Status field left untouched.
+
+If template application fails partway (e.g. after the Status rewrite but before an extra field), the project still exists; the error names the project URL so it can be fixed or deleted manually.
+
+For EXACT fidelity, pass `copyFrom` (source project number/URL + `sourceOwner`) instead of `template`: `gh project copy` (`copyProjectV2`) faithfully clones the source's fields and views, and no preset is applied afterward. `copyFrom` and `template` are mutually exclusive. To prepare a reusable source, build a project once from a gallery template in the GitHub UI, then `gh project mark-template <num> --owner <owner>` it; clone it thereafter via `copyFrom`.
+
+All `project_*` ops go through `git.github.json` and reuse the centralized scope gate: a missing `project` OAuth scope is detected case-insensitively from either gh's pre-flight message (`...missing required scopes ['project']`) or the GraphQL API error (`...granted the required scopes ... ['read:project']`) — both contain "required scopes" and "project" — and surfaced as `GitHub Projects requires the 'project' OAuth scope. Run \`gh auth refresh -s project\` and retry.`
 
 ## Side Effects
 - Filesystem

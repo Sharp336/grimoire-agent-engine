@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- GitHub Projects (V2) board management in the `github` tool: `project_view`, `project_item_add`, `project_item_create`, `project_item_edit`, `project_item_delete`, and `project_create` (with emulated built-in template presets — Status options rewritten + signature single-select fields, not a full template clone — plus a `copyFrom` mode that clones an existing project via `gh project copy` for exact fidelity).
+
 ## [17.2.4] - 2026-08-01
 
 ### Added
