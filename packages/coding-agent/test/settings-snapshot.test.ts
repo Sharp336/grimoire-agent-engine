@@ -255,7 +255,7 @@ describe("settings snapshot", () => {
 		expect(entries.find(entry => entry.path === "retry.fallbackChains")?.ui?.control).toBe("text");
 	});
 
-	it("fails closed when mnemopi visibility depends on a redacted setting", () => {
+	it("omits mnemopi visibility when it depends on a redacted setting", () => {
 		const inactiveSettings = Settings.isolated();
 		const activeSettings = Settings.isolated({ "memory.backend": "mnemopi" });
 		const inactive = buildSettingsSnapshot(inactiveSettings).settings.find(entry => entry.path === "mnemopi.dbPath");
@@ -271,7 +271,7 @@ describe("settings snapshot", () => {
 				description: "Optional SQLite DB path. Defaults to the agent memories directory.",
 				renderable: true,
 				control: "text",
-				visible: false,
+				// Visibility is indeterminate without disclosing memory.backend.
 			},
 		} as const;
 		expect(inactive).toEqual(expected);
@@ -283,13 +283,13 @@ describe("settings snapshot", () => {
 		expect(isSettingPanelVisible("mnemopi.dbPath", activeSettings)).toBe(true);
 	});
 
-	it("fails closed for an unregistered RPC condition without changing panel behavior", () => {
+	it("omits visibility for an unregistered RPC condition without changing panel behavior", () => {
 		const settings = Settings.isolated();
 		expect(getUi("providers.unexpectedStopModel")?.condition).toBe("unexpectedStopDetection");
 		const entry = buildSettingsSnapshot(settings).settings.find(
 			item => item.path === "providers.unexpectedStopModel",
 		);
-		expect(entry?.ui?.visible).toBe(false);
+		expect(entry?.ui).not.toHaveProperty("visible");
 		expect(isSettingPanelVisible("providers.unexpectedStopModel", settings)).toBe(true);
 	});
 
