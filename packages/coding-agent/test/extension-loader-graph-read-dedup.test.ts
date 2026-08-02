@@ -252,4 +252,91 @@ export { ToolAbortError };
 		const loaded = (await loadLegacyPiModule(entryPath)) as { ToolAbortError: typeof ToolAbortError };
 		expect(loaded.ToolAbortError).toBe(ToolAbortError);
 	});
+
+	it("forces the graph path under OMP_LEGACY_EXT_FULL_CRAWL=1 even with a valid sidecar", async () => {
+		const cwd = tempDir.absolute();
+		const entryPath = path.join(cwd, "forced-crawl.js");
+		const source = `import { ToolAbortError } from "@mariozechner/pi-coding-agent/tools/tool-errors";
+export { ToolAbortError };
+`;
+		fs.writeFileSync(entryPath, source, "utf8");
+		const imports = new Bun.Transpiler({ loader: "js" }).scanImports(source).map(found => {
+			const token = JSON.stringify(found.path);
+			const start = source.indexOf(token);
+			expect(start).toBeGreaterThanOrEqual(0);
+			expect(source.indexOf(token, start + token.length)).toBe(-1);
+			return { kind: found.kind, specifier: found.path, start, end: start + token.length };
+		});
+		const sha256 = new Bun.CryptoHasher("sha256").update(source).digest("hex");
+		const sidecarPath = `${entryPath}.omp-imports.json`;
+		fs.writeFileSync(sidecarPath, JSON.stringify({ version: 1, sha256, imports }), "utf8");
+		const sidecarReal = fs.realpathSync(sidecarPath);
+
+		// Env is fixed at spawn so FORCE_FULL_EXTENSION_CRAWL is true when the child
+		// statically imports the compat module; wrap Bun.file only after that import.
+		const probe = `
+import { spyOn } from "bun:test";
+import * as fs from "node:fs";
+import { loadLegacyPiModule } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
+import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
+
+const entryPath = ${JSON.stringify(entryPath)};
+const sidecarReal = ${JSON.stringify(sidecarReal)};
+const reads = new Map();
+const realBunFile = Bun.file.bind(Bun);
+spyOn(Bun, "file").mockImplementation((filePath, options) => {
+	const handle = realBunFile(filePath, options);
+	if (typeof filePath === "string") {
+		const key = fs.existsSync(filePath) ? fs.realpathSync(filePath) : filePath;
+		const bump = () => {
+			reads.set(key, (reads.get(key) ?? 0) + 1);
+		};
+		return new Proxy(handle, {
+			get(target, prop, recv) {
+				if (prop === "text" || prop === "arrayBuffer" || prop === "bytes" || prop === "json") {
+					const original = Reflect.get(target, prop, recv);
+					if (typeof original === "function") {
+						return (...methodArgs) => {
+							bump();
+							return original.apply(target, methodArgs);
+						};
+					}
+				}
+				return Reflect.get(target, prop, recv);
+			},
+		});
+	}
+	return handle;
+});
+
+const loaded = await loadLegacyPiModule(entryPath);
+process.stdout.write(JSON.stringify({
+	sidecarReads: reads.get(sidecarReal) ?? 0,
+	sameIdentity: loaded.ToolAbortError === ToolAbortError,
+}));
+`;
+
+		const proc = Bun.spawn([process.execPath, "-e", probe], {
+			cwd: path.resolve(import.meta.dir, "../../.."),
+			env: { ...process.env, OMP_LEGACY_EXT_FULL_CRAWL: "1" },
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const watchdog = setTimeout(() => {
+			try {
+				proc.kill("SIGKILL");
+			} catch {}
+		}, 15_000);
+		try {
+			const [exitCode, stdout, stderr] = await Promise.all([
+				proc.exited,
+				new Response(proc.stdout).text(),
+				new Response(proc.stderr).text(),
+			]);
+			expect(exitCode, stderr).toBe(0);
+			expect(JSON.parse(stdout)).toEqual({ sidecarReads: 0, sameIdentity: true });
+		} finally {
+			clearTimeout(watchdog);
+		}
+	});
 });

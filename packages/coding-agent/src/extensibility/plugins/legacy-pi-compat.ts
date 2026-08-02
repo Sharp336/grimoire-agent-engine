@@ -11,6 +11,7 @@ import { isCompiledBinary, stripWindowsExtendedLengthPathPrefix } from "@oh-my-p
 import { registerPluginCacheInvalidator } from "../../discovery/helpers";
 
 const IS_COMPILED_BINARY = isCompiledBinary();
+const FORCE_FULL_EXTENSION_CRAWL = process.env.OMP_LEGACY_EXT_FULL_CRAWL === "1";
 
 function isBabelTraverse(value: unknown): value is typeof traverseModule.default {
 	return typeof value === "function";
@@ -2442,7 +2443,10 @@ export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown>
 	const entryRealPath = await realpathOrSelf(path.resolve(resolvedPath));
 	return runSerializedLegacyPiModuleLoad(entryRealPath, async () => {
 		await ensureLegacyPiOverridesReady();
-		const prebuiltSource = await preparePrebuiltExtensionEntry(entryRealPath);
+		// `OMP_LEGACY_EXT_FULL_CRAWL=1` is an end-to-end recovery/diagnostic switch: skip the
+		// hash-valid sidecar fast path entirely so every edge goes through the graph crawler.
+		// Sidecar validation stays unchanged when the variable is absent.
+		const prebuiltSource = FORCE_FULL_EXTENSION_CRAWL ? null : await preparePrebuiltExtensionEntry(entryRealPath);
 		let pendingSources: { clear(): void } | undefined;
 		let retainedPrebuiltPath: string | undefined;
 		if (prebuiltSource === null) {
