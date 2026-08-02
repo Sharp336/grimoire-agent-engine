@@ -1539,6 +1539,7 @@ export class InputController {
 				// Path resolved but is not a readable image (e.g. a zero-byte or
 				// locked transient screenshot file). Prefer the clipboard bytes.
 				if (await this.#tryPasteClipboardImage(pasteSignal)) return;
+				if (pasteSignal.aborted) return;
 				this.ctx.editor.pasteText(path);
 				this.ctx.ui.requestRender();
 				this.ctx.showStatus("Pasted path is not a supported image");
@@ -1562,6 +1563,7 @@ export class InputController {
 				// path on the *local* filesystem. The bytes may still be on the
 				// clipboard (Win+Shift+S), so try those before giving up.
 				if (await this.#tryPasteClipboardImage(pasteSignal)) return;
+				if (pasteSignal.aborted) return;
 				// Over SSH the clipboard lives on the remote host, so the path is
 				// genuinely unreachable; pasting it as text would look like the
 				// image was attached when nothing was sent. Surface an SSH-aware
@@ -1586,6 +1588,7 @@ export class InputController {
 				return;
 			}
 			if (await this.#tryPasteClipboardImage(pasteSignal)) return;
+			if (pasteSignal.aborted) return;
 			this.ctx.editor.pasteText(path);
 			this.ctx.ui.requestRender();
 			this.ctx.showStatus("Failed to read pasted image path");

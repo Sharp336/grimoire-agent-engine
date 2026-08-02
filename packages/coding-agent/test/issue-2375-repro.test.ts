@@ -181,6 +181,33 @@ describe("InputController.handleImagePathPaste (issue #2375)", () => {
 		expect(spies.requestRender).not.toHaveBeenCalled();
 	});
 
+	it("drops a canceled image-path fallback after the clipboard read", async () => {
+		const clipboardRead = Promise.withResolvers<{ data: Buffer; mimeType: string } | null>();
+		const readStarted = Promise.withResolvers<void>();
+		const { ctx, spies } = createContext();
+		const controller = new InputController(ctx, {
+			readImage: () => {
+				readStarted.resolve();
+				return clipboardRead.promise;
+			},
+			readText: async () => "",
+		});
+		const pasteController = new AbortController();
+		const paste = controller.handleImagePathPaste(
+			"/tmp/definitely-does-not-exist-canceled-image-path.png",
+			pasteController.signal,
+		);
+		await readStarted.promise;
+
+		pasteController.abort();
+		clipboardRead.resolve(null);
+		await paste;
+
+		expect(spies.pasteText).not.toHaveBeenCalled();
+		expect(spies.showStatus).not.toHaveBeenCalled();
+		expect(spies.requestRender).not.toHaveBeenCalled();
+	});
+
 	it("locally: attaches the clipboard image when the pasted path resolves to a non-image file", async () => {
 		// The bracketed paste can resolve to an existing file that is not a
 		// decodable image (zero-byte/locked transient snip), which surfaces as a
