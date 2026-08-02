@@ -12,7 +12,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/cli/doctor-cli";
 import { PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/manager";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { getAgentDbPath, getHistoryDbPath, getModelDbPath } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getHistoryDbPath, getModelDbPath, setProjectDir } from "@oh-my-pi/pi-utils";
 import { runCli } from "../src/cli";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
@@ -347,7 +347,7 @@ describe("omp doctor", () => {
 		expect(["ok", "warning", "error"]).toContain(parsed.overallStatus);
 		for (const finding of parsed.findings) {
 			expect(typeof finding.id).toBe("string");
-			expect(["environment", "config", "tools", "storage", "plugins"]).toContain(finding.category);
+			expect(["environment", "config", "tools", "storage", "mcp", "plugins"]).toContain(finding.category);
 			expect(["ok", "warning", "error"]).toContain(finding.status);
 			expect(typeof finding.summary).toBe("string");
 			expect(Array.isArray(finding.details)).toBe(true);
@@ -616,5 +616,221 @@ describe("omp doctor", () => {
 		} finally {
 			statSpy.mockRestore();
 		}
+	});
+
+	test("MCP server with an invalid spec is an error", async () => {
+		// validateServerConfig rejects a stdio server missing "command".
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(mcpJson, JSON.stringify({ mcpServers: { broken: { type: "stdio" } } }), "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const finding = report.findings.find(entry => entry.id === "mcp.broken");
+		expect(finding?.status).toBe("error");
+		expect(finding?.summary).toContain("invalid spec");
+		expect(finding?.details.length).toBeGreaterThan(0);
+		// Read-only: the file is untouched.
+		expect(await fs.readFile(mcpJson, "utf8")).toBe(JSON.stringify({ mcpServers: { broken: { type: "stdio" } } }));
+	});
+
+	test("MCP stdio server with a nonexistent command is an error", async () => {
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(
+			mcpJson,
+			JSON.stringify({
+				mcpServers: { ghost: { type: "stdio", command: "this-binary-does-not-exist-anywhere-xyz" } },
+			}),
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "mcp.ghost");
+		expect(finding?.status).toBe("error");
+		expect(finding?.summary).toContain("command not found");
+	});
+
+	test("MCP http server with a valid URL is ok", async () => {
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(
+			mcpJson,
+			JSON.stringify({ mcpServers: { remote: { type: "http", url: "https://mcp.example.com/sse" } } }),
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "mcp.remote");
+		expect(finding?.status).toBe("ok");
+		expect(finding?.summary).toContain("https://mcp.example.com/sse");
+	});
+
+	test("no MCP config yields a single ok finding", async () => {
+		// Scope both user and project dirs to the empty temp root so the real
+		// project dir's configs (if any) don't pollute the finding count.
+		setProjectDir(root);
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const mcpFindings = report.findings.filter(entry => entry.category === "mcp");
+		expect(mcpFindings).toHaveLength(1);
+		expect(mcpFindings[0]?.status).toBe("ok");
+		expect(mcpFindings[0]?.summary).toContain("no MCP servers configured");
+	});
+
+	test("MCP server from a project .mcp.json is diagnosed", async () => {
+		// The real loader scans project-level .mcp.json, not just the user-level
+		// omp mcp.json. A server defined only in .mcp.json must be visible to doctor.
+		// setProjectDir(root) so the mcp-json provider finds root/.mcp.json.
+		setProjectDir(root);
+		const projectMcp = path.join(root, ".mcp.json");
+		await fs.writeFile(
+			projectMcp,
+			JSON.stringify({
+				mcpServers: { projServer: { type: "http", url: "https://project-mcp.example.com" } },
+			}),
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "mcp.projServer");
+		expect(finding?.status).toBe("ok");
+		expect(finding?.summary).toContain("https://project-mcp.example.com");
+	});
+
+	test("a null MCP server entry produces an error finding without crashing", async () => {
+		// A malformed entry (null instead of an object) must not crash the report;
+		// the provider throw is caught by the capability loader and surfaced as a
+		// warning, which the collector turns into an error finding.
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(mcpJson, JSON.stringify({ mcpServers: { broken: null } }), "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		// The report must still be emitted — no crash.
+		expect(report.findings.some(entry => entry.category === "environment")).toBe(true);
+		// The malformed entry must surface as an error, not be silently ignored.
+		const mcpErrors = report.findings.filter(entry => entry.category === "mcp" && entry.status === "error");
+		expect(mcpErrors.length).toBeGreaterThan(0);
+		expect(mcpErrors.some(entry => entry.details.length > 0)).toBe(true);
+	});
+
+	test("MCP server with malformed optional field shapes is an error", async () => {
+		// validateServerConfig only checks transport endpoints; args/env/headers
+		// shapes pass malformed. The doctor's shape validation must catch them.
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(
+			mcpJson,
+			JSON.stringify({
+				mcpServers: { badShape: { type: "stdio", command: "node", args: "not-an-array" } },
+			}),
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "mcp.badShape");
+		expect(finding?.status).toBe("error");
+		expect(finding?.summary).toContain("invalid spec");
+		expect(finding?.details.some(d => d.includes("args"))).toBe(true);
+	});
+
+	test("MCP server with malformed enabled field is an error", async () => {
+		// The native provider normalizes enabled:{} → undefined before
+		// diagnoseMcpServer sees it. The doctor must validate the RAW entry
+		// so the malformation is caught.
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(
+			mcpJson,
+			JSON.stringify({
+				mcpServers: { badEnabled: { type: "stdio", command: "node", enabled: {} } },
+			}),
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "mcp.badEnabled");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(d => d.includes("enabled"))).toBe(true);
+	});
+
+	test("MCP server with malformed timeout field is an error", async () => {
+		// The native provider normalizes timeout:{} → undefined before
+		// diagnoseMcpServer sees it. The doctor must validate the RAW entry.
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(
+			mcpJson,
+			JSON.stringify({
+				mcpServers: { badTimeout: { type: "stdio", command: "node", timeout: "not-a-number" } },
+			}),
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "mcp.badTimeout");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(d => d.includes("timeout"))).toBe(true);
+	});
+
+	test("disabled MCP server with malformed spec is an error, not ok", async () => {
+		// Shape validation must run BEFORE the disabled shortcut so a disabled
+		// server with a broken spec still reports the error.
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(
+			mcpJson,
+			JSON.stringify({
+				mcpServers: { disabledBad: { type: "stdio", command: 7, enabled: false } },
+			}),
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "mcp.disabledBad");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(d => d.includes("command"))).toBe(true);
+	});
+
+	test("MCP server with non-string env value is an error", async () => {
+		// env values must be strings; a numeric value would crash the spawn path.
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(
+			mcpJson,
+			JSON.stringify({
+				mcpServers: { badEnv: { type: "stdio", command: "node", env: { KEY: 7 } } },
+			}),
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "mcp.badEnv");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(d => d.includes("env.KEY"))).toBe(true);
+	});
+
+	test("MCP server with null enabled is an error, not absent", async () => {
+		// null is malformed, not absent — the doctor must report it.
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(
+			mcpJson,
+			JSON.stringify({
+				mcpServers: { nullEnabled: { type: "stdio", command: "node", enabled: null } },
+			}),
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "mcp.nullEnabled");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(d => d.includes("enabled") && d.includes("null"))).toBe(true);
+	});
+
+	test("MCP server with null timeout is an error, not absent", async () => {
+		// null is malformed, not absent — the doctor must report it.
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(
+			mcpJson,
+			JSON.stringify({
+				mcpServers: { nullTimeout: { type: "stdio", command: "node", timeout: null } },
+			}),
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "mcp.nullTimeout");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(d => d.includes("timeout") && d.includes("null"))).toBe(true);
 	});
 });

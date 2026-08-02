@@ -202,7 +202,8 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 
 	// User scope tracks the active profile via getAgentDir() (not ctx.home), so it
 	// stays in sync with getMCPConfigPath("user") and the /mcp config writer.
-	const userAgentDir = getAgentDir();
+	// ctx.userAgentDir lets callers scope user config without mutating global state.
+	const userAgentDir = ctx.userAgentDir ?? getAgentDir();
 	const paths = [
 		{ path: path.join(ctx.cwd, PATHS.projectDir, "mcp.json"), level: "project" as const },
 		{ path: path.join(ctx.cwd, PATHS.projectDir, ".mcp.json"), level: "project" as const },

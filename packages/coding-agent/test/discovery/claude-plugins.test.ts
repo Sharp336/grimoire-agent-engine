@@ -11,7 +11,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { loadSlashCommands } from "@oh-my-pi/pi-coding-agent/extensibility/slash-commands";
 import { discoverAgents } from "@oh-my-pi/pi-coding-agent/task/discovery";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { getAgentDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import "@oh-my-pi/pi-coding-agent/discovery/claude-plugins";
 import { type MCPServer, mcpCapability } from "@oh-my-pi/pi-coding-agent/capability/mcp";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/capability/skill";
@@ -63,7 +63,7 @@ describe("parseClaudePluginsRegistry", () => {
 describe("listClaudePluginRoots", () => {
 	let tempDir: string;
 	let originalHome: string | undefined;
-
+	let originalAgentDir: string;
 	beforeEach(async () => {
 		clearClaudePluginRootsCache();
 		clearFsCache();
@@ -71,12 +71,15 @@ describe("listClaudePluginRoots", () => {
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "claude-plugins-test-"));
 		process.env.HOME = tempDir;
 		vi.spyOn(os, "homedir").mockReturnValue(tempDir);
+		originalAgentDir = getAgentDir();
+		setAgentDir(tempDir);
 	});
 
 	afterEach(async () => {
 		clearClaudePluginRootsCache();
 		clearFsCache();
 		vi.restoreAllMocks();
+		setAgentDir(originalAgentDir);
 		if (originalHome === undefined) {
 			delete process.env.HOME;
 		} else {
@@ -84,7 +87,6 @@ describe("listClaudePluginRoots", () => {
 		}
 		await removeWithRetries(tempDir);
 	});
-
 	test("returns empty roots when no registry file exists", async () => {
 		const result = await listClaudePluginRoots(tempDir);
 		expect(result.roots).toEqual([]);

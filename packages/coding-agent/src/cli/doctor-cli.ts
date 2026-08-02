@@ -7,13 +7,26 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { $which, formatBytes, getAgentDir, isEnoent, MAIN_CONFIG_FILENAMES, VERSION } from "@oh-my-pi/pi-utils";
+import {
+	$which,
+	formatBytes,
+	getAgentDir,
+	getProjectDir,
+	isEnoent,
+	MAIN_CONFIG_FILENAMES,
+	tryParseJson,
+	VERSION,
+} from "@oh-my-pi/pi-utils";
+import { type MCPServer, mcpCapability } from "../capability/mcp";
 import type { LoadResult } from "../config/config-file";
 import { ModelsConfigFile } from "../config/models-config";
 import { classifySettingsYaml, type YamlLoadResult } from "../config/settings";
 import { collectSystemInfo, formatSystemInfo } from "../debug/system-info";
+import { loadCapability } from "../discovery";
 import { PluginManager } from "../extensibility/plugins/manager";
 import type { DoctorCheck } from "../extensibility/plugins/types";
+import { convertToLegacyConfig, validateServerConfig } from "../mcp/config";
+import type { MCPServerConfig } from "../mcp/types";
 import { theme } from "../modes/theme/theme";
 import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
 import {
@@ -30,7 +43,7 @@ import { withGcLock } from "./gc-cli";
 
 export type DoctorStatus = "ok" | "warning" | "error";
 
-export type DoctorCategory = "environment" | "config" | "tools" | "storage" | "plugins";
+export type DoctorCategory = "environment" | "config" | "tools" | "storage" | "mcp" | "plugins";
 
 export interface DoctorFinding {
 	/** Stable dotted id, e.g. "storage.history.db" or "tools.git". */
@@ -63,7 +76,7 @@ export interface DoctorReport {
 	findings: DoctorFinding[];
 }
 
-const CATEGORY_ORDER: readonly DoctorCategory[] = ["environment", "config", "tools", "storage", "plugins"];
+const CATEGORY_ORDER: readonly DoctorCategory[] = ["environment", "config", "tools", "storage", "mcp", "plugins"];
 
 const TOOL_CHECKS: ReadonlyArray<{ name: string; missingStatus: DoctorStatus; remedy: string }> = [
 	// git is the one hard requirement: all VCS integration routes through src/utils/git.ts.
@@ -397,6 +410,233 @@ async function collectStorageFindings(flags: DoctorCommandFlags): Promise<Doctor
 	return collect();
 }
 
+async function loadRawMcpEntries(
+	items: Array<MCPServer & { _source: { path: string } }>,
+): Promise<{ entries: Map<string, unknown>; sourceErrors: string[] }> {
+	// Read each unique source file once and extract the raw mcpServers entry
+	// for each server name. The native provider normalizes enabled/timeout
+	// before constructing MCPServer, so the raw entry is needed to validate
+	// the original shape (e.g. enabled:{} → undefined loses the malformation).
+	// A vanished/unreadable/unparseable source produces a load error that is
+	// surfaced as an MCP finding — it must not degrade silently to the
+	// normalized item.
+	const rawByPath = new Map<string, Record<string, unknown>>();
+	const sourceErrors: string[] = [];
+	const rawEntries = new Map<string, unknown>();
+	for (const item of items) {
+		const filePath = item._source.path;
+		if (!rawByPath.has(filePath)) {
+			try {
+				const content = await fs.promises.readFile(filePath, "utf8");
+				const parsed = tryParseJson<{ mcpServers?: Record<string, unknown> }>(content);
+				rawByPath.set(filePath, parsed?.mcpServers ?? {});
+			} catch (error) {
+				rawByPath.set(filePath, {});
+				sourceErrors.push(
+					`Failed to read raw MCP config from ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
+		const servers = rawByPath.get(filePath) ?? {};
+		if (item.name in servers) {
+			rawEntries.set(item.name, servers[item.name]);
+		}
+	}
+	return { entries: rawEntries, sourceErrors };
+}
+
+async function collectMcpFindings(flags: DoctorCommandFlags): Promise<DoctorFinding[]> {
+	// Use the real capability loader (the same path the app uses at runtime)
+	// so project-level .mcp.json, .omp/mcp.json, and plugin MCP configs are
+	// diagnosed, not just the user-level mcp.json.
+	//
+	// --agent-dir scopes USER config only: userAgentDir is passed through the
+	// loader context (not via setAgentDir mutation) so the native provider reads
+	// user-level mcp.json from the scoped dir. Project discovery stays rooted at
+	// getProjectDir() — the real project dir — so project .mcp.json is searched
+	// in the right place. When scoped, providers are limited to omp-owned ones
+	// (native + mcp-json) so external tool configs (~/.claude.json, ~/.codex/…)
+	// stay out of the scoped run.
+	const scoped = flags.agentDir !== undefined;
+	const result = await loadCapability<MCPServer>(mcpCapability.id, {
+		cwd: getProjectDir(),
+		userAgentDir: flags.agentDir,
+		providers: scoped ? ["native", "mcp-json"] : undefined,
+		// includeInvalid keeps items the capability validator would drop (missing
+		// command/url) so diagnoseMcpServer can report them through the real
+		// validateServerConfig instead of them vanishing silently.
+		includeInvalid: true,
+	});
+	// Build a map of raw config entries by reading each source file once.
+	// The native provider normalizes enabled/timeout before the MCPServer
+	// object is constructed (invalid → undefined, string → coerced), so
+	// shape validation on the normalized MCPServer misses malformed values.
+	// Reading the raw entry preserves the original shape for validation.
+	const { entries: rawEntries, sourceErrors } = await loadRawMcpEntries(result.items);
+	const findings: DoctorFinding[] = result.items.map(server =>
+		diagnoseMcpServer(server.name, server, rawEntries.get(server.name)),
+	);
+	// A vanished/unreadable/unparseable source file must surface as an error
+	// finding — it must not degrade silently to the normalized item.
+	if (sourceErrors.length > 0) {
+		findings.push({
+			id: "mcp.config-source",
+			category: "mcp",
+			status: "error",
+			summary: "MCP config: source file errors",
+			details: sourceErrors,
+			remedy: "Fix or remove the unreadable MCP config file",
+		});
+	}
+	// Provider throws (e.g. a null entry in mcpServers) surface as warnings,
+	// not items — report them so malformed configs are not silently ignored.
+	if (result.warnings.length > 0) {
+		findings.push({
+			id: "mcp.config",
+			category: "mcp",
+			status: "error",
+			summary: "MCP config: provider errors",
+			details: result.warnings,
+			remedy: "Fix the malformed MCP server entry in mcp.json",
+		});
+	}
+	if (findings.length === 0) {
+		return [{ id: "mcp.none", category: "mcp", status: "ok", summary: "no MCP servers configured", details: [] }];
+	}
+	return findings;
+}
+
+function validateMcpFieldShapes(name: string, server: MCPServer, raw: unknown): string[] {
+	const errors: string[] = [];
+	// Validate against the RAW config entry (before the provider normalizes
+	// enabled/timeout) so malformed values the provider would silently coerce
+	// are caught. Fall back to the normalized MCPServer if the raw entry is
+	// unavailable (e.g. from a provider that doesn't use mcpServers JSON).
+	const rawEntry = (raw !== null && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+	// enabled: must be boolean if present (null is malformed, not absent)
+	if ("enabled" in rawEntry && rawEntry.enabled !== undefined) {
+		if (typeof rawEntry.enabled !== "boolean") {
+			errors.push(
+				`Server "${name}": "enabled" must be a boolean, got ${rawEntry.enabled === null ? "null" : typeof rawEntry.enabled}`,
+			);
+		}
+	}
+	// timeout: must be non-negative finite number if present (null is malformed, not absent)
+	if ("timeout" in rawEntry && rawEntry.timeout !== undefined) {
+		if (typeof rawEntry.timeout !== "number" || !Number.isFinite(rawEntry.timeout) || rawEntry.timeout < 0) {
+			errors.push(
+				`Server "${name}": "timeout" must be a non-negative number, got ${rawEntry.timeout === null ? "null" : JSON.stringify(rawEntry.timeout)}`,
+			);
+		}
+	}
+	if (server.command !== undefined && typeof server.command !== "string") {
+		errors.push(`Server "${name}": "command" must be a string, got ${typeof server.command}`);
+	}
+	if (server.args !== undefined && !Array.isArray(server.args)) {
+		errors.push(`Server "${name}": "args" must be an array, got ${typeof server.args}`);
+	} else if (Array.isArray(server.args) && server.args.some(a => typeof a !== "string")) {
+		errors.push(`Server "${name}": "args" must be an array of strings`);
+	}
+	// env: must be an object with string values
+	if (server.env !== undefined) {
+		if (typeof server.env !== "object" || Array.isArray(server.env) || server.env === null) {
+			errors.push(`Server "${name}": "env" must be an object, got ${typeof server.env}`);
+		} else {
+			for (const [key, value] of Object.entries(server.env)) {
+				if (typeof value !== "string") {
+					errors.push(`Server "${name}": "env.${key}" must be a string, got ${typeof value}`);
+				}
+			}
+		}
+	}
+	// headers: must be an object with string values
+	if (server.headers !== undefined) {
+		if (typeof server.headers !== "object" || Array.isArray(server.headers) || server.headers === null) {
+			errors.push(`Server "${name}": "headers" must be an object, got ${typeof server.headers}`);
+		} else {
+			for (const [key, value] of Object.entries(server.headers)) {
+				if (typeof value !== "string") {
+					errors.push(`Server "${name}": "headers.${key}" must be a string, got ${typeof value}`);
+				}
+			}
+		}
+	}
+	if (server.url !== undefined && typeof server.url !== "string") {
+		errors.push(`Server "${name}": "url" must be a string, got ${typeof server.url}`);
+	}
+	return errors;
+}
+
+function diagnoseMcpServer(name: string, server: MCPServer, raw?: unknown): DoctorFinding {
+	const base = { id: `mcp.${name}`, category: "mcp" as const };
+	// Shape validation runs BEFORE the disabled shortcut so a disabled server
+	// with a malformed spec (e.g. enabled:false, command:7) still reports the
+	// shape error — the user should know the config is broken even if the
+	// server is currently off.
+	const shapeErrors = validateMcpFieldShapes(name, server, raw);
+	// A disabled server is ok regardless of transport-endpoint validity — it
+	// never runs. But shape errors still surface (see above).
+	if (server.enabled === false && shapeErrors.length === 0) {
+		return { ...base, status: "ok", summary: `${name}: disabled`, details: [] };
+	}
+	if (server.enabled === false && shapeErrors.length > 0) {
+		return { ...base, status: "error", summary: `${name}: invalid spec`, details: shapeErrors };
+	}
+	// Convert canonical MCPServer to legacy MCPServerConfig for the real
+	// validator.  Malformed entries (null, wrong shape) are caught here so the
+	// report still emits an error finding instead of crashing.
+	let config: MCPServerConfig;
+	try {
+		config = convertToLegacyConfig(server);
+	} catch (error) {
+		return {
+			...base,
+			status: "error",
+			summary: `${name}: malformed server config`,
+			details: [error instanceof Error ? error.message : String(error)],
+		};
+	}
+	// Reuse the real validator: never re-implement its rules.
+	const errors = [...shapeErrors, ...validateServerConfig(name, config)];
+	if (errors.length > 0) {
+		return { ...base, status: "error", summary: `${name}: invalid spec`, details: errors };
+	}
+	const serverType = config.type ?? "stdio";
+	if (serverType === "stdio") {
+		// "command" in config narrows the union to MCPStdioServerConfig; the
+		// validator already guaranteed command is present and non-empty.
+		let command = "";
+		if ("command" in config && typeof config.command === "string") command = config.command;
+		// Bun.which mirrors the PATH resolution the spawn path uses; no live spawn.
+		const resolved = Bun.which(command);
+		if (resolved === null) {
+			return {
+				...base,
+				status: "error",
+				summary: `${name}: command not found`,
+				details: [`command "${command}" not found on PATH`],
+				remedy: `Install "${command}" or fix the command in mcp.json`,
+			};
+		}
+		return { ...base, status: "ok", summary: `${name}: ${resolved}`, details: [] };
+	}
+	// http/sse: validate URL syntax only — no live connects, no OAuth probes.
+	// "url" in config narrows to the http/sse members; the validator guaranteed url.
+	let url = "";
+	if ("url" in config && typeof config.url === "string") url = config.url;
+	try {
+		new URL(url);
+	} catch (error) {
+		return {
+			...base,
+			status: "error",
+			summary: `${name}: invalid url`,
+			details: [error instanceof Error ? error.message : String(error)],
+		};
+	}
+	return { ...base, status: "ok", summary: `${name}: ${url}`, details: [] };
+}
+
 async function collectPluginFindings(flags: DoctorCommandFlags): Promise<DoctorFinding[]> {
 	// Plugin state is root-scoped; a run restricted to --agent-dir must not
 	// repair (and thereby mutate) state outside its scope.
@@ -449,6 +689,7 @@ export async function collectDoctorReport(flags: DoctorCommandFlags): Promise<Do
 		...collectToolFindings(),
 		await collectSqliteRecoverFinding(),
 		...(await collectStorageFindings(flags)),
+		...(await collectMcpFindings(flags)),
 		...(await collectPluginFindings(flags)),
 	];
 	const overallStatus: DoctorStatus = findings.some(f => f.status === "error")

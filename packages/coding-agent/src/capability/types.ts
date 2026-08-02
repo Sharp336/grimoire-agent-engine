@@ -16,6 +16,13 @@ export interface LoadContext {
 	home: string;
 	/** Git repository root (directory containing .git), or null if not in a repo */
 	repoRoot: string | null;
+	/**
+	 * Scoped user agent directory for native user-level config resolution.
+	 * When set, the native provider reads user-level configs (e.g. mcp.json)
+	 * from this dir instead of the global getAgentDir(). Lets callers scope
+	 * user config without mutating process-global state.
+	 */
+	userAgentDir?: string;
 }
 
 /**
@@ -66,6 +73,8 @@ export interface LoadOptions<T = unknown> {
 	excludeProviders?: string[];
 	/** Custom cwd. Default: getProjectDir() */
 	cwd?: string;
+	/** Scoped user agent dir for native user-level config. Default: getAgentDir() */
+	userAgentDir?: string;
 	/** Include items even if they fail validation. Default: false */
 	includeInvalid?: boolean;
 	/** Include items disabled via settings. Default: false */
