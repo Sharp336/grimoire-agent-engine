@@ -336,6 +336,11 @@ export class SideController {
 	 */
 	async #removeSideFile(sessionFile: string, failureMessage: string): Promise<boolean> {
 		try {
+			// Storage of the CURRENT parent manager. Documented limitation: a side
+			// inherited from a different-backend session (crashed previous process,
+			// or a backend switch while the side was live) may not be deletable
+			// through this backend and lingers as inert files until the
+			// filesystem-bound persisted-scan cleanup.
 			await SessionManager.removeSessionFiles(sessionFile, this.ctx.sessionManager.getStorage());
 			return true;
 		} catch (err) {
