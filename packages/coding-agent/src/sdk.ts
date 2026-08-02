@@ -2834,9 +2834,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				? await logger.time("resolveActiveRepoContext", resolveRepoContext, promptCwd)
 				: initialActiveRepoContext;
 			if (hasSession && options.contextFiles === undefined) {
-				contextFiles = await logger.time("discoverContextFiles", discoverContextFiles, promptCwd, agentDir, [
-					...(settings.get("disabledExtensions") ?? []),
-				]);
+				contextFiles = await logger.time("discoverContextFiles", discoverContextFiles, promptCwd, agentDir, {
+					disabledExtensions: [...(settings.get("disabledExtensions") ?? [])],
+					userAgentsFile: options.userAgentsFile,
+				});
 				toolSession.contextFiles = contextFiles;
 				session.setAdvisorContextPrompt(formatAdvisorContextPrompt(contextFiles));
 			}
