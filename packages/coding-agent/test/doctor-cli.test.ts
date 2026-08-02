@@ -13,6 +13,7 @@ import {
 import { PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/manager";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import * as browserLaunch from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
+import * as piUtils from "@oh-my-pi/pi-utils";
 import { getAgentDbPath, getHistoryDbPath, getModelDbPath, setProjectDir } from "@oh-my-pi/pi-utils";
 import { runCli } from "../src/cli";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
@@ -662,7 +663,7 @@ describe("omp doctor", () => {
 		const report = await runDoctorCommand({ flags: { agentDir: root } });
 		const finding = report.findings.find(entry => entry.id === "mcp.remote");
 		expect(finding?.status).toBe("ok");
-		expect(finding?.summary).toContain("https://mcp.example.com/sse");
+		expect(finding?.summary).toContain("https://mcp.example.com");
 	});
 
 	test("no MCP config yields a single ok finding", async () => {
@@ -1414,6 +1415,177 @@ describe("omp doctor", () => {
 			expect(report.findings.some(entry => entry.category === "config")).toBe(true);
 		} finally {
 			holder.kill();
+		}
+	});
+
+	// ── Item A: settings schema validation ──────────────────────────────────
+
+	test('settings: wrong-typed boolean (autoResume: "yes") is an error, not valid', async () => {
+		const configPath = path.join(root, "config.yml");
+		await fs.writeFile(configPath, 'autoResume: "yes"\n', "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const finding = report.findings.find(entry => entry.id === "config.settings");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(d => d.includes("autoResume") && d.includes("boolean"))).toBe(true);
+	});
+
+	test("settings: non-iterable array (disabledProviders: false) is an error, not valid", async () => {
+		const configPath = path.join(root, "config.yml");
+		await fs.writeFile(configPath, "disabledProviders: false\n", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const finding = report.findings.find(entry => entry.id === "config.settings");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(d => d.includes("disabledProviders") && d.includes("array"))).toBe(true);
+	});
+
+	// ── Item B: malformed MCP JSON invisible ─────────────────────────────────
+
+	test("malformed MCP JSON in scoped agent dir produces an error, not mcp.none ok", async () => {
+		setProjectDir(root);
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(mcpJson, "{ broken json !!! }", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const mcpFindings = report.findings.filter(entry => entry.category === "mcp");
+		// Must NOT be the single ok "no MCP servers configured" finding.
+		const noneOk = mcpFindings.find(entry => entry.id === "mcp.none" && entry.status === "ok");
+		expect(noneOk).toBeUndefined();
+		// Must have an error finding naming the file and the parse error.
+		const errorFinding = mcpFindings.find(entry => entry.status === "error");
+		expect(errorFinding).toBeDefined();
+		expect(errorFinding?.details.some(d => d.includes("invalid JSON"))).toBe(true);
+	});
+
+	// ── Item C: committed marker misread as rollback failure ─────────────────
+
+	test("committed swap marker (swapped:true) under --fix reports ok, not rollback failed", async () => {
+		const dbPath = getAgentDbPath(root);
+		await createDatabaseWithRows(dbPath, 10);
+		// Simulate a crash AFTER the swap committed but BEFORE marker removal:
+		// the marker has swapped:true, the live database is the repaired candidate.
+		const marker = path.join(path.dirname(dbPath), ".agent.db.omp-doctor-swap.json");
+		const archiveDir = path.join(root, ".omp-doctor-backups", "agent.db.test");
+		await fs.mkdir(archiveDir, { recursive: true });
+		await fs.writeFile(path.join(archiveDir, "agent.db"), "archive-content", "utf8");
+		await Bun.write(marker, JSON.stringify({ archive: archiveDir, swapped: true }));
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, fix: true } });
+		const finding = report.findings.find(entry => entry.id === "storage.agent.db");
+		// Must NOT report "rollback failed".
+		expect(finding?.summary).not.toContain("rollback failed");
+		// The database should be probed normally (ok or warning, not error from rollback).
+		expect(finding?.status).not.toBe("error");
+		// Exit code should be zero (no error findings from this db).
+		expect(process.exitCode).toBe(0);
+	});
+
+	// ── Item D: MCP URL credential leak ──────────────────────────────────────
+
+	test("MCP http server URL with userinfo and query token is sanitized in JSON output", async () => {
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(
+			mcpJson,
+			JSON.stringify({
+				mcpServers: {
+					leaky: { type: "http", url: "https://user:secret@mcp.example.com/sse?token=hidden" },
+				},
+			}),
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const json = JSON.stringify(report);
+		// Neither the userinfo secret nor the query token may appear anywhere.
+		expect(json).not.toContain("user:secret");
+		expect(json).not.toContain("hidden");
+		expect(json).not.toContain("=hidden");
+		// The origin should still be present so the server is identifiable.
+		expect(json).toContain("https://mcp.example.com");
+	});
+
+	// ── Item E: stdio command resolution context ─────────────────────────────
+
+	test("MCP stdio server with cwd + relative command that exists → ok, not command not found", async () => {
+		// Create a relative binary under a cwd directory in the temp root.
+		const serverBinDir = path.join(root, "serverbin");
+		await fs.mkdir(serverBinDir, { recursive: true });
+		const serverBin = path.join(serverBinDir, "server");
+		await fs.writeFile(serverBin, "#!/bin/sh\nexit 0\n", "utf8");
+		await fs.chmod(serverBin, 0o755);
+
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(
+			mcpJson,
+			JSON.stringify({
+				mcpServers: {
+					local: { type: "stdio", command: "./server", cwd: serverBinDir },
+				},
+			}),
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const finding = report.findings.find(entry => entry.id === "mcp.local");
+		expect(finding?.status).toBe("ok");
+		expect(finding?.summary).not.toContain("command not found");
+	});
+
+	// ── Item F: skills known-set too narrow ──────────────────────────────────
+
+	test("setup: agent referencing a skill discoverable via capability loader → no unknown skill warning", async () => {
+		// Create a skill under <agentDir>/skills/ (which the capability loader
+		// discovers) and an agent that autoloads it. The capability loader
+		// discovers skills from more sources than the old three-dir list, but
+		// this test verifies the loader-based discovery works for the basic case
+		// and does not produce a false "unknown skill" warning.
+		const skillsDir = path.join(root, "skills", "my-cap-skill");
+		await fs.mkdir(skillsDir, { recursive: true });
+		await fs.writeFile(
+			path.join(skillsDir, "SKILL.md"),
+			"---\nname: my-cap-skill\ndescription: test skill\n---\nBody\n",
+			"utf8",
+		);
+		const agentsDir = path.join(root, "agents");
+		await fs.mkdir(agentsDir, { recursive: true });
+		await fs.writeFile(
+			path.join(agentsDir, "skilluser.md"),
+			"---\nname: skilluser\ndescription: test\nautoloadSkills: [my-cap-skill]\ntools: read\n---\nBody\n",
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "setup.agents");
+		expect(finding?.details.some(d => d.includes("unknown skill"))).toBe(false);
+	});
+
+	// ── Item G: managed Chromium cache ───────────────────────────────────────
+
+	test("browser: cached Chromium executable → ok, not first-use warning", async () => {
+		// Create a fake Puppeteer cache directory structure in the temp root
+		// so resolveCachedChromium finds a cached binary. System Chrome and
+		// env override are absent so the cache probe is reached.
+		const fakeCacheDir = path.join(root, "fake-puppeteer-cache");
+		const buildDir = path.join(fakeCacheDir, "chrome-1234");
+		const platformDir = path.join(buildDir, "linux-64");
+		await fs.mkdir(platformDir, { recursive: true });
+		const fakeChrome = path.join(platformDir, "chrome");
+		await fs.writeFile(fakeChrome, "fake-binary", "utf8");
+
+		const chromeSpy = spyOn(browserLaunch, "resolveSystemChromium").mockReturnValue(undefined);
+		const envSpy = spyOn(browserLaunch, "readChromiumEnvOverride").mockReturnValue(undefined);
+		const cacheSpy = spyOn(piUtils, "getPuppeteerDir").mockReturnValue(fakeCacheDir);
+		try {
+			const report = await runDoctorCommand({ flags: { agentDir: root } });
+			const finding = report.findings.find(entry => entry.id === "browser.chromium");
+			expect(finding?.status).toBe("ok");
+			expect(finding?.summary).toContain("chrome");
+			expect(finding?.details.some(d => d.includes("Puppeteer cache"))).toBe(true);
+		} finally {
+			chromeSpy.mockRestore();
+			envSpy.mockRestore();
+			cacheSpy.mockRestore();
 		}
 	});
 });

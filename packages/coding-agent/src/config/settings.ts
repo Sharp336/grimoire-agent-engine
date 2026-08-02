@@ -104,6 +104,96 @@ export async function classifySettingsYaml(filePath: string): Promise<YamlLoadRe
 	return { kind: "loaded", settings: parsed as RawSettings };
 }
 
+/**
+ * Validate loaded settings values against {@link SETTINGS_SCHEMA}. Type
+ * mismatches (wrong primitive, non-array where array required, invalid enum
+ * member) are errors naming the key and expected type; unknown keys are
+ * warnings (forward-compat, never errors). Exported so `omp doctor` can
+ * surface schema violations without constructing a Settings instance.
+ */
+export function validateSettingsValues(raw: RawSettings): { errors: string[]; warnings: string[] } {
+	const errors: string[] = [];
+	const warnings: string[] = [];
+
+	// Validate each known setting path that has a value in the raw object.
+	for (const settingPath of Object.keys(SETTINGS_SCHEMA) as SettingPath[]) {
+		const value = getByPath(raw, SETTING_PATH_SEGMENTS[settingPath]);
+		if (value === undefined) continue;
+		const def = SETTINGS_SCHEMA[settingPath];
+		const error = validateSettingValueType(settingPath, value, def);
+		if (error) errors.push(error);
+	}
+
+	// Detect unknown keys (forward-compat: warn, never error).
+	const knownPaths = new Set<string>(Object.keys(SETTINGS_SCHEMA));
+	const knownPrefixes = new Set<string>();
+	for (const p of knownPaths) {
+		const segments = p.split(".");
+		for (let i = 1; i < segments.length; i++) knownPrefixes.add(segments.slice(0, i).join("."));
+	}
+	walkUnknownSettingsKeys(raw, "", knownPaths, knownPrefixes, warnings);
+
+	return { errors, warnings };
+}
+
+function validateSettingValueType(
+	path: string,
+	value: unknown,
+	def: { type: string; values?: readonly string[] },
+): string | null {
+	switch (def.type) {
+		case "boolean":
+			if (typeof value !== "boolean")
+				return `Settings key "${path}" must be a boolean, got ${value === null ? "null" : typeof value}`;
+			return null;
+		case "string":
+			if (typeof value !== "string")
+				return `Settings key "${path}" must be a string, got ${value === null ? "null" : typeof value}`;
+			return null;
+		case "number":
+			if (typeof value !== "number" || !Number.isFinite(value))
+				return `Settings key "${path}" must be a finite number, got ${value === null ? "null" : typeof value}`;
+			return null;
+		case "enum": {
+			const allowed = def.values ?? [];
+			if (typeof value !== "string")
+				return `Settings key "${path}" must be one of [${allowed.join(", ")}], got ${value === null ? "null" : typeof value}`;
+			if (!allowed.includes(value))
+				return `Settings key "${path}" must be one of [${allowed.join(", ")}], got "${value}"`;
+			return null;
+		}
+		case "array":
+			if (!Array.isArray(value))
+				return `Settings key "${path}" must be an array, got ${value === null ? "null" : typeof value}`;
+			return null;
+		case "record":
+			if (typeof value !== "object" || Array.isArray(value) || value === null)
+				return `Settings key "${path}" must be a record/object, got ${value === null ? "null" : Array.isArray(value) ? "array" : typeof value}`;
+			return null;
+		default:
+			return null;
+	}
+}
+
+function walkUnknownSettingsKeys(
+	obj: Record<string, unknown>,
+	prefix: string,
+	knownPaths: Set<string>,
+	knownPrefixes: Set<string>,
+	warnings: string[],
+): void {
+	for (const [key, value] of Object.entries(obj)) {
+		const fullPath = prefix ? `${prefix}.${key}` : key;
+		if (knownPaths.has(fullPath)) continue;
+		if (knownPrefixes.has(fullPath)) {
+			if (value !== null && typeof value === "object" && !Array.isArray(value))
+				walkUnknownSettingsKeys(value as Record<string, unknown>, fullPath, knownPaths, knownPrefixes, warnings);
+			continue;
+		}
+		warnings.push(`Unknown settings key "${fullPath}"`);
+	}
+}
+
 export interface SettingsOptions {
 	/** Current working directory for project settings discovery */
 	cwd?: string;

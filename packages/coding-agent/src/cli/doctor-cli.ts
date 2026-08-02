@@ -18,6 +18,7 @@ import {
 	getAgentDir,
 	getCustomThemesDir,
 	getProjectDir,
+	getPuppeteerDir,
 	isEnoent,
 	MAIN_CONFIG_FILENAMES,
 	parseFrontmatter,
@@ -30,10 +31,11 @@ import { watchdogYamlSchema } from "../advisor/config";
 import { collectConfigCandidates } from "../advisor/watchdog";
 import { type Hook, hookCapability } from "../capability/hook";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
+import { type Skill, skillCapability } from "../capability/skill";
 import type { LoadResult } from "../config/config-file";
 import { KEYBINDINGS, KeybindingsManager, resolveKeybindingsConfigPaths } from "../config/keybindings";
 import { ModelsConfigFile } from "../config/models-config";
-import { classifySettingsYaml, type YamlLoadResult } from "../config/settings";
+import { classifySettingsYaml, validateSettingsValues, type YamlLoadResult } from "../config/settings";
 import { collectSystemInfo, formatSystemInfo } from "../debug/system-info";
 import { loadCapability } from "../discovery";
 import { type ParsedAgentFields, parseAgentFields } from "../discovery/helpers";
@@ -173,6 +175,56 @@ function collectToolFindings(): DoctorFinding[] {
 }
 
 /**
+ * Probe whether a previously-downloaded Chromium already exists in the
+ * Puppeteer cache — WITHOUT triggering a download. Returns the cached
+ * executable path when it exists on disk, or undefined when nothing is
+ * cached. Checks the cache directory for a chrome build folder rather than
+ * calling the puppeteer APIs (which would require dynamic imports of
+ * @puppeteer/browsers and puppeteer-core/internal/revisions.js).
+ */
+async function resolveCachedChromium(): Promise<string | undefined> {
+	const cacheDir = getPuppeteerDir();
+	// The Puppeteer cache layout is <cacheDir>/<chrome|chromium>-<buildId>/.
+	// If the cache dir doesn't exist or is empty, no download has happened.
+	let entries: fs.Dirent[];
+	try {
+		entries = await fs.promises.readdir(cacheDir, { withFileTypes: true });
+	} catch {
+		return undefined;
+	}
+	for (const entry of entries) {
+		if (!entry.isDirectory()) continue;
+		// Look for a chrome/chromium build directory with an executable inside.
+		const buildDir = path.join(cacheDir, entry.name);
+		let buildEntries: fs.Dirent[];
+		try {
+			buildEntries = await fs.promises.readdir(buildDir, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		for (const sub of buildEntries) {
+			if (!sub.isDirectory()) continue;
+			// Puppeteer's layout: <buildDir>/<platform-arch>/chrome
+			const platformDir = path.join(buildDir, sub.name);
+			let platformEntries: fs.Dirent[];
+			try {
+				platformEntries = await fs.promises.readdir(platformDir, { withFileTypes: true });
+			} catch {
+				continue;
+			}
+			for (const file of platformEntries) {
+				if (file.isFile() || file.isSymbolicLink()) {
+					const name = file.name.toLowerCase();
+					if (name === "chrome" || name === "chrome.exe" || name === "chromium" || name === "headless_shell") {
+						return path.join(platformDir, file.name);
+					}
+				}
+			}
+		}
+	}
+	return undefined;
+}
+/**
  * Probe how the browser tool would resolve a Chromium executable — without
  * downloading or launching anything. Mirrors `ensureChromiumExecutable`'s
  * precedence (system detection first, then the env override) but stats the
@@ -237,6 +289,22 @@ async function collectBrowserFindings(): Promise<DoctorFinding[]> {
 				},
 			];
 		}
+	}
+	// Before issuing the first-use warning, check whether Chromium has
+	// already been downloaded into the Puppeteer cache. A cached binary means
+	// the browser tool will launch it without downloading — the warning is
+	// misleading. This probe never triggers a download.
+	const cached = await resolveCachedChromium();
+	if (cached) {
+		return [
+			{
+				id: "browser.chromium",
+				category: "browser",
+				status: "ok",
+				summary: cached,
+				details: ["resolved from Puppeteer cache"],
+			},
+		];
 	}
 	return [
 		{
@@ -647,6 +715,33 @@ async function diagnoseSettingsConfig(agentDir: string): Promise<DoctorFinding> 
 		const candidate = path.join(agentDir, filename);
 		const result = await classifySettingsYaml(candidate);
 		if (result.kind === "missing") continue;
+		if (result.kind === "loaded") {
+			// Validate loaded values against the real SETTINGS_SCHEMA so
+			// wrong-typed booleans/numbers/enums and non-iterable arrays are
+			// caught — a syntactically valid YAML mapping is not necessarily a
+			// valid settings config.
+			const { errors, warnings } = validateSettingsValues(result.settings);
+			if (errors.length > 0) {
+				return {
+					id: "config.settings",
+					category: "config",
+					status: "error",
+					summary: `settings: ${errors.length} invalid value${errors.length === 1 ? "" : "s"}`,
+					details: errors,
+					remedy: `Fix ${filename} or remove it to use defaults`,
+				};
+			}
+			if (warnings.length > 0) {
+				return {
+					id: "config.settings",
+					category: "config",
+					status: "warning",
+					summary: `settings: valid (${warnings.length} unknown key${warnings.length === 1 ? "" : "s"})`,
+					details: warnings,
+				};
+			}
+			return { id: "config.settings", category: "config", status: "ok", summary: "settings: valid", details: [] };
+		}
 		return yamlConfigFinding("settings", filename, result);
 	}
 	return {
@@ -759,7 +854,17 @@ async function collectStorageFindings(flags: DoctorCommandFlags): Promise<Doctor
 		// Sequential probes: parallel opens of sibling databases multiply lock pressure for no real gain.
 		for (const db of databases) {
 			const swap = await recoverInterruptedSwap(db, flags.fix === true);
-			if (swap.found && !swap.restored) {
+			// The engine returns {found:true, restored:false, error:null} in
+			// two distinct situations:
+			//   (a) read-only run: a marker exists but was not examined (no
+			//       payload read) — warn so the user runs --fix.
+			//   (b) --fix run with a committed marker (swapped:true): the swap
+			//       succeeded, the stale marker was cleaned up — this is NOT a
+			//       rollback failure; fall through to the normal probe.
+			// A genuine rollback failure (--fix run, error !== null) is an error.
+			// Distinguish (a) from (b) by checking the fix flag: read-only always
+			// warns; --fix only errors when error is non-null.
+			if (swap.found && !swap.restored && (flags.fix !== true || swap.error !== null)) {
 				findings.push({
 					id: `storage.${db.label}`,
 					category: "storage",
@@ -782,6 +887,11 @@ async function collectStorageFindings(flags: DoctorCommandFlags): Promise<Doctor
 				// rollback in the summary — never conceal a restoration.
 				finding.summary = `restored from archive; ${finding.summary}`;
 				finding.details.push("restored from archive after an interrupted swap");
+			} else if (swap.found && swap.error === null) {
+				// Committed-marker cleanup: the swap already succeeded, the
+				// stale marker was removed. Surface the cleanup so the user
+				// knows the repaired database was probed, not skipped.
+				finding.details.push("committed swap marker cleaned up; database probed");
 			}
 			findings.push(finding);
 		}
@@ -844,6 +954,61 @@ async function loadRawMcpEntries(
 	return { entries: rawEntries, sourceErrors };
 }
 
+/**
+ * Probe candidate MCP source files for JSON parse errors INDEPENDENTLY of
+ * discovered items. The native provider uses `tryParseJson()` which returns
+ * null (zero items) on a syntax error — so an items-driven scan can never
+ * see a broken config. This reads the same candidate paths the native
+ * provider scans and surfaces parse failures as error findings.
+ */
+async function probeMcpSourceParseErrors(
+	agentDir: string | undefined,
+	projectDir: string,
+	scoped: boolean,
+): Promise<string[]> {
+	const errors: string[] = [];
+	// Mirror the native provider's candidate paths (builtin.ts loadMCPServers).
+	const userAgentDir = agentDir ?? getAgentDir();
+	const candidates = [
+		path.join(projectDir, ".omp", "mcp.json"),
+		path.join(projectDir, ".omp", ".mcp.json"),
+		path.join(userAgentDir, "mcp.json"),
+		path.join(userAgentDir, ".mcp.json"),
+	];
+	for (const candidate of candidates) {
+		let content: string;
+		try {
+			content = await fs.promises.readFile(candidate, "utf8");
+		} catch (error) {
+			if (isEnoent(error)) continue;
+			// Non-ENOENT read failures surface as findings, never swallowed.
+			errors.push(`${candidate}: ${error instanceof Error ? error.message : String(error)}`);
+			continue;
+		}
+		const parsed = tryParseJson<unknown>(content);
+		if (parsed === null) {
+			errors.push(`${candidate}: invalid JSON (parse failed)`);
+		}
+	}
+	// When unscoped, also probe the mcp-json provider's project-level .mcp.json
+	// at the project root (a separate path the mcp-json provider scans).
+	if (!scoped) {
+		const rootMcpJson = path.join(projectDir, ".mcp.json");
+		try {
+			const content = await fs.promises.readFile(rootMcpJson, "utf8");
+			const parsed = tryParseJson<unknown>(content);
+			if (parsed === null) {
+				errors.push(`${rootMcpJson}: invalid JSON (parse failed)`);
+			}
+		} catch (error) {
+			if (!isEnoent(error)) {
+				errors.push(`${rootMcpJson}: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+	}
+	return errors;
+}
+
 async function collectMcpFindings(flags: DoctorCommandFlags): Promise<DoctorFinding[]> {
 	// Use the real capability loader (the same path the app uses at runtime)
 	// so project-level .mcp.json, .omp/mcp.json, and plugin MCP configs are
@@ -872,19 +1037,25 @@ async function collectMcpFindings(flags: DoctorCommandFlags): Promise<DoctorFind
 	// shape validation on the normalized MCPServer misses malformed values.
 	// Reading the raw entry preserves the original shape for validation.
 	const { entries: rawEntries, sourceErrors } = await loadRawMcpEntries(result.items);
+	// Probe candidate MCP source files for parse errors INDEPENDENTLY of
+	// discovered items — a syntax error yields zero items, so an items-driven
+	// scan can never see it. This catches a broken scoped <agentDir>/mcp.json
+	// that would otherwise fall through to mcp.none with status ok.
+	const parseErrors = await probeMcpSourceParseErrors(flags.agentDir, getProjectDir(), scoped);
+	const allSourceErrors = [...sourceErrors, ...parseErrors];
 	const findings: DoctorFinding[] = result.items.map(server =>
 		diagnoseMcpServer(server.name, server, rawEntries.get(server.name)),
 	);
 	// A vanished/unreadable/unparseable source file must surface as an error
 	// finding — it must not degrade silently to the normalized item.
-	if (sourceErrors.length > 0) {
+	if (allSourceErrors.length > 0) {
 		findings.push({
 			id: "mcp.config-source",
 			category: "mcp",
 			status: "error",
 			summary: "MCP config: source file errors",
-			details: sourceErrors,
-			remedy: "Fix or remove the unreadable MCP config file",
+			details: allSourceErrors,
+			remedy: "Fix or remove the unreadable or unparseable MCP config file",
 		});
 	}
 	// Provider throws (e.g. a null entry in mcpServers) surface as warnings,
@@ -966,6 +1137,41 @@ function validateMcpFieldShapes(name: string, server: MCPServer, raw: unknown): 
 	return errors;
 }
 
+/**
+ * Resolve a stdio MCP server command the way the transport does — honoring
+ * `config.cwd` for relative commands and `config.env.PATH` for PATH lookup —
+ * without spawning. Mirrors `resolveStdioSpawnCommand` in
+ * mcp/transports/stdio.ts: a command with a path separator resolves against
+ * the configured cwd; a bare command resolves via Bun.which with the
+ * config's PATH override (if any). Returns the resolved path or null.
+ */
+function resolveStdioCommand(command: string, config: MCPServerConfig): string | null {
+	// A relative or absolute command (has a path separator) resolves against
+	// the configured cwd, not the doctor's process cwd. The transport's
+	// resolveStdioSpawnCommand uses config.cwd the same way.
+	if (command.includes("/") || command.includes("\\") || path.isAbsolute(command)) {
+		const cwd = "cwd" in config && typeof config.cwd === "string" ? config.cwd : process.cwd();
+		const resolved = path.resolve(cwd, command);
+		try {
+			const st = fs.statSync(resolved);
+			if (st.isFile()) return resolved;
+		} catch {
+			// Fall through to null below.
+		}
+		return null;
+	}
+	// Bare command: use Bun.which with the config's PATH override if present.
+	// Bun.which accepts a PATH option; the transport merges config.env into
+	// the spawn environment, so config.env.PATH is the effective PATH.
+	const envPath = "env" in config && config.env && typeof config.env.PATH === "string" ? config.env.PATH : undefined;
+	if (envPath !== undefined) {
+		const resolved = Bun.which(command, { PATH: envPath });
+		if (resolved !== null) return resolved;
+		// Fall back to the process PATH if the override didn't find it.
+	}
+	return Bun.which(command);
+}
+
 function diagnoseMcpServer(name: string, server: MCPServer, raw?: unknown): DoctorFinding {
 	const base = { id: `mcp.${name}`, category: "mcp" as const };
 	// Shape validation runs BEFORE the disabled shortcut so a disabled server
@@ -1006,15 +1212,20 @@ function diagnoseMcpServer(name: string, server: MCPServer, raw?: unknown): Doct
 		// validator already guaranteed command is present and non-empty.
 		let command = "";
 		if ("command" in config && typeof config.command === "string") command = config.command;
-		// Bun.which mirrors the PATH resolution the spawn path uses; no live spawn.
-		const resolved = Bun.which(command);
+		// Resolve the command the way the transport does: honor config.cwd for
+		// relative commands and config.env.PATH for PATH lookup. The real
+		// transport (mcp/transports/stdio.ts) merges config.env and uses
+		// config.cwd before spawning; Bun.which here mirrors that resolution
+		// without spawning. A relative command (e.g. ./bin/server) resolves
+		// against the configured cwd, not the doctor's process cwd.
+		const resolved = resolveStdioCommand(command, config);
 		if (resolved === null) {
 			return {
 				...base,
 				status: "error",
 				summary: `${name}: command not found`,
-				details: [`command "${command}" not found on PATH`],
-				remedy: `Install "${command}" or fix the command in mcp.json`,
+				details: [`command "${command}" not found (checked cwd and PATH from config)`],
+				remedy: `Install "${command}" or fix the command/cwd/env.PATH in mcp.json`,
 			};
 		}
 		return { ...base, status: "ok", summary: `${name}: ${resolved}`, details: [] };
@@ -1033,7 +1244,10 @@ function diagnoseMcpServer(name: string, server: MCPServer, raw?: unknown): Doct
 			details: [error instanceof Error ? error.message : String(error)],
 		};
 	}
-	return { ...base, status: "ok", summary: `${name}: ${url}`, details: [] };
+	// Sanitize the URL for the report: origin only (no userinfo, query, or
+	// fragment) so embedded credentials or tokens never leak into the human
+	// report or --json output. Reuses the same sanitizer as broker URLs.
+	return { ...base, status: "ok", summary: `${name}: ${sanitizeBrokerUrl(url)}`, details: [] };
 }
 // ── setup section ──────────────────────────────────────────────────────────
 // Read-only sanity probes over user/project config surfaces (agents,
@@ -1079,36 +1293,62 @@ function buildKnownAgentNames(discovered: ParsedAgentFields[]): Set<string> {
 	return names;
 }
 
-/** Discover skill names from the three skill roots for autoloadSkills validation. */
-async function discoverSkillNames(agentDir: string, projectDir: string, errors: string[]): Promise<Set<string>> {
-	const dirs = [
-		path.join(agentDir, "skills"),
-		path.join(agentDir, "managed-skills"),
-		path.join(projectDir, ".omp", "skills"),
-	];
+/** Discover skill names from the shared capability loader with the same scope
+ * the runtime uses, so skills discoverable only through ancestor `.omp`
+ * directories, `.agent`/`.agents`, Claude, Codex, GitHub, and extension
+ * providers are recognized — not just the three hard-coded dirs. Keeps
+ * `--agent-dir` isolation by passing `userAgentDir` through the LoadContext. */
+async function discoverSkillNames(
+	agentDir: string | undefined,
+	projectDir: string,
+	scoped: boolean,
+): Promise<Set<string>> {
 	const names = new Set<string>();
-	for (const dir of dirs) {
-		let entries: fs.Dirent[];
-		try {
-			entries = await fs.promises.readdir(dir, { withFileTypes: true });
-		} catch (error) {
-			if (isEnoent(error)) continue;
-			errors.push(`skills: ${error instanceof Error ? error.message : String(error)}`);
-			continue;
-		}
-		for (const entry of entries) {
-			if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-			if (entry.name.startsWith(".")) continue;
-			const skillPath = path.join(dir, entry.name, "SKILL.md");
+	try {
+		const result = await loadCapability<Skill>(skillCapability.id, {
+			cwd: projectDir,
+			userAgentDir: agentDir,
+			providers: scoped ? ["native", "omp-managed"] : undefined,
+		});
+		for (const skill of result.items) names.add(skill.name);
+	} catch {
+		// Capability loader failure must not crash the report; an empty set
+		// degrades to warnings, which the skills collector also reports.
+	}
+	// The native skills provider uses getAgentDir() (not ctx.userAgentDir) for
+	// user-level skills, so a scoped --agent-dir run won't find skills in the
+	// scoped dir through the loader alone. Scan the scoped dir's skills/
+	// and managed-skills/ directly as a fallback — the same dirs the old
+	// hard-coded list covered, but now in addition to the capability loader's
+	// broader discovery (ancestor .omp, Claude, Codex, etc. when unscoped).
+	if (scoped && agentDir !== undefined) {
+		const scopedSkillDirs = [
+			path.join(agentDir, "skills"),
+			path.join(agentDir, "managed-skills"),
+			path.join(projectDir, ".omp", "skills"),
+		];
+		for (const dir of scopedSkillDirs) {
+			let entries: fs.Dirent[];
 			try {
-				const content = await fs.promises.readFile(skillPath, "utf-8");
-				const { frontmatter } = parseFrontmatter(content, { source: skillPath, level: "off" });
-				const rawName = frontmatter.name;
-				if (typeof rawName === "string" && rawName.trim()) names.add(rawName.trim());
-				else names.add(entry.name);
+				entries = await fs.promises.readdir(dir, { withFileTypes: true });
 			} catch (error) {
 				if (isEnoent(error)) continue;
-				// Skip unreadable skill files — the skills collector reports them.
+				continue;
+			}
+			for (const entry of entries) {
+				if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+				if (entry.name.startsWith(".")) continue;
+				const skillPath = path.join(dir, entry.name, "SKILL.md");
+				try {
+					const content = await fs.promises.readFile(skillPath, "utf-8");
+					const { frontmatter } = parseFrontmatter(content, { source: skillPath, level: "off" });
+					const rawName = frontmatter.name;
+					if (typeof rawName === "string" && rawName.trim()) names.add(rawName.trim());
+					else names.add(entry.name);
+				} catch (error) {
+					if (isEnoent(error)) continue;
+					// Skip unreadable skill files — the skills collector reports them.
+				}
 			}
 		}
 	}
@@ -1229,7 +1469,7 @@ async function collectAgentSetupFinding(agentDir: string, projectDir: string, sc
 	// Validate references only when agents were successfully parsed.
 	if (parsed.length > 0) {
 		const knownAgentNames = buildKnownAgentNames(parsed);
-		const knownSkillNames = await discoverSkillNames(agentDir, projectDir, errors);
+		const knownSkillNames = await discoverSkillNames(agentDir, projectDir, scoped);
 		// Build the known tool name set from the same static tool-discovery sources
 		// the runtime uses: built-in names + custom tools from <configDir>/tools/.
 		// Scans the same directories and extensions as loadTools in builtin.ts:
