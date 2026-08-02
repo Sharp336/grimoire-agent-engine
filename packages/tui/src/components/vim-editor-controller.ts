@@ -359,9 +359,7 @@ export class VimEditorController {
 		} else {
 			return false;
 		}
-		this.clearPendingCommand();
-		this.#updateVisualSelection();
-		return true;
+		return this.#finishVisualMotion();
 	}
 
 	clampNormalCursor(): void {
@@ -441,8 +439,24 @@ export class VimEditorController {
 		}
 	}
 
+	#finishVisualMotion(): boolean {
+		this.clearPendingCommand();
+		this.#updateVisualSelection();
+		return true;
+	}
+
 	#handleVisualInput(char: string): boolean {
 		const pending = this.#pending;
+		if (pending?.kind === "g") {
+			this.#pending = undefined;
+			this.#count = "";
+			if (char === "g") {
+				this.#setCursor(pending.count === undefined ? 0 : pending.count - 1, 0);
+				this.#updateVisualSelection();
+			}
+			return true;
+		}
+
 		if (pending?.kind === "visualTextObject") {
 			this.#pending = undefined;
 			if (char === "p") {
@@ -478,19 +492,57 @@ export class VimEditorController {
 				return true;
 			case "h":
 				this.#moveHorizontal(-1, this.#takeCount());
-				this.#updateVisualSelection();
-				return true;
+				return this.#finishVisualMotion();
 			case "j":
 				this.#moveVertical(1, this.#takeCount());
-				this.#updateVisualSelection();
-				return true;
+				return this.#finishVisualMotion();
 			case "k":
 				this.#moveVertical(-1, this.#takeCount());
-				this.#updateVisualSelection();
-				return true;
+				return this.#finishVisualMotion();
 			case "l":
 				this.#moveHorizontal(1, this.#takeCount());
-				this.#updateVisualSelection();
+				return this.#finishVisualMotion();
+			case "w":
+				this.#setAbsoluteCursor(this.#wordForwardPosition(this.#absoluteCursor(), this.#takeCount(), false));
+				return this.#finishVisualMotion();
+			case "W":
+				this.#setAbsoluteCursor(this.#wordForwardPosition(this.#absoluteCursor(), this.#takeCount(), true));
+				return this.#finishVisualMotion();
+			case "b":
+				this.#setAbsoluteCursor(this.#wordBackwardPosition(this.#absoluteCursor(), this.#takeCount(), false));
+				return this.#finishVisualMotion();
+			case "B":
+				this.#setAbsoluteCursor(this.#wordBackwardPosition(this.#absoluteCursor(), this.#takeCount(), true));
+				return this.#finishVisualMotion();
+			case "e":
+				this.#setAbsoluteCursor(this.#wordEndPosition(this.#absoluteCursor(), this.#takeCount(), false));
+				return this.#finishVisualMotion();
+			case "E":
+				this.#setAbsoluteCursor(this.#wordEndPosition(this.#absoluteCursor(), this.#takeCount(), true));
+				return this.#finishVisualMotion();
+			case "0":
+				this.#count = "";
+				this.#setCursor(this.#cursor().line, 0);
+				return this.#finishVisualMotion();
+			case "^":
+				this.#count = "";
+				this.#setCursor(this.#cursor().line, this.#firstNonBlankCol(this.#currentLine()));
+				return this.#finishVisualMotion();
+			case "$": {
+				const lines = this.#lines();
+				const targetLine = Math.min(lines.length - 1, this.#cursor().line + this.#takeCount() - 1);
+				this.#setCursor(targetLine, this.#lineLastCol(lines[targetLine] ?? ""));
+				return this.#finishVisualMotion();
+			}
+			case "G": {
+				const lines = this.#lines();
+				const count = this.#takeOptionalCount();
+				const targetLine = count === undefined ? lines.length - 1 : count - 1;
+				this.#setCursor(targetLine, this.#firstNonBlankCol(lines[targetLine] ?? ""));
+				return this.#finishVisualMotion();
+			}
+			case "g":
+				this.#pending = { kind: "g", count: this.#takeOptionalCount() };
 				return true;
 			case "v":
 				if (this.#visualSelection?.kind === "character") this.enterNormalMode();

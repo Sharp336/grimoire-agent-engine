@@ -484,6 +484,29 @@ describe("Editor Vim input mode", () => {
 	});
 
 	it.each([
+		{ name: "line start", text: "abc", start: "$", motion: "0", expected: "" },
+		{ name: "line end", text: "abc", start: "0", motion: "$", expected: "" },
+		{ name: "first non-blank", text: "  abc", start: "$", motion: "^", expected: "  " },
+		{ name: "next word", text: "one two", start: "0", motion: "w", expected: "wo" },
+		{ name: "previous word", text: "one two", start: "$", motion: "b", expected: "one " },
+		{ name: "word end", text: "one two", start: "0", motion: "e", expected: " two" },
+		{ name: "last line", text: "one\ntwo\nthree", start: "gg", motion: "G", expected: "hree" },
+		{ name: "first line", text: "one\ntwo\nthree", start: "G", motion: "gg", expected: "hree" },
+		{ name: "counted words", text: "one two three", start: "0", motion: "2w", expected: "hree" },
+	])("extends visual selections to $name with printable motions", ({ text, start, motion, expected }) => {
+		const editor = createVimEditor();
+		editor.setText(text);
+		typeText(editor, start);
+		editor.handleInput("v");
+
+		typeText(editor, motion);
+		editor.handleInput("d");
+
+		expect(editor.getText()).toBe(expected);
+		expect(editor.getVimMode()).toBe("normal");
+	});
+
+	it.each([
 		{ name: "Down Arrow", start: "gg", key: "\x1b[B", expected: "three" },
 		{ name: "Up Arrow", start: "G", key: "\x1b[A", expected: "one" },
 	])("extends linewise visual selections with $name", ({ start, key, expected }) => {
