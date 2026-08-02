@@ -1013,7 +1013,12 @@ export class AcpAgent implements Agent {
 				const scope = cwd ? sm.getDefaultActivationScope(cwd) : "global";
 				const disabledIds = sm.getActivationDisabledExtensions(scope);
 				const disabledProviders = sm.getActivationDisabledProviders(scope);
-				const extensions = await loadAllExtensions(cwd, disabledIds, disabledProviders);
+				const extensions = await loadAllExtensions(
+					cwd,
+					disabledIds,
+					disabledProviders,
+					sm.get("mcp.enableProjectConfig") !== false,
+				);
 				return { extensions: extensions as unknown as Array<{ [key: string]: unknown }> };
 			}
 			case "_omp/extensions/toggle": {

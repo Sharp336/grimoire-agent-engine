@@ -43,6 +43,7 @@ export async function loadAllExtensions(
 	cwd?: string,
 	disabledIds?: string[],
 	disabledProviderIds?: string[],
+	enableProjectMcpConfig = true,
 ): Promise<Extension[]> {
 	const extensions: Extension[] = [];
 	const disabledExtensions = new Set<string>(disabledIds ?? []);
@@ -151,13 +152,17 @@ export async function loadAllExtensions(
 						.then(names => new Set(names))
 						.catch(() => new Set<string>())
 				: Promise.resolve(new Set<string>()),
-			projectMcpPath ? readMCPConfigFile(projectMcpPath) : Promise.resolve({} as MCPConfigFile),
+			projectMcpPath && enableProjectMcpConfig
+				? readMCPConfigFile(projectMcpPath)
+				: Promise.resolve({} as MCPConfigFile),
 		]);
 		const projectDisabledServerNames = new Set(projectConfig.disabledServers ?? []);
 		const projectForceEnabledServers = new Set(projectConfig.enabledServers ?? []);
 		const projectDefinitions = new Set(Object.keys(projectConfig.mcpServers ?? {}));
 		const mcps = await loadCapability<MCPServer>("mcps", loadOpts);
-		for (const server of mcps.all) {
+		for (const server of enableProjectMcpConfig
+			? mcps.all
+			: mcps.all.filter(server => server._source.level !== "project")) {
 			const id = makeExtensionId("mcp", server.name);
 			const mcpProjectDefinition = projectDefinitions.has(server.name);
 			const mcpProjectActivation = mcpProjectDefinition
@@ -555,8 +560,13 @@ export function applyDisabledExtensionsToState(state: DashboardState, disabledId
 /**
  * Create initial dashboard state.
  */
-export async function createInitialState(cwd?: string, disabledIds?: string[]): Promise<DashboardState> {
-	const extensions = await loadAllExtensions(cwd, disabledIds);
+export async function createInitialState(
+	cwd?: string,
+	disabledIds?: string[],
+	disabledProviderIds?: string[],
+	enableProjectMcpConfig = true,
+): Promise<DashboardState> {
+	const extensions = await loadAllExtensions(cwd, disabledIds, disabledProviderIds, enableProjectMcpConfig);
 	const tabs = buildProviderTabs(extensions);
 	const tabFiltered = extensions; // "all" tab by default
 	const searchFiltered = tabFiltered;
@@ -593,8 +603,10 @@ export async function refreshState(
 	state: DashboardState,
 	cwd?: string,
 	disabledIds?: string[],
+	disabledProviderIds?: string[],
+	enableProjectMcpConfig = true,
 ): Promise<DashboardState> {
-	const extensions = await loadAllExtensions(cwd, disabledIds);
+	const extensions = await loadAllExtensions(cwd, disabledIds, disabledProviderIds, enableProjectMcpConfig);
 	const tabs = buildProviderTabs(extensions);
 
 	// Get current provider from tabs

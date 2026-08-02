@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { Settings } from "../../../config/settings";
+import { getDisabledProviders, syncDisabledProviders } from "../../../discovery";
 import { readMCPConfigFile } from "../../../mcp/config-writer";
 import { initTheme, theme } from "../../../modes/theme/theme";
 import {
@@ -15,7 +16,7 @@ import {
 } from "./extension-dashboard";
 import { ExtensionList } from "./extension-list";
 import { InspectorPanel } from "./inspector-panel";
-import { extensionRowKey, selectAfterRefresh } from "./state-manager";
+import { extensionRowKey, loadAllExtensions, selectAfterRefresh } from "./state-manager";
 import type { DashboardState, Extension } from "./types";
 
 const cleanupPaths: string[] = [];
@@ -242,6 +243,41 @@ describe("extension activation rendering", () => {
 		}
 	});
 
+	it("clears project legacy MCP activation when enabling an inherited server", async () => {
+		const previousAgentDir = getAgentDir();
+		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-project-legacy-mcp-"));
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
+		cleanupPaths.push(projectRoot, agentDir);
+		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
+		await Bun.write(
+			path.join(agentDir, "mcp.json"),
+			JSON.stringify({ mcpServers: { legacyinherited: { command: "echo" } } }),
+		);
+		await Bun.write(
+			path.join(projectRoot, ".omp", "config.yml"),
+			YAML.stringify({ disabledExtensions: ["mcp:legacyinherited"] }),
+		);
+
+		setAgentDir(agentDir);
+		try {
+			const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
+			const dashboard = await ExtensionDashboard.create(projectRoot, settings, 28);
+			for (const char of "legacyinherited") dashboard.handleInput(char);
+			dashboard.handleInput(" ");
+			await Bun.sleep(250);
+
+			expect((await readMCPConfigFile(path.join(projectRoot, ".omp", "mcp.json"))).enabledServers).toEqual([
+				"legacyinherited",
+			]);
+			const config = YAML.parse(await Bun.file(path.join(projectRoot, ".omp", "config.yml")).text()) as {
+				disabledExtensions?: string[];
+			};
+			expect(config.disabledExtensions ?? []).not.toContain("mcp:legacyinherited");
+		} finally {
+			setAgentDir(previousAgentDir);
+		}
+	});
+
 	it("uses a binary toggle for a complete project MCP definition", async () => {
 		const previousAgentDir = getAgentDir();
 		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-zzlocal-mcp-"));
@@ -286,11 +322,20 @@ describe("extension activation rendering", () => {
 			path.join(projectRoot, ".omp", "mcp.json"),
 			JSON.stringify({ mcpServers: { zzlocalmcp: { command: "echo", args: ["zzlocalmcp"] } } }),
 		);
+		await Bun.write(
+			path.join(agentDir, "mcp.json"),
+			JSON.stringify({ mcpServers: { zzlocalmcp: { command: "echo", args: ["user"] } } }),
+		);
 
 		setAgentDir(agentDir);
 		try {
 			const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
 			settings.set("mcp.enableProjectConfig", false);
+			const server = (await loadAllExtensions(projectRoot, [], [], false)).find(
+				extension => extension.id === "mcp:zzlocalmcp",
+			);
+			expect(server?.source.level).toBe("user");
+			expect((server?.raw as { args?: string[] } | undefined)?.args).toEqual(["user"]);
 			const dashboard = await ExtensionDashboard.create(projectRoot, settings, 28);
 			for (const char of "zzlocalmcp") dashboard.handleInput(char);
 			await Bun.sleep(50);
@@ -558,6 +603,33 @@ describe("extension activation rendering", () => {
 
 		expect(list.selectExtensionByKey(selectedKey)).toBe(true);
 		expect(list.getSelectedExtension()?.id).toBe("skill:skill-b");
+	});
+
+	it("does not replace the shared provider registry while switching activation scope", async () => {
+		const previousAgentDir = getAgentDir();
+		const previousDisabledProviders = getDisabledProviders();
+		const projectRoot = await fs.mkdtemp(path.join(os.homedir(), ".tmp-omp-extension-provider-scope-"));
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
+		cleanupPaths.push(projectRoot, agentDir);
+		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
+		await Bun.write(path.join(agentDir, "config.yml"), YAML.stringify({ disabledProviders: ["claude"] }));
+		await Bun.write(path.join(projectRoot, ".omp", "config.yml"), YAML.stringify({ enabledProviders: ["claude"] }));
+
+		setAgentDir(agentDir);
+		syncDisabledProviders(["claude"]);
+		try {
+			const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
+			const dashboard = await ExtensionDashboard.create(projectRoot, settings, 28);
+			dashboard.handleInput("\u0010");
+			await Bun.sleep(50);
+			dashboard.handleInput("\u0010");
+			await Bun.sleep(50);
+
+			expect(getDisabledProviders()).toEqual(["claude"]);
+		} finally {
+			syncDisabledProviders(previousDisabledProviders);
+			setAgentDir(previousAgentDir);
+		}
 	});
 
 	it("clears a legacy MCP activation entry when enabling the server", async () => {

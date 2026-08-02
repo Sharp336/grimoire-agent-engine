@@ -142,7 +142,15 @@ export class ExtensionDashboard implements Component {
 		this.#canUseProjectScope = sm.getActivationWriteTarget(this.cwd, "project") === "project";
 		this.#activationScope = sm.getDefaultActivationScope(this.cwd);
 		const disabledIds = sm.getActivationDisabledExtensions(this.#activationScope);
-		this.#state = this.#withActivationMetadata(await createInitialState(this.cwd, disabledIds));
+		const disabledProviders = sm.getActivationDisabledProviders(this.#activationScope);
+		this.#state = this.#withActivationMetadata(
+			await createInitialState(
+				this.cwd,
+				disabledIds,
+				disabledProviders,
+				sm.get("mcp.enableProjectConfig") !== false,
+			),
+		);
 
 		const initialMaxVisible = Math.max(3, this.terminalHeight - 9);
 		this.#mainList = new ExtensionList(
@@ -447,7 +455,7 @@ export class ExtensionDashboard implements Component {
 		void sm
 			.setProviderActivation(providerId, next, this.#activationScope)
 			.then(() => {
-				syncCapabilityDisabledProviders(sm.getActivationDisabledProviders(this.#activationScope));
+				if (target === "global") syncCapabilityDisabledProviders(sm.getActivationDisabledProviders("global"));
 				void this.#refreshFromState();
 			})
 			.catch(error =>
@@ -524,10 +532,15 @@ export class ExtensionDashboard implements Component {
 				"project",
 				resolveExistingActivationProjectRootSync(this.cwd) ?? path.resolve(this.cwd),
 			);
+			const clearLegacyActivation =
+				next === "enabled" && sm.getProjectActivation("mcp", extension.name, "project") === "disabled";
 			void Promise.all([
 				setServerDisabled(projectPath, extension.name, next === "disabled"),
 				setServerForceEnabled(projectPath, extension.name, next === "enabled"),
 			])
+				.then(async () => {
+					if (clearLegacyActivation) await sm.setProjectActivation("mcp", extension.name, "inherit", "project");
+				})
 				.catch(error =>
 					logger.warn("Failed to update project MCP activation", { name: extension.name, error: String(error) }),
 				)
@@ -572,7 +585,13 @@ export class ExtensionDashboard implements Component {
 
 		const sm = this.settings ?? Settings.instance;
 		const disabledIds = sm.getActivationDisabledExtensions(this.#activationScope);
-		const nextState = await refreshState(this.#state, this.cwd, disabledIds);
+		const nextState = await refreshState(
+			this.#state,
+			this.cwd,
+			disabledIds,
+			sm.getActivationDisabledProviders(this.#activationScope),
+			sm.get("mcp.enableProjectConfig") !== false,
+		);
 		if (refreshToken !== this.#refreshToken) return;
 		this.#state = this.#withActivationMetadata(nextState);
 
@@ -612,7 +631,6 @@ export class ExtensionDashboard implements Component {
 		if (!this.#canUseProjectScope) return;
 		const sm = this.settings ?? Settings.instance;
 		this.#activationScope = this.#activationScope === "project" ? "global" : "project";
-		syncCapabilityDisabledProviders(sm.getActivationDisabledProviders(this.#activationScope));
 		this.#applyDisabledExtensions(sm.getActivationDisabledExtensions(this.#activationScope));
 		void this.#refreshFromState();
 	}
