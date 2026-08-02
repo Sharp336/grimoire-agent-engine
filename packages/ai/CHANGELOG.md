@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `allowTokenFile` (default `true`) to `ResolveAuthBrokerConfigOptions`: when `false`, `resolveAuthBrokerConfig` skips reading the global `~/.omp/auth-broker.token` file entirely, so a scoped caller (e.g. `omp doctor --agent-dir`) can only resolve broker tokens from env or its own scoped config. Default `true` preserves existing behavior.
+
 ### Fixed
 
 - Fixed Codex WebSocket tool-result turns replaying full history when the preceding tool-call ID required Responses API normalization ([#7279](https://github.com/can1357/oh-my-pi/issues/7279)).
