@@ -65,7 +65,12 @@ const BUILT_IN_DISCOVERY_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 const BUILT_IN_DISCOVERY_NON_AUTHORITATIVE_RETRY_MS = 5 * 60 * 1000;
 
 import type { ApiKeyResolver, FetchImpl } from "@oh-my-pi/pi-ai";
-import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import {
+	createConfiguredOAuthProvider,
+	registerOAuthProvider,
+	unregisterOAuthProvider,
+	unregisterOAuthProviders,
+} from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
@@ -409,6 +414,30 @@ function createLiveConfigHeaders(
 
 function resolveConfigHeaders(headers: Record<string, string> | undefined): Record<string, string> | undefined {
 	return materializeConfigHeaderSources([headers]);
+}
+
+function resolveConfigRecord(values: Record<string, string> | undefined): Record<string, string> | undefined {
+	if (!values) return undefined;
+	const resolved: Record<string, string> = {};
+	for (const [key, value] of Object.entries(values)) {
+		const next = resolveConfigValue(value);
+		if (next) resolved[key] = next;
+	}
+	return Object.keys(resolved).length > 0 ? resolved : undefined;
+}
+
+function resolveConfiguredOAuth(config: NonNullable<ModelsConfig["providers"]>[string]["oauth"]) {
+	if (!config) return undefined;
+	const clientId = resolveConfigValue(config.clientId);
+	const clientSecret = config.clientSecret ? resolveConfigValue(config.clientSecret) : undefined;
+	if (!clientId) return undefined;
+	return {
+		...config,
+		clientId,
+		clientSecret,
+		authorizationParams: resolveConfigRecord(config.authorizationParams),
+		tokenParams: resolveConfigRecord(config.tokenParams),
+	};
 }
 
 function extractGoogleOAuthToken(value: string | undefined): string | undefined {
@@ -778,6 +807,8 @@ function getDisabledProviderIdsFromSettings(): Set<string> {
 	}
 }
 
+const configOAuthSourceOwners = new Map<string, string>();
+
 /** Authentication material returned to legacy extensions for one model request. */
 export type ResolvedRequestAuth =
 	| {
@@ -834,6 +865,7 @@ export class ModelRegistry {
 	#runtimeModelManagers: Map<string, { options: ModelManagerOptions<Api>; sourceId: string }> = new Map();
 	#ignoreLocalModelConfig: boolean;
 	#fetch: FetchImpl;
+	readonly #configOAuthSourceId: string;
 
 	#resolveCommandBackedApiKey(provider: string): CommandApiKeyResolution {
 		const keyConfig = this.#customProviderApiKeys.get(provider);
@@ -887,6 +919,7 @@ export class ModelRegistry {
 				? () => Promise.reject(new Error("network disabled in model-registry runtime test"))
 				: wrapFetchForExtraCa(fetch));
 		this.#modelsConfigFile = ModelsConfigFile.relocate(modelsPath);
+		this.#configOAuthSourceId = `models-config:${this.#modelsConfigFile.path()}`;
 		this.#cacheDbPath = modelsPath ? path.join(path.dirname(modelsPath), "models.db") : undefined;
 		// Set up fallback resolver for custom provider API keys
 		this.authStorage.setFallbackResolver(provider => {
@@ -1070,6 +1103,10 @@ export class ModelRegistry {
 		this.#customProviderApiKeys.clear();
 		this.#keylessProviders.clear();
 		this.#discoverableProviders = [];
+		unregisterOAuthProviders(this.#configOAuthSourceId);
+		for (const [provider, sourceId] of configOAuthSourceOwners) {
+			if (sourceId === this.#configOAuthSourceId) configOAuthSourceOwners.delete(provider);
+		}
 		// Drop config-sourced apiKeys from AuthStorage before reload; entries
 		// removed from models.yml must actually disappear from the resolver, not
 		// linger from the previous parse. The post-load setters below repopulate.
@@ -1607,6 +1644,18 @@ export class ModelRegistry {
 			const authMode = (providerConfig.auth ?? "apiKey") as ProviderAuthMode;
 			if (authMode === "none") {
 				keylessProviders.add(providerName);
+			}
+			const oauth = resolveConfiguredOAuth(providerConfig.oauth);
+			if (oauth) {
+				const previousSourceId = configOAuthSourceOwners.get(providerName);
+				if (previousSourceId && previousSourceId !== this.#configOAuthSourceId)
+					unregisterOAuthProvider(providerName);
+				registerOAuthProvider({
+					...createConfiguredOAuthProvider(providerName, { ...oauth, fetch: this.#fetch }),
+					id: providerName,
+					sourceId: this.#configOAuthSourceId,
+				});
+				configOAuthSourceOwners.set(providerName, this.#configOAuthSourceId);
 			}
 
 			if (providerConfig.discovery && (providerConfig.api || providerConfig.discovery.type === "proxy")) {
