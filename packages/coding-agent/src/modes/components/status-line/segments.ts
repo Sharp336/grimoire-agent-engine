@@ -4,6 +4,7 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, getProjectDir, pathIsWithin, relativePathWithinRoot } from "@oh-my-pi/pi-utils";
 import { type ThemeColor, theme } from "../../../modes/theme/theme";
+import { AgentRegistry } from "../../../registry/agent-registry";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../../tools/render-utils";
 import { fileHyperlink } from "../../../tui/hyperlink";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../../../utils/session-color";
@@ -86,7 +87,11 @@ const piSegment: StatusLineSegment = {
 	render(ctx) {
 		if (ctx.focusedAgentId) {
 			const icon = theme.icon.ghost ? `${theme.icon.ghost} ` : "";
-			return { content: theme.fg("warning", `${icon}${ctx.focusedAgentId} `), visible: true };
+			// Render the focused agent's display name, not its registry id — ids
+			// may be internal (e.g. collision-proof `side.internal`) and are not
+			// user-facing labels.
+			const label = AgentRegistry.global().get(ctx.focusedAgentId)?.displayName ?? ctx.focusedAgentId;
+			return { content: theme.fg("warning", `${icon}${label} `), visible: true };
 		}
 		const content = theme.icon.pi ? `${theme.icon.pi} ` : "";
 		return { content: theme.fg("accent", content), visible: true };
