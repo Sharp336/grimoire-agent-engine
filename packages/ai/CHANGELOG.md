@@ -5,6 +5,7 @@
 ### Added
 
 - Added `allowTokenFile` (default `true`) to `ResolveAuthBrokerConfigOptions`: when `false`, `resolveAuthBrokerConfig` skips reading the global `~/.omp/auth-broker.token` file entirely, so a scoped caller (e.g. `omp doctor --agent-dir`) can only resolve broker tokens from env or its own scoped config. Default `true` preserves existing behavior.
+- Added `validateCredentialPayload`, a shape-only validator for stored credential JSON that lets diagnostics reject malformed rows without exposing secret fields.
 
 ### Fixed
 

@@ -27,6 +27,7 @@
 - Existing XDG installs keep their placeholder key and marketplace registry: the legacy `~/.omp/agent/secret-placeholder.key` and `~/.omp/marketplaces.json` are copied to their XDG locations on first resolution.
 
 ### Fixed
+- Fixed `omp doctor` recovery and diagnostic checks: interrupted SQLite swaps now use provenance and fail closed on unknown state; MCP and browser probes match runtime executability; malformed settings and stored credentials surface as findings without exposing secrets.
 
 - Fixed sessions without a granted `write` tool hiding discoverable and MCP tools behind the unusable `xd://` transport; those sessions now disable device mounting and expose the tools directly without gaining write access.
 - Fixed collab guest prompts being sent to models as unframed developer context, so guest messages now retain their transcript attribution while reaching the model as prioritized user interjections ([#7288](https://github.com/can1357/oh-my-pi/issues/7288)).
