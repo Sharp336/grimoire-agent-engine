@@ -46,6 +46,11 @@ RpcCommandScope: TypeAlias = str
 RpcCommandExecution: TypeAlias = str
 RpcCommandAvailability: TypeAlias = str
 RpcCommandConcurrencyClass: TypeAlias = str
+RpcCommandConfirmation: TypeAlias = Literal["none", "required"]
+AgentKind: TypeAlias = Literal["main", "sub", "advisor"]
+AgentStatus: TypeAlias = Literal["running", "idle", "parked", "aborted"]
+AgentJobStatus: TypeAlias = Literal["running", "completed", "failed", "cancelled"]
+CancelAgentStatus: TypeAlias = Literal["cancelled", "not_found", "already_completed"]
 StopReason: TypeAlias = Literal["stop", "length", "toolUse", "error", "aborted"]
 NotifyType: TypeAlias = Literal["info", "warning", "error"]
 WidgetPlacement: TypeAlias = Literal["aboveEditor", "belowEditor"]
@@ -933,6 +938,51 @@ class PlanApprovalResult:
 
 
 @dataclass(slots=True, frozen=True)
+class AgentSnapshot:
+    id: str
+    display_name: str
+    kind: AgentKind
+    status: AgentStatus
+    session_file: str | None
+    created_at: int
+    last_activity: int
+    has_live_session: bool
+    parent_id: str | None = None
+    activity: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class AgentResult:
+    agent_id: str
+    source: Literal["registry", "job"]
+    agent_status: AgentStatus
+    truncated: bool
+    job_status: AgentJobStatus | None = None
+    result_text: str | None = None
+    error_text: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class AgentSendResult:
+    delivered: bool
+    outcome: Literal["injected", "woken", "revived", "failed"] | None = None
+    error: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class AgentReleaseResult:
+    released: bool
+    tombstone: bool
+
+
+@dataclass(slots=True, frozen=True)
+class CancelAgentResult:
+    id: str
+    status: CancelAgentStatus
+    message: str
+
+
+@dataclass(slots=True, frozen=True)
 class SessionState:
     model: ModelInfo | None
     thinking_level: ThinkingLevel | None
@@ -1169,6 +1219,7 @@ class RpcCommandCapability:
     scope: RpcCommandScope
     execution: RpcCommandExecution
     availability: RpcCommandAvailability
+    confirmation: RpcCommandConfirmation
     required_features: tuple[str, ...]
     input_schema: JsonObject | None = None
     output_schema: JsonObject | None = None
@@ -1363,6 +1414,8 @@ class ExtensionUiRequest:
     provider_id: str | None = None
     prompt_style: bool | None = None
     target_id: str | None = None
+    operation_id: str | None = None
+    command: Literal["cancel_agent", "release_agent"] | None = None
     notify_type: NotifyType | None = None
     status_key: str | None = None
     status_text: str | None = None
@@ -1564,6 +1617,13 @@ class PlanApprovalSettledEvent:
 
 
 @dataclass(slots=True, frozen=True)
+class AgentRegistryUpdateEvent:
+    change: Literal["registered", "status_changed", "removed"]
+    agent: AgentSnapshot
+    type: Literal["agent_registry_update"] = "agent_registry_update"
+
+
+@dataclass(slots=True, frozen=True)
 class UnknownNotification:
     payload: JsonObject
     type: Literal["unknown"] = "unknown"
@@ -1601,6 +1661,7 @@ RpcNotification: TypeAlias = (
     | ExtensionError
     | SettingsUpdateEvent
     | ToolInventoryUpdateEvent
+    | AgentRegistryUpdateEvent
     | RpcAgentEvent
     | PlanStateUpdateEvent
     | PlanApprovalRequestEvent
@@ -2018,6 +2079,97 @@ def parse_plan_state(payload: JsonObject) -> PlanState:
     )
 
 
+def parse_agent_snapshot(payload: JsonObject) -> AgentSnapshot:
+    kind = _require_literal(
+        payload.get("kind"), frozenset({"main", "sub", "advisor"}), field="agent.kind"
+    )
+    status = _require_literal(
+        payload.get("status"),
+        frozenset({"running", "idle", "parked", "aborted"}),
+        field="agent.status",
+    )
+    created_at = payload.get("createdAt")
+    last_activity = payload.get("lastActivity")
+    if isinstance(created_at, bool) or not isinstance(created_at, int):
+        raise ValueError("agent.createdAt must be an integer")
+    if isinstance(last_activity, bool) or not isinstance(last_activity, int):
+        raise ValueError("agent.lastActivity must be an integer")
+    return AgentSnapshot(
+        id=_require_str(payload, "id"),
+        display_name=_require_str(payload, "displayName"),
+        kind=cast(AgentKind, kind),
+        status=cast(AgentStatus, status),
+        session_file=_optional_str(payload, "sessionFile"),
+        created_at=created_at,
+        last_activity=last_activity,
+        has_live_session=_require_bool(payload, "hasLiveSession"),
+        parent_id=_optional_str(payload, "parentId"),
+        activity=_optional_str(payload, "activity"),
+    )
+
+
+def parse_agent_result(payload: JsonObject) -> AgentResult:
+    source = _require_literal(
+        payload.get("source"),
+        frozenset({"registry", "job"}),
+        field="agentResult.source",
+    )
+    agent_status = _require_literal(
+        payload.get("agentStatus"),
+        frozenset({"running", "idle", "parked", "aborted"}),
+        field="agentResult.agentStatus",
+    )
+    raw_job_status = _optional_literal(
+        payload.get("jobStatus"),
+        frozenset({"running", "completed", "failed", "cancelled"}),
+        field="agentResult.jobStatus",
+    )
+    return AgentResult(
+        agent_id=_require_str(payload, "agentId"),
+        source=cast(Literal["registry", "job"], source),
+        agent_status=cast(AgentStatus, agent_status),
+        truncated=_require_bool(payload, "truncated"),
+        job_status=cast(AgentJobStatus | None, raw_job_status),
+        result_text=_optional_str(payload, "resultText"),
+        error_text=_optional_str(payload, "errorText"),
+    )
+
+
+def parse_agent_send_result(payload: JsonObject) -> AgentSendResult:
+    raw_outcome = _optional_literal(
+        payload.get("outcome"),
+        frozenset({"injected", "woken", "revived", "failed"}),
+        field="agentSend.outcome",
+    )
+    return AgentSendResult(
+        delivered=_require_bool(payload, "delivered"),
+        outcome=cast(
+            Literal["injected", "woken", "revived", "failed"] | None, raw_outcome
+        ),
+        error=_optional_str(payload, "error"),
+    )
+
+
+def parse_agent_release_result(payload: JsonObject) -> AgentReleaseResult:
+    return AgentReleaseResult(
+        released=_require_bool(payload, "released"),
+        tombstone=_require_bool(payload, "tombstone"),
+    )
+
+
+def parse_cancel_agent_result(payload: JsonObject) -> CancelAgentResult:
+    status = _require_literal(
+        payload.get("status"),
+        frozenset({"cancelled", "not_found", "already_completed"}),
+        field="cancelAgent.status",
+    )
+    return CancelAgentResult(
+        id=_require_str(payload, "id"),
+        status=cast(CancelAgentStatus, status),
+        message=_require_str(payload, "message"),
+    )
+
+
 def parse_session_state(payload: JsonObject) -> SessionState:
     dump_tools = tuple(
         parse_tool_descriptor(_clone_json_object(item, field="dumpTools[]"))
@@ -2209,6 +2361,14 @@ def parse_rpc_capability_manifest(payload: JsonObject) -> RpcCapabilityManifest:
                 scope=_require_str(command, "scope"),
                 execution=_require_str(command, "execution"),
                 availability=_require_str(command, "availability"),
+                confirmation=cast(
+                    RpcCommandConfirmation,
+                    _require_literal(
+                        command.get("confirmation", "none"),
+                        frozenset({"none", "required"}),
+                        field=f"{field}.confirmation",
+                    ),
+                ),
                 required_features=string_tuple(
                     command.get("requiredFeatures"),
                     field=f"{field}.requiredFeatures",
@@ -2483,6 +2643,15 @@ def parse_extension_ui_request(payload: JsonObject) -> ExtensionUiRequest:
         provider_id=_optional_str(payload, "providerId"),
         prompt_style=_optional_bool(payload, "promptStyle"),
         target_id=_optional_str(payload, "targetId"),
+        operation_id=_optional_str(payload, "operationId"),
+        command=cast(
+            Literal["cancel_agent", "release_agent"] | None,
+            _optional_literal(
+                payload.get("command"),
+                frozenset({"cancel_agent", "release_agent"}),
+                field="extension_ui_request.command",
+            ),
+        ),
         notify_type=cast(
             NotifyType | None,
             _optional_literal(
@@ -2662,6 +2831,19 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
         return EvalCompleteEvent(
             operation_id=_require_str(payload, "operationId"),
             result=parse_eval_history_entry(result),
+        )
+    if event_type == "agent_registry_update":
+        change = _require_literal(
+            payload.get("change"),
+            frozenset({"registered", "status_changed", "removed"}),
+            field="agent_registry_update.change",
+        )
+        raw_agent = payload.get("agent")
+        if not isinstance(raw_agent, dict):
+            raise ValueError("agent_registry_update.agent must be an object")
+        return AgentRegistryUpdateEvent(
+            change=cast(Literal["registered", "status_changed", "removed"], change),
+            agent=parse_agent_snapshot(cast(JsonObject, raw_agent)),
         )
     if event_type in {
         "operation_started",

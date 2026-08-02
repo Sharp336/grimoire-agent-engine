@@ -10,6 +10,7 @@ import {
 	type RpcCommand,
 	type RpcCommandCapability,
 	type RpcCommandConcurrencyClass,
+	type RpcCommandConfirmation,
 	type RpcCommandExecution,
 	type RpcCommandSchedulingClass,
 	type RpcCommandScope,
@@ -39,6 +40,7 @@ interface RpcCommandMetadata {
 	scope: RpcCommandScope;
 	execution: RpcCommandExecution;
 	concurrencyClass?: RpcCommandConcurrencyClass;
+	confirmation: RpcCommandConfirmation;
 	requiredFeatures: readonly string[];
 	availability(context: RpcCapabilityContext): RpcCommandAvailabilityResult;
 	outputSchema?: RpcInputSchema;
@@ -85,6 +87,29 @@ const optionalBoundedStringField = (name: string, maxLength: number): RpcFieldDe
 const optionalStringField = optional("a string", value => typeof value === "string", {
 	type: ["string", "null"],
 });
+const optionalBooleanField = optional("a boolean", value => typeof value === "boolean", {
+	type: ["boolean", "null"],
+});
+const releaseTombstoneField = optional("a boolean (defaults to false)", value => typeof value === "boolean", {
+	type: ["boolean", "null"],
+	default: false,
+});
+const agentIdField = required(
+	"a non-empty agent id of at most 256 UTF-8 bytes",
+	value => typeof value === "string" && value.trim().length > 0 && Buffer.byteLength(value, "utf8") <= 256,
+	{ type: "string", minLength: 1, maxLength: 256, "x-maxUtf8Bytes": 256 },
+);
+const optionalAgentIdField = optional(
+	"a non-empty agent or message id of at most 256 UTF-8 bytes",
+	value => typeof value === "string" && value.trim().length > 0 && Buffer.byteLength(value, "utf8") <= 256,
+	{ type: ["string", "null"], minLength: 1, maxLength: 256, "x-maxUtf8Bytes": 256 },
+);
+const agentMessageField = required(
+	"a non-empty message of at most 65536 UTF-8 bytes",
+	value => typeof value === "string" && value.trim().length > 0 && Buffer.byteLength(value, "utf8") <= 65_536,
+	{ type: "string", minLength: 1, maxLength: 65_536, "x-maxUtf8Bytes": 65_536 },
+);
+const booleanField = required("a boolean", value => typeof value === "boolean", { type: "boolean" });
 const optionalObjectArrayField = optional(
 	"an array of objects",
 	value => Array.isArray(value) && value.every(item => isRecord(item)),
@@ -217,7 +242,10 @@ function requiresFeature(feature: string): Pick<RpcCommandMetadata, "requiredFea
 }
 
 type RpcCommandMetadataOverrides = Partial<
-	Pick<RpcCommandMetadata, "version" | "execution" | "requiredFeatures" | "availability" | "outputSchema">
+	Pick<
+		RpcCommandMetadata,
+		"version" | "execution" | "confirmation" | "requiredFeatures" | "availability" | "outputSchema"
+	>
 >;
 
 function classifiedCommand<TCommand extends RpcCommand>(
@@ -232,6 +260,7 @@ function classifiedCommand<TCommand extends RpcCommand>(
 		scope,
 		execution: metadata.execution ?? "sync",
 		concurrencyClass: scheduling,
+		confirmation: metadata.confirmation ?? "none",
 		requiredFeatures: metadata.requiredFeatures ?? [],
 		availability: metadata.availability ?? (() => AVAILABLE),
 		outputSchema: metadata.outputSchema,
@@ -462,6 +491,52 @@ export const RPC_COMMAND_DEFINITIONS = {
 		"serial",
 		requiresFeature("subagent-event-bus"),
 	),
+	list_agents: agentCommand(
+		{ type: "list_agents" },
+		{ includeAdvisors: optionalBooleanField },
+		"concurrent",
+		requiresFeature("agent-control"),
+	),
+	get_agent: agentCommand(
+		{ type: "get_agent", agentId: "SubagentA" },
+		{ agentId: agentIdField },
+		"concurrent",
+		requiresFeature("agent-control"),
+	),
+	get_agent_result: agentCommand(
+		{ type: "get_agent_result", agentId: "SubagentA" },
+		{ agentId: agentIdField },
+		"concurrent",
+		requiresFeature("agent-control"),
+	),
+	send_agent_message: agentCommand(
+		{ type: "send_agent_message", agentId: "SubagentA", message: "continue" },
+		{ agentId: agentIdField, message: agentMessageField, replyTo: optionalAgentIdField },
+		"control",
+		requiresFeature("agent-control"),
+	),
+	park_agent: agentCommand(
+		{ type: "park_agent", agentId: "SubagentA" },
+		{ agentId: agentIdField },
+		"control",
+		requiresFeature("agent-control"),
+	),
+	resume_agent: agentCommand(
+		{ type: "resume_agent", agentId: "SubagentA" },
+		{ agentId: agentIdField },
+		"control",
+		requiresFeature("agent-control"),
+	),
+	cancel_agent: agentCommand({ type: "cancel_agent", agentId: "SubagentA" }, { agentId: agentIdField }, "control", {
+		...requiresFeature("agent-control"),
+		confirmation: "required",
+	}),
+	release_agent: agentCommand(
+		{ type: "release_agent", agentId: "SubagentA" },
+		{ agentId: agentIdField, tombstone: releaseTombstoneField },
+		"control",
+		{ ...requiresFeature("agent-control"), confirmation: "required" },
+	),
 	set_model: sessionCommand(
 		{ type: "set_model", provider: "anthropic", modelId: "claude" },
 		{ provider: stringField, modelId: stringField },
@@ -568,6 +643,7 @@ export function getRpcCapabilityManifest(context: RpcCapabilityContext = {}): Rp
 				execution: definition.execution,
 				inputSchema: inputSchemaFor(name as RpcCommandType, definition),
 				...(definition.concurrencyClass === undefined ? {} : { concurrencyClass: definition.concurrencyClass }),
+				...(definition.confirmation === undefined ? {} : { confirmation: definition.confirmation }),
 				requiredFeatures: [...definition.requiredFeatures],
 				...(definition.outputSchema === undefined ? {} : { outputSchema: definition.outputSchema }),
 			};
