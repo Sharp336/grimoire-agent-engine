@@ -230,6 +230,10 @@
 
 - Fixed an issue where newly advertised chat models were dropped during dynamic discovery for the `alibaba-token-plan` provider.
 - Fixed a `400` error when forcing a specific tool with DeepSeek reasoning models on OpenCode Zen/Go gateways by automatically downgrading the tool selection mode to `auto` while keeping the tool advertised.
+### Added
+
+- Added FriendliAI provider with dynamic model discovery ([#4770](https://github.com/can1357/oh-my-pi/discussions/4770))
+- Added `OpenAICompat.friendliTemplateReasoningEffort` compat flag. Friendli serves GLM-5.2 reasoning via the same `chat_template_kwargs.enable_thinking` toggle NVIDIA NIM Qwen uses but, unlike NIM, also accepts top-level `reasoning_effort` for the `high`/`max` ladder. The flag tells the chat-completions encoder to emit `reasoning_effort` alongside the template kwarg; without it, selecting high vs max collapsed to identical wire bodies and silently dropped the user's selected effort. Gated to Friendli GLM-5.2 reasoning models since NIM's strict `additionalProperties: false` schema rejects the field.
 
 ## [17.2.4] - 2026-08-01
 

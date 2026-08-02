@@ -297,6 +297,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 	const isCerebras = modelMatchesHost(hostModel, "cerebras");
 	const isZai = modelMatchesHost(hostModel, "zai");
 	const isZhipu = modelMatchesHost(hostModel, "zhipu");
+	const isFriendli = modelMatchesHost(hostModel, "friendli");
 	const supportsZaiReasoningEffort = (isZai || isZhipu) && isGlm52ReasoningEffortModelId(spec.id);
 	const isKilo = modelMatchesHost(hostModel, "kilo");
 	const isKimiModel = isKimiModelId(spec.id);
@@ -377,6 +378,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		isMoonshotNative ||
 		isZai ||
 		isZhipu ||
+		isFriendli ||
 		hostMatchesUrl(baseUrl, "chutes") ||
 		hostMatchesUrl(baseUrl, "fireworks") ||
 		isDirectDeepseekApi;
@@ -469,9 +471,11 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 					? "qwen-chat-template"
 					: isQwen && isFireworks
 						? "openai"
-						: isAlibaba || isQwen
-							? "qwen"
-							: "openai";
+						: isFriendli
+							? "qwen-chat-template"
+							: isAlibaba || isQwen
+								? "qwen"
+								: "openai";
 
 	const compat: ResolvedOpenAICompat = {
 		supportsStore: !isNonStandard,
@@ -551,7 +555,8 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 			(isKimiModel && !isOpenCodeProvider) ||
 			(isDeepseekFamily && Boolean(spec.reasoning)) ||
 			isXiaomiMimo ||
-			(isOpenRouter && Boolean(spec.reasoning)),
+			(isOpenRouter && Boolean(spec.reasoning)) ||
+			(isFriendli && Boolean(spec.reasoning)),
 		requiresReasoningContentForAllAssistantTurns:
 			((isDeepseekFamily && Boolean(spec.reasoning)) || isXiaomiMimo) && !isOpenRouter,
 		// DeepSeek V4 and Xiaomi MiMo reject synthetic reasoning_content placeholders (".") on tool-call turns.
@@ -600,6 +605,14 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 			isLocalOpenAICompatBackend &&
 			provider !== "ollama" &&
 			isQwen38PlusTemplateEffortModelId(spec.id),
+		// Friendli serves GLM-5.2 reasoning models via `chat_template_kwargs.enable_thinking`
+		// (so `thinkingFormat` resolves to `qwen-chat-template` like NVIDIA NIM Qwen), but
+		// unlike NIM it ALSO accepts top-level `reasoning_effort` for the `high`/`max`
+		// ladder exposed by `getModelDefinedEfforts`. The encoder reads this to emit
+		// `reasoning_effort` alongside the template kwarg — otherwise selecting high vs max
+		// produces identical wire bodies. NIM's strict schema rejects top-level
+		// `reasoning_effort`, so the flag is gated to Friendli GLM-5.2 reasoning models only.
+		friendliTemplateReasoningEffort: isFriendli && isGlm52ReasoningEffortModelId(spec.id) && Boolean(spec.reasoning),
 		requiresAssistantContentForToolCalls: isKimiModel || isDirectDeepseekReasoning,
 		cacheControlFormat: isOpenRouter && spec.id.startsWith("anthropic/") ? "anthropic" : undefined,
 		supportsPromptCacheBreakpoints,
@@ -775,6 +788,9 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 		// the chat-completions wire shape, never on Responses.
 		qwenPreserveThinking: false,
 		qwenTemplateReasoningEffort: false,
+		// Friendli's chat-completions-only `reasoning_effort` alongside the template
+		// toggle is never exercised on the Responses path.
+		friendliTemplateReasoningEffort: false,
 		requiresThinkingAsText: false,
 		requiresMistralToolIds: false,
 		requiresToolResultName: false,

@@ -348,7 +348,8 @@ function getModelDefinedEfforts<TApi extends Api>(
 			isZaiThinkingFormat(compat) ||
 			isAnthropicMessagesGlm52ReasoningEffortModel(spec) ||
 			isOllamaCloudGlm52ReasoningEffortModel(spec) ||
-			spec.provider === "baseten"
+			spec.provider === "baseten" ||
+			spec.provider === "friendli"
 		) {
 			return HIGH_MAX_REASONING_EFFORTS;
 		}

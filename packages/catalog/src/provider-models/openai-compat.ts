@@ -2277,6 +2277,104 @@ export function fireworksModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 7.55 FriendliAI
+// ---------------------------------------------------------------------------
+
+export interface FriendliModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+const FRIENDLI_DEFAULT_BASE_URL = "https://api.friendli.ai/serverless/v1";
+
+export function friendliModelManagerOptions(
+	config?: FriendliModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? FRIENDLI_DEFAULT_BASE_URL;
+	const resolveReference = createReferenceResolver(createBundledReferenceMap<"openai-completions">("friendli"));
+	return {
+		providerId: "friendli",
+		dynamicModelsAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "friendli",
+					baseUrl,
+					apiKey,
+					mapModel: (entry, defaults) => {
+						const reference = resolveReference(defaults.id);
+						const raw = entry as Record<string, unknown> & {
+							context_length?: unknown;
+							max_completion_tokens?: unknown;
+							pricing?: Record<string, unknown>;
+							functionality?: Record<string, unknown>;
+							reasoning?: unknown;
+							reasoning_options?: unknown;
+							input_modalities?: unknown;
+							interleaved?: unknown;
+						};
+
+						const contextWindow = toPositiveNumber(
+							raw.context_length,
+							reference?.contextWindow ?? defaults.contextWindow,
+						);
+						const maxTokens = toPositiveNumber(
+							raw.max_completion_tokens,
+							reference?.maxTokens ?? defaults.maxTokens,
+						);
+
+						const pricing = raw.pricing ?? {};
+						const cost = {
+							input: toPositiveNumber(pricing.input, 0) * 1_000_000,
+							output: toPositiveNumber(pricing.output, 0) * 1_000_000,
+							cacheRead: toPositiveNumber(pricing.input_cache_read, 0) * 1_000_000,
+							cacheWrite: toPositiveNumber(pricing.cache_write, 0) * 1_000_000,
+						};
+
+						const functionality = raw.functionality ?? {};
+						const toolCallFlag = toBoolean(functionality.tool_call);
+						// Explicit tool_call: false → supportsTools: false.
+						// Explicit tool_call: true → supportsTools: true (overrides a
+						// cross-provider reference's host-specific false).
+						// Absent → defer to reference/baseModel.
+						const supportsTools = toolCallFlag === false ? false : toolCallFlag === true ? true : undefined;
+						const hasModalities = Array.isArray(raw.input_modalities);
+						const modalities = hasModalities ? (raw.input_modalities as unknown[]) : [];
+						// Only fall back to the reference when the API omits
+						// input_modalities entirely. An explicit text-only array must NOT
+						// inherit vision from a cross-provider reference — the Friendli
+						// deployment declared itself text-only.
+						const vision =
+							modalities.includes("image") || (!hasModalities && (reference?.input.includes("image") ?? false));
+
+						const reasoning = toBoolean(raw.reasoning) ?? reference?.reasoning ?? false;
+						const interleaved = raw.interleaved === "reasoning_content";
+
+						const baseModel = mapWithBundledReference(entry, defaults, reference);
+
+						return {
+							...baseModel,
+							reasoning,
+							input: vision ? ["text", "image"] : ["text"],
+							cost,
+							contextWindow,
+							maxTokens,
+							...(supportsTools !== undefined ? { supportsTools } : {}),
+							...(interleaved
+								? { compat: { ...baseModel.compat, reasoningContentField: "reasoning_content" } }
+								: {}),
+						};
+					},
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 7.6 Fire Pass (Fireworks Kimi K2.6 Turbo subscription)
 // ---------------------------------------------------------------------------
 
@@ -2408,7 +2506,7 @@ function mapWaferModel(
 		cost,
 		contextWindow,
 		maxTokens,
-		...(supportsTools === false ? { supportsTools } : {}),
+		...(supportsTools !== undefined ? { supportsTools } : {}),
 	};
 	if (reasoning) {
 		// Wafer's `wafer.provider` envelope tells us which upstream backend serves
@@ -3900,6 +3998,16 @@ export function basetenModelManagerOptions(
 			const maxTokens = toPositiveNumber(raw.max_completion_tokens, reference?.maxTokens ?? defaults.maxTokens);
 			const baseModel = mapWithBundledReference(entry, defaults, reference);
 
+			// Baseten's reasoning router accepts only the high/max
+			// effort tiers for its GLM-5.2 and gpt-oss routes.
+			const isEffortReasoning = defaults.id === "openai/gpt-oss-120b" || defaults.id === "zai-org/GLM-5.2";
+			const thinking = isEffortReasoning
+				? {
+						mode: "effort" as const,
+						efforts: [Effort.High, Effort.Max],
+					}
+				: undefined;
+
 			return {
 				...baseModel,
 				reasoning,
@@ -3907,10 +4015,12 @@ export function basetenModelManagerOptions(
 				cost,
 				contextWindow,
 				maxTokens,
+				...(thinking ? { thinking } : {}),
 				...(supportsTools === false ? { supportsTools } : {}),
 			};
 		},
 	});
+}
 }
 
 // ---------------------------------------------------------------------------

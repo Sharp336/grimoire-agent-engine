@@ -50030,6 +50030,7 @@
 			"supportsComputerUse": false
 		}
 	},
+	"friendli": {},
 	"github-copilot": {
 		"claude-fable-5": {
 			"id": "claude-fable-5",
