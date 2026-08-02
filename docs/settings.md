@@ -670,7 +670,7 @@ tui:
 | `images.autoResize` | boolean | `true` | Resize large images for model compatibility. |
 | `images.blockImages` | boolean | `false` | Never send images to providers. |
 | `tui.hyperlinks` | enum | `auto` | `off`, `auto`, `always`. |
-| `tui.viewport` | enum | `fullscreen` | `append`, `fullscreen`. `fullscreen` takes over the window: the transcript scrolls inside omp, blocks collapse and expand on click, rows highlight on hover, a drag selects text and releasing copies it, and alt+click copies a whole message. `append` keeps the transcript in the terminal's own scrollback, where the terminal owns scrolling, selection and copy — the right choice if you rely on your terminal's own search or a multiplexer's copy mode. |
+| `tui.viewport` | enum | `fullscreen` | `append`, `fullscreen`. `fullscreen` takes over the window: the transcript scrolls inside omp, blocks collapse and expand on click, rows highlight on hover, a drag selects text and releasing copies it, Alt+click copies any block, and double click copies user or assistant prose. `append` keeps the transcript in the terminal's own scrollback, where the terminal owns scrolling, selection and copy — the right choice if you rely on your terminal's own search or a multiplexer's copy mode. |
 
 For a custom status line, set `statusLine.preset: custom` and configure `statusLine.leftSegments`, `statusLine.rightSegments`, and `statusLine.segmentOptions`.
 

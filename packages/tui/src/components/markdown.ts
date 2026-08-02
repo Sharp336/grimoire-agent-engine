@@ -1,5 +1,6 @@
 import { LRUCache } from "lru-cache/raw";
 import { Lexer, Marked, type Token, Tokenizer, type TokenizerAndRendererExtension, type Tokens } from "marked";
+import type { HitZoneSink } from "../hit-zones";
 import { latexToBlock } from "../latex-block";
 import { inlineMathSpanEnd, isBareMathEnvironment, latexToUnicode } from "../latex-to-unicode";
 import type { SymbolTheme } from "../symbols";
@@ -1733,6 +1734,12 @@ export class Markdown implements Component, NativeScrollbackCommittedRows, Nativ
 		}
 
 		return result;
+	}
+
+	publishHitZones(sink: HitZoneSink): void {
+		const rows = this.#cachedLines?.length ?? 0;
+		const paddingX = this.#ignoreTight ? this.#paddingX : getPaddingX(this.#paddingX);
+		sink.selectionInset(0, rows, paddingX);
 	}
 
 	#renderSignature(width: number, paddingX: number): RenderSignature {
