@@ -879,6 +879,21 @@ describe("Editor Vim input mode", () => {
 		expect(editor.getText()).toBe("");
 	});
 
+	it("keeps fragmented pasted escape bytes inside the paste buffer", () => {
+		const editor = createVimEditor();
+		editor.handleInput("i");
+
+		editor.handleInput("\x1b[200~before");
+		editor.handleInput("\x1b");
+		editor.handleInput("after\x1b[201~");
+
+		expect(editor.getVimMode()).toBe("insert");
+		expect(editor.getText()).toBe("beforeafter");
+		editor.handleInput("\x1b");
+		editor.handleInput("u");
+		expect(editor.getText()).toBe("");
+	});
+
 	it("resets externally supplied text to an editable normal-mode cursor", () => {
 		const editor = createVimEditor();
 		editor.handleInput("i");

@@ -1247,6 +1247,20 @@ export class Editor implements Component, Focusable {
 
 	/** Process one input chunk. Returns the unconsumed tail of a completed paste, if any. */
 	#handleInputChunk(data: string): string | undefined {
+		// Paste buffering owns every byte from its start marker through its end
+		// marker. Process it before Vim commands so pasted control bytes cannot
+		// change editor mode between fragmented stdin chunks.
+		const paste = this.#pasteHandler.process(data);
+		if (paste.handled) {
+			if (paste.pasteContent !== undefined) {
+				this.pasteText(paste.pasteContent);
+				if (paste.remaining.length > 0) {
+					return paste.remaining;
+				}
+			}
+			return;
+		}
+
 		const kb = getKeybindings();
 		// Parse the sequence once; every binding probe below is then a set
 		// lookup instead of re-parsing `data` per probe (~35 probes per key).
@@ -1281,18 +1295,6 @@ export class Editor implements Component, Focusable {
 
 			// Control character - cancel and fall through to normal handling
 			this.#jumpMode = null;
-		}
-
-		// Handle bracketed paste mode
-		const paste = this.#pasteHandler.process(data);
-		if (paste.handled) {
-			if (paste.pasteContent !== undefined) {
-				this.pasteText(paste.pasteContent);
-				if (paste.remaining.length > 0) {
-					return paste.remaining;
-				}
-			}
-			return;
 		}
 
 		// Bulk printable fast path: a multi-scalar run of plain text (paste
