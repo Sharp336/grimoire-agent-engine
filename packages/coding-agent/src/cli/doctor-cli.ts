@@ -788,7 +788,24 @@ async function collectStorageFindings(flags: DoctorCommandFlags): Promise<Doctor
 		return findings;
 	};
 	// Share gc's lock so `omp gc --apply` and `omp doctor --fix` cannot vacuum the same files concurrently.
-	if (flags.fix === true) return withGcLock(flags.agentDir ?? getAgentDir(), collect);
+	// A lock-contention throw must not kill the whole report — return a warning
+	// finding so other sections still report, matching the section's busy-as-warning vocabulary.
+	if (flags.fix === true) {
+		try {
+			return await withGcLock(flags.agentDir ?? getAgentDir(), collect);
+		} catch {
+			return [
+				{
+					id: "storage.gc-lock",
+					category: "storage",
+					status: "warning",
+					summary: "another omp gc/doctor --fix holds the maintenance lock",
+					details: [],
+					remedy: "Re-run after it finishes",
+				},
+			];
+		}
+	}
 	return collect();
 }
 

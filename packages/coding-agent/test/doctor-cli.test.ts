@@ -1392,4 +1392,28 @@ describe("omp doctor", () => {
 		expect(finding?.status).toBe("ok");
 		expect(finding?.summary).toContain("1 valid");
 	});
+
+	test("gc lock contention produces a storage warning without aborting the report", async () => {
+		// Pre-create gc.lock with a live PID so withGcLock cannot acquire it.
+		// The lock is only broken when the PID is dead; a spawned child stays alive.
+		const holder = Bun.spawn({
+			cmd: ["bun", "-e", "const { promise } = Promise.withResolvers(); await promise;"],
+			stdout: "ignore",
+			stderr: "ignore",
+		});
+		try {
+			const lockPath = path.join(root, "gc.lock");
+			await fs.writeFile(lockPath, `${holder.pid}\n${new Date().toISOString()}\n`, "utf8");
+
+			const report = await runDoctorCommand({ flags: { agentDir: root, fix: true } });
+			const lockFinding = report.findings.find(entry => entry.id === "storage.gc-lock");
+			expect(lockFinding?.status).toBe("warning");
+			expect(lockFinding?.summary).toContain("maintenance lock");
+			// Other sections still report — the lock contention did not abort collection.
+			expect(report.findings.some(entry => entry.category === "environment")).toBe(true);
+			expect(report.findings.some(entry => entry.category === "config")).toBe(true);
+		} finally {
+			holder.kill();
+		}
+	});
 });
