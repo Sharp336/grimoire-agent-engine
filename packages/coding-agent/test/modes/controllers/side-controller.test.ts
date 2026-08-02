@@ -69,12 +69,19 @@ function createSideStub(overrides?: {
 				options?: { triggerTurn?: boolean; deliverAs?: string },
 			) => {
 				// Mirror the real AgentSession idle + nextTurn + triggerTurn:false
-				// path (agent-session.ts:5666-5673): persist a custom_message entry
-				// via the session manager seam. Re-injection does NOT go through
-				// this path — it calls agent.appendMessage directly — so only the
-				// boundary creation persists a side-boundary entry.
-				if (options?.deliverAs === "nextTurn" && !options?.triggerTurn && overrides?.persistCustomMessage) {
-					overrides.persistCustomMessage({
+				// path (agent-session.ts:5666-5673): append to BOTH the agent
+				// message stream (agent.appendMessage) AND the persisted session
+				// entries (appendCustomMessageEntry). Re-injection does NOT go
+				// through this path — it calls agent.appendMessage directly — so
+				// only the boundary creation reaches both seams, and re-injection
+				// appends to the agent list only (no second persisted entry).
+				if (options?.deliverAs === "nextTurn" && !options?.triggerTurn) {
+					appendMessage({
+						role: "user",
+						content: message.content,
+						attribution: message.attribution,
+					});
+					overrides?.persistCustomMessage?.({
 						customType: message.customType,
 						content: message.content,
 						display: message.display,
@@ -290,6 +297,16 @@ describe("SideController", () => {
 		expect(boundaryEntries[0]?.display).toBe(true);
 		expect(harness.ctx.focusAgentSession).toHaveBeenCalledWith(SIDE_AGENT_ID);
 
+		// Fix 4: The boundary reached the agent message stream too. Production's
+		// idle nextTurn sendCustomMessage appends to BOTH agent.state.messages and
+		// the persisted session entries — the stub mirrors that dual seam, so the
+		// initial boundary must appear in both.
+		const agentBoundaryMessages = appendMessage.mock.calls.filter(([msg]) =>
+			(msg as { content?: string } | undefined)?.content?.includes('<system-notice cause="side-conversation">'),
+		);
+		expect(agentBoundaryMessages).toHaveLength(1);
+		expect((agentBoundaryMessages[0]?.[0] as { role?: string } | undefined)?.role).toBe("user");
+
 		// Snapshot parent entry ids AFTER ensureOnDisk/flush (the create path
 		// already ran them). The parent should not be modified by the side.
 		const parentEntryIds = harness.parentManager.getEntries().map(e => e.id);
@@ -341,6 +358,16 @@ describe("SideController", () => {
 		expect(
 			recordedEntries.filter(e => e.type === "custom_message" && e.customType === SIDE_BOUNDARY_MESSAGE_TYPE),
 		).toHaveLength(1);
+
+		// Fix 4: Re-injection appended a non-visible developer message to the
+		// agent message stream only — the agent list now has two boundary messages
+		// (one user from creation, one developer from re-injection), while the
+		// persisted entries still have exactly one side-boundary entry (above).
+		const agentBoundaryMessagesAfterReinject = appendMessage.mock.calls.filter(([msg]) =>
+			(msg as { content?: string } | undefined)?.content?.includes('<system-notice cause="side-conversation">'),
+		);
+		expect(agentBoundaryMessagesAfterReinject).toHaveLength(2);
+		expect((agentBoundaryMessagesAfterReinject[1]?.[0] as { role?: string } | undefined)?.role).toBe("developer");
 
 		// --- Stage 4: start("end") destroys file + ref, parent entries unchanged ---
 		const sideFile = capturedForkArgs?.[4]?.sessionFile;
@@ -566,5 +593,59 @@ describe("SideController", () => {
 		// Cleanup.
 		await controller.start("end");
 		expect(AgentRegistry.global().get(SIDE_AGENT_ID)).toBeUndefined();
+	});
+
+	it("runs the question submit outside the lifecycle queue so dispose is not blocked by an in-flight prompt", async () => {
+		tempDir = TempDir.createSync("@omp-side-submit-queue-");
+		const harness = createContext(tempDir);
+
+		// Gate the prompt: signal when entered, block until released. This
+		// proves the submit closure runs OUTSIDE the lifecycle queue — if it
+		// were inside, dispose() would queue behind the gated prompt and
+		// could not complete until the gate is released.
+		const promptEntered = Promise.withResolvers<void>();
+		const promptGate = Promise.withResolvers<void>();
+		const promptFn = async () => {
+			promptEntered.resolve();
+			await promptGate.promise;
+		};
+
+		const { stub } = createSideStub({
+			activeToolNames: ["read", "bash"],
+			prompt: promptFn,
+		});
+
+		let sideFile: string | undefined;
+		const realForkFrom = SessionManager.forkFrom;
+		vi.spyOn(SessionManager, "forkFrom").mockImplementation(async (...args) => {
+			sideFile = args[4]?.sessionFile;
+			return realForkFrom(...args);
+		});
+		createAgentSessionSpy(stub, vi.fn(), () => sideFile);
+
+		const controller = new SideController(harness.ctx);
+
+		// Fire start without awaiting — it will block inside the gated prompt.
+		const startPromise = controller.start("question");
+		await promptEntered.promise;
+
+		// The side exists and the prompt has been entered (blocked on the gate).
+		expect(AgentRegistry.global().get(SIDE_AGENT_ID)).toBeDefined();
+		if (!sideFile) throw new Error("side file was not created");
+		expect(fs.existsSync(sideFile)).toBe(true);
+
+		// Fire dispose without awaiting — it must NOT block on the prompt gate.
+		const disposePromise = controller.dispose();
+
+		// Disposal completes BEFORE the prompt gate is released: the submit
+		// runs outside the lifecycle queue, so dispose queues behind the
+		// already-resolved #startImpl, not behind the in-flight prompt.
+		await disposePromise;
+		expect(AgentRegistry.global().get(SIDE_AGENT_ID)).toBeUndefined();
+		expect(fs.existsSync(sideFile)).toBe(false);
+
+		// Release the prompt gate and await start — it resolves cleanly.
+		promptGate.resolve();
+		await startPromise;
 	});
 });
