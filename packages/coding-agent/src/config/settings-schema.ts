@@ -247,6 +247,8 @@ interface SettingMarkers {
 	credential?: true;
 	/** The value may be disclosed by the external `get_settings` RPC command. */
 	rpcReadable?: true;
+	/** The value may be changed by `set_settings`; writable values are also readable. */
+	rpcWritable?: true;
 }
 
 interface BooleanDef extends SettingMarkers {
@@ -602,7 +604,7 @@ export const SETTINGS_SCHEMA = {
 
 	symbolPreset: {
 		type: "enum",
-		rpcReadable: true,
+		rpcWritable: true,
 		values: ["unicode", "nerd", "ascii"] as const,
 		default: "unicode",
 		ui: {
@@ -620,7 +622,7 @@ export const SETTINGS_SCHEMA = {
 
 	colorBlindMode: {
 		type: "boolean",
-		rpcReadable: true,
+		rpcWritable: true,
 		default: false,
 		ui: {
 			tab: "appearance",
@@ -633,7 +635,7 @@ export const SETTINGS_SCHEMA = {
 	// Status line
 	"statusLine.preset": {
 		type: "enum",
-		rpcReadable: true,
+		rpcWritable: true,
 		values: ["default", "minimal", "compact", "full", "nerd", "ascii", "custom"] as const,
 		default: "default",
 		ui: {
@@ -655,7 +657,7 @@ export const SETTINGS_SCHEMA = {
 
 	"statusLine.separator": {
 		type: "enum",
-		rpcReadable: true,
+		rpcWritable: true,
 		values: ["powerline", "powerline-thin", "slash", "pipe", "block", "none", "ascii"] as const,
 		default: "powerline-thin",
 		ui: {
@@ -677,7 +679,7 @@ export const SETTINGS_SCHEMA = {
 
 	"statusLine.sessionAccent": {
 		type: "boolean",
-		rpcReadable: true,
+		rpcWritable: true,
 		default: true,
 		ui: {
 			tab: "appearance",
@@ -689,7 +691,7 @@ export const SETTINGS_SCHEMA = {
 
 	"statusLine.transparent": {
 		type: "boolean",
-		rpcReadable: true,
+		rpcWritable: true,
 		default: false,
 		ui: {
 			tab: "appearance",
@@ -701,7 +703,7 @@ export const SETTINGS_SCHEMA = {
 	},
 	"statusLine.compactThinkingLevel": {
 		type: "boolean",
-		rpcReadable: true,
+		rpcWritable: true,
 		default: false,
 		ui: {
 			tab: "appearance",
@@ -819,7 +821,7 @@ export const SETTINGS_SCHEMA = {
 
 	"statusLine.showHookStatus": {
 		type: "boolean",
-		rpcReadable: true,
+		rpcWritable: true,
 		default: true,
 		ui: {
 			tab: "appearance",
@@ -838,7 +840,7 @@ export const SETTINGS_SCHEMA = {
 	// Images and terminal
 	"terminal.showImages": {
 		type: "boolean",
-		rpcReadable: true,
+		rpcWritable: true,
 		default: true,
 		ui: {
 			tab: "appearance",
@@ -851,7 +853,7 @@ export const SETTINGS_SCHEMA = {
 
 	"images.autoResize": {
 		type: "boolean",
-		rpcReadable: true,
+		rpcWritable: true,
 		default: true,
 		ui: {
 			tab: "appearance",
@@ -863,7 +865,7 @@ export const SETTINGS_SCHEMA = {
 
 	"images.blockImages": {
 		type: "boolean",
-		rpcReadable: true,
+		rpcWritable: true,
 		default: false,
 		ui: {
 			tab: "appearance",
@@ -908,7 +910,7 @@ export const SETTINGS_SCHEMA = {
 
 	"terminal.showProgress": {
 		type: "boolean",
-		rpcReadable: true,
+		rpcWritable: true,
 		default: false,
 		ui: {
 			tab: "appearance",
@@ -920,7 +922,7 @@ export const SETTINGS_SCHEMA = {
 
 	"tui.textSizing": {
 		type: "boolean",
-		rpcReadable: true,
+		rpcWritable: true,
 		default: false,
 		ui: {
 			tab: "appearance",
@@ -933,7 +935,7 @@ export const SETTINGS_SCHEMA = {
 
 	"tui.renderMermaid": {
 		type: "boolean",
-		rpcReadable: true,
+		rpcWritable: true,
 		default: true,
 		ui: {
 			tab: "appearance",
@@ -957,7 +959,7 @@ export const SETTINGS_SCHEMA = {
 
 	"tui.titleState": {
 		type: "boolean",
-		rpcReadable: true,
+		rpcWritable: true,
 		default: true,
 		ui: {
 			tab: "appearance",
@@ -970,7 +972,7 @@ export const SETTINGS_SCHEMA = {
 
 	"tui.hyperlinks": {
 		type: "enum",
-		rpcReadable: true,
+		rpcWritable: true,
 		values: ["off", "auto", "always"] as const,
 		default: "auto",
 		ui: {
@@ -983,7 +985,7 @@ export const SETTINGS_SCHEMA = {
 	},
 	"tui.tight": {
 		type: "boolean",
-		rpcReadable: true,
+		rpcWritable: true,
 		default: false,
 		ui: {
 			tab: "appearance",
@@ -994,7 +996,7 @@ export const SETTINGS_SCHEMA = {
 	},
 	"tui.scrollbackRebuild": {
 		type: "boolean",
-		rpcReadable: true,
+		rpcWritable: true,
 		default: false,
 		ui: {
 			tab: "appearance",
@@ -1007,7 +1009,7 @@ export const SETTINGS_SCHEMA = {
 
 	"display.shimmer": {
 		type: "enum",
-		rpcReadable: true,
+		rpcWritable: true,
 		values: ["classic", "kitt", "disabled"] as const,
 		default: "classic",
 		ui: {
@@ -1025,7 +1027,7 @@ export const SETTINGS_SCHEMA = {
 
 	"display.smoothStreaming": {
 		type: "boolean",
-		rpcReadable: true,
+		rpcWritable: true,
 		default: true,
 		ui: {
 			tab: "appearance",
@@ -1048,7 +1050,7 @@ export const SETTINGS_SCHEMA = {
 
 	"display.showTokenUsage": {
 		type: "boolean",
-		rpcReadable: true,
+		rpcWritable: true,
 		default: false,
 		ui: {
 			tab: "appearance",
@@ -1060,7 +1062,7 @@ export const SETTINGS_SCHEMA = {
 
 	"display.cacheMissMarker": {
 		type: "boolean",
-		rpcReadable: true,
+		rpcWritable: true,
 		default: false,
 		ui: {
 			tab: "appearance",
@@ -1072,7 +1074,7 @@ export const SETTINGS_SCHEMA = {
 
 	"display.collapseCompacted": {
 		type: "boolean",
-		rpcReadable: true,
+		rpcWritable: true,
 		default: true,
 		ui: {
 			tab: "appearance",
@@ -1085,7 +1087,7 @@ export const SETTINGS_SCHEMA = {
 
 	showHardwareCursor: {
 		type: "boolean",
-		rpcReadable: true,
+		rpcWritable: true,
 		default: true, // will be computed based on platform if undefined
 		ui: {
 			tab: "appearance",
@@ -1097,7 +1099,7 @@ export const SETTINGS_SCHEMA = {
 
 	"tui.imeSafeCursor": {
 		type: "boolean",
-		rpcReadable: true,
+		rpcWritable: true,
 		default: false,
 		ui: {
 			tab: "appearance",
@@ -4786,7 +4788,7 @@ export const SETTINGS_SCHEMA = {
 
 	"task.showResolvedModelBadge": {
 		type: "boolean",
-		rpcReadable: true,
+		rpcWritable: true,
 		default: false,
 		ui: {
 			tab: "appearance",
@@ -5609,6 +5611,11 @@ export type SettingValue<P extends SettingPath> = Schema[P] extends { type: "boo
 								? D
 								: never;
 
+/** Path-correlated setting value used by transactional mutation APIs. */
+export type SettingChange = {
+	[P in SettingPath]: { path: P; value: SettingValue<P> };
+}[SettingPath];
+
 /** Get the default value for a setting path */
 export function getDefault<P extends SettingPath>(path: P): SettingValue<P> {
 	return SETTINGS_SCHEMA[path].default as SettingValue<P>;
@@ -5637,12 +5644,145 @@ export function isCredential(path: SettingPath): boolean {
  * Whether a setting's VALUE may be disclosed to an external client.
  *
  * Explicit opt-in only: an unannotated setting is withheld, so a new setting
- * can never leak by omission. This is independent of `ui.secret`, which
- * governs TUI masking and must not authorize disclosure.
+ * can never leak by omission. Credentials are an unconditional veto even when
+ * a marker is accidentally added.
  */
 export function isRpcReadable(path: SettingPath): boolean {
+	if (isCredential(path)) return false;
 	const def = SETTINGS_SCHEMA[path];
-	return "rpcReadable" in def && def.rpcReadable === true;
+	return ("rpcReadable" in def && def.rpcReadable === true) || ("rpcWritable" in def && def.rpcWritable === true);
+}
+
+/** Whether a setting may be changed by the external `set_settings` RPC command. */
+export function isRpcWritable(path: SettingPath): boolean {
+	if (isCredential(path)) return false;
+	const def = SETTINGS_SCHEMA[path];
+	return "rpcWritable" in def && def.rpcWritable === true;
+}
+
+export const MAX_RPC_SETTING_VALUE_BYTES = 64 * 1024;
+
+export type RpcSettingValidationCode =
+	| "unknown_path"
+	| "credential_setting"
+	| "read_only_setting"
+	| "invalid_value"
+	| "invalid_type"
+	| "invalid_enum"
+	| "out_of_range"
+	| "value_too_large";
+
+export type RpcSettingValidationResult =
+	| { ok: true; path: SettingPath; value: SettingValue<SettingPath> }
+	| { ok: false; code: RpcSettingValidationCode; error: string };
+
+function jsonValueError(value: unknown, seen: Set<object>): string | undefined {
+	if (value === null || value === undefined) return "must not be null or undefined";
+	if (typeof value === "string" || typeof value === "boolean") return undefined;
+	if (typeof value === "number") return Number.isFinite(value) ? undefined : "must contain only finite numbers";
+	if (typeof value !== "object") return "must be JSON-serializable";
+	if (seen.has(value)) return "must not contain cycles";
+	seen.add(value);
+	try {
+		if (Array.isArray(value)) {
+			const descriptors = Object.getOwnPropertyDescriptors(value);
+			const keys = Object.keys(descriptors).filter(key => key !== "length");
+			if (keys.length !== value.length || keys.some((key, index) => key !== String(index))) {
+				return "must contain only dense JSON array items";
+			}
+			if (Reflect.ownKeys(value).some(key => typeof key === "symbol")) return "must not contain symbol properties";
+			for (const key of keys) {
+				const descriptor = descriptors[key];
+				if (!descriptor.enumerable || descriptor.get || descriptor.set)
+					return "must not contain property accessors";
+				const error = jsonValueError(descriptor.value, seen);
+				if (error) return error;
+			}
+			return undefined;
+		}
+		const prototype = Object.getPrototypeOf(value);
+		if (prototype !== Object.prototype && prototype !== null)
+			return "must not contain objects with custom prototypes";
+		if (Reflect.ownKeys(value).some(key => typeof key === "symbol")) return "must not contain symbol properties";
+		for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
+			if (!descriptor.enumerable || descriptor.get || descriptor.set)
+				return "must contain only plain data properties";
+			const error = jsonValueError(descriptor.value, seen);
+			if (error) return error;
+		}
+		return undefined;
+	} finally {
+		seen.delete(value);
+	}
+}
+
+/**
+ * Canonical runtime validator for externally supplied setting values.
+ * This deliberately performs no coercion and authorizes paths only through
+ * the schema marker.
+ */
+export function validateRpcSettingValue(path: unknown, value: unknown): RpcSettingValidationResult {
+	if (typeof path !== "string" || !Object.hasOwn(SETTINGS_SCHEMA, path)) {
+		return { ok: false, code: "unknown_path", error: "Unknown settings path" };
+	}
+	const settingPath = path as SettingPath;
+	if (isCredential(settingPath)) {
+		return { ok: false, code: "credential_setting", error: `Setting is credential-protected: ${path}` };
+	}
+	if (!isRpcWritable(settingPath)) {
+		return { ok: false, code: "read_only_setting", error: `Setting is not writable over RPC: ${path}` };
+	}
+	const jsonError = jsonValueError(value, new Set());
+	if (jsonError) return { ok: false, code: "invalid_value", error: `Invalid value for ${path}: ${jsonError}` };
+	const encodedBytes = new TextEncoder().encode(JSON.stringify(value)).byteLength;
+	if (encodedBytes > MAX_RPC_SETTING_VALUE_BYTES) {
+		return {
+			ok: false,
+			code: "value_too_large",
+			error: `Value for ${path} exceeds ${MAX_RPC_SETTING_VALUE_BYTES} bytes`,
+		};
+	}
+
+	const def = SETTINGS_SCHEMA[settingPath] as SettingDef;
+	switch (def.type) {
+		case "boolean":
+			if (typeof value !== "boolean")
+				return { ok: false, code: "invalid_type", error: `Setting ${path} requires a boolean` };
+			break;
+		case "string":
+			if (typeof value !== "string")
+				return { ok: false, code: "invalid_type", error: `Setting ${path} requires a string` };
+			break;
+		case "number": {
+			if (typeof value !== "number")
+				return { ok: false, code: "invalid_type", error: `Setting ${path} requires a finite number` };
+			const bounds = def.ui as (UiNumber & { min?: number; max?: number }) | undefined;
+			if ((bounds?.min !== undefined && value < bounds.min) || (bounds?.max !== undefined && value > bounds.max)) {
+				return { ok: false, code: "out_of_range", error: `Setting ${path} is outside its allowed range` };
+			}
+			break;
+		}
+		case "enum":
+			if (typeof value !== "string")
+				return { ok: false, code: "invalid_type", error: `Setting ${path} requires a string enum value` };
+			if (!def.values.includes(value))
+				return { ok: false, code: "invalid_enum", error: `Invalid enum value for ${path}` };
+			break;
+		case "array":
+			if (!Array.isArray(value))
+				return { ok: false, code: "invalid_type", error: `Setting ${path} requires an array` };
+			break;
+		case "record":
+			if (
+				typeof value !== "object" ||
+				value === null ||
+				Array.isArray(value) ||
+				(Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)
+			)
+				return { ok: false, code: "invalid_type", error: `Setting ${path} requires a plain record` };
+			break;
+	}
+	return { ok: true, path: settingPath, value: value as SettingValue<SettingPath> };
 }
 
 /** Get UI metadata for a path (undefined if no UI) */

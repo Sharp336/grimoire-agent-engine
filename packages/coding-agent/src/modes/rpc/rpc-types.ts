@@ -31,6 +31,13 @@ import type {
 import type { TodoPhase } from "../../tools/todo";
 import type { RpcMessagesPage } from "./rpc-messages";
 
+export type RpcJsonValue = string | number | boolean | null | RpcJsonValue[] | { [key: string]: RpcJsonValue };
+
+export interface RpcSettingsChange {
+	path: string;
+	value: RpcJsonValue;
+}
+
 // ============================================================================
 // RPC Commands (stdin)
 // ============================================================================
@@ -57,6 +64,7 @@ export type RpcCommand =
 	| { id?: string; type: "set_advisor_enabled"; enabled: boolean }
 	| { id?: string; type: "get_available_commands" }
 	| { id?: string; type: "get_settings"; tab?: SettingTab }
+	| { id?: string; type: "set_settings"; changes: RpcSettingsChange[] }
 	| { id?: string; type: "set_todos"; phases: TodoPhase[] }
 	| { id?: string; type: "set_host_tools"; tools: RpcHostToolDefinition[] }
 	| { id?: string; type: "set_host_uri_schemes"; schemes: RpcHostUriSchemeDefinition[] }
@@ -260,6 +268,11 @@ export interface RpcConfigUpdateFrame {
 	model?: Model;
 	thinkingLevel?: ThinkingLevel;
 	advisor?: RpcAdvisorState;
+}
+
+/** Pull-only invalidation signal; clients should call get_settings for current values. */
+export interface RpcSettingsUpdateFrame {
+	type: "settings_update";
 }
 
 export interface RpcExtensionErrorFrame {
@@ -501,6 +514,13 @@ export type RpcResponse =
 			id?: string;
 			type: "response";
 			command: "get_settings";
+			success: true;
+			data: SettingsSnapshot;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "set_settings";
 			success: true;
 			data: SettingsSnapshot;
 	  }
@@ -786,6 +806,7 @@ type RpcManifestEvent =
 	| RpcAvailableCommandsUpdateFrame
 	| RpcSessionEventFrame
 	| RpcExtensionUIRequest
+	| RpcSettingsUpdateFrame
 	| RpcHostToolCallRequest
 	| RpcHostToolCancelRequest
 	| RpcHostUriRequest
@@ -814,6 +835,7 @@ export const RPC_EVENT_TYPES = eventInventory([
 	"command_output",
 	"session_info_update",
 	"config_update",
+	"settings_update",
 	"extension_ui_request",
 	"extension_error",
 	"host_tool_call",

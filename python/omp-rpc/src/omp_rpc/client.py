@@ -68,6 +68,9 @@ from .protocol import (
     SessionState,
     SessionStats,
     SessionWorkspaceRoot,
+    SettingsChange,
+    SettingsSnapshot,
+    SettingsUpdateEvent,
     SteeringMode,
     StreamingBehavior,
     ThinkingLevel,
@@ -106,6 +109,7 @@ from .protocol import (
     parse_session_state,
     parse_session_stats,
     parse_session_workspace_roots,
+    parse_settings_snapshot,
     parse_thinking_level_cycle_result,
     parse_todo_phases,
 )
@@ -116,6 +120,7 @@ UiRequestListener = Callable[[ExtensionUiRequest], None]
 ExtensionErrorListener = Callable[[ExtensionError], None]
 ReadyListener = Callable[[ReadyEvent], None]
 UnknownNotificationListener = Callable[[UnknownNotification], None]
+SettingsUpdateListener = Callable[[SettingsUpdateEvent], None]
 OperationTerminalListener = Callable[[RpcOperationTerminalEvent], None]
 AgentStartListener = Callable[[AgentStartEvent], None]
 AgentEndListener = Callable[[AgentEndEvent], None]
@@ -577,6 +582,7 @@ class RpcClient:
         self._operation_terminal_listeners: list[OperationTerminalListener] = []
         self._ui_request_listeners: list[UiRequestListener] = []
         self._extension_error_listeners: list[ExtensionErrorListener] = []
+        self._settings_update_listeners: list[SettingsUpdateListener] = []
         self._protocol_error_listeners: list[ProtocolErrorListener] = []
         self._listener_error_listeners: list[ListenerErrorListener] = []
 
@@ -767,6 +773,12 @@ class RpcClient:
     def on_ready(self, listener: ReadyListener) -> Callable[[], None]:
         self._ready_listeners.append(listener)
         return lambda: self._remove_listener(self._ready_listeners, listener)
+
+    def on_settings_update(
+        self, listener: SettingsUpdateListener
+    ) -> Callable[[], None]:
+        self._settings_update_listeners.append(listener)
+        return lambda: self._remove_listener(self._settings_update_listeners, listener)
 
     def on_agent_start(self, listener: AgentStartListener) -> Callable[[], None]:
         return self._add_typed_event_listener("agent_start", listener)
@@ -981,6 +993,15 @@ class RpcClient:
 
     def get_capabilities(self) -> RpcCapabilityManifest:
         return parse_rpc_capability_manifest(self._request("get_capabilities"))
+
+    def get_settings(self, tab: str | None = None) -> SettingsSnapshot:
+        return parse_settings_snapshot(self._request("get_settings", tab=tab))
+
+    def set_settings(self, changes: Sequence[SettingsChange]) -> SettingsSnapshot:
+        payload: list[JsonValue] = [
+            {"path": change.path, "value": change.value} for change in changes
+        ]
+        return parse_settings_snapshot(self._request("set_settings", changes=payload))
 
     def set_model(self, provider: str, model_id: str) -> ModelInfo:
         payload = self._request("set_model", provider=provider, modelId=model_id)
@@ -2293,6 +2314,14 @@ class RpcClient:
                         "extension_error",
                         notification.type,
                         self._extension_error_listeners,
+                        notification,
+                    )
+                    continue
+                if isinstance(notification, SettingsUpdateEvent):
+                    self._dispatch_listeners(
+                        "settings_update",
+                        notification.type,
+                        self._settings_update_listeners,
                         notification,
                     )
                     continue

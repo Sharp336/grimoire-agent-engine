@@ -53,6 +53,7 @@ import { handleGetSettings } from "./rpc-get-settings";
 import { claimRpcInput } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
 import { type RpcOperationHandle, RpcOperationManager } from "./rpc-operations";
+import { handleSetSettings } from "./rpc-set-settings";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import type {
 	RpcCancelOperationResult,
@@ -414,7 +415,9 @@ export function dispatchRpcInputFrame(parsed: unknown, deps: RpcInputFrameDeps):
 	if (validation.scheduling !== "serial") {
 		const task = (async () => {
 			try {
-				deps.output(await deps.handleCommand(command));
+				const response = await deps.handleCommand(command);
+				deps.output(response);
+				if (response.success && response.command === "set_settings") deps.output({ type: "settings_update" });
 			} catch (err: unknown) {
 				const message = err instanceof Error ? err.message : String(err);
 				deps.output(deps.errorResponse(command.id, command.type, message));
@@ -425,7 +428,9 @@ export function dispatchRpcInputFrame(parsed: unknown, deps: RpcInputFrameDeps):
 	}
 
 	return (async () => {
-		deps.output(await deps.handleCommand(command));
+		const response = await deps.handleCommand(command);
+		deps.output(response);
+		if (response.success && response.command === "set_settings") deps.output({ type: "settings_update" });
 	})();
 }
 
@@ -1480,6 +1485,9 @@ export async function runRpcMode(
 
 			case "get_settings":
 				return handleGetSettings(session.settings, id, command.tab);
+
+			case "set_settings":
+				return handleSetSettings(session.settings, id, command.changes);
 
 			// =================================================================
 			// Thinking

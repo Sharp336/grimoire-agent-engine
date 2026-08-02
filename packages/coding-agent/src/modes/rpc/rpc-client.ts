@@ -63,6 +63,8 @@ import type {
 	RpcSessionInfoResult,
 	RpcSessionInfoUpdateFrame,
 	RpcSessionState,
+	RpcSettingsChange,
+	RpcSettingsUpdateFrame,
 	RpcSubagentEventFrame,
 	RpcSubagentLifecycleFrame,
 	RpcSubagentMessagesResult,
@@ -112,6 +114,7 @@ export type RpcCommandOutputListener = (frame: RpcCommandOutputFrame) => void;
 export type RpcSessionInfoUpdateListener = (frame: RpcSessionInfoUpdateFrame) => void;
 export type RpcConfigUpdateListener = (frame: RpcConfigUpdateFrame) => void;
 export type RpcExtensionErrorListener = (frame: RpcExtensionErrorFrame) => void;
+export type RpcSettingsUpdateListener = (frame: RpcSettingsUpdateFrame) => void;
 export type RpcExtensionUIRequestListener = (request: RpcExtensionUIRequest) => void;
 
 export interface RpcClientHostUriContext {
@@ -335,6 +338,10 @@ function isRpcConfigUpdateFrame(value: unknown): value is RpcConfigUpdateFrame {
 	);
 }
 
+function isRpcSettingsUpdateFrame(value: unknown): value is RpcSettingsUpdateFrame {
+	return isRecord(value) && value.type === "settings_update";
+}
+
 function isRpcExtensionErrorFrame(value: unknown): value is RpcExtensionErrorFrame {
 	if (!isRecord(value)) return false;
 	return (
@@ -441,6 +448,7 @@ export class RpcClient {
 	#sessionInfoUpdateListeners = new Set<RpcSessionInfoUpdateListener>();
 	#configUpdateListeners = new Set<RpcConfigUpdateListener>();
 	#extensionErrorListeners = new Set<RpcExtensionErrorListener>();
+	#settingsUpdateListeners = new Set<RpcSettingsUpdateListener>();
 	#pendingRequests: Map<string, { resolve: (response: RpcResponse) => void; reject: (error: Error) => void }> =
 		new Map();
 	#customTools: RpcClientCustomTool[] = [];
@@ -783,6 +791,12 @@ export class RpcClient {
 		return () => this.#configUpdateListeners.delete(listener);
 	}
 
+	/** Subscribe to persisted settings invalidations. Pull values with getSettings(). */
+	onSettingsUpdate(listener: RpcSettingsUpdateListener): () => void {
+		this.#settingsUpdateListeners.add(listener);
+		return () => this.#settingsUpdateListeners.delete(listener);
+	}
+
 	/** Subscribe to extension handler failures. */
 	onExtensionError(listener: RpcExtensionErrorListener): () => void {
 		this.#extensionErrorListeners.add(listener);
@@ -1049,6 +1063,12 @@ export class RpcClient {
 	 */
 	async getSettings(tab?: SettingTab): Promise<SettingsSnapshot> {
 		const response = await this.#send(tab === undefined ? { type: "get_settings" } : { type: "get_settings", tab });
+		return this.#getData(response);
+	}
+
+	/** Persist a validated batch of global settings changes. */
+	async setSettings(changes: readonly RpcSettingsChange[]): Promise<SettingsSnapshot> {
+		const response = await this.#send({ type: "set_settings", changes: [...changes] });
 		return this.#getData(response);
 	}
 
@@ -1702,6 +1722,11 @@ export class RpcClient {
 			for (const listener of this.#configUpdateListeners) {
 				listener(frame);
 			}
+			return;
+		}
+
+		if (isRpcSettingsUpdateFrame(data)) {
+			for (const listener of this.#settingsUpdateListeners) listener(data);
 			return;
 		}
 

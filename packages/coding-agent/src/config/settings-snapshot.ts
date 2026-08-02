@@ -132,13 +132,16 @@ function getSnapshotOptions(path: SettingPath): ReadonlyArray<SubmenuOption> | "
 	return options;
 }
 
-export function buildSettingsSnapshot(settings: Settings, tab?: SettingTab): SettingsSnapshot {
+function buildSelectedSettingsSnapshot(
+	settings: Settings,
+	paths: readonly SettingPath[],
+	tabs: readonly SettingTab[],
+): SettingsSnapshot {
 	const entries: SettingSnapshotEntry[] = [];
-	for (const path of Object.keys(SETTINGS_SCHEMA) as SettingPath[]) {
+	for (const path of paths) {
 		const ui = getUi(path);
 		const options = getSnapshotOptions(path);
 		const renderable = isSettingPanelRenderable(path);
-		if (tab !== undefined && ui?.tab !== tab) continue;
 		const visible = renderable ? getSettingPanelVisibility(path, settings, disclosesValue) : false;
 		const values = getEnumValues(path);
 		const description = getDescription(path);
@@ -171,10 +174,30 @@ export function buildSettingsSnapshot(settings: Settings, tab?: SettingTab): Set
 		} else entry.redacted = true;
 		entries.push(entry);
 	}
-	const tabs = (tab === undefined ? SETTING_TABS : [tab]).map(id => ({
-		id,
-		...TAB_METADATA[id],
-		groups: TAB_GROUPS[id],
-	}));
-	return { tabs, settings: entries };
+	return {
+		tabs: tabs.map(id => ({
+			id,
+			...TAB_METADATA[id],
+			groups: TAB_GROUPS[id],
+		})),
+		settings: entries,
+	};
+}
+
+export function buildSettingsSnapshot(settings: Settings, tab?: SettingTab): SettingsSnapshot {
+	const paths = (Object.keys(SETTINGS_SCHEMA) as SettingPath[]).filter(
+		path => tab === undefined || getUi(path)?.tab === tab,
+	);
+	return buildSelectedSettingsSnapshot(settings, paths, tab === undefined ? SETTING_TABS : [tab]);
+}
+
+/** Build the authoritative post-mutation view without disclosing unrelated settings. */
+export function buildSettingsSnapshotForPaths(settings: Settings, paths: readonly SettingPath[]): SettingsSnapshot {
+	const selected = new Set(paths);
+	const orderedPaths = (Object.keys(SETTINGS_SCHEMA) as SettingPath[]).filter(path => selected.has(path));
+	const changedTabs = new Set(
+		orderedPaths.map(path => getUi(path)?.tab).filter((tab): tab is SettingTab => tab !== undefined),
+	);
+	const orderedTabs = SETTING_TABS.filter(tab => changedTabs.has(tab));
+	return buildSelectedSettingsSnapshot(settings, orderedPaths, orderedTabs);
 }
