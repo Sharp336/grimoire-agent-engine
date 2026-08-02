@@ -767,14 +767,11 @@ export class CustomEditor extends Editor {
 		for (const chunk of drained) this.handleInput(chunk);
 	};
 
-	/** Track `promise` as an in-flight paste so subsequent `handleInput` calls queue behind it,
-	 *  then drain the queue once it settles. Codex PR #3602 review: without this, a trailing
-	 *  keystroke (Enter most painfully) in the same stdin read processes synchronously while the
-	 *  clipboard read is still pending — submit fires with the text but `pendingImages` is still
-	 *  empty and the image lands on the *next* draft instead. */
-	#trackAsyncPaste(promise: Promise<unknown>): void {
+	/** Track an in-flight paste so subsequent input cannot overtake its editor mutation. */
+	trackAsyncPaste<T>(promise: Promise<T>): Promise<T> {
 		this.#pasteInFlight++;
 		void promise.then(this.#onPasteSettled, this.#onPasteSettled);
+		return promise;
 	}
 
 	handleInput(data: string): void {
@@ -831,13 +828,13 @@ export class CustomEditor extends Editor {
 			}
 			if (content.length === 0 && this.onPasteImage) {
 				this.prepareVimInsertMutation();
-				this.#trackAsyncPaste(Promise.resolve(this.onPasteImage()));
+				void this.trackAsyncPaste(Promise.resolve(this.onPasteImage()));
 				return;
 			}
 			const imagePaths = extractImagePastePathsFromText(content);
 			if (imagePaths && this.onPasteImagePath) {
 				this.prepareVimInsertMutation();
-				this.#trackAsyncPaste(
+				void this.trackAsyncPaste(
 					(async () => {
 						for (const p of imagePaths) await this.onPasteImagePath?.(p);
 					})(),
@@ -890,14 +887,14 @@ export class CustomEditor extends Editor {
 			// Intercept configured image paste (async - fires and handles result)
 			if (acceptsTextEntry && this.#matchesAction(canonical, "app.clipboard.pasteImage") && this.onPasteImage) {
 				this.prepareVimInsertMutation();
-				this.#trackAsyncPaste(Promise.resolve(this.onPasteImage()));
+				void this.trackAsyncPaste(Promise.resolve(this.onPasteImage()));
 				return;
 			}
 
 			// Intercept configured raw text paste and serialize follow-up input until it settles.
 			if (acceptsTextEntry && this.#matchesAction(canonical, "app.clipboard.pasteTextRaw") && this.onPasteTextRaw) {
 				this.prepareVimInsertMutation();
-				this.#trackAsyncPaste(Promise.resolve(this.onPasteTextRaw()));
+				void this.trackAsyncPaste(Promise.resolve(this.onPasteTextRaw()));
 				return;
 			}
 

@@ -585,7 +585,7 @@ export class InputController {
 				target.pasteText(text);
 				this.ctx.ui.requestRender();
 			},
-			pasteImage: async image => {
+			pasteImage: image => {
 				// Images can only land in the main editor — when a modal Input is
 				// focused, refuse rather than dump the binary blob in a hidden buffer.
 				const focused = this.ctx.ui.getFocused();
@@ -593,7 +593,11 @@ export class InputController {
 					this.ctx.showStatus("Image paste is not supported in this prompt");
 					return;
 				}
-				await this.#normalizeAndInsertPastedImage(image, `Unsupported pasted image format: ${image.mimeType}`);
+				return this.ctx.editor
+					.trackAsyncPaste(
+						this.#normalizeAndInsertPastedImage(image, `Unsupported pasted image format: ${image.mimeType}`),
+					)
+					.then(() => {});
 			},
 			showStatus: message => this.ctx.showStatus(message),
 		});

@@ -1,5 +1,6 @@
 import { describe, expect, it, type Mock, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { type KeyId, matchesKey } from "@oh-my-pi/pi-tui";
@@ -34,6 +35,8 @@ type FakeEditor = {
 	setCustomKeyHandler(key: string, handler: () => void): void;
 	clearCustomKeyHandlers(): void;
 	pasteText(text: string): void;
+	insertText(text: string): void;
+	trackAsyncPaste(promise: Promise<unknown>): Promise<unknown>;
 	imageLinks?: (string | undefined)[];
 	pendingImages: ImageContent[];
 	pendingImageLinks: (string | undefined)[];
@@ -76,6 +79,10 @@ async function createContext() {
 	const resetDisplay = vi.fn();
 	const showModelSelector = vi.fn();
 	const requestRender = vi.fn();
+	const trackAsyncPaste = vi.fn((promise: Promise<unknown>) => {
+		void promise.catch(() => {});
+		return promise;
+	});
 	const showError = vi.fn();
 	let focused: unknown;
 	const addInputListener = vi.fn((listener: InputListener) => {
@@ -122,6 +129,10 @@ async function createContext() {
 		pasteText(text: string) {
 			editorText += text;
 		},
+		insertText(text: string) {
+			editorText += text;
+		},
+		trackAsyncPaste,
 		setActionKeys,
 		setCustomKeyHandler,
 		clearCustomKeyHandlers,
@@ -152,6 +163,9 @@ async function createContext() {
 		retryLoader: undefined,
 		autoCompactionEscapeHandler: undefined,
 		retryEscapeHandler: undefined,
+		sessionManager: {
+			putBlob: vi.fn(async () => ({ displayPath: "blob:image" })),
+		},
 		session: session as unknown as InteractiveModeContext["session"],
 		viewSession: session as unknown as InteractiveModeContext["viewSession"],
 		keybindings: {
@@ -237,6 +251,7 @@ async function createContext() {
 			canBranchBtw,
 			handleBtwCopyKey,
 			canCopyBtw,
+			trackAsyncPaste,
 			showError,
 		},
 	};
@@ -430,6 +445,34 @@ describe("InputController keybinding setup", () => {
 
 		expect(result).toBeUndefined();
 		expect(spies.handleBtwBranchKey).not.toHaveBeenCalled();
+	});
+
+	it("tracks enhanced image paste before accepting follow-up input", async () => {
+		await Settings.init({ inMemory: true });
+		try {
+			const { InputController, ctx, spies } = await createContext();
+			const controller = new InputController(ctx);
+			controller.setupKeyHandlers();
+			const packet = (metadata: string, payload?: string) =>
+				`\x1b]5522;${metadata}${payload === undefined ? "" : `;${payload}`}\x1b\\`;
+			const listeners = registeredInputListeners(spies.addInputListener);
+			const imageMime = Buffer.from("image/png", "utf8").toString("base64");
+
+			dispatchInput(listeners, packet("type=read:status=OK:pw=c2VjcmV0"));
+			dispatchInput(listeners, packet(`type=read:status=DATA:mime=${imageMime}`));
+			dispatchInput(listeners, packet("type=read:status=DONE"));
+			dispatchInput(listeners, packet("type=read:status=OK"));
+			dispatchInput(
+				listeners,
+				packet(`type=read:status=DATA:mime=${imageMime}`, Buffer.from("image-bytes").toString("base64")),
+			);
+			dispatchInput(listeners, packet("type=read:status=DONE"));
+
+			expect(spies.trackAsyncPaste).toHaveBeenCalledTimes(1);
+			await spies.trackAsyncPaste.mock.calls[0]?.[0];
+		} finally {
+			resetSettingsForTest();
+		}
 	});
 
 	it("routes the smart-paste shortcut to a focused login input", async () => {
