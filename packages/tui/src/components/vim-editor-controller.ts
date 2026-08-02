@@ -177,7 +177,13 @@ export class VimEditorController {
 		}
 		const printable = extractPrintableText(data);
 		const graphemes = printable ? [...segmenter.segment(printable)] : [];
-		if (graphemes.length !== 1) return printable !== undefined;
+		if (graphemes.length !== 1) {
+			if (printable === undefined) {
+				this.#pending = undefined;
+				this.#count = "";
+			}
+			return printable !== undefined;
+		}
 		const char = graphemes[0]?.segment;
 		if (!char) return false;
 		if (this.#mode === "visual") return this.#handleVisualInput(char);

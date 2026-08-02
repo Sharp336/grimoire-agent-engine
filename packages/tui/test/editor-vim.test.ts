@@ -405,6 +405,23 @@ describe("Editor Vim input mode", () => {
 		expect(editor.getText()).toBe("ab");
 	});
 
+	it("clears pending counts and operators before fallback navigation", () => {
+		const counted = createVimEditor();
+		counted.setText("abcde");
+		typeText(counted, "03");
+		counted.handleInput("\x1b[C");
+		counted.handleInput("x");
+		expect(counted.getText()).toBe("acde");
+
+		const operated = createVimEditor();
+		operated.setText("one two");
+		typeText(operated, "0d");
+		operated.handleInput("\x1b[C");
+		operated.handleInput("w");
+		expect(operated.getText()).toBe("one two");
+		expect(operated.getCursor()).toEqual({ line: 0, col: 4 });
+	});
+
 	it.each([
 		{ name: "Right Arrow", text: "abc", start: "0", key: "\x1b[C", expected: "c" },
 		{ name: "Left Arrow", text: "abc", start: "$", key: "\x1b[D", expected: "a" },
@@ -932,6 +949,7 @@ describe("Editor Vim input mode", () => {
 		editor.handleInput("u");
 		expect(editor.getText()).toBe("");
 	});
+
 	for (const fixture of VIM_TERMINAL_ENVIRONMENTS) {
 		it(`preserves Vim text objects, redo, and visual selections under ${fixture.name}`, () => {
 			withVimTerminalEnvironment(fixture.env, () => {
