@@ -17,5 +17,10 @@ async function chromiumCanLaunch(): Promise<boolean> {
 	}
 }
 
-/** Gate for tests that launch a real Chromium: `describe.skipIf(!CHROMIUM_AVAILABLE)`. */
-export const CHROMIUM_AVAILABLE = await chromiumCanLaunch();
+let availability: Promise<boolean> | undefined;
+
+/** Cached launch probe for test modules that need a synchronous `skipIf` gate. */
+export function chromiumAvailable(): Promise<boolean> {
+	availability ??= chromiumCanLaunch();
+	return availability;
+}
