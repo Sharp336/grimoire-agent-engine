@@ -7,6 +7,7 @@ import shutil
 import signal
 import sys
 import tempfile
+from pathlib import Path
 import textwrap
 import threading
 import time
@@ -23,11 +24,16 @@ from omp_rpc import (
 from omp_rpc.client import _RpcFrameDecoder
 from omp_rpc.protocol import JsonObject, JsonValue
 
+CAPABILITY_MANIFEST_JSON = (
+    Path(__file__).parent / "fixtures" / "rpc-capability-manifest.json"
+).read_text(encoding="utf-8")
+
 FAKE_SERVER = textwrap.dedent(
     """
     import json
     import sys
     import time
+    capability_manifest = json.loads(__CAPABILITY_MANIFEST_JSON__)
 
     def usage():
         return {
@@ -278,19 +284,7 @@ FAKE_SERVER = textwrap.dedent(
             respond(
                 request_id,
                 "get_capabilities",
-                {
-                    "applicationApiVersion": 1,
-                    "commands": [
-                        {
-                            "name": "get_capabilities",
-                            "version": 1,
-                            "scheduling": "serial",
-                        }
-                    ],
-                    "events": ["ready", "agent_end"],
-                    "extensionUiMethods": ["confirm"],
-                    "hostProtocols": ["tools", "uris"],
-                },
+                capability_manifest,
             )
         elif command_type == "get_state":
             respond(request_id, "get_state", current_state())
@@ -519,7 +513,7 @@ FAKE_SERVER = textwrap.dedent(
         else:
             respond(request_id, command_type, success=False, error=f"unsupported: {command_type}")
     """
-)
+).replace("__CAPABILITY_MANIFEST_JSON__", repr(CAPABILITY_MANIFEST_JSON))
 
 
 V2_MESSAGES_SERVER = textwrap.dedent(
@@ -1137,8 +1131,11 @@ class RpcClientTests(unittest.TestCase):
         with self.make_client() as client:
             capabilities = client.get_capabilities()
             self.assertEqual(capabilities.application_api_version, 1)
+            self.assertEqual(
+                capabilities.commands[0].id, "rpc.command.get_capabilities"
+            )
             self.assertEqual(capabilities.commands[0].name, "get_capabilities")
-            self.assertEqual(capabilities.commands[0].scheduling, "serial")
+            self.assertEqual(capabilities.commands[0].concurrency_class, "serial")
 
             state = client.get_state()
             self.assertEqual(state.session_id, "fake-session")

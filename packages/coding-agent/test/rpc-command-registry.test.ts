@@ -7,7 +7,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-command-registry";
 
 describe("RPC command registry", () => {
-	test("covers every command with a valid example and advertised scheduling class", () => {
+	test("projects every validated definition into a truthful descriptor", () => {
 		const manifest = getRpcCapabilityManifest();
 		const definitions = Object.entries(RPC_COMMAND_DEFINITIONS);
 
@@ -21,14 +21,30 @@ describe("RPC command registry", () => {
 				command: definition.example,
 				scheduling: definition.scheduling,
 			});
-			expect(
-				manifest.commands.some(
-					capability =>
-						capability.name === name &&
-						capability.version === definition.version &&
-						capability.scheduling === definition.scheduling,
-				),
-			).toBe(true);
+			const capability = manifest.commands.find(descriptor => descriptor.name === name);
+			expect(capability).toBeDefined();
+			expect(capability?.id).toBe(`rpc.command.${name}`);
+			expect(capability?.version).toBe(definition.version);
+			expect(capability?.scope).toBe(definition.scope);
+			expect(capability?.execution).toBe(definition.execution);
+			expect(capability?.concurrencyClass).toBe(definition.concurrencyClass);
+			expect(capability?.requiredFeatures).toEqual([...definition.requiredFeatures]);
+			expect(capability?.inputSchema?.properties.type).toEqual({ const: name });
+			expect(capability?.inputSchema?.additionalProperties).toBe(false);
+		}
+	});
+
+	test("evaluates runtime-gated availability on every manifest query", () => {
+		const unavailable = getRpcCapabilityManifest();
+		const available = getRpcCapabilityManifest({ features: new Set(["subagent-event-bus", "model.fast-mode"]) });
+
+		for (const name of ["set_subagent_subscription", "get_subagents", "get_subagent_messages", "set_fast_mode"]) {
+			const conditional = unavailable.commands.find(command => command.name === name);
+			const enabled = available.commands.find(command => command.name === name);
+			expect(conditional?.availability).toBe("conditional");
+			expect(conditional?.disabledReason).toBeUndefined();
+			expect(enabled?.availability).toBe("available");
+			expect(enabled?.disabledReason).toBeUndefined();
 		}
 	});
 
@@ -68,6 +84,11 @@ describe("RPC command registry", () => {
 			ok: true,
 			command: { id: "ok-1", type: "compact" },
 			scheduling: "serial",
+		});
+		const prompt = getRpcCapabilityManifest().commands.find(command => command.name === "prompt");
+		expect(prompt?.inputSchema?.properties.streamingBehavior).toEqual({
+			type: ["string", "null"],
+			enum: ["steer", "followUp", null],
 		});
 	});
 });

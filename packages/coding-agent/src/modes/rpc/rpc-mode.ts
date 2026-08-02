@@ -12,6 +12,7 @@
  */
 import { once } from "node:events";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { serviceTierFamily } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { $env, isRecord, readLines, Snowflake } from "@oh-my-pi/pi-utils";
@@ -747,7 +748,13 @@ export async function runRpcMode(
 	process.env.PI_NOTIFICATIONS = "off";
 
 	const frameEncoder = new RpcFrameEncoder();
-	const capabilityManifest = getRpcCapabilityManifest();
+	const getCapabilityManifest = () => {
+		const features = new Set<string>();
+		if (eventBus) features.add("subagent-event-bus");
+		if (session.model && serviceTierFamily(session.model)) features.add("model.fast-mode");
+		return getRpcCapabilityManifest({ features });
+	};
+	const capabilityManifest = getCapabilityManifest();
 	// Ordered stdout writer honoring backpressure: chunked v2 frames are produced
 	// lazily by the encoder and written one physical line at a time, so a near-limit
 	// logical frame never materializes its full base64 transport in memory.
@@ -1065,7 +1072,7 @@ export async function runRpcMode(
 			}
 
 			case "get_capabilities":
-				return success(id, "get_capabilities", capabilityManifest);
+				return success(id, "get_capabilities", getCapabilityManifest());
 
 			// =================================================================
 			// Prompting
@@ -1615,8 +1622,8 @@ export async function runRpcMode(
 			}
 
 			default: {
-				const unknownCommand = command as { type: string };
-				return error(id, unknownCommand.type, `Unknown command: ${unknownCommand.type}`, "unsupported_command");
+				const exhaustiveCommand: never = command;
+				return exhaustiveCommand;
 			}
 		}
 	};

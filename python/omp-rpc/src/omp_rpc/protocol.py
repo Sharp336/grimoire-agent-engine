@@ -29,7 +29,10 @@ RpcOperationCancellationCode: TypeAlias = Literal[
     "session_changed",
     "client_disconnected",
 ]
-RpcCommandSchedulingClass: TypeAlias = Literal["serial", "concurrent", "control"]
+RpcCommandScope: TypeAlias = str
+RpcCommandExecution: TypeAlias = str
+RpcCommandAvailability: TypeAlias = str
+RpcCommandConcurrencyClass: TypeAlias = str
 StopReason: TypeAlias = Literal["stop", "length", "toolUse", "error", "aborted"]
 NotifyType: TypeAlias = Literal["info", "warning", "error"]
 WidgetPlacement: TypeAlias = Literal["aboveEditor", "belowEditor"]
@@ -86,9 +89,6 @@ _STEERING_MODE_VALUES: Final[frozenset[str]] = frozenset({"all", "one-at-a-time"
 _INTERRUPT_MODE_VALUES: Final[frozenset[str]] = frozenset({"immediate", "wait"})
 _SESSION_ACTIVITY_PHASE_VALUES: Final[frozenset[str]] = frozenset(
     {"provider", "maintenance", "idle"}
-)
-_RPC_COMMAND_SCHEDULING_VALUES: Final[frozenset[str]] = frozenset(
-    {"serial", "concurrent", "control"}
 )
 _STOP_REASON_VALUES: Final[frozenset[str]] = frozenset(
     {"stop", "length", "toolUse", "error", "aborted"}
@@ -920,10 +920,24 @@ class SessionStats:
 
 
 @dataclass(slots=True, frozen=True)
+class RpcCapabilityDisabledReason:
+    code: str
+    message: str
+
+
+@dataclass(slots=True, frozen=True)
 class RpcCommandCapability:
+    id: str
     name: str
     version: int
-    scheduling: RpcCommandSchedulingClass
+    scope: RpcCommandScope
+    execution: RpcCommandExecution
+    availability: RpcCommandAvailability
+    required_features: tuple[str, ...]
+    input_schema: JsonObject | None = None
+    output_schema: JsonObject | None = None
+    concurrency_class: RpcCommandConcurrencyClass | None = None
+    disabled_reason: RpcCapabilityDisabledReason | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -1556,51 +1570,72 @@ def parse_rpc_capability_manifest(payload: JsonObject) -> RpcCapabilityManifest:
     if not isinstance(raw_api_version, int) or isinstance(raw_api_version, bool):
         raise ValueError("capabilities.applicationApiVersion must be an integer")
 
+    def string_tuple(value: object, *, field: str) -> tuple[str, ...]:
+        if not isinstance(value, list):
+            raise ValueError(f"{field} must be a list")
+        result: list[str] = []
+        for index, item in enumerate(value):
+            if not isinstance(item, str):
+                raise ValueError(f"{field}[{index}] must be a string")
+            result.append(item)
+        return tuple(result)
+
     raw_commands = payload.get("commands")
     if not isinstance(raw_commands, list):
         raise ValueError("capabilities.commands must be a list")
     commands: list[RpcCommandCapability] = []
     for index, raw_command in enumerate(raw_commands):
-        command = _clone_json_object(
-            raw_command, field=f"capabilities.commands[{index}]"
-        )
+        field = f"capabilities.commands[{index}]"
+        command = _clone_json_object(raw_command, field=field)
         version = command.get("version")
         if not isinstance(version, int) or isinstance(version, bool):
-            raise ValueError(
-                f"capabilities.commands[{index}].version must be an integer"
+            raise ValueError(f"{field}.version must be an integer")
+
+        raw_disabled_reason = command.get("disabledReason")
+        disabled_reason = None
+        if raw_disabled_reason is not None:
+            reason = _clone_json_object(
+                raw_disabled_reason, field=f"{field}.disabledReason"
             )
+            disabled_reason = RpcCapabilityDisabledReason(
+                code=_require_str(reason, "code"),
+                message=_require_str(reason, "message"),
+            )
+
         commands.append(
             RpcCommandCapability(
+                id=_require_str(command, "id"),
                 name=_require_str(command, "name"),
                 version=version,
-                scheduling=cast(
-                    RpcCommandSchedulingClass,
-                    _require_literal(
-                        command.get("scheduling"),
-                        _RPC_COMMAND_SCHEDULING_VALUES,
-                        field=f"capabilities.commands[{index}].scheduling",
-                    ),
+                scope=_require_str(command, "scope"),
+                execution=_require_str(command, "execution"),
+                availability=_require_str(command, "availability"),
+                required_features=string_tuple(
+                    command.get("requiredFeatures"),
+                    field=f"{field}.requiredFeatures",
                 ),
+                input_schema=_optional_json_object(
+                    command.get("inputSchema"), field=f"{field}.inputSchema"
+                ),
+                output_schema=_optional_json_object(
+                    command.get("outputSchema"), field=f"{field}.outputSchema"
+                ),
+                concurrency_class=_optional_str(command, "concurrencyClass"),
+                disabled_reason=disabled_reason,
             )
         )
-
-    def string_list(field: str) -> tuple[str, ...]:
-        value = payload.get(field)
-        if not isinstance(value, list):
-            raise ValueError(f"capabilities.{field} must be a list")
-        result: list[str] = []
-        for index, item in enumerate(value):
-            if not isinstance(item, str):
-                raise ValueError(f"capabilities.{field}[{index}] must be a string")
-            result.append(item)
-        return tuple(result)
 
     return RpcCapabilityManifest(
         application_api_version=raw_api_version,
         commands=tuple(commands),
-        events=string_list("events"),
-        extension_ui_methods=string_list("extensionUiMethods"),
-        host_protocols=string_list("hostProtocols"),
+        events=string_tuple(payload.get("events"), field="capabilities.events"),
+        extension_ui_methods=string_tuple(
+            payload.get("extensionUiMethods"),
+            field="capabilities.extensionUiMethods",
+        ),
+        host_protocols=string_tuple(
+            payload.get("hostProtocols"), field="capabilities.hostProtocols"
+        ),
     )
 
 

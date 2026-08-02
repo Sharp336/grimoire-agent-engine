@@ -45,8 +45,25 @@ The initial ready frame uses protocol v1 and advertises the opt-in lossless tran
   "capabilities": {
     "applicationApiVersion": 1,
     "commands": [
-      { "name": "get_capabilities", "version": 1, "scheduling": "serial" },
-      { "name": "abort", "version": 1, "scheduling": "control" }
+      {
+        "id": "rpc.command.get_capabilities",
+        "name": "get_capabilities",
+        "version": 1,
+        "scope": "host",
+        "execution": "sync",
+        "availability": "available",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string" },
+            "type": { "const": "get_capabilities" }
+          },
+          "required": ["type"],
+          "additionalProperties": false
+        },
+        "concurrencyClass": "serial",
+        "requiredFeatures": []
+      }
     ],
     "events": ["ready", "agent_start", "agent_end"],
     "extensionUiMethods": ["select", "confirm", "input"],
@@ -56,8 +73,18 @@ The initial ready frame uses protocol v1 and advertises the opt-in lossless tran
 ```
 
 The example capability arrays are abbreviated. The actual ready frame contains
-the complete manifest. Hosts can refresh it at runtime with
-`{ id?, type: "get_capabilities" }`.
+the complete startup snapshot. Hosts can query current, session-dependent
+availability at any time with `{ id?, type: "get_capabilities" }`.
+
+Command `id` is the stable protocol identity; `name` is the command sent in the
+`type` field. `scope`, `execution`, and `availability` describe where and how the
+command can run. An unavailable command includes a machine-readable
+`disabledReason: { code, message }`; conditional commands declare their
+`requiredFeatures` without pretending that a runtime prerequisite is always met.
+`inputSchema` is derived from the same field definitions used for
+wire validation. `outputSchema` and `concurrencyClass` are omitted when the
+server cannot advertise them truthfully. Command versions are assigned per
+registry entry.
 
 Clients that support protocol v2 SHOULD immediately send:
 
@@ -116,9 +143,10 @@ Important edge behavior from runtime:
 - Runtime validation rejects unknown commands and malformed fields before a
   handler runs. Error responses preserve a valid request `id` and use
   `code: "unsupported_command"` or `code: "invalid_request"`.
-- Each command has an advertised scheduling class. `serial` commands preserve
-  input order, `concurrent` commands run independently, and `control` commands
-  can overtake blocked serial work so abort and steering remain responsive.
+- Each command's registry entry owns its internal dispatch scheduling and its
+  advertised `concurrencyClass`. `serial` commands preserve input order,
+  `concurrent` commands may run independently, and `control` commands can
+  overtake blocked serial work so abort and steering remain responsive.
 - Invalid JSON or reassembly errors that cannot yield a valid request object emit
   `command: "parse"` with `id: undefined`.
 - `prompt` and `abort_and_prompt` synchronously acknowledge accepted work with

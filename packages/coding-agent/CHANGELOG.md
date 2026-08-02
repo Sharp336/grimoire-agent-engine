@@ -253,6 +253,7 @@
 ### Fixed
 
 - Fixed the TypeScript RPC client silently dropping prompt results, extension output and errors, session/config updates, host URI requests, and unknown future frames.
+- Added a runtime-validated RPC command registry and capability manifest with stable command identities, derived input schemas, live availability, execution scope, feature requirements, and concurrency metadata in the ready frame and TypeScript/Python client APIs.
 
 ## [17.2.4] - 2026-08-01
 
