@@ -740,6 +740,7 @@ export class Editor implements Component, Focusable {
 	}
 	/** Internal setText that doesn't reset history state - used by navigateHistory */
 	#setTextInternal(text: string, cursorAnchor: HistoryCursorAnchor = "end"): void {
+		this.#vim.finishInsertUndo();
 		this.#undoStack.length = 0;
 		this.#redoStack.length = 0;
 		const lines = sanitizeLoadedText(text).split("\n");

@@ -118,6 +118,22 @@ describe("Editor Vim input mode", () => {
 		expect(editor.getText()).toBe("");
 	});
 
+	it("starts a new insert undo group after loading history", () => {
+		const editor = createVimEditor();
+		editor.addToHistory("history");
+		editor.handleInput("i");
+		editor.handleInput("x");
+		editor.handleInput("\x7f");
+		editor.handleInput("\x1b[A");
+		expect(editor.getText()).toBe("history");
+
+		editor.handleInput("!");
+		editor.handleInput("\x1b");
+		editor.handleInput("u");
+
+		expect(editor.getText()).toBe("history");
+	});
+
 	it("undoes replacement text after changing an empty range", () => {
 		const editor = createVimEditor();
 
