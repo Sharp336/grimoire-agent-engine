@@ -122,6 +122,19 @@ describe("Editor Vim input mode", () => {
 		editor.handleInput("u");
 		expect(editor.getText()).toBe("");
 	});
+
+	it("clamps the normal cursor after the configured base undo", () => {
+		const editor = createVimEditor();
+		editor.setText("abc");
+		typeText(editor, "A!\u001b");
+
+		editor.handleInput("\x1f");
+		editor.handleInput("x");
+
+		expect(editor.getText()).toBe("ab");
+		expect(editor.getCursor()).toEqual({ line: 0, col: 1 });
+	});
+
 	it("redoes an undone change with Ctrl-R in normal mode", () => {
 		const editor = createVimEditor();
 

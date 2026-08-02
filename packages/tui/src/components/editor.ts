@@ -1321,6 +1321,7 @@ export class Editor implements Component, Focusable {
 				else this.#vim.clearPendingCommand();
 			}
 			this.#applyUndo();
+			if (this.#inputMode === "vim") this.#vim.clampNormalCursor();
 			return;
 		}
 
