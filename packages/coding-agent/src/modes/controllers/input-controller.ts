@@ -936,6 +936,13 @@ export class InputController {
 			}
 			return;
 		}
+		if (text.trim() === "/side end") {
+			// The one focus-scoped command: discarding the side is meaningful from
+			// inside it (disposal unfocuses first), so route instead of refusing.
+			this.ctx.editor.clearDraft(text);
+			await this.ctx.handleSideCommand("end");
+			return;
+		}
 		if (text && (text.startsWith("/") || text.startsWith("!") || parsePythonCommandInput(text))) {
 			this.ctx.showStatus("Commands run in the main session — press ←← to return first");
 			return; // editor text not cleared: Editor does not auto-clear on submit
