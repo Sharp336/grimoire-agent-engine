@@ -919,6 +919,33 @@ export async function runRpcMode(
 	const hostUriBridge = new RpcHostUriBridge(output);
 	const subagentRegistry = eventBus ? new RpcSubagentRegistry(eventBus, output) : undefined;
 	const sessionStorage = new FileSessionStorage();
+	const providerAuthService = new ProviderAuthService(session.modelRegistry, session.sessionId);
+	let providerAuthTaskTracker: (task: Promise<void>) => void = task => {
+		void task;
+	};
+	const providerAuthController = new ProviderAuthController(
+		providerAuthService,
+		operationManager,
+		frame => output(frame),
+		task => providerAuthTaskTracker(task),
+		request =>
+			requestRpcDialog(
+				pendingExtensionRequests,
+				output,
+				{ signal: request.signal },
+				undefined,
+				{
+					method: "input",
+					title: request.prompt,
+					placeholder: request.placeholder,
+					sensitive: true,
+					operationId: request.operationId,
+					purpose: "provider_auth",
+					providerId: request.providerId,
+				},
+				response => ("value" in response ? response.value : undefined),
+			),
+	);
 
 	// Shutdown request flag (wrapped in object to allow mutation with const)
 	const shutdownState = { requested: false };
@@ -1200,7 +1227,8 @@ export async function runRpcMode(
 		data: { cancelled: boolean } & object,
 	): Promise<RpcResponse> => {
 		if (!data.cancelled) {
-			operationManager.cancelAll("session_transition", "session_changed");
+			const protectedOperations = providerAuthController.cancelAll("session_transition", "session_changed");
+			operationManager.cancelAll("session_transition", "session_changed", protectedOperations);
 			await emitAvailableCommandsUpdate();
 		}
 		return success(id, command, data);
@@ -1342,7 +1370,8 @@ export async function runRpcMode(
 			}
 
 			case "abort": {
-				operationManager.cancelAll("user", "cancelled_by_client");
+				const protectedOperations = providerAuthController.cancelAll("user", "cancelled_by_client");
+				operationManager.cancelAll("user", "cancelled_by_client", protectedOperations);
 				await session.abort({ reason: USER_INTERRUPT_LABEL });
 				return success(id, "abort");
 			}
@@ -1351,7 +1380,8 @@ export async function runRpcMode(
 				if (toolActivationInFlight) {
 					return error(id, "abort_and_prompt", "Session tool activation is in progress", "session_busy");
 				}
-				operationManager.cancelAll("replaced", "replaced_by_prompt");
+				const protectedOperations = providerAuthController.cancelAll("replaced", "replaced_by_prompt");
+				operationManager.cancelAll("replaced", "replaced_by_prompt", protectedOperations);
 				const operation = operationManager.start(id, "abort_and_prompt");
 				setImmediate(() => {
 					if (!operationManager.begin(operation)) return;
@@ -1391,6 +1421,18 @@ export async function runRpcMode(
 					planApprovalOperations.delete(command.operationId);
 					const pending = session.planMode.pendingApproval;
 					if (pending?.approvalId === approvalId) await session.planMode.abandonPendingApproval();
+				}
+				const providerCancellation = providerAuthController.cancel(command.operationId);
+				if (providerCancellation === "cancelled") {
+					return success(id, "cancel_operation", operationManager.cancel(command.operationId).result);
+				}
+				if (providerCancellation === "protected") {
+					return error(
+						id,
+						"cancel_operation",
+						"Provider authentication credentials are already being committed",
+						"provider_auth_commit_in_progress",
+					);
 				}
 				const cancellation = await operationOwnership.cancel(operationManager, command.operationId);
 				return success(id, "cancel_operation", cancellation);
@@ -2145,8 +2187,6 @@ export async function runRpcMode(
 						},
 						onPrompt: async prompt => {
 							if (!authEmitted) {
-								// onPrompt called before any auth URL — provider requires
-								// interactive input that cannot be satisfied headlessly.
 								return Promise.reject(
 									new Error(
 										`Provider '${command.providerId}' requires interactive prompts ` +
@@ -2157,13 +2197,70 @@ export async function runRpcMode(
 							return (await uiCtx.input(prompt.message, prompt.placeholder, { timeout: 600_000 })) ?? "";
 						},
 					});
-					// Provider-scoped online refresh so the just-persisted credential
-					// re-runs discovery instead of reusing a fresh authoritative cache
-					// row (#5780).
 					await session.modelRegistry.refreshProvider(command.providerId, "online");
 					return success(id, "login", { providerId: command.providerId });
 				} catch (err: unknown) {
 					return error(id, "login", err instanceof Error ? err.message : String(err));
+				}
+			}
+
+			// =================================================================
+			// Provider authentication
+			// =================================================================
+
+			case "list_provider_auth": {
+				return success(id, "list_provider_auth", { providers: providerAuthService.list() });
+			}
+
+			case "begin_provider_auth": {
+				try {
+					const handle = providerAuthController.begin(id, command.providerId, command.method);
+					return success(id, "begin_provider_auth", { operationId: handle.operationId, accepted: true });
+				} catch (authError) {
+					const known = authError instanceof ProviderAuthError ? authError : undefined;
+					return error(
+						id,
+						"begin_provider_auth",
+						known?.message ?? "Provider authentication could not be started",
+						known?.code ?? "provider_auth_failed",
+					);
+				}
+			}
+
+			case "cancel_provider_auth": {
+				const providerCancellation = providerAuthController.cancel(command.operationId);
+				if (providerCancellation === "not_found") {
+					return error(
+						id,
+						"cancel_provider_auth",
+						"Provider authentication operation was not found",
+						"provider_auth_operation_not_found",
+					);
+				}
+				if (providerCancellation === "protected") {
+					return error(
+						id,
+						"cancel_provider_auth",
+						"Provider authentication credentials are already being committed",
+						"provider_auth_commit_in_progress",
+					);
+				}
+				return success(id, "cancel_provider_auth", operationManager.cancel(command.operationId).result);
+			}
+
+			case "remove_provider_auth": {
+				try {
+					const state = await providerAuthService.remove(command.providerId);
+					output({ type: "provider_auth_update", state } satisfies ProviderAuthUpdate);
+					return success(id, "remove_provider_auth", { state });
+				} catch (authError) {
+					const known = authError instanceof ProviderAuthError ? authError : undefined;
+					return error(
+						id,
+						"remove_provider_auth",
+						known?.message ?? "Provider authentication could not be removed",
+						known?.code ?? "provider_auth_remove_failed",
+					);
 				}
 			}
 
@@ -2230,13 +2327,14 @@ export async function runRpcMode(
 
 	// stdin closed — stop accepting side-channel work, drain every command that
 	// already owes a response, then settle any operation still running.
+	const protectedOperations = providerAuthController.close();
 	pendingExtensionRequests.rejectAll("RPC client disconnected before extension UI response completed");
 	await inputDispatcher.drain();
 	await session.planMode.abandonPendingApproval();
 	hostToolBridge.close("RPC client disconnected before host tool execution completed");
 	hostUriBridge.clear("RPC client disconnected before host URI request completed");
 	await shutdownCoordinator.drain();
-	operationManager.cancelAll("client_disconnected", "client_disconnected");
+	operationManager.cancelAll("client_disconnected", "client_disconnected", protectedOperations);
 	subagentRegistry?.dispose();
 	// Dispose the main session before exiting so the browser reaper and other
 	// bounded teardown run on the stdin-EOF path too (#5643). Idempotent: a

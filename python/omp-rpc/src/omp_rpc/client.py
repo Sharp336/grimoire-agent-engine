@@ -988,6 +988,36 @@ class RpcClient:
             payload["timedOut"] = True
         self._send_notification(payload)
 
+    def list_provider_auth(self) -> tuple[ProviderAuthState, ...]:
+        payload = self._request("list_provider_auth")
+        providers = payload.get("providers")
+        if not isinstance(providers, list):
+            raise RpcError("list_provider_auth returned a malformed provider inventory")
+        return tuple(
+            parse_provider_auth_state(provider)
+            for provider in providers
+            if isinstance(provider, dict)
+        )
+
+    def begin_provider_auth(self, provider_id: str, method: str) -> str:
+        payload = self._request(
+            "begin_provider_auth", providerId=provider_id, method=method
+        )
+        operation_id = payload.get("operationId")
+        if not isinstance(operation_id, str):
+            raise RpcError("begin_provider_auth returned a malformed operation handle")
+        return operation_id
+
+    def cancel_provider_auth(self, operation_id: str) -> CancelOperationResult:
+        payload = self._request("cancel_provider_auth", operationId=operation_id)
+        return self._parse_cancel_operation_result(operation_id, payload)
+
+    def remove_provider_auth(self, provider_id: str) -> ProviderAuthState:
+        payload = self._request("remove_provider_auth", providerId=provider_id)
+        state = payload.get("state")
+        if not isinstance(state, dict):
+            raise RpcError("remove_provider_auth returned malformed state")
+        return parse_provider_auth_state(state)
     def get_state(self) -> SessionState:
         payload = self._request("get_state")
         return parse_session_state(payload)

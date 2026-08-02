@@ -1190,6 +1190,53 @@ class ReadyEvent:
 
 
 @dataclass(slots=True, frozen=True)
+class ProviderAuthMethodCapability:
+    method: str
+    available: bool
+    exclusive: bool
+
+
+@dataclass(slots=True, frozen=True)
+class ProviderAuthIdentity:
+    email: str | None = None
+    account_id: str | None = None
+    project_id: str | None = None
+    org_id: str | None = None
+    org_name: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class ProviderAuthState:
+    provider_id: str
+    name: str
+    authenticated: bool
+    disabled: bool
+    available: bool
+    methods: tuple[ProviderAuthMethodCapability, ...]
+    credential_origin: str | None = None
+    unavailable_reason: str | None = None
+    identity: ProviderAuthIdentity | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class ProviderAuthRequest:
+    operation_id: str
+    request_id: str
+    provider_id: str
+    method: Literal["open_url"]
+    url: str
+    launch_url: str | None = None
+    instructions: str | None = None
+    type: Literal["provider_auth_request"] = "provider_auth_request"
+
+
+@dataclass(slots=True, frozen=True)
+class ProviderAuthUpdate:
+    state: ProviderAuthState
+    type: Literal["provider_auth_update"] = "provider_auth_update"
+
+
+@dataclass(slots=True, frozen=True)
 class OperationStartedEvent:
     operation_id: str
     command: RpcOperationCommand
@@ -1276,6 +1323,10 @@ class ExtensionUiRequest:
     placeholder: str | None = None
     prefill: str | None = None
     timeout: int | None = None
+    sensitive: bool | None = None
+    operation_id: str | None = None
+    purpose: str | None = None
+    provider_id: str | None = None
     prompt_style: bool | None = None
     target_id: str | None = None
     notify_type: NotifyType | None = None
@@ -2390,6 +2441,10 @@ def parse_extension_ui_request(payload: JsonObject) -> ExtensionUiRequest:
         placeholder=_optional_str(payload, "placeholder"),
         prefill=_optional_str(payload, "prefill"),
         timeout=_optional_int(payload, "timeout"),
+        sensitive=_optional_bool(payload, "sensitive"),
+        operation_id=_optional_str(payload, "operationId"),
+        purpose=_optional_str(payload, "purpose"),
+        provider_id=_optional_str(payload, "providerId"),
         prompt_style=_optional_bool(payload, "promptStyle"),
         target_id=_optional_str(payload, "targetId"),
         notify_type=cast(
@@ -2460,6 +2515,24 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
         )
     if event_type == "extension_ui_request":
         return parse_extension_ui_request(payload)
+    if event_type == "provider_auth_request":
+        method = _require_str(payload, "method")
+        if method != "open_url":
+            raise ValueError("provider_auth_request.method must be open_url")
+        return ProviderAuthRequest(
+            operation_id=_require_str(payload, "operationId"),
+            request_id=_require_str(payload, "requestId"),
+            provider_id=_require_str(payload, "providerId"),
+            method="open_url",
+            url=_require_str(payload, "url"),
+            launch_url=_optional_str(payload, "launchUrl"),
+            instructions=_optional_str(payload, "instructions"),
+        )
+    if event_type == "provider_auth_update":
+        state = payload.get("state")
+        if not isinstance(state, dict):
+            raise ValueError("provider_auth_update.state must be an object")
+        return ProviderAuthUpdate(state=parse_provider_auth_state(state))
     if event_type == "extension_error":
         return parse_extension_error(payload)
     if event_type == "settings_update":

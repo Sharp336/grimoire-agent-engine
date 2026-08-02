@@ -358,6 +358,17 @@ function parseRpcOperationAccepted(value: unknown): RpcOperationAccepted | undef
 	if (!isRecord(value) || typeof value.operationId !== "string") return undefined;
 	return { operationId: value.operationId, accepted: true };
 }
+function isRpcProviderAuthRequestFrame(value: unknown): value is RpcProviderAuthRequestFrame {
+	return (
+		isRecord(value) &&
+		value.type === "provider_auth_request" &&
+		typeof value.operationId === "string" &&
+		typeof value.requestId === "string" &&
+		typeof value.providerId === "string" &&
+		value.method === "open_url" &&
+		typeof value.url === "string"
+	);
+}
 
 const RPC_ADVISOR_STATUSES = ["running", "paused", "quota_exhausted", "error", "no_model"] as const;
 
@@ -1587,6 +1598,21 @@ export class RpcClient {
 		} finally {
 			if (listener) this.#extensionUiListeners.delete(listener);
 		}
+	async beginProviderAuth(providerId: string, method: RpcProviderAuthMethod): Promise<RpcOperationAccepted> {
+		const response = await this.#send({ type: "begin_provider_auth", providerId, method });
+		const accepted = parseRpcOperationAccepted(this.#getData<unknown>(response));
+		if (!accepted) throw new Error("RPC begin_provider_auth response is malformed");
+		return accepted;
+	}
+
+	async cancelProviderAuth(operationId: string): Promise<RpcCancelOperationResult> {
+		return this.#getData<RpcCancelOperationResult>(await this.#send({ type: "cancel_provider_auth", operationId }));
+	}
+
+	async removeProviderAuth(providerId: string): Promise<RpcProviderAuthState> {
+		const response = await this.#send({ type: "remove_provider_auth", providerId });
+		const data = this.#getData<{ state?: unknown }>(response);
+		return parseProviderAuthState(data.state);
 	}
 
 	/**

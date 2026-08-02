@@ -544,7 +544,11 @@ export interface AuthCredentialStore {
 	 * Implementations MUST update the in-memory snapshot before returning so the
 	 * post-write read path is consistent.
 	 */
-	upsertAuthCredentialRemote?(provider: string, credential: AuthCredential): Promise<StoredAuthCredential[]>;
+	upsertAuthCredentialRemote?(
+		provider: string,
+		credential: AuthCredential,
+		signal?: AbortSignal,
+	): Promise<StoredAuthCredential[]>;
 	/**
 	 * Optional async write hook for replace-all semantics (e.g. API-key login
 	 * overwriting any previous keys for the same provider). When present,
@@ -2601,9 +2605,9 @@ export class AuthStorage {
 		}
 	}
 
-	async #upsertOAuthCredential(provider: string, credential: OAuthCredential): Promise<void> {
+	async #upsertOAuthCredential(provider: string, credential: OAuthCredential, signal?: AbortSignal): Promise<void> {
 		const stored = this.#store.upsertAuthCredentialRemote
-			? await this.#store.upsertAuthCredentialRemote(provider, credential)
+			? await this.#store.upsertAuthCredentialRemote(provider, credential, signal)
 			: this.#store.upsertAuthCredentialForProvider(provider, credential);
 		this.#setStoredCredentials(
 			provider,
@@ -2831,6 +2835,11 @@ export class AuthStorage {
 			onAuth: (info: OAuthAuthInfo) => void;
 			/** onPrompt is required for some providers (github-copilot, openai-codex) */
 			onPrompt: (prompt: { message: string; placeholder?: string }) => Promise<string>;
+			/**
+			 * Synchronous transition into the uninterruptible persistence phase.
+			 * Callers must reject cancellation after this hook returns.
+			 */
+			beforePersist?: () => void;
 		},
 	): Promise<OAuthLoginIdentity | undefined> {
 		// Only paste-code providers (fixed non-loopback redirect, e.g. GitLab Duo
@@ -2862,7 +2871,13 @@ export class AuthStorage {
 			if (!result) {
 				return undefined;
 			}
-			const newCredential: ApiKeyCredential = { type: "api_key", key: result, source: "login" };
+			ctrl.beforePersist?.();
+			let newCredential: ApiKeyCredential | undefined = {
+				type: "api_key",
+				key: result,
+				source: "login",
+			};
+			result = undefined;
 			const stored = this.#store.upsertAuthCredentialRemote
 				? await this.#store.upsertAuthCredentialRemote(provider, newCredential)
 				: this.#store.upsertAuthCredentialForProvider(provider, newCredential);
@@ -2888,6 +2903,13 @@ export class AuthStorage {
 			orgId: newCredential.orgId,
 			orgName: newCredential.orgName,
 		};
+		// Use #upsertOAuthCredential to upsert the new credential.
+		// Any legacy api_key rows from older versions will be cleaned up so they do not
+		// shadow the new OAuth row, while preserving other active OAuth credentials.
+		ctrl.beforePersist?.();
+		await this.#upsertOAuthCredential(storageProvider, newCredential);
+		newCredential = undefined;
+		return identity;
 	}
 
 	/**
