@@ -272,9 +272,16 @@ interface EnumDef<T extends readonly string[]> extends CredentialMarker {
 	ui?: UiEnum<T>;
 }
 
+/** Declared element type for array settings, enabling per-element validation
+ * in {@link validateSettingValueType}. Only annotate arrays whose element type
+ * is unambiguous from the default or documented shape. */
+type ArrayElementType = "string" | "number" | "boolean" | "object";
+
 interface ArrayDef<T> extends CredentialMarker {
 	type: "array";
 	default: T[];
+	/** When set, each array element is validated against this primitive type. */
+	elements?: ArrayElementType;
 	ui?: UiArray;
 }
 
@@ -517,11 +524,11 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	extensions: { type: "array", default: EMPTY_STRING_ARRAY },
+	extensions: { type: "array", default: EMPTY_STRING_ARRAY, elements: "string" },
 
-	enabledModels: { type: "array", default: EMPTY_STRING_ARRAY },
+	enabledModels: { type: "array", default: EMPTY_STRING_ARRAY, elements: "string" },
 
-	disabledProviders: { type: "array", default: EMPTY_STRING_ARRAY },
+	disabledProviders: { type: "array", default: EMPTY_STRING_ARRAY, elements: "string" },
 
 	"providers.maxInFlightRequests": {
 		type: "record",
@@ -535,7 +542,7 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	disabledExtensions: { type: "array", default: EMPTY_STRING_ARRAY },
+	disabledExtensions: { type: "array", default: EMPTY_STRING_ARRAY, elements: "string" },
 
 	modelRoleStorage: {
 		type: "enum",
@@ -565,9 +572,9 @@ export const SETTINGS_SCHEMA = {
 
 	modelTags: { type: "record", default: EMPTY_MODEL_TAGS_RECORD },
 
-	modelProviderOrder: { type: "array", default: EMPTY_STRING_ARRAY },
+	modelProviderOrder: { type: "array", default: EMPTY_STRING_ARRAY, elements: "string" },
 
-	cycleOrder: { type: "array", default: DEFAULT_CYCLE_ORDER },
+	cycleOrder: { type: "array", default: DEFAULT_CYCLE_ORDER, elements: "string" },
 
 	// ────────────────────────────────────────────────────────────────────────
 	// Appearance
@@ -819,9 +826,9 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"statusLine.leftSegments": { type: "array", default: [] as StatusLineSegmentId[] },
+	"statusLine.leftSegments": { type: "array", default: [] as StatusLineSegmentId[], elements: "string" },
 
-	"statusLine.rightSegments": { type: "array", default: [] as StatusLineSegmentId[] },
+	"statusLine.rightSegments": { type: "array", default: [] as StatusLineSegmentId[], elements: "string" },
 
 	"statusLine.segmentOptions": { type: "record", default: {} as Record<string, unknown> },
 
@@ -1182,6 +1189,7 @@ export const SETTINGS_SCHEMA = {
 	"model.toolCallLoopGuard.exemptTools": {
 		type: "array",
 		default: DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS,
+		elements: "string",
 		ui: {
 			tab: "model",
 			group: "Thinking",
@@ -1238,6 +1246,7 @@ export const SETTINGS_SCHEMA = {
 	"workspace.additionalDirectories": {
 		type: "array",
 		default: [] as string[],
+		elements: "string",
 		ui: {
 			tab: "context",
 			group: "General",
@@ -3020,7 +3029,7 @@ export const SETTINGS_SCHEMA = {
 	"hindsight.recallMaxTokens": { type: "number", default: 1024 },
 	"hindsight.recallContextTurns": { type: "number", default: 1 },
 	"hindsight.recallMaxQueryChars": { type: "number", default: 800 },
-	"hindsight.recallTypes": { type: "array", default: HINDSIGHT_RECALL_TYPES_DEFAULT },
+	"hindsight.recallTypes": { type: "array", default: HINDSIGHT_RECALL_TYPES_DEFAULT, elements: "string" },
 
 	"hindsight.debug": { type: "boolean", default: false },
 
@@ -3142,6 +3151,7 @@ export const SETTINGS_SCHEMA = {
 	"ttsr.disabledRules": {
 		type: "array",
 		default: [] as string[],
+		elements: "string",
 		ui: {
 			tab: "context",
 			group: "Rules (TTSR)",
@@ -3450,6 +3460,7 @@ export const SETTINGS_SCHEMA = {
 	"bash.patterns": {
 		type: "array",
 		default: [],
+		elements: "object",
 		ui: {
 			tab: "shell",
 			group: "Bash",
@@ -3470,7 +3481,7 @@ export const SETTINGS_SCHEMA = {
 			description: "Block shell commands that have dedicated tools",
 		},
 	},
-	"bashInterceptor.patterns": { type: "array", default: DEFAULT_BASH_INTERCEPTOR_RULES },
+	"bashInterceptor.patterns": { type: "array", default: DEFAULT_BASH_INTERCEPTOR_RULES, elements: "object" },
 
 	"bash.direnv": {
 		type: "enum",
@@ -3510,8 +3521,8 @@ export const SETTINGS_SCHEMA = {
 		type: "string",
 		default: undefined,
 	},
-	"shellMinimizer.only": { type: "array", default: EMPTY_STRING_ARRAY },
-	"shellMinimizer.except": { type: "array", default: EMPTY_STRING_ARRAY },
+	"shellMinimizer.only": { type: "array", default: EMPTY_STRING_ARRAY, elements: "string" },
+	"shellMinimizer.except": { type: "array", default: EMPTY_STRING_ARRAY, elements: "string" },
 	"shellMinimizer.maxCaptureBytes": {
 		type: "number",
 		default: 4 * 1024 * 1024,
@@ -4283,6 +4294,7 @@ export const SETTINGS_SCHEMA = {
 	"tools.xdevInlineDevices": {
 		type: "array",
 		default: EMPTY_STRING_ARRAY,
+		elements: "string",
 		ui: {
 			tab: "tools",
 			group: "Discovery & MCP",
@@ -4391,6 +4403,7 @@ export const SETTINGS_SCHEMA = {
 	"goal.continuationModes": {
 		type: "array",
 		default: ["interactive"],
+		elements: "string",
 		ui: {
 			tab: "tasks",
 			group: "Modes",
@@ -4685,6 +4698,7 @@ export const SETTINGS_SCHEMA = {
 	"task.disabledAgents": {
 		type: "array",
 		default: [] as string[],
+		elements: "string",
 	},
 
 	"task.agentModelOverrides": {
@@ -4766,11 +4780,11 @@ export const SETTINGS_SCHEMA = {
 
 	"skills.enableAgentsProject": { type: "boolean", default: true },
 
-	"skills.customDirectories": { type: "array", default: [] as string[] },
+	"skills.customDirectories": { type: "array", default: [] as string[], elements: "string" },
 
-	"skills.ignoredSkills": { type: "array", default: [] as string[] },
+	"skills.ignoredSkills": { type: "array", default: [] as string[], elements: "string" },
 
-	"skills.includeSkills": { type: "array", default: [] as string[] },
+	"skills.includeSkills": { type: "array", default: [] as string[], elements: "string" },
 
 	// Commands
 	"commands.enableClaudeUser": {
@@ -4848,6 +4862,7 @@ export const SETTINGS_SCHEMA = {
 	"providers.webSearchOrder": {
 		type: "array",
 		default: [] as SearchProviderId[],
+		elements: "string",
 		ui: {
 			tab: "providers",
 			group: "Services",
@@ -4861,6 +4876,7 @@ export const SETTINGS_SCHEMA = {
 	"providers.webSearchExclude": {
 		type: "array",
 		default: [] as SearchProviderId[],
+		elements: "string",
 		ui: {
 			tab: "providers",
 			group: "Services",
@@ -4910,6 +4926,7 @@ export const SETTINGS_SCHEMA = {
 	"providers.imageOrder": {
 		type: "array",
 		default: [] as ImageProvider[],
+		elements: "string",
 		ui: {
 			tab: "providers",
 			group: "Services",

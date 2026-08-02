@@ -207,7 +207,7 @@ async function pathExists(filePath: string): Promise<boolean> {
 }
 
 /** True when the file exists or is merely inaccessible; false only on ENOENT. Use when probing for optional files under partially-accessible dirs. */
-async function fileExistsOr(filePath: string): Promise<boolean> {
+export async function fileExistsOr(filePath: string): Promise<boolean> {
 	try {
 		await fs.stat(filePath);
 		return true;
@@ -964,7 +964,7 @@ function releaseWriteLock(handle: Database | null): void {
  * cleanly closed database. Returns `"wal"`, `"non-wal"`, or `null` when the
  * header cannot be read (missing file or non-SQLite content).
  */
-async function headerJournalMode(dbPath: string): Promise<"wal" | "non-wal" | null> {
+export async function headerJournalMode(dbPath: string): Promise<"wal" | "non-wal" | null> {
 	try {
 		const handle = await fs.open(dbPath, "r");
 		try {
@@ -980,6 +980,37 @@ async function headerJournalMode(dbPath: string): Promise<"wal" | "non-wal" | nu
 		// normal read-only open is used (and fails with the real error).
 		return "non-wal";
 	}
+}
+
+/**
+ * Open a database read-only without mutating its directory. A cleanly closed
+ * WAL-mode database with sidecars removed gains -wal and -shm when opened via
+ * the default path; when no -wal sidecar exists and the header says WAL, open
+ * through an immutable URI instead — SQLite creates no files. When a -wal
+ * sidecar IS present, use the normal read-only open: immutable would ignore
+ * committed WAL frames and read a stale snapshot. In the partial-sidecar
+ * state (-wal without -shm — a crashed writer) that open recreates -shm;
+ * this is deliberate: the -shm is a rebuildable index, recreating it is
+ * SQLite's own recovery path, and the alternatives are worse (immutable
+ * silently drops committed transactions; refusing blinds the doctor on the
+ * database that most needs checking). An unwritable directory surfaces as
+ * the open error, which the callers report. `immutable: true` also means
+ * PRAGMA journal_mode is masked by SQLite — the header already proved WAL,
+ * so callers should report it directly.
+ */
+export async function openReadonlyNonMutating(dbPath: string): Promise<{ handle: Database; immutable: boolean }> {
+	const walSidecarExists = await fileExistsOr(`${dbPath}-wal`);
+	const headerMode = await headerJournalMode(dbPath);
+	const immutable = !walSidecarExists && headerMode === "wal";
+	// Percent-escape each path segment for SQLite URI form; immutable=1 tells
+	// SQLite the file cannot change, so it skips -wal/-shm creation.
+	const handle = immutable
+		? new Database(
+				`file:${dbPath.split(/[\\/]/).map(encodeURIComponent).join("/")}?immutable=1`,
+				constants.SQLITE_OPEN_READONLY | constants.SQLITE_OPEN_URI,
+			)
+		: new Database(dbPath, { readonly: true });
+	return { handle, immutable };
 }
 
 export async function probeDatabase(db: DoctorDatabase): Promise<DbProbe> {
@@ -1013,28 +1044,9 @@ export async function probeDatabase(db: DoctorDatabase): Promise<DbProbe> {
 	probe.present = true;
 	probe.walBytes = await statSizeOr(`${db.path}-wal`, 0);
 	let handle: Database | null = null;
-	// A cleanly closed WAL-mode database with sidecars removed gains -wal and
-	// -shm when opened read-only via the default path, mutating the directory
-	// and contradicting the read-only contract. When no -wal sidecar exists
-	// and the header says WAL, open via an immutable URI instead — SQLite
-	// creates no files and reads the main file directly. When a -wal sidecar
-	// IS present, use the normal read-only open (the sidecars already exist,
-	// so nothing new is created; immutable would ignore the WAL and read a
-	// stale snapshot).
-	const walSidecarExists = await fileExistsOr(`${db.path}-wal`);
-	const headerMode = await headerJournalMode(db.path);
-	const useImmutable = !walSidecarExists && headerMode === "wal";
+	let immutable = false;
 	try {
-		if (useImmutable) {
-			// Percent-escape each path segment for SQLite URI form; immutable=1
-			// tells SQLite the file cannot change, so it skips -wal/-shm creation.
-			handle = new Database(
-				"file:" + db.path.split(/[\\/]/).map(encodeURIComponent).join("/") + "?immutable=1",
-				constants.SQLITE_OPEN_READONLY | constants.SQLITE_OPEN_URI,
-			);
-		} else {
-			handle = new Database(db.path, { readonly: true });
-		}
+		({ handle, immutable } = await openReadonlyNonMutating(db.path));
 		// busy_timeout must precede the first lock-taking statement (issue #2421).
 		handle.run("PRAGMA busy_timeout = 5000");
 		const pageCount = handle.query("PRAGMA page_count").get() as Pick<PragmaRow, "page_count"> | null;
@@ -1043,7 +1055,7 @@ export async function probeDatabase(db: DoctorDatabase): Promise<DbProbe> {
 		probe.pageCount = pageCount?.page_count ?? null;
 		probe.freelistCount = freelist?.freelist_count ?? null;
 		probe.pageSize = pageSize?.page_size ?? null;
-		if (useImmutable) {
+		if (immutable) {
 			// immutable=1 masks PRAGMA journal_mode (reports the default, not
 			// WAL); the header already proved WAL, so report it directly.
 			probe.journalMode = "wal";

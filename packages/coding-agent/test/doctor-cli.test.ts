@@ -652,6 +652,30 @@ describe("omp doctor", () => {
 		expect(finding?.summary).toContain("command not found");
 	});
 
+	test("MCP stdio server with env.PATH restricting to a dir without the command → error, not process-PATH fallback", async () => {
+		// When a server sets env.PATH to an authoritative restricted path that
+		// does not contain its bare command, the real transport merges
+		// config.env over Bun.env so that PATH replaces the process value and
+		// the spawn fails. The doctor must mirror that: resolve via the
+		// config PATH only and report "command not found" — NOT fall back to
+		// the doctor's own process PATH (where e.g. `node` exists).
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(
+			mcpJson,
+			JSON.stringify({
+				mcpServers: {
+					restricted: { type: "stdio", command: "node", env: { PATH: "/nonexistent-restricted-path" } },
+				},
+			}),
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "mcp.restricted");
+		expect(finding?.status).toBe("error");
+		expect(finding?.summary).toContain("command not found");
+	});
+
 	test("MCP http server with a valid URL is ok", async () => {
 		const mcpJson = path.join(root, "mcp.json");
 		await fs.writeFile(
@@ -1073,6 +1097,70 @@ describe("omp doctor", () => {
 		expect(brokerFinding?.summary).not.toContain("credentials served by remote auth broker");
 	});
 
+	test("auth: !command-backed broker token with literal URL reports command-backed, not missing-token", async () => {
+		// A literal broker URL with a !command-backed token and no token file
+		// fallback makes resolveAuthBrokerConfig throw (no token resolved). The
+		// catch must classify the command-backed field BEFORE emitting a
+		// missing-token error, so the finding is a warning, not an error.
+		const configPath = path.join(root, "config.yml");
+		await fs.writeFile(
+			configPath,
+			`${["auth:", "  broker:", '    url: "https://broker.example"', '    token: "!echo ZKQMCMD"'].join("\n")}\n`,
+			"utf8",
+		);
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const brokerFinding = report.findings.find(entry => entry.id === "auth.broker");
+		expect(brokerFinding).toBeDefined();
+		if (brokerFinding === undefined) return;
+		expect(brokerFinding.category).toBe("auth");
+		expect(brokerFinding.status).toBe("warning");
+		expect(brokerFinding.summary).toContain("command-backed");
+		// The command stdout must never appear anywhere in the report.
+		expect(JSON.stringify(report)).not.toContain("ZKQMCMD");
+	});
+
+	test("auth: WAL-mode agent.db is probed without creating -wal/-shm sidecars", async () => {
+		// A cleanly closed WAL-mode database with sidecars removed must be
+		// probed via the immutable URI so the read-only doctor run creates no
+		// -wal/-shm files. Skip under root (chmod cannot restrict a directory
+		// the uid-0 process owns), mirroring the EACCES test guard.
+		if (process.getuid?.() === 0) return;
+		const dbPath = getAgentDbPath(root);
+		await createAuthCredential(dbPath, "openai", "api_key", { key: "sk-test" });
+		// Reopen in WAL mode, write a row, and close cleanly — the close
+		// auto-checkpoints and removes the sidecars, leaving a WAL-header db
+		// with no -wal/-shm.
+		const db = new Database(dbPath);
+		db.run("PRAGMA journal_mode=WAL");
+		db.run("INSERT INTO auth_credentials (provider, credential_type, data) VALUES (?, ?, ?)", [
+			"anthropic",
+			"api_key",
+			JSON.stringify({ key: "sk-second" }),
+		]);
+		db.close();
+		// Confirm the sidecars are gone after the clean close.
+		expect(await pathExists(`${dbPath}-wal`)).toBe(false);
+		expect(await pathExists(`${dbPath}-shm`)).toBe(false);
+		const dir = path.dirname(dbPath);
+		const before = new Set(await fs.readdir(dir));
+		// Make the directory read-only so a mutating open (which creates
+		// -wal/-shm) would fail with EACCES — proving the immutable path is used.
+		await fs.chmod(dir, 0o500);
+		try {
+			const report = await runDoctorCommand({ flags: { agentDir: root } });
+			const finding = report.findings.find(entry => entry.id === "auth.openai");
+			expect(finding).toBeDefined();
+			expect(finding?.status).toBe("ok");
+			expect(finding?.summary).toContain("credentials present");
+			// No new files (no -wal/-shm) were created in the directory.
+			const after = new Set(await fs.readdir(dir));
+			const created = [...after].filter(name => !before.has(name));
+			expect(created).toHaveLength(0);
+		} finally {
+			await fs.chmod(dir, 0o700);
+		}
+	});
+
 	test("tools section includes a fuser finding on Linux", async () => {
 		// fuser is Linux-only; the finding must be present on Linux and absent elsewhere.
 		const report = await runDoctorCommand({ flags: { agentDir: root } });
@@ -1186,6 +1274,30 @@ describe("omp doctor", () => {
 		expect(finding?.category).toBe("setup");
 		expect(finding?.status).toBe("error");
 		expect(finding?.details.some(d => d.includes("broken-ext"))).toBe(true);
+	});
+
+	test("setup: extension manifest with a non-string extensions entry → error naming the package, report completes", async () => {
+		// A syntactically valid JSON manifest with a malformed extensions
+		// array (e.g. [null]) must not crash the diagnostic. readExtensionManifest
+		// casts pkg.omp to ExtensionManifest without shape-checking entries, so
+		// the doctor must reject the non-string entry before path.resolve
+		// throws — producing an error finding naming the package while the
+		// rest of the report still completes.
+		const extDir = path.join(root, "extensions", "null-entry-ext");
+		await fs.mkdir(extDir, { recursive: true });
+		await fs.writeFile(
+			path.join(extDir, "package.json"),
+			JSON.stringify({ name: "null-entry-ext", omp: { extensions: [null] } }),
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "setup.extensions");
+		expect(finding?.category).toBe("setup");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(d => d.includes("null-entry-ext") && d.includes("not a string"))).toBe(true);
+		// The report still completes — other categories are present.
+		expect(report.findings.some(entry => entry.category === "browser")).toBe(true);
 	});
 
 	test("setup: clean temp dirs → all six ok", async () => {
@@ -1440,6 +1552,74 @@ describe("omp doctor", () => {
 		expect(finding?.details.some(d => d.includes("disabledProviders") && d.includes("array"))).toBe(true);
 	});
 
+	test("settings: array with null element (bashInterceptor.patterns: [null]) is an error naming the index", async () => {
+		const configPath = path.join(root, "config.yml");
+		await fs.writeFile(configPath, "bashInterceptor:\n  patterns:\n    - null\n", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const finding = report.findings.find(entry => entry.id === "config.settings");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(d => d.includes("bashInterceptor.patterns[0]") && d.includes("object"))).toBe(true);
+	});
+
+	test("settings: valid typed array (bashInterceptor.patterns with real rules) passes", async () => {
+		const configPath = path.join(root, "config.yml");
+		await fs.writeFile(
+			configPath,
+			"bashInterceptor:\n  patterns:\n    - pattern: '^cat '\n      tool: read\n      message: use read\n",
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const finding = report.findings.find(entry => entry.id === "config.settings");
+		expect(finding?.status).not.toBe("error");
+	});
+
+	test("settings: string array with non-string element is an error naming the index", async () => {
+		const configPath = path.join(root, "config.yml");
+		await fs.writeFile(configPath, "extensions:\n  - valid-ext\n  - 42\n", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const finding = report.findings.find(entry => entry.id === "config.settings");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(d => d.includes("extensions[1]") && d.includes("string"))).toBe(true);
+	});
+
+	// ── Project settings diagnosis ──────────────────────────────────────────
+
+	test("malformed project .omp/config.yml surfaces a config.settings.project error", async () => {
+		setProjectDir(root);
+		const projectConfigDir = path.join(root, ".omp");
+		await fs.mkdir(projectConfigDir, { recursive: true });
+		await fs.writeFile(path.join(projectConfigDir, "config.yml"), "theme:\n  dark: [unterminated\n", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const finding = report.findings.find(entry => entry.id === "config.settings.project");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.length).toBeGreaterThan(0);
+	});
+
+	test("missing project .omp/config.yml yields no project settings error", async () => {
+		setProjectDir(root);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const finding = report.findings.find(entry => entry.id === "config.settings.project");
+		expect(finding?.status).toBe("ok");
+		expect(finding?.summary).toContain("absent");
+	});
+
+	test("valid project .omp/config.yml yields an ok project settings finding", async () => {
+		setProjectDir(root);
+		const projectConfigDir = path.join(root, ".omp");
+		await fs.mkdir(projectConfigDir, { recursive: true });
+		await fs.writeFile(path.join(projectConfigDir, "config.yml"), "autoResume: true\n", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const finding = report.findings.find(entry => entry.id === "config.settings.project");
+		expect(finding?.status).toBe("ok");
+		expect(finding?.summary).toContain("valid");
+	});
+
 	// ── Item B: malformed MCP JSON invisible ─────────────────────────────────
 
 	test("malformed MCP JSON in scoped agent dir produces an error, not mcp.none ok", async () => {
@@ -1563,14 +1743,17 @@ describe("omp doctor", () => {
 	// ── Item G: managed Chromium cache ───────────────────────────────────────
 
 	test("browser: cached Chromium executable → ok, not first-use warning", async () => {
-		// Create a fake Puppeteer cache directory structure in the temp root
-		// so resolveCachedChromium finds a cached binary. System Chrome and
-		// env override are absent so the cache probe is reached.
+		// Fabricate the @puppeteer/browsers 3.x cache layout:
+		//   <cacheDir>/chrome/<platform>-<buildId>/<archive-dir>/chrome
+		// The doctor delegates to resolveCachedChromiumExecutable, which
+		// enumerates installed browsers via the library's own
+		// getInstalledBrowsers (no buildId guessing, no download). System
+		// Chrome and env override are absent so the cache probe is reached.
 		const fakeCacheDir = path.join(root, "fake-puppeteer-cache");
-		const buildDir = path.join(fakeCacheDir, "chrome-1234");
-		const platformDir = path.join(buildDir, "linux-64");
-		await fs.mkdir(platformDir, { recursive: true });
-		const fakeChrome = path.join(platformDir, "chrome");
+		const buildDir = path.join(fakeCacheDir, "chrome", "linux-1234");
+		const archiveDir = path.join(buildDir, "chrome-linux64");
+		await fs.mkdir(archiveDir, { recursive: true });
+		const fakeChrome = path.join(archiveDir, "chrome");
 		await fs.writeFile(fakeChrome, "fake-binary", "utf8");
 
 		const chromeSpy = spyOn(browserLaunch, "resolveSystemChromium").mockReturnValue(undefined);
@@ -1587,5 +1770,15 @@ describe("omp doctor", () => {
 			envSpy.mockRestore();
 			cacheSpy.mockRestore();
 		}
+	});
+
+	test("resolveCachedChromiumExecutable: empty cache → undefined (no download)", async () => {
+		// An empty or absent cache must resolve to undefined without throwing
+		// or triggering a download. Thread the cacheDir through the option.
+		const emptyCacheDir = path.join(root, "empty-puppeteer-cache");
+		await fs.mkdir(emptyCacheDir, { recursive: true });
+		expect(await browserLaunch.resolveCachedChromiumExecutable(emptyCacheDir)).toBeUndefined();
+		// A nonexistent cache dir is also undefined, never a throw.
+		expect(await browserLaunch.resolveCachedChromiumExecutable(path.join(root, "no-such-cache"))).toBeUndefined();
 	});
 });

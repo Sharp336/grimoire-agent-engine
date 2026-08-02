@@ -139,7 +139,7 @@ export function validateSettingsValues(raw: RawSettings): { errors: string[]; wa
 function validateSettingValueType(
 	path: string,
 	value: unknown,
-	def: { type: string; values?: readonly string[] },
+	def: { type: string; values?: readonly string[]; elements?: "string" | "number" | "boolean" | "object" },
 ): string | null {
 	switch (def.type) {
 		case "boolean":
@@ -162,10 +162,27 @@ function validateSettingValueType(
 				return `Settings key "${path}" must be one of [${allowed.join(", ")}], got "${value}"`;
 			return null;
 		}
-		case "array":
+		case "array": {
 			if (!Array.isArray(value))
 				return `Settings key "${path}" must be an array, got ${value === null ? "null" : typeof value}`;
+			// When the schema declares an element type, validate each element
+			// so a typed array with a null/wrong-typed member is caught here
+			// rather than crashing a downstream consumer (e.g. compileRules
+			// reading rule.flags on a null element).
+			const elementType = def.elements;
+			if (elementType !== undefined) {
+				for (let i = 0; i < value.length; i++) {
+					const item = value[i];
+					const actual = item === null ? "null" : typeof item;
+					const ok =
+						elementType === "object"
+							? item !== null && typeof item === "object" && !Array.isArray(item)
+							: typeof item === elementType;
+					if (!ok) return `Settings key "${path}[${i}]" must be a ${elementType}, got ${actual}`;
+				}
+			}
 			return null;
+		}
 		case "record":
 			if (typeof value !== "object" || Array.isArray(value) || value === null)
 				return `Settings key "${path}" must be a record/object, got ${value === null ? "null" : Array.isArray(value) ? "array" : typeof value}`;

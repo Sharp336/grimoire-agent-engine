@@ -18,7 +18,6 @@ import {
 	getAgentDir,
 	getCustomThemesDir,
 	getProjectDir,
-	getPuppeteerDir,
 	isEnoent,
 	MAIN_CONFIG_FILENAMES,
 	parseFrontmatter,
@@ -47,12 +46,17 @@ import { convertToLegacyConfig, validateServerConfig } from "../mcp/config";
 import type { MCPServerConfig } from "../mcp/types";
 import { theme, themeJsonSchema } from "../modes/theme/theme";
 import { loadBundledAgents } from "../task/agents";
-import { readChromiumEnvOverride, resolveSystemChromium } from "../tools/browser/launch";
+import {
+	readChromiumEnvOverride,
+	resolveCachedChromiumExecutable,
+	resolveSystemChromium,
+} from "../tools/browser/launch";
 import { BUILTIN_TOOL_NAMES, HIDDEN_TOOL_NAMES } from "../tools/builtin-names";
 import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
 import {
 	type DbProbe,
 	type DbRepair,
+	openReadonlyNonMutating,
 	probeDatabase,
 	probeSqliteRecoverCapability,
 	recoverInterruptedSwap,
@@ -175,56 +179,6 @@ function collectToolFindings(): DoctorFinding[] {
 }
 
 /**
- * Probe whether a previously-downloaded Chromium already exists in the
- * Puppeteer cache — WITHOUT triggering a download. Returns the cached
- * executable path when it exists on disk, or undefined when nothing is
- * cached. Checks the cache directory for a chrome build folder rather than
- * calling the puppeteer APIs (which would require dynamic imports of
- * @puppeteer/browsers and puppeteer-core/internal/revisions.js).
- */
-async function resolveCachedChromium(): Promise<string | undefined> {
-	const cacheDir = getPuppeteerDir();
-	// The Puppeteer cache layout is <cacheDir>/<chrome|chromium>-<buildId>/.
-	// If the cache dir doesn't exist or is empty, no download has happened.
-	let entries: fs.Dirent[];
-	try {
-		entries = await fs.promises.readdir(cacheDir, { withFileTypes: true });
-	} catch {
-		return undefined;
-	}
-	for (const entry of entries) {
-		if (!entry.isDirectory()) continue;
-		// Look for a chrome/chromium build directory with an executable inside.
-		const buildDir = path.join(cacheDir, entry.name);
-		let buildEntries: fs.Dirent[];
-		try {
-			buildEntries = await fs.promises.readdir(buildDir, { withFileTypes: true });
-		} catch {
-			continue;
-		}
-		for (const sub of buildEntries) {
-			if (!sub.isDirectory()) continue;
-			// Puppeteer's layout: <buildDir>/<platform-arch>/chrome
-			const platformDir = path.join(buildDir, sub.name);
-			let platformEntries: fs.Dirent[];
-			try {
-				platformEntries = await fs.promises.readdir(platformDir, { withFileTypes: true });
-			} catch {
-				continue;
-			}
-			for (const file of platformEntries) {
-				if (file.isFile() || file.isSymbolicLink()) {
-					const name = file.name.toLowerCase();
-					if (name === "chrome" || name === "chrome.exe" || name === "chromium" || name === "headless_shell") {
-						return path.join(platformDir, file.name);
-					}
-				}
-			}
-		}
-	}
-	return undefined;
-}
-/**
  * Probe how the browser tool would resolve a Chromium executable — without
  * downloading or launching anything. Mirrors `ensureChromiumExecutable`'s
  * precedence (system detection first, then the env override) but stats the
@@ -294,7 +248,7 @@ async function collectBrowserFindings(): Promise<DoctorFinding[]> {
 	// already been downloaded into the Puppeteer cache. A cached binary means
 	// the browser tool will launch it without downloading — the warning is
 	// misleading. This probe never triggers a download.
-	const cached = await resolveCachedChromium();
+	const cached = await resolveCachedChromiumExecutable();
 	if (cached) {
 		return [
 			{
@@ -389,9 +343,25 @@ async function collectAuthFindings(flags: DoctorCommandFlags): Promise<DoctorFin
 		});
 	} catch {
 		// The only throw from resolveAuthBrokerConfig is "URL set but no
-		// token". Do NOT forward the raw error text — it embeds the URL.
-		// Report a sanitized finding instead. When scoped, the token file
+		// token". When the token (or URL) was `!command`-backed, the resolver
+		// records commandBackedField but returns no token, so this throw is
+		// expected — classify it as a command-backed warning BEFORE the
+		// missing-token error, which would otherwise bury it. Do NOT forward
+		// the raw error text — it embeds the URL. When scoped, the token file
 		// is out of scope, so the remedy points to scoped sources only.
+		if (commandBackedField !== null) {
+			return [
+				{
+					id: "auth.broker",
+					category: "auth",
+					status: "warning",
+					summary:
+						"auth broker config is command-backed; doctor cannot resolve it without executing a shell command",
+					details: [],
+					remedy: "Run `omp doctor` in a context where the broker command resolves, or use a literal URL/token",
+				},
+			];
+		}
 		return [
 			{
 				id: "auth.broker",
@@ -452,7 +422,10 @@ async function collectAuthFindings(flags: DoctorCommandFlags): Promise<DoctorFin
 
 	let db: Database | undefined;
 	try {
-		db = new Database(dbPath, { readonly: true, create: false });
+		// Reuse the storage probe's non-mutating open (doctor-sqlite): a plain
+		// read-only open of a cleanly closed WAL database would recreate the
+		// -wal/-shm sidecars, contradicting the read-only contract.
+		db = (await openReadonlyNonMutating(dbPath)).handle;
 		db.run("PRAGMA busy_timeout = 5000");
 		const tableRow = db
 			.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'auth_credentials'")
@@ -684,6 +657,14 @@ async function collectConfigFindings(flags: DoctorCommandFlags): Promise<DoctorF
 	const agentDir = flags.agentDir ?? getAgentDir();
 	const findings: DoctorFinding[] = [];
 	findings.push(await diagnoseSettingsConfig(agentDir));
+	// Diagnose the project settings file (<cwd>/.omp/config.yml) through the
+	// same read-only classify path. The project dir is always getProjectDir()
+	// — even under --agent-dir scoping — mirroring how the MCP and setup
+	// sections treat projectDir: --agent-dir scopes the USER config only, not
+	// the project. Settings.#loadProjectSettings reads exactly this path at
+	// startup and quarantines+throws on malformed YAML, so a broken project
+	// config is an invisible startup failure that doctor must surface.
+	findings.push(await diagnoseProjectSettingsConfig());
 	// diagnose(path) parses/classifies at an explicit path without running the
 	// JSON→YAML migration, quarantining, or caching — read-only.
 	// Startup order (ConfigFile.#resolveReadPath + #jsonMigrationPath):
@@ -753,8 +734,67 @@ async function diagnoseSettingsConfig(agentDir: string): Promise<DoctorFinding> 
 	};
 }
 
-function yamlConfigFinding(name: string, filename: string, result: YamlLoadResult): DoctorFinding {
-	const base = { id: `config.${name}`, category: "config" as const };
+/**
+ * Diagnose the project settings file (`<cwd>/.omp/config.yml`) through the
+ * same read-only {@link classifySettingsYaml} path used by
+ * {@link diagnoseSettingsConfig}. At startup, `Settings.#loadProjectSettings`
+ * reads this file via the strict `#loadYaml` path which quarantines and
+ * throws on malformed YAML — a broken project config is an invisible startup
+ * failure. This surfaces it without constructing a Settings instance,
+ * quarantining, or writing. Absent file = ok (using defaults), matching the
+ * agent-dir absent convention.
+ */
+async function diagnoseProjectSettingsConfig(): Promise<DoctorFinding> {
+	const projectConfigPath = path.join(getProjectDir(), ".omp", "config.yml");
+	const result = await classifySettingsYaml(projectConfigPath);
+	if (result.kind === "missing") {
+		return {
+			id: "config.settings.project",
+			category: "config",
+			status: "ok",
+			summary: "project settings: absent (using defaults)",
+			details: [],
+		};
+	}
+	if (result.kind === "loaded") {
+		const { errors, warnings } = validateSettingsValues(result.settings);
+		if (errors.length > 0) {
+			return {
+				id: "config.settings.project",
+				category: "config",
+				status: "error",
+				summary: `project settings: ${errors.length} invalid value${errors.length === 1 ? "" : "s"}`,
+				details: errors,
+				remedy: `Fix .omp/config.yml or remove it to use defaults`,
+			};
+		}
+		if (warnings.length > 0) {
+			return {
+				id: "config.settings.project",
+				category: "config",
+				status: "warning",
+				summary: `project settings: valid (${warnings.length} unknown key${warnings.length === 1 ? "" : "s"})`,
+				details: warnings,
+			};
+		}
+		return {
+			id: "config.settings.project",
+			category: "config",
+			status: "ok",
+			summary: "project settings: valid",
+			details: [],
+		};
+	}
+	return yamlConfigFinding("project settings", ".omp/config.yml", result, "config.settings.project");
+}
+
+function yamlConfigFinding(
+	name: string,
+	filename: string,
+	result: YamlLoadResult,
+	id: string = `config.${name}`,
+): DoctorFinding {
+	const base = { id, category: "config" as const };
 	switch (result.kind) {
 		case "missing":
 			return { ...base, status: "ok", summary: `${name}: absent (using defaults)`, details: [] };
@@ -1160,14 +1200,14 @@ function resolveStdioCommand(command: string, config: MCPServerConfig): string |
 		}
 		return null;
 	}
-	// Bare command: use Bun.which with the config's PATH override if present.
-	// Bun.which accepts a PATH option; the transport merges config.env into
-	// the spawn environment, so config.env.PATH is the effective PATH.
+	// Bare command: resolve via Bun.which with the config's PATH override
+	// when present. The transport merges config.env into the spawn
+	// environment, so config.env.PATH REPLACES the process PATH — an
+	// authoritative restricted PATH that lacks the command must report
+	// "not found", never fall back to the doctor's own process PATH.
 	const envPath = "env" in config && config.env && typeof config.env.PATH === "string" ? config.env.PATH : undefined;
 	if (envPath !== undefined) {
-		const resolved = Bun.which(command, { PATH: envPath });
-		if (resolved !== null) return resolved;
-		// Fall back to the process PATH if the override didn't find it.
+		return Bun.which(command, { PATH: envPath });
 	}
 	return Bun.which(command);
 }
@@ -1831,7 +1871,17 @@ async function validateExtensionPackage(pkgRoot: string, errors: string[]): Prom
 	if (pkgExists) {
 		const manifest = await readExtensionManifest(packageJsonPath);
 		if (manifest?.extensions?.length) {
-			for (const extPath of manifest.extensions) {
+			for (const [idx, extPath] of manifest.extensions.entries()) {
+				// readExtensionManifest casts pkg.omp to ExtensionManifest
+				// without shape-checking the array entries, so a syntactically
+				// valid manifest like {"omp":{"extensions":[null]}} reaches
+				// here with a non-string entry. path.resolve would throw
+				// outside the surrounding stat catch and abort the whole
+				// report, so reject non-string/empty entries up front.
+				if (typeof extPath !== "string" || extPath.length === 0) {
+					errors.push(`${pkgName}: manifest "extensions" entry is not a string (index ${idx})`);
+					continue;
+				}
 				const resolved = path.resolve(pkgRoot, extPath);
 				try {
 					await fs.promises.stat(resolved);

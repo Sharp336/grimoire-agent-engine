@@ -188,6 +188,43 @@ export async function ensureChromiumExecutable(): Promise<string | undefined> {
 	return chromiumExecutablePromise;
 }
 
+/**
+ * Resolve a previously-downloaded Chromium executable from the Puppeteer
+ * cache WITHOUT triggering a download. Enumerates installed browsers via
+ * @puppeteer/browsers' own `getInstalledBrowsers`, which understands the
+ * cache layout across versions (including the 3.x
+ * `chrome/<platform>-<buildId>/<archive-dir>/chrome` structure), so the
+ * doctor does not duplicate the launcher's cache logic. Returns the first
+ * Chrome-family executable that exists on disk, or undefined when nothing
+ * is cached. `cacheDir` defaults to the launcher's cache root
+ * ({@link getPuppeteerDir}) but may be overridden for tests.
+ */
+export async function resolveCachedChromiumExecutable(
+	cacheDir: string = getPuppeteerDir(),
+): Promise<string | undefined> {
+	const browsers = await loadBrowsers();
+	let installed: BrowsersNs.InstalledBrowser[];
+	try {
+		installed = await browsers.getInstalledBrowsers({ cacheDir });
+	} catch {
+		// Corrupted metadata or an unreadable cache dir is equivalent to
+		// "nothing cached" for a read-only probe — never throw.
+		return undefined;
+	}
+	const chromeFamily: Record<string, true> = {
+		[browsers.Browser.CHROME]: true,
+		[browsers.Browser.CHROMEHEADLESSSHELL]: true,
+		[browsers.Browser.CHROMIUM]: true,
+	};
+	for (const entry of installed) {
+		if (!chromeFamily[entry.browser]) continue;
+		if (entry.executablePath && fs.existsSync(entry.executablePath)) {
+			return entry.executablePath;
+		}
+	}
+	return undefined;
+}
+
 let resolvedChromium: string | null | undefined; // undefined = unchecked; null = not found
 
 function isExecutableFile(p: string): boolean {
