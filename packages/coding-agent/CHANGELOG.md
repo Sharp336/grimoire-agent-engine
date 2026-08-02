@@ -44,7 +44,7 @@
 - Fixed the in-process `kill` builtin to validate signals, preserve negative PID operands, signal every process in pipeline jobs, continue after bad targets, and refuse non-probe signals aimed at the host process or process group.
 ### Changed
 
-- Mermaid ASCII diagrams now draw structure (lines, corners, junctions) in the theme's visible `border`/`accent` colors instead of the near-invisible `muted`/`borderMuted` tones, keeping diagrams readable on dark terminals.
+- Mermaid ASCII diagram junctions now use the theme's `accent` color instead of the near-invisible `borderMuted` tone (1.6:1 contrast in the default theme), keeping edge crossings readable on dark terminals.
 
 ## [17.2.3] - 2026-08-01
 

@@ -3043,17 +3043,17 @@ export function getMarkdownTheme(): MarkdownTheme {
 				// Mermaid ASCII diagrams render with the active palette so they read as
 				// content rather than raw monochrome. Roles mirror the SVG renderer's
 				// mapping; `text`/`muted`/`border`/`borderMuted`/`accent` exist in every theme.
-				// Structure roles deliberately avoid the muted tones: lines/corners track the
-				// box border and junctions track the accent, which keeps the diagram readable
-				// on dark terminals where `muted`/`borderMuted` are near-invisible.
+				// Junctions track the accent instead of `borderMuted`: `borderMuted` is
+				// near-invisible on dark terminals (1.6:1 against the default background),
+				// which left edge crossings unreadable. Other roles keep their theme colors.
 				const mermaidColorMode =
 					theme.getColorMode() === "truecolor" ? ("truecolor" as const) : ("ansi256" as const);
 				const mermaidTheme = {
 					fg: theme.getColorHex("text"),
 					border: theme.getColorHex("border"),
-					line: theme.getColorHex("border"),
+					line: theme.getColorHex("muted"),
 					arrow: theme.getColorHex("accent"),
-					corner: theme.getColorHex("border"),
+					corner: theme.getColorHex("muted"),
 					junction: theme.getColorHex("accent"),
 				};
 				return { mermaidColorMode, mermaidTheme };
