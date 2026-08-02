@@ -572,6 +572,10 @@ export class Editor implements Component, Focusable {
 		return this.#inputMode === "vim" ? this.#vim.mode : undefined;
 	}
 
+	clearVimPendingCommand(): void {
+		if (this.#inputMode === "vim") this.#vim.clearPendingCommand();
+	}
+
 	isVimModeEscape(data: string): boolean {
 		return this.#inputMode === "vim" && this.#vim.isModeEscape(data);
 	}
@@ -1308,6 +1312,7 @@ export class Editor implements Component, Focusable {
 			if (this.#inputMode === "vim") {
 				if (this.#vim.mode === "insert") this.#vim.finishInsertUndo();
 				else if (this.#vim.mode === "visual") this.#vim.enterNormalMode();
+				else this.#vim.clearPendingCommand();
 			}
 			this.#applyUndo();
 			return;
@@ -1356,6 +1361,7 @@ export class Editor implements Component, Focusable {
 					}
 					if (selected && this.#autocompleteProvider) {
 						const shouldChainSlashCommandAutocomplete = this.#isSlashCommandNameAutocompleteSelection();
+						if (this.#inputMode === "vim") this.#vim.prepareCompletion();
 						const result = this.#autocompleteProvider.applyCompletion(
 							this.#state.lines,
 							this.#state.cursorLine,
@@ -1401,6 +1407,7 @@ export class Editor implements Component, Focusable {
 						this.#cancelAutocomplete();
 					} else {
 						if (selected && this.#autocompleteProvider) {
+							if (this.#inputMode === "vim") this.#vim.prepareCompletion();
 							const result = this.#autocompleteProvider.applyCompletion(
 								this.#state.lines,
 								this.#state.cursorLine,
@@ -1429,6 +1436,7 @@ export class Editor implements Component, Focusable {
 						this.#cancelAutocomplete();
 					} else {
 						if (selected && this.#autocompleteProvider) {
+							if (this.#inputMode === "vim") this.#vim.prepareCompletion();
 							const result = this.#autocompleteProvider.applyCompletion(
 								this.#state.lines,
 								this.#state.cursorLine,
@@ -2004,7 +2012,10 @@ export class Editor implements Component, Focusable {
 
 	/** Apply terminal paste semantics to text from non-bracketed paste transports. */
 	pasteText(text: string): void {
-		if (this.#inputMode === "vim" && this.#vim.mode !== "insert") return;
+		if (this.#inputMode === "vim" && this.#vim.mode !== "insert") {
+			this.#vim.clearPendingCommand();
+			return;
+		}
 		if (this.#inputMode === "vim") this.#vim.preparePaste();
 		this.#handlePaste(text);
 	}

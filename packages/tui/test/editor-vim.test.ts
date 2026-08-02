@@ -405,7 +405,7 @@ describe("Editor Vim input mode", () => {
 		expect(editor.getText()).toBe("ab");
 	});
 
-	it("clears pending counts and operators before fallback navigation", () => {
+	it("clears pending counts and operators before non-command keys", () => {
 		const counted = createVimEditor();
 		counted.setText("abcde");
 		typeText(counted, "03");
@@ -420,6 +420,21 @@ describe("Editor Vim input mode", () => {
 		operated.handleInput("w");
 		expect(operated.getText()).toBe("one two");
 		expect(operated.getCursor()).toEqual({ line: 0, col: 4 });
+
+		const blocked = createVimEditor();
+		blocked.setText("abcde");
+		typeText(blocked, "03");
+		blocked.handleInput("\t");
+		blocked.handleInput("x");
+		expect(blocked.getText()).toBe("bcde");
+
+		const undone = createVimEditor();
+		undone.setText("one two");
+		typeText(undone, "0xd");
+		undone.handleInput("\x1f");
+		undone.handleInput("w");
+		expect(undone.getText()).toBe("one two");
+		expect(undone.getCursor()).toEqual({ line: 0, col: 4 });
 	});
 
 	it.each([
@@ -946,6 +961,32 @@ describe("Editor Vim input mode", () => {
 		editor.handleInput("\x1b");
 		expect(editor.getText()).toBe("/help");
 
+		editor.handleInput("u");
+		expect(editor.getText()).toBe("");
+	});
+
+	it("undoes a forced completion accepted before typing in insert mode", async () => {
+		const editor = createVimEditor();
+		const { promise, resolve } = Promise.withResolvers<void>();
+		editor.setAutocompleteProvider({
+			async getSuggestions() {
+				return null;
+			},
+			async getForceFileSuggestions() {
+				return { items: [{ label: "file.txt", value: "file.txt" }], prefix: "" };
+			},
+			applyCompletion() {
+				return { lines: ["file.txt"], cursorLine: 0, cursorCol: 8 };
+			},
+		});
+		editor.onAutocompleteUpdate = resolve;
+		editor.handleInput("i");
+		editor.handleInput("\t");
+		await promise;
+
+		editor.handleInput("\t");
+		editor.handleInput("\x1b");
+		expect(editor.getText()).toBe("file.txt");
 		editor.handleInput("u");
 		expect(editor.getText()).toBe("");
 	});

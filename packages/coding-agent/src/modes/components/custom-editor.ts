@@ -812,6 +812,7 @@ export class CustomEditor extends Editor {
 			if (remaining.length > 0) this.#pendingInput.push(remaining);
 			const pasteVimMode = this.getVimMode();
 			if (pasteVimMode !== undefined && pasteVimMode !== "insert") {
+				this.pasteText(content);
 				const drained = this.#pendingInput.splice(0);
 				for (const chunk of drained) this.handleInput(chunk);
 				return;
@@ -850,6 +851,7 @@ export class CustomEditor extends Editor {
 		// gesture. Plain "left" only — modified arrows and any in-text cursor
 		// movement fall through to normal handling.
 		if (canonical === "left" && this.onLeftAtStart && this.getText().trim() === "") {
+			if (vimMode !== undefined && vimMode !== "insert") this.clearVimPendingCommand();
 			this.onLeftAtStart();
 			return;
 		}
@@ -864,6 +866,7 @@ export class CustomEditor extends Editor {
 			canonical !== undefined &&
 			(this.#actionMatchKeyUnion.has(canonical) || this.#customMatchKeys.has(canonical))
 		) {
+			if (!acceptsTextEntry) this.clearVimPendingCommand();
 			// Intercept configured image paste (async - fires and handles result)
 			if (acceptsTextEntry && this.#matchesAction(canonical, "app.clipboard.pasteImage") && this.onPasteImage) {
 				void this.onPasteImage();

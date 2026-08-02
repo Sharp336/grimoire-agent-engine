@@ -126,6 +126,15 @@ export class VimEditorController {
 		if (!this.#insertUndoActive) this.#beginInsertUndo();
 	}
 
+	prepareCompletion(): void {
+		if (this.#mode === "insert" && !this.#insertUndoActive) this.#beginInsertUndo();
+	}
+
+	clearPendingCommand(): void {
+		this.#pending = undefined;
+		this.#count = "";
+	}
+
 	handleNormalInput(data: string, kb: KeybindingsManager): boolean {
 		if (this.#isEscape(data)) {
 			if (this.#mode === "visual") this.enterNormalMode();
@@ -136,8 +145,14 @@ export class VimEditorController {
 			return true;
 		}
 		if (this.#mode === "visual" && this.#handleVisualNavigation(data, kb)) return true;
-		if (data === "\n") return true;
-		if (matchesKey(data, "enter") || matchesKey(data, "return")) return this.#mode === "visual";
+		if (data === "\n") {
+			this.clearPendingCommand();
+			return true;
+		}
+		if (matchesKey(data, "enter") || matchesKey(data, "return")) {
+			this.clearPendingCommand();
+			return this.#mode === "visual";
+		}
 		if (matchesKey(data, "ctrl+r")) {
 			if (this.#mode === "visual") {
 				this.#count = "";
@@ -173,6 +188,7 @@ export class VimEditorController {
 			matchesKey(data, "ctrl+y") ||
 			matchesKey(data, "alt+y")
 		) {
+			this.clearPendingCommand();
 			return true;
 		}
 		const printable = extractPrintableText(data);

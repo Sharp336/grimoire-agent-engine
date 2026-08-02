@@ -166,11 +166,15 @@ describe("CustomEditor keybindings", () => {
 		editor.setInputMode("vim");
 		editor.setActionKeys("app.retry", ["alt+r"]);
 		editor.onRetry = onRetry;
+		editor.setText("one two");
+		editor.handleInput("0");
+		editor.handleInput("d");
 
 		editor.handleInput("\x1br");
+		editor.handleInput("w");
 
 		expect(onRetry).toHaveBeenCalledTimes(1);
-		expect(editor.getText()).toBe("");
+		expect(editor.getText()).toBe("one two");
 		expect(editor.getVimMode()).toBe("normal");
 	});
 
@@ -182,6 +186,14 @@ describe("CustomEditor keybindings", () => {
 		editor.handleInput("ignored");
 		editor.handleInput("\x1b[201~");
 		expect(editor.getText()).toBe("");
+
+		editor.setText("one two");
+		editor.handleInput("0");
+		editor.handleInput("d");
+		editor.handleInput("\x1b[200~ignored\x1b[201~");
+		editor.handleInput("w");
+		expect(editor.getText()).toBe("one two");
+		editor.setText("");
 
 		editor.handleInput("i");
 		editor.handleInput("\x1b[200~");
