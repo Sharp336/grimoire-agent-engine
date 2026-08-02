@@ -9,6 +9,7 @@ from omp_rpc import (
     AutoCompactionEndEvent,
     AutoCompactionStartEvent,
     ExtensionUiRequest,
+    JobUpdateEvent,
     OperationCancelledEvent,
     OperationCompletedEvent,
     OperationFailedEvent,
@@ -17,6 +18,7 @@ from omp_rpc import (
     PlanApprovalRequestEvent,
     PlanApprovalSettledEvent,
     PlanStateUpdateEvent,
+    QueueUpdateEvent,
     SessionState,
     TodoReminderEvent,
     ToolActivationResult,
@@ -937,6 +939,28 @@ class ProtocolParsingTests(unittest.TestCase):
         )
         self.assertFalse(unavailable.inventory_available)
         self.assertIsNone(unavailable.inventory)
+
+    def test_parse_queue_and_job_updates_forward_compatibly(self) -> None:
+        queue = parse_notification(
+            {
+                "type": "queue_update",
+                "queue": {"steering": [], "followUp": [], "rowCount": 0, "future": True},
+                "futureTopLevel": True,
+            }
+        )
+        jobs = parse_notification(
+            {
+                "type": "job_update",
+                "jobs": [{"id": "job-1", "status": "running", "future": True}],
+                "agents": [],
+                "futureTopLevel": True,
+            }
+        )
+        self.assertIsInstance(queue, QueueUpdateEvent)
+        self.assertTrue(queue.queue["future"])
+        self.assertIsInstance(jobs, JobUpdateEvent)
+        self.assertEqual(jobs.jobs[0]["id"], "job-1")
+
 
 
 if __name__ == "__main__":

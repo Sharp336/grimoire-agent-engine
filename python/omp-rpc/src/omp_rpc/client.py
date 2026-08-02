@@ -1193,6 +1193,33 @@ class RpcClient:
         return parse_agent_release_result(
             self._request("release_agent", agentId=agent_id, tombstone=tombstone)
         )
+    def get_queue(self) -> JsonObject:
+        return self._request("get_queue")
+
+    def remove_queued_message(self, entry_id: str) -> JsonObject:
+        return self._request("remove_queued_message", entryId=entry_id)
+
+    def reorder_queued_message(self, entry_id: str, to_index: int) -> JsonObject:
+        return self._request(
+            "reorder_queued_message", entryId=entry_id, toIndex=to_index
+        )
+
+    def clear_queue(
+        self, lane: Literal["steering", "followUp", "all"] | None = None
+    ) -> JsonObject:
+        fields: dict[str, JsonValue] = {}
+        if lane is not None:
+            fields["lane"] = lane
+        return self._request("clear_queue", **fields)
+
+    def list_jobs(self) -> JsonObject:
+        return self._request("list_jobs")
+
+    def get_job(self, job_id: str) -> JsonObject:
+        return self._request("get_job", jobId=job_id)
+
+    def cancel_jobs(self, job_ids: Sequence[str]) -> JsonObject:
+        return self._request("cancel_job", jobIds=list(job_ids))
 
     def set_model(self, provider: str, model_id: str) -> ModelInfo:
         payload = self._request("set_model", provider=provider, modelId=model_id)

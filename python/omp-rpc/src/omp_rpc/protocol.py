@@ -1624,6 +1624,19 @@ class AgentRegistryUpdateEvent:
 
 
 @dataclass(slots=True, frozen=True)
+class QueueUpdateEvent:
+    queue: JsonObject
+    type: Literal["queue_update"] = "queue_update"
+
+
+@dataclass(slots=True, frozen=True)
+class JobUpdateEvent:
+    jobs: tuple[JsonObject, ...]
+    agents: tuple[JsonObject, ...]
+    type: Literal["job_update"] = "job_update"
+
+
+@dataclass(slots=True, frozen=True)
 class UnknownNotification:
     payload: JsonObject
     type: Literal["unknown"] = "unknown"
@@ -1662,6 +1675,8 @@ RpcNotification: TypeAlias = (
     | SettingsUpdateEvent
     | ToolInventoryUpdateEvent
     | AgentRegistryUpdateEvent
+    | QueueUpdateEvent
+    | JobUpdateEvent
     | RpcAgentEvent
     | PlanStateUpdateEvent
     | PlanApprovalRequestEvent
@@ -2844,6 +2859,24 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
         return AgentRegistryUpdateEvent(
             change=cast(Literal["registered", "status_changed", "removed"], change),
             agent=parse_agent_snapshot(cast(JsonObject, raw_agent)),
+        )
+    if event_type == "queue_update":
+        return QueueUpdateEvent(
+            queue=_clone_json_object(payload.get("queue"), field="queue_update.queue")
+        )
+    if event_type == "job_update":
+        raw_jobs = payload.get("jobs")
+        raw_agents = payload.get("agents")
+        if not isinstance(raw_jobs, list) or not isinstance(raw_agents, list):
+            raise ValueError("job_update jobs and agents must be arrays")
+        return JobUpdateEvent(
+            jobs=tuple(
+                _clone_json_object(item, field="job_update.jobs") for item in raw_jobs
+            ),
+            agents=tuple(
+                _clone_json_object(item, field="job_update.agents")
+                for item in raw_agents
+            ),
         )
     if event_type in {
         "operation_started",
