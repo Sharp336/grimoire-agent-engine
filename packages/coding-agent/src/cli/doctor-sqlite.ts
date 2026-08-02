@@ -438,17 +438,107 @@ function swapMarkerPath(dbPath: string): string {
 	return path.join(path.dirname(dbPath), `.${path.basename(dbPath)}.omp-doctor-swap.json`);
 }
 
+/** Durable crash marker written once before any destructive swap work. Never rewritten. */
+interface SwapMarker {
+	archive: string;
+	/** Verified original trio snapshot (`snapshotTrio`) at marker publication. */
+	source: TrioSnapshotEntry[];
+	/** Candidate main-file identity after final mode, validation, and fsync. */
+	candidateMain: { size: number; hash: string };
+}
+
+function isTrioMainEntry(entry: TrioSnapshotEntry, dbPath: string): boolean {
+	return entry.name === path.basename(dbPath);
+}
+
+function mainEntryOf(entries: TrioSnapshotEntry[], dbPath: string): TrioSnapshotEntry | null {
+	return entries.find(entry => isTrioMainEntry(entry, dbPath)) ?? null;
+}
+
+/** True when every live trio member is an exact archived original member; missing archived sidecars (retired) are allowed. */
+function isRecognizedSourceSubset(live: TrioSnapshotEntry[], source: TrioSnapshotEntry[], dbPath: string): boolean {
+	const sourceMain = mainEntryOf(source, dbPath);
+	const liveMain = mainEntryOf(live, dbPath);
+	if (sourceMain === null || liveMain === null) return false;
+	if (liveMain.size !== sourceMain.size || liveMain.hash !== sourceMain.hash) return false;
+	const sourceByName = new Map(source.map(entry => [entry.name, entry]));
+	for (const entry of live) {
+		if (isTrioMainEntry(entry, dbPath)) continue;
+		const expected = sourceByName.get(entry.name);
+		if (expected === undefined || expected.size !== entry.size || expected.hash !== entry.hash) return false;
+	}
+	return true;
+}
+
+function parseSwapMarker(payload: unknown, markerPath: string): { archive: string; modern: SwapMarker | null } {
+	if (
+		payload === null ||
+		typeof payload !== "object" ||
+		!("archive" in payload) ||
+		typeof payload.archive !== "string"
+	) {
+		throw new Error(`interrupted swap marker has no archive path: ${markerPath}`);
+	}
+	const archive = payload.archive;
+	if (!("source" in payload) || !("candidateMain" in payload)) return { archive, modern: null };
+	const sourceRaw = payload.source;
+	const candidateRaw = payload.candidateMain;
+	if (!Array.isArray(sourceRaw) || candidateRaw === null || typeof candidateRaw !== "object") {
+		return { archive, modern: null };
+	}
+	if (
+		!("size" in candidateRaw) ||
+		!("hash" in candidateRaw) ||
+		typeof candidateRaw.size !== "number" ||
+		typeof candidateRaw.hash !== "string"
+	) {
+		return { archive, modern: null };
+	}
+	const source: TrioSnapshotEntry[] = [];
+	for (const entry of sourceRaw) {
+		if (
+			entry === null ||
+			typeof entry !== "object" ||
+			!("name" in entry) ||
+			!("size" in entry) ||
+			!("hash" in entry) ||
+			typeof entry.name !== "string" ||
+			typeof entry.size !== "number" ||
+			typeof entry.hash !== "string"
+		) {
+			return { archive, modern: null };
+		}
+		source.push({ name: entry.name, size: entry.size, hash: entry.hash });
+	}
+	return {
+		archive,
+		modern: {
+			archive,
+			source,
+			candidateMain: { size: candidateRaw.size, hash: candidateRaw.hash },
+		},
+	};
+}
+
+async function clearSwapMarker(marker: string, dbPath: string): Promise<void> {
+	await fs.rm(marker, { force: true });
+	await fsyncDir(path.dirname(dbPath));
+}
+
+function manualSwapRecoveryError(archiveDir: string, marker: string): string {
+	return `interrupted swap left an unrecognized live database state; verify the live database then either keep it and remove ${marker}, or restore manually from ${archiveDir}`;
+}
+
 /**
- * Atomically swap a rebuilt candidate into place behind a crash marker.
- * Any failure after the marker lands restores the archived originals; a crash
- * leaves the marker for `recoverInterruptedSwap` on the next run.
+ * Atomically swap a rebuilt candidate into place behind an immutable crash
+ * marker that records the original trio snapshot and the candidate main-file
+ * identity. Recovery classifies by those identities — never by rewriting a
+ * `swapped` flag or by integrity_check alone.
  *
  * `lockHandle` holds a RESERVED write lock on the live database. Uniform on
- * ALL platforms: while the lock is held, run a fresh holder + main-file
- * re-check, retire sidecars, then release the lock (sync) and rename
- * (fsSync.renameSync) as a synchronous pair with no await between them —
- * a microsecond gap bounded by the re-check that just proved no holders,
- * the durable marker, and the armed rollback. No platform special case.
+ * ALL platforms: while the lock is held, run a fresh holder + trio re-check,
+ * retire sidecars, then release the lock (sync) and rename
+ * (fsSync.renameSync) as a synchronous pair with no await between them.
  * `expected` is the verified trio snapshot from before the lock was acquired.
  */
 async function swapInCandidate(
@@ -459,30 +549,39 @@ async function swapInCandidate(
 	expected: TrioSnapshotEntry[],
 ): Promise<void> {
 	const marker = swapMarkerPath(dbPath);
-	// Resolve the archive path so a recovery run from a different cwd can find it.
 	const resolvedArchive = path.resolve(archiveDir);
-	await fs.writeFile(marker, JSON.stringify({ archive: resolvedArchive }), { flag: "wx" });
-	// Fsync the marker FILE itself — fsyncing only the directory entry would
-	// persist an empty/truncated marker on power loss, breaking rollback.
-	await fsyncFile(marker);
-	await fsyncDir(path.dirname(dbPath));
-	const retired: string[] = [];
-	// Capture the original file mode so a 0600 credentials-bearing database
-	// does not become world-readable after the candidate (created with the
-	// process umask) is renamed into place.
+	// Capture the original mode and apply it to the candidate before exposure
+	// so a 0600 credentials-bearing database does not become world-readable
+	// after the rename, and so the marker records the final candidate bytes.
 	let originalMode: number | null = null;
 	try {
 		originalMode = (await fs.stat(dbPath)).mode & 0o777;
 	} catch {
 		// original may not exist — the candidate's default mode is acceptable
 	}
+	if (originalMode !== null) await fs.chmod(candidate, originalMode);
+	validateCandidate(candidate);
+	await fsyncFile(candidate);
+	const candidateStat = await fs.stat(candidate);
+	const candidateMain = { size: candidateStat.size, hash: await sha256File(candidate) };
+	const markerPayload: SwapMarker = {
+		archive: resolvedArchive,
+		source: expected,
+		candidateMain,
+	};
+	// One immutable wx publication before any retirement or rename. Never rewrite.
+	await fs.writeFile(marker, JSON.stringify(markerPayload), { flag: "wx" });
+	await fsyncFile(marker);
+	await fsyncDir(path.dirname(dbPath));
+
+	const retired: string[] = [];
 	let swapCommitted = false;
+	let lockReleased = false;
 	let rollbackFailed = false;
+	let retainMarker = false;
 	let markerRemovalError: Error | null = null;
 	try {
-		// Under-lock re-check: prove no writer appeared and the main file is
-		// unchanged since quiescence. Sidecars are not yet retired, so the
-		// full trio is comparable against `expected`.
+		// Under-lock re-check: prove no writer appeared and the trio is unchanged.
 		if (lockHandle !== null) {
 			if ((await hasHolders(dbPath)) === true) throw new Error("database acquired a holder during swap; aborting");
 			try {
@@ -492,7 +591,6 @@ async function swapInCandidate(
 				throw error instanceof Error ? error : new Error(messageOf(error));
 			}
 		}
-		// Retire sidecars while the lock is still held.
 		for (const suffix of ["-wal", "-shm", "-journal"]) {
 			const sidecar = `${dbPath}${suffix}`;
 			try {
@@ -508,14 +606,14 @@ async function swapInCandidate(
 		}
 		await fsyncDir(path.dirname(dbPath));
 		// Synchronous close + rename: microsecond gap, no await between.
-		// The re-check just proved no holders; the marker is durable; rollback
-		// is armed. This is uniform on all platforms — no rename-with-handle-
-		// open attempt, no fallback, no platform special case.
 		releaseWriteLock(lockHandle);
 		lockHandle = null;
+		lockReleased = true;
 		fsSync.renameSync(candidate, dbPath);
-		if (originalMode !== null) await fs.chmod(dbPath, originalMode);
 		await fsyncDir(path.dirname(dbPath));
+		// Post-exposure verification must not roll the live path back — the
+		// candidate may already have been opened. Leave the marker for
+		// provenance-based recovery if verification fails.
 		const check = new Database(dbPath, { readonly: true });
 		try {
 			const row = check.query("PRAGMA integrity_check").get() as Pick<PragmaRow, "integrity_check"> | null;
@@ -523,25 +621,33 @@ async function swapInCandidate(
 		} finally {
 			check.close();
 		}
-		// Record swap-committed state in the marker before attempting removal.
-		// If removal fails, the marker still says swapped:true and recovery
-		// will NOT restore the old archive over new commits.
-		await fs.writeFile(marker, JSON.stringify({ archive: resolvedArchive, swapped: true }));
-		await fsyncFile(marker);
 		swapCommitted = true;
 	} catch (error) {
-		// Rollback uses the same close-before-rename protocol as the swap:
-		// stage the archive copies (writes go to staging files, not the live
-		// target), release the write lock, then rename synchronously. Renaming
-		// over the live file while the lock handle is still open fails on
-		// Windows (open SQLite file cannot be replaced).
+		if (lockReleased) {
+			// Rename was attempted (or the lock was already dropped). Do not
+			// archive-restore over a potentially exposed live path.
+			retainMarker = true;
+			throw new Error(
+				`replacement interrupted after lock release; marker retained for provenance recovery (${marker}); archive at ${resolvedArchive}: ${messageOf(error)}`,
+			);
+		}
+		// Still exclusive under the write lock: exact-restore the archived trio.
 		try {
 			const rollbackPlan = await stageRestoreFromArchive(dbPath, archiveDir);
 			releaseWriteLock(lockHandle);
 			lockHandle = null;
 			commitRestoreFromArchive(rollbackPlan);
+			const restored = await snapshotTrio(dbPath);
+			if (!snapshotsEqual(restored, expected)) {
+				rollbackFailed = true;
+				retainMarker = true;
+				throw new Error(
+					`replacement failed and rollback did not restore the verified snapshot; restore manually from ${archiveDir}`,
+				);
+			}
 		} catch (rollbackError) {
 			rollbackFailed = true;
+			retainMarker = true;
 			throw new Error(
 				`replacement failed and rollback failed; restore manually from ${archiveDir}: ${messageOf(rollbackError)}`,
 			);
@@ -549,12 +655,12 @@ async function swapInCandidate(
 		throw error;
 	} finally {
 		releaseWriteLock(lockHandle);
-		for (const retiredPath of retired) await fs.rm(retiredPath, { force: true }).catch(() => undefined);
-		// The marker is the durable pointer the next doctor run needs for
-		// recovery. Clear it only after a verified swap (swapCommitted) or a
-		// completed rollback — never when rollback failed, or the archive
-		// pointer is lost in exactly the path that most needs it.
-		if (!rollbackFailed) {
+		if (swapCommitted || (!retainMarker && !rollbackFailed)) {
+			for (const retiredPath of retired) await fs.rm(retiredPath, { force: true }).catch(() => undefined);
+		}
+		// Clear the marker only after a verified swap or a completed under-lock
+		// rollback. A post-exposure failure or failed rollback keeps it.
+		if (!retainMarker && !rollbackFailed) {
 			try {
 				await fs.rm(marker, { force: true });
 				await fsyncDir(path.dirname(dbPath));
@@ -563,8 +669,6 @@ async function swapInCandidate(
 					markerRemovalError = new Error(
 						`swap succeeded but swap marker could not be removed; the database is repaired but a stale marker remains at ${marker}: ${messageOf(error)}`,
 					);
-				// Rollback succeeded; a leftover marker without swapped:true causes
-				// the next --fix to re-restore the same archive (a benign no-op).
 			}
 		}
 	}
@@ -574,7 +678,8 @@ async function swapInCandidate(
 /**
  * Handle a marker left by a crashed swap. Always reports whether a marker was
  * found; only restores when `restore` is true (a `--fix` run), so read-only
- * runs stay read-only.
+ * runs stay read-only. Classification uses marker provenance identities, never
+ * integrity_check alone.
  */
 export async function recoverInterruptedSwap(db: DoctorDatabase, restore: boolean): Promise<SwapRecovery> {
 	const marker = swapMarkerPath(db.path);
@@ -587,31 +692,63 @@ export async function recoverInterruptedSwap(db: DoctorDatabase, restore: boolea
 	if (!markerExists) return { found: false, restored: false, error: null };
 	if (!restore) return { found: true, restored: false, error: null };
 	try {
-		const payload: unknown = JSON.parse(await Bun.file(marker).text());
-		if (
-			payload === null ||
-			typeof payload !== "object" ||
-			!("archive" in payload) ||
-			typeof payload.archive !== "string"
-		) {
-			throw new Error(`interrupted swap marker has no archive path: ${marker}`);
-		}
-		// If the swap was committed before the crash, the live database IS the
-		// repaired candidate — do NOT restore the old archive over new commits.
-		if ("swapped" in payload && payload.swapped === true) {
-			await fs.rm(marker, { force: true });
-			await fsyncDir(path.dirname(db.path));
-			return { found: true, restored: false, error: null };
-		}
-		// Resolve relative archive paths against the marker's directory so a
-		// recovery run from a different cwd can find the archive.
-		const archiveDir = path.resolve(path.dirname(marker), payload.archive);
+		const parsed = parseSwapMarker(JSON.parse(await Bun.file(marker).text()), marker);
+		const archiveDir = path.resolve(path.dirname(marker), parsed.archive);
 		const archivedMain = path.join(archiveDir, path.basename(db.path));
 		if (!(await pathExists(archivedMain)))
 			throw new Error(`interrupted swap archive is missing the database: ${archivedMain}`);
-		// Gate the restore the same way the corrupt-repair path does: if a live
-		// omp process holds the database, restoring would overwrite an inode
-		// that process is still writing to. Report busy instead of restoring.
+
+		const liveExists = await pathExists(db.path);
+		if (!liveExists) {
+			return {
+				found: true,
+				restored: false,
+				error: `interrupted swap database main file is missing; automatic recovery cannot exclude a concurrent creator. Restore manually from ${archiveDir}; marker retained at ${marker}`,
+			};
+		}
+		let decision: "restore" | "preserve" | "manual";
+		if (parsed.modern === null) {
+			// Older markers without identities: any live database is ambiguous.
+			decision = "manual";
+		} else {
+			const live = await snapshotTrio(db.path);
+			const liveMain = mainEntryOf(live, db.path);
+			const sourceMain = mainEntryOf(parsed.modern.source, db.path);
+			if (liveMain === null || sourceMain === null) {
+				decision = "manual";
+			} else if (
+				liveMain.size === parsed.modern.candidateMain.size &&
+				liveMain.hash === parsed.modern.candidateMain.hash &&
+				(liveMain.size !== sourceMain.size || liveMain.hash !== sourceMain.hash)
+			) {
+				decision = "preserve";
+			} else if (isRecognizedSourceSubset(live, parsed.modern.source, db.path)) {
+				decision = "restore";
+			} else {
+				decision = "manual";
+			}
+		}
+
+		if (decision === "preserve") {
+			await clearSwapMarker(marker, db.path);
+			return { found: true, restored: false, error: null };
+		}
+		if (decision === "manual") {
+			return { found: true, restored: false, error: manualSwapRecoveryError(archiveDir, marker) };
+		}
+
+		// Modern restore: archive bytes must still match the recorded source.
+		if (parsed.modern !== null) {
+			const archiveSnap = await snapshotTrio(archivedMain);
+			if (!snapshotsEqual(archiveSnap, parsed.modern.source)) {
+				return {
+					found: true,
+					restored: false,
+					error: `interrupted swap archive no longer matches the recorded source snapshot; restore manually from ${archiveDir}`,
+				};
+			}
+		}
+
 		if ((await hasHolders(db.path)) === true)
 			return { found: true, restored: false, error: "database busy; close running omp sessions and re-run" };
 		const before = await snapshotTrio(db.path);
@@ -620,15 +757,7 @@ export async function recoverInterruptedSwap(db: DoctorDatabase, restore: boolea
 			return { found: true, restored: false, error: "database busy; close running omp sessions and re-run" };
 		if (!snapshotsEqual(before, await snapshotTrio(db.path)))
 			return { found: true, restored: false, error: "database changed during quiescence check" };
-		// Hold a RESERVED write lock through the restore so no writer commits
-		// between the quiescence proof and the file swap. If the file is not a
-		// valid SQLite database (NOTADB), acquireWriteLock returns null — an
-		// unopenable file can't take a SQLite lock, but a process may still
-		// hold it open from before it became garbage. Gate on hasHolders:
-		// proceed only when it returns exactly false. A `true` result refuses
-		// as busy; a `null` result (fuser unavailable, e.g. macOS/Windows)
-		// refuses as an unsupported repair naming the missing dependency.
-		// BEGIN IMMEDIATE failures throw and are caught above (refuse).
+
 		let lockHandle: Database | null = null;
 		try {
 			lockHandle = await acquireWriteLock(db.path);
@@ -642,11 +771,6 @@ export async function recoverInterruptedSwap(db: DoctorDatabase, restore: boolea
 			} catch {
 				holders = null;
 			}
-			// Distinguish "another process holds it" from "holder detection is
-			// unavailable on this platform" (no fuser). The latter is an
-			// unsupported repair, not a generic busy — surface what to install
-			// so the dependency is actionable on every platform where this path
-			// is used, not only where the tools-section warning mentions it.
 			if (holders === true)
 				return {
 					found: true,
@@ -660,12 +784,15 @@ export async function recoverInterruptedSwap(db: DoctorDatabase, restore: boolea
 					error: "holder detection unavailable on this platform (fuser not found); install psmisc or close all omp sessions and re-run — automatic recovery of an unopenable database is unsupported without holder detection",
 				};
 		}
-		// Stage the archive copies while the lock is held (writes go to staging
-		// files, not the live target), then release the lock and commit the
-		// rename synchronously — the same close-before-rename protocol
-		// swapInCandidate uses. Renaming over the live file while the lock
-		// handle is still open fails on Windows (open SQLite file cannot be
-		// replaced); no reopen, no await between release and rename.
+
+		// Recheck the classified snapshot under the recovery write lock so a
+		// commit in the pre-lock gap cannot be overwritten.
+		const lockedLive = await snapshotTrio(db.path);
+		if (parsed.modern === null || !isRecognizedSourceSubset(lockedLive, parsed.modern.source, db.path)) {
+			releaseWriteLock(lockHandle);
+			return { found: true, restored: false, error: manualSwapRecoveryError(archiveDir, marker) };
+		}
+
 		try {
 			const restorePlan = await stageRestoreFromArchive(db.path, archiveDir);
 			releaseWriteLock(lockHandle);
@@ -674,8 +801,28 @@ export async function recoverInterruptedSwap(db: DoctorDatabase, restore: boolea
 		} finally {
 			releaseWriteLock(lockHandle);
 		}
-		await fs.rm(marker, { force: true });
-		await fsyncDir(path.dirname(db.path));
+
+		const restored = await snapshotTrio(db.path);
+		if (parsed.modern !== null) {
+			if (!snapshotsEqual(restored, parsed.modern.source)) {
+				return {
+					found: true,
+					restored: false,
+					error: `interrupted swap restore did not reproduce the recorded source trio; marker retained at ${marker}; archive at ${archiveDir}`,
+				};
+			}
+		} else {
+			const archiveSnap = await snapshotTrio(archivedMain);
+			if (!snapshotsEqual(restored, archiveSnap)) {
+				return {
+					found: true,
+					restored: false,
+					error: `interrupted swap restore did not match the archive trio; marker retained at ${marker}; archive at ${archiveDir}`,
+				};
+			}
+		}
+
+		await clearSwapMarker(marker, db.path);
 		return { found: true, restored: true, error: null };
 	} catch (error) {
 		return { found: true, restored: false, error: messageOf(error) };
