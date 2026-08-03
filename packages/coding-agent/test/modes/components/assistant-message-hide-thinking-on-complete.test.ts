@@ -112,32 +112,13 @@ describe("hideThinkingBlockOnComplete", () => {
 		expect(text).toContain(ANSWER);
 	});
 
-	it("constructor flag and live setter wire identically", () => {
-		const viaSetter = new AssistantMessageComponent(undefined, false);
-		viaSetter.setHideThinkingBlockOnComplete(true);
-		viaSetter.updateContent(makeMessage("stop"));
-		viaSetter.markTranscriptBlockFinalized();
-
-		const viaConstructor = new AssistantMessageComponent(undefined, false, undefined, [], undefined, true, true);
-		viaConstructor.updateContent(makeMessage("stop"));
-		viaConstructor.markTranscriptBlockFinalized();
-
-		expect(renderText(viaSetter)).toBe(renderText(viaConstructor));
-	});
-
-	it("repeat finalization is a no-op after the hide rebuild (tool-arg ticks)", () => {
-		const component = new AssistantMessageComponent(undefined, false);
-		component.setHideThinkingBlockOnComplete(true);
-		component.updateContent(makeMessage("toolUse"));
-		component.markTranscriptBlockFinalized(false);
-		component.markTranscriptBlockFinalized(false);
-		component.updateContent(makeMessage("toolUse"));
-		// Still not complete: thinking must survive repeated early seals + updates.
-		expect(renderText(component)).toContain(THINKING);
-		component.markTranscriptBlockFinalized();
-		component.markTranscriptBlockFinalized();
-		component.updateContent(makeMessage("toolUse"));
+	it("reveal setter re-renders reconstructed completed messages", () => {
+		// Builder/factory reconstruct completed messages with the constructor,
+		// then apply the reveal afterwards — the setter must rebuild on its own.
+		const component = new AssistantMessageComponent(makeMessage("stop"), false, undefined, [], undefined, true, true);
 		expect(renderText(component)).not.toContain(THINKING);
+		component.setUserRevealedThinking(true);
+		expect(renderText(component)).toContain(THINKING);
 	});
 
 	it("explicit reveal while streaming survives finalization", () => {

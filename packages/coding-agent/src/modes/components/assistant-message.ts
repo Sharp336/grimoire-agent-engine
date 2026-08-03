@@ -264,25 +264,12 @@ export class AssistantMessageComponent extends Container {
 	#thinkingRateLive = false;
 
 	/**
-	 * When set, thinking blocks render live while streaming and are hidden once
-	 * the turn truly completes (Codex-style clean transcript). Independent of
-	 * {@link hideThinkingBlock}: a settled turn whose reasoning was visible
-	 * during streaming is re-rendered without it, unless the turn ended
-	 * abnormally — there the trace stays for diagnosis.
-	 */
-	#hideThinkingBlockOnComplete = false;
-
-	/**
 	 * True once the message has actually ended (message_end, or construction
 	 * with a persisted message). Distinct from {@link #transcriptBlockFinalized},
 	 * which also seals early when a streamed message gains a tool call so its
 	 * scrollback can commit while tool arguments still stream.
 	 */
 	#messageComplete = false;
-
-	/** Whether the last render painted any visible thinking block; gates the
-	 *  hide-on-complete rebuild to the false→true finalization transition. */
-	#lastRenderHadVisibleThinking = false;
 
 	/**
 	 * User explicitly revealed thinking (Ctrl+T / settings "Hide Thinking
@@ -361,11 +348,25 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	setHideThinkingBlockOnComplete(hide: boolean): void {
+		if (this.hideThinkingBlockOnComplete === hide) return;
 		this.hideThinkingBlockOnComplete = hide;
+		// Enabling auto-hide on an incomplete, early-sealed block (tool call
+		// streamed with the setting off) makes its reasoning retractable: reopen
+		// the block so the live-region pin protects it until message_end.
+		if (hide && this.#thinkingIsRetractable()) {
+			this.#transcriptBlockFinalized = false;
+		}
 	}
 
 	setUserRevealedThinking(revealed: boolean): void {
+		if (this.#userRevealed === revealed) return;
 		this.#userRevealed = revealed;
+		// Rebuild cached content: reconstructed components are created with a
+		// completed message and get this setter after the constructor already
+		// rendered, so the reveal must re-render (mirrors image setters).
+		if (this.#lastMessage) {
+			this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
+		}
 	}
 
 	/**
@@ -604,10 +605,15 @@ export class AssistantMessageComponent extends Container {
 	 * reasoning from the streaming render. Later seals are no-ops.
 	 */
 	markTranscriptBlockFinalized(complete = true): void {
+		// Sample the effective visibility before completion flips it: the rebuild
+		// must run exactly on the false→true transition (visible thinking that
+		// now hides), or when the live pulse was on screen. Repeated seals
+		// (per tool-arg tick) stay no-ops.
+		const wasThinkingHidden = this.#effectiveHideThinkingBlock();
 		if (complete) this.#messageComplete = true;
 		this.#transcriptBlockFinalized = true;
 		this.#stopThinkingAnimation();
-		if (this.#thinkingDots || (this.#effectiveHideThinkingBlock() && this.#lastRenderHadVisibleThinking)) {
+		if (this.#thinkingDots || (!wasThinkingHidden && this.#effectiveHideThinkingBlock())) {
 			this.#fastPathKey = undefined;
 			this.#fastPathItems = undefined;
 			if (this.#lastMessage) this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
@@ -974,7 +980,6 @@ export class AssistantMessageComponent extends Container {
 		// Render content in order
 		let thinkingIndex = 0;
 		let hasRenderedContent = false;
-		let hasRenderedThinkingContent = false;
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
 			if (content.type === "text" && canonicalizeMessage(content.text)) {
@@ -991,7 +996,7 @@ export class AssistantMessageComponent extends Container {
 					thinkingIndex += 1;
 					continue;
 				}
-				hasRenderedThinkingContent = true; // Add spacing only when another visible assistant content block follows.
+				// Add spacing only when another visible assistant content block follows.
 				// This avoids a superfluous blank line before separately-rendered tool execution blocks.
 				const hasVisibleContentAfter = message.content
 					.slice(i + 1)
@@ -1021,8 +1026,6 @@ export class AssistantMessageComponent extends Container {
 				hasRenderedContent ||= this.#showImages;
 			}
 		}
-
-		this.#lastRenderHadVisibleThinking = hasRenderedThinkingContent;
 
 		if (this.#shouldAnimateThinking(message)) {
 			if (hasVisibleContent) this.#contentContainer.addChild(new Spacer(1));

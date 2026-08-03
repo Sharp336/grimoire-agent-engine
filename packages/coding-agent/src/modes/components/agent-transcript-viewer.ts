@@ -48,8 +48,6 @@ export interface AgentTranscriptViewerDeps {
 	hideThinkingBlock?: () => boolean;
 	/** Hide thinking blocks once the turn completes (live while streaming). */
 	hideThinkingBlockOnComplete?: () => boolean;
-	/** User explicitly revealed thinking (Ctrl+T to visible): wins over hide-on-complete. */
-	thinkingRevealed?: () => boolean;
 	proseOnlyThinking?: () => boolean;
 	expandKeys: KeyId[];
 	/** Keys that toggle the whole hub closed (app.agents.hub + app.session.observe). */
@@ -169,7 +167,6 @@ export class AgentTranscriptViewer implements Component {
 			cwd: deps.cwd,
 			hideThinkingBlock: deps.hideThinkingBlock,
 			hideThinkingBlockOnComplete: deps.hideThinkingBlockOnComplete,
-			thinkingRevealed: deps.thinkingRevealed,
 			proseOnlyThinking: deps.proseOnlyThinking,
 			requestRender: deps.requestRender,
 		});

@@ -66,8 +66,6 @@ export interface ChatTranscriptBuilderDeps {
 	hideThinkingBlock?: () => boolean;
 	/** Hide thinking blocks once the turn completes (live while streaming). */
 	hideThinkingBlockOnComplete?: () => boolean;
-	/** User explicitly revealed thinking (Ctrl+T to visible): wins over hide-on-complete. */
-	thinkingRevealed?: () => boolean;
 	proseOnlyThinking?: () => boolean;
 	requestRender: () => void;
 }
@@ -316,7 +314,6 @@ export class ChatTranscriptBuilder {
 	#appendAssistantMessage(message: Extract<AgentMessage, { role: "assistant" }>): void {
 		const hideThinkingBlock = this.deps.hideThinkingBlock?.() ?? false;
 		const hideThinkingBlockOnComplete = this.deps.hideThinkingBlockOnComplete?.() ?? false;
-		const thinkingRevealed = this.deps.thinkingRevealed?.() ?? false;
 		const proseOnlyThinking = this.deps.proseOnlyThinking ? this.deps.proseOnlyThinking() : true;
 		const timeline = splitAssistantMessageToolTimeline(message);
 		const assistantComponent = new AssistantMessageComponent(
@@ -330,7 +327,6 @@ export class ChatTranscriptBuilder {
 		);
 		assistantComponent.setImagesVisible(settings.get("terminal.showImages"));
 		assistantComponent.setToolResultImagesVisible(!settings.get("display.hideToolActivity"));
-		assistantComponent.setUserRevealedThinking(thinkingRevealed);
 		this.#trackExpandable(assistantComponent);
 		this.container.addChild(assistantComponent);
 
@@ -365,7 +361,6 @@ export class ChatTranscriptBuilder {
 			);
 			component.setImagesVisible(settings.get("terminal.showImages"));
 			component.setToolResultImagesVisible(!settings.get("display.hideToolActivity"));
-			component.setUserRevealedThinking(thinkingRevealed);
 			this.#trackExpandable(component);
 			this.container.addChild(component);
 		};

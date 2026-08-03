@@ -2054,7 +2054,6 @@ export class SelectorController {
 			cwd: this.ctx.sessionManager.getCwd(),
 			hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
 			hideThinkingBlockOnComplete: () => this.ctx.hideThinkingBlockOnComplete,
-			thinkingRevealed: () => this.ctx.thinkingRevealed,
 			proseOnlyThinking: () => this.ctx.proseOnlyThinking,
 			focusAgent: id => this.ctx.focusAgentSession(id),
 			sessionFile: this.ctx.sessionManager.getSessionFile() ?? null,
