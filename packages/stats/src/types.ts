@@ -155,6 +155,8 @@ export interface ToolCallStats {
 	callsInTurn: number;
 	/** Serialized argument characters */
 	argsChars: number;
+	/** Milliseconds from the invoking assistant turn to this result, when known */
+	durationMs?: number;
 }
 
 /**
@@ -167,5 +169,7 @@ export interface ToolResultLink {
 	toolCallId: string;
 	/** Text characters fed back into context */
 	resultChars: number;
+	/** Milliseconds from the invoking assistant turn to this result, when known */
+	durationMs?: number;
 	isError: boolean;
 }

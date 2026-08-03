@@ -291,6 +291,12 @@ export interface ToolUsageStats {
 	argsChars: number;
 	/** Text characters of tool results fed back into context. */
 	resultChars: number;
+	/** Median milliseconds from the invoking assistant turn to the tool result. */
+	durationMsMedian: number;
+	/** 90th-percentile milliseconds from the invoking assistant turn to the tool result. */
+	durationMsP90: number;
+	/** Calls with an observed invocation-to-result duration. */
+	durationSamples: number;
 	/** Total provider tokens of invoking turns, attributed per call share. */
 	totalTokensShare: number;
 	/** Output tokens of invoking turns, attributed per call share. */

@@ -248,6 +248,7 @@ function extractToolCalls(
 	);
 	if (blocks.length === 0) return [];
 
+	const entryTimestamp = coerceEntryTimestamp(msg.timestamp, entry);
 	return blocks.map(block => {
 		let argsChars = 0;
 		try {
@@ -263,7 +264,7 @@ function extractToolCalls(
 			toolName: block.name,
 			model: msg.model,
 			provider: msg.provider,
-			timestamp: coerceEntryTimestamp(msg.timestamp, entry),
+			timestamp: entryTimestamp,
 			agentType,
 			callsInTurn: blocks.length,
 			argsChars,
@@ -275,7 +276,11 @@ function extractToolCalls(
  * Build the result linkage for a `toolResult` entry: text characters fed back
  * into context plus the error flag, keyed to the originating call.
  */
-function extractToolResultLink(sessionFile: string, entry: SessionMessageEntry): ToolResultLink | null {
+function extractToolResultLink(
+	sessionFile: string,
+	entry: SessionMessageEntry,
+	invocationTimestamps: Map<string, number>,
+): ToolResultLink | null {
 	const msg = entry.message as ToolResultMessage;
 	if (msg.role !== "toolResult" || typeof msg.toolCallId !== "string" || msg.toolCallId.length === 0) return null;
 	let resultChars = 0;
@@ -286,10 +291,15 @@ function extractToolResultLink(sessionFile: string, entry: SessionMessageEntry):
 			}
 		}
 	}
+	const resultTimestamp = coerceEntryTimestamp(msg.timestamp, entry);
+	const invocationTimestamp = invocationTimestamps.get(msg.toolCallId);
+	const durationMs =
+		invocationTimestamp === undefined ? undefined : Math.max(0, resultTimestamp - invocationTimestamp);
 	return {
 		sessionFile,
 		toolCallId: msg.toolCallId,
 		resultChars,
+		durationMs,
 		isError: msg.isError === true,
 	};
 }
@@ -344,6 +354,17 @@ function scanLastServiceTier(bytes: Uint8Array): ServiceTierByFamily | undefined
 	});
 	return currentServiceTier;
 }
+
+/** Recover tool invocation timestamps from transcript bytes preceding an incremental offset. */
+function scanToolInvocationTimestamps(bytes: Uint8Array): Map<string, number> {
+	const timestamps = new Map<string, number>();
+	visitSessionEntriesLenient(bytes, entry => {
+		if (!isAssistantMessage(entry)) return;
+		const calls = extractToolCalls("", "", entry, "main");
+		for (const call of calls) timestamps.set(call.toolCallId, call.timestamp);
+	});
+	return timestamps;
+}
 /**
  * Parse a session file and extract all assistant message stats.
  * Uses incremental reading with offset tracking.
@@ -387,6 +408,8 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 	const toolResults: ToolResultLink[] = [];
 	const userByEntryId = new Map<string, UserMessageStats>();
 	const start = Math.max(0, Math.min(fromOffset, bytes.length));
+	const invocationTimestamps =
+		start > 0 ? scanToolInvocationTimestamps(bytes.subarray(0, start)) : new Map<string, number>();
 	const unprocessed = bytes.subarray(start);
 	const { entries, read } = parseSessionEntriesLenient(unprocessed);
 	let currentServiceTier: ServiceTierByFamily | undefined;
@@ -407,14 +430,16 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 			continue;
 		}
 		if (isToolResultMessage(entry)) {
-			const link = extractToolResultLink(sessionPath, entry);
+			const link = extractToolResultLink(sessionPath, entry, invocationTimestamps);
 			if (link) toolResults.push(link);
 			continue;
 		}
 		if (isAssistantMessage(entry)) {
 			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
 			if (msgStats) stats.push(msgStats);
-			toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType));
+			const calls = extractToolCalls(sessionPath, folder, entry, agentType);
+			toolCalls.push(...calls);
+			for (const call of calls) invocationTimestamps.set(call.toolCallId, call.timestamp);
 			// Link assistant's responding model back to the user message it answered.
 			const parentId = (entry as SessionMessageEntry).parentId;
 			if (parentId) {

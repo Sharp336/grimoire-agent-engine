@@ -14,7 +14,10 @@ const MODEL = "gpt-5.4";
 const PROVIDER = "openai";
 
 const TS1 = "2026-06-24T10:00:00.000Z";
+const TS1_GREP_RESULT = "2026-06-24T10:00:02.000Z";
+const TS1_READ_RESULT = "2026-06-24T10:00:04.000Z";
 const TS2 = "2026-06-24T10:05:00.000Z";
+const TS2_GREP_RESULT = "2026-06-24T10:05:08.000Z";
 
 // Turn 1: two toolCall blocks (grep + read) sharing one provider request.
 const TURN1_TOTAL_TOKENS = 100;
@@ -153,7 +156,7 @@ function buildStandardEntries(): unknown[] {
 		buildToolResultEntry({
 			entryId: "tr-1",
 			parentId: "asst-1",
-			timestamp: TS1,
+			timestamp: TS1_GREP_RESULT,
 			toolCallId: "call-1",
 			toolName: "grep",
 			text: GREP_RESULT_1,
@@ -161,7 +164,7 @@ function buildStandardEntries(): unknown[] {
 		buildToolResultEntry({
 			entryId: "tr-2",
 			parentId: "asst-1",
-			timestamp: TS1,
+			timestamp: TS1_READ_RESULT,
 			toolCallId: "call-2",
 			toolName: "read",
 			text: READ_ERROR_RESULT,
@@ -179,7 +182,7 @@ function buildStandardEntries(): unknown[] {
 		buildToolResultEntry({
 			entryId: "tr-3",
 			parentId: "asst-2",
-			timestamp: TS2,
+			timestamp: TS2_GREP_RESULT,
 			toolCallId: "call-3",
 			toolName: "grep",
 			text: GREP_RESULT_2,
@@ -205,6 +208,9 @@ describe("tool usage stats pipeline", () => {
 		expect(grep.calls).toBe(2);
 		expect(grep.errors).toBe(0);
 		expect(grep.resultChars).toBe(GREP_RESULT_1.length + GREP_RESULT_2.length);
+		expect(grep.durationSamples).toBe(2);
+		expect(grep.durationMsMedian).toBe(5_000);
+		expect(grep.durationMsP90).toBe(5_000);
 		expect(grep.argsChars).toBe(JSON.stringify(GREP_ARGS_1).length + JSON.stringify(GREP_ARGS_2).length);
 		// Turn 1's request is split across its two toolCall blocks; turn 2 is
 		// grep's alone: 100/2 + 40 = 90, 20/2 + 8 = 18, 0.01/2 + 0.004 = 0.009.
@@ -217,6 +223,9 @@ describe("tool usage stats pipeline", () => {
 		expect(read.calls).toBe(1);
 		expect(read.errors).toBe(1);
 		expect(read.resultChars).toBe(READ_ERROR_RESULT.length);
+		expect(read.durationSamples).toBe(1);
+		expect(read.durationMsMedian).toBe(4_000);
+		expect(read.durationMsP90).toBe(4_000);
 		expect(read.argsChars).toBe(JSON.stringify(READ_ARGS).length);
 		expect(read.totalTokensShare).toBeCloseTo(50, 6);
 		expect(read.outputTokensShare).toBeCloseTo(10, 6);
@@ -232,8 +241,10 @@ describe("tool usage stats pipeline", () => {
 		}
 		expect(toolRow(byModel, "grep").calls).toBe(2);
 		expect(toolRow(byModel, "grep").totalTokensShare).toBeCloseTo(90, 6);
+		expect(toolRow(byModel, "grep").durationMsMedian).toBe(5_000);
 		expect(toolRow(byModel, "read").calls).toBe(1);
 		expect(toolRow(byModel, "read").totalTokensShare).toBeCloseTo(50, 6);
+		expect(toolRow(byModel, "read").durationMsMedian).toBe(4_000);
 
 		// Dashboard payload reuses the same aggregates and buckets the calls.
 		const dashboard = await getToolDashboardStats("all");
@@ -277,7 +288,7 @@ describe("tool usage stats pipeline", () => {
 		const lateResult = buildToolResultEntry({
 			entryId: "tr-1",
 			parentId: "asst-1",
-			timestamp: TS2,
+			timestamp: "2026-06-24T10:00:09.000Z",
 			toolCallId: "call-1",
 			toolName: "grep",
 			text: lateResultText,
@@ -297,6 +308,8 @@ describe("tool usage stats pipeline", () => {
 		expect(linked[0].calls).toBe(1);
 		expect(linked[0].resultChars).toBe(lateResultText.length);
 		expect(linked[0].errors).toBe(1);
+		expect(linked[0].durationSamples).toBe(1);
+		expect(linked[0].durationMsMedian).toBe(9_000);
 	});
 
 	it("does not double-count tool calls copied into a forked session file", async () => {

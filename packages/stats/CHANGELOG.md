@@ -19,6 +19,7 @@
 ### Fixed
 
 - Fixed provider usage window stats silently showing no data during SQLite contention by installing a five-second busy timeout on read-only agent database connections ([#7300](https://github.com/can1357/oh-my-pi/issues/7300)).
+- Added tool-call execution duration to `omp stats`: the session parser measures invocation-to-result latency per call, existing databases re-ingest sessions once through `tool_calls_v2`, and the Tools aggregates expose median/p90 latency and observed sample counts alongside token and cost shares.
 
 ## [17.1.2] - 2026-07-24
 
