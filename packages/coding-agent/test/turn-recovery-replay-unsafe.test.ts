@@ -72,6 +72,7 @@ function createHost(
 		appendSessionMessage: () => {},
 		sessionMessageAlreadyPersisted: () => false,
 		setModelWithProviderSessionReset: async () => {},
+		syncAdvisorActivation: () => {},
 		resetCurrentResponsesProviderSession: () => {},
 		maybeAutoRedeemCodexReset: async () => false,
 		runAutoCompaction: async () =>
