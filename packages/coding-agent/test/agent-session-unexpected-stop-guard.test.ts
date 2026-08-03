@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { z } from "@oh-my-pi/pi-ai";
-import { createMockModel, type MockContent, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -57,11 +57,8 @@ function thinkingOnlyStop(thinking: string): MockResponse {
 	// "provider-authenticated content"). The unexpected-stop gate must then
 	// pick it up, or the turn slips past BOTH guards and the agent stops
 	// silently mid-task.
-	const thinkingBlock: Extract<NonNullable<MockResponse["content"]>[number], { type: "thinking" }> & {
-		thinkingSignature: string;
-	} = { type: "thinking", thinking, thinkingSignature: "reasoning_content" };
 	return {
-		content: [thinkingBlock as MockContent],
+		content: [{ type: "thinking", thinking, thinkingSignature: "reasoning_content" }],
 		stopReason: "stop",
 	};
 }
@@ -204,6 +201,9 @@ describe("AgentSession unexpected stop guard", () => {
 		await session.waitForIdle();
 
 		expect(spy).toHaveBeenCalledTimes(2);
+		// The classifier must receive the thinking text (not empty text): this is
+		// what proves the thinking fallback in #handleUnexpectedAssistantStop works.
+		expect(spy.mock.calls[0]?.[0]).toContain("响应");
 		expect(mock.calls).toHaveLength(2);
 		expect(assistantText(session.agent.state.messages)).toContain("finished after thinking-only stop");
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
