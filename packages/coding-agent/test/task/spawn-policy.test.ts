@@ -102,6 +102,7 @@ describe("task tool description scout gating", () => {
 				{ name: "reviewer", description: "Reviewer.", systemPrompt: "Review.", source: "bundled" },
 			],
 			projectAgentsDir: null,
+			errors: [],
 		});
 		const settings = Settings.isolated({
 			"async.enabled": false,
