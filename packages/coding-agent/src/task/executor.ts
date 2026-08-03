@@ -2318,7 +2318,11 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				.filter(Boolean)
 				.join("\n\n") || "IRC follow-up";
 		const turnStartTime = Date.now();
-		const sessionFile = AgentRegistry.global().get(id)?.sessionFile ?? options.sessionFile ?? undefined;
+		const ref = AgentRegistry.global().get(id);
+		const maxRuntimeMs =
+			Math.max(0, Math.trunc(Number(options.maxRuntimeMs ?? 0) || 0)) || ref?.runtimePolicy?.maxRuntimeMs || 0;
+		const sessionFile = ref?.sessionFile ?? options.sessionFile ?? undefined;
+		const sessionRuntimeLimit = ref?.runtimePolicy?.sessionRuntimeLimit;
 		const turnMonitor = createSubagentRunMonitor({
 			index,
 			id,
@@ -2552,10 +2556,8 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	const startTime = Date.now();
 	const session = await AgentLifecycleManager.global().ensureLive(id);
 	const ref = AgentRegistry.global().get(id);
-	const maxRuntimeMs = Math.max(
-		0,
-		Math.trunc(Number(ref?.runtimePolicy?.maxRuntimeMs ?? options.maxRuntimeMs ?? 0) || 0),
-	);
+	const configuredMaxRuntimeMs = Math.max(0, Math.trunc(Number(options.maxRuntimeMs ?? 0) || 0));
+	const maxRuntimeMs = configuredMaxRuntimeMs || ref?.runtimePolicy?.maxRuntimeMs || 0;
 	const configuredMaxSessionRuntimeMs = Math.max(0, Math.trunc(Number(options.maxSessionRuntimeMs ?? 0) || 0));
 	const sessionRuntimeLimit =
 		ref?.runtimePolicy?.sessionRuntimeLimit ??

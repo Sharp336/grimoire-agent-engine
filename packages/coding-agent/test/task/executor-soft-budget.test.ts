@@ -303,6 +303,31 @@ describe("runSubprocess soft request budget", () => {
 		expect(result.abortReason).toContain("task.maxRuntimeMs=20");
 	});
 
+	it("uses a positive per-turn cap supplied by the resumed caller", async () => {
+		const id = "UpdatedTurnCapScout";
+		const promptGate = Promise.withResolvers<void>();
+		const handle = createMockSession(async () => {
+			await promptGate.promise;
+		});
+		vi.spyOn(handle.session, "abort").mockImplementation(async () => {
+			promptGate.resolve();
+		});
+		registerRunning(id, handle.session);
+		const ref = AgentRegistry.global().get(id);
+		if (!ref) throw new Error("Expected registered subagent");
+		AgentRegistry.global().setRuntimePolicy(id, { maxRuntimeMs: 1_000 }, ref);
+
+		const result = await runSubagentFollowUpTurn({
+			id,
+			agent: baseAgent,
+			message: "continue",
+			maxRuntimeMs: 20,
+		});
+
+		expect(result.aborted).toBe(true);
+		expect(result.abortReason).toContain("task.maxRuntimeMs=20");
+	});
+
 	it("rejects an expired Vibe revival before running the parked session reviver", async () => {
 		const id = "ExpiredVibe";
 		const reviver = vi.fn(async () => createMockSession(async () => {}).session);
