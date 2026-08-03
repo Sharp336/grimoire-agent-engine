@@ -93,7 +93,6 @@ describe("system prompt inspect metadata", () => {
 				"secrets",
 				"images",
 				"tool-priority",
-				"lsp",
 				"ast-tools",
 				"eager-tasks",
 				"workstation",
@@ -113,8 +112,8 @@ describe("system prompt inspect metadata", () => {
 		expect(part(result.dynamicParts, "always-apply-rules").text).toContain("Always rule body");
 		expect(part(result.dynamicParts, "context-files").text).toContain("Agent context");
 		expect(part(result.dynamicParts, "workspace-tree").text).toContain("use `glob`/`read` to drill in");
-		expect(part(result.dynamicParts, "tool-priority").text).toContain("Regex search → `grep`");
-		expect(part(result.dynamicParts, "tool-priority").text).toContain("Globbing → `glob`");
+		expect(part(result.dynamicParts, "tool-priority").text).toContain("Regex search or locating targets");
+		expect(part(result.dynamicParts, "tool-priority").text).toContain("Mapping structure or globbing");
 		expect(part(result.dynamicParts, "ast-tools").text).toContain("Use `grep` only for plain-text lookup");
 		expect(part(result.dynamicParts, "mermaid").text).toContain("```mermaid");
 		expect(part(result.dynamicParts, "memory-instructions")).toMatchObject({
