@@ -77,6 +77,7 @@ import type { AgentSession } from "./session/agent-session";
 import type { AuthStorage } from "./session/auth-storage";
 import {
 	AUTO_RESTART_SESSION_FILE_ENV,
+	awaitAutoRestartExit,
 	buildAutoRestartCommand,
 	defaultAutoRestartWatchPaths,
 	ExecutableUpdateMonitor,
@@ -1766,7 +1767,7 @@ export async function runRootCommand(
 						execArgv: process.execArgv,
 						env: process.env,
 					});
-					Bun.spawn({
+					const child = Bun.spawn({
 						cmd,
 						cwd: process.cwd(),
 						env: {
@@ -1777,6 +1778,7 @@ export async function runRootCommand(
 						stdout: "inherit",
 						stderr: "inherit",
 					});
+					await postmortem.quit(await awaitAutoRestartExit(child.exited));
 				} catch (error) {
 					process.stderr.write(
 						`\nAuto-restart failed: ${error instanceof Error ? error.message : String(error)}\n` +
@@ -1784,7 +1786,6 @@ export async function runRootCommand(
 					);
 					await postmortem.quit(1);
 				}
-				await postmortem.quit(0);
 			}
 		} else {
 			// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.
