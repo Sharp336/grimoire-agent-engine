@@ -780,6 +780,7 @@ exit 64
 			return isolatedResult.promise;
 		});
 		const abortSpy = vi.spyOn(piNatives.Shell.prototype, "abort").mockResolvedValue();
+		const closeSpy = vi.spyOn(piNatives.Shell.prototype, "close").mockResolvedValue();
 
 		const owner = executeBash("owner", {
 			cwd: tempDir,
@@ -797,8 +798,12 @@ exit 64
 		const result = await overlapping;
 		expect(result.cancelled).toBe(true);
 		expect(abortSpy).toHaveBeenCalledTimes(1);
+		expect(closeSpy).not.toHaveBeenCalled();
 
 		isolatedResult.resolve({ exitCode: undefined, cancelled: true, timedOut: true });
+		await isolatedResult.promise;
+		await Promise.resolve();
+		expect(closeSpy).toHaveBeenCalledTimes(1);
 		ownerResult.resolve({ exitCode: 0, cancelled: false, timedOut: false });
 		await owner;
 	});

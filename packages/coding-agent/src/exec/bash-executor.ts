@@ -5,6 +5,7 @@
  */
 import { ExponentialYield } from "@oh-my-pi/pi-agent-core/utils/yield";
 import { type MinimizerOptions, Shell, type ShellRunResult } from "@oh-my-pi/pi-natives";
+import { logger } from "@oh-my-pi/pi-utils";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings, type ShellMinimizerSettings } from "../config/settings";
 import { OutputSink } from "../session/streaming-output";
@@ -424,6 +425,20 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	}
 	const executionShell = shellSession ?? new Shell(shellOptions);
 	const ownsPersistentSession = shellSession !== undefined;
+	let isolatedShellClosePromise: Promise<void> | undefined;
+	let isolatedShellCloseDeferred = false;
+	const closeIsolatedShell = (): Promise<void> => {
+		isolatedShellClosePromise ??= executionShell.close().catch(error => {
+			logger.warn("Failed to close isolated shell session", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
+		return isolatedShellClosePromise;
+	};
+	const deferIsolatedShellClose = (...pending: Promise<unknown>[]): void => {
+		isolatedShellCloseDeferred = true;
+		void Promise.allSettled(pending).then(closeIsolatedShell);
+	};
 	if (ownsPersistentSession) {
 		shellSessionsInUse.add(sessionKey);
 	}
@@ -504,7 +519,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				resetSession = true;
 				quarantineShellSession(sessionKey, runPromise, cleanupPromise);
 			} else {
-				void Promise.allSettled([runPromise, cleanupPromise]);
+				deferIsolatedShellClose(runPromise, cleanupPromise);
 			}
 			return {
 				exitCode: undefined,
@@ -589,6 +604,9 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		}
 		if (userSignal) {
 			userSignal.removeEventListener("abort", abortHandler);
+		}
+		if (!ownsPersistentSession && !isolatedShellCloseDeferred) {
+			await closeIsolatedShell();
 		}
 		if (ownsPersistentSession) {
 			shellSessionsInUse.delete(sessionKey);
