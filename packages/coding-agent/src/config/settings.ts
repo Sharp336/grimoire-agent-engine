@@ -107,9 +107,10 @@ export async function classifySettingsYaml(filePath: string): Promise<YamlLoadRe
 /**
  * Validate loaded settings values against {@link SETTINGS_SCHEMA}. Type
  * mismatches (wrong primitive, non-array where array required, invalid enum
- * member) are errors naming the key and expected type; unknown keys are
- * warnings (forward-compat, never errors). Exported so `omp doctor` can
- * surface schema violations without constructing a Settings instance.
+ * member) are errors naming the key and expected type; quoted dotted object
+ * keys (ignored by runtime path lookup) are errors; unknown keys are warnings
+ * (forward-compat). Exported so `omp doctor` can surface schema violations
+ * without constructing a Settings instance.
  */
 export function validateSettingsValues(raw: RawSettings): { errors: string[]; warnings: string[] } {
 	const errors: string[] = [];
@@ -240,6 +241,17 @@ function walkUnknownSettingsKeys(
 ): void {
 	for (const [key, value] of Object.entries(obj)) {
 		const fullPath = prefix ? `${prefix}.${key}` : key;
+		// Quoted dotted keys (e.g. `"theme.dark"`) are a single YAML/JSON object
+		// key. Runtime path lookup splits on `.` and walks nested mappings, so a
+		// literal dotted key is ignored. Reject before known-path / known-prefix
+		// checks — otherwise a key that stringifies to a known path or namespace
+		// would be accepted, and a dotted namespace key would launder its children.
+		if (key.includes(".")) {
+			errors.push(
+				`Settings key "${fullPath}" is a quoted dotted key and is ignored at runtime; use nested mappings instead`,
+			);
+			continue;
+		}
 		if (knownPaths.has(fullPath)) continue;
 		if (knownPrefixes.has(fullPath)) {
 			if (value !== null && typeof value === "object" && !Array.isArray(value)) {
@@ -359,6 +371,48 @@ type ParsedPathScopedStringArrayEntry =
 
 function expandTilde(p: string): string {
 	return p === "~" ? os.homedir() : p.startsWith("~/") ? path.join(os.homedir(), p.slice(2)) : p;
+}
+
+/**
+ * Resolve the config overlay file list the runtime loads: `PI_CONFIG_FILES`
+ * (platform path-list) followed by any explicit `configFiles`, each tilde-
+ * expanded and resolved against `cwd`. Exported so read-only diagnostics can
+ * enumerate exactly the overlays Settings would merge.
+ */
+export function resolveConfigOverlayPaths(cwd: string, configFiles?: readonly string[]): string[] {
+	const files = process.env.PI_CONFIG_FILES?.split(path.delimiter).filter(Boolean) ?? [];
+	if (configFiles) files.push(...configFiles);
+	return files.map(file => path.resolve(cwd, expandTilde(file)));
+}
+
+/**
+ * Strict loader for a single config overlay file — same parse + migration
+ * semantics as Settings' private overlay load. Missing / unreadable / invalid
+ * YAML / non-mapping roots are hard errors. Safe for read-only callers: no
+ * disk writes, migrates via {@link migrateRawSettingsShape}.
+ */
+export async function loadConfigOverlayFile(filePath: string): Promise<RawSettings> {
+	let content: string;
+	try {
+		content = await Bun.file(filePath).text();
+	} catch (error) {
+		throw new Error(
+			isEnoent(error)
+				? `Config overlay not found: ${filePath}`
+				: `Failed to read config overlay ${filePath}: ${String(error)}`,
+		);
+	}
+	let parsed: unknown;
+	try {
+		parsed = YAML.parse(content);
+	} catch (error) {
+		throw new Error(`Failed to parse config overlay ${filePath}: ${String(error)}`);
+	}
+	if (parsed === null || parsed === undefined) return {};
+	if (typeof parsed !== "object" || Array.isArray(parsed)) {
+		throw new Error(`Config overlay must be a YAML mapping: ${filePath}`);
+	}
+	return migrateRawSettingsShape(parsed as RawSettings);
 }
 
 function normalizePathPrefix(prefix: string): string {
@@ -514,12 +568,12 @@ function resolvePathScopedStringArray(settingPath: SettingPath, value: unknown, 
 // ═══════════════════════════════════════════════════════════════════════════
 /**
  * Apply schema migrations to raw settings — the pure transform shared by
- * {@link Settings.#migrateRawSettings} and `omp doctor`'s read-only validator.
- * Operates on a deep clone so callers never see mutation; the instance-side
- * wrapper additionally captures `lastChangelogVersion` for marker seeding.
- * Exported so doctor can validate the *migrated* shape (legacy booleans →
- * enums, renamed keys, etc.) rather than the raw YAML the runtime would
- * silently normalize at startup.
+ * {@link Settings.#migrateRawSettings}, config overlay loading, and read-only
+ * diagnostics. Operates on a deep clone so callers never see mutation; the
+ * instance-side wrapper additionally captures `lastChangelogVersion` for
+ * marker seeding. Exported so doctor can validate the *migrated* shape
+ * (legacy booleans → enums, renamed keys, etc.) rather than the raw YAML the
+ * runtime would silently normalize at startup.
  */
 export function migrateRawSettingsShape(raw: RawSettings): RawSettings {
 	raw = structuredClone(raw);
@@ -1113,9 +1167,7 @@ export class Settings {
 		this.#cwd = path.normalize(options.cwd ?? getProjectDir());
 		this.#agentDir = path.normalize(options.agentDir ?? getAgentDir());
 		this.#configPath = options.inMemory ? null : path.join(this.#agentDir, MAIN_CONFIG_FILENAMES[0]);
-		const configFiles = process.env.PI_CONFIG_FILES?.split(path.delimiter).filter(Boolean) ?? [];
-		if (options.configFiles) configFiles.push(...options.configFiles);
-		this.#configFiles = configFiles.map(file => path.resolve(this.#cwd, expandTilde(file)));
+		this.#configFiles = resolveConfigOverlayPaths(this.#cwd, options.configFiles);
 		this.#persist = !options.inMemory && options.readOnly !== true;
 		liveSettingsInstances.add(new WeakRef(this));
 
@@ -1979,32 +2031,12 @@ export class Settings {
 	}
 
 	/**
-	 * Strict loader for explicit `--config` overlays: unlike `#loadYaml`,
-	 * missing or malformed files are hard errors so a typo'd path cannot
-	 * silently fall back to the persistent settings.
+	 * Strict loader for explicit `--config` / `PI_CONFIG_FILES` overlays.
+	 * Delegates to {@link loadConfigOverlayFile} so diagnostics share the same
+	 * parse + migration path (missing/malformed files remain hard errors).
 	 */
 	async #loadOverlayYaml(filePath: string): Promise<RawSettings> {
-		let content: string;
-		try {
-			content = await Bun.file(filePath).text();
-		} catch (error) {
-			throw new Error(
-				isEnoent(error)
-					? `Config overlay not found: ${filePath}`
-					: `Failed to read config overlay ${filePath}: ${String(error)}`,
-			);
-		}
-		let parsed: unknown;
-		try {
-			parsed = YAML.parse(content);
-		} catch (error) {
-			throw new Error(`Failed to parse config overlay ${filePath}: ${String(error)}`);
-		}
-		if (parsed === null || parsed === undefined) return {};
-		if (typeof parsed !== "object" || Array.isArray(parsed)) {
-			throw new Error(`Config overlay must be a YAML mapping: ${filePath}`);
-		}
-		return this.#migrateRawSettings(parsed as RawSettings);
+		return loadConfigOverlayFile(filePath);
 	}
 
 	async #migrateFromLegacy(): Promise<void> {

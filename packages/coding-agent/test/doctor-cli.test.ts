@@ -579,6 +579,29 @@ describe("omp doctor", () => {
 		expect(report.findings.some(entry => entry.category === "tools")).toBe(true);
 	});
 
+	test("malformed plugin lockfile is reported without suppressing other plugin checks", async () => {
+		setAgentDir(root);
+		setProjectDir(root);
+		const lockfile = path.join(root, "omp-plugins.lock.json");
+		const original = "{ broken";
+		await fs.writeFile(lockfile, original, "utf8");
+		const lockfileSpy = spyOn(piUtils, "getPluginsLockfile").mockReturnValue(lockfile);
+		pluginDoctorSpy = spyOn(PluginManager.prototype, "doctor").mockResolvedValue([
+			{ name: "remaining-check", status: "ok", message: "remaining plugin check ran" },
+		]);
+		try {
+			const report = await runDoctorCommand({ flags: { fix: true, json: true } });
+			const lockfileFinding = report.findings.find(entry => entry.id === "plugins.lockfile");
+			expect(lockfileFinding?.status).toBe("error");
+			expect(lockfileFinding?.details.some(detail => detail.includes("omp-plugins.lock.json"))).toBe(true);
+			expect(report.findings.find(entry => entry.id === "plugins.remaining-check")?.status).toBe("ok");
+			expect(pluginDoctorSpy).toHaveBeenCalledWith({ fix: false });
+			expect(await Bun.file(lockfile).text()).toBe(original);
+		} finally {
+			lockfileSpy.mockRestore();
+		}
+	});
+
 	test("a small free-heavy database does not warn (threshold alignment)", async () => {
 		const dbPath = getHistoryDbPath(root);
 		await fs.mkdir(path.dirname(dbPath), { recursive: true });
@@ -2035,6 +2058,24 @@ describe("omp doctor", () => {
 		expect(finding?.details.some(d => d.includes("extensions[1]") && d.includes("string"))).toBe(true);
 	});
 
+	test("invalid PI_CONFIG_FILES overlay is reported before the main settings result", async () => {
+		setProjectDir(root);
+		const overlayPath = path.join(root, "overlay.yml");
+		await fs.writeFile(overlayPath, "disabledProviders: false\n", "utf8");
+		process.env.PI_CONFIG_FILES = overlayPath;
+		Bun.env.PI_CONFIG_FILES = overlayPath;
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const overlayIndex = report.findings.findIndex(entry => entry.id === "config.settings.overlay");
+		const settingsIndex = report.findings.findIndex(entry => entry.id === "config.settings");
+		const overlayFinding = report.findings[overlayIndex];
+		const settingsFinding = report.findings[settingsIndex];
+		expect(overlayFinding?.status).toBe("error");
+		expect(overlayFinding?.details.some(detail => detail.includes("overlay.yml"))).toBe(true);
+		expect(settingsFinding?.status).toBe("ok");
+		expect(settingsIndex).toBeGreaterThan(overlayIndex);
+	});
+
 	// ── Project settings diagnosis ──────────────────────────────────────────
 
 	test("malformed project .omp/config.yml surfaces a config.settings.project error", async () => {
@@ -2150,6 +2191,25 @@ describe("omp doctor", () => {
 		const errorFinding = mcpFindings.find(entry => entry.status === "error");
 		expect(errorFinding).toBeDefined();
 		expect(errorFinding?.details.some(d => d.includes("invalid JSON"))).toBe(true);
+	});
+
+	test("scoped doctor probes both project-root MCP config candidates once", async () => {
+		setProjectDir(root);
+		const scopedAgentDir = path.join(root, "scoped-agent");
+		await fs.mkdir(scopedAgentDir, { recursive: true });
+		const rootMcpJson = path.join(root, "mcp.json");
+		const rootDotMcpJson = path.join(root, ".mcp.json");
+		await Promise.all([
+			fs.writeFile(rootMcpJson, "{ broken mcp json", "utf8"),
+			fs.writeFile(rootDotMcpJson, "{ broken dot mcp json", "utf8"),
+		]);
+
+		const report = await runDoctorCommand({ flags: { agentDir: scopedAgentDir, json: true } });
+		const finding = report.findings.find(entry => entry.id === "mcp.config-source");
+		const details = finding?.details ?? [];
+		expect(finding?.status).toBe("error");
+		expect(details.filter(detail => detail.includes(rootMcpJson))).toHaveLength(1);
+		expect(details.filter(detail => detail.includes(rootDotMcpJson))).toHaveLength(1);
 	});
 
 	test("primitive mcpServers produces an MCP error finding, not mcp.none", async () => {

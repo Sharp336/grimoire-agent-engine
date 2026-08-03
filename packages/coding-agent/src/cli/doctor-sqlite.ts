@@ -96,7 +96,7 @@ const DESTRUCTIVE_REPAIR_ACTIONS: Partial<Record<DbRepairAction, true>> = {
 
 /** True when a repair replaced or removed the probed database, making its pre-repair state stale. */
 export function isDestructiveDbRepair(repair: DbRepair | null): boolean {
-	return repair !== null && repair.actions.some(action => DESTRUCTIVE_REPAIR_ACTIONS[action] === true);
+	return repair?.actions.some(action => DESTRUCTIVE_REPAIR_ACTIONS[action] === true) ?? false;
 }
 
 export interface DbRepair {

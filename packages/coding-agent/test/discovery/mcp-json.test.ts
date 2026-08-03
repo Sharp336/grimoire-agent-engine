@@ -4,11 +4,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type MCPServer, mcpCapability } from "@oh-my-pi/pi-coding-agent/capability/mcp";
 import { loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
+import { getMcpJsonCandidatePaths } from "@oh-my-pi/pi-coding-agent/discovery/mcp-json";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
-async function loadStandaloneMcpConfig(cwd: string): Promise<MCPServer[]> {
+async function loadStandaloneMcpConfig(cwd: string, userAgentDir?: string): Promise<MCPServer[]> {
 	const result = await loadCapability<MCPServer>(mcpCapability.id, {
 		cwd,
+		userAgentDir,
 		providers: ["mcp-json"],
 	});
 	return result.items;
@@ -124,5 +126,64 @@ describe("standalone mcp.json oauth env expansion", () => {
 			callbackPath: "/oauth/callback",
 		});
 		expect(server?.auth).toBeUndefined();
+	});
+});
+
+describe("standalone mcp.json candidates under scoped agent-dir", () => {
+	let projectDir = "";
+	let scopedAgentDir = "";
+
+	beforeEach(async () => {
+		projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-json-project-"));
+		scopedAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-json-scoped-"));
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(projectDir);
+		await removeWithRetries(scopedAgentDir);
+	});
+
+	test("considers both project mcp.json and .mcp.json when userAgentDir is scoped", async () => {
+		expect(getMcpJsonCandidatePaths(projectDir)).toEqual([
+			path.join(projectDir, "mcp.json"),
+			path.join(projectDir, ".mcp.json"),
+		]);
+
+		await fs.writeFile(
+			path.join(projectDir, "mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					fromUndotted: { url: "https://undotted.example/mcp" },
+				},
+			}),
+		);
+		await fs.writeFile(
+			path.join(projectDir, ".mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					fromDotted: { url: "https://dotted.example/mcp" },
+				},
+			}),
+		);
+		// Scoped user agent dir decoy must not replace project standalone discovery.
+		await fs.writeFile(
+			path.join(scopedAgentDir, "mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					fromScoped: { url: "https://scoped.example/mcp" },
+				},
+			}),
+		);
+
+		const servers = await loadStandaloneMcpConfig(projectDir, scopedAgentDir);
+		const byName = new Map(servers.map(server => [server.name, server]));
+
+		expect(byName.has("fromUndotted")).toBe(true);
+		expect(byName.has("fromDotted")).toBe(true);
+		expect(byName.has("fromScoped")).toBe(false);
+		expect(byName.get("fromUndotted")?.url).toBe("https://undotted.example/mcp");
+		expect(byName.get("fromDotted")?.url).toBe("https://dotted.example/mcp");
+		expect(byName.get("fromUndotted")?._source?.path).toBe(path.join(projectDir, "mcp.json"));
+		expect(byName.get("fromDotted")?._source?.path).toBe(path.join(projectDir, ".mcp.json"));
 	});
 });

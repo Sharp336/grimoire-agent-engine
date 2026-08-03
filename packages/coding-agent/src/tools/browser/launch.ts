@@ -234,7 +234,12 @@ let resolvedChromium: string | null | undefined; // undefined = unchecked; null 
 function isExecutableFile(p: string): boolean {
 	try {
 		const st = fs.statSync(p);
-		return st.isFile();
+		if (!st.isFile()) return false;
+		// Windows does not enforce POSIX execute bits the same way; keep the
+		// historical isFile-only acceptance so existing .exe resolution is unchanged.
+		if (process.platform === "win32") return true;
+		fs.accessSync(p, fs.constants.X_OK);
+		return true;
 	} catch {
 		return false;
 	}
@@ -918,6 +923,11 @@ export async function applyStealthPatches(
 
 export function stealthIgnoreDefaultArgsForTest(executablePath: string | undefined): string[] {
 	return stealthIgnoreDefaultArgs(executablePath);
+}
+
+/** Test seam for the shared system-Chromium executable-file predicate. */
+export function isExecutableFileForTest(p: string): boolean {
+	return isExecutableFile(p);
 }
 
 export function targetSupportsUserAgentOverrideForTest(target: Target): boolean {

@@ -10,7 +10,7 @@ import { getPluginsDir, getPluginsLockfile, isEnoent } from "@oh-my-pi/pi-utils"
 import { getConfigDirPaths } from "../../config";
 import { registerPluginCacheInvalidator, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import { installLegacyPiSpecifierShim } from "./legacy-pi-compat";
-import { normalizePluginRuntimeConfig } from "./runtime-config";
+import { readPluginRuntimeConfig } from "./runtime-config";
 import type { InstalledPlugin, PluginManifest, PluginRuntimeConfig, ProjectPluginOverrides } from "./types";
 
 /** Installed plugin plus the root scope that supplied its runtime metadata. */
@@ -45,13 +45,7 @@ registerPluginCacheInvalidator(clearEnabledPluginsCache);
  * `LoadContext.home`).
  */
 async function loadRuntimeConfig(home?: string): Promise<PluginRuntimeConfig> {
-	const lockPath = getPluginsLockfile(home);
-	try {
-		return normalizePluginRuntimeConfig(await Bun.file(lockPath).json());
-	} catch (err) {
-		if (isEnoent(err)) return normalizePluginRuntimeConfig({});
-		throw err;
-	}
+	return readPluginRuntimeConfig(getPluginsLockfile(home));
 }
 
 /**
@@ -93,14 +87,7 @@ async function collectPluginsAtRoot(
 		if (!isEnoent(err)) throw err;
 	}
 
-	const lockPath = path.join(root, "omp-plugins.lock.json");
-	let runtimeConfig: PluginRuntimeConfig;
-	try {
-		runtimeConfig = normalizePluginRuntimeConfig(await Bun.file(lockPath).json());
-	} catch (err) {
-		if (!isEnoent(err)) throw err;
-		runtimeConfig = normalizePluginRuntimeConfig({});
-	}
+	const runtimeConfig = await readPluginRuntimeConfig(path.join(root, "omp-plugins.lock.json"));
 
 	// Union: dependencies (npm/marketplace installs) ∪ runtime-config plugins
 	// (links + already-recorded installs). Set preserves first-seen order,

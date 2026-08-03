@@ -23,6 +23,7 @@ import {
 	getAgentDir,
 	getCustomThemesDir,
 	getMCPConfigPath,
+	getPluginsLockfile,
 	getProjectDir,
 	isEnoent,
 	isRecord,
@@ -46,7 +47,9 @@ import { KEYBINDINGS, KeybindingsManager, resolveKeybindingsConfigPaths } from "
 import { ModelsConfigFile } from "../config/models-config";
 import {
 	classifySettingsYaml,
+	loadConfigOverlayFile,
 	migrateRawSettingsShape,
+	resolveConfigOverlayPaths,
 	Settings,
 	validateSettingsValues,
 	type YamlLoadResult,
@@ -54,9 +57,11 @@ import {
 import { collectSystemInfo, formatSystemInfo } from "../debug/system-info";
 import { loadCapability } from "../discovery";
 import { type ParsedAgentFields, parseAgentFields } from "../discovery/helpers";
+import { getMcpJsonCandidatePaths } from "../discovery/mcp-json";
 import { listOmpExtensionRoots } from "../discovery/omp-extension-roots";
 import { readExtensionManifest } from "../extensibility/extensions/loader";
 import { PluginManager } from "../extensibility/plugins/manager";
+import { readPluginRuntimeConfig } from "../extensibility/plugins/runtime-config";
 import type { DoctorCheck } from "../extensibility/plugins/types";
 import { loadSkills } from "../extensibility/skills";
 import { convertToLegacyConfig, validateServerConfig } from "../mcp/config";
@@ -810,7 +815,7 @@ async function collectConfigFindings(flags: DoctorCommandFlags): Promise<DoctorF
 	const agentDir = flags.agentDir ?? getAgentDir();
 	const scoped = flags.agentDir !== undefined;
 	const findings: DoctorFinding[] = [];
-	findings.push(await diagnoseSettingsConfig(agentDir));
+	findings.push(...(await diagnoseSettingsConfig(agentDir)));
 	// Diagnose the project settings surface (<cwd>/.omp/config.yml plus all
 	// project-level capability sources) through the same read-only paths the
 	// runtime uses. The project dir is always getProjectDir() — even under
@@ -842,7 +847,48 @@ async function collectConfigFindings(flags: DoctorCommandFlags): Promise<DoctorF
 	return findings;
 }
 
-async function diagnoseSettingsConfig(agentDir: string): Promise<DoctorFinding> {
+async function diagnoseSettingsConfig(agentDir: string): Promise<DoctorFinding[]> {
+	const overlayFinding = await diagnoseSettingsOverlayFinding();
+	const settingsFinding = await diagnoseMainSettingsConfig(agentDir);
+	return overlayFinding === null ? [settingsFinding] : [overlayFinding, settingsFinding];
+}
+
+async function diagnoseSettingsOverlayFinding(): Promise<DoctorFinding | null> {
+	const errors: string[] = [];
+	const warnings: string[] = [];
+	for (const overlayPath of resolveConfigOverlayPaths(getProjectDir())) {
+		try {
+			const settings = await loadConfigOverlayFile(overlayPath);
+			const result = validateSettingsValues(settings);
+			errors.push(...result.errors.map(error => `${shortenPath(overlayPath)}: ${error}`));
+			warnings.push(...result.warnings.map(warning => `${shortenPath(overlayPath)}: ${warning}`));
+		} catch (error) {
+			errors.push(error instanceof Error ? error.message : String(error));
+		}
+	}
+	if (errors.length > 0) {
+		return {
+			id: "config.settings.overlay",
+			category: "config",
+			status: "error",
+			summary: `settings overlays: ${errors.length} invalid value${errors.length === 1 ? "" : "s"}`,
+			details: errors,
+			remedy: "Fix or remove the invalid config overlay",
+		};
+	}
+	if (warnings.length > 0) {
+		return {
+			id: "config.settings.overlay",
+			category: "config",
+			status: "warning",
+			summary: `settings overlays: valid (${warnings.length} unknown key${warnings.length === 1 ? "" : "s"})`,
+			details: warnings,
+		};
+	}
+	return null;
+}
+
+async function diagnoseMainSettingsConfig(agentDir: string): Promise<DoctorFinding> {
 	// The loader tries MAIN_CONFIG_FILENAMES in order and uses the first present
 	// file; diagnose that one. Absent-with-defaults is ok, not a problem finding.
 	// classifySettingsYaml already distinguishes missing (ENOENT) from unreadable
@@ -1290,19 +1336,19 @@ async function loadRawMcpEntries(
  * see a broken config. This reads the same candidate paths the native
  * provider scans and surfaces parse failures as error findings.
  */
-async function probeMcpSourceParseErrors(
-	agentDir: string | undefined,
-	projectDir: string,
-	scoped: boolean,
-): Promise<string[]> {
+async function probeMcpSourceParseErrors(agentDir: string | undefined, projectDir: string): Promise<string[]> {
 	const errors: string[] = [];
-	// Mirror the native provider's candidate paths (builtin.ts loadMCPServers).
+	// Mirror the native provider's candidate paths (builtin.ts loadMCPServers)
+	// plus the mcp-json provider's project-root candidates.
 	const userAgentDir = agentDir ?? getAgentDir();
 	const candidates = [
-		path.join(projectDir, ".omp", "mcp.json"),
-		path.join(projectDir, ".omp", ".mcp.json"),
-		path.join(userAgentDir, "mcp.json"),
-		path.join(userAgentDir, ".mcp.json"),
+		...new Set([
+			path.join(projectDir, ".omp", "mcp.json"),
+			path.join(projectDir, ".omp", ".mcp.json"),
+			path.join(userAgentDir, "mcp.json"),
+			path.join(userAgentDir, ".mcp.json"),
+			...getMcpJsonCandidatePaths(projectDir),
+		]),
 	];
 	for (const candidate of candidates) {
 		let content: string;
@@ -1317,22 +1363,6 @@ async function probeMcpSourceParseErrors(
 		const parsed = tryParseJson<unknown>(content);
 		if (parsed === null) {
 			errors.push(`${candidate}: invalid JSON (parse failed)`);
-		}
-	}
-	// When unscoped, also probe the mcp-json provider's project-level .mcp.json
-	// at the project root (a separate path the mcp-json provider scans).
-	if (!scoped) {
-		const rootMcpJson = path.join(projectDir, ".mcp.json");
-		try {
-			const content = await fs.promises.readFile(rootMcpJson, "utf8");
-			const parsed = tryParseJson<unknown>(content);
-			if (parsed === null) {
-				errors.push(`${rootMcpJson}: invalid JSON (parse failed)`);
-			}
-		} catch (error) {
-			if (!isEnoent(error)) {
-				errors.push(`${rootMcpJson}: ${error instanceof Error ? error.message : String(error)}`);
-			}
 		}
 	}
 	return errors;
@@ -1380,7 +1410,7 @@ async function collectMcpFindings(flags: DoctorCommandFlags): Promise<DoctorFind
 	// discovered items — a syntax error yields zero items, so an items-driven
 	// scan can never see it. This catches a broken scoped <agentDir>/mcp.json
 	// that would otherwise fall through to mcp.none with status ok.
-	const parseErrors = await probeMcpSourceParseErrors(flags.agentDir, getProjectDir(), scoped);
+	const parseErrors = await probeMcpSourceParseErrors(flags.agentDir, getProjectDir());
 	const allSourceErrors = [...sourceErrors, ...parseErrors];
 	const findings: DoctorFinding[] = await Promise.all(
 		result.items.map(server => {
@@ -2313,14 +2343,33 @@ async function collectSetupFindings(flags: DoctorCommandFlags): Promise<DoctorFi
 async function collectPluginFindings(flags: DoctorCommandFlags): Promise<DoctorFinding[]> {
 	// Plugin state is root-scoped; a run restricted to --agent-dir must not
 	// repair (and thereby mutate) state outside its scope.
-	const fix = flags.fix === true && flags.agentDir === undefined;
+	const lockfile = getPluginsLockfile();
+	const findings: DoctorFinding[] = [];
+	let lockfileBroken = false;
+	try {
+		await readPluginRuntimeConfig(lockfile);
+	} catch (error) {
+		lockfileBroken = true;
+		findings.push({
+			id: "plugins.lockfile",
+			category: "plugins",
+			status: "error",
+			summary: "plugin lockfile is invalid",
+			details: [`${shortenPath(lockfile)}: ${error instanceof Error ? error.message : String(error)}`],
+			remedy: "Fix or remove omp-plugins.lock.json",
+		});
+	}
+
 	let checks: DoctorCheck[];
 	try {
-		checks = await new PluginManager().doctor({ fix });
+		checks = await new PluginManager().doctor({
+			fix: flags.fix === true && flags.agentDir === undefined && !lockfileBroken,
+		});
 	} catch (error) {
 		// A malformed plugins/package.json makes PluginManager.doctor() rethrow;
 		// catch so the rest of the report still renders.
 		return [
+			...findings,
 			{
 				id: "plugins.doctor",
 				category: "plugins",
@@ -2330,29 +2379,32 @@ async function collectPluginFindings(flags: DoctorCommandFlags): Promise<DoctorF
 			},
 		];
 	}
-	return checks.map(check => {
-		// PluginManager.doctor({fix:true}) returns the ORIGINAL error/warning status
-		// with fixed:true; the plugin CLI excludes fixed checks from error totals.
-		// Mirror that semantics: a fixed check normalizes to ok, preserving the
-		// original problem text so the user sees what was repaired.
-		if (check.fixed === true) {
+	return [
+		...findings,
+		...checks.map(check => {
+			// PluginManager.doctor({fix:true}) returns the ORIGINAL error/warning status
+			// with fixed:true; the plugin CLI excludes fixed checks from error totals.
+			// Mirror that semantics: a fixed check normalizes to ok, preserving the
+			// original problem text so the user sees what was repaired.
+			if (check.fixed === true) {
+				return {
+					id: `plugins.${check.name}`,
+					category: "plugins" as const,
+					status: "ok" as const,
+					summary: `fixed: ${check.message}`,
+					details: [],
+					fixed: true,
+				};
+			}
 			return {
 				id: `plugins.${check.name}`,
 				category: "plugins" as const,
-				status: "ok",
-				summary: `fixed: ${check.message}`,
+				status: check.status,
+				summary: check.message,
 				details: [],
-				fixed: true,
 			};
-		}
-		return {
-			id: `plugins.${check.name}`,
-			category: "plugins" as const,
-			status: check.status,
-			summary: check.message,
-			details: [],
-		};
-	});
+		}),
+	];
 }
 
 export async function collectDoctorReport(flags: DoctorCommandFlags): Promise<DoctorReport> {
