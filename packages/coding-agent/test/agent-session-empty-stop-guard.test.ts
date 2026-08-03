@@ -86,7 +86,7 @@ async function createHarness(
 		provider?: string;
 		id?: string;
 	} = {},
-): Promise<Harness & { mock: MockModel }> {
+): Promise<Harness & { mock: MockModel; modelRegistry: ModelRegistry }> {
 	const tempDir = TempDir.createSync("@pi-empty-stop-guard-");
 	const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
 	authStorage.setRuntimeApiKey("mock", "test-key");
@@ -130,7 +130,7 @@ async function createHarness(
 	});
 	const harness = { session, authStorage, tempDir };
 	activeHarnesses.push(harness);
-	return { ...harness, mock };
+	return { ...harness, mock, modelRegistry };
 }
 
 function assistantText(messages: AgentMessage[]): string {
@@ -302,6 +302,25 @@ describe("AgentSession empty stop guard", () => {
 			.filter(entry => entry.type === "message")
 			.map(entry => entry.message as AgentMessage);
 		expect(emptyAssistantStops(activeBranchMessages)).toHaveLength(0);
+	});
+
+	it("releases a fallback probe when empty stop retries hit the cap", async () => {
+		const primarySelector = "openai/gpt-4o-mini";
+		const fallbackSelector = "openai/gpt-4o";
+		const { session, modelRegistry } = await createHarness(
+			[{ throw: "503 service unavailable: overloaded_error" }, emptyStop(), emptyStop(), emptyStop(), emptyStop()],
+			{
+				"retry.enabled": true,
+				"retry.baseDelayMs": 0,
+				"retry.fallbackChains": { [primarySelector]: [fallbackSelector] },
+			},
+			{ provider: "openai", id: "gpt-4o-mini" },
+		);
+
+		await expectPromptCompletes(session.prompt("release capped fallback probe"));
+		await session.waitForIdle();
+
+		expect(modelRegistry.admitFallbackProbe(fallbackSelector).status).toBe("probe");
 	});
 
 	it("waits for capped empty-stop persistence before removing the active branch entry", async () => {

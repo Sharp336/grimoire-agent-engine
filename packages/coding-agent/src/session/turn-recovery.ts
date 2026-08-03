@@ -540,6 +540,7 @@ export class TurnRecovery {
 			});
 			this.#clearPendingRecoveredRetryErrors();
 			this.#retryAttempt = 0;
+			this.abandonActiveRetryFallbackProbe();
 			this.resolveRetry();
 			// A zero-content turn carries no transcript value, while its provider usage
 			// can anchor the next prompt at the full failed-request size and re-trigger
@@ -1042,8 +1043,17 @@ export class TurnRecovery {
 		const fallback = this.#activeRetryFallback;
 		const lease = fallback?.probeLease;
 		if (!lease) return;
+		this.#abandonRetryFallbackProbe(lease);
+	}
+
+	/** Release one captured lease without clearing a newer fallback owner. */
+	#abandonRetryFallbackProbe(lease: FallbackProbeLease): void {
 		this.#host.modelRegistry.abandonFallbackProbe(lease);
-		fallback.probeLease = undefined;
+		const fallback = this.#activeRetryFallback;
+		const activeLease = fallback?.probeLease;
+		if (fallback && activeLease?.selector === lease.selector && activeLease.generation === lease.generation) {
+			fallback.probeLease = undefined;
+		}
 	}
 
 	/** Checks whether a fallback selector remains in cooldown. */
@@ -1666,10 +1676,11 @@ export class TurnRecovery {
 		// continuation that still fails locally must close the retry saga —
 		// otherwise auto_retry_end never fires, retryPromise stays pending, and
 		// the in-flight prompt() (and the TUI retry indicator) hang forever.
+		const probeLease = this.#activeRetryFallback?.probeLease;
 		this.#host.scheduleAgentContinue({
 			delayMs: 1,
 			generation,
-			onError: error => void this.#failRetryAfterLocalContinueError(message, error),
+			onError: error => void this.#failRetryAfterLocalContinueError(message, error, probeLease),
 		});
 
 		return true;
@@ -1701,7 +1712,12 @@ export class TurnRecovery {
 	 * closing `auto_retry_end` so subscribers stop showing retry progress, and
 	 * resolve the retry promise so the in-flight prompt() unwinds (issue #5382).
 	 */
-	async #failRetryAfterLocalContinueError(message: AssistantMessage, error: unknown): Promise<void> {
+	async #failRetryAfterLocalContinueError(
+		message: AssistantMessage,
+		error: unknown,
+		probeLease: FallbackProbeLease | undefined,
+	): Promise<void> {
+		if (probeLease) this.#abandonRetryFallbackProbe(probeLease);
 		if (this.#retryAttempt === 0) return;
 		const attempt = this.#retryAttempt;
 		this.#retryAttempt = 0;

@@ -3427,4 +3427,54 @@ describe("AgentSession retry fallback", () => {
 		expect(session.isRetrying).toBe(false);
 		expect(getLastAssistantMessage(session).stopReason).toBe("stop");
 	});
+
+	it("releases the fallback probe when retry continuation fails before provider dispatch", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled fallback test models");
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const mock = createMockModel({
+			responses: [{ throw: "503 service unavailable: overloaded_error" }],
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: mock.stream,
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 0,
+			"retry.fallbackChains": { [primarySelector]: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		const { retryEndEvents } = trackRetryEvents(session);
+		session.subscribe(event => {
+			if (event.type !== "auto_retry_start") return;
+			vi.spyOn(agent, "continue").mockRejectedValue(new Error("synthetic local continuation failure"));
+		});
+
+		const outcome = await Promise.race([
+			session.prompt("fail the scheduled continuation").then(() => "completed" as const),
+			scheduler.wait(3_000).then(() => "stuck" as const),
+		]);
+
+		expect(outcome).toBe("completed");
+		expect(mock.calls).toHaveLength(1);
+		expect(retryEndEvents).toEqual([
+			expect.objectContaining({ success: false, finalError: expect.stringContaining("failed locally") }),
+		]);
+		expect(modelRegistry.admitFallbackProbe(fallbackSelector).status).toBe("probe");
+	});
 });

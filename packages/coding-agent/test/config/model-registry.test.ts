@@ -181,6 +181,24 @@ describe("ModelRegistry", () => {
 		);
 	});
 
+	test("requires a fresh single-owner probe after selector cooldown", () => {
+		const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+		const first = registry.admitFallbackProbe("test/test-model");
+		if (first.status !== "probe") throw new Error("Expected first fallback caller to own the probe");
+		registry.markFallbackProbeHealthy(first.lease);
+
+		registry.suppressSelector("test/test-model:high", 2_000);
+		now.mockReturnValue(2_001);
+		expect(registry.isSelectorSuppressed("test/test-model")).toBe(false);
+
+		const second = registry.admitFallbackProbe("test/test-model");
+		if (second.status !== "probe") throw new Error("Expected cooldown expiry to admit one fresh probe");
+		expect(registry.admitFallbackProbe("test/test-model")).toEqual({ status: "busy" });
+
+		registry.markFallbackProbeHealthy(first.lease);
+		expect(registry.admitFallbackProbe("test/test-model")).toEqual({ status: "busy" });
+	});
+
 	test("preserves fallback probe state across routine refreshes", async () => {
 		const probe = registry.admitFallbackProbe("test/test-model");
 		if (probe.status !== "probe") throw new Error("Expected first fallback caller to own the probe");

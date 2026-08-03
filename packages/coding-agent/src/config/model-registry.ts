@@ -2796,7 +2796,9 @@ export class ModelRegistry {
 	 * Suppress a specific model selector (e.g., "provider/id") until a specific timestamp.
 	 */
 	suppressSelector(selector: string, untilMs: number): void {
-		this.#suppressedSelectors.set(this.#normalizeFallbackSelector(selector), untilMs);
+		const normalizedSelector = this.#normalizeFallbackSelector(selector);
+		this.#suppressedSelectors.set(normalizedSelector, untilMs);
+		this.#fallbackProbeStates.delete(normalizedSelector);
 	}
 
 	/**
