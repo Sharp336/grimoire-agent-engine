@@ -303,8 +303,8 @@ function extractToolResultLink(sessionFile: string, entry: SessionMessageEntry):
 			}
 		}
 	}
-	const details = msg.details as { __synthetic?: unknown; executed?: unknown } | undefined;
-	const executed = details?.__synthetic === true && details.executed === false ? false : undefined;
+	const details = msg.details as { executed?: unknown } | undefined;
+	const executed = details?.executed === false ? false : undefined;
 	return {
 		sessionFile,
 		toolCallId: msg.toolCallId,

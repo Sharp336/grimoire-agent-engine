@@ -1635,7 +1635,7 @@ export function updateToolResults(links: ToolResultLink[]): number {
 		SET result_chars = ?,
 			execution_observed = COALESCE(?, execution_observed),
 			duration_ms = CASE
-				WHEN ? = 0 OR execution_observed = 0 THEN NULL
+				WHEN ? = 0 OR COALESCE(?, execution_observed) = 0 THEN NULL
 				WHEN started_at IS NULL AND ? < timestamp THEN NULL
 				ELSE MAX(0, ? - COALESCE(started_at, timestamp))
 			END,
@@ -1646,10 +1646,12 @@ export function updateToolResults(links: ToolResultLink[]): number {
 	let updated = 0;
 	const apply = db.transaction(() => {
 		for (const link of links) {
+			const executionObserved = link.executed === false ? 0 : null;
 			const result = stmt.run(
 				link.resultChars,
-				link.executed === false ? 0 : null,
-				link.executed === false ? 0 : null,
+				executionObserved,
+				executionObserved,
+				executionObserved,
 				link.timestamp,
 				link.timestamp,
 				link.isError ? 1 : 0,

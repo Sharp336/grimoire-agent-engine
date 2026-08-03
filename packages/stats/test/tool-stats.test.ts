@@ -374,7 +374,7 @@ describe("tool usage stats pipeline", () => {
 				toolCallId: "call-todo",
 				toolName: "todo",
 				text: "No todos",
-				details: { __synthetic: true, source: "cursor_server_resolved", executed: false },
+				details: { source: "cursor_server_resolved", executed: false },
 			}),
 			buildToolResultEntry({
 				entryId: "tr-read",
@@ -383,7 +383,7 @@ describe("tool usage stats pipeline", () => {
 				toolCallId: "call-read",
 				toolName: "read",
 				text: "",
-				details: { __synthetic: true, source: "cursor_zero_length_read", executed: false },
+				details: { source: "cursor_zero_length_read", executed: false },
 			}),
 		]);
 		await syncAllSessions({ workers: 1 });
@@ -559,6 +559,40 @@ describe("tool usage stats pipeline", () => {
 		const [grep] = getToolStats();
 		expect(grep.durationSamples).toBe(1);
 		expect(grep.durationMsMedian).toBe(4_000);
+	});
+
+	it("excludes a skipped result that lands after its call row", async () => {
+		const sessionFile = await writeSessionFile("session.jsonl", { id: "late-skipped-result" }, [
+			buildAssistantEntry({
+				entryId: "asst-1",
+				timestamp: TS1,
+				toolCalls: [{ id: "call-1", name: "read", arguments: READ_ARGS }],
+				totalTokens: TURN2_TOTAL_TOKENS,
+				outputTokens: TURN2_OUTPUT_TOKENS,
+				costTotal: TURN2_COST,
+			}),
+		]);
+		await syncAllSessions({ workers: 1 });
+
+		const marker = buildToolStartEntry("call-1", "read", TS1, false);
+		const result = buildToolResultEntry({
+			entryId: "tr-1",
+			parentId: "asst-1",
+			timestamp: TS1_READ_RESULT,
+			toolCallId: "call-1",
+			toolName: "read",
+			text: "",
+			details: { executed: false },
+		});
+		await fs.appendFile(sessionFile, `${JSON.stringify(marker)}\n${JSON.stringify(result)}\n`);
+		const bumped = new Date(Date.now() + 1_000);
+		await fs.utimes(sessionFile, bumped, bumped);
+
+		await syncAllSessions({ workers: 1 });
+
+		const [read] = getToolStats();
+		expect(read.durationSamples).toBe(0);
+		expect(read.durationMsMedian).toBe(0);
 	});
 
 	it("links a result that lands in a later sync pass without duplicating the call", async () => {
