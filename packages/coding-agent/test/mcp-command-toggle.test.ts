@@ -5,6 +5,7 @@ import * as path from "node:path";
 import type { SourceMeta } from "@oh-my-pi/pi-coding-agent/capability/types";
 import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
+import { refreshMcpServer } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-live-refresh";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import {
 	getConfigRootDir,
@@ -32,7 +33,7 @@ function restoreAgentDir(): void {
 }
 
 function createController() {
-	const refreshMCPTools = vi.fn(async () => {});
+	const refreshMCPTools = vi.fn(async (_tools: unknown[]) => {});
 	const mcpManager = {
 		disconnectAll: vi.fn(async () => {}),
 		discoverAndConnect: vi.fn(async () => ({ errors: new Map<string, string>() })),
@@ -140,5 +141,24 @@ describe("/mcp enable and disable", () => {
 		const [configs] = mcpManager.connectServers.mock.calls[0]!;
 		expect(Object.keys(configs)).toEqual(["mcp1"]);
 		expect(configs.mcp1).toEqual({ type: "stdio", command: "mcp-one", enabled: true });
+	});
+	test("classifies a successful slow connection as live refresh in progress", async () => {
+		await writeProjectConfig(projectDir, {
+			mcp1: { type: "stdio", command: "mcp-one" },
+		});
+		const { mcpManager, refreshMCPTools } = createController();
+		mcpManager.getConnectionStatus.mockReturnValue("connecting");
+
+		const result = await refreshMcpServer({
+			cwd: projectDir,
+			serverName: "mcp1",
+			enabled: true,
+			manager: mcpManager as never,
+			refreshTools: async manager => refreshMCPTools(manager.getTools()),
+		});
+
+		expect(result.state).toBe("connecting");
+		expect(result.errors.size).toBe(0);
+		expect(refreshMCPTools).toHaveBeenCalledWith([]);
 	});
 });

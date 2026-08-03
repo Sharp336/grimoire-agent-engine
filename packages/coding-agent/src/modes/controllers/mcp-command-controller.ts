@@ -12,7 +12,6 @@ import {
 	analyzeAuthError,
 	discoverOAuthEndpoints,
 	fetchResourceMetadataScopes,
-	loadAllMCPConfigs,
 	MCPManager,
 	type OAuthEndpoints,
 } from "../../mcp";
@@ -67,6 +66,7 @@ import { parseCommandArgs } from "../shared";
 import { theme } from "../theme/theme";
 import type { InteractiveModeContext } from "../types";
 import { groupBySource, parseRemoveArgs, readScopeFlag, showCommandMessage } from "./command-controller-shared";
+import { refreshMcpServer } from "./mcp-live-refresh";
 
 const MCP_MANUAL_INPUT_PROVIDER_ID = "mcp";
 const MCP_MANUAL_LOGIN_TIP = "Headless? Paste the redirect URL or code with /login <value>.";
@@ -2015,20 +2015,15 @@ export class MCPCommandController {
 	}
 
 	async #connectEnabledMCPServer(name: string): Promise<void> {
-		if (!this.ctx.mcpManager) {
-			return;
-		}
+		if (!this.ctx.mcpManager) return;
 
-		const { configs, sources } = await loadAllMCPConfigs(getProjectDir());
-		const config = configs[name];
-		if (!config) {
-			await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
-			return;
-		}
-
-		const source = sources[name];
-		const result = await this.ctx.mcpManager.connectServers({ [name]: config }, source ? { [name]: source } : {});
-		await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
+		const result = await refreshMcpServer({
+			cwd: getProjectDir(),
+			serverName: name,
+			enabled: true,
+			manager: this.ctx.mcpManager,
+			refreshTools: async manager => this.ctx.session.refreshMCPTools(manager.getTools()),
+		});
 		this.#showMCPConnectionErrors(result.errors);
 	}
 

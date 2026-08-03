@@ -11,6 +11,7 @@ import {
 	isEnoent,
 	logger,
 } from "@oh-my-pi/pi-utils";
+import { getConfigDirPaths } from "../../config";
 import { withHostGuard } from "../utils";
 import { refreshBunGitCache } from "./bun-git-cache";
 import { type GitSource, parseGitUrl } from "./git-url";
@@ -152,15 +153,40 @@ export class PluginManager {
 		await Bun.write(getPluginsLockfile(), JSON.stringify(this.#runtimeConfig, null, 2));
 	}
 
-	async #loadProjectOverrides(): Promise<ProjectPluginOverrides> {
-		const overridesPath = getProjectPluginOverridesPath(this.#cwd);
-		try {
-			return await Bun.file(overridesPath).json();
-		} catch (err) {
-			if (isEnoent(err)) return {};
-			logger.warn("Failed to load project plugin overrides", { path: overridesPath, error: String(err) });
-			return {};
+	/**
+	 * Resolve the project override file the runtime plugin loader actually
+	 * reads: the first parseable `plugin-overrides.json` across project config
+	 * dirs in loader precedence order (see `loadProjectOverrides` in
+	 * `loader.ts`). Falls back to the canonical path when no override file
+	 * exists yet.
+	 */
+	async #loadProjectOverridesFile(): Promise<{ path: string; overrides: ProjectPluginOverrides }> {
+		const canonicalPath = getProjectPluginOverridesPath(this.#cwd);
+		const candidates = getConfigDirPaths("plugin-overrides.json", { user: false, cwd: this.#cwd });
+		if (!candidates.includes(canonicalPath)) candidates.push(canonicalPath);
+		for (const overridesPath of candidates) {
+			try {
+				return { path: overridesPath, overrides: await Bun.file(overridesPath).json() };
+			} catch (err) {
+				if (!isEnoent(err)) {
+					logger.warn("Failed to load project plugin overrides", { path: overridesPath, error: String(err) });
+				}
+			}
 		}
+		return { path: canonicalPath, overrides: {} };
+	}
+
+	async clearProjectDisabledOverride(name: string): Promise<void> {
+		const { path: overridesPath, overrides } = await this.#loadProjectOverridesFile();
+		if (!overrides.disabled?.includes(name)) return;
+
+		const disabled = overrides.disabled.filter(pluginName => pluginName !== name);
+		if (disabled.length > 0) {
+			overrides.disabled = disabled;
+		} else {
+			delete overrides.disabled;
+		}
+		await Bun.write(overridesPath, JSON.stringify(overrides, null, 2));
 	}
 
 	// ==========================================================================
@@ -671,8 +697,8 @@ export class PluginManager {
 			if (!isEnoent(err)) throw err;
 		}
 
-		const [projectOverrides, config, marketplaceRuntimeRealpaths] = await Promise.all([
-			this.#loadProjectOverrides(),
+		const [{ overrides: projectOverrides }, config, marketplaceRuntimeRealpaths] = await Promise.all([
+			this.#loadProjectOverridesFile(),
 			this.#ensureConfigLoaded(),
 			this.#collectMarketplaceRuntimePackageRealpaths(),
 		]);
@@ -776,6 +802,39 @@ export class PluginManager {
 		};
 	}
 
+	/**
+	 * Resolve a marketplace registry entry's effective state in this project.
+	 * Marketplace IDs need not match their runtime package names, so inspect the
+	 * installed package before applying the same project override as the loader.
+	 */
+	async getMarketplaceEffectiveState(
+		pluginId: string,
+		installPath: string,
+		registryEnabled: boolean,
+	): Promise<{ packageName: string; enabled: boolean }> {
+		const parsedId = parsePluginId(pluginId);
+		let packageName = parsedId?.name ?? pluginId;
+		try {
+			const pkg: RuntimePackageJson = await Bun.file(path.join(installPath, "package.json")).json();
+			if (typeof pkg.name === "string" && pkg.name.length > 0) {
+				packageName = pkg.name;
+			}
+		} catch (err) {
+			if (!isEnoent(err)) {
+				logger.debug("Failed to inspect marketplace plugin package path", {
+					path: installPath,
+					error: String(err),
+				});
+			}
+		}
+
+		const { overrides } = await this.#loadProjectOverridesFile();
+		return {
+			packageName,
+			enabled: registryEnabled && !(overrides.disabled?.includes(packageName) ?? false),
+		};
+	}
+
 	// ==========================================================================
 	// Enable / Disable
 	// ==========================================================================
@@ -783,13 +842,16 @@ export class PluginManager {
 	/**
 	 * Enable or disable a plugin globally.
 	 */
-	async setEnabled(name: string, enabled: boolean): Promise<void> {
+	async setEnabled(name: string, enabled: boolean, options?: { clearProjectDisabled?: boolean }): Promise<void> {
 		const config = await this.#ensureConfigLoaded();
 		if (!config.plugins[name]) {
 			throw new Error(`Plugin ${name} not found in runtime config`);
 		}
 		config.plugins[name].enabled = enabled;
 		await this.#saveRuntimeConfig();
+		if (enabled && options?.clearProjectDisabled) {
+			await this.clearProjectDisabledOverride(name);
+		}
 	}
 
 	// ==========================================================================
@@ -842,7 +904,7 @@ export class PluginManager {
 	async getPluginSettings(name: string): Promise<Record<string, unknown>> {
 		const config = await this.#ensureConfigLoaded();
 		const global = config.settings[name] || {};
-		const projectOverrides = await this.#loadProjectOverrides();
+		const { overrides: projectOverrides } = await this.#loadProjectOverridesFile();
 		const project = projectOverrides.settings?.[name] || {};
 
 		// Project settings override global

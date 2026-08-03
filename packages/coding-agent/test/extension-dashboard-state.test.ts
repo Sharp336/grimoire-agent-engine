@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { applyDisabledExtensionsToState } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/state-manager";
+import {
+	applyDisabledExtensionsToState,
+	applyExtensionEnabledToState,
+} from "@oh-my-pi/pi-coding-agent/modes/components/extensions/state-manager";
 import type { DashboardState, Extension } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/types";
 
 function extension(overrides: Partial<Extension> & Pick<Extension, "id">): Extension {
@@ -73,5 +76,22 @@ describe("applyDisabledExtensionsToState", () => {
 			shadowedBy: "skill:shadowing",
 		});
 		expect(next.selected).toMatchObject({ id: "skill:shadowed", state: "shadowed", disabledReason: "shadowed" });
+	});
+});
+
+describe("applyExtensionEnabledToState", () => {
+	test("keeps a pending plugin state consistent across refreshed dashboard slices", () => {
+		const plugin = extension({
+			id: "plugin:rapid",
+			kind: "plugin",
+			state: "disabled",
+			disabledReason: "item-disabled",
+		});
+		const next = applyExtensionEnabledToState(dashboardState([plugin], plugin), plugin.id, true);
+
+		for (const projected of [next.extensions[0], next.tabFiltered[0], next.searchFiltered[0], next.selected]) {
+			expect(projected).toMatchObject({ id: plugin.id, state: "active" });
+			expect(projected?.disabledReason).toBeUndefined();
+		}
 	});
 });

@@ -18,6 +18,7 @@ import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initializeWithSettings, reset as resetDiscoveryCache } from "@oh-my-pi/pi-coding-agent/discovery";
 import { readMCPConfigFile, setMcpServerEnabled, setServerDisabled } from "@oh-my-pi/pi-coding-agent/mcp/config-writer";
+import { ExtensionDashboard } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/extension-dashboard";
 import { loadAllExtensions } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/state-manager";
 import { __resetDirsFromEnvForTests, getMCPConfigPath, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
@@ -306,5 +307,22 @@ describe("loadAllExtensions MCP parity with /mcp list (issue #3827)", () => {
 
 		userConfig = await readMCPConfigFile(getMCPConfigPath("user", projectDir));
 		expect(userConfig.disabledServers ?? []).not.toContain("phantom-server");
+	});
+	test("reports a slow MCP connection as pending live application", async () => {
+		const notification = Promise.withResolvers<string>();
+		const refreshCalls: Array<{ name: string; enabled: boolean }> = [];
+		const dashboard = await ExtensionDashboard.create(projectDir, Settings.instance, 30, {
+			refreshMcpLive: async (name, enabled) => {
+				refreshCalls.push({ name, enabled });
+				return "pending";
+			},
+			notify: message => notification.resolve(message),
+		});
+		for (const char of "flag-disabled-server") dashboard.handleInput(char);
+		dashboard.handleInput("j");
+		dashboard.handleInput(" ");
+
+		expect(await notification.promise).toBe("MCP connection in progress — tools will update live");
+		expect(refreshCalls).toEqual([{ name: "flag-disabled-server", enabled: true }]);
 	});
 });
