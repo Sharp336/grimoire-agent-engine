@@ -204,6 +204,25 @@ describe("runSubprocess soft request budget", () => {
 		});
 	}
 
+	it("applies the cumulative session cap as the active runtime timer", async () => {
+		const id = "SessionCapScout";
+		const handle = createMockSession(({ emit, pushMessage }) => {
+			const message = assistantText("still working", "aborted");
+			pushMessage(message);
+			emit({ type: "message_end", message } as unknown as AgentSessionEvent);
+		});
+		mockCreateAgentSession(handle.session);
+		registerRunning(id, handle.session);
+
+		const result = await runSubprocess({
+			...baseOptions(id),
+			settings: Settings.isolated({ "task.maxSessionRuntimeMs": 1 }),
+		});
+
+		expect(result.aborted).toBe(true);
+		expect(result.abortReason).toContain("task.maxSessionRuntimeMs=1");
+	});
+
 	it("a budget stop drives one forced final yield and finishes as a normal completion", async () => {
 		const id = "BudgetScout";
 		let abortCallsAtReminder: number | undefined;

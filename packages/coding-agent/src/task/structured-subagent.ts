@@ -112,6 +112,8 @@ export interface StructuredSubagentRequest {
 	enableIrc?: boolean;
 	/** `0` disables executor wall-clock timeout. Undefined inherits settings. */
 	maxRuntimeMs?: number;
+	/** `0` disables cumulative child-session runtime. Undefined inherits settings. */
+	maxSessionRuntimeMs?: number;
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
 }
@@ -420,6 +422,7 @@ function buildExecutorOptions(
 		enableLsp: policy.enableLsp,
 		enableIrc: policy.enableIrc,
 		maxRuntimeMs: request.maxRuntimeMs,
+		maxSessionRuntimeMs: request.maxSessionRuntimeMs,
 		restrictToolNames,
 		keepAlive: request.keepAlive,
 		signal: request.signal,

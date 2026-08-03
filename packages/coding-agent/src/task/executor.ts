@@ -391,6 +391,12 @@ export interface ExecutorOptions {
 	 * watchdog is already suspended for the call's duration.
 	 */
 	maxRuntimeMs?: number;
+	/**
+	 * Override the `task.maxSessionRuntimeMs` cumulative wall-clock cap. Unlike
+	 * `maxRuntimeMs`, this budget is intended to survive parked/resumed
+	 * follow-up turns when the caller passes the remaining budget each time.
+	 */
+	maxSessionRuntimeMs?: number;
 	/** Include IRC only when the invocation policy permits collaboration. */
 	enableIrc?: boolean;
 	enableLsp?: boolean;
@@ -924,8 +930,10 @@ interface RunMonitorArgs {
 	softRequestBudget: number;
 	/** Whether crossing the soft budget injects a wrap-up steering notice. */
 	softRequestBudgetNotice: boolean;
-	/** Wall-clock cap in ms; 0 disables the timer. */
+	/** Wall-clock cap in ms for one turn; 0 disables the timer. */
 	maxRuntimeMs: number;
+	/** Cumulative wall-clock cap in ms across follow-up turns; 0 disables the timer. */
+	maxSessionRuntimeMs: number;
 }
 
 /**
@@ -1008,6 +1016,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		softRequestBudget,
 		softRequestBudgetNotice,
 		maxRuntimeMs,
+		maxSessionRuntimeMs,
 	} = args;
 	const startTime = Date.now();
 
@@ -1167,19 +1176,24 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	// Wall-clock hard limit. Defense-in-depth for the case where a provider stream
 	// hang escapes the inference-layer watchdog (see openai-completions
 	// `isOpenAICompletionsProgressChunk`). Disabled by default; set
-	// `task.maxRuntimeMs > 0` to cap each subagent's lifetime.
+	// `task.maxRuntimeMs > 0` to cap each turn's lifetime. The cumulative
+	// session cap independently bounds total elapsed runtime across resumed
+	// turns, so parking and reviving a child cannot reset its budget.
+	const runtimeCapMs =
+		maxSessionRuntimeMs > 0 ? Math.min(maxRuntimeMs || maxSessionRuntimeMs, maxSessionRuntimeMs) : maxRuntimeMs;
 	let runtimeTimeoutId: NodeJS.Timeout | undefined;
-	if (maxRuntimeMs > 0) {
+	if (runtimeCapMs > 0) {
 		runtimeTimeoutId = setTimeout(() => {
 			if (!resolved) {
 				logger.warn("Subagent runtime limit exceeded; aborting", {
 					id,
 					agent: agent.name,
 					maxRuntimeMs,
+					maxSessionRuntimeMs,
 				});
 				requestAbort("timeout");
 			}
-		}, maxRuntimeMs);
+		}, runtimeCapMs);
 	}
 
 	const resolveSignalAbortReason = (): string => {
@@ -1195,6 +1209,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	};
 	const resolveAbortReasonText = (): string => {
 		if (runtimeLimitExceeded) {
+			if (maxSessionRuntimeMs > 0) {
+				return `Subagent cumulative runtime limit exceeded (task.maxSessionRuntimeMs=${maxSessionRuntimeMs})`;
+			}
 			return `Subagent runtime limit exceeded (task.maxRuntimeMs=${maxRuntimeMs})`;
 		}
 		if (budgetLimitExceeded) {
@@ -2499,6 +2516,8 @@ export interface FollowUpTurnOptions {
 	artifactsDir?: string;
 	/** Wall-clock cap in ms for this turn; 0 disables. */
 	maxRuntimeMs?: number;
+	/** Cumulative wall-clock cap in ms for the child session; 0 disables. */
+	maxSessionRuntimeMs?: number;
 }
 
 /**
@@ -2536,6 +2555,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		softRequestBudget: 0,
 		softRequestBudgetNotice: false,
 		maxRuntimeMs: options.maxRuntimeMs ?? 0,
+		maxSessionRuntimeMs: options.maxSessionRuntimeMs ?? 0,
 	});
 
 	if (options.eventBus) {
@@ -2661,6 +2681,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		0,
 		Math.trunc(Number(options.maxRuntimeMs ?? settings.get("task.maxRuntimeMs") ?? 0) || 0),
 	);
+	const maxSessionRuntimeMs = Math.max(
+		0,
+		Math.trunc(Number(options.maxSessionRuntimeMs ?? settings.get("task.maxSessionRuntimeMs") ?? 0) || 0),
+	);
 	// TTL before an adopted idle subagent is parked by the lifecycle manager.
 	// <= 0 disables parking (the session stays live until process teardown).
 	const agentIdleTtlMs = Math.trunc(Number(settings.get("task.agentIdleTtlMs") ?? 420_000) || 0);
@@ -2734,6 +2758,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		softRequestBudget,
 		softRequestBudgetNotice,
 		maxRuntimeMs,
+		maxSessionRuntimeMs,
 	});
 	const progress = monitor.progress;
 	let unsubscribe: (() => void) | null = null;

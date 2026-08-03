@@ -4661,6 +4661,25 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"task.maxSessionRuntimeMs": {
+		type: "number",
+		default: 0,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Max Subagent Session Runtime",
+			description:
+				"Cumulative wall-clock limit for a keep-alive subagent session (ms). Unlike task.maxRuntimeMs, this budget is meant to survive parked/resumed follow-up turns when callers pass the remaining budget. 0 disables it.",
+			options: [
+				{ value: "0", label: "Unlimited", description: "Default" },
+				{ value: "900000", label: "15 minutes" },
+				{ value: "1800000", label: "30 minutes" },
+				{ value: "3600000", label: "1 hour" },
+				{ value: "7200000", label: "2 hours" },
+			],
+		},
+	},
+
 	"task.agentIdleTtlMs": {
 		type: "number",
 		default: 420_000,
