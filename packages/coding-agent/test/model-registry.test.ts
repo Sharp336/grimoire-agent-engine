@@ -2313,6 +2313,106 @@ describe("ModelRegistry", () => {
 			expect(syntheticCacheLoad.find("synthetic", "hf:moonshotai/Kimi-K2.5")).toBeUndefined();
 		});
 
+		test("fills the Featherless local cache from one bounded initial request", async () => {
+			authStorage.setRuntimeApiKey("featherless", "featherless-test-key");
+			const requests: Request[] = [];
+			const fetchMock: FetchImpl = async (input, init) => {
+				requests.push(input instanceof Request ? new Request(input, init) : new Request(input.toString(), init));
+				return Response.json({
+					total: 43_750,
+					data: Array.from({ length: 25 }, (_, index) => ({
+						id: `example/tool-${index}`,
+						context_length: 32_768 + index,
+						features: { tool_use: true },
+						available_on_current_plan: true,
+					})),
+				});
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+			await registry.refreshProvider("featherless", "online");
+
+			expect(getModelsForProvider(registry, "featherless")).toHaveLength(26);
+			expect(registry.getProviderModelTotal("featherless")).toBe(43_750);
+			const cachedRegistry = new ModelRegistry(authStorage, modelsJsonPath, {
+				fetch: () => {
+					throw new Error("offline cache hydration must not fetch");
+				},
+			});
+			await cachedRegistry.refresh("offline");
+			expect(getModelsForProvider(cachedRegistry, "featherless")).toHaveLength(26);
+			expect(cachedRegistry.getProviderModelTotal("featherless")).toBe(43_750);
+			expect(requests).toHaveLength(1);
+		});
+
+		test("searches and merges bounded Featherless results into an initially empty provider", async () => {
+			authStorage.setRuntimeApiKey("featherless", "featherless-test-key");
+			const requests: Request[] = [];
+			const fetchMock: FetchImpl = async (input, init) => {
+				const request = input instanceof Request ? new Request(input, init) : new Request(input.toString(), init);
+				requests.push(request);
+				const query = new URL(request.url).searchParams.get("q");
+				return query
+					? Response.json({
+							total: 812,
+							data: [
+								{
+									id: "Qwen/Qwen3-Coder-Next",
+									context_length: 262_144,
+									max_completion_tokens: 32_768,
+									pricing: { input: 0.25, output: 1 },
+									features: { tool_use: true },
+									available_on_current_plan: true,
+								},
+							],
+						})
+					: Response.json({
+							total: 43_750,
+							data: [
+								{
+									id: "example/initial",
+									context_length: 131_072,
+									features: { tool_use: true },
+									available_on_current_plan: true,
+								},
+							],
+						});
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+			expect(registry.supportsProviderSearch("featherless")).toBe(true);
+			expect(registry.getSearchableProviders()).toContain("featherless");
+			expect(await registry.searchProviderModels("featherless", "qwen coder")).toBe(1);
+			expect(registry.getProviderModelTotal("featherless", "qwen coder")).toBe(812);
+
+			const model = registry.find("featherless", "Qwen/Qwen3-Coder-Next");
+			expect(model).toMatchObject({
+				contextWindow: 262_144,
+				maxTokens: 32_768,
+				cost: { input: 0.25, output: 1 },
+			});
+			expect(registry.find("featherless", "zai-org/GLM-5.2")).toBeUndefined();
+			expect(requests).toHaveLength(1);
+			expect(requests[0]?.url).toBe(
+				"https://api.featherless.ai/v1/models?q=qwen+coder&conversational=true&per_page=100&sort=-popularity&available_on_current_plan=true",
+			);
+			expect(requests[0]?.headers.get("authorization")).toBe("Bearer featherless-test-key");
+
+			await registry.refreshProvider("featherless", "online");
+			expect(registry.find("featherless", "Qwen/Qwen3-Coder-Next")).toBeDefined();
+			expect(registry.find("featherless", "example/initial")).toBeDefined();
+
+			const cachedRegistry = new ModelRegistry(authStorage, modelsJsonPath, {
+				fetch: () => {
+					throw new Error("offline accumulated-cache hydration must not fetch");
+				},
+			});
+			await cachedRegistry.refresh("offline");
+			expect(cachedRegistry.find("featherless", "Qwen/Qwen3-Coder-Next")).toBeDefined();
+			expect(cachedRegistry.find("featherless", "example/initial")).toBeDefined();
+			expect(requests).toHaveLength(2);
+		});
+
 		test("does not re-add bundled synthetic models after authoritative refresh", async () => {
 			authStorage.setRuntimeApiKey("synthetic", "synthetic-test-key");
 			const fetchMock = mockOpenAiCompatibleModels("https://api.synthetic.new/openai/v1/models", [

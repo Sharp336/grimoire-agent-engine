@@ -58,7 +58,12 @@ interface RegistryOverrides {
 	getAvailable?: () => Model[];
 	getAll?: () => Model[];
 	getDiscoverableProviders?: () => string[];
+	getSearchableProviders?: () => string[];
 	getProviderDiscoveryState?: (providerId: string) => unknown;
+	getProviderModelTotal?: (providerId: string, query?: string) => number | undefined;
+	supportsProviderSearch?: (providerId: string) => boolean;
+	searchProviderModels?: (providerId: string, query: string) => Promise<number>;
+	hasAuth?: (providerId: string) => boolean;
 }
 
 function makeRegistry(models: () => Model[], overrides: RegistryOverrides = {}): ModelRegistry {
@@ -69,8 +74,12 @@ function makeRegistry(models: () => Model[], overrides: RegistryOverrides = {}):
 		getAvailable: overrides.getAvailable ?? models,
 		getAll: overrides.getAll ?? models,
 		getDiscoverableProviders: overrides.getDiscoverableProviders ?? (() => []),
+		getSearchableProviders: overrides.getSearchableProviders ?? (() => []),
 		getProviderDiscoveryState: overrides.getProviderDiscoveryState ?? (() => undefined),
-		authStorage: { hasAuth: () => false },
+		getProviderModelTotal: overrides.getProviderModelTotal ?? (() => undefined),
+		supportsProviderSearch: overrides.supportsProviderSearch ?? (() => false),
+		searchProviderModels: overrides.searchProviderModels ?? (async () => 0),
+		authStorage: { hasAuth: overrides.hasAuth ?? (() => false) },
 	} as unknown as ModelRegistry;
 }
 
@@ -1016,6 +1025,157 @@ describe("ModelHub", () => {
 			const rendered = normalize(hub.render(220));
 			expect(rendered).toContain("openrouter/z-ai/glm-5.2");
 			expect(rendered).toContain("custom-provider/glm-5.2");
+		});
+
+		test("searches remote catalogs without leaving All models", async () => {
+			vi.useFakeTimers();
+			try {
+				const models = [makeModel("featherless", "zai-org/GLM-5.2")];
+				let queryTotal: number | undefined;
+				const searchProviderModels = vi.fn(async (providerId: string, query: string) => {
+					expect(providerId).toBe("featherless");
+					expect(query).toBe("qwen");
+					models.push(
+						makeModel("featherless", "Qwen/Qwen3-Coder-Next"),
+						makeModel("featherless", "Qwen/Qwen3-32B"),
+					);
+					queryTotal = 68;
+					return 2;
+				});
+				const { hub } = createHub({
+					models: () => models,
+					registry: {
+						supportsProviderSearch: providerId => providerId === "featherless",
+						getProviderModelTotal: (_providerId, query) => (query === "qwen" ? queryTotal : undefined),
+						searchProviderModels,
+					},
+				});
+
+				for (const ch of "qwen") hub.handleInput(ch);
+				vi.advanceTimersByTime(250);
+				await Promise.resolve();
+				await Promise.resolve();
+
+				expect(searchProviderModels).toHaveBeenCalledTimes(1);
+				const rendered = normalize(hub.render(220));
+				expect(rendered).toContain("featherless/Qwen/Qwen3-Coder-Next");
+				expect(rendered).toContain("featherless 2/68");
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		test("loads an empty searchable provider's initial model list on first selection", async () => {
+			vi.useFakeTimers();
+			try {
+				const models: Model[] = [];
+				let providerTotal: number | undefined;
+				const refreshProvider = vi.fn(async (providerId: string, mode: string) => {
+					expect(providerId).toBe("featherless");
+					expect(mode).toBe("online");
+					for (let index = 0; index < 20; index++) {
+						models.push(makeModel("featherless", `model-${index}`, 262_144 - index));
+					}
+					providerTotal = 43_750;
+				});
+				const { hub } = createHub({
+					models: () => models,
+					registry: {
+						refreshProvider,
+						getSearchableProviders: () => ["featherless"],
+						getProviderModelTotal: () => providerTotal,
+						supportsProviderSearch: providerId => providerId === "featherless",
+						hasAuth: providerId => providerId === "featherless",
+					},
+				});
+
+				expect(normalize(hub.render(220))).toContain("featherless 0");
+				hub.handleInput(DOWN); // All models → empty Featherless
+				expect(normalize(hub.render(220))).toContain("Loading the featherless model list");
+
+				vi.advanceTimersByTime(120);
+				await Promise.resolve();
+				await Promise.resolve();
+
+				expect(refreshProvider).toHaveBeenCalledTimes(1);
+				expect(normalize(hub.render(220))).toContain("featherless 20/43750");
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		test("hops from an All-models query into a searchable provider and populates remote results", async () => {
+			vi.useFakeTimers();
+			try {
+				const models = [makeModel("featherless", "zai-org/GLM-5.2")];
+				let queryTotal: number | undefined;
+				const searchProviderModels = vi.fn(async (providerId: string, query: string) => {
+					expect(providerId).toBe("featherless");
+					expect(query).toBe("qwen");
+					models.push(makeModel("featherless", "Qwen/Qwen3-Coder-Next"));
+					queryTotal = 248;
+					return 1;
+				});
+				const { hub } = createHub({
+					models: () => models,
+					registry: {
+						supportsProviderSearch: providerId => providerId === "featherless",
+						getProviderModelTotal: (_providerId, query) => (query === "qwen" ? queryTotal : undefined),
+						searchProviderModels,
+					},
+				});
+
+				for (const ch of "qwen") hub.handleInput(ch);
+				hub.handleInput(DOWN); // All models → zero-local-match Featherless
+				expect(normalize(hub.render(220))).toContain("featherless ·");
+
+				vi.advanceTimersByTime(250);
+				await Promise.resolve();
+				await Promise.resolve();
+
+				expect(searchProviderModels).toHaveBeenCalledTimes(1);
+				expect(normalize(hub.render(220))).toContain("Qwen/Qwen3-Coder-Next");
+				expect(normalize(hub.render(220))).toContain("featherless 1/248");
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		test("reissues remote search when backspace returns to a completed query", async () => {
+			vi.useFakeTimers();
+			try {
+				const queries: string[] = [];
+				const { hub } = createHub({
+					models: [makeModel("featherless", "zai-org/GLM-5.2")],
+					registry: {
+						supportsProviderSearch: providerId => providerId === "featherless",
+						searchProviderModels: async (_providerId, query) => {
+							queries.push(query);
+							return 0;
+						},
+					},
+				});
+
+				hub.handleInput(DOWN); // All models → Featherless
+				for (const ch of "qwe") hub.handleInput(ch);
+				vi.advanceTimersByTime(250);
+				await Promise.resolve();
+				await Promise.resolve();
+
+				hub.handleInput("n");
+				vi.advanceTimersByTime(250);
+				await Promise.resolve();
+				await Promise.resolve();
+
+				hub.handleInput("\x7f");
+				vi.advanceTimersByTime(250);
+				await Promise.resolve();
+				await Promise.resolve();
+
+				expect(queries).toEqual(["qwe", "qwen", "qwe"]);
+			} finally {
+				vi.useRealTimers();
+			}
 		});
 
 		test("a provider scope that loses every match falls back to All models", () => {
