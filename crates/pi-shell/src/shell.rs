@@ -57,6 +57,14 @@ struct ShellRunLease {
 	run_id: u64,
 }
 
+struct CancelRunOnDrop(CancellationToken);
+
+impl Drop for CancelRunOnDrop {
+	fn drop(&mut self) {
+		self.0.cancel();
+	}
+}
+
 impl Drop for ShellRunLease {
 	fn drop(&mut self) {
 		self.state.lock().active_runs.remove(&self.run_id);
@@ -365,6 +373,7 @@ async fn run_shell_session(
 	ct: &CancelToken,
 ) -> Result<ShellRunResult> {
 	let tokio_cancel = CancellationToken::new();
+	let _cancel_on_drop = CancelRunOnDrop(tokio_cancel.clone());
 	let spawn_registry = Arc::new(process::SpawnRegistry::new());
 	let process_cancel_bridge = tokio::spawn({
 		let tokio_cancel = tokio_cancel.clone();
@@ -375,15 +384,19 @@ async fn run_shell_session(
 		}
 	});
 
-	let mut run_task = tokio::spawn({
+	enum RunOutcome {
+		Completed(Result<(ExecutionResult, Option<MinimizerResult>, Option<String>)>),
+		Cancelled(AbortReason),
+	}
+	let outcome = {
 		let session = session.clone();
 		let abort_state = abort_state.clone();
-		let tokio_cancel = tokio_cancel.clone();
+		let command_cancel = tokio_cancel.clone();
 		let spawn_registry = spawn_registry.clone();
-		async move {
+		let run = async move {
 			let mut session_guard = tokio::select! {
 				guard = session.lock() => guard,
-				() = tokio_cancel.cancelled() => return Err(Error::msg("Shell run cancelled")),
+				() = command_cancel.cancelled() => return Err(Error::msg("Shell run cancelled")),
 			};
 			if abort_state.is_closed() {
 				return Err(Error::msg("Shell session is closed"));
@@ -395,27 +408,26 @@ async fn run_shell_session(
 					create_session_for_run(
 						&config,
 						Some(spawn_registry.clone()),
-						Some(tokio_cancel.clone()),
+						Some(command_cancel.clone()),
 					)
 					.await?,
 				),
 			};
-			run_shell_command(session, &run_config, on_chunk, tokio_cancel, spawn_registry).await
-		}
-	});
-
-	let res = tokio::select! {
-		res = &mut run_task => res,
-		reason = ct.wait() => {
-			tokio_cancel.cancel();
-			let graceful = time::timeout(Duration::from_secs(2), &mut run_task).await;
-			if graceful.is_err() {
-				run_task.abort();
-				let _ = run_task.await;
+			run_shell_command(session, &run_config, on_chunk, command_cancel, spawn_registry).await
+		};
+		tokio::pin!(run);
+		tokio::select! {
+			res = &mut run => RunOutcome::Completed(res),
+			reason = ct.wait() => {
+				tokio_cancel.cancel();
+				let _ = time::timeout(Duration::from_secs(2), &mut run).await;
+				RunOutcome::Cancelled(reason)
 			}
-			// Use try_lock to avoid deadlocking if another task holds the session.
-			// If we can't acquire the lock, the session will be cleaned up when the
-			// holding task finishes.
+		}
+	};
+	let res = match outcome {
+		RunOutcome::Completed(res) => res,
+		RunOutcome::Cancelled(reason) => {
 			if let Ok(mut guard) = session.try_lock() {
 				*guard = None;
 			}
@@ -427,10 +439,8 @@ async fn run_shell_session(
 				minimized:   None,
 				working_dir: None,
 			});
-		}
+		},
 	};
-	let res =
-		res.unwrap_or_else(|err| Err(Error::msg(format!("Shell execution task failed: {err}"))));
 	process_cancel_bridge.abort();
 	let _ = process_cancel_bridge.await;
 	let keepalive = res.as_ref().is_ok_and(|(exec, ..)| session_keepalive(exec));
@@ -1558,14 +1568,26 @@ fn background_job_targets(
 ) -> (process::TerminationTargets, Vec<process::Process>) {
 	let mut targets = process::TerminationTargets::new();
 	let mut processes = Vec::new();
-	for job in &mut shell.jobs_mut().jobs {
+	let jobs = shell.jobs_mut();
+	if jobs.poll().is_err() {
+		return (targets, processes);
+	}
+	for job in &mut jobs.jobs {
 		job.abort_internal_tasks();
 		if let Some(pgid) = job.process_group_id() {
 			targets.add_pgid(pgid);
 		}
-		if let Some(pid) = job.representative_pid() {
-			targets.add_pid(pid);
+		#[cfg(target_os = "windows")]
+		for handle in job.duplicate_kill_handles() {
+			if let Some(process) = process::Process::from_owned_handle(handle) {
+				targets.add_process(process.clone());
+				processes.push(process);
+			}
+		}
+		#[cfg(not(target_os = "windows"))]
+		for pid in job.process_ids() {
 			if let Some(process) = process::Process::from_pid(pid) {
+				targets.add_process(process.clone());
 				processes.push(process);
 			}
 		}
@@ -6711,6 +6733,12 @@ mod tests {
 			2,
 			"jobspec must retain every external pipeline process",
 		);
+		let (_, captured_processes) = background_job_targets(&mut session.shell);
+		assert_eq!(
+			captured_processes.len(),
+			2,
+			"background cleanup must capture every external pipeline process",
+		);
 		let pids = [&first_pidfile, &second_pidfile].map(|pidfile| {
 			fs::read_to_string(pidfile)
 				.expect("pipeline pidfile")
@@ -8217,6 +8245,31 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
+	async fn close_reaps_completed_background_job_before_target_capture() {
+		let _guard = shell_test_lock().lock().await;
+		let shell = Shell::new(None);
+		shell
+			.run(
+				ShellRunOptions { command: "/bin/sleep 1 &".into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("start short background job");
+		time::sleep(Duration::from_millis(1_100)).await;
+
+		let mut session = shell.session.lock().await;
+		let core = session
+			.as_mut()
+			.expect("live background job should retain the session");
+		let (targets, processes) = background_job_targets(&mut core.shell);
+		assert!(targets.is_empty(), "completed jobs must not become termination targets");
+		assert!(processes.is_empty(), "completed jobs must not reopen process identities");
+		assert!(core.shell.jobs().jobs.is_empty(), "completed job should be reaped before capture");
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
 	async fn segmented_false_and_printf_skips_second_and_returns_nonzero() {
 		let root = unique_temp_dir("false-and");
 		let minimizer = printf_minimizer(&root.join("minimizer.toml"), None);
@@ -9166,6 +9219,48 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			.expect("active run task should not panic")
 			.expect("active close should report cancellation");
 		assert!(result.cancelled);
+
+		let error = shell
+			.run(ShellRunOptions::default(), None, CancelToken::default())
+			.await
+			.expect_err("closed shell must reject later work");
+		assert_eq!(error.to_string(), "Shell session is closed");
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn dropping_run_future_releases_session_and_allows_close() {
+		let _guard = shell_test_lock().lock().await;
+		let shell = Arc::new(Shell::new(None));
+		let running_shell = Arc::clone(&shell);
+		let (tx, rx) = flume::unbounded::<String>();
+		let run = tokio::spawn(async move {
+			running_shell
+				.run(
+					ShellRunOptions {
+						command: "/bin/sh -c 'printf \"%d\\n\" \"$$\"; sleep 30'".into(),
+						..Default::default()
+					},
+					Some(tx),
+					CancelToken::default(),
+				)
+				.await
+		});
+		let child_pid = time::timeout(Duration::from_secs(5), rx.recv_async())
+			.await
+			.expect("active command should print its pid")
+			.expect("active command output should remain connected")
+			.trim()
+			.parse::<i32>()
+			.expect("active command pid should be an integer");
+
+		run.abort();
+		let error = run.await.expect_err("aborted task should drop Shell::run");
+		assert!(error.is_cancelled());
+		time::timeout(Duration::from_secs(10), shell.close())
+			.await
+			.expect("close must not wait on detached command work");
+		wait_for_process_exit(child_pid).await;
 
 		let error = shell
 			.run(ShellRunOptions::default(), None, CancelToken::default())

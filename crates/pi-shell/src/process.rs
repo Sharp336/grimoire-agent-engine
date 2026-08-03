@@ -697,6 +697,7 @@ mod platform {
 		collections::{HashMap, HashSet},
 		ffi::c_void,
 		mem,
+		os::windows::io::{IntoRawHandle, OwnedHandle as StdOwnedHandle},
 		sync::Arc,
 	};
 
@@ -786,6 +787,7 @@ mod platform {
 		fn Process32NextW(hSnapshot: Handle, lppe: *mut PROCESSENTRY32W) -> i32;
 		fn CloseHandle(hObject: Handle) -> i32;
 		fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> Handle;
+		fn GetProcessId(Process: Handle) -> u32;
 		fn TerminateProcess(hProcess: Handle, uExitCode: u32) -> i32;
 		fn QueryFullProcessImageNameW(
 			hProcess: Handle,
@@ -843,6 +845,10 @@ mod platform {
 		const fn as_raw(&self) -> Handle {
 			self.raw as Handle
 		}
+
+		fn from_std(handle: StdOwnedHandle) -> Self {
+			Self { raw: handle.into_raw_handle() as isize }
+		}
 	}
 
 	impl Drop for OwnedHandle {
@@ -871,6 +877,17 @@ mod platform {
 			}
 			let pid_u32 = u32::try_from(pid).ok()?;
 			let handle = open_process(pid_u32, PROCESS_REFERENCE_ACCESS)?;
+			let creation_time = process_creation_time(handle.as_raw())?;
+			Some(Self { pid, handle, creation_time })
+		}
+
+		pub fn from_owned_handle(handle: StdOwnedHandle) -> Option<Self> {
+			let handle = Arc::new(OwnedHandle::from_std(handle));
+			// SAFETY: `handle` is a live process handle duplicated from the spawned
+			// child and remains owned by this process reference.
+			let pid = i32::try_from(unsafe { GetProcessId(handle.as_raw()) })
+				.ok()
+				.filter(|pid| *pid > 0)?;
 			let creation_time = process_creation_time(handle.as_raw())?;
 			Some(Self { pid, handle, creation_time })
 		}
@@ -1283,6 +1300,13 @@ impl Process {
 	/// Open a stable process reference from a PID.
 	pub fn from_pid(pid: i32) -> Option<Self> {
 		platform::Process::from_pid(pid).map(Self::from_inner)
+	}
+
+	/// Build a stable Windows process reference from a spawn-time process
+	/// handle.
+	#[cfg(target_os = "windows")]
+	pub fn from_owned_handle(handle: std::os::windows::io::OwnedHandle) -> Option<Self> {
+		platform::Process::from_owned_handle(handle).map(Self::from_inner)
 	}
 
 	/// Open stable process references whose executable path matches exactly.
