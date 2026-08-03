@@ -5,7 +5,7 @@
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Model } from "@oh-my-pi/pi-ai";
+import type { Model, ServiceTierByFamily } from "@oh-my-pi/pi-ai";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
@@ -21,7 +21,10 @@ import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
-function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent) => void }) => void): AgentSession {
+function createMockSession(
+	onPrompt: (params: { emit: (event: AgentSessionEvent) => void }) => void,
+	onSessionInit?: (init: { serviceTierOverride?: string; parentServiceTier?: ServiceTierByFamily }) => void,
+): AgentSession {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
 	const emit = (event: AgentSessionEvent) => {
 		for (const listener of listeners) listener(event);
@@ -31,7 +34,7 @@ function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent)
 		agent: { state: { systemPrompt: ["test"] } },
 		model: undefined,
 		extensionRunner: undefined,
-		sessionManager: { appendSessionInit: () => {} },
+		sessionManager: { appendSessionInit: onSessionInit ?? (() => {}) },
 		getActiveToolNames: () => ["read", "yield"],
 		getEnabledToolNames: () => ["read", "yield"],
 		setActiveToolsByName: async (_toolNames: string[]) => {},
@@ -54,7 +57,9 @@ function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent)
 	return session as unknown as AgentSession;
 }
 
-function yieldEmittingSession(): AgentSession {
+function yieldEmittingSession(
+	onSessionInit?: (init: { serviceTierOverride?: string; parentServiceTier?: ServiceTierByFamily }) => void,
+): AgentSession {
 	return createMockSession(({ emit }) => {
 		emit({
 			type: "tool_execution_end",
@@ -66,7 +71,7 @@ function yieldEmittingSession(): AgentSession {
 			},
 			isError: false,
 		});
-	});
+	}, onSessionInit);
 }
 
 function createSessionResult(session: AgentSession): CreateAgentSessionResult {
@@ -134,6 +139,89 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.rules).toBe(rules);
 		expect(forwarded?.preloadedExtensionPaths).toBe(preloadedExtensionPaths);
 		expect(forwarded?.preloadedCustomToolPaths).toBe(preloadedCustomToolPaths);
+	});
+
+	it("applies a selected agent tier override without changing unlisted agents", async () => {
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const settings = Settings.isolated({
+			"tier.subagent": "none",
+			"task.agentServiceTierOverrides": { selected: "priority" },
+		});
+
+		const selected = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "selected" },
+			settings,
+		});
+		const unlisted = await runSubprocess({
+			...baseOptions,
+			id: "unlisted-tier-child",
+			agent: { ...baseAgent, name: "unlisted" },
+			settings,
+		});
+
+		expect(selected.exitCode).toBe(0);
+		expect(unlisted.exitCode).toBe(0);
+		const selectedSettings = spy.mock.calls[0]?.[0]?.settings;
+		expect(selectedSettings?.get("tier.openai")).toBe("priority");
+		expect(selectedSettings?.get("tier.anthropic")).toBe("priority");
+		expect(selectedSettings?.get("tier.google")).toBe("priority");
+		const unlistedSettings = spy.mock.calls[1]?.[0]?.settings;
+		expect(unlistedSettings?.get("tier.openai")).toBe("none");
+		expect(unlistedSettings?.get("tier.anthropic")).toBe("none");
+		expect(unlistedSettings?.get("tier.google")).toBe("none");
+	});
+
+	it("lets an explicit none override disable a priority subagent fallback", async () => {
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const settings = Settings.isolated({
+			"tier.subagent": "priority",
+			"task.agentServiceTierOverrides": { standard: "none" },
+		});
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "standard" },
+			settings,
+		});
+
+		expect(result.exitCode).toBe(0);
+		const childSettings = spy.mock.calls[0]?.[0]?.settings;
+		expect(childSettings?.get("tier.openai")).toBe("none");
+		expect(childSettings?.get("tier.anthropic")).toBe("none");
+		expect(childSettings?.get("tier.google")).toBe("none");
+	});
+
+	it("records immediate parent tiers for an agent explicitly configured to inherit", async () => {
+		let persistedInit: { serviceTierOverride?: string; parentServiceTier?: ServiceTierByFamily } | undefined;
+		const session = yieldEmittingSession(init => {
+			persistedInit = init;
+		});
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const settings = Settings.isolated({
+			"tier.subagent": "none",
+			"task.agentServiceTierOverrides": { inheriting: "inherit" },
+		});
+		const parentServiceTier = { openai: "flex" as const, anthropic: "priority" as const };
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "inheriting" },
+			settings,
+			parentServiceTier,
+		});
+
+		expect(result.exitCode).toBe(0);
+		const childSettings = spy.mock.calls[0]?.[0]?.settings;
+		expect(childSettings?.get("tier.openai")).toBe("flex");
+		expect(childSettings?.get("tier.anthropic")).toBe("priority");
+		expect(childSettings?.get("tier.google")).toBe("none");
+		expect(persistedInit).toMatchObject({
+			serviceTierOverride: "inherit",
+			parentServiceTier,
+		});
 	});
 
 	it("forwards an exact credential resolver without replacing it", async () => {

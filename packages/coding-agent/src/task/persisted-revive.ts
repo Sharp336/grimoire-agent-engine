@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelRoleAlias } from "../config/model-roles";
+import { isServiceTierInheritSettingValue } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import { MCPManager } from "../mcp/manager";
 import type { PersistedSubagentReviverFactory } from "../registry/agent-lifecycle";
@@ -79,10 +80,6 @@ export function createPersistedSubagentReviverFactory(
 			taskDepth++;
 			parentId = registry.get(parentId)?.parentId;
 		}
-		const subagentSettings = createSubagentSettings(
-			ctx.settings,
-			init.readSummarize === false ? { "read.summarize.enabled": false } : undefined,
-		);
 		const persistedModelPattern =
 			init.modelRole && init.modelRole !== "default"
 				? [formatModelRoleAlias(init.modelRole), ...(init.resolvedModel ? [init.resolvedModel] : [])]
@@ -100,13 +97,23 @@ export function createPersistedSubagentReviverFactory(
 			const restrictToolNames = init.restrictToolNames === true;
 			const mcpManager = restrictToolNames ? undefined : MCPManager.instance();
 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
+			const serviceTierOverride = isServiceTierInheritSettingValue(init.serviceTierOverride)
+				? init.serviceTierOverride
+				: undefined;
 			const { session } = await createAgentSession({
 				cwd: ctx.session.sessionManager.getCwd(),
 				authStorage: ctx.authStorage,
 				modelRegistry: ctx.modelRegistry,
 				...(persistedModelPattern ? { modelPattern: persistedModelPattern } : {}),
 				modelPatternAuthFallback: init.resolvedModel,
-				settings: subagentSettings,
+				settings: createSubagentSettings(
+					ctx.settings,
+					init.readSummarize === false ? { "read.summarize.enabled": false } : undefined,
+					serviceTierOverride === "inherit"
+						? (init.parentServiceTier ?? ctx.session.serviceTierByFamily)
+						: undefined,
+					serviceTierOverride ?? ctx.settings.get("tier.subagent"),
+				),
 				sessionManager: reopened,
 				agentId: ref.id,
 				agentDisplayName: ref.displayName,

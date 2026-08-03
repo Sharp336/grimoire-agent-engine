@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import type { ServiceTierByFamily } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
@@ -62,7 +63,13 @@ function createRevivedSession(activeToolNames: string[][]): RevivedSessionHandle
 	return { session, observer: () => observer };
 }
 
-async function createPersistedSession(cwd: string, restrictToolNames?: boolean, modelRole?: string): Promise<string> {
+async function createPersistedSession(
+	cwd: string,
+	restrictToolNames?: boolean,
+	modelRole?: string,
+	serviceTierOverride?: string,
+	parentServiceTier?: ServiceTierByFamily,
+): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
 	const sessionFile = manager.getSessionFile();
 	if (!sessionFile) throw new Error("Expected a persisted session file");
@@ -73,6 +80,8 @@ async function createPersistedSession(cwd: string, restrictToolNames?: boolean, 
 		restrictToolNames,
 		modelRole,
 		resolvedModel: modelRole ? "anthropic/claude-sonnet-4-5" : undefined,
+		serviceTierOverride,
+		parentServiceTier,
 	});
 	manager.appendMessage({
 		role: "assistant",
@@ -95,7 +104,11 @@ async function createPersistedSession(cwd: string, restrictToolNames?: boolean, 
 	return sessionFile;
 }
 
-function createFactory(cwd: string, eventBus?: EventBus) {
+function createFactory(
+	cwd: string,
+	options: { settings?: Settings; parentServiceTier?: ServiceTierByFamily } = {},
+	eventBus?: EventBus,
+) {
 	const parentSession = {
 		sessionManager: {
 			getCwd: () => cwd,
@@ -104,12 +117,13 @@ function createFactory(cwd: string, eventBus?: EventBus) {
 		get sessionFile() {
 			return path.join(cwd, "parent.jsonl");
 		},
+		serviceTierByFamily: options.parentServiceTier ?? {},
 	} as unknown as AgentSession;
 	return createPersistedSubagentReviverFactory({
 		session: parentSession,
 		authStorage: {} as never,
 		modelRegistry: { authStorage: {} } as ModelRegistry,
-		settings: Settings.isolated(),
+		settings: options.settings ?? Settings.isolated(),
 		enableLsp: true,
 		eventBus,
 	});
@@ -245,7 +259,7 @@ describe("persisted subagent revival", () => {
 			sessionFile,
 			status: "parked",
 		});
-		const reviver = await createFactory(cwd, eventBus)(ref);
+		const reviver = await createFactory(cwd, {}, eventBus)(ref);
 		if (!reviver) throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
@@ -276,5 +290,53 @@ describe("persisted subagent revival", () => {
 		rpcRegistry.dispose();
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
+	});
+
+	it("restores a persisted per-agent priority override instead of the global fallback", async () => {
+		const cwd = makeTempDir("@pi-tier-revive-");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, "priority");
+		const settings = Settings.isolated({ "tier.subagent": "none" });
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd, { settings })(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.settings?.get("tier.openai")).toBe("priority");
+		expect(capturedOptions?.settings?.get("tier.anthropic")).toBe("priority");
+		expect(capturedOptions?.settings?.get("tier.google")).toBe("priority");
+	});
+
+	it("restores explicit inherit from the recorded immediate parent tiers", async () => {
+		const cwd = makeTempDir("@pi-tier-inherit-revive-");
+		const immediateParentServiceTier = { openai: "priority" as const, google: "flex" as const };
+		const sessionFile = await createPersistedSession(
+			cwd,
+			undefined,
+			undefined,
+			"inherit",
+			immediateParentServiceTier,
+		);
+		const settings = Settings.isolated({ "tier.subagent": "none" });
+		const topLevelServiceTier = { openai: "flex" as const };
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd, { settings, parentServiceTier: topLevelServiceTier })(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.settings?.get("tier.openai")).toBe("priority");
+		expect(capturedOptions?.settings?.get("tier.anthropic")).toBe("none");
+		expect(capturedOptions?.settings?.get("tier.google")).toBe("flex");
 	});
 });

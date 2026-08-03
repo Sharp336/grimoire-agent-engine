@@ -227,6 +227,10 @@ export interface SessionInitEntry extends SessionEntryBase {
 	spawns?: string;
 	/** The agent's `readSummarize` setting (`false` = read summarization disabled); absent uses the session default. */
 	readSummarize?: boolean;
+	/** Explicit per-agent service-tier override; absent means use the subagent fallback on revival. */
+	serviceTierOverride?: string;
+	/** Immediate parent's effective tiers recorded for faithful `inherit` revival. */
+	parentServiceTier?: ServiceTierByFamily;
 }
 
 /** Mode change entry - tracks agent mode transitions (e.g. plan mode). */
