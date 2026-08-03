@@ -1774,6 +1774,23 @@ export class TurnRecovery {
 	async #promptAgentWithIdleRetry(messages: AgentMessage[], options?: { toolChoice?: ToolChoice }): Promise<void> {
 		const deadline = Date.now() + 30_000;
 		for (;;) {
+			const fallback = this.#activeRetryFallback;
+			const probeLease = fallback?.probeLease;
+			if (fallback && probeLease) {
+				const currentModel = this.#host.model();
+				const currentSelector = currentModel
+					? formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel())
+					: probeLease.selector;
+				this.#abandonRetryFallbackProbe(probeLease);
+				const admission = this.#host.modelRegistry.admitFallbackProbe(currentSelector);
+				if (admission.status === "probe") {
+					fallback.probeLease = admission.lease;
+				} else if (admission.status === "busy") {
+					if (!(await this.#tryRetryModelFallback(currentSelector, { pinFallback: fallback.pinned }))) {
+						throw new Error(`Fallback probe already in progress for ${probeLease.selector}`);
+					}
+				}
+			}
 			try {
 				await this.#host.agent.prompt(messages, options);
 				return;

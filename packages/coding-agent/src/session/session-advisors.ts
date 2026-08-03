@@ -1161,6 +1161,15 @@ export class SessionAdvisors {
 		advisor.retryFallbackPendingSuccess = false;
 	}
 
+	#abandonAdvisorRetryFallbackProbe(advisor: ActiveAdvisor, lease: FallbackProbeLease): void {
+		this.#host.modelRegistry.abandonFallbackProbe(lease);
+		const fallback = advisor.retryFallback;
+		const activeLease = fallback?.probeLease;
+		if (fallback && activeLease?.selector === lease.selector && activeLease.generation === lease.generation) {
+			fallback.probeLease = undefined;
+		}
+	}
+
 	/**
 	 * Apply the advisor's configured provider-failure fallback chain after
 	 * same-provider credential rotation has no usable sibling.
@@ -1171,120 +1180,130 @@ export class SessionAdvisors {
 		failedMessages: readonly AgentMessage[],
 		signal: AbortSignal,
 	): Promise<boolean> {
-		if (advisor.retryFallback?.probeLease) {
-			this.#host.modelRegistry.abandonFallbackProbe(advisor.retryFallback.probeLease);
-			advisor.retryFallback.probeLease = undefined;
-		}
-		if (error instanceof AdvisorOutputQuarantinedError) return false;
+		const activeProbeLease = advisor.retryFallback?.probeLease;
+		let retainActiveProbeLease = false;
+		try {
+			if (error instanceof AdvisorOutputQuarantinedError) return false;
 
-		const failedMessage = failedMessages.findLast(
-			(message): message is AssistantMessage => message.role === "assistant",
-		);
-		if (failedMessage?.stopReason !== "error") {
-			// Stream setup can reject before any assistant turn is recorded (e.g.
-			// an HTTP 429 thrown from prompt()); classify the raw error so a
-			// structural usage limit still marks the exhausted credential.
-			const message = error instanceof Error ? error.message : String(error);
-			if (!AIError.isUsageLimit(error) && !isUsageLimitOutcome(extractHttpStatusFromError(error), message)) {
-				return false;
-			}
-			const currentModel = advisor.agent.state.model;
-			const outcome = await this.#host.modelRegistry.authStorage.markUsageLimitReached(
-				currentModel.provider,
-				advisor.providerSessionId,
-				{
-					retryAfterMs: extractRetryHint(undefined, message),
-					baseUrl: currentModel.baseUrl,
-					modelId: currentModel.id,
-					signal,
-				},
+			const failedMessage = failedMessages.findLast(
+				(message): message is AssistantMessage => message.role === "assistant",
 			);
-			return outcome.switched;
-		}
-		if (failedMessage.content.some(block => block.type === "toolCall")) return false;
-
-		const currentModel = advisor.agent.state.model;
-		const message = failedMessage.errorMessage ?? (error instanceof Error ? error.message : String(error));
-		const errorId = AIError.classifyMessage({
-			api: currentModel.api,
-			errorId: failedMessage.errorId,
-			errorMessage: message,
-			errorStatus: failedMessage.errorStatus,
-		});
-		if (AIError.is(errorId, AIError.Flag.Abort) || AIError.is(errorId, AIError.Flag.UserInterrupt)) return false;
-		if (AIError.isContextOverflow(failedMessage, currentModel.contextWindow ?? 0)) return false;
-
-		const currentSelector = formatRetryFallbackSelector(currentModel, advisor.thinkingLevel);
-
-		const retryAfterMs = extractRetryHint(undefined, message);
-		if (
-			AIError.is(errorId, AIError.Flag.UsageLimit) ||
-			isUsageLimitOutcome(extractHttpStatusFromError(error), message)
-		) {
-			const outcome = await this.#host.modelRegistry.authStorage.markUsageLimitReached(
-				currentModel.provider,
-				advisor.providerSessionId,
-				{
-					retryAfterMs,
-					baseUrl: currentModel.baseUrl,
-					modelId: currentModel.id,
-					signal,
-				},
-			);
-			if (outcome.switched) return true;
-		}
-
-		const retrySettings = this.#host.settings.getGroup("retry");
-		if (!retrySettings.enabled || !retrySettings.modelFallback) return false;
-		const role = advisor.retryFallback?.role ?? this.#host.resolveRetryFallbackRole(currentSelector, currentModel);
-		if (!role || this.#host.findRetryFallbackCandidates(role, currentSelector, currentModel).length === 0)
-			return false;
-
-		this.#host.noteRetryFallbackCooldown(currentSelector, retryAfterMs, message);
-		for (const selector of this.#host.findRetryFallbackCandidates(role, currentSelector, currentModel)) {
-			if (this.#host.isRetryFallbackSelectorSuppressed(selector)) continue;
-			const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
-			const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
-			if (!candidate || modelsAreEqual(candidate, currentModel)) continue;
-			const admission = this.#host.modelRegistry.admitFallbackProbe(selector.raw);
-			if (admission.status === "busy") continue;
-			const probeLease = admission.status === "probe" ? admission.lease : undefined;
-			let transferred = false;
-			try {
-				const apiKey = await this.#host.modelRegistry.getApiKey(candidate, advisor.providerSessionId, { signal });
-				if (!apiKey) continue;
-				signal.throwIfAborted();
-
-				const originalThinkingLevel = advisor.thinkingLevel;
-				const requestedThinkingLevel = selector.thinkingLevel ?? originalThinkingLevel;
-				const nextThinkingLevel = this.#setAdvisorModel(advisor, candidate, requestedThinkingLevel);
-				if (advisor.retryFallback) {
-					advisor.retryFallback.lastAppliedThinkingLevel = nextThinkingLevel;
-					advisor.retryFallback.probeLease = probeLease;
-				} else {
-					advisor.retryFallback = {
-						role,
-						originalSelector: currentSelector,
-						originalThinkingLevel,
-						lastAppliedThinkingLevel: nextThinkingLevel,
-						probeLease,
-					};
+			if (failedMessage?.stopReason !== "error") {
+				// Stream setup can reject before any assistant turn is recorded (e.g.
+				// an HTTP 429 thrown from prompt()); classify the raw error so a
+				// structural usage limit still marks the exhausted credential.
+				const message = error instanceof Error ? error.message : String(error);
+				if (!AIError.isUsageLimit(error) && !isUsageLimitOutcome(extractHttpStatusFromError(error), message)) {
+					return false;
 				}
-				advisor.retryFallbackPendingSuccess = true;
-				this.#host.settings.getStorage()?.recordModelUsage(formatModelStringWithRouting(candidate));
-				await this.#host.emitSessionEvent({
-					type: "retry_fallback_applied",
-					from: currentSelector,
-					to: selector.raw,
-					role,
-				});
-				transferred = true;
-				return true;
-			} finally {
-				if (probeLease && !transferred) this.#host.modelRegistry.abandonFallbackProbe(probeLease);
+				const currentModel = advisor.agent.state.model;
+				const outcome = await this.#host.modelRegistry.authStorage.markUsageLimitReached(
+					currentModel.provider,
+					advisor.providerSessionId,
+					{
+						retryAfterMs: extractRetryHint(undefined, message),
+						baseUrl: currentModel.baseUrl,
+						modelId: currentModel.id,
+						signal,
+					},
+				);
+				if (outcome.switched) retainActiveProbeLease = true;
+				return outcome.switched;
+			}
+			if (failedMessage.content.some(block => block.type === "toolCall")) return false;
+
+			const currentModel = advisor.agent.state.model;
+			const message = failedMessage.errorMessage ?? (error instanceof Error ? error.message : String(error));
+			const errorId = AIError.classifyMessage({
+				api: currentModel.api,
+				errorId: failedMessage.errorId,
+				errorMessage: message,
+				errorStatus: failedMessage.errorStatus,
+			});
+			if (AIError.is(errorId, AIError.Flag.Abort) || AIError.is(errorId, AIError.Flag.UserInterrupt)) return false;
+			if (AIError.isContextOverflow(failedMessage, currentModel.contextWindow ?? 0)) return false;
+
+			const currentSelector = formatRetryFallbackSelector(currentModel, advisor.thinkingLevel);
+
+			const retryAfterMs = extractRetryHint(undefined, message);
+			if (
+				AIError.is(errorId, AIError.Flag.UsageLimit) ||
+				isUsageLimitOutcome(extractHttpStatusFromError(error), message)
+			) {
+				const outcome = await this.#host.modelRegistry.authStorage.markUsageLimitReached(
+					currentModel.provider,
+					advisor.providerSessionId,
+					{
+						retryAfterMs,
+						baseUrl: currentModel.baseUrl,
+						modelId: currentModel.id,
+						signal,
+					},
+				);
+				if (outcome.switched) {
+					retainActiveProbeLease = true;
+					return true;
+				}
+			}
+
+			const retrySettings = this.#host.settings.getGroup("retry");
+			if (!retrySettings.enabled || !retrySettings.modelFallback) return false;
+			const role = advisor.retryFallback?.role ?? this.#host.resolveRetryFallbackRole(currentSelector, currentModel);
+			if (!role || this.#host.findRetryFallbackCandidates(role, currentSelector, currentModel).length === 0)
+				return false;
+
+			this.#host.noteRetryFallbackCooldown(currentSelector, retryAfterMs, message);
+			for (const selector of this.#host.findRetryFallbackCandidates(role, currentSelector, currentModel)) {
+				if (this.#host.isRetryFallbackSelectorSuppressed(selector)) continue;
+				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
+				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
+				if (!candidate || modelsAreEqual(candidate, currentModel)) continue;
+				const admission = this.#host.modelRegistry.admitFallbackProbe(selector.raw);
+				if (admission.status === "busy") continue;
+				const probeLease = admission.status === "probe" ? admission.lease : undefined;
+				let transferred = false;
+				try {
+					const apiKey = await this.#host.modelRegistry.getApiKey(candidate, advisor.providerSessionId, {
+						signal,
+					});
+					if (!apiKey) continue;
+					signal.throwIfAborted();
+
+					const originalThinkingLevel = advisor.thinkingLevel;
+					const requestedThinkingLevel = selector.thinkingLevel ?? originalThinkingLevel;
+					const nextThinkingLevel = this.#setAdvisorModel(advisor, candidate, requestedThinkingLevel);
+					if (advisor.retryFallback) {
+						advisor.retryFallback.lastAppliedThinkingLevel = nextThinkingLevel;
+						advisor.retryFallback.probeLease = probeLease;
+					} else {
+						advisor.retryFallback = {
+							role,
+							originalSelector: currentSelector,
+							originalThinkingLevel,
+							lastAppliedThinkingLevel: nextThinkingLevel,
+							probeLease,
+						};
+					}
+					advisor.retryFallbackPendingSuccess = true;
+					this.#host.settings.getStorage()?.recordModelUsage(formatModelStringWithRouting(candidate));
+					await this.#host.emitSessionEvent({
+						type: "retry_fallback_applied",
+						from: currentSelector,
+						to: selector.raw,
+						role,
+					});
+					transferred = true;
+					return true;
+				} finally {
+					if (probeLease && !transferred) this.#abandonAdvisorRetryFallbackProbe(advisor, probeLease);
+				}
+			}
+			return false;
+		} finally {
+			if (activeProbeLease && !retainActiveProbeLease) {
+				this.#abandonAdvisorRetryFallbackProbe(advisor, activeProbeLease);
 			}
 		}
-		return false;
 	}
 
 	async #promoteAdvisorContextModel(

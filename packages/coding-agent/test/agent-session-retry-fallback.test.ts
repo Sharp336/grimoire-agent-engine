@@ -760,6 +760,56 @@ describe("AgentSession retry fallback", () => {
 		]);
 	});
 
+	it("does not dispatch an expired startup probe after a sibling takes ownership", async () => {
+		const firstFallback = getBundledModel("openai", "gpt-4o-mini");
+		const secondFallback = getBundledModel("openai", "gpt-4o");
+		if (!firstFallback || !secondFallback) throw new Error("Expected bundled startup fallback models");
+		const firstSelector = `${firstFallback.provider}/${firstFallback.id}`;
+		const secondSelector = `${secondFallback.provider}/${secondFallback.id}`;
+		const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+		const initialAdmission = modelRegistry.admitFallbackProbe(firstSelector);
+		if (initialAdmission.status !== "probe") throw new Error("Expected startup session to own the first probe");
+
+		const requestedModels: string[] = [];
+		const mock = createMockModel({ responses: [{ content: ["Used the uncontended fallback"] }] });
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: firstFallback, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, context, options);
+			},
+		});
+		const primarySelector = "missing-provider/missing-model";
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.fallbackChains": { slow: [firstSelector, secondSelector] },
+		});
+		settings.setModelRole("slow", primarySelector);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			initialRetryFallback: {
+				role: "slow",
+				originalSelector: primarySelector,
+				originalThinkingLevel: undefined,
+				probeLease: initialAdmission.lease,
+			},
+		});
+
+		now.mockReturnValue(1_000 + 10 * 60 * 1000);
+		const siblingAdmission = modelRegistry.admitFallbackProbe(firstSelector);
+		if (siblingAdmission.status !== "probe") throw new Error("Expected sibling to replace the expired probe");
+
+		await session.prompt("Do not send the stale startup probe");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([secondSelector]);
+		expect(modelRegistry.admitFallbackProbe(firstSelector)).toEqual({ status: "busy" });
+	});
+
 	it("applies a model-keyed fallback chain to advisor quota failures", async () => {
 		const mainModel = getBundledModel("openai", "gpt-4o-mini");
 		const advisorPrimary = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -1021,6 +1071,69 @@ describe("AgentSession retry fallback", () => {
 		}
 
 		expect(releasedProbe).toBe(true);
+	});
+
+	it("keeps an advisor probe across same-selector credential rotation", async () => {
+		const mainModel = getBundledModel("openai", "gpt-4o-mini");
+		const advisorPrimary = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const advisorFallback = getBundledModel("openai", "gpt-4o");
+		if (!mainModel || !advisorPrimary || !advisorFallback) {
+			throw new Error("Expected bundled advisor credential-rotation models");
+		}
+		const mainMock = createMockModel({ responses: [{ content: ["Primary complete"] }] });
+		const advisorMock = createMockModel();
+		const primarySelector = `${advisorPrimary.provider}/${advisorPrimary.id}`;
+		const fallbackSelector = `${advisorFallback.provider}/${advisorFallback.id}`;
+		let fallbackAttempts = 0;
+		let siblingAdmissionStatus: string | undefined;
+		const fallbackRetried = Promise.withResolvers<void>();
+		const fallbackSucceeded = Promise.withResolvers<void>();
+		vi.spyOn(modelRegistry.authStorage, "markUsageLimitReached").mockResolvedValue({ switched: true });
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: mainModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mainMock.stream,
+		});
+		const settings = Settings.isolated({
+			"advisor.syncBacklog": "1",
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 0,
+			"retry.fallbackChains": { [primarySelector]: [fallbackSelector] },
+		});
+		settings.setModelRole("advisor", primarySelector);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorStreamFn: (requestedModel, context, options) => {
+				const selector = `${requestedModel.provider}/${requestedModel.id}`;
+				if (selector === primarySelector) {
+					advisorMock.push({ throw: "service unavailable: 503 overloaded" });
+				} else if (selector === fallbackSelector && fallbackAttempts++ === 0) {
+					advisorMock.push({ throw: "429 usage_limit_reached" });
+				} else if (selector === fallbackSelector) {
+					siblingAdmissionStatus = modelRegistry.admitFallbackProbe(fallbackSelector).status;
+					advisorMock.push({ content: ["Advisor recovered after credential rotation"] });
+					fallbackRetried.resolve();
+				} else {
+					throw new Error(`Unexpected advisor model requested: ${selector}`);
+				}
+				return advisorMock.stream(requestedModel, context, options);
+			},
+		});
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_succeeded") fallbackSucceeded.resolve();
+		});
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+
+		await session.prompt("Trigger advisor credential rotation");
+		await fallbackRetried.promise;
+		await fallbackSucceeded.promise;
+
+		expect(siblingAdmissionStatus).toBe("busy");
+		expect(modelRegistry.admitFallbackProbe(fallbackSelector)).toEqual({ status: "healthy" });
 	});
 
 	it("activates a model-keyed fallback chain without any role assignment", async () => {

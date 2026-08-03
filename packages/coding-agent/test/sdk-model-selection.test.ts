@@ -177,6 +177,10 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		authStoragesToClose.push(authStorage);
 		authStorage.setRuntimeApiKey(parentModel.provider, "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "fallback-models.yml"));
+		const settings = Settings.isolated({
+			"retry.fallbackChains": { smol: ["runtime-provider/runtime-model"] },
+		});
+		settings.setModelRole("smol", "missing-provider/missing-model");
 		const getApiKeySpy = vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async requested => {
 			if (requested.provider === "runtime-provider") return undefined;
 			if (requested.provider === parentModel.provider) return "test-key";
@@ -187,6 +191,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			agentDir: tempDir,
 			authStorage,
 			modelRegistry,
+			settings,
 			sessionManager: SessionManager.inMemory(),
 			disableExtensionDiscovery: true,
 			extensions: [providerExtension],
@@ -197,7 +202,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			enableMCP: false,
 			enableLsp: false,
 			skipPythonPreflight: true,
-			modelPattern: "runtime-provider/runtime-model",
+			modelPattern: "@smol",
 			modelPatternAuthFallback: `${parentModel.provider}/${parentModel.id}`,
 		});
 
@@ -205,6 +210,11 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			expect(session.model?.provider).toBe(parentModel.provider);
 			expect(session.model?.id).toBe(parentModel.id);
 			expect(modelFallbackMessage).toBeUndefined();
+			const unavailableAdmission = modelRegistry.admitFallbackProbe("runtime-provider/runtime-model");
+			expect(unavailableAdmission.status).toBe("probe");
+			if (unavailableAdmission.status === "probe") {
+				modelRegistry.abandonFallbackProbe(unavailableAdmission.lease);
+			}
 		} finally {
 			await session.dispose();
 			getApiKeySpy.mockRestore();

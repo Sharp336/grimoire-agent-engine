@@ -2391,17 +2391,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						settings.override("retry.fallbackChains", fallbackChains);
 					}
 				}
+				const selectedRetryFallback = authFallbackUsed ? undefined : retryFallback;
 				let probeLease: FallbackProbeLease | undefined;
-				if (retryFallback) {
+				if (selectedRetryFallback) {
 					const admission = modelRegistry.admitFallbackProbe(pattern);
 					if (admission.status === "busy") continue;
 					probeLease = admission.status === "probe" ? admission.lease : undefined;
 				}
 				model = selectedModel;
-				initialRetryFallback = retryFallback
+				initialRetryFallback = selectedRetryFallback
 					? {
-							...retryFallback,
-							pinned: usageFallbackTriggered || retryFallback.pinned,
+							...selectedRetryFallback,
+							pinned: usageFallbackTriggered || selectedRetryFallback.pinned,
 							probeLease,
 						}
 					: undefined;
