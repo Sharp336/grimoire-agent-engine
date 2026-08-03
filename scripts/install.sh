@@ -215,6 +215,38 @@ install_via_bun() {
     echo "Run 'omp' to get started!"
 }
 
+# Bun's musl binaries link libstdc++/libgcc dynamically, and stock musl
+# systems (Alpine, Void) don't ship them — the binary exits 127 with
+# relocation errors. Smoke the installed binary and install the runtime
+# libraries when missing; never report success for a binary that can't start.
+ensure_musl_runtime() {
+    if [ "$PLATFORM" != "linux-musl" ]; then
+        return 0
+    fi
+    if "${INSTALL_DIR}/omp" --version >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "omp requires libstdc++ and libgcc on musl systems."
+    if command -v apk >/dev/null 2>&1; then
+        echo "Installing libstdc++ and libgcc via apk..."
+        if [ "$(id -u)" = "0" ]; then
+            apk add --no-cache libstdc++ libgcc
+        elif command -v sudo >/dev/null 2>&1; then
+            sudo apk add --no-cache libstdc++ libgcc
+        else
+            echo "Could not install automatically: rerun as root or run 'apk add libstdc++ libgcc'."
+            exit 1
+        fi
+        if "${INSTALL_DIR}/omp" --version >/dev/null 2>&1; then
+            return 0
+        fi
+        echo "omp still fails to start after installing libstdc++ and libgcc."
+        exit 1
+    fi
+    echo "Install libstdc++ and libgcc with your package manager (e.g. 'apk add libstdc++ libgcc'), then run 'omp' again."
+    exit 1
+}
+
 # Install binary from GitHub releases
 install_binary() {
     # Detect platform
@@ -267,6 +299,7 @@ install_binary() {
     echo "Downloading ${BINARY}..."
     curl -fsSL --connect-timeout 10 --speed-limit 1024 --speed-time 30 "$BINARY_URL" -o "${INSTALL_DIR}/omp"
     chmod +x "${INSTALL_DIR}/omp"
+    ensure_musl_runtime
     echo ""
     echo "✓ Installed omp to ${INSTALL_DIR}/omp"
 

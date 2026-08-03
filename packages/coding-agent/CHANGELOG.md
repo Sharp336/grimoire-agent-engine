@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the binary installer reporting success on musl Linux (Alpine, Void) when the downloaded binary cannot start because `libstdc++`/`libgcc` are missing; it now smoke-runs the binary, installs the runtime libraries via `apk` when possible, and otherwise fails with the exact manual command instead of leaving a broken install ([#7545](https://github.com/can1357/oh-my-pi/issues/7545)).
+
 ## [17.2.6] - 2026-08-03
 
 ### Added

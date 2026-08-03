@@ -40,6 +40,8 @@ The most capable agent surface that ships. Continuously tuned by real-world use 
 curl -fsSL https://omp.sh/install | sh
 ```
 
+On Alpine and other musl systems the binary needs `libstdc++` and `libgcc`; the installer adds them via `apk` automatically (or run `apk add libstdc++ libgcc` yourself).
+
 **Homebrew**
 
 ```sh

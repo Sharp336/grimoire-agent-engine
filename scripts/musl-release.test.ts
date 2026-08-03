@@ -68,7 +68,7 @@ describe("musl release artifacts", () => {
 case "$*" in
   *api.github.com*) echo '{"tag_name":"v1.0.0"}' ;;
   *) while [ "$#" -gt 0 ]; do
-       [ "$1" = "-o" ] && { printf binary > "$2"; exit 0; }
+       [ "$1" = "-o" ] && { printf '#!/bin/sh\necho omp/1.0.0\n' > "$2"; exit 0; }
        shift
      done ;;
 esac
@@ -84,6 +84,82 @@ esac
 
 		expect(result.exitCode, result.stderr).toBe(0);
 		expect(result.stdout).toContain("Downloading omp-linux-musl-x64...");
-		expect(await Bun.file(path.join(installDir, "omp")).text()).toBe("binary");
+		expect(await Bun.file(path.join(installDir, "omp")).text()).toContain("echo omp/1.0.0");
+	});
+
+	test("installs libstdc++ and libgcc via apk when the musl binary fails to start", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-musl-install-"));
+		tempDirs.push(dir);
+		const binDir = path.join(dir, "bin");
+		const installDir = path.join(dir, "install");
+		await fs.mkdir(binDir);
+		await writeExecutable(binDir, "uname", '#!/bin/sh\n[ "$1" = "-s" ] && echo Linux || echo x86_64\n');
+		await writeExecutable(binDir, "ldd", "#!/bin/sh\necho 'musl libc (x86_64)'\n");
+		await writeExecutable(
+			binDir,
+			"curl",
+			`#!/bin/sh
+case "$*" in
+  *api.github.com*) echo '{"tag_name":"v1.0.0"}' ;;
+  *) while [ "$#" -gt 0 ]; do
+       [ "$1" = "-o" ] && { printf '#!/bin/sh\\nexit 127\\n' > "$2"; exit 0; }
+       shift
+     done ;;
+esac
+`,
+		);
+		// Non-root install shells out through sudo; exec the args directly.
+		await writeExecutable(binDir, "sudo", '#!/bin/sh\nexec "$@"\n');
+		// apk "installs the runtime libs" by swapping in a runnable binary.
+		await writeExecutable(
+			binDir,
+			"apk",
+			'#!/bin/sh\necho "$@" >> "$PI_INSTALL_DIR/apk.log"\nprintf \'#!/bin/sh\\necho omp/1.0.0\\n\' > "$PI_INSTALL_DIR/omp"\n',
+		);
+
+		const result = await run(["sh", "scripts/install.sh", "--binary"], {
+			...process.env,
+			PATH: `${binDir}:${process.env.PATH ?? ""}`,
+			HOME: dir,
+			PI_INSTALL_DIR: installDir,
+		});
+
+		expect(result.exitCode, result.stderr).toBe(0);
+		expect(result.stdout).toContain("Installing libstdc++ and libgcc via apk...");
+		expect(await Bun.file(path.join(installDir, "apk.log")).text()).toContain("add --no-cache libstdc++ libgcc");
+		expect(await Bun.file(path.join(installDir, "omp")).text()).toContain("echo omp/1.0.0");
+	});
+
+	test("fails with guidance when the musl binary cannot start and apk is unavailable", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-musl-install-"));
+		tempDirs.push(dir);
+		const binDir = path.join(dir, "bin");
+		const installDir = path.join(dir, "install");
+		await fs.mkdir(binDir);
+		await writeExecutable(binDir, "uname", '#!/bin/sh\n[ "$1" = "-s" ] && echo Linux || echo x86_64\n');
+		await writeExecutable(binDir, "ldd", "#!/bin/sh\necho 'musl libc (x86_64)'\n");
+		await writeExecutable(
+			binDir,
+			"curl",
+			`#!/bin/sh
+case "$*" in
+  *api.github.com*) echo '{"tag_name":"v1.0.0"}' ;;
+  *) while [ "$#" -gt 0 ]; do
+       [ "$1" = "-o" ] && { printf '#!/bin/sh\\nexit 127\\n' > "$2"; exit 0; }
+       shift
+     done ;;
+esac
+`,
+		);
+
+		const result = await run(["sh", "scripts/install.sh", "--binary"], {
+			...process.env,
+			PATH: `${binDir}:${process.env.PATH ?? ""}`,
+			HOME: dir,
+			PI_INSTALL_DIR: installDir,
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stdout).toContain("apk add libstdc++ libgcc");
 	});
 });
