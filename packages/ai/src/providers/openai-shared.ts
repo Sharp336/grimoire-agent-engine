@@ -329,9 +329,7 @@ export function applyOpenAIServiceTier(
 	model: Pick<Model, "provider" | "api" | "id">,
 ): void {
 	if (!shouldSendServiceTier(serviceTier, model)) return;
-	if (serviceTier === "flex" || serviceTier === "scale" || serviceTier === "priority") {
-		params.service_tier = serviceTier;
-	}
+	params.service_tier = serviceTier;
 }
 
 /**

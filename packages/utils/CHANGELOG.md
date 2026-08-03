@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `parseFlag()` (boolean-ish env value parsing backing `$flag()`), `getBrowserRelayDir()` (~/.omp/browser-relay, XDG data category), and `getGlobalDaemonRuntimeDir()` (profile-independent broker state) for the browser relay mode.
+
+### Changed
+
+- Added static command metadata support to the lightweight CLI runner so root help can render without importing command implementations.
+
 ## [17.2.4] - 2026-08-01
 
 ### Added

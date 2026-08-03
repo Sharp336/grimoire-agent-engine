@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Anthropic streams truncated mid-generation (connection closed with neither a `message_delta` stop_reason nor a `message_stop` frame) finalizing the partial message as a clean `stop`, which made the agent loop treat a truncated turn as complete and halt silently mid-sentence. Such streams raise the stream-envelope error again: transparently retried before replay-unsafe content streams; afterwards the turn surfaces as an error whose complete tool calls the agent loop still runs (`recoverTransientErrorToolTurn` now recognizes the envelope-error text after `retainCompletedToolCalls` drops half-streamed calls). Streams that delivered a `stop_reason` (or `message_stop`) keep degrading to best-effort content when the other terminal frame is missing.
+- Fixed Anthropic prompt caching writing a fresh entry for the entire system prefix whenever the project footer (cwd, date, workspace tree) changed. `applyPromptCaching` placed its only system breakpoint on the last block — normally the volatile footer — so starting omp in a new directory or crossing midnight re-wrote the whole cached system prefix instead of reusing it (issue [#7324](https://github.com/can1357/oh-my-pi/issues/7324)). System caching now marks up to the last three eligible blocks, covering both `[stable prefix, project footer]` and `[stable prefix, project footer, active-repo context]` layouts while skipping the OAuth cloak blocks (billing header + Claude Code identity). Message caching also skips the synthetic trailing `Continue.` pad and anchors on the preceding real assistant turn when the four-breakpoint budget is tight. This does not address open-weight chat templates that render tool schemas after the system block; keeping those cached requires relocating the per-request footer out of the system message.
+
 ## [17.2.4] - 2026-08-01
 
 ### Fixed

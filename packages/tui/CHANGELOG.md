@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Kitty/Ghostty shortcuts on non-Latin keyboard layouts by requesting base-layout key reporting from the terminal ([#7320](https://github.com/can1357/oh-my-pi/issues/7320)).
+
 ## [17.2.4] - 2026-08-01
 
 ### Fixed

@@ -1808,7 +1808,7 @@ describe("openai-codex streaming", () => {
 		expect(sawDone).toBe(true);
 	});
 
-	it("includes service_tier in SSE payloads when requested", async () => {
+	it("includes the default service_tier in SSE payloads when requested", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());
 
@@ -1855,10 +1855,10 @@ describe("openai-codex streaming", () => {
 		const result = await streamOpenAICodexResponses(model, context, {
 			fetch: fetchMock as FetchImpl,
 			apiKey: token,
-			serviceTier: "priority",
+			serviceTier: "default",
 		}).result();
 		expect(result.stopReason).toBe("stop");
-		expect(capturedBody?.service_tier).toBe("priority");
+		expect(capturedBody?.service_tier).toBe("default");
 		expect(result.usage.cost.input).toBeCloseTo(0.00001);
 		expect(result.usage.cost.output).toBeCloseTo(0.000012);
 		expect(result.usage.cost.total).toBeCloseTo(0.000022);

@@ -17,6 +17,7 @@ import type {
 	Model,
 	ModelUsageHealth,
 	ProviderSessionState,
+	ServiceTier,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
@@ -103,6 +104,7 @@ import {
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionState } from "./hindsight/state";
 import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
+import { setSharedLspEnabled } from "./lsp/client";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
 import {
 	deduplicateMCPToolsByName,
@@ -171,6 +173,7 @@ import {
 import { fingerprintAgentContent, resolveAgentSessionPolicy } from "./task/agent-policy";
 import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
+import { isScoutSpawnable } from "./task/spawn-policy";
 import type { AgentDefinition, StructuredSubagentSchemaMode } from "./task/types";
 import {
 	AUTO_THINKING,
@@ -392,6 +395,8 @@ export interface CreateAgentSessionOptions {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); retry-fallback recovery re-clamps to it. */
 	thinkingLevelCeiling?: Effort;
+	/** OpenAI service-tier override for this session. `null` omits `service_tier`. */
+	openAIServiceTier?: ServiceTier | null;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	/** Prewalk from the starting model to a fast/cheap target at the first edit/write once the todo list exists. */
@@ -3003,6 +3008,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				eagerTasksAlways,
 				taskBatch: settings.get("task.batch"),
 				taskMaxConcurrency: settings.get("task.maxConcurrency"),
+				scoutAvailable: isScoutSpawnable(
+					settings.get("task.disabledAgents") as string[] | undefined,
+					options.spawns ?? "*",
+				),
 				taskIrcEnabled: !restrictToolNames && isIrcEnabled(settings, options.taskDepth ?? 0),
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
 				secretsEnabled,
@@ -3280,13 +3289,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const openaiWebsocketSetting = settings.get("providers.openaiWebsockets") ?? "off";
 		const preferOpenAICodexWebsockets =
 			openaiWebsocketSetting === "on" ? true : openaiWebsocketSetting === "off" ? false : undefined;
-		const initialServiceTierByFamily = hasServiceTierEntry
+		const configuredServiceTierByFamily = hasServiceTierEntry
 			? (existingSession.serviceTier ?? {})
 			: buildServiceTierByFamily(
 					settings.get("tier.openai"),
 					settings.get("tier.anthropic"),
 					settings.get("tier.google"),
 				);
+		const initialServiceTierByFamily = { ...configuredServiceTierByFamily };
+		if (options.openAIServiceTier === null) {
+			delete initialServiceTierByFamily.openai;
+		} else if (options.openAIServiceTier !== undefined) {
+			initialServiceTierByFamily.openai = options.openAIServiceTier;
+		}
 
 		// One-shot launch-latency marker: fired the first time the loop dispatches
 		// a chat request to the provider transport. See onFirstChatDispatch.
@@ -3422,6 +3437,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, String(options.thinkingLevel));
 				}
 			}
+			if (options.openAIServiceTier !== undefined) {
+				sessionManager.appendServiceTierChange(
+					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
+				);
+			}
 		} else {
 			// Save initial model, thinking level, service tier, and agent persona for new sessions
 			// so they can be restored on resume.
@@ -3433,8 +3453,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// classification persists its concrete effort once a real user turn runs.
 				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel);
 			}
-			if (Object.keys(initialServiceTierByFamily).length > 0) {
-				sessionManager.appendServiceTierChange(initialServiceTierByFamily);
+			if (options.openAIServiceTier !== undefined || Object.keys(initialServiceTierByFamily).length > 0) {
+				sessionManager.appendServiceTierChange(
+					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
+				);
 			}
 			if (options.agentPersona) {
 				sessionManager.appendAgentChange(
@@ -3519,6 +3541,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			initialAdvisorCosts,
 			settings,
 			autoApprove: options.autoApprove,
+			scoutAllowedBySpawnPolicy: isScoutSpawnable(undefined, options.spawns ?? "*"),
 			evalKernelOwnerId,
 			// Defined only for top-level sessions (creation is gated above).
 			// AgentSession uses this to decide whether it may dispose the global
@@ -3740,6 +3763,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				})();
 			}
 		}
+
+		// Broker-shared language servers: one server per project, multiplexed
+		// across omp instances by the LSP mux daemon. Session-level because the
+		// flag lives in module state consulted on every client cold-start.
+		setSharedLspEnabled(enableLsp && settings.get("lsp.shared"));
 
 		// Start LSP warmup in the background so startup does not block on language server initialization.
 		// With `lsp.lazy` (the default) the warmup is skipped: recognized servers are still discovered and

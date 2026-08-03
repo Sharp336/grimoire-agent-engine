@@ -11,12 +11,9 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import { acquireTab, releaseTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { Browser, Page, Target } from "puppeteer-core";
-import { isChromiumAvailable } from "./chromium-probe";
+import { chromiumAvailable } from "./chromium-probe";
 
-// Same-module top-level await: guaranteed to resolve before the skipIf
-// registrations below run (a cross-module awaited export would be read from
-// its TDZ here and crash bun).
-const CHROMIUM_AVAILABLE = await isChromiumAvailable();
+const CHROMIUM_AVAILABLE = await chromiumAvailable();
 
 interface FakePageOptions {
 	url: string;

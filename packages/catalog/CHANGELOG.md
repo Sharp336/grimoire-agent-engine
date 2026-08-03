@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `alibaba-token-plan` dynamic discovery dropping newly advertised chat models by replacing the stale static allowlist with dedicated non-chat media-model filters ([#7391](https://github.com/can1357/oh-my-pi/issues/7391)).
+- Fixed DeepSeek reasoning models on the OpenCode Zen/Go gateways (e.g. `opencode-zen/deepseek-v4-flash-free`) failing with `400 Thinking mode does not support this tool_choice` when a specific tool was forced. Dropping `reasoning_effort` does not disable the gateway's default thinking mode, so the OpenAI-compat descriptor now marks forced `tool_choice` unsupported for DeepSeek reasoning models, downgrading the selector to `auto` while keeping the tool advertised ([#7315](https://github.com/can1357/oh-my-pi/issues/7315)).
+
 ## [17.2.4] - 2026-08-01
 
 ### Added
