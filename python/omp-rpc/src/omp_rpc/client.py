@@ -674,6 +674,9 @@ class RpcClient:
         self._operation_errors: dict[str, RpcError] = {}
         self._active_operation_ids: set[str] = set()
         self._agent_streaming = False
+        self._continuation_request_count = 0
+        self._continuation_generation = 0
+        self._confirmed_continuation_generation = 0
         self._ui_requests: queue.Queue[ExtensionUiRequest] = queue.Queue()
         self._stderr_chunks = _BoundedHistory[str](self._max_stderr_chunks)
         self._closed_error: BaseException | None = None
@@ -747,6 +750,9 @@ class RpcClient:
         self._operation_results.clear()
         self._active_operation_ids.clear()
         self._agent_streaming = False
+        self._continuation_request_count = 0
+        self._continuation_generation = 0
+        self._confirmed_continuation_generation = 0
         self._scheduled_agent_runs = 0
         self._completed_agent_runs = 0
         self._last_schedule_async_error_index = 0
@@ -1237,7 +1243,14 @@ class RpcClient:
         return parse_provider_auth_state(state)
 
     def get_state(self) -> SessionState:
-        payload = self._request("get_state")
+        return self._get_state()
+
+    def _get_state(self, timeout: float | None = None) -> SessionState:
+        payload = (
+            self._request("get_state")
+            if timeout is None
+            else self._request_with_timeout("get_state", timeout)
+        )
         return parse_session_state(payload)
 
     def get_advisor_state(self) -> AdvisorState:
@@ -1764,24 +1777,40 @@ class RpcClient:
     def steer(
         self, message: str, *, images: Sequence[ImageContent] | None = None
     ) -> None:
-        self._request(
-            "steer",
-            message=message,
-            images=list(images) if images is not None else None,
-        )
         with self._event_condition:
-            self._agent_streaming = True
+            self._continuation_request_count += 1
+        try:
+            self._request(
+                "steer",
+                message=message,
+                images=list(images) if images is not None else None,
+            )
+            with self._event_condition:
+                self._continuation_generation += 1
+                self._agent_streaming = True
+        finally:
+            with self._event_condition:
+                self._continuation_request_count -= 1
+                self._event_condition.notify_all()
 
     def follow_up(
         self, message: str, *, images: Sequence[ImageContent] | None = None
     ) -> None:
-        self._request(
-            "follow_up",
-            message=message,
-            images=list(images) if images is not None else None,
-        )
         with self._event_condition:
-            self._agent_streaming = True
+            self._continuation_request_count += 1
+        try:
+            self._request(
+                "follow_up",
+                message=message,
+                images=list(images) if images is not None else None,
+            )
+            with self._event_condition:
+                self._continuation_generation += 1
+                self._agent_streaming = True
+        finally:
+            with self._event_condition:
+                self._continuation_request_count -= 1
+                self._event_condition.notify_all()
 
     def abort(self) -> None:
         self._request("abort")
@@ -1966,10 +1995,58 @@ class RpcClient:
         operation = "wait_for_idle"
         self._prompt_lifecycle.acquire(operation)
         try:
-            if self._is_agent_idle():
-                self._check_async_errors()
-                return
-            self._wait_until_idle(timeout=timeout)
+            deadline = time.monotonic() + (timeout if timeout is not None else 60.0)
+            while True:
+                with self._event_condition:
+                    continuation_pending = (
+                        self._continuation_request_count > 0
+                        or self._continuation_generation
+                        != self._confirmed_continuation_generation
+                    )
+                    request_pending = self._continuation_request_count > 0
+                    generation = self._continuation_generation
+                if not continuation_pending:
+                    if self._is_agent_idle():
+                        self._check_async_errors()
+                        return
+                    self._wait_until_idle(timeout=max(0.0, deadline - time.monotonic()))
+                    return
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RpcTimeoutError(
+                        "Timed out waiting for RPC client to become idle. "
+                        f"Stderr: {self.stderr}"
+                    )
+                if request_pending:
+                    time.sleep(min(0.01, remaining))
+                    continue
+
+                try:
+                    state = self._get_state(timeout=remaining)
+                except RpcTimeoutError:
+                    if time.monotonic() >= deadline:
+                        raise RpcTimeoutError(
+                            "Timed out waiting for RPC client to become idle. "
+                            f"Stderr: {self.stderr}"
+                        ) from None
+                    raise
+                with self._event_condition:
+                    authoritative_idle = (
+                        self._continuation_request_count == 0
+                        and self._continuation_generation == generation
+                        and self._scheduled_agent_runs == self._completed_agent_runs
+                        and not self._active_operation_ids
+                        and state.activity_phase == "idle"
+                        and state.queued_message_count == 0
+                    )
+                    if authoritative_idle:
+                        self._confirmed_continuation_generation = generation
+                        self._agent_streaming = False
+                if authoritative_idle:
+                    self._check_async_errors()
+                    return
+                time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
         finally:
             self._prompt_lifecycle.release(operation)
 
@@ -2230,6 +2307,16 @@ class RpcClient:
         self._check_async_errors()
 
     def _request(self, command_type: str, **payload: JsonValue) -> JsonObject:
+        return self._request_with_timeout(
+            command_type, self._request_timeout, **payload
+        )
+
+    def _request_with_timeout(
+        self,
+        command_type: str,
+        response_timeout: float,
+        **payload: JsonValue,
+    ) -> JsonObject:
         process = self._require_process()
         request_id = self._next_request_id()
         envelope: JsonObject = {"id": request_id, "type": command_type}
@@ -2250,8 +2337,9 @@ class RpcClient:
                 self._pending.pop(request_id, None)
             raise
 
+        response_timeout = min(self._request_timeout, response_timeout)
         try:
-            response = response_queue.get(timeout=self._request_timeout)
+            response = response_queue.get(timeout=response_timeout)
         except queue.Empty as exc:
             with self._state_lock:
                 self._pending.pop(request_id, None)

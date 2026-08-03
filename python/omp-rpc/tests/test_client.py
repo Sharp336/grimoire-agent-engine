@@ -12,6 +12,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from typing import cast
 
 from omp_rpc import (
     AgentEndEvent,
@@ -24,7 +25,7 @@ from omp_rpc import (
     host_tool,
 )
 from omp_rpc.client import _RpcFrameDecoder
-from omp_rpc.protocol import JsonObject, JsonValue
+from omp_rpc.protocol import JsonObject, JsonValue, SessionState
 
 CAPABILITY_MANIFEST_JSON = (
     Path(__file__).parent / "fixtures" / "rpc-capability-manifest.json"
@@ -778,6 +779,12 @@ FAKE_SERVER = textwrap.dedent(
             respond(request_id, command_type, success=False, error=f"unsupported: {command_type}")
     """
 ).replace("__CAPABILITY_MANIFEST_JSON__", repr(CAPABILITY_MANIFEST_JSON))
+
+STALLED_STATE_SERVER = FAKE_SERVER.replace(
+    'elif command_type == "get_state":\n'
+    '        respond(request_id, "get_state", current_state())',
+    'elif command_type == "get_state":\n        continue',
+)
 
 
 V2_MESSAGES_SERVER = textwrap.dedent(
@@ -1567,6 +1574,52 @@ class RpcClientTests(unittest.TestCase):
         client._agent_streaming = True
         with self.assertRaises(RpcTimeoutError):
             client.wait_for_idle(timeout=0)
+
+    def test_wait_for_idle_reconciles_accepted_follow_up_after_stale_agent_end(
+        self,
+    ) -> None:
+        class ContinuationClient(RpcClient):
+            state_reads = 0
+
+            def _request(self, _command_type: str, **_payload: JsonValue) -> JsonObject:
+                return {}
+
+            def _get_state(self, timeout: float | None = None) -> SessionState:
+                del timeout
+                self.state_reads += 1
+                activity_phase = "maintenance" if self.state_reads == 1 else "idle"
+                queued_message_count = 1 if self.state_reads == 1 else 0
+                return cast(
+                    SessionState,
+                    type(
+                        "State",
+                        (),
+                        {
+                            "activity_phase": activity_phase,
+                            "queued_message_count": queued_message_count,
+                        },
+                    )(),
+                )
+
+        client = ContinuationClient()
+        client.follow_up("queued")
+        client._agent_streaming = False
+
+        client.wait_for_idle(timeout=0.5)
+
+        self.assertEqual(client.state_reads, 2)
+
+    def test_wait_for_idle_bounds_stalled_state_read_by_its_timeout(self) -> None:
+        with self.make_client(STALLED_STATE_SERVER) as client:
+            client.follow_up("queued")
+            started_at = time.monotonic()
+
+            with self.assertRaisesRegex(
+                RpcTimeoutError, "Timed out waiting for RPC client to become idle"
+            ):
+                client.wait_for_idle(timeout=0.05)
+
+            self.assertLess(time.monotonic() - started_at, 1.0)
 
     def test_prompt_operations_settle_without_guessing_from_agent_end(self) -> None:
         terminal_types: list[str] = []

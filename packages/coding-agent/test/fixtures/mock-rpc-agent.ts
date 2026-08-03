@@ -134,6 +134,7 @@ let captureText = "";
 let operationSequence = 0;
 const activeOperations = new Map<string, { requestId: string | undefined; timer?: Timer }>();
 const recentOperations = new Map<string, Record<string, unknown>>();
+let continuationStateReads = 0;
 
 // Bun's `console` is an AsyncIterable over stdin lines.
 for await (const raw of console) {
@@ -246,6 +247,30 @@ for await (const raw of console) {
 						messages: [
 							{ role: "assistant", content: [{ type: "text", text: "streaming snapshot" }], timestamp: 3 },
 						],
+					},
+				});
+				continue;
+			}
+			if (Bun.env.MOCK_RPC_CONTINUATION_RACE === "1" && frame.type === "follow_up") {
+				writeFrame({ id, type: "response", command: frame.type, success: true, data: {} });
+				setTimeout(() => {
+					writeFrame({ type: "agent_end", messages: [], isTerminal: true });
+				}, 5);
+				continue;
+			}
+			if (Bun.env.MOCK_RPC_CONTINUATION_RACE === "1" && frame.type === "get_state") {
+				if (Bun.env.MOCK_RPC_STALL_CONTINUATION_STATE === "1") continue;
+				continuationStateReads++;
+				const idle = continuationStateReads > 1;
+				writeFrame({
+					id,
+					type: "response",
+					command: frame.type,
+					success: true,
+					data: {
+						...legacyState,
+						activityPhase: idle ? "idle" : "maintenance",
+						queuedMessageCount: idle ? 0 : 1,
 					},
 				});
 				continue;

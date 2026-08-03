@@ -638,6 +638,9 @@ export class RpcClient {
 	#activeOperationIds = new Set<string>();
 	#settledOperationIds = new Set<string>();
 	#agentStreaming = false;
+	#continuationRequestCount = 0;
+	#continuationGeneration = 0;
+	#confirmedContinuationGeneration = 0;
 	#pendingPromptRequestIds = new Set<string>();
 	#legacyPromptRequestIds = new Set<string>();
 	#commandOutputListeners = new Set<RpcCommandOutputListener>();
@@ -684,6 +687,9 @@ export class RpcClient {
 		this.#activeOperationIds.clear();
 		this.#settledOperationIds.clear();
 		this.#agentStreaming = false;
+		this.#continuationRequestCount = 0;
+		this.#continuationGeneration = 0;
+		this.#confirmedContinuationGeneration = 0;
 		this.#pendingPromptRequestIds.clear();
 		this.#legacyPromptRequestIds.clear();
 
@@ -859,6 +865,9 @@ export class RpcClient {
 		this.#pendingPromptRequestIds.clear();
 		this.#legacyPromptRequestIds.clear();
 		this.#agentStreaming = false;
+		this.#continuationRequestCount = 0;
+		this.#continuationGeneration = 0;
+		this.#confirmedContinuationGeneration = 0;
 		for (const pendingCall of this.#pendingHostToolCalls.values()) {
 			pendingCall.controller.abort(error);
 		}
@@ -1180,16 +1189,28 @@ export class RpcClient {
 	 * Queue a steering message to interrupt the agent mid-run.
 	 */
 	async steer(message: string, images?: ImageContent[]): Promise<void> {
-		await this.#send({ type: "steer", message, images });
-		this.#agentStreaming = true;
+		this.#continuationRequestCount++;
+		try {
+			await this.#send({ type: "steer", message, images });
+			this.#continuationGeneration++;
+			this.#agentStreaming = true;
+		} finally {
+			this.#continuationRequestCount--;
+		}
 	}
 
 	/**
 	 * Queue a follow-up message to be processed after the agent finishes.
 	 */
 	async followUp(message: string, images?: ImageContent[]): Promise<void> {
-		await this.#send({ type: "follow_up", message, images });
-		this.#agentStreaming = true;
+		this.#continuationRequestCount++;
+		try {
+			await this.#send({ type: "follow_up", message, images });
+			this.#continuationGeneration++;
+			this.#agentStreaming = true;
+		} finally {
+			this.#continuationRequestCount--;
+		}
 	}
 
 	/**
@@ -1307,8 +1328,8 @@ export class RpcClient {
 	/**
 	 * Get current session state.
 	 */
-	async getState(): Promise<RpcSessionState> {
-		const response = await this.#send({ type: "get_state" });
+	async getState(timeoutMs = 30_000): Promise<RpcSessionState> {
+		const response = await this.#send({ type: "get_state" }, timeoutMs);
 		const state = this.#getData<RpcSessionState>(response);
 		const rawActivityPhase: unknown = state.activityPhase;
 		const activityPhase: RpcSessionState["activityPhase"] =
@@ -1848,9 +1869,51 @@ export class RpcClient {
 	 * Wait for the client to become idle.
 	 * Uses correlated operation terminals when supported, otherwise agent_end.
 	 */
-	waitForIdle(timeout = 60000): Promise<void> {
+	async waitForIdle(timeout = 60000): Promise<void> {
+		const deadline = Date.now() + timeout;
+		while (
+			this.#continuationRequestCount > 0 ||
+			this.#continuationGeneration !== this.#confirmedContinuationGeneration
+		) {
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) {
+				throw new Error(`Timeout waiting for agent to become idle. Stderr: ${this.#process?.peekStderr() ?? ""}`);
+			}
+			if (this.#continuationRequestCount > 0) {
+				await Bun.sleep(Math.min(10, remaining));
+				continue;
+			}
+
+			const generation = this.#continuationGeneration;
+			const stateTimeout = deadline - Date.now();
+			let state: RpcSessionState;
+			try {
+				state = await this.getState(stateTimeout);
+			} catch (error) {
+				if (Date.now() >= deadline) {
+					throw new Error(
+						`Timeout waiting for agent to become idle. Stderr: ${this.#process?.peekStderr() ?? ""}`,
+					);
+				}
+				throw error;
+			}
+			if (
+				this.#continuationRequestCount === 0 &&
+				this.#continuationGeneration === generation &&
+				this.#activeOperationIds.size === 0 &&
+				this.#pendingPromptRequestIds.size === 0 &&
+				state.activityPhase === "idle" &&
+				state.queuedMessageCount === 0
+			) {
+				this.#confirmedContinuationGeneration = generation;
+				this.#agentStreaming = false;
+				return;
+			}
+			await Bun.sleep(Math.min(10, Math.max(1, deadline - Date.now())));
+		}
+
 		if (this.#activeOperationIds.size === 0 && this.#pendingPromptRequestIds.size === 0 && !this.#agentStreaming)
-			return Promise.resolve();
+			return;
 
 		const { promise, resolve, reject } = Promise.withResolvers<void>();
 		let settled = false;
@@ -1873,7 +1936,7 @@ export class RpcClient {
 			if (isTerminalAgentEnd(event)) this.#agentStreaming = false;
 			finishIfIdle();
 		});
-		const timeoutId = this.#startTimeout(timeout, () => {
+		const timeoutId = this.#startTimeout(Math.max(0, deadline - Date.now()), () => {
 			if (settled) return;
 			settled = true;
 			unsubscribeOperation();
@@ -1881,7 +1944,7 @@ export class RpcClient {
 			reject(new Error(`Timeout waiting for agent to become idle. Stderr: ${this.#process?.peekStderr() ?? ""}`));
 		});
 		finishIfIdle();
-		return promise;
+		await promise;
 	}
 
 	/**

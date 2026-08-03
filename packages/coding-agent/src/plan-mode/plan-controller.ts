@@ -13,11 +13,12 @@ import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compa
 	type: "text",
 };
 import type { AgentSession, ResolvedRoleModel } from "../session/agent-session";
+import type { SessionContext } from "../session/session-context";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import { humanizePlanTitle, type PlanApprovalDetails } from "./approved-plan";
 import { resolvePlanModelTransition } from "./model-transition";
 import { listPlanFiles, readPlanFile } from "./plan-files";
-import type { PlanWorkflow, SessionPlanMode } from "./state";
+import type { PlanModeState, PlanWorkflow, SessionPlanMode } from "./state";
 
 export interface PendingPlanApproval {
 	approvalId: string;
@@ -86,6 +87,7 @@ export class PlanModeController {
 	#deferredModelState: ModelState | undefined;
 	#deferredPlanModel = false;
 	#hasEntered = false;
+	#pausedState: PlanModeState | undefined;
 	#pendingApproval: PendingPlanApproval | undefined;
 	readonly #stateListeners = new Set<StateListener>();
 	readonly #approvalListeners = new Set<ApprovalListener>();
@@ -96,9 +98,8 @@ export class PlanModeController {
 	}
 
 	get mode(): SessionPlanMode {
-		const state = this.#session.getPlanModeState();
-		if (state?.enabled) return "plan";
-		return state?.paused ? "plan_paused" : "none";
+		if (this.#session.getPlanModeState()?.enabled) return "plan";
+		return this.#pausedState ? "plan_paused" : "none";
 	}
 
 	get active(): boolean {
@@ -136,7 +137,7 @@ export class PlanModeController {
 		includeContent?: boolean;
 		includeAvailableFiles?: boolean;
 	}): Promise<PlanStateProjection> {
-		const state = this.#session.getPlanModeState();
+		const state = this.#session.getPlanModeState() ?? this.#pausedState;
 		const mode = this.mode;
 		if (!state || mode === "none") return { mode: "none" };
 		const content = state.planFilePath ? await this.#readPlan(state.planFilePath) : null;
@@ -176,6 +177,12 @@ export class PlanModeController {
 			? [...new Set([...previousTools, "write"])]
 			: previousTools;
 		const previousState = this.#session.getPlanModeState();
+		const previousPausedState = this.#pausedState;
+		const previousHasEntered = this.#hasEntered;
+		const previousMountedTools = this.#session.getMountedXdevToolNames();
+		const previousModel = this.#session.model
+			? { model: this.#session.model, thinkingLevel: this.#session.configuredThinkingLevel() }
+			: undefined;
 
 		this.#previousTools = previousTools;
 		try {
@@ -191,13 +198,43 @@ export class PlanModeController {
 			if (this.#session.isStreaming) await this.#session.sendPlanModeContext({ deliverAs: "steer" });
 			this.#hasEntered = true;
 			if (!options?.preserveRestoredModel) await this.#applyPlanModeModel();
+			this.#pausedState = undefined;
 			if (options?.persist !== false) this.#persist("plan", planFilePath, workflow);
 			await this.#emitState();
 		} catch (error) {
 			this.#session.setPlanProposalHandler(null);
 			this.#session.setPlanModeState(previousState);
+			if (
+				previousModel &&
+				(!modelsAreEqual(this.#session.model, previousModel.model) ||
+					this.#session.configuredThinkingLevel() !== previousModel.thinkingLevel)
+			) {
+				try {
+					await this.#restoreModel(previousModel);
+				} catch (rollbackError) {
+					logger.warn("Failed to restore model after plan entry failure", { error: String(rollbackError) });
+				}
+			}
+			const enabledTools = this.#session.getEnabledToolNames();
+			const mountedTools = this.#session.getMountedXdevToolNames();
+			if (
+				enabledTools.length !== previousTools.length ||
+				enabledTools.some((name, index) => name !== previousTools[index]) ||
+				mountedTools.length !== previousMountedTools.length ||
+				mountedTools.some((name, index) => name !== previousMountedTools[index])
+			) {
+				try {
+					await this.#session.setActiveToolPresentation(previousTools, previousMountedTools);
+				} catch (rollbackError) {
+					logger.warn("Failed to restore tools after plan entry failure", { error: String(rollbackError) });
+				}
+			}
 			this.#previousTools = undefined;
-			await this.#session.setActiveToolsByName(previousTools);
+			this.#previousModelState = undefined;
+			this.#deferredModelState = undefined;
+			this.#deferredPlanModel = false;
+			this.#pausedState = previousPausedState;
+			this.#hasEntered = previousHasEntered;
 			throw error;
 		}
 	}
@@ -207,7 +244,7 @@ export class PlanModeController {
 		const state = this.#session.getPlanModeState();
 		if (!state) return;
 		await this.#exit({ paused: true });
-		this.#session.setPlanModeState({ ...state, enabled: false, paused: true });
+		this.#pausedState = { ...state, enabled: false, paused: true };
 		this.#persist("plan_paused", state.planFilePath, state.workflow ?? "parallel");
 		await this.#emitState();
 	}
@@ -227,14 +264,16 @@ export class PlanModeController {
 		}
 		this.#session.setPlanProposalHandler(null);
 		this.#session.setPlanModeState(undefined);
+		this.#pausedState = undefined;
 		this.#pendingApproval = undefined;
 		this.#hasEntered = false;
 		if (!wasActive) this.#session.sessionManager.appendModeChange("none");
 		await this.#emitState();
 	}
 
-	async reconcileFromSession(): Promise<void> {
-		const context = this.#session.sessionManager.buildSessionContext();
+	async reconcileFromSession(
+		context: SessionContext = this.#session.sessionManager.buildSessionContext(),
+	): Promise<void> {
 		await this.clearTransientState({ restoreTools: false });
 		if (!this.#session.settings.get("plan.enabled")) {
 			if (context.mode === "plan" || context.mode === "plan_paused") {
@@ -256,13 +295,13 @@ export class PlanModeController {
 		if (context.mode === "plan_paused") {
 			const planFilePath =
 				typeof context.modeData?.planFilePath === "string" ? context.modeData.planFilePath : "local://PLAN.md";
-			this.#session.setPlanModeState({
+			this.#pausedState = {
 				enabled: false,
 				paused: true,
 				planFilePath,
 				workflow: context.modeData?.workflow === "iterative" ? "iterative" : "parallel",
 				reentry: true,
-			});
+			};
 			this.#hasEntered = true;
 		}
 		await this.#emitState();
@@ -282,6 +321,7 @@ export class PlanModeController {
 		const shouldRestore = options?.restoreTools !== false && this.active && this.#previousTools !== undefined;
 		this.#session.setPlanProposalHandler(null);
 		this.#session.setPlanModeState(undefined);
+		this.#pausedState = undefined;
 
 		try {
 			if (shouldRestore && this.#previousTools) await this.#session.setActiveToolsByName(this.#previousTools);
@@ -485,17 +525,30 @@ export class PlanModeController {
 			if (this.#previousModelState) this.#clearDeferredPlanModel();
 		} catch (error) {
 			this.#session.setPlanModeState(state);
-			if (planModel) {
+			if (
+				planModel &&
+				(!modelsAreEqual(this.#session.model, planModel.model) ||
+					this.#session.configuredThinkingLevel() !== planModel.thinkingLevel)
+			) {
 				try {
 					await this.#restoreModel(planModel);
 				} catch (rollbackError) {
 					logger.warn("Failed to restore plan model after plan exit failure", { error: String(rollbackError) });
 				}
 			}
-			try {
-				await this.#session.setActiveToolPresentation(planTools, mountedTools);
-			} catch (rollbackError) {
-				logger.warn("Failed to restore plan tools after plan exit failure", { error: String(rollbackError) });
+			const enabledTools = this.#session.getEnabledToolNames();
+			const currentMountedTools = this.#session.getMountedXdevToolNames();
+			if (
+				enabledTools.length !== planTools.length ||
+				enabledTools.some((name, index) => name !== planTools[index]) ||
+				currentMountedTools.length !== mountedTools.length ||
+				currentMountedTools.some((name, index) => name !== mountedTools[index])
+			) {
+				try {
+					await this.#session.setActiveToolPresentation(planTools, mountedTools);
+				} catch (rollbackError) {
+					logger.warn("Failed to restore plan tools after plan exit failure", { error: String(rollbackError) });
+				}
 			}
 			throw error;
 		}

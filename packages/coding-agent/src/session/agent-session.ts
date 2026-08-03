@@ -608,6 +608,9 @@ export class AgentSession {
 	readonly #streamingEditGuard: StreamingEditGuard;
 	readonly #loopGuards: LoopGuards;
 	#promptInFlightCount = 0;
+	/** Lazily shared by waitForIdle callers while session-owned prompt setup/finalization is still active. */
+	#promptInFlightSettled: Promise<void> | undefined;
+	#promptInFlightSettledResolve: (() => void) | undefined;
 	#abortInProgress = false;
 	// Wire-level agent_end emission deferred until #promptInFlightCount drops to 0.
 	// Internal extension hooks and post-emit work (auto-retry, auto-compaction, todo
@@ -692,6 +695,20 @@ export class AgentSession {
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
 		this.#finishInFlightSettlement();
+		const resolve = this.#promptInFlightSettledResolve;
+		this.#promptInFlightSettled = undefined;
+		this.#promptInFlightSettledResolve = undefined;
+		resolve?.();
+	}
+
+	#waitForInFlightPrompts(): Promise<void> {
+		if (this.#promptInFlightCount === 0) return Promise.resolve();
+		if (!this.#promptInFlightSettled) {
+			const { promise, resolve } = Promise.withResolvers<void>();
+			this.#promptInFlightSettled = promise;
+			this.#promptInFlightSettledResolve = resolve;
+		}
+		return this.#promptInFlightSettled;
 	}
 
 	#finishInFlightSettlement(): void {
@@ -1716,8 +1733,8 @@ export class AgentSession {
 	}
 	#sessionSwitchReconciler: (() => Promise<void>) | undefined;
 
-	async #reconcileSessionMode(): Promise<void> {
-		await this.planMode.reconcileFromSession();
+	async #reconcileSessionMode(context?: SessionContext): Promise<void> {
+		await this.planMode.reconcileFromSession(context);
 		await this.#sessionSwitchReconciler?.();
 	}
 
@@ -4290,10 +4307,20 @@ export class AgentSession {
 				await settlementCallbacks;
 				continue;
 			}
+			if (this.#promptInFlightCount > 0) {
+				// The Agent can already be idle while its session wrapper is still
+				// running preflight or finalization. Block on that lifecycle edge
+				// instead of spinning microtasks, which starves timers and process I/O
+				// needed by the outstanding work.
+				await this.#waitForInFlightPrompts();
+				continue;
+			}
+			const postPromptTasks = this.#postPromptTasksPromise;
+			if (postPromptTasks) {
+				await postPromptTasks;
+				continue;
+			}
 			if (this.activityPhase === "idle") return;
-			// The provider promise can settle one microtask before the enclosing
-			// prompt finalizer transitions into callback draining.
-			await Promise.resolve();
 		}
 	}
 	/**
@@ -7720,7 +7747,7 @@ export class AgentSession {
 			}
 			this.#reconnectToAgent();
 			try {
-				await this.#reconcileSessionMode();
+				await this.#reconcileSessionMode(sessionContext);
 			} catch (error) {
 				logger.warn("Failed to reconcile session mode after switch", {
 					targetSessionFile: sessionPath,
@@ -7746,6 +7773,11 @@ export class AgentSession {
 			if (switchingToDifferentSession) {
 				this.#advisors.restoreCost(await loadAdvisorTranscriptCosts(this.sessionFile));
 			}
+			// Preview invokers, forced tool choices, permission decisions, and
+			// announced mounts belong to the previous logical session. Defer
+			// clearing until every fallible switch step has completed so rollback
+			// preserves the previous session's pending decisions exactly.
+			this.#clearSessionScopedToolState();
 			this.#bash.finishSessionTransition(bashTransition, true);
 			if (previousSessionState.sessionId !== this.sessionManager.getSessionId()) {
 				this.#notifySessionChangeCallbacks();
