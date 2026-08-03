@@ -39,6 +39,9 @@ tui-debug.log
 coverage/
 .nyc_output/
 packages/ai/test/.temp-images/
+.chatgpt-web-session-*/
+packages/chatgpt-web-launcher/build/
+packages/chatgpt-web-launcher/release/
 
 # Project specific
 !.omp/

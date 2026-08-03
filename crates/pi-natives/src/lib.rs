@@ -46,6 +46,7 @@ pub mod html;
 pub mod iofs;
 pub mod keys;
 pub mod live;
+pub mod local_peer;
 pub mod sixel;
 pub mod snapcompact;
 pub use pi_ast::language;

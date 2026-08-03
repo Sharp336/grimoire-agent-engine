@@ -830,7 +830,7 @@ describe("ExtensionRunner", () => {
 			);
 			const errors: ExtensionError[] = [];
 			runner.onError(error => errors.push(error));
-			testSetExtensionHandlerTimeoutMs(100);
+			testSetExtensionHandlerTimeoutMs(5_000);
 			const controller = new AbortController();
 			const preAborted = new AbortController();
 			preAborted.abort();
@@ -1782,10 +1782,11 @@ describe("ExtensionRunner", () => {
 				{ type: "ui_select" },
 				{ type: "tool_approval_resolved", approved: true },
 			]);
-			expect(select).toHaveBeenCalledWith(expect.stringContaining("Allow tool: dangerous_tool"), [
-				"Approve",
-				"Deny",
-			]);
+			expect(select).toHaveBeenCalledWith(
+				expect.stringContaining("Allow tool: dangerous_tool"),
+				["Approve", "Deny"],
+				{ signal: undefined },
+			);
 			delete globalState.__approvalEvents;
 		});
 

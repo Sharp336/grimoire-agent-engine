@@ -75,6 +75,12 @@ import {
 } from "@oh-my-pi/pi-catalog/identity";
 import { isBunTestRuntime, isRecord, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
 import { parseModelString, resolveProviderModelReference } from "../config/model-resolver";
+import {
+	CHATGPT_WEB_API,
+	CHATGPT_WEB_BASE_URL,
+	revokeRegisteredKeylessProviderRegistrations,
+	validateKeylessProviderCapability,
+} from "../extensibility/extensions/keyless-provider";
 import { generateCodexAttestation } from "../live/attestation";
 import type { AuthStorage, OAuthCredential } from "../session/auth-storage";
 import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
@@ -801,6 +807,7 @@ export class ModelRegistry {
 	#providerLookupSnapshots: Map<string, Model<Api>[]> = new Map();
 	#customProviderApiKeys: Map<string, string> = new Map();
 	#keylessProviders: Set<string> = new Set();
+	#staticKeylessProviders: Set<string> = new Set();
 	#discoverableProviders: DiscoveryProviderConfig[] = [];
 	#customModelOverlays: CustomModelOverlay[] = [];
 	#providerOverrides: Map<string, ProviderOverride> = new Map();
@@ -828,6 +835,7 @@ export class ModelRegistry {
 	#lastModelModifierWarnings: Map<string, string> = new Map();
 	#runtimeProvidersBySource: Map<string, Set<string>> = new Map();
 	#runtimeProviderSourceByName: Map<string, string> = new Map();
+	#runtimeKeylessProviderSourceByName: Map<string, string> = new Map();
 	// Runtime model managers registered by extensions via fetchDynamicModels.
 	// Keyed by provider name; use the same SQLite cache path as builtins.
 	#runtimeModelManagers: Map<string, { options: ModelManagerOptions<Api>; sourceId: string }> = new Map();
@@ -1064,6 +1072,7 @@ export class ModelRegistry {
 		this.#modelsConfigFile.invalidate();
 		this.#customProviderApiKeys.clear();
 		this.#keylessProviders.clear();
+		this.#staticKeylessProviders.clear();
 		this.#discoverableProviders = [];
 		// Drop config-sourced apiKeys from AuthStorage before reload; entries
 		// removed from models.yml must actually disappear from the resolver, not
@@ -1101,7 +1110,11 @@ export class ModelRegistry {
 			error: configError,
 		} = this.#loadCustomModels();
 		this.#configError = configError;
-		this.#keylessProviders = keylessProviders;
+		this.#staticKeylessProviders = keylessProviders;
+		this.#keylessProviders = new Set(keylessProviders);
+		for (const providerName of this.#runtimeKeylessProviderSourceByName.keys()) {
+			this.#keylessProviders.add(providerName);
+		}
 		this.#discoverableProviders = discoverableProviders;
 		this.#customModelOverlays = customModels;
 		this.#providerOverrides = overrides;
@@ -2472,6 +2485,13 @@ export class ModelRegistry {
 		return this.authStorage.hasOAuth(model.provider);
 	}
 
+	#clearRuntimeKeylessProvider(providerName: string): void {
+		this.#runtimeKeylessProviderSourceByName.delete(providerName);
+		if (!this.#staticKeylessProviders.has(providerName)) {
+			this.#keylessProviders.delete(providerName);
+		}
+	}
+
 	#clearRuntimeProviderState(providerName: string): void {
 		this.#runtimeProviderApiKeys.delete(providerName);
 		this.#runtimeProviderOverrides.delete(providerName);
@@ -2479,6 +2499,7 @@ export class ModelRegistry {
 		this.#runtimeModelManagers.delete(providerName);
 		this.#runtimeModelModifiers.delete(providerName);
 		this.#lastModelModifierWarnings.delete(providerName);
+		this.#clearRuntimeKeylessProvider(providerName);
 		this.authStorage.removeConfigApiKey(providerName);
 	}
 
@@ -2488,6 +2509,7 @@ export class ModelRegistry {
 	clearSourceRegistrations(sourceId: string): void {
 		unregisterCustomApis(sourceId);
 		unregisterOAuthProviders(sourceId);
+		revokeRegisteredKeylessProviderRegistrations(sourceId);
 		const sourceProviders = this.#runtimeProvidersBySource.get(sourceId);
 		if (!sourceProviders || sourceProviders.size === 0) {
 			return;
@@ -2531,6 +2553,44 @@ export class ModelRegistry {
 		if (config.streamSimple && !config.api) {
 			throw new Error(`Provider ${providerName}: "api" is required when registering streamSimple.`);
 		}
+		const previousKeylessSource = this.#runtimeKeylessProviderSourceByName.get(providerName);
+		if (previousKeylessSource === sourceId) {
+			this.#clearRuntimeKeylessProvider(providerName);
+		}
+		if (config.keylessCapability !== undefined && config.auth !== "none") {
+			throw new Error(`Provider ${providerName}: keyless capability requires "auth: none".`);
+		}
+		let hasValidatedKeylessCapability = false;
+		if (config.auth === "none") {
+			const hasInvalidModelRoute =
+				!config.models ||
+				config.models.length === 0 ||
+				config.models.some(
+					model =>
+						(model.api !== undefined && model.api !== CHATGPT_WEB_API) ||
+						(model.baseUrl !== undefined && model.baseUrl !== CHATGPT_WEB_BASE_URL) ||
+						"keylessCapability" in model,
+				);
+			if (
+				providerName !== CHATGPT_WEB_API ||
+				config.apiKey ||
+				config.oauth ||
+				config.fetchDynamicModels ||
+				!config.streamSimple ||
+				hasInvalidModelRoute
+			) {
+				throw new Error(`Provider ${providerName}: unauthorized runtime keyless registration.`);
+			}
+			hasValidatedKeylessCapability = validateKeylessProviderCapability(
+				config.keylessCapability,
+				sourceId,
+				config.api,
+				config.baseUrl,
+			);
+			if (!hasValidatedKeylessCapability) {
+				throw new Error(`Provider ${providerName}: invalid or stale keyless capability.`);
+			}
+		}
 
 		validateProviderConfiguration(
 			providerName,
@@ -2539,7 +2599,7 @@ export class ModelRegistry {
 				headers: config.headers,
 				apiKey: config.apiKey,
 				api: config.api,
-				oauthConfigured: Boolean(config.oauth),
+				oauthConfigured: Boolean(config.oauth) || hasValidatedKeylessCapability,
 				models: (config.models ?? []) as ProviderValidationModel[],
 			},
 			"runtime-register",
@@ -2582,6 +2642,10 @@ export class ModelRegistry {
 			this.#lastStaticLoadMtime = null;
 			this.#reloadStaticModels();
 		}
+		if (hasValidatedKeylessCapability && sourceId) {
+			this.#runtimeKeylessProviderSourceByName.set(providerName, sourceId);
+			this.#keylessProviders.add(providerName);
+		}
 
 		this.#ensureFullSnapshot();
 		if (config.apiKey) {
@@ -2590,7 +2654,7 @@ export class ModelRegistry {
 			this.#runtimeProviderApiKeys.set(providerName, config.apiKey);
 		}
 
-		if (config.models && config.models.length > 0) {
+		if (config.models) {
 			// Build model overlays that persist across refresh() cycles
 			const newOverlays: CustomModelOverlay[] = [];
 			for (const modelDef of config.models) {
@@ -2773,6 +2837,10 @@ export interface ProviderConfigInput {
 	compat?: ModelSpec<Api>["compat"];
 	remoteCompaction?: RemoteCompactionConfig<Api>;
 	authHeader?: boolean;
+	/** Runtime keyless auth is accepted only with the host-issued capability below. */
+	auth?: "none";
+	/** Opaque, source-scoped host capability; structural clones are rejected. */
+	keylessCapability?: object;
 	/** Streaming transport override — see {@link Model.transport}. */
 	transport?: Model<Api>["transport"];
 	oauth?: {

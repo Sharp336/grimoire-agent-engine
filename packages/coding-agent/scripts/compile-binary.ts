@@ -4,6 +4,13 @@ import { createLegacyPiVirtualModulePlugin } from "./legacy-pi-virtual-module";
 /** Native runtime dependencies always resolved from the on-demand install instead of embedded into compiled binaries. */
 export const COMPILED_EXTERNAL_DEPENDENCIES: readonly string[] = Object.freeze(["fastembed", "onnxruntime-node"]);
 
+// Playwright's CDP bundle retains two lazy WebDriver BiDi requires that are absent from its
+// published dependency graph. ChatGPT Web uses CDP only, so leave those unreachable imports external.
+const PLAYWRIGHT_OPTIONAL_BIDI_MODULES: readonly string[] = Object.freeze([
+	"chromium-bidi/lib/cjs/bidiMapper/BidiMapper",
+	"chromium-bidi/lib/cjs/cdp/CdpConnection",
+]);
+
 /** Inputs shared by local and release coding-agent binary builds. */
 export interface CodingAgentCompileOptions {
 	/** Absolute repository root used for package resolution. */
@@ -35,7 +42,7 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 		const output = await Bun.build({
 			entrypoints: [options.entrypoint],
 			root: options.repoRoot,
-			external: [...COMPILED_EXTERNAL_DEPENDENCIES],
+			external: [...COMPILED_EXTERNAL_DEPENDENCIES, ...PLAYWRIGHT_OPTIONAL_BIDI_MODULES],
 			define: {
 				"process.env.PI_COMPILED": JSON.stringify("true"),
 				"process.env.PI_TINY_TRANSFORMERS_VERSION": JSON.stringify(options.transformersVersion),

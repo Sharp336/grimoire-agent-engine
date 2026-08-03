@@ -134,7 +134,8 @@ export async function generateEnumExports(): Promise<void> {
 	const constEnumCount = (dts.match(/export (?:declare )?const enum/g) ?? []).length;
 	const dtsContent = dts
 		.replaceAll("export const enum", "export declare enum")
-		.replaceAll("export declare const enum", "export declare enum");
+		.replaceAll("export declare const enum", "export declare enum")
+		.replace(/(?:\r?\n)+$/u, "\n");
 	await Bun.write(dtsPath, dtsContent);
 
 	const symbolCount = (generatedBlock.match(/^export const /gm) ?? []).length;

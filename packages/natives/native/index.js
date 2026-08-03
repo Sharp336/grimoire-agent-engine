@@ -22,6 +22,19 @@ export const DesktopSession = nativeBindings.DesktopSession;
 export const LiveWebRtcPeer = nativeBindings.LiveWebRtcPeer;
 export const MacAppearanceObserver = nativeBindings.MacAppearanceObserver;
 export const MacOSPowerAssertion = nativeBindings.MacOSPowerAssertion;
+export const NativeBrowserPipe = nativeBindings.NativeBrowserPipe;
+export const NativeLaunchEnvironment = nativeBindings.NativeLaunchEnvironment;
+export const NativeLocalEndpoint = nativeBindings.NativeLocalEndpoint;
+export const NativeLocalListener = nativeBindings.NativeLocalListener;
+export const NativeOwnedBrowserProcess = nativeBindings.NativeOwnedBrowserProcess;
+export const NativeOwnedFile = nativeBindings.NativeOwnedFile;
+export const NativeRuntimeBundle = nativeBindings.NativeRuntimeBundle;
+export const NativeVerifiedRuntimeLaunch = nativeBindings.NativeVerifiedRuntimeLaunch;
+export const PreparedVerifiedRuntimeLaunch = nativeBindings.PreparedVerifiedRuntimeLaunch;
+export const NativeOwnedProcess = nativeBindings.NativeOwnedProcess;
+export const NativePeerConnection = nativeBindings.NativePeerConnection;
+export const NativeProcessIdentity = nativeBindings.NativeProcessIdentity;
+export const NativeVerifiedExecutable = nativeBindings.NativeVerifiedExecutable;
 export const Process = nativeBindings.Process;
 export const PtySession = nativeBindings.PtySession;
 export const Shell = nativeBindings.Shell;
@@ -33,6 +46,7 @@ export const astEdit = nativeBindings.astEdit;
 export const astGrep = nativeBindings.astGrep;
 export const astMatch = nativeBindings.astMatch;
 export const blockRangeAt = nativeBindings.blockRangeAt;
+export const copyOwnedFilePrivate = nativeBindings.copyOwnedFilePrivate;
 export const copyToClipboard = nativeBindings.copyToClipboard;
 export const cosineSimilarityPairs = nativeBindings.cosineSimilarityPairs;
 export const countTokens = nativeBindings.countTokens;
@@ -81,6 +95,35 @@ export const truncateToWidth = nativeBindings.truncateToWidth;
 export const vectorIndexTopK = nativeBindings.vectorIndexTopK;
 export const visibleWidth = nativeBindings.visibleWidth;
 export const wrapTextWithAnsi = nativeBindings.wrapTextWithAnsi;
+export const acquireOwnedFileLock = nativeBindings.acquireOwnedFileLock;
+export const connectInheritedBroker = nativeBindings.connectInheritedBroker;
+export const connectLocal = nativeBindings.connectLocal;
+export const createLaunchEnvironment = nativeBindings.createLaunchEnvironment;
+export const currentProcessIdentity = nativeBindings.currentProcessIdentity;
+export const isProcessIdentityLive = nativeBindings.isProcessIdentityLive;
+export const launchVerifiedBrowser = nativeBindings.launchVerifiedBrowser;
+export const launchVerifiedProcess = nativeBindings.launchVerifiedProcess;
+export const matchesOwnedChild = nativeBindings.matchesOwnedChild;
+export const matchesProcessIdentity = nativeBindings.matchesProcessIdentity;
+export const openOrCreateOwnedDirectory = nativeBindings.openOrCreateOwnedDirectory;
+export const openOrCreatePrivateDirectory = nativeBindings.openOrCreatePrivateDirectory;
+export const openOwnedChild = nativeBindings.openOwnedChild;
+export const openOwnerPrivateFile = nativeBindings.openOwnerPrivateFile;
+export const openPrivateDirectory = nativeBindings.openPrivateDirectory;
+export const openInheritedBrokerBootstrap = nativeBindings.openInheritedBrokerBootstrap;
+export const openInheritedRuntimeKey = nativeBindings.openInheritedRuntimeKey;
+export const installRuntimeBundleAtomic = nativeBindings.installRuntimeBundleAtomic;
+export const openRuntimeBundle = nativeBindings.openRuntimeBundle;
+export const openExecutable = nativeBindings.openExecutable;
+export const openVerifiedExecutable = nativeBindings.openVerifiedExecutable;
+export const prepareVerifiedRuntimeLaunch = nativeBindings.prepareVerifiedRuntimeLaunch;
+export const openVerifiedExecutableMatching = nativeBindings.openVerifiedExecutableMatching;
+export const removeOwnedFileAtomic = nativeBindings.removeOwnedFileAtomic;
+export const removeOwnedTreeAtomic = nativeBindings.removeOwnedTreeAtomic;
+export const replaceOwnedFileAtomic = nativeBindings.replaceOwnedFileAtomic;
+export const verifyExecutableVersion = nativeBindings.verifyExecutableVersion;
+export const verifyPeerDescendant = nativeBindings.verifyPeerDescendant;
+export const verifyRuntimeBundle = nativeBindings.verifyRuntimeBundle;
 
 // string/numeric enums (napi-rs string_enum produces TS-only const enum)
 export const AstMatchStrictness = {
@@ -137,5 +180,10 @@ export const MacOSAppearance = {
 export const ProcessStatus = {
 	Running: "running",
 	Exited: "exited",
+};
+export const NativeBrowserFeatureToggle = {
+	DisableBackgroundNetworking: "disable-background-networking",
+	DisableComponentUpdate: "disable-component-update",
+	DisableDefaultApps: "disable-default-apps",
 };
 // --- end generated native exports ---

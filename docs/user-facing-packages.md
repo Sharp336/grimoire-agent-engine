@@ -11,6 +11,45 @@ This page indexes README-only user-facing package CLIs and features that need ro
 
 ## Package CLIs and features
 
+### `packages/chatgpt-web` — ChatGPT Web provider
+
+Sources: [`packages/chatgpt-web/README.md`](../packages/chatgpt-web/README.md),
+[`packages/chatgpt-web/package.json`](../packages/chatgpt-web/package.json), and
+[`packages/chatgpt-web/src/cli.ts`](../packages/chatgpt-web/src/cli.ts).
+
+- Package: `@oh-my-pi/pi-chatgpt-web`; package bin: `chatgpt-web`; main user path:
+  `omp chatgpt-web`.
+- Feature: registers `chatgpt-web/light`, `medium`, `high`, `extra-high`, and account-gated `pro`
+  as native OMP model selectors backed by a verified local ChatGPT browser profile.
+- Setup: `omp chatgpt-web enable`, `omp chatgpt-web login`, then
+  `omp models find "ChatGPT Web"`.
+- Modes: browser-only has no local tool schemas or broker/tunnel; full mode binds one authenticated
+  connector to one OMP turn before exposing the canonical tool set. Pro cannot initiate local OMP
+  tools.
+- Storage and limits: state is below `${PI_CODING_AGENT_DIR:-~/.omp/agent}/chatgpt-web`; the
+  browser profile is sensitive; one owner has at most five task-bound tabs; cancellation releases
+  only the selected turn.
+- Security: native owner-local listener/pipe, no-follow file identity, verified Chrome/private
+  pipe transport, OMP-owned tool approvals, structured redacted logs, and fail-closed native,
+  identity, capability, UI, architecture, ABI, and hash checks.
+- Package-local commands: `chatgpt-web setup`, `login`, `status`, `doctor`, and `uninstall` are
+  intended for packaging and diagnostics; users should prefer the OMP command.
+
+### `packages/chatgpt-web-launcher` — optional desktop launcher
+
+Sources: [`packages/chatgpt-web-launcher/package.json`](../packages/chatgpt-web-launcher/package.json)
+and [`packages/chatgpt-web/docs/architecture.md`](../packages/chatgpt-web/docs/architecture.md).
+
+- Package: private `@oh-my-pi/pi-chatgpt-web-launcher`; product: **OMP ChatGPT Web**.
+- Feature: owns the persistent browser surface, verified runtime installation, optional outbound
+  tunnel, autostart, health, cancellation, and local structured logs without changing provider
+  semantics.
+- Packaging: unsigned desktop artifacts target Linux x64/arm64, macOS x64/arm64, and Windows
+  x64/arm64. Linux musl is build-only/staged, not a published runtime or native leaf.
+- Limits: the launcher is not published to npm, exposes no raw CDP endpoint or generic page API,
+  and normal package smoke checks require no ChatGPT account, tunnel, or network access.
+
+
 ### `packages/swarm-extension` — swarm orchestration
 
 Sources: [`packages/swarm-extension/README.md`](../packages/swarm-extension/README.md), [`packages/swarm-extension/package.json`](../packages/swarm-extension/package.json), [`packages/swarm-extension/src/cli.ts`](../packages/swarm-extension/src/cli.ts), [`packages/swarm-extension/src/extension.ts`](../packages/swarm-extension/src/extension.ts).

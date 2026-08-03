@@ -266,6 +266,7 @@ jobs:
                 natives-linux-musl-x64-baseline \
                 natives-linux-x64-baseline \
                 natives-linux-x64-modern \
+                natives-win32-arm64 \
                 natives-win32-x64-baseline; do
                 bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build "//:$target" 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
               done
@@ -654,7 +655,7 @@ jobs:
               name: omp-binary-${{ matrix.target_id }}
               path: ${{ matrix.binary_path }}
 
-   # Publishes the five @oh-my-pi/pi-natives-<tag> leaf packages once
+   # Publishes the six @oh-my-pi/pi-natives-<tag> leaf packages once
    # validation passes and every binary built. Runs on one linux runner: leaf
    # publishing is platform-agnostic file packaging (gen-npm-packages reads
    # packages/natives/native), so no per-platform runners are needed.
@@ -696,7 +697,7 @@ jobs:
          - name: Install linux and win32 native addons
            uses: ./.github/actions/native-artifacts
            with:
-              targets: linux-x64-baseline linux-x64-modern linux-arm64 win32-x64-baseline
+              targets: linux-x64-baseline linux-x64-modern linux-arm64 win32-x64-baseline win32-arm64
          # Darwin addons come flat (canonical filenames) from the
          # release_binary_darwin legs.
          - name: Install darwin native addons
@@ -713,7 +714,7 @@ jobs:
               NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
            run: |
               set -euo pipefail
-              for tag in linux-x64 linux-arm64 darwin-x64 darwin-arm64 win32-x64; do
+              for tag in linux-x64 linux-arm64 darwin-x64 darwin-arm64 win32-x64 win32-arm64; do
                 bun run ci:release:publish-native-leaf "$tag"
               done
 
@@ -885,3 +886,86 @@ jobs:
                   -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
                   commit -m "omp ${{ needs.release_metadata.outputs.release-tag }}" -- Formula/omp.rb
               git push origin HEAD:main
+
+   chatgpt_web_packages:
+      name: ChatGPT Web package checks
+      needs: [native_addons]
+      if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      timeout-minutes: 30
+      steps:
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+         - uses: ./.github/actions/bun-install
+         - name: Install Linux native addon
+           uses: ./.github/actions/native-artifacts
+           with:
+              targets: linux-x64-baseline linux-x64-modern
+         - name: Type check provider and launcher
+           run: |
+              bun run chatgpt-web:check
+              bun run chatgpt-web-launcher:check
+         - name: Run account-free provider fixtures
+           run: bun run chatgpt-web:test
+         - name: Build and test launcher
+           run: |
+              bun run chatgpt-web-launcher:build
+              bun run chatgpt-web-launcher:test
+
+   chatgpt_web_native:
+      name: ChatGPT Web native (${{ matrix.platform }})
+      strategy:
+         fail-fast: false
+         matrix:
+            include:
+               - platform: linux-x64
+                 runner: ubuntu-22.04
+                 targets: linux-x64-baseline linux-x64-modern
+               - platform: linux-arm64
+                 runner: ubuntu-24.04-arm
+                 targets: linux-arm64
+               - platform: darwin-x64
+                 runner: macos-15-intel
+                 targets: darwin-x64-baseline
+               - platform: darwin-arm64
+                 runner: macos-15
+                 targets: darwin-arm64
+               - platform: win32-x64
+                 runner: windows-2022
+                 targets: win32-x64-baseline
+               - platform: win32-arm64
+                 runner: windows-11-arm
+                 targets: win32-arm64
+      runs-on: ${{ matrix.runner }}
+      timeout-minutes: 60
+      env:
+         PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.cache/chatgpt-web-chromium
+         CHATGPT_WEB_TEST_CHROMIUM_VERSION: playwright-core-1.62.1
+      steps:
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+         - uses: ./.github/actions/bun-install
+         - name: Build exact native addon
+           uses: ./.github/actions/bazel-natives
+           with:
+              targets: ${{ matrix.targets }}
+              cache-scope: chatgpt-web-${{ matrix.platform }}
+         - name: Regenerate and verify native bindings
+           run: |
+              bun --cwd=packages/natives run build:bindings
+              bun test scripts/bazel-natives.test.ts
+              bun test packages/natives/test/native-loader-metadata.test.ts packages/natives/test/npm-packages.test.ts
+         - name: Exercise owner-local peer and process APIs
+           run: bun test packages/natives/test/local-peer.test.ts
+         - name: Run account-free provider fixtures
+           run: bun run chatgpt-web:test
+         - name: Install pinned Chromium artifact
+           run: bun x playwright-core install chromium
+         - name: Export verified Chromium executable (Unix)
+           if: runner.os != 'Windows'
+           shell: bash
+           run: echo "CHATGPT_WEB_TEST_CHROMIUM=$(bun -e 'import { chromium } from \"playwright-core\"; process.stdout.write(chromium.executablePath())')" >> "$GITHUB_ENV"
+         - name: Export verified Chromium executable (Windows)
+           if: runner.os == 'Windows'
+           shell: pwsh
+           run: '"CHATGPT_WEB_TEST_CHROMIUM=$(bun -e ''import { chromium } from "playwright-core"; process.stdout.write(chromium.executablePath())'')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append'
+         - name: Exercise native private browser pipe
+           run: bun test packages/chatgpt-web/test/native-browser-transport.integration.test.ts

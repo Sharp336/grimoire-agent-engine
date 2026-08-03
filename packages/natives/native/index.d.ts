@@ -107,6 +107,107 @@ export declare class MacOSPowerAssertion {
   stop(): void
 }
 
+export declare class NativeBrowserPipe {
+  get nonBlocking(): boolean
+  read(): Promise<Uint8Array>
+  write(bytes: Uint8Array): Promise<undefined>
+  close(): Promise<undefined>
+}
+
+export declare class NativeLaunchEnvironment {
+  static tunnelChild(bootstrap: NativeOwnedFile, runtimeKey: NativeOwnedFile, broker: NativeLocalEndpoint, runtimeEpoch: string): NativeLaunchEnvironment
+  static browserChild(profileRoot: NativeOwnedFile, profileGeneration: string, ownerFence: string): NativeLaunchEnvironment
+}
+
+export declare class NativeLocalEndpoint {
+  get kind(): string
+}
+
+export declare class NativeLocalListener {
+  static create(): NativeLocalListener
+  get endpoint(): NativeLocalEndpoint
+  accept(): Promise<NativePeerConnection>
+  close(): void
+}
+
+export declare class NativeOwnedBrowserProcess {
+  get process(): NativeOwnedProcess
+  get pipe(): NativeBrowserPipe
+}
+
+/** Stable already-open file or directory capability. */
+export declare class NativeOwnedFile {
+  /** Open a regular file or directory after rejecting symbolic links. */
+  static open(path: string, directory?: boolean | undefined | null): NativeOwnedFile
+  /**
+   * Atomically create an owner-private regular file beneath a held directory
+   * capability.
+   */
+  static createPrivate(root: NativeOwnedFile, nameHint: string | undefined | null, bytes: Uint8Array): NativeOwnedFile
+  get identity(): string
+  get directory(): boolean
+  /** Read the held handle; never reopen the pathname. */
+  read(): Uint8Array
+  /** One-way consume and zeroize through the held handle. */
+  consume(): void
+  /**
+   * Delete the object named by the held handle; never reopen or delete a
+   * replacement pathname.
+   */
+  cleanup(): void
+  close(): void
+}
+
+export declare class NativeOwnedProcess {
+  get identity(): NativeProcessIdentity
+  wait(timeoutMs?: number | undefined | null): Promise<NativeProcessExit>
+  terminate(): Promise<undefined>
+  close(): void
+}
+
+export declare class NativePeerConnection {
+  get peer(): NativeProcessIdentity
+  currentPeer(): NativeProcessIdentity
+  read(): Promise<Uint8Array>
+  write(bytes: Uint8Array): Promise<undefined>
+  close(): Promise<undefined>
+}
+
+/**
+ * Opaque complete process identity. Instances are created only by verified
+ * native paths.
+ */
+export declare class NativeProcessIdentity {
+  get pid(): number
+  get processStartIdentity(): string
+  get executableIdentity(): string
+}
+
+/** Opaque authority over a validated runtime bundle. No pathname is exposed. */
+export declare class NativeRuntimeBundle {
+  close(): void
+}
+
+export declare class NativeVerifiedExecutable {
+  get identity(): string
+  get sha256(): string
+  get version(): string
+  close(): void
+}
+
+export declare class NativeVerifiedRuntimeLaunch {
+  close(): void
+}
+
+export declare class PreparedVerifiedRuntimeLaunch {
+  get launchSpec(): NativeVerifiedRuntimeLaunch
+  get version(): string
+  get runtimeEpoch(): string
+  get lifecycleGeneration(): number
+  get instanceNonce(): string
+  close(): void
+}
+
 /** Stable process reference. */
 export declare class Process {
   /** Open a stable process reference from a PID. */
@@ -248,6 +349,8 @@ export declare function __ompInstallTokioRuntime(): void
  */
 export declare function __piNativesV17_2_4(): void
 
+export declare function acquireOwnedFileLock(root: NativeOwnedFile, name: string): NativeOwnedFile
+
 /**
  * Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
  * a promise.
@@ -380,7 +483,7 @@ export interface AstMatchResult {
 }
 
 /** ast-grep pattern strictness (controls how patterns match syntax). */
-export declare enum AstMatchStrictness {
+export declare const enum AstMatchStrictness {
   /** Match at the concrete syntax tree level. */
   Cst = 'cst',
   /** Balanced default suitable for most searches. */
@@ -522,6 +625,14 @@ export interface ClipboardImage {
   mimeType: string
 }
 
+/**
+ * Recover the one-shot broker capability from its dedicated inherited
+ * named-pipe handle.
+ */
+export declare function connectInheritedBroker(): NativePeerConnection
+
+export declare function connectLocal(endpoint: NativeLocalEndpoint): Promise<NativePeerConnection>
+
 /** A context line (before or after a match). */
 export interface ContextLine {
   /** 1-indexed line number in the source file. */
@@ -529,6 +640,8 @@ export interface ContextLine {
   /** Raw line content (trimmed line ending). */
   line: string
 }
+
+export declare function copyOwnedFilePrivate(root: NativeOwnedFile, source: NativeOwnedFile, nameHint?: string | undefined | null): NativeOwnedFile
 
 /**
  * Copy plain text to the system clipboard.
@@ -565,6 +678,10 @@ export declare function cosineSimilarityPairs(vectors: Float64Array, count: numb
  * Defaults to `o200k_base`; pass `Cl100kBase` for older `OpenAI` models.
  */
 export declare function countTokens(input: string | Array<string>, encoding?: Encoding | undefined | null): number
+
+export declare function createLaunchEnvironment(profile: object): NativeLaunchEnvironment
+
+export declare function currentProcessIdentity(): NativeProcessIdentity
 
 /**
  * One `OpenAI` GA computer action.
@@ -742,7 +859,7 @@ export interface DiffRun {
 export declare function diffWords(oldText: string, newText: string): Array<DiffChange>
 
 /** Ellipsis strategy for [`truncate_to_width`]. */
-export declare enum Ellipsis {
+export declare const enum Ellipsis {
   /** Use a single Unicode ellipsis character ("…"). */
   Unicode = 0,
   /** Use three ASCII dots ("..."). */
@@ -788,7 +905,7 @@ export interface EnclosingBoundaryOptions {
 export declare function encodeSixel(bytes: Uint8Array, targetWidthPx: number, targetHeightPx: number): string
 
 /** Tokenizer encoding to use. */
-export declare enum Encoding {
+export declare const enum Encoding {
   /** GPT-4o / o1 / GPT-5 (default). */
   O200kBase = 'O200kBase',
   /** GPT-3.5 / GPT-4 / older. */
@@ -825,7 +942,7 @@ export interface ExtractSegmentsResult {
 }
 
 /** Resolved filesystem entry kind for glob filters and match metadata. */
-export declare enum FileType {
+export declare const enum FileType {
   /** Regular file. */
   File = 1,
   /** Directory. */
@@ -1032,7 +1149,7 @@ export interface GrepOptions {
 }
 
 /** Output mode for [`search`] and [`grep`] (string values match JS callers). */
-export declare enum GrepOutputMode {
+export declare const enum GrepOutputMode {
   /** Emit matched lines (and optional context lines). */
   Content = 'content',
   /** Emit per-file or total counts instead of line content. */
@@ -1133,6 +1250,8 @@ export interface HtmlToMarkdownOptions {
   skipImages?: boolean
 }
 
+export declare function installRuntimeBundleAtomic(spec: object): NativeRuntimeBundle
+
 /**
  * Invalidate the walker scan cache.
  *
@@ -1151,7 +1270,7 @@ export declare function isoBackend(): IsoBackendKind
  * Isolation backend identifier. Numeric so the JS side can `switch` on
  * the enum without string comparisons.
  */
-export declare enum IsoBackendKind {
+export declare const enum IsoBackendKind {
   Apfs = 0,
   Btrfs = 1,
   Zfs = 2,
@@ -1163,7 +1282,7 @@ export declare enum IsoBackendKind {
 }
 
 /** How a single file changed between `lower` and `merged`. */
-export declare enum IsoChangeKind {
+export declare const enum IsoChangeKind {
   Added = 0,
   Modified = 1,
   Removed = 2
@@ -1248,8 +1367,10 @@ export declare function isoStart(kind: IsoBackendKind | undefined | null, lower:
 /** Tear down a previously started backend at `merged`. */
 export declare function isoStop(kind: IsoBackendKind | undefined | null, merged: string): Promise<void>
 
+export declare function isProcessIdentityLive(pid: number, processStartIdentity: string): boolean
+
 /** Event types from Kitty keyboard protocol (flag 2). */
-export declare enum KeyEventType {
+export declare const enum KeyEventType {
   /** Key press event. */
   Press = 1,
   /** Key repeat event. */
@@ -1257,6 +1378,10 @@ export declare enum KeyEventType {
   /** Key release event. */
   Release = 3
 }
+
+export declare function launchVerifiedBrowser(spec: object): Promise<NativeOwnedBrowserProcess>
+
+export declare function launchVerifiedProcess(spec: NativeVerifiedRuntimeLaunch | object): Promise<NativeOwnedProcess>
 
 export interface LineRange {
   /** 1-indexed inclusive first visible line. */
@@ -1313,7 +1438,7 @@ export interface ListWorkspaceResult {
  * System UI appearance reported by native macOS APIs (`detectMacOSAppearance`
  * and observer).
  */
-export declare enum MacOSAppearance {
+export declare const enum MacOSAppearance {
   /** Dark color scheme. */
   Dark = 'dark',
   /** Light color scheme. */
@@ -1379,6 +1504,10 @@ export declare function matchesKittySequence(data: string, expectedCodepoint: nu
  * Returns true only when the byte sequence maps to the exact key identifier.
  */
 export declare function matchesLegacySequence(data: string, keyName: string): boolean
+
+export declare function matchesOwnedChild(root: NativeOwnedFile, name: string, expectedIdentity: string, directory?: boolean | undefined | null): boolean
+
+export declare function matchesProcessIdentity(expected: NativeProcessIdentity, actual: NativeProcessIdentity): boolean
 
 /** N-API opt-in handle for the minimizer. */
 export interface MinimizerOptions {
@@ -1472,6 +1601,55 @@ export interface MinimizerResult {
  */
 export declare function mmrRerankIndices(contents: Array<string>, scores: Float64Array, lambdaParam: number, topK: number): Uint32Array
 
+export declare const enum NativeBrowserFeatureToggle {
+  DisableBackgroundNetworking = 'disable-background-networking',
+  DisableComponentUpdate = 'disable-component-update',
+  DisableDefaultApps = 'disable-default-apps'
+}
+
+export interface NativeBrowserLaunchOptions {
+  headed: boolean
+  featureToggles?: Array<NativeBrowserFeatureToggle>
+}
+
+export interface NativeProcessExit {
+  exitCode?: number
+  signal?: string
+}
+
+export declare function openExecutable(path: string): Promise<NativeVerifiedExecutable>
+
+export declare function openInheritedBrokerBootstrap(): NativeOwnedFile
+
+export declare function openInheritedRuntimeKey(): NativeOwnedFile
+
+export declare function openOrCreateOwnedDirectory(root: NativeOwnedFile, name: string): NativeOwnedFile
+
+export declare function openOrCreatePrivateDirectory(path: string): NativeOwnedFile
+
+export declare function openOwnedChild(root: NativeOwnedFile, name: string, directory?: boolean | undefined | null): NativeOwnedFile | null
+
+export declare function openOwnerPrivateFile(path: string): NativeOwnedFile
+
+export declare function openPrivateDirectory(path: string): NativeOwnedFile
+
+export declare function openRuntimeBundle(spec: OpenRuntimeBundleSpec): NativeRuntimeBundle
+
+export interface OpenRuntimeBundleSpec {
+  root: string
+  expected: RuntimeExpectedIdentity
+}
+
+export declare function openVerifiedExecutable(spec: OpenVerifiedExecutableSpec): Promise<NativeVerifiedExecutable>
+
+export declare function openVerifiedExecutableMatching(spec: OpenVerifiedExecutableSpec, expectedIdentity: string): Promise<NativeVerifiedExecutable | undefined | null>
+
+export interface OpenVerifiedExecutableSpec {
+  path: string
+  sha256: string
+  version: string
+}
+
 /** Parsed Kitty keyboard protocol sequence result for a Kitty input sequence. */
 export interface ParsedKittyResult {
   /** Primary codepoint associated with the key. */
@@ -1517,8 +1695,10 @@ export interface PatchHunk {
   lines: Array<string>
 }
 
+export declare function prepareVerifiedRuntimeLaunch(spec: object): PreparedVerifiedRuntimeLaunch
+
 /** Current state of a process reference. */
-export declare enum ProcessStatus {
+export declare const enum ProcessStatus {
   /** The referenced process is still running. */
   Running = 'running',
   /** The referenced process has exited or is no longer observable. */
@@ -1611,6 +1791,10 @@ export interface PtyStartOptions {
  */
 export declare function readImageFromClipboard(): Promise<ClipboardImage | undefined | null>
 
+export declare function removeOwnedFileAtomic(root: NativeOwnedFile, name: string, expectedIdentity: string): void
+
+export declare function removeOwnedTreeAtomic(root: NativeOwnedFile, name: string, expectedIdentity: string): void
+
 /**
  * Render one snapcompact frame on a libuv worker: print pre-normalized text
  * onto a `size`-wide bitmap and encode it as PNG.
@@ -1632,6 +1816,20 @@ export declare function readImageFromClipboard(): Promise<ClipboardImage | undef
  * JS-side re-encode.
  */
 export declare function renderSnapcompactPng(text: string, options: SnapcompactRenderOptions): Promise<string>
+
+export declare function replaceOwnedFileAtomic(root: NativeOwnedFile, name: string, bytes: Uint8Array, expectedIdentity?: string | undefined | null): NativeOwnedFile
+
+export interface RuntimeBundleInspection {
+  manifest: any
+  checksums: any
+  metadataDigest: string
+}
+
+export interface RuntimeExpectedIdentity {
+  version: string
+  platform: string
+  arch: string
+}
 
 /**
  * Search content for a pattern (one-shot, compiles pattern each time).
@@ -1914,6 +2112,16 @@ export interface VectorTopK {
   /** Scores aligned with `indices`. */
   scores: Float64Array
 }
+
+export declare function verifyExecutableVersion(executable: NativeVerifiedExecutable, expected: string, timeoutMs?: number | undefined | null): Promise<undefined>
+
+/**
+ * Native ancestry verification; every PID edge is recaptured with start and
+ * executable identity.
+ */
+export declare function verifyPeerDescendant(peer: NativeProcessIdentity, ancestor: NativeProcessIdentity): boolean
+
+export declare function verifyRuntimeBundle(spec: object): RuntimeBundleInspection
 
 /**
  * Calculate visible width of text, excluding ANSI escape sequences.

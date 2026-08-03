@@ -103,10 +103,12 @@ import type {
 } from "../shared-events";
 import type { SlashCommandInfo } from "../slash-commands";
 import type * as TypeBox from "../typebox";
+import type { KeylessProviderRegistration, KeylessProviderRequest } from "./keyless-provider";
 
 export type { AppKeybinding, KeybindingsManager } from "../../config/keybindings";
 export type { ExecOptions, ExecResult } from "../../exec/exec";
 export type { AgentToolResult, AgentToolUpdateCallback };
+export type { KeylessProviderRegistration, KeylessProviderRequest } from "./keyless-provider";
 
 // ============================================================================
 // UI Context
@@ -1305,6 +1307,11 @@ export interface ExtensionAPI {
 	// =========================================================================
 	// Provider Registration
 	// =========================================================================
+	/**
+	 * Request the one host-authorized keyless provider registration. The host
+	 * binds the opaque capability to this extension's exact loaded source.
+	 */
+	issueKeylessProviderRegistration(request: KeylessProviderRequest): KeylessProviderRegistration | undefined;
 
 	/**
 	 * Register or override a model provider.
@@ -1353,7 +1360,7 @@ export interface ExtensionAPI {
 export interface ProviderConfig {
 	/** Base URL for the API endpoint. Required when defining models. */
 	baseUrl?: string;
-	/** API key or environment variable name. Required when defining models unless oauth is provided. */
+	/** API key or environment variable name. Required for models unless OAuth or authorized keyless auth is provided. */
 	apiKey?: string;
 	/** API type identifier. Required when registering streamSimple or when models don't specify one. */
 	api?: Api;
@@ -1363,6 +1370,10 @@ export interface ProviderConfig {
 	headers?: Record<string, string>;
 	/** If true, adds Authorization: Bearer header with the resolved API key. */
 	authHeader?: boolean;
+	/** Keyless runtime auth is accepted only with a live host-issued capability. */
+	auth?: "none";
+	/** Opaque object identity returned by issueKeylessProviderRegistration(). */
+	keylessCapability?: object;
 	/** Models to register. If provided, replaces all existing models for this provider. */
 	models?: ProviderModelConfig[];
 	/** OAuth provider for /login support. */
@@ -1401,6 +1412,8 @@ export interface ProviderModelConfig {
 	thinking?: Model["thinking"];
 	/** Supported input types. */
 	input: ("text" | "image")[];
+	/** Whether this model can invoke tools. */
+	supportsTools?: boolean;
 	/** Cost per million tokens. */
 	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 	/** Premium Copilot requests charged per user-initiated request. */
@@ -1479,11 +1492,18 @@ export type GetServiceTiersHandler = () => ServiceTierByFamily;
 
 export type SetServiceTierHandler = (family: ServiceTierFamily, tier: ServiceTier | undefined) => void;
 
+/** A provider registration captured from one host-controlled extension context. */
+export interface PendingProviderRegistration {
+	name: string;
+	config: ProviderConfig;
+	sourceId: string;
+}
+
 /** Shared state created by loader, used during registration and runtime. */
 export interface ExtensionRuntimeState {
 	flagValues: Map<string, boolean | string>;
-	/** Provider registrations queued during extension loading, processed during session initialization */
-	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }>;
+	queueProviderRegistration(registration: PendingProviderRegistration): void;
+	drainProviderRegistrations(): PendingProviderRegistration[];
 }
 
 /** Action implementations for ExtensionAPI methods. */

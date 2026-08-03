@@ -587,6 +587,17 @@ export class ExtensionRunner {
 			}
 		});
 	}
+	/**
+	 * Update the live UI context for tool approvals and extension callbacks.
+	 *
+	 * The SDK exposes this separately from {@link initialize} because interactive
+	 * and RPC hosts can replace their selector implementation while a session
+	 * remains alive. A headless update restores the canonical no-op context so
+	 * {@link hasUI} remains fail-closed.
+	 */
+	setUIContext(uiContext: ExtensionUIContext, hasUI: boolean): void {
+		this.#uiContext = hasUI ? uiContext : noOpUIContext;
+	}
 
 	/**
 	 * Forward a `credential_disabled` event from `AuthStorage` to extension handlers.

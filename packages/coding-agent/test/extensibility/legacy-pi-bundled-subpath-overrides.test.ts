@@ -232,6 +232,7 @@ process.stdout.write(JSON.stringify([
 		const entries = await collectBundledPiEntries();
 		const keys = new Set(entries.map(entry => entry.key));
 		expect(keys.has("@oh-my-pi/pi-coding-agent/slash-commands/helpers/active-oauth-account")).toBe(true);
+		expect(entries.every(entry => !entry.key.includes("\\") && !entry.binding.includes("\\"))).toBe(true);
 		// Directory index modules stay excluded: `./x/*` must not serve `x/y`
 		// from `y/index.ts`, which Node would not resolve either.
 		expect(keys.has("@oh-my-pi/pi-coding-agent/modes/theme/defaults/index")).toBe(false);

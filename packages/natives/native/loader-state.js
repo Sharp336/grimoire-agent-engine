@@ -1,12 +1,15 @@
 import * as childProcess from "node:child_process";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import * as zlib from "node:zlib";
 import packageJson from "../package.json" with { type: "json" };
 import { embeddedAddon } from "./embedded-addon.js";
 
+const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 /**
  * Native addon loader for `@oh-my-pi/pi-natives`.
  *
@@ -31,7 +34,16 @@ import { embeddedAddon } from "./embedded-addon.js";
  * post-build `--reset` stub) is the authoritative compiled-mode signal.
  */
 
-const SUPPORTED_PLATFORMS = ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64"];
+const SUPPORTED_PLATFORMS = [
+	"linux-x64",
+	"linux-arm64",
+	"darwin-x64",
+	"darwin-arm64",
+	"win32-x64",
+	"win32-arm64",
+];
+const EXPECTED_NAPI_ABI = packageJson.ompNative.napiAbi;
+const EXPECTED_PLATFORM_TAGS = packageJson.ompNative.platformTags;
 
 /**
  * Streaming startup marker, enabled by `PI_DEBUG_STARTUP`. Local copy of the
@@ -56,18 +68,117 @@ function getNativesDir() {
 	return path.join(os.homedir(), ".omp", "natives");
 }
 
-function resolveLeafPackageDir(platformTag) {
+function resolveLeafPackage(platformTag) {
+	const require_ = createRequire(import.meta.url);
+	let manifestPath;
 	try {
-		const require_ = createRequire(import.meta.url);
-		return path.dirname(require_.resolve(`@oh-my-pi/pi-natives-${platformTag}/package.json`));
-	} catch {
-		return null;
+		manifestPath = require_.resolve(`@oh-my-pi/pi-natives-${platformTag}/package.json`);
+	} catch (err) {
+		if (err && err.code === "MODULE_NOT_FOUND") return null;
+		throw err;
 	}
+	const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+	return { dir: path.dirname(manifestPath), manifest };
 }
 
 // =========================================================================
 // Pure helpers — re-exported for unit tests in `packages/natives/test/`.
 // =========================================================================
+/**
+ * @param {string} platform
+ * @param {string} arch
+ * @returns {string}
+ */
+export function selectNativePlatformTag(platform, arch) {
+	const platformTag = `${platform}-${arch}`;
+	if (!SUPPORTED_PLATFORMS.includes(platformTag) || !EXPECTED_PLATFORM_TAGS.includes(platformTag)) {
+		throw new Error(
+			`Unsupported platform: ${platformTag}\n` +
+				`Supported platforms: ${SUPPORTED_PLATFORMS.join(", ")}\n` +
+				"If you need support for this platform, please open an issue.",
+		);
+	}
+	return platformTag;
+}
+
+/**
+ * @param {{
+ *   metadata: unknown;
+ *   platformTag: string;
+ *   runtimeNapiAbi?: string | number;
+ *   packageNapiAbi?: number;
+ * }} input
+ */
+export function validateNativeAddonMetadata({
+	metadata,
+	platformTag,
+	runtimeNapiAbi = process.versions.napi ?? "0",
+	packageNapiAbi = EXPECTED_NAPI_ABI,
+}) {
+	if (!metadata || typeof metadata !== "object") {
+		throw new Error(`Native addon metadata missing for ${platformTag}`);
+	}
+	const value = /** @type {Record<string, unknown>} */ (metadata);
+	if (value.platformTag !== platformTag) {
+		throw new Error(`Native addon architecture mismatch: expected ${platformTag}, got ${String(value.platformTag)}`);
+	}
+	if (value.napiAbi !== packageNapiAbi) {
+		throw new Error(
+			`Native addon ABI mismatch for ${platformTag}: expected N-API ${packageNapiAbi}, got ${String(value.napiAbi)}`,
+		);
+	}
+	const runtimeAbi = Number(runtimeNapiAbi);
+	if (!Number.isInteger(runtimeAbi) || runtimeAbi < packageNapiAbi) {
+		throw new Error(
+			`Native addon ABI mismatch for ${platformTag}: runtime provides N-API ${String(runtimeNapiAbi)}, ` +
+				`but N-API ${packageNapiAbi} is required`,
+		);
+	}
+	const arch = platformTag.endsWith("-arm64") ? "arm64" : platformTag.endsWith("-x64") ? "x64" : "";
+	const allowedFilenames = new Set(
+		getAddonFilenames({ tag: platformTag, arch, variant: arch === "x64" ? "modern" : null }),
+	);
+	if (!value.files || typeof value.files !== "object" || Array.isArray(value.files)) {
+		throw new Error(`Native addon file metadata missing for ${platformTag}`);
+	}
+	const files = /** @type {Record<string, unknown>} */ (value.files);
+	if (Object.keys(files).length === 0) throw new Error(`Native addon file metadata missing for ${platformTag}`);
+	for (const [filename, fileMetadata] of Object.entries(files)) {
+		if (!isSafeEmbeddedAddonFilename(filename) || !allowedFilenames.has(filename)) {
+			throw new Error(`Native addon metadata contains an invalid filename for ${platformTag}: ${filename}`);
+		}
+		const sha256 =
+			fileMetadata && typeof fileMetadata === "object"
+				? /** @type {Record<string, unknown>} */ (fileMetadata).sha256
+				: undefined;
+		if (typeof sha256 !== "string" || !/^[a-f0-9]{64}$/.test(sha256)) {
+			throw new Error(`Native addon metadata contains an invalid SHA-256 for ${filename}`);
+		}
+	}
+	return /** @type {{ platformTag: string; napiAbi: number; files: Record<string, { sha256: string }> }} */ (value);
+}
+
+/**
+ * @param {{ filePath: string; sha256: string }} input
+ */
+export function verifyNativeAddonFile({ filePath, sha256 }) {
+	const hash = crypto.createHash("sha256");
+	const fd = fs.openSync(filePath, "r");
+	const buffer = Buffer.allocUnsafe(64 * 1024);
+	try {
+		for (;;) {
+			const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, null);
+			if (bytesRead === 0) break;
+			hash.update(buffer.subarray(0, bytesRead));
+		}
+	} finally {
+		fs.closeSync(fd);
+	}
+	const actual = hash.digest("hex");
+	if (actual !== sha256) {
+		throw new Error(`Native addon checksum mismatch for ${path.basename(filePath)}: expected ${sha256}, got ${actual}`);
+	}
+}
 
 /**
  * @param {{
@@ -360,9 +471,9 @@ export function selectCpuVariant({ arch, override, env, detectAvx2 }) {
 	};
 }
 
-function resolveCpuVariant(override) {
+function resolveCpuVariant(override, arch) {
 	const result = selectCpuVariant({
-		arch: process.arch,
+		arch,
 		override,
 		env: process.env,
 		detectAvx2: detectAvx2Support,
@@ -373,18 +484,32 @@ function resolveCpuVariant(override) {
 	return result.variant;
 }
 
-function selectEmbeddedAddonFile(selectedVariant) {
-	if (!embeddedAddon) return null;
-	const defaultFile = embeddedAddon.files.find(file => file.variant === "default") || null;
-	if (process.arch !== "x64") return defaultFile || embeddedAddon.files[0] || null;
-	if (selectedVariant === "modern") {
-		return (
-			embeddedAddon.files.find(file => file.variant === "modern") ||
-			embeddedAddon.files.find(file => file.variant === "baseline") ||
-			null
-		);
+/**
+ * @param {{
+ *   addon: import("./loader-state.js").EmbeddedAddon;
+ *   platformTag: string;
+ *   arch: string;
+ *   variant: "modern" | "baseline" | null;
+ *   runtimeNapiAbi?: string | number;
+ * }} input
+ */
+export function selectEmbeddedAddonFile({ addon, platformTag, arch, variant, runtimeNapiAbi }) {
+	const metadata = validateNativeAddonMetadata({
+		metadata: {
+			platformTag: addon.platformTag,
+			napiAbi: addon.napiAbi,
+			files: Object.fromEntries(addon.files.map(file => [file.filename, { sha256: file.sha256 }])),
+		},
+		platformTag,
+		runtimeNapiAbi,
+	});
+	const files = addon.files.filter(file => file.filename in metadata.files);
+	const defaultFile = files.find(file => file.variant === "default") || null;
+	if (arch !== "x64") return defaultFile;
+	if (variant === "modern") {
+		return files.find(file => file.variant === "modern") || files.find(file => file.variant === "baseline") || null;
 	}
-	return embeddedAddon.files.find(file => file.variant === "baseline") || null;
+	return files.find(file => file.variant === "baseline") || null;
 }
 
 function readTarString(buffer, offset, length) {
@@ -423,13 +548,28 @@ function isSafeEmbeddedAddonFilename(filename) {
 
 function isEmbeddedAddonFileCurrent(targetPath, file) {
 	try {
-		const stat = fs.statSync(targetPath);
-		if (!stat.isFile()) return false;
-		return typeof file.size !== "number" || stat.size === file.size;
+		const stat = fs.lstatSync(targetPath);
+		if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== file.size) return false;
+		verifyNativeAddonFile({ filePath: targetPath, sha256: file.sha256 });
+		return true;
 	} catch (err) {
-		if (err && err.code === "ENOENT") return false;
+		if (err && (err.code === "ENOENT" || String(err.message).includes("checksum mismatch"))) return false;
 		throw err;
 	}
+}
+
+function canonicalSafeTargetDirectory(targetDir) {
+	const resolvedTargetDir = path.resolve(targetDir);
+	const { root } = path.parse(resolvedTargetDir);
+	let current = root;
+	for (const component of resolvedTargetDir.slice(root.length).split(path.sep).filter(Boolean)) {
+		current = path.join(current, component);
+		const stat = fs.lstatSync(current);
+		if (stat.isSymbolicLink() || !stat.isDirectory()) {
+			throw new Error(`Unsafe embedded addon target directory: ${targetDir}`);
+		}
+	}
+	return fs.realpathSync.native(resolvedTargetDir);
 }
 
 function writeEmbeddedAddonFile(targetPath, content) {
@@ -447,21 +587,31 @@ function writeEmbeddedAddonFile(targetPath, content) {
 	}
 }
 
-export function extractEmbeddedAddonArchive({ archivePath, files, targetDir }) {
-	const pending = new Map();
+export function extractEmbeddedAddonArchive({ archivePath, archiveSha256, files, targetDir }) {
+	const expected = new Map();
 	for (const file of files) {
 		if (!isSafeEmbeddedAddonFilename(file.filename)) {
 			throw new Error(`Unsafe embedded addon filename: ${file.filename}`);
 		}
-		const targetPath = path.join(targetDir, file.filename);
-		if (!isEmbeddedAddonFileCurrent(targetPath, file)) {
-			pending.set(file.filename, file);
+		if (expected.has(file.filename)) throw new Error(`Duplicate embedded addon filename: ${file.filename}`);
+		expected.set(file.filename, file);
+	}
+	const realTargetDir = canonicalSafeTargetDirectory(targetDir);
+	if ([...expected].every(([filename, file]) => isEmbeddedAddonFileCurrent(path.join(realTargetDir, filename), file))) {
+		return [];
+	}
+
+	const archiveGzip = fs.readFileSync(archivePath);
+	if (archiveSha256) {
+		const actualArchiveSha256 = crypto.createHash("sha256").update(archiveGzip).digest("hex");
+		if (actualArchiveSha256 !== archiveSha256) {
+			throw new Error(
+				`Embedded addon archive checksum mismatch: expected ${archiveSha256}, got ${actualArchiveSha256}`,
+			);
 		}
 	}
-	if (pending.size === 0) return [];
-
-	const archive = zlib.gunzipSync(fs.readFileSync(archivePath));
-	const writtenPaths = [];
+	const archive = zlib.gunzipSync(archiveGzip);
+	const entries = new Map();
 	let offset = 0;
 
 	while (offset + 512 <= archive.length) {
@@ -471,44 +621,53 @@ export function extractEmbeddedAddonArchive({ archivePath, files, targetDir }) {
 		const size = readTarOctal(header, 124, 12);
 		const typeflag = header[156] === 0 ? "0" : String.fromCharCode(header[156]);
 		offset += 512;
-
 		if (offset + size > archive.length) {
 			throw new Error(`Truncated embedded addon archive entry: ${filename}`);
 		}
-
 		if (!isSafeEmbeddedAddonFilename(filename)) {
 			throw new Error(`Unsafe embedded addon archive entry: ${filename}`);
 		}
 		if (typeflag !== "0") {
 			throw new Error(`Unsupported embedded addon archive entry type ${typeflag}: ${filename}`);
 		}
-
-		const file = pending.get(filename);
-		if (file) {
-			if (typeof file.size === "number" && file.size !== size) {
-				throw new Error(`Embedded addon size mismatch for ${filename}: expected ${file.size}, got ${size}`);
-			}
-			const targetPath = path.join(targetDir, filename);
-			writeEmbeddedAddonFile(targetPath, archive.subarray(offset, offset + size));
-			pending.delete(filename);
-			writtenPaths.push(targetPath);
+		if (!expected.has(filename)) throw new Error(`Unexpected embedded addon archive entry: ${filename}`);
+		if (entries.has(filename)) throw new Error(`Duplicate embedded addon archive entry: ${filename}`);
+		const file = expected.get(filename);
+		if (file.size !== size) {
+			throw new Error(`Embedded addon size mismatch for ${filename}: expected ${file.size}, got ${size}`);
 		}
-
+		const content = archive.subarray(offset, offset + size);
+		const actualSha256 = crypto.createHash("sha256").update(content).digest("hex");
+		if (actualSha256 !== file.sha256) {
+			throw new Error(
+				`Embedded addon checksum mismatch for ${filename}: expected ${file.sha256}, got ${actualSha256}`,
+			);
+		}
+		entries.set(filename, content);
 		offset += Math.ceil(size / 512) * 512;
 	}
+	const missing = [...expected.keys()].filter(filename => !entries.has(filename));
+	if (missing.length > 0) throw new Error(`Embedded addon archive missing: ${missing.join(", ")}`);
 
-	if (pending.size > 0) {
-		throw new Error(`Embedded addon archive missing: ${[...pending.keys()].join(", ")}`);
+	const writtenPaths = [];
+	for (const [filename, file] of expected) {
+		const targetPath = path.join(realTargetDir, filename);
+		if (isEmbeddedAddonFileCurrent(targetPath, file)) continue;
+		writeEmbeddedAddonFile(targetPath, entries.get(filename));
+		writtenPaths.push(targetPath);
 	}
-
 	return writtenPaths;
 }
 
 function maybeExtractEmbeddedAddon(ctx, errors) {
 	if (!ctx.isCompiledBinary || !embeddedAddon) return null;
-	if (embeddedAddon.platformTag !== ctx.platformTag || embeddedAddon.version !== ctx.packageVersion) return null;
-
-	const selectedEmbeddedFile = selectEmbeddedAddonFile(ctx.selectedVariant);
+	const selectedEmbeddedFile = selectEmbeddedAddonFile({
+		addon: embeddedAddon,
+		platformTag: ctx.platformTag,
+		arch: ctx.arch,
+		variant: ctx.selectedVariant,
+		runtimeNapiAbi: ctx.runtimeNapiAbi,
+	});
 	if (!selectedEmbeddedFile) return null;
 	const targetPath = path.join(ctx.versionedDir, selectedEmbeddedFile.filename);
 
@@ -525,6 +684,7 @@ function maybeExtractEmbeddedAddon(ctx, errors) {
 		try {
 			extractEmbeddedAddonArchive({
 				archivePath: embeddedAddon.archive.filePath,
+				archiveSha256: embeddedAddon.archive.sha256,
 				files: embeddedAddon.files,
 				targetDir: ctx.versionedDir,
 			});
@@ -550,7 +710,14 @@ function maybeExtractEmbeddedAddon(ctx, errors) {
 
 	try {
 		const buffer = fs.readFileSync(selectedEmbeddedFile.filePath);
-		fs.writeFileSync(targetPath, buffer);
+		const actualSha256 = crypto.createHash("sha256").update(buffer).digest("hex");
+		if (actualSha256 !== selectedEmbeddedFile.sha256) {
+			throw new Error(
+				`Embedded addon checksum mismatch for ${selectedEmbeddedFile.filename}: ` +
+					`expected ${selectedEmbeddedFile.sha256}, got ${actualSha256}`,
+			);
+		}
+		writeEmbeddedAddonFile(targetPath, buffer);
 		return targetPath;
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
@@ -700,13 +867,23 @@ function buildHelpMessage(ctx) {
  * helpers from this file doesn't trigger AVX2 detection or filesystem probes.
  */
 /**
- * @param {{ nativeDir?: string; platform?: NodeJS.Platform | string; isCompiledBinary?: boolean; leafPackageDir?: string | null }} [overrides]
+ * @param {{
+ *   nativeDir?: string;
+ *   platform?: NodeJS.Platform | string;
+ *   arch?: string;
+ *   runtimeNapiAbi?: string | number;
+ *   isCompiledBinary?: boolean;
+ *   leafPackageDir?: string | null;
+ *   leafPackageManifest?: Record<string, unknown> | null;
+ * }} [overrides]
  */
 export function initLoaderContext(overrides = {}) {
 	const platform = overrides.platform ?? process.platform;
-	const platformTag = `${platform}-${process.arch}`;
+	const arch = overrides.arch ?? process.arch;
+	const platformTag = selectNativePlatformTag(platform, arch);
+	const runtimeNapiAbi = overrides.runtimeNapiAbi ?? process.versions.napi ?? "0";
 	const packageVersion = packageJson.version;
-	const nativeDir = overrides.nativeDir ?? path.join(import.meta.dir, "..", "native");
+	const nativeDir = overrides.nativeDir ?? path.join(moduleDir, "..", "native");
 	const execDir = path.dirname(process.execPath);
 	const nativesDir = getNativesDir();
 	const versionedDir = path.join(nativesDir, packageVersion);
@@ -727,22 +904,71 @@ export function initLoaderContext(overrides = {}) {
 		!isCompiledBinary &&
 		!normalizedNativeDir.includes("\\node_modules\\") &&
 		!normalizedNativeDir.includes("/node_modules/");
-	const leafPackageDir =
-		isCompiledBinary || isWorkspaceLoad
-			? null
-			: overrides.leafPackageDir === undefined
-				? resolveLeafPackageDir(platformTag)
-				: overrides.leafPackageDir;
+
+	let leafPackageDir = null;
+	let leafMetadata = null;
+	if (!isCompiledBinary && !isWorkspaceLoad) {
+		let leafPackage;
+		if (overrides.leafPackageDir === undefined) {
+			leafPackage = resolveLeafPackage(platformTag);
+		} else if (overrides.leafPackageDir === null) {
+			leafPackage = null;
+		} else {
+			leafPackage = { dir: overrides.leafPackageDir, manifest: overrides.leafPackageManifest };
+		}
+		if (!leafPackage) {
+			throw new Error(`Missing native leaf package @oh-my-pi/pi-natives-${platformTag} for ${platformTag}`);
+		}
+		leafPackageDir = leafPackage.dir;
+		if (leafPackage.manifest) {
+			const manifest = leafPackage.manifest;
+			if (
+				manifest.name !== `@oh-my-pi/pi-natives-${platformTag}` ||
+				manifest.version !== packageVersion ||
+				!Array.isArray(manifest.os) ||
+				manifest.os.length !== 1 ||
+				manifest.os[0] !== platform ||
+				!Array.isArray(manifest.cpu) ||
+				manifest.cpu.length !== 1 ||
+				manifest.cpu[0] !== arch
+			) {
+				throw new Error(`Native leaf package metadata mismatch for ${platformTag}`);
+			}
+			leafMetadata = validateNativeAddonMetadata({
+				metadata: manifest.ompNative,
+				platformTag,
+				runtimeNapiAbi,
+			});
+		}
+	}
+
+	let embeddedMetadata = null;
+	if (isCompiledBinary) {
+		if (!embeddedAddon) throw new Error(`Missing embedded native addon metadata for ${platformTag}`);
+		if (embeddedAddon.version !== packageVersion) {
+			throw new Error(
+				`Embedded native addon version mismatch for ${platformTag}: expected ${packageVersion}, got ${embeddedAddon.version}`,
+			);
+		}
+		embeddedMetadata = validateNativeAddonMetadata({
+			metadata: {
+				platformTag: embeddedAddon.platformTag,
+				napiAbi: embeddedAddon.napiAbi,
+				files: Object.fromEntries(embeddedAddon.files.map(file => [file.filename, { sha256: file.sha256 }])),
+			},
+			platformTag,
+			runtimeNapiAbi,
+		});
+	}
+
 	const stageFromNodeModules = shouldStageNodeModulesAddon({
 		platform,
 		isCompiledBinary,
 		nativeDir: normalizedNativeDir,
 	});
-
-	const selectedVariant = resolveCpuVariant(getVariantOverride());
-	const addonFilenames = getAddonFilenames({ tag: platformTag, arch: process.arch, variant: selectedVariant });
+	const selectedVariant = resolveCpuVariant(getVariantOverride(), arch);
+	const addonFilenames = getAddonFilenames({ tag: platformTag, arch, variant: selectedVariant });
 	const addonLabel = selectedVariant ? `${platformTag} (${selectedVariant})` : platformTag;
-
 	const candidates = resolveLoaderCandidates({
 		addonFilenames,
 		isCompiledBinary,
@@ -753,18 +979,17 @@ export function initLoaderContext(overrides = {}) {
 		versionedDir,
 		userDataDir,
 	});
+	const fileMetadata = leafMetadata?.files ?? embeddedMetadata?.files ?? null;
+	if (fileMetadata && !addonFilenames.some(filename => filename in fileMetadata)) {
+		throw new Error(`Native addon metadata has no loadable file for ${addonLabel}`);
+	}
 
-	// Version sentinel emitted by the Rust addon under a `js_name` that encodes
-	// the package version (`__piNativesV{major}_{minor}_{patch}`).
-	// `scripts/release.ts` bumps the name in `crates/pi-natives/src/lib.rs` in
-	// lock-step with the version, so a `.node` from a different release
-	// physically cannot expose the symbol this loader is looking for. That
-	// turns the silent `<sym> is not a function` crash from a Windows
-	// locked-file update into an actionable load-time error.
 	const versionSentinelExport = `__piNativesV${packageVersion.replace(/[^A-Za-z0-9]/g, "_")}`;
-
 	return {
 		platformTag,
+		platform,
+		arch,
+		runtimeNapiAbi,
 		packageVersion,
 		nativeDir,
 		leafPackageDir,
@@ -775,6 +1000,8 @@ export function initLoaderContext(overrides = {}) {
 		addonFilenames,
 		addonLabel,
 		candidates,
+		fileMetadata,
+		requireCandidateMetadata: !isWorkspaceLoad,
 		versionSentinelExport,
 		isWorkspaceLoad,
 		nativesDir,
@@ -793,12 +1020,21 @@ export function loadNative() {
 	const runtimeCandidates = prepended.length > 0 ? [...prepended, ...ctx.candidates] : ctx.candidates;
 
 	for (const candidate of runtimeCandidates) {
+		if (!fs.existsSync(candidate)) {
+			errors.push(`${candidate}: file not found`);
+			continue;
+		}
 		try {
+			const file = ctx.fileMetadata?.[path.basename(candidate)];
+			if (ctx.requireCandidateMetadata && !file) {
+				throw new Error(`Native addon metadata missing for ${path.basename(candidate)}`);
+			}
+			if (file) verifyNativeAddonFile({ filePath: candidate, sha256: file.sha256 });
 			startupMarker(`native:require:${path.basename(candidate)}`);
 			const bindings = require_(candidate);
 			validateLoadedBindings(ctx, bindings, candidate);
 			installNativeTokioRuntime(bindings);
-	        cleanupStaleNativeVersions({ nativesDir: ctx.nativesDir, currentVersion: ctx.packageVersion });
+			cleanupStaleNativeVersions({ nativesDir: ctx.nativesDir, currentVersion: ctx.packageVersion });
 			startupMarker("native:loadNative:done");
 			return bindings;
 		} catch (err) {
@@ -807,13 +1043,7 @@ export function loadNative() {
 		}
 	}
 
-	if (!SUPPORTED_PLATFORMS.includes(ctx.platformTag)) {
-		throw new Error(
-			`Unsupported platform: ${ctx.platformTag}\n` +
-				`Supported platforms: ${SUPPORTED_PLATFORMS.join(", ")}\n` +
-				"If you need support for this platform, please open an issue.",
-		);
-	}
+
 	const details = errors.map(error => `- ${error}`).join("\n");
 	throw new Error(
 		`Failed to load pi_natives native addon for ${ctx.addonLabel}.\n\nTried:\n${details}\n\n${buildHelpMessage(ctx)}`,

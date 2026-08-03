@@ -2,6 +2,30 @@
 
 This document describes how the coding-agent currently loads models, applies overrides, resolves credentials, and chooses models at runtime.
 
+## ChatGPT Web models
+
+The first-party ChatGPT Web extension registers a keyless `chatgpt-web` provider after its native
+profile and login marker pass validation. It does not create an API-key or OAuth entry in OMP's
+auth store.
+
+```text
+omp chatgpt-web enable
+omp chatgpt-web login
+omp models find "ChatGPT Web"
+omp --model chatgpt-web/medium
+```
+
+The extension exposes `chatgpt-web/light`, `chatgpt-web/medium`, `chatgpt-web/high`, and
+`chatgpt-web/extra-high`; `chatgpt-web/pro` appears only when the verified ChatGPT account exposes
+Pro. Each selector has one fixed effort. In browser-only mode every route reports local tools as
+unsupported. In full mode Instant through Extra High can use the active OMP tool set, while Pro
+remains local-tool read-only.
+
+Do not add this provider to `models.yml` with `auth: none`, an API key, a profile path, or an
+endpoint override. Enable it through the package command so OMP can validate the source-bound,
+generation-bound capability. See [Providers](./providers.md#chatgpt-web) and the
+[package README](../packages/chatgpt-web/README.md).
+
 ## What controls model behavior
 
 Primary implementation files:

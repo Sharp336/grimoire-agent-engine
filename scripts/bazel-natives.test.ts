@@ -15,6 +15,7 @@ import {
 const linuxModern: HostInfo = { platform: "linux", arch: "x64", avx2: true };
 const linuxBaseline: HostInfo = { platform: "linux", arch: "x64", avx2: false };
 const macArm: HostInfo = { platform: "darwin", arch: "arm64", avx2: false };
+const windowsArm: HostInfo = { platform: "win32", arch: "arm64", avx2: false };
 
 describe("hostTargetName", () => {
 	test("picks the x64 variant from AVX2 support", () => {
@@ -28,13 +29,14 @@ describe("hostTargetName", () => {
 		expect(hostTargetName(macArm)).toBe("darwin-arm64");
 		expect(hostTargetName({ platform: "linux", arch: "arm64", avx2: false })).toBe("linux-arm64");
 		expect(hostTargetName({ platform: "win32", arch: "x64", avx2: true })).toBe("win32-x64-baseline");
+		expect(hostTargetName(windowsArm)).toBe("win32-arm64");
 	});
 
 	test("rejects hosts without an addon target", () => {
 		expect(() => hostTargetName({ platform: "freebsd", arch: "x64", avx2: false })).toThrow(
 			/No pi_natives addon target/,
 		);
-		expect(() => hostTargetName({ platform: "win32", arch: "arm64", avx2: false })).toThrow(
+		expect(() => hostTargetName({ platform: "win32", arch: "ia32", avx2: false })).toThrow(
 			/No pi_natives addon target/,
 		);
 	});
@@ -61,10 +63,17 @@ describe("resolveTargetLabels", () => {
 
 describe("conventionOutputPaths", () => {
 	test("builds bazel-bin paths with canonical filenames (musl reuses linux names)", () => {
-		expect(conventionOutputPaths(["linux-musl-x64-baseline", "win32-x64-baseline"], macArm)).toEqual([
+		expect(conventionOutputPaths(["linux-musl-x64-baseline", "win32-x64-baseline", "win32-arm64"], macArm)).toEqual([
 			"bazel-bin/natives-linux-musl-x64-baseline/pi_natives.linux-x64-baseline.node",
 			"bazel-bin/natives-win32-x64-baseline/pi_natives.win32-x64-baseline.node",
+			"bazel-bin/natives-win32-arm64/pi_natives.win32-arm64.node",
 		]);
+	});
+	test("keeps Windows x64 and arm64 output basenames distinct", () => {
+		const outputs = conventionOutputPaths(["win32-x64-baseline", "win32-arm64"], windowsArm);
+		const basenames = outputs.map(output => path.basename(output));
+		expect(basenames).toEqual(["pi_natives.win32-x64-baseline.node", "pi_natives.win32-arm64.node"]);
+		expect(new Set(basenames).size).toBe(basenames.length);
 	});
 
 	test("expands aggregates and the host pseudo-target", () => {
@@ -74,6 +83,9 @@ describe("conventionOutputPaths", () => {
 		]);
 		expect(conventionOutputPaths(["host"], linuxBaseline)).toEqual([
 			"bazel-bin/natives-linux-x64-baseline/pi_natives.linux-x64-baseline.node",
+		]);
+		expect(conventionOutputPaths(["host"], windowsArm)).toEqual([
+			"bazel-bin/natives-win32-arm64/pi_natives.win32-arm64.node",
 		]);
 	});
 });
@@ -135,20 +147,24 @@ describe("artifact source install", () => {
 		const dest = path.join(root, "dest");
 		const baseline = "pi_natives.linux-x64-baseline.node";
 		const modern = "pi_natives.linux-x64-modern.node";
+		const windowsArmFile = "pi_natives.win32-arm64.node";
 		try {
 			await fs.mkdir(path.join(source, "natives-linux-x64-baseline"), { recursive: true });
 			await fs.mkdir(path.join(source, "natives-linux-x64-modern"), { recursive: true });
+			await fs.mkdir(path.join(source, "natives-win32-arm64"), { recursive: true });
 			await Bun.write(path.join(source, "natives-linux-x64-baseline", baseline), "baseline");
 			await Bun.write(path.join(source, "natives-linux-x64-modern", modern), "modern");
+			await Bun.write(path.join(source, "natives-win32-arm64", windowsArmFile), "windows arm64");
 
 			const result =
-				await $`${process.execPath} ${path.join(import.meta.dir, "bazel-natives.ts")} linux-x64-baseline linux-x64-modern --source ${source} --dest ${dest}`
+				await $`${process.execPath} ${path.join(import.meta.dir, "bazel-natives.ts")} linux-x64-baseline linux-x64-modern win32-arm64 --source ${source} --dest ${dest}`
 					.quiet()
 					.nothrow();
 
 			expect(result.exitCode).toBe(0);
 			expect(await Bun.file(path.join(dest, baseline)).text()).toBe("baseline");
 			expect(await Bun.file(path.join(dest, modern)).text()).toBe("modern");
+			expect(await Bun.file(path.join(dest, windowsArmFile)).text()).toBe("windows arm64");
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });
 		}
