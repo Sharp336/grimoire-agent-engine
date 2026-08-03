@@ -82,14 +82,6 @@ const AGE_TICK_MS = 5_000;
 const DATA_CHANGE_RENDER_COALESCE_MS = 100;
 /** Double-tap window for the table's left-left "close hub" gesture. */
 const LEFT_TAP_WINDOW_MS = 500;
-/** Below this width the list and inspector stack instead of sharing a row; both panes clip when split narrower. */
-const TWO_PANE_MIN_WIDTH = 110;
-/** The inspector renders short labeled lines, so surplus width belongs to the list's identity + task rows. */
-const INSPECTOR_MAX_WIDTH = 60;
-/** Floor for the list pane so identity rows keep their model badge and age. */
-const LIST_MIN_WIDTH = 48;
-/** Gap between keybinding hints in the footer. */
-const HINT_SEPARATOR = "  ";
 
 /** Two-pane mode needs a useful roster and a readable inspector. */
 const SPLIT_MIN_WIDTH = 96;
@@ -435,7 +427,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	}
 
 	#refreshRows(): void {
-		const selectedId = this.#selectedByTab[this.#tab] ?? this.#rows[this.#selectedRow]?.id;
+		const selectedId = this.#rows[this.#selectedRow]?.id;
 		const refs = this.#registry.list().filter(ref => ref.id !== MAIN_AGENT_ID);
 		this.#observedById = new Map();
 		for (const session of this.#observers.getSessions()) this.#observedById.set(session.id, session);
@@ -458,11 +450,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 				if (!rowOrder.has(ref.id)) rowOrder.set(ref.id, this.#nextRowOrder++);
 			}
 		}
-		for (const ref of refs) {
-			if (!this.#rowOrder.has(ref.id)) this.#rowOrder.set(ref.id, this.#rowOrder.size);
-		}
-		this.#allRows = refs;
-		this.#rows = this.#rowsForTab(this.#tab);
+		this.#allRows = rosterRows;
 
 		if (this.#viewMode === "tree") {
 			const tree = projectAgentTree(rosterRows);
@@ -757,190 +745,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			const count = this.#statusCounts[status];
 			if (count > 0) parts.push(`${statusGlyph(status)} ${statusText(status, `${count} ${status}`)}`);
 		}
-		if (renderedRows.length > 0 && this.#selectedRow >= end) {
-			start = this.#selectedRow;
-			end = this.#selectedRow + 1;
-			visibleLines = renderedRows[this.#selectedRow]?.length ?? 0;
-			while (start > 0 && visibleLines + renderedRows[start - 1]!.length <= maxVisibleLines) {
-				start--;
-				visibleLines += renderedRows[start]!.length;
-			}
-			while (end < renderedRows.length && visibleLines + renderedRows[end]!.length <= maxVisibleLines) {
-				visibleLines += renderedRows[end]!.length;
-				end++;
-			}
-		}
-
-		const lines = [...prefixLines];
-		if (showLeadingMarker) lines.push(` ${theme.fg("dim", `… ${start} more`)}`);
-		const stickyIdleHeader = firstIdle >= 0 && start > firstIdle;
-		if (stickyIdleHeader) lines.push(idleDisclosure(true));
-		if (selectedLines) {
-			if (firstIdle === start) lines.push(idleDisclosure(true));
-			lines.push(...selectedLines);
-		} else {
-			for (let i = start; i < end; i++) {
-				if (i === firstIdle) lines.push(idleDisclosure(true));
-				lines.push(...renderedRows[i]!);
-			}
-		}
-		if (showTrailingMarker) lines.push(` ${theme.fg("dim", `… ${this.#rows.length - end} more`)}`);
-		lines.push(...suffixLines);
-		return lines.slice(0, maxLines);
-	}
-
-	#runtimeView(ref: AgentRef): AgentRuntimeView {
-		const progress = this.#observableFor(ref.id)?.progress;
-		const view: AgentRuntimeView = {
-			model: progress?.resolvedModel,
-			thinkingLevel: progress?.thinkingLevel,
-			lspEnabled: progress?.lspEnabled,
-			advisorActive: progress?.advisorActive,
-			turns: progress?.requests,
-			tokens: progress?.tokens,
-			contextTokens: progress?.contextTokens,
-			contextWindow: progress?.contextWindow,
-			toolCount: progress?.toolCount,
-			cost: progress?.cost,
-		};
-		const session = ref.session;
-		if (!session) return view;
-		try {
-			if (session.model) view.model = formatModelStringWithRouting(session.model);
-		} catch {}
-		try {
-			const thinkingLevel = session.thinkingLevel;
-			if (thinkingLevel !== undefined) view.thinkingLevel = thinkingLevel;
-		} catch {}
-		try {
-			const toolNames = session.getActiveToolNames?.();
-			if (toolNames !== undefined) {
-				view.lspEnabled = toolNames.includes("lsp");
-			}
-		} catch {}
-		try {
-			const advisorActive = session.isAdvisorActive?.();
-			if (advisorActive !== undefined) {
-				view.advisorActive = advisorActive;
-			}
-		} catch {}
-
-		const metrics: AgentRuntimeView = {};
-		let hasSessionStats = false;
-		try {
-			const stats = session.getSessionStats?.();
-			if (stats) {
-				hasSessionStats = true;
-				metrics.turns = stats.assistantMessages;
-				metrics.tokens = stats.tokens.input + stats.tokens.output + stats.tokens.cacheWrite;
-				metrics.toolCount = stats.toolCalls;
-				metrics.cost = stats.cost;
-				metrics.contextTokens = stats.contextUsage?.tokens;
-				metrics.contextWindow = stats.contextUsage?.contextWindow;
-			}
-		} catch {}
-		if (!hasSessionStats) {
-			try {
-				const context = session.getContextUsage?.();
-				if (context) {
-					metrics.contextTokens = context.tokens;
-					metrics.contextWindow = context.contextWindow;
-				}
-			} catch {}
-		}
-		Object.assign(view, metrics);
-		return view;
-	}
-
-	#renderInspector(ref: AgentRef | undefined, width: number): string[] {
-		if (!ref) return [` ${theme.fg("dim", "No agent selected.")}`];
-		const observed = this.#observableFor(ref.id);
-		const progress = observed?.progress;
-		const runtime = this.#runtimeView(ref);
-		const unknown = "unknown";
-		const capability = (value: boolean | undefined): string => (value === undefined ? unknown : value ? "on" : "off");
-		const age = formatAge(Math.max(1, Math.round((Date.now() - ref.lastActivity) / 1000)));
-		const parent = ref.parentId ? `${ref.kind}/of ${sanitizeLine(ref.parentId)}` : ref.kind;
-		const lines = [
-			` ${theme.bold(sanitizeLine(ref.id))} · ${ref.status} · ${parent} · unread ${this.#irc.unreadCount(ref.id)} · ${age}`,
-		];
-		const task = observed?.description ?? progress?.assignment ?? progress?.task;
-		const fallbackModel =
-			ref.session?.retryFallbackModel ?? (progress?.resolvedModelIsFallback ? progress.resolvedModel : undefined);
-		// Nullish coalescing keeps `false` and `0` as known values. `AgentProgress` declares its
-		// counters as required numbers, so a ref with progress always resolves one; the guard below
-		// therefore selects refs with neither progress nor session-derived runtime, keeping the
-		// runtime-but-no-progress case on the full layout.
-		const firstKnownRuntimeValue =
-			fallbackModel ??
-			runtime.model ??
-			runtime.thinkingLevel ??
-			runtime.advisorActive ??
-			runtime.lspEnabled ??
-			runtime.turns ??
-			runtime.tokens ??
-			runtime.contextTokens ??
-			runtime.toolCount ??
-			runtime.cost;
-		if (firstKnownRuntimeValue === undefined && !progress) {
-			if (task) lines.push(` Task: ${sanitizeLine(task, TRUNCATE_LENGTHS.TITLE)}`);
-			lines.push(` ${theme.fg("dim", "No runtime data · t opens the transcript.")}`);
-			return lines.map(line => truncateToWidth(line, Math.max(1, width)));
-		}
-		lines.push(` Task: ${task ? sanitizeLine(task, TRUNCATE_LENGTHS.TITLE) : unknown}`);
-		const modelLabel = fallbackModel ? `fallback → ${fallbackModel}` : (runtime.model ?? unknown);
-		lines.push(` Model ${sanitizeLine(modelLabel)} · Reasoning ${runtime.thinkingLevel ?? unknown}`);
-		lines.push(` Advisor ${capability(runtime.advisorActive)} · LSP ${capability(runtime.lspEnabled)}`);
-		const context =
-			runtime.contextTokens === undefined
-				? unknown
-				: formatContextUsage(
-						runtime.contextWindow && runtime.contextWindow > 0
-							? (runtime.contextTokens / runtime.contextWindow) * 100
-							: undefined,
-						runtime.contextWindow ?? 0,
-						runtime.contextTokens,
-					);
-		lines.push(
-			` Turns ${runtime.turns === undefined ? unknown : formatNumber(runtime.turns)} · Tokens ${runtime.tokens === undefined ? unknown : formatNumber(runtime.tokens)} · Context ${context}`,
-		);
-		lines.push(
-			` Tools ${runtime.toolCount === undefined ? unknown : formatNumber(runtime.toolCount)} · Duration ${progress ? formatDuration(progress.durationMs) : unknown} · Cost ${runtime.cost === undefined ? unknown : `$${runtime.cost.toFixed(2)}`}`,
-		);
-		if (!progress) {
-			lines.push(` ${theme.fg("dim", "No structured progress yet.")}`);
-			if (this.#tab === "archive") lines.push(` ${theme.fg("dim", "Open transcript for persisted details.")}`);
-			return lines.map(line => truncateToWidth(line, Math.max(1, width)));
-		}
-
-		let activity = progress.lastIntent;
-		if (progress.currentTool) {
-			const elapsed = progress.currentToolStartMs
-				? ` · ${formatDuration(Math.max(0, Date.now() - progress.currentToolStartMs))}`
-				: "";
-			activity = `${progress.currentTool}${progress.currentToolArgs ? ` ${progress.currentToolArgs}` : ""}${elapsed}`;
-		}
-		if (progress.retryState) {
-			const remainingDelayMs = Math.max(
-				0,
-				progress.retryState.startedAtMs + progress.retryState.delayMs - Date.now(),
-			);
-			activity = `retry ${progress.retryState.attempt}/${progress.retryState.maxAttempts} in ${formatDuration(remainingDelayMs)}: ${progress.retryState.errorMessage}`;
-		} else if (progress.retryFailure) {
-			activity = `retry failed at ${progress.retryFailure.attempt}: ${progress.retryFailure.errorMessage}`;
-		}
-		lines.push(` Activity: ${sanitizeLine(activity ?? unknown, TRUNCATE_LENGTHS.TITLE)}`);
-		const recent = progress.recentTools?.slice(0, 3) ?? [];
-		if (recent.length === 0) {
-			lines.push(" Recent tools: none");
-		} else {
-			lines.push(" Recent tools:");
-			for (const tool of recent) {
-				const detail = `${tool.tool}${tool.args ? ` ${tool.args}` : ""} · ${formatAge(Math.max(1, Math.round((Date.now() - tool.endMs) / 1000)))}`;
-				lines.push(`  ${sanitizeLine(detail, TRUNCATE_LENGTHS.TITLE)}`);
-			}
-		}
-		return lines.map(line => truncateToWidth(line, Math.max(1, width)));
+		return parts.join(theme.fg("dim", theme.sep.dot));
 	}
 
 	#refreshAggregate(refreshFallback = false): void {
@@ -1241,7 +1046,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			if (selected) this.openChat(selected.id);
 			return;
 		}
-		if (this.#tab === "archive" && keyData === "r") {
+		if (keyData === "r") {
 			this.#reviveSelected();
 			return;
 		}
@@ -1256,7 +1061,13 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	 */
 	#activateAgent(ref: AgentRef): void {
 		this.#notice = undefined;
-		if (this.#tab === "archive" || this.#remote || !this.#focusAgent) {
+		if (
+			ref.kind === "advisor" ||
+			ref.status === "parked" ||
+			ref.status === "aborted" ||
+			this.#remote ||
+			!this.#focusAgent
+		) {
 			this.openChat(ref.id);
 			return;
 		}

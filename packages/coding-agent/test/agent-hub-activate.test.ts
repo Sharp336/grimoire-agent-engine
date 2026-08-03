@@ -16,6 +16,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import type { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { visitEntriesFromFileStream } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
@@ -119,7 +120,7 @@ describe("Agent hub Enter activation", () => {
 		hub.dispose();
 	});
 
-	it("t opens the active transcript without changing focus", () => {
+	it("openChat opens the active transcript without changing focus", () => {
 		const focusedIds: string[] = [];
 		const agents = new AgentRegistry();
 		agents.register({
@@ -136,6 +137,8 @@ describe("Agent hub Enter activation", () => {
 			onDone: () => {},
 			requestRender: () => {},
 			registry: agents,
+			settings: Settings.isolated(),
+			isBuiltInTool: () => false,
 			irc: new IrcBus(agents),
 			focusAgent: async id => {
 				focusedIds.push(id);
@@ -151,7 +154,7 @@ describe("Agent hub Enter activation", () => {
 			} as never,
 		});
 
-		hub.handleInput("t");
+		hub.openChat(AGENT_ID);
 		expect(overlayCalls).toBe(1);
 		expect(focusedIds).toEqual([]);
 		hub.dispose();
@@ -198,6 +201,7 @@ describe("Agent hub Enter activation", () => {
 		expect(release).toHaveBeenCalledWith(
 			AGENT_ID,
 			expect.objectContaining({ id: AGENT_ID, status: "running", session }),
+			{ tombstone: true },
 		);
 		expect(Bun.stripANSI(hub.render(120).join("\n"))).not.toContain("Press x again");
 		hub.dispose();
@@ -734,6 +738,7 @@ describe("Agent hub double-← gating", () => {
 				},
 				requestRender: () => {},
 			},
+			settings: Settings.isolated(),
 			editor,
 			editorContainer: {
 				children: [editor],
@@ -742,7 +747,7 @@ describe("Agent hub double-← gating", () => {
 			},
 			collabGuest: { agentRegistry: agents, hubRemote: undefined },
 			focusAgentSession: async () => {},
-			session: { getToolByName: () => undefined, extensionRunner: undefined },
+			session: { getToolByName: () => undefined, hasBuiltInTool: () => false, extensionRunner: undefined },
 			sessionManager: { getCwd: () => TEST_CWD, getSessionFile: () => sessionFile },
 			hideThinkingBlock: false,
 		};
