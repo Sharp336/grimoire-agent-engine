@@ -542,7 +542,19 @@ async function collectAuthFindings(flags: DoctorCommandFlags): Promise<DoctorFin
 			.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'auth_credentials'")
 			.get() as { present?: number } | undefined;
 		if (tableRow?.present !== 1) {
-			if (findings.length > 0) return findings;
+			if (findings.length > 0) {
+				// A staged schema-mismatch warning means this DB is from another
+				// OMP generation; a missing credentials table is not "no credentials"
+				// — keep the warning and surface the incompatible/unavailable layout.
+				findings.push({
+					id: "auth.storage",
+					category: "auth",
+					status: "error",
+					summary: "auth credential layout/table is incompatible or unavailable",
+					details: [],
+				});
+				return findings;
+			}
 			return [{ id: "auth.storage", category: "auth", status: "ok", summary: "no credentials stored", details: [] }];
 		}
 		const authCols = db.query("PRAGMA table_info(auth_credentials)").all() as Array<{ name?: string }>;

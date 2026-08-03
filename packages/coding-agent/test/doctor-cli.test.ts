@@ -1357,6 +1357,35 @@ describe("omp doctor", () => {
 		expect(JSON.stringify(report)).not.toContain("sk-future-layout");
 	});
 
+	test("auth: newer auth schema with missing auth_credentials table → warning and layout error", async () => {
+		const dbPath = getAgentDbPath(root);
+		const newerVersion = AUTH_SCHEMA_VERSION + 1;
+		await fs.mkdir(path.dirname(dbPath), { recursive: true });
+		const db = new Database(dbPath);
+		db.run("PRAGMA journal_mode=DELETE");
+		db.run(`
+			CREATE TABLE auth_schema_version (
+				id INTEGER PRIMARY KEY CHECK (id = 1),
+				version INTEGER NOT NULL
+			);
+		`);
+		db.run("INSERT INTO auth_schema_version (id, version) VALUES (1, ?)", [newerVersion]);
+		db.close();
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const schemaFinding = report.findings.find(
+			entry =>
+				entry.id === "auth.storage" &&
+				entry.details[0] === `schema version ${newerVersion} (current ${AUTH_SCHEMA_VERSION})`,
+		);
+		expect(schemaFinding?.status).toBe("warning");
+		expect(schemaFinding?.summary).toBe("auth database schema is pending automatic migration");
+		expect(schemaFinding?.details).toEqual([`schema version ${newerVersion} (current ${AUTH_SCHEMA_VERSION})`]);
+		const layoutFinding = report.findings.find(entry => entry.id === "auth.storage" && entry.status === "error");
+		expect(layoutFinding?.summary).toBe("auth credential layout/table is incompatible or unavailable");
+		expect(layoutFinding?.details).toEqual([]);
+	});
+
 	test("auth: valid stored credential → ok", async () => {
 		const dbPath = getAgentDbPath(root);
 		// Real api_key `data` shape: { key }.
