@@ -323,6 +323,7 @@ describe("RpcInputDispatcher", () => {
 					command: "get_state",
 					success: true,
 					data: {
+						mode: "none",
 						thinkingLevel: undefined,
 						isStreaming: false,
 						activityPhase: "idle",
