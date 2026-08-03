@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an optional `crawl` startup changelog mode that plays complete release notes as a yellow cinematic crawl with twinkling terminal stars in every interactive terminal.
+
 ## [17.2.7] - 2026-08-03
 
 ### Changed

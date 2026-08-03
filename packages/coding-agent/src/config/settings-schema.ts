@@ -1841,13 +1841,13 @@ export const SETTINGS_SCHEMA = {
 
 	"startup.changelogMode": {
 		type: "enum",
-		values: ["summary", "expanded", "hidden"] as const,
+		values: ["summary", "expanded", "crawl", "hidden"] as const,
 		default: "summary",
 		ui: {
 			tab: "interaction",
 			group: "Startup & Updates",
 			label: "Startup Changelog",
-			description: "Choose whether update notes start as a summary, full details, or stay hidden",
+			description: "Choose whether update notes start as a summary, full details, a cinematic crawl, or stay hidden",
 			options: [
 				{
 					value: "summary",
@@ -1858,6 +1858,11 @@ export const SETTINGS_SCHEMA = {
 					value: "expanded",
 					label: "Expanded",
 					description: "Show the recent release notes in full",
+				},
+				{
+					value: "crawl",
+					label: "Crawl",
+					description: "Play the full release notes as a yellow cinematic crawl",
 				},
 				{
 					value: "hidden",
