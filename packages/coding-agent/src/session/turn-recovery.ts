@@ -171,7 +171,6 @@ export class TurnRecovery {
 	#retryAttempt = 0;
 	// Cached replay attempts may omit the already-resolved tool block, so keep the
 	// safety cap on saga state instead of trying to reclassify every failed turn.
-	#cursorInterruptedExecRetryActive = false;
 	#cursorInterruptedExecRetrySaga = false;
 	#cursorInterruptedExecRetryAttempt = 0;
 	#retryPromise: Promise<void> | undefined;
@@ -375,7 +374,6 @@ export class TurnRecovery {
 
 	#resetRetrySaga(): void {
 		this.#retryAttempt = 0;
-		this.#cursorInterruptedExecRetryActive = false;
 		this.#cursorInterruptedExecRetrySaga = false;
 		this.#cursorInterruptedExecRetryAttempt = 0;
 	}
@@ -1377,9 +1375,12 @@ export class TurnRecovery {
 		if (!retrySettings.enabled && !options?.fireworksFastFallback) return false;
 		const classifierRefusal = this.isClassifierRefusal(message);
 		if (message.provider === "cursor" && options?.preserveFailedTurn) {
-			this.#cursorInterruptedExecRetryActive = true;
 			this.#cursorInterruptedExecRetrySaga = true;
 		}
+		// Model changes can happen through UI/RPC/extensions while a retry sleeps,
+		// so provider activity must be derived from the failing request rather than
+		// retained from whichever path last changed the model.
+		const cursorInterruptedExecRetryActive = this.#cursorInterruptedExecRetrySaga && message.provider === "cursor";
 
 		const generation = this.#host.promptGeneration();
 		this.#retryAttempt++;
@@ -1404,10 +1405,10 @@ export class TurnRecovery {
 		const cursorMaxRetries = Math.min(retrySettings.maxRetries, 2);
 		const maxRetries = this.#isOpenRouterThinkingStreamClose(message)
 			? Math.min(retrySettings.maxRetries, 1)
-			: this.#cursorInterruptedExecRetryActive
+			: cursorInterruptedExecRetryActive
 				? cursorMaxRetries
 				: retrySettings.maxRetries;
-		const budgetAttempt = this.#cursorInterruptedExecRetryActive
+		const budgetAttempt = cursorInterruptedExecRetryActive
 			? this.#cursorInterruptedExecRetryAttempt
 			: this.#retryAttempt;
 		const retryBudgetExhausted = budgetAttempt > maxRetries;
@@ -1496,11 +1497,6 @@ export class TurnRecovery {
 				switchedModel = await this.#tryFireworksFastFallback(currentSelector);
 			}
 			if (switchedModel) {
-				// Leaving Cursor suspends its two-retry watchdog while another
-				// provider uses the configured budget. Keep the saga latch so a
-				// later fallback back into Cursor reactivates the spent safety cap.
-				this.#cursorInterruptedExecRetryActive =
-					this.#cursorInterruptedExecRetrySaga && this.#host.model()?.provider === "cursor";
 				delayMs = 0;
 			} else if (usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs) {
 				delayMs = parsedRetryAfterMs;

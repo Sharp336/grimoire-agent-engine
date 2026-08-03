@@ -2115,6 +2115,111 @@ describe("AgentSession retry delay cap", () => {
 		expect(lastAssistant(session).content).toContainEqual({ type: "text", text: "recovered on fallback budget" });
 	});
 
+	it("derives the Cursor cap again after a manual provider switch during retry sleep", async () => {
+		const cursorModel = createMockModel({ id: "composer-2.5", provider: "cursor" });
+		const manualModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!manualModel) throw new Error("Expected bundled Anthropic model to exist");
+		authStorage.setRuntimeApiKey("cursor", "cursor-test-key");
+
+		const requestedModels: string[] = [];
+		const manualMock = createMockModel({
+			responses: [
+				{ throw: "502 upstream_error: manual model transient one" },
+				{ throw: "502 upstream_error: manual model transient two" },
+				{ content: ["recovered after manual switch"] },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: { model: cursorModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requestedModel, requestContext, options) => {
+				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+				if (requestedModel.provider !== "cursor") return manualMock.stream(requestedModel, requestContext, options);
+
+				const callId = "cursor-read-before-manual-switch";
+				const toolCall = {
+					type: "toolCall" as const,
+					id: callId,
+					name: "read",
+					arguments: { path: "/workspace/file.txt" },
+					[kCursorExecResolved]: true as const,
+				};
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(async () => {
+					const partial: AssistantMessage = {
+						role: "assistant",
+						content: [toolCall],
+						api: cursorModel.api,
+						provider: cursorModel.provider,
+						model: cursorModel.id,
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "stop",
+						timestamp: Date.now(),
+					};
+					stream.push({ type: "start", partial });
+					await options?.cursorOnToolResult?.({
+						role: "toolResult",
+						toolCallId: callId,
+						toolName: "read",
+						content: [{ type: "text", text: "file body" }],
+						isError: false,
+						timestamp: Date.now(),
+					});
+					stream.push({ type: "toolcall_start", contentIndex: 0, partial });
+					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
+					stream.push({
+						type: "error",
+						reason: "error",
+						error: {
+							...partial,
+							stopReason: "error",
+							errorMessage: "Cursor stream ended before turnEnded",
+							errorId: AIError.create(AIError.Flag.Transient),
+						},
+					});
+				});
+				return stream;
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 4,
+			"retry.modelFallback": false,
+		});
+		settings.setModelRole("default", `${cursorModel.provider}/${cursorModel.id}`);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		let switched = false;
+		vi.spyOn(scheduler, "wait").mockImplementation(async () => {
+			if (switched || !requestedModels.some(selector => selector.startsWith("cursor/"))) return;
+			switched = true;
+			await session?.setModel(manualModel);
+		});
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+		});
+
+		await session.prompt("Trigger a manual provider switch during Cursor retry sleep");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([
+			`${cursorModel.provider}/${cursorModel.id}`,
+			`${manualModel.provider}/${manualModel.id}`,
+			`${manualModel.provider}/${manualModel.id}`,
+			`${manualModel.provider}/${manualModel.id}`,
+		]);
+		expect(retryStartEvents.map(event => event.maxAttempts)).toEqual([2, 4, 4]);
+		expect(lastAssistant(session).content).toContainEqual({ type: "text", text: "recovered after manual switch" });
+	});
+
 	it("reactivates the interrupted Cursor cap when a mixed fallback chain returns to Cursor", async () => {
 		const initialModel = createMockModel({ id: "composer-2.5", provider: "cursor" });
 		const intermediateModel = getBundledModel("anthropic", "claude-sonnet-4-5");
