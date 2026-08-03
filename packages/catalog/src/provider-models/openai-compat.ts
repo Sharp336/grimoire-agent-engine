@@ -2878,15 +2878,27 @@ export function alibabaTokenPlanModelManagerOptions(
 					filterModel: (_entry, model) => isAlibabaTokenPlanChatModelId(model.id),
 					mapModel: (_entry, defaults) => {
 						const reference = ALIBABA_TOKEN_PLAN_STATIC_MODELS.find(model => model.id === defaults.id);
-						return reference
-							? {
-									...reference,
-									id: defaults.id,
-									api: defaults.api,
-									provider: defaults.provider,
-									baseUrl: defaults.baseUrl,
-								}
-							: defaults;
+						if (reference) {
+							return {
+								...reference,
+								id: defaults.id,
+								api: defaults.api,
+								provider: defaults.provider,
+								baseUrl: defaults.baseUrl,
+							};
+						}
+						// DeepSeek V4 family models discovered dynamically need reasoning config
+						if (defaults.id.startsWith("deepseek-v4")) {
+							return {
+								...defaults,
+								reasoning: true,
+								thinking: {
+									mode: "effort" as const,
+									efforts: [Effort.High, Effort.Max],
+								},
+							};
+						}
+						return defaults;
 					},
 					fetch: config?.fetch,
 				}),
