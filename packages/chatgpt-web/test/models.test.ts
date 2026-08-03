@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { Effort } from "@oh-my-pi/pi-catalog";
 import {
 	availableChatGptWebModelRoutes,
 	CHATGPT_WEB_MODEL_ROUTES,
@@ -29,11 +30,11 @@ describe("ChatGPT Web model routes", () => {
 	test("maps each route to one exact effort without remote capability claims", () => {
 		const models = createChatGptWebProviderModels(true, true);
 		expect(models.map(model => [model.id, model.thinking])).toEqual([
-			["light", { mode: "effort", efforts: ["low"], defaultLevel: "low" }],
-			["medium", { mode: "effort", efforts: ["medium"], defaultLevel: "medium" }],
-			["high", { mode: "effort", efforts: ["high"], defaultLevel: "high" }],
-			["extra-high", { mode: "effort", efforts: ["xhigh"], defaultLevel: "xhigh" }],
-			["pro", { mode: "effort", efforts: ["max"], defaultLevel: "max" }],
+			["light", { mode: "effort", efforts: [Effort.Low], defaultLevel: Effort.Low }],
+			["medium", { mode: "effort", efforts: [Effort.Medium], defaultLevel: Effort.Medium }],
+			["high", { mode: "effort", efforts: [Effort.High], defaultLevel: Effort.High }],
+			["extra-high", { mode: "effort", efforts: [Effort.XHigh], defaultLevel: Effort.XHigh }],
+			["pro", { mode: "effort", efforts: [Effort.Max], defaultLevel: Effort.Max }],
 		]);
 		for (const model of models) {
 			expect(model.reasoning).toBe(true);

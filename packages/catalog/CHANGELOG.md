@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `bedrock-mantle` provider with authenticated model discovery for OpenAI GPT-5.4, GPT-5.5, and GPT-5.6 models served through Amazon Bedrock's Responses endpoint ([#7080](https://github.com/can1357/oh-my-pi/pull/7080) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+
+### Fixed
+
+- Fixed `deepseek-v4` family models (e.g. `deepseek-v4-flash-0731`) discovered dynamically by `alibaba-token-plan` missing reasoning configuration and the `max` thinking effort.
+- Fixed GitHub Copilot dynamic discovery retaining stale bundled prices for default-context models instead of using the provider's reported default-tier prices ([#7471](https://github.com/can1357/oh-my-pi/issues/7471)).
+- Removed unusable Converse entries for OpenAI models that Amazon Bedrock serves only through Mantle and corrected GPT-5.6 Luna and Terra pricing ([#7080](https://github.com/can1357/oh-my-pi/pull/7080) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+
+## [17.2.5] - 2026-08-03
+
+### Fixed
+
+- Fixed an issue where newly advertised chat models were dropped during dynamic discovery for the `alibaba-token-plan` provider.
+- Fixed a `400` error when forcing a specific tool with DeepSeek reasoning models on OpenCode Zen/Go gateways by automatically downgrading the tool selection mode to `auto` while keeping the tool advertised.
+
 ## [17.2.4] - 2026-08-01
 
 ### Added

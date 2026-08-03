@@ -104,7 +104,7 @@ describe("package boundary", () => {
 		const manifest = await readJson<PackageManifest>(path.join(PACKAGE_ROOT, "package.json"));
 
 		expect(manifest.name).toBe("@oh-my-pi/pi-chatgpt-web");
-		expect(manifest.version).toBe("17.2.4");
+		expect(manifest.version).toBe("17.2.5");
 		expect("private" in manifest).toBe(false);
 		expect(manifest.bin).toEqual({ "chatgpt-web": "./src/cli.ts" });
 		expect(manifest.engines).toEqual({ bun: ">=1.3.14" });
@@ -176,7 +176,7 @@ describe("package boundary", () => {
 		expect(rootManifest.workspaces.catalog["@types/turndown"]).toBe("5.0.6");
 		expect(workspace).toEqual({
 			name: "@oh-my-pi/pi-chatgpt-web",
-			version: "17.2.4",
+			version: "17.2.5",
 			bin: { "chatgpt-web": "./src/cli.ts" },
 			dependencies: {
 				"@modelcontextprotocol/sdk": "catalog:",

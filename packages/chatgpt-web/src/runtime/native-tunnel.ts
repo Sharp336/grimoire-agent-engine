@@ -27,7 +27,7 @@ import {
 } from "../mcp/tunnel";
 
 const PACKAGE_NAME = "@oh-my-pi/pi-chatgpt-web" as const;
-const PACKAGE_VERSION = "17.2.4" as const;
+const PACKAGE_VERSION = "17.2.5" as const;
 const PACKAGE_CLI_NAME = "chatgpt-web" as const;
 const PACKAGE_CLI_RELATIVE_PATH = "app/cli.js" as const;
 const PACKAGE_CLI_ARGV = Object.freeze(["mcp", "--broker-handoff"] as const);

@@ -117,8 +117,11 @@ export function isSoftToolRequirement(directive: ToolChoiceDirective | undefined
 	return typeof directive === "object" && directive !== null && (directive as SoftToolRequirement).soft === true;
 }
 
-/** Source category for a queued steering interrupt observed without consuming the queue. */
-export type SteeringInterruptSource = "user" | "system" | "unknown";
+/**
+ * Source category for a queued steering interrupt observed without consuming the queue.
+ * Distinguishes real-user, agent-authored, system/advisor, and unknown steering.
+ */
+export type SteeringInterruptSource = "user" | "agent" | "system" | "unknown";
 
 /** Non-consuming summary of whether queued steering should interrupt a tool batch. */
 export interface SteeringQueueState {

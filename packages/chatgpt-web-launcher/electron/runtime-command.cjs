@@ -1,7 +1,7 @@
 "use strict";
 
 const PACKAGE_NAME = "@oh-my-pi/pi-chatgpt-web-launcher";
-const PACKAGE_VERSION = "17.2.4";
+const PACKAGE_VERSION = "17.2.5";
 const CLI_ENTRYPOINT = "app/cli.js";
 const MCP_ENTRYPOINT = "app/mcp-main.js";
 

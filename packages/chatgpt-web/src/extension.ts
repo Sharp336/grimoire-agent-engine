@@ -36,7 +36,7 @@ interface StructuralExtensionApi {
 			auth: "none";
 			keylessCapability: object;
 			streamSimple: ChatGptWebStream;
-			models: readonly ChatGptWebProviderModel[];
+			models: ChatGptWebProviderModel[];
 		},
 	): void;
 }
@@ -44,7 +44,7 @@ interface StructuralExtensionApi {
 export interface ChatGptWebExtensionDependencies {
 	readonly readConfig: () => Promise<ChatGptWebRuntimeConfig | null>;
 	readonly readLoginStatus: () => Promise<ChatGptWebLoginStatus | null>;
-	readonly createModels: (proAvailable: boolean, fullMode: boolean) => readonly ChatGptWebProviderModel[];
+	readonly createModels: (proAvailable: boolean, fullMode: boolean) => ChatGptWebProviderModel[];
 	readonly createStream: (options?: ChatGptWebStreamOptions) => ChatGptWebStream;
 }
 

@@ -1,3 +1,5 @@
+import { Effort } from "@oh-my-pi/pi-catalog";
+
 export type ChatGptWebEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface ChatGptWebModelRoute {
@@ -9,25 +11,33 @@ export interface ChatGptWebModelRoute {
 }
 
 export interface ChatGptWebProviderModel {
-	readonly id: string;
-	readonly name: string;
-	readonly reasoning: true;
-	readonly thinking: {
-		readonly mode: "effort";
-		readonly efforts: readonly [ChatGptWebEffort];
-		readonly defaultLevel: ChatGptWebEffort;
+	id: string;
+	name: string;
+	reasoning: true;
+	thinking: {
+		mode: "effort";
+		efforts: [Effort];
+		defaultLevel: Effort;
 	};
-	readonly contextWindow: 256_000;
-	readonly maxTokens: 64_000;
-	readonly cost: {
-		readonly input: 0;
-		readonly output: 0;
-		readonly cacheRead: 0;
-		readonly cacheWrite: 0;
+	contextWindow: 256_000;
+	maxTokens: 64_000;
+	cost: {
+		input: 0;
+		output: 0;
+		cacheRead: 0;
+		cacheWrite: 0;
 	};
-	readonly input: readonly ["text", "image"];
-	readonly supportsTools: boolean;
+	input: ["text", "image"];
+	supportsTools: boolean;
 }
+
+const PROVIDER_EFFORT_BY_WEB_EFFORT: Record<ChatGptWebEffort, Effort> = {
+	low: Effort.Low,
+	medium: Effort.Medium,
+	high: Effort.High,
+	xhigh: Effort.XHigh,
+	max: Effort.Max,
+};
 
 export const CHATGPT_WEB_MODEL_ROUTES = [
 	{
@@ -86,23 +96,23 @@ export function requireChatGptWebModelRoute(selector: string, proAvailable: bool
 	return route;
 }
 
-export function createChatGptWebProviderModels(
-	proAvailable: boolean,
-	fullMode: boolean,
-): readonly ChatGptWebProviderModel[] {
-	return availableChatGptWebModelRoutes(proAvailable).map(route => ({
-		id: route.key,
-		name: route.name,
-		reasoning: true,
-		thinking: {
-			mode: "effort",
-			efforts: [route.effort],
-			defaultLevel: route.effort,
-		},
-		contextWindow: 256_000,
-		maxTokens: 64_000,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		input: ["text", "image"],
-		supportsTools: fullMode && !route.requiresPro,
-	}));
+export function createChatGptWebProviderModels(proAvailable: boolean, fullMode: boolean): ChatGptWebProviderModel[] {
+	return availableChatGptWebModelRoutes(proAvailable).map(route => {
+		const effort = PROVIDER_EFFORT_BY_WEB_EFFORT[route.effort];
+		return {
+			id: route.key,
+			name: route.name,
+			reasoning: true,
+			thinking: {
+				mode: "effort",
+				efforts: [effort],
+				defaultLevel: effort,
+			},
+			contextWindow: 256_000,
+			maxTokens: 64_000,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			input: ["text", "image"],
+			supportsTools: fullMode && !route.requiresPro,
+		};
+	});
 }

@@ -68,7 +68,7 @@ function executable(onClose: () => void = () => {}): NativeVerifiedExecutable {
 	return {
 		identity: "verified-package-cli",
 		packageName: "@oh-my-pi/pi-chatgpt-web",
-		packageVersion: "17.2.4",
+		packageVersion: "17.2.5",
 		cliName: "chatgpt-web",
 		close: onClose,
 		__nativeVerifiedExecutable: Symbol("package-cli"),

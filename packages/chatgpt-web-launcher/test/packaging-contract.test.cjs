@@ -14,7 +14,7 @@ const mainSource = fs.readFileSync(path.join(launcherRoot, "electron", "main.cjs
 
 test("launcher metadata is private and OMP-owned", () => {
 	assert.equal(manifest.name, "@oh-my-pi/pi-chatgpt-web-launcher");
-	assert.equal(manifest.version, "17.2.4");
+	assert.equal(manifest.version, "17.2.5");
 	assert.equal(manifest.private, true);
 	assert.equal(manifest.build.appId, "sh.omp.chatgpt-web");
 	assert.equal(manifest.build.productName, "OMP ChatGPT Web");

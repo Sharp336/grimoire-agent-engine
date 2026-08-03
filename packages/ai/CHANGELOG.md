@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Ollama requests with no `user`-role turn (e.g. a plan-approval handoff whose only non-system message is an agent-attributed developer turn) returning `done_reason: "load"` and generating nothing, which was laundered into a clean empty stop and retried until the cap surfaced a misleading error. `convertMessages` now demotes the last non-prefix `system` turn to `user` so the request can produce output, and `mapDoneReason` surfaces `done_reason: "load"` as an error instead of a silent stop ([#7465](https://github.com/can1357/oh-my-pi/issues/7465)).
+- Added profile-aware Bedrock Mantle region selection, authenticated model discovery, bearer-token or SigV4 authentication, and credential refresh handling for OpenAI Responses models ([#7080](https://github.com/can1357/oh-my-pi/pull/7080) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+
+## [17.2.5] - 2026-08-03
+
+### Changed
+
+- Standardized tool-call examples in `renderToolExamples` and `renderToolInventory` to use Python keyword-argument syntax (`name(key="value")`) across all models, removing the model-specific dialect parameter and the `DialectRenderOptions.example` flag.
+- Updated `renderToolInventory` to render the tool catalog as a unified OpenAI-Harmony-style `## functions` block using TypeScript type declarations and comments, replacing the previous per-tool Markdown sections.
+- Added a `style: "harmony"` option to `jsonSchemaToTypeScript` for generating compact, comma-delimited TypeScript definitions.
+
+### Fixed
+
+- Fixed a session-blocking issue where unescaped Harmony control tokens in replayed assistant responses and tool inputs caused subsequent requests to be rejected with `invalid_prompt` errors.
+- Fixed an issue where Codex Responses dropped native image-generation results from assistant content and replays due to stale `generating` statuses.
+- Fixed Anthropic stream truncation handling where unexpected connection closures were incorrectly treated as clean stops, causing the agent loop to halt silently mid-sentence.
+- Optimized Anthropic prompt caching to prevent unnecessary cache invalidation of the entire system prefix when volatile project footer details (such as current working directory, date, or workspace tree) change.
+
 ## [17.2.4] - 2026-08-01
 
 ### Fixed

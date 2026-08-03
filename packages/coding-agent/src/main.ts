@@ -41,6 +41,7 @@ import {
 	type ScopedModel,
 } from "./config/model-resolver";
 import { ModelsConfigFile } from "./config/models-config";
+import { serviceTierSettingToTier } from "./config/service-tier";
 import { getDefault, type SettingPath, Settings, type SettingValue, settings } from "./config/settings";
 import { initializeWithSettings } from "./discovery";
 import {
@@ -188,8 +189,9 @@ function applyAcpDefaultSettingOverrides(targetSettings: Settings = settings): v
 	applyDefaultSettingOverrides(HOST_DEFAULTED_SETTING_PATHS, targetSettings);
 }
 
-async function readPipedInput(): Promise<string | undefined> {
-	if (process.stdin.isTTY !== false) return undefined;
+/** Reads a non-TTY stdin stream as prompt text. */
+export async function readPipedInput(): Promise<string | undefined> {
+	if (process.stdin.isTTY === true) return undefined;
 	// stdin is a pipe: a producer that never writes nor closes would block
 	// startup forever with zero output. Say what we're blocked on after 1s.
 	const notice = setTimeout(() => {
@@ -862,6 +864,9 @@ export async function buildSessionOptions(
 		autoApprove: parsed.autoApprove ?? false,
 	};
 	const restoringSession = Boolean(parsed.continue || parsed.resume || isForeignSessionImport(parsed));
+	if (parsed.serviceTier !== undefined) {
+		options.openAIServiceTier = serviceTierSettingToTier(parsed.serviceTier) ?? null;
+	}
 	const cliDirs = parsed.addDir ?? [];
 	const settingsDirs = activeSettings.get("workspace.additionalDirectories");
 	if (cliDirs.length > 0 || settingsDirs.length > 0) {

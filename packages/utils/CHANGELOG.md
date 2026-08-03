@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [17.2.5] - 2026-08-03
+
+### Added
+
+- Added utility functions `parseFlag()`, `getBrowserRelayDir()`, and `getGlobalDaemonRuntimeDir()` to support browser relay mode and global daemon runtime directory resolution.
+
+### Changed
+
+- Updated the lightweight CLI runner to support static command metadata, allowing root help to render without importing full command implementations.
+
 ## [17.2.4] - 2026-08-01
 
 ### Added
