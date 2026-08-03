@@ -52,9 +52,9 @@ async function git(args: readonly string[], cwd: string): Promise<Uint8Array> {
 	return result.bytes();
 }
 
-async function modifiedChangelogPaths(repoRoot: string, baseRef: string): Promise<string[]> {
+async function changedChangelogPaths(repoRoot: string, baseRef: string): Promise<string[]> {
 	const output = decodeChangelog(
-		await git(["diff", "--name-only", "--diff-filter=M", baseRef, "--", CHANGELOG_PATHSPEC], repoRoot),
+		await git(["diff", "--name-only", "--diff-filter=MD", baseRef, "--", CHANGELOG_PATHSPEC], repoRoot),
 		"git changelog path output",
 	);
 	return output
@@ -64,7 +64,7 @@ async function modifiedChangelogPaths(repoRoot: string, baseRef: string): Promis
 }
 
 export async function checkChangelogHistories(repoRoot: string, baseRef: string): Promise<ChangelogHistoryCheckResult> {
-	const checkedPaths = await modifiedChangelogPaths(repoRoot, baseRef);
+	const checkedPaths = await changedChangelogPaths(repoRoot, baseRef);
 	const violations: ChangelogHistoryViolation[] = [];
 
 	for (const changelogPath of checkedPaths) {
@@ -73,10 +73,10 @@ export async function checkChangelogHistories(repoRoot: string, baseRef: string)
 				await git(["show", `${baseRef}:${changelogPath}`], repoRoot),
 				`${changelogPath} at ${baseRef}`,
 			);
-			const headContent = decodeChangelog(
-				new Uint8Array(await Bun.file(path.join(repoRoot, changelogPath)).arrayBuffer()),
-				changelogPath,
-			);
+			const headFile = Bun.file(path.join(repoRoot, changelogPath));
+			const headContent = (await headFile.exists())
+				? decodeChangelog(new Uint8Array(await headFile.arrayBuffer()), changelogPath)
+				: "";
 			const message = releasedHistoryViolation(baseContent, headContent);
 			if (message) violations.push({ path: changelogPath, message });
 		} catch (error) {
@@ -111,7 +111,7 @@ async function main(): Promise<void> {
 			}
 			process.exit(1);
 		}
-		console.log(`Checked ${result.checkedPaths.length} modified changelog(s); released history is unchanged.`);
+		console.log(`Checked ${result.checkedPaths.length} changed changelog(s); released history is unchanged.`);
 	} catch (error) {
 		console.error(error instanceof Error ? error.message : String(error));
 		process.exit(1);
