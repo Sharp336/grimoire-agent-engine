@@ -233,6 +233,49 @@ describe("createAgentSession session storage isolation", () => {
 		expect(replacement).toMatchObject({ status: "idle", session: null });
 	});
 
+	it("rejects a child whose parent terminates during asynchronous setup", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-parent-cancel-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const cwd = path.join(tempDir, "project");
+		fs.mkdirSync(cwd, { recursive: true });
+		const registry = new AgentRegistry();
+		const parent = registry.register({
+			id: "parent",
+			displayName: "parent",
+			kind: "sub",
+			session: null,
+			status: "running",
+		});
+		const settingsReady = Promise.withResolvers<Settings>();
+		const creation = createAgentSession({
+			cwd,
+			agentDir: path.join(tempDir, "agent"),
+			modelRegistry: sharedModelRegistry,
+			settingsManager: settingsReady.promise,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			agentRegistry: registry,
+			agentId: "late-child",
+			agentDisplayName: "late child",
+			parentTaskPrefix: "late-child",
+			parentAgentId: parent.id,
+			taskDepth: 2,
+			expectedAgentRef: null,
+			expectedParentAgentRef: parent,
+		});
+
+		registry.setStatus(parent.id, "aborted", parent);
+		settingsReady.resolve(Settings.isolated());
+
+		await expect(creation).rejects.toThrow('Parent agent "parent" terminated during child session initialization.');
+		expect(registry.get("late-child")).toBeUndefined();
+	});
+
 	it("reuses the exact parked ref authorized for revival", async () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-generation-revive-${Snowflake.next()}-`));
 		tempDirs.push(tempDir);

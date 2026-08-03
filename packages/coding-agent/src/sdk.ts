@@ -524,6 +524,12 @@ export interface CreateAgentSessionOptions {
 	 * @internal
 	 */
 	expectedAgentRef?: AgentRef | null;
+	/**
+	 * Exact parent registry generation captured before asynchronous child setup.
+	 * Child registration fails if that parent is removed or terminal.
+	 * @internal
+	 */
+	expectedParentAgentRef?: AgentRef | null;
 	/** Parent task ID prefix for nested artifact naming (e.g., "Extensions") */
 	parentTaskPrefix?: string;
 	/**
@@ -2998,6 +3004,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// so that subagents launched in the same parallel batch can see each other in
 		// their initial `# IRC Peers` block (rendered inside `rebuildSystemPrompt`).
 		// The session reference is attached after construction below.
+		if (options.expectedParentAgentRef !== undefined) {
+			const parentId = options.parentAgentId;
+			const currentParent = parentId ? agentRegistry.get(parentId) : undefined;
+			if (!currentParent || currentParent !== options.expectedParentAgentRef || currentParent.status === "aborted") {
+				throw new Error(
+					`Parent agent "${parentId ?? MAIN_AGENT_ID}" terminated during child session initialization.`,
+				);
+			}
+		}
+
 		const registrationInput = {
 			id: resolvedAgentId,
 			displayName: resolvedAgentDisplayName,
