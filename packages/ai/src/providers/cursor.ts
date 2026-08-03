@@ -236,6 +236,7 @@ const NOT_IMPLEMENTED = `Not implemented by this client`;
 interface ConversationStateCacheEntry {
 	state: ConversationStateStructure;
 	owner: object;
+	restorable: boolean;
 }
 
 const conversationStateCache = new Map<string, ConversationStateCacheEntry>();
@@ -503,9 +504,10 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 		let h2Settled = false;
 		let sawTurnEnded = false;
 		let completedCleanly = false;
-		let sawServerResponse = false;
+		let sawServerMessage = false;
 		let conversationId: string | undefined;
 		let conversationStateOwner: object | undefined;
+		let conversationStateEntry: ConversationStateCacheEntry | undefined;
 		let previousConversationStateEntry: ConversationStateCacheEntry | undefined;
 		let endStreamError: Error | null = null;
 		// Reachable from the catch: a stream that dies mid-turn must still close
@@ -553,7 +555,8 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				blobStore,
 				conversationState: cachedState,
 			});
-			conversationStateCache.set(requestConversationId, { state: conversationState, owner: requestStateOwner });
+			conversationStateEntry = { state: conversationState, owner: requestStateOwner, restorable: true };
+			conversationStateCache.set(requestConversationId, conversationStateEntry);
 			const requestContextTools = buildMcpToolDefinitions(context.tools);
 
 			const baseUrl = model.baseUrl || CURSOR_API_URL;
@@ -640,12 +643,12 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 
 			const onConversationCheckpoint = (checkpoint: ConversationStateStructure) => {
 				if (conversationStateCache.get(requestConversationId)?.owner === requestStateOwner) {
-					conversationStateCache.set(requestConversationId, { state: checkpoint, owner: requestStateOwner });
+					conversationStateEntry = { state: checkpoint, owner: requestStateOwner, restorable: true };
+					conversationStateCache.set(requestConversationId, conversationStateEntry);
 				}
 			};
 
 			h2Request.on("response", headers => {
-				sawServerResponse = true;
 				debugResponseLogPromise = debugSession?.openResponseLog(
 					`HTTP/2 ${headers[":status"] ?? ""}`.trim(),
 					headers,
@@ -681,6 +684,8 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 
 					try {
 						const serverMessage = fromBinary(AgentServerMessageSchema, messageBytes);
+						sawServerMessage = true;
+						if (conversationStateEntry) conversationStateEntry.restorable = false;
 						const isTurnEnded =
 							serverMessage.message.case === "interactionUpdate" &&
 							serverMessage.message.value.message?.case === "turnEnded";
@@ -826,13 +831,22 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			if (
 				conversationId &&
 				conversationStateOwner &&
+				completedCleanly &&
+				conversationStateCache.get(conversationId)?.owner === conversationStateOwner
+			) {
+				const completedEntry = conversationStateCache.get(conversationId)!;
+				conversationStateCache.set(conversationId, { ...completedEntry, restorable: true });
+			}
+			if (
+				conversationId &&
+				conversationStateOwner &&
 				!completedCleanly &&
 				conversationStateCache.get(conversationId)?.owner === conversationStateOwner
 			) {
-				if (sawServerResponse) {
+				if (sawServerMessage) {
 					conversationStateCache.delete(conversationId);
 					log("conversationState", "invalidatedAfterInterruptedStream", { conversationId });
-				} else if (previousConversationStateEntry) {
+				} else if (previousConversationStateEntry?.restorable) {
 					conversationStateCache.set(conversationId, previousConversationStateEntry);
 					log("conversationState", "restoredAfterPreResponseFailure", { conversationId });
 				} else {

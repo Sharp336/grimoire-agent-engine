@@ -1924,6 +1924,105 @@ describe("AgentSession retry delay cap", () => {
 		expect(session.isRetrying).toBe(false);
 	});
 
+	it("restores the configured retry budget after Cursor falls back to another provider", async () => {
+		const cursorModel = createMockModel({ id: "composer-2.5", provider: "cursor" });
+		const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!fallbackModel) throw new Error("Expected bundled Anthropic fallback model to exist");
+		authStorage.setRuntimeApiKey("cursor", "cursor-test-key");
+
+		let cursorCalls = 0;
+		let fallbackCalls = 0;
+		const fallbackMock = createMockModel({
+			responses: [
+				{ throw: "502 upstream_error: fallback transient one" },
+				{ throw: "502 upstream_error: fallback transient two" },
+				{ content: ["recovered on fallback budget"] },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: { model: cursorModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requestedModel, requestContext, options) => {
+				if (requestedModel.provider !== "cursor") {
+					fallbackCalls++;
+					return fallbackMock.stream(requestedModel, requestContext, options);
+				}
+
+				const attempt = ++cursorCalls;
+				const callId = "cursor-read-before-fallback";
+				const toolCall = {
+					type: "toolCall" as const,
+					id: callId,
+					name: "read",
+					arguments: { path: "/workspace/file.txt" },
+					[kCursorExecResolved]: true as const,
+				};
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(async () => {
+					const partial: AssistantMessage = {
+						role: "assistant",
+						content: attempt === 1 ? [toolCall] : [],
+						api: cursorModel.api,
+						provider: cursorModel.provider,
+						model: cursorModel.id,
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "stop",
+						timestamp: Date.now(),
+					};
+					stream.push({ type: "start", partial });
+					if (attempt === 1) {
+						await options?.cursorOnToolResult?.({
+							role: "toolResult",
+							toolCallId: callId,
+							toolName: "read",
+							content: [{ type: "text", text: "file body" }],
+							isError: false,
+							timestamp: Date.now(),
+						});
+						stream.push({ type: "toolcall_start", contentIndex: 0, partial });
+						stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
+					}
+					stream.push({
+						type: "error",
+						reason: "error",
+						error: {
+							...partial,
+							stopReason: "error",
+							errorMessage: "Cursor stream ended before turnEnded",
+							errorId: AIError.create(AIError.Flag.Transient),
+						},
+					});
+				});
+				return stream;
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 4,
+			"retry.modelFallback": true,
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${cursorModel.provider}/${cursorModel.id}`);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("Trigger Cursor recovery and provider fallback");
+		await session.waitForIdle();
+
+		expect(cursorCalls).toBe(1);
+		expect(fallbackCalls).toBe(3);
+		expect(session.model?.provider).toBe(fallbackModel.provider);
+		expect(lastAssistant(session).content).toContainEqual({ type: "text", text: "recovered on fallback budget" });
+	});
+
 	it("defaults 502 auto-retry to ten capped backoff attempts", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {

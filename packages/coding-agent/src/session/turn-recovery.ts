@@ -1470,6 +1470,9 @@ export class TurnRecovery {
 				switchedModel = await this.#tryFireworksFastFallback(currentSelector);
 			}
 			if (switchedModel) {
+				if (this.#host.model()?.provider !== "cursor") {
+					this.#cursorInterruptedExecRetryActive = false;
+				}
 				delayMs = 0;
 			} else if (usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs) {
 				delayMs = parsedRetryAfterMs;

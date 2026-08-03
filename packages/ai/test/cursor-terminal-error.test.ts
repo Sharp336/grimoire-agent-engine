@@ -34,6 +34,7 @@ const CONNECT_END_STREAM_FLAG = 0b00000010;
 type Scenario =
 	| { kind: "success" }
 	| { kind: "connect-error-after-turn" }
+	| { kind: "http-rejection" }
 	| { kind: "grpc-trailer-after-turn" }
 	| { kind: "end-before-turn" }
 	| { kind: "hang-after-turn" }
@@ -49,6 +50,15 @@ type Scenario =
 			firstStarted: PromiseWithResolvers<void>;
 			releaseFirst: PromiseWithResolvers<void>;
 			rootPromptMessagesJson?: Uint8Array[];
+	  }
+	| {
+			kind: "checkpoint-overlap-invalidation";
+			requests: number;
+			olderStarted: PromiseWithResolvers<void>;
+			releaseOlderMessage: PromiseWithResolvers<void>;
+			releaseOlderEnd: PromiseWithResolvers<void>;
+			newerStarted: PromiseWithResolvers<void>;
+			releaseNewerEnd: PromiseWithResolvers<void>;
 	  }
 	| { kind: "todo-start-then-death" };
 
@@ -221,6 +231,30 @@ async function startServer(): Promise<string> {
 		if (headers[":path"] !== "/agent.v1.AgentService/Run") {
 			stream.respond({ ":status": 404 });
 			stream.end();
+			return;
+		}
+
+		if (scenario.kind === "http-rejection") {
+			stream.respond({ ":status": 429 });
+			stream.end();
+			return;
+		}
+
+		if (scenario.kind === "checkpoint-overlap-invalidation") {
+			scenario.requests++;
+			if (scenario.requests === 1) {
+				const { olderStarted, releaseOlderMessage, releaseOlderEnd } = scenario;
+				stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+				olderStarted.resolve();
+				void releaseOlderMessage.promise.then(() => {
+					stream.write(textDeltaFrame("older advanced"));
+					void releaseOlderEnd.promise.then(() => stream.end());
+				});
+				return;
+			}
+			const { newerStarted, releaseNewerEnd } = scenario;
+			newerStarted.resolve();
+			void releaseNewerEnd.promise.then(() => stream.end());
 			return;
 		}
 
@@ -855,6 +889,23 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		}
 		expect((await failed.result()).stopReason).toBe("error");
 
+		scenario = { kind: "http-rejection" };
+		const rejectionBaseUrl = await startServer();
+		let rejectedPendingToolCalls: string[] | undefined;
+		const rejected = streamCursor(makeModel(rejectionBaseUrl), context, {
+			apiKey: "test-token",
+			conversationId,
+			onPayload: payload => {
+				rejectedPendingToolCalls = (payload as { conversationState?: { pendingToolCalls?: string[] } })
+					.conversationState?.pendingToolCalls;
+			},
+		});
+		for await (const _event of rejected) {
+			// Rejected response headers are not evidence that Cursor mutated the conversation.
+		}
+		expect((await rejected.result()).stopReason).toBe("error");
+
+		await stopServer();
 		scenario = { kind: "success" };
 		const recoveryBaseUrl = await startServer();
 		let pendingToolCalls: string[] | undefined;
@@ -870,10 +921,104 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 			// Drain the verification request.
 		}
 		expect((await recovery.result()).stopReason).toBe("stop");
-		expect([failedPendingToolCalls, pendingToolCalls]).toEqual([
+		expect([failedPendingToolCalls, rejectedPendingToolCalls, pendingToolCalls]).toEqual([
+			[JSON.stringify({ toolCallId: "newer-call", toolName: "read" })],
 			[JSON.stringify({ toolCallId: "newer-call", toolName: "read" })],
 			[JSON.stringify({ toolCallId: "newer-call", toolName: "read" })],
 		]);
+	});
+
+	it("does not restore a checkpoint invalidated by an overlapping request", async () => {
+		const seedStarted = Promise.withResolvers<void>();
+		const releaseSeed = Promise.withResolvers<void>();
+		scenario = {
+			kind: "checkpoint-ownership-race",
+			requests: 0,
+			firstStarted: seedStarted,
+			releaseFirst: releaseSeed,
+		};
+		const baseUrl = await startServer();
+		const conversationId = "cursor-overlap-invalidation";
+		const model = makeModel(baseUrl);
+
+		const seedOlder = streamCursor(model, context, { apiKey: "test-token", conversationId });
+		const seedOlderDone = (async () => {
+			for await (const _event of seedOlder) {
+				// Drain after the seed request is released.
+			}
+			return await seedOlder.result();
+		})();
+		await seedStarted.promise;
+		const seed = streamCursor(model, context, {
+			apiKey: "test-token",
+			conversationId,
+			onPayload: payload => {
+				const request = payload as { conversationState?: { rootPromptMessagesJson?: Uint8Array[] } };
+				if (scenario.kind === "checkpoint-ownership-race") {
+					scenario.rootPromptMessagesJson = request.conversationState?.rootPromptMessagesJson;
+				}
+			},
+		});
+		for await (const _event of seed) {
+			// Seed a checkpoint with one pending call.
+		}
+		expect((await seed.result()).stopReason).toBe("stop");
+		releaseSeed.resolve();
+		expect((await seedOlderDone).stopReason).toBe("error");
+
+		const olderStarted = Promise.withResolvers<void>();
+		const releaseOlderMessage = Promise.withResolvers<void>();
+		const releaseOlderEnd = Promise.withResolvers<void>();
+		const newerStarted = Promise.withResolvers<void>();
+		const releaseNewerEnd = Promise.withResolvers<void>();
+		scenario = {
+			kind: "checkpoint-overlap-invalidation",
+			requests: 0,
+			olderStarted,
+			releaseOlderMessage,
+			releaseOlderEnd,
+			newerStarted,
+			releaseNewerEnd,
+		};
+
+		const older = streamCursor(model, context, { apiKey: "test-token", conversationId });
+		const olderDone = (async () => {
+			for await (const _event of older) {
+				// Drain after the older overlapping request advances and fails.
+			}
+			return await older.result();
+		})();
+		await olderStarted.promise;
+		const newer = streamCursor(model, context, { apiKey: "test-token", conversationId });
+		const newerDone = (async () => {
+			for await (const _event of newer) {
+				// Drain after its pre-message failure is released.
+			}
+			return await newer.result();
+		})();
+		await newerStarted.promise;
+
+		releaseOlderMessage.resolve();
+		releaseOlderEnd.resolve();
+		expect((await olderDone).stopReason).toBe("error");
+		releaseNewerEnd.resolve();
+		expect((await newerDone).stopReason).toBe("error");
+
+		scenario = { kind: "success" };
+		let pendingToolCalls: string[] | undefined;
+		const verification = streamCursor(model, context, {
+			apiKey: "test-token",
+			conversationId,
+			onPayload: payload => {
+				pendingToolCalls = (payload as { conversationState?: { pendingToolCalls?: string[] } }).conversationState
+					?.pendingToolCalls;
+			},
+		});
+		for await (const _event of verification) {
+			// Drain the verification request.
+		}
+		expect((await verification.result()).stopReason).toBe("stop");
+		expect(pendingToolCalls).toEqual([]);
 	});
 
 	it.each(["write", "bash", "edit"] as const)(
