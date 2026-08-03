@@ -13,6 +13,7 @@ function createStubAuthStorage(): AuthStorage {
 		clearConfigApiKeys: () => {},
 		hasAuth: () => false,
 		getApiKey: async () => undefined,
+		peekApiKey: () => undefined,
 	};
 	return stub as unknown as AuthStorage;
 }
@@ -178,6 +179,18 @@ describe("ModelRegistry", () => {
 		expect(Array.from({ length: 6 }, () => registry.admitFallbackProbe("test/test-model"))).toEqual(
 			Array.from({ length: 6 }, () => ({ status: "healthy" })),
 		);
+	});
+
+	test("preserves fallback probe state across routine refreshes", async () => {
+		const probe = registry.admitFallbackProbe("test/test-model");
+		if (probe.status !== "probe") throw new Error("Expected first fallback caller to own the probe");
+
+		await registry.refresh("offline");
+		expect(registry.admitFallbackProbe("test/test-model")).toEqual({ status: "busy" });
+
+		registry.markFallbackProbeHealthy(probe.lease);
+		await registry.refresh("offline");
+		expect(registry.admitFallbackProbe("test/test-model")).toEqual({ status: "healthy" });
 	});
 
 	test("ignores a stale probe callback after ownership changes", () => {

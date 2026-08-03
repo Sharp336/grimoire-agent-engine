@@ -251,7 +251,9 @@ export class TurnRecovery {
 
 	/** Closes a failed retry saga when no compaction continuation took ownership. */
 	async onErrorSettledWithoutRetry(message: AssistantMessage, compaction: RecoveryCompactionResult): Promise<void> {
-		if (message.stopReason !== "error" || this.#retryAttempt === 0 || compaction.continuationScheduled) return;
+		if (message.stopReason !== "error" || compaction.continuationScheduled) return;
+		this.abandonActiveRetryFallbackProbe();
+		if (this.#retryAttempt === 0) return;
 		const attempt = this.#retryAttempt;
 		this.#retryAttempt = 0;
 		await this.#host.emitSessionEvent({
@@ -1045,13 +1047,6 @@ export class TurnRecovery {
 
 	/** Records the cooldown that should suppress a failing selector. */
 	noteRetryFallbackCooldown(currentSelector: string, retryAfterMs: number | undefined, errorMessage: string): void {
-		const fallback = this.#activeRetryFallback;
-		if (
-			fallback?.probeLease &&
-			this.#host.modelRegistry.abandonFallbackProbeForSelector(fallback.probeLease, currentSelector)
-		) {
-			fallback.probeLease = undefined;
-		}
 		let cooldownMs = retryAfterMs;
 		if (!cooldownMs || cooldownMs <= 0) {
 			const reason = parseRateLimitReason(errorMessage);
@@ -1162,9 +1157,17 @@ export class TurnRecovery {
 			if (admission.status === "busy") continue;
 			const probeLease = admission.status === "probe" ? admission.lease : undefined;
 			let transferred = false;
+			const generation = this.#host.promptGeneration();
 			try {
 				const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 				if (!apiKey) continue;
+				if (
+					this.#host.isDisposed() ||
+					this.#host.abortInProgress() ||
+					this.#host.promptGeneration() !== generation
+				) {
+					return false;
+				}
 				await this.applyRetryFallbackCandidate(role, selector, currentSelector, {
 					...options,
 					apiKey,
@@ -1472,6 +1475,14 @@ export class TurnRecovery {
 			// last resort is for provider failures, not classifier decisions.
 			if (allowModelFallback && retrySettings.modelFallback && !(retryBudgetExhausted && classifierRefusal)) {
 				if (!classifierRefusal) {
+					const activeFallback = this.#activeRetryFallback;
+					const activeLease = activeFallback?.probeLease;
+					if (
+						activeLease &&
+						this.#host.modelRegistry.abandonFallbackProbeForSelector(activeLease, currentSelector)
+					) {
+						activeFallback.probeLease = undefined;
+					}
 					this.noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage);
 				}
 				switchedModel = await this.#tryRetryModelFallback(currentSelector, { pinFallback: classifierRefusal });

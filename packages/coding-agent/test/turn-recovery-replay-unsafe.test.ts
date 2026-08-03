@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -6,6 +6,7 @@ import type { Model, Usage } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
 	type RecoveryCompactionResult,
 	TurnRecovery,
@@ -45,7 +46,7 @@ function createHost(
 	const settings = Settings.isolated(fallbackChains ? { "retry.fallbackChains": fallbackChains } : {});
 	return {
 		agent: undefined as never,
-		sessionManager: undefined as never,
+		sessionManager: SessionManager.inMemory(),
 		persistedAssistantEntryId: () => undefined,
 		settings,
 		modelRegistry,
@@ -93,6 +94,12 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 	afterAll(() => {
 		authStorage.close();
 		tempDir.removeSync();
+	});
+
+	afterEach(() => {
+		modelRegistry.clearSuppressedSelectors();
+		modelRegistry.clearFallbackProbeStates();
+		vi.restoreAllMocks();
 	});
 
 	it("treats a failed turn with partial non-whitespace text as NOT retriable", () => {
@@ -244,5 +251,88 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		const recovery = new TurnRecovery(createHost(model, modelRegistry));
 		const message = createProviderErrorMessage(model, new Error("fetch failed"));
 		expect(recovery.isRetryableError(message)).toBe(true);
+	});
+
+	it("does not release a recovery-owned probe when another caller records cooldown", async () => {
+		const fallback = getBundledModel("openai", "gpt-4o-mini");
+		if (!fallback) throw new Error("Expected bundled fallback model gpt-4o-mini");
+		const currentSelector = `${model.provider}/${model.id}`;
+		const fallbackSelector = `${fallback.provider}/${fallback.id}`;
+		const recovery = new TurnRecovery(createHost(model, modelRegistry, { [currentSelector]: [fallbackSelector] }));
+		const selector = recovery.findRetryFallbackCandidates(currentSelector, currentSelector).at(0);
+		if (!selector) throw new Error("Expected configured fallback candidate");
+		const admission = modelRegistry.admitFallbackProbe(fallbackSelector);
+		if (admission.status !== "probe") throw new Error("Expected recovery to own the fallback probe");
+
+		await recovery.applyRetryFallbackCandidate(currentSelector, selector, currentSelector, {
+			apiKey: "test-key",
+			probeLease: admission.lease,
+		});
+		recovery.noteRetryFallbackCooldown(fallbackSelector, 1_000, "rate limited");
+
+		expect(modelRegistry.admitFallbackProbe(fallbackSelector)).toEqual({ status: "busy" });
+	});
+
+	it("releases an attempt-zero probe only after terminal compaction handling", async () => {
+		const fallback = getBundledModel("openai", "gpt-4o-mini");
+		if (!fallback) throw new Error("Expected bundled fallback model gpt-4o-mini");
+		const currentSelector = `${model.provider}/${model.id}`;
+		const fallbackSelector = `${fallback.provider}/${fallback.id}`;
+		const recovery = new TurnRecovery(createHost(model, modelRegistry, { [currentSelector]: [fallbackSelector] }));
+		const selector = recovery.findRetryFallbackCandidates(currentSelector, currentSelector).at(0);
+		if (!selector) throw new Error("Expected configured fallback candidate");
+		const admission = modelRegistry.admitFallbackProbe(fallbackSelector);
+		if (admission.status !== "probe") throw new Error("Expected recovery to own the fallback probe");
+		await recovery.applyRetryFallbackCandidate(currentSelector, selector, currentSelector, {
+			apiKey: "test-key",
+			probeLease: admission.lease,
+		});
+
+		await recovery.onErrorSettledWithoutRetry(makeMessage([], fallback), {
+			deferredHandoff: false,
+			continuationScheduled: true,
+		});
+		expect(modelRegistry.admitFallbackProbe(fallbackSelector)).toEqual({ status: "busy" });
+
+		await recovery.onErrorSettledWithoutRetry(makeMessage([], fallback), {
+			deferredHandoff: false,
+			continuationScheduled: false,
+		});
+		expect(modelRegistry.admitFallbackProbe(fallbackSelector).status).toBe("probe");
+	});
+
+	it("releases a probe when the prompt changes during fallback credential lookup", async () => {
+		const fallback = getBundledModel("openai", "gpt-4o-mini");
+		if (!fallback) throw new Error("Expected bundled fallback model gpt-4o-mini");
+		const currentSelector = `${model.provider}/${model.id}`;
+		const fallbackSelector = `${fallback.provider}/${fallback.id}`;
+		const host = createHost(model, modelRegistry, { [currentSelector]: [fallbackSelector] });
+		let generation = 0;
+		let modelChanges = 0;
+		host.promptGeneration = () => generation;
+		host.setModelWithProviderSessionReset = async () => {
+			modelChanges += 1;
+		};
+		const credentialStarted = Promise.withResolvers<void>();
+		const credential = Promise.withResolvers<string>();
+		vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async candidate => {
+			if (candidate.provider === fallback.provider && candidate.id === fallback.id) {
+				credentialStarted.resolve();
+				return credential.promise;
+			}
+			return "test-key";
+		});
+		const recovery = new TurnRecovery(host);
+		const message = makeMessage([], model);
+		message.errorMessage = "invalid request";
+
+		const result = recovery.handleRetryableError(message, { hardErrorFallback: true });
+		await credentialStarted.promise;
+		generation += 1;
+		credential.resolve("test-key");
+
+		expect(await result).toBe(false);
+		expect(modelChanges).toBe(0);
+		expect(modelRegistry.admitFallbackProbe(fallbackSelector).status).toBe("probe");
 	});
 });

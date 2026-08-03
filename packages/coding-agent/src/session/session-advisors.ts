@@ -1171,6 +1171,10 @@ export class SessionAdvisors {
 		failedMessages: readonly AgentMessage[],
 		signal: AbortSignal,
 	): Promise<boolean> {
+		if (advisor.retryFallback?.probeLease) {
+			this.#host.modelRegistry.abandonFallbackProbe(advisor.retryFallback.probeLease);
+			advisor.retryFallback.probeLease = undefined;
+		}
 		if (error instanceof AdvisorOutputQuarantinedError) return false;
 
 		const failedMessage = failedMessages.findLast(
@@ -1236,10 +1240,6 @@ export class SessionAdvisors {
 		if (!role || this.#host.findRetryFallbackCandidates(role, currentSelector, currentModel).length === 0)
 			return false;
 
-		if (advisor.retryFallback?.probeLease) {
-			this.#host.modelRegistry.abandonFallbackProbe(advisor.retryFallback.probeLease);
-			advisor.retryFallback.probeLease = undefined;
-		}
 		this.#host.noteRetryFallbackCooldown(currentSelector, retryAfterMs, message);
 		for (const selector of this.#host.findRetryFallbackCandidates(role, currentSelector, currentModel)) {
 			if (this.#host.isRetryFallbackSelectorSuppressed(selector)) continue;

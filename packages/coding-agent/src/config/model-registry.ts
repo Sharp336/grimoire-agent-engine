@@ -917,7 +917,6 @@ export class ModelRegistry {
 	async refresh(strategy: ModelRefreshStrategy = "online-if-uncached"): Promise<void> {
 		this.#reloadStaticModels();
 		this.#suppressedSelectors.clear();
-		this.#fallbackProbeStates.clear();
 		await this.#refreshRuntimeDiscoveries(strategy);
 	}
 
