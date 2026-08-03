@@ -212,7 +212,9 @@ describe("Agent Hub dashboard", () => {
 			toolCalls: 6,
 			cost: 0.5,
 			tokens: { input: 100, output: 20, cacheWrite: 30 },
+			contextUsage: { tokens: 50000, contextWindow: 200000, percent: 25 },
 		};
+		const getContextUsage = vi.fn(() => ({ tokens: 1, contextWindow: 2, percent: 50 }));
 		const session = {
 			model: currentModel,
 			thinkingLevel: "medium",
@@ -220,7 +222,7 @@ describe("Agent Hub dashboard", () => {
 			getActiveToolNames: () => ["lsp", "yield"],
 			isAdvisorActive: () => false,
 			getSessionStats: () => stats,
-			getContextUsage: () => ({ tokens: 50000, contextWindow: 200000, percent: 25 }),
+			getContextUsage,
 		} as unknown as AgentSession;
 		const registry = new AgentRegistry();
 		register(registry, "run-a", "running", "sub", session);
@@ -250,15 +252,46 @@ describe("Agent Hub dashboard", () => {
 		expect(output).toContain("Advisor off · LSP on");
 		expect(output).toContain("Turns 4 · Tokens 150 · Context 25.0%/200K");
 		expect(output).toContain("Tools 6");
+		expect(getContextUsage).not.toHaveBeenCalled();
 		stats = {
 			assistantMessages: 5,
 			toolCalls: 8,
 			cost: 0.75,
 			tokens: { input: 200, output: 40, cacheWrite: 60 },
+			contextUsage: { tokens: 50000, contextWindow: 200000, percent: 25 },
 		};
 		const refreshed = rendered(hub);
 		expect(refreshed).toContain("Turns 5 · Tokens 300 · Context 25.0%/200K");
 		expect(refreshed).toContain("Tools 8");
+		hub.dispose();
+	});
+
+	it("counts retry activity down from the wait start time", () => {
+		vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-07-28T12:00:02.000Z"));
+		const agents = new AgentRegistry();
+		register(agents, "run-a", "running");
+		const observers = new SessionObserverRegistry();
+		vi.spyOn(observers, "getSessions").mockReturnValue([
+			{
+				id: "run-a",
+				kind: "subagent",
+				label: "Run A",
+				status: "active",
+				lastUpdate: Date.now(),
+				progress: progress({
+					retryState: {
+						attempt: 2,
+						maxAttempts: 4,
+						delayMs: 5000,
+						errorMessage: "rate limited",
+						startedAtMs: Date.parse("2026-07-28T12:00:00.000Z"),
+					},
+				}),
+			},
+		]);
+		const hub = makeHub(agents, observers);
+
+		expect(rendered(hub)).toContain("Activity: retry 2/4 in 3s: rate limited");
 		hub.dispose();
 	});
 

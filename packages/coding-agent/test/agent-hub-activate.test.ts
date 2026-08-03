@@ -203,6 +203,58 @@ describe("Agent hub Enter activation", () => {
 		hub.dispose();
 	});
 
+	it("requires fresh confirmation when the selected agent id is re-registered", async () => {
+		const agents = new AgentRegistry();
+		const originalAbort = vi.fn(async () => {});
+		const originalRef = agents.register({
+			id: AGENT_ID,
+			displayName: AGENT_ID,
+			kind: "sub",
+			parentId: "Main",
+			session: { abort: originalAbort } as unknown as AgentSession,
+			sessionFile: null,
+			status: "running",
+		});
+		const replacementAbort = vi.fn(async () => {});
+		const released = Promise.withResolvers<void>();
+		const release = vi.fn(async () => {
+			released.resolve();
+		});
+		const hub = new AgentHubOverlayComponent({
+			observers: new SessionObserverRegistry(),
+			hubKeys: [],
+			onDone: () => {},
+			requestRender: () => {},
+			registry: agents,
+			irc: new IrcBus(agents),
+			focusAgent: async () => {},
+			lifecycle: { release } as unknown as AgentLifecycleManager,
+		});
+
+		hub.handleInput("x");
+		expect(agents.unregister(AGENT_ID, originalRef)).toBe(true);
+		agents.register({
+			id: AGENT_ID,
+			displayName: AGENT_ID,
+			kind: "sub",
+			parentId: "Main",
+			session: { abort: replacementAbort } as unknown as AgentSession,
+			sessionFile: null,
+			status: "running",
+		});
+
+		hub.handleInput("x");
+		expect(originalAbort).not.toHaveBeenCalled();
+		expect(replacementAbort).not.toHaveBeenCalled();
+		expect(release).not.toHaveBeenCalled();
+		expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain(`Press x again to kill running agent "${AGENT_ID}".`);
+
+		hub.handleInput("x");
+		await released.promise;
+		expect(replacementAbort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
+		hub.dispose();
+	});
+
 	it("any other key cancels a pending running-agent kill", () => {
 		const agents = new AgentRegistry();
 		const abort = vi.fn(async () => {});

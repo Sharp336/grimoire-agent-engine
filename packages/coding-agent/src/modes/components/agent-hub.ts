@@ -179,8 +179,8 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	/** Per-render screen-line to agent-row map, shared by click and hover routing. */
 	#hitRows: Array<number | undefined> = [];
 	#notice: string | undefined;
-	/** Running-agent kill confirmation: the id awaiting a second `x`. */
-	#pendingKill: string | undefined;
+	/** Running-agent kill confirmation: the exact registry generation awaiting a second `x`. */
+	#pendingKill: AgentRef | undefined;
 	/** Captured row order from the first refresh; keeps each status group stable while open. */
 	#rowOrder: Map<string, number> | undefined;
 	#nextRowOrder = 0;
@@ -570,7 +570,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 
 	#footer(showingNarrowDetails: boolean, availableWidth: number): string {
 		if (this.#pendingKill) {
-			return theme.fg("warning", `Press x again to kill running agent "${this.#pendingKill}".`);
+			return theme.fg("warning", `Press x again to kill running agent "${this.#pendingKill.id}".`);
 		}
 		const nextView = this.#viewMode === "roster" ? "by parent" : "flat";
 		if (showingNarrowDetails) {
@@ -826,22 +826,28 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		} catch {}
 
 		const metrics: AgentRuntimeView = {};
+		let hasSessionStats = false;
 		try {
 			const stats = session.getSessionStats?.();
 			if (stats) {
+				hasSessionStats = true;
 				metrics.turns = stats.assistantMessages;
 				metrics.tokens = stats.tokens.input + stats.tokens.output + stats.tokens.cacheWrite;
 				metrics.toolCount = stats.toolCalls;
 				metrics.cost = stats.cost;
+				metrics.contextTokens = stats.contextUsage?.tokens;
+				metrics.contextWindow = stats.contextUsage?.contextWindow;
 			}
 		} catch {}
-		try {
-			const context = session.getContextUsage?.();
-			if (context) {
-				metrics.contextTokens = context.tokens;
-				metrics.contextWindow = context.contextWindow;
-			}
-		} catch {}
+		if (!hasSessionStats) {
+			try {
+				const context = session.getContextUsage?.();
+				if (context) {
+					metrics.contextTokens = context.tokens;
+					metrics.contextWindow = context.contextWindow;
+				}
+			} catch {}
+		}
 		Object.assign(view, metrics);
 		return view;
 	}
@@ -915,7 +921,11 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			activity = `${progress.currentTool}${progress.currentToolArgs ? ` ${progress.currentToolArgs}` : ""}${elapsed}`;
 		}
 		if (progress.retryState) {
-			activity = `retry ${progress.retryState.attempt}/${progress.retryState.maxAttempts} in ${formatDuration(progress.retryState.delayMs)}: ${progress.retryState.errorMessage}`;
+			const remainingDelayMs = Math.max(
+				0,
+				progress.retryState.startedAtMs + progress.retryState.delayMs - Date.now(),
+			);
+			activity = `retry ${progress.retryState.attempt}/${progress.retryState.maxAttempts} in ${formatDuration(remainingDelayMs)}: ${progress.retryState.errorMessage}`;
 		} else if (progress.retryFailure) {
 			activity = `retry failed at ${progress.retryFailure.attempt}: ${progress.retryFailure.errorMessage}`;
 		}
@@ -1298,8 +1308,8 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			this.#requestRender();
 			return;
 		}
-		if (ref.status === "running" && this.#pendingKill !== ref.id) {
-			this.#pendingKill = ref.id;
+		if (ref.status === "running" && this.#pendingKill !== ref) {
+			this.#pendingKill = ref;
 			this.#notice = undefined;
 			this.#requestRender();
 			return;
