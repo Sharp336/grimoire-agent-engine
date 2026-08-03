@@ -416,7 +416,7 @@ describe("AgentLifecycleManager", () => {
 		await flushAsync();
 	});
 
-	it("bounds a stuck live descendant disposal and detaches terminal state in finally", async () => {
+	it("bounds stuck descendant disposal after detaching terminal state", async () => {
 		vi.useFakeTimers();
 		const disposeGate = deferred();
 		const child = makeSessionStub(() => disposeGate.promise);
@@ -442,7 +442,7 @@ describe("AgentLifecycleManager", () => {
 		const termination = lifecycle.waitForTermination("child", child.session);
 		await flushAsync();
 		expect(child.disposeCalls()).toBe(1);
-		expect(registry.get("child")?.session).toBe(child.session);
+		expect(registry.get("child")?.session).toBeNull();
 
 		vi.advanceTimersByTime(5_000);
 		await termination;

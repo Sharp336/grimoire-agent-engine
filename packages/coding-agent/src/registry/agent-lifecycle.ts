@@ -513,6 +513,9 @@ export class AgentLifecycleManager {
 		let liveRef = this.#registry.get(id);
 		if (liveRef === ref && ref.status !== "parked") {
 			await session.dispose();
+			if (ref.status === "aborted") {
+				throw new Error(`Agent "${id}" became terminal before its persisted session could attach.`);
+			}
 			throw new Error(`Agent "${id}" changed before its persisted session could attach.`);
 		}
 		if (liveRef === ref) {
