@@ -112,6 +112,21 @@ export class YieldQueue {
 		}
 	}
 
+	/** Remove and return entries matching a predicate while preserving the rest. */
+	take<P>(kind: string, predicate: (entry: P) => boolean): P[] {
+		const entries = this.#entries.get(kind);
+		if (!entries || entries.length === 0) return [];
+		const taken: P[] = [];
+		const retained: unknown[] = [];
+		for (const entry of entries) {
+			if (predicate(entry as P)) taken.push(entry as P);
+			else retained.push(entry);
+		}
+		if (retained.length > 0) this.#entries.set(kind, retained);
+		else this.#entries.delete(kind);
+		return taken;
+	}
+
 	async flush(mode: YieldFlushMode): Promise<void> {
 		if (mode === "idle") {
 			this.#idleFlushPending = false;

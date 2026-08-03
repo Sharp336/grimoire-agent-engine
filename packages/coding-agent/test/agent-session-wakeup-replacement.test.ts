@@ -169,6 +169,45 @@ describe("AgentSession wakeup suppression across session replacement", () => {
 		expect(manager.isDeliverySuppressed(jobId)).toBe(true);
 	});
 
+	it("removes an already queued wakeup before replacement pre-work can flush it", async () => {
+		const { jobId } = registerGatedWakeup();
+		session.yieldQueue.enqueue("async-result", {
+			jobId,
+			result: "queued old-session wakeup",
+			job: manager.getJob(jobId),
+			durationMs: undefined,
+			epoch: 0,
+		});
+		expect(session.yieldQueue.has("async-result")).toBe(true);
+		beforeSwitchHandler = async () => {
+			expect(session.yieldQueue.has("async-result")).toBe(false);
+			return undefined;
+		};
+
+		await expect(session.newSession()).resolves.toBe(true);
+
+		expect(session.yieldQueue.has("async-result")).toBe(false);
+	});
+
+	it("restores an already queued wakeup when replacement is vetoed", async () => {
+		const { jobId } = registerGatedWakeup();
+		session.yieldQueue.enqueue("async-result", {
+			jobId,
+			result: "queued wakeup for live session",
+			job: manager.getJob(jobId),
+			durationMs: undefined,
+			epoch: 0,
+		});
+		beforeSwitchHandler = async () => {
+			expect(session.yieldQueue.has("async-result")).toBe(false);
+			return { cancel: true };
+		};
+
+		await expect(session.newSession()).resolves.toBe(false);
+
+		expect(session.yieldQueue.has("async-result")).toBe(true);
+	});
+
 	it("restores and delivers a suppressed wakeup exactly once when the pre-switch hook vetoes", async () => {
 		const { jobId, fire } = registerGatedWakeup();
 		let deliveriesDuringTransition = -1;

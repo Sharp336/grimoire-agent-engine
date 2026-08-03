@@ -17,6 +17,7 @@ import type { ExtensionRunner, SessionBeforeSwitchResult } from "../extensibilit
 import { obfuscateProviderContext } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { HandoffResult, SessionHandoffOptions } from "./agent-session-types";
+import type { SuppressedWakeups } from "./async-job-delivery";
 import type { BashSessionTransition } from "./bash-runner";
 import type { SessionContext } from "./session-context";
 import type { SessionManager } from "./session-manager";
@@ -67,8 +68,8 @@ export interface SessionHandoffHost {
 	markBashSessionTransition(transition: BashSessionTransition): void;
 	finishBashSessionTransition(transition: BashSessionTransition, success: boolean): void;
 	cancelOwnAsyncJobs(): void;
-	suppressOwnWakeups(): string[];
-	restoreOwnWakeups(jobIds: string[]): void;
+	suppressOwnWakeups(): SuppressedWakeups;
+	restoreOwnWakeups(suppressed: SuppressedWakeups): void;
 	cancelOwnWakeups(): void;
 	clearCheckpointRuntimeState(): void;
 	clearSessionScopedToolState(): void;

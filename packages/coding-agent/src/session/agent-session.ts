@@ -239,6 +239,7 @@ import {
 	ASYNC_RESULT_MESSAGE_TYPE,
 	type AsyncResultEntry,
 	buildAsyncResultBatchMessage,
+	type SuppressedWakeups,
 } from "./async-job-delivery";
 import { BashRunner, type BashRunnerHost } from "./bash-runner";
 import {
@@ -1828,11 +1829,15 @@ export class AgentSession {
 	 * enqueue a follow-up into the session being replaced. The returned ids are
 	 * restored if the transition fails and cancelled after it commits.
 	 */
-	#suppressOwnWakeups(): string[] {
-		if (!this.#agentId) return [];
+	#suppressOwnWakeups(): SuppressedWakeups {
+		if (!this.#agentId) return { jobIds: [], queuedEntries: [] };
 		const manager = this.#asyncJobManager;
-		if (!manager) return [];
+		if (!manager) return { jobIds: [], queuedEntries: [] };
 		const ownerFilter = { ownerId: this.#agentId };
+		const queuedEntries = this.yieldQueue.take<AsyncResultEntry>(
+			ASYNC_RESULT_MESSAGE_TYPE,
+			entry => entry.job?.type === "wakeup",
+		);
 		const pendingDeliveryIds = new Set(manager.getDeliveryState(ownerFilter).pendingJobIds);
 		const wakeupIds = manager
 			.getAllJobs(ownerFilter)
@@ -1844,13 +1849,15 @@ export class AgentSession {
 			)
 			.map(job => job.id);
 		if (wakeupIds.length > 0) manager.acknowledgeDeliveries(wakeupIds);
-		return wakeupIds;
+		return { jobIds: wakeupIds, queuedEntries };
 	}
 
 	/** Restore wakeups suppressed by a replacement transition that did not commit. */
-	#restoreOwnWakeups(jobIds: string[]): void {
-		if (jobIds.length === 0) return;
-		this.#asyncJobManager?.resumeDeliveries(jobIds);
+	#restoreOwnWakeups(suppressed: SuppressedWakeups): void {
+		this.#asyncJobManager?.resumeDeliveries(suppressed.jobIds);
+		for (const entry of suppressed.queuedEntries) {
+			this.yieldQueue.enqueue(ASYNC_RESULT_MESSAGE_TYPE, entry);
+		}
 	}
 
 	/**
@@ -7509,7 +7516,9 @@ export class AgentSession {
 		// turn in the conversation being replaced. Same-session reloads are not a
 		// replacement, so their wakeups keep delivering. Restored on hook veto or
 		// rollback; cancelled once the switch succeeds.
-		const suppressedWakeupIds = switchingToDifferentSession ? this.#suppressOwnWakeups() : [];
+		const suppressedWakeupIds = switchingToDifferentSession
+			? this.#suppressOwnWakeups()
+			: { jobIds: [], queuedEntries: [] };
 		// Emit session_before_switch event (can be cancelled)
 		try {
 			if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
