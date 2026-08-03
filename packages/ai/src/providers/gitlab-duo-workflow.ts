@@ -2836,19 +2836,11 @@ const GITLAB_DUO_WORKFLOW_SHAKE_MARKER =
 // transcript. The flat string's payload alphabet equals its delimiter alphabet, so no
 // matcher is exact; shaking only needs to elide the bulk, and the jitter/hard byte-zone
 // guards remain the real backstop.
-const GITLAB_DUO_WORKFLOW_TOOL_BLOCK_SEGMENT_END = "(?=\\n?$)";
 const GITLAB_DUO_WORKFLOW_RENDERED_FUNCTION_CALLS_OPEN = "<function_calls>";
 const GITLAB_DUO_WORKFLOW_RENDERED_FUNCTION_CALLS_CLOSE = "</function_calls>";
 const GITLAB_DUO_WORKFLOW_RENDERED_INVOKE_OPENER_RE = /<invoke name="[^"]+">/g;
 const GITLAB_DUO_WORKFLOW_RENDERED_INVOKE_BLOCK_RE =
 	/<invoke name="[^"]+">(?:<parameter name="[^"]+">[\s\S]*?<\/parameter>)*<\/invoke>/gy;
-const GITLAB_DUO_WORKFLOW_TOOL_RESULT_BLOCK_RE = new RegExp(
-	[
-		`<function_results>[\\s\\S]*?</function_results>${GITLAB_DUO_WORKFLOW_TOOL_BLOCK_SEGMENT_END}`,
-		`<tool_response>[\\s\\S]*?</tool_response>${GITLAB_DUO_WORKFLOW_TOOL_BLOCK_SEGMENT_END}`,
-	].join("|"),
-	"g",
-);
 
 interface GitLabDuoWorkflowToolBlockMatch {
 	block: string;
@@ -2946,13 +2938,19 @@ function collectGitLabDuoWorkflowToolBlockMatches(body: string): GitLabDuoWorkfl
 			const segmentMatches = collectGitLabDuoWorkflowAssistantToolBlockMatches(content, contentStart);
 			matches.push(...segmentMatches);
 			previousAssistantHadToolCall = segmentMatches.length > 0;
-		} else if (normalizedSegment.startsWith("Human: ")) {
+		} else if (normalizedSegment.startsWith("Human: ") && previousAssistantHadToolCall) {
 			const contentStart = absoluteSegmentStart + "Human: ".length;
-			const content = body.slice(contentStart, segmentEnd);
-			const match = previousAssistantHadToolCall ? GITLAB_DUO_WORKFLOW_TOOL_RESULT_BLOCK_RE.exec(content) : null;
-			GITLAB_DUO_WORKFLOW_TOOL_RESULT_BLOCK_RE.lastIndex = 0;
-			if (match?.index === 0) {
+			// Tool output is raw and may itself contain transcript-looking role markers.
+			// Match through those markers to the wrapper close at a real segment boundary.
+			const result =
+				/(?:<function_results>[\s\S]*?<\/function_results>|<tool_response>[\s\S]*?<\/tool_response>)(?=\n?(?:\n\n(?:Assistant|Human): |$))/y;
+			result.lastIndex = contentStart;
+			const match = result.exec(body);
+			if (match) {
 				matches.push({ block: match[0], start: contentStart });
+				segmentStart = result.lastIndex;
+				previousAssistantHadToolCall = false;
+				continue;
 			}
 			previousAssistantHadToolCall = false;
 		} else if (normalizedSegment.length > 0) {
@@ -3001,13 +2999,12 @@ function shakeGitLabDuoWorkflowToolBlocks(body: string, bodyBudget: number): str
 	const blocks = collectGitLabDuoWorkflowToolBlockMatches(body);
 	if (blocks.length === 0) return body;
 	let shaken = body;
-	for (const { block } of blocks) {
-		// Re-find the (still-present) block: earlier replacements shifted indices, and a
-		// marker is shorter than the block it replaced, so a left-to-right indexOf lands
-		// on the next un-elided original block (markers never contain tool block openers).
-		const at = shaken.indexOf(block);
-		if (at < 0) continue;
+	let removedCharacters = 0;
+	for (const { block, start } of blocks) {
+		const at = start - removedCharacters;
+		if (shaken.slice(at, at + block.length) !== block) continue;
 		shaken = shaken.slice(0, at) + GITLAB_DUO_WORKFLOW_SHAKE_MARKER + shaken.slice(at + block.length);
+		removedCharacters += block.length - GITLAB_DUO_WORKFLOW_SHAKE_MARKER.length;
 		if (Buffer.byteLength(shaken, "utf8") <= bodyBudget) break;
 	}
 	return shaken;

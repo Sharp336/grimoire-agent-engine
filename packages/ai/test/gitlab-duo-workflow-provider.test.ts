@@ -658,6 +658,37 @@ describe("GitLab Duo Workflow provider protocol", () => {
 		expect(payload.goal).toContain("USER_TURN_0 keep-me");
 		expect(payload.goal).toContain(`USER_TURN_${turnCount - 1} keep-me`);
 	});
+	it("elides tool output containing transcript role markers", () => {
+		const SOFT = 1_048_576;
+		const heavy = "r".repeat(SOFT + 10_000);
+		const summarizationUserText = `<conversation>\nAssistant: <invoke name="read"><parameter name="path">transcript.txt</parameter></invoke>\n\nHuman: <tool_response>\nRESULT_HEAD\n\nHuman: quoted user\n\nAssistant: quoted assistant ${heavy}\n</tool_response>\n</conversation>\n\nSummarize using the required format. KEEP_TAIL.`;
+		const summarizationContext: Context = {
+			systemPrompt: ["Summarize conversations between users and AI coding assistants."],
+			messages: [{ role: "user", content: summarizationUserText, timestamp: Date.now() }],
+		};
+
+		const payload = buildGitLabDuoWorkflowStartRequest("workflow-1", model, summarizationContext);
+
+		expect(Buffer.byteLength(payload.goal, "utf8")).toBeLessThan(SOFT);
+		expect(payload.goal).toContain("tool I/O elided");
+		expect(payload.goal).not.toContain("RESULT_HEAD");
+		expect(payload.goal).toContain("KEEP_TAIL");
+	});
+
+	it("uses recorded offsets when identical tool XML was quoted earlier", () => {
+		const SOFT = 1_048_576;
+		const block = `<tool_response>\nDUPLICATE_BLOCK ${"d".repeat(SOFT + 10_000)}\n</tool_response>`;
+		const summarizationUserText = `<conversation>\nHuman: USER_QUOTE_START ${block} USER_QUOTE_END\n\nAssistant: <invoke name="read"><parameter name="path">large.txt</parameter></invoke>\n\nHuman: ${block}\n</conversation>\n\nSummarize using the required format.`;
+		const summarizationContext: Context = {
+			systemPrompt: ["Summarize conversations between users and AI coding assistants."],
+			messages: [{ role: "user", content: summarizationUserText, timestamp: Date.now() }],
+		};
+
+		const payload = buildGitLabDuoWorkflowStartRequest("workflow-1", model, summarizationContext);
+
+		expect(payload.goal).toContain(`USER_QUOTE_START ${block} USER_QUOTE_END`);
+		expect(payload.goal).toContain("tool I/O elided");
+	});
 	it("elides a tool_response block whose own output embeds a literal <tool_response> opener", () => {
 		const SOFT = 1_048_576;
 		// The bot-reported gap: a tool result (e.g. a read of XML/HTML or a prior
