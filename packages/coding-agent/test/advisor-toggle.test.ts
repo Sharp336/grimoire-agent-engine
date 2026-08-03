@@ -190,6 +190,7 @@ describe("AgentSession advisor toggle", () => {
 
 		session.settings.set("advisor.autoEnableFor", `${model.provider}/${model.id}:off`);
 		expect(session.isAdvisorActive()).toBe(false);
+		expect(session.formatAdvisorStatus()).toContain(`${model.provider}/${model.id}:inherit`);
 
 		session.settings.set("advisor.autoEnableFor", `${model.provider}/${model.id}:inherit`);
 		expect(session.isAdvisorActive()).toBe(true);
