@@ -88,6 +88,7 @@ import {
 	ExtensionRunner,
 	ExtensionToolWrapper,
 	type ExtensionUIContext,
+	isInlineExtensionPath,
 	type LoadExtensionsResult,
 	loadExtensionFromFactory,
 	loadExtensions,
@@ -1991,7 +1992,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// entries (`<inline-N>`) — those are per-session, not source paths.
 			extensionPaths = extensionsResult.extensions
 				.map(ext => ext.resolvedPath)
-				.filter(p => !p.startsWith("<inline"));
+				.filter(p => !isInlineExtensionPath(p));
 		} else if (options.preloadedExtensionPaths) {
 			extensionPaths = options.preloadedExtensionPaths;
 			extensionsResult = await logger.time("loadExtensions", loadExtensions, extensionPaths, cwd, eventBus);

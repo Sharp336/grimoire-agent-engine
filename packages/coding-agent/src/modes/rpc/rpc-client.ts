@@ -20,6 +20,7 @@ import type {
 	SessionCatalogScope,
 	SessionWorkspaceRoot,
 } from "../../session/session-catalog";
+import type { ToolInventory } from "../../session/session-tools";
 import type { TodoPhase } from "../../tools/todo";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameDecoder, type RpcProtocolVersion } from "./rpc-frame";
 import {
@@ -71,6 +72,8 @@ import type {
 	RpcSubagentProgressFrame,
 	RpcSubagentSnapshot,
 	RpcSubagentSubscriptionLevel,
+	RpcToolActivationResult,
+	RpcToolInventoryUpdateFrame,
 } from "./rpc-types";
 
 /** Distributive Omit that works with union types */
@@ -106,6 +109,7 @@ export type RpcSubagentLifecycleListener = (payload: RpcSubagentLifecycleFrame["
 export type RpcSubagentProgressListener = (payload: RpcSubagentProgressFrame["payload"]) => void;
 export type RpcSubagentEventListener = (payload: RpcSubagentEventFrame["payload"]) => void;
 export type RpcAvailableCommandsUpdateListener = (commands: RpcAvailableSlashCommand[]) => void;
+export type RpcToolInventoryUpdateListener = (frame: RpcToolInventoryUpdateFrame) => void;
 export type RpcRawFrameListener = (frame: Readonly<Record<string, unknown>>) => void;
 export type RpcPromptResultListener = (frame: RpcPromptResultFrame) => void;
 export type RpcOperationTerminalListener = (frame: RpcOperationTerminalFrame) => void;
@@ -248,6 +252,9 @@ function isRpcSubagentEventFrame(value: unknown): value is RpcSubagentEventFrame
 function isRpcAvailableCommandsUpdateFrame(value: unknown): value is RpcAvailableCommandsUpdateFrame {
 	if (!isRecord(value)) return false;
 	return value.type === "available_commands_update" && Array.isArray(value.commands);
+}
+function isRpcToolInventoryUpdateFrame(value: unknown): value is RpcToolInventoryUpdateFrame {
+	return isRecord(value) && value.type === "tool_inventory_update";
 }
 
 function isRpcPromptResultFrame(value: unknown): value is RpcPromptResultFrame {
@@ -435,6 +442,7 @@ export class RpcClient {
 	#subagentProgressListeners = new Set<RpcSubagentProgressListener>();
 	#subagentEventListeners = new Set<RpcSubagentEventListener>();
 	#availableCommandsUpdateListeners = new Set<RpcAvailableCommandsUpdateListener>();
+	#toolInventoryUpdateListeners = new Set<RpcToolInventoryUpdateListener>();
 	#rawFrameListeners = new Set<RpcRawFrameListener>();
 	#promptResultListeners = new Set<RpcPromptResultListener>();
 	#operationTerminalListeners = new Set<RpcOperationTerminalListener>();
@@ -757,6 +765,11 @@ export class RpcClient {
 		this.#availableCommandsUpdateListeners.add(listener);
 		return () => this.#availableCommandsUpdateListeners.delete(listener);
 	}
+	/** Subscribe to signals that the authoritative session tool inventory changed. */
+	onToolInventoryUpdate(listener: RpcToolInventoryUpdateListener): () => void {
+		this.#toolInventoryUpdateListeners.add(listener);
+		return () => this.#toolInventoryUpdateListeners.delete(listener);
+	}
 
 	/** Subscribe to every decoded JSON frame, including unknown future frames. */
 	onRawFrame(listener: RpcRawFrameListener): () => void {
@@ -986,6 +999,16 @@ export class RpcClient {
 		this.#activeOperationIds = new Set(snapshot.active.map(operation => operation.operationId));
 		for (const terminal of snapshot.recent) this.#rememberSettledOperation(terminal.operationId);
 		return snapshot;
+	}
+	/** Read the authoritative tool registry at the session command boundary. */
+	async getToolInventory(): Promise<ToolInventory> {
+		const response = await this.#send({ type: "get_tool_inventory" });
+		return this.#getData(response);
+	}
+	/** Atomically activate and deactivate already-registered tools for this session. */
+	async setToolActivation(options: { activate?: string[]; deactivate?: string[] }): Promise<RpcToolActivationResult> {
+		const response = await this.#send({ type: "set_tool_activation", ...options });
+		return this.#getData(response);
 	}
 
 	/**
@@ -1745,6 +1768,10 @@ export class RpcClient {
 			for (const listener of this.#availableCommandsUpdateListeners) {
 				listener(data.commands);
 			}
+			return;
+		}
+		if (isRpcToolInventoryUpdateFrame(data)) {
+			for (const listener of this.#toolInventoryUpdateListeners) listener(data);
 			return;
 		}
 
