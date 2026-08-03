@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `hideThinkingBlockOnComplete`: thinking blocks render live while the model streams and are hidden once the turn completes, leaving a clean user-message + final-answer transcript (Codex-style). Reasoning stays visible for turns that end abnormally (error, abort, length). Independent of `hideThinkingBlock`/`Ctrl+T`, and applies to subagent hub transcripts too.
+- Added `hideThinkingBlockOnComplete`: thinking blocks render live while the model streams and are hidden once the turn completes, leaving a clean user-message + final-answer transcript (Codex-style). Reasoning stays visible for turns that end abnormally (error, abort, length). Independent of `hideThinkingBlock`/`Ctrl+T`, and applies to subagent hub transcripts too ([#7494](https://github.com/can1357/oh-my-pi/pull/7494) by [@SebastianMartinezA](https://github.com/SebastianMartinezA)).
 
 ## [17.2.5] - 2026-08-03
 

@@ -952,7 +952,7 @@ export class AssistantMessageComponent extends Container {
 					thinkingIndex += 1;
 					continue;
 				}
-				hasRenderedThinkingContent = true;				// Add spacing only when another visible assistant content block follows.
+				hasRenderedThinkingContent = true; // Add spacing only when another visible assistant content block follows.
 				// This avoids a superfluous blank line before separately-rendered tool execution blocks.
 				const hasVisibleContentAfter = message.content
 					.slice(i + 1)

@@ -21,7 +21,10 @@ function makeMessage(stopReason: "stop" | "error" | "aborted" | "length" | "tool
 }
 
 function renderText(component: AssistantMessageComponent): string {
-	return component.render(RENDER_WIDTH).map(line => Bun.stripANSI(line)).join("\n");
+	return component
+		.render(RENDER_WIDTH)
+		.map(line => Bun.stripANSI(line))
+		.join("\n");
 }
 
 describe("hideThinkingBlockOnComplete", () => {
@@ -103,15 +106,7 @@ describe("hideThinkingBlockOnComplete", () => {
 	});
 
 	it("hides thinking for messages finalized at construction (transcript rebuild)", () => {
-		const component = new AssistantMessageComponent(
-			makeMessage("stop"),
-			false,
-			undefined,
-			[],
-			undefined,
-			true,
-			true,
-		);
+		const component = new AssistantMessageComponent(makeMessage("stop"), false, undefined, [], undefined, true, true);
 		const text = renderText(component);
 		expect(text).not.toContain(THINKING);
 		expect(text).toContain(ANSWER);
@@ -123,15 +118,7 @@ describe("hideThinkingBlockOnComplete", () => {
 		viaSetter.updateContent(makeMessage("stop"));
 		viaSetter.markTranscriptBlockFinalized();
 
-		const viaConstructor = new AssistantMessageComponent(
-			undefined,
-			false,
-			undefined,
-			[],
-			undefined,
-			true,
-			true,
-		);
+		const viaConstructor = new AssistantMessageComponent(undefined, false, undefined, [], undefined, true, true);
 		viaConstructor.updateContent(makeMessage("stop"));
 		viaConstructor.markTranscriptBlockFinalized();
 
