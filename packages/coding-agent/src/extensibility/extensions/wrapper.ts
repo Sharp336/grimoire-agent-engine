@@ -315,6 +315,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				pendingSafetyChecks.length > 0
 					? `${basePrompt}\nProvider safety checks:\n${safetyCheckLines(pendingSafetyChecks).join("\n")}`
 					: basePrompt;
+			context?.markExecutionPending?.();
 			let choice: string | undefined;
 			try {
 				choice = await uiContext.select(safetyPrompt, ["Approve", "Deny"]);

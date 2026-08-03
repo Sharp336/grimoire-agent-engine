@@ -1775,11 +1775,13 @@ describe("ExtensionRunner", () => {
 				hasQueuedMessages: () => false,
 				abort: () => {},
 				settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
+				markExecutionPending: () => events.push({ type: "execution_pending" }),
 				markExecutionStarted: () => events.push({ type: "execution_started" }),
 			});
 
 			expect(events).toEqual([
 				{ type: "tool_approval_requested" },
+				{ type: "execution_pending" },
 				{ type: "ui_select" },
 				{ type: "tool_approval_resolved", approved: true },
 				{ type: "execution_started" },
@@ -1821,6 +1823,7 @@ describe("ExtensionRunner", () => {
 			);
 			initializeRunner(runner, async () => "Deny");
 			const markExecutionStarted = vi.fn();
+			const markExecutionPending = vi.fn();
 
 			const wrapper = new ExtensionToolWrapper(approvalTool, runner);
 			await expect(
@@ -1833,6 +1836,7 @@ describe("ExtensionRunner", () => {
 					abort: () => {},
 					settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
 					markExecutionStarted,
+					markExecutionPending,
 				}),
 			).rejects.toThrow("Tool call denied by user: dangerous_tool");
 
@@ -1840,6 +1844,7 @@ describe("ExtensionRunner", () => {
 				{ type: "tool_approval_requested", reason: undefined },
 				{ type: "tool_approval_resolved", approved: false, reason: "denied by user" },
 			]);
+			expect(markExecutionPending).toHaveBeenCalledTimes(1);
 			expect(markExecutionStarted).not.toHaveBeenCalled();
 			delete globalState.__deniedApprovalEvents;
 		});

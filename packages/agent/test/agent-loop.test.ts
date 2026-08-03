@@ -4055,6 +4055,7 @@ describe("agentLoopContinue with AgentMessage", () => {
 			deferExecutionStart: true,
 			async execute(_toolCallId, params, _signal, _onUpdate, context) {
 				executionContext = context;
+				context?.markExecutionPending?.();
 				context?.markExecutionStarted?.();
 				return {
 					content: [{ type: "text", text: `echoed: ${params.value}` }],
@@ -4079,8 +4080,9 @@ describe("agentLoopContinue with AgentMessage", () => {
 		for await (const event of stream) events.push(event);
 
 		const starts = events.filter(event => event.type === "tool_execution_start");
-		expect(starts).toHaveLength(1);
-		expect(starts[0]).toMatchObject({ toolCallId: "tool-1", executed: true });
+		expect(starts).toHaveLength(2);
+		expect(starts[0]).toMatchObject({ toolCallId: "tool-1", executed: false });
+		expect(starts[1]).toMatchObject({ toolCallId: "tool-1", executed: true });
 		expect(executionContext).toMatchObject({ sentinel: true });
 		expect(Object.hasOwn(executionContext ?? {}, "sentinel")).toBe(true);
 	});

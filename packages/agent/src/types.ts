@@ -737,6 +737,11 @@ export type ToolApproval = ToolApprovalDecision | ((args: unknown) => ToolApprov
  */
 export interface AgentToolContext {
 	/**
+	 * Emit a non-executed lifecycle boundary while a deferred tool waits for
+	 * approval or another interactive preflight.
+	 */
+	markExecutionPending?: () => void;
+	/**
 	 * Mark the actual implementation boundary for tools that defer execution
 	 * behind approval or another preflight gate.
 	 */

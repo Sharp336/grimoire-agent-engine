@@ -2497,6 +2497,19 @@ async function executeToolCalls(
 					: effectiveArgs;
 				record.args = executionArgs;
 
+				let pendingExecutionEmitted = false;
+				const markExecutionPending = () => {
+					if (record.started || pendingExecutionEmitted) return;
+					pendingExecutionEmitted = true;
+					stream.push({
+						type: "tool_execution_start",
+						toolCallId: toolCall.id,
+						toolName: toolCall.name,
+						args: executionArgs,
+						intent: toolCall.intent,
+						executed: false,
+					});
+				};
 				const markExecutionStarted = () => {
 					if (record.started) return;
 					executionStarted = true;
@@ -2524,7 +2537,7 @@ async function executeToolCalls(
 						})
 					: undefined;
 				const executionContext = tool.deferExecutionStart
-					? ({ ...toolContext, markExecutionStarted } as AgentToolContext)
+					? ({ ...toolContext, markExecutionPending, markExecutionStarted } as AgentToolContext)
 					: toolContext;
 				if (!tool.deferExecutionStart) markExecutionStarted();
 				const rawResult = await tool.execute(
