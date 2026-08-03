@@ -375,7 +375,7 @@ function processProxyEvent(
 			partial.stopReason = proxyEvent.reason;
 			partial.usage = proxyEvent.usage;
 			if (proxyEvent.content !== undefined) partial.content = proxyEvent.content;
-			calculateCost(model, partial.usage);
+			calculateCost(model, partial.usage, partial.timestamp);
 			scrubPartialJson(partial);
 			return { type: "done", reason: proxyEvent.reason, message: partial };
 
@@ -384,7 +384,7 @@ function processProxyEvent(
 			partial.errorMessage = proxyEvent.errorMessage;
 			partial.usage = proxyEvent.usage;
 			if (proxyEvent.content !== undefined) partial.content = proxyEvent.content;
-			calculateCost(model, partial.usage);
+			calculateCost(model, partial.usage, partial.timestamp);
 			scrubPartialJson(partial);
 			return { type: "error", reason: proxyEvent.reason, error: partial };
 	}

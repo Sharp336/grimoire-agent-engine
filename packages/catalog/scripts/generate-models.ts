@@ -56,6 +56,7 @@ import { collapseEffortVariantsAcrossProviders } from "../src/variant-collapse";
 import {
 	applyAntigravityPricingFallback,
 	applyCanonicalLimitFallback,
+	applyDeepSeekPeakPricing,
 	applyGeneratedModelPolicies,
 	applyOllamaCloudOutputCap,
 	CLOUDFLARE_FALLBACK_MODEL,
@@ -293,28 +294,6 @@ function applyCodexPricingFallback(models: readonly ModelSpec[]): ModelSpec[] {
 			...model,
 			cost: { ...openAICost },
 		};
-	});
-}
-
-/**
- * DeepSeek API 峰谷定价：北京时间 9-12, 14-18 为高峰时段，价格 2 倍。
- * 转换为 UTC：1-4, 6-10。
- */
-function applyDeepSeekPeakPricing(models: readonly ModelSpec[]): ModelSpec[] {
-	return models.map(model => {
-		if (model.provider === "deepseek") {
-			return {
-				...model,
-				peakPricing: {
-					windows: [
-						{ startHour: 1, endHour: 4 }, // 北京 9-12
-						{ startHour: 6, endHour: 10 }, // 北京 14-18
-					],
-					multiplier: 2,
-				},
-			};
-		}
-		return model;
 	});
 }
 
@@ -782,5 +761,8 @@ function canonicalizeModelCompat(model: ModelSpec<Api>): void {
 	}
 }
 
-// Run the generator
-generateModels().catch(console.error);
+// Run the generator when executed directly (`bun run gen:models`), not when
+// imported by tests.
+if (import.meta.main) {
+	generateModels().catch(console.error);
+}

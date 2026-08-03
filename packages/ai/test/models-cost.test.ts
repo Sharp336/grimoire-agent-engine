@@ -28,7 +28,7 @@ describe("calculateCost", () => {
 			},
 		};
 
-		calculateCost(model, usage);
+		calculateCost(model, usage, Date.now());
 
 		expect(usage.cost.input).toBeCloseTo(1, 8);
 		expect(usage.cost.output).toBeCloseTo(1, 8);
@@ -62,7 +62,7 @@ describe("calculateCost", () => {
 			},
 		};
 
-		calculateCost(model, usage);
+		calculateCost(model, usage, Date.now());
 
 		expect(usage.cost.input).toBeCloseTo(1, 8);
 		expect(usage.cost.output).toBeCloseTo(1, 8);
@@ -91,7 +91,7 @@ describe("calculateCost", () => {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
 
-		calculateCost(model, usage);
+		calculateCost(model, usage, Date.now());
 
 		expect(usage.input).toBe(100);
 		expect(usage.output).toBe(20);
@@ -115,7 +115,7 @@ describe("calculateCost", () => {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
 
-		calculateCost(model, usage);
+		calculateCost(model, usage, Date.now());
 
 		// 1h write bills at 2x base input ($5/MTok -> $10/MTok), not the 5m
 		// scalar cost.cacheWrite ($6.25/MTok) which would give $2.15086875.
@@ -135,7 +135,7 @@ describe("calculateCost", () => {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
 
-		calculateCost(model, usage);
+		calculateCost(model, usage, Date.now());
 
 		// 100 * $6.25/MTok (5m) + 200 * $10/MTok (1h).
 		expect(usage.cost.cacheWrite).toBeCloseTo((6.25 * 100 + 10 * 200) / 1e6, 12);
@@ -156,7 +156,7 @@ describe("calculateCost", () => {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
 
-		calculateCost(model, usage);
+		calculateCost(model, usage, Date.now());
 
 		// 400 * $10/MTok (1h) + 600 unattributed * $6.25/MTok (flat 5m rate).
 		expect(usage.cost.cacheWrite).toBeCloseTo((10 * 400 + 6.25 * 600) / 1e6, 12);
@@ -173,7 +173,7 @@ describe("calculateCost", () => {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
 
-		calculateCost(model, usage);
+		calculateCost(model, usage, Date.now());
 
 		expect(usage.cost.cacheWrite).toBeCloseTo((6.25 * 1000) / 1e6, 12);
 	});
@@ -192,8 +192,95 @@ describe("calculateCost", () => {
 
 		expect(codexModel.cost).toEqual(openAIModel.cost);
 
-		calculateCost(codexModel, usage);
+		calculateCost(codexModel, usage, Date.now());
 
 		expect(usage.cost.total).toBeCloseTo(0.01005, 8);
+	});
+});
+
+describe("calculateCost peak pricing", () => {
+	const peakModel = {
+		...getBundledModel("github-copilot", "gpt-4o"),
+		cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 1.25 },
+		peakPricing: {
+			windows: [
+				{ startHour: 1, endHour: 4 },
+				{ startHour: 6, endHour: 10 },
+			],
+			multiplier: 2,
+		},
+	};
+
+	function inputCost(timestamp: number): number {
+		const usage: Usage = {
+			input: 1_000_000,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 1_000_000,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		calculateCost(peakModel, usage, timestamp);
+		return usage.cost.input;
+	}
+
+	it("applies the multiplier inside a window and keeps 1x outside", () => {
+		// 2026-08-03: UTC 2 and 7 are in-window, 0, 4, 5, 10 are out.
+		expect(inputCost(Date.UTC(2026, 7, 3, 2))).toBeCloseTo(2, 12);
+		expect(inputCost(Date.UTC(2026, 7, 3, 7))).toBeCloseTo(2, 12);
+		expect(inputCost(Date.UTC(2026, 7, 3, 0))).toBeCloseTo(1, 12);
+		expect(inputCost(Date.UTC(2026, 7, 3, 5))).toBeCloseTo(1, 12);
+		expect(inputCost(Date.UTC(2026, 7, 3, 23))).toBeCloseTo(1, 12);
+	});
+
+	it("treats windows as half-open [startHour, endHour)", () => {
+		expect(inputCost(Date.UTC(2026, 7, 3, 1))).toBeCloseTo(2, 12); // start inclusive
+		expect(inputCost(Date.UTC(2026, 7, 3, 4))).toBeCloseTo(1, 12); // end exclusive
+		expect(inputCost(Date.UTC(2026, 7, 3, 10))).toBeCloseTo(1, 12);
+	});
+
+	it("wraps windows that cross midnight", () => {
+		const wrapping = { ...peakModel, peakPricing: { windows: [{ startHour: 22, endHour: 2 }], multiplier: 2 } };
+		const cost = (timestamp: number): number => {
+			const usage: Usage = {
+				input: 1_000_000,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_000_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			};
+			calculateCost(wrapping, usage, timestamp);
+			return usage.cost.input;
+		};
+		expect(cost(Date.UTC(2026, 7, 3, 22))).toBeCloseTo(2, 12);
+		expect(cost(Date.UTC(2026, 7, 3, 23))).toBeCloseTo(2, 12);
+		expect(cost(Date.UTC(2026, 7, 3, 1))).toBeCloseTo(2, 12);
+		expect(cost(Date.UTC(2026, 7, 3, 2))).toBeCloseTo(1, 12);
+		expect(cost(Date.UTC(2026, 7, 3, 12))).toBeCloseTo(1, 12);
+	});
+
+	it("stays at 1x before the effective date even inside a window", () => {
+		const dormant = {
+			...peakModel,
+			peakPricing: { ...peakModel.peakPricing, effectiveFrom: Date.UTC(2026, 9, 1) },
+		};
+		const usage: Usage = {
+			input: 1_000_000,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 1_000_000,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		calculateCost(dormant, usage, Date.UTC(2026, 7, 3, 2));
+		expect(usage.cost.input).toBeCloseTo(1, 12);
+	});
+
+	it("pins the multiplier to the request timestamp, not the calculation time", () => {
+		// Off-peak request timestamp must stay 1x no matter when cost is recomputed.
+		const offPeak = Date.UTC(2026, 7, 3, 12);
+		expect(inputCost(offPeak)).toBeCloseTo(1, 12);
+		expect(inputCost(offPeak)).toBeCloseTo(1, 12);
 	});
 });

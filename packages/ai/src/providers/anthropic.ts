@@ -1700,6 +1700,7 @@ function calculateFallbackTurnCost(
 	requestModel: Model<"anthropic-messages">,
 	usage: Usage,
 	source: AnthropicWireUsage,
+	requestTimestamp: number,
 ): boolean {
 	const iterations = source.iterations ?? [];
 	if (iterations.length === 0) return false;
@@ -1725,7 +1726,7 @@ function calculateFallbackTurnCost(
 		iterationUsage.cacheWrite = cacheWriteTokens;
 		iterationUsage.totalTokens =
 			iterationUsage.input + iterationUsage.output + iterationUsage.cacheRead + iterationUsage.cacheWrite;
-		calculateCost(resolveIterationModel(requestModel, iteration.model), iterationUsage);
+		calculateCost(resolveIterationModel(requestModel, iteration.model), iterationUsage, requestTimestamp);
 		cost.input += iterationUsage.cost.input;
 		cost.output += iterationUsage.cost.output;
 		cost.cacheRead += iterationUsage.cost.cacheRead;
@@ -2227,11 +2228,11 @@ const streamAnthropicOnce = (
 								if (serverSideFallback) {
 									const served = fallbackServedModelFromUsage(startUsage);
 									if (served) output.model = served;
-									if (!calculateFallbackTurnCost(model, output.usage, startUsage)) {
-										calculateCost(model, output.usage);
+									if (!calculateFallbackTurnCost(model, output.usage, startUsage, output.timestamp)) {
+										calculateCost(model, output.usage, output.timestamp);
 									}
 								} else {
-									calculateCost(model, output.usage);
+									calculateCost(model, output.usage, output.timestamp);
 								}
 							} else {
 								reportAnthropicEnvelopeAnomaly("message_start missing usage");
@@ -2540,11 +2541,11 @@ const streamAnthropicOnce = (
 								if (serverSideFallback) {
 									const served = fallbackServedModelFromUsage(deltaUsage);
 									if (served) output.model = served;
-									if (!calculateFallbackTurnCost(model, output.usage, deltaUsage)) {
-										calculateCost(model, output.usage);
+									if (!calculateFallbackTurnCost(model, output.usage, deltaUsage, output.timestamp)) {
+										calculateCost(model, output.usage, output.timestamp);
 									}
 								} else {
-									calculateCost(model, output.usage);
+									calculateCost(model, output.usage, output.timestamp);
 								}
 							}
 						} else if (event.type === "message_stop") {

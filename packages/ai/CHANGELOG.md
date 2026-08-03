@@ -12,6 +12,9 @@
 
 - Fixed OpenAI-Codex (ChatGPT OAuth) requests failing with an `Unsupported service_tier: auto` error on default or legacy sessions by omitting the implicit `auto` service tier on the wire.
 - Fixed an issue where Cursor `kimi-k3` sessions would break permanently when a same-model assistant turn was persisted without thinking blocks, replacing hard errors with graceful warnings.
+### Changed
+
+- All providers now pass the request start timestamp into `calculateCost`, keeping cost calculation deterministic regardless of when usage is (re)computed.
 
 ## [17.2.6] - 2026-08-03
 
