@@ -57,7 +57,7 @@ const advisorEntrySchema = type({
 	"enabled?": "boolean",
 });
 
-const watchdogYamlSchema = type({
+export const watchdogYamlSchema = type({
 	"instructions?": "string",
 	"advisors?": advisorEntrySchema.array(),
 });

@@ -54,6 +54,7 @@ export async function collectConfigCandidates(
 	cwd: string,
 	agentDir: string | undefined,
 	filenames: string[],
+	readFailures?: string[],
 ): Promise<ConfigCandidate[]> {
 	const home = os.homedir();
 	const resolvedAgentDir = agentDir ?? getAgentDir();
@@ -106,6 +107,7 @@ export async function collectConfigCandidates(
 		} catch (err) {
 			if (!isEnoent(err)) {
 				logger.warn("Failed to read config candidate", { path: candidate, error: String(err) });
+				readFailures?.push(candidate);
 			}
 		}
 	}

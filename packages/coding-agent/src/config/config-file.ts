@@ -239,10 +239,9 @@ export class ConfigFile<T> implements IConfigFile<T> {
 		return result;
 	}
 
-	#parseContent(content: string): LoadResult<T> {
+	#classifyContent(content: string, readPath: string = this.#resolveReadPath()): LoadResult<T> {
 		try {
 			let parsed: unknown;
-			const readPath = this.#resolveReadPath();
 			if (readPath.endsWith(".json") || readPath.endsWith(".jsonc")) {
 				parsed = JSONC.parse(content);
 			} else if (readPath.endsWith(".yml") || readPath.endsWith(".yaml")) {
@@ -258,8 +257,8 @@ export class ConfigFile<T> implements IConfigFile<T> {
 					message: error.problem,
 				}));
 				const error = new ConfigError(this.id, schemaErrors);
-				logger.warn("Failed to parse config file", { path: this.path(), error });
-				return this.#storeCache({ error, status: "error" });
+				logger.warn("Failed to parse config file", { path: readPath, error });
+				return { error, status: "error" };
 			}
 			const value = checked as T;
 			try {
@@ -269,16 +268,20 @@ export class ConfigFile<T> implements IConfigFile<T> {
 					error instanceof ConfigError
 						? error
 						: new ConfigError(this.id, undefined, { err: error, stage: "AuxValidate" });
-				return this.#storeCache({ error: wrapped, status: "error" });
+				return { error: wrapped, status: "error" };
 			}
-			return this.#storeCache({ value, status: "ok" });
+			return { value, status: "ok" };
 		} catch (error) {
-			logger.warn("Failed to parse config file", { path: this.path(), error });
-			return this.#storeCache({
+			logger.warn("Failed to parse config file", { path: readPath, error });
+			return {
 				error: new ConfigError(this.id, undefined, { err: error, stage: "Unexpected" }),
 				status: "error",
-			});
+			};
 		}
+	}
+
+	#parseContent(content: string): LoadResult<T> {
+		return this.#storeCache(this.#classifyContent(content));
 	}
 
 	tryLoad(): LoadResult<T> {
@@ -299,6 +302,31 @@ export class ConfigFile<T> implements IConfigFile<T> {
 			});
 		}
 		return this.#parseContent(content);
+	}
+
+	/**
+	 * Read-only diagnostic load, optionally at an explicit `configPath`: parse
+	 * and classify without running the JSON→YAML migration, without
+	 * quarantining, and without polluting the load cache. Used by `omp doctor`
+	 * to surface parse/schema errors while leaving the file byte-identical on
+	 * disk. When `configPath` is omitted, the configured base path (with its
+	 * `.yaml` fallback) is diagnosed; when supplied, that exact file is read
+	 * and classified by its own extension.
+	 */
+	diagnose(configPath?: string): LoadResult<T> {
+		const readPath = configPath ?? this.#resolveReadPath();
+		let content: string;
+		try {
+			content = fs.readFileSync(readPath, "utf-8").trim();
+		} catch (error) {
+			if (isEnoent(error)) return { status: "not-found" };
+			logger.warn("Failed to read config file", { path: readPath, error });
+			return {
+				error: new ConfigError(this.id, undefined, { err: error, stage: "Read" }),
+				status: "error",
+			};
+		}
+		return this.#classifyContent(content, readPath);
 	}
 
 	async tryLoadAsync(): Promise<LoadResult<T>> {

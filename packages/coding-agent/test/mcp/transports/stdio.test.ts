@@ -3,7 +3,12 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { resolveStdioSpawnCommand, StdioTransport, terminateStdioProcess } from "../../../src/mcp/transports/stdio";
+import {
+	resolveStdioCommandPath,
+	resolveStdioSpawnCommand,
+	StdioTransport,
+	terminateStdioProcess,
+} from "../../../src/mcp/transports/stdio";
 
 describe("resolveStdioSpawnCommand", () => {
 	it("hides Windows executable MCP servers when the host has no console", async () => {
@@ -32,6 +37,51 @@ describe("resolveStdioSpawnCommand", () => {
 			windowsHide: false,
 			detached: false,
 		});
+	});
+
+	it("does not report an unresolved Windows executable as found", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-stdio-resolve-"));
+		try {
+			await expect(resolveStdioCommandPath("missing.exe", root, { PATH: root }, "win32")).resolves.toEqual({
+				kind: "command-not-found",
+			});
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects a missing or non-directory working directory", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-stdio-cwd-"));
+		try {
+			const file = path.join(root, "file");
+			await fs.writeFile(file, "");
+			await expect(
+				resolveStdioCommandPath(process.execPath, path.join(root, "missing"), {}, "linux"),
+			).resolves.toEqual({
+				kind: "cwd-unusable",
+			});
+			await expect(resolveStdioCommandPath(process.execPath, file, {}, "linux")).resolves.toEqual({
+				kind: "cwd-unusable",
+			});
+
+			// A directory without execute permission cannot be used as a cwd on
+			// POSIX. Root bypasses mode bits, so this assertion is skipped as root.
+			if (process.platform === "linux" && process.getuid?.() !== 0) {
+				const locked = await fs.mkdtemp(path.join(os.tmpdir(), "omp-stdio-cwd-lock-"));
+				const originalMode = (await fs.stat(locked)).mode & 0o777;
+				try {
+					await fs.chmod(locked, 0o600);
+					await expect(resolveStdioCommandPath(process.execPath, locked, {}, "linux")).resolves.toEqual({
+						kind: "cwd-unusable",
+					});
+				} finally {
+					await fs.chmod(locked, originalMode);
+					await fs.rm(locked, { recursive: true, force: true });
+				}
+			}
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
 	});
 
 	it("keeps Darwin stdio MCP servers attached so TCC Apple Events prompts can resolve", async () => {

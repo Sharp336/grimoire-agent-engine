@@ -18,6 +18,16 @@ const PROVIDER_ID = "mcp-json";
 const DISPLAY_NAME = "MCP Config";
 
 /**
+ * Absolute paths for standalone project-root MCP JSON candidates (`mcp.json`, `.mcp.json`).
+ *
+ * Always rooted at `projectDir` (the real project cwd). Independent of `--agent-dir` /
+ * `LoadContext.userAgentDir`, which only scopes user-level config — not these project files.
+ */
+export function getMcpJsonCandidatePaths(projectDir: string): string[] {
+	return [path.join(projectDir, "mcp.json"), path.join(projectDir, ".mcp.json")];
+}
+
+/**
  * Raw MCP JSON format (matches Claude Desktop's format).
  */
 interface MCPConfigFile {
@@ -158,9 +168,8 @@ async function loadMCPJsonFile(
  * MCP JSON Provider loader.
  */
 async function load(ctx: LoadContext): Promise<LoadResult<MCPServer>> {
-	const filenames = ["mcp.json", ".mcp.json"];
 	const results = await Promise.all(
-		filenames.map(filename => loadMCPJsonFile(ctx, path.join(ctx.cwd, filename), "project")),
+		getMcpJsonCandidatePaths(ctx.cwd).map(candidatePath => loadMCPJsonFile(ctx, candidatePath, "project")),
 	);
 
 	const allItems = results.flatMap(r => r.items);

@@ -427,7 +427,7 @@ function writeKeybindingsConfig(filePath: string, config: KeybindingsConfig): bo
 	}
 }
 
-function resolveKeybindingsConfigPaths(agentDir: string): KeybindingsConfigPaths {
+export function resolveKeybindingsConfigPaths(agentDir: string): KeybindingsConfigPaths {
 	const ymlPath = path.join(agentDir, KEYBINDINGS_YML);
 	if (fs.existsSync(ymlPath)) {
 		return { readPath: ymlPath, writeBackPath: ymlPath };

@@ -6567,7 +6567,7 @@ type SerializedCredentialRecord = {
 	identityKey: string | null;
 };
 
-const AUTH_SCHEMA_VERSION = 7;
+export const AUTH_SCHEMA_VERSION = 7;
 const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
 const LEGACY_CODEX_BLOCK_PROVIDER_KEY = "openai-codex:oauth";
 const LEGACY_CODEX_BLOCK_SCOPE = "shared";
@@ -6632,6 +6632,74 @@ function serializeCredential(provider: string, credential: AuthCredential): Seri
 	return null;
 }
 
+/**
+ * True when `data` has the OAuth fields runtime deserialization requires:
+ * non-empty string `access`, string `refresh` (empty allowed — some providers
+ * mint access-only grants; broker snapshots use {@link REMOTE_REFRESH_SENTINEL}),
+ * and finite numeric `expires` (including `0` force-refresh and long-lived
+ * finite values such as `Number.MAX_SAFE_INTEGER`). Shared by
+ * {@link validateCredentialPayload} and {@link deserializeCredential} so doctor
+ * and the production store cannot drift.
+ */
+function isStoredOAuthPayload(data: Record<string, unknown>): boolean {
+	return (
+		typeof data.access === "string" &&
+		data.access.length > 0 &&
+		typeof data.refresh === "string" &&
+		typeof data.expires === "number" &&
+		Number.isFinite(data.expires)
+	);
+}
+
+/**
+ * Validate a stored credential payload's shape without returning secret
+ * material. Mirrors the acceptance logic of {@link deserializeCredential} so
+ * `omp doctor` can detect malformed rows (e.g. `api_key` with `{}` payload,
+ * missing `data.key`, OAuth with non-string `access`) the production store
+ * would silently reject. Returns `true` when the payload is well-formed for
+ * its `credential_type`, `false` otherwise — never throws, never exposes the
+ * key or token bytes.
+ */
+export function validateCredentialPayload(credentialType: string, data: string): boolean {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(data);
+	} catch {
+		return false;
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+		return false;
+	}
+	if (credentialType === "api_key") {
+		return typeof (parsed as Record<string, unknown>).key === "string";
+	}
+	if (credentialType === "oauth") {
+		return isStoredOAuthPayload(parsed as Record<string, unknown>);
+	}
+	return false;
+}
+
+/**
+ * Pure schema-version classifier for the `auth_credentials` table — mirrors the
+ * private `SqliteAuthCredentialStore.#inferAuthSchemaVersionFromColumns`
+ * inference so read-only diagnostics (e.g. `omp doctor`) can classify a legacy
+ * schema without instantiating the store (which would migrate it). Takes the
+ * `PRAGMA table_info(auth_credentials)` column list and returns the inferred
+ * version: 0 = no `disabled_cause` (legacy, pre-soft-delete), 1 = has
+ * `disabled_cause`, 2 = has `account_id`/`email`, 3+ = has `identity_key`.
+ * Compare against `AUTH_SCHEMA_VERSION` to detect a pending migration.
+ */
+export function inferAuthSchemaVersionFromColumns(cols: ReadonlyArray<{ name?: string }>): number {
+	const hasDisabledCause = cols.some(column => column.name === "disabled_cause");
+	const hasIdentityKey = cols.some(column => column.name === "identity_key");
+	const hasAccountId = cols.some(column => column.name === "account_id");
+	const hasEmail = cols.some(column => column.name === "email");
+	if (hasIdentityKey) return 3;
+	if (hasAccountId || hasEmail) return 2;
+	if (hasDisabledCause) return 1;
+	return 0;
+}
+
 function deserializeCredential(row: AuthRow): AuthCredential | null {
 	let parsed: unknown;
 	try {
@@ -6650,7 +6718,9 @@ function deserializeCredential(row: AuthRow): AuthCredential | null {
 		}
 	}
 	if (row.credential_type === "oauth") {
-		return { type: "oauth", ...(parsed as Record<string, unknown>) } as AuthCredential;
+		const data = parsed as Record<string, unknown>;
+		if (!isStoredOAuthPayload(data)) return null;
+		return { type: "oauth", ...data } as AuthCredential;
 	}
 	return null;
 }
@@ -7228,14 +7298,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	#inferAuthSchemaVersionFromColumns(cols: Array<{ name?: string }>): number {
-		const hasDisabledCause = cols.some(column => column.name === "disabled_cause");
-		const hasIdentityKey = cols.some(column => column.name === "identity_key");
-		const hasAccountId = cols.some(column => column.name === "account_id");
-		const hasEmail = cols.some(column => column.name === "email");
-		if (hasIdentityKey) return 3;
-		if (hasAccountId || hasEmail) return 2;
-		if (hasDisabledCause) return 1;
-		return 0;
+		return inferAuthSchemaVersionFromColumns(cols);
 	}
 
 	#createAuthCredentialsTable(): void {

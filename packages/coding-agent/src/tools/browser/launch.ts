@@ -121,6 +121,55 @@ async function loadBrowsers(): Promise<typeof BrowsersNs> {
 }
 
 /**
+ * Compute the exact managed-Chromium target that `ensureChromiumExecutable`
+ * downloads and launches: `Browser.CHROME` for the detected platform, the
+ * build id pinned by puppeteer-core's `PUPPETEER_REVISIONS.chrome`, and the
+ * executable path `@puppeteer/browsers` computes under `cacheDir`. Returns
+ * undefined when platform detection fails. This is the single source of
+ * truth shared by the download path and the no-download cache probe so both
+ * stay aligned — a drift here would let `omp doctor` report a cached binary
+ * the launcher never uses (or vice versa).
+ */
+interface ManagedChromiumTarget {
+	platform: BrowsersNs.BrowserPlatform;
+	buildId: string;
+	executablePath: string;
+}
+
+async function resolveManagedChromiumTarget(cacheDir: string): Promise<ManagedChromiumTarget | undefined> {
+	const browsers = await loadBrowsers();
+	const platform = browsers.detectBrowserPlatform();
+	if (!platform) return undefined;
+	const { PUPPETEER_REVISIONS } = await import("puppeteer-core/internal/revisions.js");
+	const buildId = await browsers.resolveBuildId(browsers.Browser.CHROME, platform, PUPPETEER_REVISIONS.chrome);
+	const executablePath = browsers.computeExecutablePath({
+		browser: browsers.Browser.CHROME,
+		buildId,
+		cacheDir,
+		platform,
+	});
+	return { platform, buildId, executablePath };
+}
+
+/**
+ * Probe whether the exact managed Chromium that `ensureChromiumExecutable`
+ * targets already exists in the Puppeteer cache — WITHOUT triggering a
+ * download. Computes the same `Browser.CHROME` + platform + buildId +
+ * `computeExecutablePath` target the launcher uses and returns it only when
+ * the file exists on disk; otherwise undefined. Never calls
+ * `browsers.install` and never scans the cache for `chrome-headless-shell`,
+ * `chromium`, or other build revisions, so a mismatched Chrome-family
+ * artifact correctly reports as "not cached" (first-use download warning).
+ * Exported so `omp doctor` can probe cache availability without duplicating
+ * the target computation.
+ */
+export async function resolveCachedChromiumExecutable(cacheDir = getPuppeteerDir()): Promise<string | undefined> {
+	const target = await resolveManagedChromiumTarget(cacheDir);
+	if (!target) return undefined;
+	return fs.existsSync(target.executablePath) ? target.executablePath : undefined;
+}
+
+/**
  * Resolve the Chromium executable puppeteer will launch, lazily downloading it
  * on first use via @puppeteer/browsers. Skipped when a system Chromium (NixOS)
  * or PUPPETEER_EXECUTABLE_PATH is set. The browser is cached under
@@ -133,39 +182,31 @@ let chromiumExecutablePromise: Promise<string | undefined> | undefined;
 export async function ensureChromiumExecutable(): Promise<string | undefined> {
 	const sysChrome = resolveSystemChromium();
 	if (sysChrome) return sysChrome;
-	const envPath = process.env.PUPPETEER_EXECUTABLE_PATH;
+	const envPath = readChromiumEnvOverride();
 	if (envPath) return envPath;
 	if (chromiumExecutablePromise) return chromiumExecutablePromise;
 
 	chromiumExecutablePromise = (async () => {
-		const browsers = await loadBrowsers();
-		const platform = browsers.detectBrowserPlatform();
-		if (!platform) {
+		const cacheDir = getPuppeteerDir();
+		const target = await resolveManagedChromiumTarget(cacheDir);
+		if (!target) {
 			logger.warn("Could not detect browser platform; relying on puppeteer default resolution");
 			return undefined;
 		}
-		const cacheDir = getPuppeteerDir();
-		const { PUPPETEER_REVISIONS } = await import("puppeteer-core/internal/revisions.js");
-		const buildId = await browsers.resolveBuildId(browsers.Browser.CHROME, platform, PUPPETEER_REVISIONS.chrome);
-		const executablePath = browsers.computeExecutablePath({
-			browser: browsers.Browser.CHROME,
-			buildId,
-			cacheDir,
-			platform,
-		});
-		if (fs.existsSync(executablePath)) return executablePath;
+		if (fs.existsSync(target.executablePath)) return target.executablePath;
 
 		logger.warn("Downloading Chromium for puppeteer (first browser use)", {
-			buildId,
-			platform,
+			buildId: target.buildId,
+			platform: target.platform,
 			cacheDir,
 		});
+		const browsers = await loadBrowsers();
 		let lastReportedPercent = -1;
 		await browsers.install({
 			browser: browsers.Browser.CHROME,
-			buildId,
+			buildId: target.buildId,
 			cacheDir,
-			platform,
+			platform: target.platform,
 			downloadProgressCallback: (downloaded, total) => {
 				if (total <= 0) return;
 				const pct = Math.floor((downloaded / total) * 100);
@@ -177,7 +218,7 @@ export async function ensureChromiumExecutable(): Promise<string | undefined> {
 				}
 			},
 		});
-		return executablePath;
+		return target.executablePath;
 	})().catch(err => {
 		chromiumExecutablePromise = undefined;
 		throw new ToolError(
@@ -193,7 +234,12 @@ let resolvedChromium: string | null | undefined; // undefined = unchecked; null 
 function isExecutableFile(p: string): boolean {
 	try {
 		const st = fs.statSync(p);
-		return st.isFile();
+		if (!st.isFile()) return false;
+		// Windows does not enforce POSIX execute bits the same way; keep the
+		// historical isFile-only acceptance so existing .exe resolution is unchanged.
+		if (process.platform === "win32") return true;
+		fs.accessSync(p, fs.constants.X_OK);
+		return true;
 	} catch {
 		return false;
 	}
@@ -259,7 +305,7 @@ function systemChromiumCandidates(): string[] {
 	return candidates;
 }
 
-function resolveSystemChromium(): string | undefined {
+export function resolveSystemChromium(): string | undefined {
 	if (resolvedChromium !== undefined) return resolvedChromium ?? undefined;
 	const seen = new Set<string>();
 	for (const candidate of systemChromiumCandidates()) {
@@ -273,6 +319,15 @@ function resolveSystemChromium(): string | undefined {
 	}
 	resolvedChromium = null;
 	return undefined;
+}
+
+/**
+ * Read the `PUPPETEER_EXECUTABLE_PATH` override. Extracted as a named seam so
+ * `omp doctor` can probe the override without re-implementing the read, and
+ * tests can spy on it without mutating `process.env`.
+ */
+export function readChromiumEnvOverride(): string | undefined {
+	return process.env.PUPPETEER_EXECUTABLE_PATH;
 }
 
 /** Options shared by headless Chromium consumers. */
@@ -868,6 +923,11 @@ export async function applyStealthPatches(
 
 export function stealthIgnoreDefaultArgsForTest(executablePath: string | undefined): string[] {
 	return stealthIgnoreDefaultArgs(executablePath);
+}
+
+/** Test seam for the shared system-Chromium executable-file predicate. */
+export function isExecutableFileForTest(p: string): boolean {
+	return isExecutableFile(p);
 }
 
 export function targetSupportsUserAgentOverrideForTest(target: Target): boolean {

@@ -31,6 +31,13 @@ export interface AuthBrokerClientConfig {
 export interface ResolveAuthBrokerConfigOptions {
 	agentDir?: string;
 	configValueResolver?: (config: string) => Promise<string | undefined>;
+	/**
+	 * When false, the global broker token file (`~/.omp/auth-broker.token`)
+	 * is never read — only env and config.yml tokens are accepted. Used by
+	 * `omp doctor --agent-dir` so a scoped run cannot resolve credentials
+	 * from outside its scope. Defaults to true (production behavior).
+	 */
+	allowTokenFile?: boolean;
 }
 
 export interface DiscoverAuthStorageOptions {
@@ -214,8 +221,12 @@ export async function resolveAuthBrokerConfig(
 	}
 	if (!url) return null;
 
+	const allowTokenFile = options.allowTokenFile !== false;
 	const token =
-		(envToken && envToken.length > 0 ? envToken : undefined) ?? configToken ?? (await readTokenFile()) ?? undefined;
+		(envToken && envToken.length > 0 ? envToken : undefined) ??
+		configToken ??
+		(allowTokenFile ? await readTokenFile() : null) ??
+		undefined;
 	if (!token) {
 		throw new AIError.MissingApiKeyError(
 			undefined,

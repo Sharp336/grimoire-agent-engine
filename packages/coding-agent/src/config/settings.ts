@@ -65,11 +65,217 @@ export interface RawSettings {
 	[key: string]: unknown;
 }
 
-type YamlLoadResult =
+export type YamlLoadResult =
 	| { kind: "missing" }
 	| { kind: "loaded"; settings: RawSettings }
 	| { kind: "invalid"; error: unknown; backupPath?: string }
 	| { kind: "unreadable"; error: unknown };
+
+/**
+ * Read-only settings-YAML classify: the same read/parse/classify path
+ * {@link Settings.#loadYamlIfPresent} uses, extracted so `omp doctor` can
+ * surface parse errors without constructing a Settings instance, opening
+ * agent.db, or touching disk. Never migrates or quarantines.
+ */
+export async function classifySettingsYaml(filePath: string): Promise<YamlLoadResult> {
+	let content: string;
+	try {
+		content = await fs.promises.readFile(filePath, "utf8");
+	} catch (error) {
+		if (isEnoent(error)) return { kind: "missing" };
+		return { kind: "unreadable", error };
+	}
+
+	let parsed: unknown;
+	try {
+		parsed = YAML.parse(content);
+	} catch (error) {
+		return { kind: "invalid", error };
+	}
+	if (parsed === null || parsed === undefined) {
+		return { kind: "loaded", settings: {} };
+	}
+	if (typeof parsed !== "object" || Array.isArray(parsed)) {
+		return {
+			kind: "invalid",
+			error: new Error("Settings YAML must contain a mapping at the document root"),
+		};
+	}
+	return { kind: "loaded", settings: parsed as RawSettings };
+}
+
+/**
+ * Validate loaded settings values against {@link SETTINGS_SCHEMA}. Type
+ * mismatches (wrong primitive, non-array where array required, invalid enum
+ * member) are errors naming the key and expected type; quoted dotted object
+ * keys (ignored by runtime path lookup) are errors; unknown keys are warnings
+ * (forward-compat). Exported so `omp doctor` can surface schema violations
+ * without constructing a Settings instance.
+ */
+export function validateSettingsValues(raw: RawSettings): { errors: string[]; warnings: string[] } {
+	const errors: string[] = [];
+	const warnings: string[] = [];
+
+	// Validate each known setting path that has a value in the raw object.
+	for (const settingPath of Object.keys(SETTINGS_SCHEMA) as SettingPath[]) {
+		const value = getByPath(raw, SETTING_PATH_SEGMENTS[settingPath]);
+		if (value === undefined) continue;
+		const def = SETTINGS_SCHEMA[settingPath];
+		const error = validateSettingValueType(settingPath, value, def);
+		if (error) {
+			errors.push(error);
+			continue;
+		}
+		// Record containers pass the shape check above; member values that
+		// startup would reject via the settings hook must surface here too.
+		if (settingPath === "providers.maxInFlightRequests") {
+			try {
+				validateProviderMaxInFlightRequests(value);
+			} catch (err) {
+				errors.push(err instanceof Error ? err.message : String(err));
+			}
+		}
+	}
+
+	// Detect unknown keys (forward-compat: warn, never error) and namespace
+	// containers whose value is not a mapping (e.g. `theme: dark` where
+	// `theme` is a pure namespace — every leaf resolves to undefined at
+	// runtime, so the configured values are silently ignored).
+	const knownPaths = new Set<string>(Object.keys(SETTINGS_SCHEMA));
+	const knownPrefixes = new Set<string>();
+	for (const p of knownPaths) {
+		const segments = p.split(".");
+		for (let i = 1; i < segments.length; i++) knownPrefixes.add(segments.slice(0, i).join("."));
+	}
+	walkUnknownSettingsKeys(raw, "", knownPaths, knownPrefixes, warnings, errors);
+
+	return { errors, warnings };
+}
+
+function validateSettingValueType(
+	path: string,
+	value: unknown,
+	def: { type: string; values?: readonly string[]; elements?: "string" | "number" | "boolean" | "object" },
+): string | null {
+	switch (def.type) {
+		case "boolean":
+			if (typeof value !== "boolean")
+				return `Settings key "${path}" must be a boolean, got ${value === null ? "null" : typeof value}`;
+			return null;
+		case "string":
+			if (typeof value !== "string")
+				return `Settings key "${path}" must be a string, got ${value === null ? "null" : typeof value}`;
+			return null;
+		case "number":
+			if (typeof value !== "number" || !Number.isFinite(value))
+				return `Settings key "${path}" must be a finite number, got ${value === null ? "null" : typeof value}`;
+			return null;
+		case "enum": {
+			const allowed = def.values ?? [];
+			if (typeof value !== "string")
+				return `Settings key "${path}" must be one of [${allowed.join(", ")}], got ${value === null ? "null" : typeof value}`;
+			if (!allowed.includes(value))
+				return `Settings key "${path}" must be one of [${allowed.join(", ")}], got "${value}"`;
+			return null;
+		}
+		case "array": {
+			if (!Array.isArray(value))
+				return `Settings key "${path}" must be an array, got ${value === null ? "null" : typeof value}`;
+			// enabledModels / disabledProviders accept plain strings or the same
+			// path-scoped object entries resolvePathScopedStringArray understands.
+			if (path === "enabledModels" || path === "disabledProviders") {
+				for (let i = 0; i < value.length; i++) {
+					const parsed = parsePathScopedStringArrayEntry(path as PathScopedArraySetting, value[i]);
+					if (parsed.kind === "invalid") {
+						return `Settings key "${path}[${i}]" must be a string or path-scoped object, got ${parsed.actual}`;
+					}
+				}
+				return null;
+			}
+			// When the schema declares an element type, validate each element
+			// so a typed array with a null/wrong-typed member is caught here
+			// rather than crashing a downstream consumer (e.g. compileRules
+			// reading rule.flags on a null element).
+			const elementType = def.elements;
+			if (elementType !== undefined) {
+				for (let i = 0; i < value.length; i++) {
+					const item = value[i];
+					const actual = item === null ? "null" : typeof item;
+					const ok = matchesSettingElementType(item, elementType);
+					if (!ok) return `Settings key "${path}[${i}]" must be a ${elementType}, got ${actual}`;
+				}
+			}
+			return null;
+		}
+		case "record": {
+			if (typeof value !== "object" || Array.isArray(value) || value === null)
+				return `Settings key "${path}" must be a record/object, got ${value === null ? "null" : Array.isArray(value) ? "array" : typeof value}`;
+			const elementType = def.elements;
+			if (elementType !== undefined) {
+				for (const [key, item] of Object.entries(value)) {
+					const actual = item === null ? "null" : typeof item;
+					if (!matchesSettingElementType(item, elementType))
+						return `Settings key "${path}.${key}" must be a ${elementType}, got ${actual}`;
+				}
+			}
+			return null;
+		}
+		default:
+			return null;
+	}
+}
+
+function matchesSettingElementType(value: unknown, elementType: "string" | "number" | "boolean" | "object"): boolean {
+	return elementType === "object"
+		? value !== null && typeof value === "object" && !Array.isArray(value)
+		: typeof value === elementType;
+}
+
+function walkUnknownSettingsKeys(
+	obj: Record<string, unknown>,
+	prefix: string,
+	knownPaths: Set<string>,
+	knownPrefixes: Set<string>,
+	warnings: string[],
+	errors: string[],
+): void {
+	for (const [key, value] of Object.entries(obj)) {
+		const fullPath = prefix ? `${prefix}.${key}` : key;
+		// Quoted dotted keys (e.g. `"theme.dark"`) are a single YAML/JSON object
+		// key. Runtime path lookup splits on `.` and walks nested mappings, so a
+		// literal dotted key is ignored. Reject before known-path / known-prefix
+		// checks — otherwise a key that stringifies to a known path or namespace
+		// would be accepted, and a dotted namespace key would launder its children.
+		if (key.includes(".")) {
+			errors.push(
+				`Settings key "${fullPath}" is a quoted dotted key and is ignored at runtime; use nested mappings instead`,
+			);
+			continue;
+		}
+		if (knownPaths.has(fullPath)) continue;
+		if (knownPrefixes.has(fullPath)) {
+			if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+				walkUnknownSettingsKeys(
+					value as Record<string, unknown>,
+					fullPath,
+					knownPaths,
+					knownPrefixes,
+					warnings,
+					errors,
+				);
+			} else {
+				// A known namespace prefix mapped to a non-object (e.g.
+				// `theme: dark` or `statusLine: []`): every leaf beneath it
+				// resolves to undefined at runtime, so the configured values
+				// are silently ignored and defaults are used instead.
+				const actual = value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+				errors.push(`Settings key "${fullPath}" must be a mapping, got ${actual}`);
+			}
+			continue;
+		}
+		warnings.push(`Unknown settings key "${fullPath}"`);
+	}
+}
 
 export interface SettingsOptions {
 	/** Current working directory for project settings discovery */
@@ -152,19 +358,61 @@ export function validateProviderMaxInFlightRequests(value: unknown): Record<stri
 }
 
 const PATH_SCOPED_ARRAY_SETTINGS = new Set<SettingPath>(["enabledModels", "disabledProviders"]);
-type PathScopedStringArrayEntry = {
-	path?: unknown;
-	paths?: unknown;
-	pathPrefix?: unknown;
-	pathPrefixes?: unknown;
-	values?: unknown;
-	items?: unknown;
-	models?: unknown;
-	providers?: unknown;
-};
+const PATH_SCOPED_PREFIX_KEYS = ["path", "paths", "pathPrefix", "pathPrefixes"] as const;
+const PATH_SCOPED_VALUE_KEYS = {
+	enabledModels: ["values", "items", "models"],
+	disabledProviders: ["values", "items", "providers"],
+} as const;
+type PathScopedArraySetting = keyof typeof PATH_SCOPED_VALUE_KEYS;
+type ParsedPathScopedStringArrayEntry =
+	| { kind: "string"; value: string }
+	| { kind: "scoped"; prefixes: string[]; values: string[] }
+	| { kind: "invalid"; actual: string };
 
 function expandTilde(p: string): string {
 	return p === "~" ? os.homedir() : p.startsWith("~/") ? path.join(os.homedir(), p.slice(2)) : p;
+}
+
+/**
+ * Resolve the config overlay file list the runtime loads: `PI_CONFIG_FILES`
+ * (platform path-list) followed by any explicit `configFiles`, each tilde-
+ * expanded and resolved against `cwd`. Exported so read-only diagnostics can
+ * enumerate exactly the overlays Settings would merge.
+ */
+export function resolveConfigOverlayPaths(cwd: string, configFiles?: readonly string[]): string[] {
+	const files = process.env.PI_CONFIG_FILES?.split(path.delimiter).filter(Boolean) ?? [];
+	if (configFiles) files.push(...configFiles);
+	return files.map(file => path.resolve(cwd, expandTilde(file)));
+}
+
+/**
+ * Strict loader for a single config overlay file — same parse + migration
+ * semantics as Settings' private overlay load. Missing / unreadable / invalid
+ * YAML / non-mapping roots are hard errors. Safe for read-only callers: no
+ * disk writes, migrates via {@link migrateRawSettingsShape}.
+ */
+export async function loadConfigOverlayFile(filePath: string): Promise<RawSettings> {
+	let content: string;
+	try {
+		content = await Bun.file(filePath).text();
+	} catch (error) {
+		throw new Error(
+			isEnoent(error)
+				? `Config overlay not found: ${filePath}`
+				: `Failed to read config overlay ${filePath}: ${String(error)}`,
+		);
+	}
+	let parsed: unknown;
+	try {
+		parsed = YAML.parse(content);
+	} catch (error) {
+		throw new Error(`Failed to parse config overlay ${filePath}: ${String(error)}`);
+	}
+	if (parsed === null || parsed === undefined) return {};
+	if (typeof parsed !== "object" || Array.isArray(parsed)) {
+		throw new Error(`Config overlay must be a YAML mapping: ${filePath}`);
+	}
+	return migrateRawSettingsShape(parsed as RawSettings);
 }
 
 function normalizePathPrefix(prefix: string): string {
@@ -184,6 +432,27 @@ function stringArrayFromUnknown(value: unknown): string[] {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * Shared string-or-path-scoped-object contract for enabledModels / disabledProviders.
+ * Validation and runtime resolution both parse entries through this helper so the
+ * accepted keys/shapes cannot drift.
+ */
+function parsePathScopedStringArrayEntry(
+	settingPath: PathScopedArraySetting,
+	entry: unknown,
+): ParsedPathScopedStringArrayEntry {
+	if (typeof entry === "string") return { kind: "string", value: entry };
+	if (!isRecord(entry)) {
+		return {
+			kind: "invalid",
+			actual: entry === null ? "null" : Array.isArray(entry) ? "array" : typeof entry,
+		};
+	}
+	const prefixes = PATH_SCOPED_PREFIX_KEYS.flatMap(key => stringArrayFromUnknown(entry[key]));
+	const values = PATH_SCOPED_VALUE_KEYS[settingPath].flatMap(key => stringArrayFromUnknown(entry[key]));
+	return { kind: "scoped", prefixes, values };
 }
 
 /**
@@ -281,34 +550,14 @@ function resolvePathScopedStringArray(settingPath: SettingPath, value: unknown, 
 
 	const resolved: string[] = [];
 	for (const entry of value) {
-		if (typeof entry === "string") {
-			resolved.push(entry);
+		const parsed = parsePathScopedStringArrayEntry(settingPath as PathScopedArraySetting, entry);
+		if (parsed.kind === "string") {
+			resolved.push(parsed.value);
 			continue;
 		}
-		if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
-
-		const scoped = entry as PathScopedStringArrayEntry;
-		const prefixes = [
-			...stringArrayFromUnknown(scoped.path),
-			...stringArrayFromUnknown(scoped.paths),
-			...stringArrayFromUnknown(scoped.pathPrefix),
-			...stringArrayFromUnknown(scoped.pathPrefixes),
-		];
-		if (prefixes.length === 0 || !prefixes.some(prefix => pathMatchesPrefix(cwd, prefix))) continue;
-
-		const values =
-			settingPath === "enabledModels"
-				? [
-						...stringArrayFromUnknown(scoped.values),
-						...stringArrayFromUnknown(scoped.items),
-						...stringArrayFromUnknown(scoped.models),
-					]
-				: [
-						...stringArrayFromUnknown(scoped.values),
-						...stringArrayFromUnknown(scoped.items),
-						...stringArrayFromUnknown(scoped.providers),
-					];
-		resolved.push(...values);
+		if (parsed.kind !== "scoped") continue;
+		if (parsed.prefixes.length === 0 || !parsed.prefixes.some(prefix => pathMatchesPrefix(cwd, prefix))) continue;
+		resolved.push(...parsed.values);
 	}
 
 	return resolved;
@@ -317,6 +566,546 @@ function resolvePathScopedStringArray(settingPath: SettingPath, value: unknown, 
 // ═══════════════════════════════════════════════════════════════════════════
 // Settings Class
 // ═══════════════════════════════════════════════════════════════════════════
+/**
+ * Apply schema migrations to raw settings — the pure transform shared by
+ * {@link Settings.#migrateRawSettings}, config overlay loading, and read-only
+ * diagnostics. Operates on a deep clone so callers never see mutation; the
+ * instance-side wrapper additionally captures `lastChangelogVersion` for
+ * marker seeding. Exported so doctor can validate the *migrated* shape
+ * (legacy booleans → enums, renamed keys, etc.) rather than the raw YAML the
+ * runtime would silently normalize at startup.
+ */
+export function migrateRawSettingsShape(raw: RawSettings): RawSettings {
+	raw = structuredClone(raw);
+	// queueMode -> steeringMode
+	if ("queueMode" in raw && !("steeringMode" in raw)) {
+		raw.steeringMode = raw.queueMode;
+		delete raw.queueMode;
+	}
+
+	// lastChangelogVersion moved out of config.yml into the
+	// <agentDir>/last-changelog-version marker file so version bumps no
+	// longer dirty user-tracked configs. Capture for marker seeding (see
+	// #seedLastChangelogVersionMarker), then strip the key — the next
+	// config save drops it from disk.
+	delete raw.lastChangelogVersion;
+
+	// collapseChangelog (boolean) -> startup.changelogMode (enum). Preserve
+	// every explicit legacy choice while giving new installs the schema's
+	// "summary" default: true -> summary, false -> expanded. A separately
+	// configured new mode always wins.
+	const startupObj = isRecord(raw.startup) ? (raw.startup as Record<string, unknown>) : undefined;
+	const legacyCollapseChangelog = typeof raw.collapseChangelog === "boolean" ? raw.collapseChangelog : undefined;
+	const flatChangelogMode = raw["startup.changelogMode"];
+	const normalizedFlatChangelogMode =
+		flatChangelogMode === "summary" || flatChangelogMode === "expanded" || flatChangelogMode === "hidden"
+			? flatChangelogMode
+			: undefined;
+	if (legacyCollapseChangelog !== undefined || normalizedFlatChangelogMode !== undefined) {
+		if (!startupObj) {
+			raw.startup = {};
+		}
+		const target = raw.startup as Record<string, unknown>;
+		if (target.changelogMode === undefined) {
+			target.changelogMode =
+				normalizedFlatChangelogMode ??
+				(legacyCollapseChangelog !== undefined ? (legacyCollapseChangelog ? "summary" : "expanded") : undefined);
+		}
+	}
+	delete raw.collapseChangelog;
+	delete raw["startup.changelogMode"];
+
+	// ask.timeout: ms -> seconds (if value > 1000, it's old ms format)
+	if (raw.ask && typeof (raw.ask as Record<string, unknown>).timeout === "number") {
+		const oldValue = (raw.ask as Record<string, unknown>).timeout as number;
+		if (oldValue > 1000) {
+			(raw.ask as Record<string, unknown>).timeout = Math.round(oldValue / 1000);
+		}
+	}
+
+	// Migrate old flat "theme" string to nested theme.dark/theme.light
+	if (typeof raw.theme === "string") {
+		const oldTheme = raw.theme;
+		if (oldTheme === "light" || oldTheme === "dark") {
+			// Built-in defaults — just remove, let new defaults apply
+			delete raw.theme;
+		} else {
+			// Custom theme — detect luminance to place in correct slot
+			const slot = isLightTheme(oldTheme) ? "light" : "dark";
+			raw.theme = { [slot]: oldTheme };
+		}
+	}
+
+	// inspect_image.enabled (boolean) -> inspect_image.mode (enum). Explicit
+	// user choices are preserved: true -> "on", false -> "off". Configs with
+	// no legacy key get the new "auto" default, which hides the tool for
+	// models with native image input. Handles nested and quoted-dotted
+	// ("inspect_image.enabled") sources; the target is always the nested
+	// form, which is the only shape the resolver reads.
+	const inspectImageObj = isRecord(raw.inspect_image) ? (raw.inspect_image as Record<string, unknown>) : undefined;
+	const legacyEnabled =
+		typeof inspectImageObj?.enabled === "boolean"
+			? inspectImageObj.enabled
+			: typeof raw["inspect_image.enabled"] === "boolean"
+				? (raw["inspect_image.enabled"] as boolean)
+				: undefined;
+	if (legacyEnabled !== undefined) {
+		if (!inspectImageObj) {
+			raw.inspect_image = {};
+		}
+		const target = raw.inspect_image as Record<string, unknown>;
+		const flatMode = raw["inspect_image.mode"];
+		if (target.mode === undefined) {
+			// A quoted-dotted explicit mode wins over the legacy boolean but
+			// must be normalized into the nested form the resolver reads.
+			target.mode =
+				typeof flatMode === "string" && (INSPECT_IMAGE_MODES as readonly string[]).includes(flatMode)
+					? flatMode
+					: legacyEnabled
+						? "on"
+						: "off";
+		}
+		delete target.enabled;
+		delete raw["inspect_image.enabled"];
+		delete raw["inspect_image.mode"];
+	}
+
+	// task.isolation.enabled (boolean) -> task.isolation.mode (enum)
+	const taskObj = isRecord(raw.task) ? raw.task : undefined;
+	const isolationObj = isRecord(taskObj?.isolation) ? taskObj.isolation : undefined;
+	if (isolationObj && "enabled" in isolationObj) {
+		if (typeof isolationObj.enabled === "boolean") {
+			isolationObj.mode = isolationObj.enabled ? "auto" : "none";
+		}
+		delete isolationObj.enabled;
+	}
+
+	// task.simple: removed — the task tool no longer accepts a per-call
+	// schema (workflows drive structured output via eval agent()) and the
+	// batch/context shape is gated by task.batch instead.
+	if (taskObj && "simple" in taskObj) {
+		delete taskObj.simple;
+	}
+
+	// task.eager / todo.eager: boolean -> enum (default | preferred | always).
+	// `true` reproduced the previous "on" behavior, which is now `always`.
+	if (taskObj && typeof taskObj.eager === "boolean") {
+		taskObj.eager = taskObj.eager ? "always" : "default";
+	}
+	const todoObj = isRecord(raw.todo) ? raw.todo : undefined;
+	if (todoObj && typeof todoObj.eager === "boolean") {
+		todoObj.eager = todoObj.eager ? "always" : "default";
+	}
+
+	// task.isolation.mode: legacy values from before the pi-iso PAL refactor.
+	// `worktree` was git worktree → now lives under `rcopy`. `fuse-overlay`
+	// and `fuse-projfs` are now the platform-named `overlayfs` / `projfs`
+	// kinds; the PAL falls back internally when the chosen one isn't
+	// available, so we don't need the old TS-side platform guards.
+	if (isolationObj && typeof isolationObj.mode === "string") {
+		const legacy: Record<string, string> = {
+			worktree: "rcopy",
+			"fuse-overlay": "overlayfs",
+			"fuse-projfs": "projfs",
+		};
+		const mapped = legacy[isolationObj.mode as string];
+		if (mapped !== undefined) {
+			isolationObj.mode = mapped;
+		}
+	}
+
+	// edit.mode: removed "atom" and "vim" variants map back to "hashline"
+	const editObj = isRecord(raw.edit) ? raw.edit : undefined;
+	if (editObj) {
+		if (editObj.mode === "atom" || editObj.mode === "vim") {
+			editObj.mode = "hashline";
+		}
+		const modelVariants = editObj.modelVariants as Record<string, unknown> | undefined;
+		if (modelVariants && typeof modelVariants === "object" && !Array.isArray(modelVariants)) {
+			for (const [pattern, variant] of Object.entries(modelVariants)) {
+				if (variant === "atom" || variant === "vim") {
+					modelVariants[pattern] = "hashline";
+				}
+			}
+		}
+	}
+	if (raw["edit.mode"] === "atom" || raw["edit.mode"] === "vim") {
+		raw["edit.mode"] = "hashline";
+	}
+
+	// compaction.strategy: removed local-model shake-summary mode; plain shake
+	// keeps the same mechanical artifact-backed reduction without background CPU.
+	const compactionObj = isRecord(raw.compaction) ? raw.compaction : undefined;
+	if (compactionObj?.strategy === "shake-summary") {
+		compactionObj.strategy = "shake";
+	}
+	if (raw["compaction.strategy"] === "shake-summary") {
+		raw["compaction.strategy"] = "shake";
+	}
+
+	// snapcompact.systemPrompt: boolean -> scoped enum.
+	const snapcompactObj = isRecord(raw.snapcompact) ? raw.snapcompact : undefined;
+	if (snapcompactObj && typeof snapcompactObj.systemPrompt === "boolean") {
+		snapcompactObj.systemPrompt = snapcompactObj.systemPrompt ? "all" : "none";
+	}
+	if (typeof raw["snapcompact.systemPrompt"] === "boolean") {
+		raw["snapcompact.systemPrompt"] = raw["snapcompact.systemPrompt"] ? "all" : "none";
+	}
+
+	// inlineToolDescriptors: boolean -> enum (auto | on | off). The old
+	// `true`/`false` mapped directly onto inline-on/inline-off, so preserve
+	// the user's explicit choice; new installs get the `auto` default that
+	// turns it on only for Gemini models.
+	if (typeof raw.inlineToolDescriptors === "boolean") {
+		raw.inlineToolDescriptors = raw.inlineToolDescriptors ? "on" : "off";
+	}
+
+	// statusLine: rename "plan_mode" segment to "mode"
+	const statusLineObj = isRecord(raw.statusLine) ? raw.statusLine : undefined;
+	if (statusLineObj) {
+		for (const key of ["leftSegments", "rightSegments"] as const) {
+			const segments = statusLineObj[key];
+			if (Array.isArray(segments)) {
+				statusLineObj[key] = segments.map(seg => (seg === "plan_mode" ? "mode" : seg));
+			}
+		}
+		const segmentOptions = isRecord(statusLineObj.segmentOptions) ? statusLineObj.segmentOptions : undefined;
+		if (segmentOptions && "plan_mode" in segmentOptions && !("mode" in segmentOptions)) {
+			segmentOptions.mode = segmentOptions.plan_mode;
+			delete segmentOptions.plan_mode;
+		}
+	}
+
+	// providers.parallelFetch (boolean) replaced by the providers.fetch reader
+	// priority enum. The new default ("auto") supersedes both old values —
+	// Parallel is now a deep fallback in the auto chain rather than the first
+	// choice — so drop the legacy key (flat and nested) and let the enum
+	// default apply.
+	const providersObj = isRecord(raw.providers) ? raw.providers : undefined;
+	if (providersObj && "parallelFetch" in providersObj) {
+		delete providersObj.parallelFetch;
+	}
+	delete raw["providers.parallelFetch"];
+
+	// codexResets.autoRedeem: boolean -> tri-state enum.
+	// Existing explicit false keeps the old "do not run" behavior; missing
+	// config now falls through to the new "unset" default, which asks before
+	// the first eligible spend.
+	const codexResetsObj = isRecord(raw.codexResets) ? raw.codexResets : undefined;
+	if (codexResetsObj && typeof codexResetsObj.autoRedeem === "boolean") {
+		codexResetsObj.autoRedeem = codexResetsObj.autoRedeem ? "yes" : "no";
+	}
+	if (typeof raw["codexResets.autoRedeem"] === "boolean") {
+		raw["codexResets.autoRedeem"] = raw["codexResets.autoRedeem"] ? "yes" : "no";
+	}
+
+	// Map legacy `memories.enabled` boolean to the explicit `memory.backend`
+	// enum if the latter hasn't been set yet. Idempotent: subsequent
+	// migrations are no-ops once memory.backend is materialised.
+	const memoryBackendObj = isRecord(raw.memory) ? raw.memory : undefined;
+	const memoryBackendSet = memoryBackendObj && typeof memoryBackendObj.backend === "string";
+	const memoriesObj = isRecord(raw.memories) ? raw.memories : undefined;
+	if (!memoryBackendSet && memoriesObj && typeof memoriesObj.enabled === "boolean") {
+		const next = memoriesObj.enabled ? "local" : "off";
+		const memoryRoot = (memoryBackendObj ?? {}) as Record<string, unknown>;
+		memoryRoot.backend = next;
+		raw.memory = memoryRoot;
+	}
+
+	// Rename the legacy local `mnemosyne` memory backend to `mnemopi`.
+	// - `memory.backend: "mnemosyne"` now selects the renamed backend.
+	// - the top-level `mnemosyne` settings object becomes `mnemopi`.
+	// Idempotent: skips the object move once `mnemopi` is materialised.
+	if (memoryBackendObj && memoryBackendObj.backend === "mnemosyne") {
+		memoryBackendObj.backend = "mnemopi";
+	}
+	if ("mnemosyne" in raw && !("mnemopi" in raw)) {
+		raw.mnemopi = raw.mnemosyne;
+		delete raw.mnemosyne;
+	}
+
+	// hindsight: dynamicBankId/agentName -> scoping enum + bankId
+	// - dynamicBankId=true  → scoping="per-project" (closest semantic match;
+	//   the legacy `agent::project::channel::user` tuple was per-project in
+	//   practice — the channel/user env vars were rarely set).
+	// - hindsight.agentName was only used as the agent slot in the legacy
+	//   dynamic tuple; if the user customised it we surface it as the new
+	//   bankId base when no explicit bankId is set.
+	const hindsightObj = isRecord(raw.hindsight) ? raw.hindsight : undefined;
+	if (hindsightObj) {
+		if ("dynamicBankId" in hindsightObj) {
+			if (!("scoping" in hindsightObj) && hindsightObj.dynamicBankId === true) {
+				hindsightObj.scoping = "per-project";
+			}
+			delete hindsightObj.dynamicBankId;
+		}
+		if ("agentName" in hindsightObj) {
+			const agentName = hindsightObj.agentName;
+			if (
+				!("bankId" in hindsightObj) &&
+				typeof agentName === "string" &&
+				agentName.trim().length > 0 &&
+				agentName !== "omp"
+			) {
+				hindsightObj.bankId = agentName;
+			}
+			delete hindsightObj.agentName;
+		}
+	}
+
+	// power.preventIdleSleep / power.preventSystemSleep / power.declareUserActive
+	// / power.preventDisplaySleep (four booleans) → power.sleepPrevention enum.
+	// The enum is cumulative: each level adds the flags of all lower levels.
+	// Migration picks the highest level whose condition is met, scanning from
+	// most to least aggressive so a single enum value captures the old state.
+	if (
+		!("sleepPrevention" in ((raw.power as Record<string, unknown>) ?? {})) &&
+		raw["power.sleepPrevention"] === undefined
+	) {
+		const powerObj = isRecord(raw.power) ? raw.power : undefined;
+		const getFlag = (key: string): boolean | undefined => {
+			const nested = powerObj?.[key];
+			const flat = raw[`power.${key}`];
+			const value = nested ?? flat;
+			return typeof value === "boolean" ? value : undefined;
+		};
+		const idle = getFlag("preventIdleSleep");
+		const system = getFlag("preventSystemSleep");
+		const user = getFlag("declareUserActive");
+		const display = getFlag("preventDisplaySleep");
+		const anySet = idle !== undefined || system !== undefined || user !== undefined || display !== undefined;
+		if (anySet) {
+			const mode = system || user ? "system" : display ? "display" : idle !== false ? "idle" : "off";
+			const powerRoot = (powerObj ?? {}) as Record<string, unknown>;
+			powerRoot.sleepPrevention = mode;
+			raw.power = powerRoot;
+		}
+		// Clean up old keys (nested + flat)
+		if (powerObj) {
+			delete powerObj.preventIdleSleep;
+			delete powerObj.preventSystemSleep;
+			delete powerObj.declareUserActive;
+			delete powerObj.preventDisplaySleep;
+		}
+		delete raw["power.preventIdleSleep"];
+		delete raw["power.preventSystemSleep"];
+		delete raw["power.declareUserActive"];
+		delete raw["power.preventDisplaySleep"];
+	}
+
+	// Migration for renamed settings grep.* and glob.* from search.* and find.*:
+	// 1. Nested settings: find -> glob, search -> grep (per-property merge to avoid clobbering)
+	const ensureRawObject = (key: "glob" | "grep"): Record<string, unknown> => {
+		const current = raw[key];
+		if (isRecord(current)) {
+			return current;
+		}
+		const created: Record<string, unknown> = {};
+		raw[key] = created;
+		return created;
+	};
+
+	if ("find" in raw) {
+		const findObj = raw.find;
+		if (isRecord(findObj)) {
+			const globObj = ensureRawObject("glob");
+			const findKeys: Array<"enabled"> = ["enabled"];
+			for (const key of findKeys) {
+				if (key in findObj && !(key in globObj)) {
+					globObj[key] = findObj[key];
+				}
+			}
+		}
+		delete raw.find;
+	}
+
+	if ("search" in raw) {
+		const searchObj = raw.search;
+		if (isRecord(searchObj)) {
+			const grepObj = ensureRawObject("grep");
+			const searchKeys: Array<"enabled" | "contextBefore" | "contextAfter"> = [
+				"enabled",
+				"contextBefore",
+				"contextAfter",
+			];
+			for (const key of searchKeys) {
+				if (key in searchObj && !(key in grepObj)) {
+					grepObj[key] = searchObj[key];
+				}
+			}
+		}
+		delete raw.search;
+	}
+
+	// 2. Flat settings keys: map them to the proper nested target so get/set resolves them correctly
+	if ("find.enabled" in raw) {
+		const globObj = ensureRawObject("glob");
+		if (!("enabled" in globObj)) {
+			globObj.enabled = raw["find.enabled"];
+		}
+		delete raw["find.enabled"];
+	}
+	if ("search.enabled" in raw) {
+		const grepObj = ensureRawObject("grep");
+		if (!("enabled" in grepObj)) {
+			grepObj.enabled = raw["search.enabled"];
+		}
+		delete raw["search.enabled"];
+	}
+	if ("search.contextBefore" in raw) {
+		const grepObj = ensureRawObject("grep");
+		if (!("contextBefore" in grepObj)) {
+			grepObj.contextBefore = raw["search.contextBefore"];
+		}
+		delete raw["search.contextBefore"];
+	}
+	if ("search.contextAfter" in raw) {
+		const grepObj = ensureRawObject("grep");
+		if (!("contextAfter" in grepObj)) {
+			grepObj.contextAfter = raw["search.contextAfter"];
+		}
+		delete raw["search.contextAfter"];
+	}
+
+	// Also clean up any empty nested objects we might have created or left behind
+	if (raw.glob && typeof raw.glob === "object" && Object.keys(raw.glob).length === 0) {
+		delete raw.glob;
+	}
+	if (raw.grep && typeof raw.grep === "object" && Object.keys(raw.grep).length === 0) {
+		delete raw.grep;
+	}
+	// readHashLines: removed. Hashline anchors are now driven solely by
+	// edit.mode === "hashline"; the separate read toggle only ever produced
+	// the incoherent "hashline edits without addressable anchors" state.
+	delete raw.readHashLines;
+
+	// serviceTier (single enum with scoped openai-only/claude-only sentinels)
+	// → per-family tier.openai/tier.anthropic/tier.google; serviceTierSubagent
+	// → tier.subagent; serviceTierAdvisor → tier.advisor. `fastModeScope` is
+	// dropped — per-family scoping is now expressed by the three tier settings.
+	const tierObj = isRecord(raw.tier) ? raw.tier : {};
+	let tierTouched = false;
+	const setTier = (family: string, value: unknown): void => {
+		if (value !== undefined && !(family in tierObj)) {
+			tierObj[family] = value;
+			tierTouched = true;
+		}
+	};
+	if (typeof raw.serviceTier === "string") {
+		switch (raw.serviceTier) {
+			case "priority":
+				setTier("openai", "priority");
+				setTier("anthropic", "priority");
+				setTier("google", "priority");
+				break;
+			case "openai-only":
+				setTier("openai", "priority");
+				break;
+			case "claude-only":
+				setTier("anthropic", "priority");
+				break;
+			case "auto":
+			case "default":
+			case "flex":
+			case "scale":
+				setTier("openai", raw.serviceTier);
+				break;
+		}
+		delete raw.serviceTier;
+	}
+	const mapInheritTier = (value: unknown): unknown =>
+		value === "openai-only" || value === "claude-only" ? "priority" : value;
+	if ("serviceTierSubagent" in raw) {
+		setTier("subagent", mapInheritTier(raw.serviceTierSubagent));
+		delete raw.serviceTierSubagent;
+	}
+	if ("serviceTierAdvisor" in raw) {
+		setTier("advisor", mapInheritTier(raw.serviceTierAdvisor));
+		delete raw.serviceTierAdvisor;
+	}
+	if (tierTouched) raw.tier = tierObj;
+	delete raw.fastModeScope;
+
+	// v17 renames that used to nest under a boolean parent path:
+	//   dev.autoqa.consent -> dev.autoqaConsent
+	//   todo.reminders.max -> todo.remindersMax
+	migrateNestedLeafRename(
+		raw,
+		"dev",
+		"autoqa",
+		"consent",
+		"autoqaConsent",
+		value => value === "unset" || value === "granted" || value === "denied",
+	);
+	migrateNestedLeafRename(
+		raw,
+		"todo",
+		"reminders",
+		"max",
+		"remindersMax",
+		value => typeof value === "number" && Number.isFinite(value),
+	);
+
+	// BM25 tool discovery removal: tools.discoveryMode / tools.essentialOverride /
+	// mcp.discoveryMode / mcp.discoveryDefaultServers are gone with no
+	// replacement (`tools.xdev` stays at its own default). Dead keys are
+	// deleted so they stop lingering in config.yml.
+	const toolsObj = isRecord(raw.tools) ? raw.tools : undefined;
+	if (toolsObj) {
+		delete toolsObj.discoveryMode;
+		delete toolsObj.essentialOverride;
+	}
+	delete raw["tools.discoveryMode"];
+	delete raw["tools.essentialOverride"];
+	const mcpObj = isRecord(raw.mcp) ? raw.mcp : undefined;
+	if (mcpObj) {
+		delete mcpObj.discoveryMode;
+		delete mcpObj.discoveryDefaultServers;
+	}
+	delete raw["mcp.discoveryMode"];
+	delete raw["mcp.discoveryDefaultServers"];
+
+	// providers.webSearch / providers.image (single preferred provider) →
+	// providers.webSearchOrder / providers.imageOrder (priority lists). A
+	// concrete legacy choice becomes the head of the new list with every
+	// remaining provider appended in its built-in order, so the old
+	// preference stays #1 and the fallback chain is written out explicitly.
+	// "auto" (or an unknown id) just drops the key — the default chain.
+	const providerPrefsObj = isRecord(raw.providers) ? raw.providers : undefined;
+	const migrateProviderPreference = (
+		legacyKey: string,
+		orderKey: string,
+		expand: (value: string) => string[] | undefined,
+	): void => {
+		const flatLegacyKey = `providers.${legacyKey}`;
+		const legacy = providerPrefsObj?.[legacyKey] ?? raw[flatLegacyKey];
+		if (legacy === undefined) return;
+		const existingOrder = providerPrefsObj?.[orderKey] ?? raw[`providers.${orderKey}`];
+		const orderAlreadySet = Array.isArray(existingOrder) && existingOrder.length > 0;
+		if (!orderAlreadySet && typeof legacy === "string") {
+			const expanded = expand(legacy);
+			if (expanded) {
+				const root = providerPrefsObj ?? {};
+				root[orderKey] = expanded;
+				raw.providers = root;
+			}
+		}
+		if (providerPrefsObj) delete providerPrefsObj[legacyKey];
+		delete raw[flatLegacyKey];
+	};
+	migrateProviderPreference("webSearch", "webSearchOrder", value =>
+		value !== "auto" && isSearchProviderId(value)
+			? [value, ...SEARCH_PROVIDER_ORDER.filter(id => id !== value)]
+			: undefined,
+	);
+	migrateProviderPreference("image", "imageOrder", value =>
+		value !== "auto" && isImageProviderId(value)
+			? [value, ...AUTO_IMAGE_PROVIDER_ORDER.filter(id => id !== value)]
+			: undefined,
+	);
+
+	return raw;
+}
 
 export class Settings {
 	#configPath: string | null;
@@ -378,9 +1167,7 @@ export class Settings {
 		this.#cwd = path.normalize(options.cwd ?? getProjectDir());
 		this.#agentDir = path.normalize(options.agentDir ?? getAgentDir());
 		this.#configPath = options.inMemory ? null : path.join(this.#agentDir, MAIN_CONFIG_FILENAMES[0]);
-		const configFiles = process.env.PI_CONFIG_FILES?.split(path.delimiter).filter(Boolean) ?? [];
-		if (options.configFiles) configFiles.push(...options.configFiles);
-		this.#configFiles = configFiles.map(file => path.resolve(this.#cwd, expandTilde(file)));
+		this.#configFiles = resolveConfigOverlayPaths(this.#cwd, options.configFiles);
 		this.#persist = !options.inMemory && options.readOnly !== true;
 		liveSettingsInstances.add(new WeakRef(this));
 
@@ -1088,30 +1875,11 @@ export class Settings {
 	}
 
 	async #loadYamlIfPresent(filePath: string): Promise<YamlLoadResult> {
-		let content: string;
-		try {
-			content = await fs.promises.readFile(filePath, "utf8");
-		} catch (error) {
-			if (isEnoent(error)) return { kind: "missing" };
-			return { kind: "unreadable", error };
+		const result = await classifySettingsYaml(filePath);
+		if (result.kind === "loaded") {
+			return { kind: "loaded", settings: this.#migrateRawSettings(result.settings) };
 		}
-
-		let parsed: unknown;
-		try {
-			parsed = YAML.parse(content);
-		} catch (error) {
-			return { kind: "invalid", error };
-		}
-		if (parsed === null || parsed === undefined) {
-			return { kind: "loaded", settings: {} };
-		}
-		if (typeof parsed !== "object" || Array.isArray(parsed)) {
-			return {
-				kind: "invalid",
-				error: new Error("Settings YAML must contain a mapping at the document root"),
-			};
-		}
-		return { kind: "loaded", settings: this.#migrateRawSettings(parsed as RawSettings) };
+		return result;
 	}
 
 	async #resolveYamlWritePath(filePath: string): Promise<string> {
@@ -1263,32 +2031,12 @@ export class Settings {
 	}
 
 	/**
-	 * Strict loader for explicit `--config` overlays: unlike `#loadYaml`,
-	 * missing or malformed files are hard errors so a typo'd path cannot
-	 * silently fall back to the persistent settings.
+	 * Strict loader for explicit `--config` / `PI_CONFIG_FILES` overlays.
+	 * Delegates to {@link loadConfigOverlayFile} so diagnostics share the same
+	 * parse + migration path (missing/malformed files remain hard errors).
 	 */
 	async #loadOverlayYaml(filePath: string): Promise<RawSettings> {
-		let content: string;
-		try {
-			content = await Bun.file(filePath).text();
-		} catch (error) {
-			throw new Error(
-				isEnoent(error)
-					? `Config overlay not found: ${filePath}`
-					: `Failed to read config overlay ${filePath}: ${String(error)}`,
-			);
-		}
-		let parsed: unknown;
-		try {
-			parsed = YAML.parse(content);
-		} catch (error) {
-			throw new Error(`Failed to parse config overlay ${filePath}: ${String(error)}`);
-		}
-		if (parsed === null || parsed === undefined) return {};
-		if (typeof parsed !== "object" || Array.isArray(parsed)) {
-			throw new Error(`Config overlay must be a YAML mapping: ${filePath}`);
-		}
-		return this.#migrateRawSettings(parsed as RawSettings);
+		return loadConfigOverlayFile(filePath);
 	}
 
 	async #migrateFromLegacy(): Promise<void> {
@@ -1328,539 +2076,12 @@ export class Settings {
 		}
 	}
 
-	/** Apply schema migrations to raw settings */
+	/** Apply schema migrations to raw settings (instance wrapper — captures legacy marker) */
 	#migrateRawSettings(raw: RawSettings): RawSettings {
-		// queueMode -> steeringMode
-		if ("queueMode" in raw && !("steeringMode" in raw)) {
-			raw.steeringMode = raw.queueMode;
-			delete raw.queueMode;
-		}
-
-		// lastChangelogVersion moved out of config.yml into the
-		// <agentDir>/last-changelog-version marker file so version bumps no
-		// longer dirty user-tracked configs. Capture for marker seeding (see
-		// #seedLastChangelogVersionMarker), then strip the key — the next
-		// config save drops it from disk.
 		if (typeof raw.lastChangelogVersion === "string") {
 			this.#legacyLastChangelogVersion ??= raw.lastChangelogVersion;
 		}
-		delete raw.lastChangelogVersion;
-
-		// collapseChangelog (boolean) -> startup.changelogMode (enum). Preserve
-		// every explicit legacy choice while giving new installs the schema's
-		// "summary" default: true -> summary, false -> expanded. A separately
-		// configured new mode always wins.
-		const startupObj = isRecord(raw.startup) ? (raw.startup as Record<string, unknown>) : undefined;
-		const legacyCollapseChangelog = typeof raw.collapseChangelog === "boolean" ? raw.collapseChangelog : undefined;
-		const flatChangelogMode = raw["startup.changelogMode"];
-		const normalizedFlatChangelogMode =
-			flatChangelogMode === "summary" || flatChangelogMode === "expanded" || flatChangelogMode === "hidden"
-				? flatChangelogMode
-				: undefined;
-		if (legacyCollapseChangelog !== undefined || normalizedFlatChangelogMode !== undefined) {
-			if (!startupObj) {
-				raw.startup = {};
-			}
-			const target = raw.startup as Record<string, unknown>;
-			if (target.changelogMode === undefined) {
-				target.changelogMode =
-					normalizedFlatChangelogMode ??
-					(legacyCollapseChangelog !== undefined ? (legacyCollapseChangelog ? "summary" : "expanded") : undefined);
-			}
-		}
-		delete raw.collapseChangelog;
-		delete raw["startup.changelogMode"];
-
-		// ask.timeout: ms -> seconds (if value > 1000, it's old ms format)
-		if (raw.ask && typeof (raw.ask as Record<string, unknown>).timeout === "number") {
-			const oldValue = (raw.ask as Record<string, unknown>).timeout as number;
-			if (oldValue > 1000) {
-				(raw.ask as Record<string, unknown>).timeout = Math.round(oldValue / 1000);
-			}
-		}
-
-		// Migrate old flat "theme" string to nested theme.dark/theme.light
-		if (typeof raw.theme === "string") {
-			const oldTheme = raw.theme;
-			if (oldTheme === "light" || oldTheme === "dark") {
-				// Built-in defaults — just remove, let new defaults apply
-				delete raw.theme;
-			} else {
-				// Custom theme — detect luminance to place in correct slot
-				const slot = isLightTheme(oldTheme) ? "light" : "dark";
-				raw.theme = { [slot]: oldTheme };
-			}
-		}
-
-		// inspect_image.enabled (boolean) -> inspect_image.mode (enum). Explicit
-		// user choices are preserved: true -> "on", false -> "off". Configs with
-		// no legacy key get the new "auto" default, which hides the tool for
-		// models with native image input. Handles nested and quoted-dotted
-		// ("inspect_image.enabled") sources; the target is always the nested
-		// form, which is the only shape the resolver reads.
-		const inspectImageObj = isRecord(raw.inspect_image) ? (raw.inspect_image as Record<string, unknown>) : undefined;
-		const legacyEnabled =
-			typeof inspectImageObj?.enabled === "boolean"
-				? inspectImageObj.enabled
-				: typeof raw["inspect_image.enabled"] === "boolean"
-					? (raw["inspect_image.enabled"] as boolean)
-					: undefined;
-		if (legacyEnabled !== undefined) {
-			if (!inspectImageObj) {
-				raw.inspect_image = {};
-			}
-			const target = raw.inspect_image as Record<string, unknown>;
-			const flatMode = raw["inspect_image.mode"];
-			if (target.mode === undefined) {
-				// A quoted-dotted explicit mode wins over the legacy boolean but
-				// must be normalized into the nested form the resolver reads.
-				target.mode =
-					typeof flatMode === "string" && (INSPECT_IMAGE_MODES as readonly string[]).includes(flatMode)
-						? flatMode
-						: legacyEnabled
-							? "on"
-							: "off";
-			}
-			delete target.enabled;
-			delete raw["inspect_image.enabled"];
-			delete raw["inspect_image.mode"];
-		}
-
-		// task.isolation.enabled (boolean) -> task.isolation.mode (enum)
-		const taskObj = raw.task as Record<string, unknown> | undefined;
-		const isolationObj = taskObj?.isolation as Record<string, unknown> | undefined;
-		if (isolationObj && "enabled" in isolationObj) {
-			if (typeof isolationObj.enabled === "boolean") {
-				isolationObj.mode = isolationObj.enabled ? "auto" : "none";
-			}
-			delete isolationObj.enabled;
-		}
-
-		// task.simple: removed — the task tool no longer accepts a per-call
-		// schema (workflows drive structured output via eval agent()) and the
-		// batch/context shape is gated by task.batch instead.
-		if (taskObj && "simple" in taskObj) {
-			delete taskObj.simple;
-		}
-
-		// task.eager / todo.eager: boolean -> enum (default | preferred | always).
-		// `true` reproduced the previous "on" behavior, which is now `always`.
-		if (taskObj && typeof taskObj.eager === "boolean") {
-			taskObj.eager = taskObj.eager ? "always" : "default";
-		}
-		const todoObj = raw.todo as Record<string, unknown> | undefined;
-		if (todoObj && typeof todoObj.eager === "boolean") {
-			todoObj.eager = todoObj.eager ? "always" : "default";
-		}
-
-		// task.isolation.mode: legacy values from before the pi-iso PAL refactor.
-		// `worktree` was git worktree → now lives under `rcopy`. `fuse-overlay`
-		// and `fuse-projfs` are now the platform-named `overlayfs` / `projfs`
-		// kinds; the PAL falls back internally when the chosen one isn't
-		// available, so we don't need the old TS-side platform guards.
-		if (isolationObj && typeof isolationObj.mode === "string") {
-			const legacy: Record<string, string> = {
-				worktree: "rcopy",
-				"fuse-overlay": "overlayfs",
-				"fuse-projfs": "projfs",
-			};
-			const mapped = legacy[isolationObj.mode as string];
-			if (mapped !== undefined) {
-				isolationObj.mode = mapped;
-			}
-		}
-
-		// edit.mode: removed "atom" and "vim" variants map back to "hashline"
-		const editObj = raw.edit as Record<string, unknown> | undefined;
-		if (editObj) {
-			if (editObj.mode === "atom" || editObj.mode === "vim") {
-				editObj.mode = "hashline";
-			}
-			const modelVariants = editObj.modelVariants as Record<string, unknown> | undefined;
-			if (modelVariants && typeof modelVariants === "object" && !Array.isArray(modelVariants)) {
-				for (const [pattern, variant] of Object.entries(modelVariants)) {
-					if (variant === "atom" || variant === "vim") {
-						modelVariants[pattern] = "hashline";
-					}
-				}
-			}
-		}
-		if (raw["edit.mode"] === "atom" || raw["edit.mode"] === "vim") {
-			raw["edit.mode"] = "hashline";
-		}
-
-		// compaction.strategy: removed local-model shake-summary mode; plain shake
-		// keeps the same mechanical artifact-backed reduction without background CPU.
-		const compactionObj = raw.compaction as Record<string, unknown> | undefined;
-		if (compactionObj?.strategy === "shake-summary") {
-			compactionObj.strategy = "shake";
-		}
-		if (raw["compaction.strategy"] === "shake-summary") {
-			raw["compaction.strategy"] = "shake";
-		}
-
-		// snapcompact.systemPrompt: boolean -> scoped enum.
-		const snapcompactObj = raw.snapcompact as Record<string, unknown> | undefined;
-		if (snapcompactObj && typeof snapcompactObj.systemPrompt === "boolean") {
-			snapcompactObj.systemPrompt = snapcompactObj.systemPrompt ? "all" : "none";
-		}
-		if (typeof raw["snapcompact.systemPrompt"] === "boolean") {
-			raw["snapcompact.systemPrompt"] = raw["snapcompact.systemPrompt"] ? "all" : "none";
-		}
-
-		// inlineToolDescriptors: boolean -> enum (auto | on | off). The old
-		// `true`/`false` mapped directly onto inline-on/inline-off, so preserve
-		// the user's explicit choice; new installs get the `auto` default that
-		// turns it on only for Gemini models.
-		if (typeof raw.inlineToolDescriptors === "boolean") {
-			raw.inlineToolDescriptors = raw.inlineToolDescriptors ? "on" : "off";
-		}
-
-		// statusLine: rename "plan_mode" segment to "mode"
-		const statusLineObj = raw.statusLine as Record<string, unknown> | undefined;
-		if (statusLineObj) {
-			for (const key of ["leftSegments", "rightSegments"] as const) {
-				const segments = statusLineObj[key];
-				if (Array.isArray(segments)) {
-					statusLineObj[key] = segments.map(seg => (seg === "plan_mode" ? "mode" : seg));
-				}
-			}
-			const segmentOptions = statusLineObj.segmentOptions as Record<string, unknown> | undefined;
-			if (segmentOptions && "plan_mode" in segmentOptions && !("mode" in segmentOptions)) {
-				segmentOptions.mode = segmentOptions.plan_mode;
-				delete segmentOptions.plan_mode;
-			}
-		}
-
-		// providers.parallelFetch (boolean) replaced by the providers.fetch reader
-		// priority enum. The new default ("auto") supersedes both old values —
-		// Parallel is now a deep fallback in the auto chain rather than the first
-		// choice — so drop the legacy key (flat and nested) and let the enum
-		// default apply.
-		const providersObj = raw.providers as Record<string, unknown> | undefined;
-		if (providersObj && "parallelFetch" in providersObj) {
-			delete providersObj.parallelFetch;
-		}
-		delete raw["providers.parallelFetch"];
-
-		// codexResets.autoRedeem: boolean -> tri-state enum.
-		// Existing explicit false keeps the old "do not run" behavior; missing
-		// config now falls through to the new "unset" default, which asks before
-		// the first eligible spend.
-		const codexResetsObj = raw.codexResets as Record<string, unknown> | undefined;
-		if (codexResetsObj && typeof codexResetsObj.autoRedeem === "boolean") {
-			codexResetsObj.autoRedeem = codexResetsObj.autoRedeem ? "yes" : "no";
-		}
-		if (typeof raw["codexResets.autoRedeem"] === "boolean") {
-			raw["codexResets.autoRedeem"] = raw["codexResets.autoRedeem"] ? "yes" : "no";
-		}
-
-		// Map legacy `memories.enabled` boolean to the explicit `memory.backend`
-		// enum if the latter hasn't been set yet. Idempotent: subsequent
-		// migrations are no-ops once memory.backend is materialised.
-		const memoryBackendObj = raw.memory as Record<string, unknown> | undefined;
-		const memoryBackendSet = memoryBackendObj && typeof memoryBackendObj.backend === "string";
-		const memoriesObj = raw.memories as Record<string, unknown> | undefined;
-		if (!memoryBackendSet && memoriesObj && typeof memoriesObj.enabled === "boolean") {
-			const next = memoriesObj.enabled ? "local" : "off";
-			const memoryRoot = (memoryBackendObj ?? {}) as Record<string, unknown>;
-			memoryRoot.backend = next;
-			raw.memory = memoryRoot;
-		}
-
-		// Rename the legacy local `mnemosyne` memory backend to `mnemopi`.
-		// - `memory.backend: "mnemosyne"` now selects the renamed backend.
-		// - the top-level `mnemosyne` settings object becomes `mnemopi`.
-		// Idempotent: skips the object move once `mnemopi` is materialised.
-		if (memoryBackendObj && memoryBackendObj.backend === "mnemosyne") {
-			memoryBackendObj.backend = "mnemopi";
-		}
-		if ("mnemosyne" in raw && !("mnemopi" in raw)) {
-			raw.mnemopi = raw.mnemosyne;
-			delete raw.mnemosyne;
-		}
-
-		// hindsight: dynamicBankId/agentName -> scoping enum + bankId
-		// - dynamicBankId=true  → scoping="per-project" (closest semantic match;
-		//   the legacy `agent::project::channel::user` tuple was per-project in
-		//   practice — the channel/user env vars were rarely set).
-		// - hindsight.agentName was only used as the agent slot in the legacy
-		//   dynamic tuple; if the user customised it we surface it as the new
-		//   bankId base when no explicit bankId is set.
-		const hindsightObj = raw.hindsight as Record<string, unknown> | undefined;
-		if (hindsightObj) {
-			if ("dynamicBankId" in hindsightObj) {
-				if (!("scoping" in hindsightObj) && hindsightObj.dynamicBankId === true) {
-					hindsightObj.scoping = "per-project";
-				}
-				delete hindsightObj.dynamicBankId;
-			}
-			if ("agentName" in hindsightObj) {
-				const agentName = hindsightObj.agentName;
-				if (
-					!("bankId" in hindsightObj) &&
-					typeof agentName === "string" &&
-					agentName.trim().length > 0 &&
-					agentName !== "omp"
-				) {
-					hindsightObj.bankId = agentName;
-				}
-				delete hindsightObj.agentName;
-			}
-		}
-
-		// power.preventIdleSleep / power.preventSystemSleep / power.declareUserActive
-		// / power.preventDisplaySleep (four booleans) → power.sleepPrevention enum.
-		// The enum is cumulative: each level adds the flags of all lower levels.
-		// Migration picks the highest level whose condition is met, scanning from
-		// most to least aggressive so a single enum value captures the old state.
-		if (
-			!("sleepPrevention" in ((raw.power as Record<string, unknown>) ?? {})) &&
-			raw["power.sleepPrevention"] === undefined
-		) {
-			const powerObj = raw.power as Record<string, unknown> | undefined;
-			const getFlag = (key: string): boolean | undefined => {
-				const nested = powerObj?.[key];
-				const flat = raw[`power.${key}`];
-				const value = nested ?? flat;
-				return typeof value === "boolean" ? value : undefined;
-			};
-			const idle = getFlag("preventIdleSleep");
-			const system = getFlag("preventSystemSleep");
-			const user = getFlag("declareUserActive");
-			const display = getFlag("preventDisplaySleep");
-			const anySet = idle !== undefined || system !== undefined || user !== undefined || display !== undefined;
-			if (anySet) {
-				const mode = system || user ? "system" : display ? "display" : idle !== false ? "idle" : "off";
-				const powerRoot = (powerObj ?? {}) as Record<string, unknown>;
-				powerRoot.sleepPrevention = mode;
-				raw.power = powerRoot;
-			}
-			// Clean up old keys (nested + flat)
-			if (powerObj) {
-				delete powerObj.preventIdleSleep;
-				delete powerObj.preventSystemSleep;
-				delete powerObj.declareUserActive;
-				delete powerObj.preventDisplaySleep;
-			}
-			delete raw["power.preventIdleSleep"];
-			delete raw["power.preventSystemSleep"];
-			delete raw["power.declareUserActive"];
-			delete raw["power.preventDisplaySleep"];
-		}
-
-		// Migration for renamed settings grep.* and glob.* from search.* and find.*:
-		// 1. Nested settings: find -> glob, search -> grep (per-property merge to avoid clobbering)
-		const ensureRawObject = (key: "glob" | "grep"): Record<string, unknown> => {
-			const current = raw[key];
-			if (isRecord(current)) {
-				return current;
-			}
-			const created: Record<string, unknown> = {};
-			raw[key] = created;
-			return created;
-		};
-
-		if ("find" in raw) {
-			const findObj = raw.find;
-			if (isRecord(findObj)) {
-				const globObj = ensureRawObject("glob");
-				const findKeys: Array<"enabled"> = ["enabled"];
-				for (const key of findKeys) {
-					if (key in findObj && !(key in globObj)) {
-						globObj[key] = findObj[key];
-					}
-				}
-			}
-			delete raw.find;
-		}
-
-		if ("search" in raw) {
-			const searchObj = raw.search;
-			if (isRecord(searchObj)) {
-				const grepObj = ensureRawObject("grep");
-				const searchKeys: Array<"enabled" | "contextBefore" | "contextAfter"> = [
-					"enabled",
-					"contextBefore",
-					"contextAfter",
-				];
-				for (const key of searchKeys) {
-					if (key in searchObj && !(key in grepObj)) {
-						grepObj[key] = searchObj[key];
-					}
-				}
-			}
-			delete raw.search;
-		}
-
-		// 2. Flat settings keys: map them to the proper nested target so get/set resolves them correctly
-		if ("find.enabled" in raw) {
-			const globObj = ensureRawObject("glob");
-			if (!("enabled" in globObj)) {
-				globObj.enabled = raw["find.enabled"];
-			}
-			delete raw["find.enabled"];
-		}
-		if ("search.enabled" in raw) {
-			const grepObj = ensureRawObject("grep");
-			if (!("enabled" in grepObj)) {
-				grepObj.enabled = raw["search.enabled"];
-			}
-			delete raw["search.enabled"];
-		}
-		if ("search.contextBefore" in raw) {
-			const grepObj = ensureRawObject("grep");
-			if (!("contextBefore" in grepObj)) {
-				grepObj.contextBefore = raw["search.contextBefore"];
-			}
-			delete raw["search.contextBefore"];
-		}
-		if ("search.contextAfter" in raw) {
-			const grepObj = ensureRawObject("grep");
-			if (!("contextAfter" in grepObj)) {
-				grepObj.contextAfter = raw["search.contextAfter"];
-			}
-			delete raw["search.contextAfter"];
-		}
-
-		// Also clean up any empty nested objects we might have created or left behind
-		if (raw.glob && typeof raw.glob === "object" && Object.keys(raw.glob).length === 0) {
-			delete raw.glob;
-		}
-		if (raw.grep && typeof raw.grep === "object" && Object.keys(raw.grep).length === 0) {
-			delete raw.grep;
-		}
-		// readHashLines: removed. Hashline anchors are now driven solely by
-		// edit.mode === "hashline"; the separate read toggle only ever produced
-		// the incoherent "hashline edits without addressable anchors" state.
-		delete raw.readHashLines;
-
-		// serviceTier (single enum with scoped openai-only/claude-only sentinels)
-		// → per-family tier.openai/tier.anthropic/tier.google; serviceTierSubagent
-		// → tier.subagent; serviceTierAdvisor → tier.advisor. `fastModeScope` is
-		// dropped — per-family scoping is now expressed by the three tier settings.
-		const tierObj = isRecord(raw.tier) ? raw.tier : {};
-		let tierTouched = false;
-		const setTier = (family: string, value: unknown): void => {
-			if (value !== undefined && !(family in tierObj)) {
-				tierObj[family] = value;
-				tierTouched = true;
-			}
-		};
-		if (typeof raw.serviceTier === "string") {
-			switch (raw.serviceTier) {
-				case "priority":
-					setTier("openai", "priority");
-					setTier("anthropic", "priority");
-					setTier("google", "priority");
-					break;
-				case "openai-only":
-					setTier("openai", "priority");
-					break;
-				case "claude-only":
-					setTier("anthropic", "priority");
-					break;
-				case "auto":
-				case "default":
-				case "flex":
-				case "scale":
-					setTier("openai", raw.serviceTier);
-					break;
-			}
-			delete raw.serviceTier;
-		}
-		const mapInheritTier = (value: unknown): unknown =>
-			value === "openai-only" || value === "claude-only" ? "priority" : value;
-		if ("serviceTierSubagent" in raw) {
-			setTier("subagent", mapInheritTier(raw.serviceTierSubagent));
-			delete raw.serviceTierSubagent;
-		}
-		if ("serviceTierAdvisor" in raw) {
-			setTier("advisor", mapInheritTier(raw.serviceTierAdvisor));
-			delete raw.serviceTierAdvisor;
-		}
-		if (tierTouched) raw.tier = tierObj;
-		delete raw.fastModeScope;
-
-		// v17 renames that used to nest under a boolean parent path:
-		//   dev.autoqa.consent -> dev.autoqaConsent
-		//   todo.reminders.max -> todo.remindersMax
-		migrateNestedLeafRename(
-			raw,
-			"dev",
-			"autoqa",
-			"consent",
-			"autoqaConsent",
-			value => value === "unset" || value === "granted" || value === "denied",
-		);
-		migrateNestedLeafRename(
-			raw,
-			"todo",
-			"reminders",
-			"max",
-			"remindersMax",
-			value => typeof value === "number" && Number.isFinite(value),
-		);
-
-		// BM25 tool discovery removal: tools.discoveryMode / tools.essentialOverride /
-		// mcp.discoveryMode / mcp.discoveryDefaultServers are gone with no
-		// replacement (`tools.xdev` stays at its own default). Dead keys are
-		// deleted so they stop lingering in config.yml.
-		const toolsObj = raw.tools as Record<string, unknown> | undefined;
-		if (toolsObj) {
-			delete toolsObj.discoveryMode;
-			delete toolsObj.essentialOverride;
-		}
-		delete raw["tools.discoveryMode"];
-		delete raw["tools.essentialOverride"];
-		const mcpObj = raw.mcp as Record<string, unknown> | undefined;
-		if (mcpObj) {
-			delete mcpObj.discoveryMode;
-			delete mcpObj.discoveryDefaultServers;
-		}
-		delete raw["mcp.discoveryMode"];
-		delete raw["mcp.discoveryDefaultServers"];
-
-		// providers.webSearch / providers.image (single preferred provider) →
-		// providers.webSearchOrder / providers.imageOrder (priority lists). A
-		// concrete legacy choice becomes the head of the new list with every
-		// remaining provider appended in its built-in order, so the old
-		// preference stays #1 and the fallback chain is written out explicitly.
-		// "auto" (or an unknown id) just drops the key — the default chain.
-		const providerPrefsObj = raw.providers as Record<string, unknown> | undefined;
-		const migrateProviderPreference = (
-			legacyKey: string,
-			orderKey: string,
-			expand: (value: string) => string[] | undefined,
-		): void => {
-			const flatLegacyKey = `providers.${legacyKey}`;
-			const legacy = providerPrefsObj?.[legacyKey] ?? raw[flatLegacyKey];
-			if (legacy === undefined) return;
-			const existingOrder = providerPrefsObj?.[orderKey] ?? raw[`providers.${orderKey}`];
-			const orderAlreadySet = Array.isArray(existingOrder) && existingOrder.length > 0;
-			if (!orderAlreadySet && typeof legacy === "string") {
-				const expanded = expand(legacy);
-				if (expanded) {
-					const root = providerPrefsObj ?? {};
-					root[orderKey] = expanded;
-					raw.providers = root;
-				}
-			}
-			if (providerPrefsObj) delete providerPrefsObj[legacyKey];
-			delete raw[flatLegacyKey];
-		};
-		migrateProviderPreference("webSearch", "webSearchOrder", value =>
-			value !== "auto" && isSearchProviderId(value)
-				? [value, ...SEARCH_PROVIDER_ORDER.filter(id => id !== value)]
-				: undefined,
-		);
-		migrateProviderPreference("image", "imageOrder", value =>
-			value !== "auto" && isImageProviderId(value)
-				? [value, ...AUTO_IMAGE_PROVIDER_ORDER.filter(id => id !== value)]
-				: undefined,
-		);
-
-		return raw;
+		return migrateRawSettingsShape(raw);
 	}
 
 	/**

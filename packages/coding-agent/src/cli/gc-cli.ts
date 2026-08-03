@@ -813,6 +813,19 @@ async function removeStaleGcLock(lockPath: string): Promise<boolean> {
 	}
 }
 
+/** Thrown by {@link openGcLock} when another live process holds the gc lock. */
+export class GcLockContentionError extends Error {
+	constructor(lockPath: string) {
+		super(`GC already running: ${lockPath}`);
+		this.name = "GcLockContentionError";
+	}
+}
+
+/** True when `error` is lock-contention from {@link openGcLock} / {@link withGcLock}. */
+export function isGcLockContention(error: unknown): boolean {
+	return error instanceof GcLockContentionError;
+}
+
 async function openNewGcLock(lockPath: string): Promise<fs.FileHandle | null> {
 	try {
 		return await fs.open(lockPath, "wx");
@@ -848,9 +861,9 @@ async function openGcBreakerLock(lockPath: string): Promise<{ path: string; hand
 				throw error;
 			}
 		}
-		if (!(await removeStaleGcLock(breakerPath))) throw new Error(`GC already running: ${lockPath}`);
+		if (!(await removeStaleGcLock(breakerPath))) throw new GcLockContentionError(lockPath);
 	}
-	throw new Error(`GC already running: ${lockPath}`);
+	throw new GcLockContentionError(lockPath);
 }
 
 async function openGcLock(lockPath: string): Promise<fs.FileHandle> {
@@ -861,16 +874,16 @@ async function openGcLock(lockPath: string): Promise<fs.FileHandle> {
 	try {
 		const raced = await openNewGcLock(lockPath);
 		if (raced) return raced;
-		if (!(await removeStaleGcLock(lockPath))) throw new Error(`GC already running: ${lockPath}`);
+		if (!(await removeStaleGcLock(lockPath))) throw new GcLockContentionError(lockPath);
 		const takeover = await openNewGcLock(lockPath);
 		if (takeover) return takeover;
-		throw new Error(`GC already running: ${lockPath}`);
+		throw new GcLockContentionError(lockPath);
 	} finally {
 		await releaseGcLockFile(breaker.path, breaker.handle);
 	}
 }
 
-async function withGcLock<T>(agentDir: string, fn: (lockPath: string) => Promise<T>): Promise<T> {
+export async function withGcLock<T>(agentDir: string, fn: (lockPath: string) => Promise<T>): Promise<T> {
 	const lockPath = path.join(agentDir, "gc.lock");
 	await fs.mkdir(agentDir, { recursive: true });
 	const handle = await openGcLock(lockPath);

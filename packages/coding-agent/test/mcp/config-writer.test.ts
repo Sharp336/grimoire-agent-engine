@@ -40,4 +40,10 @@ describe("config-writer concurrent mutations", () => {
 		const config = await readMCPConfigFile(nestedPath);
 		expect(Object.keys(config.mcpServers ?? {})).toEqual(["alpha"]);
 	});
+
+	it("rejects an unsupported HTTP URL scheme", async () => {
+		await expect(addMCPServer(filePath, "bad", { type: "http", url: "ftp://example.com/mcp" })).rejects.toThrow(
+			/http or https/,
+		);
+	});
 });

@@ -35,7 +35,7 @@ export interface LoadMCPConfigsResult {
 /**
  * Convert canonical MCPServer to legacy MCPServerConfig.
  */
-function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
+export function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 	// Determine transport type
 	const transport = server.transport ?? (server.command ? "stdio" : server.url ? "http" : "stdio");
 	const shared = {
@@ -287,6 +287,15 @@ export function validateServerConfig(name: string, config: MCPServerConfig): str
 		const httpConfig = config as { url?: string };
 		if (!httpConfig.url) {
 			errors.push(`Server "${name}": ${serverType} server requires "url" field`);
+		} else {
+			try {
+				const url = new URL(httpConfig.url);
+				if (url.protocol !== "http:" && url.protocol !== "https:") {
+					errors.push(`Server "${name}": ${serverType} server "url" must use the http or https scheme`);
+				}
+			} catch {
+				errors.push(`Server "${name}": ${serverType} server "url" must be an absolute URL`);
+			}
 		}
 	} else {
 		errors.push(`Server "${name}": unknown server type "${serverType}"`);

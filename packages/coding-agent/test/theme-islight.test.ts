@@ -4,7 +4,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { generateThemeVars } from "@oh-my-pi/pi-coding-agent/export/html";
 import { defaultThemes } from "@oh-my-pi/pi-coding-agent/modes/theme/defaults";
-import { getResolvedThemeColors, getThemeByName, isLightTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import {
+	getResolvedThemeColors,
+	getThemeByName,
+	isLightTheme,
+	resolveThemeColors,
+} from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { getAgentDir, getCustomThemesDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
 describe("Theme.isLight", () => {
@@ -41,6 +46,18 @@ describe("isLightTheme (standalone)", () => {
 		["dark-catppuccin", false],
 	])("classifies %s as isLight=%s", (name, expected) => {
 		expect(isLightTheme(name)).toBe(expected);
+	});
+});
+
+describe("resolveThemeColors var resolution", () => {
+	it("rejects a missing variable reference", () => {
+		expect(() => resolveThemeColors({ text: "missing" })).toThrow(/Variable reference not found/);
+	});
+
+	it("rejects a cyclic variable reference", () => {
+		expect(() => resolveThemeColors({ text: "first" }, { first: "second", second: "first" })).toThrow(
+			/Circular variable reference/,
+		);
 	});
 });
 

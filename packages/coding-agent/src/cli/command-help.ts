@@ -36,6 +36,10 @@ export const completeHelp = { hidden: true } satisfies CommandMetadata;
 
 export const configHelp = { description: "Manage configuration settings" } satisfies CommandMetadata;
 
+export const doctorHelp = {
+	description: "Diagnose the omp install and repair on-disk databases",
+} satisfies CommandMetadata;
+
 export const dryBalanceHelp = {
 	description: "Dry-run OAuth account balancing across random session ids",
 } satisfies CommandMetadata;
