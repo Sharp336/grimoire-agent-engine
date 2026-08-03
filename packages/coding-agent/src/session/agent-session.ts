@@ -3559,6 +3559,7 @@ export class AgentSession {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
+		this.agent.abort();
 		this.#recovery.abandonActiveRetryFallbackProbe();
 		this.#memory.cancelLocalMemoryStartup();
 		this.#titleGenerationAbortController.abort();

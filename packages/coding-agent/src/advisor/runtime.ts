@@ -56,6 +56,8 @@ export interface AdvisorRuntimeHost {
 	 * primary.
 	 */
 	beginAdvisorUpdate?(inProgress: boolean): void;
+	/** Admit the advisor's active automatic fallback immediately before provider dispatch. */
+	beforeAdvisorDispatch?(signal: AbortSignal): Promise<boolean> | boolean;
 	/**
 	 * Called with the error of every failed advisor turn, before the retry sleep
 	 * or the dropped-after-3 path. Lets the host apply credential-level remedies
@@ -854,6 +856,18 @@ export class AdvisorRuntime {
 		}
 	}
 
+	async #waitBeforeRetry(signal: AbortSignal): Promise<void> {
+		if (this.retryDelayMs <= 0) {
+			await Bun.sleep(0);
+			return;
+		}
+		try {
+			await raceWithSignal(Bun.sleep(this.retryDelayMs), signal);
+		} catch (error) {
+			if (!signal.aborted) throw error;
+		}
+	}
+
 	async #drain(): Promise<void> {
 		if (this.#busy || this.#sessionTransitionPaused) return;
 		this.#busy = true;
@@ -899,6 +913,28 @@ export class AdvisorRuntime {
 					this.#backlog = Math.max(0, this.#backlog - finalTurns);
 					this.#notifyWaiters();
 					continue;
+				}
+				if (this.host.beforeAdvisorDispatch) {
+					let admitted = false;
+					try {
+						admitted = await raceWithSignal(
+							Promise.resolve(this.host.beforeAdvisorDispatch(iterationAbort.signal)),
+							iterationAbort.signal,
+						);
+					} catch (error) {
+						if (this.#epoch !== epoch || this.disposed) continue;
+						this.#pending.unshift(...popped);
+						if (!iterationAbort.signal.aborted) {
+							logger.debug("advisor pre-dispatch admission failed", { err: String(error) });
+						}
+						await this.#waitBeforeRetry(iterationAbort.signal);
+						continue;
+					}
+					if (!admitted) {
+						this.#pending.unshift(...popped);
+						await this.#waitBeforeRetry(iterationAbort.signal);
+						continue;
+					}
 				}
 
 				let success = false;

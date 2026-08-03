@@ -380,6 +380,55 @@ describe("AgentSession retry fallback", () => {
 		expect(modelRegistry.admitFallbackProbe(`${fallbackModel.provider}/${fallbackModel.id}`).status).toBe("probe");
 	});
 
+	it("aborts an active fallback request before beginDispose releases its probe", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled fallback probe models");
+		const fallbackStarted = Promise.withResolvers<void>();
+		let fallbackSignal: AbortSignal | undefined;
+		const primaryMock = createMockModel({ responses: [{ throw: "service unavailable: 503 overloaded" }] });
+		const fallbackMock = createMockModel({
+			handler: () => {
+				fallbackStarted.resolve();
+				return { content: ["late fallback response"], delayMs: 60_000 };
+			},
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requestedModel, context, options) => {
+				if (requestedModel.provider === fallbackModel.provider && requestedModel.id === fallbackModel.id) {
+					fallbackSignal = options?.signal;
+					return fallbackMock.stream(requestedModel, context, options);
+				}
+				return primaryMock.stream(requestedModel, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 0,
+			"retry.maxRetries": 1,
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		const prompt = session.prompt("Dispose the fallback probe");
+		await fallbackStarted.promise;
+		session.beginDispose();
+		const siblingAdmission = modelRegistry.admitFallbackProbe(`${fallbackModel.provider}/${fallbackModel.id}`);
+
+		expect(fallbackSignal?.aborted).toBe(true);
+		expect(siblingAdmission.status).toBe("probe");
+		if (siblingAdmission.status === "probe") modelRegistry.abandonFallbackProbe(siblingAdmission.lease);
+		await prompt;
+	});
+
 	it("confirms before crossing models when every pooled account is inside reserve", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
@@ -810,6 +859,122 @@ describe("AgentSession retry fallback", () => {
 		expect(modelRegistry.admitFallbackProbe(firstSelector)).toEqual({ status: "busy" });
 	});
 
+	it("revalidates a healthy active fallback after cooldown before dispatch", async () => {
+		const firstFallback = getBundledModel("openai", "gpt-4o-mini");
+		const secondFallback = getBundledModel("openai", "gpt-4o");
+		if (!firstFallback || !secondFallback) throw new Error("Expected bundled startup fallback models");
+		const firstSelector = `${firstFallback.provider}/${firstFallback.id}`;
+		const secondSelector = `${secondFallback.provider}/${secondFallback.id}`;
+		const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+		const firstAdmission = modelRegistry.admitFallbackProbe(firstSelector);
+		if (firstAdmission.status !== "probe") throw new Error("Expected initial fallback probe");
+		modelRegistry.markFallbackProbeHealthy(firstAdmission.lease);
+		modelRegistry.suppressSelector(firstSelector, 2_000);
+		now.mockReturnValue(3_000);
+		const siblingAdmission = modelRegistry.admitFallbackProbe(firstSelector);
+		if (siblingAdmission.status !== "probe") throw new Error("Expected sibling cooldown probe");
+
+		const requestedModels: string[] = [];
+		const mock = createMockModel({ responses: [{ content: ["Used the uncontended fallback"] }] });
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: firstFallback, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, context, options);
+			},
+		});
+		const primarySelector = "missing-provider/missing-model";
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.fallbackChains": { slow: [firstSelector, secondSelector] },
+		});
+		settings.setModelRole("slow", primarySelector);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			initialRetryFallback: {
+				role: "slow",
+				originalSelector: primarySelector,
+				originalThinkingLevel: undefined,
+			},
+		});
+
+		await session.prompt("Revalidate the active fallback");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([secondSelector]);
+		expect(modelRegistry.admitFallbackProbe(firstSelector)).toEqual({ status: "busy" });
+	});
+
+	it("revalidates a fallback switched after an earlier selector is busy", async () => {
+		const firstFallback = getBundledModel("openai", "gpt-4o-mini");
+		const secondFallback = getBundledModel("openai", "gpt-4o");
+		const thirdFallback = getBundledModel("anthropic", "claude-haiku-4-5");
+		if (!firstFallback || !secondFallback || !thirdFallback) {
+			throw new Error("Expected bundled fallback race models");
+		}
+		const firstSelector = `${firstFallback.provider}/${firstFallback.id}`;
+		const secondSelector = `${secondFallback.provider}/${secondFallback.id}`;
+		const thirdSelector = `${thirdFallback.provider}/${thirdFallback.id}`;
+		const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+		const firstSibling = modelRegistry.admitFallbackProbe(firstSelector);
+		if (firstSibling.status !== "probe") throw new Error("Expected sibling first fallback probe");
+		const credentialStarted = Promise.withResolvers<void>();
+		const releaseCredential = Promise.withResolvers<void>();
+		vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async model => {
+			if (model.provider === secondFallback.provider && model.id === secondFallback.id) {
+				credentialStarted.resolve();
+				await releaseCredential.promise;
+			}
+			return `${model.provider}-test-key`;
+		});
+
+		const requestedModels: string[] = [];
+		const mock = createMockModel({ responses: [{ content: ["Used the final admitted fallback"] }] });
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: firstFallback, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, context, options);
+			},
+		});
+		const primarySelector = "missing-provider/missing-model";
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.fallbackChains": { slow: [firstSelector, secondSelector, thirdSelector] },
+		});
+		settings.setModelRole("slow", primarySelector);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			initialRetryFallback: {
+				role: "slow",
+				originalSelector: primarySelector,
+				originalThinkingLevel: undefined,
+			},
+		});
+
+		const prompt = session.prompt("Revalidate every async fallback switch");
+		await credentialStarted.promise;
+		now.mockReturnValue(1_000 + 10 * 60 * 1_000);
+		const secondSibling = modelRegistry.admitFallbackProbe(secondSelector);
+		if (secondSibling.status !== "probe") throw new Error("Expected sibling second fallback probe");
+		releaseCredential.resolve();
+		await prompt;
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([thirdSelector]);
+		expect(modelRegistry.admitFallbackProbe(secondSelector)).toEqual({ status: "busy" });
+		modelRegistry.abandonFallbackProbe(firstSibling.lease);
+		modelRegistry.abandonFallbackProbe(secondSibling.lease);
+	});
+
 	it("applies a model-keyed fallback chain to advisor quota failures", async () => {
 		const mainModel = getBundledModel("openai", "gpt-4o-mini");
 		const advisorPrimary = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -819,14 +984,20 @@ describe("AgentSession retry fallback", () => {
 		}
 
 		const mainMock = createMockModel({
-			responses: [{ content: ["Primary complete"] }, { content: ["Primary complete again"] }],
+			responses: [
+				{ content: ["Primary complete"] },
+				{ content: ["Primary complete after reset"] },
+				{ content: ["Primary complete again"] },
+			],
 		});
 		const advisorMock = createMockModel();
 		let advisorPrimaryAttempts = 0;
+		let advisorFallbackAttempts = 0;
 		const requestedAdvisorModels: string[] = [];
 		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
 		const fallbackSucceededEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_succeeded" }>> = [];
 		const fallbackSucceeded = Promise.withResolvers<void>();
+		const fallbackAfterReset = Promise.withResolvers<void>();
 		const advisorFailures: string[] = [];
 		const advisorPrimarySelector = `${advisorPrimary.provider}/${advisorPrimary.id}`;
 		const advisorFallbackSelector = `${advisorFallback.provider}/${advisorFallback.id}`;
@@ -864,11 +1035,12 @@ describe("AgentSession retry fallback", () => {
 				requestedAdvisorModels.push(selector);
 				if (selector === advisorPrimarySelector && advisorPrimaryAttempts++ === 0) {
 					advisorMock.push({
-						throw: "Devin stream error failed_precondition: Your daily usage quota has been exhausted. Your quota will reset after 1s.",
+						throw: "Devin stream error failed_precondition: Your daily usage quota has been exhausted. Your quota will reset after 60s.",
 					});
 				} else if (selector === advisorPrimarySelector) {
 					advisorMock.push({ content: ["Advisor primary restored"] });
 				} else if (selector === advisorFallbackSelector) {
+					if (advisorFallbackAttempts++ > 0) fallbackAfterReset.resolve();
 					advisorMock.push({ content: ["Advisor recovered"] });
 				} else {
 					throw new Error(`Unexpected advisor model requested: ${selector}`);
@@ -918,8 +1090,22 @@ describe("AgentSession retry fallback", () => {
 		expect(advisorFailures).toEqual([]);
 		expect(modelRegistry.admitFallbackProbe(advisorFallbackSelector)).toEqual({ status: "healthy" });
 
+		await session.newSession();
+		await session.prompt("Complete another primary turn before the advisor cooldown expires");
+		await fallbackAfterReset.promise;
+		await session.waitForIdle();
+		expect(requestedAdvisorModels).toEqual([
+			advisorPrimarySelector,
+			advisorFallbackSelector,
+			advisorFallbackSelector,
+		]);
+		expect(session.getAdvisorAgent()?.state.model).toMatchObject({
+			provider: advisorFallback.provider,
+			id: advisorFallback.id,
+		});
+
 		const getApiKey = vi.spyOn(modelRegistry, "getApiKey");
-		const afterCooldown = Date.now() + 2_000;
+		const afterCooldown = Date.now() + 61_000;
 		vi.spyOn(Date, "now").mockReturnValue(afterCooldown);
 		await session.prompt("Complete another primary turn after the advisor cooldown");
 		await session.waitForIdle();
@@ -929,7 +1115,12 @@ describe("AgentSession retry fallback", () => {
 			{ signal: expect.any(AbortSignal) },
 		);
 
-		expect(requestedAdvisorModels).toEqual([advisorPrimarySelector, advisorFallbackSelector, advisorPrimarySelector]);
+		expect(requestedAdvisorModels).toEqual([
+			advisorPrimarySelector,
+			advisorFallbackSelector,
+			advisorFallbackSelector,
+			advisorPrimarySelector,
+		]);
 		expect(session.getAdvisorAgent()?.state.model).toMatchObject({
 			provider: advisorPrimary.provider,
 			id: advisorPrimary.id,
@@ -1005,6 +1196,103 @@ describe("AgentSession retry fallback", () => {
 			provider: advisorPrimary.provider,
 			id: advisorPrimary.id,
 		});
+	});
+
+	it("revalidates an advisor fallback lease immediately before dispatch", async () => {
+		const mainModel = getBundledModel("openai", "gpt-4o-mini");
+		const advisorPrimary = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const firstFallback = getBundledModel("openai", "gpt-4o");
+		const secondFallback = getBundledModel("anthropic", "claude-haiku-4-5");
+		const thirdFallback = getBundledModel("google", "gemini-2.5-flash");
+		if (!mainModel || !advisorPrimary || !firstFallback || !secondFallback || !thirdFallback) {
+			throw new Error("Expected bundled advisor lease models");
+		}
+		const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+		const advisorPrimarySelector = `${advisorPrimary.provider}/${advisorPrimary.id}`;
+		const firstFallbackSelector = `${firstFallback.provider}/${firstFallback.id}`;
+		const secondFallbackSelector = `${secondFallback.provider}/${secondFallback.id}`;
+		const thirdFallbackSelector = `${thirdFallback.provider}/${thirdFallback.id}`;
+		const firstCredentialStarted = Promise.withResolvers<void>();
+		const releaseFirstCredential = Promise.withResolvers<void>();
+		const secondCredentialStarted = Promise.withResolvers<void>();
+		const releaseSecondCredential = Promise.withResolvers<void>();
+		const thirdFallbackDispatched = Promise.withResolvers<void>();
+		const requestedAdvisorModels: string[] = [];
+		const mainMock = createMockModel({ responses: [{ content: ["Primary complete"] }] });
+		const advisorMock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: mainModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mainMock.stream,
+		});
+		const settings = Settings.isolated({
+			"advisor.syncBacklog": "1",
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 0,
+			"retry.fallbackChains": {
+				[advisorPrimarySelector]: [firstFallbackSelector, secondFallbackSelector, thirdFallbackSelector],
+			},
+		});
+		settings.setModelRole("advisor", advisorPrimarySelector);
+		vi.spyOn(modelRegistry.authStorage, "markUsageLimitReached").mockResolvedValue({ switched: false });
+		vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async (model, _sessionId, options) => {
+			if (model.provider === firstFallback.provider && model.id === firstFallback.id) {
+				firstCredentialStarted.resolve();
+				await releaseFirstCredential.promise;
+				options?.signal?.throwIfAborted();
+			}
+			if (model.provider === secondFallback.provider && model.id === secondFallback.id) {
+				secondCredentialStarted.resolve();
+				await releaseSecondCredential.promise;
+				options?.signal?.throwIfAborted();
+			}
+			return `${model.provider}-test-key`;
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorConfigs: [{ name: "lease-test", model: advisorPrimarySelector }],
+			advisorStreamFn: (model, context, options) => {
+				const selector = `${model.provider}/${model.id}`;
+				requestedAdvisorModels.push(selector);
+				if (selector === advisorPrimarySelector) {
+					advisorMock.push({
+						throw: "Devin stream error failed_precondition: Your daily usage quota has been exhausted. Your quota will reset after 3600s.",
+					});
+				} else if (selector === thirdFallbackSelector) {
+					thirdFallbackDispatched.resolve();
+					advisorMock.push({ content: ["Recovered on the admitted advisor fallback"] });
+				} else {
+					throw new Error(`Unexpected advisor model request: ${selector}`);
+				}
+				return advisorMock.stream(model, context, options);
+			},
+		});
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+
+		await session.prompt("Trigger advisor fallback lease revalidation");
+		await firstCredentialStarted.promise;
+		now.mockReturnValue(1_000 + 10 * 60 * 1_000);
+		const firstSibling = modelRegistry.admitFallbackProbe(firstFallbackSelector);
+		if (firstSibling.status !== "probe") throw new Error("Expected sibling first advisor probe");
+		releaseFirstCredential.resolve();
+		await secondCredentialStarted.promise;
+		now.mockReturnValue(1_000 + 20 * 60 * 1_000);
+		const secondSibling = modelRegistry.admitFallbackProbe(secondFallbackSelector);
+		if (secondSibling.status !== "probe") throw new Error("Expected sibling second advisor probe");
+		releaseSecondCredential.resolve();
+		await thirdFallbackDispatched.promise;
+		await session.waitForIdle();
+
+		expect(requestedAdvisorModels).not.toContain(firstFallbackSelector);
+		expect(requestedAdvisorModels).not.toContain(secondFallbackSelector);
+		expect(requestedAdvisorModels.at(-1)).toBe(thirdFallbackSelector);
+		expect(modelRegistry.admitFallbackProbe(secondFallbackSelector)).toEqual({ status: "busy" });
+		modelRegistry.abandonFallbackProbe(firstSibling.lease);
+		modelRegistry.abandonFallbackProbe(secondSibling.lease);
 	});
 
 	it("releases an advisor probe when the fallback turn exits with a tool-call error", async () => {

@@ -536,7 +536,7 @@ export class SessionAdvisors {
 		for (const a of this.#advisors) {
 			a.agentUnsubscribe?.();
 			a.agentUnsubscribe = undefined;
-			this.#discardAdvisorRetryFallback(a);
+			this.#releaseAdvisorRetryFallbackProbe(a);
 			a.runtime.reset();
 			a.adviseTool.resetDeliveredNotes();
 			a.emissionGuard.reset();
@@ -883,6 +883,7 @@ export class SessionAdvisors {
 					advisorRef.adviseTool.beginUpdate(inProgress);
 					advisorRef.emissionGuard.beginUpdate();
 				},
+				beforeAdvisorDispatch: signal => this.#admitAdvisorRetryFallbackDispatch(advisorRef, signal),
 				onTurnError: (error, failedMessages, signal) =>
 					this.#recoverAdvisorTurn(advisorRef, error, failedMessages, signal),
 				onTurnSuccess: async () => {
@@ -1066,7 +1067,7 @@ export class SessionAdvisors {
 	/** Re-prime every advisor's transcript view after an in-conversation history rewrite. */
 	#resetAllAdvisorRuntimes(): void {
 		for (const a of this.#advisors) {
-			this.#discardAdvisorRetryFallback(a);
+			this.#releaseAdvisorRetryFallbackProbe(a);
 			a.runtime.reset();
 		}
 	}
@@ -1164,6 +1165,95 @@ export class SessionAdvisors {
 		const lease = advisor.retryFallback?.probeLease;
 		if (lease) this.#abandonAdvisorRetryFallbackProbe(advisor, lease);
 		advisor.retryFallbackPendingSuccess = false;
+	}
+
+	async #admitAdvisorRetryFallbackDispatch(advisor: ActiveAdvisor, signal: AbortSignal): Promise<boolean> {
+		const fallback = advisor.retryFallback;
+		if (!fallback) return true;
+		const currentSelector = formatRetryFallbackSelector(advisor.agent.state.model, advisor.thinkingLevel);
+		const parsedSelector = parseRetryFallbackSelector(currentSelector, this.#host.modelRegistry);
+		if (fallback.probeLease) this.#abandonAdvisorRetryFallbackProbe(advisor, fallback.probeLease);
+		if (!parsedSelector) return false;
+		if (this.#host.isRetryFallbackSelectorSuppressed(parsedSelector)) {
+			const switched = await this.#tryAdvisorRetryFallback(
+				advisor,
+				currentSelector,
+				advisor.agent.state.model,
+				fallback.role,
+				signal,
+			);
+			return switched && this.#admitAdvisorRetryFallbackDispatch(advisor, signal);
+		}
+		signal.throwIfAborted();
+		const admission = this.#host.modelRegistry.admitFallbackProbe(currentSelector);
+		if (admission.status === "busy") {
+			const switched = await this.#tryAdvisorRetryFallback(
+				advisor,
+				currentSelector,
+				advisor.agent.state.model,
+				fallback.role,
+				signal,
+			);
+			return switched && this.#admitAdvisorRetryFallbackDispatch(advisor, signal);
+		}
+		if (admission.status === "probe") {
+			fallback.probeLease = admission.lease;
+			advisor.retryFallbackPendingSuccess = true;
+		}
+		return true;
+	}
+
+	async #tryAdvisorRetryFallback(
+		advisor: ActiveAdvisor,
+		currentSelector: string,
+		currentModel: Model,
+		role: string,
+		signal: AbortSignal,
+	): Promise<boolean> {
+		for (const selector of this.#host.findRetryFallbackCandidates(role, currentSelector, currentModel)) {
+			if (this.#host.isRetryFallbackSelectorSuppressed(selector)) continue;
+			const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
+			const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
+			if (!candidate || modelsAreEqual(candidate, currentModel)) continue;
+			const admission = this.#host.modelRegistry.admitFallbackProbe(selector.raw);
+			if (admission.status === "busy") continue;
+			const probeLease = admission.status === "probe" ? admission.lease : undefined;
+			let transferred = false;
+			try {
+				const apiKey = await this.#host.modelRegistry.getApiKey(candidate, advisor.providerSessionId, { signal });
+				if (!apiKey) continue;
+				signal.throwIfAborted();
+
+				const originalThinkingLevel = advisor.thinkingLevel;
+				const requestedThinkingLevel = selector.thinkingLevel ?? originalThinkingLevel;
+				const nextThinkingLevel = this.#setAdvisorModel(advisor, candidate, requestedThinkingLevel);
+				if (advisor.retryFallback) {
+					advisor.retryFallback.lastAppliedThinkingLevel = nextThinkingLevel;
+					advisor.retryFallback.probeLease = probeLease;
+				} else {
+					advisor.retryFallback = {
+						role,
+						originalSelector: currentSelector,
+						originalThinkingLevel,
+						lastAppliedThinkingLevel: nextThinkingLevel,
+						probeLease,
+					};
+				}
+				advisor.retryFallbackPendingSuccess = true;
+				this.#host.settings.getStorage()?.recordModelUsage(formatModelStringWithRouting(candidate));
+				await this.#host.emitSessionEvent({
+					type: "retry_fallback_applied",
+					from: currentSelector,
+					to: selector.raw,
+					role,
+				});
+				transferred = true;
+				return true;
+			} finally {
+				if (probeLease && !transferred) this.#abandonAdvisorRetryFallbackProbe(advisor, probeLease);
+			}
+		}
+		return false;
 	}
 
 	#discardAdvisorRetryFallback(advisor: ActiveAdvisor): void {
@@ -1270,52 +1360,7 @@ export class SessionAdvisors {
 				return false;
 
 			this.#host.noteRetryFallbackCooldown(currentSelector, retryAfterMs, message);
-			for (const selector of this.#host.findRetryFallbackCandidates(role, currentSelector, currentModel)) {
-				if (this.#host.isRetryFallbackSelectorSuppressed(selector)) continue;
-				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
-				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
-				if (!candidate || modelsAreEqual(candidate, currentModel)) continue;
-				const admission = this.#host.modelRegistry.admitFallbackProbe(selector.raw);
-				if (admission.status === "busy") continue;
-				const probeLease = admission.status === "probe" ? admission.lease : undefined;
-				let transferred = false;
-				try {
-					const apiKey = await this.#host.modelRegistry.getApiKey(candidate, advisor.providerSessionId, {
-						signal,
-					});
-					if (!apiKey) continue;
-					signal.throwIfAborted();
-
-					const originalThinkingLevel = advisor.thinkingLevel;
-					const requestedThinkingLevel = selector.thinkingLevel ?? originalThinkingLevel;
-					const nextThinkingLevel = this.#setAdvisorModel(advisor, candidate, requestedThinkingLevel);
-					if (advisor.retryFallback) {
-						advisor.retryFallback.lastAppliedThinkingLevel = nextThinkingLevel;
-						advisor.retryFallback.probeLease = probeLease;
-					} else {
-						advisor.retryFallback = {
-							role,
-							originalSelector: currentSelector,
-							originalThinkingLevel,
-							lastAppliedThinkingLevel: nextThinkingLevel,
-							probeLease,
-						};
-					}
-					advisor.retryFallbackPendingSuccess = true;
-					this.#host.settings.getStorage()?.recordModelUsage(formatModelStringWithRouting(candidate));
-					await this.#host.emitSessionEvent({
-						type: "retry_fallback_applied",
-						from: currentSelector,
-						to: selector.raw,
-						role,
-					});
-					transferred = true;
-					return true;
-				} finally {
-					if (probeLease && !transferred) this.#abandonAdvisorRetryFallbackProbe(advisor, probeLease);
-				}
-			}
-			return false;
+			return this.#tryAdvisorRetryFallback(advisor, currentSelector, currentModel, role, signal);
 		} finally {
 			if (activeProbeLease && !retainActiveProbeLease) {
 				this.#abandonAdvisorRetryFallbackProbe(advisor, activeProbeLease);

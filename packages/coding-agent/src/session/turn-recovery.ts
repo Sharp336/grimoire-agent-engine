@@ -1873,12 +1873,20 @@ export class TurnRecovery {
 		for (;;) {
 			const fallback = this.#activeRetryFallback;
 			const probeLease = fallback?.probeLease;
-			if (fallback && (fallback.pendingAdmission || probeLease)) {
+			if (fallback) {
 				const currentModel = this.#host.model();
 				const currentSelector = currentModel
 					? formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel())
 					: probeLease?.selector;
 				if (!currentSelector) throw new Error("Fallback admission requires an active model");
+				const parsedSelector = parseRetryFallbackSelector(currentSelector, this.#host.modelRegistry);
+				if (parsedSelector && this.isRetryFallbackSelectorSuppressed(parsedSelector)) {
+					if (probeLease) this.#abandonRetryFallbackProbe(probeLease);
+					if (!(await this.#tryRetryModelFallback(currentSelector, { pinFallback: fallback.pinned }))) {
+						throw new Error(`No admitted fallback remains after ${currentSelector}`);
+					}
+					continue;
+				}
 				if (probeLease) this.#abandonRetryFallbackProbe(probeLease);
 				const admission = this.#host.modelRegistry.admitFallbackProbe(currentSelector);
 				if (admission.status === "probe") {
@@ -1890,6 +1898,7 @@ export class TurnRecovery {
 					if (!(await this.#tryRetryModelFallback(currentSelector, { pinFallback: fallback.pinned }))) {
 						throw new Error(`Fallback probe already in progress for ${currentSelector}`);
 					}
+					continue;
 				}
 			}
 			try {
