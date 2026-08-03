@@ -33,6 +33,9 @@
 - Fixed issues with `/btw` branch promotion where branches could park behind active turns, cut from outdated session leaves, or leave rejected branch keys indistinguishable from composer input.
 - Fixed database bloat by ensuring archived main and nested session rows are properly cleaned up from `stats.db` during garbage collection.
 - Fixed startup hanging during local model discovery when a timed-out transport left its request pending, which blocked the CLI before OAuth login could finish ([#7482](https://github.com/can1357/oh-my-pi/issues/7482)).
+### Added
+
+- Added `cron_create`, `cron_list`, and `cron_delete`, which schedule a prompt on a standard five-field cron expression evaluated in local time. A fired job arrives as a system notification: an active turn takes it after its next completed tool call, and an idle session wakes a turn for it. Jobs are session-scoped and in memory by default; `durable: true` persists them beside the session transcript and replays a missed one-shot on resume. The three tools are hidden, so activate them by name, as in `--tools read,bash,cron_create,cron_list,cron_delete`.
 
 ## [17.2.5] - 2026-08-03
 

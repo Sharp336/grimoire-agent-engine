@@ -8,6 +8,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { AgentRegistry } from "../registry/agent-registry";
+import { sessionSidecarDir } from "../session/session-paths";
 
 const extraArtifactsDirs = new Set<string>();
 
@@ -25,13 +26,11 @@ export function resetRegisteredArtifactDirsForTests(): void {
 /**
  * Snapshot of artifacts dirs for every registered session, deduped.
  *
- * Collects TWO candidate dirs per ref, because a subagent reads from its
- * adopted (root-wide) `ArtifactManager.dir` but its own children are written
- * one level deeper, under `sessionFile.slice(0, -6)` (`task/index.ts`). A
- * depth-2+ subagent's output therefore lives in the write-time dir, not the
- * adopted one, so `agent://` must scan both or it 404s a live nested peer.
- * `addDir` dedup collapses the depth-0 case (both formulas agree) back to a
- * single entry.
+ * Collects two candidate dirs per ref, because a subagent reads from its
+ * adopted root-wide `ArtifactManager.dir` while its own children are written
+ * in the sidecar derived from its session file. A depth-2+ subagent's output
+ * therefore lives in the write-time dir, not the adopted one, so `agent://`
+ * must scan both. `addDir` deduplicates the depth-0 case.
  */
 export function artifactsDirsFromRegistry(): string[] {
 	const dirs: string[] = [];
@@ -41,7 +40,7 @@ export function artifactsDirsFromRegistry(): string[] {
 	};
 	for (const ref of AgentRegistry.global().list()) {
 		addDir(ref.session?.sessionManager?.getArtifactsDir());
-		if (ref.sessionFile) addDir(ref.sessionFile.slice(0, -6));
+		if (ref.sessionFile) addDir(sessionSidecarDir(ref.sessionFile));
 	}
 	for (const dir of extraArtifactsDirs) addDir(dir);
 	return dirs;
