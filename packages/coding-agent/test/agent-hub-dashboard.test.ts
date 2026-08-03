@@ -291,7 +291,7 @@ describe("Agent Hub dashboard", () => {
 		]);
 		const hub = makeHub(agents, observers);
 
-		expect(rendered(hub)).toContain("Activity: retry 2/4 in 3s: rate limited");
+		expect(rendered(hub)).toContain("Activity: retry 2/4 in 3.0s: rate limited");
 		hub.dispose();
 	});
 

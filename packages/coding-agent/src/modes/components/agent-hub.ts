@@ -1301,8 +1301,15 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	}
 
 	#killSelected(): void {
-		const ref = this.#rows[this.#selectedRow];
-		if (!ref) return;
+		const selected = this.#rows[this.#selectedRow];
+		if (!selected) return;
+		const ref = this.#registry.get(selected.id);
+		if (!ref) {
+			this.#pendingKill = undefined;
+			this.#refreshRows();
+			this.#requestRender();
+			return;
+		}
 		if (ref.kind === "advisor") {
 			this.#notice = `"${ref.id}" is a read-only advisor transcript — cannot be killed.`;
 			this.#requestRender();
