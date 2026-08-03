@@ -1342,7 +1342,13 @@ function resolveVarRefs(
 	return resolveVarRefs(vars[value], vars, visited);
 }
 
-function resolveThemeColors<T extends Record<string, ColorValue>>(
+/**
+ * Resolve theme colors through their variable references.
+ *
+ * This is the pure, singleton-free runtime path used by `createTheme` and
+ * diagnostics. It throws for missing or cyclic variable references.
+ */
+export function resolveThemeColors<T extends Record<string, ColorValue>>(
 	colors: T,
 	vars: Record<string, ColorValue> = {},
 ): Record<keyof T, string | number> {

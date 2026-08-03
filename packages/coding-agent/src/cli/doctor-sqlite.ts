@@ -88,6 +88,17 @@ export interface DbProbe {
 
 export type DbRepairAction = "checkpointed" | "optimized" | "vacuumed" | "quarantined" | "rescued" | "salvaged";
 
+const DESTRUCTIVE_REPAIR_ACTIONS: Partial<Record<DbRepairAction, true>> = {
+	quarantined: true,
+	rescued: true,
+	salvaged: true,
+};
+
+/** True when a repair replaced or removed the probed database, making its pre-repair state stale. */
+export function isDestructiveDbRepair(repair: DbRepair | null): boolean {
+	return repair !== null && repair.actions.some(action => DESTRUCTIVE_REPAIR_ACTIONS[action] === true);
+}
+
 export interface DbRepair {
 	label: string;
 	path: string;
@@ -168,16 +179,14 @@ interface MnemopiDatabaseScan {
 }
 
 /**
- * Mnemopi databases under the agent-scoped memories tree.
+ * Mnemopi databases rooted at the configured primary database path.
  * A missing directory is normal (top-level entry only, no error). Permission/I/O
  * failures scanning bank databases under banks/ return an error string so the
  * storage collector can emit a finding without aborting other database probes.
  */
-function listMnemopiDatabases(agentDir: string | undefined): MnemopiDatabaseScan {
-	const mnemopiDir = path.join(getMemoriesDir(agentDir), "mnemopi");
-	const databases: DoctorDatabase[] = [
-		{ label: "mnemopi/mnemopi.db", path: path.join(mnemopiDir, "mnemopi.db"), policy: "precious" },
-	];
+function listMnemopiDatabases(mnemopiDbPath: string): MnemopiDatabaseScan {
+	const mnemopiDir = path.dirname(mnemopiDbPath);
+	const databases: DoctorDatabase[] = [{ label: "mnemopi/mnemopi.db", path: mnemopiDbPath, policy: "precious" }];
 	try {
 		for (const entry of new Bun.Glob("banks/*/mnemopi.db").scanSync({ cwd: mnemopiDir })) {
 			databases.push({ label: `mnemopi/${entry}`, path: path.join(mnemopiDir, entry), policy: "precious" });
@@ -203,6 +212,7 @@ export interface ResolvedDoctorDatabases {
 export function resolveDoctorDatabases(
 	agentDir: string | undefined,
 	scopedToAgentDir: boolean,
+	mnemopiDbPath = path.join(getMemoriesDir(agentDir), "mnemopi", "mnemopi.db"),
 ): ResolvedDoctorDatabases {
 	const databases: DoctorDatabase[] = [
 		{ label: "agent.db", path: getAgentDbPath(agentDir), policy: "precious" },
@@ -210,8 +220,8 @@ export function resolveDoctorDatabases(
 		{ label: "models.db", path: getModelDbPath(agentDir), policy: "regenerable" },
 	];
 	const discoveryErrors: Array<{ label: string; message: string }> = [];
-	// Mnemopi databases follow agentDir; always agent-scoped.
-	const mnemopi = listMnemopiDatabases(agentDir);
+	// Mnemopi databases follow the configured primary path; always agent-scoped.
+	const mnemopi = listMnemopiDatabases(mnemopiDbPath);
 	databases.push(...mnemopi.databases);
 	if (mnemopi.error !== null) {
 		discoveryErrors.push({ label: "mnemopi", message: mnemopi.error });

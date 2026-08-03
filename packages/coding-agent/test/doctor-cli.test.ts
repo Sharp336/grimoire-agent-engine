@@ -17,6 +17,8 @@ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import * as browserLaunch from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { getAgentDbPath, getHistoryDbPath, getModelDbPath, setAgentDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { Browser, computeExecutablePath, detectBrowserPlatform, resolveBuildId } from "@puppeteer/browsers";
+import { PUPPETEER_REVISIONS } from "puppeteer-core/internal/revisions.js";
 import { runCli } from "../src/cli";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
@@ -28,6 +30,7 @@ let stderrSpy: { mockRestore(): void } | undefined;
 let pluginDoctorSpy: { mockRestore(): void } | undefined;
 let settingsState: SettingsTestState | undefined;
 const originalExitCode = process.exitCode;
+const DARK_THEME_PATH = path.join(import.meta.dir, "..", "src", "modes", "theme", "dark.json");
 
 beforeAll(async () => {
 	// The human renderer dereferences the theme singleton, which is unassigned until initTheme resolves.
@@ -165,6 +168,36 @@ describe("omp doctor", () => {
 		const [backup] = backups;
 		if (!backup) throw new Error("missing model database backup");
 		expect((await fs.readFile(path.join(backupRoot, backup, "models.db"))).equals(corruptBytes)).toBe(true);
+	});
+
+	test("destructive repair supersedes stale foreign-key violations", async () => {
+		const dbPath = getModelDbPath(root);
+		await fs.mkdir(path.dirname(dbPath), { recursive: true });
+		const db = new Database(dbPath);
+		db.run("PRAGMA journal_mode=DELETE");
+		db.run("CREATE TABLE filler (id INTEGER PRIMARY KEY, blob TEXT)");
+		const insert = db.prepare("INSERT INTO filler (blob) VALUES (?)");
+		db.run("BEGIN");
+		for (let index = 0; index < 200; index++) insert.run("x".repeat(1024));
+		db.run("COMMIT");
+		db.run("PRAGMA foreign_keys=OFF");
+		db.run("CREATE TABLE parent (id INTEGER PRIMARY KEY)");
+		db.run("CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id))");
+		db.run("INSERT INTO child (parent_id) VALUES (999)");
+		db.close();
+		await corruptInteriorPages(dbPath);
+
+		const before = await runDoctorCommand({ flags: { agentDir: root } });
+		const staleFinding = before.findings.find(entry => entry.id === "storage.models.db");
+		expect(staleFinding?.status).toBe("warning");
+		expect(staleFinding?.summary).toContain("foreign-key violations");
+
+		const after = await runDoctorCommand({ flags: { agentDir: root, fix: true } });
+		const repairedFinding = after.findings.find(entry => entry.id === "storage.models.db");
+		expect(repairedFinding?.status).toBe("ok");
+		expect(repairedFinding?.fixed).toBe(true);
+		expect(repairedFinding?.summary).toContain("quarantined");
+		expect(repairedFinding?.summary).not.toContain("foreign-key violations");
 	});
 
 	test("data-destroying corruption refuses the swap but preserves a recovery dump", async () => {
@@ -520,6 +553,17 @@ describe("omp doctor", () => {
 		expect(finding?.status).toBe("warning");
 		expect(finding?.summary).toContain("foreign-key violations");
 		expect(finding?.fixed).toBeUndefined();
+	});
+
+	test("uses the configured Mnemopi database path", async () => {
+		const dbPath = path.join(root, "configured-mnemopi", "custom.db");
+		await fs.writeFile(path.join(root, "config.yml"), `mnemopi:\n  dbPath: ${JSON.stringify(dbPath)}\n`, "utf8");
+		await createDatabaseWithRows(dbPath, 1);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const finding = report.findings.find(entry => entry.id === "storage.mnemopi/mnemopi.db");
+		expect(finding?.status).toBe("ok");
+		expect(finding?.summary).toContain("mnemopi/mnemopi.db");
 	});
 
 	test("plugin doctor throw produces a plugins error finding without aborting the report", async () => {
@@ -1601,6 +1645,37 @@ describe("omp doctor", () => {
 		expect(finding?.details.some(d => d.includes("bad.json"))).toBe(true);
 	});
 
+	test("setup: theme variable resolution errors are invalid", async () => {
+		const themesDir = path.join(root, "themes");
+		await fs.mkdir(themesDir, { recursive: true });
+		const baseTheme = await Bun.file(DARK_THEME_PATH).json();
+		await fs.writeFile(
+			path.join(themesDir, "missing-var.json"),
+			JSON.stringify({
+				...baseTheme,
+				name: "missing-var",
+				colors: { ...baseTheme.colors, text: "missing" },
+			}),
+			"utf8",
+		);
+		await fs.writeFile(
+			path.join(themesDir, "cycle.json"),
+			JSON.stringify({
+				...baseTheme,
+				name: "cycle",
+				vars: { ...baseTheme.vars, first: "second", second: "first" },
+				colors: { ...baseTheme.colors, text: "first" },
+			}),
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "setup.themes");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(detail => detail.includes("missing-var.json"))).toBe(true);
+		expect(finding?.details.some(detail => detail.includes("cycle.json"))).toBe(true);
+	});
+
 	test("setup: extension with a broken manifest → error detail", async () => {
 		const extDir = path.join(root, "extensions", "broken-ext");
 		await fs.mkdir(extDir, { recursive: true });
@@ -2278,12 +2353,11 @@ describe("omp doctor", () => {
 		expect(finding?.details.some(detail => detail.includes("does not exist or is not a directory"))).toBe(true);
 	});
 
-	// ── Item G: invalid URL must not leak credentials via parse-error text ──
+	// ── Item G: invalid URL must not leak credentials through validation ─────
 
 	test("MCP http server with a malformed URL containing credentials never leaks them in the report", async () => {
-		// The URL constructor's error message echoes the input verbatim. A
-		// malformed URL with userinfo or query secrets must produce a generic
-		// error detail — never the raw parse-error text.
+		// `validateServerConfig` must reject this malformed URL with a generic
+		// detail, never the raw input or the URL parser's echoed error.
 		const mcpJson = path.join(root, "mcp.json");
 		await fs.writeFile(
 			mcpJson,
@@ -2298,13 +2372,28 @@ describe("omp doctor", () => {
 		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
 		const finding = report.findings.find(entry => entry.id === "mcp.badUrl");
 		expect(finding?.status).toBe("error");
-		expect(finding?.summary).toContain("invalid url");
+		expect(finding?.summary).toContain("invalid spec");
 		// Neither the userinfo secret nor the query token may appear anywhere.
 		const json = JSON.stringify(report);
 		expect(json).not.toContain("user:secret");
 		expect(json).not.toContain("hidden");
 		expect(json).not.toContain("=hidden");
 		expect(json).not.toContain("bad host");
+	});
+
+	test("MCP http server with an unsupported URL scheme is invalid", async () => {
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(
+			mcpJson,
+			JSON.stringify({ mcpServers: { ftp: { type: "http", url: "ftp://example.com/mcp" } } }),
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const finding = report.findings.find(entry => entry.id === "mcp.ftp");
+		expect(finding?.status).toBe("error");
+		expect(finding?.summary).toContain("invalid spec");
+		expect(finding?.details.some(detail => detail.includes("http or https"))).toBe(true);
 	});
 
 	// ── Item H: non-string cwd on a stdio server is an error ─────────────────
@@ -2374,27 +2463,23 @@ describe("omp doctor", () => {
 	 * chrome-headless-shell path sharing that build id. Mirrors
 	 * `resolveManagedChromiumTarget` in launch.ts so the fixture lands at the
 	 * path the launcher actually probes — not a stale chrome-1234/linux-64
-	 * layout that only satisfied the old directory walk. Dynamic imports mirror
-	 * the SUT's lazy load, keeping puppeteer out of the test module's eager
-	 * graph.
+	 * layout that only satisfied the old directory walk.
 	 */
 	async function resolveManagedChromeTarget(cacheDir: string): Promise<{
 		chromePath: string;
 		shellPath: string;
 	}> {
-		const browsers = await import("@puppeteer/browsers");
-		const platform = browsers.detectBrowserPlatform();
+		const platform = detectBrowserPlatform();
 		if (!platform) throw new Error("detectBrowserPlatform returned undefined on test host");
-		const { PUPPETEER_REVISIONS } = await import("puppeteer-core/internal/revisions.js");
-		const buildId = await browsers.resolveBuildId(browsers.Browser.CHROME, platform, PUPPETEER_REVISIONS.chrome);
-		const chromePath = browsers.computeExecutablePath({
-			browser: browsers.Browser.CHROME,
+		const buildId = await resolveBuildId(Browser.CHROME, platform, PUPPETEER_REVISIONS.chrome);
+		const chromePath = computeExecutablePath({
+			browser: Browser.CHROME,
 			buildId,
 			cacheDir,
 			platform,
 		});
-		const shellPath = browsers.computeExecutablePath({
-			browser: browsers.Browser.CHROMEHEADLESSSHELL,
+		const shellPath = computeExecutablePath({
+			browser: Browser.CHROMEHEADLESSSHELL,
 			buildId,
 			cacheDir,
 			platform,

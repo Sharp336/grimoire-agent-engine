@@ -689,6 +689,22 @@ describe("mnemopi bank directory scan", () => {
 		expect(resolved.databases.some(db => db.label === "history.db")).toBe(true);
 		expect(resolved.databases.some(db => db.label.includes("banks/"))).toBe(false);
 	});
+
+	test("uses an explicit mnemopi primary path and its bank directory", async () => {
+		const defaultMemories = path.join(root, "unrelated-memories");
+		spies.push(spyOn(piUtils, "getMemoriesDir").mockReturnValue(defaultMemories));
+		const mnemopiDir = path.join(root, "configured-mnemopi");
+		const primaryPath = path.join(mnemopiDir, "custom.db");
+		const bankPath = path.join(mnemopiDir, "banks", "work", "mnemopi.db");
+		await fs.mkdir(path.dirname(bankPath), { recursive: true });
+		await fs.writeFile(primaryPath, "");
+		await fs.writeFile(bankPath, "");
+
+		const resolved = resolveDoctorDatabases(root, true, primaryPath);
+		expect(resolved.databases.find(db => db.label === "mnemopi/mnemopi.db")?.path).toBe(primaryPath);
+		expect(resolved.databases.find(db => db.label === "mnemopi/banks/work/mnemopi.db")?.path).toBe(bankPath);
+		expect(resolved.databases.some(db => db.path.startsWith(defaultMemories))).toBe(false);
+	});
 });
 
 describe("repair open create:false", () => {

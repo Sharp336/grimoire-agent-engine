@@ -63,7 +63,8 @@ import { convertToLegacyConfig, validateServerConfig } from "../mcp/config";
 import { readDisabledServers, readEnabledServers } from "../mcp/config-writer";
 import { resolveStdioCommandPath } from "../mcp/transports/stdio";
 import type { MCPServerConfig } from "../mcp/types";
-import { theme, themeJsonSchema } from "../modes/theme/theme";
+import { loadMnemopiConfig } from "../mnemopi/config";
+import { resolveThemeColors, theme, themeJsonSchema } from "../modes/theme/theme";
 import { loadBundledAgents } from "../task/agents";
 import { discoverAgents } from "../task/discovery";
 import type { AgentDefinition } from "../task/types";
@@ -77,6 +78,7 @@ import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../
 import {
 	type DbProbe,
 	type DbRepair,
+	isDestructiveDbRepair,
 	openReadonlyNonMutating,
 	probeDatabase,
 	probeSqliteRecoverCapability,
@@ -741,10 +743,9 @@ function storageFinding(probe: DbProbe, repair: DbRepair | null): DoctorFinding 
 			details: [...base.details, repair.error],
 		};
 	}
-	// (3) FK violations are not resolved by maintenance actions (checkpoint/optimize/vacuum);
-	// a db with unresolved violations stays warning even when --fix ran maintenance.
-	// No fixed flag: the FK issue itself was not repaired, though actions are noted.
-	if (probe.foreignKeyViolations > 0) {
+	// (3) Maintenance actions leave FK violations in place. A destructive repair
+	// replaces or removes the probed database, so its pre-repair count is stale.
+	if (probe.foreignKeyViolations > 0 && !isDestructiveDbRepair(repair)) {
 		const actions = repair !== null && repair.actions.length > 0 ? `${repair.actions.join(", ")}; ` : "";
 		return {
 			...base,
@@ -1134,7 +1135,19 @@ async function collectQuarantinedConfigs(agentDir: string): Promise<DoctorFindin
 }
 
 async function collectStorageFindings(flags: DoctorCommandFlags): Promise<DoctorFinding[]> {
-	const { databases, discoveryErrors } = resolveDoctorDatabases(flags.agentDir, flags.agentDir !== undefined);
+	const agentDir = flags.agentDir ?? getAgentDir();
+	let mnemopiDbPath: string | undefined;
+	try {
+		const settings = await Settings.loadReadOnly({ agentDir, cwd: getProjectDir() });
+		mnemopiDbPath = loadMnemopiConfig(settings, agentDir).dbPath;
+	} catch {
+		// Config diagnostics own this error. Keep storage useful with its default layout.
+	}
+	const { databases, discoveryErrors } = resolveDoctorDatabases(
+		flags.agentDir,
+		flags.agentDir !== undefined,
+		mnemopiDbPath,
+	);
 	const collect = async (): Promise<DoctorFinding[]> => {
 		const findings: DoctorFinding[] = [];
 		for (const discovery of discoveryErrors) {
@@ -1558,24 +1571,8 @@ async function diagnoseMcpServer(name: string, server: MCPServer, raw?: unknown)
 		}
 		return { ...base, status: "ok", summary: `${name}: ${resolution.path}`, details: [] };
 	}
-	// http/sse: validate URL syntax only — no live connects, no OAuth probes.
-	// "url" in config narrows to the http/sse members; the validator guaranteed url.
-	let url = "";
-	if ("url" in config && typeof config.url === "string") url = config.url;
-	try {
-		new URL(url);
-	} catch {
-		// The URL constructor's error message echoes the input URL verbatim,
-		// which can embed userinfo credentials or query-string secrets. Never
-		// surface raw parse-error text — return a generic, input-free detail.
-		return {
-			...base,
-			status: "error",
-			summary: `${name}: invalid url`,
-			details: ["URL is malformed and could not be parsed"],
-			remedy: `Fix the "url" for server "${name}" in mcp.json`,
-		};
-	}
+	// The shared validator guarantees an absolute HTTP(S) URL before this point.
+	const url = "url" in config && typeof config.url === "string" ? config.url : "";
 	// Sanitize the URL for the report: origin only (no userinfo, query, or
 	// fragment) so embedded credentials or tokens never leak into the human
 	// report or --json output. Reuses the same sanitizer as broker URLs.
@@ -2084,6 +2081,8 @@ async function collectThemesSetupFinding(agentDir: string): Promise<DoctorFindin
 				errors.push(`${entry.name}: ${result.summary}`);
 				continue;
 			}
+			// Schema validity is not enough: use the same pure resolution path as runtime.
+			resolveThemeColors(result.colors, result.vars);
 			count++;
 		} catch (error) {
 			if (isEnoent(error)) continue;
