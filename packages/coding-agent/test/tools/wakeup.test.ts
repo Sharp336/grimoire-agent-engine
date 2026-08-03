@@ -53,6 +53,13 @@ describe("WakeupTool", () => {
 		expect((await createTools(session)).map(tool => tool.name)).not.toContain("wakeup");
 	});
 
+	it("is unavailable to disposable top-level clones", async () => {
+		session.parentTaskPrefix = "Tan-clone";
+
+		expect(WakeupTool.createIf(session)).toBeNull();
+		expect((await createTools(session)).map(tool => tool.name)).not.toContain("wakeup");
+	});
+
 	it("sanitizes the prompt shown in execution approval details", () => {
 		const tool = new WakeupTool(session);
 		const details = tool.formatApprovalDetails?.({
