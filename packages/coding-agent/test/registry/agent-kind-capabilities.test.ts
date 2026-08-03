@@ -7,9 +7,12 @@
 import { describe, expect, it } from "bun:test";
 import {
 	type AgentKind,
+	type AgentRef,
+	type AgentStatus,
 	hasLocalPresence,
 	isLocalSession,
 	isMessageablePeer,
+	isWaitablePeer,
 } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 
 const KINDS: AgentKind[] = ["main", "sub", "advisor", "remote"];
@@ -37,5 +40,33 @@ describe("AgentKind capability taxonomy", () => {
 		expect(isMessageablePeer("advisor")).toBe(false);
 		expect(isLocalSession("advisor")).toBe(false);
 		expect(hasLocalPresence("advisor")).toBe(true);
+	});
+});
+
+describe("isWaitablePeer (kind + status)", () => {
+	const ref = (kind: AgentKind, status: AgentStatus): AgentRef => ({
+		id: "x",
+		displayName: "x",
+		kind,
+		status,
+		session: null,
+		sessionFile: null,
+		createdAt: 0,
+		lastActivity: 0,
+	});
+
+	it("a running local peer is waitable; an idle local peer is not", () => {
+		expect(isWaitablePeer(ref("sub", "running"))).toBe(true);
+		expect(isWaitablePeer(ref("sub", "idle"))).toBe(false);
+	});
+
+	it("a live remote proxy is waitable regardless of local status", () => {
+		expect(isWaitablePeer(ref("remote", "idle"))).toBe(true);
+		expect(isWaitablePeer(ref("remote", "running"))).toBe(true);
+	});
+
+	it("aborted or advisor peers are not waitable", () => {
+		expect(isWaitablePeer(ref("sub", "aborted"))).toBe(false);
+		expect(isWaitablePeer(ref("advisor", "idle"))).toBe(false);
 	});
 });

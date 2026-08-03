@@ -30,7 +30,7 @@ import type { RenderResultOptions } from "../../extensibility/custom-tools/types
 import { IrcBus } from "../../irc/bus";
 import type { Theme } from "../../modes/theme/theme";
 import hubDescription from "../../prompts/tools/hub.md" with { type: "text" };
-import type { AgentRegistry } from "../../registry/agent-registry";
+import { type AgentRegistry, isWaitablePeer } from "../../registry/agent-registry";
 import type { ToolSession } from "..";
 import {
 	buildJobResult,
@@ -372,13 +372,11 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			// No job legs: pure message wait — or nothing to block on at all.
 			if (!messaging) return nothingToWaitForResult(this.session);
 			if (!from) {
-				// A bare wait can only be satisfied by a running peer eventually
-				// sending something; with none, return the snapshot immediately
-				// instead of blocking a full message-timeout window.
-				const hasRunningPeer = messaging.registry
-					.listVisibleTo(messaging.senderId)
-					.some(ref => ref.status === "running");
-				if (!hasRunningPeer) return nothingToWaitForResult(this.session);
+				// A bare wait needs at least one waitable peer — a running local agent, or a live
+				// remote proxy that can deliver inbound at any time; with none, return the snapshot
+				// immediately instead of blocking a full message-timeout window.
+				const hasWaitablePeer = messaging.registry.listVisibleTo(messaging.senderId).some(isWaitablePeer);
+				if (!hasWaitablePeer) return nothingToWaitForResult(this.session);
 			}
 			return executeMessageWait(messaging, { from, timeoutMs: params.timeoutMs }, signal);
 		}

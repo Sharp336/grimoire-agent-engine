@@ -17,7 +17,7 @@
 
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, isWaitablePeer, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { CustomMessage } from "../session/messages";
 
 export interface IrcMessage {
@@ -313,8 +313,8 @@ export class IrcBus {
 
 		const liveness = options?.liveness;
 		const livenessReason = filter.from
-			? `IRC wait aborted: agent "${filter.from}" is not running`
-			: "IRC wait aborted: no running peers remain";
+			? `IRC wait aborted: agent "${filter.from}" is not available`
+			: "IRC wait aborted: no waitable peers remain";
 
 		const settle = (
 			outcome: { kind: "message"; msg: IrcMessage } | { kind: "timeout" } | { kind: "abort"; error: Error },
@@ -364,9 +364,9 @@ export class IrcBus {
 
 		if (liveness) {
 			const { registry, senderId } = liveness;
-			const hasRunningSender = (from?: string): boolean =>
-				registry.listVisibleTo(senderId).some(ref => ref.status === "running" && (!from || ref.id === from));
-			const check = filter.from ? () => hasRunningSender(filter.from) : () => hasRunningSender();
+			const hasWaitableSender = (from?: string): boolean =>
+				registry.listVisibleTo(senderId).some(ref => isWaitablePeer(ref) && (!from || ref.id === from));
+			const check = filter.from ? () => hasWaitableSender(filter.from) : () => hasWaitableSender();
 			unsubscribeLiveness = registry.onChange(() => {
 				if (!check()) {
 					settle({ kind: "abort", error: new Error(livenessReason) });

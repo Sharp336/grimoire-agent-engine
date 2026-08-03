@@ -68,6 +68,19 @@ export function isLocalSession(kind: AgentKind): boolean {
 export function hasLocalPresence(kind: AgentKind): boolean {
 	return kind !== "remote";
 }
+/**
+ * A peer worth waiting on for a future message: a `running` local agent (its status tracks its
+ * turn), or any live `remote` proxy — a remote executes off-node and can deliver an inbound
+ * message at any time, so its local idle/running status is not a waitability signal. Takes the
+ * full ref (kind + status), unlike the kind-only predicates above.
+ *
+ * INTERIM band-aid over the `running`-only wait-liveness gate, which is already racy for local
+ * peers (an idle-but-wakeable peer can still deliver). Remove once that gate is redesigned to
+ * "waitable = alive, timeout as backstop" — see can1357/oh-my-pi#7503.
+ */
+export function isWaitablePeer(ref: AgentRef): boolean {
+	return ref.status === "running" || ref.kind === "remote";
+}
 
 /** Persisted per-agent totals reconstructed from the child session transcript. */
 export interface AgentMetricsSummary {
