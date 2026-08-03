@@ -14,6 +14,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolPathWithSource } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools";
 import type { LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -178,6 +179,31 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.parentAgentId).toBe("SpawnerAgent");
 		expect(forwarded?.agentId).toBe("ChildAgent");
 		expect(forwarded?.parentTaskPrefix).toBe("ChildAgent");
+	});
+
+	it("uses and forwards the spawning session's custom registry", async () => {
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const agentRegistry = new AgentRegistry();
+		const parent = agentRegistry.register({
+			id: "CustomParent",
+			displayName: "custom parent",
+			kind: "main",
+			session: null,
+			status: "running",
+		});
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "CustomChild",
+			parentAgentId: parent.id,
+			agentRegistry,
+		});
+
+		expect(result.exitCode).toBe(0);
+		const forwarded = spy.mock.calls[0]?.[0];
+		expect(forwarded?.agentRegistry).toBe(agentRegistry);
+		expect(forwarded?.expectedParentAgentRef).toBe(parent);
 	});
 
 	it("removes all MCP and discovered capability sources for a restricted child", async () => {

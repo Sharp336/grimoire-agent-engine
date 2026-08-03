@@ -325,7 +325,7 @@ describe("createAgentSession session storage isolation", () => {
 		expect(registry.get("revived-worker")).toBeUndefined();
 	});
 
-	it("suspends the exact Vibe owner scope before global lifecycle teardown", async () => {
+	it("threads a custom root agent id through Vibe suspension and lifecycle teardown", async () => {
 		VibeSessionRegistry.resetGlobalForTests();
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-vibe-dispose-${Snowflake.next()}-`));
 		tempDirs.push(tempDir);
@@ -343,6 +343,8 @@ describe("createAgentSession session storage isolation", () => {
 			slashCommands: [],
 			enableMCP: false,
 			enableLsp: false,
+			agentId: "SdkRoot",
+			agentDisplayName: "sdk root",
 		});
 		const vibeRegistry = VibeSessionRegistry.global();
 		const suspend = vi.spyOn(vibeRegistry, "suspendScope");
@@ -354,9 +356,10 @@ describe("createAgentSession session storage isolation", () => {
 		await session.dispose();
 
 		expect(suspend).toHaveBeenCalledWith(
-			{ ownerId: "Main", parentSessionId, parentSessionFile },
+			{ ownerId: "SdkRoot", parentSessionId, parentSessionFile },
 			session.asyncJobManager,
 		);
+		expect(lifecycleDispose).toHaveBeenCalledWith("SdkRoot");
 		expect(suspend.mock.invocationCallOrder[0]).toBeLessThan(lifecycleDispose.mock.invocationCallOrder[0]);
 	});
 

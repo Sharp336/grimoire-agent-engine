@@ -183,6 +183,38 @@ describe("AgentLifecycleManager", () => {
 		await expect(lifecycle.ensureLive("child")).rejects.toThrow(/aborted and cannot be revived/);
 	});
 
+	it("terminalizes a descendant registered after its parent is already aborted", async () => {
+		const parent = registry.register({
+			id: "cancelled-parent",
+			displayName: "parent",
+			kind: "sub",
+			session: makeSessionStub().session,
+			sessionFile: null,
+			status: "running",
+		});
+		registry.setStatus(parent.id, "aborted", parent);
+		const child = makeSessionStub();
+
+		const childRef = registry.register({
+			id: "late-child",
+			displayName: "child",
+			kind: "sub",
+			parentId: parent.id,
+			session: child.session,
+			sessionFile: null,
+			status: "running",
+		});
+		await Promise.all([
+			lifecycle.waitForTermination(parent.id, parent),
+			lifecycle.waitForTermination(childRef.id, childRef),
+		]);
+
+		expect(childRef.status).toBe("aborted");
+		expect(childRef.session).toBeNull();
+		expect(child.abortCalls()).toBe(1);
+		expect(child.disposeCalls()).toBe(1);
+	});
+
 	it("signals a running descendant's owning run during parent cancellation", async () => {
 		const childStub = makeSessionStub();
 		registry.register({
@@ -579,10 +611,50 @@ describe("AgentLifecycleManager", () => {
 		expect(registry.get("Revive-Killed")).toMatchObject({ status: "aborted", session: null });
 	});
 
-	it("dispose terminalizes a pre-registered child before its session attaches", async () => {
+	it("dispose waits for an in-flight revival before clearing lifecycle state", async () => {
+		const reviveGate = deferred();
+		const revived = makeSessionStub();
+		const ref = registry.register({
+			id: "slow-revival",
+			displayName: "task",
+			kind: "sub",
+			parentId: MAIN_AGENT_ID,
+			session: null,
+			sessionFile: "/tmp/slow-revival.jsonl",
+			status: "parked",
+		});
+		lifecycle.adopt(
+			ref.id,
+			{
+				idleTtlMs: 0,
+				revive: async () => {
+					await reviveGate.promise;
+					return revived.session;
+				},
+			},
+			ref,
+		);
+		const revival = lifecycle.ensureLive(ref.id);
+		let disposed = false;
+		const disposal = lifecycle.dispose().then(() => {
+			disposed = true;
+		});
+		await flushAsync();
+
+		expect(disposed).toBe(false);
+		reviveGate.resolve();
+		await expect(revival).rejects.toThrow(/changed|terminal/);
+		await disposal;
+
+		expect(disposed).toBe(true);
+		expect(revived.disposeCalls()).toBe(1);
+	});
+
+	it("dispose seeds pre-registered child cleanup from a custom top-level agent id", async () => {
+		const rootId = "sdk-root";
 		registry.register({
-			id: MAIN_AGENT_ID,
-			displayName: MAIN_AGENT_ID,
+			id: rootId,
+			displayName: rootId,
 			kind: "main",
 			session: makeSessionStub().session,
 		});
@@ -590,13 +662,13 @@ describe("AgentLifecycleManager", () => {
 			id: "Initializing",
 			displayName: "task",
 			kind: "sub",
-			parentId: MAIN_AGENT_ID,
+			parentId: rootId,
 			session: null,
 			status: "running",
 		});
 		const lateSession = makeSessionStub();
 
-		await lifecycle.dispose();
+		await lifecycle.dispose(rootId);
 
 		expect(registry.get("Initializing")).toBeUndefined();
 		expect(registry.attachSession("Initializing", lateSession.session, null, child)).toBe(false);
@@ -718,7 +790,7 @@ describe("AgentLifecycleManager", () => {
 		lifecycle.adopt("stuck-Sub", { idleTtlMs: TTL });
 		lifecycle.adopt("sibling-Sub", { idleTtlMs: TTL });
 
-		await lifecycle.dispose(Date.now());
+		await lifecycle.dispose(MAIN_AGENT_ID, Date.now());
 
 		expect(stuck.disposeCalls()).toBe(1);
 		expect(sibling.disposeCalls()).toBe(1);

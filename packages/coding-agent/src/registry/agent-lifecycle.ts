@@ -451,8 +451,6 @@ export class AgentLifecycleManager {
 			}
 		}
 		if (options?.tombstone && ref.sessionFile) await persistAgentTombstone(ref.sessionFile);
-			}
-		}
 		for (const descendant of subtree) {
 			if (this.#registry.get(descendant.id) === descendant && descendant.status !== "aborted") {
 				this.#registry.setStatus(descendant.id, "aborted", descendant);
@@ -464,20 +462,23 @@ export class AgentLifecycleManager {
 		return true;
 	}
 
-	/** Teardown everything (process exit / main session dispose). */
-	async dispose(deadlineAt: number = Date.now() + AGENT_RELEASE_GRACE_MS): Promise<void> {
+	/** Teardown descendants of the disposing root (process exit / top-level session dispose). */
+	async dispose(
+		rootAgentId: string = MAIN_AGENT_ID,
+		deadlineAt: number = Date.now() + AGENT_RELEASE_GRACE_MS,
+	): Promise<void> {
 		this.#unsubscribe?.();
 		this.#unsubscribe = undefined;
 		// Runs are normally tracked before teardown, but a child session is
 		// pre-registered while its async initialization is still in flight. Include
-		// the live registry subtree so such children cannot attach after the main
-		// session has already disposed.
+		// the live registry subtree so such children cannot attach after their
+		// top-level session has already disposed.
 		const refs = new Map<string, AgentRef>();
 		for (const id of [...this.#adopted.keys(), ...this.#parks.keys(), ...this.#runs.keys()]) {
 			const ref = this.#registry.get(id);
 			if (ref) refs.set(id, ref);
 		}
-		const parentIds = new Set([MAIN_AGENT_ID, ...refs.keys()]);
+		const parentIds = new Set([rootAgentId, ...refs.keys()]);
 		const registered = this.#registry.list();
 		for (let added = true; added; ) {
 			added = false;
@@ -489,6 +490,7 @@ export class AgentLifecycleManager {
 				}
 			}
 		}
+		const revivals = [...this.#revivals.values()];
 		await Promise.all(
 			[...refs.values()].map(async ref => {
 				const release = this.release(ref.id, ref).then(() => {});
@@ -521,6 +523,22 @@ export class AgentLifecycleManager {
 				}
 			}),
 		);
+		const revivalSettlement = Promise.allSettled(revivals.map(entry => entry.promise));
+		try {
+			await untilAborted(AbortSignal.timeout(Math.max(0, deadlineAt - Date.now())), () => revivalSettlement);
+		} catch (error) {
+			if (Date.now() >= deadlineAt) {
+				for (const entry of revivals) {
+					trackLateCleanup(
+						entry.promise.then(() => {}),
+						{ id: entry.ref.id, resource: "reviving-agent" },
+					);
+				}
+			}
+			logger.warn("Agent revival cleanup exceeded its deadline", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
 		this.#revivals.clear();
 		this.#parks.clear();
 		this.#runs.clear();
@@ -680,6 +698,16 @@ export class AgentLifecycleManager {
 	}
 
 	#onRegistryEvent(event: RegistryEvent): void {
+		if (event.type === "registered" && event.ref.parentId) {
+			const parent = this.#registry.get(event.ref.parentId);
+			// Cancellation may have completed its original descendant snapshot
+			// before this child registered. Terminalize the exact new ref
+			// synchronously so late initialization can never attach a session.
+			if (parent?.status === "aborted") {
+				if (event.ref.status === "aborted") void this.#terminate(event.ref);
+				else this.#registry.setStatus(event.ref.id, "aborted", event.ref);
+			}
+		}
 		if (event.type === "status_changed" && event.ref.status === "aborted") {
 			void this.#terminate(event.ref);
 			for (const child of this.#registry.list()) {

@@ -270,10 +270,8 @@ function installSubagentRetryFallbackChain(args: {
 	return role;
 }
 
-function renderIrcPeerRoster(selfId: string): string {
-	const peers = AgentRegistry.global()
-		.list()
-		.filter(ref => ref.id !== selfId && ref.status !== "aborted" && ref.kind !== "advisor");
+function renderIrcPeerRoster(selfId: string, registry: AgentRegistry): string {
+	const peers = registry.list().filter(ref => ref.id !== selfId && ref.status !== "aborted" && ref.kind !== "advisor");
 	if (peers.length === 0) return "- (no other agents)";
 	const lines = peers.map(
 		peer =>
@@ -471,6 +469,8 @@ export interface ExecutorOptions {
 	 * transition explicitly.
 	 */
 	parentTelemetry?: AgentTelemetryConfig;
+	/** Exact registry owned by the spawning session. Defaults to the process-global registry. */
+	agentRegistry?: AgentRegistry;
 	/** Skills to autoload via sendCustomMessage before the first prompt */
 	autoloadSkills?: Skill[];
 	/**
@@ -2646,8 +2646,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		};
 	}
 
+	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
 	const expectedParentAgentRef =
-		options.parentAgentId === undefined ? undefined : (AgentRegistry.global().get(options.parentAgentId) ?? null);
+		options.parentAgentId === undefined ? undefined : (agentRegistry.get(options.parentAgentId) ?? null);
 
 	// Set up artifact paths and write input file upfront if artifacts dir provided
 	let subtaskSessionFile: string | undefined;
@@ -2755,10 +2756,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const installRegistryStatusSync = (target: AgentSession): void => {
 		target.subscribe(event => {
 			if (event.type === "agent_start") {
-				AgentRegistry.global().setStatus(id, "running", target);
+				agentRegistry.setStatus(id, "running", target);
 			} else if (event.type === "agent_end") {
-				const ref = AgentRegistry.global().get(id);
-				if (ref?.status !== "aborted") AgentRegistry.global().setStatus(id, "idle", target);
+				const ref = agentRegistry.get(id);
+				if (ref?.status !== "aborted") agentRegistry.setStatus(id, "idle", target);
 			}
 		});
 	};
@@ -3051,7 +3052,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						worktree: worktree ?? "",
 						outputSchema: normalizedOutputSchema,
 						outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
-						ircPeers: ircEnabled ? renderIrcPeerRoster(id) : "",
+						ircPeers: ircEnabled ? renderIrcPeerRoster(id, agentRegistry) : "",
 						ircSelfId: ircEnabled ? id : "",
 					});
 					return defaultPrompt.length === 0
@@ -3071,6 +3072,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				agentDisplayName: agent.name,
 				expectedAgentRef,
 				expectedParentAgentRef,
+				agentRegistry,
 				enableLsp: lspEnabled,
 				enableIrc: options.enableIrc,
 				skipPythonPreflight,
@@ -3366,7 +3368,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// live: cancellation SIGKILL-escalates, so settlement is expected
 			// within one interval — an unkillable process blocks here visibly
 			// (with periodic warnings) instead of silently racing teardown.
-			const jobManager = AsyncJobManager.instance();
 			if (jobManager) {
 				if (deferredSessionShutdown) {
 					const finalReap = Promise.allSettled([deferredSessionShutdown]).then(async () => {
