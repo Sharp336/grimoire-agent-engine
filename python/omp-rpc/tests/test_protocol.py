@@ -8,26 +8,42 @@ from omp_rpc import (
     AgentEndEvent,
     AutoCompactionEndEvent,
     AutoCompactionStartEvent,
+    AvailableCommandsUpdateEvent,
+    CommandOutputEvent,
+    ConfigUpdateEvent,
     ExtensionUiRequest,
+    GoalUpdatedEvent,
+    IrcMessageEvent,
     JobUpdateEvent,
+    ModeChangeResult,
+    ModelChangedEvent,
+    NoticeEvent,
     OperationCancelledEvent,
     OperationCompletedEvent,
     OperationFailedEvent,
     OperationStartedEvent,
-    ReadyEvent,
     PlanApprovalRequestEvent,
     PlanApprovalSettledEvent,
     PlanStateUpdateEvent,
-    QueueUpdateEvent,
+    PromptResultEvent,
     ProviderAuthRequest,
     ProviderAuthUpdate,
+    QueueUpdateEvent,
+    ReadyEvent,
+    SessionActivityPhase,
+    SessionInfoUpdateEvent,
     SessionState,
+    SubagentEvent,
+    SubagentLifecycleEvent,
+    SubagentProgressEvent,
+    ThinkingLevelChangedEvent,
     TodoReminderEvent,
     ToolActivationResult,
     ToolInventoryUpdateEvent,
     assistant_text,
     assistant_text_with_thinking,
     parse_advisor_state,
+    parse_mode_change_result,
     parse_notification,
     parse_session_state,
     parse_tool_activation_result,
@@ -36,6 +52,9 @@ from omp_rpc import (
 
 
 class ProtocolParsingTests(unittest.TestCase):
+    def test_root_package_exports_session_activity_phase(self) -> None:
+        self.assertIsNotNone(SessionActivityPhase)
+
     def test_parse_operation_lifecycle_notifications(self) -> None:
         started = parse_notification(
             {
@@ -152,6 +171,7 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertEqual(parsed.execution, "future-execution")
         self.assertEqual(parsed.availability, "future-availability")
         self.assertEqual(parsed.concurrency_class, "future-concurrency")
+
     def test_parse_plan_notifications_with_unknown_fields(self) -> None:
         state = parse_notification(
             {
@@ -195,6 +215,45 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertEqual(request.approval_id, "approval-1")
         self.assertIsInstance(settled, PlanApprovalSettledEvent)
         self.assertEqual(settled.result.decision, "refine")
+
+    def test_plan_settlement_requires_execution_dispatched_boolean(self) -> None:
+        base = {
+            "type": "plan_approval_settled",
+            "approvalId": "approval-1",
+            "result": {
+                "approvalId": "approval-1",
+                "decision": "approve",
+                "planFilePath": "local://PLAN.md",
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "executionDispatched"):
+            parse_notification(base)
+        base["result"]["executionDispatched"] = "false"
+        with self.assertRaisesRegex(ValueError, "executionDispatched"):
+            parse_notification(base)
+
+    def test_parse_mode_change_result_requires_acceptance_and_deferred(self) -> None:
+        result = parse_mode_change_result(
+            {
+                "operationId": "operation-mode",
+                "accepted": True,
+                "deferred": False,
+            }
+        )
+        self.assertIsInstance(result, ModeChangeResult)
+        self.assertEqual(result.operation_id, "operation-mode")
+        with self.assertRaisesRegex(ValueError, "accepted must be true"):
+            parse_mode_change_result(
+                {
+                    "operationId": "operation-mode",
+                    "accepted": False,
+                    "deferred": False,
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "deferred"):
+            parse_mode_change_result(
+                {"operationId": "operation-mode", "accepted": True}
+            )
 
     def test_parse_session_state(self) -> None:
         state = parse_session_state(
@@ -465,6 +524,54 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertTrue(notification.is_interactive())
         self.assertTrue(notification.requires_response())
         self.assertFalse(notification.is_passive())
+
+    def test_parse_privileged_extension_ui_request(self) -> None:
+        notification = parse_notification(
+            {
+                "type": "extension_ui_request",
+                "id": "ui-eval",
+                "method": "confirm",
+                "title": "Run eval code?",
+                "message": "display(2 + 2)",
+                "operationId": "operation-eval",
+                "command": "eval_execute",
+            }
+        )
+
+        self.assertIsInstance(notification, ExtensionUiRequest)
+        self.assertEqual(notification.operation_id, "operation-eval")
+        self.assertEqual(notification.command, "eval_execute")
+
+    def test_parse_bash_privileged_extension_ui_request(self) -> None:
+        notification = parse_notification(
+            {
+                "type": "extension_ui_request",
+                "id": "ui-bash",
+                "method": "confirm",
+                "title": "Run bash command?",
+                "message": "printf hello",
+                "operationId": "operation-bash",
+                "command": "bash",
+            }
+        )
+
+        self.assertIsInstance(notification, ExtensionUiRequest)
+        self.assertEqual(notification.operation_id, "operation-bash")
+        self.assertEqual(notification.command, "bash")
+
+    def test_reject_unknown_privileged_extension_ui_command(self) -> None:
+        with self.assertRaisesRegex(ValueError, "extension_ui_request.command"):
+            parse_notification(
+                {
+                    "type": "extension_ui_request",
+                    "id": "ui-unknown",
+                    "method": "confirm",
+                    "title": "Unknown command?",
+                    "message": "Do something privileged",
+                    "operationId": "operation-unknown",
+                    "command": "shell",
+                }
+            )
 
     def test_parse_open_url_request(self) -> None:
         notification = parse_notification(
@@ -799,6 +906,7 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertEqual(entry.source.server_name, "server")
         self.assertEqual(entry.source.remote_name, "search")
         self.assertEqual(entry.parameters["properties"]["query"]["type"], "string")
+
     def test_provider_auth_parsing_is_secret_free_and_future_tolerant(self) -> None:
         request = parse_notification(
             {
@@ -942,26 +1050,250 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertFalse(unavailable.inventory_available)
         self.assertIsNone(unavailable.inventory)
 
-    def test_parse_queue_and_job_updates_forward_compatibly(self) -> None:
+    def test_parse_advertised_notifications_into_typed_events(self) -> None:
+        events = [
+            parse_notification(
+                {
+                    "type": "prompt_result",
+                    "id": "request-1",
+                    "operationId": "operation-1",
+                    "agentInvoked": True,
+                }
+            ),
+            parse_notification(
+                {
+                    "type": "available_commands_update",
+                    "commands": [
+                        {
+                            "name": "review",
+                            "aliases": ["r"],
+                            "description": "Review changes",
+                            "input": {"hint": "path"},
+                            "subcommands": [
+                                {"name": "quick", "usage": "/review quick"}
+                            ],
+                            "source": "extension",
+                        }
+                    ],
+                }
+            ),
+            parse_notification({"type": "command_output", "text": "done"}),
+            parse_notification(
+                {
+                    "type": "session_info_update",
+                    "title": "Review",
+                    "sessionId": "session-1",
+                    "mode": "plan",
+                }
+            ),
+            parse_notification({"type": "config_update", "thinkingLevel": "high"}),
+            parse_notification(
+                {
+                    "type": "subagent_lifecycle",
+                    "payload": {
+                        "id": "AgentA",
+                        "agent": "reviewer",
+                        "agentSource": "bundled",
+                        "status": "started",
+                        "index": 0,
+                        "sessionFile": "/tmp/agent.jsonl",
+                    },
+                }
+            ),
+            parse_notification(
+                {
+                    "type": "subagent_progress",
+                    "payload": {
+                        "index": 0,
+                        "agent": "reviewer",
+                        "agentSource": "bundled",
+                        "task": "Review",
+                        "progress": {
+                            "index": 0,
+                            "id": "AgentA",
+                            "agent": "reviewer",
+                            "agentSource": "bundled",
+                            "status": "running",
+                            "task": "Review",
+                            "recentTools": [
+                                {"tool": "read", "args": "protocol.py", "endMs": 5}
+                            ],
+                            "recentOutput": ["Checking parser"],
+                            "toolCount": 1,
+                            "requests": 1,
+                            "tokens": 100,
+                            "cost": 0.01,
+                            "durationMs": 10,
+                            "modelOverride": ["anthropic/claude-sonnet-4-6", "auto"],
+                            "extractedToolData": {
+                                "read": [{"path": "protocol.py", "line": 1083}]
+                            },
+                        },
+                    },
+                }
+            ),
+            parse_notification(
+                {
+                    "type": "subagent_event",
+                    "payload": {
+                        "id": "AgentA",
+                        "event": {
+                            "type": "notice",
+                            "level": "info",
+                            "message": "working",
+                        },
+                    },
+                }
+            ),
+            parse_notification({"type": "model_changed"}),
+            parse_notification(
+                {
+                    "type": "irc_message",
+                    "message": {
+                        "role": "custom",
+                        "customType": "irc",
+                        "content": "hello",
+                        "display": True,
+                        "timestamp": 1,
+                    },
+                }
+            ),
+            parse_notification(
+                {
+                    "type": "notice",
+                    "level": "warning",
+                    "message": "careful",
+                    "source": "test",
+                }
+            ),
+            parse_notification(
+                {
+                    "type": "thinking_level_changed",
+                    "thinkingLevel": "high",
+                    "configured": "auto",
+                    "resolved": "high",
+                }
+            ),
+            parse_notification(
+                {
+                    "type": "goal_updated",
+                    "goal": {
+                        "id": "goal-1",
+                        "objective": "Ship",
+                        "status": "active",
+                        "tokensUsed": 10,
+                        "timeUsedSeconds": 2,
+                        "createdAt": 1,
+                        "updatedAt": 2,
+                    },
+                }
+            ),
+        ]
+
+        expected_types = (
+            PromptResultEvent,
+            AvailableCommandsUpdateEvent,
+            CommandOutputEvent,
+            SessionInfoUpdateEvent,
+            ConfigUpdateEvent,
+            SubagentLifecycleEvent,
+            SubagentProgressEvent,
+            SubagentEvent,
+            ModelChangedEvent,
+            IrcMessageEvent,
+            NoticeEvent,
+            ThinkingLevelChangedEvent,
+            GoalUpdatedEvent,
+        )
+        for event, expected_type in zip(events, expected_types, strict=True):
+            self.assertIsInstance(event, expected_type)
+        self.assertEqual(events[0].operation_id, "operation-1")
+        self.assertEqual(events[1].commands[0].input.hint, "path")
+        self.assertEqual(events[6].payload.progress.recent_tools[0].end_ms, 5.0)
+        self.assertEqual(
+            events[6].payload.progress.model_override,
+            ("anthropic/claude-sonnet-4-6", "auto"),
+        )
+        self.assertEqual(
+            events[6].payload.progress.extracted_tool_data,
+            {"read": [{"path": "protocol.py", "line": 1083}]},
+        )
+        self.assertEqual(events[11].configured, "auto")
+        self.assertEqual(events[12].goal.tokens_used, 10)
+
+        with self.assertRaisesRegex(ValueError, "agentInvoked"):
+            parse_notification({"type": "prompt_result", "agentInvoked": "true"})
+        with self.assertRaisesRegex(ValueError, "commands"):
+            parse_notification({"type": "available_commands_update", "commands": {}})
+
+    def test_parse_queue_and_job_updates_into_typed_models(self) -> None:
         queue = parse_notification(
             {
                 "type": "queue_update",
-                "queue": {"steering": [], "followUp": [], "rowCount": 0, "future": True},
+                "queue": {
+                    "steering": [
+                        {
+                            "entryId": "queue-1",
+                            "lane": "steering",
+                            "text": "Review",
+                            "operationId": "operation-1",
+                        }
+                    ],
+                    "followUp": [],
+                    "rowCount": 1,
+                    "displayableCount": 1,
+                    "pendingCount": 1,
+                    "pendingNextTurnCount": 0,
+                    "future": True,
+                },
                 "futureTopLevel": True,
             }
         )
         jobs = parse_notification(
             {
                 "type": "job_update",
-                "jobs": [{"id": "job-1", "status": "running", "future": True}],
-                "agents": [],
+                "jobs": [
+                    {
+                        "id": "job-1",
+                        "type": "task",
+                        "status": "running",
+                        "label": "Review",
+                        "durationMs": 12,
+                        "future": True,
+                    }
+                ],
+                "agents": [
+                    {
+                        "id": "AgentA",
+                        "parentId": "Main",
+                        "activity": "Reading",
+                        "ageMs": 25,
+                    }
+                ],
                 "futureTopLevel": True,
             }
         )
         self.assertIsInstance(queue, QueueUpdateEvent)
-        self.assertTrue(queue.queue["future"])
+        self.assertEqual(queue.queue.steering[0].entry_id, "queue-1")
+        self.assertEqual(queue.queue.pending_count, 1)
         self.assertIsInstance(jobs, JobUpdateEvent)
-        self.assertEqual(jobs.jobs[0]["id"], "job-1")
+        self.assertEqual(jobs.jobs[0].id, "job-1")
+        self.assertEqual(jobs.jobs[0].duration_ms, 12.0)
+        self.assertEqual(jobs.agents[0].parent_id, "Main")
+
+        with self.assertRaisesRegex(ValueError, "displayableCount"):
+            parse_notification(
+                {
+                    "type": "queue_update",
+                    "queue": {
+                        "steering": [],
+                        "followUp": [],
+                        "rowCount": 0,
+                        "pendingCount": 0,
+                        "pendingNextTurnCount": 0,
+                    },
+                }
+            )
 
 
 if __name__ == "__main__":

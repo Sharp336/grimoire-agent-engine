@@ -177,7 +177,7 @@ export class AgentControlService {
 
 	async resume(agentId: string): Promise<AgentControlSnapshot> {
 		const ref = this.#mutableTarget(agentId);
-		await this.#lifecycle.ensureLive(agentId);
+		await this.#lifecycle.ensureLive(agentId, ref);
 		return this.#snapshotExact(agentId, ref);
 	}
 

@@ -62,9 +62,9 @@ import type {
 	RpcHostUriRequest,
 	RpcHostUriResult,
 	RpcHostUriSchemeDefinition,
-	RpcModeChangeResult,
 	RpcJobListResult,
 	RpcJobUpdateFrame,
+	RpcModeChangeResult,
 	RpcOperationAccepted,
 	RpcOperationStartedFrame,
 	RpcOperationsSnapshot,
@@ -75,12 +75,12 @@ import type {
 	RpcPlanStateUpdateFrame,
 	RpcPlanWorkflow,
 	RpcPromptResultFrame,
-	RpcRenameSessionResult,
-	RpcQueueUpdateFrame,
 	RpcProviderAuthMethod,
 	RpcProviderAuthRequestFrame,
 	RpcProviderAuthState,
 	RpcProviderAuthUpdateFrame,
+	RpcQueueUpdateFrame,
+	RpcRenameSessionResult,
 	RpcResponse,
 	RpcResumeSessionResult,
 	RpcSessionInfoResult,
@@ -151,10 +151,10 @@ export type RpcConfigUpdateListener = (frame: RpcConfigUpdateFrame) => void;
 export type RpcExtensionErrorListener = (frame: RpcExtensionErrorFrame) => void;
 export type RpcSettingsUpdateListener = (frame: RpcSettingsUpdateFrame) => void;
 export type RpcExtensionUIRequestListener = (request: RpcExtensionUIRequest) => void;
-export type RpcQueueUpdateListener = (frame: RpcQueueUpdateFrame) => void;
-export type RpcJobUpdateListener = (frame: RpcJobUpdateFrame) => void;
 export type RpcProviderAuthRequestListener = (request: RpcProviderAuthRequestFrame) => void;
 export type RpcProviderAuthUpdateListener = (state: RpcProviderAuthState) => void;
+export type RpcQueueUpdateListener = (frame: RpcQueueUpdateFrame) => void;
+export type RpcJobUpdateListener = (frame: RpcJobUpdateFrame) => void;
 
 export interface RpcClientHostUriContext {
 	signal: AbortSignal;
@@ -408,7 +408,9 @@ function isRpcPlanApprovalSettledFrame(value: unknown): value is RpcPlanApproval
 	);
 }
 function parseRpcOperationAccepted(value: unknown): RpcOperationAccepted | undefined {
-	if (!isRecord(value) || typeof value.operationId !== "string") return undefined;
+	if (!isRecord(value) || value.accepted !== true || typeof value.operationId !== "string" || !value.operationId) {
+		return undefined;
+	}
 	return { operationId: value.operationId, accepted: true };
 }
 function isRpcProviderAuthRequestFrame(value: unknown): value is RpcProviderAuthRequestFrame {
@@ -425,6 +427,27 @@ function isRpcProviderAuthRequestFrame(value: unknown): value is RpcProviderAuth
 
 function isRpcProviderAuthUpdateFrame(value: unknown): value is RpcProviderAuthUpdateFrame {
 	return isRecord(value) && value.type === "provider_auth_update" && isRecord(value.state);
+}
+
+const RPC_ADVISOR_STATUSES = ["running", "paused", "quota_exhausted", "error", "no_model"] as const;
+function parseRpcAdvisorState(value: unknown): RpcAdvisorState | undefined {
+	if (
+		!isRecord(value) ||
+		typeof value.configured !== "boolean" ||
+		typeof value.active !== "boolean" ||
+		!Array.isArray(value.advisors)
+	) {
+		return undefined;
+	}
+	const advisors: RpcAdvisorState["advisors"] = [];
+	for (const advisor of value.advisors) {
+		if (!isRecord(advisor) || typeof advisor.name !== "string" || typeof advisor.status !== "string")
+			return undefined;
+		const status = RPC_ADVISOR_STATUSES.find(candidate => candidate === advisor.status);
+		if (!status) return undefined;
+		advisors.push({ name: advisor.name, status });
+	}
+	return { configured: value.configured, active: value.active, advisors };
 }
 
 function parseProviderAuthState(value: unknown): RpcProviderAuthState {
@@ -476,7 +499,6 @@ function parseProviderAuthState(value: unknown): RpcProviderAuthState {
 			: undefined,
 		methods,
 	};
-}
 }
 
 function isRpcCommandOutputFrame(value: unknown): value is RpcCommandOutputFrame {
@@ -1337,7 +1359,13 @@ export class RpcClient {
 		},
 	): Promise<RpcModeChangeResult> {
 		const response = await this.#send({ type: "set_mode", mode, ...options });
-		return this.#getData(response);
+		const data = this.#getData<unknown>(response);
+		const accepted = parseRpcOperationAccepted(data);
+		if (!accepted || !isRecord(data) || typeof data.deferred !== "boolean") {
+			throw new Error("set_mode response did not contain a valid accepted operation");
+		}
+		this.#registerAcceptedOperation(accepted);
+		return { ...accepted, deferred: data.deferred };
 	}
 
 	async getPlan(): Promise<RpcPlanState> {
@@ -1358,7 +1386,10 @@ export class RpcClient {
 			| { decision: "refine" | "reject"; feedback?: string },
 	): Promise<RpcOperationAccepted> {
 		const response = await this.#send({ type: "resolve_plan_approval", approvalId, ...decision });
-		return this.#getData(response);
+		const accepted = parseRpcOperationAccepted(this.#getData<unknown>(response));
+		if (!accepted) throw new Error("resolve_plan_approval response did not contain a valid accepted operation");
+		this.#registerAcceptedOperation(accepted);
+		return accepted;
 	}
 
 	/**
@@ -1770,14 +1801,13 @@ export class RpcClient {
 		return data.providers.map(parseProviderAuthState);
 	}
 
-
 	async beginProviderAuth(providerId: string, method: RpcProviderAuthMethod): Promise<RpcOperationAccepted> {
 		const response = await this.#send({ type: "begin_provider_auth", providerId, method });
 		const accepted = parseRpcOperationAccepted(this.#getData<unknown>(response));
 		if (!accepted) throw new Error("RPC begin_provider_auth response is malformed");
+		this.#registerAcceptedOperation(accepted);
 		return accepted;
 	}
-
 
 	async cancelProviderAuth(operationId: string): Promise<RpcCancelOperationResult> {
 		return this.#getData<RpcCancelOperationResult>(await this.#send({ type: "cancel_provider_auth", operationId }));
@@ -1986,6 +2016,16 @@ export class RpcClient {
 			}
 			return;
 		}
+		if (isRpcProviderAuthRequestFrame(data)) {
+			for (const listener of this.#providerAuthRequestListeners) listener(data);
+			return;
+		}
+		if (isRpcProviderAuthUpdateFrame(data)) {
+			const state = parseProviderAuthState(data.state);
+			for (const listener of this.#providerAuthUpdateListeners) listener(state);
+			return;
+		}
+
 		if (isRpcProviderAuthRequestFrame(data)) {
 			for (const listener of this.#providerAuthRequestListeners) listener(data);
 			return;

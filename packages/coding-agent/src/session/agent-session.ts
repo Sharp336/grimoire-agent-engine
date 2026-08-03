@@ -1271,6 +1271,7 @@ export class AgentSession {
 		this.#tools = new SessionTools(sessionToolsHost, {
 			autoApprove: config.autoApprove,
 			toolRegistry: config.toolRegistry,
+			createEvalTool: config.createEvalTool,
 			createVibeTools: config.createVibeTools,
 			createComputerTool: config.createComputerTool,
 			createInspectImageTool: config.createInspectImageTool,
@@ -4377,6 +4378,10 @@ export class AgentSession {
 	getToolByName(name: string): AgentTool | undefined {
 		return this.#tools.getToolByName(name);
 	}
+	/** Returns a session-bound eval tool without changing the model-visible active tool set. */
+	getEvalToolForHost(): unknown {
+		return this.#tools.getEvalToolForHost();
+	}
 
 	/** Whether a registry entry came from a built-in factory. */
 	hasBuiltInTool(name: string): boolean {
@@ -6448,7 +6453,7 @@ export class AgentSession {
 	 * @param options - Optional initial messages and parent session path
 	 * @returns true if completed, false if cancelled by hook
 	 */
-	async newSession(options?: NewSessionOptions, beforeCommit?: () => void): Promise<boolean> {
+	async newSession(options?: NewSessionOptions, beforeCommit?: () => void | Promise<void>): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("start a new session");
 		const previousSessionFile = this.sessionFile;
 
@@ -6464,7 +6469,7 @@ export class AgentSession {
 			}
 		}
 
-		beforeCommit?.();
+		await beforeCommit?.();
 		this.#eval.flushPending();
 
 		this.#disconnectFromAgent();
@@ -6563,7 +6568,7 @@ export class AgentSession {
 	 * Unlike newSession(), this preserves all messages in the agent state.
 	 * @returns true if completed, false if cancelled by hook or not persisting
 	 */
-	async fork(): Promise<boolean> {
+	async fork(beforeCommit?: () => void | Promise<void>): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("fork the session");
 		const previousSessionFile = this.sessionFile;
 
@@ -6578,6 +6583,7 @@ export class AgentSession {
 				return false;
 			}
 		}
+		await beforeCommit?.();
 
 		await this.#bash.flushPending();
 		// Flush current session to ensure all entries are written
@@ -7516,7 +7522,7 @@ export class AgentSession {
 	 * Listeners are preserved and will continue receiving events.
 	 * @returns true if switch completed, false if cancelled by hook
 	 */
-	async switchSession(sessionPath: string, beforeCommit?: () => void): Promise<boolean> {
+	async switchSession(sessionPath: string, beforeCommit?: () => void | Promise<void>): Promise<boolean> {
 		const previousSessionFile = this.sessionManager.getSessionFile();
 		const switchingToDifferentSession = previousSessionFile
 			? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
@@ -7534,7 +7540,7 @@ export class AgentSession {
 			}
 		}
 
-		beforeCommit?.();
+		await beforeCommit?.();
 		this.#eval.flushPending();
 
 		this.#disconnectFromAgent();
@@ -7817,7 +7823,7 @@ export class AgentSession {
 	 */
 	async branch(
 		entryId: string,
-		beforeCommit?: () => void,
+		beforeCommit?: () => void | Promise<void>,
 	): Promise<{
 		selectedText: string;
 		selectedImages: ImageContent[];
@@ -7848,7 +7854,7 @@ export class AgentSession {
 			skipConversationRestore = result?.skipConversationRestore ?? false;
 		}
 
-		beforeCommit?.();
+		await beforeCommit?.();
 		this.#eval.flushPending();
 
 		// Clear pending messages (bound to old session state)

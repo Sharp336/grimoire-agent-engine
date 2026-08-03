@@ -40,6 +40,7 @@ export type {
 	ToolInventoryPresentation,
 	ToolInventorySource,
 } from "../../session/session-tools";
+
 import type { FileEntry } from "../../session/session-entries";
 import type { SessionWorkspace } from "../../session/session-workspace";
 import type { AvailableSlashCommandSource } from "../../slash-commands/available-commands";
@@ -231,11 +232,9 @@ export interface RpcPlanState {
 }
 
 export interface RpcModeChangeResult {
-	mode: RpcSessionMode;
-	planFilePath?: string;
-	workflow?: RpcPlanWorkflow;
-	deferred: boolean;
 	operationId: string;
+	accepted: true;
+	deferred: boolean;
 }
 
 export interface RpcPlanApprovalResult {
@@ -331,59 +330,6 @@ export interface RpcProviderAuthRequestFrame {
 	launchUrl?: string;
 	instructions?: string;
 }
-
-export interface RpcProviderAuthUpdateFrame {
-	type: "provider_auth_update";
-	state: RpcProviderAuthState;
-}
-export type RpcProviderAuthMethod = "oauth_callback" | "paste_code" | "device_code" | "api_key";
-export type RpcProviderAuthRequestMethod = "open_url" | "paste_code" | "api_key" | "secret_text" | "confirmation";
-export type RpcProviderAuthCredentialOrigin = "runtime" | "config" | "oauth" | "api_key" | "env" | "fallback";
-
-export interface RpcProviderAuthMethodCapability {
-	method: RpcProviderAuthMethod;
-	available: boolean;
-	exclusive: true;
-}
-
-export interface RpcProviderAuthState {
-	providerId: string;
-	name: string;
-	credentialOrigin?: RpcProviderAuthCredentialOrigin;
-	authenticated: boolean;
-	disabled: boolean;
-	available: boolean;
-	unavailableReason?: string;
-	identity?: {
-		email?: string;
-		accountId?: string;
-		projectId?: string;
-		orgId?: string;
-		orgName?: string;
-	};
-	methods: RpcProviderAuthMethodCapability[];
-}
-
-export type RpcProviderAuthRequestFrame =
-	| {
-			type: "provider_auth_request";
-			operationId: string;
-			requestId: string;
-			providerId: string;
-			method: "open_url";
-			url: string;
-			launchUrl?: string;
-			instructions?: string;
-	  }
-	| {
-			type: "provider_auth_request";
-			operationId: string;
-			requestId: string;
-			providerId: string;
-			method: Exclude<RpcProviderAuthRequestMethod, "open_url">;
-			prompt: string;
-			placeholder?: string;
-	  };
 
 export interface RpcProviderAuthUpdateFrame {
 	type: "provider_auth_update";
@@ -1077,7 +1023,14 @@ export type RpcExtensionUIRequest =
 			timeout?: number;
 			/** Server-issued correlation for privileged RPC mutations. */
 			operationId?: string;
-			command?: "cancel_agent" | "release_agent";
+			command?:
+				| "cancel_agent"
+				| "release_agent"
+				| "eval_execute"
+				| "bash"
+				| "cancel_job"
+				| "delete_session"
+				| "remove_provider_auth";
 	  }
 	| {
 			type: "extension_ui_request";
@@ -1256,6 +1209,13 @@ type RpcManifestEvent =
 	| RpcToolInventoryUpdateFrame
 	| RpcEvalOutputFrame
 	| RpcEvalCompleteFrame
+	| RpcOperationStartedFrame
+	| RpcOperationTerminalFrame
+	| RpcPlanStateUpdateFrame
+	| RpcPlanApprovalRequestFrame
+	| RpcPlanApprovalSettledFrame
+	| RpcProviderAuthRequestFrame
+	| RpcProviderAuthUpdateFrame
 	| RpcSessionEventFrame
 	| RpcExtensionUIRequest
 	| RpcSettingsUpdateFrame
@@ -1291,6 +1251,15 @@ export const RPC_EVENT_TYPES = eventInventory([
 	"eval_complete",
 	"queue_update",
 	"job_update",
+	"operation_started",
+	"operation_completed",
+	"operation_failed",
+	"operation_cancelled",
+	"plan_state_update",
+	"plan_approval_request",
+	"plan_approval_settled",
+	"provider_auth_request",
+	"provider_auth_update",
 	"command_output",
 	"session_info_update",
 	"config_update",

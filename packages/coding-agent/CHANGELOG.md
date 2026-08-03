@@ -18,6 +18,8 @@
 - Added a configurable per-request web search timeout via `providers.webSearchTimeoutSeconds` ([#7197](https://github.com/can1357/oh-my-pi/pull/7197) by [@will-bogusz](https://github.com/will-bogusz)).
 - Added turn-aware `/tree` navigation: Alt+Up/Alt+Down traverses previous/next user or assistant turns while skipping tool and bookkeeping entries, Home/End jumps to the first/last visible item, and PageUp/PageDown moves by a visible page.
 - Added a `get_settings` RPC command that describes the settings schema to an external client, optionally scoped to one settings tab. Metadata is returned for every setting because `SETTINGS_SCHEMA` is compiled-in public information; a configured value is disclosed only for settings the schema explicitly marks `rpcReadable`, and everything else carries `redacted: true` with no value and no configured status. The initial allowlist covers the appearance tab's boolean and enum settings. `RpcClient.getSettings()` exposes it to TypeScript consumers.
+- Added a complete headless RPC control surface for external hosts: server-owned operation lifecycles and cancellation, provider/maintenance/idle settlement, runtime capabilities, advisor and model control, session/workspace catalogs and mutation, tool inventory and activation, structured plan workflows, provider authentication, prompt queues, async jobs, eval history and execution, and subagent lifecycle/control.
+- Added parity across the TypeScript and Python RPC clients for correlated prompts and privileged UI, host URI handling, operation reconciliation, typed state and catalog APIs, bounded forward-compatible parsing, and all new control commands.
 
 ### Changed
 
@@ -264,17 +266,6 @@
 - Fixed `skill://` resolution ignoring explicitly configured `skills.customDirectories` entries when a same-named skill existed in a default discovery path: the custom-directory skill now wins as the higher-priority source ([#7190](https://github.com/can1357/oh-my-pi/issues/7190)).
 - Fixed image paste failing on Wayland-only Linux sessions by reading PNG clipboard payloads through `wl-paste` before falling back to the native bridge ([#7316](https://github.com/can1357/oh-my-pi/issues/7316)).
 - Fixed prewalk switching to the fast model during read-only investigation: `xd://` devices are dispatched through the `write` tool, so a read-only call such as an `lsp` navigation counted as the first edit/write and armed the one-way hand-off mid-planning. Device dispatches now carry the wrapped tool's approval tier and only trigger the switch at a `write`/`exec` tier — read-only `lsp`, `debug` inspection, and internal-URL `ast_edit` calls no longer downgrade the model ([#7312](https://github.com/can1357/oh-my-pi/issues/7312)).
-### Added
-
-- Added server-owned RPC operation lifecycles with accepted/started timing, exactly-once completed, failed, or cancelled outcomes, targeted idempotent cancellation, and bounded operation snapshots for reconciliation.
-- Added an authoritative RPC `get_state.activityPhase` (`provider`, `maintenance`, or `idle`) so hosts can distinguish provider completion from post-turn maintenance and terminal idle without changing legacy `isStreaming` semantics.
-- Added a runtime-validated RPC command registry and capability manifest, including explicit serial, concurrent, and control scheduling metadata in the ready frame and TypeScript/Python client APIs.
-
-### Fixed
-
-- Fixed the TypeScript RPC client silently dropping prompt results, extension output and errors, session/config updates, host URI requests, and unknown future frames.
-- Added a runtime-validated RPC command registry and capability manifest with stable command identities, derived input schemas, live availability, execution scope, feature requirements, and concurrency metadata in the ready frame and TypeScript/Python client APIs.
-
 ## [17.2.4] - 2026-08-01
 
 ### Added

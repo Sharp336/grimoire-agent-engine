@@ -148,7 +148,7 @@ export class IrcBus {
 		let revived = false;
 		if (needsLifecycleGate) {
 			try {
-				const liveSession = await lifecycle.ensureLive(message.to);
+				const liveSession = await lifecycle.ensureLive(message.to, opts?.expectedRef ?? ref);
 				// Revival = we did not keep the same live instance (parked start, or
 				// park completed and a fresh session was rebuilt).
 				revived = !priorSession || liveSession !== priorSession;

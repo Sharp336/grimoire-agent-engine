@@ -109,7 +109,6 @@ const agentMessageField = required(
 	value => typeof value === "string" && value.trim().length > 0 && Buffer.byteLength(value, "utf8") <= 65_536,
 	{ type: "string", minLength: 1, maxLength: 65_536, "x-maxUtf8Bytes": 65_536 },
 );
-const booleanField = required("a boolean", value => typeof value === "boolean", { type: "boolean" });
 const optionalObjectArrayField = optional(
 	"an array of objects",
 	value => Array.isArray(value) && value.every(item => isRecord(item)),
@@ -384,6 +383,7 @@ export const RPC_COMMAND_DEFINITIONS = {
 		"concurrent",
 		{
 			execution: "operation",
+			confirmation: "required",
 			outputSchema: {
 				type: "object",
 				properties: {
@@ -428,6 +428,32 @@ export const RPC_COMMAND_DEFINITIONS = {
 			},
 		},
 	),
+	set_mode: sessionCommand(
+		{ type: "set_mode", mode: "plan" },
+		{
+			mode: enumField("none", "plan", "plan_paused"),
+			planFilePath: optionalStringField,
+			workflow: optionalEnumField("parallel", "iterative"),
+			when: optionalEnumField("immediate", "next_idle"),
+		},
+		"serial",
+		{ execution: "operation" },
+	),
+	get_plan: sessionCommand({ type: "get_plan" }, {}, "concurrent"),
+	resolve_plan_approval: sessionCommand(
+		{ type: "resolve_plan_approval", approvalId: "approval-1", decision: "approve" },
+		{
+			approvalId: opaqueIdField,
+			decision: enumField("approve", "refine", "reject"),
+			preserveContext: optionalBooleanField,
+			compactBeforeExecute: optionalBooleanField,
+			executionModelRole: optionalBoundedStringField("a model role no longer than 256 characters", 256),
+			editedContent: optionalBoundedStringField("edited plan content no longer than 1048576 characters", 1_048_576),
+			feedback: optionalBoundedStringField("feedback no longer than 65536 characters", 65_536),
+		},
+		"serial",
+		{ execution: "operation" },
+	),
 	new_session: sessionCommand({ type: "new_session" }, { parentSession: optionalStringField }),
 	get_state: sessionCommand({ type: "get_state" }),
 	get_operations: sessionCommand({ type: "get_operations" }, {}, "concurrent"),
@@ -437,6 +463,24 @@ export const RPC_COMMAND_DEFINITIONS = {
 	set_tool_activation: sessionCommand(
 		{ type: "set_tool_activation", activate: ["read"], deactivate: ["bash"] },
 		{ activate: optionalToolNameArrayField, deactivate: optionalToolNameArrayField },
+	),
+	list_provider_auth: sessionCommand({ type: "list_provider_auth" }, {}, "concurrent"),
+	begin_provider_auth: sessionCommand(
+		{ type: "begin_provider_auth", providerId: "anthropic", method: "oauth_callback" },
+		{ providerId: stringField, method: enumField("oauth_callback", "paste_code", "device_code", "api_key") },
+		"serial",
+		{ execution: "operation" },
+	),
+	cancel_provider_auth: sessionCommand(
+		{ type: "cancel_provider_auth", operationId: "operation-1" },
+		{ operationId: opaqueIdField },
+		"control",
+	),
+	remove_provider_auth: sessionCommand(
+		{ type: "remove_provider_auth", providerId: "anthropic" },
+		{ providerId: stringField },
+		"serial",
+		{ confirmation: "required" },
 	),
 	set_fast_mode: sessionCommand(
 		{ type: "set_fast_mode", enabled: false },
@@ -586,9 +630,17 @@ export const RPC_COMMAND_DEFINITIONS = {
 		{ lane: optionalEnumField("steering", "followUp", "all") },
 		"control",
 	),
-	list_jobs: agentCommand({ type: "list_jobs" }, {}, "concurrent"),
-	get_job: agentCommand({ type: "get_job", jobId: "job-id" }, { jobId: opaqueIdField }, "concurrent"),
-	cancel_job: agentCommand({ type: "cancel_job", jobIds: ["job-id"] }, { jobIds: jobIdArrayField }, "control"),
+	list_jobs: agentCommand({ type: "list_jobs" }, {}, "concurrent", requiresFeature("job-control")),
+	get_job: agentCommand(
+		{ type: "get_job", jobId: "job-id" },
+		{ jobId: opaqueIdField },
+		"concurrent",
+		requiresFeature("job-control"),
+	),
+	cancel_job: agentCommand({ type: "cancel_job", jobIds: ["job-id"] }, { jobIds: jobIdArrayField }, "control", {
+		...requiresFeature("job-control"),
+		confirmation: "required",
+	}),
 	set_model: sessionCommand(
 		{ type: "set_model", provider: "anthropic", modelId: "claude" },
 		{ provider: stringField, modelId: stringField },
@@ -616,7 +668,9 @@ export const RPC_COMMAND_DEFINITIONS = {
 	set_auto_compaction: sessionCommand({ type: "set_auto_compaction", enabled: true }, { enabled: booleanField }),
 	set_auto_retry: sessionCommand({ type: "set_auto_retry", enabled: true }, { enabled: booleanField }),
 	abort_retry: sessionCommand({ type: "abort_retry" }, {}, "control"),
-	bash: sessionCommand({ type: "bash", command: "pwd" }, { command: stringField }, "concurrent"),
+	bash: sessionCommand({ type: "bash", command: "pwd" }, { command: stringField }, "concurrent", {
+		confirmation: "required",
+	}),
 	abort_bash: sessionCommand({ type: "abort_bash" }, {}, "control"),
 	get_session_stats: sessionCommand({ type: "get_session_stats" }),
 	export_html: sessionCommand({ type: "export_html" }, { outputPath: optionalStringField }),
@@ -653,6 +707,8 @@ export const RPC_COMMAND_DEFINITIONS = {
 	delete_session: hostCommand(
 		{ type: "delete_session", session: "01901234" },
 		{ session: stringField, scope: optionalEnumField("cwd", "all"), cwd: optionalStringField },
+		"serial",
+		{ confirmation: "required" },
 	),
 	branch: sessionCommand({ type: "branch", entryId: "entry-1" }, { entryId: stringField }),
 	get_branch_messages: sessionCommand({ type: "get_branch_messages" }),
@@ -664,8 +720,6 @@ export const RPC_COMMAND_DEFINITIONS = {
 		{ type: "get_messages_page" },
 		{ cursor: optionalStringField, limit: positiveIntegerField },
 	),
-	get_login_providers: hostCommand({ type: "get_login_providers" }),
-	login: hostCommand({ type: "login", providerId: "anthropic" }, { providerId: stringField }),
 } as const satisfies RpcCommandDefinitions;
 
 function inputSchemaFor(name: RpcCommandType, definition: RpcCommandDefinition): RpcInputSchema {
@@ -695,7 +749,7 @@ export function getRpcCapabilityManifest(context: RpcCapabilityContext = {}): Rp
 				execution: definition.execution,
 				inputSchema: inputSchemaFor(name as RpcCommandType, definition),
 				...(definition.concurrencyClass === undefined ? {} : { concurrencyClass: definition.concurrencyClass }),
-				...(definition.confirmation === undefined ? {} : { confirmation: definition.confirmation }),
+				confirmation: definition.confirmation,
 				requiredFeatures: [...definition.requiredFeatures],
 				...(definition.outputSchema === undefined ? {} : { outputSchema: definition.outputSchema }),
 			};

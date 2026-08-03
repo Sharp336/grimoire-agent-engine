@@ -69,8 +69,8 @@ describe("get_settings over the RPC server", () => {
 			id: "invalid-tab-probe",
 			success: false,
 			command: "get_settings",
-			code: "invalid_tab",
-			error: "Settings tab must be a string",
+			code: "invalid_request",
+			error: 'RPC command field "tab" must be a string',
 		});
 		interface Entry {
 			path: string;

@@ -19,6 +19,7 @@ import { $env, isEnoent, isRecord, readLines, Snowflake } from "@oh-my-pi/pi-uti
 import { JobProjectionService } from "../../async";
 import { reset as resetCapabilities } from "../../capability";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
+import type { EvalToolDetails } from "../../eval/types";
 import {
 	type ExtensionUIContext,
 	type ExtensionUIDialogOptions,
@@ -41,8 +42,8 @@ import {
 	resolveSessionCatalogReference,
 	SessionCatalogError,
 } from "../../session/session-catalog";
-import { FileSessionStorage } from "../../session/session-storage";
 import { SessionQueueEntryNotFoundError, SessionQueueInvalidPositionError } from "../../session/session-queue-service";
+import { FileSessionStorage } from "../../session/session-storage";
 import { ToolInventoryUnavailableError } from "../../session/session-tools";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
@@ -336,8 +337,7 @@ export class RpcOperationMessageOwnership {
 	constructor(readonly session: RpcOperationMessageSession) {}
 
 	observeMessageStart(message: AgentMessage): void {
-		const operationId = this.session.getMessageTag(message);
-		if (operationId) this.#activeOperationId = operationId;
+		this.#activeOperationId = this.session.getMessageTag(message);
 	}
 
 	settle(operationId: string): void {
@@ -585,7 +585,7 @@ export async function handleRpcSessionChange(
 	session: RpcSessionChangeSession,
 	command: RpcSessionChangeCommand,
 	subagentRegistry?: RpcSubagentResetRegistry,
-	beforeCommit?: () => void,
+	beforeCommit?: () => void | Promise<void>,
 ): Promise<RpcSessionChangeResult> {
 	switch (command.type) {
 		case "new_session": {
@@ -801,6 +801,26 @@ export function requestRpcAgentMutationConfirmation(
 		response => "confirmed" in response && response.confirmed === true && response.operationId === operationId,
 	);
 }
+
+export function requestRpcPrivilegedConfirmation(
+	pendingRequests: Map<string, PendingExtensionRequest>,
+	output: RpcOutput,
+	command: "eval_execute" | "bash" | "cancel_job" | "delete_session" | "remove_provider_auth",
+	title: string,
+	message: string,
+	options: { operationId?: string; signal?: AbortSignal; timeout?: number } = {},
+): Promise<boolean> {
+	const operationId = options.operationId ?? (Snowflake.next() as string);
+	const timeout = options.timeout ?? 30_000;
+	return requestRpcDialog(
+		pendingRequests,
+		output,
+		{ signal: options.signal, timeout },
+		false,
+		{ method: "confirm", title, message, timeout, operationId, command },
+		response => "confirmed" in response && response.confirmed === true && response.operationId === operationId,
+	);
+}
 export type RpcToolActivationSession = Pick<
 	AgentSession,
 	| "activityPhase"
@@ -818,6 +838,13 @@ export class RpcToolActivationBusyError extends Error {
 	constructor() {
 		super("Session is busy; tool activation cannot change during active work");
 		this.name = "RpcToolActivationBusyError";
+	}
+}
+
+class RpcSessionTransitionBusyError extends Error {
+	constructor() {
+		super("Session transition is unavailable while an authentication, mode, or plan operation is committing");
+		this.name = "RpcSessionTransitionBusyError";
 	}
 }
 
@@ -842,7 +869,7 @@ export async function applyRpcToolActivation(
 		}
 	}
 
-	await session.setActiveToolsByName(next);
+	await session.setActiveToolsByName(next, false);
 
 	const enabledToolNames = [...new Set(session.getEnabledToolNames())];
 	const activeToolNames = [...new Set(session.getActiveToolNames())];
@@ -896,6 +923,7 @@ export async function runRpcMode(
 		const features = new Set<string>();
 		if (eventBus) features.add("subagent-event-bus");
 		features.add("agent-control");
+		if (session.asyncJobManager && session.getAgentId()) features.add("job-control");
 		if (session.model && serviceTierFamily(session.model)) features.add("model.fast-mode");
 		return getRpcCapabilityManifest({ features });
 	};
@@ -948,13 +976,18 @@ export async function runRpcMode(
 	const catalogError = (id: string | undefined, command: string, cause: unknown): RpcResponse =>
 		cause instanceof SessionCatalogError
 			? error(id, command, cause.message, cause.code)
-			: error(id, command, cause instanceof Error ? cause.message : String(cause));
+			: cause instanceof RpcSessionTransitionBusyError
+				? error(id, command, cause.message, "session_busy")
+				: error(id, command, cause instanceof Error ? cause.message : String(cause));
 	const operationOwnership = new RpcOperationMessageOwnership(session);
 	const rpcEvalOperationIds = new Set<string>();
 	const rpcEvalConfirmationControllers = new Map<string, AbortController>();
+	const rpcEvalTasks = new Set<Promise<void>>();
+	const pendingRpcBashConfirmations = new Set<AbortController>();
+	const rpcBashExecutions = new Set<Promise<unknown>>();
 	const operationManager = new RpcOperationManager(frame => {
+		if (frame.type === "operation_completed") operationOwnership.settle(frame.operationId);
 		if (frame.type !== "operation_started") {
-			operationOwnership.settle(frame.operationId);
 			rpcEvalOperationIds.delete(frame.operationId);
 			rpcEvalConfirmationControllers.get(frame.operationId)?.abort();
 			rpcEvalConfirmationControllers.delete(frame.operationId);
@@ -971,14 +1004,14 @@ export async function runRpcMode(
 	const subagentRegistry = eventBus ? new RpcSubagentRegistry(eventBus, output) : undefined;
 	const sessionStorage = new FileSessionStorage();
 	const providerAuthService = new ProviderAuthService(session.modelRegistry, session.sessionId);
-	let providerAuthTaskTracker: (task: Promise<void>) => void = task => {
+	let rpcTaskTracker: (task: Promise<void>) => void = task => {
 		void task;
 	};
 	const providerAuthController = new ProviderAuthController(
 		providerAuthService,
 		operationManager,
 		frame => output(frame),
-		task => providerAuthTaskTracker(task),
+		task => rpcTaskTracker(task),
 		request =>
 			requestRpcDialog(
 				pendingExtensionRequests,
@@ -1320,18 +1353,50 @@ export async function runRpcMode(
 	emitQueueUpdate();
 	emitJobUpdate();
 
+	const protectedCommitOperationIds = (): Set<string> => {
+		const protectedOperations = new Set(providerAuthController.protectedOperationIds());
+		for (const operation of operationManager.snapshot().active) {
+			if (
+				operation.status === "started" &&
+				(operation.command === "set_mode" || operation.command === "resolve_plan_approval")
+			) {
+				protectedOperations.add(operation.operationId);
+			}
+		}
+		return protectedOperations;
+	};
+	let sessionTransitionInFlight = false;
+	let sessionGeneration = 0;
+	const prepareSessionTransition = async (): Promise<void> => {
+		if (providerAuthController.hasMutationInFlight()) throw new RpcSessionTransitionBusyError();
+		const protectedOperations = protectedCommitOperationIds();
+		if (protectedOperations.size > 0) throw new RpcSessionTransitionBusyError();
+		const providerProtected = providerAuthController.cancelAll("session_transition", "session_changed");
+		if (providerProtected.size > 0) throw new RpcSessionTransitionBusyError();
+		sessionTransitionInFlight = true;
+		sessionGeneration++;
+		try {
+			const evalOperationIds = Array.from(rpcEvalOperationIds);
+			operationManager.cancelAll("session_transition", "session_changed");
+			for (const controller of pendingRpcBashConfirmations) controller.abort();
+			session.abortBash();
+			for (const operationId of evalOperationIds) session.abortEvalExecution(operationId);
+			await Promise.allSettled([...rpcEvalTasks, ...rpcBashExecutions]);
+			if (session.isStreaming) {
+				await session.abort({ reason: USER_INTERRUPT_LABEL });
+				await session.waitForIdle();
+			}
+		} catch (cause) {
+			sessionTransitionInFlight = false;
+			throw cause;
+		}
+	};
 	const completeSessionTransition = async (
 		id: string | undefined,
 		command: RpcCommand["type"],
 		data: { cancelled: boolean } & object,
 	): Promise<RpcResponse> => {
-		if (!data.cancelled) {
-			const evalOperationIds = Array.from(rpcEvalOperationIds);
-			const protectedOperations = providerAuthController.cancelAll("session_transition", "session_changed");
-			operationManager.cancelAll("session_transition", "session_changed", protectedOperations);
-			for (const operationId of evalOperationIds) session.abortEvalExecution(operationId);
-			await emitAvailableCommandsUpdate();
-		}
+		if (!data.cancelled) await emitAvailableCommandsUpdate();
 		return success(id, command, data);
 	};
 	let toolActivationInFlight = false;
@@ -1361,6 +1426,9 @@ export async function runRpcMode(
 			// =================================================================
 
 			case "prompt": {
+				if (sessionTransitionInFlight) {
+					return error(id, "prompt", "Session transition is in progress", "session_busy");
+				}
 				const operation = operationManager.start(id, "prompt");
 				setImmediate(() => {
 					if (!operationManager.begin(operation)) return;
@@ -1461,6 +1529,9 @@ export async function runRpcMode(
 			}
 
 			case "steer": {
+				if (sessionTransitionInFlight) {
+					return error(id, "steer", "Session transition is in progress", "session_busy");
+				}
 				if (toolActivationInFlight) {
 					return error(id, "steer", "Session tool activation is in progress", "session_busy");
 				}
@@ -1470,6 +1541,9 @@ export async function runRpcMode(
 			}
 
 			case "follow_up": {
+				if (sessionTransitionInFlight) {
+					return error(id, "follow_up", "Session transition is in progress", "session_busy");
+				}
 				if (toolActivationInFlight) {
 					return error(id, "follow_up", "Session tool activation is in progress", "session_busy");
 				}
@@ -1479,7 +1553,10 @@ export async function runRpcMode(
 			}
 
 			case "abort": {
-				const protectedOperations = providerAuthController.cancelAll("user", "cancelled_by_client");
+				const protectedOperations = protectedCommitOperationIds();
+				for (const operationId of providerAuthController.cancelAll("user", "cancelled_by_client")) {
+					protectedOperations.add(operationId);
+				}
 				operationManager.cancelAll("user", "cancelled_by_client", protectedOperations);
 				await session.abort({ reason: USER_INTERRUPT_LABEL });
 				emitQueueUpdate();
@@ -1487,11 +1564,21 @@ export async function runRpcMode(
 			}
 
 			case "abort_and_prompt": {
+				if (sessionTransitionInFlight) {
+					return error(id, "abort_and_prompt", "Session transition is in progress", "session_busy");
+				}
 				if (toolActivationInFlight) {
 					return error(id, "abort_and_prompt", "Session tool activation is in progress", "session_busy");
 				}
-				const protectedOperations = providerAuthController.cancelAll("replaced", "replaced_by_prompt");
-				operationManager.cancelAll("replaced", "replaced_by_prompt", protectedOperations);
+				const protectedOperations = protectedCommitOperationIds();
+				if (protectedOperations.size > 0) {
+					return error(id, "abort_and_prompt", "Session state commit is in progress", "session_busy");
+				}
+				const providerProtected = providerAuthController.cancelAll("replaced", "replaced_by_prompt");
+				if (providerProtected.size > 0) {
+					return error(id, "abort_and_prompt", "Session state commit is in progress", "session_busy");
+				}
+				operationManager.cancelAll("replaced", "replaced_by_prompt");
 				const operation = operationManager.start(id, "abort_and_prompt");
 				setImmediate(() => {
 					if (!operationManager.begin(operation)) return;
@@ -1526,6 +1613,20 @@ export async function runRpcMode(
 			}
 
 			case "cancel_operation": {
+				const activeOperation = operationManager
+					.snapshot()
+					.active.find(operation => operation.operationId === command.operationId);
+				if (
+					activeOperation?.status === "started" &&
+					(activeOperation.command === "set_mode" || activeOperation.command === "resolve_plan_approval")
+				) {
+					return error(
+						id,
+						"cancel_operation",
+						"Mode and plan operations cannot be cancelled after their commit phase starts",
+						"operation_commit_in_progress",
+					);
+				}
 				const approvalId = planApprovalOperations.get(command.operationId);
 				if (approvalId) {
 					planApprovalOperations.delete(command.operationId);
@@ -1574,6 +1675,7 @@ export async function runRpcMode(
 						session,
 						{ type: "switch_session", sessionPath: resolved.entry.path },
 						subagentRegistry,
+						prepareSessionTransition,
 					);
 					const cwd = session.sessionManager.getCwd();
 					const sessionFile = session.sessionManager.getSessionFile();
@@ -1590,17 +1692,43 @@ export async function runRpcMode(
 			}
 
 			case "eval_execute": {
+				if (sessionTransitionInFlight) {
+					return error(
+						id,
+						"eval_execute",
+						"Eval execution is unavailable while a session transition is in progress",
+						"session_busy",
+					);
+				}
+				if (toolActivationInFlight) {
+					return error(
+						id,
+						"eval_execute",
+						"Eval execution is unavailable while tool activation is in progress",
+						"session_busy",
+					);
+				}
+				const operationGeneration = sessionGeneration;
 				const operation = operationManager.start(id, "eval_execute");
 				rpcEvalOperationIds.add(operation.operationId);
 				const confirmationController = new AbortController();
 				rpcEvalConfirmationControllers.set(operation.operationId, confirmationController);
+				const { promise: task, resolve: resolveTask } = Promise.withResolvers<void>();
+				rpcEvalTasks.add(task);
+				void task.finally(() => rpcEvalTasks.delete(task));
 				setImmediate(() => {
-					if (!operationManager.begin(operation)) return;
+					if (!operationManager.begin(operation)) {
+						resolveTask();
+						return;
+					}
 					void (async () => {
-						const confirmed = await rpcUiContext.confirm(
+						const confirmed = await requestRpcPrivilegedConfirmation(
+							pendingExtensionRequests,
+							output,
+							"eval_execute",
 							"Run eval code?",
 							`Language: ${command.language}\n\n${command.code}`,
-							{ signal: confirmationController.signal },
+							{ operationId: operation.operationId, signal: confirmationController.signal },
 						);
 						if (!operationManager.isActive(operation)) return;
 						if (!confirmed) {
@@ -1611,15 +1739,24 @@ export async function runRpcMode(
 							);
 							return;
 						}
+						if (sessionTransitionInFlight || operationGeneration !== sessionGeneration) {
+							operationManager.fail(
+								operation,
+								new Error("Session changed before eval execution"),
+								"session_changed",
+							);
+							return;
+						}
 
 						const evalOutput = new RpcEvalOutputStream(
 							operation.operationId,
 							() => operationManager.isActive(operation),
 							output,
 						);
-						const registeredEvalTool = session.getToolByName("eval");
+						const registeredEvalTool = session.getEvalToolForHost();
 						if (!(registeredEvalTool instanceof EvalTool)) throw new Error("Eval tool is unavailable");
-						const result = await registeredEvalTool.withExecutionId(operation.operationId).execute(
+						const evalTool = registeredEvalTool;
+						const result = await evalTool.withExecutionId(operation.operationId).execute(
 							operation.operationId,
 							{
 								language: command.language,
@@ -1630,10 +1767,11 @@ export async function runRpcMode(
 							},
 							undefined,
 							update => {
-								const text = update.content
-									.filter(part => part.type === "text")
-									.map(part => part.text)
-									.join("");
+								const text =
+									update.details?.cells
+										.map((cell: NonNullable<EvalToolDetails["cells"]>[number]) => cell.output.trim())
+										.filter(Boolean)
+										.join("\n\n") ?? "";
 								evalOutput.push(text);
 							},
 						);
@@ -1642,7 +1780,7 @@ export async function runRpcMode(
 							.filter(part => part.type === "text")
 							.map(part => part.text)
 							.join("");
-						evalOutput.push(outputText);
+						evalOutput.complete(outputText);
 						if (!operationManager.isActive(operation)) return;
 						const firstCell = result.details?.cells?.[0];
 						const boundedOutput = outputText.length > 262_144 ? outputText.slice(-262_144) : outputText;
@@ -1662,11 +1800,14 @@ export async function runRpcMode(
 						session.recordEvalResult(entry);
 						output({ type: "eval_complete", operationId: operation.operationId, result: entry });
 						operationManager.complete(operation, false);
-					})().catch(cause => {
-						const evalError = cause instanceof Error ? cause : new Error(String(cause));
-						operationManager.fail(operation, evalError, "eval_execution_failed");
-					});
+					})()
+						.catch(cause => {
+							const evalError = cause instanceof Error ? cause : new Error(String(cause));
+							operationManager.fail(operation, evalError, "eval_execution_failed");
+						})
+						.finally(resolveTask);
 				});
+				rpcTaskTracker(task);
 				return success(id, "eval_execute", { operationId: operation.operationId, accepted: true });
 			}
 
@@ -1693,8 +1834,20 @@ export async function runRpcMode(
 			case "new_session":
 			case "switch_session":
 			case "branch": {
-				const result = await handleRpcSessionChange(session, command, subagentRegistry);
-				return completeSessionTransition(id, result.type, result.data);
+				try {
+					const result = await handleRpcSessionChange(
+						session,
+						command,
+						subagentRegistry,
+						prepareSessionTransition,
+					);
+					return completeSessionTransition(id, result.type, result.data);
+				} catch (cause) {
+					if (cause instanceof RpcSessionTransitionBusyError) {
+						return error(id, command.type, cause.message, "session_busy");
+					}
+					throw cause;
+				}
 			}
 
 			case "set_mode": {
@@ -1715,6 +1868,23 @@ export async function runRpcMode(
 				if (command.mode === "plan" && (session.getGoalModeState() || session.getVibeModeState())) {
 					return error(id, "set_mode", "Another exclusive mode is active.", "mode_conflict");
 				}
+				if (command.mode === "plan" && session.planMode.active) {
+					const current = session.getPlanModeState();
+					if (
+						(command.planFilePath !== undefined && current?.planFilePath !== command.planFilePath) ||
+						(command.workflow !== undefined && current?.workflow !== command.workflow)
+					) {
+						return error(
+							id,
+							"set_mode",
+							"Plan mode is already active with a different plan file or workflow.",
+							"mode_conflict",
+						);
+					}
+				}
+				if (operationManager.hasActiveCommand("set_mode")) {
+					return error(id, "set_mode", "Another mode change is already pending.", "busy");
+				}
 				const operation = operationManager.start(id, "set_mode");
 				const apply = async () => {
 					if (command.mode === "none") await session.planMode.disable();
@@ -1734,24 +1904,25 @@ export async function runRpcMode(
 					}
 				};
 				const deferred = session.isStreaming && command.when === "next_idle";
-				setImmediate(() => {
-					void (async () => {
-						try {
-							if (deferred) await session.waitForIdle();
-							if (!operationManager.begin(operation)) return;
-							await apply();
-							operationManager.complete(operation, false);
-						} catch (cause) {
-							operationManager.fail(operation, cause instanceof Error ? cause : new Error(String(cause)));
-						}
-					})();
+				const task = new Promise<void>(resolve => {
+					setImmediate(() => {
+						void (async () => {
+							try {
+								if (deferred) await session.waitForIdle();
+								if (!operationManager.begin(operation)) return;
+								await apply();
+								operationManager.complete(operation, false);
+							} catch (cause) {
+								operationManager.fail(operation, cause instanceof Error ? cause : new Error(String(cause)));
+							}
+						})().finally(resolve);
+					});
 				});
+				rpcTaskTracker(task);
 				return success(id, "set_mode", {
-					mode: command.mode,
-					planFilePath: command.mode === "none" ? undefined : (command.planFilePath ?? "local://PLAN.md"),
-					workflow: command.mode === "none" ? undefined : (command.workflow ?? "parallel"),
-					deferred,
 					operationId: operation.operationId,
+					accepted: true,
+					deferred,
 				});
 			}
 
@@ -1767,30 +1938,42 @@ export async function runRpcMode(
 				if (!pending || pending.approvalId !== command.approvalId) {
 					return error(id, "resolve_plan_approval", "Unknown plan approval.", "unknown_approval");
 				}
+				if (operationManager.hasActiveCommand("resolve_plan_approval")) {
+					return error(id, "resolve_plan_approval", "The plan approval is already being resolved.", "busy");
+				}
 				const operation = operationManager.start(id, "resolve_plan_approval");
 				planApprovalOperations.set(operation.operationId, command.approvalId);
-				setImmediate(() => {
-					if (!operationManager.isActive(operation)) return;
-					operationManager.begin(operation);
-					void session.planMode
-						.resolveApproval(
-							command.approvalId,
-							command.decision === "approve"
-								? {
-										kind: "approve",
-										preserveContext: command.preserveContext === true,
-										compactBeforeExecute: command.compactBeforeExecute === true,
-										executionModelRole: command.executionModelRole,
-										editedContent: command.editedContent,
-									}
-								: { kind: command.decision, feedback: command.feedback },
-						)
-						.then(result => operationManager.complete(operation, result.executionDispatched))
-						.catch(cause =>
-							operationManager.fail(operation, cause instanceof Error ? cause : new Error(String(cause))),
-						)
-						.finally(() => planApprovalOperations.delete(operation.operationId));
+				const task = new Promise<void>(resolve => {
+					setImmediate(() => {
+						if (!operationManager.begin(operation)) {
+							planApprovalOperations.delete(operation.operationId);
+							resolve();
+							return;
+						}
+						void session.planMode
+							.resolveApproval(
+								command.approvalId,
+								command.decision === "approve"
+									? {
+											kind: "approve",
+											preserveContext: command.preserveContext === true,
+											compactBeforeExecute: command.compactBeforeExecute === true,
+											executionModelRole: command.executionModelRole,
+											editedContent: command.editedContent,
+										}
+									: { kind: command.decision, feedback: command.feedback },
+							)
+							.then(result => operationManager.complete(operation, result.executionDispatched))
+							.catch(cause =>
+								operationManager.fail(operation, cause instanceof Error ? cause : new Error(String(cause))),
+							)
+							.finally(() => {
+								planApprovalOperations.delete(operation.operationId);
+								resolve();
+							});
+					});
 				});
+				rpcTaskTracker(task);
 				return success(id, "resolve_plan_approval", { operationId: operation.operationId, accepted: true });
 			}
 
@@ -2001,19 +2184,24 @@ export async function runRpcMode(
 			}
 
 			case "list_jobs": {
-				if (!jobProjection) return success(id, "list_jobs", { jobs: [], agents: [] });
+				if (!jobProjection) return error(id, "list_jobs", "Background job manager is unavailable", "unavailable");
 				return success(id, "list_jobs", jobProjection.list());
 			}
 
 			case "get_job": {
-				return success(id, "get_job", { job: jobProjection?.get(command.jobId) ?? null });
+				if (!jobProjection) return error(id, "get_job", "Background job manager is unavailable", "unavailable");
+				return success(id, "get_job", { job: jobProjection.get(command.jobId) ?? null });
 			}
 
 			case "cancel_job": {
 				if (!jobProjection) return error(id, "cancel_job", "Background job manager is unavailable", "unavailable");
+				const resolvedTargets = jobProjection.resolveCancellationTargets(command.jobIds);
 				let confirmed = false;
 				try {
-					confirmed = await rpcUiContext.confirm(
+					confirmed = await requestRpcPrivilegedConfirmation(
+						pendingExtensionRequests,
+						output,
+						"cancel_job",
 						"Cancel background jobs?",
 						`Cancel ${command.jobIds.length} background job${command.jobIds.length === 1 ? "" : "s"}: ${command.jobIds.join(", ")}`,
 						{ timeout: 15_000 },
@@ -2024,7 +2212,7 @@ export async function runRpcMode(
 				if (!confirmed) {
 					return error(id, "cancel_job", "Cancellation was not confirmed", "confirmation_required");
 				}
-				const outcomes = await jobProjection.cancel(command.jobIds);
+				const outcomes = await jobProjection.cancelResolved(resolvedTargets);
 				emitJobUpdate();
 				return success(id, "cancel_job", { outcomes });
 			}
@@ -2210,10 +2398,46 @@ export async function runRpcMode(
 			// =================================================================
 			// Bash
 			// =================================================================
-
 			case "bash": {
-				const result = await session.executeBash(command.command);
-				return success(id, "bash", result);
+				if (sessionTransitionInFlight) {
+					return error(
+						id,
+						"bash",
+						"Shell command execution is unavailable while a session transition is in progress",
+						"session_busy",
+					);
+				}
+				const operationGeneration = sessionGeneration;
+				const confirmationController = new AbortController();
+				pendingRpcBashConfirmations.add(confirmationController);
+				let confirmed = false;
+				try {
+					confirmed = await requestRpcPrivilegedConfirmation(
+						pendingExtensionRequests,
+						output,
+						"bash",
+						"Run shell command?",
+						command.command,
+						{ signal: confirmationController.signal },
+					);
+				} catch {
+					return error(id, "bash", "Shell command confirmation was not completed", "confirmation_required");
+				} finally {
+					pendingRpcBashConfirmations.delete(confirmationController);
+				}
+				if (!confirmed) {
+					return error(id, "bash", "Shell command execution was not confirmed", "confirmation_required");
+				}
+				if (sessionTransitionInFlight || operationGeneration !== sessionGeneration) {
+					return error(id, "bash", "Session changed before shell command execution", "session_changed");
+				}
+				const execution = session.executeBash(command.command);
+				rpcBashExecutions.add(execution);
+				try {
+					return success(id, "bash", await execution);
+				} finally {
+					rpcBashExecutions.delete(execution);
+				}
 			}
 
 			case "abort_bash": {
@@ -2303,7 +2527,7 @@ export async function runRpcMode(
 				if (!session.sessionManager.getSessionFile())
 					return error(id, "fork_session", "The active session has not been persisted", "session_not_persisted");
 				try {
-					const forked = await session.fork();
+					const forked = await session.fork(prepareSessionTransition);
 					const data: RpcForkSessionResult = {
 						cancelled: !forked,
 						...(forked && session.sessionManager.getSessionFile()
@@ -2369,10 +2593,20 @@ export async function runRpcMode(
 						{ scope: command.scope ?? (command.cwd ? "cwd" : "all"), cwd: command.cwd },
 						sessionStorage,
 					);
+					const confirmed = await requestRpcPrivilegedConfirmation(
+						pendingExtensionRequests,
+						output,
+						"delete_session",
+						"Delete session?",
+						`Permanently delete session "${resolved.entry.title ?? resolved.entry.id}" and its artifacts?`,
+					);
+					if (!confirmed) {
+						return error(id, "delete_session", "Session deletion was not confirmed", "confirmation_required");
+					}
 					const activePath = session.sessionManager.getSessionFile();
 					const wasActive = activePath !== undefined && path.resolve(activePath) === resolved.entry.path;
 					if (wasActive) {
-						const started = await session.newSession();
+						const started = await session.newSession(undefined, prepareSessionTransition);
 						if (!started) {
 							const cancelled: RpcDeleteSessionResult = {
 								deleted: false,
@@ -2543,10 +2777,9 @@ export async function runRpcMode(
 			}
 
 			case "remove_provider_auth": {
+				let releaseReservation: () => void;
 				try {
-					const state = await providerAuthService.remove(command.providerId);
-					output({ type: "provider_auth_update", state } satisfies ProviderAuthUpdate);
-					return success(id, "remove_provider_auth", { state });
+					releaseReservation = providerAuthController.reserveMutation();
 				} catch (authError) {
 					const known = authError instanceof ProviderAuthError ? authError : undefined;
 					return error(
@@ -2555,6 +2788,49 @@ export async function runRpcMode(
 						known?.message ?? "Provider authentication could not be removed",
 						known?.code ?? "provider_auth_remove_failed",
 					);
+				}
+				try {
+					const target = providerAuthService.credentialTarget(command.providerId);
+					let confirmed = false;
+					try {
+						confirmed = await requestRpcPrivilegedConfirmation(
+							pendingExtensionRequests,
+							output,
+							"remove_provider_auth",
+							"Remove provider authentication?",
+							`Remove credentials stored as "${target.storageProvider}" for providers: ${target.affectedProviderIds.join(", ")}?`,
+						);
+					} catch {
+						return error(
+							id,
+							"remove_provider_auth",
+							"Credential removal confirmation was not completed",
+							"confirmation_required",
+						);
+					}
+					if (!confirmed) {
+						return error(
+							id,
+							"remove_provider_auth",
+							"Credential removal was not confirmed",
+							"confirmation_required",
+						);
+					}
+					const result = await providerAuthService.remove(command.providerId);
+					for (const state of result.states) {
+						output({ type: "provider_auth_update", state } satisfies ProviderAuthUpdate);
+					}
+					return success(id, "remove_provider_auth", { state: result.state });
+				} catch (authError) {
+					const known = authError instanceof ProviderAuthError ? authError : undefined;
+					return error(
+						id,
+						"remove_provider_auth",
+						known?.message ?? "Provider authentication could not be removed",
+						known?.code ?? "provider_auth_remove_failed",
+					);
+				} finally {
+					releaseReservation();
 				}
 			}
 
@@ -2581,7 +2857,7 @@ export async function runRpcMode(
 			process.exit(0);
 		},
 	});
-	providerAuthTaskTracker = task => shutdownCoordinator.track(task);
+	rpcTaskTracker = task => shutdownCoordinator.track(task);
 
 	const dispatchFrameDeps: RpcInputFrameDeps = {
 		handleCommand,
@@ -2596,7 +2872,10 @@ export async function runRpcMode(
 
 	const inputDispatcher = new RpcInputDispatcher({
 		deps: dispatchFrameDeps,
-		afterSerialCommand: () => shutdownCoordinator.checkShutdownRequested(),
+		afterSerialCommand: async () => {
+			sessionTransitionInFlight = false;
+			shutdownCoordinator.checkShutdownRequested();
+		},
 	});
 
 	// Keep the stdin reader moving: side-channel frames dispatch immediately,
@@ -2622,16 +2901,18 @@ export async function runRpcMode(
 
 	// stdin closed — stop accepting side-channel work, drain every command that
 	// already owes a response, then settle any operation still running.
-	const protectedOperations = providerAuthController.close();
+	const protectedOperations = new Set(providerAuthController.close());
 	pendingExtensionRequests.rejectAll("RPC client disconnected before extension UI response completed");
+	session.abortBash();
 	await inputDispatcher.drain();
-	await session.planMode.abandonPendingApproval();
-	hostToolBridge.close("RPC client disconnected before host tool execution completed");
-	hostUriBridge.clear("RPC client disconnected before host URI request completed");
-	await shutdownCoordinator.drain();
+	for (const operationId of protectedCommitOperationIds()) protectedOperations.add(operationId);
 	const rpcEvalsToAbort = Array.from(rpcEvalOperationIds);
 	operationManager.cancelAll("client_disconnected", "client_disconnected", protectedOperations);
 	for (const operationId of rpcEvalsToAbort) session.abortEvalExecution(operationId);
+	hostToolBridge.close("RPC client disconnected before host tool execution completed");
+	hostUriBridge.clear("RPC client disconnected before host URI request completed");
+	await shutdownCoordinator.drain();
+	await session.planMode.abandonPendingApproval();
 	unsubscribeAgentRegistry();
 	unsubscribeJobUpdates?.();
 	subagentRegistry?.dispose();

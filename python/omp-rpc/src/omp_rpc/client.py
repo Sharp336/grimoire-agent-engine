@@ -9,9 +9,10 @@ import signal
 import subprocess
 import threading
 import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Generic, Literal, Mapping, Sequence, TypeVar, cast
+from typing import Any, Generic, Literal, TypeVar, cast
 
 from .host_tools import HostTool, HostToolContext
 from .host_uris import HostUri, HostUriContext, normalize_read_result
@@ -20,6 +21,7 @@ from .protocol import (
     AdvisorState,
     AgentEndEvent,
     AgentMessage,
+    AgentRegistryUpdateEvent,
     AgentReleaseResult,
     AgentResult,
     AgentSendResult,
@@ -30,37 +32,59 @@ from .protocol import (
     AutoCompactionStartEvent,
     AutoRetryEndEvent,
     AutoRetryStartEvent,
+    AvailableCommandsUpdateEvent,
     BashResult,
     BranchMessage,
     BranchResult,
     CancelAgentResult,
+    CancelJobResult,
     CancellationResult,
     CancelOperationResult,
+    CommandOutputEvent,
     CompactionResult,
+    ConfigUpdateEvent,
     DeleteSessionResult,
+    EvalCompleteEvent,
     EvalHistoryEntry,
+    EvalOutputEvent,
     ExtensionError,
     ExtensionUiRequest,
     FastModeResult,
     ForkSessionResult,
+    GoalUpdatedEvent,
     ImageContent,
     InterruptMode,
+    IrcMessageEvent,
+    JobListResult,
+    JobSnapshot,
+    JobUpdateEvent,
     JsonObject,
     JsonValue,
     MessageEndEvent,
     MessagesPage,
     MessageStartEvent,
     MessageUpdateEvent,
+    ModeChangeResult,
+    ModelChangedEvent,
     ModelCycleResult,
     ModelInfo,
+    NoticeEvent,
     OperationCancelledEvent,
     OperationCompletedEvent,
     OperationFailedEvent,
     OperationsSnapshot,
     OperationStartedEvent,
+    PlanApprovalRequestEvent,
+    PlanApprovalSettledEvent,
     PlanState,
+    PlanStateUpdateEvent,
     PlanWorkflow,
+    PromptResultEvent,
+    ProviderAuthRequest,
     ProviderAuthState,
+    ProviderAuthUpdate,
+    QueueRemoveResult,
+    QueueUpdateEvent,
     ReadyEvent,
     RenameSessionResult,
     ResumeSessionResult,
@@ -75,7 +99,10 @@ from .protocol import (
     SessionCatalogPage,
     SessionCatalogScope,
     SessionInfoResult,
+    SessionInfoUpdateEvent,
     SessionMode,
+    SessionQueueClearResult,
+    SessionQueueSnapshot,
     SessionState,
     SessionStats,
     SessionWorkspaceRoot,
@@ -84,7 +111,11 @@ from .protocol import (
     SettingsUpdateEvent,
     SteeringMode,
     StreamingBehavior,
+    SubagentEvent,
+    SubagentLifecycleEvent,
+    SubagentProgressEvent,
     ThinkingLevel,
+    ThinkingLevelChangedEvent,
     ThinkingLevelCycleResult,
     TodoAutoClearEvent,
     TodoItem,
@@ -112,22 +143,29 @@ from .protocol import (
     parse_branch_messages,
     parse_branch_result,
     parse_cancel_agent_result,
+    parse_cancel_job_result,
     parse_cancellation_result,
     parse_compaction_result,
     parse_delete_session_result,
     parse_eval_history_entry,
     parse_fast_mode_result,
     parse_fork_session_result,
+    parse_job_list_result,
+    parse_job_snapshot,
+    parse_mode_change_result,
     parse_model_cycle_result,
     parse_model_info,
     parse_notification,
+    parse_plan_state,
+    parse_provider_auth_state,
+    parse_queue_remove_result,
     parse_rename_session_result,
     parse_resume_session_result,
     parse_rpc_capability_manifest,
     parse_session_catalog_page,
     parse_session_info_result,
-    parse_plan_state,
-    parse_provider_auth_state,
+    parse_session_queue_clear_result,
+    parse_session_queue_snapshot,
     parse_session_state,
     parse_session_stats,
     parse_session_workspace_roots,
@@ -146,7 +184,31 @@ ReadyListener = Callable[[ReadyEvent], None]
 UnknownNotificationListener = Callable[[UnknownNotification], None]
 SettingsUpdateListener = Callable[[SettingsUpdateEvent], None]
 ToolInventoryUpdateListener = Callable[[ToolInventoryUpdateEvent], None]
+OperationStartedListener = Callable[[OperationStartedEvent], None]
 OperationTerminalListener = Callable[[RpcOperationTerminalEvent], None]
+PromptResultListener = Callable[[PromptResultEvent], None]
+EvalOutputListener = Callable[[EvalOutputEvent], None]
+EvalCompleteListener = Callable[[EvalCompleteEvent], None]
+PlanStateUpdateListener = Callable[[PlanStateUpdateEvent], None]
+PlanApprovalRequestListener = Callable[[PlanApprovalRequestEvent], None]
+PlanApprovalSettledListener = Callable[[PlanApprovalSettledEvent], None]
+AgentRegistryUpdateListener = Callable[[AgentRegistryUpdateEvent], None]
+ProviderAuthRequestListener = Callable[[ProviderAuthRequest], None]
+ProviderAuthUpdateListener = Callable[[ProviderAuthUpdate], None]
+AvailableCommandsUpdateListener = Callable[[AvailableCommandsUpdateEvent], None]
+CommandOutputListener = Callable[[CommandOutputEvent], None]
+SessionInfoUpdateListener = Callable[[SessionInfoUpdateEvent], None]
+ConfigUpdateListener = Callable[[ConfigUpdateEvent], None]
+SubagentLifecycleListener = Callable[[SubagentLifecycleEvent], None]
+SubagentProgressListener = Callable[[SubagentProgressEvent], None]
+SubagentEventListener = Callable[[SubagentEvent], None]
+ModelChangedListener = Callable[[ModelChangedEvent], None]
+IrcMessageListener = Callable[[IrcMessageEvent], None]
+NoticeListener = Callable[[NoticeEvent], None]
+ThinkingLevelChangedListener = Callable[[ThinkingLevelChangedEvent], None]
+GoalUpdatedListener = Callable[[GoalUpdatedEvent], None]
+QueueUpdateListener = Callable[[QueueUpdateEvent], None]
+JobUpdateListener = Callable[[JobUpdateEvent], None]
 AgentStartListener = Callable[[AgentStartEvent], None]
 AgentEndListener = Callable[[AgentEndEvent], None]
 TurnStartListener = Callable[[TurnStartEvent], None]
@@ -181,6 +243,35 @@ _RPC_CHUNK_PAYLOAD_BYTES = 256 * 1024
 _RPC_MESSAGES_PAGE_BUSY_ERROR = "Cannot page messages while the session is changing"
 _RPC_MESSAGES_PAGE_STALE_ERROR = "RPC message cursor is stale"
 _RPC_MESSAGES_PAGE_FALLBACK_CODES = frozenset({"session_busy", "stale_cursor"})
+
+_AGENT_EVENT_TYPES = frozenset(
+    {
+        "agent_start",
+        "agent_end",
+        "turn_start",
+        "turn_end",
+        "message_start",
+        "message_update",
+        "message_end",
+        "tool_execution_start",
+        "tool_execution_update",
+        "tool_execution_end",
+        "auto_compaction_start",
+        "auto_compaction_end",
+        "auto_retry_start",
+        "auto_retry_end",
+        "retry_fallback_applied",
+        "retry_fallback_succeeded",
+        "ttsr_triggered",
+        "todo_reminder",
+        "todo_auto_clear",
+        "model_changed",
+        "irc_message",
+        "notice",
+        "thinking_level_changed",
+        "goal_updated",
+    }
+)
 
 
 @dataclass(slots=True)
@@ -580,6 +671,7 @@ class RpcClient:
         self._completed_agent_runs = 0
         self._last_schedule_async_error_index = 0
         self._operation_results: dict[str, RpcOperationTerminalEvent] = {}
+        self._operation_errors: dict[str, RpcError] = {}
         self._active_operation_ids: set[str] = set()
         self._agent_streaming = False
         self._ui_requests: queue.Queue[ExtensionUiRequest] = queue.Queue()
@@ -602,6 +694,7 @@ class RpcClient:
         self._notification_listeners: list[NotificationListener] = []
         self._event_listeners: list[AgentEventListener] = []
         self._typed_event_listeners: dict[str, list[AgentEventListener]] = {}
+        self._typed_notification_listeners: dict[str, list[NotificationListener]] = {}
         self._ready_listeners: list[ReadyListener] = []
         self._unknown_notification_listeners: list[UnknownNotificationListener] = []
         self._tool_inventory_update_listeners: list[ToolInventoryUpdateListener] = []
@@ -805,6 +898,7 @@ class RpcClient:
     ) -> Callable[[], None]:
         self._settings_update_listeners.append(listener)
         return lambda: self._remove_listener(self._settings_update_listeners, listener)
+
     def on_tool_inventory_update(
         self, listener: ToolInventoryUpdateListener
     ) -> Callable[[], None]:
@@ -812,6 +906,104 @@ class RpcClient:
         return lambda: self._remove_listener(
             self._tool_inventory_update_listeners, listener
         )
+
+    def on_operation_started(
+        self, listener: OperationStartedListener
+    ) -> Callable[[], None]:
+        return self._add_typed_notification_listener("operation_started", listener)
+
+    def on_prompt_result(self, listener: PromptResultListener) -> Callable[[], None]:
+        return self._add_typed_notification_listener("prompt_result", listener)
+
+    def on_eval_output(self, listener: EvalOutputListener) -> Callable[[], None]:
+        return self._add_typed_notification_listener("eval_output", listener)
+
+    def on_eval_complete(self, listener: EvalCompleteListener) -> Callable[[], None]:
+        return self._add_typed_notification_listener("eval_complete", listener)
+
+    def on_plan_state_update(
+        self, listener: PlanStateUpdateListener
+    ) -> Callable[[], None]:
+        return self._add_typed_notification_listener("plan_state_update", listener)
+
+    def on_plan_approval_request(
+        self, listener: PlanApprovalRequestListener
+    ) -> Callable[[], None]:
+        return self._add_typed_notification_listener("plan_approval_request", listener)
+
+    def on_plan_approval_settled(
+        self, listener: PlanApprovalSettledListener
+    ) -> Callable[[], None]:
+        return self._add_typed_notification_listener("plan_approval_settled", listener)
+
+    def on_agent_registry_update(
+        self, listener: AgentRegistryUpdateListener
+    ) -> Callable[[], None]:
+        return self._add_typed_notification_listener("agent_registry_update", listener)
+
+    def on_provider_auth_request(
+        self, listener: ProviderAuthRequestListener
+    ) -> Callable[[], None]:
+        return self._add_typed_notification_listener("provider_auth_request", listener)
+
+    def on_provider_auth_update(
+        self, listener: ProviderAuthUpdateListener
+    ) -> Callable[[], None]:
+        return self._add_typed_notification_listener("provider_auth_update", listener)
+
+    def on_available_commands_update(
+        self, listener: AvailableCommandsUpdateListener
+    ) -> Callable[[], None]:
+        return self._add_typed_notification_listener(
+            "available_commands_update", listener
+        )
+
+    def on_command_output(self, listener: CommandOutputListener) -> Callable[[], None]:
+        return self._add_typed_notification_listener("command_output", listener)
+
+    def on_session_info_update(
+        self, listener: SessionInfoUpdateListener
+    ) -> Callable[[], None]:
+        return self._add_typed_notification_listener("session_info_update", listener)
+
+    def on_config_update(self, listener: ConfigUpdateListener) -> Callable[[], None]:
+        return self._add_typed_notification_listener("config_update", listener)
+
+    def on_subagent_lifecycle(
+        self, listener: SubagentLifecycleListener
+    ) -> Callable[[], None]:
+        return self._add_typed_notification_listener("subagent_lifecycle", listener)
+
+    def on_subagent_progress(
+        self, listener: SubagentProgressListener
+    ) -> Callable[[], None]:
+        return self._add_typed_notification_listener("subagent_progress", listener)
+
+    def on_subagent_event(self, listener: SubagentEventListener) -> Callable[[], None]:
+        return self._add_typed_notification_listener("subagent_event", listener)
+
+    def on_model_changed(self, listener: ModelChangedListener) -> Callable[[], None]:
+        return self._add_typed_notification_listener("model_changed", listener)
+
+    def on_irc_message(self, listener: IrcMessageListener) -> Callable[[], None]:
+        return self._add_typed_notification_listener("irc_message", listener)
+
+    def on_notice(self, listener: NoticeListener) -> Callable[[], None]:
+        return self._add_typed_notification_listener("notice", listener)
+
+    def on_thinking_level_changed(
+        self, listener: ThinkingLevelChangedListener
+    ) -> Callable[[], None]:
+        return self._add_typed_notification_listener("thinking_level_changed", listener)
+
+    def on_goal_updated(self, listener: GoalUpdatedListener) -> Callable[[], None]:
+        return self._add_typed_notification_listener("goal_updated", listener)
+
+    def on_queue_update(self, listener: QueueUpdateListener) -> Callable[[], None]:
+        return self._add_typed_notification_listener("queue_update", listener)
+
+    def on_job_update(self, listener: JobUpdateListener) -> Callable[[], None]:
+        return self._add_typed_notification_listener("job_update", listener)
 
     def on_agent_start(self, listener: AgentStartListener) -> Callable[[], None]:
         return self._add_typed_event_listener("agent_start", listener)
@@ -953,7 +1145,9 @@ class RpcClient:
             if request.method == "cancel" or request.is_passive():
                 return
             if request.method == "confirm":
-                self.send_ui_confirmation(request.id, confirm)
+                self.send_ui_confirmation(
+                    request.id, confirm, operation_id=request.operation_id
+                )
                 return
             if request.method == "select":
                 if select_value is not None:
@@ -1028,8 +1222,8 @@ class RpcClient:
         operation_id = payload.get("operationId")
         if not isinstance(operation_id, str):
             raise RpcError("begin_provider_auth returned a malformed operation handle")
+        self._register_operation(operation_id)
         return operation_id
-
 
     def cancel_provider_auth(self, operation_id: str) -> CancelOperationResult:
         payload = self._request("cancel_provider_auth", operationId=operation_id)
@@ -1059,6 +1253,7 @@ class RpcClient:
         if state is None:
             raise RpcError("set_advisor_enabled returned an empty payload")
         return state
+
     def set_mode(
         self,
         mode: SessionMode,
@@ -1066,19 +1261,18 @@ class RpcClient:
         plan_file_path: str | None = None,
         workflow: PlanWorkflow | None = None,
         when: Literal["immediate", "next_idle"] = "immediate",
-    ) -> str:
-        payload = self._request(
-            "set_mode",
-            mode=mode,
-            planFilePath=plan_file_path,
-            workflow=workflow,
-            when=when,
+    ) -> ModeChangeResult:
+        result = parse_mode_change_result(
+            self._request(
+                "set_mode",
+                mode=mode,
+                planFilePath=plan_file_path,
+                workflow=workflow,
+                when=when,
+            )
         )
-        operation_id = payload.get("operationId")
-        if not isinstance(operation_id, str):
-            raise RpcError("set_mode response did not include operationId")
-        self._register_operation(operation_id)
-        return operation_id
+        self._register_operation(result.operation_id)
+        return result
 
     def get_plan(self) -> PlanState:
         return parse_plan_state(self._request("get_plan"))
@@ -1124,6 +1318,7 @@ class RpcClient:
             {"path": change.path, "value": change.value} for change in changes
         ]
         return parse_settings_snapshot(self._request("set_settings", changes=payload))
+
     def get_tool_inventory(self) -> ToolInventory:
         return parse_tool_inventory(self._request("get_tool_inventory"))
 
@@ -1197,33 +1392,48 @@ class RpcClient:
         return parse_agent_release_result(
             self._request("release_agent", agentId=agent_id, tombstone=tombstone)
         )
-    def get_queue(self) -> JsonObject:
-        return self._request("get_queue")
 
-    def remove_queued_message(self, entry_id: str) -> JsonObject:
-        return self._request("remove_queued_message", entryId=entry_id)
+    def get_queue(self) -> SessionQueueSnapshot:
+        return parse_session_queue_snapshot(self._request("get_queue"))
 
-    def reorder_queued_message(self, entry_id: str, to_index: int) -> JsonObject:
-        return self._request(
-            "reorder_queued_message", entryId=entry_id, toIndex=to_index
+    def remove_queued_message(self, entry_id: str) -> QueueRemoveResult:
+        return parse_queue_remove_result(
+            self._request("remove_queued_message", entryId=entry_id)
+        )
+
+    def reorder_queued_message(
+        self, entry_id: str, to_index: int
+    ) -> SessionQueueSnapshot:
+        return parse_session_queue_snapshot(
+            self._request("reorder_queued_message", entryId=entry_id, toIndex=to_index)
         )
 
     def clear_queue(
         self, lane: Literal["steering", "followUp", "all"] | None = None
-    ) -> JsonObject:
+    ) -> SessionQueueClearResult:
         fields: dict[str, JsonValue] = {}
         if lane is not None:
             fields["lane"] = lane
-        return self._request("clear_queue", **fields)
+        return parse_session_queue_clear_result(self._request("clear_queue", **fields))
 
-    def list_jobs(self) -> JsonObject:
-        return self._request("list_jobs")
+    def list_jobs(self) -> JobListResult:
+        return parse_job_list_result(self._request("list_jobs"))
 
-    def get_job(self, job_id: str) -> JsonObject:
-        return self._request("get_job", jobId=job_id)
+    def get_job(self, job_id: str) -> JobSnapshot | None:
+        payload = self._request("get_job", jobId=job_id)
+        if "job" not in payload:
+            raise ValueError("get_job.job is required")
+        raw_job = payload.get("job")
+        if raw_job is None:
+            return None
+        if not isinstance(raw_job, dict):
+            raise ValueError("get_job.job must be an object or null")
+        return parse_job_snapshot(cast(JsonObject, raw_job))
 
-    def cancel_jobs(self, job_ids: Sequence[str]) -> JsonObject:
-        return self._request("cancel_job", jobIds=list(job_ids))
+    def cancel_jobs(self, job_ids: Sequence[str]) -> CancelJobResult:
+        return parse_cancel_job_result(
+            self._request("cancel_job", jobIds=list(job_ids))
+        )
 
     def set_model(self, provider: str, model_id: str) -> ModelInfo:
         payload = self._request("set_model", provider=provider, modelId=model_id)
@@ -1806,14 +2016,24 @@ class RpcClient:
             self._event_condition.notify_all()
 
     def _remember_operation_result(self, terminal: RpcOperationTerminalEvent) -> None:
+        self._operation_errors.pop(terminal.operation_id, None)
         self._operation_results.pop(terminal.operation_id, None)
         if len(self._operation_results) >= 128:
             self._operation_results.pop(next(iter(self._operation_results)))
         self._operation_results[terminal.operation_id] = terminal
 
+    def _remember_operation_error(self, operation_id: str, error: RpcError) -> None:
+        self._operation_errors.pop(operation_id, None)
+        if len(self._operation_errors) >= 128:
+            self._operation_errors.pop(next(iter(self._operation_errors)))
+        self._operation_errors[operation_id] = error
+
     def _register_operation(self, operation_id: str) -> None:
         with self._event_condition:
-            if operation_id in self._operation_results:
+            if (
+                operation_id in self._operation_results
+                or operation_id in self._operation_errors
+            ):
                 return
             if (
                 not self._active_operation_ids
@@ -1829,13 +2049,21 @@ class RpcClient:
             return (
                 self._scheduled_agent_runs == self._completed_agent_runs
                 and not self._active_operation_ids
+                and not self._agent_streaming
             )
 
     def _check_async_errors(self) -> None:
         with self._event_condition:
+            operation_error = (
+                self._operation_errors.pop(next(iter(self._operation_errors)))
+                if self._operation_errors
+                else None
+            )
             errors = self._async_errors.snapshot_from(
                 self._last_schedule_async_error_index
             )
+        if operation_error is not None:
+            raise operation_error
         if errors:
             raise errors[0]
 
@@ -1965,6 +2193,9 @@ class RpcClient:
                         "Increase max_event_history to retain more streamed events."
                     )
 
+                operation_error = self._operation_errors.pop(operation_id, None)
+                if operation_error is not None:
+                    raise operation_error
                 terminal = self._operation_results.pop(operation_id, None)
                 if terminal is not None:
                     return tuple(
@@ -2306,6 +2537,14 @@ class RpcClient:
         listeners.append(typed_listener)
         return lambda: self._remove_listener(listeners, typed_listener)
 
+    def _add_typed_notification_listener(
+        self, event_type: str, listener: TEventListener
+    ) -> Callable[[], None]:
+        listeners = self._typed_notification_listeners.setdefault(event_type, [])
+        typed_listener = cast(NotificationListener, listener)
+        listeners.append(typed_listener)
+        return lambda: self._remove_listener(listeners, typed_listener)
+
     @staticmethod
     def _normalize_todo_phases(
         todos: Sequence[TodoSeed | TodoPhaseSeed],
@@ -2545,10 +2784,49 @@ class RpcClient:
                             RpcError(f"Failed to parse terminal agent_end: {exc}")
                         )
                         self._mark_agent_run_completed()
+                    if payload_type in (
+                        "operation_completed",
+                        "operation_failed",
+                        "operation_cancelled",
+                    ):
+                        operation_id = payload.get("operationId")
+                        with self._event_condition:
+                            if isinstance(operation_id, str):
+                                self._active_operation_ids.discard(operation_id)
+                            error = RpcError(
+                                f"Failed to parse terminal {payload_type}: {exc}"
+                            )
+                            if isinstance(operation_id, str):
+                                self._remember_operation_error(operation_id, error)
+                            else:
+                                self._async_errors.append(error)
+                            self._event_condition.notify_all()
+                if isinstance(notification, OperationStartedEvent):
+                    with self._event_condition:
+                        self._active_operation_ids.add(notification.operation_id)
+                        self._event_condition.notify_all()
+                elif isinstance(
+                    notification,
+                    (
+                        OperationCompletedEvent,
+                        OperationFailedEvent,
+                        OperationCancelledEvent,
+                    ),
+                ):
+                    with self._event_condition:
+                        self._active_operation_ids.discard(notification.operation_id)
+                        self._remember_operation_result(notification)
+                        self._event_condition.notify_all()
                 self._dispatch_listeners(
                     "notification",
                     notification.type,
                     self._notification_listeners,
+                    notification,
+                )
+                self._dispatch_listeners(
+                    "typed_notification",
+                    notification.type,
+                    self._typed_notification_listeners.get(notification.type, []),
                     notification,
                 )
 
@@ -2610,12 +2888,7 @@ class RpcClient:
                     continue
 
                 if isinstance(notification, OperationStartedEvent):
-                    with self._event_condition:
-                        if notification.operation_id not in self._operation_results:
-                            self._active_operation_ids.add(notification.operation_id)
-                        self._event_condition.notify_all()
                     continue
-
                 if isinstance(
                     notification,
                     (
@@ -2624,16 +2897,15 @@ class RpcClient:
                         OperationCancelledEvent,
                     ),
                 ):
-                    with self._event_condition:
-                        self._active_operation_ids.discard(notification.operation_id)
-                        self._remember_operation_result(notification)
-                        self._event_condition.notify_all()
                     self._dispatch_listeners(
                         "operation_terminal",
                         notification.type,
                         self._operation_terminal_listeners,
                         notification,
                     )
+                    continue
+
+                if notification.type not in _AGENT_EVENT_TYPES:
                     continue
 
                 event = cast(RpcAgentEvent, notification)

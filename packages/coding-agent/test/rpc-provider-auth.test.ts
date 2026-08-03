@@ -70,6 +70,7 @@ describe("provider auth controller", () => {
 			},
 		);
 		controller.begin("request-1", "openrouter", "api_key");
+		expect(frames).toEqual([]);
 		expect(() => controller.begin("request-2", "openrouter", "api_key")).toThrow(ProviderAuthError);
 		await Promise.all(tasks);
 		expect(received).toBe("secret-test-key");
@@ -273,7 +274,7 @@ describe("provider auth controller", () => {
 		releaseProvider();
 		await tasks[0];
 		expect(committed).toBeFalse();
-		expect(providerSignal?.aborted).toBeTrue();
+		expect(providerSignal).toBeUndefined();
 		expect(frames.some(frame => "type" in frame && frame.type === "provider_auth_update")).toBeFalse();
 		expect(frames).toContainEqual(
 			expect.objectContaining({
@@ -363,6 +364,33 @@ describe("provider auth controller", () => {
 			}),
 		);
 	});
+	test("reserves provider mutation across confirmation and blocks concurrent login", async () => {
+		const tasks: Promise<void>[] = [];
+		const fakeService = {
+			assertMethod: () => {},
+			login: async () => ({ state: state("openrouter", "api_key") }),
+		};
+		const controller = new ProviderAuthController(
+			fakeService as unknown as ProviderAuthService,
+			new RpcOperationManager(
+				() => {},
+				() => "op-after-removal",
+			),
+			() => {},
+			task => tasks.push(task),
+			async () => "unused",
+		);
+
+		const release = controller.reserveMutation();
+		expect(controller.hasMutationInFlight()).toBeTrue();
+		expect(() => controller.begin(undefined, "openrouter", "api_key")).toThrow(
+			expect.objectContaining({ code: "provider_auth_busy" }),
+		);
+		release();
+		expect(controller.hasMutationInFlight()).toBeFalse();
+		controller.begin(undefined, "openrouter", "api_key");
+		await Promise.all(tasks);
+	});
 });
 
 describe("provider auth removal", () => {
@@ -379,7 +407,7 @@ describe("provider auth removal", () => {
 			},
 		};
 		const service = new ProviderAuthService({ authStorage, refreshProvider: async () => {} } as never);
-		expect((await service.remove("openrouter")).authenticated).toBeFalse();
+		expect((await service.remove("openrouter")).state.authenticated).toBeFalse();
 		expect(removed).toBe(1);
 		for (const blocked of ["env", "runtime", "config", "fallback"] as const) {
 			origin = blocked;
@@ -388,5 +416,58 @@ describe("provider auth removal", () => {
 			});
 		}
 		expect(removed).toBe(1);
+	});
+
+	test("removes aliased credentials from canonical storage and refreshes every affected provider", async () => {
+		const removed: string[] = [];
+		const refreshed: string[] = [];
+		let stored = true;
+		const authStorage = {
+			hasAuth: (providerId: string) => providerId === "openai-codex" && stored,
+			getCredentialOrigin: (providerId: string) =>
+				providerId === "openai-codex" && stored ? { kind: "oauth" as const } : undefined,
+			getOAuthAccountIdentity: () => undefined,
+			remove: async (providerId: string) => {
+				removed.push(providerId);
+				stored = false;
+			},
+		};
+		const service = new ProviderAuthService({
+			authStorage,
+			refreshProvider: async (providerId: string) => {
+				refreshed.push(providerId);
+			},
+		} as never);
+
+		expect(service.credentialTarget("openai-codex-device")).toEqual({
+			storageProvider: "openai-codex",
+			affectedProviderIds: ["openai-codex", "openai-codex-device"],
+		});
+		const result = await service.remove("openai-codex-device");
+		expect(removed).toEqual(["openai-codex"]);
+		expect(refreshed).toEqual(["openai-codex", "openai-codex-device"]);
+		expect(result.states.map(item => item.providerId)).toEqual(["openai-codex", "openai-codex-device"]);
+		expect(result.states.every(item => !item.authenticated)).toBeTrue();
+	});
+
+	test("reports successful removal when provider refresh fails afterward", async () => {
+		let origin: CredentialOriginKind | undefined = "api_key";
+		const authStorage = {
+			hasAuth: () => origin !== undefined,
+			getCredentialOrigin: () => (origin ? { kind: origin } : undefined),
+			getOAuthAccountIdentity: () => undefined,
+			remove: async () => {
+				origin = undefined;
+			},
+		};
+		const service = new ProviderAuthService({
+			authStorage,
+			refreshProvider: async () => {
+				throw new Error("offline");
+			},
+		} as never);
+		const result = await service.remove("openrouter");
+		expect(result.state.authenticated).toBeFalse();
+		expect(origin).toBeUndefined();
 	});
 });

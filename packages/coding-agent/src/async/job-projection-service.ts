@@ -1,5 +1,5 @@
 import type { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import type { AgentRegistry } from "../registry/agent-registry";
+import type { AgentRef, AgentRegistry } from "../registry/agent-registry";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 import { truncateTailBytes } from "../session/streaming-output";
 import { MAX_OUTPUT_BYTES } from "../task/types";
@@ -19,6 +19,10 @@ export interface JobProjectionSnapshot {
 	jobs: JobSnapshot[];
 	agents: AgentActivitySnapshot[];
 }
+export type ResolvedJobCancellationTarget =
+	| { id: string; kind: "job"; target: AsyncJob }
+	| { id: string; kind: "agent"; target: AgentRef }
+	| { id: string; kind: "missing"; outcome: CancelOutcome };
 
 /** Shared owner-filtered job view and cancellation boundary used by hub and RPC. */
 export class JobProjectionService {
@@ -127,29 +131,50 @@ export class JobProjectionService {
 		return out;
 	}
 
-	async cancel(jobIds: readonly string[]): Promise<CancelOutcome[]> {
+	resolveCancellationTargets(jobIds: readonly string[]): ResolvedJobCancellationTarget[] {
 		if (jobIds.length > MAX_RPC_CANCEL_JOB_IDS) {
 			throw new Error(`At most ${MAX_RPC_CANCEL_JOB_IDS} background jobs may be cancelled at once`);
 		}
+		return jobIds.map(id => {
+			const job = this.#host.manager.getJob(id);
+			const agent = this.#ownedAgentRegistration(id);
+			if (this.#visible(job)) {
+				if (job.status !== "running" && agent) return { id, kind: "agent", target: agent };
+				return { id, kind: "job", target: job };
+			}
+			if (agent) return { id, kind: "agent", target: agent };
+			return { id, kind: "missing", outcome: this.#missingOutcome(id) };
+		});
+	}
+
+	async cancelResolved(targets: readonly ResolvedJobCancellationTarget[]): Promise<CancelOutcome[]> {
 		const outcomes: CancelOutcome[] = [];
 		const filter = this.#host.ownerId ? { ownerId: this.#host.ownerId } : undefined;
-		for (const id of jobIds) {
+		for (const resolved of targets) {
+			const { id } = resolved;
+			if (resolved.kind === "missing") {
+				outcomes.push(resolved.outcome);
+				continue;
+			}
+			if (resolved.kind === "agent") {
+				outcomes.push(await this.#cancelAgentRegistration(id, resolved.target));
+				continue;
+			}
 			const existing = this.#host.manager.getJob(id);
-			if (!this.#visible(existing)) {
-				outcomes.push(await this.#cancelAgentRegistration(id));
+			if (existing !== resolved.target || !this.#visible(existing)) {
+				outcomes.push({
+					id,
+					status: "not_found",
+					message: `Background job ${id} changed before it could be cancelled.`,
+				});
 				continue;
 			}
 			if (existing.status !== "running") {
-				const registration = await this.#cancelAgentRegistration(id);
-				outcomes.push(
-					registration.status === "cancelled"
-						? registration
-						: {
-								id,
-								status: "already_completed",
-								message: `Background job ${id} is already ${existing.status}.`,
-							},
-				);
+				outcomes.push({
+					id,
+					status: "already_completed",
+					message: `Background job ${id} is already ${existing.status}.`,
+				});
 				continue;
 			}
 			outcomes.push(
@@ -161,20 +186,40 @@ export class JobProjectionService {
 		return outcomes;
 	}
 
-	async #cancelAgentRegistration(id: string): Promise<CancelOutcome> {
-		const registry = this.#host.registry;
-		const ref = registry?.get(id);
+	async cancel(jobIds: readonly string[]): Promise<CancelOutcome[]> {
+		return this.cancelResolved(this.resolveCancellationTargets(jobIds));
+	}
+
+	#ownedAgentRegistration(id: string): AgentRef | undefined {
+		const ref = this.#host.registry?.get(id);
+		if (ref?.kind !== "sub" || id === this.#host.ownerId) return undefined;
+		if (this.#host.ownerId && ref.parentId !== this.#host.ownerId) return undefined;
+		return ref;
+	}
+
+	#missingOutcome(id: string): CancelOutcome {
+		const ref = this.#host.registry?.get(id);
 		if (ref?.kind !== "sub") return { id, status: "not_found", message: `Background job not found: ${id}` };
 		if (id === this.#host.ownerId) return { id, status: "not_found", message: `Cannot cancel yourself (${id}).` };
-		if (this.#host.ownerId && ref.parentId !== this.#host.ownerId) {
-			return { id, status: "not_found", message: `Agent ${id} was not spawned by you and cannot be cancelled.` };
+		return {
+			id,
+			status: "not_found",
+			message: `Agent ${id} was not spawned by you and cannot be cancelled.`,
+		};
+	}
+
+	async #cancelAgentRegistration(id: string, expected: AgentRef): Promise<CancelOutcome> {
+		const registry = this.#host.registry;
+		const ref = registry?.get(id);
+		if (!registry || ref !== expected || this.#ownedAgentRegistration(id) !== expected) {
+			return { id, status: "not_found", message: `Agent ${id} changed before it could be cancelled.` };
 		}
 		try {
 			if (ref.status === "running" && ref.session) await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
-			if (this.#host.lifecycle) await this.#host.lifecycle.release(id);
+			if (this.#host.lifecycle) await this.#host.lifecycle.release(id, expected);
 			else {
 				await ref.session?.dispose();
-				registry?.unregister(id);
+				registry.unregister(id, expected);
 			}
 		} catch (error) {
 			return {

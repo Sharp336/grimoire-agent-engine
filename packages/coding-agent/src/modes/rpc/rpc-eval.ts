@@ -66,6 +66,19 @@ export class RpcEvalOutputStream {
 		}
 	}
 
+	/** Reconciles the canonical final result without treating a dropped trailing line break as tail loss. */
+	complete(finalOutput: string): void {
+		if (
+			this.#closed ||
+			!this.isActive() ||
+			finalOutput === this.#observedTail ||
+			(this.#observedTail.startsWith(finalOutput) && this.#observedTail.slice(finalOutput.length).trim() === "")
+		) {
+			return;
+		}
+		this.push(finalOutput);
+	}
+
 	get truncated(): boolean {
 		return this.#truncated;
 	}

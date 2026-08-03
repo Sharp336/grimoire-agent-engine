@@ -1,11 +1,10 @@
 import type { CredentialOriginKind, OAuthLoginIdentity } from "@oh-my-pi/pi-ai";
 import { type OAuthProviderUnion, PROVIDER_REGISTRY, type ProviderDefinition } from "@oh-my-pi/pi-ai/registry";
-import { Snowflake } from "@oh-my-pi/pi-utils";
+import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { RpcOperationHandle, RpcOperationManager } from "../rpc/rpc-operations";
 
 export type ProviderAuthMethod = "oauth_callback" | "paste_code" | "device_code" | "api_key";
-
 
 export interface ProviderAuthMethodCapability {
 	method: ProviderAuthMethod;
@@ -105,6 +104,16 @@ export class ProviderAuthService {
 			throw new ProviderAuthError("provider_auth_provider_unavailable", "Provider authentication is unavailable");
 	}
 
+	credentialTarget(providerId: string): { storageProvider: string; affectedProviderIds: string[] } {
+		const definition = findDefinition(providerId);
+		const storageProvider = definition.storeCredentialsAs ?? definition.id;
+		const affectedProviderIds = PROVIDER_REGISTRY.filter(
+			candidate =>
+				candidate.login !== undefined && (candidate.storeCredentialsAs ?? candidate.id) === storageProvider,
+		).map(candidate => candidate.id);
+		return { storageProvider, affectedProviderIds };
+	}
+
 	async login(
 		providerId: string,
 		method: ProviderAuthMethod,
@@ -119,8 +128,9 @@ export class ProviderAuthService {
 			 */
 			onBeforePersist?: () => void;
 		},
-	): Promise<{ state: ProviderAuthState; identity?: OAuthLoginIdentity }> {
+	): Promise<{ state: ProviderAuthState; states: ProviderAuthState[]; identity?: OAuthLoginIdentity }> {
 		this.assertMethod(providerId, method);
+		const target = this.credentialTarget(providerId);
 		const identity = await this.modelRegistry.authStorage.login(providerId as OAuthProviderUnion, {
 			signal: callbacks.signal,
 			onAuth: callbacks.onAuth,
@@ -130,13 +140,18 @@ export class ProviderAuthService {
 		// AuthStorage returning means its authoritative persistence step committed.
 		// A cancellation racing after that boundary must not turn durable credentials
 		// into a cancelled terminal.
-		await this.modelRegistry.refreshProvider(providerId, "online");
-		return { state: this.get(providerId), identity };
+		await Promise.all(
+			target.affectedProviderIds.map(affectedProviderId =>
+				this.modelRegistry.refreshProvider(affectedProviderId, "online"),
+			),
+		);
+		const states = target.affectedProviderIds.map(affectedProviderId => this.get(affectedProviderId));
+		return { state: this.get(providerId), states, identity };
 	}
 
-	async remove(providerId: string): Promise<ProviderAuthState> {
+	async remove(providerId: string): Promise<{ state: ProviderAuthState; states: ProviderAuthState[] }> {
 		const definition = findDefinition(providerId);
-		const storageProvider = definition.storeCredentialsAs ?? providerId;
+		const target = this.credentialTarget(providerId);
 		const state = this.project(definition);
 		if (!state.authenticated)
 			throw new ProviderAuthError("provider_auth_not_authenticated", "Provider is not authenticated");
@@ -146,9 +161,21 @@ export class ProviderAuthService {
 				"This credential origin cannot be removed through provider authentication",
 			);
 		}
-		await this.modelRegistry.authStorage.remove(storageProvider);
-		await this.modelRegistry.refreshProvider(providerId, "online");
-		return this.get(providerId);
+		await this.modelRegistry.authStorage.remove(target.storageProvider);
+		await Promise.all(
+			target.affectedProviderIds.map(async affectedProviderId => {
+				try {
+					await this.modelRegistry.refreshProvider(affectedProviderId, "online");
+				} catch (error) {
+					logger.warn("Provider credentials were removed, but provider discovery refresh failed", {
+						providerId: affectedProviderId,
+						error: String(error),
+					});
+				}
+			}),
+		);
+		const states = target.affectedProviderIds.map(affectedProviderId => this.get(affectedProviderId));
+		return { state: this.get(providerId), states };
 	}
 
 	private project(definition: ProviderDefinition): ProviderAuthState {
@@ -177,7 +204,6 @@ export class ProviderAuthService {
 	}
 }
 
-
 type ActiveAuthOperation = {
 	handle: RpcOperationHandle;
 	providerId: string;
@@ -194,6 +220,7 @@ export type ProviderAuthCancellationResult = "cancelled" | "protected" | "not_fo
 export class ProviderAuthController {
 	#active: ActiveAuthOperation | undefined;
 	#closed = false;
+	#mutationReservation: symbol | undefined;
 
 	constructor(
 		private readonly service: ProviderAuthService,
@@ -212,7 +239,7 @@ export class ProviderAuthController {
 
 	begin(requestId: string | undefined, providerId: string, method: ProviderAuthMethod): RpcOperationHandle {
 		if (this.#closed) throw new ProviderAuthError("provider_auth_disconnected", "Provider authentication is closed");
-		if (this.#active)
+		if (this.#active || this.#mutationReservation)
 			throw new ProviderAuthError(
 				"provider_auth_busy",
 				"Another provider authentication operation is already active",
@@ -227,10 +254,32 @@ export class ProviderAuthController {
 			commitStarted: false,
 		};
 		this.#active = active;
-		const task = this.run(active);
+		const task = new Promise<void>((resolve, reject) => {
+			setImmediate(() => {
+				this.run(active).then(resolve, reject);
+			});
+		});
 		active.task = task;
 		this.trackTask(task);
 		return handle;
+	}
+
+	reserveMutation(): () => void {
+		if (this.#closed) throw new ProviderAuthError("provider_auth_disconnected", "Provider authentication is closed");
+		if (this.#active || this.#mutationReservation)
+			throw new ProviderAuthError(
+				"provider_auth_busy",
+				"Another provider authentication operation is already active",
+			);
+		const reservation = Symbol("provider-auth-mutation");
+		this.#mutationReservation = reservation;
+		return () => {
+			if (this.#mutationReservation === reservation) this.#mutationReservation = undefined;
+		};
+	}
+
+	hasMutationInFlight(): boolean {
+		return this.#mutationReservation !== undefined;
 	}
 
 	cancel(
@@ -250,6 +299,10 @@ export class ProviderAuthController {
 		this.operations.cancel(active.handle.operationId, reason, code);
 		return "cancelled";
 	}
+	protectedOperationIds(): ReadonlySet<string> {
+		const active = this.#active;
+		return active?.commitStarted ? new Set([active.handle.operationId]) : new Set();
+	}
 
 	cancelAll(
 		reason: "user" | "replaced" | "session_transition" | "client_disconnected",
@@ -267,7 +320,10 @@ export class ProviderAuthController {
 	}
 
 	private async run(active: ActiveAuthOperation): Promise<void> {
-		this.operations.begin(active.handle);
+		if (!this.operations.begin(active.handle)) {
+			if (this.#active?.handle.operationId === active.handle.operationId) this.#active = undefined;
+			return;
+		}
 		try {
 			const result = await this.service.login(active.providerId, active.method, {
 				signal: active.abortController.signal,
@@ -290,7 +346,9 @@ export class ProviderAuthController {
 				},
 			});
 			if (!this.operations.isActive(active.handle)) return;
-			this.output({ type: "provider_auth_update", state: result.state });
+			for (const state of result.states ?? [result.state]) {
+				this.output({ type: "provider_auth_update", state });
+			}
 			this.operations.complete(active.handle, false, { state: result.state });
 		} catch (error) {
 			if (!this.operations.isActive(active.handle)) return;

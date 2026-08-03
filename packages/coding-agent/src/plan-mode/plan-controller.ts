@@ -215,6 +215,16 @@ export class PlanModeController {
 	async disable(): Promise<void> {
 		const wasActive = this.active;
 		if (wasActive) await this.#exit({ paused: false });
+		const pendingApproval = this.#pendingApproval;
+		if (pendingApproval) {
+			this.#pendingApproval = undefined;
+			await this.#settle({
+				approvalId: pendingApproval.approvalId,
+				decision: "reject",
+				executionDispatched: false,
+				planFilePath: pendingApproval.planFilePath,
+			});
+		}
 		this.#session.setPlanProposalHandler(null);
 		this.#session.setPlanModeState(undefined);
 		this.#pendingApproval = undefined;
@@ -259,10 +269,20 @@ export class PlanModeController {
 	}
 
 	async clearTransientState(options?: { restoreTools?: boolean }): Promise<void> {
+		const pendingApproval = this.#pendingApproval;
+		if (pendingApproval) {
+			this.#pendingApproval = undefined;
+			await this.#settle({
+				approvalId: pendingApproval.approvalId,
+				decision: "reject",
+				executionDispatched: false,
+				planFilePath: pendingApproval.planFilePath,
+			});
+		}
 		const shouldRestore = options?.restoreTools !== false && this.active && this.#previousTools !== undefined;
 		this.#session.setPlanProposalHandler(null);
 		this.#session.setPlanModeState(undefined);
-		this.#pendingApproval = undefined;
+
 		try {
 			if (shouldRestore && this.#previousTools) await this.#session.setActiveToolsByName(this.#previousTools);
 		} finally {

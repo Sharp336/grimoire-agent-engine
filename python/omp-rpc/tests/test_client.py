@@ -15,10 +15,12 @@ from pathlib import Path
 
 from omp_rpc import (
     AgentEndEvent,
+    ExtensionUiRequest,
     RpcClient,
     RpcCommandError,
     RpcConcurrencyError,
     RpcError,
+    RpcTimeoutError,
     host_tool,
 )
 from omp_rpc.client import _RpcFrameDecoder
@@ -281,7 +283,20 @@ FAKE_SERVER = textwrap.dedent(
         request_id = command.get("id")
 
         if command_type == "extension_ui_response":
-            emit_prompt_turn("ui acknowledged")
+            if command["id"] in {"ui-privileged", "ui-bash"}:
+                expected_operation_id = (
+                    "operation-bash"
+                    if command["id"] == "ui-bash"
+                    else "operation-eval"
+                )
+                text = (
+                    "ui correlated"
+                    if command.get("operationId") == expected_operation_id
+                    else "ui correlation missing"
+                )
+                emit_prompt_turn(text)
+            else:
+                emit_prompt_turn("ui acknowledged")
             continue
 
         if command_type == "get_capabilities":
@@ -357,9 +372,9 @@ FAKE_SERVER = textwrap.dedent(
                 request_id,
                 "set_mode",
                 {
-                    **plan_state,
-                    "deferred": command.get("when") == "next_idle",
                     "operationId": operation_id,
+                    "accepted": True,
+                    "deferred": command.get("when") == "next_idle",
                 },
             )
             print(
@@ -389,6 +404,115 @@ FAKE_SERVER = textwrap.dedent(
             )
         elif command_type == "get_plan":
             respond(request_id, "get_plan", plan_state)
+        elif command_type == "get_queue":
+            queue_snapshot = {
+                "steering": [
+                    {
+                        "entryId": "queue-1",
+                        "lane": "steering",
+                        "text": "Steer now",
+                        "operationId": "operation-prompt",
+                    }
+                ],
+                "followUp": [],
+                "rowCount": 1,
+                "displayableCount": 1,
+                "pendingCount": 1,
+                "pendingNextTurnCount": 0,
+            }
+            print(
+                json.dumps({"type": "queue_update", "queue": queue_snapshot}),
+                flush=True,
+            )
+            respond(request_id, "get_queue", queue_snapshot)
+        elif command_type == "remove_queued_message":
+            respond(
+                request_id,
+                "remove_queued_message",
+                {
+                    "removed": {"text": "Steer now"},
+                    "queue": {
+                        "steering": [],
+                        "followUp": [],
+                        "rowCount": 0,
+                        "displayableCount": 0,
+                        "pendingCount": 0,
+                        "pendingNextTurnCount": 0,
+                    },
+                },
+            )
+        elif command_type == "reorder_queued_message":
+            respond(
+                request_id,
+                "reorder_queued_message",
+                {
+                    "steering": [],
+                    "followUp": [],
+                    "rowCount": 0,
+                    "displayableCount": 0,
+                    "pendingCount": 0,
+                    "pendingNextTurnCount": 0,
+                },
+            )
+        elif command_type == "clear_queue":
+            empty_queue = {
+                "steering": [],
+                "followUp": [],
+                "rowCount": 0,
+                "displayableCount": 0,
+                "pendingCount": 0,
+                "pendingNextTurnCount": 0,
+            }
+            respond(
+                request_id,
+                "clear_queue",
+                {"steering": [], "followUp": [], "snapshot": empty_queue},
+            )
+        elif command_type == "list_jobs":
+            jobs = [
+                {
+                    "id": "job-1",
+                    "type": "task",
+                    "status": "running",
+                    "label": "Review",
+                    "durationMs": 25,
+                    "queued": False,
+                }
+            ]
+            agents = [{"id": "AgentA", "ageMs": 50, "activity": "Reading"}]
+            print(
+                json.dumps({"type": "job_update", "jobs": jobs, "agents": agents}),
+                flush=True,
+            )
+            respond(request_id, "list_jobs", {"jobs": jobs, "agents": agents})
+        elif command_type == "get_job":
+            respond(
+                request_id,
+                "get_job",
+                {
+                    "job": {
+                        "id": "job-1",
+                        "type": "task",
+                        "status": "running",
+                        "label": "Review",
+                        "durationMs": 25,
+                    }
+                },
+            )
+        elif command_type == "cancel_job":
+            respond(
+                request_id,
+                "cancel_job",
+                {
+                    "outcomes": [
+                        {
+                            "id": command["jobIds"][0],
+                            "status": "cancelled",
+                            "message": "Cancelled",
+                        }
+                    ]
+                },
+            )
         elif command_type == "resolve_plan_approval":
             operation_id = "operation-resolve-plan"
             respond(
@@ -533,6 +657,38 @@ FAKE_SERVER = textwrap.dedent(
                 continue
             if message == "needs confirm":
                 print(json.dumps({"type": "extension_ui_request", "id": "ui-2", "method": "confirm", "title": "Confirm", "message": "Continue?"}), flush=True)
+                continue
+            if message == "needs privileged confirm":
+                print(
+                    json.dumps(
+                        {
+                            "type": "extension_ui_request",
+                            "id": "ui-privileged",
+                            "method": "confirm",
+                            "title": "Run eval code?",
+                            "message": "display(2 + 2)",
+                            "operationId": "operation-eval",
+                            "command": "eval_execute",
+                        }
+                    ),
+                    flush=True,
+                )
+                continue
+            if message == "needs bash confirmation":
+                print(
+                    json.dumps(
+                        {
+                            "type": "extension_ui_request",
+                            "id": "ui-bash",
+                            "method": "confirm",
+                            "title": "Run bash command?",
+                            "message": "printf hello",
+                            "operationId": "operation-bash",
+                            "command": "bash",
+                        }
+                    ),
+                    flush=True,
+                )
                 continue
             if message == "needs cancel":
                 print(json.dumps({"type": "extension_ui_request", "id": "ui-3", "method": "editor", "title": "Edit", "placeholder": "value"}), flush=True)
@@ -1104,6 +1260,22 @@ OPERATION_SERVER = textwrap.dedent(
             flush=True,
         )
         active[operation_id] = request_id
+        if command["message"] == "malformed operation":
+            active.pop(operation_id, None)
+            print(
+                json.dumps(
+                    {
+                        "type": "operation_completed",
+                        "operationId": operation_id,
+                        "requestId": request_id,
+                        "command": "prompt",
+                        "agentInvoked": False,
+                        "settledAt": "invalid",
+                    }
+                ),
+                flush=True,
+            )
+            continue
         if command["message"] == "hold":
             continue
         if command["message"] == "local":
@@ -1377,6 +1549,7 @@ class RpcClientTests(unittest.TestCase):
                 },
             ),
         )
+
     def test_advisor_state_methods_preserve_authoritative_runtime_state(self) -> None:
         with self.make_client() as client:
             configured = client.get_advisor_state()
@@ -1388,6 +1561,12 @@ class RpcClientTests(unittest.TestCase):
         self.assertFalse(disabled.configured)
         self.assertFalse(disabled.active)
         self.assertEqual(disabled.advisors[0].status, "paused")
+
+    def test_wait_for_idle_does_not_fast_path_while_streaming(self) -> None:
+        client = RpcClient()
+        client._agent_streaming = True
+        with self.assertRaises(RpcTimeoutError):
+            client.wait_for_idle(timeout=0)
 
     def test_prompt_operations_settle_without_guessing_from_agent_end(self) -> None:
         terminal_types: list[str] = []
@@ -1418,6 +1597,32 @@ class RpcClientTests(unittest.TestCase):
 
         self.assertEqual(turn.events, ())
         self.assertEqual(terminal_types, ["operation_failed"])
+
+    def test_operation_state_is_current_for_listeners_and_malformed_terminal(
+        self,
+    ) -> None:
+        started_with_active_state: list[bool] = []
+        unknown_errors: list[str | None] = []
+        with self.make_client(OPERATION_SERVER) as client:
+            client.on_operation_started(
+                lambda event: started_with_active_state.append(
+                    event.operation_id in client._active_operation_ids
+                )
+            )
+            client.on_unknown_notification(
+                lambda event: unknown_errors.append(event.parse_error)
+            )
+            operation_id = client.prompt("malformed operation")
+            self.assertIsNotNone(operation_id)
+            with self.assertRaisesRegex(
+                RpcError, "Failed to parse terminal operation_completed"
+            ):
+                client.wait_for_idle(timeout=1.0)
+            self.assertNotIn(operation_id, client._active_operation_ids)
+
+        self.assertEqual(started_with_active_state, [True])
+        self.assertEqual(len(unknown_errors), 1)
+        self.assertIn("settledAt", unknown_errors[0] or "")
 
     def test_wait_for_idle_tracks_local_prompt_operation(self) -> None:
         with self.make_client(OPERATION_SERVER) as client:
@@ -1674,6 +1879,32 @@ class RpcClientTests(unittest.TestCase):
 
         self.assertEqual(seen_methods, ["input"])
 
+    def test_install_headless_ui_preserves_privileged_correlation(self) -> None:
+        with self.make_client() as client:
+            client.install_headless_ui(confirm=True)
+            turn = client.prompt_and_wait("needs privileged confirm", timeout=2.0)
+
+        self.assertEqual(turn.require_assistant_text(), "ui correlated")
+
+    def test_bash_confirmation_stays_typed_and_correlated(self) -> None:
+        requests = []
+        unknown_notifications = []
+
+        with self.make_client() as client:
+            client.on_unknown_notification(unknown_notifications.append)
+            client.install_headless_ui(
+                confirm=True,
+                on_request=requests.append,
+            )
+            turn = client.prompt_and_wait("needs bash confirmation", timeout=2.0)
+
+        self.assertEqual(len(requests), 1)
+        self.assertIsInstance(requests[0], ExtensionUiRequest)
+        self.assertEqual(requests[0].command, "bash")
+        self.assertEqual(requests[0].operation_id, "operation-bash")
+        self.assertEqual(unknown_notifications, [])
+        self.assertEqual(turn.require_assistant_text(), "ui correlated")
+
     def test_ready_and_typed_event_listeners(self) -> None:
         ready_types: list[str] = []
         event_types: list[str] = []
@@ -1712,13 +1943,17 @@ class RpcClientTests(unittest.TestCase):
             self.assertEqual(state.todo_phases[0].tasks[1].content, "Exercise edits")
 
     def test_plan_workflow_commands(self) -> None:
+        started_operations = []
         with self.make_client() as client:
+            client.on_operation_started(started_operations.append)
             operation_id = client.set_mode(
                 "plan",
                 plan_file_path="local://REVIEW.md",
                 workflow="iterative",
             )
-            self.assertEqual(operation_id, "operation-set-mode")
+            self.assertEqual(operation_id.operation_id, "operation-set-mode")
+            self.assertTrue(operation_id.accepted)
+            self.assertFalse(operation_id.deferred)
             state = client.get_state()
             self.assertEqual(state.mode, "plan")
             self.assertEqual(state.plan.plan_file_path, "local://REVIEW.md")
@@ -1731,6 +1966,33 @@ class RpcClientTests(unittest.TestCase):
                 feedback="Revise the rollback section.",
             )
             self.assertEqual(approval_operation, "operation-resolve-plan")
+        self.assertEqual(started_operations[0].operation_id, "operation-set-mode")
+
+    def test_queue_and_job_commands_return_typed_models(self) -> None:
+        agent_events = []
+        queue_updates = []
+        job_updates = []
+        with self.make_client() as client:
+            client.on_event(agent_events.append)
+            client.on_queue_update(queue_updates.append)
+            client.on_job_update(job_updates.append)
+            queue = client.get_queue()
+            self.assertEqual(queue.steering[0].entry_id, "queue-1")
+            self.assertEqual(queue.steering[0].operation_id, "operation-prompt")
+            removed = client.remove_queued_message("queue-1")
+            self.assertEqual(removed.removed.text, "Steer now")
+            cleared = client.clear_queue("all")
+            self.assertEqual(cleared.snapshot.pending_count, 0)
+            jobs = client.list_jobs()
+            self.assertEqual(jobs.jobs[0].duration_ms, 25.0)
+            self.assertEqual(jobs.agents[0].activity, "Reading")
+            self.assertEqual(client.get_job("job-1").label, "Review")
+            cancelled = client.cancel_jobs(["job-1"])
+            self.assertEqual(cancelled.outcomes[0].status, "cancelled")
+
+        self.assertEqual(queue_updates[0].queue.row_count, 1)
+        self.assertEqual(job_updates[0].jobs[0].id, "job-1")
+        self.assertEqual(agent_events, [])
 
     def test_model_mode_and_session_commands(self) -> None:
         with self.make_client() as client:
@@ -2317,6 +2579,7 @@ class ProviderAuthClientTests(unittest.TestCase):
         inventory = client.list_provider_auth()
         self.assertEqual(inventory[0].methods[0].method, "future_method")
         operation_id = client.begin_provider_auth("openrouter", "future_method")
+        self.assertIn(operation_id, client._active_operation_ids)
 
         self.assertEqual(
             client.cancel_provider_auth(operation_id).status, "future_status"

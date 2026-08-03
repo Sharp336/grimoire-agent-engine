@@ -55,6 +55,23 @@ describe("RpcOperationManager", () => {
 		expect(frames.filter(frame => frame.type === "operation_cancelled")).toHaveLength(1);
 	});
 
+	test("reports active commands from acceptance through settlement", () => {
+		const manager = new RpcOperationManager(
+			() => {},
+			() => "operation-1",
+		);
+		const operation = manager.start("request-1", "set_mode");
+
+		expect(manager.hasActiveCommand("set_mode")).toBe(true);
+		expect(manager.hasActiveCommand("resolve_plan_approval")).toBe(false);
+
+		manager.begin(operation);
+		expect(manager.hasActiveCommand("set_mode")).toBe(true);
+
+		manager.complete(operation, false);
+		expect(manager.hasActiveCommand("set_mode")).toBe(false);
+	});
+
 	test("bulk cancellation preserves explicitly protected operations", () => {
 		let sequence = 0;
 		const manager = new RpcOperationManager(
@@ -119,6 +136,30 @@ describe("RpcOperationManager", () => {
 			expect.objectContaining({ operationId: followUp.operationId }),
 			expect.objectContaining({ operationId: active.operationId }),
 		]);
+	});
+
+	test("an untagged message start clears stale active operation ownership", async () => {
+		const manager = new RpcOperationManager(
+			() => {},
+			() => "operation-active",
+		);
+		const operation = manager.start("request-active", "prompt");
+		manager.begin(operation);
+		const tagged: AgentMessage = { role: "user", content: "tagged", timestamp: 1 };
+		const untagged: AgentMessage = { role: "user", content: "untagged", timestamp: 2 };
+		let abortCount = 0;
+		const ownership = new RpcOperationMessageOwnership({
+			getMessageTag: message => (message === tagged ? operation.operationId : undefined),
+			removeQueuedMessagesByTag: () => 0,
+			abort: async () => {
+				abortCount++;
+			},
+		});
+
+		ownership.observeMessageStart(tagged);
+		ownership.observeMessageStart(untagged);
+		expect((await ownership.cancel(manager, operation.operationId)).status).toBe("cancelled");
+		expect(abortCount).toBe(0);
 	});
 
 	test("snapshot retains bounded recent outcomes and distinguishes accepted from started", () => {

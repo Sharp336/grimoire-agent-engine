@@ -3369,6 +3369,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						);
 						return tools.filter((tool): tool is AgentTool => tool !== null);
 					},
+			createEvalTool: restrictToolNames ? undefined : () => new EvalTool(toolSession),
 			createComputerTool: restrictToolNames
 				? undefined
 				: async () => (await BUILTIN_TOOLS.computer(toolSession)) ?? null,
