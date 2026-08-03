@@ -1,6 +1,6 @@
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { abortableSleep, prompt } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import wakeupDescription from "../prompts/tools/wakeup.md" with { type: "text" };
 import wakeupFiredTemplate from "../prompts/tools/wakeup-fired.md" with { type: "text" };
@@ -30,24 +30,11 @@ export interface WakeupDetails {
 }
 
 async function waitForDelay(delayMs: number, signal: AbortSignal): Promise<void> {
-	const { promise, resolve, reject } = Promise.withResolvers<void>();
-	const timer: NodeJS.Timeout = setTimeout(resolve, delayMs);
-	const abort = (): void => {
-		clearTimeout(timer);
-		reject(new ToolAbortError());
-	};
-
-	if (signal.aborted) {
-		abort();
-	} else {
-		signal.addEventListener("abort", abort, { once: true });
-	}
-
 	try {
-		await promise;
-	} finally {
-		clearTimeout(timer);
-		signal.removeEventListener("abort", abort);
+		await abortableSleep(delayMs, signal);
+	} catch (error) {
+		if (signal.aborted) throw new ToolAbortError(undefined, { cause: error });
+		throw error;
 	}
 }
 

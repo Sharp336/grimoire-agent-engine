@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 82709)
+Total output lines: 8508
+
 /**
  * AgentSession - Core abstraction for agent lifecycle and session management.
  *
@@ -1801,6 +1804,7 @@ export class AgentSession {
 			if (job.type === "wakeup") continue;
 			manager.cancel(job.id, ownerFilter);
 		}
+		manager.evictCompletedJobs(ownerFilter, { preserveTypes: ["wakeup"] });
 		// Invalidate this owner's in-flight/drained deliveries against the new
 		// generation, then drop any async-result follow-up already queued, so a
 		// prior session's background result cannot inject into the next transcript.

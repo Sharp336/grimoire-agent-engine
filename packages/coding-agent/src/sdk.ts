@@ -3295,6 +3295,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		};
 		const advisorToolBuilds: Array<Tool | null | Promise<Tool | null>> = [];
 		for (const name in BUILTIN_TOOLS) {
+			// Advisors do not own a resumable turn loop. A delayed wakeup would
+			// otherwise be delivered into the primary session with the advisor's
+			// instruction, so it must not be grantable from WATCHDOG.yml.
+			if (name === "wakeup") continue;
 			advisorToolBuilds.push(BUILTIN_TOOLS[name as keyof typeof BUILTIN_TOOLS](advisorToolSession));
 		}
 		const built = await Promise.all(advisorToolBuilds);

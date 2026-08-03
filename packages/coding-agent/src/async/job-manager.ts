@@ -129,6 +129,11 @@ export interface AsyncJobFilter {
 	ownerId?: string;
 }
 
+export interface AsyncJobEvictionOptions {
+	/** Settled job types to retain while evicting other matching jobs. */
+	preserveTypes?: readonly AsyncJob["type"][];
+}
+
 export class AsyncJobManager {
 	static #instance: AsyncJobManager | undefined;
 
@@ -462,10 +467,12 @@ export class AsyncJobManager {
 	 * yield queue) is guarded by the owner's delivery generation, not the per-id
 	 * suppression marker — that marker is cleared when the id is reused.
 	 */
-	evictCompletedJobs(filter?: AsyncJobFilter): number {
+	evictCompletedJobs(filter?: AsyncJobFilter, options?: AsyncJobEvictionOptions): number {
 		let evicted = 0;
+		const preserveTypes = new Set(options?.preserveTypes);
 		for (const job of this.#filterJobs(this.#jobs.values(), filter)) {
 			if (job.status !== "completed" && job.status !== "failed") continue;
+			if (preserveTypes.has(job.type)) continue;
 			this.acknowledgeDeliveries([job.id]);
 			if (this.#evictJob(job.id)) evicted += 1;
 		}
