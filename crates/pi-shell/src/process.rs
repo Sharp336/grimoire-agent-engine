@@ -2,6 +2,7 @@
 
 use std::{
 	collections::{HashMap, HashSet},
+	sync::Arc,
 	time::Duration,
 };
 
@@ -1682,6 +1683,21 @@ impl TerminationTargets {
 		}
 	}
 
+	/// Merge another target set while keeping process and group ids unique.
+	pub fn extend(&mut self, other: Self) {
+		for pgid in other.pgids {
+			self.add_pgid(pgid);
+		}
+		for process in other.processes {
+			self.add_process(process);
+		}
+	}
+
+	/// Iterate over the stable process references in this target set.
+	pub fn processes(&self) -> impl Iterator<Item = &Process> {
+		self.processes.iter()
+	}
+
 	/// True when no targets have been recorded.
 	#[must_use]
 	pub const fn is_empty(&self) -> bool {
@@ -1740,9 +1756,15 @@ struct RegistryState {
 	next_sweep_at: usize,
 }
 
-#[derive(Default)]
 pub struct SpawnRegistry {
-	state: Mutex<RegistryState>,
+	state:  Mutex<RegistryState>,
+	mirror: Option<Arc<Self>>,
+}
+
+impl Default for SpawnRegistry {
+	fn default() -> Self {
+		Self { state: Mutex::new(RegistryState::default()), mirror: None }
+	}
 }
 
 impl SpawnRegistry {
@@ -1768,6 +1790,13 @@ impl SpawnRegistry {
 		Self::default()
 	}
 
+	/// Create a per-run registry that also records each spawn in a persistent
+	/// session registry.
+	#[must_use]
+	pub fn with_mirror(mirror: Arc<Self>) -> Self {
+		Self { state: Mutex::new(RegistryState::default()), mirror: Some(mirror) }
+	}
+
 	/// Record a freshly spawned child. Called from the spawn-observer hook.
 	///
 	/// The `Process` handle MUST be opened by the caller *immediately* after
@@ -1781,6 +1810,7 @@ impl SpawnRegistry {
 	/// external commands cannot exhaust the process' FD/handle limit by
 	/// retaining one owned handle per historical spawn.
 	pub fn record(&self, pgid: Option<i32>, process: Option<Process>) {
+		let mirrored_process = process.clone();
 		let mut state = self.state.lock();
 		state.spawned.push(SpawnedProcess { process, pgid });
 		if state.spawned.len() >= state.next_sweep_at.max(Self::PRUNE_THRESHOLD) {
@@ -1792,6 +1822,10 @@ impl SpawnRegistry {
 			// `PRUNE_THRESHOLD` records, so amortized per-record cost is O(1)
 			// even if the live set stays large.
 			state.next_sweep_at = state.spawned.len() + Self::PRUNE_THRESHOLD;
+		}
+		drop(state);
+		if let Some(mirror) = &self.mirror {
+			mirror.record(pgid, mirrored_process);
 		}
 	}
 

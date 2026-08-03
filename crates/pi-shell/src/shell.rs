@@ -7,7 +7,7 @@ use std::{
 	io::{self, BufRead, Write},
 	path::{Path, PathBuf},
 	str,
-	sync::Arc,
+	sync::{Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard},
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -28,7 +28,10 @@ use flume::Sender;
 use jiff::{Timestamp, fmt::strtime, tz::TimeZone};
 #[cfg(not(unix))]
 use tokio::io::AsyncReadExt as _;
-use tokio::{sync::Mutex as TokioMutex, time};
+use tokio::{
+	sync::{Mutex as TokioMutex, Notify},
+	time,
+};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(windows)]
@@ -39,26 +42,109 @@ use crate::{
 };
 
 struct ShellSessionCore {
-	shell: BrushShell,
+	shell:               BrushShell,
+	background_registry: Arc<process::SpawnRegistry>,
+}
+
+#[derive(Default)]
+struct ShellAbortStatus {
+	active_runs: HashMap<u64, AbortToken>,
+	run_waiters: Vec<Arc<Notify>>,
+	next_run_id: u64,
+	closed:      bool,
 }
 
 #[derive(Clone, Default)]
-struct ShellAbortState(Arc<TokioMutex<Option<AbortToken>>>);
+struct ShellAbortState(Arc<StdMutex<ShellAbortStatus>>);
+
+struct ShellRunLease {
+	state:  ShellAbortState,
+	run_id: u64,
+}
+
+struct CancelRunOnDrop(CancellationToken);
+
+impl Drop for CancelRunOnDrop {
+	fn drop(&mut self) {
+		self.0.cancel();
+	}
+}
+
+impl Drop for ShellRunLease {
+	fn drop(&mut self) {
+		let waiters = {
+			let mut status = self.state.lock();
+			status.active_runs.remove(&self.run_id);
+			if status.active_runs.is_empty() {
+				std::mem::take(&mut status.run_waiters)
+			} else {
+				Vec::new()
+			}
+		};
+		for waiter in waiters {
+			waiter.notify_one();
+		}
+	}
+}
 
 impl ShellAbortState {
-	async fn set(&self, abort_token: AbortToken) {
-		*self.0.lock().await = Some(abort_token);
+	fn lock(&self) -> StdMutexGuard<'_, ShellAbortStatus> {
+		match self.0.lock() {
+			Ok(status) => status,
+			Err(poisoned) => poisoned.into_inner(),
+		}
 	}
 
-	async fn clear(&self) {
-		*self.0.lock().await = None;
+	fn register(&self, abort_token: AbortToken) -> Option<ShellRunLease> {
+		let mut status = self.lock();
+		if status.closed {
+			abort_token.abort(AbortReason::Signal);
+			return None;
+		}
+		let run_id = status.next_run_id;
+		status.next_run_id = status.next_run_id.wrapping_add(1);
+		status.active_runs.insert(run_id, abort_token);
+		Some(ShellRunLease { state: self.clone(), run_id })
 	}
 
-	async fn abort(&self) {
-		let abort_token = self.0.lock().await.clone();
-		if let Some(abort_token) = abort_token {
+	fn abort(&self) {
+		let abort_tokens = self
+			.lock()
+			.active_runs
+			.values()
+			.cloned()
+			.collect::<Vec<_>>();
+		for abort_token in abort_tokens {
 			abort_token.abort(AbortReason::Signal);
 		}
+	}
+
+	fn close(&self) {
+		let abort_tokens = {
+			let mut status = self.lock();
+			status.closed = true;
+			status.active_runs.values().cloned().collect::<Vec<_>>()
+		};
+		for abort_token in abort_tokens {
+			abort_token.abort(AbortReason::Signal);
+		}
+	}
+
+	fn is_closed(&self) -> bool {
+		self.lock().closed
+	}
+
+	async fn wait_for_runs(&self) {
+		let waiter = {
+			let mut status = self.lock();
+			if status.active_runs.is_empty() {
+				return;
+			}
+			let waiter = Arc::new(Notify::new());
+			status.run_waiters.push(waiter.clone());
+			waiter
+		};
+		waiter.notified().await;
 	}
 }
 
@@ -141,9 +227,10 @@ pub struct ShellExecuteOptions {
 pub type ShellExecuteResult = ShellRunResult;
 
 pub struct Shell {
-	session:     Arc<TokioMutex<Option<ShellSessionCore>>>,
-	abort_state: ShellAbortState,
-	config:      ShellConfig,
+	session:             Arc<TokioMutex<Option<ShellSessionCore>>>,
+	abort_state:         ShellAbortState,
+	background_registry: Arc<process::SpawnRegistry>,
+	config:              ShellConfig,
 }
 
 impl Shell {
@@ -166,6 +253,7 @@ impl Shell {
 		Self {
 			session: Arc::new(TokioMutex::new(None)),
 			abort_state: ShellAbortState::default(),
+			background_registry: Arc::new(process::SpawnRegistry::new()),
 			config,
 		}
 	}
@@ -176,6 +264,11 @@ impl Shell {
 		on_chunk: Option<Sender<String>>,
 		mut cancel_token: CancelToken,
 	) -> Result<ShellRunResult> {
+		let abort_token = cancel_token.emplace_abort_token();
+		let run_lease = self
+			.abort_state
+			.register(abort_token)
+			.ok_or_else(|| Error::msg("Shell session is closed"))?;
 		let run_config = ShellRunConfig {
 			command:   options.command,
 			cwd:       options.cwd,
@@ -188,13 +281,36 @@ impl Shell {
 			self.config.clone(),
 			run_config,
 			on_chunk,
-			&mut cancel_token,
+			&cancel_token,
+			self.background_registry.clone(),
+			Some(run_lease),
 		)
 		.await
 	}
 
-	pub async fn abort(&self) {
-		self.abort_state.abort().await;
+	pub fn abort(&self) {
+		self.abort_state.abort();
+	}
+
+	/// Mark the shell closed and synchronously signal all registered runs.
+	///
+	/// This is used by host wrappers whose destructor cannot await
+	/// [`Self::close`].
+	pub fn close_now(&self) {
+		self.abort_state.close();
+	}
+
+	/// Stop active work and release the persistent session.
+	///
+	/// Closing is terminal and idempotent. Future calls to [`Self::run`] fail.
+	pub async fn close(&self) {
+		self.close_now();
+		self.abort_state.wait_for_runs().await;
+		let mut session = self.session.lock().await;
+		if let Some(core) = session.as_mut() {
+			terminate_background_jobs_and_wait(core).await;
+		}
+		*session = None;
 	}
 
 	/// Number of live background jobs (running `&`/`nohup` children) tracked by
@@ -288,27 +404,40 @@ async fn run_shell_session(
 	config: ShellConfig,
 	run_config: ShellRunConfig,
 	on_chunk: Option<Sender<String>>,
-	ct: &mut CancelToken,
+	ct: &CancelToken,
+	background_registry: Arc<process::SpawnRegistry>,
+	run_lease: Option<ShellRunLease>,
 ) -> Result<ShellRunResult> {
 	let tokio_cancel = CancellationToken::new();
-	let spawn_registry = Arc::new(process::SpawnRegistry::new());
+	let _cancel_on_drop = CancelRunOnDrop(tokio_cancel.clone());
+	let spawn_registry = Arc::new(process::SpawnRegistry::with_mirror(background_registry.clone()));
 	let process_cancel_bridge = tokio::spawn({
 		let tokio_cancel = tokio_cancel.clone();
 		let spawn_registry = spawn_registry.clone();
 		async move {
+			let _run_lease = run_lease;
 			tokio_cancel.cancelled().await;
 			terminate_run(&spawn_registry).await;
 		}
 	});
 
-	let mut run_task = tokio::spawn({
+	enum RunOutcome {
+		Completed(Result<(ExecutionResult, Option<MinimizerResult>, Option<String>)>),
+		Cancelled(AbortReason),
+	}
+	let outcome = {
 		let session = session.clone();
 		let abort_state = abort_state.clone();
-		let tokio_cancel = tokio_cancel.clone();
-		let at = ct.emplace_abort_token();
+		let command_cancel = tokio_cancel.clone();
 		let spawn_registry = spawn_registry.clone();
-		async move {
-			let mut session_guard = session.lock().await;
+		let run = async move {
+			let mut session_guard = tokio::select! {
+				guard = session.lock() => guard,
+				() = command_cancel.cancelled() => return Err(Error::msg("Shell run cancelled")),
+			};
+			if abort_state.is_closed() {
+				return Err(Error::msg("Shell session is closed"));
+			}
 
 			let session = match &mut *session_guard {
 				Some(session) => session,
@@ -316,29 +445,27 @@ async fn run_shell_session(
 					create_session_for_run(
 						&config,
 						Some(spawn_registry.clone()),
-						Some(tokio_cancel.clone()),
+						Some(command_cancel.clone()),
+						Some(background_registry),
 					)
 					.await?,
 				),
 			};
-			abort_state.set(at).await;
-			run_shell_command(session, &run_config, on_chunk, tokio_cancel, spawn_registry).await
-		}
-	});
-
-	let res = tokio::select! {
-		res = &mut run_task => res,
-		reason = ct.wait() => {
-			tokio_cancel.cancel();
-			let graceful = time::timeout(Duration::from_secs(2), &mut run_task).await;
-			if graceful.is_err() {
-				run_task.abort();
-				let _ = run_task.await;
+			run_shell_command(session, &run_config, on_chunk, command_cancel, spawn_registry).await
+		};
+		tokio::pin!(run);
+		tokio::select! {
+			res = &mut run => RunOutcome::Completed(res),
+			reason = ct.wait() => {
+				tokio_cancel.cancel();
+				let _ = time::timeout(Duration::from_secs(2), &mut run).await;
+				RunOutcome::Cancelled(reason)
 			}
-			abort_state.clear().await;
-			// Use try_lock to avoid deadlocking if another task holds the session.
-			// If we can't acquire the lock, the session will be cleaned up when the
-			// holding task finishes.
+		}
+	};
+	let res = match outcome {
+		RunOutcome::Completed(res) => res,
+		RunOutcome::Cancelled(reason) => {
 			if let Ok(mut guard) = session.try_lock() {
 				*guard = None;
 			}
@@ -350,14 +477,10 @@ async fn run_shell_session(
 				minimized:   None,
 				working_dir: None,
 			});
-		}
+		},
 	};
-	let res =
-		res.unwrap_or_else(|err| Err(Error::msg(format!("Shell execution task failed: {err}"))));
 	process_cancel_bridge.abort();
 	let _ = process_cancel_bridge.await;
-	abort_state.clear().await;
-
 	let keepalive = res.as_ref().is_ok_and(|(exec, ..)| session_keepalive(exec));
 	if !keepalive {
 		*session.lock().await = None;
@@ -397,6 +520,7 @@ async fn run_shell_oneshot(
 				&config,
 				Some(spawn_registry.clone()),
 				Some(tokio_cancel.clone()),
+				None,
 			)
 			.await?;
 			run_shell_command(&mut session, &run_config, on_chunk, tokio_cancel, spawn_registry).await
@@ -462,6 +586,7 @@ async fn run_shell_oneshot_streams(
 				&config,
 				Some(spawn_registry.clone()),
 				Some(tokio_cancel.clone()),
+				None,
 			)
 			.await?;
 			run_shell_command_streams(&mut session, &run_config, streams, tokio_cancel, spawn_registry)
@@ -582,13 +707,14 @@ fn merge_path_values(_existing: &str, incoming: &str) -> String {
 
 #[cfg(test)]
 async fn create_session(config: &ShellConfig) -> Result<ShellSessionCore> {
-	create_session_for_run(config, None, None).await
+	create_session_for_run(config, None, None, None).await
 }
 
 async fn create_session_for_run(
 	config: &ShellConfig,
 	spawn_registry: Option<Arc<process::SpawnRegistry>>,
 	cancel_token: Option<CancellationToken>,
+	background_registry: Option<Arc<process::SpawnRegistry>>,
 ) -> Result<ShellSessionCore> {
 	let mut shell = BrushShell::builder()
 		.do_not_inherit_env(true)
@@ -768,7 +894,11 @@ async fn create_session_for_run(
 		source_snapshot(&mut shell, snapshot_path, spawn_registry, cancel_token).await?;
 	}
 
-	Ok(ShellSessionCore { shell })
+	Ok(ShellSessionCore {
+		shell,
+		background_registry: background_registry
+			.unwrap_or_else(|| Arc::new(process::SpawnRegistry::new())),
+	})
 }
 
 async fn source_snapshot(
@@ -1180,7 +1310,7 @@ async fn run_shell_command_once(
 		.await;
 
 	if cancel_token.is_cancelled() {
-		terminate_background_jobs(&mut session.shell);
+		terminate_background_jobs(session);
 	}
 
 	drop(params);
@@ -1299,7 +1429,7 @@ async fn run_shell_command_streams(
 		.await;
 
 	if cancel_token.is_cancelled() {
-		terminate_background_jobs(&mut session.shell);
+		terminate_background_jobs(session);
 	}
 
 	if env_scope_pushed {
@@ -1478,21 +1608,26 @@ async fn terminate_run(registry: &process::SpawnRegistry) {
 		}
 	}
 }
-fn terminate_background_jobs(shell: &mut BrushShell) {
+fn background_job_targets(
+	session: &mut ShellSessionCore,
+) -> (process::TerminationTargets, Vec<process::Process>) {
 	let mut targets = process::TerminationTargets::new();
-	for job in &mut shell.jobs_mut().jobs {
+	let jobs = session.shell.jobs_mut();
+	let _ = jobs.poll();
+	for job in &mut jobs.jobs {
 		job.abort_internal_tasks();
-		if let Some(pgid) = job.process_group_id() {
-			targets.add_pgid(pgid);
-		}
-		if let Some(pid) = job.representative_pid() {
-			targets.add_pid(pid);
-		}
 	}
+	targets.extend(session.background_registry.build_targets());
+	let processes = targets.processes().cloned().collect();
+	(targets, processes)
+}
+
+fn terminate_background_jobs(session: &mut ShellSessionCore) {
+	let (targets, _) = background_job_targets(session);
 	if targets.is_empty() {
 		// Shell-internal jobs were aborted above. Pure descendant cleanup is
 		// handled by `process_cancel_bridge` while the cancel was in flight;
-		// without job-tracked pgids or pids there is nothing else to signal here.
+		// without spawn-time registry targets there is nothing else to signal here.
 		return;
 	}
 
@@ -1501,6 +1636,22 @@ fn terminate_background_jobs(shell: &mut BrushShell) {
 		time::sleep(Duration::from_millis(150)).await;
 		targets.signal(process::KILL_SIGNAL);
 	});
+}
+
+async fn terminate_background_jobs_and_wait(session: &mut ShellSessionCore) {
+	let (targets, processes) = background_job_targets(session);
+	if targets.is_empty() {
+		return;
+	}
+
+	targets.signal(process::TERM_SIGNAL);
+	time::sleep(Duration::from_millis(150)).await;
+	targets.signal(process::KILL_SIGNAL);
+	for process in processes {
+		let _ = process
+			.wait_for_exit(Some(Duration::from_secs(1)), CancelToken::default())
+			.await;
+	}
 }
 
 /// Apply per-command environment variables onto a freshly pushed
@@ -6581,7 +6732,10 @@ mod tests {
 			quote_arg(second_pidfile.to_str().expect("utf8 second pidfile")),
 			quote_arg(second_ready.to_str().expect("utf8 second ready path")),
 		);
-		let (mut session, params) = kill_test_context().await;
+		let (mut session, mut params) = kill_test_context().await;
+		let spawn_registry =
+			Arc::new(process::SpawnRegistry::with_mirror(session.background_registry.clone()));
+		params.set_spawn_observer(spawn_registry.clone());
 		let source_info = SourceInfo::from("pi-natives:test");
 
 		time::timeout(
@@ -6608,6 +6762,12 @@ mod tests {
 				.count(),
 			2,
 			"jobspec must retain every external pipeline process",
+		);
+		let (_, captured_processes) = background_job_targets(&mut session);
+		assert_eq!(
+			captured_processes.len(),
+			2,
+			"background cleanup must capture every external pipeline process",
 		);
 		let pids = [&first_pidfile, &second_pidfile].map(|pidfile| {
 			fs::read_to_string(pidfile)
@@ -7974,6 +8134,26 @@ mod tests {
 	}
 
 	#[cfg(unix)]
+	async fn wait_for_process_exit(pid: i32) {
+		time::timeout(Duration::from_secs(5), async {
+			loop {
+				// SAFETY: tests pass a positive PID reported by their own child process.
+				// Signal 0 only checks whether that process still exists.
+				if unsafe { libc::kill(pid, 0) } == -1 {
+					let error = std::io::Error::last_os_error();
+					if error.raw_os_error() == Some(libc::ESRCH) {
+						return;
+					}
+					panic!("kill({pid}, 0) failed while checking child cleanup: {error}");
+				}
+				time::sleep(Duration::from_millis(20)).await;
+			}
+		})
+		.await
+		.expect("timed out waiting for child process to exit");
+	}
+
+	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn uutils_diff_reads_process_substitution_fds() {
 		let (result, output) = time::timeout(
@@ -8050,7 +8230,118 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		assert_eq!(shell.live_background_job_count().await, 1);
 
 		// Dropping the shell at scope end reaps the child via kill-on-drop.
-		shell.abort().await;
+		shell.abort();
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn close_terminates_retained_background_jobs() {
+		let _guard = shell_test_lock().lock().await;
+		let shell = Shell::new(None);
+		let (tx, rx) = flume::unbounded::<String>();
+
+		shell
+			.run(
+				ShellRunOptions {
+					command: "/bin/sh -c 'trap \"\" TERM; printf \"%d\\n\" \"$$\"; while :; do \
+					          /bin/sleep 1; done' &"
+						.into(),
+					..Default::default()
+				},
+				Some(tx),
+				CancelToken::default(),
+			)
+			.await
+			.expect("start retained background job");
+		let child_pid = rx
+			.recv_async()
+			.await
+			.expect("background command should print its pid")
+			.trim()
+			.parse::<i32>()
+			.expect("background pid should be an integer");
+		let child = process::Process::from_pid(child_pid)
+			.expect("background child should still be running before close");
+		assert_eq!(shell.live_background_job_count().await, 1);
+		assert_eq!(child.status(), process::ProcessStatus::Running);
+
+		shell.close().await;
+		assert_eq!(
+			child.status(),
+			process::ProcessStatus::Exited,
+			"TERM-ignoring background child must be gone when close resolves"
+		);
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn close_terminates_background_process_spawned_after_run_returns() {
+		let _guard = shell_test_lock().lock().await;
+		let root = unique_temp_dir("delayed-background-close");
+		let pid_path = root.join("child.pid");
+		let escaped_pid_path = pid_path.to_string_lossy().replace('\'', "'\\''");
+		let shell = Shell::new(None);
+		shell
+			.run(
+				ShellRunOptions {
+					command: format!(
+						"{{ sleep 0.1; /bin/sh -c 'trap \"\" TERM; printf \"%d\\n\" \"$$\" > \"$1\"; \
+						 while :; do /bin/sleep 1; done' sh '{escaped_pid_path}'; }} &"
+					),
+					..Default::default()
+				},
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("start delayed background task");
+		time::timeout(Duration::from_secs(5), async {
+			while !pid_path.exists() {
+				time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("delayed background child should start");
+		let child_pid = fs::read_to_string(&pid_path)
+			.expect("read delayed background pid")
+			.trim()
+			.parse::<i32>()
+			.expect("delayed background pid should be an integer");
+		let child =
+			process::Process::from_pid(child_pid).expect("delayed background child should be live");
+
+		shell.close().await;
+		assert_eq!(
+			child.status(),
+			process::ProcessStatus::Exited,
+			"delayed background child must be gone when close resolves"
+		);
+		let _ = fs::remove_dir_all(root);
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn close_reaps_completed_background_job_before_target_capture() {
+		let _guard = shell_test_lock().lock().await;
+		let shell = Shell::new(None);
+		shell
+			.run(
+				ShellRunOptions { command: "/bin/sleep 1 &".into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("start short background job");
+		time::sleep(Duration::from_millis(1_100)).await;
+
+		let mut session = shell.session.lock().await;
+		let core = session
+			.as_mut()
+			.expect("live background job should retain the session");
+		let (targets, processes) = background_job_targets(core);
+		assert!(targets.is_empty(), "completed jobs must not become termination targets");
+		assert!(processes.is_empty(), "completed jobs must not reopen process identities");
+		assert!(core.shell.jobs().jobs.is_empty(), "completed job should be reaped before capture");
 	}
 
 	#[cfg(unix)]
@@ -8634,6 +8925,70 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		);
 	}
 
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn close_while_sourcing_snapshot_stops_snapshot_and_rejects_later_runs() {
+		let _guard = shell_test_lock().lock().await;
+		let root = unique_temp_dir("snapshot-close");
+		let snapshot_path = root.join("snapshot.sh");
+		let pid_path = root.join("snapshot-child.pid");
+		let escaped_pid_path = pid_path.to_string_lossy().replace('\'', "'\\''");
+		std::fs::write(
+			&snapshot_path,
+			format!(
+				"/bin/sh -c 'printf \"%d\\n\" \"$$\" > \"$1\"; sleep 30' sh '{escaped_pid_path}'\n"
+			),
+		)
+		.expect("write snapshot file");
+
+		let shell = Arc::new(Shell::new(Some(ShellOptions {
+			snapshot_path: Some(snapshot_path.to_string_lossy().into_owned()),
+			..Default::default()
+		})));
+		let running_shell = Arc::clone(&shell);
+		let run_handle = tokio::spawn(async move {
+			running_shell
+				.run(
+					ShellRunOptions { command: "printf done".into(), ..Default::default() },
+					None,
+					CancelToken::default(),
+				)
+				.await
+		});
+
+		let child_pid = time::timeout(Duration::from_secs(5), async {
+			loop {
+				if let Ok(pid_text) = std::fs::read_to_string(&pid_path)
+					&& let Ok(pid) = pid_text.trim().parse::<i32>()
+					&& pid > 0
+				{
+					return pid;
+				}
+				time::sleep(Duration::from_millis(20)).await;
+			}
+		})
+		.await
+		.expect("timed out waiting for snapshot child pid");
+
+		time::timeout(Duration::from_secs(10), shell.close())
+			.await
+			.expect("close should settle while snapshot setup is blocked");
+		let result = time::timeout(Duration::from_secs(10), run_handle)
+			.await
+			.expect("snapshot run should settle after close")
+			.expect("snapshot run task should not panic")
+			.expect("closing an active run should return cancellation");
+		assert!(result.cancelled);
+		wait_for_process_exit(child_pid).await;
+
+		let error = shell
+			.run(ShellRunOptions::default(), None, CancelToken::default())
+			.await
+			.expect_err("closed shell must reject later work");
+		assert_eq!(error.to_string(), "Shell session is closed");
+		let _ = std::fs::remove_dir_all(&root);
+	}
+
 	/// Regression for the `suspended (tty input)` bug: an **interactive child
 	/// inside a pipeline** (`zsh -i ... | awk`) used to stay in the host
 	/// session, open `/dev/tty`, `tcsetpgrp` itself to the foreground, and
@@ -8816,13 +9171,197 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		let mut cancel_token = CancelToken::default();
 		let abort_token = cancel_token.emplace_abort_token();
 
-		abort_state.set(abort_token).await;
-		abort_state.abort().await;
+		let _run_lease = abort_state
+			.register(abort_token)
+			.expect("open state should register a run");
+		abort_state.abort();
 
 		let reason = time::timeout(Duration::from_millis(100), cancel_token.wait())
 			.await
 			.expect("cancel token should be signalled");
 		assert!(matches!(reason, AbortReason::Signal));
+	}
+
+	#[tokio::test]
+	async fn completed_run_cannot_clear_a_newer_run_abort_token() {
+		let abort_state = ShellAbortState::default();
+		let mut first_cancel = CancelToken::default();
+		let mut second_cancel = CancelToken::default();
+		let first = abort_state
+			.register(first_cancel.emplace_abort_token())
+			.expect("first run should register");
+		let _second = abort_state
+			.register(second_cancel.emplace_abort_token())
+			.expect("second run should register");
+
+		drop(first);
+		abort_state.abort();
+
+		let reason = time::timeout(Duration::from_millis(100), second_cancel.wait())
+			.await
+			.expect("newer run should remain registered after the older run finishes");
+		assert!(matches!(reason, AbortReason::Signal));
+		assert!(
+			time::timeout(Duration::from_millis(20), first_cancel.wait())
+				.await
+				.is_err(),
+			"completed run should no longer receive shared abort signals"
+		);
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn closed_state_blocks_session_creation_before_cancel_bridge_runs() {
+		let root = unique_temp_dir("closed-before-create");
+		let snapshot_path = root.join("snapshot.sh");
+		let marker_path = root.join("created");
+		let escaped_marker_path = marker_path.to_string_lossy().replace('\'', "'\\''");
+		std::fs::write(&snapshot_path, format!("printf created > '{escaped_marker_path}'\n"))
+			.expect("write snapshot");
+
+		let session = Arc::new(TokioMutex::new(None));
+		let abort_state = ShellAbortState::default();
+		abort_state.close();
+		let result = run_shell_session(
+			Arc::clone(&session),
+			abort_state,
+			ShellConfig {
+				session_env:   None,
+				snapshot_path: Some(snapshot_path.to_string_lossy().into_owned()),
+				minimizer:     None,
+			},
+			ShellRunConfig {
+				command:   "true".into(),
+				cwd:       None,
+				env:       None,
+				minimizer: None,
+			},
+			None,
+			&CancelToken::default(),
+			Arc::new(process::SpawnRegistry::new()),
+			None,
+		)
+		.await
+		.expect_err("closed state must reject creation before cancellation is bridged");
+
+		assert_eq!(result.to_string(), "Shell session is closed");
+		assert!(!marker_path.exists(), "closed run must not source its snapshot");
+		assert!(session.lock().await.is_none(), "closed run must not insert a session core");
+		let _ = std::fs::remove_dir_all(&root);
+	}
+
+	#[tokio::test]
+	async fn close_is_terminal_and_idempotent() {
+		let shell = Shell::new(None);
+
+		shell.close().await;
+		shell.close().await;
+
+		let error = shell
+			.run(ShellRunOptions::default(), None, CancelToken::default())
+			.await
+			.expect_err("closed shell must reject new work");
+		assert_eq!(error.to_string(), "Shell session is closed");
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn close_cancels_active_work_before_it_resolves() {
+		let _guard = shell_test_lock().lock().await;
+		let shell = Arc::new(Shell::new(None));
+		let running_shell = Arc::clone(&shell);
+		let (tx, rx) = flume::unbounded::<String>();
+		let run_handle = tokio::spawn(async move {
+			running_shell
+				.run(
+					ShellRunOptions {
+						command: "/bin/sh -c 'trap \"\" TERM; printf \"%d\\n\" \"$$\"; while :; do \
+						          /bin/sleep 1; done'"
+							.into(),
+						..Default::default()
+					},
+					Some(tx),
+					CancelToken::default(),
+				)
+				.await
+		});
+		let child_pid = time::timeout(Duration::from_secs(5), rx.recv_async())
+			.await
+			.expect("active command should print readiness")
+			.expect("active command output should remain connected")
+			.trim()
+			.parse::<i32>()
+			.expect("active command pid should be an integer");
+		let child =
+			process::Process::from_pid(child_pid).expect("active command should still be running");
+
+		time::timeout(Duration::from_secs(10), async {
+			tokio::join!(shell.close(), shell.close());
+		})
+		.await
+		.expect("concurrent close calls should settle after cancelling active work");
+		assert!(run_handle.is_finished(), "active run must be settled when close resolves");
+		assert_eq!(child.status(), process::ProcessStatus::Exited);
+		let result = time::timeout(Duration::from_secs(10), run_handle)
+			.await
+			.expect("active run should settle before close returns")
+			.expect("active run task should not panic")
+			.expect("active close should report cancellation");
+		assert!(result.cancelled);
+
+		let error = shell
+			.run(ShellRunOptions::default(), None, CancelToken::default())
+			.await
+			.expect_err("closed shell must reject later work");
+		assert_eq!(error.to_string(), "Shell session is closed");
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn dropping_run_future_releases_session_and_allows_close() {
+		let _guard = shell_test_lock().lock().await;
+		let shell = Arc::new(Shell::new(None));
+		let running_shell = Arc::clone(&shell);
+		let (tx, rx) = flume::unbounded::<String>();
+		let run = tokio::spawn(async move {
+			running_shell
+				.run(
+					ShellRunOptions {
+						command: "/bin/sh -c 'printf \"%d\\n\" \"$$\"; sleep 30'".into(),
+						..Default::default()
+					},
+					Some(tx),
+					CancelToken::default(),
+				)
+				.await
+		});
+		let child_pid = time::timeout(Duration::from_secs(5), rx.recv_async())
+			.await
+			.expect("active command should print its pid")
+			.expect("active command output should remain connected")
+			.trim()
+			.parse::<i32>()
+			.expect("active command pid should be an integer");
+		let child =
+			process::Process::from_pid(child_pid).expect("active command should still be running");
+
+		run.abort();
+		let error = run.await.expect_err("aborted task should drop Shell::run");
+		assert!(error.is_cancelled());
+		time::timeout(Duration::from_secs(10), shell.close())
+			.await
+			.expect("close must wait for dropped-run cleanup");
+		assert_eq!(
+			child.status(),
+			process::ProcessStatus::Exited,
+			"dropped run child must be gone when close resolves"
+		);
+
+		let error = shell
+			.run(ShellRunOptions::default(), None, CancelToken::default())
+			.await
+			.expect_err("closed shell must reject later work");
+		assert_eq!(error.to_string(), "Shell session is closed");
 	}
 
 	#[cfg(unix)]
