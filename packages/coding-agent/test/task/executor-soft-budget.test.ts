@@ -46,7 +46,7 @@ function createMockSession(
 		promptIndex: number;
 		emit: (event: AgentSessionEvent) => void;
 		pushMessage: (message: unknown) => void;
-	}) => void,
+	}) => void | Promise<void>,
 ): MockSessionHandle {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
 	const messages: unknown[] = [];
@@ -81,7 +81,7 @@ function createMockSession(
 		prompt: async (text: string, options?: PromptOptions) => {
 			promptIndex += 1;
 			prompts.push({ text, options });
-			onPrompt({ promptIndex, emit, pushMessage: message => messages.push(message) });
+			await onPrompt({ promptIndex, emit, pushMessage: message => messages.push(message) });
 			return true;
 		},
 		waitForIdle: async () => {},
@@ -206,10 +206,12 @@ describe("runSubprocess soft request budget", () => {
 
 	it("applies the cumulative session cap as the active runtime timer", async () => {
 		const id = "SessionCapScout";
-		const handle = createMockSession(({ emit, pushMessage }) => {
-			const message = assistantText("still working", "aborted");
-			pushMessage(message);
-			emit({ type: "message_end", message } as unknown as AgentSessionEvent);
+		const promptGate = Promise.withResolvers<void>();
+		const handle = createMockSession(async () => {
+			await promptGate.promise;
+		});
+		vi.spyOn(handle.session, "abort").mockImplementation(async () => {
+			promptGate.resolve();
 		});
 		mockCreateAgentSession(handle.session);
 		registerRunning(id, handle.session);
