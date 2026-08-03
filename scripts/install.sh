@@ -243,7 +243,9 @@ ensure_musl_runtime() {
         echo "omp still fails to start after installing libstdc++ and libgcc."
         exit 1
     fi
-    echo "Install libstdc++ and libgcc with your package manager (e.g. 'apk add libstdc++ libgcc'), then run 'omp' again."
+    echo "Install libstdc++ and libgcc with your package manager, then run 'omp' again:"
+    echo "  Alpine: apk add libstdc++ libgcc"
+    echo "  Void:   xbps-install libstdc++ libgcc"
     exit 1
 }
 
