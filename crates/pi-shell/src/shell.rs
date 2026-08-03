@@ -348,6 +348,9 @@ async fn run_shell_session(
 		let spawn_registry = spawn_registry.clone();
 		async move {
 			let mut session_guard = session.lock().await;
+			if abort_state.is_closed().await {
+				return Err(Error::msg("Shell session is closed"));
+			}
 
 			let session = match &mut *session_guard {
 				Some(session) => session,
@@ -8878,6 +8881,46 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			.await
 			.expect_err("closed shell must reject new work");
 		assert_eq!(error.to_string(), "Shell session is closed");
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn closed_state_blocks_session_creation_before_cancel_bridge_runs() {
+		let root = unique_temp_dir("closed-before-create");
+		let snapshot_path = root.join("snapshot.sh");
+		let marker_path = root.join("created");
+		let escaped_marker_path = marker_path.to_string_lossy().replace('\'', "'\\''");
+		std::fs::write(&snapshot_path, format!("printf created > '{escaped_marker_path}'\n"))
+			.expect("write snapshot");
+
+		let session = Arc::new(TokioMutex::new(None));
+		let abort_state = ShellAbortState::default();
+		abort_state.close().await;
+		let mut cancel_token = CancelToken::default();
+		let result = run_shell_session(
+			Arc::clone(&session),
+			abort_state,
+			ShellConfig {
+				session_env:   None,
+				snapshot_path: Some(snapshot_path.to_string_lossy().into_owned()),
+				minimizer:     None,
+			},
+			ShellRunConfig {
+				command:   "true".into(),
+				cwd:       None,
+				env:       None,
+				minimizer: None,
+			},
+			None,
+			&mut cancel_token,
+		)
+		.await
+		.expect_err("closed state must reject creation before cancellation is bridged");
+
+		assert_eq!(result.to_string(), "Shell session is closed");
+		assert!(!marker_path.exists(), "closed run must not source its snapshot");
+		assert!(session.lock().await.is_none(), "closed run must not insert a session core");
+		let _ = std::fs::remove_dir_all(&root);
 	}
 
 	#[cfg(unix)]
