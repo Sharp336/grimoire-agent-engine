@@ -34,6 +34,18 @@ async function writeExecutable(directory: string, name: string, content: string)
 	await fs.chmod(file, 0o755);
 }
 
+// install.sh invokes a handful of real coreutils alongside the stubbed
+// commands; symlink them into binDir so tests can run with an isolated PATH
+// that contains exactly the stubs + the tools the script needs — never the
+// host's apk/sudo, which would make the branch under test host-dependent.
+async function linkHostTools(binDir: string, names: string[]): Promise<void> {
+	for (const name of names) {
+		const real = Bun.which(name);
+		if (!real) throw new Error(`host tool required by install.sh not found on PATH: ${name}`);
+		await fs.symlink(real, path.join(binDir, name));
+	}
+}
+
 describe("musl release artifacts", () => {
 	test("builds the requested x64 and arm64 musl asset names with Bun's musl targets", async () => {
 		const result = await run([
@@ -59,6 +71,7 @@ describe("musl release artifacts", () => {
 		const binDir = path.join(dir, "bin");
 		const installDir = path.join(dir, "install");
 		await fs.mkdir(binDir);
+		await linkHostTools(binDir, ["sh", "mkdir", "chmod", "grep", "sed"]);
 		await writeExecutable(binDir, "uname", '#!/bin/sh\n[ "$1" = "-s" ] && echo Linux || echo x86_64\n');
 		await writeExecutable(binDir, "ldd", "#!/bin/sh\necho 'musl libc (x86_64)'\n");
 		await writeExecutable(
@@ -77,7 +90,7 @@ esac
 
 		const result = await run(["sh", "scripts/install.sh", "--binary"], {
 			...process.env,
-			PATH: `${binDir}:${process.env.PATH ?? ""}`,
+			PATH: binDir,
 			HOME: dir,
 			PI_INSTALL_DIR: installDir,
 		});
@@ -93,6 +106,7 @@ esac
 		const binDir = path.join(dir, "bin");
 		const installDir = path.join(dir, "install");
 		await fs.mkdir(binDir);
+		await linkHostTools(binDir, ["sh", "mkdir", "chmod", "grep", "sed", "id"]);
 		await writeExecutable(binDir, "uname", '#!/bin/sh\n[ "$1" = "-s" ] && echo Linux || echo x86_64\n');
 		await writeExecutable(binDir, "ldd", "#!/bin/sh\necho 'musl libc (x86_64)'\n");
 		await writeExecutable(
@@ -119,7 +133,7 @@ esac
 
 		const result = await run(["sh", "scripts/install.sh", "--binary"], {
 			...process.env,
-			PATH: `${binDir}:${process.env.PATH ?? ""}`,
+			PATH: binDir,
 			HOME: dir,
 			PI_INSTALL_DIR: installDir,
 		});
@@ -136,6 +150,7 @@ esac
 		const binDir = path.join(dir, "bin");
 		const installDir = path.join(dir, "install");
 		await fs.mkdir(binDir);
+		await linkHostTools(binDir, ["sh", "mkdir", "chmod", "grep", "sed"]);
 		await writeExecutable(binDir, "uname", '#!/bin/sh\n[ "$1" = "-s" ] && echo Linux || echo x86_64\n');
 		await writeExecutable(binDir, "ldd", "#!/bin/sh\necho 'musl libc (x86_64)'\n");
 		await writeExecutable(
@@ -154,7 +169,7 @@ esac
 
 		const result = await run(["sh", "scripts/install.sh", "--binary"], {
 			...process.env,
-			PATH: `${binDir}:${process.env.PATH ?? ""}`,
+			PATH: binDir,
 			HOME: dir,
 			PI_INSTALL_DIR: installDir,
 		});
