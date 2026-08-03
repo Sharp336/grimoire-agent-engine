@@ -21,6 +21,7 @@
 
 - Exposed the script-driven `computer` schema to every model, including models with provider-native Computer Use support, because native action declarations cannot express persistent desktop sessions or accessibility handles.
 - Reduced `omp --help` cold-start latency and memory use by rendering lightweight command metadata without loading every runtime command and provider graph.
+- Virtualized fullscreen transcript composition: long sessions now materialize a bounded near-window suffix, reveal older batches while scrolling, cache stable block geometry, and re-render only blocks intersecting the visible band while preserving live streaming and animation updates.
 
 ### Fixed
 
