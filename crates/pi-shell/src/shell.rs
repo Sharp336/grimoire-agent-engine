@@ -307,10 +307,13 @@ impl Shell {
 		self.close_now();
 		self.abort_state.wait_for_runs().await;
 		let mut session = self.session.lock().await;
-		if let Some(core) = session.as_mut() {
-			terminate_background_jobs_and_wait(core).await;
-		}
+		let mut targets = session
+			.as_mut()
+			.map_or_else(|| self.background_registry.build_targets(), background_job_targets);
+		targets.signal(process::TERM_SIGNAL);
 		*session = None;
+		drop(session);
+		finish_background_termination(&mut targets).await;
 	}
 
 	/// Number of live background jobs (running `&`/`nohup` children) tracked by
@@ -467,7 +470,13 @@ async fn run_shell_session(
 		RunOutcome::Completed(res) => res,
 		RunOutcome::Cancelled(reason) => {
 			if let Ok(mut guard) = session.try_lock() {
-				*guard = None;
+				if abort_state.is_closed() {
+					if let Some(core) = guard.as_mut() {
+						terminate_background_jobs(core);
+					}
+				} else {
+					*guard = None;
+				}
 			}
 			let _ = process_cancel_bridge.await;
 			return Ok(ShellRunResult {
@@ -1561,13 +1570,23 @@ async fn read_output_bytes(
 }
 
 impl SpawnObserver for process::SpawnRegistry {
-	fn on_spawn(&self, pid: i32, pgid: Option<i32>) {
+	fn on_spawn(
+		&self,
+		pid: i32,
+		pgid: Option<i32>,
+		#[cfg(windows)] handle: Option<std::os::windows::io::OwnedHandle>,
+	) {
 		// Pin a stable process reference *now*, before the pid can be recycled.
 		// On Windows an open handle keeps the pid slot reserved for the lifetime
 		// of the handle; on Linux the pidfd carries identity; on macOS the
 		// recorded start-time triple detects impersonation. Deferring the open
 		// to `build_targets` (as the old code did) let a recycled pid resolve
 		// to an unrelated process — issue #4605.
+		#[cfg(windows)]
+		let process = handle
+			.and_then(process::Process::from_owned_handle)
+			.or_else(|| process::Process::from_pid(pid));
+		#[cfg(not(windows))]
 		let process = process::Process::from_pid(pid);
 		self.record(pgid, process);
 	}
@@ -1583,8 +1602,10 @@ impl SpawnObserver for process::SpawnRegistry {
 async fn terminate_run(registry: &process::SpawnRegistry) {
 	const WAVES: u32 = 3;
 	let mut saw_targets = false;
+	let mut targets = process::TerminationTargets::new();
 	for wave in 0..WAVES {
-		let targets = registry.build_targets();
+		targets.retain_live();
+		targets.extend(registry.build_targets());
 		if targets.is_empty() {
 			if saw_targets || wave + 1 == WAVES {
 				return;
@@ -1608,9 +1629,7 @@ async fn terminate_run(registry: &process::SpawnRegistry) {
 		}
 	}
 }
-fn background_job_targets(
-	session: &mut ShellSessionCore,
-) -> (process::TerminationTargets, Vec<process::Process>) {
+fn background_job_targets(session: &mut ShellSessionCore) -> process::TerminationTargets {
 	let mut targets = process::TerminationTargets::new();
 	let jobs = session.shell.jobs_mut();
 	let _ = jobs.poll();
@@ -1618,12 +1637,11 @@ fn background_job_targets(
 		job.abort_internal_tasks();
 	}
 	targets.extend(session.background_registry.build_targets());
-	let processes = targets.processes().cloned().collect();
-	(targets, processes)
+	targets
 }
 
 fn terminate_background_jobs(session: &mut ShellSessionCore) {
-	let (targets, _) = background_job_targets(session);
+	let mut targets = background_job_targets(session);
 	if targets.is_empty() {
 		// Shell-internal jobs were aborted above. Pure descendant cleanup is
 		// handled by `process_cancel_bridge` while the cancel was in flight;
@@ -1638,15 +1656,14 @@ fn terminate_background_jobs(session: &mut ShellSessionCore) {
 	});
 }
 
-async fn terminate_background_jobs_and_wait(session: &mut ShellSessionCore) {
-	let (targets, processes) = background_job_targets(session);
+async fn finish_background_termination(targets: &mut process::TerminationTargets) {
 	if targets.is_empty() {
 		return;
 	}
 
-	targets.signal(process::TERM_SIGNAL);
 	time::sleep(Duration::from_millis(150)).await;
 	targets.signal(process::KILL_SIGNAL);
+	let processes: Vec<process::Process> = targets.processes().cloned().collect();
 	for process in processes {
 		let _ = process
 			.wait_for_exit(Some(Duration::from_secs(1)), CancelToken::default())
@@ -6763,9 +6780,9 @@ mod tests {
 			2,
 			"jobspec must retain every external pipeline process",
 		);
-		let (_, captured_processes) = background_job_targets(&mut session);
+		let captured_targets = background_job_targets(&mut session);
 		assert_eq!(
-			captured_processes.len(),
+			captured_targets.processes().count(),
 			2,
 			"background cleanup must capture every external pipeline process",
 		);
@@ -8338,10 +8355,60 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		let core = session
 			.as_mut()
 			.expect("live background job should retain the session");
-		let (targets, processes) = background_job_targets(core);
+		let targets = background_job_targets(core);
 		assert!(targets.is_empty(), "completed jobs must not become termination targets");
-		assert!(processes.is_empty(), "completed jobs must not reopen process identities");
 		assert!(core.shell.jobs().jobs.is_empty(), "completed job should be reaped before capture");
+	}
+
+	#[cfg(target_os = "linux")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn close_retains_detached_descendant_through_term_to_kill_grace() {
+		let _guard = shell_test_lock().lock().await;
+		let root = unique_temp_dir("detached-descendant-close");
+		let script_path = root.join("daemon.sh");
+		let pid_path = root.join("daemon.pid");
+		fs::write(
+			&script_path,
+			"#!/bin/sh\ntrap '' TERM\nprintf '%d\\n' \"$$\" > \"$1\"\nwhile :; do /bin/sleep 1; \
+			 done\n",
+		)
+		.expect("write daemon script");
+		let shell = Shell::new(None);
+		let command = format!(
+			"/bin/sh -c 'setsid /bin/sh \"$1\" \"$2\" & wait' sh {} {} &",
+			quote_arg(script_path.to_str().expect("utf8 script path")),
+			quote_arg(pid_path.to_str().expect("utf8 pid path")),
+		);
+		shell
+			.run(ShellRunOptions { command, ..Default::default() }, None, CancelToken::default())
+			.await
+			.expect("start detached descendant");
+		time::timeout(Duration::from_secs(5), async {
+			while !pid_path.exists() {
+				time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("detached descendant should start");
+		let child_pid = fs::read_to_string(&pid_path)
+			.expect("read detached descendant pid")
+			.trim()
+			.parse::<i32>()
+			.expect("detached descendant pid should be an integer");
+		let child =
+			process::Process::from_pid(child_pid).expect("detached descendant should be live");
+
+		shell.close().await;
+		let child_status = child.status();
+		if child_status != process::ProcessStatus::Exited {
+			let _ = child.kill_tree(Some(process::KILL_SIGNAL));
+		}
+		assert_eq!(
+			child_status,
+			process::ProcessStatus::Exited,
+			"close must retain and kill a detached TERM-ignoring descendant",
+		);
+		let _ = fs::remove_dir_all(root);
 	}
 
 	#[cfg(unix)]
@@ -9314,6 +9381,92 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			.await
 			.expect_err("closed shell must reject later work");
 		assert_eq!(error.to_string(), "Shell session is closed");
+	}
+
+	#[cfg(target_os = "linux")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn close_cleans_retained_job_after_cancelling_later_run() {
+		let _guard = shell_test_lock().lock().await;
+		let root = unique_temp_dir("retained-and-active-close");
+		let script_path = root.join("retained.sh");
+		let retained_pid_path = root.join("retained.pid");
+		fs::write(
+			&script_path,
+			"#!/bin/sh\ntrap '' TERM\nprintf '%d\\n' \"$$\" > \"$1\"\nwhile :; do /bin/sleep 1; \
+			 done\n",
+		)
+		.expect("write retained script");
+		let shell = Arc::new(Shell::new(None));
+		let retained_command = format!(
+			"/bin/sh -c 'setsid /bin/sh \"$1\" \"$2\" & wait' sh {} {} &",
+			quote_arg(script_path.to_str().expect("utf8 script path")),
+			quote_arg(retained_pid_path.to_str().expect("utf8 pid path")),
+		);
+		shell
+			.run(
+				ShellRunOptions { command: retained_command, ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("start retained job");
+		time::timeout(Duration::from_secs(5), async {
+			while !retained_pid_path.exists() {
+				time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("retained child should start");
+		let retained_pid = fs::read_to_string(&retained_pid_path)
+			.expect("read retained pid")
+			.trim()
+			.parse::<i32>()
+			.expect("retained pid should be an integer");
+		let retained =
+			process::Process::from_pid(retained_pid).expect("retained child should be live");
+
+		let running_shell = Arc::clone(&shell);
+		let (tx, rx) = flume::unbounded::<String>();
+		let run_handle = tokio::spawn(async move {
+			running_shell
+				.run(
+					ShellRunOptions {
+						command: "/bin/sh -c 'trap \"\" TERM; printf \"%d\\n\" \"$$\"; while :; do \
+						          /bin/sleep 1; done'"
+							.into(),
+						..Default::default()
+					},
+					Some(tx),
+					CancelToken::default(),
+				)
+				.await
+		});
+		let active_pid = time::timeout(Duration::from_secs(5), rx.recv_async())
+			.await
+			.expect("active command should print readiness")
+			.expect("active command output should remain connected")
+			.trim()
+			.parse::<i32>()
+			.expect("active pid should be an integer");
+		let active = process::Process::from_pid(active_pid).expect("active child should be live");
+
+		shell.close().await;
+		let run_result = run_handle
+			.await
+			.expect("active run task should not panic")
+			.expect("active close should report cancellation");
+		let retained_status = retained.status();
+		let active_status = active.status();
+		if retained_status != process::ProcessStatus::Exited {
+			let _ = retained.kill_tree(Some(process::KILL_SIGNAL));
+		}
+		if active_status != process::ProcessStatus::Exited {
+			let _ = active.kill_tree(Some(process::KILL_SIGNAL));
+		}
+		assert!(run_result.cancelled);
+		assert_eq!(retained_status, process::ProcessStatus::Exited);
+		assert_eq!(active_status, process::ProcessStatus::Exited);
+		let _ = fs::remove_dir_all(root);
 	}
 
 	#[cfg(unix)]

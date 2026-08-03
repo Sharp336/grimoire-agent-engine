@@ -10,6 +10,9 @@ use itertools::Itertools;
 
 use tokio_util::sync::CancellationToken;
 
+#[cfg(windows)]
+use std::os::windows::io::OwnedHandle;
+
 use crate::{
 	ShellFd,
 	arithmetic::{self, ExpandAndEvaluate},
@@ -79,7 +82,7 @@ pub trait ExternalCommandOutputMarker: Send + Sync {
 pub trait SpawnObserver: Send + Sync {
 	/// Reports a freshly spawned external child. `pgid` is the child's process
 	/// group id when known (always its own pid under `NewProcessGroup`).
-	fn on_spawn(&self, pid: i32, pgid: Option<i32>);
+	fn on_spawn(&self, pid: i32, pgid: Option<i32>, #[cfg(windows)] handle: Option<OwnedHandle>);
 }
 
 /// Parameters for execution.

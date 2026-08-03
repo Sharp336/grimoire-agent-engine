@@ -698,6 +698,7 @@ mod platform {
 		collections::{HashMap, HashSet},
 		ffi::c_void,
 		mem,
+		os::windows::io::{AsRawHandle, IntoRawHandle, OwnedHandle as StdOwnedHandle},
 		sync::Arc,
 	};
 
@@ -802,6 +803,7 @@ mod platform {
 			lpKernelTime: *mut Filetime,
 			lpUserTime: *mut Filetime,
 		) -> i32;
+		fn GetProcessId(process_handle: Handle) -> u32;
 		fn ReadProcessMemory(
 			hProcess: Handle,
 			lpBaseAddress: *const c_void,
@@ -866,6 +868,20 @@ mod platform {
 	}
 
 	impl Process {
+		pub fn from_owned_handle(handle: StdOwnedHandle) -> Option<Self> {
+			let raw = handle.as_raw_handle().cast::<c_void>();
+			// SAFETY: `raw` comes from a live owned process handle and remains valid
+			// for both queries. Ownership moves into the internal handle only after
+			// every fallible query succeeds.
+			let pid = i32::try_from(unsafe { GetProcessId(raw) })
+				.ok()
+				.filter(|pid| *pid > 0)?;
+			let creation_time = process_creation_time(raw)?;
+			let raw = handle.into_raw_handle().cast::<c_void>();
+			let handle = Arc::new(OwnedHandle::from_raw(raw)?);
+			Some(Self { pid, handle, creation_time })
+		}
+
 		pub fn from_pid(pid: i32) -> Option<Self> {
 			if pid <= 0 {
 				return None;
@@ -1281,6 +1297,12 @@ pub struct Process {
 }
 
 impl Process {
+	/// Take ownership of a process handle duplicated at spawn time.
+	#[cfg(target_os = "windows")]
+	pub fn from_owned_handle(handle: std::os::windows::io::OwnedHandle) -> Option<Self> {
+		platform::Process::from_owned_handle(handle).map(Self::from_inner)
+	}
+
 	/// Open a stable process reference from a PID.
 	pub fn from_pid(pid: i32) -> Option<Self> {
 		platform::Process::from_pid(pid).map(Self::from_inner)
@@ -1722,13 +1744,39 @@ impl TerminationTargets {
 	/// Send `signal` to every recorded target. Failures are swallowed:
 	/// targets routinely exit between collection and signalling, and
 	/// the caller's policy is "best effort".
-	pub fn signal(&self, signal: i32) {
+	pub fn signal(&mut self, signal: i32) {
+		let protected = host_protected_pids();
+		let descendants: Vec<Process> = self
+			.processes
+			.iter()
+			.flat_map(|process| process.signalable_descendants(&protected))
+			.collect();
+		for descendant in descendants {
+			self.add_process(descendant);
+		}
+		let leader_groups: Vec<i32> = self
+			.processes
+			.iter()
+			.filter_map(|process| process.group_id().filter(|group| *group == process.pid()))
+			.collect();
+		for group in leader_groups {
+			self.add_pgid(group);
+		}
 		for &pgid in &self.pgids {
 			let _ = kill_process_group(pgid, signal);
 		}
 		for process in &self.processes {
-			let _ = process.signal_tree(signal);
+			let _ = process.signal_tree_excluding(signal, &protected);
 		}
+	}
+
+	/// Drop exited targets before extending the next termination wave.
+	pub fn retain_live(&mut self) {
+		self
+			.processes
+			.retain(|process| process.status() == ProcessStatus::Running);
+		self.pgids.retain(|pgid| process_group_alive(*pgid));
+		self.seen_pids = self.processes.iter().map(Process::pid).collect();
 	}
 }
 
