@@ -931,6 +931,22 @@ describe("Cursor MCP resource frames answer from the host's servers", () => {
 		expect(downloads).toBe(2);
 		expect(serializedAnswer.value.result.value.downloadPath).toBe("assets/readme.md");
 		expect(serializedReplay.results).toHaveLength(0);
+
+		const subsequentReplay = await dispatchExec(message, {
+			execHandlers,
+			state: newBlockState({ resolvedContextToolResults: new Map([[block.id, serializedResult]]) }),
+		});
+		const subsequentAnswer = soleResult(subsequentReplay.frames);
+		if (subsequentAnswer.case !== "readMcpResourceExecResult") {
+			throw new Error(`got ${subsequentAnswer.case}`);
+		}
+		if (subsequentAnswer.value.result.case !== "success") {
+			throw new Error(`got ${subsequentAnswer.value.result.case}`);
+		}
+
+		expect(downloads).toBe(2);
+		expect(subsequentAnswer.value.result.value.downloadPath).toBe("assets/readme.md");
+		expect(subsequentReplay.results).toHaveLength(0);
 	});
 
 	it("reruns a serialized resource read instead of replaying empty content", async () => {

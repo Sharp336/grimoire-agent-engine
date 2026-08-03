@@ -2476,7 +2476,10 @@ export async function resolveExecHandler<TArgs, TResult>(
 			: await applyToolResultHandler(toolResult, onToolResult);
 
 		if (execResult) {
-			if (rerunningResolvedCall) return { execResult };
+			if (rerunningResolvedCall) {
+				preserveNativeExecReplay(pairing?.previousResult, pairing, execResult);
+				return { execResult };
+			}
 			// TResult-only is a supported return form, so the transcript entry has to
 			// be synthesized here. Deriving its state from the raw result keeps the
 			// two views consistent: every exec result is a proto oneof whose only
