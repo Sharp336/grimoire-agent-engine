@@ -124,6 +124,40 @@ describe("AgentLifecycleManager", () => {
 		expect(stub.disposeCalls()).toBe(1);
 	});
 
+	it("aborts adopted descendants when their parent is cancelled", async () => {
+		const childStub = makeSessionStub();
+		let childAbortCalls = 0;
+		const childSession = Object.assign(childStub.session, {
+			abort: async () => {
+				childAbortCalls++;
+			},
+		});
+		registry.register({
+			id: "parent",
+			displayName: "parent",
+			kind: "sub",
+			session: makeSessionStub().session,
+			sessionFile: null,
+			status: "running",
+		});
+		registry.register({
+			id: "child",
+			displayName: "child",
+			kind: "sub",
+			parentId: "parent",
+			session: childSession,
+			sessionFile: null,
+			status: "idle",
+		});
+		lifecycle.adopt("child", { idleTtlMs: 0 });
+
+		registry.setStatus("parent", "aborted");
+		await flushAsync();
+
+		expect(childAbortCalls).toBe(1);
+		expect(registry.get("child")?.status).toBe("aborted");
+	});
+
 	it("ensureLive revives a parked agent through its reviver and flips it back to idle", async () => {
 		const revived = makeSessionStub();
 		registry.register({

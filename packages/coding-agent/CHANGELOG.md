@@ -340,6 +340,9 @@
 - Fixed the Python RPC client dropping context, compaction, OAuth URL, and terminal-settlement fields.
 - Fixed the browser tool ignoring the url parameter when opening a new tab on an attached browser.
 - Fixed browser automation disrupting attached browsers by adopting the active foreground tab and avoiding raising new tabs during screenshots.
+### Fixed
+
+- Propagated cancellation through the adopted subagent tree. When a parent agent is marked aborted, the lifecycle manager now aborts each live descendant session and marks that descendant aborted, preventing a cancelled or dead parent from leaving keep-alive children running without an owner.
 
 ## [17.2.1] - 2026-07-30
 

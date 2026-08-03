@@ -483,6 +483,22 @@ export class AgentLifecycleManager {
 	}
 
 	#onRegistryEvent(event: RegistryEvent): void {
+		if (event.type === "status_changed" && event.ref.status === "aborted") {
+			// Parent/task cancellation is terminal for the whole owned subtree.
+			// Abort descendants without waiting on the event-dispatch path so a
+			// dead parent cannot leave live keep-alive children consuming work.
+			for (const child of this.#registry.list()) {
+				if (child.parentId === event.ref.id && child.status !== "aborted") {
+					void child.session?.abort().catch(error => {
+						logger.debug("AgentLifecycleManager descendant abort failed", {
+							id: child.id,
+							error: error instanceof Error ? error.message : String(error),
+						});
+					});
+					this.#registry.setStatus(child.id, "aborted", child);
+				}
+			}
+		}
 		const adopted = this.#adopted.get(event.ref.id);
 		if (!adopted || adopted.ref !== event.ref) return;
 		if (event.type === "removed") {
