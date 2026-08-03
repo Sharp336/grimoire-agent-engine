@@ -14,7 +14,7 @@
 - Fixed the in-process ps shell builtin rejecting common procps/BSD format specifiers (`ps -o tpgid,...` failed with `unknown output format specifier`); added `tpgid`, `pri`, `flags`, real/effective user and group columns, `wchan`, fault counters, `sz`, and the STAT `+` foreground flag.
 ### Added
 
-- Added `providers.maxImagesPerRequest` and `providers.maxImageBytesPerRequest`: per-provider caps on how many images and how many total base64 image bytes a single request may carry, settable per provider id from `config.yml`, `omp config set`, or the settings panel. A custom gateway that is unknown by id now inherits its wire API family's image budget (`anthropic-messages` 90, `google-generative-ai` 200) instead of falling to the 5-image floor, and the byte cap drops the oldest droppable images until the request fits, which lets a gateway that rejects large bodies keep its compaction archive readable
+- Added `providers.maxImagesPerRequest` and `providers.maxImageBytesPerRequest`: per-provider budgets for how many images and how many total base64 image bytes a single request may carry, settable per provider id from `config.yml`, `omp config set`, or the settings panel. A custom gateway that is unknown by id now inherits its wire API family's image budget (`anthropic-messages` 90, `google-generative-ai` 200) instead of falling to the 5-image floor, which keeps a compaction archive readable on a private gateway. The byte budget removes the oldest droppable images until the request fits or none are left; images retained in assistant turns are never removed and count against the budget
 
 ## [17.2.6] - 2026-08-03
 
