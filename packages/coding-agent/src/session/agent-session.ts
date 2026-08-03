@@ -9190,7 +9190,7 @@ export class AgentSession {
 			if (this.#advisorAutomaticPatterns().length > 0) {
 				const model = this.model;
 				const modelLabel = model ? formatModelString(model) : "no model";
-				const thinking = this.configuredThinkingLevel() ?? ThinkingLevel.Off;
+				const thinking = this.configuredThinkingLevel() ?? "inherit";
 				return `Advisor is automatic; no rule matches ${modelLabel}:${thinking}.`;
 			}
 			return "Advisor is disabled.";
