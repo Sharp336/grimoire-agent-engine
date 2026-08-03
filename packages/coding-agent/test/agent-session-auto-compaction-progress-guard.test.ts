@@ -117,6 +117,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 			}),
 			modelRegistry,
 			extensionRunner,
+			agentKind: "sub",
 		});
 	});
 
@@ -455,6 +456,36 @@ describe("AgentSession auto-compaction progress guard", () => {
 		expect(promptSpy).toHaveBeenCalledTimes(1);
 		const noProgress = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes(NO_PROGRESS_FRAGMENT));
 		expect(noProgress.length).toBe(0);
+	});
+
+	it("uses the child ceiling for post-compaction headroom", async () => {
+		activateOngoingGoal("child-headroom");
+		session.settings.set("task.childContextBudgetTokens", 100_000);
+		session.settings.set("compaction.thresholdTokens", 150_000);
+		session.settings.set("compaction.thresholdPercent", -1);
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		// Below the configured 150k threshold's 120k recovery band, but above
+		// the child ceiling's 80k recovery band.
+		vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 90_000, contextWindow: 200_000, percent: 45 });
+
+		const notices = collectNotices();
+		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") onCompactionDone();
+		});
+
+		const assistantMsg = highUsageAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await compactionDone;
+		await session.waitForIdle();
+
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes(NO_PROGRESS_FRAGMENT))).toHaveLength(
+			1,
+		);
 	});
 
 	it("rebases the in-flight prompt snapshot so mid-run compaction is not misread as a dead-end", async () => {

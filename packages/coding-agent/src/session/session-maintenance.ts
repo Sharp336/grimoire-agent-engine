@@ -1825,7 +1825,9 @@ export class SessionMaintenance {
 	 * When the model/window is unknown we cannot evaluate the band, so we
 	 * optimistically allow the continuation (preserving prior behavior).
 	 */
-	#compactionCreatedHeadroom(compactionSettings = this.#host.settings.getGroup("compaction")): boolean {
+	#compactionCreatedHeadroom(
+		compactionSettings: CompactionSettings = this.#host.settings.getGroup("compaction"),
+	): boolean {
 		const contextWindow = this.#model?.contextWindow ?? 0;
 		if (contextWindow <= 0) return true;
 		const residualTokens = compactionContextTokens(
