@@ -22,6 +22,7 @@ import {
 	getAgentDbPath,
 	getAgentDir,
 	getCustomThemesDir,
+	getMCPConfigPath,
 	getProjectDir,
 	isEnoent,
 	isRecord,
@@ -59,11 +60,13 @@ import { PluginManager } from "../extensibility/plugins/manager";
 import type { DoctorCheck } from "../extensibility/plugins/types";
 import { loadSkills } from "../extensibility/skills";
 import { convertToLegacyConfig, validateServerConfig } from "../mcp/config";
+import { readDisabledServers, readEnabledServers } from "../mcp/config-writer";
 import { resolveStdioCommandPath } from "../mcp/transports/stdio";
 import type { MCPServerConfig } from "../mcp/types";
 import { theme, themeJsonSchema } from "../modes/theme/theme";
 import { loadBundledAgents } from "../task/agents";
 import { discoverAgents } from "../task/discovery";
+import type { AgentDefinition } from "../task/types";
 import {
 	readChromiumEnvOverride,
 	resolveCachedChromiumExecutable,
@@ -428,6 +431,33 @@ async function collectAuthFindings(flags: DoctorCommandFlags): Promise<DoctorFin
 		];
 	}
 	if (brokerConfig) {
+		let brokerUrl: URL;
+		try {
+			brokerUrl = new URL(brokerConfig.url);
+		} catch {
+			return [
+				{
+					id: "auth.broker",
+					category: "auth",
+					status: "error",
+					summary: "auth broker URL is unusable",
+					details: ["Auth broker URL must be an absolute HTTP(S) URL"],
+					remedy: "Set OMP_AUTH_BROKER_URL or the `auth.broker.url` config entry to an HTTP(S) URL",
+				},
+			];
+		}
+		if (brokerUrl.protocol !== "http:" && brokerUrl.protocol !== "https:") {
+			return [
+				{
+					id: "auth.broker",
+					category: "auth",
+					status: "error",
+					summary: "auth broker URL is unusable",
+					details: ["Auth broker URL must be an absolute HTTP(S) URL"],
+					remedy: "Set OMP_AUTH_BROKER_URL or the `auth.broker.url` config entry to an HTTP(S) URL",
+				},
+			];
+		}
 		return [
 			{
 				id: "auth.broker",
@@ -1317,6 +1347,16 @@ async function collectMcpFindings(flags: DoctorCommandFlags): Promise<DoctorFind
 		// validateServerConfig instead of them vanishing silently.
 		includeInvalid: true,
 	});
+	const userMcpPath =
+		flags.agentDir !== undefined ? path.join(flags.agentDir, "mcp.json") : getMCPConfigPath("user", getProjectDir());
+	// The later source probe owns read/parse diagnostics. Do not let a broken
+	// optional denylist prevent the rest of the doctor report from running.
+	const [disabledServerNames, forcedEnabledNames] = await Promise.all([
+		readDisabledServers(userMcpPath).catch((): string[] => []),
+		readEnabledServers(userMcpPath).catch((): string[] => []),
+	]);
+	const disabledServers = new Set(disabledServerNames);
+	const forcedEnabled = new Set(forcedEnabledNames);
 	// Build a map of raw config entries by reading each source file once.
 	// The native provider normalizes enabled/timeout before the MCPServer
 	// object is constructed (invalid → undefined, string → coerced), so
@@ -1330,7 +1370,14 @@ async function collectMcpFindings(flags: DoctorCommandFlags): Promise<DoctorFind
 	const parseErrors = await probeMcpSourceParseErrors(flags.agentDir, getProjectDir(), scoped);
 	const allSourceErrors = [...sourceErrors, ...parseErrors];
 	const findings: DoctorFinding[] = await Promise.all(
-		result.items.map(server => diagnoseMcpServer(server.name, server, rawEntries.get(server.name))),
+		result.items.map(server => {
+			const effectiveServer = disabledServers.has(server.name)
+				? { ...server, enabled: false }
+				: server.enabled === false && forcedEnabled.has(server.name)
+					? { ...server, enabled: true }
+					: server;
+			return diagnoseMcpServer(server.name, effectiveServer, rawEntries.get(server.name));
+		}),
 	);
 	// A vanished/unreadable/unparseable source file must surface as an error
 	// finding — it must not degrade silently to the normalized item.
@@ -1496,7 +1543,7 @@ async function diagnoseMcpServer(name: string, server: MCPServer, raw?: unknown)
 				...base,
 				status: "error",
 				summary: `${name}: working directory unavailable`,
-				details: [`cwd "${cwd}" does not exist or is not a directory`],
+				details: [`cwd "${cwd}" does not exist or is not a directory or lacks search/execute permission`],
 				remedy: `Create the configured cwd or fix the "cwd" for server "${name}" in mcp.json`,
 			};
 		}
@@ -1580,20 +1627,25 @@ async function buildKnownAgentNames(
 	discovered: ParsedAgentFields[],
 	projectDir: string,
 	scoped: boolean,
-): Promise<Set<string>> {
+): Promise<{ names: Set<string>; runtimeAgents: AgentDefinition[] }> {
 	const names = new Set<string>();
 	for (const fields of discovered) names.add(fields.name);
+	const locallyParsedNames = new Set(names);
 	for (const bundled of loadBundledAgents()) names.add(bundled.name);
+	const runtimeAgents: AgentDefinition[] = [];
 	if (!scoped) {
 		try {
 			const { agents } = await discoverAgents(projectDir);
-			for (const agent of agents) names.add(agent.name);
+			for (const agent of agents) {
+				names.add(agent.name);
+				if (!locallyParsedNames.has(agent.name)) runtimeAgents.push(agent);
+			}
 		} catch {
 			// Discovery failure must not crash the report; the locally-parsed
 			// and bundled names still cover the common case.
 		}
 	}
-	return names;
+	return { names, runtimeAgents };
 }
 
 /** Discover skill names from the shared capability loader with the same scope
@@ -1733,9 +1785,11 @@ async function collectAgentSetupFinding(agentDir: string, projectDir: string, sc
 		}
 	}
 
-	// Validate references only when agents were successfully parsed.
-	if (parsed.length > 0) {
-		const knownAgentNames = await buildKnownAgentNames(parsed, projectDir, scoped);
+	// Validate references when either locally scanned or runtime-discovered
+	// definitions exist. Runtime-only agents can come from ancestor config
+	// roots and plugins, which the local markdown walk does not cover.
+	const { names: knownAgentNames, runtimeAgents } = await buildKnownAgentNames(parsed, projectDir, scoped);
+	if (parsed.length > 0 || runtimeAgents.length > 0) {
 		const knownSkillNames = await discoverSkillNames(agentDir, projectDir, scoped);
 		// Build the known tool name set from the same runtime toolCapability
 		// discovery the task tool uses: built-in names + custom tools from all
@@ -1763,7 +1817,7 @@ async function collectAgentSetupFinding(agentDir: string, projectDir: string, sc
 			// Capability loader failure must not crash the report; an empty
 			// set degrades to warnings for unknown tool references.
 		}
-		for (const fields of parsed) {
+		for (const fields of [...parsed, ...runtimeAgents]) {
 			for (const tool of fields.tools ?? []) {
 				if (!knownTools.has(tool) && !tool.startsWith("mcp__")) {
 					warnings.push(`${fields.name}: unknown tool "${tool}"`);
@@ -1894,9 +1948,10 @@ async function collectKeybindingsSetupFinding(agentDir: string): Promise<DoctorF
 }
 
 async function collectWatchdogSetupFinding(agentDir: string, projectDir: string): Promise<DoctorFinding> {
+	const readFailures: string[] = [];
 	let candidates: Array<{ path: string; content: string }>;
 	try {
-		candidates = await collectConfigCandidates(projectDir, agentDir, ["WATCHDOG.yml", "WATCHDOG.yaml"]);
+		candidates = await collectConfigCandidates(projectDir, agentDir, ["WATCHDOG.yml", "WATCHDOG.yaml"], readFailures);
 	} catch (error) {
 		return {
 			id: "setup.watchdog",
@@ -1906,7 +1961,8 @@ async function collectWatchdogSetupFinding(agentDir: string, projectDir: string)
 			details: [error instanceof Error ? error.message : String(error)],
 		};
 	}
-	if (candidates.length === 0) {
+	const errors = readFailures.map(candidate => `cannot read ${candidate}`);
+	if (candidates.length === 0 && errors.length === 0) {
 		return {
 			id: "setup.watchdog",
 			category: "setup",
@@ -1915,7 +1971,6 @@ async function collectWatchdogSetupFinding(agentDir: string, projectDir: string)
 			details: [],
 		};
 	}
-	const errors: string[] = [];
 	for (const candidate of candidates) {
 		let parsed: unknown;
 		try {

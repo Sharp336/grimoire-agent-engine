@@ -182,6 +182,10 @@ export async function resolveStdioCommandPath(
 ): Promise<StdioCommandPathResolution> {
 	try {
 		if (!(await fs.stat(cwd)).isDirectory()) return { kind: "cwd-unusable" };
+		// On POSIX a directory must be traversable (execute) for the child to
+		// resolve relative paths or run a bare command via PATH. Windows uses
+		// ACL checks and is handled by the platform resolver below.
+		if (platform !== "win32") await fs.access(cwd, fsNative.constants.X_OK);
 	} catch {
 		return { kind: "cwd-unusable" };
 	}

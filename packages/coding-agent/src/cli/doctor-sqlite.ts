@@ -397,16 +397,21 @@ async function archiveTrio(dbPath: string, expected: TrioSnapshotEntry[]): Promi
 		`${path.basename(dbPath)}.${Date.now()}-${process.pid}`,
 	);
 	await fs.mkdir(archiveDir, { recursive: true });
-	await fsyncDir(path.dirname(archiveDir));
-	for (const entry of expected) {
-		const copied = path.join(archiveDir, entry.name);
-		await fs.copyFile(path.join(path.dirname(dbPath), entry.name), copied);
-		await fsyncFile(copied);
+	try {
+		await fsyncDir(path.dirname(archiveDir));
+		for (const entry of expected) {
+			const copied = path.join(archiveDir, entry.name);
+			await fs.copyFile(path.join(path.dirname(dbPath), entry.name), copied);
+			await fsyncFile(copied);
+		}
+		await fsyncDir(archiveDir);
+		const verify = await snapshotTrio(path.join(archiveDir, path.basename(dbPath)));
+		if (!snapshotsEqual(verify, expected)) throw new Error("backup does not match the verified database snapshot");
+		return archiveDir;
+	} catch (error) {
+		await fs.rm(archiveDir, { recursive: true, force: true }).catch(() => undefined);
+		throw error;
 	}
-	await fsyncDir(archiveDir);
-	const verify = await snapshotTrio(path.join(archiveDir, path.basename(dbPath)));
-	if (!snapshotsEqual(verify, expected)) throw new Error("backup does not match the verified database snapshot");
-	return archiveDir;
 }
 
 /** One trio member's staged restore: a fsynced staging file to rename over the target, or a target to remove when the archive lacks that sidecar. */

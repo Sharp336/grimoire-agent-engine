@@ -621,6 +621,9 @@ describe("regenerable quarantine backups", () => {
 		expect(repair.error).toContain("backup failed");
 		expect(repair.error).toContain("ENOSPC");
 		expect(await fs.readFile(dbPath, "utf8")).toBe(original);
+		const backupRoot = path.join(root, ".omp-doctor-backups");
+		const backups = await fs.readdir(backupRoot).catch(() => []);
+		expect(backups).toEqual([]);
 	});
 });
 

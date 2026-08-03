@@ -12,6 +12,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent/cli/doctor-cli";
 import { PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/manager";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import * as taskDiscovery from "@oh-my-pi/pi-coding-agent/task/discovery";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import * as browserLaunch from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { getAgentDbPath, getHistoryDbPath, getModelDbPath, setAgentDir, setProjectDir } from "@oh-my-pi/pi-utils";
@@ -738,6 +740,44 @@ describe("omp doctor", () => {
 		expect(finding?.summary).toContain("command not found");
 	});
 
+	test("MCP denylisted server reports disabled without probing its command", async () => {
+		setProjectDir(root);
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(
+			mcpJson,
+			JSON.stringify({
+				disabledServers: ["ghost"],
+				mcpServers: { ghost: { type: "stdio", command: "this-binary-does-not-exist-anywhere-xyz" } },
+			}),
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "mcp.ghost");
+		expect(finding?.status).toBe("ok");
+		expect(finding?.summary).toContain("disabled");
+	});
+
+	test("MCP enabledServers restores probing for a source-disabled server", async () => {
+		setProjectDir(root);
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(
+			mcpJson,
+			JSON.stringify({
+				enabledServers: ["ghost"],
+				mcpServers: {
+					ghost: { type: "stdio", command: "this-binary-does-not-exist-anywhere-xyz", enabled: false },
+				},
+			}),
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "mcp.ghost");
+		expect(finding?.status).toBe("error");
+		expect(finding?.summary).toContain("command not found");
+	});
+
 	test("MCP stdio server with env.PATH restricting to a dir without the command → error, not process-PATH fallback", async () => {
 		// When a server sets env.PATH to an authoritative restricted path that
 		// does not contain its bare command, the real transport merges
@@ -1284,6 +1324,21 @@ describe("omp doctor", () => {
 		expect(JSON.stringify(report)).not.toContain("=secret");
 	});
 
+	test("auth: unusable broker URL is an error without leaking the configured value", async () => {
+		const configPath = path.join(root, "config.yml");
+		await fs.writeFile(
+			configPath,
+			`${["auth:", "  broker:", '    url: "ftp://user:broker-secret@broker.example"', '    token: "token"'].join("\n")}\n`,
+			"utf8",
+		);
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const brokerFinding = report.findings.find(entry => entry.id === "auth.broker");
+		expect(brokerFinding?.status).toBe("error");
+		expect(brokerFinding?.summary).toContain("unusable");
+		expect(JSON.stringify(report)).not.toContain("broker-secret");
+		expect(JSON.stringify(report)).not.toContain("ftp://");
+	});
+
 	test("auth: scoped run with broker URL but no scoped token does not see the global token file", async () => {
 		// When --agent-dir is set, the global broker token file
 		// (~/.omp/auth-broker.token) is outside scope. A broker URL in the
@@ -1414,6 +1469,24 @@ describe("omp doctor", () => {
 		expect(finding?.details.some(d => d.includes("nonexistent-agent"))).toBe(true);
 	});
 
+	test("setup: runtime-only agent references are validated", async () => {
+		setAgentDir(root);
+		setProjectDir(root);
+		const runtimeAgent: AgentDefinition = {
+			name: "runtime-only",
+			description: "test agent",
+			systemPrompt: "",
+			source: "project",
+			tools: ["not-a-real-tool"],
+		};
+		spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [runtimeAgent], projectAgentsDir: null });
+
+		const report = await runDoctorCommand({ flags: {} });
+		const finding = report.findings.find(entry => entry.id === "setup.agents");
+		expect(finding?.status).toBe("warning");
+		expect(finding?.details).toContain('runtime-only: unknown tool "not-a-real-tool"');
+	});
+
 	test("setup: keybindings.yml with an unknown action → warning", async () => {
 		await fs.writeFile(path.join(root, "keybindings.yml"), "nonexistent.action: ctrl+a\n", "utf8");
 
@@ -1442,6 +1515,23 @@ describe("omp doctor", () => {
 		expect(finding?.category).toBe("setup");
 		expect(finding?.status).toBe("error");
 		expect(finding?.details.some(d => d.includes("WATCHDOG.yml"))).toBe(true);
+	});
+
+	test("setup: unreadable WATCHDOG.yml is an error, not absent", async () => {
+		if (process.getuid?.() === 0) return;
+		setProjectDir(root);
+		const watchdogPath = path.join(root, "WATCHDOG.yml");
+		await fs.writeFile(watchdogPath, "advisors: []\n", "utf8");
+		const originalMode = (await fs.stat(watchdogPath)).mode & 0o777;
+		try {
+			await fs.chmod(watchdogPath, 0o000);
+			const report = await runDoctorCommand({ flags: { agentDir: root } });
+			const finding = report.findings.find(entry => entry.id === "setup.watchdog");
+			expect(finding?.status).toBe("error");
+			expect(finding?.details.some(detail => detail.includes("WATCHDOG.yml"))).toBe(true);
+		} finally {
+			await fs.chmod(watchdogPath, originalMode);
+		}
 	});
 
 	test("setup: valid SKILL.md via runtime capability path → ok", async () => {

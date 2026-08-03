@@ -35,4 +35,25 @@ describe("validateSettingsValues", () => {
 			result.errors.some(error => error.includes("Provider request limits must be positive numbers: openai")),
 		).toBe(true);
 	});
+
+	it("rejects non-string task override record values", () => {
+		const result = validateSettingsValues({
+			task: {
+				agentModelOverrides: { task_fast: 7 },
+				agentPrewalk: { task_budget: false },
+			},
+		});
+		expect(result.errors).toContain('Settings key "task.agentModelOverrides.task_fast" must be a string, got number');
+		expect(result.errors).toContain('Settings key "task.agentPrewalk.task_budget" must be a string, got boolean');
+	});
+
+	it("accepts string-valued task override records", () => {
+		const result = validateSettingsValues({
+			task: {
+				agentModelOverrides: { task_fast: "openai/gpt-5" },
+				agentPrewalk: { task_budget: "openai/gpt-5-mini" },
+			},
+		});
+		expect(result.errors).toEqual([]);
+	});
 });

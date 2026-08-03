@@ -200,22 +200,34 @@ function validateSettingValueType(
 				for (let i = 0; i < value.length; i++) {
 					const item = value[i];
 					const actual = item === null ? "null" : typeof item;
-					const ok =
-						elementType === "object"
-							? item !== null && typeof item === "object" && !Array.isArray(item)
-							: typeof item === elementType;
+					const ok = matchesSettingElementType(item, elementType);
 					if (!ok) return `Settings key "${path}[${i}]" must be a ${elementType}, got ${actual}`;
 				}
 			}
 			return null;
 		}
-		case "record":
+		case "record": {
 			if (typeof value !== "object" || Array.isArray(value) || value === null)
 				return `Settings key "${path}" must be a record/object, got ${value === null ? "null" : Array.isArray(value) ? "array" : typeof value}`;
+			const elementType = def.elements;
+			if (elementType !== undefined) {
+				for (const [key, item] of Object.entries(value)) {
+					const actual = item === null ? "null" : typeof item;
+					if (!matchesSettingElementType(item, elementType))
+						return `Settings key "${path}.${key}" must be a ${elementType}, got ${actual}`;
+				}
+			}
 			return null;
+		}
 		default:
 			return null;
 	}
+}
+
+function matchesSettingElementType(value: unknown, elementType: "string" | "number" | "boolean" | "object"): boolean {
+	return elementType === "object"
+		? value !== null && typeof value === "object" && !Array.isArray(value)
+		: typeof value === elementType;
 }
 
 function walkUnknownSettingsKeys(

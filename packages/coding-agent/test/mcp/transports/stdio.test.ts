@@ -63,6 +63,22 @@ describe("resolveStdioSpawnCommand", () => {
 			await expect(resolveStdioCommandPath(process.execPath, file, {}, "linux")).resolves.toEqual({
 				kind: "cwd-unusable",
 			});
+
+			// A directory without execute permission cannot be used as a cwd on
+			// POSIX. Root bypasses mode bits, so this assertion is skipped as root.
+			if (process.platform === "linux" && process.getuid?.() !== 0) {
+				const locked = await fs.mkdtemp(path.join(os.tmpdir(), "omp-stdio-cwd-lock-"));
+				const originalMode = (await fs.stat(locked)).mode & 0o777;
+				try {
+					await fs.chmod(locked, 0o600);
+					await expect(resolveStdioCommandPath(process.execPath, locked, {}, "linux")).resolves.toEqual({
+						kind: "cwd-unusable",
+					});
+				} finally {
+					await fs.chmod(locked, originalMode);
+					await fs.rm(locked, { recursive: true, force: true });
+				}
+			}
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });
 		}

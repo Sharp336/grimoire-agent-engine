@@ -272,22 +272,24 @@ interface EnumDef<T extends readonly string[]> extends CredentialMarker {
 	ui?: UiEnum<T>;
 }
 
-/** Declared element type for array settings, enabling per-element validation
- * in {@link validateSettingValueType}. Only annotate arrays whose element type
- * is unambiguous from the default or documented shape. */
-type ArrayElementType = "string" | "number" | "boolean" | "object";
+/** Declared member type for array and record settings, enabling per-member
+ * validation in {@link validateSettingValueType}. Only annotate containers
+ * whose member type is unambiguous from the default or documented shape. */
+type ContainerElementType = "string" | "number" | "boolean" | "object";
 
 interface ArrayDef<T> extends CredentialMarker {
 	type: "array";
 	default: T[];
-	/** When set, each array element is validated against this primitive type. */
-	elements?: ArrayElementType;
+	/** When set, each array member is validated against this primitive type. */
+	elements?: ContainerElementType;
 	ui?: UiArray;
 }
 
 interface RecordDef<T> extends CredentialMarker {
 	type: "record";
 	default: Record<string, T>;
+	/** When set, each record value is validated against this primitive type. */
+	elements?: ContainerElementType;
 	ui?: UiBase;
 }
 
@@ -4704,10 +4706,12 @@ export const SETTINGS_SCHEMA = {
 	"task.agentModelOverrides": {
 		type: "record",
 		default: {} as Record<string, string>,
+		elements: "string",
 	},
 	"task.agentPrewalk": {
 		type: "record",
 		default: {} as Record<string, string>,
+		elements: "string",
 	},
 	"task.prewalk": {
 		type: "boolean",
