@@ -442,6 +442,11 @@ export interface StreamOptions {
 	 * For example, Anthropic uses `user_id` for abuse tracking and rate limiting.
 	 */
 	metadata?: Record<string, unknown>;
+	/**
+	 * Provider-owned request configuration. Provider hooks interpret this bag;
+	 * generic API transports do not forward its fields onto the wire.
+	 */
+	providerOptions?: Readonly<Record<string, unknown>>;
 	/** OpenAI Responses/Codex response fields to include verbatim. */
 	include?: OpenAIResponseInclude[];
 	/**

@@ -16,6 +16,12 @@
 - Fixed `--thinking off` being ignored by Google (Generative AI, Gemini CLI, Vertex), Ollama, Devin, GitLab Duo OpenAI-format, and OpenAI/Anthropic shim OpenAI-format requests.
 - Fixed the thinking selector, RPC, ACP, and extension paths being unable to re-enable thinking after it had been turned off.
 - Fixed thinking state not reaching collab guests, RPC clients, and proxied agents, which showed stale or wrong thinking status.
+### Fixed
+
+- Fixed extension slash commands appearing as user prompts after being handled locally.
+- Preserved explicit session titles when branching from an earlier conversation turn.
+- Fixed floating rejections from cmux browser guest JavaScript terminating the main process and every active session; attributable rejections now fail the browser run as tool errors while unrelated process rejections retain the fatal path ([#7365](https://github.com/can1357/oh-my-pi/issues/7365)).
+- Fixed the Windows bash tool silently taking down the whole omp process when a command blocked until its timeout: cancelling a timed-out run walked the spawned child's descendant tree from raw `th32ParentProcessID` links, and a recycled pid matching the harness's stale recorded parent pid could enumerate omp as a false descendant and `TerminateProcess` it, killing the session with no `session_exit` record. Run-cancellation sweeps now refuse to signal the harness or any process collected beneath it, while still reaping the timed-out target when it owns a recycled ancestor pid ([#7452](https://github.com/can1357/oh-my-pi/issues/7452)).
 
 ## [17.2.5] - 2026-08-03
 

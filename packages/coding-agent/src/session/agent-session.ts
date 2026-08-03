@@ -7540,7 +7540,10 @@ export class AgentSession {
 			await this.#advisors.drainAndDetachRecorders();
 			try {
 				if (!selectedEntry.parentId) {
+					const title = this.sessionManager.getSessionName();
+					const titleSource = this.sessionManager.titleSource;
 					await this.sessionManager.newSession({ parentSession: previousSessionFile });
+					if (title) await this.sessionManager.setSessionName(title, titleSource);
 				} else {
 					this.sessionManager.createBranchedSession(selectedEntry.parentId);
 				}

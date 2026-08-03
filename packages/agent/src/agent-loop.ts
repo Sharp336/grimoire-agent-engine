@@ -2395,7 +2395,16 @@ async function executeToolCalls(
 	};
 
 	const runTool = async (record: (typeof records)[number], index: number): Promise<void> => {
-		if (interruptState.triggered) {
+		// A pending interrupt preempts not-yet-started tools so the message
+		// injects promptly. A peer-IRC interrupt is the exception: it aborts
+		// interruptible waits only and leaves non-interruptible foreground work
+		// untouched (see the emit branch below and the `does not abort a
+		// non-interruptible foreground tool` case). That guarantee must hold for
+		// work still queued behind the aborted wait too — otherwise a batched
+		// `todo`/`write` gets dropped as "Skipped due to pending peer interrupt"
+		// purely for being ordered after the wait (#7493). User/system steering
+		// still preempts everything queued.
+		if (interruptState.triggered && (record.interruptible || interruptState.source !== "irc")) {
 			// Skip both span emission and the collector orphan record here. The
 			// tail sweep below (after `Promise.allSettled`) is the single path
 			// that handles "no result message was produced" — it calls
@@ -2877,6 +2886,9 @@ function createSkippedToolResult(
 	if (source === "user") {
 		reason = "queued user message";
 		blocker = "queued message";
+	} else if (source === "agent") {
+		reason = "pending parent steering message";
+		blocker = "steering message";
 	} else if (source === "system") {
 		reason = "pending system advisory";
 		blocker = "advisory";
