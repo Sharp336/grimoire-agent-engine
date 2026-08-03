@@ -176,6 +176,8 @@ export interface InteractiveModeContext {
 	hideThinkingBlock: boolean;
 	/** Hide thinking blocks once the turn completes (kept visible while streaming). */
 	hideThinkingBlockOnComplete: boolean;
+	/** User explicitly revealed thinking (Ctrl+T to visible): wins over hide-on-complete. */
+	thinkingRevealed: boolean;
 	/**
 	 * Effective thinking-block visibility: true when hidden by user setting OR
 	 * thinking level is "off" before the session has produced displayable

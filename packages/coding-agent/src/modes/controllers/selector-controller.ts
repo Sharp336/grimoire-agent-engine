@@ -510,9 +510,13 @@ export class SelectorController {
 			}
 			case "hideThinkingBlock":
 				this.ctx.hideThinkingBlock = value as boolean;
+				// Explicit user choice: visible reveals completed reasoning too
+				// (wins over hide-on-complete), hidden restores the default.
+				this.ctx.thinkingRevealed = !(value as boolean);
 				for (const child of this.ctx.chatContainer.children) {
 					if (child instanceof AssistantMessageComponent) {
 						child.setHideThinkingBlock(this.ctx.effectiveHideThinkingBlock);
+						child.setUserRevealedThinking(this.ctx.thinkingRevealed);
 					}
 				}
 				// Full clear + replay so blocks frozen in committed scrollback on
@@ -525,6 +529,9 @@ export class SelectorController {
 				for (const child of this.ctx.chatContainer.children) {
 					if (child instanceof AssistantMessageComponent) {
 						child.setHideThinkingBlockOnComplete(value as boolean);
+						// Re-enabling the clean-transcript mode clears any prior
+						// explicit reveal so the setting takes effect again.
+						if (value as boolean) child.setUserRevealedThinking(false);
 					}
 				}
 				// Full clear + replay so settled blocks frozen in committed scrollback
@@ -2044,6 +2051,7 @@ export class SelectorController {
 			cwd: this.ctx.sessionManager.getCwd(),
 			hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
 			hideThinkingBlockOnComplete: () => this.ctx.hideThinkingBlockOnComplete,
+			thinkingRevealed: () => this.ctx.thinkingRevealed,
 			proseOnlyThinking: () => this.ctx.proseOnlyThinking,
 			focusAgent: id => this.ctx.focusAgentSession(id),
 			sessionFile: this.ctx.sessionManager.getSessionFile() ?? null,

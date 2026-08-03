@@ -157,6 +157,8 @@ export interface AgentHubDeps {
 	hideThinkingBlock?: () => boolean;
 	/** Hide thinking blocks once the turn completes (live while streaming). */
 	hideThinkingBlockOnComplete?: () => boolean;
+	/** User explicitly revealed thinking (Ctrl+T to visible): wins over hide-on-complete. */
+	thinkingRevealed?: () => boolean;
 	proseOnlyThinking?: () => boolean;
 	/** Keys toggling tool output expansion (app.tools.expand). */
 	expandKeys?: KeyId[];
@@ -199,6 +201,7 @@ export class AgentHubOverlayComponent extends Container {
 	#cwd: string;
 	#hideThinkingBlock: (() => boolean) | undefined;
 	#hideThinkingBlockOnComplete: (() => boolean) | undefined;
+	#thinkingRevealed: (() => boolean) | undefined;
 	#proseOnlyThinking: (() => boolean) | undefined;
 	#expandKeys: KeyId[];
 	#focusAgent: ((id: string) => Promise<void>) | undefined;
@@ -230,6 +233,7 @@ export class AgentHubOverlayComponent extends Container {
 		this.#cwd = deps.cwd ?? getProjectDir();
 		this.#hideThinkingBlock = deps.hideThinkingBlock;
 		this.#hideThinkingBlockOnComplete = deps.hideThinkingBlockOnComplete;
+		this.#thinkingRevealed = deps.thinkingRevealed;
 		this.#proseOnlyThinking = deps.proseOnlyThinking;
 		this.#expandKeys = deps.expandKeys ?? ["ctrl+o"];
 		this.#focusAgent = deps.focusAgent;
@@ -326,6 +330,7 @@ export class AgentHubOverlayComponent extends Container {
 			cwd: this.#cwd,
 			hideThinkingBlock: this.#hideThinkingBlock,
 			hideThinkingBlockOnComplete: this.#hideThinkingBlockOnComplete,
+			thinkingRevealed: this.#thinkingRevealed,
 			proseOnlyThinking: this.#proseOnlyThinking,
 			expandKeys: this.#expandKeys,
 			hubKeys: this.#hubKeys,

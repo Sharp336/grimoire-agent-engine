@@ -140,6 +140,27 @@ describe("hideThinkingBlockOnComplete", () => {
 		expect(renderText(component)).not.toContain(THINKING);
 	});
 
+	it("explicit user reveal (Ctrl+T visible) beats hide-on-complete", () => {
+		const component = new AssistantMessageComponent(undefined, false);
+		component.setHideThinkingBlockOnComplete(true);
+		component.updateContent(makeMessage("stop"));
+		component.markTranscriptBlockFinalized();
+		// Completed turn with auto-hide on: hidden by default.
+		expect(renderText(component)).not.toContain(THINKING);
+
+		// Ctrl+T → visible: completed reasoning comes back (re-render like the
+		// toggle's resetDisplay replay).
+		component.setUserRevealedThinking(true);
+		component.updateContent(makeMessage("stop"));
+		expect(renderText(component)).toContain(THINKING);
+
+		// Ctrl+T → hidden: the global toggle wins and the default is restored.
+		component.setHideThinkingBlock(true);
+		component.setUserRevealedThinking(false);
+		component.updateContent(makeMessage("stop"));
+		expect(renderText(component)).not.toContain(THINKING);
+	});
+
 	it("pins the live region while retractable thinking is visible", () => {
 		// Flag on, still streaming with visible reasoning: pinned, so scrolled
 		// rows never freeze into native scrollback before the hide rebuild.

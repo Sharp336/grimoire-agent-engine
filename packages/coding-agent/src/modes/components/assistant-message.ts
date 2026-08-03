@@ -284,6 +284,14 @@ export class AssistantMessageComponent extends Container {
 	 *  hide-on-complete rebuild to the false→true finalization transition. */
 	#lastRenderHadVisibleThinking = false;
 
+	/**
+	 * User explicitly revealed thinking (Ctrl+T / settings "Hide Thinking
+	 * Blocks" set to visible): beats hide-on-complete so completed blocks can
+	 * be re-read. Hidden state clears it, restoring the clean-transcript
+	 * default for future turns.
+	 */
+	#userRevealed = false;
+
 	#textColorTransform?: (text: string) => string;
 
 	setTextColorTransform(transform?: (text: string) => string): void {
@@ -356,15 +364,22 @@ export class AssistantMessageComponent extends Container {
 		this.hideThinkingBlockOnComplete = hide;
 	}
 
+	setUserRevealedThinking(revealed: boolean): void {
+		this.#userRevealed = revealed;
+	}
+
 	/**
 	 * Effective thinking visibility for this block: hidden when the user's
 	 * global toggle is on, or — with hide-on-complete — once the turn has truly
-	 * completed and ended normally (`stop`/`toolUse`). Live blocks keep
-	 * streaming their reasoning; abnormal turns (error/abort/length) keep their
-	 * trace on every re-render, not just the finalize one.
+	 * completed and ended normally (`stop`/`toolUse`). An explicit user reveal
+	 * (Ctrl+T / settings to visible) wins over hide-on-complete so completed
+	 * reasoning can be re-read. Live blocks keep streaming their reasoning;
+	 * abnormal turns (error/abort/length) keep their trace on every re-render,
+	 * not just the finalize one.
 	 */
 	#effectiveHideThinkingBlock(): boolean {
 		if (this.hideThinkingBlock) return true;
+		if (this.#userRevealed) return false;
 		if (!this.hideThinkingBlockOnComplete || !this.#messageComplete) return false;
 		const reason = this.#lastMessage?.stopReason;
 		return reason === "stop" || reason === "toolUse";
