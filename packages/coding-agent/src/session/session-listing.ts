@@ -617,9 +617,17 @@ export function listSessionsReadOnly(sessionDir: string, storage: SessionStorage
 	return scanSessionDirReadOnly(sessionDir, storage, true);
 }
 
-/** List all sessions across all project directories (newest first). */
-export async function listAllSessions(storage: SessionStorage = new FileSessionStorage()): Promise<SessionInfo[]> {
-	const sessionsRoot = path.join(getDefaultAgentDir(), "sessions");
+/**
+ * List all sessions across all project directories (newest first).
+ *
+ * @param sessionsRoot Root of the sessions tree to scan. Defaults to the active
+ *   profile's `~/.omp/agent/sessions`; pass another profile's sessions root to
+ *   discover sessions stored under a different `--profile`.
+ */
+export async function listAllSessions(
+	storage: SessionStorage = new FileSessionStorage(),
+	sessionsRoot: string = path.join(getDefaultAgentDir(), "sessions"),
+): Promise<SessionInfo[]> {
 	try {
 		const files = await Array.fromAsync(new Bun.Glob("*/*.jsonl").scan(sessionsRoot), name =>
 			path.join(sessionsRoot, name),
@@ -679,6 +687,13 @@ function sessionMatchesResumeArg(session: SessionInfo, sessionArg: string): bool
 export interface ResolveResumableSessionOptions {
 	/** Search default global session buckets after the active/custom session directory misses. */
 	allowGlobalFallback?: boolean;
+	/**
+	 * Sessions tree to resolve against instead of the active profile's. Redirects
+	 * both the cwd-scoped and all-projects scans to this root so a `--resume`
+	 * target stored under another `--profile` can be found. Defaults to the active
+	 * profile's sessions root.
+	 */
+	sessionsRoot?: string;
 }
 
 function isSessionStorage(value: SessionStorage | ResolveResumableSessionOptions): value is SessionStorage {
@@ -694,7 +709,7 @@ export async function resolveResumableSession(
 ): Promise<ResolvedSessionMatch | undefined> {
 	const storage = isSessionStorage(storageOrOptions) ? storageOrOptions : new FileSessionStorage();
 	const resolvedOptions = isSessionStorage(storageOrOptions) ? options : storageOrOptions;
-	const localSessionDir = sessionDir ?? computeDefaultSessionDir(cwd, storage);
+	const localSessionDir = sessionDir ?? computeDefaultSessionDir(cwd, storage, resolvedOptions.sessionsRoot);
 	const localSessions = await listSessions(localSessionDir, storage);
 	const localMatch = localSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
 	if (localMatch) {
@@ -705,7 +720,7 @@ export async function resolveResumableSession(
 		return undefined;
 	}
 
-	const globalSessions = await listAllSessions(storage);
+	const globalSessions = await listAllSessions(storage, resolvedOptions.sessionsRoot);
 	const globalMatch = globalSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
 	if (!globalMatch) {
 		return undefined;

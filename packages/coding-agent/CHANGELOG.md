@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `--session-profile <name>` to resolve the `--resume`/`--fork` target from another profile's session store while the process keeps running the active profile's config, so a session created under one `--profile` can be resumed under another (e.g. `omp --profile work --resume <id> --session-profile personal`). Lookup is redirected to that profile's sessions tree; the session opens in place and default resolution is unchanged when the flag is omitted.
+
 ### Changed
 
 - Replaced arktype with `@oh-my-pi/omptype` across all tool parameter and config schemas: ~100x faster schema construction removes the arktype startup tax (the `scope({}, { jitless: true })` workarounds are gone). Config schema errors now report via `OmpErrors` entries with the same `path`/`problem` shape.

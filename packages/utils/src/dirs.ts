@@ -489,6 +489,15 @@ export function getActiveProfile(): string | undefined {
 export function getProfileRootDir(profile: string | undefined): string {
 	return getProfileConfigRoot(normalizeProfileName(profile));
 }
+/**
+ * Resolve a profile's sessions directory without activating it. Mirrors
+ * {@link getSessionsDir} for the active profile, including the XDG data-category
+ * routing a named profile would use if it were the active one, so cross-profile
+ * session lookups target the same tree that profile writes to.
+ */
+export function getProfileSessionsDir(profile: string | undefined): string {
+	return new DirResolver({ profile: normalizeProfileName(profile) }).agentSubdir(undefined, "sessions", "data");
+}
 /** Get the agent config directory (~/.omp/agent). */
 export function getAgentDir(): string {
 	return dirs.agentDir;
