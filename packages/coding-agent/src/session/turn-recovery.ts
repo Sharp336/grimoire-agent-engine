@@ -173,6 +173,7 @@ export class TurnRecovery {
 	// safety cap on saga state instead of trying to reclassify every failed turn.
 	#cursorInterruptedExecRetryActive = false;
 	#cursorInterruptedExecRetrySaga = false;
+	#cursorInterruptedExecRetryAttempt = 0;
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
 	#activeRetryFallback: ActiveRetryFallbackState | undefined;
@@ -376,6 +377,7 @@ export class TurnRecovery {
 		this.#retryAttempt = 0;
 		this.#cursorInterruptedExecRetryActive = false;
 		this.#cursorInterruptedExecRetrySaga = false;
+		this.#cursorInterruptedExecRetryAttempt = 0;
 	}
 
 	/**
@@ -1381,6 +1383,9 @@ export class TurnRecovery {
 
 		const generation = this.#host.promptGeneration();
 		this.#retryAttempt++;
+		if (this.#cursorInterruptedExecRetrySaga && message.provider === "cursor") {
+			this.#cursorInterruptedExecRetryAttempt++;
+		}
 
 		// Create retry promise on first attempt so waitForRetry() can await it
 		// Ensure only one promise exists (avoid orphaned promises from concurrent calls)
@@ -1396,12 +1401,18 @@ export class TurnRecovery {
 		// (every rotation sets switchedCredential and skips it), so without
 		// this last resort a provider-wide usage cap never fails over to the
 		// configured chain.
+		const cursorMaxRetries = Math.min(retrySettings.maxRetries, 2);
 		const maxRetries = this.#isOpenRouterThinkingStreamClose(message)
 			? Math.min(retrySettings.maxRetries, 1)
 			: this.#cursorInterruptedExecRetryActive
-				? Math.min(retrySettings.maxRetries, 2)
+				? cursorMaxRetries
 				: retrySettings.maxRetries;
-		const retryBudgetExhausted = this.#retryAttempt > maxRetries;
+		const budgetAttempt = this.#cursorInterruptedExecRetryActive
+			? this.#cursorInterruptedExecRetryAttempt
+			: this.#retryAttempt;
+		const retryBudgetExhausted = budgetAttempt > maxRetries;
+		const cursorRetryBudgetExhausted =
+			this.#cursorInterruptedExecRetrySaga && this.#cursorInterruptedExecRetryAttempt > cursorMaxRetries;
 
 		const errorMessage = message.errorMessage || "Unknown error";
 		const id = this.#classifyRetryMessage(message);
@@ -1474,7 +1485,7 @@ export class TurnRecovery {
 					// continue an arbitrarily long Cursor-only fallback chain. A
 					// later non-Cursor candidate is still safe: switching provider
 					// clears the special latch below and restores the normal budget.
-					allowCursorCandidates: !(retryBudgetExhausted && this.#cursorInterruptedExecRetryActive),
+					allowCursorCandidates: !cursorRetryBudgetExhausted,
 				});
 			}
 			// Auto fallback from a Fireworks Fast variant to its base model. Independent

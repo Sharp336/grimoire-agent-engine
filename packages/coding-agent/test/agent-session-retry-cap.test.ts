@@ -2208,6 +2208,7 @@ describe("AgentSession retry delay cap", () => {
 			`${initialModel.provider}/${initialModel.id}`,
 			`${intermediateModel.provider}/${intermediateModel.id}`,
 			`${returnedCursorModel.provider}/${returnedCursorModel.id}`,
+			`${returnedCursorModel.provider}/${returnedCursorModel.id}`,
 		]);
 		expect(session.model?.id).toBe(returnedCursorModel.id);
 		expect(session.isRetrying).toBe(false);
