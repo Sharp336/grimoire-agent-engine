@@ -217,6 +217,8 @@ export interface SessionInitEntry extends SessionEntryBase {
 	spawns?: string;
 	/** The agent's `readSummarize` setting (`false` = read summarization disabled); absent uses the session default. */
 	readSummarize?: boolean;
+	/** The agent's xdevPromote frontmatter; absent = session default. */
+	xdevPromote?: string[];
 }
 
 /** Mode change entry - tracks agent mode transitions (e.g. plan mode). */

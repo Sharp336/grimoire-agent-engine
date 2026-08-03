@@ -160,6 +160,32 @@ describe("parseAgentFields", () => {
 	test("returns undefined readSummarize when field absent", () => {
 		expect(parseAgentFields({ name: "scout", description: "desc" })?.readSummarize).toBeUndefined();
 	});
+
+	test("lowercases and dedupes xdevPromote names", () => {
+		expect(
+			parseAgentFields({
+				name: "scout",
+				description: "desc",
+				xdevPromote: ["LSP", "mcp__Context7_Resolve", "lsp"],
+			})?.xdevPromote,
+		).toEqual(["lsp", "mcp__context7_resolve"]);
+	});
+
+	test("parses xdevPromote from CSV string", () => {
+		expect(
+			parseAgentFields({
+				name: "scout",
+				description: "desc",
+				xdevPromote: "lsp, mcp__context7_resolve_library_id",
+			})?.xdevPromote,
+		).toEqual(["lsp", "mcp__context7_resolve_library_id"]);
+	});
+
+	test("returns undefined xdevPromote when field absent or empty", () => {
+		expect(parseAgentFields({ name: "scout", description: "desc" })?.xdevPromote).toBeUndefined();
+		expect(parseAgentFields({ name: "scout", description: "desc", xdevPromote: [] })?.xdevPromote).toBeUndefined();
+		expect(parseAgentFields({ name: "scout", description: "desc", xdevPromote: "" })?.xdevPromote).toBeUndefined();
+	});
 	test("parses prewalk from boolean frontmatter", () => {
 		expect(parseAgentFields({ name: "worker", description: "desc", prewalk: true })?.prewalk).toBe(true);
 		expect(parseAgentFields({ name: "worker", description: "desc", prewalk: false })?.prewalk).toBe(false);

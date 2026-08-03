@@ -8,5 +8,6 @@ description: {{jsonStringify description}}
 {{/if}}{{#if blocking}}blocking: true
 {{/if}}{{#if prewalk}}prewalk: {{jsonStringify prewalk}}
 {{/if}}{{#if autoloadSkills}}autoloadSkills: {{jsonStringify autoloadSkills}}
+{{/if}}{{#if xdevPromote}}xdevPromote: {{jsonStringify xdevPromote}}
 {{/if}}---
 {{body}}

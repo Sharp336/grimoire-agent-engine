@@ -241,6 +241,7 @@ export interface ParsedAgentFields {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	autoloadSkills?: string[];
 	readSummarize?: boolean;
+	xdevPromote?: string[];
 	blocking?: boolean;
 	/** `true` = prewalk into the default target; string = prewalk into that model pattern. */
 	prewalk?: boolean | string;
@@ -307,6 +308,8 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	const autoloadSkills = parseArrayOrCSV(frontmatter.autoloadSkills)
 		?.map(s => s.trim())
 		.filter(Boolean);
+	const xdevPromote = parseArrayOrCSV(frontmatter.xdevPromote);
+	const normalizedXdevPromote = xdevPromote ? normalizeToolNames(xdevPromote) : undefined;
 	return {
 		name,
 		description,
@@ -318,6 +321,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		blocking,
 		autoloadSkills,
 		readSummarize,
+		xdevPromote: normalizedXdevPromote,
 		prewalk,
 	};
 }

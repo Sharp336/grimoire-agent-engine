@@ -4327,6 +4327,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tools.xdevPromote": {
+		type: "array",
+		default: EMPTY_STRING_ARRAY,
+		ui: {
+			tab: "tools",
+			group: "Discovery & MCP",
+			label: "xd:// Promoted Tools",
+			description:
+				'Tools to keep top-level instead of mounting under xd:// while xd:// Tools is on (for example "lsp" or "mcp__context7_resolve-library_id"). Promotion only changes presentation; tools must still be enabled through their normal settings. No-op when xd:// Tools is off.',
+		},
+	},
+
 	// MCP
 	"mcp.enableProjectConfig": {
 		type: "boolean",

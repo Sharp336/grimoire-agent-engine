@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `tools.xdevPromote` (and the per-agent `xdevPromote` frontmatter) to keep specific tools top-level instead of mounting them under `xd://`, without disabling `tools.xdev` globally. Promotion only changes presentation; tools still need their normal enablement ([#5648](https://github.com/can1357/oh-my-pi/issues/5648)).
+
 ## [17.2.6] - 2026-08-03
 
 ### Added

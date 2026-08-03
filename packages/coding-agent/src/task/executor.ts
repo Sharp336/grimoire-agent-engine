@@ -862,6 +862,19 @@ export function createSubagentSettings(
 
 export type AbortReason = "signal" | "terminate" | "timeout" | "budget";
 
+/**
+ * Per-agent frontmatter values expressed as config overrides. Future per-agent
+ * knobs that mirror a config.yml setting get folded in here — the override
+ * flows through `createSubagentSettings` into the child's `Settings`, so every
+ * read site (tool mounting, prompt building, ...) picks it up unchanged.
+ */
+function agentSettingsOverrides(agent: AgentDefinition): Partial<Record<SettingPath, unknown>> {
+	return {
+		...(agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
+		...(agent.xdevPromote ? { "tools.xdevPromote": agent.xdevPromote } : undefined),
+	};
+}
+
 const MAX_YIELD_TOOL_ERRORS = 6;
 
 /** Inputs for the run monitor driving one subagent assignment. */
@@ -2580,7 +2593,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const subagentSettings = createSubagentSettings(
 		settings,
 		{
-			...(agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
+			...agentSettingsOverrides(agent),
 			// Isolated runs must not expose roots outside the worktree.
 			...(worktree !== undefined ? { "workspace.additionalDirectories": [] } : undefined),
 		},
@@ -3074,6 +3087,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				tools: session.getActiveToolNames(),
 				spawns: spawnsEnv,
 				readSummarize: agent.readSummarize,
+				xdevPromote: agent.xdevPromote,
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,

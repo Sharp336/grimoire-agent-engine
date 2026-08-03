@@ -42,6 +42,16 @@ describe("issue #5764: registerTool loadMode default", () => {
 		expect(isMountableUnderXdev({ name: "lsp", loadMode: "discoverable" })).toBe(true);
 	});
 
+	it("promotion keeps a discoverable tool top-level without touching pinned names", () => {
+		// Promoted discoverable tools never mount; unpromoted ones still do.
+		expect(isMountableUnderXdev({ name: "ast_edit", loadMode: "discoverable" }, new Set(["ast_edit"]))).toBe(false);
+		expect(isMountableUnderXdev({ name: "ast_grep", loadMode: "discoverable" }, new Set(["ast_edit"]))).toBe(true);
+		// Promotion cannot override transport/pinned names: read and write stay
+		// top-level regardless, and todo/grep stay pinned even when promoted.
+		expect(isMountableUnderXdev({ name: "write", loadMode: "discoverable" }, new Set(["write"]))).toBe(false);
+		expect(isMountableUnderXdev({ name: "todo", loadMode: "discoverable" }, new Set(["todo"]))).toBe(false);
+	});
+
 	it("defaults omitted loadMode to essential for essential built-in names, discoverable otherwise", () => {
 		expect(defaultLoadModeForToolName("read")).toBe("essential");
 		expect(defaultLoadModeForToolName("bash")).toBe("essential");

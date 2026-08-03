@@ -187,6 +187,7 @@ import {
 import {
 	BashTool,
 	BUILTIN_TOOLS,
+	compileXdevPromoteSet,
 	createTools,
 	createVibeTools,
 	type DeferredDiagnosticsEntry,
@@ -3060,12 +3061,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// discovers, `write xd://<tool>` executes); a session without either keeps
 		// every tool top-level instead of auto-granting the missing transport.
 		if (toolSession.xdev) {
+			const promotedNames = compileXdevPromoteSet(settings.get("tools.xdevPromote"));
 			const topLevelToolNames: string[] = [];
 			const mountedNames: string[] = [];
 			for (const name of initialToolNames) {
 				const tool = toolRegistry.get(name);
 				const explicitlyRequested = explicitlyRequestedToolNameSet?.has(name) === true;
-				if (tool && xdevReadAvailable && xdevWriteAvailable && !explicitlyRequested && isMountableUnderXdev(tool))
+				if (
+					tool &&
+					xdevReadAvailable &&
+					xdevWriteAvailable &&
+					!explicitlyRequested &&
+					isMountableUnderXdev(tool, promotedNames)
+				)
 					mountedNames.push(name);
 				else topLevelToolNames.push(name);
 			}

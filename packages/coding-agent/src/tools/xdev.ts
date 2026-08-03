@@ -37,6 +37,7 @@ import { XD_URL_PREFIX } from "../internal-urls/xd-protocol";
 import type { Theme } from "../modes/theme/theme";
 import { truncateHeadBytes } from "../session/streaming-output";
 import { resolveToolTier, type ToolTier } from "./approval";
+import { normalizeToolNames } from "./builtin-names";
 import { renderDefaultToolExecution } from "./default-renderer";
 import type { Tool } from "./index";
 import { replaceTabs } from "./render-utils";
@@ -74,13 +75,27 @@ export type XdevDocsMode = "inline" | "builtins" | "catalog";
 /**
  * Whether an enabled tool is presented under `xd://` (rather than top-level)
  * while the `xd://` transport is active. Discoverable tools mount unless they
- * are pinned top-level by {@link XDEV_KEEP_TOP_LEVEL} or carry the transport
- * itself ({@link XDEV_TRANSPORT_TOOLS}); essential tools never do. The caller
- * gates this on the transport being active.
+ * are pinned top-level by {@link XDEV_KEEP_TOP_LEVEL}, carry the transport
+ * itself ({@link XDEV_TRANSPORT_TOOLS}), or are user-promoted via
+ * `tools.xdevPromote` / agent `xdevPromote` frontmatter; essential tools never
+ * do. The caller gates this on the transport being active.
  */
-export function isMountableUnderXdev(tool: { name: string; loadMode?: ToolLoadMode }): boolean {
+export function isMountableUnderXdev(
+	tool: { name: string; loadMode?: ToolLoadMode },
+	promoted?: ReadonlySet<string>,
+): boolean {
 	if (tool.name in XDEV_TRANSPORT_TOOLS || tool.name in XDEV_KEEP_TOP_LEVEL) return false;
+	if (promoted?.has(tool.name)) return false;
 	return tool.loadMode === "discoverable";
+}
+
+/** Compile a `tools.xdevPromote` list into a normalized lookup. Malformed
+ *  (non-string) entries are dropped so bad config cannot break mounting. */
+export function compileXdevPromoteSet(names: readonly unknown[] | undefined): ReadonlySet<string> | undefined {
+	if (!names || names.length === 0) return undefined;
+	const strings = names.filter((name): name is string => typeof name === "string");
+	if (strings.length === 0) return undefined;
+	return new Set(normalizeToolNames(strings));
 }
 
 /** Dispatch metadata carried on write-tool details for renderer delegation. */

@@ -112,6 +112,22 @@ describe("read and write route xd:// device URLs", () => {
 		}
 	});
 
+	it("tools.xdevPromote keeps promoted discoverable tools top-level", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-promote-"));
+		try {
+			const tools = await createTools(
+				xdevSession(tempDir, { settings: Settings.isolated({ "tools.xdevPromote": ["ast_edit"] }) }),
+			);
+			// Promoted tool ships first-class; unpromoted discoverables still mount.
+			expect(tools.some(entry => entry.name === "ast_edit")).toBe(true);
+			expect(tools.some(entry => entry.name === "ast_grep")).toBe(false);
+			const listing = await tools.find(entry => entry.name === "read")!.execute("rl", { path: "xd://" });
+			expect(listing.content.find(entry => entry.type === "text")?.text).not.toContain("xd://ast_edit");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
 	it("records a read tier on the dispatch of a read-only device", async () => {
 		const readDevice: AgentTool = {
 			name: "peek",

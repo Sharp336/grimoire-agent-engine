@@ -96,10 +96,10 @@ export function createPersistedSubagentReviverFactory(
 				cwd: ctx.session.sessionManager.getCwd(),
 				authStorage: ctx.authStorage,
 				modelRegistry: ctx.modelRegistry,
-				settings: createSubagentSettings(
-					ctx.settings,
-					init.readSummarize === false ? { "read.summarize.enabled": false } : undefined,
-				),
+				settings: createSubagentSettings(ctx.settings, {
+					...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
+					...(init.xdevPromote ? { "tools.xdevPromote": init.xdevPromote } : undefined),
+				}),
 				sessionManager: reopened,
 				agentId: ref.id,
 				agentDisplayName: ref.displayName,
