@@ -20,13 +20,18 @@ import { initializeWithSettings, reset as resetDiscoveryCache } from "@oh-my-pi/
 import { readMCPConfigFile, setMcpServerEnabled, setServerDisabled } from "@oh-my-pi/pi-coding-agent/mcp/config-writer";
 import { ExtensionDashboard } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/extension-dashboard";
 import { loadAllExtensions } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/state-manager";
+import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { __resetDirsFromEnvForTests, getMCPConfigPath, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+
+const testTheme = await getThemeByName("dark");
 
 describe("loadAllExtensions MCP parity with /mcp list (issue #3827)", () => {
 	let projectDir = "";
 	let userAgentDir = "";
 
 	beforeEach(async () => {
+		if (!testTheme) throw new Error("Failed to load dark theme for extension dashboard tests");
+		setThemeInstance(testTheme);
 		resetSettingsForTest();
 		projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-3827-project-"));
 		userAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-3827-user-"));
