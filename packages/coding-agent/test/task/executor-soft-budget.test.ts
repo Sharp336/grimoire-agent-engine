@@ -11,7 +11,11 @@ import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
-import { resolveSoftRequestBudget, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import {
+	resolveSoftRequestBudget,
+	runSubagentFollowUpTurn,
+	runSubprocess,
+} from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -204,25 +208,68 @@ describe("runSubprocess soft request budget", () => {
 		});
 	}
 
-	it("applies the cumulative session cap as the active runtime timer", async () => {
+	it("keeps the cumulative session cap across follow-up turns", async () => {
 		const id = "SessionCapScout";
-		const promptGate = Promise.withResolvers<void>();
-		const handle = createMockSession(async () => {
-			await promptGate.promise;
+		const followUpGate = Promise.withResolvers<void>();
+		let followUpPending = false;
+		const handle = createMockSession(async ({ promptIndex, emit, pushMessage }) => {
+			if (promptIndex === 1) {
+				const yieldMessage = {
+					role: "assistant" as const,
+					content: [
+						{
+							type: "toolCall" as const,
+							id: "tool-initial-yield",
+							name: "yield",
+							arguments: { result: { data: { report: "first turn complete" } } },
+						},
+					],
+					stopReason: "toolUse" as const,
+				};
+				pushMessage(yieldMessage);
+				emit({ type: "message_end", message: yieldMessage } as unknown as AgentSessionEvent);
+				emit({
+					type: "tool_execution_end",
+					toolCallId: "tool-initial-yield",
+					toolName: "yield",
+					result: {
+						content: [{ type: "text", text: "Result submitted." }],
+						details: { status: "success", data: { report: "first turn complete" } },
+					},
+					isError: false,
+				} as AgentSessionEvent);
+				return;
+			}
+			await followUpGate.promise;
 		});
 		vi.spyOn(handle.session, "abort").mockImplementation(async () => {
-			promptGate.resolve();
+			if (followUpPending) followUpGate.resolve();
 		});
 		mockCreateAgentSession(handle.session);
 		registerRunning(id, handle.session);
 
-		const result = await runSubprocess({
+		const sessionRuntimeStartedAt = Date.now();
+		const first = await runSubprocess({
 			...baseOptions(id),
-			settings: Settings.isolated({ "task.maxSessionRuntimeMs": 1 }),
+			keepAlive: true,
+			maxSessionRuntimeMs: 100,
+			sessionRuntimeStartedAt,
+		});
+		expect(first.aborted).toBe(false);
+
+		await Bun.sleep(110);
+		followUpPending = true;
+		const followUp = await runSubagentFollowUpTurn({
+			id,
+			agent: baseAgent,
+			message: "continue",
+			maxSessionRuntimeMs: 100,
+			sessionRuntimeStartedAt,
 		});
 
-		expect(result.aborted).toBe(true);
-		expect(result.abortReason).toContain("task.maxSessionRuntimeMs=1");
+		expect(handle.prompts).toHaveLength(1);
+		expect(followUp.aborted).toBe(true);
+		expect(followUp.abortReason).toContain("task.maxSessionRuntimeMs=100");
 	});
 
 	it("a budget stop drives one forced final yield and finishes as a normal completion", async () => {

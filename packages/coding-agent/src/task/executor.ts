@@ -393,10 +393,12 @@ export interface ExecutorOptions {
 	maxRuntimeMs?: number;
 	/**
 	 * Override the `task.maxSessionRuntimeMs` cumulative wall-clock cap. Unlike
-	 * `maxRuntimeMs`, this budget is intended to survive parked/resumed
-	 * follow-up turns when the caller passes the remaining budget each time.
+	 * `maxRuntimeMs`, this budget survives parked/resumed follow-up turns when
+	 * {@link sessionRuntimeStartedAt} is retained by the child lifecycle.
 	 */
 	maxSessionRuntimeMs?: number;
+	/** Wall-clock creation time of a keep-alive child governed by {@link maxSessionRuntimeMs}. */
+	sessionRuntimeStartedAt?: number;
 	/** Include IRC only when the invocation policy permits collaboration. */
 	enableIrc?: boolean;
 	enableLsp?: boolean;
@@ -934,6 +936,8 @@ interface RunMonitorArgs {
 	maxRuntimeMs: number;
 	/** Cumulative wall-clock cap in ms across follow-up turns; 0 disables the timer. */
 	maxSessionRuntimeMs: number;
+	/** Wall-clock creation time retained by the keep-alive child lifecycle. */
+	sessionRuntimeStartedAt?: number;
 }
 
 /**
@@ -1017,6 +1021,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		softRequestBudgetNotice,
 		maxRuntimeMs,
 		maxSessionRuntimeMs,
+		sessionRuntimeStartedAt,
 	} = args;
 	const startTime = Date.now();
 
@@ -1173,27 +1178,34 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		);
 	}
 
-	// Wall-clock hard limit. Defense-in-depth for the case where a provider stream
-	// hang escapes the inference-layer watchdog (see openai-completions
-	// `isOpenAICompletionsProgressChunk`). Disabled by default; set
-	// `task.maxRuntimeMs > 0` to cap each turn's lifetime. The cumulative
-	// session cap independently bounds total elapsed runtime across resumed
-	// turns, so parking and reviving a child cannot reset its budget.
-	const runtimeCapMs =
-		maxSessionRuntimeMs > 0 ? Math.min(maxRuntimeMs || maxSessionRuntimeMs, maxSessionRuntimeMs) : maxRuntimeMs;
+	// Wall-clock hard limits. The per-turn cap starts here; the cumulative cap
+	// starts when the keep-alive child was created and therefore keeps counting
+	// while the child is idle or parked.
+	const sessionElapsedMs =
+		maxSessionRuntimeMs > 0 ? Math.max(0, startTime - (sessionRuntimeStartedAt ?? startTime)) : 0;
+	const sessionRemainingMs = Math.max(0, maxSessionRuntimeMs - sessionElapsedMs);
+	const runtimeLimit =
+		maxSessionRuntimeMs > 0 && (maxRuntimeMs === 0 || sessionRemainingMs <= maxRuntimeMs)
+			? { kind: "session" as const, delayMs: sessionRemainingMs }
+			: maxRuntimeMs > 0
+				? { kind: "turn" as const, delayMs: maxRuntimeMs }
+				: undefined;
 	let runtimeTimeoutId: NodeJS.Timeout | undefined;
-	if (runtimeCapMs > 0) {
+	if (runtimeLimit?.delayMs === 0) {
+		requestAbort("timeout");
+	} else if (runtimeLimit) {
 		runtimeTimeoutId = setTimeout(() => {
 			if (!resolved) {
 				logger.warn("Subagent runtime limit exceeded; aborting", {
 					id,
 					agent: agent.name,
+					limit: runtimeLimit.kind,
 					maxRuntimeMs,
 					maxSessionRuntimeMs,
 				});
 				requestAbort("timeout");
 			}
-		}, runtimeCapMs);
+		}, runtimeLimit.delayMs);
 	}
 
 	const resolveSignalAbortReason = (): string => {
@@ -1209,7 +1221,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	};
 	const resolveAbortReasonText = (): string => {
 		if (runtimeLimitExceeded) {
-			if (maxSessionRuntimeMs > 0) {
+			if (runtimeLimit?.kind === "session") {
 				return `Subagent cumulative runtime limit exceeded (task.maxSessionRuntimeMs=${maxSessionRuntimeMs})`;
 			}
 			return `Subagent runtime limit exceeded (task.maxRuntimeMs=${maxRuntimeMs})`;
@@ -1885,6 +1897,7 @@ async function driveSessionToYield(
 
 	try {
 		try {
+			checkAbort();
 			await awaitAbortable(session.prompt(task, { attribution: "agent" }));
 			await awaitAbortable(session.waitForIdle());
 		} catch (err) {
@@ -2518,6 +2531,8 @@ export interface FollowUpTurnOptions {
 	maxRuntimeMs?: number;
 	/** Cumulative wall-clock cap in ms for the child session; 0 disables. */
 	maxSessionRuntimeMs?: number;
+	/** Wall-clock creation time retained across every turn of this child session. */
+	sessionRuntimeStartedAt?: number;
 }
 
 /**
@@ -2556,6 +2571,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		softRequestBudgetNotice: false,
 		maxRuntimeMs: options.maxRuntimeMs ?? 0,
 		maxSessionRuntimeMs: options.maxSessionRuntimeMs ?? 0,
+		sessionRuntimeStartedAt: options.sessionRuntimeStartedAt,
 	});
 
 	if (options.eventBus) {
@@ -2759,6 +2775,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		softRequestBudgetNotice,
 		maxRuntimeMs,
 		maxSessionRuntimeMs,
+		sessionRuntimeStartedAt: options.sessionRuntimeStartedAt,
 	});
 	const progress = monitor.progress;
 	let unsubscribe: (() => void) | null = null;
