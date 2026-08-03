@@ -93,15 +93,42 @@ const piSegment: StatusLineSegment = {
 	},
 };
 
+const COMPACT_PROVIDER_LABELS: Readonly<Record<string, string>> = {
+	anthropic: "Claude",
+	"openai-codex": "Codex",
+	devin: "Devin",
+	openai: "OpenAI",
+	google: "Gemini",
+	"google-gemini": "Gemini",
+	"google-vertex": "Vertex",
+	"github-copilot": "Copilot",
+	xai: "Grok",
+	openrouter: "OpenRouter",
+	"amazon-bedrock": "Bedrock",
+	"azure-openai": "Azure",
+};
+
+function compactProviderLabel(provider: string | undefined): string {
+	if (!provider) return "";
+	const known = COMPACT_PROVIDER_LABELS[provider.toLowerCase()];
+	if (known) return known;
+	return provider
+		.split(/[-_]/u)
+		.filter(Boolean)
+		.map(part => part[0]!.toUpperCase() + part.slice(1))
+		.join(" ");
+}
+
 const modelSegment: StatusLineSegment = {
 	id: "model",
 	render(ctx) {
 		const state = ctx.session.state;
 		const opts = ctx.options.model ?? {};
 
+		const providerLabel = compactProviderLabel(state.model?.provider);
 		let modelName = state.model?.name || state.model?.id || "no-model";
-		if (modelName.startsWith("Claude ")) {
-			modelName = modelName.slice(7);
+		if (providerLabel && modelName.toLowerCase().startsWith(`${providerLabel.toLowerCase()} `)) {
+			modelName = modelName.slice(providerLabel.length + 1);
 		}
 
 		// Resolve the current thinking-level display ("◉ xhigh", "⟳ auto", …)
@@ -143,7 +170,9 @@ const modelSegment: StatusLineSegment = {
 
 		// `statusLineModel` is aliased to `accent` in many themes, so the badge
 		// uses status colors to stay visibly distinct from the model name color.
-		let content = theme.fg("statusLineModel", withIcon(modelIcon, modelName));
+		let content = theme.fg("statusLineModel", modelIcon ? `${modelIcon} ` : "");
+		if (providerLabel) content += theme.fg("dim", `${providerLabel} `);
+		content += theme.fg("statusLineModel", modelName);
 		// Advisor "++" badge, colored by the worst status in the roster:
 		// success = all running, warning = quota-exhausted, error = failed,
 		// dim = everything paused/no-model. Per-advisor detail lives in

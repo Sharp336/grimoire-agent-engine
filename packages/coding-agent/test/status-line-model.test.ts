@@ -56,6 +56,20 @@ function createModelContext(advisorActive: boolean): SegmentContext {
 	};
 }
 
+describe("status line model segment provider label", () => {
+	it.each([
+		["anthropic", "Claude Opus 4.6", "Claude Opus 4.6"],
+		["openai-codex", "GPT-5.6 Sol", "Codex GPT-5.6 Sol"],
+		["devin", "SWE-1.7 Lightning", "Devin SWE-1.7 Lightning"],
+	])("prefixes %s models without duplicating the model family", (provider, name, expected) => {
+		const ctx = createModelContext(false);
+		ctx.session.state.model = { ...ctx.session.state.model!, id: "test-model", name, provider };
+		const modelPrefix = theme.icon.model ? `${theme.icon.model} ` : "";
+
+		expect(Bun.stripANSI(renderSegment("model", ctx).content)).toBe(`${modelPrefix}${expected}`);
+	});
+});
+
 describe("status line model segment advisor badge", () => {
 	it("appends a success-colored ++ badge when all advisors run", () => {
 		const rendered = renderSegment("model", createModelContext(true));
