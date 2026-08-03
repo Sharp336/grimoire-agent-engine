@@ -3566,6 +3566,7 @@ describe("advisor", () => {
 		it("surfaces a persistent classifier refusal after one stripped resend", async () => {
 			const promptInputs: string[] = [];
 			const failures: unknown[] = [];
+			let discardedTurns = 0;
 			const state: { messages: AgentMessage[]; error?: string } = { messages: [] };
 			const agent: AdvisorAgent = {
 				prompt: async input => {
@@ -3604,6 +3605,9 @@ describe("advisor", () => {
 					snapshotMessages: () => messages,
 					enqueueAdvice: () => {},
 					notifyFailure: error => failures.push(error),
+					onTurnDiscarded: () => {
+						discardedTurns += 1;
+					},
 				},
 				0,
 			);
@@ -3615,6 +3619,7 @@ describe("advisor", () => {
 			expect(promptInputs[0]).toContain("private reasoning");
 			expect(promptInputs[1]).not.toContain("private reasoning");
 			expect(failures).toHaveLength(1);
+			expect(discardedTurns).toBe(1);
 		});
 
 		it("degrades on a category-less refusal", async () => {

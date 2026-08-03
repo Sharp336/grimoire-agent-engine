@@ -536,6 +536,7 @@ export class SessionAdvisors {
 		for (const a of this.#advisors) {
 			a.agentUnsubscribe?.();
 			a.agentUnsubscribe = undefined;
+			this.#discardAdvisorRetryFallback(a);
 			a.runtime.reset();
 			a.adviseTool.resetDeliveredNotes();
 			a.emissionGuard.reset();
@@ -898,6 +899,7 @@ export class SessionAdvisors {
 						role: fallback.role,
 					});
 				},
+				onTurnDiscarded: () => this.#releaseAdvisorRetryFallbackProbe(advisorRef),
 				notifyFailure: error => {
 					this.#advisorStatuses.set(slug, { name: advisorName, status: "error" });
 					const message = error instanceof Error ? error.message : String(error);
@@ -1063,7 +1065,10 @@ export class SessionAdvisors {
 
 	/** Re-prime every advisor's transcript view after an in-conversation history rewrite. */
 	#resetAllAdvisorRuntimes(): void {
-		for (const a of this.#advisors) a.runtime.reset();
+		for (const a of this.#advisors) {
+			this.#discardAdvisorRetryFallback(a);
+			a.runtime.reset();
+		}
 	}
 
 	#stopAdvisorRuntime(): void {
@@ -1072,10 +1077,7 @@ export class SessionAdvisors {
 		// a closing recorder (it would reopen and resurrect an already-released file).
 		const closes: Promise<void>[] = [];
 		for (const a of this.#advisors) {
-			if (a.retryFallback?.probeLease) {
-				this.#host.modelRegistry.abandonFallbackProbe(a.retryFallback.probeLease);
-				a.retryFallback.probeLease = undefined;
-			}
+			this.#discardAdvisorRetryFallback(a);
 			a.agentUnsubscribe?.();
 			a.agentUnsubscribe = undefined;
 			a.runtime.dispose();
@@ -1125,15 +1127,13 @@ export class SessionAdvisors {
 
 		const originalSelector = parseRetryFallbackSelector(fallback.originalSelector, this.#host.modelRegistry);
 		if (!originalSelector) {
-			advisor.retryFallback = undefined;
-			advisor.retryFallbackPendingSuccess = false;
+			this.#discardAdvisorRetryFallback(advisor);
 			return;
 		}
 		const currentSelector = formatRetryFallbackSelector(advisor.agent.state.model, advisor.thinkingLevel);
 		if (currentSelector === originalSelector.raw) {
 			if (!this.#host.isRetryFallbackSelectorSuppressed(originalSelector)) {
-				advisor.retryFallback = undefined;
-				advisor.retryFallbackPendingSuccess = false;
+				this.#discardAdvisorRetryFallback(advisor);
 			}
 			return;
 		}
@@ -1157,8 +1157,25 @@ export class SessionAdvisors {
 				: advisor.thinkingLevel;
 		this.#setAdvisorModel(advisor, primaryModel, thinkingToApply);
 		this.#host.settings.getStorage()?.recordModelUsage(formatModelStringWithRouting(primaryModel));
-		advisor.retryFallback = undefined;
+		this.#discardAdvisorRetryFallback(advisor);
+	}
+
+	#releaseAdvisorRetryFallbackProbe(advisor: ActiveAdvisor): void {
+		const lease = advisor.retryFallback?.probeLease;
+		if (lease) this.#abandonAdvisorRetryFallbackProbe(advisor, lease);
 		advisor.retryFallbackPendingSuccess = false;
+	}
+
+	#discardAdvisorRetryFallback(advisor: ActiveAdvisor): void {
+		const fallback = advisor.retryFallback;
+		if (!fallback) return;
+		this.#releaseAdvisorRetryFallbackProbe(advisor);
+		const original = parseRetryFallbackSelector(fallback.originalSelector, this.#host.modelRegistry);
+		if (original) {
+			const model = this.#host.modelRegistry.find(original.provider, original.id);
+			if (model) this.#setAdvisorModel(advisor, model, fallback.originalThinkingLevel);
+		}
+		advisor.retryFallback = undefined;
 	}
 
 	#abandonAdvisorRetryFallbackProbe(advisor: ActiveAdvisor, lease: FallbackProbeLease): void {

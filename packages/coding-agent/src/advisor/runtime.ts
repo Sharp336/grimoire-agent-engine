@@ -72,6 +72,8 @@ export interface AdvisorRuntimeHost {
 	): Promise<boolean | undefined> | boolean | undefined;
 	/** Called after a successful advisor turn so the host can finish fallback lifecycle reporting. */
 	onTurnSuccess?(): Promise<void> | void;
+	/** Called when a failed turn is dropped without entering normal recovery. */
+	onTurnDiscarded?(): Promise<void> | void;
 	/** Surface a non-recovering advisor failure to the host UI without adding model-visible context. */
 	notifyFailure?(error: unknown): void;
 	/** Signal that the advisor paused on a quota/rate-limit after host-level
@@ -996,6 +998,13 @@ export class AdvisorRuntime {
 							}
 						}
 						this.#notifyFailureOnce(err);
+						if (this.host.onTurnDiscarded) {
+							try {
+								await raceWithSignal(Promise.resolve(this.host.onTurnDiscarded()), iterationAbort.signal);
+							} catch (hookErr) {
+								logger.debug("advisor onTurnDiscarded hook failed", { err: String(hookErr) });
+							}
+						}
 						this.#clearSeenContext();
 						this.#backlog = Math.max(0, this.#backlog - finalTurns);
 						this.#notifyWaiters();

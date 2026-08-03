@@ -364,6 +364,51 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		expect(modelRegistry.admitFallbackProbe(fallbackSelector)).toEqual({ status: "busy" });
 	});
 
+	it("settles an accepted empty stop from the fallback request", async () => {
+		const fallback = getBundledModel("openai", "gpt-4o-mini");
+		if (!fallback) throw new Error("Expected bundled fallback model gpt-4o-mini");
+		const currentSelector = `${model.provider}/${model.id}`;
+		const fallbackSelector = `${fallback.provider}/${fallback.id}`;
+		const recovery = new TurnRecovery(createHost(model, modelRegistry, { [currentSelector]: [fallbackSelector] }));
+		const selector = recovery.findRetryFallbackCandidates(currentSelector, currentSelector).at(0);
+		if (!selector) throw new Error("Expected configured fallback candidate");
+		const admission = modelRegistry.admitFallbackProbe(fallbackSelector);
+		if (admission.status !== "probe") throw new Error("Expected recovery to own the fallback probe");
+		await recovery.applyRetryFallbackCandidate(currentSelector, selector, currentSelector, {
+			apiKey: "test-key",
+			probeLease: admission.lease,
+		});
+		const emptyStop = makeMessage([], fallback);
+		emptyStop.stopReason = "stop";
+		recovery.setAcceptTerminalEmptyStop(true);
+
+		await recovery.onAssistantSettledSuccessfully(emptyStop);
+
+		expect(modelRegistry.admitFallbackProbe(fallbackSelector)).toEqual({ status: "healthy" });
+	});
+
+	it("does not settle a fallback lease from an older primary response", async () => {
+		const fallback = getBundledModel("openai", "gpt-4o-mini");
+		if (!fallback) throw new Error("Expected bundled fallback model gpt-4o-mini");
+		const currentSelector = `${model.provider}/${model.id}`;
+		const fallbackSelector = `${fallback.provider}/${fallback.id}`;
+		const recovery = new TurnRecovery(createHost(model, modelRegistry, { [currentSelector]: [fallbackSelector] }));
+		const selector = recovery.findRetryFallbackCandidates(currentSelector, currentSelector).at(0);
+		if (!selector) throw new Error("Expected configured fallback candidate");
+		const admission = modelRegistry.admitFallbackProbe(fallbackSelector);
+		if (admission.status !== "probe") throw new Error("Expected recovery to own the fallback probe");
+		await recovery.applyRetryFallbackCandidate(currentSelector, selector, currentSelector, {
+			apiKey: "test-key",
+			probeLease: admission.lease,
+		});
+		const oldPrimaryStop = makeMessage([{ type: "text", text: "Old primary turn" }], model);
+		oldPrimaryStop.stopReason = "stop";
+
+		await recovery.onAssistantSettledSuccessfully(oldPrimaryStop);
+
+		expect(modelRegistry.admitFallbackProbe(fallbackSelector)).toEqual({ status: "busy" });
+	});
+
 	it("releases an attempt-zero probe when compaction blocks continuation", async () => {
 		const fallback = getBundledModel("openai", "gpt-4o-mini");
 		if (!fallback) throw new Error("Expected bundled fallback model gpt-4o-mini");

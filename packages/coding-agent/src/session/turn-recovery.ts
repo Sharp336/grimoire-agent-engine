@@ -172,6 +172,7 @@ export class TurnRecovery {
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
 	#activeRetryFallback: ActiveRetryFallbackState | undefined;
+	#dispatchedRetryFallbackProbe: FallbackProbeLease | undefined;
 	#pendingRecoveredRetryErrors: PendingRecoveredRetryError[] = [];
 	#usageLimitOutcomes = new WeakMap<AssistantMessage, Promise<UsageLimitOutcome>>();
 	#emptyStopRetryCount = 0;
@@ -222,13 +223,16 @@ export class TurnRecovery {
 
 	/** Closes a successful retry saga and annotates recovered persisted errors. */
 	async onAssistantSettledSuccessfully(message: AssistantMessage): Promise<void> {
-		if (message.stopReason === "error" || message.stopReason === "aborted" || this.#isEmptyAssistantStop(message)) {
+		if (message.stopReason === "error" || message.stopReason === "aborted") {
 			return;
 		}
-		if (this.#activeRetryFallback?.probeLease) {
-			this.#host.modelRegistry.markFallbackProbeHealthy(this.#activeRetryFallback.probeLease);
-			this.#activeRetryFallback.probeLease = undefined;
+		if (this.#isEmptyAssistantStop(message)) {
+			if (message.stopReason === "stop" && this.#acceptTerminalEmptyStopForPrompt) {
+				this.#markMatchingRetryFallbackProbeHealthy(message);
+			}
+			return;
 		}
+		this.#markMatchingRetryFallbackProbeHealthy(message);
 		if (this.#retryAttempt === 0) return;
 		const model = this.#host.model();
 		if (this.#activeRetryFallback && model) {
@@ -252,7 +256,7 @@ export class TurnRecovery {
 	/** Closes a failed retry saga when no compaction continuation took ownership. */
 	async onErrorSettledWithoutRetry(message: AssistantMessage, compaction: RecoveryCompactionResult): Promise<void> {
 		if (message.stopReason !== "error" || compaction.continuationScheduled) return;
-		this.abandonActiveRetryFallbackProbe();
+		this.#abandonMatchingRetryFallbackProbe(message);
 		if (this.#retryAttempt === 0) return;
 		const attempt = this.#retryAttempt;
 		this.#retryAttempt = 0;
@@ -268,7 +272,7 @@ export class TurnRecovery {
 	/** Releases a failed probe after abort handling declines every continuation. */
 	onAbortSettledWithoutRetry(message: AssistantMessage): void {
 		if (message.stopReason !== "aborted") return;
-		this.abandonActiveRetryFallbackProbe();
+		this.#abandonMatchingRetryFallbackProbe(message);
 	}
 
 	/** Persists an otherwise skipped terminal empty error turn. */
@@ -1046,6 +1050,52 @@ export class TurnRecovery {
 		this.#abandonRetryFallbackProbe(lease);
 	}
 
+	/** Release the current lease and require fresh admission at the next provider dispatch. */
+	deferActiveRetryFallbackProbe(): void {
+		const fallback = this.#activeRetryFallback;
+		const lease = fallback?.probeLease;
+		if (!fallback || !lease) return;
+		this.#abandonRetryFallbackProbe(lease);
+		fallback.pendingAdmission = true;
+	}
+
+	#markMatchingRetryFallbackProbeHealthy(_message: AssistantMessage): void {
+		const fallback = this.#activeRetryFallback;
+		const lease = this.#settledRetryFallbackProbe(_message);
+		const activeLease = fallback?.probeLease;
+		if (
+			!fallback ||
+			!lease ||
+			activeLease?.selector !== lease.selector ||
+			activeLease.generation !== lease.generation
+		)
+			return;
+		this.#host.modelRegistry.markFallbackProbeHealthy(lease);
+		fallback.probeLease = undefined;
+	}
+
+	#abandonMatchingRetryFallbackProbe(_message: AssistantMessage): void {
+		const fallback = this.#activeRetryFallback;
+		const lease = this.#settledRetryFallbackProbe(_message);
+		const activeLease = fallback?.probeLease;
+		if (
+			!fallback ||
+			!lease ||
+			activeLease?.selector !== lease.selector ||
+			activeLease.generation !== lease.generation
+		)
+			return;
+		this.#abandonRetryFallbackProbe(lease);
+	}
+
+	#settledRetryFallbackProbe(message: AssistantMessage): FallbackProbeLease | undefined {
+		if (this.#dispatchedRetryFallbackProbe) return this.#dispatchedRetryFallbackProbe;
+		const lease = this.#activeRetryFallback?.probeLease;
+		if (!lease) return undefined;
+		const selector = parseRetryFallbackSelector(lease.selector, this.#host.modelRegistry);
+		return selector?.provider === message.provider && selector.id === message.model ? lease : undefined;
+	}
+
 	/** Release one captured lease without clearing a newer fallback owner. */
 	#abandonRetryFallbackProbe(lease: FallbackProbeLease): void {
 		this.#host.modelRegistry.abandonFallbackProbe(lease);
@@ -1818,7 +1868,7 @@ export class TurnRecovery {
 		this.resolveRetry();
 	}
 
-	async #promptAgentWithIdleRetry(messages: AgentMessage[], options?: { toolChoice?: ToolChoice }): Promise<void> {
+	async #runAgentWithIdleRetry(dispatch: () => Promise<void>): Promise<void> {
 		const deadline = Date.now() + 30_000;
 		for (;;) {
 			const fallback = this.#activeRetryFallback;
@@ -1843,18 +1893,37 @@ export class TurnRecovery {
 				}
 			}
 			try {
-				await this.#host.agent.prompt(messages, options);
+				const dispatchedLease = this.#activeRetryFallback?.probeLease;
+				this.#dispatchedRetryFallbackProbe = dispatchedLease;
+				try {
+					await dispatch();
+				} finally {
+					if (this.#dispatchedRetryFallbackProbe === dispatchedLease) {
+						this.#dispatchedRetryFallbackProbe = undefined;
+					}
+				}
 				return;
 			} catch (err) {
 				if (!(err instanceof AgentBusyError)) {
+					this.deferActiveRetryFallbackProbe();
 					throw err;
 				}
 				if (Date.now() >= deadline) {
+					this.deferActiveRetryFallbackProbe();
 					throw new Error("Timed out waiting for prior agent run to finish before prompting.");
 				}
 				await this.#host.agent.waitForIdle();
 			}
 		}
+	}
+
+	async #promptAgentWithIdleRetry(messages: AgentMessage[], options?: { toolChoice?: ToolChoice }): Promise<void> {
+		await this.#runAgentWithIdleRetry(() => this.#host.agent.prompt(messages, options));
+	}
+
+	/** Revalidates fallback admission immediately before an agent continuation. */
+	continueAgentWithIdleRetry(): Promise<void> {
+		return this.#runAgentWithIdleRetry(() => this.#host.agent.continue());
 	}
 
 	/** Whether auto-retry is currently in progress */

@@ -775,8 +775,8 @@ export class AgentSession {
 		const generation = this.#promptGeneration;
 		this.#beginInFlight();
 		let turnError: unknown;
-		void this.agent
-			.prompt(records)
+		void this.#recovery
+			.promptAgentWithIdleRetry(records)
 			.catch(error => {
 				turnError = error;
 				logger.warn("IRC wake turn failed", { error: String(error) });
@@ -1122,7 +1122,7 @@ export class AgentSession {
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
-				await this.agent.prompt(messages.length === 1 ? first : messages);
+				await this.#recovery.promptAgentWithIdleRetry(messages.length === 1 ? [first] : messages);
 			},
 			scheduleIdleFlush: run => {
 				this.#schedulePostPromptTask(
@@ -1201,6 +1201,7 @@ export class AgentSession {
 			emitSessionEvent: event => this.#emitSessionEvent(event),
 			schedulePostPromptTask: (task, options) => this.#schedulePostPromptTask(task, options),
 			scheduleAgentContinue: options => this.#scheduleAgentContinue(options),
+			continueAgent: () => this.#recovery.continueAgentWithIdleRetry(),
 			promptGeneration: () => this.#promptGeneration,
 		};
 		this.#ttsr = new TtsrCoordinator(ttsrHost, config.ttsrManager);
@@ -1232,6 +1233,7 @@ export class AgentSession {
 			localProtocolOptions: () => this.#localProtocolOptions(),
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			schedulePostPromptTask: task => this.#schedulePostPromptTask(task),
+			continueAgent: () => this.#recovery.continueAgentWithIdleRetry(),
 			discardAssistantTurn: message => this.#recovery.discardAssistantTurn(message),
 		};
 		this.#streamingEditGuard = new StreamingEditGuard(streamGuardsHost);
@@ -2954,7 +2956,7 @@ export class AgentSession {
 						this.#skipAgentContinue("post-restore-unavailable", options);
 						return;
 					}
-					await this.agent.continue();
+					await this.#recovery.continueAgentWithIdleRetry();
 				} catch (error) {
 					logger.warn("agent.continue failed after scheduling", {
 						error: error instanceof Error ? error.message : String(error),
@@ -5027,6 +5029,7 @@ export class AgentSession {
 	): Promise<void> {
 		this.#beginInFlight();
 		const generation = this.#promptGeneration;
+		let providerDispatchStarted = false;
 		try {
 			await this.#recovery.maybeRestoreRetryFallbackPrimary();
 			if (!(await this.#runUsageAwarePreflight())) return;
@@ -5232,6 +5235,7 @@ export class AgentSession {
 				this.#planReferenceSent = true;
 			}
 			try {
+				providerDispatchStarted = true;
 				await this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions);
 			} finally {
 				this.#stats.setPendingSnapshot(undefined);
@@ -5240,6 +5244,7 @@ export class AgentSession {
 				await this.#waitForPostPromptRecovery(generation);
 			}
 		} finally {
+			if (!providerDispatchStarted) this.#recovery.deferActiveRetryFallbackProbe();
 			this.#endInFlight();
 		}
 	}
@@ -5634,6 +5639,7 @@ export class AgentSession {
 		options?: { acceptTerminalEmptyStop?: boolean },
 	): Promise<void> {
 		this.#beginInFlight();
+		let providerDispatchStarted = false;
 		try {
 			if (!(await this.#runUsageAwarePreflight())) return;
 			const acceptTerminalEmptyStop = options?.acceptTerminalEmptyStop === true;
@@ -5641,9 +5647,11 @@ export class AgentSession {
 				this.#resetPromptMaintenanceState();
 			}
 			this.#recovery.setAcceptTerminalEmptyStop(acceptTerminalEmptyStop);
-			await this.agent.prompt(message);
+			providerDispatchStarted = true;
+			await this.#recovery.promptAgentWithIdleRetry([message]);
 			await this.#waitForPostPromptRecovery();
 		} finally {
+			if (!providerDispatchStarted) this.#recovery.deferActiveRetryFallbackProbe();
 			this.#recovery.setAcceptTerminalEmptyStop(false);
 			this.#endInFlight();
 		}

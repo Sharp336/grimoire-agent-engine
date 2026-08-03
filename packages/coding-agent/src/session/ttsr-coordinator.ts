@@ -34,6 +34,7 @@ export interface TtsrCoordinatorHost {
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	schedulePostPromptTask(task: (signal: AbortSignal) => Promise<void>, options?: { delayMs?: number }): void;
 	scheduleAgentContinue(options: TtsrContinueOptions): void;
+	continueAgent(): Promise<void>;
 	promptGeneration(): number;
 }
 
@@ -452,7 +453,7 @@ export class TtsrCoordinator {
 					this.#markInjected(details.rules);
 				}
 				try {
-					await this.#host.agent.continue();
+					await this.#host.continueAgent();
 				} catch {
 					this.resolveResume();
 				}
