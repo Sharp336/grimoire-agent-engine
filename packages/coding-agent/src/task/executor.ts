@@ -8,7 +8,11 @@ import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
-import { canonicalizeToolCallJson, normalizeToolCallLoopThreshold } from "@oh-my-pi/pi-ai/utils/tool-call-loop-guard";
+import {
+	canonicalizeToolCallJson,
+	hashCanonicalToolCallValue,
+	normalizeToolCallLoopThreshold,
+} from "@oh-my-pi/pi-ai/utils/tool-call-loop-guard";
 import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../async";
 import type { Rule } from "../capability/rule";
@@ -1427,7 +1431,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				const eventArgs = isRecord(eventRecord) && isRecord(eventRecord.args) ? eventRecord.args : {};
 				const canonicalArgs = pendingToolArguments.get(event.toolCallId);
 				pendingToolArguments.delete(event.toolCallId);
-				const canonicalResult = event.isError ? undefined : canonicalizeToolCallJson(event.result);
+				const canonicalResult = event.isError ? undefined : hashCanonicalToolCallValue(event.result);
 				const convergenceGuardEnabled = settings.get("model.toolCallLoopGuard.enabled") === true;
 				const configuredConvergenceThreshold = settings.get("model.toolCallLoopGuard.threshold");
 				const convergenceThreshold = normalizeToolCallLoopThreshold(configuredConvergenceThreshold);

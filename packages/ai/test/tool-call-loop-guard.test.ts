@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { normalizeToolCallLoopThreshold, ToolCallLoopGuard } from "@oh-my-pi/pi-ai/utils/tool-call-loop-guard";
+import {
+	hashCanonicalToolCallValue,
+	normalizeToolCallLoopThreshold,
+	ToolCallLoopGuard,
+} from "@oh-my-pi/pi-ai/utils/tool-call-loop-guard";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
 const zeroUsage = {
@@ -18,6 +22,22 @@ describe("ToolCallLoopGuard", () => {
 		expect(normalizeToolCallLoopThreshold(Number.POSITIVE_INFINITY)).toBe(1);
 		expect(normalizeToolCallLoopThreshold(0)).toBe(1);
 		expect(normalizeToolCallLoopThreshold(2.9)).toBe(2);
+	});
+
+	test("hashes large result values incrementally and canonically", () => {
+		const largeText = "x".repeat(1_000_000);
+		const first = {
+			content: [{ type: "text", text: largeText }],
+			details: { complete: true, bytes: largeText.length },
+		};
+		const reordered = {
+			details: { bytes: largeText.length, complete: true },
+			content: [{ text: largeText, type: "text" }],
+		};
+		const changed = { ...reordered, details: { ...reordered.details, complete: false } };
+
+		expect(hashCanonicalToolCallValue(first)).toBe(hashCanonicalToolCallValue(reordered));
+		expect(hashCanonicalToolCallValue(changed)).not.toBe(hashCanonicalToolCallValue(first));
 	});
 
 	test("detects the fifth consecutive identical tool call", () => {
