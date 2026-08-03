@@ -89,7 +89,6 @@ export const systemPromptHelp = {
 	description: "Inspect provider-facing system prompts",
 } satisfies CommandMetadata;
 
-
 export const tinyModelsHelp = {
 	description: "Download tiny local models (session titles + memory)",
 } satisfies CommandMetadata;
