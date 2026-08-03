@@ -1549,12 +1549,27 @@ describe("omp doctor", () => {
 		const discoverySpy = spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({
 			agents: [runtimeAgent],
 			projectAgentsDir: null,
+			errors: [],
 		});
 		try {
 			const report = await runDoctorCommand({ flags: {} });
 			const finding = report.findings.find(entry => entry.id === "setup.agents");
 			expect(finding?.status).toBe("warning");
 			expect(finding?.details).toContain('runtime-only: unknown tool "not-a-real-tool"');
+		} finally {
+			discoverySpy.mockRestore();
+		}
+	});
+
+	test("setup: runtime agent discovery failure → error finding", async () => {
+		setAgentDir(root);
+		setProjectDir(root);
+		const discoverySpy = spyOn(taskDiscovery, "discoverAgents").mockRejectedValue(new Error("boom discovery"));
+		try {
+			const report = await runDoctorCommand({ flags: {} });
+			const finding = report.findings.find(entry => entry.id === "setup.agents");
+			expect(finding?.status).toBe("error");
+			expect(finding?.details).toContain("runtime agent discovery: boom discovery");
 		} finally {
 			discoverySpy.mockRestore();
 		}

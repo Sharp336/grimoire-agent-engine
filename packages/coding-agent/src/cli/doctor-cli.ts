@@ -1654,25 +1654,31 @@ async function buildKnownAgentNames(
 	discovered: ParsedAgentFields[],
 	projectDir: string,
 	scoped: boolean,
-): Promise<{ names: Set<string>; runtimeAgents: AgentDefinition[] }> {
+): Promise<{ names: Set<string>; runtimeAgents: AgentDefinition[]; discoveryErrors: string[] }> {
 	const names = new Set<string>();
 	for (const fields of discovered) names.add(fields.name);
 	const locallyParsedNames = new Set(names);
 	for (const bundled of loadBundledAgents()) names.add(bundled.name);
 	const runtimeAgents: AgentDefinition[] = [];
+	const discoveryErrors: string[] = [];
 	if (!scoped) {
 		try {
-			const { agents } = await discoverAgents(projectDir);
-			for (const agent of agents) {
+			const discovery = await discoverAgents(projectDir);
+			for (const diagnostic of discovery.errors ?? []) {
+				discoveryErrors.push(`runtime agent discovery: ${diagnostic}`);
+			}
+			for (const agent of discovery.agents) {
 				names.add(agent.name);
 				if (!locallyParsedNames.has(agent.name)) runtimeAgents.push(agent);
 			}
-		} catch {
+		} catch (error) {
 			// Discovery failure must not crash the report; the locally-parsed
-			// and bundled names still cover the common case.
+			// and bundled names still cover the common case. Surface the
+			// rejection so doctor cannot report healthy over a silent drop.
+			discoveryErrors.push(`runtime agent discovery: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
-	return { names, runtimeAgents };
+	return { names, runtimeAgents, discoveryErrors };
 }
 
 /** Discover skill names from the shared capability loader with the same scope
@@ -1815,7 +1821,12 @@ async function collectAgentSetupFinding(agentDir: string, projectDir: string, sc
 	// Validate references when either locally scanned or runtime-discovered
 	// definitions exist. Runtime-only agents can come from ancestor config
 	// roots and plugins, which the local markdown walk does not cover.
-	const { names: knownAgentNames, runtimeAgents } = await buildKnownAgentNames(parsed, projectDir, scoped);
+	const {
+		names: knownAgentNames,
+		runtimeAgents,
+		discoveryErrors,
+	} = await buildKnownAgentNames(parsed, projectDir, scoped);
+	errors.push(...discoveryErrors);
 	if (parsed.length > 0 || runtimeAgents.length > 0) {
 		const knownSkillNames = await discoverSkillNames(agentDir, projectDir, scoped);
 		// Build the known tool name set from the same runtime toolCapability

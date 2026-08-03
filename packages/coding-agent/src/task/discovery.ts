@@ -17,10 +17,11 @@
  *
  * Agent files use markdown with YAML frontmatter.
  */
+import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { isProviderEnabled } from "../capability";
 import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
 import { listClaudePluginRoots } from "../discovery/helpers";
@@ -34,13 +35,29 @@ const TASK_AGENT_CONFIG_SOURCE = ".omp";
 export interface DiscoveryResult {
 	agents: AgentDefinition[];
 	projectAgentsDir: string | null;
+	/** Diagnostics from agent source reads/parses that runtime skipped. */
+	errors?: string[];
 }
 
 /**
  * Load agents from a directory.
  */
-async function loadAgentsFromDir(dir: string, source: AgentSource): Promise<AgentDefinition[]> {
-	const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+async function loadAgentsFromDir(
+	dir: string,
+	source: AgentSource,
+): Promise<{ agents: AgentDefinition[]; errors: string[] }> {
+	const errors: string[] = [];
+	let entries: Dirent[];
+	try {
+		entries = await fs.readdir(dir, { withFileTypes: true });
+	} catch (error) {
+		if (!isEnoent(error)) {
+			const message = error instanceof Error ? error.message : String(error);
+			logger.warn("Failed to read agents directory", { dir, error });
+			errors.push(`${dir}: ${message}`);
+		}
+		return { agents: [], errors };
+	}
 	const files = entries
 		.filter(entry => (entry.isFile() || entry.isSymbolicLink()) && entry.name.endsWith(".md"))
 		.sort((a, b) => a.name.localeCompare(b.name))
@@ -50,12 +67,14 @@ async function loadAgentsFromDir(dir: string, source: AgentSource): Promise<Agen
 				.readFile(filePath, "utf-8")
 				.then(content => parseAgent(filePath, content, source, "warn"))
 				.catch(error => {
+					const message = error instanceof Error ? error.message : String(error);
 					logger.warn("Failed to read agent file", { filePath, error });
+					errors.push(`${filePath}: ${message}`);
 					return null;
 				});
 		});
 
-	return (await Promise.all(files)).filter(Boolean) as AgentDefinition[];
+	return { agents: (await Promise.all(files)).filter(Boolean) as AgentDefinition[], errors };
 }
 
 /**
@@ -118,8 +137,12 @@ export async function discoverAgents(cwd: string, home: string = os.homedir()): 
 	}
 
 	const seen = new Set<string>();
+	const errors: string[] = [];
 	const loadedAgents = (await Promise.all(orderedDirs.map(({ dir, source }) => loadAgentsFromDir(dir, source))))
-		.flat()
+		.flatMap(result => {
+			errors.push(...result.errors);
+			return result.agents;
+		})
 		.filter(agent => {
 			if (seen.has(agent.name)) return false;
 			seen.add(agent.name);
@@ -134,7 +157,7 @@ export async function discoverAgents(cwd: string, home: string = os.homedir()): 
 
 	const projectAgentsDir = projectDirs.length > 0 ? projectDirs[0].path : null;
 
-	return { agents: [...loadedAgents, ...bundledAgents], projectAgentsDir };
+	return { agents: [...loadedAgents, ...bundledAgents], projectAgentsDir, errors };
 }
 
 /**
