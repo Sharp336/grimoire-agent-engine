@@ -1456,6 +1456,7 @@ export class AgentSession {
 			providerSessionState: this.#providerSessionState,
 			preferWebsockets: this.#preferWebsockets,
 			model: () => this.model,
+			agentKind: () => this.#agentKind,
 			thinkingLevel: () => this.thinkingLevel,
 			isDisposed: () => this.#isDisposed,
 			isStreaming: () => this.isStreaming,
