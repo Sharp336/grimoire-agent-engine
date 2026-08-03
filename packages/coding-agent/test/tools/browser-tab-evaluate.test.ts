@@ -8,8 +8,6 @@ import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 
-const chromiumAvailable = await CHROMIUM_AVAILABLE;
-
 function makeSession(): ToolSession {
 	return {
 		cwd: "/tmp/test",
@@ -20,7 +18,7 @@ function makeSession(): ToolSession {
 	};
 }
 
-describe.skipIf(!chromiumAvailable)("browser tab evaluation", () => {
+describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 	// Launches real headless Chromium; CI cold start easily exceeds bun's 5s default.
 	it("runs tab.evaluate in the page's main JavaScript world", async () => {
 		const tool = new BrowserTool(makeSession());
