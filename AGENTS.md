@@ -268,6 +268,7 @@ Location: `packages/*/CHANGELOG.md` (per package).
 
 - New entries always go under `## [Unreleased]`.
 - Never modify already-released sections (e.g., `## [0.12.2]`) — they are immutable.
+- After editing a changelog, inspect its diff; any changed line below the first released `## [...]` heading is a defect.
 - Don't flag changelog section order or formatting in reviews or PRs — `bun run release` runs `fix-changelogs` which normalizes everything automatically.
 
 **Attribution:**

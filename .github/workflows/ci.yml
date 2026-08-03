@@ -133,6 +133,13 @@ jobs:
       steps:
          - uses: actions/checkout@v4
          - uses: ./.github/actions/bun-install
+         - name: Check immutable changelog history
+           if: github.event_name == 'pull_request'
+           env:
+              CHANGELOG_BASE_REF: ${{ github.event.pull_request.base.sha }}
+           run: |
+              git fetch --no-tags --depth=1 origin "$CHANGELOG_BASE_REF"
+              bun scripts/check-changelog-history.ts --base "$CHANGELOG_BASE_REF"
          - name: Type check workspace
            run: bun run ci:check:full
          - name: Build collab web
