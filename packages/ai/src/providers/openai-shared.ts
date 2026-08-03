@@ -745,21 +745,21 @@ export function applyOpenAIExtraBody<P extends object>(
 	// `params.providerOptions` may already carry the Vercel gateway routing block
 	// emitted by applyOpenAIGatewayRouting / applyVercelResponsesCacheControls. A
 	// wholesale assign would silently drop zeroDataRetention/only/order/caching
-	// when compat.extraBody.providerOptions is also present. Deep-merge the nested
-	// `gateway` object so the typed routing constraint always survives; the typed
-	// value wins on conflicts.
+	// when compat.extraBody.providerOptions is also present. Preserve the typed
+	// gateway block across the merge of any extraBody.providerOptions shape
+	// (including null/primitives), deep-merging the nested `gateway` when the
+	// incoming value is a record; the typed value wins on conflicts.
 	const existingProviderOptions = (params as Record<string, unknown>).providerOptions;
 	const incomingProviderOptions = extraBody.providerOptions;
-	if (
-		isRecord(existingProviderOptions) &&
-		isRecord(incomingProviderOptions) &&
-		(isRecord(existingProviderOptions.gateway) || isRecord(incomingProviderOptions.gateway))
-	) {
-		const mergedProviderOptions = { ...existingProviderOptions, ...incomingProviderOptions };
-		mergedProviderOptions.gateway = {
-			...(isRecord(incomingProviderOptions.gateway) ? incomingProviderOptions.gateway : {}),
-			...(isRecord(existingProviderOptions.gateway) ? existingProviderOptions.gateway : {}),
-		};
+	if (isRecord(existingProviderOptions) && isRecord(existingProviderOptions.gateway)) {
+		const mergedProviderOptions = { ...existingProviderOptions };
+		if (isRecord(incomingProviderOptions)) {
+			Object.assign(mergedProviderOptions, incomingProviderOptions);
+		}
+		const incomingGateway = isRecord(incomingProviderOptions) ? incomingProviderOptions.gateway : undefined;
+		if (isRecord(incomingGateway)) {
+			mergedProviderOptions.gateway = { ...incomingGateway, ...existingProviderOptions.gateway };
+		}
 		Object.assign(params, { ...extraBody, providerOptions: mergedProviderOptions });
 	} else {
 		Object.assign(params, extraBody);

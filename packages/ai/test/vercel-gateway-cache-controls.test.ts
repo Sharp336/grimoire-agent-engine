@@ -324,6 +324,30 @@ describe("Vercel AI Gateway zero data retention", () => {
 		expect(responsesPayload.providerOptions).toEqual({ gateway: { only: ["anthropic"], zeroDataRetention: true } });
 	});
 
+	it("keeps zeroDataRetention when extraBody.providerOptions is null", async () => {
+		const chat = buildModel({
+			id: "anthropic/claude-sonnet-4.6",
+			name: "Claude Sonnet 4.6",
+			api: "openai-completions",
+			provider: "vercel-ai-gateway",
+			baseUrl: "https://ai-gateway.vercel.sh/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 16_384,
+			compat: {
+				vercelGatewayRouting: { zeroDataRetention: true },
+				extraBody: { providerOptions: null },
+			},
+		} satisfies ModelSpec<"openai-completions">);
+
+		// A non-record incoming providerOptions must not replace the typed gateway
+		// block (external review P2).
+		const payload = await captureChatPayload(chat);
+		expect(payload.providerOptions).toEqual({ gateway: { zeroDataRetention: true } });
+	});
+
 	it("drops zeroDataRetention but keeps routing when baseUrl is overridden away from Vercel", async () => {
 		const routing: VercelGatewayRouting = { only: ["bedrock"], zeroDataRetention: true };
 		const chat = buildModel({
