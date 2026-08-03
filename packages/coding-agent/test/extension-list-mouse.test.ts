@@ -205,6 +205,16 @@ describe("InspectorPanel rendering", () => {
 		withLiveRefresh.setExtension(mcp("example"));
 		expect(Bun.stripANSI(withLiveRefresh.render(60).join("\n"))).toContain("live (no restart needed)");
 	});
+
+	test("keeps the MCP refresh badge inside a narrow inspector", () => {
+		const panel = new InspectorPanel();
+		panel.setExtension(mcp("example"));
+		const rendered = panel.render(8);
+		const appliesIndex = rendered.findIndex(line => Bun.stripANSI(line) === "Applies:");
+
+		expect(appliesIndex).toBeGreaterThanOrEqual(0);
+		expect(Bun.stringWidth(rendered[appliesIndex + 1] ?? "")).toBeLessThanOrEqual(8);
+	});
 });
 
 describe("buildProviderTabs", () => {

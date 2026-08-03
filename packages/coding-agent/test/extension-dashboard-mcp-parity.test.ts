@@ -325,4 +325,37 @@ describe("loadAllExtensions MCP parity with /mcp list (issue #3827)", () => {
 		expect(await notification.promise).toBe("MCP connection in progress — tools will update live");
 		expect(refreshCalls).toEqual([{ name: "flag-disabled-server", enabled: true }]);
 	});
+
+	test("serializes repeated MCP toggles through live refresh", async () => {
+		const firstRefreshStarted = Promise.withResolvers<void>();
+		const releaseFirstRefresh = Promise.withResolvers<void>();
+		const secondRefreshStarted = Promise.withResolvers<void>();
+		const refreshCalls: Array<{ name: string; enabled: boolean }> = [];
+		const dashboard = await ExtensionDashboard.create(projectDir, Settings.instance, 30, {
+			refreshMcpLive: async (name, enabled) => {
+				refreshCalls.push({ name, enabled });
+				if (refreshCalls.length === 1) {
+					firstRefreshStarted.resolve();
+					await releaseFirstRefresh.promise;
+				} else {
+					secondRefreshStarted.resolve();
+				}
+				return "updated";
+			},
+		});
+		for (const char of "flag-disabled-server") dashboard.handleInput(char);
+		dashboard.handleInput("j");
+
+		dashboard.handleInput(" ");
+		dashboard.handleInput(" ");
+		await firstRefreshStarted.promise;
+		expect(refreshCalls).toEqual([{ name: "flag-disabled-server", enabled: true }]);
+
+		releaseFirstRefresh.resolve();
+		await secondRefreshStarted.promise;
+		expect(refreshCalls).toEqual([
+			{ name: "flag-disabled-server", enabled: true },
+			{ name: "flag-disabled-server", enabled: false },
+		]);
+	});
 });

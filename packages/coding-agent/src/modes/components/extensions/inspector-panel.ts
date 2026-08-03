@@ -83,7 +83,7 @@ export class InspectorPanel implements Component {
 
 		// Hot-refresh badge
 		lines.push(theme.fg("muted", "Applies:"));
-		lines.push(`  ${this.#getRefreshBadge(ext.kind)}`);
+		lines.push(truncateToWidth(`  ${this.#getRefreshBadge(ext.kind)}`, width));
 		lines.push("");
 
 		// Preview section (routed based on kind)

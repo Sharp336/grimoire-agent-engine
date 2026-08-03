@@ -90,7 +90,9 @@ export class ExtensionDashboard implements Component {
 	#body!: TwoColumnBody;
 	#refreshToken = 0;
 	#pluginToggleQueue = Promise.resolve();
-	#pendingPluginStates = new Map<string, boolean>();
+	#mcpToggleQueues = new Map<string, Promise<void>>();
+	#pendingExtensionStates = new Map<string, { enabled: boolean; generation: number }>();
+	#toggleGeneration = 0;
 	// Frame geometry from the last render, for SGR mouse hit-testing. The
 	// fullscreen overlay paints from screen row 0, so mouse rows map 1:1.
 	#tabRowStart = 0;
@@ -291,8 +293,9 @@ export class ExtensionDashboard implements Component {
 	#handleExtensionToggle(extensionId: string, enabled: boolean): void {
 		const sm = this.#settings ?? Settings.instance;
 		if (extensionId.startsWith("plugin:")) {
-			this.#pendingPluginStates.set(extensionId, enabled);
-			const toggle = () => this.#togglePluginExtension(extensionId, enabled);
+			const generation = ++this.#toggleGeneration;
+			this.#pendingExtensionStates.set(extensionId, { enabled, generation });
+			const toggle = () => this.#togglePluginExtension(extensionId, enabled, generation);
 			this.#pluginToggleQueue = this.#pluginToggleQueue.then(toggle, toggle);
 			return;
 		}
@@ -303,7 +306,19 @@ export class ExtensionDashboard implements Component {
 		// `~/.omp/agent/mcp.json` so `/mcp list`, the MCP runtime, and this
 		// dashboard agree on every server's enabled state (issue #3827).
 		if (extensionId.startsWith("mcp:")) {
-			void this.#toggleMcpExtension(extensionId, enabled, sm);
+			const generation = ++this.#toggleGeneration;
+			this.#pendingExtensionStates.set(extensionId, { enabled, generation });
+			const previous = this.#mcpToggleQueues.get(extensionId) ?? Promise.resolve();
+			const toggle = () => this.#toggleMcpExtension(extensionId, enabled, generation, sm);
+			const queued = previous.then(toggle, toggle);
+			this.#mcpToggleQueues.set(extensionId, queued);
+			void queued
+				.finally(() => {
+					if (this.#mcpToggleQueues.get(extensionId) === queued) {
+						this.#mcpToggleQueues.delete(extensionId);
+					}
+				})
+				.catch(() => {});
 			return;
 		}
 
@@ -325,7 +340,7 @@ export class ExtensionDashboard implements Component {
 		void this.#refreshFromState();
 	}
 
-	async #togglePluginExtension(extensionId: string, enabled: boolean): Promise<void> {
+	async #togglePluginExtension(extensionId: string, enabled: boolean, generation: number): Promise<void> {
 		const rest = extensionId.slice("plugin:".length);
 
 		try {
@@ -363,9 +378,7 @@ export class ExtensionDashboard implements Component {
 			this.#hooks.notifyError?.(`Failed to toggle plugin: ${String(error)}`);
 		}
 
-		if (this.#pendingPluginStates.get(extensionId) === enabled) {
-			this.#pendingPluginStates.delete(extensionId);
-		}
+		this.#clearPendingExtensionState(extensionId, generation);
 
 		try {
 			await this.#refreshFromState();
@@ -375,7 +388,7 @@ export class ExtensionDashboard implements Component {
 		}
 	}
 
-	async #toggleMcpExtension(extensionId: string, enabled: boolean, sm: Settings): Promise<void> {
+	async #toggleMcpExtension(extensionId: string, enabled: boolean, generation: number, sm: Settings): Promise<void> {
 		const name = extensionId.slice("mcp:".length);
 		try {
 			await setMcpServerEnabled({
@@ -388,6 +401,7 @@ export class ExtensionDashboard implements Component {
 		} catch (error) {
 			logger.warn("Failed to persist MCP toggle", { name, enabled, error: String(error) });
 			this.#hooks.notifyError?.(`Failed to save MCP toggle for "${name}": ${String(error)}`);
+			this.#clearPendingExtensionState(extensionId, generation);
 			await this.#refreshFromState();
 			return;
 		}
@@ -421,7 +435,14 @@ export class ExtensionDashboard implements Component {
 			this.#hooks.notify?.("MCP change saved — restart to apply");
 		}
 
+		this.#clearPendingExtensionState(extensionId, generation);
 		await this.#refreshFromState();
+	}
+
+	#clearPendingExtensionState(extensionId: string, generation: number): void {
+		if (this.#pendingExtensionStates.get(extensionId)?.generation === generation) {
+			this.#pendingExtensionStates.delete(extensionId);
+		}
 	}
 
 	#writableMcpSourcePath(extensionId: string): string | undefined {
@@ -441,8 +462,8 @@ export class ExtensionDashboard implements Component {
 		const nextState = await refreshState(this.#state, this.#cwd, disabledIds);
 		if (refreshToken !== this.#refreshToken) return;
 		this.#state = nextState;
-		for (const [extensionId, enabled] of this.#pendingPluginStates) {
-			this.#state = applyExtensionEnabledToState(this.#state, extensionId, enabled);
+		for (const [extensionId, pending] of this.#pendingExtensionStates) {
+			this.#state = applyExtensionEnabledToState(this.#state, extensionId, pending.enabled);
 		}
 
 		// Re-anchor on the same tab id in the (re-sorted) list.
