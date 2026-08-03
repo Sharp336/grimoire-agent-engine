@@ -344,7 +344,7 @@ describe("Agent Hub dashboard", () => {
 				progress: progress({
 					id: "routing-scout",
 					resolvedModel: "anthropic/claude-opus-5:high",
-					thinkingLevel: Effort.High,
+					thinkingLevel: Effort.Medium,
 				}),
 			},
 		]);
@@ -354,7 +354,7 @@ describe("Agent Hub dashboard", () => {
 			.split("\n")
 			.map(line => line.split("│")[0] ?? "")
 			.join("\n");
-		expect(listPane).toContain("claude-opus-5 ◒ high · just now");
+		expect(listPane).toContain("claude-opus-5 ◑ med · just now");
 
 		expect(Bun.stripANSI(hub.render(108).join("\n"))).not.toContain("│");
 		hub.dispose();
