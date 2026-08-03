@@ -303,12 +303,15 @@ function extractToolResultLink(sessionFile: string, entry: SessionMessageEntry):
 			}
 		}
 	}
+	const details = msg.details as { __synthetic?: unknown; executed?: unknown } | undefined;
+	const executed = details?.__synthetic === true && details.executed === false ? false : undefined;
 	return {
 		sessionFile,
 		toolCallId: msg.toolCallId,
 		resultChars,
 		timestamp: coerceEntryTimestamp(msg.timestamp, entry),
 		isError: msg.isError === true,
+		...(executed === false ? { executed } : {}),
 	};
 }
 

@@ -226,6 +226,29 @@ function buildToolErrorResult(message: string): AgentToolResult<unknown> {
 	};
 }
 
+function buildUnexecutedToolErrorResult(message: string): AgentToolResult<unknown> {
+	return {
+		content: [{ type: "text", text: message }],
+		details: {
+			__synthetic: true,
+			source: "cursor_bridge_rejected",
+			executed: false,
+		},
+	};
+}
+
+function markUnexecutedToolResult(result: AgentToolResult<unknown>): AgentToolResult<unknown> {
+	const details = result.details;
+	return {
+		...result,
+		details: {
+			...(details && typeof details === "object" && !Array.isArray(details) ? details : {}),
+			__synthetic: true,
+			source: "cursor_bridge_rejected",
+			executed: false,
+		},
+	};
+}
 async function executeTool(
 	options: CursorExecBridgeOptions,
 	toolName: string,
@@ -235,11 +258,21 @@ async function executeTool(
 ): Promise<ToolResultMessage> {
 	const tool = overrideTool ?? options.getExecutableTool?.(toolName) ?? options.tools.get(toolName);
 	if (!tool) {
-		const result = buildToolErrorResult(`Tool "${toolName}" not available`);
+		const result = buildUnexecutedToolErrorResult(`Tool "${toolName}" not available`);
 		return createToolResultMessage(toolCallId, toolName, result, true);
 	}
 
-	options.emitEvent?.({ type: "tool_execution_start", toolCallId, toolName, args });
+	let executionObserved = false;
+	const emitExecutionBoundary = (executed: boolean) => {
+		if (executionObserved) return;
+		executionObserved = true;
+		options.emitEvent?.({ type: "tool_execution_start", toolCallId, toolName, args, executed });
+	};
+	const toolContext = options.getToolContext?.();
+	const executionContext = tool.deferExecutionStart
+		? ({ ...toolContext, markExecutionStarted: () => emitExecutionBoundary(true) } as AgentToolContext)
+		: toolContext;
+	if (!tool.deferExecutionStart) emitExecutionBoundary(true);
 
 	let result: AgentToolResult<unknown>;
 	let isError = false;
@@ -261,19 +294,17 @@ async function executeTool(
 		: undefined;
 
 	try {
-		result = await tool.execute(
-			toolCallId,
-			args as Record<string, unknown>,
-			undefined,
-			onUpdate,
-			options.getToolContext?.(),
-		);
+		result = await tool.execute(toolCallId, args as Record<string, unknown>, undefined, onUpdate, executionContext);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		result = buildToolErrorResult(message);
 		isError = true;
 	}
 	isError ||= result.isError === true;
+	if (!executionObserved) {
+		emitExecutionBoundary(false);
+		result = markUnexecutedToolResult(result);
+	}
 
 	const sanitizedFinalResult: AgentToolResult<unknown> = {
 		content: result.content.map(c => (c.type === "text" ? { ...c, text: sanitizeText(c.text) } : c)),
@@ -313,7 +344,7 @@ async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, 
 	const toolName = "delete";
 
 	if (options.allowDirectFileMutation === false) {
-		const result = buildToolErrorResult(`Tool "${toolName}" not available`);
+		const result = buildUnexecutedToolErrorResult(`Tool "${toolName}" not available`);
 		return createToolResultMessage(toolCallId, toolName, result, true);
 	}
 
@@ -324,7 +355,7 @@ async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, 
 	// this, a configured `deny` or an `always-ask` session still lost the file.
 	const refusal = refuseByWritePolicy(options, toolName, pathArg);
 	if (refusal) {
-		return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(refusal), true);
+		return createToolResultMessage(toolCallId, toolName, buildUnexecutedToolErrorResult(refusal), true);
 	}
 
 	options.emitEvent?.({ type: "tool_execution_start", toolCallId, toolName, args: { path: pathArg } });
@@ -396,14 +427,14 @@ function formatTodoSyncSummary(phases: TodoPhase[]): string {
 /**
  * Persisted result for a server-resolved todo call.
  *
- * `details` is only attached for an authoritative snapshot, and then
- * `details.phases` is load-bearing rather than decoration: `todoToolRenderer`
- * rebuilds the rendered list exclusively from it, so a mirrored update that
- * omitted it would replay as `Todo 0 tasks` after a reload.
+ * `details.phases` is only attached for an authoritative snapshot and is
+ * load-bearing rather than decoration: `todoToolRenderer` rebuilds the rendered
+ * list exclusively from it, so a mirrored update that omitted it would replay
+ * as `Todo 0 tasks` after a reload.
  *
- * A refusal or a server error carries no `details`. Echoing the current phases
- * there would replay a call that changed nothing as if it had re-asserted the
- * whole list — and `event-controller` feeds `details.phases` straight into
+ * A refusal or a server error carries no `details.phases`. Echoing the current
+ * phases there would replay a call that changed nothing as if it had re-asserted
+ * the whole list — and `event-controller` feeds `details.phases` straight into
  * `setTodos`, so a refused `read_todos` would overwrite live UI state.
  */
 function buildTodoSyncResult(
@@ -418,7 +449,12 @@ function buildTodoSyncResult(
 		content: [
 			{ type: "text", text: error ?? (phases ? formatTodoSyncSummary(phases) : "Todo snapshot not mirrored") },
 		],
-		details: phases ? { phases, storage: "session" } : undefined,
+		details: {
+			...(phases ? { phases, storage: "session" } : {}),
+			__synthetic: true,
+			source: "cursor_server_resolved",
+			executed: false,
+		},
 		isError: error !== null,
 		timestamp: Date.now(),
 	};
@@ -439,7 +475,15 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		const composed = piReadPath(args.path, args.offset, args.limit);
 		// A present `limit: 0` asks for zero lines; no selector expresses that.
 		if (composed === null) {
-			return createToolResultMessage(toolCallId, "read", { content: [{ type: "text", text: "" }] }, false);
+			return createToolResultMessage(
+				toolCallId,
+				"read",
+				{
+					content: [{ type: "text", text: "" }],
+					details: { __synthetic: true, source: "cursor_zero_length_read", executed: false },
+				},
+				false,
+			);
 		}
 		return await executeTool(this.options, "read", toolCallId, { path: composed });
 	}
@@ -504,7 +548,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		const toolName = "bash";
 		const tool = this.options.tools.get(toolName);
 		if (!tool) {
-			const result = buildToolErrorResult(`Tool "${toolName}" not available`);
+			const result = buildUnexecutedToolErrorResult(`Tool "${toolName}" not available`);
 			return createToolResultMessage(toolCallId, toolName, result, true);
 		}
 
@@ -514,8 +558,17 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			cwd: args.workingDirectory || undefined,
 			timeout: timeoutSeconds,
 		};
-
-		this.options.emitEvent?.({ type: "tool_execution_start", toolCallId, toolName, args: toolArgs });
+		let executionObserved = false;
+		const emitExecutionBoundary = (executed: boolean) => {
+			if (executionObserved) return;
+			executionObserved = true;
+			this.options.emitEvent?.({ type: "tool_execution_start", toolCallId, toolName, args: toolArgs, executed });
+		};
+		const toolContext = this.options.getToolContext?.();
+		const executionContext = tool.deferExecutionStart
+			? ({ ...toolContext, markExecutionStarted: () => emitExecutionBoundary(true) } as AgentToolContext)
+			: toolContext;
+		if (!tool.deferExecutionStart) emitExecutionBoundary(true);
 
 		let result: AgentToolResult<unknown>;
 		let isError = false;
@@ -560,11 +613,15 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		};
 
 		try {
-			result = await tool.execute(toolCallId, toolArgs, undefined, onUpdate, this.options.getToolContext?.());
+			result = await tool.execute(toolCallId, toolArgs, undefined, onUpdate, executionContext);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			result = buildToolErrorResult(message);
 			isError = true;
+		}
+		if (!executionObserved) {
+			emitExecutionBoundary(false);
+			result = markUnexecutedToolResult(result);
 		}
 		isError ||= result.isError === true;
 
@@ -628,7 +685,15 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		// string for it; no `read` selector expresses that, so answer directly
 		// rather than falling back to a whole-file read.
 		if (composed === null) {
-			return createToolResultMessage(call.toolCallId, "read", { content: [{ type: "text", text: "" }] }, false);
+			return createToolResultMessage(
+				call.toolCallId,
+				"read",
+				{
+					content: [{ type: "text", text: "" }],
+					details: { __synthetic: true, source: "cursor_zero_length_read", executed: false },
+				},
+				false,
+			);
 		}
 		return await executeTool(this.options, "read", call.toolCallId, { path: composed });
 	}
@@ -851,9 +916,10 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 * A `null` snapshot means nothing may be mirrored — a server `error`, or a
 	 * benign refusal: a filtered, truncated, or empty read, or a snapshot the
 	 * local model cannot represent. Local state is left untouched, and the result
-	 * carries no `details` (text `"Todo snapshot not mirrored"`): `event-controller`
-	 * feeds `details.phases` straight into `setTodos`, so echoing the current list
-	 * back would let a call that changed nothing overwrite live UI state.
+	 * carries no `details.phases` (text `"Todo snapshot not mirrored"`):
+	 * `event-controller` feeds `details.phases` straight into `setTodos`, so
+	 * echoing the current list back would let a call that changed nothing
+	 * overwrite live UI state.
 	 */
 	todoSync(snapshot: CursorTodoSnapshot | null, toolCallId: string, error: string | null = null): ToolResultMessage {
 		const setPhases = this.options.setTodoPhases;
@@ -923,7 +989,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		if (!tool) {
 			const availableTools = Array.from(this.options.tools.keys()).filter(name => name.startsWith("mcp__"));
 			const message = formatMcpToolErrorMessage(toolName, availableTools);
-			const result = buildToolErrorResult(message);
+			const result = buildUnexecutedToolErrorResult(message);
 			return createToolResultMessage(toolCallId, toolName, result, true);
 		}
 

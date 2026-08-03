@@ -121,6 +121,7 @@ interface ToolResultOptions {
 	toolName: string;
 	text: string;
 	isError?: boolean;
+	details?: unknown;
 }
 
 function buildToolResultEntry(opts: ToolResultOptions) {
@@ -135,6 +136,7 @@ function buildToolResultEntry(opts: ToolResultOptions) {
 			toolName: opts.toolName,
 			content: [{ type: "text", text: opts.text }],
 			isError: opts.isError ?? false,
+			...(opts.details === undefined ? {} : { details: opts.details }),
 			timestamp: Date.parse(opts.timestamp),
 		},
 	};
@@ -323,6 +325,126 @@ describe("tool usage stats pipeline", () => {
 		expect(read.durationMsP90).toBe(0);
 	});
 
+	it("excludes markerless current synthetic results from duration samples", async () => {
+		await writeSessionFile("session.jsonl", { id: "markerless-synthetic" }, [
+			buildAssistantEntry({
+				entryId: "asst-1",
+				timestamp: TS1,
+				toolCalls: [{ id: "call-1", name: "read", arguments: READ_ARGS }],
+				totalTokens: TURN2_TOTAL_TOKENS,
+				outputTokens: TURN2_OUTPUT_TOKENS,
+				costTotal: TURN2_COST,
+			}),
+			buildToolResultEntry({
+				entryId: "tr-1",
+				parentId: "asst-1",
+				timestamp: TS1_READ_RESULT,
+				toolCallId: "call-1",
+				toolName: "read",
+				text: "Tool not available",
+				isError: true,
+				details: { __synthetic: true, source: "cursor_bridge_rejected", executed: false },
+			}),
+		]);
+		await syncAllSessions({ workers: 1 });
+
+		const [read] = getToolStats();
+		expect(read.calls).toBe(1);
+		expect(read.errors).toBe(1);
+		expect(read.durationSamples).toBe(0);
+	});
+
+	it("excludes markerless current successful Cursor results from duration samples", async () => {
+		await writeSessionFile("session.jsonl", { id: "markerless-current-success" }, [
+			buildAssistantEntry({
+				entryId: "asst-1",
+				timestamp: TS1,
+				toolCalls: [
+					{ id: "call-read", name: "read", arguments: READ_ARGS },
+					{ id: "call-todo", name: "todo", arguments: {} },
+				],
+				totalTokens: TURN2_TOTAL_TOKENS,
+				outputTokens: TURN2_OUTPUT_TOKENS,
+				costTotal: TURN2_COST,
+			}),
+			buildToolResultEntry({
+				entryId: "tr-todo",
+				parentId: "asst-1",
+				timestamp: TS1_GREP_RESULT,
+				toolCallId: "call-todo",
+				toolName: "todo",
+				text: "No todos",
+				details: { __synthetic: true, source: "cursor_server_resolved", executed: false },
+			}),
+			buildToolResultEntry({
+				entryId: "tr-read",
+				parentId: "asst-1",
+				timestamp: TS1_READ_RESULT,
+				toolCallId: "call-read",
+				toolName: "read",
+				text: "",
+				details: { __synthetic: true, source: "cursor_zero_length_read", executed: false },
+			}),
+		]);
+		await syncAllSessions({ workers: 1 });
+
+		const stats = getToolStats();
+		expect(toolRow(stats, "read").durationSamples).toBe(0);
+		expect(toolRow(stats, "todo").durationSamples).toBe(0);
+	});
+
+	it("excludes markerless results completed before their assistant entry was persisted", async () => {
+		const resultTimestamp = new Date(Date.parse(TS1) - 120_000).toISOString();
+		await writeSessionFile("session.jsonl", { id: "markerless-inverted" }, [
+			buildToolResultEntry({
+				entryId: "tr-1",
+				parentId: "asst-1",
+				timestamp: resultTimestamp,
+				toolCallId: "call-1",
+				toolName: "read",
+				text: "",
+			}),
+			buildAssistantEntry({
+				entryId: "asst-1",
+				timestamp: TS1,
+				toolCalls: [{ id: "call-1", name: "read", arguments: READ_ARGS }],
+				totalTokens: TURN2_TOTAL_TOKENS,
+				outputTokens: TURN2_OUTPUT_TOKENS,
+				costTotal: TURN2_COST,
+			}),
+		]);
+		await syncAllSessions({ workers: 1 });
+
+		const [read] = getToolStats();
+		expect(read.durationSamples).toBe(0);
+	});
+
+	it("keeps timing markerless legacy results", async () => {
+		await writeSessionFile("session.jsonl", { id: "markerless-legacy" }, [
+			buildAssistantEntry({
+				entryId: "asst-1",
+				timestamp: TS1,
+				toolCalls: [{ id: "call-1", name: "grep", arguments: GREP_ARGS_1 }],
+				totalTokens: TURN2_TOTAL_TOKENS,
+				outputTokens: TURN2_OUTPUT_TOKENS,
+				costTotal: TURN2_COST,
+			}),
+			buildToolResultEntry({
+				entryId: "tr-1",
+				parentId: "asst-1",
+				timestamp: TS1_GREP_RESULT,
+				toolCallId: "call-1",
+				toolName: "grep",
+				text: GREP_RESULT_1,
+			}),
+		]);
+		await syncAllSessions({ workers: 1 });
+
+		const [grep] = getToolStats();
+		expect(grep.durationSamples).toBe(1);
+		expect(grep.durationMsMedian).toBe(62_000);
+	});
+
 	it("keeps timing legacy execution markers that predate the executed flag", async () => {
 		await writeSessionFile("session.jsonl", { id: "legacy-marker" }, [
 			buildAssistantEntry({
@@ -402,6 +524,41 @@ describe("tool usage stats pipeline", () => {
 		expect(modelA?.durationMsMedian).toBe(2_000);
 		expect(modelB?.durationSamples).toBe(1);
 		expect(modelB?.durationMsMedian).toBe(8_000);
+	});
+
+	it("retains a start marker until its tool call arrives in a later sync pass", async () => {
+		const sessionFile = await writeSessionFile("session.jsonl", { id: "live-turn" }, [
+			buildToolStartEntry("call-1", "grep", TS1),
+		]);
+		await syncAllSessions({ workers: 1 });
+
+		expect(getToolStats()).toEqual([]);
+
+		const assistant = buildAssistantEntry({
+			entryId: "asst-1",
+			timestamp: TS1,
+			toolCalls: [{ id: "call-1", name: "grep", arguments: GREP_ARGS_1 }],
+			totalTokens: TURN2_TOTAL_TOKENS,
+			outputTokens: TURN2_OUTPUT_TOKENS,
+			costTotal: TURN2_COST,
+		});
+		const result = buildToolResultEntry({
+			entryId: "tr-1",
+			parentId: "asst-1",
+			timestamp: TS1_READ_RESULT,
+			toolCallId: "call-1",
+			toolName: "grep",
+			text: GREP_RESULT_1,
+		});
+		await fs.appendFile(sessionFile, `${JSON.stringify(assistant)}\n${JSON.stringify(result)}\n`);
+		const bumped = new Date(Date.now() + 1_000);
+		await fs.utimes(sessionFile, bumped, bumped);
+
+		await syncAllSessions({ workers: 1 });
+
+		const [grep] = getToolStats();
+		expect(grep.durationSamples).toBe(1);
+		expect(grep.durationMsMedian).toBe(4_000);
 	});
 
 	it("links a result that lands in a later sync pass without duplicating the call", async () => {

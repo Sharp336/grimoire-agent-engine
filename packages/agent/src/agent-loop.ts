@@ -70,6 +70,7 @@ import type {
 	AgentPreModelCallResult,
 	AgentTool,
 	AgentToolCall,
+	AgentToolContext,
 	AgentToolResult,
 	AgentTurnEndContext,
 	AsideMessage,
@@ -2496,10 +2497,22 @@ async function executeToolCalls(
 					: effectiveArgs;
 				record.args = executionArgs;
 
+				const markExecutionStarted = () => {
+					if (record.started) return;
+					executionStarted = true;
+					record.started = true;
+					stream.push({
+						type: "tool_execution_start",
+						toolCallId: toolCall.id,
+						toolName: toolCall.name,
+						args: executionArgs,
+						intent: toolCall.intent,
+						executed: true,
+					});
+				};
+
 				// The cooperative steering signal rides the loop-owned
-				// ToolCallContext (surfacing as `ctx.toolCall.steeringSignal`):
-				// AgentToolContext itself is app-built via declaration merging, so
-				// the loop cannot construct or extend one structurally.
+				// ToolCallContext (surfacing as `ctx.toolCall.steeringSignal`).
 				const toolContext = getToolContext
 					? getToolContext({
 							batchId,
@@ -2510,16 +2523,10 @@ async function executeToolCalls(
 							providerMetadata: toolCall.providerMetadata,
 						})
 					: undefined;
-				executionStarted = true;
-				record.started = true;
-				stream.push({
-					type: "tool_execution_start",
-					toolCallId: toolCall.id,
-					toolName: toolCall.name,
-					args: executionArgs,
-					intent: toolCall.intent,
-					executed: true,
-				});
+				const executionContext = tool.deferExecutionStart
+					? ({ ...toolContext, markExecutionStarted } as AgentToolContext)
+					: toolContext;
+				if (!tool.deferExecutionStart) markExecutionStarted();
 				const rawResult = await tool.execute(
 					toolCall.id,
 					executionArgs,
@@ -2533,7 +2540,7 @@ async function executeToolCalls(
 							partialResult: coerceToolResult(partialResult).result,
 						});
 					},
-					toolContext,
+					executionContext,
 				);
 				completedToolExecution = true;
 				const coerced = coerceToolResult(rawResult);

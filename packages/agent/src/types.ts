@@ -736,7 +736,11 @@ export type ToolApproval = ToolApprovalDecision | ((args: unknown) => ToolApprov
  * Apps can extend via declaration merging.
  */
 export interface AgentToolContext {
-	// Empty by default - apps extend via declaration merging
+	/**
+	 * Mark the actual implementation boundary for tools that defer execution
+	 * behind approval or another preflight gate.
+	 */
+	markExecutionStarted?: () => void;
 }
 
 export type AgentToolExecFn<TParameters extends TSchema = TSchema, TDetails = any, TTheme = unknown> = (
@@ -770,6 +774,11 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	concurrency?: "shared" | "exclusive" | ((args: Partial<Static<TParameters>>) => "shared" | "exclusive");
 	/** If true, argument validation errors are non-fatal: raw args are passed to execute() instead of returning an error to the LLM. */
 	lenientArgValidation?: boolean;
+	/**
+	 * Defer the execution-start event until `context.markExecutionStarted()` is
+	 * called. Use only for wrappers with preflight work inside `execute()`.
+	 */
+	deferExecutionStart?: boolean;
 	/**
 	 * Whether the agent loop may abort this tool mid-execution to deliver a
 	 * queued steering message. A function resolves this per call from the raw,

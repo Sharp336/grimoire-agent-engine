@@ -177,6 +177,13 @@ export async function initDb(): Promise<Database> {
 		CREATE INDEX IF NOT EXISTS idx_tool_calls_timestamp ON tool_calls(timestamp);
 		CREATE INDEX IF NOT EXISTS idx_tool_calls_tool_timestamp ON tool_calls(tool_name, timestamp);
 
+		CREATE TABLE IF NOT EXISTS pending_tool_invocations (
+			session_file TEXT NOT NULL,
+			tool_call_id TEXT NOT NULL,
+			started_at INTEGER NOT NULL,
+			execution_observed INTEGER NOT NULL,
+			PRIMARY KEY (session_file, tool_call_id)
+		);
 		CREATE TABLE IF NOT EXISTS meta (
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL
@@ -1535,6 +1542,21 @@ export function insertToolCalls(calls: ToolCallStats[]): number {
 			WHERE entry_id = ? AND timestamp = ? AND tool_call_id = ? AND session_file <> ?
 		)
 	`);
+	const applyPendingInvocation = db.prepare(`
+		WITH pending AS (
+			SELECT started_at, execution_observed
+			FROM pending_tool_invocations
+			WHERE session_file = ? AND tool_call_id = ?
+		)
+		UPDATE tool_calls
+		SET started_at = (SELECT started_at FROM pending),
+			execution_observed = (SELECT execution_observed FROM pending)
+		WHERE session_file = ? AND tool_call_id = ? AND EXISTS (SELECT 1 FROM pending)
+	`);
+	const deletePendingInvocation = db.prepare(`
+		DELETE FROM pending_tool_invocations
+		WHERE session_file = ? AND tool_call_id = ?
+	`);
 
 	let inserted = 0;
 	const insert = db.transaction(() => {
@@ -1559,6 +1581,8 @@ export function insertToolCalls(calls: ToolCallStats[]): number {
 				c.sessionFile,
 			);
 			if (result.changes > 0) inserted++;
+			applyPendingInvocation.run(c.sessionFile, c.toolCallId, c.sessionFile, c.toolCallId);
+			deletePendingInvocation.run(c.sessionFile, c.toolCallId);
 		}
 	});
 	insert();
@@ -1573,10 +1597,23 @@ export function updateToolInvocations(links: ToolInvocationLink[]): number {
 		SET started_at = ?, execution_observed = ?
 		WHERE session_file = ? AND tool_call_id = ?
 	`);
+	const retain = db.prepare(`
+		INSERT OR REPLACE INTO pending_tool_invocations (
+			session_file, tool_call_id, started_at, execution_observed
+		)
+		VALUES (?, ?, ?, ?)
+	`);
+	const discard = db.prepare(`
+		DELETE FROM pending_tool_invocations
+		WHERE session_file = ? AND tool_call_id = ?
+	`);
 	let updated = 0;
 	const apply = db.transaction(() => {
 		for (const link of links) {
-			updated += stmt.run(link.timestamp, link.executed ? 1 : 0, link.sessionFile, link.toolCallId).changes;
+			retain.run(link.sessionFile, link.toolCallId, link.timestamp, link.executed ? 1 : 0);
+			const changes = stmt.run(link.timestamp, link.executed ? 1 : 0, link.sessionFile, link.toolCallId).changes;
+			updated += changes;
+			if (changes > 0) discard.run(link.sessionFile, link.toolCallId);
 		}
 	});
 	apply();
@@ -1596,8 +1633,10 @@ export function updateToolResults(links: ToolResultLink[]): number {
 	const stmt = db.prepare(`
 		UPDATE tool_calls
 		SET result_chars = ?,
+			execution_observed = COALESCE(?, execution_observed),
 			duration_ms = CASE
-				WHEN execution_observed = 0 THEN NULL
+				WHEN ? = 0 OR execution_observed = 0 THEN NULL
+				WHEN started_at IS NULL AND ? < timestamp THEN NULL
 				ELSE MAX(0, ? - COALESCE(started_at, timestamp))
 			END,
 			is_error = ?
@@ -1609,6 +1648,9 @@ export function updateToolResults(links: ToolResultLink[]): number {
 		for (const link of links) {
 			const result = stmt.run(
 				link.resultChars,
+				link.executed === false ? 0 : null,
+				link.executed === false ? 0 : null,
+				link.timestamp,
 				link.timestamp,
 				link.isError ? 1 : 0,
 				link.sessionFile,

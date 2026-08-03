@@ -1651,6 +1651,7 @@ export class Agent {
 						toolName: block.name,
 						args: block.arguments,
 						intent: block.intent,
+						executed: false,
 					});
 					this.#emit({
 						type: "tool_execution_end",

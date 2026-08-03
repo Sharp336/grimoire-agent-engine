@@ -3439,6 +3439,7 @@ export class AgentSession {
 				toolCallId: event.toolCallId,
 				toolName: event.toolName,
 				args: event.args,
+				executed: event.executed,
 				intent: event.intent,
 			};
 			await this.#extensionRunner.emit(extensionEvent);

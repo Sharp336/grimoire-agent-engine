@@ -195,5 +195,7 @@ export interface ToolResultLink {
 	resultChars: number;
 	/** Tool-result completion timestamp (Unix ms) */
 	timestamp: number;
+	/** False when a current synthetic result proves no implementation ran. */
+	executed?: boolean;
 	isError: boolean;
 }
