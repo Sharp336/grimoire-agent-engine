@@ -188,8 +188,8 @@ describe("Agent Hub dashboard", () => {
 		expect(output).toContain("Tools 9 · Duration 1m5s · Cost $1.25");
 		expect(output).toContain("retry 2/4 in 5.0s: rate limited");
 		expect(output).not.toContain("bash bun test");
-		expect(output).not.toContain("one arg-0");
-		expect(output).toContain("four arg-3");
+		expect(output).toContain("one arg-0");
+		expect(output).not.toContain("four arg-3");
 		expect(output).not.toContain("RAW SECRET OUTPUT");
 		hub.dispose();
 	});
@@ -207,18 +207,19 @@ describe("Agent Hub dashboard", () => {
 			contextWindow: 200000,
 			maxTokens: 8192,
 		});
+		let stats = {
+			assistantMessages: 4,
+			toolCalls: 6,
+			cost: 0.5,
+			tokens: { input: 100, output: 20, cacheWrite: 30 },
+		};
 		const session = {
 			model: currentModel,
 			thinkingLevel: "medium",
 			contextUsageRevision: 1,
 			getActiveToolNames: () => ["lsp", "yield"],
 			isAdvisorActive: () => false,
-			getSessionStats: () => ({
-				assistantMessages: 4,
-				toolCalls: 6,
-				cost: 0.5,
-				tokens: { input: 100, output: 20, cacheWrite: 30 },
-			}),
+			getSessionStats: () => stats,
 			getContextUsage: () => ({ tokens: 50000, contextWindow: 200000, percent: 25 }),
 		} as unknown as AgentSession;
 		const registry = new AgentRegistry();
@@ -249,6 +250,15 @@ describe("Agent Hub dashboard", () => {
 		expect(output).toContain("Advisor off · LSP on");
 		expect(output).toContain("Turns 4 · Tokens 150 · Context 25.0%/200K");
 		expect(output).toContain("Tools 6");
+		stats = {
+			assistantMessages: 5,
+			toolCalls: 8,
+			cost: 0.75,
+			tokens: { input: 200, output: 40, cacheWrite: 60 },
+		};
+		const refreshed = rendered(hub);
+		expect(refreshed).toContain("Turns 5 · Tokens 300 · Context 25.0%/200K");
+		expect(refreshed).toContain("Tools 8");
 		hub.dispose();
 	});
 });

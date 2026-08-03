@@ -757,6 +757,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 				end++;
 			}
 		}
+		if (start > 0) lines.push(` ${theme.fg("dim", `… ${start} more`)}`);
 		for (let i = start; i < end; i++) lines.push(...renderedRows[i]!);
 		if (end < this.#rows.length) lines.push(` ${theme.fg("dim", `… ${this.#rows.length - end} more`)}`);
 		if (this.#tab === "active" && idleCount > 0) {
@@ -802,14 +803,6 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			}
 		} catch {}
 
-		let revision = -1;
-		try {
-			revision = session.contextUsageRevision;
-		} catch {}
-		if (this.#liveMetricsCache?.id === ref.id && this.#liveMetricsCache.revision === revision) {
-			Object.assign(view, this.#liveMetricsCache.metrics);
-			return view;
-		}
 		const metrics: AgentRuntimeView = {};
 		try {
 			const stats = session.getSessionStats?.();
@@ -827,7 +820,6 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 				metrics.contextWindow = context.contextWindow;
 			}
 		} catch {}
-		this.#liveMetricsCache = { id: ref.id, revision, metrics };
 		Object.assign(view, metrics);
 		return view;
 	}
@@ -846,7 +838,10 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		];
 		const task = observed?.description ?? progress?.assignment ?? progress?.task;
 		lines.push(` Task: ${task ? sanitizeLine(task, TRUNCATE_LENGTHS.TITLE) : unknown}`);
-		lines.push(` Model ${sanitizeLine(runtime.model ?? unknown)} · Reasoning ${runtime.thinkingLevel ?? unknown}`);
+		const fallbackModel =
+			ref.session?.retryFallbackModel ?? (progress?.resolvedModelIsFallback ? progress.resolvedModel : undefined);
+		const modelLabel = fallbackModel ? `fallback → ${fallbackModel}` : (runtime.model ?? unknown);
+		lines.push(` Model ${sanitizeLine(modelLabel)} · Reasoning ${runtime.thinkingLevel ?? unknown}`);
 		lines.push(` Advisor ${capability(runtime.advisorActive)} · LSP ${capability(runtime.lspEnabled)}`);
 		const context =
 			runtime.contextTokens === undefined
@@ -883,7 +878,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			activity = `retry failed at ${progress.retryFailure.attempt}: ${progress.retryFailure.errorMessage}`;
 		}
 		lines.push(` Activity: ${sanitizeLine(activity ?? unknown, TRUNCATE_LENGTHS.TITLE)}`);
-		const recent = progress.recentTools.slice(-3).reverse();
+		const recent = progress.recentTools?.slice(0, 3) ?? [];
 		if (recent.length === 0) {
 			lines.push(" Recent tools: none");
 		} else {

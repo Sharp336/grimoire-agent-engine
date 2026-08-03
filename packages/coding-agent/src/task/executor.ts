@@ -1666,6 +1666,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			if (nextModel && nextModel !== activeModel) {
 				activeModel = nextModel;
 				progress.resolvedModel = nextModel;
+				progress.resolvedModelIsFallback = undefined;
+				const contextWindow = session.model?.contextWindow;
+				progress.contextWindow = contextWindow && contextWindow > 0 ? contextWindow : undefined;
 				scheduleProgress(true);
 			}
 			if (event.type === "auto_retry_start") {
@@ -3148,6 +3151,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			if (filteredSubagentTools.length !== subagentToolNames.length) {
 				await awaitAbortable(session.setActiveToolsByName(filteredSubagentTools));
 			}
+			progress.lspEnabled = session.getActiveToolNames().includes("lsp");
+			monitor.scheduleProgress(true);
 
 			session.sessionManager.appendSessionInit({
 				systemPrompt: session.agent.state.systemPrompt.join("\n\n"),

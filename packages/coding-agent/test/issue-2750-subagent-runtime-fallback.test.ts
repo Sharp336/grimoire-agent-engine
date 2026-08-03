@@ -7,7 +7,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 
-function model(provider: string, id: string): Model<Api> {
+function model(provider: string, id: string, contextWindow = 128000): Model<Api> {
 	return buildModel({
 		provider,
 		id,
@@ -17,23 +17,33 @@ function model(provider: string, id: string): Model<Api> {
 		reasoning: false,
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 128000,
+		contextWindow,
 		maxTokens: 8192,
 	});
 }
 
 function createYieldingSession(
-	options: { advisorActive?: boolean; initialThinkingLevel?: Effort; thinkingLevel?: Effort } = {},
+	options: {
+		advisorActive?: boolean;
+		initialThinkingLevel?: Effort;
+		thinkingLevel?: Effort;
+		activeToolNames?: string[];
+		initialModel?: Model<Api>;
+		fallbackModel?: Model<Api>;
+		restoredModel?: Model<Api>;
+	} = {},
 ): AgentSession {
 	const listeners: Array<(event: { type: string; [key: string]: unknown }) => void> = [];
+	const activeToolNames = options.activeToolNames ?? ["yield"];
 	const session = {
 		agent: { state: { systemPrompt: ["test"] } },
 		state: { messages: [] },
+		model: options.initialModel,
 		thinkingLevel: options.initialThinkingLevel,
 		extensionRunner: undefined,
 		sessionManager: { appendSessionInit: () => {} },
-		getActiveToolNames: () => ["yield"],
-		getEnabledToolNames: () => ["yield"],
+		getActiveToolNames: () => activeToolNames,
+		getEnabledToolNames: () => activeToolNames,
 		isAdvisorActive: () => options.advisorActive ?? false,
 		setActiveToolsByName: async () => {},
 		setIrcWakeTurnObserver: () => {},
@@ -49,12 +59,17 @@ function createYieldingSession(
 						thinkingLevel: options.thinkingLevel,
 					});
 				}
+				if (options.fallbackModel) session.model = options.fallbackModel;
 				listener({
 					type: "retry_fallback_applied",
 					from: "primary/bad-runtime-model",
 					to: "fallback/working-model",
 					role: "subagent:issue-2750",
 				});
+				if (options.restoredModel) {
+					session.model = options.restoredModel;
+					listener({ type: "auto_retry_end", attempt: 1, success: true });
+				}
 				listener({
 					type: "tool_execution_end",
 					toolCallId: "tool-yield",
@@ -130,6 +145,65 @@ describe("subagent runtime model resolution", () => {
 		expect(inheritedFallbackChain).toEqual(["global/inherited-model"]);
 		expect(result.modelOverride).toEqual(["primary/bad-runtime-model", "fallback/working-model"]);
 		expect(result.resolvedModel).toBe("fallback/working-model");
+	});
+
+	it("clears fallback state and refreshes context limits when the primary model is restored", async () => {
+		const primary = model("primary", "bad-runtime-model", 256000);
+		const fallback = model("fallback", "working-model", 64000);
+		const snapshots: Array<{
+			resolvedModel?: string;
+			resolvedModelIsFallback?: boolean;
+			contextWindow?: number;
+		}> = [];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(
+			async () =>
+				({
+					session: createYieldingSession({
+						initialModel: primary,
+						fallbackModel: fallback,
+						restoredModel: primary,
+					}),
+					extensionsResult: {},
+					setToolUIContext: () => {},
+				}) as never,
+		);
+
+		const result = await runSubprocess({
+			cwd: "/tmp",
+			agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+			task: "work",
+			index: 0,
+			id: "runtime-model-restoration",
+			modelOverride: ["primary/bad-runtime-model", "fallback/working-model"],
+			settings: Settings.isolated(),
+			modelRegistry: {
+				refresh: async () => {},
+				getAvailable: () => [primary, fallback],
+				getApiKey: async () => "test-key",
+			} as never,
+			enableLsp: false,
+			onProgress: progress => {
+				snapshots.push({
+					resolvedModel: progress.resolvedModel,
+					resolvedModelIsFallback: progress.resolvedModelIsFallback,
+					contextWindow: progress.contextWindow,
+				});
+			},
+		});
+
+		expect(snapshots).toContainEqual({
+			resolvedModel: "fallback/working-model",
+			resolvedModelIsFallback: true,
+			contextWindow: 64000,
+		});
+		expect(snapshots).toContainEqual({
+			resolvedModel: "primary/bad-runtime-model",
+			resolvedModelIsFallback: undefined,
+			contextWindow: 256000,
+		});
+		expect(result.resolvedModel).toBe("primary/bad-runtime-model");
+		expect(result.resolvedModelIsFallback).toBeUndefined();
+		expect(result.contextWindow).toBe(256000);
 	});
 
 	it("inherits an explicitly configured default fallback chain for a single subagent model", async () => {
@@ -469,6 +543,39 @@ describe("subagent runtime model resolution", () => {
 		expect(childModelPatternAuthFallback).toBe("openai-codex/gpt-5.5");
 		expect(childModelPatternFallbackRole).toBe("subagent:issue-4421");
 		expect(childModelPatternDefaultFallbackChain).toEqual(["openai-codex/gpt-5.6-sol"]);
+	});
+
+	it("publishes effective LSP availability from the created session tools", async () => {
+		const primary = model("primary", "runtime-model");
+		const snapshots: Array<boolean | undefined> = [];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(
+			async () =>
+				({
+					session: createYieldingSession({ activeToolNames: ["yield"] }),
+					extensionsResult: {},
+					setToolUIContext: () => {},
+				}) as never,
+		);
+
+		await runSubprocess({
+			cwd: "/tmp",
+			agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+			task: "work",
+			index: 0,
+			id: "runtime-lsp-disabled-setting",
+			modelOverride: "primary/runtime-model",
+			settings: Settings.isolated({ "lsp.enabled": false }),
+			modelRegistry: {
+				refresh: async () => {},
+				getAvailable: () => [primary],
+				getApiKey: async () => "test-key",
+			} as never,
+			enableLsp: true,
+			onProgress: progress => snapshots.push(progress.lspEnabled),
+		});
+
+		expect(snapshots).toContain(false);
+		expect(snapshots).not.toContain(true);
 	});
 
 	it("publishes runtime capabilities and reasoning changes in progress snapshots", async () => {
