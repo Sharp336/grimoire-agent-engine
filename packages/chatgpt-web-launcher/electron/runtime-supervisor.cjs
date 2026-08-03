@@ -43,8 +43,9 @@ function validateReadyHealth(health, expected) {
 
 function epochDigest(value) { return createHash("sha256").update(value).digest("hex").slice(0, 16); }
 function exitCodeOf(exit) { return Number.isInteger(exit?.exitCode) && exit.exitCode >= -1 && exit.exitCode <= 255 ? exit.exitCode : null; }
-function loadBundledProviderRuntime() {
-  return Promise.resolve().then(() => require(PROVIDER_RUNTIME_BUNDLE));
+function loadBundledProviderRuntime(_entrypoint = PROVIDER_RUNTIME_ENTRYPOINT, loadModule = require) {
+  if (typeof loadModule !== "function") throw new TypeError("provider_runtime_loader_invalid");
+  return Promise.resolve().then(() => loadModule(PROVIDER_RUNTIME_BUNDLE));
 }
 function createProviderRuntimeEpochFactory(options, loadProvider = loadBundledProviderRuntime) {
   if (!options || typeof options !== "object" || Array.isArray(options)) {
@@ -246,7 +247,9 @@ class RuntimeSupervisor {
 module.exports = {
   DEFAULT_POLICY,
   PROVIDER_RUNTIME_ENTRYPOINT,
+  PROVIDER_RUNTIME_BUNDLE,
   RuntimeSupervisor,
+  loadBundledProviderRuntime,
   createProviderRuntimeEpochFactory,
   defaultTimeout,
   normalizeMode,

@@ -5355,14 +5355,18 @@ fn owner_only_pipe_security() -> Result<PipeSecurity> {
 	if needed == 0 {
 		return Err(last_error("GetTokenInformation size failed"));
 	}
-	let mut token_user = vec![0_u8; needed as usize];
+	// Typed slots round the byte count up while keeping the variable-length result
+	// aligned for TOKEN_USER and its pointer-bearing prefix.
+	let token_user_slots = (needed as usize).div_ceil(size_of::<TOKEN_USER>());
+	let mut token_user = Vec::with_capacity(token_user_slots);
+	token_user.resize_with(token_user_slots, std::mem::MaybeUninit::<TOKEN_USER>::uninit);
 	if unsafe {
 		GetTokenInformation(token.0, TokenUser, token_user.as_mut_ptr().cast(), needed, &mut needed)
 	} == 0
 	{
 		return Err(last_error("GetTokenInformation failed"));
 	}
-	let user = unsafe { &*(token_user.as_ptr() as *const TOKEN_USER) };
+	let user = unsafe { token_user[0].assume_init_ref() };
 	let sid_len = unsafe { GetLengthSid(user.User.Sid) } as usize;
 	if sid_len == 0 {
 		return Err(last_error("GetLengthSid failed"));

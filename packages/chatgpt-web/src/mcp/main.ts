@@ -1,5 +1,6 @@
 import type { Readable, Writable } from "node:stream";
 import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { connectInheritedBroker, openInheritedBrokerBootstrap } from "@oh-my-pi/pi-natives";
 import * as z from "zod/v4";
 import { bootstrapPayloadDigest } from "./bootstrap";
 import type { OmpMcpConnector, OmpMcpTool, OmpTurnBinding } from "./broker";
@@ -49,6 +50,11 @@ interface NativeHandoffModule {
 	openInheritedBrokerBootstrap(): NativeOwnedBootstrapFile | Promise<NativeOwnedBootstrapFile>;
 	connectInheritedBroker(): NativeInheritedConnection | Promise<NativeInheritedConnection>;
 }
+
+const defaultNativeHandoffModule: NativeHandoffModule = {
+	connectInheritedBroker,
+	openInheritedBrokerBootstrap,
+};
 
 interface WireRequest {
 	readonly id: string;
@@ -222,9 +228,8 @@ export interface McpHandoffChildOptions {
 }
 
 export async function runMcpHandoffChild(options: McpHandoffChildOptions = {}): Promise<void> {
-	// Full-mode native peer transport is loaded lazily so browser-only/Pro never load or start it.
-	const nativeModule =
-		options.nativeModule ?? ((await import("@oh-my-pi/pi-natives")) as unknown as NativeHandoffModule);
+	// Full-mode native peer transport starts only when the handoff child runs.
+	const nativeModule = options.nativeModule ?? defaultNativeHandoffModule;
 	if (
 		typeof nativeModule.openInheritedBrokerBootstrap !== "function" ||
 		typeof nativeModule.connectInheritedBroker !== "function"

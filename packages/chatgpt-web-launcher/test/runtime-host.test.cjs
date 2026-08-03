@@ -5,13 +5,22 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const Module = require("node:module");
 const { spawnSync } = require("node:child_process");
 
 let compiledRuntime;
-function loadRuntimeModule(nativeModule) {
+function loadRuntimeModule() {
   if (compiledRuntime) return compiledRuntime;
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "omp-launcher-host-"));
+  const nativePackage = path.join(directory, "node_modules", "@oh-my-pi", "pi-natives");
+  fs.mkdirSync(nativePackage, { recursive: true });
+  fs.writeFileSync(
+    path.join(nativePackage, "package.json"),
+    JSON.stringify({ name: "@oh-my-pi/pi-natives", main: "index.cjs" }),
+  );
+  fs.writeFileSync(
+    path.join(nativePackage, "index.cjs"),
+    "module.exports = { connectLocal() { throw new Error('native test stub'); }, matchesProcessIdentity() { return false; } };",
+  );
   const hostSource = path.resolve(__dirname, "../../chatgpt-web/src/runtime/host.ts");
   const launcherSource = path.resolve(__dirname, "../../chatgpt-web/src/runtime/launcher-host.ts");
   const tsgo = path.resolve(__dirname, "../../../node_modules/@typescript/native-preview/bin/tsgo");
@@ -26,17 +35,8 @@ function loadRuntimeModule(nativeModule) {
     launcherSource,
   ], { encoding: "utf8" });
   assert.equal(compiled.status, 0, `${compiled.stdout}\n${compiled.stderr}`);
-  const originalLoad = Module._load;
-  Module._load = function load(request, parent, isMain) {
-    if (request === "@oh-my-pi/pi-natives") return nativeModule;
-    return originalLoad.call(this, request, parent, isMain);
-  };
-  try {
-    compiledRuntime = require(path.join(directory, "runtime", "launcher-host.js"));
-    return compiledRuntime;
-  } finally {
-    Module._load = originalLoad;
-  }
+  compiledRuntime = require(path.join(directory, "runtime", "launcher-host.js"));
+  return compiledRuntime;
 }
 
 function queue() {
@@ -83,7 +83,7 @@ function runtimeFixture() {
     connectLocal: () => connection,
     matchesProcessIdentity: sameIdentity,
   };
-  const runtime = loadRuntimeModule(nativeModule);
+  const runtime = loadRuntimeModule();
   const authority = { ownerId: "owner", runtimeEpoch: "epoch", lifecycleGeneration: 1, launcherPid: 700, launcherNonce: "launcher-nonce", controlToken: "control-token" };
   const descriptor = { version: 1, ownerId: "owner", runtimeEpoch: "epoch", lifecycleGeneration: 1, launcherPid: 700, launcherNonce: "launcher-nonce", launcherIdentity: peer, endpoint: { kind: "owner-local" } };
   const native = runtime.createLauncherNativeClient(nativeModule);

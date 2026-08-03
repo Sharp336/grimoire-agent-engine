@@ -127,14 +127,24 @@ function createPreloadApi(ipcRenderer) {
   });
 }
 
+function exposePreloadApi(contextBridge, ipcRenderer) {
+  if (!contextBridge || typeof contextBridge.exposeInMainWorld !== "function") {
+    throw new TypeError("invalid_context_bridge");
+  }
+  const api = createPreloadApi(ipcRenderer);
+  contextBridge.exposeInMainWorld("ompChatGptWeb", api);
+  return api;
+}
+
 if (process.versions.electron) {
   const { contextBridge, ipcRenderer } = require("electron");
-  contextBridge.exposeInMainWorld("ompChatGptWeb", createPreloadApi(ipcRenderer));
+  exposePreloadApi(contextBridge, ipcRenderer);
 }
 
 module.exports = Object.freeze({
   DEFAULT_PUBLIC_STATE,
   IPC_CHANNELS,
   createPreloadApi,
+  exposePreloadApi,
   validatePublicState,
 });

@@ -1,5 +1,10 @@
 import { randomBytes } from "node:crypto";
-import type { NativeLocalEndpoint, NativeProcessIdentity } from "@oh-my-pi/pi-natives";
+import {
+	connectLocal,
+	matchesProcessIdentity,
+	type NativeLocalEndpoint,
+	type NativeProcessIdentity,
+} from "@oh-my-pi/pi-natives";
 import type { BrowserLoginRequest, BrowserLoginResult } from "../browser/login-host";
 import type { ChatGptWebRuntimeAdmission } from "../provider/types";
 import {
@@ -67,6 +72,8 @@ interface LauncherNativeModule {
 	matchesProcessIdentity(expected: NativeProcessIdentity, actual: NativeProcessIdentity): boolean;
 }
 
+const launcherNativeModule: LauncherNativeModule = { connectLocal, matchesProcessIdentity };
+
 async function* readNativeConnection(connection: RawNativePeerConnection): AsyncIterable<Uint8Array> {
 	for (;;) {
 		const chunk = await connection.read();
@@ -100,9 +107,8 @@ export function createLauncherNativeClient(nativeModule: LauncherNativeModule): 
 }
 
 export async function loadLauncherNativeClient(): Promise<LauncherNativeClient> {
-	// The native binary is platform-selected and must stay behind the async launcher startup boundary.
-	const nativeModule = await import("@oh-my-pi/pi-natives");
-	return createLauncherNativeClient(nativeModule);
+	// Native connections stay behind the async launcher startup boundary.
+	return createLauncherNativeClient(launcherNativeModule);
 }
 export interface LauncherDescriptor {
 	readonly version: 1;

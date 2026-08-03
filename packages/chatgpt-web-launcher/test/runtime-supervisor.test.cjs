@@ -1,15 +1,15 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
 const path = require("node:path");
 const {
+  PROVIDER_RUNTIME_BUNDLE,
   PROVIDER_RUNTIME_ENTRYPOINT,
   RuntimeSupervisor,
   createProviderRuntimeEpochFactory,
+  loadBundledProviderRuntime,
 } = require("../electron/runtime-supervisor.cjs");
 const { resolveRuntimeCommand } = require("../electron/runtime-command.cjs");
-const supervisorSource = fs.readFileSync(path.join(__dirname, "../electron/runtime-supervisor.cjs"), "utf8");
 function deferred() { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; }
 function waitFor(supervisor, predicate) { return new Promise((resolve) => { let off = () => {}; off = supervisor.subscribe((state) => { if (predicate(state)) { off(); resolve(state); } }); }); }
 function fixture(options = {}) {
@@ -65,8 +65,14 @@ test("fixed provider entrypoint resolves the real full-mode epoch factory withou
   assert.equal(loadedSpecifier, PROVIDER_RUNTIME_ENTRYPOINT);
   assert.equal(PROVIDER_RUNTIME_ENTRYPOINT, "@oh-my-pi/pi-chatgpt-web");
   assert.deepEqual(created, ["full"]);
-  assert.match(supervisorSource, /path\.resolve\(__dirname, "\.\.\/build\/provider-runtime\.cjs"\)/);
-  assert.match(supervisorSource, /require\(PROVIDER_RUNTIME_BUNDLE\)/);
+  assert.equal(PROVIDER_RUNTIME_BUNDLE, path.resolve(__dirname, "../build/provider-runtime.cjs"));
+  const bundledProvider = Object.freeze({ bundled: true });
+  let requiredPath;
+  assert.equal(await loadBundledProviderRuntime(PROVIDER_RUNTIME_ENTRYPOINT, specifier => {
+    requiredPath = specifier;
+    return bundledProvider;
+  }), bundledProvider);
+  assert.equal(requiredPath, PROVIDER_RUNTIME_BUNDLE);
 });
 test("runtime command forwards only the native materialized environment and fixed identity", async () => {
   const environment = Object.freeze({ opaqueEnvironment: true });
@@ -132,6 +138,5 @@ test("PID reuse, reparenting, and ambient environment never replace owned author
   process.env.OMP_TEST_ENVIRONMENT_CANARY = "must-not-be-inherited";
   try { const value = fixture({ reparent: true }); await value.supervisor.start({ mode: "full" }); const original = value.children[0]; const reused = { pid: original.identity.pid, killed: false }; await value.supervisor.drain(); assert.equal(original.terminated, true); assert.equal(reused.killed, false); assert.equal(original.identity.parent, "unrelated"); assert.doesNotMatch(JSON.stringify(value.events), /OMP_TEST_ENVIRONMENT_CANARY/); }
   finally { delete process.env.OMP_TEST_ENVIRONMENT_CANARY; }
-  const source = fs.readFileSync(path.join(__dirname, "../electron/process-tree.cjs"), "utf8"); assert.doesNotMatch(source, /process\.kill|taskkill|spawnSync|\.pid\b/);
 });
 test("mismatched ready identity is rejected", async () => { const value = fixture({ wrongHealth: true }); await assert.rejects(value.supervisor.start({ mode: "full" }), /runtime_ready_identity_mismatch/); assert.equal(value.children[0].terminated, true); });

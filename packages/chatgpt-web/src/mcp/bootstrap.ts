@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import * as defaultNativeModule from "@oh-my-pi/pi-natives";
 import type { NativeLocalEndpointCapability, PiNativeTunnelCapabilityResolver } from "./tunnel";
 /** Opaque native launch profile. Only the native bridge can create a usable instance. */
 export interface NativeLaunchEnvironment {
@@ -637,13 +638,13 @@ export class NativeOmpBootstrapAuthority implements OmpBootstrapAuthority, PiNat
 	}
 }
 
-/** Uses an injected native bridge when supplied; direct development callers retain the lazy fallback. */
+/** Uses an injected native bridge when supplied; direct development callers use the package bridge. */
 export async function createNativeOmpBootstrapAuthority(
 	runtimeRoot: NativeOwnedBootstrapFile,
 	injectedNativeModule?: unknown,
 ): Promise<NativeOmpBootstrapAuthority> {
 	const nativeModule = (
-		injectedNativeModule === undefined ? await import("@oh-my-pi/pi-natives") : injectedNativeModule
+		injectedNativeModule === undefined ? defaultNativeModule : injectedNativeModule
 	) as Partial<NativeBootstrapModule>;
 	if (
 		typeof nativeModule.NativeLocalListener?.create !== "function" ||

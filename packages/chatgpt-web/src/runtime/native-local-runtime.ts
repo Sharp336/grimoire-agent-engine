@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import path from "node:path";
+import * as defaultNativeModule from "@oh-my-pi/pi-natives";
 import { readChatGptWebLoginStatus } from "../browser/login";
 import type { BrowserLoginRequest, LoginHost } from "../browser/login-host";
 import {
@@ -96,8 +97,8 @@ function unavailable(code: NativeLocalRuntimeUnavailableCode): NativeLocalRuntim
 }
 
 async function defaultNativeModuleLoader(): Promise<unknown> {
-	// Development/package entrypoints need lazy platform selection; packaged launchers inject their verified module.
-	return import("@oh-my-pi/pi-natives");
+	// Capability initialization stays lazy; packaged launchers can inject their verified module.
+	return defaultNativeModule;
 }
 function isNativeOwnedFile(value: unknown): value is NativeOwnedFile {
 	return (
@@ -275,8 +276,8 @@ async function createNativeFullRuntimeResources(
 }
 
 /**
- * Lazily binds package-owned runtime contracts to native capabilities. The native addon is never
- * imported by constructing this object, and a missing capability is a stable fail-closed error.
+ * Lazily initializes package-owned runtime capabilities. Constructing the bootstrap does not open
+ * native files, start browser processes, or create local transports, and missing capabilities fail closed.
  */
 export function createNativeLocalRuntimeBootstrap(
 	options: NativeLocalRuntimeBootstrapOptions = {},

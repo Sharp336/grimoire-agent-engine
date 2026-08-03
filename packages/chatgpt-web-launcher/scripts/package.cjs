@@ -46,6 +46,22 @@ function expectedArtifactNames(platform = process.platform, arch = process.arch)
 	return target.extensions.map(extension => `omp-chatgpt-web-${manifest.version}-${target.os}-${arch}.${extension}`);
 }
 
+function createBuilderArguments(platform, arch, staging) {
+	const target = TARGETS[platform];
+	if (!target || !ARCHES.has(arch)) throw new Error("unsupported_package_tuple");
+	const artifactTemplate = `omp-chatgpt-web-${manifest.version}-${target.os}-${arch}.\${ext}`;
+	return Object.freeze([
+		builderCli,
+		target.flag,
+		`--${arch}`,
+		"--publish",
+		"never",
+		`--config.directories.output=${staging}`,
+		`--config.artifactName=${artifactTemplate}`,
+		...(target.flag === "--mac" ? ["--config.mac.identity=-"] : []),
+	]);
+}
+
 function validateInputs() {
 	if (manifest.name !== "@oh-my-pi/pi-chatgpt-web-launcher" || manifest.version !== "17.2.5" || manifest.private !== true) {
 		throw new Error("launcher_package_identity_mismatch");
@@ -73,17 +89,8 @@ function packageLauncher(requestedFlag = process.argv[2]) {
 	validateInputs();
 	const staging = fs.mkdtempSync(path.join(os.tmpdir(), "omp-chatgpt-web-package-"));
 	try {
-		const artifactTemplate = `omp-chatgpt-web-${manifest.version}-${target.os}-${process.arch}.\${ext}`;
-		const result = spawnSync(process.execPath, [
-			builderCli,
-			target.flag,
-			`--${process.arch}`,
-			"--publish",
-			"never",
-			`--config.directories.output=${staging}`,
-			`--config.artifactName=${artifactTemplate}`,
-			...(target.flag === "--mac" ? ["--config.mac.identity=-"] : []),
-		], {
+		const builderArguments = createBuilderArguments(process.platform, process.arch, staging);
+		const result = spawnSync(process.execPath, builderArguments, {
 			cwd: launcherRoot,
 			env: sanitizedBuildEnvironment(),
 			stdio: "ignore",
@@ -118,6 +125,7 @@ function packageLauncher(requestedFlag = process.argv[2]) {
 module.exports = {
 	TARGETS,
 	sanitizedBuildEnvironment,
+	createBuilderArguments,
 	expectedArtifactNames,
 	packageLauncher,
 };

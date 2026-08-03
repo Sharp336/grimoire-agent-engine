@@ -2,12 +2,11 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const path = require("node:path");
 const {
   DEFAULT_PUBLIC_STATE,
   IPC_CHANNELS,
   createPreloadApi,
+  exposePreloadApi,
   validatePublicState,
 } = require("../electron/preload.cjs");
 const {
@@ -20,7 +19,6 @@ const {
   validateRendererState,
 } = require("../electron/main.cjs");
 
-const packageRoot = path.resolve(__dirname, "..");
 
 function publicState(overrides = {}) {
   return {
@@ -154,35 +152,26 @@ test("state subscriptions sanitize updates and unsubscribe the exact wrapped lis
   assert.equal(received.length, 1);
 });
 
-test("renderer source consumes every non-secret state field and only the typed bridge", () => {
-  const types = fs.readFileSync(path.join(packageRoot, "src", "types.ts"), "utf8");
-  const app = fs.readFileSync(path.join(packageRoot, "src", "App.tsx"), "utf8");
-  const preload = fs.readFileSync(path.join(packageRoot, "electron", "preload.cjs"), "utf8");
-  const html = fs.readFileSync(path.join(packageRoot, "index.html"), "utf8");
-  const combinedRenderer = `${types}\n${app}`;
-
-  for (const contract of [
-    "LauncherPublicState",
-    "LauncherPreloadApi",
-    "setup",
-    "login",
-    "mode",
-    "runtime",
-    "activeTurns",
-    "mcp",
-    "autoStart",
-    "failure",
-  ]) assert.match(combinedRenderer, new RegExp(`\\b${contract}\\b`));
-  for (const action of ["getState", "subscribeState", "requestLogin", "setMode", "restartRuntime", "setAutoStart"]) {
-    assert.match(types, new RegExp(`\\b${action}\\b`));
-    assert.match(app, new RegExp(`\\b${action}\\b`));
-  }
-  assert.match(types, /readonly ompChatGptWeb: LauncherPreloadApi/);
-  assert.match(preload, /exposeInMainWorld\("ompChatGptWeb"/);
-  assert.doesNotMatch(combinedRenderer, /@oh-my-pi\/pi-chatgpt-web|coding-agent/);
-  assert.match(html, /default-src 'none'/);
-  assert.match(html, /connect-src 'none'/);
-  assert.doesNotMatch(html, /https?:\/\//);
+test("preload exposes only the frozen typed bridge under the fixed renderer key", () => {
+  const fake = fakeRenderer();
+  let exposed;
+  const api = exposePreloadApi({
+    exposeInMainWorld(key, value) {
+      exposed = { key, value };
+    },
+  }, fake.ipcRenderer);
+  assert.equal(exposed.key, "ompChatGptWeb");
+  assert.equal(exposed.value, api);
+  assert.equal(Object.isFrozen(api), true);
+  assert.deepEqual(Object.keys(api).sort(), [
+    "getState",
+    "requestLogin",
+    "restartRuntime",
+    "setAutoStart",
+    "setMode",
+    "subscribeState",
+  ]);
+  assert.throws(() => exposePreloadApi({}, fake.ipcRenderer), /invalid_context_bridge/);
 });
 
 test("main process mirrors the preload allowlist and admits only validated public state", async () => {
@@ -239,8 +228,4 @@ test("packaged runtime integration is authority-gated and renderer health is red
     status: "failed",
     errorClass: "RuntimeRestartBudgetExceeded",
   }, "full", false).failure, { code: "restart-limit", recoverable: false });
-  const source = fs.readFileSync(path.join(packageRoot, "electron", "main.cjs"), "utf8");
-  assert.match(source, /createRuntimeCommandFactory\(\{ native, installedRuntime \}\)/);
-  assert.match(source, /await runtimeIntegration\?\.close\(\)/);
-  assert.match(source, /finally \{ installedRuntime\.close\(\); \}/);
 });

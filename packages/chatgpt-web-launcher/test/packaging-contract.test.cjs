@@ -3,14 +3,71 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 
 const launcherRoot = path.resolve(__dirname, "..");
 const manifest = JSON.parse(fs.readFileSync(path.join(launcherRoot, "package.json"), "utf8"));
-const prepareSource = fs.readFileSync(path.join(launcherRoot, "scripts", "prepare-runtime.cjs"), "utf8");
-const packageSource = fs.readFileSync(path.join(launcherRoot, "scripts", "package.cjs"), "utf8");
-const smokeSource = fs.readFileSync(path.join(launcherRoot, "scripts", "smoke-package.cjs"), "utf8");
-const mainSource = fs.readFileSync(path.join(launcherRoot, "electron", "main.cjs"), "utf8");
+const {
+	TARGETS,
+	createBuilderArguments,
+	expectedArtifactNames,
+	packageLauncher,
+	sanitizedBuildEnvironment,
+} = require("../scripts/package.cjs");
+const {
+	buildEnvironment,
+	copyProviderNotices,
+	launcherRoot: preparedLauncherRoot,
+	ompRoot,
+	providerRoot,
+} = require("../scripts/prepare-runtime.cjs");
+const {
+	READY_MARKER,
+	assertAbsoluteNormalized,
+	assertSafeOutput,
+	readReadyMarker,
+	smokeEnvironment,
+} = require("../scripts/smoke-package.cjs");
+const { SMOKE_READY_MARKER, runSmokeMode } = require("../electron/main.cjs");
+
+function temporaryDirectory(t) {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-launcher-contract-"));
+	t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+	return root;
+}
+
+function runtimeMetadata() {
+	const executable = process.platform === "win32" ? "runtime/bun.exe" : "runtime/bun";
+	const addon = `app/node_modules/@oh-my-pi/pi-natives-${process.platform}-${process.arch}/addon.node`;
+	const digest = "a".repeat(64);
+	return {
+		manifest: {
+			schemaVersion: 1,
+			appVersion: manifest.version,
+			platform: process.platform,
+			arch: process.arch,
+			entrypoints: { cli: "app/cli.js", mcp: "app/mcp-main.js" },
+			runtime: { kind: "bun", version: "1.3.14", executable },
+			native: {
+				package: "@oh-my-pi/pi-natives",
+				version: manifest.version,
+				platformTag: `${process.platform}-${process.arch}`,
+				napiAbi: 10,
+				packageRoot: "app/node_modules/@oh-my-pi/pi-natives",
+				leafRoot: `app/node_modules/@oh-my-pi/pi-natives-${process.platform}-${process.arch}`,
+				addon,
+				sha256: digest,
+			},
+			externals: ["playwright-core", "@modelcontextprotocol/sdk", "@oh-my-pi/pi-natives"],
+		},
+		checksums: {
+			algorithm: "sha256",
+			files: { [executable]: digest, "app/cli.js": digest, "app/mcp-main.js": digest, [addon]: digest },
+		},
+		metadataDigest: "b".repeat(64),
+	};
+}
 
 test("launcher metadata is private and OMP-owned", () => {
 	assert.equal(manifest.name, "@oh-my-pi/pi-chatgpt-web-launcher");
@@ -23,15 +80,28 @@ test("launcher metadata is private and OMP-owned", () => {
 	assert.equal(manifest.publishConfig, undefined);
 });
 
-test("package scripts prepare deterministic runtime and never publish", () => {
+test("package scripts prepare deterministic runtime and never publish", t => {
+	const staging = path.join(temporaryDirectory(t), "staging");
 	assert.equal(manifest.scripts["prepare:runtime"], "bun scripts/prepare-runtime.cjs");
 	assert.equal(manifest.scripts["build:runtime"], "bun scripts/prepare-runtime.cjs");
 	assert.equal(manifest.scripts["smoke:package"], "node scripts/smoke-package.cjs");
-	assert.match(manifest.scripts.package, /bun run build:runtime/);
-	assert.doesNotMatch(JSON.stringify(manifest.scripts), /npm publish|bun publish|electron-builder.*--publish always/i);
-	assert.match(packageSource, /"--publish",\s*\n\s*"never"/);
-	assert.match(packageSource, /electron-builder\/out\/cli\/cli\.js/);
-	assert.match(packageSource, /cross_packaging_forbidden/);
+	assert.equal(manifest.scripts.package, "bun run build && bun run build:runtime && node scripts/package.cjs");
+	for (const [platform, target] of Object.entries(TARGETS)) {
+		const args = createBuilderArguments(platform, "x64", staging);
+		assert.equal(args[0], require.resolve("electron-builder/out/cli/cli.js", { paths: [launcherRoot] }));
+		assert.equal(args[1], target.flag);
+		assert.ok(args.includes("--x64"));
+		assert.deepEqual(args.slice(args.indexOf("--publish"), args.indexOf("--publish") + 2), ["--publish", "never"]);
+		assert.ok(args.includes(`--config.directories.output=${staging}`));
+		for (const name of expectedArtifactNames(platform, "x64")) assert.match(name, /^omp-chatgpt-web-17\.2\.5-/);
+	}
+	const forbiddenFlag = Object.values(TARGETS).find(target => target.flag !== TARGETS[process.platform].flag).flag;
+	assert.throws(() => packageLauncher(forbiddenFlag), /cross_packaging_forbidden/);
+	assert.deepEqual({ ...sanitizedBuildEnvironment({ PATH: "safe", SECRET: "canary", NODE_OPTIONS: "--require=evil" }) }, {
+		PATH: "safe",
+		CSC_IDENTITY_AUTO_DISCOVERY: "false",
+		ELECTRON_BUILDER_ALLOW_UNRESOLVED_DEPENDENCIES: "false",
+	});
 });
 
 test("Electron targets, icons, AppImage, and ASAR resource paths are fixed", () => {
@@ -53,29 +123,76 @@ test("Electron targets, icons, AppImage, and ASAR resource paths are fixed", () 
 	assert.equal(manifest.build.nsis.runAfterFinish, false);
 });
 
-test("runtime preparation uses explicit roots and exact notices", () => {
-	assert.match(prepareSource, /const launcherRoot = path\.resolve\(__dirname, "\.\."\)/);
-	assert.match(prepareSource, /const ompRoot = path\.resolve\(launcherRoot, "\.\.\/\.\."\)/);
-	assert.match(prepareSource, /const providerRoot = path\.join\(ompRoot, "packages", "chatgpt-web"\)/);
-	assert.match(prepareSource, /\["NOTICE\.md", "OpenCodex-MIT\.txt"\]/);
-	assert.match(prepareSource, /Bun-runtime\.md/);
-	assert.doesNotMatch(prepareSource, /generate-third-party-notices|env:\s*process\.env/);
+test("runtime preparation uses fixed roots, a minimal environment, and exact notices", t => {
+	assert.equal(preparedLauncherRoot, launcherRoot);
+	assert.equal(ompRoot, path.resolve(launcherRoot, "../.."));
+	assert.equal(providerRoot, path.join(ompRoot, "packages", "chatgpt-web"));
+	assert.deepEqual(buildEnvironment(), {
+		OMP_CHATGPT_WEB_BUILD: "1",
+		PATH: path.dirname(process.execPath),
+	});
+	const output = path.join(temporaryDirectory(t), "runtime");
+	fs.mkdirSync(output, { recursive: true });
+	fs.writeFileSync(path.join(output, "manifest.json"), JSON.stringify({ runtime: { kind: "external" } }));
+	copyProviderNotices(output);
+	assert.deepEqual(fs.readdirSync(path.join(output, "LICENSES")).sort(), ["NOTICE.md", "OpenCodex-MIT.txt"]);
+	for (const name of ["NOTICE.md", "OpenCodex-MIT.txt"]) {
+		assert.deepEqual(
+			fs.readFileSync(path.join(output, "LICENSES", name)),
+			fs.readFileSync(path.join(providerRoot, "LICENSES", name)),
+		);
+	}
 });
 
-test("package smoke uses an isolated app root and an allowlisted readiness event", () => {
-	assert.match(smokeSource, /const READY_MARKER = "OMP_CHATGPT_WEB_SMOKE_READY"/);
-	assert.match(smokeSource, /OMP_CHATGPT_WEB_APP_DIR/);
-	assert.match(smokeSource, /OMP_CHATGPT_WEB_SMOKE_MARKER/);
-	assert.match(smokeSource, /"--smoke"/);
-	assert.match(mainSource, /const SMOKE_READY_MARKER = "OMP_CHATGPT_WEB_SMOKE_READY"/);
-	assert.match(mainSource, /ensurePackagedRuntime/);
-	assert.match(mainSource, /installed\.close\(\)/);
-	assert.doesNotMatch(mainSource, /console\.(?:log|error)|process\.stderr/);
-	assert.match(smokeSource, /assertAbsoluteNormalized\(appDir\)/);
-	assert.match(smokeSource, /runtime", "versions"/);
-	assert.match(smokeSource, /packaged_smoke_unclean_shutdown/);
-	assert.match(smokeSource, /package_smoke_output_leak/);
-	assert.match(smokeSource, /fs\.rmSync\(scratch, \{ recursive: true, force: true \}\)/);
-	assert.doesNotMatch(smokeSource, /\.\.\.process\.env/);
-	assert.doesNotMatch(smokeSource, /https?:\/\/[A-Za-z0-9]/);
+test("package smoke isolates state, allowlists output, and closes verified runtime ownership", async t => {
+	const root = temporaryDirectory(t);
+	const appDir = path.join(root, "app-data");
+	const markerPath = path.join(appDir, "ready.json");
+	const resourcesPath = path.join(root, "resources");
+	fs.mkdirSync(appDir, { recursive: true });
+	fs.mkdirSync(resourcesPath, { recursive: true });
+	assert.equal(READY_MARKER, "OMP_CHATGPT_WEB_SMOKE_READY");
+	assert.equal(SMOKE_READY_MARKER, READY_MARKER);
+	assert.equal(assertAbsoluteNormalized(appDir), appDir);
+	assert.throws(() => assertAbsoluteNormalized("relative"), /invalid_smoke_path/);
+	const env = smokeEnvironment(appDir, markerPath, { PATH: "safe", SECRET: "canary", NODE_OPTIONS: "--require=evil" });
+	assert.deepEqual({ ...env }, {
+		PATH: "safe",
+		HOME: appDir,
+		OMP_CHATGPT_WEB_APP_DIR: appDir,
+		OMP_CHATGPT_WEB_SMOKE_MARKER: markerPath,
+		OMP_CHATGPT_WEB_SMOKE: "1",
+	});
+	assert.doesNotThrow(() => assertSafeOutput(`${READY_MARKER}\n`, "", [root]));
+	assert.throws(() => assertSafeOutput(`${READY_MARKER}\nhttps://example.invalid\n`, "", []), /package_smoke_output_leak/);
+
+	let sourceClosed = 0;
+	let installedClosed = 0;
+	const source = { close() { sourceClosed += 1; } };
+	const installed = { close() { installedClosed += 1; } };
+	const output = [];
+	await runSmokeMode({
+		app: { isPackaged: true, getVersion: () => manifest.version },
+		native: {
+			async openRuntimeBundle() { return source; },
+			async verifyRuntimeBundle() { return runtimeMetadata(); },
+			async installRuntimeBundleAtomic() { return installed; },
+		},
+		appDir,
+		markerPath,
+		resourcesPath,
+		writeOutput(line) { output.push(line); },
+	});
+	assert.deepEqual(output, [`${READY_MARKER}\n`]);
+	assert.equal(sourceClosed, 1);
+	assert.equal(installedClosed, 1);
+	assert.deepEqual(readReadyMarker(markerPath), {
+		marker: READY_MARKER,
+		ready: true,
+		packaged: true,
+		runtimeVerified: true,
+		version: manifest.version,
+		platform: process.platform,
+		arch: process.arch,
+	});
 });

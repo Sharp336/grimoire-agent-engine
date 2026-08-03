@@ -54,6 +54,36 @@ export function resolveBundleRoots(scriptDirectory = import.meta.dir): BundleRoo
 	return Object.freeze({ launcherRoot, ompRoot, providerRoot });
 }
 
+export function resolveRuntimeEntrypoints(scriptDirectory = import.meta.dir) {
+	const roots = resolveBundleRoots(scriptDirectory);
+	return Object.freeze({
+		cli: join(roots.providerRoot, "src", "cli.ts"),
+		mcp: join(roots.providerRoot, "src", "mcp", "main.ts"),
+		providerLoader: join(roots.launcherRoot, "scripts", "provider-runtime-entry.ts"),
+	});
+}
+
+export function createBunBuildOptions(
+	entrypoint: string,
+	outdir: string,
+	naming: string,
+	target: "bun" | "node",
+	format: "esm" | "cjs",
+) {
+	return {
+		entrypoints: [entrypoint],
+		target,
+		format,
+		minify: true,
+		sourcemap: "none" as const,
+		splitting: false,
+		packages: "bundle" as const,
+		external: [...RUNTIME_EXTERNALS],
+		outdir,
+		naming,
+	};
+}
+
 export function selectNativeTarget(platform: string, arch: string): { tag: string; platform: string; arch: string } {
 	const tag = `${platform}-${arch}`;
 	const target = NATIVE_TARGETS[tag as keyof typeof NATIVE_TARGETS] as NativeTarget | undefined;
@@ -336,41 +366,20 @@ function validateOutput(output: string, launcherRoot: string): string {
 }
 
 async function bundleEntrypoint(entrypoint: string, outdir: string, naming: string): Promise<void> {
-	const result = await Bun.build({
-		entrypoints: [entrypoint],
-		target: "bun",
-		format: "esm",
-		minify: true,
-		sourcemap: "none",
-		splitting: false,
-		packages: "bundle",
-		external: [...RUNTIME_EXTERNALS],
-		outdir,
-		naming,
-	});
+	const result = await Bun.build(createBunBuildOptions(entrypoint, outdir, naming, "bun", "esm"));
 	if (!result.success) throw new Error("runtime_bundle_build_failed");
 }
 
-async function bundleProviderLoader(launcherRoot: string): Promise<void> {
+async function bundleProviderLoader(entrypoint: string, launcherRoot: string): Promise<void> {
 	const outputRoot = join(launcherRoot, "build");
 	ensureDirectory(outputRoot);
-	const result = await Bun.build({
-		entrypoints: [join(launcherRoot, "scripts", "provider-runtime-entry.ts")],
-		target: "node",
-		format: "cjs",
-		minify: true,
-		sourcemap: "none",
-		splitting: false,
-		packages: "bundle",
-		external: [...RUNTIME_EXTERNALS],
-		outdir: outputRoot,
-		naming: "provider-runtime.cjs",
-	});
+	const result = await Bun.build(createBunBuildOptions(entrypoint, outputRoot, "provider-runtime.cjs", "node", "cjs"));
 	if (!result.success) throw new Error("provider_runtime_loader_build_failed");
 }
 
 export async function buildRuntimeBundle(options: BuildRuntimeOptions = {}): Promise<string> {
 	const { launcherRoot, ompRoot, providerRoot } = resolveBundleRoots();
+	const entrypoints = resolveRuntimeEntrypoints();
 	const launcherManifest = jsonFile(join(launcherRoot, "package.json"));
 	const providerManifest = jsonFile(join(providerRoot, "package.json"));
 	if (
@@ -390,9 +399,9 @@ export async function buildRuntimeBundle(options: BuildRuntimeOptions = {}): Pro
 	const appRoot = join(output, "app");
 	const appNodeModules = join(appRoot, "node_modules");
 	ensureDirectory(appNodeModules);
-	await bundleEntrypoint(join(providerRoot, "src", "cli.ts"), appRoot, "cli.js");
-	await bundleEntrypoint(join(providerRoot, "src", "mcp", "main.ts"), appRoot, "mcp-main.js");
-	await bundleProviderLoader(launcherRoot);
+	await bundleEntrypoint(entrypoints.cli, appRoot, "cli.js");
+	await bundleEntrypoint(entrypoints.mcp, appRoot, "mcp-main.js");
+	await bundleProviderLoader(entrypoints.providerLoader, launcherRoot);
 	const externalLock = copyExternalClosure(join(ompRoot, "node_modules"), appNodeModules, [
 		"playwright-core",
 		"@modelcontextprotocol/sdk",

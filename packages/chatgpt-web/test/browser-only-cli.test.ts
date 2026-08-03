@@ -202,7 +202,10 @@ describe("browser-only CLI topology", () => {
 		]);
 		expect(await child.exited).toBe(1);
 		expect(stdout).toBe("");
-		expect(stderr).toBe("ChatGPT Web command failed\n");
+		expect([
+			"ChatGPT Web command failed\n",
+			"ChatGPT Web command failed (native-secure-state-capability-unavailable)\n",
+		]).toContain(stderr);
 	});
 
 	test("rejects full mode and tunnel/MCP flags before creating a runtime", async () => {

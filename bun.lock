@@ -86,6 +86,7 @@
         "@oh-my-pi/pi-ai": "catalog:",
         "@oh-my-pi/pi-catalog": "catalog:",
         "@oh-my-pi/pi-natives": "catalog:",
+        "@oh-my-pi/pi-utils": "catalog:",
         "fflate": "catalog:",
         "playwright-core": "1.62.1",
         "turndown": "catalog:",

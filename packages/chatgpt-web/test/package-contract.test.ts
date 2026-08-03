@@ -108,7 +108,7 @@ describe("package boundary", () => {
 		expect("private" in manifest).toBe(false);
 		expect(manifest.bin).toEqual({ "chatgpt-web": "./src/cli.ts" });
 		expect(manifest.engines).toEqual({ bun: ">=1.3.14" });
-		expect(manifest.files).toEqual(["src", "README.md", "LICENSES"]);
+		expect(manifest.files).toEqual(["src", "README.md", "CHANGELOG.md", "LICENSES"]);
 		expect(manifest.exports).toEqual({
 			".": { types: "./src/index.ts", import: "./src/index.ts" },
 			"./extension": { types: "./src/extension.ts", import: "./src/extension.ts" },
@@ -130,6 +130,7 @@ describe("package boundary", () => {
 			"@oh-my-pi/pi-ai": "catalog:",
 			"@oh-my-pi/pi-catalog": "catalog:",
 			"@oh-my-pi/pi-natives": "catalog:",
+			"@oh-my-pi/pi-utils": "catalog:",
 			fflate: "catalog:",
 			"playwright-core": "1.62.1",
 			turndown: "catalog:",
@@ -183,6 +184,7 @@ describe("package boundary", () => {
 				"@oh-my-pi/pi-ai": "catalog:",
 				"@oh-my-pi/pi-catalog": "catalog:",
 				"@oh-my-pi/pi-natives": "catalog:",
+				"@oh-my-pi/pi-utils": "catalog:",
 				fflate: "catalog:",
 				"playwright-core": "1.62.1",
 				turndown: "catalog:",

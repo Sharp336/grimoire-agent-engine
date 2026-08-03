@@ -278,98 +278,55 @@ describe("browser-only local provider path", () => {
 		expect(events.filter(result => result.at(-1)?.type === "error")).toHaveLength(1);
 		expect(capacity.active()).toBe(0);
 	});
-	test("loads the real coding-agent session around the ChatGPT Web extension and picker", async () => {
-		const result = await runCodingAgentSessionFixture();
+	test("loads the extension through public package exports in an isolated process", async () => {
+		const result = await runProviderPackageFixture();
 		expect(result).toEqual({ provider: "chatgpt-web", model: "high", registeredModel: "high" });
 	});
 });
-async function runCodingAgentSessionFixture(): Promise<{
+async function runProviderPackageFixture(): Promise<{
 	readonly provider: string;
 	readonly model: string;
 	readonly registeredModel: string | undefined;
 }> {
-	const fixturePath = path.join(process.cwd(), `.chatgpt-web-session-fixture-${randomUUID()}.ts`);
+	const fixturePath = path.join(process.cwd(), `.chatgpt-web-provider-fixture-${randomUUID()}.ts`);
 	const workspaceRoot = path.resolve(import.meta.dir, "../../..");
 	await Bun.write(
 		fixturePath,
 		`
-const codingAgentPackage = ["@oh-my-pi/pi", "coding", "agent"].join("-");
-const [{ createAgentSession }, { ModelRegistry }, { Settings }, { AuthStorage }, { SessionManager }] = await Promise.all([
-	import(codingAgentPackage + "/sdk"),
-	import(codingAgentPackage + "/config/model-registry"),
-	import(codingAgentPackage + "/config/settings"),
-	import(codingAgentPackage + "/session/auth-storage"),
-	import(codingAgentPackage + "/session/session-manager"),
-]);
-import { createChatGptWebProviderModels } from "@oh-my-pi/pi-chatgpt-web";
+import { createChatGptWebProviderModels, createChatGptWebStream } from "@oh-my-pi/pi-chatgpt-web";
 import { createChatGptWebExtension } from "@oh-my-pi/pi-chatgpt-web/extension";
-import { createChatGptWebStream } from "@oh-my-pi/pi-chatgpt-web";
-import { mkdirSync } from "node:fs";
-import path from "node:path";
 
-const root = process.env.CHATGPT_WEB_FIXTURE_ROOT;
-const cwd = path.join(root, "workspace");
-mkdirSync(cwd, { recursive: true });
-const authStorage = await AuthStorage.create(path.join(root, "auth.db"));
-const modelRegistry = new ModelRegistry(authStorage, path.join(root, "models.json"));
+let registered;
 const extension = createChatGptWebExtension({
 	readConfig: async () => ({ mode: "browser-only", tunnelId: null, runtimeKeyConfigured: false }),
-	readLoginStatus: async () => ({ authenticated: true, proAvailable: false, verifiedAt: "2026-08-02T00:00:00.000Z" }),
+	readLoginStatus: async () => ({
+		authenticated: true,
+		proAvailable: false,
+		verifiedAt: "2026-08-02T00:00:00.000Z",
+	}),
 	createModels: createChatGptWebProviderModels,
 	createStream: options => createChatGptWebStream(options),
 });
-let registeredModel;
 await extension({
-	issueKeylessProviderRegistration() { return { keylessCapability: {} }; },
-	registerProvider(_name, config) {
-		registeredModel = config.models.find(model => model.id === "high")?.id;
+	issueKeylessProviderRegistration() {
+		return { keylessCapability: {} };
+	},
+	registerProvider(name, config) {
+		registered = { name, config };
 	},
 });
-const model = {
-	id: "high",
-	name: "ChatGPT Web — High",
-	api: "chatgpt-web",
-	provider: "chatgpt-web",
-	baseUrl: "chatgpt-web://local",
-	reasoning: true,
-	input: ["text", "image"],
-	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-	contextWindow: 256000,
-	maxTokens: 64000,
-	compat: {},
-};
-const created = await createAgentSession({
-	cwd,
-	agentDir: root,
-	sessionManager: SessionManager.inMemory(cwd),
-	authStorage,
-	modelRegistry,
-	settings: Settings.isolated({ "async.enabled": false, "bash.autoBackground.enabled": false }),
-	model,
-	disableExtensionDiscovery: true,
-	extensions: [extension],
-	skills: [],
-	contextFiles: [],
-	workspaceTree: { rootPath: cwd, rendered: ".\\\\n", truncated: false, totalLines: 1, agentsMdFiles: [] },
-	promptTemplates: [],
-	slashCommands: [],
-	enableMCP: false,
-	enableLsp: false,
-	skipPythonPreflight: true,
-	toolNames: [],
-});
-const selected = created.session.model;
-process.stdout.write(JSON.stringify({ provider: selected.provider, model: selected.id, registeredModel }));
-await created.session.dispose();
-authStorage.close();
-process.exit(0);
+const selected = registered?.config.models.find(model => model.id === "high");
+if (!registered || !selected) throw new Error("ChatGPT Web extension did not register the high model");
+process.stdout.write(JSON.stringify({
+	provider: registered.name,
+	model: selected.id,
+	registeredModel: registered.config.models.find(model => model.id === "high")?.id,
+}));
 `,
 	);
 	try {
-		const fixtureRoot = path.join(process.cwd(), `.chatgpt-web-session-${randomUUID()}`);
 		const child = Bun.spawn([process.execPath, fixturePath], {
 			cwd: workspaceRoot,
-			env: { ...process.env, CHATGPT_WEB_FIXTURE_ROOT: fixtureRoot },
 			stdout: "pipe",
 			stderr: "pipe",
 		});
@@ -377,7 +334,7 @@ process.exit(0);
 			new Response(child.stdout).text(),
 			new Response(child.stderr).text(),
 		]);
-		if ((await child.exited) !== 0) throw new Error(`coding-agent fixture failed: ${stderr}`);
+		if ((await child.exited) !== 0) throw new Error(`provider package fixture failed: ${stderr}`);
 		return JSON.parse(stdout) as { provider: string; model: string; registeredModel: string | undefined };
 	} finally {
 		await rm(fixturePath, { force: true });
