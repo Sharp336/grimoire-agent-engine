@@ -130,6 +130,7 @@ export function buildAnthropicCompat(spec: ModelSpec<"anthropic-messages">): Res
 	// (issue #4192).
 	const isZenmux = modelMatchesHost(spec, "zenmux");
 	const requiresThinkingEnabled = modelMatchesHost(spec, "moonshotNative") && matchesKimiMandatoryThinkingModel(spec);
+	const isVercelGateway = modelMatchesHost(spec, "vercelAIGateway");
 	const isAzure = isAzureAnthropicRoute(baseUrl);
 	const signingEndpoint = official || isCopilot || isZenmux || isAnthropicSigningProxyUrl(baseUrl);
 	const compat: ResolvedAnthropicCompat = {
@@ -173,6 +174,10 @@ export function buildAnthropicCompat(spec: ModelSpec<"anthropic-messages">): Res
 		replayUnsignedThinking: !signingEndpoint && (Boolean(spec.reasoning) || modelMatchesHost(spec, "deepseekFamily")),
 		escapeBuiltinToolNames: modelMatchesHost(spec, "umans"),
 		streamIdleTimeoutMs: spec.compat?.streamIdleTimeoutMs,
+		// Vercel AI Gateway accepts `providerOptions.gateway` in the Messages
+		// body itself; the resolved routing block is filled by applyCompatOverrides.
+		isVercelGatewayHost: isVercelGateway,
+		vercelGatewayRouting: undefined,
 	};
 	applyCompatOverrides(compat, spec.compat);
 	return compat;

@@ -10,7 +10,7 @@
 
 ### Added
 
-- Added opt-in Vercel AI Gateway per-request Zero Data Retention (`zeroDataRetention`) for Chat Completions and Responses, emitted under `providerOptions.gateway` alongside existing `only`/`order`/`caching` routing.
+- Added opt-in Vercel AI Gateway per-request Zero Data Retention (`zeroDataRetention`) across Chat Completions, Responses, and Anthropic Messages transports, emitted under `providerOptions.gateway` alongside existing `only`/`order` routing.
 
 ### Fixed
 

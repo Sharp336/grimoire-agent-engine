@@ -85,3 +85,38 @@ test("resolves Responses gateway controls only for the Vercel endpoint", () => {
 	expect(vercel.compat.vercelGatewayRouting).toEqual(routing);
 	expect(direct.compat.isVercelGatewayHost).toBe(false);
 });
+
+test("resolves gateway routing controls for anthropic-messages Vercel models", () => {
+	const routing = { only: ["bedrock"], zeroDataRetention: true };
+	const vercel = buildModel({
+		id: "anthropic/claude-sonnet-4.6",
+		name: "Claude Sonnet 4.6",
+		api: "anthropic-messages",
+		provider: "vercel-ai-gateway",
+		baseUrl: "https://ai-gateway.vercel.sh",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 16_384,
+		compat: { vercelGatewayRouting: routing },
+	} satisfies ModelSpec<"anthropic-messages">);
+	const direct = buildModel({
+		id: "anthropic/claude-sonnet-4.6",
+		name: "Claude Sonnet 4.6",
+		api: "anthropic-messages",
+		provider: "custom",
+		baseUrl: "https://api.example.com",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 16_384,
+		compat: { vercelGatewayRouting: routing },
+	} satisfies ModelSpec<"anthropic-messages">);
+
+	expect(vercel.compat.isVercelGatewayHost).toBe(true);
+	expect(vercel.compat.vercelGatewayRouting).toEqual(routing);
+	expect(direct.compat.isVercelGatewayHost).toBe(false);
+	expect(direct.compat.vercelGatewayRouting).toEqual(routing);
+});

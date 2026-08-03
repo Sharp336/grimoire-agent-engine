@@ -45,6 +45,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 	Usage,
+	VercelGatewayRouting,
 } from "../types";
 import { isRecord, normalizeSystemPrompts, normalizeToolCallId, resolveCacheRetention } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
@@ -3627,8 +3628,28 @@ function buildParams(
 	applyPromptCaching(params, cacheControl);
 	enforceCacheControlLimit(params, 4);
 	normalizeCacheControlTtlOrdering(params);
+	applyAnthropicGatewayRouting(params, model);
 
 	return params;
+}
+
+/**
+ * Forward Vercel AI Gateway routing preferences on the Anthropic Messages
+ * transport. The gateway accepts `providerOptions.gateway` directly in the
+ * Messages body (its ZDR docs carry the field with @ts-expect-error because
+ * the Anthropic SDK does not type it); `caching` stays on the Chat/Responses
+ * surfaces (#6410), so only routing and `zeroDataRetention` are forwarded here.
+ */
+function applyAnthropicGatewayRouting(params: MessageCreateParamsStreaming, model: Model<"anthropic-messages">): void {
+	const compat = model.compat;
+	if (!compat.isVercelGatewayHost || !compat.vercelGatewayRouting) return;
+	const routing = compat.vercelGatewayRouting;
+	const gateway: Pick<VercelGatewayRouting, "only" | "order" | "zeroDataRetention"> = {};
+	if (routing.only) gateway.only = routing.only;
+	if (routing.order) gateway.order = routing.order;
+	if (routing.zeroDataRetention) gateway.zeroDataRetention = true;
+	if (!gateway.only && !gateway.order && !gateway.zeroDataRetention) return;
+	(params as MessageCreateParamsStreaming & { providerOptions?: unknown }).providerOptions = { gateway };
 }
 
 const EMPTY_ERROR_TOOL_RESULT_TEXT = "Tool failed with no output.";
