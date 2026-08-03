@@ -362,6 +362,43 @@ describe("runSubprocess soft request budget", () => {
 		expect(receipt.error).toMatch(/hard-aborted/);
 		expect(receipt.error).toMatch(new RegExp(`history://${id}`));
 	});
+
+	it("stops repeated identical tool calls as non-converging", async () => {
+		const id = "LoopScout";
+		const handle = createMockSession(({ emit, pushMessage }) => {
+			for (let index = 1; index <= 4; index++) {
+				const toolCall = {
+					role: "assistant" as const,
+					content: [
+						{
+							type: "toolCall" as const,
+							id: `tool-${index}`,
+							name: "read",
+							arguments: { path: "/tmp/same.ts" },
+						},
+					],
+					stopReason: "toolUse" as const,
+				};
+				pushMessage(toolCall);
+				emit({ type: "message_end", message: toolCall } as unknown as AgentSessionEvent);
+				emit({
+					type: "tool_execution_end",
+					toolCallId: `tool-${index}`,
+					toolName: "read",
+					args: { path: "/tmp/same.ts" },
+					result: { content: [{ type: "text", text: "same result" }] },
+					isError: false,
+				} as unknown as AgentSessionEvent);
+			}
+		});
+		mockCreateAgentSession(handle.session);
+		registerRunning(id, handle.session);
+
+		const result = await runSubprocess(baseOptions(id));
+
+		expect(result.exitCode).not.toBe(0);
+		expect(result.error).toContain("non-converging");
+	});
 });
 
 describe("resolveSoftRequestBudget", () => {

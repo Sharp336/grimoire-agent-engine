@@ -116,10 +116,17 @@ export function resolveSoftRequestBudget(agentName: string, configuredBudget: nu
 
 /** Extra requests allowed after a budget stop for the forced yield to land before the run is hard-aborted. */
 export const BUDGET_STOP_GRACE_REQUESTS = 5;
+/** Identical tool signatures that indicate a verify/repair cycle is no longer converging. */
+export const NON_CONVERGENT_TOOL_REPEATS = 4;
 
 /** Steering notice injected when a subagent crosses its soft request budget. */
 export function buildBudgetNotice(requests: number, budget: number): string {
 	return `[budget notice] You have used ${requests} requests in this run (soft budget: ${budget}). Wrap up now: finish the current step and yield your final report. At ${Math.ceil(budget * 1.5)} requests the run is force-stopped and you will be asked to yield whatever you have.`;
+}
+
+/** Diagnostic used when a child repeats the same tool call without yielding. */
+export function buildNonConvergenceError(toolName: string, repeats: number): string {
+	return `Subagent repeated ${toolName} with identical arguments ${repeats} times without yielding; stopping as non-converging.`;
 }
 
 /** Flatten whitespace and clip salvage text for the cancelled-child summary line. */
@@ -1069,6 +1076,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	let budgetStopAbortPromise: Promise<void> | undefined;
 	let terminalError: string | undefined;
 	let consecutiveYieldToolErrors = 0;
+	let repeatedToolSignature: string | undefined;
+	let repeatedToolCount = 0;
 	let lastAssistantSalvageText: string | undefined;
 	let activeSessionAbortPromise: Promise<void> | undefined;
 
@@ -1409,6 +1418,21 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			}
 
 			case "tool_execution_end": {
+				const eventRecord: unknown = event;
+				const eventArgs = isRecord(eventRecord) && isRecord(eventRecord.args) ? eventRecord.args : {};
+				if (!event.isError && event.toolName !== "yield") {
+					const argsText = JSON.stringify(eventArgs) ?? "";
+					const signature = `${event.toolName}:${argsText}`;
+					if (signature === repeatedToolSignature) {
+						repeatedToolCount++;
+					} else {
+						repeatedToolSignature = signature;
+						repeatedToolCount = 1;
+					}
+					if (repeatedToolCount >= NON_CONVERGENT_TOOL_REPEATS && !abortSent) {
+						failWithError(buildNonConvergenceError(event.toolName, repeatedToolCount));
+					}
+				}
 				if (progress.currentTool) {
 					progress.recentTools.unshift({
 						tool: progress.currentTool,
@@ -1432,8 +1456,6 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 
 				// Check for registered subagent tool handler
 				const handler = subprocessToolRegistry.getHandler(event.toolName);
-				const eventRecord: unknown = event;
-				const eventArgs = isRecord(eventRecord) && isRecord(eventRecord.args) ? eventRecord.args : {};
 				if (handler) {
 					// Extract data using handler
 					if (handler.extractData) {

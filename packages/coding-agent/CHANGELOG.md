@@ -340,6 +340,9 @@
 - Fixed the Python RPC client dropping context, compaction, OAuth URL, and terminal-settlement fields.
 - Fixed the browser tool ignoring the url parameter when opening a new tab on an attached browser.
 - Fixed browser automation disrupting attached browsers by adopting the active foreground tab and avoiding raising new tabs during screenshots.
+### Fixed
+
+- Added a convergence guard to subagent execution: four consecutive successful calls to the same tool with identical arguments now stop the run with a non-convergence diagnostic instead of allowing a verify/repair loop to consume the remaining soft request budget.
 
 ## [17.2.1] - 2026-07-30
 
