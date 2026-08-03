@@ -981,6 +981,7 @@ describe("advisor", () => {
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
 				enqueueAdvice: () => {},
+				includeThinking: () => true,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
 
@@ -1069,6 +1070,112 @@ describe("advisor", () => {
 			expect(promptInputs[0]).toContain("second");
 			// The loop re-checked maintenance for the expanded batch.
 			expect(maintainCalls).toBe(2);
+		});
+
+		it("drops thinking-only batch when preference flips off during maintainContext", async () => {
+			const promptInputs: string[] = [];
+			const { promise: firstMaintainStarted, resolve: startFirstMaintain } = Promise.withResolvers<void>();
+			const { promise: finishFirstMaintain, resolve: releaseFirstMaintain } = Promise.withResolvers<boolean>();
+			let includeThinking = true;
+			let maintainCalls = 0;
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+				},
+				abort: () => {},
+				reset: () => {},
+				state: { messages: [] },
+			};
+			const messages: AgentMessage[] = [
+				{
+					role: "assistant",
+					content: [{ type: "thinking", thinking: "private reasoning only" }],
+					timestamp: 1,
+				} as AgentMessage,
+			];
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => messages,
+				enqueueAdvice: () => {},
+				includeThinking: () => includeThinking,
+				maintainContext: async () => {
+					maintainCalls++;
+					if (maintainCalls === 1) {
+						startFirstMaintain();
+						return await finishFirstMaintain;
+					}
+					return false;
+				},
+			};
+			const runtime = new AdvisorRuntime(agent, host);
+
+			runtime.onTurnEnd(messages);
+			await firstMaintainStarted;
+			expect(runtime.backlog).toBe(1);
+
+			// Flip preference while maintainContext is still awaiting; the held
+			// batch is thinking-only and must drop rather than re-leak reasoning.
+			includeThinking = false;
+			releaseFirstMaintain(true);
+			await settleUntil(() => runtime.backlog === 0);
+
+			expect(promptInputs).toEqual([]);
+			expect(runtime.backlog).toBe(0);
+			expect(maintainCalls).toBe(1);
+		});
+
+		it("reformats pending batch when preference flips off without context reset", async () => {
+			const promptInputs: string[] = [];
+			const { promise: firstMaintainStarted, resolve: startFirstMaintain } = Promise.withResolvers<void>();
+			const { promise: finishFirstMaintain, resolve: releaseFirstMaintain } = Promise.withResolvers<boolean>();
+			const { promise: promptStarted, resolve: startPrompt } = Promise.withResolvers<void>();
+			let includeThinking = true;
+			let maintainCalls = 0;
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+					startPrompt();
+				},
+				abort: () => {},
+				reset: () => {},
+				state: { messages: [] },
+			};
+			const messages: AgentMessage[] = [
+				{
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "private reasoning" },
+						{ type: "text", text: "visible answer" },
+					],
+					timestamp: 1,
+				} as AgentMessage,
+			];
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => messages,
+				enqueueAdvice: () => {},
+				includeThinking: () => includeThinking,
+				maintainContext: async () => {
+					maintainCalls++;
+					if (maintainCalls === 1) {
+						startFirstMaintain();
+						return await finishFirstMaintain;
+					}
+					return false;
+				},
+			};
+			const runtime = new AdvisorRuntime(agent, host);
+
+			runtime.onTurnEnd(messages);
+			await firstMaintainStarted;
+			includeThinking = false;
+			releaseFirstMaintain(false);
+			await promptStarted;
+			await settleUntil(() => runtime.backlog === 0);
+
+			expect(promptInputs).toHaveLength(1);
+			expect(promptInputs[0]).not.toContain("private reasoning");
+			expect(promptInputs[0]).not.toContain("_thinking:_");
+			expect(promptInputs[0]).toContain("visible answer");
+			expect(runtime.backlog).toBe(0);
 		});
 		it("re-scrubs coalesced pending updates when a later regex value collides with their friendly prefixes", async () => {
 			const obfuscator = new SecretObfuscator([
@@ -1992,6 +2099,7 @@ describe("advisor", () => {
 				snapshotMessages: () => messages,
 				enqueueAdvice: () => {},
 				obfuscator,
+				includeThinking: () => true,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
 
@@ -3549,6 +3657,7 @@ describe("advisor", () => {
 					snapshotMessages: () => messages,
 					enqueueAdvice: () => {},
 					notifyFailure: error => failures.push(error),
+					includeThinking: () => true,
 				},
 				0,
 			);
@@ -3604,6 +3713,7 @@ describe("advisor", () => {
 					snapshotMessages: () => messages,
 					enqueueAdvice: () => {},
 					notifyFailure: error => failures.push(error),
+					includeThinking: () => true,
 				},
 				0,
 			);
@@ -3670,6 +3780,7 @@ describe("advisor", () => {
 					snapshotMessages: () => messages,
 					enqueueAdvice: () => {},
 					notifyFailure: error => failures.push(error),
+					includeThinking: () => true,
 				},
 				0,
 			);
@@ -3681,6 +3792,279 @@ describe("advisor", () => {
 			expect(promptInputs[0]).toContain("private reasoning");
 			expect(promptInputs[1]).not.toContain("private reasoning");
 			expect(failures).toEqual([]);
+		});
+
+		it("includes primary thinking by default", async () => {
+			const promptInputs: string[] = [];
+			const agent = makeAgent(promptInputs);
+			const messages = [
+				{
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "private reasoning" },
+						{ type: "text", text: "answer" },
+					],
+					timestamp: 1,
+				} as AgentMessage,
+			];
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => messages,
+				enqueueAdvice: () => {},
+			});
+
+			runtime.onTurnEnd(messages);
+			await runtime.waitForCatchup(1000, 1);
+
+			expect(promptInputs).toHaveLength(1);
+			expect(promptInputs[0]).toContain("private reasoning");
+			expect(promptInputs[0]).toContain("_thinking:_");
+			expect(promptInputs[0]).toContain("answer");
+		});
+
+		it("hides primary thinking when host preference is false", async () => {
+			const promptInputs: string[] = [];
+			const agent = makeAgent(promptInputs);
+			const messages = [
+				{
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "private reasoning" },
+						{ type: "text", text: "answer" },
+					],
+					timestamp: 1,
+				} as AgentMessage,
+			];
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => messages,
+				enqueueAdvice: () => {},
+				includeThinking: () => false,
+			});
+
+			runtime.onTurnEnd(messages);
+			await runtime.waitForCatchup(1000, 1);
+
+			expect(promptInputs).toHaveLength(1);
+			expect(promptInputs[0]).not.toContain("private reasoning");
+			expect(promptInputs[0]).not.toContain("_thinking:_");
+			expect(promptInputs[0]).toContain("answer");
+		});
+
+		it("honors a live includeThinking preference change without rebuild", async () => {
+			const promptInputs: string[] = [];
+			const agent = makeAgent(promptInputs);
+			let includeThinking = true;
+			const messages: AgentMessage[] = [
+				{
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "visible first" },
+						{ type: "text", text: "first answer" },
+					],
+					timestamp: 1,
+				} as AgentMessage,
+			];
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => messages,
+				enqueueAdvice: () => {},
+				includeThinking: () => includeThinking,
+			});
+
+			runtime.onTurnEnd(messages);
+			await runtime.waitForCatchup(1000, 1);
+			expect(promptInputs[0]).toContain("visible first");
+			expect(promptInputs[0]).toContain("first answer");
+
+			includeThinking = false;
+			messages.push({
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "hidden second" },
+					{ type: "text", text: "second answer" },
+				],
+				timestamp: 2,
+			} as AgentMessage);
+			runtime.onTurnEnd(messages);
+			await runtime.waitForCatchup(1000, 1);
+
+			expect(promptInputs).toHaveLength(2);
+			expect(promptInputs[1]).not.toContain("hidden second");
+			expect(promptInputs[1]).not.toContain("_thinking:_");
+			expect(promptInputs[1]).toContain("second answer");
+			expect(promptInputs[1]).not.toContain("visible first");
+		});
+
+		it("does not sticky-demote thinking after a preference-off refusal", async () => {
+			const promptInputs: string[] = [];
+			const failures: unknown[] = [];
+			const state: { messages: AgentMessage[]; error?: string } = { messages: [] };
+			let includeThinking = false;
+			let promptCalls = 0;
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+					promptCalls++;
+					// First batch is preference-off (no thinking). Still refuse once so we
+					// exercise the classifier path without a real thinking strip.
+					if (promptCalls === 1) {
+						state.error = "Refusal (reasoning_extraction): reasoning may not be echoed";
+						state.messages.push({
+							role: "assistant",
+							content: [],
+							stopReason: "error",
+							stopDetails: { type: "refusal", category: "reasoning_extraction" },
+							errorMessage: state.error,
+							timestamp: 2,
+						} as unknown as AgentMessage);
+						return;
+					}
+					state.error = undefined;
+					state.messages.push({
+						role: "assistant",
+						content: [],
+						stopReason: "stop",
+						timestamp: promptCalls + 1,
+					} as unknown as AgentMessage);
+				},
+				abort: () => {},
+				reset: () => {},
+				rollbackTo: count => {
+					state.messages.length = count;
+					state.error = undefined;
+				},
+				state,
+			};
+			const messages: AgentMessage[] = [
+				{
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "hidden while preference off" },
+						{ type: "text", text: "first answer" },
+					],
+					timestamp: 1,
+				} as AgentMessage,
+			];
+			const runtime = new AdvisorRuntime(
+				agent,
+				{
+					snapshotMessages: () => messages,
+					enqueueAdvice: () => {},
+					includeThinking: () => includeThinking,
+					notifyFailure: error => failures.push(error),
+				},
+				0,
+			);
+
+			runtime.onTurnEnd(messages);
+			await settleUntil(() => failures.length === 1 && runtime.backlog === 0);
+
+			// Preference-off refusal must fail without sticky demotion recovery.
+			expect(promptInputs).toHaveLength(1);
+			expect(promptInputs[0]).not.toContain("hidden while preference off");
+			expect(promptInputs[0]).toContain("first answer");
+			expect(failures).toHaveLength(1);
+
+			// Later flip preference on; a new thinking-bearing delta must include traces.
+			includeThinking = true;
+			messages.push({
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "restored after preference on" },
+					{ type: "text", text: "second answer" },
+				],
+				timestamp: 3,
+			} as AgentMessage);
+			runtime.onTurnEnd(messages);
+			await settleUntil(() => promptInputs.length === 2 && runtime.backlog === 0);
+
+			expect(promptInputs).toHaveLength(2);
+			expect(promptInputs[1]).toContain("restored after preference on");
+			expect(promptInputs[1]).toContain("_thinking:_");
+			expect(promptInputs[1]).toContain("second answer");
+		});
+
+		it("does not demote thinking after a text-only batch refusal", async () => {
+			const promptInputs: string[] = [];
+			const failures: unknown[] = [];
+			const state: { messages: AgentMessage[]; error?: string } = { messages: [] };
+			let promptCalls = 0;
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+					promptCalls++;
+					// Text-only first batch still refuses once. Demotion must not fire —
+					// there is no thinking content to strip, so a retry would be identical.
+					if (promptCalls === 1) {
+						state.error = "Refusal (reasoning_extraction): reasoning may not be echoed";
+						state.messages.push({
+							role: "assistant",
+							content: [],
+							stopReason: "error",
+							stopDetails: { type: "refusal", category: "reasoning_extraction" },
+							errorMessage: state.error,
+							timestamp: 2,
+						} as unknown as AgentMessage);
+						return;
+					}
+					state.error = undefined;
+					state.messages.push({
+						role: "assistant",
+						content: [],
+						stopReason: "stop",
+						timestamp: promptCalls + 1,
+					} as unknown as AgentMessage);
+				},
+				abort: () => {},
+				reset: () => {},
+				rollbackTo: count => {
+					state.messages.length = count;
+					state.error = undefined;
+				},
+				state,
+			};
+			const messages: AgentMessage[] = [
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "text only answer" }],
+					timestamp: 1,
+				} as AgentMessage,
+			];
+			const runtime = new AdvisorRuntime(
+				agent,
+				{
+					snapshotMessages: () => messages,
+					enqueueAdvice: () => {},
+					// Preference on: eligibility true, but batch has no thinking content.
+					includeThinking: () => true,
+					notifyFailure: error => failures.push(error),
+				},
+				0,
+			);
+
+			runtime.onTurnEnd(messages);
+			await settleUntil(() => failures.length === 1 && runtime.backlog === 0);
+
+			// One attempt only — no demotion retry of an identical text-only payload.
+			expect(promptInputs).toHaveLength(1);
+			expect(promptInputs[0]).toContain("text only answer");
+			expect(promptInputs[0]).not.toContain("_thinking:_");
+			expect(failures).toHaveLength(1);
+
+			// Later thinking-bearing delta must still include traces (no sticky demotion).
+			messages.push({
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "should still be visible" },
+					{ type: "text", text: "second answer" },
+				],
+				timestamp: 3,
+			} as AgentMessage);
+			runtime.onTurnEnd(messages);
+			await settleUntil(() => promptInputs.length === 2 && runtime.backlog === 0);
+
+			expect(promptInputs).toHaveLength(2);
+			expect(promptInputs[1]).toContain("should still be visible");
+			expect(promptInputs[1]).toContain("_thinking:_");
+			expect(promptInputs[1]).toContain("second answer");
 		});
 
 		it("calls onTurnError with state.error before retrying the batch", async () => {
