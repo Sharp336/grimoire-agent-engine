@@ -1065,6 +1065,7 @@ export class AgentSession {
 			persistedAssistantEntryId: message => (message as PersistedAssistantMessage)[kPersistedSessionEntryId],
 			sessionMessageAlreadyPersisted: message => this.#sessionMessageAlreadyPersisted(message),
 			setModelWithProviderSessionReset: model => this.#setModelWithProviderSessionReset(model),
+			syncAdvisorActivation: () => this.#syncAdvisorActivation(true),
 			resetCurrentResponsesProviderSession: reason => this.#resetCurrentResponsesProviderSession(reason),
 			maybeAutoRedeemCodexReset: activeBlockUnblockAtMs => this.#maybeAutoRedeemCodexReset(activeBlockUnblockAtMs),
 			runAutoCompaction: (reason, willRetry, deferred, allowDefer, options) =>
@@ -1602,7 +1603,7 @@ export class AgentSession {
 		if (!model) return undefined;
 		const availableModels = this.#modelRegistry.getAvailable();
 		const matchPreferences = getModelMatchPreferences(this.settings);
-		const configuredThinking = this.configuredThinkingLevel() ?? ThinkingLevel.Off;
+		const configuredThinking = this.configuredThinkingLevel() ?? ThinkingLevel.Inherit;
 		for (const pattern of patterns) {
 			const resolved = resolveModelRoleValue(pattern, availableModels, {
 				settings: this.settings,

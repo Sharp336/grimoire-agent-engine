@@ -33,6 +33,7 @@ describe("AgentSession advisor toggle", () => {
 		authStorage.setRuntimeApiKey("openai", "test-key");
 		authStorage.setRuntimeApiKey("openrouter", "test-key");
 		authStorage.setRuntimeApiKey("nanogpt", "test-key");
+		authStorage.setRuntimeApiKey("fireworks", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const replacement = getBundledModel("openai", "gpt-4o-mini");
@@ -182,6 +183,68 @@ describe("AgentSession advisor toggle", () => {
 		expect(session.formatAdvisorStatus()).toContain(
 			`Automatic match: ${replacementModel.provider}/${replacementModel.id}.`,
 		);
+	});
+
+	it("distinguishes inherited thinking from explicitly disabled thinking", () => {
+		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+
+		session.settings.set("advisor.autoEnableFor", `${model.provider}/${model.id}:off`);
+		expect(session.isAdvisorActive()).toBe(false);
+
+		session.settings.set("advisor.autoEnableFor", `${model.provider}/${model.id}:inherit`);
+		expect(session.isAdvisorActive()).toBe(true);
+	});
+
+	it("re-evaluates automatic activation after a Fireworks Fast fallback", async () => {
+		const fastModel = getBundledModel("fireworks", "kimi-k2.6-fast");
+		const baseModel = getBundledModel("fireworks", "kimi-k2.6");
+		if (!fastModel || !baseModel) throw new Error("Expected bundled Fireworks Fast and base models to exist");
+
+		const mock = createMockModel();
+		const fallbackAgent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model: fastModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => {
+				if (requestedModel.id === fastModel.id) {
+					mock.push({ throw: "provider returned error 503" });
+				} else {
+					mock.push({ content: ["Recovered on Fireworks Standard"] });
+				}
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+		const fallbackSettings = Settings.isolated({
+			"advisor.autoEnableFor": `${baseModel.provider}/${baseModel.id}`,
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 1,
+			"retry.maxRetries": 0,
+		});
+		fallbackSettings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		const fallbackSession = new AgentSession({
+			agent: fallbackAgent,
+			sessionManager: SessionManager.inMemory(),
+			settings: fallbackSettings,
+			modelRegistry,
+			advisorTools: [],
+		});
+
+		try {
+			expect(fallbackSession.isAdvisorActive()).toBe(false);
+
+			await fallbackSession.prompt("Trigger Fireworks Fast fallback");
+			await fallbackSession.waitForIdle();
+
+			expect(fallbackSession.model?.id).toBe(baseModel.id);
+			expect(fallbackSession.isAdvisorActive()).toBe(true);
+			expect(fallbackSession.getAdvisorStats().automaticMatch).toBe(`${baseModel.provider}/${baseModel.id}`);
+		} finally {
+			await fallbackSession.dispose();
+		}
 	});
 
 	it("matches the final thinking level applied by a temporary model switch", async () => {
