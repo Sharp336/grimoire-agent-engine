@@ -7,9 +7,9 @@ RPC mode runs the coding agent as a newline-delimited JSON protocol over stdio.
 
 Primary implementation:
 
-- `src/modes/rpc/rpc-mode.ts`
-- `src/modes/rpc/rpc-types.ts`
-- `src/session/agent-session.ts`
+- `packages/coding-agent/src/modes/rpc/rpc-mode.ts`
+- `packages/coding-agent/src/modes/rpc/rpc-types.ts`
+- `packages/coding-agent/src/session/agent-session.ts`
 - `packages/agent/src/agent.ts`
 - `packages/agent/src/agent-loop.ts`
 
@@ -23,15 +23,15 @@ Behavior notes:
 
 - `@file` CLI arguments are rejected in RPC mode.
 - RPC mode disables automatic session title generation by default to avoid an extra model call.
-- RPC mode resets workflow-altering `todo.*`, `task.*`, `memory.backend`/`memories.enabled`, `advisor.*`, `async.*`, and `bash.autoBackground.*` settings to their built-in defaults instead of inheriting user overrides.
-- The process reads stdin as JSONL (`readJsonl(Bun.stdin.stream())`).
+- RPC/ACP host defaults cover task isolation/execution, memory, advisor, tier, async-job, and bash auto-background settings. They are applied only when a path is not explicitly configured; project/global config, `--config`, and isolated settings remain authoritative. Todo settings are not host-defaulted.
+- The process claims stdin before extension discovery, then parses it one non-empty JSONL line at a time. Malformed JSON emits a recoverable `command: "parse"` failure and does not terminate the loop.
 - At startup it writes a `ready` frame before processing commands. The frame advertises supported protocol versions and transport limits.
-- When stdin closes, pending host-tool calls and host-URI requests are rejected and the process exits with code `0`.
+- When stdin closes, pending extension UI, host-tool, and host-URI requests are rejected; accepted commands are drained, the session is disposed, and the process exits with code `0`.
 - Responses/events are written as one JSON object per line.
 
 ## Transport and Framing
 
-Protocol v1 frames are a single JSON object followed by `\n`. Every physical JSONL frame is limited to 1 MiB.
+Protocol v1 stdout frames are a single JSON object followed by `\n`. The server caps each physical stdout frame at 1 MiB. Inbound commands are always one unchunked JSONL object; clients SHOULD keep them within the advertised physical-frame limit.
 
 The initial ready frame uses protocol v1 and advertises the opt-in lossless transport:
 
@@ -64,7 +64,7 @@ After the success response, oversized stdout objects are emitted losslessly as a
 }
 ```
 
-Clients MUST validate `chunkId`, `index`, `count`, and `byteLength`, reject interleaved or interrupted sequences, enforce the advertised reassembly limit, concatenate decoded bytes in index order, decode them as strict UTF-8, and parse the result as one JSON object. The exported TypeScript `RpcFrameDecoder` implements this validation. The bundled TypeScript and Python `RpcClient` implementations negotiate v2 automatically when the ready frame advertises it.
+Clients MUST validate `chunkId`, `index`, `count`, and `byteLength`, reject interleaved or interrupted sequences, enforce the advertised reassembly limit, concatenate decoded bytes in index order, decode them as strict UTF-8, and parse the result as one JSON object. The TypeScript `RpcFrameDecoder`, exported from `@oh-my-pi/pi-coding-agent/modes/rpc/rpc-frame`, implements this validation. The bundled TypeScript and Python `RpcClient` implementations negotiate v2 automatically when the ready frame advertises it.
 
 Legacy clients may ignore the added ready fields and remain on v1. V1 retains its bounded fallback behavior for oversized output. Frames above the v2 reassembly ceiling still fail explicitly; large history APIs should use pagination rather than depending on arbitrarily large logical frames.
 
@@ -99,14 +99,14 @@ All commands accept optional `id?: string`.
 Important edge behavior from runtime:
 
 - Unknown command responses are emitted with `id: undefined` (even if the request had an `id`).
-- Parse/handler exceptions in the input loop emit `command: "parse"` with `id: undefined`.
+- Malformed JSON and synchronous dispatch failures emit `command: "parse"` with `id: undefined`. Exceptions while handling a recognized command emit a failure with that command's `type` and `id`.
 - `prompt` and `abort_and_prompt` return immediate success, then may emit a later error response with the **same** id if async prompt scheduling fails.
 - `prompt` success responses may include `data.agentInvoked`. `false` means the prompt completed locally without an agent turn; `true` means the prompt produced agent lifecycle events; omitted means the host must rely on session events for completion.
 - `abort_and_prompt` does not currently emit `data.agentInvoked` or `prompt_result`; hosts should treat it as the legacy abort-then-schedule path and rely on session events or same-id scheduling errors.
 
 ## Command Schema (canonical)
 
-`RpcCommand` is defined in `src/modes/rpc/rpc-types.ts`:
+`RpcCommand` is defined in `packages/coding-agent/src/modes/rpc/rpc-types.ts`:
 
 ### Prompting
 
@@ -202,7 +202,7 @@ The bundled TypeScript `RpcClient.getMessages()` and Python `RpcClient.get_messa
 All command results use `RpcResponse`:
 
 - Success: `{ id?, type: "response", command: <command>, success: true, data?: ... }`
-- Failure: `{ id?, type: "response", command: string, success: false, error: string }`
+- Failure: `{ id?, type: "response", command: string, success: false, error: string, code?: string }`
 
 Data payloads are command-specific and defined in `rpc-types.ts`.
 
@@ -428,6 +428,11 @@ The response payload is:
 These tools are added to the active session tool registry before the next model
 call. Re-sending `set_host_tools` replaces the previous host-owned set.
 
+Definitions also accept `hidden?: boolean` and
+`loadMode?: "essential" | "discoverable"`. An explicit mode wins. When omitted,
+known essential built-in names remain `"essential"`; other host tools default
+to `"discoverable"`. `toolNames` in the response lists the registered names.
+
 ### `set_host_uri_schemes` payload
 
 Replaces the current set of host-owned URL schemes the RPC server should
@@ -475,9 +480,11 @@ Common event types:
 - `tool_execution_start`, `tool_execution_update`, `tool_execution_end`
 - `auto_compaction_start`, `auto_compaction_end`
 - `auto_retry_start`, `auto_retry_end`
+- `retry_fallback_applied`, `retry_fallback_succeeded`
+- `model_changed`, `thinking_level_changed`
 - `ttsr_triggered`
-- `todo_reminder`
-- `todo_auto_clear`
+- `todo_reminder`, `todo_auto_clear`
+- `irc_message`, `notice`, `goal_updated`
 
 Extension runner errors are emitted separately as:
 
@@ -491,6 +498,28 @@ Extension runner errors are emitted separately as:
 ```
 
 `message_update` includes streaming deltas in `assistantMessageEvent` (text/thinking/toolcall deltas).
+
+### Available commands
+
+`get_available_commands` returns `{ commands }`, and the same array is pushed
+in `available_commands_update` frames at startup and after command metadata
+changes. Each command has `name`, `source`, and optional `aliases`,
+`description`, `input.hint`, and `subcommands`.
+
+### Subagent subscriptions
+
+Subagent forwarding defaults to `"off"`. `set_subagent_subscription` selects:
+
+- `"off"`: no forwarded subagent frames
+- `"progress"`: lifecycle and progress frames
+- `"events"`: lifecycle, progress, and full subagent event frames
+
+`get_subagents` returns the registry snapshot sorted by subagent index and id.
+`get_subagent_messages` selects a transcript by `subagentId` or `sessionFile`;
+`fromByte` supports incremental reads. Its result contains `sessionFile`,
+`fromByte`, `nextByte`, `reset`, raw transcript `entries`, and converted
+`messages`. If `fromByte` exceeds the current file size, reading restarts at
+byte zero and reports `reset: true`.
 
 ## Prompt/Queue Concurrency and Ordering
 
@@ -710,6 +739,10 @@ a message or fall back to `content` for textual error surfacing:
 - Schemes are global to the process; `set_host_uri_schemes` replaces the
   previous set, unregistering anything not in the new list.
 - Schemes are normalized to lowercase before registration.
+- Successful reads require `content`. `contentType` defaults to `text/plain`
+  and, when supplied, is `"text/plain"`, `"text/markdown"`, or
+  `"application/json"`. A result-level `immutable` overrides the registered
+  scheme's value for that read.
 
 ## Error Model and Recoverability
 
@@ -799,7 +832,7 @@ stdin:
 
 ## Notes on `RpcClient` helper
 
-`src/modes/rpc/rpc-client.ts` is a convenience wrapper, not the protocol definition.
+`packages/coding-agent/src/modes/rpc/rpc-client.ts` is a convenience wrapper, not the protocol definition.
 
 Current helper characteristics:
 

@@ -5,7 +5,7 @@ description: Use when creating a new omp extension. Covers ExtensionAPI, factory
 
 # Authoring Extensions
 
-Extensions are the primary way to add capabilities to `oh-my-pi`. A single extension module can register tools the LLM can call, slash commands users can invoke, and event handlers that run throughout the session lifecycle — all from one TypeScript file.
+Extensions are the primary way to add capabilities to `oh-my-pi`. A single extension module can register tools the LLM can call, slash commands users can invoke, and event handlers that run throughout the session lifecycle — all from one TypeScript file. Its default factory may initialize synchronously or return a promise.
 
 ## Minimum viable extension
 
@@ -86,6 +86,8 @@ omp loads extension modules from these sources:
 
 The runtime de-duplicates by resolved absolute path — first seen wins.
 
+The user directory is the active profile's agent directory: the default is `~/.omp/agent`, while `omp --profile <name>` uses `~/.omp/profiles/<name>/agent` (and `PI_CODING_AGENT_DIR` overrides it).
+
 When a path points to a directory, omp resolves the entry point in this order:
 
 1. `package.json` with `omp.extensions` (or legacy `pi.extensions`) field
@@ -158,7 +160,7 @@ pi.registerCommand("my-cmd", {
 
 ## Registering tools
 
-Tools are called by the LLM. Parameters use [Zod](https://zod.dev) schemas, available at `pi.zod`:
+Tools are called by the LLM. Parameter definitions accept ArkType or Zod schemas; `pi.typebox` remains available as a compatibility shim for legacy TypeBox-style extensions. The following example uses the injected `zod/v4` module:
 
 ```ts
 const z = pi.zod;
@@ -184,6 +186,8 @@ pi.registerTool({
   },
 });
 ```
+
+Tool definitions may also set `loadMode: "essential" | "discoverable"` (`"discoverable"` by default), `approval: "read" | "write" | "exec"` (`"exec"` by default), and `strict` for provider structured-output grammar behavior.
 
 ## Subscribing to events
 

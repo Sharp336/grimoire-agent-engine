@@ -11,10 +11,12 @@
 - The error→toolUse salvage in the agent loop (`recoverTransientErrorToolTurn`) now recognizes Anthropic stream-envelope truncation errors, so a turn cut after streaming complete tool calls runs those calls instead of ending the run with an error.
 - Shake no longer elides artifact recovery reads; the compaction dead-end rescue uses a dedicated `RESCUE_SHAKE_CONFIG`.
 - Fixed the proxy transport dropping `thinkingMode` and `disableReasoning`, so proxied agents ignored a requested thinking-off.
+## [17.2.6] - 2026-08-03
+
 ### Fixed
 
-- A peer-IRC interrupt (e.g. a subagent message) no longer skips a non-interruptible tool call that was queued behind an interruptible wait in the same batch, so a batched `todo`/`write` update ordered after `hub wait` now runs instead of failing with "Skipped due to pending peer interrupt"; IRC still aborts only interruptible waits, and user/system steering still preempts queued work ([#7493](https://github.com/can1357/oh-my-pi/issues/7493)).
-- Parent-agent steering interruptions now use parent steering wording while advisor interruptions keep system-advisory wording ([#7199](https://github.com/can1357/oh-my-pi/issues/7199)).
+- Fixed an issue where peer-IRC interrupts (such as subagent messages) incorrectly skipped non-interruptible tool calls queued in the same batch.
+- Improved interruption messaging to clearly distinguish between parent-agent steering and system-advisory interruptions.
 
 ## [17.2.5] - 2026-08-03
 

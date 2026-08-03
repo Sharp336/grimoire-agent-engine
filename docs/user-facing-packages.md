@@ -60,3 +60,52 @@ There is no package README at this path today; the manifest and CLI entrypoint h
 - Fixtures: each task directory contains `prompt.md`, `input/`, `expected/`, and `metadata.json`; bundled distribution can use `fixtures.tar.gz`.
 - Outputs: markdown or JSON benchmark reports under `runs/` by default, with live progress and optional conversation dumps.
 - Side effects/limits: creates the repository `runs/` directory, extracts fixture archives to temp space, and runs agent sessions against copied fixtures; `--check-fixtures` validates fixture structure and exits.
+
+### `packages/metaharness` — unified benchmark manager
+
+Sources: [`packages/metaharness/README.md`](../packages/metaharness/README.md), [`packages/metaharness/package.json`](../packages/metaharness/package.json), [`packages/metaharness/src/server.ts`](../packages/metaharness/src/server.ts).
+
+- Package: private `@oh-my-pi/pi-metaharness`; bin: `metaharness`.
+- Feature: one dashboard, SQLite store, REST/SSE API, and normalized run/trace model for Harbor,
+  TypeScript edit, and SnapCompact benchmarks.
+- CLI: `bun run serve --port 4700` (or the package bin) starts the dashboard and API.
+- Storage: state lives under `<jobs-dir>/_manager/metaharness.sqlite`; benchmark-native artifacts
+  remain the filesystem source of truth and historical CLI runs are auto-discovered.
+- Limits: deleting an experiment or run also deletes its job directories and is rejected while the
+  target is running.
+
+### `packages/browser-relay` — drive existing Chrome tabs
+
+Sources: [`packages/browser-relay/README.md`](../packages/browser-relay/README.md), [`packages/browser-relay/package.json`](../packages/browser-relay/package.json), [`packages/coding-agent/src/tools/browser/relay/`](../packages/coding-agent/src/tools/browser/relay/).
+
+- Package: private `@oh-my-pi/browser-relay`; user command: `omp browser-relay`.
+- Setup: run `omp browser-relay install`, load the unpacked extension from
+  `~/.omp/browser-relay/extension`, then set `browser.relay` or use `app.relay: true`.
+- Behavior: the relay auto-starts through the global daemon broker; `app.target` selects a tab by
+  URL/title substring, otherwise the visible tab is adopted.
+- Security/limits: it binds loopback; use `--token` when local processes are untrusted. Chrome
+  internal pages, DevTools, Web Store, extension pages, and tabs with DevTools open cannot attach.
+
+### `packages/collab-web` — browser client for collaborative sessions
+
+Sources: [`packages/collab-web/README.md`](../packages/collab-web/README.md), [`packages/collab-web/package.json`](../packages/collab-web/package.json), [`docs/collab.md`](./collab.md).
+
+- Package: private `@oh-my-pi/collab-web`; production client: <https://my.omp.sh/>.
+- Feature: browser guest UI for `/collab` sessions, including streaming transcript, tool cards,
+  subagent views, prompts, and host interruption.
+- Local paths: `bun run dev` serves the UI on port 3000; `bun run mock-host` runs an offline relay
+  and scripted host; `bun run build` emits a static SPA under `dist/`.
+- Constraints: non-local deployments require HTTPS and a reachable secure WebSocket relay. The room
+  key stays in the URL fragment and is not sent to the relay.
+
+### `packages/snapcompact` — bitmap context-compression API
+
+Sources: [`packages/snapcompact/README.md`](../packages/snapcompact/README.md), [`packages/snapcompact/package.json`](../packages/snapcompact/package.json), [`packages/snapcompact/src/index.ts`](../packages/snapcompact/src/index.ts).
+
+- Package: public `@oh-my-pi/snapcompact`; install with `bun add @oh-my-pi/snapcompact`; requires
+  Bun 1.3.14 or newer.
+- Feature: deterministic local serialization and PNG rendering of discarded conversation history
+  for vision-model context compaction; no model call or API key is required.
+- Public entrypoint includes `compact`, `render`, `renderMany`, `frames`, shape selection, text
+  normalization/serialization, image budgets, and file-operation helpers.
+- Runtime constraint: rasterization and PNG encoding require `@oh-my-pi/pi-natives`.
