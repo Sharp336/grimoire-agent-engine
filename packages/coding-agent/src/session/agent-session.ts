@@ -155,6 +155,7 @@ import { containsUltrathink, ULTRATHINK_NOTICE } from "../modes/ultrathink";
 import { computeNonMessageTokens } from "../modes/utils/context-usage";
 import { containsWorkflow, renderWorkflowNotice } from "../modes/workflow";
 import { type PlanApprovalDetails, resolveApprovedPlan } from "../plan-mode/approved-plan";
+import { PlanModeController } from "../plan-mode/plan-controller";
 import { listPlanFiles, readPlanFile } from "../plan-mode/plan-files";
 import type { PlanModeState } from "../plan-mode/state";
 import goalModeContextPrompt from "../prompts/goals/goal-mode-context.md" with { type: "text" };
@@ -471,6 +472,8 @@ export class AgentSession {
 	/** Caller-owned tags keyed by exact message identity; never serialized into provider payloads. */
 	readonly #messageTags = new WeakMap<AgentMessage, string>();
 	#planModeState: PlanModeState | undefined;
+	/** Authoritative plan transition owner shared by every host surface. */
+	readonly planMode: PlanModeController;
 	/** Session-scoped `/vision` override; undefined = follow persisted `inspect_image.mode`. */
 	#inspectImageModeOverride: InspectImageMode | undefined;
 	#vibeModeState: VibeModeState | undefined;
@@ -1628,6 +1631,7 @@ export class AgentSession {
 			syncTodoPhasesFromBranch: () => this.#todo.syncFromBranch(),
 		};
 		this.#handoff = new SessionHandoff(handoffHost);
+		this.planMode = new PlanModeController(this);
 
 		this.#rehydrateCheckpointRewindState();
 
@@ -1749,8 +1753,12 @@ export class AgentSession {
 	setSessionBeforeSwitchReconciler(reconciler: (() => Promise<void>) | null): void {
 		this.#sessionBeforeSwitchReconciler = reconciler ?? undefined;
 	}
-
 	#sessionSwitchReconciler: (() => Promise<void>) | undefined;
+
+	async #reconcileSessionMode(context?: SessionContext): Promise<void> {
+		await this.planMode.reconcileFromSession(context);
+		await this.#sessionSwitchReconciler?.();
+	}
 
 	setSessionSwitchReconciler(reconciler: (() => Promise<void>) | null): void {
 		this.#sessionSwitchReconciler = reconciler ?? undefined;
@@ -3934,6 +3942,7 @@ export class AgentSession {
 			logger.warn("Post-prompt tasks still draining at dispose deadline", { error: String(error) });
 		}
 		await this.#drainAutolearnCapture();
+		await this.planMode.clearTransientState({ restoreTools: false });
 		await this.#memory.transition;
 
 		const hindsightState = this.getHindsightSessionState();
@@ -6605,7 +6614,9 @@ export class AgentSession {
 			this.#planReferencePath = "local://PLAN.md";
 			this.#advisors.resetSessionState();
 			advisorRecordersDetached = false;
+
 			this.#reconnectToAgent();
+			await this.#reconcileSessionMode();
 			// The workspace-roots block must reflect the new session's directory set,
 			// not the previous session's — refresh before the next turn goes out.
 			await this.refreshBaseSystemPrompt();
@@ -6711,6 +6722,7 @@ export class AgentSession {
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;
 			await this.#memory.resetContextForNewTranscript();
+			await this.#reconcileSessionMode();
 
 			// Emit session_switch event with reason "fork" to hooks
 			if (this.#extensionRunner) {
@@ -7775,7 +7787,7 @@ export class AgentSession {
 			}
 			this.#reconnectToAgent();
 			try {
-				await this.#sessionSwitchReconciler?.();
+				await this.#reconcileSessionMode(sessionContext);
 			} catch (error) {
 				logger.warn("Failed to reconcile session mode after switch", {
 					targetSessionFile: sessionPath,
@@ -7851,11 +7863,10 @@ export class AgentSession {
 				this.#emit({ type: "model_changed" });
 			}
 			this.#todo.syncFromBranch();
-			this.#advisors.resetAllRuntimes();
 			this.#advisors.reattachRecorderFeeds();
 			this.#reconnectToAgent();
 			try {
-				await this.#sessionSwitchReconciler?.();
+				await this.#reconcileSessionMode();
 			} catch (reconcileError) {
 				logger.warn("Failed to reconcile session mode after switch rollback", {
 					targetSessionFile: sessionPath,
@@ -7966,6 +7977,7 @@ export class AgentSession {
 				this.#advisors.resetSessionState();
 				this.#closeCodexProviderSessionsForHistoryRewrite();
 			}
+			await this.#reconcileSessionMode();
 
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;
