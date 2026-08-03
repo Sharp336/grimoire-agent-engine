@@ -832,6 +832,9 @@
 - Fixed in-progress aborts awaiting `session_stop` extension handlers whose results would be discarded.
 - Fixed `/retry` reporting "Nothing to retry" after a stream stalled or aborted mid-tool-call.
 - Fixed locally consumed extension commands triggering automatic title generation and exposing their command text to the title model.
+### Changed
+
+- Changed Agent Hub to default to running-agent visibility, archive parked and aborted agents, and expose live runtime metadata with structured activity ([#5251](https://github.com/can1357/oh-my-pi/pull/5251) by [@wolfiesch](https://github.com/wolfiesch)).
 
 ## [17.0.7] - 2026-07-21
 

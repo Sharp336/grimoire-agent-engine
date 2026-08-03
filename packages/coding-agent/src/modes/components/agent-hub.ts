@@ -162,7 +162,8 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	/** Prevent the async persisted-session scan from flashing a false empty state. */
 	#loadingPersistedSubagents = false;
 
-	// Table state
+	// Dashboard state
+	#allRows: AgentRef[] = [];
 	#rows: AgentRef[] = [];
 	#statusCounts: Record<AgentStatus, number> = { running: 0, idle: 0, parked: 0, aborted: 0 };
 	#selectedRow = 0;
@@ -170,7 +171,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	/** Per-render screen-line to agent-row map, shared by click and hover routing. */
 	#hitRows: Array<number | undefined> = [];
 	#notice: string | undefined;
-	/** Captured row order from the first refresh; keeps the hub stable while open. */
+	/** Captured row order from the first refresh; keeps each status group stable while open. */
 	#rowOrder: Map<string, number> | undefined;
 	#nextRowOrder = 0;
 	/** Double-tap window state for the table's left-left "close hub" gesture. */
@@ -283,7 +284,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	 * those included must wait for {@link persistedSubagentsReady} first.
 	 */
 	get isEmpty(): boolean {
-		return this.#rows.length === 0;
+		return this.#allRows.length === 0;
 	}
 
 	/** Tear down every subscription and timer. Called by the overlay owner on close. */
@@ -424,7 +425,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	}
 
 	#refreshRows(): void {
-		const selectedId = this.#rows[this.#selectedRow]?.id;
+		const selectedId = this.#selectedByTab[this.#tab] ?? this.#rows[this.#selectedRow]?.id;
 		const refs = this.#registry.list().filter(ref => ref.id !== MAIN_AGENT_ID);
 		this.#observedById = new Map();
 		for (const session of this.#observers.getSessions()) this.#observedById.set(session.id, session);
@@ -447,6 +448,11 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 				if (!rowOrder.has(ref.id)) rowOrder.set(ref.id, this.#nextRowOrder++);
 			}
 		}
+		for (const ref of refs) {
+			if (!this.#rowOrder.has(ref.id)) this.#rowOrder.set(ref.id, this.#rowOrder.size);
+		}
+		this.#allRows = refs;
+		this.#rows = this.#rowsForTab(this.#tab);
 
 		if (this.#viewMode === "tree") {
 			const tree = projectAgentTree(rosterRows);
@@ -738,7 +744,156 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			const count = this.#statusCounts[status];
 			if (count > 0) parts.push(`${statusGlyph(status)} ${statusText(status, `${count} ${status}`)}`);
 		}
-		return parts.join(theme.sep.dot);
+		if (renderedRows.length > 0 && this.#selectedRow >= end) {
+			start = this.#selectedRow;
+			end = this.#selectedRow + 1;
+			visibleLines = renderedRows[this.#selectedRow]?.length ?? 0;
+			while (start > 0 && visibleLines + renderedRows[start - 1]!.length <= maxVisibleLines) {
+				start--;
+				visibleLines += renderedRows[start]!.length;
+			}
+			while (end < renderedRows.length && visibleLines + renderedRows[end]!.length <= maxVisibleLines) {
+				visibleLines += renderedRows[end]!.length;
+				end++;
+			}
+		}
+		for (let i = start; i < end; i++) lines.push(...renderedRows[i]!);
+		if (end < this.#rows.length) lines.push(` ${theme.fg("dim", `… ${this.#rows.length - end} more`)}`);
+		if (this.#tab === "active" && idleCount > 0) {
+			lines.push(` ${theme.fg("dim", `${this.#showIdle ? "▾" : "▸"} ${idleCount} idle agents`)}`);
+		}
+		if (this.#tab === "archive" && this.#rows.length === 0) lines.push(` ${theme.fg("dim", "No archived agents.")}`);
+		return lines;
+	}
+
+	#runtimeView(ref: AgentRef): AgentRuntimeView {
+		const progress = this.#observableFor(ref.id)?.progress;
+		const view: AgentRuntimeView = {
+			model: progress?.resolvedModel,
+			thinkingLevel: progress?.thinkingLevel,
+			lspEnabled: progress?.lspEnabled,
+			advisorActive: progress?.advisorActive,
+			turns: progress?.requests,
+			tokens: progress?.tokens,
+			contextTokens: progress?.contextTokens,
+			contextWindow: progress?.contextWindow,
+			toolCount: progress?.toolCount,
+			cost: progress?.cost,
+		};
+		const session = ref.session;
+		if (!session) return view;
+		try {
+			if (session.model) view.model = formatModelStringWithRouting(session.model);
+		} catch {}
+		try {
+			const thinkingLevel = session.thinkingLevel;
+			if (thinkingLevel !== undefined) view.thinkingLevel = thinkingLevel;
+		} catch {}
+		try {
+			const toolNames = session.getActiveToolNames?.();
+			if (toolNames !== undefined) {
+				view.lspEnabled = toolNames.includes("lsp");
+			}
+		} catch {}
+		try {
+			const advisorActive = session.isAdvisorActive?.();
+			if (advisorActive !== undefined) {
+				view.advisorActive = advisorActive;
+			}
+		} catch {}
+
+		let revision = -1;
+		try {
+			revision = session.contextUsageRevision;
+		} catch {}
+		if (this.#liveMetricsCache?.id === ref.id && this.#liveMetricsCache.revision === revision) {
+			Object.assign(view, this.#liveMetricsCache.metrics);
+			return view;
+		}
+		const metrics: AgentRuntimeView = {};
+		try {
+			const stats = session.getSessionStats?.();
+			if (stats) {
+				metrics.turns = stats.assistantMessages;
+				metrics.tokens = stats.tokens.input + stats.tokens.output + stats.tokens.cacheWrite;
+				metrics.toolCount = stats.toolCalls;
+				metrics.cost = stats.cost;
+			}
+		} catch {}
+		try {
+			const context = session.getContextUsage?.();
+			if (context) {
+				metrics.contextTokens = context.tokens;
+				metrics.contextWindow = context.contextWindow;
+			}
+		} catch {}
+		this.#liveMetricsCache = { id: ref.id, revision, metrics };
+		Object.assign(view, metrics);
+		return view;
+	}
+
+	#renderInspector(ref: AgentRef | undefined, width: number): string[] {
+		if (!ref) return [` ${theme.fg("dim", "No agent selected.")}`];
+		const observed = this.#observableFor(ref.id);
+		const progress = observed?.progress;
+		const runtime = this.#runtimeView(ref);
+		const unknown = "unknown";
+		const capability = (value: boolean | undefined): string => (value === undefined ? unknown : value ? "on" : "off");
+		const age = formatAge(Math.max(1, Math.round((Date.now() - ref.lastActivity) / 1000)));
+		const parent = ref.parentId ? `${ref.kind}/of ${sanitizeLine(ref.parentId)}` : ref.kind;
+		const lines = [
+			` ${theme.bold(sanitizeLine(ref.id))} · ${ref.status} · ${parent} · unread ${this.#irc.unreadCount(ref.id)} · ${age}`,
+		];
+		const task = observed?.description ?? progress?.assignment ?? progress?.task;
+		lines.push(` Task: ${task ? sanitizeLine(task, TRUNCATE_LENGTHS.TITLE) : unknown}`);
+		lines.push(` Model ${sanitizeLine(runtime.model ?? unknown)} · Reasoning ${runtime.thinkingLevel ?? unknown}`);
+		lines.push(` Advisor ${capability(runtime.advisorActive)} · LSP ${capability(runtime.lspEnabled)}`);
+		const context =
+			runtime.contextTokens === undefined
+				? unknown
+				: formatContextUsage(
+						runtime.contextWindow && runtime.contextWindow > 0
+							? (runtime.contextTokens / runtime.contextWindow) * 100
+							: undefined,
+						runtime.contextWindow ?? 0,
+						runtime.contextTokens,
+					);
+		lines.push(
+			` Turns ${runtime.turns === undefined ? unknown : formatNumber(runtime.turns)} · Tokens ${runtime.tokens === undefined ? unknown : formatNumber(runtime.tokens)} · Context ${context}`,
+		);
+		lines.push(
+			` Tools ${runtime.toolCount === undefined ? unknown : formatNumber(runtime.toolCount)} · Duration ${progress ? formatDuration(progress.durationMs) : unknown} · Cost ${runtime.cost === undefined ? unknown : `$${runtime.cost.toFixed(2)}`}`,
+		);
+		if (!progress) {
+			lines.push(` ${theme.fg("dim", "No structured progress yet.")}`);
+			if (this.#tab === "archive") lines.push(` ${theme.fg("dim", "Open transcript for persisted details.")}`);
+			return lines.map(line => truncateToWidth(line, Math.max(1, width)));
+		}
+
+		let activity = progress.lastIntent;
+		if (progress.currentTool) {
+			const elapsed = progress.currentToolStartMs
+				? ` · ${formatDuration(Math.max(0, Date.now() - progress.currentToolStartMs))}`
+				: "";
+			activity = `${progress.currentTool}${progress.currentToolArgs ? ` ${progress.currentToolArgs}` : ""}${elapsed}`;
+		}
+		if (progress.retryState) {
+			activity = `retry ${progress.retryState.attempt}/${progress.retryState.maxAttempts} in ${formatDuration(progress.retryState.delayMs)}: ${progress.retryState.errorMessage}`;
+		} else if (progress.retryFailure) {
+			activity = `retry failed at ${progress.retryFailure.attempt}: ${progress.retryFailure.errorMessage}`;
+		}
+		lines.push(` Activity: ${sanitizeLine(activity ?? unknown, TRUNCATE_LENGTHS.TITLE)}`);
+		const recent = progress.recentTools.slice(-3).reverse();
+		if (recent.length === 0) {
+			lines.push(" Recent tools: none");
+		} else {
+			lines.push(" Recent tools:");
+			for (const tool of recent) {
+				const detail = `${tool.tool}${tool.args ? ` ${tool.args}` : ""} · ${formatAge(Math.max(1, Math.round((Date.now() - tool.endMs) / 1000)))}`;
+				lines.push(`  ${sanitizeLine(detail, TRUNCATE_LENGTHS.TITLE)}`);
+			}
+		}
+		return lines.map(line => truncateToWidth(line, Math.max(1, width)));
 	}
 
 	#refreshAggregate(refreshFallback = false): void {
@@ -1029,19 +1184,20 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			this.#requestRender();
 			return;
 		}
+		const selected = this.#rows[this.#selectedRow];
 		if (matchesKey(keyData, "enter") || keyData === "\r" || keyData === "\n") {
-			const selected = this.#rows[this.#selectedRow];
 			if (selected) this.#activateAgent(selected);
 			return;
 		}
-		if (keyData === "r") {
+		if (keyData === "t") {
+			if (selected) this.openChat(selected.id);
+			return;
+		}
+		if (this.#tab === "archive" && keyData === "r") {
 			this.#reviveSelected();
 			return;
 		}
-		if (keyData === "x") {
-			this.#killSelected();
-			return;
-		}
+		if (this.#tab === "archive" && keyData === "x") this.#killSelected();
 	}
 
 	/**
@@ -1052,16 +1208,13 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	 */
 	#activateAgent(ref: AgentRef): void {
 		this.#notice = undefined;
-		const focusAgent = this.#focusAgent;
-		// Advisor refs are read-only transcripts with no live/ revivable session;
-		// open the in-hub chat view (file-backed) instead of trying to focus one.
-		if (ref.kind === "advisor" || this.#remote || !focusAgent) {
+		if (this.#tab === "archive" || this.#remote || !this.#focusAgent) {
 			this.openChat(ref.id);
 			return;
 		}
 		void (async () => {
 			try {
-				await focusAgent(ref.id); // ensureLive inside revives parked agents; no parking, no session files
+				await this.#focusAgent!(ref.id);
 				this.#onDone();
 			} catch (error) {
 				this.#notice = error instanceof Error ? error.message : String(error);
