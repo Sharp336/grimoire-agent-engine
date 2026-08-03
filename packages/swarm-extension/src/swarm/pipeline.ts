@@ -7,6 +7,7 @@
  * - For pipeline mode, iterations repeat the full DAG execution
  */
 import type { AgentSource, ModelRegistry, Settings, SingleResult } from "@oh-my-pi/pi-coding-agent";
+import { buildDependencyGraph } from "./dag";
 import { executeSwarmAgent } from "./executor";
 import type { SwarmDefinition } from "./schema";
 import type { StateTracker } from "./state";
@@ -45,10 +46,12 @@ export interface PipelineResult {
 export class PipelineController {
 	#def: SwarmDefinition;
 	#waves: string[][];
+	#dependencies: Map<string, Set<string>>;
 	#stateTracker: StateTracker;
 
 	constructor(def: SwarmDefinition, waves: string[][], stateTracker: StateTracker) {
 		this.#def = def;
+		this.#dependencies = buildDependencyGraph(def);
 		this.#waves = waves;
 		this.#stateTracker = stateTracker;
 	}
@@ -147,6 +150,9 @@ export class PipelineController {
 					status: "waiting",
 					iteration,
 					wave: waveIdx,
+					startedAt: undefined,
+					completedAt: undefined,
+					error: undefined,
 				});
 			}
 			options.emitProgress(waveIdx);
@@ -154,8 +160,22 @@ export class PipelineController {
 			// Execute all agents in wave in parallel, catching per-agent errors
 			const waveResults = await Promise.all(
 				wave.map(async agentName => {
-					const agent = this.#def.agents.get(agentName)!;
 					const currentIndex = agentIndex++;
+					const failedDependencies = [...(this.#dependencies.get(agentName) ?? [])].filter(
+						dependency => results.get(dependency)?.exitCode !== 0,
+					);
+					if (failedDependencies.length > 0) {
+						const result = this.#buildBlockedResult(agentName, currentIndex, iteration, failedDependencies);
+						await this.#stateTracker.updateAgent(agentName, {
+							status: "blocked",
+							completedAt: Date.now(),
+							error: result.error,
+						});
+						await this.#stateTracker.appendLog(agentName, result.stderr);
+						return { agentName, result };
+					}
+
+					const agent = this.#def.agents.get(agentName)!;
 					try {
 						const result = await executeSwarmAgent(agent, currentIndex, {
 							workspace: options.workspace,
@@ -201,6 +221,31 @@ export class PipelineController {
 		}
 
 		return results;
+	}
+
+	#buildBlockedResult(
+		agentName: string,
+		index: number,
+		iteration: number,
+		failedDependencies: string[],
+	): SingleResult {
+		const agent = this.#def.agents.get(agentName)!;
+		const error = `${agentName} blocked because dependencies did not complete successfully: ${failedDependencies.join(", ")}`;
+		return {
+			index,
+			id: `swarm-${this.#def.name}-${agentName}-${iteration}`,
+			agent: agentName,
+			agentSource: "project" as AgentSource,
+			task: agent.task,
+			exitCode: 1,
+			output: "",
+			stderr: error,
+			truncated: false,
+			durationMs: 0,
+			tokens: 0,
+			requests: 0,
+			error,
+		};
 	}
 
 	#buildProgressSnapshot(): Record<string, { status: string; iteration: number }> {

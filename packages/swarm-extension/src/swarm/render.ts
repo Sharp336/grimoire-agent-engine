@@ -12,6 +12,7 @@ const STATUS_LABELS: Record<string, string> = {
 	waiting: "[wait]",
 	idle: "[idle]",
 	aborted: "[stop]",
+	blocked: "[skip]",
 };
 
 export function renderSwarmProgress(state: SwarmState): string[] {
@@ -38,12 +39,14 @@ export function renderSwarmProgress(state: SwarmState): string[] {
 	// Summary line
 	const completed = agents.filter(a => a.status === "completed").length;
 	const failed = agents.filter(a => a.status === "failed").length;
+	const blocked = agents.filter(a => a.status === "blocked").length;
 	const running = agents.filter(a => a.status === "running").length;
 
 	lines.push("");
 	const parts = [`${completed}/${agents.length} done`];
 	if (running > 0) parts.push(`${running} running`);
 	if (failed > 0) parts.push(`${failed} failed`);
+	if (blocked > 0) parts.push(`${blocked} blocked`);
 	if (state.startedAt) {
 		parts.push(`elapsed: ${formatDuration(Date.now() - state.startedAt)}`);
 	}

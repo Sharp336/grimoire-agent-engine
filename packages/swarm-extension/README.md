@@ -129,7 +129,7 @@ swarm:
 
 The orchestrator builds a DAG from `waits_for` and `reports_to`, then groups agents into **waves** using topological sort. Agents in the same wave run in parallel; waves execute in sequence.
 
-- `waits_for: [a, b]` — this agent won't start until both `a` and `b` finish
+- `waits_for: [a, b]` — this agent starts only when both `a` and `b` finish successfully; a failed or blocked dependency marks it blocked without running it
 - `reports_to: [x]` — equivalent to `x` having `waits_for: [this_agent]`
 - No explicit deps + `pipeline`/`sequential` mode — agents chain by YAML declaration order
 - No explicit deps + `parallel` mode — all agents run in one wave

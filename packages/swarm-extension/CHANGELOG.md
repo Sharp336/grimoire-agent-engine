@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Block dependent agents when an upstream dependency fails while allowing independent branches to continue.
+- Close standalone runner resources and exit with a status code that reflects the pipeline result.
+
 ## [16.3.7] - 2026-07-05
 
 ### Fixed

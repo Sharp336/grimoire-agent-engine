@@ -11,7 +11,7 @@ import { discoverAuthStorage } from "@oh-my-pi/pi-coding-agent";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildDependencyGraph, buildExecutionWaves, detectCycles } from "./swarm/dag";
-import { PipelineController } from "./swarm/pipeline";
+import { PipelineController, type PipelineResult } from "./swarm/pipeline";
 import { renderSwarmProgress } from "./swarm/render";
 import { parseSwarmYaml, validateSwarmDefinition } from "./swarm/schema";
 import { StateTracker } from "./swarm/state";
@@ -64,31 +64,36 @@ await stateTracker.init([...def.agents.keys()], def.targetCount, def.mode);
 
 // Auth + settings
 const authStorage = await discoverAuthStorage();
-const modelRegistry = new ModelRegistry(authStorage);
-const settings = Settings.isolated();
+let result: PipelineResult;
+try {
+	const modelRegistry = new ModelRegistry(authStorage);
+	const settings = Settings.isolated();
 
-// Progress display
-let lastProgressDump = 0;
-const PROGRESS_INTERVAL_MS = 5000;
+	// Progress display
+	let lastProgressDump = 0;
+	const PROGRESS_INTERVAL_MS = 5000;
 
-// Run
-console.log("\n--- Pipeline starting ---\n");
+	// Run
+	console.log("\n--- Pipeline starting ---\n");
 
-const controller = new PipelineController(def, waves, stateTracker);
-const result = await controller.run({
-	workspace,
-	onProgress: () => {
-		const now = Date.now();
-		if (now - lastProgressDump > PROGRESS_INTERVAL_MS) {
-			lastProgressDump = now;
-			const lines = renderSwarmProgress(stateTracker.state);
-			console.log(lines.join("\n"));
-			console.log();
-		}
-	},
-	modelRegistry,
-	settings,
-});
+	const controller = new PipelineController(def, waves, stateTracker);
+	result = await controller.run({
+		workspace,
+		onProgress: () => {
+			const now = Date.now();
+			if (now - lastProgressDump > PROGRESS_INTERVAL_MS) {
+				lastProgressDump = now;
+				const lines = renderSwarmProgress(stateTracker.state);
+				console.log(lines.join("\n"));
+				console.log();
+			}
+		},
+		modelRegistry,
+		settings,
+	});
+} finally {
+	authStorage.close();
+}
 
 console.log("\n--- Pipeline finished ---\n");
 console.log(`Status: ${result.status}`);
@@ -104,3 +109,13 @@ console.log(`\nState saved to: ${stateTracker.swarmDir}`);
 // Final state dump
 const lines = renderSwarmProgress(stateTracker.state);
 console.log(lines.join("\n"));
+
+const exitCode = result.status === "completed" ? 0 : 1;
+await Promise.all([flushWritable(process.stdout), flushWritable(process.stderr)]);
+process.exit(exitCode);
+
+function flushWritable(stream: NodeJS.WriteStream): Promise<void> {
+	const { promise, resolve, reject } = Promise.withResolvers<void>();
+	stream.write("", error => (error ? reject(error) : resolve()));
+	return promise;
+}

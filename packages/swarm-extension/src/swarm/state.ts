@@ -12,7 +12,7 @@ import * as path from "node:path";
 // ============================================================================
 
 export type PipelineStatus = "idle" | "running" | "completed" | "failed" | "aborted";
-export type AgentStatus = "pending" | "waiting" | "running" | "completed" | "failed";
+export type AgentStatus = "pending" | "waiting" | "running" | "completed" | "failed" | "blocked";
 
 export interface AgentState {
 	name: string;
