@@ -40,7 +40,7 @@ import {
 	resolveTelemetry,
 	type StreamFn,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
-	type ThinkingLevel,
+	ThinkingLevel,
 	type ToolChoiceDirective,
 } from "@oh-my-pi/pi-agent-core";
 import {
@@ -101,11 +101,17 @@ import { type AdvisorConfig, type AdvisorRuntimeStatus, loadAdvisorTranscriptCos
 import { type AsyncJob, AsyncJobManager } from "../async";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
-import type { ResolvedModelRoleValue } from "../config/model-resolver";
+import {
+	formatModelString,
+	formatModelStringWithRouting,
+	getModelMatchPreferences,
+	type ResolvedModelRoleValue,
+	resolveModelRoleValue,
+} from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings, SkillsSettings } from "../config/settings";
-import { onAppendOnlyModeChanged, onModelRolesChanged } from "../config/settings";
+import { onAdvisorActivationChanged, onAppendOnlyModeChanged, onModelRolesChanged } from "../config/settings";
 import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import { getFileSnapshotStore } from "../edit/file-snapshot-store";
 import type { PythonResult } from "../eval/py/executor";
@@ -449,6 +455,7 @@ export class AgentSession {
 	#cancelExitRecorder?: () => void;
 	#cancelFatalRecoveryHint?: () => void;
 	#exitRecorded = false;
+	#unsubscribeAdvisorActivation?: () => void;
 	#unsubscribeAppendOnly?: () => void;
 	#unsubscribeModelRoles?: () => void;
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
@@ -469,6 +476,9 @@ export class AgentSession {
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
 	readonly #advisors: SessionAdvisors;
+	#advisorEnabled = false;
+	#advisorEnabledOverride: boolean | undefined;
+	#advisorAutomaticMatch: string | undefined;
 	#goalTurnCounter = 0;
 	#planReferenceSent = false;
 	#planReferencePath = "local://PLAN.md";
@@ -1009,6 +1019,7 @@ export class AgentSession {
 			promptGeneration: () => this.#promptGeneration,
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
 			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
+			syncAfterThinkingLevelApplied: () => this.#syncAdvisorActivation(true),
 			setModelWithProviderSessionReset: model => this.#setModelWithProviderSessionReset(model),
 			clearActiveRetryFallback: () => this.#recovery.clearActiveRetryFallback(),
 			clearInheritedProviderPromptCacheKey: () => this.#clearInheritedProviderPromptCacheKey(),
@@ -1558,6 +1569,7 @@ export class AgentSession {
 			syncTodoPhasesFromBranch: () => this.#todo.syncFromBranch(),
 		};
 		this.#handoff = new SessionHandoff(handoffHost);
+		this.#syncAdvisorActivation();
 
 		this.#rehydrateCheckpointRewindState();
 
@@ -1566,7 +1578,64 @@ export class AgentSession {
 		this.#unsubscribeAgent = this.agent.subscribe(this.#handleAgentEvent);
 		// Re-evaluate append-only context mode when the setting changes at runtime.
 		this.#unsubscribeAppendOnly = onAppendOnlyModeChanged(_value => this.#syncAppendOnlyContext(this.model));
-		this.#unsubscribeModelRoles = onModelRolesChanged(() => this.#advisors.onModelRolesChanged());
+		this.#unsubscribeAdvisorActivation = onAdvisorActivationChanged(() => {
+			if (this.#isDisposed) return;
+			this.#syncAdvisorActivation(true);
+		});
+		this.#unsubscribeModelRoles = onModelRolesChanged(() => {
+			if (this.#isDisposed) return;
+			this.#syncAdvisorActivation(true);
+		});
+	}
+
+	#advisorAutomaticPatterns(): string[] {
+		return (this.settings.get("advisor.autoEnableFor") ?? "")
+			.split(",")
+			.map(pattern => pattern.trim())
+			.filter(Boolean);
+	}
+
+	#matchAdvisorAutomaticPattern(): string | undefined {
+		const patterns = this.#advisorAutomaticPatterns();
+		if (patterns.length === 0) return undefined;
+		const model = this.model;
+		if (!model) return undefined;
+		const availableModels = this.#modelRegistry.getAvailable();
+		const matchPreferences = getModelMatchPreferences(this.settings);
+		const configuredThinking = this.configuredThinkingLevel() ?? ThinkingLevel.Off;
+		for (const pattern of patterns) {
+			const resolved = resolveModelRoleValue(pattern, availableModels, {
+				settings: this.settings,
+				matchPreferences,
+				allowInvalidThinkingSelectorFallback: false,
+			});
+			if (!resolved.model || formatModelStringWithRouting(resolved.model) !== formatModelStringWithRouting(model)) {
+				continue;
+			}
+			if (
+				resolved.explicitThinkingSelector !== undefined &&
+				resolved.explicitThinkingSelector !== configuredThinking
+			) {
+				continue;
+			}
+			return pattern;
+		}
+		return undefined;
+	}
+	#syncAdvisorActivation(seedToCurrent = false): boolean {
+		const alwaysEnabled = this.settings.get("advisor.enabled");
+		const automaticMatch =
+			this.#advisorEnabledOverride === undefined && !alwaysEnabled
+				? this.#matchAdvisorAutomaticPattern()
+				: undefined;
+		const enabled = this.#advisorEnabledOverride ?? (alwaysEnabled || automaticMatch !== undefined);
+		this.#advisorAutomaticMatch = automaticMatch;
+		this.#advisorEnabled = enabled;
+		if (!enabled || (this.#agentKind !== "main" && !this.settings.get("advisor.subagents"))) {
+			this.#advisors.setAdvisorEnabled(false);
+			return false;
+		}
+		return this.#advisors.setAdvisorEnabled(true, seedToCurrent);
 	}
 	/** Model registry for API key resolution and model discovery */
 	get modelRegistry(): ModelRegistry {
@@ -3874,6 +3943,10 @@ export class AgentSession {
 		this.setHindsightSessionState(undefined);
 		hindsightState?.dispose();
 		this.#disconnectFromAgent();
+		if (this.#unsubscribeAdvisorActivation) {
+			this.#unsubscribeAdvisorActivation();
+			this.#unsubscribeAdvisorActivation = undefined;
+		}
 		if (this.#unsubscribeAppendOnly) {
 			this.#unsubscribeAppendOnly();
 			this.#unsubscribeAppendOnly = undefined;
@@ -6654,7 +6727,8 @@ export class AgentSession {
 
 	/** Advances through the thinking selectors supported by the active model. */
 	cycleThinkingLevel(): ConfiguredThinkingLevel | undefined {
-		return this.#models.cycleThinkingLevel();
+		const level = this.#models.cycleThinkingLevel();
+		return level;
 	}
 
 	/** Reports whether `/fast` is enabled for the active model family. */
@@ -7615,6 +7689,7 @@ export class AgentSession {
 						: (sessionContext.thinkingLevel as ThinkingLevel | undefined)
 					: defaultThinkingLevel;
 			this.#models.restoreThinkingLevel(restoredThinkingLevel);
+			this.#syncAdvisorActivation(true);
 			this.#models.restoreServiceTiers(
 				hasServiceTierEntry ? (sessionContext.serviceTier ?? {}) : configuredServiceTierByFamily,
 			);
@@ -7704,6 +7779,7 @@ export class AgentSession {
 			}
 			this.#todo.syncFromBranch();
 			this.#advisors.resetAllRuntimes();
+			this.#syncAdvisorActivation(true);
 			this.#advisors.reattachRecorderFeeds();
 			this.#reconnectToAgent();
 			try {
@@ -8991,13 +9067,28 @@ export class AgentSession {
 	}
 
 	/**
-	 * Enable or disable the advisor for this session. The setting is overridden for the session,
-	 * and the runtime is started or stopped to match.
+	 * Force the advisor on or off for this session, overriding configured automatic activation.
 	 *
-	 * @returns true when the advisor is actively running after the call.
+	 * @returns true when an advisor runtime is actively running after the call.
 	 */
 	setAdvisorEnabled(enabled: boolean): boolean {
-		return this.#advisors.setAdvisorEnabled(enabled);
+		this.#advisorEnabledOverride = enabled;
+		return this.#syncAdvisorActivation(true);
+	}
+
+	/**
+	 * Clear the session override and return to configured always/automatic activation.
+	 *
+	 * @returns true when an advisor runtime is actively running after the call.
+	 */
+	resetAdvisorEnabledOverride(): boolean {
+		this.#advisorEnabledOverride = undefined;
+		return this.#syncAdvisorActivation(true);
+	}
+
+	/** Re-evaluate configured activation while preserving any session override. */
+	refreshAdvisorActivation(): boolean {
+		return this.#syncAdvisorActivation(true);
 	}
 
 	/**
@@ -9006,7 +9097,7 @@ export class AgentSession {
 	 * @returns true when the advisor is actively running after the call.
 	 */
 	toggleAdvisorEnabled(): boolean {
-		return this.#advisors.toggleAdvisorEnabled();
+		return this.setAdvisorEnabled(!this.#advisorEnabled);
 	}
 
 	/**
@@ -9034,7 +9125,7 @@ export class AgentSession {
 	 * Whether the advisor setting is enabled for this session.
 	 */
 	isAdvisorEnabled(): boolean {
-		return this.#advisors.isAdvisorEnabled();
+		return this.#advisorEnabled;
 	}
 
 	/**
@@ -9085,14 +9176,33 @@ export class AgentSession {
 	 * Return structured advisor stats for the status command and TUI panel.
 	 */
 	getAdvisorStats(): AdvisorStats {
-		return this.#advisors.getAdvisorStats();
+		return { ...this.#advisors.getAdvisorStats(), automaticMatch: this.#advisorAutomaticMatch };
 	}
 
 	/**
 	 * Format a concise advisor status line for ACP/text output.
 	 */
 	formatAdvisorStatus(): string {
-		return this.#advisors.formatAdvisorStatus();
+		const stats = this.getAdvisorStats();
+		if (!stats.configured && !stats.active) {
+			if (this.#advisorEnabledOverride === false) return "Advisor is disabled for this session.";
+			if (this.#advisorAutomaticPatterns().length > 0) {
+				const model = this.model;
+				const modelLabel = model ? formatModelString(model) : "no model";
+				const thinking = this.configuredThinkingLevel() ?? ThinkingLevel.Off;
+				return `Advisor is automatic; no rule matches ${modelLabel}:${thinking}.`;
+			}
+			return "Advisor is disabled.";
+		}
+		const status = this.#advisors.formatAdvisorStatus();
+		if (!this.#advisorAutomaticMatch) return status;
+		if (status.startsWith("Advisor is enabled (")) {
+			return status.replace(
+				/^(Advisor is enabled \([^)]+\)\.)/,
+				`$1 Automatic match: ${this.#advisorAutomaticMatch}.`,
+			);
+		}
+		return status.replace(/^(Advisors enabled \(\d+\))/, `$1 via ${this.#advisorAutomaticMatch}`);
 	}
 
 	/**

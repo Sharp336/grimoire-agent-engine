@@ -104,6 +104,8 @@ const ADVISOR_CODEX_SSE_MAX_ATTEMPTS = 1;
 export interface AdvisorStats {
 	configured: boolean;
 	active: boolean;
+	/** Model selector that activated the automatic policy, when applicable. */
+	automaticMatch?: string;
 	model?: Model;
 	contextWindow: number;
 	contextTokens: number;
@@ -1545,13 +1547,14 @@ export class SessionAdvisors {
 	 *
 	 * @returns true when the advisor is actively running after the call.
 	 */
-	setAdvisorEnabled(enabled: boolean): boolean {
+	setAdvisorEnabled(enabled: boolean, seedToCurrent = true): boolean {
 		this.#advisorEnabled = enabled;
 		if (enabled) {
 			if (this.#advisors.length > 0 && !this.#advisorRuntimeMatchesCurrentConfig()) this.#stopAdvisorRuntime();
-			return this.#buildAdvisorRuntime(true);
+			return this.#buildAdvisorRuntime(seedToCurrent);
 		}
 		this.#stopAdvisorRuntime();
+		this.#advisorStatuses.clear();
 		return false;
 	}
 

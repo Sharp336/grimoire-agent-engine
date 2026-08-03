@@ -55,6 +55,24 @@ describe("selector setting side effects", () => {
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 
+	it("invalidates advisor status without clearing the session override", () => {
+		const resetAdvisorEnabledOverride = vi.fn();
+		const invalidate = vi.fn();
+		const requestRender = vi.fn();
+		const controller = new SelectorController({
+			session: { resetAdvisorEnabledOverride },
+			statusLine: { invalidate },
+			ui: { requestRender },
+		} as unknown as InteractiveModeContext);
+
+		controller.handleSettingChange("advisor.autoEnableFor", "pi/smol:low");
+		controller.handleSettingChange("advisor.enabled", false);
+
+		expect(resetAdvisorEnabledOverride).not.toHaveBeenCalled();
+		expect(invalidate).toHaveBeenCalledTimes(2);
+		expect(requestRender).toHaveBeenCalledTimes(2);
+	});
+
 	it("invalidates the UI and requests a repaint when tui.tight changes", () => {
 		const invalidate = vi.fn();
 		const requestRender = vi.fn();
@@ -78,7 +96,7 @@ describe("selector setting side effects", () => {
 
 		expect(applyMemoryBackend).toHaveBeenCalledTimes(1);
 	});
-	it("stops the live advisor runtime when advisor.enabled is turned off in /settings", () => {
+	it("lets settings activation events update the runtime without replacing a session override", () => {
 		const setAdvisorEnabled = vi.fn();
 		const invalidate = vi.fn();
 		const requestRender = vi.fn();
@@ -90,7 +108,7 @@ describe("selector setting side effects", () => {
 
 		controller.handleSettingChange("advisor.enabled", false);
 
-		expect(setAdvisorEnabled).toHaveBeenCalledWith(false);
+		expect(setAdvisorEnabled).not.toHaveBeenCalled();
 		expect(invalidate).toHaveBeenCalledTimes(1);
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
