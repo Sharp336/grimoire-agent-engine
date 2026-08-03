@@ -139,6 +139,97 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		);
 	});
 
+	it("admits only one concurrent Fireworks Fast fallback probe", async () => {
+		const fastModel = getBundledModel("fireworks", "kimi-k2.6-fast");
+		const baseModel = getBundledModel("fireworks", "kimi-k2.6");
+		if (!fastModel || !baseModel) throw new Error("Expected bundled Fireworks Fast and base models");
+		const baseSelector = `${baseModel.provider}/${baseModel.id}`;
+		vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue("test-key");
+		const switchStarted = Promise.withResolvers<void>();
+		const releaseSwitch = Promise.withResolvers<void>();
+		let firstModel = fastModel;
+		let secondModel = fastModel;
+		let modelChanges = 0;
+		const firstContinue = vi.fn();
+		const secondContinue = vi.fn();
+		const firstHost = createHost(fastModel, modelRegistry);
+		firstHost.model = () => firstModel;
+		firstHost.scheduleAgentContinue = firstContinue;
+		firstHost.setModelWithProviderSessionReset = async candidate => {
+			modelChanges++;
+			switchStarted.resolve();
+			await releaseSwitch.promise;
+			firstModel = candidate;
+		};
+		const secondHost = createHost(fastModel, modelRegistry);
+		secondHost.model = () => secondModel;
+		secondHost.scheduleAgentContinue = secondContinue;
+		secondHost.setModelWithProviderSessionReset = async candidate => {
+			modelChanges++;
+			secondModel = candidate;
+		};
+		const firstRecovery = new TurnRecovery(firstHost);
+		const secondRecovery = new TurnRecovery(secondHost);
+		const firstMessage = makeMessage([], fastModel);
+		const secondMessage = makeMessage([], fastModel);
+		firstMessage.errorMessage = "router unavailable";
+		secondMessage.errorMessage = "router unavailable";
+
+		const first = firstRecovery.handleRetryableError(firstMessage, {
+			fireworksFastFallback: true,
+			preserveFailedTurn: true,
+		});
+		await switchStarted.promise;
+		expect(modelRegistry.admitFallbackProbe(baseSelector)).toEqual({ status: "busy" });
+		expect(
+			await secondRecovery.handleRetryableError(secondMessage, {
+				fireworksFastFallback: true,
+				preserveFailedTurn: true,
+			}),
+		).toBe(false);
+		expect(modelChanges).toBe(1);
+		expect(secondContinue).not.toHaveBeenCalled();
+		releaseSwitch.resolve();
+		expect(await first).toBe(true);
+		expect(firstContinue).toHaveBeenCalledTimes(1);
+	});
+
+	it("releases a Fireworks Fast probe when the prompt changes during key lookup", async () => {
+		const fastModel = getBundledModel("fireworks", "kimi-k2.6-fast");
+		const baseModel = getBundledModel("fireworks", "kimi-k2.6");
+		if (!fastModel || !baseModel) throw new Error("Expected bundled Fireworks Fast and base models");
+		const baseSelector = `${baseModel.provider}/${baseModel.id}`;
+		const credentialStarted = Promise.withResolvers<void>();
+		const credential = Promise.withResolvers<string>();
+		vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async candidate => {
+			if (candidate.provider === baseModel.provider && candidate.id === baseModel.id) {
+				credentialStarted.resolve();
+				return credential.promise;
+			}
+			return "test-key";
+		});
+		let generation = 0;
+		const host = createHost(fastModel, modelRegistry);
+		host.promptGeneration = () => generation;
+		const setModel = vi.fn(async () => {});
+		host.setModelWithProviderSessionReset = setModel;
+		const recovery = new TurnRecovery(host);
+		const message = makeMessage([], fastModel);
+		message.errorMessage = "router unavailable";
+
+		const result = recovery.handleRetryableError(message, {
+			fireworksFastFallback: true,
+			preserveFailedTurn: true,
+		});
+		await credentialStarted.promise;
+		generation++;
+		credential.resolve("test-key");
+
+		expect(await result).toBe(false);
+		expect(setModel).not.toHaveBeenCalled();
+		expect(modelRegistry.admitFallbackProbe(baseSelector).status).toBe("probe");
+	});
+
 	it("treats a thinking-only partial turn as still retriable", () => {
 		const recovery = new TurnRecovery(createHost(model, modelRegistry));
 		const message = makeMessage([{ type: "thinking", thinking: "Let me reason about this step by step." }], model);
@@ -273,7 +364,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		expect(modelRegistry.admitFallbackProbe(fallbackSelector)).toEqual({ status: "busy" });
 	});
 
-	it("releases an attempt-zero probe only after terminal compaction handling", async () => {
+	it("releases an attempt-zero probe when compaction blocks continuation", async () => {
 		const fallback = getBundledModel("openai", "gpt-4o-mini");
 		if (!fallback) throw new Error("Expected bundled fallback model gpt-4o-mini");
 		const currentSelector = `${model.provider}/${model.id}`;
@@ -297,6 +388,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		await recovery.onErrorSettledWithoutRetry(makeMessage([], fallback), {
 			deferredHandoff: false,
 			continuationScheduled: false,
+			automaticContinuationBlocked: true,
 		});
 		expect(modelRegistry.admitFallbackProbe(fallbackSelector).status).toBe("probe");
 	});

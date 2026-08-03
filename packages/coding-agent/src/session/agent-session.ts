@@ -2711,6 +2711,7 @@ export class AgentSession {
 						continuationScheduled: compactionResult.continuationScheduled,
 						automaticContinuationBlocked: compactionResult.automaticContinuationBlocked === true,
 					});
+					await this.#recovery.onErrorSettledWithoutRetry(msg, compactionResult);
 					this.#recovery.resolveRetry();
 					await emitAgentEndNotification(
 						compactionResult.continuationScheduled ? { willContinue: true } : undefined,

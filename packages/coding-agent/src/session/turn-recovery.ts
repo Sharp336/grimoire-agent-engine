@@ -1300,19 +1300,34 @@ export class TurnRecovery {
 		if (!model) return false;
 		const baseModel = this.#host.modelRegistry.find("fireworks", toFireworksBaseModelId(model.id));
 		if (!baseModel) return false;
-		const apiKey = await this.#host.modelRegistry.getApiKey(baseModel, this.#host.sessionId());
-		if (!apiKey) return false;
 		const baseSelector = formatModelStringWithRouting(baseModel);
-		await this.#host.setModelWithProviderSessionReset(baseModel);
-		this.#host.sessionManager.appendModelChange(baseSelector, EPHEMERAL_MODEL_CHANGE_ROLE);
-		this.#host.settings.getStorage()?.recordModelUsage(baseSelector);
-		await this.#host.emitSessionEvent({
-			type: "retry_fallback_applied",
-			from: currentSelector,
-			to: baseSelector,
-			role: "fireworks-fast",
-		});
-		return true;
+		const admission = this.#host.modelRegistry.admitFallbackProbe(baseSelector);
+		if (admission.status === "busy") return false;
+		const probeLease = admission.status === "probe" ? admission.lease : undefined;
+		let transferred = false;
+		const generation = this.#host.promptGeneration();
+		try {
+			const apiKey = await this.#host.modelRegistry.getApiKey(baseModel, this.#host.sessionId());
+			if (!apiKey) return false;
+			if (this.#host.isDisposed() || this.#host.abortInProgress() || this.#host.promptGeneration() !== generation) {
+				return false;
+			}
+			const applied = await this.applyRetryFallbackCandidate(
+				"fireworks-fast",
+				{
+					raw: baseSelector,
+					provider: baseModel.provider,
+					id: baseModel.id,
+					thinkingLevel: undefined,
+				},
+				currentSelector,
+				{ pinFallback: true, apiKey, probeLease },
+			);
+			transferred = applied;
+			return applied;
+		} finally {
+			if (probeLease && !transferred) this.#host.modelRegistry.abandonFallbackProbe(probeLease);
+		}
 	}
 
 	async #maybeRestoreRetryFallbackPrimary(): Promise<void> {

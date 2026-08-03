@@ -208,10 +208,8 @@ describe("Agent hub row ordering", () => {
 	it("flags a fallback badge for a live row whose fallback armed no session retry state", () => {
 		geometry = stubStdoutGeometry(120);
 		const agents = new AgentRegistry();
-		// Live session with a resolved model but no `retryFallbackModel` — the
-		// Fireworks Fast → base degrade emits `retry_fallback_applied` without
-		// arming `#activeRetryFallback`, so the badge must fall back to the
-		// executor-reported progress flag.
+		// A live progress update can arrive without a retryFallbackModel snapshot,
+		// so the badge must fall back to the executor-reported progress flag.
 		const session = { model: { id: "kimi-k2" }, retryFallbackModel: undefined } as unknown as AgentSession;
 		agents.register({ id: "FastAgent", displayName: "Fast Agent", kind: "sub", session });
 
