@@ -1501,7 +1501,8 @@ function mapOptionsForApi<TApi extends Api>(
 			const reasoning = options?.reasoning;
 			const adaptiveThinkingMode =
 				!explicitThinkingOff &&
-				(options?.thinkingMode === "adaptive" || options?.anthropicThinkingMode === "adaptive");
+				(options?.anthropicThinkingMode === "adaptive" ||
+					(options?.thinkingMode === "adaptive" && model.thinking?.mode === "anthropic-adaptive"));
 			if ((!reasoning && !adaptiveThinkingMode) || !model.reasoning) {
 				return castApi<"anthropic-messages">({
 					...base,
@@ -1623,7 +1624,10 @@ function mapOptionsForApi<TApi extends Api>(
 				reasoning: explicitThinkingOff ? undefined : options?.reasoning,
 				anthropicThinkingMode: explicitThinkingOff
 					? undefined
-					: (options?.anthropicThinkingMode ?? (options?.thinkingMode === "adaptive" ? "adaptive" : undefined)),
+					: (options?.anthropicThinkingMode ??
+						(options?.thinkingMode === "adaptive" && model.thinking?.mode === "anthropic-adaptive"
+							? "adaptive"
+							: undefined)),
 				thinkingBudgets: options?.thinkingBudgets,
 				toolChoice: mapAnthropicToolChoice(options?.toolChoice),
 				thinkingDisplay: options?.hideThinkingSummary ? "omitted" : undefined,

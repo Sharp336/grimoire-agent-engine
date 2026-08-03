@@ -111,6 +111,34 @@ describe("GitLab Duo prompt cache affinity", () => {
 		expect(payload?.output_config).toBeUndefined();
 	});
 
+	it("ignores neutral adaptive thinking mode for non-adaptive Anthropic proxy models", async () => {
+		const model = getGitLabDuoModels().find(candidate => candidate.id === "duo-chat-opus-4-5");
+		if (!model) throw new Error("GitLab Duo Anthropic model is missing");
+		let payload: Record<string, unknown> | undefined;
+		const stream = streamGitLabDuo(model, context, {
+			apiKey: "gitlab-access-token",
+			thinkingMode: "adaptive",
+			fetch: async input => {
+				if (String(input).includes("/direct_access")) {
+					return new Response(JSON.stringify({ token: "direct-access-token", headers: {} }), {
+						status: 200,
+						headers: { "content-type": "application/json" },
+					});
+				}
+				throw new Error("the payload hook should stop the proxy request before fetch");
+			},
+			onPayload: body => {
+				payload = body as Record<string, unknown>;
+				throw new Error("stop after payload capture");
+			},
+		});
+
+		await stream.result();
+
+		expect(payload?.thinking).toEqual({ type: "disabled" });
+		expect(payload?.output_config).toBeUndefined();
+	});
+
 	it("maps neutral off thinking mode for Anthropic proxy models", async () => {
 		const model = getGitLabDuoModels().find(candidate => candidate.id === "duo-chat-opus-4-6");
 		if (!model) throw new Error("GitLab Duo Anthropic model is missing");

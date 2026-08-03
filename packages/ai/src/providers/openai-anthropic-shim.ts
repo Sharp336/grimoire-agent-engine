@@ -88,7 +88,10 @@ export function streamOpenAIAnthropicShim(
 					anthropicModel.thinking?.mode === "anthropic-budget-effort";
 
 				const adaptiveThinkingMode =
-					options?.anthropicThinkingMode ?? (options?.thinkingMode === "adaptive" ? "adaptive" : undefined);
+					options?.anthropicThinkingMode ??
+					(options?.thinkingMode === "adaptive" && anthropicModel.thinking?.mode === "anthropic-adaptive"
+						? "adaptive"
+						: undefined);
 				const thinkingEnabled = !!reasoningEffort && model.reasoning && !explicitThinkingOff;
 				const thinkingBudget =
 					reasoningEffort && !explicitThinkingOff

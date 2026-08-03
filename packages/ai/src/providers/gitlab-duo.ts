@@ -270,56 +270,60 @@ export function streamGitLabDuo(
 			};
 
 			const explicitThinkingOff = options.thinkingMode === "off" || options.disableReasoning === true;
-			const adaptiveThinkingMode =
-				options.anthropicThinkingMode ?? (options.thinkingMode === "adaptive" ? "adaptive" : undefined);
 			const reasoningEffort = options.reasoning;
 
-			const inner =
+			const anthropicModel =
 				mapping.provider === "anthropic"
-					? streamAnthropic(
-							buildModel({
-								...model,
-								id: mapping.model,
-								api: "anthropic-messages",
-								// Re-derive Claude thinking metadata from the upstream model id;
-								// the Duo alias carries alias-derived metadata from buildModel().
-								thinking: undefined,
-								baseUrl: ANTHROPIC_PROXY_URL,
-								compat: model.compatConfig,
-							} as ModelSpec<"anthropic-messages">),
-							context,
-							{
-								apiKey: directAccess.token,
-								isOAuth: true,
-								temperature: options.temperature,
-								topP: options.topP,
-								topK: options.topK,
-								minP: options.minP,
-								presencePenalty: options.presencePenalty,
-								repetitionPenalty: options.repetitionPenalty,
-								maxTokens: options.maxTokens ?? model.maxTokens ?? undefined,
-								signal: options.signal,
-								cacheRetention: options.cacheRetention,
-								headers,
-								maxRetryDelayMs: options.maxRetryDelayMs,
-								metadata: options.metadata,
-								sessionId: options.sessionId,
-								promptCacheKey: options.promptCacheKey,
-								providerSessionState: options.providerSessionState,
-								onPayload: options.onPayload,
-								onResponse: options.onResponse,
-								onSseEvent: options.onSseEvent,
-								fetch: options.fetch,
-								thinkingEnabled: Boolean(reasoningEffort) && model.reasoning && !explicitThinkingOff,
-								thinkingBudgetTokens:
-									reasoningEffort && !explicitThinkingOff
-										? (options.thinkingBudgets?.[reasoningEffort] ?? ANTHROPIC_THINKING[reasoningEffort])
-										: undefined,
-								reasoning: reasoningEffort,
-								anthropicThinkingMode: explicitThinkingOff ? undefined : adaptiveThinkingMode,
-								toolChoice: mapAnthropicToolChoice(options.toolChoice),
-							},
-						)
+					? buildModel({
+							...model,
+							id: mapping.model,
+							api: "anthropic-messages",
+							// Re-derive Claude thinking metadata from the upstream model id;
+							// the Duo alias carries alias-derived metadata from buildModel().
+							thinking: undefined,
+							baseUrl: ANTHROPIC_PROXY_URL,
+							compat: model.compatConfig,
+						} as ModelSpec<"anthropic-messages">)
+					: undefined;
+			const adaptiveThinkingMode =
+				options.anthropicThinkingMode ??
+				(options.thinkingMode === "adaptive" && anthropicModel?.thinking?.mode === "anthropic-adaptive"
+					? "adaptive"
+					: undefined);
+
+			const inner =
+				mapping.provider === "anthropic" && anthropicModel
+					? streamAnthropic(anthropicModel, context, {
+							apiKey: directAccess.token,
+							isOAuth: true,
+							temperature: options.temperature,
+							topP: options.topP,
+							topK: options.topK,
+							minP: options.minP,
+							presencePenalty: options.presencePenalty,
+							repetitionPenalty: options.repetitionPenalty,
+							maxTokens: options.maxTokens ?? model.maxTokens ?? undefined,
+							signal: options.signal,
+							cacheRetention: options.cacheRetention,
+							headers,
+							maxRetryDelayMs: options.maxRetryDelayMs,
+							metadata: options.metadata,
+							sessionId: options.sessionId,
+							promptCacheKey: options.promptCacheKey,
+							providerSessionState: options.providerSessionState,
+							onPayload: options.onPayload,
+							onResponse: options.onResponse,
+							onSseEvent: options.onSseEvent,
+							fetch: options.fetch,
+							thinkingEnabled: Boolean(reasoningEffort) && model.reasoning && !explicitThinkingOff,
+							thinkingBudgetTokens:
+								reasoningEffort && !explicitThinkingOff
+									? (options.thinkingBudgets?.[reasoningEffort] ?? ANTHROPIC_THINKING[reasoningEffort])
+									: undefined,
+							reasoning: reasoningEffort,
+							anthropicThinkingMode: explicitThinkingOff ? undefined : adaptiveThinkingMode,
+							toolChoice: mapAnthropicToolChoice(options.toolChoice),
+						})
 					: mapping.openaiApiType === "responses"
 						? streamOpenAIResponses(
 								buildModel({

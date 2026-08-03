@@ -158,6 +158,13 @@ describe("issue #1373: Bedrock Claude thinkingDisplay", () => {
 			display: "summarized",
 		});
 		expect(adaptivePayload.additionalModelRequestFields?.output_config?.effort).toBeUndefined();
+		const budgetAdaptivePayload = await captureSimpleBedrockPayload(
+			budgetModel("us.anthropic.claude-haiku-4-5-20251001-v1:0"),
+			{
+				thinkingMode: "adaptive",
+			},
+		);
+		expect(budgetAdaptivePayload.additionalModelRequestFields).toBeUndefined();
 		const offPayload = await captureSimpleBedrockPayload(adaptiveModel("anthropic.claude-opus-4-7"), {
 			reasoning: Effort.High,
 			thinkingMode: "off",

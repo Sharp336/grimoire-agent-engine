@@ -27,6 +27,23 @@ const staleOpenAIClaude: Model<"openai-completions"> = buildModel({
 	},
 } satisfies ModelSpec<"openai-completions">);
 
+const budgetOpenAIClaude: Model<"openai-completions"> = buildModel({
+	id: "claude-3-7-sonnet-20250219",
+	name: "Claude 3.7 Sonnet via shim",
+	api: "openai-completions",
+	provider: "synthetic",
+	baseUrl: "https://api.synthetic.new/openai/v1",
+	reasoning: true,
+	input: ["text"],
+	contextWindow: 200_000,
+	maxTokens: 64_000,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	thinking: {
+		mode: "budget",
+		efforts: [Effort.Low, Effort.High],
+	},
+} satisfies ModelSpec<"openai-completions">);
+
 const offCapableOpenAIClaude: Model<"openai-completions"> = buildModel({
 	id: "claude-opus-5",
 	name: "Claude Opus 5 via shim",
@@ -119,6 +136,31 @@ describe("OpenAI/Anthropic shim thinking transport", () => {
 		await stream.result();
 
 		expect(payload?.thinking).toMatchObject({ type: "adaptive" });
+		expect(payload?.output_config).toBeUndefined();
+	});
+
+	it("ignores neutral adaptive mode for non-adaptive Anthropic transports", async () => {
+		let payload: Record<string, unknown> | undefined;
+		const stream = streamOpenAIAnthropicShim(
+			budgetOpenAIClaude,
+			context,
+			{
+				apiKey: "test-key",
+				format: "anthropic",
+				thinkingMode: "adaptive",
+				onPayload: body => {
+					payload = body as Record<string, unknown>;
+					throw new Error("stop after payload capture");
+				},
+			},
+			{
+				anthropicBaseUrl: "https://api.synthetic.new/anthropic",
+				defaultFormat: "anthropic",
+			},
+		);
+		await stream.result();
+
+		expect(payload?.thinking).toEqual({ type: "disabled" });
 		expect(payload?.output_config).toBeUndefined();
 	});
 

@@ -49,6 +49,19 @@ function adaptiveModel(id: string): Model<"anthropic-messages"> {
 	} as ModelSpec<"anthropic-messages">);
 }
 
+/** Budget-thinking Anthropic model; neutral adaptive mode should not opt it into thinking. */
+function budgetModel(id: string): Model<"anthropic-messages"> {
+	const base = makeAnthropicModel(id);
+	return buildModel({
+		...base,
+		thinking: {
+			mode: "budget",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+		},
+		compat: base.compatConfig,
+	} as ModelSpec<"anthropic-messages">);
+}
+
 /** Real catalog entry — carries shipped `thinking` capability metadata. */
 function bundledAnthropicModel(id: string): Model<"anthropic-messages"> {
 	const model = getBundledModel<"anthropic-messages">("anthropic", id);
@@ -169,6 +182,15 @@ describe("Anthropic adaptive thinking mode", () => {
 		});
 
 		expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
+		expect(payload.output_config?.effort).toBeUndefined();
+	});
+
+	it("ignores neutral adaptive mode on budget Anthropic models", async () => {
+		const payload = await captureSimplePayload(budgetModel("claude-3-7-sonnet-20250219"), {
+			thinkingMode: "adaptive",
+		});
+
+		expect(payload.thinking).toEqual({ type: "disabled" });
 		expect(payload.output_config?.effort).toBeUndefined();
 	});
 
