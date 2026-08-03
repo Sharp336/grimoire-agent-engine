@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Added deterministic, terminal cleanup for native shell sessions ([#7485](https://github.com/can1357/oh-my-pi/issues/7485)).
+
 ## [17.2.5] - 2026-08-03
 
 ### Breaking Changes
