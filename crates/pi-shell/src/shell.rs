@@ -1573,7 +1573,7 @@ impl SpawnObserver for process::SpawnRegistry {
 	fn on_spawn(
 		&self,
 		pid: i32,
-		pgid: Option<i32>,
+		_pgid: Option<i32>,
 		#[cfg(windows)] handle: Option<std::os::windows::io::OwnedHandle>,
 	) {
 		// Pin a stable process reference *now*, before the pid can be recycled.
@@ -1588,15 +1588,14 @@ impl SpawnObserver for process::SpawnRegistry {
 			.or_else(|| process::Process::from_pid(pid));
 		#[cfg(not(windows))]
 		let process = process::Process::from_pid(pid);
-		self.record(pgid, process);
+		self.record(process);
 	}
 }
 
 // Escalating TERM -> KILL waves over the processes this run spawned, scoped via
 // the per-run `SpawnRegistry`. The kill set is rebuilt each wave so a child
-// spawned in a grace window — or a grandchild whose recorded parent already
-// exited but whose process group is still live — is still reaped, and the loop
-// stops as soon as the run's whole tree is gone. Scoping to the registry (vs a
+// spawned in a grace window is still reaped, and the loop stops as soon as the
+// run's whole tree is gone. Scoping to the registry (vs a
 // process-global descendant diff) is what keeps a cancel from reaping a
 // concurrent run's children in a shared host process.
 async fn terminate_run(registry: &process::SpawnRegistry) {

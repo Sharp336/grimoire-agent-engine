@@ -1484,11 +1484,10 @@ impl Process {
 			return Ok(true);
 		}
 
-		let process_group = if group { self.group_id() } else { None };
 		let protected = host_protected_pids();
 
 		// Polite wave: SIGTERM the group, every live descendant, then the root.
-		if let Some(pgid) = process_group {
+		if group && let Some(pgid) = self.group_id() {
 			let _ = kill_process_group(pgid, TERM_SIGNAL);
 		}
 		let mut descendants = self.signalable_descendants(&protected);
@@ -1516,7 +1515,7 @@ impl Process {
 
 		// Hard wave. Re-walk the tree so any grandchild spawned during the grace
 		// period — or any process re-parented to the root — is signalled too.
-		if let Some(pgid) = process_group {
+		if group && let Some(pgid) = self.group_id() {
 			let _ = kill_process_group(pgid, KILL_SIGNAL);
 		}
 		descendants = self.signalable_descendants(&protected);
@@ -1674,7 +1673,6 @@ pub const KILL_SIGNAL: i32 = 9;
 /// on platforms that do not expose process groups.
 #[derive(Default)]
 pub struct TerminationTargets {
-	pgids:     Vec<i32>,
 	processes: Vec<Process>,
 	seen_pids: HashSet<i32>,
 }
@@ -1684,13 +1682,6 @@ impl TerminationTargets {
 	#[must_use]
 	pub fn new() -> Self {
 		Self::default()
-	}
-
-	/// Record a process group id. Duplicates are ignored.
-	pub fn add_pgid(&mut self, pgid: i32) {
-		if pgid > 0 && !self.pgids.contains(&pgid) {
-			self.pgids.push(pgid);
-		}
 	}
 
 	/// Record a pid. Duplicates are ignored. If the pid is alive, opens
@@ -1720,11 +1711,8 @@ impl TerminationTargets {
 		}
 	}
 
-	/// Merge another target set while keeping process and group ids unique.
+	/// Merge another target set while keeping process ids unique.
 	pub fn extend(&mut self, other: Self) {
-		for pgid in other.pgids {
-			self.add_pgid(pgid);
-		}
 		for process in other.processes {
 			self.add_process(process);
 		}
@@ -1738,7 +1726,7 @@ impl TerminationTargets {
 	/// True when no targets have been recorded.
 	#[must_use]
 	pub const fn is_empty(&self) -> bool {
-		self.pgids.is_empty() && self.processes.is_empty()
+		self.processes.is_empty()
 	}
 
 	/// Send `signal` to every recorded target. Failures are swallowed:
@@ -1754,16 +1742,11 @@ impl TerminationTargets {
 		for descendant in descendants {
 			self.add_process(descendant);
 		}
-		let leader_groups: Vec<i32> = self
-			.processes
-			.iter()
-			.filter_map(|process| process.group_id().filter(|group| *group == process.pid()))
-			.collect();
-		for group in leader_groups {
-			self.add_pgid(group);
-		}
-		for &pgid in &self.pgids {
-			let _ = kill_process_group(pgid, signal);
+		for process in &self.processes {
+			if process.status() == ProcessStatus::Running && process.group_id() == Some(process.pid())
+			{
+				let _ = kill_process_group(process.pid(), signal);
+			}
 		}
 		for process in &self.processes {
 			let _ = process.signal_tree_excluding(signal, &protected);
@@ -1775,7 +1758,6 @@ impl TerminationTargets {
 		self
 			.processes
 			.retain(|process| process.status() == ProcessStatus::Running);
-		self.pgids.retain(|pgid| process_group_alive(*pgid));
 		self.seen_pids = self.processes.iter().map(Process::pid).collect();
 	}
 }
@@ -1793,7 +1775,6 @@ impl TerminationTargets {
 #[derive(Clone)]
 struct SpawnedProcess {
 	process: Option<Process>,
-	pgid:    Option<i32>,
 }
 
 /// Per-run record of the OS processes a single shell command launched,
@@ -1872,10 +1853,10 @@ impl SpawnRegistry {
 	/// crosses the next-sweep watermark, so long-running loops of short
 	/// external commands cannot exhaust the process' FD/handle limit by
 	/// retaining one owned handle per historical spawn.
-	pub fn record(&self, pgid: Option<i32>, process: Option<Process>) {
+	pub fn record(&self, process: Option<Process>) {
 		let mirrored_process = process.clone();
 		let mut state = self.state.lock();
-		state.spawned.push(SpawnedProcess { process, pgid });
+		state.spawned.push(SpawnedProcess { process });
 		if state.spawned.len() >= state.next_sweep_at.max(Self::PRUNE_THRESHOLD) {
 			prune_exited(&mut state.spawned);
 			// Schedule the next sweep `PRUNE_THRESHOLD` further records away.
@@ -1888,7 +1869,7 @@ impl SpawnRegistry {
 		}
 		drop(state);
 		if let Some(mirror) = &self.mirror {
-			mirror.record(pgid, mirrored_process);
+			mirror.record(mirrored_process);
 		}
 	}
 
@@ -1896,9 +1877,10 @@ impl SpawnRegistry {
 	/// signal wave so a child spawned during a grace window — between the
 	/// cancel firing and the next wave — is still reaped.
 	///
-	/// A recorded process contributes only while alive; a recorded pgid
-	/// contributes only while the group still has members, so once the run's
-	/// whole tree exits the targets are empty and the wave loop can stop early.
+	/// A recorded process contributes only while its spawn-time identity remains
+	/// live, so once the run's whole tree exits the targets are empty and the
+	/// wave loop can stop early. Numeric process-group ids are never retained
+	/// without a live pinned member because the id can be reused.
 	///
 	/// Pruning also runs here so a cancellation cycle sees a compact target
 	/// set even when the record-time threshold hasn't fired yet.
@@ -1918,32 +1900,17 @@ impl SpawnRegistry {
 			if let Some(process) = entry.process {
 				targets.add_process(process);
 			}
-			// If the observer failed to pin a handle at spawn time (the child
-			// exited before `Process::from_pid` could open it), the child is
-			// already gone — signalling anything for that pid would either
-			// no-op or, worse, race a recycled pid onto an unrelated process.
-			// Drop the entry entirely rather than reintroduce the pid-reuse
-			// window this whole change exists to close (#4605).
-			if let Some(pgid) = entry.pgid
-				&& pgid > 0
-				&& process_group_alive(pgid)
-			{
-				targets.add_pgid(pgid);
-			}
 		}
 		targets
 	}
 }
 
-/// Drop registry entries whose pinned process, process group, and — on
-/// Windows — descendant tree are all gone. With nothing still-live the entry
+/// Drop registry entries whose pinned process and — on Windows — descendant
+/// tree are both gone. With nothing still-live the entry
 /// contributes nothing to the next termination wave and only pins an owned OS
 /// handle for no reason.
 ///
-/// The platform split matters because Windows has no process groups. On Unix
-/// a child reparented onto init keeps its pgid, so a live pgid still catches
-/// grandchildren whose immediate parent exited. On Windows there is no
-/// reparenting and no pgid, so we probe the descendant tree directly through
+/// On Windows we probe the descendant tree directly through
 /// the still-open pinned handle — dropping that handle would release the pid
 /// slot, letting a recycled pid make future Toolhelp walks unsafe (issue
 /// #4605) and orphaning any leftover child from the next cancellation wave.
@@ -1963,36 +1930,8 @@ fn prune_exited(spawned: &mut Vec<SpawnedProcess>) {
 				return true;
 			}
 		}
-		entry
-			.pgid
-			.is_some_and(|pgid| pgid > 0 && process_group_alive(pgid))
+		false
 	});
-}
-
-/// True when process group `pgid` still has at least one member. `kill(2)`
-/// with signal 0 performs permission/existence checks without delivering a
-/// signal; `EPERM` means the group exists but is not ours to signal, which
-/// still counts as alive.
-#[must_use]
-fn process_group_alive(pgid: i32) -> bool {
-	if pgid <= 0 {
-		return false;
-	}
-	platform_process_group_alive(pgid)
-}
-
-#[cfg(unix)]
-fn platform_process_group_alive(pgid: i32) -> bool {
-	// SAFETY: `kill` takes integer identifiers by value and does not access
-	// caller-owned memory. A negative pid targets the process group; signal 0
-	// only runs the existence/permission checks.
-	let ret = unsafe { libc::kill(-pgid, 0) };
-	ret == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
-#[cfg(not(unix))]
-const fn platform_process_group_alive(_pgid: i32) -> bool {
-	false
 }
 
 #[cfg(test)]
@@ -2183,7 +2122,7 @@ mod tests {
 
 		let registry = SpawnRegistry::new();
 		let pinned = Process::from_pid(long_pid).expect("pin child at record time");
-		registry.record(None, Some(pinned));
+		registry.record(Some(pinned));
 
 		let live_targets = registry.build_targets();
 		assert!(
@@ -2280,7 +2219,7 @@ mod tests {
 				}
 				thread::sleep(Duration::from_millis(5));
 			}
-			registry.record(None, pinned);
+			registry.record(pinned);
 		}
 
 		let retained = registry.state.lock().spawned.len();
@@ -2318,7 +2257,7 @@ mod tests {
 		// (pinning ourselves) so the pruner has nothing to remove.
 		let fill = SpawnRegistry::PRUNE_THRESHOLD + 10;
 		for _ in 0..fill {
-			registry.record(None, Process::from_pid(self_pid));
+			registry.record(Process::from_pid(self_pid));
 		}
 		let after_fill = registry.state.lock().spawned.len();
 		assert_eq!(after_fill, fill, "live-only entries must not be pruned during warm-up");
@@ -2331,7 +2270,7 @@ mod tests {
 		// every one of these records.
 		let extra = 20;
 		for _ in 0..extra {
-			registry.record(None, Process::from_pid(self_pid));
+			registry.record(Process::from_pid(self_pid));
 		}
 		let after_extra = registry.state.lock().spawned.len();
 		assert_eq!(

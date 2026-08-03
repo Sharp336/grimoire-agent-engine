@@ -18,6 +18,7 @@ use napi::{
 };
 use napi_derive::napi;
 use parking_lot::Mutex;
+use pi_shell::process::Process as ShellProcess;
 use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
 
 use crate::{ps, task};
@@ -251,15 +252,11 @@ impl PtySession {
 
 fn terminate_pty_processes(
 	child: &mut Box<dyn Child + Send + Sync>,
-	child_pid: Option<i32>,
-	process_group_id: Option<i32>,
+	child_process: Option<&ShellProcess>,
 ) {
 	let mut targets = ps::TerminationTargets::new();
-	if let Some(pgid) = process_group_id {
-		targets.add_pgid(pgid);
-	}
-	if let Some(pid) = child_pid {
-		targets.add_pid(pid);
+	if let Some(process) = child_process {
+		targets.add_process(process.clone());
 	}
 
 	targets.signal(ps::TERM_SIGNAL);
@@ -353,6 +350,7 @@ fn run_pty_sync(
 	drop(pair.slave);
 	let child_process_id = child.process_id();
 	let child_pid = child_process_id.and_then(|value| i32::try_from(value).ok());
+	let child_process = child_pid.and_then(ShellProcess::from_pid);
 	if let Some(callback) = on_start.as_ref() {
 		callback.call(Ok(child_process_id.unwrap_or(0)), ThreadsafeFunctionCallMode::NonBlocking);
 	}
@@ -436,10 +434,6 @@ fn run_pty_sync(
 		let _ = reader_tx.send(ReaderEvent::Done);
 	});
 
-	#[cfg(unix)]
-	let process_group_id = master.process_group_leader().filter(|pgid| *pgid > 0);
-	#[cfg(not(unix))]
-	let process_group_id: Option<i32> = None;
 	let mut timed_out = false;
 	let mut cancelled = false;
 	let mut reader_done = false;
@@ -451,7 +445,7 @@ fn run_pty_sync(
 			let message = err.to_string();
 			timed_out = message.contains("Timeout");
 			cancelled = !timed_out;
-			terminate_pty_processes(&mut child, child_pid, process_group_id);
+			terminate_pty_processes(&mut child, child_process.as_ref());
 			terminate_requested = true;
 			reader_drain_deadline = Some(Instant::now() + POST_CANCEL_DRAIN_TIMEOUT);
 		}
@@ -468,7 +462,7 @@ fn run_pty_sync(
 				Ok(ControlMessage::Kill) => {
 					cancelled = true;
 					if !terminate_requested {
-						terminate_pty_processes(&mut child, child_pid, process_group_id);
+						terminate_pty_processes(&mut child, child_process.as_ref());
 						terminate_requested = true;
 						reader_drain_deadline = Some(Instant::now() + POST_CANCEL_DRAIN_TIMEOUT);
 					}
