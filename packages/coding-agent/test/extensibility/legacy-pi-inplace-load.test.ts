@@ -5,7 +5,10 @@ import * as path from "node:path";
 import * as url from "node:url";
 import {
 	__collectLegacyPiExtensionSourcesForTests,
+	__hasCommonJsModuleSourceForTests,
+	__inFlightLegacyPiLoadsForTests,
 	__rewriteLegacyExtensionSourceForTests,
+	__setLegacyPiGraphPreparationPauseForTests,
 	loadLegacyPiModule,
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -1541,5 +1544,158 @@ describe("legacy-pi in-place module loading (issue #1674)", () => {
 		// extension's rewrite hook; its fork-scope import stays unresolved.
 		const siblingUrl = `${url.pathToFileURL(await fs.realpath(path.join(dir, "unrelated.ts"))).href}?nonce=${Date.now()}`;
 		await expect(import(siblingUrl)).rejects.toThrow(/@earendil-works\/pi-ai/);
+	});
+
+	it("keeps shared rewritten CommonJS sources until concurrent loads settle", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "shared-cjs-concurrent-root", version: "1.0.0", type: "module" }),
+			"node_modules/direct/package.json": JSON.stringify({
+				name: "direct",
+				version: "1.0.0",
+				main: "index.js",
+			}),
+			// Graph-owned CommonJS with a legacy Pi require that must stay rewritten
+			// in the process-global source map while overlapping imports run.
+			"node_modules/direct/index.js": 'module.exports = require("@mariozechner/pi-ai").Type;\n',
+			"first.ts": [
+				'import { Type } from "@oh-my-pi/pi-ai";',
+				'import requiredType from "direct";',
+				"const gate = globalThis.__ompSharedCjsGate;",
+				"gate.firstReady(requiredType === Type);",
+				"await gate.wait;",
+				"export const sharesHostType = requiredType === Type;",
+				"export default function (pi) { void pi; }",
+			].join("\n"),
+			"second.ts": [
+				'import { Type } from "@oh-my-pi/pi-ai";',
+				'import requiredType from "direct";',
+				"export const sharesHostType = requiredType === Type;",
+				"export default function (pi) { void pi; }",
+			].join("\n"),
+		});
+
+		const sharedPath = await fs.realpath(path.join(dir, "node_modules", "direct", "index.js"));
+		const firstReady = Promise.withResolvers<boolean>();
+		const releaseFirst = Promise.withResolvers<void>();
+		const gateKey = "__ompSharedCjsGate";
+		const globals = globalThis as typeof globalThis &
+			Record<string, { firstReady: (ok: boolean) => void; wait: Promise<void> } | undefined>;
+		globals[gateKey] = {
+			firstReady: ok => firstReady.resolve(ok),
+			wait: releaseFirst.promise,
+		};
+		let firstPromise: Promise<unknown> | undefined;
+
+		try {
+			firstPromise = loadLegacyPiModule(path.join(dir, "first.ts"));
+			expect(await firstReady.promise).toBe(true);
+			expect(__hasCommonJsModuleSourceForTests(sharedPath)).toBe(true);
+
+			// Reverse completion: the later-started load finishes while the first
+			// import is still held open. Eager per-load clear would delete the
+			// shared rewritten CommonJS source here.
+			const second = (await loadLegacyPiModule(path.join(dir, "second.ts"))) as {
+				sharesHostType: boolean;
+			};
+			expect(second.sharesHostType).toBe(true);
+			expect(__inFlightLegacyPiLoadsForTests()).toBe(1);
+			expect(__hasCommonJsModuleSourceForTests(sharedPath)).toBe(true);
+
+			releaseFirst.resolve();
+			const first = (await firstPromise) as { sharesHostType: boolean };
+			expect(first.sharesHostType).toBe(true);
+			expect(__inFlightLegacyPiLoadsForTests()).toBe(0);
+			expect(__hasCommonJsModuleSourceForTests(sharedPath)).toBe(false);
+		} finally {
+			releaseFirst.resolve();
+			await firstPromise?.catch(() => undefined);
+			delete globals[gateKey];
+		}
+	});
+
+	it("retains shared CommonJS sources when a peer finishes during graph preparation", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "shared-cjs-prep-race-root", version: "1.0.0", type: "module" }),
+			"node_modules/direct/package.json": JSON.stringify({
+				name: "direct",
+				version: "1.0.0",
+				main: "index.js",
+			}),
+			"node_modules/direct/index.js": 'module.exports = require("@mariozechner/pi-ai").Type;\n',
+			"first.ts": [
+				'import { Type } from "@oh-my-pi/pi-ai";',
+				'import requiredType from "direct";',
+				"const gate = globalThis.__ompSharedCjsPrepGate;",
+				"gate.firstReady(requiredType === Type);",
+				"await gate.wait;",
+				"export const sharesHostType = requiredType === Type;",
+				"export default function (pi) { void pi; }",
+			].join("\n"),
+			"second.ts": [
+				'import { Type } from "@oh-my-pi/pi-ai";',
+				'import requiredType from "direct";',
+				"export const sharesHostType = requiredType === Type;",
+				"export default function (pi) { void pi; }",
+			].join("\n"),
+		});
+
+		const sharedPath = await fs.realpath(path.join(dir, "node_modules", "direct", "index.js"));
+		const firstReady = Promise.withResolvers<boolean>();
+		const releaseFirst = Promise.withResolvers<void>();
+		const prepEntered = Promise.withResolvers<void>();
+		const releasePrep = Promise.withResolvers<void>();
+		const gateKey = "__ompSharedCjsPrepGate";
+		const globals = globalThis as typeof globalThis &
+			Record<string, { firstReady: (ok: boolean) => void; wait: Promise<void> } | undefined>;
+		globals[gateKey] = {
+			firstReady: ok => firstReady.resolve(ok),
+			wait: releaseFirst.promise,
+		};
+		let firstPromise: Promise<unknown> | undefined;
+		let secondPromise: Promise<unknown> | undefined;
+
+		__setLegacyPiGraphPreparationPauseForTests(async () => {
+			// Only the overlapping second load should pause inside preparation.
+			if (__inFlightLegacyPiLoadsForTests() < 2) {
+				return;
+			}
+			prepEntered.resolve();
+			await releasePrep.promise;
+		});
+
+		try {
+			firstPromise = loadLegacyPiModule(path.join(dir, "first.ts"));
+			expect(await firstReady.promise).toBe(true);
+			expect(__hasCommonJsModuleSourceForTests(sharedPath)).toBe(true);
+			expect(__inFlightLegacyPiLoadsForTests()).toBe(1);
+
+			// Dangerous interleaving: B is inside async graph preparation (after
+			// writing shared CommonJS sources) when A completes and would otherwise
+			// flush retained cleanups because B was not yet counted as in flight.
+			secondPromise = loadLegacyPiModule(path.join(dir, "second.ts"));
+			await prepEntered.promise;
+			expect(__inFlightLegacyPiLoadsForTests()).toBe(2);
+			expect(__hasCommonJsModuleSourceForTests(sharedPath)).toBe(true);
+
+			releaseFirst.resolve();
+			const first = (await firstPromise) as { sharesHostType: boolean };
+			expect(first.sharesHostType).toBe(true);
+			// A finished while B is still preparing; shared rewritten sources must remain.
+			expect(__inFlightLegacyPiLoadsForTests()).toBe(1);
+			expect(__hasCommonJsModuleSourceForTests(sharedPath)).toBe(true);
+
+			releasePrep.resolve();
+			const second = (await secondPromise) as { sharesHostType: boolean };
+			expect(second.sharesHostType).toBe(true);
+			expect(__inFlightLegacyPiLoadsForTests()).toBe(0);
+			expect(__hasCommonJsModuleSourceForTests(sharedPath)).toBe(false);
+		} finally {
+			releasePrep.resolve();
+			releaseFirst.resolve();
+			await firstPromise?.catch(() => undefined);
+			await secondPromise?.catch(() => undefined);
+			__setLegacyPiGraphPreparationPauseForTests(undefined);
+			delete globals[gateKey];
+		}
 	});
 });

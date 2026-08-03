@@ -2404,6 +2404,11 @@ async function installExtensionGraphHook(
  *
  * Returns a clearable handle to drop cached sources that weren't consumed
  * during the initial load; `undefined` when no new modules were discovered.
+ *
+ * Callers must not clear the handle while another {@link loadLegacyPiModule}
+ * import may still need the process-global CommonJS source/definition/cache
+ * maps. Concurrent loads retain every handle and flush them together after the
+ * last in-flight load settles, including peers still inside this preparation.
  */
 async function ensureExtensionGraphHook(entryRealPath: string): Promise<{ clear(): void } | undefined> {
 	const {
@@ -2434,6 +2439,11 @@ async function ensureExtensionGraphHook(entryRealPath: string): Promise<{ clear(
 			// stale snapshot from the walk that flagged it.
 			synchronousModuleSources.set(modulePath, await rewriteLegacyExtensionSource(source, modulePath));
 		}
+	}
+	// Test seam: after shared CommonJS sources are written, allow a concurrent
+	// load to finish and attempt cleanup while this preparation is still open.
+	if (graphPreparationPauseForTests) {
+		await graphPreparationPauseForTests();
 	}
 	let hookedModules = extensionGraphHookModules.get(entryRealPath);
 	if (!hookedModules) {
@@ -2484,6 +2494,72 @@ async function ensureExtensionGraphHook(entryRealPath: string): Promise<{ clear(
 	};
 }
 
+type ExtensionGraphHookCleanup = { clear(): void };
+
+/**
+ * Concurrent {@link loadLegacyPiModule} calls share process-global CommonJS
+ * source/definition/cache maps. Clearing a single entry's handle while another
+ * import is still in flight can delete a shared rewritten dependency out from
+ * under that import. Retain every cleanup handle and flush them only after the
+ * last in-flight load settles — including loads still inside async graph
+ * preparation, before their cleanup handle exists.
+ */
+let inFlightLegacyPiLoads = 0;
+const retainedGraphHookCleanups: ExtensionGraphHookCleanup[] = [];
+
+/** Test seam: pause inside {@link ensureExtensionGraphHook} after CJS sources are written. */
+let graphPreparationPauseForTests: (() => Promise<void>) | undefined;
+
+/** Test seam: observe in-flight legacy load count changes. */
+let inFlightChangedForTests: ((count: number) => void) | undefined;
+
+function notifyInFlightChangedForTests(): void {
+	inFlightChangedForTests?.(inFlightLegacyPiLoads);
+}
+
+function beginLegacyPiLoadLifetime(): void {
+	inFlightLegacyPiLoads++;
+	notifyInFlightChangedForTests();
+}
+
+function retainExtensionGraphHookCleanup(cleanup: ExtensionGraphHookCleanup | undefined): void {
+	if (cleanup) {
+		retainedGraphHookCleanups.push(cleanup);
+	}
+}
+
+function releaseExtensionGraphHookCleanup(): void {
+	inFlightLegacyPiLoads--;
+	notifyInFlightChangedForTests();
+	if (inFlightLegacyPiLoads > 0) {
+		return;
+	}
+	const cleanups = retainedGraphHookCleanups.splice(0);
+	for (const cleanup of cleanups) {
+		cleanup.clear();
+	}
+}
+
+/** Test seam: whether a graph-owned CommonJS source is still retained. */
+export function __hasCommonJsModuleSourceForTests(modulePath: string): boolean {
+	return commonJsModuleSources.has(modulePath);
+}
+
+/** Test seam: in-flight legacy module loads retaining graph-hook cleanups. */
+export function __inFlightLegacyPiLoadsForTests(): number {
+	return inFlightLegacyPiLoads;
+}
+
+/** Test seam: pause graph preparation after rewritten CommonJS sources are stored. */
+export function __setLegacyPiGraphPreparationPauseForTests(pause: (() => Promise<void>) | undefined): void {
+	graphPreparationPauseForTests = pause;
+}
+
+/** Test seam: observe in-flight count changes for deterministic reverse-completion gates. */
+export function __setLegacyPiInFlightChangedForTests(listener: ((count: number) => void) | undefined): void {
+	inFlightChangedForTests = listener;
+}
+
 /**
  * Load a legacy Pi extension module from its real on-disk location.
  *
@@ -2501,8 +2577,13 @@ export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown>
 	// actually hands the hook.
 	const entryRealPath = await realpathOrSelf(path.resolve(resolvedPath));
 	await ensureLegacyPiOverridesReady();
-	const pendingSources = await ensureExtensionGraphHook(entryRealPath);
+	// Count this load before graph preparation writes shared maps. Otherwise a
+	// peer that finishes while we are still inside `ensureExtensionGraphHook`
+	// can flush retained cleanups and delete CommonJS sources we just prepared.
+	beginLegacyPiLoadLifetime();
 	try {
+		const pendingSources = await ensureExtensionGraphHook(entryRealPath);
+		retainExtensionGraphHookCleanup(pendingSources);
 		// Dynamic import is required: legacy extension entry paths are user/plugin supplied at runtime.
 		// On POSIX, use the raw filesystem path so Bun keys the `?mtime`
 		// suffix as part of the module identity; Bun ignores query strings on
@@ -2513,10 +2594,10 @@ export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown>
 				: entryRealPath;
 		return await import(`${entrySpecifier}?mtime=${nextLegacyPiLoadTag()}`);
 	} finally {
-		// Drop whatever the initial import didn't consume: graph modules only
-		// reached by lazy dynamic imports must be read from disk at their actual
-		// import time, not served from this load-time snapshot.
-		pendingSources?.clear();
+		// Drop load-time snapshots only after every overlapping import settles:
+		// graph modules only reached by lazy dynamic imports must then be read
+		// from disk at their actual import time, not served from this snapshot.
+		releaseExtensionGraphHookCleanup();
 	}
 }
 

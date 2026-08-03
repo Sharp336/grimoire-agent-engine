@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Loaded independent extensions concurrently while preserving their configured order for command, flag, renderer, and handler precedence.
+- Loaded independent extension modules concurrently, then initialized their factories in configured path order while preserving command, flag, renderer, handler, and shared-event initialization contracts.
 
 ## [17.2.5] - 2026-08-03
 
