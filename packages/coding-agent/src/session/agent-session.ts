@@ -1856,7 +1856,10 @@ export class AgentSession {
 	#restoreOwnWakeups(suppressed: SuppressedWakeups): void {
 		this.#asyncJobManager?.resumeDeliveries(suppressed.jobIds);
 		for (const entry of suppressed.queuedEntries) {
-			this.yieldQueue.enqueue(ASYNC_RESULT_MESSAGE_TYPE, entry);
+			this.yieldQueue.enqueue(ASYNC_RESULT_MESSAGE_TYPE, {
+				...entry,
+				epoch: this.#asyncDeliveryEpoch,
+			});
 		}
 	}
 

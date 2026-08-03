@@ -208,6 +208,23 @@ describe("AgentSession wakeup suppression across session replacement", () => {
 		expect(session.yieldQueue.has("async-result")).toBe(true);
 	});
 
+	it("restamps an already queued wakeup when replacement fails after epoch advance", async () => {
+		const { jobId } = registerGatedWakeup();
+		session.yieldQueue.enqueue("async-result", {
+			jobId,
+			result: "queued wakeup after failed replacement",
+			job: manager.getJob(jobId),
+			durationMs: undefined,
+			epoch: 0,
+		});
+		vi.spyOn(sessionManager, "newSession").mockRejectedValue(new Error("session create failed"));
+
+		await expect(session.newSession()).rejects.toThrow("session create failed");
+
+		const restored = session.yieldQueue.drainLazy().map(build => build());
+		expect(restored.some(message => message !== null)).toBe(true);
+	});
+
 	it("restores and delivers a suppressed wakeup exactly once when the pre-switch hook vetoes", async () => {
 		const { jobId, fire } = registerGatedWakeup();
 		let deliveriesDuringTransition = -1;
