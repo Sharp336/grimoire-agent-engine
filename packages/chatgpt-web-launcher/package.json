@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-chatgpt-web-launcher",
-	"version": "17.2.5",
+	"version": "17.2.6",
 	"private": true,
 	"description": "Authenticated desktop browser host for Oh My Pi ChatGPT Web",
 	"author": "Oh My Pi contributors",

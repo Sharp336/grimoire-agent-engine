@@ -5,6 +5,11 @@
 ### Added
 
 - Added owner-bound local-security APIs for private files and directories, authenticated local IPC, process identity checks, and verified executable/runtime launches used by the ChatGPT Web integration.
+## [17.2.6] - 2026-08-03
+
+### Added
+
+- Added non-blocking, process-owned `FileLock` bindings using abstract Unix sockets on Linux, named mutexes on Windows, and persistent `flock(2)` sidecars on other Unix platforms.
 
 ## [17.2.5] - 2026-08-03
 

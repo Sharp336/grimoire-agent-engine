@@ -6,9 +6,9 @@ A custom tool is a TypeScript/JavaScript module that exports a factory. The fact
 
 ## What this is (and is not)
 
-- **Custom tool**: callable by the model during a turn (`execute` + Zod parameter schema).
+- **Custom tool**: callable by the model during a turn (`execute` + parameter schema).
 - **Extension**: lifecycle/event framework that can register tools and intercept/modify events.
-- **Hook**: external pre/post command scripts.
+- **Hook**: legacy event-driven interceptor API loaded through the extension runner.
 - **Skill**: static guidance/context package, not executable tool code.
 
 If you need the model to call code directly, use a custom tool.
@@ -22,7 +22,7 @@ There are two active integration styles:
    - Always included in the initial active tool set in SDK bootstrap.
 
 2. **Filesystem-discovered modules via loader API** (`discoverAndLoadCustomTools` / `loadCustomTools`)
-   - Exposed as library APIs in `src/extensibility/custom-tools/loader.ts`.
+   - Exposed as library APIs in `packages/coding-agent/src/extensibility/custom-tools/loader.ts`.
    - Host code can call these to discover and load tool modules from config/provider/plugin paths.
 
 ```text
@@ -70,8 +70,8 @@ const factory: CustomToolFactory = (pi) => ({
   name: "repo_stats",
   label: "Repo Stats",
   description: "Counts tracked TypeScript files",
-  parameters: pi.zod.object({
-    glob: pi.zod.string().optional().default("**/*.ts"),
+  parameters: pi.arktype({
+    glob: "string?",
   }),
 
   async execute(toolCallId, params, onUpdate, ctx, signal) {
@@ -109,7 +109,7 @@ const factory: CustomToolFactory = (pi) => ({
 export default factory;
 ```
 
-Schemas are authored with Zod (`pi.zod`) and flow through the shared validation/wire pipeline.
+Parameter schemas may use ArkType (`pi.arktype`), Zod (`pi.zod`), or the legacy-compatible TypeBox shim (`pi.typebox`); ArkType is preferred for new tools. Schemas flow through the shared validation/wire pipeline.
 
 Factory return type:
 
@@ -126,11 +126,13 @@ From `types.ts` and `loader.ts`:
 - `ui`: UI context (can be no-op in headless modes)
 - `hasUI`: `false` in non-interactive flows
 - `logger`: shared file logger
-- `typebox`: zod-backed compatibility shim for legacy TypeBox-style schemas
-- `zod`: injected `zod/v4` module (canonical for new schemas)
+- `arktype`: injected ArkType module (preferred for new schemas)
+- `typebox`: compatibility shim for legacy TypeBox-style schemas
+- `zod`: injected `zod/v4` module
 - `pi`: injected `@oh-my-pi/pi-coding-agent` exports
-- `pushPendingAction(action)`: register a preview action finalized via plain-text writes to `/xdev/resolve` or `/xdev/reject` (`docs/resolve-tool-runtime.md`)
-  Loader starts with a no-op UI context and requires host code to call `setUIContext(...)` when real UI is ready.
+- `pushPendingAction(action)`: stage a preview action that is finalized by writing a plain-text reason to `xd://resolve` or `xd://reject`
+
+The loader starts with a no-op UI context and requires host code to call `setUIContext(...)` when real UI is ready. If the runtime did not provide a pending-action store, calling `pushPendingAction` throws `Pending action store unavailable for custom tools in this runtime.`
 
 ## Execution contract and typing
 
@@ -140,15 +142,15 @@ From `types.ts` and `loader.ts`:
 execute(toolCallId, params, onUpdate, ctx, signal);
 ```
 
-- `params` is statically typed from your Zod/TypeBox schema via `Static<TParams>`.
+- `params` is statically typed from its ArkType, Zod, or TypeBox schema via `Static<TParams>`.
 - Runtime argument validation happens before execution in the agent loop.
 - `onUpdate` emits partial results for UI streaming.
-- `ctx` includes `sessionManager`, `modelRegistry`, current `model`, `isIdle()`, `hasQueuedMessages()`, `abort()`, and optional `settings`, `fetch`, and `autoApprove`.
-- `signal` carries cancellation.
+- `ctx` includes `sessionManager`, `modelRegistry`, current `model`, `isIdle()`, `hasQueuedMessages()`, `abort()`, and optional `settings`, `fetch`, `localProtocolOptions`, and `autoApprove`.
+- `signal` carries cancellation and may be `undefined`.
 
 `CustomToolAdapter` bridges this to the agent tool interface and forwards calls in the correct argument order.
 
-Tool definitions may also declare `strict`, `hidden`, `deferrable`, `mcpServerName`, `mcpToolName`, `approval`, and `formatApprovalDetails`.
+Tool definitions may also declare `strict`, `hidden`, `loadMode`, `deferrable`, `mcpServerName`, `mcpToolName`, `approval`, and `formatApprovalDetails`. Custom tools default to the `"discoverable"` load mode; use `"essential"` to keep a tool top-level.
 
 ## How tools are exposed to the model
 

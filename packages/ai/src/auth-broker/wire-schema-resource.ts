@@ -12,7 +12,7 @@
  * exception (standard type keeps extra keys): it preserves provider-specific extension fields so
  * they round-trip through the broker instead of being dropped (see below).
  */
-import { type Type, type } from "arktype";
+import { scope, type Type } from "arktype";
 import {
 	type ApiKeyCredential,
 	type AuthCredential,
@@ -84,6 +84,11 @@ export interface AuthBrokerWireSchemas {
 }
 
 function buildAuthBrokerWireSchemas(): AuthBrokerWireSchemas {
+	// Wire schemas validate only a handful of times per process, so ArkType's
+	// definition-time JIT codegen is startup tax. A local jitless scope skips
+	// that codegen and uses interpreted traversal; correctness is unchanged.
+	const { type } = scope({}, { jitless: true });
+
 	// ─── Credential payloads ───────────────────────────────────────────────────
 
 	/** Real OAuth credential (broker-side) — refresh token is the actual upstream value. */

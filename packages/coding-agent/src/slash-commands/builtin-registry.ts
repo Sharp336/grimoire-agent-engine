@@ -1720,6 +1720,16 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "reset",
+		description: "Reset the conversation context in place, keeping the session",
+		getTuiAutocompleteDescription: runtime =>
+			runtime.ctx.session.isStreaming ? "Reset: unavailable while streaming" : "Reset: drop context, keep session",
+		handleTui: async (_command, runtime) => {
+			runtime.ctx.editor.setText("");
+			await runtime.ctx.handleResetContextCommand();
+		},
+	},
+	{
 		name: "drop",
 		description: "Delete the current session and start a new one",
 		handleTui: async (_command, runtime) => {

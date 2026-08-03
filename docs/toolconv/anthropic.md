@@ -190,6 +190,12 @@ Before the API converts it, the model literally emits an XML block. The current 
 
 Current Claude models prefix these tags with an `antml:` XML namespace prefix (e.g. `antml:function_calls`, `antml:invoke name="…"`, `antml:parameter name="…"`). The API strips all of this and exposes only the JSON `tool_use` block; integrators should target the JSON, not the XML.
 
+### OMP `anthropic` dialect
+
+OMP operates on the underlying prompt-driven XML rather than Messages API content blocks. Its renderer always emits the unprefixed attribute form above, wraps multiple calls in one `<function_calls>` block, and renders each argument as a `<parameter name="…">` child. With a tool schema, declared string arguments are inserted as literal text; other values are JSON-serialized. The streaming scanner also accepts `antml:`-prefixed tags, `<tool_calls>` as a wrapper alias, and a bare `<invoke>` outside either wrapper.
+
+The scanner mints call ids because this XML has none. It scans streamed text statefully, emits `toolArgDelta` events while each parameter body arrives, and publishes the coerced argument object with `toolEnd` after `</invoke>`. A parameter value is capped at 1,000,000 JavaScript string code units; overflow gains an explicit truncation suffix. JSON-like values are parsed with repair, while schema-declared strings stay strings. With `parseThinking: true`, `<thinking>`, `<think>`, and `<scratchpad>` (prefixed or unprefixed) become thinking events; otherwise those tags remain visible text.
+
 ---
 
 ## Multiple / parallel tool calls
@@ -300,6 +306,23 @@ Rich result (text + image blocks):
 ```
 
 Server tools require **no** `tool_result` from you — Anthropic executes them and injects the result inline in the assistant turn. (Legacy XML feeds results back as `<function_results><result><tool_name>…</tool_name><stdout>…</stdout></result></function_results>`, or `<error>…</error>` on failure.)
+
+OMP's prompt-driven dialect is different from Anthropic's server-tool behavior. It renders client results as:
+
+```text
+<function_results>
+<result>
+<tool_name>get_weather</tool_name>
+<stdout>15 degrees</stdout>
+</result>
+<error>
+<tool_name>other_tool</tool_name>
+<stderr>execution failed</stderr>
+</error>
+</function_results>
+```
+
+There is no result id in this XML, so results are correlated by call order. OMP includes the tool name in both success and error entries and does not encode `isError` anywhere else.
 
 ---
 

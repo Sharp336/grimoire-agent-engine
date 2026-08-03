@@ -91,7 +91,7 @@ describe("formatSessionDumpText tool parameters", () => {
 		});
 
 		expect(out).toContain("## Available Tools");
-		expect(out).toContain("<examples>");
+		expect(out).toContain("@example");
 		expect(out).toContain('glob(paths=["src/**/*.ts"])');
 	});
 

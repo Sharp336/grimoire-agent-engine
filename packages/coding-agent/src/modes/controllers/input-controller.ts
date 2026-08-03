@@ -250,7 +250,7 @@ export class InputController {
 			this.#btwBranchListenerInstalled = true;
 			this.ctx.ui.addInputListener(data => {
 				if (!matchesKey(data, "b")) return undefined;
-				if (!this.ctx.canBranchBtw()) return undefined;
+				if (!this.ctx.handlesBtwBranchKey()) return undefined;
 				if (this.ctx.ui.getFocused() !== this.ctx.editor) return undefined;
 				if (this.ctx.editor.getText().trim()) return undefined;
 				void this.ctx.handleBtwBranchKey();

@@ -10,7 +10,7 @@ function verifiedExecutable(overrides: Partial<NativeVerifiedExecutable> = {}): 
 	return {
 		identity: "opened-package-cli-identity",
 		packageName: "@oh-my-pi/pi-chatgpt-web",
-		packageVersion: "17.2.5",
+		packageVersion: "17.2.6",
 		cliName: "chatgpt-web",
 		close() {},
 		__nativeVerifiedExecutable: Symbol("verified"),
@@ -32,7 +32,7 @@ describe("runtime command boundary", () => {
 		expect(calls).toEqual([
 			{
 				packageName: "@oh-my-pi/pi-chatgpt-web",
-				packageVersion: "17.2.5",
+				packageVersion: "17.2.6",
 				cliName: "chatgpt-web",
 				cliRelativePath: "app/cli.js",
 			},

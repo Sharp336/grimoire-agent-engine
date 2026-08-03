@@ -14,8 +14,8 @@ test("launcher state persists only allowlisted non-secret settings atomically", 
   try {
     const store = createStateStore(file);
     assert.deepEqual(store.read(), DEFAULT_STATE);
-    store.update({ language: "zh-CN", onboardingComplete: true, runtimeMode: "full", browserSmokePassed: true, browserSmokeVersion: "17.2.5" });
-    assert.deepEqual(createStateStore(file).read(), { ...DEFAULT_STATE, language: "zh-CN", onboardingComplete: true, runtimeMode: "full", browserSmokePassed: true, browserSmokeVersion: "17.2.5" });
+    store.update({ language: "zh-CN", onboardingComplete: true, runtimeMode: "full", browserSmokePassed: true, browserSmokeVersion: "17.2.6" });
+    assert.deepEqual(createStateStore(file).read(), { ...DEFAULT_STATE, language: "zh-CN", onboardingComplete: true, runtimeMode: "full", browserSmokePassed: true, browserSmokeVersion: "17.2.6" });
     assert.throws(() => store.update({ token: "secret" }), /state_field_not_allowed/);
     assert.equal(fs.readdirSync(root).some((name) => name.includes(".tmp-")), false);
     if (process.platform !== "win32") assert.equal(fs.statSync(file).mode & 0o077, 0);

@@ -389,5 +389,11 @@ export interface FreshSessionResult {
 	closedProviderSessions: number;
 }
 
+/** Outcome of an in-place `/reset` conversation-context reset. */
+export interface ResetSessionContextResult {
+	/** Number of live messages dropped from the model's context. */
+	droppedCount: number;
+}
+
 /** Queued user content restored to the editor. */
 export type RestoredQueuedMessage = { text: string; images?: ImageContent[] };

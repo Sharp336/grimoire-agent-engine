@@ -32,7 +32,7 @@ function fixture(options = {}) {
           async close() { if (!closed) { closed = true; events.push(`spawn-${spawn.index}:environment-close`); } },
         };
       },
-      async waitForTunnelReady(identity) { events.push(`${identity.label}:ready-wait`); if (options.readyPending) return new Promise(() => {}); const child = children.find((value) => value.identity === identity); if (options.reparent) identity.parent = "unrelated"; return { ready: true, version: options.wrongHealth ? "0.0.0" : "17.2.5", runtimeEpoch, lifecycleGeneration: number, instanceNonce: child.instanceNonce }; },
+      async waitForTunnelReady(identity) { events.push(`${identity.label}:ready-wait`); if (options.readyPending) return new Promise(() => {}); const child = children.find((value) => value.identity === identity); if (options.reparent) identity.parent = "unrelated"; return { ready: true, version: options.wrongHealth ? "0.0.0" : "17.2.6", runtimeEpoch, lifecycleGeneration: number, instanceNonce: child.instanceNonce }; },
       async close() { events.push(`epoch-${number}:close`); } };
   } };
   const native = { async launchVerifiedProcess(spec) {
@@ -42,7 +42,7 @@ function fixture(options = {}) {
       close() { this.closed = true; events.push(`${identity.label}:close-owned`); }, crash(code = 1) { exit.resolve({ exitCode: code }); } };
     children.push(child); events.push(`${identity.label}:launch`); return child;
   } };
-  const commandFactory = async ({ epoch, spawn, environment }) => { const current = spawnNumber; assert.deepEqual(environment, { opaqueEnvironment: spawn.index }); events.push(`spawn-${current}:command`); return { launchSpec: Object.freeze({ opaqueLaunch: current, instanceNonce: spawn.instanceNonce }), version: "17.2.5", runtimeEpoch: epoch.runtimeEpoch, lifecycleGeneration: epoch.lifecycleGeneration, instanceNonce: spawn.instanceNonce, close() { events.push(`spawn-${current}:command-close`); } }; };
+  const commandFactory = async ({ epoch, spawn, environment }) => { const current = spawnNumber; assert.deepEqual(environment, { opaqueEnvironment: spawn.index }); events.push(`spawn-${current}:command`); return { launchSpec: Object.freeze({ opaqueLaunch: current, instanceNonce: spawn.instanceNonce }), version: "17.2.6", runtimeEpoch: epoch.runtimeEpoch, lifecycleGeneration: epoch.lifecycleGeneration, instanceNonce: spawn.instanceNonce, close() { events.push(`spawn-${current}:command-close`); } }; };
   const supervisor = new RuntimeSupervisor({ epochFactory, native, commandFactory, timeout: options.timeout ?? ((promise) => promise), clock: () => 1000, policy: { restartLimit: options.restartLimit ?? 2 } });
   return { supervisor, events, children };
 }
@@ -78,7 +78,7 @@ test("runtime command forwards only the native materialized environment and fixe
   const environment = Object.freeze({ opaqueEnvironment: true });
   let captured;
   const command = await resolveRuntimeCommand({
-    installedRuntime: { bundle: Object.freeze({ opaqueBundle: true }), version: "17.2.5" },
+    installedRuntime: { bundle: Object.freeze({ opaqueBundle: true }), version: "17.2.6" },
     mode: "full",
     epoch: { runtimeEpoch: `epoch-${"e".repeat(16)}`, lifecycleGeneration: 4 },
     spawn: { instanceNonce: `nonce-${"n".repeat(16)}`, forbiddenCapability: "must-not-forward" },
@@ -88,7 +88,7 @@ test("runtime command forwards only the native materialized environment and fixe
       captured = request;
       return {
         launchSpec: Object.freeze({ opaqueLaunch: true }),
-        version: "17.2.5",
+        version: "17.2.6",
         runtimeEpoch: request.runtimeEpoch,
         lifecycleGeneration: request.lifecycleGeneration,
         instanceNonce: request.instanceNonce,
