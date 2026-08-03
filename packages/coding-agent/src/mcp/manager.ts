@@ -973,8 +973,13 @@ export class MCPManager {
 		}
 
 		const attempt = this.#doReconnect(name, options?.authChallenge);
-		this.#pendingReconnections.set(name, attempt);
-		return attempt.finally(() => this.#pendingReconnections.delete(name));
+		const tracked = attempt.finally(() => {
+			if (this.#pendingReconnections.get(name) === tracked) {
+				this.#pendingReconnections.delete(name);
+			}
+		});
+		this.#pendingReconnections.set(name, tracked);
+		return tracked;
 	}
 
 	/**
