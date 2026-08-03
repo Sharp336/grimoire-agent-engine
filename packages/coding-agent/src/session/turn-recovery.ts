@@ -172,6 +172,7 @@ export class TurnRecovery {
 	// Cached replay attempts may omit the already-resolved tool block, so keep the
 	// safety cap on saga state instead of trying to reclassify every failed turn.
 	#cursorInterruptedExecRetryActive = false;
+	#cursorInterruptedExecRetrySaga = false;
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
 	#activeRetryFallback: ActiveRetryFallbackState | undefined;
@@ -374,6 +375,7 @@ export class TurnRecovery {
 	#resetRetrySaga(): void {
 		this.#retryAttempt = 0;
 		this.#cursorInterruptedExecRetryActive = false;
+		this.#cursorInterruptedExecRetrySaga = false;
 	}
 
 	/**
@@ -1374,6 +1376,7 @@ export class TurnRecovery {
 		const classifierRefusal = this.isClassifierRefusal(message);
 		if (message.provider === "cursor" && options?.preserveFailedTurn) {
 			this.#cursorInterruptedExecRetryActive = true;
+			this.#cursorInterruptedExecRetrySaga = true;
 		}
 
 		const generation = this.#host.promptGeneration();
@@ -1482,9 +1485,11 @@ export class TurnRecovery {
 				switchedModel = await this.#tryFireworksFastFallback(currentSelector);
 			}
 			if (switchedModel) {
-				if (this.#host.model()?.provider !== "cursor") {
-					this.#cursorInterruptedExecRetryActive = false;
-				}
+				// Leaving Cursor suspends its two-retry watchdog while another
+				// provider uses the configured budget. Keep the saga latch so a
+				// later fallback back into Cursor reactivates the spent safety cap.
+				this.#cursorInterruptedExecRetryActive =
+					this.#cursorInterruptedExecRetrySaga && this.#host.model()?.provider === "cursor";
 				delayMs = 0;
 			} else if (usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs) {
 				delayMs = parsedRetryAfterMs;

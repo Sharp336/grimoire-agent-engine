@@ -2115,6 +2115,104 @@ describe("AgentSession retry delay cap", () => {
 		expect(lastAssistant(session).content).toContainEqual({ type: "text", text: "recovered on fallback budget" });
 	});
 
+	it("reactivates the interrupted Cursor cap when a mixed fallback chain returns to Cursor", async () => {
+		const initialModel = createMockModel({ id: "composer-2.5", provider: "cursor" });
+		const intermediateModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const returnedCursorModel = getBundledModel("cursor", "claude-4.5-sonnet");
+		if (!intermediateModel || !returnedCursorModel) throw new Error("Expected bundled fallback models to exist");
+		authStorage.setRuntimeApiKey("cursor", "cursor-test-key");
+
+		const requestedModels: string[] = [];
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: { model: initialModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requestedModel, _context, options) => {
+				const attempt = requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+				const callId = "cursor-read-before-mixed-fallback";
+				const toolCall = {
+					type: "toolCall" as const,
+					id: callId,
+					name: "read",
+					arguments: { path: "/workspace/file.txt" },
+					[kCursorExecResolved]: true as const,
+				};
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(async () => {
+					const partial: AssistantMessage = {
+						role: "assistant",
+						content: attempt === 1 ? [toolCall] : [],
+						api: requestedModel.api,
+						provider: requestedModel.provider,
+						model: requestedModel.id,
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "stop",
+						timestamp: Date.now(),
+					};
+					stream.push({ type: "start", partial });
+					if (attempt === 1) {
+						await options?.cursorOnToolResult?.({
+							role: "toolResult",
+							toolCallId: callId,
+							toolName: "read",
+							content: [{ type: "text", text: "file body" }],
+							isError: false,
+							timestamp: Date.now(),
+						});
+						stream.push({ type: "toolcall_start", contentIndex: 0, partial });
+						stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
+					}
+					stream.push({
+						type: "error",
+						reason: "error",
+						error: {
+							...partial,
+							stopReason: "error",
+							errorMessage:
+								requestedModel.provider === "cursor"
+									? "Cursor stream ended before turnEnded"
+									: "502 upstream_error: intermediate fallback failed",
+							errorId: AIError.create(AIError.Flag.Transient),
+						},
+					});
+				});
+				return stream;
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 10,
+			"retry.modelFallback": true,
+			"retry.fallbackChains": {
+				default: [
+					`${intermediateModel.provider}/${intermediateModel.id}`,
+					`${returnedCursorModel.provider}/${returnedCursorModel.id}`,
+				],
+			},
+		});
+		settings.setModelRole("default", `${initialModel.provider}/${initialModel.id}`);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("Trigger Cursor to Anthropic to Cursor fallback recovery");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([
+			`${initialModel.provider}/${initialModel.id}`,
+			`${intermediateModel.provider}/${intermediateModel.id}`,
+			`${returnedCursorModel.provider}/${returnedCursorModel.id}`,
+		]);
+		expect(session.model?.id).toBe(returnedCursorModel.id);
+		expect(session.isRetrying).toBe(false);
+	});
+
 	it("defaults 502 auto-retry to ten capped backoff attempts", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {
