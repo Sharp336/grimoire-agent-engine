@@ -113,14 +113,22 @@ describe("AgentSession bash session ownership", () => {
 		expect(session.messages.some(message => message.role === "bashExecution")).toBe(false);
 	});
 
-	it("closes its persistent native shell during session disposal", async () => {
+	it.skipIf(process.platform === "win32")("closes its persistent native shell during session disposal", async () => {
 		createSession();
 		const sessionId = session.sessionId;
-		const closeSpy = vi.spyOn(bashExecutor, "closeShellSession").mockResolvedValue();
+		const variable = "OMP_SHELL_OWNER_DISPOSE_PROBE";
+		const seeded = await bashExecutor.executeBash(`export ${variable}=owned`, { sessionKey: sessionId });
+		expect(seeded.exitCode).toBe(0);
+		const beforeDispose = await bashExecutor.executeBash(`printf '%s' "$${variable}"`, { sessionKey: sessionId });
+		expect(beforeDispose.output).toBe("owned");
 
 		await session.dispose();
 
-		expect(closeSpy).toHaveBeenCalledWith(sessionId);
+		const afterDispose = await bashExecutor.executeBash(`printf '%s' "\${${variable}-unset}"`, {
+			sessionKey: sessionId,
+		});
+		expect(afterDispose.output).toBe("unset");
+		await bashExecutor.closeShellSession(sessionId);
 	});
 
 	it("keeps a queued bash result on the branch discarded by an empty stop", async () => {

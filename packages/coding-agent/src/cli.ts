@@ -34,11 +34,13 @@ import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbou
 import { DAEMON_BROKER_WORKER_ARG } from "./launch/protocol";
 import { TERMINAL_OUTPUT_WORKER_ARG } from "./launch/terminal-output-worker-protocol";
 import { LSP_MUX_WORKER_ARG } from "./lsp/mux/protocol";
+import { startComputerProcess } from "./tools/computer/process-entry";
 import {
 	COMPUTER_PROCESS_ARG,
 	type ComputerWorkerInbound,
 	type ComputerWorkerOutbound,
 } from "./tools/computer/protocol";
+import { smokeTestComputerWorker } from "./tools/computer/supervisor";
 
 if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
 	process.stderr.write(
@@ -93,7 +95,6 @@ async function runSmokeTest(): Promise<void> {
 	const { smokeTestSttWorker } = await import("./stt/asr-client");
 	const { smokeTestTtsWorker } = await import("./tts/tts-client");
 	const { smokeTestMnemopiEmbedWorker } = await import("./mnemopi/embed-client");
-	const { smokeTestComputerWorker } = await import("./tools/computer/supervisor");
 	const { smokeTestJsEvalWorker } = await import("./eval/js/context-manager");
 	// Other smoke dependencies stay lazy so normal CLI startup does not load their worker clients.
 	const { smokeTestDaemonBroker } = await import("./launch/client");
@@ -172,7 +173,6 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		return true;
 	}
 	if (arg === COMPUTER_PROCESS_ARG) {
-		const { startComputerProcess } = await import("./tools/computer/process-entry");
 		await runIpcSubprocessWorker<ComputerWorkerInbound, ComputerWorkerOutbound>(startComputerProcess);
 		return true;
 	}

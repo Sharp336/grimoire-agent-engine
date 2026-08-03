@@ -131,6 +131,7 @@ export async function applyDirenvPreflight(
 }
 
 const shellSessions = new Map<string, Shell>();
+const shellSessionOwners = new Map<string, string>();
 const brokenShellSessions = new Set<string>();
 const shellSessionQuarantines = new Map<string, Promise<unknown>>();
 /** Session keys with a command currently in flight on the persistent Shell. */
@@ -138,11 +139,9 @@ const shellSessionsInUse = new Set<string>();
 
 /**
  * Shells retained past their turn because a background (`nohup`/`&`) job is
- * still running. A per-call `:async:` Shell is normally dropped at teardown,
- * which SIGKILLs its children via kill-on-drop. Keeping the reference alive lets
- * the process survive across turns; the Shell is dropped once its last
- * background job exits (reaped by the poll loop below). Children stay
- * kill-on-drop, so they still die when the harness tears the Shell down on exit.
+ * still running. Closing a per-call `:async:` Shell at turn teardown would
+ * SIGKILL its children. Keeping the reference alive lets the process survive
+ * across turns; the Shell is closed once its last background job exits.
  */
 const retainedShells = new Set<Shell>();
 const RETAIN_REAP_INTERVAL_MS = 5_000;
@@ -150,36 +149,73 @@ const RETAIN_REAP_INTERVAL_MS = 5_000;
 // N-API chunk bridge drains. The JS watchdog must not race that teardown.
 const NATIVE_TIMEOUT_FALLBACK_GRACE_MS = 5_000;
 
-/** Close and forget the persistent native shell owned by one agent session. */
-export async function closeShellSession(sessionKey: string): Promise<void> {
+function detachShellSession(sessionKey: string): Shell | undefined {
 	const shell = shellSessions.get(sessionKey);
 	shellSessions.delete(sessionKey);
+	shellSessionOwners.delete(sessionKey);
 	shellSessionsInUse.delete(sessionKey);
-	brokenShellSessions.delete(sessionKey);
-	shellSessionQuarantines.delete(sessionKey);
-	if (shell) await shell.close();
+	return shell;
 }
 
-async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<void> {
+function forgetShellSession(sessionKey: string): Shell | undefined {
+	const shell = detachShellSession(sessionKey);
+	brokenShellSessions.delete(sessionKey);
+	shellSessionQuarantines.delete(sessionKey);
+	return shell;
+}
+
+async function closeShell(shell: Shell): Promise<void> {
+	try {
+		await shell.close();
+	} catch (error) {
+		logger.warn("Failed to close native shell session", {
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
+}
+
+function closeShellAfter(shell: Shell, ...pending: Promise<unknown>[]): void {
+	void Promise.allSettled(pending).then(() => closeShell(shell));
+}
+
+/** Close and forget every persistent native shell owned by one agent session. */
+export async function closeShellSession(ownerSessionKey: string): Promise<void> {
+	const ownedKeys = Array.from(shellSessionOwners.entries())
+		.filter(([, owner]) => owner === ownerSessionKey)
+		.map(([sessionKey]) => sessionKey);
+	const shells = ownedKeys.flatMap(sessionKey => {
+		const shell = forgetShellSession(sessionKey);
+		return shell ? [shell] : [];
+	});
+	await Promise.allSettled(shells.map(closeShell));
+}
+
+async function closeShellAfterLiveBackgroundJobs(shell: Shell): Promise<void> {
 	let live: number;
 	try {
 		live = await shell.liveBackgroundJobCount();
 	} catch {
+		await closeShell(shell);
 		return;
 	}
-	if (live <= 0) return;
+	if (live <= 0) {
+		await closeShell(shell);
+		return;
+	}
 	retainedShells.add(shell);
 	const interval = setInterval(() => {
 		void shell
 			.liveBackgroundJobCount()
-			.then(remaining => {
+			.then(async remaining => {
 				if (remaining > 0) return;
 				clearInterval(interval);
 				retainedShells.delete(shell);
+				await closeShell(shell);
 			})
-			.catch(() => {
+			.catch(async () => {
 				clearInterval(interval);
 				retainedShells.delete(shell);
+				await closeShell(shell);
 			});
 	}, RETAIN_REAP_INTERVAL_MS);
 	interval.unref?.();
@@ -419,7 +455,11 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	const sessionKey = buildSessionKey(shell, prefix, snapshotPath, shellEnv, options?.sessionKey, minimizer);
 	const persistentSessionBroken = brokenShellSessions.has(sessionKey);
 	if (persistentSessionBroken) {
-		shellSessions.delete(sessionKey);
+		const brokenShell = detachShellSession(sessionKey);
+		const quarantine = shellSessionQuarantines.get(sessionKey);
+		if (brokenShell) {
+			closeShellAfter(brokenShell, ...(quarantine ? [quarantine] : []));
+		}
 	}
 
 	// A persistent Shell runs one command at a time (the native session is a
@@ -432,6 +472,9 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	if (!shellSession && !persistentSessionBroken && !sessionBusy) {
 		shellSession = new Shell(shellOptions);
 		shellSessions.set(sessionKey, shellSession);
+		if (options?.sessionKey !== undefined) {
+			shellSessionOwners.set(sessionKey, options.sessionKey);
+		}
 	}
 	const executionShell = shellSession ?? new Shell(shellOptions);
 	const ownsPersistentSession = shellSession !== undefined;
@@ -496,9 +539,10 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	}
 
 	let resetSession = false;
+	let runPromise: Promise<ShellRunResult> | undefined;
 
 	try {
-		const runPromise = executionShell.run(
+		runPromise = executionShell.run(
 			{
 				command: finalCommand,
 				cwd: commandCwd,
@@ -623,14 +667,17 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			if (resetSession || options?.sessionKey?.includes(":async:")) {
 				// `:async:` keys are per-job (jobId is unique), so the Shell would
 				// otherwise stay in the process-global map forever after completion.
-				shellSessions.delete(sessionKey);
-				// Dropping the only reference to a per-call `:async:` Shell SIGKILLs
-				// any `nohup`/`&` children (kill-on-drop). If the command left a live
-				// background job, retain the Shell so the process survives across
-				// turns; it is reaped once its last job exits and still dies with the
-				// harness. Skip on resetSession (cancel/error) — those tear down.
-				if (!resetSession && shellSession) {
-					await retainShellWithLiveBackgroundJobs(shellSession);
+				const removedShell = resetSession ? detachShellSession(sessionKey) : forgetShellSession(sessionKey);
+				if (removedShell) {
+					if (resetSession) {
+						closeShellAfter(
+							removedShell,
+							...(runPromise ? [runPromise] : []),
+							...(abortCleanupPromise ? [abortCleanupPromise] : []),
+						);
+					} else {
+						await closeShellAfterLiveBackgroundJobs(removedShell);
+					}
 				}
 			}
 		}

@@ -1,14 +1,10 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-	$env,
-	isBunTestRuntime,
-	isCompiledBinary,
-	logger,
-	stripWindowsExtendedLengthPathPrefix,
-	workerHostEntry,
-} from "@oh-my-pi/pi-utils";
+import { $env, isBunTestRuntime, isCompiledBinary } from "@oh-my-pi/pi-utils/env";
+import * as logger from "@oh-my-pi/pi-utils/logger";
+import { stripWindowsExtendedLengthPathPrefix } from "@oh-my-pi/pi-utils/path";
+import { workerHostEntry } from "@oh-my-pi/pi-utils/worker-host";
 import type { Subprocess } from "bun";
 
 /**
