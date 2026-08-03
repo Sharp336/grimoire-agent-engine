@@ -228,6 +228,7 @@
 - Added managed RPC eval execution and history: `eval_execute` runs code in the session kernel behind a server-owned operation whose host confirmation is bound to the issued operation id, streams `eval_output` chunks with a bounded canonical transcript, and settles as `eval_complete`; `get_eval_history` replays recorded entries. The host-facing eval tool is resolved without changing the model-visible active tool set, so execution never mutates tool activation.
 - Added RPC subagent lifecycle and control: `list_agents`, `get_agent`, and `get_agent_result` project live and parked delegated agents with identity, status, progress, and result metadata, `send_agent_message` delivers steering, `park_agent`/`resume_agent` and `release_agent` manage keep-alive refs, and `cancel_agent` cancels a delegated run with an authoritative outcome. Lifecycle and progress frames are correlated to their registry entries in the TypeScript and Python clients.
 - Added RPC prompt queue and async job control: `get_queue`, `remove_queued_message`, `reorder_queued_message`, and `clear_queue` project and mutate the steering and follow-up queues, while `list_jobs`, `get_job`, and `cancel_job` share one owner-filtered job view and cancellation boundary with the Agent Hub. Hosts receive typed `queue_update` and `job_update` frames instead of scraping interactive output.
+- Added TypeScript and Python RPC client parity for the full control surface: correlated prompts and privileged UI, host URI handling, operation reconciliation, typed state, catalog, and manifest models, and bounded forward-compatible parsing of every new command and frame.
 
 ### Changed
 
@@ -236,6 +237,7 @@
 - Exposed the script-driven `computer` schema to every model, including models with provider-native Computer Use support, because native action declarations cannot express persistent desktop sessions or accessibility handles.
 - Reduced `omp --help` cold-start latency and memory use by rendering lightweight command metadata without loading every runtime command and provider graph.
 - `delete_session` now requires a host confirmation bound to a server-issued `operationId`. A declined, expired, disconnected, or mismatched confirmation fails closed with the `confirmation_required` error code, and the capability manifest advertises `confirmation: "required"` so hosts can prompt before the round trip.
+- The RPC `bash` command now requires a host confirmation bound to a server-issued `operationId`, matching `eval_execute`, `cancel_job`, `delete_session`, and `remove_provider_auth`. The capability manifest advertises `confirmation: "required"` for each of them.
 
 ### Fixed
 
@@ -264,6 +266,11 @@
 - Fixed plugin installation validation failures for legacy compatibility shims.
 - Removed hard-coded references to disabled or absent agents in system and tool prompts.
 - Fixed the `computer` worker entry pulling the desktop native addon into every CLI startup graph; the entry is now loaded on worker dispatch after the buffering inbox is installed, matching the tab and JS eval worker entries.
+- Fixed RPC session transitions racing in-flight privileged execution: `new_session`, `switch_session`, `fork`, `branch`, `resume_session`, and `delete_session` now abort pending bash confirmations, cancel and drain eval and bash work before committing, and refuse to start while a provider authentication, mode, or plan approval commit is in flight (`session_busy`). Prompts, steers, follow-ups, eval, and tool activation are rejected for the duration, and completions that arrive after the transition are discarded by a session generation guard instead of settling against the new session.
+- Fixed mode and plan operations being cancellable after their commit phase started, which could leave a half-applied transition; `cancel_operation` now reports `operation_commit_in_progress`, and `abort_and_prompt` reports `session_busy` instead of cancelling a committing operation.
+- Fixed RPC shutdown returning before server-owned operation work settled: eval, mode, and plan approval tasks are tracked and drained before the pending plan approval is abandoned.
+- Fixed a session switch clearing session-scoped tool state (preview invokers, forced tool choices, permission decisions, and announced mounts) before every fallible step had completed, so a failed switch discarded the previous session's pending decisions.
+- Fixed the RPC capability manifest omitting the plan and provider authentication frames (`plan_state_update`, `plan_approval_request`, `plan_approval_settled`, `provider_auth_request`, `provider_auth_update`) from its advertised event inventory, and `eval_execute` rejecting an explicit `null` for `reset` or `excludeFromContext`.
 - Fixed template argument substitution (`substituteArgs`) executing recursive placeholder expansion when positional argument values contain literal `$@` or `$ARGUMENTS` tokens.
 - Fixed focused-agent status bar dimming darkening Powerline end caps.
 - Fixed the browser relay creating duplicate "omp" tab groups: the bridge now keeps at most one group RPC in flight (a queued drain replaces fire-and-forget per-tab requests), so concurrent requests can no longer race the extension's non-atomic query→create→set-title sequence in the same window. Also fixed an extension reconnect (relay daemon restart, service-worker recycle) being misread as the user dragging every tab out of the omp group — grouping state is reset when the extension socket closes, so tabs regroup on the next hello instead of being permanently opted out.

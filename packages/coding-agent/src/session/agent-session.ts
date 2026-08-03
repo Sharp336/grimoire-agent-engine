@@ -307,7 +307,6 @@ import {
 import { ModelControls, type ModelControlsHost } from "./model-controls";
 import { isPrewalkPlanNudge, PrewalkCoordinator, type PrewalkCoordinatorHost } from "./prewalk";
 import { isAdvisorCard, isUserQueuedMessage } from "./queued-messages";
-import { formatRetryFallbackSelector, type RetryFallbackSelector } from "./retry-fallback-chains";
 import { type AdvisorStats, SessionAdvisors, type SessionAdvisorsHost } from "./session-advisors";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getRestorableSessionModels } from "./session-context";
@@ -1733,8 +1732,8 @@ export class AgentSession {
 	}
 	#sessionSwitchReconciler: (() => Promise<void>) | undefined;
 
-	async #reconcileSessionMode(): Promise<void> {
-		await this.planMode.reconcileFromSession();
+	async #reconcileSessionMode(context?: SessionContext): Promise<void> {
+		await this.planMode.reconcileFromSession(context);
 		await this.#sessionSwitchReconciler?.();
 	}
 
@@ -4194,12 +4193,6 @@ export class AgentSession {
 		this.#queuedMessageDrainBlocked = false;
 	}
 
-	#reconcileQueuedMessageDrain(): void {
-		if (!this.agent.hasQueuedMessages()) {
-			this.#queuedMessageDrainBlocked = false;
-		}
-	}
-
 	async #runQueuedUsageAwarePreflight(signal?: AbortSignal): Promise<boolean> {
 		try {
 			const allowed = await this.#runUsageAwarePreflight(signal);
@@ -6480,7 +6473,7 @@ export class AgentSession {
 	 * @param options - Optional initial messages and parent session path
 	 * @returns true if completed, false if cancelled by hook
 	 */
-	async newSession(options?: NewSessionOptions, beforeCommit?: () => void): Promise<boolean> {
+	async newSession(options?: NewSessionOptions, beforeCommit?: () => void | Promise<void>): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("start a new session");
 		const previousSessionFile = this.sessionFile;
 
@@ -6496,7 +6489,7 @@ export class AgentSession {
 			}
 		}
 
-		beforeCommit?.();
+		await beforeCommit?.();
 		this.#eval.flushPending();
 
 		this.#disconnectFromAgent();
@@ -6595,7 +6588,7 @@ export class AgentSession {
 	 * Unlike newSession(), this preserves all messages in the agent state.
 	 * @returns true if completed, false if cancelled by hook or not persisting
 	 */
-	async fork(): Promise<boolean> {
+	async fork(beforeCommit?: () => void | Promise<void>): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("fork the session");
 		const previousSessionFile = this.sessionFile;
 
@@ -6610,6 +6603,7 @@ export class AgentSession {
 				return false;
 			}
 		}
+		await beforeCommit?.();
 
 		await this.#bash.flushPending();
 		// Flush current session to ensure all entries are written
@@ -7548,7 +7542,7 @@ export class AgentSession {
 	 * Listeners are preserved and will continue receiving events.
 	 * @returns true if switch completed, false if cancelled by hook
 	 */
-	async switchSession(sessionPath: string, beforeCommit?: () => void): Promise<boolean> {
+	async switchSession(sessionPath: string, beforeCommit?: () => void | Promise<void>): Promise<boolean> {
 		const previousSessionFile = this.sessionManager.getSessionFile();
 		const switchingToDifferentSession = previousSessionFile
 			? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
@@ -7566,7 +7560,7 @@ export class AgentSession {
 			}
 		}
 
-		beforeCommit?.();
+		await beforeCommit?.();
 		this.#eval.flushPending();
 
 		this.#disconnectFromAgent();
@@ -7746,7 +7740,7 @@ export class AgentSession {
 			}
 			this.#reconnectToAgent();
 			try {
-				await this.#reconcileSessionMode();
+				await this.#reconcileSessionMode(sessionContext);
 			} catch (error) {
 				logger.warn("Failed to reconcile session mode after switch", {
 					targetSessionFile: sessionPath,
@@ -7772,6 +7766,11 @@ export class AgentSession {
 			if (switchingToDifferentSession) {
 				this.#advisors.restoreCost(await loadAdvisorTranscriptCosts(this.sessionFile));
 			}
+			// Preview invokers, forced tool choices, permission decisions, and
+			// announced mounts belong to the previous logical session. Defer
+			// clearing until every fallible switch step has completed so rollback
+			// preserves the previous session's pending decisions exactly.
+			this.#clearSessionScopedToolState();
 			this.#bash.finishSessionTransition(bashTransition, true);
 			if (previousSessionState.sessionId !== this.sessionManager.getSessionId()) {
 				this.#notifySessionChangeCallbacks();
@@ -7849,7 +7848,7 @@ export class AgentSession {
 	 */
 	async branch(
 		entryId: string,
-		beforeCommit?: () => void,
+		beforeCommit?: () => void | Promise<void>,
 	): Promise<{
 		selectedText: string;
 		selectedImages: ImageContent[];
@@ -7880,7 +7879,7 @@ export class AgentSession {
 			skipConversationRestore = result?.skipConversationRestore ?? false;
 		}
 
-		beforeCommit?.();
+		await beforeCommit?.();
 		this.#eval.flushPending();
 
 		// Clear pending messages (bound to old session state)
