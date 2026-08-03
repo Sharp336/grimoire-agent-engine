@@ -34,14 +34,22 @@ export interface ClassifyUnexpectedStopDeps {
 
 export function isUnexpectedStopCandidate(message: AssistantMessage): boolean {
 	if (message.stopReason !== "stop") return false;
-	let hasText = false;
+	let hasActionableContent = false;
 	for (const content of message.content) {
 		if (content.type === "toolCall") return false;
 		if (content.type === "text" && /\S/.test(content.text)) {
-			hasText = true;
+			hasActionableContent = true;
+		}
+		// A stop turn with non-whitespace thinking but no text is a candidate
+		// too: on reasoning models (thinkingFormat openai / reasoning_content)
+		// the intended response is sometimes emitted as a thinking fragment and
+		// the turn ends without any text or tool call. Without this, the guard
+		// is bypassed and the agent silently stops mid-task.
+		if (content.type === "thinking" && /\S/.test(content.thinking)) {
+			hasActionableContent = true;
 		}
 	}
-	return hasText;
+	return hasActionableContent;
 }
 
 export async function classifyUnexpectedStop(

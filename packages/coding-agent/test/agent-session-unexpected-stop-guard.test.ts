@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { z } from "@oh-my-pi/pi-ai";
-import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockContent, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -46,6 +46,22 @@ function recordCall(value: string, id: string): MockResponse {
 function unexpectedStop(text: string): MockResponse {
 	return {
 		content: [{ type: "text", text }],
+		stopReason: "stop",
+	};
+}
+
+function thinkingOnlyStop(thinking: string): MockResponse {
+	// Mirrors the real wire shape for openai-completions reasoning models:
+	// thinking carries `thinkingSignature: "reasoning_content"`, which makes
+	// `#isEmptyAssistantStop` treat the turn as non-empty (signed thinking is
+	// "provider-authenticated content"). The unexpected-stop gate must then
+	// pick it up, or the turn slips past BOTH guards and the agent stops
+	// silently mid-task.
+	const thinkingBlock: Extract<NonNullable<MockResponse["content"]>[number], { type: "thinking" }> & {
+		thinkingSignature: string;
+	} = { type: "thinking", thinking, thinkingSignature: "reasoning_content" };
+	return {
+		content: [thinkingBlock as MockContent],
 		stopReason: "stop",
 	};
 }
@@ -167,6 +183,29 @@ describe("AgentSession unexpected stop guard", () => {
 		expect(spy).toHaveBeenCalledTimes(2);
 		expect(mock.calls).toHaveLength(2);
 		expect(assistantText(session.agent.state.messages)).toContain("done now");
+		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
+	});
+
+	it("classifies and continues on a thinking-only stop", async () => {
+		let calls = 0;
+		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockImplementation(async () => {
+			calls++;
+			return calls === 1;
+		});
+		const { session, mock } = await createHarness(
+			[thinkingOnlyStop(" 响应"), { content: ["finished after thinking-only stop"], stopReason: "stop" }],
+			{
+				"features.unexpectedStopDetection": true,
+				"providers.unexpectedStopModel": "online",
+			},
+		);
+
+		await session.prompt("do the thing");
+		await session.waitForIdle();
+
+		expect(spy).toHaveBeenCalledTimes(2);
+		expect(mock.calls).toHaveLength(2);
+		expect(assistantText(session.agent.state.messages)).toContain("finished after thinking-only stop");
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
 	});
 

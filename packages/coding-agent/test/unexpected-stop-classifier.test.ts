@@ -76,6 +76,46 @@ describe("isUnexpectedStopCandidate", () => {
 		});
 		expect(isUnexpectedStopCandidate(message)).toBe(false);
 	});
+
+	it("returns true for a thinking-only stop with non-whitespace thinking", () => {
+		const message = makeAssistantMessage({
+			stopReason: "stop",
+			content: [{ type: "thinking", thinking: " 响应" }],
+		});
+		expect(isUnexpectedStopCandidate(message)).toBe(true);
+	});
+
+	it("returns true for a thinking-only stop with a full response trapped in thinking", () => {
+		const message = makeAssistantMessage({
+			stopReason: "stop",
+			content: [
+				{
+					type: "thinking",
+					thinking: "responseAll four reviewers complete. Let me now synthesize the findings.",
+				},
+			],
+		});
+		expect(isUnexpectedStopCandidate(message)).toBe(true);
+	});
+
+	it("returns false when thinking is only whitespace", () => {
+		const message = makeAssistantMessage({
+			stopReason: "stop",
+			content: [{ type: "thinking", thinking: "   \n\t  " }],
+		});
+		expect(isUnexpectedStopCandidate(message)).toBe(false);
+	});
+
+	it("returns false when thinking-only stop has a toolCall", () => {
+		const message = makeAssistantMessage({
+			stopReason: "stop",
+			content: [
+				{ type: "thinking", thinking: "I should run the tests." },
+				{ type: "toolCall", id: "call-1", name: "bash", arguments: {} },
+			],
+		});
+		expect(isUnexpectedStopCandidate(message)).toBe(false);
+	});
 });
 
 describe("classifyUnexpectedStop", () => {

@@ -14,6 +14,7 @@ import type {
 	Effort,
 	Model,
 	TextContent,
+	ThinkingContent,
 	ToolChoice,
 } from "@oh-my-pi/pi-ai";
 import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
@@ -591,9 +592,16 @@ export class TurnRecovery {
 			return false;
 		}
 
-		const text = assistantMessage.content
-			.filter((content): content is TextContent => content.type === "text")
-			.map(content => content.text)
+		const textBlocks = assistantMessage.content.filter((content): content is TextContent => content.type === "text");
+		// Prefer text for the classifier, but fall back to thinking when the
+		// turn produced no text (thinking-only unexpected stops). The thinking
+		// content is what the model was mid-deliberation about, so the
+		// classifier can still judge whether the stop is terminal.
+		const thinkingBlocks = assistantMessage.content.filter(
+			(content): content is ThinkingContent => content.type === "thinking",
+		);
+		const text = (textBlocks.length > 0 ? textBlocks : thinkingBlocks)
+			.map(content => ("text" in content ? content.text : content.thinking))
 			.join("\n");
 		if (!/\S/.test(text)) {
 			this.#unexpectedStopRetryCount = 0;
