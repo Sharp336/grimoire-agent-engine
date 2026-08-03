@@ -506,7 +506,7 @@ export class ExtensionDashboard implements Component {
 		void sm
 			.setProviderActivation(providerId, next, activationScope)
 			.then(() => {
-				syncCapabilityDisabledProviders(sm.getActivationDisabledProviders(activationScope));
+				syncCapabilityDisabledProviders(sm.get("disabledProviders") as string[]);
 				void this.#refreshFromState();
 			})
 			.catch(error =>

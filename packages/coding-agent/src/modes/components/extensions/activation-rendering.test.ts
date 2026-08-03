@@ -793,6 +793,45 @@ describe("extension activation rendering", () => {
 		}
 	});
 
+	it("syncs provider registry from effective cwd state after a global provider toggle", async () => {
+		const previousAgentDir = getAgentDir();
+		const previousDisabledProviders = getDisabledProviders();
+		const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-provider-effective-sync-"));
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agent-"));
+		cleanupPaths.push(projectRoot, agentDir);
+		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
+		await fs.mkdir(path.join(agentDir, "skills", "global-skill"), { recursive: true });
+		await Bun.write(path.join(projectRoot, ".omp", "config.yml"), YAML.stringify({ enabledProviders: ["native"] }));
+		await Bun.write(
+			path.join(agentDir, "skills", "global-skill", "SKILL.md"),
+			"---\nname: global-skill\ndescription: User skill\n---\nUser skill\n",
+		);
+
+		syncDisabledProviders(previousDisabledProviders.filter(providerId => providerId !== "native"));
+		setAgentDir(agentDir);
+		try {
+			const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
+			const dashboard = await ExtensionDashboard.create(projectRoot, settings, 28);
+			dashboard.handleInput("\x10");
+			for (let i = 0; i < 30; i++) {
+				if (stripAnsi(dashboard.render(140).join("\n")).includes("OMP Extension Packages")) break;
+				dashboard.handleInput("\x1b[C");
+				await Bun.sleep(5);
+			}
+
+			expect(stripAnsi(dashboard.render(140).join("\n"))).toContain("OMP Extension Packages");
+			dashboard.handleInput(" ");
+			await Bun.sleep(120);
+
+			expect(settings.getProviderActivation("native", "global")).toBe("disabled");
+			expect(settings.get("disabledProviders")).toEqual([]);
+			expect(getDisabledProviders()).not.toContain("native");
+		} finally {
+			syncDisabledProviders(previousDisabledProviders);
+			setAgentDir(previousAgentDir);
+		}
+	});
+
 	it("renders inherited project activation as a leading icon without a text badge", () => {
 		const list = new ExtensionList([
 			extension({
