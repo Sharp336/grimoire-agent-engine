@@ -738,7 +738,7 @@ export class ComputerWorkerCore {
 		} finally {
 			this.#session = undefined;
 			this.#unsubscribe();
-			this.#transport.send({ type: "closed" });
+			await this.#transport.sendAndFlush({ type: "closed" });
 			this.#transport.close();
 		}
 	}

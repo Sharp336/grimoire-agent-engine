@@ -2,11 +2,18 @@ import type { DesktopCapabilities } from "@oh-my-pi/pi-natives";
 import { withTimeout } from "@oh-my-pi/pi-utils/async";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
-import { workerHostEntry } from "@oh-my-pi/pi-utils/worker-host";
+import {
+	createWorkerHandle,
+	createWorkerSubprocess,
+	resolveWorkerSpawnCmd,
+	type SpawnedSubprocess,
+	workerEnvFromParent,
+} from "../../subprocess/worker-client";
+import { safeSend } from "../../utils/ipc";
 import type { ToolSession } from "../index";
 import { ToolAbortError, ToolError } from "../tool-errors";
 import {
-	COMPUTER_WORKER_ARG,
+	COMPUTER_PROCESS_ARG,
 	type ComputerRunOk,
 	type ComputerSessionSnapshot,
 	type ComputerWorkerInbound,
@@ -32,7 +39,7 @@ export interface ComputerController {
 	close(): Promise<void>;
 }
 
-/** Minimal Bun worker lifecycle surface used by the supervisor. */
+/** Minimal subprocess lifecycle surface used by the supervisor. */
 export interface ComputerWorkerHandle {
 	send(message: ComputerWorkerInbound): void;
 	onMessage(handler: (message: ComputerWorkerOutbound) => void): () => void;
@@ -40,7 +47,7 @@ export interface ComputerWorkerHandle {
 	terminate(): Promise<void>;
 }
 
-/** Startup and shutdown deadlines for a computer worker. */
+/** Startup and shutdown deadlines for a computer subprocess. */
 export interface ComputerSupervisorTimeouts {
 	startMs: number;
 	closeMs: number;
@@ -58,7 +65,7 @@ export type ComputerSessionToolCaller = (
 	options: { session: ToolSession; signal?: AbortSignal; emitStatus?: () => void },
 ) => Promise<unknown>;
 
-/** Creates an isolated computer worker handle. */
+/** Creates an isolated computer subprocess handle. */
 export type ComputerWorkerFactory = () => ComputerWorkerHandle;
 
 interface PendingRun {
@@ -68,44 +75,22 @@ interface PendingRun {
 	toolCalls: Map<string, AbortController>;
 }
 
-function wrapWorker(worker: Worker): ComputerWorkerHandle {
-	return {
-		send(message) {
-			worker.postMessage(message);
-		},
-		onMessage(handler) {
-			const listener = (event: MessageEvent): void => handler(event.data as ComputerWorkerOutbound);
-			worker.addEventListener("message", listener);
-			return () => worker.removeEventListener("message", listener);
-		},
-		onError(handler) {
-			const onError = (event: ErrorEvent): void =>
-				handler(event.error instanceof Error ? event.error : new Error(event.message));
-			const onMessageError = (event: MessageEvent): void =>
-				handler(new Error(`Computer worker message error: ${String(event.data)}`));
-			const onClose = (): void => handler(new Error("Computer worker exited"));
-			worker.addEventListener("error", onError);
-			worker.addEventListener("messageerror", onMessageError);
-			worker.addEventListener("close", onClose);
-			return () => {
-				worker.removeEventListener("error", onError);
-				worker.removeEventListener("messageerror", onMessageError);
-				worker.removeEventListener("close", onClose);
-			};
-		},
-		async terminate() {
-			worker.terminate();
-		},
-	};
+/** Spawns the raw computer subprocess through the active CLI host. */
+export function createComputerSubprocess(): SpawnedSubprocess<ComputerWorkerOutbound> {
+	return createWorkerSubprocess<ComputerWorkerOutbound>({
+		spawnCommand: resolveWorkerSpawnCmd(COMPUTER_PROCESS_ARG),
+		env: workerEnvFromParent(),
+		exitLabel: "Computer subprocess",
+		reportCleanExit: true,
+	});
 }
 
-/** Spawns the computer worker through the active CLI host when available. */
-export function spawnComputerWorker(): ComputerWorkerHandle {
-	const hostEntry = workerHostEntry();
-	const worker = hostEntry
-		? new Worker(hostEntry, { type: "module", argv: [COMPUTER_WORKER_ARG] })
-		: new Worker(new URL("./worker-entry.ts", import.meta.url).href, { type: "module" });
-	return wrapWorker(worker);
+/** Spawns the computer runtime with no same-process fallback. */
+export function spawnComputerSubprocess(): ComputerWorkerHandle {
+	const spawned = createComputerSubprocess();
+	return createWorkerHandle<ComputerWorkerInbound, ComputerWorkerOutbound>(spawned, message =>
+		safeSend(spawned.proc, message, "computer"),
+	);
 }
 
 function errorFromPayload(payload: RunErrorPayload): Error {
@@ -151,7 +136,7 @@ export class ComputerSupervisor implements ComputerController {
 
 	constructor(
 		session: ToolSession,
-		createWorker: ComputerWorkerFactory = spawnComputerWorker,
+		createWorker: ComputerWorkerFactory = spawnComputerSubprocess,
 		timeouts: ComputerSupervisorTimeouts = DEFAULT_TIMEOUTS,
 		callSessionTool: ComputerSessionToolCaller = async () => {
 			throw new ToolError("Computer session tool bridge is unavailable");
@@ -211,6 +196,7 @@ export class ComputerSupervisor implements ComputerController {
 			this.#unsubscribeError = worker.onError(error => {
 				void this.#workerFailed(error);
 			});
+			this.#safeSend({ type: "ping", id: `computer-start-${Snowflake.next()}` });
 		} catch (error) {
 			started.reject(error);
 		}
@@ -226,7 +212,7 @@ export class ComputerSupervisor implements ComputerController {
 	}
 
 	#handleMessage(message: ComputerWorkerOutbound): void {
-		if (message.type === "ready") {
+		if (message.type === "ready" || message.type === "pong") {
 			this.#startResolve?.();
 			this.#startResolve = undefined;
 			this.#startReject = undefined;
@@ -378,7 +364,7 @@ export async function releaseComputerSessionsForOwner(ownerId: string | undefine
 /** Verifies computer worker startup, messaging, and bounded shutdown. */
 export async function smokeTestComputerWorker(
 	timeoutMs = SMOKE_TIMEOUT_MS,
-	createWorker: ComputerWorkerFactory = spawnComputerWorker,
+	createWorker: ComputerWorkerFactory = spawnComputerSubprocess,
 ): Promise<void> {
 	const worker = createWorker();
 	const waitFor = async (expected: ComputerWorkerOutbound["type"], failureMessage: string): Promise<void> => {

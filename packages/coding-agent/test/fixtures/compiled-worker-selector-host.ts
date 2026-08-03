@@ -1,6 +1,4 @@
-import { parentPort } from "node:worker_threads";
-import { installWorkerInbox, WORKER_HOST_SELECTOR_PREFIX } from "@oh-my-pi/pi-utils/worker-host";
-import { COMPUTER_WORKER_ARG } from "../../src/tools/computer/protocol";
+import { WORKER_HOST_SELECTOR_PREFIX } from "@oh-my-pi/pi-utils/worker-host";
 
 const STATS_WORKER_ARG = `${WORKER_HOST_SELECTOR_PREFIX}stats_sync`;
 
@@ -21,11 +19,7 @@ if (Bun.isMainThread) {
 	}
 } else {
 	const selector = process.argv.find(arg => arg.startsWith(WORKER_HOST_SELECTOR_PREFIX));
-	if (selector === COMPUTER_WORKER_ARG) {
-		if (!parentPort) throw new Error("compiled worker fixture: missing parentPort");
-		installWorkerInbox(parentPort);
-		await import("../../src/tools/computer/worker-entry");
-	} else if (selector === STATS_WORKER_ARG) {
+	if (selector === STATS_WORKER_ARG) {
 		self.onmessage = (_event: MessageEvent<{ kind: "ping" }>) => {
 			self.postMessage({ ok: true, kind: "pong" });
 		};

@@ -157,11 +157,17 @@ class FakeNativeSession implements NativeDesktopSession {
 
 class MemoryTransport implements ComputerWorkerTransport {
 	readonly outbound: ComputerWorkerOutbound[] = [];
+	closeCount = 0;
+	readonly #flush: (message: ComputerWorkerOutbound) => Promise<void>;
 	#handler?: (message: ComputerWorkerInbound) => void;
 	#waiters = new Set<{
 		predicate: (message: ComputerWorkerOutbound) => boolean;
 		resolve: (message: ComputerWorkerOutbound) => void;
 	}>();
+
+	constructor(flush?: (message: ComputerWorkerOutbound) => Promise<void>) {
+		this.#flush = flush ?? (async message => this.send(message));
+	}
 
 	send(message: ComputerWorkerOutbound): void {
 		this.outbound.push(message);
@@ -171,13 +177,18 @@ class MemoryTransport implements ComputerWorkerTransport {
 			waiter.resolve(message);
 		}
 	}
+	sendAndFlush(message: ComputerWorkerOutbound): Promise<void> {
+		return this.#flush(message);
+	}
 	onMessage(handler: (message: ComputerWorkerInbound) => void): () => void {
 		this.#handler = handler;
 		return () => {
 			if (this.#handler === handler) this.#handler = undefined;
 		};
 	}
-	close(): void {}
+	close(): void {
+		this.closeCount += 1;
+	}
 	inbound(message: ComputerWorkerInbound): void {
 		this.#handler?.(message);
 	}
@@ -257,6 +268,28 @@ describe("computer schema and approval", () => {
 });
 
 describe("computer worker round trips", () => {
+	it("flushes the closed reply before closing its subprocess transport", async () => {
+		const flushed = Promise.withResolvers<void>();
+		let transport!: MemoryTransport;
+		transport = new MemoryTransport(async message => {
+			transport.send(message);
+			await flushed.promise;
+		});
+		const native = new FakeNativeSession();
+		new ComputerWorkerCore(transport, () => native);
+
+		transport.inbound({ type: "run", id: "open", code: "1", timeoutMs: 2_000, session: snapshot() });
+		await transport.waitFor(message => message.type === "result" && message.id === "open");
+		transport.inbound({ type: "close" });
+		await transport.waitFor(message => message.type === "closed");
+
+		expect(native.closeCount).toBe(1);
+		expect(transport.closeCount).toBe(0);
+		flushed.resolve();
+		await Bun.sleep(0);
+		expect(transport.closeCount).toBe(1);
+	});
+
 	it("lists windows and returns screenshot caption, image, and detail through a fake native session", async () => {
 		const transport = new MemoryTransport();
 		const native = new FakeNativeSession();
@@ -498,6 +531,7 @@ describe("computer worker round trips", () => {
 class SupervisorWorker implements ComputerWorkerHandle {
 	readonly #respond: boolean;
 	#messageHandlers = new Set<(message: ComputerWorkerOutbound) => void>();
+	#errorHandlers = new Set<(error: Error) => void>();
 	#terminated = false;
 
 	constructor(respond: boolean) {
@@ -522,8 +556,9 @@ class SupervisorWorker implements ComputerWorkerHandle {
 		queueMicrotask(() => this.#emit({ type: "ready" }));
 		return () => this.#messageHandlers.delete(handler);
 	}
-	onError(_handler: (error: Error) => void): () => void {
-		return () => {};
+	onError(handler: (error: Error) => void): () => void {
+		this.#errorHandlers.add(handler);
+		return () => this.#errorHandlers.delete(handler);
 	}
 	async terminate(): Promise<void> {
 		this.#terminated = true;
@@ -532,9 +567,34 @@ class SupervisorWorker implements ComputerWorkerHandle {
 		if (this.#terminated) return;
 		for (const handler of this.#messageHandlers) handler(message);
 	}
+	crash(error: Error): void {
+		for (const handler of this.#errorHandlers) handler(error);
+	}
 }
 
 describe("computer supervisor recovery", () => {
+	it("rejects a pending call after a child crash and starts a fresh subprocess", async () => {
+		let workers = 0;
+		let first!: SupervisorWorker;
+		const supervisor = new ComputerSupervisor(
+			toolSession(),
+			() => {
+				const worker = new SupervisorWorker(++workers > 1);
+				if (workers === 1) first = worker;
+				return worker;
+			},
+			{ startMs: 200, closeMs: 200 },
+		);
+		const pending = supervisor.run("await wait(1_000)", 1_000, snapshot());
+		await Bun.sleep(0);
+		first.crash(new Error("Computer subprocess exited with signal 5: native panic"));
+
+		await expect(pending).rejects.toThrow("Computer subprocess exited with signal 5: native panic");
+		expect((await supervisor.run("41 + 1", 1_000, snapshot())).returnValue).toBe("fresh");
+		expect(workers).toBe(2);
+		await supervisor.close();
+	});
+
 	it("surfaces a timeout ToolError and creates a fresh worker for the next run", async () => {
 		let workers = 0;
 		const supervisor = new ComputerSupervisor(toolSession(), () => new SupervisorWorker(++workers > 1), {
