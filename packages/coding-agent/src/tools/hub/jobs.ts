@@ -376,12 +376,12 @@ async function cancelAgentRegistration(
 	}
 	const lifecycle = session.agentLifecycle?.();
 	try {
-		if (ref.status === "running" && ref.session) {
-			await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
-		}
 		if (lifecycle) {
 			await lifecycle.release(id);
 		} else {
+			if (ref.status === "running" && ref.session) {
+				await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
+			}
 			await ref.session?.dispose();
 			registry?.unregister(id);
 		}

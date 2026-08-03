@@ -342,7 +342,7 @@
 - Fixed browser automation disrupting attached browsers by adopting the active foreground tab and avoiding raising new tabs during screenshots.
 ### Fixed
 
-- Propagated cancellation through the adopted subagent tree. When a parent agent is marked aborted, the lifecycle manager now aborts each live descendant session and marks that descendant aborted, preventing a cancelled or dead parent from leaving keep-alive children running without an owner.
+- Propagated cancellation through the adopted subagent tree. Parent cancellation and explicit lifecycle release now signal each descendant's owning run with bounded cleanup, clear adoption timers, and dispose and detach live sessions while preserving terminal `aborted` state, preventing keep-alive children from continuing, parking, or becoming revivable without an owner.
 
 ## [17.2.1] - 2026-07-30
 

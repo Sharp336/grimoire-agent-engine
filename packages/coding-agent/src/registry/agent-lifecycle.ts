@@ -33,6 +33,8 @@ import {
 	type RegistryEvent,
 } from "./agent-registry";
 
+const TERMINATION_ABORT_TIMEOUT_MS = 5_000;
+
 export type AgentReviver = (expected: AgentRef) => Promise<AgentSession>;
 
 const AGENT_RELEASE_GRACE_MS = 5000;
@@ -86,6 +88,18 @@ interface RevivingAgent {
 	promise: Promise<AgentSession>;
 }
 
+interface ActiveRun {
+	ref: AgentRef;
+	session: AgentSession;
+	abort: () => Promise<void>;
+}
+
+interface TerminatingAgent {
+	ref: AgentRef;
+	session: AgentSession | null;
+	promise: Promise<void>;
+}
+
 export class AgentLifecycleManager {
 	static #global: AgentLifecycleManager | undefined;
 
@@ -108,6 +122,8 @@ export class AgentLifecycleManager {
 			current.#adopted.clear();
 			current.#revivals.clear();
 			current.#parks.clear();
+			current.#runs.clear();
+			current.#terminations.clear();
 			current.#persistedReviverFactory = undefined;
 		}
 		AgentLifecycleManager.#global = undefined;
@@ -123,6 +139,10 @@ export class AgentLifecycleManager {
 	readonly #parks = new Map<string, ParkInFlight>();
 	/** In-flight revives, bound to the parked ref that initiated them, so concurrent {@link ensureLive} calls coalesce. */
 	readonly #revivals = new Map<string, RevivingAgent>();
+	/** Active executor runs, used to stop the run monitor rather than only its current model turn. */
+	readonly #runs = new Map<string, ActiveRun>();
+	/** Terminal cleanup coalesced per exact ref. */
+	readonly #terminations = new Map<string, TerminatingAgent>();
 	#unsubscribe: (() => void) | undefined;
 	#persistedReviverFactory: PersistedSubagentReviverFactory | undefined;
 	/** TTL applied when a cold-revived ref is adopted on demand. */
@@ -183,6 +203,37 @@ export class AgentLifecycleManager {
 	}
 
 	/**
+	 * Bind a live session to its owning executor run. Descendant cancellation
+	 * invokes `abort` so the run monitor's signal stops yield retries and final
+	 * lifecycle bookkeeping, not merely the session's current model turn.
+	 */
+	trackRun(id: string, session: AgentSession, abort: () => Promise<void>): () => void {
+		const ref = this.#registry.get(id);
+		if (!ref || ref.session !== session || ref.status === "aborted") return () => {};
+		const run: ActiveRun = { ref, session, abort };
+		this.#runs.set(id, run);
+		return () => {
+			if (this.#runs.get(id) === run) this.#runs.delete(id);
+		};
+	}
+
+	/** Wait for terminal cleanup when cancellation already owns this ref. */
+	async waitForTermination(id: string, expected?: AgentRefExpectation): Promise<void> {
+		const termination = this.#terminations.get(id);
+		if (termination && (expected === undefined || termination.ref === expected || termination.session === expected)) {
+			await termination.promise;
+		}
+	}
+
+	/** True while terminal cancellation owns disposal/detachment for this exact ref. */
+	isTerminating(id: string, expected?: AgentRefExpectation): boolean {
+		const termination = this.#terminations.get(id);
+		return Boolean(
+			termination && (expected === undefined || termination.ref === expected || termination.session === expected),
+		);
+	}
+
+	/**
 	 * True while {@link park} is disposing this agent's session (lets dispose
 	 * hooks distinguish park from teardown). False once the park is cancelled
 	 * by ensureLive or after detach+dispose completes. When `expected` is
@@ -211,7 +262,7 @@ export class AgentLifecycleManager {
 		const adopted = this.#adopted.get(id);
 		if (!adopted) return;
 		const ref = this.#registry.get(id);
-		if (!ref || adopted.ref !== ref) return;
+		if (!ref || adopted.ref !== ref || ref.status !== "idle") return;
 		const session = ref.session;
 		if (!session) return;
 
@@ -306,6 +357,12 @@ export class AgentLifecycleManager {
 				`Unknown agent "${id}" — it was never registered or has been released. If a transcript exists, read history://${id}.`,
 			);
 		}
+		if (ref.status === "aborted") {
+			await this.waitForTermination(id, ref);
+			throw new Error(
+				`Agent "${id}" is aborted and cannot be revived. Its transcript remains readable at history://${id}.`,
+			);
+		}
 		if (ref.session) return ref.session;
 		const inflight = this.#revivals.get(id);
 		if (inflight?.ref === ref) return inflight.promise;
@@ -356,57 +413,53 @@ export class AgentLifecycleManager {
 			throw error;
 		}
 	}
-
 	/**
-	 * Dispose if live and drop timers. When `expected` is given, only a ref
-	 * matching it is released; a stale release can never take down a newer
-	 * same-id ref. Returns true when a matching ref was released.
-	 *
-	 * By default the ref is unregistered (teardown / one-shot removal). Pass
-	 * `tombstone: true` for an explicit kill: the ref is kept registered as a
-	 * terminal `aborted` row (session detached) instead of being removed, so a
-	 * later persisted-subagent scan (e.g. Agent Hub reopen) skips it via its
-	 * `if (!registry.get(id))` guard rather than re-adopting the surviving
-	 * on-disk transcript as a fresh `parked` row. Mirrors
-	 * `finalizeSubagentLifecycle`'s genuine-kill path.
+	 * Terminally clean up the exact registered subtree. Descendants remain as
+	 * detached `aborted` refs so history stays readable and they cannot be
+	 * revived. By default the root is unregistered; `tombstone: true` keeps it
+	 * as a detached terminal ref after an explicit kill. When `expected` is
+	 * given, only a matching ref is released, so stale cleanup cannot remove a
+	 * newer same-id generation. Returns true when a matching ref was released.
 	 */
 	async release(id: string, expected?: AgentRefExpectation, options?: { tombstone?: boolean }): Promise<boolean> {
 		const adopted = this.#adopted.get(id);
 		const current = this.#registry.get(id);
 		const currentMatches =
 			current && (expected === undefined || current === expected || current.session === expected);
+		if (current && !currentMatches) return false;
 		const adoptedMatches =
 			adopted && (expected === undefined || adopted.ref === expected || adopted.ref.session === expected);
 		const ref = currentMatches ? current : adoptedMatches ? adopted.ref : undefined;
 		if (!ref) return false;
-		if (adopted?.ref === ref) {
-			clearTimeout(adopted.timer);
-			this.#adopted.delete(id);
-		}
 
-		const park = this.#parks.get(id);
-		if (park && park.ref === ref) {
-			// Prefer cancel when the session is still live so release owns dispose.
-			if (!park.detached) park.cancel();
-			await park.promise;
-		}
-
-		if (options?.tombstone) {
-			// Persist the terminal decision before detaching the session. The
-			// sidecar prevents a later discovery pass from reviving this transcript
-			// as a fresh parked ref.
-			if (ref.sessionFile) await persistAgentTombstone(ref.sessionFile);
-			this.#registry.setStatus(id, "aborted", ref);
-		}
-		const live = this.#registry.get(id) === ref ? ref.session : null;
-		if (options?.tombstone) this.#registry.detachSession(id, ref);
-		if (live) {
-			try {
-				await live.dispose();
-			} catch (error) {
-				logger.warn("AgentLifecycleManager.release: session dispose failed", { id, error: String(error) });
+		// Snapshot the exact registered subtree before asynchronous cleanup so
+		// removing a parent cannot orphan live or revivable descendants.
+		const registered = this.#registry.list();
+		const subtree = [ref];
+		// An adopted ref may be stale while a newer same-id ref is registered.
+		// Only a root that is still current owns the registered descendants.
+		if (this.#registry.get(id) === ref) {
+			const subtreeIds = new Set([ref.id]);
+			for (let index = 0; index < subtree.length; index++) {
+				const parent = subtree[index];
+				for (const child of registered) {
+					if (child.parentId === parent.id && !subtreeIds.has(child.id)) {
+						subtree.push(child);
+						subtreeIds.add(child.id);
+					}
+				}
 			}
 		}
+		if (options?.tombstone && ref.sessionFile) await persistAgentTombstone(ref.sessionFile);
+			}
+		}
+		for (const descendant of subtree) {
+			if (this.#registry.get(descendant.id) === descendant && descendant.status !== "aborted") {
+				this.#registry.setStatus(descendant.id, "aborted", descendant);
+			}
+		}
+		await Promise.all(subtree.map(descendant => this.#terminate(descendant)));
+
 		if (!options?.tombstone) this.#registry.unregister(id, ref);
 		return true;
 	}
@@ -415,7 +468,7 @@ export class AgentLifecycleManager {
 	async dispose(deadlineAt: number = Date.now() + AGENT_RELEASE_GRACE_MS): Promise<void> {
 		this.#unsubscribe?.();
 		this.#unsubscribe = undefined;
-		const ids = [...new Set([...this.#adopted.keys(), ...this.#parks.keys()])];
+		const ids = [...new Set([...this.#adopted.keys(), ...this.#parks.keys(), ...this.#runs.keys()])];
 		await Promise.all(
 			ids.map(async id => {
 				const release = this.release(id).then(() => {});
@@ -432,17 +485,37 @@ export class AgentLifecycleManager {
 				}
 			}),
 		);
+		const terminating = [...this.#terminations.values()];
+		await Promise.all(
+			terminating.map(async entry => {
+				try {
+					await untilAborted(AbortSignal.timeout(Math.max(0, deadlineAt - Date.now())), () => entry.promise);
+				} catch (error) {
+					if (Date.now() >= deadlineAt) {
+						trackLateCleanup(entry.promise, { id: entry.ref.id, resource: "terminating-agent" });
+					}
+					logger.warn("Agent termination exceeded its deadline", {
+						id: entry.ref.id,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			}),
+		);
 		this.#revivals.clear();
 		this.#parks.clear();
+		this.#runs.clear();
+		this.#terminations.clear();
 		this.#persistedReviverFactory = undefined;
 	}
 
 	async #revive(id: string, revive: AgentReviver, ref: AgentRef, adopted: AdoptedAgent): Promise<AgentSession> {
 		const session = await revive(ref);
 		let liveRef = this.#registry.get(id);
-		if (liveRef === ref && ref.status === "parked" && !ref.session) {
-			// A simple reviver returned a session without claiming the parked ref;
-			// attach it here while the exact ref is still revivable.
+		if (liveRef === ref && ref.status !== "parked") {
+			await session.dispose();
+			throw new Error(`Agent "${id}" changed before its persisted session could attach.`);
+		}
+		if (liveRef === ref) {
 			if (!this.#registry.attachSession(id, session, ref.sessionFile, ref)) {
 				await session.dispose();
 				throw new Error(`Agent "${id}" changed before its persisted session could attach.`);
@@ -461,6 +534,10 @@ export class AgentLifecycleManager {
 			// `aborted` tombstone set while revive() was in flight — is stale.
 			await session.dispose();
 			throw new Error(`Agent "${id}" was replaced or became terminal while its persisted session was reviving.`);
+		}
+		if (liveRef.status === "aborted") {
+			await session.dispose();
+			throw new Error(`Agent "${id}" was aborted while its persisted session was reviving.`);
 		}
 		adopted.ref = liveRef;
 		// Emits status_changed → "idle", which re-arms the TTL timer below.
@@ -482,19 +559,108 @@ export class AgentLifecycleManager {
 		adopted.timer = timer;
 	}
 
+	async #settleTerminationStep(
+		ref: AgentRef,
+		step: string,
+		deadline: Promise<false>,
+		operation: () => Promise<void>,
+	): Promise<boolean> {
+		let pending: Promise<void>;
+		try {
+			pending = operation();
+		} catch (error) {
+			logger.debug(`AgentLifecycleManager descendant ${step} failed`, {
+				id: ref.id,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return true;
+		}
+		const completion = pending.then(
+			() => true,
+			error => {
+				// Observe late rejections even when the deadline wins the race.
+				logger.debug(`AgentLifecycleManager descendant ${step} failed`, {
+					id: ref.id,
+					error: error instanceof Error ? error.message : String(error),
+				});
+				return true;
+			},
+		);
+		const settled = await Promise.race([completion, deadline]);
+		if (!settled) logger.debug(`AgentLifecycleManager descendant ${step} timed out`, { id: ref.id });
+		return settled;
+	}
+
+	#terminate(ref: AgentRef): Promise<void> {
+		const existing = this.#terminations.get(ref.id);
+		if (existing?.ref === ref) return existing.promise;
+
+		const session = ref.session;
+		const termination: TerminatingAgent = {
+			ref,
+			session,
+			promise: undefined as unknown as Promise<void>,
+		};
+
+		const adopted = this.#adopted.get(ref.id);
+		if (adopted?.ref === ref) {
+			clearTimeout(adopted.timer);
+			this.#adopted.delete(ref.id);
+		}
+		if (this.#registry.get(ref.id) === ref) {
+			if (ref.status !== "aborted") this.#registry.setStatus(ref.id, "aborted", ref);
+			// Preserve the live session locally for abort/dispose, but detach it
+			// immediately so terminal refs never route callers into dead work.
+			this.#registry.detachSession(ref.id, ref);
+		}
+
+		let deadlineTimer: NodeJS.Timeout | undefined;
+		const { promise: deadline, resolve: resolveDeadline } = Promise.withResolvers<false>();
+		deadlineTimer = setTimeout(() => resolveDeadline(false), TERMINATION_ABORT_TIMEOUT_MS);
+		deadlineTimer.unref?.();
+		termination.promise = (async () => {
+			try {
+				const park = this.#parks.get(ref.id);
+				if (park?.ref === ref) {
+					if (!park.detached) park.cancel();
+					const settled = await this.#settleTerminationStep(ref, "park", deadline, () => park.promise);
+					if (!settled && this.#parks.get(ref.id) === park) this.#parks.delete(ref.id);
+				}
+
+				const run = this.#runs.get(ref.id);
+				if (run?.ref === ref) {
+					try {
+						await this.#settleTerminationStep(ref, "run abort", deadline, run.abort);
+					} finally {
+						if (this.#runs.get(ref.id) === run) this.#runs.delete(ref.id);
+					}
+				} else if (session) {
+					await this.#settleTerminationStep(ref, "abort", deadline, () => session.abort());
+				}
+
+				if (session) {
+					await this.#settleTerminationStep(ref, "dispose", deadline, () => session.dispose());
+				}
+			} finally {
+				clearTimeout(deadlineTimer);
+				if (this.#registry.get(ref.id) === ref) {
+					this.#registry.detachSession(ref.id, ref);
+					this.#registry.setStatus(ref.id, "aborted", ref);
+				}
+			}
+		})().finally(() => {
+			if (this.#terminations.get(ref.id) === termination) this.#terminations.delete(ref.id);
+		});
+
+		this.#terminations.set(ref.id, termination);
+		return termination.promise;
+	}
+
 	#onRegistryEvent(event: RegistryEvent): void {
 		if (event.type === "status_changed" && event.ref.status === "aborted") {
-			// Parent/task cancellation is terminal for the whole owned subtree.
-			// Abort descendants without waiting on the event-dispatch path so a
-			// dead parent cannot leave live keep-alive children consuming work.
+			void this.#terminate(event.ref);
 			for (const child of this.#registry.list()) {
 				if (child.parentId === event.ref.id && child.status !== "aborted") {
-					void child.session?.abort().catch(error => {
-						logger.debug("AgentLifecycleManager descendant abort failed", {
-							id: child.id,
-							error: error instanceof Error ? error.message : String(error),
-						});
-					});
 					this.#registry.setStatus(child.id, "aborted", child);
 				}
 			}

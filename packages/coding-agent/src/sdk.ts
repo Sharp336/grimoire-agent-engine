@@ -1628,6 +1628,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (!ref || agentRegistry.get(resolvedAgentId) !== ref) return;
 		if (ref.status === "parked" || (ref.status === "aborted" && !ref.session)) return;
 		if (AgentLifecycleManager.global().isParking(resolvedAgentId, ref)) return;
+		if (AgentLifecycleManager.global().isTerminating(resolvedAgentId, ref)) return;
 		agentRegistry.unregister(resolvedAgentId, ref);
 	};
 	const evalKernelOwnerId = `agent-session:${Snowflake.next()}`;

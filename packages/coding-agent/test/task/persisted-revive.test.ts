@@ -44,22 +44,29 @@ type IrcWakeObserver = (records: CustomMessage[]) => ((error?: unknown) => void 
 interface RevivedSessionHandle {
 	session: AgentSession;
 	observer: () => IrcWakeObserver | undefined;
+	emit: (event: AgentSessionEvent) => void;
 }
 
 function createRevivedSession(activeToolNames: string[][]): RevivedSessionHandle {
 	let observer: IrcWakeObserver | undefined;
+	let listener: ((event: AgentSessionEvent) => void) | undefined;
 	const session = {
 		getMountedXdevToolNames: () => [],
 		setActiveToolsByName: async (names: string[]) => {
 			activeToolNames.push(names);
 		},
-		subscribe: (_listener: (event: AgentSessionEvent) => void) => () => {},
+		subscribe: (next: (event: AgentSessionEvent) => void) => {
+			listener = next;
+			return () => {
+				if (listener === next) listener = undefined;
+			};
+		},
 		setIrcWakeTurnObserver: (next: IrcWakeObserver | undefined) => {
 			observer = next;
 		},
 		getLastAssistantMessage: () => undefined,
 	} as unknown as AgentSession;
-	return { session, observer: () => observer };
+	return { session, observer: () => observer, emit: event => listener?.(event) };
 }
 
 async function createPersistedSession(cwd: string, restrictToolNames?: boolean, modelRole?: string): Promise<string> {
@@ -118,6 +125,8 @@ function createFactory(cwd: string, eventBus?: EventBus) {
 afterEach(async () => {
 	vi.restoreAllMocks();
 	MCPManager.resetForTests();
+	AgentLifecycleManager.resetGlobalForTests();
+	AgentRegistry.resetGlobalForTests();
 	await Promise.all(tempDirs.splice(0).map(dir => dir.remove()));
 });
 
@@ -215,6 +224,29 @@ describe("persisted subagent revival", () => {
 
 		expect(capturedOptions?.modelPattern).toBe("anthropic/claude-sonnet-4-5");
 		expect(capturedOptions?.modelPatternAuthFallback).toBe("anthropic/claude-sonnet-4-5");
+	});
+
+	it("does not let a late persisted agent_end overwrite terminal aborted state", async () => {
+		AgentRegistry.resetGlobalForTests();
+		AgentLifecycleManager.resetGlobalForTests();
+		const cwd = makeTempDir("@pi-revive-terminal-status-");
+		const sessionFile = await createPersistedSession(cwd);
+		const registry = AgentRegistry.global();
+		const ref = registry.register(createRef(sessionFile));
+		const handle = createRevivedSession([]);
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+			registry.attachSession(ref.id, handle.session, sessionFile, ref);
+			registry.setStatus(ref.id, "running", ref);
+			return { session: handle.session } as CreateAgentSessionResult;
+		});
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		registry.setStatus(ref.id, "aborted", ref);
+		handle.emit({ type: "agent_end" } as AgentSessionEvent);
+
+		expect(ref.status).toBe("aborted");
 	});
 
 	it("installs an IRC wake monitor that emits cold-revive lifecycle frames on the shared bus", async () => {

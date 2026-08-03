@@ -8,26 +8,32 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 
 interface SessionStub {
 	session: AgentSession;
+	abortCalls: () => number;
 	disposeCalls: () => number;
 }
 
-/** Minimal session: the lifecycle manager only ever calls dispose() on it. */
+/** Minimal live session surface used by lifecycle cleanup. */
 function makeSessionStub(dispose?: () => Promise<void>): SessionStub {
-	let calls = 0;
+	let abortCalls = 0;
+	let disposeCalls = 0;
 	const stub = {
+		abort: async () => {
+			abortCalls++;
+		},
 		dispose: async () => {
-			calls++;
+			disposeCalls++;
 			await dispose?.();
 		},
 	};
-	return { session: stub as unknown as AgentSession, disposeCalls: () => calls };
+	return {
+		session: stub as unknown as AgentSession,
+		abortCalls: () => abortCalls,
+		disposeCalls: () => disposeCalls,
+	};
 }
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
-	let resolve!: () => void;
-	const promise = new Promise<void>(r => {
-		resolve = r;
-	});
+	const { promise, resolve } = Promise.withResolvers<void>();
 	return { promise, resolve };
 }
 
@@ -87,6 +93,18 @@ describe("AgentLifecycleManager", () => {
 		expect(registry.get("generation-Sub")).toBeUndefined();
 	});
 
+	it("attachSession cannot revive a ref aborted during asynchronous initialization", () => {
+		const ref = registerIdleSub("initializing-Sub", null, "/tmp/initializing-Sub.jsonl");
+		registry.setStatus(ref.id, "aborted", ref);
+		const lateSession = makeSessionStub();
+
+		expect(registry.attachSession(ref.id, lateSession.session, "/tmp/late.jsonl", ref)).toBe(false);
+		expect(registry.get(ref.id)).toBe(ref);
+		expect(ref.status).toBe("aborted");
+		expect(ref.session).toBeNull();
+		expect(ref.sessionFile).toBe("/tmp/initializing-Sub.jsonl");
+	});
+
 	it("adopt arms the TTL: an idle agent is parked — session disposed, ref + sessionFile retained", async () => {
 		vi.useFakeTimers();
 		const stub = makeSessionStub();
@@ -124,7 +142,8 @@ describe("AgentLifecycleManager", () => {
 		expect(stub.disposeCalls()).toBe(1);
 	});
 
-	it("aborts adopted descendants when their parent is cancelled", async () => {
+	it("terminally cleans up adopted descendants and preserves aborted through TTL expiry", async () => {
+		vi.useFakeTimers();
 		const childStub = makeSessionStub();
 		let childAbortCalls = 0;
 		const childSession = Object.assign(childStub.session, {
@@ -149,13 +168,330 @@ describe("AgentLifecycleManager", () => {
 			sessionFile: null,
 			status: "idle",
 		});
-		lifecycle.adopt("child", { idleTtlMs: 0 });
+		lifecycle.adopt("child", { idleTtlMs: TTL, revive: async () => childSession });
 
 		registry.setStatus("parent", "aborted");
+		await flushAsync();
+		vi.advanceTimersByTime(TTL);
 		await flushAsync();
 
 		expect(childAbortCalls).toBe(1);
 		expect(registry.get("child")?.status).toBe("aborted");
+		expect(registry.get("child")?.session).toBeNull();
+		expect(childStub.disposeCalls()).toBe(1);
+		expect(lifecycle.has("child")).toBe(false);
+		await expect(lifecycle.ensureLive("child")).rejects.toThrow(/aborted and cannot be revived/);
+	});
+
+	it("signals a running descendant's owning run during parent cancellation", async () => {
+		const childStub = makeSessionStub();
+		registry.register({
+			id: "parent",
+			displayName: "parent",
+			kind: "sub",
+			session: makeSessionStub().session,
+			sessionFile: null,
+			status: "running",
+		});
+		registry.register({
+			id: "child",
+			displayName: "child",
+			kind: "sub",
+			parentId: "parent",
+			session: childStub.session,
+			sessionFile: null,
+			status: "running",
+		});
+		let runAbortCalls = 0;
+		lifecycle.trackRun("child", childStub.session, async () => {
+			runAbortCalls++;
+		});
+
+		registry.setStatus("parent", "aborted");
+		await lifecycle.waitForTermination("child", childStub.session);
+
+		expect(runAbortCalls).toBe(1);
+		expect(childStub.disposeCalls()).toBe(1);
+		expect(registry.get("child")?.status).toBe("aborted");
+		expect(registry.get("child")?.session).toBeNull();
+	});
+
+	it("dispose terminally releases running agents tracked before adoption", async () => {
+		const parent = makeSessionStub();
+		const child = makeSessionStub();
+		registry.register({
+			id: "parent",
+			displayName: "parent",
+			kind: "sub",
+			session: parent.session,
+			sessionFile: null,
+			status: "running",
+		});
+		registry.register({
+			id: "child",
+			displayName: "child",
+			kind: "sub",
+			parentId: "parent",
+			session: child.session,
+			sessionFile: null,
+			status: "running",
+		});
+		let parentRunAbortCalls = 0;
+		let childRunAbortCalls = 0;
+		lifecycle.trackRun("parent", parent.session, async () => {
+			parentRunAbortCalls++;
+		});
+		lifecycle.trackRun("child", child.session, async () => {
+			childRunAbortCalls++;
+		});
+
+		await lifecycle.dispose();
+
+		expect(parentRunAbortCalls).toBe(1);
+		expect(childRunAbortCalls).toBe(1);
+		expect(parent.disposeCalls()).toBe(1);
+		expect(child.disposeCalls()).toBe(1);
+		expect(registry.get("parent")).toBeUndefined();
+		expect(registry.get("child")).toBeUndefined();
+	});
+
+	it("dispose awaits a termination already between run abort and session disposal", async () => {
+		const disposeStarted = deferred();
+		const disposeGate = deferred();
+		const child = makeSessionStub(async () => {
+			disposeStarted.resolve();
+			await disposeGate.promise;
+		});
+		const ref = registry.register({
+			id: "child",
+			displayName: "child",
+			kind: "sub",
+			parentId: "Main",
+			session: child.session,
+			sessionFile: null,
+			status: "running",
+		});
+		lifecycle.trackRun(ref.id, child.session, async () => {});
+		registry.setStatus(ref.id, "aborted", ref);
+		await disposeStarted.promise;
+
+		let managerDisposed = false;
+		const managerDisposal = lifecycle.dispose().then(() => {
+			managerDisposed = true;
+		});
+		await flushAsync();
+		expect(managerDisposed).toBe(false);
+
+		disposeGate.resolve();
+		await managerDisposal;
+		expect(managerDisposed).toBe(true);
+		expect(child.disposeCalls()).toBe(1);
+		expect(ref.status).toBe("aborted");
+		expect(ref.session).toBeNull();
+	});
+
+	it("release terminally cancels the full descendant subtree before unregistering its root", async () => {
+		const parent = makeSessionStub();
+		const firstChild = makeSessionStub();
+		const secondChild = makeSessionStub();
+		const grandchild = makeSessionStub();
+		registry.register({
+			id: "parent",
+			displayName: "parent",
+			kind: "sub",
+			session: parent.session,
+			sessionFile: null,
+			status: "running",
+		});
+		registry.register({
+			id: "first-child",
+			displayName: "first child",
+			kind: "sub",
+			parentId: "parent",
+			session: firstChild.session,
+			sessionFile: null,
+			status: "idle",
+		});
+		registry.register({
+			id: "second-child",
+			displayName: "second child",
+			kind: "sub",
+			parentId: "parent",
+			session: secondChild.session,
+			sessionFile: null,
+			status: "idle",
+		});
+		registry.register({
+			id: "grandchild",
+			displayName: "grandchild",
+			kind: "sub",
+			parentId: "first-child",
+			session: grandchild.session,
+			sessionFile: null,
+			status: "running",
+		});
+
+		await lifecycle.release("parent");
+
+		expect(registry.get("parent")).toBeUndefined();
+		for (const [id, stub] of [
+			["first-child", firstChild],
+			["second-child", secondChild],
+			["grandchild", grandchild],
+		] as const) {
+			expect(registry.get(id)?.status).toBe("aborted");
+			expect(registry.get(id)?.session).toBeNull();
+			expect(stub.abortCalls()).toBe(1);
+			expect(stub.disposeCalls()).toBe(1);
+		}
+		expect(parent.abortCalls()).toBe(1);
+		expect(parent.disposeCalls()).toBe(1);
+	});
+
+	it("release refuses a stale adopted ref when a newer same-id root is registered", async () => {
+		const oldSession = makeSessionStub();
+		const oldRef = registerIdleSub("parent", oldSession.session);
+		lifecycle.adopt("parent", { idleTtlMs: 0 }, oldRef);
+
+		const replacementSession = makeSessionStub();
+		const replacement = registerIdleSub("parent", replacementSession.session, "/tmp/replacement.jsonl");
+		const childSession = makeSessionStub();
+		const child = registry.register({
+			id: "child",
+			displayName: "child",
+			kind: "sub",
+			parentId: "parent",
+			session: childSession.session,
+			sessionFile: null,
+			status: "idle",
+		});
+
+		expect(await lifecycle.release("parent", oldRef)).toBe(false);
+
+		expect(oldSession.disposeCalls()).toBe(0);
+		expect(registry.get("parent")).toBe(replacement);
+		expect(replacement.status).toBe("idle");
+		expect(replacement.session).toBe(replacementSession.session);
+		expect(registry.get("child")).toBe(child);
+		expect(child.status).toBe("idle");
+		expect(child.session).toBe(childSession.session);
+		expect(childSession.disposeCalls()).toBe(0);
+	});
+
+	it("bounds a stuck descendant run abort and still completes terminal cleanup", async () => {
+		vi.useFakeTimers();
+		const child = makeSessionStub();
+		const abortGate = deferred();
+		registry.register({
+			id: "parent",
+			displayName: "parent",
+			kind: "sub",
+			session: makeSessionStub().session,
+			sessionFile: null,
+			status: "running",
+		});
+		registry.register({
+			id: "child",
+			displayName: "child",
+			kind: "sub",
+			parentId: "parent",
+			session: child.session,
+			sessionFile: null,
+			status: "running",
+		});
+		lifecycle.trackRun("child", child.session, () => abortGate.promise);
+
+		registry.setStatus("parent", "aborted");
+		const termination = lifecycle.waitForTermination("child", child.session);
+		await flushAsync();
+		expect(child.disposeCalls()).toBe(0);
+
+		vi.advanceTimersByTime(5_000);
+		await termination;
+
+		expect(child.disposeCalls()).toBe(1);
+		expect(registry.get("child")?.status).toBe("aborted");
+		expect(registry.get("child")?.session).toBeNull();
+		abortGate.resolve();
+		await flushAsync();
+	});
+
+	it("bounds a stuck live descendant disposal and detaches terminal state in finally", async () => {
+		vi.useFakeTimers();
+		const disposeGate = deferred();
+		const child = makeSessionStub(() => disposeGate.promise);
+		registry.register({
+			id: "parent",
+			displayName: "parent",
+			kind: "sub",
+			session: makeSessionStub().session,
+			sessionFile: null,
+			status: "running",
+		});
+		registry.register({
+			id: "child",
+			displayName: "child",
+			kind: "sub",
+			parentId: "parent",
+			session: child.session,
+			sessionFile: null,
+			status: "running",
+		});
+
+		registry.setStatus("parent", "aborted");
+		const termination = lifecycle.waitForTermination("child", child.session);
+		await flushAsync();
+		expect(child.disposeCalls()).toBe(1);
+		expect(registry.get("child")?.session).toBe(child.session);
+
+		vi.advanceTimersByTime(5_000);
+		await termination;
+
+		expect(registry.get("child")?.status).toBe("aborted");
+		expect(registry.get("child")?.session).toBeNull();
+		disposeGate.resolve();
+		await flushAsync();
+	});
+
+	it("bounds an in-flight park disposal and preserves terminal state", async () => {
+		vi.useFakeTimers();
+		const disposeGate = deferred();
+		const child = makeSessionStub(() => disposeGate.promise);
+		registry.register({
+			id: "parent",
+			displayName: "parent",
+			kind: "sub",
+			session: makeSessionStub().session,
+			sessionFile: null,
+			status: "running",
+		});
+		const childRef = registry.register({
+			id: "child",
+			displayName: "child",
+			kind: "sub",
+			parentId: "parent",
+			session: child.session,
+			sessionFile: "/tmp/child.jsonl",
+			status: "idle",
+		});
+		lifecycle.adopt("child", { idleTtlMs: 0 }, childRef);
+		const parking = lifecycle.park("child");
+		await flushAsync();
+		expect(child.disposeCalls()).toBe(1);
+		expect(childRef.status).toBe("parked");
+		expect(childRef.session).toBeNull();
+
+		registry.setStatus("parent", "aborted");
+		const termination = lifecycle.waitForTermination("child", childRef);
+		vi.advanceTimersByTime(5_000);
+		await termination;
+
+		expect(registry.get("child")).toBe(childRef);
+		expect(childRef.status).toBe("aborted");
+		expect(childRef.session).toBeNull();
+		expect(lifecycle.has("child", childRef)).toBe(false);
+		disposeGate.resolve();
+		await parking;
 	});
 
 	it("ensureLive revives a parked agent through its reviver and flips it back to idle", async () => {

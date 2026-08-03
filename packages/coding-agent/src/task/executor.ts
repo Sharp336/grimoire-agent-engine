@@ -2553,6 +2553,10 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	}
 
 	monitor.setActiveSession(session);
+	const untrackRun = AgentLifecycleManager.global().trackRun(id, session, async () => {
+		monitor.requestAbort("signal");
+		await monitor.waitForActiveSessionAbort();
+	});
 	const unsubscribe = monitor.attach(session);
 	let outcome: DriveOutcome;
 	try {
@@ -2567,6 +2571,8 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		const active = monitor.takeActiveSession();
 		if (active) monitor.captureSalvage(active);
 		monitor.finish();
+		await AgentLifecycleManager.global().waitForTermination(id, session);
+		untrackRun();
 	}
 
 	return finalizeRunResult({
@@ -2737,6 +2743,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	});
 	const progress = monitor.progress;
 	let unsubscribe: (() => void) | null = null;
+	let untrackRun: (() => void) | null = null;
 	let reviveSession: AgentReviver | null = null;
 	// Adopted (kept-alive) subagents flip registry status from session events on
 	// later turns: revive/wake → running, turn drained → idle. The subscription
@@ -2747,7 +2754,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			if (event.type === "agent_start") {
 				AgentRegistry.global().setStatus(id, "running", target);
 			} else if (event.type === "agent_end") {
-				AgentRegistry.global().setStatus(id, "idle", target);
+				const ref = AgentRegistry.global().get(id);
+				if (ref?.status !== "aborted") AgentRegistry.global().setStatus(id, "idle", target);
 			}
 		});
 	};
@@ -3093,6 +3101,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			sessionCreatedAt = performance.now();
 
 			monitor.setActiveSession(session);
+			untrackRun = AgentLifecycleManager.global().trackRun(id, session, async () => {
+				monitor.requestAbort("signal");
+				await monitor.waitForActiveSessionAbort();
+			});
 			installRegistryStatusSync(session);
 			if (sessionFile !== null && worktree === undefined) {
 				// Lifecycle reviver: park closed the JSONL writer, so reopening takes
@@ -3341,6 +3353,16 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					},
 				});
 			}
+			untrackRun?.();
+			untrackRun = null;
+			// Structured-concurrency reap: cancel and await ALL surviving owner
+			// jobs (abort paths; suppressed/watched jobs the model left behind)
+			// so isolation capture/cleanup never races a live process writing
+			// into the worktree. This never proceeds while an owner process is
+			// live: cancellation SIGKILL-escalates, so settlement is expected
+			// within one interval — an unkillable process blocks here visibly
+			// (with periodic warnings) instead of silently racing teardown.
+			const jobManager = AsyncJobManager.instance();
 			if (jobManager) {
 				if (deferredSessionShutdown) {
 					const finalReap = Promise.allSettled([deferredSessionShutdown]).then(async () => {
