@@ -297,6 +297,28 @@ function applyCodexPricingFallback(models: readonly ModelSpec[]): ModelSpec[] {
 }
 
 /**
+ * DeepSeek API 峰谷定价：北京时间 9-12, 14-18 为高峰时段，价格 2 倍。
+ * 转换为 UTC：1-4, 6-10。
+ */
+function applyDeepSeekPeakPricing(models: readonly ModelSpec[]): ModelSpec[] {
+	return models.map(model => {
+		if (model.provider === "deepseek") {
+			return {
+				...model,
+				peakPricing: {
+					windows: [
+						{ startHour: 1, endHour: 4 }, // 北京 9-12
+						{ startHour: 6, endHour: 10 }, // 北京 14-18
+					],
+					multiplier: 2,
+				},
+			};
+		}
+		return model;
+	});
+}
+
+/**
  * Provider discovery sometimes reports context-sized Kimi output ceilings. Keep
  * the bundled catalog at the documented/provider-safe caps so request builders
  * that always send `max_tokens` do not over-allocate.
@@ -660,6 +682,7 @@ async function generateModels() {
 	allModels = applyPremiumMultiplierOverrides(allModels);
 	allModels = applyCodexPricingFallback(allModels);
 	allModels = applyAntigravityPricingFallback(allModels);
+	allModels = applyDeepSeekPeakPricing(allModels);
 	allModels = applyKimiMaxTokensCap(allModels);
 	allModels = applyFireworksDeepSeekReasoningShape(allModels);
 	allModels = dropFireworksWireIds(allModels);

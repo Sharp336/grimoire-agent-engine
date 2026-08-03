@@ -857,6 +857,17 @@ export interface Model<TApi extends Api = Api> {
 		cacheRead: number; // $/million tokens
 		cacheWrite: number; // $/million tokens
 	};
+	/**
+	 * Peak/off-peak pricing windows. When the current time falls within a window,
+	 * all costs are multiplied by the multiplier. Hours are in UTC to ensure
+	 * correct behavior regardless of the user's local timezone.
+	 *
+	 * Example: DeepSeek peak hours (Beijing 9-12, 14-18) = UTC 1-4, 6-10
+	 */
+	peakPricing?: {
+		windows: Array<{ startHour: number; endHour: number }>;
+		multiplier: number;
+	};
 	/** Premium Copilot requests charged per user-initiated request (defaults to 1). */
 	premiumMultiplier?: number;
 	contextWindow: number | null;
