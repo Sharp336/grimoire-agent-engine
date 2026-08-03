@@ -1,6 +1,9 @@
 //! Brush-based shell execution exported via N-API.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+	collections::{HashMap, HashSet},
+	sync::{Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard},
+};
 
 use napi::{
 	Env, Result,
@@ -16,6 +19,75 @@ use pi_shell::{
 };
 
 use crate::task;
+
+#[derive(Default)]
+struct NativeRunStatus {
+	active_runs: HashSet<u64>,
+	next_run_id: u64,
+	closed:      bool,
+}
+
+struct NativeRuns {
+	status:  StdMutex<NativeRunStatus>,
+	changed: tokio::sync::watch::Sender<u64>,
+}
+
+impl Default for NativeRuns {
+	fn default() -> Self {
+		let (changed, _) = tokio::sync::watch::channel(0);
+		Self { status: StdMutex::new(NativeRunStatus::default()), changed }
+	}
+}
+
+struct NativeRunLease {
+	runs:   Arc<NativeRuns>,
+	run_id: u64,
+}
+
+impl Drop for NativeRunLease {
+	fn drop(&mut self) {
+		let removed = self.runs.lock().active_runs.remove(&self.run_id);
+		if removed {
+			self.runs.changed.send_modify(|generation| {
+				*generation = generation.wrapping_add(1);
+			});
+		}
+	}
+}
+
+impl NativeRuns {
+	fn lock(&self) -> StdMutexGuard<'_, NativeRunStatus> {
+		match self.status.lock() {
+			Ok(status) => status,
+			Err(poisoned) => poisoned.into_inner(),
+		}
+	}
+
+	fn register(self: &Arc<Self>) -> Option<NativeRunLease> {
+		let mut status = self.lock();
+		if status.closed {
+			return None;
+		}
+		let run_id = status.next_run_id;
+		status.next_run_id = status.next_run_id.wrapping_add(1);
+		status.active_runs.insert(run_id);
+		Some(NativeRunLease { runs: Arc::clone(self), run_id })
+	}
+
+	fn close(&self) {
+		self.lock().closed = true;
+	}
+
+	async fn wait_until_idle(&self) {
+		let mut changed = self.changed.subscribe();
+		loop {
+			if self.lock().active_runs.is_empty() {
+				return;
+			}
+			let _ = changed.changed().await;
+		}
+	}
+}
 
 /// N-API opt-in handle for the minimizer.
 #[napi(object)]
@@ -191,8 +263,17 @@ impl From<CoreShellRunResult> for ShellRunResult {
 #[napi]
 pub struct Shell {
 	inner: Arc<CoreShell>,
+	runs:  Arc<NativeRuns>,
 }
 
+impl Drop for Shell {
+	fn drop(&mut self) {
+		self.runs.close();
+		self.inner.close_now();
+	}
+}
+
+#[allow(clippy::unused_async, reason = "N-API exposes abort as a Promise-returning method")]
 #[napi]
 impl Shell {
 	/// Create a new shell session from optional configuration.
@@ -200,7 +281,10 @@ impl Shell {
 	/// The options set session-scoped environment variables and a snapshot path.
 	#[napi(constructor)]
 	pub fn new(options: Option<ShellOptions>) -> Self {
-		Self { inner: Arc::new(CoreShell::new(options.map(Into::into))) }
+		Self {
+			inner: Arc::new(CoreShell::new(options.map(Into::into))),
+			runs:  Arc::new(NativeRuns::default()),
+		}
 	}
 
 	/// Run a shell command using the provided options.
@@ -216,6 +300,10 @@ impl Shell {
 		#[napi(ts_arg_type = "((error: Error | null, chunk: string) => void) | undefined | null")]
 		on_chunk: Option<ThreadsafeFunction<String, UnknownReturnValue>>,
 	) -> Result<PromiseRaw<'env, ShellRunResult>> {
+		let run_lease = self
+			.runs
+			.register()
+			.ok_or_else(|| Error::from_reason("Shell session is closed"))?;
 		let cancel_token = task::CancelToken::new(options.timeout_ms, options.signal);
 		let inner = Arc::clone(&self.inner);
 		let run_options = CoreShellRunOptions {
@@ -225,6 +313,7 @@ impl Shell {
 			timeout_ms: options.timeout_ms,
 		};
 		task::future(env, "shell.run", async move {
+			let _run_lease = run_lease;
 			let (chunk_tx, drain_handle) = bridge_chunks(on_chunk);
 			let result = inner
 				.run(run_options, chunk_tx, cancel_token.into_core())
@@ -243,7 +332,7 @@ impl Shell {
 	/// Returns `Ok(())` even when no commands are running.
 	#[napi]
 	pub async fn abort(&self) -> Result<()> {
-		self.inner.abort().await;
+		self.inner.abort();
 		Ok(())
 	}
 
@@ -252,7 +341,9 @@ impl Shell {
 	/// Closing is terminal and safe to call more than once.
 	#[napi]
 	pub async fn close(&self) -> Result<()> {
+		self.runs.close();
 		self.inner.close().await;
+		self.runs.wait_until_idle().await;
 		Ok(())
 	}
 
@@ -363,7 +454,7 @@ async fn pump_chunks(rx: flume::Receiver<String>, mut forward: impl AsyncFnMut(S
 
 #[cfg(test)]
 mod tests {
-	use std::time::Duration;
+	use std::{sync::Arc, time::Duration};
 
 	use flume;
 	use pi_shell::{
@@ -372,7 +463,69 @@ mod tests {
 	};
 	use tokio::time;
 
-	use super::{BRIDGE_QUEUE_CHUNKS, CoreShell, pump_chunks};
+	use super::{BRIDGE_QUEUE_CHUNKS, CoreShell, NativeRuns, Shell as NativeShell, pump_chunks};
+
+	#[tokio::test]
+	async fn native_close_waits_for_core_run_and_chunk_drain() {
+		let runs = Arc::new(NativeRuns::default());
+		let run_lease = runs.register().expect("open wrapper should register a run");
+		let (core_done_tx, core_done_rx) = tokio::sync::oneshot::channel::<()>();
+		let (drain_done_tx, drain_done_rx) = tokio::sync::oneshot::channel::<()>();
+		let run = tokio::spawn(async move {
+			core_done_rx.await.expect("core completion signal");
+			drain_done_rx.await.expect("chunk drain completion signal");
+			drop(run_lease);
+		});
+
+		runs.close();
+		let waiting_runs = Arc::clone(&runs);
+		let close = tokio::spawn(async move { waiting_runs.wait_until_idle().await });
+		core_done_tx.send(()).expect("signal core completion");
+		time::sleep(Duration::from_millis(20)).await;
+		assert!(!close.is_finished(), "close must wait while chunk callbacks are still draining");
+
+		drain_done_tx
+			.send(())
+			.expect("signal chunk drain completion");
+		time::timeout(Duration::from_secs(1), close)
+			.await
+			.expect("close should settle after the chunk drain")
+			.expect("close wait task should not panic");
+		run.await.expect("run lease task should not panic");
+		assert!(runs.register().is_none(), "closed wrapper must reject later runs");
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn dropping_native_shell_synchronously_cancels_active_core_work() {
+		let shell = NativeShell::new(None);
+		let inner = Arc::clone(&shell.inner);
+		let (tx, rx) = flume::unbounded::<String>();
+		let run = tokio::spawn(async move {
+			inner
+				.run(
+					CoreShellRunOptions {
+						command: "/bin/sh -c 'printf \"ready\\n\"; sleep 30'".into(),
+						..Default::default()
+					},
+					Some(tx),
+					CancelToken::default(),
+				)
+				.await
+		});
+		time::timeout(Duration::from_secs(5), rx.recv_async())
+			.await
+			.expect("active command should print readiness")
+			.expect("active command output should remain connected");
+
+		drop(shell);
+		let result = time::timeout(Duration::from_secs(10), run)
+			.await
+			.expect("dropping native wrapper should settle active work")
+			.expect("active run task should not panic")
+			.expect("active run should return cancellation");
+		assert!(result.cancelled);
+	}
 
 	/// Regression for #4078: the reader→JS bridge queue must stay bounded when
 	/// the JS side (here: a deliberately slow `forward`) cannot keep up with a
