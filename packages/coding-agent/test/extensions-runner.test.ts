@@ -506,7 +506,7 @@ describe("ExtensionRunner", () => {
 
 	describe("before_provider_request chaining", () => {
 		it("exposes the request model instead of the primary session model", async () => {
-			const primaryModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+			const primaryModel = getBundledModel("openai-codex", "gpt-5.5");
 			const requestModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 			if (!primaryModel || !requestModel) throw new Error("Expected bundled cross-provider models to exist");
 
