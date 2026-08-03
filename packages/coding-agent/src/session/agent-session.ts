@@ -1935,6 +1935,7 @@ export class AgentSession {
 		const data: ToolExecutionStartData = {
 			toolCallId: event.toolCallId,
 			toolName: event.toolName,
+			executed: event.executed !== false,
 			startedAt: new Date().toISOString(),
 		};
 		// The assistant message already persists the full arguments; store only

@@ -46,6 +46,8 @@ interface AssistantTurnOptions {
 	entryId: string;
 	parentId?: string | null;
 	timestamp: string;
+	model?: string;
+	provider?: string;
 	toolCalls: ToolCallBlock[];
 	totalTokens: number;
 	outputTokens: number;
@@ -72,8 +74,8 @@ function buildAssistantEntry(opts: AssistantTurnOptions) {
 				})),
 			],
 			api: "openai-responses",
-			provider: PROVIDER,
-			model: MODEL,
+			provider: opts.provider ?? PROVIDER,
+			model: opts.model ?? MODEL,
 			usage: {
 				input: 10,
 				output: opts.outputTokens,
@@ -90,14 +92,24 @@ function buildAssistantEntry(opts: AssistantTurnOptions) {
 	};
 }
 
-function buildToolStartEntry(toolCallId: string, toolName: string, timestamp: string) {
+function buildToolStartEntry(
+	toolCallId: string,
+	toolName: string,
+	timestamp: string,
+	executed: boolean | undefined = true,
+) {
 	return {
 		type: "custom",
 		id: `start-${toolCallId}`,
 		parentId: null,
 		timestamp,
 		customType: "tool_execution_start",
-		data: { toolCallId, toolName, startedAt: timestamp },
+		data: {
+			toolCallId,
+			toolName,
+			...(executed === undefined ? {} : { executed }),
+			startedAt: timestamp,
+		},
 	};
 }
 
@@ -276,6 +288,120 @@ describe("tool usage stats pipeline", () => {
 		expect(seriesCalls.get("read")).toBe(1);
 		expect(seriesErrors.get("grep")).toBe(0);
 		expect(seriesErrors.get("read")).toBe(1);
+	});
+
+	it("excludes tool calls that never reached their implementation from duration samples", async () => {
+		const syntheticResult = "Tool call was rejected before execution";
+		await writeSessionFile("session.jsonl", { id: "synthetic" }, [
+			buildAssistantEntry({
+				entryId: "asst-1",
+				timestamp: TS1,
+				toolCalls: [{ id: "call-1", name: "read", arguments: READ_ARGS }],
+				totalTokens: TURN2_TOTAL_TOKENS,
+				outputTokens: TURN2_OUTPUT_TOKENS,
+				costTotal: TURN2_COST,
+			}),
+			buildToolStartEntry("call-1", "read", TS1, false),
+			buildToolResultEntry({
+				entryId: "tr-1",
+				parentId: "asst-1",
+				timestamp: TS1_READ_RESULT,
+				toolCallId: "call-1",
+				toolName: "read",
+				text: syntheticResult,
+				isError: true,
+			}),
+		]);
+		await syncAllSessions({ workers: 1 });
+
+		const [read] = getToolStats();
+		expect(read.calls).toBe(1);
+		expect(read.errors).toBe(1);
+		expect(read.resultChars).toBe(syntheticResult.length);
+		expect(read.durationSamples).toBe(0);
+		expect(read.durationMsMedian).toBe(0);
+		expect(read.durationMsP90).toBe(0);
+	});
+
+	it("keeps timing legacy execution markers that predate the executed flag", async () => {
+		await writeSessionFile("session.jsonl", { id: "legacy-marker" }, [
+			buildAssistantEntry({
+				entryId: "asst-1",
+				timestamp: TS1,
+				toolCalls: [{ id: "call-1", name: "grep", arguments: GREP_ARGS_1 }],
+				totalTokens: TURN2_TOTAL_TOKENS,
+				outputTokens: TURN2_OUTPUT_TOKENS,
+				costTotal: TURN2_COST,
+			}),
+			buildToolStartEntry("call-1", "grep", TS1, undefined),
+			buildToolResultEntry({
+				entryId: "tr-1",
+				parentId: "asst-1",
+				timestamp: TS1_GREP_RESULT,
+				toolCallId: "call-1",
+				toolName: "grep",
+				text: GREP_RESULT_1,
+			}),
+		]);
+		await syncAllSessions({ workers: 1 });
+
+		const [grep] = getToolStats();
+		expect(grep.durationSamples).toBe(1);
+		expect(grep.durationMsMedian).toBe(2_000);
+		expect(grep.durationMsP90).toBe(2_000);
+	});
+
+	it("keeps duration percentiles isolated by model and provider", async () => {
+		await writeSessionFile("session.jsonl", { id: "model-groups" }, [
+			buildAssistantEntry({
+				entryId: "asst-1",
+				timestamp: TS1,
+				toolCalls: [{ id: "call-1", name: "grep", arguments: GREP_ARGS_1 }],
+				totalTokens: TURN2_TOTAL_TOKENS,
+				outputTokens: TURN2_OUTPUT_TOKENS,
+				costTotal: TURN2_COST,
+				model: "model-a",
+				provider: "provider-a",
+			}),
+			buildToolStartEntry("call-1", "grep", TS1),
+			buildToolResultEntry({
+				entryId: "tr-1",
+				parentId: "asst-1",
+				timestamp: TS1_GREP_RESULT,
+				toolCallId: "call-1",
+				toolName: "grep",
+				text: GREP_RESULT_1,
+			}),
+			buildAssistantEntry({
+				entryId: "asst-2",
+				parentId: "tr-1",
+				timestamp: TS2,
+				toolCalls: [{ id: "call-2", name: "grep", arguments: GREP_ARGS_2 }],
+				totalTokens: TURN2_TOTAL_TOKENS,
+				outputTokens: TURN2_OUTPUT_TOKENS,
+				costTotal: TURN2_COST,
+				model: "model-b",
+				provider: "provider-b",
+			}),
+			buildToolStartEntry("call-2", "grep", TS2),
+			buildToolResultEntry({
+				entryId: "tr-2",
+				parentId: "asst-2",
+				timestamp: TS2_GREP_RESULT,
+				toolCallId: "call-2",
+				toolName: "grep",
+				text: GREP_RESULT_2,
+			}),
+		]);
+		await syncAllSessions({ workers: 1 });
+
+		const rows = getToolStatsByModel();
+		const modelA = rows.find(row => row.model === "model-a" && row.provider === "provider-a");
+		const modelB = rows.find(row => row.model === "model-b" && row.provider === "provider-b");
+		expect(modelA?.durationSamples).toBe(1);
+		expect(modelA?.durationMsMedian).toBe(2_000);
+		expect(modelB?.durationSamples).toBe(1);
+		expect(modelB?.durationMsMedian).toBe(8_000);
 	});
 
 	it("links a result that lands in a later sync pass without duplicating the call", async () => {

@@ -4030,6 +4030,11 @@ describe("agentLoopContinue with AgentMessage", () => {
 		}
 
 		expect(executed).toEqual([]);
+		const toolStart = events.find(e => e.type === "tool_execution_start");
+		expect(toolStart).toBeDefined();
+		if (toolStart?.type === "tool_execution_start") {
+			expect(toolStart.executed).toBe(false);
+		}
 		const toolEnd = events.find(e => e.type === "tool_execution_end");
 		expect(toolEnd).toBeDefined();
 		if (toolEnd?.type === "tool_execution_end") {

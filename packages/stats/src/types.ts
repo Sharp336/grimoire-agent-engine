@@ -83,6 +83,7 @@ export interface SessionToolExecutionStartEntry {
 	customType: "tool_execution_start";
 	data?: {
 		toolCallId?: unknown;
+		executed?: unknown;
 		startedAt?: unknown;
 	};
 }
@@ -174,10 +175,11 @@ export interface ToolCallStats {
 	argsChars: number;
 }
 
-/** Actual invocation timestamp emitted by a persisted tool-execution marker. */
+/** Execution-boundary marker linked to its persisted tool-call row. */
 export interface ToolInvocationLink {
 	sessionFile: string;
 	toolCallId: string;
+	executed: boolean;
 	timestamp: number;
 }
 

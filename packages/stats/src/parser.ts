@@ -106,7 +106,12 @@ function extractToolInvocationLink(sessionFile: string, entry: SessionEntry): To
 	if (marker.customType !== "tool_execution_start" || typeof marker.data?.toolCallId !== "string") return null;
 	const timestamp = Date.parse(typeof marker.data.startedAt === "string" ? marker.data.startedAt : marker.timestamp);
 	if (!Number.isFinite(timestamp)) return null;
-	return { sessionFile, toolCallId: marker.data.toolCallId, timestamp };
+	return {
+		sessionFile,
+		toolCallId: marker.data.toolCallId,
+		executed: marker.data.executed !== false,
+		timestamp,
+	};
 }
 
 /**

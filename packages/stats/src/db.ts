@@ -164,6 +164,7 @@ export async function initDb(): Promise<Database> {
 			provider TEXT NOT NULL,
 			timestamp INTEGER NOT NULL,
 			started_at INTEGER,
+			execution_observed INTEGER,
 			agent_type TEXT NOT NULL DEFAULT 'main',
 			calls_in_turn INTEGER NOT NULL DEFAULT 1,
 			args_chars INTEGER NOT NULL DEFAULT 0,
@@ -236,6 +237,9 @@ export async function initDb(): Promise<Database> {
 	}
 	if (!toolCallColumns.some(column => column.name === "started_at")) {
 		db.run("ALTER TABLE tool_calls ADD COLUMN started_at INTEGER");
+	}
+	if (!toolCallColumns.some(column => column.name === "execution_observed")) {
+		db.run("ALTER TABLE tool_calls ADD COLUMN execution_observed INTEGER");
 	}
 	const hasStaleColumn =
 		userMessageColumns.length > 0 &&
@@ -1561,18 +1565,18 @@ export function insertToolCalls(calls: ToolCallStats[]): number {
 	return inserted;
 }
 
-/** Persist the execution-start timestamp for DB-aware incremental result linking. */
+/** Persist execution-boundary timing and whether the tool implementation ran. */
 export function updateToolInvocations(links: ToolInvocationLink[]): number {
 	if (!db || links.length === 0) return 0;
 	const stmt = db.prepare(`
 		UPDATE tool_calls
-		SET started_at = ?
+		SET started_at = ?, execution_observed = ?
 		WHERE session_file = ? AND tool_call_id = ?
 	`);
 	let updated = 0;
 	const apply = db.transaction(() => {
 		for (const link of links) {
-			updated += stmt.run(link.timestamp, link.sessionFile, link.toolCallId).changes;
+			updated += stmt.run(link.timestamp, link.executed ? 1 : 0, link.sessionFile, link.toolCallId).changes;
 		}
 	});
 	apply();
@@ -1591,7 +1595,12 @@ export function updateToolResults(links: ToolResultLink[]): number {
 
 	const stmt = db.prepare(`
 		UPDATE tool_calls
-		SET result_chars = ?, duration_ms = MAX(0, ? - COALESCE(started_at, timestamp)), is_error = ?
+		SET result_chars = ?,
+			duration_ms = CASE
+				WHEN execution_observed = 0 THEN NULL
+				ELSE MAX(0, ? - COALESCE(started_at, timestamp))
+			END,
+			is_error = ?
 		WHERE session_file = ? AND tool_call_id = ? AND result_chars IS NULL
 	`);
 
@@ -1647,41 +1656,75 @@ interface ToolAggregateRow {
 	last_used: number;
 }
 
-function durationPercentiles(
-	whereSql: string,
-	params: Array<number | string | null>,
-	samples: number,
-): { median: number; p90: number } {
-	if (!db || samples === 0) return { median: 0, p90: 0 };
-	const medianIndex = (samples - 1) * 0.5;
-	const p90Index = (samples - 1) * 0.9;
-	const ranks = [
-		Math.floor(medianIndex) + 1,
-		Math.ceil(medianIndex) + 1,
-		Math.floor(p90Index) + 1,
-		Math.ceil(p90Index) + 1,
-	];
+interface DurationRankRow {
+	tool_name: string;
+	model?: string;
+	provider?: string;
+	duration_ms: number;
+	duration_index: number;
+	duration_samples: number;
+}
+
+interface DurationPercentiles {
+	median: number;
+	p90: number;
+}
+
+const ZERO_DURATION_PERCENTILES: DurationPercentiles = { median: 0, p90: 0 };
+
+function durationGroupKey(row: Pick<DurationRankRow, "tool_name" | "model" | "provider">, byModel: boolean): string {
+	return JSON.stringify(byModel ? [row.tool_name, row.model ?? null, row.provider ?? null] : [row.tool_name]);
+}
+
+function durationPercentilesByGroup(byModel: boolean, cutoff?: number): Map<string, DurationPercentiles> {
+	if (!db) return new Map();
+	const groupColumns = byModel ? "t.tool_name, t.model, t.provider" : "t.tool_name";
+	const selectedGroupColumns = byModel ? "tool_name, model, provider" : "tool_name";
+	const hasCutoff = cutoff !== undefined && cutoff > 0;
 	const rows = db
 		.prepare(`
 			WITH ordered AS (
-				SELECT t.duration_ms, ROW_NUMBER() OVER (ORDER BY t.duration_ms) AS rank
+				SELECT ${groupColumns}, t.duration_ms,
+					ROW_NUMBER() OVER (PARTITION BY ${groupColumns} ORDER BY t.duration_ms) - 1 AS duration_index,
+					COUNT(*) OVER (PARTITION BY ${groupColumns}) AS duration_samples
 				FROM tool_calls t
-				WHERE t.duration_ms IS NOT NULL${whereSql}
+				WHERE t.duration_ms IS NOT NULL${hasCutoff ? " AND t.timestamp >= ?" : ""}
+			),
+			bounds AS (
+				SELECT *,
+					(duration_samples - 1) * 0.5 AS median_index,
+					(duration_samples - 1) * 0.9 AS p90_index
+				FROM ordered
 			)
-			SELECT rank, duration_ms
-			FROM ordered
-			WHERE rank IN (?, ?, ?, ?)
+			SELECT ${selectedGroupColumns}, duration_ms, duration_index, duration_samples
+			FROM bounds
+			WHERE duration_index IN (
+				CAST(median_index AS INTEGER),
+				CAST(median_index AS INTEGER) + (median_index > CAST(median_index AS INTEGER)),
+				CAST(p90_index AS INTEGER),
+				CAST(p90_index AS INTEGER) + (p90_index > CAST(p90_index AS INTEGER))
+			)
+			ORDER BY ${selectedGroupColumns}, duration_index
 		`)
-		.all(...params, ...ranks) as Array<{ rank: number; duration_ms: number }>;
-	const values = new Map(rows.map(row => [row.rank, row.duration_ms]));
-	const interpolate = (index: number): number => {
-		const lowerRank = Math.floor(index) + 1;
-		const upperRank = Math.ceil(index) + 1;
-		const lower = values.get(lowerRank) ?? 0;
-		const upper = values.get(upperRank) ?? lower;
-		return lower + (upper - lower) * (index - Math.floor(index));
-	};
-	return { median: interpolate(medianIndex), p90: interpolate(p90Index) };
+		.all(...(hasCutoff ? [cutoff] : [])) as DurationRankRow[];
+	const grouped = new Map<string, { samples: number; values: Map<number, number> }>();
+	for (const row of rows) {
+		const key = durationGroupKey(row, byModel);
+		const group = grouped.get(key) ?? { samples: row.duration_samples, values: new Map<number, number>() };
+		group.values.set(row.duration_index, row.duration_ms);
+		grouped.set(key, group);
+	}
+	const result = new Map<string, DurationPercentiles>();
+	for (const [key, group] of grouped) {
+		const interpolate = (percentile: number): number => {
+			const index = (group.samples - 1) * percentile;
+			const lower = group.values.get(Math.floor(index)) ?? 0;
+			const upper = group.values.get(Math.ceil(index)) ?? lower;
+			return lower + (upper - lower) * (index - Math.floor(index));
+		};
+		result.set(key, { median: interpolate(0.5), p90: interpolate(0.9) });
+	}
+	return result;
 }
 
 function rowToToolUsage(row: ToolAggregateRow, duration: { median: number; p90: number }): ToolUsageStats {
@@ -1718,15 +1761,10 @@ export function getToolStats(cutoff?: number): ToolUsageStats[] {
 	`);
 
 	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as ToolAggregateRow[];
-	const params = hasCutoff ? [cutoff] : [];
-	return rows.map(row => {
-		const duration = durationPercentiles(
-			` AND t.tool_name = ?${hasCutoff ? " AND t.timestamp >= ?" : ""}`,
-			[row.tool_name, ...params],
-			row.duration_samples ?? 0,
-		);
-		return rowToToolUsage(row, duration);
-	});
+	const durationByGroup = durationPercentilesByGroup(false, cutoff);
+	return rows.map(row =>
+		rowToToolUsage(row, durationByGroup.get(durationGroupKey(row, false)) ?? ZERO_DURATION_PERCENTILES),
+	);
 }
 
 /**
@@ -1746,21 +1784,12 @@ export function getToolStatsByModel(cutoff?: number): ToolModelStats[] {
 	`);
 
 	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as ToolAggregateRow[];
-	const params = hasCutoff ? [cutoff] : [];
-	return rows.map(row => {
-		// `IS` keeps a NULL model/provider group matching its own rows; `=` would
-		// never match and report a zero duration for calls with no recorded model.
-		const duration = durationPercentiles(
-			` AND t.tool_name = ? AND t.model IS ? AND t.provider IS ?${hasCutoff ? " AND t.timestamp >= ?" : ""}`,
-			[row.tool_name, row.model ?? null, row.provider ?? null, ...params],
-			row.duration_samples ?? 0,
-		);
-		return {
-			...rowToToolUsage(row, duration),
-			model: row.model ?? "",
-			provider: row.provider ?? "",
-		};
-	});
+	const durationByGroup = durationPercentilesByGroup(true, cutoff);
+	return rows.map(row => ({
+		...rowToToolUsage(row, durationByGroup.get(durationGroupKey(row, true)) ?? ZERO_DURATION_PERCENTILES),
+		model: row.model ?? "",
+		provider: row.provider ?? "",
+	}));
 }
 
 /**

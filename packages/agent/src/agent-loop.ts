@@ -2378,6 +2378,7 @@ async function executeToolCalls(
 				toolName: toolCall.name,
 				args: record.args,
 				intent: toolCall.intent,
+				executed: false,
 			});
 		}
 		stream.push({
@@ -2459,14 +2460,6 @@ async function executeToolCalls(
 			emitToolResult(record, createToolSignalAbortedResult(record.signal), true);
 			return;
 		}
-		record.started = true;
-		stream.push({
-			type: "tool_execution_start",
-			toolCallId: toolCall.id,
-			toolName: toolCall.name,
-			args: effectiveArgs,
-			intent: toolCall.intent,
-		});
 
 		const toolSpan = startExecuteToolSpan(telemetry, {
 			tool,
@@ -2518,6 +2511,15 @@ async function executeToolCalls(
 						})
 					: undefined;
 				executionStarted = true;
+				record.started = true;
+				stream.push({
+					type: "tool_execution_start",
+					toolCallId: toolCall.id,
+					toolName: toolCall.name,
+					args: executionArgs,
+					intent: toolCall.intent,
+					executed: true,
+				});
 				const rawResult = await tool.execute(
 					toolCall.id,
 					executionArgs,
@@ -2870,6 +2872,7 @@ function createAbortedToolResult(
 		toolName: toolCall.name,
 		args: toolCall.arguments,
 		intent: toolCall.intent,
+		executed: false,
 	});
 	stream.push({
 		type: "tool_execution_end",

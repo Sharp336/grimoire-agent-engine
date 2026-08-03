@@ -16,11 +16,13 @@ export interface ToolArgumentSummary {
 	path?: string;
 }
 
-/** Persisted marker written before a tool implementation starts running. */
+/** Persisted marker emitted when a tool call reaches its execution boundary. */
 export interface ToolExecutionStartData {
 	toolCallId: string;
 	toolName: string;
 	args?: ToolArgumentSummary;
+	/** False when no tool implementation ran; absent on legacy execution markers. */
+	executed?: boolean;
 	intent?: string;
 	startedAt: string;
 }
