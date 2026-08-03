@@ -16,6 +16,7 @@
 - Added `--service-tier` to override the OpenAI service tier for a session. The flag takes precedence over the configured `tier.openai` setting and over a resumed session's recorded tier, leaves the Anthropic and Google tiers alone, and persists across resumes; `none` omits `service_tier` from the request.
 - Added a configurable per-request web search timeout via `providers.webSearchTimeoutSeconds` ([#7197](https://github.com/can1357/oh-my-pi/pull/7197) by [@will-bogusz](https://github.com/will-bogusz)).
 - Added turn-aware `/tree` navigation: Alt+Up/Alt+Down traverses previous/next user or assistant turns while skipping tool and bookkeeping entries, Home/End jumps to the first/last visible item, and PageUp/PageDown moves by a visible page.
+- Added `hideThinkingBlockOnComplete`: thinking blocks render live while the model streams and are hidden once the turn completes, leaving a clean user-message + final-answer transcript (Codex-style). Reasoning stays visible for turns that end abnormally (error, abort, length). Independent of `hideThinkingBlock`/`Ctrl+T`, and applies to subagent hub transcripts too.
 
 ### Changed
 

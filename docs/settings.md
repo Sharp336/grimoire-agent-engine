@@ -381,6 +381,7 @@ See [Advisor and WATCHDOG.md](./advisor-watchdog.md) for runtime behavior, `WATC
 ```yaml
 defaultThinkingLevel: high
 hideThinkingBlock: false
+hideThinkingBlockOnComplete: false
 thinkingBudgets:
   minimal: 1024
   low: 2048
@@ -394,6 +395,7 @@ thinkingBudgets:
 |---|---|---|---|
 | `defaultThinkingLevel` | enum | `high` | `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `auto`. Override per run with `--thinking`. |
 | `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in output. `--hide-thinking` sets it for the run (display only). |
+| `hideThinkingBlockOnComplete` | boolean | `false` | Show thinking while streaming, then hide it once the turn completes (Codex-style clean transcript). Turns that end abnormally (error, abort, length) keep their reasoning visible for diagnosis. Independent of `hideThinkingBlock` and `Ctrl+T`. |
 | `thinkingBudgets.minimal` | number | `1024` | Token budget for the `minimal` level. |
 | `thinkingBudgets.low` | number | `2048` | Token budget for `low`. |
 | `thinkingBudgets.medium` | number | `8192` | Token budget for `medium`. |

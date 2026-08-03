@@ -64,6 +64,8 @@ export interface ChatTranscriptBuilderDeps {
 	getMessageRenderer?: (customType: string) => MessageRenderer | undefined;
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
+	/** Hide thinking blocks once the turn completes (live while streaming). */
+	hideThinkingBlockOnComplete?: () => boolean;
 	proseOnlyThinking?: () => boolean;
 	requestRender: () => void;
 }
@@ -310,6 +312,7 @@ export class ChatTranscriptBuilder {
 
 	#appendAssistantMessage(message: Extract<AgentMessage, { role: "assistant" }>): void {
 		const hideThinkingBlock = this.deps.hideThinkingBlock?.() ?? false;
+		const hideThinkingBlockOnComplete = this.deps.hideThinkingBlockOnComplete?.() ?? false;
 		const proseOnlyThinking = this.deps.proseOnlyThinking ? this.deps.proseOnlyThinking() : true;
 		const timeline = splitAssistantMessageToolTimeline(message);
 		const assistantComponent = new AssistantMessageComponent(
@@ -319,6 +322,7 @@ export class ChatTranscriptBuilder {
 			this.deps.getMessageRenderer ? undefined : [], // placeholder for thinkingRenderers
 			this.deps.ui.imageBudget,
 			proseOnlyThinking,
+			hideThinkingBlockOnComplete,
 		);
 		assistantComponent.setImagesVisible(settings.get("terminal.showImages"));
 		this.#trackExpandable(assistantComponent);
@@ -351,6 +355,7 @@ export class ChatTranscriptBuilder {
 				this.deps.getMessageRenderer ? undefined : [],
 				undefined,
 				proseOnlyThinking,
+				hideThinkingBlockOnComplete,
 			);
 			component.setImagesVisible(settings.get("terminal.showImages"));
 			this.#trackExpandable(component);

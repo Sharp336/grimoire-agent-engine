@@ -155,6 +155,8 @@ export interface AgentHubDeps {
 	cwd?: string;
 	/** Mirrors the main transcript's thinking-block visibility. */
 	hideThinkingBlock?: () => boolean;
+	/** Hide thinking blocks once the turn completes (live while streaming). */
+	hideThinkingBlockOnComplete?: () => boolean;
 	proseOnlyThinking?: () => boolean;
 	/** Keys toggling tool output expansion (app.tools.expand). */
 	expandKeys?: KeyId[];
@@ -196,6 +198,7 @@ export class AgentHubOverlayComponent extends Container {
 	#getMessageRenderer: ((customType: string) => MessageRenderer | undefined) | undefined;
 	#cwd: string;
 	#hideThinkingBlock: (() => boolean) | undefined;
+	#hideThinkingBlockOnComplete: (() => boolean) | undefined;
 	#proseOnlyThinking: (() => boolean) | undefined;
 	#expandKeys: KeyId[];
 	#focusAgent: ((id: string) => Promise<void>) | undefined;
@@ -226,6 +229,7 @@ export class AgentHubOverlayComponent extends Container {
 		this.#getMessageRenderer = deps.getMessageRenderer;
 		this.#cwd = deps.cwd ?? getProjectDir();
 		this.#hideThinkingBlock = deps.hideThinkingBlock;
+		this.#hideThinkingBlockOnComplete = deps.hideThinkingBlockOnComplete;
 		this.#proseOnlyThinking = deps.proseOnlyThinking;
 		this.#expandKeys = deps.expandKeys ?? ["ctrl+o"];
 		this.#focusAgent = deps.focusAgent;
@@ -321,6 +325,7 @@ export class AgentHubOverlayComponent extends Container {
 			getMessageRenderer: this.#getMessageRenderer,
 			cwd: this.#cwd,
 			hideThinkingBlock: this.#hideThinkingBlock,
+			hideThinkingBlockOnComplete: this.#hideThinkingBlockOnComplete,
 			proseOnlyThinking: this.#proseOnlyThinking,
 			expandKeys: this.#expandKeys,
 			hubKeys: this.#hubKeys,

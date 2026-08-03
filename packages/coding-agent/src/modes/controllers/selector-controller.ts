@@ -500,6 +500,17 @@ export class SelectorController {
 				// InputController.toggleThinkingBlockVisibility).
 				this.ctx.ui.resetDisplay();
 				break;
+			case "hideThinkingBlockOnComplete":
+				this.ctx.hideThinkingBlockOnComplete = value as boolean;
+				for (const child of this.ctx.chatContainer.children) {
+					if (child instanceof AssistantMessageComponent) {
+						child.setHideThinkingOnFinalize(value as boolean);
+					}
+				}
+				// Full clear + replay so settled blocks frozen in committed scrollback
+				// retire their stale thinking snapshots too.
+				this.ctx.ui.resetDisplay();
+				break;
 			case "proseOnlyThinking":
 				this.ctx.proseOnlyThinking = value as boolean;
 				for (const child of this.ctx.chatContainer.children) {
@@ -2012,6 +2023,7 @@ export class SelectorController {
 			getMessageRenderer: type => this.ctx.session.extensionRunner?.getMessageRenderer(type),
 			cwd: this.ctx.sessionManager.getCwd(),
 			hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
+			hideThinkingBlockOnComplete: () => this.ctx.hideThinkingBlockOnComplete,
 			proseOnlyThinking: () => this.ctx.proseOnlyThinking,
 			focusAgent: id => this.ctx.focusAgentSession(id),
 			sessionFile: this.ctx.sessionManager.getSessionFile() ?? null,

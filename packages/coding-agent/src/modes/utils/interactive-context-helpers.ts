@@ -23,6 +23,7 @@ export function createAssistantMessageComponent(
 		ctx.viewSession.extensionRunner?.getAssistantThinkingRenderers(),
 		ctx.ui.imageBudget,
 		ctx.proseOnlyThinking,
+		ctx.hideThinkingBlockOnComplete,
 	);
 	component.setImagesVisible(ctx.settings.get("terminal.showImages"));
 	component.setExpanded(ctx.toolOutputExpanded);

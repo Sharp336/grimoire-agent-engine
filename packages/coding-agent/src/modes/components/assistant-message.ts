@@ -262,6 +262,15 @@ export class AssistantMessageComponent extends Container {
 	 *  on a fresh block that has no live token throughput of its own. */
 	#thinkingRateLive = false;
 
+	/**
+	 * When set, thinking blocks render live while streaming and are hidden once
+	 * the transcript block finalizes (Codex-style clean transcript). Independent
+	 * of {@link hideThinkingBlock}: a settled turn whose reasoning was visible
+	 * during streaming is re-rendered without it, unless the turn ended
+	 * abnormally — there the trace stays for diagnosis.
+	 */
+	#hideThinkingOnFinalize = false;
+
 	#textColorTransform?: (text: string) => string;
 
 	setTextColorTransform(transform?: (text: string) => string): void {
@@ -274,8 +283,10 @@ export class AssistantMessageComponent extends Container {
 		private readonly thinkingRenderers: readonly AssistantThinkingRenderer[] = [],
 		private readonly imageBudget?: ImageBudget,
 		private proseOnlyThinking = true,
+		hideThinkingBlockOnComplete = false,
 	) {
 		super();
+		this.#hideThinkingOnFinalize = hideThinkingBlockOnComplete;
 		this.#transcriptBlockFinalized = message !== undefined;
 
 		// Slim cache-invalidation divider, populated above the content when this
@@ -328,6 +339,20 @@ export class AssistantMessageComponent extends Container {
 		this.hideThinkingBlock = hide;
 	}
 
+	setHideThinkingOnFinalize(hide: boolean): void {
+		this.#hideThinkingOnFinalize = hide;
+	}
+
+	/**
+	 * Effective thinking visibility for this block: hidden when the user's
+	 * global toggle is on, or — with {@link #hideThinkingOnFinalize} — once the
+	 * block has settled and the turn ended normally. Live blocks (not yet
+	 * finalized) keep streaming their reasoning either way.
+	 */
+	#effectiveHideThinkingBlock(): boolean {
+		return this.hideThinkingBlock || (this.#hideThinkingOnFinalize && this.#transcriptBlockFinalized);
+	}
+
 	setProseOnlyThinking(proseOnly: boolean): void {
 		this.proseOnlyThinking = proseOnly;
 	}
@@ -346,7 +371,7 @@ export class AssistantMessageComponent extends Container {
 	 * Once text starts, a tool call streams, or the block is sealed, the pulse ends.
 	 */
 	#shouldAnimateThinking(message: AssistantMessage): boolean {
-		if (!this.hideThinkingBlock || this.#transcriptBlockFinalized) return false;
+		if (!this.#effectiveHideThinkingBlock() || this.#transcriptBlockFinalized) return false;
 		let tail: "text" | "thinking" | undefined;
 		for (const content of message.content) {
 			if (content.type === "toolCall") return false;
@@ -500,12 +525,29 @@ export class AssistantMessageComponent extends Container {
 		return this.#blockVersion;
 	}
 
+	/**
+	 * Whether hide-on-finalize should drop this block's reasoning now: the flag
+	 * is on, the message carries thinking that would be visible, and the turn
+	 * ended normally (`stop` or `toolUse`). Aborted, errored, or length-cut
+	 * turns keep their trace for diagnosis.
+	 */
+	#thinkingShouldHideOnFinalize(): boolean {
+		if (!this.#hideThinkingOnFinalize) return false;
+		const message = this.#lastMessage;
+		if (!message || (message.stopReason !== "stop" && message.stopReason !== "toolUse")) return false;
+		return message.content.some(
+			c => c.type === "thinking" && resolveThinkingDisplay(c, this.proseOnlyThinking).visible,
+		);
+	}
+
 	markTranscriptBlockFinalized(): void {
 		this.#transcriptBlockFinalized = true;
 		this.#stopThinkingAnimation();
-		// If the live pulse was on screen when the block sealed, drop the fast path
-		// and rebuild so the placeholder is removed — finalized blocks never animate.
-		if (this.#thinkingDots) {
+		// If the live pulse was on screen when the block sealed — or hide-on-
+		// finalize retracts reasoning shown during streaming — drop the fast path
+		// and rebuild so the placeholder/thinking is removed. Finalized blocks
+		// never animate.
+		if (this.#thinkingDots || this.#thinkingShouldHideOnFinalize()) {
 			this.#fastPathKey = undefined;
 			this.#fastPathItems = undefined;
 			if (this.#lastMessage) this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
@@ -677,7 +719,9 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	#computeShapeKey(message: AssistantMessage): string {
-		const parts: string[] = [`htb:${this.hideThinkingBlock ? 1 : 0}|pot:${this.proseOnlyThinking ? 1 : 0}`];
+		const parts: string[] = [
+			`htb:${this.#effectiveHideThinkingBlock() ? 1 : 0}|pot:${this.proseOnlyThinking ? 1 : 0}`,
+		];
 		for (const content of message.content) {
 			if (content.type === "text") {
 				parts.push(canonicalizeMessage(content.text) ? "T1" : "T0");
@@ -827,7 +871,7 @@ export class AssistantMessageComponent extends Container {
 		// would happen mid-stream.
 		this.#containsMermaidSource = message.content.some(content => {
 			if (content.type === "text") return containsMermaidFence(content.text);
-			if (content.type === "thinking" && !this.hideThinkingBlock) {
+			if (content.type === "thinking" && !this.#effectiveHideThinkingBlock()) {
 				const display = resolveThinkingDisplay(content, this.proseOnlyThinking);
 				return display.visible && containsMermaidFence(display.text);
 			}
@@ -852,7 +896,7 @@ export class AssistantMessageComponent extends Container {
 			c =>
 				(c.type === "text" && canonicalizeMessage(c.text)) ||
 				(c.type === "image" && c.data && c.mimeType) ||
-				(!this.hideThinkingBlock &&
+				(!this.#effectiveHideThinkingBlock() &&
 					c.type === "thinking" &&
 					resolveThinkingDisplay(c, this.proseOnlyThinking).visible),
 		);
@@ -872,7 +916,7 @@ export class AssistantMessageComponent extends Container {
 				hasRenderedContent = true;
 			} else if (content.type === "thinking" && resolveThinkingDisplay(content, this.proseOnlyThinking).visible) {
 				const thinkingText = resolveThinkingDisplay(content, this.proseOnlyThinking).text;
-				if (this.hideThinkingBlock) {
+				if (this.#effectiveHideThinkingBlock()) {
 					thinkingIndex += 1;
 					continue;
 				}
