@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { ToolCallLoopGuard } from "@oh-my-pi/pi-ai/utils/tool-call-loop-guard";
+import { normalizeToolCallLoopThreshold, ToolCallLoopGuard } from "@oh-my-pi/pi-ai/utils/tool-call-loop-guard";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
 const zeroUsage = {
@@ -13,6 +13,13 @@ const zeroUsage = {
 } satisfies AssistantMessage["usage"];
 
 describe("ToolCallLoopGuard", () => {
+	test("normalizes invalid and fractional thresholds consistently", () => {
+		expect(normalizeToolCallLoopThreshold(Number.NaN)).toBe(1);
+		expect(normalizeToolCallLoopThreshold(Number.POSITIVE_INFINITY)).toBe(1);
+		expect(normalizeToolCallLoopThreshold(0)).toBe(1);
+		expect(normalizeToolCallLoopThreshold(2.9)).toBe(2);
+	});
+
 	test("detects the fifth consecutive identical tool call", () => {
 		const guard = new ToolCallLoopGuard({ threshold: 5, exemptTools: ["job", "irc"] });
 		let detection = null;

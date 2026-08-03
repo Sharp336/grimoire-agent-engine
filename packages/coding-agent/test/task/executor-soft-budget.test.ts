@@ -37,6 +37,11 @@ interface MockSessionHandle {
 	disposeCalls: () => number;
 }
 
+interface MockSessionOptions {
+	settings?: Settings;
+	onIrcWake?: (params: { emit: (event: AgentSessionEvent) => void; pushMessage: (message: unknown) => void }) => void;
+}
+
 function assistantText(text: string, stopReason: "stop" | "aborted" = "stop") {
 	return { role: "assistant" as const, content: [{ type: "text" as const, text }], stopReason };
 }
@@ -47,6 +52,7 @@ function createMockSession(
 		emit: (event: AgentSessionEvent) => void;
 		pushMessage: (message: unknown) => void;
 	}) => void,
+	options: MockSessionOptions = {},
 ): MockSessionHandle {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
 	const messages: unknown[] = [];
@@ -68,6 +74,7 @@ function createMockSession(
 		model: { api: "anthropic-messages" } as never,
 		extensionRunner: undefined as never,
 		sessionManager: { appendSessionInit: () => {} } as never,
+		settings: options.settings ?? Settings.isolated(),
 		getActiveToolNames: () => ["read", "yield"],
 		getEnabledToolNames: () => ["read", "yield"],
 		setActiveToolsByName: async () => {},
@@ -101,6 +108,7 @@ function createMockSession(
 				timestamp: msg.ts,
 			};
 			const finishObservation = ircWakeTurnObserver?.([record]);
+			options.onIrcWake?.({ emit, pushMessage: message => messages.push(message) });
 			const yieldMessage = {
 				role: "assistant" as const,
 				content: [
@@ -202,6 +210,61 @@ describe("runSubprocess soft request budget", () => {
 			sessionFile: null,
 			status: "running",
 		});
+	}
+
+	function emitToolExecution(
+		emit: (event: AgentSessionEvent) => void,
+		toolCallId: string,
+		toolName: string,
+		args: Record<string, unknown>,
+		result: unknown,
+		isError = false,
+	): void {
+		emit({ type: "tool_execution_start", toolCallId, toolName, args });
+		emit({ type: "tool_execution_end", toolCallId, toolName, result, isError });
+	}
+
+	function emitSuccessfulYield(
+		emit: (event: AgentSessionEvent) => void,
+		pushMessage: (message: unknown) => void,
+	): void {
+		const toolCallId = "terminal-yield";
+		const args = { result: { data: { report: "completed" } } };
+		pushMessage({
+			role: "assistant",
+			content: [{ type: "toolCall", id: toolCallId, name: "yield", arguments: args }],
+			stopReason: "toolUse",
+		});
+		emit({ type: "tool_execution_start", toolCallId, toolName: "yield", args });
+		emit({
+			type: "tool_execution_end",
+			toolCallId,
+			toolName: "yield",
+			result: {
+				content: [{ type: "text", text: "Result submitted." }],
+				details: { status: "success", data: { report: "completed" } },
+			},
+			isError: false,
+		});
+	}
+
+	function convergenceOptions(
+		id: string,
+		loopGuard: {
+			enabled?: boolean;
+			threshold?: number;
+			exemptTools?: string[];
+		} = {},
+	) {
+		return {
+			...baseOptions(id),
+			settings: Settings.isolated({
+				"task.softRequestBudget": 0,
+				"model.toolCallLoopGuard.enabled": loopGuard.enabled ?? true,
+				"model.toolCallLoopGuard.threshold": loopGuard.threshold ?? 3,
+				"model.toolCallLoopGuard.exemptTools": loopGuard.exemptTools ?? ["hub"],
+			}),
+		};
 	}
 
 	it("a budget stop drives one forced final yield and finishes as a normal completion", async () => {
@@ -363,41 +426,187 @@ describe("runSubprocess soft request budget", () => {
 		expect(receipt.error).toMatch(new RegExp(`history://${id}`));
 	});
 
-	it("stops repeated identical tool calls as non-converging", async () => {
+	it("uses the configured threshold and canonical JSON arguments and results", async () => {
 		const id = "LoopScout";
-		const handle = createMockSession(({ emit, pushMessage }) => {
-			for (let index = 1; index <= 4; index++) {
-				const toolCall = {
-					role: "assistant" as const,
-					content: [
-						{
-							type: "toolCall" as const,
-							id: `tool-${index}`,
-							name: "read",
-							arguments: { path: "/tmp/same.ts" },
-						},
-					],
-					stopReason: "toolUse" as const,
-				};
-				pushMessage(toolCall);
-				emit({ type: "message_end", message: toolCall } as unknown as AgentSessionEvent);
-				emit({
-					type: "tool_execution_end",
-					toolCallId: `tool-${index}`,
-					toolName: "read",
-					args: { path: "/tmp/same.ts" },
-					result: { content: [{ type: "text", text: "same result" }] },
-					isError: false,
-				} as unknown as AgentSessionEvent);
-			}
+		const handle = createMockSession(({ emit }) => {
+			emitToolExecution(
+				emit,
+				"tool-1",
+				"read",
+				{ path: "/tmp/same.ts", options: { offset: 1, limit: 20 } },
+				{ content: [{ type: "text", text: "same result" }], details: { bytes: 20, complete: true } },
+			);
+			emitToolExecution(
+				emit,
+				"tool-2",
+				"read",
+				{ options: { limit: 20, offset: 1 }, path: "/tmp/same.ts" },
+				{ details: { complete: true, bytes: 20 }, content: [{ text: "same result", type: "text" }] },
+			);
+			emitToolExecution(
+				emit,
+				"tool-3",
+				"read",
+				{ path: "/tmp/same.ts", options: { offset: 1, limit: 20 } },
+				{ content: [{ type: "text", text: "same result" }], details: { bytes: 20, complete: true } },
+			);
 		});
 		mockCreateAgentSession(handle.session);
 		registerRunning(id, handle.session);
 
-		const result = await runSubprocess(baseOptions(id));
+		const result = await runSubprocess(convergenceOptions(id, { threshold: 3 }));
 
 		expect(result.exitCode).not.toBe(0);
+		expect(result.error).toContain("identical arguments and results 3 times");
 		expect(result.error).toContain("non-converging");
+	});
+
+	it("uses live session settings and reports autonomous IRC convergence failures", async () => {
+		const id = "IrcLoopScout";
+		const settings = Settings.isolated({
+			"task.softRequestBudget": 0,
+			"model.toolCallLoopGuard.enabled": true,
+			"model.toolCallLoopGuard.threshold": 2,
+			"model.toolCallLoopGuard.exemptTools": ["hub"],
+		});
+		const eventBus = new EventBus();
+		const frames: RpcSubagentFrame[] = [];
+		let resolveWakeTerminal: (() => void) | undefined;
+		const rpcRegistry = new RpcSubagentRegistry(eventBus, frame => {
+			frames.push(frame);
+			if (frame.type === "subagent_lifecycle" && frame.payload.status !== "started") {
+				resolveWakeTerminal?.();
+			}
+		});
+		rpcRegistry.setSubscriptionLevel("progress");
+		const handle = createMockSession(({ emit, pushMessage }) => emitSuccessfulYield(emit, pushMessage), {
+			settings,
+			onIrcWake: ({ emit }) => {
+				const args = { path: "/tmp/same.ts" };
+				const result = { content: [{ type: "text", text: "same result" }] };
+				emitToolExecution(emit, "irc-read-1", "read", args, result);
+				emitToolExecution(emit, "irc-read-2", "read", args, result);
+			},
+		});
+		mockCreateAgentSession(handle.session);
+		registerRunning(id, handle.session);
+		const initial = await runSubprocess({ ...baseOptions(id, eventBus), settings });
+		const abortsBeforeWake = handle.abortCalls();
+		frames.length = 0;
+		const terminal = Promise.withResolvers<void>();
+		resolveWakeTerminal = terminal.resolve;
+
+		const receipt = await new IrcBus().send({ from: "Main", to: id, body: "continue" });
+		await terminal.promise;
+
+		expect(initial.exitCode).toBe(0);
+		expect(receipt.outcome).toBe("woken");
+		expect(handle.abortCalls()).toBe(abortsBeforeWake + 1);
+		expect(frames.at(-1)).toMatchObject({
+			type: "subagent_lifecycle",
+			payload: { id, status: "failed" },
+		});
+		rpcRegistry.dispose();
+	});
+
+	it("does not enforce convergence detection when the centralized guard is disabled", async () => {
+		const id = "DisabledLoopGuardScout";
+		const handle = createMockSession(({ emit, pushMessage }) => {
+			for (let index = 1; index <= 3; index++) {
+				emitToolExecution(
+					emit,
+					`tool-${index}`,
+					"read",
+					{ path: "/tmp/same.ts" },
+					{ content: [{ type: "text", text: "same result" }] },
+				);
+			}
+			emitSuccessfulYield(emit, pushMessage);
+		});
+		mockCreateAgentSession(handle.session);
+		registerRunning(id, handle.session);
+
+		const result = await runSubprocess(convergenceOptions(id, { enabled: false, threshold: 2 }));
+
+		expect(result.exitCode).toBe(0);
+		expect(JSON.parse(result.output)).toEqual({ report: "completed" });
+	});
+
+	it("preserves configured exemptions for repeated polling tools", async () => {
+		const id = "PollingScout";
+		const handle = createMockSession(({ emit, pushMessage }) => {
+			for (let index = 1; index <= 3; index++) {
+				emitToolExecution(
+					emit,
+					`wait-${index}`,
+					"hub",
+					{ op: "wait" },
+					{ content: [{ type: "text", text: "no completed jobs yet" }] },
+				);
+			}
+			emitSuccessfulYield(emit, pushMessage);
+		});
+		mockCreateAgentSession(handle.session);
+		registerRunning(id, handle.session);
+
+		const result = await runSubprocess(convergenceOptions(id, { threshold: 2, exemptTools: ["hub"] }));
+
+		expect(result.exitCode).toBe(0);
+		expect(JSON.parse(result.output)).toEqual({ report: "completed" });
+	});
+
+	it("treats result changes under nested intent-named keys as progress", async () => {
+		const id = "ProgressingScout";
+		const handle = createMockSession(({ emit, pushMessage }) => {
+			for (let index = 1; index <= 3; index++) {
+				emitToolExecution(
+					emit,
+					`read-${index}`,
+					"read",
+					{ path: "/tmp/growing.log" },
+					{
+						content: [{ type: "text", text: "same result" }],
+						details: { progress: { i: `result ${index}` } },
+					},
+				);
+			}
+			emitSuccessfulYield(emit, pushMessage);
+		});
+		mockCreateAgentSession(handle.session);
+		registerRunning(id, handle.session);
+
+		const result = await runSubprocess(convergenceOptions(id, { threshold: 2, exemptTools: [] }));
+
+		expect(result.exitCode).toBe(0);
+		expect(JSON.parse(result.output)).toEqual({ report: "completed" });
+	});
+
+	it("resets the consecutive-success streak after a failed call", async () => {
+		const id = "RecoveringScout";
+		const handle = createMockSession(({ emit, pushMessage }) => {
+			const args = { path: "/tmp/same.ts" };
+			const success = { content: [{ type: "text", text: "same result" }] };
+			emitToolExecution(emit, "success-1", "read", args, success);
+			emitToolExecution(emit, "success-2", "read", args, success);
+			emitToolExecution(
+				emit,
+				"failure",
+				"read",
+				args,
+				{ content: [{ type: "text", text: "temporary failure" }] },
+				true,
+			);
+			emitToolExecution(emit, "success-3", "read", args, success);
+			emitToolExecution(emit, "success-4", "read", args, success);
+			emitSuccessfulYield(emit, pushMessage);
+		});
+		mockCreateAgentSession(handle.session);
+		registerRunning(id, handle.session);
+
+		const result = await runSubprocess(convergenceOptions(id, { threshold: 3, exemptTools: [] }));
+
+		expect(result.exitCode).toBe(0);
+		expect(JSON.parse(result.output)).toEqual({ report: "completed" });
 	});
 });
 

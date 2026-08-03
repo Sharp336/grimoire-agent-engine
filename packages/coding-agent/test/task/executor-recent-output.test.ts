@@ -123,7 +123,7 @@ function resetEvent(): AgentSessionEvent {
 
 function toolPair(idx: number): AgentSessionEvent[] {
 	return [
-		{ type: "tool_execution_start", toolCallId: `obs-${idx}`, toolName: "read", args: {} },
+		{ type: "tool_execution_start", toolCallId: `obs-${idx}`, toolName: "read", args: { path: `/tmp/obs-${idx}` } },
 		{
 			type: "tool_execution_end",
 			toolCallId: `obs-${idx}`,
