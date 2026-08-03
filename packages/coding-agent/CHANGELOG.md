@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed provider session metadata disclosure by recording only bounded effective compaction and tokenizer settings while preserving session identity; raw config paths are excluded.
+- Fixed pending idle compaction firing against a stale idle gate: changing `compaction.idleEnabled` or `compaction.idleThresholdTokens` while the idle timer is armed is now honored when the timer fires, and the request reports the threshold that actually triggered it.
+
 ## [17.2.6] - 2026-08-03
 
 ### Added

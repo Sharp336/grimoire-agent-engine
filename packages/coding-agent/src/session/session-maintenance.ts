@@ -68,6 +68,7 @@ import type { ConfiguredThinkingLevel } from "../thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ContextUsageBreakdown, HandoffResult, SessionHandoffOptions } from "./agent-session-types";
 import { findCompactMode } from "./compact-modes";
+import { resolveCompactionStrategy } from "./compaction-strategy";
 import { convertToLlm, stripImagesFromMessage } from "./messages";
 import { isTerminalTextAssistantAnswer } from "./queued-messages";
 import {
@@ -79,6 +80,11 @@ import type { SessionContext } from "./session-context";
 import { getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
+import {
+	buildEffectiveIdleThreshold,
+	type EffectiveIdleThreshold,
+	overrideSessionMetadataCompactionStrategy,
+} from "./session-metadata";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 
 export type CompactionCheckResult = Readonly<{
@@ -970,10 +976,18 @@ export class SessionMaintenance {
 		this.#autoCompactionAbortController?.abort();
 	}
 
-	/** Trigger idle compaction through the auto-compaction flow (with UI events). */
-	async runIdleCompaction(): Promise<void> {
+	/**
+	 * Trigger idle compaction through the auto-compaction flow (with UI events).
+	 *
+	 * `idleThreshold` is the gate the caller validated immediately before firing —
+	 * the idle timer owns that policy, and settings can change again while this
+	 * run is in flight. Passing it keeps the request's reported threshold the one
+	 * that actually triggered it. Omitted, the current settings are resolved
+	 * instead, which is right for callers that trigger idle compaction directly.
+	 */
+	async runIdleCompaction(options: { idleThreshold?: EffectiveIdleThreshold } = {}): Promise<void> {
 		if (this.#host.isStreaming() || this.isCompacting) return;
-		await this.runAutoCompaction("idle", false, true);
+		await this.runAutoCompaction("idle", false, true, true, { idleThreshold: options.idleThreshold });
 	}
 
 	/**
@@ -1564,7 +1578,10 @@ export class SessionMaintenance {
 					signal,
 					{
 						...options,
-						metadata: this.#host.agent.metadataForProvider(candidate.provider),
+						metadata: overrideSessionMetadataCompactionStrategy(
+							this.#host.agent.metadataForProvider(candidate.provider),
+							"context-full",
+						),
 						convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 						telemetry,
 						// Honor the user's /model thinking selection (incl. `off`) on
@@ -2142,11 +2159,24 @@ export class SessionMaintenance {
 			suppressHandoff?: boolean;
 			phase?: CodexCompactionContext["phase"];
 			terminalTextAnswer?: boolean;
+			idleThreshold?: EffectiveIdleThreshold;
 		} = {},
 	): Promise<CompactionCheckResult> {
 		const compactionSettings = this.#host.settings.getGroup("compaction");
-		if (compactionSettings.strategy === "off") return COMPACTION_CHECK_NONE;
+		const compactionStrategy = resolveCompactionStrategy(
+			reason === "idle" || compactionSettings.enabled,
+			compactionSettings.strategy,
+		);
+		if (compactionStrategy === "off") return COMPACTION_CHECK_NONE;
 		if (reason !== "idle" && !compactionSettings.enabled) return COMPACTION_CHECK_NONE;
+		// The idle timer fires on compaction.idleThresholdTokens behind its own
+		// enable gate, so idle requests must report that threshold rather than the
+		// normal compaction.threshold* policy the session profile records. Prefer
+		// the gate the idle timer validated when it fired: settings can change
+		// between arming the timer and building this request, and re-reading them
+		// here would report a threshold that never triggered the run.
+		const metadataIdleThreshold =
+			reason === "idle" ? (options.idleThreshold ?? buildEffectiveIdleThreshold(this.#host.settings)) : undefined;
 		const generation = this.#host.promptGeneration();
 		const terminalTextAnswer =
 			options.terminalTextAnswer ?? isTerminalTextAssistantAnswer(this.#host.findLastAssistantMessage());
@@ -2158,7 +2188,7 @@ export class SessionMaintenance {
 		// Shake runs inline (cheap, no remote LLM). On overflow recovery, if shake
 		// reclaims nothing we fall through to the summary-compaction body below so
 		// the oversized input still gets resolved.
-		if (compactionSettings.strategy === "shake") {
+		if (compactionStrategy === "shake") {
 			const outcome = await this.#runAutoShake(
 				reason,
 				willRetry,
@@ -2181,7 +2211,7 @@ export class SessionMaintenance {
 			reason !== "overflow" &&
 			reason !== "incomplete" &&
 			reason !== "idle" &&
-			compactionSettings.strategy === "handoff"
+			compactionStrategy === "handoff"
 		) {
 			this.#host.schedulePostPromptTask(
 				async signal => {
@@ -2204,9 +2234,9 @@ export class SessionMaintenance {
 		// LLM call would hit the same overflow. "incomplete" is an output-side problem,
 		// so a handoff request on the existing context is still viable.
 		let action: "context-full" | "handoff" | "snapcompact" =
-			compactionSettings.strategy === "snapcompact"
+			compactionStrategy === "snapcompact"
 				? "snapcompact"
-				: compactionSettings.strategy === "handoff" && reason !== "overflow" && !suppressHandoff
+				: compactionStrategy === "handoff" && reason !== "overflow" && !suppressHandoff
 					? "handoff"
 					: "context-full";
 		if (action === "snapcompact" && this.#model && !this.#model.input.includes("image")) {
@@ -2235,6 +2265,8 @@ export class SessionMaintenance {
 				const handoffResult = await this.#host.runHandoff(handoffFocus, {
 					autoTriggered: true,
 					signal: autoCompactionSignal,
+					metadataCompactionStrategy: compactionStrategy,
+					metadataIdleThreshold,
 					onSwitchCancelled: () => {
 						handoffSwitchCancelled = true;
 					},
@@ -2610,7 +2642,11 @@ export class SessionMaintenance {
 									promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
 									extraContext: compactionPrep.hookContext,
 									remoteInstructions: this.#host.baseSystemPrompt().join("\n\n"),
-									metadata: this.#host.agent.metadataForProvider(candidate.provider),
+									metadata: overrideSessionMetadataCompactionStrategy(
+										this.#host.agent.metadataForProvider(candidate.provider),
+										"context-full",
+										metadataIdleThreshold,
+									),
 									initiatorOverride: "agent",
 									convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 									telemetry,
