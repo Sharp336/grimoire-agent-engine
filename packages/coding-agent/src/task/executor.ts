@@ -47,13 +47,7 @@ import type { AuthStorage } from "../session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
-import {
-	type ConfiguredThinkingLevel,
-	parseConfiguredThinkingLevel,
-	prewalkWouldBeNoop,
-	resolveTaskEffortLevel,
-	type TaskEffort,
-} from "../thinking";
+import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
 import type { ContextFileEntry, ToolSession } from "../tools";
 import { resolveEvalBackends } from "../tools/eval-backends";
 import { isIrcEnabled } from "../tools/hub";
@@ -982,7 +976,7 @@ interface SubagentRunMonitor {
 	/** Return and clear the active session reference. */
 	takeActiveSession(): AgentSession | null;
 	/** Subscribe the monitor to a session's events. Returns the unsubscribe function. */
-	attach(session: AgentSession): () => void;
+	attach(session: AgentSession, explicitThinkingLevel?: ConfiguredThinkingLevel): () => void;
 	/** Best-effort capture of the last assistant text for cancelled-run salvage. */
 	captureSalvage(session: AgentSession): void;
 	lastAssistantSalvageText(): string | undefined;
@@ -1005,11 +999,11 @@ function isAsyncResultInjection(message: AgentMessage | undefined): boolean {
 function synchronizeResolvedModelSelector(
 	current: string | undefined,
 	runtimeModel: string | undefined,
+	explicitThinkingLevel: ConfiguredThinkingLevel | undefined,
 ): string | undefined {
-	if (!current || !runtimeModel || current === runtimeModel) return runtimeModel;
-	const suffixPrefix = `${runtimeModel}:`;
-	if (!current.startsWith(suffixPrefix)) return runtimeModel;
-	return parseConfiguredThinkingLevel(current.slice(suffixPrefix.length)) !== undefined ? current : runtimeModel;
+	if (!runtimeModel) return undefined;
+	if (explicitThinkingLevel !== undefined) return `${runtimeModel}:${explicitThinkingLevel}`;
+	return current === runtimeModel ? current : runtimeModel;
 }
 
 function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
@@ -1674,11 +1668,11 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		scheduleProgress(flushProgress);
 	};
 
-	const attach = (session: AgentSession): (() => void) => {
+	const attach = (session: AgentSession, explicitThinkingLevel?: ConfiguredThinkingLevel): (() => void) => {
 		let fallbackOwnedBySession = false;
 		const syncRuntimeProgress = (): boolean => {
 			const runtimeModel = session.model ? formatModelStringWithRouting(session.model) : undefined;
-			const model = synchronizeResolvedModelSelector(progress.resolvedModel, runtimeModel);
+			const model = synchronizeResolvedModelSelector(progress.resolvedModel, runtimeModel, explicitThinkingLevel);
 			const contextWindow =
 				session.model?.contextWindow && session.model.contextWindow > 0 ? session.model.contextWindow : undefined;
 			const thinkingLevel = session.thinkingLevel;
@@ -1761,13 +1755,21 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				return;
 			}
 			if (event.type === "retry_fallback_applied") {
-				progress.resolvedModel = event.to;
+				progress.resolvedModel = synchronizeResolvedModelSelector(
+					progress.resolvedModel,
+					event.to,
+					explicitThinkingLevel,
+				);
 				progress.resolvedModelIsFallback = true;
 				scheduleProgress(true);
 				return;
 			}
 			if (event.type === "retry_fallback_succeeded") {
-				progress.resolvedModel = event.model;
+				progress.resolvedModel = synchronizeResolvedModelSelector(
+					progress.resolvedModel,
+					event.model,
+					explicitThinkingLevel,
+				);
 				progress.resolvedModelIsFallback = true;
 				scheduleProgress(true);
 				return;
@@ -2950,11 +2952,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				options.effort !== undefined
 					? resolveTaskEffortLevel(model, options.effort, spawnEffortCeiling)
 					: undefined;
+			const resolvedSelectorThinkingLevel =
+				effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : undefined);
 			if (model) {
-				const displayLevel = effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : undefined);
 				progress.resolvedModel =
-					displayLevel !== undefined
-						? formatModelSelectorValue(formatModelStringWithRouting(model), displayLevel)
+					resolvedSelectorThinkingLevel !== undefined
+						? formatModelSelectorValue(formatModelStringWithRouting(model), resolvedSelectorThinkingLevel)
 						: formatModelStringWithRouting(model);
 			}
 			// Precedence: caller `effort` > explicit `:level` suffix on the resolved
@@ -3290,7 +3293,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				}
 			}
 
-			unsubscribe = monitor.attach(session);
+			unsubscribe = monitor.attach(session, resolvedSelectorThinkingLevel);
 
 			checkAbort();
 			// Autoload skills via sendCustomMessage (same mechanic as /skill:<name>)

@@ -197,7 +197,7 @@ describe("subagent runtime model resolution", () => {
 			task: "work",
 			index: 0,
 			id: "runtime-model-restoration",
-			modelOverride: ["primary/bad-runtime-model", "fallback/working-model"],
+			modelOverride: ["primary/bad-runtime-model:high", "fallback/working-model"],
 			settings: Settings.isolated(),
 			modelRegistry: {
 				refresh: async () => {},
@@ -215,18 +215,61 @@ describe("subagent runtime model resolution", () => {
 		});
 
 		expect(snapshots).toContainEqual({
-			resolvedModel: "fallback/working-model",
+			resolvedModel: "fallback/working-model:high",
 			resolvedModelIsFallback: true,
 			contextWindow: 64000,
 		});
 		expect(snapshots).toContainEqual({
-			resolvedModel: "primary/bad-runtime-model",
+			resolvedModel: "primary/bad-runtime-model:high",
 			resolvedModelIsFallback: undefined,
 			contextWindow: 256000,
 		});
-		expect(result.resolvedModel).toBe("primary/bad-runtime-model");
+		expect(result.resolvedModel).toBe("primary/bad-runtime-model:high");
 		expect(result.resolvedModelIsFallback).toBeUndefined();
 		expect(result.contextWindow).toBe(256000);
+	});
+
+	it("preserves a literal model id ending in :max across fallback recovery", async () => {
+		const primary = model("primary", "literal:max");
+		const fallback = model("fallback", "working-model");
+		const resolvedModels: string[] = [];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(
+			async () =>
+				({
+					session: createYieldingSession({
+						initialModel: primary,
+						fallbackModel: fallback,
+						restoredModel: primary,
+						liveFallbackOwnership: true,
+					}),
+					extensionsResult: {},
+					setToolUIContext: () => {},
+				}) as never,
+		);
+
+		const result = await runSubprocess({
+			cwd: "/tmp",
+			agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+			task: "work",
+			index: 0,
+			id: "literal-max-model",
+			modelOverride: ["primary/literal:max", "fallback/working-model"],
+			settings: Settings.isolated(),
+			modelRegistry: {
+				refresh: async () => {},
+				getAvailable: () => [primary, fallback],
+				getApiKey: async () => "test-key",
+			} as never,
+			enableLsp: false,
+			onProgress: progress => {
+				if (progress.resolvedModel) resolvedModels.push(progress.resolvedModel);
+			},
+		});
+
+		expect(resolvedModels).toContain("fallback/working-model");
+		expect(resolvedModels).toContain("primary/literal:max");
+		expect(resolvedModels).not.toContain("primary/literal:max:max");
+		expect(result.resolvedModel).toBe("primary/literal:max");
 	});
 
 	it("inherits an explicitly configured default fallback chain for a single subagent model", async () => {
