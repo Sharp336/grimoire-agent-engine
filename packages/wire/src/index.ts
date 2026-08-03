@@ -336,7 +336,14 @@ export type GuestFrame =
 	| { t: "prompt"; text: string; images?: ImageContent[] }
 	| { t: "ui-response"; reqId: number; value?: CollabUiResponseValue }
 	| { t: "abort" }
-	| { t: "agent-cmd"; cmd: "chat" | "kill" | "revive"; agentId: string; text?: string }
+	| {
+			t: "agent-cmd";
+			cmd: "chat" | "kill" | "revive";
+			agentId: string;
+			text?: string;
+			/** Host-issued agent generation used to reject stale destructive commands. */
+			generation?: number;
+	  }
 	| { t: "fetch-transcript"; reqId: number; agentId: string; fromByte: number };
 
 /** EventBus channels mirrored to guests (task subagent traffic only). */

@@ -342,7 +342,7 @@ export class CollabHost {
 				this.#handleAbort(fromPeer);
 				break;
 			case "agent-cmd":
-				this.#handleAgentCmd(frame.cmd, frame.agentId, frame.text, fromPeer);
+				this.#handleAgentCmd(frame.cmd, frame.agentId, frame.text, frame.generation, fromPeer);
 				break;
 			case "ui-response":
 				this.#handleUiResponse(frame.reqId, frame.value, fromPeer);
@@ -583,7 +583,13 @@ export class CollabHost {
 		}, AGENTS_DEBOUNCE_MS);
 	}
 
-	#handleAgentCmd(cmd: "chat" | "kill" | "revive", agentId: string, text: string | undefined, fromPeer: number): void {
+	#handleAgentCmd(
+		cmd: "chat" | "kill" | "revive",
+		agentId: string,
+		text: string | undefined,
+		generation: number | undefined,
+		fromPeer: number,
+	): void {
 		if (!this.#peers.get(fromPeer)?.canWrite) {
 			this.#rejectReadOnly("agent control", fromPeer);
 			return;
@@ -616,6 +622,9 @@ export class CollabHost {
 				const kill = async () => {
 					const ref = AgentRegistry.global().get(agentId);
 					if (!ref) return;
+					if (generation === undefined || ref.createdAt !== generation) {
+						throw new Error("stale agent generation");
+					}
 					if (ref.status === "running" && ref.session) {
 						await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
 					}

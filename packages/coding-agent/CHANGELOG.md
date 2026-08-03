@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 406633)
+... 577956 bytes omitted ...
+
 # Changelog
 
 ## [Unreleased]
@@ -450,6 +453,10 @@
 ### Removed
 
 - Removed the dangling `MCPManager.setOnNotification` single-slot setter, which had no callers in the runtime. Replaced by `MCPManager.addNotificationListener` — multi-listener, per-listener error isolation, returns an unsubscribe function.
+### Changed
+
+- Changed Agent Hub to prioritize running agents, head the collapsible idle group with its disclosure row, archive parked and aborted agents, and expose responsive live runtime details with structured activity. The list and inspector share a row only when both panes fit, footer hints shed low-priority entries instead of clipping the close gesture on an 80-column terminal, and an archived agent with no retained runtime collapses to one line instead of six `unknown` fields ([#5251](https://github.com/can1357/oh-my-pi/pull/5251) by [@wolfiesch](https://github.com/wolfiesch)).
+- Changed the Agent Hub `x` action to confirm before aborting a running agent, so a stray keystroke on the default Active tab cannot cancel live work; any other key cancels the pending confirmation and archived agents are still released on the first press ([#5251](https://github.com/can1357/oh-my-pi/pull/5251) by [@wolfiesch](https://github.com/wolfiesch)).
 
 ## [17.1.8] - 2026-07-28
 
@@ -539,11 +546,6 @@
 - Fixed `/live` sideband WebSockets ignoring standard proxy environment variables and `NO_PROXY`, which left proxied sessions stuck while the rest of the Codex connection succeeded ([#6770](https://github.com/can1357/oh-my-pi/issues/6770)).
 - Fixed the bash tool's `kill` builtin rejecting numeric signals and multiple process operands, stopping after the first failed target, and defaulting to `SIGKILL` instead of the standard `SIGTERM`. Negative PID operands (process groups per `kill(2)`) and the `--` end-of-options marker are now handled instead of being misparsed as signals ([#6779](https://github.com/can1357/oh-my-pi/issues/6779)).
 - Fixed `learned.md` saves growing a blank line on every write (trailing-newline split artifact) and hoisting all headings/prose above all bullets, which re-scoped lessons under the wrong heading in hand-organized files. Saves are now byte-idempotent and preserve mixed Markdown ordering: non-list lines keep their positions, new lessons insert newest-first at the head of the first bullet run, and dedupe/cap operate on bullet lines in place.
-### Changed
-
-- Changed Agent Hub to prioritize running agents, head the collapsible idle group with its disclosure row, archive parked and aborted agents, and expose responsive live runtime details with structured activity. The list and inspector share a row only when both panes fit, footer hints shed low-priority entries instead of clipping the close gesture on an 80-column terminal, and an archived agent with no retained runtime collapses to one line instead of six `unknown` fields ([#5251](https://github.com/can1357/oh-my-pi/pull/5251) by [@wolfiesch](https://github.com/wolfiesch)).
-- Changed the Agent Hub `x` action to confirm before aborting a running agent, so a stray keystroke on the default Active tab cannot cancel live work; any other key cancels the pending confirmation and archived agents are still released on the first press ([#5251](https://github.com/can1357/oh-my-pi/pull/5251) by [@wolfiesch](https://github.com/wolfiesch)).
-
 ## [17.1.5] - 2026-07-27
 
 ### Added
@@ -13442,6 +13444,7 @@ pi --extension ./safety.ts -e ./todo.ts
 - JPEG/GIF/WebP images not displaying in terminals using Kitty graphics protocol (Kitty, Ghostty, WezTerm). The protocol requires PNG format, so non-PNG images are now converted before display.
 - Version check URL typo preventing update notifications from working ([#423](https://github.com/badlogic/pi-mono/pull/423) by [@skuridin](https://github.com/skuridin))
 - Large images exceeding Anthropic's 5MB limit now retry with progressive quality/size reduction ([#424](https://github.com/badlogic/pi-mono/pull/424) by [@mitsuhiko](https://github.com/mitsuhiko))
+- Fixed unknown `__omp_worker_*` CLI selectors exiting 0 with empty output instead of erroring; an unrecognized worker-host selector now writes `Error: unknown worker selector: …` to s…212152 tokens truncated…t now retry with progressive quality/size reduction ([#424](https://github.com/badlogic/pi-mono/pull/424) by [@mitsuhiko](https://github.com/mitsuhiko))
 
 ## [0.32.2] - 2026-01-03
 

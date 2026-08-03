@@ -119,7 +119,7 @@ export function AgentDrawer(props: {
 						<button
 							type="button"
 							className="ag-btn ag-btn--danger"
-							onClick={() => client.sendAgentCmd("kill", agent.id)}
+							onClick={() => client.sendAgentCmd("kill", agent.id, undefined, agent.createdAt)}
 						>
 							<OctagonX size={13} aria-hidden />
 							kill
