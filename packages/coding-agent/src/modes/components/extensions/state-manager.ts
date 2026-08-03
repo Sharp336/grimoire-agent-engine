@@ -175,9 +175,6 @@ export async function loadAllExtensions(
 						: "inherit";
 			const projectForceEnabled = !mcpProjectDefinition && projectForceEnabledServers.has(server.name);
 			const projectDisabled = !mcpProjectDefinition && projectDisabledServerNames.has(server.name);
-			const sourceSaysDisabled =
-				server.enabled === false &&
-				(mcpProjectDefinition || (!projectForceEnabled && !forceEnabledServers.has(server.name)));
 			const enabled = isMCPServerEffectivelyEnabled(server, {
 				projectDefinition: mcpProjectDefinition,
 				projectDisabled,
@@ -185,7 +182,6 @@ export async function loadAllExtensions(
 				userDisabled: userDisabledServerNames.has(server.name),
 				userEnabled: forceEnabledServers.has(server.name),
 			});
-			const sourceWritable = server._source.provider === "native" || server._source.provider === "mcp-json";
 			const { state, disabledReason } = activationRowState({
 				itemDisabled: !enabled,
 				shadowed: (server as { _shadowed?: boolean })._shadowed,
@@ -205,7 +201,7 @@ export async function loadAllExtensions(
 				source: sourceFromMeta(server._source),
 				state,
 				disabledReason,
-				activationLocked: sourceSaysDisabled && !sourceWritable,
+				activationLocked: false,
 				mcpProjectActivation,
 				mcpProjectDefinition,
 				mcpUserDisabled: userDisabledServerNames.has(server.name),

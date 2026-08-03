@@ -708,6 +708,46 @@ describe("extension activation rendering", () => {
 		}
 	});
 
+	it("enables a source-disabled third-party MCP through the user overlay", async () => {
+		const previousAgentDir = getAgentDir();
+		const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-third-party-mcp-"));
+		const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-third-party-home-"));
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-third-party-agent-"));
+		cleanupPaths.push(projectRoot, homeDir, agentDir);
+		await fs.mkdir(path.join(projectRoot, ".git"), { recursive: true });
+		await fs.mkdir(path.join(projectRoot, ".omp"), { recursive: true });
+		const opencodePath = path.join(homeDir, ".config", "opencode", "opencode.json");
+		await fs.mkdir(path.dirname(opencodePath), { recursive: true });
+		await Bun.write(
+			opencodePath,
+			JSON.stringify({
+				mcp: { "zz-third-party": { type: "local", command: ["echo", "third-party"], enabled: false } },
+			}),
+		);
+
+		vi.spyOn(os, "homedir").mockReturnValue(homeDir);
+		setAgentDir(agentDir);
+		try {
+			const settings = await Settings.loadIsolated({ cwd: projectRoot, agentDir });
+			const dashboard = await ExtensionDashboard.create(projectRoot, settings, 28);
+			dashboard.handleInput("\x10");
+			for (const char of "zz-third-party") dashboard.handleInput(char);
+			await Bun.sleep(50);
+
+			expect(stripAnsi(dashboard.render(140).join("\n"))).toContain("zz-third-party");
+			dashboard.handleInput(" ");
+			await Bun.sleep(120);
+
+			expect((await readMCPConfigFile(path.join(agentDir, "mcp.json"))).enabledServers).toEqual(["zz-third-party"]);
+			const source = JSON.parse(await Bun.file(opencodePath).text()) as {
+				mcp: Record<string, { enabled?: boolean }>;
+			};
+			expect(source.mcp["zz-third-party"]?.enabled).toBe(false);
+		} finally {
+			setAgentDir(previousAgentDir);
+		}
+	});
+
 	it("uses binary provider activation for project-only AGENTS.md", async () => {
 		const previousAgentDir = getAgentDir();
 		const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-agents-provider-"));
