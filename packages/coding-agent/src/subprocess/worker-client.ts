@@ -1,9 +1,9 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $env, isBunTestRuntime, isCompiledBinary } from "@oh-my-pi/pi-utils/env";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { stripWindowsExtendedLengthPathPrefix } from "@oh-my-pi/pi-utils/path";
+import { isBunTestRuntime, isCompiledBinary } from "@oh-my-pi/pi-utils/runtime";
 import { workerHostEntry } from "@oh-my-pi/pi-utils/worker-host";
 import type { Subprocess } from "bun";
 
@@ -126,10 +126,9 @@ export function resolveWorkerSpawnCmd(workerArg: string): WorkerSpawnCommand {
  * `overlay` (e.g. the tiny-model device/dtype vars) wins over inherited keys.
  */
 export function workerEnvFromParent(overlay?: Record<string, string>): Record<string, string> {
-	const base = $env as Record<string, string | undefined>;
 	const merged: Record<string, string> = {};
-	for (const key in base) {
-		const value = base[key];
+	for (const key in process.env) {
+		const value = process.env[key];
 		if (typeof value === "string") merged[key] = value;
 	}
 	if (overlay) {

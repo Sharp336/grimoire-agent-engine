@@ -181,10 +181,10 @@ describe("isBunTestRuntime", () => {
 	it("recognizes Bun's underscore test entrypoints", async () => {
 		const dir = path.dirname(writeTempEnv(""));
 		const underscoreProbePath = path.join(dir, "runtime_test.ts");
-		const envModulePath = path.join(import.meta.dir, "..", "src", "env.ts");
+		const runtimeModulePath = path.join(import.meta.dir, "..", "src", "runtime.ts");
 		fs.writeFileSync(
 			underscoreProbePath,
-			`import { isBunTestRuntime } from ${JSON.stringify(envModulePath)};\nprocess.stdout.write(JSON.stringify(isBunTestRuntime()));\n`,
+			`import { isBunTestRuntime } from ${JSON.stringify(runtimeModulePath)};\nprocess.stdout.write(JSON.stringify(isBunTestRuntime()));\n`,
 		);
 		expect(
 			await runRuntimeProbe(
