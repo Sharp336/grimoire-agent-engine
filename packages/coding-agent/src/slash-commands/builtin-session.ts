@@ -17,7 +17,7 @@ import { describeRedeemOutcome, type ResetUsageAccount, toResetUsageAccounts } f
 import { matchSessionPinAccounts, toSessionPinAccounts } from "./helpers/session-pin";
 import { launchStatsDashboard, parseStatsDashboardArgs } from "./helpers/stats-dashboard";
 import { handleTodoAcp } from "./helpers/todo";
-import { buildUsageReportText } from "./helpers/usage-report";
+import { buildUsageModelRosterText, buildUsageReportText } from "./helpers/usage-report";
 import type { SlashCommandRuntime, SlashCommandSpec } from "./types";
 
 async function handleUsageResetCommand(
@@ -295,9 +295,10 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		name: "usage",
 		description: "Show provider usage and limits",
 		acpDescription: "Show token usage",
-		acpInputHint: "[show|reset [account|active]]",
+		acpInputHint: "[show|models|reset [account|active]]",
 		subcommands: [
 			{ name: "show", description: "Show provider usage and limits" },
+			{ name: "models", description: "List models backed by a live usage report" },
 			{ name: "reset", description: "Spend a saved Codex rate-limit reset", usage: "[account|active]" },
 		],
 		allowArgs: true,
@@ -307,16 +308,25 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				await runtime.output(await buildUsageReportText(runtime));
 				return commandConsumed();
 			}
+			if (verb === "models" && !rest) {
+				await runtime.output(await buildUsageModelRosterText(runtime));
+				return commandConsumed();
+			}
 			if (verb === "reset") {
 				await handleUsageResetCommand(rest, runtime.session, runtime.output);
 				return commandConsumed();
 			}
-			return usage("Usage: /usage [show|reset [account|active]]", runtime);
+			return usage("Usage: /usage [show|models|reset [account|active]]", runtime);
 		},
 		handleTui: async (command, runtime) => {
 			const { verb, rest } = parseSubcommand(command.args);
 			if (!verb || (verb === "show" && !rest)) {
 				await runtime.ctx.handleUsageCommand();
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			if (verb === "models" && !rest) {
+				await runtime.ctx.handleUsageModelsCommand();
 				runtime.ctx.editor.setText("");
 				return;
 			}
@@ -329,7 +339,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				runtime.ctx.editor.setText("");
 				return;
 			}
-			runtime.ctx.showStatus("Usage: /usage [show|reset [account|active]]");
+			runtime.ctx.showStatus("Usage: /usage [show|models|reset [account|active]]");
 			runtime.ctx.editor.setText("");
 		},
 	},

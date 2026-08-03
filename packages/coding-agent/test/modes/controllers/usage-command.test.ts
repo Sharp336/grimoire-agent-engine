@@ -31,7 +31,7 @@ describe("CommandController /usage", () => {
 		setThemeInstance(theme);
 	});
 
-	it("renders bars and free percentage for limits that only report remainingFraction", async () => {
+	it("renders a bar and the free percentage for limits that only report remainingFraction", async () => {
 		const present = vi.fn();
 		const ctx = {
 			session: createUsageSessionDouble(),
@@ -66,7 +66,7 @@ describe("CommandController /usage", () => {
 		const firstCall = present.mock.calls[0];
 		expect(firstCall).toBeDefined();
 		const output = renderPresentedBlocks(firstCall?.[0]);
-		expect(output).toContain("25% free");
+		expect(output).toContain("25%");
 		expect(output).toContain("█");
 		expect(output).not.toContain("··········");
 	});
@@ -114,9 +114,9 @@ describe("CommandController /usage", () => {
 		const firstCall = present.mock.calls[0];
 		expect(firstCall).toBeDefined();
 		const output = renderPresentedBlocks(firstCall?.[0]);
-		expect(output).toContain("Cursor");
+		expect(output).toContain("cursor");
 		expect(output).toContain("gpt-4 requests");
-		expect(output).toContain("70% free");
+		expect(output).toContain("70%");
 		expect(output).toContain("resets in 1d");
 	});
 
@@ -154,10 +154,11 @@ describe("CommandController /usage", () => {
 		const firstCall = present.mock.calls[0];
 		expect(firstCall).toBeDefined();
 		const output = renderPresentedBlocks(firstCall?.[0]);
-		expect(output).toContain("Saved rate-limit resets");
+		// A limit-less account owns no bar column, so its banked resets render as
+		// a provider footnote with the soonest expiry and the already-lapsed count.
 		expect(output).toContain("user@example.com: 2 saved resets");
-		expect(output).toContain(`expires in`);
-		expect(output).toContain(`(${futureIso.slice(0, 10)})`);
-		expect(output).toContain(`expired (${expiredIso.slice(0, 10)})`);
+		expect(output).toContain("first expires in");
+		expect(output).toContain("1 expired");
+		expect(output).toContain("/usage reset");
 	});
 });

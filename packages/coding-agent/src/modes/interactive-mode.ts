@@ -4484,6 +4484,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleUsageCommand(reports);
 	}
 
+	handleUsageModelsCommand(): Promise<void> {
+		return this.#commandController.handleUsageModelsCommand();
+	}
+
 	async handleChangelogCommand(showFull = false): Promise<void> {
 		await this.#commandController.handleChangelogCommand(showFull);
 	}
