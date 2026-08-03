@@ -3930,6 +3930,215 @@ export function togetherModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 15.25 Featherless
+// ---------------------------------------------------------------------------
+
+export const FEATHERLESS_BASE_URL = "https://api.featherless.ai/v1";
+export const FEATHERLESS_HEADERS: Record<string, string> = {
+	"HTTP-Referer": "https://omp.sh/",
+	"X-Title": "Oh-My-Pi",
+};
+
+const FEATHERLESS_FETCH_LIMIT = 100;
+const FEATHERLESS_DEFAULT_MODEL_ID = "zai-org/GLM-5.2";
+const FEATHERLESS_DEFAULT_MODEL_CREATED_AT = 1_781_637_564;
+
+export interface FeatherlessModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+	onModelCount?: (count: number, query: string) => void;
+}
+
+function mapFeatherlessModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	canonical: Model<"openai-completions"> | undefined,
+): ModelSpec<"openai-completions"> {
+	const pricing = isRecord(entry.pricing) ? entry.pricing : {};
+	const features = isRecord(entry.features) ? entry.features : {};
+	const reasoning = canonical?.reasoning ?? false;
+	const inputCost = toPositiveNumber(pricing.input, toPositiveNumber(pricing.prompt, 0) * 1_000_000);
+	const outputCost = toPositiveNumber(pricing.output, toPositiveNumber(pricing.completion, 0) * 1_000_000);
+	return {
+		...defaults,
+		name: canonical?.name ?? defaults.name,
+		reasoning,
+		input: features.image_input === true ? ["text", "image"] : ["text"],
+		supportsTools: features.tool_use === true,
+		cost: {
+			input: inputCost,
+			output: outputCost,
+			cacheRead: 0,
+			cacheWrite: 0,
+		},
+		contextWindow: toPositiveNumber(entry.context_length, null),
+		maxTokens: toPositiveNumber(entry.max_completion_tokens, null),
+		headers: FEATHERLESS_HEADERS,
+		...(reasoning
+			? {
+					thinking: { mode: "effort" as const, efforts: [Effort.High] },
+					compat: {
+						thinkingFormat: "qwen-chat-template" as const,
+						replayReasoningContent: true,
+					},
+				}
+			: {}),
+	};
+}
+
+export const FEATHERLESS_DEFAULT_MODEL: ModelSpec<"openai-completions"> = {
+	id: FEATHERLESS_DEFAULT_MODEL_ID,
+	name: "GLM 5.2",
+	api: "openai-completions",
+	provider: "featherless",
+	baseUrl: FEATHERLESS_BASE_URL,
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 1.39, output: 4.4, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 262_144,
+	maxTokens: null,
+	headers: FEATHERLESS_HEADERS,
+	thinking: { mode: "effort", efforts: [Effort.High] },
+	compat: {
+		thinkingFormat: "qwen-chat-template",
+		replayReasoningContent: true,
+	},
+};
+
+interface RankedFeatherlessModel {
+	model: ModelSpec<"openai-completions">;
+	createdAt: number;
+}
+
+function featherlessCreatedAt(entry: OpenAICompatibleModelRecord): number {
+	const created = toPositiveNumber(entry.created, 0);
+	if (created > 0) return created;
+	const hfCreatedAt = typeof entry.hf_created_at === "string" ? Date.parse(entry.hf_created_at) / 1000 : 0;
+	return Number.isFinite(hfCreatedAt) && hfCreatedAt > 0 ? hfCreatedAt : 0;
+}
+
+function compareRankedFeatherlessModels(left: RankedFeatherlessModel, right: RankedFeatherlessModel): number {
+	const contextDifference = (right.model.contextWindow ?? 0) - (left.model.contextWindow ?? 0);
+	if (contextDifference !== 0) return contextDifference;
+	const ageDifference = right.createdAt - left.createdAt;
+	if (ageDifference !== 0) return ageDifference;
+	return left.model.id.localeCompare(right.model.id);
+}
+
+function materializeRankedFeatherlessModels(
+	models: RankedFeatherlessModel[],
+	limit: number,
+): ModelSpec<"openai-completions">[] {
+	return models
+		.sort(compareRankedFeatherlessModels)
+		.slice(0, limit)
+		.map(({ model }, priority) => ({ ...model, priority }));
+}
+
+async function fetchRankedFeatherlessModels(
+	config: FeatherlessModelManagerConfig | undefined,
+	query: Readonly<Record<string, string>>,
+	queryKey: string,
+): Promise<RankedFeatherlessModel[] | null> {
+	const canonicalReferences = getBundledModelReferenceIndex();
+	const createdAtById = new Map<string, number>();
+	const models = await fetchOpenAICompatibleModels({
+		api: "openai-completions",
+		provider: "featherless",
+		baseUrl: config?.baseUrl ?? FEATHERLESS_BASE_URL,
+		apiKey: config?.apiKey,
+		headers: FEATHERLESS_HEADERS,
+		query,
+		onModelCount: count => config?.onModelCount?.(count, queryKey),
+		filterModel: entry => {
+			const features = isRecord(entry.features) ? entry.features : {};
+			return (
+				features.audio_output !== true &&
+				entry.available_on_current_plan !== false &&
+				toPositiveNumber(entry.context_length, 0) > 0
+			);
+		},
+		mapModel: (entry, defaults) => {
+			createdAtById.set(defaults.id, featherlessCreatedAt(entry));
+			const canonical = resolveModelReference(defaults.id, canonicalReferences) as
+				| Model<"openai-completions">
+				| undefined;
+			return mapFeatherlessModel(entry, defaults, canonical);
+		},
+		fetch: config?.fetch,
+	});
+	if (models === null) return null;
+	return models.map(model => ({ model, createdAt: createdAtById.get(model.id) ?? 0 }));
+}
+
+export function featherlessModelManagerOptions(
+	config?: FeatherlessModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const planQuery: Readonly<Record<string, string>> = apiKey ? { available_on_current_plan: "true" } : {};
+	let reportedTotal: number | undefined;
+	const trackedConfig: FeatherlessModelManagerConfig = {
+		...config,
+		onModelCount: (count, query) => {
+			if (!query) reportedTotal = count;
+			config?.onModelCount?.(count, query);
+		},
+	};
+	return {
+		providerId: "featherless",
+		dynamicModelsAuthoritative: false,
+		dynamicModelsPartial: true,
+		cacheFingerprintSalt: "featherless-all-conversational-v1",
+		restorableHeaderFallback: FEATHERLESS_HEADERS,
+		getReportedModelTotal: () => reportedTotal,
+		restoreReportedModelTotal: total => {
+			reportedTotal = total;
+			config?.onModelCount?.(total, "");
+		},
+		fetchDynamicModels: async () => {
+			const ranked = await fetchRankedFeatherlessModels(
+				trackedConfig,
+				{
+					conversational: "true",
+					// Featherless' capability index omits models that report tool use correctly.
+					// Fetch every conversational candidate and retain the tool-use flag as metadata.
+					per_page: String(FEATHERLESS_FETCH_LIMIT),
+					sort: "-popularity",
+					...planQuery,
+				},
+				"",
+			);
+			if (ranked === null) return null;
+			if (!ranked.some(({ model }) => model.id === FEATHERLESS_DEFAULT_MODEL_ID)) {
+				ranked.push({
+					model: FEATHERLESS_DEFAULT_MODEL,
+					createdAt: FEATHERLESS_DEFAULT_MODEL_CREATED_AT,
+				});
+			}
+			return materializeRankedFeatherlessModels(ranked, FEATHERLESS_FETCH_LIMIT);
+		},
+		searchDynamicModels: async query => {
+			const trimmedQuery = query.trim();
+			if (!trimmedQuery) return [];
+			const ranked = await fetchRankedFeatherlessModels(
+				trackedConfig,
+				{
+					q: trimmedQuery,
+					conversational: "true",
+					// Keep non-tool conversational models selectable; the model hub marks them locally.
+					per_page: String(FEATHERLESS_FETCH_LIMIT),
+					sort: "-popularity",
+					...planQuery,
+				},
+				trimmedQuery,
+			);
+			return ranked === null ? null : materializeRankedFeatherlessModels(ranked, FEATHERLESS_FETCH_LIMIT);
+		},
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 15.5 CoreWeave Serverless Inference
 // ---------------------------------------------------------------------------
 

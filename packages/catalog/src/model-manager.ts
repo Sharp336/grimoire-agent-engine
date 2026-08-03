@@ -39,8 +39,12 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	cacheTtlMs?: number;
 	/** When true, a successful dynamic fetch is the complete provider catalog and prunes static-only models. */
 	dynamicModelsAuthoritative?: boolean;
+	/** When true, a successful dynamic fetch is a partial page merged with matching cached models. */
+	dynamicModelsPartial?: boolean;
 	/** Cached model ids whose presence forces refresh when the static or migration-policy fingerprint changes. */
 	dropCachedModelIdsOnStaticMismatch?: readonly string[];
+	/** Provider-owned cache identity revision for dynamic mapping or inclusion policy changes. */
+	cacheFingerprintSalt?: string;
 	/**
 	 * Trusted, provider-wide request headers that can be safely re-derived at
 	 * cache-read time. The cache never persists their values. Models whose live
@@ -51,6 +55,12 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	restorableHeaderFallback?: Record<string, string>;
 	/** Optional dynamic endpoint fetcher. */
 	fetchDynamicModels?: () => Promise<readonly ModelSpec<TApi>[] | null>;
+	/** Optional bounded remote search hook for providers whose complete catalog is too large to preload. */
+	searchDynamicModels?: (query: string) => Promise<readonly ModelSpec<TApi>[] | null>;
+	/** Current provider-reported total to persist beside a successful dynamic snapshot. */
+	getReportedModelTotal?: () => number | undefined;
+	/** Restores a provider-reported total when a cached snapshot is hydrated. */
+	restoreReportedModelTotal?: (total: number) => void;
 	/** Optional stencil.so fallback hook. */
 	modelsDev?: ModelsDevFallback<TApi, TModelsDevPayload>;
 	/** Clock override for deterministic tests. */
@@ -188,6 +198,9 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		? passModelList<TApi>(options.staticModels)
 		: (getBundledModels(options.providerId as GeneratedProvider) as Model<TApi>[]);
 	const cache = readModelCache<TApi>(cacheProviderId, ttlMs, now, dbPath);
+	if (cache?.reportedTotal !== undefined) {
+		options.restoreReportedModelTotal?.(cache.reportedTotal);
+	}
 	const restoredCache = restoreCachedModelHeaders(
 		cache?.models ?? [],
 		staticModels,
@@ -201,22 +214,28 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const dynamicModelsAuthoritative = options.dynamicModelsAuthoritative ?? false;
 	const cacheDropIds = options.dropCachedModelIdsOnStaticMismatch;
 	const staticCatalogFingerprint = fingerprintStatic(staticModels, dynamicModelsAuthoritative);
+	const saltedStaticCatalogFingerprint = options.cacheFingerprintSalt
+		? `${staticCatalogFingerprint}:salt:${Bun.hash(options.cacheFingerprintSalt).toString(36)}`
+		: staticCatalogFingerprint;
 	// Endpoint-migration policy is cache identity: adding an id must invalidate
 	// matching-static-catalog caches written by the prior resolver.
 	const staticFingerprint =
 		cacheDropIds && cacheDropIds.length > 0
-			? `${staticCatalogFingerprint}:drop:${Bun.hash(cacheDropIds.join("\0")).toString(36)}`
-			: staticCatalogFingerprint;
+			? `${saltedStaticCatalogFingerprint}:drop:${Bun.hash(cacheDropIds.join("\0")).toString(36)}`
+			: saltedStaticCatalogFingerprint;
 	const cacheFingerprintMatches = cache?.staticFingerprint === staticFingerprint && staticFingerprint.length > 0;
 	const cacheNeedsModelMigration =
 		!cacheFingerprintMatches &&
 		cacheDropIds !== undefined &&
 		usableCachedModels.some(model => cacheDropIds.includes(model.id));
+	const cacheHasRequiredReportedTotal =
+		options.restoreReportedModelTotal === undefined || cache?.reportedTotal !== undefined;
 	const hasUsableFreshCache =
 		(cache?.fresh ?? false) &&
 		!cacheHasUnresolvedHeaders &&
 		!cacheNeedsModelMigration &&
-		(!dynamicModelsAuthoritative || cacheFingerprintMatches);
+		cacheHasRequiredReportedTotal &&
+		((!dynamicModelsAuthoritative && options.cacheFingerprintSalt === undefined) || cacheFingerprintMatches);
 	const dynamicFetcher = options.fetchDynamicModels;
 	const hasDynamicFetcher = typeof dynamicFetcher === "function";
 	const hasAuthoritativeCache = ((cache?.authoritative ?? false) && hasUsableFreshCache) || !hasDynamicFetcher;
@@ -250,8 +269,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const shouldUseFreshCacheAsAuthoritative =
 		strategy === "online-if-uncached" && hasUsableFreshCache && hasAuthoritativeCache;
 	const dynamicFetchSucceeded = fetchedDynamicModels !== null;
+	const preservedCacheModels =
+		dynamicFetchSucceeded && options.dynamicModelsPartial && cacheFingerprintMatches ? usableCachedModels : [];
 	const cacheModels = dynamicFetchSucceeded
-		? []
+		? preservedCacheModels
 		: prepareCacheModelsForStaticMismatch(
 				usableCachedModels,
 				staticModels,
@@ -273,7 +294,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const dynamicAuthoritative = !hasDynamicFetcher || dynamicFetchSucceeded || shouldUseFreshCacheAsAuthoritative;
 	if (shouldFetchFromNetwork) {
 		if (dynamicFetchSucceeded) {
-			const mergedSnapshot = mergeDynamicModels(mergeModelSources(staticModels, modelsDevModels), dynamicModels);
+			const mergedSnapshot = mergeDynamicModels(
+				mergeDynamicModels(mergeModelSources(staticModels, modelsDevModels), preservedCacheModels),
+				dynamicModels,
+			);
 			const snapshotModels = dynamicModelsAuthoritative
 				? retainModelIds(mergedSnapshot, dynamicModels)
 				: mergedSnapshot;
@@ -286,6 +310,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				dbPath,
 				staticModels,
 				restorableHeaderFallback,
+				options.getReportedModelTotal?.(),
 			);
 		} else {
 			// Dynamic fetch failed — update cache with a non-authoritative snapshot so
@@ -322,6 +347,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				dbPath,
 				staticModels,
 				restorableHeaderFallback,
+				latestCache?.reportedTotal ?? cache?.reportedTotal,
 			);
 		}
 	}

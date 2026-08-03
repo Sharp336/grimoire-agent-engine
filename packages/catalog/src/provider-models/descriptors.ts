@@ -20,6 +20,7 @@ import {
 	cloudflareAiGatewayModelManagerOptions,
 	coreWeaveModelManagerOptions,
 	deepseekModelManagerOptions,
+	featherlessModelManagerOptions,
 	firepassModelManagerOptions,
 	fireworksModelManagerOptions,
 	githubCopilotModelManagerOptions,
@@ -177,6 +178,12 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["FIREWORKS_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => fireworksModelManagerOptions(config),
 		catalogDiscovery: { label: "Fireworks" },
+	},
+	{
+		id: "featherless",
+		defaultModel: "zai-org/GLM-5.2",
+		envVars: ["FEATHERLESS_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => featherlessModelManagerOptions(config),
 	},
 	{
 		id: "github-copilot",

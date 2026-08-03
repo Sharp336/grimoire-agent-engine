@@ -6,6 +6,7 @@ export type ModelManagerConfig = {
 	apiKey?: string;
 	baseUrl?: string;
 	fetch?: FetchImpl;
+	onModelCount?: (count: number, query: string) => void;
 	/** The supplied fetch already applies provider-specific authentication. */
 	authenticated?: boolean;
 };

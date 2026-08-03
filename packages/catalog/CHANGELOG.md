@@ -230,6 +230,15 @@
 
 - Fixed an issue where newly advertised chat models were dropped during dynamic discovery for the `alibaba-token-plan` provider.
 - Fixed a `400` error when forcing a specific tool with DeepSeek reasoning models on OpenCode Zen/Go gateways by automatically downgrading the tool selection mode to `auto` while keeping the tool advertised.
+### Added
+
+- Added Featherless as a built-in OpenAI-compatible provider with GLM 5.2 as its default, provider headers and pricing metadata, and no prebundled model list. The initial authenticated refresh makes one bounded 100-record request and caches every eligible conversational model from that page, including models without tool use; typed queries use bounded server-side search and merge additional matches into the same local cache. Both paths order results by descending context window, then newest upstream creation time, and the model hub reapplies that order locally after MRU or fuzzy-search ranking. The provider-reported total is displayed alongside the loaded count and persisted with the initial cache snapshot so offline and fresh-cache reloads retain the remote catalog size.
+
+### Fixed
+
+- Fixed Featherless searches returning no official GLM, Kimi, or MiniMax models because its server-side `capabilities=tool-use` index omits models whose response metadata explicitly reports `features.tool_use: true`; conversational candidates are now fetched without that incomplete index and their tool-use support is preserved as model metadata.
+- Fixed `alibaba-token-plan` dynamic discovery dropping newly advertised chat models by replacing the stale static allowlist with dedicated non-chat media-model filters ([#7391](https://github.com/can1357/oh-my-pi/issues/7391)).
+- Fixed DeepSeek reasoning models on the OpenCode Zen/Go gateways (e.g. `opencode-zen/deepseek-v4-flash-free`) failing with `400 Thinking mode does not support this tool_choice` when a specific tool was forced. Dropping `reasoning_effort` does not disable the gateway's default thinking mode, so the OpenAI-compat descriptor now marks forced `tool_choice` unsupported for DeepSeek reasoning models, downgrading the selector to `auto` while keeping the tool advertised ([#7315](https://github.com/can1357/oh-my-pi/issues/7315)).
 
 ## [17.2.4] - 2026-08-01
 

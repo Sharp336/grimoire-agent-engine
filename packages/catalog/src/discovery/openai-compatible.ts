@@ -116,6 +116,10 @@ export interface FetchOpenAICompatibleModelsOptions<TApi extends Api> {
 	timeoutMs?: number;
 	/** Optional fetch implementation override for testing/custom runtimes. */
 	fetch?: FetchImpl;
+	/** Optional query parameters appended to the `/models` request. */
+	query?: Readonly<Record<string, string>>;
+	/** Receives the provider-reported total count when the response exposes one. */
+	onModelCount?: (count: number) => void;
 	/**
 	 * Optional post-normalization filter.
 	 * Return false to skip a model.
@@ -155,10 +159,14 @@ export async function fetchOpenAICompatibleModels<TApi extends Api>(
 	}
 
 	const fetchImpl = discoveryFetch(options.fetch);
+	const modelsUrl = new URL(`${baseUrl}${MODELS_PATH}`);
+	for (const [key, value] of Object.entries(options.query ?? {})) {
+		modelsUrl.searchParams.set(key, value);
+	}
 	const fetchPayload = async (signal?: AbortSignal): Promise<unknown | null> => {
 		let response: Response;
 		try {
-			response = await fetchImpl(`${baseUrl}${MODELS_PATH}`, {
+			response = await fetchImpl(modelsUrl.toString(), {
 				method: "GET",
 				headers: requestHeaders,
 				signal,
@@ -191,6 +199,10 @@ export async function fetchOpenAICompatibleModels<TApi extends Api>(
 	const entries = extractModelEntries(payload);
 	if (entries === null) {
 		return null;
+	}
+	const modelCount = extractModelCount(payload);
+	if (modelCount !== undefined) {
+		options.onModelCount?.(modelCount);
 	}
 
 	const context: OpenAICompatibleModelMapperContext<TApi> = {
@@ -227,6 +239,24 @@ export async function fetchOpenAICompatibleModels<TApi extends Api>(
 	}
 
 	return Array.from(deduped.values()).sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function extractModelCount(payload: unknown): number | undefined {
+	if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return undefined;
+	const record = payload as Record<string, unknown>;
+	for (const candidate of [record.total, record.total_items, record.count]) {
+		if (typeof candidate === "number" && Number.isFinite(candidate) && candidate >= 0) {
+			return Math.floor(candidate);
+		}
+	}
+	const pagination = record.pagination;
+	if (typeof pagination === "object" && pagination !== null && !Array.isArray(pagination)) {
+		const totalItems = (pagination as Record<string, unknown>).total_items;
+		if (typeof totalItems === "number" && Number.isFinite(totalItems) && totalItems >= 0) {
+			return Math.floor(totalItems);
+		}
+	}
+	return undefined;
 }
 
 function normalizeBaseUrl(baseUrl: string): string {
