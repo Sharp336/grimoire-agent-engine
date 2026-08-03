@@ -185,8 +185,8 @@ export class GuestClient {
 		this.#socket.send({ t: "abort" });
 	}
 
-	sendAgentCmd(cmd: "chat" | "kill" | "revive", agentId: string, text?: string, generation?: number): void {
-		this.#socket.send({ t: "agent-cmd", cmd, agentId, text, generation });
+	sendAgentCmd(cmd: "chat" | "kill" | "revive", agentId: string, text?: string): void {
+		this.#socket.send({ t: "agent-cmd", cmd, agentId, text });
 	}
 
 	/**

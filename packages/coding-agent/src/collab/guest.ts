@@ -201,9 +201,9 @@ export class CollabGuestLink {
 			if (this.#rejectReadOnly()) return;
 			this.#socket?.send({ t: "agent-cmd", cmd: "chat", agentId: id, text });
 		},
-		kill: (id, generation) => {
+		kill: id => {
 			if (this.#rejectReadOnly()) return;
-			this.#socket?.send({ t: "agent-cmd", cmd: "kill", agentId: id, generation });
+			this.#socket?.send({ t: "agent-cmd", cmd: "kill", agentId: id });
 		},
 		revive: id => {
 			if (this.#rejectReadOnly()) return;

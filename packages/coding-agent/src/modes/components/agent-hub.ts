@@ -106,7 +106,7 @@ export interface AgentHubRemoteTranscript {
 /** Guest-side proxy for hub actions executed on the collab host. */
 export interface AgentHubRemote {
 	chat(id: string, text: string): void;
-	kill(id: string, generation: number): void;
+	kill(id: string): void;
 	revive(id: string): void;
 	/** Mirrors readFileIncremental: text from fromByte (complete JSONL lines), newSize = next fromByte base; null = temporarily unavailable. */
 	readTranscript(id: string, fromByte: number): Promise<AgentHubRemoteTranscript | null>;
@@ -1324,7 +1324,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		this.#pendingKill = undefined;
 		this.#notice = undefined;
 		if (this.#remote) {
-			this.#remote.kill(ref.id, ref.createdAt);
+			this.#remote.kill(ref.id);
 			this.#refreshRows();
 			this.#requestRender();
 			return;
