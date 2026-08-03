@@ -104,6 +104,14 @@ const modelSegment: StatusLineSegment = {
 			modelName = modelName.slice(7);
 		}
 
+		// Prepend provider/id prefix when opted in and the provider is known
+		// (e.g. "anthropic/opus-4.5"). Capitalize the provider for readability
+		// and dim it so the model id remains visually dominant.
+		if (opts.showProvider && state.model?.provider) {
+			const provider = state.model.provider[0].toUpperCase() + state.model.provider.slice(1);
+			modelName = theme.fg("dim", `${provider}/`) + modelName;
+		}
+
 		// Resolve the current thinking-level display ("◉ xhigh", "⟳ auto", …)
 		// when the model supports thinking and the segment isn't hiding it.
 		let thinkingDisplay = "";

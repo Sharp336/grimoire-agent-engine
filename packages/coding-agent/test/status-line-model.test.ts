@@ -124,3 +124,53 @@ describe("status line model segment compact thinking level", () => {
 		expect(Bun.stripANSI(rendered.content)).not.toContain(theme.sep.dot);
 	});
 });
+
+describe("status line model segment showProvider", () => {
+	function createProviderContext(showProvider: boolean, provider: string): SegmentContext {
+		return {
+			...createModelContext(false),
+			options: { model: { showProvider } },
+			session: {
+				state: {
+					model: { id: "test-model", name: "Test Model", provider },
+				},
+				isFastModeActive: () => false,
+				isAutoThinking: false,
+				autoResolvedThinkingLevel: () => undefined,
+				isAdvisorActive: () => false,
+				getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+			} as unknown as SegmentContext["session"],
+		};
+	}
+
+	it("prepends capitalized provider prefix when showProvider is true", () => {
+		const rendered = renderSegment("model", createProviderContext(true, "anthropic"));
+		expect(Bun.stripANSI(rendered.content)).toContain("Anthropic/");
+		expect(Bun.stripANSI(rendered.content)).toContain("Test Model");
+	});
+
+	it("omits provider prefix when showProvider is false", () => {
+		const rendered = renderSegment("model", createProviderContext(false, "anthropic"));
+		expect(Bun.stripANSI(rendered.content)).not.toContain("Anthropic");
+		expect(Bun.stripANSI(rendered.content)).toContain("Test Model");
+	});
+
+	it("omits provider prefix when showProvider is true but model has no provider", () => {
+		const ctx = createProviderContext(true, "anthropic");
+		ctx.session.state.model = { id: "test-model", name: "Test Model" };
+		const rendered = renderSegment("model", ctx);
+		expect(Bun.stripANSI(rendered.content)).not.toContain("Anthropic");
+	});
+
+	it("omits provider prefix when options.model is absent", () => {
+		const ctx = createModelContext(false);
+		ctx.options = {};
+		ctx.session.state.model = {
+			id: "test-model",
+			name: "Test Model",
+			provider: "anthropic",
+		} as SegmentContext["session"]["state"]["model"];
+		const rendered = renderSegment("model", ctx);
+		expect(Bun.stripANSI(rendered.content)).not.toContain("Anthropic");
+	});
+});
