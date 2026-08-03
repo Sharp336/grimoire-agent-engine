@@ -12,6 +12,14 @@ export interface YieldDispatcher<P> {
 
 export interface YieldQueueOptions {
 	isStreaming: () => boolean;
+	/**
+	 * Gate for idle wake turns. The idle flush is the only path that starts a
+	 * provider turn on its own, so a mode holding durable custody of the session
+	 * can refuse the wake the same way it refuses a peer IRC wake. Refusing
+	 * retains every queued entry untouched: the owed notifications still reach
+	 * the model through a later flush or the next run's lazy aside drain.
+	 */
+	canWakeIdle?: () => boolean;
 	injectStreaming?(msg: AgentMessage): void;
 	injectIdle(messages: AgentMessage[]): Promise<void>;
 	scheduleIdleFlush(run: () => Promise<void>): void;
@@ -115,6 +123,9 @@ export class YieldQueue {
 	async flush(mode: YieldFlushMode): Promise<void> {
 		if (mode === "idle") {
 			this.#idleFlushPending = false;
+			// Wake boundary. Checked before the first #drain so a refusal leaves the
+			// entries queued rather than settling receipts for work that never ran.
+			if (this.#options.canWakeIdle?.() === false) return;
 		}
 		const idleMessages: BuiltMessage[] = [];
 		for (const [kind, dispatcher] of this.#dispatchers) {
