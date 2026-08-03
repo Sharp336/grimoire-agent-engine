@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `--session-profile <name>` to resolve the `--resume`/`--fork` target from another profile's session store while the process keeps running the active profile's config, so a session created under one `--profile` can be resumed under another (e.g. `omp --profile work --resume <id> --session-profile personal`). Lookup is redirected to that profile's sessions tree; the session opens in place and default resolution is unchanged when the flag is omitted.
+- Added `--session-profile <name>` to resolve the `--resume`/`--fork` target from another profile's session store while the process keeps running the active profile's config, so a session created under one `--profile` can be resumed under another (e.g. `omp --profile work --resume <id> --session-profile personal`). Lookup is redirected to that profile's sessions tree; the session opens in place and default resolution is unchanged when the flag is omitted ([#7565](https://github.com/can1357/oh-my-pi/pull/7565) by [@thekidnamedkd](https://github.com/thekidnamedkd)).
 
 ### Changed
 

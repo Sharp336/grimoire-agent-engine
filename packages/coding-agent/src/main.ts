@@ -725,10 +725,19 @@ export async function createSessionManager(
 	// The session opens in place (its own profile's tree); only lookup is
 	// redirected. Empty when unset, so resolution falls back to the active profile.
 	const sessionProfileRoot = parsed.sessionProfile ? getProfileSessionsDir(parsed.sessionProfile) : undefined;
-	if (parsed.sessionProfile && typeof parsed.resume !== "string" && typeof parsed.fork !== "string") {
-		throw new SessionResolutionError(
-			"--session-profile needs a target session; pass --resume <id> or --fork <id> to resolve from that profile.",
-		);
+	if (parsed.sessionProfile) {
+		const target =
+			typeof parsed.resume === "string" ? parsed.resume : typeof parsed.fork === "string" ? parsed.fork : undefined;
+		if (target === undefined) {
+			throw new SessionResolutionError(
+				"--session-profile needs a target session; pass --resume <id> or --fork <id> to resolve from that profile.",
+			);
+		}
+		if (target.includes("/") || target.includes("\\") || target.endsWith(".jsonl")) {
+			throw new SessionResolutionError(
+				"--session-profile expects a session id, not a path; a path already names a specific file. Drop --session-profile to resume a path directly.",
+			);
+		}
 	}
 	const resumeOptions = { sessionsRoot: sessionProfileRoot };
 	if (parsed.fork) {

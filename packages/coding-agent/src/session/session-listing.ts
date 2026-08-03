@@ -709,7 +709,17 @@ export async function resolveResumableSession(
 ): Promise<ResolvedSessionMatch | undefined> {
 	const storage = isSessionStorage(storageOrOptions) ? storageOrOptions : new FileSessionStorage();
 	const resolvedOptions = isSessionStorage(storageOrOptions) ? options : storageOrOptions;
-	const localSessionDir = sessionDir ?? computeDefaultSessionDir(cwd, storage, resolvedOptions.sessionsRoot);
+	// A foreign profile's store is resolved read-only: the all-projects glob finds
+	// the session by id/prefix without the cwd-scoped local pass, which would
+	// ensureDir/migrate and recover backups inside that profile's tree. Lookup
+	// only — the other profile's directories are never created or mutated.
+	if (resolvedOptions.sessionsRoot !== undefined) {
+		const foreignSessions = await listAllSessions(storage, resolvedOptions.sessionsRoot);
+		const foreignMatch = foreignSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
+		return foreignMatch ? { session: foreignMatch, scope: "global" } : undefined;
+	}
+
+	const localSessionDir = sessionDir ?? computeDefaultSessionDir(cwd, storage);
 	const localSessions = await listSessions(localSessionDir, storage);
 	const localMatch = localSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
 	if (localMatch) {
@@ -720,7 +730,7 @@ export async function resolveResumableSession(
 		return undefined;
 	}
 
-	const globalSessions = await listAllSessions(storage, resolvedOptions.sessionsRoot);
+	const globalSessions = await listAllSessions(storage);
 	const globalMatch = globalSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
 	if (!globalMatch) {
 		return undefined;

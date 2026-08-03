@@ -228,6 +228,19 @@ describe("resolveResumableSession across profiles", () => {
 		expect(match?.session.id).toBe("crossabcd");
 		expect(match?.session.path).toBe(filePath);
 	});
+
+	it("does not create or mutate the foreign profile's tree on lookup", async () => {
+		writeForeignSession("2025-01-01_cross.jsonl", "/tmp/project", "crossabcd");
+		const before = fs.readdirSync(foreignRoot).sort();
+
+		// A miss must not ensureDir/migrate a cwd-scoped directory in the foreign tree.
+		const miss = await resolveResumableSession("nomatch", "/tmp/some-other-cwd", undefined, {
+			sessionsRoot: foreignRoot,
+		});
+
+		expect(miss).toBeUndefined();
+		expect(fs.readdirSync(foreignRoot).sort()).toEqual(before);
+	});
 });
 
 describe("SessionManager temp cwd session dirs", () => {

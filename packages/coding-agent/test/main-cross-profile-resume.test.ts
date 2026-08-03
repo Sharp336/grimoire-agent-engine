@@ -98,4 +98,10 @@ describe("createSessionManager — --session-profile", () => {
 			createSessionManager(buildArgs({ sessionProfile: "work" }), projectCwd, stubSettings),
 		).rejects.toThrow(/session-profile/);
 	});
+
+	it("rejects --session-profile with a path-based target", async () => {
+		await expect(
+			createSessionManager(buildArgs({ resume: foreignFile, sessionProfile: "work" }), projectCwd, stubSettings),
+		).rejects.toThrow(/not a path/);
+	});
 });

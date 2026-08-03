@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `getProfileSessionsDir(profile)` to resolve a named profile's sessions directory without activating it (XDG-aware, mirrors `getSessionsDir` for the active profile), supporting cross-profile session lookups ([#7565](https://github.com/can1357/oh-my-pi/pull/7565) by [@thekidnamedkd](https://github.com/thekidnamedkd)).
+
 ## [17.2.6] - 2026-08-03
 
 ### Added
