@@ -4,6 +4,7 @@ import { scheduler } from "node:timers/promises";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { ApiKeyResolveContext, AssistantMessage, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import * as aiStream from "@oh-my-pi/pi-ai/stream";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -887,8 +888,11 @@ describe("AgentSession retry delay cap", () => {
 		});
 	});
 
-	it("resumes a stalled Cursor stream after its exec tool result", async () => {
-		const stallMessage = "Provider stream stalled while waiting for the next event";
+	it.each([
+		["watchdog stall", "Provider stream stalled while waiting for the next event"],
+		["incomplete stream", "Cursor stream ended before turnEnded"],
+		["HTTP/2 truncation", "NGHTTP2_INTERNAL_ERROR"],
+	] as const)("resumes a Cursor %s after its exec tool result", async (_case, stallMessage) => {
 		const model = createMockModel({
 			id: "composer-2.5",
 			provider: "cursor",
@@ -966,6 +970,7 @@ describe("AgentSession retry delay cap", () => {
 							...partial,
 							stopReason: "error",
 							errorMessage: stallMessage,
+							errorId: AIError.create(AIError.Flag.Transient),
 						},
 					});
 				});
@@ -1661,6 +1666,261 @@ describe("AgentSession retry delay cap", () => {
 		expect(retryEndEvents).toHaveLength(1);
 		expect(retryEndEvents[0]).toMatchObject({ success: false, attempt: 1 });
 		expect(lastAssistant(session).errorMessage).toBe("server_error: stream closed with reason: error");
+		expect(session.isRetrying).toBe(false);
+	});
+
+	it("does not cap ordinary Cursor usage-limit retries", async () => {
+		const model = createMockModel({ id: "composer-2.5", provider: "cursor" });
+		authStorage.setRuntimeApiKey("cursor", "cursor-test-key");
+		const mock = createMockModel({
+			provider: "cursor",
+			responses: [
+				{
+					content: [{ type: "thinking", thinking: "attempt 1" }],
+					stopReason: "error",
+					errorMessage: "429 Too Many Requests",
+				},
+				{
+					content: [{ type: "thinking", thinking: "attempt 2" }],
+					stopReason: "error",
+					errorMessage: "429 Too Many Requests",
+				},
+				{
+					content: [{ type: "thinking", thinking: "attempt 3" }],
+					stopReason: "error",
+					errorMessage: "429 Too Many Requests",
+				},
+				{ content: ["recovered after Cursor usage limit"] },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 10,
+			"retry.modelFallback": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+		});
+
+		await session.prompt("Trigger repeated Cursor usage limits");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(4);
+		expect(retryStartEvents).toHaveLength(3);
+		expect(retryStartEvents.at(-1)).toMatchObject({ attempt: 3, maxAttempts: 10 });
+		expect(lastAssistant(session).content).toContainEqual({
+			type: "text",
+			text: "recovered after Cursor usage limit",
+		});
+		expect(session.isRetrying).toBe(false);
+	});
+
+	it("does not retry a resolved Cursor usage limit as a transport interruption", async () => {
+		const model = createMockModel({ id: "composer-2.5", provider: "cursor" });
+		authStorage.setRuntimeApiKey("cursor", "cursor-test-key");
+		let streamCalls = 0;
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (_requestedModel, _context, options) => {
+				streamCalls++;
+				const callId = `cursor-read-usage-limit-${streamCalls}`;
+				const toolCall = {
+					type: "toolCall" as const,
+					id: callId,
+					name: "read",
+					arguments: { path: "/workspace/file.txt" },
+					[kCursorExecResolved]: true as const,
+				};
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(async () => {
+					await options?.cursorOnToolResult?.({
+						role: "toolResult",
+						toolCallId: callId,
+						toolName: "read",
+						content: [{ type: "text", text: "file body" }],
+						isError: false,
+						timestamp: Date.now(),
+					});
+					const partial: AssistantMessage = {
+						role: "assistant",
+						content: [toolCall],
+						api: model.api,
+						provider: model.provider,
+						model: model.id,
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "stop",
+						timestamp: Date.now(),
+					};
+					stream.push({ type: "start", partial });
+					stream.push({ type: "toolcall_start", contentIndex: 0, partial });
+					stream.push({
+						type: "toolcall_delta",
+						contentIndex: 0,
+						delta: JSON.stringify(toolCall.arguments),
+						partial,
+					});
+					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
+					stream.push({
+						type: "error",
+						reason: "error",
+						error: {
+							...partial,
+							stopReason: "error",
+							errorMessage: "429 Too Many Requests",
+							errorId: AIError.create(AIError.Flag.UsageLimit),
+						},
+					});
+				});
+				return stream;
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 10,
+			"retry.modelFallback": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+		});
+
+		await session.prompt("Trigger repeated resolved Cursor usage limits");
+		await session.waitForIdle();
+
+		// The completed tool call makes replay unsafe. The 429 still records the
+		// credential outcome, but it must not be mistaken for an interrupted
+		// transport and continued under the special two-attempt watchdog budget.
+		expect(streamCalls).toBe(1);
+		expect(retryStartEvents).toHaveLength(0);
+		expect(session.isRetrying).toBe(false);
+	});
+
+	it("caps cached resolved Cursor transport continuation at two retries", async () => {
+		const model = createMockModel({ id: "composer-2.5", provider: "cursor" });
+		authStorage.setRuntimeApiKey("cursor", "cursor-test-key");
+		let streamCalls = 0;
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (_requestedModel, _context, options) => {
+				const attempt = ++streamCalls;
+				const callId = "cursor-read-cached";
+				const toolCall = {
+					type: "toolCall" as const,
+					id: callId,
+					name: "read",
+					arguments: { path: "/workspace/file.txt" },
+					[kCursorExecResolved]: true as const,
+				};
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(async () => {
+					const partial: AssistantMessage = {
+						role: "assistant",
+						content: attempt === 1 ? [toolCall] : [],
+						api: model.api,
+						provider: model.provider,
+						model: model.id,
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "stop",
+						timestamp: Date.now(),
+					};
+					stream.push({ type: "start", partial });
+					if (attempt === 1) {
+						await options?.cursorOnToolResult?.({
+							role: "toolResult",
+							toolCallId: callId,
+							toolName: "read",
+							content: [{ type: "text", text: "file body" }],
+							isError: false,
+							timestamp: Date.now(),
+						});
+						stream.push({ type: "toolcall_start", contentIndex: 0, partial });
+						stream.push({
+							type: "toolcall_delta",
+							contentIndex: 0,
+							delta: JSON.stringify(toolCall.arguments),
+							partial,
+						});
+						stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
+					}
+					stream.push({
+						type: "error",
+						reason: "error",
+						error: {
+							...partial,
+							stopReason: "error",
+							errorMessage: "Cursor stream ended before turnEnded",
+							errorId: AIError.create(AIError.Flag.Transient),
+						},
+					});
+				});
+				return stream;
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 10,
+			"retry.modelFallback": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+		});
+
+		await session.prompt("Trigger repeated resolved Cursor transport failures");
+		await session.waitForIdle();
+
+		expect(streamCalls).toBe(3);
+		expect(retryStartEvents).toHaveLength(2);
+		expect(retryStartEvents.at(-1)).toMatchObject({ attempt: 2, maxAttempts: 2 });
 		expect(session.isRetrying).toBe(false);
 	});
 

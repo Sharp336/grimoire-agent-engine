@@ -4,6 +4,7 @@ import {
 	type BlockState,
 	buildCursorHistoryForTest,
 	buildCursorSystemPromptJsons,
+	buildResolvedCursorToolResults,
 	emptyGrepPatternRejection,
 	handleServerMessage,
 	processInteractionUpdate,
@@ -226,6 +227,32 @@ describe("Cursor resolveExecHandler execHandlers binding", () => {
 			});
 		});
 
+		it("replays the exact rejected result when no handler was installed", async () => {
+			const first = await resolveExecHandler<{ path: string }, { tag: string; reason?: string; message?: string }>(
+				{ path: "/tmp/foo" },
+				undefined,
+				undefined,
+				() => ({ tag: "generic-error" }),
+				(reason: string) => ({ tag: "rejected", reason }),
+				(message: string) => ({ tag: "error", message }),
+				pairing,
+			);
+			if (!first.toolResult) throw new Error("expected a paired rejection");
+
+			const replay = await resolveExecHandler<{ path: string }, { tag: string; reason?: string; message?: string }>(
+				{ path: "/tmp/foo" },
+				undefined,
+				undefined,
+				() => ({ tag: "generic-error" }),
+				(reason: string) => ({ tag: "rejected", reason }),
+				(message: string) => ({ tag: "error", message }),
+				{ ...pairing, previousResult: first.toolResult },
+			);
+
+			expect(replay.execResult).toBe(first.execResult);
+			expect(replay.execResult).toEqual({ tag: "rejected", reason: "Tool not available" });
+		});
+
 		it("pairs when the handler produces nothing", async () => {
 			const { execResult, toolResult } = await resolveExecHandler(
 				{ path: "/tmp/foo" },
@@ -353,6 +380,56 @@ describe("Cursor resolveExecHandler execHandlers binding", () => {
 				content: [{ type: "text", text: "Tool produced no transcript result" }],
 				isError: false,
 			});
+		});
+
+		it("replays the exact native result behind a synthesized transcript result", async () => {
+			const nativeResult = create(ReadResultSchema, {
+				result: {
+					case: "success",
+					value: create(ReadSuccessSchema, {
+						path: "/tmp/foo",
+						output: { case: "content", value: "native file bytes" },
+					}),
+				},
+			});
+			const first = await resolveExecHandler<{ path: string }, ReadResult>(
+				{ path: "/tmp/foo" },
+				async () => nativeResult,
+				undefined,
+				() => {
+					throw new Error("first execution must use the native handler result");
+				},
+				() => create(ReadResultSchema),
+				() => create(ReadResultSchema),
+				pairing,
+			);
+			if (!first.toolResult) throw new Error("expected a paired transcript result");
+
+			let repeatedExecutions = 0;
+			const replay = await resolveExecHandler<{ path: string }, ReadResult>(
+				{ path: "/tmp/foo" },
+				async () => {
+					repeatedExecutions++;
+					return create(ReadResultSchema);
+				},
+				undefined,
+				() =>
+					create(ReadResultSchema, {
+						result: {
+							case: "success",
+							value: create(ReadSuccessSchema, {
+								path: "/tmp/foo",
+								output: { case: "content", value: "lossy transcript reconstruction" },
+							}),
+						},
+					}),
+				() => create(ReadResultSchema),
+				() => create(ReadResultSchema),
+				{ ...pairing, previousResult: first.toolResult },
+			);
+
+			expect(repeatedExecutions).toBe(0);
+			expect(replay.execResult).toBe(nativeResult);
 		});
 
 		it("records an MCP success carrying is_error as a failed call", async () => {
@@ -550,6 +627,33 @@ describe("Cursor request action encoding", () => {
 });
 
 describe("Cursor history encoding", () => {
+	it("limits fallback-ID replay candidates to a trailing interrupted tool turn", () => {
+		const callId = "cursor-exec::7:piBashArgs";
+		const assistant = cursorAssistant(
+			"cursor-composer-2.5",
+			[{ type: "toolCall", id: callId, name: "bash", arguments: { command: "echo first" } }],
+			2,
+			"error",
+		);
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: callId,
+			toolName: "bash",
+			content: [{ type: "text", text: "first" }],
+			isError: false,
+			timestamp: 3,
+		};
+
+		expect(buildResolvedCursorToolResults([assistant, result], "cursor").get(callId)).toBe(result);
+		expect(buildResolvedCursorToolResults([{ ...assistant, stopReason: "toolUse" }, result], "cursor").size).toBe(0);
+		expect(
+			buildResolvedCursorToolResults(
+				[assistant, result, { role: "user", content: "Run a new command", timestamp: 4 }],
+				"cursor",
+			).size,
+		).toBe(0);
+	});
+
 	it("keeps an empty tool result paired with its structured call", () => {
 		const messages: Context["messages"] = [
 			{ role: "user", content: "Read the empty window.", timestamp: 1 },
