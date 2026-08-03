@@ -16,7 +16,7 @@ function renderStatus(stats: AdvisorStats, formattedStatus: string): Promise<str
 			getAdvisorStats: () => stats,
 			formatAdvisorStatus: () => formattedStatus,
 		},
-		present: (components: Component[]) => {
+		presentCommandOutput: (components: Component[]) => {
 			presented = components;
 		},
 	} as unknown as InteractiveModeContext);
