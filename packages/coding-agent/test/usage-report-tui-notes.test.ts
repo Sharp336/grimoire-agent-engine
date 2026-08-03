@@ -134,6 +134,17 @@ describe("renderUsageReports (#3268 TUI aggregate)", () => {
 		expect(text).toContain("rae@example.com (Team Org)");
 	});
 
+	it("shows a scoped account identity for a single report with empty metadata", () => {
+		const baseLimit = limit("Daily", "daily", 24 * HOUR, 0.3);
+		const scopedLimit = { ...baseLimit, scope: { ...baseLimit.scope, accountId: "scoped-account" } };
+		const reports: UsageReport[] = [report("test-provider", "", [scopedLimit])];
+
+		const text = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 120));
+
+		expect(text).toContain("scoped-account");
+		expect(text).not.toContain("account 1");
+	});
+
 	it("renders used-only absolute amounts with neutral status and no account summary", () => {
 		const reports: UsageReport[] = [
 			report("anthropic", "spend@example.test", [

@@ -577,7 +577,10 @@ export class CommandController {
 		}
 		const availableWidth = Math.max(40, (this.ctx.ui.terminal.columns ?? 100) - 2);
 		const selectors = this.ctx.session.getUsageReportingModelSelectors(usageReports ?? []);
-		this.ctx.present([new Spacer(1), new Text(renderUsageModelRoster(theme, selectors, availableWidth), 1, 0)]);
+		this.ctx.presentCommandOutput([
+			new Spacer(1),
+			new Text(renderUsageModelRoster(theme, selectors, availableWidth), 1, 0),
+		]);
 	}
 
 	async handleChangelogCommand(showFull = false): Promise<void> {
@@ -1605,7 +1608,10 @@ function formatLegendLabels(reports: UsageReport[]): string[] {
 	const labels = reports.map((report, index) => formatReportLabel(report, index));
 	if (labels.length < 2) return labels;
 	const orgs = new Set(reports.map(report => orgSuffix(report)));
-	const withoutOrg = orgs.size > 1 ? labels : labels.map(label => label.replace(/\s\([^()]*\)$/, ""));
+	const sharedOrg = orgs.size === 1 ? [...orgs][0] : undefined;
+	const withoutOrg = sharedOrg
+		? labels.map(label => (label.endsWith(sharedOrg) ? label.slice(0, -sharedOrg.length) : label))
+		: labels;
 	const domains = new Set(withoutOrg.map(label => label.slice(label.indexOf("@"))));
 	if (domains.size === 1 && withoutOrg.every(label => label.includes("@"))) {
 		return withoutOrg.map(label => label.slice(0, label.indexOf("@")));
@@ -2004,9 +2010,10 @@ export function renderUsageReports(
 			// legend row on a single column. A positional `account 1` placeholder
 			// carries no identity, so only a real label is worth the space.
 			const report = block.accounts[0]!;
-			const named = report.metadata?.email || report.metadata?.accountId || report.metadata?.projectId;
+			const label = labels[0] ?? "";
+			const named = label !== "account 1";
 			const marker = isActive(report) ? `${uiTheme.fg("accent", uiTheme.status.enabled)} ` : "";
-			const detail = [named ? labels[0] : "", modelSuffix.replace(/^ · /, "")].filter(Boolean).join(" · ");
+			const detail = [named ? label : "", modelSuffix.replace(/^ · /, "")].filter(Boolean).join(" · ");
 			lines.push(detail ? `${heading}  ${marker}${uiTheme.fg("dim", detail)}` : heading);
 		} else {
 			const accountText = `${block.accounts.length} accounts`;
