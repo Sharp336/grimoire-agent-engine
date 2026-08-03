@@ -100,10 +100,10 @@ function terminalGitLabDuoWorkflowMessage(content = "Done"): MessageEvent {
 }
 
 describe("GitLab Duo Workflow provider protocol", () => {
-	it("creates chat-route workflows with MCP-only privileges by default", () => {
+	it("creates ambient-route workflows with MCP-only privileges by default", () => {
 		const body = buildGitLabDuoWorkflowCreateBody("group");
 		expect(body).toMatchObject({
-			workflow_definition: "chat",
+			workflow_definition: "ambient",
 			environment: "ide",
 			namespace_id: "group",
 			allow_agent_to_request_user: false,
@@ -125,10 +125,9 @@ describe("GitLab Duo Workflow provider protocol", () => {
 		expect(body).not.toHaveProperty("namespace_id");
 	});
 
-	it("uses GraphQL root namespace ids for chat direct_access", () => {
+	it("uses GraphQL root namespace ids for ambient direct_access", () => {
 		expect(buildGitLabDuoWorkflowDirectAccessBody("1")).toMatchObject({
-			workflow_definition: "chat",
-			root_namespace_id: "gid://gitlab/Group/1",
+			workflow_definition: "ambient",
 		});
 		expect(buildGitLabDuoWorkflowDirectAccessBody("gid://gitlab/Group/1")).toMatchObject({
 			root_namespace_id: "gid://gitlab/Group/1",
@@ -145,13 +144,13 @@ describe("GitLab Duo Workflow provider protocol", () => {
 		).toBe("rails-token");
 	});
 
-	it("defaults to the chat route while keeping inline flow overrides available", () => {
-		expect(buildGitLabDuoWorkflowCreateBody("group")).toMatchObject({ workflow_definition: "chat" });
+	it("defaults to the ambient route while keeping inline flow overrides available", () => {
+		expect(buildGitLabDuoWorkflowCreateBody("group")).toMatchObject({ workflow_definition: "ambient" });
 		expect(buildGitLabDuoWorkflowCreateBody("group", { workflowDefinition: "custom_flow/v1" })).toMatchObject({
 			workflow_definition: "custom_flow/v1",
 		});
 		const payload = buildGitLabDuoWorkflowStartRequest("workflow-1", model, context);
-		expect(payload.workflowDefinition).toBe("chat");
+		expect(payload.workflowDefinition).toBe("ambient");
 	});
 
 	it("forwards workflow create goals verbatim without redaction", () => {
@@ -249,7 +248,7 @@ describe("GitLab Duo Workflow provider protocol", () => {
 		});
 		const metadata = JSON.parse(payload.workflowMetadata) as Record<string, unknown>;
 		expect(payload.workflowID).toBe("workflow-1");
-		expect(payload.workflowDefinition).toBe("chat");
+		expect(payload.workflowDefinition).toBe("ambient");
 		expect(payload.goal).toBe("Help me update the code.");
 		expect(payload.additional_context).toEqual([]);
 		expect(metadata).toHaveProperty("client_type", "node-websocket");
@@ -297,7 +296,7 @@ describe("GitLab Duo Workflow provider protocol", () => {
 
 	it("always emits the inline ambient flowConfig (no server-side registry path)", () => {
 		const payload = buildGitLabDuoWorkflowStartRequest("workflow-1", model, context);
-		expect(payload.workflowDefinition).toBe("chat");
+		expect(payload.workflowDefinition).toBe("ambient");
 		expect(payload.flowConfigSchemaVersion).toBe("v1");
 		expect(payload.flowConfig).toBeDefined();
 		expect(payload).not.toHaveProperty("flowConfigId");

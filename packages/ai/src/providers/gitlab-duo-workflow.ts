@@ -28,10 +28,9 @@ import { redactSensitiveCredentials } from "./transform-messages";
 
 export const GITLAB_DUO_WORKFLOW_PROVIDER_ID = "gitlab-duo-agent";
 export const GITLAB_DUO_WORKFLOW_API = "gitlab-duo-agent";
-// GitLab.com binds inline `flowConfig` MCP tools reliably on the `chat` workflow
-// route. The flow payload below still defines an isolated `ambient` AgentComponent;
-// `chat` here is routing/entitlement metadata, not the server-side chat registry prompt.
-export const GITLAB_DUO_WORKFLOW_DEFINITION = "chat";
+// Use the ambient workflow route supported by existing GitLab Duo entitlements.
+// The flow payload below also defines an isolated ambient AgentComponent.
+export const GITLAB_DUO_WORKFLOW_DEFINITION = "ambient";
 export type GitLabDuoWorkflowDefinition = "chat" | "ambient" | (string & {});
 
 const DEFAULT_GITLAB_BASE_URL = "https://gitlab.com";
