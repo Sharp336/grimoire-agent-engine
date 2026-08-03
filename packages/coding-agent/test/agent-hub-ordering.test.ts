@@ -957,5 +957,6 @@ describe("Agent hub row ordering", () => {
 		} finally {
 			hub.dispose();
 		}
+
 	});
 });

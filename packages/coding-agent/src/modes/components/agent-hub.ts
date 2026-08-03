@@ -82,6 +82,14 @@ const AGE_TICK_MS = 5_000;
 const DATA_CHANGE_RENDER_COALESCE_MS = 100;
 /** Double-tap window for the table's left-left "close hub" gesture. */
 const LEFT_TAP_WINDOW_MS = 500;
+/** Below this width the list and inspector stack instead of sharing a row; both panes clip when split narrower. */
+const TWO_PANE_MIN_WIDTH = 110;
+/** The inspector renders short labeled lines, so surplus width belongs to the list's identity + task rows. */
+const INSPECTOR_MAX_WIDTH = 60;
+/** Floor for the list pane so identity rows keep their model badge and age. */
+const LIST_MIN_WIDTH = 48;
+/** Gap between keybinding hints in the footer. */
+const HINT_SEPARATOR = "  ";
 
 /** Two-pane mode needs a useful roster and a readable inspector. */
 const SPLIT_MIN_WIDTH = 96;
@@ -171,6 +179,8 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	/** Per-render screen-line to agent-row map, shared by click and hover routing. */
 	#hitRows: Array<number | undefined> = [];
 	#notice: string | undefined;
+	/** Running-agent kill confirmation: the id awaiting a second `x`. */
+	#pendingKill: string | undefined;
 	/** Captured row order from the first refresh; keeps each status group stable while open. */
 	#rowOrder: Map<string, number> | undefined;
 	#nextRowOrder = 0;
@@ -559,6 +569,9 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	}
 
 	#footer(showingNarrowDetails: boolean, availableWidth: number): string {
+		if (this.#pendingKill) {
+			return theme.fg("warning", `Press x again to kill running agent "${this.#pendingKill}".`);
+		}
 		const nextView = this.#viewMode === "roster" ? "by parent" : "flat";
 		if (showingNarrowDetails) {
 			return theme.fg("dim", `Tab:roster  PgUp/PgDn:scroll  Enter:open  t:${nextView}  Esc:roster`);
@@ -760,10 +773,16 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 
 		const lines = [...prefixLines];
 		if (showLeadingMarker) lines.push(` ${theme.fg("dim", `… ${start} more`)}`);
+		const stickyIdleHeader = firstIdle >= 0 && start > firstIdle;
+		if (stickyIdleHeader) lines.push(idleDisclosure(true));
 		if (selectedLines) {
+			if (firstIdle === start) lines.push(idleDisclosure(true));
 			lines.push(...selectedLines);
 		} else {
-			for (let i = start; i < end; i++) lines.push(...renderedRows[i]!);
+			for (let i = start; i < end; i++) {
+				if (i === firstIdle) lines.push(idleDisclosure(true));
+				lines.push(...renderedRows[i]!);
+			}
 		}
 		if (showTrailingMarker) lines.push(` ${theme.fg("dim", `… ${this.#rows.length - end} more`)}`);
 		lines.push(...suffixLines);
@@ -840,9 +859,29 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			` ${theme.bold(sanitizeLine(ref.id))} · ${ref.status} · ${parent} · unread ${this.#irc.unreadCount(ref.id)} · ${age}`,
 		];
 		const task = observed?.description ?? progress?.assignment ?? progress?.task;
-		lines.push(` Task: ${task ? sanitizeLine(task, TRUNCATE_LENGTHS.TITLE) : unknown}`);
 		const fallbackModel =
 			ref.session?.retryFallbackModel ?? (progress?.resolvedModelIsFallback ? progress.resolvedModel : undefined);
+		// Nullish coalescing keeps `false` and `0` as known values. `AgentProgress` declares its
+		// counters as required numbers, so a ref with progress always resolves one; the guard below
+		// therefore selects refs with neither progress nor session-derived runtime, keeping the
+		// runtime-but-no-progress case on the full layout.
+		const firstKnownRuntimeValue =
+			fallbackModel ??
+			runtime.model ??
+			runtime.thinkingLevel ??
+			runtime.advisorActive ??
+			runtime.lspEnabled ??
+			runtime.turns ??
+			runtime.tokens ??
+			runtime.contextTokens ??
+			runtime.toolCount ??
+			runtime.cost;
+		if (firstKnownRuntimeValue === undefined && !progress) {
+			if (task) lines.push(` Task: ${sanitizeLine(task, TRUNCATE_LENGTHS.TITLE)}`);
+			lines.push(` ${theme.fg("dim", "No runtime data · t opens the transcript.")}`);
+			return lines.map(line => truncateToWidth(line, Math.max(1, width)));
+		}
+		lines.push(` Task: ${task ? sanitizeLine(task, TRUNCATE_LENGTHS.TITLE) : unknown}`);
 		const modelLabel = fallbackModel ? `fallback → ${fallbackModel}` : (runtime.model ?? unknown);
 		lines.push(` Model ${sanitizeLine(modelLabel)} · Reasoning ${runtime.thinkingLevel ?? unknown}`);
 		lines.push(` Advisor ${capability(runtime.advisorActive)} · LSP ${capability(runtime.lspEnabled)}`);
@@ -1121,6 +1160,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	}
 
 	#handleTableInput(keyData: string): void {
+		if (keyData !== "x") this.#pendingKill = undefined;
 		if (matchesKey(keyData, "escape")) {
 			if (this.#narrowDetailsOpen && !this.#lastRenderWasSplit) {
 				this.#narrowDetailsOpen = false;
@@ -1258,6 +1298,13 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			this.#requestRender();
 			return;
 		}
+		if (ref.status === "running" && this.#pendingKill !== ref.id) {
+			this.#pendingKill = ref.id;
+			this.#notice = undefined;
+			this.#requestRender();
+			return;
+		}
+		this.#pendingKill = undefined;
 		this.#notice = undefined;
 		if (this.#remote) {
 			this.#remote.kill(ref.id);

@@ -541,7 +541,8 @@
 - Fixed `learned.md` saves growing a blank line on every write (trailing-newline split artifact) and hoisting all headings/prose above all bullets, which re-scoped lessons under the wrong heading in hand-organized files. Saves are now byte-idempotent and preserve mixed Markdown ordering: non-list lines keep their positions, new lessons insert newest-first at the head of the first bullet run, and dedupe/cap operate on bullet lines in place.
 ### Changed
 
-- Changed Agent Hub to prioritize running agents, collapse idle agents, archive parked and aborted agents, and expose responsive live runtime details with structured activity ([#5251](https://github.com/can1357/oh-my-pi/pull/5251) by [@wolfiesch](https://github.com/wolfiesch)).
+- Changed Agent Hub to prioritize running agents, head the collapsible idle group with its disclosure row, archive parked and aborted agents, and expose responsive live runtime details with structured activity. The list and inspector share a row only when both panes fit, footer hints shed low-priority entries instead of clipping the close gesture on an 80-column terminal, and an archived agent with no retained runtime collapses to one line instead of six `unknown` fields ([#5251](https://github.com/can1357/oh-my-pi/pull/5251) by [@wolfiesch](https://github.com/wolfiesch)).
+- Changed the Agent Hub `x` action to confirm before aborting a running agent, so a stray keystroke on the default Active tab cannot cancel live work; any other key cancels the pending confirmation and archived agents are still released on the first press ([#5251](https://github.com/can1357/oh-my-pi/pull/5251) by [@wolfiesch](https://github.com/wolfiesch)).
 
 ## [17.1.5] - 2026-07-27
 

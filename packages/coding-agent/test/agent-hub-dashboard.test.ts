@@ -261,4 +261,100 @@ describe("Agent Hub dashboard", () => {
 		expect(refreshed).toContain("Tools 8");
 		hub.dispose();
 	});
+
+	it("keeps the close gesture in the footer on an 80-column terminal", () => {
+		const registry = new AgentRegistry();
+		register(registry, "run-a", "running");
+		register(registry, "park-a", "parked");
+		const hub = makeHub(registry);
+
+		for (const tab of ["active", "archive"] as const) {
+			const footer = Bun.stripANSI(hub.render(80).join("\n"))
+				.split("\n")
+				.find(line => line.includes("j/k:select"));
+			expect(footer, tab).toBeDefined();
+			expect(footer!.length, tab).toBeLessThanOrEqual(78);
+			expect(footer, tab).toContain("Tab:switch");
+			expect(footer, tab).toContain("Esc/←←:close");
+			hub.handleInput("\t");
+		}
+
+		expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain("t:transcript");
+		hub.dispose();
+	});
+
+	it("heads the idle group with its disclosure marker when expanded", () => {
+		const registry = new AgentRegistry();
+		register(registry, "run-a", "running");
+		register(registry, "idle-a", "idle");
+		const hub = makeHub(registry);
+
+		expect(rendered(hub)).toContain("▸ 1 idle agents");
+		hub.handleInput("i");
+		const output = rendered(hub);
+		expect(output.indexOf("run-a")).toBeLessThan(output.indexOf("▾ 1 idle agents"));
+		expect(output.indexOf("▾ 1 idle agents")).toBeLessThan(output.indexOf("idle-a"));
+		hub.dispose();
+	});
+
+	it("splits panes only when both fit, keeping identity rows intact", () => {
+		const registry = new AgentRegistry();
+		register(registry, "routing-scout", "running");
+		const observers = new SessionObserverRegistry();
+		vi.spyOn(observers, "getSessions").mockReturnValue([
+			{
+				id: "routing-scout",
+				kind: "subagent",
+				label: "routing-scout",
+				status: "active",
+				lastUpdate: Date.now(),
+				progress: progress({
+					id: "routing-scout",
+					resolvedModel: "anthropic/claude-opus-5:high",
+					thinkingLevel: Effort.High,
+				}),
+			},
+		]);
+		const hub = makeHub(registry, observers);
+
+		const listPane = Bun.stripANSI(hub.render(120).join("\n"))
+			.split("\n")
+			.map(line => line.split("│")[0] ?? "")
+			.join("\n");
+		expect(listPane).toContain("claude-opus-5 ◒ high · just now");
+
+		expect(Bun.stripANSI(hub.render(108).join("\n"))).not.toContain("│");
+		hub.dispose();
+	});
+
+	it("collapses an archived agent with no runtime data to one line", () => {
+		const registry = new AgentRegistry();
+		register(registry, "park-a", "parked");
+		const hub = makeHub(registry);
+		hub.handleInput("\t");
+
+		const output = rendered(hub);
+		expect(output).toContain("No runtime data · t opens the transcript.");
+		expect(output).not.toContain("Model unknown");
+		expect(output).not.toContain("Turns unknown");
+		hub.dispose();
+	});
+
+	it("keeps the full inspector for an archived agent with runtime but no progress", () => {
+		const registry = new AgentRegistry();
+		const session = {
+			thinkingLevel: "medium",
+			getActiveToolNames: () => ["lsp"],
+			isAdvisorActive: () => false,
+		} as unknown as AgentSession;
+		registry.register({ id: "park-a", displayName: "park-a", kind: "sub", status: "parked", session });
+		const hub = makeHub(registry);
+		hub.handleInput("\t");
+
+		const output = rendered(hub);
+		expect(output).toContain("Advisor off · LSP on");
+		expect(output).toContain("No structured progress yet.");
+		expect(output).not.toContain("No runtime data");
+		hub.dispose();
+	});
 });

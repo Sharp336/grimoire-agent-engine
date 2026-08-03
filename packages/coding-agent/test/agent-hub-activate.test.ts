@@ -157,7 +157,7 @@ describe("Agent hub Enter activation", () => {
 		hub.dispose();
 	});
 
-	it("x aborts and releases a running agent from the Active tab", async () => {
+	it("x confirms once before aborting and releasing a running agent", async () => {
 		const agents = new AgentRegistry();
 		const abort = vi.fn(async () => {});
 		const session = { abort } as unknown as AgentSession;
@@ -187,6 +187,11 @@ describe("Agent hub Enter activation", () => {
 
 		expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain("x:kill");
 		hub.handleInput("x");
+		expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain(`Press x again to kill running agent "${AGENT_ID}".`);
+		expect(abort).not.toHaveBeenCalled();
+		expect(release).not.toHaveBeenCalled();
+
+		hub.handleInput("x");
 		await released.promise;
 
 		expect(abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
@@ -194,6 +199,41 @@ describe("Agent hub Enter activation", () => {
 			AGENT_ID,
 			expect.objectContaining({ id: AGENT_ID, status: "running", session }),
 		);
+		expect(Bun.stripANSI(hub.render(120).join("\n"))).not.toContain("Press x again");
+		hub.dispose();
+	});
+
+	it("any other key cancels a pending running-agent kill", () => {
+		const agents = new AgentRegistry();
+		const abort = vi.fn(async () => {});
+		agents.register({
+			id: AGENT_ID,
+			displayName: AGENT_ID,
+			kind: "sub",
+			parentId: "Main",
+			session: { abort } as unknown as AgentSession,
+			sessionFile: null,
+			status: "running",
+		});
+		const release = vi.fn(async () => {});
+		const hub = new AgentHubOverlayComponent({
+			observers: new SessionObserverRegistry(),
+			hubKeys: [],
+			onDone: () => {},
+			requestRender: () => {},
+			registry: agents,
+			irc: new IrcBus(agents),
+			focusAgent: async () => {},
+			lifecycle: { release } as unknown as AgentLifecycleManager,
+		});
+
+		hub.handleInput("x");
+		expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain("Press x again");
+		hub.handleInput("j");
+
+		expect(Bun.stripANSI(hub.render(120).join("\n"))).not.toContain("Press x again");
+		expect(abort).not.toHaveBeenCalled();
+		expect(release).not.toHaveBeenCalled();
 		hub.dispose();
 	});
 
