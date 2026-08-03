@@ -877,6 +877,7 @@ export class SessionAdvisors {
 					this.#maintainAdvisorContext(advisorRef, incomingTokens, signal),
 				obfuscator: this.#host.obfuscator,
 				getModelIdentity: () => formatModelString(advisorRef.agent.state.model),
+				includeThinking: () => this.#host.settings.get("advisor.includeThinking"),
 				beginAdvisorUpdate: inProgress => {
 					advisorRef.adviseTool.beginUpdate(inProgress);
 					advisorRef.emissionGuard.beginUpdate();

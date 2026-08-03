@@ -156,6 +156,7 @@ const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	"advisor.subagents",
 	"advisor.syncBacklog",
 	"advisor.immuneTurns",
+	"advisor.includeThinking",
 	"tier.advisor",
 ];
 

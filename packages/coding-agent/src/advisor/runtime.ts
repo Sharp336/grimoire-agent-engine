@@ -80,6 +80,14 @@ export interface AdvisorRuntimeHost {
 	notifyQuotaExhausted?(): void;
 	/** Stable identity for the live advisor model. Used to restore full transcript rendering after a model switch. */
 	getModelIdentity?(): string;
+	/**
+	 * Whether primary thinking/reasoning blocks should be included in advisor
+	 * deltas. Defaults to true when omitted (existing advisor behavior). Set
+	 * false via `advisor.includeThinking` to hide traces. Live-read each render
+	 * so settings toggles apply without rebuilding the runtime. Refusal recovery
+	 * can still demote thinking for the current model even when this returns true.
+	 */
+	includeThinking?: () => boolean;
 }
 
 /**
@@ -245,6 +253,17 @@ interface PendingDelta {
 	turns: number;
 	/** Whether the primary was mid-turn (willContinue:true) when this delta was rendered. */
 	wip: boolean;
+	/**
+	 * Whether this delta's rendered markdown actually contained primary thinking
+	 * blocks (eligibility ∧ non-empty thinking content). Used for refusal demotion.
+	 */
+	includedThinking: boolean;
+	/**
+	 * Primary-context customTypes this format expanded (not collapsed to the
+	 * unchanged marker). Reformat of an unsent batch clears only these markers
+	 * so already-delivered plan context is not re-expanded.
+	 */
+	expandedPrimaryContextTypes: string[];
 	overflowRecovery?: boolean;
 }
 
@@ -267,6 +286,24 @@ function fingerprintMessage(message: AgentMessage): bigint | undefined {
 	} catch {
 		return undefined;
 	}
+}
+
+function messageHasThinkingContent(message: AgentMessage): boolean {
+	if (message.role !== "assistant" || !Array.isArray(message.content)) return false;
+	for (const block of message.content) {
+		if (
+			block !== null &&
+			typeof block === "object" &&
+			"type" in block &&
+			block.type === "thinking" &&
+			"thinking" in block &&
+			typeof block.thinking === "string" &&
+			block.thinking.trim().length > 0
+		) {
+			return true;
+		}
+	}
+	return false;
 }
 
 export class AdvisorRuntime {
@@ -296,7 +333,7 @@ export class AdvisorRuntime {
 	#failureNotified = false;
 	/** Consecutive quarantined turns since the last success/reset (issue #6661). */
 	#consecutiveQuarantines = 0;
-	/** Whether primary reasoning is included in advisor deltas for the current model. */
+	/** Whether primary reasoning remains eligible after refusal demotion for the current model. */
 	#includeThinking = true;
 	#modelIdentity: string | undefined;
 	/** Completed 3-failure backlog-drop cycles since the last success/reset. */
@@ -571,18 +608,27 @@ export class AdvisorRuntime {
 		const identity = this.host.getModelIdentity?.();
 		if (identity === undefined || identity === this.#modelIdentity) return;
 		this.#modelIdentity = identity;
+		// Model switch clears refusal demotion; preference still gates via host.
 		this.#includeThinking = true;
 	}
 
-	#formatRawDelta(rawMessages: AgentMessage[], wip = false): string | null {
+	#formatRawDelta(
+		rawMessages: AgentMessage[],
+		wip = false,
+	): { text: string; includedThinking: boolean; expandedPrimaryContextTypes: string[] } | null {
+		const expandedPrimaryContextTypes: string[] = [];
 		const delta = rawMessages
 			.filter(message => !(message.role === "custom" && message.customType === "advisor"))
-			.map(message => this.#dedupContextMessage(message));
+			.map(message => this.#dedupContextMessage(message, expandedPrimaryContextTypes));
 		if (delta.length === 0) return null;
 		const obfuscator = this.host.obfuscator;
+		const thinkingEligible = this.#includeThinking && (this.host.includeThinking?.() ?? true);
+		// Actual emission: eligibility alone is not enough — text-only batches must not
+		// sticky-demote the runtime when a classifier refuses for other reasons.
+		const includedThinking = thinkingEligible && delta.some(messageHasThinkingContent);
 		let md = formatSessionHistoryMarkdown(delta, {
 			...ADVISOR_RENDER_OPTIONS,
-			includeThinking: this.#includeThinking,
+			includeThinking: thinkingEligible,
 		});
 		if (!md.trim()) return null;
 		if (obfuscator?.hasSecrets()) {
@@ -617,12 +663,16 @@ export class AdvisorRuntime {
 						? obfuscateAdvisorMessage(obfuscator, message, this.#advisorRegexSecretValues)
 						: message,
 				),
-				{ ...ADVISOR_RENDER_OPTIONS, includeThinking: this.#includeThinking },
+				{ ...ADVISOR_RENDER_OPTIONS, includeThinking: thinkingEligible },
 			);
 			md = obfuscator.obfuscate(md, this.#advisorRegexSecretValues);
 		}
 		const heading = wip ? "### Session update [in progress — more steps follow]" : "### Session update";
-		return `${heading}\n\n${md}`;
+		return {
+			text: `${heading}\n\n${md}`,
+			includedThinking,
+			expandedPrimaryContextTypes,
+		};
 	}
 
 	#renderDelta(messages?: AgentMessage[], wip = false): Omit<PendingDelta, "turns" | "overflowRecovery"> | null {
@@ -658,8 +708,17 @@ export class AdvisorRuntime {
 			this.#deliveredPrefix.push({ message, fingerprint: fingerprintMessage(message) });
 		}
 		this.#lastCount = all.length;
-		const text = this.#formatRawDelta(rawMessages, wip);
-		return text ? { text, rawMessages, renderRevision: this.#renderRevision, wip } : null;
+		const formatted = this.#formatRawDelta(rawMessages, wip);
+		return formatted
+			? {
+					text: formatted.text,
+					rawMessages,
+					renderRevision: this.#renderRevision,
+					wip,
+					includedThinking: formatted.includedThinking,
+					expandedPrimaryContextTypes: formatted.expandedPrimaryContextTypes,
+				}
+			: null;
 	}
 
 	/**
@@ -670,7 +729,7 @@ export class AdvisorRuntime {
 	 * full rules (~1k tokens) each turn. Returns a CLONE when collapsing — the
 	 * input shares the live primary transcript and must never be mutated.
 	 */
-	#dedupContextMessage(msg: AgentMessage): AgentMessage {
+	#dedupContextMessage(msg: AgentMessage, expandedPrimaryContextTypes?: string[]): AgentMessage {
 		if (msg.role !== "custom") return msg;
 		// Narrowed to CustomMessage: customType and content are properly typed.
 		if (!PRIMARY_CONTEXT_CUSTOM_TYPES.has(msg.customType)) return msg;
@@ -679,7 +738,34 @@ export class AdvisorRuntime {
 			return { ...msg, content: "(unchanged — still in effect)" };
 		}
 		this.#seenContext.set(msg.customType, msg.content);
+		expandedPrimaryContextTypes?.push(msg.customType);
 		return msg;
+	}
+
+	/**
+	 * Re-render an unsent raw batch under the current thinking preference.
+	 * Clears only primary-context markers this batch previously expanded (not
+	 * markers from already-delivered turns), so a second format still expands
+	 * first-delivery plan bodies without re-bloating unchanged delivered context.
+	 * Restores those markers if the re-render empties.
+	 */
+	#reformatUnsentDelta(
+		rawMessages: AgentMessage[],
+		wip: boolean,
+		expandedPrimaryContextTypes: readonly string[] = [],
+	): { text: string; includedThinking: boolean; expandedPrimaryContextTypes: string[] } | null {
+		const saved = new Map<string, string>();
+		for (const customType of expandedPrimaryContextTypes) {
+			if (!this.#seenContext.has(customType) || saved.has(customType)) continue;
+			saved.set(customType, this.#seenContext.get(customType)!);
+			this.#seenContext.delete(customType);
+		}
+		const formatted = this.#formatRawDelta(rawMessages, wip);
+		if (!formatted) {
+			for (const [key, value] of saved) this.#seenContext.set(key, value);
+			return null;
+		}
+		return formatted;
 	}
 
 	#notifyWaiters(): void {
@@ -750,6 +836,8 @@ export class AdvisorRuntime {
 		finalTurns: number;
 		wip: boolean;
 		resetContext: boolean;
+		includedThinking: boolean;
+		expandedPrimaryContextTypes: string[];
 	} | null> {
 		let batchText = initial.map(b => b.text).join("\n\n");
 		let rawMessages = initial.flatMap(b => b.rawMessages);
@@ -758,6 +846,8 @@ export class AdvisorRuntime {
 		// so a willContinue:true turn keeps its [in progress] heading. Also
 		// returned to #drain so the retry-requeue path preserves it on failed turns.
 		let wip = initial.at(-1)?.wip ?? false;
+		let includedThinking = initial.some(b => b.includedThinking);
+		let expandedPrimaryContextTypes = initial.flatMap(b => b.expandedPrimaryContextTypes);
 
 		for (let round = 0; round < MAX_COALESCE_ROUNDS; round++) {
 			if (this.#sessionTransitionPaused) break;
@@ -787,6 +877,10 @@ export class AdvisorRuntime {
 						if (lateItems.length > 0) {
 							wip = lateItems.at(-1)!.wip;
 							rawMessages = rawMessages.concat(lateItems.flatMap(b => b.rawMessages));
+							includedThinking = includedThinking || lateItems.some(b => b.includedThinking);
+							expandedPrimaryContextTypes = expandedPrimaryContextTypes.concat(
+								lateItems.flatMap(b => b.expandedPrimaryContextTypes),
+							);
 						}
 					}
 					// Reset only the advisor Agent/log. The primary cursor, backlog,
@@ -795,12 +889,16 @@ export class AdvisorRuntime {
 					// restored without replaying any older primary transcript.
 					this.#clearAdvisorContextAtCurrentCursor();
 					const rerendered = this.#formatRawDelta(rawMessages, wip);
+					// Preference/filter can empty a thinking-only batch. Never fall back
+					// to the pre-rerender text — that would re-leak stripped reasoning.
 					return {
-						batch: rerendered ?? (batchText || null),
+						batch: rerendered?.text ?? null,
 						rawMessages,
 						finalTurns: turns,
 						wip,
 						resetContext: true,
+						includedThinking: rerendered?.includedThinking ?? false,
+						expandedPrimaryContextTypes: rerendered?.expandedPrimaryContextTypes ?? [],
 					};
 				}
 			}
@@ -824,13 +922,51 @@ export class AdvisorRuntime {
 			rawMessages = rawMessages.concat(late.flatMap(b => b.rawMessages));
 			turns += late.reduce((sum, b) => sum + b.turns, 0);
 			wip = late.at(-1)!.wip;
+			includedThinking = includedThinking || late.some(b => b.includedThinking);
+			expandedPrimaryContextTypes = expandedPrimaryContextTypes.concat(
+				late.flatMap(b => b.expandedPrimaryContextTypes),
+			);
 		}
 
+		// Reformat only when actual thinking emission disagrees with current
+		// eligibility (e.g. preference flipped true→false while maintain awaited).
+		// Format at most once here; clear only markers this unsent batch expanded.
+		const preferThinking = this.#includeThinking && (this.host.includeThinking?.() ?? true);
+		const rawHasThinking = rawMessages.some(messageHasThinkingContent);
+		const wantThinking = preferThinking && rawHasThinking;
+		let batch = batchText;
+		let batchIncludedThinking = includedThinking;
+		let batchExpandedTypes = expandedPrimaryContextTypes;
+		if (includedThinking !== wantThinking) {
+			const reformatted = this.#reformatUnsentDelta(rawMessages, wip, expandedPrimaryContextTypes);
+			if (!reformatted) {
+				return {
+					batch: null,
+					rawMessages,
+					finalTurns: turns,
+					wip,
+					resetContext: false,
+					includedThinking: false,
+					expandedPrimaryContextTypes: [],
+				};
+			}
+			batch = reformatted.text;
+			batchIncludedThinking = reformatted.includedThinking;
+			batchExpandedTypes = reformatted.expandedPrimaryContextTypes;
+		}
 		const batchObfuscator = this.host.obfuscator;
 		if (batchObfuscator?.hasSecrets()) {
-			batchText = batchObfuscator.stripUnsafeFriendlyPlaceholderPrefixes(batchText, this.#advisorRegexSecretValues);
+			batch = batchObfuscator.stripUnsafeFriendlyPlaceholderPrefixes(batch, this.#advisorRegexSecretValues);
 		}
-		return { batch: batchText || null, rawMessages, finalTurns: turns, wip, resetContext: false };
+		return {
+			batch: batch || null,
+			rawMessages,
+			finalTurns: turns,
+			wip,
+			resetContext: false,
+			includedThinking: batchIncludedThinking,
+			expandedPrimaryContextTypes: batchExpandedTypes,
+		};
 	}
 
 	#terminalAssistantFailure(snapshot: number): AssistantMessage | undefined {
@@ -870,11 +1006,33 @@ export class AdvisorRuntime {
 				const iterationAbort = new AbortController();
 				this.#iterationAbort = iterationAbort;
 				const epoch = this.#epoch;
+				const kept: PendingDelta[] = [];
 				for (const delta of popped) {
-					if (delta.renderRevision === this.#renderRevision) continue;
-					const refreshed = this.#formatRawDelta(delta.rawMessages, delta.wip);
-					if (refreshed) delta.text = refreshed;
+					if (delta.renderRevision === this.#renderRevision) {
+						kept.push(delta);
+						continue;
+					}
+					const refreshed = this.#reformatUnsentDelta(
+						delta.rawMessages,
+						delta.wip,
+						delta.expandedPrimaryContextTypes,
+					);
+					if (!refreshed) {
+						// Filtered empty under current preference/demotion — consume turns
+						// without replaying the previous reasoning-bearing text.
+						this.#backlog = Math.max(0, this.#backlog - delta.turns);
+						continue;
+					}
+					delta.text = refreshed.text;
+					delta.includedThinking = refreshed.includedThinking;
+					delta.expandedPrimaryContextTypes = refreshed.expandedPrimaryContextTypes;
 					delta.renderRevision = this.#renderRevision;
+					kept.push(delta);
+				}
+				popped = kept;
+				if (popped.length === 0) {
+					this.#notifyWaiters();
+					continue;
 				}
 				const recoveringOverflow = popped.some(delta => delta.overflowRecovery === true);
 				const result = await this.#collectAndMaintainBatch(
@@ -891,7 +1049,8 @@ export class AdvisorRuntime {
 					continue;
 				}
 
-				const { batch, rawMessages, finalTurns, wip, resetContext } = result;
+				const { batch, rawMessages, finalTurns, wip, resetContext, includedThinking, expandedPrimaryContextTypes } =
+					result;
 
 				if (this.disposed || batch === null) {
 					this.#backlog = Math.max(0, this.#backlog - finalTurns);
@@ -979,16 +1138,21 @@ export class AdvisorRuntime {
 					this.#rollbackFailedTurn(messageSnapshot);
 					logger.debug("advisor turn failed", { err: String(err) });
 					if (classifierRefusal) {
-						if (this.#includeThinking) {
+						// Demote only when the failed batch actually rendered thinking.
+						// Preference-off refusals must not sticky-demote #includeThinking
+						// or a later false→true setting flip cannot restore traces.
+						if (includedThinking) {
 							this.#includeThinking = false;
-							const strippedBatch = this.#formatRawDelta(rawMessages, wip);
+							const strippedBatch = this.#reformatUnsentDelta(rawMessages, wip, expandedPrimaryContextTypes);
 							if (strippedBatch) {
 								this.#pending.unshift({
-									text: strippedBatch,
+									text: strippedBatch.text,
 									rawMessages,
 									renderRevision: this.#renderRevision,
 									turns: finalTurns,
 									wip,
+									includedThinking: strippedBatch.includedThinking,
+									expandedPrimaryContextTypes: strippedBatch.expandedPrimaryContextTypes,
 									overflowRecovery: recoveringOverflow || undefined,
 								});
 								logger.debug("advisor refusal recovered by stripping primary reasoning");
@@ -1047,6 +1211,8 @@ export class AdvisorRuntime {
 							renderRevision: this.#renderRevision,
 							turns: finalTurns,
 							wip,
+							includedThinking,
+							expandedPrimaryContextTypes,
 							overflowRecovery: recoveringOverflow || undefined,
 						});
 						continue;
@@ -1067,6 +1233,8 @@ export class AdvisorRuntime {
 							renderRevision: this.#renderRevision,
 							turns: finalTurns,
 							wip,
+							includedThinking,
+							expandedPrimaryContextTypes,
 							overflowRecovery: recoveringOverflow || undefined,
 						});
 						this.#wakeAllWaiters();
@@ -1098,16 +1266,25 @@ export class AdvisorRuntime {
 						} else {
 							// Retry once against the fresh advisor context, using only the same
 							// bounded raw batch. Pending updates remain queued behind it.
-							const recoveryBatch = this.#formatRawDelta(rawMessages, wip) ?? batch;
-							this.#pending.unshift({
-								text: recoveryBatch,
-								rawMessages,
-								renderRevision: this.#renderRevision,
-								turns: finalTurns,
-								wip,
-								overflowRecovery: true,
-							});
-							logger.debug("advisor context overflow recovered at current primary cursor");
+							const recovery = this.#formatRawDelta(rawMessages, wip);
+							if (!recovery) {
+								// Preference/filter emptied the batch — drop rather than
+								// re-send the pre-overflow reasoning-bearing text.
+								logger.debug("advisor overflow recovery dropped empty re-render");
+								success = true;
+							} else {
+								this.#pending.unshift({
+									text: recovery.text,
+									rawMessages,
+									renderRevision: this.#renderRevision,
+									turns: finalTurns,
+									wip,
+									includedThinking: recovery.includedThinking,
+									expandedPrimaryContextTypes: recovery.expandedPrimaryContextTypes,
+									overflowRecovery: true,
+								});
+								logger.debug("advisor context overflow recovered at current primary cursor");
+							}
 						}
 					} else {
 						this.#consecutiveFailures++;
@@ -1127,6 +1304,8 @@ export class AdvisorRuntime {
 								renderRevision: this.#renderRevision,
 								turns: finalTurns,
 								wip,
+								includedThinking,
+								expandedPrimaryContextTypes,
 								overflowRecovery: recoveringOverflow || undefined,
 							});
 							if (this.retryDelayMs <= 0) {

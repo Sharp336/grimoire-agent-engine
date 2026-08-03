@@ -510,6 +510,18 @@ export const SETTINGS_SCHEMA = {
 			condition: "advisorEnabled",
 		},
 	},
+	"advisor.includeThinking": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Include Thinking Traces",
+			description:
+				"When on, advisor deltas include the primary assistant's thinking/reasoning blocks. Turn off to hide those traces from the advisor (context only; does not disable model thinking).",
+			condition: "advisorEnabled",
+		},
+	},
 	shellPath: { type: "string", default: undefined },
 	"git.enabled": {
 		type: "boolean",
