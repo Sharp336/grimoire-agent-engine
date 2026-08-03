@@ -100,7 +100,7 @@ import {
 import { type AdvisorConfig, type AdvisorRuntimeStatus, loadAdvisorTranscriptCosts } from "../advisor";
 import { type AsyncJob, AsyncJobManager } from "../async";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
-import type { ModelRegistry } from "../config/model-registry";
+import type { FallbackProbeLease, ModelRegistry } from "../config/model-registry";
 import { type ResolvedModelRoleValue, resolveModelOverride } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily } from "../config/service-tier";
@@ -3555,6 +3555,7 @@ export class AgentSession {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
+		this.#recovery.abandonActiveRetryFallbackProbe();
 		this.#memory.cancelLocalMemoryStartup();
 		this.#titleGenerationAbortController.abort();
 		this.#abortAutolearnCapture();
@@ -3858,7 +3859,7 @@ export class AgentSession {
 
 		const role = this.#recovery.resolveRetryFallbackRole(currentSelector, currentModel);
 		if (!role) return;
-		let fallback: { selector: RetryFallbackSelector; apiKey: string } | undefined;
+		let fallback: { selector: RetryFallbackSelector; apiKey: string; probeLease?: FallbackProbeLease } | undefined;
 		for (const candidate of this.#recovery.findRetryFallbackCandidates(role, currentSelector, currentModel)) {
 			if (this.#recovery.isRetryFallbackSelectorSuppressed(candidate)) continue;
 			const resolved = resolveModelOverride([candidate.raw], this.#modelRegistry, this.settings);
@@ -3902,49 +3903,63 @@ export class AgentSession {
 			}
 			if (signal.aborted) return;
 			if (!apiKey) continue;
-			fallback = { selector: candidate, apiKey };
+			const admission = this.#modelRegistry.admitFallbackProbe(candidate.raw);
+			if (admission.status === "busy") continue;
+			fallback = {
+				selector: candidate,
+				apiKey,
+				probeLease: admission.status === "probe" ? admission.lease : undefined,
+			};
 			break;
 		}
 		if (!fallback) return;
 
-		if (health.state === "reserve") {
-			if (reservePolicy === "confirm" && this.#usageFallbackConfirmer) {
-				if (this.#usageReserveApprovedSelector === currentSelector) return;
-				const selected = health.accounts.find(account => account.selected);
-				const remainingFraction =
-					selected?.remainingFraction ??
-					health.accounts.reduce<number | undefined>(
-						(minimum, account) =>
-							account.remainingFraction === undefined
-								? minimum
-								: minimum === undefined
-									? account.remainingFraction
-									: Math.min(minimum, account.remainingFraction),
-						undefined,
+		let transferred = false;
+		try {
+			if (health.state === "reserve") {
+				if (reservePolicy === "confirm" && this.#usageFallbackConfirmer) {
+					if (this.#usageReserveApprovedSelector === currentSelector) return;
+					const selected = health.accounts.find(account => account.selected);
+					const remainingFraction =
+						selected?.remainingFraction ??
+						health.accounts.reduce<number | undefined>(
+							(minimum, account) =>
+								account.remainingFraction === undefined
+									? minimum
+									: minimum === undefined
+										? account.remainingFraction
+										: Math.min(minimum, account.remainingFraction),
+							undefined,
+						);
+					const shouldFallback = await this.#confirmUsageFallback(
+						{
+							from: currentSelector,
+							to: fallback.selector.raw,
+							remainingPercent:
+								remainingFraction === undefined ? undefined : Math.max(0, remainingFraction * 100),
+						},
+						signal,
 					);
-				const shouldFallback = await this.#confirmUsageFallback(
-					{
-						from: currentSelector,
-						to: fallback.selector.raw,
-						remainingPercent: remainingFraction === undefined ? undefined : Math.max(0, remainingFraction * 100),
-					},
-					signal,
-				);
-				if (signal.aborted) return;
-				if (!shouldFallback) {
-					this.#usageReserveApprovedSelector = currentSelector;
-					return;
+					if (signal.aborted) return;
+					if (!shouldFallback) {
+						this.#usageReserveApprovedSelector = currentSelector;
+						return;
+					}
 				}
 			}
-		}
 
-		if (signal.aborted) return;
-		this.#usageReserveApprovedSelector = undefined;
-		await this.#recovery.applyRetryFallbackCandidate(role, fallback.selector, currentSelector, {
-			pinFallback: true,
-			apiKey: fallback.apiKey,
-			signal,
-		});
+			if (signal.aborted) return;
+			this.#usageReserveApprovedSelector = undefined;
+			await this.#recovery.applyRetryFallbackCandidate(role, fallback.selector, currentSelector, {
+				pinFallback: true,
+				apiKey: fallback.apiKey,
+				signal,
+				probeLease: fallback.probeLease,
+			});
+			transferred = true;
+		} finally {
+			if (fallback.probeLease && !transferred) this.#modelRegistry.abandonFallbackProbe(fallback.probeLease);
+		}
 	}
 
 	/** Effective thinking level applied to the agent (the resolved level when `auto`). */
@@ -6064,6 +6079,7 @@ export class AgentSession {
 		this.#abortInProgress = true;
 		try {
 			this.#abortAutolearnCapture();
+			this.#recovery.abandonActiveRetryFallbackProbe();
 			for (const controller of this.#usagePreflightAbortControllers) controller.abort();
 			this.abortRetry();
 			this.#promptGeneration++;

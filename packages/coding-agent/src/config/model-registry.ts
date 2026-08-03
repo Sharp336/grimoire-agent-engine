@@ -742,6 +742,18 @@ function normalizeSuppressedSelector(
 	return `${parsed.provider}/${aliasId ?? parsed.id}`;
 }
 
+/** Ownership token for the first automatic request sent to an untested fallback selector. */
+export interface FallbackProbeLease {
+	readonly selector: string;
+	readonly generation: number;
+}
+
+/** Non-waiting admission result for an automatic fallback selector. */
+export type FallbackProbeAdmission =
+	| { status: "probe"; lease: FallbackProbeLease }
+	| { status: "healthy" }
+	| { status: "busy" };
+
 /**
  * Look up a model's override, falling back to entries keyed by retired
  * effort-tier variant ids (models.yml authored before collapsing). A raw key
@@ -812,6 +824,8 @@ export class ModelRegistry {
 	#providerDiscoveryStates: Map<string, ProviderDiscoveryState> = new Map();
 	#cacheDbPath?: string;
 	#suppressedSelectors: Map<string, number> = new Map();
+	#fallbackProbeStates: Map<string, { state: "probing"; generation: number } | { state: "healthy" }> = new Map();
+	#nextFallbackProbeGeneration = 0;
 	#backgroundRefresh?: Promise<void>;
 	#lastDiscoveryWarnings: Map<string, string> = new Map();
 	// Runtime extension model overlays — persist across refresh() cycles so that
@@ -903,6 +917,7 @@ export class ModelRegistry {
 	async refresh(strategy: ModelRefreshStrategy = "online-if-uncached"): Promise<void> {
 		this.#reloadStaticModels();
 		this.#suppressedSelectors.clear();
+		this.#fallbackProbeStates.clear();
 		await this.#refreshRuntimeDiscoveries(strategy);
 	}
 
@@ -952,6 +967,9 @@ export class ModelRegistry {
 			if (selector.startsWith(`${providerId}/`)) {
 				this.#suppressedSelectors.delete(selector);
 			}
+		}
+		for (const selector of this.#fallbackProbeStates.keys()) {
+			if (selector.startsWith(`${providerId}/`)) this.#fallbackProbeStates.delete(selector);
 		}
 		await this.#refreshRuntimeDiscoveries(strategy, new Set([providerId]));
 		// #reloadStaticModels above may have rebuilt #models from static sources,
@@ -2720,24 +2738,63 @@ export class ModelRegistry {
 		}
 	}
 
+	#normalizeFallbackSelector(selector: string): string {
+		return normalizeSuppressedSelector(selector, (provider, id) => this.find(provider, id) !== undefined);
+	}
+
+	/**
+	 * Admit automatic traffic to a fallback selector without waiting.
+	 *
+	 * The first caller owns a probe. Concurrent callers skip the selector until
+	 * that probe succeeds or is abandoned. Once healthy, normal parallel traffic
+	 * resumes. Primary model traffic never calls this method.
+	 */
+	admitFallbackProbe(selector: string): FallbackProbeAdmission {
+		const normalizedSelector = this.#normalizeFallbackSelector(selector);
+		const state = this.#fallbackProbeStates.get(normalizedSelector);
+		if (state?.state === "healthy") return { status: "healthy" };
+		if (state?.state === "probing") return { status: "busy" };
+
+		const generation = ++this.#nextFallbackProbeGeneration;
+		this.#fallbackProbeStates.set(normalizedSelector, { state: "probing", generation });
+		return { status: "probe", lease: { selector: normalizedSelector, generation } };
+	}
+
+	/** Mark the owned probe healthy. Stale leases cannot change newer state. */
+	markFallbackProbeHealthy(lease: FallbackProbeLease): void {
+		const state = this.#fallbackProbeStates.get(lease.selector);
+		if (state?.state !== "probing" || state.generation !== lease.generation) return;
+		this.#fallbackProbeStates.set(lease.selector, { state: "healthy" });
+	}
+
+	/** Release an unfinished probe. Stale leases cannot release a newer owner. */
+	abandonFallbackProbe(lease: FallbackProbeLease): void {
+		const state = this.#fallbackProbeStates.get(lease.selector);
+		if (state?.state !== "probing" || state.generation !== lease.generation) return;
+		this.#fallbackProbeStates.delete(lease.selector);
+	}
+
+	/** Release a probe only when the failing selector is the selector that lease owns. */
+	abandonFallbackProbeForSelector(lease: FallbackProbeLease, selector: string): boolean {
+		if (lease.selector !== this.#normalizeFallbackSelector(selector)) return false;
+		const state = this.#fallbackProbeStates.get(lease.selector);
+		if (state?.state !== "probing" || state.generation !== lease.generation) return false;
+		this.#fallbackProbeStates.delete(lease.selector);
+		return true;
+	}
+
 	/**
 	 * Suppress a specific model selector (e.g., "provider/id") until a specific timestamp.
 	 */
 	suppressSelector(selector: string, untilMs: number): void {
-		this.#suppressedSelectors.set(
-			normalizeSuppressedSelector(selector, (provider, id) => this.find(provider, id) !== undefined),
-			untilMs,
-		);
+		this.#suppressedSelectors.set(this.#normalizeFallbackSelector(selector), untilMs);
 	}
 
 	/**
 	 * Check if a model selector is currently suppressed due to rate limits.
 	 */
 	isSelectorSuppressed(selector: string): boolean {
-		const normalizedSelector = normalizeSuppressedSelector(
-			selector,
-			(provider, id) => this.find(provider, id) !== undefined,
-		);
+		const normalizedSelector = this.#normalizeFallbackSelector(selector);
 		const suppressedUntil = this.#suppressedSelectors.get(normalizedSelector);
 		if (!suppressedUntil) return false;
 		if (suppressedUntil <= Date.now()) {
@@ -2751,9 +2808,7 @@ export class ModelRegistry {
 	 * Clear the cooldown suppression for one selector after an explicit user selection.
 	 */
 	clearSuppressedSelector(selector: string): void {
-		this.#suppressedSelectors.delete(
-			normalizeSuppressedSelector(selector, (provider, id) => this.find(provider, id) !== undefined),
-		);
+		this.#suppressedSelectors.delete(this.#normalizeFallbackSelector(selector));
 	}
 
 	/**
@@ -2762,6 +2817,11 @@ export class ModelRegistry {
 	 */
 	clearSuppressedSelectors(): void {
 		this.#suppressedSelectors.clear();
+	}
+
+	/** Reset automatic fallback health and probe state without reloading models. */
+	clearFallbackProbeStates(): void {
+		this.#fallbackProbeStates.clear();
 	}
 }
 
