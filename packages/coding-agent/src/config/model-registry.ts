@@ -2743,7 +2743,17 @@ export class ModelRegistry {
 	}
 
 	#normalizeFallbackSelector(selector: string): string {
-		return normalizeSuppressedSelector(selector, (provider, id) => this.find(provider, id) !== undefined);
+		const normalized = normalizeSuppressedSelector(selector, (provider, id) => this.find(provider, id) !== undefined);
+		const parsed = parseModelString(normalized, {
+			allowMaxSuffix: true,
+			allowAutoAlias: true,
+			isLiteralModelId: (provider, id) => this.find(provider, id) !== undefined,
+		});
+		if (!parsed) return normalized;
+		const model = this.find(parsed.provider, parsed.id);
+		if (!model) return normalized;
+		const aliasId = resolveVariantAlias(model.provider, model.id);
+		return `${model.provider}/${aliasId ?? model.id}`;
 	}
 
 	/**
@@ -2798,7 +2808,9 @@ export class ModelRegistry {
 	suppressSelector(selector: string, untilMs: number): void {
 		const normalizedSelector = this.#normalizeFallbackSelector(selector);
 		this.#suppressedSelectors.set(normalizedSelector, untilMs);
-		this.#fallbackProbeStates.delete(normalizedSelector);
+		if (this.#fallbackProbeStates.get(normalizedSelector)?.state === "healthy") {
+			this.#fallbackProbeStates.delete(normalizedSelector);
+		}
 	}
 
 	/**

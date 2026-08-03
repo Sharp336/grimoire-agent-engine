@@ -1275,11 +1275,13 @@ describe("AgentSession TTSR resume gate", () => {
 		});
 	}
 
-	it("prompt() blocks until TTSR interrupt continuation completes", async () => {
+	it("preserves a fallback probe until the TTSR interrupt continuation completes", async () => {
 		collapseSchedulerSettleDelays();
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		let streamCallCount = 0;
 		let continuationCompleted = false;
+		let continuationAdmission: string | undefined;
+		let modelRegistry: ModelRegistry;
 
 		const ttsrManager = new TtsrManager({
 			enabled: true,
@@ -1303,6 +1305,7 @@ describe("AgentSession TTSR resume gate", () => {
 					pushAbortableTtsrStream(stream, signal);
 				} else {
 					// Continuation stream: complete normally after a delay
+					continuationAdmission = modelRegistry.admitFallbackProbe(`${model.provider}/${model.id}`).status;
 					pushContinuationStream(stream, () => {
 						continuationCompleted = true;
 					});
@@ -1316,8 +1319,10 @@ describe("AgentSession TTSR resume gate", () => {
 		const settings = Settings.isolated();
 		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth-int.db"));
 		authStorages.push(authStorage);
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const probeAdmission = modelRegistry.admitFallbackProbe(`${model.provider}/${model.id}`);
+		if (probeAdmission.status !== "probe") throw new Error("Expected TTSR session to own the fallback probe");
 
 		session = new AgentSession({
 			agent,
@@ -1325,6 +1330,12 @@ describe("AgentSession TTSR resume gate", () => {
 			settings,
 			modelRegistry,
 			ttsrManager,
+			initialRetryFallback: {
+				role: "ttsr-test",
+				originalSelector: "missing-provider/missing-model",
+				originalThinkingLevel: undefined,
+				probeLease: probeAdmission.lease,
+			},
 		});
 
 		// prompt() must block until the TTSR continuation completes
@@ -1332,6 +1343,8 @@ describe("AgentSession TTSR resume gate", () => {
 
 		// By the time prompt() returns, the continuation must have finished
 		expect(continuationCompleted).toBe(true);
+		expect(continuationAdmission).toBe("busy");
+		expect(modelRegistry.admitFallbackProbe(`${model.provider}/${model.id}`)).toEqual({ status: "healthy" });
 		expect(streamCallCount).toBeGreaterThanOrEqual(2);
 		expect(session.isStreaming).toBe(false);
 	});

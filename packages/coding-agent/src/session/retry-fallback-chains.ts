@@ -50,6 +50,8 @@ export interface ActiveRetryFallbackState {
 	originalThinkingLevel: ConfiguredThinkingLevel | undefined;
 	lastAppliedFallbackThinkingLevel: ConfiguredThinkingLevel | undefined;
 	pinned: boolean;
+	/** The current fallback model must pass admission before its next prompt. */
+	pendingAdmission?: boolean;
 	/** Present only while this session owns the selector's first live probe. */
 	probeLease?: FallbackProbeLease;
 }

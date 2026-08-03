@@ -357,4 +357,113 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		expect(modelChanges).toBe(0);
 		expect(modelRegistry.admitFallbackProbe(fallbackSelector).status).toBe("probe");
 	});
+
+	it("releases the probe when disposal finishes during the model switch", async () => {
+		const fallback = getBundledModel("openai", "gpt-4o-mini");
+		if (!fallback) throw new Error("Expected bundled fallback model gpt-4o-mini");
+		const currentSelector = `${model.provider}/${model.id}`;
+		const fallbackSelector = `${fallback.provider}/${fallback.id}`;
+		const host = createHost(model, modelRegistry, { [currentSelector]: [fallbackSelector] });
+		let disposed = false;
+		host.isDisposed = () => disposed;
+		const switchStarted = Promise.withResolvers<void>();
+		const releaseSwitch = Promise.withResolvers<void>();
+		host.setModelWithProviderSessionReset = async () => {
+			switchStarted.resolve();
+			await releaseSwitch.promise;
+		};
+		const emitSessionEvent = vi.fn(async () => {});
+		host.emitSessionEvent = emitSessionEvent;
+		const recovery = new TurnRecovery(host);
+		const selector = recovery.findRetryFallbackCandidates(currentSelector, currentSelector).at(0);
+		if (!selector) throw new Error("Expected configured fallback candidate");
+		const admission = modelRegistry.admitFallbackProbe(fallbackSelector);
+		if (admission.status !== "probe") throw new Error("Expected recovery to own the fallback probe");
+
+		const applied = recovery.applyRetryFallbackCandidate(currentSelector, selector, currentSelector, {
+			apiKey: "test-key",
+			probeLease: admission.lease,
+		});
+		await switchStarted.promise;
+		disposed = true;
+		releaseSwitch.resolve();
+
+		expect(await applied).toBe(false);
+		expect(emitSessionEvent).not.toHaveBeenCalled();
+		expect(modelRegistry.admitFallbackProbe(fallbackSelector).status).toBe("probe");
+	});
+
+	it("re-admits pending fallback state before a later fresh prompt", async () => {
+		const fallback = getBundledModel("openai", "gpt-4o-mini");
+		if (!fallback) throw new Error("Expected bundled fallback model gpt-4o-mini");
+		const currentSelector = `${model.provider}/${model.id}`;
+		const fallbackSelector = `${fallback.provider}/${fallback.id}`;
+		const host = createHost(model, modelRegistry, { [currentSelector]: [fallbackSelector] });
+		let generation = 0;
+		let activeModel = model;
+		host.promptGeneration = () => generation;
+		host.model = () => activeModel;
+		const switchStarted = Promise.withResolvers<void>();
+		const releaseSwitch = Promise.withResolvers<void>();
+		host.setModelWithProviderSessionReset = async candidate => {
+			switchStarted.resolve();
+			await releaseSwitch.promise;
+			activeModel = candidate;
+		};
+		host.agent = {
+			prompt: vi.fn(async () => {
+				expect(modelRegistry.admitFallbackProbe(fallbackSelector)).toEqual({ status: "busy" });
+			}),
+		} as never;
+		const recovery = new TurnRecovery(host);
+		const selector = recovery.findRetryFallbackCandidates(currentSelector, currentSelector).at(0);
+		if (!selector) throw new Error("Expected configured fallback candidate");
+		const admission = modelRegistry.admitFallbackProbe(fallbackSelector);
+		if (admission.status !== "probe") throw new Error("Expected recovery to own the fallback probe");
+
+		const applied = recovery.applyRetryFallbackCandidate(currentSelector, selector, currentSelector, {
+			apiKey: "test-key",
+			probeLease: admission.lease,
+		});
+		await switchStarted.promise;
+		generation += 1;
+		releaseSwitch.resolve();
+
+		expect(await applied).toBe(false);
+		await recovery.promptAgentWithIdleRetry([]);
+	});
+
+	it("re-admits the fallback before a later prompt after the applied event fails", async () => {
+		const fallback = getBundledModel("openai", "gpt-4o-mini");
+		if (!fallback) throw new Error("Expected bundled fallback model gpt-4o-mini");
+		const currentSelector = `${model.provider}/${model.id}`;
+		const fallbackSelector = `${fallback.provider}/${fallback.id}`;
+		const host = createHost(model, modelRegistry, { [currentSelector]: [fallbackSelector] });
+		let activeModel = model;
+		host.model = () => activeModel;
+		host.setModelWithProviderSessionReset = async candidate => {
+			activeModel = candidate;
+		};
+		host.emitSessionEvent = async () => {
+			throw new Error("event delivery failed");
+		};
+		host.agent = {
+			prompt: vi.fn(async () => {
+				expect(modelRegistry.admitFallbackProbe(fallbackSelector)).toEqual({ status: "busy" });
+			}),
+		} as never;
+		const recovery = new TurnRecovery(host);
+		const selector = recovery.findRetryFallbackCandidates(currentSelector, currentSelector).at(0);
+		if (!selector) throw new Error("Expected configured fallback candidate");
+		const admission = modelRegistry.admitFallbackProbe(fallbackSelector);
+		if (admission.status !== "probe") throw new Error("Expected recovery to own the fallback probe");
+
+		expect(
+			recovery.applyRetryFallbackCandidate(currentSelector, selector, currentSelector, {
+				apiKey: "test-key",
+				probeLease: admission.lease,
+			}),
+		).rejects.toThrow("event delivery failed");
+		await recovery.promptAgentWithIdleRetry([]);
+	});
 });

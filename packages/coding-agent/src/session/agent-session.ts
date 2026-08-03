@@ -2743,7 +2743,7 @@ export class AgentSession {
 			// continuations — except TTSR self-repair, which already scheduled a
 			// hidden retry while #ttsrAbortPending is still true.
 			if (msg.stopReason === "aborted") {
-				this.#recovery.onAbortSettledWithoutRetry(msg);
+				if (!ttsrAbortPendingAtAgentEnd) this.#recovery.onAbortSettledWithoutRetry(msg);
 				this.#recovery.resolveRetry();
 				this.#resetSessionStopContinuationState();
 				await emitAgentEndNotification(ttsrAbortPendingAtAgentEnd ? { willContinue: true } : undefined);
@@ -3941,13 +3941,14 @@ export class AgentSession {
 			let transferred = false;
 			try {
 				this.#usageReserveApprovedSelector = undefined;
-				await this.#recovery.applyRetryFallbackCandidate(role, candidate, currentSelector, {
+				const applied = await this.#recovery.applyRetryFallbackCandidate(role, candidate, currentSelector, {
 					pinFallback: true,
 					apiKey,
 					signal,
 					probeLease,
 				});
-				transferred = true;
+				transferred = applied;
+				if (!applied) return;
 				return;
 			} finally {
 				if (probeLease && !transferred) this.#modelRegistry.abandonFallbackProbe(probeLease);

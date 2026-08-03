@@ -1104,7 +1104,9 @@ export class TurnRecovery {
 		selector: RetryFallbackSelector,
 		currentSelector: string,
 		options?: { pinFallback?: boolean; apiKey?: string; signal?: AbortSignal; probeLease?: FallbackProbeLease },
-	): Promise<void> {
+	): Promise<boolean> {
+		const generation = this.#host.promptGeneration();
+		const probeLease = options?.probeLease;
 		const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 		const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 		if (!candidate) {
@@ -1115,7 +1117,10 @@ export class TurnRecovery {
 		if (!apiKey) {
 			throw new Error(`No API key for retry fallback ${selector.raw}`);
 		}
-		if (options?.signal?.aborted) return;
+		if (this.#retryFallbackApplicationCancelled(options?.signal, generation)) {
+			if (probeLease) this.#host.modelRegistry.abandonFallbackProbe(probeLease);
+			return false;
+		}
 
 		// Capture the configured selector (auto-aware) so a fallback chain preserves
 		// `auto` instead of collapsing it to the level it resolved to this turn.
@@ -1133,6 +1138,8 @@ export class TurnRecovery {
 		this.#host.sessionManager.appendModelChange(candidateSelector, EPHEMERAL_MODEL_CHANGE_ROLE);
 		this.#host.settings.getStorage()?.recordModelUsage(candidateSelector);
 		this.#host.setThinkingLevel(nextThinkingLevel);
+		const cancelledAfterSwitch = this.#retryFallbackApplicationCancelled(options?.signal, generation);
+		if (cancelledAfterSwitch && probeLease) this.#host.modelRegistry.abandonFallbackProbe(probeLease);
 		if (!this.#activeRetryFallback) {
 			this.#activeRetryFallback = {
 				role,
@@ -1140,20 +1147,45 @@ export class TurnRecovery {
 				originalThinkingLevel: currentThinkingLevel,
 				lastAppliedFallbackThinkingLevel: nextThinkingLevel,
 				pinned: options?.pinFallback === true,
-				probeLease: options?.probeLease,
+				pendingAdmission: cancelledAfterSwitch,
+				probeLease: cancelledAfterSwitch ? undefined : probeLease,
 			};
 		} else {
 			this.abandonActiveRetryFallbackProbe();
 			this.#activeRetryFallback.lastAppliedFallbackThinkingLevel = nextThinkingLevel;
 			this.#activeRetryFallback.pinned = this.#activeRetryFallback.pinned || options?.pinFallback === true;
-			this.#activeRetryFallback.probeLease = options?.probeLease;
+			this.#activeRetryFallback.pendingAdmission = cancelledAfterSwitch;
+			this.#activeRetryFallback.probeLease = cancelledAfterSwitch ? undefined : probeLease;
 		}
-		await this.#host.emitSessionEvent({
-			type: "retry_fallback_applied",
-			from: currentSelector,
-			to: selector.raw,
-			role,
-		});
+		if (cancelledAfterSwitch) return false;
+		try {
+			await this.#host.emitSessionEvent({
+				type: "retry_fallback_applied",
+				from: currentSelector,
+				to: selector.raw,
+				role,
+			});
+		} catch (error) {
+			if (probeLease) {
+				const fallback = this.#activeRetryFallback;
+				const activeLease = fallback?.probeLease;
+				const ownsExactLease =
+					activeLease?.selector === probeLease.selector && activeLease.generation === probeLease.generation;
+				this.#abandonRetryFallbackProbe(probeLease);
+				if (fallback && ownsExactLease) fallback.pendingAdmission = true;
+			}
+			throw error;
+		}
+		return true;
+	}
+
+	#retryFallbackApplicationCancelled(signal: AbortSignal | undefined, generation: number): boolean {
+		return (
+			signal?.aborted === true ||
+			this.#host.isDisposed() ||
+			this.#host.abortInProgress() ||
+			this.#host.promptGeneration() !== generation
+		);
 	}
 
 	async #tryRetryModelFallback(currentSelector: string, options?: { pinFallback?: boolean }): Promise<boolean> {
@@ -1184,13 +1216,13 @@ export class TurnRecovery {
 				) {
 					return false;
 				}
-				await this.applyRetryFallbackCandidate(role, selector, currentSelector, {
+				const applied = await this.applyRetryFallbackCandidate(role, selector, currentSelector, {
 					...options,
 					apiKey,
 					probeLease,
 				});
-				transferred = true;
-				return true;
+				transferred = applied;
+				return applied;
 			} finally {
 				if (probeLease && !transferred) this.#host.modelRegistry.abandonFallbackProbe(probeLease);
 			}
@@ -1776,18 +1808,22 @@ export class TurnRecovery {
 		for (;;) {
 			const fallback = this.#activeRetryFallback;
 			const probeLease = fallback?.probeLease;
-			if (fallback && probeLease) {
+			if (fallback && (fallback.pendingAdmission || probeLease)) {
 				const currentModel = this.#host.model();
 				const currentSelector = currentModel
 					? formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel())
-					: probeLease.selector;
-				this.#abandonRetryFallbackProbe(probeLease);
+					: probeLease?.selector;
+				if (!currentSelector) throw new Error("Fallback admission requires an active model");
+				if (probeLease) this.#abandonRetryFallbackProbe(probeLease);
 				const admission = this.#host.modelRegistry.admitFallbackProbe(currentSelector);
 				if (admission.status === "probe") {
 					fallback.probeLease = admission.lease;
+					fallback.pendingAdmission = false;
+				} else if (admission.status === "healthy") {
+					fallback.pendingAdmission = false;
 				} else if (admission.status === "busy") {
 					if (!(await this.#tryRetryModelFallback(currentSelector, { pinFallback: fallback.pinned }))) {
-						throw new Error(`Fallback probe already in progress for ${probeLease.selector}`);
+						throw new Error(`Fallback probe already in progress for ${currentSelector}`);
 					}
 				}
 			}

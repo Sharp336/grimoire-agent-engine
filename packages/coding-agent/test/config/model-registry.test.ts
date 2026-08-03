@@ -170,6 +170,15 @@ describe("ModelRegistry", () => {
 		expect(admissions.filter(admission => admission.status === "busy")).toHaveLength(5);
 	});
 
+	test("canonicalizes live fallback selector casing before admission", () => {
+		const first = registry.admitFallbackProbe(" OpenAI/GPT-4O:high ");
+		if (first.status !== "probe") throw new Error("Expected mixed-case selector to own the probe");
+
+		expect(registry.admitFallbackProbe("openai/gpt-4o")).toEqual({ status: "busy" });
+		registry.markFallbackProbeHealthy(first.lease);
+		expect(registry.admitFallbackProbe("OpenAI/Gpt-4O:max")).toEqual({ status: "healthy" });
+	});
+
 	test("restores parallel fallback admission after the first probe succeeds", () => {
 		const first = registry.admitFallbackProbe("test/test-model");
 		if (first.status !== "probe") throw new Error("Expected first fallback caller to own the probe");
