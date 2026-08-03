@@ -468,18 +468,38 @@ export class AgentLifecycleManager {
 	async dispose(deadlineAt: number = Date.now() + AGENT_RELEASE_GRACE_MS): Promise<void> {
 		this.#unsubscribe?.();
 		this.#unsubscribe = undefined;
-		const ids = [...new Set([...this.#adopted.keys(), ...this.#parks.keys(), ...this.#runs.keys()])];
+		// Runs are normally tracked before teardown, but a child session is
+		// pre-registered while its async initialization is still in flight. Include
+		// the live registry subtree so such children cannot attach after the main
+		// session has already disposed.
+		const refs = new Map<string, AgentRef>();
+		for (const id of [...this.#adopted.keys(), ...this.#parks.keys(), ...this.#runs.keys()]) {
+			const ref = this.#registry.get(id);
+			if (ref) refs.set(id, ref);
+		}
+		const parentIds = new Set([MAIN_AGENT_ID, ...refs.keys()]);
+		const registered = this.#registry.list();
+		for (let added = true; added; ) {
+			added = false;
+			for (const ref of registered) {
+				if (ref.parentId && parentIds.has(ref.parentId) && !refs.has(ref.id)) {
+					refs.set(ref.id, ref);
+					parentIds.add(ref.id);
+					added = true;
+				}
+			}
+		}
 		await Promise.all(
-			ids.map(async id => {
-				const release = this.release(id).then(() => {});
+			[...refs.values()].map(async ref => {
+				const release = this.release(ref.id, ref).then(() => {});
 				try {
 					await untilAborted(AbortSignal.timeout(Math.max(0, deadlineAt - Date.now())), () => release);
 				} catch (error) {
 					if (Date.now() >= deadlineAt) {
-						trackLateCleanup(release, { id, resource: "adopted-agent" });
+						trackLateCleanup(release, { id: ref.id, resource: "adopted-agent" });
 					}
 					logger.warn("Agent cleanup exceeded its deadline", {
-						id,
+						id: ref.id,
 						error: error instanceof Error ? error.message : String(error),
 					});
 				}

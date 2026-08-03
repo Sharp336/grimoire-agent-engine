@@ -579,6 +579,31 @@ describe("AgentLifecycleManager", () => {
 		expect(registry.get("Revive-Killed")).toMatchObject({ status: "aborted", session: null });
 	});
 
+	it("dispose terminalizes a pre-registered child before its session attaches", async () => {
+		registry.register({
+			id: MAIN_AGENT_ID,
+			displayName: MAIN_AGENT_ID,
+			kind: "main",
+			session: makeSessionStub().session,
+		});
+		const child = registry.register({
+			id: "Initializing",
+			displayName: "task",
+			kind: "sub",
+			parentId: MAIN_AGENT_ID,
+			session: null,
+			status: "running",
+		});
+		const lateSession = makeSessionStub();
+
+		await lifecycle.dispose();
+
+		expect(registry.get("Initializing")).toBeUndefined();
+		expect(registry.attachSession("Initializing", lateSession.session, null, child)).toBe(false);
+		expect(lateSession.abortCalls()).toBe(0);
+		expect(lateSession.disposeCalls()).toBe(0);
+	});
+
 	it("ensureLive on an unknown id throws and points at history://", async () => {
 		await expect(lifecycle.ensureLive("9-Ghost")).rejects.toThrow(/history:\/\/9-Ghost/);
 	});
