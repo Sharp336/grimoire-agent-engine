@@ -572,7 +572,7 @@ async function collectAuthFindings(flags: DoctorCommandFlags): Promise<DoctorFin
 			)
 			.all() as AuthProbeRow[];
 		const findings: DoctorFinding[] = [];
-		if (authSchemaVersion < AUTH_SCHEMA_VERSION) {
+		if (authSchemaVersion !== AUTH_SCHEMA_VERSION) {
 			findings.push({
 				id: "auth.storage",
 				category: "auth",

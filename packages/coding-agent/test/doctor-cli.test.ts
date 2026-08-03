@@ -4,6 +4,7 @@ import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { AUTH_SCHEMA_VERSION } from "@oh-my-pi/pi-ai/auth-storage";
 import {
 	type DoctorFinding,
 	type DoctorReport,
@@ -1155,6 +1156,7 @@ describe("omp doctor", () => {
 		provider: string,
 		credentialType: "api_key" | "oauth",
 		data: Record<string, unknown>,
+		schemaVersion: number = AUTH_SCHEMA_VERSION,
 	): Promise<void> {
 		await fs.mkdir(path.dirname(dbPath), { recursive: true });
 		const db = new Database(dbPath);
@@ -1175,7 +1177,7 @@ describe("omp doctor", () => {
 				updated_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))
 			);
 		`);
-		db.run("INSERT INTO auth_schema_version (id, version) VALUES (1, 7)");
+		db.run("INSERT INTO auth_schema_version (id, version) VALUES (1, ?)", [schemaVersion]);
 		db.run("INSERT INTO auth_credentials (provider, credential_type, data) VALUES (?, ?, ?)", [
 			provider,
 			credentialType,
@@ -1301,6 +1303,21 @@ describe("omp doctor", () => {
 		expect(migrationFinding).toBeDefined();
 		expect(migrationFinding?.status).toBe("warning");
 		expect(migrationFinding?.summary).toContain("pending automatic migration");
+	});
+
+	test("auth: newer auth schema → warning naming stored and current versions", async () => {
+		const dbPath = getAgentDbPath(root);
+		const newerVersion = AUTH_SCHEMA_VERSION + 1;
+		await createAuthCredential(dbPath, "openai", "api_key", { key: "sk-newer" }, newerVersion);
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const migrationFinding = report.findings.find(entry => entry.id === "auth.storage");
+		expect(migrationFinding).toBeDefined();
+		expect(migrationFinding?.status).toBe("warning");
+		expect(migrationFinding?.summary).toContain("pending automatic migration");
+		const details = migrationFinding?.details.join(" ") ?? "";
+		expect(details).toContain(String(newerVersion));
+		expect(details).toContain(String(AUTH_SCHEMA_VERSION));
+		expect(JSON.stringify(report)).not.toContain("sk-newer");
 	});
 
 	test("auth: valid stored credential → ok", async () => {
