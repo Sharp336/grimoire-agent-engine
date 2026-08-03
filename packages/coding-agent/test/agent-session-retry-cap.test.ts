@@ -1924,6 +1924,98 @@ describe("AgentSession retry delay cap", () => {
 		expect(session.isRetrying).toBe(false);
 	});
 
+	it("preserves the interrupted Cursor retry cap across Cursor fallback models", async () => {
+		const cursorModels = [
+			getBundledModel("cursor", "claude-4-sonnet"),
+			getBundledModel("cursor", "claude-4.5-sonnet"),
+			getBundledModel("cursor", "claude-4.5-opus-high"),
+			getBundledModel("cursor", "claude-4.6-opus-high"),
+		];
+		if (cursorModels.some(model => !model)) throw new Error("Expected bundled Cursor fallback models to exist");
+		const [initialModel, ...fallbackModels] = cursorModels as NonNullable<(typeof cursorModels)[number]>[];
+		authStorage.setRuntimeApiKey("cursor", "cursor-test-key");
+
+		const requestedModels: string[] = [];
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: { model: initialModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requestedModel, _context, options) => {
+				const attempt = requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+				const callId = "cursor-read-across-fallbacks";
+				const toolCall = {
+					type: "toolCall" as const,
+					id: callId,
+					name: "read",
+					arguments: { path: "/workspace/file.txt" },
+					[kCursorExecResolved]: true as const,
+				};
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(async () => {
+					const partial: AssistantMessage = {
+						role: "assistant",
+						content: attempt === 1 ? [toolCall] : [],
+						api: requestedModel.api,
+						provider: requestedModel.provider,
+						model: requestedModel.id,
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "stop",
+						timestamp: Date.now(),
+					};
+					stream.push({ type: "start", partial });
+					if (attempt === 1) {
+						await options?.cursorOnToolResult?.({
+							role: "toolResult",
+							toolCallId: callId,
+							toolName: "read",
+							content: [{ type: "text", text: "file body" }],
+							isError: false,
+							timestamp: Date.now(),
+						});
+						stream.push({ type: "toolcall_start", contentIndex: 0, partial });
+						stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
+					}
+					stream.push({
+						type: "error",
+						reason: "error",
+						error: {
+							...partial,
+							stopReason: "error",
+							errorMessage: "Cursor stream ended before turnEnded",
+							errorId: AIError.create(AIError.Flag.Transient),
+						},
+					});
+				});
+				return stream;
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 10,
+			"retry.modelFallback": true,
+			"retry.fallbackChains": {
+				default: fallbackModels.map(model => `${model.provider}/${model.id}`),
+			},
+		});
+		settings.setModelRole("default", `${initialModel.provider}/${initialModel.id}`);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("Trigger repeated Cursor failures across a fallback chain");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual(cursorModels.slice(0, 3).map(model => `cursor/${model?.id}`));
+		expect(session.model?.id).toBe(cursorModels[2]?.id);
+		expect(session.isRetrying).toBe(false);
+	});
+
 	it("restores the configured retry budget after Cursor falls back to another provider", async () => {
 		const cursorModel = createMockModel({ id: "composer-2.5", provider: "cursor" });
 		const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");

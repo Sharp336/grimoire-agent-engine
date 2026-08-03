@@ -1139,13 +1139,17 @@ export class TurnRecovery {
 		});
 	}
 
-	async #tryRetryModelFallback(currentSelector: string, options?: { pinFallback?: boolean }): Promise<boolean> {
+	async #tryRetryModelFallback(
+		currentSelector: string,
+		options?: { pinFallback?: boolean; allowCursorCandidates?: boolean },
+	): Promise<boolean> {
 		const role = this.#activeRetryFallback?.role ?? this.resolveRetryFallbackRole(currentSelector);
 		if (!role) return false;
 
 		const ceiling = this.#host.thinkingLevelCeiling();
 		for (const selector of this.findRetryFallbackCandidates(role, currentSelector)) {
 			if (this.isRetryFallbackSelectorSuppressed(selector)) continue;
+			if (options?.allowCursorCandidates === false && selector.provider === "cursor") continue;
 			const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 			const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 			if (!candidate) continue;
@@ -1460,7 +1464,15 @@ export class TurnRecovery {
 				if (!classifierRefusal) {
 					this.noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage);
 				}
-				switchedModel = await this.#tryRetryModelFallback(currentSelector, { pinFallback: classifierRefusal });
+				switchedModel = await this.#tryRetryModelFallback(currentSelector, {
+					pinFallback: classifierRefusal,
+					// Cursor's interrupted-exec watchdog is a saga-wide safety cap.
+					// Once spent, another Cursor candidate must not reset it and
+					// continue an arbitrarily long Cursor-only fallback chain. A
+					// later non-Cursor candidate is still safe: switching provider
+					// clears the special latch below and restores the normal budget.
+					allowCursorCandidates: !(retryBudgetExhausted && this.#cursorInterruptedExecRetryActive),
+				});
 			}
 			// Auto fallback from a Fireworks Fast variant to its base model. Independent
 			// of the role-fallback setting: it's intrinsic to the Fast contract (speed
