@@ -33,6 +33,7 @@ import {
 	getMarketplacesCacheDir,
 	getMarketplacesRegistryPath,
 	getPluginsCacheDir,
+	type InstalledPluginSummary,
 	MarketplaceManager,
 } from "../../../extensibility/plugins/marketplace";
 import { setMcpServerEnabled } from "../../../mcp/config-writer";
@@ -365,10 +366,14 @@ export class ExtensionDashboard implements Component {
 				await manager.setPluginEnabled(pluginId, enabled, scope);
 				if (enabled) {
 					const extension = this.#state.extensions.find(item => item.id === extensionId);
-					if (extension?.path) {
+					const raw = extension?.raw as { type?: string; summary?: InstalledPluginSummary } | undefined;
+					if (raw?.type === "marketplace" && raw.summary) {
 						const pluginManager = new PluginManager(this.#cwd);
-						const effective = await pluginManager.getMarketplaceEffectiveState(pluginId, extension.path, true);
-						await pluginManager.clearProjectDisabledOverride(effective.packageName);
+						const effective = await pluginManager.getMarketplaceAggregateEffectiveState(
+							pluginId,
+							raw.summary.entries,
+						);
+						await pluginManager.clearProjectDisabledOverrides(effective.packageNames);
 					}
 				}
 			}

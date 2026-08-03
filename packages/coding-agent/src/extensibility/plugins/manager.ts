@@ -18,7 +18,7 @@ import { type GitSource, parseGitUrl } from "./git-url";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "./legacy-pi-compat";
 import { resolvePluginManifestEntries } from "./loader";
 import { getInstalledPluginsRegistryPath, readInstalledPluginsRegistry } from "./marketplace/registry";
-import { parsePluginId } from "./marketplace/types";
+import { type InstalledPluginEntry, parsePluginId } from "./marketplace/types";
 import { extractPackageName, parsePluginSpec } from "./parser";
 import { normalizePluginRuntimeConfig } from "./runtime-config";
 import type {
@@ -177,10 +177,15 @@ export class PluginManager {
 	}
 
 	async clearProjectDisabledOverride(name: string): Promise<void> {
-		const { path: overridesPath, overrides } = await this.#loadProjectOverridesFile();
-		if (!overrides.disabled?.includes(name)) return;
+		await this.clearProjectDisabledOverrides([name]);
+	}
 
-		const disabled = overrides.disabled.filter(pluginName => pluginName !== name);
+	async clearProjectDisabledOverrides(names: readonly string[]): Promise<void> {
+		const { path: overridesPath, overrides } = await this.#loadProjectOverridesFile();
+		const namesToClear = new Set(names);
+		if (!overrides.disabled?.some(name => namesToClear.has(name))) return;
+
+		const disabled = overrides.disabled.filter(pluginName => !namesToClear.has(pluginName));
 		if (disabled.length > 0) {
 			overrides.disabled = disabled;
 		} else {
@@ -812,6 +817,29 @@ export class PluginManager {
 		installPath: string,
 		registryEnabled: boolean,
 	): Promise<{ packageName: string; enabled: boolean }> {
+		const packageName = await this.#resolveMarketplacePackageName(pluginId, installPath);
+		const { overrides } = await this.#loadProjectOverridesFile();
+		return {
+			packageName,
+			enabled: registryEnabled && !(overrides.disabled?.includes(packageName) ?? false),
+		};
+	}
+
+	async getMarketplaceAggregateEffectiveState(
+		pluginId: string,
+		entries: readonly InstalledPluginEntry[],
+	): Promise<{ packageNames: string[]; enabled: boolean }> {
+		const packageNames = await Promise.all(
+			entries.map(entry => this.#resolveMarketplacePackageName(pluginId, entry.installPath)),
+		);
+		const disabled = new Set((await this.#loadProjectOverridesFile()).overrides.disabled ?? []);
+		return {
+			packageNames: Array.from(new Set(packageNames)),
+			enabled: entries.every((entry, index) => entry.enabled !== false && !disabled.has(packageNames[index])),
+		};
+	}
+
+	async #resolveMarketplacePackageName(pluginId: string, installPath: string): Promise<string> {
 		const parsedId = parsePluginId(pluginId);
 		let packageName = parsedId?.name ?? pluginId;
 		try {
@@ -828,11 +856,7 @@ export class PluginManager {
 			}
 		}
 
-		const { overrides } = await this.#loadProjectOverridesFile();
-		return {
-			packageName,
-			enabled: registryEnabled && !(overrides.disabled?.includes(packageName) ?? false),
-		};
+		return packageName;
 	}
 
 	// ==========================================================================

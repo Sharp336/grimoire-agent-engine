@@ -136,4 +136,54 @@ describe("plugin config", () => {
 			enabled: true,
 		});
 	});
+
+	test("marketplace aggregate state and override cleanup include every registry entry", async () => {
+		const firstInstallPath = path.join(tmpRoot, "marketplace-plugin-user");
+		const secondInstallPath = path.join(tmpRoot, "marketplace-plugin-project");
+		await fs.mkdir(firstInstallPath, { recursive: true });
+		await fs.mkdir(secondInstallPath, { recursive: true });
+		await Bun.write(path.join(firstInstallPath, "package.json"), JSON.stringify({ name: "@scope/runtime-user" }));
+		await Bun.write(path.join(secondInstallPath, "package.json"), JSON.stringify({ name: "@scope/runtime-project" }));
+		await Bun.write(
+			path.join(tmpRoot, "plugin-overrides.json"),
+			JSON.stringify({ disabled: ["@scope/runtime-project", "other-plugin"] }),
+		);
+		const entries = [
+			{
+				scope: "user" as const,
+				installPath: firstInstallPath,
+				version: "1.0.0",
+				installedAt: "2026-07-29T00:00:00.000Z",
+				lastUpdated: "2026-07-29T00:00:00.000Z",
+				enabled: true,
+			},
+			{
+				scope: "project" as const,
+				installPath: secondInstallPath,
+				version: "1.0.0",
+				installedAt: "2026-07-29T00:00:00.000Z",
+				lastUpdated: "2026-07-29T00:00:00.000Z",
+				enabled: true,
+			},
+		];
+		const manager = new PluginManager(tmpRoot);
+
+		await expect(
+			manager.getMarketplaceAggregateEffectiveState("catalog-name@test-marketplace", entries),
+		).resolves.toEqual({
+			packageNames: ["@scope/runtime-user", "@scope/runtime-project"],
+			enabled: false,
+		});
+
+		await manager.clearProjectDisabledOverrides(["@scope/runtime-user", "@scope/runtime-project"]);
+		await expect(Bun.file(path.join(tmpRoot, "plugin-overrides.json")).json()).resolves.toEqual({
+			disabled: ["other-plugin"],
+		});
+		await expect(
+			manager.getMarketplaceAggregateEffectiveState("catalog-name@test-marketplace", entries),
+		).resolves.toEqual({
+			packageNames: ["@scope/runtime-user", "@scope/runtime-project"],
+			enabled: true,
+		});
+	});
 });

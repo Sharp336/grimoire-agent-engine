@@ -369,11 +369,9 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 		for (const summary of installed) {
 			const id = makeExtensionId("plugin", `mkt/${summary.id}@${summary.scope}`);
 			const entry: InstalledPluginEntry | undefined = summary.entries[0];
-			const effective = entry
-				? await pluginManager.getMarketplaceEffectiveState(summary.id, entry.installPath, entry.enabled !== false)
-				: undefined;
+			const effective = await pluginManager.getMarketplaceAggregateEffectiveState(summary.id, summary.entries);
 			const isShadowed = Boolean(summary.shadowedBy);
-			const isDisabled = effective?.enabled === false;
+			const isDisabled = !effective.enabled;
 			extensions.push({
 				id,
 				kind: "plugin",
