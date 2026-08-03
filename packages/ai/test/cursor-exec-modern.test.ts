@@ -882,7 +882,7 @@ describe("Cursor MCP resource frames answer from the host's servers", () => {
 		expect(readingAnswer.value.result.value.downloadPath).toBe("assets/readme.md");
 	});
 
-	it("replays a completed resource download without writing it twice", async () => {
+	it("replays an in-memory resource download exactly and reruns it after serialization", async () => {
 		const message = buildExecMessage({
 			case: "readMcpResourceExecArgs",
 			value: create(ReadMcpResourceExecArgsSchema, {
@@ -914,9 +914,56 @@ describe("Cursor MCP resource frames answer from the host's servers", () => {
 		expect(answer.value.result.value.downloadPath).toBe("assets/readme.md");
 		expect(replay.output.content).toHaveLength(0);
 		expect(replay.results).toHaveLength(0);
+
+		const serializedResult = JSON.parse(JSON.stringify(first.results[0])) as ToolResultMessage;
+		const serializedReplay = await dispatchExec(message, {
+			execHandlers,
+			state: newBlockState({ resolvedContextToolResults: new Map([[block.id, serializedResult]]) }),
+		});
+		const serializedAnswer = soleResult(serializedReplay.frames);
+		if (serializedAnswer.case !== "readMcpResourceExecResult") {
+			throw new Error(`got ${serializedAnswer.case}`);
+		}
+		if (serializedAnswer.value.result.case !== "success") {
+			throw new Error(`got ${serializedAnswer.value.result.case}`);
+		}
+
+		expect(downloads).toBe(2);
+		expect(serializedAnswer.value.result.value.downloadPath).toBe("assets/readme.md");
+		expect(serializedReplay.results).toHaveLength(0);
 	});
 
-	it("replays a completed resource listing without querying the server twice", async () => {
+	it("reruns a serialized resource read instead of replaying empty content", async () => {
+		const message = buildExecMessage({
+			case: "readMcpResourceExecArgs",
+			value: create(ReadMcpResourceExecArgsSchema, { server: "docs", uri: "docs://readme" }),
+		});
+		let reads = 0;
+		const execHandlers: CursorExecHandlers = {
+			readMcpResource: async ({ uri }) => {
+				reads++;
+				return { uri, mimeType: "text/markdown", text: "# Serialized README" };
+			},
+		};
+		const first = await dispatchExec(message, { execHandlers });
+		const block = first.output.content.find((item): item is ToolCallState => item.type === "toolCall");
+		if (!block || !first.results[0]) throw new Error("expected a paired resource read");
+
+		const serializedResult = JSON.parse(JSON.stringify(first.results[0])) as ToolResultMessage;
+		const replay = await dispatchExec(message, {
+			execHandlers,
+			state: newBlockState({ resolvedContextToolResults: new Map([[block.id, serializedResult]]) }),
+		});
+		const answer = soleResult(replay.frames);
+		if (answer.case !== "readMcpResourceExecResult") throw new Error(`got ${answer.case}`);
+		if (answer.value.result.case !== "success") throw new Error(`got ${answer.value.result.case}`);
+
+		expect(reads).toBe(2);
+		expect(answer.value.result.value.content).toEqual({ case: "text", value: "# Serialized README" });
+		expect(replay.results).toHaveLength(0);
+	});
+
+	it("replays an in-memory resource listing exactly and reruns it after serialization", async () => {
 		const message = buildExecMessage({
 			case: "listMcpResourcesExecArgs",
 			value: create(ListMcpResourcesExecArgsSchema, { server: "docs" }),
@@ -944,6 +991,23 @@ describe("Cursor MCP resource frames answer from the host's servers", () => {
 		expect(answer.value.result.value.resources.map(resource => resource.uri)).toEqual(["docs://readme"]);
 		expect(replay.output.content).toHaveLength(0);
 		expect(replay.results).toHaveLength(0);
+
+		const serializedResult = JSON.parse(JSON.stringify(first.results[0])) as ToolResultMessage;
+		const serializedReplay = await dispatchExec(message, {
+			execHandlers,
+			state: newBlockState({ resolvedContextToolResults: new Map([[block.id, serializedResult]]) }),
+		});
+		const serializedAnswer = soleResult(serializedReplay.frames);
+		if (serializedAnswer.case !== "listMcpResourcesExecResult") {
+			throw new Error(`got ${serializedAnswer.case}`);
+		}
+		if (serializedAnswer.value.result.case !== "success") {
+			throw new Error(`got ${serializedAnswer.value.result.case}`);
+		}
+
+		expect(listings).toBe(2);
+		expect(serializedAnswer.value.result.value.resources.map(resource => resource.uri)).toEqual(["docs://readme"]);
+		expect(serializedReplay.results).toHaveLength(0);
 	});
 
 	it("leaves no block for a listing no handler answered", async () => {

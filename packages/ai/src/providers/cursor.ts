@@ -954,6 +954,7 @@ export function buildResolvedCursorToolResults(messages: Message[], provider: st
 
 type CursorExecResolution = CursorExecPairing & {
 	previousResult?: ToolResultMessage;
+	requireNativeReplay?: boolean;
 };
 
 interface CursorNativeExecReplay {
@@ -986,11 +987,17 @@ function preserveNativeExecReplay(
 	});
 }
 
-function cursorExecResolution(state: BlockState, toolCallId: string, toolName: string): CursorExecResolution {
+function cursorExecResolution(
+	state: BlockState,
+	toolCallId: string,
+	toolName: string,
+	options?: { requireNativeReplay?: boolean },
+): CursorExecResolution {
 	return {
 		toolCallId,
 		toolName,
 		previousResult: state.resolvedContextToolResults?.get(toolCallId),
+		requireNativeReplay: options?.requireNativeReplay,
 	};
 }
 
@@ -1773,7 +1780,7 @@ async function handleExecServerMessage(
 							: buildListMcpResourcesResult([]),
 					buildListMcpResourcesError,
 					buildListMcpResourcesError,
-					cursorExecResolution(state, toolCallId, "list_mcp_resources"),
+					cursorExecResolution(state, toolCallId, "list_mcp_resources", { requireNativeReplay: true }),
 				);
 				execResult = resolved.execResult;
 			}
@@ -1820,7 +1827,7 @@ async function handleExecServerMessage(
 								}),
 					reason => buildReadMcpResourceError(args.uri, reason),
 					error => buildReadMcpResourceError(args.uri, error),
-					cursorExecResolution(state, toolCallId, "read_mcp_resource"),
+					cursorExecResolution(state, toolCallId, "read_mcp_resource", { requireNativeReplay: true }),
 				);
 				sendExecClientMessage(h2Request, execMsg, "readMcpResourceExecResult", resolved.execResult);
 				return;
@@ -2403,6 +2410,7 @@ export async function resolveExecHandler<TArgs, TResult>(
 	buildError: (error: string) => TResult,
 	pairing: CursorExecResolution | null,
 ): Promise<{ execResult: TResult; toolResult?: ToolResultMessage }> {
+	let rerunningResolvedCall = false;
 	if (pairing?.previousResult) {
 		if (pairing.previousResult.toolName !== pairing.toolName) {
 			const message = `Cursor repeated tool call ${pairing.toolCallId} as ${pairing.toolName} after it completed as ${pairing.previousResult.toolName}`;
@@ -2425,15 +2433,22 @@ export async function resolveExecHandler<TArgs, TResult>(
 			});
 			return { execResult: nativeReplay.result as TResult };
 		}
-		log("exec", "replayResolvedResult", { toolCallId: pairing.toolCallId, toolName: pairing.toolName });
-		return { execResult: buildFromToolResult(pairing.previousResult) };
+		if (!pairing.requireNativeReplay) {
+			log("exec", "replayResolvedResult", { toolCallId: pairing.toolCallId, toolName: pairing.toolName });
+			return { execResult: buildFromToolResult(pairing.previousResult) };
+		}
+		log("exec", "rerunAfterMissingNativeReplay", {
+			toolCallId: pairing.toolCallId,
+			toolName: pairing.toolName,
+		});
+		rerunningResolvedCall = true;
 	}
 
 	const pair = async (text: string, isError: boolean): Promise<ToolResultMessage | undefined> => {
 		// `null` only for MCP without a handler: that block is never marked
 		// resolved, so `agent-loop.ts` runs it locally and pairs its own result.
 		// Synthesizing one here would double up.
-		if (!pairing) return undefined;
+		if (!pairing || rerunningResolvedCall) return undefined;
 		const synthesized: ToolResultMessage = {
 			role: "toolResult",
 			toolCallId: pairing.toolCallId,
@@ -2456,9 +2471,12 @@ export async function resolveExecHandler<TArgs, TResult>(
 	try {
 		const handlerResult = await handler(args);
 		const { execResult, toolResult } = splitExecHandlerResult(handlerResult);
-		const finalToolResult = await applyToolResultHandler(toolResult, onToolResult);
+		const finalToolResult = rerunningResolvedCall
+			? toolResult
+			: await applyToolResultHandler(toolResult, onToolResult);
 
 		if (execResult) {
+			if (rerunningResolvedCall) return { execResult };
 			// TResult-only is a supported return form, so the transcript entry has to
 			// be synthesized here. Deriving its state from the raw result keeps the
 			// two views consistent: every exec result is a proto oneof whose only
