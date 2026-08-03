@@ -1649,7 +1649,7 @@ interface ToolAggregateRow {
 
 function durationPercentiles(
 	whereSql: string,
-	params: Array<number | string>,
+	params: Array<number | string | null>,
 	samples: number,
 ): { median: number; p90: number } {
 	if (!db || samples === 0) return { median: 0, p90: 0 };
@@ -1748,9 +1748,11 @@ export function getToolStatsByModel(cutoff?: number): ToolModelStats[] {
 	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as ToolAggregateRow[];
 	const params = hasCutoff ? [cutoff] : [];
 	return rows.map(row => {
+		// `IS` keeps a NULL model/provider group matching its own rows; `=` would
+		// never match and report a zero duration for calls with no recorded model.
 		const duration = durationPercentiles(
-			` AND t.tool_name = ? AND t.model = ? AND t.provider = ?${hasCutoff ? " AND t.timestamp >= ?" : ""}`,
-			[row.tool_name, row.model ?? "", row.provider ?? "", ...params],
+			` AND t.tool_name = ? AND t.model IS ? AND t.provider IS ?${hasCutoff ? " AND t.timestamp >= ?" : ""}`,
+			[row.tool_name, row.model ?? null, row.provider ?? null, ...params],
 			row.duration_samples ?? 0,
 		);
 		return {
