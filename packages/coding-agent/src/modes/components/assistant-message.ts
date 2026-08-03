@@ -550,6 +550,24 @@ export class AssistantMessageComponent extends Container {
 		return settled;
 	}
 
+	/**
+	 * While hide-on-complete keeps retractable reasoning visible, the final
+	 * rebuild at message_end will remove it: pin the live region so scrolled
+	 * thinking rows are never frozen into immutable native scrollback, where
+	 * they would survive the rebuild in terminal history. Mirrors the
+	 * {@link getTranscriptBlockSettledRows} deferral.
+	 */
+	isNativeScrollbackLiveRegionPinned(): boolean {
+		if (this.#transcriptBlockFinalized || this.#effectiveHideThinkingBlock()) return false;
+		return (
+			this.hideThinkingBlockOnComplete &&
+			(this.#lastMessage?.content.some(
+				c => c.type === "thinking" && resolveThinkingDisplay(c, this.proseOnlyThinking).visible,
+			) ??
+				false)
+		);
+	}
+
 	getTranscriptBlockVersion(): number {
 		return this.#blockVersion;
 	}

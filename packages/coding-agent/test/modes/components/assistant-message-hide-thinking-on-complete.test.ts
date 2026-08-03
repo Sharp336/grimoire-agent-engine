@@ -139,4 +139,37 @@ describe("hideThinkingBlockOnComplete", () => {
 		component.updateContent(makeMessage("toolUse"));
 		expect(renderText(component)).not.toContain(THINKING);
 	});
+
+	it("pins the live region while retractable thinking is visible", () => {
+		// Flag on, still streaming with visible reasoning: pinned, so scrolled
+		// rows never freeze into native scrollback before the hide rebuild.
+		const live = new AssistantMessageComponent(undefined, false);
+		live.setHideThinkingBlockOnComplete(true);
+		live.updateContent(makeMessage("stop"));
+		expect(live.isNativeScrollbackLiveRegionPinned()).toBe(true);
+
+		// Once finalized, the block settles as-is (thinking already hidden):
+		// no pin needed.
+		live.markTranscriptBlockFinalized();
+		expect(live.isNativeScrollbackLiveRegionPinned()).toBe(false);
+
+		// Flag off: nothing is retracted, nothing to pin.
+		const off = new AssistantMessageComponent(undefined, false);
+		off.updateContent(makeMessage("stop"));
+		expect(off.isNativeScrollbackLiveRegionPinned()).toBe(false);
+
+		// Global hide wins: no visible thinking to retract, no pin.
+		const globalHide = new AssistantMessageComponent(undefined, true);
+		globalHide.setHideThinkingBlockOnComplete(true);
+		globalHide.updateContent(makeMessage("stop"));
+		expect(globalHide.isNativeScrollbackLiveRegionPinned()).toBe(false);
+
+		// No thinking in the message: nothing to pin.
+		const noThinking = new AssistantMessageComponent(undefined, false);
+		noThinking.setHideThinkingBlockOnComplete(true);
+		const message = makeMessage("stop");
+		message.content = [{ type: "text", text: ANSWER }];
+		noThinking.updateContent(message);
+		expect(noThinking.isNativeScrollbackLiveRegionPinned()).toBe(false);
+	});
 });
