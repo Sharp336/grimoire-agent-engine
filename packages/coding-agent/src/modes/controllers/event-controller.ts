@@ -276,6 +276,7 @@ export class EventController {
 				showContentPreview: this.ctx.settings.get("read.toolResultPreview"),
 			});
 			group.setExpanded(this.ctx.toolOutputExpanded);
+			group.setToolActivityVisible(!this.ctx.hideToolActivity);
 			this.ctx.chatContainer.addChild(group);
 			this.#lastReadGroup = group;
 		}
@@ -927,6 +928,7 @@ export class EventController {
 						content.id,
 					);
 					component.setExpanded(this.ctx.toolOutputExpanded);
+					component.setToolActivityVisible(!this.ctx.hideToolActivity);
 					this.ctx.chatContainer.addChild(component);
 					this.ctx.pendingTools.set(content.id, component);
 					this.#toolTimelineComponents.set(content.id, component);
@@ -1176,6 +1178,7 @@ export class EventController {
 				event.toolCallId,
 			);
 			component.setExpanded(this.ctx.toolOutputExpanded);
+			component.setToolActivityVisible(!this.ctx.hideToolActivity);
 			this.ctx.chatContainer.addChild(component);
 			this.ctx.pendingTools.set(event.toolCallId, component);
 			this.#toolTimelineComponents.set(event.toolCallId, component);
@@ -1464,6 +1467,20 @@ export class EventController {
 		// the loader and finalizes it at its own agent_end (isStreaming === false by
 		// then). Mirrors the collab guest's !isStreaming loader reconciler.
 		if (this.ctx.session.isStreaming) return;
+		// A non-terminal settle (`isTerminal: false`) is a scheduling pause, not the
+		// end of the run: an unsuppressed async job (a `/vibe` worker turn, a bash
+		// `async` job, etc.) will re-wake the loop when its result is delivered.
+		// `AgentSession` tags this on the deferred event (see `#hasPendingAsyncWake`
+		// in agent-session.ts). Skip the idle title/loader teardown so the tab keeps
+		// reading "working"; the later terminal `agent_end` performs it. Still flush
+		// a deferred model switch — the plan-mode reconciler queues it to apply once
+		// the current stream ends, and `#finishAgentEnd` is otherwise its only flush
+		// site, so the automatic continuation would otherwise run on the old
+		// model/thinking level until the terminal settle.
+		if (event.isTerminal === false) {
+			await this.ctx.flushPendingModelSwitch();
+			return;
+		}
 		setTerminalTitleState("idle");
 
 		await this.#finishAgentEnd(event);
