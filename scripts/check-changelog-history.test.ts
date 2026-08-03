@@ -27,7 +27,7 @@ describe("releasedHistoryViolation", () => {
 	});
 
 	it("rejects repeated insertions into released sections", () => {
-		const head = BASE_CHANGELOG.replaceAll("### Added", "### Added\n\\n- Repeated mechanical insertion.");
+		const head = BASE_CHANGELOG.replaceAll("### Added", "### Added\n\n- Repeated mechanical insertion.");
 		expect(releasedHistoryViolation(BASE_CHANGELOG, head)).toContain("changed immutable history");
 	});
 
@@ -44,7 +44,7 @@ describe("decodeChangelog", () => {
 });
 
 describe("checkChangelogHistories", () => {
-	it("checks the working changelog against a git base", async () => {
+	it("checks changed changelogs against a git base", async () => {
 		const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "changelog-history-"));
 		const git = (...args: string[]) =>
 			$`git ${args}`
@@ -80,6 +80,16 @@ describe("checkChangelogHistories", () => {
 				{
 					path: "packages/example/CHANGELOG.md",
 					message: 'changed immutable history beginning at "## [1.0.0] - 2026-01-01"',
+				},
+			]);
+
+			await fs.rm(changelogPath);
+			const deleted = await checkChangelogHistories(repoRoot, "HEAD");
+			expect(deleted.checkedPaths).toEqual(["packages/example/CHANGELOG.md"]);
+			expect(deleted.violations).toEqual([
+				{
+					path: "packages/example/CHANGELOG.md",
+					message: "removed every released section",
 				},
 			]);
 		} finally {
