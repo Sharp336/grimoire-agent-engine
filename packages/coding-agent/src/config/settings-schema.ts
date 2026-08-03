@@ -1948,6 +1948,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tui.vimMode": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Vim Editing Mode",
+			description:
+				"Modal prompt editing. Escape leaves Insert mode; Normal mode has hjkl, 0, $, ^, w, b, e, gg, G, counts, x/D/C, dd/yy, p and u; v/V start a Visual selection that y copies and d deletes",
+		},
+	},
+
 	"loop.mode": {
 		type: "enum",
 		values: ["prompt", "compact", "reset"] as const,
