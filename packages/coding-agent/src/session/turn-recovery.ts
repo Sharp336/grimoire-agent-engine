@@ -593,17 +593,20 @@ export class TurnRecovery {
 		}
 
 		const textBlocks = assistantMessage.content.filter((content): content is TextContent => content.type === "text");
-		// Prefer text for the classifier, but fall back to thinking when the
-		// turn produced no text (thinking-only unexpected stops). The thinking
-		// content is what the model was mid-deliberation about, so the
-		// classifier can still judge whether the stop is terminal.
+		// Prefer non-whitespace text for the classifier, but fall back to
+		// thinking when the turn has no usable text (thinking-only unexpected
+		// stops). Keying on non-whitespace content — not block presence — keeps
+		// this consistent with isUnexpectedStopCandidate: a turn with an
+		// empty/whitespace text block plus real thinking passes the gate and
+		// must not bail here.
 		const thinkingBlocks = assistantMessage.content.filter(
 			(content): content is ThinkingContent => content.type === "thinking",
 		);
-		const text = (textBlocks.length > 0 ? textBlocks : thinkingBlocks)
-			.map(content => ("text" in content ? content.text : content.thinking))
-			.join("\n");
-		if (!/\S/.test(text)) {
+		let text = textBlocks.map(content => content.text).join("\n");
+		if (!hasNonWhitespace(text)) {
+			text = thinkingBlocks.map(content => content.thinking).join("\n");
+		}
+		if (!hasNonWhitespace(text)) {
 			this.#unexpectedStopRetryCount = 0;
 			return false;
 		}

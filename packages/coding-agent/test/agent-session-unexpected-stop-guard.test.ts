@@ -63,6 +63,20 @@ function thinkingOnlyStop(thinking: string): MockResponse {
 	};
 }
 
+function whitespaceTextPlusThinkingStop(thinking: string): MockResponse {
+	// A degenerate empty/whitespace text block alongside real thinking: the
+	// gate passes (non-whitespace thinking), so the classifier-input fallback
+	// must ignore the whitespace text and classify on the thinking. Regression
+	// for the mismatch between block presence and non-whitespace content.
+	return {
+		content: [
+			{ type: "text", text: "   \n\t  " },
+			{ type: "thinking", thinking, thinkingSignature: "reasoning_content" },
+		],
+		stopReason: "stop",
+	};
+}
+
 async function createHarness(
 	responses: MockResponse[],
 	settingsOverrides: SettingsOverrides = {},
@@ -206,6 +220,33 @@ describe("AgentSession unexpected stop guard", () => {
 		expect(spy.mock.calls[0]?.[0]).toContain("响应");
 		expect(mock.calls).toHaveLength(2);
 		expect(assistantText(session.agent.state.messages)).toContain("finished after thinking-only stop");
+		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
+	});
+
+	it("classifies on thinking when a whitespace text block accompanies it", async () => {
+		let calls = 0;
+		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockImplementation(async () => {
+			calls++;
+			return calls === 1;
+		});
+		const { session, mock } = await createHarness(
+			[
+				whitespaceTextPlusThinkingStop("still working, next step is running the build"),
+				{ content: ["done after whitespace-text thinking stop"], stopReason: "stop" },
+			],
+			{
+				"features.unexpectedStopDetection": true,
+				"providers.unexpectedStopModel": "online",
+			},
+		);
+
+		await session.prompt("do the thing");
+		await session.waitForIdle();
+
+		expect(spy).toHaveBeenCalledTimes(2);
+		expect(spy.mock.calls[0]?.[0]).toContain("still working");
+		expect(mock.calls).toHaveLength(2);
+		expect(assistantText(session.agent.state.messages)).toContain("done after whitespace-text thinking stop");
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
 	});
 
