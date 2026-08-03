@@ -1,5 +1,14 @@
-import { describe, expect, it } from "bun:test";
-import { packages, rewriteManifest } from "./ci-release-publish";
+import { afterEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { packages, prepareNativeCorePackage, rewriteManifest } from "./ci-release-publish";
+
+const temporaryDirectories: string[] = [];
+
+afterEach(async () => {
+	await Promise.all(temporaryDirectories.splice(0).map(root => fs.rm(root, { recursive: true, force: true })));
+});
 
 describe("published manifest topology", () => {
 	it("repoints omptype runtime entries to dist/js with a bun source condition", async () => {
@@ -50,5 +59,30 @@ describe("published manifest topology", () => {
 			},
 			"./*.js": "./src/*.ts",
 		});
+	});
+
+	it("ships every file required by the lazy desktop export in the native core", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-native-core-publish-test-"));
+		temporaryDirectories.push(root);
+		await Bun.write(
+			path.join(root, "package.json"),
+			JSON.stringify({
+				name: "@oh-my-pi/pi-natives",
+				version: "1.2.3",
+				exports: {
+					"./desktop": { types: "./native/desktop.d.ts", import: "./native/desktop.js" },
+				},
+			}),
+		);
+
+		const manifest = await prepareNativeCorePackage(root, false);
+		expect(manifest.files).toEqual(
+			expect.arrayContaining([
+				"native/desktop.js",
+				"native/desktop.d.ts",
+				"native/desktop-adapter.js",
+				"native/desktop-adapter.d.ts",
+			]),
+		);
 	});
 });

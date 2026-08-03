@@ -307,7 +307,6 @@ import {
 import { ModelControls, type ModelControlsHost } from "./model-controls";
 import { isPrewalkPlanNudge, PrewalkCoordinator, type PrewalkCoordinatorHost } from "./prewalk";
 import { isAdvisorCard, isUserQueuedMessage } from "./queued-messages";
-import { formatRetryFallbackSelector, type RetryFallbackSelector } from "./retry-fallback-chains";
 import { type AdvisorStats, SessionAdvisors, type SessionAdvisorsHost } from "./session-advisors";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getRestorableSessionModels } from "./session-context";
@@ -4192,12 +4191,6 @@ export class AgentSession {
 
 	#allowQueuedMessageDrainRetry(): void {
 		this.#queuedMessageDrainBlocked = false;
-	}
-
-	#reconcileQueuedMessageDrain(): void {
-		if (!this.agent.hasQueuedMessages()) {
-			this.#queuedMessageDrainBlocked = false;
-		}
 	}
 
 	async #runQueuedUsageAwarePreflight(signal?: AbortSignal): Promise<boolean> {
