@@ -5,6 +5,37 @@
 ### Added
 
 - Added `hideThinkingBlockOnComplete`: thinking blocks render live while the model streams and are hidden once the turn completes, leaving a clean user-message + final-answer transcript (Codex-style). Reasoning stays visible for turns that end abnormally (error, abort, length). Independent of `hideThinkingBlock`/`Ctrl+T` — though an explicit `Ctrl+T`/settings toggle to visible reveals completed reasoning until toggled hidden again (re-enabling the setting clears the reveal). Applies to subagent hub transcripts too ([#7494](https://github.com/can1357/oh-my-pi/pull/7494) by [@SebastianMartinezA](https://github.com/SebastianMartinezA)).
+### Changed
+
+- Replaced arktype with `@oh-my-pi/omptype` across all tool parameter and config schemas: ~100x faster schema construction removes the arktype startup tax (the `scope({}, { jitless: true })` workarounds are gone). Config schema errors now report via `OmpErrors` entries with the same `path`/`problem` shape.
+
+### Fixed
+
+- Fixed extension/custom/hook tool wrappers stripping schema methods off `parameters`: `applyToolProxy` bound every callable property, and binding a schema (a plain function carrying `toJsonSchema`/`assert`) dropped those properties, breaking wire-schema detection and crashing the status-line token estimator with `JSON.stringify(schema) === undefined`. Prototype methods are still bound; own data properties and schema callables now pass through untouched.
+- Fixed bug where `agent()` calls in eval cells ignored turn cancellation and continued running indefinitely
+- Fixed the built-in `tail` printing `tail: Broken pipe` and failing when a downstream pipeline reader exited early (e.g. `tail -c N file.jsonl | jq …` with jq aborting on a parse error); it now exits silently with 141 (128+SIGPIPE) like a real tail, in every output path including `--follow`.
+- Fixed the in-process ps shell builtin rejecting common procps/BSD format specifiers (`ps -o tpgid,...` failed with `unknown output format specifier`); added `tpgid`, `pri`, `flags`, real/effective user and group columns, `wchan`, fault counters, `sz`, and the STAT `+` foreground flag.
+### Fixed
+
+- Fixed `install.sh` reporting success (exit 0) for a musl binary that cannot start: the installer now smoke-runs the downloaded binary and, on failure, prints the captured error plus the `apk add libstdc++ libgcc` remediation for musl targets and exits non-zero. Documented the Alpine/musl runtime requirement in the README ([#7545](https://github.com/can1357/oh-my-pi/issues/7545)).
+
+## [17.2.6] - 2026-08-03
+
+### Added
+
+- Added the `/reset` slash command to reset the conversation context in place: it drops the live messages, queued turns, and pending tool calls (and cancels the turn's async jobs, post-prompt continuations, and checkpoint/plan runtime state) while keeping the session id, title, cwd, model, and on-disk transcript. It records a durable reset boundary so the live transcript stays cleared across rebuilds (theme change, focus attach, `/shake`, resume) instead of resurrecting the pre-reset messages, while the full pre-reset history stays on disk ([#3580](https://github.com/can1357/oh-my-pi/issues/3580)).
+
+### Fixed
+
+- Fixed extension slash commands appearing as user prompts after being handled locally.
+- Preserved explicit session titles when branching from an earlier conversation turn.
+- Fixed an issue where unhandled JavaScript rejections in the browser guest could crash the main process and active sessions, converting them into tool errors instead.
+- Fixed a critical issue on Windows where cancelling a timed-out bash tool command could mistakenly terminate the main process due to PID recycling.
+- Fixed an issue where supervised processes reaching a terminal state failed to notify their launching session, requiring polling; the broker now actively notifies the session upon process completion.
+- Fixed crashes on macOS when using PCRE2-only grep patterns with Bun by defaulting to the interpreted PCRE2 engine instead of JIT, and introduced the `OMP_PCRE2_JIT` environment variable to manually control JIT compilation.
+- Fixed issues with `/btw` branch promotion where branches could park behind active turns, cut from outdated session leaves, or leave rejected branch keys indistinguishable from composer input.
+- Fixed database bloat by ensuring archived main and nested session rows are properly cleaned up from `stats.db` during garbage collection.
+- Fixed startup hanging during local model discovery when a timed-out transport left its request pending, which blocked the CLI before OAuth login could finish ([#7482](https://github.com/can1357/oh-my-pi/issues/7482)).
 
 ## [17.2.5] - 2026-08-03
 
@@ -2252,7 +2283,7 @@
 
 ### Fixed
 
-- Fixed `omp install` of legacy pi extensions failing with `Cannot find module '/$bunfs/root/packages/coding-agent/src/extensibility/typebox.js'` on every released `omp-<platform>-<arch>` binary. Commit `dc5c93462f` removed worker entrypoints from `scripts/ci-release-build-binaries.ts`; the inline comment then claimed the legacy-shim and package-barrel entrypoints (`typebox.ts`, `legacy-pi-{ai,coding-agent}-shim.ts`, `packages/{agent,natives,tui,utils}/...`) were "still" passed to `bun build --compile`, but they had never been re-added. The release binaries shipped without those files in bunfs, so `legacy-pi-compat.ts` redirected `typebox` imports to a bunfs path that didn't exist. `__resolveTypeBoxShimPath` now mirrors `__validateLegacyPiPackageRootOverrides` (#2168) by dropping the override when the shim file is missing, so a missing shim falls through to native `node_modules` resolution instead of emitting a dead bunfs URL ([#3414](https://github.com/can1357/oh-my-pi/issues/3414)).
+- Fixed `omp install` of legacy pi extensions failing because the compiled binary omitted the coding-agent TypeBox shim on every released `omp-<platform>-<arch>` binary. Commit `dc5c93462f` removed worker entrypoints from `scripts/ci-release-build-binaries.ts`; the inline comment then claimed the legacy-shim and package-barrel entrypoints (`typebox.ts`, `legacy-pi-{ai,coding-agent}-shim.ts`, `packages/{agent,natives,tui,utils}/...`) were "still" passed to `bun build --compile`, but they had never been re-added. The release binaries shipped without those files in bunfs, so `legacy-pi-compat.ts` redirected `typebox` imports to a bunfs path that didn't exist. `__resolveTypeBoxShimPath` now mirrors `__validateLegacyPiPackageRootOverrides` (#2168) by dropping the override when the shim file is missing, so a missing shim falls through to native `node_modules` resolution instead of emitting a dead bunfs URL ([#3414](https://github.com/can1357/oh-my-pi/issues/3414)).
 - Fixed every legacy `@(scope)/pi-*` and `@sinclair/typebox` import failing to load on the `omp-darwin-arm64` release binary (and any other `omp` built with Bun 1.3.14). `__validateLegacyPiPackageRootOverrides` and the `rewriteLegacyPiImports` emit path both depended on `--compile` extras being reachable as `/$bunfs/root/...` filesystem entries, but Bun 1.3.14 stopped exposing them through every API (`fs.existsSync`, `Bun.file().exists()`, `Bun.resolveSync`, `await import()` on the bunfs path or its `file://` URL all fail; only `/$bunfs/root/<binary-name>` itself answers). `legacy-pi-compat.ts` now keeps a JS-heap reference to every bundled pi-* surface in a lazy-loaded sibling `legacy-pi-bundled-registry.ts` and serves them through an `omp-legacy-pi-bundled:` virtual namespace whose `Bun.plugin().onLoad` returns synthetic re-exports — no bunfs path ever leaves the module in compiled mode, and dev / source-link / installed-package modes keep the historical `file://` rewrite. The matching `--compile` extras in `scripts/build-binary.ts`, the shared `scripts/binary-entrypoints.ts` list, and the dead `BUNFS_PACKAGE_ROOT` / `bunfsPath` / `__computeBunfsPackageRoot` / `__joinBunfsPath` helpers are gone. ([#3423](https://github.com/can1357/oh-my-pi/issues/3423))
 
 ## [16.1.17] - 2026-06-24

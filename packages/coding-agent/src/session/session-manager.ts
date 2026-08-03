@@ -44,6 +44,7 @@ import {
 	type ModeChangeEntry,
 	type ModelChangeEntry,
 	type NewSessionOptions,
+	type ResetBoundaryEntry,
 	type ServiceTierChangeEntry,
 	type SessionEntry,
 	type SessionHeader,
@@ -1465,6 +1466,12 @@ export class SessionManager {
 					throw err;
 				}
 
+				if (sessionFileExisted && sessionPathChanged) {
+					this.#header.previousSessionFiles = [
+						...new Set([...(this.#header.previousSessionFiles ?? []), path.resolve(oldSessionFile)]),
+					];
+				}
+
 				this.#sessionFile = newSessionFile;
 				this.#artifactManager = null;
 				this.#artifactManagerSessionFile = null;
@@ -2086,6 +2093,18 @@ export class SessionManager {
 		return entry.id;
 	}
 
+	/**
+	 * Append the durable conversation boundary recorded by `/clear`. The
+	 * collapsed live transcript and the model-context rebuild start after the
+	 * latest one, while the full history stays on disk (the plain
+	 * `transcript:true` export walks it unchanged).
+	 */
+	appendResetBoundary(): string {
+		const entry: ResetBoundaryEntry = { type: "reset_boundary", ...this.#freshEntryFields() };
+		this.#recordEntry(entry);
+		return entry.id;
+	}
+
 	appendCustomEntry(customType: string, data?: unknown): string {
 		const entry: CustomEntry = { type: "custom", customType, data, ...this.#freshEntryFields() };
 		this.#recordEntry(entry);
@@ -2340,6 +2359,8 @@ export class SessionManager {
 			id: newSessionId,
 			timestamp,
 			cwd: this.#cwd,
+			title: this.#sessionName,
+			titleSource: this.#titleSource,
 			parentSession: this.#persist ? sourceSessionFile : undefined,
 			additionalDirectories: this.#additionalDirectories.length > 0 ? [...this.#additionalDirectories] : undefined,
 		};

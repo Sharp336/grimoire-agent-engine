@@ -1373,14 +1373,22 @@ export class Agent {
 				if (this.#steeringQueue.length === 0) {
 					return { queued: false };
 				}
-				for (const message of this.#steeringQueue) {
+				const messageCount = this.#steeringMode === "one-at-a-time" ? 1 : this.#steeringQueue.length;
+				let hasAgentSteering = false;
+				for (let i = 0; i < messageCount; i++) {
+					const message = this.#steeringQueue[i];
 					const role = "role" in message ? message.role : undefined;
 					const attribution = "attribution" in message ? message.attribution : undefined;
-					if (role === "user" && attribution !== "agent") {
+					if (attribution === "user") {
 						return { queued: true, source: "user" };
 					}
+					if (role !== "user") continue;
+					if (attribution !== "agent") {
+						return { queued: true, source: "user" };
+					}
+					hasAgentSteering = true;
 				}
-				return { queued: true, source: "system" };
+				return { queued: true, source: hasAgentSteering ? "agent" : "system" };
 			},
 			waitForSteeringMessages: signal => this.#waitForSteeringMessages(signal),
 			hasIrcInterrupts: this.hasIrcInterrupts,

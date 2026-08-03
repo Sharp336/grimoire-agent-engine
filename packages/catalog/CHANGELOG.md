@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Replaced arktype with `@oh-my-pi/omptype` for discovery payload schemas (same definition DSL, lazy JIT validation).
+
+## [17.2.6] - 2026-08-03
+
+### Added
+
+- Added the `bedrock-mantle` provider with authenticated model discovery for OpenAI GPT-5.4, GPT-5.5, and GPT-5.6 models (including Luna and Terra variants with corrected pricing) served through Amazon Bedrock's Responses endpoint.
+
+### Fixed
+
+- Fixed dynamic discovery for the `deepseek-v4` model family (such as `deepseek-v4-flash-0731`) under `alibaba-token-plan` missing reasoning configuration and maximum thinking effort.
+- Fixed GitHub Copilot dynamic discovery retaining stale bundled prices for default-context models instead of using the provider's reported default-tier prices.
+
 ## [17.2.5] - 2026-08-03
 
 ### Fixed
