@@ -273,7 +273,11 @@ impl Drop for Shell {
 	}
 }
 
-#[allow(clippy::unused_async, reason = "N-API exposes abort as a Promise-returning method")]
+#[allow(
+	clippy::unused_async,
+	clippy::unused_async_trait_impl,
+	reason = "N-API exposes abort as a Promise-returning method"
+)]
 #[napi]
 impl Shell {
 	/// Create a new shell session from optional configuration.
@@ -463,36 +467,31 @@ mod tests {
 	};
 	use tokio::time;
 
-	use super::{BRIDGE_QUEUE_CHUNKS, CoreShell, NativeRuns, Shell as NativeShell, pump_chunks};
+	use super::{BRIDGE_QUEUE_CHUNKS, CoreShell, Shell as NativeShell, pump_chunks};
 
 	#[tokio::test]
 	async fn native_close_waits_for_core_run_and_chunk_drain() {
-		let runs = Arc::new(NativeRuns::default());
-		let run_lease = runs.register().expect("open wrapper should register a run");
-		let (core_done_tx, core_done_rx) = tokio::sync::oneshot::channel::<()>();
-		let (drain_done_tx, drain_done_rx) = tokio::sync::oneshot::channel::<()>();
-		let run = tokio::spawn(async move {
-			core_done_rx.await.expect("core completion signal");
-			drain_done_rx.await.expect("chunk drain completion signal");
-			drop(run_lease);
-		});
+		let shell = NativeShell::new(None);
+		let run_lease = shell
+			.runs
+			.register()
+			.expect("open wrapper should register a run");
+		let close = shell.close();
+		tokio::pin!(close);
 
-		runs.close();
-		let waiting_runs = Arc::clone(&runs);
-		let close = tokio::spawn(async move { waiting_runs.wait_until_idle().await });
-		core_done_tx.send(()).expect("signal core completion");
-		time::sleep(Duration::from_millis(20)).await;
-		assert!(!close.is_finished(), "close must wait while chunk callbacks are still draining");
+		assert!(
+			time::timeout(Duration::from_millis(20), &mut close)
+				.await
+				.is_err(),
+			"exported close must wait while chunk callbacks are still draining"
+		);
 
-		drain_done_tx
-			.send(())
-			.expect("signal chunk drain completion");
-		time::timeout(Duration::from_secs(1), close)
+		drop(run_lease);
+		time::timeout(Duration::from_secs(1), &mut close)
 			.await
-			.expect("close should settle after the chunk drain")
-			.expect("close wait task should not panic");
-		run.await.expect("run lease task should not panic");
-		assert!(runs.register().is_none(), "closed wrapper must reject later runs");
+			.expect("exported close should settle after the chunk drain")
+			.expect("exported close should succeed");
+		assert!(shell.runs.register().is_none(), "exported close must reject later runs");
 	}
 
 	#[cfg(unix)]

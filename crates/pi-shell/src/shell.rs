@@ -105,6 +105,10 @@ impl ShellAbortState {
 			abort_token.abort(AbortReason::Signal);
 		}
 	}
+
+	fn is_closed(&self) -> bool {
+		self.lock().closed
+	}
 }
 
 fn shell_working_dir_matches(shell: &BrushShell, cwd: &str) -> bool {
@@ -234,6 +238,7 @@ impl Shell {
 		};
 		run_shell_session(
 			self.session.clone(),
+			self.abort_state.clone(),
 			self.config.clone(),
 			run_config,
 			on_chunk,
@@ -261,7 +266,7 @@ impl Shell {
 		self.close_now();
 		let mut session = self.session.lock().await;
 		if let Some(core) = session.as_mut() {
-			terminate_background_jobs(&mut core.shell);
+			terminate_background_jobs_and_wait(&mut core.shell).await;
 		}
 		*session = None;
 	}
@@ -353,6 +358,7 @@ pub async fn execute_shell_streams(
 
 async fn run_shell_session(
 	session: Arc<TokioMutex<Option<ShellSessionCore>>>,
+	abort_state: ShellAbortState,
 	config: ShellConfig,
 	run_config: ShellRunConfig,
 	on_chunk: Option<Sender<String>>,
@@ -371,6 +377,7 @@ async fn run_shell_session(
 
 	let mut run_task = tokio::spawn({
 		let session = session.clone();
+		let abort_state = abort_state.clone();
 		let tokio_cancel = tokio_cancel.clone();
 		let spawn_registry = spawn_registry.clone();
 		async move {
@@ -378,6 +385,9 @@ async fn run_shell_session(
 				guard = session.lock() => guard,
 				() = tokio_cancel.cancelled() => return Err(Error::msg("Shell run cancelled")),
 			};
+			if abort_state.is_closed() {
+				return Err(Error::msg("Shell session is closed"));
+			}
 
 			let session = match &mut *session_guard {
 				Some(session) => session,
@@ -1543,8 +1553,11 @@ async fn terminate_run(registry: &process::SpawnRegistry) {
 		}
 	}
 }
-fn terminate_background_jobs(shell: &mut BrushShell) {
+fn background_job_targets(
+	shell: &mut BrushShell,
+) -> (process::TerminationTargets, Vec<process::Process>) {
 	let mut targets = process::TerminationTargets::new();
+	let mut processes = Vec::new();
 	for job in &mut shell.jobs_mut().jobs {
 		job.abort_internal_tasks();
 		if let Some(pgid) = job.process_group_id() {
@@ -1552,8 +1565,16 @@ fn terminate_background_jobs(shell: &mut BrushShell) {
 		}
 		if let Some(pid) = job.representative_pid() {
 			targets.add_pid(pid);
+			if let Some(process) = process::Process::from_pid(pid) {
+				processes.push(process);
+			}
 		}
 	}
+	(targets, processes)
+}
+
+fn terminate_background_jobs(shell: &mut BrushShell) {
+	let (targets, _) = background_job_targets(shell);
 	if targets.is_empty() {
 		// Shell-internal jobs were aborted above. Pure descendant cleanup is
 		// handled by `process_cancel_bridge` while the cancel was in flight;
@@ -1566,6 +1587,22 @@ fn terminate_background_jobs(shell: &mut BrushShell) {
 		time::sleep(Duration::from_millis(150)).await;
 		targets.signal(process::KILL_SIGNAL);
 	});
+}
+
+async fn terminate_background_jobs_and_wait(shell: &mut BrushShell) {
+	let (targets, processes) = background_job_targets(shell);
+	if targets.is_empty() {
+		return;
+	}
+
+	targets.signal(process::TERM_SIGNAL);
+	time::sleep(Duration::from_millis(150)).await;
+	targets.signal(process::KILL_SIGNAL);
+	for process in processes {
+		let _ = process
+			.wait_for_exit(Some(Duration::from_secs(1)), CancelToken::default())
+			.await;
+	}
 }
 
 /// Apply per-command environment variables onto a freshly pushed
@@ -8148,7 +8185,9 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		shell
 			.run(
 				ShellRunOptions {
-					command: "/bin/sleep 30 & printf '%d\\n' \"$!\"".into(),
+					command: "/bin/sh -c 'trap \"\" TERM; printf \"%d\\n\" \"$$\"; while :; do \
+					          /bin/sleep 1; done' &"
+						.into(),
 					..Default::default()
 				},
 				Some(tx),
@@ -8163,10 +8202,17 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 			.trim()
 			.parse::<i32>()
 			.expect("background pid should be an integer");
+		let child = process::Process::from_pid(child_pid)
+			.expect("background child should still be running before close");
 		assert_eq!(shell.live_background_job_count().await, 1);
+		assert_eq!(child.status(), process::ProcessStatus::Running);
 
 		shell.close().await;
-		wait_for_process_exit(child_pid).await;
+		assert_eq!(
+			child.status(),
+			process::ProcessStatus::Exited,
+			"TERM-ignoring background child must be gone when close resolves"
+		);
 	}
 
 	#[cfg(unix)]
@@ -9032,6 +9078,45 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 				.is_err(),
 			"completed run should no longer receive shared abort signals"
 		);
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn closed_state_blocks_session_creation_before_cancel_bridge_runs() {
+		let root = unique_temp_dir("closed-before-create");
+		let snapshot_path = root.join("snapshot.sh");
+		let marker_path = root.join("created");
+		let escaped_marker_path = marker_path.to_string_lossy().replace('\'', "'\\''");
+		std::fs::write(&snapshot_path, format!("printf created > '{escaped_marker_path}'\n"))
+			.expect("write snapshot");
+
+		let session = Arc::new(TokioMutex::new(None));
+		let abort_state = ShellAbortState::default();
+		abort_state.close();
+		let result = run_shell_session(
+			Arc::clone(&session),
+			abort_state,
+			ShellConfig {
+				session_env:   None,
+				snapshot_path: Some(snapshot_path.to_string_lossy().into_owned()),
+				minimizer:     None,
+			},
+			ShellRunConfig {
+				command:   "true".into(),
+				cwd:       None,
+				env:       None,
+				minimizer: None,
+			},
+			None,
+			&CancelToken::default(),
+		)
+		.await
+		.expect_err("closed state must reject creation before cancellation is bridged");
+
+		assert_eq!(result.to_string(), "Shell session is closed");
+		assert!(!marker_path.exists(), "closed run must not source its snapshot");
+		assert!(session.lock().await.is_none(), "closed run must not insert a session core");
+		let _ = std::fs::remove_dir_all(&root);
 	}
 
 	#[tokio::test]
