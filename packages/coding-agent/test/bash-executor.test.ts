@@ -6,6 +6,7 @@ import { resetSettingsForTest, Settings, type ShellMinimizerSettings } from "@oh
 import {
 	applyDirenvPreflight,
 	buildMinimizerOptions,
+	closeShellSession,
 	executeBash,
 	isPersistentShellCdCommand,
 } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
@@ -563,6 +564,23 @@ exit 64
 		if (timed.type === "result") {
 			expect(timed.result.output).toContain("fg");
 		}
+	});
+
+	it.skipIf(process.platform === "win32")("closes a retained async shell when its base owner closes", async () => {
+		const ownerSessionKey = `retained-owner-${Date.now()}`;
+		const closeSpy = vi.spyOn(piNatives.Shell.prototype, "close");
+		const sleepBin = fs.existsSync("/bin/sleep") ? "/bin/sleep" : "sleep";
+		const result = await executeBash(`${sleepBin} 30 >/dev/null 2>&1 & echo foreground-done`, {
+			cwd: tempDir,
+			timeout: 5000,
+			sessionKey: `${ownerSessionKey}:async:test-job`,
+			ownerSessionKey,
+		});
+		expect(result.output).toContain("foreground-done");
+		expect(closeSpy).not.toHaveBeenCalled();
+
+		await closeShellSession(ownerSessionKey);
+		expect(closeSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("returns a real PID for background external commands", async () => {
@@ -1296,7 +1314,11 @@ describe("executeBash :async: background retention", () => {
 	it.skipIf(process.platform === "win32")("closes a completed per-job :async: shell", async () => {
 		const closeSpy = vi.spyOn(piNatives.Shell.prototype, "close");
 
-		const result = await executeBash("true", { sessionKey: "close-probe:async:job1", cwd: tmp });
+		const result = await executeBash("true", {
+			sessionKey: "close-probe:async:job1",
+			ownerSessionKey: "close-probe",
+			cwd: tmp,
+		});
 
 		expect(result.exitCode).toBe(0);
 		expect(closeSpy).toHaveBeenCalledTimes(1);
@@ -1315,6 +1337,7 @@ describe("executeBash :async: background retention", () => {
 		const controller = new AbortController();
 		const execution = executeBash("blocked", {
 			sessionKey: "close-abort-probe:async:job1",
+			ownerSessionKey: "close-abort-probe",
 			cwd: tmp,
 			signal: controller.signal,
 			timeout: 0,
@@ -1341,6 +1364,7 @@ describe("executeBash :async: background retention", () => {
 
 			const result = await executeBash(`${sleepBin} 0.2 >/dev/null 2>&1 &`, {
 				sessionKey: "close-background-probe:async:job1",
+				ownerSessionKey: "close-background-probe",
 				cwd: tmp,
 			});
 
@@ -1370,6 +1394,7 @@ describe("executeBash :async: background retention", () => {
 				// unwrap), so it is the process we assert on.
 				const res = await executeBash(`${sleepBin} 30 >/dev/null 2>&1 & echo $! > ${shellQuote(pidFile)}`, {
 					sessionKey: "retain-probe:async:job1",
+					ownerSessionKey: "retain-probe",
 					cwd: tmp,
 				});
 				expect(res.cancelled).toBe(false);
@@ -1377,7 +1402,11 @@ describe("executeBash :async: background retention", () => {
 				expect(Number.isInteger(pid)).toBe(true);
 
 				// A later turn on a different per-job shell must not have killed it.
-				await executeBash("true", { sessionKey: "retain-probe:async:job2", cwd: tmp });
+				await executeBash("true", {
+					sessionKey: "retain-probe:async:job2",
+					ownerSessionKey: "retain-probe",
+					cwd: tmp,
+				});
 
 				let alive = true;
 				try {
@@ -1412,6 +1441,7 @@ describe("executeBash :async: background retention", () => {
 				const operand = `echo $$ > ${pidFile}; exec ${sleepBin} 30`;
 				const res = await executeBash(`nohup sh -c ${shellQuote(operand)} >/dev/null 2>&1 &`, {
 					sessionKey: "reparent-probe:async:job1",
+					ownerSessionKey: "reparent-probe",
 					cwd: tmp,
 				});
 				expect(res.cancelled).toBe(false);
@@ -1421,7 +1451,11 @@ describe("executeBash :async: background retention", () => {
 				expect(Number.isInteger(pid)).toBe(true);
 
 				// A later turn on a different per-job shell must not have killed it.
-				await executeBash("true", { sessionKey: "reparent-probe:async:job2", cwd: tmp });
+				await executeBash("true", {
+					sessionKey: "reparent-probe:async:job2",
+					ownerSessionKey: "reparent-probe",
+					cwd: tmp,
+				});
 
 				let alive = true;
 				try {

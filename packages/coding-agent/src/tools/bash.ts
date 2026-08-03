@@ -767,6 +767,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					const result = await executeBash(options.command, {
 						cwd: options.commandCwd,
 						sessionKey: `${this.session.getSessionId?.() ?? ""}:async:${jobId}`,
+						ownerSessionKey: this.session.getSessionId?.() ?? "",
 						timeout: options.timeoutMs ?? 0,
 						signal: runSignal,
 						env: options.resolvedEnv,

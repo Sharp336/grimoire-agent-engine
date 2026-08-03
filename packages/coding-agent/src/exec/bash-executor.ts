@@ -23,6 +23,8 @@ export interface BashExecutorOptions {
 	signal?: AbortSignal;
 	/** Session key suffix to isolate shell sessions per agent */
 	sessionKey?: string;
+	/** Stable agent session that owns a per-job shell session. */
+	ownerSessionKey?: string;
 	/** Additional environment variables to inject */
 	env?: Record<string, string>;
 	/** Run through the configured user shell instead of brush parsing directly. */
@@ -143,7 +145,12 @@ const shellSessionsInUse = new Set<string>();
  * SIGKILL its children. Keeping the reference alive lets the process survive
  * across turns; the Shell is closed once its last background job exits.
  */
-const retainedShells = new Set<Shell>();
+interface RetainedShell {
+	ownerSessionKey: string;
+	interval?: Timer;
+}
+
+const retainedShells = new Map<Shell, RetainedShell>();
 const RETAIN_REAP_INTERVAL_MS = 5_000;
 // Native cancellation may spend two seconds unwinding the shell before its
 // N-API chunk bridge drains. The JS watchdog must not race that teardown.
@@ -187,38 +194,47 @@ export async function closeShellSession(ownerSessionKey: string): Promise<void> 
 		const shell = forgetShellSession(sessionKey);
 		return shell ? [shell] : [];
 	});
+	for (const [shell, retained] of retainedShells) {
+		if (retained.ownerSessionKey !== ownerSessionKey) continue;
+		if (takeRetainedShell(shell, retained)) shells.push(shell);
+	}
 	await Promise.allSettled(shells.map(closeShell));
 }
 
-async function closeShellAfterLiveBackgroundJobs(shell: Shell): Promise<void> {
+function takeRetainedShell(shell: Shell, retained: RetainedShell): boolean {
+	if (retainedShells.get(shell) !== retained) return false;
+	retainedShells.delete(shell);
+	if (retained.interval) clearInterval(retained.interval);
+	return true;
+}
+
+async function closeShellAfterLiveBackgroundJobs(shell: Shell, ownerSessionKey: string): Promise<void> {
+	const retained: RetainedShell = { ownerSessionKey };
+	retainedShells.set(shell, retained);
 	let live: number;
 	try {
 		live = await shell.liveBackgroundJobCount();
 	} catch {
-		await closeShell(shell);
+		if (takeRetainedShell(shell, retained)) await closeShell(shell);
 		return;
 	}
+	if (retainedShells.get(shell) !== retained) return;
 	if (live <= 0) {
-		await closeShell(shell);
+		if (takeRetainedShell(shell, retained)) await closeShell(shell);
 		return;
 	}
-	retainedShells.add(shell);
-	const interval = setInterval(() => {
+	retained.interval = setInterval(() => {
 		void shell
 			.liveBackgroundJobCount()
 			.then(async remaining => {
 				if (remaining > 0) return;
-				clearInterval(interval);
-				retainedShells.delete(shell);
-				await closeShell(shell);
+				if (takeRetainedShell(shell, retained)) await closeShell(shell);
 			})
 			.catch(async () => {
-				clearInterval(interval);
-				retainedShells.delete(shell);
-				await closeShell(shell);
+				if (takeRetainedShell(shell, retained)) await closeShell(shell);
 			});
 	}, RETAIN_REAP_INTERVAL_MS);
-	interval.unref?.();
+	retained.interval.unref?.();
 }
 
 function quarantineShellSession(
@@ -453,6 +469,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		minimizer,
 	};
 	const sessionKey = buildSessionKey(shell, prefix, snapshotPath, shellEnv, options?.sessionKey, minimizer);
+	const ownerSessionKey = options?.ownerSessionKey ?? options?.sessionKey;
 	const persistentSessionBroken = brokenShellSessions.has(sessionKey);
 	if (persistentSessionBroken) {
 		const brokenShell = detachShellSession(sessionKey);
@@ -472,8 +489,8 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	if (!shellSession && !persistentSessionBroken && !sessionBusy) {
 		shellSession = new Shell(shellOptions);
 		shellSessions.set(sessionKey, shellSession);
-		if (options?.sessionKey !== undefined) {
-			shellSessionOwners.set(sessionKey, options.sessionKey);
+		if (ownerSessionKey !== undefined) {
+			shellSessionOwners.set(sessionKey, ownerSessionKey);
 		}
 	}
 	const executionShell = shellSession ?? new Shell(shellOptions);
@@ -664,20 +681,22 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		}
 		if (ownsPersistentSession) {
 			shellSessionsInUse.delete(sessionKey);
-			if (resetSession || options?.sessionKey?.includes(":async:")) {
-				// `:async:` keys are per-job (jobId is unique), so the Shell would
-				// otherwise stay in the process-global map forever after completion.
-				const removedShell = resetSession ? detachShellSession(sessionKey) : forgetShellSession(sessionKey);
+			const asyncOwnerSessionKey = options?.ownerSessionKey;
+			if (resetSession) {
+				const removedShell = detachShellSession(sessionKey);
 				if (removedShell) {
-					if (resetSession) {
-						closeShellAfter(
-							removedShell,
-							...(runPromise ? [runPromise] : []),
-							...(abortCleanupPromise ? [abortCleanupPromise] : []),
-						);
-					} else {
-						await closeShellAfterLiveBackgroundJobs(removedShell);
-					}
+					closeShellAfter(
+						removedShell,
+						...(runPromise ? [runPromise] : []),
+						...(abortCleanupPromise ? [abortCleanupPromise] : []),
+					);
+				}
+			} else if (asyncOwnerSessionKey !== undefined) {
+				// Managed async keys are per-job, so the Shell would otherwise stay
+				// in the process-global map forever after completion.
+				const removedShell = forgetShellSession(sessionKey);
+				if (removedShell) {
+					await closeShellAfterLiveBackgroundJobs(removedShell, asyncOwnerSessionKey);
 				}
 			}
 		}
