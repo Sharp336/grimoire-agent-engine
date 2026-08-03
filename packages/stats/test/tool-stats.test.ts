@@ -52,12 +52,14 @@ interface AssistantTurnOptions {
 	costTotal: number;
 }
 
+// The assistant request begins one minute before the persisted execution-start
+// markers so duration assertions catch accidental model-latency attribution.
 function buildAssistantEntry(opts: AssistantTurnOptions) {
 	return {
 		type: "message",
 		id: opts.entryId,
 		parentId: opts.parentId ?? null,
-		timestamp: opts.timestamp,
+		timestamp: new Date(Date.parse(opts.timestamp) - 60_000).toISOString(),
 		message: {
 			role: "assistant",
 			content: [
@@ -81,10 +83,21 @@ function buildAssistantEntry(opts: AssistantTurnOptions) {
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: opts.costTotal },
 			},
 			stopReason: "toolUse",
-			timestamp: Date.parse(opts.timestamp),
+			timestamp: Date.parse(opts.timestamp) - 60_000,
 			duration: 10,
 			ttft: 5,
 		},
+	};
+}
+
+function buildToolStartEntry(toolCallId: string, toolName: string, timestamp: string) {
+	return {
+		type: "custom",
+		id: `start-${toolCallId}`,
+		parentId: null,
+		timestamp,
+		customType: "tool_execution_start",
+		data: { toolCallId, toolName, startedAt: timestamp },
 	};
 }
 
@@ -153,6 +166,8 @@ function buildStandardEntries(): unknown[] {
 			outputTokens: TURN1_OUTPUT_TOKENS,
 			costTotal: TURN1_COST,
 		}),
+		buildToolStartEntry("call-1", "grep", TS1),
+		buildToolStartEntry("call-2", "read", TS1),
 		buildToolResultEntry({
 			entryId: "tr-1",
 			parentId: "asst-1",
@@ -179,6 +194,7 @@ function buildStandardEntries(): unknown[] {
 			outputTokens: TURN2_OUTPUT_TOKENS,
 			costTotal: TURN2_COST,
 		}),
+		buildToolStartEntry("call-3", "grep", TS2),
 		buildToolResultEntry({
 			entryId: "tr-3",
 			parentId: "asst-2",
@@ -210,14 +226,14 @@ describe("tool usage stats pipeline", () => {
 		expect(grep.resultChars).toBe(GREP_RESULT_1.length + GREP_RESULT_2.length);
 		expect(grep.durationSamples).toBe(2);
 		expect(grep.durationMsMedian).toBe(5_000);
-		expect(grep.durationMsP90).toBe(5_000);
+		expect(grep.durationMsP90).toBe(7_400);
 		expect(grep.argsChars).toBe(JSON.stringify(GREP_ARGS_1).length + JSON.stringify(GREP_ARGS_2).length);
 		// Turn 1's request is split across its two toolCall blocks; turn 2 is
 		// grep's alone: 100/2 + 40 = 90, 20/2 + 8 = 18, 0.01/2 + 0.004 = 0.009.
 		expect(grep.totalTokensShare).toBeCloseTo(90, 6);
 		expect(grep.outputTokensShare).toBeCloseTo(18, 6);
 		expect(grep.costShare).toBeCloseTo(0.009, 8);
-		expect(grep.lastUsed).toBe(Date.parse(TS2));
+		expect(grep.lastUsed).toBe(Date.parse(TS2) - 60_000);
 
 		const read = toolRow(stats, "read");
 		expect(read.calls).toBe(1);
@@ -230,7 +246,7 @@ describe("tool usage stats pipeline", () => {
 		expect(read.totalTokensShare).toBeCloseTo(50, 6);
 		expect(read.outputTokensShare).toBeCloseTo(10, 6);
 		expect(read.costShare).toBeCloseTo(0.005, 8);
-		expect(read.lastUsed).toBe(Date.parse(TS1));
+		expect(read.lastUsed).toBe(Date.parse(TS1) - 60_000);
 
 		// Per-model breakdown carries the fixture model/provider with the same split.
 		const byModel = getToolStatsByModel();
@@ -273,6 +289,7 @@ describe("tool usage stats pipeline", () => {
 				outputTokens: TURN2_OUTPUT_TOKENS,
 				costTotal: TURN2_COST,
 			}),
+			buildToolStartEntry("call-1", "grep", TS1),
 		]);
 		await syncAllSessions({ workers: 1 });
 

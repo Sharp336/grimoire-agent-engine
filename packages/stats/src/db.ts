@@ -23,6 +23,7 @@ import type {
 	ProviderTimeSeriesPoint,
 	TimeSeriesPoint,
 	ToolCallStats,
+	ToolInvocationLink,
 	ToolModelStats,
 	ToolResultLink,
 	ToolTimeSeriesPoint,
@@ -162,6 +163,7 @@ export async function initDb(): Promise<Database> {
 			model TEXT NOT NULL,
 			provider TEXT NOT NULL,
 			timestamp INTEGER NOT NULL,
+			started_at INTEGER,
 			agent_type TEXT NOT NULL DEFAULT 'main',
 			calls_in_turn INTEGER NOT NULL DEFAULT 1,
 			args_chars INTEGER NOT NULL DEFAULT 0,
@@ -231,6 +233,9 @@ export async function initDb(): Promise<Database> {
 	const toolCallColumns = db.prepare("PRAGMA table_info(tool_calls)").all() as { name: string }[];
 	if (!toolCallColumns.some(column => column.name === "duration_ms")) {
 		db.run("ALTER TABLE tool_calls ADD COLUMN duration_ms INTEGER");
+	}
+	if (!toolCallColumns.some(column => column.name === "started_at")) {
+		db.run("ALTER TABLE tool_calls ADD COLUMN started_at INTEGER");
 	}
 	const hasStaleColumn =
 		userMessageColumns.length > 0 &&
@@ -1518,9 +1523,9 @@ export function insertToolCalls(calls: ToolCallStats[]): number {
 	const stmt = db.prepare(`
 		INSERT OR IGNORE INTO tool_calls (
 			session_file, entry_id, tool_call_id, folder, tool_name,
-			model, provider, timestamp, agent_type, calls_in_turn, args_chars, duration_ms
+			model, provider, timestamp, agent_type, calls_in_turn, args_chars
 		)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		WHERE NOT EXISTS (
 			SELECT 1 FROM tool_calls
 			WHERE entry_id = ? AND timestamp = ? AND tool_call_id = ? AND session_file <> ?
@@ -1542,7 +1547,6 @@ export function insertToolCalls(calls: ToolCallStats[]): number {
 				c.agentType,
 				c.callsInTurn,
 				c.argsChars,
-				c.durationMs ?? null,
 				// `WHERE NOT EXISTS` binds: skip when a different session_file
 				// already holds this (entry_id, timestamp, tool_call_id).
 				c.entryId,
@@ -1557,6 +1561,24 @@ export function insertToolCalls(calls: ToolCallStats[]): number {
 	return inserted;
 }
 
+/** Persist the execution-start timestamp for DB-aware incremental result linking. */
+export function updateToolInvocations(links: ToolInvocationLink[]): number {
+	if (!db || links.length === 0) return 0;
+	const stmt = db.prepare(`
+		UPDATE tool_calls
+		SET started_at = ?
+		WHERE session_file = ? AND tool_call_id = ?
+	`);
+	let updated = 0;
+	const apply = db.transaction(() => {
+		for (const link of links) {
+			updated += stmt.run(link.timestamp, link.sessionFile, link.toolCallId).changes;
+		}
+	});
+	apply();
+	return updated;
+}
+
 /**
  * Attach result size / error flag to persisted tool-call rows. Results can
  * land in a later incremental sync pass than the call that produced them, so
@@ -1569,7 +1591,7 @@ export function updateToolResults(links: ToolResultLink[]): number {
 
 	const stmt = db.prepare(`
 		UPDATE tool_calls
-		SET result_chars = ?, duration_ms = COALESCE(?, duration_ms), is_error = ?
+		SET result_chars = ?, duration_ms = MAX(0, ? - COALESCE(started_at, timestamp)), is_error = ?
 		WHERE session_file = ? AND tool_call_id = ? AND result_chars IS NULL
 	`);
 
@@ -1578,7 +1600,7 @@ export function updateToolResults(links: ToolResultLink[]): number {
 		for (const link of links) {
 			const result = stmt.run(
 				link.resultChars,
-				link.durationMs ?? null,
+				link.timestamp,
 				link.isError ? 1 : 0,
 				link.sessionFile,
 				link.toolCallId,
@@ -1625,51 +1647,44 @@ interface ToolAggregateRow {
 	last_used: number;
 }
 
-function countDurationSamples(tableSql: string, params: Array<number | string>): number {
-	if (!db) return 0;
-	const row = db.prepare(`SELECT COUNT(*) AS count FROM (${tableSql})`).get(...params) as { count: number };
-	return row.count;
-}
-
 function durationPercentiles(
 	whereSql: string,
 	params: Array<number | string>,
-): { median: number; p90: number; samples: number } {
-	if (!db) return { median: 0, p90: 0, samples: 0 };
-	const tableSql = `
-		SELECT t.duration_ms
-		FROM tool_calls t
-		WHERE t.duration_ms IS NOT NULL${whereSql}
-	`;
-	const samples = countDurationSamples(tableSql, params);
-	if (samples === 0) return { median: 0, p90: 0, samples: 0 };
-	const fetch = (percentile: number): number => {
-		if (!db) return 0;
-		const row = db
-			.prepare(`
+	samples: number,
+): { median: number; p90: number } {
+	if (!db || samples === 0) return { median: 0, p90: 0 };
+	const medianIndex = (samples - 1) * 0.5;
+	const p90Index = (samples - 1) * 0.9;
+	const ranks = [
+		Math.floor(medianIndex) + 1,
+		Math.ceil(medianIndex) + 1,
+		Math.floor(p90Index) + 1,
+		Math.ceil(p90Index) + 1,
+	];
+	const rows = db
+		.prepare(`
 			WITH ordered AS (
-				SELECT duration_ms,
-					ROW_NUMBER() OVER (ORDER BY duration_ms) AS rank,
-					COUNT(*) OVER () AS count
-				FROM (${tableSql})
+				SELECT t.duration_ms, ROW_NUMBER() OVER (ORDER BY t.duration_ms) AS rank
+				FROM tool_calls t
+				WHERE t.duration_ms IS NOT NULL${whereSql}
 			)
-			SELECT AVG(duration_ms) AS duration_ms
+			SELECT rank, duration_ms
 			FROM ordered
-			WHERE rank IN (
-				1 + CAST((count - 1) * ? AS INTEGER),
-				1 + CAST((count - 1) * ? + 0.999999999 AS INTEGER)
-			)
+			WHERE rank IN (?, ?, ?, ?)
 		`)
-			.get(...params, percentile, percentile) as { duration_ms: number | null } | undefined;
-		return row?.duration_ms ?? 0;
+		.all(...params, ...ranks) as Array<{ rank: number; duration_ms: number }>;
+	const values = new Map(rows.map(row => [row.rank, row.duration_ms]));
+	const interpolate = (index: number): number => {
+		const lowerRank = Math.floor(index) + 1;
+		const upperRank = Math.ceil(index) + 1;
+		const lower = values.get(lowerRank) ?? 0;
+		const upper = values.get(upperRank) ?? lower;
+		return lower + (upper - lower) * (index - Math.floor(index));
 	};
-	return { median: fetch(0.5), p90: fetch(0.9), samples };
+	return { median: interpolate(medianIndex), p90: interpolate(p90Index) };
 }
 
-function rowToToolUsage(
-	row: ToolAggregateRow,
-	duration: { median: number; p90: number; samples: number },
-): ToolUsageStats {
+function rowToToolUsage(row: ToolAggregateRow, duration: { median: number; p90: number }): ToolUsageStats {
 	return {
 		tool: row.tool_name,
 		calls: row.calls,
@@ -1678,7 +1693,7 @@ function rowToToolUsage(
 		resultChars: row.result_chars ?? 0,
 		durationMsMedian: duration.median,
 		durationMsP90: duration.p90,
-		durationSamples: duration.samples,
+		durationSamples: row.duration_samples ?? 0,
 		totalTokensShare: row.total_tokens_share ?? 0,
 		outputTokensShare: row.output_tokens_share ?? 0,
 		costShare: row.cost_share ?? 0,
@@ -1705,10 +1720,11 @@ export function getToolStats(cutoff?: number): ToolUsageStats[] {
 	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as ToolAggregateRow[];
 	const params = hasCutoff ? [cutoff] : [];
 	return rows.map(row => {
-		const duration = durationPercentiles(` AND t.tool_name = ?${hasCutoff ? " AND t.timestamp >= ?" : ""}`, [
-			row.tool_name,
-			...params,
-		]);
+		const duration = durationPercentiles(
+			` AND t.tool_name = ?${hasCutoff ? " AND t.timestamp >= ?" : ""}`,
+			[row.tool_name, ...params],
+			row.duration_samples ?? 0,
+		);
 		return rowToToolUsage(row, duration);
 	});
 }
@@ -1735,6 +1751,7 @@ export function getToolStatsByModel(cutoff?: number): ToolModelStats[] {
 		const duration = durationPercentiles(
 			` AND t.tool_name = ? AND t.model = ? AND t.provider = ?${hasCutoff ? " AND t.timestamp >= ?" : ""}`,
 			[row.tool_name, row.model ?? "", row.provider ?? "", ...params],
+			row.duration_samples ?? 0,
 		);
 		return {
 			...rowToToolUsage(row, duration),

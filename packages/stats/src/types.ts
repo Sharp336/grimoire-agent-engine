@@ -75,7 +75,24 @@ export interface SessionServiceTierChangeEntry {
 	serviceTier: ServiceTierByFamily | ServiceTier | null;
 }
 
-export type SessionEntry = SessionHeader | SessionMessageEntry | SessionServiceTierChangeEntry | { type: string };
+export interface SessionToolExecutionStartEntry {
+	type: "custom";
+	id: string;
+	parentId: string | null;
+	timestamp: string;
+	customType: "tool_execution_start";
+	data?: {
+		toolCallId?: unknown;
+		startedAt?: unknown;
+	};
+}
+
+export type SessionEntry =
+	| SessionHeader
+	| SessionMessageEntry
+	| SessionServiceTierChangeEntry
+	| SessionToolExecutionStartEntry
+	| { type: string };
 
 /**
  * Behavioral stats extracted from a single user message.
@@ -147,7 +164,7 @@ export interface ToolCallStats {
 	model: string;
 	/** Provider name */
 	provider: string;
-	/** Assistant-message timestamp (Unix ms) */
+	/** Fallback invocation boundary from the persisted assistant entry (Unix ms) */
 	timestamp: number;
 	/** Which agent produced the call */
 	agentType: AgentType;
@@ -155,8 +172,13 @@ export interface ToolCallStats {
 	callsInTurn: number;
 	/** Serialized argument characters */
 	argsChars: number;
-	/** Milliseconds from the invoking assistant turn to this result, when known */
-	durationMs?: number;
+}
+
+/** Actual invocation timestamp emitted by a persisted tool-execution marker. */
+export interface ToolInvocationLink {
+	sessionFile: string;
+	toolCallId: string;
+	timestamp: number;
 }
 
 /**
@@ -169,7 +191,7 @@ export interface ToolResultLink {
 	toolCallId: string;
 	/** Text characters fed back into context */
 	resultChars: number;
-	/** Milliseconds from the invoking assistant turn to this result, when known */
-	durationMs?: number;
+	/** Tool-result completion timestamp (Unix ms) */
+	timestamp: number;
 	isError: boolean;
 }
