@@ -539,6 +539,9 @@
 - Fixed `/live` sideband WebSockets ignoring standard proxy environment variables and `NO_PROXY`, which left proxied sessions stuck while the rest of the Codex connection succeeded ([#6770](https://github.com/can1357/oh-my-pi/issues/6770)).
 - Fixed the bash tool's `kill` builtin rejecting numeric signals and multiple process operands, stopping after the first failed target, and defaulting to `SIGKILL` instead of the standard `SIGTERM`. Negative PID operands (process groups per `kill(2)`) and the `--` end-of-options marker are now handled instead of being misparsed as signals ([#6779](https://github.com/can1357/oh-my-pi/issues/6779)).
 - Fixed `learned.md` saves growing a blank line on every write (trailing-newline split artifact) and hoisting all headings/prose above all bullets, which re-scoped lessons under the wrong heading in hand-organized files. Saves are now byte-idempotent and preserve mixed Markdown ordering: non-list lines keep their positions, new lessons insert newest-first at the head of the first bullet run, and dedupe/cap operate on bullet lines in place.
+### Changed
+
+- Changed Agent Hub to prioritize running agents, collapse idle agents, archive parked and aborted agents, and expose responsive live runtime details with structured activity ([#5251](https://github.com/can1357/oh-my-pi/pull/5251) by [@wolfiesch](https://github.com/wolfiesch)).
 
 ## [17.1.5] - 2026-07-27
 
@@ -832,10 +835,6 @@
 - Fixed in-progress aborts awaiting `session_stop` extension handlers whose results would be discarded.
 - Fixed `/retry` reporting "Nothing to retry" after a stream stalled or aborted mid-tool-call.
 - Fixed locally consumed extension commands triggering automatic title generation and exposing their command text to the title model.
-### Changed
-
-- Changed Agent Hub to default to running-agent visibility, archive parked and aborted agents, and expose live runtime metadata with structured activity ([#5251](https://github.com/can1357/oh-my-pi/pull/5251) by [@wolfiesch](https://github.com/wolfiesch)).
-
 ## [17.0.7] - 2026-07-21
 
 ### Fixed

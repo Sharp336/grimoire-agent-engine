@@ -157,6 +157,46 @@ describe("Agent hub Enter activation", () => {
 		hub.dispose();
 	});
 
+	it("x aborts and releases a running agent from the Active tab", async () => {
+		const agents = new AgentRegistry();
+		const abort = vi.fn(async () => {});
+		const session = { abort } as unknown as AgentSession;
+		agents.register({
+			id: AGENT_ID,
+			displayName: AGENT_ID,
+			kind: "sub",
+			parentId: "Main",
+			session,
+			sessionFile: null,
+			status: "running",
+		});
+		const released = Promise.withResolvers<void>();
+		const release = vi.fn(async () => {
+			released.resolve();
+		});
+		const hub = new AgentHubOverlayComponent({
+			observers: new SessionObserverRegistry(),
+			hubKeys: [],
+			onDone: () => {},
+			requestRender: () => {},
+			registry: agents,
+			irc: new IrcBus(agents),
+			focusAgent: async () => {},
+			lifecycle: { release } as unknown as AgentLifecycleManager,
+		});
+
+		expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain("x:kill");
+		hub.handleInput("x");
+		await released.promise;
+
+		expect(abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
+		expect(release).toHaveBeenCalledWith(
+			AGENT_ID,
+			expect.objectContaining({ id: AGENT_ID, status: "running", session }),
+		);
+		hub.dispose();
+	});
+
 	it("archive Enter opens a transcript and r is the only revive action", async () => {
 		const agents = new AgentRegistry();
 		agents.register({

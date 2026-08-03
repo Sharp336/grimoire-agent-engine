@@ -31,15 +31,21 @@ function createYieldingSession(
 		initialModel?: Model<Api>;
 		fallbackModel?: Model<Api>;
 		restoredModel?: Model<Api>;
+		emitFallback?: boolean;
+		liveFallbackOwnership?: boolean;
 	} = {},
 ): AgentSession {
 	const listeners: Array<(event: { type: string; [key: string]: unknown }) => void> = [];
 	const activeToolNames = options.activeToolNames ?? ["yield"];
+	let fallbackOwnership = false;
 	const session = {
 		agent: { state: { systemPrompt: ["test"] } },
 		state: { messages: [] },
 		model: options.initialModel,
 		thinkingLevel: options.initialThinkingLevel,
+		get retryFallbackModel() {
+			return fallbackOwnership ? "fallback/working-model" : undefined;
+		},
 		extensionRunner: undefined,
 		sessionManager: { appendSessionInit: () => {} },
 		getActiveToolNames: () => activeToolNames,
@@ -59,15 +65,23 @@ function createYieldingSession(
 						thinkingLevel: options.thinkingLevel,
 					});
 				}
-				if (options.fallbackModel) session.model = options.fallbackModel;
-				listener({
-					type: "retry_fallback_applied",
-					from: "primary/bad-runtime-model",
-					to: "fallback/working-model",
-					role: "subagent:issue-2750",
-				});
+				if (options.emitFallback !== false) {
+					fallbackOwnership = options.liveFallbackOwnership === true;
+					if (options.fallbackModel) session.model = options.fallbackModel;
+					listener({
+						type: "retry_fallback_applied",
+						from: "primary/bad-runtime-model",
+						to: "fallback/working-model",
+						role: "subagent:issue-2750",
+					});
+				}
 				if (options.restoredModel) {
 					session.model = options.restoredModel;
+					if (options.liveFallbackOwnership) {
+						session.thinkingLevel = Effort.High;
+						listener({ type: "thinking_level_changed", thinkingLevel: Effort.High });
+						fallbackOwnership = false;
+					}
 					listener({ type: "auto_retry_end", attempt: 1, success: true });
 				}
 				listener({
@@ -99,7 +113,14 @@ describe("subagent runtime model resolution", () => {
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			if (!options) throw new Error("Expected createAgentSession options");
 			childFallbackChains = options.settings?.get("retry.fallbackChains") as Record<string, string[]> | undefined;
-			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
+			return {
+				session: createYieldingSession({
+					initialModel: primary,
+					fallbackModel: fallback,
+				}),
+				extensionsResult: {},
+				setToolUIContext: () => {},
+			} as never;
 		});
 
 		const agent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
@@ -145,6 +166,7 @@ describe("subagent runtime model resolution", () => {
 		expect(inheritedFallbackChain).toEqual(["global/inherited-model"]);
 		expect(result.modelOverride).toEqual(["primary/bad-runtime-model", "fallback/working-model"]);
 		expect(result.resolvedModel).toBe("fallback/working-model");
+		expect(result.resolvedModelIsFallback).toBe(true);
 	});
 
 	it("clears fallback state and refreshes context limits when the primary model is restored", async () => {
@@ -162,6 +184,7 @@ describe("subagent runtime model resolution", () => {
 						initialModel: primary,
 						fallbackModel: fallback,
 						restoredModel: primary,
+						liveFallbackOwnership: true,
 					}),
 					extensionsResult: {},
 					setToolUIContext: () => {},
@@ -584,6 +607,8 @@ describe("subagent runtime model resolution", () => {
 			thinkingLevel?: string;
 			lspEnabled?: boolean;
 			advisorActive?: boolean;
+			resolvedModel?: string;
+			contextWindow?: number;
 		}> = [];
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(
 			async () =>
@@ -592,6 +617,8 @@ describe("subagent runtime model resolution", () => {
 						advisorActive: true,
 						initialThinkingLevel: Effort.High,
 						thinkingLevel: Effort.Medium,
+						initialModel: primary,
+						emitFallback: false,
 					}),
 					extensionsResult: {},
 					setToolUIContext: () => {},
@@ -604,8 +631,7 @@ describe("subagent runtime model resolution", () => {
 			task: "work",
 			index: 0,
 			id: "runtime-capabilities",
-			modelOverride: "primary/runtime-model",
-			thinkingLevel: Effort.High,
+			modelOverride: "primary/runtime-model:high",
 			settings: Settings.isolated(),
 			modelRegistry: {
 				refresh: async () => {},
@@ -618,6 +644,8 @@ describe("subagent runtime model resolution", () => {
 					thinkingLevel: progress.thinkingLevel,
 					lspEnabled: progress.lspEnabled,
 					advisorActive: progress.advisorActive,
+					resolvedModel: progress.resolvedModel,
+					contextWindow: progress.contextWindow,
 				});
 			},
 		});
@@ -626,11 +654,15 @@ describe("subagent runtime model resolution", () => {
 			thinkingLevel: "high",
 			lspEnabled: false,
 			advisorActive: true,
+			resolvedModel: "primary/runtime-model:high",
+			contextWindow: 128000,
 		});
 		expect(snapshots).toContainEqual({
 			thinkingLevel: "medium",
 			lspEnabled: false,
 			advisorActive: true,
+			resolvedModel: "primary/runtime-model:high",
+			contextWindow: 128000,
 		});
 	});
 });

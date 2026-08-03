@@ -757,14 +757,17 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 				end++;
 			}
 		}
-		if (start > 0) lines.push(` ${theme.fg("dim", `… ${start} more`)}`);
-		for (let i = start; i < end; i++) lines.push(...renderedRows[i]!);
-		if (end < this.#rows.length) lines.push(` ${theme.fg("dim", `… ${this.#rows.length - end} more`)}`);
-		if (this.#tab === "active" && idleCount > 0) {
-			lines.push(` ${theme.fg("dim", `${this.#showIdle ? "▾" : "▸"} ${idleCount} idle agents`)}`);
+
+		const lines = [...prefixLines];
+		if (showLeadingMarker) lines.push(` ${theme.fg("dim", `… ${start} more`)}`);
+		if (selectedLines) {
+			lines.push(...selectedLines);
+		} else {
+			for (let i = start; i < end; i++) lines.push(...renderedRows[i]!);
 		}
-		if (this.#tab === "archive" && this.#rows.length === 0) lines.push(` ${theme.fg("dim", "No archived agents.")}`);
-		return lines;
+		if (showTrailingMarker) lines.push(` ${theme.fg("dim", `… ${this.#rows.length - end} more`)}`);
+		lines.push(...suffixLines);
+		return lines.slice(0, maxLines);
 	}
 
 	#runtimeView(ref: AgentRef): AgentRuntimeView {
@@ -1192,7 +1195,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			this.#reviveSelected();
 			return;
 		}
-		if (this.#tab === "archive" && keyData === "x") this.#killSelected();
+		if (keyData === "x") this.#killSelected();
 	}
 
 	/**

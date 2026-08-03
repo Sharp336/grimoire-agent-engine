@@ -47,7 +47,13 @@ import type { AuthStorage } from "../session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
-import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
+import {
+	type ConfiguredThinkingLevel,
+	parseConfiguredThinkingLevel,
+	prewalkWouldBeNoop,
+	resolveTaskEffortLevel,
+	type TaskEffort,
+} from "../thinking";
 import type { ContextFileEntry, ToolSession } from "../tools";
 import { resolveEvalBackends } from "../tools/eval-backends";
 import { isIrcEnabled } from "../tools/hub";
@@ -996,6 +1002,16 @@ function isAsyncResultInjection(message: AgentMessage | undefined): boolean {
 	return message?.role === "custom" && message.customType === ASYNC_RESULT_MESSAGE_TYPE;
 }
 
+function synchronizeResolvedModelSelector(
+	current: string | undefined,
+	runtimeModel: string | undefined,
+): string | undefined {
+	if (!current || !runtimeModel || current === runtimeModel) return runtimeModel;
+	const suffixPrefix = `${runtimeModel}:`;
+	if (!current.startsWith(suffixPrefix)) return runtimeModel;
+	return parseConfiguredThinkingLevel(current.slice(suffixPrefix.length)) !== undefined ? current : runtimeModel;
+}
+
 function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	const {
 		index,
@@ -1659,18 +1675,47 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	};
 
 	const attach = (session: AgentSession): (() => void) => {
-		let activeModel = session.model ? formatModelStringWithRouting(session.model) : undefined;
+		let fallbackOwnedBySession = false;
+		const syncRuntimeProgress = (): boolean => {
+			const runtimeModel = session.model ? formatModelStringWithRouting(session.model) : undefined;
+			const model = synchronizeResolvedModelSelector(progress.resolvedModel, runtimeModel);
+			const contextWindow =
+				session.model?.contextWindow && session.model.contextWindow > 0 ? session.model.contextWindow : undefined;
+			const thinkingLevel = session.thinkingLevel;
+			const lspEnabled = session.getActiveToolNames?.().includes("lsp") ?? false;
+			const advisorActive = session.isAdvisorActive?.();
+			const sessionOwnsFallback = session.retryFallbackModel !== undefined;
+			let resolvedModelIsFallback: true | undefined;
+			if (sessionOwnsFallback) {
+				resolvedModelIsFallback = true;
+				fallbackOwnedBySession = true;
+			} else if (fallbackOwnedBySession) {
+				resolvedModelIsFallback = undefined;
+				fallbackOwnedBySession = false;
+			} else {
+				resolvedModelIsFallback =
+					progress.resolvedModel === model && progress.resolvedModelIsFallback === true ? true : undefined;
+			}
+			const changed =
+				progress.resolvedModel !== model ||
+				progress.contextWindow !== contextWindow ||
+				progress.thinkingLevel !== thinkingLevel ||
+				progress.lspEnabled !== lspEnabled ||
+				progress.advisorActive !== advisorActive ||
+				progress.resolvedModelIsFallback !== resolvedModelIsFallback;
+			progress.resolvedModel = model;
+			progress.contextWindow = contextWindow;
+			progress.thinkingLevel = thinkingLevel;
+			progress.lspEnabled = lspEnabled;
+			progress.advisorActive = advisorActive;
+			progress.resolvedModelIsFallback = resolvedModelIsFallback;
+			return changed;
+		};
+		syncRuntimeProgress();
+		scheduleProgress(true);
 		return session.subscribe(event => {
 			emitSubagentEvent(event);
-			const nextModel = session.model ? formatModelStringWithRouting(session.model) : undefined;
-			if (nextModel && nextModel !== activeModel) {
-				activeModel = nextModel;
-				progress.resolvedModel = nextModel;
-				progress.resolvedModelIsFallback = undefined;
-				const contextWindow = session.model?.contextWindow;
-				progress.contextWindow = contextWindow && contextWindow > 0 ? contextWindow : undefined;
-				scheduleProgress(true);
-			}
+			if (syncRuntimeProgress()) scheduleProgress(true);
 			if (event.type === "auto_retry_start") {
 				progress.retryState = {
 					attempt: event.attempt,
