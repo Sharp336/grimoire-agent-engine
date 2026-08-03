@@ -1701,6 +1701,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
 			getAgentId: () => resolvedAgentId,
+			deliverAsyncResult: (jobId, result, job) => session.deliverAsyncJobResult(jobId, result, job),
 			getToolByName: name => session?.getToolByName(name),
 			agentRegistry,
 			// The global lifecycle releases through AgentRegistry.global(); wiring it

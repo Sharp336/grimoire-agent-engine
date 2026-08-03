@@ -159,6 +159,69 @@ describe("AsyncJobManager", () => {
 		manager.cancel(firstJobId);
 	});
 
+	test("passive jobs remain cancellable without consuming execution capacity", async () => {
+		const manager = new AsyncJobManager({
+			maxRunningJobs: 1,
+			onJobComplete: async () => {},
+		});
+		const passiveGate = Promise.withResolvers<string>();
+		const runningGate = Promise.withResolvers<string>();
+
+		const runningJobId = manager.register("bash", "running", async () => await runningGate.promise);
+		expect(manager.atCapacity).toBe(true);
+
+		const passiveJobId = manager.register("wakeup", "future wakeup", async () => await passiveGate.promise, {
+			passive: true,
+		});
+		expect(manager.getJob(passiveJobId)?.passive).toBe(true);
+		expect(() => manager.register("task", "blocked", async () => "done")).toThrow(/Background job limit reached/);
+		expect(manager.cancel(passiveJobId)).toBe(true);
+
+		passiveGate.resolve("cancelled");
+		runningGate.resolve("done");
+		await manager.waitForAll();
+		expect(manager.getJob(passiveJobId)?.status).toBe("cancelled");
+		expect(manager.getJob(runningJobId)?.status).toBe("completed");
+	});
+
+	test("bounds passive registrations independently from execution capacity", async () => {
+		const manager = new AsyncJobManager({
+			maxRunningJobs: 1,
+			maxPassiveJobs: 2,
+			onJobComplete: async () => {},
+		});
+		const firstGate = Promise.withResolvers<string>();
+		const secondGate = Promise.withResolvers<string>();
+		const replacementGate = Promise.withResolvers<string>();
+		const runningGate = Promise.withResolvers<string>();
+
+		const first = manager.register("wakeup", "first wakeup", async () => await firstGate.promise, {
+			passive: true,
+		});
+		manager.register("wakeup", "second wakeup", async () => await secondGate.promise, { passive: true });
+		expect(manager.atCapacity).toBe(false);
+
+		manager.register("bash", "running", async () => await runningGate.promise);
+		expect(manager.atCapacity).toBe(true);
+		expect(() => manager.register("wakeup", "excess wakeup", async () => "done", { passive: true })).toThrow(
+			/Passive job limit reached/,
+		);
+
+		expect(manager.cancel(first)).toBe(true);
+		const replacement = manager.register("wakeup", "replacement wakeup", async () => await replacementGate.promise, {
+			passive: true,
+		});
+		expect(manager.getJob(replacement)?.passive).toBe(true);
+		expect(manager.atCapacity).toBe(true);
+
+		manager.cancelAll();
+		firstGate.resolve("cancelled");
+		secondGate.resolve("cancelled");
+		replacementGate.resolve("cancelled");
+		runningGate.resolve("cancelled");
+		await manager.waitForAll();
+	});
+
 	test("queued jobs do not count toward the cap until markRunning", async () => {
 		const manager = new AsyncJobManager({
 			maxRunningJobs: 1,
