@@ -7,6 +7,7 @@ type OpenAICompatibleValidationOptions = {
 	baseUrl: string;
 	model: string;
 	signal?: AbortSignal;
+	headers?: Record<string, string>;
 	fetch?: FetchImpl;
 };
 type AnthropicCompatibleValidationOptions = {
@@ -68,6 +69,7 @@ export async function validateOpenAICompatibleApiKey(options: OpenAICompatibleVa
 		method: "POST",
 		headers: {
 			"Content-Type": "application/json",
+			...options.headers,
 			Authorization: `Bearer ${options.apiKey}`,
 		},
 		body: JSON.stringify({
