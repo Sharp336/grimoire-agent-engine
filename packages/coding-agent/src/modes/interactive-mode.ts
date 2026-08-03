@@ -4064,11 +4064,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		popTerminalTitle();
 		this.stop();
 
-		// Print resumption hint if this is a persisted session
+		// Copy and print the resumption command if this is a persisted session.
 		const sessionId = this.sessionManager.getSessionId();
 		const sessionFile = this.sessionManager.getSessionFile();
 		if (sessionId && sessionFile) {
-			process.stderr.write(`\n${chalk.dim(`Resume this session with ${APP_NAME} --resume ${sessionId}`)}\n`);
+			const resumeCommand = `${APP_NAME} --resume ${sessionId}`;
+			await copyToClipboard(resumeCommand);
+			process.stderr.write(`\n${chalk.dim(`Resume this session with ${resumeCommand} (copied to clipboard)`)}\n`);
 		}
 
 		await postmortem.quit(0);

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Copied the resume command to the system clipboard when an interactive session closes.
+
 ## [17.2.6] - 2026-08-03
 
 ### Added
