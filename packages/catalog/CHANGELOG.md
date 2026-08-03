@@ -4,6 +4,10 @@
 
 ## [17.2.7] - 2026-08-03
 
+### Added
+
+- Added Vercel AI Gateway `zeroDataRetention` routing preference to `VercelGatewayRouting`, configurable per model via `compat.vercelGatewayRouting`.
+
 ### Fixed
 
 - Fixed an issue where setting `thinking-level: off` failed to disable reasoning on direct DeepSeek V4 requests.

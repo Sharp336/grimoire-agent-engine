@@ -8,6 +8,10 @@
 
 - Replaced `arktype` with `@oh-my-pi/omptype` for schema validation, delivering up to 100x faster schema construction and 60-100x faster validation while maintaining full compatibility with existing `type`/`Type` exports and the `isArkSchema` contract.
 
+### Added
+
+- Added opt-in Vercel AI Gateway per-request Zero Data Retention (`zeroDataRetention`) for Chat Completions and Responses, emitted under `providerOptions.gateway` alongside existing `only`/`order`/`caching` routing.
+
 ### Fixed
 
 - Fixed OpenAI-Codex (ChatGPT OAuth) requests failing with an `Unsupported service_tier: auto` error on default or legacy sessions by omitting the implicit `auto` service tier on the wire.

@@ -19,8 +19,8 @@ describe("Portkey gateway model references", () => {
 	});
 });
 
-describe("Vercel AI Gateway cache compat", () => {
-	test("resolves Chat Completions caching controls only for the Vercel endpoint", () => {
+describe("Vercel AI Gateway compat", () => {
+	test("resolves Chat Completions gateway controls only for the Vercel endpoint", () => {
 		const model = buildModel({
 			id: "anthropic/claude-sonnet-4.6",
 			name: "Claude Sonnet 4.6",
@@ -37,6 +37,7 @@ describe("Vercel AI Gateway cache compat", () => {
 					only: ["anthropic"],
 					order: ["anthropic", "bedrock"],
 					caching: "auto",
+					zeroDataRetention: true,
 				},
 			},
 		} satisfies ModelSpec<"openai-completions">);
@@ -46,12 +47,13 @@ describe("Vercel AI Gateway cache compat", () => {
 			only: ["anthropic"],
 			order: ["anthropic", "bedrock"],
 			caching: "auto",
+			zeroDataRetention: true,
 		});
 	});
 });
 
-test("resolves Responses cache controls only for the Vercel endpoint", () => {
-	const routing = { caching: "auto" as const, cacheAnchorItems: 1, cacheTtl: "1h" as const };
+test("resolves Responses gateway controls only for the Vercel endpoint", () => {
+	const routing = { caching: "auto" as const, cacheAnchorItems: 1, cacheTtl: "1h" as const, zeroDataRetention: true };
 	const vercel = buildModel({
 		id: "anthropic/claude-sonnet-4.6",
 		name: "Claude Sonnet 4.6",

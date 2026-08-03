@@ -556,6 +556,8 @@ export interface VercelGatewayRouting {
 	cacheAnchorItems?: number;
 	/** Requested automatic-cache lifetime for the Responses API. */
 	cacheTtl?: "5m" | "1h";
+	/** Route only through providers with zero data retention agreements with Vercel. */
+	zeroDataRetention?: boolean;
 }
 
 type ResolvedToolStrictMode = NonNullable<OpenAICompat["toolStrictMode"]> | "mixed";

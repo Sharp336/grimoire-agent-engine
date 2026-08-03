@@ -215,3 +215,99 @@ describe("Vercel AI Gateway automatic cache controls", () => {
 		}
 	});
 });
+
+describe("Vercel AI Gateway zero data retention", () => {
+	it("maps zeroDataRetention to the documented Chat and Responses request shapes", async () => {
+		const routing: VercelGatewayRouting = { zeroDataRetention: true };
+		const [chat, responses] = await Promise.all([
+			captureChatPayload(vercelChatModel(routing)),
+			captureResponsesPayload(responsesModel("vercel-ai-gateway", "https://ai-gateway.vercel.sh/v1", routing)),
+		]);
+
+		expect(chat.providerOptions).toEqual({ gateway: { zeroDataRetention: true } });
+		expect(chat.caching).toBeUndefined();
+
+		expect(responses.providerOptions).toEqual({ gateway: { zeroDataRetention: true } });
+		expect(responses.caching).toBeUndefined();
+	});
+
+	it("keeps zeroDataRetention beside only/order routing on both surfaces", async () => {
+		const routing: VercelGatewayRouting = {
+			only: ["bedrock"],
+			order: ["anthropic", "bedrock"],
+			zeroDataRetention: true,
+		};
+		const [chat, responses] = await Promise.all([
+			captureChatPayload(vercelChatModel(routing)),
+			captureResponsesPayload(responsesModel("vercel-ai-gateway", "https://ai-gateway.vercel.sh/v1", routing)),
+		]);
+
+		expect(chat.providerOptions).toEqual({
+			gateway: { only: ["bedrock"], order: ["anthropic", "bedrock"], zeroDataRetention: true },
+		});
+		expect(responses.providerOptions).toEqual({
+			gateway: { only: ["bedrock"], order: ["anthropic", "bedrock"], zeroDataRetention: true },
+		});
+	});
+
+	it("keeps zeroDataRetention while suppressing caching when cache retention is none", async () => {
+		const routing: VercelGatewayRouting = { caching: "auto", zeroDataRetention: true };
+		const [chat, responses] = await Promise.all([
+			captureChatPayload(vercelChatModel(routing), { cacheRetention: "none" }),
+			captureResponsesPayload(responsesModel("vercel-ai-gateway", "https://ai-gateway.vercel.sh/v1", routing), {
+				cacheRetention: "none",
+			}),
+		]);
+
+		// ZDR is a routing constraint, not a cache preference: `none` retention
+		// suppresses `caching` but must not silently drop zeroDataRetention.
+		expect(chat.providerOptions).toEqual({ gateway: { zeroDataRetention: true } });
+		expect(chat.caching).toBeUndefined();
+
+		expect(responses.providerOptions).toEqual({ gateway: { zeroDataRetention: true } });
+		expect(responses.caching).toBeUndefined();
+	});
+
+	it("keeps zeroDataRetention while suppressing caching when PI_CACHE_RETENTION is none", async () => {
+		const routing: VercelGatewayRouting = { caching: "auto", zeroDataRetention: true };
+		await withEnv({ PI_CACHE_RETENTION: "none" }, async () => {
+			const [chat, responses] = await Promise.all([
+				captureChatPayload(vercelChatModel(routing)),
+				captureResponsesPayload(responsesModel("vercel-ai-gateway", "https://ai-gateway.vercel.sh/v1", routing)),
+			]);
+
+			expect(chat.providerOptions).toEqual({ gateway: { zeroDataRetention: true } });
+			expect(chat.caching).toBeUndefined();
+
+			expect(responses.providerOptions).toEqual({ gateway: { zeroDataRetention: true } });
+			expect(responses.caching).toBeUndefined();
+		});
+	});
+
+	it("emits nothing for unset, disabled, or non-Vercel hosts", async () => {
+		const nonVercelChat = buildModel({
+			id: "anthropic/claude-sonnet-4.6",
+			name: "Claude Sonnet 4.6",
+			api: "openai-completions",
+			provider: "custom",
+			baseUrl: "https://api.example.com/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 16_384,
+			compat: { vercelGatewayRouting: { zeroDataRetention: true } },
+		} satisfies ModelSpec<"openai-completions">);
+
+		const [unsetChat, disabledChat, nonVercelChatPayload, nonVercelResponses] = await Promise.all([
+			captureChatPayload(vercelChatModel()),
+			captureChatPayload(vercelChatModel({ zeroDataRetention: false })),
+			captureChatPayload(nonVercelChat),
+			captureResponsesPayload(responsesModel("custom", "https://api.example.com/v1", { zeroDataRetention: true })),
+		]);
+
+		for (const payload of [unsetChat, disabledChat, nonVercelChatPayload, nonVercelResponses]) {
+			expect(payload.providerOptions).toBeUndefined();
+		}
+	});
+});

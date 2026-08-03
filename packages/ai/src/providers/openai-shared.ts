@@ -622,7 +622,7 @@ export function resolveOpenAIOutputTokenParam(
 
 export interface OpenAIGatewayRoutingParams {
 	provider?: OpenRouterRouting;
-	providerOptions?: { gateway?: Pick<VercelGatewayRouting, "only" | "order" | "caching"> };
+	providerOptions?: { gateway?: Pick<VercelGatewayRouting, "only" | "order" | "caching" | "zeroDataRetention"> };
 }
 
 export interface OpenAIGatewayRoutingCompat {
@@ -640,18 +640,24 @@ export interface OpenAIGatewayRoutingCompat {
 export function applyOpenAIGatewayRouting(
 	params: OpenAIGatewayRoutingParams,
 	compat: OpenAIGatewayRoutingCompat,
-	cacheEnabled = true,
+	// Gates only the `caching` option; `only`/`order`/`zeroDataRetention` are
+	// routing constraints emitted regardless of cache retention.
+	emitCaching = true,
 ): void {
 	if (compat.isOpenRouterHost && compat.openRouterRouting) {
 		params.provider = compat.openRouterRouting;
 	}
 	if (compat.isVercelGatewayHost && compat.vercelGatewayRouting) {
 		const routing = compat.vercelGatewayRouting;
-		if (routing.only || routing.order || (cacheEnabled && routing.caching)) {
-			const gatewayOptions: Pick<VercelGatewayRouting, "only" | "order" | "caching"> = {};
+		if (routing.only || routing.order || routing.zeroDataRetention || (emitCaching && routing.caching)) {
+			const gatewayOptions: Pick<VercelGatewayRouting, "only" | "order" | "caching" | "zeroDataRetention"> = {};
 			if (routing.only) gatewayOptions.only = routing.only;
 			if (routing.order) gatewayOptions.order = routing.order;
-			if (cacheEnabled && routing.caching) gatewayOptions.caching = routing.caching;
+			if (emitCaching && routing.caching) gatewayOptions.caching = routing.caching;
+			// ZDR is a routing constraint, not a cache preference: emit it regardless
+			// of cache retention, and only when explicitly requested (docs: "If
+			// zeroDataRetention is false or not set, there is no ZDR enforcement").
+			if (routing.zeroDataRetention) gatewayOptions.zeroDataRetention = true;
 			params.providerOptions = { gateway: gatewayOptions };
 		}
 	}
@@ -661,7 +667,7 @@ export interface VercelResponsesCacheParams {
 	caching?: "auto";
 	cache_anchor_items?: number;
 	cache_ttl?: "5m" | "1h";
-	providerOptions?: { gateway?: Pick<VercelGatewayRouting, "only" | "order"> };
+	providerOptions?: { gateway?: Pick<VercelGatewayRouting, "only" | "order" | "zeroDataRetention"> };
 }
 
 export interface VercelResponsesCacheCompat {
@@ -682,10 +688,14 @@ export function applyVercelResponsesCacheControls(
 	const routing = compat.vercelGatewayRouting;
 	if (!compat.isVercelGatewayHost) return;
 
-	if (routing?.only || routing?.order) {
-		const gateway: Pick<VercelGatewayRouting, "only" | "order"> = {};
+	if (routing?.only || routing?.order || routing?.zeroDataRetention) {
+		const gateway: Pick<VercelGatewayRouting, "only" | "order" | "zeroDataRetention"> = {};
 		if (routing.only) gateway.only = routing.only;
 		if (routing.order) gateway.order = routing.order;
+		// Request-scoped ZDR is independent of cache retention and caching mode:
+		// the gateway filters to ZDR-compliant providers before any fallback or
+		// cache planning runs. Emit only on the explicit `true` from config.
+		if (routing.zeroDataRetention) gateway.zeroDataRetention = true;
 		params.providerOptions = { gateway };
 	}
 
