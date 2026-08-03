@@ -44,13 +44,26 @@ export function getBundledModels(provider: GeneratedProvider): Model<Api>[] {
 }
 
 export function calculateCost<TApi extends Api>(model: Model<TApi>, usage: Usage): Usage["cost"] {
+	const peakMultiplier = getPeakPricingMultiplier(model);
 	const orchestration = usage.orchestration;
-	usage.cost.input = (model.cost.input / 1000000) * (usage.input + (orchestration?.input ?? 0));
-	usage.cost.output = (model.cost.output / 1000000) * (usage.output + (orchestration?.output ?? 0));
-	usage.cost.cacheRead = (model.cost.cacheRead / 1000000) * (usage.cacheRead + (orchestration?.cacheRead ?? 0));
-	usage.cost.cacheWrite = cacheWriteCost(model, usage);
+	usage.cost.input = (model.cost.input / 1000000) * (usage.input + (orchestration?.input ?? 0)) * peakMultiplier;
+	usage.cost.output = (model.cost.output / 1000000) * (usage.output + (orchestration?.output ?? 0)) * peakMultiplier;
+	usage.cost.cacheRead =
+		(model.cost.cacheRead / 1000000) * (usage.cacheRead + (orchestration?.cacheRead ?? 0)) * peakMultiplier;
+	usage.cost.cacheWrite = cacheWriteCost(model, usage) * peakMultiplier;
 	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
 	return usage.cost;
+}
+
+function getPeakPricingMultiplier<TApi extends Api>(model: Model<TApi>): number {
+	const peak = model.peakPricing;
+	if (!peak) return 1;
+	const utcHour = new Date().getUTCHours();
+	const isPeak = peak.windows.some(w => {
+		if (w.startHour <= w.endHour) return utcHour >= w.startHour && utcHour < w.endHour;
+		return utcHour >= w.startHour || utcHour < w.endHour; // cross-midnight
+	});
+	return isPeak ? peak.multiplier : 1;
 }
 
 /**
