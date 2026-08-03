@@ -23,15 +23,15 @@ Sources: [`packages/swarm-extension/README.md`](../packages/swarm-extension/READ
 - Side effects/output: creates the workspace if needed and persists state/logs under `<workspace>/.swarm_<name>/`.
 - Limits/errors: validates the YAML definition, dependency graph, and cycles before execution; standalone runs have no built-in timeout.
 
-### `packages/terminal-bench` — Terminal-Bench 2 runner
+### `packages/metaharness` — Terminal-Bench 2 runner
 
-Sources: [`packages/terminal-bench/README.md`](../packages/terminal-bench/README.md), [`packages/terminal-bench/package.json`](../packages/terminal-bench/package.json), [`packages/terminal-bench/src/runner.ts`](../packages/terminal-bench/src/runner.ts), [`packages/terminal-bench/agent/omp_local.py`](../packages/terminal-bench/agent/omp_local.py).
+Sources: [`packages/metaharness/README.md`](../packages/metaharness/README.md), [`packages/metaharness/package.json`](../packages/metaharness/package.json), [`packages/metaharness/src/runner.ts`](../packages/metaharness/src/runner.ts), [`packages/metaharness/agent/omp_local.py`](../packages/metaharness/agent/omp_local.py).
 
-- Package: private `@oh-my-pi/terminal-bench`; bin: `tb2`.
+- Package: `@oh-my-pi/pi-metaharness`; bin: `metaharness` (dashboard/API); Harbor CLI via `bun packages/metaharness/src/runner.ts`.
 - Feature: runs `harbor-framework/terminal-bench-2` against a local or published `omp` build with a live progress, spend, token, ETA, and pass/fail dashboard.
-- CLI: `bun src/runner.ts [options] [-- <extra harbor args>]`; package bin exposes `tb2`.
+- CLI: `bun packages/metaharness/src/runner.ts harbor [options] [-- <extra harbor args>]`.
 - Modes: default `omp` agent, `oracle`/`nop`/any Harbor agent via `--agent`; local source packing by default, published npm install via `--install published`; `cleanup` command removes leftover Harbor Docker resources.
-- Key inputs: `--model`, `--tasks`, `--concurrency`, `--attempts`, `--include`, `--exclude`, `--dataset`, `--effort`, `--advisor-model`, gateway options, `--tarball`, `--no-build`, `--dry-run`, and passthrough Harbor args.
+- Key inputs: `--model`, `--tasks`, `--concurrency`, `--attempts`, `--include`, `--exclude`, `--dataset`, `--thinking` (alias `--effort`; in-container omp still receives `--thinking <level>` for published-build compat), `--advisor-model`, gateway options, `--tarball`, `--no-build`, `--dry-run`, and passthrough Harbor args.
 - Outputs: Harbor job directories plus `_bench/<jobName>/report.md`, `harbor.log`, and generated `models.yml` under `--jobs-dir`.
 - Side effects/limits: requires Docker, Harbor, and usually the host auth gateway; local install packs `packages/coding-agent`; web search is off by default because it cannot authenticate through the gateway; Alpine/musl task images are unsupported by the native prebuilds.
 
