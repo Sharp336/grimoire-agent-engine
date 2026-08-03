@@ -1,6 +1,7 @@
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
-import { abortableSleep, prompt } from "@oh-my-pi/pi-utils";
+import { prompt } from "@oh-my-pi/pi-utils";
+import { abortableSleep } from "@oh-my-pi/pi-utils/abortable";
 import { type } from "arktype";
 import wakeupDescription from "../prompts/tools/wakeup.md" with { type: "text" };
 import wakeupFiredTemplate from "../prompts/tools/wakeup-fired.md" with { type: "text" };
@@ -77,9 +78,12 @@ export class WakeupTool implements AgentTool<typeof wakeupSchema, WakeupDetails>
 	constructor(private readonly session: ToolSession) {}
 
 	static createIf(session: ToolSession): WakeupTool | null {
-		// Task/eval subagents are reaped when their assignment settles, so they
-		// cannot truthfully promise a delayed turn after yielding.
-		return session.asyncJobManager && (session.taskDepth ?? 0) === 0 ? new WakeupTool(session) : null;
+		// Disposable sessions are reaped when their assignment settles, so they
+		// cannot truthfully promise a delayed turn after yielding. `/tan` clones
+		// use parentTaskPrefix while keeping taskDepth at zero.
+		return session.asyncJobManager && (session.taskDepth ?? 0) === 0 && !session.parentTaskPrefix
+			? new WakeupTool(session)
+			: null;
 	}
 
 	async execute(
