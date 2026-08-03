@@ -2201,6 +2201,7 @@ export class SessionMaintenance {
 				generation,
 				shouldAutoContinue,
 				terminalTextAnswer,
+				compactionSettings,
 				options.triggerContextTokens,
 				suppressContinuation,
 			);
@@ -2432,6 +2433,9 @@ export class SessionMaintenance {
 						skipped: frameRescueResult === undefined,
 					});
 					let continuationScheduled = false;
+					// Queued messages must remain parked when the child-clamped
+					// recovery band was not reached. Routing them through
+					// agent.continue() here would bypass the pre-prompt child budget gate.
 					if (frameRescueCreatedHeadroom) {
 						continuationScheduled = this.#host.scheduleCompactionContinuation({
 							generation,
@@ -2439,13 +2443,6 @@ export class SessionMaintenance {
 							terminalTextAnswer,
 							suppressContinuation,
 						});
-					} else if (!suppressContinuation && this.#host.agent.hasQueuedMessages()) {
-						this.#host.scheduleAgentContinue({
-							delayMs: 100,
-							generation,
-							shouldContinue: () => this.#host.agent.hasQueuedMessages(),
-						});
-						continuationScheduled = true;
 					}
 					if (deadEndWarning) {
 						this.#host.emitNotice("warning", deadEndWarning, "compaction");
@@ -2987,6 +2984,7 @@ export class SessionMaintenance {
 		generation: number,
 		autoContinue: boolean,
 		terminalTextAnswer: boolean,
+		compactionSettings: CompactionSettings,
 		triggerContextTokens?: number,
 		suppressContinuation = false,
 	): Promise<CompactionCheckResult | "fallback"> {
@@ -3030,11 +3028,6 @@ export class SessionMaintenance {
 			// without that pre-shake savings, shake can fall through to context-full
 			// even though the post-prune history is already inside the recovery band.
 			const contextWindow = this.#model?.contextWindow ?? 0;
-			const configuredCompactionSettings = this.#host.settings.getGroup("compaction");
-			const compactionSettings =
-				reason === "threshold" && contextWindow > 0
-					? this.#withChildContextBudget(contextWindow, configuredCompactionSettings)
-					: configuredCompactionSettings;
 			let stillOverThreshold = false;
 			if (contextWindow > 0) {
 				if (typeof triggerContextTokens === "number" && Number.isFinite(triggerContextTokens)) {
