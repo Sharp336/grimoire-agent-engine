@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # ArkType Guide (for migrating Zod → ArkType in this repo)
 
 Pinned to **arktype 2.2.3** (workspace catalog). Author types with
