@@ -2,6 +2,8 @@ import { expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import type { ComputerSessionSnapshot, ComputerWorkerOutbound } from "../../src/tools/computer/protocol";
+import { COMPUTER_PROCESS_ARG } from "../../src/tools/computer/protocol";
 import { spawnComputerSubprocess } from "../../src/tools/computer/supervisor";
 
 it("imports the CLI entry graph without loading dotenv before profile bootstrap", async () => {
@@ -85,6 +87,89 @@ it("dispatches the computer worker through the CLI host selector in a child proc
 it("loads and cleanly closes the computer subprocess", async () => {
 	const response = await pingComputerSubprocess("computer-source-process");
 	expect(response).toEqual({ type: "pong", id: "computer-source-process" });
+});
+
+it("keeps computer runtime state after an IPC serialization failure", async () => {
+	const preload = path.resolve(import.meta.dir, "fixtures/computer-ipc-serialization-preload.ts");
+	const cli = path.resolve(import.meta.dir, "../../src/cli.ts");
+	const messages: ComputerWorkerOutbound[] = [];
+	const waiters = new Set<{
+		predicate: (message: ComputerWorkerOutbound) => boolean;
+		resolve(message: ComputerWorkerOutbound): void;
+		reject(error: Error): void;
+	}>();
+	const proc = Bun.spawn({
+		cmd: [process.execPath, "--preload", preload, cli, COMPUTER_PROCESS_ARG],
+		stdout: "ignore",
+		stderr: "pipe",
+		serialization: "advanced",
+		ipc(value) {
+			const message = value as ComputerWorkerOutbound;
+			messages.push(message);
+			for (const waiter of waiters) {
+				if (!waiter.predicate(message)) continue;
+				waiters.delete(waiter);
+				waiter.resolve(message);
+			}
+		},
+	});
+	const exited = proc.exited.then(async code => {
+		const stderr = await new Response(proc.stderr).text();
+		const error = new Error(`Computer child exited with ${code}: ${stderr}`);
+		for (const waiter of waiters) waiter.reject(error);
+		waiters.clear();
+	});
+	const waitFor = (predicate: (message: ComputerWorkerOutbound) => boolean): Promise<ComputerWorkerOutbound> => {
+		const buffered = messages.find(predicate);
+		if (buffered) return Promise.resolve(buffered);
+		const result = Promise.withResolvers<ComputerWorkerOutbound>();
+		waiters.add({ predicate, resolve: result.resolve, reject: result.reject });
+		return result.promise;
+	};
+	const session: ComputerSessionSnapshot = {
+		cwd: import.meta.dir,
+		sessionId: crypto.randomUUID(),
+		captureMaxWidth: 1280,
+		captureMaxHeight: 896,
+		display: "all",
+		readOnly: true,
+	};
+	try {
+		await waitFor(message => message.type === "ready");
+		const failedRun = waitFor(message => message.type === "result" && message.id === "bad-ipc");
+		proc.send({
+			type: "run",
+			id: "bad-ipc",
+			code: 'globalThis.ipcMarker = "retained"; await tool.echo({ bad: true })',
+			timeoutMs: 5_000,
+			session,
+		});
+		const failed = await failedRun;
+		expect(failed).toMatchObject({ type: "result", id: "bad-ipc", ok: false });
+
+		const retainedRun = waitFor(message => message.type === "result" && message.id === "retained-state");
+		proc.send({
+			type: "run",
+			id: "retained-state",
+			code: "throw new Error(globalThis.ipcMarker)",
+			timeoutMs: 5_000,
+			session,
+		});
+		const retained = await retainedRun;
+		expect(retained).toMatchObject({
+			type: "result",
+			id: "retained-state",
+			ok: false,
+			error: { message: "retained" },
+		});
+
+		const pong = waitFor(message => message.type === "pong" && message.id === "after-bad-ipc");
+		proc.send({ type: "ping", id: "after-bad-ipc" });
+		expect(await pong).toEqual({ type: "pong", id: "after-bad-ipc" });
+	} finally {
+		proc.kill("SIGKILL");
+		await exited;
+	}
 });
 
 it("dispatches the computer worker from a single npm-style host bundle", async () => {

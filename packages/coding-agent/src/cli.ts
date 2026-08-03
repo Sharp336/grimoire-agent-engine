@@ -173,7 +173,9 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		return true;
 	}
 	if (arg === COMPUTER_PROCESS_ARG) {
-		await runIpcSubprocessWorker<ComputerWorkerInbound, ComputerWorkerOutbound>(startComputerProcess);
+		await runIpcSubprocessWorker<ComputerWorkerInbound, ComputerWorkerOutbound>(startComputerProcess, {
+			rethrowConnectedSendErrors: true,
+		});
 		return true;
 	}
 	if (arg === JS_EVAL_WORKER_ARG) {
