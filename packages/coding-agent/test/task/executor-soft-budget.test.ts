@@ -248,23 +248,29 @@ describe("runSubprocess soft request budget", () => {
 		mockCreateAgentSession(handle.session);
 		registerRunning(id, handle.session);
 
-		const sessionRuntimeStartedAt = Date.now();
 		const first = await runSubprocess({
 			...baseOptions(id),
 			keepAlive: true,
-			maxSessionRuntimeMs: 100,
-			sessionRuntimeStartedAt,
+			maxSessionRuntimeMs: 5_000,
+			sessionRuntimeStartedAt: Date.now(),
 		});
 		expect(first.aborted).toBe(false);
 
-		await Bun.sleep(110);
+		const ref = AgentRegistry.global().get(id);
+		if (!ref) throw new Error("Expected adopted subagent");
+		AgentRegistry.global().setRuntimePolicy(
+			id,
+			{
+				maxRuntimeMs: ref.runtimePolicy?.maxRuntimeMs ?? 0,
+				sessionRuntimeLimit: { maxSessionRuntimeMs: 100, startedAt: Date.now() - 101 },
+			},
+			ref,
+		);
 		followUpPending = true;
 		const followUp = await runSubagentFollowUpTurn({
 			id,
 			agent: baseAgent,
 			message: "continue",
-			maxSessionRuntimeMs: 100,
-			sessionRuntimeStartedAt,
 		});
 
 		expect(handle.prompts).toHaveLength(1);
@@ -272,6 +278,94 @@ describe("runSubprocess soft request budget", () => {
 		expect(followUp.abortReason).toContain("task.maxSessionRuntimeMs=100");
 	});
 
+	it("preserves a registered per-turn cap when the resumed caller has it disabled", async () => {
+		const id = "RestoredTurnCapScout";
+		const promptGate = Promise.withResolvers<void>();
+		const handle = createMockSession(async () => {
+			await promptGate.promise;
+		});
+		vi.spyOn(handle.session, "abort").mockImplementation(async () => {
+			promptGate.resolve();
+		});
+		registerRunning(id, handle.session);
+		const ref = AgentRegistry.global().get(id);
+		if (!ref) throw new Error("Expected registered subagent");
+		AgentRegistry.global().setRuntimePolicy(id, { maxRuntimeMs: 20 }, ref);
+
+		const result = await runSubagentFollowUpTurn({
+			id,
+			agent: baseAgent,
+			message: "continue",
+			maxRuntimeMs: 0,
+		});
+
+		expect(result.aborted).toBe(true);
+		expect(result.abortReason).toContain("task.maxRuntimeMs=20");
+	});
+
+	it("rejects an expired Vibe revival before running the parked session reviver", async () => {
+		const id = "ExpiredVibe";
+		const reviver = vi.fn(async () => createMockSession(async () => {}).session);
+		const ref = AgentRegistry.global().register({
+			id,
+			displayName: id,
+			kind: "sub",
+			session: null,
+			sessionFile: "/tmp/expired-vibe.jsonl",
+			status: "parked",
+		});
+		const sessionRuntimeStartedAt = Date.now() - 101;
+		AgentLifecycleManager.global().adopt(
+			id,
+			{
+				idleTtlMs: 0,
+				revive: reviver,
+				runtimePolicy: {
+					maxRuntimeMs: 0,
+					sessionRuntimeLimit: { maxSessionRuntimeMs: 100, startedAt: sessionRuntimeStartedAt },
+				},
+			},
+			ref,
+		);
+
+		const result = await runSubagentFollowUpTurn({
+			id,
+			agent: baseAgent,
+			message: "continue",
+			maxSessionRuntimeMs: 100,
+			sessionRuntimeStartedAt,
+		});
+
+		expect(reviver).not.toHaveBeenCalled();
+		expect(result.aborted).toBe(true);
+		expect(result.abortReason).toBe("Subagent cumulative runtime limit exceeded (task.maxSessionRuntimeMs=100)");
+		expect(AgentRegistry.global().get(id)).toBeUndefined();
+		expect(AgentLifecycleManager.global().has(id, ref)).toBe(false);
+	});
+
+	it("reports the per-turn timer when it expires before the cumulative deadline", async () => {
+		const id = "TurnCapScout";
+		const promptGate = Promise.withResolvers<void>();
+		const handle = createMockSession(async () => {
+			await promptGate.promise;
+		});
+		vi.spyOn(handle.session, "abort").mockImplementation(async () => {
+			promptGate.resolve();
+		});
+		mockCreateAgentSession(handle.session);
+		registerRunning(id, handle.session);
+
+		const result = await runSubprocess({
+			...baseOptions(id),
+			keepAlive: false,
+			maxRuntimeMs: 20,
+			maxSessionRuntimeMs: 1_000,
+			sessionRuntimeStartedAt: Date.now(),
+		});
+
+		expect(result.aborted).toBe(true);
+		expect(result.abortReason).toBe("Subagent runtime limit exceeded (task.maxRuntimeMs=20)");
+	});
 	it("a budget stop drives one forced final yield and finishes as a normal completion", async () => {
 		const id = "BudgetScout";
 		let abortCallsAtReminder: number | undefined;

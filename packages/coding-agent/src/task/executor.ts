@@ -2552,6 +2552,24 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	const startTime = Date.now();
 	const session = await AgentLifecycleManager.global().ensureLive(id);
 	const ref = AgentRegistry.global().get(id);
+	const maxRuntimeMs = Math.max(
+		0,
+		Math.trunc(Number(ref?.runtimePolicy?.maxRuntimeMs ?? options.maxRuntimeMs ?? 0) || 0),
+	);
+	const configuredMaxSessionRuntimeMs = Math.max(0, Math.trunc(Number(options.maxSessionRuntimeMs ?? 0) || 0));
+	const sessionRuntimeLimit =
+		ref?.runtimePolicy?.sessionRuntimeLimit ??
+		(configuredMaxSessionRuntimeMs > 0
+			? {
+					maxSessionRuntimeMs: configuredMaxSessionRuntimeMs,
+					startedAt: options.sessionRuntimeStartedAt ?? startTime,
+				}
+			: undefined);
+	const maxSessionRuntimeMs = sessionRuntimeLimit?.maxSessionRuntimeMs ?? 0;
+	if (ref) {
+		AgentRegistry.global().setRuntimePolicy(id, { maxRuntimeMs, sessionRuntimeLimit }, ref);
+	}
+	const lifecycle = AgentLifecycleManager.global();
 	const sessionFile = ref?.sessionFile ?? undefined;
 
 	const monitor = createSubagentRunMonitor({
