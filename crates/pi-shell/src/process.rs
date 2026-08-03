@@ -2,6 +2,7 @@
 
 use std::{
 	collections::{HashMap, HashSet},
+	sync::Arc,
 	time::Duration,
 };
 
@@ -697,7 +698,6 @@ mod platform {
 		collections::{HashMap, HashSet},
 		ffi::c_void,
 		mem,
-		os::windows::io::{IntoRawHandle, OwnedHandle as StdOwnedHandle},
 		sync::Arc,
 	};
 
@@ -787,7 +787,6 @@ mod platform {
 		fn Process32NextW(hSnapshot: Handle, lppe: *mut PROCESSENTRY32W) -> i32;
 		fn CloseHandle(hObject: Handle) -> i32;
 		fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> Handle;
-		fn GetProcessId(Process: Handle) -> u32;
 		fn TerminateProcess(hProcess: Handle, uExitCode: u32) -> i32;
 		fn QueryFullProcessImageNameW(
 			hProcess: Handle,
@@ -845,10 +844,6 @@ mod platform {
 		const fn as_raw(&self) -> Handle {
 			self.raw as Handle
 		}
-
-		fn from_std(handle: StdOwnedHandle) -> Self {
-			Self { raw: handle.into_raw_handle() as isize }
-		}
 	}
 
 	impl Drop for OwnedHandle {
@@ -877,17 +872,6 @@ mod platform {
 			}
 			let pid_u32 = u32::try_from(pid).ok()?;
 			let handle = open_process(pid_u32, PROCESS_REFERENCE_ACCESS)?;
-			let creation_time = process_creation_time(handle.as_raw())?;
-			Some(Self { pid, handle, creation_time })
-		}
-
-		pub fn from_owned_handle(handle: StdOwnedHandle) -> Option<Self> {
-			let handle = Arc::new(OwnedHandle::from_std(handle));
-			// SAFETY: `handle` is a live process handle duplicated from the spawned
-			// child and remains owned by this process reference.
-			let pid = i32::try_from(unsafe { GetProcessId(handle.as_raw()) })
-				.ok()
-				.filter(|pid| *pid > 0)?;
 			let creation_time = process_creation_time(handle.as_raw())?;
 			Some(Self { pid, handle, creation_time })
 		}
@@ -1302,13 +1286,6 @@ impl Process {
 		platform::Process::from_pid(pid).map(Self::from_inner)
 	}
 
-	/// Build a stable Windows process reference from a spawn-time process
-	/// handle.
-	#[cfg(target_os = "windows")]
-	pub fn from_owned_handle(handle: std::os::windows::io::OwnedHandle) -> Option<Self> {
-		platform::Process::from_owned_handle(handle).map(Self::from_inner)
-	}
-
 	/// Open stable process references whose executable path matches exactly.
 	pub fn from_path(path: String) -> Vec<Self> {
 		platform::find_by_path(&path)
@@ -1721,6 +1698,21 @@ impl TerminationTargets {
 		}
 	}
 
+	/// Merge another target set while keeping process and group ids unique.
+	pub fn extend(&mut self, other: Self) {
+		for pgid in other.pgids {
+			self.add_pgid(pgid);
+		}
+		for process in other.processes {
+			self.add_process(process);
+		}
+	}
+
+	/// Iterate over the stable process references in this target set.
+	pub fn processes(&self) -> impl Iterator<Item = &Process> {
+		self.processes.iter()
+	}
+
 	/// True when no targets have been recorded.
 	#[must_use]
 	pub const fn is_empty(&self) -> bool {
@@ -1779,9 +1771,15 @@ struct RegistryState {
 	next_sweep_at: usize,
 }
 
-#[derive(Default)]
 pub struct SpawnRegistry {
-	state: Mutex<RegistryState>,
+	state:  Mutex<RegistryState>,
+	mirror: Option<Arc<Self>>,
+}
+
+impl Default for SpawnRegistry {
+	fn default() -> Self {
+		Self { state: Mutex::new(RegistryState::default()), mirror: None }
+	}
 }
 
 impl SpawnRegistry {
@@ -1807,6 +1805,13 @@ impl SpawnRegistry {
 		Self::default()
 	}
 
+	/// Create a per-run registry that also records each spawn in a persistent
+	/// session registry.
+	#[must_use]
+	pub fn with_mirror(mirror: Arc<Self>) -> Self {
+		Self { state: Mutex::new(RegistryState::default()), mirror: Some(mirror) }
+	}
+
 	/// Record a freshly spawned child. Called from the spawn-observer hook.
 	///
 	/// The `Process` handle MUST be opened by the caller *immediately* after
@@ -1820,6 +1825,7 @@ impl SpawnRegistry {
 	/// external commands cannot exhaust the process' FD/handle limit by
 	/// retaining one owned handle per historical spawn.
 	pub fn record(&self, pgid: Option<i32>, process: Option<Process>) {
+		let mirrored_process = process.clone();
 		let mut state = self.state.lock();
 		state.spawned.push(SpawnedProcess { process, pgid });
 		if state.spawned.len() >= state.next_sweep_at.max(Self::PRUNE_THRESHOLD) {
@@ -1831,6 +1837,10 @@ impl SpawnRegistry {
 			// `PRUNE_THRESHOLD` records, so amortized per-record cost is O(1)
 			// even if the live set stays large.
 			state.next_sweep_at = state.spawned.len() + Self::PRUNE_THRESHOLD;
+		}
+		drop(state);
+		if let Some(mirror) = &self.mirror {
+			mirror.record(pgid, mirrored_process);
 		}
 	}
 
