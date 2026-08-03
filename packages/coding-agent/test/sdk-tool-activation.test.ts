@@ -19,6 +19,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { fingerprintAgentContent } from "@oh-my-pi/pi-coding-agent/task/agent-policy";
 import { VIBE_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/vibe";
 import { logger, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
@@ -769,6 +770,47 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		} finally {
 			await session.dispose();
 			await control.dispose();
+		}
+	});
+
+	it("fingerprints agent_change entries written by live persona switches", async () => {
+		const tempDir = makeTempDir();
+		const sessionManager = SessionManager.inMemory();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			sessionManager,
+		});
+
+		try {
+			await session.switchAgentPersona({
+				name: "fingerprinted-persona",
+				description: "Persona switched in live",
+				systemPrompt: "You are fingerprinted.",
+				source: "project" as const,
+			});
+
+			// The persisted agent_change must carry the definition content
+			// fingerprint so a later fork/resume can detect same-identity
+			// content changes and invalidate the provider prompt cache
+			// (thread sdk.ts:6435).
+			const persona = sessionManager.buildSessionContext().agentPersona;
+			expect(persona).toEqual(
+				expect.objectContaining({
+					agent: "fingerprinted-persona",
+					source: "project",
+					fingerprint: expect.any(String),
+				}),
+			);
+			expect(persona?.fingerprint).toBe(
+				fingerprintAgentContent({
+					name: "fingerprinted-persona",
+					description: "Persona switched in live",
+					systemPrompt: "You are fingerprinted.",
+					source: "project" as const,
+				}),
+			);
+		} finally {
+			await session.dispose();
 		}
 	});
 

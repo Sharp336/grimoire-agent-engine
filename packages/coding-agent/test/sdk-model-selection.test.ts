@@ -168,6 +168,46 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		expect(modelFallbackMessage).toBe('Model "missing-provider/missing-model" not found');
 	});
 
+	test("defers an unresolved agentPersona model until extension providers register", async () => {
+		const authStorage = await AuthStorage.create(path.join(tempDir, "persona-auth.db"));
+		authStoragesToClose.push(authStorage);
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			disableExtensionDiscovery: true,
+			extensions: [providerExtension],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			// The persona names a provider/model only the extension registers; the
+			// pre-extension resolution fails, so the patterns must be deferred and
+			// retried after registration instead of silently falling back to the
+			// previous/default model (thread sdk.ts:1404).
+			agentPersona: {
+				name: "extension-model-persona",
+				description: "Persona with an extension-provided model",
+				systemPrompt: "You are extension-model-persona.",
+				model: ["runtime-provider/runtime-model"],
+				source: "project" as const,
+			},
+		});
+
+		try {
+			expect(session.model?.provider).toBe("runtime-provider");
+			expect(session.model?.id).toBe("runtime-model");
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("uses auth fallback when deferred subagent modelPattern resolves without working credentials", async () => {
 		const parentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!parentModel) {

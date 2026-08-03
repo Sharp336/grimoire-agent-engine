@@ -13,6 +13,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { CURRENT_SESSION_VERSION, type SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { fingerprintAgentContent } from "@oh-my-pi/pi-coding-agent/task/agent-policy";
 import * as discovery from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -327,6 +328,7 @@ describe("provider prompt-cache key session affinity", () => {
 		tempDir: TempDir,
 		id: string,
 		agentName: string,
+		fingerprint?: string,
 	): Promise<{ cwd: string; sessionFile: string; sessionDir: string }> {
 		const cwd = tempDir.join("project");
 		const sessionDir = tempDir.join("sessions");
@@ -334,12 +336,18 @@ describe("provider prompt-cache key session affinity", () => {
 		await fs.mkdir(sessionDir, { recursive: true });
 		const sessionFile = path.join(sessionDir, `${id}.jsonl`);
 		const timestamp = "2026-06-01T00:00:00.000Z";
+		const agentChange: Record<string, unknown> = {
+			type: "agent_change",
+			id: "agent-1",
+			parentId: null,
+			timestamp,
+			agent: agentName,
+			source: "bundled",
+		};
+		if (fingerprint !== undefined) agentChange.fingerprint = fingerprint;
 		await Bun.write(
 			sessionFile,
-			`${[
-				{ type: "session", version: 3, id, timestamp, cwd },
-				{ type: "agent_change", id: "agent-1", parentId: null, timestamp, agent: agentName, source: "bundled" },
-			]
+			`${[{ type: "session", version: 3, id, timestamp, cwd }, agentChange]
 				.map(entry => JSON.stringify(entry))
 				.join("\n")}\n`,
 		);
@@ -542,6 +550,83 @@ describe("provider prompt-cache key session affinity", () => {
 		} finally {
 			await session?.dispose();
 			authStorage?.close();
+		}
+	});
+
+	it("drops the fork-inherited prompt-cache key when the resumed persona's fingerprint changed", async () => {
+		using tempDir = TempDir.createSync("@omp-prompt-cache-fp-change-");
+		const persona = {
+			name: "fp-persona",
+			description: "Persona",
+			systemPrompt: "Original prompt.",
+			source: "bundled" as const,
+		};
+		const { cwd, sessionFile, sessionDir } = await createPersonaResumeFixture(
+			tempDir,
+			"fp-change-session",
+			"fp-persona",
+			fingerprintAgentContent(persona),
+		);
+		const forkedManager = await SessionManager.forkFrom(sessionFile, cwd, sessionDir);
+		// The CLI resume path pre-copies the header key into options with source
+		// "fork" before the persona rehydrates; simulate that here.
+		expect(forkedManager.getHeader()?.providerPromptCacheKey).toBe("fp-change-session");
+		const authStorage = await AuthStorage.create(tempDir.join("fp-auth.db"));
+		let session: AgentSession | undefined;
+		try {
+			// The persona file changed since the transcript was saved: same name/source,
+			// different content fingerprint. The fork-sourced cache key is stale and
+			// must not survive (thread sdk.ts:1423).
+			const created = await createMinimalSession(tempDir, {
+				cwd,
+				sessionManager: forkedManager,
+				providerPromptCacheKey: forkedManager.getHeader()?.providerPromptCacheKey,
+				providerPromptCacheKeySource: "fork",
+				agentPersona: {
+					...persona,
+					systemPrompt: "Edited prompt.",
+				},
+			});
+			session = created.session;
+			expect(session.agent.promptCacheKey).toBeUndefined();
+		} finally {
+			await session?.dispose();
+			authStorage.close();
+		}
+	});
+
+	it("drops the fork-inherited prompt-cache key when the persisted persona has no fingerprint", async () => {
+		using tempDir = TempDir.createSync("@omp-prompt-cache-no-fp-");
+		const persona = {
+			name: "legacy-persona",
+			description: "Persona",
+			systemPrompt: "Legacy prompt.",
+			source: "bundled" as const,
+		};
+		// Legacy transcript: agent_change written without a content fingerprint.
+		const { cwd, sessionFile, sessionDir } = await createPersonaResumeFixture(
+			tempDir,
+			"legacy-fp-session",
+			"legacy-persona",
+		);
+		const forkedManager = await SessionManager.forkFrom(sessionFile, cwd, sessionDir);
+		const authStorage = await AuthStorage.create(tempDir.join("legacy-auth.db"));
+		let session: AgentSession | undefined;
+		try {
+			// An undefined persisted fingerprint is unknown content — the inherited
+			// key must be dropped rather than trusted (thread sdk.ts:1389).
+			const created = await createMinimalSession(tempDir, {
+				cwd,
+				sessionManager: forkedManager,
+				providerPromptCacheKey: forkedManager.getHeader()?.providerPromptCacheKey,
+				providerPromptCacheKeySource: "fork",
+				agentPersona: persona,
+			});
+			session = created.session;
+			expect(session.agent.promptCacheKey).toBeUndefined();
+		} finally {
+			await session?.dispose();
+			authStorage.close();
 		}
 	});
 });

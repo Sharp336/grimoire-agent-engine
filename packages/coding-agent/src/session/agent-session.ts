@@ -174,7 +174,7 @@ import {
 	obfuscateProviderContext,
 	type SecretObfuscator,
 } from "../secrets/obfuscator";
-import { resolveAgentSessionPolicy } from "../task/agent-policy";
+import { fingerprintAgentContent, resolveAgentSessionPolicy } from "../task/agent-policy";
 import type { AgentDefinition } from "../task/types";
 import {
 	AUTO_THINKING,
@@ -6211,7 +6211,11 @@ export class AgentSession {
 					additionalDirectories: this.settings.get("workspace.additionalDirectories"),
 				});
 				if (this.#agentPersona) {
-					this.sessionManager.appendAgentChange(this.#agentPersona.name, this.#agentPersona.source);
+					this.sessionManager.appendAgentChange(
+						this.#agentPersona.name,
+						this.#agentPersona.source,
+						fingerprintAgentContent(this.#agentPersona),
+					);
 				}
 				this.#bash.markSessionTransition(bashTransition);
 				// The new session owns the transcript from here, so the previous
@@ -6444,7 +6448,7 @@ export class AgentSession {
 			this.#setAgentPersona?.(agent);
 			await this.refreshBaseSystemPrompt();
 			// 6. Persist
-			this.sessionManager.appendAgentChange(agent.name, agent.source);
+			this.sessionManager.appendAgentChange(agent.name, agent.source, fingerprintAgentContent(agent));
 			this.emitNotice("info", `Switched to agent persona "${agent.name}".`, "agent-switch");
 		} catch (error) {
 			this.#agentPersona = previousPersona;

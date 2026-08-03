@@ -1385,11 +1385,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		persistedPersona?.source === options.agentPersona.source;
 	// Content fingerprint additionally drives cache invalidation: the persona
 	// file may have changed since the transcript was saved, and the cache
-	// prefix would be built for the old system prompt/tool set.
+	// prefix would be built for the old system prompt/tool set. A missing
+	// persisted fingerprint (legacy entries, older write paths) is unknown,
+	// so treat it as changed rather than trusting the inherited cache key.
 	const personaChanged =
 		options.agentPersona !== undefined &&
 		(!personaIdentityRehydrated ||
-			(persistedPersona?.fingerprint !== undefined && persistedPersona.fingerprint !== personaFingerprint));
+			persistedPersona?.fingerprint === undefined ||
+			persistedPersona.fingerprint !== personaFingerprint);
 	// Apply the persona policy for SDK/embedding callers that pass agentPersona
 	// directly (the CLI path pre-resolves these in buildSessionOptions).
 	const personaPolicy = options.agentPersona ? resolveAgentSessionPolicy(options.agentPersona) : undefined;
@@ -1398,6 +1401,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			options.toolNames = personaPolicy.toolNames;
 			options.toolNamesFromAgent = true;
 		}
+		// A persona model that does not resolve yet (provider/model registered by
+		// an extension, e.g. `--extension ./provider-pack --agent foo`) must be
+		// deferred rather than dropped: preserve the patterns so the
+		// post-extension deferred-model block can retry them after registration.
+		let personaModelResolved: Model | undefined;
 		if (
 			options.model === undefined &&
 			options.modelPattern === undefined &&
@@ -1405,12 +1413,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			personaPolicy.modelPatterns?.length
 		) {
 			const resolved = resolveModelOverride(personaPolicy.modelPatterns, modelRegistry, settings);
-			if (resolved.model) {
-				options.model = resolved.model;
+			personaModelResolved = resolved.model;
+			if (personaModelResolved) {
+				options.model = personaModelResolved;
 				if (resolved.thinkingLevel && !personaPolicy.thinkingLevel && options.thinkingLevel === undefined) {
 					options.thinkingLevel = resolved.thinkingLevel;
 				}
 			}
+		}
+		if (
+			options.model === undefined &&
+			options.modelPattern === undefined &&
+			!personaIdentityRehydrated &&
+			personaPolicy.modelPatterns?.length &&
+			!personaModelResolved
+		) {
+			options.modelPattern = personaPolicy.modelPatterns;
 		}
 		if (options.thinkingLevel === undefined && !personaIdentityRehydrated && personaPolicy.thinkingLevel) {
 			options.thinkingLevel = personaPolicy.thinkingLevel;
@@ -1429,9 +1447,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const inheritedPromptCacheKey = forkCacheShapeChanged
 		? undefined
 		: sessionManager.getHeader()?.providerPromptCacheKey;
-	const providerPromptCacheKey = options.providerPromptCacheKey ?? inheritedPromptCacheKey;
+	// The CLI resume/fork path can already have copied the header cache key
+	// into options.providerPromptCacheKey (source "fork") before the persona
+	// rehydrates here. A changed/unknown persona must not keep that stale
+	// fork-sourced key — the cache prefix was built for the old prompt/tool
+	// set. Explicit caller-pinned keys are untouched.
+	const providerPromptCacheKey =
+		options.providerPromptCacheKey !== undefined && options.providerPromptCacheKeySource !== "fork"
+			? options.providerPromptCacheKey
+			: personaChanged
+				? undefined
+				: (options.providerPromptCacheKey ?? inheritedPromptCacheKey);
 	const providerPromptCacheKeySource =
-		options.providerPromptCacheKey !== undefined
+		options.providerPromptCacheKey !== undefined && options.providerPromptCacheKeySource !== "fork"
 			? (options.providerPromptCacheKeySource ?? "explicit")
 			: providerPromptCacheKey !== undefined
 				? "fork"
