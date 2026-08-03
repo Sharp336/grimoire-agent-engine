@@ -1546,12 +1546,18 @@ describe("omp doctor", () => {
 			source: "project",
 			tools: ["not-a-real-tool"],
 		};
-		spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [runtimeAgent], projectAgentsDir: null });
-
-		const report = await runDoctorCommand({ flags: {} });
-		const finding = report.findings.find(entry => entry.id === "setup.agents");
-		expect(finding?.status).toBe("warning");
-		expect(finding?.details).toContain('runtime-only: unknown tool "not-a-real-tool"');
+		const discoverySpy = spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({
+			agents: [runtimeAgent],
+			projectAgentsDir: null,
+		});
+		try {
+			const report = await runDoctorCommand({ flags: {} });
+			const finding = report.findings.find(entry => entry.id === "setup.agents");
+			expect(finding?.status).toBe("warning");
+			expect(finding?.details).toContain('runtime-only: unknown tool "not-a-real-tool"');
+		} finally {
+			discoverySpy.mockRestore();
+		}
 	});
 
 	test("setup: keybindings.yml with an unknown action → warning", async () => {
