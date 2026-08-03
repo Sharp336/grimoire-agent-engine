@@ -21,7 +21,7 @@ import type {
 import type { postmortem } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig } from "../advisor";
 import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager } from "../async";
-import type { ModelRegistry } from "../config/model-registry";
+import type { FallbackProbeLease, ModelRegistry } from "../config/model-registry";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings, SkillsSettings } from "../config/settings";
 import type { CursorMcpResourceAdapter } from "../cursor";
@@ -102,6 +102,8 @@ export interface InitialRetryFallbackState {
 	originalThinkingLevel: ConfiguredThinkingLevel | undefined;
 	/** Prevent cooldown restoration when startup selected this fallback from live usage health. */
 	pinned?: boolean;
+	/** Present only when startup owns the selector's first live probe. */
+	probeLease?: FallbackProbeLease;
 }
 
 /** Dependencies and initial state used to construct an AgentSession. */

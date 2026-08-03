@@ -265,6 +265,12 @@ export class TurnRecovery {
 		this.#clearPendingRecoveredRetryErrors();
 	}
 
+	/** Releases a failed probe after abort handling declines every continuation. */
+	onAbortSettledWithoutRetry(message: AssistantMessage): void {
+		if (message.stopReason !== "aborted") return;
+		this.abandonActiveRetryFallbackProbe();
+	}
+
 	/** Persists an otherwise skipped terminal empty error turn. */
 	persistTerminalEmptyErrorTurn(message: AssistantMessage): Promise<void> {
 		return this.#persistTerminalEmptyErrorTurn(message);

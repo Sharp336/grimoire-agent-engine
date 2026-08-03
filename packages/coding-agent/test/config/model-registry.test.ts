@@ -209,6 +209,24 @@ describe("ModelRegistry", () => {
 		expect(registry.admitFallbackProbe("test/test-model").status).toBe("probe");
 	});
 
+	test("expires a hung probe without letting its late callback change the new owner", () => {
+		const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+		const first = registry.admitFallbackProbe("test/test-model");
+		if (first.status !== "probe") throw new Error("Expected first fallback caller to own the probe");
+
+		now.mockReturnValue(1_000 + 10 * 60 * 1000);
+		const second = registry.admitFallbackProbe("test/test-model");
+		if (second.status !== "probe") throw new Error("Expected the expired probe to admit a new owner");
+
+		registry.markFallbackProbeHealthy(first.lease);
+		expect(registry.admitFallbackProbe("test/test-model")).toEqual({ status: "busy" });
+		registry.abandonFallbackProbe(first.lease);
+		expect(registry.admitFallbackProbe("test/test-model")).toEqual({ status: "busy" });
+
+		registry.markFallbackProbeHealthy(second.lease);
+		expect(registry.admitFallbackProbe("test/test-model")).toEqual({ status: "healthy" });
+	});
+
 	test("resolves API keys and provider headers for legacy extensions", async () => {
 		const model = testModel;
 		vi.spyOn(registry, "getApiKey").mockResolvedValue("test-key");

@@ -13,7 +13,7 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { type FallbackProbeLease, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { parseModelPattern, parseModelString } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
@@ -338,6 +338,48 @@ describe("AgentSession retry fallback", () => {
 		}
 	});
 
+	it("releases a fallback probe when the active turn is aborted", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled fallback probe models");
+		const fallbackStarted = Promise.withResolvers<void>();
+		const primaryMock = createMockModel({ responses: [{ throw: "service unavailable: 503 overloaded" }] });
+		const fallbackMock = createMockModel({
+			handler: () => {
+				fallbackStarted.resolve();
+				return { content: ["late fallback response"], delayMs: 60_000 };
+			},
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requestedModel, context, options) =>
+				requestedModel.provider === fallbackModel.provider && requestedModel.id === fallbackModel.id
+					? fallbackMock.stream(requestedModel, context, options)
+					: primaryMock.stream(requestedModel, context, options),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 0,
+			"retry.maxRetries": 1,
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		const prompt = session.prompt("Abort the fallback probe");
+		await fallbackStarted.promise;
+		await session.abort();
+		await prompt;
+
+		expect(modelRegistry.admitFallbackProbe(`${fallbackModel.provider}/${fallbackModel.id}`).status).toBe("probe");
+	});
+
 	it("confirms before crossing models when every pooled account is inside reserve", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
@@ -398,6 +440,79 @@ describe("AgentSession retry fallback", () => {
 		expect(modelRegistry.admitFallbackProbe(`${fallbackModel.provider}/${fallbackModel.id}`)).toEqual({
 			status: "healthy",
 		});
+	});
+
+	it("admits after reserve confirmation and reselects when another caller wins", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const firstFallback = getBundledModel("openai", "gpt-4o-mini");
+		const secondFallback = getBundledModel("openai", "gpt-4o");
+		if (!primaryModel || !firstFallback || !secondFallback) {
+			throw new Error("Expected bundled reserve fallback models");
+		}
+		const firstSelector = `${firstFallback.provider}/${firstFallback.id}`;
+		const secondSelector = `${secondFallback.provider}/${secondFallback.id}`;
+		const requestedModels: string[] = [];
+		const mock = createMockModel({ responses: [{ content: ["continued on the second fallback"] }] });
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requestedModel, context, options) => {
+				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.usageAwareFallback": true,
+			"retry.usageReservePct": 10,
+			"retry.usageReservePolicy": "confirm",
+			"retry.fallbackChains": { default: [firstSelector, secondSelector] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		vi.spyOn(modelRegistry.authStorage, "getModelUsageHealth").mockImplementation(async provider =>
+			provider === primaryModel.provider
+				? {
+						state: "reserve",
+						accounts: [
+							{
+								credentialId: 1,
+								credentialType: "oauth",
+								selected: true,
+								state: "reserve",
+								remainingFraction: 0.05,
+							},
+						],
+					}
+				: { state: "healthy", accounts: [] },
+		);
+		let siblingLease: FallbackProbeLease | undefined;
+		const confirmations: string[] = [];
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		session.setUsageFallbackConfirmer(async confirmation => {
+			confirmations.push(confirmation.to);
+			if (confirmation.to === firstSelector) {
+				const admission = modelRegistry.admitFallbackProbe(firstSelector);
+				if (admission.status !== "probe") throw new Error("Expected sibling to win the first probe");
+				siblingLease = admission.lease;
+			}
+			return true;
+		});
+
+		try {
+			await session.prompt("Choose an available reserve fallback");
+			await session.waitForIdle();
+		} finally {
+			if (siblingLease) modelRegistry.abandonFallbackProbe(siblingLease);
+		}
+
+		expect(confirmations).toEqual([firstSelector, secondSelector]);
+		expect(requestedModels).toEqual([secondSelector]);
+		expect(session.model).toMatchObject({ provider: secondFallback.provider, id: secondFallback.id });
 	});
 
 	it("reselects a healthy same-provider account before considering a model fallback", async () => {

@@ -754,6 +754,8 @@ export type FallbackProbeAdmission =
 	| { status: "healthy" }
 	| { status: "busy" };
 
+const FALLBACK_PROBE_TTL_MS = 5 * 60 * 1000;
+
 /**
  * Look up a model's override, falling back to entries keyed by retired
  * effort-tier variant ids (models.yml authored before collapsing). A raw key
@@ -824,7 +826,10 @@ export class ModelRegistry {
 	#providerDiscoveryStates: Map<string, ProviderDiscoveryState> = new Map();
 	#cacheDbPath?: string;
 	#suppressedSelectors: Map<string, number> = new Map();
-	#fallbackProbeStates: Map<string, { state: "probing"; generation: number } | { state: "healthy" }> = new Map();
+	#fallbackProbeStates: Map<
+		string,
+		{ state: "probing"; generation: number; expiresAt: number } | { state: "healthy" }
+	> = new Map();
 	#nextFallbackProbeGeneration = 0;
 	#backgroundRefresh?: Promise<void>;
 	#lastDiscoveryWarnings: Map<string, string> = new Map();
@@ -2752,10 +2757,15 @@ export class ModelRegistry {
 		const normalizedSelector = this.#normalizeFallbackSelector(selector);
 		const state = this.#fallbackProbeStates.get(normalizedSelector);
 		if (state?.state === "healthy") return { status: "healthy" };
-		if (state?.state === "probing") return { status: "busy" };
+		const now = Date.now();
+		if (state?.state === "probing" && state.expiresAt > now) return { status: "busy" };
 
 		const generation = ++this.#nextFallbackProbeGeneration;
-		this.#fallbackProbeStates.set(normalizedSelector, { state: "probing", generation });
+		this.#fallbackProbeStates.set(normalizedSelector, {
+			state: "probing",
+			generation,
+			expiresAt: now + FALLBACK_PROBE_TTL_MS,
+		});
 		return { status: "probe", lease: { selector: normalizedSelector, generation } };
 	}
 

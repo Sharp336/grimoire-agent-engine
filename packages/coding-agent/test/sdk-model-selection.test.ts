@@ -451,6 +451,9 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			try {
 				expect(session.model?.provider).toBe("runtime-provider");
 				expect(session.model?.id).toBe("runtime-reasoning-model");
+				expect(modelRegistry.admitFallbackProbe("runtime-provider/runtime-reasoning-model")).toEqual({
+					status: "busy",
+				});
 				// `low` differs from the fallback model's default (`high`), so this
 				// proves the suffix is inherited rather than the model default applied.
 				expect(session.thinkingLevel).toBe(Effort.Low);
@@ -458,6 +461,9 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			} finally {
 				await session.dispose();
 			}
+			const admission = modelRegistry.admitFallbackProbe("runtime-provider/runtime-reasoning-model");
+			if (admission.status !== "probe") throw new Error("Expected startup probe release on session disposal");
+			modelRegistry.abandonFallbackProbe(admission.lease);
 		} finally {
 			exitSpy.mockRestore();
 		}

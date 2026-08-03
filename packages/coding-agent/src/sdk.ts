@@ -45,7 +45,7 @@ import { type Rule, ruleCapability, setActiveRules } from "./capability/rule";
 import { bucketRules } from "./capability/rule-buckets";
 import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode";
 import { shouldInlineToolDescriptors } from "./config/inline-tool-descriptors-mode";
-import { isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry";
+import { type FallbackProbeLease, isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry";
 import {
 	formatModelSelectorValue,
 	formatModelString,
@@ -2391,9 +2391,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						settings.override("retry.fallbackChains", fallbackChains);
 					}
 				}
+				let probeLease: FallbackProbeLease | undefined;
+				if (retryFallback) {
+					const admission = modelRegistry.admitFallbackProbe(pattern);
+					if (admission.status === "busy") continue;
+					probeLease = admission.status === "probe" ? admission.lease : undefined;
+				}
 				model = selectedModel;
-				initialRetryFallback =
-					retryFallback && usageFallbackTriggered ? { ...retryFallback, pinned: true } : retryFallback;
+				initialRetryFallback = retryFallback
+					? {
+							...retryFallback,
+							pinned: usageFallbackTriggered || retryFallback.pinned,
+							probeLease,
+						}
+					: undefined;
 				modelFallbackMessage = undefined;
 				if (selectedExplicitThinkingLevel) {
 					restoredSessionThinkingLevel = selectedThinkingLevel;
@@ -3792,6 +3803,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			eventBus,
 		};
 	} catch (error) {
+		if (!hasSession && initialRetryFallback?.probeLease) {
+			modelRegistry.abandonFallbackProbe(initialRetryFallback.probeLease);
+			initialRetryFallback.probeLease = undefined;
+		}
 		// Release the subscription if the throw happened after install but before the
 		// dispose-wrap took ownership. Idempotent with dispose() — Set.delete is a no-op
 		// for already-removed listeners.

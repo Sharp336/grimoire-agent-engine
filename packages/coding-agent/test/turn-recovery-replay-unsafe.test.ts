@@ -301,6 +301,28 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		expect(modelRegistry.admitFallbackProbe(fallbackSelector).status).toBe("probe");
 	});
 
+	it("releases an active probe when an aborted turn has no continuation", async () => {
+		const fallback = getBundledModel("openai", "gpt-4o-mini");
+		if (!fallback) throw new Error("Expected bundled fallback model gpt-4o-mini");
+		const currentSelector = `${model.provider}/${model.id}`;
+		const fallbackSelector = `${fallback.provider}/${fallback.id}`;
+		const recovery = new TurnRecovery(createHost(model, modelRegistry, { [currentSelector]: [fallbackSelector] }));
+		const selector = recovery.findRetryFallbackCandidates(currentSelector, currentSelector).at(0);
+		if (!selector) throw new Error("Expected configured fallback candidate");
+		const admission = modelRegistry.admitFallbackProbe(fallbackSelector);
+		if (admission.status !== "probe") throw new Error("Expected recovery to own the fallback probe");
+		await recovery.applyRetryFallbackCandidate(currentSelector, selector, currentSelector, {
+			apiKey: "test-key",
+			probeLease: admission.lease,
+		});
+		const aborted = makeMessage([], fallback);
+		aborted.stopReason = "aborted";
+
+		recovery.onAbortSettledWithoutRetry(aborted);
+
+		expect(modelRegistry.admitFallbackProbe(fallbackSelector).status).toBe("probe");
+	});
+
 	it("releases a probe when the prompt changes during fallback credential lookup", async () => {
 		const fallback = getBundledModel("openai", "gpt-4o-mini");
 		if (!fallback) throw new Error("Expected bundled fallback model gpt-4o-mini");
