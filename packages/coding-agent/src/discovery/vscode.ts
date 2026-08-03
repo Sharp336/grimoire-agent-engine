@@ -53,10 +53,7 @@ async function loadMCPConfig(
 	const warnings: string[] = [];
 
 	const content = await readFile(path);
-	if (!content) {
-		warnings.push(`Failed to read ${path}`);
-		return { items, warnings };
-	}
+	if (content === null) return { items, warnings };
 
 	const parsed = tryParseJson<{ mcp?: { servers?: Record<string, unknown> } }>(content);
 	if (!parsed) {

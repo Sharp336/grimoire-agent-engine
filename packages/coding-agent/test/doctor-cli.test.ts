@@ -893,6 +893,8 @@ describe("omp doctor", () => {
 		expect(mcpFindings).toHaveLength(1);
 		expect(mcpFindings[0]?.status).toBe("ok");
 		expect(mcpFindings[0]?.summary).toContain("no MCP servers configured");
+		expect(mcpFindings.some(entry => entry.id === "mcp.config")).toBe(false);
+		expect(mcpFindings.some(entry => entry.details.some(detail => detail.includes("Failed to read")))).toBe(false);
 	});
 
 	test("MCP server from a project .mcp.json is diagnosed", async () => {
