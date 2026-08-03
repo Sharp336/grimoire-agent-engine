@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 82709)
-Total output lines: 8508
-
 /**
  * AgentSession - Core abstraction for agent lifecycle and session management.
  *
@@ -2874,7 +2871,6 @@ export class AgentSession {
 			// replayed. Visible/side-effecting output then remains terminal while its
 			// credential is still blocked or rotated exactly once.
 			await this.#recovery.recordUsageLimitOutcome(msg);
-
 			let compactionResult = COMPACTION_CHECK_NONE;
 			let checkedCompaction = false;
 			if (activeGoal) {
