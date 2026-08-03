@@ -109,6 +109,7 @@ describe("task spawn routing", () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 			agents: [{ ...taskAgent, model: ["anthropic/claude-sonnet-4"] }],
 			projectAgentsDir: null,
+			errors: [],
 		});
 		const gate = deferred();
 		const runSpy = vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
@@ -152,6 +153,7 @@ describe("task spawn routing", () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 			agents: [taskAgent],
 			projectAgentsDir: null,
+			errors: [],
 		});
 		const started: string[] = [];
 		const gates = new Map<string, Deferred>();
@@ -194,6 +196,7 @@ describe("task spawn routing", () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 			agents: [taskAgent],
 			projectAgentsDir: null,
+			errors: [],
 		});
 		const started: string[] = [];
 		const gates = new Map<string, Deferred>();
@@ -237,6 +240,7 @@ describe("task spawn routing", () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 			agents: [taskAgent],
 			projectAgentsDir: null,
+			errors: [],
 		});
 		const started: string[] = [];
 		const gates = new Map<string, Deferred>();
@@ -305,6 +309,7 @@ describe("task spawn routing", () => {
 			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 				agents: [taskAgent],
 				projectAgentsDir: null,
+				errors: [],
 			});
 			const started: string[] = [];
 			const gates = new Map<string, Deferred>();
@@ -343,6 +348,7 @@ describe("task spawn routing", () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 			agents: [taskAgent],
 			projectAgentsDir: null,
+			errors: [],
 		});
 		const started: string[] = [];
 		const gates = new Map<string, Deferred>();
@@ -394,6 +400,7 @@ describe("task spawn routing", () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 			agents: [taskAgent],
 			projectAgentsDir: null,
+			errors: [],
 		});
 		const started: string[] = [];
 		const gates = new Map<string, Deferred>();

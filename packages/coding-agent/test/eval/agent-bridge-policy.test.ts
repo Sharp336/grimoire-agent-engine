@@ -89,7 +89,7 @@ function makeSession(options: SessionOptions = {}): ToolSession {
 }
 
 function mockAgents(agents: AgentDefinition[] = [taskAgent, reviewerAgent]): void {
-	vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents, projectAgentsDir: null });
+	vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents, projectAgentsDir: null, errors: [] });
 }
 
 function singleResult(options: ExecutorOptions, overrides: Partial<SingleResult> = {}): SingleResult {

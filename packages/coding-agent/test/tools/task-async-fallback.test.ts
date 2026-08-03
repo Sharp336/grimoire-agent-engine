@@ -44,8 +44,9 @@ describe("task.async-fallback", () => {
 				},
 			],
 			projectAgentsDir: null,
+			errors: [],
 		});
-		discoverSpy.mockResolvedValue({ agents: [], projectAgentsDir: null });
+		discoverSpy.mockResolvedValue({ agents: [], projectAgentsDir: null, errors: [] });
 
 		// Enable async so the missing `asyncJobManager` is the fallback trigger.
 		const tool = await TaskTool.create(createSession({ "async.enabled": true }));

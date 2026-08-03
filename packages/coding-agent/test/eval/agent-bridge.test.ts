@@ -38,7 +38,11 @@ describe("runEvalAgent", () => {
 			systemPrompt: "Handle task",
 			source: "bundled",
 		};
-		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({
+			agents: [agent],
+			projectAgentsDir: null,
+			errors: [],
+		});
 		const runSubprocessSpy = vi.spyOn(taskExecutor, "runSubprocess").mockResolvedValue(createResult());
 
 		const mcpManager = { sentinel: "mcp" } as unknown as MCPManager;
@@ -79,7 +83,11 @@ describe("runEvalAgent", () => {
 			status: "valid",
 			data: { status: "ok" },
 		};
-		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({
+			agents: [agent],
+			projectAgentsDir: null,
+			errors: [],
+		});
 		vi.spyOn(taskExecutor, "runSubprocess").mockResolvedValue(createResult({ output: "not JSON", structuredOutput }));
 		const session = {
 			cwd: "/tmp",

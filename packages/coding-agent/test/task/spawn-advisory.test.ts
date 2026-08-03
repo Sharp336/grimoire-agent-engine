@@ -79,7 +79,11 @@ describe("task tool advisory gating via suppressSpawnAdvisory", () => {
 	}
 
 	async function spawnText(suppress: boolean): Promise<string> {
-		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [agent],
+			projectAgentsDir: null,
+			errors: [],
+		});
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(
 			async (options): Promise<SingleResult> => ({
 				index: options.index ?? 0,

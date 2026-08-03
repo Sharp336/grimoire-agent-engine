@@ -68,7 +68,7 @@ describe("task spawn validation", () => {
 	}
 
 	async function executeText(params: unknown): Promise<string> {
-		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null, errors: [] });
 		const tool = await TaskTool.create(createSession());
 		const result = await tool.execute("tool-call", params);
 		return result.content.find(part => part.type === "text")?.text ?? "";

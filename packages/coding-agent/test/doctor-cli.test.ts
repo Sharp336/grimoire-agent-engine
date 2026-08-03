@@ -1575,6 +1575,37 @@ describe("omp doctor", () => {
 		}
 	});
 
+	test("setup: actual runtime-only ancestor parse failure → safe error finding", async () => {
+		const projectDir = path.join(root, "nested", "project");
+		const agentsDir = path.join(root, ".omp", "agents");
+		const agentPath = path.join(agentsDir, "recovered-runtime.md");
+		const secret = "RUNTIME_AGENT_FILE_SECRET";
+		await fs.mkdir(projectDir, { recursive: true });
+		await fs.mkdir(agentsDir, { recursive: true });
+		await fs.writeFile(
+			agentPath,
+			[
+				"---",
+				"name: recovered-runtime",
+				"description: Recovered runtime-only agent.",
+				"tools: [read]",
+				"invalid: [unclosed array",
+				"---",
+				secret,
+			].join("\n"),
+		);
+		setAgentDir(path.join(root, "user-agent-dir"));
+		setProjectDir(projectDir);
+
+		const report = await runDoctorCommand({ flags: {} });
+		const finding = report.findings.find(entry => entry.id === "setup.agents");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details).toContain(
+			`runtime agent discovery: ${agentPath}: invalid YAML frontmatter; loaded with fallback`,
+		);
+		expect(JSON.stringify(report)).not.toContain(secret);
+	});
+
 	test("setup: keybindings.yml with an unknown action → warning", async () => {
 		await fs.writeFile(path.join(root, "keybindings.yml"), "nonexistent.action: ctrl+a\n", "utf8");
 

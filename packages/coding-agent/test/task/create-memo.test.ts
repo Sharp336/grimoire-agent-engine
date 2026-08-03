@@ -31,7 +31,7 @@ describe("TaskTool.create discovery memo", () => {
 	it("reuses one discovery scan across repeated creations with the same cwd", async () => {
 		const spy = vi
 			.spyOn(discoveryModule, "discoverAgents")
-			.mockResolvedValue({ agents: TEST_AGENTS, projectAgentsDir: null });
+			.mockResolvedValue({ agents: TEST_AGENTS, projectAgentsDir: null, errors: [] });
 
 		const first = await TaskTool.create(createSession("/tmp"));
 		const second = await TaskTool.create(createSession("/tmp"));
@@ -43,7 +43,7 @@ describe("TaskTool.create discovery memo", () => {
 	it("rescans for a different cwd", async () => {
 		const spy = vi
 			.spyOn(discoveryModule, "discoverAgents")
-			.mockResolvedValue({ agents: TEST_AGENTS, projectAgentsDir: null });
+			.mockResolvedValue({ agents: TEST_AGENTS, projectAgentsDir: null, errors: [] });
 
 		await TaskTool.create(createSession("/tmp"));
 		await TaskTool.create(createSession("/tmp/omp-memo-other"));
@@ -55,7 +55,7 @@ describe("TaskTool.create discovery memo", () => {
 		const spy = vi
 			.spyOn(discoveryModule, "discoverAgents")
 			.mockRejectedValueOnce(new Error("boom"))
-			.mockResolvedValue({ agents: TEST_AGENTS, projectAgentsDir: null });
+			.mockResolvedValue({ agents: TEST_AGENTS, projectAgentsDir: null, errors: [] });
 
 		await expect(TaskTool.create(createSession("/tmp"))).rejects.toThrow("boom");
 		const tool = await TaskTool.create(createSession("/tmp"));

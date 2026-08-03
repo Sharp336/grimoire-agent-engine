@@ -83,7 +83,11 @@ function result(): SingleResult {
 }
 
 function mockDiscovery(agent: AgentDefinition = AGENT): void {
-	vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+	vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+		agents: [agent],
+		projectAgentsDir: null,
+		errors: [],
+	});
 }
 
 afterEach(() => {

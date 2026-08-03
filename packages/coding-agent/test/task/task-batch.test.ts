@@ -92,6 +92,7 @@ function mockDiscovery(agent: AgentDefinition | AgentDefinition[] = taskAgent): 
 	vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 		agents: Array.isArray(agent) ? agent : [agent],
 		projectAgentsDir: null,
+		errors: [],
 	});
 }
 describe("task.batch schema gating", () => {

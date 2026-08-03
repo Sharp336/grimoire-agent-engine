@@ -125,6 +125,7 @@ function mockAgents(agent: AgentDefinition): void {
 	vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 		agents: [agent],
 		projectAgentsDir: null,
+		errors: [],
 	});
 }
 

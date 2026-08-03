@@ -24,6 +24,7 @@ Skill body`;
 			enabled: true,
 		});
 		expect(result.body).toBe("Skill body");
+		expect(result.diagnostics).toEqual([]);
 		expect(warnSpy).not.toHaveBeenCalled();
 	});
 
@@ -38,6 +39,8 @@ Body content`;
 
 		expect(result.frontmatter).toEqual({ invalid: "[unclosed array" });
 		expect(result.body).toBe("Body content");
+		expect(result.diagnostics).toHaveLength(1);
+		expect(result.diagnostics[0]?.source).toBe("broken.md");
 		expect(warnSpy).toHaveBeenCalledWith(
 			"Failed to parse YAML frontmatter",
 			expect.objectContaining({ err: expect.stringContaining("broken.md") }),
@@ -63,6 +66,7 @@ Body`;
 		// The unrecoverable line survives as its raw trimmed string.
 		expect(result.frontmatter.scope).toBe('"text","thinking"');
 		expect(result.body).toBe("Body");
+		expect(result.diagnostics).toHaveLength(1);
 		expect(warnSpy).toHaveBeenCalled();
 	});
 });

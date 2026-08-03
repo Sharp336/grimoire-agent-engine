@@ -4,7 +4,7 @@
  * Agents are embedded at build time via Bun's import with { type: "text" }.
  */
 import { Effort } from "@oh-my-pi/pi-ai";
-import { parseFrontmatter, prompt } from "@oh-my-pi/pi-utils";
+import { type FrontmatterError, parseFrontmatter, prompt } from "@oh-my-pi/pi-utils";
 import { parseAgentFields } from "../discovery/helpers";
 import designerMd from "../prompts/agents/designer.md" with { type: "text" };
 // Embed agent markdown files at build time
@@ -75,7 +75,6 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
 ];
 
 // Computed lazily on first loadBundledAgents() call to avoid eager prompt.render at module load.
-
 export class AgentParsingError extends Error {
 	constructor(
 		error: Error,
@@ -99,6 +98,40 @@ export class AgentParsingError extends Error {
 	}
 }
 
+/** Parse result used by discovery to retain recovered agents and report their diagnostics. */
+export interface AgentParseResult {
+	agent: AgentDefinition;
+	diagnostics: FrontmatterError[];
+}
+
+/**
+ * Parse an agent once while retaining recoverable frontmatter diagnostics.
+ */
+export function parseAgentWithDiagnostics(
+	filePath: string,
+	content: string,
+	source: AgentSource,
+	level: "fatal" | "warn" | "off" = "fatal",
+): AgentParseResult {
+	const { frontmatter, body, diagnostics } = parseFrontmatter(content, {
+		location: filePath,
+		level,
+	});
+	const fields = parseAgentFields(frontmatter);
+	if (!fields) {
+		throw new AgentParsingError(new Error(`Invalid agent field: ${filePath}\n${content}`), filePath);
+	}
+	return {
+		agent: {
+			...fields,
+			systemPrompt: body,
+			source,
+			filePath,
+		},
+		diagnostics,
+	};
+}
+
 /**
  * Parse an agent from embedded content.
  */
@@ -108,20 +141,7 @@ export function parseAgent(
 	source: AgentSource,
 	level: "fatal" | "warn" | "off" = "fatal",
 ): AgentDefinition {
-	const { frontmatter, body } = parseFrontmatter(content, {
-		location: filePath,
-		level,
-	});
-	const fields = parseAgentFields(frontmatter);
-	if (!fields) {
-		throw new AgentParsingError(new Error(`Invalid agent field: ${filePath}\n${content}`), filePath);
-	}
-	return {
-		...fields,
-		systemPrompt: body,
-		source,
-		filePath,
-	};
+	return parseAgentWithDiagnostics(filePath, content, source, level).agent;
 }
 
 /** Cache for bundled agents */

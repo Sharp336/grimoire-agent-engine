@@ -202,6 +202,7 @@ describe("AgentDashboard tab navigation", () => {
 				{ name: "proj-agent", description: "p", systemPrompt: "", source: "project" },
 				{ name: "bundled-agent", description: "b", systemPrompt: "", source: "bundled" },
 			],
+			errors: [],
 		});
 		const geo = stubStdoutGeometry(120);
 		try {
@@ -243,6 +244,7 @@ describe("AgentDashboard prewalk", () => {
 		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
 			projectAgentsDir: null,
 			agents: [{ name: "task", description: "Generic task agent", systemPrompt: "", source: "bundled" }],
+			errors: [],
 		});
 		const settings = Settings.isolated({ "task.prewalk": true });
 		const dashboard = await AgentDashboard.create(await makeTempCwd(), settings, 24, {});

@@ -51,6 +51,7 @@ describe("task spawn policy surfaces", () => {
 		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({
 			agents: [factFinderAgent, oracleAgent],
 			projectAgentsDir: null,
+			errors: [],
 		});
 
 		const tool = await TaskTool.create(makeSession("fact-finder"));

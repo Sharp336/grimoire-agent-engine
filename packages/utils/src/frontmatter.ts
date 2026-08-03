@@ -99,26 +99,30 @@ export interface FrontmatterOptions {
 	level?: "off" | "warn" | "fatal";
 }
 
+export interface FrontmatterParseResult {
+	frontmatter: Record<string, unknown>;
+	body: string;
+	/** Recoverable YAML failures that triggered the line-by-line fallback. */
+	diagnostics: FrontmatterError[];
+}
+
 /**
  * Parse YAML frontmatter from markdown content
- * Returns { frontmatter, body } where body has frontmatter stripped
+ * Returns parsed frontmatter, body, and recoverable parse diagnostics.
  */
-export function parseFrontmatter(
-	content: string,
-	options?: FrontmatterOptions,
-): { frontmatter: Record<string, unknown>; body: string } {
+export function parseFrontmatter(content: string, options?: FrontmatterOptions): FrontmatterParseResult {
 	const { location, source, fallback, normalize = true, level = "warn" } = options ?? {};
 	const loc = location ?? source;
 	const frontmatter: Record<string, unknown> = { ...fallback };
 
 	const normalized = normalize ? stripHtmlComments(content.replace(/\r\n?/g, "\n")) : content;
 	if (!normalized.startsWith("---")) {
-		return { frontmatter, body: normalized };
+		return { frontmatter, body: normalized, diagnostics: [] };
 	}
 
 	const endIndex = normalized.indexOf("\n---", 3);
 	if (endIndex === -1) {
-		return { frontmatter, body: normalized };
+		return { frontmatter, body: normalized, diagnostics: [] };
 	}
 
 	const metadata = normalized.slice(4, endIndex);
@@ -126,13 +130,13 @@ export function parseFrontmatter(
 
 	try {
 		const loaded = parseYamlRecord(metadata);
-		return { frontmatter: normalizeKeys({ ...frontmatter, ...loaded }), body };
+		return { frontmatter: normalizeKeys({ ...frontmatter, ...loaded }), body, diagnostics: [] };
 	} catch (error) {
 		const quotedMetadata = quoteAmbiguousPlainScalars(metadata);
 		if (quotedMetadata) {
 			try {
 				const loaded = parseYamlRecord(quotedMetadata);
-				return { frontmatter: normalizeKeys({ ...frontmatter, ...loaded }), body };
+				return { frontmatter: normalizeKeys({ ...frontmatter, ...loaded }), body, diagnostics: [] };
 			} catch {
 				// Fall through to the existing warning + simple key/value fallback.
 			}
@@ -170,6 +174,10 @@ export function parseFrontmatter(
 			frontmatter[match[1]] = value;
 		}
 
-		return { frontmatter: normalizeKeys(frontmatter) as Record<string, unknown>, body };
+		return {
+			frontmatter: normalizeKeys(frontmatter) as Record<string, unknown>,
+			body,
+			diagnostics: [err],
+		};
 	}
 }

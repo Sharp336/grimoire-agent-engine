@@ -108,7 +108,7 @@ describe("task approval details surface the dispatch", () => {
 	});
 
 	async function makeTool(spawns = "*"): Promise<TaskTool> {
-		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null, errors: [] });
 		return TaskTool.create({
 			cwd: "/tmp",
 			hasUI: false,

@@ -78,6 +78,7 @@ function mockDiscovery(): void {
 	vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 		agents: [taskAgent, scoutAgent],
 		projectAgentsDir: null,
+		errors: [],
 	});
 }
 

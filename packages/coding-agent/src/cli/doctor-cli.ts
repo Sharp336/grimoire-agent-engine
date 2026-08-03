@@ -18,6 +18,7 @@ import {
 } from "@oh-my-pi/pi-ai/auth-storage";
 import {
 	$which,
+	FrontmatterError,
 	formatBytes,
 	getAgentDbPath,
 	getAgentDir,
@@ -30,6 +31,7 @@ import {
 	MAIN_CONFIG_FILENAMES,
 	parseFrontmatter,
 	sanitizeText,
+	truncate,
 	tryParseJson,
 	VERSION,
 } from "@oh-my-pi/pi-utils";
@@ -70,7 +72,7 @@ import { resolveStdioCommandPath } from "../mcp/transports/stdio";
 import type { MCPServerConfig } from "../mcp/types";
 import { loadMnemopiConfig } from "../mnemopi/config";
 import { resolveThemeColors, theme, themeJsonSchema } from "../modes/theme/theme";
-import { loadBundledAgents } from "../task/agents";
+import { AgentParsingError, loadBundledAgents } from "../task/agents";
 import { discoverAgents } from "../task/discovery";
 import type { AgentDefinition } from "../task/types";
 import {
@@ -1644,6 +1646,17 @@ async function scanMarkdownDir(dir: string): Promise<Array<{ filePath: string; c
 	return results;
 }
 
+const RUNTIME_DISCOVERY_SUMMARY_LIMIT = 240;
+
+function summarizeRuntimeDiscoveryFailure(error: unknown): string {
+	if (error instanceof AgentParsingError || error instanceof FrontmatterError) {
+		return "agent metadata parse failed";
+	}
+	const raw = error instanceof Error ? error.message : String(error);
+	const summary = sanitizeText(raw).replace(/\s+/g, " ").trim();
+	return truncate(summary || "unknown failure", RUNTIME_DISCOVERY_SUMMARY_LIMIT);
+}
+
 /** Build the set of known agent names for `spawns` validation. When
  * unscoped, delegates to the runtime's `discoverAgents` so ancestor `.omp/agents`
  * dirs and Claude marketplace plugin agents are included — the same surface
@@ -1664,7 +1677,7 @@ async function buildKnownAgentNames(
 	if (!scoped) {
 		try {
 			const discovery = await discoverAgents(projectDir);
-			for (const diagnostic of discovery.errors ?? []) {
+			for (const diagnostic of discovery.errors) {
 				discoveryErrors.push(`runtime agent discovery: ${diagnostic}`);
 			}
 			for (const agent of discovery.agents) {
@@ -1675,7 +1688,7 @@ async function buildKnownAgentNames(
 			// Discovery failure must not crash the report; the locally-parsed
 			// and bundled names still cover the common case. Surface the
 			// rejection so doctor cannot report healthy over a silent drop.
-			discoveryErrors.push(`runtime agent discovery: ${error instanceof Error ? error.message : String(error)}`);
+			discoveryErrors.push(`runtime agent discovery: ${summarizeRuntimeDiscoveryFailure(error)}`);
 		}
 	}
 	return { names, runtimeAgents, discoveryErrors };

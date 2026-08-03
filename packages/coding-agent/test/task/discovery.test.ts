@@ -91,6 +91,38 @@ describe("discoverAgents", () => {
 		expect(projectAgentsDir).toBe(path.join(projectDir, ".omp", "agents"));
 	});
 
+	test("reports parse failures without dropping a recovered agent or exposing file contents", async () => {
+		const agentsDir = path.join(projectDir, ".omp", "agents");
+		const recoveredPath = path.join(agentsDir, "recovered.md");
+		const rejectedPath = path.join(agentsDir, "rejected.md");
+		const recoveredSecret = "RECOVERED_AGENT_FILE_SECRET";
+		const rejectedSecret = "REJECTED_AGENT_FILE_SECRET";
+		await fs.mkdir(agentsDir, { recursive: true });
+		await fs.writeFile(
+			recoveredPath,
+			[
+				"---",
+				"name: recovered-agent",
+				"description: Recovered runtime agent.",
+				"tools: [read]",
+				"invalid: [unclosed array",
+				"---",
+				recoveredSecret,
+			].join("\n"),
+		);
+		await fs.writeFile(rejectedPath, ["---", "name: rejected-agent", "---", rejectedSecret].join("\n"));
+
+		const result = await discoverAgents(projectDir, tempHome);
+
+		expect(result.agents.find(agent => agent.name === "recovered-agent")?.tools).toContain("read");
+		expect(result.agents.some(agent => agent.name === "rejected-agent")).toBe(false);
+		expect(result.projectAgentsDir).toBe(agentsDir);
+		expect(result.errors).toContain(`${recoveredPath}: invalid YAML frontmatter; loaded with fallback`);
+		expect(result.errors).toContain(`${rejectedPath}: invalid agent definition`);
+		expect(result.errors.join("\n")).not.toContain(recoveredSecret);
+		expect(result.errors.join("\n")).not.toContain(rejectedSecret);
+	});
+
 	test("loads agents from OMP npm plugins under <home>/.omp/plugins/node_modules", async () => {
 		await writeOmpPluginAgent(tempHome);
 

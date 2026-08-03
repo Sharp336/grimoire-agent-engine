@@ -381,6 +381,7 @@ describe("task tool plan-mode prewalk guard", () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 			agents: [prewalkAgent],
 			projectAgentsDir: null,
+			errors: [],
 		});
 		let forwarded: AgentDefinition | undefined;
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async (options): Promise<SingleResult> => {

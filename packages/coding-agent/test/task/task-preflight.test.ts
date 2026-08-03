@@ -55,7 +55,7 @@ function resultFor(id: string): SingleResult {
 }
 
 function mockDiscovery(agents: AgentDefinition[] = [taskAgent]): void {
-	vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents, projectAgentsDir: null });
+	vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents, projectAgentsDir: null, errors: [] });
 }
 
 describe("task async preflight", () => {

@@ -26,7 +26,7 @@ import { isProviderEnabled } from "../capability";
 import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
 import { listClaudePluginRoots } from "../discovery/helpers";
 import { listOmpExtensionRoots } from "../discovery/omp-extension-roots";
-import { loadBundledAgents, parseAgent } from "./agents";
+import { loadBundledAgents, parseAgentWithDiagnostics } from "./agents";
 import type { AgentDefinition, AgentSource } from "./types";
 
 const TASK_AGENT_CONFIG_SOURCE = ".omp";
@@ -35,8 +35,8 @@ const TASK_AGENT_CONFIG_SOURCE = ".omp";
 export interface DiscoveryResult {
 	agents: AgentDefinition[];
 	projectAgentsDir: string | null;
-	/** Diagnostics from agent source reads/parses that runtime skipped. */
-	errors?: string[];
+	/** Safe diagnostics from agent source reads/parses that runtime skipped or recovered. */
+	errors: string[];
 }
 
 /**
@@ -52,29 +52,39 @@ async function loadAgentsFromDir(
 		entries = await fs.readdir(dir, { withFileTypes: true });
 	} catch (error) {
 		if (!isEnoent(error)) {
-			const message = error instanceof Error ? error.message : String(error);
 			logger.warn("Failed to read agents directory", { dir, error });
-			errors.push(`${dir}: ${message}`);
+			errors.push(`${dir}: unable to read agents directory`);
 		}
 		return { agents: [], errors };
 	}
 	const files = entries
 		.filter(entry => (entry.isFile() || entry.isSymbolicLink()) && entry.name.endsWith(".md"))
 		.sort((a, b) => a.name.localeCompare(b.name))
-		.map(file => {
+		.map(async file => {
 			const filePath = path.join(dir, file.name);
-			return fs
-				.readFile(filePath, "utf-8")
-				.then(content => parseAgent(filePath, content, source, "warn"))
-				.catch(error => {
-					const message = error instanceof Error ? error.message : String(error);
-					logger.warn("Failed to read agent file", { filePath, error });
-					errors.push(`${filePath}: ${message}`);
-					return null;
-				});
+			let content: string;
+			try {
+				content = await fs.readFile(filePath, "utf-8");
+			} catch (error) {
+				logger.warn("Failed to read agent file", { filePath, error });
+				errors.push(`${filePath}: unable to read agent file`);
+				return null;
+			}
+
+			try {
+				const { agent, diagnostics } = parseAgentWithDiagnostics(filePath, content, source, "warn");
+				if (diagnostics.length > 0) {
+					errors.push(`${filePath}: invalid YAML frontmatter; loaded with fallback`);
+				}
+				return agent;
+			} catch (error) {
+				logger.warn("Failed to parse agent file", { filePath, error });
+				errors.push(`${filePath}: invalid agent definition`);
+				return null;
+			}
 		});
 
-	return { agents: (await Promise.all(files)).filter(Boolean) as AgentDefinition[], errors };
+	return { agents: (await Promise.all(files)).filter((agent): agent is AgentDefinition => agent !== null), errors };
 }
 
 /**
