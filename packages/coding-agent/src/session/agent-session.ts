@@ -1311,6 +1311,7 @@ export class AgentSession {
 		this.#tools = new SessionTools(sessionToolsHost, {
 			autoApprove: config.autoApprove,
 			toolRegistry: config.toolRegistry,
+			createEvalTool: config.createEvalTool,
 			createVibeTools: config.createVibeTools,
 			createComputerTool: config.createComputerTool,
 			createInspectImageTool: config.createInspectImageTool,
@@ -3959,6 +3960,7 @@ export class AgentSession {
 			hindsightState?.flushRetainQueue() ?? Promise.resolve(),
 			this.#disposeMnemopi(mnemopiState, options.mnemopiConsolidateTimeoutMs),
 		]);
+		this.#eval.flushPending();
 		for (const result of results) {
 			if (result.status === "rejected") {
 				logger.warn("Session dispose subsystem failed during parallel teardown", {
@@ -4421,6 +4423,10 @@ export class AgentSession {
 	/** Looks up a registered tool by name. */
 	getToolByName(name: string): AgentTool | undefined {
 		return this.#tools.getToolByName(name);
+	}
+	/** Returns a session-bound eval tool without changing the model-visible active tool set. */
+	getEvalToolForHost(): unknown {
+		return this.#tools.getEvalToolForHost();
 	}
 
 	/** Whether a registry entry came from a built-in factory. */
@@ -5599,6 +5605,7 @@ export class AgentSession {
 			// The per-turn before_agent_start override lives only for this turn.
 			this.#tools.clearTurnSystemPromptOverride();
 			this.#usagePreflightReadyForNextModelCall = false;
+			this.#eval.flushPending();
 			this.#endInFlight();
 		}
 	}
@@ -6541,7 +6548,7 @@ export class AgentSession {
 	 * @param options - Optional initial messages and parent session path
 	 * @returns true if completed, false if cancelled by hook
 	 */
-	async newSession(options?: NewSessionOptions): Promise<boolean> {
+	async newSession(options?: NewSessionOptions, beforeCommit?: () => void): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("start a new session");
 		const previousSessionFile = this.sessionFile;
 
@@ -6556,6 +6563,9 @@ export class AgentSession {
 				return false;
 			}
 		}
+
+		beforeCommit?.();
+		this.#eval.flushPending();
 
 		this.#disconnectFromAgent();
 		let advisorRecordersDetached = false;
@@ -7355,8 +7365,8 @@ export class AgentSession {
 	/**
 	 * Track Python work started outside AgentSession.executePython so dispose can await and abort it too.
 	 */
-	trackEvalExecution<T>(execution: Promise<T>, abortController: AbortController): Promise<T> {
-		return this.#eval.trackExecution(execution, abortController);
+	trackEvalExecution<T>(execution: Promise<T>, abortController: AbortController, executionId?: string): Promise<T> {
+		return this.#eval.trackExecution(execution, abortController, executionId);
 	}
 
 	/**
@@ -7366,11 +7376,28 @@ export class AgentSession {
 		this.#eval.recordPythonResult(code, result, options);
 	}
 
+	/** Record a user-initiated eval through the existing session transcript authority. */
+	recordEvalResult(
+		result: Omit<PythonExecutionMessage, "role" | "timestamp"> & { timestamp?: number },
+	): PythonExecutionMessage {
+		return this.#eval.recordEvalResult(result);
+	}
+
+	/** Completed eval entries not yet appended because an agent turn is streaming. */
+	getPendingEvalMessages(): readonly PythonExecutionMessage[] {
+		return this.#eval.pendingMessages();
+	}
+
 	/**
 	 * Cancel running Python execution.
 	 */
 	abortEval(): void {
 		this.#eval.abort();
+	}
+
+	/** Cancel exactly one eval execution without affecting sibling kernels or runs. */
+	abortEvalExecution(executionId: string): boolean {
+		return this.#eval.abortExecution(executionId);
 	}
 
 	/** Whether a Python execution is currently running */
@@ -7589,7 +7616,7 @@ export class AgentSession {
 	 * Listeners are preserved and will continue receiving events.
 	 * @returns true if switch completed, false if cancelled by hook
 	 */
-	async switchSession(sessionPath: string): Promise<boolean> {
+	async switchSession(sessionPath: string, beforeCommit?: () => void): Promise<boolean> {
 		const previousSessionFile = this.sessionManager.getSessionFile();
 		const switchingToDifferentSession = previousSessionFile
 			? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
@@ -7606,6 +7633,9 @@ export class AgentSession {
 				return false;
 			}
 		}
+
+		beforeCommit?.();
+		this.#eval.flushPending();
 
 		this.#disconnectFromAgent();
 		await this.abort({ goalReason: "internal" });
@@ -7885,7 +7915,10 @@ export class AgentSession {
 	 *   - selectedImages: Image attachments of the selected user message (for editor draft restore)
 	 *   - cancelled: True if a hook cancelled the branch
 	 */
-	async branch(entryId: string): Promise<{
+	async branch(
+		entryId: string,
+		beforeCommit?: () => void,
+	): Promise<{
 		selectedText: string;
 		selectedImages: ImageContent[];
 		cancelled: boolean;
@@ -7914,6 +7947,9 @@ export class AgentSession {
 			}
 			skipConversationRestore = result?.skipConversationRestore ?? false;
 		}
+
+		beforeCommit?.();
+		this.#eval.flushPending();
 
 		// Clear pending messages (bound to old session state)
 		this.#pendingNextTurnMessages = [];
