@@ -95,6 +95,19 @@ describe("renderUsageReports (#3268 TUI aggregate)", () => {
 		expect(text).toContain("claude-opus-4-6");
 	});
 
+	it("sanitizes roster identifiers before enforcing the width cap", () => {
+		const width = 24;
+		const models = [
+			"custom-provider-with-a-very-long-name/model\twith-tabs",
+			"custom-provider-with-a-very-long-name/model\x1b]0;hidden\x07-safe",
+		];
+		const text = stripVTControlCharacters(renderUsageModelRoster(theme, models, width));
+
+		expect(text).not.toContain("\t");
+		expect(text).not.toContain("hidden");
+		for (const line of text.split("\n")) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(width);
+	});
+
 	it("deduplicates identical per-limit notes when accounts share one window group", () => {
 		// Both accounts report the SAME label+windowId, so their limits land in
 		// one aggregate group; both carry an identical per-limit note.
@@ -143,6 +156,59 @@ describe("renderUsageReports (#3268 TUI aggregate)", () => {
 
 		expect(text).toContain("scoped-account");
 		expect(text).not.toContain("account 1");
+	});
+
+	it("numbers saved-reset footnotes by their owning report", () => {
+		const resetCredits = { availableCount: 1, credits: [] };
+		const reports: UsageReport[] = [
+			{ provider: "openai-codex", fetchedAt: Date.now(), limits: [], resetCredits },
+			{ provider: "openai-codex", fetchedAt: Date.now(), limits: [], resetCredits },
+		];
+
+		const text = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 120));
+
+		expect(text).toContain("account 1: 1 saved reset");
+		expect(text).toContain("account 2: 1 saved reset");
+	});
+
+	it("sanitizes provider-supplied reset and unmetered account text", () => {
+		const reports: UsageReport[] = [
+			{
+				provider: "test-provider",
+				fetchedAt: Date.now(),
+				limits: [],
+				metadata: { email: "acct\tname\x1b]0;hidden\x07@example.test", planType: "business\tplan" },
+				resetCredits: { availableCount: 1, credits: [] },
+			},
+		];
+
+		const text = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 120));
+
+		expect(text).not.toContain("\t");
+		expect(text).not.toContain("hidden");
+		expect(text).toContain("business");
+		expect(text).toContain("plan");
+	});
+
+	it("clamps finite provider fractions and rejects non-finite values", () => {
+		const reports: UsageReport[] = [
+			report("test-provider", "acct@example.test", [
+				limit("Overage", "over", HOUR, 1.25),
+				limit("Negative", "negative", HOUR, -0.25),
+				limit("Not a number", "nan", HOUR, Number.NaN),
+				limit("Infinite", "infinite", HOUR, Number.POSITIVE_INFINITY),
+			]),
+		];
+
+		const text = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 120));
+		const lines = text.split("\n");
+
+		expect(lines.find(line => line.includes("Overage"))).toContain("0%");
+		expect(lines.find(line => line.includes("Negative"))).toContain("100%");
+		expect(lines.find(line => line.includes("Not a number"))).toContain("—");
+		expect(lines.find(line => line.includes("Infinite"))).toContain("—");
+		expect(text).not.toContain("NaN%");
+		expect(text).not.toContain("Infinity%");
 	});
 
 	it("renders used-only absolute amounts with neutral status and no account summary", () => {

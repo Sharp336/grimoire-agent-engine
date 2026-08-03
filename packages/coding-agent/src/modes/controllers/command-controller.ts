@@ -1744,6 +1744,12 @@ function resolveStatusColor(status: UsageLimit["status"]): "success" | "warning"
 /** Eighth-block ramp so a bar carries sub-cell precision at small widths. */
 const BAR_PARTIALS = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"] as const;
 
+/** Provider fractions are untrusted input: reject non-finite values and clamp overage. */
+function normalizeUsageFraction(fraction: number | undefined): number | undefined {
+	if (fraction === undefined || !Number.isFinite(fraction)) return undefined;
+	return Math.min(Math.max(fraction, 0), 1);
+}
+
 /** Filled portion is the USED fraction; the remainder is a dim track. */
 function renderUsageBar(
 	fraction: number,
@@ -1752,7 +1758,7 @@ function renderUsageBar(
 	barWidth: number,
 ): string {
 	if (barWidth <= 0) return "";
-	const exact = Math.min(Math.max(fraction, 0), 1) * barWidth;
+	const exact = (normalizeUsageFraction(fraction) ?? 0) * barWidth;
 	let fullCells = Math.floor(exact);
 	let eighths = Math.round((exact - fullCells) * 8);
 	if (eighths === 8) {
@@ -1767,7 +1773,9 @@ function renderUsageBar(
 
 /** Remaining quota as a short cell string: `100%`, `<1%`, `0%`. */
 function formatFreePercent(fraction: number): string {
-	const free = Math.max(0, 1 - fraction) * 100;
+	const normalized = normalizeUsageFraction(fraction);
+	if (normalized === undefined) return "—";
+	const free = (1 - normalized) * 100;
 	if (free === 0) return "0%";
 	if (free >= 99.95) return "100%";
 	if (free < 1) return "<1%";
@@ -1831,7 +1839,10 @@ function buildUsageBlock(
 		.map((report, position) => ({
 			report,
 			position,
-			worst: report.limits.reduce((max, limit) => Math.max(max, resolveUsedFraction(limit) ?? -1), -1),
+			worst: report.limits.reduce(
+				(max, limit) => Math.max(max, normalizeUsageFraction(resolveUsedFraction(limit)) ?? -1),
+				-1,
+			),
 		}))
 		.sort((a, b) => (b.worst !== a.worst ? b.worst - a.worst : a.position - b.position))
 		.map(entry => entry.report);
@@ -1871,7 +1882,7 @@ function buildUsageBlock(
 	}
 
 	const credits: string[] = [];
-	for (const report of providerReports) {
+	for (const [index, report] of providerReports.entries()) {
 		const count = report.resetCredits?.availableCount ?? 0;
 		if (count <= 0) continue;
 		const expiries = (report.resetCredits?.credits ?? [])
@@ -1884,7 +1895,7 @@ function buildUsageBlock(
 			expired > 0 ? `${expired} expired` : "",
 		].filter(Boolean);
 		credits.push(
-			`${formatReportLabel(report, 0)}: ${count} saved reset${count === 1 ? "" : "s"}${detail.length > 0 ? ` (${detail.join(", ")})` : ""} — /usage reset`,
+			`${formatReportLabel(report, index)}: ${count} saved reset${count === 1 ? "" : "s"}${detail.length > 0 ? ` (${detail.join(", ")})` : ""} — /usage reset`,
 		);
 	}
 
@@ -1973,7 +1984,7 @@ export function renderUsageReports(
 			const pressure = (block: UsageBlock): number =>
 				block.accounts
 					.flatMap(report => report.limits)
-					.reduce((max, limit) => Math.max(max, resolveUsedFraction(limit) ?? -1), -1);
+					.reduce((max, limit) => Math.max(max, normalizeUsageFraction(resolveUsedFraction(limit)) ?? -1), -1);
 			const delta = pressure(b) - pressure(a);
 			return delta !== 0 ? delta : a.provider.localeCompare(b.provider);
 		});
@@ -2050,7 +2061,7 @@ export function renderUsageReports(
 						layout.cellWidth,
 					);
 				}
-				const fraction = resolveUsedFraction(limit);
+				const fraction = normalizeUsageFraction(resolveUsedFraction(limit));
 				const bar = renderUsageBar(
 					fraction ?? 0,
 					fraction === undefined ? undefined : limit.status,
@@ -2085,13 +2096,13 @@ export function renderUsageReports(
 		}
 		for (const credit of block.credits) {
 			lines.push(
-				`${padding(USAGE_INDENT)}${uiTheme.fg("dim", truncateToWidth(credit, availableWidth - USAGE_INDENT))}`,
+				`${padding(USAGE_INDENT)}${uiTheme.fg("dim", truncateToWidth(replaceTabs(sanitizeText(credit)), availableWidth - USAGE_INDENT))}`,
 			);
 		}
 		// Accounts with no rate limits (e.g. business/enterprise plans).
 		for (const account of block.unmetered) {
 			lines.push(
-				`${padding(USAGE_INDENT)}${uiTheme.fg("dim", truncateToWidth(account, availableWidth - USAGE_INDENT))}`,
+				`${padding(USAGE_INDENT)}${uiTheme.fg("dim", truncateToWidth(replaceTabs(sanitizeText(account)), availableWidth - USAGE_INDENT))}`,
 			);
 		}
 	}
@@ -2112,7 +2123,7 @@ export function renderUsageModelRoster(
 	availableWidth: number,
 ): string {
 	if (usageModelSelectors.length === 0) {
-		return uiTheme.fg("dim", "No models are mapped to a live usage report.");
+		return truncateToWidth(uiTheme.fg("dim", "No models are mapped to a live usage report."), availableWidth);
 	}
 	const byProvider = new Map<string, string[]>();
 	for (const selector of usageModelSelectors) {
@@ -2128,13 +2139,14 @@ export function renderUsageModelRoster(
 		`${uiTheme.bold(uiTheme.fg("accent", "Models with usage data"))} ${uiTheme.fg("dim", `· ${total} model${total === 1 ? "" : "s"}`)}`,
 	];
 	for (const [provider, models] of [...byProvider.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+		const safeProvider = replaceTabs(sanitizeText(provider));
 		lines.push("");
-		lines.push(`${uiTheme.fg("accent", provider)} ${uiTheme.fg("dim", `(${models.length})`)}`);
+		lines.push(`${uiTheme.fg("accent", safeProvider)} ${uiTheme.fg("dim", `(${models.length})`)}`);
 		for (const model of models) {
 			lines.push(
-				`${padding(USAGE_INDENT)}${replaceTabs(truncateToWidth(sanitizeText(model), availableWidth - USAGE_INDENT))}`,
+				`${padding(USAGE_INDENT)}${truncateToWidth(replaceTabs(sanitizeText(model)), availableWidth - USAGE_INDENT)}`,
 			);
 		}
 	}
-	return lines.join("\n");
+	return lines.map(line => truncateToWidth(line, availableWidth)).join("\n");
 }
