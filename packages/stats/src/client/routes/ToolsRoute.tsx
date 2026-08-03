@@ -3,7 +3,14 @@ import { Line } from "react-chartjs-2";
 import { getToolDashboardStats } from "../api";
 import { CHART_THEMES, MODEL_COLORS } from "../components/chart-shared";
 import { formatRangeTick, rangeMeta } from "../components/range-meta";
-import { formatCompact, formatCost, formatInteger, formatPercent, formatRelativeTime } from "../data/formatters";
+import {
+	formatCompact,
+	formatCost,
+	formatDurationMs,
+	formatInteger,
+	formatPercent,
+	formatRelativeTime,
+} from "../data/formatters";
 import { useResource } from "../data/useResource";
 import { buildToolRows, type ToolRowView } from "../data/view-models";
 import type { TimeRange, ToolModelStats, ToolTimeSeriesPoint, ToolUsageStats } from "../types";
@@ -297,6 +304,31 @@ function ToolsTable({ byTool }: { byTool: ToolUsageStats[] }) {
 				render: (item: ToolRowView) => <span className="font-mono">{formatCost(item.costShare)}</span>,
 			},
 			{
+				key: "medianMs",
+				header: "Median Time",
+				numeric: true,
+				render: (item: ToolRowView) => (
+					<span
+						className="font-mono"
+						title={`Median execution time over ${formatInteger(item.durationSamples)} timed call(s); p90 ${
+							item.durationSamples > 0 ? formatDurationMs(item.durationMsP90) : "-"
+						}`}
+					>
+						{item.durationSamples > 0 ? formatDurationMs(item.durationMsMedian) : "-"}
+					</span>
+				),
+			},
+			{
+				key: "p90Ms",
+				header: "p90 Time",
+				numeric: true,
+				render: (item: ToolRowView) => (
+					<span className="font-mono" title="90th-percentile execution time">
+						{item.durationSamples > 0 ? formatDurationMs(item.durationMsP90) : "-"}
+					</span>
+				),
+			},
+			{
 				key: "resultChars",
 				header: "Result Text",
 				numeric: true,
@@ -342,6 +374,18 @@ function ToolsTable({ byTool }: { byTool: ToolUsageStats[] }) {
 				<div>
 					<div className="stats-mobile-card-label">Result Text</div>
 					<div className="stats-mobile-card-value font-mono">{formatCompact(item.resultChars)}</div>
+				</div>
+				<div>
+					<div className="stats-mobile-card-label">Median Time</div>
+					<div className="stats-mobile-card-value font-mono">
+						{item.durationSamples > 0 ? formatDurationMs(item.durationMsMedian) : "-"}
+					</div>
+				</div>
+				<div>
+					<div className="stats-mobile-card-label">p90 Time</div>
+					<div className="stats-mobile-card-value font-mono">
+						{item.durationSamples > 0 ? formatDurationMs(item.durationMsP90) : "-"}
+					</div>
 				</div>
 			</div>
 		</div>
@@ -426,6 +470,16 @@ function ToolModelPanel({ byToolModel }: { byToolModel: ToolModelStats[] }) {
 				numeric: true,
 				render: (item: ToolModelStats & { errorRate: number }) => (
 					<span className="font-mono">{formatCost(item.costShare)}</span>
+				),
+			},
+			{
+				key: "medianMs",
+				header: "Median Time",
+				numeric: true,
+				render: (item: ToolModelStats & { errorRate: number }) => (
+					<span className="font-mono" title="Median execution time for this tool under this model">
+						{item.durationSamples > 0 ? formatDurationMs(item.durationMsMedian) : "-"}
+					</span>
 				),
 			},
 		],
