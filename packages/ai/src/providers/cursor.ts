@@ -836,7 +836,8 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 		} finally {
 			if (conversationId && conversationStateOwner && completedCleanly && conversationStateEntry) {
 				conversationStateEntry.restorable = true;
-				if (conversationStateCache.get(conversationId)?.owner === conversationStateOwner) {
+				const currentEntry = conversationStateCache.get(conversationId);
+				if (!currentEntry || currentEntry.owner === conversationStateOwner) {
 					conversationStateCache.set(conversationId, conversationStateEntry);
 				}
 			}
@@ -963,13 +964,19 @@ interface CursorNativeExecReplay {
 }
 
 const kCursorNativeExecReplay = Symbol("cursorNativeExecReplay");
+const CURSOR_NATIVE_REPLAY_REQUIRED = "__cursorNativeReplayRequired";
 
 type CursorReplayableToolResult = ToolResultMessage & {
 	[kCursorNativeExecReplay]?: CursorNativeExecReplay;
+	[CURSOR_NATIVE_REPLAY_REQUIRED]?: true;
 };
 
 function nativeExecReplay(result: ToolResultMessage): CursorNativeExecReplay | undefined {
 	return (result as CursorReplayableToolResult)[kCursorNativeExecReplay];
+}
+
+function nativeExecReplayRequired(result: ToolResultMessage): boolean {
+	return (result as CursorReplayableToolResult)[CURSOR_NATIVE_REPLAY_REQUIRED] === true;
 }
 
 function preserveNativeExecReplay(
@@ -985,6 +992,7 @@ function preserveNativeExecReplay(
 		value: { toolName: pairing.toolName, result: execResult } satisfies CursorNativeExecReplay,
 		enumerable: true,
 	});
+	(toolResult as CursorReplayableToolResult)[CURSOR_NATIVE_REPLAY_REQUIRED] = true;
 }
 
 function cursorExecResolution(
@@ -2433,7 +2441,7 @@ export async function resolveExecHandler<TArgs, TResult>(
 			});
 			return { execResult: nativeReplay.result as TResult };
 		}
-		if (!pairing.requireNativeReplay) {
+		if (!pairing.requireNativeReplay && !nativeExecReplayRequired(pairing.previousResult)) {
 			log("exec", "replayResolvedResult", { toolCallId: pairing.toolCallId, toolName: pairing.toolName });
 			return { execResult: buildFromToolResult(pairing.previousResult) };
 		}
@@ -2464,7 +2472,7 @@ export async function resolveExecHandler<TArgs, TResult>(
 		const reason = "Tool not available";
 		const execResult = buildRejected(reason);
 		const toolResult = await pair(reason, true);
-		preserveNativeExecReplay(toolResult, pairing, execResult);
+		preserveNativeExecReplay(rerunningResolvedCall ? pairing?.previousResult : toolResult, pairing, execResult);
 		return { execResult, toolResult };
 	}
 
@@ -2490,18 +2498,23 @@ export async function resolveExecHandler<TArgs, TResult>(
 			return { execResult, toolResult: pairedResult };
 		}
 		if (finalToolResult) {
-			return { execResult: buildFromToolResult(finalToolResult), toolResult: finalToolResult };
+			const rebuiltResult = buildFromToolResult(finalToolResult);
+			if (rerunningResolvedCall) {
+				preserveNativeExecReplay(pairing?.previousResult, pairing, rebuiltResult);
+				return { execResult: rebuiltResult };
+			}
+			return { execResult: rebuiltResult, toolResult: finalToolResult };
 		}
 		const reason = "Tool returned no result";
 		const rejectedResult = buildRejected(reason);
 		const pairedResult = await pair(reason, true);
-		preserveNativeExecReplay(pairedResult, pairing, rejectedResult);
+		preserveNativeExecReplay(rerunningResolvedCall ? pairing?.previousResult : pairedResult, pairing, rejectedResult);
 		return { execResult: rejectedResult, toolResult: pairedResult };
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		const execResult = buildError(message);
 		const pairedResult = await pair(message, true);
-		preserveNativeExecReplay(pairedResult, pairing, execResult);
+		preserveNativeExecReplay(rerunningResolvedCall ? pairing?.previousResult : pairedResult, pairing, execResult);
 		return { execResult, toolResult: pairedResult };
 	}
 }

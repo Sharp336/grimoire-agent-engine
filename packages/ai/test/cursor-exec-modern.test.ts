@@ -979,6 +979,52 @@ describe("Cursor MCP resource frames answer from the host's servers", () => {
 		expect(replay.results).toHaveLength(0);
 	});
 
+	it("caches a failed serialized resource rerun so its handler is not repeated", async () => {
+		const message = buildExecMessage({
+			case: "readMcpResourceExecArgs",
+			value: create(ReadMcpResourceExecArgsSchema, {
+				server: "docs",
+				uri: "docs://side-effect",
+				downloadPath: "assets/side-effect.md",
+			}),
+		});
+		let downloads = 0;
+		let fail = false;
+		const execHandlers: CursorExecHandlers = {
+			readMcpResource: async ({ uri, downloadPath }) => {
+				downloads++;
+				if (fail) throw new Error("download failed after writing");
+				return { uri, mimeType: "text/markdown", downloadPath };
+			},
+		};
+		const first = await dispatchExec(message, { execHandlers });
+		const block = first.output.content.find((item): item is ToolCallState => item.type === "toolCall");
+		if (!block || !first.results[0]) throw new Error("expected a paired resource download");
+
+		const serializedResult = JSON.parse(JSON.stringify(first.results[0])) as ToolResultMessage;
+		fail = true;
+		const replay = () =>
+			dispatchExec(message, {
+				execHandlers,
+				state: newBlockState({ resolvedContextToolResults: new Map([[block.id, serializedResult]]) }),
+			});
+
+		const failed = await replay();
+		const repeated = await replay();
+		const failedAnswer = soleResult(failed.frames);
+		const repeatedAnswer = soleResult(repeated.frames);
+		if (failedAnswer.case !== "readMcpResourceExecResult") throw new Error(`got ${failedAnswer.case}`);
+		if (repeatedAnswer.case !== "readMcpResourceExecResult") throw new Error(`got ${repeatedAnswer.case}`);
+		if (failedAnswer.value.result.case !== "error") throw new Error(`got ${failedAnswer.value.result.case}`);
+		if (repeatedAnswer.value.result.case !== "error") throw new Error(`got ${repeatedAnswer.value.result.case}`);
+
+		expect(downloads).toBe(2);
+		expect(failedAnswer.value.result.value.error).toContain("download failed after writing");
+		expect(repeatedAnswer.value.result.value.error).toContain("download failed after writing");
+		expect(failed.results).toHaveLength(0);
+		expect(repeated.results).toHaveLength(0);
+	});
+
 	it("replays an in-memory resource listing exactly and reruns it after serialization", async () => {
 		const message = buildExecMessage({
 			case: "listMcpResourcesExecArgs",

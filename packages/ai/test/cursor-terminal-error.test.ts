@@ -64,6 +64,7 @@ type Scenario =
 			kind: "checkpoint-overlap-success";
 			requests: number;
 			olderStarted: PromiseWithResolvers<void>;
+			releaseOlderMessage?: PromiseWithResolvers<void>;
 			releaseOlderSuccess: PromiseWithResolvers<void>;
 			newerStarted: PromiseWithResolvers<void>;
 			releaseNewerEnd: PromiseWithResolvers<void>;
@@ -269,12 +270,13 @@ async function startServer(): Promise<string> {
 
 		if (scenario.kind === "checkpoint-overlap-success") {
 			const activeScenario = scenario;
-			const { olderStarted, releaseOlderSuccess, newerStarted, releaseNewerEnd } = activeScenario;
+			const { olderStarted, releaseOlderMessage, releaseOlderSuccess, newerStarted, releaseNewerEnd } =
+				activeScenario;
 			activeScenario.requests++;
 			if (activeScenario.requests === 1) {
 				stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
 				olderStarted.resolve();
-				void releaseOlderSuccess.promise.then(() => {
+				const finishOlder = () => {
 					stream.end(
 						Buffer.concat([
 							checkpointFrame(
@@ -284,7 +286,15 @@ async function startServer(): Promise<string> {
 							turnEndedFrame(),
 						]),
 					);
-				});
+				};
+				if (releaseOlderMessage) {
+					void releaseOlderMessage.promise.then(() => {
+						stream.write(textDeltaFrame("older advanced"));
+						void releaseOlderSuccess.promise.then(finishOlder);
+					});
+				} else {
+					void releaseOlderSuccess.promise.then(finishOlder);
+				}
 				return;
 			}
 			newerStarted.resolve();
@@ -1010,6 +1020,77 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect((await olderDone).stopReason).toBe("stop");
 		releaseNewerEnd.resolve();
 		expect((await newerDone).stopReason).toBe("error");
+
+		scenario = { kind: "success" };
+		let pendingToolCalls: string[] | undefined;
+		const verification = streamCursor(model, context, {
+			apiKey: "test-token",
+			conversationId,
+			onPayload: payload => {
+				pendingToolCalls = (payload as { conversationState?: { pendingToolCalls?: string[] } }).conversationState
+					?.pendingToolCalls;
+			},
+		});
+		for await (const _event of verification) {
+			// Drain the verification request.
+		}
+		expect((await verification.result()).stopReason).toBe("stop");
+		expect(pendingToolCalls).toEqual([JSON.stringify({ toolCallId: "older-success-call", toolName: "read" })]);
+	});
+
+	it("publishes a successful older checkpoint after a newer request clears its non-restorable entry", async () => {
+		const olderStarted = Promise.withResolvers<void>();
+		const releaseOlderMessage = Promise.withResolvers<void>();
+		const releaseOlderSuccess = Promise.withResolvers<void>();
+		const newerStarted = Promise.withResolvers<void>();
+		const releaseNewerEnd = Promise.withResolvers<void>();
+		scenario = {
+			kind: "checkpoint-overlap-success",
+			requests: 0,
+			olderStarted,
+			releaseOlderMessage,
+			releaseOlderSuccess,
+			newerStarted,
+			releaseNewerEnd,
+		};
+		const baseUrl = await startServer();
+		const model = makeModel(baseUrl);
+		const conversationId = "cursor-overlap-late-success";
+		const olderAdvanced = Promise.withResolvers<void>();
+
+		const older = streamCursor(model, context, {
+			apiKey: "test-token",
+			conversationId,
+			onPayload: payload => {
+				const request = payload as { conversationState?: { rootPromptMessagesJson?: Uint8Array[] } };
+				if (scenario.kind === "checkpoint-overlap-success") {
+					scenario.rootPromptMessagesJson = request.conversationState?.rootPromptMessagesJson;
+				}
+			},
+		});
+		const olderDone = (async () => {
+			for await (const event of older) {
+				if (event.type === "text_delta") olderAdvanced.resolve();
+			}
+			return await older.result();
+		})();
+		await olderStarted.promise;
+
+		const newer = streamCursor(model, context, { apiKey: "test-token", conversationId });
+		const newerDone = (async () => {
+			for await (const _event of newer) {
+				// Drain after the newer owner clears its non-restorable predecessor.
+			}
+			return await newer.result();
+		})();
+		await newerStarted.promise;
+
+		releaseOlderMessage.resolve();
+		await olderAdvanced.promise;
+		releaseNewerEnd.resolve();
+		expect((await newerDone).stopReason).toBe("error");
+		releaseOlderSuccess.resolve();
+		expect((await olderDone).stopReason).toBe("stop");
 
 		scenario = { kind: "success" };
 		let pendingToolCalls: string[] | undefined;
