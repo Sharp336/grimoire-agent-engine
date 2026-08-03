@@ -12,6 +12,9 @@
 - Fixed bug where `agent()` calls in eval cells ignored turn cancellation and continued running indefinitely
 - Fixed the built-in `tail` printing `tail: Broken pipe` and failing when a downstream pipeline reader exited early (e.g. `tail -c N file.jsonl | jq …` with jq aborting on a parse error); it now exits silently with 141 (128+SIGPIPE) like a real tail, in every output path including `--follow`.
 - Fixed the in-process ps shell builtin rejecting common procps/BSD format specifiers (`ps -o tpgid,...` failed with `unknown output format specifier`); added `tpgid`, `pri`, `flags`, real/effective user and group columns, `wchan`, fault counters, `sz`, and the STAT `+` foreground flag.
+### Added
+
+- Added `providers.maxImagesPerRequest` and `providers.maxImageBytesPerRequest`: per-provider caps on how many images and how many total base64 image bytes a single request may carry, settable per provider id from `config.yml`, `omp config set`, or the settings panel. A custom gateway that is unknown by id now inherits its wire API family's image budget (`anthropic-messages` 90, `google-generative-ai` 200) instead of falling to the 5-image floor, and the byte cap drops the oldest droppable images until the request fits, which lets a gateway that rejects large bodies keep its compaction archive readable
 
 ## [17.2.6] - 2026-08-03
 
