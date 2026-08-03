@@ -780,6 +780,7 @@ exit 64
 			return isolatedResult.promise;
 		});
 		const abortSpy = vi.spyOn(piNatives.Shell.prototype, "abort").mockResolvedValue();
+		const closeSpy = vi.spyOn(piNatives.Shell.prototype, "close").mockResolvedValue();
 
 		const owner = executeBash("owner", {
 			cwd: tempDir,
@@ -797,8 +798,12 @@ exit 64
 		const result = await overlapping;
 		expect(result.cancelled).toBe(true);
 		expect(abortSpy).toHaveBeenCalledTimes(1);
+		expect(closeSpy).not.toHaveBeenCalled();
 
 		isolatedResult.resolve({ exitCode: undefined, cancelled: true, timedOut: true });
+		await isolatedResult.promise;
+		await Promise.resolve();
+		expect(closeSpy).toHaveBeenCalledTimes(1);
 		ownerResult.resolve({ exitCode: 0, cancelled: false, timedOut: false });
 		await owner;
 	});
@@ -1287,6 +1292,68 @@ describe("executeBash :async: background retention", () => {
 		vi.restoreAllMocks();
 		if (fs.existsSync(tmp)) removeSyncWithRetries(tmp);
 	});
+
+	it.skipIf(process.platform === "win32")("closes a completed per-job :async: shell", async () => {
+		const closeSpy = vi.spyOn(piNatives.Shell.prototype, "close");
+
+		const result = await executeBash("true", { sessionKey: "close-probe:async:job1", cwd: tmp });
+
+		expect(result.exitCode).toBe(0);
+		expect(closeSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("closes an aborted per-job :async: shell after native cleanup settles", async () => {
+		const runResult = Promise.withResolvers<ShellRunResult>();
+		const abortCleanup = Promise.withResolvers<void>();
+		const dispatched = Promise.withResolvers<void>();
+		vi.spyOn(piNatives.Shell.prototype, "run").mockImplementation(() => {
+			dispatched.resolve();
+			return runResult.promise;
+		});
+		vi.spyOn(piNatives.Shell.prototype, "abort").mockImplementation(() => abortCleanup.promise);
+		const closeSpy = vi.spyOn(piNatives.Shell.prototype, "close").mockResolvedValue();
+		const controller = new AbortController();
+		const execution = executeBash("blocked", {
+			sessionKey: "close-abort-probe:async:job1",
+			cwd: tmp,
+			signal: controller.signal,
+			timeout: 0,
+		});
+		await dispatched.promise;
+
+		controller.abort();
+		const result = await execution;
+		expect(result.cancelled).toBe(true);
+		expect(closeSpy).not.toHaveBeenCalled();
+
+		runResult.resolve({ exitCode: undefined, cancelled: true, timedOut: false });
+		abortCleanup.resolve();
+		await Promise.all([runResult.promise, abortCleanup.promise]);
+		await Bun.sleep(0);
+		expect(closeSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"closes a per-job :async: shell after its last background process exits",
+		async () => {
+			const closeSpy = vi.spyOn(piNatives.Shell.prototype, "close");
+			const sleepBin = fs.existsSync("/bin/sleep") ? "/bin/sleep" : "sleep";
+
+			const result = await executeBash(`${sleepBin} 0.2 >/dev/null 2>&1 &`, {
+				sessionKey: "close-background-probe:async:job1",
+				cwd: tmp,
+			});
+
+			expect(result.exitCode).toBe(0);
+			expect(closeSpy).not.toHaveBeenCalled();
+			await pollUntil(() => closeSpy.mock.calls.length > 0, Date.now() + 6_000);
+			const closeResult = closeSpy.mock.results[0];
+			if (!closeResult) throw new Error("Expected native shell close result");
+			await Promise.resolve(closeResult.value);
+			expect(closeSpy).toHaveBeenCalledTimes(1);
+		},
+		7_000,
+	);
 
 	it.skipIf(process.platform === "win32")(
 		"keeps a per-job :async: shell's plain-`&` background process alive across turns",

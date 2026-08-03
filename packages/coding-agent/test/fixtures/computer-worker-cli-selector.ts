@@ -1,15 +1,20 @@
-const worker = new Worker(new URL("../../src/cli.ts", import.meta.url).href, {
-	type: "module",
-	argv: ["__omp_worker_computer"],
-});
+import { spawnComputerSubprocess } from "../../src/tools/computer/supervisor";
+
+const worker = spawnComputerSubprocess();
 const response = Promise.withResolvers<unknown>();
-worker.addEventListener("message", event => {
-	if (event.data?.type === "pong" && event.data.id === "computer-cli-selector") response.resolve(event.data);
+const closed = Promise.withResolvers<void>();
+const unsubscribeMessage = worker.onMessage(message => {
+	if (message.type === "pong" && message.id === "computer-cli-selector") response.resolve(message);
+	if (message.type === "closed") closed.resolve();
 });
-worker.addEventListener("error", event => response.reject(event.error ?? new Error(event.message)));
-worker.postMessage({ type: "ping", id: "computer-cli-selector" });
+const unsubscribeError = worker.onError(error => response.reject(error));
+worker.send({ type: "ping", id: "computer-cli-selector" });
 try {
 	process.stdout.write(`${JSON.stringify(await response.promise)}\n`);
+	worker.send({ type: "close" });
+	await closed.promise;
 } finally {
-	worker.terminate();
+	unsubscribeMessage();
+	unsubscribeError();
+	await worker.terminate();
 }

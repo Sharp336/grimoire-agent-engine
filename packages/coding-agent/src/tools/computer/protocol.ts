@@ -1,8 +1,8 @@
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import type { DesktopCapabilities } from "@oh-my-pi/pi-natives";
 
-/** Hidden CLI selector that re-enters the computer worker host. */
-export const COMPUTER_WORKER_ARG = "__omp_worker_computer";
+/** Hidden CLI selector that re-enters the computer subprocess host. */
+export const COMPUTER_PROCESS_ARG = "__omp_worker_computer";
 
 /** Frozen run settings transferred from the tool session to the worker. */
 export interface ComputerSessionSnapshot {
@@ -61,9 +61,13 @@ export type ComputerWorkerOutbound =
 	| { type: "tool-call"; id: string; runId: string; name: string; args: unknown }
 	| { type: "closed" };
 
-/** Transport used by the worker core in Bun workers and tests. */
+/** Transport used by the worker core in subprocesses and tests. */
 export interface ComputerWorkerTransport {
-	send(message: ComputerWorkerOutbound, transfer?: Bun.Transferable[]): void;
+	send(message: ComputerWorkerOutbound): void;
+	sendAndFlush(message: ComputerWorkerOutbound): Promise<void>;
 	onMessage(handler: (message: ComputerWorkerInbound) => void): () => void;
 	close(): void;
 }
+
+/** IPC host surface used to build the subprocess transport. */
+export type ComputerProcessTransport = Omit<ComputerWorkerTransport, "close">;

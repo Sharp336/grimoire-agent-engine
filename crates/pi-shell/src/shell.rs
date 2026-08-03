@@ -42,23 +42,50 @@ struct ShellSessionCore {
 	shell: BrushShell,
 }
 
+#[derive(Default)]
+struct ShellAbortStatus {
+	abort_token: Option<AbortToken>,
+	closed:      bool,
+}
+
 #[derive(Clone, Default)]
-struct ShellAbortState(Arc<TokioMutex<Option<AbortToken>>>);
+struct ShellAbortState(Arc<TokioMutex<ShellAbortStatus>>);
 
 impl ShellAbortState {
-	async fn set(&self, abort_token: AbortToken) {
-		*self.0.lock().await = Some(abort_token);
+	async fn set(&self, abort_token: AbortToken) -> bool {
+		let mut status = self.0.lock().await;
+		if status.closed {
+			abort_token.abort(AbortReason::Signal);
+			return false;
+		}
+		status.abort_token = Some(abort_token);
+		true
 	}
 
 	async fn clear(&self) {
-		*self.0.lock().await = None;
+		self.0.lock().await.abort_token = None;
 	}
 
 	async fn abort(&self) {
-		let abort_token = self.0.lock().await.clone();
+		let abort_token = self.0.lock().await.abort_token.clone();
 		if let Some(abort_token) = abort_token {
 			abort_token.abort(AbortReason::Signal);
 		}
+	}
+
+	async fn close(&self) {
+		let abort_token = {
+			let mut status = self.0.lock().await;
+			status.closed = true;
+			status.abort_token.clone()
+		};
+		if let Some(abort_token) = abort_token {
+			abort_token.abort(AbortReason::Signal);
+		}
+	}
+
+	async fn is_closed(&self) -> bool {
+		self.0.lock().await.closed
 	}
 }
 
@@ -176,6 +203,9 @@ impl Shell {
 		on_chunk: Option<Sender<String>>,
 		mut cancel_token: CancelToken,
 	) -> Result<ShellRunResult> {
+		if self.abort_state.is_closed().await {
+			return Err(Error::msg("Shell session is closed"));
+		}
 		let run_config = ShellRunConfig {
 			command:   options.command,
 			cwd:       options.cwd,
@@ -195,6 +225,15 @@ impl Shell {
 
 	pub async fn abort(&self) {
 		self.abort_state.abort().await;
+	}
+
+	/// Stop active work and release the persistent session.
+	///
+	/// Closing is terminal and idempotent. Future calls to [`Self::run`] fail.
+	pub async fn close(&self) {
+		self.abort_state.close().await;
+		*self.session.lock().await = None;
+		self.abort_state.clear().await;
 	}
 
 	/// Number of live background jobs (running `&`/`nohup` children) tracked by
@@ -321,7 +360,9 @@ async fn run_shell_session(
 					.await?,
 				),
 			};
-			abort_state.set(at).await;
+			if !abort_state.set(at).await {
+				return Err(Error::msg("Shell session is closed"));
+			}
 			run_shell_command(session, &run_config, on_chunk, tokio_cancel, spawn_registry).await
 		}
 	});
@@ -8816,13 +8857,27 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		let mut cancel_token = CancelToken::default();
 		let abort_token = cancel_token.emplace_abort_token();
 
-		abort_state.set(abort_token).await;
+		assert!(abort_state.set(abort_token).await);
 		abort_state.abort().await;
 
 		let reason = time::timeout(Duration::from_millis(100), cancel_token.wait())
 			.await
 			.expect("cancel token should be signalled");
 		assert!(matches!(reason, AbortReason::Signal));
+	}
+
+	#[tokio::test]
+	async fn close_is_terminal_and_idempotent() {
+		let shell = Shell::new(None);
+
+		shell.close().await;
+		shell.close().await;
+
+		let error = shell
+			.run(ShellRunOptions::default(), None, CancelToken::default())
+			.await
+			.expect_err("closed shell must reject new work");
+		assert_eq!(error.to_string(), "Shell session is closed");
 	}
 
 	#[cfg(unix)]

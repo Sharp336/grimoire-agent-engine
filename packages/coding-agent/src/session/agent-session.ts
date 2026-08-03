@@ -3687,6 +3687,7 @@ export class AgentSession {
 		const mnemopiState = setMnemopiSessionState(this, undefined);
 		const advisorRecorderClosed = this.#advisors.recorderClosed();
 		const results = await Promise.allSettled([
+			this.#bash.dispose(),
 			this.#disposeOwnedAsyncJobs(),
 			this.#eval.disposeKernels(),
 			this.#releaseOwnedBrowserTabs(this.sessionManager.getSessionId()),

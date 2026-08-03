@@ -2,7 +2,7 @@ import * as path from "node:path";
 import type { Agent } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
-import { type BashResult, executeBash as executeBashCommand } from "../exec/bash-executor";
+import { type BashResult, closeShellSession, executeBash as executeBashCommand } from "../exec/bash-executor";
 import type { ExtensionRunner } from "../extensibility/extensions";
 import { outputMeta } from "../tools/output-meta";
 import { clampTimeout } from "../tools/tool-timeouts";
@@ -55,6 +55,7 @@ export class BashRunner {
 	#abortControllers = new Set<AbortController>();
 	#pendingMessages: PendingBashMessage[] = [];
 	#sessionTarget: BashSessionTarget;
+	#ownedSessionIds = new Set<string>();
 
 	constructor(host: BashRunnerHost) {
 		this.#host = host;
@@ -63,6 +64,7 @@ export class BashRunner {
 			refs: 0,
 			destination: { kind: "current", manager: host.sessionManager },
 		};
+		this.#ownedSessionIds.add(this.#sessionTarget.sessionId);
 	}
 
 	/** Executes a bash command while retaining the session and branch that owned its start. */
@@ -141,6 +143,14 @@ export class BashRunner {
 		for (const abortController of this.#abortControllers) abortController.abort();
 	}
 
+	/** Stop commands and close every native shell created by this session. */
+	async dispose(): Promise<void> {
+		this.abort();
+		const sessionIds = Array.from(this.#ownedSessionIds);
+		this.#ownedSessionIds.clear();
+		await Promise.allSettled(sessionIds.map(sessionId => closeShellSession(sessionId)));
+	}
+
 	/** Whether a bash command is currently running. */
 	get isRunning(): boolean {
 		return this.#abortControllers.size > 0;
@@ -205,6 +215,7 @@ export class BashRunner {
 	/** Adopts a transition's new target as the live bash owner. */
 	markSessionTransition(transition: BashSessionTransition): void {
 		transition.newTarget.sessionId = this.#host.sessionManager.getSessionId();
+		this.#ownedSessionIds.add(transition.newTarget.sessionId);
 		this.#sessionTarget = transition.newTarget;
 	}
 

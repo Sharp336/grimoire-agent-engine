@@ -34,9 +34,13 @@ import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbou
 import { DAEMON_BROKER_WORKER_ARG } from "./launch/protocol";
 import { TERMINAL_OUTPUT_WORKER_ARG } from "./launch/terminal-output-worker-protocol";
 import { LSP_MUX_WORKER_ARG } from "./lsp/mux/protocol";
-import { COMPUTER_WORKER_ARG } from "./tools/computer/protocol";
+import { startComputerProcess } from "./tools/computer/process-entry";
+import {
+	COMPUTER_PROCESS_ARG,
+	type ComputerWorkerInbound,
+	type ComputerWorkerOutbound,
+} from "./tools/computer/protocol";
 import { smokeTestComputerWorker } from "./tools/computer/supervisor";
-import { startComputerWorker } from "./tools/computer/worker-entry";
 
 if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
 	process.stderr.write(
@@ -168,9 +172,8 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		await import("./tools/browser/tab-worker-entry");
 		return true;
 	}
-	if (arg === COMPUTER_WORKER_ARG) {
-		if (parentPort) installWorkerInbox(parentPort);
-		startComputerWorker();
+	if (arg === COMPUTER_PROCESS_ARG) {
+		await runIpcSubprocessWorker<ComputerWorkerInbound, ComputerWorkerOutbound>(startComputerProcess);
 		return true;
 	}
 	if (arg === JS_EVAL_WORKER_ARG) {

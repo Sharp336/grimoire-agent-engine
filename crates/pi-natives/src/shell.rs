@@ -247,6 +247,15 @@ impl Shell {
 		Ok(())
 	}
 
+	/// Stop active work and release this shell session.
+	///
+	/// Closing is terminal and safe to call more than once.
+	#[napi]
+	pub async fn close(&self) -> Result<()> {
+		self.inner.close().await;
+		Ok(())
+	}
+
 	/// Count live background jobs (`&`/`nohup` children still running) on this
 	/// session. Completed jobs are reaped first. The host uses this to retain a
 	/// per-call shell whose background processes are still running instead of
