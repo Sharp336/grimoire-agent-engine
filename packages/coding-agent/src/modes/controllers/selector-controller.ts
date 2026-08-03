@@ -524,7 +524,7 @@ export class SelectorController {
 				this.ctx.hideThinkingBlockOnComplete = value as boolean;
 				for (const child of this.ctx.chatContainer.children) {
 					if (child instanceof AssistantMessageComponent) {
-						child.setHideThinkingOnFinalize(value as boolean);
+						child.setHideThinkingBlockOnComplete(value as boolean);
 					}
 				}
 				// Full clear + replay so settled blocks frozen in committed scrollback
