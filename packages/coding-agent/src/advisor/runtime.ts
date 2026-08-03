@@ -1143,11 +1143,7 @@ export class AdvisorRuntime {
 						// or a later false→true setting flip cannot restore traces.
 						if (includedThinking) {
 							this.#includeThinking = false;
-							const strippedBatch = this.#reformatUnsentDelta(
-								rawMessages,
-								wip,
-								expandedPrimaryContextTypes,
-							);
+							const strippedBatch = this.#reformatUnsentDelta(rawMessages, wip, expandedPrimaryContextTypes);
 							if (strippedBatch) {
 								this.#pending.unshift({
 									text: strippedBatch.text,
