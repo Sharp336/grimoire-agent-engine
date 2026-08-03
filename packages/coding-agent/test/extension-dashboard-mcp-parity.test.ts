@@ -20,7 +20,7 @@ import { initializeWithSettings, reset as resetDiscoveryCache } from "@oh-my-pi/
 import { readMCPConfigFile, setMcpServerEnabled, setServerDisabled } from "@oh-my-pi/pi-coding-agent/mcp/config-writer";
 import { ExtensionDashboard } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/extension-dashboard";
 import { loadAllExtensions } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/state-manager";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName, setThemeInstance, type Theme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { __resetDirsFromEnvForTests, getMCPConfigPath, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
 const testTheme = await getThemeByName("dark");
@@ -28,8 +28,10 @@ const testTheme = await getThemeByName("dark");
 describe("loadAllExtensions MCP parity with /mcp list (issue #3827)", () => {
 	let projectDir = "";
 	let userAgentDir = "";
+	let previousTheme: Theme | undefined;
 
 	beforeEach(async () => {
+		previousTheme = theme;
 		if (!testTheme) throw new Error("Failed to load dark theme for extension dashboard tests");
 		setThemeInstance(testTheme);
 		resetSettingsForTest();
@@ -68,6 +70,7 @@ describe("loadAllExtensions MCP parity with /mcp list (issue #3827)", () => {
 	});
 
 	afterEach(async () => {
+		if (previousTheme) setThemeInstance(previousTheme);
 		resetSettingsForTest();
 		__resetDirsFromEnvForTests();
 		await removeWithRetries(projectDir);
