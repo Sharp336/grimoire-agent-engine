@@ -1018,6 +1018,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"display.hideToolActivity": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Hide Tool Activity",
+			description: "Hide model-initiated tool calls and results from the transcript",
+		},
+	},
+
 	"display.showTokenUsage": {
 		type: "boolean",
 		default: false,

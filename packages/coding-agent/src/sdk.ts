@@ -2679,7 +2679,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// a real tool.
 		//
 		// It must be a `replace`-mode instance. `PiEditExecArgs` carries
-		// `old_text`/`new_text` pairs, which is exactly `replace`'s schema and
+		// `old_string`/`new_string` replacements, which is exactly `replace`'s schema and
 		// nothing else's — under the default `hashline` mode the frame's args do
 		// not match the tool's parameters at all. The registry instance follows
 		// the session's configured mode, so the bridge builds its own.
@@ -2880,8 +2880,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				}
 			}
 			let appendPrompt: string | undefined = appendParts.length > 0 ? appendParts.join("\n\n") : undefined;
-			// Owned/in-band tool dialects (non-native) require the catalog as `# Tool:`
-			// sections; native tool calling lets the compact name list suffice.
+			// Owned/in-band tool dialects (non-native) require the full functions-
+			// namespace catalog; native tool calling lets the compact name list suffice.
 			const nativeTools = resolveDialect(settings.get("tools.format"), agent?.state.model ?? model) === undefined;
 			const promptTools = projectSystemPromptToolMetadata(
 				tools,
