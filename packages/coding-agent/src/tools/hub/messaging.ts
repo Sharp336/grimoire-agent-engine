@@ -16,7 +16,7 @@ import type { Settings } from "../../config/settings";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import { IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "../../irc/bus";
 import type { Theme } from "../../modes/theme/theme";
-import { type AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
+import { type AgentRegistry, isLocalSession, isMessageablePeer, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { registerPersistedSubagents } from "../../registry/persisted-agents";
 import { canSpawnAtDepth } from "../../task/types";
 import { Ellipsis, renderStatusLine, renderTreeList, truncateToWidth } from "../../tui";
@@ -96,18 +96,14 @@ export async function executeList(
 	// it must not suppress the persisted-subagent scan on a resumed session (else local parked
 	// subagents stay absent and direct sends to them miss instead of reviving). The peer list below
 	// still includes remotes.
-	if (
-		!refs.some(
-			ref => ref.id !== senderId && ref.status !== "aborted" && ref.kind !== "advisor" && ref.kind !== "remote",
-		)
-	) {
+	if (!refs.some(ref => ref.id !== senderId && ref.status !== "aborted" && isLocalSession(ref.kind))) {
 		await registerPersistedSubagents(registry, registry.get(senderId)?.sessionFile);
 		refs = registry.list();
 	}
 
 	const bus = IrcBus.global();
 	const peers = refs
-		.filter(ref => ref.id !== senderId && ref.status !== "aborted" && ref.kind !== "advisor")
+		.filter(ref => ref.id !== senderId && ref.status !== "aborted" && isMessageablePeer(ref.kind))
 		.map(ref => ({
 			id: ref.id,
 			displayName: ref.displayName,

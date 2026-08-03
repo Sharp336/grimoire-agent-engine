@@ -32,7 +32,13 @@ import type { Settings } from "../../config/settings";
 import type { MessageRenderer } from "../../extensibility/extensions/types";
 import { IrcBus } from "../../irc/bus";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
-import { type AgentRef, AgentRegistry, type AgentStatus, MAIN_AGENT_ID } from "../../registry/agent-registry";
+import {
+	type AgentRef,
+	AgentRegistry,
+	type AgentStatus,
+	hasLocalPresence,
+	MAIN_AGENT_ID,
+} from "../../registry/agent-registry";
 import { registerPersistedSubagents } from "../../registry/persisted-agents";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { shortenPath, truncateToWidth } from "../../tools/render-utils";
@@ -426,10 +432,10 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 
 	#refreshRows(): void {
 		const selectedId = this.#rows[this.#selectedRow]?.id;
-		// Remote proxies (murmur-q00p) are messaging peers, not local sessions: they have no
-		// session/transcript and the hub's focus/revive/kill act on the local lifecycle, so exclude
-		// them here. They stay discoverable via `hub list` and reachable by broadcast.
-		const refs = this.#registry.list().filter(ref => ref.id !== MAIN_AGENT_ID && ref.kind !== "remote");
+		// Remote proxies (murmur-q00p) are messaging peers, not local sessions: they have no local
+		// presence to display and the hub's focus/revive/kill act on the local lifecycle. `main`/`sub`
+		// (and read-only `advisor`) stay; remotes stay discoverable via `hub list` + broadcast.
+		const refs = this.#registry.list().filter(ref => ref.id !== MAIN_AGENT_ID && hasLocalPresence(ref.kind));
 		this.#observedById = new Map();
 		for (const session of this.#observers.getSessions()) this.#observedById.set(session.id, session);
 		const rowOrder = this.#rowOrder;
