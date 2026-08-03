@@ -28,7 +28,7 @@ describe("calculateCost", () => {
 			},
 		};
 
-		calculateCost(model, usage, Date.now());
+		calculateCost(model, usage);
 
 		expect(usage.cost.input).toBeCloseTo(1, 8);
 		expect(usage.cost.output).toBeCloseTo(1, 8);
@@ -62,7 +62,7 @@ describe("calculateCost", () => {
 			},
 		};
 
-		calculateCost(model, usage, Date.now());
+		calculateCost(model, usage);
 
 		expect(usage.cost.input).toBeCloseTo(1, 8);
 		expect(usage.cost.output).toBeCloseTo(1, 8);
@@ -91,7 +91,7 @@ describe("calculateCost", () => {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
 
-		calculateCost(model, usage, Date.now());
+		calculateCost(model, usage);
 
 		expect(usage.input).toBe(100);
 		expect(usage.output).toBe(20);
@@ -115,7 +115,7 @@ describe("calculateCost", () => {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
 
-		calculateCost(model, usage, Date.now());
+		calculateCost(model, usage);
 
 		// 1h write bills at 2x base input ($5/MTok -> $10/MTok), not the 5m
 		// scalar cost.cacheWrite ($6.25/MTok) which would give $2.15086875.
@@ -135,7 +135,7 @@ describe("calculateCost", () => {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
 
-		calculateCost(model, usage, Date.now());
+		calculateCost(model, usage);
 
 		// 100 * $6.25/MTok (5m) + 200 * $10/MTok (1h).
 		expect(usage.cost.cacheWrite).toBeCloseTo((6.25 * 100 + 10 * 200) / 1e6, 12);
@@ -156,7 +156,7 @@ describe("calculateCost", () => {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
 
-		calculateCost(model, usage, Date.now());
+		calculateCost(model, usage);
 
 		// 400 * $10/MTok (1h) + 600 unattributed * $6.25/MTok (flat 5m rate).
 		expect(usage.cost.cacheWrite).toBeCloseTo((10 * 400 + 6.25 * 600) / 1e6, 12);
@@ -173,7 +173,7 @@ describe("calculateCost", () => {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
 
-		calculateCost(model, usage, Date.now());
+		calculateCost(model, usage);
 
 		expect(usage.cost.cacheWrite).toBeCloseTo((6.25 * 1000) / 1e6, 12);
 	});
@@ -192,7 +192,7 @@ describe("calculateCost", () => {
 
 		expect(codexModel.cost).toEqual(openAIModel.cost);
 
-		calculateCost(codexModel, usage, Date.now());
+		calculateCost(codexModel, usage);
 
 		expect(usage.cost.total).toBeCloseTo(0.01005, 8);
 	});

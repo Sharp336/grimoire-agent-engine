@@ -43,10 +43,15 @@ export function getBundledModels(provider: GeneratedProvider): Model<Api>[] {
 	return models ? (Array.from(models.values()) as Model<Api>[]) : [];
 }
 
+/**
+ * `requestTimestamp` pins peak/off-peak pricing to when the request started.
+ * It defaults to the calculation time so untyped callers keep the legacy
+ * two-argument shape; typed provider sites always pass the real request start.
+ */
 export function calculateCost<TApi extends Api>(
 	model: Model<TApi>,
 	usage: Usage,
-	requestTimestamp: number,
+	requestTimestamp: number = Date.now(),
 ): Usage["cost"] {
 	const peakMultiplier = getPeakPricingMultiplier(model, requestTimestamp);
 	const orchestration = usage.orchestration;
@@ -62,8 +67,8 @@ export function calculateCost<TApi extends Api>(
 /**
  * Multiplier for peak/off-peak pricing windows, evaluated at the request start
  * timestamp's UTC hour. Windows are half-open `[startHour, endHour)`; a window
- * whose start exceeds its end wraps midnight. Models without `peakPricing`
- * always pay 1x.
+ * whose start exceeds its end wraps midnight. Models without `peakPricing`,
+ * or with an `effectiveFrom` date in the future, always pay 1x.
  */
 function getPeakPricingMultiplier<TApi extends Api>(model: Model<TApi>, requestTimestamp: number): number {
 	const peak = model.peakPricing;

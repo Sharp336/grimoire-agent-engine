@@ -13,7 +13,7 @@
 
 ### Changed
 
-- `calculateCost` now requires a request timestamp so peak pricing multipliers pin to when the request started instead of when cost is computed.
+- `calculateCost` accepts a request start timestamp (defaulting to the current time) so peak pricing multipliers pin to when the request started instead of when cost is computed.
 
 ## [17.2.6] - 2026-08-03
 
