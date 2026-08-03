@@ -1276,7 +1276,10 @@ describe("omp doctor", () => {
 		const migrationFinding = report.findings.find(entry => entry.id === "auth.storage");
 		expect(migrationFinding).toBeDefined();
 		expect(migrationFinding?.status).toBe("warning");
-		expect(migrationFinding?.summary).toContain("pending automatic migration");
+		expect(migrationFinding?.summary).toBe("auth database schema is pending automatic migration");
+		expect(migrationFinding?.remedy).toBe(
+			"Run `omp` normally; the schema will be migrated automatically on the next startup",
+		);
 		// Never surface the secret key.
 		expect(JSON.stringify(report)).not.toContain("sk-v0");
 	});
@@ -1313,11 +1316,45 @@ describe("omp doctor", () => {
 		const migrationFinding = report.findings.find(entry => entry.id === "auth.storage");
 		expect(migrationFinding).toBeDefined();
 		expect(migrationFinding?.status).toBe("warning");
-		expect(migrationFinding?.summary).toContain("pending automatic migration");
-		const details = migrationFinding?.details.join(" ") ?? "";
-		expect(details).toContain(String(newerVersion));
-		expect(details).toContain(String(AUTH_SCHEMA_VERSION));
+		expect(migrationFinding?.summary).toBe("auth database schema is pending automatic migration");
+		expect(migrationFinding?.details).toEqual([`schema version ${newerVersion} (current ${AUTH_SCHEMA_VERSION})`]);
+		expect(migrationFinding?.remedy).toBe(
+			`Upgrade to an OMP version that supports auth schema version ${newerVersion}`,
+		);
 		expect(JSON.stringify(report)).not.toContain("sk-newer");
+	});
+
+	test("auth: newer auth schema with incompatible future layout → warning survives read error", async () => {
+		const dbPath = getAgentDbPath(root);
+		const newerVersion = AUTH_SCHEMA_VERSION + 1;
+		await fs.mkdir(path.dirname(dbPath), { recursive: true });
+		const db = new Database(dbPath);
+		db.run("PRAGMA journal_mode=DELETE");
+		db.run(`
+			CREATE TABLE auth_schema_version (
+				id INTEGER PRIMARY KEY CHECK (id = 1),
+				version INTEGER NOT NULL
+			);
+			CREATE TABLE auth_credentials (
+				opaque_payload TEXT NOT NULL
+			);
+		`);
+		db.run("INSERT INTO auth_schema_version (id, version) VALUES (1, ?)", [newerVersion]);
+		db.run("INSERT INTO auth_credentials (opaque_payload) VALUES (?)", ["sk-future-layout"]);
+		db.close();
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const schemaFinding = report.findings.find(
+			entry =>
+				entry.id === "auth.storage" &&
+				entry.details[0] === `schema version ${newerVersion} (current ${AUTH_SCHEMA_VERSION})`,
+		);
+		expect(schemaFinding?.status).toBe("warning");
+		expect(schemaFinding?.summary).toBe("auth database schema is pending automatic migration");
+		expect(schemaFinding?.details).toEqual([`schema version ${newerVersion} (current ${AUTH_SCHEMA_VERSION})`]);
+		const readFinding = report.findings.find(entry => entry.id === "auth.storage" && entry.status === "error");
+		expect(readFinding?.summary).toContain("cannot read auth database");
+		expect(JSON.stringify(report)).not.toContain("sk-future-layout");
 	});
 
 	test("auth: valid stored credential → ok", async () => {

@@ -338,6 +338,19 @@ function sanitizeBrokerUrl(raw: string): string {
 		return "<unparseable broker URL>";
 	}
 }
+function createAuthSchemaMismatchFinding(authSchemaVersion: number): DoctorFinding {
+	return {
+		id: "auth.storage",
+		category: "auth",
+		status: "warning",
+		summary: "auth database schema is pending automatic migration",
+		details: [`schema version ${authSchemaVersion} (current ${AUTH_SCHEMA_VERSION})`],
+		remedy:
+			authSchemaVersion > AUTH_SCHEMA_VERSION
+				? `Upgrade to an OMP version that supports auth schema version ${authSchemaVersion}`
+				: "Run `omp` normally; the schema will be migrated automatically on the next startup",
+	};
+}
 /**
  * Probe auth/setup: credential presence per configured provider, OAuth token
  * expiry, and broker mode. Bounded to local file checks — no network, no
@@ -499,6 +512,7 @@ async function collectAuthFindings(flags: DoctorCommandFlags): Promise<DoctorFin
 		];
 	}
 
+	const findings: DoctorFinding[] = [];
 	let db: Database | undefined;
 	try {
 		// Reuse the storage probe's non-mutating open (doctor-sqlite): a plain
@@ -506,30 +520,37 @@ async function collectAuthFindings(flags: DoctorCommandFlags): Promise<DoctorFin
 		// -wal/-shm sidecars, contradicting the read-only contract.
 		db = (await openReadonlyNonMutating(dbPath)).handle;
 		db.run("PRAGMA busy_timeout = 5000");
+		// Read the recorded version before making assumptions about the current
+		// credential-table layout. This mirrors the production store's preference
+		// for the recorded version; only a genuinely absent/null value falls back
+		// to column inference for legacy databases.
+		let authSchemaVersion: number | null = null;
+		const versionTableRow = db
+			.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'auth_schema_version'")
+			.get() as { present?: number } | undefined;
+		if (versionTableRow?.present === 1) {
+			const versionRow = db.query("SELECT version FROM auth_schema_version WHERE id = 1").get() as
+				| { version?: number }
+				| undefined;
+			authSchemaVersion = typeof versionRow?.version === "number" ? versionRow.version : null;
+		}
+		if (authSchemaVersion !== null && authSchemaVersion !== AUTH_SCHEMA_VERSION) {
+			findings.push(createAuthSchemaMismatchFinding(authSchemaVersion));
+		}
+
 		const tableRow = db
 			.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'auth_credentials'")
 			.get() as { present?: number } | undefined;
 		if (tableRow?.present !== 1) {
+			if (findings.length > 0) return findings;
 			return [{ id: "auth.storage", category: "auth", status: "ok", summary: "no credentials stored", details: [] }];
 		}
-		// Classify the auth_credentials schema version from its columns — the
-		// same pure inference the production store uses — so a legacy v0 table
-		// (no disabled_cause column) is probed read-only instead of failing the
-		// query that references disabled_cause. Doctor never runs the migration;
-		// it only warns that the next normal omp run will migrate automatically.
-		// Read the recorded schema version first (same as the production store),
-		// falling back to column-based inference only when the version table is
-		// absent (legacy databases created before the auth_schema_version table).
 		const authCols = db.query("PRAGMA table_info(auth_credentials)").all() as Array<{ name?: string }>;
-		let authSchemaVersion: number;
-		try {
-			const versionRow = db.query("SELECT version FROM auth_schema_version WHERE id = 1").get() as
-				| { version?: number }
-				| undefined;
-			authSchemaVersion =
-				typeof versionRow?.version === "number" ? versionRow.version : inferAuthSchemaVersionFromColumns(authCols);
-		} catch {
+		if (authSchemaVersion === null) {
 			authSchemaVersion = inferAuthSchemaVersionFromColumns(authCols);
+			if (authSchemaVersion !== AUTH_SCHEMA_VERSION) {
+				findings.push(createAuthSchemaMismatchFinding(authSchemaVersion));
+			}
 		}
 		const isLegacyV0 = authSchemaVersion === 0;
 		// Read provider / type / disabled / expiry / row id / payload. The
@@ -571,17 +592,6 @@ async function collectAuthFindings(flags: DoctorCommandFlags): Promise<DoctorFin
 					"FROM auth_credentials ORDER BY provider ASC, id ASC",
 			)
 			.all() as AuthProbeRow[];
-		const findings: DoctorFinding[] = [];
-		if (authSchemaVersion !== AUTH_SCHEMA_VERSION) {
-			findings.push({
-				id: "auth.storage",
-				category: "auth",
-				status: "warning",
-				summary: "auth database schema is pending automatic migration",
-				details: [`schema version ${authSchemaVersion} (current ${AUTH_SCHEMA_VERSION})`],
-				remedy: "Run `omp` normally; the schema will be migrated automatically on the next startup",
-			});
-		}
 		if (rows.length === 0) {
 			if (findings.length === 0) {
 				findings.push({
@@ -677,6 +687,7 @@ async function collectAuthFindings(flags: DoctorCommandFlags): Promise<DoctorFin
 	} catch (error) {
 		if (isSqliteBusyError(error)) {
 			return [
+				...findings,
 				{
 					id: "auth.storage",
 					category: "auth",
@@ -688,6 +699,7 @@ async function collectAuthFindings(flags: DoctorCommandFlags): Promise<DoctorFin
 			];
 		}
 		return [
+			...findings,
 			{
 				id: "auth.storage",
 				category: "auth",
