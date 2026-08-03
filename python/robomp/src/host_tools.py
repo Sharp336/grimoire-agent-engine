@@ -1756,6 +1756,15 @@ def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
             _raise_command(msg)
         staged = bindings.db.list_staged_review_comments(bindings.issue_key)
         comments = [_review_comment_to_payload(comment) for comment in staged]
+        # Resolve the PR head SHA so Forgejo can anchor inline comments even
+        # when the worktree's HEAD diverges from the remote PR head (rebase,
+        # force-push). Without commit_id, Forgejo resolves the head itself and
+        # can 500 on PRs in a transient merge state. The worktree is a checkout
+        # of the PR head, so rev-parse HEAD gives us the right SHA.
+        commit_id: str | None = None
+        head_proc = _run_repo_command(bindings, ["git", "rev-parse", "HEAD"], timeout=10.0)
+        if head_proc.returncode == 0:
+            commit_id = head_proc.stdout.strip() or None
         try:
             review = _run_coro(
                 bindings.loop,
@@ -1765,16 +1774,23 @@ def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
                     body=body.strip(),
                     event="COMMENT",
                     comments=comments,
+                    commit_id=commit_id,
                 ),
             )
         except GitHubError as exc:
             _audit(bindings, "submit_pr_review", args, error=str(exc))
-            if exc.status != 422:
+            # 422 = validation rejection (e.g. Forgejo can't anchor inline
+            # comments). 500 = Forgejo internal error on the reviews endpoint
+            # (observed on certain PRs — the server crashes instead of returning
+            # a proper 422). Both mean the batched review can't land as-is.
+            # Degrade to visible issue comments (mirrors mira) so findings still
+            # surface and the model doesn't retry and degrade its own output.
+            # Without this fallback, a 500 propagates to the model as a raw
+            # error, triggering a retry-and-simplify loop where the model
+            # strips newlines from its review body on subsequent attempts.
+            if exc.status not in (422, 500):
                 _raise_command(f"GitHub rejected PR review: {exc.status} {exc.message}")
 
-            # 422 = the host rejected the batched review (e.g. Forgejo can't anchor
-            # the inline comments). Degrade to visible issue comments (mirrors mira)
-            # so the findings still land instead of vanishing.
             def _note(comment: Any) -> str:
                 return f"**`{comment.path}:{comment.line}`**\n\n{comment.body}"
 
@@ -1797,7 +1813,7 @@ def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
             except GitHubError as fexc:
                 _audit(bindings, "submit_pr_review", args, error=str(fexc))
                 _raise_command(
-                    f"Review rejected (422) and fallback comment posting failed: {fexc.status} {fexc.message}"
+                    f"Review rejected ({exc.status}) and fallback comment posting failed: {fexc.status} {fexc.message}"
                 )
 
             cleared = bindings.db.clear_staged_review_comments(bindings.issue_key)
@@ -1813,7 +1829,7 @@ def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
                 },
             )
             return (
-                f"review rejected (422); posted summary + {posted_inline} inline comment(s) "
+                f"review rejected ({exc.status}); posted summary + {posted_inline} inline comment(s) "
                 "as issue comments"
             )
         cleared = bindings.db.clear_staged_review_comments(bindings.issue_key)

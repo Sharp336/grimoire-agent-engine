@@ -347,17 +347,21 @@ class GitHubProxyClient:
         body: str,
         event: str,
         comments: list[Mapping[str, Any]],
+        commit_id: str | None = None,
     ) -> PullRequestReviewInfo:
+        json_body: dict[str, Any] = {
+            "repo": repo,
+            "pr_number": pr_number,
+            "body": body,
+            "event": event,
+            "comments": comments,
+        }
+        if commit_id:
+            json_body["commit_id"] = commit_id
         data = await self._request(
             "POST",
             "/gh/v1/submit_pr_review",
-            json_body={
-                "repo": repo,
-                "pr_number": pr_number,
-                "body": body,
-                "event": event,
-                "comments": comments,
-            },
+            json_body=json_body,
         )
         return _pr_review_from(data)
 

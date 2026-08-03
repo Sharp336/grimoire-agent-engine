@@ -274,7 +274,10 @@ def test_submit_pr_review_forgejo_uses_new_position_payload() -> None:
             pr_number=9,
             body="summary",
             event="COMMENT",
-            comments=[{"path": "src/app.py", "line": 12, "side": "RIGHT", "body": "finding"}],
+            comments=[
+                {"path": "src/app.py", "line": 12, "side": "RIGHT", "body": "finding"},
+                {"path": "src/old.py", "line": 5, "side": "LEFT", "body": "removed-line finding"},
+            ],
         )
     )
     assert review.id == 44
@@ -282,7 +285,10 @@ def test_submit_pr_review_forgejo_uses_new_position_payload() -> None:
     assert captured["body"] == {
         "body": "summary",
         "event": "COMMENT",
-        "comments": [{"path": "src/app.py", "body": "finding", "new_position": 12}],
+        "comments": [
+            {"path": "src/app.py", "body": "finding", "new_position": 12},
+            {"path": "src/old.py", "body": "removed-line finding", "old_position": 5},
+        ],
     }
 
 

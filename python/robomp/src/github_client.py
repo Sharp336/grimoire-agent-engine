@@ -67,6 +67,7 @@ class PullRequestInfo:
     state: str
     author: str = ""
     head_repo: str = ""
+    head_sha: str = ""
     title: str = ""
     body: str = ""
 
@@ -595,15 +596,21 @@ class GitHubClient:
         """Adapt canonical host-tool comment shape to the wire schema for this platform.
 
         GitHub keeps line/side/start_line/start_side; Forgejo/Gitea only reads
-        path/body/new_position (+old_position), so github-only keys are dropped and
-        `line` is mapped to `new_position`.
+        path/body/new_position (+old_position), so github-only keys are dropped
+        and `line` is mapped to `new_position` for RIGHT-side comments or
+        `old_position` for LEFT-side (removed-line) comments.
         """
         if self._platform != "forgejo":
             return [dict(c) for c in comments]
-        return [
-            {"path": c["path"], "body": c["body"], "new_position": c["line"]}
-            for c in comments
-        ]
+        payload: list[dict[str, Any]] = []
+        for c in comments:
+            entry: dict[str, Any] = {"path": c["path"], "body": c["body"]}
+            if str(c.get("side", "RIGHT")).upper() == "LEFT":
+                entry["old_position"] = c["line"]
+            else:
+                entry["new_position"] = c["line"]
+            payload.append(entry)
+        return payload
 
     async def submit_pr_review(
         self,
@@ -613,12 +620,12 @@ class GitHubClient:
         body: str,
         event: str,
         comments: list[Mapping[str, Any]],
+        commit_id: str | None = None,
     ) -> PullRequestReviewInfo:
-        data = await self.request(
-            "POST",
-            f"/repos/{repo}/pulls/{pr_number}/reviews",
-            json={"body": body, "event": event, "comments": self._review_comments_payload(comments)},
-        )
+        payload: dict[str, Any] = {"body": body, "event": event, "comments": self._review_comments_payload(comments)}
+        if commit_id:
+            payload["commit_id"] = commit_id
+        data = await self.request("POST", f"/repos/{repo}/pulls/{pr_number}/reviews", json=payload)
         return _pr_review_from_payload(data)
 
     async def add_assignees(self, repo: str, number: int, assignees: list[str]) -> None:
@@ -812,6 +819,7 @@ def _pr_from_payload(repo: str, data: Mapping[str, Any]) -> PullRequestInfo:
         state=str(data.get("state") or "open"),
         author=str(user.get("login") or "") if isinstance(user, Mapping) else "",
         head_repo=str(head_repo.get("full_name") or "") if isinstance(head_repo, Mapping) else "",
+        head_sha=str(head.get("sha") or "") if isinstance(head, Mapping) else "",
         title=str(data.get("title") or ""),
         body=str(data.get("body") or ""),
     )
