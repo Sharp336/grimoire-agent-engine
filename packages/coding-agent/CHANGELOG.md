@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Skipped legacy extension dependency graph traversal for packages proved not to need compatibility hooks, while retaining fail-open checks for CommonJS, native, and legacy-Pi cases.
+
 ## [17.2.5] - 2026-08-03
 
 ### Breaking Changes

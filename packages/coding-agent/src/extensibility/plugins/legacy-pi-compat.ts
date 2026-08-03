@@ -665,6 +665,8 @@ const bareRequireResolutionCache = new Map<string, Promise<string | null>>();
 const realpathCache = new Map<string, Promise<string>>();
 const nativeAddonResolutionCache = new Map<string, Promise<string | null>>();
 const nativeAddonRequireScanCache = new Map<string, Promise<boolean>>();
+const packageGraphHookNeedCache = new Map<string, Promise<boolean>>();
+const FORCE_FULL_EXTENSION_CRAWL = process.env.OMP_LEGACY_EXT_FULL_CRAWL === "1";
 
 function clearLegacyPiResolutionCaches(): void {
 	resolvedSpecifierFallbacks.clear();
@@ -677,6 +679,7 @@ function clearLegacyPiResolutionCaches(): void {
 	nativeAddonResolutionCache.clear();
 	nativeAddonRequireScanCache.clear();
 	realpathCache.clear();
+	packageGraphHookNeedCache.clear();
 }
 
 registerPluginCacheInvalidator(clearLegacyPiResolutionCaches);
@@ -1333,6 +1336,85 @@ async function readPackageManifestUncached(packageRoot: string): Promise<Record<
 	}
 }
 
+/**
+ * A third-party package needs graph hooks only when a rewrite could change one
+ * of its files. Pure-ESM packages that declare no host `pi-*` / typebox
+ * dependency and ship no native addon resolve natively from their own
+ * `node_modules` location, so crawling them parses megabytes to produce
+ * byte-identical output.
+ */
+async function packageNeedsGraphHooks(packageRoot: string): Promise<boolean> {
+	if (FORCE_FULL_EXTENSION_CRAWL) {
+		return true;
+	}
+	const cached = packageGraphHookNeedCache.get(packageRoot);
+	if (cached) return cached;
+
+	const promise = packageNeedsGraphHooksUncached(packageRoot);
+	packageGraphHookNeedCache.set(packageRoot, promise);
+	return promise;
+}
+
+async function packageNeedsGraphHooksUncached(packageRoot: string): Promise<boolean> {
+	const manifest = await readPackageManifest(packageRoot);
+	if (!manifest) {
+		return true;
+	}
+	if (manifest.type !== "module") {
+		return true;
+	}
+	if (exportsContainRequireCondition(manifest.exports)) {
+		return true;
+	}
+	for (const field of ["dependencies", "peerDependencies", "optionalDependencies"]) {
+		const deps = manifest[field];
+		if (!isRecord(deps)) continue;
+		for (const name of Object.keys(deps)) {
+			if (
+				LEGACY_PI_SPECIFIER_FILTER.test(name) ||
+				name === "typebox" ||
+				name === "@sinclair/typebox" ||
+				name === "node-gyp-build" ||
+				name === "bindings" ||
+				name.endsWith("-napi")
+			) {
+				return true;
+			}
+		}
+	}
+	if (manifest.gypfile || manifest.binary !== undefined) {
+		return true;
+	}
+	return false;
+}
+
+/** A string leaf is a target, not a condition; only object keys are conditions. */
+function exportsContainRequireCondition(exports: unknown): boolean {
+	if (typeof exports === "string") {
+		return false;
+	}
+	if (Array.isArray(exports)) {
+		for (const item of exports) {
+			if (exportsContainRequireCondition(item)) {
+				return true;
+			}
+		}
+		return false;
+	}
+	if (!isRecord(exports)) {
+		return false;
+	}
+	for (const [key, value] of Object.entries(exports)) {
+		if (key === "require") {
+			return true;
+		}
+		if (exportsContainRequireCondition(value)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 type ExtensionModuleKind = "commonjs" | "esm";
 
 async function isCommonJsModulePath(
@@ -1971,6 +2053,7 @@ async function collectExtensionModules(entryRealPath: string): Promise<Extension
 				let requiresNativeAddonRewrite = false;
 				let requiresSynchronousSourceHook = false;
 				let synchronousSourceUpgraded = false;
+				let crawlResolved = true;
 				const isRequired = reference.kind === "require";
 				if (specifier.startsWith(".")) {
 					const candidate = isRequired
@@ -2060,6 +2143,21 @@ async function collectExtensionModules(entryRealPath: string): Promise<Extension
 					if (resolved) {
 						resolvedModuleKind = isCommonJsEntry ? "commonjs" : "esm";
 						resolvedEsmBranch = selectedEsmBranch && !isCommonJsEntry;
+						if (resolvedModuleKind === "esm" && !requiresNativeAddonRewrite) {
+							const packageName = splitBarePackageSpecifier(specifier)?.name;
+							const packageRoot = packageName ? await findNodePackageRoot(packageName, file) : null;
+							const realPackageRoot = packageRoot ? await realpathOrSelf(packageRoot) : null;
+							if (
+								packageRoot &&
+								realPackageRoot &&
+								isPathInsideRoot(realPackageRoot, resolved) &&
+								isPathInsideRoot(path.resolve(packageRoot), resolved) &&
+								!isPathInsideRoot(realPackageRoot, entryRealPath) &&
+								!(await packageNeedsGraphHooks(packageRoot))
+							) {
+								crawlResolved = false;
+							}
+						}
 					}
 					nextCacheBustResolvedImports = false;
 				}
@@ -2095,12 +2193,30 @@ async function collectExtensionModules(entryRealPath: string): Promise<Extension
 						commonJsPaths.delete(resolved);
 					}
 					if (!modules.has(resolved)) {
-						queue.push({
-							file: resolved,
-							cacheBustResolvedImports: mergedCacheBust,
-							moduleKind: mergedModuleKind,
-							esmBranch: resolvedEsmBranch,
-						});
+						if (crawlResolved) {
+							queue.push({
+								file: resolved,
+								cacheBustResolvedImports: mergedCacheBust,
+								moduleKind: mergedModuleKind,
+								esmBranch: resolvedEsmBranch,
+							});
+						} else {
+							// Pure-ESM third-party entry: record it in `modules` so the
+							// importer's rewritten absolute specifier still loads through
+							// the graph hook, but never descend into the package's graph.
+							try {
+								modules.set(resolved, await Bun.file(resolved).text());
+							} catch {
+								// Unreadable entry — fail open to the crawl so native
+								// resolution still surfaces the error after a full walk.
+								queue.push({
+									file: resolved,
+									cacheBustResolvedImports: mergedCacheBust,
+									moduleKind: mergedModuleKind,
+									esmBranch: resolvedEsmBranch,
+								});
+							}
+						}
 					}
 				}
 			} catch {
@@ -2596,4 +2712,9 @@ export function installLegacyPiSpecifierShim(): void {
 /** Test seam: clears the memoized canonical specifier resolutions. */
 export function __resetLegacyPiResolutionCache(): void {
 	clearLegacyPiResolutionCaches();
+}
+
+/** Test seam for the third-party graph-crawl gate. */
+export async function __packageNeedsGraphHooksForTests(packageRoot: string): Promise<boolean> {
+	return packageNeedsGraphHooks(packageRoot);
 }
