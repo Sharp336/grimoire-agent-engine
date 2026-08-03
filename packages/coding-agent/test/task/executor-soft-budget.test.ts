@@ -12,6 +12,7 @@ import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import {
+	attachIrcWakeTurnMonitor,
 	resolveSoftRequestBudget,
 	runSubagentFollowUpTurn,
 	runSubprocess,
@@ -39,6 +40,9 @@ interface MockSessionHandle {
 	prompts: Array<{ text: string; options?: PromptOptions }>;
 	abortCalls: () => number;
 	disposeCalls: () => number;
+	ircWakeTurnObserver: () =>
+		| ((records: CustomMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined)
+		| undefined;
 }
 
 function assistantText(text: string, stopReason: "stop" | "aborted" = "stop") {
@@ -146,6 +150,7 @@ function createMockSession(
 		session: session as AgentSession,
 		prompts,
 		abortCalls: () => abortCount,
+		ircWakeTurnObserver: () => ircWakeTurnObserver,
 		disposeCalls: () => disposeCount,
 	};
 }
@@ -326,6 +331,118 @@ describe("runSubprocess soft request budget", () => {
 
 		expect(result.aborted).toBe(true);
 		expect(result.abortReason).toContain("task.maxRuntimeMs=20");
+	});
+
+	it("terminal-releases the running follow-up ref before a cumulative-timeout agent_end can restore idle", async () => {
+		vi.useFakeTimers();
+		try {
+			const id = "RunningSessionCapScout";
+			const promptGate = Promise.withResolvers<void>();
+			const handle = createMockSession(async () => {
+				await promptGate.promise;
+			});
+			let idleRestoreAccepted: boolean | undefined;
+			registerRunning(id, handle.session);
+			const ref = AgentRegistry.global().get(id);
+			if (!ref) throw new Error("Expected registered subagent");
+			const startedAt = Date.now();
+			AgentLifecycleManager.global().adopt(
+				id,
+				{
+					idleTtlMs: 0,
+					runtimePolicy: {
+						maxRuntimeMs: 0,
+						sessionRuntimeLimit: { maxSessionRuntimeMs: 20, startedAt },
+					},
+				},
+				ref,
+			);
+			vi.spyOn(handle.session, "abort").mockImplementation(async () => {
+				expect(AgentRegistry.global().get(id)).toBeUndefined();
+				idleRestoreAccepted = AgentRegistry.global().setStatus(id, "idle", ref);
+				promptGate.resolve();
+			});
+
+			const pending = runSubagentFollowUpTurn({
+				id,
+				agent: baseAgent,
+				message: "continue",
+				maxSessionRuntimeMs: 20,
+				sessionRuntimeStartedAt: startedAt,
+			});
+			await Promise.resolve();
+			vi.advanceTimersByTime(20);
+			const result = await pending;
+
+			expect(result.aborted).toBe(true);
+			expect(result.abortReason).toBe("Subagent cumulative runtime limit exceeded (task.maxSessionRuntimeMs=20)");
+			expect(idleRestoreAccepted).toBe(false);
+			expect(AgentRegistry.global().get(id)).toBeUndefined();
+			expect(AgentLifecycleManager.global().has(id, ref)).toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("uses the live IRC policy and terminal-releases the exact ref when its cumulative cap fires", async () => {
+		vi.useFakeTimers();
+		try {
+			const id = "IrcSessionCapScout";
+			const handle = createMockSession(async () => {});
+			registerRunning(id, handle.session);
+			const ref = AgentRegistry.global().get(id);
+			if (!ref) throw new Error("Expected registered subagent");
+			AgentRegistry.global().setStatus(id, "idle", ref);
+			const startedAt = Date.now();
+			AgentLifecycleManager.global().adopt(
+				id,
+				{
+					idleTtlMs: 0,
+					runtimePolicy: {
+						maxRuntimeMs: 50,
+						sessionRuntimeLimit: { maxSessionRuntimeMs: 20, startedAt },
+					},
+				},
+				ref,
+			);
+			let idleRestoreAccepted: boolean | undefined;
+			const abortSpy = vi.spyOn(handle.session, "abort").mockImplementation(async () => {
+				expect(AgentRegistry.global().get(id)).toBeUndefined();
+				idleRestoreAccepted = AgentRegistry.global().setStatus(id, "idle", ref);
+			});
+			attachIrcWakeTurnMonitor(handle.session, {
+				id,
+				agent: baseAgent,
+				maxRuntimeMs: 5,
+			});
+			const observer = handle.ircWakeTurnObserver();
+			if (!observer) throw new Error("Expected IRC wake observer");
+			const finishObservation = observer([
+				{
+					role: "custom",
+					customType: "irc:incoming",
+					content: "continue",
+					display: true,
+					details: { message: "continue" },
+					timestamp: Date.now(),
+				},
+			]);
+
+			vi.advanceTimersByTime(5);
+			await Promise.resolve();
+			expect(abortSpy).not.toHaveBeenCalled();
+			expect(AgentRegistry.global().get(id)).toBe(ref);
+
+			vi.advanceTimersByTime(15);
+			await Promise.resolve();
+			expect(abortSpy).toHaveBeenCalledTimes(1);
+			expect(idleRestoreAccepted).toBe(false);
+			expect(AgentRegistry.global().get(id)).toBeUndefined();
+			expect(AgentLifecycleManager.global().has(id, ref)).toBe(false);
+			await finishObservation?.();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("rejects an expired Vibe revival before running the parked session reviver", async () => {

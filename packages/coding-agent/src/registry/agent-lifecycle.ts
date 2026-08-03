@@ -28,6 +28,8 @@ import {
 	type AgentRef,
 	type AgentRefExpectation,
 	AgentRegistry,
+	type AgentRuntimePolicy,
+	type AgentSessionRuntimeLimit,
 	getAgentTombstonePath,
 	MAIN_AGENT_ID,
 	type RegistryEvent,
@@ -54,11 +56,19 @@ async function persistAgentTombstone(sessionFile: string): Promise<void> {
  */
 export type PersistedSubagentReviverFactory = (ref: AgentRef) => Promise<AgentReviver | undefined>;
 
+export type SessionRuntimeLimit = AgentSessionRuntimeLimit;
+
+export function sessionRuntimeExceededReason(limit: SessionRuntimeLimit): string {
+	return `Subagent cumulative runtime limit exceeded (task.maxSessionRuntimeMs=${limit.maxSessionRuntimeMs})`;
+}
+
 export interface AdoptOptions {
 	/** TTL before an idle agent is parked. <= 0 disables parking. */
 	idleTtlMs: number;
 	/** Recreates a live AgentSession from the ref's sessionFile. Absent => not resumable after park (e.g. isolated runs). */
 	revive?: AgentReviver;
+	/** Runtime contract shared by every wake and revival of this child. */
+	runtimePolicy?: AgentRuntimePolicy;
 }
 
 interface AdoptedAgent {
@@ -159,6 +169,7 @@ export class AgentLifecycleManager {
 		}
 		const existing = this.#adopted.get(id);
 		clearTimeout(existing?.timer);
+		if (opts.runtimePolicy) this.#registry.setRuntimePolicy(id, opts.runtimePolicy, ref);
 		const adopted: AdoptedAgent = { ref, idleTtlMs: opts.idleTtlMs, revive: opts.revive };
 		this.#adopted.set(id, adopted);
 		this.#armTimer(id, adopted);
@@ -279,6 +290,7 @@ export class AgentLifecycleManager {
 	 * cancelled (session still live) or awaited to completion before revive.
 	 */
 	async ensureLive(id: string): Promise<AgentSession> {
+		this.#assertSessionRuntimeAvailable(this.#registry.get(id)?.runtimePolicy?.sessionRuntimeLimit);
 		const park = this.#parks.get(id);
 		if (park) {
 			const parked = this.#registry.get(id);
@@ -286,6 +298,7 @@ export class AgentLifecycleManager {
 			// thrashing dispose + revive.
 			if (parked?.session && !park.detached && park.cancel()) {
 				await park.promise;
+				this.#assertSessionRuntimeAvailable(this.#registry.get(id)?.runtimePolicy?.sessionRuntimeLimit);
 				const kept = this.#registry.get(id)?.session;
 				if (kept) {
 					// Park cleared the idle timer; re-arm so TTL park still works.
@@ -297,10 +310,12 @@ export class AgentLifecycleManager {
 				// Already committed to detach (or no live session): wait for park,
 				// then fall through to the revive path.
 				await park.promise;
+				this.#assertSessionRuntimeAvailable(this.#registry.get(id)?.runtimePolicy?.sessionRuntimeLimit);
 			}
 		}
 
 		const ref = this.#registry.get(id);
+		this.#assertSessionRuntimeAvailable(ref?.runtimePolicy?.sessionRuntimeLimit);
 		if (!ref) {
 			throw new Error(
 				`Unknown agent "${id}" — it was never registered or has been released. If a transcript exists, read history://${id}.`,
@@ -411,6 +426,40 @@ export class AgentLifecycleManager {
 		return true;
 	}
 
+	/**
+	 * Remove an exhausted exact ref synchronously so delayed lifecycle events
+	 * cannot restore it. Disposal remains bounded background cleanup.
+	 */
+	terminalRelease(id: string, expected: AgentRef): boolean {
+		const ref = this.#registry.get(id);
+		if (ref !== expected) return false;
+
+		const adopted = this.#adopted.get(id);
+		if (adopted?.ref === ref) {
+			clearTimeout(adopted.timer);
+			this.#adopted.delete(id);
+		}
+		const park = this.#parks.get(id);
+		if (park?.ref === ref) {
+			if (!park.detached) park.cancel();
+			this.#parks.delete(id);
+			void untilAborted(AbortSignal.timeout(AGENT_RELEASE_GRACE_MS), () => park.promise).catch(error => {
+				logger.debug("AgentLifecycleManager: terminal park cleanup timed out", { id, error: String(error) });
+			});
+		}
+		if (this.#revivals.get(id)?.ref === ref) this.#revivals.delete(id);
+
+		const session = ref.session;
+		if (session) this.#registry.detachSession(id, ref);
+		if (!this.#registry.unregister(id, ref)) return false;
+		if (session) {
+			void untilAborted(AbortSignal.timeout(AGENT_RELEASE_GRACE_MS), () => session.dispose()).catch(error => {
+				logger.debug("AgentLifecycleManager: terminal session cleanup timed out", { id, error: String(error) });
+			});
+		}
+		return true;
+	}
+
 	/** Teardown everything (process exit / main session dispose). */
 	async dispose(deadlineAt: number = Date.now() + AGENT_RELEASE_GRACE_MS): Promise<void> {
 		this.#unsubscribe?.();
@@ -469,6 +518,13 @@ export class AgentLifecycleManager {
 			throw new Error(`Agent "${id}" changed before its persisted session became idle.`);
 		}
 		return session;
+	}
+
+	#assertSessionRuntimeAvailable(limit?: SessionRuntimeLimit): void {
+		if (!limit || limit.maxSessionRuntimeMs <= 0) return;
+		if (Date.now() - limit.startedAt >= limit.maxSessionRuntimeMs) {
+			throw new Error(sessionRuntimeExceededReason(limit));
+		}
 	}
 
 	#armTimer(id: string, adopted: AdoptedAgent): void {

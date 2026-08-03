@@ -87,6 +87,7 @@ describe("InteractiveMode tiny-title prewarm", () => {
 		const prewarm = vi.spyOn(tinyTitleClient, "prewarm").mockImplementation(() => {});
 
 		await mode.init();
+		await new Promise<void>(resolve => setImmediate(resolve));
 
 		expect(prewarm).toHaveBeenCalledWith("lfm2-350m");
 	});
@@ -97,6 +98,7 @@ describe("InteractiveMode tiny-title prewarm", () => {
 		const prewarm = vi.spyOn(tinyTitleClient, "prewarm").mockImplementation(() => {});
 
 		await mode.init();
+		await new Promise<void>(resolve => setImmediate(resolve));
 
 		expect(prewarm).not.toHaveBeenCalled();
 	});

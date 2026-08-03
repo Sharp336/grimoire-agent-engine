@@ -37,7 +37,7 @@ import type { MnemopiSessionState } from "../mnemopi/state";
 import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pending.md" with { type: "text" };
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
-import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
+import { AgentLifecycleManager, type AgentReviver, sessionRuntimeExceededReason } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
 import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage } from "../sdk";
 import type { AgentSession, AgentSessionEvent, Prewalk } from "../session/agent-session";
@@ -938,6 +938,8 @@ interface RunMonitorArgs {
 	maxSessionRuntimeMs: number;
 	/** Wall-clock creation time retained by the keep-alive child lifecycle. */
 	sessionRuntimeStartedAt?: number;
+	/** Synchronous terminal cutover when the cumulative session cap fires. */
+	onSessionRuntimeLimitExceeded?: () => void;
 }
 
 /**
@@ -1022,6 +1024,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		maxRuntimeMs,
 		maxSessionRuntimeMs,
 		sessionRuntimeStartedAt,
+		onSessionRuntimeLimitExceeded,
 	} = args;
 	const startTime = Date.now();
 
@@ -1192,6 +1195,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				: undefined;
 	let runtimeTimeoutId: NodeJS.Timeout | undefined;
 	if (runtimeLimit?.delayMs === 0) {
+		if (runtimeLimit.kind === "session") onSessionRuntimeLimitExceeded?.();
 		requestAbort("timeout");
 	} else if (runtimeLimit) {
 		runtimeTimeoutId = setTimeout(() => {
@@ -1203,6 +1207,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					maxRuntimeMs,
 					maxSessionRuntimeMs,
 				});
+				if (runtimeLimit.kind === "session") onSessionRuntimeLimitExceeded?.();
 				requestAbort("timeout");
 			}
 		}, runtimeLimit.delayMs);
@@ -2304,7 +2309,6 @@ export interface IrcWakeTurnMonitorOptions {
 export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWakeTurnMonitorOptions): void {
 	const { id, agent } = options;
 	const index = options.index ?? 0;
-	const maxRuntimeMs = options.maxRuntimeMs ?? 0;
 	session.setIrcWakeTurnObserver(records => {
 		const ircTask =
 			records
@@ -2320,7 +2324,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 		const turnStartTime = Date.now();
 		const ref = AgentRegistry.global().get(id);
 		const maxRuntimeMs =
-			Math.max(0, Math.trunc(Number(options.maxRuntimeMs ?? 0) || 0)) || ref?.runtimePolicy?.maxRuntimeMs || 0;
+			ref?.runtimePolicy?.maxRuntimeMs ?? Math.max(0, Math.trunc(Number(options.maxRuntimeMs ?? 0) || 0));
 		const sessionFile = ref?.sessionFile ?? options.sessionFile ?? undefined;
 		const sessionRuntimeLimit = ref?.runtimePolicy?.sessionRuntimeLimit;
 		const turnMonitor = createSubagentRunMonitor({
@@ -2338,6 +2342,13 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			softRequestBudget: 0,
 			softRequestBudgetNotice: false,
 			maxRuntimeMs,
+			maxSessionRuntimeMs: sessionRuntimeLimit?.maxSessionRuntimeMs ?? 0,
+			sessionRuntimeStartedAt: sessionRuntimeLimit?.startedAt,
+			onSessionRuntimeLimitExceeded: ref
+				? () => {
+						AgentLifecycleManager.global().terminalRelease(id, ref);
+					}
+				: undefined,
 		});
 
 		if (options.eventBus) {
@@ -2554,24 +2565,52 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	const { id, agent, message, signal } = options;
 	const index = options.index ?? 0;
 	const startTime = Date.now();
-	const session = await AgentLifecycleManager.global().ensureLive(id);
-	const ref = AgentRegistry.global().get(id);
+	const lifecycle = AgentLifecycleManager.global();
+	const initialRef = AgentRegistry.global().get(id);
 	const configuredMaxRuntimeMs = Math.max(0, Math.trunc(Number(options.maxRuntimeMs ?? 0) || 0));
-	const maxRuntimeMs = configuredMaxRuntimeMs || ref?.runtimePolicy?.maxRuntimeMs || 0;
+	const maxRuntimeMs = configuredMaxRuntimeMs || initialRef?.runtimePolicy?.maxRuntimeMs || 0;
 	const configuredMaxSessionRuntimeMs = Math.max(0, Math.trunc(Number(options.maxSessionRuntimeMs ?? 0) || 0));
 	const sessionRuntimeLimit =
-		ref?.runtimePolicy?.sessionRuntimeLimit ??
+		initialRef?.runtimePolicy?.sessionRuntimeLimit ??
 		(configuredMaxSessionRuntimeMs > 0
 			? {
 					maxSessionRuntimeMs: configuredMaxSessionRuntimeMs,
 					startedAt: options.sessionRuntimeStartedAt ?? startTime,
 				}
 			: undefined);
+	if (
+		initialRef &&
+		sessionRuntimeLimit &&
+		sessionRuntimeLimit.maxSessionRuntimeMs > 0 &&
+		Date.now() - sessionRuntimeLimit.startedAt >= sessionRuntimeLimit.maxSessionRuntimeMs
+	) {
+		const reason = sessionRuntimeExceededReason(sessionRuntimeLimit);
+		lifecycle.terminalRelease(id, initialRef);
+		return {
+			index,
+			id,
+			agent: agent.name,
+			agentSource: agent.source,
+			task: message,
+			description: options.description,
+			exitCode: 1,
+			output: "",
+			stderr: reason,
+			truncated: false,
+			durationMs: Date.now() - startTime,
+			tokens: 0,
+			requests: 0,
+			error: reason,
+			aborted: true,
+			abortReason: reason,
+		};
+	}
+	const session = await lifecycle.ensureLive(id);
+	const ref = AgentRegistry.global().get(id);
 	const maxSessionRuntimeMs = sessionRuntimeLimit?.maxSessionRuntimeMs ?? 0;
 	if (ref) {
 		AgentRegistry.global().setRuntimePolicy(id, { maxRuntimeMs, sessionRuntimeLimit }, ref);
 	}
-	const lifecycle = AgentLifecycleManager.global();
 	const sessionFile = ref?.sessionFile ?? undefined;
 
 	const monitor = createSubagentRunMonitor({
@@ -2589,9 +2628,14 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		sessionFile,
 		softRequestBudget: 0,
 		softRequestBudgetNotice: false,
-		maxRuntimeMs: options.maxRuntimeMs ?? 0,
-		maxSessionRuntimeMs: options.maxSessionRuntimeMs ?? 0,
-		sessionRuntimeStartedAt: options.sessionRuntimeStartedAt,
+		maxRuntimeMs,
+		maxSessionRuntimeMs,
+		sessionRuntimeStartedAt: sessionRuntimeLimit?.startedAt,
+		onSessionRuntimeLimitExceeded: ref
+			? () => {
+					lifecycle.terminalRelease(id, ref);
+				}
+			: undefined,
 	});
 
 	if (options.eventBus) {

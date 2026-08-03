@@ -39,6 +39,19 @@ type AgentDurationKind = "active" | "span" | "unknown";
  */
 export type AgentKind = "main" | "sub" | "advisor";
 
+/** Runtime limits retained by a keep-alive child across wake and revival paths. */
+export interface AgentSessionRuntimeLimit {
+	maxSessionRuntimeMs: number;
+	startedAt: number;
+}
+
+export interface AgentRuntimePolicy {
+	/** Wall-clock cap for each running turn; 0 disables it. */
+	maxRuntimeMs: number;
+	/** Absolute cumulative child budget; absent disables it. */
+	sessionRuntimeLimit?: AgentSessionRuntimeLimit;
+}
+
 /** Persisted per-agent totals reconstructed from the child session transcript. */
 export interface AgentMetricsSummary {
 	tokens: number;
@@ -83,6 +96,8 @@ export interface AgentRef {
 	activity?: string;
 	/** Persisted identity and telemetry restored after the live observer is gone. */
 	history?: AgentHistorySummary;
+	/** Runtime contract for every later wake/revival of this child. */
+	runtimePolicy?: AgentRuntimePolicy;
 }
 
 export type AgentRefExpectation = AgentRef | AgentSession;
@@ -111,6 +126,7 @@ export interface RegisterInput {
 	lastActivity?: number;
 	/** Persisted identity and telemetry restored after the live observer is gone. */
 	history?: AgentHistorySummary;
+	runtimePolicy?: AgentRuntimePolicy;
 }
 
 export class AgentRegistry {
@@ -149,6 +165,7 @@ export class AgentRegistry {
 			lastActivity: input.lastActivity ?? now,
 			activity: input.activity,
 			history: input.history,
+			runtimePolicy: input.runtimePolicy,
 		};
 		this.#refs.set(ref.id, ref);
 		this.#emit({ type: "registered", ref });
@@ -176,6 +193,13 @@ export class AgentRegistry {
 		) as AgentHistorySummary;
 		ref.history = { ...ref.history, ...definedHistory };
 		this.#emit({ type: "metadata_changed", ref });
+		return true;
+	}
+
+	setRuntimePolicy(id: string, runtimePolicy: AgentRuntimePolicy, expected?: AgentRefExpectation): boolean {
+		const ref = this.#refs.get(id);
+		if (!ref || !this.#matchesExpected(ref, expected)) return false;
+		ref.runtimePolicy = runtimePolicy;
 		return true;
 	}
 
