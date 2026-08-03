@@ -5,11 +5,10 @@ import * as path from "node:path";
 import * as url from "node:url";
 import {
 	__collectLegacyPiExtensionSourcesForTests,
-	__packageNeedsGraphHooksForTests,
 	__rewriteLegacyExtensionSourceForTests,
 	loadLegacyPiModule,
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
-import { removeWithRetries, TempDir } from "@oh-my-pi/pi-utils";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 // Issue #1674: legacy Pi extensions load browser-UI assets (HTML/CSS) at module
 // init via `readFileSync(join(__dirname, "ui.html"))`. The compat layer must run
@@ -19,14 +18,10 @@ import { removeWithRetries, TempDir } from "@oh-my-pi/pi-utils";
 // public `loadLegacyPiModule` entry point.
 
 const tempRoots: string[] = [];
-const gateTempDirs: TempDir[] = [];
 
 afterAll(async () => {
 	for (const dir of tempRoots) {
 		await removeWithRetries(dir);
-	}
-	for (const dir of gateTempDirs) {
-		await dir.remove();
 	}
 });
 
@@ -39,18 +34,6 @@ async function writePackage(files: Record<string, string>): Promise<string> {
 		await fs.writeFile(abs, files[rel], "utf8");
 	}
 	return dir;
-}
-
-/** Gate fixtures use the central TempDir helper so cleanup stays full-suite safe. */
-async function writeGatePackage(files: Record<string, string>): Promise<string> {
-	const tempDir = await TempDir.create("@omp-legacy-graph-gate-");
-	gateTempDirs.push(tempDir);
-	for (const rel in files) {
-		const abs = tempDir.join(rel);
-		await fs.mkdir(path.dirname(abs), { recursive: true });
-		await fs.writeFile(abs, files[rel], "utf8");
-	}
-	return tempDir.path();
 }
 
 describe("legacy-pi in-place module loading (issue #1674)", () => {
@@ -1562,75 +1545,266 @@ describe("legacy-pi in-place module loading (issue #1674)", () => {
 });
 
 describe("third-party graph-crawl gate", () => {
-	it("skips a pure-ESM package with plain dependencies and no exports map", async () => {
-		const dir = await writeGatePackage({
-			"package.json": JSON.stringify({
-				name: "pure-esm",
-				version: "1.0.0",
-				type: "module",
-				dependencies: { "lru-cache": "^11" },
-			}),
-		});
-		expect(await __packageNeedsGraphHooksForTests(dir)).toBe(false);
-	});
-
-	it("skips an ESM package whose exports map has only import/default conditions", async () => {
-		const dir = await writeGatePackage({
-			"package.json": JSON.stringify({
-				name: "esm-exports",
-				version: "1.0.0",
-				type: "module",
-				exports: { ".": { import: "./index.js", default: "./index.js" } },
-			}),
-		});
-		expect(await __packageNeedsGraphHooksForTests(dir)).toBe(false);
-	});
-
-	it("crawls a package whose exports map nests a require condition", async () => {
-		const dir = await writeGatePackage({
-			"package.json": JSON.stringify({
+	it("loads a selected dual-format ESM entry while omitting its safe descendants", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "graph-gate-ext", version: "1.0.0", type: "module" }),
+			"index.js": [
+				'import { selected } from "dual-format";',
+				"export { selected };",
+				"export default function (pi) { void pi; }",
+			].join("\n"),
+			"node_modules/dual-format/package.json": JSON.stringify({
 				name: "dual-format",
 				version: "1.0.0",
 				type: "module",
-				exports: { ".": { node: { require: "./index.cjs", import: "./index.js" } } },
+				exports: { ".": { import: "./index.js", require: "./index.cjs" } },
+				dependencies: { "transitive-esm": "1.0.0" },
 			}),
-		});
-		expect(await __packageNeedsGraphHooksForTests(dir)).toBe(true);
-	});
-
-	it("crawls an implicit-CommonJS package (no type field)", async () => {
-		const dir = await writeGatePackage({
-			"package.json": JSON.stringify({ name: "implicit-cjs", version: "1.0.0" }),
-		});
-		expect(await __packageNeedsGraphHooksForTests(dir)).toBe(true);
-	});
-
-	it("crawls an ESM package that depends on a host pi package", async () => {
-		const dir = await writeGatePackage({
-			"package.json": JSON.stringify({
-				name: "pi-dependent",
+			"node_modules/dual-format/index.js": [
+				'import { transitive } from "transitive-esm";',
+				'import { leaf } from "./leaf.js";',
+				`export const selected = \`esm:\${transitive}:\${leaf}\`;`,
+			].join("\n"),
+			"node_modules/dual-format/index.cjs": 'module.exports = { selected: "cjs" };',
+			"node_modules/dual-format/leaf.js": 'export const leaf = "relative";',
+			"node_modules/dual-format/node_modules/transitive-esm/package.json": JSON.stringify({
+				name: "transitive-esm",
 				version: "1.0.0",
 				type: "module",
-				dependencies: { "@oh-my-pi/pi-ai": "*" },
+				exports: "./index.js",
 			}),
+			"node_modules/dual-format/node_modules/transitive-esm/index.js": 'export const transitive = "transitive";',
 		});
-		expect(await __packageNeedsGraphHooksForTests(dir)).toBe(true);
+		const entry = await fs.realpath(path.join(dir, "index.js"));
+		const selectedEntry = await fs.realpath(path.join(dir, "node_modules/dual-format/index.js"));
+		const safeLeaf = await fs.realpath(path.join(dir, "node_modules/dual-format/leaf.js"));
+		const transitiveEntry = await fs.realpath(
+			path.join(dir, "node_modules/dual-format/node_modules/transitive-esm/index.js"),
+		);
+
+		const sources = await __collectLegacyPiExtensionSourcesForTests(entry);
+		expect(sources.has(entry)).toBe(true);
+		expect(sources.has(selectedEntry)).toBe(true);
+		expect(sources.has(safeLeaf)).toBe(false);
+		expect(sources.has(transitiveEntry)).toBe(false);
+
+		const mod = (await loadLegacyPiModule(entry)) as { selected: string };
+		expect(mod.selected).toBe("esm:transitive:relative");
 	});
 
-	it("crawls an ESM package that ships a native addon build", async () => {
-		const dir = await writeGatePackage({
-			"package.json": JSON.stringify({
-				name: "native-esm",
+	it("crawls resolved CommonJS, native-risk, and legacy-risk package paths", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "fail-open-ext", version: "1.0.0", type: "module" }),
+			"index.js": [
+				'import cjsValue from "commonjs-dep";',
+				'import { nativeValue } from "native-risk";',
+				'import { legacyValue } from "legacy-risk";',
+				"export const values = [cjsValue, nativeValue, legacyValue];",
+				"export default function (pi) { void pi; }",
+			].join("\n"),
+			"node_modules/commonjs-dep/package.json": JSON.stringify({
+				name: "commonjs-dep",
+				version: "1.0.0",
+				main: "index.cjs",
+			}),
+			"node_modules/commonjs-dep/index.cjs": 'module.exports = require("./leaf.cjs");',
+			"node_modules/commonjs-dep/leaf.cjs": 'module.exports = "commonjs";',
+			"node_modules/native-risk/package.json": JSON.stringify({
+				name: "native-risk",
 				version: "1.0.0",
 				type: "module",
+				exports: "./index.js",
 				gypfile: true,
 			}),
+			"node_modules/native-risk/index.js": 'export { nativeValue } from "./leaf.js";',
+			"node_modules/native-risk/leaf.js": 'export const nativeValue = "native";',
+			"node_modules/legacy-risk/package.json": JSON.stringify({
+				name: "legacy-risk",
+				version: "1.0.0",
+				type: "module",
+				exports: "./index.js",
+				dependencies: { "@oh-my-pi/pi-ai": "*" },
+			}),
+			"node_modules/legacy-risk/index.js": 'export { legacyValue } from "./leaf.js";',
+			"node_modules/legacy-risk/leaf.js": 'export const legacyValue = "legacy";',
 		});
-		expect(await __packageNeedsGraphHooksForTests(dir)).toBe(true);
+		const entry = await fs.realpath(path.join(dir, "index.js"));
+		const crawledPaths = await Promise.all(
+			[
+				"node_modules/commonjs-dep/index.cjs",
+				"node_modules/commonjs-dep/leaf.cjs",
+				"node_modules/native-risk/index.js",
+				"node_modules/native-risk/leaf.js",
+				"node_modules/legacy-risk/index.js",
+				"node_modules/legacy-risk/leaf.js",
+			].map(relativePath => fs.realpath(path.join(dir, relativePath))),
+		);
+
+		const sources = await __collectLegacyPiExtensionSourcesForTests(entry);
+		for (const crawledPath of crawledPaths) {
+			expect(sources.has(crawledPath)).toBe(true);
+		}
+
+		const mod = (await loadLegacyPiModule(entry)) as { values: string[] };
+		expect(mod.values).toEqual(["commonjs", "native", "legacy"]);
 	});
 
-	it("fails open when the package manifest is unreadable", async () => {
-		const dir = await writeGatePackage({ "readme.md": "no manifest here" });
-		expect(await __packageNeedsGraphHooksForTests(dir)).toBe(true);
+	it("reloads pruned ESM package entries and their relative leaves", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "reload-gate-ext", version: "1.0.0", type: "module" }),
+			"index.js": [
+				'import { dependencyVersion, leafVersion } from "reloadable-esm";',
+				'export const extensionVersion = "one";',
+				"export { dependencyVersion, leafVersion };",
+				"export default function (pi) { void pi; }",
+			].join("\n"),
+			"node_modules/reloadable-esm/package.json": JSON.stringify({
+				name: "reloadable-esm",
+				version: "1.0.0",
+				type: "module",
+				exports: "./index.js",
+			}),
+			"node_modules/reloadable-esm/index.js": [
+				'import { leafVersion } from "./leaf.js";',
+				'export const dependencyVersion = "one";',
+				"export { leafVersion };",
+			].join("\n"),
+			"node_modules/reloadable-esm/leaf.js": 'export const leafVersion = "one";',
+		});
+		const entry = path.join(dir, "index.js");
+		const dependencyEntry = path.join(dir, "node_modules/reloadable-esm/index.js");
+		const dependencyLeaf = path.join(dir, "node_modules/reloadable-esm/leaf.js");
+
+		const first = (await loadLegacyPiModule(entry)) as {
+			dependencyVersion: string;
+			extensionVersion: string;
+			leafVersion: string;
+		};
+		expect(first).toMatchObject({
+			dependencyVersion: "one",
+			extensionVersion: "one",
+			leafVersion: "one",
+		});
+
+		await fs.writeFile(
+			entry,
+			[
+				'import { dependencyVersion, leafVersion } from "reloadable-esm";',
+				'export const extensionVersion = "two";',
+				"export { dependencyVersion, leafVersion };",
+				"export default function (pi) { void pi; }",
+			].join("\n"),
+			"utf8",
+		);
+		await fs.writeFile(
+			dependencyEntry,
+			[
+				'import { leafVersion } from "./leaf.js";',
+				'export const dependencyVersion = "two";',
+				"export { leafVersion };",
+			].join("\n"),
+			"utf8",
+		);
+		await fs.writeFile(dependencyLeaf, 'export const leafVersion = "two";', "utf8");
+
+		const second = (await loadLegacyPiModule(entry)) as typeof first;
+		expect(second).toMatchObject({
+			dependencyVersion: "two",
+			extensionVersion: "two",
+			leafVersion: "two",
+		});
+	});
+
+	it("keeps arbitrary optional-native CommonJS children in the graph and pins their .node requires", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "arbitrary-native-ext", version: "1.0.0", type: "module" }),
+			"index.js": [
+				'import { loadSource } from "arbitrary-native-wrapper";',
+				"export { loadSource };",
+				"export default function (pi) { void pi; }",
+			].join("\n"),
+			"node_modules/arbitrary-native-wrapper/package.json": JSON.stringify({
+				name: "arbitrary-native-wrapper",
+				version: "1.0.0",
+				type: "module",
+				exports: "./index.js",
+				optionalDependencies: {
+					"@fixture/arbitrary-platform-linux-x64": "1.0.0",
+				},
+			}),
+			"node_modules/arbitrary-native-wrapper/index.js": [
+				'import loader from "./native.cjs";',
+				"export const loadSource = loader.load.toString();",
+			].join("\n"),
+			"node_modules/arbitrary-native-wrapper/native.cjs":
+				'module.exports = { load: () => require("@fixture/arbitrary-platform-linux-x64") };\n',
+			"node_modules/arbitrary-native-wrapper/node_modules/@fixture/arbitrary-platform-linux-x64/package.json":
+				JSON.stringify({
+					name: "@fixture/arbitrary-platform-linux-x64",
+					version: "1.0.0",
+					main: "binding.node",
+				}),
+			"node_modules/arbitrary-native-wrapper/node_modules/@fixture/arbitrary-platform-linux-x64/binding.node":
+				"native fixture",
+		});
+		const entry = await fs.realpath(path.join(dir, "index.js"));
+		const wrapperEntry = await fs.realpath(path.join(dir, "node_modules/arbitrary-native-wrapper/index.js"));
+		const nativeChild = await fs.realpath(path.join(dir, "node_modules/arbitrary-native-wrapper/native.cjs"));
+		const addon = await fs.realpath(
+			path.join(
+				dir,
+				"node_modules/arbitrary-native-wrapper/node_modules/@fixture/arbitrary-platform-linux-x64/binding.node",
+			),
+		);
+
+		const sources = await __collectLegacyPiExtensionSourcesForTests(entry);
+		expect(sources.has(wrapperEntry)).toBe(true);
+		expect(sources.has(nativeChild)).toBe(true);
+
+		const mod = (await loadLegacyPiModule(entry)) as { loadSource: string };
+		expect(mod.loadSource).toContain(addon.replaceAll("\\", "/"));
+	});
+
+	it("prunes safe ESM descendants through a symlinked package root", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "symlink-gate-ext", version: "1.0.0", type: "module" }),
+			"index.js": [
+				'import { selected } from "safe-linked";',
+				"export { selected };",
+				"export default function (pi) { void pi; }",
+			].join("\n"),
+		});
+		const store = path.join(dir, ".store", "safe-linked");
+		await fs.mkdir(store, { recursive: true });
+		await fs.writeFile(
+			path.join(store, "package.json"),
+			JSON.stringify({
+				name: "safe-linked",
+				version: "1.0.0",
+				type: "module",
+				exports: "./index.js",
+			}),
+			"utf8",
+		);
+		await fs.writeFile(
+			path.join(store, "index.js"),
+			['import { leaf } from "./leaf.js";', `export const selected = \`linked:\${leaf}\`;`].join("\n"),
+			"utf8",
+		);
+		await fs.writeFile(path.join(store, "leaf.js"), 'export const leaf = "safe";', "utf8");
+		await fs.mkdir(path.join(dir, "node_modules"), { recursive: true });
+		await fs.symlink(store, path.join(dir, "node_modules", "safe-linked"));
+
+		const entry = await fs.realpath(path.join(dir, "index.js"));
+		const selectedEntry = await fs.realpath(path.join(dir, "node_modules/safe-linked/index.js"));
+		const safeLeaf = await fs.realpath(path.join(dir, "node_modules/safe-linked/leaf.js"));
+
+		const sources = await __collectLegacyPiExtensionSourcesForTests(entry);
+		expect(sources.has(entry)).toBe(true);
+		expect(sources.has(selectedEntry)).toBe(true);
+		expect(sources.has(safeLeaf)).toBe(false);
+
+		const mod = (await loadLegacyPiModule(entry)) as { selected: string };
+		expect(mod.selected).toBe("linked:safe");
 	});
 });

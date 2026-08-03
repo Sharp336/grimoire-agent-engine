@@ -1336,37 +1336,47 @@ async function readPackageManifestUncached(packageRoot: string): Promise<Record<
 	}
 }
 
+type ExtensionModuleKind = "commonjs" | "esm";
+
 /**
- * A third-party package needs graph hooks only when a rewrite could change one
- * of its files. Pure-ESM packages that declare no host `pi-*` / typebox
- * dependency and ship no native addon resolve natively from their own
- * `node_modules` location, so crawling them parses megabytes to produce
- * byte-identical output.
+ * A resolved third-party file needs graph hooks when its selected module kind
+ * or package metadata could require compatibility rewriting. Classification is
+ * deliberately file-specific: an ESM `.js` import target remains safe to prune
+ * when the same package exposes a sibling `.cjs` require target.
  */
-async function packageNeedsGraphHooks(packageRoot: string): Promise<boolean> {
+async function resolvedModuleNeedsGraphHooks(
+	packageRoot: string,
+	modulePath: string,
+	moduleKind: ExtensionModuleKind | undefined,
+): Promise<boolean> {
 	if (FORCE_FULL_EXTENSION_CRAWL) {
 		return true;
 	}
+	if (moduleKind !== "esm" || !hasSourceModuleExtension(modulePath)) {
+		return true;
+	}
+
 	const cached = packageGraphHookNeedCache.get(packageRoot);
 	if (cached) return cached;
 
-	const promise = packageNeedsGraphHooksUncached(packageRoot);
+	const promise = packageHasGraphRewriteRisk(packageRoot);
 	packageGraphHookNeedCache.set(packageRoot, promise);
 	return promise;
 }
 
-async function packageNeedsGraphHooksUncached(packageRoot: string): Promise<boolean> {
+async function packageHasGraphRewriteRisk(packageRoot: string): Promise<boolean> {
 	const manifest = await readPackageManifest(packageRoot);
 	if (!manifest) {
 		return true;
 	}
-	if (manifest.type !== "module") {
+	// Optional dependencies often name arbitrary prebuilt platform packages
+	// (for example `@scope/pkg-darwin-arm64`) whose `.node` mains need absolute
+	// path rewriting. Package-name heuristics are not a safe allowlist here.
+	const optionalDeps = manifest.optionalDependencies;
+	if (isRecord(optionalDeps) && Object.keys(optionalDeps).length > 0) {
 		return true;
 	}
-	if (exportsContainRequireCondition(manifest.exports)) {
-		return true;
-	}
-	for (const field of ["dependencies", "peerDependencies", "optionalDependencies"]) {
+	for (const field of ["dependencies", "peerDependencies"]) {
 		const deps = manifest[field];
 		if (!isRecord(deps)) continue;
 		for (const name of Object.keys(deps)) {
@@ -1387,35 +1397,6 @@ async function packageNeedsGraphHooksUncached(packageRoot: string): Promise<bool
 	}
 	return false;
 }
-
-/** A string leaf is a target, not a condition; only object keys are conditions. */
-function exportsContainRequireCondition(exports: unknown): boolean {
-	if (typeof exports === "string") {
-		return false;
-	}
-	if (Array.isArray(exports)) {
-		for (const item of exports) {
-			if (exportsContainRequireCondition(item)) {
-				return true;
-			}
-		}
-		return false;
-	}
-	if (!isRecord(exports)) {
-		return false;
-	}
-	for (const [key, value] of Object.entries(exports)) {
-		if (key === "require") {
-			return true;
-		}
-		if (exportsContainRequireCondition(value)) {
-			return true;
-		}
-	}
-	return false;
-}
-
-type ExtensionModuleKind = "commonjs" | "esm";
 
 async function isCommonJsModulePath(
 	modulePath: string,
@@ -2143,7 +2124,7 @@ async function collectExtensionModules(entryRealPath: string): Promise<Extension
 					if (resolved) {
 						resolvedModuleKind = isCommonJsEntry ? "commonjs" : "esm";
 						resolvedEsmBranch = selectedEsmBranch && !isCommonJsEntry;
-						if (resolvedModuleKind === "esm" && !requiresNativeAddonRewrite) {
+						if (!requiresNativeAddonRewrite) {
 							const packageName = splitBarePackageSpecifier(specifier)?.name;
 							const packageRoot = packageName ? await findNodePackageRoot(packageName, file) : null;
 							const realPackageRoot = packageRoot ? await realpathOrSelf(packageRoot) : null;
@@ -2151,9 +2132,8 @@ async function collectExtensionModules(entryRealPath: string): Promise<Extension
 								packageRoot &&
 								realPackageRoot &&
 								isPathInsideRoot(realPackageRoot, resolved) &&
-								isPathInsideRoot(path.resolve(packageRoot), resolved) &&
 								!isPathInsideRoot(realPackageRoot, entryRealPath) &&
-								!(await packageNeedsGraphHooks(packageRoot))
+								!(await resolvedModuleNeedsGraphHooks(packageRoot, resolved, resolvedModuleKind))
 							) {
 								crawlResolved = false;
 							}
@@ -2712,9 +2692,4 @@ export function installLegacyPiSpecifierShim(): void {
 /** Test seam: clears the memoized canonical specifier resolutions. */
 export function __resetLegacyPiResolutionCache(): void {
 	clearLegacyPiResolutionCaches();
-}
-
-/** Test seam for the third-party graph-crawl gate. */
-export async function __packageNeedsGraphHooksForTests(packageRoot: string): Promise<boolean> {
-	return packageNeedsGraphHooks(packageRoot);
 }

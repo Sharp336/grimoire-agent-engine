@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Skipped legacy extension dependency graph traversal for packages proved not to need compatibility hooks, while retaining fail-open checks for CommonJS, native, and legacy-Pi cases.
+- Skipped legacy extension dependency graph traversal for packages proved not to need compatibility hooks, while retaining fail-open checks for CommonJS, native, and legacy-Pi cases. ([#7461](https://github.com/can1357/oh-my-pi/pull/7461) by [@metaphorics](https://github.com/metaphorics))
 
 ## [17.2.5] - 2026-08-03
 
