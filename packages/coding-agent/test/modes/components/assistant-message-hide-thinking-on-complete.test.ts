@@ -140,6 +140,18 @@ describe("hideThinkingBlockOnComplete", () => {
 		expect(renderText(component)).not.toContain(THINKING);
 	});
 
+	it("explicit reveal while streaming survives finalization", () => {
+		const component = new AssistantMessageComponent(undefined, false);
+		component.setHideThinkingBlockOnComplete(true);
+		component.updateContent(makeMessage("stop"));
+		// User reveals mid-stream: reasoning stays visible through finalize.
+		component.setUserRevealedThinking(true);
+		component.markTranscriptBlockFinalized();
+		expect(renderText(component)).toContain(THINKING);
+		// And it is no longer retractable: nothing to pin or defer.
+		expect(component.isNativeScrollbackLiveRegionPinned()).toBe(false);
+	});
+
 	it("explicit user reveal (Ctrl+T visible) beats hide-on-complete", () => {
 		const component = new AssistantMessageComponent(undefined, false);
 		component.setHideThinkingBlockOnComplete(true);

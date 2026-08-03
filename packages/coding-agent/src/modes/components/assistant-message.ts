@@ -532,13 +532,7 @@ export class AssistantMessageComponent extends Container {
 		// Reasoning that hide-on-complete will retract at message_end must never
 		// reach immutable native scrollback: defer settling wholesale (like
 		// mermaid) while retractable thinking is currently visible.
-		if (
-			this.hideThinkingBlockOnComplete &&
-			!this.#effectiveHideThinkingBlock() &&
-			this.#lastMessage?.content.some(
-				c => c.type === "thinking" && resolveThinkingDisplay(c, this.proseOnlyThinking).visible,
-			)
-		) {
+		if (this.#thinkingIsRetractable()) {
 			return 0;
 		}
 		const items = this.#fastPathItems;
@@ -566,14 +560,14 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	/**
-	 * While hide-on-complete keeps retractable reasoning visible, the final
-	 * rebuild at message_end will remove it: pin the live region so scrolled
-	 * thinking rows are never frozen into immutable native scrollback, where
-	 * they would survive the rebuild in terminal history. Mirrors the
-	 * {@link getTranscriptBlockSettledRows} deferral.
+	 * Whether the currently visible reasoning will actually be retracted at
+	 * message_end: hide-on-complete is on, no explicit user reveal overrides
+	 * it, and a visible thinking block exists. Both native-scrollback guards
+	 * (settled-rows deferral and live-region pinning) must agree on this, or a
+	 * revealed turn keeps unnecessary pin/deferral for its whole duration.
 	 */
-	isNativeScrollbackLiveRegionPinned(): boolean {
-		if (this.#transcriptBlockFinalized || this.#effectiveHideThinkingBlock()) return false;
+	#thinkingIsRetractable(): boolean {
+		if (this.#userRevealed || this.#effectiveHideThinkingBlock()) return false;
 		return (
 			this.hideThinkingBlockOnComplete &&
 			(this.#lastMessage?.content.some(
@@ -581,6 +575,18 @@ export class AssistantMessageComponent extends Container {
 			) ??
 				false)
 		);
+	}
+
+	/**
+	 * While hide-on-complete keeps retractable reasoning visible, the final
+	 * rebuild at message_end will remove it: pin the live region so scrolled
+	 * thinking rows are never frozen into immutable native scrollback, where
+	 * they would survive the rebuild in terminal history. Mirrors the
+	 * {@link getTranscriptBlockSettledRows} deferral.
+	 */
+	isNativeScrollbackLiveRegionPinned(): boolean {
+		if (this.#transcriptBlockFinalized) return false;
+		return this.#thinkingIsRetractable();
 	}
 
 	getTranscriptBlockVersion(): number {

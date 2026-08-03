@@ -526,11 +526,14 @@ export class SelectorController {
 				break;
 			case "hideThinkingBlockOnComplete":
 				this.ctx.hideThinkingBlockOnComplete = value as boolean;
+				if (value as boolean) this.ctx.thinkingRevealed = false;
 				for (const child of this.ctx.chatContainer.children) {
 					if (child instanceof AssistantMessageComponent) {
 						child.setHideThinkingBlockOnComplete(value as boolean);
 						// Re-enabling the clean-transcript mode clears any prior
-						// explicit reveal so the setting takes effect again.
+						// explicit reveal so the setting takes effect again — the
+						// ctx must be cleared too, or new/rebuilt components keep
+						// reading the stale reveal from the factory/builder.
 						if (value as boolean) child.setUserRevealedThinking(false);
 					}
 				}
