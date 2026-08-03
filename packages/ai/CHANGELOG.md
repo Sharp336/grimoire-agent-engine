@@ -8,6 +8,23 @@
 - Added `validateCredentialPayload`, a shape-only validator for stored credential JSON that lets diagnostics reject malformed rows without exposing secret fields.
 - Exported `AUTH_SCHEMA_VERSION` and `inferAuthSchemaVersionFromColumns` (a pure schema-version classifier for the `auth_credentials` table) so read-only diagnostics like `omp doctor` can detect a legacy schema pending automatic migration without instantiating the store (which would migrate it).
 
+## [17.2.5] - 2026-08-03
+
+### Changed
+
+- Standardized tool-call examples in `renderToolExamples` and `renderToolInventory` to use Python keyword-argument syntax (`name(key="value")`) across all models, removing the model-specific dialect parameter and the `DialectRenderOptions.example` flag.
+- Updated `renderToolInventory` to render the tool catalog as a unified OpenAI-Harmony-style `## functions` block using TypeScript type declarations and comments, replacing the previous per-tool Markdown sections.
+- Added a `style: "harmony"` option to `jsonSchemaToTypeScript` for generating compact, comma-delimited TypeScript definitions.
+
+### Fixed
+
+- Fixed a session-blocking issue where unescaped Harmony control tokens in replayed assistant responses and tool inputs caused subsequent requests to be rejected with `invalid_prompt` errors.
+- Fixed an issue where Codex Responses dropped native image-generation results from assistant content and replays due to stale `generating` statuses.
+- Fixed Anthropic stream truncation handling where unexpected connection closures were incorrectly treated as clean stops, causing the agent loop to halt silently mid-sentence.
+- Optimized Anthropic prompt caching to prevent unnecessary cache invalidation of the entire system prefix when volatile project footer details (such as current working directory, date, or workspace tree) change.
+
+## [17.2.4] - 2026-08-01
+
 ### Fixed
 
 - Fixed Codex WebSocket tool-result turns replaying full history when the preceding tool-call ID required Responses API normalization ([#7279](https://github.com/can1357/oh-my-pi/issues/7279)).

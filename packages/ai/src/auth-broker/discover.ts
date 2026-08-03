@@ -6,6 +6,7 @@
  */
 import * as path from "node:path";
 import {
+	$envExact,
 	getAgentDbPath,
 	getAgentDir,
 	getAuthBrokerSnapshotCachePath,
@@ -62,7 +63,7 @@ export function getAuthBrokerTokenFilePath(): string {
  */
 async function defaultResolveConfigValue(config: string): Promise<string | undefined> {
 	if (config.startsWith("!")) return undefined;
-	const envValue = process.env[config];
+	const envValue = $envExact(config);
 	return envValue || config;
 }
 
