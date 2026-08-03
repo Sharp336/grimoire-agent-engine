@@ -43,6 +43,7 @@ describe("Vercel AI Gateway compat", () => {
 		} satisfies ModelSpec<"openai-completions">);
 
 		expect(model.compat.isVercelGatewayHost).toBe(true);
+		expect(model.compat.isVercelGatewayUrl).toBe(true);
 		expect(model.compat.vercelGatewayRouting).toEqual({
 			only: ["anthropic"],
 			order: ["anthropic", "bedrock"],
@@ -50,6 +51,29 @@ describe("Vercel AI Gateway compat", () => {
 			zeroDataRetention: true,
 		});
 	});
+});
+
+test("keeps the routing host class but drops the ZDR URL claim for a baseUrl override", () => {
+	const routing = { only: ["bedrock"], zeroDataRetention: true };
+	const overridden = buildModel({
+		id: "anthropic/claude-sonnet-4.6",
+		name: "Claude Sonnet 4.6",
+		api: "openai-completions",
+		provider: "vercel-ai-gateway",
+		baseUrl: "https://corp-proxy.example/v1",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 16_384,
+		compat: { vercelGatewayRouting: routing },
+	} satisfies ModelSpec<"openai-completions">);
+
+	// Provider id alone keeps the broad routing host class (only/order may still
+	// be emitted), but the ZDR retention claim must not be made for a non-Vercel
+	// endpoint that won't enforce it.
+	expect(overridden.compat.isVercelGatewayHost).toBe(true);
+	expect(overridden.compat.isVercelGatewayUrl).toBe(false);
 });
 
 test("resolves Responses gateway controls only for the Vercel endpoint", () => {
@@ -82,8 +106,10 @@ test("resolves Responses gateway controls only for the Vercel endpoint", () => {
 	} satisfies ModelSpec<"openai-responses">);
 
 	expect(vercel.compat.isVercelGatewayHost).toBe(true);
+	expect(vercel.compat.isVercelGatewayUrl).toBe(true);
 	expect(vercel.compat.vercelGatewayRouting).toEqual(routing);
 	expect(direct.compat.isVercelGatewayHost).toBe(false);
+	expect(direct.compat.isVercelGatewayUrl).toBe(false);
 });
 
 test("resolves gateway routing controls for anthropic-messages Vercel models", () => {
@@ -116,7 +142,9 @@ test("resolves gateway routing controls for anthropic-messages Vercel models", (
 	} satisfies ModelSpec<"anthropic-messages">);
 
 	expect(vercel.compat.isVercelGatewayHost).toBe(true);
+	expect(vercel.compat.isVercelGatewayUrl).toBe(true);
 	expect(vercel.compat.vercelGatewayRouting).toEqual(routing);
 	expect(direct.compat.isVercelGatewayHost).toBe(false);
+	expect(direct.compat.isVercelGatewayUrl).toBe(false);
 	expect(direct.compat.vercelGatewayRouting).toEqual(routing);
 });

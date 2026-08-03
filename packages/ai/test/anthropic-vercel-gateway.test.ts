@@ -72,6 +72,27 @@ describe("Vercel AI Gateway routing on the Anthropic transport", () => {
 		expect(payload.providerOptions).toEqual({ gateway: { zeroDataRetention: true } });
 	});
 
+	it("drops zeroDataRetention when baseUrl is overridden away from Vercel", async () => {
+		const proxy = buildModel({
+			id: "anthropic/claude-sonnet-4.6",
+			name: "Claude Sonnet 4.6",
+			api: "anthropic-messages",
+			provider: "vercel-ai-gateway",
+			baseUrl: "https://corp-proxy.example",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 16_384,
+			compat: { vercelGatewayRouting: { only: ["bedrock"], zeroDataRetention: true } },
+		} satisfies ModelSpec<"anthropic-messages">);
+
+		// The provider id alone is not enough for a retention claim; only routing
+		// survives a baseUrl override away from the Vercel hostname.
+		const payload = await capturePayload(proxy);
+		expect(payload.providerOptions).toEqual({ gateway: { only: ["bedrock"] } });
+	});
+
 	it("leaves unset, disabled, and non-Vercel requests unchanged", async () => {
 		const [unset, disabled, nonVercel] = await Promise.all([
 			capturePayload(vercelModel()),

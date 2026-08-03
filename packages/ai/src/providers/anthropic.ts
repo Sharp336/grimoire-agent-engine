@@ -3647,9 +3647,11 @@ function applyAnthropicGatewayRouting(params: MessageCreateParamsStreaming, mode
 	const gateway: Pick<VercelGatewayRouting, "only" | "order" | "zeroDataRetention"> = {};
 	if (routing.only) gateway.only = routing.only;
 	if (routing.order) gateway.order = routing.order;
-	if (routing.zeroDataRetention) gateway.zeroDataRetention = true;
+	// The ZDR retention claim additionally requires the actual Vercel hostname:
+	// a models.yml baseUrl override may point the provider id at another proxy.
+	if (compat.isVercelGatewayUrl && routing.zeroDataRetention) gateway.zeroDataRetention = true;
 	if (!gateway.only && !gateway.order && !gateway.zeroDataRetention) return;
-	(params as MessageCreateParamsStreaming & { providerOptions?: unknown }).providerOptions = { gateway };
+	params.providerOptions = { gateway };
 }
 
 const EMPTY_ERROR_TOOL_RESULT_TEXT = "Tool failed with no output.";

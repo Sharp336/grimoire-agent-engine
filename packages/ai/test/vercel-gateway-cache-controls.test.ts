@@ -51,7 +51,7 @@ function responsesModel(provider: string, baseUrl: string, routing?: VercelGatew
 
 function captureChatPayload(
 	model: Model<"openai-completions">,
-	options: { cacheRetention?: "long" | "short" | "none" } = {},
+	options: { cacheRetention?: "long" | "short" | "none"; extraBody?: Record<string, unknown> } = {},
 ): Promise<Payload> {
 	const { promise, resolve } = Promise.withResolvers<Payload>();
 	streamOpenAICompletions(model, context, {
@@ -65,7 +65,7 @@ function captureChatPayload(
 
 function captureResponsesPayload(
 	model: Model<"openai-responses">,
-	options: { cacheRetention?: "long" | "short" | "none" } = {},
+	options: { cacheRetention?: "long" | "short" | "none"; extraBody?: Record<string, unknown> } = {},
 ): Promise<Payload> {
 	const { promise, resolve } = Promise.withResolvers<Payload>();
 	streamOpenAIResponses(model, context, {
@@ -282,6 +282,85 @@ describe("Vercel AI Gateway zero data retention", () => {
 			expect(responses.providerOptions).toEqual({ gateway: { zeroDataRetention: true } });
 			expect(responses.caching).toBeUndefined();
 		});
+	});
+
+	it("keeps zeroDataRetention when extraBody supplies providerOptions", async () => {
+		const routing: VercelGatewayRouting = { only: ["anthropic"], zeroDataRetention: true };
+		const extraBody = { gateway: { only: ["openai"] } };
+		const chat = buildModel({
+			id: "anthropic/claude-sonnet-4.6",
+			name: "Claude Sonnet 4.6",
+			api: "openai-completions",
+			provider: "vercel-ai-gateway",
+			baseUrl: "https://ai-gateway.vercel.sh/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 16_384,
+			compat: { vercelGatewayRouting: routing, extraBody: { providerOptions: extraBody } },
+		} satisfies ModelSpec<"openai-completions">);
+		const responses = buildModel({
+			id: "anthropic/claude-sonnet-4.6",
+			name: "Claude Sonnet 4.6",
+			api: "openai-responses",
+			provider: "vercel-ai-gateway",
+			baseUrl: "https://ai-gateway.vercel.sh/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 16_384,
+			compat: { vercelGatewayRouting: routing },
+		} satisfies ModelSpec<"openai-responses">);
+
+		// extraBody.providerOptions (documented escape hatch) must not clobber the
+		// typed gateway routing; the typed value wins on conflicts (bot P1).
+		const [chatPayload, responsesPayload] = await Promise.all([
+			captureChatPayload(chat),
+			captureResponsesPayload(responses, { extraBody: { providerOptions: extraBody } }),
+		]);
+		expect(chatPayload.providerOptions).toEqual({ gateway: { only: ["anthropic"], zeroDataRetention: true } });
+		expect(responsesPayload.providerOptions).toEqual({ gateway: { only: ["anthropic"], zeroDataRetention: true } });
+	});
+
+	it("drops zeroDataRetention but keeps routing when baseUrl is overridden away from Vercel", async () => {
+		const routing: VercelGatewayRouting = { only: ["bedrock"], zeroDataRetention: true };
+		const chat = buildModel({
+			id: "anthropic/claude-sonnet-4.6",
+			name: "Claude Sonnet 4.6",
+			api: "openai-completions",
+			provider: "vercel-ai-gateway",
+			baseUrl: "https://corp-proxy.example/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 16_384,
+			compat: { vercelGatewayRouting: routing },
+		} satisfies ModelSpec<"openai-completions">);
+		const responses = buildModel({
+			id: "anthropic/claude-sonnet-4.6",
+			name: "Claude Sonnet 4.6",
+			api: "openai-responses",
+			provider: "vercel-ai-gateway",
+			baseUrl: "https://corp-proxy.example/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 16_384,
+			compat: { vercelGatewayRouting: routing },
+		} satisfies ModelSpec<"openai-responses">);
+
+		// ZDR is a retention claim: a non-Vercel baseUrl must not carry it even
+		// with the provider id intact; only/order stay on the broader routing class.
+		const [chatPayload, responsesPayload] = await Promise.all([
+			captureChatPayload(chat),
+			captureResponsesPayload(responses),
+		]);
+		expect(chatPayload.providerOptions).toEqual({ gateway: { only: ["bedrock"] } });
+		expect(responsesPayload.providerOptions).toEqual({ gateway: { only: ["bedrock"] } });
 	});
 
 	it("emits nothing for unset, disabled, or non-Vercel hosts", async () => {

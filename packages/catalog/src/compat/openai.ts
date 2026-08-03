@@ -582,6 +582,11 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		isOpenRouterHost: isOpenRouter,
 		wireModelIdMode,
 		isVercelGatewayHost: isVercelGateway,
+		// ZDR is a retention guarantee: it must only be claimed when the request
+		// actually goes to Vercel. Provider-id matching alone is not enough — a
+		// models.yml baseUrl override can point a `vercel-ai-gateway` provider at
+		// an unrelated proxy.
+		isVercelGatewayUrl: hostMatchesUrl(baseUrl, "vercelAIGateway"),
 		supportsStrictMode: detectStrictModeSupport(provider, baseUrl),
 		extraBody: undefined,
 		toolStrictMode: isCerebras ? "all_strict" : "mixed",
@@ -744,6 +749,9 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 		vercelGatewayRouting: undefined,
 		isOpenRouterHost: isOpenRouter,
 		isVercelGatewayHost: isVercelGateway,
+		// ZDR is a retention guarantee: only claim it when the request actually
+		// goes to Vercel (provider-id matching survives baseUrl overrides).
+		isVercelGatewayUrl: hostMatchesUrl(baseUrl, "vercelAIGateway"),
 		wireModelIdMode: isOpenRouter ? "openrouter" : "raw",
 		// Mirrors buildOpenAICompat: Kimi behind a Responses-capable proxy still
 		// lands on Moonshot's MFJS validator.
@@ -783,6 +791,7 @@ function pickResponsesOnly(compat: ResolvedOpenAIResponsesCompat): ResponsesOnly
 		supportsImageDetailOriginal: compat.supportsImageDetailOriginal,
 		supportsObfuscationOptOut: compat.supportsObfuscationOptOut,
 		isVercelGatewayHost: compat.isVercelGatewayHost,
+		isVercelGatewayUrl: compat.isVercelGatewayUrl,
 	} satisfies ResponsesOnlyCompat;
 }
 

@@ -169,6 +169,7 @@ describe("applyOpenAIGatewayRouting", () => {
 		applyOpenAIGatewayRouting(params, {
 			isOpenRouterHost: false,
 			isVercelGatewayHost: true,
+			isVercelGatewayUrl: true,
 			vercelGatewayRouting: { zeroDataRetention: true },
 		});
 		expect(params.providerOptions).toEqual({ gateway: { zeroDataRetention: true } });

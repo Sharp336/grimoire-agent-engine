@@ -221,6 +221,20 @@ export type ContextManagement = {
 	edits: Array<{ type: "clear_thinking_20251015"; keep: "all" }>;
 };
 
+/**
+ * Vercel AI Gateway per-request `providerOptions.gateway` wire shape. The
+ * gateway accepts this nested object in the Messages body (docs: per-request
+ * ZDR / provider routing); the Anthropic SDK types don't model it, so it is
+ * declared here alongside every other first-class request field.
+ */
+export interface AnthropicGatewayProviderOptionsWire {
+	gateway?: {
+		only?: string[];
+		order?: string[];
+		zeroDataRetention?: boolean;
+	};
+}
+
 export type MessageCreateParams = {
 	model: string;
 	messages: MessageParam[];
@@ -246,6 +260,11 @@ export type MessageCreateParams = {
 	 * header: `server-side-fallback-2026-06-01`.
 	 */
 	fallbacks?: FallbackParam[];
+	/**
+	 * Vercel AI Gateway provider options carried verbatim in the Messages body
+	 * (see {@link AnthropicGatewayProviderOptionsWire}).
+	 */
+	providerOptions?: AnthropicGatewayProviderOptionsWire;
 };
 
 export type MessageCreateParamsStreaming = MessageCreateParams & { stream: true };

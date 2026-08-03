@@ -31,6 +31,7 @@ const compat: ResolvedOpenAICompat = {
 	alwaysSendMaxTokens: false,
 	isOpenRouterHost: false,
 	isVercelGatewayHost: false,
+	isVercelGatewayUrl: false,
 	reasoningEffortMap: {},
 	supportsUsageInStreaming: true,
 	supportsToolChoice: true,

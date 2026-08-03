@@ -704,6 +704,8 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 		toolStrictMode: ResolvedToolStrictMode;
 		/** The model sits behind Vercel AI Gateway. */
 		isVercelGatewayHost: boolean;
+		/** baseUrl actually matches the Vercel AI Gateway hostname (ai-gateway.vercel.sh). */
+		isVercelGatewayUrl: boolean;
 		dropThinkingWhenReasoningEffort: boolean;
 		/** Complete alternate view for thinking-engaged requests; swap pointers, never spread. */
 		whenThinking?: ResolvedOpenAICompat;
@@ -719,6 +721,8 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	vercelGatewayRouting?: OpenAICompat["vercelGatewayRouting"];
 	/** The model sits behind Vercel AI Gateway's Responses endpoint. */
 	isVercelGatewayHost: boolean;
+	/** baseUrl actually matches the Vercel AI Gateway hostname (ai-gateway.vercel.sh). */
+	isVercelGatewayUrl: boolean;
 }
 
 /**
@@ -747,6 +751,8 @@ export type ResolvedAnthropicCompat = Required<
 	officialEndpoint: boolean;
 	/** The model sits behind Vercel AI Gateway; gateway preferences are forwarded in the Messages body. */
 	isVercelGatewayHost: boolean;
+	/** baseUrl actually matches the Vercel AI Gateway hostname (ai-gateway.vercel.sh). */
+	isVercelGatewayUrl: boolean;
 	/** Vercel AI Gateway routing preferences (only/order/zeroDataRetention). */
 	vercelGatewayRouting?: VercelGatewayRouting;
 };

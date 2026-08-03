@@ -176,7 +176,10 @@ export function buildAnthropicCompat(spec: ModelSpec<"anthropic-messages">): Res
 		streamIdleTimeoutMs: spec.compat?.streamIdleTimeoutMs,
 		// Vercel AI Gateway accepts `providerOptions.gateway` in the Messages
 		// body itself; the resolved routing block is filled by applyCompatOverrides.
+		// ZDR emission additionally requires the URL gate: the provider id alone
+		// survives baseUrl overrides and must not claim Vercel retention.
 		isVercelGatewayHost: isVercelGateway,
+		isVercelGatewayUrl: hostMatchesUrl(baseUrl, "vercelAIGateway"),
 		vercelGatewayRouting: undefined,
 	};
 	applyCompatOverrides(compat, spec.compat);
