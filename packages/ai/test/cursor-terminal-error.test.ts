@@ -60,6 +60,15 @@ type Scenario =
 			newerStarted: PromiseWithResolvers<void>;
 			releaseNewerEnd: PromiseWithResolvers<void>;
 	  }
+	| {
+			kind: "checkpoint-overlap-success";
+			requests: number;
+			olderStarted: PromiseWithResolvers<void>;
+			releaseOlderSuccess: PromiseWithResolvers<void>;
+			newerStarted: PromiseWithResolvers<void>;
+			releaseNewerEnd: PromiseWithResolvers<void>;
+			rootPromptMessagesJson?: Uint8Array[];
+	  }
 	| { kind: "todo-start-then-death" };
 
 let server: http2.Http2Server | undefined;
@@ -253,6 +262,31 @@ async function startServer(): Promise<string> {
 				return;
 			}
 			const { newerStarted, releaseNewerEnd } = scenario;
+			newerStarted.resolve();
+			void releaseNewerEnd.promise.then(() => stream.end());
+			return;
+		}
+
+		if (scenario.kind === "checkpoint-overlap-success") {
+			const activeScenario = scenario;
+			const { olderStarted, releaseOlderSuccess, newerStarted, releaseNewerEnd } = activeScenario;
+			activeScenario.requests++;
+			if (activeScenario.requests === 1) {
+				stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+				olderStarted.resolve();
+				void releaseOlderSuccess.promise.then(() => {
+					stream.end(
+						Buffer.concat([
+							checkpointFrame(
+								[JSON.stringify({ toolCallId: "older-success-call", toolName: "read" })],
+								activeScenario.rootPromptMessagesJson,
+							),
+							turnEndedFrame(),
+						]),
+					);
+				});
+				return;
+			}
 			newerStarted.resolve();
 			void releaseNewerEnd.promise.then(() => stream.end());
 			return;
@@ -926,6 +960,72 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 			[JSON.stringify({ toolCallId: "newer-call", toolName: "read" })],
 			[JSON.stringify({ toolCallId: "newer-call", toolName: "read" })],
 		]);
+	});
+
+	it("restores a successful older checkpoint when an overlapping request fails before a server message", async () => {
+		const olderStarted = Promise.withResolvers<void>();
+		const releaseOlderSuccess = Promise.withResolvers<void>();
+		const newerStarted = Promise.withResolvers<void>();
+		const releaseNewerEnd = Promise.withResolvers<void>();
+		scenario = {
+			kind: "checkpoint-overlap-success",
+			requests: 0,
+			olderStarted,
+			releaseOlderSuccess,
+			newerStarted,
+			releaseNewerEnd,
+		};
+		const baseUrl = await startServer();
+		const model = makeModel(baseUrl);
+		const conversationId = "cursor-overlap-success";
+
+		const older = streamCursor(model, context, {
+			apiKey: "test-token",
+			conversationId,
+			onPayload: payload => {
+				const request = payload as { conversationState?: { rootPromptMessagesJson?: Uint8Array[] } };
+				if (scenario.kind === "checkpoint-overlap-success") {
+					scenario.rootPromptMessagesJson = request.conversationState?.rootPromptMessagesJson;
+				}
+			},
+		});
+		const olderDone = (async () => {
+			for await (const _event of older) {
+				// Drain after the older request publishes its successful checkpoint.
+			}
+			return await older.result();
+		})();
+		await olderStarted.promise;
+
+		const newer = streamCursor(model, context, { apiKey: "test-token", conversationId });
+		const newerDone = (async () => {
+			for await (const _event of newer) {
+				// Drain after its pre-message failure is released.
+			}
+			return await newer.result();
+		})();
+		await newerStarted.promise;
+
+		releaseOlderSuccess.resolve();
+		expect((await olderDone).stopReason).toBe("stop");
+		releaseNewerEnd.resolve();
+		expect((await newerDone).stopReason).toBe("error");
+
+		scenario = { kind: "success" };
+		let pendingToolCalls: string[] | undefined;
+		const verification = streamCursor(model, context, {
+			apiKey: "test-token",
+			conversationId,
+			onPayload: payload => {
+				pendingToolCalls = (payload as { conversationState?: { pendingToolCalls?: string[] } }).conversationState
+					?.pendingToolCalls;
+			},
+		});
+		for await (const _event of verification) {
+			// Drain the verification request.
+		}
+		expect((await verification.result()).stopReason).toBe("stop");
+		expect(pendingToolCalls).toEqual([JSON.stringify({ toolCallId: "older-success-call", toolName: "read" })]);
 	});
 
 	it("does not restore a checkpoint invalidated by an overlapping request", async () => {

@@ -642,8 +642,14 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			openBlockState = state;
 
 			const onConversationCheckpoint = (checkpoint: ConversationStateStructure) => {
+				if (!conversationStateEntry) return;
+				// Keep this request's entry identity stable even after a newer request
+				// claims the map. The newer owner captured this object as its fallback,
+				// so mutating it lets a later clean completion make the checkpoint
+				// restorable if that newer request fails before receiving a message.
+				conversationStateEntry.state = checkpoint;
+				conversationStateEntry.restorable = true;
 				if (conversationStateCache.get(requestConversationId)?.owner === requestStateOwner) {
-					conversationStateEntry = { state: checkpoint, owner: requestStateOwner, restorable: true };
 					conversationStateCache.set(requestConversationId, conversationStateEntry);
 				}
 			};
@@ -828,14 +834,11 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		} finally {
-			if (
-				conversationId &&
-				conversationStateOwner &&
-				completedCleanly &&
-				conversationStateCache.get(conversationId)?.owner === conversationStateOwner
-			) {
-				const completedEntry = conversationStateCache.get(conversationId)!;
-				conversationStateCache.set(conversationId, { ...completedEntry, restorable: true });
+			if (conversationId && conversationStateOwner && completedCleanly && conversationStateEntry) {
+				conversationStateEntry.restorable = true;
+				if (conversationStateCache.get(conversationId)?.owner === conversationStateOwner) {
+					conversationStateCache.set(conversationId, conversationStateEntry);
+				}
 			}
 			if (
 				conversationId &&
