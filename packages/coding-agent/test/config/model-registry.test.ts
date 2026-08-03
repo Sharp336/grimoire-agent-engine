@@ -13,6 +13,7 @@ function createStubAuthStorage(): AuthStorage {
 		clearConfigApiKeys: () => {},
 		hasAuth: () => false,
 		getApiKey: async () => undefined,
+		peekApiKey: () => undefined,
 	};
 	return stub as unknown as AuthStorage;
 }
@@ -154,6 +155,60 @@ describe("ModelRegistry", () => {
 		secondResolve();
 		await registry.awaitBackgroundRefresh();
 	});
+
+	test("admits one non-waiting first probe across concurrent fallback callers", async () => {
+		const start = Promise.withResolvers<void>();
+		const callers = Array.from({ length: 6 }, async () => {
+			await start.promise;
+			return registry.admitFallbackProbe("test/test-model:high");
+		});
+
+		start.resolve();
+		const admissions = await Promise.all(callers);
+
+		expect(admissions.filter(admission => admission.status === "probe")).toHaveLength(1);
+		expect(admissions.filter(admission => admission.status === "busy")).toHaveLength(5);
+	});
+
+	test("restores parallel fallback admission after the first probe succeeds", () => {
+		const first = registry.admitFallbackProbe("test/test-model");
+		if (first.status !== "probe") throw new Error("Expected first fallback caller to own the probe");
+
+		registry.markFallbackProbeHealthy(first.lease);
+
+		expect(Array.from({ length: 6 }, () => registry.admitFallbackProbe("test/test-model"))).toEqual(
+			Array.from({ length: 6 }, () => ({ status: "healthy" })),
+		);
+	});
+
+	test("preserves fallback probe state across routine refreshes", async () => {
+		const probe = registry.admitFallbackProbe("test/test-model");
+		if (probe.status !== "probe") throw new Error("Expected first fallback caller to own the probe");
+
+		await registry.refresh("offline");
+		expect(registry.admitFallbackProbe("test/test-model")).toEqual({ status: "busy" });
+
+		registry.markFallbackProbeHealthy(probe.lease);
+		await registry.refresh("offline");
+		expect(registry.admitFallbackProbe("test/test-model")).toEqual({ status: "healthy" });
+	});
+
+	test("ignores a stale probe callback after ownership changes", () => {
+		const first = registry.admitFallbackProbe("test/test-model");
+		if (first.status !== "probe") throw new Error("Expected first fallback caller to own the probe");
+		expect(registry.abandonFallbackProbeForSelector(first.lease, "other/model")).toBe(false);
+		expect(registry.admitFallbackProbe("test/test-model")).toEqual({ status: "busy" });
+		registry.abandonFallbackProbe(first.lease);
+
+		const second = registry.admitFallbackProbe("test/test-model");
+		if (second.status !== "probe") throw new Error("Expected abandoned probe to admit a new owner");
+		registry.markFallbackProbeHealthy(first.lease);
+
+		expect(registry.admitFallbackProbe("test/test-model")).toEqual({ status: "busy" });
+		registry.abandonFallbackProbe(second.lease);
+		expect(registry.admitFallbackProbe("test/test-model").status).toBe("probe");
+	});
+
 	test("resolves API keys and provider headers for legacy extensions", async () => {
 		const model = testModel;
 		vi.spyOn(registry, "getApiKey").mockResolvedValue("test-key");

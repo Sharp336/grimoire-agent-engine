@@ -1,7 +1,7 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { ModelRegistry } from "../config/model-registry";
+import type { FallbackProbeLease, ModelRegistry } from "../config/model-registry";
 import {
 	formatModelSelectorValue,
 	formatModelString,
@@ -50,6 +50,8 @@ export interface ActiveRetryFallbackState {
 	originalThinkingLevel: ConfiguredThinkingLevel | undefined;
 	lastAppliedFallbackThinkingLevel: ConfiguredThinkingLevel | undefined;
 	pinned: boolean;
+	/** Present only while this session owns the selector's first live probe. */
+	probeLease?: FallbackProbeLease;
 }
 
 const RETRY_BACKOFF_MAX_DELAY_MS = 8_000;

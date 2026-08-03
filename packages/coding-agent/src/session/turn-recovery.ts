@@ -21,7 +21,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { extractRetryHint, logger, prompt } from "@oh-my-pi/pi-utils";
-import type { ModelRegistry } from "../config/model-registry";
+import type { FallbackProbeLease, ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import type { RecoveredRetryError } from "../extensibility/shared-events";
@@ -222,14 +222,14 @@ export class TurnRecovery {
 
 	/** Closes a successful retry saga and annotates recovered persisted errors. */
 	async onAssistantSettledSuccessfully(message: AssistantMessage): Promise<void> {
-		if (
-			message.stopReason === "error" ||
-			message.stopReason === "aborted" ||
-			this.#isEmptyAssistantStop(message) ||
-			this.#retryAttempt === 0
-		) {
+		if (message.stopReason === "error" || message.stopReason === "aborted" || this.#isEmptyAssistantStop(message)) {
 			return;
 		}
+		if (this.#activeRetryFallback?.probeLease) {
+			this.#host.modelRegistry.markFallbackProbeHealthy(this.#activeRetryFallback.probeLease);
+			this.#activeRetryFallback.probeLease = undefined;
+		}
+		if (this.#retryAttempt === 0) return;
 		const model = this.#host.model();
 		if (this.#activeRetryFallback && model) {
 			await this.#host.emitSessionEvent({
@@ -251,7 +251,9 @@ export class TurnRecovery {
 
 	/** Closes a failed retry saga when no compaction continuation took ownership. */
 	async onErrorSettledWithoutRetry(message: AssistantMessage, compaction: RecoveryCompactionResult): Promise<void> {
-		if (message.stopReason !== "error" || this.#retryAttempt === 0 || compaction.continuationScheduled) return;
+		if (message.stopReason !== "error" || compaction.continuationScheduled) return;
+		this.abandonActiveRetryFallbackProbe();
+		if (this.#retryAttempt === 0) return;
 		const attempt = this.#retryAttempt;
 		this.#retryAttempt = 0;
 		await this.#host.emitSessionEvent({
@@ -1025,7 +1027,17 @@ export class TurnRecovery {
 
 	/** Clears fallback ownership after an explicit model change. */
 	clearActiveRetryFallback(): void {
+		this.abandonActiveRetryFallbackProbe();
 		this.#activeRetryFallback = undefined;
+	}
+
+	/** Release an unfinished first-probe lease without changing fallback ownership. */
+	abandonActiveRetryFallbackProbe(): void {
+		const fallback = this.#activeRetryFallback;
+		const lease = fallback?.probeLease;
+		if (!lease) return;
+		this.#host.modelRegistry.abandonFallbackProbe(lease);
+		fallback.probeLease = undefined;
 	}
 
 	/** Checks whether a fallback selector remains in cooldown. */
@@ -1075,7 +1087,7 @@ export class TurnRecovery {
 		role: string,
 		selector: RetryFallbackSelector,
 		currentSelector: string,
-		options?: { pinFallback?: boolean; apiKey?: string; signal?: AbortSignal },
+		options?: { pinFallback?: boolean; apiKey?: string; signal?: AbortSignal; probeLease?: FallbackProbeLease },
 	): Promise<void> {
 		const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 		const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
@@ -1112,10 +1124,13 @@ export class TurnRecovery {
 				originalThinkingLevel: currentThinkingLevel,
 				lastAppliedFallbackThinkingLevel: nextThinkingLevel,
 				pinned: options?.pinFallback === true,
+				probeLease: options?.probeLease,
 			};
 		} else {
+			this.abandonActiveRetryFallbackProbe();
 			this.#activeRetryFallback.lastAppliedFallbackThinkingLevel = nextThinkingLevel;
 			this.#activeRetryFallback.pinned = this.#activeRetryFallback.pinned || options?.pinFallback === true;
+			this.#activeRetryFallback.probeLease = options?.probeLease;
 		}
 		await this.#host.emitSessionEvent({
 			type: "retry_fallback_applied",
@@ -1138,10 +1153,31 @@ export class TurnRecovery {
 			// A candidate whose effort floor exceeds the per-spawn ceiling would be
 			// clamped UP past the cap by its model floor — skip it entirely.
 			if (ceiling !== undefined && !modelSupportsEffortCeiling(candidate, ceiling)) continue;
-			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
-			if (!apiKey) continue;
-			await this.applyRetryFallbackCandidate(role, selector, currentSelector, options);
-			return true;
+			const admission = this.#host.modelRegistry.admitFallbackProbe(selector.raw);
+			if (admission.status === "busy") continue;
+			const probeLease = admission.status === "probe" ? admission.lease : undefined;
+			let transferred = false;
+			const generation = this.#host.promptGeneration();
+			try {
+				const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
+				if (!apiKey) continue;
+				if (
+					this.#host.isDisposed() ||
+					this.#host.abortInProgress() ||
+					this.#host.promptGeneration() !== generation
+				) {
+					return false;
+				}
+				await this.applyRetryFallbackCandidate(role, selector, currentSelector, {
+					...options,
+					apiKey,
+					probeLease,
+				});
+				transferred = true;
+				return true;
+			} finally {
+				if (probeLease && !transferred) this.#host.modelRegistry.abandonFallbackProbe(probeLease);
+			}
 		}
 
 		return false;
@@ -1439,6 +1475,14 @@ export class TurnRecovery {
 			// last resort is for provider failures, not classifier decisions.
 			if (allowModelFallback && retrySettings.modelFallback && !(retryBudgetExhausted && classifierRefusal)) {
 				if (!classifierRefusal) {
+					const activeFallback = this.#activeRetryFallback;
+					const activeLease = activeFallback?.probeLease;
+					if (
+						activeLease &&
+						this.#host.modelRegistry.abandonFallbackProbeForSelector(activeLease, currentSelector)
+					) {
+						activeFallback.probeLease = undefined;
+					}
 					this.noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage);
 				}
 				switchedModel = await this.#tryRetryModelFallback(currentSelector, { pinFallback: classifierRefusal });

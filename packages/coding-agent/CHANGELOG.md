@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed parallel subagents sending duplicate probes to the same unknown retry fallback ([#7484](https://github.com/can1357/oh-my-pi/issues/7484)).
+
 ## [17.2.5] - 2026-08-03
 
 ### Breaking Changes

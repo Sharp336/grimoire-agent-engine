@@ -115,6 +115,7 @@ describe("AgentSession retry fallback", () => {
 		// (default 5-minute suppression) so state never leaks between tests.
 		modelRegistry = sharedRegistry;
 		modelRegistry.clearSuppressedSelectors();
+		modelRegistry.clearFallbackProbeStates();
 	});
 
 	afterEach(async () => {
@@ -258,6 +259,85 @@ describe("AgentSession retry fallback", () => {
 		}
 	});
 
+	it("lets one sibling probe an unknown fallback without making the others wait", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled fallback probe models");
+
+		const releasePrimary = Promise.withResolvers<void>();
+		const allPrimaryStarted = Promise.withResolvers<void>();
+		const releaseFallback = Promise.withResolvers<void>();
+		const fallbackStarted = Promise.withResolvers<void>();
+		const fiveCallersFinished = Promise.withResolvers<void>();
+		let primaryAttempts = 0;
+		let fallbackAttempts = 0;
+		let finishedCallers = 0;
+		const primaryMock = createMockModel({
+			handler: async () => {
+				primaryAttempts += 1;
+				if (primaryAttempts === 6) allPrimaryStarted.resolve();
+				await releasePrimary.promise;
+				return { throw: "overloaded_error: provider returned error 503" };
+			},
+		});
+		const fallbackMock = createMockModel({
+			handler: async () => {
+				fallbackAttempts += 1;
+				fallbackStarted.resolve();
+				await releaseFallback.promise;
+				return { content: ["Fallback probe passed"] };
+			},
+		});
+		const sessions = Array.from({ length: 6 }, () => {
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) =>
+					model.provider === fallbackModel.provider && model.id === fallbackModel.id
+						? fallbackMock.stream(model, context, options)
+						: primaryMock.stream(model, context, options),
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 0,
+				"retry.maxRetries": 1,
+				"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			});
+			settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+			return new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
+		});
+
+		try {
+			const prompts = sessions.map(candidateSession =>
+				candidateSession.prompt("Recover together").finally(() => {
+					finishedCallers += 1;
+					if (finishedCallers === 5) fiveCallersFinished.resolve();
+				}),
+			);
+			await allPrimaryStarted.promise;
+			releasePrimary.resolve();
+			await fallbackStarted.promise;
+			await fiveCallersFinished.promise;
+
+			expect(fallbackAttempts).toBe(1);
+
+			releaseFallback.resolve();
+			await Promise.all(prompts);
+			expect(modelRegistry.admitFallbackProbe(`${fallbackModel.provider}/${fallbackModel.id}`)).toEqual({
+				status: "healthy",
+			});
+		} finally {
+			releasePrimary.resolve();
+			releaseFallback.resolve();
+			await Promise.all(sessions.map(candidateSession => candidateSession.dispose()));
+		}
+	});
+
 	it("confirms before crossing models when every pooled account is inside reserve", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
@@ -315,6 +395,9 @@ describe("AgentSession retry fallback", () => {
 		});
 		expect(requestedModels).toEqual([`${fallbackModel.provider}/${fallbackModel.id}`]);
 		expect(session.messages.some(message => message.role === "user")).toBe(true);
+		expect(modelRegistry.admitFallbackProbe(`${fallbackModel.provider}/${fallbackModel.id}`)).toEqual({
+			status: "healthy",
+		});
 	});
 
 	it("reselects a healthy same-provider account before considering a model fallback", async () => {
@@ -668,6 +751,7 @@ describe("AgentSession retry fallback", () => {
 			},
 		]);
 		expect(advisorFailures).toEqual([]);
+		expect(modelRegistry.admitFallbackProbe(advisorFallbackSelector)).toEqual({ status: "healthy" });
 
 		const getApiKey = vi.spyOn(modelRegistry, "getApiKey");
 		const afterCooldown = Date.now() + 2_000;
@@ -756,6 +840,72 @@ describe("AgentSession retry fallback", () => {
 			provider: advisorPrimary.provider,
 			id: advisorPrimary.id,
 		});
+	});
+
+	it("releases an advisor probe when the fallback turn exits with a tool-call error", async () => {
+		const mainModel = getBundledModel("openai", "gpt-4o-mini");
+		const advisorPrimary = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const advisorFallback = getBundledModel("openai", "gpt-4o");
+		if (!mainModel || !advisorPrimary || !advisorFallback) {
+			throw new Error("Expected bundled advisor fallback models to exist");
+		}
+
+		const mainMock = createMockModel({ responses: [{ content: ["Primary complete"] }] });
+		const advisorMock = createMockModel();
+		const advisorPrimarySelector = `${advisorPrimary.provider}/${advisorPrimary.id}`;
+		const advisorFallbackSelector = `${advisorFallback.provider}/${advisorFallback.id}`;
+		const fallbackReturned = Promise.withResolvers<void>();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: mainModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mainMock.stream,
+		});
+		const settings = Settings.isolated({
+			"advisor.syncBacklog": "1",
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 0,
+			"retry.fallbackChains": { [advisorPrimarySelector]: [advisorFallbackSelector] },
+		});
+		settings.setModelRole("advisor", advisorPrimarySelector);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorStreamFn: (requestedModel, context, options) => {
+				const selector = `${requestedModel.provider}/${requestedModel.id}`;
+				if (selector === advisorPrimarySelector) {
+					advisorMock.push({ throw: "service unavailable: 503 overloaded" });
+				} else if (selector === advisorFallbackSelector) {
+					advisorMock.push({
+						content: [{ type: "toolCall", name: "missing-tool", arguments: {} }],
+						stopReason: "error",
+						errorMessage: "fallback tool-call response failed",
+					});
+					fallbackReturned.resolve();
+				} else {
+					throw new Error(`Unexpected advisor model requested: ${selector}`);
+				}
+				return advisorMock.stream(requestedModel, context, options);
+			},
+		});
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+
+		await session.prompt("Trigger advisor fallback failure");
+		await fallbackReturned.promise;
+		let releasedProbe = false;
+		for (let attempt = 0; attempt < 50; attempt += 1) {
+			const admission = modelRegistry.admitFallbackProbe(advisorFallbackSelector);
+			if (admission.status === "probe") {
+				modelRegistry.abandonFallbackProbe(admission.lease);
+				releasedProbe = true;
+				break;
+			}
+			await Bun.sleep(0);
+		}
+
+		expect(releasedProbe).toBe(true);
 	});
 
 	it("activates a model-keyed fallback chain without any role assignment", async () => {
