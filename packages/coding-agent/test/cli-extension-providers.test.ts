@@ -14,12 +14,13 @@
  * passed explicitly so the test never touches the developer's real `~/.omp`.
  */
 
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import { AuthStorage } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { getModelMatchPreferences, resolveCliModel } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { loadCliExtensionProviders } from "@oh-my-pi/pi-coding-agent/sdk";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -86,4 +87,150 @@ test("loadCliExtensionProviders makes extension providers resolvable by selector
 	} finally {
 		authStorage.close();
 	}
+});
+
+type ExtensionLoadGate = {
+	firstStarted: () => void;
+	secondRegistered: () => void;
+	wait: Promise<void>;
+};
+
+describe("loadExtensions registration order", () => {
+	let orderTmp: TempDir;
+
+	beforeEach(async () => {
+		orderTmp = await TempDir.create("@cli-ext-providers-order-");
+	});
+
+	afterEach(async () => {
+		resetSettingsForTest();
+		await orderTmp.remove();
+	});
+
+	test("preserves provider order when concurrent factories finish out of order", async () => {
+		const firstPath = orderTmp.join("first-provider.ts");
+		const secondPath = orderTmp.join("second-provider.ts");
+		const firstStarted = Promise.withResolvers<void>();
+		const secondRegistered = Promise.withResolvers<void>();
+		const releaseFirst = Promise.withResolvers<void>();
+		const gateKey = `__ompExtensionLoadGate_${Bun.hash(orderTmp.path()).toString(36)}`;
+		const globals = globalThis as typeof globalThis & Record<string, ExtensionLoadGate | undefined>;
+		globals[gateKey] = {
+			firstStarted: () => firstStarted.resolve(),
+			secondRegistered: () => secondRegistered.resolve(),
+			wait: releaseFirst.promise,
+		};
+
+		try {
+			await fs.writeFile(
+				firstPath,
+				`export default async function (pi) {
+	const gate = globalThis[${JSON.stringify(gateKey)}] as { firstStarted: () => void; wait: Promise<void> };
+	gate.firstStarted();
+	await gate.wait;
+	pi.registerProvider("shared-provider", { baseUrl: "https://first.example.com/v1" });
+}`,
+			);
+			await fs.writeFile(
+				secondPath,
+				`export default function (pi) {
+	pi.registerProvider("shared-provider", { baseUrl: "https://second.example.com/v1" });
+	(globalThis[${JSON.stringify(gateKey)}] as { secondRegistered: () => void }).secondRegistered();
+}`,
+			);
+
+			const resultPromise = loadExtensions([firstPath, secondPath], orderTmp.path());
+			await Promise.all([firstStarted.promise, secondRegistered.promise]);
+			releaseFirst.resolve();
+			const result = await resultPromise;
+
+			expect(result.errors).toEqual([]);
+			expect(result.extensions).toHaveLength(2);
+			expect(result.runtime.pendingProviderRegistrations).toEqual([
+				{
+					name: "shared-provider",
+					config: { baseUrl: "https://first.example.com/v1" },
+					sourceId: firstPath,
+				},
+				{
+					name: "shared-provider",
+					config: { baseUrl: "https://second.example.com/v1" },
+					sourceId: secondPath,
+				},
+			]);
+		} finally {
+			delete globals[gateKey];
+		}
+	});
+
+	test("preserves later flag defaults when factories finish out of order", async () => {
+		const firstPath = orderTmp.join("first-flag.ts");
+		const secondPath = orderTmp.join("second-flag.ts");
+		const firstStarted = Promise.withResolvers<void>();
+		const secondRegistered = Promise.withResolvers<void>();
+		const releaseFirst = Promise.withResolvers<void>();
+		const gateKey = `__ompExtensionLoadGate_${Bun.hash(orderTmp.path()).toString(36)}`;
+		const globals = globalThis as typeof globalThis & Record<string, ExtensionLoadGate | undefined>;
+		globals[gateKey] = {
+			firstStarted: () => firstStarted.resolve(),
+			secondRegistered: () => secondRegistered.resolve(),
+			wait: releaseFirst.promise,
+		};
+
+		try {
+			await fs.writeFile(
+				firstPath,
+				`export default async function (pi) {
+	const gate = globalThis[${JSON.stringify(gateKey)}] as { firstStarted: () => void; wait: Promise<void> };
+	gate.firstStarted();
+	await gate.wait;
+	pi.registerFlag("shared-flag", { type: "string", default: "first" });
+}
+`,
+			);
+			await fs.writeFile(
+				secondPath,
+				`export default function (pi) {
+	pi.registerFlag("shared-flag", { type: "string", default: "second" });
+	(globalThis[${JSON.stringify(gateKey)}] as { secondRegistered: () => void }).secondRegistered();
+}
+`,
+			);
+
+			const resultPromise = loadExtensions([firstPath, secondPath], orderTmp.path());
+			await Promise.all([firstStarted.promise, secondRegistered.promise]);
+			releaseFirst.resolve();
+			const result = await resultPromise;
+
+			expect(result.errors).toEqual([]);
+			expect(result.runtime.flagValues.get("shared-flag")).toBe("second");
+		} finally {
+			delete globals[gateKey];
+		}
+	});
+
+	test("keeps providers registered before a factory fails", async () => {
+		const failingPath = orderTmp.join("failing-provider.ts");
+		await fs.writeFile(
+			failingPath,
+			`export default function (pi) {
+	pi.registerProvider("kept-provider", { baseUrl: "https://kept.example.com/v1" });
+	throw new Error("failure after provider registration");
+}
+`,
+		);
+
+		const result = await loadExtensions([failingPath], orderTmp.path());
+
+		expect(result.extensions).toEqual([]);
+		expect(result.errors).toHaveLength(1);
+		expect(result.errors[0]?.path).toBe(failingPath);
+		expect(result.runtime.pendingProviderRegistrations).toEqual([
+			{
+				name: "kept-provider",
+				config: { baseUrl: "https://kept.example.com/v1" },
+				sourceId: failingPath,
+			},
+		]);
+	});
 });

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Loaded independent extensions concurrently while preserving their configured order for command, flag, renderer, and handler precedence.
+
 ## [17.2.5] - 2026-08-03
 
 ### Breaking Changes

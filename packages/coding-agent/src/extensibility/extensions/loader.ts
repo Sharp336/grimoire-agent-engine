@@ -156,6 +156,8 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		private readonly runtime: IExtensionRuntime,
 		private readonly cwd: string,
 		public readonly events: EventBus,
+		private readonly providerSink?: Array<{ name: string; config: ProviderConfig; sourceId: string }>,
+		private readonly flagValueSink?: Map<string, boolean | string>,
 	) {}
 
 	on<F extends HandlerFn>(event: string, handler: F): void {
@@ -202,7 +204,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	): void {
 		this.extension.flags.set(name, { name, extensionPath: this.extension.path, ...options });
 		if (options.default !== undefined) {
-			this.runtime.flagValues.set(name, options.default);
+			(this.flagValueSink ?? this.runtime.flagValues).set(name, options.default);
 		}
 	}
 
@@ -216,7 +218,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 
 	getFlag(name: string): boolean | string | undefined {
 		if (!this.extension.flags.has(name)) return undefined;
-		return this.runtime.flagValues.get(name);
+		return (this.flagValueSink ?? this.runtime.flagValues).get(name);
 	}
 
 	sendMessage<T = unknown>(
@@ -289,7 +291,12 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	}
 
 	registerProvider(name: string, config: ProviderConfig): void {
-		this.runtime.pendingProviderRegistrations.push({ name, config, sourceId: this.extension.path });
+		const registration = { name, config, sourceId: this.extension.path };
+		if (this.providerSink) {
+			this.providerSink.push(registration);
+		} else {
+			this.runtime.pendingProviderRegistrations.push(registration);
+		}
 	}
 }
 
@@ -310,13 +317,22 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 	};
 }
 
+type ExtensionLoadResult = {
+	extension: Extension | null;
+	error: string | null;
+	providers: Array<{ name: string; config: ProviderConfig; sourceId: string }>;
+	flagDefaults: Map<string, boolean | string>;
+};
+
 async function loadExtension(
 	extensionPath: string,
 	cwd: string,
 	eventBus: EventBus,
 	runtime: IExtensionRuntime,
-): Promise<{ extension: Extension | null; error: string | null }> {
+): Promise<ExtensionLoadResult> {
 	const resolvedPath = resolvePath(extensionPath, cwd);
+	const providers: Array<{ name: string; config: ProviderConfig; sourceId: string }> = [];
+	const flagDefaults = new Map<string, boolean | string>();
 	try {
 		const module = (await withHostGuard(() => loadLegacyPiModule(resolvedPath))) as LoadedExtensionModule;
 		const factory = getExtensionFactory(module);
@@ -325,19 +341,21 @@ async function loadExtension(
 			return {
 				extension: null,
 				error: `Extension does not export a valid factory function: ${extensionPath}`,
+				providers,
+				flagDefaults,
 			};
 		}
 
 		const extension = createExtension(extensionPath, resolvedPath);
-		const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus);
+		const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus, providers, flagDefaults);
 		await withHostGuard(async () => {
 			await factory(api);
 		});
 
-		return { extension, error: null };
+		return { extension, error: null, providers, flagDefaults };
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		return { extension: null, error: `Failed to load extension: ${message}` };
+		return { extension: null, error: `Failed to load extension: ${message}`, providers, flagDefaults };
 	}
 }
 
@@ -357,25 +375,38 @@ export async function loadExtensionFromFactory(
 	return extension;
 }
 
+const LOAD_CONCURRENCY = 8;
+
 /**
  * Load extensions from paths.
+ *
+ * Loads up to {@link LOAD_CONCURRENCY} extensions concurrently. Results are
+ * written into a pre-sized array by input index, so `extensions`, `errors`,
+ * and `runtime.pendingProviderRegistrations` preserve the `paths` order
+ * regardless of completion order.
  */
 export async function loadExtensions(paths: string[], cwd: string, eventBus?: EventBus): Promise<LoadExtensionsResult> {
 	const extensions: Extension[] = [];
 	const errors: Array<{ path: string; error: string }> = [];
 	const resolvedEventBus = eventBus ?? new EventBus();
 	const runtime = new ExtensionRuntime();
-
-	for (const extPath of paths) {
-		const { extension, error } = await loadExtension(extPath, cwd, resolvedEventBus, runtime);
-
-		if (error) {
-			errors.push({ path: extPath, error });
-			continue;
+	const settled: ExtensionLoadResult[] = new Array(paths.length);
+	let next = 0;
+	const workers = Array.from({ length: Math.min(LOAD_CONCURRENCY, paths.length) }, async () => {
+		while (true) {
+			const index = next++;
+			if (index >= paths.length) return;
+			settled[index] = await loadExtension(paths[index], cwd, resolvedEventBus, runtime);
 		}
+	});
+	await Promise.all(workers);
 
-		if (extension) {
-			extensions.push(extension);
+	for (const [index, { extension, error, providers, flagDefaults }] of settled.entries()) {
+		if (error) errors.push({ path: paths[index], error });
+		if (extension) extensions.push(extension);
+		runtime.pendingProviderRegistrations.push(...providers);
+		for (const [name, value] of flagDefaults) {
+			runtime.flagValues.set(name, value);
 		}
 	}
 
