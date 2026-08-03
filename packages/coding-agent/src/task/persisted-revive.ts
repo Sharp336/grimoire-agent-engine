@@ -98,7 +98,9 @@ export function createPersistedSubagentReviverFactory(
 				modelRegistry: ctx.modelRegistry,
 				settings: createSubagentSettings(ctx.settings, {
 					...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
-					...(init.xdevPromote ? { "tools.xdevPromote": init.xdevPromote } : undefined),
+					// `undefined` (absent) inherits the global tools.xdevPromote; an
+					// explicitly empty list clears it, remounting everything under xd://.
+					...(init.xdevPromote !== undefined ? { "tools.xdevPromote": init.xdevPromote } : undefined),
 				}),
 				sessionManager: reopened,
 				agentId: ref.id,

@@ -15,6 +15,10 @@ describe("createSubagentSettings xdevPromote override", () => {
 		]);
 	});
 
+	it("lets an explicitly empty xdevPromote clear the inherited value", () => {
+		expect(createSubagentSettings(parent, { "tools.xdevPromote": [] }).get("tools.xdevPromote")).toEqual([]);
+	});
+
 	it("keeps readSummarize false and xdevPromote independent overrides", () => {
 		const child = createSubagentSettings(parent, {
 			"read.summarize.enabled": false,

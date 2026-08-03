@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `tools.xdevPromote` (and the per-agent `xdevPromote` frontmatter) to keep specific tools top-level instead of mounting them under `xd://`, without disabling `tools.xdev` globally. Promotion only changes presentation; tools still need their normal enablement ([#5648](https://github.com/can1357/oh-my-pi/issues/5648)).
+- Added `tools.xdevPromote` (and the per-agent `xdevPromote` frontmatter) to keep specific tools top-level instead of mounting them under `xd://`, without disabling `tools.xdev` globally. Promotion only changes presentation; tools still need their normal enablement, and an explicitly empty per-agent `xdevPromote` clears the inherited global promotion ([#5648](https://github.com/can1357/oh-my-pi/issues/5648)).
 ### Changed
 
 - Replaced arktype with `@oh-my-pi/omptype` across all tool parameter and config schemas: ~100x faster schema construction removes the arktype startup tax (the `scope({}, { jitless: true })` workarounds are gone). Config schema errors now report via `OmpErrors` entries with the same `path`/`problem` shape.

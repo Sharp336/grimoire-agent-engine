@@ -181,10 +181,12 @@ describe("parseAgentFields", () => {
 		).toEqual(["lsp", "mcp__context7_resolve_library_id"]);
 	});
 
-	test("returns undefined xdevPromote when field absent or empty", () => {
+	test("returns undefined xdevPromote when field absent, [] when explicitly empty", () => {
+		// Absent inherits the global tools.xdevPromote...
 		expect(parseAgentFields({ name: "scout", description: "desc" })?.xdevPromote).toBeUndefined();
-		expect(parseAgentFields({ name: "scout", description: "desc", xdevPromote: [] })?.xdevPromote).toBeUndefined();
-		expect(parseAgentFields({ name: "scout", description: "desc", xdevPromote: "" })?.xdevPromote).toBeUndefined();
+		// ...while an explicit empty value clears it ([] is distinguishable from absent).
+		expect(parseAgentFields({ name: "scout", description: "desc", xdevPromote: [] })?.xdevPromote).toEqual([]);
+		expect(parseAgentFields({ name: "scout", description: "desc", xdevPromote: "" })?.xdevPromote).toEqual([]);
 	});
 	test("parses prewalk from boolean frontmatter", () => {
 		expect(parseAgentFields({ name: "worker", description: "desc", prewalk: true })?.prewalk).toBe(true);

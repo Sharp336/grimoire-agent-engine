@@ -4335,7 +4335,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Discovery & MCP",
 			label: "xd:// Promoted Tools",
 			description:
-				'Tools to keep top-level instead of mounting under xd:// while xd:// Tools is on (for example "lsp" or "mcp__context7_resolve-library_id"). Promotion only changes presentation; tools must still be enabled through their normal settings. No-op when xd:// Tools is off.',
+				'Tools to keep top-level instead of mounting under xd:// while xd:// Tools is on (for example "lsp" or "mcp__context_resolve_library_id"). MCP names use the sanitized minted form (server/tool parts lowercased, non-alphanumerics replaced with underscores). Promotion only changes presentation; tools must still be enabled through their normal settings. No-op when xd:// Tools is off.',
 		},
 	},
 

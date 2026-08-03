@@ -369,7 +369,7 @@ export interface AgentDefinition {
 	autoloadSkills?: string[];
 	/** When `false`, the agent's `read` tool returns verbatim file content instead of structural summaries. */
 	readSummarize?: boolean;
-	/** Tools forced top-level instead of xd:// mounting in this agent's sessions; undefined inherits `tools.xdevPromote`. */
+	/** Tools forced top-level instead of xd:// mounting in this agent's sessions; `undefined` (absent) inherits `tools.xdevPromote`, an explicitly empty list clears it. */
 	xdevPromote?: string[];
 	/** Prewalk hand-off for the spawned session: `true` = switch to the default prewalk target at the first edit/write, string = custom target model pattern. */
 	prewalk?: boolean | string;

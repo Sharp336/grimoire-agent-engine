@@ -308,8 +308,12 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	const autoloadSkills = parseArrayOrCSV(frontmatter.autoloadSkills)
 		?.map(s => s.trim())
 		.filter(Boolean);
-	const xdevPromote = parseArrayOrCSV(frontmatter.xdevPromote);
-	const normalizedXdevPromote = xdevPromote ? normalizeToolNames(xdevPromote) : undefined;
+	const rawXdevPromote = frontmatter.xdevPromote;
+	const xdevPromote = parseArrayOrCSV(rawXdevPromote);
+	// Distinguish an explicitly empty field (xdevPromote: [] / "") — which
+	// clears the inherited tools.xdevPromote — from an absent one (undefined).
+	const normalizedXdevPromote =
+		xdevPromote !== undefined ? normalizeToolNames(xdevPromote) : rawXdevPromote !== undefined ? [] : undefined;
 	return {
 		name,
 		description,

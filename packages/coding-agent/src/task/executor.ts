@@ -871,7 +871,9 @@ export type AbortReason = "signal" | "terminate" | "timeout" | "budget";
 function agentSettingsOverrides(agent: AgentDefinition): Partial<Record<SettingPath, unknown>> {
 	return {
 		...(agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
-		...(agent.xdevPromote ? { "tools.xdevPromote": agent.xdevPromote } : undefined),
+		// `undefined` (absent) inherits the global tools.xdevPromote; an
+		// explicitly empty list clears it, remounting everything under xd://.
+		...(agent.xdevPromote !== undefined ? { "tools.xdevPromote": agent.xdevPromote } : undefined),
 	};
 }
 
