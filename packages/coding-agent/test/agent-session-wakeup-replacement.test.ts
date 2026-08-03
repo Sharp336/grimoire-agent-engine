@@ -367,7 +367,7 @@ describe("AgentSession wakeup suppression across session replacement", () => {
 			return "";
 		});
 
-		await expect(session.handoff()).resolves.toBeUndefined();
+		await expect(session.handoff()).rejects.toThrow("Handoff generation produced no content");
 		await manager.drainDeliveries();
 
 		expect(deliveriesDuringHandoff).toBe(0);
@@ -403,6 +403,28 @@ describe("AgentSession wakeup suppression across session replacement", () => {
 			"async-result",
 			expect.objectContaining({ jobId, result: "rollback wakeup" }),
 		);
+	});
+
+	it("suppresses a wakeup throughout a same-session reload and restores it after commit", async () => {
+		await seedPersistedMessages();
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+		const { jobId, fire } = registerGatedWakeup();
+		let deliveriesDuringReload = -1;
+		beforeSwitchHandler = async () => {
+			fire("reload wakeup");
+			await manager.waitForAll();
+			await manager.drainDeliveries();
+			deliveriesDuringReload = enqueue.mock.calls.length;
+			return undefined;
+		};
+
+		await expect(session.switchSession(sessionFile)).resolves.toBe(true);
+		await manager.drainDeliveries();
+
+		expect(deliveriesDuringReload).toBe(0);
+		expect(enqueue).toHaveBeenCalledTimes(1);
+		expect(enqueue).toHaveBeenCalledWith("async-result", expect.objectContaining({ jobId, result: "reload wakeup" }));
 	});
 
 	it("cancels pending wakeup timers when a different-session switch commits", async () => {

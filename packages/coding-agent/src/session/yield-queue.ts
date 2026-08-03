@@ -117,14 +117,29 @@ export class YieldQueue {
 		const entries = this.#entries.get(kind);
 		if (!entries || entries.length === 0) return [];
 		const taken: P[] = [];
-		const retained: unknown[] = [];
+		const retained: StoredEntry[] = [];
 		for (const entry of entries) {
-			if (predicate(entry as P)) taken.push(entry as P);
+			if (predicate(entry.value as P)) taken.push(entry.value as P);
 			else retained.push(entry);
 		}
 		if (retained.length > 0) this.#entries.set(kind, retained);
 		else this.#entries.delete(kind);
 		return taken;
+	}
+
+	/** Restore entries previously removed by {@link take} without replaying enqueue observers. */
+	restore<P>(kind: string, restored: readonly P[]): void {
+		if (restored.length === 0 || !this.#dispatchers.has(kind)) return;
+		const entries = this.#entries.get(kind);
+		if (entries) entries.push(...restored.map(value => ({ value })));
+		else
+			this.#entries.set(
+				kind,
+				restored.map(value => ({ value })),
+			);
+		if (!this.#options.isStreaming() && !this.#dispatchers.get(kind)!.skipIdleFlush) {
+			this.#scheduleIdleFlush();
+		}
 	}
 
 	async flush(mode: YieldFlushMode): Promise<void> {

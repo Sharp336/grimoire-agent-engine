@@ -1,8 +1,8 @@
+import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { abortableSleep } from "@oh-my-pi/pi-utils/abortable";
-import { type } from "arktype";
 import wakeupDescription from "../prompts/tools/wakeup.md" with { type: "text" };
 import wakeupFiredTemplate from "../prompts/tools/wakeup-fired.md" with { type: "text" };
 import wakeupScheduledTemplate from "../prompts/tools/wakeup-scheduled.md" with { type: "text" };

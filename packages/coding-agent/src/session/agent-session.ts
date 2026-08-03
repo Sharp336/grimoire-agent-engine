@@ -1855,12 +1855,10 @@ export class AgentSession {
 	/** Restore wakeups suppressed by a replacement transition that did not commit. */
 	#restoreOwnWakeups(suppressed: SuppressedWakeups): void {
 		this.#asyncJobManager?.resumeDeliveries(suppressed.jobIds);
-		for (const entry of suppressed.queuedEntries) {
-			this.yieldQueue.enqueue(ASYNC_RESULT_MESSAGE_TYPE, {
-				...entry,
-				epoch: this.#asyncDeliveryEpoch,
-			});
-		}
+		this.yieldQueue.restore(
+			ASYNC_RESULT_MESSAGE_TYPE,
+			suppressed.queuedEntries.map(entry => ({ ...entry, epoch: this.#asyncDeliveryEpoch })),
+		);
 	}
 
 	/**
@@ -7516,12 +7514,10 @@ export class AgentSession {
 			: true;
 		// Suppress this session's wakeup deliveries before the hook/abort/flush
 		// awaits below: a wakeup expiring inside that window must not start a
-		// turn in the conversation being replaced. Same-session reloads are not a
-		// replacement, so their wakeups keep delivering. Restored on hook veto or
-		// rollback; cancelled once the switch succeeds.
-		const suppressedWakeupIds = switchingToDifferentSession
-			? this.#suppressOwnWakeups()
-			: { jobIds: [], queuedEntries: [] };
+		// turn while either a replacement or same-session reload is rebuilding
+		// session state. Restored on hook veto, rollback, or a successful reload;
+		// cancelled only once a different-session switch succeeds.
+		const suppressedWakeupIds = this.#suppressOwnWakeups();
 		// Emit session_before_switch event (can be cancelled)
 		try {
 			if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
@@ -7746,6 +7742,8 @@ export class AgentSession {
 			if (switchingToDifferentSession) {
 				this.#advisors.restoreCost(await loadAdvisorTranscriptCosts(this.sessionFile));
 				this.#cancelOwnWakeups();
+			} else {
+				this.#restoreOwnWakeups(suppressedWakeupIds);
 			}
 			this.#bash.finishSessionTransition(bashTransition, true);
 			if (previousSessionState.sessionId !== this.sessionManager.getSessionId()) {
