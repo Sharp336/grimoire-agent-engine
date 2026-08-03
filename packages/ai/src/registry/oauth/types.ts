@@ -68,6 +68,17 @@ export interface OAuthProviderInfo {
 	 * entry back to the model provider it authenticates.
 	 */
 	storeCredentialsAs?: string;
+	/**
+	 * When true, this provider's credentials can authenticate xAI HTTP tool
+	 * endpoints (image gen, video gen, TTS, web search). Lets plugin-supplied
+	 * OAuth providers slot into resolveXAIHttpCredentials without core naming them.
+	 */
+	xaiHttpCompat?: boolean;
+	/**
+	 * Base URL for xAI HTTP tools when xaiHttpCompat is true. Defaults to
+	 * "https://api.x.ai/v1" if omitted.
+	 */
+	xaiHttpBaseUrl?: string;
 }
 
 export interface OAuthController {
@@ -93,4 +104,13 @@ export interface OAuthProviderInterface {
 	getApiKey?(credentials: OAuthCredentials): string;
 	/** Store resulting OAuth credentials under a different provider id. */
 	readonly storeCredentialsAs?: string;
+	/**
+	 * When true, this provider's credentials can authenticate xAI HTTP tool
+	 * endpoints (image gen, video gen, TTS, web search).
+	 */
+	readonly xaiHttpCompat?: boolean;
+	/**
+	 * Base URL for xAI HTTP tools when xaiHttpCompat is true.
+	 */
+	readonly xaiHttpBaseUrl?: string;
 }

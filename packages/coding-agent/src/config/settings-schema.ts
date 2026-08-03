@@ -28,6 +28,7 @@ import {
 	TINY_TITLE_MODEL_VALUES,
 } from "../tiny/models";
 import { IMAGE_PROVIDER_CHOICES, type ImageProvider } from "../tools/image-providers";
+import { VIDEO_PROVIDER_CHOICES, type VideoProvider } from "../tools/video-providers";
 import {
 	DEFAULT_TTS_LOCAL_MODEL_KEY,
 	DEFAULT_TTS_VOICE,
@@ -3892,6 +3893,17 @@ export const SETTINGS_SCHEMA = {
 				"Enable the generate_image tool (text-to-image generation and editing). Exposed as an xd:// device when tools.xdev is on.",
 		},
 	},
+	"generate_video.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Available Tools",
+			label: "Generate Video",
+			description:
+				"Enable the generate_video tool (text-to-video, image-to-video, and — on xAI — video extension and editing). Billed per second of output. Exposed as an xd:// device when tools.xdev is on.",
+		},
+	},
 
 	// Legacy boolean kept only for back-compat migration to `inspect_image.mode`
 	// (see config/settings.ts). Hidden from UI.
@@ -4969,6 +4981,19 @@ export const SETTINGS_SCHEMA = {
 			description:
 				"Prioritized providers for image generation; unlisted providers follow the active session provider and the built-in order",
 			options: IMAGE_PROVIDER_CHOICES,
+			ordered: true,
+		},
+	},
+	"providers.videoOrder": {
+		type: "array",
+		default: [] as VideoProvider[],
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Video Provider Order",
+			description:
+				"Prioritized providers for video generation; unlisted providers follow the active session provider and the built-in order",
+			options: VIDEO_PROVIDER_CHOICES,
 			ordered: true,
 		},
 	},

@@ -71,6 +71,7 @@ import {
 	setExcludedSearchProviders,
 	setImageProviderOrder,
 	setSearchProviderOrder,
+	setVideoProviderOrder,
 	type ToolSession,
 } from "../../tools";
 import { AskTool, type AskToolDetails, type AskToolInput } from "../../tools/ask";
@@ -671,6 +672,11 @@ export class SelectorController {
 			case "providers.imageOrder":
 				if (Array.isArray(value)) {
 					setImageProviderOrder(value.filter((entry): entry is string => typeof entry === "string"));
+				}
+				break;
+			case "providers.videoOrder":
+				if (Array.isArray(value)) {
+					setVideoProviderOrder(value.filter((entry): entry is string => typeof entry === "string"));
 				}
 				break;
 

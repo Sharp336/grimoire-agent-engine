@@ -1,5 +1,6 @@
 // Ported from NousResearch/hermes-agent (MIT) — tools/xai_http.py.
 
+import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
@@ -7,7 +8,8 @@ import type { ModelRegistry } from "../config/model-registry";
 const DEFAULT_BASE_URL = "https://api.x.ai/v1";
 
 interface XAICredentials {
-	provider: "xai-oauth" | "xai";
+	/** Provider id that supplied the credential (built-in or plugin-registered). */
+	provider: XAIHttpProvider;
 	apiKey: string;
 	baseURL: string;
 }
@@ -17,12 +19,23 @@ export function ohMyPiXAIUserAgent(): string {
 }
 
 /** xAI provider ids supported by shared HTTP tool transport resolution. */
-export type XAIHttpProvider = "xai-oauth" | "xai";
+export type XAIHttpProvider = "xai-oauth" | "xai" | (string & {});
 
 /** Resolved endpoint and configured headers for an xAI HTTP tool request. */
 export interface XAIHttpTransport {
 	baseURL: string;
 	headers?: Record<string, string>;
+}
+
+/**
+ * Check if a provider id can authenticate xAI HTTP tool endpoints.
+ * Returns true for built-in xai/xai-oauth or any plugin-registered provider
+ * that declared xaiHttpCompat.
+ */
+export function isXAIHttpCompatProvider(providerId: string | undefined): boolean {
+	if (!providerId) return false;
+	if (providerId === "xai" || providerId === "xai-oauth") return true;
+	return getOAuthProviders().some(p => p.id === providerId && p.xaiHttpCompat);
 }
 
 /**
@@ -130,6 +143,7 @@ export async function resolveXAIHttpCredentials(
 	modelRegistry: ModelRegistry,
 	modelId?: string,
 ): Promise<XAICredentials | null> {
+	// 1. xai-oauth — only when a *dedicated* xai-oauth source exists.
 	const hasDedicatedXaiOAuth =
 		modelRegistry.authStorage.hasNonEnvCredential("xai-oauth") || Boolean($env.XAI_OAUTH_TOKEN);
 	if (hasDedicatedXaiOAuth) {
@@ -140,10 +154,21 @@ export async function resolveXAIHttpCredentials(
 		}
 	}
 
+	// 2. xai (plain API key).
 	const apiKey = await modelRegistry.getApiKeyForProvider("xai");
 	if (apiKey) {
 		const baseURL = resolveXAIBaseURL(modelRegistry, "xai", modelId);
 		return { provider: "xai", apiKey, baseURL };
+	}
+
+	// 3. Plugin-registered providers that declared xaiHttpCompat.
+	for (const provider of getOAuthProviders()) {
+		if (!provider.xaiHttpCompat) continue;
+		const providerKey = await modelRegistry.getApiKeyForProvider(provider.id);
+		if (providerKey) {
+			const baseURL = provider.xaiHttpBaseUrl ?? DEFAULT_BASE_URL;
+			return { provider: provider.id, apiKey: providerKey, baseURL };
+		}
 	}
 
 	return null;

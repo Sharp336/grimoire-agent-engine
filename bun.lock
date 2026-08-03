@@ -360,9 +360,9 @@
     },
   },
   "patchedDependencies": {
-    "puppeteer-core@25.3.0": "patches/puppeteer-core@25.3.0.patch",
-    "@ark/schema@0.56.2": "patches/@ark%2Fschema@0.56.2.patch",
     "@agentclientprotocol/sdk@1.2.1": "patches/@agentclientprotocol%2Fsdk@1.2.1.patch",
+    "@ark/schema@0.56.2": "patches/@ark%2Fschema@0.56.2.patch",
+    "puppeteer-core@25.3.0": "patches/puppeteer-core@25.3.0.patch",
   },
   "overrides": {
     "@ark/schema": "0.56.2",

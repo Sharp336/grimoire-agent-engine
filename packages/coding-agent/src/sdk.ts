@@ -221,6 +221,7 @@ import { isAutoQaEnabled } from "./tools/report-tool-issue";
 import { queueResolveHandler } from "./tools/resolve";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "./tools/todo";
 import { ttsTool } from "./tools/tts";
+import { videoGenTool } from "./tools/video-gen";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { EventBus } from "./utils/event-bus";
 import { buildNamedToolChoice } from "./utils/tool-choice";
@@ -1944,17 +1945,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		let customToolPaths: ToolPathWithSource[] = [];
 		const inlineExtensions: ExtensionFactory[] = [];
 		if (!restrictToolNames) {
-			// Add image tools when generation is enabled and either no explicit tool
-			// whitelist was given or it names `generate_image`. Unlike built-in tools
+			// Add media tools when generation is enabled and either no explicit tool
+			// whitelist was given or it names the tool. Unlike built-in tools
 			// (filtered in `createTools`), custom tools are force-activated via
 			// `alwaysInclude` below, so an explicit `--no-tools`/whitelist must be
 			// honored here or image-gen would leak past every filter (issue #5305).
-			const imageGenRequested = !options.toolNames || options.toolNames.includes("generate_image");
+			// The list is normalized first, matching `createTools` — a raw compare
+			// would reject a non-canonical spelling the rest of setup accepts.
+			const requestedMediaToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
+			const imageGenRequested = !requestedMediaToolNames || requestedMediaToolNames.includes("generate_image");
 			if (settings.get("generate_image.enabled") && imageGenRequested) {
 				const imageGenTools = await logger.time("getImageGenTools", () => getImageGenTools(modelRegistry, model));
 				if (imageGenTools.length > 0) {
 					customTools.push(...(imageGenTools as unknown as CustomTool[]));
 				}
+			}
+
+			const videoGenRequested = !requestedMediaToolNames || requestedMediaToolNames.includes("generate_video");
+			if (settings.get("generate_video.enabled") && videoGenRequested) {
+				customTools.push(videoGenTool as unknown as CustomTool);
 			}
 
 			if (settings.get("speechgen.enabled")) {
