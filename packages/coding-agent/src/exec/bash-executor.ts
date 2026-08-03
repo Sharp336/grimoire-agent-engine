@@ -150,6 +150,16 @@ const RETAIN_REAP_INTERVAL_MS = 5_000;
 // N-API chunk bridge drains. The JS watchdog must not race that teardown.
 const NATIVE_TIMEOUT_FALLBACK_GRACE_MS = 5_000;
 
+/** Close and forget the persistent native shell owned by one agent session. */
+export async function closeShellSession(sessionKey: string): Promise<void> {
+	const shell = shellSessions.get(sessionKey);
+	shellSessions.delete(sessionKey);
+	shellSessionsInUse.delete(sessionKey);
+	brokenShellSessions.delete(sessionKey);
+	shellSessionQuarantines.delete(sessionKey);
+	if (shell) await shell.close();
+}
+
 async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<void> {
 	let live: number;
 	try {

@@ -113,6 +113,16 @@ describe("AgentSession bash session ownership", () => {
 		expect(session.messages.some(message => message.role === "bashExecution")).toBe(false);
 	});
 
+	it("closes its persistent native shell during session disposal", async () => {
+		createSession();
+		const sessionId = session.sessionId;
+		const closeSpy = vi.spyOn(bashExecutor, "closeShellSession").mockResolvedValue();
+
+		await session.dispose();
+
+		expect(closeSpy).toHaveBeenCalledWith(sessionId);
+	});
+
 	it("keeps a queued bash result on the branch discarded by an empty stop", async () => {
 		const sessionManager = SessionManager.inMemory(tempDir.path());
 		let returnEmptyStop = true;
