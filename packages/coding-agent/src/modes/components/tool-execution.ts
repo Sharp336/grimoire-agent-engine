@@ -14,7 +14,7 @@ import {
 	Text,
 	type TUI,
 } from "@oh-my-pi/pi-tui";
-import { getProjectDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { getProjectDir, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { EDIT_MODE_STRATEGIES, type EditMode, type PerFileDiffPreview } from "../../edit";
 import type { Theme } from "../../modes/theme/theme";
 import { getThemeEpoch, theme } from "../../modes/theme/theme";
@@ -234,11 +234,11 @@ export interface ToolExecutionOptions {
 }
 
 export interface ToolExecutionHandle extends Component {
-	updateArgs(args: any, toolCallId?: string): void;
+	updateArgs(args: unknown, toolCallId?: string): void;
 	updateResult(
 		result: {
 			content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
-			details?: any;
+			details?: unknown;
 			isError?: boolean;
 		},
 		isPartial?: boolean,
@@ -286,7 +286,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	readonly #instanceId = ++toolExecutionInstanceSeq;
 	#toolName: string;
 	#toolLabel: string;
-	#args: any;
+	#args: unknown;
 	#expanded = false;
 	#toolActivityVisible = true;
 	#showImages: boolean;
@@ -317,7 +317,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	#result?: {
 		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
 		isError?: boolean;
-		details?: any;
+		details?: unknown;
 	};
 	// Edit preview state
 	#editMode?: EditMode;
@@ -388,7 +388,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 
 	constructor(
 		toolName: string,
-		args: any,
+		args: unknown,
 		options: ToolExecutionOptions = {},
 		tool: AgentTool | undefined,
 		ui: ToolExecutionUi,
@@ -436,7 +436,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		this.#schedulePreviewDiff();
 	}
 
-	updateArgs(args: any, _toolCallId?: string): void {
+	updateArgs(args: unknown, _toolCallId?: string): void {
 		// Reference-equality short-circuit before any further work. Callers
 		// always allocate a new arg object on each streamed delta (see
 		// event-controller.ts and ui-helpers.ts), so a same-reference assignment
@@ -568,7 +568,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	updateResult(
 		result: {
 			content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
-			details?: any;
+			details?: unknown;
 			isError?: boolean;
 		},
 		isPartial = false,
@@ -619,8 +619,11 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	 */
 	#getAllImageBlocks(): Array<{ data?: string; mimeType?: string }> {
 		if (!this.#result) return [];
-		const contentImages = this.#result.content?.filter((c: any) => c.type === "image") || [];
-		const detailImages = this.#result.details?.images || [];
+		const contentImages = this.#result.content?.filter(c => c.type === "image") || [];
+		const detailImages =
+			isRecord(this.#result.details) && Array.isArray(this.#result.details.images)
+				? (this.#result.details.images as Array<{ data?: string; mimeType?: string }>)
+				: [];
 		return [...contentImages, ...detailImages];
 	}
 
@@ -1064,7 +1067,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 					) => Component;
 					const resultComponent = renderResult(
 						{
-							content: this.#result.content as any,
+							content: this.#result.content,
 							details: this.#result.details,
 							isError: this.#result.isError,
 						},
@@ -1112,7 +1115,8 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 			this.#multiFileBoxes = [];
 
 			// Check for multi-file edit results
-			const perFileResults = this.#result?.details?.perFileResults as
+			const resultDetails = this.#result?.details;
+			const perFileResults = (isRecord(resultDetails) ? resultDetails.perFileResults : undefined) as
 				| Array<{ path: string; isError?: boolean }>
 				| undefined;
 			if (perFileResults && perFileResults.length > 1) {
@@ -1150,8 +1154,13 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 				}
 
 				// Show pending indicator for remaining files
-				const totalFiles = this.#args?.edits
-					? new Set((this.#args.edits as any[]).map((e: any) => e?.path).filter(Boolean)).size
+				const editsList = isRecord(this.#args) && Array.isArray(this.#args.edits) ? this.#args.edits : undefined;
+				const totalFiles = editsList
+					? new Set(
+							editsList
+								.map(e => (isRecord(e) && typeof e.path === "string" ? e.path : undefined))
+								.filter((p): p is string => Boolean(p)),
+						).size
 					: 0;
 				const remaining = Math.max(0, totalFiles - perFileResults.length);
 				if (remaining > 0 && this.#isPartial) {
@@ -1210,7 +1219,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 					try {
 						const resultComponent = renderer.renderResult(
 							{
-								content: this.#result.content as any,
+								content: this.#result.content,
 								details: this.#result.details,
 								isError: this.#result.isError,
 							},
@@ -1288,7 +1297,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		this.#renderedImageCount = this.#imageComponents.length;
 	}
 
-	#getCallArgsForRender(): any {
+	#getCallArgsForRender(): unknown {
 		const renderArgs = getArgsWithStreamedTextInput(this.#args);
 		if (!isEditLikeToolName(this.#toolName)) {
 			return renderArgs;
@@ -1326,7 +1335,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 			}
 			context.expanded = this.#expanded;
 			context.previewLines = BASH_DEFAULT_PREVIEW_LINES;
-			context.timeout = normalizeTimeoutSeconds(this.#args?.timeout, 3600);
+			context.timeout = normalizeTimeoutSeconds(isRecord(this.#args) ? this.#args.timeout : undefined, 3600);
 		} else if (this.#toolName === "eval" && this.#result) {
 			const output = this.#getTextOutput().trimEnd();
 			context.output = output;
@@ -1385,20 +1394,21 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	#getTextOutput(): string {
 		if (!this.#result) return "";
 
-		const textBlocks = this.#result.content?.filter((c: any) => c.type === "text") || [];
+		const textBlocks = this.#result.content?.filter(c => c.type === "text") || [];
 		const imageBlocks = this.#getAllImageBlocks();
 
 		let output = textBlocks
-			.map((c: any) => {
+			.map(c => {
 				return sanitizeWithOptionalSixelPassthrough(c.text || "", sanitizeText);
 			})
 			.join("\n");
 
 		if (imageBlocks.length > 0 && (!TERMINAL.imageProtocol || !this.#showImages)) {
 			const imageIndicators = imageBlocks
-				.map((img: any) => {
-					const dims = img.data ? (getImageDimensions(img.data, img.mimeType) ?? undefined) : undefined;
-					return imageFallback(img.mimeType, dims);
+				.map(img => {
+					const dims =
+						img.data && img.mimeType ? (getImageDimensions(img.data, img.mimeType) ?? undefined) : undefined;
+					return imageFallback(img.mimeType ?? "", dims);
 				})
 				.join("\n");
 			output = output ? `${output}\n${imageIndicators}` : imageIndicators;

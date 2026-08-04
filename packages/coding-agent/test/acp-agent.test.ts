@@ -8,6 +8,7 @@ import type {
 	CreateElicitationRequest,
 	CreateElicitationResponse,
 	PromptRequest,
+	SessionConfigSelectOption,
 	SessionNotification,
 } from "@agentclientprotocol/sdk";
 import {
@@ -535,9 +536,9 @@ describe("ACP agent", () => {
 
 		const modelOption = first.configOptions?.find(opt => opt.id === "model");
 		expect(modelOption?.type).toBe("select");
-		expect((modelOption as any).options?.map((opt: any) => opt.value)).toEqual(
-			TEST_MODELS.map(model => `${model.provider}/${model.id}`),
-		);
+		if (modelOption?.type !== "select") throw new Error("expected a select model config option");
+		const modelOptionValues = (modelOption.options as SessionConfigSelectOption[]).map(opt => opt.value);
+		expect(modelOptionValues).toEqual(TEST_MODELS.map(model => `${model.provider}/${model.id}`));
 
 		await harness.agent.setSessionConfigOption({
 			sessionId: first.sessionId,

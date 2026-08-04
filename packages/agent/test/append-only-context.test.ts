@@ -2,7 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { AppendOnlyContextManager, AppendOnlyLog, StablePrefix } from "@oh-my-pi/pi-agent-core/append-only-context";
 import type { AgentContext, AgentTool } from "@oh-my-pi/pi-agent-core/types";
-import type { Message, Tool, ToolExample } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Message, Tool, ToolExample, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
 // ---------------------------------------------------------------------------
@@ -32,6 +33,39 @@ function makeTool(
 		examples,
 		execute: async () => ({ content: [{ type: "text", text: "done" }] }),
 	} as AgentTool;
+}
+
+// Valid provider-level message fixtures. The append-only log inspects entries
+// structurally (via a field digest), so these carry only the fields the tests
+// exercise plus whatever the Message contract requires — no `any`.
+const MOCK_MODEL = createMockModel().model;
+function userMsg(content: string, extra: Partial<UserMessage> = {}): UserMessage {
+	return { role: "user", content, timestamp: 0, ...extra };
+}
+function asstMsg(text: string, extra: Partial<AssistantMessage> = {}): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text }],
+		api: MOCK_MODEL.api,
+		provider: MOCK_MODEL.provider,
+		model: MOCK_MODEL.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: 0,
+		...extra,
+	};
+}
+function toolResultMsg(
+	fields: Pick<ToolResultMessage, "content" | "toolCallId" | "toolName" | "isError"> & Partial<ToolResultMessage>,
+): ToolResultMessage {
+	return { role: "toolResult", timestamp: 0, ...fields };
 }
 
 const BUILD_OPTS = { intentTracing: false } as const;
@@ -161,15 +195,15 @@ describe("AppendOnlyLog", () => {
 
 	it("appends messages", () => {
 		const log = new AppendOnlyLog();
-		log.append({ role: "user", content: "hello" } as any);
-		log.append({ role: "assistant", content: "world" } as any);
+		log.append(userMsg("hello"));
+		log.append(asstMsg("world"));
 		expect(log.length).toBe(2);
 		expect(log.toMessages()).toHaveLength(2);
 	});
 
 	it("toMessages returns a copy of the array", () => {
 		const log = new AppendOnlyLog();
-		const msg = { role: "user", content: "test" };
+		const msg = userMsg("test");
 		log.append(msg);
 		const msgs = log.toMessages();
 		// Array is a copy — mutating it doesn't affect the log
@@ -179,37 +213,34 @@ describe("AppendOnlyLog", () => {
 
 	it("replaceTail replaces last entry", () => {
 		const log = new AppendOnlyLog();
-		log.append({ role: "user", content: "old" });
-		log.replaceTail({ role: "user", content: "new" });
+		log.append(userMsg("old"));
+		log.replaceTail(userMsg("new"));
 		expect(log.toMessages()).toHaveLength(1);
 		expect(log.toMessages()[0]!.content).toBe("new");
 	});
 
 	it("replaceTail is no-op on empty log", () => {
 		const log = new AppendOnlyLog();
-		log.replaceTail({ role: "user", content: "nope" });
+		log.replaceTail(userMsg("nope"));
 		expect(log.length).toBe(0);
 	});
 
 	it("extend appends multiple messages", () => {
 		const log = new AppendOnlyLog();
-		log.extend([
-			{ role: "user", content: "a" },
-			{ role: "assistant", content: "b" },
-		]);
+		log.extend([userMsg("a"), asstMsg("b")]);
 		expect(log.length).toBe(2);
 	});
 
 	it("clear resets the log", () => {
 		const log = new AppendOnlyLog();
-		log.append({ role: "user", content: "x" });
+		log.append(userMsg("x"));
 		log.clear();
 		expect(log.length).toBe(0);
 	});
 
 	it("entries readonly access returns internal array", () => {
 		const log = new AppendOnlyLog();
-		log.append({ role: "user", content: "test" });
+		log.append(userMsg("test"));
 		expect(log.entries()).toHaveLength(1);
 	});
 });
@@ -272,8 +303,8 @@ describe("AppendOnlyContextManager", () => {
 		const mgr = new AppendOnlyContextManager();
 		mgr.build(makeContext(), BUILD_OPTS);
 
-		mgr.appendMessage({ role: "user", content: "hello" } as any);
-		mgr.appendMessage({ role: "assistant", content: "world" } as any);
+		mgr.appendMessage(userMsg("hello"));
+		mgr.appendMessage(asstMsg("world"));
 
 		const result = mgr.build(makeContext(), BUILD_OPTS);
 		expect(result.messages).toHaveLength(2);
@@ -285,14 +316,14 @@ describe("AppendOnlyContextManager", () => {
 		const mgr = new AppendOnlyContextManager();
 		mgr.build(makeContext(), BUILD_OPTS);
 
-		mgr.appendMessage({ role: "user", content: "q1" });
+		mgr.appendMessage(userMsg("q1"));
 		const r1 = mgr.build(makeContext(), BUILD_OPTS);
 		expect(r1.messages).toHaveLength(1);
 
-		mgr.appendMessage({ role: "assistant", content: "a1" });
+		mgr.appendMessage(asstMsg("a1"));
 		const r2 = mgr.build(makeContext(), BUILD_OPTS);
 		expect(r2.messages).toHaveLength(2);
-		expect(r2.messages[1]!.content).toBe("a1");
+		expect(r2.messages[1]!.content).toEqual([{ type: "text", text: "a1" }]);
 	});
 
 	it("invalidate forces prefix rebuild", () => {
@@ -307,7 +338,7 @@ describe("AppendOnlyContextManager", () => {
 	it("reset clears log and prefix", () => {
 		const mgr = new AppendOnlyContextManager();
 		mgr.build(makeContext({ systemPrompt: ["Original"] }), BUILD_OPTS);
-		mgr.appendMessage({ role: "user", content: "hello" });
+		mgr.appendMessage(userMsg("hello"));
 
 		const freshCtx = makeContext({ systemPrompt: ["Fresh start"] });
 		mgr.reset(freshCtx, BUILD_OPTS);
@@ -320,8 +351,8 @@ describe("AppendOnlyContextManager", () => {
 	it("replaceTailMessage updates last log entry", () => {
 		const mgr = new AppendOnlyContextManager();
 		mgr.build(makeContext(), BUILD_OPTS);
-		mgr.appendMessage({ role: "user", content: "old" });
-		mgr.replaceTailMessage({ role: "user", content: "new" });
+		mgr.appendMessage(userMsg("old"));
+		mgr.replaceTailMessage(userMsg("new"));
 
 		const result = mgr.build(makeContext(), BUILD_OPTS);
 		expect(result.messages).toHaveLength(1);
@@ -331,7 +362,7 @@ describe("AppendOnlyContextManager", () => {
 	it("build propagates tool spec description default", () => {
 		const mgr = new AppendOnlyContextManager();
 		const toolWithNoDesc = makeTool("bare");
-		delete (toolWithNoDesc as any).description;
+		delete (toolWithNoDesc as Partial<Tool>).description;
 
 		const ctx = makeContext({ tools: [toolWithNoDesc] });
 		const result = mgr.build(ctx, BUILD_OPTS);
@@ -356,7 +387,7 @@ describe("AppendOnlyContextManager", () => {
 
 	it("tolerates context with no tools", () => {
 		const mgr = new AppendOnlyContextManager();
-		const ctx = makeContext({ tools: undefined as any });
+		const ctx = makeContext({ tools: undefined });
 
 		const result = mgr.build(ctx, BUILD_OPTS);
 		expect(result.tools).toEqual([]);
@@ -420,44 +451,38 @@ describe("message sync", () => {
 		const mgr = new AppendOnlyContextManager();
 		mgr.build(makeContext(), BUILD_OPTS);
 
-		const msgs: Message[] = [
-			{ role: "user", content: "Hello" },
-			{ role: "assistant", content: "Hi" },
-		] as any;
+		const msgs: Message[] = [userMsg("Hello"), asstMsg("Hi")];
 		mgr.syncMessages(msgs);
 
 		const result = mgr.build(makeContext(), BUILD_OPTS);
 		expect(result.messages).toHaveLength(2);
 		expect(result.messages[0]!.content).toBe("Hello");
-		expect(result.messages[1]!.content).toBe("Hi");
+		expect(result.messages[1]!.content).toEqual([{ type: "text", text: "Hi" }]);
 	});
 
 	it("syncMessages on subsequent calls only appends delta", () => {
 		const mgr = new AppendOnlyContextManager();
 		mgr.build(makeContext(), BUILD_OPTS);
 
-		mgr.syncMessages([{ role: "user", content: "q1" }]);
+		mgr.syncMessages([userMsg("q1")]);
 		const r1 = mgr.build(makeContext(), BUILD_OPTS);
 		expect(r1.messages).toHaveLength(1);
 
-		mgr.syncMessages([
-			{ role: "user", content: "q1" },
-			{ role: "assistant", content: "a1" },
-		]);
+		mgr.syncMessages([userMsg("q1"), asstMsg("a1")]);
 		const r2 = mgr.build(makeContext(), BUILD_OPTS);
 		expect(r2.messages).toHaveLength(2);
-		expect(r2.messages[1]!.content).toBe("a1");
+		expect(r2.messages[1]!.content).toEqual([{ type: "text", text: "a1" }]);
 	});
 
 	it("syncMessages with unchanged messages is a no-op (same length, no new entries)", () => {
 		const mgr = new AppendOnlyContextManager();
 		mgr.build(makeContext(), BUILD_OPTS);
-		mgr.syncMessages([{ role: "user", content: "q1" }]);
+		mgr.syncMessages([userMsg("q1")]);
 
 		const before = mgr.log.length;
 
 		// Same array length → nothing new to append
-		mgr.syncMessages([{ role: "user", content: "q1" }]);
+		mgr.syncMessages([userMsg("q1")]);
 		expect(mgr.log.length).toBe(before);
 	});
 
@@ -465,15 +490,11 @@ describe("message sync", () => {
 		const mgr = new AppendOnlyContextManager();
 		mgr.build(makeContext(), BUILD_OPTS);
 
-		mgr.syncMessages([
-			{ role: "user", content: "q1" },
-			{ role: "assistant", content: "a1" },
-			{ role: "user", content: "q2" },
-		]);
+		mgr.syncMessages([userMsg("q1"), asstMsg("a1"), userMsg("q2")]);
 		expect(mgr.log.length).toBe(3);
 
 		// Simulate compaction — array shrinks
-		mgr.syncMessages([{ role: "user", content: "q2" }]);
+		mgr.syncMessages([userMsg("q2")]);
 		expect(mgr.log.length).toBe(1);
 		expect(mgr.log.toMessages()[0]!.content).toBe("q2");
 	});
@@ -483,28 +504,25 @@ describe("message sync", () => {
 
 		// First turn: build with empty context, sync first message
 		mgr.build(makeContext(), BUILD_OPTS);
-		mgr.syncMessages([{ role: "user", content: "turn1" }]);
+		mgr.syncMessages([userMsg("turn1")]);
 		const r1 = mgr.build(makeContext(), BUILD_OPTS);
 		expect(r1.messages).toHaveLength(1);
 		expect(r1.messages[0]!.content).toBe("turn1");
 
 		// Second turn: sync second message
-		mgr.syncMessages([
-			{ role: "user", content: "turn1" },
-			{ role: "assistant", content: "resp1" },
-		]);
+		mgr.syncMessages([userMsg("turn1"), asstMsg("resp1")]);
 		const r2 = mgr.build(makeContext(), BUILD_OPTS);
 		expect(r2.messages).toHaveLength(2);
-		expect(r2.messages[1]!.content).toBe("resp1");
+		expect(r2.messages[1]!.content).toEqual([{ type: "text", text: "resp1" }]);
 	});
 
 	it("resetSyncCursor forces full re-sync on next call", () => {
 		const mgr = new AppendOnlyContextManager();
 		mgr.build(makeContext(), BUILD_OPTS);
-		mgr.syncMessages([{ role: "user", content: "old" }]);
+		mgr.syncMessages([userMsg("old")]);
 
 		mgr.resetSyncCursor();
-		mgr.syncMessages([{ role: "user", content: "fresh" }]);
+		mgr.syncMessages([userMsg("fresh")]);
 
 		const result = mgr.build(makeContext(), BUILD_OPTS);
 		expect(result.messages).toHaveLength(1);
@@ -515,17 +533,14 @@ describe("message sync", () => {
 		const mgr = new AppendOnlyContextManager();
 		mgr.build(makeContext(), BUILD_OPTS);
 
-		const original0 = { role: "user", content: "q1" } as any;
-		const original1 = { role: "assistant", content: "original long result" } as any;
+		const original0 = userMsg("q1");
+		const original1 = asstMsg("original long result");
 		mgr.syncMessages([original0, original1]);
 		expect(mgr.log.length).toBe(2);
 
 		// Same length, but the second message's content changed (simulates per-turn
 		// tool-output pruning / transformContext re-render).
-		mgr.syncMessages([
-			{ role: "user", content: "q1" },
-			{ role: "assistant", content: "[pruned]" },
-		] as any);
+		mgr.syncMessages([userMsg("q1"), asstMsg("[pruned]")]);
 		expect(mgr.log.length).toBe(2);
 
 		const entries = mgr.log.entries();
@@ -533,35 +548,33 @@ describe("message sync", () => {
 		// stops llama.cpp from re-prefilling the entire prior context.
 		expect(entries[0]).toBe(original0);
 		// The diverged tail is re-synced with the new bytes.
-		expect((entries[1] as { content: unknown }).content).toBe("[pruned]");
+		expect((entries[1] as { content: unknown }).content).toEqual([{ type: "text", text: "[pruned]" }]);
 	});
 
 	it("detects tool-result metadata-only rewrites before preserving a later prefix (#3406)", () => {
 		const mgr = new AppendOnlyContextManager();
 		mgr.build(makeContext(), BUILD_OPTS);
 
-		const original0 = { role: "user", content: "q1" } as any;
-		const original1 = {
-			role: "toolResult",
+		const original0 = userMsg("q1");
+		const original1 = toolResultMsg({
 			content: [{ type: "text", text: "same output" }],
 			toolCallId: "old-call",
 			toolName: "read",
 			isError: false,
-		} as any;
-		const original2 = { role: "assistant", content: "a1" } as any;
+		});
+		const original2 = asstMsg("a1");
 		mgr.syncMessages([original0, original1, original2]);
 
 		mgr.syncMessages([
-			{ role: "user", content: "q1" },
-			{
-				role: "toolResult",
+			userMsg("q1"),
+			toolResultMsg({
 				content: [{ type: "text", text: "same output" }],
 				toolCallId: "new-call",
 				toolName: "write",
 				isError: true,
-			},
-			{ role: "assistant", content: "a1-pruned" },
-		] as any);
+			}),
+			asstMsg("a1-pruned"),
+		]);
 
 		const entries = mgr.log.entries();
 		expect(entries).toHaveLength(3);
@@ -569,41 +582,35 @@ describe("message sync", () => {
 		expect((entries[1] as { toolCallId: unknown }).toolCallId).toBe("new-call");
 		expect((entries[1] as { toolName: unknown }).toolName).toBe("write");
 		expect((entries[1] as { isError: unknown }).isError).toBe(true);
-		expect((entries[2] as { content: unknown }).content).toBe("a1-pruned");
+		expect((entries[2] as { content: unknown }).content).toEqual([{ type: "text", text: "a1-pruned" }]);
 	});
 
 	it("detects providerPayload-only rewrites before preserving a later prefix (#3406)", () => {
 		const mgr = new AppendOnlyContextManager();
 		mgr.build(makeContext(), BUILD_OPTS);
 
-		const original0 = { role: "user", content: "q1" } as any;
-		const original1 = {
-			role: "assistant",
-			content: [{ type: "text", text: "same visible output" }],
-			id: "assistant-1",
+		const original0 = userMsg("q1");
+		const original1 = asstMsg("same visible output", {
 			providerPayload: {
 				type: "openaiResponsesHistory",
 				provider: "openai",
 				items: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "old native" }] }],
 			},
-		} as any;
-		const original2 = { role: "user", content: "q2" } as any;
+		});
+		const original2 = userMsg("q2");
 		mgr.syncMessages([original0, original1, original2]);
 
 		mgr.syncMessages([
-			{ role: "user", content: "q1" },
-			{
-				role: "assistant",
-				content: [{ type: "text", text: "same visible output" }],
-				id: "assistant-1",
+			userMsg("q1"),
+			asstMsg("same visible output", {
 				providerPayload: {
 					type: "openaiResponsesHistory",
 					provider: "openai",
 					items: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "new native" }] }],
 				},
-			},
-			{ role: "user", content: "q2-rewritten" },
-		] as any);
+			}),
+			userMsg("q2-rewritten"),
+		]);
 
 		const entries = mgr.log.entries();
 		expect(entries).toHaveLength(3);
@@ -619,10 +626,7 @@ describe("message sync", () => {
 		const mgr = new AppendOnlyContextManager();
 		mgr.build(makeContext(), BUILD_OPTS);
 
-		mgr.syncMessages([
-			{ role: "user", content: "q1" },
-			{ role: "assistant", content: "a1" },
-		] as any);
+		mgr.syncMessages([userMsg("q1"), asstMsg("a1")]);
 		expect(mgr.log.length).toBe(2);
 
 		// Public log clear used by advisor reset: it intentionally empties the
@@ -630,33 +634,26 @@ describe("message sync", () => {
 		mgr.log.clear();
 		expect(mgr.log.length).toBe(0);
 
-		mgr.syncMessages([
-			{ role: "user", content: "q1" },
-			{ role: "assistant", content: "a1-rewritten" },
-		] as any);
+		mgr.syncMessages([userMsg("q1"), asstMsg("a1-rewritten")]);
 
 		const entries = mgr.log.entries();
 		expect(entries).toHaveLength(2);
 		expect((entries[0] as { content: unknown }).content).toBe("q1");
-		expect((entries[1] as { content: unknown }).content).toBe("a1-rewritten");
+		expect((entries[1] as { content: unknown }).content).toEqual([{ type: "text", text: "a1-rewritten" }]);
 	});
 
 	it("preserves the prefix when the tail is rewritten (#3406)", () => {
 		const mgr = new AppendOnlyContextManager();
 		mgr.build(makeContext(), BUILD_OPTS);
 
-		const original0 = { role: "user", content: "q1" } as any;
-		const original1 = { role: "assistant", content: "a1" } as any;
-		const original2 = { role: "user", content: "q2" } as any;
+		const original0 = userMsg("q1");
+		const original1 = asstMsg("a1");
+		const original2 = userMsg("q2");
 		mgr.syncMessages([original0, original1, original2]);
 
 		// Tail-only rewrite (e.g. per-turn pruning of the most recent tool result):
 		// the first two messages MUST stay byte-stable; only the tail re-syncs.
-		mgr.syncMessages([
-			{ role: "user", content: "q1" },
-			{ role: "assistant", content: "a1" },
-			{ role: "user", content: "q2-rewritten" },
-		] as any);
+		mgr.syncMessages([userMsg("q1"), asstMsg("a1"), userMsg("q2-rewritten")]);
 
 		const entries = mgr.log.entries();
 		expect(entries).toHaveLength(3);
@@ -669,22 +666,18 @@ describe("message sync", () => {
 		const mgr = new AppendOnlyContextManager();
 		mgr.build(makeContext(), BUILD_OPTS);
 
-		const original0 = { role: "user", content: "q1" } as any;
-		const original1 = { role: "assistant", content: "a1" } as any;
+		const original0 = userMsg("q1");
+		const original1 = asstMsg("a1");
 		mgr.syncMessages([original0, original1]);
 
 		// Re-sync with: (a) message #1 rewritten in place; (b) a brand-new tail
 		// appended. The prefix [original0] MUST stay byte-stable.
-		mgr.syncMessages([
-			{ role: "user", content: "q1" },
-			{ role: "assistant", content: "a1-pruned" },
-			{ role: "user", content: "q2" },
-		] as any);
+		mgr.syncMessages([userMsg("q1"), asstMsg("a1-pruned"), userMsg("q2")]);
 
 		const entries = mgr.log.entries();
 		expect(entries).toHaveLength(3);
 		expect(entries[0]).toBe(original0);
-		expect((entries[1] as { content: unknown }).content).toBe("a1-pruned");
+		expect((entries[1] as { content: unknown }).content).toEqual([{ type: "text", text: "a1-pruned" }]);
 		expect((entries[2] as { content: unknown }).content).toBe("q2");
 	});
 
@@ -692,11 +685,11 @@ describe("message sync", () => {
 		const mgr = new AppendOnlyContextManager();
 		mgr.build(makeContext(), BUILD_OPTS);
 
-		mgr.syncMessages([{ role: "user", content: "hello" }]);
+		mgr.syncMessages([userMsg("hello")]);
 		expect(mgr.log.length).toBe(1);
 
 		// No byte-stable prefix — the only message diverged.
-		mgr.syncMessages([{ role: "user", content: "world" }]);
+		mgr.syncMessages([userMsg("world")]);
 
 		const msgs = mgr.build(makeContext(), BUILD_OPTS).messages;
 		expect(msgs).toHaveLength(1);
@@ -707,16 +700,10 @@ describe("message sync", () => {
 		const mgr = new AppendOnlyContextManager();
 		mgr.build(makeContext(), BUILD_OPTS);
 
-		mgr.syncMessages([
-			{ role: "user", content: "q1" },
-			{ role: "assistant", content: "a1" },
-		]);
+		mgr.syncMessages([userMsg("q1"), asstMsg("a1")]);
 
 		const before = mgr.log.length;
-		mgr.syncMessages([
-			{ role: "user", content: "q1" },
-			{ role: "assistant", content: "a1" },
-		]);
+		mgr.syncMessages([userMsg("q1"), asstMsg("a1")]);
 		// Length unchanged — no new messages appended, no clear
 		expect(mgr.log.length).toBe(before);
 	});
@@ -724,7 +711,7 @@ describe("message sync", () => {
 	it("invalidateForModelChange resets prefix and log", () => {
 		const mgr = new AppendOnlyContextManager();
 		mgr.build(makeContext({ systemPrompt: ["Before"] }), BUILD_OPTS);
-		mgr.syncMessages([{ role: "user", content: "hello" }]);
+		mgr.syncMessages([userMsg("hello")]);
 
 		mgr.invalidateForModelChange();
 
@@ -735,7 +722,7 @@ describe("message sync", () => {
 		expect(result.messages).toHaveLength(0);
 
 		// Re-sync should work cleanly
-		mgr.syncMessages([{ role: "user", content: "new turn" }]);
+		mgr.syncMessages([userMsg("new turn")]);
 		const r2 = mgr.build(ctx, BUILD_OPTS);
 		expect(r2.messages).toHaveLength(1);
 		expect(r2.messages[0]!.content).toBe("new turn");
@@ -864,7 +851,7 @@ describe("syncMessages detects tool_calls mutation", () => {
 			content: null,
 			tool_calls: [{ id: "c1", type: "function", function: { name: "read", arguments: '{"path":"/a"}' } }],
 		};
-		const msgs = [{ role: "user", content: "q" }, assistant] as unknown as Message[];
+		const msgs = [userMsg("q"), assistant] as unknown as Message[];
 		mgr.syncMessages(msgs);
 		expect(mgr.log.length).toBe(2);
 

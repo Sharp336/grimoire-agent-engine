@@ -342,7 +342,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * through side transports (e.g. `xd://` device mounts) instead of failing
 	 * with "Tool not found". Returning `undefined` keeps the failure.
 	 */
-	resolveFallbackTool?: (name: string) => AgentTool<any> | undefined;
+	resolveFallbackTool?: (name: string) => AgentTool | undefined;
 
 	/**
 	 * Enable intent tracing for tool calls.
@@ -607,7 +607,7 @@ export interface BeforeToolCallContext {
 	/** The raw tool call block from `assistantMessage.content`. */
 	toolCall: AgentToolCall;
 	/** The resolved tool the call dispatches to. */
-	tool: AgentTool<any>;
+	tool: AgentTool;
 	/**
 	 * Validated tool arguments. The same reference is forwarded to `tool.execute`
 	 * (after any `transformToolCallArguments` pass), so in-place mutations stick;
@@ -627,7 +627,7 @@ export interface AfterToolCallContext {
 	/** Validated tool arguments used for execution (post `beforeToolCall` mutations). */
 	args: Record<string, unknown>;
 	/** The executed tool result before any `afterToolCall` overrides are applied. */
-	result: AgentToolResult<any>;
+	result: AgentToolResult;
 	/** Whether the executed tool result is currently treated as an error. */
 	isError: boolean;
 	/** Current agent context at the time the tool call is finalized. */
@@ -667,7 +667,7 @@ export interface AgentState {
 	model: Model;
 	thinkingLevel?: Effort;
 	disableReasoning?: boolean;
-	tools: AgentTool<any>[];
+	tools: AgentTool[];
 	messages: AgentMessage[]; // Can include attachments + custom message types
 	isStreaming: boolean;
 	streamMessage: AgentMessage | null;
@@ -675,7 +675,7 @@ export interface AgentState {
 	error?: string;
 }
 
-export interface AgentToolResult<T = any, _TInput = unknown> {
+export interface AgentToolResult<T = unknown, _TInput = unknown> {
 	// Content blocks supporting text and images
 	content: (TextContent | ImageContent)[];
 	// Details to be displayed in a UI or logged
@@ -690,7 +690,9 @@ export interface AgentToolResult<T = any, _TInput = unknown> {
 }
 
 // Callback for streaming tool execution updates
-export type AgentToolUpdateCallback<T = any, TInput = unknown> = (partialResult: AgentToolResult<T, TInput>) => void;
+export type AgentToolUpdateCallback<T = unknown, TInput = unknown> = (
+	partialResult: AgentToolResult<T, TInput>,
+) => void;
 
 /** Options passed to renderResult */
 export interface RenderResultOptions {
@@ -739,7 +741,7 @@ export interface AgentToolContext {
 	// Empty by default - apps extend via declaration merging
 }
 
-export type AgentToolExecFn<TParameters extends TSchema = TSchema, TDetails = any, TTheme = unknown> = (
+export type AgentToolExecFn<TParameters extends TSchema = TSchema, TDetails = unknown, TTheme = unknown> = (
 	this: AgentTool<TParameters, TDetails, TTheme>,
 	toolCallId: string,
 	params: Static<TParameters>,
@@ -749,7 +751,7 @@ export type AgentToolExecFn<TParameters extends TSchema = TSchema, TDetails = an
 ) => Promise<AgentToolResult<TDetails, TParameters>>;
 
 // AgentTool extends Tool but adds the execute function
-export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any, TTheme = unknown>
+export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = unknown, TTheme = unknown>
 	extends Tool<TParameters> {
 	// A human-readable label for the tool to be displayed in UI
 	label: string;
@@ -826,25 +828,44 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	/** Lines appended after the standard approval prompt header. */
 	formatApprovalDetails?: (args: unknown) => string | string[] | undefined;
 
-	/** The main execution callback for this tool. */
-	execute: AgentToolExecFn<TParameters, TDetails, TTheme>;
+	/**
+	 * The main execution callback for this tool.
+	 *
+	 * Declared with method syntax (not an `AgentToolExecFn` property) so its
+	 * parameters are bivariant: a concrete `AgentTool<Schema, Details>` stays
+	 * assignable to the erased {@link AnyAgentTool} that heterogeneous tool
+	 * collections and adapters hold. Runtime shape is unchanged.
+	 */
+	execute(
+		this: AgentTool<TParameters, TDetails, TTheme>,
+		toolCallId: string,
+		params: Static<TParameters>,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback<TDetails, TParameters>,
+		context?: AgentToolContext,
+	): Promise<AgentToolResult<TDetails, TParameters>>;
 
 	/** Optional custom rendering for tool call display (returns UI component) */
-	renderCall?: (args: Static<TParameters>, options: RenderResultOptions, theme: TTheme) => unknown;
+	renderCall?(args: Static<TParameters>, options: RenderResultOptions, theme: TTheme): unknown;
 
 	/** Optional custom rendering for tool result display (returns UI component) */
-	renderResult?: (
-		result: AgentToolResult<TDetails, TParameters>,
-		options: RenderResultOptions,
-		theme: TTheme,
-	) => unknown;
+	renderResult?(result: AgentToolResult<TDetails, TParameters>, options: RenderResultOptions, theme: TTheme): unknown;
 }
+
+/**
+ * A tool with erased schema/details/theme type parameters — the canonical
+ * element type for heterogeneous tool collections and adapters that must hold
+ * tools of differing parameter schemas. Concrete `AgentTool<Schema, Details>`
+ * values are assignable here because the interface's callbacks use method
+ * syntax (bivariant parameters).
+ */
+export type AnyAgentTool = AgentTool<TSchema, unknown, unknown>;
 
 // AgentContext is like Context but uses AgentTool
 export interface AgentContext {
 	systemPrompt: string[];
 	messages: AgentMessage[];
-	tools?: AgentTool<any>[];
+	tools?: AgentTool[];
 }
 
 /**
@@ -870,6 +891,18 @@ export type AgentEvent =
 	| { type: "message_update"; message: AgentMessage; assistantMessageEvent: AssistantMessageEvent }
 	| { type: "message_end"; message: AgentMessage }
 	// Tool execution lifecycle
-	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any; intent?: string }
-	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
-	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError?: boolean };
+	| {
+			type: "tool_execution_start";
+			toolCallId: string;
+			toolName: string;
+			args: unknown;
+			intent?: string;
+	  }
+	| {
+			type: "tool_execution_update";
+			toolCallId: string;
+			toolName: string;
+			args: unknown;
+			partialResult: AgentToolResult;
+	  }
+	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: AgentToolResult; isError?: boolean };

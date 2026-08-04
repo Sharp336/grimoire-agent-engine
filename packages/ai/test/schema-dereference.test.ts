@@ -1,6 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import { dereferenceJsonSchema } from "@oh-my-pi/pi-ai/utils/schema";
 
+// Dereferenced schemas are plain JSON trees; every node is again a record, so
+// this recursive shape lets the assertions walk arbitrary nested keys.
+interface SchemaNode {
+	[key: string]: SchemaNode;
+}
+
 describe("dereferenceJsonSchema", () => {
 	it("returns non-object input unchanged", () => {
 		expect(dereferenceJsonSchema(null)).toBe(null);
@@ -33,9 +39,9 @@ describe("dereferenceJsonSchema", () => {
 				},
 			},
 		};
-		const result = dereferenceJsonSchema(schema) as any;
+		const result = dereferenceJsonSchema(schema) as SchemaNode;
 		expect(result.$defs).toBeUndefined();
-		expect(result.properties.anchor).toEqual({
+		expect(result.properties.anchor as unknown).toEqual({
 			type: "object",
 			properties: {
 				path: { type: "string" },
@@ -54,9 +60,9 @@ describe("dereferenceJsonSchema", () => {
 				Item: { type: "string", enum: ["a", "b"] },
 			},
 		};
-		const result = dereferenceJsonSchema(schema) as any;
+		const result = dereferenceJsonSchema(schema) as SchemaNode;
 		expect(result.definitions).toBeUndefined();
-		expect(result.properties.item).toEqual({ type: "string", enum: ["a", "b"] });
+		expect(result.properties.item as unknown).toEqual({ type: "string", enum: ["a", "b"] });
 	});
 
 	it("inlines nested $ref inside arrays (items, anyOf, oneOf)", () => {
@@ -83,9 +89,9 @@ describe("dereferenceJsonSchema", () => {
 				Str: { type: "string" },
 			},
 		};
-		const result = dereferenceJsonSchema(schema) as any;
+		const result = dereferenceJsonSchema(schema) as SchemaNode;
 		expect(result.$defs).toBeUndefined();
-		expect(result.properties.anchors.items).toEqual({
+		expect(result.properties.anchors.items as unknown).toEqual({
 			type: "object",
 			properties: {
 				anchor_type: { type: "string", enum: ["file", "symbol", "pattern"] },
@@ -93,8 +99,8 @@ describe("dereferenceJsonSchema", () => {
 			},
 			required: ["anchor_type", "path"],
 		});
-		expect(result.properties.value.anyOf[0]).toEqual({ type: "string" });
-		expect(result.properties.value.anyOf[1]).toEqual({ type: "null" });
+		expect(result.properties.value.anyOf[0] as unknown).toEqual({ type: "string" });
+		expect(result.properties.value.anyOf[1] as unknown).toEqual({ type: "null" });
 	});
 
 	it("handles $ref inside a definition pointing to another definition", () => {
@@ -113,9 +119,9 @@ describe("dereferenceJsonSchema", () => {
 				},
 			},
 		};
-		const result = dereferenceJsonSchema(schema) as any;
+		const result = dereferenceJsonSchema(schema) as SchemaNode;
 		expect(result.$defs).toBeUndefined();
-		expect(result.properties.wrapper).toEqual({
+		expect(result.properties.wrapper as unknown).toEqual({
 			type: "object",
 			properties: {
 				value: { type: "integer", minimum: 0 },
@@ -142,12 +148,12 @@ describe("dereferenceJsonSchema", () => {
 				},
 			},
 		};
-		const result = dereferenceJsonSchema(schema) as any;
+		const result = dereferenceJsonSchema(schema) as SchemaNode;
 		expect(result.$defs).toBeUndefined();
 		const node = result.properties.node;
-		expect(node.properties.name).toEqual({ type: "string" });
+		expect(node.properties.name as unknown).toEqual({ type: "string" });
 		// Circular ref breaks to {}
-		expect(node.properties.children.items).toEqual({});
+		expect(node.properties.children.items as unknown).toEqual({});
 	});
 
 	it("leaves external $ref untouched", () => {
@@ -158,8 +164,8 @@ describe("dereferenceJsonSchema", () => {
 			},
 			$defs: {},
 		};
-		const result = dereferenceJsonSchema(schema) as any;
-		expect(result.properties.ext).toEqual({ $ref: "https://example.com/schema.json#/Foo" });
+		const result = dereferenceJsonSchema(schema) as SchemaNode;
+		expect(result.properties.ext as unknown).toEqual({ $ref: "https://example.com/schema.json#/Foo" });
 	});
 
 	it("preserves sibling keywords alongside $ref", () => {
@@ -180,10 +186,10 @@ describe("dereferenceJsonSchema", () => {
 				},
 			},
 		};
-		const result = dereferenceJsonSchema(schema) as any;
+		const result = dereferenceJsonSchema(schema) as SchemaNode;
 		expect(result.$defs).toBeUndefined();
 		// Sibling description overrides the definition's description
-		expect(result.properties.anchor_type).toEqual({
+		expect(result.properties.anchor_type as unknown).toEqual({
 			type: "string",
 			enum: ["file", "symbol", "pattern"],
 			description: "Field-level description",
@@ -202,10 +208,10 @@ describe("dereferenceJsonSchema", () => {
 				Shared: { type: "string", maxLength: 100 },
 			},
 		};
-		const result = dereferenceJsonSchema(schema) as any;
+		const result = dereferenceJsonSchema(schema) as SchemaNode;
 		expect(result.$defs).toBeUndefined();
-		expect(result.properties.a).toEqual({ type: "string", maxLength: 100 });
-		expect(result.properties.b).toEqual({ type: "string", maxLength: 100 });
+		expect(result.properties.a as unknown).toEqual({ type: "string", maxLength: 100 });
+		expect(result.properties.b as unknown).toEqual({ type: "string", maxLength: 100 });
 	});
 
 	it("reproduces the nucleus write_memory schema pattern", () => {
@@ -239,17 +245,21 @@ describe("dereferenceJsonSchema", () => {
 				},
 			},
 		};
-		const result = dereferenceJsonSchema(schema) as any;
+		const result = dereferenceJsonSchema(schema) as SchemaNode;
 
 		// $defs stripped
 		expect(result.$defs).toBeUndefined();
 
 		// anchors items fully inlined
-		expect(result.properties.anchors.items.properties.anchor_type.enum).toEqual(["file", "symbol", "pattern"]);
-		expect(result.properties.anchors.items.required).toEqual(["anchor_type", "path"]);
+		expect(result.properties.anchors.items.properties.anchor_type.enum as unknown).toEqual([
+			"file",
+			"symbol",
+			"pattern",
+		]);
+		expect(result.properties.anchors.items.required as unknown).toEqual(["anchor_type", "path"]);
 
 		// Other properties preserved
-		expect(result.properties.kind).toEqual({ type: "string", description: "Memory kind" });
-		expect(result.required).toEqual(["kind", "content", "anchors"]);
+		expect(result.properties.kind as unknown).toEqual({ type: "string", description: "Memory kind" });
+		expect(result.required as unknown).toEqual(["kind", "content", "anchors"]);
 	});
 });

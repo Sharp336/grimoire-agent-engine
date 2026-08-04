@@ -162,7 +162,7 @@ export interface RenderResultOptions {
 	spinnerFrame?: number;
 }
 
-export type CustomToolResult<TDetails = any> = AgentToolResult<TDetails>;
+export type CustomToolResult<TDetails = unknown> = AgentToolResult<TDetails>;
 
 /**
  * Custom tool definition.
@@ -197,7 +197,7 @@ export type CustomToolResult<TDetails = any> = AgentToolResult<TDetails>;
  * });
  * ```
  */
-export interface CustomTool<TParams extends TSchema = TSchema, TDetails = any> {
+export interface CustomTool<TParams extends TSchema = TSchema, TDetails = unknown> {
 	/** Tool name (used in LLM tool calls) */
 	name: string;
 	/** Human-readable label for UI */
@@ -243,24 +243,22 @@ export interface CustomTool<TParams extends TSchema = TSchema, TDetails = any> {
 	/** Called on session lifecycle events - use to reconstruct state or cleanup resources */
 	onSession?: (event: CustomToolSessionEvent, ctx: CustomToolContext) => void | Promise<void>;
 	/** Custom rendering for tool call display - return a Component */
-	renderCall?: (args: Static<TParams>, options: RenderResultOptions, theme: Theme) => Component;
+	renderCall?(args: Static<TParams>, options: RenderResultOptions, theme: Theme): Component;
 
 	/** Custom rendering for tool result display - return a Component */
-	renderResult?: (
+	renderResult?(
 		result: CustomToolResult<TDetails>,
 		options: RenderResultOptions,
 		theme: Theme,
 		args?: Static<TParams>,
-	) => Component;
+	): Component;
 }
 
 /** Factory function that creates a custom tool or array of tools */
-export type CustomToolFactory = (
-	pi: CustomToolAPI,
-) => CustomTool<any, any> | CustomTool<any, any>[] | Promise<CustomTool<any, any> | CustomTool<any, any>[]>;
+export type CustomToolFactory = (pi: CustomToolAPI) => CustomTool | CustomTool[] | Promise<CustomTool | CustomTool[]>;
 
 /** Loaded custom tool with metadata and wrapped AgentTool */
-export interface LoadedCustomTool<TParams extends TSchema = TSchema, TDetails = any> {
+export interface LoadedCustomTool<TParams extends TSchema = TSchema, TDetails = unknown> {
 	/** Original path (as specified) */
 	path: string;
 	/** Resolved absolute path */

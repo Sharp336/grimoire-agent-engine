@@ -14,6 +14,7 @@ import type {
 	AgentMessage,
 	AgentTool,
 	AgentToolContext,
+	StreamFn,
 	ToolCallContext,
 } from "@oh-my-pi/pi-agent-core/types";
 import { ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD } from "@oh-my-pi/pi-agent-core/types";
@@ -566,23 +567,34 @@ describe("agentLoop with AgentMessage", () => {
 		}
 
 		// Validation should have failed and reported the parse error & truncated JSON
-		const toolResultMsg = events.find(e => e.type === "message_start" && e.message.role === "toolResult") as any;
+		const toolResultMsg = events.find(
+			(e): e is Extract<AgentEvent, { type: "message_start" }> =>
+				e.type === "message_start" && e.message.role === "toolResult",
+		);
 		expect(toolResultMsg).toBeDefined();
-		const resultText = toolResultMsg.message.content[0].text;
+		const toolResultMessage = toolResultMsg!.message;
+		if (toolResultMessage.role !== "toolResult") throw new Error("expected a toolResult message");
+		const firstContent = toolResultMessage.content[0];
+		const resultText = firstContent?.type === "text" ? firstContent.text : "";
 		expect(resultText).toContain("Tool call arguments are not valid JSON.");
 		expect(resultText).toContain("Unexpected token F");
 		expect(resultText).toContain("[truncated");
 
 		// Should have paired start and end events
-		const toolStart = events.find(e => e.type === "tool_execution_start") as any;
-		const toolEnd = events.find(e => e.type === "tool_execution_end") as any;
+		const toolStart = events.find(
+			(e): e is Extract<AgentEvent, { type: "tool_execution_start" }> => e.type === "tool_execution_start",
+		);
+		const toolEnd = events.find(
+			(e): e is Extract<AgentEvent, { type: "tool_execution_end" }> => e.type === "tool_execution_end",
+		);
 		expect(toolStart).toBeDefined();
 		expect(toolEnd).toBeDefined();
 
 		// Start args must not include __rawJson
-		expect(toolStart.args).toBeDefined();
-		expect(toolStart.args.__rawJson).toBeUndefined();
-		expect(toolStart.args.__parseError).toBeDefined(); // keeps __parseError for visibility of parse failure
+		expect(toolStart!.args).toBeDefined();
+		const startArgs = toolStart!.args as { __rawJson?: unknown; __parseError?: unknown };
+		expect(startArgs.__rawJson).toBeUndefined();
+		expect(startArgs.__parseError).toBeDefined(); // keeps __parseError for visibility of parse failure
 	});
 
 	it("runs completed tool calls after a transient stream_read_error", async () => {
@@ -1058,9 +1070,12 @@ describe("agentLoop with AgentMessage", () => {
 		// The event's result carries the same discriminator so the UI can
 		// render "provider transport failed, tool not executed" instead of a
 		// generic "Edit tool failed" panel.
-		expect(endEvent?.result?.details?.__synthetic).toBe(true);
-		expect(endEvent?.result?.details?.source).toBe("assistant_stop_error");
-		expect(endEvent?.result?.details?.executed).toBe(false);
+		const endDetails = endEvent?.result.details as
+			| { __synthetic?: boolean; source?: string; executed?: boolean }
+			| undefined;
+		expect(endDetails?.__synthetic).toBe(true);
+		expect(endDetails?.source).toBe("assistant_stop_error");
+		expect(endDetails?.executed).toBe(false);
 	});
 
 	it("recovers completed custom-wire tool calls after stream_read_error", async () => {
@@ -2743,7 +2758,7 @@ it("recovers from provider whitespace loop recovery without duplicating assistan
 		tools: [],
 	};
 
-	const customStreamFn = (model: any, _context: any, _options: any) => {
+	const customStreamFn: StreamFn = (model, _context, _options) => {
 		const stream = new AssistantMessageEventStream();
 		const run = async () => {
 			try {
@@ -2806,7 +2821,7 @@ it("recovers from provider whitespace loop recovery without duplicating assistan
 	const mock = createMockModel();
 	const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
 	const events: AgentEvent[] = [];
-	const stream = agentLoop([createUserMessage("Hello")], context, config, undefined, customStreamFn as any);
+	const stream = agentLoop([createUserMessage("Hello")], context, config, undefined, customStreamFn);
 
 	for await (const event of stream) {
 		events.push(event);

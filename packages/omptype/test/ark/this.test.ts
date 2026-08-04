@@ -37,7 +37,7 @@ it("at nested path", () => {
 
 	expect(T(validData)).toEqual(validData);
 
-	const invalidData = { foo: { bar: {} as any } };
+	const invalidData = { foo: { bar: {} } };
 	invalidData.foo.bar = invalidData.foo;
 	expect(T(invalidData).toString()).toBe("foo.bar.foo must be an object (was missing)");
 });

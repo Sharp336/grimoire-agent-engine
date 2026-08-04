@@ -1,3 +1,4 @@
+// biome-ignore-all lint/suspicious/noExplicitAny: tests the schema's any type contract
 import { describe, expect, it } from "bun:test";
 import { type Type, type } from "@oh-my-pi/omptype/ark";
 import type { Eq } from "./type-assert";

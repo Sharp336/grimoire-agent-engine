@@ -1369,9 +1369,8 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 		const result = await stream.result();
 
 		expect(result.stopReason).toBe("error");
-		expect(isContextOverflow({ stopReason: "error", errorMessage: result.errorMessage, content: [] } as any)).toBe(
-			true,
-		);
+		const overflowInput: unknown = { stopReason: "error", errorMessage: result.errorMessage, content: [] };
+		expect(isContextOverflow(overflowInput as AssistantMessage)).toBe(true);
 		expect(result.errorMessage).toContain("prompt is too long");
 		// The request was never spent and the created workflow was stopped.
 		expect(socketOpened).toBe(false);
@@ -1446,9 +1445,8 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 		expect(result.stopReason).toBe("error");
 		// The request WAS attempted (jitter zone can succeed), then relabeled on failure.
 		expect(socketOpened).toBe(true);
-		expect(isContextOverflow({ stopReason: "error", errorMessage: result.errorMessage, content: [] } as any)).toBe(
-			true,
-		);
+		const overflowInput: unknown = { stopReason: "error", errorMessage: result.errorMessage, content: [] };
+		expect(isContextOverflow(overflowInput as AssistantMessage)).toBe(true);
 		expect(result.errorMessage).toContain("prompt is too long");
 		expect(result.errorMessage).not.toContain("Internal server error");
 	});

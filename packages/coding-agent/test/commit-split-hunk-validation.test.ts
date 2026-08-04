@@ -23,6 +23,13 @@ index 3333333..4444444 100644
  }
 `;
 
+function splitCommitDetails(details: unknown): { valid: unknown; errors: unknown } {
+	if (typeof details !== "object" || details === null || !("valid" in details) || !("errors" in details)) {
+		throw new Error("split_commit result details missing valid/errors");
+	}
+	return { valid: details.valid, errors: details.errors };
+}
+
 describe("split_commit hunk selector validation", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
@@ -57,8 +64,8 @@ describe("split_commit hunk selector validation", () => {
 			{} as never,
 		);
 
-		expect(result.details.valid).toBe(false);
-		expect(result.details.errors).toContain("Commit 1: No hunks selected for src/a.ts");
+		expect(splitCommitDetails(result.details).valid).toBe(false);
+		expect(splitCommitDetails(result.details).errors).toContain("Commit 1: No hunks selected for src/a.ts");
 		expect(state.splitProposal).toBeUndefined();
 	});
 
@@ -91,8 +98,8 @@ describe("split_commit hunk selector validation", () => {
 			{} as never,
 		);
 
-		expect(result.details.valid).toBe(false);
-		expect(result.details.errors).toContain("Commit 1: No hunks selected for src/a.ts");
+		expect(splitCommitDetails(result.details).valid).toBe(false);
+		expect(splitCommitDetails(result.details).errors).toContain("Commit 1: No hunks selected for src/a.ts");
 		expect(state.splitProposal).toBeUndefined();
 	});
 
@@ -123,8 +130,10 @@ describe("split_commit hunk selector validation", () => {
 			{} as never,
 		);
 
-		expect(result.details.valid).toBe(true);
-		expect(result.details.errors).not.toContain("Commit 1: No diff found for packages/coding-agent/CHANGELOG.md");
+		expect(splitCommitDetails(result.details).valid).toBe(true);
+		expect(splitCommitDetails(result.details).errors).not.toContain(
+			"Commit 1: No diff found for packages/coding-agent/CHANGELOG.md",
+		);
 		expect(state.splitProposal?.commits[0]?.changes.map(change => change.path)).toContain(
 			"packages/coding-agent/CHANGELOG.md",
 		);

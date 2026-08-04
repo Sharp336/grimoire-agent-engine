@@ -1,7 +1,7 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { Markdown } from "@oh-my-pi/pi-tui";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import chalk from "chalk";
 import typesDescriptionPrompt from "../../commit/prompts/types-description.md" with { type: "text" };
@@ -109,7 +109,10 @@ export async function runCommitAgentSession(input: CommitAgentInput): Promise<Co
 			}
 			case "tool_execution_start":
 				toolCalls += 1;
-				toolArgsById.set(event.toolCallId, { name: event.toolName, args: event.args });
+				toolArgsById.set(event.toolCallId, {
+					name: event.toolName,
+					args: isRecord(event.args) ? event.args : undefined,
+				});
 				break;
 			case "message_end": {
 				const role = event.message?.role;

@@ -10,6 +10,7 @@ import type {
 	ThinkingLevelChangeEntry,
 } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import { branchSummaryText, compactionSummaryText, firstContentText } from "../context-message-assertions";
 
 function msg(id: string, parentId: string | null, role: "user" | "assistant", text: string): SessionMessageEntry {
 	const base = { type: "message" as const, id, parentId, timestamp: "2025-01-01T00:00:00Z" };
@@ -199,11 +200,11 @@ describe("buildSessionContext", () => {
 
 			// Should have: summary + kept (3,4) + after (6,7) = 5 messages
 			expect(ctx.messages).toHaveLength(5);
-			expect((ctx.messages[0] as any).summary).toContain("Summary of first two turns");
-			expect((ctx.messages[1] as any).content).toBe("second");
-			expect((ctx.messages[2] as any).content[0].text).toBe("response2");
-			expect((ctx.messages[3] as any).content).toBe("third");
-			expect((ctx.messages[4] as any).content[0].text).toBe("response3");
+			expect(compactionSummaryText(ctx.messages[0])).toContain("Summary of first two turns");
+			expect(firstContentText(ctx.messages[1])).toBe("second");
+			expect(firstContentText(ctx.messages[2])).toBe("response2");
+			expect(firstContentText(ctx.messages[3])).toBe("third");
+			expect(firstContentText(ctx.messages[4])).toBe("response3");
 		});
 
 		it("keeps Anthropic native web-search bytes when compaction retains the assistant turn", () => {
@@ -273,7 +274,7 @@ describe("buildSessionContext", () => {
 
 			// Summary + all messages (1,2,4)
 			expect(ctx.messages).toHaveLength(4);
-			expect((ctx.messages[0] as any).summary).toContain("Empty summary");
+			expect(compactionSummaryText(ctx.messages[0])).toContain("Empty summary");
 		});
 
 		it("uses preserved OpenAI replacement history instead of kept raw messages", () => {
@@ -497,7 +498,7 @@ describe("buildSessionContext", () => {
 
 			// Should use second summary, keep from 4
 			expect(ctx.messages).toHaveLength(4);
-			expect((ctx.messages[0] as any).summary).toContain("Second summary");
+			expect(compactionSummaryText(ctx.messages[0])).toContain("Second summary");
 		});
 	});
 
@@ -614,11 +615,11 @@ describe("buildSessionContext", () => {
 
 			const ctxA = buildSessionContext(entries, "3");
 			expect(ctxA.messages).toHaveLength(3);
-			expect((ctxA.messages[2] as any).content).toBe("branch A");
+			expect(firstContentText(ctxA.messages[2])).toBe("branch A");
 
 			const ctxB = buildSessionContext(entries, "4");
 			expect(ctxB.messages).toHaveLength(3);
-			expect((ctxB.messages[2] as any).content).toBe("branch B");
+			expect(firstContentText(ctxB.messages[2])).toBe("branch B");
 		});
 
 		it("includes branch summary in path", () => {
@@ -632,8 +633,8 @@ describe("buildSessionContext", () => {
 			const ctx = buildSessionContext(entries, "5");
 
 			expect(ctx.messages).toHaveLength(4);
-			expect((ctx.messages[2] as any).summary).toContain("Summary of abandoned work");
-			expect((ctx.messages[3] as any).content).toBe("new direction");
+			expect(branchSummaryText(ctx.messages[2])).toContain("Summary of abandoned work");
+			expect(firstContentText(ctx.messages[3])).toBe("new direction");
 		});
 
 		it("complex tree with multiple branches and compaction", () => {
@@ -660,20 +661,20 @@ describe("buildSessionContext", () => {
 			// Main path to 7: summary + kept(3,4) + after(6,7)
 			const ctxMain = buildSessionContext(entries, "7");
 			expect(ctxMain.messages).toHaveLength(5);
-			expect((ctxMain.messages[0] as any).summary).toContain("Compacted history");
-			expect((ctxMain.messages[1] as any).content).toBe("q2");
-			expect((ctxMain.messages[2] as any).content[0].text).toBe("r2");
-			expect((ctxMain.messages[3] as any).content).toBe("q3");
-			expect((ctxMain.messages[4] as any).content[0].text).toBe("r3");
+			expect(compactionSummaryText(ctxMain.messages[0])).toContain("Compacted history");
+			expect(firstContentText(ctxMain.messages[1])).toBe("q2");
+			expect(firstContentText(ctxMain.messages[2])).toBe("r2");
+			expect(firstContentText(ctxMain.messages[3])).toBe("q3");
+			expect(firstContentText(ctxMain.messages[4])).toBe("r3");
 
 			// Branch path to 11: 1,2,3 + branch_summary + 11
 			const ctxBranch = buildSessionContext(entries, "11");
 			expect(ctxBranch.messages).toHaveLength(5);
-			expect((ctxBranch.messages[0] as any).content).toBe("start");
-			expect((ctxBranch.messages[1] as any).content[0].text).toBe("r1");
-			expect((ctxBranch.messages[2] as any).content).toBe("q2");
-			expect((ctxBranch.messages[3] as any).summary).toContain("Tried wrong approach");
-			expect((ctxBranch.messages[4] as any).content).toBe("better approach");
+			expect(firstContentText(ctxBranch.messages[0])).toBe("start");
+			expect(firstContentText(ctxBranch.messages[1])).toBe("r1");
+			expect(firstContentText(ctxBranch.messages[2])).toBe("q2");
+			expect(branchSummaryText(ctxBranch.messages[3])).toContain("Tried wrong approach");
+			expect(firstContentText(ctxBranch.messages[4])).toBe("better approach");
 		});
 	});
 

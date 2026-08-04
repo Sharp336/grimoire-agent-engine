@@ -3,6 +3,7 @@ import {
 	type AgentMessage,
 	type AgentTool,
 	type AgentToolContext,
+	type AnyAgentTool,
 	AppendOnlyContextManager,
 	type CompactionSummaryMessage,
 	countTokens,
@@ -700,8 +701,8 @@ export class SessionAdvisors {
 
 			const names = config.tools === undefined ? ADVISOR_DEFAULT_TOOL_NAMES : new Set(config.tools);
 			const tools = (this.#advisorTools ?? []).filter(t => names.has(t.name));
-			const advisorLoopTools: AgentTool<any>[] = [adviseTool, ...tools];
-			const advisorToolMap = new Map<string, AgentTool<any>>();
+			const advisorLoopTools: AnyAgentTool[] = [adviseTool, ...tools];
+			const advisorToolMap = new Map<string, AnyAgentTool>();
 			const availableAdvisorToolNames = new Set<string>();
 			for (const tool of advisorLoopTools) {
 				availableAdvisorToolNames.add(tool.name);

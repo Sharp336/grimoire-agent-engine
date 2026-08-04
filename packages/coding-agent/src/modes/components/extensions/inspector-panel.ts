@@ -6,7 +6,8 @@
 import * as os from "node:os";
 import { isZodSchema, zodToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { type Component, truncateToWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
-import { theme } from "../../../modes/theme/theme";
+import { isRecord } from "@oh-my-pi/pi-utils";
+import { type ThemeColor, theme } from "../../../modes/theme/theme";
 import { shortenPath } from "../../../tools/render-utils";
 import type { Extension, ExtensionState } from "./types";
 
@@ -168,22 +169,30 @@ export class InspectorPanel implements Component {
 		lines.push(theme.fg("dim", theme.boxRound.horizontal.repeat(Math.min(width - 2, 40))));
 
 		try {
-			const tool = raw as any;
-			const wire = (s: unknown): any => (isZodSchema(s) ? zodToWireSchema(s) : s);
-			const paramSchema = wire(tool?.parameters);
-			const inputSchema = wire(tool?.inputSchema);
+			const tool = isRecord(raw) ? raw : {};
+			const wire = (s: unknown): { properties?: Record<string, unknown>; required?: unknown } | undefined => {
+				const resolved = isZodSchema(s) ? zodToWireSchema(s) : s;
+				return isRecord(resolved)
+					? (resolved as { properties?: Record<string, unknown>; required?: unknown })
+					: undefined;
+			};
+			const paramSchema = wire(tool.parameters);
+			const inputSchema = wire(tool.inputSchema);
 			const params = paramSchema?.properties || inputSchema?.properties || {};
 
 			if (Object.keys(params).length === 0) {
 				lines.push(theme.fg("dim", "  (no arguments)"));
 			} else {
-				const required = new Set(paramSchema?.required || inputSchema?.required || []);
+				const requiredList = paramSchema?.required ?? inputSchema?.required;
+				const required = new Set<string>(
+					Array.isArray(requiredList) ? requiredList.filter((r): r is string => typeof r === "string") : [],
+				);
 
 				for (const [name, spec] of Object.entries(params)) {
-					const param = spec as any;
-					const type = param.type || "any";
+					const param = isRecord(spec) ? spec : {};
+					const type = typeof param.type === "string" ? param.type : "any";
 					const isRequired = required.has(name);
-					const defaultVal = param.default !== undefined ? `Default: ${param.default}` : null;
+					const defaultVal = param.default !== undefined ? `Default: ${String(param.default)}` : null;
 
 					const nameCol = theme.fg("accent", name.padEnd(12));
 					const typeCol = theme.fg("muted", type.padEnd(10));
@@ -210,8 +219,9 @@ export class InspectorPanel implements Component {
 		lines.push(theme.fg("dim", theme.boxRound.horizontal.repeat(Math.min(width - 2, 40))));
 
 		try {
-			const skill = raw as any;
-			const instruction = skill?.prompt || skill?.instruction || skill?.content || "";
+			const skill = isRecord(raw) ? raw : {};
+			const pickText = (v: unknown): string | undefined => (typeof v === "string" && v.length > 0 ? v : undefined);
+			const instruction = pickText(skill.prompt) ?? pickText(skill.instruction) ?? pickText(skill.content) ?? "";
 
 			if (!instruction) {
 				lines.push(theme.fg("dim", "  (no instruction text)"));
@@ -239,10 +249,11 @@ export class InspectorPanel implements Component {
 		lines.push(theme.fg("dim", theme.boxRound.horizontal.repeat(Math.min(width - 2, 40))));
 
 		try {
-			const mcp = raw as any;
-			const transport = mcp?.transport || mcp?.type || "unknown";
-			const command = mcp?.command || mcp?.cmd || "";
-			const args = mcp?.args || mcp?.arguments || [];
+			const mcp = isRecord(raw) ? raw : {};
+			const asStr = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+			const transport = asStr(mcp.transport) || asStr(mcp.type) || "unknown";
+			const command = asStr(mcp.command) || asStr(mcp.cmd) || "";
+			const args = Array.isArray(mcp.args) ? mcp.args : Array.isArray(mcp.arguments) ? mcp.arguments : [];
 
 			lines.push(`  ${theme.fg("muted", "Transport:")}  ${theme.fg("accent", transport)}`);
 
@@ -255,7 +266,7 @@ export class InspectorPanel implements Component {
 			}
 
 			// Environment variables if present
-			if (mcp?.env && typeof mcp.env === "object") {
+			if (isRecord(mcp.env)) {
 				const envCount = Object.keys(mcp.env).length;
 				if (envCount > 0) {
 					lines.push(`  ${theme.fg("muted", "Env vars:")}   ${theme.fg("dim", `${envCount} defined`)}`);
@@ -284,7 +295,7 @@ export class InspectorPanel implements Component {
 	}
 
 	#getKindBadge(kind: string): string {
-		const kindColors: Record<string, string> = {
+		const kindColors: Record<string, ThemeColor> = {
 			"extension-module": "accent",
 			skill: "accent",
 			rule: "success",
@@ -298,7 +309,7 @@ export class InspectorPanel implements Component {
 		};
 
 		const color = kindColors[kind] || "muted";
-		return theme.fg(color as any, kind);
+		return theme.fg(color, kind);
 	}
 
 	#getStatusBadge(state: ExtensionState, reason?: string, shadowedBy?: string): string {

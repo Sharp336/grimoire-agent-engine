@@ -13,6 +13,7 @@ const arkSessionNotification = type({
 	},
 });
 
+import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { AcpAgent } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
@@ -603,7 +604,7 @@ describe("ACP event mapper", () => {
 				toolCallId: "tc-3",
 				toolName: "bash",
 				args: { command: "npm run check" },
-				partialResult: { details: { terminalId: "term-1" } },
+				partialResult: { content: [], details: { terminalId: "term-1" } },
 			} as AgentSessionEvent,
 			"session-1",
 		);
@@ -740,7 +741,11 @@ describe("ACP event mapper", () => {
 				toolCallId: "tc-terminal-error",
 				toolName: "bash",
 				isError: true,
-				result: { errorMessage: "command failed", details: { terminalId: "term-1" } },
+				result: {
+					content: [],
+					errorMessage: "command failed",
+					details: { terminalId: "term-1" },
+				} as AgentToolResult,
 			} as AgentSessionEvent,
 			"session-1",
 		);
@@ -750,7 +755,11 @@ describe("ACP event mapper", () => {
 				toolCallId: "tc-terminal-message",
 				toolName: "bash",
 				isError: false,
-				result: { message: "command completed", details: { terminalId: "term-1" } },
+				result: {
+					content: [],
+					message: "command completed",
+					details: { terminalId: "term-1" },
+				} as AgentToolResult,
 			} as AgentSessionEvent,
 			"session-1",
 		);
@@ -784,7 +793,7 @@ describe("ACP event mapper", () => {
 				toolCallId: "tc-plain-output",
 				toolName: "bash",
 				isError: false,
-				result: "hello from stdout",
+				result: { content: [{ type: "text", text: "hello from stdout" }] },
 			} as AgentSessionEvent,
 			"session-1",
 		);
@@ -805,7 +814,7 @@ describe("ACP event mapper", () => {
 				toolCallId: "tc-direct-terminal",
 				toolName: "bash",
 				isError: false,
-				result: { terminalId: "term-1" },
+				result: { content: [], terminalId: "term-1" } as AgentToolResult,
 			} as AgentSessionEvent,
 			"session-1",
 		);
@@ -826,9 +835,10 @@ describe("ACP event mapper", () => {
 				toolName: "bash",
 				isError: false,
 				result: {
-					content: [{ type: "terminal", terminalId: "term-1" }],
+					content: [],
+					terminalId: "term-1",
 					details: { terminalId: "term-1" },
-				},
+				} as AgentToolResult,
 			} as AgentSessionEvent,
 			"session-1",
 		);

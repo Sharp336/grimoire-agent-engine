@@ -897,7 +897,7 @@ function createCustomToolContext(ctx: ExtensionContext): CustomToolContext {
 function isCustomTool(tool: CustomTool | ToolDefinition): tool is CustomTool {
 	// To distinguish, we mark converted tools with a hidden symbol property.
 	// If the tool doesn't have this marker, it's a CustomTool that needs conversion.
-	return !(tool as any).__isToolDefinition;
+	return !(tool as { __isToolDefinition?: unknown }).__isToolDefinition;
 }
 
 function isLegacyBuiltinToolDefinition(tool: CustomTool | ToolDefinition): boolean {

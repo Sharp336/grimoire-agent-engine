@@ -11,6 +11,7 @@ import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import {
 	AgentServerMessageSchema,
+	type InteractionUpdate,
 	InteractionUpdateSchema,
 	McpArgsSchema,
 	McpToolCallSchema,
@@ -134,9 +135,116 @@ function newHarness(): Harness {
 	};
 }
 
-function start(h: Harness, toolCall: unknown, callId = "call-1"): void {
+type TodoRowLit = { content: string; status: number };
+
+interface UpdateTodoFixture {
+	updateTodosToolCall: {
+		args?: { merge?: boolean; todos?: TodoRowLit[] };
+		result?: {
+			result:
+				| { case: "success"; value: { wasMerge?: boolean; totalCount?: number; todos: TodoRowLit[] } }
+				| { case: "error"; value: { error: string } };
+		};
+	};
+}
+
+interface ReadTodoFixture {
+	readTodosToolCall: {
+		args?: { statusFilter?: number[]; idFilter?: string[] };
+		result?: { result: { case: "success"; value: { totalCount?: number; todos: TodoRowLit[] } } };
+	};
+}
+
+type TodoFixture = UpdateTodoFixture | ReadTodoFixture;
+
+function todoItems(rows: TodoRowLit[]): TodoItem[] {
+	return rows.map(row => create(TodoItemSchema, { content: row.content, status: row.status }));
+}
+
+/**
+ * Builds the real `agent.v1.ToolCall` oneof a decoded interaction stream
+ * carries. A fixture names the variant with the convenience
+ * `updateTodosToolCall` / `readTodosToolCall` key; a wire message only ever
+ * exposes it as the `tool: { case, value }` oneof, so the convenience shape is
+ * mapped onto it here. `total_count` is a proto3 scalar a real server always
+ * sends, so an omitted count becomes the honest row count rather than the
+ * default `0` — which the acceptance guard would misread as a truncated
+ * response.
+ */
+function buildTodoToolCall(fixture: TodoFixture): ToolCall {
+	if ("updateTodosToolCall" in fixture) {
+		const call = fixture.updateTodosToolCall;
+		return create(ToolCallSchema, {
+			tool: {
+				case: "updateTodosToolCall",
+				value: create(UpdateTodosToolCallSchema, {
+					args: create(UpdateTodosArgsSchema, {
+						merge: call.args?.merge ?? false,
+						todos: todoItems(call.args?.todos ?? []),
+					}),
+					result:
+						call.result === undefined
+							? undefined
+							: create(
+									UpdateTodosResultSchema,
+									call.result.result.case === "success"
+										? {
+												result: {
+													case: "success",
+													value: create(UpdateTodosSuccessSchema, {
+														wasMerge: call.result.result.value.wasMerge ?? false,
+														totalCount:
+															call.result.result.value.totalCount ??
+															call.result.result.value.todos.length,
+														todos: todoItems(call.result.result.value.todos),
+													}),
+												},
+											}
+										: {
+												result: {
+													case: "error",
+													value: create(UpdateTodosErrorSchema, { error: call.result.result.value.error }),
+												},
+											},
+								),
+				}),
+			},
+		});
+	}
+	const call = fixture.readTodosToolCall;
+	return create(ToolCallSchema, {
+		tool: {
+			case: "readTodosToolCall",
+			value: create(ReadTodosToolCallSchema, {
+				args: create(ReadTodosArgsSchema, {
+					statusFilter: call.args?.statusFilter ?? [],
+					idFilter: call.args?.idFilter ?? [],
+				}),
+				result:
+					call.result === undefined
+						? undefined
+						: create(ReadTodosResultSchema, {
+								result: {
+									case: "success",
+									value: create(ReadTodosSuccessSchema, {
+										totalCount: call.result.result.value.totalCount ?? call.result.result.value.todos.length,
+										todos: todoItems(call.result.result.value.todos),
+									}),
+								},
+							}),
+			}),
+		},
+	});
+}
+
+function start(h: Harness, fixture: TodoFixture, callId = "call-1"): void {
 	processInteractionUpdate(
-		{ message: { case: "toolCallStarted", value: { callId, toolCall } } },
+		create(InteractionUpdateSchema, {
+			message: {
+				case: "toolCallStarted",
+				value: create(ToolCallStartedUpdateSchema, { callId, toolCall: buildTodoToolCall(fixture) }),
+			},
+		}),
 		h.output,
 		h.stream,
 		h.state,
@@ -144,9 +252,14 @@ function start(h: Harness, toolCall: unknown, callId = "call-1"): void {
 	);
 }
 
-function complete(h: Harness, toolCall: unknown): void {
+function complete(h: Harness, fixture: TodoFixture): void {
 	processInteractionUpdate(
-		{ message: { case: "toolCallCompleted", value: { toolCall } } },
+		create(InteractionUpdateSchema, {
+			message: {
+				case: "toolCallCompleted",
+				value: create(ToolCallCompletedUpdateSchema, { toolCall: buildTodoToolCall(fixture) }),
+			},
+		}),
 		h.output,
 		h.stream,
 		h.state,
@@ -386,21 +499,32 @@ describe("cursor native todo bridge", () => {
  * production ever sees.
  */
 describe("cursor native todo bridge (wire-encoded protobuf)", () => {
-	function wireUpdate(kind: "toolCallStarted" | "toolCallCompleted", toolCall?: ToolCall): unknown {
+	function wireUpdate(kind: "toolCallStarted" | "toolCallCompleted", toolCall?: ToolCall): InteractionUpdate {
 		// `toolCall` is optional on the wire: omitting it exercises a completion
 		// frame that carries no result at all.
-		const value =
+		const update =
 			kind === "toolCallStarted"
-				? create(ToolCallStartedUpdateSchema, { callId: "call-1", toolCall })
-				: create(ToolCallCompletedUpdateSchema, { callId: "call-1", toolCall });
+				? create(InteractionUpdateSchema, {
+						message: {
+							case: "toolCallStarted",
+							value: create(ToolCallStartedUpdateSchema, { callId: "call-1", toolCall }),
+						},
+					})
+				: create(InteractionUpdateSchema, {
+						message: {
+							case: "toolCallCompleted",
+							value: create(ToolCallCompletedUpdateSchema, { callId: "call-1", toolCall }),
+						},
+					});
 		const server = create(AgentServerMessageSchema, {
-			message: {
-				case: "interactionUpdate",
-				value: create(InteractionUpdateSchema, { message: { case: kind, value } } as never),
-			},
+			message: { case: "interactionUpdate", value: update },
 		});
 		// handleServerMessage forwards `message.value` to processInteractionUpdate.
-		return fromBinary(AgentServerMessageSchema, toBinary(AgentServerMessageSchema, server)).message.value;
+		const decoded = fromBinary(AgentServerMessageSchema, toBinary(AgentServerMessageSchema, server));
+		if (decoded.message.case !== "interactionUpdate") {
+			throw new Error(`expected interactionUpdate, got ${decoded.message.case}`);
+		}
+		return decoded.message.value;
 	}
 
 	function items(rows: [string, string, number][]) {
@@ -476,20 +600,8 @@ describe("cursor native todo bridge (wire-encoded protobuf)", () => {
 
 	function drive(toolCall: ToolCall): Harness {
 		const h = newHarness();
-		processInteractionUpdate(
-			wireUpdate("toolCallStarted", toolCall) as never,
-			h.output,
-			h.stream,
-			h.state,
-			h.usageState,
-		);
-		processInteractionUpdate(
-			wireUpdate("toolCallCompleted", toolCall) as never,
-			h.output,
-			h.stream,
-			h.state,
-			h.usageState,
-		);
+		processInteractionUpdate(wireUpdate("toolCallStarted", toolCall), h.output, h.stream, h.state, h.usageState);
+		processInteractionUpdate(wireUpdate("toolCallCompleted", toolCall), h.output, h.stream, h.state, h.usageState);
 		return h;
 	}
 
@@ -578,14 +690,8 @@ describe("cursor native todo bridge (wire-encoded protobuf)", () => {
 		// from every rebuilt transcript.
 		const h = newHarness();
 		const toolCall = updateCall(items([["1", "step one", 2]]), 1);
-		processInteractionUpdate(
-			wireUpdate("toolCallStarted", toolCall) as never,
-			h.output,
-			h.stream,
-			h.state,
-			h.usageState,
-		);
-		processInteractionUpdate(wireUpdate("toolCallCompleted") as never, h.output, h.stream, h.state, h.usageState);
+		processInteractionUpdate(wireUpdate("toolCallStarted", toolCall), h.output, h.stream, h.state, h.usageState);
+		processInteractionUpdate(wireUpdate("toolCallCompleted"), h.output, h.stream, h.state, h.usageState);
 
 		const callId = todoBlocks(h)[0].id;
 		expect(todoBlocks(h)).toHaveLength(1);
@@ -698,7 +804,7 @@ describe("cursor native todo bridge (wire-encoded protobuf)", () => {
 			2,
 		);
 		for (const kind of ["toolCallStarted", "toolCallCompleted"] as const) {
-			processInteractionUpdate(wireUpdate(kind, toolCall) as never, h.output, h.stream, h.state, h.usageState);
+			processInteractionUpdate(wireUpdate(kind, toolCall), h.output, h.stream, h.state, h.usageState);
 		}
 
 		expect(h.toolResults[0]).toMatchObject({
@@ -852,7 +958,7 @@ describe("cursor native todo bridge (wire-encoded protobuf)", () => {
 		h.state.onTodoSnapshot = undefined;
 		const toolCall = updateCall(items([["1", "task", 3]]), 1);
 		for (const kind of ["toolCallStarted", "toolCallCompleted"] as const) {
-			processInteractionUpdate(wireUpdate(kind, toolCall) as never, h.output, h.stream, h.state, h.usageState);
+			processInteractionUpdate(wireUpdate(kind, toolCall), h.output, h.stream, h.state, h.usageState);
 		}
 
 		expect(h.syncCalls).toEqual([]);
@@ -868,7 +974,7 @@ describe("cursor native todo bridge (wire-encoded protobuf)", () => {
 		h.state.onTodoSnapshot = undefined;
 		const toolCall = errorCall("boom");
 		for (const kind of ["toolCallStarted", "toolCallCompleted"] as const) {
-			processInteractionUpdate(wireUpdate(kind, toolCall) as never, h.output, h.stream, h.state, h.usageState);
+			processInteractionUpdate(wireUpdate(kind, toolCall), h.output, h.stream, h.state, h.usageState);
 		}
 
 		expect(h.toolResults[0]).toMatchObject({
@@ -889,7 +995,7 @@ describe("cursor native todo bridge (wire-encoded protobuf)", () => {
 		};
 		const toolCall = updateCall(items([["1", "task", 3]]), 1);
 		for (const kind of ["toolCallStarted", "toolCallCompleted"] as const) {
-			processInteractionUpdate(wireUpdate(kind, toolCall) as never, h.output, h.stream, h.state, h.usageState);
+			processInteractionUpdate(wireUpdate(kind, toolCall), h.output, h.stream, h.state, h.usageState);
 		}
 
 		expect(h.state.currentToolCall).toBeNull();
@@ -928,15 +1034,9 @@ describe("cursor native todo bridge (wire-encoded protobuf)", () => {
 					}),
 				},
 			});
+		processInteractionUpdate(wireUpdate("toolCallStarted", mcpCall({})), h.output, h.stream, h.state, h.usageState);
 		processInteractionUpdate(
-			wireUpdate("toolCallStarted", mcpCall({})) as never,
-			h.output,
-			h.stream,
-			h.state,
-			h.usageState,
-		);
-		processInteractionUpdate(
-			wireUpdate("toolCallCompleted", mcpCall({ query: new TextEncoder().encode('"weather"') })) as never,
+			wireUpdate("toolCallCompleted", mcpCall({ query: new TextEncoder().encode('"weather"') })),
 			h.output,
 			h.stream,
 			h.state,

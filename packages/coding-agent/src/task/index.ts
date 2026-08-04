@@ -48,7 +48,7 @@ import { type DiscoveryResult, discoverAgents } from "./discovery";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
-import { renderResult, renderCall as renderTaskCall } from "./render";
+import { renderCall as renderTaskCall, renderResult as renderTaskResult } from "./render";
 import { repairTaskParams } from "./repair-args";
 import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
 
@@ -573,7 +573,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	// calls still normalize through arktype; `execute()` resolves `agent`
 	// defaults independently, so the success path is unchanged.
 	readonly lenientArgValidation = true;
-	readonly renderResult = renderResult;
+	renderResult(
+		result: AgentToolResult<TaskToolDetails>,
+		options: Parameters<typeof renderTaskResult>[1],
+		theme: Parameters<typeof renderTaskResult>[2],
+		args?: Parameters<typeof renderTaskResult>[3],
+	): ReturnType<typeof renderTaskResult> {
+		return renderTaskResult(result, options, theme, args);
+	}
 	// Suppress the streaming call preview once a (partial or final) result exists
 	// so the task renders as ONE block that transitions in place — not a pending
 	// call frame stacked above the result frame. Mirrors `taskToolRenderer`.

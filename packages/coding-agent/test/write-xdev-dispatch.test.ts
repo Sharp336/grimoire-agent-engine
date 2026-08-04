@@ -8,6 +8,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as themeModule from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { ToolChoiceQueue } from "@oh-my-pi/pi-coding-agent/session/tool-choice-queue";
 import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import type { GhToolDetails } from "@oh-my-pi/pi-coding-agent/tools/gh";
 import { githubToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/gh-renderer";
 import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { WriteTool, writeToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/write";
@@ -48,6 +49,20 @@ function createTestXdevState(tools: Tool[], builtInNames: Iterable<string> = too
 		builtInNames: new Set(builtInNames),
 		isActive: () => false,
 	};
+}
+
+function xdevDispatchDetails(details: unknown): { tool?: unknown; mode?: unknown; tier?: unknown } {
+	if (typeof details === "object" && details !== null && "xdev" in details) {
+		const xdev = details.xdev;
+		if (typeof xdev === "object" && xdev !== null) {
+			return {
+				tool: "tool" in xdev ? xdev.tool : undefined,
+				mode: "mode" in xdev ? xdev.mode : undefined,
+				tier: "tier" in xdev ? xdev.tier : undefined,
+			};
+		}
+	}
+	return {};
 }
 
 describe("read and write route xd:// device URLs", () => {
@@ -94,11 +109,11 @@ describe("read and write route xd:// device URLs", () => {
 			// staging a preview (not a direct apply).
 			const previewResult = await write!.execute("write-xdev-preview", { path: "xd://ast_edit", content });
 			expect(previewResult.isError).toBeUndefined();
-			expect(previewResult.details?.xdev?.tool).toBe("ast_edit");
-			expect(previewResult.details?.xdev?.mode).toBe("execute");
+			expect(xdevDispatchDetails(previewResult.details).tool).toBe("ast_edit");
+			expect(xdevDispatchDetails(previewResult.details).mode).toBe("execute");
 			// The dispatch records the wrapped tool's approval tier so prewalk can
 			// tell a mutation from a read-only device call (issue #7312).
-			expect(previewResult.details?.xdev?.tier).toBe("write");
+			expect(xdevDispatchDetails(previewResult.details).tier).toBe("write");
 			const previewText = previewResult.content.find(entry => entry.type === "text")?.text ?? "";
 			expect(previewText).toContain("modernWrap");
 
@@ -270,11 +285,12 @@ describe("read and write route xd:// device URLs", () => {
 		const uiTheme = (await themeModule.getThemeByName("dark")) ?? (await themeModule.getThemeByName("light"));
 		if (!uiTheme) throw new Error("expected an initialized theme");
 
-		const githubDevice = {
+		const githubSchema = type({ op: "string" });
+		const githubDevice: AgentTool<typeof githubSchema, GhToolDetails, themeModule.Theme> = {
 			name: "github",
 			label: "GitHub",
 			description: "fixture",
-			parameters: type({ op: "string" }),
+			parameters: githubSchema,
 			...githubToolRenderer,
 			async execute() {
 				throw new ToolError("gh: Not Found (HTTP 404)");
@@ -537,7 +553,7 @@ describe("web_search stays top-level under xdev", () => {
 				content: "{}",
 			});
 			expect(dispatched.isError).toBe(true);
-			expect(dispatched.details?.xdev?.tool).toBe("web_search");
+			expect(xdevDispatchDetails(dispatched.details).tool).toBe("web_search");
 			expect(dispatched.content.find(entry => entry.type === "text")?.text).not.toContain("No such tool");
 		} finally {
 			await removeWithRetries(tempDir);
@@ -567,7 +583,7 @@ describe("xd:// and top-level calls share the canonical tool map", () => {
 				content: JSON.stringify({ pattern: "fallback-needle", path: tempDir }),
 			});
 			expect(dispatched.isError).toBeUndefined();
-			expect(dispatched.details?.xdev?.tool).toBe("grep");
+			expect(xdevDispatchDetails(dispatched.details).tool).toBe("grep");
 			expect(dispatched.content.find(entry => entry.type === "text")?.text).toContain("fallback-needle");
 
 			// Docs resolve through the same fallback.

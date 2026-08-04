@@ -3,7 +3,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as ai from "@oh-my-pi/pi-ai";
-import { Effort, type Model } from "@oh-my-pi/pi-ai";
+import { type AssistantMessage, Effort, type Model } from "@oh-my-pi/pi-ai";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	buildMemoryToolDeveloperInstructions,
@@ -11,6 +12,7 @@ import {
 	startMemoryStartupTask,
 } from "@oh-my-pi/pi-coding-agent/memories";
 import * as memoryStorage from "@oh-my-pi/pi-coding-agent/memories/storage";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { getAgentDbPath, Snowflake, TempDir } from "@oh-my-pi/pi-utils";
 
 interface SessionFixture {
@@ -18,8 +20,8 @@ interface SessionFixture {
 	sessionDir: string;
 	sessionFile: string;
 	settings: Settings;
-	session: any;
-	modelRegistry: any;
+	session: AgentSession;
+	modelRegistry: ModelRegistry;
 	model: Model;
 	whenSettled: Promise<void>;
 }
@@ -49,12 +51,36 @@ function createModel(id = "test-model"): Model {
 	} as Model;
 }
 
-function createModelRegistry(model: Model): any {
-	return {
+function createModelRegistry(model: Model): ModelRegistry {
+	return Object.assign(Object.create(ModelRegistry.prototype), {
 		find: vi.fn(() => model),
 		getAll: vi.fn(() => [model]),
 		getApiKey: vi.fn(async () => "test-api-key"),
 		resolver: vi.fn(() => async () => "test-api-key"),
+	}) as ModelRegistry;
+}
+
+function createAssistantMessage(
+	content: AssistantMessage["content"],
+	usage?: AssistantMessage["usage"],
+	stopReason: string = "end_turn",
+): AssistantMessage {
+	return {
+		role: "assistant",
+		api: "openai-completions",
+		provider: "openai",
+		model: "test-model",
+		stopReason: stopReason as AssistantMessage["stopReason"],
+		content,
+		usage: usage ?? {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		timestamp: 0,
 	};
 }
 
@@ -79,18 +105,31 @@ async function createFixture(overrides?: Partial<Record<string, unknown>>): Prom
 	const refreshBaseSystemPrompt = vi.fn(async () => {
 		settled.resolve();
 	});
-	const session = {
-		sessionManager: {
-			getSessionFile: () => sessionFile,
-			getSessionDir: () => sessionDir,
-			getSessionId: () => "current-thread",
-			getCwd: () => agentDir,
+	const session = Object.assign(
+		Object.create(AgentSession.prototype, {
+			isDisposed: { value: false, writable: true, configurable: true, enumerable: true },
+			sessionId: { value: "current-thread", writable: true, configurable: true, enumerable: true },
+			beginLocalMemoryStartup: {
+				value: () => new AbortController().signal,
+				writable: true,
+				configurable: true,
+				enumerable: true,
+			},
+			endLocalMemoryStartup: { value: () => {}, writable: true, configurable: true, enumerable: true },
+			model: { value: model, writable: true, configurable: true, enumerable: true },
+			modelRegistry: { value: modelRegistry, writable: true, configurable: true, enumerable: true },
+		}),
+		{
+			sessionManager: {
+				getSessionFile: () => sessionFile,
+				getSessionDir: () => sessionDir,
+				getSessionId: () => "current-thread",
+				getCwd: () => agentDir,
+			},
+			settings,
+			refreshBaseSystemPrompt,
 		},
-		settings,
-		model,
-		modelRegistry,
-		refreshBaseSystemPrompt,
-	};
+	) as AgentSession;
 
 	return { agentDir, sessionDir, sessionFile, settings, session, modelRegistry, model, whenSettled: settled.promise };
 }
@@ -207,23 +246,30 @@ describe("memories runtime", () => {
 
 		const completeSpy = vi
 			.spyOn(ai, "completeSimple")
-			.mockResolvedValueOnce({
-				stopReason: "end_turn",
-				content: [
+			.mockResolvedValueOnce(
+				createAssistantMessage(
+					[
+						{
+							type: "text",
+							text: JSON.stringify({
+								rollout_summary: "Rollout summary A",
+								rollout_slug: "thread-a-rollout",
+								raw_memory: "Raw memory A",
+							}),
+						},
+					],
 					{
-						type: "text",
-						text: JSON.stringify({
-							rollout_summary: "Rollout summary A",
-							rollout_slug: "thread-a-rollout",
-							raw_memory: "Raw memory A",
-						}),
+						input: 10,
+						output: 5,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 15,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 					},
-				],
-				usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15 },
-			} as any)
-			.mockResolvedValueOnce({
-				stopReason: "end_turn",
-				content: [
+				),
+			)
+			.mockResolvedValueOnce(
+				createAssistantMessage([
 					{
 						type: "text",
 						text: JSON.stringify({
@@ -232,8 +278,8 @@ describe("memories runtime", () => {
 							skills: [{ name: "deploy-playbook", content: "# Deploy\nUse blue/green." }],
 						}),
 					},
-				],
-			} as any);
+				]),
+			);
 
 		startMemoryStartupTask({
 			session: fx.session,
@@ -273,7 +319,7 @@ describe("memories runtime", () => {
 			reasoning: true,
 			thinking: { mode: "effort", efforts: [Effort.High, Effort.XHigh] },
 		};
-		fx.session.model = constrainedModel;
+		(fx.session as { model: Model }).model = constrainedModel;
 		fx.modelRegistry.find = vi.fn(() => constrainedModel);
 		fx.modelRegistry.getAll = vi.fn(() => [constrainedModel]);
 
@@ -286,23 +332,30 @@ describe("memories runtime", () => {
 
 		const spy = vi
 			.spyOn(ai, "completeSimple")
-			.mockResolvedValueOnce({
-				stopReason: "end_turn",
-				content: [
+			.mockResolvedValueOnce(
+				createAssistantMessage(
+					[
+						{
+							type: "text",
+							text: JSON.stringify({
+								rollout_summary: "Rollout summary",
+								rollout_slug: "thread-constrained",
+								raw_memory: "Raw memory",
+							}),
+						},
+					],
 					{
-						type: "text",
-						text: JSON.stringify({
-							rollout_summary: "Rollout summary",
-							rollout_slug: "thread-constrained",
-							raw_memory: "Raw memory",
-						}),
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 					},
-				],
-				usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
-			} as any)
-			.mockResolvedValueOnce({
-				stopReason: "end_turn",
-				content: [
+				),
+			)
+			.mockResolvedValueOnce(
+				createAssistantMessage([
 					{
 						type: "text",
 						text: JSON.stringify({
@@ -311,8 +364,8 @@ describe("memories runtime", () => {
 							skills: [],
 						}),
 					},
-				],
-			} as any);
+				]),
+			);
 
 		startMemoryStartupTask({
 			session: fx.session,
@@ -335,9 +388,8 @@ describe("memories runtime", () => {
 
 	test("phase2 sync prunes stale summaries and preserves raw memory ordering", async () => {
 		const fx = await createFixture();
-		vi.spyOn(ai, "completeSimple").mockResolvedValue({
-			stopReason: "end_turn",
-			content: [
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(
+			createAssistantMessage([
 				{
 					type: "text",
 					text: JSON.stringify({
@@ -346,8 +398,8 @@ describe("memories runtime", () => {
 						skills: [{ name: "ops", content: "# Ops\nRunbook" }],
 					}),
 				},
-			],
-		} as any);
+			]),
+		);
 
 		const db = memoryStorage.openMemoryDb(getAgentDbPath(fx.agentDir));
 		memoryStorage.upsertThreads(db, [

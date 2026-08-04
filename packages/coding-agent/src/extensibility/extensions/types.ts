@@ -585,15 +585,15 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	onSession?: (event: ToolSessionEvent, ctx: ExtensionContext) => void | Promise<void>;
 
 	/** Custom rendering for tool call display */
-	renderCall?: (args: Static<TParams>, options: ToolRenderResultOptions, theme: Theme) => Component;
+	renderCall?(args: Static<TParams>, options: ToolRenderResultOptions, theme: Theme): Component;
 
 	/** Custom rendering for tool result display */
-	renderResult?: (
+	renderResult?(
 		result: AgentToolResult<TDetails>,
 		options: ToolRenderResultOptions,
 		theme: Theme,
 		args?: Static<TParams>,
-	) => Component;
+	): Component;
 }
 
 // ============================================================================
@@ -1545,7 +1545,7 @@ export interface Extension {
 	resolvedPath: string;
 	label?: string;
 	handlers: Map<string, HandlerFn[]>;
-	tools: Map<string, RegisteredTool<any, any>>;
+	tools: Map<string, RegisteredTool>;
 	assistantThinkingRenderers: AssistantThinkingRenderer[];
 	messageRenderers: Map<string, MessageRenderer>;
 	commands: Map<string, RegisteredCommand>;

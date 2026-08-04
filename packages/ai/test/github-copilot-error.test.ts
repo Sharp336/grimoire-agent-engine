@@ -2,8 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { rewriteCopilotError } from "@oh-my-pi/pi-ai/utils/http-inspector";
 
 function errorWithStatus(status: number): Error {
-	const err = new Error(`${status} Unauthorized`);
-	(err as any).status = status;
+	const err: Error & { status?: number } = new Error(`${status} Unauthorized`);
+	err.status = status;
 	return err;
 }
 

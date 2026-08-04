@@ -23,8 +23,8 @@ export interface CommitToolOptions {
 	enableAnalyzeFiles?: boolean;
 }
 
-export function createCommitTools(options: CommitToolOptions): Array<CustomTool<any, any>> {
-	const tools: Array<CustomTool<any, any>> = [
+export function createCommitTools(options: CommitToolOptions): Array<CustomTool> {
+	const tools: Array<CustomTool> = [
 		createGitOverviewTool(options.cwd, options.state),
 		createGitFileDiffTool(options.cwd, options.state),
 		createGitHunkTool(options.cwd),

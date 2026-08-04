@@ -3,7 +3,7 @@ import { Image } from "@oh-my-pi/pi-tui/components/image";
 import { Spacer } from "@oh-my-pi/pi-tui/components/spacer";
 import { Text } from "@oh-my-pi/pi-tui/components/text";
 import { ProcessTerminal } from "@oh-my-pi/pi-tui/terminal";
-import { TUI } from "@oh-my-pi/pi-tui/tui";
+import { type Component, TUI } from "@oh-my-pi/pi-tui/tui";
 
 const testImagePath = Bun.argv[2] || "/tmp/test-image.png";
 
@@ -43,7 +43,8 @@ if (dims) {
 tui.addChild(new Spacer(1));
 tui.addChild(new Text("Press Ctrl+C to exit", 1, 0));
 
-const editor = {
+const editor: Component = {
+	render: () => [],
 	handleInput(data: string) {
 		if (data.charCodeAt(0) === 3) {
 			tui.stop();
@@ -52,5 +53,5 @@ const editor = {
 	},
 };
 
-tui.setFocus(editor as any);
+tui.setFocus(editor);
 tui.start();

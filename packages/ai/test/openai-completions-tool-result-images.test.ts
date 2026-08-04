@@ -277,6 +277,9 @@ describe("openai-completions convertMessages", () => {
 		};
 
 		const now = Date.now();
+		// A stringified-JSON arguments value is what some providers emit on the wire;
+		// erase its static type to unknown so the field assertion is a single cast.
+		const stringToolArgs: unknown = '{"path":"README.md"}';
 		const assistantMessage: AssistantMessage = {
 			role: "assistant",
 			content: [
@@ -284,7 +287,7 @@ describe("openai-completions convertMessages", () => {
 					type: "toolCall",
 					id: "tool-1",
 					name: "read",
-					arguments: '{"path":"README.md"}' as unknown as Record<string, any>,
+					arguments: stringToolArgs as Record<string, unknown>,
 				},
 			],
 			api: model.api,

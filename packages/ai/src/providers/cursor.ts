@@ -59,6 +59,7 @@ import {
 	GrepSuccessSchema,
 	type GrepUnionResult,
 	GrepUnionResultSchema,
+	type InteractionUpdate,
 	KvClientMessageSchema,
 	type KvServerMessage,
 	ListMcpResourcesErrorSchema,
@@ -339,7 +340,10 @@ function debugReplacer(key: string, value: unknown): unknown {
 		value instanceof Uint8Array ||
 		(value && typeof value === "object" && "type" in value && value.type === "Buffer")
 	) {
-		const bytes = value instanceof Uint8Array ? value : new Uint8Array((value as any).data);
+		const bytes =
+			value instanceof Uint8Array
+				? value
+				: new Uint8Array((value as Record<"type", unknown> & { data: number[] }).data);
 		const asHex = key === "blobId" || key === "blob_id" || key.endsWith("Id") || key.endsWith("_id");
 		return debugBytes(bytes, asHex);
 	}
@@ -1008,7 +1012,7 @@ async function handleShellStreamArgs(
 	const normalizedArgs: ShellArgs = { ...args, workingDirectory: normalizedWorkingDirectory };
 	const startTs = performance.now();
 	log("shellStream", "start", {
-		command: (args as any).command,
+		command: args.command,
 		workingDirectory: normalizedWorkingDirectory,
 		execId: execMsg.execId,
 		hasExecHandlers: !!execHandlers,
@@ -1117,14 +1121,12 @@ async function handleShellStreamArgs(
 	const handler = streamHandler ? (shellArgs: ShellArgs) => streamHandler(shellArgs, streamCallbacks) : batchHandler;
 
 	const { execResult } = await resolveExecHandler(
-		args as any,
+		args,
 		handler as typeof batchHandler,
 		onToolResult,
-		toolResult => buildShellResultFromToolResult(normalizedArgs as any, toolResult),
-		reason =>
-			buildShellRejectedResult((normalizedArgs as any).command, (normalizedArgs as any).workingDirectory, reason),
-		error =>
-			buildShellFailureResult((normalizedArgs as any).command, (normalizedArgs as any).workingDirectory, error),
+		toolResult => buildShellResultFromToolResult(normalizedArgs, toolResult),
+		reason => buildShellRejectedResult(normalizedArgs.command, normalizedArgs.workingDirectory, reason),
+		error => buildShellFailureResult(normalizedArgs.command, normalizedArgs.workingDirectory, error),
 		{ toolCallId: args.toolCallId, toolName: "bash" },
 	);
 
@@ -3638,7 +3640,7 @@ async function pairSynthesizedExecResult(
 
 /** Exported for tests: drives one Cursor interaction update through the streaming state machine. */
 export function processInteractionUpdate(
-	update: any,
+	update: InteractionUpdate,
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	state: BlockState,
@@ -3790,7 +3792,8 @@ export function processInteractionUpdate(
 			// delta is a cumulative snapshot of the JSON-text args. Strip the prefix we already
 			// have to recover the new suffix; fall back to treating the value as an incremental
 			// fragment when it doesn't extend the buffer.
-			const snapshot: string = update.message.value.argsTextDelta || "";
+			const deltaUpdate = update.message.value;
+			const snapshot: string = ("argsTextDelta" in deltaUpdate ? deltaUpdate.argsTextDelta : "") || "";
 			const current = target[kStreamingPartialJson] ?? "";
 			const chunk = snapshot.startsWith(current) ? snapshot.slice(current.length) : snapshot;
 			if (chunk.length === 0) {

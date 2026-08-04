@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
-import type { Usage } from "@oh-my-pi/pi-ai";
+import type { StopReason, Usage } from "@oh-my-pi/pi-ai";
 import type { GeneratedProvider } from "@oh-my-pi/pi-catalog/models";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { getConfigRootDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
@@ -463,7 +463,32 @@ export function insertMessageStats(stats: MessageStats[]): number {
 /**
  * Build aggregated stats from query results.
  */
-function buildAggregatedStats(rows: any[]): AggregatedStats {
+interface AggregateRow {
+	total_requests: number | null;
+	failed_requests: number | null;
+	total_input_tokens: number | null;
+	total_output_tokens: number | null;
+	total_cache_read_tokens: number | null;
+	total_cache_write_tokens: number | null;
+	total_premium_requests: number | null;
+	total_cost: number | null;
+	avg_duration: number | null;
+	avg_ttft: number | null;
+	avg_tokens_per_second: number | null;
+	first_timestamp: number | null;
+	last_timestamp: number | null;
+}
+
+interface ModelAggregateRow extends AggregateRow {
+	model: string;
+	provider: string;
+}
+
+interface FolderAggregateRow extends AggregateRow {
+	folder: string;
+}
+
+function buildAggregatedStats(rows: AggregateRow[]): AggregatedStats {
 	if (rows.length === 0) {
 		return {
 			totalRequests: 0,
@@ -543,7 +568,7 @@ export function getOverallStats(cutoff?: number): AggregatedStats {
 	`);
 
 	const rows = hasCutoff ? stmt.all(cutoff) : stmt.all();
-	return buildAggregatedStats(rows as any[]);
+	return buildAggregatedStats(rows as AggregateRow[]);
 }
 /**
  * Get stats grouped by model.
@@ -575,7 +600,7 @@ export function getStatsByModel(cutoff?: number): ModelStats[] {
 		ORDER BY total_requests DESC
 	`);
 
-	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as any[];
+	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as ModelAggregateRow[];
 	return rows.map(row => ({
 		model: row.model,
 		provider: row.provider,
@@ -612,7 +637,7 @@ export function getStatsByFolder(cutoff?: number): FolderStats[] {
 		ORDER BY total_requests DESC
 	`);
 
-	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as any[];
+	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as FolderAggregateRow[];
 	return rows.map(row => ({
 		folder: row.folder,
 		...buildAggregatedStats([row]),
@@ -624,6 +649,16 @@ export function getStatsByFolder(cutoff?: number): FolderStats[] {
  * Token columns are explicit so the dashboard's share denominator matches the
  * counts it renders. Rows missing `agent_type` (defensive) fall back to "main".
  */
+interface AgentTypeAggregateRow {
+	agent_type: AgentType | null;
+	total_requests: number | null;
+	total_input_tokens: number | null;
+	total_output_tokens: number | null;
+	total_cache_read_tokens: number | null;
+	total_cache_write_tokens: number | null;
+	total_cost: number | null;
+}
+
 export function getStatsByAgentType(cutoff?: number): AgentTypeStats[] {
 	if (!db) return [];
 
@@ -642,9 +677,9 @@ export function getStatsByAgentType(cutoff?: number): AgentTypeStats[] {
 		GROUP BY agent_type
 	`);
 
-	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as any[];
+	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as AgentTypeAggregateRow[];
 	return rows.map(row => ({
-		agentType: (row.agent_type as AgentType) ?? "main",
+		agentType: row.agent_type ?? "main",
 		totalRequests: row.total_requests || 0,
 		totalInputTokens: row.total_input_tokens || 0,
 		totalOutputTokens: row.total_output_tokens || 0,
@@ -657,6 +692,14 @@ export function getStatsByAgentType(cutoff?: number): AgentTypeStats[] {
 /**
  * Get time series data.
  */
+interface TimeSeriesRow {
+	bucket: number;
+	requests: number;
+	errors: number;
+	tokens: number;
+	cost: number;
+}
+
 export function getTimeSeries(hours = 24, cutoff?: number | null, bucketMs = 60 * 60 * 1000): TimeSeriesPoint[] {
 	if (!db) return [];
 
@@ -677,8 +720,8 @@ export function getTimeSeries(hours = 24, cutoff?: number | null, bucketMs = 60 
 	`);
 
 	const rows = hasCutoff
-		? (stmt.all(bucketMs, bucketMs, seriesCutoff) as any[])
-		: (stmt.all(bucketMs, bucketMs) as any[]);
+		? (stmt.all(bucketMs, bucketMs, seriesCutoff) as TimeSeriesRow[])
+		: (stmt.all(bucketMs, bucketMs) as TimeSeriesRow[]);
 	return rows.map(row => ({
 		timestamp: row.bucket,
 		requests: row.requests,
@@ -930,7 +973,34 @@ export function closeDb(): void {
 	}
 }
 
-function rowToMessageStats(row: any): MessageStats {
+interface MessageRow {
+	id: number;
+	session_file: string;
+	entry_id: string;
+	folder: string;
+	model: string;
+	provider: string;
+	api: string;
+	timestamp: number;
+	duration: number | null;
+	ttft: number | null;
+	stop_reason: StopReason;
+	error_message: string | null;
+	input_tokens: number;
+	output_tokens: number;
+	cache_read_tokens: number;
+	cache_write_tokens: number;
+	total_tokens: number;
+	premium_requests: number;
+	cost_input: number;
+	cost_output: number;
+	cost_cache_read: number;
+	cost_cache_write: number;
+	cost_total: number;
+	agent_type: AgentType | null;
+}
+
+function rowToMessageStats(row: MessageRow): MessageStats {
 	return {
 		id: row.id,
 		sessionFile: row.session_file,
@@ -942,7 +1012,7 @@ function rowToMessageStats(row: any): MessageStats {
 		timestamp: row.timestamp,
 		duration: row.duration,
 		ttft: row.ttft,
-		stopReason: row.stop_reason as any,
+		stopReason: row.stop_reason,
 		errorMessage: row.error_message,
 		usage: {
 			input: row.input_tokens,
@@ -959,7 +1029,7 @@ function rowToMessageStats(row: any): MessageStats {
 				total: row.cost_total,
 			},
 		},
-		agentType: (row.agent_type as AgentType) ?? "main",
+		agentType: row.agent_type ?? "main",
 	};
 }
 
@@ -970,7 +1040,7 @@ export function getRecentRequests(limit = 100): MessageStats[] {
 		ORDER BY timestamp DESC 
 		LIMIT ?
 	`);
-	return (stmt.all(limit) as any[]).map(rowToMessageStats);
+	return (stmt.all(limit) as MessageRow[]).map(rowToMessageStats);
 }
 
 export function getRecentErrors(limit = 100, cutoff?: number | null): MessageStats[] {
@@ -983,20 +1053,32 @@ export function getRecentErrors(limit = 100, cutoff?: number | null): MessageSta
 		ORDER BY timestamp DESC
 		LIMIT ?
 	`);
-	const rows = hasCutoff ? stmt.all(cutoff, limit) : stmt.all(limit);
+	const rows = (hasCutoff ? stmt.all(cutoff, limit) : stmt.all(limit)) as MessageRow[];
 	return rows.map(rowToMessageStats);
 }
 
 export function getMessageById(id: number): MessageStats | null {
 	if (!db) return null;
 	const stmt = db.prepare("SELECT * FROM messages WHERE id = ?");
-	const row = stmt.get(id);
+	const row = stmt.get(id) as MessageRow | undefined;
 	return row ? rowToMessageStats(row) : null;
 }
 
 /**
  * Get daily cost time series data for the last N days, broken down by model.
  */
+interface CostSeriesRow {
+	bucket: number;
+	model: string;
+	provider: string;
+	cost: number;
+	cost_input: number;
+	cost_output: number;
+	cost_cache_read: number;
+	cost_cache_write: number;
+	requests: number;
+}
+
 export function getCostTimeSeries(days = 90, cutoff?: number | null): CostTimeSeriesPoint[] {
 	if (!db) return [];
 
@@ -1020,7 +1102,7 @@ export function getCostTimeSeries(days = 90, cutoff?: number | null): CostTimeSe
 		ORDER BY bucket ASC
 	`);
 
-	const rows = hasCutoff ? (stmt.all(seriesCutoff) as any[]) : (stmt.all() as any[]);
+	const rows = hasCutoff ? (stmt.all(seriesCutoff) as CostSeriesRow[]) : (stmt.all() as CostSeriesRow[]);
 	return rows.map(row => ({
 		timestamp: row.bucket,
 		model: row.model,
@@ -1321,7 +1403,7 @@ export function updateUserMessageLinks(links: UserMessageLink[]): number {
 	return updated;
 }
 
-const UNKNOWN_MODEL = "unknown";
+export const UNKNOWN_MODEL = "unknown";
 
 interface BehaviorSeriesRow {
 	bucket: number;

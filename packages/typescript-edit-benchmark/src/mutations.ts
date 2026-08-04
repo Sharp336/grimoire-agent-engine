@@ -127,7 +127,7 @@ function parseCode(code: string): Parsed | null {
 t.VISITOR_KEYS.TSTypeCastExpression = ["expression", "typeAnnotation"];
 {
 	const { generatorInfosMap } = require("@babel/generator/lib/nodes") as {
-		generatorInfosMap: Map<string, [any, number, unknown]>;
+		generatorInfosMap: Map<string, [unknown, number, unknown]>;
 	};
 	if (!generatorInfosMap.has("TSTypeCastExpression")) {
 		const tsAs = generatorInfosMap.get("TSAsExpression");

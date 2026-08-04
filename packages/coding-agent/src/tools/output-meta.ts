@@ -10,9 +10,10 @@ import type {
 	AgentToolExecFn,
 	AgentToolResult,
 	AgentToolUpdateCallback,
+	AnyAgentTool,
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { logger } from "@oh-my-pi/pi-utils";
+import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import { getDefault, type Settings } from "../config/settings";
 import { formatGroupedDiagnosticMessages } from "../lsp/utils";
 import type { Theme } from "../modes/theme/theme";
@@ -680,7 +681,7 @@ async function spillLargeResultToArtifact(
 	const { threshold, tailBytes, tailLines, headBytes } = getSpillConfig(context?.settings);
 
 	// Skip if tool already saved an artifact
-	const existingMeta: OutputMeta | undefined = result.details?.meta;
+	const existingMeta = (isRecord(result.details) ? result.details.meta : undefined) as OutputMeta | undefined;
 	if (existingMeta?.truncation?.artifactId) return result;
 
 	// Reading an artifact already addresses recoverable full output. Spilling that
@@ -804,7 +805,7 @@ async function spillLargeResultToArtifact(
 async function wrappedExecute(
 	this: AgentTool & { [kUnwrappedExecute]: AgentToolExecFn },
 	toolCallId: string,
-	params: any,
+	params: unknown,
 	signal?: AbortSignal,
 	onUpdate?: AgentToolUpdateCallback,
 	context?: AgentToolContext,
@@ -818,7 +819,7 @@ async function wrappedExecute(
 		result = await spillLargeResultToArtifact(result, this.name, context);
 
 		// Append notices from meta
-		const meta: OutputMeta | undefined = result.details?.meta;
+		const meta = (isRecord(result.details) ? result.details.meta : undefined) as OutputMeta | undefined;
 		if (meta) {
 			return {
 				...result,
@@ -837,7 +838,7 @@ async function wrappedExecute(
  * 1. Automatically append output notices based on details.meta
  * 2. Handle ToolError rendering
  */
-export function wrapToolWithMetaNotice<T extends AgentTool<any, any, any>>(tool: T): T {
+export function wrapToolWithMetaNotice<T extends AnyAgentTool>(tool: T): T {
 	if (kUnwrappedExecute in tool) {
 		return tool;
 	}

@@ -2086,7 +2086,7 @@ function emitAbortedAssistantMessage(
 
 /** Per-call outcome of the pre-dispatch prepare phase (validation + `beforeToolCall`). */
 interface PreparedToolCall {
-	tool: AgentTool<any> | undefined;
+	tool: AgentTool | undefined;
 	/** Validated (possibly hook-revised) execution args; raw args when validation failed. */
 	args: Record<string, unknown>;
 	validationErrorMessage?: string;
@@ -2105,10 +2105,10 @@ interface PreparedToolCall {
 const preparedDispatchByMessage = new WeakMap<AssistantMessage, Map<string, PreparedToolCall>>();
 
 function resolveToolForCall(
-	tools: AgentTool<any>[] | undefined,
+	tools: AgentTool[] | undefined,
 	toolCall: AgentToolCall,
 	resolveFallbackTool: AgentLoopConfig["resolveFallbackTool"],
-): AgentTool<any> | undefined {
+): AgentTool | undefined {
 	// Tools emitted via OpenAI's custom-tool path (e.g. `apply_patch` on GPT-5)
 	// come back under their wire-level name, which may differ from the
 	// harness-internal `name`. Match on either, preferring `name` for
@@ -2301,7 +2301,7 @@ async function executeToolCalls(
 			interruptible,
 			signal: interruptible ? interruptibleSignal : nonInterruptibleSignal,
 			started: false,
-			result: undefined as AgentToolResult<any> | undefined,
+			result: undefined as AgentToolResult | undefined,
 			isError: false,
 			skipped: false,
 			toolResultMessage: undefined as ToolResultMessage | undefined,
@@ -2368,7 +2368,7 @@ async function executeToolCalls(
 		await checkIrcInterrupts();
 	};
 
-	const emitToolResult = (record: (typeof records)[number], result: AgentToolResult<any>, isError: boolean): void => {
+	const emitToolResult = (record: (typeof records)[number], result: AgentToolResult, isError: boolean): void => {
 		if (record.resultEmitted) return;
 		const { toolCall } = record;
 		if (!record.started) {
@@ -2479,7 +2479,7 @@ async function executeToolCalls(
 			toolSpan.setAttribute(PiGenAIAttr.ToolCallIntent, toolCall.intent);
 		}
 
-		let result: AgentToolResult<any> = { content: [], details: {} };
+		let result: AgentToolResult = { content: [], details: {} };
 		let isError = false;
 		let caughtError: unknown;
 		let completedToolExecution = false;

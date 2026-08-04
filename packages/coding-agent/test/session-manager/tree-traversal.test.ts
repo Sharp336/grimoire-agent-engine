@@ -1,6 +1,7 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import type { CustomEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { firstContentText } from "../context-message-assertions";
 import { assistantMsg, userMsg } from "../utilities";
 
 describe("SessionManager append and tree traversal", () => {
@@ -393,7 +394,7 @@ describe("SessionManager append and tree traversal", () => {
 			const entry2 = session.getEntry(id2);
 			expect(entry2).toBeDefined();
 			if (entry2?.type === "message" && entry2.message.role === "assistant") {
-				expect((entry2.message.content as any)[0].text).toBe("second");
+				expect(firstContentText(entry2.message)).toBe("second");
 			}
 		});
 	});
@@ -414,9 +415,9 @@ describe("SessionManager append and tree traversal", () => {
 			const ctx = session.buildSessionContext();
 			expect(ctx.messages).toHaveLength(3); // msg1, msg2, msg4-branch (not msg3)
 
-			expect((ctx.messages[0] as any).content).toBe("msg1");
-			expect((ctx.messages[1] as any).content[0].text).toBe("msg2");
-			expect((ctx.messages[2] as any).content[0].text).toBe("msg4-branch");
+			expect(firstContentText(ctx.messages[0])).toBe("msg1");
+			expect(firstContentText(ctx.messages[1])).toBe("msg2");
+			expect(firstContentText(ctx.messages[2])).toBe("msg4-branch");
 		});
 	});
 });

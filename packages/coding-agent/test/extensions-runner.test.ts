@@ -1731,7 +1731,7 @@ describe("ExtensionRunner", () => {
 			name: "dangerous_tool",
 			label: "Dangerous Tool",
 			description: "Test tool",
-			parameters: {} as never,
+			parameters: Type.Object({}),
 			approval: "exec" as const,
 			execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
 		};
@@ -1767,7 +1767,7 @@ describe("ExtensionRunner", () => {
 			initializeRunner(runner, select);
 
 			const wrapper = new ExtensionToolWrapper(approvalTool, runner);
-			await (wrapper as ExtensionToolWrapper<any>).execute("call-approval", {}, undefined, undefined, {
+			await wrapper.execute("call-approval", {}, undefined, undefined, {
 				sessionManager,
 				modelRegistry,
 				model: undefined,
@@ -1821,7 +1821,7 @@ describe("ExtensionRunner", () => {
 
 			const wrapper = new ExtensionToolWrapper(approvalTool, runner);
 			await expect(
-				(wrapper as ExtensionToolWrapper<any>).execute("call-denied", {}, undefined, undefined, {
+				wrapper.execute("call-denied", {}, undefined, undefined, {
 					sessionManager,
 					modelRegistry,
 					model: undefined,
@@ -1872,7 +1872,7 @@ describe("ExtensionRunner", () => {
 
 			const wrapper = new ExtensionToolWrapper(approvalTool, runner);
 			await expect(
-				(wrapper as ExtensionToolWrapper<any>).execute("call-thrown", {}, undefined, undefined, {
+				wrapper.execute("call-thrown", {}, undefined, undefined, {
 					sessionManager,
 					modelRegistry,
 					model: undefined,
@@ -1925,7 +1925,7 @@ describe("ExtensionRunner", () => {
 
 			const wrapper = new ExtensionToolWrapper(approvalTool, runner);
 			await expect(
-				(wrapper as ExtensionToolWrapper<any>).execute("call-partial-context", {}, undefined, undefined, {
+				wrapper.execute("call-partial-context", {}, undefined, undefined, {
 					settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) },
 				} as never),
 			).rejects.toThrow('Tool "dangerous_tool" requires approval but no interactive UI available.');
@@ -2453,13 +2453,7 @@ describe("ExtensionRunner", () => {
 			} as AgentTool;
 			const wrapped = new ExtensionToolWrapper(promptTool, runner);
 
-			await (wrapped as ExtensionToolWrapper<any>).execute(
-				"call-p2p",
-				{ command: "original-command" },
-				undefined,
-				undefined,
-				alwaysAskContext,
-			);
+			await wrapped.execute("call-p2p", { command: "original-command" }, undefined, undefined, alwaysAskContext);
 
 			// The user was prompted for the revised command, and that is what executed.
 			expect(promptedWith).toContain("revised-command");
@@ -2629,13 +2623,7 @@ describe("ExtensionRunner", () => {
 			} as AgentTool;
 			const wrapped = new ExtensionToolWrapper(promptTool, runner);
 
-			await (wrapped as ExtensionToolWrapper<any>).execute(
-				"call-order",
-				{ command: "original" },
-				undefined,
-				undefined,
-				alwaysAskContext,
-			);
+			await wrapped.execute("call-order", { command: "original" }, undefined, undefined, alwaysAskContext);
 
 			expect(order).toEqual(["tool_call", "tool_approval_requested", "ui_select"]);
 			delete globalState.__orderEvents;

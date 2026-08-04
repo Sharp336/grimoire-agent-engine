@@ -3208,7 +3208,9 @@ export function lmStudioModelManagerOptions(
 ): ModelManagerOptions<"openai-completions"> {
 	const apiKey = config?.apiKey;
 	const baseUrl = config?.baseUrl ?? Bun.env.LM_STUDIO_BASE_URL ?? "http://127.0.0.1:1234/v1";
-	const references = createBundledReferenceMap<"openai-completions">("lm-studio" as any);
+	// LM Studio serves only locally-discovered models, which have no bundled
+	// catalog entries to project — so there are no references to resolve against.
+	const references = new Map<string, ModelSpec<"openai-completions">>();
 	return {
 		providerId: "lm-studio",
 		fetchDynamicModels: async () => {

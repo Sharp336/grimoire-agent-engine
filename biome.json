@@ -25,7 +25,7 @@
 				"useNodejsImportProtocol": "off"
 			},
 			"suspicious": {
-				"noExplicitAny": "off",
+				"noExplicitAny": "error",
 				"noControlCharactersInRegex": "off",
 				"noEmptyInterface": "off",
 				"noConstEnum": "off",

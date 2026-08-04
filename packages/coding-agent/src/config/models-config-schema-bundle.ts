@@ -115,7 +115,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 				(value.minLevel !== undefined && value.maxLevel !== undefined) ||
 				ctx.mustBe("thinking with `efforts` (or legacy `levels`/`minLevel`+`maxLevel`)"),
 		)
-		.pipe((value: any) => {
+		.pipe(value => {
 			let resolved = value.efforts ?? value.levels;
 			if (!resolved) {
 				const minIndex = EFFORT_ORDER.indexOf(value.minLevel!);

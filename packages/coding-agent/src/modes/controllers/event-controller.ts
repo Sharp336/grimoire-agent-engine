@@ -2,7 +2,7 @@ import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { type Component, Loader, TERMINAL } from "@oh-my-pi/pi-tui";
-import { logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { extractTextContent } from "../../commit/utils";
 import { settings } from "../../config/settings";
@@ -1151,7 +1151,7 @@ export class EventController {
 					component.updateArgs(event.args, event.toolCallId);
 				} else {
 					const group = this.#getReadGroup();
-					group.updateArgs(event.args, event.toolCallId);
+					group.updateArgs(isRecord(event.args) ? event.args : {}, event.toolCallId);
 					this.ctx.pendingTools.set(event.toolCallId, group);
 					this.#toolTimelineComponents.set(event.toolCallId, group);
 				}
@@ -1411,9 +1411,8 @@ export class EventController {
 				this.ctx.setTodos(details.phases);
 			}
 		} else if (event.toolName === "todo" && event.isError) {
-			const textContent = event.result.content.find(
-				(content: { type: string; text?: string }) => content.type === "text",
-			)?.text;
+			const textBlock = event.result.content.find(content => content.type === "text");
+			const textContent = textBlock && "text" in textBlock ? textBlock.text : undefined;
 			// This text can be a provider error copied verbatim off the wire (the
 			// Cursor todo bridge forwards the server's string), so it may carry
 			// ANSI escapes, other C0/C1 controls, tabs, newlines, or a line far

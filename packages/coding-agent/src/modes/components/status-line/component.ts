@@ -198,8 +198,8 @@ interface ContextUsageMemo {
 	usedTokens: number;
 	contextWindow: number;
 	systemPromptRef: readonly string[] | undefined;
-	toolsRef: readonly any[] | undefined;
-	skillsRef: readonly any[] | undefined;
+	toolsRef: readonly unknown[] | undefined;
+	skillsRef: readonly unknown[] | undefined;
 }
 
 interface ActiveRepoCache {

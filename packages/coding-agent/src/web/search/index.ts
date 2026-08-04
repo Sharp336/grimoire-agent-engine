@@ -384,7 +384,7 @@ export const webSearchCustomTool: CustomTool<typeof webSearchSchema, SearchRende
 	},
 };
 
-export function getSearchTools(): CustomTool<any, any>[] {
+export function getSearchTools(): CustomTool[] {
 	return [webSearchCustomTool];
 }
 

@@ -145,7 +145,7 @@ describe("autoloadSkills in executor", () => {
 			autoloadSkills: mockSkills,
 		});
 
-		const sendCustomMessage = session.sendCustomMessage as Mock<any>;
+		const sendCustomMessage = session.sendCustomMessage as Mock<(...args: never[]) => Promise<unknown>>;
 		expect(sendCustomMessage).toHaveBeenCalledTimes(2);
 
 		// Verify first skill
@@ -191,7 +191,7 @@ describe("autoloadSkills in executor", () => {
 
 		await runSubprocess(baseOptions);
 
-		const sendCustomMessage = session.sendCustomMessage as Mock<any>;
+		const sendCustomMessage = session.sendCustomMessage as Mock<(...args: never[]) => Promise<unknown>>;
 		expect(sendCustomMessage).not.toHaveBeenCalled();
 	});
 
@@ -213,7 +213,7 @@ describe("autoloadSkills in executor", () => {
 
 		await runSubprocess({ ...baseOptions, autoloadSkills: undefined });
 
-		const sendCustomMessage = session.sendCustomMessage as Mock<any>;
+		const sendCustomMessage = session.sendCustomMessage as Mock<(...args: never[]) => Promise<unknown>>;
 		expect(sendCustomMessage).not.toHaveBeenCalled();
 	});
 
@@ -233,7 +233,7 @@ describe("autoloadSkills in executor", () => {
 		});
 
 		// Track sendCustomMessage call order
-		(session.sendCustomMessage as Mock<any>).mockImplementation(async () => {
+		(session.sendCustomMessage as Mock<(...args: never[]) => Promise<unknown>>).mockImplementation(async () => {
 			callOrder.push("sendCustomMessage");
 		});
 

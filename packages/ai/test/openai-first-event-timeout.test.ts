@@ -852,10 +852,10 @@ describe("OpenAI-family first-event timeouts", () => {
 			compat: { streamIdleTimeoutMs: 20 },
 		});
 
-		const fetchMock = () => Promise.resolve(createNoProgressOpenAIResponsesStream(undefined));
+		const fetchMock: FetchImpl = () => Promise.resolve(createNoProgressOpenAIResponsesStream(undefined));
 		const result = await streamOpenAIResponses(customResponsesModel, baseContext(), {
 			apiKey: "test-key",
-			fetch: fetchMock as any,
+			fetch: fetchMock,
 		}).result();
 
 		expect(result.stopReason).toBe("error");

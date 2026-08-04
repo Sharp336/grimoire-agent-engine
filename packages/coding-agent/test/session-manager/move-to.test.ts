@@ -15,20 +15,18 @@ import { makeAssistantMessage } from "./helpers";
 
 function getHeader(entries: unknown[]): SessionHeader | undefined {
 	return entries.find(
-		(e): e is SessionHeader => typeof e === "object" && e !== null && "type" in e && (e as any).type === "session",
-	) as SessionHeader | undefined;
+		(e): e is SessionHeader => typeof e === "object" && e !== null && "type" in e && e.type === "session",
+	);
 }
 
 function hasAssistantEntry(entries: unknown[]): boolean {
-	return entries.some(
-		e =>
-			typeof e === "object" &&
-			e !== null &&
-			"type" in e &&
-			(e as any).type === "message" &&
-			"message" in e &&
-			(e as any).message?.role === "assistant",
-	);
+	return entries.some(e => {
+		if (typeof e !== "object" || e === null || !("type" in e) || e.type !== "message" || !("message" in e)) {
+			return false;
+		}
+		const { message } = e;
+		return typeof message === "object" && message !== null && "role" in message && message.role === "assistant";
+	});
 }
 
 // -- stripOuterDoubleQuotes tests -------------------------------------------

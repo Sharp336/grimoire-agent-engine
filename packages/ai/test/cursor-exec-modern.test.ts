@@ -39,6 +39,7 @@ import {
 	ForceBackgroundSubagentStatus,
 	GetDiffRequestSchema,
 	GrepArgsSchema,
+	InteractionUpdateSchema,
 	ListMcpResourcesExecArgsSchema,
 	McpAllowlistPrecheckArgsSchema,
 	McpArgsSchema,
@@ -62,6 +63,7 @@ import {
 	SmartModeClassifierArgsSchema,
 	SubagentArgsSchema,
 	SubagentAwaitArgsSchema,
+	type ToolCall,
 	ToolCallSchema,
 	WebFetchAllowlistPrecheckArgsSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
@@ -264,7 +266,9 @@ describe("Cursor stream teardown", () => {
 
 		// Start the call and leave it open: the transport dies before completion.
 		processInteractionUpdate(
-			{ message: { case: "toolCallStarted", value: { callId: "envelope-a", toolCall } } },
+			create(InteractionUpdateSchema, {
+				message: { case: "toolCallStarted", value: { callId: "envelope-a", toolCall } },
+			}),
 			output,
 			stream,
 			state,
@@ -293,7 +297,7 @@ describe("Cursor stream teardown", () => {
 		const state = newBlockState();
 
 		processInteractionUpdate(
-			{
+			create(InteractionUpdateSchema, {
 				message: {
 					case: "toolCallStarted",
 					value: {
@@ -301,7 +305,7 @@ describe("Cursor stream teardown", () => {
 						toolCall: { tool: { case: "mcpToolCall", value: { args: { toolCallId: "mcp-1" } } } },
 					},
 				},
-			},
+			}),
 			output,
 			stream,
 			state,
@@ -329,7 +333,7 @@ describe("Cursor stream teardown", () => {
 		const state = newBlockState({ onToolResult: result => void paired.push(result) });
 
 		processInteractionUpdate(
-			{
+			create(InteractionUpdateSchema, {
 				message: {
 					case: "toolCallStarted",
 					value: {
@@ -337,7 +341,7 @@ describe("Cursor stream teardown", () => {
 						toolCall: { tool: { case: "updateTodosToolCall", value: { args: { todos: [] } } } },
 					},
 				},
-			},
+			}),
 			output,
 			stream,
 			state,
@@ -366,7 +370,7 @@ describe("Cursor stream teardown", () => {
 		state.resolvedMcpToolCallIds.add("mcp-1");
 
 		processInteractionUpdate(
-			{
+			create(InteractionUpdateSchema, {
 				message: {
 					case: "toolCallStarted",
 					value: {
@@ -374,7 +378,7 @@ describe("Cursor stream teardown", () => {
 						toolCall: { tool: { case: "mcpToolCall", value: { args: { toolCallId: "mcp-1" } } } },
 					},
 				},
-			},
+			}),
 			output,
 			stream,
 			state,
@@ -909,23 +913,24 @@ describe("Cursor modern exec frames: hooks", () => {
 		// mis-wired branch answers a different hook than the one asked, which the
 		// server reads as a stalled or misrouted hook — invisible unless every
 		// variant is exercised.
-		const requestCases = [
-			"preCompact",
-			"subagentStart",
-			"subagentStop",
-			"preToolUse",
-			"postToolUse",
-			"postToolUseFailure",
-			"beforeSubmitPrompt",
-			"afterAgentResponse",
-			"afterAgentThought",
-			"stop",
-		] as const;
+		// One request per modelled case: an explicit oneof `case` at each `create`
+		// keeps the payload typed, where a variable case would not correlate with
+		// its value. Every payload is optional, so an empty value stands in.
+		const requests = [
+			create(ExecuteHookRequestSchema, { request: { case: "preCompact", value: {} } }),
+			create(ExecuteHookRequestSchema, { request: { case: "subagentStart", value: {} } }),
+			create(ExecuteHookRequestSchema, { request: { case: "subagentStop", value: {} } }),
+			create(ExecuteHookRequestSchema, { request: { case: "preToolUse", value: {} } }),
+			create(ExecuteHookRequestSchema, { request: { case: "postToolUse", value: {} } }),
+			create(ExecuteHookRequestSchema, { request: { case: "postToolUseFailure", value: {} } }),
+			create(ExecuteHookRequestSchema, { request: { case: "beforeSubmitPrompt", value: {} } }),
+			create(ExecuteHookRequestSchema, { request: { case: "afterAgentResponse", value: {} } }),
+			create(ExecuteHookRequestSchema, { request: { case: "afterAgentThought", value: {} } }),
+			create(ExecuteHookRequestSchema, { request: { case: "stop", value: {} } }),
+		];
 
-		for (const requestCase of requestCases) {
-			const request = create(ExecuteHookRequestSchema, {
-				request: { case: requestCase, value: {} },
-			} as never);
+		for (const request of requests) {
+			const requestCase = request.request.case;
 			const { frames } = await dispatchExec(
 				buildExecMessage({ case: "executeHookArgs", value: create(ExecuteHookArgsSchema, { request }) }),
 			);
@@ -1413,7 +1418,9 @@ describe("Cursor modern exec frames: server-resolved tool calls leave a paired b
 
 		const usage = { sawTokenDelta: false };
 		processInteractionUpdate(
-			{ message: { case: "toolCallStarted", value: { callId: options.envelopeId ?? "", toolCall } } },
+			create(InteractionUpdateSchema, {
+				message: { case: "toolCallStarted", value: { callId: options.envelopeId ?? "", toolCall } },
+			}),
 			output,
 			stream,
 			state,
@@ -1421,12 +1428,12 @@ describe("Cursor modern exec frames: server-resolved tool calls leave a paired b
 		);
 		const resultsAfterStart = results.length;
 		processInteractionUpdate(
-			{
+			create(InteractionUpdateSchema, {
 				message: {
 					case: "toolCallCompleted",
 					value: options.completionCarriesCall === false ? {} : { toolCall },
 				},
-			},
+			}),
 			output,
 			stream,
 			state,
@@ -1532,14 +1539,18 @@ describe("Cursor modern exec frames: server-resolved tool calls leave a paired b
 		const usage = { sawTokenDelta: false };
 
 		processInteractionUpdate(
-			{ message: { case: "toolCallStarted", value: { callId: "envelope-a", toolCall } } },
+			create(InteractionUpdateSchema, {
+				message: { case: "toolCallStarted", value: { callId: "envelope-a", toolCall } },
+			}),
 			output,
 			stream,
 			state,
 			usage,
 		);
 		processInteractionUpdate(
-			{ message: { case: "toolCallCompleted", value: { callId: "envelope-b", toolCall } } },
+			create(InteractionUpdateSchema, {
+				message: { case: "toolCallCompleted", value: { callId: "envelope-b", toolCall } },
+			}),
 			output,
 			stream,
 			state,
@@ -1550,7 +1561,9 @@ describe("Cursor modern exec frames: server-resolved tool calls leave a paired b
 		expect(results).toEqual([]);
 
 		processInteractionUpdate(
-			{ message: { case: "toolCallCompleted", value: { callId: "envelope-a", toolCall } } },
+			create(InteractionUpdateSchema, {
+				message: { case: "toolCallCompleted", value: { callId: "envelope-a", toolCall } },
+			}),
 			output,
 			stream,
 			state,
@@ -1593,9 +1606,14 @@ describe("Cursor modern exec frames: server-resolved tool calls leave a paired b
 			return result;
 		};
 		const usage = { sawTokenDelta: false };
-		const send = (updateCase: string, callId: string, toolCall: unknown) =>
+		const send = (updateCase: "toolCallStarted" | "toolCallCompleted", callId: string, toolCall: ToolCall) =>
 			processInteractionUpdate(
-				{ message: { case: updateCase, value: { callId, toolCall } } },
+				create(
+					InteractionUpdateSchema,
+					updateCase === "toolCallStarted"
+						? { message: { case: "toolCallStarted", value: { callId, toolCall } } }
+						: { message: { case: "toolCallCompleted", value: { callId, toolCall } } },
+				),
 				output,
 				stream,
 				state,
@@ -1626,7 +1644,7 @@ describe("Cursor modern exec frames: server-resolved tool calls leave a paired b
 		const state = newBlockState();
 
 		processInteractionUpdate(
-			{
+			create(InteractionUpdateSchema, {
 				message: {
 					case: "toolCallStarted",
 					value: {
@@ -1634,7 +1652,7 @@ describe("Cursor modern exec frames: server-resolved tool calls leave a paired b
 						toolCall: { tool: { case: "piReadToolCall", value: { args: { path: "/a.ts" } } } },
 					},
 				},
-			},
+			}),
 			output,
 			stream,
 			state,

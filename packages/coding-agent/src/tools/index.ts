@@ -1,5 +1,5 @@
 import type { Clipboard, InMemorySnapshotStore } from "@oh-my-pi/hashline";
-import type { AgentOptions, AgentTelemetryConfig, AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { AgentOptions, AgentTelemetryConfig, AgentTool, AnyAgentTool } from "@oh-my-pi/pi-agent-core";
 import type { FetchImpl, ImageContent, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManager } from "../async/job-manager";
@@ -110,7 +110,7 @@ export * from "./xdev";
 export * from "./yield";
 
 /** Tool type (AgentTool from pi-ai) */
-export type Tool = AgentTool<any, any, any>;
+export type Tool = AnyAgentTool;
 
 export type ContextFileEntry = {
 	path: string;

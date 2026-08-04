@@ -97,12 +97,12 @@ console.log(`\nSpeedup: ${(jsTime / nativeTime).toFixed(2)}x`);
 
 bench("js/parse+match", () => {
 	for (const sample of samples) {
-		js.matchesKey(sample.data, sample.expected as any);
+		js.matchesKey(sample.data, sample.expected as js.KeyId);
 	}
 });
 
 bench("native/match", () => {
 	for (const sample of samples) {
-		native.matchesKey(sample.data, sample.expected as any);
+		native.matchesKey(sample.data, sample.expected as native.KeyId);
 	}
 });

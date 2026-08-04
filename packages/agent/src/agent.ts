@@ -246,7 +246,7 @@ export interface AgentOptions {
 	 * route calls to tools exposed through side transports (e.g. `xd://`
 	 * device mounts) instead of failing with "Tool not found".
 	 */
-	resolveFallbackTool?: (name: string) => AgentTool<any> | undefined;
+	resolveFallbackTool?: (name: string) => AgentTool | undefined;
 
 	/** Enable intent tracing schema injection/stripping in the harness. */
 	intentTracing?: boolean;
@@ -405,7 +405,7 @@ export class Agent {
 	#kimiApiFormat?: "openai" | "anthropic";
 	#preferWebsockets?: boolean;
 	#transformToolCallArguments?: (args: Record<string, unknown>, toolName: string) => Record<string, unknown>;
-	#resolveFallbackTool?: (name: string) => AgentTool<any> | undefined;
+	#resolveFallbackTool?: (name: string) => AgentTool | undefined;
 	#intentTracing: boolean;
 	#pruneToolDescriptions: boolean;
 	#dialect?: Dialect;
@@ -902,7 +902,7 @@ export class Agent {
 		return this.#interruptMode;
 	}
 
-	setTools(t: AgentTool<any>[]) {
+	setTools(t: AgentTool[]) {
 		this.#state.tools = t;
 	}
 
@@ -1446,8 +1446,8 @@ export class Agent {
 						break;
 
 					case "turn_end":
-						if (event.message.role === "assistant" && (event.message as any).errorMessage) {
-							this.#state.error = (event.message as any).errorMessage;
+						if (event.message.role === "assistant" && event.message.errorMessage) {
+							this.#state.error = event.message.errorMessage;
 						}
 						break;
 

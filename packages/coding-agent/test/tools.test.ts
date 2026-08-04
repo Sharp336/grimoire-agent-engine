@@ -4,7 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import * as zlib from "node:zlib";
-import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import type { AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { TextContent } from "@oh-my-pi/pi-ai";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { DEFAULT_BASH_INTERCEPTOR_RULES, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
@@ -22,11 +23,11 @@ import { DEFAULT_FILE_LIMIT, GrepTool, MULTI_FILE_PER_FILE_MATCHES } from "../sr
 import { HubTool } from "../src/tools/hub";
 
 // Helper to extract text from content blocks
-function getTextOutput(result: any): string {
+function getTextOutput(result: AgentToolResult): string {
 	return (
 		result.content
-			?.filter((c: any) => c.type === "text")
-			.map((c: any) => c.text)
+			.filter((c): c is TextContent => c.type === "text")
+			.map(c => c.text)
 			.join("\n") || ""
 	);
 }
@@ -970,7 +971,7 @@ describe("Coding Agent Tools", () => {
 			const output = getTextOutput(result);
 
 			expect(output).toContain("definitely not a png");
-			expect(result.content.some((c: any) => c.type === "image")).toBe(false);
+			expect(result.content.some(c => c.type === "image")).toBe(false);
 		});
 	});
 

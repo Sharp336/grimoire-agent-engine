@@ -7,6 +7,7 @@ import type {
 	AgentToolContext,
 	AgentToolResult,
 	AgentToolUpdateCallback,
+	AnyAgentTool,
 } from "@oh-my-pi/pi-agent-core";
 import type {
 	CursorMcpCall,
@@ -41,7 +42,7 @@ const CURSOR_TODO_PHASE = "Tasks";
  * tool registry stores. The concrete tools have narrower `execute` parameter
  * types than the default `AgentTool`, which only unify through this alias.
  */
-type CursorBridgeTool = AgentTool<any, any, any>;
+type CursorBridgeTool = AnyAgentTool;
 
 /**
  * The live MCP connections Cursor's resource frames are answered from.

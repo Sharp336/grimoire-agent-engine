@@ -75,7 +75,7 @@ describe("CursorExecHandlers.grep bridge", () => {
 		searchTool = new GrepTool(createTestSession(cwd));
 		handlers = new CursorExecHandlers({
 			cwd,
-			tools: new Map([["grep", searchTool as any]]),
+			tools: new Map<string, AgentTool>([["grep", searchTool]]),
 		});
 	});
 
@@ -89,7 +89,7 @@ describe("CursorExecHandlers.grep bridge", () => {
 			toolCallId: "call-1",
 			path: cwd,
 			pattern: "hello",
-		} as any);
+		} as Parameters<typeof handlers.grep>[0]);
 		expect((defaultResult.details as { matchCount?: number } | undefined)?.matchCount).toBe(1);
 
 		// 2. If caseInsensitive: true, should be case-insensitive (match count 2 for "hello")
@@ -98,7 +98,7 @@ describe("CursorExecHandlers.grep bridge", () => {
 			path: cwd,
 			pattern: "hello",
 			caseInsensitive: true,
-		} as any);
+		} as Parameters<typeof handlers.grep>[0]);
 		expect((insensitiveResult.details as { matchCount?: number } | undefined)?.matchCount).toBe(2);
 
 		// 3. If caseInsensitive: false, should be case-sensitive (match count 1 for "hello")
@@ -107,7 +107,7 @@ describe("CursorExecHandlers.grep bridge", () => {
 			path: cwd,
 			pattern: "hello",
 			caseInsensitive: false,
-		} as any);
+		} as Parameters<typeof handlers.grep>[0]);
 		expect((sensitiveResult.details as { matchCount?: number } | undefined)?.matchCount).toBe(1);
 	});
 

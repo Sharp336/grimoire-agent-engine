@@ -2187,8 +2187,6 @@ export class Settings {
 // Setting Hooks
 // ═══════════════════════════════════════════════════════════════════════════
 
-type SettingHook<P extends SettingPath> = (value: SettingValue<P>, prev: SettingValue<P>) => void;
-
 /**
  * Minimal change-notification primitive backing the exported `on*Changed`
  * subscriptions. Holds a listener set, hands out unsubscribe closures, and
@@ -2228,7 +2226,7 @@ class SettingSignal<A extends unknown[] = []> {
 	}
 }
 
-const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
+const SETTING_HOOKS: Partial<Record<SettingPath, (value: unknown, prev: unknown) => void>> = {
 	"theme.dark": value => {
 		if (typeof value === "string") {
 			setAutoThemeMapping("dark", value);

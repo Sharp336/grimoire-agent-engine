@@ -25,12 +25,13 @@ describe("migrateSessionEntries", () => {
 
 		migrateSessionEntries(entries);
 
-		// Header should have version set to current
-		expect((entries[0] as any).version).toBe(3);
+		const header = entries[0];
+		if (header?.type !== "session") throw new Error("expected session header");
+		expect(header.version).toBe(3);
 
-		// Entries should have id/parentId
-		const msg1 = entries[1] as any;
-		const msg2 = entries[2] as any;
+		const msg1 = entries[1];
+		const msg2 = entries[2];
+		if (msg1?.type !== "message" || msg2?.type !== "message") throw new Error("expected message entries");
 
 		expect(msg1.id).toBeDefined();
 		expect(msg1.id.length).toBe(8);
@@ -71,9 +72,11 @@ describe("migrateSessionEntries", () => {
 
 		migrateSessionEntries(entries);
 
-		// IDs should be unchanged
-		expect((entries[1] as any).id).toBe("abc12345");
-		expect((entries[2] as any).id).toBe("def67890");
-		expect((entries[2] as any).parentId).toBe("abc12345");
+		const msg1 = entries[1];
+		const msg2 = entries[2];
+		if (msg1?.type !== "message" || msg2?.type !== "message") throw new Error("expected message entries");
+		expect(msg1.id).toBe("abc12345");
+		expect(msg2.id).toBe("def67890");
+		expect(msg2.parentId).toBe("abc12345");
 	});
 });

@@ -3015,9 +3015,12 @@ export async function processResponsesStream<TApi extends Api>(
 			);
 			output.stopReason = mapOpenAIResponsesStopReason(response?.status);
 			if (response?.status === "failed" || response?.status === "cancelled") {
-				const error = response?.error ?? (response as any)?.status_details?.error;
+				const responseWithDetails = response as
+					| { status_details?: { error?: { code?: string; message?: string }; reason?: unknown } }
+					| undefined;
+				const error = response?.error ?? responseWithDetails?.status_details?.error;
 				const details = response?.incomplete_details;
-				const statusDetailsReason = (response as any)?.status_details?.reason;
+				const statusDetailsReason = responseWithDetails?.status_details?.reason;
 				const message = error
 					? `${error.code || "unknown"}: ${error.message || "no message"}`
 					: details?.reason
@@ -3051,7 +3054,12 @@ export async function processResponsesStream<TApi extends Api>(
 			// reaches the SDK stream), actively releasing the connection.
 			break;
 		} else if (event.type === "error") {
-			const err = (event as any).error ?? event;
+			const errEvent = event as {
+				error?: { code?: string; message?: string };
+				code?: string;
+				message?: string;
+			};
+			const err = errEvent.error ?? errEvent;
 			const code = err.code ?? "unknown";
 			const message = err.message ?? "no message";
 			throw new AIError.ProviderResponseError(`Error Code ${code}: ${message}`, {
@@ -3060,7 +3068,10 @@ export async function processResponsesStream<TApi extends Api>(
 			});
 		} else if (event.type === "response.failed") {
 			populateResponsesUsageFromResponse(output, event.response?.usage);
-			const error = event.response?.error ?? (event.response as any)?.status_details?.error;
+			const responseWithDetails = event.response as
+				| { status_details?: { error?: { code?: string; message?: string } } }
+				| undefined;
+			const error = event.response?.error ?? responseWithDetails?.status_details?.error;
 			const details = event.response?.incomplete_details;
 			const message = error
 				? `${error.code || "unknown"}: ${error.message || "no message"}`

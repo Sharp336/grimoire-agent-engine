@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { create } from "@bufbuild/protobuf";
 import {
 	type BlockState,
 	mergeCursorMcpToolCallArgs,
@@ -10,6 +11,7 @@ import {
 import type { AssistantMessage, AssistantMessageEvent } from "@oh-my-pi/pi-ai/types";
 import { getStreamingPartialJson, kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { InteractionUpdateSchema } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
 
 interface Harness {
 	output: AssistantMessage;
@@ -77,17 +79,17 @@ function newHarness(): Harness {
 
 function startMcpToolCall(h: Harness, name: string, id = "call-1"): void {
 	processInteractionUpdate(
-		{
+		create(InteractionUpdateSchema, {
 			message: {
 				case: "toolCallStarted",
 				value: {
 					callId: id,
 					toolCall: {
-						mcpToolCall: { args: { name, toolName: name, toolCallId: id } },
+						tool: { case: "mcpToolCall", value: { args: { name, toolName: name, toolCallId: id } } },
 					},
 				},
 			},
-		},
+		}),
 		h.output,
 		h.stream,
 		h.state,
@@ -97,7 +99,7 @@ function startMcpToolCall(h: Harness, name: string, id = "call-1"): void {
 
 function pushArgsTextDelta(h: Harness, argsTextDelta: string): void {
 	processInteractionUpdate(
-		{ message: { case: "partialToolCall", value: { argsTextDelta } } },
+		create(InteractionUpdateSchema, { message: { case: "partialToolCall", value: { argsTextDelta } } }),
 		h.output,
 		h.stream,
 		h.state,
@@ -107,12 +109,12 @@ function pushArgsTextDelta(h: Harness, argsTextDelta: string): void {
 
 function completeMcpToolCall(h: Harness, args: Record<string, Uint8Array> | undefined): void {
 	processInteractionUpdate(
-		{
+		create(InteractionUpdateSchema, {
 			message: {
 				case: "toolCallCompleted",
-				value: { toolCall: { mcpToolCall: { args: { args } } } },
+				value: { toolCall: { tool: { case: "mcpToolCall", value: { args: { args } } } } },
 			},
-		},
+		}),
 		h.output,
 		h.stream,
 		h.state,
@@ -122,7 +124,7 @@ function completeMcpToolCall(h: Harness, args: Record<string, Uint8Array> | unde
 
 function pushTextDelta(h: Harness, text: string): void {
 	processInteractionUpdate(
-		{ message: { case: "textDelta", value: { text } } },
+		create(InteractionUpdateSchema, { message: { case: "textDelta", value: { text } } }),
 		h.output,
 		h.stream,
 		h.state,

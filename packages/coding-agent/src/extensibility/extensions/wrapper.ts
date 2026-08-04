@@ -6,6 +6,8 @@ import type {
 	AgentToolContext,
 	AgentToolResult,
 	AgentToolUpdateCallback,
+	AnyAgentTool,
+	RenderResultOptions,
 	ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
@@ -22,15 +24,15 @@ import type { RegisteredTool, ToolCallEventResult } from "./types";
 /**
  * Adapts a RegisteredTool into an AgentTool.
  */
-export class RegisteredToolAdapter implements AgentTool<any, any, any> {
+export class RegisteredToolAdapter implements AnyAgentTool {
 	declare name: string;
 	declare description: string;
-	declare parameters: any;
+	declare parameters: TSchema;
 	declare label: string;
 	declare strict: boolean;
 
-	renderCall?: (args: any, options: any, theme: any) => any;
-	renderResult?: (result: any, options: any, theme: any, args?: any) => any;
+	renderCall?: (args: unknown, options: RenderResultOptions, theme: unknown) => unknown;
+	renderResult?: (result: AgentToolResult, options: RenderResultOptions, theme: unknown, args?: unknown) => unknown;
 	readonly loadMode: ToolLoadMode;
 
 	constructor(
@@ -45,11 +47,11 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 		// enters the custom-renderer path, gets undefined back, and silently
 		// discards tool result text (extensions without renderers show blank).
 		if (registeredTool.definition.renderCall) {
-			this.renderCall = (args: any, options: any, theme: any) =>
+			this.renderCall = (args, options, theme) =>
 				registeredTool.definition.renderCall!(args, options, theme as Theme);
 		}
 		if (registeredTool.definition.renderResult) {
-			this.renderResult = (result: any, options: any, theme: any, args?: any) =>
+			this.renderResult = (result, options, theme, args) =>
 				registeredTool.definition.renderResult!(
 					result,
 					{ expanded: options.expanded, isPartial: options.isPartial, spinnerFrame: options.spinnerFrame },
@@ -61,9 +63,9 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 
 	async execute(
 		toolCallId: string,
-		params: any,
+		params: unknown,
 		signal?: AbortSignal,
-		onUpdate?: AgentToolUpdateCallback<any>,
+		onUpdate?: AgentToolUpdateCallback,
 		context?: AgentToolContext,
 	) {
 		// Bind the extension context to this tool's own name so `ctx.invokeTool` delegates to the

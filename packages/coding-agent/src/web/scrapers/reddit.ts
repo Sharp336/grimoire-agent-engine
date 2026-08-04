@@ -21,6 +21,17 @@ interface RedditComment {
 	replies?: { data: { children: Array<{ data: RedditComment }> } };
 }
 
+/** Loosely-typed shape of the Reddit JSON API: a listing (subreddit page) or an
+ *  array of listings (post page: `[post, comments]`). Leaf `data` payloads are
+ *  narrowed to {@link RedditPost}/{@link RedditComment} at each use site. */
+interface RedditChild {
+	kind?: string;
+	data?: unknown;
+}
+interface RedditListing {
+	data?: { children?: RedditChild[] };
+}
+
 /**
  * Handle Reddit URLs via JSON API
  */
@@ -44,7 +55,7 @@ export const handleReddit: SpecialHandler = async (
 		const result = await loadPage(jsonUrl, { timeout, signal });
 		if (!result.ok) return null;
 
-		const data = tryParseJson<any>(result.content);
+		const data = tryParseJson<RedditListing | RedditListing[]>(result.content);
 		if (!data) return null;
 		let md = "";
 
@@ -64,9 +75,10 @@ export const handleReddit: SpecialHandler = async (
 				}
 
 				// Add comments if available
-				if (data.length >= 2 && data[1]?.data?.children) {
+				const commentChildren = data.length >= 2 ? data[1]?.data?.children : undefined;
+				if (commentChildren) {
 					md += `---\n\n## Top Comments\n\n`;
-					const comments = data[1].data.children.filter((c: { kind: string }) => c.kind === "t1").slice(0, 10);
+					const comments = commentChildren.filter(c => c.kind === "t1").slice(0, 10);
 
 					for (const { data: comment } of comments as Array<{ data: RedditComment }>) {
 						md += `### u/${comment.author} · ${comment.score} points\n\n`;
@@ -74,7 +86,7 @@ export const handleReddit: SpecialHandler = async (
 					}
 				}
 			}
-		} else if (data?.data?.children) {
+		} else if (!Array.isArray(data) && data.data?.children) {
 			// Subreddit or listing page
 			const posts = data.data.children.slice(0, 20) as Array<{ data: RedditPost }>;
 			const subreddit = posts[0]?.data?.subreddit;

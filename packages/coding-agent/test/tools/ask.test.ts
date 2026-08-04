@@ -49,7 +49,7 @@ function createContext(args: {
 	) => Promise<string | undefined>;
 	askDialog?: (
 		questions: ExtensionAskDialogQuestion[],
-		dialogOptions?: any,
+		dialogOptions?: unknown,
 	) => Promise<ExtensionAskDialogResult | undefined>;
 	abort?: () => void;
 }): AgentToolContext {

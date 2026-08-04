@@ -150,6 +150,10 @@ const createMockKernel = () => {
 	};
 };
 
+function toolResultDetailsIsError(details: unknown): boolean {
+	return typeof details === "object" && details !== null && "isError" in details && details.isError === true;
+}
+
 describe("AgentSession python cleanup", () => {
 	const tempDirs: TempDir[] = [];
 	let originalNullPrompt: string | undefined;
@@ -445,7 +449,7 @@ describe("AgentSession python cleanup", () => {
 		expect(disposed).toBe(true);
 		expect(toolExecutionSettled).toBe(true);
 		expect(executeSpy).toHaveBeenCalledTimes(1);
-		expect(toolResult.details?.isError).toBe(true);
+		expect(toolResultDetailsIsError(toolResult.details)).toBe(true);
 		expect(toolResult.content).toContainEqual(
 			expect.objectContaining({ type: "text", text: expect.stringContaining("Command aborted") }),
 		);

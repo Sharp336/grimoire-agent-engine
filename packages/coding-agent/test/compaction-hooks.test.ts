@@ -10,25 +10,26 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import {
-	HookRunner,
-	type LoadedHook,
-	type SessionBeforeCompactEvent,
-	type SessionCompactEvent,
-	type SessionEvent,
+import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import type {
+	SessionBeforeCompactEvent,
+	SessionBeforeCompactResult,
+	SessionCompactEvent,
+	SessionEvent,
 } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
-import { theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { e2eApiKey } from "./utilities";
 
 describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("Compaction hooks", () => {
 	let session: AgentSession;
 	let tempDir: string;
-	let hookRunner: HookRunner;
 	let capturedEvents: SessionEvent[];
 
 	beforeEach(() => {
@@ -47,43 +48,22 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("Compaction hooks", () => {
 	});
 
 	function createHook(
-		onBeforeCompact?: (event: SessionBeforeCompactEvent) => { cancel?: boolean; compaction?: any } | undefined,
+		onBeforeCompact?: (event: SessionBeforeCompactEvent) => SessionBeforeCompactResult | undefined,
 		onCompact?: (event: SessionCompactEvent) => void,
-	): LoadedHook {
-		const handlers = new Map<string, ((event: any, ctx: any) => Promise<any>)[]>();
-
-		handlers.set("session_before_compact", [
-			async (event: SessionBeforeCompactEvent) => {
+	): ExtensionFactory {
+		return pi => {
+			pi.on("session_before_compact", event => {
 				capturedEvents.push(event);
-				if (onBeforeCompact) {
-					return onBeforeCompact(event);
-				}
-				return undefined;
-			},
-		]);
-
-		handlers.set("session_compact", [
-			async (event: SessionCompactEvent) => {
+				return onBeforeCompact?.(event);
+			});
+			pi.on("session_compact", event => {
 				capturedEvents.push(event);
-				if (onCompact) {
-					onCompact(event);
-				}
-				return undefined;
-			},
-		]);
-
-		return {
-			path: "test-hook",
-			resolvedPath: "/test/test-hook.ts",
-			handlers,
-			messageRenderers: new Map(),
-			commands: new Map(),
-			setSendMessageHandler: () => {},
-			setAppendEntryHandler: () => {},
+				onCompact?.(event);
+			});
 		};
 	}
 
-	async function createSession(hooks: LoadedHook[]) {
+	async function createSession(extensionFactories: ExtensionFactory[]) {
 		const toolSession: ToolSession = {
 			cwd: tempDir,
 			hasUI: false,
@@ -107,33 +87,20 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("Compaction hooks", () => {
 		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
 		const modelRegistry = new ModelRegistry(authStorage);
 
-		hookRunner = new HookRunner(hooks, tempDir, sessionManager, modelRegistry);
-		hookRunner.initialize({
-			getModel: () => session.model,
-			sendMessageHandler: async () => {},
-			appendEntryHandler: async () => {},
-			uiContext: {
-				select: async () => undefined,
-				confirm: async () => false,
-				input: async () => undefined,
-				notify: () => {},
-				setStatus: () => {},
-				custom: async () => undefined as never,
-				setEditorText: () => {},
-				getEditorText: () => "",
-				editor: async () => undefined,
-				get theme() {
-					return theme;
-				},
-			},
-			hasUI: false,
-		});
+		const extensionRuntime = new ExtensionRuntime();
+		const eventBus = new EventBus();
+		const extensions = await Promise.all(
+			extensionFactories.map((factory, index) =>
+				loadExtensionFromFactory(factory, tempDir, eventBus, extensionRuntime, `test-hook-${index}`),
+			),
+		);
+		const extensionRunner = new ExtensionRunner(extensions, extensionRuntime, tempDir, sessionManager, modelRegistry);
 
 		session = new AgentSession({
 			agent,
 			sessionManager,
 			settings,
-			extensionRunner: hookRunner as any,
+			extensionRunner,
 			modelRegistry,
 		});
 
@@ -245,33 +212,14 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("Compaction hooks", () => {
 	}, 120000);
 
 	it("should continue with default compaction if hook throws error", async () => {
-		const throwingHook: LoadedHook = {
-			path: "throwing-hook",
-			resolvedPath: "/test/throwing-hook.ts",
-			handlers: new Map<string, ((event: any, ctx: any) => Promise<any>)[]>([
-				[
-					"session_before_compact",
-					[
-						async (event: SessionBeforeCompactEvent) => {
-							capturedEvents.push(event);
-							throw new Error("Hook intentionally throws");
-						},
-					],
-				],
-				[
-					"session_compact",
-					[
-						async (event: SessionCompactEvent) => {
-							capturedEvents.push(event);
-							return undefined;
-						},
-					],
-				],
-			]),
-			messageRenderers: new Map(),
-			commands: new Map(),
-			setSendMessageHandler: () => {},
-			setAppendEntryHandler: () => {},
+		const throwingHook: ExtensionFactory = pi => {
+			pi.on("session_before_compact", event => {
+				capturedEvents.push(event);
+				throw new Error("Hook intentionally throws");
+			});
+			pi.on("session_compact", event => {
+				capturedEvents.push(event);
+			});
 		};
 
 		await createSession([throwingHook]);
@@ -291,62 +239,22 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("Compaction hooks", () => {
 	it("should call multiple hooks in order", async () => {
 		const callOrder: string[] = [];
 
-		const hook1: LoadedHook = {
-			path: "hook1",
-			resolvedPath: "/test/hook1.ts",
-			handlers: new Map<string, ((event: any, ctx: any) => Promise<any>)[]>([
-				[
-					"session_before_compact",
-					[
-						async () => {
-							callOrder.push("hook1-before");
-							return undefined;
-						},
-					],
-				],
-				[
-					"session_compact",
-					[
-						async () => {
-							callOrder.push("hook1-after");
-							return undefined;
-						},
-					],
-				],
-			]),
-			messageRenderers: new Map(),
-			commands: new Map(),
-			setSendMessageHandler: () => {},
-			setAppendEntryHandler: () => {},
+		const hook1: ExtensionFactory = pi => {
+			pi.on("session_before_compact", () => {
+				callOrder.push("hook1-before");
+			});
+			pi.on("session_compact", () => {
+				callOrder.push("hook1-after");
+			});
 		};
 
-		const hook2: LoadedHook = {
-			path: "hook2",
-			resolvedPath: "/test/hook2.ts",
-			handlers: new Map<string, ((event: any, ctx: any) => Promise<any>)[]>([
-				[
-					"session_before_compact",
-					[
-						async () => {
-							callOrder.push("hook2-before");
-							return undefined;
-						},
-					],
-				],
-				[
-					"session_compact",
-					[
-						async () => {
-							callOrder.push("hook2-after");
-							return undefined;
-						},
-					],
-				],
-			]),
-			messageRenderers: new Map(),
-			commands: new Map(),
-			setSendMessageHandler: () => {},
-			setAppendEntryHandler: () => {},
+		const hook2: ExtensionFactory = pi => {
+			pi.on("session_before_compact", () => {
+				callOrder.push("hook2-before");
+			});
+			pi.on("session_compact", () => {
+				callOrder.push("hook2-after");
+			});
 		};
 
 		await createSession([hook1, hook2]);

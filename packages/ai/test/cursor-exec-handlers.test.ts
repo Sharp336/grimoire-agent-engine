@@ -21,6 +21,7 @@ import {
 	type AgentRunRequest,
 	AgentServerMessageSchema,
 	ExecServerMessageSchema,
+	InteractionUpdateSchema,
 	McpArgsSchema,
 	McpResultSchema,
 	McpSuccessSchema,
@@ -1146,7 +1147,7 @@ describe("Cursor K3 completion warnings", () => {
 		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 
 		processInteractionUpdate(
-			{ message: { case: "turnEnded", value: {} } },
+			create(InteractionUpdateSchema, { message: { case: "turnEnded", value: {} } }),
 			output,
 			new AssistantMessageEventStream(),
 			newBlockState(),
@@ -1279,7 +1280,9 @@ describe("Cursor exec local-work tracking (issue #4593)", () => {
 		);
 
 		processInteractionUpdate(
-			{ message: { case: "textDelta", value: { text: "Final synthesized answer" } } },
+			create(InteractionUpdateSchema, {
+				message: { case: "textDelta", value: { text: "Final synthesized answer" } },
+			}),
 			output,
 			stream,
 			state,
@@ -1349,23 +1352,26 @@ describe("Cursor exec local-work tracking (issue #4593)", () => {
 		// The block itself only exists once the streamed call arrives. It must
 		// come out unresolved, so `agent-loop.ts` executes it and pairs a result.
 		processInteractionUpdate(
-			{
+			create(InteractionUpdateSchema, {
 				message: {
 					case: "toolCallStarted",
 					value: {
 						callId: "call-mcp-unhandled",
 						toolCall: {
-							mcpToolCall: {
-								args: {
-									name: "mcp__fixture_report",
-									toolName: "mcp__fixture_report",
-									toolCallId: "call-mcp-unhandled",
+							tool: {
+								case: "mcpToolCall",
+								value: {
+									args: {
+										name: "mcp__fixture_report",
+										toolName: "mcp__fixture_report",
+										toolCallId: "call-mcp-unhandled",
+									},
 								},
 							},
 						},
 					},
 				},
-			},
+			}),
 			output,
 			stream,
 			state,

@@ -8,7 +8,7 @@ import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { applyToolProxy } from "../tool-proxy";
 import type { CustomTool, CustomToolContext } from "./types";
 
-export class CustomToolAdapter<TParams extends TSchema = TSchema, TDetails = any, TTheme extends Theme = Theme>
+export class CustomToolAdapter<TParams extends TSchema = TSchema, TDetails = unknown, TTheme extends Theme = Theme>
 	implements AgentTool<TParams, TDetails, TTheme>
 {
 	declare name: string;
@@ -41,7 +41,7 @@ export class CustomToolAdapter<TParams extends TSchema = TSchema, TDetails = any
 	 * Backward-compatible export of factory function for existing callers.
 	 * Prefer CustomToolAdapter constructor directly.
 	 */
-	static wrap<TParams extends TSchema = TSchema, TDetails = any, TTheme extends Theme = Theme>(
+	static wrap<TParams extends TSchema = TSchema, TDetails = unknown, TTheme extends Theme = Theme>(
 		tool: CustomTool<TParams, TDetails>,
 		getContext: () => CustomToolContext,
 	): AgentTool<TParams, TDetails, TTheme> {

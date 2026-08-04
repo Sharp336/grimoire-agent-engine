@@ -146,6 +146,13 @@ async function armInputWaiter(mode: InteractiveMode): Promise<{
 	};
 }
 
+function goalCompletionReport(details: unknown): unknown {
+	if (typeof details === "object" && details !== null && "completionBudgetReport" in details) {
+		return details.completionBudgetReport;
+	}
+	return undefined;
+}
+
 describe("InteractiveMode goal mode integration", () => {
 	let harness: GoalHarness;
 	let shared: SharedFixture;
@@ -455,7 +462,7 @@ describe("InteractiveMode goal mode integration", () => {
 		const result = await goalTool.execute("call-1", { op: "complete" });
 		const completionText = JSON.stringify(result.content);
 
-		expect(result.details?.completionBudgetReport).toBe(
+		expect(goalCompletionReport(result.details)).toBe(
 			"Goal achieved. Report final budget usage to the user: tokens used: 0 of 50.",
 		);
 		expect(completionText).toContain("Goal achieved. Report final budget usage to the user: tokens used: 0 of 50.");

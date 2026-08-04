@@ -170,7 +170,7 @@ export interface Component {
 	/**
 	 * Optional hook to set whether this component ignores tight layout mode.
 	 */
-	setIgnoreTight?(ignore: boolean): any;
+	setIgnoreTight?(ignore: boolean): void;
 
 	/**
 	 * Optional teardown. Called when the component is permanently removed from

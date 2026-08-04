@@ -214,7 +214,9 @@ describe("legacy-pi @(scope)/pi-ai root `Type` remap (issue #1437)", () => {
 					'export const schema = StringEnum(["red", "green"] as const, { description: "primary colors" });',
 				].join("\n"),
 			),
-		)) as { schema: { safeParse: (input: unknown) => { success: boolean }; toJSON?: () => any } };
+		)) as {
+			schema: { safeParse: (input: unknown) => { success: boolean }; toJSON?: () => { description?: unknown } };
+		};
 
 		expect(loaded.schema.safeParse("red").success).toBe(true);
 		expect(loaded.schema.safeParse("blue").success).toBe(false);
