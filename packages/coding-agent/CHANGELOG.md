@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in `settings.autoRestartOnUpdate` (default `false`). A persisted interactive session detects a stable replacement of its running executable, waits for the active turn to settle, then resumes through the normal session path with unsaved editor text retained.
+
 ## [17.2.8] - 2026-08-04
 
 ### Changed
