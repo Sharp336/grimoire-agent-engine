@@ -10,10 +10,8 @@
  * A schema is a callable: `schema(data)` returns the (possibly morphed)
  * output, or an `OmpErrors` on failure (`result instanceof type.errors`).
  */
-import { compile, compileAllows } from "./compile";
 import { type ErrorConfig, OmpErrors, OmpTypeError, TraversalError } from "./errors";
 import type { InferDef, InferDefIn, InferObjectLiteral, InferObjectLiteralIn, InferString } from "./infer";
-import { walk } from "./interp";
 import {
 	type AliasResolver,
 	type Constructor,
@@ -35,6 +33,7 @@ import {
 } from "./ir";
 import { irToJsonSchema, type JsonSchemaOptions } from "./json-schema";
 import { keywordIR, patternIR } from "./keywords";
+import { compile, compileAllows, walk } from "./validate";
 
 // `Extract`/`Exclude` in the string DSL need assignability, which is defined here.
 useAssignability(isSubtype);
