@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import {
 	buildCommandCodeServerConfig,
 	clearCommandCodeServerConfigCache,
@@ -9,6 +10,7 @@ import {
 import type { Context, Model, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { COMMAND_CODE_TEXT_FRAMES, COMMAND_CODE_TOOL_CALL_FRAMES } from "./fixtures/command-code-stream";
 
 type CapturedRequest = {
@@ -540,3 +542,52 @@ describe("command-code helpers", () => {
 		expect(config.recentCommits.length).toBeGreaterThan(0);
 	});
 });
+
+describe("command-code effort dial", () => {
+	it("omits reasoning_effort for unladdered bundled reasoners under a global setting", async () => {
+		scenario = { kind: "capture", body: `{"type":"finish","finishReason":"stop"}\n` };
+		const baseUrl = await startServer();
+		const model = {
+			...getBundledModel("command-code", "Qwen/Qwen3.7-Plus"),
+			baseUrl,
+		} as Model<"command-code">;
+		expect(model.thinking).toBeUndefined();
+
+		const stream = streamSimple(model, { messages: [{ role: "user", content: "hi", timestamp: 1 }] }, {
+			apiKey: "test-key",
+			reasoning: Effort.High,
+			config: null,
+		});
+		for await (const _ of stream) {
+			/* drain */
+		}
+		await stream.result();
+
+		const params = lastRequest!.body.params as Record<string, unknown>;
+		expect(params.reasoning_effort).toBeUndefined();
+	});
+
+	it("sends reasoning_effort for authored Command Code ladders", async () => {
+		scenario = { kind: "capture", body: `{"type":"finish","finishReason":"stop"}\n` };
+		const baseUrl = await startServer();
+		const model = {
+			...getBundledModel("command-code", "deepseek/deepseek-v4-flash"),
+			baseUrl,
+		} as Model<"command-code">;
+		expect(model.thinking?.efforts).toEqual([Effort.High, Effort.Max]);
+
+		const stream = streamSimple(model, { messages: [{ role: "user", content: "hi", timestamp: 1 }] }, {
+			apiKey: "test-key",
+			reasoning: Effort.High,
+			config: null,
+		});
+		for await (const _ of stream) {
+			/* drain */
+		}
+		await stream.result();
+
+		const params = lastRequest!.body.params as Record<string, unknown>;
+		expect(params.reasoning_effort).toBe("high");
+	});
+});
+

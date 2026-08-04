@@ -1905,8 +1905,10 @@ function mapOptionsForApi<TApi extends Api>(
 		}
 		case "command-code": {
 			const ccModel = model as Model<"command-code">;
-			// Models may be `reasoning: true` with no authored effort ladder (gateway
-			// has no dial). Skip validation and omit `reasoningEffort` in that case.
+			// Official CLI only dials `params.reasoning_effort` for models in
+			// `EFFORTS_BY_MODEL`. Seeded ladders land on `thinking`; unladdered
+			// reasoners keep `thinking: undefined` via `trustExplicitThinkingOnly`
+			// ("Default" = omit the wire field). Skip validation in that case.
 			const effort =
 				options?.reasoning && !options.disableReasoning && ccModel.thinking?.efforts.length
 					? requireSupportedEffort(ccModel, options.reasoning)
