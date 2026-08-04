@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `peakPricing` to models.yml custom model definitions, `modelOverrides`, and extension provider registrations, so configured and overridden models can declare peak/off-peak UTC pricing windows that flow into displayed cost calculation.
+
 ## [17.2.8] - 2026-08-04
 
 ### Changed
