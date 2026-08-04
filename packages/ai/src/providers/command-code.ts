@@ -367,7 +367,9 @@ function toWireToolResultValue(content: (TextContent | ImageContent)[]): string 
  */
 function toWireMessages(messages: Message[], supportsImages: boolean): unknown[] {
 	const out: unknown[] = [];
-	for (const message of messages) {
+	for (let i = 0; i < messages.length; i++) {
+		const message = messages[i]!;
+
 		if (message.role === "assistant") {
 			const content: Array<Record<string, unknown>> = [];
 			for (const block of message.content) {
@@ -389,29 +391,37 @@ function toWireMessages(messages: Message[], supportsImages: boolean): unknown[]
 		}
 
 		if (message.role === "toolResult") {
-			const imageBlocks = message.content.filter((block): block is ImageContent => block.type === "image");
-			const omittedImages = imageBlocks.length > 0 && !supportsImages;
-			const textValue = joinTextWithImagePlaceholder(toWireToolResultValue(message.content), omittedImages);
-			out.push({
-				role: "tool",
-				content: [
-					{
-						type: "tool-result",
-						toolCallId: message.toolCallId,
-						toolName: "",
-						output: { type: "text", value: textValue },
-					},
-				],
-			});
-			// The tool-result `output` channel is text-only on the wire. Re-attach
-			// image payloads as a follow-up user turn (same shape as user
-			// screenshots) only when the selected model accepts vision input.
-			if (supportsImages && imageBlocks.length > 0) {
+			// Keep consecutive tool results contiguous (parallel tool calls). Buffer
+			// any image payloads and hoist them once after the whole run.
+			const pendingImages: ImageContent[] = [];
+			let j = i;
+			for (; j < messages.length && messages[j]!.role === "toolResult"; j++) {
+				const toolMsg = messages[j]! as Extract<Message, { role: "toolResult" }>;
+				const imageBlocks = toolMsg.content.filter((block): block is ImageContent => block.type === "image");
+				const omittedImages = imageBlocks.length > 0 && !supportsImages;
+				const textValue = joinTextWithImagePlaceholder(toWireToolResultValue(toolMsg.content), omittedImages);
+				out.push({
+					role: "tool",
+					content: [
+						{
+							type: "tool-result",
+							toolCallId: toolMsg.toolCallId,
+							toolName: "",
+							output: { type: "text", value: textValue },
+						},
+					],
+				});
+				if (supportsImages && imageBlocks.length > 0) {
+					pendingImages.push(...imageBlocks);
+				}
+			}
+			i = j - 1;
+			if (pendingImages.length > 0) {
 				out.push({
 					role: "user",
 					content: [
 						{ type: "text", text: "Attached image(s) from the tool result(s) above:" },
-						...userContentBlocks(imageBlocks, true),
+						...userContentBlocks(pendingImages, true),
 					],
 				});
 			}

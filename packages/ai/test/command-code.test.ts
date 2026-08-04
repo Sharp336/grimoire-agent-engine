@@ -379,6 +379,67 @@ describe("command-code request parity", () => {
 		]);
 	});
 
+	it("buffers hoisted images until after consecutive tool results", async () => {
+		scenario = {
+			kind: "capture",
+			body: `{"type":"text-delta","text":"ok"}\n{"type":"finish","finishReason":"stop"}\n`,
+		};
+		const baseUrl = await startServer();
+		const context: Context = {
+			messages: [
+				{
+					role: "assistant",
+					content: [
+						{ type: "toolCall", id: "call_a", name: "read", arguments: { path: "a.png" } },
+						{ type: "toolCall", id: "call_b", name: "read", arguments: { path: "b.txt" } },
+					],
+					api: "command-code",
+					provider: "command-code",
+					model: "Qwen/Qwen3.7-Plus",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 1,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call_a",
+					toolName: "read",
+					content: [
+						{ type: "text", text: "image a" },
+						{ type: "image", mimeType: "image/png", data: "AAAA" },
+					],
+					isError: false,
+					timestamp: 2,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call_b",
+					toolName: "read",
+					content: [{ type: "text", text: "plain b" }],
+					isError: false,
+					timestamp: 3,
+				},
+				{ role: "user", content: "compare", timestamp: 4 },
+			],
+		};
+		await collectStream(makeVisionModel(baseUrl), context);
+		const params = lastRequest!.body.params as { messages: Array<Record<string, unknown>> };
+		// Contiguous tool window first, then a single hoist turn.
+		expect(params.messages.map(message => message.role)).toEqual(["assistant", "tool", "tool", "user", "user"]);
+		const hoist = params.messages[3] as { content: Array<Record<string, unknown>> };
+		expect(hoist.content).toEqual([
+			{ type: "text", text: "Attached image(s) from the tool result(s) above:" },
+			{ type: "image", image: "data:image/png;base64,AAAA", mimeType: "image/png" },
+		]);
+	});
+
 	it("omits tool-result images for text-only models", async () => {
 		scenario = {
 			kind: "capture",
@@ -633,6 +694,33 @@ describe("command-code helpers", () => {
 		expect(typeof config.gitStatus).toBe("string");
 		expect(config.mainBranch.length).toBeGreaterThan(0);
 		expect(config.recentCommits.length).toBeGreaterThan(0);
+	});
+});
+
+describe("command-code streamSimple options", () => {
+	it("forwards cwd into the Command Code config snapshot", async () => {
+		scenario = { kind: "capture", body: `{"type":"finish","finishReason":"stop"}\n` };
+		const baseUrl = await startServer();
+		const model = {
+			...getBundledModel("command-code", "deepseek/deepseek-v4-flash"),
+			baseUrl,
+		} as Model<"command-code">;
+		const cwd = process.cwd();
+		const stream = streamSimple(
+			model,
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			{
+				apiKey: "test-key",
+				cwd,
+			},
+		);
+		for await (const _ of stream) {
+			/* drain */
+		}
+		await stream.result();
+		const config = lastRequest!.body.config as { workingDir?: string };
+		expect(config.workingDir).toBe(cwd);
+		expect(lastRequest!.headers.get("x-project-slug")).toBe(slugifyProjectPath(cwd));
 	});
 });
 

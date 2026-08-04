@@ -1917,6 +1917,7 @@ function mapOptionsForApi<TApi extends Api>(
 				...base,
 				reasoningEffort: effort,
 				conversationId: options?.sessionId,
+				cwd: options?.cwd,
 			});
 		}
 		default:
