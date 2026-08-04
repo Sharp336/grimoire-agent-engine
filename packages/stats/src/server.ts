@@ -9,6 +9,7 @@ import {
 	getCostDashboardStats,
 	getDashboardStats,
 	getModelDashboardStats,
+	getModelList,
 	getOverviewStats,
 	getProviderDashboardStats,
 	getRecentErrors,
@@ -237,14 +238,59 @@ export async function handleApi(req: Request): Promise<Response> {
 
 	if (path === "/api/stats/recent") {
 		const limit = url.searchParams.get("limit");
-		const stats = await getRecentRequests(limit ? parseInt(limit, 10) : undefined);
+		const offset = url.searchParams.get("offset");
+		const model = url.searchParams.get("model");
+		const range = url.searchParams.get("range");
+		const parsedLimit = limit ? parseInt(limit, 10) : undefined;
+		const parsedOffset = offset ? parseInt(offset, 10) : undefined;
+		if (
+			parsedLimit !== undefined &&
+			(Number.isNaN(parsedLimit) || parsedLimit < 0 || !Number.isInteger(parsedLimit))
+		) {
+			return new Response("Bad Request: invalid limit", { status: 400 });
+		}
+		if (parsedLimit !== undefined && parsedLimit > 1000) {
+			return new Response("Bad Request: limit too large", { status: 400 });
+		}
+		if (
+			parsedOffset !== undefined &&
+			(Number.isNaN(parsedOffset) || parsedOffset < 0 || !Number.isInteger(parsedOffset))
+		) {
+			return new Response("Bad Request: invalid offset", { status: 400 });
+		}
+		const stats = await getRecentRequests(parsedLimit, parsedOffset, model || undefined, range || undefined);
 		return Response.json(stats);
 	}
 
 	if (path === "/api/stats/errors") {
 		const limit = url.searchParams.get("limit");
-		const stats = await getRecentErrors(range, limit ? parseInt(limit, 10) : undefined);
+		const offset = url.searchParams.get("offset");
+		const model = url.searchParams.get("model");
+		const range = url.searchParams.get("range");
+		const parsedLimit = limit ? parseInt(limit, 10) : undefined;
+		const parsedOffset = offset ? parseInt(offset, 10) : undefined;
+		if (
+			parsedLimit !== undefined &&
+			(Number.isNaN(parsedLimit) || parsedLimit < 0 || !Number.isInteger(parsedLimit))
+		) {
+			return new Response("Bad Request: invalid limit", { status: 400 });
+		}
+		if (parsedLimit !== undefined && parsedLimit > 1000) {
+			return new Response("Bad Request: limit too large", { status: 400 });
+		}
+		if (
+			parsedOffset !== undefined &&
+			(Number.isNaN(parsedOffset) || parsedOffset < 0 || !Number.isInteger(parsedOffset))
+		) {
+			return new Response("Bad Request: invalid offset", { status: 400 });
+		}
+		const stats = await getRecentErrors(parsedLimit, parsedOffset, model || undefined, range || undefined);
 		return Response.json(stats);
+	}
+
+	if (path === "/api/stats/models-list") {
+		const models = await getModelList();
+		return Response.json(models);
 	}
 
 	if (path === "/api/stats/models") {
@@ -265,7 +311,11 @@ export async function handleApi(req: Request): Promise<Response> {
 	if (path.startsWith("/api/request/")) {
 		const id = path.split("/").pop();
 		if (!id) return new Response("Bad Request", { status: 400 });
-		const details = await getRequestDetails(parseInt(id, 10));
+		const parsedId = parseInt(id, 10);
+		if (Number.isNaN(parsedId) || parsedId < 0 || !Number.isInteger(parsedId)) {
+			return new Response("Bad Request: invalid id", { status: 400 });
+		}
+		const details = await getRequestDetails(parsedId);
 		if (!details) return new Response("Not Found", { status: 404 });
 		return Response.json(details);
 	}

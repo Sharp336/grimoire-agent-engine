@@ -14,6 +14,7 @@ import { BUILTIN_MARKETPLACE_SLASH_COMMANDS, reloadTuiPluginState } from "./buil
 import { BUILTIN_MODE_SLASH_COMMANDS } from "./builtin-modes";
 import { BUILTIN_SESSION_SLASH_COMMANDS } from "./builtin-session";
 import { parseSlashCommand } from "./helpers/parse";
+import { interceptSlashCommand } from "../i18n/interceptor";
 import type {
 	BuiltinSlashCommand,
 	ParsedSlashCommand,
@@ -70,7 +71,18 @@ function materializeTuiBuiltinSlashCommand(
 	cmd: BuiltinSlashCommand,
 	runtime?: TuiSlashCommandRuntime,
 ): TuiBuiltinSlashCommand {
-	const materialized: TuiBuiltinSlashCommand = { ...cmd };
+const translated = interceptSlashCommand({
+		name: cmd.name,
+		description: cmd.description,
+		subcommands: cmd.subcommands,
+	});
+	const materialized: TuiBuiltinSlashCommand = { ...cmd, description: translated.description };
+	if (translated.subcommands) {
+		materialized.subcommands = cmd.subcommands!.map((sub, i) => ({
+			...sub,
+			description: translated.subcommands![i].description,
+		}));
+	}
 	if (cmd.subcommands) {
 		materialized.getArgumentCompletions =
 			cmd.name === "mcp" && runtime

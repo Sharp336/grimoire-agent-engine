@@ -10,6 +10,7 @@ import { Container, Markdown, Text } from "@oh-my-pi/pi-tui";
 import { formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import { settings } from "../config/settings";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
+import { formatCost } from "../i18n/exchange-rate";
 import { formatContextUsage } from "../modes/components/status-line/context-thresholds";
 import { getMarkdownTheme, type Theme } from "../modes/theme/theme";
 import { stripGeneratedOutputNotice, stripRawOutputArtifactNotice } from "../tools/output-meta";
@@ -117,7 +118,7 @@ function appendAgentStats(
 		line += `${theme.sep.dot}${theme.fg("dim", ctx)}`;
 	}
 	if (opts.cost > 0) {
-		line += `${theme.sep.dot}${theme.fg("statusLineCost", `$${opts.cost.toFixed(2)}`)}`;
+		line += `${theme.sep.dot}${theme.fg("statusLineCost", formatCost(opts.cost))}`;
 	}
 	if (opts.resolvedModel && opts.showResolvedModelBadge) {
 		line += `${theme.sep.dot}${theme.fg("dim", truncateToWidth(replaceTabs(opts.resolvedModel), 30))}`;

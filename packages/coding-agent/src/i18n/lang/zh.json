@@ -1,0 +1,78 @@
+{
+  "meta": {
+    "version": "16.2.2",
+    "lastUpdated": "2026-07-24",
+    "completeness": 100,
+    "description": "简体中文翻译文件"
+  },
+  "errors": {
+    "file_not_found": "文件未找到：{path}",
+    "permission_denied": "权限被拒绝：{path}",
+    "invalid_config": "配置无效：{key}",
+    "command_failed": "命令执行失败：{command}",
+    "network_error": "网络错误：{message}",
+    "timeout": "操作超时：{operation}",
+    "parse_error": "解析错误：{file}"
+  },
+  "tools": {
+    "read": {
+      "description": "读取文件内容",
+      "status_reading": "正在读取...",
+      "status_success": "已读取 {path}",
+      "status_error": "读取失败"
+    },
+    "write": {
+      "description": "写入文件",
+      "status_writing": "正在写入...",
+      "status_success": "已写入 {path}",
+      "status_error": "写入失败"
+    },
+    "edit": {
+      "description": "编辑文件",
+      "status_editing": "正在编辑...",
+      "status_success": "已编辑 {path}",
+      "status_error": "编辑失败"
+    },
+    "bash": {
+      "description": "执行 Bash 命令",
+      "status_running": "正在执行...",
+      "status_success": "命令执行完成",
+      "status_error": "命令执行失败",
+      "status_timeout": "命令执行超时"
+    },
+    "grep": {
+      "description": "搜索文件内容",
+      "status_searching": "正在搜索...",
+      "status_success": "搜索完成",
+      "status_no_results": "未找到匹配项"
+    },
+    "glob": {
+      "description": "搜索文件路径",
+      "status_searching": "正在搜索文件...",
+      "status_success": "搜索完成",
+      "status_no_results": "未找到匹配文件"
+    }
+  },
+  "ui": {
+    "loading": "加载中...",
+    "processing": "处理中...",
+    "confirm": "确认",
+    "cancel": "取消",
+    "yes": "是",
+    "no": "否",
+    "error": "错误",
+    "warning": "警告",
+    "info": "信息",
+    "success": "成功",
+    "retry": "重试",
+    "abort": "中止"
+  },
+  "cli": {
+    "version": "版本",
+    "help": "帮助",
+    "usage": "用法",
+    "options": "选项",
+    "commands": "命令",
+    "examples": "示例"
+  }
+}

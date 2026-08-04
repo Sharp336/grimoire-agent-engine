@@ -217,13 +217,14 @@ export async function initDb(): Promise<Database> {
 	`);
 
 	const messageColumns = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
-	if (!messageColumns.some(column => column.name === "premium_requests")) {
+	const hasPremiumColumn = messageColumns.some(column => column.name === "premium_requests");
+	if (!hasPremiumColumn) {
 		db.run("ALTER TABLE messages ADD COLUMN premium_requests REAL NOT NULL DEFAULT 0");
+		db.run("UPDATE messages SET premium_requests = 0 WHERE premium_requests IS NULL");
 	}
 	if (!messageColumns.some(column => column.name === "cost_no_cache_input")) {
 		db.run("ALTER TABLE messages ADD COLUMN cost_no_cache_input REAL");
 	}
-	db.run("UPDATE messages SET premium_requests = 0 WHERE premium_requests IS NULL");
 	// Token-usage-by-agent: each message is classified main / subagent / advisor
 	// from its transcript path. A brand-new table gets the column from CREATE
 	// TABLE and the parser labels rows at insert time; a pre-existing table gets
@@ -1025,8 +1026,34 @@ export function closeDb(): void {
 		db = null;
 	}
 }
+interface MessageRow {
+	id: number;
+	session_file: string;
+	entry_id: string;
+	folder: string;
+	model: string;
+	provider: string;
+	api: string;
+	timestamp: number;
+	duration: number | null;
+	ttft: number | null;
+	stop_reason: string;
+	error_message: string | null;
+	input_tokens: number;
+	output_tokens: number;
+	cache_read_tokens: number;
+	cache_write_tokens: number;
+	total_tokens: number;
+	premium_requests: number;
+	cost_input: number;
+	cost_output: number;
+	cost_cache_read: number;
+	cost_cache_write: number;
+	cost_total: number;
+	agent_type: string;
+}
 
-function rowToMessageStats(row: any): MessageStats {
+function rowToMessageStats(row: MessageRow): MessageStats {
 	return {
 		id: row.id,
 		sessionFile: row.session_file,
@@ -1038,7 +1065,7 @@ function rowToMessageStats(row: any): MessageStats {
 		timestamp: row.timestamp,
 		duration: row.duration,
 		ttft: row.ttft,
-		stopReason: row.stop_reason as any,
+		stopReason: row.stop_reason as MessageStats["stopReason"],
 		errorMessage: row.error_message,
 		usage: {
 			input: row.input_tokens,
@@ -1059,34 +1086,96 @@ function rowToMessageStats(row: any): MessageStats {
 	};
 }
 
-export function getRecentRequests(limit = 100): MessageStats[] {
+export function getRecentRequests(limit = 100, offset = 0, model?: string, cutoff?: number): MessageStats[] {
 	if (!db) return [];
-	const stmt = db.prepare(`
-		SELECT * FROM messages 
-		ORDER BY timestamp DESC 
-		LIMIT ?
-	`);
-	return (stmt.all(limit) as any[]).map(rowToMessageStats);
+	if (model) {
+		const sql = cutoff
+			? `SELECT * FROM messages WHERE model = ? AND timestamp > ? ORDER BY timestamp DESC LIMIT ? OFFSET ?`
+			: `SELECT * FROM messages WHERE model = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?`;
+		const stmt = db.prepare(sql);
+		return (
+			cutoff
+				? (stmt.all(model, cutoff, limit, offset) as MessageRow[])
+				: (stmt.all(model, limit, offset) as MessageRow[])
+		).map(rowToMessageStats);
+	}
+	const sql = cutoff
+		? `SELECT * FROM messages WHERE timestamp > ? ORDER BY timestamp DESC LIMIT ? OFFSET ?`
+		: `SELECT * FROM messages ORDER BY timestamp DESC LIMIT ? OFFSET ?`;
+	const stmt = db.prepare(sql);
+	return (cutoff ? (stmt.all(cutoff, limit, offset) as MessageRow[]) : (stmt.all(limit, offset) as MessageRow[])).map(
+		rowToMessageStats,
+	);
 }
 
-export function getRecentErrors(limit = 100, cutoff?: number | null): MessageStats[] {
+export function getRecentErrors(limit = 100, offset = 0, model?: string, cutoff?: number): MessageStats[] {
 	if (!db) return [];
-	const hasCutoff = cutoff !== undefined && cutoff !== null;
-	const stmt = db.prepare(`
-		SELECT * FROM messages
-		WHERE stop_reason = 'error'
-		${hasCutoff ? "AND timestamp >= ?" : ""}
-		ORDER BY timestamp DESC
-		LIMIT ?
-	`);
-	const rows = hasCutoff ? stmt.all(cutoff, limit) : stmt.all(limit);
-	return rows.map(rowToMessageStats);
+	if (model) {
+		const sql = cutoff
+			? `SELECT * FROM messages WHERE stop_reason = 'error' AND model = ? AND timestamp > ? ORDER BY timestamp DESC LIMIT ? OFFSET ?`
+			: `SELECT * FROM messages WHERE stop_reason = 'error' AND model = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?`;
+		const stmt = db.prepare(sql);
+		return (
+			cutoff
+				? (stmt.all(model, cutoff, limit, offset) as MessageRow[])
+				: (stmt.all(model, limit, offset) as MessageRow[])
+		).map(rowToMessageStats);
+	}
+	const sql = cutoff
+		? `SELECT * FROM messages WHERE stop_reason = 'error' AND timestamp > ? ORDER BY timestamp DESC LIMIT ? OFFSET ?`
+		: `SELECT * FROM messages WHERE stop_reason = 'error' ORDER BY timestamp DESC LIMIT ? OFFSET ?`;
+	const stmt = db.prepare(sql);
+	return (cutoff ? (stmt.all(cutoff, limit, offset) as MessageRow[]) : (stmt.all(limit, offset) as MessageRow[])).map(
+		rowToMessageStats,
+	);
+}
+
+export function countRecentRequests(model?: string, cutoff?: number): number {
+	if (!db) return 0;
+	if (model) {
+		const sql = cutoff
+			? "SELECT COUNT(*) as count FROM messages WHERE model = ? AND timestamp > ?"
+			: "SELECT COUNT(*) as count FROM messages WHERE model = ?";
+		const stmt = db.prepare(sql);
+		const row = (cutoff ? stmt.get(model, cutoff) : stmt.get(model)) as { count: number } | undefined;
+		return row?.count ?? 0;
+	}
+	const sql = cutoff
+		? "SELECT COUNT(*) as count FROM messages WHERE timestamp > ?"
+		: "SELECT COUNT(*) as count FROM messages";
+	const stmt = db.prepare(sql);
+	const row = (cutoff ? stmt.get(cutoff) : stmt.get()) as { count: number } | undefined;
+	return row?.count ?? 0;
+}
+
+export function countRecentErrors(model?: string, cutoff?: number): number {
+	if (!db) return 0;
+	if (model) {
+		const sql = cutoff
+			? "SELECT COUNT(*) as count FROM messages WHERE stop_reason = 'error' AND model = ? AND timestamp > ?"
+			: "SELECT COUNT(*) as count FROM messages WHERE stop_reason = 'error' AND model = ?";
+		const stmt = db.prepare(sql);
+		const row = (cutoff ? stmt.get(model, cutoff) : stmt.get(model)) as { count: number } | undefined;
+		return row?.count ?? 0;
+	}
+	const sql = cutoff
+		? "SELECT COUNT(*) as count FROM messages WHERE stop_reason = 'error' AND timestamp > ?"
+		: "SELECT COUNT(*) as count FROM messages WHERE stop_reason = 'error'";
+	const stmt = db.prepare(sql);
+	const row = (cutoff ? stmt.get(cutoff) : stmt.get()) as { count: number } | undefined;
+	return row?.count ?? 0;
+}
+
+export function getDistinctModels(): string[] {
+	if (!db) return [];
+	const stmt = db.prepare("SELECT DISTINCT model FROM messages ORDER BY model");
+	return (stmt.all() as { model: string }[]).map(row => row.model);
 }
 
 export function getMessageById(id: number): MessageStats | null {
 	if (!db) return null;
 	const stmt = db.prepare("SELECT * FROM messages WHERE id = ?");
-	const row = stmt.get(id);
+	const row = stmt.get(id) as MessageRow | null;
 	return row ? rowToMessageStats(row) : null;
 }
 

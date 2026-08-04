@@ -41,7 +41,9 @@ function makeError(timestamp: number, entryId: string): MessageStats {
 
 async function readMessages(response: Response): Promise<MessageStats[]> {
 	expect(response.status).toBe(200);
-	return response.json() as Promise<MessageStats[]>;
+	const result = (await response.json()) as { items: MessageStats[]; total: number };
+	expect(result.total).toBe(result.items.length);
+	return result.items;
 }
 
 describe("Recent Errors range", () => {

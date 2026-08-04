@@ -6,6 +6,7 @@ import { Args, Command, Flags, renderCommandHelp } from "@oh-my-pi/pi-utils/cli"
 import { parseArgs } from "../cli/args";
 import { setupHelp as commandHelp } from "../cli/command-help";
 import { runSetupCommand, type SetupCommandArgs, type SetupComponent } from "../cli/setup-cli";
+import { cliTranslator } from "../i18n/interceptor";
 import { runRootCommand } from "../main";
 import { initTheme } from "../modes/theme/theme";
 
@@ -49,7 +50,7 @@ export default class Setup extends Command {
 		const { args, flags } = await this.parse(Setup);
 		if (!args.component) {
 			if (flags.check || flags.json) {
-				renderCommandHelp("omp", "setup", Setup);
+				renderCommandHelp("omp", "setup", Setup, cliTranslator);
 				return;
 			}
 			await runOnboardingSetup();

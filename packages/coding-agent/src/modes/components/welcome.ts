@@ -7,15 +7,34 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
-import { APP_NAME } from "@oh-my-pi/pi-utils";
+import { APP_NAME } from "@oh-my-pi/pi-utils/dirs";
+import { getLanguage, registerCacheInvalidator } from "../../i18n";
+import { interceptTips, interceptWelcomeString } from "../../i18n/interceptor";
 import { theme } from "../../modes/theme/theme";
 import tipsText from "./tips.txt" with { type: "text" };
 
 /** Tips embedded at build time, one per line; blanks dropped. */
-const TIPS: readonly string[] = tipsText
+const EN_TIPS: readonly string[] = tipsText
 	.split("\n")
 	.map(line => line.trim())
 	.filter(line => line.length > 0);
+
+/** Runtime-resolved tips: translated when i18n is active, fallback to English. */
+function resolveTips(): readonly string[] {
+	return interceptTips(EN_TIPS);
+}
+
+/** Lazy-loaded tips array. */
+let _tips: readonly string[] | null = null;
+function getTips(): readonly string[] {
+	if (_tips === null) _tips = resolveTips();
+	return _tips;
+}
+
+export function invalidateTipsCache(): void {
+	_tips = null;
+}
+registerCacheInvalidator(invalidateTipsCache);
 
 /**
  * Fixed number of session rows in the welcome box so its height stays stable
@@ -44,12 +63,17 @@ const NEW_GLOW_PERIOD_MS = 1500;
  *  affordance surfaces this many times as often. */
 const NEW_TIP_WEIGHT = 4;
 
+/** Per-tip selection weights, parallel to {@link getTips}. */
+function computeTipWeights(tips: readonly string[]): readonly number[] {
+	return tips.map(tip => (NEW_TIP_MARKER.test(tip) ? NEW_TIP_WEIGHT : 1));
+}
+
 /** Pick a tip from `tips`, biased toward "[NEW]" tips by {@link NEW_TIP_WEIGHT};
  *  `r` is a uniform sample in [0, 1). Returns "" when `tips` is empty.
  *  Exported for tests. */
 export function pickWeightedTip(tips: readonly string[], r: number): string {
 	if (tips.length === 0) return "";
-	const weights = tips.map(tip => (NEW_TIP_MARKER.test(tip) ? NEW_TIP_WEIGHT : 1));
+	const weights = computeTipWeights(tips);
 	const total = weights.reduce((sum, weight) => sum + weight, 0);
 	let acc = r * total;
 	for (let i = 0; i < tips.length; i++) {
@@ -83,7 +107,7 @@ function renderNewTag(phase: number, encoding: ColorEncoding): string {
 	return out + reset;
 }
 export function renderWelcomeTip(tip: string, boxWidth: number, phase = 0): string[] {
-	const label = "Tip: ";
+	const label = interceptWelcomeString("tipLabel");
 	const labelWidth = visibleWidth(label);
 	const bodyBudget = boxWidth - 1 - labelWidth; // 1 = leading indent
 	if (bodyBudget < 8) return [];
@@ -147,6 +171,7 @@ export class WelcomeComponent implements Component {
 	// Bypassed while the intro animation runs (every frame differs).
 	#cachedWidth = -1;
 	#cachedLines: string[] | undefined;
+	#cachedLang: string | undefined;
 
 	constructor(
 		private readonly version: string,
@@ -158,17 +183,17 @@ export class WelcomeComponent implements Component {
 	get tip(): string | undefined {
 		if (this.#selectedTip === undefined) {
 			if (theme.getSymbolPreset() === "unicode" && Math.random() < 0.1) {
-				this.#selectedTip = "Please use nerdfont 😭.";
+				this.#selectedTip = interceptWelcomeString("nerdfont");
 			} else {
-				this.#selectedTip = pickWeightedTip(TIPS, Math.random());
+				this.#selectedTip = pickWeightedTip(getTips(), Math.random());
 			}
 		}
 		return this.#selectedTip || undefined;
 	}
-
 	invalidate(): void {
 		this.#cachedWidth = -1;
 		this.#cachedLines = undefined;
+		this.#cachedLang = undefined;
 	}
 
 	/**
@@ -217,6 +242,11 @@ export class WelcomeComponent implements Component {
 
 	render(termWidth: number): readonly string[] {
 		const animating = this.#animStart != null;
+		const currentLang = this.#getCurrentLanguage();
+		// Invalidate cache if language changed
+		if (this.#cachedLang !== currentLang) {
+			this.invalidate();
+		}
 		if (!animating && this.#cachedLines && this.#cachedWidth === termWidth) {
 			return this.#cachedLines;
 		}
@@ -224,11 +254,17 @@ export class WelcomeComponent implements Component {
 		if (animating) {
 			this.#cachedLines = undefined;
 			this.#cachedWidth = -1;
+			this.#cachedLang = undefined;
 		} else {
 			this.#cachedLines = lines;
 			this.#cachedWidth = termWidth;
+			this.#cachedLang = currentLang;
 		}
 		return lines;
+	}
+
+	#getCurrentLanguage(): string {
+		return getLanguage();
 	}
 
 	#renderLines(termWidth: number): string[] {
@@ -244,7 +280,7 @@ export class WelcomeComponent implements Component {
 		const minRightCol = 20;
 		const leftMinContentWidth = Math.max(
 			minLeftCol,
-			visibleWidth("Welcome back!"),
+			visibleWidth(interceptWelcomeString("welcome.back")),
 			visibleWidth(this.modelName),
 			visibleWidth(this.providerName),
 		);
@@ -267,7 +303,7 @@ export class WelcomeComponent implements Component {
 		// Left column - centered content
 		const leftLines = [
 			"",
-			this.#centerText(theme.bold("Welcome back!"), leftCol),
+			this.#centerText(theme.bold(interceptWelcomeString("welcome.back")), leftCol),
 			"",
 			...logoColored.map(l => this.#centerText(l, leftCol)),
 			"",
@@ -282,7 +318,7 @@ export class WelcomeComponent implements Component {
 		// Recent sessions content
 		const sessionLines: string[] = [];
 		if (this.recentSessions.length === 0) {
-			sessionLines.push(` ${theme.fg("dim", "No recent sessions")}`);
+			sessionLines.push(` ${theme.fg("dim", interceptWelcomeString("noRecentSessions"))}`);
 		} else {
 			// Reserve width for the bullet prefix (" • ") and the trailing " (timeAgo)"
 			// so the relative time is never the part that gets truncated. The name
@@ -308,7 +344,7 @@ export class WelcomeComponent implements Component {
 		// LSP servers content
 		const lspLines: string[] = [];
 		if (this.lspServers.length === 0) {
-			lspLines.push(` ${theme.fg("dim", "No LSP servers")}`);
+			lspLines.push(` ${theme.fg("dim", interceptWelcomeString("noLspServers"))}`);
 		} else {
 			for (const server of this.lspServers.slice(0, WELCOME_LSP_SLOTS)) {
 				const icon =
@@ -330,16 +366,16 @@ export class WelcomeComponent implements Component {
 
 		// Right column
 		const rightLines = [
-			` ${theme.bold(theme.fg("accent", "Tips"))}`,
-			` ${theme.fg("dim", "#")}${theme.fg("muted", " for prompt actions")}`,
-			` ${theme.fg("dim", "/")}${theme.fg("muted", " for commands")}`,
-			` ${theme.fg("dim", "!")}${theme.fg("muted", " to run bash")}`,
-			` ${theme.fg("dim", "$")}${theme.fg("muted", " to run python")}`,
+			` ${theme.bold(theme.fg("accent", interceptWelcomeString("tips")))}`,
+			` ${theme.fg("dim", "#")}${theme.fg("muted", interceptWelcomeString("tips.promptActions"))}`,
+			` ${theme.fg("dim", "/")}${theme.fg("muted", interceptWelcomeString("tips.commands"))}`,
+			` ${theme.fg("dim", "!")}${theme.fg("muted", interceptWelcomeString("tips.bash"))}`,
+			` ${theme.fg("dim", "$")}${theme.fg("muted", interceptWelcomeString("tips.python"))}`,
 			separator,
-			` ${theme.bold(theme.fg("accent", "LSP Servers"))}`,
+			` ${theme.bold(theme.fg("accent", interceptWelcomeString("lspServers")))}`,
 			...lspLines,
 			separator,
-			` ${theme.bold(theme.fg("accent", "Recent sessions"))}`,
+			` ${theme.bold(theme.fg("accent", interceptWelcomeString("recentSessions")))}`,
 			...sessionLines,
 			"",
 		];

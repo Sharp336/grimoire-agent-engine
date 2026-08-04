@@ -28,7 +28,11 @@ describe("overview token metrics", () => {
 	it("distinguishes uncached input and cache reads and shows their reconciled total", () => {
 		const html = renderToStaticMarkup(<MetricCluster stats={stats} />);
 
-		expect(html).toContain("Uncached Input");
+		// Labels moved into the i18n dictionary ("Uncached Input" → "Input Tokens");
+		// the uncached-vs-cache distinction now lives in the card titles.
+		expect(html).toContain('title="Conversation input not served from cache"');
+		expect(html).toContain('title="Conversation input read from the prompt cache"');
+		expect(html).toContain("Input Tokens");
 		expect(html).toContain("Cache Read");
 		expect(html).toContain("Conversation Total");
 		expect(html).toContain("Uncached input + cache reads + cache writes + output");

@@ -22,15 +22,14 @@ import {
 	getAgentDir,
 	getLastChangelogVersionPath,
 	getProjectDir,
-	hasFsCode,
-	isEnoent,
-	logger,
 	MAIN_CONFIG_FILENAMES,
-	procmgr,
 	setWorktreesDir,
-	toError,
-} from "@oh-my-pi/pi-utils";
+} from "@oh-my-pi/pi-utils/dirs";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
+import { hasFsCode, isEnoent } from "@oh-my-pi/pi-utils/fs-error";
+import * as logger from "@oh-my-pi/pi-utils/logger";
+import * as procmgr from "@oh-my-pi/pi-utils/procmgr";
+import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { JSONC, YAML } from "bun";
 import { invalidate as invalidateCapabilityFsCache } from "../capability/fs";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";

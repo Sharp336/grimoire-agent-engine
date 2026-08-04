@@ -163,7 +163,7 @@ interface ActiveAdvisor {
 	signature: string;
 }
 
-interface AdvisorCompactionSummaryMessage extends CompactionSummaryMessage {
+export interface AdvisorCompactionSummaryMessage extends CompactionSummaryMessage {
 	firstKeptEntryId?: string;
 	advisorUsageAnchorStartIndex?: number;
 }
@@ -1804,8 +1804,10 @@ export class SessionAdvisors {
 
 	/**
 	 * Format a concise advisor status line for ACP/text output.
+	 * @param formatCostFn - Optional cost formatter. Defaults to `$X.XXXX`.
 	 */
-	formatAdvisorStatus(): string {
+	formatAdvisorStatus(formatCostFn?: (cost: number) => string): string {
+		const fmt = formatCostFn ?? ((n: number) => `$${n.toFixed(4)}`);
 		const stats = this.getAdvisorStats();
 		if (!stats.active && stats.advisors.length === 0) {
 			return stats.configured
@@ -1826,7 +1828,7 @@ export class SessionAdvisors {
 			const spendParts = [`${s.tokens.input.toLocaleString()} input`, `${s.tokens.output.toLocaleString()} output`];
 			if (s.tokens.cacheRead > 0) spendParts.push(`${s.tokens.cacheRead.toLocaleString()} cache read`);
 			if (s.tokens.cacheWrite > 0) spendParts.push(`${s.tokens.cacheWrite.toLocaleString()} cache write`);
-			const spendLine = `Spend: ${spendParts.join(", ")}, $${stats.cost.toFixed(4)}`;
+			const spendLine = `Spend: ${spendParts.join(", ")}, ${fmt(s.cost)}`;
 			if (!s.model || s.status !== "running") return `Advisor "${s.name}" is ${s.status.replace("_", " ")}.`;
 			return `Advisor is enabled (${s.model.provider}/${s.model.id}). ${contextLine}. ${spendLine}.`;
 		}
@@ -1837,11 +1839,11 @@ export class SessionAdvisors {
 					? `${s.contextTokens.toLocaleString()} / ${s.contextWindow.toLocaleString()} (${Math.round((s.contextTokens / s.contextWindow) * 100)}%)`
 					: `${s.contextTokens.toLocaleString()}`;
 			lines.push(
-				`  • ${s.name}${s.model && s.status === "running" ? ` (${s.model.provider}/${s.model.id})` : ` [${s.status}]`} — context ${ctx} tokens, $${s.cost.toFixed(4)}`,
+				`  • ${s.name}${s.model && s.status === "running" ? ` (${s.model.provider}/${s.model.id})` : ` [${s.status}]`} — context ${ctx} tokens, ${fmt(s.cost)}`,
 			);
 		}
 		lines.push(
-			`Totals: ${stats.tokens.input.toLocaleString()} input, ${stats.tokens.output.toLocaleString()} output, $${stats.cost.toFixed(4)}.`,
+			`Totals: ${stats.tokens.input.toLocaleString()} input, ${stats.tokens.output.toLocaleString()} output, ${fmt(stats.cost)}.`,
 		);
 		return lines.join("\n");
 	}

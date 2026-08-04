@@ -12,6 +12,8 @@
  */
 import type { CompactionMethod } from "./compaction-methods";
 
+import { i18n } from "../i18n";
+
 /** Subcommand selecting a one-off compaction mode for manual `/compact`. */
 export type CompactMode = "soft" | "remote" | "snapcompact";
 
@@ -40,17 +42,32 @@ export interface CompactModeDef {
 export const COMPACT_MODES: readonly CompactModeDef[] = [
 	{
 		name: "soft",
-		description: "Summarize locally with the active model (skip server compaction)",
+		get description() {
+			return i18n.t(
+				"compact.modes.soft.description",
+				"Summarize locally with the active model (skip remote endpoints)",
+			);
+		},
 		overrides: { methodOrder: ["soft"] },
 	},
 	{
 		name: "remote",
-		description: "Summarize via OpenAI-compatible server compaction, then fall back to a local summary",
+		get description() {
+			return i18n.t(
+				"compact.modes.remote.description",
+				"Summarize via the remote endpoint / provider-native compaction",
+			);
+		},
 		overrides: { methodOrder: ["remote", "soft"] },
 	},
 	{
 		name: "snapcompact",
-		description: "Archive history onto dense bitmap images the model reads back (no LLM call)",
+		get description() {
+			return i18n.t(
+				"compact.modes.snapcompact.description",
+				"Archive history onto dense bitmap images the model reads back (no LLM call)",
+			);
+		},
 		overrides: { methodOrder: ["snapcompact"] },
 		rejectsFocus: true,
 	},

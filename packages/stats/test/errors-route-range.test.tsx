@@ -68,14 +68,18 @@ describe("ErrorsRoute range", () => {
 		await act(async () => {
 			root?.render(<ErrorsRoute active range="24h" refreshTrigger={0} onRequestClick={() => {}} />);
 		});
-		expect(requestedUrls).toEqual(["/api/stats/errors?range=24h&limit=50"]);
+		expect(requestedUrls).toEqual([
+			"/api/stats/models-list",
+			"/api/stats/errors?limit=50&offset=0&range=24h",
+		]);
 
 		await act(async () => {
 			root?.render(<ErrorsRoute active range="7d" refreshTrigger={0} onRequestClick={() => {}} />);
 		});
 		expect(requestedUrls).toEqual([
-			"/api/stats/errors?range=24h&limit=50",
-			"/api/stats/errors?range=7d&limit=50",
+			"/api/stats/models-list",
+			"/api/stats/errors?limit=50&offset=0&range=24h",
+			"/api/stats/errors?limit=50&offset=0&range=7d",
 		]);
 	});
 });

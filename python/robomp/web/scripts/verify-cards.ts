@@ -403,7 +403,7 @@ async function main(): Promise<void> {
   statusMock = baseStatus;
   statusDelayMs = 600;
   await page.goto(BASE_URL, { waitUntil: "domcontentloaded" });
-  
+
   // Wait a small frame but not full delay
   await Bun.sleep(100);
   const skeletonsCount = await page.evaluate(() => document.querySelectorAll(".rmp-card-skeleton").length);
@@ -666,7 +666,7 @@ async function main(): Promise<void> {
   // Contrast & structural checks (dark theme)
   const structuralCheck = await page.evaluate(() => {
     const cards = Array.from(document.querySelectorAll(".rmp-card"));
-    
+
     // borders and shadows
     const borderShadowOk = cards.every(el => {
       const style = window.getComputedStyle(el);

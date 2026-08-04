@@ -161,7 +161,7 @@ export class FooterComponent implements Component {
 		const normalizedPremiumRequests = Math.round((totalPremiumRequests + Number.EPSILON) * 100) / 100;
 		if (totalCost || usingSubscription || normalizedPremiumRequests) {
 			const billingParts: string[] = [];
-			if (totalCost) {
+if (totalCost) {
 				const formatted = totalCost.toFixed(3);
 				if (usingSubscription) {
 					const spend =

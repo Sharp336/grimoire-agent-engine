@@ -162,6 +162,7 @@
 
 - New Projects view summarizing usage, cost, and reliability per project folder (backed by the existing `/api/stats/folders` endpoint).
 - System-aware light/dark theme toggle — follows the OS by default, and an explicit choice persists across reloads.
+- Added i18n (internationalization) support for the stats dashboard UI with English and Chinese translations. Language preference persists in localStorage and auto-detects browser language.
 
 ### Changed
 

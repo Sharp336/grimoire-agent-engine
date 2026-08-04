@@ -31,9 +31,13 @@ import { installProfileAlias, resolveProfileAliasCommandFromProcess } from "./cl
 import { extractProfileFlags } from "./cli/profile-bootstrap";
 import { startJsEvalProcess } from "./eval/js/process-entry";
 import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
+import { i18n } from "./i18n";
+import { cliTranslator } from "./i18n/interceptor";
 import { DAEMON_BROKER_WORKER_ARG } from "./launch/protocol";
 import { TERMINAL_OUTPUT_WORKER_ARG } from "./launch/terminal-output-worker-protocol";
 import { LSP_MUX_WORKER_ARG } from "./lsp/mux/protocol";
+import { invalidateSettingDefsCache } from "./modes/components/settings-defs";
+import { invalidateTipsCache } from "./modes/components/welcome";
 import { COMPUTER_WORKER_ARG } from "./tools/computer/protocol";
 import { smokeTestComputerWorker } from "./tools/computer/supervisor";
 import { startComputerWorker } from "./tools/computer/worker-entry";
@@ -68,7 +72,7 @@ async function showHelp(config: CliConfig<CommandMetadata>): Promise<void> {
 		import("@oh-my-pi/pi-utils/cli"),
 		import("./cli/help-extra"),
 	]);
-	renderRootHelp(config);
+	renderRootHelp(config, cliTranslator);
 	const extra = getExtraHelpText();
 	if (extra.trim().length > 0) {
 		process.stdout.write(`\n${extra}\n`);
@@ -344,6 +348,7 @@ export async function runCli(argv: string[]): Promise<void> {
 			// profile instead of the default agent directory.
 			setProfile(resolveProfileEnv(process.env.OMP_PROFILE, process.env.PI_PROFILE));
 		}
+
 		if (extracted.aliasName !== undefined) {
 			const profile = extracted.profile ?? getActiveProfile();
 			if (!profile) {
@@ -382,6 +387,17 @@ export async function runCli(argv: string[]): Promise<void> {
 		return;
 	}
 
+	// Initialize i18n system after profile is set and worker dispatch. The
+	// invalidators are safe to import top-level: settings-defs and welcome
+	// reach `@oh-my-pi/pi-utils` through env-core only (the barrel re-exports
+	// the side-effect-free `env-core` module, not `env`), so they never apply
+	// the agent `.env` at module load. The `.env` application happens later,
+	// when the dispatched command graph loads `args.ts` → `help-extra`, which
+	// imports `@oh-my-pi/pi-utils/env` directly after `setProfile()` has run.
+	await i18n.init();
+	invalidateSettingDefsCache();
+	invalidateTipsCache();
+
 	// Declare this module as the worker-host entry now that the active profile
 	// is resolved. The worker-host module is side-effect-free; importing
 	// `@oh-my-pi/pi-utils/env` here would snapshot the wrong agent `.env`.
@@ -409,7 +425,14 @@ export async function runCli(argv: string[]): Promise<void> {
 		process.exitCode = 1;
 		return;
 	}
-	return run({ bin: APP_NAME, version: VERSION, argv: resolved.argv, commands, metadataHelp: showHelp });
+	return run({
+		bin: APP_NAME,
+		version: VERSION,
+		argv: resolved.argv,
+		commands,
+		metadataHelp: showHelp,
+		translator: cliTranslator,
+	});
 }
 
 // Floating call instead of top-level await: TLA forces `--bytecode` (CJS
