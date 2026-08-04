@@ -114,6 +114,17 @@ describe("TypeBox adapter", () => {
 		expect(valid(intersection, { a: "x" })).toBe(false);
 	});
 
+	test("Type.Optional with a default keeps a plain defaulted key", () => {
+		const object = Type.Object({ depth: Type.Optional(Type.Integer({ default: 3 })), name: Type.String() });
+		expect(valid(object, { name: "x" })).toBe(true);
+		expect(valid(object, { name: "x", depth: 5 })).toBe(true);
+		expect(object.toJsonSchema()).toEqual({
+			type: "object",
+			properties: { depth: { type: "integer", default: 3 }, name: { type: "string" } },
+			required: ["name"],
+		});
+	});
+
 	test("object transforms preserve property validation", () => {
 		const base = Type.Object({ a: Type.String(), b: Type.Number() }, { additionalProperties: false });
 		expect(valid(Type.Partial(base), {})).toBe(true);

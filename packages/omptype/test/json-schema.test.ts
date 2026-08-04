@@ -96,6 +96,20 @@ describe("irToJsonSchema", () => {
 		});
 	});
 
+	it("keeps required properties before optional ones regardless of declaration order", () => {
+		const ir: IR = {
+			k: "object",
+			extras: "keep",
+			props: [
+				{ key: "opt", opt: true, val: { k: "string" } },
+				{ key: "req", opt: false, val: { k: "string" } },
+			],
+		};
+		const schema = irToJsonSchema(ir) as { properties: Record<string, unknown>; required: string[] };
+		expect(Object.keys(schema.properties)).toEqual(["req", "opt"]);
+		expect(schema.required).toEqual(["req"]);
+	});
+
 	it("emits an index signature as additionalProperties", () => {
 		expect(irToJsonSchema(parseDef({ "[string]": "number.integer" }))).toEqual({
 			type: "object",

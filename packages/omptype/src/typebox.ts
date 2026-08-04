@@ -416,7 +416,11 @@ function tObject<const P extends Record<string, AnySchema>>(properties: P, opts?
 	for (const key in properties) {
 		const schema = properties[key];
 		const inner = asRuntime<unknown>(schema)[OPTIONAL_INNER];
-		def[inner ? `${key}?` : key] = inner ?? schema;
+		// A defaulted `Type.Optional(...)` maps to a plain defaulted key:
+		// omptype (like ArkType) rejects `key?` with a default, and a default
+		// already makes the key omittable on input.
+		const optionalKey = inner !== undefined && !asRuntime<unknown>(inner).hasDefault;
+		def[optionalKey ? `${key}?` : key] = inner ?? schema;
 		props[key] = schema;
 	}
 	if (opts?.additionalProperties === false) def["+"] = "reject";
