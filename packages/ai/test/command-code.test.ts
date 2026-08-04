@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import {
 	buildCommandCodeServerConfig,
 	clearCommandCodeServerConfigCache,
@@ -7,6 +6,7 @@ import {
 	slugifyProjectPath,
 	streamCommandCode,
 } from "@oh-my-pi/pi-ai/providers/command-code";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context, Model, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -553,11 +553,15 @@ describe("command-code effort dial", () => {
 		} as Model<"command-code">;
 		expect(model.thinking).toBeUndefined();
 
-		const stream = streamSimple(model, { messages: [{ role: "user", content: "hi", timestamp: 1 }] }, {
-			apiKey: "test-key",
-			reasoning: Effort.High,
-			config: null,
-		});
+		const stream = streamSimple(
+			model,
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			{
+				apiKey: "test-key",
+				reasoning: Effort.High,
+				config: null,
+			},
+		);
 		for await (const _ of stream) {
 			/* drain */
 		}
@@ -576,11 +580,15 @@ describe("command-code effort dial", () => {
 		} as Model<"command-code">;
 		expect(model.thinking?.efforts).toEqual([Effort.High, Effort.Max]);
 
-		const stream = streamSimple(model, { messages: [{ role: "user", content: "hi", timestamp: 1 }] }, {
-			apiKey: "test-key",
-			reasoning: Effort.High,
-			config: null,
-		});
+		const stream = streamSimple(
+			model,
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			{
+				apiKey: "test-key",
+				reasoning: Effort.High,
+				config: null,
+			},
+		);
 		for await (const _ of stream) {
 			/* drain */
 		}
@@ -590,4 +598,3 @@ describe("command-code effort dial", () => {
 		expect(params.reasoning_effort).toBe("high");
 	});
 });
-

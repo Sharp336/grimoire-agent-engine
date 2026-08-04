@@ -147,9 +147,7 @@ export function resolveModelThinking<TApi extends Api>(
 	// Providers that dial effort only via authored metadata (Devin sibling
 	// routing; Command Code `EFFORTS_BY_MODEL`) must not fabricate a ladder
 	// from identity when the seed/spec omits `thinking`.
-	if (
-		(compat as ResolvedDevinCompat | ResolvedCommandCodeCompat | undefined)?.trustExplicitThinkingOnly === true
-	) {
+	if ((compat as ResolvedDevinCompat | ResolvedCommandCodeCompat | undefined)?.trustExplicitThinkingOnly === true) {
 		return undefined;
 	}
 	// Empty/malformed explicit metadata is treated as absent — infer instead.
