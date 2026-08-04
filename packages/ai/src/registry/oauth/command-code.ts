@@ -31,13 +31,11 @@ const ALLOWED_ORIGINS: Record<string, true> = {
 };
 
 /**
- * First loopback port tried, matching the Command Code CLI (kept in sync with
- * `callbackPort` on the provider definition so broker/remote logins forward the
- * same port). The studio honors whatever callback URL it is handed, so walking
- * forward is safe when 5959 is taken.
+ * Fixed loopback port matching the Command Code CLI and the provider's
+ * `callbackPort`. Auth-broker remote-login SSH-forwards only this registered
+ * port, so falling back to 5960+ would advertise an un-forwarded callback.
  */
 const CALLBACK_PORT = 5959;
-const PORT_ATTEMPTS = 10;
 const CALLBACK_PATH = "/callback";
 /** 302s to the studio URL so UIs can advertise a truncation-safe copy target. */
 const LAUNCH_PATH = "/launch";
@@ -82,24 +80,16 @@ function readFailure(value: unknown): Error | undefined {
 	return new AIError.OAuthError(description ?? record.error, { kind: "device-auth", provider: PROVIDER });
 }
 
-/**
- * Bind the loopback listener, walking forward from {@link CALLBACK_PORT}. The
- * bound port is echoed to the studio inside the callback URL, so any port in
- * the range works.
- */
+/** Bind the loopback listener on the registered {@link CALLBACK_PORT}. */
 function bindCallbackServer(fetch: (req: Request) => Promise<Response> | Response): Bun.Server<unknown> {
-	let lastError: unknown;
-	for (let offset = 0; offset < PORT_ATTEMPTS; offset++) {
-		try {
-			return Bun.serve({ hostname: "127.0.0.1", port: CALLBACK_PORT + offset, reusePort: false, fetch });
-		} catch (cause) {
-			lastError = cause;
-		}
+	try {
+		return Bun.serve({ hostname: "127.0.0.1", port: CALLBACK_PORT, reusePort: false, fetch });
+	} catch (cause) {
+		throw new AIError.OAuthError(
+			`Command Code login callback port ${CALLBACK_PORT} is in use. Free it (or stop the process bound to it) and retry — auth-broker remote-login only forwards this registered port.`,
+			{ kind: "configuration", provider: PROVIDER, cause },
+		);
 	}
-	throw new AIError.OAuthError(
-		`No free loopback port for the Command Code login callback (tried ${CALLBACK_PORT}-${CALLBACK_PORT + PORT_ATTEMPTS - 1}). Free one of those ports and retry.`,
-		{ kind: "configuration", provider: PROVIDER, cause: lastError },
-	);
 }
 
 /**

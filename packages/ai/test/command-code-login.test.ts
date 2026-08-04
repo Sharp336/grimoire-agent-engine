@@ -9,7 +9,7 @@ import type { OAuthAuthInfo } from "@oh-my-pi/pi-ai/registry/oauth/types";
  * test IS the studio, POSTing the callback payload back to the port the login
  * advertises. `COMMANDCODE_API_ENV` is unset, so the flow targets prod.
  *
- * Cases share the 5959–5968 loopback range, so they must not overlap. A file-
+ * Cases share the fixed callback port 5959, so they must not overlap. A file-
  * level mutex serializes them even under `bun test --parallel`.
  */
 
@@ -23,7 +23,7 @@ type StartedLogin = {
 	launchUrl: string;
 };
 
-/** Serialize every case — concurrent Bun.serve binds on 5959+ cross-talk. */
+/** Serialize every case — concurrent Bun.serve binds on 5959 cross-talk. */
 let fileGate: Promise<void> = Promise.resolve();
 
 function serial(run: () => Promise<void>): () => Promise<void> {

@@ -32,7 +32,7 @@ const OFFICIAL_CLIENT_HEADERS = {
 const OFFICIAL_ENVELOPE_KEYS = ["config", "memory", "taste", "skills", "permissionMode", "threadId", "params"];
 const OFFICIAL_PARAMS_KEYS = ["model", "messages", "tools", "system", "max_tokens", "stream"];
 
-let server: Bun.Server | undefined;
+let server: Bun.Server<unknown> | undefined;
 let scenario:
 	| { kind: "capture"; body: string }
 	| { kind: "happy" }
