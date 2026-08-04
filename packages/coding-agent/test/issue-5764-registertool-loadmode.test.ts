@@ -252,3 +252,55 @@ describe("class-based CustomTool renderCall receiver (private field)", () => {
 		expect(rows).toEqual(["private-label-value"]);
 	});
 });
+
+describe("class-based CustomTool metadata getters stay live after composition", () => {
+	it("description and hidden reflect mutated state when read from the composed definition", () => {
+		class StatefulTool implements CustomTool {
+			readonly name = "stateful_metadata";
+			readonly parameters = emptySchema;
+			#description = "initial-description";
+			#hidden = false;
+
+			get label(): string {
+				return `label-for-${this.#description}`;
+			}
+			get description(): string {
+				return this.#description;
+			}
+			get hidden(): boolean {
+				return this.#hidden;
+			}
+
+			async execute() {
+				return { content: [{ type: "text" as const, text: "ok" }] };
+			}
+
+			setDescription(value: string): void {
+				this.#description = value;
+			}
+			setHidden(value: boolean): void {
+				this.#hidden = value;
+			}
+		}
+
+		const instance = new StatefulTool();
+		// composeCustomTool calls customToolToDefinition, which produces the
+		// ToolDefinition the RegisteredToolAdapter wraps. We read the adapter's
+		// forwarded properties — they must reflect live state, not a snapshot.
+		const tool = composeCustomTool(instance, execRunner);
+
+		// Initial state — snapshot would capture these values.
+		expect(tool.description).toBe("initial-description");
+		expect(tool.hidden).toBe(false);
+		expect(tool.label).toBe("label-for-initial-description");
+
+		// Mutate the backing state. A snapshot taken at composition time would
+		// still report the old values; live getters report the new ones.
+		instance.setDescription("updated-description");
+		instance.setHidden(true);
+
+		expect(tool.description).toBe("updated-description");
+		expect(tool.hidden).toBe(true);
+		expect(tool.label).toBe("label-for-updated-description");
+	});
+});

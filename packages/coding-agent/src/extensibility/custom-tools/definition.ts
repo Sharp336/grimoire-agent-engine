@@ -47,18 +47,37 @@ function resolveCustomToolContext(
 }
 
 export function customToolToDefinition(tool: CustomTool, getContext?: () => CustomToolContext): ToolDefinition {
-	const mergeCallAndResult =
-		"mergeCallAndResult" in tool && typeof tool.mergeCallAndResult === "boolean"
-			? tool.mergeCallAndResult
-			: undefined;
+	// Metadata fields (name, label, description, parameters, hidden, deferrable,
+	// strict, mcpServerName, mcpToolName, mergeCallAndResult) are forwarded as
+	// getters so a class-based CustomTool that exposes them through getters
+	// (settings- or state-dependent) stays live after composition — matching the
+	// liveness the removed CustomToolAdapter provided via applyToolProxy.
+	//
+	// loadMode is a RESOLVED value (defaultLoadModeForToolName normalizes it at
+	// composition time), not a passthrough, so it stays eager. The bound
+	// callbacks (approval, formatApprovalDetails, renderCall, renderResult,
+	// execute, onSession) are already correct — they close over `tool` and read
+	// its fields on each invocation.
 	const definition: ToolDefinition & { mergeCallAndResult?: boolean } = {
-		name: tool.name,
-		label: tool.label,
-		description: tool.description,
-		parameters: tool.parameters,
-		hidden: tool.hidden,
+		get name() {
+			return tool.name;
+		},
+		get label() {
+			return tool.label;
+		},
+		get description() {
+			return tool.description;
+		},
+		get parameters() {
+			return tool.parameters;
+		},
+		get hidden() {
+			return tool.hidden;
+		},
 		loadMode: defaultLoadModeForToolName(tool.name, tool.loadMode),
-		deferrable: tool.deferrable,
+		get deferrable() {
+			return tool.deferrable;
+		},
 		approval: typeof tool.approval === "function" ? tool.approval.bind(tool) : tool.approval,
 		formatApprovalDetails:
 			typeof tool.formatApprovalDetails === "function"
@@ -66,10 +85,20 @@ export function customToolToDefinition(tool: CustomTool, getContext?: () => Cust
 				: tool.formatApprovalDetails,
 		// Preserved through RegisteredToolAdapter so MCP-backed tools' explicit
 		// `strict: false` (#4336/#4340) survives the custom-tool → definition bridge.
-		strict: tool.strict,
-		mcpServerName: tool.mcpServerName,
-		mcpToolName: tool.mcpToolName,
-		mergeCallAndResult,
+		get strict() {
+			return tool.strict;
+		},
+		get mcpServerName() {
+			return tool.mcpServerName;
+		},
+		get mcpToolName() {
+			return tool.mcpToolName;
+		},
+		get mergeCallAndResult() {
+			return "mergeCallAndResult" in tool && typeof tool.mergeCallAndResult === "boolean"
+				? tool.mergeCallAndResult
+				: undefined;
+		},
 		execute: (toolCallId, params, signal, onUpdate, ctx) =>
 			tool.execute(toolCallId, params, onUpdate, resolveCustomToolContext(ctx, getContext), signal),
 		onSession: tool.onSession

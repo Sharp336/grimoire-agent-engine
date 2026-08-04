@@ -980,3 +980,128 @@ describe("createAgentSession toolDefinitions defaultInactive", () => {
 		}
 	});
 });
+
+describe("createAgentSession toolDefinitions hidden", () => {
+	const tempDirs: string[] = [];
+	let modelRegistry!: ModelRegistry;
+	let registryAuthDir: string;
+
+	const makeTempDir = (): string => {
+		const tempDir = path.join(os.tmpdir(), `pi-sdk-tooldef-hidden-${Snowflake.next()}`);
+		tempDirs.push(tempDir);
+		fs.mkdirSync(tempDir, { recursive: true });
+		return tempDir;
+	};
+
+	beforeAll(async () => {
+		registryAuthDir = path.join(os.tmpdir(), `pi-sdk-tooldef-hidden-auth-${Snowflake.next()}`);
+		fs.mkdirSync(registryAuthDir, { recursive: true });
+		modelRegistry = new ModelRegistry(await discoverAuthStorage(registryAuthDir));
+	});
+
+	afterEach(() => {
+		for (const tempDir of tempDirs.splice(0)) {
+			removeSyncWithRetries(tempDir);
+		}
+		vi.restoreAllMocks();
+	});
+
+	afterAll(() => {
+		removeSyncWithRetries(registryAuthDir);
+	});
+
+	const baseOptions = (tempDir: string): CreateAgentSessionOptions => ({
+		cwd: tempDir,
+		agentDir: tempDir,
+		modelRegistry,
+		sessionManager: SessionManager.inMemory(),
+		settings: Settings.isolated(),
+		model: getBundledModel("openai", "gpt-4o-mini"),
+		disableExtensionDiscovery: true,
+		skills: [],
+		contextFiles: [],
+		promptTemplates: [],
+		slashCommands: [],
+		enableMCP: false,
+		enableLsp: false,
+		rules: [],
+		workspaceTree: { rootPath: tempDir, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
+	});
+
+	it("excludes a hidden toolDefinitions entry from the initial active set unless explicitly requested", async () => {
+		const tempDir = makeTempDir();
+		const hiddenDef: ToolDefinition = {
+			name: "sdk_hidden_def",
+			label: "SDK Hidden Def",
+			description: "SDK toolDefinition with hidden",
+			parameters: type({}),
+			hidden: true,
+			async execute() {
+				return { content: [{ type: "text", text: "hidden-def" }] };
+			},
+		};
+		const visibleDef: ToolDefinition = {
+			name: "sdk_visible_def",
+			label: "SDK Visible Def",
+			description: "SDK toolDefinition without hidden",
+			parameters: type({}),
+			async execute() {
+				return { content: [{ type: "text", text: "visible-def" }] };
+			},
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolDefinitions: [hiddenDef, visibleDef],
+		});
+
+		try {
+			expect(session.getAllToolNames()).toEqual(expect.arrayContaining(["sdk_hidden_def", "sdk_visible_def"]));
+			expect(session.getActiveToolNames()).not.toContain("sdk_hidden_def");
+			expect(session.systemPrompt.join("\n")).not.toContain("sdk_hidden_def");
+			expect(session.getAllToolNames()).toContain("sdk_visible_def");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("does not re-add a hidden toolDefinitions entry via the alwaysInclude path when toolNames omits it", async () => {
+		const tempDir = makeTempDir();
+		const hiddenDef: ToolDefinition = {
+			name: "sdk_hidden_no_readd",
+			label: "SDK Hidden No Re-add",
+			description: "SDK toolDefinition with hidden, not re-added by alwaysInclude",
+			parameters: type({}),
+			hidden: true,
+			async execute() {
+				return { content: [{ type: "text", text: "hidden-no-readd" }] };
+			},
+		};
+		const visibleDef: ToolDefinition = {
+			name: "sdk_visible_pair",
+			label: "SDK Visible Pair",
+			description: "SDK toolDefinition without hidden, paired with the hidden one",
+			parameters: type({}),
+			async execute() {
+				return { content: [{ type: "text", text: "visible-pair" }] };
+			},
+		};
+
+		// Explicit toolNames that names the visible def but NOT the hidden one.
+		// The alwaysInclude path must skip the hidden entry (not re-add it).
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolDefinitions: [hiddenDef, visibleDef],
+			toolNames: ["read", "sdk_visible_pair"],
+		});
+
+		try {
+			expect(session.getAllToolNames()).toContain("sdk_hidden_no_readd");
+			expect(session.getActiveToolNames()).not.toContain("sdk_hidden_no_readd");
+			expect(session.systemPrompt.join("\n")).not.toContain("sdk_hidden_no_readd");
+			expect(session.getActiveToolNames()).toContain("sdk_visible_pair");
+		} finally {
+			await session.dispose();
+		}
+	});
+});
