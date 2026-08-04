@@ -277,14 +277,19 @@ describe("system-prompt inspect output", () => {
 		expect(subagentParsed.target).toEqual(target);
 	});
 
-	test("system-prompt inspect --breakdown --json separates source, tool prompt, and schema shares", () => {
+	test("system-prompt inspect --breakdown --json separates prompt descriptions, examples, and schemas", () => {
+		const toolDescription = "Read files";
+		const toolExamples =
+			'\n\n<examples>\n# Read one file\n<example>\nread(path="README.md")\n</example>\n</examples>';
+		const toolPrompt = `${toolDescription}${toolExamples}`;
 		const inspection: SystemPromptInspection = {
 			...result,
 			model: { provider: "openai-codex", id: "gpt-5.4" },
 			providerTools: [
 				{
 					name: "read",
-					description: "Read files",
+					description: toolPrompt,
+					examples: [{ caption: "Read one file", call: { path: "README.md" } }],
 					parameters: {
 						type: "object",
 						properties: { path: { type: "string" } },
@@ -310,12 +315,16 @@ describe("system-prompt inspect output", () => {
 			dynamicPercentagesMayOverlap: boolean;
 			tools: Array<{
 				name: string;
-				prompt: { tokens: number; percentOfMeasuredContext: number };
+				description: { characters: number; tokens: number; percentOfMeasuredContext: number };
+				examples: { characters: number; tokens: number; percentOfMeasuredContext: number };
+				prompt: { characters: number; tokens: number; percentOfMeasuredContext: number };
 				schema: { tokens: number; percentOfMeasuredContext: number };
 			}>;
 		};
 		const providerTokens = countTokens(inspection.systemPrompt, Encoding.O200kBase);
-		const promptTokens = countTokens(["Read files"], Encoding.O200kBase);
+		const descriptionTokens = countTokens([toolDescription], Encoding.O200kBase);
+		const promptTokens = countTokens([toolPrompt], Encoding.O200kBase);
+		const exampleTokens = promptTokens - descriptionTokens;
 		const inspectedTool = inspection.providerTools[0];
 		const schemaTokens = countTokens(
 			[`${JSON.stringify(inspectedTool?.parameters ?? {})}\n${JSON.stringify(inspectedTool?.customFormat ?? {})}`],
@@ -357,9 +366,17 @@ describe("system-prompt inspect output", () => {
 			expect.objectContaining({
 				name: "read",
 				prompt: expect.objectContaining({ tokens: promptTokens }),
+				description: expect.objectContaining({ tokens: descriptionTokens }),
+				examples: expect.objectContaining({ characters: toolExamples.length, tokens: exampleTokens }),
 				schema: expect.objectContaining({ tokens: schemaTokens }),
 			}),
 		]);
+		const human = formatInspectOutput("/tmp/project", inspection, { mode: "breakdown", json: false });
+		expect(human).toContain(`description ${descriptionTokens} tokens`);
+		expect(human).toContain(`examples ${exampleTokens} tokens`);
+		const parsedTool = parsed.tools[0]!;
+		expect(parsedTool.description.characters + parsedTool.examples.characters).toBe(parsedTool.prompt.characters);
+		expect(parsedTool.description.tokens + parsedTool.examples.tokens).toBe(parsedTool.prompt.tokens);
 		expect(
 			parsed.categories.providerPrompt.percentOfMeasuredContext +
 				parsed.categories.toolPrompts.percentOfMeasuredContext +

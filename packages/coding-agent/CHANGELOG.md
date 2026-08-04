@@ -153,6 +153,9 @@
 ### Changed
 
 - Upgraded the bundled omptype schema engine: intersection and pipe operators, bigint and RegExp literals in the string DSL, Standard Schema V1 interop, JSON Schema import via fromJsonSchema(), and richer union/collection error reporting.
+### Added
+
+- Added description and example token shares to `system-prompt inspect --breakdown`, retaining the aggregate prompt field.
 
 ## [17.2.7] - 2026-08-03
 

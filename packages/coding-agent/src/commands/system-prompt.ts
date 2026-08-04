@@ -86,6 +86,8 @@ interface BreakdownTool {
 	name: string;
 	wireName: string;
 	prompt: TokenMeasurement;
+	description: TokenMeasurement;
+	examples: TokenMeasurement;
 	schema: TokenMeasurement;
 }
 
@@ -143,6 +145,34 @@ function measureTexts(texts: readonly string[]): Omit<TokenMeasurement, "percent
 	};
 }
 
+const TOOL_EXAMPLES_MARKER = "\n\n<examples>\n";
+const TOOL_EXAMPLES_END = "\n</examples>";
+
+function measureToolPrompt(tool: Tool) {
+	const prompt = tool.description ?? "";
+	const promptMeasurement = measureTexts([prompt]);
+	const examplesStart =
+		tool.examples?.length && prompt.endsWith(TOOL_EXAMPLES_END) ? prompt.lastIndexOf(TOOL_EXAMPLES_MARKER) : -1;
+	if (examplesStart < 0) {
+		return {
+			prompt: promptMeasurement,
+			description: promptMeasurement,
+			examples: measureTexts([]),
+		};
+	}
+	// Examples own the separator bytes.
+	// Measure their marginal token contribution so the components add to the prompt across BPE boundary merges.
+	const description = measureTexts([prompt.slice(0, examplesStart)]);
+	return {
+		prompt: promptMeasurement,
+		description,
+		examples: {
+			characters: promptMeasurement.characters - description.characters,
+			tokens: promptMeasurement.tokens - description.tokens,
+		},
+	};
+}
+
 function withPercentage(
 	measurement: Omit<TokenMeasurement, "percentOfMeasuredContext">,
 	totalMeasuredContextTokens: number,
@@ -164,6 +194,7 @@ function serializeToolSchema(tool: Tool): string {
 
 function buildBreakdown(cwd: string, result: SystemPromptInspection): BreakdownInspectJson {
 	const toolPrompts = result.providerTools.map(tool => tool.description ?? "");
+	const toolPromptParts = result.providerTools.map(measureToolPrompt);
 	const toolSchemas = result.providerTools.map(serializeToolSchema);
 	const providerPromptMeasurement = measureTexts(result.systemPrompt);
 	const toolPromptMeasurement = measureTexts(toolPrompts);
@@ -206,7 +237,11 @@ function buildBreakdown(cwd: string, result: SystemPromptInspection): BreakdownI
 		tokenizer: { provider: "openai", encoding: BREAKDOWN_ENCODING_LABEL },
 		model: result.model,
 		measurementScope: {
-			includes: ["provider prompt blocks", "normalized tool descriptions", "tool parameter schemas and grammars"],
+			includes: [
+				"provider prompt blocks",
+				"normalized tool descriptions and example blocks",
+				"tool parameter schemas and grammars",
+			],
 			excludes: ["conversation messages", "provider-specific request framing and control metadata"],
 		},
 		totalMeasuredContextTokens,
@@ -222,12 +257,17 @@ function buildBreakdown(cwd: string, result: SystemPromptInspection): BreakdownI
 		dynamicParts,
 		dynamicSources,
 		dynamicPercentagesMayOverlap: true,
-		tools: result.providerTools.map((tool, index) => ({
-			name: tool.name,
-			wireName: tool.customWireName ?? tool.name,
-			prompt: withPercentage(measureTexts([toolPrompts[index] ?? ""]), totalMeasuredContextTokens),
-			schema: withPercentage(measureTexts([toolSchemas[index] ?? "{}"]), totalMeasuredContextTokens),
-		})),
+		tools: result.providerTools.map((tool, index) => {
+			const parts = toolPromptParts[index] ?? measureToolPrompt(tool);
+			return {
+				name: tool.name,
+				wireName: tool.customWireName ?? tool.name,
+				description: withPercentage(parts.description, totalMeasuredContextTokens),
+				examples: withPercentage(parts.examples, totalMeasuredContextTokens),
+				prompt: withPercentage(parts.prompt, totalMeasuredContextTokens),
+				schema: withPercentage(measureTexts([toolSchemas[index] ?? "{}"]), totalMeasuredContextTokens),
+			};
+		}),
 	};
 }
 
@@ -254,7 +294,7 @@ function renderBreakdown(output: BreakdownInspectJson): string {
 		"Tools:",
 		...output.tools.map(
 			tool =>
-				`${tool.name}: prompt ${tool.prompt.tokens} tokens (${tool.prompt.percentOfMeasuredContext}%), schema ${tool.schema.tokens} tokens (${tool.schema.percentOfMeasuredContext}%)`,
+				`${tool.name}: prompt ${tool.prompt.tokens} tokens (${tool.prompt.percentOfMeasuredContext}%), description ${tool.description.tokens} tokens (${tool.description.percentOfMeasuredContext}%), examples ${tool.examples.tokens} tokens (${tool.examples.percentOfMeasuredContext}%), schema ${tool.schema.tokens} tokens (${tool.schema.percentOfMeasuredContext}%)`,
 		),
 	];
 	return lines.join("\n");
