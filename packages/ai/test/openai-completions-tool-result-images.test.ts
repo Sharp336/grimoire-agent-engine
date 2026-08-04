@@ -54,6 +54,7 @@ const compat: ResolvedOpenAICompat = {
 	alwaysSendMaxTokens: false,
 	isOpenRouterHost: false,
 	isVercelGatewayHost: false,
+	isVercelGatewayUrl: false,
 	wireModelIdMode: "raw",
 	stripDeepseekSpecialTokens: false,
 	reasoningDeltasMayBeCumulative: false,

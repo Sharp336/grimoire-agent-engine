@@ -213,6 +213,7 @@ describe("openai-completions compatibility", () => {
 			alwaysSendMaxTokens: false,
 			isOpenRouterHost: false,
 			isVercelGatewayHost: false,
+			isVercelGatewayUrl: false,
 			wireModelIdMode: "raw",
 			stripDeepseekSpecialTokens: false,
 			reasoningDeltasMayBeCumulative: false,

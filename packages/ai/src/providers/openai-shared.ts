@@ -63,6 +63,7 @@ export type { OpenAIPromptCacheOptions } from "../types";
 import {
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
+	isRecord,
 	normalizeResponsesToolCallId,
 	normalizeSystemPrompts,
 	resolveCacheRetention,
@@ -620,15 +621,21 @@ export function resolveOpenAIOutputTokenParam(
 	return { field: input.field, value };
 }
 
+type VercelGatewayProviderOptions = {
+	gateway?: Pick<VercelGatewayRouting, "only" | "order" | "caching" | "zeroDataRetention">;
+};
+
 export interface OpenAIGatewayRoutingParams {
 	provider?: OpenRouterRouting;
-	providerOptions?: { gateway?: Pick<VercelGatewayRouting, "only" | "order" | "caching"> };
+	providerOptions?: VercelGatewayProviderOptions;
 }
 
 export interface OpenAIGatewayRoutingCompat {
 	isOpenRouterHost: boolean;
 	openRouterRouting?: OpenRouterRouting;
 	isVercelGatewayHost?: boolean;
+	/** baseUrl actually matches the Vercel AI Gateway hostname; gates the ZDR retention claim. */
+	isVercelGatewayUrl?: boolean;
 	vercelGatewayRouting?: VercelGatewayRouting;
 }
 
@@ -640,18 +647,31 @@ export interface OpenAIGatewayRoutingCompat {
 export function applyOpenAIGatewayRouting(
 	params: OpenAIGatewayRoutingParams,
 	compat: OpenAIGatewayRoutingCompat,
-	cacheEnabled = true,
+	// Gates only the `caching` option; `only`/`order`/`zeroDataRetention` are
+	// routing constraints emitted regardless of cache retention.
+	emitCaching = true,
 ): void {
 	if (compat.isOpenRouterHost && compat.openRouterRouting) {
 		params.provider = compat.openRouterRouting;
 	}
 	if (compat.isVercelGatewayHost && compat.vercelGatewayRouting) {
 		const routing = compat.vercelGatewayRouting;
-		if (routing.only || routing.order || (cacheEnabled && routing.caching)) {
-			const gatewayOptions: Pick<VercelGatewayRouting, "only" | "order" | "caching"> = {};
+		if (
+			routing.only ||
+			routing.order ||
+			(compat.isVercelGatewayUrl && routing.zeroDataRetention) ||
+			(emitCaching && routing.caching)
+		) {
+			const gatewayOptions: Pick<VercelGatewayRouting, "only" | "order" | "caching" | "zeroDataRetention"> = {};
 			if (routing.only) gatewayOptions.only = routing.only;
 			if (routing.order) gatewayOptions.order = routing.order;
-			if (cacheEnabled && routing.caching) gatewayOptions.caching = routing.caching;
+			if (emitCaching && routing.caching) gatewayOptions.caching = routing.caching;
+			// ZDR is a routing constraint, not a cache preference: emit it regardless
+			// of cache retention, and only when explicitly requested (docs: "If
+			// zeroDataRetention is false or not set, there is no ZDR enforcement").
+			// The retention claim additionally requires the actual Vercel hostname:
+			// a models.yml baseUrl override may point the provider id elsewhere.
+			if (compat.isVercelGatewayUrl && routing.zeroDataRetention) gatewayOptions.zeroDataRetention = true;
 			params.providerOptions = { gateway: gatewayOptions };
 		}
 	}
@@ -661,11 +681,13 @@ export interface VercelResponsesCacheParams {
 	caching?: "auto";
 	cache_anchor_items?: number;
 	cache_ttl?: "5m" | "1h";
-	providerOptions?: { gateway?: Pick<VercelGatewayRouting, "only" | "order"> };
+	providerOptions?: { gateway?: Pick<VercelGatewayRouting, "only" | "order" | "zeroDataRetention"> };
 }
 
 export interface VercelResponsesCacheCompat {
 	isVercelGatewayHost: boolean;
+	/** baseUrl actually matches the Vercel AI Gateway hostname; gates the ZDR retention claim. */
+	isVercelGatewayUrl?: boolean;
 	vercelGatewayRouting?: VercelGatewayRouting;
 }
 
@@ -682,10 +704,16 @@ export function applyVercelResponsesCacheControls(
 	const routing = compat.vercelGatewayRouting;
 	if (!compat.isVercelGatewayHost) return;
 
-	if (routing?.only || routing?.order) {
-		const gateway: Pick<VercelGatewayRouting, "only" | "order"> = {};
+	if (routing?.only || routing?.order || (compat.isVercelGatewayUrl && routing?.zeroDataRetention)) {
+		const gateway: Pick<VercelGatewayRouting, "only" | "order" | "zeroDataRetention"> = {};
 		if (routing.only) gateway.only = routing.only;
 		if (routing.order) gateway.order = routing.order;
+		// Request-scoped ZDR is independent of cache retention and caching mode:
+		// the gateway filters to ZDR-compliant providers before any fallback or
+		// cache planning runs. Emit only on the explicit `true` from config AND
+		// only when the request actually goes to Vercel (baseUrl overrides must
+		// not claim a retention guarantee the endpoint won't enforce).
+		if (compat.isVercelGatewayUrl && routing?.zeroDataRetention) gateway.zeroDataRetention = true;
 		params.providerOptions = { gateway };
 	}
 
@@ -718,7 +746,29 @@ export function applyOpenAIExtraBody<P extends object>(
 	options?: OpenAIExtraBodyOptions,
 ): void {
 	if (!extraBody) return;
-	Object.assign(params, extraBody);
+	// `params.providerOptions` may already carry the Vercel gateway routing block
+	// emitted by applyOpenAIGatewayRouting / applyVercelResponsesCacheControls. A
+	// wholesale assign would silently drop zeroDataRetention/only/order/caching
+	// when compat.extraBody.providerOptions is also present. Preserve the typed
+	// gateway block across the merge of any extraBody.providerOptions shape
+	// (including null/primitives), deep-merging the nested `gateway` when the
+	// incoming value is a record; the typed value wins on conflicts.
+	const existingProviderOptions = (params as Record<string, unknown>).providerOptions;
+	const incomingProviderOptions = extraBody.providerOptions;
+	if (isRecord(existingProviderOptions) && isRecord(existingProviderOptions.gateway)) {
+		const existingGateway = existingProviderOptions.gateway;
+		const mergedProviderOptions = { ...existingProviderOptions };
+		if (isRecord(incomingProviderOptions)) {
+			Object.assign(mergedProviderOptions, incomingProviderOptions);
+		}
+		const incomingGateway = isRecord(incomingProviderOptions) ? incomingProviderOptions.gateway : undefined;
+		mergedProviderOptions.gateway = isRecord(incomingGateway)
+			? { ...incomingGateway, ...existingGateway }
+			: existingGateway;
+		Object.assign(params, { ...extraBody, providerOptions: mergedProviderOptions });
+	} else {
+		Object.assign(params, extraBody);
+	}
 	if (options?.dropThinkingWhenReasoningEffort) {
 		const shaped = params as { reasoning_effort?: unknown; thinking?: unknown };
 		if (shaped.reasoning_effort !== undefined) {
@@ -747,7 +797,7 @@ export type OpenAICompletionsParams = Omit<ChatCompletionCreateParamsStreaming, 
 	service_tier?: ServiceTier;
 	tool_stream?: boolean;
 	provider?: OpenAICompat["openRouterRouting"];
-	providerOptions?: { gateway?: { only?: string[]; order?: string[] } };
+	providerOptions?: VercelGatewayProviderOptions;
 };
 
 /** Reasoning-relevant slice of caller options the Chat Completions dialect dispatch reads. */

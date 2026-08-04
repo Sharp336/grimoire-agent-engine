@@ -164,7 +164,30 @@ describe("applyOpenAIGatewayRouting", () => {
 		expect(params.provider).toBeUndefined();
 	});
 
-	it("ignores Vercel gateway routing with neither only nor order", () => {
+	it("maps Vercel zeroDataRetention to providerOptions.gateway", () => {
+		const params = routingParams();
+		applyOpenAIGatewayRouting(params, {
+			isOpenRouterHost: false,
+			isVercelGatewayHost: true,
+			isVercelGatewayUrl: true,
+			vercelGatewayRouting: { zeroDataRetention: true },
+		});
+		expect(params.providerOptions).toEqual({ gateway: { zeroDataRetention: true } });
+		expect(params.provider).toBeUndefined();
+	});
+
+	it("omits Vercel zeroDataRetention when false or unset", () => {
+		const compat: OpenAIGatewayRoutingCompat = {
+			isOpenRouterHost: false,
+			isVercelGatewayHost: true,
+			vercelGatewayRouting: { zeroDataRetention: false },
+		};
+		const params = routingParams();
+		applyOpenAIGatewayRouting(params, compat);
+		expect(params.providerOptions).toBeUndefined();
+	});
+
+	it("ignores Vercel gateway routing without routing or zero-data-retention preferences", () => {
 		const params = routingParams();
 		applyOpenAIGatewayRouting(params, {
 			isOpenRouterHost: false,

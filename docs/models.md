@@ -534,6 +534,7 @@ Gateway routing (only applied when `baseUrl` matches the gateway):
 
 - `openRouterRouting.only` / `openRouterRouting.order` — provider routing on `openrouter.ai` (see <https://openrouter.ai/docs/provider-routing>).
 - `vercelGatewayRouting.only` / `vercelGatewayRouting.order` — provider routing on `ai-gateway.vercel.sh` (see <https://vercel.com/docs/ai-gateway/models-and-providers/provider-options>).
+- `vercelGatewayRouting.zeroDataRetention` — restrict routing to providers with zero data retention agreements (see <https://vercel.com/docs/ai-gateway/security-and-compliance/zdr>).
 
 Provider-level `compat` is the baseline; per-model `compat` is deep-merged on top, with
 `openRouterRouting`, `vercelGatewayRouting`, `extraBody`, and `whenThinking` merged as nested objects.

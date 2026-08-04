@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added support for `compat.vercelGatewayRouting.zeroDataRetention` in `models.yml` to opt Vercel AI Gateway requests into per-request Zero Data Retention; ZDR is emitted only when the model's `baseUrl` actually points at the gateway ([#7446](https://github.com/can1357/oh-my-pi/pull/7446) by [@sjdweb](https://github.com/sjdweb)).
+
 ## [17.2.7] - 2026-08-03
 
 ### Changed

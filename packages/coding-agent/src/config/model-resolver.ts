@@ -375,7 +375,13 @@ function applyUpstreamRouting(model: Model<Api>, upstream: string): Model<Api> {
 	return buildModel({
 		...model,
 		compat: modelMatchesHost(model, "vercelAIGateway")
-			? { ...aggregatorModel.compatConfig, vercelGatewayRouting: routing }
+			? {
+					...aggregatorModel.compatConfig,
+					vercelGatewayRouting: {
+						...aggregatorModel.compatConfig?.vercelGatewayRouting,
+						...routing,
+					},
+				}
 			: { ...aggregatorModel.compatConfig, openRouterRouting: routing },
 	} as ModelSpec<Api>);
 }

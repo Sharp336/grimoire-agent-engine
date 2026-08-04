@@ -4,7 +4,7 @@
  * defaults come from provider ids, strict host checks, and model-id
  * classification, with explicit spec overrides assigned on top.
  */
-import { hostMatchesUrl, modelMatchesHost } from "../hosts";
+import { hostMatchesUrl, isVercelAIGatewayUrl, modelMatchesHost } from "../hosts";
 import {
 	hasOpus47ApiRestrictions,
 	isAnthropicFableOrMythosModel,
@@ -130,6 +130,7 @@ export function buildAnthropicCompat(spec: ModelSpec<"anthropic-messages">): Res
 	// (issue #4192).
 	const isZenmux = modelMatchesHost(spec, "zenmux");
 	const requiresThinkingEnabled = modelMatchesHost(spec, "moonshotNative") && matchesKimiMandatoryThinkingModel(spec);
+	const isVercelGateway = modelMatchesHost(spec, "vercelAIGateway");
 	const isAzure = isAzureAnthropicRoute(baseUrl);
 	const signingEndpoint = official || isCopilot || isZenmux || isAnthropicSigningProxyUrl(baseUrl);
 	const compat: ResolvedAnthropicCompat = {
@@ -173,7 +174,16 @@ export function buildAnthropicCompat(spec: ModelSpec<"anthropic-messages">): Res
 		replayUnsignedThinking: !signingEndpoint && (Boolean(spec.reasoning) || modelMatchesHost(spec, "deepseekFamily")),
 		escapeBuiltinToolNames: modelMatchesHost(spec, "umans"),
 		streamIdleTimeoutMs: spec.compat?.streamIdleTimeoutMs,
+		// Vercel AI Gateway accepts `providerOptions.gateway` in the Messages
+		// body itself; the resolved routing block is filled by applyCompatOverrides.
+		// ZDR emission additionally requires the URL gate: the provider id alone
+		// survives baseUrl overrides and must not claim Vercel retention.
+		isVercelGatewayHost: isVercelGateway,
+		isVercelGatewayUrl: isVercelAIGatewayUrl(baseUrl),
+		vercelGatewayRouting: undefined,
 	};
 	applyCompatOverrides(compat, spec.compat);
+	// Resolved-only retention gate; never trust a raw compat override here.
+	compat.isVercelGatewayUrl = isVercelAIGatewayUrl(baseUrl);
 	return compat;
 }

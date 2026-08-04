@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
+import type { VercelGatewayRouting } from "@oh-my-pi/pi-catalog/types";
 import {
 	expandRoleAlias,
 	extractExplicitThinkingSelector,
@@ -1757,6 +1758,8 @@ describe("extractExplicitThinkingSelector", () => {
 describe("provider routing selector (@upstream)", () => {
 	const openRouterOnly = (model: Model<Api> | undefined): string[] | undefined =>
 		(model?.compat as { openRouterRouting?: { only?: string[] } } | undefined)?.openRouterRouting?.only;
+	const vercelGatewayRouting = (model: Model<Api> | undefined): VercelGatewayRouting | undefined =>
+		(model?.compat as { vercelGatewayRouting?: VercelGatewayRouting } | undefined)?.vercelGatewayRouting;
 
 	test("pins an OpenRouter model to one upstream via @slug", () => {
 		const result = parseModelPattern("openrouter/z-ai/glm-4.7@cerebras", allModels);
@@ -1799,13 +1802,22 @@ describe("provider routing selector (@upstream)", () => {
 			cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 },
 			contextWindow: 128000,
 			maxTokens: 8192,
+			compat: {
+				vercelGatewayRouting: {
+					order: ["anthropic", "bedrock"],
+					caching: "auto",
+					zeroDataRetention: true,
+				},
+			},
 		});
 		const result = parseModelPattern("vercel-ai-gateway/zai/glm-4.7@cerebras", [gatewayModel]);
 		expect(result.model?.id).toBe("zai/glm-4.7");
-		expect(
-			(result.model?.compat as { vercelGatewayRouting?: { only?: string[] } } | undefined)?.vercelGatewayRouting
-				?.only,
-		).toEqual(["cerebras"]);
+		expect(vercelGatewayRouting(result.model)).toEqual({
+			only: ["cerebras"],
+			order: ["anthropic", "bedrock"],
+			caching: "auto",
+			zeroDataRetention: true,
+		});
 		expect(openRouterOnly(result.model)).toBeUndefined();
 	});
 

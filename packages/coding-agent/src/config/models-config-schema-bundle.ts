@@ -10,6 +10,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 	const VercelGatewayRoutingSchema = type({
 		"only?": "string[]",
 		"order?": "string[]",
+		"zeroDataRetention?": "boolean",
 	});
 
 	const ReasoningEffortMapSchema = type({

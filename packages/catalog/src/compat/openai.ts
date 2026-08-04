@@ -8,7 +8,7 @@
  * never detect, resolve, or allocate.
  */
 import { isFireworksFastModelId } from "../fireworks-model-id";
-import { hostMatchesUrl, modelMatchesHost } from "../hosts";
+import { hostMatchesUrl, isVercelAIGatewayUrl, modelMatchesHost } from "../hosts";
 import { bareModelId, parseOpenAIModel, semverGte } from "../identity/classify";
 import {
 	isAnthropicNamespacedModelId,
@@ -582,6 +582,11 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		isOpenRouterHost: isOpenRouter,
 		wireModelIdMode,
 		isVercelGatewayHost: isVercelGateway,
+		// ZDR is a retention guarantee: it must only be claimed when the request
+		// actually goes to Vercel. Provider-id matching alone is not enough — a
+		// models.yml baseUrl override can point a `vercel-ai-gateway` provider at
+		// an unrelated proxy.
+		isVercelGatewayUrl: isVercelAIGatewayUrl(baseUrl),
 		supportsStrictMode: detectStrictModeSupport(provider, baseUrl),
 		extraBody: undefined,
 		toolStrictMode: isCerebras ? "all_strict" : "mixed",
@@ -604,6 +609,9 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 	};
 
 	applyCompatOverrides(compat, spec.compat);
+	// Resolved-only retention gate: loosely typed compat input must not be able
+	// to assert a Vercel guarantee for an unrelated endpoint.
+	compat.isVercelGatewayUrl = isVercelAIGatewayUrl(baseUrl);
 	const deepseekThinking = compat.extraBody?.thinking;
 	if (
 		isDirectDeepseekReasoning &&
@@ -638,6 +646,14 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 	if (whenThinkingPolicy) {
 		const variant: ResolvedOpenAICompat = { ...compat };
 		applyCompatOverrides(variant, whenThinkingPolicy);
+		if (whenThinkingPolicy.vercelGatewayRouting) {
+			variant.vercelGatewayRouting = {
+				...compat.vercelGatewayRouting,
+				...whenThinkingPolicy.vercelGatewayRouting,
+			};
+		}
+		// The retention gate is resolved from baseUrl, not user-overridable compat.
+		variant.isVercelGatewayUrl = compat.isVercelGatewayUrl;
 		if (whenThinkingPolicy.reasoningDisableMode === undefined) {
 			variant.reasoningDisableMode = resolveReasoningDisableMode(variant.thinkingFormat);
 		}
@@ -744,6 +760,9 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 		vercelGatewayRouting: undefined,
 		isOpenRouterHost: isOpenRouter,
 		isVercelGatewayHost: isVercelGateway,
+		// ZDR is a retention guarantee: only claim it when the request actually
+		// goes to Vercel (provider-id matching survives baseUrl overrides).
+		isVercelGatewayUrl: isVercelAIGatewayUrl(baseUrl),
 		wireModelIdMode: isOpenRouter ? "openrouter" : "raw",
 		// Mirrors buildOpenAICompat: Kimi behind a Responses-capable proxy still
 		// lands on Moonshot's MFJS validator.
@@ -765,6 +784,8 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 			: spec.compat?.streamIdleTimeoutMs,
 	};
 	applyCompatOverrides(compat, spec.compat);
+	// Resolved-only retention gate; never trust a raw compat override here.
+	compat.isVercelGatewayUrl = isVercelAIGatewayUrl(baseUrl);
 	if (spec.compat?.reasoningDisableMode === undefined) {
 		compat.reasoningDisableMode = resolveReasoningDisableMode(compat.thinkingFormat);
 	}
@@ -783,6 +804,7 @@ function pickResponsesOnly(compat: ResolvedOpenAIResponsesCompat): ResponsesOnly
 		supportsImageDetailOriginal: compat.supportsImageDetailOriginal,
 		supportsObfuscationOptOut: compat.supportsObfuscationOptOut,
 		isVercelGatewayHost: compat.isVercelGatewayHost,
+		isVercelGatewayUrl: compat.isVercelGatewayUrl,
 	} satisfies ResponsesOnlyCompat;
 }
 

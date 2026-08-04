@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Vercel AI Gateway `zeroDataRetention` routing preference to `VercelGatewayRouting`, configurable per model via `compat.vercelGatewayRouting` ([#7446](https://github.com/can1357/oh-my-pi/pull/7446) by [@sjdweb](https://github.com/sjdweb)).
+
 ## [17.2.7] - 2026-08-03
 
 ### Fixed

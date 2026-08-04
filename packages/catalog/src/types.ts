@@ -496,6 +496,12 @@ export interface AnthropicCompat {
 	 * {@link ResolvedAnthropicCompat.officialEndpoint}.
 	 */
 	signingEndpoint?: boolean;
+	/**
+	 * Vercel AI Gateway routing preferences. Only used when baseUrl points to
+	 * Vercel AI Gateway; forwarded as `providerOptions.gateway` in the
+	 * Messages body (the gateway's Anthropic transport accepts the field).
+	 */
+	vercelGatewayRouting?: VercelGatewayRouting;
 }
 
 /**
@@ -556,6 +562,8 @@ export interface VercelGatewayRouting {
 	cacheAnchorItems?: number;
 	/** Requested automatic-cache lifetime for the Responses API. */
 	cacheTtl?: "5m" | "1h";
+	/** Route only through providers with zero data retention agreements with Vercel. */
+	zeroDataRetention?: boolean;
 }
 
 type ResolvedToolStrictMode = NonNullable<OpenAICompat["toolStrictMode"]> | "mixed";
@@ -696,6 +704,8 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 		toolStrictMode: ResolvedToolStrictMode;
 		/** The model sits behind Vercel AI Gateway. */
 		isVercelGatewayHost: boolean;
+		/** baseUrl actually matches the Vercel AI Gateway hostname (ai-gateway.vercel.sh). */
+		isVercelGatewayUrl: boolean;
 		dropThinkingWhenReasoningEffort: boolean;
 		/** Complete alternate view for thinking-engaged requests; swap pointers, never spread. */
 		whenThinking?: ResolvedOpenAICompat;
@@ -711,6 +721,8 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	vercelGatewayRouting?: OpenAICompat["vercelGatewayRouting"];
 	/** The model sits behind Vercel AI Gateway's Responses endpoint. */
 	isVercelGatewayHost: boolean;
+	/** baseUrl actually matches the Vercel AI Gateway hostname (ai-gateway.vercel.sh). */
+	isVercelGatewayUrl: boolean;
 }
 
 /**
@@ -721,7 +733,9 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 export type ResolvedOpenRouterCompat = ResolvedOpenAICompat & ResolvedOpenAIResponsesCompat;
 
 /** Fully-resolved anthropic-messages compat view (same contract as `ResolvedOpenAICompat`). */
-export type ResolvedAnthropicCompat = Required<Omit<AnthropicCompat, "streamIdleTimeoutMs">> & {
+export type ResolvedAnthropicCompat = Required<
+	Omit<AnthropicCompat, "streamIdleTimeoutMs" | "vercelGatewayRouting">
+> & {
 	/**
 	 * Stream-watchdog idle-timeout fallback in ms for slow reasoning hosts; 0 disables the idle watchdog.
 	 * Undefined defers to `PI_STREAM_IDLE_TIMEOUT_MS`, then the legacy
@@ -735,6 +749,12 @@ export type ResolvedAnthropicCompat = Required<Omit<AnthropicCompat, "streamIdle
 	 * env headers, and cache-TTL shaping without per-request URL parsing.
 	 */
 	officialEndpoint: boolean;
+	/** The model sits behind Vercel AI Gateway; gateway preferences are forwarded in the Messages body. */
+	isVercelGatewayHost: boolean;
+	/** baseUrl actually matches the Vercel AI Gateway hostname (ai-gateway.vercel.sh). */
+	isVercelGatewayUrl: boolean;
+	/** Vercel AI Gateway routing preferences (only/order/zeroDataRetention). */
+	vercelGatewayRouting?: VercelGatewayRouting;
 };
 
 /**
