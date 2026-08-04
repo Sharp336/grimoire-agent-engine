@@ -2960,11 +2960,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 		const requestedToolNames = explicitlyRequestedToolNames ?? toolNamesFromRegistry;
 		const normalizedRequested = requestedToolNames.filter(name => toolRegistry.has(name));
-		const defaultInactiveToolNames = new Set([
-			...registeredTools.filter(tool => isDefaultInactiveTool(tool.definition)).map(tool => tool.definition.name),
-			...sdkToolDefinitions.filter(tool => isDefaultInactiveTool(tool)).map(tool => tool.name),
-			...sdkCustomTools.filter(tool => isDefaultInactiveTool(tool)).map(tool => tool.name),
-		]);
+		// Registry assembly above is last-wins by tool name (later entries replace
+		// earlier ones in `toolRegistry`), so activation must be derived from each
+		// name's WINNING registry entry, not the independent source lists: when a
+		// hidden `toolDefinitions` entry shadows a visible same-named `customTools`
+		// entry (or vice versa), the winner's hidden/defaultInactive flags decide —
+		// a shadowed input's flags must neither re-activate a hidden tool nor
+		// deactivate a visible one. The composed wrapper forwards the winner's
+		// fields live, so the existing `isDefaultInactiveTool` predicate stays the
+		// single decision point.
+		const extensionToolNames = [...new Set(allCustomTools.map(tool => tool.definition.name))];
+		const winningEntryIsDefaultInactive = (name: string): boolean => {
+			const winner = toolRegistry.get(name) as { hidden?: boolean; defaultInactive?: boolean } | undefined;
+			return winner !== undefined && isDefaultInactiveTool(winner);
+		};
+		const defaultInactiveToolNames = new Set(extensionToolNames.filter(name => winningEntryIsDefaultInactive(name)));
 		const requestedActiveToolNames = normalizedRequested.filter(name => name !== "goal");
 		const explicitlyRequestedToolNameSet = explicitlyRequestedToolNames
 			? new Set(explicitlyRequestedToolNames)
@@ -2984,11 +2994,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// except those marked hidden or defaultInactive (unless explicitly requested via toolNames).
 		const alwaysInclude: string[] = restrictToolNames
 			? []
-			: [
-					...sdkCustomTools.filter(t => !isDefaultInactiveTool(t)).map(t => t.name),
-					...sdkToolDefinitions.filter(t => !isDefaultInactiveTool(t)).map(t => t.name),
-					...registeredTools.filter(t => !isDefaultInactiveTool(t.definition)).map(t => t.definition.name),
-				];
+			: extensionToolNames.filter(name => !defaultInactiveToolNames.has(name));
 		for (const name of alwaysInclude) {
 			if (toolRegistry.has(name) && !initialToolNames.includes(name)) {
 				initialToolNames.push(name);

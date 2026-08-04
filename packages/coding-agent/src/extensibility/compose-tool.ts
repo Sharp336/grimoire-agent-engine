@@ -1,4 +1,5 @@
 import type { AgentTool, ToolLoadMode } from "@oh-my-pi/pi-agent-core";
+import type { TSchema } from "@oh-my-pi/pi-ai";
 import { defaultLoadModeForToolName } from "../tools/essential-tools";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { customToolToDefinition } from "./custom-tools/definition";
@@ -22,7 +23,11 @@ interface ComposeOptions {
  * refresh paths supply no runner — has nothing to gate against, so it stops at
  * the meta-notice.
  */
-function finishComposition(tool: AgentTool, runner: ExtensionRunner | undefined, metaNotice: boolean): AgentTool {
+function finishComposition<TParams extends TSchema, TDetails>(
+	tool: AgentTool<TParams, TDetails>,
+	runner: ExtensionRunner | undefined,
+	metaNotice: boolean,
+): AgentTool<TParams, TDetails> {
 	const metaNoticed = metaNotice ? wrapToolWithMetaNotice(tool) : tool;
 	return runner ? new ExtensionToolWrapper(metaNoticed, runner) : metaNoticed;
 }
@@ -38,11 +43,11 @@ export function composeAgentTool(tool: AgentTool, runner: ExtensionRunner, opts?
 }
 
 /** Resolve load mode, adapt, and finish — the shared tail of both entry points. */
-function composeDefinition(
-	definition: ToolDefinition,
+function composeDefinition<TParams extends TSchema, TDetails>(
+	definition: ToolDefinition<TParams, TDetails>,
 	runner: ExtensionRunner | undefined,
 	opts: ComposeOptions | undefined,
-): AgentTool {
+): AgentTool<TParams, TDetails> {
 	const loadMode = defaultLoadModeForToolName(definition.name, opts?.loadMode ?? definition.loadMode);
 	// Never spread the definition: a class-instance definition's prototype
 	// methods (including `execute`), getters, and `#private`-field receiver
@@ -54,7 +59,7 @@ function composeDefinition(
 	// RegisteredTool wrapper, which it prefers over the definition's own value.
 	const definitionResolvedLoadMode = defaultLoadModeForToolName(definition.name, definition.loadMode);
 	const overrideLoadMode = loadMode !== definitionResolvedLoadMode ? loadMode : undefined;
-	const adapter = new RegisteredToolAdapter(
+	const adapter = new RegisteredToolAdapter<TParams, TDetails>(
 		{
 			definition,
 			extensionPath: "<composed>",
@@ -73,11 +78,11 @@ function composeDefinition(
  * `getContext` thunk is supplied, throws at composition time — a CustomTool's
  * callbacks need a context, and a silent empty-context crash at call time is worse.
  */
-export function composeCustomTool(
-	tool: CustomTool,
+export function composeCustomTool<TParams extends TSchema, TDetails>(
+	tool: CustomTool<TParams, TDetails>,
 	runner: ExtensionRunner | undefined,
 	opts?: ComposeOptions & { getContext?: () => CustomToolContext },
-): AgentTool {
+): AgentTool<TParams, TDetails> {
 	if (!runner && !opts?.getContext) {
 		throw new Error(
 			`composeCustomTool("${tool.name}"): a runner or getContext thunk is required — ` +
@@ -98,10 +103,10 @@ export function composeCustomTool(
  * those fields would be `undefined`. Use {@link composeCustomTool} with a
  * `getContext` thunk for the runner-less path.
  */
-export function composeToolDefinition(
-	definition: ToolDefinition,
+export function composeToolDefinition<TParams extends TSchema, TDetails>(
+	definition: ToolDefinition<TParams, TDetails>,
 	runner: ExtensionRunner,
 	opts?: ComposeOptions,
-): AgentTool {
+): AgentTool<TParams, TDetails> {
 	return composeDefinition(definition, runner, opts);
 }

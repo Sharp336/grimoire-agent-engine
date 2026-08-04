@@ -6,6 +6,8 @@
  * `compose-tool.ts`, so both the SDK and the composition pipeline depend on it
  * without forming a cycle.
  */
+
+import type { TSchema } from "@oh-my-pi/pi-ai";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import type { ExtensionContext, ToolDefinition, ToolExecuteExtensionContext } from "../extensions/types";
@@ -46,19 +48,27 @@ function resolveCustomToolContext(
 	return (ctx as ToolExecuteExtensionContext).callerToolContext ?? getContext?.() ?? createCustomToolContext(ctx);
 }
 
-export function customToolToDefinition(tool: CustomTool, getContext?: () => CustomToolContext): ToolDefinition {
-	// Metadata fields (name, label, description, parameters, hidden, deferrable,
-	// strict, mcpServerName, mcpToolName, mergeCallAndResult) are forwarded as
-	// getters so a class-based CustomTool that exposes them through getters
-	// (settings- or state-dependent) stays live after composition — matching the
-	// liveness the removed CustomToolAdapter provided via applyToolProxy.
+export function customToolToDefinition<TParams extends TSchema, TDetails>(
+	tool: CustomTool<TParams, TDetails>,
+	getContext?: () => CustomToolContext,
+): ToolDefinition<TParams, TDetails> {
+	// Fields a class-based CustomTool can expose through getters (settings- or
+	// state-dependent) are forwarded lazily so they stay live after composition —
+	// matching the liveness the removed CustomToolAdapter provided via
+	// applyToolProxy. That covers the metadata (name, label, description,
+	// parameters, hidden, deferrable, strict, mcpServerName, mcpToolName,
+	// mergeCallAndResult) AND the approval pair: the gate re-reads
+	// `approval`/`formatApprovalDetails` on every call, so a getter that
+	// tightens from `allow` to `prompt`/`deny` must take effect instead of
+	// running against a value frozen at conversion time. Function values are
+	// bound to the tool on each access so class methods keep their receiver.
 	//
-	// loadMode is a RESOLVED value (defaultLoadModeForToolName normalizes it at
-	// composition time), not a passthrough, so it stays eager. The bound
-	// callbacks (approval, formatApprovalDetails, renderCall, renderResult,
-	// execute, onSession) are already correct — they close over `tool` and read
-	// its fields on each invocation.
-	const definition: ToolDefinition & { mergeCallAndResult?: boolean } = {
+	// loadMode is deliberately eager: it is a RESOLVED value —
+	// defaultLoadModeForToolName normalizes it at composition time — not a
+	// passthrough of the tool's own field. execute/onSession/renderResult are
+	// closures that read `tool`'s live methods on each invocation; renderCall
+	// is bound once at conversion (display-only, no gate depends on it).
+	const definition: ToolDefinition<TParams, TDetails> & { mergeCallAndResult?: boolean } = {
 		get name() {
 			return tool.name;
 		},
@@ -78,11 +88,14 @@ export function customToolToDefinition(tool: CustomTool, getContext?: () => Cust
 		get deferrable() {
 			return tool.deferrable;
 		},
-		approval: typeof tool.approval === "function" ? tool.approval.bind(tool) : tool.approval,
-		formatApprovalDetails:
-			typeof tool.formatApprovalDetails === "function"
-				? tool.formatApprovalDetails.bind(tool)
-				: tool.formatApprovalDetails,
+		get approval() {
+			const approval = tool.approval;
+			return typeof approval === "function" ? approval.bind(tool) : approval;
+		},
+		get formatApprovalDetails() {
+			const formatApprovalDetails = tool.formatApprovalDetails;
+			return typeof formatApprovalDetails === "function" ? formatApprovalDetails.bind(tool) : formatApprovalDetails;
+		},
 		// Preserved through RegisteredToolAdapter so MCP-backed tools' explicit
 		// `strict: false` (#4336/#4340) survives the custom-tool → definition bridge.
 		get strict() {

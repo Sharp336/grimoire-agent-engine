@@ -1104,4 +1104,45 @@ describe("createAgentSession toolDefinitions hidden", () => {
 			await session.dispose();
 		}
 	});
+
+	it("derives activation from the winning registry entry when same-named inputs shadow", async () => {
+		// Registry assembly is last-wins by tool name. A visible customTools
+		// entry shadowed by a hidden same-named toolDefinitions entry must have
+		// the HIDDEN winner decide activation — the visible entry's name must
+		// not re-activate the hidden tool through the alwaysInclude path.
+		const tempDir = makeTempDir();
+		const visibleCustom: CustomTool = {
+			name: "shadow_pair",
+			label: "Visible Custom",
+			description: "visible customTools entry shadowed by a hidden toolDefinitions entry",
+			parameters: type({}),
+			async execute() {
+				return { content: [{ type: "text", text: "visible" }] };
+			},
+		};
+		const hiddenDef: ToolDefinition = {
+			name: "shadow_pair",
+			label: "Hidden Def",
+			description: "hidden toolDefinitions entry that wins the registry",
+			parameters: type({}),
+			hidden: true,
+			async execute() {
+				return { content: [{ type: "text", text: "hidden" }] };
+			},
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			customTools: [visibleCustom],
+			toolDefinitions: [hiddenDef],
+		});
+
+		try {
+			expect(session.getAllToolNames()).toContain("shadow_pair");
+			expect(session.getActiveToolNames()).not.toContain("shadow_pair");
+			expect(session.systemPrompt.join("\n")).not.toContain("shadow_pair");
+		} finally {
+			await session.dispose();
+		}
+	});
 });

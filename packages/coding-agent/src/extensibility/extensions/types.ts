@@ -524,7 +524,23 @@ export interface ExtensionCommandContext extends ExtensionContext {
  * Internal execution-time context. Carries the original caller {@link AgentToolContext}
  * (the full live context with settings/fetch/autoApprove) through the composition
  * pipeline so the custom-tool bridge can prefer it over the projected extension
- * context. Not part of the public extension API — extensions never see this field.
+ * context.
+ *
+ * Who sees it: `RegisteredToolAdapter` passes this object as the execute context
+ * to every composed tool, so extension-authored `ToolDefinition.execute` receives
+ * it too — the field is readable on the runtime object even though it is not on
+ * the `ExtensionContext` contract extensions code against. The custom-tool bridge
+ * (`resolveCustomToolContext`) deliberately prefers it so a re-registered built-in
+ * keeps the caller's already-granted state and MCP-backed tools keep live
+ * settings/fetch/autoApprove instead of a projected copy.
+ *
+ * Why that is safe: extensions are user-installed trusted code that already hold
+ * session-level capabilities through `ExtensionContext` (session manager, model
+ * registry, same-tool `invokeTool`), and the caller context is built by the host
+ * from session state — never from tool input. Every call still passes
+ * `ExtensionToolWrapper`'s approval gate, which re-resolves policy from the
+ * host's settings before the tool runs, so holding the caller context does not
+ * bypass approval.
  */
 export interface ToolExecuteExtensionContext extends ExtensionContext {
 	callerToolContext?: AgentToolContext;

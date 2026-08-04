@@ -22,7 +22,9 @@ import type { RegisteredTool, ToolCallEventResult, ToolExecuteExtensionContext }
 /**
  * Adapts a RegisteredTool into an AgentTool.
  */
-export class RegisteredToolAdapter implements AgentTool<any, any, any> {
+export class RegisteredToolAdapter<TParams extends TSchema = TSchema, TDetails = unknown>
+	implements AgentTool<TParams, TDetails>
+{
 	declare name: string;
 	declare description: string;
 	declare parameters: any;
@@ -34,7 +36,7 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 	readonly loadMode: ToolLoadMode;
 
 	constructor(
-		private registeredTool: RegisteredTool,
+		private registeredTool: RegisteredTool<TParams, TDetails>,
 		private runner?: ExtensionRunner,
 	) {
 		applyToolProxy(registeredTool.definition, this);

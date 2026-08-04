@@ -10,15 +10,20 @@
  * `(toolCallId, params, signal, onUpdate, ctx)` — the bug fixed by splitting
  * `composeCustomTool` (CustomTool only) from `composeToolDefinition`.
  */
-import { describe, expect, it } from "bun:test";
+import { describe, expect, expectTypeOf, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	composeAgentTool,
 	composeCustomTool,
 	composeToolDefinition,
 } from "@oh-my-pi/pi-coding-agent/extensibility/compose-tool";
-import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
+import type {
+	CustomTool,
+	ToolApproval,
+	ToolApprovalDecision,
+} from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { ExtensionContext, ToolDefinition } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { BUILTIN_TOOLS, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -302,5 +307,124 @@ describe("class-based CustomTool metadata getters stay live after composition", 
 		expect(tool.description).toBe("updated-description");
 		expect(tool.hidden).toBe(true);
 		expect(tool.label).toBe("label-for-updated-description");
+	});
+});
+
+describe("class-based CustomTool approval stays live after composition", () => {
+	it("approval reflects a tightened policy when the backing state changes after composition", async () => {
+		// A getter-backed approval that captures state at read time: eager
+		// assignment at conversion would freeze "read" and let the tightened
+		// deny policy be bypassed through the stale permissive value.
+		class GatedTool implements CustomTool {
+			readonly name = "gated_approval";
+			readonly label = "Gated Approval";
+			readonly description = "approval tightens with state";
+			readonly parameters = emptySchema;
+			#locked = false;
+
+			get approval(): ToolApproval {
+				return this.#locked ? { tier: "exec", policy: "deny", reason: "locked" } : "read";
+			}
+
+			lock(): void {
+				this.#locked = true;
+			}
+
+			async execute() {
+				return { content: [{ type: "text" as const, text: "ran" }] };
+			}
+		}
+
+		const instance = new GatedTool();
+		const tool = composeCustomTool(instance, execRunner);
+
+		// Permissive: yolo mode (no context settings) allows a read tier.
+		const result = await tool.execute("call-1", {}, undefined, undefined, undefined);
+		expect(result.content[0]).toEqual({ type: "text", text: "ran" });
+
+		// Tighten to deny — the gate must re-read approval and block.
+		instance.lock();
+		await expect(tool.execute("call-2", {}, undefined, undefined, undefined)).rejects.toThrow(
+			/blocked by user policy/,
+		);
+	});
+
+	it("approval binding is preserved for a method-valued approval reading instance state", async () => {
+		// A method-valued approval reads `this.#locked` at call time; binding
+		// must be preserved so the method sees the correct receiver.
+		class MethodApprovalTool implements CustomTool {
+			readonly name = "method_approval";
+			readonly label = "Method Approval";
+			readonly description = "approval is a method reading instance state";
+			readonly parameters = emptySchema;
+			#locked = false;
+
+			approval(): ToolApprovalDecision {
+				return this.#locked ? { tier: "exec", policy: "deny" } : "read";
+			}
+
+			lock(): void {
+				this.#locked = true;
+			}
+
+			async execute() {
+				return { content: [{ type: "text" as const, text: "ran" }] };
+			}
+		}
+
+		const instance = new MethodApprovalTool();
+		const tool = composeCustomTool(instance, execRunner);
+
+		const result = await tool.execute("call-1", {}, undefined, undefined, undefined);
+		expect(result.content[0]).toEqual({ type: "text", text: "ran" });
+
+		instance.lock();
+		await expect(tool.execute("call-2", {}, undefined, undefined, undefined)).rejects.toThrow(
+			/blocked by user policy/,
+		);
+	});
+});
+
+describe("composeCustomTool / composeToolDefinition generic type preservation", () => {
+	it("composeCustomTool preserves the tool's parameter and details generics", () => {
+		const params = type({ query: "string" });
+		interface SearchDetails {
+			hits: number;
+		}
+
+		const tool: CustomTool<typeof params, SearchDetails> = {
+			name: "typed_search",
+			label: "Typed Search",
+			description: "typed params and details",
+			parameters: params,
+			async execute(_id, p, _onUpdate, _ctx, _signal) {
+				p.query.toUpperCase();
+				return { content: [{ type: "text" as const, text: "ok" }], details: { hits: 0 } };
+			},
+		};
+		const composed = composeCustomTool(tool, execRunner);
+		expectTypeOf(composed).toEqualTypeOf<AgentTool<typeof params, SearchDetails>>();
+		expect(composed.name).toBe("typed_search");
+	});
+
+	it("composeToolDefinition preserves the definition's parameter and details generics", () => {
+		const params = type({ query: "string" });
+		interface SearchDetails {
+			hits: number;
+		}
+
+		const def: ToolDefinition<typeof params, SearchDetails> = {
+			name: "typed_search_def",
+			label: "Typed Search Def",
+			description: "typed params and details",
+			parameters: params,
+			async execute(_id, p, _signal, _onUpdate, _ctx) {
+				p.query.toUpperCase();
+				return { content: [{ type: "text" as const, text: "ok" }], details: { hits: 0 } };
+			},
+		};
+		const composed = composeToolDefinition(def, execRunner);
+		expectTypeOf(composed).toEqualTypeOf<AgentTool<typeof params, SearchDetails>>();
+		expect(composed.name).toBe("typed_search_def");
 	});
 });
