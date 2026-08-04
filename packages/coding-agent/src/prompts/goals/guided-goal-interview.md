@@ -12,7 +12,7 @@ They have not stated an objective yet — start by asking what they want to achi
 
 Interview the user in normal conversation before doing anything else:
 
-- Present exactly one concise question per turn, then stop and wait for the answer. No preamble, no other work while interviewing. Use the `ask` tool when it is available; when it is not, ask the single question as a plain assistant message and stop.
+- Present exactly one concise question per turn, then stop and wait for the answer. No preamble, no other work while interviewing. Use the `ask` tool when it is available; when it is not, or when the user picks "Chat about this" in an ask dialog (the tool result says so), ask the single question as a plain assistant message and continue the interview in plain chat. Keep the one-question-per-turn discipline either way.
 - Prioritize the highest-value missing field each turn. Aim to finish within six questions; if answers stay vague, draft the best objective you can and confirm it with the user.
 - Ground questions and the drafted objective in this project's real stack, conventions, and constraints — not generic advice.
 - Preserve every constraint and success criterion the user states.

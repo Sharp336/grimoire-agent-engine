@@ -48,8 +48,15 @@ async function createHarness(options?: { goalEnabled?: boolean }): Promise<Guide
 	if (!model) {
 		throw new Error("Expected claude-sonnet-4-5 to exist in registry");
 	}
-	const initialTools = await createTools(createToolSession(tempDir.path(), settings), ["read"]);
-	const toolRegistry = new Map<string, Tool>(initialTools.map(tool => [tool.name, tool] as const));
+	const initialTools = await createTools(createToolSession(tempDir.path(), settings, { hasUI: true }), ["read"]);
+	// Register `ask` without enabling it: the registry must know the tool so a
+	// command that force-activated it would show up in getEnabledToolNames(),
+	// while the session starts with it disabled (as if the user turned it off).
+	const registryTools = await createTools(createToolSession(tempDir.path(), settings, { hasUI: true }), [
+		"read",
+		"ask",
+	]);
+	const toolRegistry = new Map<string, Tool>(registryTools.map(tool => [tool.name, tool] as const));
 	const session = new AgentSession({
 		agent: new Agent({
 			initialState: {
