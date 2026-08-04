@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added live reloads for global `config.yml` and `config.yaml` changes.
+
 ## [17.2.8] - 2026-08-04
 
 ### Changed
