@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { parseInternalUrl } from "@oh-my-pi/pi-utils";
 import * as capability from "../../src/capability";
 import type { SSHHost } from "../../src/capability/ssh";
 import type { CapabilityResult, SourceMeta } from "../../src/capability/types";
+import { parseInternalUrl } from "../../src/internal-urls/parse";
 import { SshProtocolHandler } from "../../src/internal-urls/ssh-protocol";
 import * as fileTransfer from "../../src/ssh/file-transfer";
 

@@ -9,7 +9,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { resolveToolSearchScope } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
-import { parseInternalUrl } from "@oh-my-pi/pi-utils";
+import { parseInternalUrl } from "../../src/internal-urls/parse";
 
 /**
  * Path-only callers (search/grep, bash URL expansion) only need the artifact's

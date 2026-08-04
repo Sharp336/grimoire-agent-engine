@@ -10,20 +10,13 @@ import {
 	type ToolResultMessage,
 	type Usage,
 } from "@oh-my-pi/pi-ai";
-import {
-	getSessionsDir,
-	isEnoent,
-	parseSkillUrlTarget,
-	readLines,
-	splitTopLevelDelimitedPath,
-} from "@oh-my-pi/pi-utils";
+import { getSessionsDir, isEnoent, parseSkillUrlTarget, readLines } from "@oh-my-pi/pi-utils";
 import type {
 	AgentType,
 	MessageStats,
 	ProvisionalSkillInvocationStats,
 	ResultSkillInvocationStats,
 	SessionEntry,
-	SessionHeader,
 	SessionMessageEntry,
 	SessionServiceTierChangeEntry,
 	ToolCallStats,
@@ -240,23 +233,6 @@ function isToolCall(block: unknown): block is ToolCall {
 	const candidate = block as Partial<ToolCall>;
 	return candidate.type === "toolCall" && typeof candidate.id === "string" && typeof candidate.name === "string";
 }
-function recordReadToolPaths(
-	entry: SessionMessageEntry,
-	readPathsByToolCallId: Map<string, string>,
-	neededToolCallIds?: ReadonlySet<string>,
-): void {
-	const msg = entry.message as AssistantMessage;
-	if (!Array.isArray(msg.content)) return;
-	for (const block of msg.content.filter(isToolCall)) {
-		if (
-			block.name !== "read" ||
-			typeof block.arguments?.path !== "string" ||
-			(neededToolCallIds !== undefined && !neededToolCallIds.has(block.id))
-		)
-			continue;
-		readPathsByToolCallId.set(block.id, block.arguments.path);
-	}
-}
 
 /**
  * Extract one {@link ToolCallStats} per `toolCall` content block of an
@@ -330,43 +306,10 @@ function hasResultSkillTargets(details: unknown): details is { skillTargets: unk
 }
 
 /**
- * Legacy results predate `skillTargets`. Recover only semicolon lists: unlike
- * comma and whitespace recovery, they do not depend on the filesystem state
- * that existed when the historical read ran.
- */
-function extractLegacyDelimitedSkillInvocations(
-	sessionFile: string,
-	toolCallId: string,
-	readPath: string | undefined,
-): ResultSkillInvocationStats[] {
-	if (readPath === undefined) return [];
-	const targets = splitTopLevelDelimitedPath(readPath, "semicolon");
-	if (targets.length < 2) return [];
-
-	const invocations: ResultSkillInvocationStats[] = [];
-	for (const target of targets) {
-		const skillTarget = parseSkillUrlTarget(target.trim());
-		if (!skillTarget) continue;
-		invocations.push({
-			sessionFile,
-			toolCallId,
-			targetIndex: invocations.length,
-			target: skillTarget.target,
-			skillName: skillTarget.skill,
-		});
-	}
-	return invocations;
-}
-
-/**
  * Extract authoritative executed-skill targets from a `read` result.
  * `displayReadTargets` is presentation metadata and is intentionally ignored.
  */
-function extractResultSkillInvocations(
-	sessionFile: string,
-	entry: SessionMessageEntry,
-	readPathsByToolCallId: ReadonlyMap<string, string>,
-): ResultSkillInvocationStats[] {
+function extractResultSkillInvocations(sessionFile: string, entry: SessionMessageEntry): ResultSkillInvocationStats[] {
 	const msg = entry.message as ToolResultMessage;
 	if (
 		msg.role !== "toolResult" ||
@@ -375,13 +318,7 @@ function extractResultSkillInvocations(
 		msg.toolCallId.length === 0
 	)
 		return [];
-	if (!hasResultSkillTargets(msg.details)) {
-		return extractLegacyDelimitedSkillInvocations(
-			sessionFile,
-			msg.toolCallId,
-			readPathsByToolCallId.get(msg.toolCallId),
-		);
-	}
+	if (!hasResultSkillTargets(msg.details)) return [];
 
 	const invocations: ResultSkillInvocationStats[] = [];
 	for (const candidate of msg.details.skillTargets) {
@@ -404,19 +341,6 @@ function extractResultSkillInvocations(
 	return invocations;
 }
 
-function legacyReadToolCallId(entry: SessionEntry): string | undefined {
-	if (!isToolResultMessage(entry)) return undefined;
-	const msg = entry.message as ToolResultMessage;
-	if (
-		msg.toolName !== "read" ||
-		typeof msg.toolCallId !== "string" ||
-		msg.toolCallId.length === 0 ||
-		hasResultSkillTargets(msg.details)
-	)
-		return undefined;
-	return msg.toolCallId;
-}
-
 const LF = 0x0a;
 const CR = 0x0d;
 const jsonLineDecoder = new TextDecoder();
@@ -429,28 +353,6 @@ function parseJsonLine(bytes: Uint8Array, start: number, end: number): SessionEn
 	} catch {
 		return null;
 	}
-}
-
-function isSessionHeader(entry: SessionEntry | null): entry is SessionHeader {
-	return entry?.type === "session" && typeof (entry as Partial<SessionHeader>).id === "string";
-}
-
-async function readSessionHeader(sessionFile: string): Promise<SessionHeader | null> {
-	try {
-		for await (const line of readLines(Bun.file(sessionFile).stream())) {
-			const entry = parseJsonLine(line, 0, line.length);
-			if (isSessionHeader(entry) && entry.id.length > 0) {
-				return entry;
-			}
-		}
-	} catch {
-		// A later parse will surface unreadable files; discovery remains deterministic.
-	}
-	return null;
-}
-
-function compareSessionFiles(left: string, right: string): number {
-	return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function visitSessionEntriesLenient(bytes: Uint8Array, visit: (entry: SessionEntry) => void): number {
@@ -482,18 +384,10 @@ function parseSessionEntriesLenient(bytes: Uint8Array): { entries: SessionEntry[
 	return { entries, read };
 }
 
-function scanPrefixState(
-	bytes: Uint8Array,
-	legacyReadToolCallIds: ReadonlySet<string>,
-	readPathsByToolCallId: Map<string, string>,
-): ServiceTierByFamily | undefined {
+function scanLastServiceTier(bytes: Uint8Array): ServiceTierByFamily | undefined {
 	let currentServiceTier: ServiceTierByFamily | undefined;
 	visitSessionEntriesLenient(bytes, entry => {
-		if (isServiceTierChange(entry)) {
-			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
-		} else if (isAssistantMessage(entry)) {
-			recordReadToolPaths(entry, readPathsByToolCallId, legacyReadToolCallIds);
-		}
+		if (isServiceTierChange(entry)) currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
 	});
 	return currentServiceTier;
 }
@@ -501,9 +395,11 @@ function scanPrefixState(
  * Parse a session file and extract all assistant message stats.
  * Uses incremental reading with offset tracking.
  *
- * On incremental parsing, scan the prefix for the current service tier and
- * only the read call IDs needed to recover legacy results in the unprocessed
- * tail. The scan keeps offset-based memory behavior for large sessions.
+ * Service-tier carry-over: `currentServiceTier` is a session-scoped piece of
+ * state derived from `service_tier_change` entries that affects whether
+ * subsequent OpenAI assistant replies count as premium requests. Incremental
+ * syncs that resume past the most-recent tier change would otherwise lose
+ * that state and silently record `premiumRequests = 0` for priority traffic.
  */
 export interface ParseSessionResult {
 	stats: MessageStats[];
@@ -545,18 +441,12 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 	const resultSkillInvocations: ResultSkillInvocationStats[] = [];
 	const toolResults: ToolResultLink[] = [];
 	const userByEntryId = new Map<string, UserMessageStats>();
-	const readPathsByToolCallId = new Map<string, string>();
 	const start = Math.max(0, Math.min(fromOffset, bytes.length));
 	const unprocessed = bytes.subarray(start);
 	const { entries, read } = parseSessionEntriesLenient(unprocessed);
 	let currentServiceTier: ServiceTierByFamily | undefined;
-	const legacyReadToolCallIds = new Set<string>();
-	for (const entry of entries) {
-		const toolCallId = legacyReadToolCallId(entry);
-		if (toolCallId !== undefined) legacyReadToolCallIds.add(toolCallId);
-	}
 	if (start > 0) {
-		currentServiceTier = scanPrefixState(bytes.subarray(0, start), legacyReadToolCallIds, readPathsByToolCallId);
+		currentServiceTier = scanLastServiceTier(bytes.subarray(0, start));
 	}
 	for (const entry of entries) {
 		if (isServiceTierChange(entry)) {
@@ -574,11 +464,10 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 		if (isToolResultMessage(entry)) {
 			const link = extractToolResultLink(sessionPath, entry);
 			if (link) toolResults.push(link);
-			resultSkillInvocations.push(...extractResultSkillInvocations(sessionPath, entry, readPathsByToolCallId));
+			resultSkillInvocations.push(...extractResultSkillInvocations(sessionPath, entry));
 			continue;
 		}
 		if (isAssistantMessage(entry)) {
-			recordReadToolPaths(entry, readPathsByToolCallId);
 			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
 			if (msgStats) stats.push(msgStats);
 			const calls = extractToolCalls(sessionPath, folder, entry, agentType);
@@ -664,75 +553,7 @@ export async function listAllSessionFiles(): Promise<string[]> {
 		allFiles.push(...files);
 	}
 
-	const files = await Promise.all(
-		allFiles.map(async file => ({
-			file,
-			absoluteFile: path.resolve(file),
-			header: await readSessionHeader(file),
-		})),
-	);
-	files.sort((left, right) => compareSessionFiles(left.absoluteFile, right.absoluteFile));
-
-	const fileByPath = new Map(files.map(file => [file.absoluteFile, file]));
-	const fileBySessionId = new Map<string, (typeof files)[number]>();
-	for (const file of files) {
-		if (file.header && !fileBySessionId.has(file.header.id)) {
-			fileBySessionId.set(file.header.id, file);
-		}
-	}
-
-	const children = new Map<string, string[]>();
-	const indegree = new Map(files.map(file => [file.absoluteFile, 0]));
-
-	for (const file of files) {
-		const parentSession = file.header?.parentSession;
-		if (parentSession === undefined) continue;
-		const parent =
-			(typeof parentSession === "string" && fileBySessionId.get(parentSession)) ||
-			(typeof parentSession === "string" && path.isAbsolute(parentSession)
-				? fileByPath.get(path.resolve(parentSession))
-				: undefined) ||
-			(typeof parentSession === "string"
-				? fileByPath.get(path.resolve(path.dirname(file.file), parentSession))
-				: undefined);
-		if (!parent) continue;
-
-		const parentChildren = children.get(parent.absoluteFile);
-		if (parentChildren) parentChildren.push(file.file);
-		else children.set(parent.absoluteFile, [file.file]);
-		indegree.set(file.absoluteFile, (indegree.get(file.absoluteFile) ?? 0) + 1);
-	}
-
-	for (const childFiles of children.values()) {
-		childFiles.sort((left, right) => compareSessionFiles(path.resolve(left), path.resolve(right)));
-	}
-
-	const ready = files.filter(file => indegree.get(file.absoluteFile) === 0).map(file => file.file);
-	ready.sort((left, right) => compareSessionFiles(path.resolve(left), path.resolve(right)));
-
-	const remaining = new Set(files.map(file => file.absoluteFile));
-	const ordered: string[] = [];
-	while (ready.length > 0) {
-		const file = ready.shift();
-		if (!file) break;
-		const absoluteFile = path.resolve(file);
-		if (!remaining.delete(absoluteFile)) continue;
-		ordered.push(file);
-
-		for (const child of children.get(absoluteFile) ?? []) {
-			const absoluteChild = path.resolve(child);
-			const childIndegree = (indegree.get(absoluteChild) ?? 0) - 1;
-			indegree.set(absoluteChild, childIndegree);
-			if (childIndegree === 0) ready.push(child);
-		}
-		ready.sort((left, right) => compareSessionFiles(path.resolve(left), path.resolve(right)));
-	}
-
-	const unordered = files
-		.filter(file => remaining.has(file.absoluteFile))
-		.map(file => file.file)
-		.toSorted((left, right) => compareSessionFiles(path.resolve(left), path.resolve(right)));
-	return [...ordered, ...unordered];
+	return allFiles.toSorted();
 }
 
 /**

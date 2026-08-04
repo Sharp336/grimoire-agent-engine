@@ -75,9 +75,4 @@ describe("issue 4812: pi-natives sentinel process-stale diagnosis", () => {
 		const ctx = { ...ctxFor("16.3.11"), isWorkspaceLoad: true };
 		expect(() => validateLoadedBindings(ctx, { grep: () => {} }, unusedCandidate)).not.toThrow();
 	});
-
-	it("allows compiled install smoke tests to use a published addon", () => {
-		const ctx = { ...ctxFor("16.3.11"), allowReleaseAddon: true };
-		expect(() => validateLoadedBindings(ctx, { __piNativesV16_3_10: () => {} }, unusedCandidate)).not.toThrow();
-	});
 });

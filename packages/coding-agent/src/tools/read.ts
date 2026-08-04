@@ -18,17 +18,14 @@ import { Text } from "@oh-my-pi/pi-tui";
 import {
 	getRemoteDir,
 	type ImageMetadata,
-	type InternalUrl,
 	isEexist,
 	isEnotempty,
 	isProbablyBinary,
 	logger,
-	parseInternalUrl,
 	parseSkillUrlTarget,
 	prompt,
 	readImageMetadata,
 	type SkillUrlTarget,
-	splitInternalUrlSel,
 	untilAborted,
 } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "lru-cache/raw";
@@ -45,6 +42,8 @@ import { isNotebookPath, readEditableNotebookText } from "../edit/notebook";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { InternalUrlRouter, resolveLocalUrlToFile, resolveLocalUrlToPath } from "../internal-urls";
 import { type ResolvedArtifactFile, resolveArtifactFile } from "../internal-urls/artifact-protocol";
+import { parseInternalUrl } from "../internal-urls/parse";
+import type { InternalUrl } from "../internal-urls/types";
 import { getLanguageFromPath, isMarkdownPath, type Theme } from "../modes/theme/theme";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
@@ -111,6 +110,7 @@ import {
 	probeLiteralPathExists,
 	resolveReadPath,
 	splitDelimitedPathEntry,
+	splitInternalUrlSel,
 	splitPathAndSel,
 	splitPathAndSelPreferringLiteral,
 } from "./path-utils";

@@ -13,7 +13,7 @@ import type {
 import { type GrepMatch, GrepOutputMode, type GrepResult, grep } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
-import { prompt, splitInternalUrlSel, untilAborted } from "@oh-my-pi/pi-utils";
+import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { recordFileSnapshot, recordSeenLinesFromBody } from "../edit/file-snapshot-store";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { LocalProtocolOptions } from "../internal-urls/local-protocol";
@@ -53,6 +53,7 @@ import {
 	resolveReadPath,
 	resolveToolSearchScope,
 	selectorLineRanges,
+	splitInternalUrlSel,
 	splitPathAndSel,
 	splitPathAndSelPreferringLiteral,
 	toPathList,

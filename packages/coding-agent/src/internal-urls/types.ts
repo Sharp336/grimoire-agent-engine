@@ -5,11 +5,28 @@
  * providing access to agent outputs and server resources without exposing filesystem paths.
  */
 
-import type { InternalUrl } from "@oh-my-pi/pi-utils";
 import type { Skill } from "../extensibility/skills";
 import type { LocalProtocolOptions } from "./local-protocol";
 
-export type { InternalUrl };
+/**
+ * Parsed internal URL with preserved host casing.
+ */
+export interface InternalUrl extends URL {
+	/**
+	 * Raw host segment extracted from input, preserving case.
+	 */
+	rawHost: string;
+	/**
+	 * Raw pathname extracted from input, preserving traversal markers before URL normalization.
+	 */
+	rawPathname?: string;
+	/**
+	 * Exact input string this URL was parsed from, before any normalization.
+	 * Set by `parseInternalUrl`; used where byte-exact URI matching matters
+	 * (e.g. MCP resource URIs compared by string equality).
+	 */
+	rawHref?: string;
+}
 
 /**
  * Raw resource payload returned by protocol handlers. The `immutable` flag is

@@ -7,7 +7,6 @@
  */
 import * as url from "node:url";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
-import { parseInternalUrl } from "@oh-my-pi/pi-utils";
 import { isSettingsInitialized, settings } from "../config/settings";
 import {
 	LocalProtocolHandler,
@@ -15,6 +14,7 @@ import {
 	resolveLocalUrlToPath,
 	resolveMemoryUrlToPath,
 } from "../internal-urls";
+import { parseInternalUrl } from "../internal-urls/parse";
 
 const OSC = "\x1b]";
 const ST = "\x1b\\";

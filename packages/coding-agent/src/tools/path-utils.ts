@@ -3,15 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import { glob } from "@oh-my-pi/pi-natives";
-import {
-	type DelimitedPathSplitMode,
-	isEnoent,
-	isEnotdir,
-	splitInternalUrlSel,
-	splitTopLevelDelimitedPath,
-	stripWindowsExtendedLengthPathPrefix,
-	untilAborted,
-} from "@oh-my-pi/pi-utils";
+import { isEnoent, isEnotdir, stripWindowsExtendedLengthPathPrefix, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Skill } from "../extensibility/skills";
 import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
 import { ToolAbortError, ToolError } from "./tool-errors";
@@ -26,6 +18,43 @@ const RANGE_LIST_SRC = `${RANGE_CHUNK_SRC}(?:,${RANGE_CHUNK_SRC})*`;
 const FILE_LINE_RANGE_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|raw|conflicts)$`, "i");
 const FILE_LINE_RANGE_ONLY_RE = new RegExp(`^${RANGE_LIST_SRC}$`, "i");
 const FILE_RAW_ONLY_RE = /^raw$/i;
+// Permissive selector chunk for internal URLs — accepts well-formed selectors
+// plus common malformed shapes (e.g. `:-N`) so the read tool peels the entire
+// selector chain off before dispatching to a protocol handler.
+const INTERNAL_URL_SELECTOR_PART_RE = new RegExp(
+	String.raw`^(?:raw|conflicts|${RANGE_LIST_SRC}|-\d+(?:[-+]\d+)?)$`,
+	"i",
+);
+// Schemes whose host grammar is identifier-shaped, so any trailing
+// `:<selector-chunk>` is unambiguously a read-tool selector. `mcp://` is
+// excluded because mcp resource URIs may legitimately contain colons. `ssh://`
+// is included despite an optional `:port`; `splitInternalUrlSel` skips the peel
+// for an `ssh://host:port` that has no `/path`, so the port colon is never
+// mistaken for a selector (a real ssh selector trails the `/path`, e.g.
+// `ssh://h/f:1-5`).
+const INTERNAL_SCHEMES_WITH_SELECTORS: Record<string, true> = {
+	agent: true,
+	artifact: true,
+	issue: true,
+	history: true,
+	local: true,
+	memory: true,
+	omp: true,
+	pr: true,
+	rule: true,
+	security: true,
+	skill: true,
+	ssh: true,
+	vault: true,
+};
+// Schemes whose resource URIs are server-defined and may legitimately end
+// with selector-shaped tails (e.g. `:raw`, `:conflicts`, `:1-50`, `/:raw`).
+// `McpProtocolHandler` resolves by exact URI match (`r.uri === uri`), so
+// peeling syntactically can make valid resources unreachable. Keep these
+// schemes opaque; selector support for them needs a resolver-aware path that
+// tries the exact URI before interpreting any suffix as a read selector.
+const OPAQUE_RESOURCE_SCHEMES: Record<string, true> = { mcp: true };
+const INTERNAL_URL_SCHEME_RE = /^([a-z][a-z0-9+.-]*):\/\//i;
 
 const NARROW_NO_BREAK_SPACE = "\u202F";
 const TOP_LEVEL_INTERNAL_URL_PREFIXES = [
@@ -322,6 +351,57 @@ export async function probeLiteralPathExists(filePath: string, cwd: string): Pro
 }
 
 /**
+ * Variant of {@link splitPathAndSel} for internal URLs (`scheme://...`).
+ *
+ * The filesystem-path splitter is intentionally conservative: it refuses to
+ * peel a trailing `:<chunk>` unless that chunk matches the strict selector
+ * grammar. That rule is right for filesystem paths (a file named `a:1-50` is
+ * legal) but wrong for internal URLs, where any trailing `:<chunk>` after the
+ * scheme is unambiguously a read-tool selector — even if malformed (e.g.
+ * `artifact://3:raw:-100`).
+ *
+ * This function iteratively peels selector-shaped chunks (well-formed plus
+ * common malformed shapes like `:-N`) so the rest of the read tool can pass a
+ * clean URL to the protocol handler and surface selector errors via parseSel
+ * instead of as misleading "host invalid" errors from the handler. Schemes
+ * whose resource URIs may legitimately contain colons (`mcp://`) are skipped.
+ *
+ * Falls back to the input unchanged when nothing matches.
+ */
+export function splitInternalUrlSel(rawPath: string): { path: string; sel?: string } {
+	const schemeMatch = rawPath.match(INTERNAL_URL_SCHEME_RE);
+	if (!schemeMatch) return { path: rawPath };
+	const scheme = schemeMatch[1].toLowerCase();
+	// Opaque schemes (mcp://, etc.) carry server-defined resource URIs that may
+	// legitimately end in selector-shaped tails. Forward verbatim — see
+	// OPAQUE_RESOURCE_SCHEMES.
+	if (OPAQUE_RESOURCE_SCHEMES[scheme]) return { path: rawPath };
+	if (!INTERNAL_SCHEMES_WITH_SELECTORS[scheme]) return { path: rawPath };
+
+	const schemeEnd = schemeMatch[0].length;
+	// ssh:// authority carries an optional `:port`; with no `/path` after the
+	// authority, a trailing `:NNNN` is the port, not a read selector
+	// (e.g. ssh://host:2222). Other schemes' authority-trailing selectors
+	// (artifact://5:1-50) still peel, so this guard is ssh-specific.
+	if (scheme === "ssh" && rawPath.indexOf("/", schemeEnd) === -1) {
+		return { path: rawPath };
+	}
+	let path = rawPath;
+	const chunks: string[] = [];
+	while (true) {
+		const colon = path.lastIndexOf(":");
+		// Stop before crossing into the scheme separator `://`.
+		if (colon < schemeEnd) break;
+		const tail = path.slice(colon + 1);
+		if (!INTERNAL_URL_SELECTOR_PART_RE.test(tail)) break;
+		chunks.unshift(tail);
+		path = path.slice(0, colon);
+	}
+	if (chunks.length === 0) return { path: rawPath };
+	return { path, sel: chunks.join(":") };
+}
+
+/**
  * Async sibling of {@link splitPathAndSel} that prefers a literal filesystem
  * path over selector interpretation. Filenames whose tail matches the selector
  * grammar (e.g. `test:1-2`, `log:raw`) are legal on POSIX; without this the
@@ -613,8 +693,64 @@ export function hasGlobPathChars(filePath: string): boolean {
 
 type PathEntrySplitter = (item: string) => { basePath: string };
 
+const TOP_LEVEL_WHITESPACE_RE = /\s/;
+
+type DelimitedPathSplitMode = "comma" | "semicolon" | "whitespace" | "mixed";
+
+function isDelimitedPathSeparator(ch: string, mode: DelimitedPathSplitMode): boolean {
+	if (mode === "comma") return ch === ",";
+	if (mode === "semicolon") return ch === ";";
+	if (mode === "whitespace") return TOP_LEVEL_WHITESPACE_RE.test(ch);
+	return ch === "," || ch === ";" || TOP_LEVEL_WHITESPACE_RE.test(ch);
+}
+
 function hasTopLevelPathDelimiter(entry: string): boolean {
-	return splitTopLevelDelimitedPath(entry, "mixed").length > 1;
+	let braceDepth = 0;
+	for (let i = 0; i < entry.length; i++) {
+		const ch = entry[i];
+		if (ch === "\\" && i + 1 < entry.length) {
+			i++;
+			continue;
+		}
+		if (ch === "{") {
+			braceDepth++;
+			continue;
+		}
+		if (ch === "}") {
+			if (braceDepth > 0) braceDepth--;
+			continue;
+		}
+		if (braceDepth === 0 && (ch === "," || ch === ";" || TOP_LEVEL_WHITESPACE_RE.test(ch))) {
+			return true;
+		}
+	}
+	return false;
+}
+
+function splitTopLevelDelimitedPath(entry: string, mode: DelimitedPathSplitMode): string[] {
+	const parts: string[] = [];
+	let braceDepth = 0;
+	let start = 0;
+	for (let i = 0; i < entry.length; i++) {
+		const ch = entry[i];
+		if (ch === "\\" && i + 1 < entry.length) {
+			i++;
+			continue;
+		}
+		if (ch === "{") {
+			braceDepth++;
+			continue;
+		}
+		if (ch === "}") {
+			if (braceDepth > 0) braceDepth--;
+			continue;
+		}
+		if (braceDepth !== 0 || !isDelimitedPathSeparator(ch, mode)) continue;
+		parts.push(entry.slice(start, i));
+		start = i + 1;
+	}
+	parts.push(entry.slice(start));
+	return parts;
 }
 
 /**

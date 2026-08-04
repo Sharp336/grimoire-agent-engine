@@ -8,9 +8,6 @@ TMP_WORK_DIR="$WORK_DIR/tmp"
 mkdir -p "$TMP_WORK_DIR"
 export TMPDIR="$TMP_WORK_DIR"
 trap 'rm -rf "$WORK_DIR"' EXIT
-if [ "${OMP_INSTALL_TEST_SKIP_NATIVE_BUILD:-0}" = "1" ]; then
-   export OMP_INSTALL_TEST_ALLOW_RELEASE_NATIVE_ADDON=1
-fi
 
 section() {
    echo ""

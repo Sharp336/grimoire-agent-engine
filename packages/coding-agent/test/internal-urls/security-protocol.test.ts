@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { parseInternalUrl } from "@oh-my-pi/pi-utils";
 import { InternalUrlRouter, SecurityProtocolHandler } from "../../src/internal-urls";
+import { parseInternalUrl } from "../../src/internal-urls/parse";
 import { importCodexSecurityBundle, importSarifFile, SecurityStore } from "../../src/security";
 
 const FIXTURE_ROOT = path.join(import.meta.dir, "..", "fixtures", "security");

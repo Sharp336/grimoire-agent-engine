@@ -76,7 +76,6 @@ export interface NativeLoaderContext {
 	candidates: string[];
 	versionSentinelExport: string;
 	isWorkspaceLoad: boolean;
-	allowReleaseAddon: boolean;
 	nativesDir: string;
 }
 
@@ -115,7 +114,6 @@ export function selectCpuVariant(input: SelectCpuVariantInput): SelectCpuVariant
 
 export interface ValidateLoadedBindingsContext {
 	isWorkspaceLoad: boolean;
-	allowReleaseAddon?: boolean;
 	packageVersion: string;
 	versionSentinelExport: string;
 }

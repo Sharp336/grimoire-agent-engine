@@ -47,19 +47,6 @@ export interface RequestDetails extends MessageStats {
 	output: unknown;
 }
 
-/**
- * Session log entry types.
- */
-export interface SessionHeader {
-	type: "session";
-	version: number;
-	id: string;
-	timestamp: string;
-	cwd: string;
-	title?: string;
-	parentSession?: string;
-}
-
 export interface SessionMessageEntry {
 	type: "message";
 	id: string;
@@ -76,7 +63,7 @@ export interface SessionServiceTierChangeEntry {
 	serviceTier: ServiceTierByFamily | ServiceTier | null;
 }
 
-export type SessionEntry = SessionHeader | SessionMessageEntry | SessionServiceTierChangeEntry | { type: string };
+export type SessionEntry = SessionMessageEntry | SessionServiceTierChangeEntry | { type: string };
 
 /**
  * Behavioral stats extracted from a single user message.

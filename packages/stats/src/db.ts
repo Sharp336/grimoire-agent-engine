@@ -201,13 +201,6 @@ export async function initDb(): Promise<Database> {
 		);
 	`);
 
-	db.run(`
-		CREATE TEMPORARY TABLE IF NOT EXISTS session_sync_order (
-			session_file TEXT PRIMARY KEY,
-			priority INTEGER NOT NULL UNIQUE
-		)
-	`);
-
 	const toolCallColumns = db.prepare("PRAGMA table_info(tool_calls)").all() as { name: string }[];
 	if (!toolCallColumns.some(column => column.name === "skill_name")) {
 		db.run("ALTER TABLE tool_calls ADD COLUMN skill_name TEXT");
@@ -422,24 +415,6 @@ export function setFileOffset(sessionFile: string, offset: number, lastModified:
 		VALUES (?, ?, ?)
 	`);
 	stmt.run(sessionFile, offset, lastModified);
-}
-
-/**
- * Install the current lineage order used to choose a canonical fork owner.
- * The temporary table is connection-local and rebuilt before each sync.
- */
-export function setSessionSyncOrder(sessionFiles: readonly string[]): void {
-	if (!db) return;
-
-	const clear = db.prepare("DELETE FROM session_sync_order");
-	const insert = db.prepare("INSERT INTO session_sync_order (session_file, priority) VALUES (?, ?)");
-	const apply = db.transaction(() => {
-		clear.run();
-		for (const [priority, sessionFile] of sessionFiles.entries()) {
-			insert.run(sessionFile, priority);
-		}
-	});
-	apply();
 }
 
 /**
@@ -1586,80 +1561,35 @@ export function getBehaviorByModel(cutoff?: number | null): BehaviorModelStats[]
 }
 
 /**
- * Forked sessions deep-copy assistant entries under a different file. When
- * both owners participate in the current ordered sync, the earlier lineage
- * entry replaces the later copy; otherwise the existing historical row wins.
- * Keyed on the assistant entry identity, not the call ID alone — provider call
- * IDs are not a global namespace across unrelated sessions.
+ * Insert tool-call rows. Idempotent via UNIQUE(session_file, tool_call_id);
+ * the `WHERE NOT EXISTS` guard mirrors {@link insertMessageStats}: forks
+ * copy assistant entries under a different file, so first-write-wins across
+ * the files that are replayed keeps aggregates from double counting.
+ * Keyed on the assistant entry identity plus tool call ID — provider call IDs
+ * are not a global namespace across unrelated sessions.
  */
 export function insertToolCalls(calls: ToolCallStats[]): number {
 	if (!db || calls.length === 0) return 0;
 
-	const insert = db.prepare(`
+	const stmt = db.prepare(`
 		INSERT INTO tool_calls (
 			session_file, entry_id, tool_call_id, folder, tool_name, skill_name,
 			model, provider, timestamp, agent_type, calls_in_turn, args_chars
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		WHERE NOT EXISTS (
+			SELECT 1 FROM tool_calls
+			WHERE entry_id = ? AND timestamp = ? AND tool_call_id = ? AND session_file <> ?
+		)
 		ON CONFLICT(session_file, tool_call_id) DO UPDATE SET
 			skill_name = excluded.skill_name
 		WHERE tool_calls.skill_name IS NULL AND excluded.skill_name IS NOT NULL
 	`);
-	const duplicateOwners = db.prepare(`
-		SELECT
-			t.session_file,
-			current_order.priority AS current_priority,
-			existing_order.priority AS existing_priority
-		FROM tool_calls t
-		LEFT JOIN session_sync_order current_order ON current_order.session_file = ?
-		LEFT JOIN session_sync_order existing_order ON existing_order.session_file = t.session_file
-		WHERE t.entry_id = ? AND t.timestamp = ? AND t.tool_call_id = ? AND t.session_file <> ?
-	`);
-	const currentCall = db.prepare(`
-		SELECT 1
-		FROM tool_calls
-		WHERE session_file = ? AND entry_id = ? AND timestamp = ? AND tool_call_id = ?
-	`);
-	const deleteSkillInvocations = db.prepare(
-		"DELETE FROM skill_invocations WHERE session_file = ? AND tool_call_id = ?",
-	);
-	const deleteToolCall = db.prepare("DELETE FROM tool_calls WHERE session_file = ? AND tool_call_id = ?");
 
 	let inserted = 0;
-	const apply = db.transaction(() => {
+	const insert = db.transaction(() => {
 		for (const call of calls) {
-			const owners = duplicateOwners.all(
-				call.sessionFile,
-				call.entryId,
-				call.timestamp,
-				call.toolCallId,
-				call.sessionFile,
-			) as Array<{ session_file: string; current_priority: number | null; existing_priority: number | null }>;
-			if (owners.length > 0) {
-				const currentPriority = owners[0]?.current_priority;
-				if (
-					currentPriority === null ||
-					currentPriority === undefined ||
-					owners.some(owner => owner.existing_priority === null)
-				) {
-					continue;
-				}
-
-				if (owners.every(owner => owner.existing_priority !== null && currentPriority < owner.existing_priority)) {
-					for (const owner of owners) {
-						deleteSkillInvocations.run(owner.session_file, call.toolCallId);
-						deleteToolCall.run(owner.session_file, call.toolCallId);
-					}
-				} else {
-					const current = currentCall.get(call.sessionFile, call.entryId, call.timestamp, call.toolCallId);
-					if (current) {
-						deleteSkillInvocations.run(call.sessionFile, call.toolCallId);
-						deleteToolCall.run(call.sessionFile, call.toolCallId);
-					}
-					continue;
-				}
-			}
-
-			const result = insert.run(
+			const result = stmt.run(
 				call.sessionFile,
 				call.entryId,
 				call.toolCallId,
@@ -1672,11 +1602,17 @@ export function insertToolCalls(calls: ToolCallStats[]): number {
 				call.agentType,
 				call.callsInTurn,
 				call.argsChars,
+				// `WHERE NOT EXISTS` binds: skip when a different session_file
+				// already holds this (entry_id, timestamp, tool_call_id).
+				call.entryId,
+				call.timestamp,
+				call.toolCallId,
+				call.sessionFile,
 			);
 			if (result.changes > 0) inserted++;
 		}
 	});
-	apply.immediate();
+	insert();
 	return inserted;
 }
 
@@ -1839,7 +1775,7 @@ export function getToolStats(cutoff?: number): ToolUsageStats[] {
 	const stmt = db.prepare(`
 		SELECT t.tool_name, ${TOOL_AGGREGATE_COLUMNS}
 		FROM tool_calls t
-		LEFT JOIN messages m ON m.entry_id = t.entry_id AND m.timestamp = t.timestamp
+		LEFT JOIN messages m ON m.session_file = t.session_file AND m.entry_id = t.entry_id
 		${hasCutoff ? "WHERE t.timestamp >= ?" : ""}
 		GROUP BY t.tool_name
 		ORDER BY calls DESC
@@ -1859,7 +1795,7 @@ export function getToolStatsByModel(cutoff?: number): ToolModelStats[] {
 	const stmt = db.prepare(`
 		SELECT t.tool_name, t.model, t.provider, ${TOOL_AGGREGATE_COLUMNS}
 		FROM tool_calls t
-		LEFT JOIN messages m ON m.entry_id = t.entry_id AND m.timestamp = t.timestamp
+		LEFT JOIN messages m ON m.session_file = t.session_file AND m.entry_id = t.entry_id
 		${hasCutoff ? "WHERE t.timestamp >= ?" : ""}
 		GROUP BY t.tool_name, t.model, t.provider
 		ORDER BY calls DESC
@@ -1960,7 +1896,7 @@ export function getSkillStats(cutoff?: number): SkillUsageStats[] {
 		FROM skill_invocations si
 		JOIN tool_calls t ON t.session_file = si.session_file AND t.tool_call_id = si.tool_call_id
 		JOIN target_counts tc ON tc.session_file = si.session_file AND tc.tool_call_id = si.tool_call_id
-		LEFT JOIN messages m ON m.entry_id = t.entry_id AND m.timestamp = t.timestamp
+		LEFT JOIN messages m ON m.session_file = t.session_file AND m.entry_id = t.entry_id
 		WHERE ${hasCutoff ? "t.timestamp >= ?" : "1 = 1"}
 		GROUP BY si.skill_name
 		ORDER BY calls DESC
@@ -1996,7 +1932,7 @@ export function getSkillStatsByModel(cutoff?: number): SkillModelStats[] {
 		FROM skill_invocations si
 		JOIN tool_calls t ON t.session_file = si.session_file AND t.tool_call_id = si.tool_call_id
 		JOIN target_counts tc ON tc.session_file = si.session_file AND tc.tool_call_id = si.tool_call_id
-		LEFT JOIN messages m ON m.entry_id = t.entry_id AND m.timestamp = t.timestamp
+		LEFT JOIN messages m ON m.session_file = t.session_file AND m.entry_id = t.entry_id
 		WHERE ${hasCutoff ? "t.timestamp >= ?" : "1 = 1"}
 		GROUP BY si.skill_name, t.model, t.provider
 		ORDER BY calls DESC

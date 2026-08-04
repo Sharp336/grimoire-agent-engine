@@ -12,6 +12,14 @@ describe("parseSkillUrlTarget", () => {
 			skill: "review:guide",
 			target: "skill://review%3Aguide:raw",
 		});
+		expect(parseSkillUrlTarget("skill://review/docs;appendix.md")).toEqual({
+			skill: "review",
+			target: "skill://review/docs;appendix.md",
+		});
+		expect(parseSkillUrlTarget("skill://review/a,b.md:5-16,960-973")).toEqual({
+			skill: "review",
+			target: "skill://review/a,b.md:5-16,960-973",
+		});
 	});
 
 	it("rejects non-skill URLs and empty skill authorities", () => {

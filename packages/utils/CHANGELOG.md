@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added canonical parsing for persisted `skill://` read targets.
+
 ## [17.2.6] - 2026-08-03
 
 ### Added
