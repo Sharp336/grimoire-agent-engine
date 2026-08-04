@@ -169,3 +169,35 @@ describe("ToolView browser URLs", () => {
 		expect(html).not.toContain("…/b/c");
 	});
 });
+
+describe("ToolView glob scopes", () => {
+	it("renders semicolon-delimited glob scopes intact without middle-eliding", () => {
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="glob"
+				defaultOpen
+				args={{ path: "src/**/*.ts; test/**/*.ts" }}
+				result={{ content: [] }}
+			/>,
+		);
+
+		// Both scopes must survive — shortenPath would have produced "src/…/**/*.ts".
+		expect(html).toContain("src/**/*.ts; test/**/*.ts");
+		expect(html).not.toContain("…");
+	});
+
+	it("renders scheme-bearing glob scopes intact without corrupting the scheme", () => {
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="glob"
+				defaultOpen
+				args={{ path: "memory://root/skills/**/*.md" }}
+				result={{ content: [] }}
+			/>,
+		);
+
+		// Scheme + path must survive — shortenPath would have produced "memory:/…/**/*.md".
+		expect(html).toContain("memory://root/skills/**/*.md");
+		expect(html).not.toContain("…");
+	});
+});

@@ -9,6 +9,7 @@
 ### Fixed
 
 - Stopped path-shortening URLs in the `browser` and `inspect_image` tool renderers; URLs are now rendered intact (truncated only) instead of being split on `/` and middle-elided.
+- Stopped middle-eliding glob search scopes in the `glob` tool summary; pattern-bearing (`*`/`?`/`[`) and scheme-bearing (`memory://…`) scope values are now rendered intact instead of being corrupted by `shortenPath`. Factored the existing scheme guard into a shared `compactPath` helper used by `PathText`, `inspect_image`, and `glob`.
 
 ## [17.2.2] - 2026-07-31
 

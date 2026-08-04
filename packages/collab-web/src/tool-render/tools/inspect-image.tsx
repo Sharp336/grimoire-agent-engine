@@ -2,14 +2,14 @@
 import type { ReactNode } from "react";
 import { Badge, Badges, InvalidArg, PathText, ResultImages, ResultText, Row } from "../parts";
 import type { ToolRenderer, ToolRenderProps } from "../types";
-import { detailsRecord, normalizeWs, shortenPath, str, truncate } from "../util";
+import { compactPath, detailsRecord, normalizeWs, str, truncate } from "../util";
 
 function Summary({ args, result }: ToolRenderProps): ReactNode {
 	const rec = detailsRecord(result);
 	const target = str(args.path) ?? str(args.url) ?? (rec ? str(rec.imagePath) : null);
 	if (target === null) return <InvalidArg what="image path" />;
-	// URLs (args.url) must not go through shortenPath — it splits on "/" and middle-elides.
-	const display = target.includes("://") ? target : shortenPath(target);
+	// URLs and glob patterns must not go through shortenPath — it splits on "/" and middle-elides.
+	const display = compactPath(target);
 	return <span>{truncate(display)}</span>;
 }
 

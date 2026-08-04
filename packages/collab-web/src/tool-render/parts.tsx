@@ -5,7 +5,7 @@
 import type { ReactNode } from "react";
 import { useMemo, useState } from "react";
 import type { ToolRenderHost, ToolResultImage, ToolResultLike } from "./types";
-import { getHljs, replaceTabs, resultImagesOf, resultTextOf, shortenPath, stripAnsi } from "./util";
+import { compactPath, getHljs, replaceTabs, resultImagesOf, resultTextOf, stripAnsi } from "./util";
 
 export type Tone = "accent" | "ok" | "err" | "warn";
 
@@ -47,7 +47,7 @@ export function PathText({
 	}
 	return (
 		<span className="tv-path">
-			{path.includes("://") ? path : shortenPath(path)}
+			{compactPath(path)}
 			{range && <span className="tv-lines">{range}</span>}
 			{sel && <span className="tv-lines">:{sel}</span>}
 		</span>

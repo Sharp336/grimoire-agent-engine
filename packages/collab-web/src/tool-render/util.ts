@@ -29,8 +29,22 @@ export function display(value: unknown): string {
 	}
 }
 
-/** Replace `/Users/<x>` / `/home/<x>` prefix with `~` for display. */
-export { shortenPath } from "../lib/format";
+import { shortenPath } from "../lib/format";
+
+export { shortenPath };
+
+/**
+ * Display-safe path compaction: middle-elide long filesystem paths, but
+ * return URLs and glob patterns intact. `shortenPath` splits on `/` and
+ * middle-elides, which corrupts scheme-bearing values
+ * (`memory://root/skills` → `memory:/…/skills`) and hides glob scope
+ * (e.g. `src` + `**` + `*.ts` + `; test` + `**` + `*.ts` → `src/…` + `**` + `*.ts`).
+ * A value is shown intact when it carries a scheme (`://`) or glob
+ * metacharacters (`*`, `?`, `[`).
+ */
+export function compactPath(p: string): string {
+	return /:\/\//.test(p) || /[*?[]/.test(p) ? p : shortenPath(p);
+}
 
 /**
  * Search scope for display: the current `path` argument (else the legacy
