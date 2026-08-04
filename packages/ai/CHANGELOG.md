@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Restored the required-first property order in the ark wire schema after the omptype migration: object properties now emit with required keys preceding optional keys (each group in declaration order), including nested objects and schema-array branches.
 ## [17.2.7] - 2026-08-03
 
 ### Changed

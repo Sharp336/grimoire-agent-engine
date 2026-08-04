@@ -664,17 +664,6 @@ function pruneArkUndefinedUnionBranches(node: unknown): void {
 }
 
 /**
- * Convert an ArkType schema into the JSON Schema shape providers consume.
- *
- * Mirrors {@link zodToWireSchema}: emit draft-2020-12, drop the `$schema`
- * metadata, run the JSON-schema post-process (NOT the Zod-only cleanup), then
- * close declared objects so the wire is `additionalProperties: false` like Zod.
- *
- * The `fallback` degrades any un-emittable node (a `.narrow()` predicate or a
- * morph) to its underlying base schema instead of throwing — matching Zod,
- * whose `.refine()`/`.transform()` likewise never appear in the wire schema.
- */
-/**
  * Reorder object `properties` so required keys precede optional keys, each
  * group preserving declaration order. Restores the arktype-emitted wire shape
  * after the omptype migration: omptype's JSON Schema emitter preserves pure
@@ -702,11 +691,34 @@ function reorderRequiredPropertiesFirst(node: unknown): void {
 		}
 		obj.properties = ordered;
 	}
-	for (const key of [...SCHEMA_VALUE_KEYS, ...SCHEMA_MAP_KEYS]) {
+	for (const key of SCHEMA_VALUE_KEYS) {
 		if (Object.hasOwn(obj, key)) reorderRequiredPropertiesFirst(obj[key]);
+	}
+	for (const mapKey of SCHEMA_MAP_KEYS) {
+		const map = obj[mapKey];
+		if (map !== null && typeof map === "object" && !Array.isArray(map)) {
+			for (const key in map as Record<string, unknown>) {
+				reorderRequiredPropertiesFirst((map as Record<string, unknown>)[key]);
+			}
+		}
+	}
+	for (const arrKey of SCHEMA_ARRAY_KEYS) {
+		const arr = obj[arrKey];
+		if (Array.isArray(arr)) for (const child of arr) reorderRequiredPropertiesFirst(child);
 	}
 }
 
+/**
+ * Convert an ArkType schema into the JSON Schema shape providers consume.
+ *
+ * Mirrors {@link zodToWireSchema}: emit draft-2020-12, drop the `$schema`
+ * metadata, run the JSON-schema post-process (NOT the Zod-only cleanup), then
+ * close declared objects so the wire is `additionalProperties: false` like Zod.
+ *
+ * The `fallback` degrades any un-emittable node (a `.narrow()` predicate or a
+ * morph) to its underlying base schema instead of throwing — matching Zod,
+ * whose `.refine()`/`.transform()` likewise never appear in the wire schema.
+ */
 export function arkToWireSchema(schema: Type): Record<string, unknown> {
 	return stamp(schema, kArkWireSchema, s => {
 		const raw = s.toJsonSchema({ target: "draft-2020-12", fallback: ctx => ctx.base }) as Record<string, unknown>;

@@ -406,6 +406,30 @@ describe("arkToWireSchema — authored property order", () => {
 		);
 		expect(Object.keys(wire.properties as Record<string, unknown>)).toEqual(["pattern", "i", "paths", "skip"]);
 	});
+
+	it("recurses into nested objects and schema arrays", () => {
+		// The reorder walk must reach schemas stored under properties map
+		// entries, not just keyword-named keys — mirroring the other walkers.
+		const wire = toolWireSchema(
+			arkTool(
+				type({
+					outer: {
+						"opt?": "string",
+						req: "string",
+						inner: { "optional?": "boolean", required: "number" },
+					},
+					"choice?": type.or(type({ a: "string", "b?": "number" }), "null"),
+				}),
+			),
+		);
+		const outer = (wire.properties as Record<string, unknown>).outer as Record<string, unknown>;
+		expect(Object.keys(outer.properties as Record<string, unknown>)).toEqual(["req", "inner", "opt"]);
+		const inner = (outer.properties as Record<string, unknown>).inner as Record<string, unknown>;
+		expect(Object.keys(inner.properties as Record<string, unknown>)).toEqual(["required", "optional"]);
+		const choice = (wire.properties as Record<string, unknown>).choice as Record<string, unknown>;
+		const branch = (choice.anyOf as Record<string, unknown>[])[0];
+		expect(Object.keys(branch.properties as Record<string, unknown>)).toEqual(["a", "b"]);
+	});
 });
 
 // ---------------------------------------------------------------------------
