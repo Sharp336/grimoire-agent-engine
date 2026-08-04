@@ -30,16 +30,7 @@ export function display(value: unknown): string {
 }
 
 /** Replace `/Users/<x>` / `/home/<x>` prefix with `~` for display. */
-export function shortenPath(p: string): string {
-	for (const prefix of ["/Users/", "/home/"]) {
-		if (p.startsWith(prefix)) {
-			const rest = p.slice(prefix.length);
-			const slash = rest.indexOf("/");
-			return slash < 0 ? "~" : `~${rest.slice(slash)}`;
-		}
-	}
-	return p;
-}
+export { shortenPath } from "../lib/format";
 
 /**
  * Search scope for display: the current `path` argument (else the legacy
