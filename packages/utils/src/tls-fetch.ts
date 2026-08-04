@@ -16,7 +16,7 @@
  */
 import * as fs from "node:fs";
 import * as tls from "node:tls";
-import { $env } from "./env";
+import { $env } from "./env-core";
 import { isEnoent } from "./fs-error";
 
 /**

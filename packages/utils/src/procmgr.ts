@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import type { Subprocess } from "bun";
 import { getAgentDir, MAIN_CONFIG_FILENAMES } from "./dirs";
-import { $env, filterChildShellEnv } from "./env";
+import { $env, filterChildShellEnv } from "./env-core";
 import { $which } from "./which";
 
 export interface ShellConfig {
