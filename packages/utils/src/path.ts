@@ -38,10 +38,10 @@ export function stripWindowsExtendedLengthPathPrefix(
  * Pass `home` to override the home directory resolution.
  */
 export function expandTilde(filePath: string, home?: string): string {
+	if (filePath !== "~" && !filePath.startsWith("~/") && !filePath.startsWith("~\\")) {
+		return filePath;
+	}
 	const h = home ?? os.homedir();
 	if (filePath === "~") return h;
-	if (filePath.startsWith("~/") || filePath.startsWith("~\\")) {
-		return h + filePath.slice(1);
-	}
-	return filePath;
+	return h + filePath.slice(1);
 }
