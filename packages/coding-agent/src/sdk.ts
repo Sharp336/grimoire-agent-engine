@@ -2949,9 +2949,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 		const requestedToolNames = explicitlyRequestedToolNames ?? toolNamesFromRegistry;
 		const normalizedRequested = requestedToolNames.filter(name => toolRegistry.has(name));
-		const defaultInactiveToolNames = new Set(
-			registeredTools.filter(tool => tool.definition.defaultInactive).map(tool => tool.definition.name),
-		);
+		const defaultInactiveToolNames = new Set([
+			...registeredTools.filter(tool => tool.definition.defaultInactive).map(tool => tool.definition.name),
+			...sdkToolDefinitions.filter(tool => tool.defaultInactive).map(tool => tool.name),
+		]);
 		const requestedActiveToolNames = normalizedRequested.filter(name => name !== "goal");
 		const explicitlyRequestedToolNameSet = explicitlyRequestedToolNames
 			? new Set(explicitlyRequestedToolNames)
@@ -2967,13 +2968,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			: requestedActiveToolNames.filter(name => !defaultInactiveToolNames.has(name));
 		let initialToolNames = [...initialRequestedActiveToolNames];
 
-		// Custom tools and extension-registered tools are always included regardless of toolNames filter.
-		// Restricted callers own the list, so never widen it with registered tools.
+		// Custom tools and extension-registered tools are always included regardless of toolNames filter,
+		// except those marked defaultInactive (unless explicitly requested via toolNames).
 		const alwaysInclude: string[] = restrictToolNames
 			? []
 			: [
 					...sdkCustomTools.map(t => t.name),
-					...sdkToolDefinitions.map(t => t.name),
+					...sdkToolDefinitions.filter(t => !t.defaultInactive).map(t => t.name),
 					...registeredTools.filter(t => !t.definition.defaultInactive).map(t => t.definition.name),
 				];
 		for (const name of alwaysInclude) {

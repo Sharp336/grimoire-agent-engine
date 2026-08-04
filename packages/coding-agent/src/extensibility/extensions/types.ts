@@ -1439,6 +1439,10 @@ export type ExtensionFactory = (pi: ExtensionAPI) => void | Promise<void>;
 export interface RegisteredTool<TParams extends TSchema = TSchema, TDetails = unknown> {
 	definition: ToolDefinition<TParams, TDetails>;
 	extensionPath: string;
+	/** When set, overrides the definition's own `loadMode` without spreading the
+	 *  definition (which would destroy a class instance's prototype methods and
+	 *  `#private`-field receiver). The adapter prefers this over the definition's value. */
+	loadMode?: ToolLoadMode;
 }
 
 export interface ExtensionFlag {

@@ -75,7 +75,7 @@ export function customToolToDefinition(tool: CustomTool, getContext?: () => Cust
 		onSession: tool.onSession
 			? (event, ctx) => tool.onSession?.(event, resolveCustomToolContext(ctx, getContext))
 			: undefined,
-		renderCall: tool.renderCall,
+		renderCall: typeof tool.renderCall === "function" ? tool.renderCall.bind(tool) : tool.renderCall,
 		renderResult: tool.renderResult
 			? (result, options, theme, args): Component => {
 					const component = tool.renderResult?.(

@@ -9,11 +9,14 @@
 - Upgraded the bundled omptype schema engine: intersection and pipe operators, bigint and RegExp literals in the string DSL, Standard Schema V1 interop, JSON Schema import via fromJsonSchema(), and richer union/collection error reporting.
 ### Breaking Changes
 
-- Removed `CustomToolAdapter`; replaced by `composeCustomTool` / `composeAgentTool` / `composeToolDefinition`, exported from the package root (`@oh-my-pi/pi-coding-agent`). `CreateAgentSessionOptions.customTools` now accepts only `CustomTool[]`; pass plain `ToolDefinition` objects via the new `toolDefinitions` option.
+- `composeToolDefinition` now requires a runner (`ExtensionRunner`), not `| undefined`. A plain `ToolDefinition.execute` reads its `ExtensionContext` (e.g. `ctx.sessionManager`, `ctx.ui`); without a runner the adapter could only supply a bare `{ callerToolContext }` object, leaving those fields `undefined`. Use `composeCustomTool` with a `getContext` thunk for the runner-less path.
 
 ### Fixed
 
 - Fixed `isCustomTool` misclassifying plain caller-created `ToolDefinition`s as `CustomTool`s, causing `composeCustomTool` to shuffle execute args (`onUpdate` where `signal` expected). `composeCustomTool` now accepts only `CustomTool`; plain `ToolDefinition`s use the new `composeToolDefinition` entry point.
+- Fixed `composeToolDefinition` / `composeCustomTool` destroying class-based tool definitions by spreading them into plain objects, losing prototype methods (including `execute`), getters, and `#private`-field receivers. The definition object identity is now preserved; an explicit `loadMode` override is applied via a `RegisteredTool.loadMode` field instead of spreading.
+- Fixed `CustomTool.renderCall` losing its receiver when converted to a `ToolDefinition` — a class-based custom tool reading instance state or a `#private` field got wrong output or a private-brand `TypeError`. `renderCall` is now bound to the original tool, matching `approval` and `formatApprovalDetails`.
+- Fixed SDK `toolDefinitions` entries ignoring `ToolDefinition.defaultInactive` — a `toolDefinitions` entry with `defaultInactive: true` was always activated. SDK-supplied definitions now honor `defaultInactive` exactly as extension-registered ones do (included in the inactive set, excluded unless explicitly requested via `toolNames`).
 
 ## [17.2.7] - 2026-08-03
 

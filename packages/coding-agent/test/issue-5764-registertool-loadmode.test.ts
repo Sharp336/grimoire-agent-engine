@@ -18,7 +18,7 @@ import {
 	composeCustomTool,
 	composeToolDefinition,
 } from "@oh-my-pi/pi-coding-agent/extensibility/compose-tool";
-import type { CustomTool, CustomToolContext } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
+import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { ExtensionContext, ToolDefinition } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { BUILTIN_TOOLS, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -42,6 +42,13 @@ function makeSession(): ToolSession {
 const emptySchema = type({});
 const noopExecute = async () => ({ content: [{ type: "text" as const, text: "" }] });
 const stubRunner = { createContext: () => ({}) as ExtensionContext } as ExtensionRunner;
+// A runner stub complete enough for ExtensionToolWrapper.execute to pass through:
+// no handlers to emit, no tool-call marker consumed, yolo approval (no context settings).
+// Built via Object.assign so the cast through the single-method stub type stays valid.
+const execRunner = Object.assign(stubRunner, {
+	hasHandlers: () => false,
+	consumeToolCallEmitted: () => false,
+}) as ExtensionRunner;
 
 describe("issue #5764: registerTool loadMode default", () => {
 	it("never mounts the read/write transport tools under xdev, even when mislabeled discoverable", () => {
@@ -153,14 +160,6 @@ describe("composeToolDefinition execution arg order", () => {
 	it("receives (signal, onUpdate, ctx) in the ToolDefinition slots, not the CustomTool slots", async () => {
 		const sentinelSignal = new AbortController().signal;
 		const sentinelOnUpdate = () => {};
-		const sentinelCtx = {
-			sessionManager: { getSessionId: () => "arg-order-test" } as CustomToolContext["sessionManager"],
-			modelRegistry: {} as CustomToolContext["modelRegistry"],
-			model: undefined,
-			isIdle: () => true,
-			hasQueuedMessages: () => false,
-			abort: () => {},
-		};
 
 		let captured: { signal?: unknown; onUpdate?: unknown; ctx?: unknown } = {};
 
@@ -175,19 +174,81 @@ describe("composeToolDefinition execution arg order", () => {
 			},
 		};
 
-		// Runner-less composition: no ExtensionToolWrapper, so execute goes
-		// straight through RegisteredToolAdapter → definition.execute.
-		const tool = composeToolDefinition(definition, undefined);
-		await tool.execute("call-1", {}, sentinelSignal, sentinelOnUpdate, sentinelCtx);
+		// With a stub runner, RegisteredToolAdapter builds the extension context
+		// via runner.createContext and passes it as the ctx slot.
+		const tool = composeToolDefinition(definition, execRunner);
+		await tool.execute("call-1", {}, sentinelSignal, sentinelOnUpdate, undefined);
 
 		// ToolDefinition.execute signature: (toolCallId, params, signal, onUpdate, ctx)
 		// The definition must receive the original signal at slot 3, onUpdate at
 		// slot 4, and ctx at slot 5 — NOT shuffled into CustomTool order
-		// (onUpdate, ctx, signal). In runner-less mode, RegisteredToolAdapter
-		// wraps the caller context as { callerToolContext: context }.
+		// (onUpdate, ctx, signal).
 		expect(captured.signal).toBe(sentinelSignal);
 		expect(captured.onUpdate).toBe(sentinelOnUpdate);
-		const ctx = captured.ctx;
-		expect(ctx && typeof ctx === "object" && "callerToolContext" in ctx && ctx.callerToolContext).toBe(sentinelCtx);
+		expect(captured.ctx).toEqual({}); // stubRunner.createContext returns {}
+	});
+});
+
+describe("class-based ToolDefinition composition (prototype methods preserved)", () => {
+	it("executes a class-based ToolDefinition whose execute is a prototype method and loadMode is omitted", async () => {
+		class CounterTool implements ToolDefinition {
+			readonly name = "class_counter";
+			readonly label = "Class Counter";
+			readonly description = "increments an instance counter on each call";
+			readonly parameters = emptySchema;
+			#count = 0;
+
+			async execute(
+				_toolCallId: string,
+				_params: Record<string, never>,
+				_signal: AbortSignal | undefined,
+				_onUpdate: unknown,
+				_ctx: ExtensionContext,
+			) {
+				this.#count++;
+				return { content: [{ type: "text" as const, text: `count:${this.#count}` }] };
+			}
+		}
+
+		const tool = composeToolDefinition(new CounterTool(), execRunner);
+		const result = await tool.execute("call-1", {}, undefined, undefined, undefined);
+		expect(result.content[0]).toEqual({ type: "text", text: "count:1" });
+
+		// Second call proves instance state survives — the definition object
+		// identity was preserved, not spread into a plain object.
+		const result2 = await tool.execute("call-2", {}, undefined, undefined, undefined);
+		expect(result2.content[0]).toEqual({ type: "text", text: "count:2" });
+	});
+});
+
+describe("class-based CustomTool renderCall receiver (private field)", () => {
+	it("renderCall reads a #private field through the composed tool without throwing", () => {
+		class LabeledTool implements CustomTool {
+			readonly name = "class_labeled";
+			readonly label = "Class Labeled";
+			readonly description = "renderCall reads a private label";
+			readonly parameters = emptySchema;
+			#label = "private-label-value";
+
+			async execute() {
+				return { content: [{ type: "text" as const, text: "ok" }] };
+			}
+
+			renderCall() {
+				return { render: () => [this.#label] };
+			}
+		}
+
+		const tool = composeCustomTool(new LabeledTool(), execRunner);
+		// renderCall is forwarded through RegisteredToolAdapter; if the method
+		// is copied bare (without binding), `this` is wrong and `this.#label`
+		// throws a TypeError: Cannot read private member from an object whose
+		// private brand does not match.
+		const component = tool.renderCall?.({}, { expanded: false, isPartial: false }, {} as never);
+		const rows =
+			typeof component === "object" && component !== null && "render" in component
+				? (component as { render: (width: number) => readonly string[] }).render(80)
+				: undefined;
+		expect(rows).toEqual(["private-label-value"]);
 	});
 });

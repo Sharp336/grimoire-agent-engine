@@ -44,10 +44,21 @@ function composeDefinition(
 	opts: ComposeOptions | undefined,
 ): AgentTool {
 	const loadMode = defaultLoadModeForToolName(definition.name, opts?.loadMode ?? definition.loadMode);
+	// Never spread the definition: a class-instance definition's prototype
+	// methods (including `execute`), getters, and `#private`-field receiver
+	// would be destroyed by `{ ...definition }`, leaving the adapter calling an
+	// undefined `execute`. When no load-mode override is supplied, pass the
+	// ORIGINAL definition object through untouched. When an override is needed
+	// (the resolved load mode differs from what the adapter would resolve from
+	// the definition alone), hand it to the adapter via a load-mode field on the
+	// RegisteredTool wrapper, which it prefers over the definition's own value.
+	const definitionResolvedLoadMode = defaultLoadModeForToolName(definition.name, definition.loadMode);
+	const overrideLoadMode = loadMode !== definitionResolvedLoadMode ? loadMode : undefined;
 	const adapter = new RegisteredToolAdapter(
 		{
-			definition: definition.loadMode === loadMode ? definition : { ...definition, loadMode },
+			definition,
 			extensionPath: "<composed>",
+			...(overrideLoadMode ? { loadMode: overrideLoadMode } : {}),
 		},
 		runner,
 	);
@@ -80,10 +91,16 @@ export function composeCustomTool(
  * Compose a plain {@link ToolDefinition} into an {@link AgentTool}: no conversion,
  * since the definition already carries the ToolDefinition execute arg order
  * (`toolCallId, params, signal, onUpdate, ctx`).
+ *
+ * A runner is REQUIRED: a plain `ToolDefinition.execute` reads its
+ * {@link ExtensionContext} (e.g. `ctx.sessionManager`, `ctx.ui`), and without a
+ * runner the adapter can only supply a bare `{ callerToolContext }` object —
+ * those fields would be `undefined`. Use {@link composeCustomTool} with a
+ * `getContext` thunk for the runner-less path.
  */
 export function composeToolDefinition(
 	definition: ToolDefinition,
-	runner: ExtensionRunner | undefined,
+	runner: ExtensionRunner,
 	opts?: ComposeOptions,
 ): AgentTool {
 	return composeDefinition(definition, runner, opts);

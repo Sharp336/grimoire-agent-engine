@@ -17,6 +17,7 @@ import {
 	createAgentSession,
 	discoverAuthStorage,
 	type ExtensionFactory,
+	type ToolDefinition,
 } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -864,5 +865,118 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				await session.dispose();
 			}
 		});
+	});
+});
+
+describe("createAgentSession toolDefinitions defaultInactive", () => {
+	const tempDirs: string[] = [];
+	let modelRegistry!: ModelRegistry;
+	let registryAuthDir: string;
+
+	const makeTempDir = (): string => {
+		const tempDir = path.join(os.tmpdir(), `pi-sdk-tooldef-inactive-${Snowflake.next()}`);
+		tempDirs.push(tempDir);
+		fs.mkdirSync(tempDir, { recursive: true });
+		return tempDir;
+	};
+
+	beforeAll(async () => {
+		registryAuthDir = path.join(os.tmpdir(), `pi-sdk-tooldef-inactive-auth-${Snowflake.next()}`);
+		fs.mkdirSync(registryAuthDir, { recursive: true });
+		modelRegistry = new ModelRegistry(await discoverAuthStorage(registryAuthDir));
+	});
+
+	afterEach(() => {
+		for (const tempDir of tempDirs.splice(0)) {
+			removeSyncWithRetries(tempDir);
+		}
+		vi.restoreAllMocks();
+	});
+
+	afterAll(() => {
+		removeSyncWithRetries(registryAuthDir);
+	});
+
+	const baseOptions = (tempDir: string): CreateAgentSessionOptions => ({
+		cwd: tempDir,
+		agentDir: tempDir,
+		modelRegistry,
+		sessionManager: SessionManager.inMemory(),
+		settings: Settings.isolated(),
+		model: getBundledModel("openai", "gpt-4o-mini"),
+		disableExtensionDiscovery: true,
+		skills: [],
+		contextFiles: [],
+		promptTemplates: [],
+		slashCommands: [],
+		enableMCP: false,
+		enableLsp: false,
+		rules: [],
+		workspaceTree: { rootPath: tempDir, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
+	});
+
+	it("excludes a defaultInactive toolDefinitions entry from the initial active set unless explicitly requested", async () => {
+		const tempDir = makeTempDir();
+		const inactiveDef: ToolDefinition = {
+			name: "sdk_inactive_def",
+			label: "SDK Inactive Def",
+			description: "SDK toolDefinition with defaultInactive",
+			parameters: type({}),
+			defaultInactive: true,
+			async execute() {
+				return { content: [{ type: "text", text: "inactive-def" }] };
+			},
+		};
+		const activeDef: ToolDefinition = {
+			name: "sdk_active_def",
+			label: "SDK Active Def",
+			description: "SDK toolDefinition without defaultInactive",
+			parameters: type({}),
+			async execute() {
+				return { content: [{ type: "text", text: "active-def" }] };
+			},
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolDefinitions: [inactiveDef, activeDef],
+		});
+
+		try {
+			expect(session.getAllToolNames()).toEqual(expect.arrayContaining(["sdk_inactive_def", "sdk_active_def"]));
+			expect(session.getActiveToolNames()).not.toContain("sdk_inactive_def");
+			expect(session.systemPrompt.join("\n")).not.toContain("sdk_inactive_def");
+			// The active def is included (as an xd:// device since it's discoverable).
+			expect(session.getAllToolNames()).toContain("sdk_active_def");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("includes a defaultInactive toolDefinitions entry when explicitly requested via toolNames", async () => {
+		const tempDir = makeTempDir();
+		const inactiveDef: ToolDefinition = {
+			name: "sdk_inactive_def2",
+			label: "SDK Inactive Def2",
+			description: "SDK toolDefinition with defaultInactive, explicitly requested",
+			parameters: type({}),
+			defaultInactive: true,
+			async execute() {
+				return { content: [{ type: "text", text: "inactive-def2" }] };
+			},
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolDefinitions: [inactiveDef],
+			toolNames: ["read", "sdk_inactive_def2"],
+		});
+
+		try {
+			expect(session.getActiveToolNames()).toContain("sdk_inactive_def2");
+			expect(session.systemPrompt.join("\n")).toContain("sdk_inactive_def2");
+		} finally {
+			await session.dispose();
+		}
 	});
 });

@@ -38,7 +38,10 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 		private runner?: ExtensionRunner,
 	) {
 		applyToolProxy(registeredTool.definition, this);
-		this.loadMode = defaultLoadModeForToolName(registeredTool.definition.name, registeredTool.definition.loadMode);
+		this.loadMode = defaultLoadModeForToolName(
+			registeredTool.definition.name,
+			registeredTool.loadMode ?? registeredTool.definition.loadMode,
+		);
 
 		// Only define render methods when the underlying definition provides them.
 		// If these exist unconditionally on the prototype, ToolExecutionComponent
