@@ -82,13 +82,11 @@ import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { MacOSPowerAssertion } from "@oh-my-pi/pi-natives";
 import {
-	$env,
 	escapeXmlText,
 	formatDuration,
 	getAgentDbPath,
 	isBunTestRuntime,
 	isEnoent,
-	isInteractiveHost,
 	isRecord,
 	logger,
 	postmortem,
@@ -182,7 +180,6 @@ import {
 	shouldDisableReasoning,
 	toReasoningEffort,
 } from "../thinking";
-import { isLowSignalTitleInput } from "../tiny/text";
 import { shutdownTinyTitleClient } from "../tiny/title-client";
 import { resolveApproval } from "../tools/approval";
 import { type AskToolDetails, type AskToolInput, recoverAskQuestions } from "../tools/ask";
@@ -206,7 +203,6 @@ import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { extractFileMentions, generateFileMentionMessages } from "../utils/file-mentions";
 import { normalizeModelContextImages } from "../utils/image-loading";
 import type { InspectImageMode } from "../utils/inspect-image-mode";
-import { generateSessionTitle } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { VibeModeState } from "../vibe/state";
 import type { AgentSessionEvent, AgentSessionEventListener } from "./agent-session-events";
@@ -281,7 +277,6 @@ import {
 } from "./launch-completion";
 import {
 	type BashExecutionMessage,
-	buildReplanTitleContext,
 	type CustomMessage,
 	type CustomMessagePayload,
 	convertToLlm,
@@ -343,6 +338,12 @@ export type { AdvisorStats, PerAdvisorStat } from "./session-advisors";
 
 const SESSION_STOP_CONTINUATION_CAP = 8;
 
+import {
+	type SessionNameTrigger,
+	SessionTitleGenerator,
+	type SessionTitleHost,
+	type SetSessionNameWithTrigger,
+} from "./session-title";
 import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
 import { TodoTracker, type TodoTrackerHost } from "./todo-tracker";
 import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
@@ -409,14 +410,6 @@ type ScheduledAgentContinueOptions = {
 	onSkip?: (reason: AgentContinueSkipReason) => void;
 	onError?: (error: unknown) => void;
 };
-
-type SessionTitleSource = "auto" | "user";
-type SessionNameTrigger = "replan";
-type SetSessionNameWithTrigger = (
-	name: string,
-	source?: SessionTitleSource,
-	trigger?: SessionNameTrigger,
-) => Promise<boolean>;
 
 const kPersistedSessionEntryId = Symbol("persistedSessionEntryId");
 type PersistedAssistantMessage = AssistantMessage & { [kPersistedSessionEntryId]?: string };
@@ -488,12 +481,7 @@ export class AgentSession {
 	#planModeReminderCount = 0;
 	#planModeReminderAwaitingProgress = false;
 	readonly #todo: TodoTracker;
-	#replanTitleRefreshInFlight: Promise<void> | undefined = undefined;
-	/** Resolved TITLE_SYSTEM.md override applied to every automatic session-title
-	 *  generation path. Refresh via {@link AgentSession.setTitleSystemPrompt} when
-	 *  the session cwd changes. */
-	#titleSystemPrompt: string | undefined;
-	#titleGenerationAbortController = new AbortController();
+	readonly #title: SessionTitleGenerator;
 	#toolChoiceQueue = new ToolChoiceQueue();
 
 	readonly #bash: BashRunner;
@@ -1085,7 +1073,6 @@ export class AgentSession {
 		// toggle scopes priority to Fireworks alone, without mutating the shared
 		// session `serviceTier` that drives `/fast` and OpenAI/Anthropic priority.
 		this.agent.serviceTierResolver = model => this.#models.effectiveServiceTier(model);
-		this.#titleSystemPrompt = config.titleSystemPrompt;
 		this.#pruneToolDescriptions = config.pruneToolDescriptions === true;
 		this.#transformContext = config.transformContext ?? (messages => messages);
 		this.#sideStreamFn = config.sideStreamFn ?? streamSimple;
@@ -1230,6 +1217,16 @@ export class AgentSession {
 			promptGeneration: () => this.#promptGeneration,
 		};
 		this.#ttsr = new TtsrCoordinator(ttsrHost, config.ttsrManager);
+		const titleHost: SessionTitleHost = {
+			agent: () => this.agent,
+			sessionManager: () => this.sessionManager,
+			modelRegistry: () => this.#modelRegistry,
+			currentModel: () => this.model,
+			agentKind: () => this.#agentKind,
+			extensionRunner: () => this.#extensionRunner,
+			sessionId: () => this.sessionId,
+		};
+		this.#title = new SessionTitleGenerator(titleHost, this.settings, config.titleSystemPrompt);
 		this.#obfuscator = config.obfuscator;
 		const providerBoundaryHost: SessionProviderBoundaryHost = {
 			agent: this.agent,
@@ -2546,7 +2543,7 @@ export class AgentSession {
 					this.#streamingEditGuard.invalidate(editedPath);
 				}
 				if (toolName === "todo" && !isError && details && this.#todo.onTodoResultDetails(details, toolCallId)) {
-					this.#scheduleReplanTitleRefresh();
+					this.#title.scheduleReplanTitleRefresh();
 				}
 				if (toolName === "todo" && isError) {
 					const errorText = content.find(part => part.type === "text")?.text;
@@ -3606,7 +3603,7 @@ export class AgentSession {
 	beginDispose(): void {
 		this.#isDisposed = true;
 		this.#memory.cancelLocalMemoryStartup();
-		this.#titleGenerationAbortController.abort();
+		this.#title.abort();
 		this.#abortAutolearnCapture();
 		this.#irc.flushPending();
 		this.yieldQueue.clear();
@@ -6086,71 +6083,8 @@ export class AgentSession {
 		this.#todo.setPhases(phases);
 	}
 
-	#buildReplanTitleContext(): string {
-		return buildReplanTitleContext(this.agent.state.messages);
-	}
-
-	#scheduleReplanTitleRefresh(): void {
-		// Headless subagent sessions have no operator-visible title, so a todo-init
-		// replan refresh only burns a tiny-model call whose result lands in JSONL
-		// and is never shown (issue #5910). In an interactive host the operator can
-		// focus a live subagent from the Agent Hub, where the status line renders
-		// its session name — so keep the refresh there and only skip subagents when
-		// no focusable UI exists (print/RPC/ACP/eval/SDK/CI).
-		if (this.#agentKind === "sub" && !isInteractiveHost()) return;
-		if (this.#replanTitleRefreshInFlight) return;
-		if (!this.settings.get("title.refreshOnReplan")) return;
-		if (this.sessionManager.titleSource === "user") return;
-		const context = this.#buildReplanTitleContext();
-		if (!context) return;
-		const sessionId = this.sessionManager.getSessionId();
-		const refresh = this.#refreshTitleAfterReplan(context, sessionId)
-			.catch(err => {
-				logger.warn("title-generator: replan refresh failed", {
-					sessionId,
-					error: err instanceof Error ? err.message : String(err),
-				});
-			})
-			.finally(() => {
-				if (this.#replanTitleRefreshInFlight === refresh) {
-					this.#replanTitleRefreshInFlight = undefined;
-				}
-			});
-		this.#replanTitleRefreshInFlight = refresh;
-	}
-
-	/**
-	 * Start automatic title generation when the session and input are eligible.
-	 * Interactive and CLI-bootstrap submissions share this gate so every first
-	 * user message persists titles with the same environment, signal, and local
-	 * extension-command policy.
-	 */
 	maybeStartTitleGeneration(firstMessage: string, onStart?: () => void): void {
-		const extensionCommandSpace = firstMessage.indexOf(" ");
-		const isLocalExtensionCommand =
-			firstMessage.startsWith("/") &&
-			this.#extensionRunner?.getCommand(
-				extensionCommandSpace === -1 ? firstMessage.slice(1) : firstMessage.slice(1, extensionCommandSpace),
-			) !== undefined;
-		if (isLocalExtensionCommand || this.sessionName || $env.PI_NO_TITLE || isLowSignalTitleInput(firstMessage)) {
-			return;
-		}
-		onStart?.();
-		this.generateTitle(firstMessage)
-			.then(async title => {
-				// Re-check after generation so concurrent attempts cannot replace
-				// the first title that completed.
-				if (title && !this.sessionName) {
-					await this.sessionManager.setSessionName(title, "auto");
-				}
-			})
-			.catch(err => {
-				logger.warn("title-generator: uncaught auto-title error", {
-					sessionId: this.sessionId,
-					reason: "uncaught-auto-title-error",
-					error: err instanceof Error ? err.message : String(err),
-				});
-			});
+		this.#title.maybeStartTitleGeneration(firstMessage, onStart, message => this.generateTitle(message));
 	}
 
 	/**
@@ -6159,33 +6093,14 @@ export class AgentSession {
 	 * local-worker requests instead of leaving background inference alive.
 	 */
 	generateTitle(firstMessage: string): Promise<string | null> {
-		return generateSessionTitle(
-			firstMessage,
-			this.#modelRegistry,
-			this.settings,
-			this.sessionId,
-			this.model,
-			provider => this.agent.metadataForProvider(provider),
-			this.#titleSystemPrompt,
-			this.#titleGenerationAbortController.signal,
-		);
-	}
-
-	async #refreshTitleAfterReplan(context: string, sessionId: string): Promise<void> {
-		const title = await this.generateTitle(context);
-		if (!title) return;
-		if (this.sessionManager.getSessionId() !== sessionId) return;
-		if (!this.settings.get("title.refreshOnReplan")) return;
-		if (this.sessionManager.titleSource === "user") return;
-		const setSessionName = this.sessionManager.setSessionName as SetSessionNameWithTrigger;
-		await setSessionName.call(this.sessionManager, title, "auto", "replan");
+		return this.#title.generateTitle(firstMessage);
 	}
 
 	/** Currently-applied {@link TITLE_SYSTEM.md} override, or undefined when the
 	 *  bundled prompt is in effect. Consumed by {@link InteractiveMode} so the
 	 *  first-input title path and the replan refresh share one source. */
 	get titleSystemPrompt(): string | undefined {
-		return this.#titleSystemPrompt;
+		return this.#title.titleSystemPrompt;
 	}
 
 	/** Replace the title-generation system prompt override. Called by
@@ -6193,7 +6108,7 @@ export class AgentSession {
 	 *  changes (e.g. `/move` relocation) so the next replan refresh resolves
 	 *  against the destination project's override. */
 	setTitleSystemPrompt(prompt: string | undefined): void {
-		this.#titleSystemPrompt = prompt;
+		this.#title.setTitleSystemPrompt(prompt);
 	}
 
 	/**
