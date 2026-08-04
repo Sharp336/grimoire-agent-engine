@@ -101,10 +101,12 @@ export class PipelineController {
 
 				for (const [agentName, result] of iterationResults) {
 					allResults.get(agentName)!.push(result);
-					if (result.exitCode !== 0) {
-						errors.push(
-							`${agentName} (iteration ${iteration + 1}): ${result.error || `exit code ${result.exitCode}`}`,
-						);
+					if (result.exitCode !== 0 || result.error !== undefined || result.aborted === true) {
+						const reason =
+							result.error ??
+							result.abortReason ??
+							(result.aborted ? "aborted" : `exit code ${result.exitCode}`);
+						errors.push(`${agentName} (iteration ${iteration + 1}): ${reason}`);
 					}
 				}
 			}
@@ -161,9 +163,17 @@ export class PipelineController {
 			const waveResults = await Promise.all(
 				wave.map(async agentName => {
 					const currentIndex = agentIndex++;
-					const failedDependencies = [...(this.#dependencies.get(agentName) ?? [])].filter(
-						dependency => results.get(dependency)?.exitCode !== 0,
-					);
+					const failedDependencies = [...(this.#dependencies.get(agentName) ?? [])].filter(dependency => {
+						const dependencyResult = results.get(dependency);
+						if (!dependencyResult) {
+							throw new Error(`Dependency '${dependency}' of '${agentName}' has no result`);
+						}
+						return (
+							dependencyResult.exitCode !== 0 ||
+							dependencyResult.error !== undefined ||
+							dependencyResult.aborted === true
+						);
+					});
 					if (failedDependencies.length > 0) {
 						const result = this.#buildBlockedResult(agentName, currentIndex, iteration, failedDependencies);
 						await this.#stateTracker.updateAgent(agentName, {

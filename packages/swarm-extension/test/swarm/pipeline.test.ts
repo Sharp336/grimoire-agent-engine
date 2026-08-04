@@ -21,6 +21,7 @@ beforeEach(async () => {
 		async (agent, index, options): Promise<SingleResult> => {
 			executed.push(agent.name);
 			const failed = agent.name === "failing";
+			const aborted = agent.name === "aborted";
 			await options.stateTracker.updateAgent(agent.name, {
 				status: failed ? "failed" : "completed",
 				iteration: options.iteration,
@@ -34,13 +35,14 @@ beforeEach(async () => {
 				agentSource: "project" as AgentSource,
 				task: agent.task,
 				exitCode: failed ? 1 : 0,
-				output: failed ? "" : `${agent.name} completed`,
+				output: failed || aborted ? "" : `${agent.name} completed`,
 				stderr: failed ? "expected failure" : "",
 				truncated: false,
 				durationMs: 1,
 				tokens: 0,
 				requests: 0,
 				error: failed ? "expected failure" : undefined,
+				aborted,
 			};
 		},
 	);
@@ -100,5 +102,34 @@ swarm:
 		expect(progress).toContain("[skip] dependent: blocked");
 		expect(progress).toContain("2 blocked");
 		expect(stateTracker.state.agents.independent_child.status).toBe("completed");
+	});
+
+	it("blocks dependents when an upstream agent is aborted with exit code 0", async () => {
+		const definition = parseSwarmYaml(`
+swarm:
+  name: aborted-gate-test
+  workspace: ./workspace
+  mode: pipeline
+  agents:
+    aborted:
+      role: aborted probe
+      task: abort
+      reports_to: [dependent]
+    dependent:
+      role: blocked child
+      task: must not execute
+      waits_for: [aborted]
+`);
+		const dependencies = buildDependencyGraph(definition);
+		const waves = buildExecutionWaves(dependencies);
+		const stateTracker = new SwarmStateTracker(workspace, definition.name);
+		await stateTracker.init([...definition.agents.keys()], definition.targetCount, definition.mode);
+		const controller = new PipelineController(definition, waves, stateTracker);
+
+		const result = await controller.run({ workspace });
+
+		expect(result.status).toBe("failed");
+		expect(executed).toEqual(["aborted"]);
+		expect(stateTracker.state.agents.dependent.status).toBe("blocked");
 	});
 });
