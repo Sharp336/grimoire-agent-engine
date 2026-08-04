@@ -63,7 +63,7 @@ function createBuilderArguments(platform, arch, staging) {
 }
 
 function validateInputs() {
-	if (manifest.name !== "@oh-my-pi/pi-chatgpt-web-launcher" || manifest.version !== "17.2.6" || manifest.private !== true) {
+	if (manifest.name !== "@oh-my-pi/pi-chatgpt-web-launcher" || manifest.version !== "17.2.7" || manifest.private !== true) {
 		throw new Error("launcher_package_identity_mismatch");
 	}
 	if (manifest.build.appId !== "sh.omp.chatgpt-web" || manifest.build.productName !== "OMP ChatGPT Web") {

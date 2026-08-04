@@ -10,7 +10,7 @@ function metadata() {
   const addon = "app/node_modules/@oh-my-pi/pi-natives-win32-x64/pi_natives.win32-x64.node";
   return {
     manifest: {
-      schemaVersion: 1, appVersion: "17.2.6", platform: "win32", arch: "x64",
+      schemaVersion: 1, appVersion: "17.2.7", platform: "win32", arch: "x64",
       entrypoints: { cli: "app/cli.js", mcp: "app/mcp-main.js" },
       runtime: { kind: "bun", version: "1.3.14", executable: "runtime/bun.exe" },
       native: { package: "@oh-my-pi/pi-natives", version: "0.49.3", platformTag: "win32-x64", napiAbi: 10,
@@ -27,18 +27,18 @@ function authority(options = {}) {
   const source = { kind: "source", close: () => events.push("source:close") };
   const installed = { kind: "installed", close: () => events.push("installed:close") };
   return { events, source, installed, native: {
-    async openRuntimeBundle(request) { events.push("open"); if (options.openError) throw options.openError; assert.equal(request.expected.version, "17.2.6"); return source; },
+    async openRuntimeBundle(request) { events.push("open"); if (options.openError) throw options.openError; assert.equal(request.expected.version, "17.2.7"); return source; },
     async verifyRuntimeBundle({ bundle }) { events.push(`verify:${bundle.kind}`); if (options.corruptHash && bundle === source) throw new Error("runtime_checksums_invalid"); const value = metadata(); if (options.pathSwap && bundle === installed) value.metadataDigest = "c".repeat(64); return value; },
-    async installRuntimeBundleAtomic(request) { events.push("install"); assert.equal(request.source, source); assert.equal(request.ownerPrivate, true); assert.equal(request.replaceAtomically, true); assert.equal(path.basename(request.versionsRoot), "versions"); assert.equal(request.versionKey, "17.2.6-win32-x64"); return installed; },
+    async installRuntimeBundleAtomic(request) { events.push("install"); assert.equal(request.source, source); assert.equal(request.ownerPrivate, true); assert.equal(request.replaceAtomically, true); assert.equal(path.basename(request.versionsRoot), "versions"); assert.equal(request.versionKey, "17.2.7-win32-x64"); return installed; },
   } };
 }
-const app = { isPackaged: true, getVersion: () => "17.2.6" };
+const app = { isPackaged: true, getVersion: () => "17.2.7" };
 const roots = { coreHome: path.resolve("private-app"), resourcesPath: path.resolve("resources") };
 
 test("runtime installation is native-authoritative, private, atomic, and versioned", async () => {
   const fake = authority();
   const result = await ensurePackagedRuntime({ app, ...roots, native: fake.native, platform: "win32", arch: "x64" });
-  assert.equal(result.bundle, fake.installed); assert.equal(result.versionKey, "17.2.6-win32-x64");
+  assert.equal(result.bundle, fake.installed); assert.equal(result.versionKey, "17.2.7-win32-x64");
   assert.equal(result.root, path.join(roots.coreHome, "runtime", "versions", result.versionKey));
   assert.deepEqual(fake.events, ["open", "verify:source", "install", "verify:installed", "source:close"]);
   result.close(); assert.equal(fake.events.at(-1), "installed:close");
@@ -58,9 +58,9 @@ test("corrupt hashes, path swaps, and broad ACL native rejections fail closed", 
 
 test("fixed metadata requires cli.js and mcp-main.js checksums and rejects traversal", () => {
   const value = metadata(); delete value.checksums.files["app/mcp-main.js"];
-  assert.throws(() => validateRuntimeBundleMetadata(value.manifest, value.checksums, { version: "17.2.6", platform: "win32", arch: "x64" }), /runtime_required_checksum_missing/);
+  assert.throws(() => validateRuntimeBundleMetadata(value.manifest, value.checksums, { version: "17.2.7", platform: "win32", arch: "x64" }), /runtime_required_checksum_missing/);
   value.checksums.files["app/mcp-main.js"] = digest; value.manifest.entrypoints.cli = "../cli.js";
-  assert.throws(() => validateRuntimeBundleMetadata(value.manifest, value.checksums, { version: "17.2.6", platform: "win32", arch: "x64" }), /runtime_fixed_entrypoints_invalid/);
+  assert.throws(() => validateRuntimeBundleMetadata(value.manifest, value.checksums, { version: "17.2.7", platform: "win32", arch: "x64" }), /runtime_fixed_entrypoints_invalid/);
 });
 
 test("installation fails closed without native authority", async () => {

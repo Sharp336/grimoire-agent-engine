@@ -71,7 +71,7 @@ function runtimeMetadata() {
 
 test("launcher metadata is private and OMP-owned", () => {
 	assert.equal(manifest.name, "@oh-my-pi/pi-chatgpt-web-launcher");
-	assert.equal(manifest.version, "17.2.6");
+	assert.equal(manifest.version, "17.2.7");
 	assert.equal(manifest.private, true);
 	assert.equal(manifest.build.appId, "sh.omp.chatgpt-web");
 	assert.equal(manifest.build.productName, "OMP ChatGPT Web");
@@ -93,7 +93,7 @@ test("package scripts prepare deterministic runtime and never publish", t => {
 		assert.ok(args.includes("--x64"));
 		assert.deepEqual(args.slice(args.indexOf("--publish"), args.indexOf("--publish") + 2), ["--publish", "never"]);
 		assert.ok(args.includes(`--config.directories.output=${staging}`));
-		for (const name of expectedArtifactNames(platform, "x64")) assert.match(name, /^omp-chatgpt-web-17\.2\.6-/);
+		for (const name of expectedArtifactNames(platform, "x64")) assert.match(name, /^omp-chatgpt-web-17\.2\.7-/);
 	}
 	const forbiddenFlag = Object.values(TARGETS).find(target => target.flag !== TARGETS[process.platform].flag).flag;
 	assert.throws(() => packageLauncher(forbiddenFlag), /cross_packaging_forbidden/);

@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [17.2.7] - 2026-08-03
+
+### Changed
+
+- Replaced `arktype` with `@oh-my-pi/omptype` for schema validation, delivering up to 100x faster schema construction and 60-100x faster validation while maintaining full compatibility with existing `type`/`Type` exports and the `isArkSchema` contract.
+
+### Fixed
+
+- Fixed OpenAI-Codex (ChatGPT OAuth) requests failing with an `Unsupported service_tier: auto` error on default or legacy sessions by omitting the implicit `auto` service tier on the wire.
+- Fixed an issue where Cursor `kimi-k3` sessions would break permanently when a same-model assistant turn was persisted without thinking blocks, replacing hard errors with graceful warnings.
+
 ## [17.2.6] - 2026-08-03
 
 ### Added

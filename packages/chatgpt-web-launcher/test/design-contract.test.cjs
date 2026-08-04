@@ -26,7 +26,7 @@ const manifest = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json
 
 test("isolated package pins the complete OMP dependency and build contract", () => {
   assert.equal(manifest.name, "@oh-my-pi/pi-chatgpt-web-launcher");
-  assert.equal(manifest.version, "17.2.6");
+  assert.equal(manifest.version, "17.2.7");
   assert.equal(manifest.engines.bun, ">=1.3.14");
   for (const script of ["build", "build:runtime", "check", "check:types", "package", "prepare:runtime", "smoke:package", "test"]) {
     assert.equal(typeof manifest.scripts[script], "string", `missing script ${script}`);
@@ -130,7 +130,7 @@ test("navigation, redirect, window-open, and CSP policies reject outside destina
 
 test("helper paths are derived under the versioned private root and verified from held native identities", async () => {
   const root = path.resolve("C:/private-omp-runtime");
-  const version = "17.2.6";
+  const version = "17.2.7";
   const scriptBytes = Buffer.from("console.log('launcher')", "utf8");
   const scriptHash = createHash("sha256").update(scriptBytes).digest("hex");
   const expected = { executableSha256: "a".repeat(64), scriptSha256: scriptHash, executableIdentity: "exe-id", scriptIdentity: "script-id" };
@@ -160,7 +160,7 @@ test("helper replacement is rejected on immediate pre-use revalidation", async (
     async openVerifiedExecutable() { return { identity: executableIdentity }; },
     NativeOwnedFile: { open() { return { identity: "script-id", read: () => bytes, close() {} }; } },
   };
-  const verified = await verifyLauncherHelper({ nativeModule, privateInstallRoot: root, version: "17.2.6", expected });
+  const verified = await verifyLauncherHelper({ nativeModule, privateInstallRoot: root, version: "17.2.7", expected });
   executableIdentity = "replaced-exe";
   await assert.rejects(revalidateLauncherHelper(nativeModule, verified, expected), /helper_executable_identity_mismatch/);
   verified.script.close();

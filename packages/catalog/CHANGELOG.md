@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [17.2.7] - 2026-08-03
+
+### Fixed
+
+- Fixed an issue where setting `thinking-level: off` failed to disable reasoning on direct DeepSeek V4 requests.
+
 ## [17.2.6] - 2026-08-03
 
 ### Added

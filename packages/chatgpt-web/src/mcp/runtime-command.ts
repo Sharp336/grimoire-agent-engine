@@ -3,7 +3,7 @@ import type { ChatGptWebMode } from "../config";
 const PACKAGE_NAME = "@oh-my-pi/pi-chatgpt-web";
 const PACKAGE_CLI_NAME = "chatgpt-web";
 const PACKAGE_CLI_RELATIVE_PATH = "app/cli.js";
-const PACKAGE_VERSION = "17.2.6";
+const PACKAGE_VERSION = "17.2.7";
 const BROKER_HANDOFF_ARGV = Object.freeze(["mcp", "--broker-handoff"] as const);
 
 /** Opaque native capability retaining the already-open, verified package CLI until spawn. */
