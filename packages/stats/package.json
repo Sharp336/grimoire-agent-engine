@@ -55,8 +55,7 @@
     "@types/bun": "catalog:",
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",
-    "linkedom": "catalog:",
-    "postcss": "catalog:"
+    "linkedom": "catalog:"
   },
   "engines": {
     "bun": ">=1.3.14"

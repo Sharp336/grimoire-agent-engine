@@ -24,7 +24,7 @@ export * from "./process-name";
 export * as procmgr from "./procmgr";
 export * as prompt from "./prompt";
 export * as ptree from "./ptree";
-export { AbortError, ChildProcess, Exception, NonZeroExitError } from "./ptree";
+export { AbortError, NonZeroExitError } from "./ptree";
 export * from "./runtime-install";
 export * from "./sanitize-text";
 export * from "./snowflake";

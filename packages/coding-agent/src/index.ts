@@ -1,5 +1,3 @@
-import { HookEditorComponent, HookInputComponent, HookSelectorComponent } from "./modes/components";
-
 // Core session management
 
 // Re-export TUI components for custom tool rendering
@@ -58,9 +56,3 @@ export type * from "./task/types";
 // Tools (detail types and utilities)
 export * from "./tools";
 export * from "./utils/git";
-// UI components for extensions
-export {
-	HookEditorComponent as ExtensionEditorComponent,
-	HookInputComponent as ExtensionInputComponent,
-	HookSelectorComponent as ExtensionSelectorComponent,
-};
