@@ -894,6 +894,36 @@ describe("command-code streamSimple options", () => {
 		expect(lastRequest!.body.permissionMode).toBe("plan");
 	});
 
+	it("notifies onResponse with the provider response", async () => {
+		scenario = { kind: "capture", body: `{"type":"finish","finishReason":"stop"}\n` };
+		const baseUrl = await startServer();
+		const model = {
+			...getBundledModel("command-code", "deepseek/deepseek-v4-flash"),
+			baseUrl,
+		} as Model<"command-code">;
+		let responseStatus: number | undefined;
+		let responseHeaders: Record<string, string> | undefined;
+		const stream = streamSimple(
+			model,
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			{
+				apiKey: "test-key",
+				onResponse: response => {
+					responseStatus = response.status;
+					responseHeaders = response.headers;
+				},
+			},
+		);
+		for await (const _ of stream) {
+			/* drain */
+		}
+		await stream.result();
+
+		expect(responseStatus).toBe(200);
+		// The capture server answers with content-type application/x-ndjson.
+		expect(responseHeaders?.["content-type"]).toBe("application/x-ndjson");
+	});
+
 	it("merges model headers under caller headers", async () => {
 		scenario = {
 			kind: "capture",

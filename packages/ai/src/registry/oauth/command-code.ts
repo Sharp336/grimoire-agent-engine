@@ -171,6 +171,14 @@ export async function loginCommandCode(cb: OAuthLoginCallbacks): Promise<string>
 			return json({ success: false, error: "Invalid JSON" }, 400, origin);
 		}
 
+		// Reject forged deliveries without settling the login: a local process
+		// must not be able to swap in its own key, nor cancel a pending login.
+		// The state check runs before the failure path too, so a body with only
+		// `{ "error": "access_denied" }` cannot abort a login without the token.
+		const parsedState =
+			typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>).state : undefined;
+		if (parsedState !== state) return json({ success: false, error: "Invalid state token" }, 403, origin);
+
 		// The studio reports denial/provisioning failures on the same endpoint.
 		// Acknowledge and fail the login now rather than waiting out the deadline.
 		const failure = readFailure(parsed);
@@ -184,9 +192,6 @@ export async function loginCommandCode(cb: OAuthLoginCallbacks): Promise<string>
 		if (!isCallbackPayload(parsed)) {
 			return json({ success: false, error: "Missing required fields" }, 400, origin);
 		}
-		// Reject forged deliveries without settling the login: a local process
-		// must not be able to swap in its own key, nor cancel a pending login.
-		if (parsed.state !== state) return json({ success: false, error: "Invalid state token" }, 403, origin);
 
 		const payload = parsed;
 		queueMicrotask(() => {

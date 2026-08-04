@@ -33,6 +33,7 @@ import type {
 } from "../types";
 import { normalizeSystemPrompts } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { notifyProviderResponse } from "../utils/provider-response";
 import { toolWireSchema } from "../utils/schema/wire";
 import { getNamedToolChoiceName } from "../utils/tool-choice";
 import { transformMessages } from "./transform-messages";
@@ -710,6 +711,10 @@ export const streamCommandCode: StreamFunction<"command-code"> = (
 					body: payload,
 					signal: options?.signal,
 				});
+
+				// Raw-SSE/debug buffer, extensions and session stats consume the
+				// provider response via this hook (shared contract).
+				await notifyProviderResponse(options, response, model);
 
 				if (!response.ok) {
 					const bodyText = await response.text();

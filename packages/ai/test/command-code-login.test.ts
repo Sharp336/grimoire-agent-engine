@@ -153,11 +153,36 @@ describe("command-code browser login", () => {
 	);
 
 	it(
-		"maps a studio denial to a LoginCancelledError",
+		"rejects a state-less denial without cancelling the login",
+		serial(async () => {
+			const login = await startLogin();
+			try {
+				// A forged `{ error: "access_denied" }` without the random state must
+				// not settle (cancel) the pending login — state is checked first.
+				const forged = await postJson(login.callbackUrl, {
+					error: "access_denied",
+					error_description: "Denied",
+				});
+				expect(forged.status).toBe(403);
+				await Bun.sleep(50);
+				expect(await isSettled(login.settled)).toBe(false);
+
+				const real = await postJson(login.callbackUrl, validPayload(login.state, "sk-real-key"));
+				expect(real.status).toBe(200);
+				await expect(login.settled).resolves.toEqual({ ok: true, value: "sk-real-key" });
+			} finally {
+				await finish(login);
+			}
+		}),
+	);
+
+	it(
+		"maps a studio denial with a valid state to a LoginCancelledError",
 		serial(async () => {
 			const login = await startLogin();
 			try {
 				const response = await postJson(login.callbackUrl, {
+					state: login.state,
 					error: "access_denied",
 					error_description: "Denied",
 				});
