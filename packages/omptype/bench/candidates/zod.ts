@@ -112,6 +112,10 @@ export const zodCandidate: Candidate = {
 			return result.success ? result.data : result.error;
 		};
 	},
+	allows(definition) {
+		const schema = buildSchema(definition);
+		return (value: unknown) => schema.safeParse(value).success;
+	},
 	isErrors: result => result instanceof z.ZodError,
 	summary: result => (result instanceof z.ZodError ? z.prettifyError(result) : ""),
 };

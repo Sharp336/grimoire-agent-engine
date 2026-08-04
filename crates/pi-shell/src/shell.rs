@@ -6653,7 +6653,8 @@ mod tests {
 		// ~589 KiB: forces the seekable bounded_tail path, and the 400 KB tail
 		// overflows the OS pipe buffer so tail is still writing when head exits.
 		let command = format!(
-			"seq 1 100000 > '{file}'; set -o pipefail; tail -c 400000 '{file}' | head -c 10 > /dev/null; echo rc=$?",
+			"seq 1 100000 > '{file}'; set -o pipefail; tail -c 400000 '{file}' | head -c 10 > \
+			 /dev/null; echo rc=$?",
 			file = file.display()
 		);
 		let (result, output) = execute_captured(command).await;
