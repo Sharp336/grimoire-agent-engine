@@ -32,7 +32,7 @@ export function createBridgeGrepFactory(
 ): (options: GrepToolOptions) => AgentTool {
 	return options => {
 		const grepTool: Tool = new GrepTool(session, options);
-		return composeAgentTool(grepTool, extensionRunner);
+		return composeAgentTool(grepTool, extensionRunner, { metaNotice: false });
 	};
 }
 
@@ -51,7 +51,7 @@ export function createBridgeGrepFactory(
  */
 export function createBridgeEditTool(session: ToolSession, extensionRunner: ExtensionRunner): AgentTool {
 	const editTool: Tool = new EditTool(session, "replace");
-	return composeAgentTool(editTool, extensionRunner);
+	return composeAgentTool(editTool, extensionRunner, { metaNotice: false });
 }
 
 /**

@@ -7,6 +7,7 @@
  * without forming a cycle.
  */
 import type { Component } from "@oh-my-pi/pi-tui";
+import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import type { ExtensionContext, ToolDefinition, ToolExecuteExtensionContext } from "../extensions/types";
 import type { CustomTool, CustomToolContext } from "./types";
 
@@ -17,7 +18,6 @@ const EMPTY_ROWS: readonly string[] = [];
  * output, instead of the `undefined`-return case that silently discards result text.
  */
 const EMPTY_COMPONENT: Component = { render: () => EMPTY_ROWS };
-const TOOL_DEFINITION_MARKER = "__isToolDefinition";
 
 /** Narrow an {@link ExtensionContext} to the subset a custom tool's callbacks see. */
 export function createCustomToolContext(ctx: ExtensionContext): CustomToolContext {
@@ -46,10 +46,6 @@ function resolveCustomToolContext(
 	return (ctx as ToolExecuteExtensionContext).callerToolContext ?? getContext?.() ?? createCustomToolContext(ctx);
 }
 
-export function isCustomTool(tool: CustomTool | ToolDefinition): tool is CustomTool {
-	return !(TOOL_DEFINITION_MARKER in tool);
-}
-
 export function customToolToDefinition(tool: CustomTool, getContext?: () => CustomToolContext): ToolDefinition {
 	const mergeCallAndResult =
 		"mergeCallAndResult" in tool && typeof tool.mergeCallAndResult === "boolean"
@@ -61,9 +57,13 @@ export function customToolToDefinition(tool: CustomTool, getContext?: () => Cust
 		description: tool.description,
 		parameters: tool.parameters,
 		hidden: tool.hidden,
-		loadMode: tool.loadMode,
+		loadMode: defaultLoadModeForToolName(tool.name, tool.loadMode),
 		deferrable: tool.deferrable,
 		approval: typeof tool.approval === "function" ? tool.approval.bind(tool) : tool.approval,
+		formatApprovalDetails:
+			typeof tool.formatApprovalDetails === "function"
+				? tool.formatApprovalDetails.bind(tool)
+				: tool.formatApprovalDetails,
 		// Preserved through RegisteredToolAdapter so MCP-backed tools' explicit
 		// `strict: false` (#4336/#4340) survives the custom-tool → definition bridge.
 		strict: tool.strict,
@@ -88,6 +88,5 @@ export function customToolToDefinition(tool: CustomTool, getContext?: () => Cust
 				}
 			: undefined,
 	};
-	Object.defineProperty(definition, TOOL_DEFINITION_MARKER, { value: true });
 	return definition;
 }

@@ -249,7 +249,7 @@ async function createDefaultSecuritySession(input: SecurityScanSessionFactoryInp
 		}),
 		providerSessionId: `security:${input.scanId}`,
 		sessionManager: input.sessionManager,
-		customTools: [input.publicationTool],
+		toolDefinitions: [input.publicationTool],
 		toolNames: SECURITY_SESSION_TOOLS,
 		restrictToolNames: true,
 		allowRestrictedCustomTools: true,

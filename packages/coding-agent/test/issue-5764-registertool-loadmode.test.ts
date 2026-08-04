@@ -4,12 +4,21 @@
  * to `discoverable`, which — with `tools.xdev` on — unmounts it from the
  * top-level schema and breaks the `xd://` transport (transport IS `read xd://`
  * / `write xd://<tool>`).
+ *
+ * Also tests that a plain {@link ToolDefinition} composed via
+ * {@link composeToolDefinition} executes with the correct arg order
+ * `(toolCallId, params, signal, onUpdate, ctx)` — the bug fixed by splitting
+ * `composeCustomTool` (CustomTool only) from `composeToolDefinition`.
  */
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { composeAgentTool, composeCustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/compose-tool";
-import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
+import {
+	composeAgentTool,
+	composeCustomTool,
+	composeToolDefinition,
+} from "@oh-my-pi/pi-coding-agent/extensibility/compose-tool";
+import type { CustomTool, CustomToolContext } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { ExtensionContext, ToolDefinition } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { BUILTIN_TOOLS, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -64,7 +73,7 @@ describe("issue #5764: registerTool loadMode default", () => {
 		expect(isMountableUnderXdev(tool)).toBe(false);
 	});
 
-	it("composeCustomTool defaults a re-registered essential built-in (ToolDefinition) to essential and not mountable", () => {
+	it("composeToolDefinition defaults a re-registered essential built-in to essential and not mountable", () => {
 		const definition: ToolDefinition = {
 			name: "read",
 			label: "Read",
@@ -72,7 +81,7 @@ describe("issue #5764: registerTool loadMode default", () => {
 			parameters: emptySchema,
 			execute: noopExecute,
 		};
-		const tool = composeCustomTool(definition, stubRunner);
+		const tool = composeToolDefinition(definition, stubRunner);
 		expect(tool.loadMode).toBe("essential");
 		expect(isMountableUnderXdev(tool)).toBe(false);
 	});
@@ -90,7 +99,7 @@ describe("issue #5764: registerTool loadMode default", () => {
 		expect(isMountableUnderXdev(tool)).toBe(true);
 	});
 
-	it("composeCustomTool still defaults a novel extension ToolDefinition to discoverable", () => {
+	it("composeToolDefinition still defaults a novel extension ToolDefinition to discoverable", () => {
 		const definition: ToolDefinition = {
 			name: "my_ext_tool",
 			label: "My Ext Tool",
@@ -98,7 +107,7 @@ describe("issue #5764: registerTool loadMode default", () => {
 			parameters: emptySchema,
 			execute: noopExecute,
 		};
-		const tool = composeCustomTool(definition, stubRunner);
+		const tool = composeToolDefinition(definition, stubRunner);
 		expect(tool.loadMode).toBe("discoverable");
 		expect(isMountableUnderXdev(tool)).toBe(true);
 	});
@@ -115,7 +124,7 @@ describe("issue #5764: registerTool loadMode default", () => {
 		expect(isMountableUnderXdev(tool)).toBe(false);
 	});
 
-	it("composeCustomTool respects an explicit opts.loadMode override", () => {
+	it("composeToolDefinition respects an explicit opts.loadMode override", () => {
 		const definition: ToolDefinition = {
 			name: "some_extension_tool",
 			label: "Some Tool",
@@ -123,7 +132,7 @@ describe("issue #5764: registerTool loadMode default", () => {
 			parameters: emptySchema,
 			execute: noopExecute,
 		};
-		const tool = composeCustomTool(definition, stubRunner, { loadMode: "essential" });
+		const tool = composeToolDefinition(definition, stubRunner, { loadMode: "essential" });
 		expect(tool.loadMode).toBe("essential");
 		expect(isMountableUnderXdev(tool)).toBe(false);
 	});
@@ -137,5 +146,48 @@ describe("issue #5764: registerTool loadMode default", () => {
 			if (!tool) continue;
 			expect(tool.loadMode, `${name} must declare loadMode "essential"`).toBe("essential");
 		}
+	});
+});
+
+describe("composeToolDefinition execution arg order", () => {
+	it("receives (signal, onUpdate, ctx) in the ToolDefinition slots, not the CustomTool slots", async () => {
+		const sentinelSignal = new AbortController().signal;
+		const sentinelOnUpdate = () => {};
+		const sentinelCtx = {
+			sessionManager: { getSessionId: () => "arg-order-test" } as CustomToolContext["sessionManager"],
+			modelRegistry: {} as CustomToolContext["modelRegistry"],
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		let captured: { signal?: unknown; onUpdate?: unknown; ctx?: unknown } = {};
+
+		const definition: ToolDefinition = {
+			name: "arg_order_probe",
+			label: "Arg Order Probe",
+			description: "captures the execute arg slots",
+			parameters: emptySchema,
+			async execute(_toolCallId, _params, signal, onUpdate, ctx) {
+				captured = { signal, onUpdate, ctx };
+				return { content: [{ type: "text" as const, text: "ok" }] };
+			},
+		};
+
+		// Runner-less composition: no ExtensionToolWrapper, so execute goes
+		// straight through RegisteredToolAdapter → definition.execute.
+		const tool = composeToolDefinition(definition, undefined);
+		await tool.execute("call-1", {}, sentinelSignal, sentinelOnUpdate, sentinelCtx);
+
+		// ToolDefinition.execute signature: (toolCallId, params, signal, onUpdate, ctx)
+		// The definition must receive the original signal at slot 3, onUpdate at
+		// slot 4, and ctx at slot 5 — NOT shuffled into CustomTool order
+		// (onUpdate, ctx, signal). In runner-less mode, RegisteredToolAdapter
+		// wraps the caller context as { callerToolContext: context }.
+		expect(captured.signal).toBe(sentinelSignal);
+		expect(captured.onUpdate).toBe(sentinelOnUpdate);
+		const ctx = captured.ctx;
+		expect(ctx && typeof ctx === "object" && "callerToolContext" in ctx && ctx.callerToolContext).toBe(sentinelCtx);
 	});
 });

@@ -7,6 +7,13 @@
 ### Changed
 
 - Upgraded the bundled omptype schema engine: intersection and pipe operators, bigint and RegExp literals in the string DSL, Standard Schema V1 interop, JSON Schema import via fromJsonSchema(), and richer union/collection error reporting.
+### Breaking Changes
+
+- Removed `CustomToolAdapter`; replaced by `composeCustomTool` / `composeAgentTool` / `composeToolDefinition`, exported from the package root (`@oh-my-pi/pi-coding-agent`). `CreateAgentSessionOptions.customTools` now accepts only `CustomTool[]`; pass plain `ToolDefinition` objects via the new `toolDefinitions` option.
+
+### Fixed
+
+- Fixed `isCustomTool` misclassifying plain caller-created `ToolDefinition`s as `CustomTool`s, causing `composeCustomTool` to shuffle execute args (`onUpdate` where `signal` expected). `composeCustomTool` now accepts only `CustomTool`; plain `ToolDefinition`s use the new `composeToolDefinition` entry point.
 
 ## [17.2.7] - 2026-08-03
 

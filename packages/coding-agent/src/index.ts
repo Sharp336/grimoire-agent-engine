@@ -15,6 +15,8 @@ export type * from "./config/prompt-templates";
 export * from "./config/prompt-templates";
 export type { RetrySettings, SkillsSettings } from "./config/settings";
 export { Settings, settings } from "./config/settings";
+// Tool composition (composeCustomTool / composeAgentTool / composeToolDefinition)
+export * from "./extensibility/compose-tool";
 // Custom commands
 export type * from "./extensibility/custom-commands/types";
 export type * from "./extensibility/custom-tools";

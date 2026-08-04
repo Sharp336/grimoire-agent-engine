@@ -79,7 +79,7 @@ import {
 	loadCustomCommands as loadCustomCommandsInternal,
 } from "./extensibility/custom-commands";
 import { discoverCustomToolPaths, loadCustomTools, type ToolPathWithSource } from "./extensibility/custom-tools";
-import { createCustomToolContext, customToolToDefinition, isCustomTool } from "./extensibility/custom-tools/definition";
+import { createCustomToolContext, customToolToDefinition } from "./extensibility/custom-tools/definition";
 import type { CustomTool, CustomToolSessionEvent } from "./extensibility/custom-tools/types";
 import {
 	discoverAndLoadExtensions,
@@ -415,8 +415,10 @@ export interface CreateAgentSessionOptions {
 	/** Absolute wall-clock deadline in Unix epoch milliseconds. */
 	deadline?: number;
 
-	/** Custom tools to register (in addition to built-in tools). Accepts both CustomTool and ToolDefinition. */
-	customTools?: (CustomTool | ToolDefinition)[];
+	/** Custom tools to register (in addition to built-in tools). Each must be a {@link CustomTool} — its execute callback receives `(toolCallId, params, onUpdate, ctx, signal)`. */
+	customTools?: CustomTool[];
+	/** Plain {@link ToolDefinition}s to register (in addition to built-in tools). Use this when the definition's execute already follows the `(toolCallId, params, signal, onUpdate, ctx)` arg order. */
+	toolDefinitions?: ToolDefinition[];
 	/** Inline extensions (merged with discovery). */
 	extensions?: ExtensionFactory[];
 	/** Additional extension paths to load (merged with discovery). */
@@ -882,7 +884,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 // Internal Helpers
 
 function isLegacyBuiltinToolDefinition(tool: CustomTool | ToolDefinition): boolean {
-	return !isCustomTool(tool) && "__ompLegacyBuiltinTool" in tool && tool.__ompLegacyBuiltinTool === true;
+	return "__ompLegacyBuiltinTool" in tool && tool.__ompLegacyBuiltinTool === true;
 }
 
 /** Matches the truncation applied to per-server instructions inside `rebuildSystemPrompt`. */
@@ -1302,7 +1304,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		options.customSystemPrompt !== undefined ||
 		options.appendSystemPrompt !== undefined ||
 		options.toolNames !== undefined ||
-		options.customTools !== undefined;
+		options.customTools !== undefined ||
+		options.toolDefinitions !== undefined;
 	const inheritedPromptCacheKey = forkCacheShapeChanged
 		? undefined
 		: sessionManager.getHeader()?.providerPromptCacheKey;
@@ -2573,12 +2576,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			restrictToolNames && options.allowRestrictedCustomTools !== true
 				? []
 				: (options.customTools?.filter(tool => !isLegacyBuiltinToolDefinition(tool)) ?? []);
+		const sdkToolDefinitions =
+			restrictToolNames && options.allowRestrictedCustomTools !== true
+				? []
+				: (options.toolDefinitions?.filter(tool => !isLegacyBuiltinToolDefinition(tool)) ?? []);
 		const allCustomTools = [
 			...registeredTools,
-			...sdkCustomTools.map(tool => {
-				const definition = isCustomTool(tool) ? customToolToDefinition(tool) : tool;
-				return { definition, extensionPath: "<sdk>" };
-			}),
+			...sdkCustomTools.map(tool => ({
+				definition: customToolToDefinition(tool),
+				extensionPath: "<sdk>",
+			})),
+			...sdkToolDefinitions.map(definition => ({ definition, extensionPath: "<sdk>" })),
 		];
 		// composeAgentTool applies output metadata and extension interception after registry assembly.
 		const extensionTools: Tool[] = deduplicateMCPToolsByName(wrapRegisteredTools(allCustomTools, extensionRunner));
@@ -2964,7 +2972,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const alwaysInclude: string[] = restrictToolNames
 			? []
 			: [
-					...sdkCustomTools.map(t => (isCustomTool(t) ? t.name : t.name)),
+					...sdkCustomTools.map(t => t.name),
+					...sdkToolDefinitions.map(t => t.name),
 					...registeredTools.filter(t => !t.definition.defaultInactive).map(t => t.definition.name),
 				];
 		for (const name of alwaysInclude) {
