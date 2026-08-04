@@ -385,6 +385,8 @@ function toWireMessages(messages: Message[]): unknown[] {
 		}
 
 		if (message.role === "toolResult") {
+			const textValue = toWireToolResultValue(message.content);
+			const imageBlocks = message.content.filter((block): block is ImageContent => block.type === "image");
 			out.push({
 				role: "tool",
 				content: [
@@ -392,10 +394,22 @@ function toWireMessages(messages: Message[]): unknown[] {
 						type: "tool-result",
 						toolCallId: message.toolCallId,
 						toolName: "",
-						output: { type: "text", value: toWireToolResultValue(message.content) },
+						output: { type: "text", value: textValue },
 					},
 				],
 			});
+			// The tool-result `output` channel is text-only on the wire. Re-attach
+			// image payloads as a follow-up user turn (same shape as user
+			// screenshots) so vision-capable models still see the bytes.
+			if (imageBlocks.length > 0) {
+				out.push({
+					role: "user",
+					content: [
+						{ type: "text", text: "Attached image(s) from the tool result(s) above:" },
+						...userContentBlocks(imageBlocks),
+					],
+				});
+			}
 			continue;
 		}
 

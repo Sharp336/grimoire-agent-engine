@@ -15453,7 +15453,7 @@
 				"text",
 				"image"
 			],
-			"reasoning": true,
+			"reasoning": false,
 			"contextWindow": 200000,
 			"maxTokens": 64000,
 			"cost": {
@@ -15788,7 +15788,7 @@
 				"image"
 			],
 			"reasoning": true,
-			"contextWindow": 272000,
+			"contextWindow": 400000,
 			"maxTokens": 64000,
 			"cost": {
 				"input": 2,
@@ -15837,7 +15837,7 @@
 		},
 		"gpt-5.4-mini": {
 			"id": "gpt-5.4-mini",
-			"name": "GPT-5.4 mini",
+			"name": "GPT-5.4 Mini",
 			"api": "command-code",
 			"provider": "command-code",
 			"baseUrl": "https://api.commandcode.ai",
@@ -15890,8 +15890,7 @@
 					"high",
 					"xhigh"
 				]
-			},
-			"contextPromotionTarget": "command-code/gpt-5.4"
+			}
 		},
 		"gpt-5.6-luna": {
 			"id": "gpt-5.6-luna",
@@ -16024,14 +16023,14 @@
 		},
 		"MiniMaxAI/MiniMax-M2.5": {
 			"id": "MiniMaxAI/MiniMax-M2.5",
-			"name": "MiniMax-M2.5",
+			"name": "MiniMax M2.5",
 			"api": "command-code",
 			"provider": "command-code",
 			"baseUrl": "https://api.commandcode.ai",
 			"input": [
 				"text"
 			],
-			"reasoning": true,
+			"reasoning": false,
 			"contextWindow": 200000,
 			"maxTokens": 64000,
 			"cost": {
@@ -16043,14 +16042,14 @@
 		},
 		"MiniMaxAI/MiniMax-M2.7": {
 			"id": "MiniMaxAI/MiniMax-M2.7",
-			"name": "MiniMax-M2.7",
+			"name": "MiniMax M2.7",
 			"api": "command-code",
 			"provider": "command-code",
 			"baseUrl": "https://api.commandcode.ai",
 			"input": [
 				"text"
 			],
-			"reasoning": true,
+			"reasoning": false,
 			"contextWindow": 200000,
 			"maxTokens": 64000,
 			"cost": {
@@ -16062,7 +16061,7 @@
 		},
 		"MiniMaxAI/MiniMax-M3": {
 			"id": "MiniMaxAI/MiniMax-M3",
-			"name": "MiniMax-M3",
+			"name": "MiniMax M3",
 			"api": "command-code",
 			"provider": "command-code",
 			"baseUrl": "https://api.commandcode.ai",
@@ -16110,7 +16109,7 @@
 				"text",
 				"image"
 			],
-			"reasoning": true,
+			"reasoning": false,
 			"contextWindow": 256000,
 			"maxTokens": 64000,
 			"cost": {
@@ -16130,7 +16129,7 @@
 				"text",
 				"image"
 			],
-			"reasoning": true,
+			"reasoning": false,
 			"contextWindow": 256000,
 			"maxTokens": 64000,
 			"cost": {
@@ -16202,7 +16201,7 @@
 		},
 		"nvidia/nemotron-3-ultra-550b-a55b": {
 			"id": "nvidia/nemotron-3-ultra-550b-a55b",
-			"name": "Nemotron 3 Ultra 550B A55B",
+			"name": "Nemotron 3 Ultra",
 			"api": "command-code",
 			"provider": "command-code",
 			"baseUrl": "https://api.commandcode.ai",
@@ -16259,12 +16258,13 @@
 		},
 		"Qwen/Qwen3.6-Plus": {
 			"id": "Qwen/Qwen3.6-Plus",
-			"name": "Qwen3.6 Plus",
+			"name": "Qwen 3.6 Plus",
 			"api": "command-code",
 			"provider": "command-code",
 			"baseUrl": "https://api.commandcode.ai",
 			"input": [
-				"text"
+				"text",
+				"image"
 			],
 			"reasoning": true,
 			"contextWindow": 200000,
@@ -16298,14 +16298,14 @@
 		},
 		"Qwen/Qwen3.7-Max": {
 			"id": "Qwen/Qwen3.7-Max",
-			"name": "Qwen3.7 Max",
+			"name": "Qwen 3.7 Max",
 			"api": "command-code",
 			"provider": "command-code",
 			"baseUrl": "https://api.commandcode.ai",
 			"input": [
 				"text"
 			],
-			"reasoning": false,
+			"reasoning": true,
 			"contextWindow": 1000000,
 			"maxTokens": 64000,
 			"cost": {
@@ -16403,7 +16403,7 @@
 		},
 		"tencent/Hy3": {
 			"id": "tencent/Hy3",
-			"name": "Hy3",
+			"name": "Tencent Hy3 (Free)",
 			"api": "command-code",
 			"provider": "command-code",
 			"baseUrl": "https://api.commandcode.ai",
@@ -16509,7 +16509,7 @@
 		},
 		"xiaomi/mimo-v2.5": {
 			"id": "xiaomi/mimo-v2.5",
-			"name": "MiMo-V2.5",
+			"name": "MiMo V2.5",
 			"api": "command-code",
 			"provider": "command-code",
 			"baseUrl": "https://api.commandcode.ai",
@@ -16517,7 +16517,7 @@
 				"text",
 				"image"
 			],
-			"reasoning": true,
+			"reasoning": false,
 			"contextWindow": 1000000,
 			"maxTokens": 64000,
 			"cost": {
@@ -16529,14 +16529,14 @@
 		},
 		"xiaomi/mimo-v2.5-pro": {
 			"id": "xiaomi/mimo-v2.5-pro",
-			"name": "MiMo-V2.5-Pro",
+			"name": "MiMo V2.5 Pro",
 			"api": "command-code",
 			"provider": "command-code",
 			"baseUrl": "https://api.commandcode.ai",
 			"input": [
 				"text"
 			],
-			"reasoning": true,
+			"reasoning": false,
 			"contextWindow": 1000000,
 			"maxTokens": 64000,
 			"cost": {
@@ -16555,7 +16555,7 @@
 			"input": [
 				"text"
 			],
-			"reasoning": true,
+			"reasoning": false,
 			"contextWindow": 200000,
 			"maxTokens": 64000,
 			"cost": {
@@ -16567,14 +16567,14 @@
 		},
 		"zai-org/GLM-5.1": {
 			"id": "zai-org/GLM-5.1",
-			"name": "GLM 5.1",
+			"name": "GLM-5.1",
 			"api": "command-code",
 			"provider": "command-code",
 			"baseUrl": "https://api.commandcode.ai",
 			"input": [
 				"text"
 			],
-			"reasoning": true,
+			"reasoning": false,
 			"contextWindow": 200000,
 			"maxTokens": 64000,
 			"cost": {
@@ -16586,7 +16586,7 @@
 		},
 		"zai-org/GLM-5.2": {
 			"id": "zai-org/GLM-5.2",
-			"name": "GLM 5.2",
+			"name": "GLM-5.2",
 			"api": "command-code",
 			"provider": "command-code",
 			"baseUrl": "https://api.commandcode.ai",

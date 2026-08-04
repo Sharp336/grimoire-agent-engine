@@ -212,7 +212,11 @@ function applyGlobalModelsDevFallback(
 		if (
 			providerScopedKeys.has(`${model.provider}/${model.id}`) ||
 			model.provider === "devin" ||
-			model.provider === "baseten"
+			model.provider === "baseten" ||
+			// Command Code's static seed is the wire catalog; same-id rows on
+			// models.dev (other providers) must not overwrite authored
+			// reasoning/input/name.
+			model.provider === "command-code"
 		) {
 			return model;
 		}

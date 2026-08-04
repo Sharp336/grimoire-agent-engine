@@ -14,6 +14,7 @@
 
 ### Fixed
 
+- `command-code` tool-result turns now hoist image blocks into a follow-up user message so vision-capable models still receive screenshot/PDF bytes (the tool-result `output` channel stays text-only on the wire).
 - `command-code` requests now match the official CLI: the `x-project-slug`,
   `x-taste-learning` and `x-co-flag` headers are sent (they were missing), the
   envelope's `mode` is omitted on the main agent loop instead of being pinned to

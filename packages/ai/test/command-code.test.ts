@@ -309,6 +309,63 @@ describe("command-code request parity", () => {
 			output: { type: "text", value: "file contents" },
 		});
 	});
+
+	it("hoists tool-result images into a follow-up user turn", async () => {
+		scenario = {
+			kind: "capture",
+			body: `{"type":"text-delta","text":"ok"}\n{"type":"finish","finishReason":"stop"}\n`,
+		};
+		const baseUrl = await startServer();
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_img",
+			toolName: "read",
+			content: [
+				{ type: "text", text: "screenshot captured" },
+				{ type: "image", mimeType: "image/png", data: "AAEC" },
+			],
+			isError: false,
+			timestamp: 2,
+		};
+		const context: Context = {
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", id: "call_img", name: "read", arguments: { path: "shot.png" } }],
+					api: "command-code",
+					provider: "command-code",
+					model: "deepseek/deepseek-v4-flash",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 1,
+				},
+				toolResult,
+				{ role: "user", content: "describe it", timestamp: 3 },
+			],
+		};
+		await collectStream(makeModel(baseUrl), context);
+		const params = lastRequest!.body.params as { messages: Array<Record<string, unknown>> };
+		expect(params.messages.map(message => message.role)).toEqual(["assistant", "tool", "user", "user"]);
+		const toolMessage = params.messages[1] as { content: Array<Record<string, unknown>> };
+		expect(toolMessage.content[0]).toEqual({
+			type: "tool-result",
+			toolCallId: "call_img",
+			toolName: "",
+			output: { type: "text", value: "screenshot captured" },
+		});
+		const hoist = params.messages[2] as { content: Array<Record<string, unknown>> };
+		expect(hoist.content).toEqual([
+			{ type: "text", text: "Attached image(s) from the tool result(s) above:" },
+			{ type: "image", image: "data:image/png;base64,AAEC", mimeType: "image/png" },
+		]);
+	});
 });
 
 describe("command-code stream handling", () => {
