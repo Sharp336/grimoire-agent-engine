@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Restored the fluent `this` return of `Component.setIgnoreTight` (declared as polymorphic `this` on the interface) that was lost when its `any` return type was removed, so consumers chaining or retaining the call keep typechecking.
+
 ## [17.2.5] - 2026-08-03
 
 ### Fixed

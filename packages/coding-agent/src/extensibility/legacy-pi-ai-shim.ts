@@ -39,7 +39,7 @@ import {
 } from "@oh-my-pi/pi-catalog/models";
 import { type TSchema, Type } from "./legacy-typebox";
 
-export interface StringEnumOptions<T extends string> {
+export interface StringEnumOptions<T extends string | number> {
 	description?: string;
 	default?: T;
 	examples?: T[];
@@ -48,7 +48,7 @@ export interface StringEnumOptions<T extends string> {
 
 function stringEnumWireSchema<T extends string | number>(
 	values: readonly T[] | Record<string, T>,
-	options: StringEnumOptions<string> | undefined,
+	options: StringEnumOptions<T> | undefined,
 ) {
 	const enumValues = Array.isArray(values) ? [...values] : Object.values(values);
 	const schema: Record<string, unknown> = {
@@ -66,7 +66,7 @@ function stringEnumWireSchema<T extends string | number>(
 
 export function StringEnum<T extends string | number>(
 	values: readonly T[] | Record<string, T>,
-	options?: StringEnumOptions<string>,
+	options?: StringEnumOptions<T>,
 ): TSchema {
 	const opts = {
 		description: options?.description ?? "Legacy string enum compatibility schema",

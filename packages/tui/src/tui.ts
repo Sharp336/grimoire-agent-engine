@@ -169,8 +169,9 @@ export interface Component {
 	invalidate?(): void;
 	/**
 	 * Optional hook to set whether this component ignores tight layout mode.
+	 * Returns `this` so implementations keep their fluent chaining surface.
 	 */
-	setIgnoreTight?(ignore: boolean): void;
+	setIgnoreTight?(ignore: boolean): this;
 
 	/**
 	 * Optional teardown. Called when the component is permanently removed from

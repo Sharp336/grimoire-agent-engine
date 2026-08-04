@@ -7,6 +7,7 @@ import {
 	parseJsonWithRepair,
 	parseStreamingJson,
 	repairJson,
+	StringEnum,
 	streamSimpleOpenAIResponses,
 } from "@oh-my-pi/pi-coding-agent/extensibility/legacy-pi-ai-shim";
 
@@ -55,6 +56,19 @@ describe("legacy pi-ai shim root exports", () => {
 		expect(parseJsonWithRepair<{ a: number }>("{a: 1,}")).toEqual({ a: 1 });
 		// parseStreamingJson completes a truncated object at the streaming edge.
 		expect(parseStreamingJson<{ a: number }>('{"a": 1')).toEqual({ a: 1 });
+	});
+	it("accepts numeric enums through StringEnumOptions without narrowing the shim surface", () => {
+		// Type-level contract: legacy extensions may declare numeric enums, so
+		// StringEnumOptions must carry the function's `T extends string | number`
+		// instead of hardcoding `string`. `default`/`examples` are typed against
+		// the inferred value type, and the call must compile as written.
+		const schema = StringEnum([1, 2] as const, { default: 1, examples: [2], description: "numeric" });
+		expect(schema).toBeDefined();
+		const parsed = JSON.parse(JSON.stringify(schema));
+		expect(parsed.enum).toEqual([1, 2]);
+		expect(parsed.default).toBe(1);
+		expect(parsed.examples).toEqual([2]);
+		expect(parsed.description).toBe("numeric");
 	});
 	it("maps legacy simple options before streaming OpenAI Responses", async () => {
 		const requests: unknown[] = [];

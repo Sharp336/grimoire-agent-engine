@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, expectTypeOf, it } from "bun:test";
 import { Box } from "../src/components/box";
 import { Editor } from "../src/components/editor";
 import { Markdown } from "../src/components/markdown";
 import { Text } from "../src/components/text";
+import { type Component, Container } from "../src/tui";
 import { setTuiTight } from "../src/utils";
 import { defaultEditorTheme, defaultMarkdownTheme } from "./test-themes";
 
@@ -87,5 +88,30 @@ describe("TUI Tight Layout option", () => {
 		const linesTight = mdComponent.render(15);
 		// It should still have 1 char padding (space before Hello)
 		expect(linesTight[0]!.startsWith(" Hello")).toBe(true);
+	});
+
+	it("keeps setIgnoreTight's fluent `this` return on the Component contract", () => {
+		// Type-level contract: the interface returns polymorphic `this`, so
+		// consumers that chain or retain the result keep typechecking, and each
+		// shipped implementation hands back its own instance.
+		function retained<C extends Component>(component: C): C {
+			return component.setIgnoreTight?.(true) ?? component;
+		}
+
+		const textComponent = new Text("Hello", 1, 0);
+		expectTypeOf(textComponent.setIgnoreTight(true)).toEqualTypeOf<Text>();
+		expect(textComponent.setIgnoreTight(true)).toBe(textComponent);
+
+		const boxComponent = new Box(1, 0);
+		expectTypeOf(boxComponent.setIgnoreTight(true)).toEqualTypeOf<Box>();
+		expect(boxComponent.setIgnoreTight(true)).toBe(boxComponent);
+
+		const mdComponent = new Markdown("Hello", 1, 0, defaultMarkdownTheme);
+		expectTypeOf(mdComponent.setIgnoreTight(true)).toEqualTypeOf<Markdown>();
+		expect(mdComponent.setIgnoreTight(true)).toBe(mdComponent);
+
+		const container = new Container();
+		expectTypeOf(container.setIgnoreTight(true)).toEqualTypeOf<Container>();
+		expect(retained(container)).toBe(container);
 	});
 });

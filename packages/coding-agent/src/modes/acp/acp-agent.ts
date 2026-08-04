@@ -2233,7 +2233,11 @@ export class AcpAgent implements Agent {
 			toolName: message.toolName,
 			isError: message.isError === true,
 			result: {
-				content: Array.isArray(message.content) ? (message.content as AgentToolResult["content"]) : [],
+				content: Array.isArray(message.content)
+					? (message.content as AgentToolResult["content"])
+					: typeof message.content === "string" && message.content.length > 0
+						? [{ type: "text", text: message.content }]
+						: [],
 				details: message.details,
 				...(typeof message.errorMessage === "string" && { errorMessage: message.errorMessage }),
 			},

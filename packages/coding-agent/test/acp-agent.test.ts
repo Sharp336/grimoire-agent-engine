@@ -1560,6 +1560,84 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
+	it("replays stored tool-result string content as ACP tool_call_update text", async () => {
+		const harness = await createHarness();
+		const stored = new FakeAgentSession(harness.cwdA);
+		harness.sessions.push(stored);
+		stored.sessionManager.appendMessage({ role: "user", content: "probe legacy result", timestamp: Date.now() });
+		stored.sessionManager.appendMessage({
+			role: "assistant",
+			content: [
+				{
+					type: "toolCall",
+					id: "toolu_string_content_replay",
+					name: "custom_probe",
+					arguments: { target: "legacy" },
+				},
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: TEST_MODELS[0].id,
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		});
+		// Legacy/imported producers may store a tool result's readable output as
+		// a plain string instead of a content-block array. The JSONL loader
+		// rehydrates entries verbatim (`ReplayableMessage.content` is `unknown`),
+		// so rehydrate the fixture through JSON exactly as the loader does; the
+		// replay path must normalize the string instead of dropping the only
+		// result description.
+		const legacyStringResult = JSON.parse(
+			JSON.stringify({
+				role: "toolResult",
+				toolCallId: "toolu_string_content_replay",
+				toolName: "custom_probe",
+				content: "all probes passed",
+				isError: false,
+				timestamp: Date.now(),
+			}),
+		);
+		stored.sessionManager.appendMessage(legacyStringResult);
+		await stored.sessionManager.ensureOnDisk();
+		await stored.sessionManager.flush();
+
+		await harness.agent.loadSession({
+			sessionId: stored.sessionId,
+			cwd: harness.cwdA,
+			mcpServers: [],
+		});
+
+		const completions = harness.updates
+			.filter(update => update.sessionId === stored.sessionId)
+			.map(notification => notification.update)
+			.filter(
+				update =>
+					"toolCallId" in update &&
+					update.toolCallId === "toolu_string_content_replay" &&
+					update.sessionUpdate === "tool_call_update" &&
+					update.status === "completed",
+			);
+
+		expect(completions).toHaveLength(1);
+		expect(completions[0]).toEqual(
+			expect.objectContaining({
+				content: expect.arrayContaining([
+					{ type: "content", content: { type: "text", text: "all probes passed" } },
+				]),
+			}),
+		);
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
 	it("does not replay silent-abort marker as agent_message_chunk to ACP clients", async () => {
 		const harness = await createHarness();
 		const stored = new FakeAgentSession(harness.cwdA);

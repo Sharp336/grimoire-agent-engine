@@ -185,10 +185,12 @@ class SafeToolRendererComponent implements Component {
 		invalidate.call(this.#component);
 	}
 
-	setIgnoreTight(ignore: boolean): void {
+	setIgnoreTight(ignore: boolean): this {
 		const setIgnoreTight = this.#component.setIgnoreTight;
-		if (setIgnoreTight === undefined) return;
-		setIgnoreTight.call(this.#component, ignore);
+		if (setIgnoreTight !== undefined) {
+			setIgnoreTight.call(this.#component, ignore);
+		}
+		return this;
 	}
 
 	dispose(): void {

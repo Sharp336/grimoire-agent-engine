@@ -6,6 +6,8 @@
 
 - Fixed ACP session replay dropping `errorMessage` from legacy/imported failed tool-result messages, so the readable failure reason now appears in the replayed tool_call_update content.
 - Replaced banned `Parameters<>`/`ReturnType<>` type queries in `TaskTool.renderResult` with concrete named types.
+- Fixed ACP session replay dropping a stored `toolResult` whose `content` is a plain string (legacy/imported sessions): the replay path now normalizes the string into a text content block instead of emitting an empty result, preserving the tool's only result description.
+- Widened the legacy `pi-ai` shim's `StringEnumOptions` to `T extends string | number` and threaded the `StringEnum` value type through it, so numeric legacy enums like `StringEnum([1, 2], { default: 1, examples: [2] })` compile again instead of being rejected by the `StringEnumOptions<string>` annotation introduced with the `any` removal.
 
 ## [17.2.8] - 2026-08-04
 
