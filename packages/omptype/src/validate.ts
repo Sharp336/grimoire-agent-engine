@@ -243,10 +243,6 @@ function objectIndexValidators(ir: ObjectIR, key: PropertyKey): IR[] {
 	return result;
 }
 
-function isObjectExtra(ir: ObjectIR, key: PropertyKey): boolean {
-	return objectIndexValidators(ir, key).length === 0 && !ir.props.some(prop => prop.key === key);
-}
-
 /** Pure predicate used for union-member scanning (no morphs, no errors). */
 function checks(ir: IR, v: unknown): boolean {
 	// Cycle guards are only needed when the subtree can revisit nodes through
@@ -632,9 +628,10 @@ function visitNode(ir: IR, v: unknown, path: PropertyKey[]): unknown {
 			}
 			for (const key in rec) {
 				if (!own.call(rec, key)) continue;
-				if (ir.index !== undefined) {
+				const indexes = objectIndexValidators(ir, key);
+				for (const index of indexes) {
 					path.push(key);
-					const result = visit(ir.index, rec[key], path);
+					const result = visit(index, rec[key], path);
 					path.pop();
 					if (result instanceof OmpErrors) {
 						if (errors) errors.append(result);
@@ -643,21 +640,7 @@ function visitNode(ir: IR, v: unknown, path: PropertyKey[]): unknown {
 						out[key] = result;
 					}
 				}
-				if (ir.patternIndexes !== undefined) {
-					for (const pattern of ir.patternIndexes) {
-						if (!checks(pattern.key, key)) continue;
-						path.push(key);
-						const result = visit(pattern.val, rec[key], path);
-						path.pop();
-						if (result instanceof OmpErrors) {
-							if (errors) errors.append(result);
-							else errors = result;
-						} else if (out) {
-							out[key] = result;
-						}
-					}
-				}
-				if (ir.extras === "reject" && isObjectExtra(ir, key)) {
+				if (ir.extras === "reject" && indexes.length === 0 && !ir.props.some(prop => prop.key === key)) {
 					path.push(key);
 					const error = fail(path, EXTRAS_REJECTED, rec[key]);
 					path.pop();
@@ -667,9 +650,10 @@ function visitNode(ir: IR, v: unknown, path: PropertyKey[]): unknown {
 			}
 			for (const key of Object.getOwnPropertySymbols(rec)) {
 				if (!Object.prototype.propertyIsEnumerable.call(rec, key)) continue;
-				if (ir.symbolIndex !== undefined) {
+				const indexes = objectIndexValidators(ir, key);
+				for (const index of indexes) {
 					path.push(key);
-					const result = visit(ir.symbolIndex, rec[key], path);
+					const result = visit(index, rec[key], path);
 					path.pop();
 					if (result instanceof OmpErrors) {
 						if (errors) errors.append(result);
@@ -677,7 +661,8 @@ function visitNode(ir: IR, v: unknown, path: PropertyKey[]): unknown {
 					} else if (out) {
 						out[key] = result;
 					}
-				} else if (ir.extras === "reject" && isObjectExtra(ir, key)) {
+				}
+				if (ir.extras === "reject" && indexes.length === 0 && !ir.props.some(prop => prop.key === key)) {
 					path.push(key);
 					const error = fail(path, EXTRAS_REJECTED, rec[key]);
 					path.pop();
@@ -1329,7 +1314,7 @@ class Builder {
 				// matching every index, so they delegate to the walker. The emitted
 				// reject loops below rely on that: they classify with a bare
 				// `!declaredCheck` because only the pattern-free case reaches them,
-				// where `isObjectExtra` collapses to exactly that test.
+				// where the index-claimed test collapses to exactly `!declaredCheck`.
 				if (
 					node.patternIndexes !== undefined ||
 					node.symbolIndex !== undefined ||

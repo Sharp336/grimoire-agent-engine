@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { OmpErrors, type Type, type } from "../src";
+import { OmpErrors, scope, type Type, type } from "../src";
 
 /** Call count that guarantees the JIT has kicked in (threshold is 3). */
 const JIT = 5;
@@ -43,5 +43,60 @@ describe("multi-index union fast-path parity", () => {
 		assertStageParity(build, null, true);
 		// "a" matches both; "bad" is unknown but not a number → rejected.
 		assertStageParity(build, { a: "bad" }, false);
+	});
+});
+
+describe("index-key predicate single evaluation", () => {
+	/**
+	 * Build a schema whose pattern-index key is a custom scoped string
+	 * refinement, so the key predicate runs through `objectIndexValidators`.
+	 * The predicate counts its own invocations to prove single evaluation.
+	 */
+	function buildCountedSchema(count: { value: number }, acceptFirst: boolean): Type {
+		const $ = scope({
+			countedKey: [
+				"string",
+				":",
+				(s: string) => {
+					count.value++;
+					return acceptFirst ? count.value === 1 : s.startsWith("f");
+				},
+			],
+		});
+		return $.type({ "[countedKey]": "number", "+": "reject" });
+	}
+
+	it("evaluates a pattern-index key predicate exactly once per key", () => {
+		const count = { value: 0 };
+		const T = buildCountedSchema(count, false);
+		count.value = 0;
+		const out = T({ foo: 1 });
+		expect(out).not.toBeInstanceOf(OmpErrors);
+		// "foo" is the only enumerable own key; the predicate should run once.
+		expect(count.value).toBe(1);
+	});
+
+	it("does not reject a validated property when the predicate is non-idempotent", () => {
+		// The predicate returns true on the first call and false on every
+		// subsequent call.  Double evaluation would cause `isObjectExtra` to
+		// see false on the second call, classify the key as undeclared, and
+		// reject it as extra — even though it was already index-validated.
+		const count = { value: 0 };
+		const T = buildCountedSchema(count, true);
+		count.value = 0;
+		const out = T({ foo: 1 });
+		expect(out).not.toBeInstanceOf(OmpErrors);
+		expect(count.value).toBe(1);
+	});
+
+	it("evaluates the key predicate exactly once per key across JIT stages", () => {
+		const count = { value: 0 };
+		const T = buildCountedSchema(count, false);
+		for (let i = 0; i < JIT; i++) {
+			count.value = 0;
+			const out = T(structuredClone({ foo: 1 }));
+			expect(out).not.toBeInstanceOf(OmpErrors);
+			expect(count.value).toBe(1);
+		}
 	});
 });

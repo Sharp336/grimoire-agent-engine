@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fixed a divergence where the pure-union fast path (`checks()`) applied only the first matching index signature for object keys, while the interpreter's full visit path and the JIT both applied the general index plus every matching pattern index. Multi-index schemas (e.g. `type([{ "[/^f/]": "number", "[/oo$/]": "string" }, "|", "null"])`) now reject consistently across pre-JIT and post-JIT calls.
+- Fixed double evaluation of index-key predicates in the object walker's extras-reject path. A pattern-index key refinement (e.g. a scoped `["string", ":", fn]` key) was invoked once for validation and again inside `isObjectExtra`, so a non-idempotent predicate could reject an already-validated property as undeclared. The walker now computes `objectIndexValidators` once per key and reuses the result for both validation and extras-reject classification.
 
 ## [17.2.8] - 2026-08-04
 
