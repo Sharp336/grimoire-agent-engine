@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
+import { heapStats, memoryUsage } from "bun:jsc";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { heapStats, memoryUsage } from "bun:jsc";
 import { ModelRegistry } from "../src/config/model-registry";
 import { Settings } from "../src/config/settings";
 import { AgentLifecycleManager } from "../src/registry/agent-lifecycle";
@@ -454,10 +454,7 @@ async function main(): Promise<void> {
 		}));
 		await writeJson(path.join(outputDir, "results.json"), resultsSummary);
 		const failed = results.filter(
-			result =>
-				result.exitCode !== 0 ||
-				result.aborted === true ||
-				result.structuredOutput?.status !== "valid",
+			result => result.exitCode !== 0 || result.aborted === true || result.structuredOutput?.status !== "valid",
 		);
 		if (failed.length > 0) throw new Error(`${failed.length}/${options.agentCount} scout runs failed`);
 
