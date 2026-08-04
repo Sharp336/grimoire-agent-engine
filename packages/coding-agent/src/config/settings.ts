@@ -1354,7 +1354,10 @@ export class Settings {
 		const legacyCollapseChangelog = typeof raw.collapseChangelog === "boolean" ? raw.collapseChangelog : undefined;
 		const flatChangelogMode = raw["startup.changelogMode"];
 		const normalizedFlatChangelogMode =
-			flatChangelogMode === "summary" || flatChangelogMode === "expanded" || flatChangelogMode === "hidden"
+			flatChangelogMode === "summary" ||
+			flatChangelogMode === "expanded" ||
+			flatChangelogMode === "crawl" ||
+			flatChangelogMode === "hidden"
 				? flatChangelogMode
 				: undefined;
 		if (legacyCollapseChangelog !== undefined || normalizedFlatChangelogMode !== undefined) {
