@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added saved `/panel` roles. A role declares an independent family-diverse or named-persona lineup; `/panel answer` and `/panel plan` preview the resolved lineup, dispatch isolated read-only participants, and synthesize their labeled results in the primary session.
+
 ## [17.2.8] - 2026-08-04
 
 ### Changed
