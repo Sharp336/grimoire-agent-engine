@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+
 ### Breaking Changes
 
 - Removed the `expandTilde` re-export from the `tools/path-utils` subpath; import it from `@oh-my-pi/pi-utils` instead.

@@ -15,6 +15,9 @@
 
 - Honor the current process `PATH` when caching executable lookups, preventing stale tool paths after environment reloads.
 - Parsed account-cap reset windows such as “Your limit will reset in 13 minutes” so credential backoff honors the provider's full reset duration.
+### Fixed
+
+- `expandTilde()` no longer expands `~\…` on POSIX, where `\` is a valid filename character rather than a path separator. The `~\` form now expands only on Windows; on POSIX it passes through unchanged (resolving relative to the working directory, matching the per-consumer settings helper this replaced). `~` and `~/…` continue to expand on all platforms. Added an injectable `platform` parameter (matching `stripWindowsExtendedLengthPathPrefix`) so the behavior is testable without mutating `process.platform`.
 
 ## [17.2.6] - 2026-08-03
 

@@ -31,8 +31,24 @@ describe("expandTilde", () => {
 		expect(expandTilde("~/x")).toBe(`${os.homedir()}/x`);
 	});
 
-	it("splices the home prefix for ~\\ paths", () => {
-		expect(expandTilde("~\\x")).toBe(`${os.homedir()}\\x`);
+	it("splices the home prefix for ~\\ paths on Windows", () => {
+		expect(expandTilde("~\\x", undefined, "win32")).toBe(`${os.homedir()}\\x`);
+	});
+
+	it("leaves ~\\ paths untouched on POSIX", () => {
+		expect(expandTilde("~\\project", undefined, "linux")).toBe("~\\project");
+		expect(expandTilde("~\\x", undefined, "darwin")).toBe("~\\x");
+	});
+
+	it("expands ~ and ~/x on both POSIX and Windows", () => {
+		expect(expandTilde("~", "/h", "linux")).toBe("/h");
+		expect(expandTilde("~/x", "/h", "linux")).toBe("/h/x");
+		expect(expandTilde("~", "/h", "win32")).toBe("/h");
+		expect(expandTilde("~/x", "/h", "win32")).toBe("/h/x");
+	});
+
+	it("expands ~\\project under home on Windows", () => {
+		expect(expandTilde("~\\project", "/h", "win32")).toBe("/h\\project");
 	});
 
 	it("leaves ~foo untouched", () => {
@@ -42,7 +58,8 @@ describe("expandTilde", () => {
 	it("honors a custom home", () => {
 		expect(expandTilde("~", "/custom/home")).toBe("/custom/home");
 		expect(expandTilde("~/x", "/custom/home")).toBe("/custom/home/x");
-		expect(expandTilde("~\\x", "/custom/home")).toBe("/custom/home\\x");
+		expect(expandTilde("~\\x", "/custom/home", "win32")).toBe("/custom/home\\x");
+		expect(expandTilde("~\\x", "/custom/home", "linux")).toBe("~\\x");
 		expect(expandTilde("~foo", "/custom/home")).toBe("~foo");
 	});
 
@@ -62,6 +79,15 @@ describe("expandTilde lazy home resolution", () => {
 			throw new Error("ENOENT: no such file or directory, uvwasi_getpwuid_r");
 		});
 		expect(expandTilde("plain/path")).toBe("plain/path");
+		expect(homedirSpy).not.toHaveBeenCalled();
+		homedirSpy.mockRestore();
+	});
+
+	it("does not resolve the home directory for ~\\ inputs on POSIX", () => {
+		const homedirSpy = vi.spyOn(os, "homedir").mockImplementation(() => {
+			throw new Error("ENOENT: no such file or directory, uvwasi_getpwuid_r");
+		});
+		expect(expandTilde("~\\project", undefined, "linux")).toBe("~\\project");
 		expect(homedirSpy).not.toHaveBeenCalled();
 		homedirSpy.mockRestore();
 	});

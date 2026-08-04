@@ -33,12 +33,17 @@ export function stripWindowsExtendedLengthPathPrefix(
  * Expand a leading `~` (or `~\` on Windows) to the home directory.
  *
  * Semantics: empty strings and non-`~`-prefixed inputs pass through
- * unchanged; bare `~` returns the home directory; `~/x` and `~\x` splice the
- * home prefix. Other `~`-prefixed forms (e.g. `~foo`) are left untouched.
- * Pass `home` to override the home directory resolution.
+ * unchanged; bare `~` returns the home directory; `~/x` splices the home
+ * prefix on all platforms; `~\x` splices the home prefix only on Windows
+ * (on POSIX, `\` is a valid filename character, not a separator, so `~\x`
+ * is left untouched and resolves relative to the working directory). Other
+ * `~`-prefixed forms (e.g. `~foo`) are left untouched. Pass `home` to
+ * override the home directory resolution. Pass `platform` to override
+ * platform detection (defaults to `process.platform`).
  */
-export function expandTilde(filePath: string, home?: string): string {
-	if (filePath !== "~" && !filePath.startsWith("~/") && !filePath.startsWith("~\\")) {
+export function expandTilde(filePath: string, home?: string, platform: NodeJS.Platform = process.platform): string {
+	const isWindows = platform === "win32";
+	if (filePath !== "~" && !filePath.startsWith("~/") && !(isWindows && filePath.startsWith("~\\"))) {
 		return filePath;
 	}
 	const h = home ?? os.homedir();
