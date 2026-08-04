@@ -78,6 +78,7 @@ test("keeps the routing host class but drops the ZDR URL claim for non-Vercel ba
 	const forgedCompat = {
 		vercelGatewayRouting: routing,
 		isVercelGatewayUrl: true,
+		whenThinking: { isVercelGatewayUrl: true },
 	} as unknown as ModelSpec<"openai-completions">["compat"];
 	const forged = buildOverridden("https://corp-proxy.example/v1", forgedCompat);
 
@@ -90,6 +91,7 @@ test("keeps the routing host class but drops the ZDR URL claim for non-Vercel ba
 	expect(lookalike.compat.isVercelGatewayUrl).toBe(false);
 	expect(insecure.compat.isVercelGatewayUrl).toBe(false);
 	expect(forged.compat.isVercelGatewayUrl).toBe(false);
+	expect(forged.compat.whenThinking?.isVercelGatewayUrl).toBe(false);
 });
 
 test("resolves Responses gateway controls only for the Vercel endpoint", () => {

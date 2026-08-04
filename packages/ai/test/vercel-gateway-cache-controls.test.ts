@@ -3,6 +3,7 @@ import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-comple
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { Context, Model, ModelSpec, VercelGatewayRouting } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { withEnv } from "./helpers";
 
 const context: Context = {
@@ -19,7 +20,12 @@ function abortedSignal(): AbortSignal {
 
 function vercelChatModel(
 	routing?: VercelGatewayRouting,
-	options: { baseUrl?: string; extraBody?: Record<string, unknown> } = {},
+	options: {
+		baseUrl?: string;
+		extraBody?: Record<string, unknown>;
+		reasoning?: boolean;
+		whenThinkingRouting?: VercelGatewayRouting;
+	} = {},
 ): Model<"openai-completions"> {
 	return buildModel({
 		id: "anthropic/claude-sonnet-4.6",
@@ -27,13 +33,21 @@ function vercelChatModel(
 		api: "openai-completions",
 		provider: "vercel-ai-gateway",
 		baseUrl: options.baseUrl ?? "https://ai-gateway.vercel.sh/v1",
-		reasoning: false,
+		reasoning: options.reasoning ?? false,
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 200_000,
 		maxTokens: 16_384,
-		...(routing || options.extraBody
-			? { compat: { vercelGatewayRouting: routing, extraBody: options.extraBody } }
+		...(routing || options.extraBody || options.whenThinkingRouting
+			? {
+					compat: {
+						vercelGatewayRouting: routing,
+						extraBody: options.extraBody,
+						whenThinking: options.whenThinkingRouting
+							? { vercelGatewayRouting: options.whenThinkingRouting }
+							: undefined,
+					},
+				}
 			: {}),
 	} satisfies ModelSpec<"openai-completions">);
 }
@@ -56,7 +70,11 @@ function responsesModel(provider: string, baseUrl: string, routing?: VercelGatew
 
 function captureChatPayload(
 	model: Model<"openai-completions">,
-	options: { cacheRetention?: "long" | "short" | "none"; extraBody?: Record<string, unknown> } = {},
+	options: {
+		cacheRetention?: "long" | "short" | "none";
+		extraBody?: Record<string, unknown>;
+		reasoning?: Effort;
+	} = {},
 ): Promise<Payload> {
 	const { promise, resolve } = Promise.withResolvers<Payload>();
 	streamOpenAICompletions(model, context, {
@@ -222,6 +240,49 @@ describe("Vercel AI Gateway automatic cache controls", () => {
 });
 
 describe("Vercel AI Gateway zero data retention", () => {
+	it("preserves baseline routing when a thinking-specific policy adds an upstream", async () => {
+		const payload = await captureChatPayload(
+			vercelChatModel(
+				{ order: ["anthropic", "bedrock"], caching: "auto", zeroDataRetention: true },
+				{
+					reasoning: true,
+					whenThinkingRouting: { only: ["bedrock"] },
+				},
+			),
+			{ reasoning: Effort.High },
+		);
+
+		expect(payload.providerOptions).toEqual({
+			gateway: {
+				only: ["bedrock"],
+				order: ["anthropic", "bedrock"],
+				caching: "auto",
+				zeroDataRetention: true,
+			},
+		});
+	});
+
+	it("honors an explicit thinking-specific ZDR disable without dropping other baseline routing", async () => {
+		const payload = await captureChatPayload(
+			vercelChatModel(
+				{ order: ["anthropic", "bedrock"], caching: "auto", zeroDataRetention: true },
+				{
+					reasoning: true,
+					whenThinkingRouting: { only: ["bedrock"], zeroDataRetention: false },
+				},
+			),
+			{ reasoning: Effort.High },
+		);
+
+		expect(payload.providerOptions).toEqual({
+			gateway: {
+				only: ["bedrock"],
+				order: ["anthropic", "bedrock"],
+				caching: "auto",
+			},
+		});
+	});
+
 	it("maps zeroDataRetention to the documented Chat and Responses request shapes", async () => {
 		const routing: VercelGatewayRouting = { zeroDataRetention: true };
 		const [chat, responses] = await Promise.all([

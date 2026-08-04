@@ -646,6 +646,14 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 	if (whenThinkingPolicy) {
 		const variant: ResolvedOpenAICompat = { ...compat };
 		applyCompatOverrides(variant, whenThinkingPolicy);
+		if (whenThinkingPolicy.vercelGatewayRouting) {
+			variant.vercelGatewayRouting = {
+				...compat.vercelGatewayRouting,
+				...whenThinkingPolicy.vercelGatewayRouting,
+			};
+		}
+		// The retention gate is resolved from baseUrl, not user-overridable compat.
+		variant.isVercelGatewayUrl = compat.isVercelGatewayUrl;
 		if (whenThinkingPolicy.reasoningDisableMode === undefined) {
 			variant.reasoningDisableMode = resolveReasoningDisableMode(variant.thinkingFormat);
 		}
