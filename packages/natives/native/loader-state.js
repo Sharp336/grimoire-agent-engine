@@ -606,8 +606,9 @@ export function validateLoadedBindings(ctx, bindings, candidate) {
 	// `node_modules` install or a compiled bundle) the local `.node` only gains
 	// the renamed sentinel after `bun --cwd=packages/natives run build`. Skip
 	// validation there so a stale post-pull dev tree boots while the rebuild
-	// completes; install and compiled-binary paths still validate.
-	if (ctx.isWorkspaceLoad) return;
+	// completes. Install and compiled-binary paths validate unless the install
+	// smoke explicitly reuses a published release addon.
+	if (ctx.isWorkspaceLoad || ctx.allowReleaseAddon) return;
 	if (typeof bindings[ctx.versionSentinelExport] === "function") return;
 
 	// The expected sentinel is missing. Distinguish two failure modes by the
@@ -722,6 +723,8 @@ export function initLoaderContext(overrides = {}) {
 			env: process.env,
 			importMetaUrl: import.meta.url,
 		});
+	const allowReleaseAddon =
+		isCompiledBinary && process.env.OMP_INSTALL_TEST_ALLOW_RELEASE_NATIVE_ADDON === "1";
 	const normalizedNativeDir = platform === "win32" ? nativeDir.toLowerCase() : nativeDir;
 	const isWorkspaceLoad =
 		!isCompiledBinary &&
@@ -777,6 +780,7 @@ export function initLoaderContext(overrides = {}) {
 		candidates,
 		versionSentinelExport,
 		isWorkspaceLoad,
+		allowReleaseAddon,
 		nativesDir,
 	};
 }
