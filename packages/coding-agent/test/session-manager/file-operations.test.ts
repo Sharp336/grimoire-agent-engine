@@ -157,6 +157,85 @@ describe("resolveResumableSession", () => {
 	});
 });
 
+describe("resolveResumableSession across profiles", () => {
+	let testAgentDir: string;
+	let foreignRoot: string;
+	let foreignProjectDir: string;
+	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
+
+	beforeEach(() => {
+		// Point the active profile at an empty store so the default scan misses.
+		testAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-active-profile-"));
+		setAgentDir(testAgentDir);
+		// A separate tree standing in for another profile's sessions root.
+		foreignRoot = fs.mkdtempSync(path.join(os.tmpdir(), "omp-foreign-profile-"));
+		foreignProjectDir = path.join(foreignRoot, "-tmp-project");
+		fs.mkdirSync(foreignProjectDir, { recursive: true });
+	});
+
+	afterEach(() => {
+		if (originalAgentDir) {
+			setAgentDir(originalAgentDir);
+		} else {
+			setAgentDir(fallbackAgentDir);
+			delete process.env.PI_CODING_AGENT_DIR;
+		}
+		removeSyncWithRetries(testAgentDir);
+		removeSyncWithRetries(foreignRoot);
+	});
+
+	function writeForeignSession(fileName: string, headerCwd: string, id: string): string {
+		const filePath = path.join(foreignProjectDir, fileName);
+		fs.writeFileSync(
+			filePath,
+			`${[
+				JSON.stringify({ type: "session", id, timestamp: "2025-01-01T00:00:00Z", cwd: headerCwd }),
+				JSON.stringify({
+					type: "message",
+					id: "msg-1",
+					parentId: null,
+					timestamp: "2025-01-01T00:00:01Z",
+					message: { role: "user", content: "hello", timestamp: 1 },
+				}),
+			].join("\n")}\n`,
+		);
+		return filePath;
+	}
+
+	it("does not resolve a foreign-profile session without sessionsRoot", async () => {
+		writeForeignSession("2025-01-01_cross.jsonl", "/tmp/project", "crossabcd");
+
+		const match = await resolveResumableSession("crossabcd", "/tmp/project");
+
+		expect(match).toBeUndefined();
+	});
+
+	it("resolves a foreign-profile session when sessionsRoot targets that profile", async () => {
+		const filePath = writeForeignSession("2025-01-01_cross.jsonl", "/tmp/project", "crossabcd");
+
+		const match = await resolveResumableSession("crossabcd", "/tmp/project", undefined, {
+			sessionsRoot: foreignRoot,
+		});
+
+		expect(match?.session.id).toBe("crossabcd");
+		expect(match?.session.path).toBe(filePath);
+	});
+
+	it("does not create or mutate the foreign profile's tree on lookup", async () => {
+		writeForeignSession("2025-01-01_cross.jsonl", "/tmp/project", "crossabcd");
+		const before = fs.readdirSync(foreignRoot).sort();
+
+		// A miss must not ensureDir/migrate a cwd-scoped directory in the foreign tree.
+		const miss = await resolveResumableSession("nomatch", "/tmp/some-other-cwd", undefined, {
+			sessionsRoot: foreignRoot,
+		});
+
+		expect(miss).toBeUndefined();
+		expect(fs.readdirSync(foreignRoot).sort()).toEqual(before);
+	});
+});
+
 describe("SessionManager temp cwd session dirs", () => {
 	let testAgentDir: string;
 	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;

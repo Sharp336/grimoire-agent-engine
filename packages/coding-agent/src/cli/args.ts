@@ -56,6 +56,12 @@ export interface Args {
 	mode?: Mode;
 	noSession?: boolean;
 	sessionDir?: string;
+	/**
+	 * Profile whose session store the `--resume`/`--fork` target is resolved
+	 * from, independent of the active `--profile`. Lets a session created under
+	 * one profile be resumed while running another profile's config.
+	 */
+	sessionProfile?: string;
 	providerSessionId?: string;
 	providerPromptCacheKey?: string;
 	fork?: string;

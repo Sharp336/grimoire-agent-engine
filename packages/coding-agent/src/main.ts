@@ -13,6 +13,7 @@ import {
 	$env,
 	directoryExists,
 	getLogPath,
+	getProfileSessionsDir,
 	getProjectDir,
 	logger,
 	normalizePathForComparison,
@@ -719,6 +720,26 @@ export async function createSessionManager(
 	activeSettings: Settings = settings,
 	askToMoveSession: SessionPrompt = promptMoveSession,
 ): Promise<SessionManager | undefined> {
+	// `--session-profile` resolves the resume/fork target from another profile's
+	// session store while this process keeps running the active profile's config.
+	// The session opens in place (its own profile's tree); only lookup is
+	// redirected. Empty when unset, so resolution falls back to the active profile.
+	const sessionProfileRoot = parsed.sessionProfile ? getProfileSessionsDir(parsed.sessionProfile) : undefined;
+	if (parsed.sessionProfile) {
+		const target =
+			typeof parsed.resume === "string" ? parsed.resume : typeof parsed.fork === "string" ? parsed.fork : undefined;
+		if (target === undefined) {
+			throw new SessionResolutionError(
+				"--session-profile needs a target session; pass --resume <id> or --fork <id> to resolve from that profile.",
+			);
+		}
+		if (target.includes("/") || target.includes("\\") || target.endsWith(".jsonl")) {
+			throw new SessionResolutionError(
+				"--session-profile expects a session id, not a path; a path already names a specific file. Drop --session-profile to resume a path directly.",
+			);
+		}
+	}
+	const resumeOptions = { sessionsRoot: sessionProfileRoot };
 	if (parsed.fork) {
 		if (parsed.noSession) {
 			throw new SessionResolutionError("--fork requires session persistence");
@@ -727,7 +748,7 @@ export async function createSessionManager(
 		if (forkSource.includes("/") || forkSource.includes("\\") || forkSource.endsWith(".jsonl")) {
 			return await SessionManager.forkFrom(forkSource, cwd, parsed.sessionDir);
 		}
-		const match = await resolveResumableSession(forkSource, cwd, parsed.sessionDir);
+		const match = await resolveResumableSession(forkSource, cwd, parsed.sessionDir, resumeOptions);
 		if (!match) {
 			throw new SessionResolutionError(
 				`Session "${forkSource}" not found.`,
@@ -747,7 +768,7 @@ export async function createSessionManager(
 		if (sessionArg.includes("/") || sessionArg.includes("\\") || sessionArg.endsWith(".jsonl")) {
 			return await SessionManager.open(sessionArg, parsed.sessionDir);
 		}
-		const match = await resolveResumableSession(sessionArg, cwd, parsed.sessionDir);
+		const match = await resolveResumableSession(sessionArg, cwd, parsed.sessionDir, resumeOptions);
 		if (!match) {
 			throw new SessionResolutionError(
 				`Session "${sessionArg}" not found.`,
