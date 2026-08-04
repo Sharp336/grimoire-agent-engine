@@ -47,7 +47,7 @@ export function PathText({
 	}
 	return (
 		<span className="tv-path">
-			{shortenPath(path)}
+			{path.includes("://") ? path : shortenPath(path)}
 			{range && <span className="tv-lines">{range}</span>}
 			{sel && <span className="tv-lines">:{sel}</span>}
 		</span>

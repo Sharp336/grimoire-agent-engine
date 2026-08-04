@@ -8,7 +8,9 @@ function Summary({ args, result }: ToolRenderProps): ReactNode {
 	const rec = detailsRecord(result);
 	const target = str(args.path) ?? str(args.url) ?? (rec ? str(rec.imagePath) : null);
 	if (target === null) return <InvalidArg what="image path" />;
-	return <span>{truncate(shortenPath(target))}</span>;
+	// URLs (args.url) must not go through shortenPath — it splits on "/" and middle-elides.
+	const display = target.includes("://") ? target : shortenPath(target);
+	return <span>{truncate(display)}</span>;
 }
 
 function Body({ args, result }: ToolRenderProps): ReactNode {

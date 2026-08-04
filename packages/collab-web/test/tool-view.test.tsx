@@ -152,3 +152,20 @@ describe("ToolView xd:// dispatches", () => {
 		expect(html).not.toContain("tv-out-title");
 	});
 });
+
+describe("ToolView browser URLs", () => {
+	it("renders browser tool URLs intact without path-shortening", () => {
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="browser"
+				defaultOpen
+				args={{ action: "open", url: "https://example.com/a/b/c" }}
+				result={{ content: [] }}
+			/>,
+		);
+
+		// Scheme + host must survive — shortenPath would have produced "https:/…/b/c".
+		expect(html).toContain("https://example.com");
+		expect(html).not.toContain("…/b/c");
+	});
+});

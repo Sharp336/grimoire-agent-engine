@@ -63,7 +63,7 @@ function Summary({ args, result }: ToolRenderProps): ReactNode {
 			<Badge tone={actionTone(action)}>{action}</Badge>
 			<span>{closeAll ? "all tabs" : tab}</span>
 			{args.kill === true && <Badge tone="err">kill</Badge>}
-			{url && <span className="tv-faint">{truncate(shortenPath(url), 72)}</span>}
+			{url && <span className="tv-faint">{truncate(url, 72)}</span>}
 		</>
 	);
 }
@@ -84,7 +84,7 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 		<>
 			<span className="tv-badges">
 				{tab !== null && <Badge>tab {tab}</Badge>}
-				{url && <Badge tone="accent">{truncate(shortenPath(url), 120)}</Badge>}
+				{url && <Badge tone="accent">{truncate(url, 120)}</Badge>}
 				{browserDesc && <Badge>{browserDesc}</Badge>}
 				{app?.target && <Badge>target {app.target}</Badge>}
 				{args.all === true && <Badge tone="warn">all</Badge>}

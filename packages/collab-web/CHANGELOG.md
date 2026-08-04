@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Tool renderers now use the canonical home-relative middle-elided path format (matching `shortenPath` in `lib/format.ts`) for filesystem paths, unifying summary and body display across all tool cards.
+
+### Fixed
+
+- Stopped path-shortening URLs in the `browser` and `inspect_image` tool renderers; URLs are now rendered intact (truncated only) instead of being split on `/` and middle-elided.
+
 ## [17.2.2] - 2026-07-31
 
 ### Fixed
