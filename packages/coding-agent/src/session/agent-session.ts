@@ -6572,6 +6572,23 @@ export class AgentSession {
 		if (agent.availability === "subagent") {
 			throw new Error(`Agent "${agent.name}" is subagent-only and cannot be selected as main persona.`);
 		}
+		// Enforce the switch invariant at this boundary, not just in the slash
+		// command: SDK/extension code can call this method directly, and
+		// applying a persona while a turn is in flight (or while a mode still
+		// depends on its own tool overlay) would remove required mode tools or
+		// mutate the active request mid-stream.
+		if (this.isStreaming) {
+			throw new Error("Cannot switch agent while streaming.");
+		}
+		if (this.getPlanModeState()?.enabled) {
+			throw new Error("Cannot switch agent during plan mode. Exit plan mode first.");
+		}
+		if (this.getGoalModeState()?.enabled) {
+			throw new Error("Cannot switch agent during goal mode. Exit goal mode first.");
+		}
+		if (this.getVibeModeState()?.enabled) {
+			throw new Error("Cannot switch agent during vibe mode. Exit vibe mode first.");
+		}
 		const policy = resolveAgentSessionPolicy(agent);
 		const previousPersona = this.#agentPersona;
 		const previousOverlay = this.#agentToolOverlay;

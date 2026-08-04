@@ -676,6 +676,75 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("rejects a persona switch while the session is streaming", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession(baseOptions(tempDir));
+		try {
+			(session.agent.state as { isStreaming: boolean }).isStreaming = true;
+			await expect(
+				session.switchAgentPersona({
+					name: "streaming-target",
+					description: "Target persona",
+					systemPrompt: "",
+					source: "project" as const,
+				}),
+			).rejects.toThrow("Cannot switch agent while streaming.");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("rejects a persona switch during plan, goal, and vibe mode without mutating session state", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession(baseOptions(tempDir));
+		try {
+			const personaBefore = session.agentPersona;
+			const toolsBefore = session.getEnabledToolNames();
+			const persona = {
+				name: "mode-target",
+				description: "Target persona",
+				systemPrompt: "",
+				source: "project" as const,
+			};
+			const cases: Array<[() => void, RegExp]> = [
+				[
+					() => session.setPlanModeState({ enabled: true, planFilePath: "/tmp/plan.md" }),
+					/Cannot switch agent during plan mode\./,
+				],
+				[
+					() =>
+						session.setGoalModeState({
+							enabled: true,
+							mode: "active",
+							goal: {
+								id: "g",
+								objective: "test",
+								status: "active",
+								tokensUsed: 0,
+								timeUsedSeconds: 0,
+								createdAt: 0,
+								updatedAt: 0,
+							},
+						}),
+					/Cannot switch agent during goal mode\./,
+				],
+				[() => session.setVibeModeState({ enabled: true }), /Cannot switch agent during vibe mode\./],
+			];
+			for (const [enable, message] of cases) {
+				enable();
+				await expect(session.switchAgentPersona(persona)).rejects.toThrow(message);
+				// The rejected switch must not have mutated persona/tools.
+				expect(session.agentPersona).toBe(personaBefore);
+				expect(session.getEnabledToolNames()).toEqual(toolsBefore);
+				session.setPlanModeState(undefined);
+				session.setGoalModeState(undefined);
+				session.setVibeModeState(undefined);
+			}
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("keeps explicit CLI tool/model/thinking selections across a persona switch", async () => {
 		const tempDir = makeTempDir();
 		// A reasoning-capable model so the thinking-level assertion is meaningful:

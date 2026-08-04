@@ -981,6 +981,15 @@ export async function buildSessionOptions(
 	// createAgentSession's post-extension re-resolution (issue #6694); the
 	// scoped thinking-level seed below must be deferred along with the model.
 	let deferredDefaultRole = false;
+	// True when the persona's own model pattern could not resolve before
+	// extensions register (provider/model shipped by an extension) and the
+	// startup scope is settings-derived: `options.model` is left unset so
+	// createAgentSession's post-extension deferred-model block retries the
+	// patterns (sdk.ts:1408) instead of pinning the remembered/scoped fallback
+	// and blocking that retry. Under an explicit CLI `--models` scope deferral
+	// would let the persona model escape the allow-list (createAgentSession
+	// never sees CLI `--models`), so the first scoped model is pinned there.
+	let personaDeferred = false;
 	if (parsed.model) {
 		options.cliModelLocked = true;
 		const resolved = resolveCliModel({
@@ -1032,6 +1041,10 @@ export async function buildSessionOptions(
 				if (resolved.thinkingLevel && !agentPolicy.thinkingLevel) {
 					options.thinkingLevel = resolved.thinkingLevel;
 				}
+			} else {
+				// Unresolved before extensions register: defer (settings-derived
+				// scope only; an explicit CLI scope is pinned below).
+				personaDeferred = true;
 			}
 			if (resolved.warning) {
 				process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}
@@ -1039,7 +1052,7 @@ export async function buildSessionOptions(
 			}
 		}
 		const remembered = activeSettings.getModelRole("default");
-		if (!options.model && remembered) {
+		if (!options.model && !personaDeferred && remembered) {
 			const rememberedSpec = resolveModelRoleValue(
 				remembered,
 				scopedModels.map(scopedModel => scopedModel.model),
@@ -1075,9 +1088,13 @@ export async function buildSessionOptions(
 		// Defer ONLY for a settings-derived scope: createAgentSession re-resolves
 		// against `settings.enabledModels` and never sees CLI `--models`, so
 		// deferring under an explicit CLI scope would let the saved default
-		// escape it — keep pinning the first scoped model there.
-		deferredDefaultRole = !options.model && Boolean(remembered) && !((parsed.models?.length ?? 0) > 0);
-		if (!options.model && !deferredDefaultRole) options.model = scopedModels[0].model;
+		// escape it — keep pinning the first scoped model there. A deferred
+		// PERSONA model defers under either scope: the persona is an explicit
+		// selection like --model (whose deferral is scope-agnostic), and the
+		// SDK's persona deferral block (sdk.ts:1408) is the canonical mechanism.
+		deferredDefaultRole =
+			!options.model && !personaDeferred && Boolean(remembered) && !((parsed.models?.length ?? 0) > 0);
+		if (!options.model && !personaDeferred && !deferredDefaultRole) options.model = scopedModels[0].model;
 	} else if (agentPolicy?.modelPatterns && agentPolicy.modelPatterns.length > 0 && !agentRehydratedFromContext) {
 		const resolved = resolveModelOverride(agentPolicy.modelPatterns, modelRegistry, activeSettings);
 		if (resolved.model) {
