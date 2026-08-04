@@ -87,14 +87,28 @@ const MCP_CALL_TIMEOUT_MS = 60_000;
  * agent is driven to one forced final `yield` so partial findings come back
  * as a real report; only if it still refuses to yield within
  * {@link BUDGET_STOP_GRACE_REQUESTS} more requests is the run hard-aborted.
- * The `default` key applies to agents without an explicit entry and can be
- * overridden via the `task.softRequestBudget` setting (0 disables the guard).
+ * Entries are ceilings, not fixed values: the `default` key applies to agents
+ * without an explicit entry, and the `task.softRequestBudget` setting can only
+ * lower an agent's budget, never raise it above its bundled entry (0 disables
+ * the guard entirely).
  */
 export const SOFT_REQUEST_BUDGET: Record<string, number> = {
 	scout: 100,
 	sonic: 100,
 	default: 200,
 };
+
+/**
+ * Resolves the effective soft request budget for an agent. The configured
+ * `task.softRequestBudget` and the agent's bundled entry are both upper
+ * bounds, so the tighter one wins; a configured budget of 0 disables the
+ * guard regardless of the bundled entry.
+ */
+export function resolveSoftRequestBudget(agentName: string, configuredBudget: number): number {
+	const normalized = Math.max(0, Math.trunc(configuredBudget));
+	if (normalized === 0) return 0;
+	return Math.min(normalized, SOFT_REQUEST_BUDGET[agentName] ?? normalized);
+}
 
 /** Extra requests allowed after a budget stop for the forced yield to land before the run is hard-aborted. */
 export const BUDGET_STOP_GRACE_REQUESTS = 5;
@@ -292,6 +306,8 @@ export interface ExecutorOptions {
 	cwd: string;
 	/** Additional workspace directories to seed on the subagent session (multi-root). */
 	additionalDirectories?: string[];
+	/** Exact provider credential resolver inherited from the parent session. */
+	getApiKey?: CreateAgentSessionOptions["getApiKey"];
 	worktree?: string;
 	agent: AgentDefinition;
 	task: string;
@@ -2184,6 +2200,135 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	};
 }
 
+/** Inputs for {@link attachIrcWakeTurnMonitor}. */
+export interface IrcWakeTurnMonitorOptions {
+	/** Registry id of the kept-alive subagent whose autonomous IRC wake turns are monitored. */
+	id: string;
+	index?: number;
+	agent: AgentDefinition;
+	description?: string;
+	modelOverride?: string | string[];
+	eventBus?: EventBus;
+	parentToolCallId?: string;
+	/** Fallback session file when the registry ref carries none. */
+	sessionFile?: string;
+	maxRuntimeMs?: number;
+	outputSchema?: unknown;
+	outputSchemaMode?: StructuredSubagentSchemaMode;
+	outputSchemaSource?: StructuredSubagentSchemaSource;
+	artifactsDir?: string;
+}
+
+/**
+ * Bracket a kept-alive subagent's autonomous IRC wake turns with a task run
+ * monitor so RPC/collab subscribers see the same `subagent_lifecycle` /
+ * `subagent_progress` frames a first run emits. Shared by the live executor
+ * reviver and the persisted cold-revive path so a resumed process's parked
+ * subagents are not blind spots. The observer runs after the session has
+ * flushed its post-prompt settle (see {@link AgentSession.setIrcWakeTurnObserver}).
+ */
+export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWakeTurnMonitorOptions): void {
+	const { id, agent } = options;
+	const index = options.index ?? 0;
+	const maxRuntimeMs = options.maxRuntimeMs ?? 0;
+	session.setIrcWakeTurnObserver(records => {
+		const ircTask =
+			records
+				.map(record => {
+					const body =
+						record.details && typeof record.details === "object"
+							? Reflect.get(record.details, "message")
+							: undefined;
+					return typeof body === "string" ? body : record.content;
+				})
+				.filter(Boolean)
+				.join("\n\n") || "IRC follow-up";
+		const turnStartTime = Date.now();
+		const sessionFile = AgentRegistry.global().get(id)?.sessionFile ?? options.sessionFile ?? undefined;
+		const turnMonitor = createSubagentRunMonitor({
+			index,
+			id,
+			agent,
+			task: ircTask,
+			description: options.description,
+			modelOverride: options.modelOverride,
+			eventBus: options.eventBus,
+			parentToolCallId: options.parentToolCallId,
+			detached: true,
+			sessionFile,
+			softRequestBudget: 0,
+			softRequestBudgetNotice: false,
+			maxRuntimeMs,
+		});
+
+		if (options.eventBus) {
+			options.eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+				id,
+				agent: agent.name,
+				parentToolCallId: options.parentToolCallId,
+				detached: true,
+				agentSource: agent.source,
+				description: options.description,
+				status: "started",
+				sessionFile,
+				index,
+			});
+		}
+
+		turnMonitor.setActiveSession(session);
+		const unsubscribeTurn = turnMonitor.attach(session);
+		return async turnError => {
+			unsubscribeTurn();
+			const activeSession = turnMonitor.takeActiveSession();
+			if (activeSession) turnMonitor.captureSalvage(activeSession);
+			const lastAssistant = session.getLastAssistantMessage();
+			const yielded = turnMonitor.yieldCalled();
+			const runtimeLimitExceeded = turnMonitor.runtimeLimitExceeded();
+			const aborted = runtimeLimitExceeded || (lastAssistant?.stopReason === "aborted" && !yielded);
+			const error =
+				lastAssistant?.stopReason === "error"
+					? lastAssistant.errorMessage || "Subagent failed"
+					: turnError !== undefined && !yielded
+						? turnError instanceof Error
+							? turnError.stack || turnError.message
+							: String(turnError)
+						: undefined;
+			turnMonitor.finish();
+			try {
+				await finalizeRunResult({
+					monitor: turnMonitor,
+					done: {
+						exitCode: aborted || error ? 1 : 0,
+						error,
+						aborted,
+						abortReason: aborted ? turnMonitor.resolveAbortReasonText() : undefined,
+						durationMs: Date.now() - turnStartTime,
+					},
+					index,
+					id,
+					agent,
+					task: ircTask,
+					modelOverride: options.modelOverride,
+					outputSchema: options.outputSchema,
+					outputSchemaMode: options.outputSchemaMode,
+					outputSchemaSource: options.outputSchemaSource,
+					artifactsDir: options.artifactsDir,
+					eventBus: options.eventBus,
+					parentToolCallId: options.parentToolCallId,
+					detached: true,
+					sessionFile,
+					startTime: turnStartTime,
+				});
+			} catch (finalizeError) {
+				logger.warn("IRC subagent turn finalization failed", {
+					id,
+					error: finalizeError instanceof Error ? finalizeError.message : String(finalizeError),
+				});
+			}
+		};
+	});
+}
+
 /**
  * Settle a subagent's registry lifecycle after a run: terminal teardown for
  * hard aborts, unregister for one-shot helpers, park for isolated runs, and
@@ -2219,7 +2364,14 @@ export async function finalizeSubagentLifecycle(args: {
 	const resumableAbort =
 		args.abortKind === "budget" && args.keepAlive && !args.isolated && args.reviveSession !== null;
 	if (args.aborted && !resumableAbort) {
-		if (ref && ownsRef) registry.setStatus(args.id, "aborted", ref);
+		if (ref && ownsRef) {
+			// Terminal hard kill: mark `aborted` and detach the session before
+			// disposing so the ref satisfies the AgentRef invariant (session null
+			// when aborted) — ensureLive/hub focus must treat it as terminal, never
+			// route into the disposed session.
+			registry.setStatus(args.id, "aborted", ref);
+			registry.detachSession(args.id, ref);
+		}
 		await disposeSession();
 		return;
 	}
@@ -2446,8 +2598,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		0,
 		Math.trunc(Number(settings.get("task.softRequestBudget") ?? SOFT_REQUEST_BUDGET.default) || 0),
 	);
-	const softRequestBudget =
-		configuredDefaultBudget === 0 ? 0 : (SOFT_REQUEST_BUDGET[agent.name] ?? configuredDefaultBudget);
+	const softRequestBudget = resolveSoftRequestBudget(agent.name, configuredDefaultBudget);
 	const softRequestBudgetNotice = settings.get("task.softRequestBudgetNotice") ?? false;
 	const parentDepth = options.taskDepth ?? 0;
 	const childDepth = parentDepth + 1;
@@ -2529,6 +2680,23 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 		});
 	};
+	const installIrcWakeTurnMonitor = (target: AgentSession): void => {
+		attachIrcWakeTurnMonitor(target, {
+			id,
+			index,
+			agent,
+			description: options.description,
+			modelOverride,
+			eventBus: options.eventBus,
+			parentToolCallId: options.parentToolCallId,
+			sessionFile: subtaskSessionFile,
+			maxRuntimeMs,
+			outputSchema,
+			outputSchemaMode: options.outputSchemaMode,
+			outputSchemaSource: options.outputSchemaSource,
+			artifactsDir: options.artifactsDir,
+		});
+	};
 
 	const runSubagent = async (): Promise<{
 		exitCode: number;
@@ -2589,7 +2757,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 			checkAbort();
 			if (!registryFromParent) {
-				await awaitAbortable(modelRegistry.refresh());
+				modelRegistry.refreshInBackground();
 			} else {
 				logger.debug("runSubagent: reusing parent modelRegistry; skipping refresh");
 			}
@@ -2670,6 +2838,16 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const effectiveThinkingLevel =
 				effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : (thinkingLevel ?? resolvedThinkingLevel));
 			resolvedAt = performance.now();
+			const effectiveCwd = worktree ?? cwd;
+			const sessionManagerPromise = sessionFile
+				? SessionManager.open(sessionFile, undefined, undefined, {
+						initialCwd: effectiveCwd,
+						suppressBreadcrumb: true,
+					})
+				: Promise.resolve(SessionManager.inMemory(effectiveCwd));
+			// Setup below can fail before this promise's consumption boundary.
+			// Observe rejection immediately while preserving it for the later await.
+			sessionManagerPromise.catch(() => {});
 			// Per-agent prewalk: the agent definition's `prewalk` frontmatter or the
 			// `task.agentPrewalk` settings override hands the subagent off to a
 			// fast/cheap target at its first edit/write — the same mechanism as the
@@ -2682,6 +2860,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				agentPrewalk: resolveAgentPrewalkDefault(agent, settings.get("task.prewalk")),
 			});
 			if (prewalkPattern) {
+				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
 				const resolvedPrewalk = resolveModelOverride([prewalkPattern], modelRegistry, settings);
 				const target = resolvedPrewalk.model;
 				if (!target || !modelRegistry.hasConfiguredAuth(target)) {
@@ -2702,20 +2881,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					prewalk = { target, thinkingLevel: resolvedPrewalk.thinkingLevel };
 				}
 			}
-
-			const effectiveCwd = worktree ?? cwd;
-			const sessionManager = sessionFile
-				? await awaitAbortable(
-						SessionManager.open(sessionFile, undefined, undefined, {
-							initialCwd: effectiveCwd,
-							suppressBreadcrumb: true,
-						}),
-					)
-				: SessionManager.inMemory(effectiveCwd);
-			if (options.parentArtifactManager) {
-				sessionManager.adoptArtifactManager(options.parentArtifactManager);
-			}
-			sessionOpenedAt = performance.now();
 
 			const restrictToolNames = options.restrictToolNames === true;
 			const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
@@ -2770,6 +2935,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				additionalDirectories: worktree !== undefined ? undefined : options.additionalDirectories,
 				authStorage,
 				modelRegistry,
+				getApiKey: options.getApiKey,
 				settings: subagentSettings,
 				model,
 				modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
@@ -2835,6 +3001,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				},
 			});
 
+			const sessionManager = await awaitAbortable(sessionManagerPromise);
+			if (options.parentArtifactManager) {
+				sessionManager.adoptArtifactManager(options.parentArtifactManager);
+			}
+			sessionOpenedAt = performance.now();
+
 			const sessionPromise = createAgentSession(buildSubagentSessionOptions(sessionManager, null));
 			let session: AgentSession;
 			try {
@@ -2866,6 +3038,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						buildSubagentSessionOptions(reopened, expectedAgentRef),
 					);
 					installRegistryStatusSync(revived);
+					installIrcWakeTurnMonitor(revived);
 					return revived;
 				};
 			}
@@ -3037,6 +3210,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const session = monitor.takeActiveSession();
 			if (session) {
 				monitor.captureSalvage(session);
+				if (options.keepAlive !== false && worktree === undefined) {
+					installIrcWakeTurnMonitor(session);
+				}
 				await finalizeSubagentLifecycle({
 					id,
 					session,

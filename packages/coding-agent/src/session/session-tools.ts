@@ -1,6 +1,6 @@
 import type { Agent, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
-import { logger, prompt, stringProperty } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt, stringProperty } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../capability";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelString } from "../config/model-resolver";
@@ -72,7 +72,10 @@ interface SessionToolsOptions {
 	builtInToolNames?: Iterable<string>;
 	presentationPinnedToolNames?: ReadonlySet<string>;
 	ensureWriteRegistered?: () => Promise<boolean>;
-	rebuildSystemPrompt?: (toolNames: string[], tools: Map<string, AgentTool>) => Promise<{ systemPrompt: string[] }>;
+	rebuildSystemPrompt?: (
+		toolNames: string[],
+		tools: Map<string, AgentTool>,
+	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
 	getLocalCalendarDate?: () => string;
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
 	xdev?: XdevState;
@@ -159,6 +162,18 @@ export function projectMountedMCPXdevGuidance(routes: Iterable<MountedMCPToolRou
 
 const XDEV_MOUNT_NOTICE_MESSAGE_TYPE = "xdev-mount-notice";
 
+/**
+ * Structured payload persisted on each {@link XDEV_MOUNT_NOTICE_MESSAGE_TYPE}
+ * custom message. Lets a resumed session reconstruct which dynamic devices the
+ * model has already been told about, so reconnecting hosts do not re-announce
+ * (and re-splice a redundant developer message that busts the provider
+ * prompt-cache prefix).
+ */
+interface XdevMountNoticeDetails {
+	added: string[];
+	removed: string[];
+}
+
 /** Owns tool registration, presentation, prompt rebuilding, skills, and permissions. */
 export class SessionTools {
 	readonly #host: SessionToolsHost;
@@ -172,10 +187,26 @@ export class SessionTools {
 	#rpcHostToolNames = new Set<string>();
 	#xdev: XdevState | undefined;
 	#pendingXdevMountDelta: { added: Set<string>; removed: Set<string> } | undefined;
+	/**
+	 * Dynamic (`xd://`) devices the model has already been told are mounted.
+	 * Seeded lazily from persisted history on resume (see
+	 * {@link #ensureAnnouncedMountsSeeded}) and updated as notices are emitted, so
+	 * a host reconnect that re-mounts the same device does not re-announce it.
+	 */
+	#announcedMounts = new Set<string>();
+	#announcedMountsSeeded = false;
 	#presentationPinnedToolNames: ReadonlySet<string> | undefined;
 	#runtimeSelectedToolNames: ReadonlySet<string> | undefined;
 	#baseSystemPrompt: string[];
 	#lastAppliedToolSignature: string | undefined;
+	/**
+	 * `xd://` device names the current base system prompt renders in its catalog
+	 * (the last rebuild's {@link BuildSystemPromptResult.xdevCatalogNames}). Consulted
+	 * when a pending mount notice is delivered: a device the outgoing prompt already
+	 * lists is recorded as announced without a redundant notice line. Empty when the
+	 * prompt carries no catalog (no mounts, or a custom prompt that omits the section).
+	 */
+	#basePromptXdevNames: ReadonlySet<string> = new Set();
 	#mcpRefreshTail: Promise<void> = Promise.resolve();
 	#promptModelKey: string | undefined;
 	#rebuildSystemPrompt: SessionToolsOptions["rebuildSystemPrompt"];
@@ -543,24 +574,28 @@ export class SessionTools {
 	/** Applies an enabled tool set and reconciles its `xd://` partition. */
 	async applyActiveToolsByName(toolNames: string[]): Promise<void> {
 		toolNames = normalizeToolNames(toolNames);
+		let builtInWriteAvailable = this.#builtInToolNames.has("write");
+		if (toolNames.includes("write") && !builtInWriteAvailable) {
+			builtInWriteAvailable = (await this.#ensureWriteRegistered?.()) === true;
+			if (builtInWriteAvailable) this.#builtInToolNames.add("write");
+		}
 		const selectedTools = toolNames.flatMap(name => {
 			const tool = this.#toolRegistry.get(name);
 			return tool ? [{ name, tool }] : [];
 		});
 		const xdevReadAvailable = this.#builtInToolNames.has("read") && selectedTools.some(({ name }) => name === "read");
+		const xdevWriteAvailable = builtInWriteAvailable && selectedTools.some(({ name }) => name === "write");
 		const isPresentationPinned = (name: string): boolean =>
 			this.#presentationPinnedToolNames?.has(name) === true || this.#runtimeSelectedToolNames?.has(name) === true;
 		const mountCandidates = selectedTools.filter(
 			({ name, tool }) =>
-				this.#xdev !== undefined && xdevReadAvailable && !isPresentationPinned(name) && isMountableUnderXdev(tool),
+				this.#xdev !== undefined &&
+				xdevReadAvailable &&
+				xdevWriteAvailable &&
+				!isPresentationPinned(name) &&
+				isMountableUnderXdev(tool),
 		);
-
-		let builtInWriteAvailable = this.#builtInToolNames.has("write");
-		if (mountCandidates.length > 0 && !builtInWriteAvailable) {
-			builtInWriteAvailable = (await this.#ensureWriteRegistered?.()) === true;
-			if (builtInWriteAvailable) this.#builtInToolNames.add("write");
-		}
-		const mountNames = builtInWriteAvailable ? new Set(mountCandidates.map(({ name }) => name)) : new Set<string>();
+		const mountNames = new Set(mountCandidates.map(({ name }) => name));
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];
 		for (const { name, tool } of selectedTools) {
@@ -599,6 +634,7 @@ export class SessionTools {
 
 		let rebuiltSystemPrompt: string[] | undefined;
 		let rebuiltSignature: string | undefined;
+		let rebuiltXdevCatalogNames: readonly string[] | undefined;
 		try {
 			if (this.#rebuildSystemPrompt) {
 				const signature = this.#computeAppliedToolSignature(validToolNames, tools);
@@ -606,6 +642,7 @@ export class SessionTools {
 					const built = await this.#rebuildSystemPrompt(validToolNames, this.#toolRegistry);
 					rebuiltSystemPrompt = built.systemPrompt;
 					rebuiltSignature = signature;
+					rebuiltXdevCatalogNames = built.xdevCatalogNames;
 				}
 			}
 		} catch (error) {
@@ -629,6 +666,7 @@ export class SessionTools {
 			this.#host.agent.setSystemPrompt(this.#baseSystemPrompt);
 			this.#lastAppliedToolSignature = rebuiltSignature;
 			this.#promptModelKey = this.#currentPromptModelKey();
+			this.#basePromptXdevNames = new Set(rebuiltXdevCatalogNames);
 		}
 	}
 
@@ -674,26 +712,121 @@ export class SessionTools {
 		this.#host.emitNotice("info", `xd://: ${parts.join("; ")}`, "xdev");
 	}
 
+	/**
+	 * Forget the announced-mount baseline for a replaced transcript. Called when
+	 * session history is swapped wholesale (`/new`, `switchSession`, `branch`): the
+	 * previous transcript's persisted notices no longer apply, so the next notice
+	 * re-seeds from the new history and a device reconnecting into it announces
+	 * again.
+	 *
+	 * The pending delta is deliberately preserved: it holds mounts that are still
+	 * live but not yet delivered to the model, and `branch()` does not rebuild the
+	 * base system prompt, so dropping it would leave the branched transcript
+	 * unaware of a still-mounted device that no later refresh would re-queue.
+	 */
+	resetAnnouncedMounts(): void {
+		this.#announcedMounts.clear();
+		this.#announcedMountsSeeded = false;
+	}
+
+	/**
+	 * Seed {@link #announcedMounts} from persisted mount notices the first time a
+	 * notice is consumed. On resume the in-memory mount set is rebuilt from
+	 * scratch, so without replaying history every already-announced dynamic device
+	 * would look freshly mounted and re-announce.
+	 */
+	#ensureAnnouncedMountsSeeded(): void {
+		if (this.#announcedMountsSeeded) return;
+		this.#announcedMountsSeeded = true;
+		for (const message of this.#host.agent.state.messages) {
+			if (message.role !== "custom" || message.customType !== XDEV_MOUNT_NOTICE_MESSAGE_TYPE) continue;
+			const details = message.details;
+			if (
+				isRecord(details) &&
+				Array.isArray(details.added) &&
+				details.added.every(name => typeof name === "string") &&
+				Array.isArray(details.removed) &&
+				details.removed.every(name => typeof name === "string")
+			) {
+				for (const name of details.added) this.#announcedMounts.add(name);
+				for (const name of details.removed) this.#announcedMounts.delete(name);
+				continue;
+			}
+
+			// Releases before structured notice details persisted only the rendered
+			// prompt. Replay its two stable inventory sections so the first resume
+			// after upgrading does not re-announce every dynamic device once.
+			if (typeof message.content !== "string") continue;
+			let section: "added" | "removed" | undefined;
+			for (const line of message.content.split("\n")) {
+				if (line === "These tools became available:") {
+					section = "added";
+					continue;
+				}
+				if (line.startsWith("No longer mounted")) {
+					section = "removed";
+					continue;
+				}
+				if (line === "Configured inline device docs:" || line === "</system-notice>") break;
+				if (line.startsWith("Read `xd://<tool>`")) {
+					section = undefined;
+					continue;
+				}
+				if (!section) continue;
+				const match = /^- xd:\/\/(\S+?)(?:\s+—|$)/.exec(line);
+				const name = match?.[1];
+				if (!name) continue;
+				if (section === "added") this.#announcedMounts.add(name);
+				else this.#announcedMounts.delete(name);
+			}
+		}
+	}
+
 	/** Consumes the hidden notice for unannounced `xd://` mount changes. */
-	takePendingXdevMountNotice(): CustomMessage | undefined {
+	takePendingXdevMountNotice(baseCatalogDelivered: boolean): CustomMessage<XdevMountNoticeDetails> | undefined {
 		const pending = this.#pendingXdevMountDelta;
 		if (!pending) return undefined;
 		this.#pendingXdevMountDelta = undefined;
+		this.#ensureAnnouncedMountsSeeded();
+		// A pending add for a device the outgoing base prompt already lists in its
+		// catalog needs no notice line — but only when the final provider prompt
+		// still carries that base catalog. A `before_agent_start` replacement drops
+		// it, so its additions must remain in the notice. Record prompt-carried
+		// devices announced here, after the final prompt is known and immediately
+		// before delivery. The pending delta remains untouched by rebuilds, letting
+		// {@link #notifyXdevMountDelta} cancel a mount followed by an unmount before
+		// any request is sent (issue #7139 reviews).
+		if (baseCatalogDelivered) {
+			for (const name of pending.added) {
+				if (this.#basePromptXdevNames.has(name)) this.#announcedMounts.add(name);
+			}
+		}
+		// Only announce a net change relative to what the model already knows (from
+		// this session and persisted history): a re-mount of an already-announced
+		// device — the common resume/reconnect case — and an unmount for a device
+		// it was never told about are both suppressed, keeping the provider prompt
+		// cache prefix byte-stable across resumes.
+		const addedNames = [...pending.added].filter(name => !this.#announcedMounts.has(name));
+		const removedNames = [...pending.removed].filter(name => this.#announcedMounts.has(name));
+		if (addedNames.length === 0 && removedNames.length === 0) return undefined;
 		const summaries = new Map(this.#xdev ? xdevEntries(this.#xdev).map(entry => [entry.name, entry.summary]) : []);
-		const added = [...pending.added].map(name => ({ name, summary: summaries.get(name) ?? "" }));
-		const removed = [...pending.removed].map(name => ({ name }));
+		const added = addedNames.map(name => ({ name, summary: summaries.get(name) ?? "" }));
+		const removed = removedNames.map(name => ({ name }));
 		const docs = this.#xdev
 			? xdevDocsFor(
 					this.#xdev,
-					pending.added,
+					new Set(addedNames),
 					this.#host.settings.get("tools.xdevDocs"),
 					this.#host.settings.get("tools.xdevInlineDevices"),
 				)
 			: "";
+		for (const name of addedNames) this.#announcedMounts.add(name);
+		for (const name of removedNames) this.#announcedMounts.delete(name);
 		return {
 			role: "custom",
 			customType: XDEV_MOUNT_NOTICE_MESSAGE_TYPE,
 			content: prompt.render(xdevMountNoticePrompt, { added, removed, docs }),
+			details: { added: addedNames, removed: removedNames },
 			attribution: "agent",
 			display: false,
 			timestamp: Date.now(),
@@ -702,23 +835,21 @@ export class SessionTools {
 
 	/** Rediscovers reloadable skills and refreshes prompt metadata. */
 	async refreshSkills(): Promise<void> {
-		if (!this.#skillsReloadable) {
-			return;
-		}
-
 		resetCapabilities();
-		const skillsSettings = this.#host.settings.getGroup("skills");
-		const discovered = await loadSkills({
-			...skillsSettings,
-			cwd: this.#host.sessionManager.getCwd(),
-			disabledExtensions: this.#host.settings.get("disabledExtensions") ?? [],
-		});
-		this.#skills = discovered.skills;
-		this.#skillWarnings = discovered.warnings;
-		this.#skillsSettings = skillsSettings;
+		if (this.#skillsReloadable) {
+			const skillsSettings = this.#host.settings.getGroup("skills");
+			const discovered = await loadSkills({
+				...skillsSettings,
+				cwd: this.#host.sessionManager.getCwd(),
+				disabledExtensions: this.#host.settings.get("disabledExtensions") ?? [],
+			});
+			this.#skills = discovered.skills;
+			this.#skillWarnings = discovered.warnings;
+			this.#skillsSettings = skillsSettings;
 
-		if (this.#host.agentKind() === "main") {
-			setActiveSkills(this.#skills);
+			if (this.#host.agentKind() === "main") {
+				setActiveSkills(this.#skills);
+			}
 		}
 		await this.refreshBaseSystemPrompt();
 		this.#host.notifyCommandMetadataChanged();
@@ -964,6 +1095,7 @@ export class SessionTools {
 		const built = await this.#rebuildSystemPrompt(activeToolNames, this.#toolRegistry);
 		if (this.#host.isDisposed()) return;
 		this.#baseSystemPrompt = built.systemPrompt;
+		this.#basePromptXdevNames = new Set(built.xdevCatalogNames);
 		this.#host.clearMemoryPromotionSnapshot();
 		if (
 			previousBaseSystemPrompt.length !== this.#baseSystemPrompt.length ||

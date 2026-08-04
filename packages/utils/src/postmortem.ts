@@ -29,8 +29,41 @@ const callbackList: ((reason: Reason) => Promise<void> | void)[] = [];
 // Tracks cleanup run state (to prevent recursion/reentry issues)
 let cleanupStage: "idle" | "running" | "complete" = "idle";
 const CLEANUP_DEADLINE_MS = 10_000;
-const exitProcess =
-	typeof process.reallyExit === "function" ? process.reallyExit.bind(process) : process.exit.bind(process);
+/**
+ * Symbol stamped by the extension-load guard onto the throwing replacement it
+ * installs over `process.exit` / `process.reallyExit`, carrying the native
+ * primitive that replacement shadows.
+ *
+ * Host-owned shutdown ({@link exitProcess}) reads through it so a signal that
+ * lands while the guard is active still terminates the process (#6488), while
+ * a signal that lands after the guard has restored the native exit also
+ * terminates cleanly (#7393). `Symbol.for` so it survives duplicate module
+ * instances across bundles/realms.
+ */
+export const NATIVE_PROCESS_EXIT = Symbol.for("omp.postmortem.nativeProcessExit");
+
+type HardExitFn = (code?: number) => never;
+
+/**
+ * Hard-exit the process through the native primitive, resolved on every call.
+ *
+ * The native exit is deliberately re-resolved here rather than bound at module
+ * load: the extension/hook loader's `withHostGuard` transiently swaps
+ * `process.reallyExit`/`process.exit` for a stub that throws
+ * `ExtensionExitError`, and the shipped bundle defers this module's evaluation
+ * until first access — which can land inside that guard window, so binding at
+ * init could freeze the throwing stub forever and turn every later shutdown
+ * (SIGHUP/SIGINT/fatal) into an unhandled-rejection loop (#7393). When the
+ * guard is active the stub carries the native exit under
+ * {@link NATIVE_PROCESS_EXIT}; unwrapping it lets a mid-guard signal still exit
+ * (#6488). Otherwise the current `process.reallyExit`/`process.exit` is native.
+ */
+function exitProcess(code: number): never {
+	const current: HardExitFn = typeof process.reallyExit === "function" ? process.reallyExit : process.exit;
+	const behind = Reflect.get(current, NATIVE_PROCESS_EXIT);
+	const nativeExit = typeof behind === "function" ? (behind as HardExitFn) : current;
+	return nativeExit.call(process, code) as never;
+}
 let cleanupPromise: Promise<void> | undefined;
 let stdioDisconnectRegistrations = 0;
 
@@ -319,14 +352,20 @@ export function cleanup(): Promise<void> {
 	return runCleanup(Reason.MANUAL);
 }
 
-async function runQuit(code: number, exitMode: "guarded" | "native"): Promise<void> {
+/** Controls how manual process shutdown handles terminal output. */
+export interface QuitOptions {
+	/** Wait for buffered stdout before exiting; disable after the terminal has disconnected. */
+	drainStdout?: boolean;
+}
+
+async function runQuit(code: number, exitMode: "guarded" | "native", options: QuitOptions = {}): Promise<void> {
 	await runCleanup(Reason.MANUAL);
 
 	if (!isMainThread) {
 		return; // Workers: cleanup done, let worker exit naturally
 	}
 
-	if (process.stdout.writableLength > 0) {
+	if (options.drainStdout !== false && process.stdout.writableLength > 0) {
 		const { promise, resolve } = Promise.withResolvers<void>();
 		process.stdout.once("drain", resolve);
 		await Promise.race([promise, Bun.sleep(5000)]);
@@ -343,9 +382,9 @@ async function runQuit(code: number, exitMode: "guarded" | "native"): Promise<vo
 /**
  * Runs all cleanup callbacks and exits through the current `process.exit`.
  *
- * In main thread: waits for stdout drain, then calls `process.exit()`.
+ * In main thread: waits for stdout drain unless disabled, then calls `process.exit()`.
  * In workers: runs cleanup only (process.exit would kill entire process).
  */
-export function quit(code: number = 0): Promise<void> {
-	return runQuit(code, "guarded");
+export function quit(code: number = 0, options: QuitOptions = {}): Promise<void> {
+	return runQuit(code, "guarded", options);
 }

@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 import { formatHashlineHeader, stripHashlinePrefixes } from "@oh-my-pi/hashline";
+import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
 	AgentToolContext,
@@ -12,7 +13,6 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { isEnoent, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
 
 import { canonicalSnapshotKey, getFileSnapshotStore } from "../edit/file-snapshot-store";
 import { normalizeToLF } from "../edit/normalize";
@@ -1267,9 +1267,15 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 			// Try ACP bridge first for editor-visible filesystem paths. Internal
 			// artifacts such as local:// plans are owned by OMP, not the editor.
-			if (await routeWriteThroughBridge(this.session, path, absolutePath, cleanContent, signal)) {
-				const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, cleanContent);
-				const header = maybeWriteSnapshotHeader(this.session, absolutePath, cleanContent);
+			const bridgeWrite = await routeWriteThroughBridge(this.session, path, absolutePath, cleanContent, signal);
+			if (bridgeWrite) {
+				// `write` always replaces the whole file, so (unlike hashline's
+				// hunk-scoped diff) there's no size cost to keying the header/
+				// executable-bit check on the verified post-write content —
+				// use it so a drifted write (e.g. client format-on-save) still
+				// hands back a tag that matches what's actually on disk.
+				const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, bridgeWrite.text);
+				const header = maybeWriteSnapshotHeader(this.session, absolutePath, bridgeWrite.text);
 				const writeLine = `Successfully wrote ${cleanContent.length} bytes to ${displayPath}`;
 				let resultText = header ? `${header}\n${writeLine}` : writeLine;
 				if (stripped) {
