@@ -26,6 +26,12 @@ export interface SessionTitleHost {
 	agentKind(): "main" | "sub";
 	extensionRunner(): ExtensionRunner | undefined;
 	sessionId(): string;
+	/**
+	 * The owning session's public title generation, so an SDK integration that
+	 * overrides or spies on `AgentSession.generateTitle` governs the replan
+	 * refresh exactly as it governs the first-message path.
+	 */
+	generateTitle(context: string): Promise<string | null>;
 }
 
 /**
@@ -166,7 +172,7 @@ export class SessionTitleGenerator {
 	}
 
 	async #refreshTitleAfterReplan(context: string, sessionId: string): Promise<void> {
-		const title = await this.generateTitle(context);
+		const title = await this.#host.generateTitle(context);
 		if (!title) return;
 		const sessionManager = this.#host.sessionManager();
 		if (sessionManager.getSessionId() !== sessionId) return;

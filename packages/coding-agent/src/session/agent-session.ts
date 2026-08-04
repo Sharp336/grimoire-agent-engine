@@ -1225,6 +1225,7 @@ export class AgentSession {
 			agentKind: () => this.#agentKind,
 			extensionRunner: () => this.#extensionRunner,
 			sessionId: () => this.sessionId,
+			generateTitle: message => this.generateTitle(message),
 		};
 		this.#title = new SessionTitleGenerator(titleHost, this.settings, config.titleSystemPrompt);
 		this.#obfuscator = config.obfuscator;

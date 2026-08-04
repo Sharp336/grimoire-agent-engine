@@ -243,6 +243,29 @@ describe("SessionTitleGenerator contracts", () => {
 		}
 	});
 
+	it("routes the replan refresh through the session's public generateTitle (contract e)", async () => {
+		await makeSession({ "title.refreshOnReplan": true });
+		const active = session;
+		if (!active) throw new Error("session not created");
+		await active.setSessionName("Old auto title", "auto");
+		seedReplanContext(active);
+
+		// An SDK integration overrides the public method to supply its own title
+		// (or to suppress the provider call). The replan path must honor it, the
+		// same way the first-message path does.
+		const override = vi.spyOn(active, "generateTitle").mockResolvedValue("Override replan title");
+
+		scriptedResponses = [
+			createTodoInitAssistantMessage("Parser", "Rework parser diagnostics"),
+			createAssistantMessage("todo initialized"),
+		];
+		await active.prompt("replan parser diagnostics");
+		await flushUntil(() => override.mock.calls.length === 1);
+
+		expect(override).toHaveBeenCalledTimes(1);
+		expect(active.sessionManager.getHeader()?.title).toBe("Override replan title");
+	});
+
 	it("discards a replan title when the session id rotates during generation (contract c)", async () => {
 		await makeSession({ "title.refreshOnReplan": true });
 		const active = session;
