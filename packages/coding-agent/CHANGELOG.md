@@ -12,6 +12,7 @@
 - Added a third state to the git TUI whitespace toggle (`b`): beyond ignoring whitespace-only line changes, it hides formatting-only changes (indentation, line splits/joins, blank lines) and import-only changes in TypeScript/JavaScript, Rust, and Go
 - Compressed single-child directory chains in the sidebar tree view
 - Split pure additions (new/untracked files) into their own list below tracked changes in each git TUI file section, separated by a rule; addition rows drop the redundant status letter and deleted files render struck through
+- Added `lfm2.5-350m` as a local `providers.tinyModel` option for session titles
 
 ### Changed
 
