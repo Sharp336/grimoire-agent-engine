@@ -4,7 +4,7 @@
  * defaults come from provider ids, strict host checks, and model-id
  * classification, with explicit spec overrides assigned on top.
  */
-import { hostMatchesUrl, modelMatchesHost } from "../hosts";
+import { hostMatchesUrl, isVercelAIGatewayUrl, modelMatchesHost } from "../hosts";
 import {
 	hasOpus47ApiRestrictions,
 	isAnthropicFableOrMythosModel,
@@ -179,9 +179,11 @@ export function buildAnthropicCompat(spec: ModelSpec<"anthropic-messages">): Res
 		// ZDR emission additionally requires the URL gate: the provider id alone
 		// survives baseUrl overrides and must not claim Vercel retention.
 		isVercelGatewayHost: isVercelGateway,
-		isVercelGatewayUrl: hostMatchesUrl(baseUrl, "vercelAIGateway"),
+		isVercelGatewayUrl: isVercelAIGatewayUrl(baseUrl),
 		vercelGatewayRouting: undefined,
 	};
 	applyCompatOverrides(compat, spec.compat);
+	// Resolved-only retention gate; never trust a raw compat override here.
+	compat.isVercelGatewayUrl = isVercelAIGatewayUrl(baseUrl);
 	return compat;
 }

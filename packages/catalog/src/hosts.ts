@@ -7,8 +7,8 @@
  * parsed hostnames: proxies regularly embed the upstream host in a path
  * segment, and the historical call sites all used substring semantics.
  * Callers that need strict hostname matching — where a substring false
- * positive is dangerous, e.g. the Anthropic official-endpoint OAuth gate —
- * parse the URL and compare the hostname themselves.
+ * positive is dangerous, e.g. auth or retention gates — use a dedicated
+ * parsed-URL predicate instead.
  */
 
 interface HostClassSpec {
@@ -18,9 +18,8 @@ interface HostClassSpec {
 	readonly providerPrefixes?: readonly string[];
 	/** Lowercase ASCII substrings matched case-insensitively against the base URL. */
 	readonly urlMarkers: readonly string[];
-	// Strict hostname matching is intentionally not modeled here: the one
-	// auth-sensitive consumer (Anthropic official-endpoint) parses the URL
-	// itself; every other call site is benign and uses substring matching.
+	// Strict hostname matching is intentionally not modeled here. Security-
+	// sensitive consumers use dedicated parsed-URL predicates instead.
 }
 
 export const KNOWN_HOSTS = {
@@ -80,6 +79,17 @@ export function hostMatchesUrl(baseUrl: string | undefined, host: KnownHost): bo
 		if (includesAsciiCaseInsensitive(baseUrl, marker)) return true;
 	}
 	return false;
+}
+
+/** Exact HTTPS endpoint check for retention guarantees enforced by Vercel AI Gateway. */
+export function isVercelAIGatewayUrl(baseUrl: string | undefined): boolean {
+	if (!baseUrl) return false;
+	try {
+		const url = new URL(baseUrl);
+		return url.protocol === "https:" && url.hostname === "ai-gateway.vercel.sh";
+	} catch {
+		return false;
+	}
 }
 
 /** Provider-or-URL host check — the canonical `provider === id || baseUrl.includes(marker)` idiom. */

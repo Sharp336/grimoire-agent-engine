@@ -53,31 +53,51 @@ describe("Vercel AI Gateway compat", () => {
 	});
 });
 
-test("keeps the routing host class but drops the ZDR URL claim for a baseUrl override", () => {
+test("keeps the routing host class but drops the ZDR URL claim for non-Vercel baseUrl overrides", () => {
 	const routing = { only: ["bedrock"], zeroDataRetention: true };
-	const overridden = buildModel({
-		id: "anthropic/claude-sonnet-4.6",
-		name: "Claude Sonnet 4.6",
-		api: "openai-completions",
-		provider: "vercel-ai-gateway",
-		baseUrl: "https://corp-proxy.example/v1",
-		reasoning: false,
-		input: ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 200_000,
-		maxTokens: 16_384,
-		compat: { vercelGatewayRouting: routing },
-	} satisfies ModelSpec<"openai-completions">);
+	const buildOverridden = (
+		baseUrl: string,
+		compat: ModelSpec<"openai-completions">["compat"] = { vercelGatewayRouting: routing },
+	) =>
+		buildModel({
+			id: "anthropic/claude-sonnet-4.6",
+			name: "Claude Sonnet 4.6",
+			api: "openai-completions",
+			provider: "vercel-ai-gateway",
+			baseUrl,
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 16_384,
+			compat,
+		} satisfies ModelSpec<"openai-completions">);
+	const overridden = buildOverridden("https://corp-proxy.example/v1");
+	const lookalike = buildOverridden("https://ai-gateway.vercel.sh.proxy.example/v1");
+	const insecure = buildOverridden("http://ai-gateway.vercel.sh/v1");
+	const forgedCompat = {
+		vercelGatewayRouting: routing,
+		isVercelGatewayUrl: true,
+	} as unknown as ModelSpec<"openai-completions">["compat"];
+	const forged = buildOverridden("https://corp-proxy.example/v1", forgedCompat);
 
 	// Provider id alone keeps the broad routing host class (only/order may still
 	// be emitted), but the ZDR retention claim must not be made for a non-Vercel
 	// endpoint that won't enforce it.
 	expect(overridden.compat.isVercelGatewayHost).toBe(true);
 	expect(overridden.compat.isVercelGatewayUrl).toBe(false);
+	expect(lookalike.compat.isVercelGatewayHost).toBe(true);
+	expect(lookalike.compat.isVercelGatewayUrl).toBe(false);
+	expect(insecure.compat.isVercelGatewayUrl).toBe(false);
+	expect(forged.compat.isVercelGatewayUrl).toBe(false);
 });
 
 test("resolves Responses gateway controls only for the Vercel endpoint", () => {
 	const routing = { caching: "auto" as const, cacheAnchorItems: 1, cacheTtl: "1h" as const, zeroDataRetention: true };
+	const forgedCompat = {
+		vercelGatewayRouting: routing,
+		isVercelGatewayUrl: true,
+	} as unknown as ModelSpec<"openai-responses">["compat"];
 	const vercel = buildModel({
 		id: "anthropic/claude-sonnet-4.6",
 		name: "Claude Sonnet 4.6",
@@ -102,7 +122,7 @@ test("resolves Responses gateway controls only for the Vercel endpoint", () => {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 200_000,
 		maxTokens: 16_384,
-		compat: { vercelGatewayRouting: routing },
+		compat: forgedCompat,
 	} satisfies ModelSpec<"openai-responses">);
 
 	expect(vercel.compat.isVercelGatewayHost).toBe(true);
@@ -114,6 +134,10 @@ test("resolves Responses gateway controls only for the Vercel endpoint", () => {
 
 test("resolves gateway routing controls for anthropic-messages Vercel models", () => {
 	const routing = { only: ["bedrock"], zeroDataRetention: true };
+	const forgedCompat = {
+		vercelGatewayRouting: routing,
+		isVercelGatewayUrl: true,
+	} as unknown as ModelSpec<"anthropic-messages">["compat"];
 	const vercel = buildModel({
 		id: "anthropic/claude-sonnet-4.6",
 		name: "Claude Sonnet 4.6",
@@ -138,7 +162,7 @@ test("resolves gateway routing controls for anthropic-messages Vercel models", (
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 200_000,
 		maxTokens: 16_384,
-		compat: { vercelGatewayRouting: routing },
+		compat: forgedCompat,
 	} satisfies ModelSpec<"anthropic-messages">);
 
 	expect(vercel.compat.isVercelGatewayHost).toBe(true);

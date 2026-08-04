@@ -15,13 +15,16 @@ function abortedSignal(): AbortSignal {
 	return controller.signal;
 }
 
-function vercelModel(routing?: VercelGatewayRouting): Model<"anthropic-messages"> {
+function vercelModel(
+	routing?: VercelGatewayRouting,
+	baseUrl = "https://ai-gateway.vercel.sh",
+): Model<"anthropic-messages"> {
 	return buildModel({
 		id: "anthropic/claude-sonnet-4.6",
 		name: "Claude Sonnet 4.6",
 		api: "anthropic-messages",
 		provider: "vercel-ai-gateway",
-		baseUrl: "https://ai-gateway.vercel.sh",
+		baseUrl,
 		reasoning: false,
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -73,24 +76,15 @@ describe("Vercel AI Gateway routing on the Anthropic transport", () => {
 	});
 
 	it("drops zeroDataRetention when baseUrl is overridden away from Vercel", async () => {
-		const proxy = buildModel({
-			id: "anthropic/claude-sonnet-4.6",
-			name: "Claude Sonnet 4.6",
-			api: "anthropic-messages",
-			provider: "vercel-ai-gateway",
-			baseUrl: "https://corp-proxy.example",
-			reasoning: false,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 200_000,
-			maxTokens: 16_384,
-			compat: { vercelGatewayRouting: { only: ["bedrock"], zeroDataRetention: true } },
-		} satisfies ModelSpec<"anthropic-messages">);
-
 		// The provider id alone is not enough for a retention claim; only routing
 		// survives a baseUrl override away from the Vercel hostname.
-		const payload = await capturePayload(proxy);
-		expect(payload.providerOptions).toEqual({ gateway: { only: ["bedrock"] } });
+		const routing: VercelGatewayRouting = { only: ["bedrock"], zeroDataRetention: true };
+		const [proxyPayload, lookalikePayload] = await Promise.all([
+			capturePayload(vercelModel(routing, "https://corp-proxy.example")),
+			capturePayload(vercelModel(routing, "https://ai-gateway.vercel.sh.proxy.example")),
+		]);
+		expect(proxyPayload.providerOptions).toEqual({ gateway: { only: ["bedrock"] } });
+		expect(lookalikePayload.providerOptions).toEqual({ gateway: { only: ["bedrock"] } });
 	});
 
 	it("leaves unset, disabled, and non-Vercel requests unchanged", async () => {

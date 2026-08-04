@@ -621,9 +621,13 @@ export function resolveOpenAIOutputTokenParam(
 	return { field: input.field, value };
 }
 
+type VercelGatewayProviderOptions = {
+	gateway?: Pick<VercelGatewayRouting, "only" | "order" | "caching" | "zeroDataRetention">;
+};
+
 export interface OpenAIGatewayRoutingParams {
 	provider?: OpenRouterRouting;
-	providerOptions?: { gateway?: Pick<VercelGatewayRouting, "only" | "order" | "caching" | "zeroDataRetention"> };
+	providerOptions?: VercelGatewayProviderOptions;
 }
 
 export interface OpenAIGatewayRoutingCompat {
@@ -752,14 +756,15 @@ export function applyOpenAIExtraBody<P extends object>(
 	const existingProviderOptions = (params as Record<string, unknown>).providerOptions;
 	const incomingProviderOptions = extraBody.providerOptions;
 	if (isRecord(existingProviderOptions) && isRecord(existingProviderOptions.gateway)) {
+		const existingGateway = existingProviderOptions.gateway;
 		const mergedProviderOptions = { ...existingProviderOptions };
 		if (isRecord(incomingProviderOptions)) {
 			Object.assign(mergedProviderOptions, incomingProviderOptions);
 		}
 		const incomingGateway = isRecord(incomingProviderOptions) ? incomingProviderOptions.gateway : undefined;
-		if (isRecord(incomingGateway)) {
-			mergedProviderOptions.gateway = { ...incomingGateway, ...existingProviderOptions.gateway };
-		}
+		mergedProviderOptions.gateway = isRecord(incomingGateway)
+			? { ...incomingGateway, ...existingGateway }
+			: existingGateway;
 		Object.assign(params, { ...extraBody, providerOptions: mergedProviderOptions });
 	} else {
 		Object.assign(params, extraBody);
@@ -792,7 +797,7 @@ export type OpenAICompletionsParams = Omit<ChatCompletionCreateParamsStreaming, 
 	service_tier?: ServiceTier;
 	tool_stream?: boolean;
 	provider?: OpenAICompat["openRouterRouting"];
-	providerOptions?: { gateway?: { only?: string[]; order?: string[] } };
+	providerOptions?: VercelGatewayProviderOptions;
 };
 
 /** Reasoning-relevant slice of caller options the Chat Completions dialect dispatch reads. */

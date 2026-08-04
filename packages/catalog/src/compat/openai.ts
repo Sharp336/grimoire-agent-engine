@@ -8,7 +8,7 @@
  * never detect, resolve, or allocate.
  */
 import { isFireworksFastModelId } from "../fireworks-model-id";
-import { hostMatchesUrl, modelMatchesHost } from "../hosts";
+import { hostMatchesUrl, isVercelAIGatewayUrl, modelMatchesHost } from "../hosts";
 import { bareModelId, parseOpenAIModel, semverGte } from "../identity/classify";
 import {
 	isAnthropicNamespacedModelId,
@@ -586,7 +586,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		// actually goes to Vercel. Provider-id matching alone is not enough — a
 		// models.yml baseUrl override can point a `vercel-ai-gateway` provider at
 		// an unrelated proxy.
-		isVercelGatewayUrl: hostMatchesUrl(baseUrl, "vercelAIGateway"),
+		isVercelGatewayUrl: isVercelAIGatewayUrl(baseUrl),
 		supportsStrictMode: detectStrictModeSupport(provider, baseUrl),
 		extraBody: undefined,
 		toolStrictMode: isCerebras ? "all_strict" : "mixed",
@@ -609,6 +609,9 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 	};
 
 	applyCompatOverrides(compat, spec.compat);
+	// Resolved-only retention gate: loosely typed compat input must not be able
+	// to assert a Vercel guarantee for an unrelated endpoint.
+	compat.isVercelGatewayUrl = isVercelAIGatewayUrl(baseUrl);
 	const deepseekThinking = compat.extraBody?.thinking;
 	if (
 		isDirectDeepseekReasoning &&
@@ -751,7 +754,7 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 		isVercelGatewayHost: isVercelGateway,
 		// ZDR is a retention guarantee: only claim it when the request actually
 		// goes to Vercel (provider-id matching survives baseUrl overrides).
-		isVercelGatewayUrl: hostMatchesUrl(baseUrl, "vercelAIGateway"),
+		isVercelGatewayUrl: isVercelAIGatewayUrl(baseUrl),
 		wireModelIdMode: isOpenRouter ? "openrouter" : "raw",
 		// Mirrors buildOpenAICompat: Kimi behind a Responses-capable proxy still
 		// lands on Moonshot's MFJS validator.
@@ -773,6 +776,8 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 			: spec.compat?.streamIdleTimeoutMs,
 	};
 	applyCompatOverrides(compat, spec.compat);
+	// Resolved-only retention gate; never trust a raw compat override here.
+	compat.isVercelGatewayUrl = isVercelAIGatewayUrl(baseUrl);
 	if (spec.compat?.reasoningDisableMode === undefined) {
 		compat.reasoningDisableMode = resolveReasoningDisableMode(compat.thinkingFormat);
 	}
