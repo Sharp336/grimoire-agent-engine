@@ -157,7 +157,7 @@ describe("status line model segment showProvider", () => {
 
 	it("omits provider prefix when showProvider is true but model has no provider", () => {
 		const ctx = createProviderContext(true, "anthropic");
-		ctx.session.state.model = { id: "test-model", name: "Test Model" };
+		ctx.session.state.model = { id: "test-model", name: "Test Model" } as SegmentContext["session"]["state"]["model"];
 		const rendered = renderSegment("model", ctx);
 		expect(Bun.stripANSI(rendered.content)).not.toContain("Anthropic");
 	});

@@ -104,14 +104,6 @@ const modelSegment: StatusLineSegment = {
 			modelName = modelName.slice(7);
 		}
 
-		// Prepend provider/id prefix when opted in and the provider is known
-		// (e.g. "anthropic/opus-4.5"). Capitalize the provider for readability
-		// and dim it so the model id remains visually dominant.
-		if (opts.showProvider && state.model?.provider) {
-			const provider = state.model.provider[0].toUpperCase() + state.model.provider.slice(1);
-			modelName = theme.fg("dim", `${provider}/`) + modelName;
-		}
-
 		// Resolve the current thinking-level display ("◉ xhigh", "⟳ auto", …)
 		// when the model supports thinking and the segment isn't hiding it.
 		let thinkingDisplay = "";
@@ -152,6 +144,16 @@ const modelSegment: StatusLineSegment = {
 		// `statusLineModel` is aliased to `accent` in many themes, so the badge
 		// uses status colors to stay visibly distinct from the model name color.
 		let content = theme.fg("statusLineModel", withIcon(modelIcon, modelName));
+
+		// Prepend a dimmed provider prefix when opted in. Concatenated (not
+		// nested) so the inner `\\x1b[39m` from theme.fg("dim", …) does not
+		// reset the outer statusLineModel color on the model name.
+		if (opts.showProvider && state.model?.provider) {
+			const provider = sanitizeStatusText(state.model.provider);
+			const label = provider[0].toUpperCase() + provider.slice(1);
+			content = theme.fg("dim", `${label}/`) + content;
+		}
+
 		// Advisor "++" badge, colored by the worst status in the roster:
 		// success = all running, warning = quota-exhausted, error = failed,
 		// dim = everything paused/no-model. Per-advisor detail lives in
