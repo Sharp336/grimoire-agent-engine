@@ -6,6 +6,44 @@ A **provider** is the account or backend namespace, such as `anthropic`, `openai
 
 This page covers how providers become available, how credentials are resolved, the provider/environment-variable map, local engines, disabling providers, and custom providers. For endpoint-specific request, reasoning, tool, stream, usage, and retry constraints, see [Provider endpoint constraints](./provider-endpoint-constraints.md). For model selection and the full `models.yml` schema, see [Model and Provider Configuration](./models.md). For config-file locations and merge precedence, see [Settings](./settings.md). For credential storage and login flows in depth, see [Secrets and credentials](./secrets.md). For the complete environment-variable reference, see [Environment variables](./environment-variables.md). For local engine setup, see [Local models](./local-models.md). For context-file discovery providers, see [Context files](./context-files.md).
 
+## ChatGPT Web
+
+`chatgpt-web` is a first-party extension provider that drives ChatGPT through a verified local
+Chrome profile. It is unofficial browser automation, not the OpenAI API. ChatGPT UI drift, account
+capability changes, or a missing native security primitive fails the turn explicitly; the provider
+does not switch models, modes, transports, or binaries.
+
+Enable and verify it with:
+
+```text
+omp chatgpt-web enable
+omp chatgpt-web login
+omp models find "ChatGPT Web"
+omp --model chatgpt-web/medium
+```
+
+The default state root is `${PI_CODING_AGENT_DIR:-~/.omp/agent}/chatgpt-web`, and the sensitive
+browser profile is its `browser-profile` directory. Never copy, sync, or commit that profile.
+
+- **Browser-only mode** sends the OMP turn and images to a fresh Temporary Chat. It starts no
+  broker, MCP child, or tunnel and includes no local tool names or schemas.
+- **Full mode** adds an outbound OpenAI tunnel and connector. A dedicated
+  `chatgpt_web_bind_turn` call must bind the authenticated connector to the single active turn
+  before tools become visible. OMP still owns every tool approval and sandbox decision.
+- **Pro** is shown only when the account exposes it and cannot initiate local OMP tools in either
+  mode.
+
+One profile owner may run five task-bound tabs concurrently; a sixth turn fails explicitly.
+Cancellation closes only that turn's page and releases its tab and broker capabilities. The local
+broker and launcher control plane use a native owner-local Unix listener or Windows named pipe
+with peer identity checks, not a loopback bearer endpoint.
+
+Use `omp chatgpt-web status` for redacted state, `omp chatgpt-web doctor` for read-only native and
+runtime checks, and `omp chatgpt-web disable` to remove only the extension registration. Full setup,
+limitations, data flow, and security boundaries are documented in the
+[package README](../packages/chatgpt-web/README.md), [architecture](../packages/chatgpt-web/docs/architecture.md),
+and [security model](../packages/chatgpt-web/docs/security-model.md).
+
 ## How `omp` decides a provider is available
 
 At startup the model registry assembles its catalog from four sources, in order:

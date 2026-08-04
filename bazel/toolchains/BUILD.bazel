@@ -7,7 +7,8 @@
 # nothing on gnu platforms because the constraint cannot match there.
 #
 # //bazel/toolchains/msvc: hermetic clang-cl + lld-link + xwin CRT/SDK
-# cc toolchain for x86_64-pc-windows-msvc cross builds from linux.
+# cc toolchains for x86_64-pc-windows-msvc and aarch64-pc-windows-msvc cross
+# builds from linux or macOS.
 
 package(default_visibility = ["//visibility:public"])
 
@@ -56,11 +57,11 @@ _MUSL_RUST_TOOLCHAINS = {
     for name, (exec_cv, target_cv, tools) in _MUSL_RUST_TOOLCHAINS.items()
 ]
 
-# msvc cross cc toolchain: @msvc_cc generates its wrappers for whichever host
-# fetches it, so one toolchain() per supported exec host points at the same
-# cc_toolchain — only the variant matching the local host can ever resolve.
-# target_compatible_with pins these to windows/x86_64, so they can never
-# shadow the zig cc toolchains on linux (or the host Xcode toolchain on mac).
+# msvc cross cc toolchains: @msvc_cc generates its wrappers for whichever host
+# fetches it, so one toolchain() per supported exec host and target architecture
+# points at the corresponding cc_toolchain — only the variant matching the local
+# host and requested target can ever resolve. Target constraints keep these from
+# shadowing zig cc on linux or the host Xcode toolchain on macOS.
 _MSVC_EXEC_HOSTS = {
     "linux-x64": ["@platforms//os:linux", "@platforms//cpu:x86_64"],
     "linux-arm64": ["@platforms//os:linux", "@platforms//cpu:aarch64"],
@@ -77,6 +78,20 @@ _MSVC_EXEC_HOSTS = {
             "@platforms//cpu:x86_64",
         ],
         toolchain = "@msvc_cc//:cc_toolchain",
+        toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+    )
+    for name, exec_cv in _MSVC_EXEC_HOSTS.items()
+]
+
+[
+    toolchain(
+        name = "msvc-cc-arm64-from-" + name,
+        exec_compatible_with = exec_cv,
+        target_compatible_with = [
+            "@platforms//os:windows",
+            "@platforms//cpu:arm64",
+        ],
+        toolchain = "@msvc_cc//:cc_toolchain_arm64",
         toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
     )
     for name, exec_cv in _MSVC_EXEC_HOSTS.items()

@@ -34,6 +34,12 @@ import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/leg
 import { getAllPluginExtensionPaths } from "../plugins/loader";
 
 import { resolvePath, withHostGuard } from "../utils";
+import {
+	CHATGPT_WEB_EXTENSION_SOURCE_ID,
+	issueKeylessProviderRegistration,
+	type KeylessProviderRegistration,
+	type KeylessProviderRequest,
+} from "./keyless-provider";
 import type {
 	AssistantThinkingRenderer,
 	Extension,
@@ -43,6 +49,7 @@ import type {
 	ExtensionRuntime as IExtensionRuntime,
 	LoadExtensionsResult,
 	MessageRenderer,
+	PendingProviderRegistration,
 	ProviderConfig,
 	RegisteredCommand,
 	ToolDefinition,
@@ -70,8 +77,17 @@ export class ExtensionRuntimeNotInitializedError extends Error {
  */
 export class ExtensionRuntime implements IExtensionRuntime {
 	flagValues = new Map<string, boolean | string>();
-	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }> = [];
+	#pendingProviderRegistrations: PendingProviderRegistration[] = [];
 
+	queueProviderRegistration(registration: PendingProviderRegistration): void {
+		this.#pendingProviderRegistrations.push({ ...registration });
+	}
+
+	drainProviderRegistrations(): PendingProviderRegistration[] {
+		const pending = this.#pendingProviderRegistrations;
+		this.#pendingProviderRegistrations = [];
+		return pending;
+	}
 	sendMessage(): void {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
@@ -138,36 +154,39 @@ export class ExtensionRuntime implements IExtensionRuntime {
  * Registration methods write to the extension object.
  * Action methods delegate to the shared runtime.
  */
-class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
+class ConcreteExtensionAPI implements ExtensionAPI {
 	readonly logger = logger;
 	readonly typebox = TypeBox;
 	readonly arktype = Type;
 	readonly zod = zodModule;
-	readonly flagValues = new Map<string, boolean | string>();
-	readonly pendingProviderRegistrations: Array<{
-		name: string;
-		config: ProviderConfig;
-		sourceId: string;
-	}> = [];
+	readonly #extension: Extension;
+	readonly #runtime: IExtensionRuntime;
+	readonly #cwd: string;
+	readonly #sourceId: string;
 
 	constructor(
 		public readonly pi: typeof PiCodingAgent,
-		private readonly extension: Extension,
-		private readonly runtime: IExtensionRuntime,
-		private readonly cwd: string,
+		extension: Extension,
+		runtime: IExtensionRuntime,
+		cwd: string,
 		public readonly events: EventBus,
-	) {}
+	) {
+		this.#extension = extension;
+		this.#runtime = runtime;
+		this.#cwd = cwd;
+		this.#sourceId = extension.path;
+	}
 
 	on<F extends HandlerFn>(event: string, handler: F): void {
-		const list = this.extension.handlers.get(event) ?? [];
+		const list = this.#extension.handlers.get(event) ?? [];
 		list.push(handler);
-		this.extension.handlers.set(event, list);
+		this.#extension.handlers.set(event, list);
 	}
 
 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void {
-		this.extension.tools.set(tool.name, {
+		this.#extension.tools.set(tool.name, {
 			definition: tool,
-			extensionPath: this.extension.path,
+			extensionPath: this.#sourceId,
 		});
 	}
 
@@ -179,11 +198,11 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			handler: RegisteredCommand["handler"];
 		},
 	): void {
-		this.extension.commands.set(name, { name, ...options });
+		this.#extension.commands.set(name, { name, ...options });
 	}
 
 	setLabel(label: string): void {
-		this.extension.label = label;
+		this.#extension.label = label;
 	}
 
 	registerShortcut(
@@ -193,103 +212,107 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			handler: (ctx: ExtensionContext) => Promise<void> | void;
 		},
 	): void {
-		this.extension.shortcuts.set(shortcut, { shortcut, extensionPath: this.extension.path, ...options });
+		this.#extension.shortcuts.set(shortcut, { shortcut, extensionPath: this.#sourceId, ...options });
 	}
 
 	registerFlag(
 		name: string,
 		options: { description?: string; type: "boolean" | "string"; default?: boolean | string },
 	): void {
-		this.extension.flags.set(name, { name, extensionPath: this.extension.path, ...options });
+		this.#extension.flags.set(name, { name, extensionPath: this.#sourceId, ...options });
 		if (options.default !== undefined) {
-			this.runtime.flagValues.set(name, options.default);
+			this.#runtime.flagValues.set(name, options.default);
 		}
 	}
 
 	registerMessageRenderer<T>(customType: string, renderer: MessageRenderer<T>): void {
-		this.extension.messageRenderers.set(customType, renderer as MessageRenderer);
+		this.#extension.messageRenderers.set(customType, renderer as MessageRenderer);
 	}
 
 	registerAssistantThinkingRenderer(renderer: AssistantThinkingRenderer): void {
-		this.extension.assistantThinkingRenderers.push(renderer);
+		this.#extension.assistantThinkingRenderers.push(renderer);
 	}
 
 	getFlag(name: string): boolean | string | undefined {
-		if (!this.extension.flags.has(name)) return undefined;
-		return this.runtime.flagValues.get(name);
+		if (!this.#extension.flags.has(name)) return undefined;
+		return this.#runtime.flagValues.get(name);
 	}
 
 	sendMessage<T = unknown>(
 		message: CustomMessagePayload<T>,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
 	): void {
-		this.runtime.sendMessage(message, options);
+		this.#runtime.sendMessage(message, options);
 	}
 
 	sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
 		options?: { deliverAs?: "steer" | "followUp" },
 	): void {
-		this.runtime.sendUserMessage(content, options);
+		this.#runtime.sendUserMessage(content, options);
 	}
 
 	appendEntry(customType: string, data?: unknown): void {
-		this.runtime.appendEntry(customType, data);
+		this.#runtime.appendEntry(customType, data);
 	}
 
 	exec(command: string, args: string[], options?: ExecOptions) {
-		return execCommand(command, args, options?.cwd ?? this.cwd, options);
+		return execCommand(command, args, options?.cwd ?? this.#cwd, options);
 	}
 
 	getActiveTools(): string[] {
-		return this.runtime.getActiveTools();
+		return this.#runtime.getActiveTools();
 	}
 
 	getAllTools(): string[] {
-		return this.runtime.getAllTools();
+		return this.#runtime.getAllTools();
 	}
 
 	setActiveTools(toolNames: string[]): Promise<void> {
-		return this.runtime.setActiveTools(toolNames);
+		return this.#runtime.setActiveTools(toolNames);
 	}
 
 	getCommands() {
-		return this.runtime.getCommands();
+		return this.#runtime.getCommands();
 	}
 
 	setModel(model: Model): Promise<boolean> {
-		return this.runtime.setModel(model);
+		return this.#runtime.setModel(model);
 	}
 
 	getThinkingLevel(): ThinkingLevel | undefined {
-		return this.runtime.getThinkingLevel();
+		return this.#runtime.getThinkingLevel();
 	}
 
 	setThinkingLevel(level: ThinkingLevel, persist?: boolean): void {
-		this.runtime.setThinkingLevel(level, persist);
+		this.#runtime.setThinkingLevel(level, persist);
 	}
 
 	getServiceTiers(): Readonly<ServiceTierByFamily> {
-		return { ...this.runtime.getServiceTiers() };
+		return { ...this.#runtime.getServiceTiers() };
 	}
 
 	setServiceTier(family: ServiceTierFamily, tier: ServiceTier | undefined): void {
 		if (!isServiceTierFamily(family) || (tier !== undefined && !isServiceTierForFamily(family, tier))) {
 			throw new TypeError(`Invalid service tier "${String(tier)}" for family "${String(family)}"`);
 		}
-		this.runtime.setServiceTier(family, tier);
+		this.#runtime.setServiceTier(family, tier);
 	}
 
 	getSessionName(): string | undefined {
-		return this.runtime.getSessionName();
+		return this.#runtime.getSessionName();
 	}
 
 	setSessionName(name: string): Promise<void> {
-		return this.runtime.setSessionName(name);
+		return this.#runtime.setSessionName(name);
+	}
+
+	issueKeylessProviderRegistration(request: KeylessProviderRequest): KeylessProviderRegistration | undefined {
+		return issueKeylessProviderRegistration(this.#sourceId, request);
 	}
 
 	registerProvider(name: string, config: ProviderConfig): void {
-		this.runtime.pendingProviderRegistrations.push({ name, config, sourceId: this.extension.path });
+		this.#runtime.queueProviderRegistration({ name, config, sourceId: this.#sourceId });
 	}
 }
 
@@ -316,10 +339,13 @@ async function loadExtension(
 	eventBus: EventBus,
 	runtime: IExtensionRuntime,
 ): Promise<{ extension: Extension | null; error: string | null }> {
-	const resolvedPath = resolvePath(extensionPath, cwd);
+	const isBuiltInChatGptWeb = extensionPath === CHATGPT_WEB_EXTENSION_SOURCE_ID;
+	const resolvedPath = isBuiltInChatGptWeb ? extensionPath : resolvePath(extensionPath, cwd);
+	// Optional built-in plugin: keep browser/native modules lazy while retaining this literal edge in compiled binaries.
 	try {
-		const module = (await withHostGuard(() => loadLegacyPiModule(resolvedPath))) as LoadedExtensionModule;
-		const factory = getExtensionFactory(module);
+		const factory = isBuiltInChatGptWeb
+			? getExtensionFactory(await import("@oh-my-pi/pi-chatgpt-web/extension"))
+			: getExtensionFactory((await withHostGuard(() => loadLegacyPiModule(resolvedPath))) as LoadedExtensionModule);
 
 		if (typeof factory !== "function") {
 			return {
@@ -561,7 +587,7 @@ export async function discoverExtensionPaths(
 	const isDisabledName = (name: string): boolean => disabled.has(`extension-module:${name}`);
 
 	const addPath = (extPath: string): void => {
-		const resolved = path.resolve(extPath);
+		const resolved = extPath === CHATGPT_WEB_EXTENSION_SOURCE_ID ? extPath : path.resolve(extPath);
 		if (!seen.has(resolved)) {
 			seen.add(resolved);
 			allPaths.push(extPath);
@@ -605,6 +631,7 @@ export async function discoverExtensionPaths(
 		}
 	} else {
 		for (const configuredPath of configuredPaths) {
+			if (configuredPath === CHATGPT_WEB_EXTENSION_SOURCE_ID) continue;
 			addPaths(await discoverHooksInPackageRoot(resolvePath(configuredPath, cwd)));
 		}
 	}
@@ -616,6 +643,10 @@ export async function discoverExtensionPaths(
 
 	// 4. Explicitly configured paths
 	for (const configuredPath of configuredPaths) {
+		if (configuredPath === CHATGPT_WEB_EXTENSION_SOURCE_ID) {
+			addPath(configuredPath);
+			continue;
+		}
 		const resolved = resolvePath(configuredPath, cwd);
 
 		let stat: fs1.Stats | null = null;

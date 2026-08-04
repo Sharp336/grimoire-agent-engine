@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added owner-bound local-security APIs for private files and directories, authenticated local IPC, process identity checks, and verified executable/runtime launches used by the ChatGPT Web integration.
 ## [17.2.7] - 2026-08-03
 
 ### Added

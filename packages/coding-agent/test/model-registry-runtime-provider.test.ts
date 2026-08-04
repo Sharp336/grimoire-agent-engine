@@ -13,8 +13,17 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
+import { createChatGptWebProviderModels } from "@oh-my-pi/pi-chatgpt-web";
+import { createChatGptWebExtension } from "@oh-my-pi/pi-chatgpt-web/extension";
 import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import {
+	CHATGPT_WEB_EXTENSION_SOURCE_ID,
+	revokeKeylessProviderRegistrations,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/keyless-provider";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { logger, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 describe("ModelRegistry runtime provider registration", () => {
@@ -24,6 +33,7 @@ describe("ModelRegistry runtime provider registration", () => {
 	let registry: ModelRegistry;
 
 	const sourceIds = ["ext://atomic", "ext://runtime", "ext://oauth"];
+	const chatGptWebSourceId = CHATGPT_WEB_EXTENSION_SOURCE_ID;
 
 	// Stub transport: reject every request so refresh("online") drives the full
 	// online discovery path with deterministic, instant failures instead of real
@@ -45,6 +55,7 @@ describe("ModelRegistry runtime provider registration", () => {
 		for (const sourceId of sourceIds) {
 			unregisterOAuthProviders(sourceId);
 		}
+		revokeKeylessProviderRegistrations(chatGptWebSourceId);
 		authStorage.close();
 		if (tempDir && fs.existsSync(tempDir)) {
 			removeSyncWithRetries(tempDir);
@@ -66,6 +77,18 @@ describe("ModelRegistry runtime provider registration", () => {
 
 	function getProviderModels(registry: ModelRegistry, providerName: string) {
 		return registry.getAll().filter(model => model.provider === providerName);
+	}
+	async function issueChatGptWebRegistration(): Promise<{ readonly keylessCapability: object }> {
+		let registration: { readonly keylessCapability: object } | undefined;
+		const factory: ExtensionFactory = api => {
+			registration = api.issueKeylessProviderRegistration({
+				api: "chatgpt-web",
+				baseUrl: "chatgpt-web://local",
+			});
+		};
+		await loadExtensionFromFactory(factory, tempDir, new EventBus(), new ExtensionRuntime(), chatGptWebSourceId);
+		if (!registration) throw new Error("ChatGPT Web keyless capability was not issued");
+		return registration;
 	}
 
 	function expectProviderHeader(
@@ -1202,5 +1225,205 @@ describe("ModelRegistry runtime provider registration", () => {
 		} finally {
 			warn.mockRestore();
 		}
+	});
+	test("loads the structural extension end to end and cleans its source", async () => {
+		const structuralFactory = createChatGptWebExtension({
+			readConfig: async () => ({ mode: "browser-only", tunnelId: null, runtimeKeyConfigured: false }),
+			readLoginStatus: async () => ({
+				authenticated: true,
+				proAvailable: false,
+				verifiedAt: "2026-08-02T00:00:00.000Z",
+			}),
+			createModels: createChatGptWebProviderModels,
+			createStream: () => streamSimple,
+		});
+		// The package deliberately declares only the structural subset it consumes.
+		const factory = structuralFactory as unknown as ExtensionFactory;
+		const runtime = new ExtensionRuntime();
+		await loadExtensionFromFactory(factory, tempDir, new EventBus(), runtime, chatGptWebSourceId);
+		const registrations = runtime.drainProviderRegistrations();
+		expect(registrations).toHaveLength(1);
+		// Production drains clear the prior source after the replacement factory has issued.
+		registry.clearSourceRegistrations(chatGptWebSourceId);
+		for (const registration of registrations) {
+			registry.registerProvider(registration.name, registration.config, registration.sourceId);
+		}
+
+		expect(registry.find("chatgpt-web", "light")?.provider).toBe("chatgpt-web");
+		expect(registry.find("chatgpt-web", "pro")).toBeUndefined();
+		expect(registry.getAvailable().some(model => model.provider === "chatgpt-web")).toBe(true);
+		registry.clearSourceRegistrations(chatGptWebSourceId);
+		expect(registry.find("chatgpt-web", "light")).toBeUndefined();
+		expect(getCustomApi("chatgpt-web")).toBeUndefined();
+	});
+
+	test("accepts only live source-bound ChatGPT Web keyless capabilities", async () => {
+		const first = await issueChatGptWebRegistration();
+		expect(first).toBeDefined();
+		const second = await issueChatGptWebRegistration();
+		expect(second).toBeDefined();
+		const baseConfig: ProviderConfigInput = {
+			baseUrl: "chatgpt-web://local",
+			api: "chatgpt-web",
+			auth: "none",
+			streamSimple,
+			models: [{ ...baseModel, id: "light", supportsTools: false }],
+		};
+
+		expect(() =>
+			registry.registerProvider(
+				"chatgpt-web",
+				{ ...baseConfig, keylessCapability: first?.keylessCapability },
+				chatGptWebSourceId,
+			),
+		).toThrow("invalid or stale keyless capability");
+		expect(() =>
+			registry.registerProvider(
+				"chatgpt-web",
+				{ ...baseConfig, keylessCapability: structuredClone(second?.keylessCapability) },
+				chatGptWebSourceId,
+			),
+		).toThrow("invalid or stale keyless capability");
+		expect(() =>
+			registry.registerProvider(
+				"chatgpt-web",
+				{ ...baseConfig, keylessCapability: second?.keylessCapability },
+				`${chatGptWebSourceId}.forged`,
+			),
+		).toThrow("invalid or stale keyless capability");
+		expect(() =>
+			registry.registerProvider(
+				"other-provider",
+				{ ...baseConfig, keylessCapability: second?.keylessCapability },
+				chatGptWebSourceId,
+			),
+		).toThrow("unauthorized runtime keyless registration");
+		expect(() =>
+			registry.registerProvider(
+				"chatgpt-web",
+				{ ...baseConfig, api: "chatgpt-web-clone", keylessCapability: second?.keylessCapability },
+				chatGptWebSourceId,
+			),
+		).toThrow("invalid or stale keyless capability");
+		expect(() =>
+			registry.registerProvider(
+				"chatgpt-web",
+				{ ...baseConfig, baseUrl: "chatgpt-web://changed", keylessCapability: second?.keylessCapability },
+				chatGptWebSourceId,
+			),
+		).toThrow("invalid or stale keyless capability");
+		expect(() =>
+			registry.registerProvider(
+				"chatgpt-web",
+				{
+					...baseConfig,
+					keylessCapability: second?.keylessCapability,
+					models: [{ ...baseModel, id: "light", baseUrl: "https://changed.invalid" }],
+				},
+				chatGptWebSourceId,
+			),
+		).toThrow("unauthorized runtime keyless registration");
+
+		registry.registerProvider(
+			"chatgpt-web",
+			{ ...baseConfig, keylessCapability: second?.keylessCapability },
+			chatGptWebSourceId,
+		);
+		expect(registry.find("chatgpt-web", "light")?.supportsTools).toBe(false);
+		expect(authStorage.hasAuth("chatgpt-web")).toBe(false);
+	});
+
+	test("preserves runtime keyless state across static reload and removes it with its source", async () => {
+		fs.writeFileSync(
+			modelsJsonPath,
+			JSON.stringify({
+				providers: {
+					"static-keyless": {
+						baseUrl: "http://127.0.0.1:4893",
+						api: "openai-completions",
+						auth: "none",
+						models: [{ ...baseModel, id: "static-model" }],
+					},
+				},
+			}),
+		);
+		await registry.refresh("offline");
+		const registration = await issueChatGptWebRegistration();
+		expect(getCustomApi("chatgpt-web")).toBeUndefined();
+		registry.registerProvider(
+			"chatgpt-web",
+			{
+				baseUrl: "chatgpt-web://local",
+				api: "chatgpt-web",
+				auth: "none",
+				keylessCapability: registration.keylessCapability,
+				streamSimple,
+				models: [
+					{ ...baseModel, id: "light", supportsTools: true },
+					{ ...baseModel, id: "pro", supportsTools: false },
+				],
+			},
+			chatGptWebSourceId,
+		);
+
+		expect(
+			registry
+				.getAvailable()
+				.filter(model => model.provider === "chatgpt-web")
+				.map(model => model.id),
+		).toEqual(["light", "pro"]);
+		const light = registry.find("chatgpt-web", "light");
+		expect(`${light?.provider}/${light?.id}`).toBe("chatgpt-web/light");
+		expect(light?.supportsTools).toBe(true);
+		expect(registry.find("chatgpt-web", "pro")?.supportsTools).toBe(false);
+		expect(await registry.getApiKeyForProvider("chatgpt-web")).toBe("N/A");
+		expect(authStorage.hasAuth("chatgpt-web")).toBe(false);
+		expect(getCustomApi("chatgpt-web")).toBeDefined();
+		await registry.refresh("offline");
+		expect(registry.getAvailable().some(model => model.provider === "chatgpt-web" && model.id === "light")).toBe(
+			true,
+		);
+		expect(
+			registry.getAvailable().some(model => model.provider === "static-keyless" && model.id === "static-model"),
+		).toBe(true);
+
+		registry.clearSourceRegistrations(chatGptWebSourceId);
+		expect(registry.find("chatgpt-web", "light")).toBeUndefined();
+		expect(registry.getAvailable().some(model => model.provider === "chatgpt-web")).toBe(false);
+		expect(
+			registry.getAvailable().some(model => model.provider === "static-keyless" && model.id === "static-model"),
+		).toBe(true);
+		expect(getCustomApi("chatgpt-web")).toBeUndefined();
+	});
+
+	test("same-source re-registration replaces models and requires a fresh generation", async () => {
+		const first = await issueChatGptWebRegistration();
+		registry.registerProvider(
+			"chatgpt-web",
+			{
+				baseUrl: "chatgpt-web://local",
+				api: "chatgpt-web",
+				auth: "none",
+				keylessCapability: first?.keylessCapability,
+				streamSimple,
+				models: [{ ...baseModel, id: "stale" }],
+			},
+			chatGptWebSourceId,
+		);
+		const replacement = await issueChatGptWebRegistration();
+		registry.registerProvider(
+			"chatgpt-web",
+			{
+				baseUrl: "chatgpt-web://local",
+				api: "chatgpt-web",
+				auth: "none",
+				keylessCapability: replacement?.keylessCapability,
+				streamSimple,
+				models: [{ ...baseModel, id: "light" }],
+			},
+			chatGptWebSourceId,
+		);
+		expect(registry.find("chatgpt-web", "stale")).toBeUndefined();
+		expect(registry.find("chatgpt-web", "light")?.provider).toBe("chatgpt-web");
 	});
 });

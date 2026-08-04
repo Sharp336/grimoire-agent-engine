@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the first-party ChatGPT Web provider with `omp chatgpt-web enable|disable|status|login|doctor` lifecycle commands and ChatGPT Web models in the model picker, supporting browser-only and full tunnel/MCP modes.
 ## [17.2.7] - 2026-08-03
 
 ### Changed

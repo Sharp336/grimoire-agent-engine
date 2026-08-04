@@ -45,7 +45,8 @@ describe("createAgentSession preloadedExtensions isolation (issue #2190)", () =>
 			errors: [],
 			runtime: {
 				flagValues: new Map(),
-				pendingProviderRegistrations: [],
+				queueProviderRegistration() {},
+				drainProviderRegistrations: () => [],
 				// Cast: only the fields we touch matter; the SDK happily accepts a
 				// minimal runtime when no extension hooks fire.
 			} as unknown as LoadExtensionsResult["runtime"],

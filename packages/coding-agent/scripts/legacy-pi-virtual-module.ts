@@ -155,8 +155,9 @@ export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
 				}
 				matches.sort();
 				for (const match of matches) {
-					if (!match.endsWith(pattern.sourceSuffix)) continue;
-					const basename = match.slice(0, match.length - pattern.sourceSuffix.length);
+					const normalizedMatch = match.replaceAll("\\", "/");
+					if (!normalizedMatch.endsWith(pattern.sourceSuffix)) continue;
+					const basename = normalizedMatch.slice(0, normalizedMatch.length - pattern.sourceSuffix.length);
 					const segments = basename.split("/");
 					// Every directory on the way has to be importable too: a private or
 					// hidden folder is no more exported than a private file.

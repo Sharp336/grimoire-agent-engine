@@ -12,6 +12,15 @@ export interface LeafTarget {
 export interface BuildLeafManifestInput extends LeafTarget {
 	files: readonly string[];
 	version: string;
+	napiAbi: number;
+	fileHashes: Readonly<Record<string, string>>;
+	allowMissingFiles?: boolean;
+}
+
+export interface NativeLeafMetadata {
+	platformTag: string;
+	napiAbi: number;
+	files: Record<string, { sha256: string }>;
 }
 
 export interface LeafManifest {
@@ -30,6 +39,7 @@ export interface LeafManifest {
 	engines: {
 		bun: string;
 	};
+	ompNative: NativeLeafMetadata;
 }
 
 export interface GeneratedLeafPackage {
@@ -53,6 +63,7 @@ export const LEAF_TARGETS: readonly LeafTarget[] = [
 	{ tag: "darwin-x64", os: "darwin", cpu: "x64" },
 	{ tag: "darwin-arm64", os: "darwin", cpu: "arm64" },
 	{ tag: "win32-x64", os: "win32", cpu: "x64" },
+	{ tag: "win32-arm64", os: "win32", cpu: "arm64" },
 ];
 
 const packageDirDefault = path.join(import.meta.dir, "..");
@@ -70,6 +81,11 @@ function discoverAddonFiles(nativeDir: string, tag: string): Promise<string[]> {
 		),
 	).then(files => files.filter(file => file !== null));
 }
+async function sha256File(filePath: string): Promise<string> {
+	const hasher = new Bun.CryptoHasher("sha256");
+	for await (const chunk of Bun.file(filePath).stream()) hasher.update(chunk);
+	return hasher.digest("hex");
+}
 
 function selectPrimaryAddonFile(tag: string, files: readonly string[]): string {
 	const baseline = `pi_natives.${tag}-baseline.node`;
@@ -79,11 +95,33 @@ function selectPrimaryAddonFile(tag: string, files: readonly string[]): string {
 	return files[0];
 }
 
-export function buildLeafManifest({ tag, os, cpu, files, version }: BuildLeafManifestInput): LeafManifest {
-	const addonFiles = [...new Set(files.map(file => path.basename(file)))];
+export function buildLeafManifest({
+	tag,
+	os,
+	cpu,
+	files,
+	version,
+	napiAbi,
+	fileHashes,
+	allowMissingFiles = false,
+}: BuildLeafManifestInput): LeafManifest {
+	for (const file of files) {
+		if (path.basename(file) !== file || file.includes("/") || file.includes("\\")) {
+			throw new Error(`Leaf ${tag} includes invalid addon file: ${file}`);
+		}
+	}
+	const addonFiles = [...new Set(files)];
 	if (addonFiles.length === 0) throw new Error(`No native addon files found for ${tag}`);
+	if (addonFiles.length !== files.length) throw new Error(`Leaf ${tag} includes duplicate addon filenames`);
+	const metadataFiles: Record<string, { sha256: string }> = {};
 	for (const file of addonFiles) {
-		if (!file.endsWith(".node")) throw new Error(`Leaf ${tag} includes non-addon file: ${file}`);
+		if (!expectedAddonFilenames(tag).includes(file)) {
+			throw new Error(`Leaf ${tag} includes invalid addon file: ${file}`);
+		}
+		const sha256 = fileHashes[file];
+		if (sha256 === undefined && allowMissingFiles) continue;
+		if (!/^[a-f0-9]{64}$/.test(sha256 ?? "")) throw new Error(`Leaf ${tag} is missing SHA-256 metadata for ${file}`);
+		metadataFiles[file] = { sha256 };
 	}
 	const main = selectPrimaryAddonFile(tag, addonFiles);
 	return {
@@ -102,6 +140,7 @@ export function buildLeafManifest({ tag, os, cpu, files, version }: BuildLeafMan
 		engines: {
 			bun: ">=1.3.14",
 		},
+		ompNative: { platformTag: tag, napiAbi, files: metadataFiles },
 	};
 }
 
@@ -127,8 +166,17 @@ export async function generateNpmPackages({
 	version,
 	tags,
 }: GenerateNpmPackagesInput = {}): Promise<GeneratedLeafPackage[]> {
-	const manifestVersion =
-		version ?? ((await Bun.file(path.join(packageDir, "package.json")).json()) as { version: string }).version;
+	const packageManifest = (await Bun.file(path.join(packageDir, "package.json")).json()) as {
+		version: string;
+		ompNative: { napiAbi: number; platformTags: string[] };
+	};
+	const manifestVersion = version ?? packageManifest.version;
+	if (
+		packageManifest.ompNative.platformTags.length !== LEAF_TARGETS.length ||
+		!LEAF_TARGETS.every(target => packageManifest.ompNative.platformTags.includes(target.tag))
+	) {
+		throw new Error("Native platform tags in package.json do not match LEAF_TARGETS");
+	}
 	const nativeDir = path.join(packageDir, "native");
 	const npmDir = path.join(packageDir, "npm");
 	const leaves: GeneratedLeafPackage[] = [];
@@ -136,7 +184,17 @@ export async function generateNpmPackages({
 	for (const target of selectTargets(tags)) {
 		const files = await discoverAddonFiles(nativeDir, target.tag);
 		const manifestFiles = files.length > 0 ? files : [expectedAddonFilenames(target.tag)[0]];
-		const manifest = buildLeafManifest({ ...target, files: manifestFiles, version: manifestVersion });
+		const fileHashes = Object.fromEntries(
+			await Promise.all(files.map(async file => [file, await sha256File(path.join(nativeDir, file))])),
+		);
+		const manifest = buildLeafManifest({
+			...target,
+			files: manifestFiles,
+			version: manifestVersion,
+			napiAbi: packageManifest.ompNative.napiAbi,
+			fileHashes,
+			allowMissingFiles: files.length === 0,
+		});
 		const leafDir = path.join(npmDir, target.tag);
 		const missing = files.length === 0;
 		leaves.push({ tag: target.tag, dir: leafDir, files, manifest, missing });

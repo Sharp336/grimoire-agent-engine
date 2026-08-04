@@ -22,6 +22,10 @@ export const browserRelayHelp = {
 	description: "Run the local CDP relay that lets the browser tool drive your own Chrome tabs",
 } satisfies CommandMetadata;
 
+export const chatGptWebHelp = {
+	description: "Manage the local ChatGPT Web provider",
+} satisfies CommandMetadata;
+
 export const cleanseHelp = {
 	description: "Detect and fix project diagnostics with weighted parallel subagents",
 } satisfies CommandMetadata;

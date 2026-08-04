@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import * as crypto from "node:crypto";
 import * as path from "node:path";
 
 const reset = process.argv.includes("--reset");
@@ -15,6 +16,7 @@ const embeddedAddonTypedefs = `/** @typedef {"modern" | "baseline" | "default"} 
  * @property {EmbeddedAddonVariant} variant
  * @property {string} filename
  * @property {number} size
+ * @property {string} sha256
  * @property {string=} filePath
  */
 
@@ -23,11 +25,13 @@ const embeddedAddonTypedefs = `/** @typedef {"modern" | "baseline" | "default"} 
  * @property {"tar.gz"} format
  * @property {string} filename
  * @property {string} filePath
+ * @property {string} sha256
  */
 
 /**
  * @typedef {Object} EmbeddedAddon
  * @property {string} platformTag
+ * @property {number} napiAbi
  * @property {string} version
  * @property {EmbeddedAddonFile[]} files
  * @property {EmbeddedAddonArchive=} archive
@@ -63,8 +67,9 @@ interface CandidateAddon {
 }
 
 interface AvailableAddon extends CandidateAddon {
-	path: string;
 	size: number;
+	sha256: string;
+	content: Uint8Array;
 }
 
 const targetPlatform = Bun.env.TARGET_PLATFORM || process.platform;
@@ -80,33 +85,44 @@ const candidates: CandidateAddon[] =
 
 const available: AvailableAddon[] = [];
 for (const candidate of candidates) {
-	const candidatePath = path.join(nativeDir, candidate.filename);
-	try {
-		const stat = await fs.stat(candidatePath);
-		available.push({ ...candidate, path: candidatePath, size: stat.size });
-	} catch (err) {
-		if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-	}
+	const addonPath = path.join(nativeDir, candidate.filename);
+	const file = Bun.file(addonPath);
+	if (!(await file.exists())) continue;
+	const content = await file.bytes();
+	available.push({
+		...candidate,
+		size: content.byteLength,
+		content,
+		sha256: crypto.createHash("sha256").update(content).digest("hex"),
+	});
 }
 
 if (available.length === 0) {
 	const expected = candidates.map(candidate => `  - ${candidate.filename}`).join("\n");
 	throw new Error(`No native addons found for ${platformTag}. Expected one of:\n${expected}`);
 }
-const packageJson = (await Bun.file(packageJsonPath).json()) as { version: string };
+const packageJson = (await Bun.file(packageJsonPath).json()) as {
+	version: string;
+	ompNative: { napiAbi: number; platformTags: string[] };
+};
+if (!packageJson.ompNative.platformTags.includes(platformTag)) {
+	throw new Error(`Unsupported native embed target ${platformTag}`);
+}
 
 const archiveFilename = `${archivePrefix}${platformTag}${archiveSuffix}`;
 const archivePath = path.join(nativeDir, archiveFilename);
 const archiveEntries: Record<string, Uint8Array> = {};
 for (const addon of available) {
-	archiveEntries[addon.filename] = await fs.readFile(addon.path);
+	archiveEntries[addon.filename] = addon.content;
 }
-await Bun.write(archivePath, await new Bun.Archive(archiveEntries, { compress: "gzip", level: 9 }).bytes());
+const archiveBytes = await new Bun.Archive(archiveEntries, { compress: "gzip", level: 9 }).bytes();
+await Bun.write(archivePath, archiveBytes);
+const archiveSha256 = crypto.createHash("sha256").update(archiveBytes).digest("hex");
 
 const files = available
 	.map(
 		addon =>
-			`\t\t{ variant: ${JSON.stringify(addon.variant)}, filename: ${JSON.stringify(addon.filename)}, size: ${addon.size} },`,
+			`\t\t{ variant: ${JSON.stringify(addon.variant)}, filename: ${JSON.stringify(addon.filename)}, size: ${addon.size}, sha256: ${JSON.stringify(addon.sha256)} },`,
 	)
 	.join("\n");
 
@@ -120,11 +136,13 @@ import archivePath from ${JSON.stringify(`../native/${archiveFilename}`)} with {
 
 export const embeddedAddon = {
 \tplatformTag: ${JSON.stringify(platformTag)},
+\tnapiAbi: ${packageJson.ompNative.napiAbi},
 \tversion: ${JSON.stringify(packageJson.version)},
 \tarchive: {
 \t\tformat: "tar.gz",
 \t\tfilename: ${JSON.stringify(archiveFilename)},
 \t\tfilePath: archivePath,
+\t\tsha256: ${JSON.stringify(archiveSha256)},
 \t},
 \tfiles: [
 ${files}

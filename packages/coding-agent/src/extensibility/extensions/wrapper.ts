@@ -316,10 +316,14 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					: basePrompt;
 			let choice: string | undefined;
 			try {
-				choice = await uiContext.select(safetyPrompt, ["Approve", "Deny"]);
+				choice = await uiContext.select(safetyPrompt, ["Approve", "Deny"], { signal });
 			} catch (err) {
 				await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted");
 				throw err;
+			}
+			if (signal?.aborted) {
+				await emitApprovalResolved(false, "approval aborted");
+				throw new DOMException("Tool approval was aborted", "AbortError");
 			}
 			const approved = choice === "Approve";
 			await emitApprovalResolved(approved, approved ? undefined : "denied by user");
@@ -331,6 +335,8 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				context.providerSafetyApproved = true;
 			}
 		}
+
+		if (signal?.aborted) throw new DOMException("Tool execution was aborted before dispatch", "AbortError");
 
 		// Execute the actual tool
 		let result: AgentToolResult<TDetails, TParameters>;

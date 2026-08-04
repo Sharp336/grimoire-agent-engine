@@ -328,10 +328,9 @@ export async function runModelsListing(options: RunModelsListingOptions): Promis
 		for (const sourceId of new Set(activeSources)) {
 			modelRegistry.clearSourceRegistrations(sourceId);
 		}
-		for (const { name, config, sourceId } of extensionsResult.runtime.pendingProviderRegistrations) {
+		for (const { name, config, sourceId } of extensionsResult.runtime.drainProviderRegistrations()) {
 			modelRegistry.registerProvider(name, config, sourceId);
 		}
-		extensionsResult.runtime.pendingProviderRegistrations = [];
 		// Discover runtime (extension) provider catalogs now that they are registered.
 		await modelRegistry.refreshRuntimeProviders(action === "refresh" ? "online" : "online-if-uncached");
 

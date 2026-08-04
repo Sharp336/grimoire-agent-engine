@@ -2,9 +2,9 @@
 
 Downloads the official LLVM release archive for the host that fetches the repo
 (linux-x64 CI pods, darwin dev hosts) and prunes it down to the clang-cl /
-lld-link / llvm-lib / llvm-rc slice plus the clang builtin headers
-(lib/clang/<major>/include — immintrin.h & co, required for the SSE units in
-bundled opus). The pruned tree is ~300 MiB instead of ~10 GiB.
+lld-link / llvm-lib / llvm-rc slice plus the clang builtin headers used by both
+x86_64-pc-windows-msvc and aarch64-pc-windows-msvc (lib/clang/<major>/include).
+The pruned tree is ~300 MiB instead of ~10 GiB.
 
 The archive download (~1.5-2 GiB) goes through repository_ctx.download_and_extract
 with a pinned sha256, so it lands in Bazel's content-addressed repository cache:
@@ -79,6 +79,19 @@ filegroup(
         ":builtin_headers",
     ],
 )
+
+# The official LLVM distribution is a multi-target tool suite. Keep explicit
+# target labels so each cc toolchain selects its own target rather than routing
+# an unsupported target through another architecture's label.
+filegroup(
+    name = "x86_64-pc-windows-msvc",
+    srcs = [":all"],
+)
+
+filegroup(
+    name = "aarch64-pc-windows-msvc",
+    srcs = [":all"],
+)
 """
 
 def _llvm_msvc_tools_impl(rctx):
@@ -128,5 +141,5 @@ def _llvm_msvc_tools_impl(rctx):
 
 llvm_msvc_tools_repository = repository_rule(
     implementation = _llvm_msvc_tools_impl,
-    doc = "Pruned LLVM release binaries (clang-cl/lld-link/llvm-lib/llvm-rc) for the exec host.",
+    doc = "Pruned multi-target LLVM release binaries for x86_64/aarch64 MSVC cross builds.",
 )

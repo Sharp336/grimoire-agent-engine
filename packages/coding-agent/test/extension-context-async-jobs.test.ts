@@ -6,7 +6,8 @@ import type { AsyncJobSnapshot } from "@oh-my-pi/pi-coding-agent/session/agent-s
 function createRunner(getAsyncJobSnapshot?: () => AsyncJobSnapshot | null): ExtensionRunner {
 	const runtime = {
 		flagValues: new Map(),
-		pendingProviderRegistrations: [],
+		queueProviderRegistration() {},
+		drainProviderRegistrations: () => [],
 	} as unknown as ExtensionRuntime;
 	return new ExtensionRunner(
 		[],

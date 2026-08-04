@@ -26,6 +26,7 @@
  */
 
 import { describe, expect, it } from "bun:test";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -50,11 +51,14 @@ describe("issue 823: standalone-binary native loader path resolution", () => {
 			detectCompiledBinary({
 				embeddedAddon: {
 					platformTag: "linux-x64",
+					napiAbi: 10,
 					version: "14.5.2",
 					files: [
 						{
 							variant: "modern",
 							filename: "pi_natives.linux-x64-modern.node",
+							size: 1,
+							sha256: "a".repeat(64),
 							filePath: "/$bunfs/root/packages/natives/native/pi_natives.linux-x64-modern.node",
 						},
 					],
@@ -220,8 +224,8 @@ describe("issue 823: standalone-binary native loader path resolution", () => {
 			);
 
 			const files: EmbeddedAddonFile[] = [
-				{ variant: "modern", filename: modernFilename, size: modern.length },
-				{ variant: "baseline", filename: baselineFilename, size: baseline.length },
+				{ variant: "modern", filename: modernFilename, size: modern.length, sha256: crypto.createHash("sha256").update(modern).digest("hex") },
+				{ variant: "baseline", filename: baselineFilename, size: baseline.length, sha256: crypto.createHash("sha256").update(baseline).digest("hex") },
 			];
 
 			const written = extractEmbeddedAddonArchive({ archivePath, files, targetDir });

@@ -46,6 +46,11 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.browserRelayHelp,
 	},
 	{
+		name: "chatgpt-web",
+		load: () => import("./commands/chatgpt-web").then(m => m.default),
+		help: commandHelp.chatGptWebHelp,
+	},
+	{
 		name: "cleanse",
 		load: () => import("./commands/cleanse").then(m => m.default),
 		help: commandHelp.cleanseHelp,

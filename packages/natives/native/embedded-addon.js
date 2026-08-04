@@ -9,6 +9,7 @@
  * @property {EmbeddedAddonVariant} variant
  * @property {string} filename
  * @property {number} size
+ * @property {string} sha256
  * @property {string=} filePath
  */
 
@@ -17,11 +18,13 @@
  * @property {"tar.gz"} format
  * @property {string} filename
  * @property {string} filePath
+ * @property {string} sha256
  */
 
 /**
  * @typedef {Object} EmbeddedAddon
  * @property {string} platformTag
+ * @property {number} napiAbi
  * @property {string} version
  * @property {EmbeddedAddonFile[]} files
  * @property {EmbeddedAddonArchive=} archive
