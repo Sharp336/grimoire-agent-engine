@@ -40,6 +40,7 @@ let scenario:
 	| { kind: "capture"; body: string }
 	| { kind: "happy" }
 	| { kind: "provider-executed" }
+	| { kind: "provider-executed-interleaved" }
 	| { kind: "malformed-line" }
 	| { kind: "truncated" }
 	| { kind: "frames"; lines: readonly string[] }
@@ -130,6 +131,14 @@ async function startServer(): Promise<string> {
 				return ndjson([
 					`{"type":"tool-call","toolCallId":"srv_1","toolName":"web_search","input":{},"providerExecuted":true}`,
 					`{"type":"tool-result","toolCallId":"srv_1","toolName":"web_search","result":"found it"}`,
+					`{"type":"finish","finishReason":"stop"}`,
+				]);
+			}
+			if (scenario.kind === "provider-executed-interleaved") {
+				return ndjson([
+					`{"type":"text-delta","text":"before "}`,
+					`{"type":"tool-result","toolCallId":"srv_1","toolName":"web_search","result":"found it"}`,
+					`{"type":"text-delta","text":"after"}`,
 					`{"type":"finish","finishReason":"stop"}`,
 				]);
 			}
@@ -320,6 +329,25 @@ describe("command-code request parity", () => {
 			toolName: "",
 			output: { type: "text", value: "file contents" },
 		});
+	});
+
+	it("sends requestModelId as the wire model id", async () => {
+		scenario = {
+			kind: "capture",
+			body: `{"type":"text-delta","text":"ok"}\n{"type":"finish","finishReason":"stop"}\n`,
+		};
+		const baseUrl = await startServer();
+		const aliased = {
+			...makeModel(baseUrl),
+			id: "command-code/local-alias",
+			requestModelId: "deepseek/deepseek-v4-flash",
+		} as Model<"command-code">;
+		const context: Context = { messages: [{ role: "user", content: "hi", timestamp: 1 }] };
+		const { result } = await collectStream(aliased, context);
+		const params = lastRequest!.body.params as { model: string };
+		expect(params.model).toBe("deepseek/deepseek-v4-flash");
+		// Local attribution keeps the catalog id.
+		expect(result.model).toBe("command-code/local-alias");
 	});
 
 	it("hoists tool-result images into a follow-up user turn for vision models", async () => {
@@ -614,6 +642,20 @@ describe("command-code stream handling", () => {
 		expect(result.content.some(block => block.type === "toolCall")).toBe(false);
 		const text = result.content.find(block => block.type === "text");
 		expect(text?.type === "text" ? text.text : "").toContain("found it");
+	});
+
+	it("keeps text ordered around a provider-executed tool result", async () => {
+		scenario = { kind: "provider-executed-interleaved" };
+		const baseUrl = await startServer();
+		const context: Context = { messages: [{ role: "user", content: "search", timestamp: 1 }] };
+		const { result } = await collectStream(makeModel(baseUrl), context);
+		// The open text block must be closed before the tool-result block, so the
+		// trailing delta lands in a new block instead of flowing back into "before ".
+		expect(result.content.map(block => (block.type === "text" ? block.text : block.type))).toEqual([
+			"before ",
+			"[web_search] found it",
+			"after",
+		]);
 	});
 
 	it("tolerates malformed stream lines", async () => {

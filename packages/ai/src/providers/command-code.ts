@@ -632,7 +632,8 @@ export const streamCommandCode: StreamFunction<"command-code"> = (
 			}));
 
 			const params: Record<string, unknown> = {
-				model: model.id,
+				// Wire id may be aliased away from the local catalog id.
+				model: model.requestModelId ?? model.id,
 				messages: toWireMessages(transformed, model.input.includes("image")),
 				system: normalizeSystemPrompts(context.systemPrompt).join("\n\n"),
 				max_tokens: options?.maxTokens ?? model.maxTokens ?? DEFAULT_MAX_TOKENS,
@@ -824,6 +825,7 @@ export const streamCommandCode: StreamFunction<"command-code"> = (
 						}
 						case "tool-result": {
 							markFirstToken();
+							endTextBlock();
 							endThinkingBlock();
 							const toolName = event.toolName ?? "";
 							const payloadText = stringifyProviderToolPayload(event.result ?? event.output);
