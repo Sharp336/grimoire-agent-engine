@@ -223,24 +223,28 @@ function tupleLayout(ir: TupleIR, length: number): { readonly postfixStart: numb
 type ObjectIR = Extract<IR, { k: "object" }>;
 
 /**
- * The extras-policy decision for one key, shared by both engines. Returns the
- * index signature that claims the key, or undefined when none does. The caller
- * applies the keep/reject consequence of `ir.extras` in its own iteration
- * style; only the classification is stated here.
+ * All index-signature validators that claim `key`, shared by both engines.
+ * Returns every validator the key must satisfy — the general index (for string
+ * keys) plus each matching pattern index, or the symbol index for symbol keys.
+ * A key is index-claimed when the result is non-empty; the caller applies the
+ * keep/reject consequence of `ir.extras` in its own iteration style.
  */
-function objectExtraIndex(ir: ObjectIR, key: PropertyKey): IR | undefined {
-	if (typeof key === "symbol") return ir.symbolIndex;
-	if (ir.index !== undefined) return ir.index;
+function objectIndexValidators(ir: ObjectIR, key: PropertyKey): IR[] {
+	if (typeof key === "symbol") {
+		return ir.symbolIndex !== undefined ? [ir.symbolIndex] : [];
+	}
+	const result: IR[] = [];
+	if (ir.index !== undefined) result.push(ir.index);
 	if (ir.patternIndexes !== undefined) {
 		for (const pattern of ir.patternIndexes) {
-			if (checks(pattern.key, key)) return pattern.val;
+			if (checks(pattern.key, key)) result.push(pattern.val);
 		}
 	}
-	return undefined;
+	return result;
 }
 
 function isObjectExtra(ir: ObjectIR, key: PropertyKey): boolean {
-	return objectExtraIndex(ir, key) === undefined && !ir.props.some(prop => prop.key === key);
+	return objectIndexValidators(ir, key).length === 0 && !ir.props.some(prop => prop.key === key);
 }
 
 /** Pure predicate used for union-member scanning (no morphs, no errors). */
@@ -341,17 +345,21 @@ function checkNode(ir: IR, v: unknown): boolean {
 			}
 			for (const key in rec) {
 				if (!own.call(rec, key)) continue;
-				const index = objectExtraIndex(ir, key);
-				if (index !== undefined && !checks(index, rec[key])) return false;
-				if (ir.extras === "reject" && index === undefined && !ir.props.some(prop => prop.key === key)) {
+				const indexes = objectIndexValidators(ir, key);
+				for (const index of indexes) {
+					if (!checks(index, rec[key])) return false;
+				}
+				if (ir.extras === "reject" && indexes.length === 0 && !ir.props.some(prop => prop.key === key)) {
 					return false;
 				}
 			}
 			for (const key of Object.getOwnPropertySymbols(rec)) {
 				if (!Object.prototype.propertyIsEnumerable.call(rec, key)) continue;
-				const index = objectExtraIndex(ir, key);
-				if (index !== undefined && !checks(index, rec[key])) return false;
-				if (ir.extras === "reject" && index === undefined && !ir.props.some(prop => prop.key === key)) {
+				const indexes = objectIndexValidators(ir, key);
+				for (const index of indexes) {
+					if (!checks(index, rec[key])) return false;
+				}
+				if (ir.extras === "reject" && indexes.length === 0 && !ir.props.some(prop => prop.key === key)) {
 					return false;
 				}
 			}

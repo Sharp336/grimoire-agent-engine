@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Collapsed the interpreter (`interp.ts`) and JIT compiler (`compile.ts`) into a single `validate.ts` engine — one semantic definition per IR node kind feeds both execution paths. The `@oh-my-pi/omptype/compile` and `@oh-my-pi/omptype/interp` subpaths no longer resolve; these internal modules were removed.
+
+### Fixed
+
+- Fixed a divergence where the pure-union fast path (`checks()`) applied only the first matching index signature for object keys, while the interpreter's full visit path and the JIT both applied the general index plus every matching pattern index. Multi-index schemas (e.g. `type([{ "[/^f/]": "number", "[/oo$/]": "string" }, "|", "null"])`) now reject consistently across pre-JIT and post-JIT calls.
+
 ## [17.2.8] - 2026-08-04
 
 ### Added
