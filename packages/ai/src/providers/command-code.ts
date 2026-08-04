@@ -12,6 +12,7 @@
  * `input_schema` tools, `system` as one string, the `x-*` header set). oh-my-pi
  * adapts to that harness rather than normalizing it to its own conventions.
  */
+import * as fs from "node:fs/promises";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { $env, readLines } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
@@ -227,8 +228,7 @@ async function gitOutput(cwd: string, args: string[]): Promise<string> {
 
 async function readStructure(cwd: string): Promise<string[]> {
 	try {
-		const { readdir } = await import("node:fs/promises");
-		const entries = await readdir(cwd);
+		const entries = await fs.readdir(cwd);
 		return entries.filter(entry => !entry.startsWith(".") && !STRUCTURE_IGNORED.has(entry)).sort();
 	} catch {
 		return [];

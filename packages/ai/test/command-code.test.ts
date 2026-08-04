@@ -32,7 +32,7 @@ const OFFICIAL_CLIENT_HEADERS = {
 const OFFICIAL_ENVELOPE_KEYS = ["config", "memory", "taste", "skills", "permissionMode", "threadId", "params"];
 const OFFICIAL_PARAMS_KEYS = ["model", "messages", "tools", "system", "max_tokens", "stream"];
 
-let server: ReturnType<typeof Bun.serve> | undefined;
+let server: Bun.Server | undefined;
 let scenario:
 	| { kind: "capture"; body: string }
 	| { kind: "happy" }
@@ -474,10 +474,12 @@ describe("command-code helpers", () => {
 		expect(config.environment).toBe(process.platform);
 		expect(Array.isArray(config.structure)).toBe(true);
 		expect(config.structure).not.toContain("node_modules");
-		// oh-my-pi's own checkout is a git repo, so the git fields must be filled.
+		// Environment-stable invariants only: PR CI checks out a detached HEAD
+		// (`git branch --show-current` → ""), and a clean tree has empty status.
 		expect(config.isGitRepo).toBe(true);
-		expect(config.currentBranch.length).toBeGreaterThan(0);
-		expect(config.gitStatus.length).toBeGreaterThan(0);
+		expect(typeof config.currentBranch).toBe("string");
+		expect(typeof config.gitStatus).toBe("string");
+		expect(config.mainBranch.length).toBeGreaterThan(0);
 		expect(config.recentCommits.length).toBeGreaterThan(0);
 	});
 });
