@@ -71,6 +71,7 @@ import type {
 	AutocompleteProviderFactory,
 	ContextUsage,
 	ExtensionUIContext,
+	ExtensionUICustomOptions,
 	ExtensionUIDialogOptions,
 	ExtensionUISelectItem,
 	ExtensionWidgetContent,
@@ -5025,7 +5026,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			keybindings: KeybindingsManager,
 			done: (result: T) => void,
 		) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
-		options?: { overlay?: boolean },
+		options?: ExtensionUICustomOptions,
 	): Promise<T> {
 		return this.#extensionUiController.showHookCustom(factory, options);
 	}

@@ -2,9 +2,14 @@ import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { ReviewCommand } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review";
-import type { CustomCommandAPI } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/types";
-import type { HookCommandContext } from "@oh-my-pi/pi-coding-agent/extensibility/hooks/types";
+import {
+	parseReviewDiffSnapshot,
+	ReviewCommand,
+} from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review";
+import type {
+	CustomCommandAPI,
+	CustomCommandContext,
+} from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/types";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { PrDiffPayload, ViewLookupResult } from "@oh-my-pi/pi-coding-agent/tools/gh";
 import * as gh from "@oh-my-pi/pi-coding-agent/tools/gh";
@@ -106,7 +111,7 @@ describe("ReviewCommand", () => {
 		onEditorCall?: (call: EditorCall) => void;
 		onSelectCall?: (call: SelectCall) => void;
 		onNotify?: (call: NotifyCall) => void;
-	}): HookCommandContext {
+	}): CustomCommandContext {
 		const selectResults = [...(options?.selectResults ?? [])];
 		return {
 			hasUI: true,
@@ -134,7 +139,7 @@ describe("ReviewCommand", () => {
 					options?.onNotify?.({ message, type });
 				},
 			},
-		} as unknown as HookCommandContext;
+		} as unknown as CustomCommandContext;
 	}
 
 	it("uses prompt-style input for custom review instructions", async () => {
@@ -251,7 +256,7 @@ describe("ReviewCommand", () => {
 		const dir = await createTempDir();
 		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
 		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
-		const ctx = { hasUI: false } as unknown as HookCommandContext;
+		const ctx = { hasUI: false } as unknown as CustomCommandContext;
 
 		const cases = [
 			"https://github.com/owner/repo/pull/123",
@@ -277,7 +282,7 @@ describe("ReviewCommand", () => {
 		const dir = await createTempDir();
 		spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
 		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
-		const ctx = { hasUI: false } as unknown as HookCommandContext;
+		const ctx = { hasUI: false } as unknown as CustomCommandContext;
 
 		const result = await command.execute(["https://github.com/owner/repo/pull/123"], ctx);
 
@@ -292,7 +297,7 @@ describe("ReviewCommand", () => {
 		const dir = await createTempDir();
 		spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(makeManyFileDiff(21)));
 		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
-		const ctx = { hasUI: false } as unknown as HookCommandContext;
+		const ctx = { hasUI: false } as unknown as CustomCommandContext;
 
 		const result = await command.execute(["https://github.com/owner/repo/pull/123"], ctx);
 
@@ -306,7 +311,7 @@ describe("ReviewCommand", () => {
 	it("rejects unsupported PR-like URL formats as normal instructions", async () => {
 		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
 		const command = new ReviewCommand({ cwd: "/tmp" } as unknown as CustomCommandAPI);
-		const ctx = { hasUI: false } as unknown as HookCommandContext;
+		const ctx = { hasUI: false } as unknown as CustomCommandContext;
 
 		const cases = [
 			"https://github.com/owner/repo/issues/123",
@@ -331,7 +336,7 @@ describe("ReviewCommand", () => {
 		const dir = await createTempDir();
 		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
 		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
-		const ctx = { hasUI: false } as unknown as HookCommandContext;
+		const ctx = { hasUI: false } as unknown as CustomCommandContext;
 		const secondUrl = "https://github.com/owner/repo/pull/456";
 
 		const result = await command.execute(["focus", "https://github.com/owner/repo/pull/123", "on", secondUrl], ctx);
@@ -591,9 +596,58 @@ describe("ReviewCommand", () => {
 		expect(result!).toContain("src/pr.ts");
 		expect(showSpy).toHaveBeenCalledWith(dir, "abc1234", { format: "" });
 	});
+	it("parses quoted rename paths and exact old/new line anchors", () => {
+		const snapshot = parseReviewDiffSnapshot(`diff --git "a/src/old name.ts" "b/src/new name.ts"
+similarity index 80%
+rename from "src/old name.ts"
+rename to "src/new name.ts"
+--- "a/src/old name.ts"
++++ "b/src/new name.ts"
+@@ -10,2 +10,3 @@ export function value()
+ context
+-removed
++added
++second
+\\ No newline at end of file`);
+
+		expect(snapshot.files).toHaveLength(1);
+		expect(snapshot.files[0]).toEqual(
+			expect.objectContaining({
+				path: "src/new name.ts",
+				oldPath: "src/old name.ts",
+				newPath: "src/new name.ts",
+				linesAdded: 2,
+				linesRemoved: 1,
+			}),
+		);
+		expect(snapshot.files[0]!.rows).toMatchObject([
+			{ kind: "hunk", hunkHeader: "@@ -10,2 +10,3 @@ export function value()" },
+			{ kind: "context", oldLine: 10, newLine: 10, raw: " context" },
+			{ kind: "removed", oldLine: 11, raw: "-removed" },
+			{ kind: "added", newLine: 11, raw: "+added" },
+			{ kind: "added", newLine: 12, raw: "+second" },
+			{ kind: "no-newline", raw: "\\ No newline at end of file" },
+		]);
+	});
+
+	it("keeps duplicate staged and unstaged file diffs independently addressable", () => {
+		const fileDiff = `diff --git a/src/value.ts b/src/value.ts
+--- a/src/value.ts
++++ b/src/value.ts
+@@ -0,0 +1 @@
++value`;
+		const snapshot = parseReviewDiffSnapshot(`${fileDiff}\n${fileDiff}`);
+
+		expect(snapshot.files.map(file => ({ path: file.path, occurrence: file.occurrence }))).toEqual([
+			{ path: "src/value.ts", occurrence: 1 },
+			{ path: "src/value.ts", occurrence: 2 },
+		]);
+		expect(snapshot.totalAdded).toBe(2);
+	});
+
 	it("renders headless review requests through the reviewer task prompt", async () => {
 		const command = new ReviewCommand({ cwd: "/tmp" } as unknown as CustomCommandAPI);
-		const ctx = { hasUI: false } as unknown as HookCommandContext;
+		const ctx = { hasUI: false } as unknown as CustomCommandContext;
 
 		const result = await command.execute(["focus", "auth"], ctx);
 

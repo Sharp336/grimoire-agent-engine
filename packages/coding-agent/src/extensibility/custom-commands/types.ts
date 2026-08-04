@@ -8,11 +8,35 @@
 import type * as arktype from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
 import type * as zod from "@oh-my-pi/omptype/zod";
-import type { ExecOptions, ExecResult, HookCommandContext } from "../../extensibility/hooks/types";
+import type { Component, TUI } from "@oh-my-pi/pi-tui";
+import type { ExtensionUICustomOptions } from "../../extensibility/extensions/types";
+import type { ExecOptions, ExecResult, HookCommandContext, HookUIContext } from "../../extensibility/hooks/types";
 import type * as PiCodingAgent from "../../index";
+import type { Theme } from "../../modes/theme/theme";
 
 // Re-export for custom commands to use
 export type { ExecOptions, ExecResult, HookCommandContext };
+
+export interface CustomCommandUIContext extends Omit<HookUIContext, "custom"> {
+	/**
+	 * Show a custom component using the documented custom-command callback shape.
+	 * The command runtime adapts the extension UI's keybindings-aware factory.
+	 */
+	custom<T>(
+		factory: (
+			tui: TUI,
+			theme: Theme,
+			done: (result: T) => void,
+		) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
+		options?: ExtensionUICustomOptions,
+	): Promise<T>;
+	/** Insert text through the core editor's paste handling. */
+	pasteToEditor(text: string): void;
+}
+
+export type CustomCommandContext = Omit<HookCommandContext, "ui"> & {
+	ui: CustomCommandUIContext;
+};
 
 /**
  * API passed to custom command factory.
@@ -86,7 +110,7 @@ export interface CustomCommand {
 	 * @param ctx - Command context with UI and session control
 	 * @returns String to send as prompt, or void for fire-and-forget
 	 */
-	execute(args: string[], ctx: HookCommandContext): Promise<string | undefined> | string | undefined;
+	execute(args: string[], ctx: CustomCommandContext): Promise<string | undefined> | string | undefined;
 }
 
 /**
