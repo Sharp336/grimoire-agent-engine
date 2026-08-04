@@ -2,9 +2,11 @@
 
 ## [Unreleased]
 
+## [17.2.7] - 2026-08-03
+
 ### Changed
 
-- Replaced arktype with `@oh-my-pi/omptype` across all tool parameter and config schemas: ~100x faster schema construction removes the arktype startup tax (the `scope({}, { jitless: true })` workarounds are gone). Config schema errors now report via `OmpErrors` entries with the same `path`/`problem` shape.
+- Replaced arktype with @oh-my-pi/omptype for tool parameter and config schemas, significantly improving startup performance with ~100x faster schema construction. Config schema errors are now reported via OmpErrors using the same path/problem structure.
 
 ### Fixed
 
@@ -15,6 +17,13 @@
 ### Added
 
 - Added `providers.maxImagesPerRequest` and `providers.maxImageBytesPerRequest`: per-provider budgets for how many images and how many total base64 image bytes a single request may carry, settable per provider id from `config.yml`, `omp config set`, or the settings panel. A custom gateway that is unknown by id now inherits its wire API family's image budget (`anthropic-messages` 90, `google-generative-ai` 200) instead of falling to the 5-image floor, which keeps a compaction archive readable on a private gateway. The byte budget removes the oldest droppable images until the request fits or none are left; images retained in assistant turns are never removed and count against the budget. Snapcompact's inline imaging plans against both budgets, so a tool result or system prompt whose frames would not fit ships as text instead of a note pointing at frames the clamp would remove. A turn the clamp leaves with no images and no text keeps an `[image omitted: provider image limit]` placeholder, so an image-only user turn is not silently dropped from the request
+- Fixed an issue where custom, extension, or hook tool wrappers stripped schema methods off parameters, causing wire-schema detection failures and status-line token estimator crashes.
+- Fixed a bug where agent() calls in evaluation cells ignored turn cancellation and continued running indefinitely.
+- Fixed the built-in tail command to exit silently with code 141 (SIGPIPE) instead of failing with a "Broken pipe" error when a downstream pipeline reader exits early.
+- Fixed the in-process ps shell builtin to support common procps/BSD format specifiers, including tpgid, pri, flags, real/effective user/group columns, wchan, fault counters, sz, and the STAT + foreground flag.
+- Fixed install.sh falsely reporting success on musl-based systems (such as Alpine Linux) when the binary fails to start; the installer now smoke-tests the binary, exits non-zero on failure, and provides remediation steps.
+- Fixed Codex config.toml discovery incorrectly importing MCP servers that are configured with enabled = false.
+- Fixed bash.patterns allow rules rejecting valid commands when quoted arguments contained shell metacharacters (such as Cargo benchmark regex filters).
 
 ## [17.2.6] - 2026-08-03
 
