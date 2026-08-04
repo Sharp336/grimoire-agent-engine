@@ -154,6 +154,44 @@ describe("compound command interception", () => {
 	});
 });
 
+describe("default grep rule with pipeline stages", () => {
+	const tools = ["grep"];
+
+	it.each([
+		"printf 'x\\n' | grep x",
+		"ps aux | grep -i node",
+		"echo hi | grep -e foo -e bar",
+		"echo hi | grep -A 3 foo",
+		"echo hi | LC_ALL=C grep foo",
+		"echo hi | /usr/bin/grep foo",
+		"echo hi | grep -- -foo",
+		"echo hi | sort | rg --color never foo",
+		"echo hi | grep foo > out.txt",
+	])("does not block %s, which only filters pipeline stdin", command => {
+		expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
+	});
+
+	it.each([
+		"grep pattern src/",
+		"grep -r pattern .",
+		"grep pattern file | wc -l",
+		"cat x | grep pat file.txt",
+		"echo hi | grep -e foo bar.txt",
+		"echo hi | grep -- foo bar.txt",
+		"echo hi && grep pat file",
+		"echo hi || grep pat",
+		"echo hi; grep pat",
+	])("still blocks %s, which searches a path", command => {
+		expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
+	});
+
+	it("only exempts the pipeline stage from path-based tool rules", () => {
+		expect(checkBashInterception("echo hi | cat file.txt", ["read"], DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(
+			true,
+		);
+	});
+});
+
 describe("default echo/printf redirect rule", () => {
 	const tools = ["write"];
 

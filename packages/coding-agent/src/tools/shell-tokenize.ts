@@ -82,26 +82,40 @@ export function tokenizeShellSegments(command: string): string[][] {
 	return segments;
 }
 
+/** A flat shell command stage together with the pipeline context it runs in. */
+export interface FlatShellCommandStage {
+	/** Original, trimmed text of the stage. */
+	text: string;
+	/**
+	 * True when the stage is a downstream element of a pipeline
+	 * (`producer | stage`), so its input comes from the previous stage stdout
+	 * rather than from a path operand.
+	 */
+	consumesPipelineStdin: boolean;
+}
+
 /**
- * Returns the original text of flat shell command segments. Unlike
- * `tokenizeShellSegments`, this preserves quoting and escaping so the results
- * are safe to match against user-configured regular expressions.
+ * Returns the original text of flat shell command stages plus the pipeline
+ * context each one executes in. Unlike `tokenizeShellSegments`, this preserves
+ * quoting and escaping so the results are safe to match against
+ * user-configured regular expressions.
  *
  * The extractor deliberately declines to split syntax whose execution context
  * cannot be determined with this small scanner (heredocs, command substitution,
  * backticks, grouping, and malformed quoting). Callers must still check the
  * complete input in that case.
  */
-export function extractFlatShellCommandSegments(command: string): string[] {
-	const segments: string[] = [];
+export function extractFlatShellCommandStages(command: string): FlatShellCommandStage[] {
+	const segments: FlatShellCommandStage[] = [];
 	let segmentStart = 0;
 	let inSingle = false;
 	let inDouble = false;
 	let atWordStart = true;
+	let consumesPipelineStdin = false;
 
 	const pushSegment = (end: number) => {
 		const segment = command.slice(segmentStart, end).trim();
-		if (segment.length > 0) segments.push(segment);
+		if (segment.length > 0) segments.push({ text: segment, consumesPipelineStdin });
 	};
 
 	for (let i = 0; i < command.length; i++) {
@@ -155,6 +169,7 @@ export function extractFlatShellCommandSegments(command: string): string[] {
 		}
 		if (ch === "#" && atWordStart) {
 			pushSegment(i);
+			consumesPipelineStdin = false;
 			const newline = command.indexOf("\n", i + 1);
 			if (newline === -1) return segments;
 			i = newline;
@@ -170,7 +185,10 @@ export function extractFlatShellCommandSegments(command: string): string[] {
 					: false;
 		if ((ch === "\n" || ch === ";" || ch === "|" || ch === "&") && !isRedirectionOperatorCharacter) {
 			pushSegment(i);
-			if ((ch === "|" || ch === "&") && command[i + 1] === ch) i++;
+			const isDoubledOperator = (ch === "|" || ch === "&") && command[i + 1] === ch;
+			// A single `|` feeds the next stage stdin; `||` is a control operator.
+			consumesPipelineStdin = ch === "|" && !isDoubledOperator;
+			if (isDoubledOperator) i++;
 			segmentStart = i + 1;
 			atWordStart = true;
 			continue;
@@ -181,4 +199,13 @@ export function extractFlatShellCommandSegments(command: string): string[] {
 	if (inSingle || inDouble) return [];
 	pushSegment(command.length);
 	return segments;
+}
+
+/**
+ * Returns only the text of flat shell command segments, dropping the pipeline
+ * context. Thin wrapper over `extractFlatShellCommandStages` for callers that
+ * match rules against segment text alone.
+ */
+export function extractFlatShellCommandSegments(command: string): string[] {
+	return extractFlatShellCommandStages(command).map(stage => stage.text);
 }

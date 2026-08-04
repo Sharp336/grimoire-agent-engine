@@ -6,7 +6,7 @@
  * the specialized tools instead.
  */
 import { type BashInterceptorRule, DEFAULT_BASH_INTERCEPTOR_RULES } from "../config/settings-schema";
-import { extractFlatShellCommandSegments } from "./shell-tokenize";
+import { extractFlatShellCommandStages, tokenizeShellSegments } from "./shell-tokenize";
 
 export interface InterceptionResult {
 	/** If true, the bash command should be blocked */
@@ -94,13 +94,122 @@ function withoutLeadingEnvironmentAssignments(command: string): string | null {
 	return commandWithoutAssignments.length > 0 ? commandWithoutAssignments : null;
 }
 
-function interceptionCandidates(command: string): string[] {
-	const candidates = [command.trim()];
-	const segments = extractFlatShellCommandSegments(command);
-	candidates.push(...segments.map(segment => segment.trim()));
-	for (const segment of segments) {
-		const withoutAssignments = withoutLeadingEnvironmentAssignments(segment);
-		if (withoutAssignments) candidates.push(withoutAssignments);
+/**
+ * Commands whose input is stdin unless a path operand is supplied. A dedicated
+ * path-searching tool cannot stand in for one of these when it runs as a
+ * pipeline stage filtering the previous command stdout.
+ */
+const STDIN_FILTER_COMMANDS = new Set(["grep", "egrep", "fgrep", "rgrep", "rg", "ripgrep", "ag", "ack", "ack-grep"]);
+
+/** Suggested tools that search paths and cannot read the bash pipeline stdin. */
+const PATH_ONLY_TOOLS = new Set(["grep"]);
+
+/** Options that supply the pattern, so no bare pattern operand follows. */
+const PATTERN_OPTIONS = new Set(["-e", "-f", "--regexp", "--file"]);
+
+/** Options that consume the next token as a value rather than a search path. */
+const VALUE_OPTIONS = new Set([
+	"-e",
+	"-f",
+	"-m",
+	"-A",
+	"-B",
+	"-C",
+	"--regexp",
+	"--file",
+	"--max-count",
+	"--after-context",
+	"--before-context",
+	"--context",
+	"--color",
+	"--colour",
+	"--include",
+	"--exclude",
+	"--exclude-dir",
+	"--label",
+]);
+
+const REDIRECTION_TOKEN = /^\d*(?:>>|>&|&>|<<|<|>)/;
+const BARE_REDIRECTION_TOKEN = /^\d*(?:>>|>&|&>|<<|<|>)$/;
+const ENVIRONMENT_ASSIGNMENT_TOKEN = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+function commandWordBasename(word: string): string {
+	const normalized = word.replaceAll("\\", "/");
+	return normalized.slice(normalized.lastIndexOf("/") + 1);
+}
+
+/**
+ * True when the stage is a grep-style filter invoked without any path operand,
+ * so the only thing it can read is the stdin it inherits from the pipeline.
+ * Anything this small scanner cannot account for returns false, which keeps the
+ * previous interception behaviour.
+ */
+function isStdinOnlyFilterStage(stage: string): boolean {
+	const words = tokenizeShellSegments(stage)[0];
+	if (!words || words.length === 0) return false;
+	let index = 0;
+	while (index < words.length && ENVIRONMENT_ASSIGNMENT_TOKEN.test(words[index] ?? "")) index++;
+	const commandWord = words[index];
+	if (!commandWord || !STDIN_FILTER_COMMANDS.has(commandWordBasename(commandWord))) return false;
+
+	let patternSeen = false;
+	for (let i = index + 1; i < words.length; i++) {
+		const word = words[i] ?? "";
+		if (word === "--") {
+			const operands = words.length - (i + 1);
+			return operands <= (patternSeen ? 0 : 1);
+		}
+		if (REDIRECTION_TOKEN.test(word)) {
+			// A redirection target is not a search path.
+			if (BARE_REDIRECTION_TOKEN.test(word)) i++;
+			continue;
+		}
+		if (word.startsWith("-") && word.length > 1) {
+			if (PATTERN_OPTIONS.has(word)) {
+				patternSeen = true;
+				i++;
+				continue;
+			}
+			if (VALUE_OPTIONS.has(word)) {
+				i++;
+				continue;
+			}
+			if (word.startsWith("--")) continue;
+			// Bundled short flags: a trailing -e/-f still consumes the next word.
+			const lastFlag = word.at(-1);
+			if (lastFlag === "e" || lastFlag === "f") {
+				patternSeen = true;
+				i++;
+			}
+			continue;
+		}
+		if (!patternSeen) {
+			patternSeen = true;
+			continue;
+		}
+		// A second bare operand is a search path a path-based tool can handle.
+		return false;
+	}
+	return true;
+}
+
+interface InterceptionCandidate {
+	/** Text matched against the configured rule patterns. */
+	text: string;
+	/**
+	 * True when the candidate is a pipeline stage whose only input is stdin, so
+	 * rules suggesting a path-based tool must not apply to it.
+	 */
+	stdinOnlyPipelineStage: boolean;
+}
+
+function interceptionCandidates(command: string): InterceptionCandidate[] {
+	const candidates: InterceptionCandidate[] = [{ text: command.trim(), stdinOnlyPipelineStage: false }];
+	for (const stage of extractFlatShellCommandStages(command)) {
+		const stdinOnlyPipelineStage = stage.consumesPipelineStdin && isStdinOnlyFilterStage(stage.text);
+		candidates.push({ text: stage.text.trim(), stdinOnlyPipelineStage });
+		const withoutAssignments = withoutLeadingEnvironmentAssignments(stage.text);
+		if (withoutAssignments) candidates.push({ text: withoutAssignments, stdinOnlyPipelineStage });
 	}
 	return candidates;
 }
@@ -128,9 +237,12 @@ export function checkBashInterception(
 		}
 
 		for (const candidate of candidates) {
+			// The suggested tool searches paths, so it cannot replace a stage
+			// that only filters the stdin handed to it by the pipeline.
+			if (candidate.stdinOnlyPipelineStage && PATH_ONLY_TOOLS.has(rule.tool)) continue;
 			// A configured global or sticky regex carries state across calls.
 			regex.lastIndex = 0;
-			if (regex.test(candidate)) {
+			if (regex.test(candidate.text)) {
 				return {
 					block: true,
 					message: `Blocked: ${rule.message}\n\nOriginal command: ${originalCommand}`,
