@@ -159,6 +159,22 @@ export const getModelsConfigSchemaBundle = once(() => {
 		return true;
 	});
 
+	const PeakPricingWindowSchema = type({
+		startHour: "0 <= number.integer <= 23",
+		endHour: "0 <= number.integer <= 23",
+	});
+
+	const PeakPricingSchema = type({
+		"effectiveFrom?": "number",
+		windows: [PeakPricingWindowSchema, "[]"],
+		multiplier: "number",
+	}).narrow((value, ctx) => {
+		if (value.windows.length === 0) {
+			return ctx.mustBe("peakPricing.windows a non-empty array");
+		}
+		return true;
+	});
+
 	const ModelDefinitionSchema = type({
 		id: "string",
 		"name?": "string",
@@ -175,6 +191,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 			cacheWrite: "number",
 		},
 		"premiumMultiplier?": "number",
+		"peakPricing?": PeakPricingSchema,
 		"contextWindow?": "number",
 		"maxTokens?": "number",
 		"omitMaxOutputTokens?": "boolean",
@@ -224,6 +241,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 			"cacheWrite?": "number",
 		},
 		"premiumMultiplier?": "number",
+		"peakPricing?": PeakPricingSchema,
 		"contextWindow?": "number",
 		"maxTokens?": "number",
 		"omitMaxOutputTokens?": "boolean",

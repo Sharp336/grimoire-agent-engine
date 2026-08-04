@@ -857,7 +857,21 @@ export interface Model<TApi extends Api = Api> {
 		cacheRead: number; // $/million tokens
 		cacheWrite: number; // $/million tokens
 	};
-	/** Premium Copilot requests charged per user-initiated request (defaults to 1). */
+	/**
+	 * Peak/off-peak pricing windows. When the request start timestamp falls
+	 * within a window, all costs are multiplied by the multiplier. Windows are
+	 * evaluated at the UTC hour of the request, not at cost-calculation time, so
+	 * recomputing cost for partial/final usage never changes the multiplier.
+	 * Hours are in UTC to keep behavior timezone-independent.
+	 *
+	 * Example: DeepSeek peak hours (Beijing 9-12, 14-18) = UTC 1-4, 6-10
+	 */
+	peakPricing?: {
+		/** UTC timestamp before which the policy is dormant (multiplier stays 1). */
+		effectiveFrom?: number;
+		windows: Array<{ startHour: number; endHour: number }>;
+		multiplier: number;
+	};
 	premiumMultiplier?: number;
 	contextWindow: number | null;
 	maxTokens: number | null;

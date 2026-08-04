@@ -56,6 +56,7 @@ import { collapseEffortVariantsAcrossProviders } from "../src/variant-collapse";
 import {
 	applyAntigravityPricingFallback,
 	applyCanonicalLimitFallback,
+	applyDeepSeekPeakPricing,
 	applyGeneratedModelPolicies,
 	applyOllamaCloudOutputCap,
 	CLOUDFLARE_FALLBACK_MODEL,
@@ -660,6 +661,7 @@ async function generateModels() {
 	allModels = applyPremiumMultiplierOverrides(allModels);
 	allModels = applyCodexPricingFallback(allModels);
 	allModels = applyAntigravityPricingFallback(allModels);
+	allModels = applyDeepSeekPeakPricing(allModels);
 	allModels = applyKimiMaxTokensCap(allModels);
 	allModels = applyFireworksDeepSeekReasoningShape(allModels);
 	allModels = dropFireworksWireIds(allModels);
@@ -759,5 +761,8 @@ function canonicalizeModelCompat(model: ModelSpec<Api>): void {
 	}
 }
 
-// Run the generator
-generateModels().catch(console.error);
+// Run the generator when executed directly (`bun run gen:models`), not when
+// imported by tests.
+if (import.meta.main) {
+	generateModels().catch(console.error);
+}

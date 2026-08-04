@@ -152,6 +152,45 @@ const COPILOT_GENERATED_LIMITS: Record<string, { contextWindow: number; maxToken
 };
 
 /**
+ * UTC timestamp at which DeepSeek's peak/off-peak pricing becomes effective.
+ * DeepSeek announced 2x pricing during peak hours (Beijing 9:00-12:00 and
+ * 14:00-18:00 daily) but has not set an activation date
+ * (https://api-docs.deepseek.com/quick_start/pricing — "the effective date
+ * will be subject to the official announcement"). Until that date is
+ * announced, `Number.POSITIVE_INFINITY` keeps the config dormant so reported
+ * costs stay accurate; set it to `Date.UTC(...)` once the policy is live.
+ */
+const DEEPSEEK_PEAK_PRICING_EFFECTIVE_FROM_MS = Number.POSITIVE_INFINITY;
+
+/**
+ * DeepSeek API peak/off-peak pricing: 2x during Beijing time 9-12 and 14-18,
+ * which is UTC hours 1-4 and 6-10. Applied provider-wide because the policy
+ * covers every DeepSeek billing item.
+ */
+export function applyDeepSeekPeakPricing(
+	models: readonly ModelSpec[],
+	effectiveFromMs: number = DEEPSEEK_PEAK_PRICING_EFFECTIVE_FROM_MS,
+): ModelSpec[] {
+	// Dormant until DeepSeek announces the effective date; emitting nothing
+	// keeps the bundled catalog at the actual billed rates.
+	if (!Number.isFinite(effectiveFromMs)) return [...models];
+	return models.map(model => {
+		if (model.provider !== "deepseek") return model;
+		return {
+			...model,
+			peakPricing: {
+				effectiveFrom: effectiveFromMs,
+				windows: [
+					{ startHour: 1, endHour: 4 }, // Beijing 9-12
+					{ startHour: 6, endHour: 10 }, // Beijing 14-18
+				],
+				multiplier: 2,
+			},
+		};
+	});
+}
+
+/**
  * Apply upstream metadata corrections to a mutable array of models, then
  * re-bake canonical thinking metadata so generated catalogs always carry the
  * deriver's output for the post-policy spec.

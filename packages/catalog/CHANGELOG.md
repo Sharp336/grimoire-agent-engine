@@ -7,6 +7,13 @@
 ### Fixed
 
 - Fixed an issue where setting `thinking-level: off` failed to disable reasoning on direct DeepSeek V4 requests.
+### Added
+
+- Added peak/off-peak pricing support: models can declare `peakPricing` UTC hour windows with a cost multiplier, evaluated against the request start timestamp. DeepSeek's announced 2x peak-hours policy is wired up in the generator but stays dormant until DeepSeek publishes the effective date, so displayed costs match what is actually billed today.
+
+### Changed
+
+- `calculateCost` accepts a request start timestamp (defaulting to the current time) so peak pricing multipliers pin to when the request started instead of when cost is computed.
 
 ## [17.2.6] - 2026-08-03
 

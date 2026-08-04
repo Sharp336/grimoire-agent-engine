@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Proxied model responses now pin cost calculation to the request start timestamp.
+
 ## [17.2.6] - 2026-08-03
 
 ### Fixed

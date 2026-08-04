@@ -530,6 +530,7 @@ interface ModelPatch {
 	compactionModel?: string;
 	remoteCompaction?: RemoteCompactionConfig<Api>;
 	premiumMultiplier?: number;
+	peakPricing?: ModelSpec<Api>["peakPricing"];
 }
 
 /**
@@ -563,6 +564,7 @@ function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: ModelTr
 		result.remoteCompaction = mergeRemoteCompactionConfig(base.remoteCompaction, patch.remoteCompaction);
 	}
 	if (patch.premiumMultiplier !== undefined) result.premiumMultiplier = patch.premiumMultiplier;
+	if (patch.peakPricing !== undefined) result.peakPricing = patch.peakPricing;
 	if (patch.cost) {
 		result.cost = {
 			input: patch.cost.input ?? base.cost.input,
@@ -679,6 +681,7 @@ function buildCustomModelOverlay(
 		compactionModel: modelDef.compactionModel,
 		remoteCompaction: mergeRemoteCompactionConfig(providerRemoteCompaction, modelDef.remoteCompaction),
 		premiumMultiplier: modelDef.premiumMultiplier,
+		peakPricing: modelDef.peakPricing,
 		isOAuth: resolveCustomModelIsOAuth(api, providerAuth),
 	};
 }
@@ -721,6 +724,7 @@ function finalizeCustomModel(model: CustomModelOverlay, options: CustomModelBuil
 		compactionModel: resolvedModel.compactionModel,
 		remoteCompaction: resolvedModel.remoteCompaction,
 		premiumMultiplier: resolvedModel.premiumMultiplier,
+		peakPricing: resolvedModel.peakPricing ?? reference?.peakPricing,
 		isOAuth: resolvedModel.isOAuth,
 	} as ModelSpec<Api>);
 }
@@ -2815,5 +2819,6 @@ export interface ProviderConfigInput {
 		compactionModel?: string;
 		remoteCompaction?: RemoteCompactionConfig<Api>;
 		premiumMultiplier?: number;
+		peakPricing?: ModelSpec<Api>["peakPricing"];
 	}>;
 }

@@ -43,14 +43,43 @@ export function getBundledModels(provider: GeneratedProvider): Model<Api>[] {
 	return models ? (Array.from(models.values()) as Model<Api>[]) : [];
 }
 
-export function calculateCost<TApi extends Api>(model: Model<TApi>, usage: Usage): Usage["cost"] {
+/**
+ * `requestTimestamp` pins peak/off-peak pricing to when the request started.
+ * It defaults to the calculation time so untyped callers keep the legacy
+ * two-argument shape; typed provider sites always pass the real request start.
+ */
+export function calculateCost<TApi extends Api>(
+	model: Model<TApi>,
+	usage: Usage,
+	requestTimestamp: number = Date.now(),
+): Usage["cost"] {
+	const peakMultiplier = getPeakPricingMultiplier(model, requestTimestamp);
 	const orchestration = usage.orchestration;
-	usage.cost.input = (model.cost.input / 1000000) * (usage.input + (orchestration?.input ?? 0));
-	usage.cost.output = (model.cost.output / 1000000) * (usage.output + (orchestration?.output ?? 0));
-	usage.cost.cacheRead = (model.cost.cacheRead / 1000000) * (usage.cacheRead + (orchestration?.cacheRead ?? 0));
-	usage.cost.cacheWrite = cacheWriteCost(model, usage);
+	usage.cost.input = (model.cost.input / 1000000) * (usage.input + (orchestration?.input ?? 0)) * peakMultiplier;
+	usage.cost.output = (model.cost.output / 1000000) * (usage.output + (orchestration?.output ?? 0)) * peakMultiplier;
+	usage.cost.cacheRead =
+		(model.cost.cacheRead / 1000000) * (usage.cacheRead + (orchestration?.cacheRead ?? 0)) * peakMultiplier;
+	usage.cost.cacheWrite = cacheWriteCost(model, usage) * peakMultiplier;
 	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
 	return usage.cost;
+}
+
+/**
+ * Multiplier for peak/off-peak pricing windows, evaluated at the request start
+ * timestamp's UTC hour. Windows are half-open `[startHour, endHour)`; a window
+ * whose start exceeds its end wraps midnight. Models without `peakPricing`,
+ * or with an `effectiveFrom` date in the future, always pay 1x.
+ */
+function getPeakPricingMultiplier<TApi extends Api>(model: Model<TApi>, requestTimestamp: number): number {
+	const peak = model.peakPricing;
+	if (!peak) return 1;
+	if (peak.effectiveFrom !== undefined && requestTimestamp < peak.effectiveFrom) return 1;
+	const utcHour = new Date(requestTimestamp).getUTCHours();
+	const isPeak = peak.windows.some(w => {
+		if (w.startHour <= w.endHour) return utcHour >= w.startHour && utcHour < w.endHour;
+		return utcHour >= w.startHour || utcHour < w.endHour;
+	});
+	return isPeak ? peak.multiplier : 1;
 }
 
 /**

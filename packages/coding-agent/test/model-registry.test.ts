@@ -7,6 +7,7 @@ import { Effort, type FetchImpl, type Model, type OpenAICompat, type ThinkingCon
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { getModelsConfigSchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema-bundle";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -1522,6 +1523,65 @@ describe("ModelRegistry", () => {
 			const model = omitOnCustom.find("ollama", "glm-5.1:cloud");
 			expect(model?.omitMaxOutputTokens).toBe(true);
 			expect(model?.maxTokens).toBe(202752);
+		});
+	});
+
+	describe("peakPricing config wiring", () => {
+		// Custom definitions and overrides must carry `peakPricing` all the way
+		// into the built catalog so `calculateCost` sees it for configured models.
+		const peakPolicy = {
+			windows: [
+				{ startHour: 1, endHour: 4 },
+				{ startHour: 6, endHour: 10 },
+			],
+			multiplier: 2,
+		};
+		let registry: ModelRegistry;
+		beforeAll(() => {
+			registry = readonlyRegistry({
+				providers: {
+					openrouter: {
+						baseUrl: "https://peak.example.com/v1",
+						apiKey: "TEST_KEY",
+						api: "openai-completions",
+						models: [
+							{
+								id: "peak-custom",
+								api: "openai-completions",
+								reasoning: false,
+								input: ["text"],
+								cost: { input: 1, output: 3, cacheRead: 0.2, cacheWrite: 0 },
+								contextWindow: 128000,
+								maxTokens: 16384,
+								peakPricing: peakPolicy,
+							},
+						],
+						modelOverrides: {
+							"anthropic/claude-sonnet-4": { peakPricing: peakPolicy },
+						},
+					},
+				},
+			});
+		});
+
+		test("custom model definitions carry peakPricing into the built catalog", () => {
+			expect(registry.find("openrouter", "peak-custom")?.peakPricing).toEqual(peakPolicy);
+		});
+
+		test("modelOverrides apply peakPricing to bundled models", () => {
+			const model = getModelsForProvider(registry, "openrouter").find(m => m.id === "anthropic/claude-sonnet-4");
+			expect(model?.peakPricing).toEqual(peakPolicy);
+		});
+
+		test("models.yml schema accepts peakPricing and rejects malformed shapes", () => {
+			const schema = getModelsConfigSchema();
+			const configWith = (peakPricing: unknown) => ({
+				providers: { openrouter: { models: [{ id: "peak-model", peakPricing }] } },
+			});
+			expect(schema.allows(configWith(peakPolicy))).toBe(true);
+			expect(schema.allows(configWith({ windows: [], multiplier: 2 }))).toBe(false);
+			expect(schema.allows(configWith({ windows: [{ startHour: 25, endHour: 2 }], multiplier: 2 }))).toBe(false);
+			expect(schema.allows(configWith({ windows: [{ startHour: 1, endHour: 4 }] }))).toBe(false);
 		});
 	});
 
