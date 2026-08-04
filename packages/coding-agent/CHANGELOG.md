@@ -8,6 +8,7 @@
 - Added `settings.hotReload` (default `false`): when enabled, an outside edit to `config.yml` is picked up automatically at a safe boundary, before the next prompt when the session is idle or at the end of the current turn when one is streaming, so the next turn never runs on stale settings.
 - Added a live rebind of the session's model when `modelRoles.default` changes. It defers to the next turn boundary while streaming, declines over an explicit `--model`, a restored session's model, and a manual `/model` pick, and retargets an active retry fallback's restore selector instead of interrupting the cascade.
 - Made `advisor.enabled` and the `statusLine.*` group reachable from a settings change. `advisor.enabled` was captured once at construction and only reachable through `/advisor`; the `statusLine.*` group already had a live updater but was refreshed only when the session accent happened to change. Both now fire on any change to their keys.
+
 ## [17.2.8] - 2026-08-04
 
 ### Changed
