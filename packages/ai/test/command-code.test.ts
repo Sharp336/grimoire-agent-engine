@@ -764,6 +764,72 @@ describe("command-code streamSimple options", () => {
 		expect(config.workingDir).toBe(cwd);
 		expect(lastRequest!.headers.get("x-project-slug")).toBe(slugifyProjectPath(cwd));
 	});
+
+	it("omits params.tools when toolChoice is none", async () => {
+		scenario = {
+			kind: "capture",
+			body: `{"type":"finish","finishReason":"stop"}
+`,
+		};
+		const baseUrl = await startServer();
+		const model = {
+			...getBundledModel("command-code", "deepseek/deepseek-v4-flash"),
+			baseUrl,
+		} as Model<"command-code">;
+		const stream = streamSimple(
+			model,
+			{
+				messages: [{ role: "user", content: "hi", timestamp: 1 }],
+				tools: [
+					{
+						name: "read",
+						description: "Read a file",
+						parameters: { type: "object", properties: { path: { type: "string" } } },
+					},
+				],
+			},
+			{
+				apiKey: "test-key",
+				toolChoice: "none",
+			},
+		);
+		for await (const _ of stream) {
+			/* drain */
+		}
+		await stream.result();
+
+		const params = lastRequest!.body.params as Record<string, unknown>;
+		expect(params.tools).toBeUndefined();
+	});
+
+	it("merges model headers under caller headers", async () => {
+		scenario = {
+			kind: "capture",
+			body: `{"type":"finish","finishReason":"stop"}
+`,
+		};
+		const baseUrl = await startServer();
+		const model = {
+			...getBundledModel("command-code", "deepseek/deepseek-v4-flash"),
+			baseUrl,
+			headers: { "x-model-header": "model-value", "x-overridden": "model" },
+		} as Model<"command-code">;
+		const stream = streamSimple(
+			model,
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			{
+				apiKey: "test-key",
+				headers: { "x-overridden": "caller" },
+			},
+		);
+		for await (const _ of stream) {
+			/* drain */
+		}
+		await stream.result();
+
+		expect(lastRequest!.headers.get("x-model-header")).toBe("model-value");
+		expect(lastRequest!.headers.get("x-overridden")).toBe("caller");
+	});
 });
 
 describe("command-code effort dial", () => {

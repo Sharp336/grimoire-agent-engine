@@ -28,6 +28,7 @@ import type {
 	TextContent,
 	ThinkingContent,
 	ToolCall,
+	ToolChoice,
 	Usage,
 } from "../types";
 import { normalizeSystemPrompts } from "../utils";
@@ -102,6 +103,8 @@ export interface CommandCodeServerConfig {
 }
 
 export interface CommandCodeOptions extends StreamOptions {
+	/** Unified tool choice override; `"none"` omits `params.tools` (the gateway has no tool_choice field). */
+	toolChoice?: ToolChoice;
 	/** Server-side conversation key. Sent as body `threadId` when UUID-shaped. */
 	conversationId?: string;
 	/** Wire value for `params.reasoning_effort`. Omitted when the model has no thinking config. */
@@ -639,7 +642,11 @@ export const streamCommandCode: StreamFunction<"command-code"> = (
 				max_tokens: options?.maxTokens ?? model.maxTokens ?? DEFAULT_MAX_TOKENS,
 				stream: true,
 			};
-			if (tools.length > 0) params.tools = tools;
+			// `toolChoice: "none"` (side-channel turns, handoff/compaction) must
+			// not leave tools callable: the gateway has no `tool_choice` field, so
+			// omitting `params.tools` is the only wire lever. Same rationale as the
+			// openai-completions none-gate (openai-completions.ts:1656).
+			if (tools.length > 0 && options?.toolChoice !== "none") params.tools = tools;
 			if (options?.temperature !== undefined) params.temperature = options.temperature;
 			if (options?.reasoningEffort !== undefined) params.reasoning_effort = options.reasoningEffort;
 
@@ -665,6 +672,8 @@ export const streamCommandCode: StreamFunction<"command-code"> = (
 				[HEADER.coFlag]: String(options?.oauthEnforced ?? false),
 				[HEADER.sessionId]: sessionId,
 				...($env.CMD_ZDR === "1" ? { [HEADER.zdr]: "1" } : {}),
+				// Caller headers layer on top of model-defined headers (shared contract).
+				...(model.headers ?? {}),
 				...(options?.headers ?? {}),
 			};
 

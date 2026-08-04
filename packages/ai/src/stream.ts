@@ -1918,6 +1918,7 @@ function mapOptionsForApi<TApi extends Api>(
 				reasoningEffort: effort,
 				conversationId: options?.sessionId,
 				cwd: options?.cwd,
+				toolChoice: options?.toolChoice,
 			});
 		}
 		default:
