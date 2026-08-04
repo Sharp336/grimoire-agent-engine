@@ -128,6 +128,23 @@ describe("TypeBox adapter", () => {
 		});
 	});
 
+	test("optional keys with embedded defaults validate, default, and emit clean JSON Schema", () => {
+		const schema = Type.Object({
+			name: Type.String(),
+			depth: Type.Optional(Type.Integer({ minimum: 1, maximum: 10, default: 3 })),
+		});
+
+		expect(valid(schema, { name: "Ada" })).toBe(true);
+		expect(valid(schema, { name: "Ada", depth: 5 })).toBe(true);
+		expect(valid(schema, { name: "Ada", depth: 0 })).toBe(false);
+		expect(schema({ name: "Ada" })).toEqual({ name: "Ada", depth: 3 });
+		expect(schema.toJsonSchema()).toMatchObject({
+			type: "object",
+			properties: { name: { type: "string" }, depth: { type: "integer", minimum: 1, maximum: 10, default: 3 } },
+			required: ["name"],
+		});
+	});
+
 	test("legacy validation helpers are non-enumerable and return compatibility results", () => {
 		const schema = Type.Object({ name: Type.String(), score: Type.Number({ default: 1 }) });
 		expect(schema.safeParse({ name: "Ada" })).toEqual({

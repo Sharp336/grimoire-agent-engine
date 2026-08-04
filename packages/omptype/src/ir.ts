@@ -1428,7 +1428,6 @@ function parseObjectDefinition(def: Record<PropertyKey, unknown>, resolve?: Alia
 		} else if (!spreadKeys?.has(key) && (key === normalizedKey || normalizedKeys?.includes(key))) {
 			throw new OmpTypeError(`duplicate object key ${String(key)}`);
 		}
-		if (opt && prop.hasDefault) throw new OmpTypeError(`optional key ${String(key)} cannot specify a default`);
 		if (simple && (prop.hasDefault || !isSimpleIR(prop.val))) simple = false;
 		addObjectProp(props, spreadKeys, prop);
 	}
