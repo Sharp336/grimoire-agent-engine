@@ -42,7 +42,12 @@ import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVi
 export const COMMAND_CODE_API_URL = "https://api.commandcode.ai";
 const COMMAND_CODE_STAGING_API_URL = "https://staging-api.commandcode.ai";
 const COMMAND_CODE_LOCAL_API_URL = "http://localhost:9090";
-const GENERATE_PATH = "/alpha/generate";
+/**
+ * Endpoint path, relative on purpose: resolved against a base normalized to a
+ * trailing slash so a path-prefixed proxy base (`https://host/cmd`) keeps its
+ * prefix instead of being replaced by an absolute `/alpha/generate`.
+ */
+const GENERATE_PATH = "alpha/generate";
 /** Semver reported to the Command Code API; required for generate requests. */
 const COMMAND_CODE_CLIENT_VERSION = "1.9.0";
 const DEFAULT_MAX_TOKENS = 64_000;
@@ -660,7 +665,7 @@ export const streamCommandCode: StreamFunction<"command-code"> = (
 			if (options?.temperature !== undefined) params.temperature = options.temperature;
 			if (options?.reasoningEffort !== undefined) params.reasoning_effort = options.reasoningEffort;
 
-			const body: Record<string, unknown> = {
+			let body: Record<string, unknown> = {
 				config,
 				memory: null,
 				taste: null,
@@ -686,6 +691,13 @@ export const streamCommandCode: StreamFunction<"command-code"> = (
 				...(model.headers ?? {}),
 				...(options?.headers ?? {}),
 			};
+
+			// Request-capture/redaction hook, same contract as the other HTTP
+			// providers: a returned value replaces the outgoing body.
+			const replacementPayload = await options?.onPayload?.(body, model);
+			if (replacementPayload !== undefined) {
+				body = replacementPayload as Record<string, unknown>;
+			}
 
 			const payload = JSON.stringify(body);
 			stream.push({ type: "start", partial: output });

@@ -88,7 +88,9 @@ async function startServer(): Promise<string> {
 		port: 0,
 		async fetch(req) {
 			const url = new URL(req.url);
-			if (req.method !== "POST" || url.pathname !== "/alpha/generate") {
+			// Suffix match so a path-prefixed base (`{base}/cmd`) still routes here;
+			// anything that is not the generate endpoint still 404s.
+			if (req.method !== "POST" || !url.pathname.endsWith("/alpha/generate")) {
 				return new Response("not found", { status: 404 });
 			}
 			const body = (await req.json()) as Record<string, unknown>;
@@ -840,6 +842,56 @@ describe("command-code streamSimple options", () => {
 		const tools = params.tools as Array<{ name: string }>;
 		expect(tools).toHaveLength(1);
 		expect(tools[0]?.name).toBe("write");
+	});
+
+	it("keeps a path-prefixed base URL when resolving the generate endpoint", async () => {
+		scenario = { kind: "capture", body: `{"type":"finish","finishReason":"stop"}\n` };
+		const baseUrl = await startServer();
+		const model = {
+			...getBundledModel("command-code", "deepseek/deepseek-v4-flash"),
+			baseUrl: `${baseUrl}/cmd`,
+		} as Model<"command-code">;
+		const stream = streamSimple(
+			model,
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			{ apiKey: "test-key" },
+		);
+		for await (const _ of stream) {
+			/* drain */
+		}
+		await stream.result();
+
+		expect(new URL(lastRequest!.url).pathname).toBe("/cmd/alpha/generate");
+	});
+
+	it("lets onPayload observe and replace the request body", async () => {
+		scenario = { kind: "capture", body: `{"type":"finish","finishReason":"stop"}\n` };
+		const baseUrl = await startServer();
+		const model = {
+			...getBundledModel("command-code", "deepseek/deepseek-v4-flash"),
+			baseUrl,
+		} as Model<"command-code">;
+		let seen: Record<string, unknown> | undefined;
+		const stream = streamSimple(
+			model,
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			{
+				apiKey: "test-key",
+				onPayload: payload => {
+					seen = payload as Record<string, unknown>;
+					return { ...(payload as Record<string, unknown>), permissionMode: "plan" };
+				},
+			},
+		);
+		for await (const _ of stream) {
+			/* drain */
+		}
+		await stream.result();
+
+		// The hook sees the real envelope...
+		expect((seen!.params as Record<string, unknown>).model).toBe("deepseek/deepseek-v4-flash");
+		// ...and its replacement is what actually goes on the wire.
+		expect(lastRequest!.body.permissionMode).toBe("plan");
 	});
 
 	it("merges model headers under caller headers", async () => {
