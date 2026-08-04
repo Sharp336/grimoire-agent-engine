@@ -44,7 +44,6 @@ import {
 	type ToolChoiceDirective,
 } from "@oh-my-pi/pi-agent-core";
 import {
-	type CompactionPreparation,
 	type CompactionResult,
 	calculatePromptTokens,
 	collectEntriesForBranchSummary,
@@ -323,6 +322,7 @@ import {
 import { cleanupEmptyMoveSession, type SessionManager } from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
+import { SessionObfuscation, type SessionObfuscationHost } from "./session-obfuscation";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
@@ -590,7 +590,7 @@ export class AgentSession {
 	#inFlightSettledCallbacks: Array<() => void | Promise<void>> = [];
 	#sessionStopContinuationCount = 0;
 	#sessionStopHookActive = false;
-	#obfuscator: SecretObfuscator | undefined;
+	readonly #obfuscation: SessionObfuscation;
 	/** Session-start value of `inlineToolDescriptors`; drives handoff tool pruning. */
 	#pruneToolDescriptions = false;
 	#checkpointState: CheckpointState | undefined = undefined;
@@ -1228,7 +1228,8 @@ export class AgentSession {
 			generateTitle: message => this.generateTitle(message),
 		};
 		this.#title = new SessionTitleGenerator(titleHost, this.settings, config.titleSystemPrompt);
-		this.#obfuscator = config.obfuscator;
+		const obfuscationHost: SessionObfuscationHost = { providerBoundary: () => this.#providerBoundary };
+		this.#obfuscation = new SessionObfuscation(obfuscationHost, config.obfuscator);
 		const providerBoundaryHost: SessionProviderBoundaryHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -1242,14 +1243,14 @@ export class AgentSession {
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
 			onSseEvent: this.#onSseEvent,
-			obfuscator: this.#obfuscator,
+			obfuscator: this.#obfuscation.obfuscator,
 		};
 		this.#providerBoundary = new SessionProviderBoundary(providerBoundaryHost);
 		const streamGuardsHost: StreamGuardsHost = {
 			agent: this.agent,
 			settings: this.settings,
 			sessionManager: this.sessionManager,
-			obfuscator: this.#obfuscator,
+			obfuscator: this.#obfuscation.obfuscator,
 			model: () => this.model,
 			isDisposed: () => this.#isDisposed,
 			promptGeneration: () => this.#promptGeneration,
@@ -1348,7 +1349,7 @@ export class AgentSession {
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
 			yieldQueue: this.yieldQueue,
-			obfuscator: this.#obfuscator,
+			obfuscator: this.#obfuscation.obfuscator,
 			providerSessionState: this.#providerSessionState,
 			preferWebsockets: this.#preferWebsockets,
 			onPayload: this.#onPayload,
@@ -1434,8 +1435,8 @@ export class AgentSession {
 			drainStrandedQueuedMessages: () => this.#drainStrandedQueuedMessages(),
 			buildDisplaySessionContext: () => this.buildDisplaySessionContext(),
 			convertToLlmForSideRequest: messages => this.#convertToLlmForSideRequest(messages),
-			obfuscateTextForProvider: text => this.#obfuscateTextForProvider(text),
-			obfuscatePreparationForProvider: preparation => this.#obfuscatePreparationForProvider(preparation),
+			obfuscateTextForProvider: text => this.#obfuscation.obfuscateTextForProvider(text),
+			obfuscatePreparationForProvider: preparation => this.#obfuscation.obfuscatePreparationForProvider(preparation),
 			closeCodexProviderSessionsForHistoryRewrite: () => this.#closeCodexProviderSessionsForHistoryRewrite(),
 			resetCodexProviderAfterCompaction: compaction => this.#resetCodexProviderAfterCompaction(compaction),
 			resetPlanReference: () => {
@@ -1469,7 +1470,7 @@ export class AgentSession {
 			modelRegistry: this.#modelRegistry,
 			extensionRunner: this.#extensionRunner,
 			sideStreamFn: this.#sideStreamFn,
-			obfuscator: this.#obfuscator,
+			obfuscator: this.#obfuscation.obfuscator,
 			model: () => this.model,
 			thinkingLevel: () => this.thinkingLevel,
 			sessionId: () => this.sessionId,
@@ -1479,8 +1480,8 @@ export class AgentSession {
 			setSkipPostTurnMaintenance: timestamp => {
 				this.#maintenance.skipPostTurnMaintenanceAssistantTimestamp = timestamp;
 			},
-			obfuscateTextForProvider: text => this.#obfuscateTextForProvider(text),
-			deobfuscateFromProvider: text => this.#deobfuscateFromProvider(text),
+			obfuscateTextForProvider: text => this.#obfuscation.obfuscateTextForProvider(text),
+			deobfuscateFromProvider: text => this.#obfuscation.deobfuscateFromProvider(text),
 			convertMessagesToLlm: (messages, signal) => this.convertMessagesToLlm(messages, signal),
 			prepareSimpleStreamOptions: (options, provider) => this.prepareSimpleStreamOptions(options, provider),
 			effectiveServiceTier: model => this.#models.effectiveServiceTier(model),
@@ -1671,7 +1672,7 @@ export class AgentSession {
 
 	/** Secret obfuscator, when secrets are configured; /share redaction reuses it. */
 	get obfuscator(): SecretObfuscator | undefined {
-		return this.#obfuscator;
+		return this.#obfuscation.obfuscator;
 	}
 
 	/** Whether a TTSR abort is pending (stream was aborted to inject rules) */
@@ -2355,7 +2356,7 @@ export class AgentSession {
 		// writes `$$HASH$$` tokens to the session file; convertToLlm re-obfuscates outbound
 		// traffic on the next turn. Walks text, thinking, and toolCall arguments/intent.
 		let displayEvent: AgentEvent = event;
-		const obfuscator = this.#obfuscator;
+		const obfuscator = this.#obfuscation.obfuscator;
 		if (obfuscator && event.type === "message_end" && event.message.role === "assistant") {
 			const message = event.message;
 			const deobfuscatedContent = deobfuscateAssistantContent(obfuscator, message.content);
@@ -4432,22 +4433,6 @@ export class AgentSession {
 		options?: Pick<BuildSessionContextOptions, "collapseCompactedHistory" | "keepDanglingToolCalls">,
 	): SessionContext {
 		return this.#providerBoundary.buildTranscriptSessionContext(options);
-	}
-
-	#obfuscateTextForProvider(text: string | undefined): string | undefined {
-		return this.#providerBoundary.obfuscateText(text);
-	}
-
-	#obfuscatePreparationForProvider(preparation: CompactionPreparation): CompactionPreparation {
-		return this.#providerBoundary.obfuscateCompactionPreparation(preparation);
-	}
-
-	#deobfuscateFromProvider(text: string): string {
-		return this.#providerBoundary.deobfuscateText(text);
-	}
-
-	#deobfuscatedProviderTextReadyForDelta(text: string): string {
-		return this.#providerBoundary.deobfuscateDelta(text);
 	}
 
 	#convertToLlmForSideRequest(messages: AgentMessage[]): Message[] {
@@ -7120,12 +7105,12 @@ export class AgentSession {
 		let providerReplyText = "";
 		let emittedReplyText = "";
 		let assistantMessage: AssistantMessage | undefined;
-		const stream = await this.#sideStreamFn(model, obfuscateProviderContext(this.#obfuscator, context), options);
+		const stream = await this.#sideStreamFn(model, obfuscateProviderContext(this.obfuscator, context), options);
 		for await (const event of stream) {
 			if (event.type === "text_delta") {
 				providerReplyText += event.delta;
 				if (args.onTextDelta) {
-					const readyText = this.#deobfuscatedProviderTextReadyForDelta(providerReplyText);
+					const readyText = this.#obfuscation.deobfuscatedProviderTextReadyForDelta(providerReplyText);
 					if (readyText.length > emittedReplyText.length) {
 						const delta = readyText.slice(emittedReplyText.length);
 						emittedReplyText = readyText;
@@ -7143,8 +7128,9 @@ export class AgentSession {
 				// 'H.content.filter')`. Normalize to `[]` so the recap surfaces an empty reply
 				// instead of turning a malformed side-channel response into a session-mute crash.
 				const rawContent = Array.isArray(event.message.content) ? event.message.content : [];
-				assistantMessage = this.#obfuscator?.hasSecrets()
-					? { ...event.message, content: deobfuscateAssistantContent(this.#obfuscator, rawContent) }
+				const obfuscator = this.obfuscator;
+				assistantMessage = obfuscator?.hasSecrets()
+					? { ...event.message, content: deobfuscateAssistantContent(obfuscator, rawContent) }
 					: { ...event.message, content: rawContent };
 				break;
 			}
@@ -7156,7 +7142,7 @@ export class AgentSession {
 		if (!assistantMessage) {
 			throw new Error("Ephemeral turn ended without a final message");
 		}
-		const replyText = this.#deobfuscateFromProvider(providerReplyText);
+		const replyText = this.#obfuscation.deobfuscateFromProvider(providerReplyText);
 		if (args.onTextDelta && replyText.length > emittedReplyText.length) {
 			args.onTextDelta(replyText.slice(emittedReplyText.length));
 		}
@@ -7940,7 +7926,7 @@ export class AgentSession {
 				model,
 				apiKey: this.#modelRegistry.resolver(model, this.sessionId),
 				signal: this.#branchSummaryAbortController.signal,
-				customInstructions: this.#obfuscateTextForProvider(options.customInstructions),
+				customInstructions: this.#obfuscation.obfuscateTextForProvider(options.customInstructions),
 				reserveTokens: branchSummarySettings.reserveTokens,
 				metadata: this.agent.metadataForProvider(model.provider),
 				convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
@@ -8052,7 +8038,7 @@ export class AgentSession {
 
 		// Update agent state — build display context to populate agent messages.
 		const stateContext = this.sessionManager.buildSessionContext();
-		const displayContext = deobfuscateSessionContext(stateContext, this.#obfuscator);
+		const displayContext = deobfuscateSessionContext(stateContext, this.#obfuscation.obfuscator);
 		this.agent.replaceMessages(displayContext.messages);
 		this.#rehydrateCheckpointRewindState();
 		this.#advisors.resetSessionState({ preserveCost: true });
@@ -8140,8 +8126,9 @@ export class AgentSession {
 					);
 					if (!toolCall) return undefined;
 					if (toolCall.name !== "ask") return undefined;
-					const args = this.#obfuscator?.hasSecrets()
-						? deobfuscateToolArguments(this.#obfuscator, toolCall.arguments)
+					const obfuscator = this.#obfuscation.obfuscator;
+					const args = obfuscator?.hasSecrets()
+						? deobfuscateToolArguments(obfuscator, toolCall.arguments)
 						: toolCall.arguments;
 					return recoverAskQuestions(args);
 				}
