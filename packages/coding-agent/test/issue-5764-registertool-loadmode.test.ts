@@ -16,7 +16,7 @@ import {
 	defaultLoadModeForToolName,
 	ESSENTIAL_BUILTIN_TOOL_NAMES,
 } from "@oh-my-pi/pi-coding-agent/tools/essential-tools";
-import { isMountableUnderXdev } from "@oh-my-pi/pi-coding-agent/tools/xdev";
+import { compileXdevPromoteSet, isMountableUnderXdev } from "@oh-my-pi/pi-coding-agent/tools/xdev";
 
 function makeSession(): ToolSession {
 	return {
@@ -50,6 +50,18 @@ describe("issue #5764: registerTool loadMode default", () => {
 		// top-level regardless, and todo/grep stay pinned even when promoted.
 		expect(isMountableUnderXdev({ name: "write", loadMode: "discoverable" }, new Set(["write"]))).toBe(false);
 		expect(isMountableUnderXdev({ name: "todo", loadMode: "discoverable" }, new Set(["todo"]))).toBe(false);
+	});
+
+	it("tolerates malformed tools.xdevPromote config values", () => {
+		// A hand-edited scalar (`tools.xdevPromote: lsp`) or non-string entries
+		// must degrade to no promotion instead of crashing mounting.
+		expect(compileXdevPromoteSet("lsp" as unknown as string[])).toBeUndefined();
+		expect(compileXdevPromoteSet({ lsp: true } as unknown as string[])).toBeUndefined();
+		expect(compileXdevPromoteSet([42] as unknown as string[])).toBeUndefined();
+		// Mixed lists keep the valid names, normalized case-insensitively.
+		expect(compileXdevPromoteSet(["LSP", 42])).toEqual(new Set(["lsp"]));
+		expect(compileXdevPromoteSet([])).toBeUndefined();
+		expect(compileXdevPromoteSet(undefined)).toBeUndefined();
 	});
 
 	it("defaults omitted loadMode to essential for essential built-in names, discoverable otherwise", () => {

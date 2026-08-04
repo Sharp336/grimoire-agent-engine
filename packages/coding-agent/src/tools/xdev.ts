@@ -90,9 +90,11 @@ export function isMountableUnderXdev(
 }
 
 /** Compile a `tools.xdevPromote` list into a normalized lookup. Malformed
- *  (non-string) entries are dropped so bad config cannot break mounting. */
+ *  (non-array or non-string) values are dropped so bad config cannot break
+ *  mounting — a hand-edited scalar like `tools.xdevPromote: lsp` must not
+ *  crash session/tool creation. */
 export function compileXdevPromoteSet(names: readonly unknown[] | undefined): ReadonlySet<string> | undefined {
-	if (!names || names.length === 0) return undefined;
+	if (!Array.isArray(names) || names.length === 0) return undefined;
 	const strings = names.filter((name): name is string => typeof name === "string");
 	if (strings.length === 0) return undefined;
 	return new Set(normalizeToolNames(strings));
