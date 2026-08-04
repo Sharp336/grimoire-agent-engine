@@ -5,6 +5,12 @@
 ### Added
 
 - Added `tools.xdevPromote` (and the per-agent `xdevPromote` frontmatter) to keep specific tools top-level instead of mounting them under `xd://`, without disabling `tools.xdev` globally. Promotion only changes presentation; tools still need their normal enablement, and an explicitly empty per-agent `xdevPromote` clears the inherited global promotion ([#5648](https://github.com/can1357/oh-my-pi/issues/5648)).
+## [17.2.8] - 2026-08-04
+
+### Changed
+
+- Upgraded the bundled omptype schema engine: intersection and pipe operators, bigint and RegExp literals in the string DSL, Standard Schema V1 interop, JSON Schema import via fromJsonSchema(), and richer union/collection error reporting.
+
 ## [17.2.7] - 2026-08-03
 
 ### Changed
