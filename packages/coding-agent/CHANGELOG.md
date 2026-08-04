@@ -41,6 +41,9 @@
 - Fixed issues with `/btw` branch promotion where branches could park behind active turns, cut from outdated session leaves, or leave rejected branch keys indistinguishable from composer input.
 - Fixed database bloat by ensuring archived main and nested session rows are properly cleaned up from `stats.db` during garbage collection.
 - Fixed startup hanging during local model discovery when a timed-out transport left its request pending, which blocked the CLI before OAuth login could finish ([#7482](https://github.com/can1357/oh-my-pi/issues/7482)).
+### Added
+
+- Added `session.start`, `session.resume`, `session.replay`, `session.result`, `session.steer`, and `session.watch` to RPC mode, giving an external supervisor a durable append-only record of a session beside its transcript. A run claims an identity so a retried dispatch resolves against the existing episode instead of launching a second one, events carry a sequence a reconnecting supervisor can replay from, steering is acknowledged and redelivered when it was accepted but never injected, and the terminal result is sealed once and returned identically to every later reader. Clients that do not send `session.start` or `session.resume` are unaffected: nothing is recorded and events stream as before.
 
 ## [17.2.5] - 2026-08-03
 

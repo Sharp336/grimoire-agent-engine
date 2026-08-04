@@ -341,6 +341,13 @@ export * from "./agent-session-events";
 export * from "./agent-session-types";
 export type { AdvisorStats, PerAdvisorStat } from "./session-advisors";
 
+const persistenceSafeAgentEvents = new WeakMap<object, AgentSessionEvent>();
+
+/** Returns the provider-safe source event behind a deobfuscated display event. */
+export function persistenceSafeAgentSessionEvent(event: AgentSessionEvent): AgentSessionEvent {
+	return (persistenceSafeAgentEvents.get(event) ?? event) as AgentSessionEvent;
+}
+
 const SESSION_STOP_CONTINUATION_CAP = 8;
 
 import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
@@ -349,6 +356,13 @@ import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
 const PLAN_MODE_REMINDER_MAX = 3;
 const POST_PROMPT_DRAIN_TIMEOUT_MS = 5_000;
+/**
+ * How long a custody boundary waits on outstanding advisor reviews. Far shorter
+ * than the headless print-mode drain: this runs on a terminal boundary that may
+ * be an exit path, so an advisor stalled on its own provider has to stop gating
+ * progress well before it stops the process from finishing.
+ */
+const ADVISOR_CUSTODY_DRAIN_TIMEOUT_MS = 5_000;
 
 /** Internal marker for hook messages queued through the agent loop */
 // ============================================================================
@@ -431,6 +445,7 @@ export class AgentSession {
 	fileSnapshotStore?: InMemorySnapshotStore;
 	/** Per-session `CUT`/`PASTE` clipboard register shared across edit calls. */
 	editClipboard?: Clipboard;
+	#assertBackgroundAgentWorkAllowed: (() => void) | undefined;
 
 	#powerAssertion: MacOSPowerAssertion | undefined;
 
@@ -453,6 +468,7 @@ export class AgentSession {
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
+	#messagePersistenceBarriers = new Set<(event: AgentSessionEvent) => Promise<void>>();
 	#commandMetadataChangedListeners: CommandMetadataChangedListener[] = [];
 	#sessionChangeCallbacks = new Set<() => void>();
 	#observedSessionId: string | undefined;
@@ -461,6 +477,9 @@ export class AgentSession {
 	#pendingNextTurnMessages: CustomMessage[] = [];
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
 	#queuedMessageDrainScheduled = false;
+	#pendingExtensionEventCount = 0;
+	#pendingExtensionEventsIdle: Promise<void> = Promise.resolve();
+	#resolvePendingExtensionEvents: (() => void) | undefined;
 	#planModeState: PlanModeState | undefined;
 	/** Session-scoped `/vision` override; undefined = follow persisted `inspect_image.mode`. */
 	#inspectImageModeOverride: InspectImageMode | undefined;
@@ -725,12 +744,26 @@ export class AgentSession {
 		this.#resumeStrandedIrcAsides();
 	}
 
+	/** Whether a mode-installed custody guard currently permits background work to start an
+	 *  autonomous turn. Every wake path — stranded peer IRC asides and the yield queue's idle
+	 *  flush alike — asks here before waking, and a refusal only skips the wake: the pending
+	 *  records stay queued so the owed delivery survives for the next allowed boundary. */
+	#backgroundAgentWorkAllowed(): boolean {
+		try {
+			this.#assertBackgroundAgentWorkAllowed?.();
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
 	/** IRC records that arrive after the loop's final aside poll — or while an abort skipped that
 	 *  poll — land in pending IRC queues with no loop left to drain them; the queued-message drain's
 	 *  gate (agent.hasQueuedMessages()) does not count peer IRC interrupts. Once idle, wake a turn so
 	 *  the agent responds to the peer. Skip only when a queued steer/follow-up will itself drive a
 	 *  resume turn whose aside poll already consumes these (no double-wake). */
 	#resumeStrandedIrcAsides(): void {
+		if (!this.#backgroundAgentWorkAllowed()) return;
 		if (this.#isDisposed || this.isStreaming || !this.#irc.hasPending()) return;
 		if (this.#canAutoContinueForFollowUp() && this.agent.hasQueuedMessages()) return;
 		const records = this.#irc.drainPending();
@@ -1132,6 +1165,11 @@ export class AgentSession {
 		});
 		this.yieldQueue = new YieldQueue({
 			isStreaming: () => this.isStreaming,
+			// The idle flush prompts the agent, so it is background work in exactly the
+			// sense the custody guard governs: a delayed launch completion, late LSP
+			// diagnostic, or MCP notification must not open a turn while an RPC run is
+			// binding or after its episode is sealed.
+			canWakeIdle: () => this.#backgroundAgentWorkAllowed(),
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
@@ -1789,6 +1827,11 @@ export class AgentSession {
 		return this.#hasPendingAsyncWake();
 	}
 
+	/** Whether a queued notification can start an idle follow-up turn. */
+	hasPendingYieldWake(): boolean {
+		return this.yieldQueue.hasPendingIdleWake();
+	}
+
 	/**
 	 * Settle one generation of owner-scoped async work: wait for running owner
 	 * jobs to finish, deliver their queued results (which enqueue async-result
@@ -1972,7 +2015,7 @@ export class AgentSession {
 	async #emitSessionEvent(event: AgentSessionEvent): Promise<void> {
 		if (event.type === "message_update") {
 			this.#emit(event);
-			void this.#queueExtensionEvent(event);
+			await this.#queueExtensionEvent(event);
 			return;
 		}
 		// Take a FIFO ticket before the extension emit: extension deliveries for
@@ -2035,11 +2078,13 @@ export class AgentSession {
 			}
 		}
 		if (event.type !== "agent_end") {
+			const tracksExtensionEvent = this.#extensionRunner?.hasHandlers(event.type) === true;
+			if (tracksExtensionEvent) this.#beginPendingExtensionEvent();
 			const processing = this.#processAgentEvent(event);
 			if ((event.type === "message_start" || event.type === "message_end") && isAdvisorCard(event.message)) {
 				this.#advisors.trackCardEvent(processing);
 			}
-			return processing;
+			return tracksExtensionEvent ? processing.finally(() => this.#endPendingExtensionEvent()) : processing;
 		}
 		const { promise, resolve } = Promise.withResolvers<void>();
 		this.#trackPostPromptTask(promise);
@@ -2054,7 +2099,7 @@ export class AgentSession {
 		const key = sessionMessagePersistenceKey(message);
 		if (!key) return undefined;
 		const previous = this.#messageEndPersistenceTail;
-		const { promise, resolve } = Promise.withResolvers<void>();
+		const { promise, resolve, reject } = Promise.withResolvers<void>();
 		const clear = () => {
 			if (this.#pendingMessageEndPersistence.get(key) === promise) {
 				this.#pendingMessageEndPersistence.delete(key);
@@ -2068,8 +2113,11 @@ export class AgentSession {
 				await previous;
 				try {
 					persistMessage();
-				} finally {
 					resolve();
+				} catch (error) {
+					reject(error);
+					throw error;
+				} finally {
 					clear();
 				}
 			},
@@ -2084,6 +2132,11 @@ export class AgentSession {
 		const key = sessionMessagePersistenceKey(message);
 		if (!key) return;
 		await this.#pendingMessageEndPersistence.get(key);
+	}
+
+	/** Resolves after a completed message has been appended to the session transcript. */
+	waitForMessagePersistence(message: AgentMessage): Promise<void> {
+		return this.#waitForSessionMessagePersistence(message);
 	}
 
 	/**
@@ -2363,6 +2416,7 @@ export class AgentSession {
 			const deobfuscatedContent = deobfuscateAssistantContent(obfuscator, message.content);
 			if (deobfuscatedContent !== message.content) {
 				displayEvent = { ...event, message: { ...message, content: deobfuscatedContent } };
+				persistenceSafeAgentEvents.set(displayEvent, event);
 			}
 		}
 
@@ -2383,6 +2437,9 @@ export class AgentSession {
 		if (event.type !== "agent_end") {
 			try {
 				await this.#emitSessionEvent(displayEvent);
+				if (displayEvent.type === "message_end") {
+					for (const barrier of [...this.#messagePersistenceBarriers]) await barrier(displayEvent);
+				}
 			} catch (error) {
 				messageEndPersistence?.release();
 				throw error;
@@ -2597,13 +2654,21 @@ export class AgentSession {
 			// maintenance can emit agent_end, so preserve the state at settle entry.
 			const ttsrAbortPendingAtAgentEnd = this.#ttsr.abortPending;
 			const emitAgentEndNotification = async (options?: { willContinue?: boolean }) => {
-				// Public agent_end is held out of the eager display pass and emitted
-				// here after maintenance routing, tagged isTerminal so subscribers can
-				// tell final settles from scheduled continuations.
-				await this.#emitSessionEvent({ ...event, isTerminal: !options?.willContinue });
-				void this.#emitAgentEndNotification(activeMessages, options).catch(err => {
-					logger.error("Agent end extension notification failed", { err });
-				});
+				this.#beginPendingExtensionEvent();
+				try {
+					// Public agent_end is held out of the eager display pass and emitted
+					// here after maintenance routing, tagged isTerminal so subscribers can
+					// tell final settles from scheduled continuations.
+					await this.#emitSessionEvent({ ...event, isTerminal: !options?.willContinue });
+				} catch (error) {
+					this.#endPendingExtensionEvent();
+					throw error;
+				}
+				void this.#emitAgentEndNotification(activeMessages, options)
+					.catch(err => {
+						logger.error("Agent end extension notification failed", { err });
+					})
+					.finally(() => this.#endPendingExtensionEvent());
 			};
 			const usage = this.getSessionStats().tokens;
 			await this.#goalRuntime.onAgentEnd({
@@ -3433,6 +3498,15 @@ export class AgentSession {
 		return () => this.#sessionChangeCallbacks.delete(callback);
 	}
 
+	/**
+	 * Register work that must finish after message_end publication and before
+	 * the matching transcript entry is appended.
+	 */
+	registerMessagePersistenceBarrier(barrier: (event: AgentSessionEvent) => Promise<void>): () => void {
+		this.#messagePersistenceBarriers.add(barrier);
+		return () => this.#messagePersistenceBarriers.delete(barrier);
+	}
+
 	subscribeCommandMetadataChanged(listener: CommandMetadataChangedListener): () => void {
 		this.#commandMetadataChangedListeners.push(listener);
 		return () => {
@@ -3778,6 +3852,7 @@ export class AgentSession {
 		}
 		this.#eventListeners = [];
 		this.#sessionChangeCallbacks.clear();
+		this.#messagePersistenceBarriers.clear();
 	}
 
 	#closeAllProviderSessions(reason: string): void {
@@ -4151,6 +4226,34 @@ export class AgentSession {
 	 */
 	waitForAdvisorCatchup(timeoutMs: number): Promise<boolean> {
 		return this.#advisors.waitForAdvisorCatchup(timeoutMs);
+	}
+
+	/**
+	 * Whether an advisor review or an emitted advisor card is still outstanding.
+	 *
+	 * Advisor work runs beside the primary rather than inside it, so this is true
+	 * at moments when every primary-facing signal reads idle. A custody boundary
+	 * that seals on those signals alone would seal over a review that can still
+	 * persist a card or resume the primary.
+	 */
+	get hasPendingAdvisorReviews(): boolean {
+		return this.#advisors.hasPendingReviews;
+	}
+	onAdvisorReviewsSettled(listener: () => void): () => void {
+		return this.#advisors.onReviewsSettled(listener);
+	}
+
+	/**
+	 * Drain outstanding advisor reviews and their card persistence at a custody
+	 * boundary.
+	 *
+	 * Bounded on purpose: an advisor stalled on its own provider must not hold the
+	 * boundary open, so this gives up at the deadline and leaves the remainder
+	 * visible through {@link hasPendingAdvisorReviews} — the caller then declines
+	 * to seal rather than waiting without limit.
+	 */
+	async waitForPendingAdvisorReviews(timeoutMs = ADVISOR_CUSTODY_DRAIN_TIMEOUT_MS): Promise<void> {
+		await this.#advisors.waitForAdvisorCatchup(timeoutMs);
 	}
 
 	async drainAsyncJobDeliveriesForAcp(options?: { timeoutMs?: number }): Promise<boolean> {
@@ -5535,17 +5638,54 @@ export class AgentSession {
 		}
 	}
 
+	findUserMessageByIdempotencyKey(idempotencyKey: string): AgentMessage | undefined {
+		return this.agent.state.messages.find(
+			message => message.role === "user" && message.idempotencyKey === idempotencyKey,
+		);
+	}
+
+	findPersistedUserMessageByIdempotencyKey(idempotencyKey: string): AgentMessage | undefined {
+		const branch = this.sessionManager.getBranch();
+		for (let index = branch.length - 1; index >= 0; index--) {
+			const entry = branch[index];
+			if (entry.type !== "message") continue;
+			const message = entry.message;
+			if (message.role === "user" && message.idempotencyKey === idempotencyKey) return message;
+		}
+		return undefined;
+	}
+
 	/**
 	 * Queue a steering message to interrupt the agent mid-run.
 	 */
-	async steer(text: string, images?: ImageContent[]): Promise<void> {
+	async steer(text: string, images?: ImageContent[], options?: { idempotencyKey?: string }): Promise<void> {
+		await this.steerWithResult(text, images, options);
+	}
+
+	/** Queue steering and report whether usage preflight accepted it. */
+	async steerWithResult(
+		text: string,
+		images?: ImageContent[],
+		options?: { idempotencyKey?: string },
+	): Promise<boolean> {
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
+		const idempotencyKey = options?.idempotencyKey;
+		if (
+			idempotencyKey &&
+			(this.findUserMessageByIdempotencyKey(idempotencyKey) ||
+				this.agent
+					.peekSteeringQueue()
+					.some(message => message.role === "user" && message.idempotencyKey === idempotencyKey))
+		) {
+			return true;
+		}
 
 		const expandedText = expandPromptTemplate(text, [...this.#promptTemplates]);
-		if (!(await this.#runUsageAwarePreflight())) return;
-		await this.#queueUserMessage(expandedText, images, "steer");
+		if (!(await this.#runUsageAwarePreflight())) return false;
+		await this.#queueUserMessage(expandedText, images, "steer", options?.idempotencyKey);
+		return true;
 	}
 
 	/**
@@ -5593,6 +5733,7 @@ export class AgentSession {
 		text: string,
 		images: ImageContent[] | undefined,
 		mode: "steer" | "followUp",
+		idempotencyKey?: string,
 	): Promise<void> {
 		// A queued user message (RPC/SDK/collab steer or follow-up, or a typed message
 		// while streaming) is a deliberate resume; re-enable advisor auto-resume that
@@ -5615,6 +5756,7 @@ export class AgentSession {
 				content,
 				attribution: "user",
 				timestamp: Date.now(),
+				...(idempotencyKey ? { idempotencyKey } : {}),
 			});
 		} else {
 			if (imageDescriptionNotice) this.agent.steer(imageDescriptionNotice);
@@ -5624,6 +5766,7 @@ export class AgentSession {
 				steering: true,
 				attribution: "user",
 				timestamp: Date.now(),
+				...(idempotencyKey ? { idempotencyKey } : {}),
 			});
 		}
 		this.#scheduleIdleQueueDrain();
@@ -6016,6 +6159,36 @@ export class AgentSession {
 			this.agent.peekFollowUpQueue().filter(isDisplayableQueuedMessage).length +
 			this.#pendingNextTurnMessages.length
 		);
+	}
+
+	/** Whether any agent or next-turn message remains queued, including hidden extension messages. */
+	get hasQueuedAgentMessages(): boolean {
+		return this.agent.hasQueuedMessages() || this.#pendingNextTurnMessages.length > 0;
+	}
+
+	/** Whether an extension lifecycle handler can still enqueue work from the current custody boundary. */
+	get hasPendingExtensionEvents(): boolean {
+		return this.#pendingExtensionEventCount > 0;
+	}
+
+	/** Wait until extension lifecycle handlers from the current boundary have settled. */
+	waitForPendingExtensionEvents(): Promise<void> {
+		return this.#pendingExtensionEventsIdle;
+	}
+
+	#beginPendingExtensionEvent(): void {
+		if (this.#pendingExtensionEventCount++ > 0) return;
+		const deferred = Promise.withResolvers<void>();
+		this.#pendingExtensionEventsIdle = deferred.promise;
+		this.#resolvePendingExtensionEvents = deferred.resolve;
+	}
+
+	#endPendingExtensionEvent(): void {
+		this.#pendingExtensionEventCount--;
+		if (this.#pendingExtensionEventCount > 0) return;
+		this.#pendingExtensionEventCount = 0;
+		this.#resolvePendingExtensionEvents?.();
+		this.#resolvePendingExtensionEvents = undefined;
 	}
 
 	getQueuedMessages(): { steering: readonly string[]; followUp: readonly string[] } {
@@ -6443,7 +6616,13 @@ export class AgentSession {
 			try {
 				const oldDirStat = await fs.promises.stat(oldArtifactDir);
 				if (oldDirStat.isDirectory()) {
-					await fs.promises.cp(oldArtifactDir, newArtifactDir, { recursive: true });
+					await fs.promises.cp(oldArtifactDir, newArtifactDir, {
+						recursive: true,
+						filter: source => {
+							const relative = path.relative(oldArtifactDir, source);
+							return relative !== "rpc-ledger" && !relative.startsWith(`rpc-ledger${path.sep}`);
+						},
+					});
 				}
 			} catch (err) {
 				if (!isEnoent(err)) {
@@ -7068,6 +7247,11 @@ export class AgentSession {
 		return this.#bash.hasPendingMessages;
 	}
 
+	/** Persist pending bash result messages before a terminal or session boundary. */
+	flushPendingBashMessages(): Promise<void> {
+		return this.#bash.flushPending();
+	}
+
 	// =========================================================================
 	// User-Initiated Python Execution
 	// =========================================================================
@@ -7137,6 +7321,7 @@ export class AgentSession {
 
 	/** Delivers an IRC message into this recipient session. */
 	deliverIrcMessage(msg: IrcMessage, opts?: { expectsReply?: boolean }): Promise<"injected" | "woken"> {
+		this.#assertBackgroundAgentWorkAllowed?.();
 		return this.#irc.deliver(msg, opts);
 	}
 
@@ -7145,6 +7330,11 @@ export class AgentSession {
 		observer: ((records: CustomMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined) | undefined,
 	): void {
 		this.#ircWakeTurnObserver = observer;
+	}
+
+	/** Installs a mode-specific guard for peer messages that can start agent work. */
+	setBackgroundAgentWorkGuard(guard: (() => void) | undefined): void {
+		this.#assertBackgroundAgentWorkAllowed = guard;
 	}
 
 	/** Emits an IRC relay observation for UI rendering without persisting it. */
@@ -8762,18 +8952,30 @@ export class AgentSession {
 	 * Useful for /copy command.
 	 * @returns Text content, or undefined if no assistant message exists
 	 */
-	getLastAssistantText(): string | undefined {
+	getLastAssistantText(options: { providerSafe?: boolean } = {}): string | undefined {
 		const lastAssistant = this.#getLastCopyCandidateAssistantMessage();
 		if (!lastAssistant) return undefined;
 
+		const content =
+			!options.providerSafe && this.#obfuscator?.hasSecrets()
+				? deobfuscateAssistantContent(this.#obfuscator, lastAssistant.content)
+				: lastAssistant.content;
 		let text = "";
-		for (const content of lastAssistant.content) {
-			if (content.type === "text") {
-				text += content.text;
+		for (const block of content) {
+			if (block.type === "text") {
+				text += block.text;
 			}
 		}
 
 		return text.trim() || undefined;
+	}
+
+	restoreProviderTextForDisplay(text: string): string {
+		return this.#deobfuscateFromProvider(text);
+	}
+
+	restoreProviderValueForDisplay<T>(value: T): T {
+		return this.#obfuscator?.deobfuscateObject(value) ?? value;
 	}
 
 	hasCopyCandidateAssistantMessage(): boolean {
