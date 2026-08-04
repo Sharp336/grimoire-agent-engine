@@ -559,7 +559,6 @@ describe("command-code effort dial", () => {
 			{
 				apiKey: "test-key",
 				reasoning: Effort.High,
-				config: null,
 			},
 		);
 		for await (const _ of stream) {
@@ -586,7 +585,6 @@ describe("command-code effort dial", () => {
 			{
 				apiKey: "test-key",
 				reasoning: Effort.High,
-				config: null,
 			},
 		);
 		for await (const _ of stream) {
