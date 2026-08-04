@@ -1,5 +1,8 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
+
+import { getAgentDir, getConfigRootDir, refreshDirsFromEnv } from "./dirs";
 
 export * from "./worker-host";
 
@@ -214,6 +217,61 @@ export function parseEnvFile(filePath: string): Record<string, string> {
  * side-effect-free `env-core` module).
  */
 export const $env: Record<string, string> = Bun.env as Record<string, string>;
+
+/**
+ * Apply the agent `.env` chain (project, agent, config-root, home — first file
+ * with a key wins) to `Bun.env`, then rebuild the dirs resolver so
+ * directory-affecting keys (`XDG_*_HOME`, `PI_CODING_AGENT_DIR`) take effect.
+ *
+ * This is the side effect that the `@oh-my-pi/pi-utils/env` entrypoint runs
+ * eagerly. The barrel re-exports side-effect-free `env-core`, so SDK consumers
+ * whose static graph never imports `/env` get no `.env` values — call this
+ * explicitly from an embedder's bootstrap path. Importing env-core does not
+ * apply the files; only `/env`'s import or a call here does.
+ *
+ * Idempotent: keys already present in `Bun.env` are never overwritten, so the
+ * CLI path (which imports `/env` after `setProfile()`) is unaffected when an
+ * SDK helper runs inside the CLI process, and repeat calls are no-ops.
+ */
+export function applyDotenvFiles(): void {
+	if (dotenvFilesApplied) {
+		return;
+	}
+	dotenvFilesApplied = true;
+
+	const homeEnv = parseEnvFile(path.join(os.homedir(), ".env"));
+	const piEnv = parseEnvFile(path.join(getConfigRootDir(), ".env"));
+	const agentEnv = parseEnvFile(path.join(getAgentDir(), ".env"));
+	const projectEnv = parseEnvFile(path.join(process.cwd(), ".env"));
+
+	for (const key of Object.keys(Bun.env)) {
+		const value = Bun.env[key];
+		if (
+			!isSafeEnvName(key) ||
+			isMacosMallocStackLoggingEnvName(key) ||
+			value === undefined ||
+			!isSafeEnvValue(value)
+		) {
+			delete Bun.env[key];
+		}
+	}
+
+	for (const file of [projectEnv, agentEnv, piEnv, homeEnv]) {
+		for (const key in file) {
+			if (!isMacosMallocStackLoggingEnvName(key) && !Bun.env[key]) {
+				Bun.env[key] = file[key];
+				if (file === projectEnv) markProjectEnvLoaded(key);
+			}
+		}
+	}
+
+	// Directory-affecting keys may have just arrived from the profile/agent
+	// `.env` applied above. The dirs resolver may have cached its paths at
+	// module load — before this ran — so rebuild it from the updated env.
+	refreshDirsFromEnv();
+}
+
+let dotenvFilesApplied = false;
 
 /**
  * Resolve the first environment variable value from the given keys.
