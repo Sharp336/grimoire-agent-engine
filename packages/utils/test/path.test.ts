@@ -1,5 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { stripWindowsExtendedLengthPathPrefix } from "../src/path";
+import * as os from "node:os";
+import * as path from "node:path";
+import { expandTilde, stripWindowsExtendedLengthPathPrefix } from "../src/path";
 
 describe("stripWindowsExtendedLengthPathPrefix", () => {
 	it("removes drive and UNC extended-length prefixes on Windows", () => {
@@ -14,5 +16,39 @@ describe("stripWindowsExtendedLengthPathPrefix", () => {
 	it("leaves non-Windows paths unchanged", () => {
 		const path = "\\\\?\\C:\\Users\\Shi Xin\\omp.exe";
 		expect(stripWindowsExtendedLengthPathPrefix(path, "linux")).toBe(path);
+	});
+});
+
+describe("expandTilde", () => {
+	it("passes an empty string through unchanged", () => {
+		expect(expandTilde("")).toBe("");
+	});
+
+	it("expands a bare tilde to the home directory", () => {
+		expect(expandTilde("~")).toBe(os.homedir());
+	});
+
+	it("splices the home prefix for ~/ paths", () => {
+		expect(expandTilde("~/x")).toBe(`${os.homedir()}/x`);
+	});
+
+	it("splices the home prefix for ~\\ paths", () => {
+		expect(expandTilde("~\\x")).toBe(`${os.homedir()}\\x`);
+	});
+
+	it("joins ~foo under the home directory", () => {
+		expect(expandTilde("~foo")).toBe(path.join(os.homedir(), "foo"));
+	});
+
+	it("honors a custom home", () => {
+		expect(expandTilde("~", "/custom/home")).toBe("/custom/home");
+		expect(expandTilde("~/x", "/custom/home")).toBe("/custom/home/x");
+		expect(expandTilde("~\\x", "/custom/home")).toBe("/custom/home\\x");
+		expect(expandTilde("~foo", "/custom/home")).toBe("/custom/home/foo");
+	});
+
+	it("leaves non-tilde paths unchanged", () => {
+		expect(expandTilde("plain/path")).toBe("plain/path");
+		expect(expandTilde("/abs/path")).toBe("/abs/path");
 	});
 });
