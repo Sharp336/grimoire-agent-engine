@@ -110,6 +110,7 @@ function isUnavailablePlan(bucket: TokenPlanBucket): boolean {
  */
 function intervalWindowId(durationMs: number | undefined): { id: string; label: string } {
 	if (durationMs === undefined || durationMs <= 0) return { id: "interval", label: "Interval" };
+	if (durationMs >= 4 * HOUR_MS && durationMs < 6 * HOUR_MS) return { id: "5h", label: "5 Hour" };
 	if (durationMs % HOUR_MS === 0) {
 		const hours = durationMs / HOUR_MS;
 		return { id: `${hours}h`, label: `${hours} Hour` };

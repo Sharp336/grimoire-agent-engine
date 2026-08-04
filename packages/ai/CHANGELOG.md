@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed GitHub Copilot requests failing with a raw `HTTP 400 model_not_available_for_integrator` on roughly half of all turns for recently rolled-out models. Copilot's fleet is not uniform — part of it rejects models that `/models` advertises on the same host — and the transient classifier matched only the older `model_not_supported` code at a fixed envelope depth, so these rejections surfaced as terminal errors instead of entering the existing retry path. Model-availability 400s are now recognized at any envelope depth and rerolled on a flat delay with a dedicated 8-attempt budget on the OpenAI transports; every other retryable failure keeps its previous backoff and attempt count.
+- Fixed MiniMax Token Plan rolling-window quota never reaching the status line's `usage` segment because the dynamic `windowId` produced a non-`5h` value when the rolling window's actual duration diverged slightly from 5 hours. The provider now labels any rolling window in the [4h, 6h) range as `5h`, matching the documented MiniMax 5-hour reset cadence, so the status line consistently renders both `5h` and `7d` for active Token Plan accounts.
 
 ## [17.2.7] - 2026-08-03
 

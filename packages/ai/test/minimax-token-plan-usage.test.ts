@@ -141,13 +141,13 @@ describe("MiniMax Token Plan usage", () => {
 		expect(new Headers(requests[0]?.init?.headers).get("Authorization")).toBe("Bearer sk-cp-test");
 		expect(report?.provider).toBe("minimax-code");
 		expect(report?.metadata).toMatchObject({ source: "minimax-token-plan", models: ["general", "video"] });
-		expect(report?.limits.map(limit => limit.id)).toEqual(["general:4h", "general:7d", "video:24h", "video:7d"]);
+		expect(report?.limits.map(limit => limit.id)).toEqual(["general:5h", "general:7d", "video:24h", "video:7d"]);
 
 		const [intervalLimit, weeklyLimit, videoInterval, videoWeekly] = report?.limits ?? [];
-		expect(intervalLimit?.label).toBe("General 4 Hour");
+		expect(intervalLimit?.label).toBe("General 5 Hour");
 		expect(intervalLimit?.window).toEqual({
-			id: "4h",
-			label: "4 Hour",
+			id: "5h",
+			label: "5 Hour",
 			durationMs: 14_400_000,
 			resetsAt: INTERVAL_END,
 		});
@@ -237,7 +237,7 @@ describe("MiniMax Token Plan usage", () => {
 
 		const report = await minimaxCodeUsageProvider.fetchUsage(params("minimax-code"), { fetch: fetchMock });
 
-		expect(report?.limits.map(limit => limit.id)).toEqual(["general:4h", "general:7d"]);
+		expect(report?.limits.map(limit => limit.id)).toEqual(["general:5h", "general:7d"]);
 		expect(report?.limits[0]?.status).toBe("exhausted");
 		expect(report?.limits[0]?.amount.usedFraction).toBe(1);
 	});
@@ -262,7 +262,7 @@ describe("MiniMax Token Plan usage", () => {
 
 			const report = await minimaxCodeUsageProvider.fetchUsage(params("minimax-code"), { fetch: fetchMock });
 
-			const interval = report?.limits.find(limit => limit.id === "general:4h");
+			const interval = report?.limits.find(limit => limit.id === "general:5h");
 			expect(interval?.status).toBe("exhausted");
 			expect(interval?.amount).toMatchObject({ usedFraction: 1, remainingFraction: 0 });
 			expect(report?.limits.find(limit => limit.id === "general:7d")?.status).toBe("ok");
@@ -275,7 +275,7 @@ describe("MiniMax Token Plan usage", () => {
 
 		const report = await minimaxCodeUsageProvider.fetchUsage(params("minimax-code"), { fetch: fetchMock });
 
-		expect(report?.limits.map(limit => limit.id)).toEqual(["general:4h", "general:7d"]);
+		expect(report?.limits.map(limit => limit.id)).toEqual(["general:5h", "general:7d"]);
 		expect(report?.metadata).toMatchObject({ models: ["general", "video"], unavailableModels: ["video"] });
 	});
 
@@ -307,7 +307,7 @@ describe("MiniMax Token Plan usage", () => {
 
 			const report = await minimaxCodeUsageProvider.fetchUsage(params("minimax-code"), { fetch: fetchMock });
 
-			expect(report?.limits.map(limit => limit.id)).toEqual(["video:4h", "video:7d"]);
+			expect(report?.limits.map(limit => limit.id)).toEqual(["video:5h", "video:7d"]);
 			expect(report?.metadata).not.toHaveProperty("unavailableModels");
 		}
 	});
@@ -336,8 +336,8 @@ describe("MiniMax Token Plan usage", () => {
 		const report = await minimaxCodeUsageProvider.fetchUsage(params("minimax-code"), { fetch: fetchMock });
 		if (!report) throw new Error("expected a usage report");
 
-		const general = report.limits.find(limit => limit.id === "general:4h");
-		expect(general?.scope).toEqual({ provider: "minimax-code", shared: true, windowId: "4h" });
+		const general = report.limits.find(limit => limit.id === "general:5h");
+		expect(general?.scope).toEqual({ provider: "minimax-code", shared: true, windowId: "5h" });
 		const video = report.limits.find(limit => limit.id === "video:24h");
 		expect(video?.scope).toEqual({ provider: "minimax-code", modelId: "video", windowId: "24h" });
 
