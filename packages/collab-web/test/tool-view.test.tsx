@@ -200,6 +200,57 @@ describe("ToolView glob scopes", () => {
 		expect(html).toContain("memory://root/skills/**/*.md");
 		expect(html).not.toContain("…");
 	});
+
+	it("renders brace-glob scopes with their alternatives intact", () => {
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="glob"
+				defaultOpen
+				args={{ path: "src/features/{admin,user}/pages/index.tsx" }}
+				result={{ content: [] }}
+			/>,
+		);
+
+		// `{` is a glob metacharacter — elision would hide which alternatives
+		// were searched ("src/…/pages/index.tsx").
+		expect(html).toContain("src/features/{admin,user}/pages/index.tsx");
+		expect(html).not.toContain("…");
+	});
+
+	it("renders a multi-pattern glob result scope badge with every pattern intact", () => {
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="glob"
+				defaultOpen
+				args={{ path: "src/**/*.ts" }}
+				result={{ content: [], details: { scopePath: "src/**/*.ts, test/**/*.ts" } }}
+			/>,
+		);
+
+		// The comma-joined display has >4 segments — shortenPath would have
+		// produced "src/…/**/*.ts", hiding the second pattern.
+		expect(html).toContain("in src/**/*.ts, test/**/*.ts");
+		expect(html).not.toContain("…");
+	});
+});
+
+describe("ToolView grep scopes", () => {
+	it("renders deep and scheme-bearing grep scopes intact", () => {
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="grep"
+				defaultOpen
+				args={{ pattern: "foo", path: ["src/deep/nested/path/**/*.ts", "memory://root/skills/**/*.md"] }}
+				result={{ content: [] }}
+			/>,
+		);
+
+		// Both scopes must survive — shortenPath would have produced
+		// "src/…/**/*.ts" and corrupted the scheme to "memory:/…/**/*.md".
+		expect(html).toContain("src/deep/nested/path/**/*.ts");
+		expect(html).toContain("memory://root/skills/**/*.md");
+		expect(html).not.toContain("…");
+	});
 });
 
 describe("ToolView home redaction", () => {
@@ -235,6 +286,22 @@ describe("ToolView home redaction", () => {
 		// The `[id]` bracket is a glob metacharacter, so elision is skipped —
 		// but home redaction still applies.
 		expect(html).toContain("~/project/apps/[id]/page.tsx");
+		expect(html).not.toContain("/home/alice");
+		expect(html).not.toContain("alice/");
+	});
+
+	it("redacts the username from a scheme-prefixed home path", () => {
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="glob"
+				defaultOpen
+				args={{ path: "file:///home/alice/project/**/*.ts" }}
+				result={{ content: [] }}
+			/>,
+		);
+
+		// The `://` early return must not skip home redaction.
+		expect(html).toContain("file://~/project/**/*.ts");
 		expect(html).not.toContain("/home/alice");
 		expect(html).not.toContain("alice/");
 	});

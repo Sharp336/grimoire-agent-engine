@@ -2,7 +2,7 @@
 import type { ReactNode } from "react";
 import { Badge, Badges, InvalidArg, Note, ResultText } from "../parts";
 import type { ToolRenderer, ToolRenderProps } from "../types";
-import { compactPath, detailsRecord, isRecord, num, scopePaths, shortenPath, str, truncate } from "../util";
+import { compactPath, detailsRecord, isRecord, num, scopePaths, str, truncate } from "../util";
 
 function Summary({ args }: ToolRenderProps): ReactNode {
 	const raw = args.path ?? args.paths;
@@ -44,7 +44,7 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 							{fileCount} file{fileCount === 1 ? "" : "s"}
 						</Badge>
 					),
-					scopePath !== null && <Badge>in {shortenPath(scopePath)}</Badge>,
+					scopePath !== null && <Badge>in {compactPath(scopePath)}</Badge>,
 					truncated && (
 						<Badge tone="warn">{resultLimit !== null ? `truncated at ${resultLimit}` : "truncated"}</Badge>
 					),

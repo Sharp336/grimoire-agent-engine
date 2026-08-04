@@ -11,6 +11,9 @@
 - Stopped path-shortening URLs in the `browser` and `inspect_image` tool renderers; URLs are now rendered intact (truncated only) instead of being split on `/` and middle-elided.
 - Stopped middle-eliding glob search scopes in the `glob` tool summary; pattern-bearing (`*`/`?`/`[`) and scheme-bearing (`memory://…`) scope values are now rendered intact instead of being corrupted by `shortenPath`. Factored the existing scheme guard into a shared `compactPath` helper used by `PathText`, `inspect_image`, and `glob`.
 - Restored unconditional home-directory redaction for glob, URI, and bracketed-literal paths routed through the canonical path formatter; scopes under `/home/<user>` (e.g. `/home/alice/project/src/**/*.ts` or `/home/alice/project/apps/[id]/page.tsx`) now render home-relative (`~/…`) instead of leaking the username. Also preserved the `server/share` root of UNC paths (`//server/share/…`) through middle elision.
+- Migrated the `grep` tool's scope and missing-path display and the `glob` tool's result scope badge to `compactPath`, so deep and scheme-bearing (`memory://…`) grep scopes and multi-pattern glob scope badges are no longer middle-elided or corrupted.
+- Extended the `compactPath` glob guard to the canonical metacharacter set (`*`, `?`, `[`, `{`, matching `hasGlobPathChars`), so brace-glob scopes like `src/features/{admin,user}/…` render with their alternatives intact.
+- Extended unconditional home redaction to home paths immediately after a URI scheme prefix (`file:///home/<user>/…` now renders `file://~/…` instead of leaking the username).
 
 ## [17.2.2] - 2026-07-31
 

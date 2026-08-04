@@ -2,7 +2,7 @@
 import type { ReactNode } from "react";
 import { Badge, Badges, InvalidArg, ResultImages, ResultText, Row } from "../parts";
 import type { ToolRenderer, ToolRenderProps } from "../types";
-import { detailsRecord, display, isRecord, normalizeWs, num, resultTextOf, shortenPath, str, truncate } from "../util";
+import { compactPath, detailsRecord, display, isRecord, normalizeWs, num, resultTextOf, str, truncate } from "../util";
 
 /** Values safe to show unquoted in a `NAME=value` shell prefix. */
 const SHELL_SAFE = /^[\w@%+=:,./-]+$/;
@@ -73,7 +73,7 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 			</div>
 			<Badges
 				items={[
-					cwd && <Badge>cwd={shortenPath(cwd)}</Badge>,
+					cwd && <Badge>cwd={compactPath(cwd)}</Badge>,
 					timeoutSeconds !== null && <Badge>timeout={timeoutSeconds}s</Badge>,
 					args.pty === true && <Badge tone="accent">pty</Badge>,
 					!job && args.async === true && <Badge tone="accent">async</Badge>,

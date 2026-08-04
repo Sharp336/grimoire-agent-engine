@@ -8,7 +8,7 @@ function Summary({ args, result }: ToolRenderProps): ReactNode {
 	const rec = detailsRecord(result);
 	const target = str(args.path) ?? str(args.url) ?? (rec ? str(rec.imagePath) : null);
 	if (target === null) return <InvalidArg what="image path" />;
-	// URLs and glob patterns must not go through shortenPath — it splits on "/" and middle-elides.
+	// compactPath redacts the home prefix but skips elision for URLs and glob patterns, which splitting on "/" would corrupt.
 	const display = compactPath(target);
 	return <span>{truncate(display)}</span>;
 }

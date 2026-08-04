@@ -29,21 +29,21 @@ export function display(value: unknown): string {
 	}
 }
 
-import { elideMiddle, redactHome, shortenPath } from "../lib/format";
-
-export { shortenPath };
+import { elideMiddle, redactHome } from "../lib/format";
 
 /**
  * Display-safe path compaction. Home redaction is UNCONDITIONAL — every
  * value is normalized to `~` first so a glob/URI/bracketed scope under a
  * home directory never leaks the username. Middle elision is the only
  * conditional part: it is skipped for scheme-bearing values (`://`, which
- * `elideMiddle` would corrupt by splitting on `/`) and glob patterns
- * (`*`, `?`, `[`, which carry scope meaning that elision would hide).
+ * `elideMiddle` would corrupt by splitting on `/`) and glob patterns — the
+ * canonical metacharacter set is `*`, `?`, `[`, `{` (matching
+ * `hasGlobPathChars` in coding-agent `path-utils.ts`), which carry scope
+ * meaning that elision would hide.
  */
 export function compactPath(p: string): string {
 	const redacted = redactHome(p);
-	if (/:\/\//.test(redacted) || /[*?[]/.test(redacted)) return redacted;
+	if (/:\/\//.test(redacted) || /[*?[{]/.test(redacted)) return redacted;
 	return elideMiddle(redacted);
 }
 

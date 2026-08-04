@@ -54,11 +54,14 @@ export function fmtPercent(p: number | null | undefined): string {
  * Replace a leading `/home/<user>` or `/Users/<user>` with `~`.
  * Unconditional — applied to every path before any elision decision,
  * so glob/URI/bracketed scopes under a home directory never leak the
- * username. No-op for values that do not start with a home prefix.
+ * username. A home path immediately after a URI scheme prefix
+ * (`file:///home/<user>/…`, optional authority) is redacted too, with
+ * the prefix kept intact. No-op for values carrying no home prefix;
+ * a `/home/<user>` mid-string in unrelated text is never touched.
  */
 export function redactHome(p: string): string {
 	if (typeof p !== "string" || p.length === 0) return "";
-	return p.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, "~");
+	return p.replace(/^((?:[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/]*)?)\/(?:Users|home)\/[^/]+(?=\/|$)/, "$1~");
 }
 
 /**

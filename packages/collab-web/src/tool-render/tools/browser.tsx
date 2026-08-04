@@ -2,7 +2,7 @@
 import type { ReactNode } from "react";
 import { Badge, CodeBlock, ResultImages, ResultText, type Tone } from "../parts";
 import type { ToolRenderer, ToolRenderProps } from "../types";
-import { detailsRecord, isRecord, num, shortenPath, str, truncate } from "../util";
+import { compactPath, detailsRecord, isRecord, num, str, truncate } from "../util";
 
 interface BrowserDetails {
 	action: string | null;
@@ -48,7 +48,7 @@ function actionTone(action: string): Tone | undefined {
 /** Mirrors the TUI's `describeBrowser`: explicit app args win over reported mode. */
 function describeBrowser(app: AppArg | null, details: BrowserDetails): string | null {
 	if (app?.cdpUrl) return `connected ${app.cdpUrl}`;
-	if (app?.path) return `spawned ${shortenPath(app.path)}`;
+	if (app?.path) return `spawned ${compactPath(app.path)}`;
 	return details.browser;
 }
 

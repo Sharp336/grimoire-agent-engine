@@ -2,7 +2,7 @@
 import type { ReactNode } from "react";
 import { Badge, InvalidArg, Kv, KvGrid, Note, Output, ResultText, Row } from "../parts";
 import type { ToolRenderer, ToolRenderProps } from "../types";
-import { detailsRecord, isRecord, normalizeWs, num, shortenPath, str, truncate } from "../util";
+import { compactPath, detailsRecord, isRecord, normalizeWs, num, str, truncate } from "../util";
 
 const SUCCESS_CONCLUSIONS: Record<string, true> = { success: true, neutral: true, skipped: true };
 const FAILURE_CONCLUSIONS: Record<string, true> = {
@@ -236,7 +236,7 @@ function CheckoutRows({ checkouts }: { checkouts: readonly unknown[] }): ReactNo
 				return (
 					<Row k={prNumber !== null ? `#${prNumber}` : "PR"} key={prNumber ?? index}>
 						<span>{str(entry.branch) ?? ""}</span>
-						{worktree && <span className="tv-muted"> {shortenPath(worktree)}</span>}
+						{worktree && <span className="tv-muted"> {compactPath(worktree)}</span>}
 						{entry.reused === true && <Badge>reused</Badge>}
 					</Row>
 				);
@@ -268,7 +268,7 @@ function DetailsGrid({ details }: { details: Record<string, unknown> }): ReactNo
 				</Kv>,
 			);
 		} else if (typeof value === "string" && value) {
-			const text = key === "worktreePath" ? shortenPath(value) : key === "headSha" ? shortSha(value) : value;
+			const text = key === "worktreePath" ? compactPath(value) : key === "headSha" ? shortSha(value) : value;
 			rows.push(
 				<Kv k={key} key={key}>
 					{text}
