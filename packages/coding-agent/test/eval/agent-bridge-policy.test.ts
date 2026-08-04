@@ -253,10 +253,61 @@ describe("runEvalAgent", () => {
 		expect(runSpy).toHaveBeenCalledTimes(1);
 	});
 
+	it("resolves an explicit model: default to the agent frontmatter model (issue #6438)", async () => {
+		const frontmatterAgent = {
+			name: "task",
+			description: "Task agent",
+			systemPrompt: "Run the task.",
+			source: "bundled",
+			spawns: "*",
+			model: ["opencode-go/deepseek-v4-flash"],
+		} satisfies AgentDefinition;
+		mockAgents([frontmatterAgent]);
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+
+		await runEvalAgent(
+			{ prompt: "work", model: "default" },
+			{
+				session: makeSession({
+					settings: Settings.isolated({
+						"async.enabled": false,
+						"task.isolation.mode": "none",
+						"task.enableLsp": true,
+						modelRoles: { default: "openai-codex/gpt-5.6-terra" },
+					}),
+				}),
+			},
+		);
+
+		const options = runSpy.mock.calls[0]?.[0];
+		expect(options?.modelOverride).toEqual(["opencode-go/deepseek-v4-flash"]);
+	});
+
+	it("keeps a non-default model override on eval agent()", async () => {
+		mockAgents();
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+
+		await runEvalAgent(
+			{ prompt: "work", model: "@smol" },
+			{
+				session: makeSession({
+					settings: Settings.isolated({
+						"async.enabled": false,
+						"task.isolation.mode": "none",
+						"task.enableLsp": true,
+						modelRoles: { default: "openai-codex/gpt-5.6-terra", smol: "local/llama" },
+					}),
+				}),
+			},
+		);
+
+		const options = runSpy.mock.calls[0]?.[0];
+		expect(options?.modelOverride).toEqual(["local/llama"]);
+	});
+
 	it("runs plan-mode eval agents with an attenuated policy", async () => {
 		mockAgents([{ ...taskAgent, tools: ["ast_grep", "write"] }]);
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
-
 		await expect(
 			runEvalAgent({ prompt: "hello" }, { session: makeSession({ planMode: true }) }),
 		).resolves.toMatchObject({

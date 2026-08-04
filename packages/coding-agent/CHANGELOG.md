@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed an explicit `model: "default"` selector on subagent spawns (eval `agent()`, task internals) silently resolving to the parent session model instead of the selected agent's frontmatter model, which broke project agent routing ([#6438](https://github.com/can1357/oh-my-pi/issues/6438)).
+
 ## [17.2.7] - 2026-08-03
 
 ### Changed

@@ -2,6 +2,7 @@
  * Host-side handler for the eval `agent()` helper.
  */
 import { type } from "@oh-my-pi/omptype";
+import { DEFAULT_MODEL_ROLE_ALIAS, formatModelRoleAlias, LEGACY_MODEL_ROLE_ALIAS_PREFIX } from "../config/model-roles";
 import {
 	buildStructuredSubagentRecoveryHint,
 	runStructuredSubagent,
@@ -86,6 +87,32 @@ function trimToUndefined(value: string | undefined): string | undefined {
 	return trimmed ? trimmed : undefined;
 }
 
+/**
+ * The `model` override the eval agent() helper forwards to the subagent.
+ * A sole "default" selector ("default", "*", "@default", "pi/default")
+ * means "this agent's default model" — identical to omitting the override
+ * (issue #6438) — so it is dropped here instead of being expanded through
+ * the parent session's default role, which would silently discard the
+ * agent's frontmatter model.
+ */
+function normalizeAgentModel(model: string | string[] | undefined): string | string[] | undefined {
+	const patterns = Array.isArray(model)
+		? model
+		: model
+				?.split(",")
+				.map(pattern => pattern.trim())
+				.filter(Boolean);
+	if (!patterns || patterns.length === 0) return undefined;
+	if (patterns.length !== 1) return patterns;
+	const pattern = patterns[0]!;
+	const isDefaultSelector =
+		pattern === "default" ||
+		pattern === formatModelRoleAlias("default") ||
+		pattern === DEFAULT_MODEL_ROLE_ALIAS ||
+		pattern === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}default`;
+	return isDefaultSelector ? undefined : pattern;
+}
+
 function emitProgressStatus(emitStatus: ((event: JsStatusEvent) => void) | undefined, progress: AgentProgress): void {
 	if (!emitStatus) return;
 	const preview = (progress.assignment ?? progress.task ?? "").split("\n")[0]?.slice(0, 120);
@@ -148,7 +175,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 					invocationKind: "eval",
 					assignment: parsed.prompt,
 					...(parsed.agent !== undefined ? { agent: parsed.agent } : {}),
-					...(parsed.model !== undefined ? { model: parsed.model } : {}),
+					...(normalizeAgentModel(parsed.model) !== undefined ? { model: normalizeAgentModel(parsed.model) } : {}),
 					...(Object.hasOwn(parsed, "schema") ? { outputSchema: parsed.schema } : {}),
 					...(parsed.schemaMode !== undefined ? { schemaMode: parsed.schemaMode } : {}),
 					...(parsed.label !== undefined ? { identity: { label: parsed.label } } : {}),
