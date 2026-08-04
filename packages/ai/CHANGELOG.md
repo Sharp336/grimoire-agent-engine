@@ -5,6 +5,36 @@
 ### Fixed
 
 - Fixed GitHub Copilot requests failing with a raw `HTTP 400 model_not_available_for_integrator` on roughly half of all turns for recently rolled-out models. Copilot's fleet is not uniform — part of it rejects models that `/models` advertises on the same host — and the transient classifier matched only the older `model_not_supported` code at a fixed envelope depth, so these rejections surfaced as terminal errors instead of entering the existing retry path. Model-availability 400s are now recognized at any envelope depth and rerolled on a flat delay with a dedicated 8-attempt budget on the OpenAI transports; every other retryable failure keeps its previous backoff and attempt count.
+### Added
+
+- `command-code` browser login: `/login` now runs the Command Code studio
+  handshake on a loopback callback (port 5959) and stores the returned API key,
+  so authenticating no longer requires the separate `command-code` CLI.
+- Added the `command-code` API/provider for Command Code's JSONL `/alpha/generate` wire protocol, with auth-file fallback via `~/.commandcode/auth.json`.
+
+### Fixed
+
+- `command-code` requests now match the official CLI: the `x-project-slug`,
+  `x-taste-learning` and `x-co-flag` headers are sent (they were missing), the
+  envelope's `mode` is omitted on the main agent loop instead of being pinned to
+  `"agent"`, `x-session-id` stays stable across turns, and `config` carries the
+  real repository snapshot (structure, branch, status, recent commits) rather
+  than empty placeholders.
+- `command-code` streams now handle the gateway's full event vocabulary. Tool
+  arguments stream in through `tool-input-start`/`-delta`/`-end` (emitting
+  `toolcall_delta`), `text-start`/`text-end` bound text blocks, and
+  `start-step`/`finish-step`/`provider-metadata` are recognized framing instead
+  of unknown events.
+- `command-code` usage no longer double-counts cached prompt tokens: `input` is
+  the non-cached bucket (`inputTokenDetails.noCacheTokens`), and
+  `reasoningTokens` is reported. Combined with real catalog pricing, the
+  computed cost now matches the gateway's own `cost` figure.
+- `command-code` re-sends the request while the gateway answers `pause_turn`
+  (up to five continuations), accumulating content and usage.
+- `command-code` error frames keep the gateway's `type`, `statusCode` and
+  `isRetryable`, so a transient `server_error` is retried instead of surfacing
+  as a terminal "Network connection lost."; a stalled stream also fails through
+  a first-event watchdog instead of hanging until the socket drops.
 
 ## [17.2.7] - 2026-08-03
 

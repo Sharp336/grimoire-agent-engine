@@ -24,6 +24,7 @@ import { isInvalidatedOAuthTokenError } from "./error/auth-classify";
 import { isUsageLimitOutcome } from "./error/rate-limit";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
+import type { CommandCodeOptions } from "./providers/command-code";
 import { coworkFetch } from "./providers/cowork-fetch";
 import type { CursorOptions } from "./providers/cursor";
 import type { DevinOptions } from "./providers/devin";
@@ -49,6 +50,7 @@ import {
 	streamAnthropic,
 	streamAzureOpenAIResponses,
 	streamBedrock,
+	streamCommandCode,
 	streamCursor,
 	streamDevin,
 	streamGoogle,
@@ -908,6 +910,13 @@ function streamDispatch<TApi extends Api>(
 
 		case "devin-agent":
 			return streamDevin(providerModel as Model<"devin-agent">, context, providerOptions as DevinOptions);
+
+		case "command-code":
+			return streamCommandCode(
+				providerModel as Model<"command-code">,
+				context,
+				providerOptions as CommandCodeOptions,
+			);
 
 		default:
 			throw new AIError.ConfigurationError(`Unhandled API: ${api}`);
@@ -1892,6 +1901,18 @@ function mapOptionsForApi<TApi extends Api>(
 			return castApi<"devin-agent">({
 				...base,
 				chatModelUid: resolveWireModelId(devinModel, effort),
+			});
+		}
+		case "command-code": {
+			const ccModel = model as Model<"command-code">;
+			const effort =
+				options?.reasoning && !options.disableReasoning
+					? requireSupportedEffort(ccModel, options.reasoning)
+					: undefined;
+			return castApi<"command-code">({
+				...base,
+				reasoningEffort: effort,
+				conversationId: options?.sessionId,
 			});
 		}
 		default:

@@ -49,7 +49,11 @@ import {
 	SAKANA_FUGU_STATIC_MODELS,
 	stripFireworksDeepSeekThinkingToggle,
 } from "../src/provider-models/openai-compat";
-import { type OpenAICodexAccount, openaiCodexModelManagerOptions } from "../src/provider-models/special";
+import {
+	COMMAND_CODE_STATIC_MODELS,
+	type OpenAICodexAccount,
+	openaiCodexModelManagerOptions,
+} from "../src/provider-models/special";
 import type { Api, ModelSpec } from "../src/types";
 import { cleanModelName } from "../src/utils";
 import { collapseEffortVariantsAcrossProviders } from "../src/variant-collapse";
@@ -560,6 +564,7 @@ async function generateModels() {
 	// Seed Meta's documented Muse model so first-run selection does not depend on
 	// credentials or live discovery.
 	allModels.push(...META_MUSE_STATIC_MODELS);
+	allModels.push(...COMMAND_CODE_STATIC_MODELS);
 	// Mantle's catalog endpoint is account/API-key scoped. Keep the generated
 	// bundle deterministic; authenticated runtime discovery may replace this seed.
 	allModels.push(...BEDROCK_MANTLE_STATIC_MODELS);
