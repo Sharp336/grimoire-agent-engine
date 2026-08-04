@@ -17,6 +17,7 @@ import { setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
 const DOWN = "\x1b[B";
 const ENTER = "\r";
 const TAB = "\t";
+const SHIFT_ENTER = "\x1b[13;2~";
 
 let darkTheme = await getThemeByName("dark");
 
@@ -75,6 +76,17 @@ diff --git a/src/beta.ts b/src/beta.ts
 		expect(render(overlay)).toContain("↑↓ line");
 	});
 
+	it("shows the full current nested path above the wide diff pane", () => {
+		const nestedPath = "packages/coding-agent/src/modes/components/deep/code-review-pane.ts";
+		const { overlay } = makeOverlay(`diff --git a/${nestedPath} b/${nestedPath}
+--- a/${nestedPath}
++++ b/${nestedPath}
+@@ -0,0 +1 @@
++new`);
+
+		expect(render(overlay, 120)).toContain(nestedPath);
+	});
+
 	it("anchors an annotation to the selected diff line", () => {
 		const rows = Array.from({ length: 80 }, (_, index) => ` context-row-${String(index).padStart(3, "0")}`);
 		const { overlay, onComplete } = makeOverlay(
@@ -104,6 +116,28 @@ diff --git a/src/beta.ts b/src/beta.ts
 		expect(onComplete).toHaveBeenCalledWith(
 			expect.objectContaining({ action: "review", annotations: overlay.getAnnotations() }),
 		);
+	});
+
+	it("commits a multiline annotation entered with shift+enter", () => {
+		const { overlay } = makeOverlay(
+			"diff --git a/src/value.ts b/src/value.ts\n--- a/src/value.ts\n+++ b/src/value.ts\n@@ -0,0 +1 @@\n+new",
+		);
+
+		render(overlay);
+		overlay.handleInput(TAB);
+		overlay.handleInput("a");
+		overlay.handleInput("first line");
+		overlay.handleInput(SHIFT_ENTER);
+		overlay.handleInput("second line");
+		expect(render(overlay)).toContain("shift+enter newline");
+		overlay.handleInput(ENTER);
+
+		expect(overlay.getAnnotations()).toEqual([
+			expect.objectContaining({ newLine: 1, note: "first line\nsecond line" }),
+		]);
+		const out = render(overlay);
+		expect(out).toContain("first line");
+		expect(out).toContain("second line");
 	});
 
 	it("gates paste until annotations exist and supports undo", () => {

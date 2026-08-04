@@ -1,7 +1,7 @@
 import {
 	type Component,
+	Editor,
 	Ellipsis,
-	Input,
 	matchesKey,
 	replaceTabs,
 	ScrollView,
@@ -17,7 +17,7 @@ import type {
 } from "../../extensibility/custom-commands/bundled/review/shared";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { sanitizeStatusText } from "../shared";
-import { theme } from "../theme/theme";
+import { getEditorTheme, theme } from "../theme/theme";
 import {
 	matchesAppExternalEditor,
 	matchesSelectCancel,
@@ -82,6 +82,7 @@ const MIN_BODY_ROWS = 3;
 const SIDEBAR_MIN_TOTAL_WIDTH = 64;
 const SIDEBAR_MIN_BODY_WIDTH = 40;
 const ACTIONS = [CONTINUE_CODE_REVIEW_ACTION, PASTE_CODE_REVIEW_ACTION] as const;
+const MAX_ANNOTATION_EDITOR_ROWS = 6;
 
 function isSourceRow(row: ReviewDiffRow): row is ReviewSourceRow {
 	return row.kind === "context" || row.kind === "added" || row.kind === "removed";
@@ -108,7 +109,7 @@ export class CodeReviewOverlay implements Component {
 		ellipsis: Ellipsis.Omit,
 		theme: { track: text => theme.fg("dim", text), thumb: text => theme.fg("accent", text) },
 	});
-	#input = new Input();
+	#editor = new Editor(getEditorTheme());
 	#focus: FocusRegion = "files";
 	#fileIndex = 0;
 	#sourceIndex = 0;
@@ -126,9 +127,11 @@ export class CodeReviewOverlay implements Component {
 		private readonly callbacks: CodeReviewOverlayCallbacks,
 		private readonly externalEditorLabel?: string,
 	) {
-		this.#input.setUseTerminalCursor(false);
-		this.#input.onSubmit = value => this.#commitAnnotation(value);
-		this.#input.onEscape = () => this.#cancelAnnotation();
+		this.#editor.setBorderVisible(false);
+		this.#editor.setPromptGutter("> ");
+		this.#editor.setUseTerminalCursor(false);
+		this.#editor.setScrollbarVisible(true);
+		this.#editor.onSubmit = value => this.#commitAnnotation(value);
 		this.#resetSourceCursor();
 	}
 
@@ -149,7 +152,11 @@ export class CodeReviewOverlay implements Component {
 				void this.#openAnnotationEditor();
 				return;
 			}
-			this.#input.handleInput(data);
+			if (matchesSelectCancel(data)) {
+				this.#cancelAnnotation();
+				return;
+			}
+			this.#editor.handleInput(data);
 			return;
 		}
 		if (matchesSelectCancel(data)) {
@@ -329,12 +336,12 @@ export class CodeReviewOverlay implements Component {
 			return;
 		}
 		this.#annotating = true;
-		this.#input.setValue("");
+		this.#editor.setText("");
 	}
 
 	#cancelAnnotation(): void {
 		this.#annotating = false;
-		this.#input.setValue("");
+		this.#editor.setText("");
 	}
 
 	#commitAnnotation(value: string): void {
@@ -342,7 +349,7 @@ export class CodeReviewOverlay implements Component {
 		const file = this.#currentFile();
 		const source = this.#currentSourceRows()[this.#sourceIndex];
 		this.#annotating = false;
-		this.#input.setValue("");
+		this.#editor.setText("");
 		if (!note || !file || !source) return;
 		this.#annotations.push({
 			fileIndex: this.#fileIndex,
@@ -372,7 +379,7 @@ export class CodeReviewOverlay implements Component {
 			this.callbacks.onWarning?.("No editor configured. Set $VISUAL or $EDITOR environment variable.");
 			return;
 		}
-		const draft = this.#input.getValue();
+		const draft = this.#editor.getExpandedText();
 		try {
 			this.tui.stop();
 			const result = await openInEditor(editorCommand, draft, { extension: ".md" });
@@ -525,9 +532,10 @@ export class CodeReviewOverlay implements Component {
 				width,
 				Ellipsis.Unicode,
 			);
-			const hints = ["enter save", "esc cancel"];
+			const hints = ["enter save", "shift+enter newline", "esc cancel"];
 			if (this.externalEditorLabel) hints.push(`${this.externalEditorLabel} editor`);
-			return [caption, this.#input.render(width)[0] ?? "", theme.fg("dim", hints.join(" · "))];
+			this.#editor.focused = true;
+			return [caption, ...this.#editor.render(width), theme.fg("dim", hints.join(" · "))];
 		}
 		const focusHelp =
 			this.#focus === "files"
@@ -545,9 +553,10 @@ export class CodeReviewOverlay implements Component {
 		const sidebarWidth = this.#sidebarShown ? this.#sidebarWidth(width) : 0;
 		const innerWidth = Math.max(1, width - 4);
 		const bodyWidth = this.#sidebarShown ? splitBodyWidth(width, sidebarWidth) : innerWidth;
+		this.#editor.setMaxHeight(Math.max(1, Math.min(MAX_ANNOTATION_EDITOR_ROWS, termHeight - 12)));
+		this.#editor.focused = this.#annotating;
 		const footer = this.#renderFooter(innerWidth);
-		const narrowHeaderRows = this.#sidebarShown ? 0 : 1;
-		const chromeRows = 4 + 1 + ACTIONS.length + footer.length + narrowHeaderRows;
+		const chromeRows = 4 + 1 + ACTIONS.length + footer.length + 1;
 		this.#bodyHeight = Math.max(MIN_BODY_ROWS, termHeight - chromeRows);
 		const renderedBody = this.#renderBody(bodyWidth);
 		this.#scrollView.setLines(renderedBody.lines);
@@ -556,10 +565,11 @@ export class CodeReviewOverlay implements Component {
 		const body = this.#scrollView.render(bodyWidth);
 		const out: string[] = [];
 		if (this.#sidebarShown) {
-			const sidebar = this.#renderSidebar(this.#bodyHeight, sidebarWidth);
+			const sidebar = this.#renderSidebar(this.#bodyHeight + 1, sidebarWidth);
 			out.push(topBorderSplit(width, OVERLAY_TITLE, sidebarWidth));
+			out.push(splitRow(sidebar[0] ?? "", this.#renderCurrentFileHeader(bodyWidth), width, sidebarWidth));
 			for (let index = 0; index < this.#bodyHeight; index++) {
-				out.push(splitRow(sidebar[index] ?? "", body[index] ?? "", width, sidebarWidth));
+				out.push(splitRow(sidebar[index + 1] ?? "", body[index] ?? "", width, sidebarWidth));
 			}
 			out.push(dividerSplit(width, sidebarWidth));
 		} else {
