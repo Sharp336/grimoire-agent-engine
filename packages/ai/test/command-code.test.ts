@@ -6,6 +6,7 @@ import {
 	slugifyProjectPath,
 	streamCommandCode,
 } from "@oh-my-pi/pi-ai/providers/command-code";
+import { NON_VISION_IMAGE_PLACEHOLDER } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context, Model, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -62,6 +63,15 @@ function makeModel(baseUrl: string): Model<"command-code"> {
 		maxTokens: 64_000,
 		thinking: { mode: "effort", efforts: [Effort.High, Effort.Max] },
 	});
+}
+
+function makeVisionModel(baseUrl: string): Model<"command-code"> {
+	return {
+		...makeModel(baseUrl),
+		id: "Qwen/Qwen3.7-Plus",
+		name: "Qwen 3.7 Plus",
+		input: ["text", "image"],
+	};
 }
 
 function ndjson(lines: readonly string[]): Response {
@@ -312,7 +322,64 @@ describe("command-code request parity", () => {
 		});
 	});
 
-	it("hoists tool-result images into a follow-up user turn", async () => {
+	it("hoists tool-result images into a follow-up user turn for vision models", async () => {
+		scenario = {
+			kind: "capture",
+			body: `{"type":"text-delta","text":"ok"}\n{"type":"finish","finishReason":"stop"}\n`,
+		};
+		const baseUrl = await startServer();
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_img",
+			toolName: "read",
+			content: [
+				{ type: "text", text: "screenshot captured" },
+				{ type: "image", mimeType: "image/png", data: "AAEC" },
+			],
+			isError: false,
+			timestamp: 2,
+		};
+		const context: Context = {
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", id: "call_img", name: "read", arguments: { path: "shot.png" } }],
+					api: "command-code",
+					provider: "command-code",
+					model: "Qwen/Qwen3.7-Plus",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 1,
+				},
+				toolResult,
+				{ role: "user", content: "describe it", timestamp: 3 },
+			],
+		};
+		await collectStream(makeVisionModel(baseUrl), context);
+		const params = lastRequest!.body.params as { messages: Array<Record<string, unknown>> };
+		expect(params.messages.map(message => message.role)).toEqual(["assistant", "tool", "user", "user"]);
+		const toolMessage = params.messages[1] as { content: Array<Record<string, unknown>> };
+		expect(toolMessage.content[0]).toEqual({
+			type: "tool-result",
+			toolCallId: "call_img",
+			toolName: "",
+			output: { type: "text", value: "screenshot captured" },
+		});
+		const hoist = params.messages[2] as { content: Array<Record<string, unknown>> };
+		expect(hoist.content).toEqual([
+			{ type: "text", text: "Attached image(s) from the tool result(s) above:" },
+			{ type: "image", image: "data:image/png;base64,AAEC", mimeType: "image/png" },
+		]);
+	});
+
+	it("omits tool-result images for text-only models", async () => {
 		scenario = {
 			kind: "capture",
 			body: `{"type":"text-delta","text":"ok"}\n{"type":"finish","finishReason":"stop"}\n`,
@@ -354,18 +421,44 @@ describe("command-code request parity", () => {
 		};
 		await collectStream(makeModel(baseUrl), context);
 		const params = lastRequest!.body.params as { messages: Array<Record<string, unknown>> };
-		expect(params.messages.map(message => message.role)).toEqual(["assistant", "tool", "user", "user"]);
+		expect(params.messages.map(message => message.role)).toEqual(["assistant", "tool", "user"]);
 		const toolMessage = params.messages[1] as { content: Array<Record<string, unknown>> };
 		expect(toolMessage.content[0]).toEqual({
 			type: "tool-result",
 			toolCallId: "call_img",
 			toolName: "",
-			output: { type: "text", value: "screenshot captured" },
+			output: {
+				type: "text",
+				value: `screenshot captured\n${NON_VISION_IMAGE_PLACEHOLDER}`,
+			},
 		});
-		const hoist = params.messages[2] as { content: Array<Record<string, unknown>> };
-		expect(hoist.content).toEqual([
-			{ type: "text", text: "Attached image(s) from the tool result(s) above:" },
-			{ type: "image", image: "data:image/png;base64,AAEC", mimeType: "image/png" },
+		expect(JSON.stringify(params.messages)).not.toContain('"type":"image"');
+	});
+
+	it("replaces user images with a placeholder on text-only models", async () => {
+		scenario = {
+			kind: "capture",
+			body: `{"type":"text-delta","text":"ok"}\n{"type":"finish","finishReason":"stop"}\n`,
+		};
+		const baseUrl = await startServer();
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "what is this?" },
+						{ type: "image", mimeType: "image/png", data: "AAEC" },
+					],
+					timestamp: 1,
+				},
+			],
+		};
+		await collectStream(makeModel(baseUrl), context);
+		const params = lastRequest!.body.params as { messages: Array<Record<string, unknown>> };
+		const userMessage = params.messages[0] as { content: Array<Record<string, unknown>> };
+		expect(userMessage.content).toEqual([
+			{ type: "text", text: "what is this?" },
+			{ type: "text", text: NON_VISION_IMAGE_PLACEHOLDER },
 		]);
 	});
 });

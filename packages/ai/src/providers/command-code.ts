@@ -34,6 +34,7 @@ import { normalizeSystemPrompts } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { toolWireSchema } from "../utils/schema/wire";
 import { transformMessages } from "./transform-messages";
+import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
 
 /** Production Command Code API base. */
 export const COMMAND_CODE_API_URL = "https://api.commandcode.ai";
@@ -330,21 +331,24 @@ function stringifyProviderToolPayload(value: unknown): string {
 	}
 }
 
-function userContentBlocks(content: string | (TextContent | ImageContent)[]): Array<Record<string, unknown>> {
+function userContentBlocks(
+	content: string | (TextContent | ImageContent)[],
+	supportsImages: boolean,
+): Array<Record<string, unknown>> {
 	if (typeof content === "string") {
 		return [{ type: "text", text: content }];
 	}
-	const blocks: Array<Record<string, unknown>> = [];
-	for (const block of content) {
-		if (block.type === "text") {
-			blocks.push({ type: "text", text: block.text });
-		} else if (block.type === "image") {
-			blocks.push({
-				type: "image",
-				image: `data:${block.mimeType};base64,${block.data}`,
-				mimeType: block.mimeType,
-			});
-		}
+	const { textBlocks, imageBlocks, omittedImages } = partitionVisionContent(content, supportsImages);
+	const blocks: Array<Record<string, unknown>> = textBlocks.map(block => ({ type: "text", text: block.text }));
+	if (omittedImages) {
+		blocks.push({ type: "text", text: NON_VISION_IMAGE_PLACEHOLDER });
+	}
+	for (const block of imageBlocks) {
+		blocks.push({
+			type: "image",
+			image: `data:${block.mimeType};base64,${block.data}`,
+			mimeType: block.mimeType,
+		});
 	}
 	return blocks;
 }
@@ -361,7 +365,7 @@ function toWireToolResultValue(content: (TextContent | ImageContent)[]): string 
  * is left empty on tool results because the official client does the same — the
  * gateway matches results to calls by `toolCallId`.
  */
-function toWireMessages(messages: Message[]): unknown[] {
+function toWireMessages(messages: Message[], supportsImages: boolean): unknown[] {
 	const out: unknown[] = [];
 	for (const message of messages) {
 		if (message.role === "assistant") {
@@ -385,8 +389,9 @@ function toWireMessages(messages: Message[]): unknown[] {
 		}
 
 		if (message.role === "toolResult") {
-			const textValue = toWireToolResultValue(message.content);
 			const imageBlocks = message.content.filter((block): block is ImageContent => block.type === "image");
+			const omittedImages = imageBlocks.length > 0 && !supportsImages;
+			const textValue = joinTextWithImagePlaceholder(toWireToolResultValue(message.content), omittedImages);
 			out.push({
 				role: "tool",
 				content: [
@@ -400,13 +405,13 @@ function toWireMessages(messages: Message[]): unknown[] {
 			});
 			// The tool-result `output` channel is text-only on the wire. Re-attach
 			// image payloads as a follow-up user turn (same shape as user
-			// screenshots) so vision-capable models still see the bytes.
-			if (imageBlocks.length > 0) {
+			// screenshots) only when the selected model accepts vision input.
+			if (supportsImages && imageBlocks.length > 0) {
 				out.push({
 					role: "user",
 					content: [
 						{ type: "text", text: "Attached image(s) from the tool result(s) above:" },
-						...userContentBlocks(imageBlocks),
+						...userContentBlocks(imageBlocks, true),
 					],
 				});
 			}
@@ -414,7 +419,7 @@ function toWireMessages(messages: Message[]): unknown[] {
 		}
 
 		if (message.role === "user" || message.role === "developer") {
-			const content = userContentBlocks(message.content);
+			const content = userContentBlocks(message.content, supportsImages);
 			if (content.length > 0) {
 				out.push({ role: "user", content });
 			}
@@ -618,7 +623,7 @@ export const streamCommandCode: StreamFunction<"command-code"> = (
 
 			const params: Record<string, unknown> = {
 				model: model.id,
-				messages: toWireMessages(transformed),
+				messages: toWireMessages(transformed, model.input.includes("image")),
 				system: normalizeSystemPrompts(context.systemPrompt).join("\n\n"),
 				max_tokens: options?.maxTokens ?? model.maxTokens ?? DEFAULT_MAX_TOKENS,
 				stream: true,
