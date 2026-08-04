@@ -145,8 +145,20 @@ describe("status line model segment showProvider", () => {
 
 	it("prepends capitalized provider prefix when showProvider is true", () => {
 		const rendered = renderSegment("model", createProviderContext(true, "anthropic"));
-		expect(Bun.stripANSI(rendered.content)).toContain("Anthropic/");
-		expect(Bun.stripANSI(rendered.content)).toContain("Test Model");
+		const stripped = Bun.stripANSI(rendered.content);
+		expect(stripped).toContain("Anthropic/Test Model");
+		// Slash separates provider from the model name, not from the icon.
+		const icon = theme.icon.model ? `${theme.icon.model} ` : "";
+		expect(stripped).toBe(`${icon}Anthropic/Test Model`);
+		// Provider span is dim and does not wrap (nest inside) the model span:
+		// icon and model keep their own statusLineModel spans, provider its own dim.
+		const dimAnsi = theme.getFgAnsi("dim");
+		const modelAnsi = theme.getFgAnsi("statusLineModel");
+		const reset = "\x1b[39m";
+		expect(rendered.content).toContain(
+			`${modelAnsi}${icon}${reset}${dimAnsi}Anthropic/${reset}${modelAnsi}Test Model`,
+		);
+		expect(rendered.content).not.toContain(`${dimAnsi}Anthropic/${reset}${modelAnsi}${icon}`);
 	});
 
 	it("omits provider prefix when showProvider is false", () => {

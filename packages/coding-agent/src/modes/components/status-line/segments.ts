@@ -143,15 +143,19 @@ const modelSegment: StatusLineSegment = {
 
 		// `statusLineModel` is aliased to `accent` in many themes, so the badge
 		// uses status colors to stay visibly distinct from the model name color.
-		let content = theme.fg("statusLineModel", withIcon(modelIcon, modelName));
-
-		// Prepend a dimmed provider prefix when opted in. Concatenated (not
-		// nested) so the inner `\\x1b[39m` from theme.fg("dim", …) does not
-		// reset the outer statusLineModel color on the model name.
+		let content: string;
 		if (opts.showProvider && state.model?.provider) {
 			const provider = sanitizeStatusText(state.model.provider);
 			const label = provider[0].toUpperCase() + provider.slice(1);
-			content = theme.fg("dim", `${label}/`) + content;
+			// Icon (statusLineModel), dimmed provider, then model — three sibling
+			// spans, so the provider's dim reset cannot touch the model color and
+			// the slash separates provider from model, not from the icon.
+			content =
+				theme.fg("statusLineModel", modelIcon ? `${modelIcon} ` : "") +
+				theme.fg("dim", `${label}/`) +
+				theme.fg("statusLineModel", modelName);
+		} else {
+			content = theme.fg("statusLineModel", withIcon(modelIcon, modelName));
 		}
 
 		// Advisor "++" badge, colored by the worst status in the roster:
