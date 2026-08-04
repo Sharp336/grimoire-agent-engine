@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Best-effort kwarg-stripping retry ladder for Anthropic: when a provider 400 rejects an optional parameter named in the error message (temperature, output_config, thinking, forced tool_choice), the request is automatically retried with that parameter stripped instead of failing. The ladder slots into the existing catch-block retry flow alongside the Grammar/FastModeUnsupported handlers and shares the same streaming-safety guard (no retry after replay-unsafe content has been forwarded).
 
 ## [17.2.7] - 2026-08-03
 

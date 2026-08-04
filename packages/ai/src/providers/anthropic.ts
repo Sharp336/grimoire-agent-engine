@@ -59,6 +59,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { isFoundryEnabled } from "../utils/foundry";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
+import { type KwargRetryLadder, nextKwargStripRung } from "../utils/kwarg-retry-ladder";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
 import { COMBINATOR_KEYS, NO_STRICT, toolWireSchema } from "../utils/schema";
@@ -478,6 +479,49 @@ function dropAnthropicStrictTools(params: MessageCreateParamsStreaming): void {
 		delete tool.strict;
 	}
 }
+
+/**
+ * Best-effort kwarg-stripping ladder for the Anthropic Messages API. Each
+ * rung targets a 400 that rejects an optional parameter the error message
+ * names, ordered least-disruptive first. Semantics-changing keys (messages,
+ * tools, max_tokens, system) are never stripped. Applied after `prepareParams`
+ * returns, so no sticky build-time state is needed.
+ */
+const anthropicKwargLadder: KwargRetryLadder<MessageCreateParamsStreaming> = [
+	{
+		id: "output_config",
+		matchers: [/\boutput[_-]?config\b/i, /\beffort\b/i],
+		strip: params => {
+			delete params.output_config;
+		},
+	},
+	{
+		id: "thinking",
+		matchers: [/\bthinking\b/i, /\bbudget[_-]?tokens\b/i],
+		strip: params => {
+			delete params.thinking;
+		},
+	},
+	{
+		id: "temperature",
+		matchers: [/\btemperature\b/i, /\btop[_-]?p\b/i, /\btop[_-]?k\b/i],
+		strip: params => {
+			delete params.temperature;
+			delete params.top_p;
+			delete params.top_k;
+		},
+	},
+	{
+		id: "tool_choice_required",
+		matchers: [/tool[_-]?choice.*(?:required|forces tool use|is not compatible)/i],
+		strip: params => {
+			const choice = params.tool_choice;
+			if (choice && (choice.type === "any" || choice.type === "tool")) {
+				params.tool_choice = { type: "auto" };
+			}
+		},
+	},
+];
 
 function getCacheControl(
 	model: Model<"anthropic-messages">,
@@ -1820,6 +1864,7 @@ const streamAnthropicOnce = (
 				(providerSessionState?.strictToolsDisabled ?? false) || (model.compat?.disableStrictTools ?? false);
 			let dropFastMode = providerSessionState?.fastModeDisabled ?? false;
 			let forceDemoteUnsignedThinking = providerSessionState?.replayUnsignedThinkingDisabled ?? false;
+			const appliedKwargRungs = new Set<string>();
 			const mergedCallerHeaders = mergeHeaders(model.headers, options?.headers);
 			const umansGatewayWebSearchHeader = getUmansWebSearchHeader(model, mergedCallerHeaders);
 			// Keep fallback payloads aligned with the top-level Vertex effort gate:
@@ -2690,6 +2735,33 @@ const streamAnthropicOnce = (
 						firstTokenTime = undefined;
 						continue;
 					}
+					if (
+						firstTokenTime === undefined &&
+						!streamedReplayUnsafeContent &&
+						AIError.isUnsupportedKwarg(streamFailure)
+					) {
+						const errorText = streamFailure instanceof Error ? streamFailure.message : String(streamFailure);
+						const rung = nextKwargStripRung(errorText, anthropicKwargLadder, appliedKwargRungs);
+						if (rung) {
+							appliedKwargRungs.add(rung.id);
+							logger.warn(`anthropic: provider rejected optional kwarg, retrying without ${rung.id}`, {
+								model: model.id,
+								error: await finalizeErrorMessage(streamFailure, rawRequestDump),
+							});
+							params = await prepareParams();
+							rung.strip(params);
+							providerRetryAttempt = 0;
+							output.content.length = 0;
+							output.model = model.id;
+							output.responseId = undefined;
+							output.errorMessage = undefined;
+							output.providerPayload = undefined;
+							output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+							output.stopReason = "stop";
+							firstTokenTime = undefined;
+							continue;
+						}
+					}
 					const isTransientEnvelopeFailure =
 						AIError.isTransientStreamParseError(streamFailure) || AIError.isStreamEnvelopeError(streamFailure);
 					const isLocalIdleTimeout =
@@ -2745,6 +2817,9 @@ const streamAnthropicOnce = (
 			}
 			if (forceDemoteUnsignedThinking && model.compat.replayUnsignedThinking) {
 				output.disabledFeatures = [...(output.disabledFeatures ?? []), "unsigned-thinking-replay"];
+			}
+			for (const rungId of appliedKwargRungs) {
+				output.disabledFeatures = [...(output.disabledFeatures ?? []), `kwarg:${rungId}`];
 			}
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
