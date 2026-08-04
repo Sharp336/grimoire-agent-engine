@@ -1,5 +1,4 @@
 import * as os from "node:os";
-import * as path from "node:path";
 
 const WINDOWS_DRIVE_EXTENDED_PREFIX = /^\\\\[?]\\([A-Za-z]:[\\/].*)$/;
 const WINDOWS_UNC_EXTENDED_PREFIX = /^\\\\[?]\\UNC[\\/]([^\\/]+)[\\/](.+)$/i;
@@ -33,19 +32,16 @@ export function stripWindowsExtendedLengthPathPrefix(
 /**
  * Expand a leading `~` (or `~\` on Windows) to the home directory.
  *
- * Semantics (strict superset of every prior in-repo copy): empty strings and
- * non-`~` inputs pass through unchanged; bare `~` returns the home directory;
- * `~/x` and `~\x` splice the home prefix; `~foo` joins `foo` under the home
- * directory. Pass `home` to override the home directory resolution.
+ * Semantics: empty strings and non-`~`-prefixed inputs pass through
+ * unchanged; bare `~` returns the home directory; `~/x` and `~\x` splice the
+ * home prefix. Other `~`-prefixed forms (e.g. `~foo`) are left untouched.
+ * Pass `home` to override the home directory resolution.
  */
 export function expandTilde(filePath: string, home?: string): string {
 	const h = home ?? os.homedir();
 	if (filePath === "~") return h;
 	if (filePath.startsWith("~/") || filePath.startsWith("~\\")) {
 		return h + filePath.slice(1);
-	}
-	if (filePath.startsWith("~")) {
-		return path.join(h, filePath.slice(1));
 	}
 	return filePath;
 }

@@ -1,6 +1,5 @@
 import { describe, expect, it } from "bun:test";
 import * as os from "node:os";
-import * as path from "node:path";
 import { expandTilde, stripWindowsExtendedLengthPathPrefix } from "../src/path";
 
 describe("stripWindowsExtendedLengthPathPrefix", () => {
@@ -36,15 +35,15 @@ describe("expandTilde", () => {
 		expect(expandTilde("~\\x")).toBe(`${os.homedir()}\\x`);
 	});
 
-	it("joins ~foo under the home directory", () => {
-		expect(expandTilde("~foo")).toBe(path.join(os.homedir(), "foo"));
+	it("leaves ~foo untouched", () => {
+		expect(expandTilde("~foo")).toBe("~foo");
 	});
 
 	it("honors a custom home", () => {
 		expect(expandTilde("~", "/custom/home")).toBe("/custom/home");
 		expect(expandTilde("~/x", "/custom/home")).toBe("/custom/home/x");
 		expect(expandTilde("~\\x", "/custom/home")).toBe("/custom/home\\x");
-		expect(expandTilde("~foo", "/custom/home")).toBe("/custom/home/foo");
+		expect(expandTilde("~foo", "/custom/home")).toBe("~foo");
 	});
 
 	it("leaves non-tilde paths unchanged", () => {

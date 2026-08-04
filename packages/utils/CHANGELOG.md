@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added a canonical `expandTilde()` utility that expands a leading `~` (bare, `~/`, or `~\`) to the home directory, consolidating the duplicated in-repo copies into `@oh-my-pi/pi-utils`.
 
 ## [17.2.9] - 2026-08-05
 
