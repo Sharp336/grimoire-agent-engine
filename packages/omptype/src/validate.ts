@@ -1134,15 +1134,38 @@ class Builder {
 					);
 				}
 				const stringKey = this.next("k");
-				if (node.index !== undefined) {
-					objectChecks.push(
-						`(()=>{for(const ${stringKey} in ${v})if(own.call(${v},${stringKey})&&!(${this.predicate(node.index, `${v}[${stringKey}]`)}))return false;return true})()`,
-					);
-				}
 				if (node.patternIndexes !== undefined) {
+					// Consolidate string-key checks into a single IIFE so each
+					// pattern-key predicate is evaluated exactly once per key —
+					// matching the walker's objectIndexValidators-once-per-key
+					// invariant. The cached match result is reused for both
+					// pattern-index validation and extras-reject classification.
+					const body: string[] = [`for(const ${stringKey} in ${v})if(own.call(${v},${stringKey})){`];
+					if (node.index !== undefined) {
+						body.push(`if(!(${this.predicate(node.index, `${v}[${stringKey}]`)}))return false;`);
+					}
+					const matchVars: string[] = [];
 					for (const pattern of node.patternIndexes) {
+						const matchVar = this.next("m");
+						matchVars.push(matchVar);
+						body.push(`const ${matchVar}=(${this.predicate(pattern.key, stringKey)});`);
+						body.push(`if(${matchVar}&&!(${this.predicate(pattern.val, `${v}[${stringKey}]`)}))return false;`);
+					}
+					if (node.extras === "reject" && node.index === undefined) {
+						const patternMatch = matchVars.length > 0 ? matchVars.join("||") : "false";
+						body.push(`if(!(${this.declaredCheck(node.props, stringKey)})&&!(${patternMatch}))return false;`);
+					}
+					body.push("}");
+					objectChecks.push(`(()=>{${body.join("")}return true})()`);
+				} else {
+					if (node.index !== undefined) {
 						objectChecks.push(
-							`(()=>{for(const ${stringKey} in ${v})if(own.call(${v},${stringKey})&&(${this.predicate(pattern.key, stringKey)})&&!(${this.predicate(pattern.val, `${v}[${stringKey}]`)}))return false;return true})()`,
+							`(()=>{for(const ${stringKey} in ${v})if(own.call(${v},${stringKey})&&!(${this.predicate(node.index, `${v}[${stringKey}]`)}))return false;return true})()`,
+						);
+					}
+					if (node.extras === "reject" && node.index === undefined) {
+						objectChecks.push(
+							`(()=>{for(const ${stringKey} in ${v})if(own.call(${v},${stringKey})&&!(${this.declaredCheck(node.props, stringKey)}))return false;return true})()`,
 						);
 					}
 				}
@@ -1152,21 +1175,11 @@ class Builder {
 						`(()=>{for(const ${symbol} of Object.getOwnPropertySymbols(${v}))if(Object.prototype.propertyIsEnumerable.call(${v},${symbol})&&!(${this.predicate(node.symbolIndex, `${v}[${symbol}]`)}))return false;return true})()`,
 					);
 				}
-				if (node.extras === "reject") {
-					const patternMatch =
-						node.patternIndexes?.map(pattern => `(${this.predicate(pattern.key, stringKey)})`).join("||") ??
-						"false";
-					if (node.index === undefined) {
-						objectChecks.push(
-							`(()=>{for(const ${stringKey} in ${v})if(own.call(${v},${stringKey})&&!(${this.declaredCheck(node.props, stringKey)})&&!(${patternMatch}))return false;return true})()`,
-						);
-					}
-					if (node.symbolIndex === undefined) {
-						const symbol = this.next("s");
-						objectChecks.push(
-							`(()=>{for(const ${symbol} of Object.getOwnPropertySymbols(${v}))if(Object.prototype.propertyIsEnumerable.call(${v},${symbol})&&!(${this.declaredCheck(node.props, symbol)}))return false;return true})()`,
-						);
-					}
+				if (node.extras === "reject" && node.symbolIndex === undefined) {
+					const symbol = this.next("s");
+					objectChecks.push(
+						`(()=>{for(const ${symbol} of Object.getOwnPropertySymbols(${v}))if(Object.prototype.propertyIsEnumerable.call(${v},${symbol})&&!(${this.declaredCheck(node.props, symbol)}))return false;return true})()`,
+					);
 				}
 				return `(${objectChecks.join("&&")})`;
 			}
@@ -1905,15 +1918,39 @@ class Builder {
 					}
 				}
 				const stringKey = this.next("k");
-				if (node.index !== undefined) {
-					this.push(`for(const ${stringKey} in ${object}){if(!own.call(${object},${stringKey}))continue;`);
-					this.emitAllows(node.index, `${object}[${stringKey}]`);
-					this.push("}");
-				}
 				if (node.patternIndexes !== undefined) {
+					// Consolidate string-key iteration into a single loop so each
+					// pattern-key predicate is evaluated exactly once per key —
+					// matching the walker's objectIndexValidators-once-per-key
+					// invariant. The cached match result is reused for both
+					// pattern-index validation and extras-reject classification.
+					this.push(`for(const ${stringKey} in ${object}){if(!own.call(${object},${stringKey}))continue;`);
+					if (node.index !== undefined) {
+						this.emitAllows(node.index, `${object}[${stringKey}]`);
+					}
+					const matchVars: string[] = [];
 					for (const pattern of node.patternIndexes) {
+						const matchVar = this.next("m");
+						matchVars.push(matchVar);
+						this.push(`const ${matchVar}=(${this.predicate(pattern.key, stringKey)});`);
 						this.push(
-							`for(const ${stringKey} in ${object})if(own.call(${object},${stringKey})&&(${this.predicate(pattern.key, stringKey)})&&!(${this.predicate(pattern.val, `${object}[${stringKey}]`)}))return false;`,
+							`if(${matchVar}&&!(${this.predicate(pattern.val, `${object}[${stringKey}]`)}))return false;`,
+						);
+					}
+					if (node.extras === "reject" && node.index === undefined) {
+						const patternMatch = matchVars.length > 0 ? matchVars.join("||") : "false";
+						this.push(`if(!(${this.declaredCheck(node.props, stringKey)})&&!(${patternMatch}))return false;`);
+					}
+					this.push("}");
+				} else {
+					if (node.index !== undefined) {
+						this.push(`for(const ${stringKey} in ${object}){if(!own.call(${object},${stringKey}))continue;`);
+						this.emitAllows(node.index, `${object}[${stringKey}]`);
+						this.push("}");
+					}
+					if (node.extras === "reject" && node.index === undefined) {
+						this.push(
+							`for(const ${stringKey} in ${object})if(own.call(${object},${stringKey})&&!(${this.declaredCheck(node.props, stringKey)}))return false;`,
 						);
 					}
 				}
@@ -1925,21 +1962,11 @@ class Builder {
 					this.emitAllows(node.symbolIndex, `${object}[${symbol}]`);
 					this.push("}");
 				}
-				if (node.extras === "reject") {
-					const patternMatch =
-						node.patternIndexes?.map(pattern => `(${this.predicate(pattern.key, stringKey)})`).join("||") ??
-						"false";
-					if (node.index === undefined) {
-						this.push(
-							`for(const ${stringKey} in ${object})if(own.call(${object},${stringKey})&&!(${this.declaredCheck(node.props, stringKey)})&&!(${patternMatch}))return false;`,
-						);
-					}
-					if (node.symbolIndex === undefined) {
-						const symbol = this.next("s");
-						this.push(
-							`for(const ${symbol} of Object.getOwnPropertySymbols(${object}))if(Object.prototype.propertyIsEnumerable.call(${object},${symbol})&&!(${this.declaredCheck(node.props, symbol)}))return false;`,
-						);
-					}
+				if (node.extras === "reject" && node.symbolIndex === undefined) {
+					const symbol = this.next("s");
+					this.push(
+						`for(const ${symbol} of Object.getOwnPropertySymbols(${object}))if(Object.prototype.propertyIsEnumerable.call(${object},${symbol})&&!(${this.declaredCheck(node.props, symbol)}))return false;`,
+					);
 				}
 				return;
 			}

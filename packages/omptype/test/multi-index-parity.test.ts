@@ -99,4 +99,26 @@ describe("index-key predicate single evaluation", () => {
 			expect(count.value).toBe(1);
 		}
 	});
+
+	it("T(value) and T.allows(value) agree for a stateful pattern-key predicate", () => {
+		// The predicate returns true only on its first invocation (count === 1)
+		// and false on every subsequent call. The walker evaluates it once per
+		// key, so T(value) accepts. The compiled allows path must also evaluate
+		// it once — not twice (once for pattern-index validation, again for
+		// extras-reject classification) — or T.allows would see false on the
+		// second call, classify the key as undeclared, and reject it.
+		const count = { value: 0 };
+		const T = buildCountedSchema(count, true);
+		for (let i = 0; i < JIT; i++) {
+			count.value = 0;
+			const out = T(structuredClone({ foo: 1 }));
+			expect(out).not.toBeInstanceOf(OmpErrors);
+			expect(count.value).toBe(1);
+
+			count.value = 0;
+			const allows = T.allows(structuredClone({ foo: 1 }));
+			expect(allows).toBe(true);
+			expect(count.value).toBe(1);
+		}
+	});
 });
