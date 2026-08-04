@@ -81,7 +81,6 @@ import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { MacOSPowerAssertion } from "@oh-my-pi/pi-natives";
 import {
-	escapeXmlText,
 	formatDuration,
 	getAgentDbPath,
 	isBunTestRuntime,
@@ -136,7 +135,7 @@ import type { HookCommandContext } from "../extensibility/hooks/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
 import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility/tool-event-input";
-import { GoalRuntime } from "../goals/runtime";
+import type { GoalRuntime } from "../goals/runtime";
 import type { GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
@@ -153,8 +152,6 @@ import { containsWorkflow, renderWorkflowNotice } from "../modes/workflow";
 import { type PlanApprovalDetails, resolveApprovedPlan } from "../plan-mode/approved-plan";
 import { listPlanFiles, readPlanFile } from "../plan-mode/plan-files";
 import type { PlanModeState } from "../plan-mode/state";
-import goalModeContextPrompt from "../prompts/goals/goal-mode-context.md" with { type: "text" };
-import goalTodoContextPrompt from "../prompts/goals/goal-todo-context.md" with { type: "text" };
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
 import interruptedThinkingTemplate from "../prompts/system/interrupted-thinking.md" with { type: "text" };
 import planModeActivePrompt from "../prompts/system/plan-mode-active.md" with { type: "text" };
@@ -312,6 +309,7 @@ import type { BuildSessionContextOptions, SessionContext } from "./session-conte
 import { getRestorableSessionModels } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
 import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
+import { SessionGoalMode, type SessionGoalModeHost } from "./session-goal-mode";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
 import {
 	COMPACTION_CHECK_NONE,
@@ -458,10 +456,8 @@ export class AgentSession {
 	/** Session-scoped `/vision` override; undefined = follow persisted `inspect_image.mode`. */
 	#inspectImageModeOverride: InspectImageMode | undefined;
 	#vibeModeState: VibeModeState | undefined;
-	#goalModeState: GoalModeState | undefined;
-	#goalRuntime: GoalRuntime;
+	readonly #goalMode: SessionGoalMode;
 	readonly #advisors: SessionAdvisors;
-	#goalTurnCounter = 0;
 	#planReferenceSent = false;
 	#planReferencePath = "local://PLAN.md";
 	#clientBridge: ClientBridge | undefined;
@@ -1301,12 +1297,8 @@ export class AgentSession {
 		this.agent.providerSessionState = this.#providerSessionState;
 		this.#syncAgentSessionId();
 		this.#todo.syncFromBranch();
-		this.#goalRuntime = new GoalRuntime({
-			getState: () => this.#goalModeState,
-			setState: state => {
-				this.#goalModeState = state;
-			},
-			getCurrentUsage: () => {
+		const goalModeHost: SessionGoalModeHost = {
+			currentTokenUsage: () => {
 				const usage = this.getSessionStats().tokens;
 				return {
 					input: usage.input,
@@ -1315,30 +1307,16 @@ export class AgentSession {
 					cacheWrite: usage.cacheWrite,
 				};
 			},
-			emit: event => {
-				if (event.type === "goal_updated") {
-					return this.#emitSessionEvent({ type: "goal_updated", goal: event.goal, state: event.state });
-				}
+			emitSessionEvent: event => this.#emitSessionEvent(event),
+			appendModeChange: (mode, data) => {
+				this.sessionManager.appendModeChange(mode, data);
 			},
-			persist: (mode, state) => {
-				if (mode === "none") {
-					this.sessionManager.appendModeChange("none");
-				} else if (state) {
-					this.sessionManager.appendModeChange(mode, { goal: state.goal });
-				}
-			},
-			sendHiddenMessage: async message => {
-				await this.sendCustomMessage(
-					{
-						customType: message.customType,
-						content: message.content,
-						display: false,
-						attribution: "agent",
-					},
-					{ deliverAs: message.deliverAs },
-				);
-			},
-		});
+			sendCustomMessage: (message, options) => this.sendCustomMessage(message, options),
+			todoEnabled: () => this.settings.get("todo.enabled"),
+			getActiveToolNames: () => this.getActiveToolNames(),
+			getTodoPhases: () => this.getTodoPhases(),
+		};
+		this.#goalMode = new SessionGoalMode(goalModeHost);
 		this.#cancelExitRecorder = postmortem.register(`agent-session:${this.sessionManager.getSessionId()}`, reason => {
 			this.#recordSessionExit(reason);
 		});
@@ -1419,7 +1397,7 @@ export class AgentSession {
 			sessionId: () => this.sessionId,
 			messages: () => this.messages,
 			baseSystemPrompt: () => this.#tools.baseSystemPrompt,
-			goalModeState: () => this.#goalModeState,
+			goalModeState: () => this.#goalMode.getGoalModeState(),
 			planReferencePath: () => this.#planReferencePath,
 			nonMessageTokenSource: () => this,
 			memoryBackendSession: () => this,
@@ -2366,13 +2344,7 @@ export class AgentSession {
 		}
 
 		if (event.type === "turn_start") {
-			const usage = this.getSessionStats().tokens;
-			this.#goalRuntime.onTurnStart(`turn-${++this.#goalTurnCounter}`, {
-				input: usage.input,
-				output: usage.output,
-				cacheRead: usage.cacheRead,
-				cacheWrite: usage.cacheWrite,
-			});
+			this.#goalMode.onTurnStart();
 		}
 
 		if (event.type === "tool_execution_start") {
@@ -2406,11 +2378,7 @@ export class AgentSession {
 			}
 		}
 		if (event.type === "tool_execution_end") {
-			if (event.toolName === "goal") {
-				await this.#goalRuntime.onGoalToolCompleted();
-			} else {
-				await this.#goalRuntime.onToolCompleted(event.toolName);
-			}
+			await this.#goalMode.onToolCompleted(event.toolName);
 			this.#planModeReminderAwaitingProgress = false;
 			if (
 				event.toolName === "ask" ||
@@ -2604,15 +2572,7 @@ export class AgentSession {
 					logger.error("Agent end extension notification failed", { err });
 				});
 			};
-			const usage = this.getSessionStats().tokens;
-			await this.#goalRuntime.onAgentEnd({
-				currentUsage: {
-					input: usage.input,
-					output: usage.output,
-					cacheRead: usage.cacheRead,
-					cacheWrite: usage.cacheWrite,
-				},
-			});
+			await this.#goalMode.onAgentEnd();
 			const fallbackAssistant = [...settledMessages]
 				.reverse()
 				.find((message): message is AssistantMessage => message.role === "assistant");
@@ -2622,8 +2582,8 @@ export class AgentSession {
 				this.#lastSuccessfulYieldToolCallId = undefined;
 				logger.debug("agent_end maintenance routing", {
 					reason: "no-assistant-message",
-					goalModeEnabled: this.#goalModeState?.enabled === true,
-					goalStatus: this.#goalModeState?.goal.status,
+					goalModeEnabled: this.#goalMode.getGoalModeState()?.enabled === true,
+					goalStatus: this.#goalMode.getGoalModeState()?.goal.status,
 				});
 				await emitAgentEndNotification();
 				return;
@@ -2643,8 +2603,8 @@ export class AgentSession {
 					contentBlocks: msg.content.length,
 					hasToolCalls: msg.content.some(content => content.type === "toolCall"),
 					hasText: msg.content.some(content => content.type === "text"),
-					goalModeEnabled: this.#goalModeState?.enabled === true,
-					goalStatus: this.#goalModeState?.goal.status,
+					goalModeEnabled: this.#goalMode.getGoalModeState()?.enabled === true,
+					goalStatus: this.#goalMode.getGoalModeState()?.goal.status,
 					successfulYield: successfulYieldMessage !== undefined,
 					...extra,
 				});
@@ -2675,7 +2635,8 @@ export class AgentSession {
 				return;
 			}
 
-			const activeGoal = this.#goalModeState?.enabled === true && this.#goalModeState.goal.status === "active";
+			const activeGoalState = this.#goalMode.getGoalModeState();
+			const activeGoal = activeGoalState?.enabled === true && activeGoalState.goal.status === "active";
 			// A successful `yield` in this run is terminal for execution purposes.
 			// Suppress empty-stop retry, unexpected-stop retry, queued-message drain,
 			// and compaction-driven continuations for the rest of this prompt cycle:
@@ -3013,7 +2974,8 @@ export class AgentSession {
 			return true;
 		}
 		if (!options.autoContinue) return false;
-		const activeGoal = this.#goalModeState?.enabled === true && this.#goalModeState.goal.status === "active";
+		const activeGoalState = this.#goalMode.getGoalModeState();
+		const activeGoal = activeGoalState?.enabled === true && activeGoalState.goal.status === "active";
 		if (options.terminalTextAnswer && !activeGoal) return false;
 		return this.#scheduleAutoContinuePrompt(options.generation);
 	}
@@ -4515,11 +4477,11 @@ export class AgentSession {
 	}
 
 	getGoalModeState(): GoalModeState | undefined {
-		return this.#goalModeState;
+		return this.#goalMode.getGoalModeState();
 	}
 
 	setGoalModeState(state: GoalModeState | undefined): void {
-		this.#goalModeState = state;
+		this.#goalMode.setGoalModeState(state);
 	}
 
 	getVibeModeState(): VibeModeState | undefined {
@@ -4537,7 +4499,7 @@ export class AgentSession {
 	}
 
 	get goalRuntime(): GoalRuntime {
-		return this.#goalRuntime;
+		return this.#goalMode.goalRuntime;
 	}
 
 	markPlanReferenceSent(): void {
@@ -4656,18 +4618,7 @@ export class AgentSession {
 	}
 
 	async sendGoalModeContext(options?: { deliverAs?: "steer" | "followUp" | "nextTurn" }): Promise<void> {
-		const message = this.#buildGoalModeMessage();
-		if (!message) return;
-		await this.sendCustomMessage(
-			{
-				customType: message.customType,
-				content: message.content,
-				display: message.display,
-				details: message.details,
-				attribution: message.attribution,
-			},
-			options ? { deliverAs: options.deliverAs } : undefined,
-		);
+		await this.#goalMode.sendGoalModeContext(options);
 	}
 
 	async sendVibeModeContext(options?: { deliverAs?: "steer" | "followUp" | "nextTurn" }): Promise<void> {
@@ -4811,20 +4762,6 @@ export class AgentSession {
 		};
 	}
 
-	#buildGoalModeMessage(): CustomMessage | null {
-		const content = this.#goalRuntime.buildActivePrompt();
-		if (!content) return null;
-		const todoContext = this.#buildGoalTodoContext();
-		return {
-			role: "custom",
-			customType: "goal-mode-context",
-			content: prompt.render(goalModeContextPrompt, { goalContext: content, todoContext }),
-			display: false,
-			attribution: "agent",
-			timestamp: Date.now(),
-		};
-	}
-
 	#buildVibeModeMessage(): CustomMessage | null {
 		if (!this.#vibeModeState?.enabled) return null;
 		return {
@@ -4837,47 +4774,6 @@ export class AgentSession {
 			attribution: "agent",
 			timestamp: Date.now(),
 		};
-	}
-
-	#sanitizeGoalTodoText(text: string): string {
-		return escapeXmlText(text)
-			.replace(/\r\n/g, "\\n")
-			.replace(/\r/g, "\\r")
-			.replace(/\n/g, "\\n")
-			.replace(/\t/g, "\\t")
-			.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u2028\u2029]/g, " ");
-	}
-
-	#buildGoalTodoContext(): string | undefined {
-		if (!this.settings.get("todo.enabled")) return undefined;
-		const canCallTodoTool = this.getActiveToolNames().includes("todo");
-		if (!canCallTodoTool) return undefined;
-		const phases = this.getTodoPhases().filter(phase => phase.tasks.length > 0);
-		if (phases.length === 0) return undefined;
-
-		let total = 0;
-		let closed = 0;
-		let open = 0;
-		const promptPhases = phases.map(phase => ({
-			name: this.#sanitizeGoalTodoText(phase.name),
-			tasks: phase.tasks.map(task => {
-				total++;
-				if (task.status === "completed" || task.status === "abandoned") {
-					closed++;
-				} else {
-					open++;
-				}
-				return { content: this.#sanitizeGoalTodoText(task.content), status: task.status };
-			}),
-		}));
-
-		return prompt.render(goalTodoContextPrompt, {
-			canCallTodoTool,
-			closed: String(closed),
-			open: String(open),
-			phases: promptPhases,
-			total: String(total),
-		});
 	}
 
 	#normalizeImagesForModel(images: ImageContent[] | undefined): Promise<ImageContent[] | undefined> {
@@ -5204,7 +5100,7 @@ export class AgentSession {
 			if (planModeMessage) {
 				messages.push(planModeMessage);
 			}
-			const goalModeMessage = this.#buildGoalModeMessage();
+			const goalModeMessage = this.#goalMode.buildGoalModeMessage();
 			if (goalModeMessage) {
 				messages.push(goalModeMessage);
 			}
@@ -6147,7 +6043,7 @@ export class AgentSession {
 			await postPromptDrain;
 			await this.agent.waitForIdle();
 			await this.#drainAutolearnCapture();
-			await this.#goalRuntime.onTaskAborted({ reason: options?.goalReason ?? "interrupted" });
+			await this.#goalMode.onTaskAborted({ reason: options?.goalReason ?? "interrupted" });
 			// Clear prompt-in-flight state: waitForIdle resolves when the agent loop's finally
 			// block runs, but nested prompt setup/finalizers may still be unwinding. Without this,
 			// a subsequent prompt() can incorrectly observe the session as busy after an abort.
