@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Removed the `export` keyword from the internal `UNKNOWN_MODEL` constant (only consumed in-file).
+
 ## [17.2.4] - 2026-08-01
 
 ### Fixed

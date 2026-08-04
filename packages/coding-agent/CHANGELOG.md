@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed ACP session replay dropping `errorMessage` from legacy/imported failed tool-result messages, so the readable failure reason now appears in the replayed tool_call_update content.
+- Replaced banned `Parameters<>`/`ReturnType<>` type queries in `TaskTool.renderResult` with concrete named types.
+
 ## [17.2.8] - 2026-08-04
 
 ### Changed

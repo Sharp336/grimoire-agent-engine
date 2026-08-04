@@ -687,6 +687,8 @@ export interface AgentToolResult<T = unknown, _TInput = unknown> {
 	providerMetadata?: ToolResultProviderMetadata;
 	/** Marks the result as contextually useless: safe for compaction to elide once consumed (e.g. zero matches, wait timeout). Ignored when isError is set. */
 	useless?: boolean;
+	/** Carries a legacy/replay failure reason for tool results whose readable text lives only in `errorMessage` (imported/older sessions). Consumed by ACP text extraction as fallback content. */
+	readonly errorMessage?: string;
 }
 
 // Callback for streaming tool execution updates

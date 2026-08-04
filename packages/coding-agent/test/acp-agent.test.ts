@@ -18,7 +18,7 @@ import {
 	zPromptResponse,
 	zSessionNotification,
 } from "@agentclientprotocol/sdk/dist/schema/zod.gen.js";
-import type { Model } from "@oh-my-pi/pi-ai";
+import type { Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
@@ -1484,6 +1484,78 @@ describe("ACP agent", () => {
 			}),
 		);
 
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("replays failed tool-result errorMessage as ACP tool_call_update content", async () => {
+		const harness = await createHarness();
+		const stored = new FakeAgentSession(harness.cwdA);
+		harness.sessions.push(stored);
+		stored.sessionManager.appendMessage({ role: "user", content: "run failing tool", timestamp: Date.now() });
+		stored.sessionManager.appendMessage({
+			role: "assistant",
+			content: [
+				{
+					type: "toolCall",
+					id: "toolu_err_replay",
+					name: "bash",
+					arguments: { command: "exit 1" },
+				},
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: TEST_MODELS[0].id,
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		});
+		const failedResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "toolu_err_replay",
+			toolName: "bash",
+			content: [],
+			isError: true,
+			timestamp: Date.now(),
+		};
+		stored.sessionManager.appendMessage(
+			Object.assign(failedResult, { errorMessage: "Command failed with exit code 1" }),
+		);
+		await stored.sessionManager.ensureOnDisk();
+		await stored.sessionManager.flush();
+
+		await harness.agent.loadSession({
+			sessionId: stored.sessionId,
+			cwd: harness.cwdA,
+			mcpServers: [],
+		});
+
+		const completions = harness.updates
+			.filter(update => update.sessionId === stored.sessionId)
+			.map(notification => notification.update)
+			.filter(
+				update =>
+					"toolCallId" in update &&
+					update.toolCallId === "toolu_err_replay" &&
+					update.sessionUpdate === "tool_call_update" &&
+					update.status === "failed",
+			);
+
+		expect(completions).toHaveLength(1);
+		expect(completions[0]).toEqual(
+			expect.objectContaining({
+				content: expect.arrayContaining([
+					{ type: "content", content: { type: "text", text: "Command failed with exit code 1" } },
+				]),
+			}),
+		);
 		harness.abortController.abort();
 		await Bun.sleep(0);
 	});

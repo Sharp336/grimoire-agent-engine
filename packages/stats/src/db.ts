@@ -1403,7 +1403,7 @@ export function updateUserMessageLinks(links: UserMessageLink[]): number {
 	return updated;
 }
 
-export const UNKNOWN_MODEL = "unknown";
+const UNKNOWN_MODEL = "unknown";
 
 interface BehaviorSeriesRow {
 	bucket: number;

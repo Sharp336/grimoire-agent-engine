@@ -16,6 +16,7 @@
 import path from "node:path";
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
+import type { Component } from "@oh-my-pi/pi-tui";
 import { $env, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "..";
 import type { Theme } from "../modes/theme/theme";
@@ -48,7 +49,7 @@ import { type DiscoveryResult, discoverAgents } from "./discovery";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
-import { renderCall as renderTaskCall, renderResult as renderTaskResult } from "./render";
+import { renderCall as renderTaskCall, renderResult as renderTaskResult, type TaskRenderOptions } from "./render";
 import { repairTaskParams } from "./repair-args";
 import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
 
@@ -575,10 +576,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	readonly lenientArgValidation = true;
 	renderResult(
 		result: AgentToolResult<TaskToolDetails>,
-		options: Parameters<typeof renderTaskResult>[1],
-		theme: Parameters<typeof renderTaskResult>[2],
-		args?: Parameters<typeof renderTaskResult>[3],
-	): ReturnType<typeof renderTaskResult> {
+		options: TaskRenderOptions,
+		theme: Theme,
+		args?: TaskParams,
+	): Component {
 		return renderTaskResult(result, options, theme, args);
 	}
 	// Suppress the streaming call preview once a (partial or final) result exists

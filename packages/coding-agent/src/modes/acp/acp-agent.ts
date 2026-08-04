@@ -2235,6 +2235,7 @@ export class AcpAgent implements Agent {
 			result: {
 				content: Array.isArray(message.content) ? (message.content as AgentToolResult["content"]) : [],
 				details: message.details,
+				...(typeof message.errorMessage === "string" && { errorMessage: message.errorMessage }),
 			},
 		};
 		const notifications = mapAgentSessionEventToAcpSessionUpdates(endEvent, sessionId, {

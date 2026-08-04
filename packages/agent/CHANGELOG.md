@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added optional `errorMessage` field to `AgentToolResult` to carry a legacy/replay failure reason consumed by ACP text extraction.
+
 ## [17.2.6] - 2026-08-03
 
 ### Fixed
