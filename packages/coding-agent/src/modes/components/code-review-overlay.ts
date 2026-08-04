@@ -109,7 +109,7 @@ export class CodeReviewOverlay implements Component {
 		theme: { track: text => theme.fg("dim", text), thumb: text => theme.fg("accent", text) },
 	});
 	#input = new Input();
-	#focus: FocusRegion = "actions";
+	#focus: FocusRegion = "files";
 	#fileIndex = 0;
 	#sourceIndex = 0;
 	#actionIndex = 0;

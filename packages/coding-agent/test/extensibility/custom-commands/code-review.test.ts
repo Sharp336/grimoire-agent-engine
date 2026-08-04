@@ -64,7 +64,6 @@ describe("CodeReviewCommand", () => {
 			const overlay = component as CodeReviewOverlay;
 			overlay.render(90);
 			overlay.handleInput(TAB);
-			overlay.handleInput(TAB);
 			overlay.handleInput("a");
 			for (const char of "check the workspace transition") overlay.handleInput(char);
 			overlay.handleInput(ENTER);

@@ -52,7 +52,8 @@ describe("CodeReviewOverlay", () => {
 		const { overlay } = makeOverlay(`diff --git a/src/alpha.ts b/src/alpha.ts
 --- a/src/alpha.ts
 +++ b/src/alpha.ts
-@@ -0,0 +1 @@
+@@ -1 +1 @@
+-old
 +new
 diff --git a/src/beta.ts b/src/beta.ts
 --- a/src/beta.ts
@@ -68,8 +69,10 @@ diff --git a/src/beta.ts b/src/beta.ts
 		expect(out).toContain(CONTINUE_CODE_REVIEW_ACTION);
 		expect(out).toContain(PASTE_CODE_REVIEW_ACTION);
 
-		overlay.handleInput("]");
+		overlay.handleInput(DOWN);
 		expect(render(overlay)).toContain("beta");
+		overlay.handleInput(TAB);
+		expect(render(overlay)).toContain("↑↓ line");
 	});
 
 	it("anchors an annotation to the selected diff line", () => {
@@ -79,7 +82,6 @@ diff --git a/src/beta.ts b/src/beta.ts
 		);
 
 		render(overlay);
-		overlay.handleInput(TAB);
 		overlay.handleInput(TAB);
 		for (let index = 0; index < 12; index++) overlay.handleInput(DOWN);
 		overlay.handleInput("a");
@@ -108,6 +110,9 @@ diff --git a/src/beta.ts b/src/beta.ts
 		const diff =
 			"diff --git a/src/value.ts b/src/value.ts\n--- a/src/value.ts\n+++ b/src/value.ts\n@@ -0,0 +1 @@\n+new";
 		const first = makeOverlay(diff);
+		render(first.overlay);
+		first.overlay.handleInput(TAB);
+		first.overlay.handleInput(TAB);
 
 		first.overlay.handleInput(DOWN);
 		first.overlay.handleInput(ENTER);
@@ -115,7 +120,6 @@ diff --git a/src/beta.ts b/src/beta.ts
 
 		const { overlay } = makeOverlay(diff);
 		render(overlay);
-		overlay.handleInput(TAB);
 		overlay.handleInput(TAB);
 		overlay.handleInput("a");
 		overlay.handleInput("n");
@@ -152,7 +156,6 @@ diff --git a/src/beta.ts b/src/beta.ts
 			);
 
 			render(overlay);
-			overlay.handleInput(TAB);
 			overlay.handleInput(TAB);
 			overlay.handleInput("a");
 			overlay.handleInput("draft");
