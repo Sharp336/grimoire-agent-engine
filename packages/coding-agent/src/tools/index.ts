@@ -6,6 +6,7 @@ import type { AsyncJobManager } from "../async/job-manager";
 import type { Rule } from "../capability/rule";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
+import type { CronManager } from "../cron";
 import { EditTool } from "../edit";
 import { checkJuliaKernelAvailability } from "../eval/jl/kernel";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
@@ -44,6 +45,7 @@ import { BrowserTool } from "./browser";
 import { type BuiltinToolName, type HiddenToolName, normalizeToolNames } from "./builtin-names";
 import { type CheckpointState, CheckpointTool, type CompletedRewindState, RewindTool } from "./checkpoint";
 import { ComputerTool } from "./computer";
+import { CronCreateTool, CronDeleteTool, CronListTool } from "./cron";
 import { DebugTool } from "./debug";
 import { EvalTool } from "./eval";
 import { resolveEvalBackends } from "./eval-backends";
@@ -81,6 +83,7 @@ export * from "./browser";
 export * from "./checkpoint";
 export * from "./computer";
 export * from "./computer/supervisor";
+export * from "./cron";
 export * from "./debug";
 export * from "./essential-tools";
 export * from "./eval";
@@ -300,6 +303,8 @@ export interface ToolSession {
 	 * session never borrows the owning session's manager by accident.
 	 */
 	asyncJobManager?: AsyncJobManager;
+	/** Scheduler the cron tools create, list, and delete jobs through. */
+	cronManager?: CronManager;
 	/** MCP manager visible to subagents without relying on the process-global singleton. */
 	mcpManager?: MCPManager;
 	/** Local protocol root to propagate to nested subagents and eval-created agents. */
@@ -446,6 +451,9 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 export const HIDDEN_TOOLS: Record<HiddenToolName, ToolFactory> = {
 	yield: s => new YieldTool(s),
 	goal: s => new GoalTool(s),
+	cron_create: s => new CronCreateTool(s),
+	cron_list: s => new CronListTool(s),
+	cron_delete: s => new CronDeleteTool(s),
 };
 
 export type ToolName = BuiltinToolName;

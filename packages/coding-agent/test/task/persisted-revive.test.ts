@@ -93,14 +93,14 @@ async function createPersistedSession(cwd: string, restrictToolNames?: boolean):
 	return sessionFile;
 }
 
-function createFactory(cwd: string, eventBus?: EventBus) {
+function createFactory(cwd: string, eventBus?: EventBus, parentSessionFile = path.join(cwd, "parent.jsonl")) {
 	const parentSession = {
 		sessionManager: {
 			getCwd: () => cwd,
 			getArtifactManager: () => undefined,
 		},
 		get sessionFile() {
-			return path.join(cwd, "parent.jsonl");
+			return parentSessionFile;
 		},
 	} as unknown as AgentSession;
 	return createPersistedSubagentReviverFactory({
@@ -207,7 +207,8 @@ describe("persisted subagent revival", () => {
 			sessionFile,
 			status: "parked",
 		});
-		const reviver = await createFactory(cwd, eventBus)(ref);
+		const parentSessionFile = path.join(cwd, "named-session");
+		const reviver = await createFactory(cwd, eventBus, parentSessionFile)(ref);
 		if (!reviver) throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
@@ -225,6 +226,7 @@ describe("persisted subagent revival", () => {
 		const finish = observer?.([record]);
 		await finish?.();
 		await terminal.promise;
+		expect(await Bun.file(path.join(`${parentSessionFile}.d`, `${ref.id}.md`)).exists()).toBe(true);
 
 		expect(frames[0]).toMatchObject({
 			type: "subagent_lifecycle",
