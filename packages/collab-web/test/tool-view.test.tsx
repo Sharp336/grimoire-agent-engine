@@ -201,3 +201,59 @@ describe("ToolView glob scopes", () => {
 		expect(html).not.toContain("…");
 	});
 });
+
+describe("ToolView home redaction", () => {
+	it("renders a glob scope under a home directory home-relative without leaking the username", () => {
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="glob"
+				defaultOpen
+				args={{ path: "/home/alice/project/src/**/*.ts" }}
+				result={{ content: [] }}
+			/>,
+		);
+
+		// Home prefix is redacted to ~ even though the value carries glob
+		// metacharacters (the early return used to skip redaction entirely).
+		expect(html).toContain("~/project/src/**/*.ts");
+		expect(html).not.toContain("/home/alice");
+		expect(html).not.toContain("alice/");
+		// The glob pattern itself stays intact.
+		expect(html).toContain("**/*.ts");
+	});
+
+	it("renders a bracketed literal path under a home directory home-relative", () => {
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="glob"
+				defaultOpen
+				args={{ path: "/home/alice/project/apps/[id]/page.tsx" }}
+				result={{ content: [] }}
+			/>,
+		);
+
+		// The `[id]` bracket is a glob metacharacter, so elision is skipped —
+		// but home redaction still applies.
+		expect(html).toContain("~/project/apps/[id]/page.tsx");
+		expect(html).not.toContain("/home/alice");
+		expect(html).not.toContain("alice/");
+	});
+});
+
+describe("ToolView UNC paths", () => {
+	it("retains the server/share root of a UNC path through elision", () => {
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="inspect_image"
+				defaultOpen
+				args={{ path: "//server/share/file.ts" }}
+				result={{ content: [] }}
+			/>,
+		);
+
+		// The server name must survive — the old elision produced "/…/share/file.ts".
+		expect(html).toContain("server");
+		expect(html).toContain("share");
+		expect(html).toContain("//server/share/file.ts");
+	});
+});

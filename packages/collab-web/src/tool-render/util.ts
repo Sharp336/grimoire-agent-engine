@@ -29,21 +29,22 @@ export function display(value: unknown): string {
 	}
 }
 
-import { shortenPath } from "../lib/format";
+import { elideMiddle, redactHome, shortenPath } from "../lib/format";
 
 export { shortenPath };
 
 /**
- * Display-safe path compaction: middle-elide long filesystem paths, but
- * return URLs and glob patterns intact. `shortenPath` splits on `/` and
- * middle-elides, which corrupts scheme-bearing values
- * (`memory://root/skills` → `memory:/…/skills`) and hides glob scope
- * (e.g. `src` + `**` + `*.ts` + `; test` + `**` + `*.ts` → `src/…` + `**` + `*.ts`).
- * A value is shown intact when it carries a scheme (`://`) or glob
- * metacharacters (`*`, `?`, `[`).
+ * Display-safe path compaction. Home redaction is UNCONDITIONAL — every
+ * value is normalized to `~` first so a glob/URI/bracketed scope under a
+ * home directory never leaks the username. Middle elision is the only
+ * conditional part: it is skipped for scheme-bearing values (`://`, which
+ * `elideMiddle` would corrupt by splitting on `/`) and glob patterns
+ * (`*`, `?`, `[`, which carry scope meaning that elision would hide).
  */
 export function compactPath(p: string): string {
-	return /:\/\//.test(p) || /[*?[]/.test(p) ? p : shortenPath(p);
+	const redacted = redactHome(p);
+	if (/:\/\//.test(redacted) || /[*?[]/.test(redacted)) return redacted;
+	return elideMiddle(redacted);
 }
 
 /**
