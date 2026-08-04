@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
 import { getManagedSkillsDir } from "@oh-my-pi/pi-coding-agent/autolearn/managed-skills";
 import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resetActiveSkillsForTests, type Skill, setActiveSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
@@ -12,7 +13,6 @@ import { LearnTool } from "@oh-my-pi/pi-coding-agent/tools/learn";
 import { ManageSkillTool } from "@oh-my-pi/pi-coding-agent/tools/manage-skill";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
-import { type } from "arktype";
 
 function makeSession(
 	settingsOverrides: Partial<Record<SettingPath, unknown>> = {},
@@ -120,6 +120,18 @@ describe("autolearn tool gating", () => {
 		expect(depthOnlySubagent).toEqual(expect.arrayContaining(["recall", "retain"]));
 		expect(depthOnlySubagent).not.toContain("manage_skill");
 		expect(depthOnlySubagent).not.toContain("learn");
+	});
+
+	it("allows the tools in a subagent when explicitly requested in toolNames", async () => {
+		// Frontmatter tools: list overrides the taskDepth gate.
+		const sub = (
+			await createTools(makeSession({ "autolearn.enabled": true, "memory.backend": "mnemopi" }, { taskDepth: 1 }), [
+				"manage_skill",
+				"learn",
+			])
+		).map(t => t.name);
+		expect(sub).toContain("manage_skill");
+		expect(sub).toContain("learn");
 	});
 
 	it("offers learn with the file-based local backend", async () => {

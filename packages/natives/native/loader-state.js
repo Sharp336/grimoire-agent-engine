@@ -129,7 +129,8 @@ export function shouldStageNodeModulesAddon({ platform, isCompiledBinary, native
 	// Check both separators independently of the host's `path.sep`: this helper
 	// is shared by the loader (running on Windows with `\`) and the test suite
 	// (typically running on POSIX hosts when CI executes the regression test).
-	return nativeDir.includes("\\node_modules\\") || nativeDir.includes("/node_modules/");
+	const normalizedNativeDir = nativeDir.toLowerCase();
+	return normalizedNativeDir.includes("\\node_modules\\") || normalizedNativeDir.includes("/node_modules/");
 }
 
 /**
@@ -178,6 +179,23 @@ export function resolveLoaderCandidates({
 
 // =========================================================================
 
+function parseReleaseVersion(version) {
+	const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
+	return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+}
+
+function isOlderReleaseVersion(candidate, current) {
+	const candidateParts = parseReleaseVersion(candidate);
+	const currentParts = parseReleaseVersion(current);
+	if (!candidateParts || !currentParts) return false;
+	for (let index = 0; index < candidateParts.length; index++) {
+		if (candidateParts[index] !== currentParts[index]) {
+			return candidateParts[index] < currentParts[index];
+		}
+	}
+	return false;
+}
+
 /**
  * Remove version-pinned native cache directories older than the loaded package.
  * Best-effort by design: permission errors and concurrent processes must not
@@ -196,7 +214,7 @@ export function cleanupStaleNativeVersions({ nativesDir, currentVersion }) {
 	}
 
 	for (const entry of entries) {
-		if (!entry.isDirectory() || entry.name === currentVersion) continue;
+		if (!entry.isDirectory() || !isOlderReleaseVersion(entry.name, currentVersion)) continue;
 		const targetPath = path.join(nativesDir, entry.name);
 		try {
 			fs.rmSync(targetPath, { recursive: true, force: true });
@@ -671,7 +689,7 @@ function buildHelpMessage(ctx) {
 	return (
 		"If installed via npm/bun, try reinstalling: bun install @oh-my-pi/pi-natives\n" +
 		"If developing locally, build with: bun --cwd=packages/natives run build\n" +
-		"Optional x64 variants: TARGET_VARIANT=baseline|modern bun --cwd=packages/natives run build"
+		"Explicit targets: bun scripts/bazel-natives.ts <target> --dest packages/natives/native"
 	);
 }
 
@@ -681,28 +699,44 @@ function buildHelpMessage(ctx) {
  * Called from `loadNative()` rather than at module scope so importing pure
  * helpers from this file doesn't trigger AVX2 detection or filesystem probes.
  */
-function initLoaderContext() {
-	const platformTag = `${process.platform}-${process.arch}`;
+/**
+ * @param {{ nativeDir?: string; platform?: NodeJS.Platform | string; isCompiledBinary?: boolean; leafPackageDir?: string | null }} [overrides]
+ */
+export function initLoaderContext(overrides = {}) {
+	const platform = overrides.platform ?? process.platform;
+	const platformTag = `${platform}-${process.arch}`;
 	const packageVersion = packageJson.version;
-	const nativeDir = path.join(import.meta.dir, "..", "native");
+	const nativeDir = overrides.nativeDir ?? path.join(import.meta.dir, "..", "native");
 	const execDir = path.dirname(process.execPath);
 	const nativesDir = getNativesDir();
 	const versionedDir = path.join(nativesDir, packageVersion);
 	const userDataDir =
-		process.platform === "win32"
+		platform === "win32"
 			? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "omp")
 			: path.join(os.homedir(), ".local", "bin");
 
-	const isCompiledBinary = detectCompiledBinary({
-		embeddedAddon,
-		env: process.env,
-		importMetaUrl: import.meta.url,
-	});
-	const leafPackageDir = isCompiledBinary ? null : resolveLeafPackageDir(platformTag);
+	const isCompiledBinary =
+		overrides.isCompiledBinary ??
+		detectCompiledBinary({
+			embeddedAddon,
+			env: process.env,
+			importMetaUrl: import.meta.url,
+		});
+	const normalizedNativeDir = platform === "win32" ? nativeDir.toLowerCase() : nativeDir;
+	const isWorkspaceLoad =
+		!isCompiledBinary &&
+		!normalizedNativeDir.includes("\\node_modules\\") &&
+		!normalizedNativeDir.includes("/node_modules/");
+	const leafPackageDir =
+		isCompiledBinary || isWorkspaceLoad
+			? null
+			: overrides.leafPackageDir === undefined
+				? resolveLeafPackageDir(platformTag)
+				: overrides.leafPackageDir;
 	const stageFromNodeModules = shouldStageNodeModulesAddon({
-		platform: process.platform,
+		platform,
 		isCompiledBinary,
-		nativeDir,
+		nativeDir: normalizedNativeDir,
 	});
 
 	const selectedVariant = resolveCpuVariant(getVariantOverride());
@@ -728,8 +762,6 @@ function initLoaderContext() {
 	// turns the silent `<sym> is not a function` crash from a Windows
 	// locked-file update into an actionable load-time error.
 	const versionSentinelExport = `__piNativesV${packageVersion.replace(/[^A-Za-z0-9]/g, "_")}`;
-	const isWorkspaceLoad =
-		!isCompiledBinary && !nativeDir.includes("\\node_modules\\") && !nativeDir.includes("/node_modules/");
 
 	return {
 		platformTag,

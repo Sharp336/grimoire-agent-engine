@@ -273,6 +273,7 @@ describe("ModelRegistry", () => {
 		let anthropicHeadersOnly: ModelRegistry;
 		let anthropicAuthHeader: ModelRegistry;
 		let mixGoogleCustom: ModelRegistry;
+		let openaiProxy: ModelRegistry;
 		let xaiModelScopedHeaders: ModelRegistry;
 		let otherXaiModelId: string;
 		beforeAll(() => {
@@ -306,6 +307,9 @@ describe("ModelRegistry", () => {
 					),
 				},
 			});
+			openaiProxy = readonlyRegistry({
+				providers: { openai: overrideConfig("https://openai-proxy.example.com/v1") },
+			});
 			const otherXaiModel = sharedBuiltin
 				.getAll()
 				.find(model => model.provider === "xai" && model.id !== "grok-4.3");
@@ -336,6 +340,13 @@ describe("ModelRegistry", () => {
 			for (const model of anthropicModels) {
 				expect(model.baseUrl).toBe("https://my-proxy.example.com/v1");
 			}
+		});
+
+		test("rerouted bundled OpenAI models recompute inferred computer capability", () => {
+			const model = openaiProxy.find("openai", "gpt-5.4");
+
+			expect(model?.baseUrl).toBe("https://openai-proxy.example.com/v1");
+			expect(model?.supportsComputerUse).toBe(false);
 		});
 
 		test("overriding headers merges with model headers", () => {
@@ -691,7 +702,7 @@ describe("ModelRegistry", () => {
 			});
 			const fetchMock: FetchImpl = async input => {
 				const url = String(input);
-				if (url === "https://models.dev/api.json") return Response.json({});
+				if (url === "https://catalog.stencil.so/models.json.zstd") return Response.json({});
 				if (url === "https://proxy.example/v1/models") {
 					return Response.json({
 						data: [{ id: "claude-sonnet-5", display_name: "Claude Sonnet 5" }],
@@ -1163,6 +1174,7 @@ describe("ModelRegistry", () => {
 		};
 		let thinkingCustom: ModelRegistry;
 		let thinkingOverride: ModelRegistry;
+		let deepseekOverride: ModelRegistry;
 		beforeAll(() => {
 			thinkingCustom = readonlyRegistry({
 				providers: {
@@ -1177,6 +1189,21 @@ describe("ModelRegistry", () => {
 						modelOverrides: {
 							"anthropic/claude-sonnet-4": {
 								thinking: { mode: "budget", efforts: [Effort.Low, Effort.Medium] },
+							},
+						},
+					},
+				},
+			});
+			deepseekOverride = readonlyRegistry({
+				providers: {
+					openrouter: {
+						modelOverrides: {
+							"deepseek/deepseek-v4-flash-0731": {
+								thinking: {
+									mode: "effort",
+									efforts: [Effort.Max, Effort.High, Effort.Low],
+									defaultLevel: Effort.High,
+								},
 							},
 						},
 					},
@@ -1198,6 +1225,17 @@ describe("ModelRegistry", () => {
 			expect(model?.thinking).toEqual({
 				mode: "budget",
 				efforts: [Effort.Low, Effort.Medium],
+			});
+		});
+
+		test("model overrides preserve explicit OpenRouter DeepSeek thinking metadata", () => {
+			const model = getModelsForProvider(deepseekOverride, "openrouter").find(
+				m => m.id === "deepseek/deepseek-v4-flash-0731",
+			);
+			expect(model?.thinking).toEqual({
+				mode: "effort",
+				efforts: [Effort.Max, Effort.High, Effort.Low],
+				defaultLevel: Effort.High,
 			});
 		});
 	});

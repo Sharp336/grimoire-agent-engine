@@ -91,6 +91,16 @@ function requireRecord(value: unknown, label: string): Record<string, unknown> {
 	return value;
 }
 
+/**
+ * Decode a captured Codex SSE request body. The provider zstd-compresses the
+ * body by default, so a binary payload is decompressed before JSON parsing.
+ */
+function decodeCodexRequestBody(body: RequestInit["body"]): string {
+	if (typeof body === "string") return body;
+	if (body instanceof Uint8Array) return new TextDecoder().decode(Bun.zstdDecompressSync(body));
+	throw new Error("expected a string or binary Codex request body");
+}
+
 function parseTurnMetadata(clientMetadata: Record<string, unknown>): Record<string, unknown> {
 	const encoded = clientMetadata["x-codex-turn-metadata"];
 	if (typeof encoded !== "string") throw new Error("expected x-codex-turn-metadata");
@@ -110,7 +120,7 @@ function createCodexFetchMock(sse: string, onRequest: (captured: CapturedCodexRe
 		if (url.endsWith("/responses")) {
 			onRequest({
 				headers: init?.headers instanceof Headers ? init.headers : new Headers(init?.headers),
-				body: typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {},
+				body: JSON.parse(decodeCodexRequestBody(init?.body)) as Record<string, unknown>,
 			});
 			return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
 		}
@@ -364,6 +374,22 @@ describe("openai-codex Responses Lite input shaping", () => {
 		expect(disabled.tool_choice).toBe("none");
 		expect(disabled.tools).toBeUndefined();
 	});
+
+	it.each(["gpt-5.3-codex-spark", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"])(
+		"preserves a forced computer function through Lite for %s",
+		async modelId => {
+			const model = createCodexModel(modelId);
+			const computer = { type: "function", name: "computer", parameters: { type: "object" } };
+			const other = { type: "function", name: "read", parameters: { type: "object" } };
+			const body = await transformRequestBody(
+				{ model: model.id, tools: [computer, other], tool_choice: { type: "function", name: "computer" } },
+				model,
+				{ responsesLite: true },
+			);
+			expect(body.input?.[0]).toEqual({ type: "additional_tools", role: "developer", tools: [computer] });
+			expect(body.tool_choice).toBe("required");
+		},
+	);
 
 	it("moves instructions and tools into input items under lite", async () => {
 		const model = createCodexModel("gpt-5.6-terra");

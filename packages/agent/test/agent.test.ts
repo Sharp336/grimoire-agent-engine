@@ -40,6 +40,228 @@ describe("Agent", () => {
 		agent.abort();
 		await prompt;
 	});
+	it("classifies agent-authored steering as a parent steering message", async () => {
+		const toolSchema = z.object({ value: z.string() });
+		const executed: string[] = [];
+		let agent: Agent;
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			concurrency: "exclusive",
+			async execute(_toolCallId, params) {
+				executed.push(params.value);
+				if (params.value === "first") {
+					agent.steer({
+						role: "user",
+						content: "parent steering",
+						attribution: "agent",
+						timestamp: Date.now(),
+					});
+				}
+				return {
+					content: [{ type: "text", text: `ok:${params.value}` }],
+					details: { value: params.value },
+				};
+			},
+		};
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "first" } },
+						{ type: "toolCall", id: "tool-2", name: "echo", arguments: { value: "second" } },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
+			streamFn: mock.stream,
+			interruptMode: "immediate",
+		});
+		const events: AgentEvent[] = [];
+		const unsubscribe = agent.subscribe(event => events.push(event));
+
+		await agent.prompt("start");
+		unsubscribe();
+
+		expect(executed).toEqual(["first"]);
+		const skipped = events.find(
+			(event): event is Extract<AgentEvent, { type: "tool_execution_end" }> =>
+				event.type === "tool_execution_end" && event.toolCallId === "tool-2",
+		);
+		expect(skipped).toBeDefined();
+		const skippedContent = skipped?.result.content[0];
+		expect(skippedContent?.type).toBe("text");
+		if (skippedContent?.type !== "text") throw new Error("skipped tool result must be text");
+		expect(skippedContent.text).toContain("Skipped due to pending parent steering message");
+		expect(skippedContent.text).toContain("After the steering message is handled on the next step");
+		expect(skippedContent.text).not.toContain("pending system advisory");
+		expect(skippedContent.text).not.toContain("queued user message");
+	});
+
+	it("classifies user-attributed custom steering as a queued user message", async () => {
+		const toolSchema = z.object({ value: z.string() });
+		const executed: string[] = [];
+		let agent: Agent;
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			concurrency: "exclusive",
+			async execute(_toolCallId, params) {
+				executed.push(params.value);
+				if (params.value === "first") {
+					agent.steer({
+						role: "custom",
+						customType: "visible-user-steer",
+						content: "visible custom steering",
+						display: true,
+						attribution: "user",
+						timestamp: Date.now(),
+					});
+					agent.steer({
+						role: "user",
+						content: "normal user steering",
+						timestamp: Date.now(),
+					});
+				}
+				return {
+					content: [{ type: "text", text: `ok:${params.value}` }],
+					details: { value: params.value },
+				};
+			},
+		};
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "first" } },
+						{ type: "toolCall", id: "tool-2", name: "echo", arguments: { value: "second" } },
+					],
+				},
+				{ content: ["done"] },
+				{ content: ["done"] },
+			],
+		});
+		agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
+			streamFn: mock.stream,
+			steeringMode: "one-at-a-time",
+			interruptMode: "immediate",
+		});
+		const events: AgentEvent[] = [];
+		const unsubscribe = agent.subscribe(event => events.push(event));
+
+		await agent.prompt("start");
+		unsubscribe();
+
+		expect(executed).toEqual(["first"]);
+		const skipped = events.find(
+			(event): event is Extract<AgentEvent, { type: "tool_execution_end" }> =>
+				event.type === "tool_execution_end" && event.toolCallId === "tool-2",
+		);
+		expect(skipped).toBeDefined();
+		const skippedContent = skipped?.result.content[0];
+		expect(skippedContent?.type).toBe("text");
+		if (skippedContent?.type !== "text") throw new Error("skipped tool result must be text");
+		expect(skippedContent.text).toContain("Skipped due to queued user message");
+		expect(skippedContent.text).not.toContain("pending system advisory");
+	});
+
+	it("classifies one-at-a-time steering from the next queued mixed source", async () => {
+		const cases = [
+			{
+				order: ["system", "agent"] as const,
+				expected: "pending system advisory",
+				unexpected: "pending parent steering message",
+			},
+			{
+				order: ["agent", "system"] as const,
+				expected: "pending parent steering message",
+				unexpected: "pending system advisory",
+			},
+		];
+
+		for (const scenario of cases) {
+			const toolSchema = z.object({ value: z.string() });
+			const executed: string[] = [];
+			let agent: Agent;
+			const tool: AgentTool<typeof toolSchema, { value: string }> = {
+				name: "echo",
+				label: "Echo",
+				description: "Echo tool",
+				parameters: toolSchema,
+				concurrency: "exclusive",
+				async execute(_toolCallId, params) {
+					executed.push(params.value);
+					if (params.value === "first") {
+						for (const source of scenario.order) {
+							if (source === "agent") {
+								agent.steer({
+									role: "user",
+									content: "parent steering",
+									attribution: "agent",
+									timestamp: Date.now(),
+								});
+							} else {
+								agent.steer({
+									role: "custom",
+									customType: "advisor",
+									content: "advisor steering",
+									display: true,
+									attribution: "agent",
+									timestamp: Date.now(),
+								});
+							}
+						}
+					}
+					return {
+						content: [{ type: "text", text: `ok:${params.value}` }],
+						details: { value: params.value },
+					};
+				},
+			};
+			const mock = createMockModel({
+				responses: [
+					{
+						content: [
+							{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "first" } },
+							{ type: "toolCall", id: "tool-2", name: "echo", arguments: { value: "second" } },
+						],
+					},
+					{ content: ["done"] },
+					{ content: ["done"] },
+				],
+			});
+			agent = new Agent({
+				initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
+				streamFn: mock.stream,
+				interruptMode: "immediate",
+			});
+			const events: AgentEvent[] = [];
+			const unsubscribe = agent.subscribe(event => events.push(event));
+
+			await agent.prompt("start");
+			unsubscribe();
+
+			expect(executed).toEqual(["first"]);
+			const skipped = events.find(
+				(event): event is Extract<AgentEvent, { type: "tool_execution_end" }> =>
+					event.type === "tool_execution_end" && event.toolCallId === "tool-2",
+			);
+			expect(skipped).toBeDefined();
+			const skippedContent = skipped?.result.content[0];
+			expect(skippedContent?.type).toBe("text");
+			if (skippedContent?.type !== "text") throw new Error("skipped tool result must be text");
+			expect(skippedContent.text).toContain(`Skipped due to ${scenario.expected}`);
+			expect(skippedContent.text).not.toContain(scenario.unexpected);
+		}
+	});
 
 	it("continue() should process queued follow-up messages after an assistant turn", async () => {
 		const mock = createMockModel({ responses: [{ content: ["Processed"] }] });
@@ -357,6 +579,228 @@ describe("Agent", () => {
 			toolName: toolCall.name,
 			content: [{ type: "text", text: "/workspace" }],
 			isError: false,
+		});
+	});
+
+	it("persists the transformed payload when the stream fails mid-transform", async () => {
+		// The error drain snapshots the Cursor buffer just like the normal one, so
+		// it needs the same await: a transformer still in flight when the provider
+		// errors would otherwise patch an entry this path already detached, and
+		// the original payload is persisted instead. A provider error is exactly
+		// when a transform is most likely to be mid-flight.
+		const mock = createMockModel({ responses: [] });
+		const toolCall = {
+			type: "toolCall" as const,
+			id: "cursor-tool-err",
+			name: "shell",
+			arguments: { command: "pwd" },
+			[kCursorExecResolved]: true,
+		};
+		const started = createAssistantMessage([toolCall]);
+		const realToolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			content: [{ type: "text", text: "original" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		// Held across the failure so the transform is guaranteed to still be
+		// pending when the catch path runs.
+		const gate = Promise.withResolvers<void>();
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			cursorOnToolResult: async message => {
+				await gate.promise;
+				return { ...message, content: [{ type: "text" as const, text: "transformed" }] };
+			},
+			streamFn: (_model, _context, options) => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					// Fire-and-forget, exactly like the provider's data loop.
+					void options?.cursorOnToolResult?.(realToolResult);
+					stream.push({ type: "start", partial: started });
+					stream.fail(new Error("connection reset mid-transform"));
+				});
+				return stream;
+			},
+		});
+
+		const turn = agent.prompt("trigger");
+		await Bun.sleep(0);
+		gate.resolve();
+		await turn;
+
+		const toolResults = agent.state.messages.filter(message => message.role === "toolResult");
+		expect(toolResults).toHaveLength(1);
+		expect(toolResults[0]).toMatchObject({
+			toolCallId: toolCall.id,
+			content: [{ type: "text", text: "transformed" }],
+		});
+	});
+
+	it("buffers a Cursor result even with neither exec handlers nor a transformer", async () => {
+		// Both options are optional, but the Cursor provider resolves its native
+		// tools server-side regardless and marks those blocks
+		// `kCursorExecResolved`, so `agent-loop.ts` emits no placeholder for them.
+		// Without a result sink the provider's own fallback result is dropped and
+		// the assistant block is left unpaired — `buildSessionContext` then strips
+		// the whole interaction on replay.
+		const mock = createMockModel({ responses: [] });
+		const toolCall = {
+			type: "toolCall" as const,
+			id: "cursor-tool-bare",
+			name: "todo",
+			arguments: { todos: [] },
+			[kCursorExecResolved]: true,
+		};
+		const started = createAssistantMessage([toolCall]);
+		const realToolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			content: [{ type: "text", text: "Todo snapshot not mirrored" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		// No `cursorExecHandlers`, no `cursorOnToolResult` — a bare SDK host.
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (_model, _context, options) => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					void options?.cursorOnToolResult?.(realToolResult);
+					stream.push({ type: "start", partial: started });
+					stream.push({ type: "done", reason: "stop", message: started });
+				});
+				return stream;
+			},
+		});
+
+		await agent.prompt("trigger");
+
+		const toolResults = agent.state.messages.filter(message => message.role === "toolResult");
+		expect(toolResults).toHaveLength(1);
+		expect(toolResults[0]).toMatchObject({ toolCallId: toolCall.id, toolName: toolCall.name });
+	});
+
+	it("keeps the reserved result when the transformer rejects", async () => {
+		// `cursorOnToolResult` is a supported option returning a Promise, and the
+		// provider dispatches decoded messages with `void handleServerMessage(...)`.
+		// The drain awaits a pending transformer, so a REJECTING one must not
+		// take the turn down with it or cost the result: an unbuffered toolResult
+		// leaves its toolCall block unpaired and the transcript rebuild strips it
+		// as dangling. The reserved (pre-transform) payload stands in.
+		const mock = createMockModel({ responses: [] });
+		const toolCall = {
+			type: "toolCall" as const,
+			id: "cursor-tool-slow",
+			name: "shell",
+			arguments: { command: "pwd" },
+			[kCursorExecResolved]: true,
+		};
+		const started = createAssistantMessage([toolCall]);
+		const realToolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			content: [{ type: "text", text: "/workspace" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			cursorOnToolResult: async () => {
+				throw new Error("transformer blew up");
+			},
+			streamFn: (_model, _context, options) => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					// Fire-and-forget, exactly like the provider's data loop.
+					void options?.cursorOnToolResult?.(realToolResult);
+					stream.push({ type: "start", partial: started });
+					stream.push({ type: "done", reason: "stop", message: started });
+				});
+				return stream;
+			},
+		});
+
+		await agent.prompt("trigger");
+
+		const toolResults = agent.state.messages.filter(message => message.role === "toolResult");
+		expect(toolResults).toHaveLength(1);
+		expect(toolResults[0]).toMatchObject({
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			content: [{ type: "text", text: "/workspace" }],
+		});
+	});
+
+	it("persists the transformed payload when the transformer resolves after message_end", async () => {
+		// The transformer is awaited by the provider's fire-and-forget dispatch,
+		// so `message_end` decoded from the same chunk can reach the drain while
+		// it is still pending. Buffering the call is not enough: a transformer
+		// that actually rewrites the result must have that rewrite persisted,
+		// exactly like the awaited exec-channel paths. Otherwise the customized
+		// payload is silently replaced by the original in this timing window.
+		const mock = createMockModel({ responses: [] });
+		const toolCall = {
+			type: "toolCall" as const,
+			id: "cursor-tool-late",
+			name: "shell",
+			arguments: { command: "pwd" },
+			[kCursorExecResolved]: true,
+		};
+		const started = createAssistantMessage([toolCall]);
+		const realToolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			content: [{ type: "text", text: "original" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		// Deterministic race, no wall-clock delay. The transformer blocks on a
+		// gate this test holds open across the whole stream, so it is guaranteed
+		// to still be unresolved when `message_end` reaches the drain. The gate
+		// is released only after `prompt()` has been started and has had a chance
+		// to run to the drain — a drain that does not await the transformer will
+		// already have persisted the original payload by then.
+		//
+		// Gating on the `message_end` event instead would deadlock: that event is
+		// emitted from inside the drain that now waits on this promise.
+		const gate = Promise.withResolvers<void>();
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			cursorOnToolResult: async message => {
+				await gate.promise;
+				return { ...message, content: [{ type: "text" as const, text: "transformed" }] };
+			},
+			streamFn: (_model, _context, options) => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					// Fire-and-forget, exactly like the provider's data loop: the
+					// transformer is still pending when the stream closes below.
+					void options?.cursorOnToolResult?.(realToolResult);
+					stream.push({ type: "start", partial: started });
+					stream.push({ type: "done", reason: "stop", message: started });
+				});
+				return stream;
+			},
+		});
+
+		const turn = agent.prompt("trigger");
+		// Let the stream drain as far as it can while the transformer is blocked.
+		// An unawaited drain finishes the turn here, with the original payload.
+		for (let i = 0; i < 50; i++) await Promise.resolve();
+		gate.resolve();
+		await turn;
+
+		const toolResults = agent.state.messages.filter(message => message.role === "toolResult");
+		expect(toolResults).toHaveLength(1);
+		expect(toolResults[0]).toMatchObject({
+			toolCallId: toolCall.id,
+			content: [{ type: "text", text: "transformed" }],
 		});
 	});
 
