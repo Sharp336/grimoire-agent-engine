@@ -674,6 +674,39 @@ function pruneArkUndefinedUnionBranches(node: unknown): void {
  * morph) to its underlying base schema instead of throwing — matching Zod,
  * whose `.refine()`/`.transform()` likewise never appear in the wire schema.
  */
+/**
+ * Reorder object `properties` so required keys precede optional keys, each
+ * group preserving declaration order. Restores the arktype-emitted wire shape
+ * after the omptype migration: omptype's JSON Schema emitter preserves pure
+ * declaration order (matching its own `from-json-schema` round-trip), while
+ * the ark wire contract groups required props first (streaming renderers and
+ * prompt caching depend on the stable shape).
+ */
+function reorderRequiredPropertiesFirst(node: unknown): void {
+	if (Array.isArray(node)) {
+		for (const child of node) reorderRequiredPropertiesFirst(child);
+		return;
+	}
+	if (!node || typeof node !== "object") return;
+	const obj = node as Record<string, unknown>;
+	if (obj.properties && typeof obj.properties === "object" && !Array.isArray(obj.properties)) {
+		const properties = obj.properties as Record<string, unknown>;
+		const required = Array.isArray(obj.required) ? (obj.required as string[]) : [];
+		const requiredSet = new Set(required);
+		const ordered: Record<string, unknown> = {};
+		for (const key of Object.keys(properties)) {
+			if (requiredSet.has(key)) ordered[key] = properties[key];
+		}
+		for (const key of Object.keys(properties)) {
+			if (!requiredSet.has(key)) ordered[key] = properties[key];
+		}
+		obj.properties = ordered;
+	}
+	for (const key of [...SCHEMA_VALUE_KEYS, ...SCHEMA_MAP_KEYS]) {
+		if (Object.hasOwn(obj, key)) reorderRequiredPropertiesFirst(obj[key]);
+	}
+}
+
 export function arkToWireSchema(schema: Type): Record<string, unknown> {
 	return stamp(schema, kArkWireSchema, s => {
 		const raw = s.toJsonSchema({ target: "draft-2020-12", fallback: ctx => ctx.base }) as Record<string, unknown>;
@@ -681,6 +714,7 @@ export function arkToWireSchema(schema: Type): Record<string, unknown> {
 		pruneArkUndefinedUnionBranches(raw);
 		const upgraded = postProcessJsonSchema(upgradeJsonSchemaTo202012(raw) as Record<string, unknown>);
 		closeDeclaredObjects(upgraded);
+		reorderRequiredPropertiesFirst(upgraded);
 		return upgraded;
 	});
 }
