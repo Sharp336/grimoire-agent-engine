@@ -98,12 +98,14 @@ function refreshStatusLine(ctx: InteractiveModeContext): void {
 }
 
 /** `/fast status` label for the active model: "on" when the next request uses priority on a
- *  family `/fast` can control. Fireworks priority is a separate `providers.fireworksTier` knob
+ *  family `/fast` can control, "blocked" when priority is requested but the provider or
+ *  account refuses it. Fireworks priority is a separate `providers.fireworksTier` knob
  *  `/fast off`/toggle cannot clear, so a Fireworks-only tier never reports "on" here. */
 function formatFastModeStatus(session: AgentSession): string {
 	const model = session.model;
 	if (!model || !serviceTierFamily(model)) return "off";
-	return session.isFastModeActive() ? "on" : "off";
+	const state = session.fastModeState();
+	return state === "active" ? "on" : state;
 }
 
 /** Detailed, session-effective `/computer status` diagnostics. */
