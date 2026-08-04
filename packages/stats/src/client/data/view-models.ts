@@ -7,6 +7,7 @@ import type {
 	CostTimeSeriesPoint,
 	FolderStats,
 	ModelPerformancePoint,
+	SkillUsageStats,
 	TimeRange,
 	ToolUsageStats,
 } from "../types";
@@ -241,6 +242,35 @@ export function buildFolderRows(folders: FolderStats[]): FolderRowView[] {
 	}));
 }
 
+/** Return attributed cost per invocation without dividing zero-call rows. */
+export function averageCostPerInvocation(costShare: number, calls: number): number {
+	return calls > 0 ? costShare / calls : 0;
+}
+
+/** Keep a selection only while the refreshed data still offers it. */
+export function resolveAvailableSelection(selected: string | null, options: readonly string[]): string | null {
+	return selected !== null && options.includes(selected) ? selected : null;
+}
+
+/** Table row for the Skills route: usage stats plus derived rates/shares. */
+export interface SkillRowView extends SkillUsageStats {
+	/** errors / calls (0 for zero calls). */
+	errorRate: number;
+	/** Calls relative to the busiest skill, 0-100, for the share bar. */
+	callsPercentage: number;
+	/** Attributed cost divided by invocation count. */
+	avgCostPerInvocation: number;
+}
+
+export function buildSkillRows(skills: SkillUsageStats[]): SkillRowView[] {
+	const maxCalls = skills.reduce((max, skill) => Math.max(max, skill.calls), 0);
+	return skills.map(skill => ({
+		...skill,
+		errorRate: skill.calls > 0 ? skill.errors / skill.calls : 0,
+		callsPercentage: maxCalls > 0 ? (skill.calls / maxCalls) * 100 : 0,
+		avgCostPerInvocation: averageCostPerInvocation(skill.costShare, skill.calls),
+	}));
+}
 /** Table row for the Tools route: usage stats plus derived rates/shares. */
 export interface ToolRowView extends ToolUsageStats {
 	/** errors / calls (0 for zero calls). */

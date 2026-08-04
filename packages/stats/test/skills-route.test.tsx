@@ -1,0 +1,250 @@
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import { parseHTML } from "linkedom";
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { buildSkillInvocationSeries, formatSkillSeriesLabel, SkillsRoute } from "../src/client/routes/SkillsRoute";
+import type { SkillDashboardStats } from "../src/shared-types";
+
+
+type FetchInput = string | URL | Request;
+type FetchInit = RequestInit | BunFetchRequestInit;
+
+const originalGlobals = new Map<string, PropertyDescriptor | undefined>();
+let root: Root | null = null;
+
+function installGlobal(name: string, value: unknown): void {
+	originalGlobals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+	Object.defineProperty(globalThis, name, { configurable: true, value, writable: true });
+}
+
+function restoreGlobals(): void {
+	for (const [name, descriptor] of originalGlobals) {
+		if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+		else Reflect.deleteProperty(globalThis, name);
+	}
+	originalGlobals.clear();
+}
+
+afterEach(async () => {
+	const activeRoot = root;
+	if (activeRoot) {
+		await act(async () => {
+			activeRoot.unmount();
+		});
+		root = null;
+	}
+	vi.restoreAllMocks();
+	restoreGlobals();
+});
+
+const dashboard: SkillDashboardStats = {
+	bySkill: [
+		{
+			skill: "review",
+			calls: 2,
+			errors: 0,
+			argsChars: 0,
+			resultChars: 0,
+			totalTokensShare: 100,
+			outputTokensShare: 20,
+			costShare: 0.009,
+			lastUsed: Date.parse("2026-06-24T10:05:00.000Z"),
+		},
+		{
+			skill: "outline",
+			calls: 1,
+			errors: 0,
+			argsChars: 0,
+			resultChars: 0,
+			totalTokensShare: 50,
+			outputTokensShare: 10,
+			costShare: 0.004,
+			lastUsed: Date.parse("2026-06-24T10:04:00.000Z"),
+		},
+	],
+	bySkillModel: [
+		{
+			skill: "review",
+			model: "gpt-5.4",
+			provider: "openai",
+			calls: 2,
+			errors: 0,
+			argsChars: 0,
+			resultChars: 0,
+			totalTokensShare: 100,
+			outputTokensShare: 20,
+			costShare: 0.009,
+			lastUsed: Date.parse("2026-06-24T10:05:00.000Z"),
+		},
+		{
+			skill: "outline",
+			model: "gpt-5.5",
+			provider: "openai",
+			calls: 1,
+			errors: 0,
+			argsChars: 0,
+			resultChars: 0,
+			totalTokensShare: 50,
+			outputTokensShare: 10,
+			costShare: 0.004,
+			lastUsed: Date.parse("2026-06-24T10:04:00.000Z"),
+		},
+	],
+	series: [],
+};
+
+const lintDashboard: SkillDashboardStats = {
+	bySkill: [{ ...dashboard.bySkill[0], skill: "lint" }],
+	bySkillModel: [{ ...dashboard.bySkillModel[0], skill: "lint" }],
+	series: [],
+};
+
+const collisionSkills = [
+	["Other", 10],
+	["alpha", 9],
+	["beta", 8],
+	["gamma", 7],
+	["delta", 6],
+	["epsilon", 5],
+	["zeta", 4],
+] as const;
+
+const collisionDashboard: SkillDashboardStats = {
+	...dashboard,
+	bySkill: collisionSkills.map(([skill, calls]) => ({
+		...dashboard.bySkill[0],
+		skill,
+		calls,
+	})),
+	series: collisionSkills.map(([skill, calls]) => ({
+		timestamp: Date.parse("2026-06-24T10:00:00.000Z"),
+		skill,
+		calls,
+		errors: 0,
+	})),
+};
+
+describe("SkillsRoute", () => {
+	it("fetches the selected range and renders average invocation cost", async () => {
+		const domWindow = parseHTML('<html><body><div id="root"></div></body></html>').window;
+		installGlobal("window", domWindow);
+		installGlobal("document", domWindow.document);
+		installGlobal("navigator", domWindow.navigator);
+
+		installGlobal("Node", domWindow.Node);
+		installGlobal("Element", domWindow.Element);
+		installGlobal("HTMLElement", domWindow.HTMLElement);
+		installGlobal("HTMLIFrameElement", domWindow.HTMLIFrameElement);
+		installGlobal("SVGElement", domWindow.SVGElement);
+		installGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+
+		const requestedUrls: string[] = [];
+		const fetchStub = Object.assign(
+			async (input: FetchInput, _init?: FetchInit) => {
+				requestedUrls.push(input instanceof Request ? input.url : input.toString());
+				return Response.json(dashboard);
+			},
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchStub);
+
+		const container = domWindow.document.getElementById("root");
+		if (!container) throw new Error("Expected test root");
+		root = createRoot(container as unknown as Element);
+
+		await act(async () => {
+			root?.render(<SkillsRoute active range="24h" refreshTrigger={0} />);
+		});
+		expect(requestedUrls).toEqual(["/api/stats/skills?range=24h"]);
+		expect(domWindow.document.body.textContent).toContain("Avg Cost / Invocation");
+		expect(domWindow.document.body.textContent).toContain("Avg Cost / Inv.");
+		expect(domWindow.document.body.textContent).toContain("$0.0045");
+
+		await act(async () => {
+			root?.render(<SkillsRoute active range="7d" refreshTrigger={0} />);
+		});
+		expect(requestedUrls).toEqual(["/api/stats/skills?range=24h", "/api/stats/skills?range=7d"]);
+	});
+
+	it("clears a selected skill when a refreshed range removes it", async () => {
+		const domWindow = parseHTML('<html><body><div id="root"></div></body></html>').window;
+		installGlobal("window", domWindow);
+		installGlobal("document", domWindow.document);
+		installGlobal("navigator", domWindow.navigator);
+		installGlobal("Node", domWindow.Node);
+		installGlobal("Element", domWindow.Element);
+		installGlobal("HTMLElement", domWindow.HTMLElement);
+		installGlobal("HTMLIFrameElement", domWindow.HTMLIFrameElement);
+		installGlobal("SVGElement", domWindow.SVGElement);
+		installGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+
+		const fetchStub = Object.assign(
+			async (input: FetchInput, _init?: FetchInit) => {
+				const url = input instanceof Request ? input.url : input.toString();
+				return Response.json(url.includes("range=7d") ? lintDashboard : dashboard);
+			},
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchStub);
+
+		const container = domWindow.document.getElementById("root");
+		if (!container) throw new Error("Expected test root");
+		root = createRoot(container as unknown as Element);
+		await act(async () => {
+			root?.render(<SkillsRoute active range="24h" refreshTrigger={0} />);
+		});
+
+		const select = domWindow.document.querySelector("select");
+		if (!select) throw new Error("Expected skill filter");
+		const reviewOption = select.querySelector("option[value='review']") as HTMLOptionElement | null;
+		if (!reviewOption) throw new Error("Expected review option");
+		await act(async () => {
+			reviewOption.selected = true;
+			select.dispatchEvent(new domWindow.Event("change", { bubbles: true }));
+		});
+		expect(select.value).toBe("review");
+
+		await act(async () => {
+			root?.render(<SkillsRoute active range="7d" refreshTrigger={0} />);
+		});
+		const refreshedSelect = domWindow.document.querySelector("select");
+		if (!refreshedSelect) throw new Error("Expected refreshed skill filter");
+		expect(refreshedSelect.value).toBe("");
+		expect(domWindow.document.body.textContent).toContain("lint");
+		await act(async () => {
+			root?.render(<SkillsRoute active range="24h" refreshTrigger={0} />);
+		});
+		const restoredSelect = domWindow.document.querySelector("select");
+		if (!restoredSelect) throw new Error("Expected restored skill filter");
+		expect(restoredSelect.value).toBe("");
+		const modelTable = domWindow.document.querySelectorAll("table").at(-1);
+		if (!modelTable) throw new Error("Expected skill model table");
+		expect(modelTable.textContent).toContain("review");
+		expect(modelTable.textContent).toContain("outline");
+	});
+
+	it("keeps a real Other skill separate from the overflow series", () => {
+		const chartSeries = buildSkillInvocationSeries(collisionDashboard.series);
+		const bucket = chartSeries.buckets[0];
+		if (bucket === undefined) throw new Error("Expected a chart bucket");
+		const datasets = chartSeries.skills.map(skill => ({
+			label: formatSkillSeriesLabel(skill),
+			data: [chartSeries.data.get(bucket)?.get(skill) ?? 0],
+		}));
+
+		expect(datasets).toEqual([
+			{ label: "Other", data: [10] },
+			{ label: "alpha", data: [9] },
+			{ label: "beta", data: [8] },
+			{ label: "gamma", data: [7] },
+			{ label: "delta", data: [6] },
+			{ label: "epsilon", data: [5] },
+			{ label: "Other skills", data: [4] },
+		]);
+		expect(datasets.reduce((total, dataset) => total + dataset.data[0], 0)).toBe(
+			collisionDashboard.series.reduce((total, point) => total + point.calls, 0),
+		);
+		expect(datasets.filter(dataset => dataset.label === "Other").map(dataset => dataset.data)).toEqual([[10]]);
+		expect(datasets.filter(dataset => dataset.label === "Other skills").map(dataset => dataset.data)).toEqual([[4]]);
+	});
+});

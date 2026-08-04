@@ -53,8 +53,9 @@ const INTERNAL_SCHEMES_WITH_SELECTORS: Record<string, true> = {
 // peeling syntactically can make valid resources unreachable. Keep these
 // schemes opaque; selector support for them needs a resolver-aware path that
 // tries the exact URI before interpreting any suffix as a read selector.
-const OPAQUE_RESOURCE_SCHEMES: ReadonlySet<string> = new Set(["mcp"]);
+const OPAQUE_RESOURCE_SCHEMES: Record<string, true> = { mcp: true };
 const INTERNAL_URL_SCHEME_RE = /^([a-z][a-z0-9+.-]*):\/\//i;
+
 const NARROW_NO_BREAK_SPACE = "\u202F";
 const TOP_LEVEL_INTERNAL_URL_PREFIXES = [
 	"agent://",
@@ -350,26 +351,6 @@ export async function probeLiteralPathExists(filePath: string, cwd: string): Pro
 }
 
 /**
- * Async sibling of {@link splitPathAndSel} that prefers a literal filesystem
- * path over selector interpretation. Filenames whose tail matches the selector
- * grammar (e.g. `test:1-2`, `log:raw`) are legal on POSIX; without this the
- * strict splitter peels the tail and both `read` and `grep` refuse to open the
- * real file (issue #4618). The literal wins on a confirmed `lstat`, and also
- * on `"unknown"` (`EACCES` on a parent, transient I/O), so an unreachable
- * literal is never silently reinterpreted as `path + selector`. Only a
- * definitive `ENOENT`/`ENOTDIR` falls back to the strict split.
- */
-export async function splitPathAndSelPreferringLiteral(
-	rawPath: string,
-	cwd: string,
-): Promise<{ path: string; sel?: string }> {
-	const strict = splitPathAndSel(rawPath);
-	if (strict.sel === undefined) return strict;
-	const probe = await probeLiteralPathExists(rawPath, cwd);
-	return probe === "missing" ? strict : { path: rawPath };
-}
-
-/**
  * Variant of {@link splitPathAndSel} for internal URLs (`scheme://...`).
  *
  * The filesystem-path splitter is intentionally conservative: it refuses to
@@ -387,7 +368,6 @@ export async function splitPathAndSelPreferringLiteral(
  *
  * Falls back to the input unchanged when nothing matches.
  */
-
 export function splitInternalUrlSel(rawPath: string): { path: string; sel?: string } {
 	const schemeMatch = rawPath.match(INTERNAL_URL_SCHEME_RE);
 	if (!schemeMatch) return { path: rawPath };
@@ -395,7 +375,7 @@ export function splitInternalUrlSel(rawPath: string): { path: string; sel?: stri
 	// Opaque schemes (mcp://, etc.) carry server-defined resource URIs that may
 	// legitimately end in selector-shaped tails. Forward verbatim — see
 	// OPAQUE_RESOURCE_SCHEMES.
-	if (OPAQUE_RESOURCE_SCHEMES.has(scheme)) return { path: rawPath };
+	if (OPAQUE_RESOURCE_SCHEMES[scheme]) return { path: rawPath };
 	if (!INTERNAL_SCHEMES_WITH_SELECTORS[scheme]) return { path: rawPath };
 
 	const schemeEnd = schemeMatch[0].length;
@@ -419,6 +399,26 @@ export function splitInternalUrlSel(rawPath: string): { path: string; sel?: stri
 	}
 	if (chunks.length === 0) return { path: rawPath };
 	return { path, sel: chunks.join(":") };
+}
+
+/**
+ * Async sibling of {@link splitPathAndSel} that prefers a literal filesystem
+ * path over selector interpretation. Filenames whose tail matches the selector
+ * grammar (e.g. `test:1-2`, `log:raw`) are legal on POSIX; without this the
+ * strict splitter peels the tail and both `read` and `grep` refuse to open the
+ * real file (issue #4618). The literal wins on a confirmed `lstat`, and also
+ * on `"unknown"` (`EACCES` on a parent, transient I/O), so an unreachable
+ * literal is never silently reinterpreted as `path + selector`. Only a
+ * definitive `ENOENT`/`ENOTDIR` falls back to the strict split.
+ */
+export async function splitPathAndSelPreferringLiteral(
+	rawPath: string,
+	cwd: string,
+): Promise<{ path: string; sel?: string }> {
+	const strict = splitPathAndSel(rawPath);
+	if (strict.sel === undefined) return strict;
+	const probe = await probeLiteralPathExists(rawPath, cwd);
+	return probe === "missing" ? strict : { path: rawPath };
 }
 
 /**
@@ -753,20 +753,6 @@ function splitTopLevelDelimitedPath(entry: string, mode: DelimitedPathSplitMode)
 	return parts;
 }
 
-async function delimitedPathPartResolves(entry: string, cwd: string, splitter: PathEntrySplitter): Promise<boolean> {
-	if (isInternalUrlPath(entry)) return true;
-	const peeled = splitPathAndSel(entry).path;
-	const { basePath } = splitter(peeled);
-	const absoluteBasePath = resolveToCwd(basePath, cwd);
-	try {
-		await fs.promises.stat(absoluteBasePath);
-		return true;
-	} catch (err) {
-		if (isEnoent(err)) return false;
-		throw err;
-	}
-}
-
 /**
  * How many split parts must resolve to an existing path for the split to win.
  * Semicolon is the documented list delimiter, so it splits unconditionally
@@ -798,6 +784,20 @@ async function tryDelimitedPathSplit(
 	return parts;
 }
 
+async function delimitedPathPartResolves(entry: string, cwd: string, splitter: PathEntrySplitter): Promise<boolean> {
+	if (isInternalUrlPath(entry)) return true;
+	const peeled = splitPathAndSel(entry).path;
+	const { basePath } = splitter(peeled);
+	const absoluteBasePath = resolveToCwd(basePath, cwd);
+	try {
+		await fs.promises.stat(absoluteBasePath);
+		return true;
+	} catch (err) {
+		if (isEnoent(err)) return false;
+		throw err;
+	}
+}
+
 /**
  * Split one path-like entry whose multiple targets were flattened into one
  * string. Existing paths are kept intact, so real filenames containing spaces,
@@ -811,11 +811,6 @@ export async function splitDelimitedPathEntry(
 	const normalizedEntry = normalizePathLikeInput(entry);
 	if (!hasTopLevelPathDelimiter(normalizedEntry)) return null;
 	if (isInternalUrlPath(normalizedEntry)) return null;
-	// A real POSIX file may contain the delimiter and a selector-shaped tail
-	// (`a;b:1-2`, `a b:1-2`). Preserve the raw entry whenever the full literal
-	// resolves — or is only ambiguous — so downstream literal-preferring
-	// splitters see it before delimiter expansion peels or splits (issue #4618
-	// reviewer feedback: delimited expansion ran before the literal check).
 	if ((await probeLiteralPathExists(normalizedEntry, cwd)) !== "missing") return null;
 	const splitter = options.splitter ?? parseSearchPath;
 	const peeledEntry = splitPathAndSel(normalizedEntry).path;

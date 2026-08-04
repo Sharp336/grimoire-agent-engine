@@ -21,6 +21,11 @@ import type {
 	ProviderAggregate,
 	ProviderHourlyPoint,
 	ProviderTimeSeriesPoint,
+	ProvisionalSkillInvocationStats,
+	ResultSkillInvocationStats,
+	SkillModelStats,
+	SkillTimeSeriesPoint,
+	SkillUsageStats,
 	TimeSeriesPoint,
 	ToolCallStats,
 	ToolModelStats,
@@ -62,7 +67,8 @@ const USER_MESSAGE_LINKS_REPAIR_KEY = "user_message_links_v1";
 const PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY = "premium_requests_priority_v1";
 const AGENT_TYPE_BACKFILL_KEY = "agent_type_v1";
 const FORK_DEDUPE_KEY = "fork_dedupe_v1";
-const TOOL_CALLS_BACKFILL_KEY = "tool_calls_v1";
+const TOOL_CALLS_BACKFILL_KEY = "tool_calls_v2";
+const SKILL_INVOCATIONS_BACKFILL_KEY = "skill_invocations_v1";
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
@@ -117,6 +123,7 @@ export async function initDb(): Promise<Database> {
 		);
 
 		CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
+		CREATE INDEX IF NOT EXISTS idx_messages_entry_timestamp ON messages(entry_id, timestamp);
 		CREATE INDEX IF NOT EXISTS idx_messages_model ON messages(model);
 		CREATE INDEX IF NOT EXISTS idx_messages_folder ON messages(folder);
 		CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_file);
@@ -159,6 +166,7 @@ export async function initDb(): Promise<Database> {
 			tool_call_id TEXT NOT NULL,
 			folder TEXT NOT NULL,
 			tool_name TEXT NOT NULL,
+			skill_name TEXT,
 			model TEXT NOT NULL,
 			provider TEXT NOT NULL,
 			timestamp INTEGER NOT NULL,
@@ -173,11 +181,36 @@ export async function initDb(): Promise<Database> {
 		CREATE INDEX IF NOT EXISTS idx_tool_calls_timestamp ON tool_calls(timestamp);
 		CREATE INDEX IF NOT EXISTS idx_tool_calls_tool_timestamp ON tool_calls(tool_name, timestamp);
 
+		CREATE TABLE IF NOT EXISTS skill_invocations (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_file TEXT NOT NULL,
+			tool_call_id TEXT NOT NULL,
+			target_index INTEGER NOT NULL,
+			target TEXT,
+			skill_name TEXT NOT NULL,
+			is_error INTEGER,
+			UNIQUE(session_file, tool_call_id, target_index)
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_skill_invocations_skill ON skill_invocations(skill_name);
+		CREATE INDEX IF NOT EXISTS idx_skill_invocations_call ON skill_invocations(session_file, tool_call_id);
+
 		CREATE TABLE IF NOT EXISTS meta (
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL
 		);
 	`);
+
+	const toolCallColumns = db.prepare("PRAGMA table_info(tool_calls)").all() as { name: string }[];
+	if (!toolCallColumns.some(column => column.name === "skill_name")) {
+		db.run("ALTER TABLE tool_calls ADD COLUMN skill_name TEXT");
+	}
+	db.run("CREATE INDEX IF NOT EXISTS idx_tool_calls_skill_timestamp ON tool_calls(skill_name, timestamp)");
+
+	const skillInvocationColumns = db.prepare("PRAGMA table_info(skill_invocations)").all() as { name: string }[];
+	if (!skillInvocationColumns.some(column => column.name === "is_error")) {
+		db.run("ALTER TABLE skill_invocations ADD COLUMN is_error INTEGER");
+	}
 
 	const messageColumns = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
 	if (!messageColumns.some(column => column.name === "premium_requests")) {
@@ -261,6 +294,7 @@ export async function initDb(): Promise<Database> {
 	}
 	backfillUserMessages(db);
 	backfillToolCalls(db);
+	backfillSkillInvocations(db);
 	repairUserMessageLinks(db);
 	backfillPriorityPremiumRequests(db);
 	backfillAgentType(db);
@@ -1087,12 +1121,12 @@ function backfillUserMessages(database: Database): void {
 }
 
 /**
- * One-shot wipe of `tool_calls` + `file_offsets` when the `tool_calls` table
- * is introduced (or its schema version bumps), so the next sync re-parses
- * every session and ingests historical tool calls. `messages` and
- * `user_messages` re-inserts are idempotent, so the offset reset is safe.
- * Same sentinel protocol as {@link backfillUserMessages}: the PENDING value
- * written here prevents re-wiping on subsequent inits.
+ * One-shot reset of `file_offsets` when the `tool_calls` table is introduced
+ * (or its schema version bumps), so the next sync re-parses every session and
+ * ingests historical tool calls. Existing tool-call rows are intentionally
+ * retained so historical calls without replayable session files remain
+ * visible. Same sentinel protocol as {@link backfillUserMessages}: the
+ * PENDING value written here prevents repeating the reset on later inits.
  */
 function backfillToolCalls(database: Database): void {
 	const row = database.prepare("SELECT value FROM meta WHERE key = ?").get(TOOL_CALLS_BACKFILL_KEY) as
@@ -1100,11 +1134,38 @@ function backfillToolCalls(database: Database): void {
 		| undefined;
 	if (!shouldResetBackfill(row?.value)) return;
 
-	database.run("DELETE FROM tool_calls");
 	database.run("DELETE FROM file_offsets");
 	database
 		.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
 		.run(TOOL_CALLS_BACKFILL_KEY, BACKFILL_PENDING);
+}
+
+/**
+ * Seed one provisional child invocation for every legacy scalar skill
+ * attribution. The transaction makes the offset reset and sentinel write
+ * crash-safe; `INSERT OR IGNORE` makes retries idempotent.
+ */
+function backfillSkillInvocations(database: Database): void {
+	const row = database.prepare("SELECT value FROM meta WHERE key = ?").get(SKILL_INVOCATIONS_BACKFILL_KEY) as
+		| { value: string }
+		| undefined;
+	if (!shouldResetBackfill(row?.value)) return;
+
+	const apply = database.transaction(() => {
+		database.run(`
+			INSERT OR IGNORE INTO skill_invocations (
+				session_file, tool_call_id, target_index, target, skill_name
+			)
+			SELECT session_file, tool_call_id, 0, NULL, skill_name
+			FROM tool_calls
+			WHERE skill_name IS NOT NULL
+		`);
+		database.run("DELETE FROM file_offsets");
+		database
+			.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+			.run(SKILL_INVOCATIONS_BACKFILL_KEY, BACKFILL_PENDING);
+	});
+	apply();
 }
 
 /**
@@ -1230,6 +1291,7 @@ export function markSessionBackfillsComplete(): void {
 		for (const key of [
 			USER_MESSAGES_BACKFILL_KEY,
 			TOOL_CALLS_BACKFILL_KEY,
+			SKILL_INVOCATIONS_BACKFILL_KEY,
 			USER_MESSAGE_LINKS_REPAIR_KEY,
 			PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY,
 		]) {
@@ -1500,49 +1562,52 @@ export function getBehaviorByModel(cutoff?: number | null): BehaviorModelStats[]
 
 /**
  * Insert tool-call rows. Idempotent via UNIQUE(session_file, tool_call_id);
- * the `WHERE NOT EXISTS` guard mirrors {@link insertMessageStats}: forked
- * sessions deep-copy assistant entries (same `entry_id`, `timestamp`, and
- * tool-call ids under a new file), so first-write-wins across the lineage
- * keeps aggregates from double counting. Keyed on the assistant entry
- * identity, not the call id alone — provider call ids are not a global
- * namespace across unrelated sessions.
+ * the `WHERE NOT EXISTS` guard mirrors {@link insertMessageStats}: forks
+ * copy assistant entries under a different file, so first-write-wins across
+ * the files that are replayed keeps aggregates from double counting.
+ * Keyed on the assistant entry identity plus tool call ID — provider call IDs
+ * are not a global namespace across unrelated sessions.
  */
 export function insertToolCalls(calls: ToolCallStats[]): number {
 	if (!db || calls.length === 0) return 0;
 
 	const stmt = db.prepare(`
-		INSERT OR IGNORE INTO tool_calls (
-			session_file, entry_id, tool_call_id, folder, tool_name,
+		INSERT INTO tool_calls (
+			session_file, entry_id, tool_call_id, folder, tool_name, skill_name,
 			model, provider, timestamp, agent_type, calls_in_turn, args_chars
 		)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		WHERE NOT EXISTS (
 			SELECT 1 FROM tool_calls
 			WHERE entry_id = ? AND timestamp = ? AND tool_call_id = ? AND session_file <> ?
 		)
+		ON CONFLICT(session_file, tool_call_id) DO UPDATE SET
+			skill_name = excluded.skill_name
+		WHERE tool_calls.skill_name IS NULL AND excluded.skill_name IS NOT NULL
 	`);
 
 	let inserted = 0;
 	const insert = db.transaction(() => {
-		for (const c of calls) {
+		for (const call of calls) {
 			const result = stmt.run(
-				c.sessionFile,
-				c.entryId,
-				c.toolCallId,
-				c.folder,
-				c.toolName,
-				c.model,
-				c.provider,
-				c.timestamp,
-				c.agentType,
-				c.callsInTurn,
-				c.argsChars,
+				call.sessionFile,
+				call.entryId,
+				call.toolCallId,
+				call.folder,
+				call.toolName,
+				call.skillName,
+				call.model,
+				call.provider,
+				call.timestamp,
+				call.agentType,
+				call.callsInTurn,
+				call.argsChars,
 				// `WHERE NOT EXISTS` binds: skip when a different session_file
 				// already holds this (entry_id, timestamp, tool_call_id).
-				c.entryId,
-				c.timestamp,
-				c.toolCallId,
-				c.sessionFile,
+				call.entryId,
+				call.timestamp,
+				call.toolCallId,
+				call.sessionFile,
 			);
 			if (result.changes > 0) inserted++;
 		}
@@ -1551,6 +1616,84 @@ export function insertToolCalls(calls: ToolCallStats[]): number {
 	return inserted;
 }
 
+/**
+ * Persist assistant-side skill inference without overwriting an executed
+ * target recovered from the tool result.
+ */
+export function insertProvisionalSkillInvocations(invocations: ProvisionalSkillInvocationStats[]): number {
+	if (!db || invocations.length === 0) return 0;
+
+	const stmt = db.prepare(`
+		INSERT INTO skill_invocations (
+			session_file, tool_call_id, target_index, target, skill_name
+		)
+		SELECT ?, ?, ?, ?, ?
+		WHERE EXISTS (
+			SELECT 1 FROM tool_calls
+			WHERE session_file = ? AND tool_call_id = ?
+		)
+		ON CONFLICT(session_file, tool_call_id, target_index) DO UPDATE SET
+			skill_name = excluded.skill_name
+		WHERE skill_invocations.target IS NULL
+	`);
+
+	let changed = 0;
+	const apply = db.transaction(() => {
+		for (const invocation of invocations) {
+			const result = stmt.run(
+				invocation.sessionFile,
+				invocation.toolCallId,
+				invocation.targetIndex,
+				invocation.target,
+				invocation.skillName,
+				invocation.sessionFile,
+				invocation.toolCallId,
+			);
+			changed += result.changes;
+		}
+	});
+	apply();
+	return changed;
+}
+
+/** Persist an executed skill target, superseding any provisional inference. */
+export function upsertResultSkillInvocations(invocations: ResultSkillInvocationStats[]): number {
+	if (!db || invocations.length === 0) return 0;
+
+	const stmt = db.prepare(`
+		INSERT INTO skill_invocations (
+			session_file, tool_call_id, target_index, target, skill_name, is_error
+		)
+		SELECT ?, ?, ?, ?, ?, ?
+		WHERE EXISTS (
+			SELECT 1 FROM tool_calls
+			WHERE session_file = ? AND tool_call_id = ?
+		)
+		ON CONFLICT(session_file, tool_call_id, target_index) DO UPDATE SET
+			target = excluded.target,
+			skill_name = excluded.skill_name,
+			is_error = excluded.is_error
+	`);
+
+	let changed = 0;
+	const apply = db.transaction(() => {
+		for (const invocation of invocations) {
+			const result = stmt.run(
+				invocation.sessionFile,
+				invocation.toolCallId,
+				invocation.targetIndex,
+				invocation.target,
+				invocation.skillName,
+				invocation.isError === undefined ? null : invocation.isError ? 1 : 0,
+				invocation.sessionFile,
+				invocation.toolCallId,
+			);
+			changed += result.changes;
+		}
+	});
+	apply();
+	return changed;
+}
 /**
  * Attach result size / error flag to persisted tool-call rows. Results can
  * land in a later incremental sync pass than the call that produced them, so
@@ -1696,6 +1839,147 @@ export function getToolTimeSeries(
 	return rows.map(row => ({
 		timestamp: row.bucket,
 		tool: row.tool_name,
+		calls: row.calls,
+		errors: row.errors,
+	}));
+}
+
+interface SkillAggregateRow {
+	skill_name: string;
+	model?: string;
+	provider?: string;
+	calls: number;
+	errors: number;
+	args_chars: number | null;
+	result_chars: number | null;
+	total_tokens_share: number | null;
+	output_tokens_share: number | null;
+	cost_share: number | null;
+	last_used: number;
+}
+
+function rowToSkillUsage(row: SkillAggregateRow): SkillUsageStats {
+	return {
+		skill: row.skill_name,
+		calls: row.calls,
+		errors: row.errors,
+		argsChars: row.args_chars ?? 0,
+		resultChars: row.result_chars ?? 0,
+		totalTokensShare: row.total_tokens_share ?? 0,
+		outputTokensShare: row.output_tokens_share ?? 0,
+		costShare: row.cost_share ?? 0,
+		lastUsed: row.last_used,
+	};
+}
+
+/** Get skill usage aggregated by canonical skill name. */
+export function getSkillStats(cutoff?: number): SkillUsageStats[] {
+	if (!db) return [];
+
+	const hasCutoff = cutoff !== undefined && cutoff > 0;
+	const stmt = db.prepare(`
+		WITH target_counts AS (
+			SELECT session_file, tool_call_id, COUNT(*) AS target_count
+			FROM skill_invocations
+			GROUP BY session_file, tool_call_id
+		)
+		SELECT
+			si.skill_name,
+			COUNT(*) as calls,
+			SUM(CASE WHEN COALESCE(si.is_error, t.is_error, 0) = 1 THEN 1 ELSE 0 END) as errors,
+			SUM(t.args_chars * 1.0 / tc.target_count) as args_chars,
+			SUM(COALESCE(t.result_chars, 0) * 1.0 / tc.target_count) as result_chars,
+			SUM(COALESCE(m.total_tokens, 0) * 1.0 / t.calls_in_turn / tc.target_count) as total_tokens_share,
+			SUM(COALESCE(m.output_tokens, 0) * 1.0 / t.calls_in_turn / tc.target_count) as output_tokens_share,
+			SUM(COALESCE(m.cost_total, 0) / t.calls_in_turn / tc.target_count) as cost_share,
+			MAX(t.timestamp) as last_used
+		FROM skill_invocations si
+		JOIN tool_calls t ON t.session_file = si.session_file AND t.tool_call_id = si.tool_call_id
+		JOIN target_counts tc ON tc.session_file = si.session_file AND tc.tool_call_id = si.tool_call_id
+		LEFT JOIN messages m ON m.session_file = t.session_file AND m.entry_id = t.entry_id
+		WHERE ${hasCutoff ? "t.timestamp >= ?" : "1 = 1"}
+		GROUP BY si.skill_name
+		ORDER BY calls DESC
+	`);
+
+	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as SkillAggregateRow[];
+	return rows.map(rowToSkillUsage);
+}
+
+/** Get skill usage aggregated by canonical skill name, model, and provider. */
+export function getSkillStatsByModel(cutoff?: number): SkillModelStats[] {
+	if (!db) return [];
+
+	const hasCutoff = cutoff !== undefined && cutoff > 0;
+	const stmt = db.prepare(`
+		WITH target_counts AS (
+			SELECT session_file, tool_call_id, COUNT(*) AS target_count
+			FROM skill_invocations
+			GROUP BY session_file, tool_call_id
+		)
+		SELECT
+			si.skill_name,
+			t.model,
+			t.provider,
+			COUNT(*) as calls,
+			SUM(CASE WHEN COALESCE(si.is_error, t.is_error, 0) = 1 THEN 1 ELSE 0 END) as errors,
+			SUM(t.args_chars * 1.0 / tc.target_count) as args_chars,
+			SUM(COALESCE(t.result_chars, 0) * 1.0 / tc.target_count) as result_chars,
+			SUM(COALESCE(m.total_tokens, 0) * 1.0 / t.calls_in_turn / tc.target_count) as total_tokens_share,
+			SUM(COALESCE(m.output_tokens, 0) * 1.0 / t.calls_in_turn / tc.target_count) as output_tokens_share,
+			SUM(COALESCE(m.cost_total, 0) / t.calls_in_turn / tc.target_count) as cost_share,
+			MAX(t.timestamp) as last_used
+		FROM skill_invocations si
+		JOIN tool_calls t ON t.session_file = si.session_file AND t.tool_call_id = si.tool_call_id
+		JOIN target_counts tc ON tc.session_file = si.session_file AND tc.tool_call_id = si.tool_call_id
+		LEFT JOIN messages m ON m.session_file = t.session_file AND m.entry_id = t.entry_id
+		WHERE ${hasCutoff ? "t.timestamp >= ?" : "1 = 1"}
+		GROUP BY si.skill_name, t.model, t.provider
+		ORDER BY calls DESC
+	`);
+
+	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as SkillAggregateRow[];
+	return rows.map(row => ({
+		...rowToSkillUsage(row),
+		model: row.model ?? "",
+		provider: row.provider ?? "",
+	}));
+}
+/** Get canonical skill invocations as a bucketed time series. */
+export function getSkillTimeSeries(
+	days = 14,
+	cutoff?: number | null,
+	bucketMs = 24 * 60 * 60 * 1000,
+): SkillTimeSeriesPoint[] {
+	if (!db) return [];
+
+	const hasCutoff = cutoff !== null;
+	const seriesCutoff = hasCutoff ? (cutoff ?? Date.now() - days * 24 * 60 * 60 * 1000) : 0;
+
+	const stmt = db.prepare(`
+		WITH target_counts AS (
+			SELECT session_file, tool_call_id, COUNT(*) AS target_count
+			FROM skill_invocations
+			GROUP BY session_file, tool_call_id
+		)
+		SELECT
+			(t.timestamp / ?) * ? as bucket,
+			si.skill_name,
+			COUNT(*) as calls,
+			SUM(CASE WHEN COALESCE(si.is_error, t.is_error, 0) = 1 THEN 1 ELSE 0 END) as errors
+		FROM skill_invocations si
+		JOIN tool_calls t ON t.session_file = si.session_file AND t.tool_call_id = si.tool_call_id
+		JOIN target_counts tc ON tc.session_file = si.session_file AND tc.tool_call_id = si.tool_call_id
+		WHERE ${hasCutoff ? "t.timestamp >= ?" : "1 = 1"}
+		GROUP BY bucket, si.skill_name
+		ORDER BY bucket ASC
+	`);
+
+	const rowsRaw = hasCutoff ? stmt.all(bucketMs, bucketMs, seriesCutoff) : stmt.all(bucketMs, bucketMs);
+	const rows = rowsRaw as Array<{ bucket: number; skill_name: string; calls: number; errors: number }>;
+	return rows.map(row => ({
+		timestamp: row.bucket,
+		skill: row.skill_name,
 		calls: row.calls,
 		errors: row.errors,
 	}));

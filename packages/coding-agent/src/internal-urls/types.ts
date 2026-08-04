@@ -9,6 +9,26 @@ import type { Skill } from "../extensibility/skills";
 import type { LocalProtocolOptions } from "./local-protocol";
 
 /**
+ * Parsed internal URL with preserved host casing.
+ */
+export interface InternalUrl extends URL {
+	/**
+	 * Raw host segment extracted from input, preserving case.
+	 */
+	rawHost: string;
+	/**
+	 * Raw pathname extracted from input, preserving traversal markers before URL normalization.
+	 */
+	rawPathname?: string;
+	/**
+	 * Exact input string this URL was parsed from, before any normalization.
+	 * Set by `parseInternalUrl`; used where byte-exact URI matching matters
+	 * (e.g. MCP resource URIs compared by string equality).
+	 */
+	rawHref?: string;
+}
+
+/**
  * Raw resource payload returned by protocol handlers. The `immutable` flag is
  * applied by the router from {@link ProtocolHandler.immutable}, so handlers do
  * not need to set it themselves.
@@ -56,26 +76,6 @@ export interface UrlCompletion {
 	label?: string;
 	/** Optional one-line description shown beside the candidate. */
 	description?: string;
-}
-
-/**
- * Parsed internal URL with preserved host casing.
- */
-export interface InternalUrl extends URL {
-	/**
-	 * Raw host segment extracted from input, preserving case.
-	 */
-	rawHost: string;
-	/**
-	 * Raw pathname extracted from input, preserving traversal markers before URL normalization.
-	 */
-	rawPathname?: string;
-	/**
-	 * Exact input string this URL was parsed from, before any normalization.
-	 * Set by `parseInternalUrl`; used where byte-exact URI matching matters
-	 * (e.g. MCP resource URIs compared by string equality).
-	 */
-	rawHref?: string;
 }
 
 /**

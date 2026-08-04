@@ -11,10 +11,10 @@ import { isSettingsInitialized, settings } from "../config/settings";
 import {
 	LocalProtocolHandler,
 	memoryRootsFromRegistry,
-	parseInternalUrl,
 	resolveLocalUrlToPath,
 	resolveMemoryUrlToPath,
 } from "../internal-urls";
+import { parseInternalUrl } from "../internal-urls/parse";
 
 const OSC = "\x1b]";
 const ST = "\x1b\\";

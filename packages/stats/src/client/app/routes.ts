@@ -1,6 +1,7 @@
 import {
 	Activity,
 	AlertCircle,
+	BookOpen,
 	Coins,
 	Cpu,
 	Folder,
@@ -19,6 +20,7 @@ export type DashboardSection =
 	| "models"
 	| "providers"
 	| "tools"
+	| "skills"
 	| "costs"
 	| "behavior"
 	| "projects"
@@ -61,6 +63,11 @@ export const routes: DashboardRoute[] = [
 		id: "tools",
 		label: "Tools",
 		icon: Wrench,
+	},
+	{
+		id: "skills",
+		label: "Skills",
+		icon: BookOpen,
 	},
 	{
 		id: "costs",

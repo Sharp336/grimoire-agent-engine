@@ -37,6 +37,7 @@ describe("multi-path tools tolerate missing entries", () => {
 		await fs.mkdir(path.join(tempDir, "src"), { recursive: true });
 		await Bun.write(path.join(tempDir, "src", "alpha.ts"), "shared-needle alpha\n");
 		await Bun.write(path.join(tempDir, "src", "beta.ts"), "shared-needle beta\n");
+		await Bun.write(path.join(tempDir, "README.md"), "ordinary read content\n");
 	});
 
 	afterEach(async () => {
@@ -61,6 +62,59 @@ describe("multi-path tools tolerate missing entries", () => {
 		expect(text).toContain("Skipped missing paths: tests/");
 		expect(details?.fileCount).toBe(2);
 		expect(details?.missingPaths).toEqual(["tests/"]);
+	});
+
+	it("records per-target skill failures in delimiter order", async () => {
+		const tools = await createTools(createTestSession(tempDir));
+		const tool = tools.find(entry => entry.name === "read");
+		if (!tool) throw new Error("Missing read tool");
+
+		const result = await tool.execute("read-skills-delimited", {
+			path: "README.md;skill://review:raw;skill://lint;skill://review",
+		});
+		const text = getText(result);
+		const details = result.details as
+			| { skillTargets?: Array<{ skill: string; target: string; isError?: boolean }> }
+			| undefined;
+
+		expect(details?.skillTargets).toEqual([
+			{ skill: "review", target: "skill://review:raw", isError: true },
+			{ skill: "lint", target: "skill://lint", isError: true },
+			{ skill: "review", target: "skill://review", isError: true },
+		]);
+		expect(text).toContain("ordinary read content");
+	});
+
+	it("attaches one canonical target to a direct skill read", async () => {
+		const skillDir = path.join(tempDir, "review-guide");
+		const skillFile = path.join(skillDir, "SKILL.md");
+		await fs.mkdir(skillDir, { recursive: true });
+		await Bun.write(skillFile, "# Review guide\n");
+
+		const tools = await createTools(
+			createTestSession(tempDir, {
+				skills: [
+					{
+						name: "review:guide",
+						description: "Review guide",
+						filePath: skillFile,
+						baseDir: skillDir,
+						source: "test",
+					},
+				],
+			}),
+		);
+		const tool = tools.find(entry => entry.name === "read");
+		if (!tool) throw new Error("Missing read tool");
+
+		const result = await tool.execute("read-direct-skill", { path: "skill://review%3Aguide:raw" });
+		const details = result.details as
+			| { skillTargets?: Array<{ skill: string; target: string; isError?: boolean }> }
+			| undefined;
+
+		expect(details?.skillTargets).toEqual([
+			{ skill: "review:guide", target: "skill://review%3Aguide:raw", isError: false },
+		]);
 	});
 
 	it("search errors only when every path is missing", async () => {

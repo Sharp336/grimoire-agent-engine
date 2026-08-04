@@ -47,18 +47,6 @@ export interface RequestDetails extends MessageStats {
 	output: unknown;
 }
 
-/**
- * Session log entry types.
- */
-export interface SessionHeader {
-	type: "session";
-	version: number;
-	id: string;
-	timestamp: string;
-	cwd: string;
-	title?: string;
-}
-
 export interface SessionMessageEntry {
 	type: "message";
 	id: string;
@@ -75,7 +63,7 @@ export interface SessionServiceTierChangeEntry {
 	serviceTier: ServiceTierByFamily | ServiceTier | null;
 }
 
-export type SessionEntry = SessionHeader | SessionMessageEntry | SessionServiceTierChangeEntry | { type: string };
+export type SessionEntry = SessionMessageEntry | SessionServiceTierChangeEntry | { type: string };
 
 /**
  * Behavioral stats extracted from a single user message.
@@ -143,6 +131,8 @@ export interface ToolCallStats {
 	folder: string;
 	/** Tool name */
 	toolName: string;
+	/** Canonical skill name for a read of a skill:// URL, or null */
+	skillName: string | null;
 	/** Model that emitted the call */
 	model: string;
 	/** Provider name */
@@ -155,6 +145,24 @@ export interface ToolCallStats {
 	callsInTurn: number;
 	/** Serialized argument characters */
 	argsChars: number;
+}
+interface SkillInvocationIdentity {
+	sessionFile: string;
+	toolCallId: string;
+	targetIndex: number;
+	skillName: string;
+}
+
+/** Assistant-side inference for a skill URL before the read result arrives. */
+export interface ProvisionalSkillInvocationStats extends SkillInvocationIdentity {
+	target: null;
+}
+
+/** Executed skill target recovered from a read tool result. */
+export interface ResultSkillInvocationStats extends SkillInvocationIdentity {
+	target: string;
+	/** Whether this individual skill target failed to read. */
+	isError?: boolean;
 }
 
 /**

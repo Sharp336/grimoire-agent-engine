@@ -40,6 +40,10 @@ describe("session image persistence", () => {
 			content: [text("generated"), png(contentImageData)],
 			details: {
 				images: [payload(generatedImageData), png(typedDetailImageData)],
+				skillTargets: [
+					{ skill: "review", target: "skill://review:raw" },
+					{ skill: "lint", target: "skill://lint" },
+				],
 			},
 			isError: false,
 			timestamp: Date.now(),
@@ -49,12 +53,19 @@ describe("session image persistence", () => {
 		const persistedContentImage = persisted.message.content.find(
 			(block): block is ImageContent => block.type === "image",
 		);
-		const persistedDetails = persisted.message.details as { images: ImagePayload[] };
+		const persistedDetails = persisted.message.details as {
+			images: ImagePayload[];
+			skillTargets: Array<{ skill: string; target: string }>;
+		};
 
 		expect(persistedContentImage).toBeDefined();
 		expect(isBlobRef(persistedContentImage?.data ?? "")).toBe(true);
 		expect(persistedDetails.images).toHaveLength(2);
 		expect(persistedDetails.images.every(image => isBlobRef(image.data))).toBe(true);
+		expect(persistedDetails.skillTargets).toEqual([
+			{ skill: "review", target: "skill://review:raw" },
+			{ skill: "lint", target: "skill://lint" },
+		]);
 
 		const loaded: FileEntry[] = [structuredClone(persisted)];
 		await resolveBlobRefsInEntries(loaded, blobStore);
@@ -62,11 +73,18 @@ describe("session image persistence", () => {
 		const resolvedContentImage = resolved.message.content.find(
 			(block): block is ImageContent => block.type === "image",
 		);
-		const resolvedDetails = resolved.message.details as { images: ImagePayload[] };
+		const resolvedDetails = resolved.message.details as {
+			images: ImagePayload[];
+			skillTargets: Array<{ skill: string; target: string }>;
+		};
 
 		expect(resolvedContentImage?.data).toBe(contentImageData);
 		expect(resolvedDetails.images[0]?.data).toBe(generatedImageData);
 		expect(resolvedDetails.images[1]?.data).toBe(typedDetailImageData);
+		expect(resolvedDetails.skillTargets).toEqual([
+			{ skill: "review", target: "skill://review:raw" },
+			{ skill: "lint", target: "skill://lint" },
+		]);
 	});
 
 	it("externalizes and restores native Responses images in assistant content and provider history", async () => {

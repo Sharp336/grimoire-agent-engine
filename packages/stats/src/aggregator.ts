@@ -17,6 +17,9 @@ import {
 	getOverallStats,
 	getProviderHourlyBurn,
 	getProviderTimeSeries,
+	getSkillStats,
+	getSkillStatsByModel,
+	getSkillTimeSeries,
 	getStatsByAgentType,
 	getStatsByFolder,
 	getStatsByModel,
@@ -27,12 +30,14 @@ import {
 	getToolTimeSeries,
 	initDb,
 	insertMessageStats,
+	insertProvisionalSkillInvocations,
 	insertToolCalls,
 	insertUserMessageStats,
 	markSessionBackfillsComplete,
 	setFileOffset,
 	updateToolResults,
 	updateUserMessageLinks,
+	upsertResultSkillInvocations,
 } from "./db";
 import { getSessionEntry, listAllSessionFiles, type ParseSessionResult, parseSessionFile } from "./parser";
 import type { SyncWorkerRequest, SyncWorkerResponse } from "./sync-worker";
@@ -46,6 +51,7 @@ import type {
 	MessageStats,
 	ProviderDashboardStats,
 	RequestDetails,
+	SkillDashboardStats,
 	ToolDashboardStats,
 } from "./types";
 import { computeUsageWindowStats, fetchUsageSnapshots } from "./usage-windows";
@@ -77,6 +83,8 @@ function applyParseResult(sessionFile: string, lastModified: number, result: Par
 	if (result.userStats.length > 0) insertUserMessageStats(result.userStats);
 	if (result.userLinks.length > 0) updateUserMessageLinks(result.userLinks);
 	if (result.toolCalls.length > 0) insertToolCalls(result.toolCalls);
+	if (result.skillInvocations.length > 0) insertProvisionalSkillInvocations(result.skillInvocations);
+	if (result.resultSkillInvocations.length > 0) upsertResultSkillInvocations(result.resultSkillInvocations);
 	if (result.toolResults.length > 0) updateToolResults(result.toolResults);
 	setFileOffset(sessionFile, result.newOffset, lastModified);
 	return result.stats.length + result.userStats.length;
@@ -248,7 +256,6 @@ async function syncAllSessionsLocked(opts?: SyncOptions): Promise<{ processed: n
 	let totalProcessed = 0;
 	let filesProcessed = 0;
 	let completed = 0;
-	let cursor = 0;
 	const finish = () => {
 		markSessionBackfillsComplete();
 		return { processed: totalProcessed, files: filesProcessed };
@@ -306,6 +313,7 @@ async function syncAllSessionsLocked(opts?: SyncOptions): Promise<{ processed: n
 	const handles: WorkerHandle[] = [];
 	for (let i = 0; i < poolSize; i++) handles.push(spawnWorker());
 
+	let cursor = 0;
 	async function drain(handle: WorkerHandle): Promise<void> {
 		while (true) {
 			const idx = cursor++;
@@ -320,7 +328,6 @@ async function syncAllSessionsLocked(opts?: SyncOptions): Promise<{ processed: n
 	} finally {
 		for (const handle of handles) handle.worker.terminate();
 	}
-
 	return finish();
 }
 
@@ -540,6 +547,16 @@ export async function getToolDashboardStats(range?: string | null): Promise<Tool
 	};
 }
 
+/** Get the skills dashboard payload using the active range configuration. */
+export async function getSkillDashboardStats(range?: string | null): Promise<SkillDashboardStats> {
+	await initDb();
+	const { modelSeriesDays, modelSeriesBucketMs, cutoff } = getTimeRangeConfig(range);
+	return {
+		bySkill: getSkillStats(cutoff ?? undefined),
+		bySkillModel: getSkillStatsByModel(cutoff ?? undefined),
+		series: getSkillTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs),
+	};
+}
 /**
  * Get the providers dashboard payload: per-provider totals, peak-burn-hours
  * histogram, provider token time series, and subscription-window analytics

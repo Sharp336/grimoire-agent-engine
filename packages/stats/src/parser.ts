@@ -10,10 +10,12 @@ import {
 	type ToolResultMessage,
 	type Usage,
 } from "@oh-my-pi/pi-ai";
-import { getSessionsDir, isEnoent, readLines } from "@oh-my-pi/pi-utils";
+import { getSessionsDir, isEnoent, parseSkillUrlTarget, readLines } from "@oh-my-pi/pi-utils";
 import type {
 	AgentType,
 	MessageStats,
+	ProvisionalSkillInvocationStats,
+	ResultSkillInvocationStats,
 	SessionEntry,
 	SessionMessageEntry,
 	SessionServiceTierChangeEntry,
@@ -58,6 +60,10 @@ function extractFolderFromPath(sessionPath: string): string {
 	const projectDir = rel.split(path.sep)[0];
 	// Convert --work--pi-- to /work/pi
 	return projectDir.replace(/^--/, "/").replace(/--/g, "/");
+}
+function extractSkillName(tool: ToolCall): string | null {
+	if (tool.name !== "read" || typeof tool.arguments?.path !== "string") return null;
+	return parseSkillUrlTarget(tool.arguments.path)?.skill ?? null;
 }
 
 /**
@@ -222,6 +228,12 @@ function coerceEntryTimestamp(timestamp: number | undefined, entry: SessionMessa
 	return Number.isFinite(ts) ? ts : 0;
 }
 
+function isToolCall(block: unknown): block is ToolCall {
+	if (block === null || typeof block !== "object") return false;
+	const candidate = block as Partial<ToolCall>;
+	return candidate.type === "toolCall" && typeof candidate.id === "string" && typeof candidate.name === "string";
+}
+
 /**
  * Extract one {@link ToolCallStats} per `toolCall` content block of an
  * assistant message. Returns an empty array for turns without tool calls.
@@ -238,14 +250,7 @@ function extractToolCalls(
 	// (malformed persisted entries — see extractStats) and blocks missing ids.
 	if (typeof msg.model !== "string" || typeof msg.provider !== "string") return [];
 
-	const blocks = msg.content.filter(
-		(block): block is ToolCall =>
-			block !== null &&
-			typeof block === "object" &&
-			block.type === "toolCall" &&
-			typeof block.id === "string" &&
-			typeof block.name === "string",
-	);
+	const blocks = msg.content.filter(isToolCall);
 	if (blocks.length === 0) return [];
 
 	return blocks.map(block => {
@@ -267,6 +272,7 @@ function extractToolCalls(
 			agentType,
 			callsInTurn: blocks.length,
 			argsChars,
+			skillName: extractSkillName(block),
 		};
 	});
 }
@@ -292,6 +298,47 @@ function extractToolResultLink(sessionFile: string, entry: SessionMessageEntry):
 		resultChars,
 		isError: msg.isError === true,
 	};
+}
+
+function hasResultSkillTargets(details: unknown): details is { skillTargets: unknown[] } {
+	if (details === null || typeof details !== "object" || !("skillTargets" in details)) return false;
+	return Array.isArray(details.skillTargets);
+}
+
+/**
+ * Extract authoritative executed-skill targets from a `read` result.
+ * `displayReadTargets` is presentation metadata and is intentionally ignored.
+ */
+function extractResultSkillInvocations(sessionFile: string, entry: SessionMessageEntry): ResultSkillInvocationStats[] {
+	const msg = entry.message as ToolResultMessage;
+	if (
+		msg.role !== "toolResult" ||
+		msg.toolName !== "read" ||
+		typeof msg.toolCallId !== "string" ||
+		msg.toolCallId.length === 0
+	)
+		return [];
+	if (!hasResultSkillTargets(msg.details)) return [];
+
+	const invocations: ResultSkillInvocationStats[] = [];
+	for (const candidate of msg.details.skillTargets) {
+		if (!candidate || typeof candidate !== "object") continue;
+		if (!("target" in candidate) || !("skill" in candidate)) continue;
+		const target = candidate.target;
+		const skillName = candidate.skill;
+		const candidateIsError = "isError" in candidate ? candidate.isError : undefined;
+		if (typeof skillName !== "string" || skillName.length === 0) continue;
+		if (typeof target !== "string" || target.length === 0) continue;
+		invocations.push({
+			sessionFile,
+			toolCallId: msg.toolCallId,
+			targetIndex: invocations.length,
+			target,
+			skillName,
+			isError: typeof candidateIsError === "boolean" ? candidateIsError : undefined,
+		});
+	}
+	return invocations;
 }
 
 const LF = 0x0a;
@@ -352,19 +399,15 @@ function scanLastServiceTier(bytes: Uint8Array): ServiceTierByFamily | undefined
  * state derived from `service_tier_change` entries that affects whether
  * subsequent OpenAI assistant replies count as premium requests. Incremental
  * syncs that resume past the most-recent tier change would otherwise lose
- * that state and silently record `premiumRequests = 0` for priority traffic
- * (the coding-agent stopped folding the tier into `usage.premiumRequests`
- * after 13f59162e — the parser is now the sole source of truth). When
- * `fromOffset > 0` we therefore scan the bytes preceding `fromOffset`
- * for the latest service-tier value before parsing the unprocessed tail.
- * The scan only keeps the current tier and does not materialize prefix
- * entries, preserving offset-based memory behavior for large sessions.
+ * that state and silently record `premiumRequests = 0` for priority traffic.
  */
 export interface ParseSessionResult {
 	stats: MessageStats[];
 	userStats: UserMessageStats[];
 	userLinks: UserMessageLink[];
 	toolCalls: ToolCallStats[];
+	skillInvocations: ProvisionalSkillInvocationStats[];
+	resultSkillInvocations: ResultSkillInvocationStats[];
 	toolResults: ToolResultLink[];
 	newOffset: number;
 }
@@ -373,8 +416,18 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 	try {
 		bytes = await Bun.file(sessionPath).bytes();
 	} catch (err) {
-		if (isEnoent(err))
-			return { stats: [], userStats: [], userLinks: [], toolCalls: [], toolResults: [], newOffset: fromOffset };
+		if (isEnoent(err)) {
+			return {
+				stats: [],
+				userStats: [],
+				userLinks: [],
+				toolCalls: [],
+				skillInvocations: [],
+				resultSkillInvocations: [],
+				toolResults: [],
+				newOffset: fromOffset,
+			};
+		}
 		throw err;
 	}
 
@@ -384,6 +437,8 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 	const userStats: UserMessageStats[] = [];
 	const userLinks: UserMessageLink[] = [];
 	const toolCalls: ToolCallStats[] = [];
+	const skillInvocations: ProvisionalSkillInvocationStats[] = [];
+	const resultSkillInvocations: ResultSkillInvocationStats[] = [];
 	const toolResults: ToolResultLink[] = [];
 	const userByEntryId = new Map<string, UserMessageStats>();
 	const start = Math.max(0, Math.min(fromOffset, bytes.length));
@@ -409,12 +464,25 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 		if (isToolResultMessage(entry)) {
 			const link = extractToolResultLink(sessionPath, entry);
 			if (link) toolResults.push(link);
+			resultSkillInvocations.push(...extractResultSkillInvocations(sessionPath, entry));
 			continue;
 		}
 		if (isAssistantMessage(entry)) {
 			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
 			if (msgStats) stats.push(msgStats);
-			toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType));
+			const calls = extractToolCalls(sessionPath, folder, entry, agentType);
+			toolCalls.push(...calls);
+			for (const call of calls) {
+				if (call.skillName !== null) {
+					skillInvocations.push({
+						sessionFile: sessionPath,
+						toolCallId: call.toolCallId,
+						targetIndex: 0,
+						target: null,
+						skillName: call.skillName,
+					});
+				}
+			}
 			// Link assistant's responding model back to the user message it answered.
 			const parentId = (entry as SessionMessageEntry).parentId;
 			if (parentId) {
@@ -436,8 +504,16 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 			}
 		}
 	}
-
-	return { stats, userStats, userLinks, toolCalls, toolResults, newOffset: start + read };
+	return {
+		stats,
+		userStats,
+		userLinks,
+		toolCalls,
+		skillInvocations,
+		resultSkillInvocations,
+		toolResults,
+		newOffset: start + read,
+	};
 }
 
 /**
@@ -477,7 +553,7 @@ export async function listAllSessionFiles(): Promise<string[]> {
 		allFiles.push(...files);
 	}
 
-	return allFiles;
+	return allFiles.toSorted();
 }
 
 /**

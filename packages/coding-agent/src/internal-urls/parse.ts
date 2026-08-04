@@ -47,7 +47,7 @@ export function extractUriScheme(input: string): string | undefined {
 /**
  * Parse an internal URL into an InternalUrl.
  *
- * Handles URLs where `new URL()` would fail (e.g., `skill://plugin:name`
+ * Handles URLs where `new URL()` would fail (e.g. `skill://plugin:name`
  * where the colon is not a port separator).
  */
 export function parseInternalUrl(input: string): InternalUrl {

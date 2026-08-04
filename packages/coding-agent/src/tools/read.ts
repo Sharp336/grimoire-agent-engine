@@ -22,8 +22,10 @@ import {
 	isEnotempty,
 	isProbablyBinary,
 	logger,
+	parseSkillUrlTarget,
 	prompt,
 	readImageMetadata,
+	type SkillUrlTarget,
 	untilAborted,
 } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "lru-cache/raw";
@@ -723,6 +725,10 @@ const readSchema = type({
 
 export type ReadToolInput = typeof readSchema.infer;
 
+interface ReadSkillTarget extends SkillUrlTarget {
+	isError?: boolean;
+}
+
 export interface ReadToolDetails {
 	kind?: "file" | "url";
 	truncation?: TruncationResult;
@@ -750,7 +756,9 @@ export interface ReadToolDetails {
 	conflictCount?: number;
 	/** Paths recovered from a delimited read argument; used only by the TUI to render one call as multiple read rows. */
 	displayReadTargets?: string[];
+	skillTargets?: ReadSkillTarget[];
 }
+
 type ReadParams = ReadToolInput;
 
 /** Parsed representation of a path-embedded selector. */
@@ -968,6 +976,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const notes = [notice];
 		const content: Array<TextContent | ImageContent> = [];
 		const displayReadTargets: string[] = [];
+		const skillTargets: ReadSkillTarget[] = [];
 		let pendingText = notice;
 		const flushText = () => {
 			if (pendingText.length === 0) return;
@@ -979,8 +988,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		};
 
 		for (const part of parts) {
+			const skillTarget = parseSkillUrlTarget(part);
 			try {
 				const result = await this.execute("read-delimited-part", { path: part }, signal);
+				if (skillTarget) skillTargets.push({ ...skillTarget, isError: false });
 				displayReadTargets.push(result.details?.suffixResolution?.to ?? part);
 				for (const block of result.content) {
 					if (block.type === "text") {
@@ -992,6 +1003,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				}
 			} catch (error) {
 				if (error instanceof ToolAbortError || signal?.aborted) throw error;
+				if (skillTarget) skillTargets.push({ ...skillTarget, isError: true });
 				const message = error instanceof Error ? error.message : String(error);
 				const errorNote = `Could not read ${part}: ${message}`;
 				notes.push(errorNote);
@@ -1001,7 +1013,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		}
 		flushText();
 
-		return toolResult<ReadToolDetails>({ notes, displayReadTargets }).content(content).done();
+		const details: ReadToolDetails = { notes, displayReadTargets };
+		if (skillTargets.length > 0) details.skillTargets = skillTargets;
+		return toolResult<ReadToolDetails>(details).content(content).done();
 	}
 
 	/**
@@ -2308,6 +2322,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		let promotedSelector: string | undefined;
 		if (internalRouter.canResolve(readPath)) {
 			const internalTarget = splitInternalUrlSel(readPath);
+			const skillTarget = parseSkillUrlTarget(readPath);
 			const parsed = parseSel(internalTarget.sel);
 			if (internalTarget.sel !== undefined && parsed.kind === "none") {
 				throw new ToolError(
@@ -2330,10 +2345,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					// cannot shadow the URL's selector semantics during filesystem routing.
 					promotedSelector = internalTarget.sel;
 				} else {
-					return this.#handleInternalUrl(internalTarget.path, parsed, signal);
+					return this.#handleInternalUrl(internalTarget.path, parsed, signal, skillTarget);
 				}
 			} else {
-				return this.#handleInternalUrl(internalTarget.path, parsed, signal);
+				return this.#handleInternalUrl(internalTarget.path, parsed, signal, skillTarget);
 			}
 		}
 
@@ -3257,6 +3272,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		url: string,
 		parsedSel: ParsedSelector,
 		signal?: AbortSignal,
+		skillTarget?: SkillUrlTarget,
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		const internalRouter = InternalUrlRouter.instance();
 
@@ -3314,6 +3330,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			},
 		});
 		const details: ReadToolDetails = { resolvedPath: resource.sourcePath, contentType: resource.contentType };
+		if (skillTarget) details.skillTargets = [{ ...skillTarget, isError: false }];
 
 		// If extraction was used, return directly (no pagination)
 		if (hasExtraction) {
