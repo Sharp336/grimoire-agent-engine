@@ -62,6 +62,7 @@ import type {
 	SessionStopEventResult,
 	ToolCallEvent,
 	ToolCallEventResult,
+	ToolExecuteExtensionContext,
 	ToolResultEvent,
 	ToolResultEventResult,
 	UserBashEvent,
@@ -834,9 +835,10 @@ export class ExtensionRunner {
 			signal?: AbortSignal;
 			onUpdate?: AgentToolUpdateCallback;
 		},
-	): ExtensionContext {
+	): ToolExecuteExtensionContext {
 		const getModel = model ? () => model : this.#getModel;
 		return {
+			callerToolContext: delegation?.context,
 			ui: this.#uiContext,
 			getContextUsage: () => this.#getContextUsageFn(),
 			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),

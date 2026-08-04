@@ -17,7 +17,7 @@ import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
 import type { ExtensionRunner } from "./runner";
-import type { RegisteredTool, ToolCallEventResult } from "./types";
+import type { RegisteredTool, ToolCallEventResult, ToolExecuteExtensionContext } from "./types";
 
 /**
  * Adapts a RegisteredTool into an AgentTool.
@@ -35,7 +35,7 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 
 	constructor(
 		private registeredTool: RegisteredTool,
-		private runner: ExtensionRunner,
+		private runner?: ExtensionRunner,
 	) {
 		applyToolProxy(registeredTool.definition, this);
 		this.loadMode = defaultLoadModeForToolName(registeredTool.definition.name, registeredTool.definition.loadMode);
@@ -72,18 +72,20 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 		// call, so a bare `ctx.invokeTool(params)` keeps the caller's `toolCall`/provider metadata
 		// (write/edit LSP batching, computer safety acknowledgement), stops when the outer call is
 		// aborted, and still streams native progress.
-		return this.registeredTool.definition.execute(
-			toolCallId,
-			params,
-			signal,
-			onUpdate,
-			this.runner.createContext(undefined, {
-				toolName: this.registeredTool.definition.name,
-				context,
-				signal,
-				onUpdate,
-			}),
-		);
+		//
+		// Runner-less composition (embeddings without an extension runner) has no runner to build a
+		// full ExtensionContext, so it hands the definition bridge only the caller's live tool
+		// context. The bridge prefers `callerToolContext`, else its baked `getContext` thunk; it never
+		// reads the projected ExtensionContext fields on this path.
+		const ctx = this.runner
+			? this.runner.createContext(undefined, {
+					toolName: this.registeredTool.definition.name,
+					context,
+					signal,
+					onUpdate,
+				})
+			: ({ callerToolContext: context } as ToolExecuteExtensionContext);
+		return this.registeredTool.definition.execute(toolCallId, params, signal, onUpdate, ctx);
 	}
 }
 

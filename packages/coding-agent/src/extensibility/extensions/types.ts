@@ -13,6 +13,7 @@ import type * as TypeBox from "@oh-my-pi/omptype/typebox";
 import type * as zod from "@oh-my-pi/omptype/zod";
 import type {
 	AgentMessage,
+	AgentToolContext,
 	AgentToolResult,
 	AgentToolUpdateCallback,
 	ThinkingLevel,
@@ -517,6 +518,16 @@ export interface ExtensionCommandContext extends ExtensionContext {
 
 	/** Compact the session context (interactive mode shows UI). */
 	compact(instructionsOrOptions?: string | CompactOptions): Promise<void>;
+}
+
+/**
+ * Internal execution-time context. Carries the original caller {@link AgentToolContext}
+ * (the full live context with settings/fetch/autoApprove) through the composition
+ * pipeline so the custom-tool bridge can prefer it over the projected extension
+ * context. Not part of the public extension API — extensions never see this field.
+ */
+export interface ToolExecuteExtensionContext extends ExtensionContext {
+	callerToolContext?: AgentToolContext;
 }
 
 // ============================================================================

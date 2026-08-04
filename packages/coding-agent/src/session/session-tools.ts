@@ -5,10 +5,9 @@ import { reset as resetCapabilities } from "../capability";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelString } from "../config/model-resolver";
 import type { Settings, SkillsSettings } from "../config/settings";
+import { composeAgentTool, composeCustomTool } from "../extensibility/compose-tool";
 import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
-import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
 import type { ExtensionRunner } from "../extensibility/extensions";
-import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
 import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "../extensibility/skills";
 import { type LocalProtocolOptions, XD_URL_PREFIX } from "../internal-urls";
 import { deduplicateMCPToolsByName } from "../mcp/tool-bridge";
@@ -334,9 +333,8 @@ export class SessionTools {
 	}
 
 	#wrapRuntimeTool(tool: AgentTool): AgentTool {
-		const wrapped = wrapToolWithMetaNotice(tool);
 		const extensionRunner = this.#host.extensionRunner();
-		return extensionRunner ? new ExtensionToolWrapper(wrapped, extensionRunner) : wrapped;
+		return extensionRunner ? composeAgentTool(tool, extensionRunner) : wrapToolWithMetaNotice(tool);
 	}
 
 	/** Installs and activates the ephemeral vibe tool set. */
@@ -1246,6 +1244,7 @@ export class SessionTools {
 	}
 
 	async #applyMCPToolRefresh(mcpTools: CustomTool[]): Promise<void> {
+		const extensionRunner = this.#host.extensionRunner();
 		const existingNames = Array.from(this.#toolRegistry.keys());
 		const previousMcpTools = new Map(
 			existingNames.flatMap(name => {
@@ -1265,6 +1264,10 @@ export class SessionTools {
 			}
 		}
 
+		// Custom-tool execution context for MCP-backed tools. Backs context-less direct
+		// calls (e.g. `ctx.invokeTool`); loop execution instead threads the live caller
+		// context through composeCustomTool → the definition bridge (callerToolContext),
+		// so settings/fetch/autoApprove survive rather than being projected away.
 		const getCustomToolContext = (): CustomToolContext => ({
 			sessionManager: this.#host.sessionManager,
 			modelRegistry: this.#host.modelRegistry,
@@ -1276,15 +1279,12 @@ export class SessionTools {
 			},
 			settings: this.#host.settings,
 			localProtocolOptions: this.#host.localProtocolOptions(),
+			autoApprove: this.#autoApprove,
 		});
 
-		const extensionRunner = this.#host.extensionRunner();
 		const uniqueMcpTools = deduplicateMCPToolsByName(mcpTools);
 		for (const customTool of uniqueMcpTools) {
-			const wrapped = wrapToolWithMetaNotice(CustomToolAdapter.wrap(customTool, getCustomToolContext) as AgentTool);
-			const finalTool = (
-				extensionRunner ? new ExtensionToolWrapper(wrapped, extensionRunner) : wrapped
-			) as AgentTool;
+			const finalTool = composeCustomTool(customTool, extensionRunner, { getContext: getCustomToolContext });
 			this.#toolRegistry.set(finalTool.name, finalTool);
 		}
 
@@ -1329,10 +1329,7 @@ export class SessionTools {
 
 		const extensionRunner = this.#host.extensionRunner();
 		for (const tool of rpcTools) {
-			const metaWrapped = wrapToolWithMetaNotice(tool);
-			const finalTool = (
-				extensionRunner ? new ExtensionToolWrapper(metaWrapped, extensionRunner) : metaWrapped
-			) as AgentTool;
+			const finalTool = extensionRunner ? composeAgentTool(tool, extensionRunner) : wrapToolWithMetaNotice(tool);
 			this.#toolRegistry.set(finalTool.name, finalTool);
 			this.#rpcHostToolNames.add(finalTool.name);
 		}

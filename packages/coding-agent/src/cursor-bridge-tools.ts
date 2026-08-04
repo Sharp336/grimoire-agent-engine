@@ -10,8 +10,8 @@
 
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { EditTool } from "./edit";
+import { composeAgentTool } from "./extensibility/compose-tool";
 import type { ExtensionRunner } from "./extensibility/extensions";
-import { ExtensionToolWrapper } from "./extensibility/extensions";
 import type { GrepToolOptions, Tool, ToolSession } from "./tools";
 import { GrepTool } from "./tools";
 
@@ -32,7 +32,7 @@ export function createBridgeGrepFactory(
 ): (options: GrepToolOptions) => AgentTool {
 	return options => {
 		const grepTool: Tool = new GrepTool(session, options);
-		return new ExtensionToolWrapper(grepTool, extensionRunner);
+		return composeAgentTool(grepTool, extensionRunner);
 	};
 }
 
@@ -51,7 +51,7 @@ export function createBridgeGrepFactory(
  */
 export function createBridgeEditTool(session: ToolSession, extensionRunner: ExtensionRunner): AgentTool {
 	const editTool: Tool = new EditTool(session, "replace");
-	return new ExtensionToolWrapper(editTool, extensionRunner);
+	return composeAgentTool(editTool, extensionRunner);
 }
 
 /**

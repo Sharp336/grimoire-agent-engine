@@ -148,13 +148,13 @@ execute(toolCallId, params, onUpdate, ctx, signal);
 - `ctx` includes `sessionManager`, `modelRegistry`, current `model`, `isIdle()`, `hasQueuedMessages()`, `abort()`, and optional `settings`, `fetch`, `localProtocolOptions`, and `autoApprove`.
 - `signal` carries cancellation and may be `undefined`.
 
-The session bootstrap bridge converts custom tools to extension `ToolDefinition`s and forwards calls in the correct argument order. `CustomToolAdapter` remains available to library consumers that directly adapt a custom tool to the agent tool interface.
+The session bootstrap bridge converts custom tools to extension `ToolDefinition`s and forwards calls in the correct argument order. Library consumers compose a custom tool or `ToolDefinition` into an `AgentTool` with `composeCustomTool` (or `composeAgentTool` for an already-built native tool); both route through the single `ExtensionToolWrapper` approval/event gate.
 
 Tool definitions may also declare `strict`, `hidden`, `loadMode`, `deferrable`, `mcpServerName`, `mcpToolName`, and `approval`. When `loadMode` is omitted, custom tool names default to `"discoverable"` except for the canonical essential built-in names (`read`, `write`, `bash`, `edit`, `glob`, `computer`, `eval`, `task`, `hub`, `learn`, and `manage_skill`), which default to `"essential"` so wrappers or re-registrations do not demote them. An explicit `loadMode` always wins; use `"essential"` to keep any other tool top-level. Although the public `CustomTool` type also declares `formatApprovalDetails`, the SDK/discovery bridge does not propagate that callback into the registered tool definition, so it cannot customize approval details on the normal integration paths.
 
 ## How tools are exposed to the model
 
-- Session bootstrap wraps included SDK-provided and discovered custom tools as extension tool definitions; library consumers may instead use `CustomToolAdapter` directly.
+- Session bootstrap wraps included SDK-provided and discovered custom tools as extension tool definitions; library consumers may instead compose with `composeCustomTool`.
 - They are inserted into the session tool registry by name.
 - In unrestricted SDK bootstrap, custom and extension-registered tools are force-included in the initial active set. Restricted sessions exclude SDK-provided custom tools unless `allowRestrictedCustomTools: true`, and expose an opted-in custom tool only when its name appears in `toolNames`.
 - CLI `--tools` currently validates only built-in tool names; custom tool inclusion is handled through discovery/registration paths and SDK options.
@@ -166,7 +166,7 @@ Optional rendering hooks:
 - `renderCall(args, options, theme)`
 - `renderResult(result, options, theme)`
 
-The normal SDK and filesystem-discovery paths wrap custom tools as extensions. On those paths, `renderResult` receives only the three arguments above; the bridge does not forward the original tool arguments. The public `CustomTool` type retains an optional fourth `args` parameter for direct `CustomToolAdapter` consumers.
+The normal SDK and filesystem-discovery paths wrap custom tools as extensions. On those paths, `renderResult` receives only the three arguments above; the bridge does not forward the original tool arguments. The public `CustomTool` type retains an optional fourth `args` parameter, which `composeCustomTool` consumers receive.
 
 Runtime behavior in TUI:
 

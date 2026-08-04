@@ -27,7 +27,6 @@ import {
 	prewarmOpenAICodexResponses,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
-import type { Component } from "@oh-my-pi/pi-tui";
 import { $env, $flag, getAgentDir, getProjectDir, logger, postmortem, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import {
@@ -73,20 +72,21 @@ import { disposeVmContextsByOwner } from "./eval/js/context-manager";
 import { disposeAllKernelSessions, disposeKernelSessionsByOwner } from "./eval/py/executor";
 import { disposeAllRubyKernelSessions, disposeRubyKernelSessionsByOwner } from "./eval/rb/executor";
 import { defaultEvalSessionId } from "./eval/session-id";
+import { composeAgentTool } from "./extensibility/compose-tool";
 import {
 	type CustomCommandsLoadResult,
 	type LoadedCustomCommand,
 	loadCustomCommands as loadCustomCommandsInternal,
 } from "./extensibility/custom-commands";
 import { discoverCustomToolPaths, loadCustomTools, type ToolPathWithSource } from "./extensibility/custom-tools";
-import type { CustomTool, CustomToolContext, CustomToolSessionEvent } from "./extensibility/custom-tools/types";
+import { createCustomToolContext, customToolToDefinition, isCustomTool } from "./extensibility/custom-tools/definition";
+import type { CustomTool, CustomToolSessionEvent } from "./extensibility/custom-tools/types";
 import {
 	discoverAndLoadExtensions,
 	discoverExtensionPaths,
 	type ExtensionContext,
 	type ExtensionFactory,
 	ExtensionRunner,
-	ExtensionToolWrapper,
 	type ExtensionUIContext,
 	type LoadExtensionsResult,
 	loadExtensionFromFactory,
@@ -190,7 +190,6 @@ import {
 	createTools,
 	createVibeTools,
 	type DeferredDiagnosticsEntry,
-	defaultLoadModeForToolName,
 	discoverStartupLspServers,
 	EditTool,
 	EvalTool,
@@ -882,29 +881,10 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 
 // Internal Helpers
 
-function createCustomToolContext(ctx: ExtensionContext): CustomToolContext {
-	return {
-		sessionManager: ctx.sessionManager,
-		modelRegistry: ctx.modelRegistry,
-		model: ctx.model,
-		isIdle: ctx.isIdle,
-		hasQueuedMessages: ctx.hasPendingMessages,
-		abort: ctx.abort,
-		localProtocolOptions: ctx.localProtocolOptions,
-	};
-}
-
-function isCustomTool(tool: CustomTool | ToolDefinition): tool is CustomTool {
-	// To distinguish, we mark converted tools with a hidden symbol property.
-	// If the tool doesn't have this marker, it's a CustomTool that needs conversion.
-	return !(tool as any).__isToolDefinition;
-}
-
 function isLegacyBuiltinToolDefinition(tool: CustomTool | ToolDefinition): boolean {
 	return !isCustomTool(tool) && "__ompLegacyBuiltinTool" in tool && tool.__ompLegacyBuiltinTool === true;
 }
 
-const TOOL_DEFINITION_MARKER = Symbol("__isToolDefinition");
 /** Matches the truncation applied to per-server instructions inside `rebuildSystemPrompt`. */
 const MAX_MCP_INSTRUCTIONS_LENGTH = 4000;
 
@@ -935,40 +915,8 @@ function registerEvalCleanup(): void {
 	postmortem.register("julia-cleanup", disposeAllJuliaKernelSessions);
 }
 
-export function customToolToDefinition(tool: CustomTool): ToolDefinition {
-	const definition: ToolDefinition & { [TOOL_DEFINITION_MARKER]: true } = {
-		name: tool.name,
-		label: tool.label,
-		description: tool.description,
-		parameters: tool.parameters,
-		hidden: tool.hidden,
-		loadMode: defaultLoadModeForToolName(tool.name, tool.loadMode),
-		deferrable: tool.deferrable,
-		approval: typeof tool.approval === "function" ? tool.approval.bind(tool) : tool.approval,
-		// Preserved through RegisteredToolAdapter so MCP-backed tools' explicit
-		// `strict: false` (#4336/#4340) survives the custom-tool → definition bridge.
-		strict: tool.strict,
-		mcpServerName: tool.mcpServerName,
-		mcpToolName: tool.mcpToolName,
-		execute: (toolCallId, params, signal, onUpdate, ctx) =>
-			tool.execute(toolCallId, params, onUpdate, createCustomToolContext(ctx), signal),
-		onSession: tool.onSession ? (event, ctx) => tool.onSession?.(event, createCustomToolContext(ctx)) : undefined,
-		renderCall: tool.renderCall,
-		renderResult: tool.renderResult
-			? (result, options, theme): Component => {
-					const component = tool.renderResult?.(
-						result,
-						{ expanded: options.expanded, isPartial: options.isPartial, spinnerFrame: options.spinnerFrame },
-						theme,
-					);
-					// Return empty component if undefined to match Component type requirement
-					return component ?? ({ render: () => [] } as unknown as Component);
-				}
-			: undefined,
-		[TOOL_DEFINITION_MARKER]: true,
-	};
-	return definition;
-}
+// Re-exported from its leaf module so existing `import { customToolToDefinition } from "...sdk"` callers stay valid.
+export { customToolToDefinition };
 
 function createCustomToolsExtension(tools: CustomTool[]): ExtensionFactory {
 	const uniqueTools = deduplicateMCPToolsByName(tools);
@@ -2632,13 +2580,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return { definition, extensionPath: "<sdk>" };
 			}),
 		];
-		// `wrapToolWithMetaNotice` runs the centralized large-output → artifact spill.
-		// Built-in tools get it in `createTools`; extension, SDK-custom, image-gen,
-		// TTS, and startup (non-deferred) MCP tools all funnel through here, so apply
-		// it once at this adapter boundary (idempotent — a no-op if already wrapped).
-		const wrappedExtensionTools: Tool[] = deduplicateMCPToolsByName(
-			wrapRegisteredTools(allCustomTools, extensionRunner).map(wrapToolWithMetaNotice),
-		);
+		// composeAgentTool applies output metadata and extension interception after registry assembly.
+		const extensionTools: Tool[] = deduplicateMCPToolsByName(wrapRegisteredTools(allCustomTools, extensionRunner));
 
 		// All built-in tools are active (conditional tools like git/ask return null from factory if disabled)
 		const builtInRegistryToolNames = toolSession.xdev?.builtInNames ?? new Set(toolRegistry.keys());
@@ -2657,7 +2600,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				nativeToolsByName.set(goalTool.name, wrapped);
 			}
 		}
-		for (const tool of wrappedExtensionTools) {
+		for (const tool of extensionTools) {
 			toolRegistry.set(tool.name, tool);
 			builtInRegistryToolNames.delete(tool.name);
 		}
@@ -2680,7 +2623,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// call site, regardless of whether any user extensions are loaded. See the runner-construction
 		// comment above for the safety invariant this enforces.
 		for (const tool of toolRegistry.values()) {
-			toolRegistry.set(tool.name, new ExtensionToolWrapper(tool, extensionRunner));
+			toolRegistry.set(tool.name, composeAgentTool(tool, extensionRunner));
 		}
 		// Cursor's own client owns file edits, so `edit` is not advertised to the
 		// model (commit 8ba0498eb: full-file `write` is used instead). The exec
@@ -2731,7 +2674,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const writeTool = await logger.time("createTools:write:session", BUILTIN_TOOLS.write, toolSession);
 				if (!writeTool || toolRegistry.has("write")) return builtInRegistryToolNames.has("write");
 				const nativeWrite = wrapToolWithMetaNotice(writeTool);
-				toolRegistry.set(writeTool.name, new ExtensionToolWrapper(nativeWrite, extensionRunner) as Tool);
+				toolRegistry.set(writeTool.name, composeAgentTool(nativeWrite, extensionRunner));
 				builtInRegistryToolNames.add(writeTool.name);
 				nativeToolsByName.set(writeTool.name, nativeWrite);
 				return true;
@@ -3342,7 +3285,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// first, matching the registry's wrap order.
 		const advisorTools: Tool[] = built
 			.filter((tool): tool is Tool => tool != null)
-			.map(tool => new ExtensionToolWrapper(wrapToolWithMetaNotice(tool), extensionRunner) as Tool);
+			.map(tool => composeAgentTool(tool, extensionRunner));
 
 		const advisorWatchdogPrompts = [...watchdogFiles];
 		if (initialActiveRepoContext) {

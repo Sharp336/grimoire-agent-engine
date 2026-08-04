@@ -1,8 +1,15 @@
 import { describe, expect, it, vi } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
-import type { CustomToolContext } from "../src/extensibility/custom-tools/types";
+import type { CustomTool, CustomToolContext } from "../src/extensibility/custom-tools/types";
 import type { ExtensionRunner } from "../src/extensibility/extensions/runner";
-import type { RegisteredTool } from "../src/extensibility/extensions/types";
+import type {
+	ExtensionContext,
+	RegisteredTool,
+	ToolExecuteExtensionContext,
+} from "../src/extensibility/extensions/types";
 import { wrapRegisteredTool } from "../src/extensibility/extensions/wrapper";
 import { MCPManager } from "../src/mcp/manager";
 import { DeferredMCPTool, MCPTool } from "../src/mcp/tool-bridge";
@@ -13,7 +20,19 @@ import { createMockConnection, createMockTransport } from "./mcp-test-utils";
 
 type CapturedRequest = { method: string; params: Record<string, unknown> | undefined };
 
-const unusedContext = {} as CustomToolContext;
+function makeCustomToolContext(overrides: Partial<CustomToolContext> = {}): CustomToolContext {
+	return {
+		sessionManager: { getSessionId: () => "test" } as CustomToolContext["sessionManager"],
+		modelRegistry: {} as CustomToolContext["modelRegistry"],
+		model: undefined,
+		isIdle: () => true,
+		hasQueuedMessages: () => false,
+		abort: () => {},
+		...overrides,
+	};
+}
+
+const unusedContext = makeCustomToolContext();
 
 /** Strict MCP tool: `additionalProperties:false`, one required + one optional field. */
 const STRICT_TOOL: MCPToolDefinition = {
@@ -69,7 +88,7 @@ describe("MCP tool strict declaration", () => {
 		expect(definition.strict).toBe(false);
 		const adapter = wrapRegisteredTool(
 			{ definition, extensionPath: "<sdk>" } as RegisteredTool,
-			{ createContext: () => ({}) } as unknown as ExtensionRunner,
+			{ createContext: () => ({}) as ExtensionContext } as ExtensionRunner,
 		);
 		expect(adapter.strict).toBe(false);
 	});
@@ -148,5 +167,99 @@ describe("Task MCP proxy parity", () => {
 
 		expect(freshCalls).toHaveLength(1);
 		expect(staleCalls).toHaveLength(0);
+	});
+});
+
+describe("custom tool context bridge", () => {
+	const sentinelFetch = () => Promise.resolve(new Response("ok"));
+	const callerSettings = Settings.isolated();
+
+	function makeProbe() {
+		const captured: CustomToolContext[] = [];
+		const tool: CustomTool = {
+			name: "context_probe",
+			label: "Context probe",
+			description: "Records the CustomToolContext it receives",
+			parameters: type({}),
+			async execute(_toolCallId, _params, _onUpdate, ctx) {
+				captured.push(ctx);
+				return { content: [{ type: "text" as const, text: "ok" }] };
+			},
+		};
+		return { tool, captured };
+	}
+
+	it("prefers the exact callerToolContext (settings, autoApprove, fetch) over getContext and the narrow projection", async () => {
+		const { tool, captured } = makeProbe();
+
+		const thunkSettings = Settings.isolated();
+		const thunkContext = makeCustomToolContext({ settings: thunkSettings, autoApprove: false, fetch: undefined });
+		const getContext = () => thunkContext;
+
+		const callerToolContext: AgentToolContext = makeCustomToolContext({
+			settings: callerSettings,
+			autoApprove: true,
+			fetch: sentinelFetch,
+		});
+
+		const extensionCtx = { callerToolContext } as ToolExecuteExtensionContext;
+
+		const definition = customToolToDefinition(tool, getContext);
+		await definition.execute("call-1", {}, undefined, undefined, extensionCtx);
+
+		expect(captured).toHaveLength(1);
+		const received = captured[0];
+		expect(received).toBe(callerToolContext);
+		expect(received.settings).toBe(callerSettings);
+		expect(received.autoApprove).toBe(true);
+		expect(received.fetch).toBe(sentinelFetch);
+	});
+
+	it("falls back to the supplied getContext thunk when no caller context exists", async () => {
+		const { tool, captured } = makeProbe();
+
+		const thunkSettings = Settings.isolated();
+		const thunkFetch = () => Promise.resolve(new Response("thunk"));
+		const thunkContext = makeCustomToolContext({ settings: thunkSettings, autoApprove: true, fetch: thunkFetch });
+		const getContext = () => thunkContext;
+
+		const extensionCtx = {} as ExtensionContext;
+		const definition = customToolToDefinition(tool, getContext);
+		await definition.execute("call-1", {}, undefined, undefined, extensionCtx);
+
+		expect(captured).toHaveLength(1);
+		const received = captured[0];
+		expect(received).toBe(thunkContext);
+		expect(received.settings).toBe(thunkSettings);
+		expect(received.autoApprove).toBe(true);
+		expect(received.fetch).toBe(thunkFetch);
+	});
+
+	it("falls back to the narrow ExtensionContext projection when neither caller nor getContext exists", async () => {
+		const { tool, captured } = makeProbe();
+
+		const fakeSessionManager = { getSessionId: () => "test" } as CustomToolContext["sessionManager"];
+		const fakeModelRegistry = {} as CustomToolContext["modelRegistry"];
+		const extensionCtx = {
+			sessionManager: fakeSessionManager,
+			modelRegistry: fakeModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasPendingMessages: () => false,
+			abort: () => {},
+		} as ExtensionContext;
+
+		const definition = customToolToDefinition(tool);
+		await definition.execute("call-1", {}, undefined, undefined, extensionCtx);
+
+		expect(captured).toHaveLength(1);
+		const received = captured[0];
+		expect(received.sessionManager).toBe(fakeSessionManager);
+		expect(received.modelRegistry).toBe(fakeModelRegistry);
+		expect(received.isIdle()).toBe(true);
+		expect(received.hasQueuedMessages()).toBe(false);
+		expect(received.settings).toBeUndefined();
+		expect(received.autoApprove).toBeUndefined();
+		expect(received.fetch).toBeUndefined();
 	});
 });
