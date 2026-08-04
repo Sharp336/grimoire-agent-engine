@@ -1244,7 +1244,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		pushTerminalTitle();
 		setTerminalTitleStateEnabled(this.settings.get("tui.titleState"));
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
-		this.updateEditorBorderColor();
+		// Seeds the border, the status-line `vim` segment, and the cursor shape in one call.
+		// Deliberately here rather than beside #applyVimMode in the constructor: that runs before
+		// #focusController exists, which updateEditorBorderColor dereferences.
+		this.#syncVimStatus(this.editor);
 		// Single side-effect point for title changes: every setSessionName caller
 		// (first-input titling, /rename, extension renames, plan seeding, replan
 		// refresh) gets the terminal title + accent updates from here. Registered
@@ -2069,7 +2072,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	updateEditorBorderColor(): void {
-		const vimMode = this.editor.vimMode;
+		// `vimMode` reads "insert" when modal editing is off, so every Vim branch below must gate on
+		// `vimEnabled` — otherwise non-Vim users would lose the session-accent/thinking border.
+		const vimMode = this.editor.vimEnabled ? this.editor.vimMode : undefined;
 		if (this.isBashMode) {
 			this.editor.borderColor = theme.getBashModeBorderColor();
 		} else if (this.isPythonMode) {
@@ -2078,6 +2083,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.editor.borderColor = (str: string) => theme.fg("warning", str);
 		} else if (vimMode === "normal") {
 			this.editor.borderColor = (str: string) => theme.fg("accent", str);
+		} else if (vimMode === "insert") {
+			// Insert gets its own colour rather than falling through to the session accent: with Normal
+			// and Visual both coloured, an uncoloured Insert made the border unreadable as a mode.
+			// Matches the `vim` status-line segment, which uses the same three colours.
+			this.editor.borderColor = (str: string) => theme.fg("success", str);
 		} else {
 			const accentEnabled = !isSettingsInitialized() || settings.get("statusLine.sessionAccent") !== false;
 			const sessionName = accentEnabled ? this.sessionManager.getSessionName() : undefined;
@@ -3474,7 +3484,44 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 		// Recolor the prompt border on every mode switch: in a modal editor the mode has to be
 		// visible at a glance, and the border is where bash/python mode already signal themselves.
-		editor.onVimModeChange = () => this.updateEditorBorderColor();
+		editor.onVimModeChange = () => this.#syncVimStatus(editor);
+	}
+
+	/**
+	 * Re-apply `tui.vimMode` to the live editor. `setVimMode` is idempotent and always lands in
+	 * Insert, so toggling the setting mid-session can never strand the editor in a mode where
+	 * ordinary typing does nothing.
+	 */
+	applyVimModeSetting(): void {
+		this.#applyVimMode(this.editor);
+		this.#syncVimStatus(this.editor);
+		this.ui.requestRender();
+	}
+
+	/**
+	 * Push an editor's modal state into the three places that surface it: the prompt border, the
+	 * status-line `vim` segment, and the hardware cursor shape. Called on every mode/pending change,
+	 * so it stays cheap — the terminal dedupes an unchanged DECSCUSR shape. Takes the editor rather
+	 * than reading `this.editor`: `setEditorComponent` configures its replacement before swapping it in.
+	 */
+	#syncVimStatus(editor: CustomEditor): void {
+		this.statusLine.setVimStatus(
+			editor.vimEnabled
+				? {
+						mode: editor.vimMode,
+						pending: editor.vimPending,
+						selectedLines: editor.vimSelectedLines,
+						display: settings.get("tui.vimModeDisplay"),
+					}
+				: undefined,
+		);
+		// Insert gets the bar every non-modal editor uses; Normal/Visual rest *on* a grapheme, which
+		// is a block. Only reaches the terminal when the hardware cursor is actually on — the
+		// software cursor carries the same distinction itself (Editor#cursorCell).
+		this.ui.terminal.setCursorShape?.(
+			editor.vimEnabled && editor.vimMode !== "insert" ? "block" : editor.vimEnabled ? "bar" : "default",
+		);
+		this.updateEditorBorderColor();
 	}
 
 	async #copyYankToClipboard(content: string): Promise<void> {
@@ -4793,7 +4840,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			logger.warn("Failed to refresh slash command state for custom editor", { error: String(error) });
 		});
 
-		this.updateEditorBorderColor();
+		this.#syncVimStatus(nextEditor);
 		this.ui.requestRender();
 	}
 

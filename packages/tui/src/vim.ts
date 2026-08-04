@@ -112,6 +112,15 @@ export class VimState {
 		return this.#count.length > 0 || this.#operator !== null || this.#pendingG;
 	}
 
+	/**
+	 * The half-typed command as Vim would echo it (`"2"`, `"d"`, `"2d"`, `"g"`) — empty when
+	 * nothing is pending. Hosts render this next to the mode so a partially entered operator is
+	 * visible instead of silently swallowing the next keystroke.
+	 */
+	get pendingText(): string {
+		return `${this.#count}${this.#operator ?? ""}${this.#pendingG ? "g" : ""}`;
+	}
+
 	get visual(): boolean {
 		return this.mode === "visual" || this.mode === "visual-line";
 	}

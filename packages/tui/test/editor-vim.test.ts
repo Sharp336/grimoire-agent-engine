@@ -432,6 +432,64 @@ describe("Editor vim mode", () => {
 			expect(editor.getText()).toBe("xyalfa");
 		});
 	});
+
+	describe("mode chrome", () => {
+		it("reports the half-typed command so hosts can echo it", () => {
+			const editor = vimEditor("alfa bravo charlie");
+			expect(editor.vimPending).toBe("");
+			editor.handleInput("2");
+			expect(editor.vimPending).toBe("2");
+			editor.handleInput("d");
+			expect(editor.vimPending).toBe("2d");
+			editor.handleInput(ESC);
+			expect(editor.vimPending).toBe("");
+		});
+
+		it("reports the Visual selection height as it grows", () => {
+			const editor = vimEditor("one\ntwo\nthree");
+			expect(editor.vimSelectedLines).toBe(0);
+			editor.handleInput("V");
+			expect(editor.vimSelectedLines).toBe(1);
+			editor.handleInput("j");
+			expect(editor.vimSelectedLines).toBe(2);
+			editor.handleInput(ESC);
+			expect(editor.vimSelectedLines).toBe(0);
+		});
+
+		it("notifies on pending and selection changes, not just mode switches", () => {
+			const editor = vimEditor("one\ntwo\nthree");
+			const seen: string[] = [];
+			editor.onVimModeChange = () => seen.push(`${editor.vimMode}:${editor.vimPending}:${editor.vimSelectedLines}`);
+
+			editor.handleInput("2"); // pending only — mode unchanged
+			editor.handleInput(ESC); // pending cleared — mode unchanged
+			editor.handleInput("V"); // mode switch
+			editor.handleInput("j"); // selection grows — mode and pending unchanged
+
+			expect(seen).toEqual(["normal:2:0", "normal::0", "visual-line::1", "visual-line::2"]);
+		});
+
+		it("draws a block cursor in Normal and an underline cursor in Insert", () => {
+			const editor = vimEditor("alfa");
+			editor.focused = true;
+			expect(editor.render(20).join("\n")).toContain("\x1b[7m");
+
+			editor.handleInput("i");
+			expect(editor.vimMode).toBe("insert");
+			const insertFrame = editor.render(20).join("\n");
+			expect(insertFrame).toContain("\x1b[4m");
+			expect(insertFrame).not.toContain("\x1b[7m");
+		});
+
+		it("keeps the reverse-video cursor for non-modal editors", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("alfa");
+			editor.focused = true;
+			const frame = editor.render(20).join("\n");
+			expect(frame).not.toContain("\x1b[4m");
+			expect(editor.vimEnabled).toBe(false);
+		});
+	});
 });
 
 // Keep the helper referenced so an unused-import lint never fires while it stays available

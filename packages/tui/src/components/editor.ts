@@ -737,6 +737,22 @@ export class Editor implements Component, Focusable {
 		return this.#vim?.mode ?? "insert";
 	}
 
+	/** True when modal editing is active, regardless of which mode is current. */
+	get vimEnabled(): boolean {
+		return this.#vim !== null;
+	}
+
+	/** Half-typed Vim command (`"2d"`, `"g"`), or `""` when nothing is pending. */
+	get vimPending(): string {
+		return this.#vim?.pendingText ?? "";
+	}
+
+	/** Lines spanned by the active Visual selection; 0 outside Visual modes. */
+	get vimSelectedLines(): number {
+		const selection = this.#vimSelection();
+		return selection === null ? 0 : selection.to.line - selection.from.line + 1;
+	}
+
 	/**
 	 * Whether Escape belongs to the editor right now rather than to the app.
 	 *
@@ -971,7 +987,25 @@ export class Editor implements Component, Focusable {
 		);
 	}
 
+	/**
+	 * SGR wrapper for the cursor cell drawn *over* a grapheme.
+	 *
+	 * Vim's block-vs-bar distinction has to survive in a cell grid, so Insert mode underlines the
+	 * cell instead of reversing it: both occupy exactly one column, which keeps every width
+	 * calculation below untouched, and terminals render SGR 4 far more consistently than a
+	 * half-cell bar glyph. Non-Vim editors keep the reverse-video block they always had.
+	 */
+	#cursorCell(text: string): string {
+		const insertShape = this.#vim !== null && this.#vim.mode === "insert";
+		return insertShape ? `\x1b[4m${text}\x1b[0m` : `\x1b[7m${text}\x1b[0m`;
+	}
+
 	#getStyledInputCursor(): { text: string; width: number } {
+		// Normal/Visual rest *on* a grapheme, so past end-of-line they need a full block to look
+		// like Vim; the thin bar glyph stays the Insert/non-Vim caret.
+		if (this.#vim !== null && this.#vim.mode !== "insert") {
+			return { text: "\x1b[7m \x1b[0m", width: 1 };
+		}
 		const cursorChar = this.#theme.symbols.inputCursor;
 		// Keep the software cursor steady. Ghostty/cmux can leave visual
 		// afterimages for SGR blink cells during rapid input-row repaints.
@@ -989,7 +1023,7 @@ export class Editor implements Component, Focusable {
 		const lastGraphemeWidth = lastGrapheme ? visibleWidth(lastGrapheme) : 0;
 		const builtInCursor = this.#getStyledInputCursor();
 		const fallbackReplacement = lastGrapheme
-			? { text: `\x1b[7m${lastGrapheme}\x1b[0m`, width: lastGraphemeWidth }
+			? { text: this.#cursorCell(lastGrapheme), width: lastGraphemeWidth }
 			: builtInCursor;
 		const clampReplacement = (candidate: { text: string; width: number }): { text: string; width: number } => {
 			let text = sliceByColumn(candidate.text, 0, maxWidth, true);
@@ -1176,7 +1210,7 @@ export class Editor implements Component, Focusable {
 						const promptGlyphWidth = visibleWidth(promptGlyph);
 						const remainingCursorWidth = Math.max(0, zeroWidthCursorBudget - promptGlyphWidth);
 						if (remainingCursorWidth === 0) {
-							result.push(`\x1b[7m${promptGlyph}\x1b[0m${marker}`);
+							result.push(`${this.#cursorCell(promptGlyph)}${marker}`);
 						} else {
 							const widthLimitedCursor = this.#renderEndOfLineCursorAtWidthLimit(
 								"",
@@ -1253,7 +1287,7 @@ export class Editor implements Component, Focusable {
 					const afterGraphemes = [...segmenter.segment(after)];
 					const firstGrapheme = afterGraphemes[0]?.segment || "";
 					const restAfter = after.slice(firstGrapheme.length);
-					const cursor = `\x1b[7m${firstGrapheme}\x1b[0m`;
+					const cursor = this.#cursorCell(firstGrapheme);
 					// Decorate the plain text on each side of the cursor glyph. The reverse-video
 					// reset (\x1b[0m) ends in "m" (a word char), so a boundary match on restAfter
 					// would fail in the whole-line fallback below — decorate the segments here.
@@ -1857,10 +1891,17 @@ export class Editor implements Component, Focusable {
 
 	#runVimKey(key: string, vim: VimState): boolean {
 		const before = vim.mode;
+		const pendingBefore = vim.pendingText;
+		const selectedLinesBefore = this.vimSelectedLines;
 		const commands = vim.handleKey(key, this.#state);
 		if (commands === null) return false;
 		this.#applyVimCommands(commands);
-		if (vim.mode !== before) this.onVimModeChange?.(vim.mode);
+		// Pending and selection size are mode chrome too: hosts echo `2d` and the Visual line count
+		// beside the mode name, and extending a selection changes neither the mode nor the pending
+		// command — so all three have to be compared or the indicator goes stale mid-selection.
+		if (vim.mode !== before || vim.pendingText !== pendingBefore || this.vimSelectedLines !== selectedLinesBefore) {
+			this.onVimModeChange?.(vim.mode);
+		}
 		return true;
 	}
 
