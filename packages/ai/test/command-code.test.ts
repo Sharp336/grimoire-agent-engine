@@ -802,6 +802,46 @@ describe("command-code streamSimple options", () => {
 		expect(params.tools).toBeUndefined();
 	});
 
+	it("narrows params.tools to the named toolChoice tool", async () => {
+		scenario = { kind: "capture", body: `{"type":"finish","finishReason":"stop"}\n` };
+		const baseUrl = await startServer();
+		const model = {
+			...getBundledModel("command-code", "deepseek/deepseek-v4-flash"),
+			baseUrl,
+		} as Model<"command-code">;
+		const stream = streamSimple(
+			model,
+			{
+				messages: [{ role: "user", content: "hi", timestamp: 1 }],
+				tools: [
+					{
+						name: "read",
+						description: "Read a file",
+						parameters: { type: "object", properties: { path: { type: "string" } } },
+					},
+					{
+						name: "write",
+						description: "Write a file",
+						parameters: { type: "object", properties: { path: { type: "string" } } },
+					},
+				],
+			},
+			{
+				apiKey: "test-key",
+				toolChoice: { type: "function", name: "write" },
+			},
+		);
+		for await (const _ of stream) {
+			/* drain */
+		}
+		await stream.result();
+
+		const params = lastRequest!.body.params as Record<string, unknown>;
+		const tools = params.tools as Array<{ name: string }>;
+		expect(tools).toHaveLength(1);
+		expect(tools[0]?.name).toBe("write");
+	});
+
 	it("merges model headers under caller headers", async () => {
 		scenario = {
 			kind: "capture",

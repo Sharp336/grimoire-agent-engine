@@ -34,6 +34,7 @@ import type {
 import { normalizeSystemPrompts } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { toolWireSchema } from "../utils/schema/wire";
+import { getNamedToolChoiceName } from "../utils/tool-choice";
 import { transformMessages } from "./transform-messages";
 import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
 
@@ -628,7 +629,16 @@ export const streamCommandCode: StreamFunction<"command-code"> = (
 				options !== undefined && "config" in options ? options.config : await buildCommandCodeServerConfig(cwd);
 
 			const transformed = transformMessages(context.messages, model);
-			const tools = (context.tools ?? []).map(tool => ({
+			// The gateway has no wire `tool_choice` field. `"none"` omits the
+			// tools list entirely; a named choice approximates the force by
+			// advertising only the pinned tool (same lever as the Ollama chat
+			// transport's selectToolsForToolChoice).
+			const namedTool = getNamedToolChoiceName(options?.toolChoice);
+			const wireTools =
+				namedTool === undefined
+					? (context.tools ?? [])
+					: (context.tools ?? []).filter(tool => tool.name === namedTool || tool.customWireName === namedTool);
+			const tools = wireTools.map(tool => ({
 				name: tool.name,
 				description: tool.description,
 				input_schema: toolWireSchema(tool),

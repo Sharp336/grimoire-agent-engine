@@ -40,6 +40,19 @@ function extractFunctionName(choice: ToolChoice): string | undefined {
 }
 
 /**
+ * Return the tool/function name pinned by a named ToolChoice (`{type:
+ * "tool", name}` / `{type: "function", ...}`), or undefined for string
+ * choices and the computer marker. Shared by transports that approximate a
+ * forced named choice by narrowing the advertised tool list (Ollama chat,
+ * Command Code).
+ */
+export function getNamedToolChoiceName(choice: ToolChoice | undefined): string | undefined {
+	if (!choice || typeof choice === "string") return undefined;
+	if (choice.type === "computer") return undefined;
+	return extractFunctionName(choice);
+}
+
+/**
  * Map unified ToolChoice to OpenAI Completions API format.
  * - "any" → "required"
  * - { type: "tool", name } → { type: "function", function: { name } }
