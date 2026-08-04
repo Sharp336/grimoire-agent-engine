@@ -45,9 +45,22 @@ function userMessageTree(): SessionTreeNode[] {
 	return [{ entry, children: [] }];
 }
 
-function renderSelector(selector: TreeSelectorComponent): string {
-	const lines = (selector as unknown as { render: (w: number) => string[] }).render(120);
-	return Bun.stripANSI(lines.join("\n"));
+function renderSelector(selector: TreeSelectorComponent, width = 120): string {
+	// `render` is an internal Component method the exported class type omits.
+	const renderable = selector as unknown as { render: (w: number) => string[] };
+	return Bun.stripANSI(renderable.render(width).join("\n"));
+}
+
+const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform") as PropertyDescriptor;
+
+/** The hints are built during construction, so the platform must be set around it. */
+function renderOnPlatform(platform: NodeJS.Platform, build: () => TreeSelectorComponent, width = 120): string {
+	Object.defineProperty(process, "platform", { ...platformDescriptor, value: platform });
+	try {
+		return renderSelector(build(), width);
+	} finally {
+		Object.defineProperty(process, "platform", platformDescriptor);
+	}
 }
 
 describe("issue #1909: tree-selector empty-state messaging", () => {
@@ -65,7 +78,7 @@ describe("issue #1909: tree-selector empty-state messaging", () => {
 		// the panel isn't broken and can widen the view without leaving the screen.
 		expect(text).toContain("hidden by the current filter");
 		expect(text).toContain("[default]");
-		expect(text.toLowerCase()).toContain("alt+a");
+		expect(text.toLowerCase()).toContain("+a to show all");
 		// Total count must reflect the real flatNodes count, not 0/0 (otherwise the
 		// "filter hides things" framing is unconvincing).
 		expect(text).toContain("(0/2)");
@@ -103,5 +116,48 @@ describe("issue #1909: tree-selector empty-state messaging", () => {
 		expect(text).toContain("(0/0)");
 		// Don't tell the user to widen the filter when there's nothing to widen to.
 		expect(text).not.toContain("hidden by the current filter");
+	});
+});
+
+describe("tree-selector modifier labels follow the host platform", () => {
+	it("renders the Option glyph in the empty-state and footer hints on darwin", () => {
+		const text = renderOnPlatform(
+			"darwin",
+			() =>
+				new TreeSelectorComponent(
+					freshSessionTree(),
+					"e2",
+					60,
+					() => {},
+					() => {},
+				),
+			// The footer is a TruncatedText; render wide enough to see the whole hint.
+			280,
+		);
+
+		expect(text).toContain("Press ⌥+A to show all, ⌥+D for default");
+		expect(text).toContain("⌥+↑/↓: previous/next turn");
+		expect(text).toContain("⌥+D/T/U/L/A: filter");
+		expect(text).not.toContain("Alt+");
+	});
+
+	it("keeps the ASCII Alt label in the same hints off darwin", () => {
+		const text = renderOnPlatform(
+			"linux",
+			() =>
+				new TreeSelectorComponent(
+					freshSessionTree(),
+					"e2",
+					60,
+					() => {},
+					() => {},
+				),
+			280,
+		);
+
+		expect(text).toContain("Press Alt+A to show all, Alt+D for default");
+		expect(text).toContain("Alt+↑/↓: previous/next turn");
+		expect(text).toContain("Alt+D/T/U/L/A: filter");
+		expect(text).not.toContain("⌥");
 	});
 });

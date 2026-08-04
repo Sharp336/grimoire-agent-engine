@@ -17,7 +17,7 @@ import * as fs from "node:fs";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { type Component, Editor, matchesKey, routeSgrMouseInput, ScrollView, type TUI } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, logger } from "@oh-my-pi/pi-utils";
-import type { KeyId } from "../../config/keybindings";
+import { formatKeyHint, type KeyId } from "../../config/keybindings";
 import type { MessageRenderer } from "../../extensibility/extensions/types";
 import type { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import type { AgentRegistry, AgentStatus } from "../../registry/agent-registry";
@@ -605,9 +605,10 @@ export class AgentTranscriptViewer implements Component {
 		const lines: string[] = [];
 		const statsLine = this.#statsLine();
 		if (statsLine) lines.push(` ${statsLine}`);
+		const expandKey = formatKeyHint(this.deps.expandKeys[0] ?? "ctrl+o");
 		const hint = this.#editor
-			? `Enter:send  Esc:close  ${this.deps.expandKeys[0] ?? "ctrl+o"}:expand  empty input → j/k:scroll  g/G:top/bottom`
-			: `Esc:close  ${this.deps.expandKeys[0] ?? "ctrl+o"}:expand  j/k:scroll  g/G:top/bottom`;
+			? `Enter:send  Esc:close  ${expandKey}:expand  empty input → j/k:scroll  g/G:top/bottom`
+			: `Esc:close  ${expandKey}:expand  j/k:scroll  g/G:top/bottom`;
 		lines.push(` ${theme.fg("dim", hint)}`);
 		return lines;
 	}

@@ -14,6 +14,7 @@ import {
 	saveWatchdogConfigFile,
 } from "../../advisor";
 import { reset as resetCapabilities } from "../../capability";
+import { formatKeyHint } from "../../config/keybindings";
 import {
 	formatModelSelectorValue,
 	resolveAdvisorRoleSelection,
@@ -724,7 +725,8 @@ export class SelectorController {
 						await this.ctx.session.setModelTemporary(model, roleThinkingLevel);
 						this.ctx.statusLine.invalidate();
 						this.ctx.updateEditorBorderColor();
-						const roleSelectorHint = this.ctx.keybindings.getKeys("app.model.select")[0] ?? "Alt+M";
+						const roleSelectorHint =
+							this.ctx.keybindings.getDisplayString("app.model.select") || formatKeyHint("alt+m");
 						this.ctx.showStatus(`Session-only model: ${selector}. Use ${roleSelectorHint} or /model for roles.`);
 					};
 					try {

@@ -27,6 +27,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
+import { formatKeyHint, formatKeyHints } from "../../config/keybindings";
 import type { ModelRegistry } from "../../config/model-registry";
 import { type ModelRoleLookup, type ResolvedModelRoleValue, resolveModelRoleValue } from "../../config/model-resolver";
 import { getKnownRoleIds, getRoleInfo } from "../../config/model-roles";
@@ -1803,7 +1804,7 @@ export class ModelHubComponent implements Component {
 		// segment track the ctrl+p status uses; the selected role's chip fills.
 		while (lines.length < rows - 1) lines.push("");
 		if (rows >= 2) {
-			const cycleKey = getKeybindings().getKeys("app.model.cycleForward")[0] ?? "ctrl+p";
+			const cycleKey = formatKeyHints(getKeybindings().getKeys("app.model.cycleForward")) || formatKeyHint("ctrl+p");
 			if (cycleOrder.length > 0) {
 				const selectedRow = this.#rolesRows[this.#roleIndex];
 				const selectedRole =

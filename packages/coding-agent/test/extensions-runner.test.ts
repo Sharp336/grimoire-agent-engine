@@ -14,6 +14,7 @@ import { discoverAndLoadExtensions, ExtensionRuntime } from "@oh-my-pi/pi-coding
 import {
 	EXTENSION_HANDLER_TIMEOUT_MS,
 	ExtensionRunner,
+	RESERVED_EXTENSION_SHORTCUTS,
 	testSetExtensionHandlerTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type {
@@ -24,6 +25,7 @@ import type {
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { canonicalKeyId } from "@oh-my-pi/pi-tui";
 import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 
 describe("ExtensionRunner", () => {
@@ -208,6 +210,123 @@ describe("ExtensionRunner", () => {
 			expect(shortcuts.has("alt+m")).toBe(false);
 
 			warnSpy.mockRestore();
+		});
+
+		it("rejects the macOS spellings of a reserved chord, which resolve to the same key event", async () => {
+			// `canonicalKeyId` folds `Option`/`⌥` onto `alt`, and the editor's match
+			// keys are built from the canonical form — so an extension registering
+			// `⌥+m` would really shadow app.model.select. The reservation check must
+			// canonicalize too, or it waves the alias through. The uppercase bases are
+			// the strings darwin `/hotkeys` prints, and they must not pick up a phantom
+			// Shift from `canonicalKeyId`'s bare-uppercase rule.
+			const extCode = `
+				export default function(pi) {
+					pi.registerShortcut("Option+m", {
+						description: "Tries to bind model select via the Option spelling",
+						handler: async () => {},
+					});
+					pi.registerShortcut("⌥+M", {
+						description: "Same chord as printed by /hotkeys on macOS",
+						handler: async () => {},
+					});
+					pi.registerShortcut("Ctrl+C", {
+						description: "Reserved interrupt with an uppercase base",
+						handler: async () => {},
+					});
+					pi.registerShortcut("⌥+enter", {
+						description: "Tries to bind the follow-up newline chord",
+						handler: async () => {},
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "conflict-alias.ts"), extCode);
+
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const shortcuts = runner.getShortcuts();
+
+			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("conflicts with built-in"), expect.any(Object));
+			expect([...shortcuts.keys()]).toEqual([]);
+
+			warnSpy.mockRestore();
+		});
+
+		it("reserves a chord regardless of the modifier order the extension writes", async () => {
+			// `shift+ctrl+p` canonicalizes to `ctrl+shift+p`; both spellings must be
+			// rejected for app.model.cycleBackward.
+			const extCode = `
+				export default function(pi) {
+					pi.registerShortcut("ctrl+shift+p", {
+						description: "Tries to bind cycle backward",
+						handler: async () => {},
+					});
+					pi.registerShortcut("shift+ctrl+p", {
+						description: "Tries the other order",
+						handler: async () => {},
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "conflict-order.ts"), extCode);
+
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const shortcuts = runner.getShortcuts();
+
+			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("conflicts with built-in"), expect.any(Object));
+			expect([...shortcuts.keys()]).toEqual([]);
+
+			warnSpy.mockRestore();
+		});
+
+		it("keeps every reserved chord reachable by the canonicalized lookup", () => {
+			// The lookup at `getShortcuts()` canonicalizes the incoming key, so a table
+			// entry that is not its own canonical form (as `shift+ctrl+p` was) can
+			// never match and silently stops reserving anything.
+			const drifted = Object.keys(RESERVED_EXTENSION_SHORTCUTS).filter(key => canonicalKeyId(key) !== key);
+
+			expect(drifted).toEqual([]);
+		});
+
+		it("keeps an uppercase-spelled non-reserved chord on the chord the author meant", async () => {
+			// `canonicalKeyId` promotes a bare uppercase base letter to Shift, so
+			// `getShortcuts()` must lowercase first or `Alt+K` registers as
+			// `shift+alt+k` and never fires on the real Alt+K event.
+			const extCode = `
+				export default function(pi) {
+					pi.registerShortcut("Alt+K", {
+						description: "Non-reserved chord with an uppercase base",
+						handler: async () => {},
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "uppercase-base.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			expect([...runner.getShortcuts().keys()]).toEqual(["alt+k"]);
 		});
 
 		it("warns when two extensions register same shortcut", async () => {

@@ -9,7 +9,7 @@ import type {
 	AgentToolUpdateCallback,
 } from "@oh-my-pi/pi-agent-core";
 import type { CredentialDisabledEvent, ImageContent, Model, ProviderResponseMetadata } from "@oh-my-pi/pi-ai";
-import type { KeyId } from "@oh-my-pi/pi-tui";
+import { canonicalKeyId, type KeyId } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { Settings } from "../../config/settings";
@@ -330,6 +330,33 @@ const noOpUIContext: ExtensionUIContext = {
 	setTheme: (_theme: string | Theme) => Promise.resolve({ success: false, error: "UI not available" }),
 	getToolsExpanded: () => false,
 	setToolsExpanded: () => {},
+};
+
+/**
+ * Chords an extension may not claim, keyed by canonical id. Incoming keys are
+ * canonicalized before the lookup, so alternate spellings of the same chord
+ * (`Option+M`, `⌥+m`, `shift+ctrl+p`) are rejected too — the editor builds its
+ * match keys from the canonical form, so any of them would really shadow the
+ * built-in. Every key here must be a `canonicalKeyId` fixed point or it is dead.
+ */
+export const RESERVED_EXTENSION_SHORTCUTS: Record<string, true> = {
+	"ctrl+c": true,
+	"ctrl+d": true,
+	"ctrl+z": true,
+	"ctrl+k": true,
+	"ctrl+p": true,
+	"ctrl+l": true,
+	"ctrl+o": true,
+	"ctrl+t": true,
+	"ctrl+g": true,
+	"alt+m": true,
+	// Default chord for `app.message.followUp` (Windows Terminal can't deliver Ctrl+Enter; #1903).
+	"ctrl+q": true,
+	"shift+tab": true,
+	"ctrl+shift+p": true,
+	"alt+enter": true,
+	escape: true,
+	enter: true,
 };
 
 export class ExtensionRunner {
@@ -696,33 +723,17 @@ export class ExtensionRunner {
 		this.runtime.flagValues.set(name, value);
 	}
 
-	static readonly #RESERVED_SHORTCUTS: Record<string, true> = {
-		"ctrl+c": true,
-		"ctrl+d": true,
-		"ctrl+z": true,
-		"ctrl+k": true,
-		"ctrl+p": true,
-		"ctrl+l": true,
-		"ctrl+o": true,
-		"ctrl+t": true,
-		"ctrl+g": true,
-		"alt+m": true,
-		// Default chord for `app.message.followUp` (Windows Terminal can't deliver Ctrl+Enter; #1903).
-		"ctrl+q": true,
-		"shift+tab": true,
-		"shift+ctrl+p": true,
-		"alt+enter": true,
-		escape: true,
-		enter: true,
-	};
-
 	getShortcuts(): Map<KeyId, ExtensionShortcut> {
 		const allShortcuts = new Map<KeyId, ExtensionShortcut>();
 		for (const ext of this.extensions) {
 			for (const [key, shortcut] of ext.shortcuts) {
-				const normalizedKey = key.toLowerCase() as KeyId;
+				// Lowercase first, as every other canonicalization site does: a bare
+				// uppercase base letter would otherwise be promoted to Shift, turning
+				// `Ctrl+C` into an unreserved `ctrl+shift+c` and `Alt+K` into a chord
+				// that never fires.
+				const normalizedKey = canonicalKeyId(key.toLowerCase()) as KeyId;
 
-				if (ExtensionRunner.#RESERVED_SHORTCUTS[normalizedKey]) {
+				if (RESERVED_EXTENSION_SHORTCUTS[normalizedKey]) {
 					logger.warn("Extension shortcut conflicts with built-in shortcut", {
 						key,
 						extensionPath: shortcut.extensionPath,

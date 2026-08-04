@@ -166,12 +166,39 @@ const SHIFTED_SYMBOL_KEYS = new Set<string>([
 
 const MODIFIER_ORDER = ["ctrl", "shift", "alt", "super"] as const;
 
+export type Modifier = (typeof MODIFIER_ORDER)[number];
+
+/**
+ * Spellings accepted on input, mapped to the canonical modifier. macOS chords are
+ * also written with the glyphs printed on the physical keys (and the words Apple
+ * uses for them) because that is what the UI renders on darwin and what
+ * docs/keybindings.md tells users to copy into `keybindings.yml`.
+ */
+export const MODIFIER_SPELLINGS: Record<string, Modifier> = {
+	ctrl: "ctrl",
+	shift: "shift",
+	alt: "alt",
+	option: "alt",
+	"⌥": "alt",
+	super: "super",
+	cmd: "super",
+	command: "super",
+	"⌘": "super",
+};
+
+// Prefix matching needs ordered pairs; hoisted so `canonicalKeyId` (one call per
+// key event) does not re-walk the record on every chord.
+const MODIFIER_SPELLING_ENTRIES = Object.entries(MODIFIER_SPELLINGS);
+
 function startsWithModifier(key: string, offset: number, modifier: string): boolean {
 	if (key.length <= offset + modifier.length || key.charCodeAt(offset + modifier.length) !== 43) return false;
 	for (let i = 0; i < modifier.length; i++) {
 		const actual = key.charCodeAt(offset + i);
 		const expected = modifier.charCodeAt(i);
-		if (actual !== expected && actual !== expected - 32) return false;
+		if (actual === expected) continue;
+		// Spellings are stored lowercase; accept the ASCII uppercase form too. The
+		// glyph spellings are non-ASCII, so they must match exactly.
+		if (expected < 97 || expected > 122 || actual !== expected - 32) return false;
 	}
 	return true;
 }
@@ -189,10 +216,10 @@ export function canonicalKeyId(key: string): string {
 
 	while (foundModifier) {
 		foundModifier = false;
-		for (const modifier of MODIFIER_ORDER) {
-			if (startsWithModifier(key, offset, modifier)) {
-				modifiers.push(modifier);
-				offset += modifier.length + 1;
+		for (const [spelling, modifier] of MODIFIER_SPELLING_ENTRIES) {
+			if (startsWithModifier(key, offset, spelling)) {
+				if (!modifiers.includes(modifier)) modifiers.push(modifier);
+				offset += spelling.length + 1;
 				foundModifier = true;
 				break;
 			}
@@ -222,7 +249,27 @@ export function addKeyAliases(keys: Set<string>, key: KeyId): void {
 	}
 }
 
-const normalizeKeyId = (key: KeyId): KeyId => key.toLowerCase() as KeyId;
+/**
+ * Lowercase a chord and fold every modifier onto its canonical name, keeping the
+ * authored order (which drives the UI label, so `alt+shift+p` must not become
+ * `shift+alt+p`). Folding here rather than only in `canonicalKeyId` is required:
+ * `getKeys()` output is handed straight to `matchesKey`, whose native
+ * `parse_key_id` knows only ctrl/shift/super/alt and silently degrades an
+ * unrecognized modifier to the bare base key.
+ */
+const normalizeKeyId = (key: KeyId): KeyId => {
+	const lower = key.toLowerCase();
+	const lastPlus = lower.lastIndexOf("+");
+	if (lastPlus <= 0) return lower as KeyId;
+	const parts = lower.slice(0, lastPlus).split("+");
+	for (let i = 0; i < parts.length; i++) {
+		const part = parts[i] as string;
+		// `Object.hasOwn`, not `??`: a part named `constructor`/`toString` resolves
+		// through Object.prototype to a truthy function that `??` would keep.
+		if (Object.hasOwn(MODIFIER_SPELLINGS, part)) parts[i] = MODIFIER_SPELLINGS[part] as string;
+	}
+	return `${parts.join("+")}${lower.slice(lastPlus)}` as KeyId;
+};
 
 function normalizeKeys(keys: KeyId | KeyId[] | undefined): KeyId[] {
 	if (keys === undefined) return [];
@@ -260,10 +307,14 @@ export class KeybindingsManager {
 		const userClaims = new Map<KeyId, Set<Keybinding>>();
 		for (const [keybinding, keys] of Object.entries(this.#userBindings)) {
 			if (!(keybinding in this.#definitions)) continue;
+			// Claims are keyed by canonical id, not by the spelling the user typed:
+			// `alt+x` and `Option+x` produce the same match key, so they collide even
+			// though the raw strings differ.
 			for (const key of normalizeKeys(keys)) {
-				const claimants = userClaims.get(key) ?? new Set<Keybinding>();
+				const canonical = canonicalKeyId(key) as KeyId;
+				const claimants = userClaims.get(canonical) ?? new Set<Keybinding>();
 				claimants.add(keybinding as Keybinding);
-				userClaims.set(key, claimants);
+				userClaims.set(canonical, claimants);
 			}
 		}
 

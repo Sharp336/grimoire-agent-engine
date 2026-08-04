@@ -16,6 +16,8 @@ app.plan.toggle: Alt+Shift+P
 
 Chord names are case-insensitive and use the same notation shown in the UI, such as `Ctrl+P`, `Alt+Shift+P`, `Shift+Enter`, and `Ctrl+Backspace`.
 
+On macOS the UI labels `alt` and `super` with the glyphs printed on the keys, so `/hotkeys` and the hint bar show `⌥+P` and `⌘+V` where other platforms show `Alt+P` and `Super+V`. Every spelling of a modifier is accepted here — `⌥`, `Option`, and `Alt` all mean the same key, as do `⌘`, `Cmd`, `Command`, and `Super` — so a chord copied out of the UI resolves to the binding it came from. `omp` folds them to the canonical ASCII names internally (and when it rewrites the file), which is what the default column below uses.
+
 Set an action to an empty array to disable it:
 
 ```yaml

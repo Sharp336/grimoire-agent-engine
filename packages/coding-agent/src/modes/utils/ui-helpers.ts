@@ -4,6 +4,7 @@ import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { type Component, Spacer, Text, TruncatedText } from "@oh-my-pi/pi-tui";
 import type { AdvisorMessageDetails } from "../../advisor";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
+import { formatKeyHint } from "../../config/keybindings";
 import { settings } from "../../config/settings";
 import { getEditClipboard } from "../../edit/edit-clipboard";
 import { getFileSnapshotStore } from "../../edit/file-snapshot-store";
@@ -784,7 +785,7 @@ export class UiHelpers {
 					this.ctx.pendingMessagesContainer.addChild(new TruncatedText(queuedText, 1, 0));
 				}
 			}
-			const dequeueKey = this.ctx.keybindings.getDisplayString("app.message.dequeue") || "Alt+Up";
+			const dequeueKey = this.ctx.keybindings.getDisplayString("app.message.dequeue") || formatKeyHint("alt+up");
 			const hintText = theme.fg("dim", `  ${theme.tree.hook} ${dequeueKey} to edit`);
 			this.ctx.pendingMessagesContainer.addChild(new TruncatedText(hintText, 1, 0));
 		}

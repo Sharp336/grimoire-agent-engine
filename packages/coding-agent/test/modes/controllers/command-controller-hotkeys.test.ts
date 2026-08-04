@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { buildHotkeysMarkdown } from "@oh-my-pi/pi-coding-agent/modes/utils/hotkeys-markdown";
 
 describe("buildHotkeysMarkdown", () => {
@@ -74,5 +74,64 @@ describe("buildHotkeysMarkdown", () => {
 
 		expect(markdown).toContain("| `Disabled` | Select model (temporary) |");
 		expect(markdown).toContain("| `Alt+M` | Select model (set roles) |");
+	});
+});
+
+describe("buildHotkeysMarkdown static editor chords", () => {
+	const keybindings = { getDisplayString: () => "Ctrl+K" };
+
+	it("labels the static chords with the Apple key glyphs on darwin", () => {
+		const markdown = buildHotkeysMarkdown({ keybindings, platform: "darwin" });
+
+		expect(markdown).toContain("| `⌥+Left` / `⌥+Right` | Move by word |");
+		expect(markdown).toContain("| `Shift+Enter` / `⌥+Enter` | New line |");
+		expect(markdown).toContain("| `Ctrl+W` / `⌥+Backspace` | Delete word backwards |");
+		expect(markdown).toContain("| `Ctrl+A` / `Home` / `⌘+Left` | Start of line |");
+		expect(markdown).toContain("| `Ctrl+E` / `End` / `⌘+Right` | End of line |");
+		// Nothing may fall back to the ASCII names once the host is macOS.
+		for (const ascii of ["Alt+", "Cmd+", "Super+", "Option+"]) {
+			expect(markdown).not.toContain(ascii);
+		}
+	});
+
+	it("uses the ASCII modifier names off darwin and drops the mac-only chords", () => {
+		const markdown = buildHotkeysMarkdown({ keybindings, platform: "linux" });
+
+		expect(markdown).toContain("| `Alt+Left` / `Alt+Right` | Move by word |");
+		expect(markdown).toContain("| `Shift+Enter` / `Alt+Enter` | New line |");
+		expect(markdown).toContain("| `Ctrl+W` / `Alt+Backspace` | Delete word backwards |");
+		// `super+left` / `super+right` are not bound anywhere; the rows only ever
+		// described the macOS editing convention, so they stay off other hosts
+		// instead of being relabelled into a chord that does nothing.
+		expect(markdown).toContain("| `Ctrl+A` / `Home` | Start of line |");
+		expect(markdown).toContain("| `Ctrl+E` / `End` | End of line |");
+		for (const macOnly of ["⌥", "⌘", "Cmd+", "Option+"]) {
+			expect(markdown).not.toContain(macOnly);
+		}
+	});
+
+	// `command-controller.ts` calls `buildHotkeysMarkdown({ keybindings })` with no
+	// `platform`, so the `?? process.platform` fallback is the only path `/hotkeys`
+	// ever takes in production.
+	describe("without an injected platform", () => {
+		let platformDescriptor: PropertyDescriptor;
+
+		beforeEach(() => {
+			platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform") as PropertyDescriptor;
+		});
+
+		afterEach(() => {
+			Object.defineProperty(process, "platform", platformDescriptor);
+		});
+
+		it("follows the host platform", () => {
+			Object.defineProperty(process, "platform", { ...platformDescriptor, value: "darwin" });
+			expect(buildHotkeysMarkdown({ keybindings })).toContain("| `⌥+Left` / `⌥+Right` | Move by word |");
+
+			Object.defineProperty(process, "platform", { ...platformDescriptor, value: "linux" });
+			const linux = buildHotkeysMarkdown({ keybindings });
+			expect(linux).toContain("| `Alt+Left` / `Alt+Right` | Move by word |");
+			expect(linux).toContain("| `Ctrl+A` / `Home` | Start of line |");
+		});
 	});
 });

@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Changed key hints on macOS to use the modifier glyphs printed on the physical keys: `/hotkeys`, the pending-message and tree-selector hints, the session-model status line, and the sign-in copy hint now render `alt` as `⌥` and `super` as `⌘` (`⌥+P`, `⌘+V`) while other platforms keep `Alt+P` and `Super+V`. `keybindings.yml` accepts every spelling of a modifier (`⌥`/`Option`/`Alt`, `⌘`/`Cmd`/`Command`/`Super`), so a chord copied out of the UI resolves to the binding it came from.
+
+### Fixed
+
+- Fixed the `/hotkeys` navigation and editing rows hardcoding macOS key names on every platform: `Option+Left/Right` and `Option+Backspace` were shown to Linux and Windows users, and the `Cmd+Left`/`Cmd+Right` line-start/line-end rows (which are not bound outside macOS) were listed unconditionally. The rows now follow the host platform.
+- Fixed the session-only model status message, the agent-transcript footer, and the model-hub cycle footer printing raw chord ids (`alt+m`, `ctrl+o`, `ctrl+p`) instead of formatted key hints, because they read `getKeys(...)[0]` rather than going through the hint formatter.
+- Fixed the extension reserved-shortcut guard comparing the chord as written instead of canonically, so an extension could claim a reserved built-in by spelling it differently. The editor builds its match keys from the canonical id, so `ctrl+shift+p` (reserved as `shift+ctrl+p`) — and now any `Option`/`⌘` spelling — really did shadow the built-in while passing the check. `getShortcuts()` canonicalizes before the lookup and the reserved table is keyed canonically.
+- Fixed keybinding conflict detection missing two actions that claim the same chord under different spellings (`alt+x` versus `Option+x`): claims are now keyed by canonical id, so the collision is reported instead of one binding silently shadowing the other.
+- Fixed a chord bound with an alternate modifier spelling collapsing to its bare base key in components that match `getKeys()` output directly. Key normalization only lowercased, so `app.agents.hub: ⌥+A` reached the native matcher — which knows only `ctrl`/`shift`/`super`/`alt` — as an unrecognized modifier plus `a`, making the plain letter `a` close the agent hub while `Alt+A` did nothing. Normalization now folds every modifier onto its canonical name while keeping the authored order the UI label depends on.
+- Fixed key-hint rendering resolving chord parts through `Object.prototype`, so a binding on a key named `constructor` or `toString` printed a function's native-code text instead of the key name.
+
 ## [17.2.7] - 2026-08-03
 
 ### Changed

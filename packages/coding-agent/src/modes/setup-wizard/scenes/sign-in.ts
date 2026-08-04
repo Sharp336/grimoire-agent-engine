@@ -10,6 +10,7 @@ import {
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils";
+import { formatKeyHint } from "../../../config/keybindings";
 import { copyToClipboard } from "../../../utils/clipboard";
 import { OAuthSelectorComponent } from "../../components/oauth-selector";
 import { theme } from "../../theme/theme";
@@ -20,7 +21,7 @@ function loginUrlLink(url: string): string {
 }
 
 function loginCopyHint(): string {
-	return theme.fg("dim", "(clipboard copy attempted; Alt+C retries)");
+	return theme.fg("dim", `(clipboard copy attempted; ${formatKeyHint("alt+c")} retries)`);
 }
 
 class CopyablePromptInput implements Component, Focusable {

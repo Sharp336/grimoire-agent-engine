@@ -5,6 +5,7 @@ import {
 	type KeybindingDefinitions,
 	type KeybindingsConfig,
 	type KeyId,
+	MODIFIER_SPELLINGS,
 	setKeybindings,
 	TUI_KEYBINDINGS,
 	KeybindingsManager as TuiKeybindingsManager,
@@ -636,9 +637,9 @@ export class KeybindingsManager extends TuiKeybindingsManager {
 	/**
 	 * Get display string for a keybinding (e.g., "ctrl+c/escape").
 	 */
-	getDisplayString(keybinding: Keybinding): string {
+	getDisplayString(keybinding: Keybinding, platform?: NodeJS.Platform): string {
 		const keys = this.getKeys(keybinding);
-		return formatKeyHints(keys.length === 0 ? [] : keys);
+		return formatKeyHints(keys.length === 0 ? [] : keys, platform);
 	}
 
 	/**
@@ -659,6 +660,19 @@ const MODIFIER_LABELS: Record<string, string> = {
 	ctrl: "Ctrl",
 	shift: "Shift",
 	alt: "Alt",
+	super: "Super",
+};
+
+/**
+ * macOS labels Alt and Super with the glyphs printed on the physical keys. The
+ * `+` separator is kept so mixed chords stay unambiguous (`Ctrl+⌥+X`), and
+ * `canonicalKeyId` parses both glyphs back, so a hint copied out of the UI into
+ * `keybindings.yml` still resolves to the same chord.
+ */
+const DARWIN_MODIFIER_LABELS: Record<string, string> = {
+	...MODIFIER_LABELS,
+	alt: "⌥",
+	super: "⌘",
 };
 
 const KEY_LABELS: Record<string, string> = {
@@ -680,23 +694,49 @@ const KEY_LABELS: Record<string, string> = {
 	right: "Right",
 };
 
-function formatKeyPart(part: string): string {
+/**
+ * Resolve a chord part to its canonical modifier name. `Object.hasOwn` rather than
+ * a plain lookup: a part named `constructor`/`toString` would otherwise resolve
+ * through `Object.prototype` to a function and render as native-code text.
+ */
+function canonicalModifierPart(lower: string): string {
+	return Object.hasOwn(MODIFIER_SPELLINGS, lower) ? (MODIFIER_SPELLINGS[lower] as string) : lower;
+}
+
+function formatKeyPart(part: string, labels: Record<string, string>): string {
 	const lower = part.toLowerCase();
-	const modifier = MODIFIER_LABELS[lower];
-	if (modifier) return modifier;
-	const label = KEY_LABELS[lower];
-	if (label) return label;
+	// Fold `option`/`⌥`/`cmd`/`⌘` onto the canonical modifier so a chord authored
+	// with the macOS spelling is relabelled for the active platform, not echoed
+	// verbatim. Modifier order is left as authored.
+	const canonical = canonicalModifierPart(lower);
+	if (Object.hasOwn(labels, canonical)) return labels[canonical] as string;
+	if (Object.hasOwn(KEY_LABELS, lower)) return KEY_LABELS[lower] as string;
 	if (part.length === 1) return part.toUpperCase();
 	return `${part.charAt(0).toUpperCase()}${part.slice(1)}`;
 }
 
-export function formatKeyHint(key: KeyId): string {
-	return key.split("+").map(formatKeyPart).join("+");
+export function formatKeyHint(key: KeyId, platform: NodeJS.Platform = process.platform): string {
+	const labels = platform === "darwin" ? DARWIN_MODIFIER_LABELS : MODIFIER_LABELS;
+	return key
+		.split("+")
+		.map(part => formatKeyPart(part, labels))
+		.join("+");
 }
 
-export function formatKeyHints(keys: KeyId | KeyId[]): string {
+export function formatKeyHints(keys: KeyId | KeyId[], platform: NodeJS.Platform = process.platform): string {
 	const list = Array.isArray(keys) ? keys : [keys];
-	return list.map(formatKeyHint).join("/");
+	return list.map(key => formatKeyHint(key, platform)).join("/");
+}
+
+/**
+ * Label for one modifier (`alt` → `⌥` on darwin, `Alt` elsewhere). Whole chords
+ * go through {@link formatKeyHint}; this exists for the compact hints that list
+ * several keys behind a single modifier, such as `⌥+D/T/U/L/A`.
+ */
+export function modifierLabel(modifier: string, platform: NodeJS.Platform = process.platform): string {
+	const labels = platform === "darwin" ? DARWIN_MODIFIER_LABELS : MODIFIER_LABELS;
+	const canonical = canonicalModifierPart(modifier.toLowerCase());
+	return Object.hasOwn(labels, canonical) ? (labels[canonical] as string) : modifier;
 }
 
 export type { Keybinding, KeybindingsConfig, KeyId };

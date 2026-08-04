@@ -11,6 +11,7 @@ import {
 	TruncatedText,
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui";
+import { formatKeyHint, modifierLabel } from "../../config/keybindings";
 import type { TreeFilterMode } from "../../config/settings-schema";
 import { theme } from "../../modes/theme/theme";
 import {
@@ -457,7 +458,15 @@ class TreeList implements Component {
 						width,
 					),
 				);
-				lines.push(truncateToWidth(theme.fg("muted", "  Press Alt+A to show all, Alt+D for default"), width));
+				lines.push(
+					truncateToWidth(
+						theme.fg(
+							"muted",
+							`  Press ${formatKeyHint("alt+a")} to show all, ${formatKeyHint("alt+d")} for default`,
+						),
+						width,
+					),
+				);
 				lines.push(
 					truncateToWidth(theme.fg("muted", `  (0/${this.#flatNodes.length})${this.#getFilterLabel()}`), width),
 				);
@@ -952,7 +961,7 @@ export class TreeSelectorComponent extends Container {
 			new TruncatedText(
 				theme.fg(
 					"muted",
-					"Enter: switch. Alt+↑/↓: previous/next turn. PgUp/PgDn (←/→): page. Home/End: first/last item. Shift+Enter: summarize & switch. Shift+L: label. Ctrl+O: filter. Alt+D/T/U/L/A: filter. Type to search",
+					`Enter: switch. ${modifierLabel("alt")}+↑/↓: previous/next turn. PgUp/PgDn (←/→): page. Home/End: first/last item. Shift+Enter: summarize & switch. Shift+L: label. Ctrl+O: filter. ${modifierLabel("alt")}+D/T/U/L/A: filter. Type to search`,
 				),
 				0,
 				0,
