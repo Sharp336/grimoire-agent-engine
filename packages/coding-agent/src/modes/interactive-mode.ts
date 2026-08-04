@@ -3517,8 +3517,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 
 			// The interview is a normal conversation: the kickoff rides in as a
-			// hidden developer message, the agent asks its questions as regular
-			// assistant turns, and the user answers in the ordinary editor. Queue
+			// hidden developer message, the agent asks one question per turn — via
+			// the ask dialog when the ask tool is enabled, otherwise as a plain
+			// assistant message — and the user answers in the ordinary editor. Queue
 			// behind an in-flight run instead of aborting it.
 			const kickoff = prompt.render(guidedGoalInterviewPrompt, { initial: rest?.trim() || undefined });
 			if (this.session.isStreaming) {

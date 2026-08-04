@@ -119,6 +119,10 @@ describe("guided goal setup", () => {
 			// The goal tool is activated up front so the agent can create the goal
 			// once the interview concludes.
 			expect(harness.session.getEnabledToolNames()).toContain("goal");
+			// The command activates `goal` only — it must not auto-enable `ask`
+			// (the user may have disabled it deliberately); the prompt falls back
+			// to plain chat when the ask tool is absent.
+			expect(harness.session.getEnabledToolNames()).not.toContain("ask");
 		} finally {
 			await harness.cleanup();
 		}
