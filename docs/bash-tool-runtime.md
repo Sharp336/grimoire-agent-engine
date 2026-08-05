@@ -37,7 +37,7 @@ The bash tool has the `exec` approval tier. `bash.patterns` rules can explicitly
 
 ## 2) Optional interception (blocked-command path)
 
-If `bashInterceptor.enabled` is true, `BashTool` loads rules from settings (`getBashInterceptorRules()`) and runs `checkBashInterception()` against the command — checking both the original and the cwd-normalized form (after a leading `cd … &&` is extracted) when they differ. Rule syntax is unchanged: each rule checks the complete input first, then raw flat command fragments separated by unquoted/unescaped `&&`, `||`, `;`, `|`, `&`, or newlines, then those fragments with leading `NAME=value` assignments removed.
+If `bashInterceptor.enabled` is true, `BashTool` loads rules from settings (`getBashInterceptorRules()`) and runs `checkBashInterception()` against the command — checking both the original and the cwd-normalized form (after a leading `cd … &&` is extracted) when they differ. Rule syntax is unchanged: each rule checks the complete input first, then raw flat command fragments separated by unquoted/unescaped `&&`, `||`, `;`, `|`, `|&`, `&`, or newlines, then those fragments with leading `NAME=value` assignments removed. Fragments that receive piped stdin from `|` or `|&` are excluded from the fragment candidates, including across blank/comment continuation lines, because a stdin-consuming stage cannot be replaced by a path-based dedicated tool.
 
 Interception behavior:
 
@@ -218,8 +218,12 @@ When `async.enabled` is true and the call passes `async: true`, `BashTool` start
 
 After execution:
 
-1. A cancellation or missing exit status throws a tool error.
-2. Timeout returns an error result with `details.timedOut = true` so the renderer can distinguish it from an ordinary failure.
+1. A cancellation or missing exit status throws a tool error. The client-bridge
+   terminal route also throws `ToolError` for timeout before structured result
+   shaping.
+2. Local non-PTY and interactive-PTY timeouts return an error result with
+   `details.timedOut = true` so the renderer can distinguish them from an
+   ordinary failure.
 3. Empty output becomes `(no output)`.
 4. A final inline byte cap protects routes that bypass `OutputSink`; it reuses the sink artifact when available or saves a `bash-original` artifact.
 5. Truncation metadata is attached from the sink summary.
@@ -271,7 +275,7 @@ This component is wired by `CommandController.handleBashCommand()` and fed from 
 - Interceptor only blocks commands when suggested tool is currently available in context.
 - If artifact allocation fails, truncation still occurs but no `artifact://` back-reference is available.
 - Shell session cache has no explicit eviction in this module; lifetime is process-scoped.
-- Timeout and cancellation are normalized across backends before result shaping: timeouts return error results with `details.timedOut`, while cancellations throw.
+- Timeout shaping is backend-specific: local non-PTY and interactive-PTY timeouts return error results with `details.timedOut`; the client-bridge terminal creation/execution timeout paths throw `ToolError`. Non-timeout cancellations throw across these tool-call routes.
 
 ## Implementation files
 

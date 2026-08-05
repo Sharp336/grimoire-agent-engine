@@ -6,6 +6,17 @@
 
 - Added `thinking.supportsDisabledThinking`, marking adaptive Claude models that accept an explicit `thinking.type: "disabled"` request instead of the legacy low-effort fallback. Claude Opus 5 and Sonnet 5 are marked; older adaptive Claude models keep the fallback.
 - Added `thinking.disabledThinkingMaxEffort`, the highest effort that may accompany `thinking.type: "disabled"`. Claude Opus 5 rejects that combination above `high` with a 400, so requests are clamped instead of dropping the caller's effort.
+## [17.2.9] - 2026-08-05
+
+### Fixed
+
+- Fixed Amazon Bedrock catalog generation omitting AWS GovCloud `us-gov.*` Claude inference-profile IDs, so selectors like `amazon-bedrock/us-gov.anthropic.claude-sonnet-4-5-…` resolve instead of failing model lookup (or misrouting commercial `us.*` geos onto `us-east-1` with GovCloud credentials).
+
+## [17.2.7] - 2026-08-03
+
+### Fixed
+
+- Fixed an issue where setting `thinking-level: off` failed to disable reasoning on direct DeepSeek V4 requests.
 
 ## [17.2.6] - 2026-08-03
 

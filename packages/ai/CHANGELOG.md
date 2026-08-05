@@ -13,6 +13,28 @@
 - Fixed the GitLab Duo and OpenAI/Anthropic shim providers dropping the explicit thinking-off signal on their OpenAI-format transports.
 - Fixed Anthropic Messages gateway requests that set `thinking.type: "adaptive"` without `output_config.effort` being translated as thinking-off. The gateway, direct Anthropic provider, Bedrock Claude, GitLab Duo Anthropic proxy, OpenAI/Anthropic shim providers, and pi-native forwarding path now preserve Claude adaptive thinking mode separately from effort.
 - Fixed neutral `thinkingMode: "adaptive"` incorrectly enabling thinking on budget Claude models when no effort was set.
+## [17.2.9] - 2026-08-05
+
+### Fixed
+
+- Fixed GitHub Copilot requests failing with a raw `HTTP 400 model_not_available_for_integrator` on roughly half of all turns for recently rolled-out models. Copilot's fleet is not uniform — part of it rejects models that `/models` advertises on the same host — and the transient classifier matched only the older `model_not_supported` code at a fixed envelope depth, so these rejections surfaced as terminal errors instead of entering the existing retry path. Model-availability 400s are now recognized at any envelope depth and rerolled on a flat delay with a dedicated 8-attempt budget on the OpenAI transports; every other retryable failure keeps its previous backoff and attempt count.
+- Fixed Cursor reads with inline OMP range selectors reporting the returned slice length as the source file's `totalLines`, which made sequential reads of an unchanged file appear inconsistent ([#7590](https://github.com/can1357/oh-my-pi/issues/7590)).
+- Made model-scoped usage health ignore Codex accounts that cannot use the requested plan-gated model while retaining conservative unknown-state handling and independent usage-window resets.
+- Fixed OpenAI Codex usage telemetry blocking explicitly allowed ChatGPT Team credentials when a weekly `used_percent` rounded to 100, which could route multi-account sessions to an actually exhausted sibling instead ([#7617](https://github.com/can1357/oh-my-pi/issues/7617)).
+- Fixed OpenAI Codex GPT-5.x requests sending optional `reasoning.summary`, `reasoning.context`, and `text.verbosity` controls by default, reducing Codex `server_error` disconnects from unsupported request shapes. ([#4949](https://github.com/can1357/oh-my-pi/issues/4949))
+- Classified concurrent-request caps separately from quota exhaustion so they use a short retry backoff without burning a credential, and rotate credentials for account-scoped 403 caps such as Devin's overall message limit.
+
+## [17.2.7] - 2026-08-03
+
+### Changed
+
+- Replaced `arktype` with `@oh-my-pi/omptype` for schema validation, delivering up to 100x faster schema construction and 60-100x faster validation while maintaining full compatibility with existing `type`/`Type` exports and the `isArkSchema` contract.
+
+### Fixed
+
+- Fixed OpenAI-Codex (ChatGPT OAuth) requests failing with an `Unsupported service_tier: auto` error on default or legacy sessions by omitting the implicit `auto` service tier on the wire.
+- Fixed an issue where Cursor `kimi-k3` sessions would break permanently when a same-model assistant turn was persisted without thinking blocks, replacing hard errors with graceful warnings.
+
 ## [17.2.6] - 2026-08-03
 
 ### Added

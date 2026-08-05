@@ -11,6 +11,12 @@
 - The error→toolUse salvage in the agent loop (`recoverTransientErrorToolTurn`) now recognizes Anthropic stream-envelope truncation errors, so a turn cut after streaming complete tool calls runs those calls instead of ending the run with an error.
 - Shake no longer elides artifact recovery reads; the compaction dead-end rescue uses a dedicated `RESCUE_SHAKE_CONFIG`.
 - Fixed the proxy transport dropping `thinkingMode` and `disableReasoning`, so proxied agents ignored a requested thinking-off.
+## [17.2.9] - 2026-08-05
+
+### Fixed
+
+- Preserved queued steering and follow-up messages when a continuation is cancelled before or during pre-dequeue hooks, and propagated the caller's cancellation signal through every continuation model-call loop.
+
 ## [17.2.6] - 2026-08-03
 
 ### Fixed

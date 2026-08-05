@@ -2048,9 +2048,16 @@ export class SessionManager {
 	 * Append a model change as a child of the current leaf, then advance the leaf.
 	 * @param model Model in "provider/modelId" format
 	 * @param role Optional role (default: "default")
+	 * @param resolvedModelIsFallback Whether this transition selected a retry-fallback model
 	 */
-	appendModelChange(model: string, role?: string): string {
-		const entry: ModelChangeEntry = { type: "model_change", ...this.#freshEntryFields(), model, role };
+	appendModelChange(model: string, role?: string, resolvedModelIsFallback = false): string {
+		const entry: ModelChangeEntry = {
+			type: "model_change",
+			...this.#freshEntryFields(),
+			model,
+			role,
+			resolvedModelIsFallback,
+		};
 		this.#recordEntry(entry);
 		return entry.id;
 	}
@@ -2059,6 +2066,10 @@ export class SessionManager {
 		systemPrompt: string;
 		task: string;
 		tools: string[];
+		agent?: string;
+		modelRole?: string;
+		resolvedModel?: string;
+		readOnly?: boolean;
 		outputSchema?: unknown;
 		outputSchemaMode?: StructuredSubagentSchemaMode;
 		restrictToolNames?: boolean;
@@ -2095,7 +2106,7 @@ export class SessionManager {
 	}
 
 	/**
-	 * Append the durable conversation boundary recorded by `/reset`. The
+	 * Append the durable conversation boundary recorded by `/clear`. The
 	 * collapsed live transcript and the model-context rebuild start after the
 	 * latest one, while the full history stays on disk (the plain
 	 * `transcript:true` export walks it unchanged).
@@ -2548,6 +2559,9 @@ export class SessionManager {
 			systemPrompt: string;
 			task: string;
 			tools: string[];
+			agent?: string;
+			modelRole?: string;
+			resolvedModel?: string;
 			outputSchema?: unknown;
 			outputSchemaMode?: StructuredSubagentSchemaMode;
 			restrictToolNames?: boolean;
@@ -2568,6 +2582,9 @@ export class SessionManager {
 			systemPrompt: string;
 			task: string;
 			tools: string[];
+			agent?: string;
+			modelRole?: string;
+			resolvedModel?: string;
 			outputSchema?: unknown;
 			outputSchemaMode?: StructuredSubagentSchemaMode;
 			restrictToolNames?: boolean;
@@ -2581,6 +2598,9 @@ export class SessionManager {
 					systemPrompt: entry.systemPrompt,
 					task: entry.task,
 					tools: entry.tools,
+					agent: entry.agent,
+					modelRole: entry.modelRole,
+					resolvedModel: entry.resolvedModel,
 					outputSchema: entry.outputSchema,
 					outputSchemaMode: entry.outputSchemaMode,
 					restrictToolNames: entry.restrictToolNames,
