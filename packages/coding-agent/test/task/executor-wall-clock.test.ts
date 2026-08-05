@@ -2,11 +2,12 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { runSubagentFollowUpTurn, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
@@ -75,6 +76,8 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 		AgentRegistry.resetGlobalForTests();
+		AgentLifecycleManager.resetGlobalForTests();
+		vi.useRealTimers();
 	});
 
 	const baseAgent: AgentDefinition = {
@@ -201,6 +204,41 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		// The whole point: we never reached session.prompt(), because the abort
 		// was observed before issuing the model call.
 		expect(promptCalls).toBe(0);
+	});
+
+	it("charges parked-session revival against the follow-up wall-clock limit", async () => {
+		vi.useFakeTimers();
+		const handle = createHangingSession();
+		let promptCalls = 0;
+		const originalPrompt = handle.session.prompt;
+		handle.session.prompt = async (text, options) => {
+			promptCalls += 1;
+			return originalPrompt.call(handle.session, text, options);
+		};
+		const revivalStarted = Promise.withResolvers<void>();
+		const revival = Promise.withResolvers<AgentSession>();
+		vi.spyOn(AgentLifecycleManager.global(), "ensureLive").mockImplementation(() => {
+			revivalStarted.resolve();
+			return revival.promise;
+		});
+
+		const run = runSubagentFollowUpTurn({
+			id: "parked-revival-timeout",
+			agent: baseAgent,
+			message: "continue work",
+			maxRuntimeMs: 30,
+		});
+		await revivalStarted.promise;
+		vi.advanceTimersByTime(31);
+		revival.resolve(handle.session);
+		const result = await run;
+
+		expect(result.aborted).toBe(true);
+		expect(result.exitCode).toBe(1);
+		expect(result.abortReason).toContain("runtime limit exceeded");
+		expect(result.abortReason).toContain("task.maxRuntimeMs=30");
+		expect(promptCalls).toBe(0);
+		expect(handle.abortCalls()).toBeGreaterThanOrEqual(1);
 	});
 
 	it("a cancelled late initializer cannot replace a newer same-id worker", async () => {

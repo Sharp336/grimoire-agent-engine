@@ -4809,7 +4809,7 @@ export class AgentSession {
 		const existing = messages.filter(
 			(message): message is CustomMessage => message.role === "custom" && message.customType === "vibe-mode-context",
 		);
-		if (content !== undefined && existing.length === 1) return null;
+		if (content !== undefined && existing.length === 1 && existing[0]?.content === content) return null;
 		if (existing.length > 0) {
 			this.agent.replaceMessages(
 				messages.filter(message => message.role !== "custom" || message.customType !== "vibe-mode-context"),

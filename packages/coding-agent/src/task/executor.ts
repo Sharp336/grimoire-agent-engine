@@ -1773,6 +1773,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		resolveAbortReasonText,
 		setActiveSession: session => {
 			activeSession = session;
+			// Setup/revival can outlast the run deadline. If the monitor already
+			// aborted while no session was attached, stop the late session before
+			// the driver can issue a prompt.
+			if (abortSent) void abortActiveSession();
 		},
 		takeActiveSession: () => {
 			const session = activeSession;
@@ -2505,10 +2509,8 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	const { id, agent, message, signal } = options;
 	const index = options.index ?? 0;
 	const startTime = Date.now();
-	const session = await AgentLifecycleManager.global().ensureLive(id);
 	const ref = AgentRegistry.global().get(id);
 	const sessionFile = ref?.sessionFile ?? undefined;
-
 	const monitor = createSubagentRunMonitor({
 		index,
 		id,
@@ -2527,6 +2529,13 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		maxRequests: options.maxRequests,
 		maxRuntimeMs: options.maxRuntimeMs ?? 0,
 	});
+	let session: AgentSession;
+	try {
+		session = await AgentLifecycleManager.global().ensureLive(id);
+	} catch (error) {
+		monitor.finish();
+		throw error;
+	}
 
 	if (options.eventBus) {
 		options.eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
@@ -2546,7 +2555,13 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	const unsubscribe = monitor.attach(session);
 	let outcome: DriveOutcome;
 	try {
-		outcome = await driveSessionToYield(session, monitor, message);
+		outcome = monitor.abortSignal.aborted
+			? {
+					exitCode: 1,
+					aborted: monitor.isAbortedRun(),
+					abortReasonText: monitor.resolveAbortReasonText(),
+				}
+			: await driveSessionToYield(session, monitor, message);
 	} finally {
 		try {
 			await untilAborted(AbortSignal.timeout(5000), () => monitor.waitForActiveSessionAbort());

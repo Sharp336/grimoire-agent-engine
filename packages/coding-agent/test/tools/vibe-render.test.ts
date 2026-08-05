@@ -59,6 +59,8 @@ describe("vibe tool renderers", () => {
 		expect(spawnDescription).toContain("does not inherit the parent conversation");
 		expect(spawnDescription).toContain("normal system prompt and discovered repository context");
 		expect(spawnDescription).toContain("including applicable `AGENTS.md`");
+		expect(spawnDescription).toContain("When artifact persistence succeeds");
+		expect(spawnDescription).toContain("fails before producing a result may have no `fullOutputUrl`");
 		expect(waitDescription).toContain("bounded preview");
 		expect(waitDescription).toContain("immutable `fullOutputUrl`");
 		expect(waitDescription).toContain("latest-output alias");

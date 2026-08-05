@@ -17,7 +17,7 @@ import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mod
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { normalizeCustomMessagePayload } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { type CustomMessage, normalizeCustomMessagePayload } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage, type WriteTextAtomicOptions } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { VIBE_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/vibe";
@@ -192,6 +192,29 @@ describe("InteractiveMode vibe mode toggle", () => {
 		expect(
 			session.messages.some(message => message.role === "custom" && message.customType === "vibe-mode-context"),
 		).toBe(false);
+	});
+
+	it("replaces a single stale Vibe overlay restored from session history", async () => {
+		session.messages.push({
+			role: "custom",
+			customType: "vibe-mode-context",
+			content: "<vibe-mode>stale restored guidance</vibe-mode>",
+			display: false,
+			attribution: "agent",
+			timestamp: Date.now() - 1000,
+		});
+		const sendCustomMessage = vi.spyOn(session, "sendCustomMessage");
+
+		await mode.handleVibeModeCommand();
+		await session.sendVibeModeContext({ deliverAs: "nextTurn" });
+
+		expect(sendCustomMessage).toHaveBeenCalledTimes(1);
+		const overlays = session.messages.filter(
+			(message): message is CustomMessage => message.role === "custom" && message.customType === "vibe-mode-context",
+		);
+		expect(overlays).toHaveLength(1);
+		expect(overlays[0]?.content).not.toContain("stale restored guidance");
+		expect(overlays[0]?.content).toContain("Vibe mode is ON.");
 	});
 
 	it("keeps a same-named non-built-in Todo tool unavailable in Vibe mode", async () => {
