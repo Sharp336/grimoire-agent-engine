@@ -59,19 +59,27 @@ describe("shouldDeliverDesktopNotification", () => {
 	});
 
 	it("fires for Bell-only terminals on a local Windows desktop, but not over SSH", () => {
-		expect(shouldDeliverDesktopNotification("trueColor", true, "win32", {})).toBe(true);
-		expect(shouldDeliverDesktopNotification("trueColor", true, "win32", { SSH_CONNECTION: "1.2.3.4" })).toBe(false);
-		expect(shouldDeliverDesktopNotification("trueColor", true, "win32", { PI_NO_DESKTOP_NOTIFY: "1" })).toBe(false);
-		expect(shouldDeliverDesktopNotification("kitty", false, "win32", {})).toBe(false);
+		const WIN_ENV: NodeJS.ProcessEnv = { SESSIONNAME: "Console" };
+		expect(shouldDeliverDesktopNotification("trueColor", true, "win32", WIN_ENV)).toBe(true);
+		expect(
+			shouldDeliverDesktopNotification("trueColor", true, "win32", { ...WIN_ENV, SSH_CONNECTION: "1.2.3.4" }),
+		).toBe(false);
+		expect(
+			shouldDeliverDesktopNotification("trueColor", true, "win32", { ...WIN_ENV, PI_NO_DESKTOP_NOTIFY: "1" }),
+		).toBe(false);
+		expect(shouldDeliverDesktopNotification("kitty", false, "win32", WIN_ENV)).toBe(false);
 	});
 });
 
 describe("hasWindowsDesktopSession", () => {
-	it("requires win32 + no SSH markers", () => {
-		expect(hasWindowsDesktopSession("win32", {})).toBe(true);
-		expect(hasWindowsDesktopSession("win32", { SSH_CLIENT: "1.2.3.4 5 22" })).toBe(false);
-		expect(hasWindowsDesktopSession("win32", { SSH_TTY: "/dev/pts/0" })).toBe(false);
-		expect(hasWindowsDesktopSession("linux", {})).toBe(false);
+	it("requires win32 + an interactive logon session + no SSH markers", () => {
+		expect(hasWindowsDesktopSession("win32", { SESSIONNAME: "Console" })).toBe(true);
+		expect(hasWindowsDesktopSession("win32", { SESSIONNAME: "RDP-Tcp#3" })).toBe(true);
+		// Services / session-0 hosts have no SESSIONNAME — a toast can never surface there.
+		expect(hasWindowsDesktopSession("win32", {})).toBe(false);
+		expect(hasWindowsDesktopSession("win32", { SESSIONNAME: "Console", SSH_CLIENT: "1.2.3.4 5 22" })).toBe(false);
+		expect(hasWindowsDesktopSession("win32", { SESSIONNAME: "Console", SSH_TTY: "/dev/pts/0" })).toBe(false);
+		expect(hasWindowsDesktopSession("linux", { SESSIONNAME: "Console" })).toBe(false);
 	});
 });
 

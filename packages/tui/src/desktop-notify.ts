@@ -61,14 +61,18 @@ export function hasLinuxDesktopSession(
 
 /**
  * Whether the current process can surface a native Windows toast: win32
- * platform and not an SSH session (a toast on a remote host the user is not
- * looking at is noise; the BEL still reaches the local terminal in-band).
+ * platform, an interactive logon session (`SESSIONNAME` is set for console
+ * and RDP sessions but not for services / session-0 hosts, the analog of the
+ * `DBUS_SESSION_BUS_ADDRESS` gate on Linux), and not an SSH session (a toast
+ * on a remote host the user is not looking at is noise; the BEL still
+ * reaches the local terminal in-band).
  */
 export function hasWindowsDesktopSession(
 	platform: NodeJS.Platform = process.platform,
 	env: NodeJS.ProcessEnv = Bun.env,
 ): boolean {
 	if (platform !== "win32") return false;
+	if (!env.SESSIONNAME) return false;
 	return !env.SSH_CONNECTION && !env.SSH_CLIENT && !env.SSH_TTY;
 }
 
@@ -184,10 +188,10 @@ const POWERSHELL_AUMID = "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerSh
 /**
  * Build the PowerShell script that raises a WinRT toast for `message`. Pure
  * helper so tests assert the exact script without spawning a child. Title and
- * body are XML-escaped into the toast payload; the payload is embedded as a
- * single-quoted PowerShell string (with `'` doubled) so no interpolation runs.
- * Critical urgency maps to the `urgent` toast scenario, which keeps the toast
- * on screen until dismissed.
+ * body are XML-escaped into the toast payload, which leaves no `'` in the
+ * XML, so embedding it as a single-quoted PowerShell string runs no
+ * interpolation. Critical urgency maps to the `urgent` toast scenario, which
+ * keeps the toast on screen until dismissed.
  */
 export function buildWindowsToastScript(message: string | TerminalNotification): string {
 	const { title, body, urgency } = resolveFields(message);
@@ -196,12 +200,11 @@ export function buildWindowsToastScript(message: string | TerminalNotification):
 		`<toast${scenario}><visual><binding template="ToastGeneric">` +
 		`<text>${escapeXml(title)}</text><text>${escapeXml(body)}</text>` +
 		`</binding></visual></toast>`;
-	const quoted = xml.replace(/'/g, "''");
 	return [
 		"[void][Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime]",
 		"[void][Windows.Data.Xml.Dom.XmlDocument,Windows.Data.Xml.Dom.XmlDocument,ContentType=WindowsRuntime]",
 		"$xml=New-Object Windows.Data.Xml.Dom.XmlDocument",
-		`$xml.LoadXml('${quoted}')`,
+		`$xml.LoadXml('${xml}')`,
 		`[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('${POWERSHELL_AUMID}').Show([Windows.UI.Notifications.ToastNotification]::new($xml))`,
 	].join("\n");
 }
