@@ -18,6 +18,8 @@ import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { LspTool } from "../lsp";
 import type { MCPManager } from "../mcp";
+import type { MissionRuntime } from "../missions/runtime";
+import { MissionTool } from "../missions/tools/mission-tool";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import type { PlanModeState } from "../plan-mode/state";
 import type { AgentLifecycleManager } from "../registry/agent-lifecycle";
@@ -304,6 +306,8 @@ export interface ToolSession {
 	getGoalModeState?: () => GoalModeState | undefined;
 	/** Goal runtime for the active agent session. */
 	getGoalRuntime?: () => GoalRuntime | undefined;
+	/** Mission runtime for the active agent session; drives the hidden `mission` tool. */
+	getMissionRuntime?: () => MissionRuntime | undefined;
 	/** Live one-shot wake controller for the active top-level agent session. */
 	getSessionSchedule?: () => SessionScheduleController | undefined;
 	/** Get cumulative session usage statistics (input/output tokens, cost). */
@@ -428,6 +432,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 export const HIDDEN_TOOLS: Record<HiddenToolName, ToolFactory> = {
 	yield: s => new YieldTool(s),
 	goal: s => new GoalTool(s),
+	mission: s => new MissionTool(s),
 };
 
 export type ToolName = BuiltinToolName;

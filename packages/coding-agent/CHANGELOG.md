@@ -6,6 +6,7 @@
 
 - Added a persisted mission runtime with injected host boundaries: it validates plans and remediation graphs, serializes pause/cancel/handoff transitions before effects, and recovers interrupted workers without silent redispatch.
 - Mission launch flags now start the persisted runtime, and active missions guard destructive session transitions while preserving owner-scoped child revival.
+- Added the hidden `mission` tool that the mission runtime activates while a mission is nonterminal, giving the parent orchestrator the `get`, `set_plan`, `run_next`, `resolve_handoff`, and `revise_pending` operations the mission prompts instruct it to call; without it every launched mission stalled in planning because the activated tool name was silently dropped.
 
 ## [17.2.9] - 2026-08-05
 
