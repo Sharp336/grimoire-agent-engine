@@ -11,6 +11,11 @@
 - Fixed a divergence where the pure-union fast path (`checks()`) applied only the first matching index signature for object keys, while the interpreter's full visit path and the JIT both applied the general index plus every matching pattern index. Multi-index schemas (e.g. `type([{ "[/^f/]": "number", "[/oo$/]": "string" }, "|", "null"])`) now reject consistently across pre-JIT and post-JIT calls.
 - Fixed double evaluation of index-key predicates in the object walker's extras-reject path. A pattern-index key refinement (e.g. a scoped `["string", ":", fn]` key) was invoked once for validation and again inside `isObjectExtra`, so a non-idempotent predicate could reject an already-validated property as undeclared. The walker now computes `objectIndexValidators` once per key and reuses the result for both validation and extras-reject classification.
 - Fixed double evaluation of index-key predicates in the compiled `allows` path (`emitAllows` and the inline `predicate` object case). A pattern-index key refinement was evaluated once for pattern-index validation and again for extras-reject classification, so a stateful predicate (e.g. one returning true only on its first call) caused `T.allows(value)` to reject a value that `T(value)` accepted. Both paths now evaluate each pattern-key predicate exactly once per key, matching the walker's `objectIndexValidators`-once-per-key invariant.
+## [17.2.9] - 2026-08-05
+
+### Fixed
+
+- Fixed the TypeBox adapter emitting an invalid left-bound-only DSL for min-only numeric schemas (e.g. `Type.Integer({ minimum: 1 })`), which threw `left bound requires a corresponding right bound` and broke extension tool loading ([#7648](https://github.com/can1357/oh-my-pi/issues/7648)).
 
 ## [17.2.8] - 2026-08-04
 

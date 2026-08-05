@@ -314,6 +314,23 @@ describe("AgentLifecycleManager", () => {
 		expect(registry.get("6-Sub")).toBeUndefined();
 	});
 
+	it("does not let one stuck adopted agent block sibling disposal", async () => {
+		const gate = deferred();
+		const stuck = makeSessionStub(() => gate.promise);
+		const sibling = makeSessionStub();
+		registerIdleSub("stuck-Sub", stuck.session);
+		registerIdleSub("sibling-Sub", sibling.session);
+		lifecycle.adopt("stuck-Sub", { idleTtlMs: TTL });
+		lifecycle.adopt("sibling-Sub", { idleTtlMs: TTL });
+
+		await lifecycle.dispose(Date.now());
+
+		expect(stuck.disposeCalls()).toBe(1);
+		expect(sibling.disposeCalls()).toBe(1);
+		gate.resolve();
+		await flushAsync();
+	});
+
 	it("a delayed release cannot remove or mutate a replacement ref with the same id", async () => {
 		const gate = deferred();
 		const oldSession = makeSessionStub(() => gate.promise);
