@@ -132,7 +132,7 @@ export function resolveBasicShell(): string | undefined {
  * brush-core shell. The resolved binary only serves the spawn-a-shell paths
  * (interactive PTY sessions, ACP client terminals, SHELL env), so this
  * prefers a real Git Bash when one exists and otherwise falls back to
- * cmd.exe — it never fails.
+ * PowerShell, then cmd.exe — it never fails.
  *
  * Search order:
  * 1. Git for Windows install roots (machine + per-user installers)
