@@ -135,6 +135,26 @@ describe("guided goal setup", () => {
 		}
 	});
 
+	it("renders the interview prompt with a plain-chat fallback when the ask tool is disabled", async () => {
+		const harness = await createHarness();
+		try {
+			const promptSpy = vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
+
+			await harness.mode.handleGuidedGoalCommand("ship the release");
+
+			expect(promptSpy).toHaveBeenCalledTimes(1);
+			const call = promptSpy.mock.calls[0];
+			if (!call) throw new Error("expected a prompt call");
+			const [text] = call;
+			// The prompt must instruct the agent to fall back to a plain assistant
+			// message when the ask tool is unavailable — not require it unconditionally.
+			expect(text).toContain("plain assistant message");
+			expect(text).toContain("when it is not");
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
 	it("asks the agent to elicit the objective when no rough goal is given", async () => {
 		const harness = await createHarness();
 		try {
