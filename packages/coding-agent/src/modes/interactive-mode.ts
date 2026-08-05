@@ -121,12 +121,7 @@ import type { LspStartupServerInfo } from "../tools";
 import { normalizeLocalScheme } from "../tools/path-utils";
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
 import { setAutoQaConsentHandler } from "../tools/report-tool-issue";
-import {
-	formatPhaseDisplayName,
-	selectCollapsedTodos,
-	setActiveTodoDescriptionsProvider,
-	todoMatchesAnyDescription,
-} from "../tools/todo";
+import { formatPhaseDisplayName, selectCollapsedTodos, todoMatchesAnyDescription } from "../tools/todo";
 import { vocalizer } from "../tts/vocalizer";
 import { renderTreeList } from "../tui/tree-list";
 import { formatStartupChangelogSummary, type StartupChangelogSelection } from "../utils/changelog";
@@ -1005,9 +1000,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#observerRegistry.onChange(kind => {
 			this.#scheduleObserverUiSync(kind);
 		});
-		// Let the transient todo tool result light up pending todos executed by a
-		// live subagent, matching the sticky HUD's active set (#5873).
-		setActiveTodoDescriptionsProvider(() => this.#getActiveSubagentDescriptions());
 
 		// Load initial todos
 		await this.#loadTodoList();

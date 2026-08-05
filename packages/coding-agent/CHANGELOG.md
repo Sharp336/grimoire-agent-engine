@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Successful `todo` transcript results now render as a one-line task/completion summary by default instead of duplicating the sticky Todo HUD; Ctrl+O still expands the full task tree, and failures retain their detailed error block ([#5047](https://github.com/can1357/oh-my-pi/issues/5047)).
+
 ## [17.2.9] - 2026-08-05
 
 ### Breaking Changes

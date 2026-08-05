@@ -17,7 +17,6 @@ import {
 	todoMatchesAnyDescription,
 	todoToolRenderer,
 } from "@oh-my-pi/pi-coding-agent/tools";
-import type { Component } from "@oh-my-pi/pi-tui";
 
 function createSession(initialPhases: TodoPhase[] = []): ToolSession {
 	let phases = initialPhases;
@@ -600,75 +599,48 @@ describe("todoMatchesAnyDescription", () => {
 		expect(todoMatchesAnyDescription("Audit AGENTS.md compliance", ["Audit AGENTS md compliance"])).toBe(true);
 	});
 });
-describe("todoToolRenderer.renderResult phase collapsing", () => {
-	async function buildThreePhaseAfterDone() {
+describe("todoToolRenderer.renderResult compact success", () => {
+	async function buildResult() {
 		const tool = new TodoTool(createSession());
 		await tool.execute("init", {
 			op: "init",
-			list: [
-				{ phase: "Alpha", items: ["a1", "a2"] },
-				{ phase: "Beta", items: ["b1", "b2"] },
-				{ phase: "Gamma", items: ["c1", "c2"] },
-			],
+			list: [{ phase: "Execution", items: ["first", "second", "third"] }],
 		});
-		// `done a1` keeps the active task inside Alpha (auto-promotes a2), leaving
-		// Beta and Gamma untouched by this update.
-		return tool.execute("done", { op: "done", task: "a1" });
+		return tool.execute("done", { op: "done", task: "first" });
 	}
-	function innerLines(component: Component): string[] {
-		const lines = Bun.stripANSI(component.render(100).join("\n")).split("\n");
-		return lines.slice(1, -1).map(line => line.replace(/^│/, "").replace(/│\s*$/, "").trim());
-	}
-	it("collapses untouched phases to a one-line summary while expanding the active phase", async () => {
-		const result = await buildThreePhaseAfterDone();
-		const component = todoToolRenderer.renderResult(result, { expanded: false, isPartial: false }, theme, {
-			op: "done",
-			task: "a1",
-		});
-		const rendered = Bun.stripANSI(component.render(100).join("\n"));
-		// Active phase's collapsed viewport omits the completed task and shows the
-		// promoted current one (#5873).
-		expect(rendered).not.toContain("a1");
-		expect(rendered).toContain("a2");
-		// Untouched phases collapse: headers + progress counts, no task contents.
-		expect(rendered).toContain("II. Beta");
-		expect(rendered).toContain("III. Gamma");
-		expect(rendered).toContain("0/2");
-		expect(rendered).not.toContain("b1");
-		expect(rendered).not.toContain("b2");
-		expect(rendered).not.toContain("c1");
-		expect(rendered).not.toContain("c2");
+
+	it("renders a successful result as one summary line by default", async () => {
+		const result = await buildResult();
+		const component = todoToolRenderer.renderResult(result, { expanded: false, isPartial: false }, theme);
+		const lines = component.render(100);
+		const rendered = Bun.stripANSI(lines.join("\n"));
+
+		expect(lines).toHaveLength(1);
+		expect(rendered).toContain("Todo");
+		expect(rendered).toContain("3 tasks");
+		expect(rendered).toContain("1 complete");
+		expect(rendered).not.toContain("first");
+		expect(rendered).not.toContain("second");
 	});
-	it("falls back to in_progress / completed signals when call args are unavailable", async () => {
-		const result = await buildThreePhaseAfterDone();
-		// Transcript rebuilds may not carry call args; the active (Alpha) phase is
-		// still derived from the in_progress task and the completion transition.
+
+	it("restores the complete task tree when manually expanded", async () => {
+		const result = await buildResult();
+		const component = todoToolRenderer.renderResult(result, { expanded: true, isPartial: false }, theme);
+		const rendered = Bun.stripANSI(component.render(100).join("\n"));
+
+		expect(rendered).toContain("first");
+		expect(rendered).toContain("second");
+		expect(rendered).toContain("third");
+	});
+
+	it("keeps failed results expanded with their error details", async () => {
+		const tool = new TodoTool(createSession());
+		const result = await tool.execute("done", { op: "done", task: "missing" });
 		const component = todoToolRenderer.renderResult(result, { expanded: false, isPartial: false }, theme);
 		const rendered = Bun.stripANSI(component.render(100).join("\n"));
-		expect(rendered).toContain("a2");
-		expect(rendered).not.toContain("b1");
-		expect(rendered).not.toContain("c1");
-	});
-	it("shows every phase fully when manually expanded", async () => {
-		const result = await buildThreePhaseAfterDone();
-		const component = todoToolRenderer.renderResult(result, { expanded: true, isPartial: false }, theme, {
-			op: "done",
-			task: "a1",
-		});
-		const rendered = Bun.stripANSI(component.render(100).join("\n"));
-		expect(rendered).toContain("b1");
-		expect(rendered).toContain("b2");
-		expect(rendered).toContain("c1");
-		expect(rendered).toContain("c2");
-	});
-	it("drops blank separator lines between phases", async () => {
-		const result = await buildThreePhaseAfterDone();
-		const component = todoToolRenderer.renderResult(result, { expanded: true, isPartial: false }, theme, {
-			op: "done",
-			task: "a1",
-		});
-		// No empty body line survives between phases.
-		expect(innerLines(component).every(line => line.length > 0)).toBe(true);
+
+		expect(rendered).toContain("Todo");
+		expect(rendered).toContain('Task "missing" not found');
 	});
 });
 
