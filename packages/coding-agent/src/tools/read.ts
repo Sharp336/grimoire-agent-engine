@@ -721,6 +721,11 @@ const readSchema = type({
 	),
 });
 
+/** Variant used when `memory.backend=off`: does not advertise `memory://`. */
+const readSchemaWithoutMemory: typeof readSchema = type({
+	path: type("string").describe("Local path, internal URI (e.g. skill://), or URL. Inline selectors are supported."),
+});
+
 export type ReadToolInput = typeof readSchema.infer;
 
 export interface ReadToolDetails {
@@ -866,7 +871,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly label = "Read";
 	readonly loadMode = "essential";
 	description: string;
-	readonly parameters = readSchema;
+	readonly parameters: typeof readSchema;
 	readonly strict = true;
 
 	readonly #autoResizeImages: boolean;
@@ -874,6 +879,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	#inspectImageActive: boolean;
 
 	constructor(private readonly session: ToolSession) {
+		this.parameters = session.settings.get("memory.backend") === "off" ? readSchemaWithoutMemory : readSchema;
 		this.#autoResizeImages = session.settings.get("images.autoResize");
 		this.#defaultLimit = Math.max(
 			1,
