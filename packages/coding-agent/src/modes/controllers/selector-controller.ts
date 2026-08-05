@@ -20,6 +20,16 @@ import {
 	resolveModelRoleValue,
 } from "../../config/model-resolver";
 import { getRoleInfo } from "../../config/model-roles";
+
+import {
+	normalizeOpenAICompatibleBaseUrl,
+	OPENAI_COMPATIBLE_API_IDS,
+	OPENAI_COMPATIBLE_LOGIN_ID,
+	probeOpenAICompatibleEndpoint,
+	validateOpenAICompatibleApi,
+	validateOpenAICompatibleProviderName,
+	writeOpenAICompatibleProvider,
+} from "../../config/openai-compatible-login";
 import { settings } from "../../config/settings";
 import { disableProvider, enableProvider } from "../../discovery";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
@@ -1642,6 +1652,98 @@ export class SelectorController {
 	}
 
 	/**
+	 * Gather and validate an OpenAI-compatible endpoint before persisting its
+	 * dynamically discovered provider configuration through the interactive login surface.
+	 */
+	async #handleOpenAICompatibleLogin(): Promise<boolean> {
+		let restored = false;
+		const restoreEditor = () => {
+			if (restored) return;
+			restored = true;
+			this.ctx.editorContainer.clear();
+			this.ctx.editorContainer.addChild(this.ctx.editor);
+			this.ctx.ui.setFocus(this.ctx.editor);
+			this.ctx.ui.requestRender();
+		};
+		const dialog = new LoginDialogComponent(this.ctx.ui, "OpenAI-compatible endpoint", (_success, message) => {
+			restoreEditor();
+			if (message) this.ctx.showStatus(message);
+		});
+		this.ctx.editorContainer.clear();
+		this.ctx.editorContainer.addChild(dialog);
+		this.ctx.ui.setFocus(dialog);
+		this.ctx.ui.requestRender();
+
+		let writeCompleted = false;
+		try {
+			const providerName = validateOpenAICompatibleProviderName(
+				await dialog.showPrompt("Provider name (models.yml key):", "my-openai-proxy"),
+			);
+			const baseUrl = normalizeOpenAICompatibleBaseUrl(
+				await dialog.showPrompt("OpenAI-compatible base URL:", "https://api.example.com/v1"),
+			);
+			const apiKey = (await dialog.showPrompt("API key:", undefined, { secret: true })).trim();
+			if (!apiKey) throw new Error("API key is required.");
+			const api = validateOpenAICompatibleApi(
+				await dialog.showSelect(
+					"API:",
+					[...OPENAI_COMPATIBLE_API_IDS],
+					OPENAI_COMPATIBLE_API_IDS.indexOf("openai-completions"),
+				),
+			);
+
+			let modelCount: number | undefined;
+			for (;;) {
+				const probe = await probeOpenAICompatibleEndpoint({ baseUrl, apiKey }, fetch, dialog.signal);
+				if (dialog.signal.aborted) return false;
+				if (probe.ok) {
+					modelCount = probe.models.length;
+					break;
+				}
+				const action = await dialog.showSelect(`${probe.error}\n\nWhat would you like to do?`, [
+					"Retry",
+					"Save anyway",
+					"Cancel",
+				]);
+				if (dialog.signal.aborted) return false;
+				if (action === "Save anyway") break;
+				if (action === "Cancel") return false;
+			}
+
+			if (dialog.signal.aborted) return false;
+			const savedProviderName = await writeOpenAICompatibleProvider(
+				{ providerName, baseUrl, apiKey, api },
+				undefined,
+				dialog.signal,
+			);
+			writeCompleted = true;
+			this.ctx.session.modelRegistry.invalidateModelsConfig();
+			await this.ctx.session.modelRegistry.refreshProvider(savedProviderName, "online");
+			const block = new TranscriptBlock();
+			block.addChild(
+				new Text(
+					theme.fg(
+						"success",
+						modelCount === undefined
+							? `${theme.status.success} Added ${savedProviderName} to models.yml; dynamic discovery will retry /models at runtime`
+							: `${theme.status.success} Added ${savedProviderName} to models.yml; probe found ${modelCount} models and dynamic discovery will keep them current`,
+					),
+					1,
+					0,
+				),
+			);
+			this.ctx.present(block);
+			return true;
+		} catch (error: unknown) {
+			if (dialog.signal.aborted && !writeCompleted) return false;
+			this.ctx.showError(`Login failed: ${error instanceof Error ? error.message : String(error)}`);
+			return false;
+		} finally {
+			restoreEditor();
+		}
+	}
+
+	/**
 	 * Run the OAuth login flow for `providerId` inside a cancellable
 	 * {@link LoginDialogComponent} that replaces the editor slot. Esc aborts:
 	 * the dialog's abort signal reaches the provider flow, any pending prompt
@@ -1810,7 +1912,11 @@ export class SelectorController {
 	async showOAuthSelector(mode: "login" | "logout", providerId?: string): Promise<void> {
 		if (providerId) {
 			if (mode === "login") {
-				await this.#handleOAuthLogin(providerId);
+				if (providerId === OPENAI_COMPATIBLE_LOGIN_ID) {
+					await this.#handleOpenAICompatibleLogin();
+				} else {
+					await this.#handleOAuthLogin(providerId);
+				}
 			} else {
 				await this.#showOAuthLogoutAccountSelector(providerId);
 			}
@@ -1838,7 +1944,11 @@ export class SelectorController {
 					selector.stopValidation();
 					done();
 					if (mode === "login") {
-						await this.#handleOAuthLogin(selectedProviderId);
+						if (selectedProviderId === OPENAI_COMPATIBLE_LOGIN_ID) {
+							await this.#handleOpenAICompatibleLogin();
+						} else {
+							await this.#handleOAuthLogin(selectedProviderId);
+						}
 					} else {
 						await this.#showOAuthLogoutAccountSelector(selectedProviderId);
 					}

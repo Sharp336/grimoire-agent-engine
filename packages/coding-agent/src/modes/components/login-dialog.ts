@@ -1,9 +1,19 @@
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
-import { Container, getKeybindings, Input, Spacer, Text, type TUI, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
+import {
+	type Component,
+	Container,
+	getKeybindings,
+	Input,
+	Spacer,
+	Text,
+	type TUI,
+	wrapTextWithAnsi,
+} from "@oh-my-pi/pi-tui";
 import { theme } from "../../modes/theme/theme";
 import { urlHyperlinkAlways, WidthAwareText } from "../../tui";
 import { openPath } from "../../utils/open";
 import { DynamicBorder } from "./dynamic-border";
+import { HookSelectorComponent } from "./hook-selector";
 
 /**
  * Login dialog component - replaces editor during OAuth login flow
@@ -15,6 +25,8 @@ export class LoginDialogComponent extends Container {
 	#abortController = new AbortController();
 	#inputResolver?: (value: string) => void;
 	#inputRejecter?: (error: Error) => void;
+	#selector?: HookSelectorComponent;
+	#promptContent: Component[] = [];
 
 	constructor(
 		tui: TUI,
@@ -60,6 +72,11 @@ export class LoginDialogComponent extends Container {
 
 	#cancel(): void {
 		this.#abortController.abort();
+		if (this.#selector) {
+			this.#contentContainer.removeChild(this.#selector);
+			this.#selector.dispose();
+			this.#selector = undefined;
+		}
 		if (this.#inputRejecter) {
 			this.#inputRejecter(new Error("Login cancelled"));
 			this.#inputResolver = undefined;
@@ -81,6 +98,7 @@ export class LoginDialogComponent extends Container {
 	 */
 	showAuth(url: string, instructions?: string, launchUrl?: string): void {
 		this.#contentContainer.clear();
+		this.#promptContent = [];
 		this.#contentContainer.addChild(new Spacer(1));
 		this.#contentContainer.addChild(
 			new WidthAwareText(
@@ -118,6 +136,8 @@ export class LoginDialogComponent extends Container {
 	 * Show input for manual code/URL entry (for callback server providers)
 	 */
 	showManualInput(prompt: string): Promise<string> {
+		if (this.#inputResolver) return Promise.reject(new Error("Login dialog is already waiting for input"));
+		this.#input.mask = false;
 		// Invalid pastes re-prompt (the OAuth callback loop calls this again), so
 		// reuse the already-mounted input instead of stacking duplicate prompt and
 		// hint lines beneath the dialog. Reset the value so each retry starts clean.
@@ -137,24 +157,59 @@ export class LoginDialogComponent extends Container {
 	}
 
 	/**
-	 * Called by onPrompt callback - show prompt and wait for input
-	 * Note: Does NOT clear content, appends to existing (preserves URL from showAuth)
+	 * Called by onPrompt callback - show prompt and wait for input.
+	 * Retains authorization content while replacing the previous prompt's controls.
 	 */
-	showPrompt(message: string, placeholder?: string): Promise<string> {
-		this.#contentContainer.addChild(new Spacer(1));
-		this.#contentContainer.addChild(new Text(theme.fg("text", message), 1, 0));
-		if (placeholder) {
-			this.#contentContainer.addChild(new Text(theme.fg("dim", `e.g., ${placeholder}`), 1, 0));
-		}
-		if (!this.#contentContainer.children.includes(this.#input)) {
-			this.#contentContainer.addChild(this.#input);
-		}
-		this.#contentContainer.addChild(new Text(theme.fg("dim", "(Escape to cancel, Enter to submit)"), 1, 0));
+	showPrompt(message: string, placeholder?: string, options?: { secret?: boolean }): Promise<string> {
+		if (this.#inputResolver) return Promise.reject(new Error("Login dialog is already waiting for input"));
+		this.#input.mask = options?.secret === true;
+		for (const child of this.#promptContent) this.#contentContainer.removeChild(child);
+		this.#promptContent = [];
+		if (this.#contentContainer.children.includes(this.#input)) this.#contentContainer.removeChild(this.#input);
+
+		const spacer = new Spacer(1);
+		const prompt = new Text(theme.fg("text", message), 1, 0);
+		const placeholderHint = placeholder ? new Text(theme.fg("dim", `e.g., ${placeholder}`), 1, 0) : undefined;
+		const submitHint = new Text(theme.fg("dim", "(Escape to cancel, Enter to submit)"), 1, 0);
+		this.#promptContent = [spacer, prompt, ...(placeholderHint ? [placeholderHint] : []), submitHint];
+		for (const child of this.#promptContent.slice(0, -1)) this.#contentContainer.addChild(child);
+		this.#contentContainer.addChild(this.#input);
+		this.#contentContainer.addChild(submitHint);
 
 		this.#input.setValue("");
 		this.#tui.requestRender();
 
 		const { promise, resolve, reject } = Promise.withResolvers<string>();
+		this.#inputResolver = resolve;
+		this.#inputRejecter = reject;
+		return promise;
+	}
+
+	/** Show a keyboard-navigable selection prompt inside the active login dialog. */
+	showSelect(message: string, options: string[], initialIndex?: number): Promise<string> {
+		if (this.#inputResolver) return Promise.reject(new Error("Login dialog is already waiting for input"));
+		for (const child of this.#promptContent) this.#contentContainer.removeChild(child);
+		this.#promptContent = [];
+		if (this.#contentContainer.children.includes(this.#input)) this.#contentContainer.removeChild(this.#input);
+		const { promise, resolve, reject } = Promise.withResolvers<string>();
+		const selector = new HookSelectorComponent(
+			message,
+			options,
+			value => {
+				if (this.#selector !== selector || !this.#inputResolver) return;
+				this.#contentContainer.removeChild(selector);
+				selector.dispose();
+				this.#selector = undefined;
+				this.#inputResolver = undefined;
+				this.#inputRejecter = undefined;
+				resolve(value);
+			},
+			() => this.#cancel(),
+			{ initialIndex },
+		);
+		this.#selector = selector;
+		this.#contentContainer.addChild(selector);
+		this.#tui.requestRender();
 		this.#inputResolver = resolve;
 		this.#inputRejecter = reject;
 		return promise;
@@ -178,8 +233,12 @@ export class LoginDialogComponent extends Container {
 		this.#tui.requestRender();
 	}
 
-	/** Route non-bracketed paste transports into the active login input. */
+	/** Route non-bracketed paste transports into the active login control. */
 	pasteText(text: string): void {
+		if (this.#selector) {
+			this.#selector.handleInput(text);
+			return;
+		}
 		this.#input.pasteText(text);
 	}
 
@@ -191,7 +250,11 @@ export class LoginDialogComponent extends Container {
 			return;
 		}
 
-		// Pass to input
+		if (this.#selector) {
+			this.#selector.handleInput(data);
+			return;
+		}
+
 		this.#input.handleInput(data);
 	}
 }

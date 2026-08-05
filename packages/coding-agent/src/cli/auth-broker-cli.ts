@@ -27,7 +27,6 @@ import {
 	listProvidersWithEnvKey,
 	type OAuthCredential,
 	type OAuthProvider,
-	type OAuthProviderInfo,
 	PASTE_CODE_LOGIN_PROVIDERS,
 	PROVIDER_REGISTRY,
 	SqliteAuthCredentialStore,
@@ -37,6 +36,14 @@ import { $which, APP_NAME, getAgentDbPath, getConfigRootDir, isEnoent, logger, V
 import { setTransports as setLoggerTransports } from "@oh-my-pi/pi-utils/logger";
 import { $ } from "bun";
 import chalk from "chalk";
+import {
+	normalizeOpenAICompatibleBaseUrl,
+	OPENAI_COMPATIBLE_LOGIN_ID,
+	probeOpenAICompatibleEndpoint,
+	validateOpenAICompatibleApi,
+	validateOpenAICompatibleProviderName,
+	writeOpenAICompatibleProvider,
+} from "../config/openai-compatible-login";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
 
 export type AuthBrokerAction = "serve" | "token" | "login" | "logout" | "status" | "import" | "migrate" | "list";
@@ -186,7 +193,15 @@ async function runLogin(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 				"Usage: omp auth-broker login <provider> --via=user@host (provider required for remote login)",
 			);
 		}
-		providerArg = await pickProviderInteractively(providers);
+		providerArg = await pickProviderInteractively([
+			...providers,
+			{ id: OPENAI_COMPATIBLE_LOGIN_ID, name: "OpenAI-compatible endpoint" },
+		]);
+	}
+	if (providerArg === OPENAI_COMPATIBLE_LOGIN_ID) {
+		if (flags.via) throw new Error("OpenAI-compatible login must run on the machine that owns models.yml.");
+		await runOpenAICompatibleLocalLogin();
+		return;
 	}
 	if (!providers.some(p => p.id === providerArg)) {
 		throw new Error(
@@ -259,16 +274,96 @@ async function runLocalLogin(provider: OAuthProvider): Promise<void> {
 	}
 }
 
+async function runOpenAICompatibleLocalLogin(): Promise<void> {
+	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+	const ask = (message: string) => promptLine(rl, `${message} `);
+	const askSecret = (message: string) => promptLine(rl, `${message} `, { secret: true });
+	try {
+		const providerName = validateOpenAICompatibleProviderName(await ask("Provider name (models.yml key):"));
+		const baseUrl = normalizeOpenAICompatibleBaseUrl(await ask("OpenAI-compatible base URL:"));
+		const apiKey = (await askSecret("API key:")).trim();
+		if (!apiKey) throw new Error("API key is required.");
+		const api = validateOpenAICompatibleApi(await ask("API (openai-completions; e.g. openai-responses):"));
+
+		let modelCount: number | undefined;
+		for (;;) {
+			const probe = await probeOpenAICompatibleEndpoint({ baseUrl, apiKey });
+			if (probe.ok) {
+				modelCount = probe.models.length;
+				break;
+			}
+			process.stderr.write(`${probe.error}\n`);
+			const action = (await ask("Press Enter to retry, or type save to save anyway:")).trim();
+			if (action.toLowerCase() === "save") break;
+		}
+
+		const savedProviderName = await writeOpenAICompatibleProvider({ providerName, baseUrl, apiKey, api });
+		process.stdout.write(
+			modelCount === undefined
+				? `Added ${savedProviderName} to models.yml. Dynamic discovery will retry /models at runtime.\n`
+				: `Added ${savedProviderName} to models.yml. Probe found ${modelCount} models; dynamic discovery will keep them current.\n`,
+		);
+	} finally {
+		rl.close();
+	}
+}
+
 /**
  * Interactive `readline` prompt that cleanly tears down on Ctrl-C / Escape so
  * cancelling a half-finished login flow doesn't leave the terminal in raw mode.
  */
-function promptLine(rl: readline.Interface, question: string): Promise<string> {
+function promptLine(rl: readline.Interface, question: string, options: { secret?: boolean } = {}): Promise<string> {
 	const { promise, resolve, reject } = Promise.withResolvers<string>();
 	const input = process.stdin as NodeJS.ReadStream;
 	const supportsRawMode = input.isTTY && typeof input.setRawMode === "function";
 	const wasRaw = supportsRawMode ? input.isRaw : false;
 	let settled = false;
+
+	if (options.secret && supportsRawMode) {
+		let value = "";
+		const onData = (data: Buffer | string) => {
+			for (const character of data.toString()) {
+				if (character === "\u0003" || character === "\u0004" || character === "\u001b") {
+					finish(() => reject(new Error("Login cancelled")));
+					return;
+				}
+				if (character === "\r" || character === "\n") {
+					finish(() => resolve(value));
+					return;
+				}
+				if (character === "\u007f" || character === "\b") {
+					value = value.slice(0, -1);
+					continue;
+				}
+				if (!/[\u0000-\u001f\u007f]/.test(character)) value += character;
+			}
+		};
+		// readline's keypress decoder stays attached to the stream, so a bare
+		// `input.resume()` would re-deliver each byte to it and echo the secret in
+		// the clear. Detach every pre-existing `data` listener for the duration of
+		// the raw read, then restore them so the next prompt works unchanged.
+		const priorDataListeners = input.rawListeners("data") as Array<(...args: unknown[]) => void>;
+		const cleanupSecret = () => {
+			input.off("data", onData);
+			input.setRawMode?.(wasRaw);
+			for (const listener of priorDataListeners) input.on("data", listener);
+			rl.resume();
+		};
+		const finish = (result: () => void) => {
+			if (settled) return;
+			settled = true;
+			cleanupSecret();
+			process.stdout.write("\n");
+			result();
+		};
+		rl.pause();
+		input.removeAllListeners("data");
+		input.setRawMode(true);
+		input.on("data", onData);
+		input.resume();
+		process.stdout.write(question);
+		return promise;
+	}
 
 	const cleanup = () => {
 		rl.off("SIGINT", onSigint);
@@ -313,7 +408,7 @@ function promptLine(rl: readline.Interface, question: string): Promise<string> {
 	return promise;
 }
 
-async function pickProviderInteractively(providers: readonly OAuthProviderInfo[]): Promise<string> {
+async function pickProviderInteractively(providers: readonly { id: string; name: string }[]): Promise<string> {
 	if (providers.length === 0) {
 		throw new Error("No OAuth providers registered");
 	}

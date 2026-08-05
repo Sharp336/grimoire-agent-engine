@@ -1,5 +1,4 @@
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
-import type { OAuthProviderInfo } from "@oh-my-pi/pi-ai/oauth/types";
 import {
 	Container,
 	extractPrintableText,
@@ -10,6 +9,7 @@ import {
 	Spacer,
 	TruncatedText,
 } from "@oh-my-pi/pi-tui";
+import { OPENAI_COMPATIBLE_LOGIN_ID } from "../../config/openai-compatible-login";
 import { settings } from "../../config/settings";
 import { theme } from "../../modes/theme/theme";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../../modes/utils/keybinding-matchers";
@@ -17,6 +17,19 @@ import type { AuthStorage, CredentialOriginKind } from "../../session/auth-stora
 import { DynamicBorder } from "./dynamic-border";
 
 const OAUTH_SELECTOR_MAX_VISIBLE = 10;
+
+interface LoginSelectorProvider {
+	id: string;
+	name: string;
+	available: boolean;
+	storeCredentialsAs?: string;
+}
+
+const OPENAI_COMPATIBLE_LOGIN_PROVIDER: LoginSelectorProvider = {
+	id: OPENAI_COMPATIBLE_LOGIN_ID,
+	name: "OpenAI-compatible endpoint",
+	available: true,
+};
 
 /**
  * Provider ids the user has disabled via settings. `/login` (login mode) hides
@@ -52,8 +65,8 @@ const ORIGIN_LABELS: Record<CredentialOriginKind, string> = {
  */
 export class OAuthSelectorComponent extends Container {
 	#listContainer: Container;
-	#allProviders: OAuthProviderInfo[] = [];
-	#filteredProviders: OAuthProviderInfo[] = [];
+	#allProviders: LoginSelectorProvider[] = [];
+	#filteredProviders: LoginSelectorProvider[] = [];
 	#searchQuery = "";
 	#selectedIndex: number = 0;
 	#hoveredIndex: number | null = null;
@@ -152,6 +165,7 @@ export class OAuthSelectorComponent extends Container {
 					!disabled.has(provider.id) &&
 					!(provider.storeCredentialsAs && disabled.has(provider.storeCredentialsAs)),
 			);
+			this.#allProviders.push(OPENAI_COMPATIBLE_LOGIN_PROVIDER);
 		}
 		this.#filteredProviders = this.#allProviders;
 	}
@@ -260,7 +274,7 @@ export class OAuthSelectorComponent extends Container {
 		return theme.fg("muted", `  ${suffix}`);
 	}
 
-	#getProviderSearchText(provider: OAuthProviderInfo): string {
+	#getProviderSearchText(provider: LoginSelectorProvider): string {
 		let text = `${provider.name} ${provider.id}`;
 		const origin = this.#authStorage.getCredentialOrigin(provider.id);
 		if (origin) {
