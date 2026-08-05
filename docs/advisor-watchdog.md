@@ -1,8 +1,10 @@
-# Advisor, WATCHDOG.md, and WATCHDOG.yml
+# Advisor, agent definitions, and WATCHDOG.md
 
 The advisor subsystem attaches one or more optional reviewer models to a session. Each advisor reviews primary-agent transcript updates, can inspect the workspace with its own tools, and injects concise advice back into the primary session.
 
-An advisor does not approve actions or mutate primary session state directly. Its default investigative toolset is `read`, `grep`, and `glob`, but a `WATCHDOG.yml` roster entry may grant any built-in — including mutating tools such as `edit`, `write`, `bash`, `eval`, and `browser`. Those tools run in an isolated advisor `ToolSession`, but they honor the session's normal approval mode and per-tool policies; grant them only when the advisor model and workspace are trusted (see [Tools and isolation](#tools-and-isolation)).
+Advisors are ordinary agent definitions — any `.md` agent in the usual discovery roots (bundled, `<active agent dir>/agents`, `.omp/agents`, extension package roots) — referenced by name. The main session lists its advisors in the `advisor.agents` setting; subagents get advisors from their own definition's `advisors:` frontmatter. An agent acting as an advisor never gets advisors of its own: advisor runtimes are plain agents without session spawning, and `task`, `hub`, and `yield` are stripped from advisor tool grants.
+
+An advisor does not approve actions or mutate primary session state directly. Its default investigative toolset is `read`, `grep`, and `glob`, but a definition's `tools:` frontmatter may grant any built-in — including mutating tools such as `edit`, `write`, `bash`, `eval`, and `browser`. Those tools run in an isolated advisor `ToolSession`, but they honor the session's normal approval mode and per-tool policies; grant them only when the advisor model and workspace are trusted (see [Tools and isolation](#tools-and-isolation)).
 
 ## Implementation files
 
@@ -21,13 +23,18 @@ An advisor does not approve actions or mutate primary session state directly. It
 
 ---
 
-## Enabling the advisor
+## Configuring advisors
 
-The subsystem requires `advisor.enabled: true`. Model selection then depends on the roster:
+The subsystem requires `advisor.enabled: true`. Which advisors run is decided per session:
 
-- Without any discovered `WATCHDOG.yml` advisor entries, OMP creates the legacy/default advisor and resolves its model from `modelRoles.advisor`.
-- With a roster, each enabled entry uses its explicit `model` when present, otherwise `modelRoles.advisor`. An unresolvable entry is reported as `no_model` without preventing other entries from running.
-- `advisors[].enabled: false` keeps an entry visible as paused but does not build its runtime.
+- The **main session** reads `advisor.agents`, an array of agent names resolved against the discovered agent roster.
+- **Subagent sessions** read the spawned definition's `advisors:` frontmatter (a CSV or YAML list of agent names); a subagent with no declared advisors gets none.
+
+Legacy fallback: a main session with `advisor.enabled: true` and an empty `advisor.agents` list still runs the default advisor, with its model resolved from `modelRoles.advisor`. Subagents have no such fallback — undeclared means none.
+
+Names resolve against the usual agent discovery roots: bundled agent definitions, user-level `<active agent dir>/agents` (`~/.omp/agent/agents` by default; relocated by `PI_CODING_AGENT_DIR`), project-level `.omp/agents`, and extension package roots. A name that matches no definition is skipped with a warning notice.
+
+Each referenced definition is wrapped in the advisor role ([`createAdvisorAgent`](../packages/coding-agent/src/session/session-advisors.ts)): its model, thinking level, tools, and body survive as the advisor's identity and specialization, while driving-agent concerns are dropped (see [The advisor role](#the-advisor-role)).
 
 Example:
 
@@ -37,9 +44,37 @@ modelRoles:
 
 advisor:
   enabled: true
+  agents:
+    - architecture-reviewer
+    - security-spotter
 ```
 
-Model selectors use normal role/model resolution, including provider-prefixed ids, canonical ids, fallback lists, and optional thinking suffixes.
+Model selectors use normal role/model resolution, including provider-prefixed ids, canonical ids, fallback lists, `@role` aliases, and optional thinking suffixes.
+
+### The advisor role
+
+Any agent definition is advisor-usable; the role wrapper changes how the definition is interpreted:
+
+- **Honored frontmatter.** `model` (string list; `@role` aliases and fallback lists work). Omitted → the `modelRoles.advisor` chain; present but unresolvable → that advisor is reported as `no_model` without preventing other advisors from running. `thinking-level` is honored: it beats the role default but loses to an explicit `:level` suffix on a `model` pattern. `tools` selects the investigative grant, defaulting to `read`, `grep`, and `glob`; `advise` is always injected. `name`/`description` label the advisor in status output and transcripts.
+- **Ignored frontmatter.** `spawns`, `prewalk`, `output`, `read-summarize`, and `autoload-skills` have no effect in the advisor role.
+- **Recursion cut.** `task`, `hub`, and `yield` are stripped from the advisor's tool grant even when listed in `tools:` — an advisor is a plain agent with no session spawning, so it can never grow subagents (and therefore advisors) of its own.
+- **System prompt.** The advisor baseline, the primary's project context, the discovered `WATCHDOG.md` blocks, and the definition's body.
+
+A definition that both specializes as a reviewer and opts its subagents into advisory review:
+
+```markdown
+---
+name: code-reviewer
+description: Reviews diffs for cross-module coupling and public-API growth.
+model:
+  - anthropic/claude-sonnet-4-5:medium
+thinking-level: high
+tools: [read, grep, glob]
+advisors: [architecture-reviewer, security-spotter]
+---
+
+Watch cross-module coupling and public-API growth.
+```
 
 `tier.advisor` controls service tier for all advisors. It defaults to `none` (standard processing); `inherit` follows the primary's live per-family tier, including `/fast` changes. Concrete values (`auto`, `default`, `flex`, `scale`, `priority`) are applied only when the advisor model's provider family supports them.
 
@@ -64,15 +99,17 @@ Slash commands:
 | `/advisor status`    | Show each advisor's runtime state, model, context usage, token usage, and cost.                                                      |
 | `/advisor dump`      | Copy the compact transcript (all active advisors when a roster is present) to the clipboard.                                         |
 | `/advisor dump raw`  | Copy the full dump, including system prompt, tools, thinking, and calls.                                                             |
-| `/advisor configure` | Open the interactive TUI editor for project- or user-level `WATCHDOG.yml`. Non-TUI command hosts report that the editor is TUI-only. |
+| `/advisor configure` | Open an interactive agent picker over the discovered roster; the selection is written to `advisor.agents`. Non-TUI command hosts report that the picker is TUI-only. |
 
-If the subsystem is enabled but no legacy/default or roster model resolves, status reports the configured advisors as inactive/`no_model`.
+If the subsystem is enabled but no advisor model resolves, status reports the configured advisors as inactive/`no_model`.
 
 ## What the advisor sees
 
 At each primary update, `AdvisorRuntime` receives only the new transcript delta since its previous update. Deltas are rendered with reasoning, tool intent, watched-role markers, and expanded primary constraint context, so advisors can review assistant reasoning as well as user-visible text, tool calls, and tool results. Provider-bound messages and tool arguments/results are passed through the session secret obfuscator before reaching the advisor model.
 
 Most hidden `custom` messages collapse to a one-line summary in the delta. The primary agent's injected constraint context (`plan-mode-context` and `plan-mode-reference`) is instead rendered verbatim inside an XML-escaped `<primary-context kind="…">` wrapper, while repeated copies are deduplicated. Advisors also receive the primary's discovered project context files (`AGENTS.md` and related standing instructions) in a `<project-context>` system-prompt block. If the session cwd is outside Git with exactly one direct child repository, an additional watchdog block tells the advisor which child is the active project.
+
+An advisor's system prompt is the advisor baseline (`src/prompts/advisor/system.md`) plus the primary's project context, the discovered `WATCHDOG.md` blocks, and the agent definition's body as its specialization.
 
 Advisor messages already injected into the primary transcript are filtered out before the next delta is rendered. This prevents the advisor from recursively reviewing its own advice.
 
@@ -97,7 +134,7 @@ Every advisor has the `advise` tool for surfacing notes into the primary transcr
 - `grep`
 - `glob`
 
-A `WATCHDOG.yml` roster entry may select any subset of built-ins that were actually constructed for the session (a factory that returned `null`, such as unavailable `lsp`, is absent). An explicit empty `tools: []` grants no investigative tools; `advise` remains available. Unknown-only lists are dropped with a warning and currently fall back to the default subset. Grantable names include mutating tools such as `edit`, `write`, `bash`, `eval`, `browser`, `debug`, `ast_edit`, `task`, `hub`, and memory tools.
+A definition's `tools:` frontmatter may select any subset of built-ins that were actually constructed for the session (a factory that returned `null`, such as unavailable `lsp`, is absent). An explicit empty `tools: []` grants no investigative tools; `advise` remains available. Unknown-only lists are dropped with a warning and currently fall back to the default subset. Grantable names include mutating tools such as `edit`, `write`, `bash`, `eval`, `browser`, `debug`, `ast_edit`, and memory tools; `task`, `hub`, and `yield` are always stripped (the recursion cut, see [The advisor role](#the-advisor-role)).
 
 Advisor tools are built against the isolated advisor `ToolSession` and wrapped with `ExtensionToolWrapper`, so `tools.approvalMode`, per-tool approval policies, and `autoApprove` apply just as they do to registry tools. Cursor's server-side exec bridge uses the same approval context and only exposes delete/edit/search capabilities when the corresponding advisor grant exists.
 
@@ -109,7 +146,7 @@ The `advise` tool accepts one note and an optional severity:
 | `concern`       | Interrupting steering message when the delivery constraints below permit it. A late terminal-answer `concern` is preserved as a visible card instead.                | Material risk, likely wrong direction, missing constraint, hallucinated API. |
 | `blocker`       | Interrupting steering message when the delivery constraints below permit it. Unlike a `concern`, a terminal answer alone does not prevent it from triggering a turn. | Continuing would clearly waste work or produce broken output.                |
 
-Accepted notes are rendered into the primary transcript as XML-escaped `<advisory>` elements. Named roster advisors add an `advisor` attribute:
+Accepted notes are rendered into the primary transcript as XML-escaped `<advisory>` elements. Named advisors (anything but the legacy default) add an `advisor` attribute:
 
 ```text
 <advisory advisor="Architecture" severity="concern" guidance="weigh, don't blindly obey">
@@ -253,51 +290,26 @@ Especially pay attention to:
 
 Later project files sit closer to the end of the advisor prompt, so narrower directory guidance is more prominent than broad ancestor guidance.
 
-## WATCHDOG.yml
+## Migrating from WATCHDOG.yml
 
-`WATCHDOG.yml` (or `WATCHDOG.yaml`) is the advisor roster. Where `WATCHDOG.md` supplies review priorities, `WATCHDOG.yml` declares the advisors themselves — one entry per name, each with its own enable flag, model, tool grant, and specialization prompt. The interactive `/advisor configure` overlay edits this file in place. Files that fail to parse or fail schema validation are logged and skipped so one bad project config cannot kill the session.
+`WATCHDOG.yml`/`WATCHDOG.yaml` rosters are no longer read. When such a file is found, OMP logs a startup warning pointing here; the file itself is inert. Advisors are now agent definitions referenced by name — the main session lists them in `advisor.agents`, and subagents declare them in their definition's `advisors:` frontmatter.
 
-Example:
+To migrate an existing roster, turn each entry into an agent definition (bundled, `<active agent dir>/agents`, `.omp/agents`, or an extension package root):
 
-```yaml
-instructions: |
-  Everyone: prefer diffs that keep tests unified.
+| Old `WATCHDOG.yml` field | Now |
+| ------------------------ | --- |
+| `advisors[].name` | the agent name referenced from `advisor.agents` / `advisors:` frontmatter |
+| `advisors[].model` | `model:` frontmatter on the agent definition (omit to keep `modelRoles.advisor`) |
+| `advisors[].tools` | `tools:` frontmatter on the agent definition |
+| `advisors[].instructions` | the agent definition body |
+| `advisors[].enabled: false` | remove the name from the referencing list |
+| top-level `instructions` | move into `WATCHDOG.md` (it is appended to every advisor's system prompt) |
 
-advisors:
-  - name: Architecture
-    enabled: true
-    model: anthropic/claude-sonnet-4-5:medium
-    tools: [read, grep, glob]
-    instructions: |
-      Watch cross-module coupling and public-API growth.
-
-  - name: Fixer
-    enabled: false
-    model: anthropic/claude-sonnet-4-5:high
-    tools: [read, grep, glob, edit, bash]
-    instructions: |
-      You may edit and run tests to prove a fix locally, then advise.
-```
-
-Fields:
-
-- `instructions` (top level): shared prompt prepended to every advisor's system prompt alongside `WATCHDOG.md`. Concatenated across all discovered `WATCHDOG.yml` files.
-- `advisors[].name`: human label; slugified for the session id and its `__advisor.<slug>.jsonl` filename. Duplicate slugs across files are resolved by the same specificity rule as `WATCHDOG.md` discovery (project leaf > project ancestor > user).
-- `advisors[].enabled`: optional per-advisor switch, default `true`. `false` leaves the advisor visible as paused in status/configuration.
-- `advisors[].model`: optional model selector with optional `:level` thinking suffix (e.g. `x-ai/grok-code-fast:high`). Omitted → the advisor uses `modelRoles.advisor`.
-- `advisors[].tools`: optional list of built-in tool names to grant. Omitted → the default `read`/`grep`/`glob` subset; explicit `[]` → no investigative tools. Any name in [`BUILTIN_TOOL_NAMES`](../packages/coding-agent/src/tools/builtin-names.ts) is accepted, including mutating tools. Legacy aliases (`search`→`grep`, `find`→`glob`) are normalized. Unknown names are dropped with a warning; if that leaves a nonempty input with no valid names, the implementation currently treats the result as omitted and uses the default subset.
-- `advisors[].instructions`: this advisor's specialization, appended after the shared baseline. Both instruction fields expand `@path` imports like `WATCHDOG.md`.
-
-### Discovery locations
-
-`WATCHDOG.yml`/`WATCHDOG.yaml` share the same user + project search path as `WATCHDOG.md`: the user-level `<active agent dir>/WATCHDOG.yml` plus every `WATCHDOG.yml`/`.omp/WATCHDOG.yml` encountered while walking from `cwd` up to the repository root (or the home directory when no repo root is found). All discovered files are loaded together; a more-specific file (project leaf > project ancestor > user) replaces an earlier entry with the same advisor slug.
+The old `advisor.subagents` setting is gone: definitions decide, and the default of no subagent advisors matches the old `advisor.subagents: false` default.
 
 ## Subagents
 
-`advisor.subagents` controls whether spawned task/eval subagents also get an advisor runtime.
-
-- `false` (default): only the main session can run an advisor.
-- `true`: eligible subagent sessions build their own advisor subsystem with the same settings/model-role resolution, then rerun both `WATCHDOG.md` and `WATCHDOG.yml` discovery for that subagent session's `cwd` and agent directory.
+Subagents get advisors from their own definition's `advisors:` frontmatter — a CSV or YAML list of agent names resolved against the same discovered roster. A subagent whose definition declares no advisors gets none; there is no global switch anymore (the `advisor.subagents` setting was removed, and its old `false` default is the behavior for every undeclared subagent).
 
 Subagent advisors remain isolated from the subagent's primary tool session in the same way the main advisor is isolated from the main agent.
 
@@ -319,7 +331,7 @@ The advisor is a passive reviewer with its own model usage, so — like a task s
 
 - legacy/default advisor: `<session>/__advisor.jsonl`
 - named advisor: `<session>/__advisor.<slug>.jsonl`
-- subagent advisor (`advisor.subagents: true`): `<session>/<SubId>/__advisor[.<slug>].jsonl`
+- subagent advisor (from the definition's `advisors:` frontmatter): `<session>/<SubId>/__advisor[.<slug>].jsonl`
 
 Paths derive from the owning session file (not the shared artifacts root), so each primary/subagent advisor writes a distinct file. The reserved `__advisor` stem cannot collide with a task subagent id.
 

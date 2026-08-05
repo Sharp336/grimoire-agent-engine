@@ -41,7 +41,6 @@ import {
 	ADVISOR_DEFAULT_TOOL_NAMES,
 	AdviseTool,
 	type AdvisorAgent,
-	type AdvisorConfig,
 	AdvisorEmissionGuard,
 	type AdvisorMessageDetails,
 	type AdvisorNote,
@@ -76,6 +75,8 @@ import { estimateToolSchemaTokens } from "../modes/utils/context-usage";
 import type { PlanModeState } from "../plan-mode/state";
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
 import type { SecretObfuscator } from "../secrets/obfuscator";
+import { getAgent } from "../task/discovery";
+import type { AgentDefinition } from "../task/types";
 import {
 	concreteThinkingLevel,
 	resolveThinkingLevelForModel,
@@ -169,12 +170,32 @@ interface AdvisorCompactionSummaryMessage extends CompactionSummaryMessage {
 }
 
 interface AdvisorRuntimeDescriptor {
-	config: AdvisorConfig;
+	/** The roster definition wrapped in the advisor role; undefined for the legacy default advisor. */
+	agent: AgentDefinition | undefined;
 	name: string;
 	slug: string;
 	model: Model;
 	thinkingLevel: ThinkingLevel;
 	signature: string;
+}
+
+/**
+ * Tools that would let an advisor re-enter session spawning. Stripped from
+ * advisor grants so an agent acting as an advisor can never grow subagents —
+ * and therefore advisors — of its own (the recursion cut).
+ */
+const ADVISOR_STRIPPED_TOOL_NAMES: Record<string, true> = { task: true, hub: true, yield: true };
+
+/**
+ * Wrap an agent definition in the advisor role (the same shape
+ * `createPlanModeAgent` uses for plan mode): identity, system prompt, model,
+ * thinking level and investigative tools survive; driving-agent concerns —
+ * spawning, prewalk, structured output — are dropped so the advisor stays a
+ * passive observer of its host session.
+ */
+export function createAdvisorAgent(agent: AgentDefinition): AgentDefinition {
+	const tools = agent.tools?.filter(tool => !ADVISOR_STRIPPED_TOOL_NAMES[tool]);
+	return { ...agent, tools, spawns: undefined, prewalk: undefined, output: undefined };
 }
 
 /** Inputs that configure the advisor roster owned by a session. */
@@ -212,9 +233,16 @@ export interface SessionAdvisorsOptions {
 	 */
 	mcpResources?: CursorMcpResourceAdapter;
 	watchdogPrompt?: string;
-	sharedInstructions?: string;
 	contextPrompt?: string;
-	configs?: AdvisorConfig[];
+	/**
+	 * Advisor names to attach: the `advisor.agents` setting for the main
+	 * session, the spawned definition's `advisors` frontmatter for subagents.
+	 * Empty/undefined on the main session falls back to the legacy default
+	 * advisor on the `advisor` role; on subagents it means no advisors.
+	 */
+	agentNames?: string[];
+	/** `discoverAgents` roster the advisor names resolve against. */
+	agentRoster?: AgentDefinition[];
 	streamFn?: StreamFn;
 	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
 	/** Advisor spend already persisted for this session, restored on resume. */
@@ -289,12 +317,12 @@ export class SessionAdvisors {
 	#advisorGetToolContext: SessionAdvisorsOptions["getToolContext"];
 	#advisorMcpResources: SessionAdvisorsOptions["mcpResources"];
 	#advisorWatchdogPrompt: string | undefined;
-	#advisorSharedInstructions: string | undefined;
 	#advisorContextPrompt: string | undefined;
 	#advisorStreamFn: StreamFn | undefined;
 	#transformProviderContext: ((context: Context, model: Model) => Context | Promise<Context>) | undefined;
 	#advisors: ActiveAdvisor[] = [];
-	#advisorConfigs: AdvisorConfig[] | undefined;
+	#advisorAgentNames: string[] | undefined;
+	#advisorAgentRoster: AgentDefinition[] | undefined;
 	#advisorStatuses = new Map<string, { name: string; status: AdvisorRuntimeStatus }>();
 	#advisorProviderSessionIds = new Map<string, string>();
 	#advisorCosts = new Map<string, number>();
@@ -315,9 +343,9 @@ export class SessionAdvisors {
 		this.#advisorGetToolContext = options.getToolContext;
 		this.#advisorMcpResources = options.mcpResources;
 		this.#advisorWatchdogPrompt = options.watchdogPrompt;
-		this.#advisorSharedInstructions = options.sharedInstructions;
 		this.#advisorContextPrompt = options.contextPrompt;
-		this.#advisorConfigs = options.configs;
+		this.#advisorAgentNames = options.agentNames;
+		this.#advisorAgentRoster = options.agentRoster;
 		this.#advisorStreamFn = options.streamFn;
 		this.#transformProviderContext = options.transformProviderContext;
 		if (options.initialCosts) this.#advisorCosts = new Map(options.initialCosts);
@@ -549,12 +577,24 @@ export class SessionAdvisors {
 	}
 
 	#resolveAdvisorRuntimeDescriptors(emitWarnings: boolean): AdvisorRuntimeDescriptor[] {
-		const legacy = !this.#advisorConfigs?.length;
-		const roster: AdvisorConfig[] = legacy ? [{ name: "default" }] : this.#advisorConfigs!;
+		// The legacy default advisor is a main-session compatibility path only:
+		// a subagent with no advisors declared in its definition gets none.
+		const legacy = !this.#advisorAgentNames?.length && this.#host.agentKind() === "main";
+		const names = legacy ? ["default"] : (this.#advisorAgentNames ?? []);
 		const descriptors: AdvisorRuntimeDescriptor[] = [];
 		const usedSlugs = new Set<string>();
-		for (const config of roster) {
-			let slug = legacy ? "" : slugifyAdvisorName(config.name);
+		for (const name of names) {
+			const definition = legacy ? undefined : getAgent(this.#advisorAgentRoster ?? [], name);
+			if (!legacy && !definition) {
+				if (emitWarnings) {
+					this.#host.emitNotice("warning", `Advisor "${name}": no matching agent definition`, "advisor");
+				}
+				continue;
+			}
+			// Wrap the roster definition in the advisor role: identity, prompt,
+			// model and investigative tools survive; driving-agent concerns do not.
+			const agent = definition ? createAdvisorAgent(definition) : undefined;
+			let slug = legacy ? "" : slugifyAdvisorName(name);
 			if (slug) {
 				let candidate = slug;
 				let n = 2;
@@ -562,27 +602,24 @@ export class SessionAdvisors {
 				slug = candidate;
 				usedSlugs.add(slug);
 			}
-			// Per-advisor toggle: skip disabled advisors but keep them in the
-			// status map so they show `○` rather than disappearing.
-			if (config.enabled === false) {
-				this.#advisorStatuses.set(slug, { name: config.name, status: "paused" });
-				continue;
-			}
 
-			// Resolve the advisor's model: an explicit `model` override wins; else the
-			// `advisor` role chain. A model that fails to resolve skips just this advisor.
+			// Resolve the advisor's model: the definition's `model` patterns win;
+			// else the `advisor` role chain. A model that fails to resolve skips
+			// just this advisor.
 			let model: Model | undefined;
 			let thinkingLevel: ThinkingLevel | undefined;
-			if (config.model) {
-				const resolved = resolveModelOverride([config.model], this.#host.modelRegistry, this.#host.settings);
+			let explicitPatternLevel = false;
+			if (agent?.model?.length) {
+				const resolved = resolveModelOverride(agent.model, this.#host.modelRegistry, this.#host.settings);
 				model = resolved.model;
 				thinkingLevel = concreteThinkingLevel(resolved.thinkingLevel);
+				explicitPatternLevel = resolved.explicitThinkingLevel;
 				if (!model) {
-					this.#advisorStatuses.set(slug, { name: config.name, status: "no_model" });
+					this.#advisorStatuses.set(slug, { name, status: "no_model" });
 					if (emitWarnings) {
 						this.#host.emitNotice(
 							"warning",
-							`Advisor "${config.name}": no model matched "${config.model}"`,
+							`Advisor "${name}": no model matched "${agent.model.join(", ")}"`,
 							"advisor",
 						);
 					}
@@ -591,16 +628,21 @@ export class SessionAdvisors {
 			} else {
 				const sel = resolveAdvisorRoleSelection(this.#host.settings, this.#host.modelRegistry.getAvailable());
 				if (!sel) {
-					this.#advisorStatuses.set(slug, { name: config.name, status: "no_model" });
+					this.#advisorStatuses.set(slug, { name, status: "no_model" });
 					if (emitWarnings) {
 						logger.debug("advisor enabled but no model assigned to the 'advisor' role; advisor inactive", {
-							advisor: config.name,
+							advisor: name,
 						});
 					}
 					continue;
 				}
 				model = sel.model;
 				thinkingLevel = concreteThinkingLevel(sel.thinkingLevel);
+			}
+			// The definition's own thinking level beats the role/pattern default
+			// but loses to an explicit `:level` suffix on its model pattern.
+			if (agent?.thinkingLevel !== undefined && !explicitPatternLevel) {
+				thinkingLevel = concreteThinkingLevel(agent.thinkingLevel);
 			}
 			// Clamp the effort against the resolved model. Historically we defaulted
 			// to `ThinkingLevel.Medium` unconditionally, which threw at first stream
@@ -619,25 +661,29 @@ export class SessionAdvisors {
 			// order matches the configured roster even when earlier advisors were
 			// skipped as paused/no_model. The build loop overwrites this to "running"
 			// without changing insertion order.
-			this.#advisorStatuses.set(slug, { name: config.name, status: "running" });
+			this.#advisorStatuses.set(slug, { name, status: "running" });
 			descriptors.push({
-				config,
-				name: config.name,
+				agent,
+				name,
 				slug,
 				model,
 				thinkingLevel: advisorThinkingLevel,
-				signature: this.#advisorRuntimeSignature(config, slug, model, advisorThinkingLevel),
+				signature: this.#advisorRuntimeSignature(agent, name, slug, model, advisorThinkingLevel),
 			});
 		}
 		return descriptors;
 	}
 
-	#advisorRuntimeSignature(config: AdvisorConfig, slug: string, model: Model, thinkingLevel: ThinkingLevel): string {
-		const tools = config.tools?.length ? config.tools.join("\u001e") : "";
-		const instructions = config.instructions?.trim() ?? "";
-		return [config.name, slug, formatModelStringWithRouting(model), thinkingLevel, tools, instructions].join(
-			"\u001f",
-		);
+	#advisorRuntimeSignature(
+		agent: AgentDefinition | undefined,
+		name: string,
+		slug: string,
+		model: Model,
+		thinkingLevel: ThinkingLevel,
+	): string {
+		const tools = agent?.tools?.length ? agent.tools.join("\u001e") : "";
+		const instructions = agent?.systemPrompt.trim() ?? "";
+		return [name, slug, formatModelStringWithRouting(model), thinkingLevel, tools, instructions].join("\u001f");
 	}
 
 	#advisorRuntimeMatchesCurrentConfig(): boolean {
@@ -653,7 +699,6 @@ export class SessionAdvisors {
 		if (this.#host.isDisposed()) return false;
 		if (this.#advisors.length > 0) return true;
 		if (!this.#advisorEnabled) return false;
-		if (this.#host.agentKind() !== "main" && !this.#host.settings.get("advisor.subagents")) return false;
 
 		// Rebuild the status map from scratch so removed/renamed advisors don't
 		// leave stale entries. #resolveAdvisorRuntimeDescriptors populates every
@@ -679,7 +724,7 @@ export class SessionAdvisors {
 
 		for (const descriptor of descriptors) {
 			const {
-				config,
+				agent: advisorDef,
 				slug,
 				model: advisorModel,
 				name: advisorName,
@@ -690,15 +735,17 @@ export class SessionAdvisors {
 			const emissionGuard = new AdvisorEmissionGuard();
 			const adviseTool = new AdviseTool((note, severity) => this.#routeAdvice(advisorRef, note, severity));
 
-			// `#advisorWatchdogPrompt` already carries WATCHDOG.md + YAML shared
-			// instructions; `config.instructions` adds this advisor's specialization.
+			// The advisor baseline plus shared context blocks; the wrapped
+			// definition's own prompt adds this advisor's specialization.
 			const systemPrompt = [advisorSystemPrompt];
 			if (this.#advisorContextPrompt) systemPrompt.push(this.#advisorContextPrompt);
 			if (this.#advisorWatchdogPrompt) systemPrompt.push(this.#advisorWatchdogPrompt);
-			if (this.#advisorSharedInstructions) systemPrompt.push(this.#advisorSharedInstructions);
-			if (config.instructions?.trim()) systemPrompt.push(config.instructions.trim());
+			if (advisorDef?.systemPrompt.trim()) systemPrompt.push(advisorDef.systemPrompt.trim());
 
-			const names = config.tools === undefined ? ADVISOR_DEFAULT_TOOL_NAMES : new Set(config.tools);
+			// `createAdvisorAgent` already stripped spawning tools (`task`/`hub`/
+			// `yield`) from the definition's grant — an agent acting as an
+			// advisor never grows advisors of its own.
+			const names = advisorDef?.tools === undefined ? ADVISOR_DEFAULT_TOOL_NAMES : new Set(advisorDef.tools);
 			const tools = (this.#advisorTools ?? []).filter(t => names.has(t.name));
 			const advisorLoopTools: AgentTool<any>[] = [adviseTool, ...tools];
 			const advisorToolMap = new Map<string, AgentTool<any>>();
@@ -1567,16 +1614,15 @@ export class SessionAdvisors {
 	}
 
 	/**
-	 * Replace the live advisor roster from an edited `WATCHDOG.yml` (the `/advisor
-	 * configure` save path). Swaps the configs + shared baseline, then rebuilds the
-	 * runtimes in place so the change applies without a restart. When the advisor is
-	 * disabled the new configs are simply stored for the next enable.
+	 * Replace the live advisor roster (the `/advisor configure` save path).
+	 * Swaps the name list, then rebuilds the runtimes in place so the change
+	 * applies without a restart. When the advisor is disabled the new names
+	 * are simply stored for the next enable.
 	 *
 	 * @returns the number of advisors active after the rebuild.
 	 */
-	applyAdvisorConfigs(advisors: AdvisorConfig[], sharedInstructions: string | undefined): number {
-		this.#advisorConfigs = advisors;
-		this.#advisorSharedInstructions = sharedInstructions;
+	applyAdvisorAgents(names: string[]): number {
+		this.#advisorAgentNames = names;
 		if (!this.#advisorEnabled) return 0;
 		this.#stopAdvisorRuntime();
 		this.#buildAdvisorRuntime(true);

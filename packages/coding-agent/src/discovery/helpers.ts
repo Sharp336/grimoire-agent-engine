@@ -236,6 +236,7 @@ export interface ParsedAgentFields {
 	description: string;
 	tools?: string[];
 	spawns?: string[] | "*";
+	advisors?: string[];
 	model?: string[];
 	output?: unknown;
 	thinkingLevel?: ConfiguredThinkingLevel;
@@ -286,6 +287,10 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		spawns = "*";
 	}
 
+	// Advisors: name references into the same discovery roster, resolved when
+	// the session for this agent is built.
+	const advisors = parseArrayOrCSV(frontmatter.advisors);
+
 	const output = frontmatter.output !== undefined ? frontmatter.output : undefined;
 	const rawThinkingLevel =
 		typeof frontmatter.thinkingLevel === "string"
@@ -312,6 +317,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		description,
 		tools,
 		spawns,
+		advisors,
 		model,
 		output,
 		thinkingLevel,

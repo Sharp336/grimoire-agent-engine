@@ -362,6 +362,13 @@ export interface AgentDefinition {
 	systemPrompt: string;
 	tools?: string[];
 	spawns?: string[] | "*";
+	/**
+	 * Names of agents from the same discovery roster that observe this agent as
+	 * advisors while it runs (the main session's equivalent is the
+	 * `advisor.agents` setting). Any agent definition is advisor-usable; an
+	 * agent acting as an advisor never gets advisors of its own.
+	 */
+	advisors?: string[];
 	model?: string[];
 	thinkingLevel?: ConfiguredThinkingLevel;
 	output?: unknown;

@@ -81,7 +81,9 @@ describe("settings layout", () => {
 	});
 
 	it("hides advisor dependent settings when advisor is disabled", () => {
-		const advisorDependentPaths: SettingPath[] = ["advisor.subagents", "advisor.syncBacklog", "advisor.immuneTurns"];
+		// `advisor.agents` is config-file only (a free-form array without declared
+		// options), so only the toggleable advisor settings render in the panel.
+		const advisorDependentPaths: SettingPath[] = ["advisor.syncBacklog", "advisor.immuneTurns"];
 		const advisorDependentPathSet = new Set(advisorDependentPaths);
 		const defs = getSettingsForTab("model").filter(def => advisorDependentPathSet.has(def.path));
 

@@ -47,7 +47,8 @@ export interface ConfigCandidate {
  * `.omp/<F>` for each given filename — and return the readable candidates with
  * their raw content, sorted user-first then project ancestor→leaf (depth
  * descending, so the leaf directory is most specific/last). Shared by
- * {@link discoverWatchdogFiles} and `discoverAdvisorConfigs`. Content is returned
+ * {@link discoverWatchdogFiles} and the legacy WATCHDOG.yml detection in the
+ * session bootstrap. Content is returned
  * verbatim (no `@import` expansion); callers expand what they need.
  */
 export async function collectConfigCandidates(

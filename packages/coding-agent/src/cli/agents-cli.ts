@@ -60,6 +60,7 @@ function toFrontmatter(agent: AgentDefinition): Record<string, unknown> {
 
 	if (agent.tools && agent.tools.length > 0) frontmatter.tools = agent.tools;
 	if (agent.spawns !== undefined) frontmatter.spawns = agent.spawns;
+	if (agent.advisors && agent.advisors.length > 0) frontmatter.advisors = agent.advisors;
 	if (agent.model && agent.model.length > 0) frontmatter.model = agent.model;
 	if (agent.thinkingLevel) frontmatter.thinkingLevel = agent.thinkingLevel;
 	if (agent.output !== undefined) frontmatter.output = agent.output;

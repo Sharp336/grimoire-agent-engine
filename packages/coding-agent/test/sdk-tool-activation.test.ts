@@ -831,22 +831,40 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		const tempDir = makeTempDir();
 		const target = path.join(tempDir, "advisor-write.txt");
 
-		// An advisor only builds once a model resolves for it, and both the
-		// explicit override and the `advisor` role chain resolve against
-		// `modelRegistry.getAvailable()` — the models this machine holds auth
-		// for. Grant the suite's isolated storage a key and name the model
-		// outright, or the roster silently resolves to `no_model` wherever no
-		// provider is configured (CI) while passing on a developer box whose
-		// environment happens to carry provider keys.
+		// The advisor roster is the discovered agent roster, so the mutating
+		// advisor is a project agent definition granting `write` (the default
+		// advisor grant is read-only read/grep/glob). Its `gpt-4o-mini` model
+		// pattern resolves against `modelRegistry.getAvailable()` — the models
+		// this machine holds auth for. Grant the suite's isolated storage a key
+		// and name the model outright, or the roster silently resolves to
+		// `no_model` wherever no provider is configured (CI) while passing on a
+		// developer box whose environment happens to carry provider keys.
+		fs.mkdirSync(path.join(tempDir, ".omp", "agents"), { recursive: true });
+		fs.writeFileSync(
+			path.join(tempDir, ".omp", "agents", "writer.md"),
+			[
+				"---",
+				"name: writer",
+				"description: Advisor granted the write tool",
+				"tools:",
+				"  - write",
+				"model:",
+				"  - gpt-4o-mini",
+				"---",
+				"",
+			].join("\n"),
+		);
+
 		await withProviderAuth(["openai"], async () => {
 			const { session } = await createAgentSession({
 				...baseOptions(tempDir),
-				settings: Settings.isolated({ "advisor.enabled": true, "tools.approval": { write: "deny" } }),
+				settings: Settings.isolated({
+					"advisor.enabled": true,
+					"advisor.agents": ["writer"],
+					"tools.approval": { write: "deny" },
+				}),
 			});
 			try {
-				// The default advisor roster is read-only (read/grep/glob); the
-				// reviewed hole needs one actually granted a mutating tool.
-				session.applyAdvisorConfigs([{ name: "writer", tools: ["write"], model: "gpt-4o-mini" }], undefined);
 				const advisor = session.getAdvisorAgent();
 				if (!advisor) throw new Error("expected an advisor agent");
 				const writeTool = advisor.state.tools?.find(tool => tool.name === "write");

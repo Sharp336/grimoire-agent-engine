@@ -1782,6 +1782,13 @@ export class Settings {
 		if (tierTouched) raw.tier = tierObj;
 		delete raw.fastModeScope;
 
+		// advisor.subagents is gone: subagents now get advisors from their own
+		// definition's `advisors` frontmatter, not a global blanket toggle.
+		if (isRecord(raw.advisor) && "subagents" in raw.advisor) {
+			delete raw.advisor.subagents;
+		}
+		delete raw["advisor.subagents"];
+
 		// v17 renames that used to nest under a boolean parent path:
 		//   dev.autoqa.consent -> dev.autoqaConsent
 		//   todo.reminders.max -> todo.remindersMax

@@ -5,14 +5,7 @@ import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
 import { Loader, Spacer, setTuiTight, Text } from "@oh-my-pi/pi-tui";
-import { getAgentDbPath, getAgentDir, getProjectDir, normalizePathForComparison } from "@oh-my-pi/pi-utils";
-import {
-	type AdvisorConfigScope,
-	discoverAdvisorConfigs,
-	loadWatchdogConfigFile,
-	resolveAdvisorConfigEditPath,
-	saveWatchdogConfigFile,
-} from "../../advisor";
+import { getAgentDbPath, getProjectDir, normalizePathForComparison } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../../capability";
 import {
 	formatModelSelectorValue,
@@ -60,6 +53,7 @@ import {
 	toResetUsageAccounts,
 } from "../../slash-commands/helpers/reset-usage";
 import { toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
+import { discoverAgents } from "../../task/discovery";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -77,9 +71,8 @@ import { AskTool, type AskToolDetails, type AskToolInput } from "../../tools/ask
 import { shortenPath } from "../../tools/render-utils";
 import { ToolAbortError } from "../../tools/tool-errors";
 import { copyToClipboard } from "../../utils/clipboard";
-import { repo } from "../../utils/git";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
-import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "../components/advisor-config";
+import { AdvisorAgentsPickerComponent, type AdvisorAgentsPickerDeps } from "../components/advisor-config";
 import { AgentDashboard } from "../components/agent-dashboard";
 import { AgentHubOverlayComponent } from "../components/agent-hub";
 import { AssistantMessageComponent } from "../components/assistant-message";
@@ -265,20 +258,8 @@ export class SelectorController {
 
 	showAdvisorConfigure(): void {
 		const cwd = this.ctx.sessionManager.getCwd();
-		const agentDir = getAgentDir() ?? getProjectDir();
-		const initialScope: AdvisorConfigScope = "project";
 		void (async () => {
-			// "Project" scope edits the repo-root WATCHDOG.yml (the project-level file
-			// discovery walks), not the launch subdir — `getProjectDir()` is only cwd.
-			let projectDir = cwd;
-			try {
-				projectDir = (await repo.root(cwd)) ?? cwd;
-			} catch {
-				projectDir = cwd;
-			}
-			const dirs = { projectDir, agentDir };
-			const initialDoc = await loadWatchdogConfigFile(await resolveAdvisorConfigEditPath(initialScope, dirs));
-			// Fullscreen editor on the alternate screen (the /settings idiom): the
+			// Fullscreen picker on the alternate screen (the /settings idiom): the
 			// overlay holds the alt buffer + mouse tracking; the transcript stays put.
 			let overlayHandle: OverlayHandle | undefined;
 			const done = () => {
@@ -286,35 +267,34 @@ export class SelectorController {
 				this.focusActiveEditorArea();
 				this.ctx.ui.requestRender();
 			};
-			// Label the seeded implicit-default row with the actual advisor-role model
-			// (NOT the first live advisor, which may be a named advisor from another scope).
+			// The picker lists the same discovered roster the task spawner uses;
+			// the ordered selection is persisted to `advisor.agents` on save.
+			const { agents } = await discoverAgents(cwd);
+			// Name the legacy default advisor's model so an empty selection still
+			// tells the user what will run (the roster itself has no row for it).
 			const advisorRoleSel = resolveAdvisorRoleSelection(
 				this.ctx.settings,
 				this.ctx.session.modelRegistry.getAvailable(),
 			);
 			const defaultAdvisorModel = advisorRoleSel?.model;
-			const deps: AdvisorConfigDeps = {
-				modelRegistry: this.ctx.session.modelRegistry,
+			const deps: AdvisorAgentsPickerDeps = {
 				settings: this.ctx.settings,
-				scopedModels: this.ctx.session.scopedModels,
-				availableToolNames: this.ctx.session.getAdvisorAvailableToolNames(),
+				agents,
 				defaultModelLabel: defaultAdvisorModel
 					? `${defaultAdvisorModel.provider}/${defaultAdvisorModel.id}`
 					: undefined,
 			};
-			const overlay = new AdvisorConfigOverlayComponent(this.ctx.ui, deps, initialScope, initialDoc, {
-				loadDoc: async scope => loadWatchdogConfigFile(await resolveAdvisorConfigEditPath(scope, dirs)),
-				save: async (scope, doc) => {
-					await saveWatchdogConfigFile(await resolveAdvisorConfigEditPath(scope, dirs), doc);
-					// Re-discover the merged roster (project + user) so the live advisors
-					// reflect cross-level precedence, not just the edited file.
-					const discovered = await discoverAdvisorConfigs(cwd, agentDir);
-					const count = this.ctx.session.applyAdvisorConfigs(discovered.advisors, discovered.sharedInstructions);
+			const overlay = new AdvisorAgentsPickerComponent(deps, {
+				// Persisting `advisor.agents` is the component's job (the dashboard
+				// `task.disabledAgents` pattern); this callback rebuilds the live
+				// advisors so the new roster applies without a restart.
+				save: async names => {
+					const count = this.ctx.session.applyAdvisorAgents(names);
 					this.ctx.statusLine.invalidate();
 					this.ctx.showStatus(
 						count > 0
-							? `Saved ${scope} WATCHDOG.yml — ${count} advisor${count === 1 ? "" : "s"} active.`
-							: `Saved ${scope} WATCHDOG.yml. Run /advisor on to activate the configured advisors.`,
+							? `Advisor roster saved — ${count} advisor${count === 1 ? "" : "s"} active.`
+							: `Advisor roster saved. Run /advisor on to activate the configured advisors.`,
 					);
 					this.ctx.ui.requestRender();
 				},
@@ -322,12 +302,6 @@ export class SelectorController {
 				requestRender: () => this.ctx.ui.requestRender(),
 				notify: message => this.ctx.showStatus(message),
 				getAdvisorStats: () => this.ctx.session.getAdvisorStats().advisors,
-				getUsageReports: async () => this.ctx.session.fetchUsageReports?.() ?? null,
-				resolveActiveAccount: (provider, sessionId) =>
-					this.ctx.session.modelRegistry.authStorage.getOAuthAccountIdentity(
-						provider,
-						sessionId ?? this.ctx.session.sessionId,
-					),
 			});
 			overlayHandle = this.ctx.ui.showOverlay(overlay, {
 				anchor: "bottom-center",

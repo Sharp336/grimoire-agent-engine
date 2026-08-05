@@ -97,7 +97,7 @@ import {
 	stringProperty,
 	withTimeout,
 } from "@oh-my-pi/pi-utils";
-import { type AdvisorConfig, type AdvisorRuntimeStatus, loadAdvisorTranscriptCosts } from "../advisor";
+import { type AdvisorRuntimeStatus, loadAdvisorTranscriptCosts } from "../advisor";
 import { type AsyncJob, AsyncJobManager } from "../async";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
@@ -1438,9 +1438,9 @@ export class AgentSession {
 			getToolContext: config.advisorGetToolContext,
 			mcpResources: config.advisorMcpResources,
 			watchdogPrompt: config.advisorWatchdogPrompt,
-			sharedInstructions: config.advisorSharedInstructions,
 			contextPrompt: config.advisorContextPrompt,
-			configs: config.advisorConfigs,
+			agentNames: config.advisorAgentNames,
+			agentRoster: config.advisorAgentRoster,
 			streamFn: config.advisorStreamFn,
 			transformProviderContext: config.transformProviderContext,
 			initialCosts: config.initialAdvisorCosts,
@@ -8885,15 +8885,15 @@ export class AgentSession {
 	}
 
 	/**
-	 * Replace the live advisor roster from an edited `WATCHDOG.yml` (the `/advisor
-	 * configure` save path). Swaps the configs + shared baseline, then rebuilds the
-	 * runtimes in place so the change applies without a restart. When the advisor is
-	 * disabled the new configs are simply stored for the next enable.
+	 * Replace the live advisor roster (the `/advisor configure` save path).
+	 * Swaps the name list, then rebuilds the runtimes in place so the change
+	 * applies without a restart. When the advisor is disabled the new names
+	 * are simply stored for the next enable.
 	 *
 	 * @returns the number of advisors active after the rebuild.
 	 */
-	applyAdvisorConfigs(advisors: AdvisorConfig[], sharedInstructions: string | undefined): number {
-		return this.#advisors.applyAdvisorConfigs(advisors, sharedInstructions);
+	applyAdvisorAgents(names: string[]): number {
+		return this.#advisors.applyAdvisorAgents(names);
 	}
 
 	/**

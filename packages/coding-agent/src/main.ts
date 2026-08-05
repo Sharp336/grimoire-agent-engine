@@ -154,7 +154,7 @@ const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	// instead of inheriting a user's globally-enabled local preference, and when
 	// they do opt in they get the default tuning rather than the user's local tuning.
 	"advisor.enabled",
-	"advisor.subagents",
+	"advisor.agents",
 	"advisor.syncBacklog",
 	"advisor.immuneTurns",
 	"tier.advisor",

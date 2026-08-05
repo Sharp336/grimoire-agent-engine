@@ -69,6 +69,9 @@ describe("AgentSession advisor toggle", () => {
 			settings,
 			modelRegistry,
 			advisorTools: [],
+			// The roster `applyAdvisorAgents` resolves names against: the live-roster
+			// cost test swaps to "Security" and needs a matching definition.
+			advisorAgentRoster: [{ name: "Security", description: "Security reviewer", systemPrompt: "", source: "user" }],
 		});
 	});
 
@@ -387,7 +390,7 @@ describe("AgentSession advisor toggle", () => {
 		const advisor = enableAdvisor();
 		appendAdvisorCost(advisor, 0.5, 1);
 
-		expect(session.applyAdvisorConfigs([{ name: "Security" }], undefined)).toBe(1);
+		expect(session.applyAdvisorAgents(["Security"])).toBe(1);
 		expect(session.getAdvisorCost()).toBeCloseTo(0.5, 8);
 		expect(session.formatAdvisorStatus()).toContain("$0.5000");
 	});

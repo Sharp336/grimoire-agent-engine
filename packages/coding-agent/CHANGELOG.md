@@ -44,6 +44,19 @@
 - Fixed parsing of POSIX `$EDITOR` commands that contain quoted arguments or executable paths with spaces.
 - Fixed persisted Agent Hub rows losing the explicit caller model role when a subagent used a model override, preserving role provenance across restarts.
 - Fixed unobserved promise rejections in browser helpers (such as `tab.waitForResponse()`) causing tab workers to hang or crash.
+### Breaking Changes
+
+- WATCHDOG.yml advisor rosters are no longer supported. Advisors are now defined as agent definitions: the main session lists them via the `advisor.agents` setting, and agents opt their subagents in via `advisors:` frontmatter.
+- Removed the `advisor.subagents` setting. Subagents get advisors only from their own definition's `advisors:` frontmatter.
+
+### Added
+
+- Advisors are now ordinary agent definitions referenced by name: `advisors:` agent frontmatter for subagents and the `advisor.agents` setting for the main session.
+- `/advisor configure` is now an agent picker over the discovered roster instead of a YAML editor.
+
+### Removed
+
+- WATCHDOG.yml roster configuration and its TUI YAML editor.
 
 ## [17.2.9] - 2026-08-05
 

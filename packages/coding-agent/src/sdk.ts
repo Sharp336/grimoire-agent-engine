@@ -31,7 +31,7 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import { $env, $flag, getAgentDir, getProjectDir, logger, postmortem, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import {
-	discoverAdvisorConfigs,
+	collectConfigCandidates,
 	discoverWatchdogFiles,
 	formatActiveRepoWatchdogPrompt,
 	formatAdvisorContextPrompt,
@@ -169,6 +169,7 @@ import {
 	loadProjectContextFiles as loadContextFilesInternal,
 	projectSystemPromptToolMetadata,
 } from "./system-prompt";
+import { discoverAgents } from "./task/discovery";
 import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
 import { isScoutSpawnable } from "./task/spawn-policy";
@@ -354,6 +355,14 @@ export interface CreateAgentSessionOptions {
 	agentDir?: string;
 	/** Spawns to allow. Default: "*" */
 	spawns?: string;
+
+	/**
+	 * Advisor names to attach, resolved against the discovered agent roster.
+	 * Subagent sessions only: the task executor forwards the spawned
+	 * definition's `advisors` frontmatter. Ignored for the main session, which
+	 * reads the `advisor.agents` setting instead.
+	 */
+	advisorAgentNames?: string[];
 
 	/** Auth storage for credentials. Default: discoverAuthStorage(agentDir) */
 	authStorage?: AuthStorage;
@@ -1307,8 +1316,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	activeRepoContextPromise.catch(() => {});
 	const watchdogFilesPromise = logger.time("discoverWatchdogFiles", () => discoverWatchdogFiles(cwd, agentDir));
 	watchdogFilesPromise.catch(() => {});
-	const advisorConfigsPromise = logger.time("discoverAdvisorConfigs", () => discoverAdvisorConfigs(cwd, agentDir));
-	advisorConfigsPromise.catch(() => {});
+	// Roster the session's advisor names resolve against (agent definitions).
+	const advisorRosterPromise = logger.time("discoverAgents", () => discoverAgents(cwd));
+	advisorRosterPromise.catch(() => {});
+	// Legacy WATCHDOG.yml rosters are no longer read; warn once per session so
+	// users migrate them to agent definitions + the `advisor.agents` setting.
+	const legacyWatchdogYamlPromise = logger.time("collectConfigCandidates", () =>
+		collectConfigCandidates(cwd, agentDir, ["WATCHDOG.yml", "WATCHDOG.yaml"]),
+	);
+	legacyWatchdogYamlPromise.catch(() => {});
 	const promptTemplatesPromise = options.promptTemplates
 		? Promise.resolve(options.promptTemplates)
 		: logger.time("discoverPromptTemplates", discoverPromptTemplates, cwd, agentDir);
@@ -1614,14 +1630,27 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 		return result;
 	};
-	const [initialContextFiles, resolvedWorkspaceTree, watchdogFiles, initialActiveRepoContext, discoveredAdvisors] =
-		await Promise.all([
-			contextFilesPromise,
-			raceWithDeadline("buildWorkspaceTree", workspaceTreePromise),
-			watchdogFilesPromise,
-			activeRepoContextPromise,
-			advisorConfigsPromise,
-		]);
+	const [
+		initialContextFiles,
+		resolvedWorkspaceTree,
+		watchdogFiles,
+		initialActiveRepoContext,
+		advisorRoster,
+		legacyWatchdogYaml,
+	] = await Promise.all([
+		contextFilesPromise,
+		raceWithDeadline("buildWorkspaceTree", workspaceTreePromise),
+		watchdogFilesPromise,
+		activeRepoContextPromise,
+		advisorRosterPromise,
+		legacyWatchdogYamlPromise,
+	]);
+	if (legacyWatchdogYaml && legacyWatchdogYaml.length > 0) {
+		logger.warn(
+			"WATCHDOG.yml advisor rosters are no longer supported; define advisors as agent definitions and list them in the advisor.agents setting or an agent's `advisors` frontmatter",
+			{ files: legacyWatchdogYaml.map(candidate => candidate.path) },
+		);
+	}
 	let contextFiles = initialContextFiles;
 
 	let agent: Agent;
@@ -3368,8 +3397,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		session = new AgentSession({
 			advisorWatchdogPrompt,
 			advisorContextPrompt,
-			advisorSharedInstructions: discoveredAdvisors.sharedInstructions,
-			advisorConfigs: discoveredAdvisors.advisors,
+			// The main session pulls its advisor list from the `advisor.agents`
+			// setting; a subagent's list comes from its own definition, forwarded
+			// by the task executor — never from the setting.
+			advisorAgentNames: agentKind === "main" ? settings.get("advisor.agents") : options.advisorAgentNames,
+			advisorAgentRoster: advisorRoster?.agents,
 			agent,
 			pruneToolDescriptions: inlineToolDescriptors,
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,

@@ -140,6 +140,30 @@ describe("parseAgentFields", () => {
 		expect(fields?.autoloadSkills).toBeUndefined();
 	});
 
+	test("parses advisors from array frontmatter", () => {
+		const fields = parseAgentFields({
+			name: "worker",
+			description: "desc",
+			advisors: ["security-advisor", "perf-reviewer"],
+		});
+
+		expect(fields?.advisors).toEqual(["security-advisor", "perf-reviewer"]);
+	});
+
+	test("parses advisors from CSV string", () => {
+		const fields = parseAgentFields({
+			name: "worker",
+			description: "desc",
+			advisors: "security-advisor, perf-reviewer",
+		});
+
+		expect(fields?.advisors).toEqual(["security-advisor", "perf-reviewer"]);
+	});
+
+	test("returns undefined advisors when field absent", () => {
+		expect(parseAgentFields({ name: "worker", description: "desc" })?.advisors).toBeUndefined();
+	});
+
 	test("parses readSummarize from boolean frontmatter", () => {
 		expect(parseAgentFields({ name: "scout", description: "desc", readSummarize: false })?.readSummarize).toBe(false);
 		expect(parseAgentFields({ name: "scout", description: "desc", readSummarize: true })?.readSummarize).toBe(true);

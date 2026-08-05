@@ -19,7 +19,6 @@ import type {
 	ToolChoice,
 } from "@oh-my-pi/pi-ai";
 import type { postmortem } from "@oh-my-pi/pi-utils";
-import type { AdvisorConfig } from "../advisor";
 import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager } from "../async";
 import type { ModelRegistry } from "../config/model-registry";
 import type { PromptTemplate } from "../config/prompt-templates";
@@ -33,6 +32,7 @@ import type { ContextUsage } from "../extensibility/extensions/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { SecretObfuscator } from "../secrets/obfuscator";
+import type { AgentDefinition } from "../task/types";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
@@ -264,12 +264,17 @@ export interface AgentSessionConfig {
 	advisorMcpResources?: CursorMcpResourceAdapter;
 	/** Preloaded watchdog prompt content for the advisor. */
 	advisorWatchdogPrompt?: string;
-	/** Shared advisor instructions loaded from WATCHDOG.yml. */
-	advisorSharedInstructions?: string;
 	/** Project context rendered for advisor sessions. */
 	advisorContextPrompt?: string;
-	/** Advisors discovered from WATCHDOG.yml. */
-	advisorConfigs?: AdvisorConfig[];
+	/**
+	 * Advisor names to attach: the `advisor.agents` setting for the main
+	 * session, the spawned definition's `advisors` frontmatter for subagents.
+	 * Empty/undefined on the main session falls back to the legacy default
+	 * advisor on the `advisor` role; on subagents it means no advisors.
+	 */
+	advisorAgentNames?: string[];
+	/** `discoverAgents` roster the advisor names resolve against. */
+	advisorAgentRoster?: AgentDefinition[];
 	/** Strip tool descriptions from provider-bound side-request tool specs. */
 	pruneToolDescriptions?: boolean;
 	/** Disconnect the MCP manager owned by this session during disposal. */

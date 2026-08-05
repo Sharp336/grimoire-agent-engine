@@ -3048,6 +3048,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				hasUI: false,
 				prewalk,
 				spawns: spawnsEnv,
+				advisorAgentNames: agent.advisors,
 				taskDepth: childDepth,
 				parentHindsightSessionState: options.parentHindsightSessionState,
 				parentMnemopiSessionState: options.parentMnemopiSessionState,

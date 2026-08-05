@@ -1316,7 +1316,16 @@ describe("AgentSession retry fallback", () => {
 			settings,
 			modelRegistry,
 			advisorTools: [],
-			advisorConfigs: [{ name: "fallback-test", model: advisorPrimarySelector }],
+			advisorAgentNames: ["fallback-test"],
+			advisorAgentRoster: [
+				{
+					name: "fallback-test",
+					description: "Advisor whose model pattern keys the retry fallback chain",
+					systemPrompt: "",
+					model: [advisorPrimarySelector],
+					source: "user",
+				},
+			],
 			advisorStreamFn: (model, context, options) => {
 				const selector = `${model.provider}/${model.id}`;
 				requestedAdvisorModels.push(selector);

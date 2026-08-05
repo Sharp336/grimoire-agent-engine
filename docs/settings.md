@@ -369,12 +369,12 @@ See [Models](./models.md) for the `models.yml` schema and custom-provider defini
 
 The advisor is a second model that reviews each completed turn and can inject advice into the primary session. Assign a model with `modelRoles.advisor`, then enable it with `advisor.enabled`, `/advisor on`, or by launching with the `--advisor` flag.
 
-See [Advisor and WATCHDOG.md](./advisor-watchdog.md) for runtime behavior, `WATCHDOG.md` discovery, and bounded catch-up semantics.
+See [Advisor, agent definitions, and WATCHDOG.md](./advisor-watchdog.md) for runtime behavior, agent-definition roster configuration, `WATCHDOG.md` discovery, and bounded catch-up semantics.
 
 | Key                   | Type    | Default | Notes                                                                                                                                                |
 | --------------------- | ------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `advisor.enabled`     | boolean | `false` | Enable the advisor runtime when `modelRoles.advisor` resolves to an available model.                                                                 |
-| `advisor.subagents`   | boolean | `false` | Also enable advisor runtimes for spawned task/eval subagents.                                                                                        |
+| `advisor.agents`      | array   | `[]`    | Agent definition names that observe the main session as advisors; empty falls back to the default advisor on `modelRoles.advisor`. Subagents get advisors from their definition's `advisors:` frontmatter instead. See [Advisor, agent definitions, and WATCHDOG.md](./advisor-watchdog.md). |
 | `advisor.syncBacklog` | enum    | `off`   | Bounded advisor catch-up delay: `off`, `1`, `3`, or `5`. The primary waits up to 30 seconds only while advisor backlog is at or above the threshold. |
 | `advisor.immuneTurns` | number  | `3`     | After a `concern`/`blocker` interrupts, route further concerns/blockers as non-interrupting asides for this many completed primary turns.            |
 
