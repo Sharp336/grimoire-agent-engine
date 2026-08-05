@@ -350,12 +350,21 @@ function clearLegacyPiResolutionCaches(): void {
 	// `prebuiltExtensionHookPaths` is intentionally not cleared: Bun cannot unregister a
 	// plugin, so the registered hooks outlive any cache reset. Clearing it would re-register
 	// a duplicate hook per entry on the next load.
-	prebuiltExtensionSources.clear();
-	prebuiltExtensionSourceRetainCounts.clear();
-	extensionGraphPreparedSources.clear();
-	extensionGraphPreparedRetainCounts.clear();
+	// Defer eviction of actively retained sources: an in-flight load's permanent onLoad may
+	// still need the retained snapshot. Entries with a nonzero retain count are left for
+	// releasePrebuiltExtensionSource/releaseGraphPreparedSource to clean up when the last
+	// load finishes.
+	for (const key of prebuiltExtensionSources.keys()) {
+		if ((prebuiltExtensionSourceRetainCounts.get(key) ?? 0) === 0) {
+			prebuiltExtensionSources.delete(key);
+		}
+	}
+	for (const key of extensionGraphPreparedSources.keys()) {
+		if ((extensionGraphPreparedRetainCounts.get(key) ?? 0) === 0) {
+			extensionGraphPreparedSources.delete(key);
+		}
+	}
 }
-
 registerPluginCacheInvalidator(clearLegacyPiResolutionCaches);
 const PACKAGE_IMPORT_EXCLUDED = Symbol("packageImportExcluded");
 
@@ -1426,51 +1435,62 @@ function escapeRegExp(value: string): string {
 // Extension source realpaths already covered by an installed load-time hook for
 // each entry. `Bun.plugin()` registrations are process-global and permanent, so
 // reloads install supplemental hooks only for modules added to the graph since
-// the previous load.
 const extensionGraphHookModules = new Map<string, Set<string>>();
 const extensionGraphCacheBustResolvedImportModules = new Map<string, Set<string>>();
-const prebuiltExtensionSources = new Map<string, string>();
+const prebuiltExtensionSources = new Map<string, Map<string, string>>();
 const prebuiltExtensionSourceRetainCounts = new Map<string, number>();
 // Raw graph-collected entry sources published for the permanent prebuilt onLoad to
 // reuse when the sidecar fast-path source was evicted (stale/missing). Retained for
 // the duration of each in-flight graph load so concurrent loads cannot starve each other.
-const extensionGraphPreparedSources = new Map<string, string>();
+const extensionGraphPreparedSources = new Map<string, Map<string, string>>();
 const extensionGraphPreparedRetainCounts = new Map<string, number>();
 const prebuiltExtensionHookPaths = new Set<string>();
 
-function retainPrebuiltExtensionSource(entryRealPath: string, source: string): void {
-	prebuiltExtensionSources.set(entryRealPath, source);
+function retainPrebuiltExtensionSource(entryRealPath: string, mtimeTag: string, source: string): void {
+	let byTag = prebuiltExtensionSources.get(entryRealPath);
+	if (!byTag) {
+		byTag = new Map<string, string>();
+		prebuiltExtensionSources.set(entryRealPath, byTag);
+	}
+	byTag.set(mtimeTag, source);
 	prebuiltExtensionSourceRetainCounts.set(
 		entryRealPath,
 		(prebuiltExtensionSourceRetainCounts.get(entryRealPath) ?? 0) + 1,
 	);
 }
 
-function releasePrebuiltExtensionSource(entryRealPath: string): void {
+function releasePrebuiltExtensionSource(entryRealPath: string, mtimeTag: string): void {
 	const count = prebuiltExtensionSourceRetainCounts.get(entryRealPath) ?? 0;
 	if (count <= 1) {
 		prebuiltExtensionSourceRetainCounts.delete(entryRealPath);
 		prebuiltExtensionSources.delete(entryRealPath);
 	} else {
 		prebuiltExtensionSourceRetainCounts.set(entryRealPath, count - 1);
+		prebuiltExtensionSources.get(entryRealPath)?.delete(mtimeTag);
 	}
 }
 
-function retainGraphPreparedSource(entryRealPath: string, source: string): void {
-	extensionGraphPreparedSources.set(entryRealPath, source);
+function retainGraphPreparedSource(entryRealPath: string, mtimeTag: string, source: string): void {
+	let byTag = extensionGraphPreparedSources.get(entryRealPath);
+	if (!byTag) {
+		byTag = new Map<string, string>();
+		extensionGraphPreparedSources.set(entryRealPath, byTag);
+	}
+	byTag.set(mtimeTag, source);
 	extensionGraphPreparedRetainCounts.set(
 		entryRealPath,
 		(extensionGraphPreparedRetainCounts.get(entryRealPath) ?? 0) + 1,
 	);
 }
 
-function releaseGraphPreparedSource(entryRealPath: string): void {
+function releaseGraphPreparedSource(entryRealPath: string, mtimeTag: string): void {
 	const count = extensionGraphPreparedRetainCounts.get(entryRealPath) ?? 0;
 	if (count <= 1) {
 		extensionGraphPreparedRetainCounts.delete(entryRealPath);
 		extensionGraphPreparedSources.delete(entryRealPath);
 	} else {
 		extensionGraphPreparedRetainCounts.set(entryRealPath, count - 1);
+		extensionGraphPreparedSources.get(entryRealPath)?.delete(mtimeTag);
 	}
 }
 
@@ -2079,7 +2099,7 @@ async function installExtensionGraphHook(
 					const queryIndex = args.path.indexOf("?mtime=");
 					const sourcePath = queryIndex >= 0 ? args.path.slice(0, queryIndex) : args.path;
 					const mtimeTag = queryIndex >= 0 ? args.path.slice(queryIndex + "?mtime=".length) : null;
-					const prebuilt = prebuiltExtensionSources.get(sourcePath);
+					const prebuilt = prebuiltExtensionSources.get(sourcePath)?.get(mtimeTag ?? "");
 					if (prebuilt !== undefined) {
 						// A prebuilt sidecar hook supersedes any stale graph hook for this
 						// entry (e.g. after a same-process rebuild that added a sidecar).
@@ -2159,7 +2179,10 @@ async function installExtensionGraphHook(
  * during the initial load (including any graph-prepared entry published for the
  * permanent prebuilt hook); `undefined` when nothing was published or installed.
  */
-async function ensureExtensionGraphHook(entryRealPath: string): Promise<{ clear(): void } | undefined> {
+async function ensureExtensionGraphHook(
+	entryRealPath: string,
+	mtimeTag: string,
+): Promise<{ clear(): void } | undefined> {
 	const {
 		modules: currentModules,
 		commonJsPaths,
@@ -2187,7 +2210,7 @@ async function ensureExtensionGraphHook(entryRealPath: string): Promise<{ clear(
 	const publishedEntrySource =
 		entryPreparedSource !== undefined && !commonJsPaths.has(entryRealPath) ? entryPreparedSource : undefined;
 	if (publishedEntrySource !== undefined) {
-		retainGraphPreparedSource(entryRealPath, publishedEntrySource);
+		retainGraphPreparedSource(entryRealPath, mtimeTag, publishedEntrySource);
 	}
 	let hookedModules = extensionGraphHookModules.get(entryRealPath);
 	if (!hookedModules) {
@@ -2207,7 +2230,7 @@ async function ensureExtensionGraphHook(entryRealPath: string): Promise<{ clear(
 	}
 	const releasePublishedEntry = (): void => {
 		if (publishedEntrySource !== undefined) {
-			releaseGraphPreparedSource(entryRealPath);
+			releaseGraphPreparedSource(entryRealPath, mtimeTag);
 		}
 	};
 	if (pendingModules.size === 0 && commonJsPaths.size === 0) {
@@ -2367,11 +2390,12 @@ async function preparePrebuiltExtensionEntry(entryRealPath: string): Promise<str
 	return rewritten;
 }
 
-function installPrebuiltExtensionHook(entryRealPath: string, source: string): void {
-	// Reference-count concurrent loads of the same path: the first in-flight load must
-	// not delete the map entry while a second load's onLoad still needs it. loadLegacyPiModule
-	// releases in `finally` once the last retain drops to zero.
-	retainPrebuiltExtensionSource(entryRealPath, source);
+function installPrebuiltExtensionHook(entryRealPath: string, mtimeTag: string, source: string): void {
+	// Reference-count concurrent loads of the same path: each load retains its own
+	// source snapshot keyed by mtimeTag so concurrent loads with distinct ?mtime tags
+	// cannot overwrite each other's retained source. loadLegacyPiModule releases in
+	// `finally` once the last retain drops to zero.
+	retainPrebuiltExtensionSource(entryRealPath, mtimeTag, source);
 	if (!prebuiltExtensionHookPaths.has(entryRealPath)) {
 		prebuiltExtensionHookPaths.add(entryRealPath);
 		const filter = new RegExp(`^${escapeRegExp(entryRealPath)}(?:\\?mtime=\\d+)?$`);
@@ -2383,7 +2407,7 @@ function installPrebuiltExtensionHook(entryRealPath: string, source: string): vo
 					const queryIndex = args.path.indexOf("?mtime=");
 					const sourcePath = queryIndex >= 0 ? args.path.slice(0, queryIndex) : args.path;
 					const mtimeTag = queryIndex >= 0 ? args.path.slice(queryIndex + "?mtime=".length) : null;
-					const contents = prebuiltExtensionSources.get(sourcePath);
+					const contents = prebuiltExtensionSources.get(sourcePath)?.get(mtimeTag ?? "");
 					if (contents !== undefined) {
 						return { contents, loader: getLoader(sourcePath) };
 					}
@@ -2392,7 +2416,7 @@ function installPrebuiltExtensionHook(entryRealPath: string, source: string): vo
 					// the graph-prepared raw source published by ensureExtensionGraphHook (fresh
 					// disk read from this load's collectExtensionModules) over opening the entry
 					// again. A genuine miss still falls back to disk.
-					const prepared = extensionGraphPreparedSources.get(sourcePath);
+					const prepared = extensionGraphPreparedSources.get(sourcePath)?.get(mtimeTag ?? "");
 					const raw = prepared !== undefined ? prepared : await Bun.file(sourcePath).text();
 					return {
 						contents: await rewriteLegacyExtensionSource(raw, sourcePath, mtimeTag),
@@ -2441,6 +2465,14 @@ export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown>
 	// `bun link`/pnpm installs) so the rewrite filter matches the path Bun
 	// actually hands the hook.
 	const entryRealPath = await realpathOrSelf(path.resolve(resolvedPath));
+	// Generate the ?mtime tag before source preparation so each concurrent load
+	// can key its retained source by tag, isolating concurrent same-entry loads.
+	const mtimeTag = nextLegacyPiLoadTag();
+	// Serialize the complete source-preparation→import→cleanup lifetime per real
+	// entry path. Distinct paths stay concurrent; same-path loads wait until the
+	// prior load's `finally` releases retained state. Per-tag source isolation
+	// (mtimeTag-keyed maps) ensures concurrent loads with distinct tags cannot
+	// overwrite each other's retained sources once the gate releases.
 	return runSerializedLegacyPiModuleLoad(entryRealPath, async () => {
 		await ensureLegacyPiOverridesReady();
 		// `OMP_LEGACY_EXT_FULL_CRAWL=1` is an end-to-end recovery/diagnostic switch: skip the
@@ -2456,9 +2488,9 @@ export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown>
 			// would defeat the hash check that rejected this sidecar.
 			prebuiltExtensionSources.delete(entryRealPath);
 			prebuiltExtensionSourceRetainCounts.delete(entryRealPath);
-			pendingSources = await ensureExtensionGraphHook(entryRealPath);
+			pendingSources = await ensureExtensionGraphHook(entryRealPath, mtimeTag);
 		} else {
-			installPrebuiltExtensionHook(entryRealPath, prebuiltSource);
+			installPrebuiltExtensionHook(entryRealPath, mtimeTag, prebuiltSource);
 			retainedPrebuiltPath = entryRealPath;
 		}
 		try {
@@ -2470,7 +2502,7 @@ export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown>
 				process.platform === "win32" || isBundledVirtualSpecifier(entryRealPath)
 					? toImportSpecifier(entryRealPath)
 					: entryRealPath;
-			return await import(`${entrySpecifier}?mtime=${nextLegacyPiLoadTag()}`);
+			return await import(`${entrySpecifier}?mtime=${mtimeTag}`);
 		} finally {
 			// Drop graph snapshots the initial import didn't consume: graph modules only
 			// reached by lazy dynamic imports must be read from disk at their actual import
@@ -2478,7 +2510,7 @@ export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown>
 			// the last in-flight load for this path finishes (success or error).
 			pendingSources?.clear();
 			if (retainedPrebuiltPath !== undefined) {
-				releasePrebuiltExtensionSource(retainedPrebuiltPath);
+				releasePrebuiltExtensionSource(retainedPrebuiltPath, mtimeTag);
 			}
 		}
 	});
