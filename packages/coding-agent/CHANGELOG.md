@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Removed a duplicate local `asRecord` type guard from the web scrapers, re-exporting the shared implementation from `@oh-my-pi/pi-utils`. The name, signature, `null`-on-non-record contract, and `./utils` import path are unchanged.
+
 ## [17.2.9] - 2026-08-05
 
 ### Breaking Changes
