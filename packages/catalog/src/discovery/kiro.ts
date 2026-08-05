@@ -399,13 +399,25 @@ function gptThinking(model: SanitizedKiroModel): ThinkingConfig {
 	if (rootSchema.additionalProperties !== false) schemaError(modelId, "gpt.additionalProperties");
 	const root = exactPropertyNames(modelId, rootSchema, ["reasoning"], "gpt.root");
 	exactSchemaKeywords(modelId, root.reasoning, ["type", "properties"], "gpt.reasoning");
-	const reasoning = exactPropertyNames(modelId, root.reasoning, ["mode", "effort"], "gpt.reasoning");
-	exactSchemaKeywords(modelId, reasoning.mode, ["type", "enum", "default"], "gpt.mode");
-	exactSchemaKeywords(modelId, reasoning.effort, ["type", "enum", "default"], "gpt.effort");
-	const modes = stringEnum(modelId, reasoning.mode, new Set(["standard", "pro"]), "gpt.mode");
-	if (!modes.includes("standard") || enumDefault(modelId, reasoning.mode, modes, "gpt.mode-default") !== "standard") {
-		schemaError(modelId, "gpt.mode-default");
+	const hasLegacyMode =
+		root.reasoning.properties !== undefined && Object.hasOwn(root.reasoning.properties, "mode");
+	const reasoning = exactPropertyNames(
+		modelId,
+		root.reasoning,
+		hasLegacyMode ? ["mode", "effort"] : ["effort"],
+		"gpt.reasoning",
+	);
+	if (hasLegacyMode) {
+		exactSchemaKeywords(modelId, reasoning.mode, ["type", "enum", "default"], "gpt.mode");
+		const modes = stringEnum(modelId, reasoning.mode, new Set(["standard", "pro"]), "gpt.mode");
+		if (
+			!modes.includes("standard") ||
+			enumDefault(modelId, reasoning.mode, modes, "gpt.mode-default") !== "standard"
+		) {
+			schemaError(modelId, "gpt.mode-default");
+		}
 	}
+	exactSchemaKeywords(modelId, reasoning.effort, ["type", "enum", "default"], "gpt.effort");
 	const advertisedWireEfforts = stringEnum(modelId, reasoning.effort, GPT_WIRE_EFFORTS, "gpt.effort");
 	const wireEfforts = GPT_WIRE_EFFORT_ORDER.filter(effort => advertisedWireEfforts.includes(effort));
 	const efforts = wireEfforts.map(effort => (effort === "none" ? Effort.Minimal : (effort as Effort)));

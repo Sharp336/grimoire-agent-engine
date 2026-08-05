@@ -10,6 +10,7 @@ import {
 	resolveKiroModelCacheProviderId,
 	resolveModelCacheProviderId,
 } from "@oh-my-pi/pi-catalog/provider-models";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { kiroModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/special";
 import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
@@ -36,6 +37,29 @@ function catalogResponse(
 function jsonFetch(payload: unknown, status = 200): FetchImpl {
 	return async () =>
 		new Response(JSON.stringify(payload), { status, headers: { "Content-Type": "application/json" } });
+}
+
+function gptReasoningSchema(legacyMode = false): Record<string, unknown> {
+	const effort = {
+		type: "string",
+		enum: ["none", "low", "medium", "high", "xhigh", "max"],
+		default: "high",
+	};
+	return {
+		type: "object",
+		additionalProperties: false,
+		properties: {
+			reasoning: {
+				type: "object",
+				properties: legacyMode
+					? {
+							mode: { type: "string", enum: ["standard", "pro"], default: "standard" },
+							effort,
+						}
+					: { effort },
+			},
+		},
+	};
 }
 
 function fallbackSpec(): ModelSpec<"kiro-api"> {
@@ -167,6 +191,56 @@ describe("Kiro provider discovery", () => {
 			rateUnit: "Credit",
 		});
 		expect(sanitized.additionalModelRequestFieldsSchema?.properties?.reasoning?.type).toBe("string");
+	});
+
+	test("maps the live effort-only GPT reasoning schema for the full model catalog", async () => {
+		const modelIds = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
+		const payload = catalogResponse(modelIds);
+		for (const model of payload.models as Array<Record<string, unknown>>) {
+			model.additionalModelRequestFieldsSchema = gptReasoningSchema();
+		}
+		const options = kiroModelManagerOptions({
+			apiKey: JSON.stringify({ token: "gpt-catalog-token", apiEndpoint: API_ENDPOINT }),
+			fetch: jsonFetch(payload),
+		});
+
+		const models = await options.fetchDynamicModels?.();
+		expect(models?.map(model => model.id)).toEqual(modelIds);
+		expect(models?.map(model => model.thinking?.efforts)).toEqual(
+			modelIds.map(() => [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max]),
+		);
+		expect(models?.map(model => model.thinking?.defaultLevel)).toEqual(modelIds.map(() => Effort.High));
+		expect(models?.every(model => model.thinking?.mode === "effort")).toBe(true);
+		expect(models?.every(model => model.thinking?.effortMap?.[Effort.Minimal] === "none")).toBe(true);
+	});
+
+	test("accepts legacy GPT mode+effort reasoning schemas", async () => {
+		const payload = catalogResponse(["gpt-legacy"]);
+		const model = (payload.models as Array<Record<string, unknown>>)[0]!;
+		model.additionalModelRequestFieldsSchema = gptReasoningSchema(true);
+		const options = kiroModelManagerOptions({
+			apiKey: JSON.stringify({ token: "legacy-gpt-token", apiEndpoint: API_ENDPOINT }),
+			fetch: jsonFetch(payload),
+		});
+
+		const models = await options.fetchDynamicModels?.();
+		expect(models?.[0]?.thinking).toMatchObject({ mode: "effort", defaultLevel: Effort.High });
+	});
+
+	test("rejects unknown GPT reasoning properties", async () => {
+		const payload = catalogResponse(["gpt-invalid"]);
+		const model = (payload.models as Array<Record<string, unknown>>)[0]!;
+		const schema = gptReasoningSchema();
+		const properties = schema.properties as Record<string, unknown>;
+		const reasoning = properties.reasoning as Record<string, unknown>;
+		(reasoning.properties as Record<string, unknown>).verbosity = { type: "string" };
+		model.additionalModelRequestFieldsSchema = schema;
+		const options = kiroModelManagerOptions({
+			apiKey: JSON.stringify({ token: "invalid-gpt-token", apiEndpoint: API_ENDPOINT }),
+			fetch: jsonFetch(payload),
+		});
+
+		expect(await options.fetchDynamicModels?.()).toBeNull();
 	});
 
 	test("sends the selected OAuth profile ARN in the ListAvailableModels body", async () => {

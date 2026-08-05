@@ -190,6 +190,26 @@ describe("Kiro request transformation", () => {
 		expect(disabled.additionalModelRequestFields).toBeUndefined();
 	});
 
+	test("serializes effort reasoning with the standard runtime mode", () => {
+		const model = createModel({
+			reasoning: true,
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+				defaultLevel: Effort.High,
+				effortMap: { [Effort.Minimal]: "none" },
+			},
+		});
+		const context: Context = { messages: [{ role: "user", content: "Think", timestamp: 0 }] };
+
+		expect(transformKiroRequest(model, context, { reasoning: Effort.Minimal }).additionalModelRequestFields).toEqual({
+			reasoning: { mode: "standard", effort: "none" },
+		});
+		expect(transformKiroRequest(model, context, { reasoning: Effort.High }).additionalModelRequestFields).toEqual({
+			reasoning: { mode: "standard", effort: "high" },
+		});
+	});
+
 	test("drops an aborted assistant turn together with its orphaned tool result", () => {
 		const context: Context = {
 			messages: [
