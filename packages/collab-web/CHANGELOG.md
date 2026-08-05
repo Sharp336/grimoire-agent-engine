@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Fixed collab-web path formatting for non-file URLs, multi-path scopes, and local file URLs.
 - Stopped path-shortening URLs in the `browser` and `inspect_image` tool renderers; URLs are now rendered intact (truncated only) instead of being split on `/` and middle-elided.
 - Stopped middle-eliding glob search scopes in the `glob` tool summary; pattern-bearing (`*`/`?`/`[`) and scheme-bearing (`memory://…`) scope values are now rendered intact instead of being corrupted by `shortenPath`. Factored the existing scheme guard into a shared `compactPath` helper used by `PathText`, `inspect_image`, and `glob`.
 - Restored unconditional home-directory redaction for glob, URI, and bracketed-literal paths routed through the canonical path formatter; scopes under `/home/<user>` (e.g. `/home/alice/project/src/**/*.ts` or `/home/alice/project/apps/[id]/page.tsx`) now render home-relative (`~/…`) instead of leaking the username. Also preserved the `server/share` root of UNC paths (`//server/share/…`) through middle elision.

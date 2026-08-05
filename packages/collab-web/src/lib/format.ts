@@ -61,7 +61,7 @@ export function fmtPercent(p: number | null | undefined): string {
  */
 export function redactHome(p: string): string {
 	if (typeof p !== "string" || p.length === 0) return "";
-	return p.replace(/^((?:[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/]*)?)\/(?:Users|home)\/[^/]+(?=\/|$)/, "$1~");
+	return p.replace(/^((?:file:\/\/[^/]*)?)\/(?:Users|home)\/[^/]+(?=\/|$)/i, "$1~");
 }
 
 /**

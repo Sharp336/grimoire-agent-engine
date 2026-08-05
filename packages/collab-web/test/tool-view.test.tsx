@@ -168,6 +168,20 @@ describe("ToolView browser URLs", () => {
 		expect(html).toContain("https://example.com");
 		expect(html).not.toContain("…/b/c");
 	});
+
+	it("redacts home paths in file URLs while preserving the file scheme", () => {
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="browser"
+				defaultOpen
+				args={{ action: "open", url: "file:///home/alice/report.html" }}
+				result={{ content: [] }}
+			/>,
+		);
+
+		expect(html).toContain("file://~/report.html");
+		expect(html).not.toContain("/home/alice");
+	});
 });
 
 describe("ToolView glob scopes", () => {
@@ -231,6 +245,25 @@ describe("ToolView glob scopes", () => {
 		// produced "src/…/**/*.ts", hiding the second pattern.
 		expect(html).toContain("in src/**/*.ts, test/**/*.ts");
 		expect(html).not.toContain("…");
+	});
+
+	it("keeps comma-delimited deep scope paths independently compacted", () => {
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="glob"
+				defaultOpen
+				args={{ path: "packages/collab-web/src" }}
+				result={{
+					content: [],
+					details: {
+						scopePath: "packages/collab-web/src, packages/coding-agent/src",
+					},
+				}}
+			/>,
+		);
+
+		expect(html).toContain("in packages/collab-web/src, packages/coding-agent/src");
+		expect(html).not.toContain("packages/�?�/src");
 	});
 });
 

@@ -42,6 +42,12 @@ import { elideMiddle, redactHome } from "../lib/format";
  * meaning that elision would hide.
  */
 export function compactPath(p: string): string {
+	if (/[,;]/.test(p)) {
+		return p
+			.split(/([,;]\s*)/)
+			.map((part, index) => (index % 2 === 0 ? compactPath(part) : part))
+			.join("");
+	}
 	const redacted = redactHome(p);
 	if (/:\/\//.test(redacted) || /[*?[{]/.test(redacted)) return redacted;
 	return elideMiddle(redacted);
