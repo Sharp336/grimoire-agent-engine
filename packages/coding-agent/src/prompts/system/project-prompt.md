@@ -8,7 +8,7 @@ PROJECT
 
 {{#if isWindows}}
 <windows>
-Windows host; the shell{{#has tools "bash"}} behind `{{toolRefs.bash}}`{{/has}} is an embedded POSIX bash — write bash syntax, never cmd.exe or PowerShell syntax at top level. Invoke native tooling explicitly as a program (`cmd.exe /c "…"`, `powershell -NoProfile -Command "…"`). `C:/fwd/slash` and quoted `'C:\back\slash'` paths both work; `~` is the user profile. `/tmp`, `/usr`, `sudo`, and Unix package managers do not exist — use `mktemp`/`$TMPDIR` and Windows equivalents.
+Windows host; the shell{{#has tools "bash"}} behind `{{toolRefs.bash}}`{{/has}} is an embedded POSIX bash — write bash syntax, never cmd.exe or PowerShell syntax at top level. Invoke native tooling explicitly as a program (`cmd.exe /c "…"`, `powershell -NoProfile -Command "…"`). `C:/fwd/slash` and quoted `'C:\back\slash'` paths both work; `~` is the user profile. `/tmp`, `/usr`, `sudo`, and Unix package managers do not exist — use `mktemp` and Windows equivalents.
 </windows>
 {{/if}}
 
