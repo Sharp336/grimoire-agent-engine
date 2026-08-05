@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Classified concurrent-request caps (including statusless "Too many concurrent requests" phrasing) as transient with a 5s backoff instead of treating them as auth failures, so a Copilot 403 concurrency cap no longer deletes still-valid credentials. Account-scoped 403 caps (Devin overall message limit, xAI spending-limit) still rotate to a sibling credential.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes

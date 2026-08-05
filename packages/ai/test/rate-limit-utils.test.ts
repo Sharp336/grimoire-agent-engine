@@ -45,6 +45,18 @@ describe("parseRateLimitReason", () => {
 		expect(parseRateLimitReason("Rate limit reached for gpt-4o")).toBe("RATE_LIMIT_EXCEEDED");
 		expect(parseRateLimitReason("Your quota will reset at 07-28")).toBe("QUOTA_EXHAUSTED");
 	});
+	// Statusless adapter phrasing "Too many concurrent requests" / "Too many
+	// concurrent invocations" carries no limit/quota/exceeded/reached keyword,
+	// so the first three pattern alternatives miss it. The generic "too many
+	// requests" substring check also fails (the intervening word breaks the
+	// match). Without the dedicated alternative these fall to UNKNOWN and the
+	// temporary cap becomes terminal instead of retrying with the 5s backoff.
+	it("classifies statusless 'too many concurrent' phrasing as CONCURRENT_LIMIT", () => {
+		expect(parseRateLimitReason("Too many concurrent requests")).toBe("CONCURRENT_LIMIT");
+		expect(parseRateLimitReason("Too many concurrent invocations")).toBe("CONCURRENT_LIMIT");
+		// The cap must be retriable (Transient), not terminal.
+		expect(is(classify("Too many concurrent requests"), Flag.Transient)).toBe(true);
+	});
 
 	// Deterministic 4xx feature rejections worded with bare concurrency nouns
 	// ("concurrent request/invocation is not supported") must not classify as a

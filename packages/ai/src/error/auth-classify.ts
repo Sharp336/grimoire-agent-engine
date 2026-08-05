@@ -1,6 +1,6 @@
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
 import { isOAuthExpiry, isUsageLimit } from "./flags";
-import { isUsageLimitOutcome } from "./rate-limit";
+import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./rate-limit";
 
 /**
  * Whether an OAuth refresh failure is definitive (the credential must be
@@ -38,9 +38,16 @@ export function isAuthRetryableError(error: unknown): boolean {
 	if (isUsageLimit(error)) return true;
 	if (isInvalidatedOAuthTokenError(error)) return true;
 	const httpStatus = extractHttpStatusFromError(error);
-	if (httpStatus === 401 || httpStatus === 403) return true;
 	const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+	// A 403 concurrency cap is transient (shed-and-backoff), not an auth
+	// failure — exclude it from the top-level auth-retry gate so the caller's
+	// transient backoff owns it instead of force-refreshing the same account
+	// and rotating to a sibling whose production resolver would treat the cap
+	// as a hard-auth failure. Mirrors the streaming gate in stream.ts.
+	if (httpStatus === 401) return true;
+	if (httpStatus === 403) return !isConcurrencyCapExclusion(httpStatus, message);
 	const embeddedStatus = message ? extractHttpStatusFromError({ message }) : undefined;
-	if (embeddedStatus === 401 || embeddedStatus === 403) return true;
+	if (embeddedStatus === 401) return true;
+	if (embeddedStatus === 403) return !isConcurrencyCapExclusion(embeddedStatus, message);
 	return isUsageLimitOutcome(httpStatus ?? embeddedStatus, message);
 }

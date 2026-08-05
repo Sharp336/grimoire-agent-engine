@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Retry-delay extraction now recognizes account-reset hints ("will reset in …" / "reset in …") and gives them precedence over short generic retry hints ("please retry in 5s"), so a body carrying both honours the longer account reset window.
+
 ## [17.1.8] - 2026-07-28
 
 ### Added

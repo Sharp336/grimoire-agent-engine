@@ -91,6 +91,20 @@ describe("isAuthRetryableError", () => {
 		expect(isAuthRetryableError(new Error("network blip"))).toBe(false);
 		expect(isAuthRetryableError(undefined)).toBe(false);
 	});
+	// A 403 concurrency cap is transient (shed-and-backoff), not an auth
+	// failure — it must be excluded from the top-level auth-retry gate so
+	// withAuth throws it to the caller's transient backoff instead of
+	// force-refreshing the same account and rotating to a sibling.
+	it("excludes 403 concurrency caps from the auth-retry gate", () => {
+		expect(isAuthRetryableError(Object.assign(new Error("concurrent requests limit reached"), { status: 403 }))).toBe(
+			false,
+		);
+		expect(isAuthRetryableError(Object.assign(new Error("Too many concurrent requests"), { status: 403 }))).toBe(
+			false,
+		);
+		// A bare 403 without concurrency wording still rotates.
+		expect(isAuthRetryableError(authError(403))).toBe(true);
+	});
 });
 
 describe("withAuth", () => {
@@ -275,18 +289,16 @@ describe("withAuth", () => {
 		expect(contexts.map(ctx => ctx.lastChance)).toEqual([false, true, true, true]);
 	});
 
-	it("does not directly rotate through every sibling on a 403 concurrency cap", async () => {
+	it("surfaces a 403 concurrency cap without entering the auth-retry path", async () => {
 		const keys: string[] = [];
 		const contexts: ApiKeyResolveContext[] = [];
-		const pool = ["k0", "k1", "k2", "k3"];
-		let resolveIndex = 0;
 		const concurrencyCap = Object.assign(new Error("concurrent requests limit reached"), { status: 403 });
 
 		await expect(
 			withAuth(
 				ctx => {
 					contexts.push(ctx);
-					return ctx.error === undefined ? pool[0] : pool[++resolveIndex];
+					return ctx.error === undefined ? "k0" : ctx.lastChance ? "k2" : "k1";
 				},
 				async key => {
 					keys.push(key);
@@ -295,10 +307,14 @@ describe("withAuth", () => {
 			),
 		).rejects.toBe(concurrencyCap);
 
-		// The concurrency classification takes precedence over plain-403 direct
-		// rotation: refresh once, then take only the legacy sibling switch.
-		expect(keys).toEqual(["k0", "k1", "k2"]);
-		expect(contexts.map(ctx => ctx.lastChance)).toEqual([false, false, true]);
+		// The concurrency cap is excluded from the top-level auth-retry gate
+		// (isAuthRetryableError), so withAuth throws it immediately — no
+		// force-refresh, no sibling rotation. The caller's transient backoff
+		// owns the retry, preserving the still-valid credential.
+		expect(keys).toEqual(["k0"]);
+		expect(contexts.map(ctx => ({ lastChance: ctx.lastChance, hasError: ctx.error !== undefined }))).toEqual([
+			{ lastChance: false, hasError: false },
+		]);
 	});
 
 	it("surfaces the last 403 when every sibling is denied", async () => {

@@ -29,8 +29,13 @@ const CONCURRENT_LIMIT_PATTERN =
 	// structured snake_case codes ("concurrent_limit_exceeded",
 	// "concurrent_requests_limit_reached", "concurrency_quota_exceeded") need the
 	// third alternative. Bare space-separated concurrency feature rejections stay
-	// excluded because they neither use `[-_]` nor carry a cap keyword.
-	/\bconcurren\w*\b[^\n]{0,60}\b(?:limit|quota|exceed\w*|reach\w*)\b|\b(?:limit|quota|exceed\w*|reach\w*)\b[^\n]{0,60}\bconcurren\w*\b|\bconcurren[a-z]*[-_](?:[a-z]+[_-])*(?:limit|quota|exceed\w*|reach\w*)/i;
+	// excluded because they neither use `[-_]` nor carry a cap keyword. The fourth
+	// alternative covers the common statusless adapter phrasing "Too many concurrent
+	// requests" / "Too many concurrent invocations", where "too many" is the cap
+	// signal — no limit/quota/exceeded/reached keyword appears, so the first three
+	// alternatives miss it and the generic "too many requests" substring check also
+	// fails (the intervening word breaks the match).
+	/\bconcurren\w*\b[^\n]{0,60}\b(?:limit|quota|exceed\w*|reach\w*)\b|\b(?:limit|quota|exceed\w*|reach\w*)\b[^\n]{0,60}\bconcurren\w*\b|\bconcurren[a-z]*[-_](?:[a-z]+[_-])*(?:limit|quota|exceed\w*|reach\w*)|\btoo many concurrent\b/i;
 const ACCOUNT_SCOPED_403_PATTERN =
 	// The bare "limit will reset" / "will reset in" phrasing also appears on
 	// statusless per-minute transients ("Rate limit will reset in 30 seconds"),
