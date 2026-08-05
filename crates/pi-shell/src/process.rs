@@ -11,6 +11,13 @@ use parking_lot::Mutex;
 
 use crate::cancel::CancelToken;
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct ProcessIdentity {
+	pid:               i32,
+	start_time:        u64,
+	start_time_subsec: u64,
+}
+
 /// Current state of a process reference.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProcessStatus {
@@ -31,7 +38,7 @@ mod platform {
 		sync::Arc,
 	};
 
-	use super::ProcessStatus;
+	use super::{ProcessIdentity, ProcessStatus};
 
 	/// Stable Linux process reference backed by a pidfd.
 	#[derive(Clone)]
@@ -53,6 +60,14 @@ mod platform {
 
 		pub const fn pid(&self) -> i32 {
 			self.pid
+		}
+
+		pub(super) const fn identity(&self) -> ProcessIdentity {
+			ProcessIdentity {
+				pid:               self.pid,
+				start_time:        self.start_time,
+				start_time_subsec: 0,
+			}
 		}
 
 		pub fn children(&self) -> Vec<Self> {
@@ -332,7 +347,7 @@ mod platform {
 		ptr,
 	};
 
-	use super::ProcessStatus;
+	use super::{ProcessIdentity, ProcessStatus};
 
 	#[link(name = "proc", kind = "dylib")]
 	unsafe extern "C" {
@@ -364,6 +379,14 @@ mod platform {
 
 		pub const fn pid(&self) -> i32 {
 			self.pid
+		}
+
+		pub(super) const fn identity(&self) -> ProcessIdentity {
+			ProcessIdentity {
+				pid:               self.pid,
+				start_time:        self.start_tvsec,
+				start_time_subsec: self.start_tvusec,
+			}
 		}
 
 		pub fn children(&self) -> Vec<Self> {
@@ -704,7 +727,7 @@ mod platform {
 
 	use smallvec::SmallVec;
 
-	use super::ProcessStatus;
+	use super::{ProcessIdentity, ProcessStatus};
 
 	#[repr(C)]
 	#[allow(non_snake_case, reason = "Windows PROCESSENTRY32W field names must match Win32 ABI")]
@@ -894,6 +917,14 @@ mod platform {
 
 		pub const fn pid(&self) -> i32 {
 			self.pid
+		}
+
+		pub(super) const fn identity(&self) -> ProcessIdentity {
+			ProcessIdentity {
+				pid:               self.pid,
+				start_time:        self.creation_time,
+				start_time_subsec: 0,
+			}
 		}
 
 		pub fn parent_pid(&self) -> Option<i32> {
@@ -1416,6 +1447,23 @@ impl Process {
 			.collect()
 	}
 
+	const fn identity(&self) -> ProcessIdentity {
+		self.inner.identity()
+	}
+
+	/// Keep descendants pinned before TERM alongside a fresh walk for the hard
+	/// wave. The group leader may exit during grace, making `group_id()` empty
+	/// and hiding a reparented descendant; deduplicating by pinned identity also
+	/// avoids confusing a recycled PID with the original process.
+	fn merge_descendants(pinned: Vec<Self>, fresh: Vec<Self>) -> Vec<Self> {
+		let mut seen = HashSet::new();
+		pinned
+			.into_iter()
+			.chain(fresh)
+			.filter(|process| seen.insert(process.identity()))
+			.collect()
+	}
+
 	fn signal_tree(&self, signal: i32) -> u32 {
 		self.signal_tree_excluding(signal, &host_protected_pids())
 	}
@@ -1487,10 +1535,10 @@ impl Process {
 		let protected = host_protected_pids();
 
 		// Polite wave: SIGTERM the group, every live descendant, then the root.
+		let mut descendants = self.signalable_descendants(&protected);
 		if group && let Some(pgid) = self.group_id() {
 			let _ = kill_process_group(pgid, TERM_SIGNAL);
 		}
-		let mut descendants = self.signalable_descendants(&protected);
 		for child in &descendants {
 			let _ = child.inner.kill(TERM_SIGNAL);
 		}
@@ -1513,12 +1561,12 @@ impl Process {
 			}
 		}
 
-		// Hard wave. Re-walk the tree so any grandchild spawned during the grace
-		// period — or any process re-parented to the root — is signalled too.
+		// Hard wave. Keep the pre-TERM identities and add a fresh walk so
+		// descendants spawned during grace are signalled too.
 		if group && let Some(pgid) = self.group_id() {
 			let _ = kill_process_group(pgid, KILL_SIGNAL);
 		}
-		descendants = self.signalable_descendants(&protected);
+		descendants = Self::merge_descendants(descendants, self.signalable_descendants(&protected));
 		for child in &descendants {
 			let _ = child.inner.kill(KILL_SIGNAL);
 		}
@@ -2087,6 +2135,100 @@ mod tests {
 			 cancellation cleanup can reach it; this regressed on macOS when the walk relied on the \
 			 broken `proc_listchildpids`",
 		);
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn terminate_tree_kills_reparented_term_ignoring_child() {
+		use std::{
+			fs,
+			os::unix::process::CommandExt,
+			process::{Child, Command},
+			thread,
+			time::Duration,
+		};
+
+		struct Cleanup {
+			child:      Option<Child>,
+			descendant: Option<Process>,
+			pgid:       Option<i32>,
+		}
+
+		impl Drop for Cleanup {
+			fn drop(&mut self) {
+				if let Some(descendant) = &self.descendant {
+					let _ = descendant.inner.kill(KILL_SIGNAL);
+				}
+				if let Some(pgid) = self.pgid {
+					let _ = kill_process_group(pgid, KILL_SIGNAL);
+				}
+				if let Some(child) = self.child.as_mut() {
+					let _ = child.kill();
+					let _ = child.wait();
+				}
+			}
+		}
+
+		let pid_file = tempfile::NamedTempFile::new().expect("create child pid file");
+		let pid_file_path = pid_file.path().to_owned();
+		let child = {
+			let mut command = Command::new("sh");
+			command
+				.arg("-c")
+				.arg(
+					r#"(trap "" TERM; echo $$ > "$CHILD_PID_FILE"; while :; do :; done) & trap "exit 0" TERM; while :; do :; done"#,
+				)
+				.env("CHILD_PID_FILE", &pid_file_path);
+			// SAFETY: This runs in the freshly forked child before exec and only
+			// changes its own session and process-group membership.
+			unsafe {
+				command.pre_exec(|| {
+					if libc::setsid() == -1 {
+						return Err(std::io::Error::last_os_error());
+					}
+					Ok(())
+				});
+			}
+			command.spawn().expect("spawn process-group leader")
+		};
+		let root_pid = i32::try_from(child.id()).expect("root pid fits in i32");
+		let mut cleanup =
+			Cleanup { child: Some(child), descendant: None, pgid: Some(root_pid) };
+		let root = Process::from_pid(root_pid).expect("pin process-group leader");
+
+		let child_pid = loop {
+			if let Ok(contents) = fs::read_to_string(&pid_file_path)
+				&& let Ok(pid) = contents.trim().parse::<i32>()
+			{
+				break pid;
+			}
+			assert_eq!(
+				root.status(),
+				ProcessStatus::Running,
+				"leader exited before its child was observable",
+			);
+			thread::sleep(Duration::from_millis(10));
+		};
+		let descendant = Process::from_pid(child_pid).expect("pin TERM-ignoring child");
+		assert_eq!(descendant.status(), ProcessStatus::Running);
+		cleanup.descendant = Some(descendant.clone());
+
+		let result = root
+			.terminate_tree(true, 50, 500, CancelToken::default())
+			.await
+			.expect("terminate tree");
+
+		assert!(result, "termination should finish within the hard-kill timeout");
+		assert_ne!(
+			descendant.status(),
+			ProcessStatus::Running,
+			"terminate_tree must not report success while a reparented child remains alive",
+		);
+
+		cleanup.pgid = None;
+		if let Some(child) = cleanup.child.as_mut() {
+			let _ = child.wait();
+		}
 	}
 
 	/// Regression test for issue #4605: `SpawnRegistry` MUST pin a stable

@@ -253,16 +253,36 @@ impl PtySession {
 fn terminate_pty_processes(
 	child: &mut Box<dyn Child + Send + Sync>,
 	child_process: Option<&ShellProcess>,
+	process_group: Option<i32>,
+	child_reaped: bool,
 ) {
 	let mut targets = ps::TerminationTargets::new();
 	if let Some(process) = child_process {
 		targets.add_process(process.clone());
 	}
 
-	targets.signal(ps::TERM_SIGNAL);
+	let fallback_pgid = pty_fallback_pgid(child_process.is_some(), process_group, child_reaped);
+	if let Some(pgid) = fallback_pgid {
+		// A raw pgid is safe only for this immediate cancellation wave: retaining
+		// it after reaping could signal an unrelated process group after reuse.
+		let _ = ps::kill_process_group(pgid, ps::TERM_SIGNAL);
+	} else {
+		targets.signal(ps::TERM_SIGNAL);
+	}
 	let _ = child.kill();
-	targets.signal(ps::KILL_SIGNAL);
+	if let Some(pgid) = fallback_pgid {
+		let _ = ps::kill_process_group(pgid, ps::KILL_SIGNAL);
+	} else {
+		targets.signal(ps::KILL_SIGNAL);
+	}
 }
+
+fn pty_fallback_pgid(pinned: bool, process_group: Option<i32>, child_reaped: bool) -> Option<i32> {
+	(!pinned && !child_reaped)
+		.then_some(process_group)
+		.flatten()
+}
+
 fn run_pty_sync(
 	config: PtyRunConfig,
 	on_chunk: Option<ThreadsafeFunction<String>>,
@@ -358,6 +378,10 @@ fn run_pty_sync(
 		.map_err(|err| Error::from_reason(format!("PTY setup cancelled before reader: {err}")))?;
 
 	let master = pair.master;
+	#[cfg(unix)]
+	let process_group = master.process_group_leader().filter(|pid| *pid > 0);
+	#[cfg(not(unix))]
+	let process_group = None;
 	let mut writer = master
 		.take_writer()
 		.map_err(|err| Error::from_reason(format!("Failed to create PTY writer: {err}")))?;
@@ -445,7 +469,12 @@ fn run_pty_sync(
 			let message = err.to_string();
 			timed_out = message.contains("Timeout");
 			cancelled = !timed_out;
-			terminate_pty_processes(&mut child, child_process.as_ref());
+			terminate_pty_processes(
+				&mut child,
+				child_process.as_ref(),
+				process_group,
+				exit_code.is_some(),
+			);
 			terminate_requested = true;
 			reader_drain_deadline = Some(Instant::now() + POST_CANCEL_DRAIN_TIMEOUT);
 		}
@@ -462,7 +491,12 @@ fn run_pty_sync(
 				Ok(ControlMessage::Kill) => {
 					cancelled = true;
 					if !terminate_requested {
-						terminate_pty_processes(&mut child, child_process.as_ref());
+						terminate_pty_processes(
+							&mut child,
+							child_process.as_ref(),
+							process_group,
+							exit_code.is_some(),
+						);
 						terminate_requested = true;
 						reader_drain_deadline = Some(Instant::now() + POST_CANCEL_DRAIN_TIMEOUT);
 					}
@@ -623,5 +657,17 @@ fn run_pty_sync(
 fn emit_chunk(text: &str, callback: Option<&ThreadsafeFunction<String>>) {
 	if let Some(callback) = callback {
 		callback.call(Ok(text.to_string()), ThreadsafeFunctionCallMode::NonBlocking);
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::pty_fallback_pgid;
+
+	#[test]
+	fn pty_fallback_pgid_respects_process_lifecycle() {
+		assert_eq!(pty_fallback_pgid(true, Some(41), false), None);
+		assert_eq!(pty_fallback_pgid(false, Some(41), false), Some(41));
+		assert_eq!(pty_fallback_pgid(false, Some(41), true), None);
 	}
 }
