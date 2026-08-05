@@ -93,6 +93,14 @@ export interface UsageFallbackConfirmation {
 }
 
 /**
+ * Confirms whether a reserve-triggered model fallback may proceed.
+ *
+ * Interactive callers use the confirmation details to present the pending
+ * route change; aborting `signal` cancels that pending confirmation.
+ */
+export type UsageFallbackConfirmer = (confirmation: UsageFallbackConfirmation, signal: AbortSignal) => Promise<boolean>;
+
+/**
  * What {@link AgentSession.reapplyDefaultRoleModel} did about a changed `default`
  * model role.
  *
