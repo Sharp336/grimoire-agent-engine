@@ -1271,6 +1271,10 @@ export async function runRootCommand(
 	if (parsedArgs.hideThinking) {
 		settingsInstance.override("hideThinkingBlock", true);
 	}
+	// Apply --reduce-motion CLI flag (ephemeral, not persisted)
+	if (parsedArgs.reduceMotion) {
+		settingsInstance.override("display.reduceMotion", parsedArgs.reduceMotion);
+	}
 	// Apply --advisor CLI flag (ephemeral, not persisted)
 	if (parsedArgs.advisor) {
 		settingsInstance.override("advisor.enabled", true);
