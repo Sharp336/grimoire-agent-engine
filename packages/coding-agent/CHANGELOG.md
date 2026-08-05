@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Unified and verified in-place SQLite repair guidance across agent, stats, and mnemopi stores, with restrictive recovery permissions for credential data.
+- Bounded legacy-bank discovery with one total startup budget so a locked or contended `banks/` directory cannot stall startup for minutes.
+- Restored absent environment variables correctly in perf-test teardown.
 - Fixed the credential store corruption latch not clearing in-memory rate-limit blocks on healthy usage reports, not notifying generation listeners on latch, and not surfacing repair guidance when the store file is malformed at startup; the database path is now passed through all SqliteAuthCredentialStore construction sites (AgentStorage and the legacy pi-coding-agent shim) so corruption reports always identify the file. ([#7296](https://github.com/can1357/oh-my-pi/issues/7296))
 - Fixed the credential store corruption latch not clearing in-memory rate-limit blocks on healthy usage reports, not notifying generation listeners on latch, and not surfacing repair guidance when the store file is malformed at startup; the database path is now passed through all SqliteAuthCredentialStore construction sites (AgentStorage and the legacy pi-coding-agent shim) so corruption reports always identify the file.
 - Fixed the model-perf backfill and the mnemopi legacy bank reader re-throwing or re-probing a damaged SQLite database on every invocation: both now latch on the first `SQLITE_CORRUPT`/`SQLITE_NOTADB` error, log once at error level with repair guidance, and fail open (no backfill rows / no legacy bank) without touching the file again. ([#7302](https://github.com/can1357/oh-my-pi/issues/7302))
@@ -11,6 +14,7 @@
 
 ### Changed
 
+- Consolidated POSIX shell argument quoting on the shared `@oh-my-pi/pi-utils/shell` helper across SSH transfers, user-shell launches, daemon broker commands, skill URLs, profile aliases, screenshots, snapshots, and test fixtures.
 - Centralized SQLite open pragmas on the shared `configureSqliteDatabase`/`openSqliteDatabase` helpers (session agent storage, history storage, local memory storage, GitHub cache, auto-QA grievance store, autoresearch store, and the GC maintenance handles); per-site pragma sets, timeouts, caching, and retry behavior are unchanged. ([#7302](https://github.com/can1357/oh-my-pi/issues/7302))
 
 ## [17.2.3] - 2026-08-01

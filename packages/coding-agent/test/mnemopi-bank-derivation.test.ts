@@ -9,7 +9,7 @@ import {
 	resetLegacyBankCorruptLatchForTests,
 } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
 import { logger, removeWithRetries, TempDir } from "@oh-my-pi/pi-utils";
-import { shellQuote } from "@oh-my-pi/pi-utils/shell";
+import { sqliteRepairGuidance } from "@oh-my-pi/pi-utils/sqlite";
 
 // Set up a fixture filesystem we can reuse across the two regression
 // suites — same shape as `~/.omp/memories/mnemopi/` on a real install.
@@ -151,6 +151,36 @@ describe("extendRecallWithLegacyBanks edge cases", () => {
 		expect(out).toContain("active");
 		expect(out).not.toContain("corrupt-C");
 	});
+
+	it("bounds the total scan time when legacy banks are exclusively locked", () => {
+		const lockedBanks: Database[] = [];
+		const suffix = crypto.randomUUID();
+		try {
+			for (let index = 0; index < 3; index++) {
+				const bank = `aaa-locked-${suffix}-${index}`;
+				createBankFixture(bank, [{ cwd: path.join(rootDir.path(), "projects", "locked") }]);
+				const db = new Database(path.join(banksDir, bank, "mnemopi.db"));
+				db.exec("BEGIN EXCLUSIVE");
+				lockedBanks.push(db);
+			}
+
+			const started = performance.now();
+			const extended = extendRecallWithLegacyBanks(
+				["active"],
+				mainDbPath,
+				path.join(rootDir.path(), "projects", "locked"),
+			);
+			const elapsedMs = performance.now() - started;
+
+			expect(extended).toEqual(["active"]);
+			expect(elapsedMs).toBeLessThan(5000);
+		} finally {
+			for (const db of lockedBanks) {
+				db.exec("ROLLBACK");
+				db.close();
+			}
+		}
+	});
 });
 
 describe("bankOnlyHasCwd corrupt-store latch", () => {
@@ -184,11 +214,7 @@ describe("bankOnlyHasCwd corrupt-store latch", () => {
 		);
 		expect(damagedErrors).toHaveLength(1);
 		expect(String(damagedErrors[0]?.[0])).toContain(corruptDbPath);
-		// The repair command shell-quotes the path and uses --ignore-freelist.
-		expect(String(damagedErrors[0]?.[0])).toContain(
-			`sqlite3 ${shellQuote(corruptDbPath)} '.recover --ignore-freelist'`,
-		);
-		expect(String(damagedErrors[0]?.[0])).toContain(`sqlite3 ${shellQuote(`${corruptDbPath}.fixed`)}`);
+		expect(String(damagedErrors[0]?.[0])).toContain(sqliteRepairGuidance(corruptDbPath));
 
 		// Non-corrupt errors still use debug, not error.
 		const legacyDebugs = debugSpy.mock.calls.filter(

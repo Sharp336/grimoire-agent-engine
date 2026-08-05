@@ -2,8 +2,7 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
-import { shellQuote } from "@oh-my-pi/pi-utils/shell";
-import { configureSqliteDatabase, isSqliteCorruptError } from "@oh-my-pi/pi-utils/sqlite";
+import { configureSqliteDatabase, isSqliteCorruptError, sqliteRepairGuidance } from "@oh-my-pi/pi-utils/sqlite";
 import { type Env, enhancedRecallEnabled } from "../config";
 import { cosineSimilarity } from "./vector-math";
 
@@ -271,7 +270,7 @@ export class QueryCache {
 		}
 		logger.error(
 			`Query-cache persistence store is damaged (${this.#dbPath}); persistence is disabled for this process. ` +
-				`In-memory tiers keep working. Repair with: sqlite3 ${shellQuote(this.#dbPath)} '.recover --ignore-freelist' | sqlite3 ${shellQuote(`${this.#dbPath}.recovered`)}`,
+				`In-memory tiers keep working. ${sqliteRepairGuidance(this.#dbPath)}`,
 			{ err, dbPath: this.#dbPath },
 		);
 	}

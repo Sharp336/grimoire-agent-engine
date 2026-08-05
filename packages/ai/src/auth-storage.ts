@@ -14,7 +14,7 @@ import * as path from "node:path";
 import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 import { $env, getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
 import { shellQuote } from "@oh-my-pi/pi-utils/shell";
-import { configureSqliteDatabase, isSqliteCorruptError } from "@oh-my-pi/pi-utils/sqlite";
+import { configureSqliteDatabase, isSqliteCorruptError, sqliteRepairGuidance } from "@oh-my-pi/pi-utils/sqlite";
 import type { ApiKeyResolver } from "./auth-retry";
 import * as AIError from "./error";
 import { isUsageLimitOutcome } from "./error/rate-limit";
@@ -1718,9 +1718,9 @@ export class AuthStorage {
 		logger.error(
 			storePath
 				? `Credential store is damaged; persisted rate-limit blocks are disabled for this process. ` +
-						`Stop omp, back up the store (including -wal/-shm), then repair with: sqlite3 ${shellQuote(storePath)} '.recover --ignore-freelist' | sqlite3 ${shellQuote(`${storePath}.fixed`)} && chmod 600 ${shellQuote(`${storePath}.fixed`)}`
+						sqliteRepairGuidance(storePath, { restrictPermissions: true })
 				: "Credential store is damaged; persisted rate-limit blocks are disabled for this process. " +
-						"Repair the store file with sqlite3's .recover and restart.",
+						sqliteRepairGuidance(undefined),
 			{ err, op, storePath, ...context },
 		);
 		this.#bumpGeneration("store-damaged");
@@ -7049,8 +7049,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	static #damagedStoreError(dbPath: string | undefined, cause: unknown): Error {
 		return new Error(
 			dbPath
-				? `Credential store at ${shellQuote(dbPath)} is damaged. Stop omp, back up the store (including -wal/-shm), then repair with: sqlite3 ${shellQuote(dbPath)} '.recover --ignore-freelist' | sqlite3 ${shellQuote(`${dbPath}.fixed`)} && chmod 600 ${shellQuote(`${dbPath}.fixed`)}`
-				: "Credential store is damaged. Repair the store file with sqlite3's .recover and restart.",
+				? `Credential store at ${shellQuote(dbPath)} is damaged. ${sqliteRepairGuidance(dbPath, { restrictPermissions: true })}`
+				: `Credential store is damaged. ${sqliteRepairGuidance(undefined)}`,
 			{ cause },
 		);
 	}

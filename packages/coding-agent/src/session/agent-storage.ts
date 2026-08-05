@@ -10,7 +10,12 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { AsyncDrain, getAgentDbPath, getStatsDbPath, isRecord, logger } from "@oh-my-pi/pi-utils";
 import { shellQuote } from "@oh-my-pi/pi-utils/shell";
-import { configureSqliteDatabase, isSqliteCorruptError, openSqliteDatabase } from "@oh-my-pi/pi-utils/sqlite";
+import {
+	configureSqliteDatabase,
+	isSqliteCorruptError,
+	openSqliteDatabase,
+	sqliteRepairGuidance,
+} from "@oh-my-pi/pi-utils/sqlite";
 import type { RawSettings as Settings } from "../config/settings";
 
 /** Row shape for settings table queries */
@@ -172,7 +177,7 @@ export class AgentStorage {
 			this.#db.close();
 			if (isSqliteCorruptError(err)) {
 				throw new Error(
-					`Agent database at ${shellQuote(dbPath)} is damaged. Stop omp, back up the store (including -wal/-shm), then repair with: sqlite3 ${shellQuote(dbPath)} '.recover --ignore-freelist' | sqlite3 ${shellQuote(`${dbPath}.fixed`)} && chmod 600 ${shellQuote(`${dbPath}.fixed`)}`,
+					`Agent database at ${shellQuote(dbPath)} is damaged. ${sqliteRepairGuidance(dbPath, { restrictPermissions: true })}`,
 					{ cause: err },
 				);
 			}
@@ -642,7 +647,7 @@ LIMIT ?4`,
 				this.#statsDbDamagedPaths.add(statsDbPath);
 				logger.error(
 					`Stats database is damaged; model-perf backfill is disabled for this path. ` +
-						`Repair with: sqlite3 ${shellQuote(statsDbPath)} '.recover --ignore-freelist' | sqlite3 ${shellQuote(`${statsDbPath}.fixed`)}`,
+						sqliteRepairGuidance(statsDbPath),
 					{ err, statsDbPath },
 				);
 				return -1;

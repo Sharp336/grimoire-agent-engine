@@ -6,6 +6,7 @@
  * file damage apart from transient lock contention.
  */
 import { Database } from "bun:sqlite";
+import { shellQuote } from "./shell";
 
 /**
  * SQLite's unrecoverable-file result codes: the `SQLITE_CORRUPT` family plus
@@ -16,6 +17,35 @@ export function isSqliteCorruptError(err: unknown): boolean {
 	if (err === null || typeof err !== "object" || !("code" in err)) return false;
 	const code = err.code;
 	return typeof code === "string" && (code.startsWith("SQLITE_CORRUPT") || code === "SQLITE_NOTADB");
+}
+
+export interface SqliteRepairGuidanceOptions {
+	/** Create the recovered file under `umask 077` — for stores holding secrets. Default false. */
+	restrictPermissions?: boolean;
+}
+
+/**
+ * Build copy-pasteable SQLite repair guidance that recovers, verifies, backs
+ * up the original database and sidecars, then installs the repaired file.
+ * Steps are `&&`-chained so failed recovery cannot reach installation;
+ * restrictive permissions protect stores holding secrets during recovery.
+ */
+export function sqliteRepairGuidance(dbPath: string | undefined, options: SqliteRepairGuidanceOptions = {}): string {
+	if (dbPath === undefined) return "Repair the store file with sqlite3's .recover and restart.";
+
+	const fixedPath = `${dbPath}.fixed`;
+	const backupPath = `${dbPath}.bak`;
+	const walPath = `${dbPath}-wal`;
+	const shmPath = `${dbPath}-shm`;
+	const backupWalPath = `${backupPath}-wal`;
+	const backupShmPath = `${backupPath}-shm`;
+	const recover = `sqlite3 ${shellQuote(dbPath)} '.recover --ignore-freelist' | sqlite3 ${shellQuote(fixedPath)}`;
+	const recoverStep = options.restrictPermissions ? `(umask 077 && ${recover})` : recover;
+	const sidecarBackup = `{ mv ${shellQuote(walPath)} ${shellQuote(backupWalPath)} 2>/dev/null; mv ${shellQuote(shmPath)} ${shellQuote(backupShmPath)} 2>/dev/null; true; }`;
+	const command =
+		`${recoverStep} && sqlite3 ${shellQuote(fixedPath)} 'PRAGMA integrity_check' | grep -qx 'ok'` +
+		` && mv ${shellQuote(dbPath)} ${shellQuote(backupPath)} && ${sidecarBackup} && mv ${shellQuote(fixedPath)} ${shellQuote(dbPath)}`;
+	return `Stop omp, then repair the database in place with: ${command}`;
 }
 
 export interface SqlitePragmaSettings {

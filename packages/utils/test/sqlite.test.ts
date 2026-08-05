@@ -18,6 +18,7 @@ import {
 	isSqliteCorruptError,
 	openSqliteDatabase,
 	type SqliteOpenSettings,
+	sqliteRepairGuidance,
 } from "@oh-my-pi/pi-utils/sqlite";
 import { removeWithRetries } from "../src/temp";
 
@@ -172,5 +173,43 @@ describe("isSqliteCorruptError", () => {
 		expect(isSqliteCorruptError(new Error("plain"))).toBe(false);
 		expect(isSqliteCorruptError(null)).toBe(false);
 		expect(isSqliteCorruptError("SQLITE_CORRUPT")).toBe(false);
+	});
+});
+
+describe("sqliteRepairGuidance", () => {
+	test("builds restrictive in-place repair guidance with balanced quoting", () => {
+		const dbPath = "/tmp/omp agent's.db";
+		const guidance = sqliteRepairGuidance(dbPath, { restrictPermissions: true });
+		const quotedPath = "'/tmp/omp agent'\\''s.db'";
+		const fixedPath = "'/tmp/omp agent'\\''s.db.fixed'";
+		const backupPath = "'/tmp/omp agent'\\''s.db.bak'";
+
+		expect(guidance).toContain(
+			`Stop omp, then repair the database in place with: (umask 077 && sqlite3 ${quotedPath}`,
+		);
+		expect(guidance).toContain(`.recover --ignore-freelist' | sqlite3 ${fixedPath}`);
+		let open = false;
+		for (let index = guidance.indexOf("(umask 077 &&"); index < guidance.length; index++) {
+			if (guidance[index] === "'" && guidance[index - 1] !== "\\") open = !open;
+		}
+		expect(open).toBe(false);
+		expect(guidance.indexOf("(umask 077 &&")).toBeLessThan(
+			guidance.indexOf(`sqlite3 ${fixedPath} 'PRAGMA integrity_check'`),
+		);
+		expect(guidance.indexOf(`sqlite3 ${fixedPath} 'PRAGMA integrity_check'`)).toBeLessThan(
+			guidance.indexOf(`mv ${quotedPath} ${backupPath}`),
+		);
+		expect(guidance.endsWith(`mv ${fixedPath} ${quotedPath}`)).toBe(true);
+	});
+
+	test("does not add a restrictive umask to non-secret repair guidance", () => {
+		const guidance = sqliteRepairGuidance("/tmp/model cache.db");
+		expect(guidance).not.toContain("umask 077");
+		expect(guidance).toContain("PRAGMA integrity_check");
+		expect(guidance).toContain("mv '/tmp/model cache.db.fixed' '/tmp/model cache.db'");
+	});
+
+	test("keeps the path-free fallback", () => {
+		expect(sqliteRepairGuidance(undefined)).toBe("Repair the store file with sqlite3's .recover and restart.");
 	});
 });

@@ -23,8 +23,7 @@ import * as path from "node:path";
 import { AuthStorage, type OAuthCredential, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { logger } from "@oh-my-pi/pi-utils";
-import { shellQuote } from "@oh-my-pi/pi-utils/shell";
-import { isSqliteCorruptError } from "@oh-my-pi/pi-utils/sqlite";
+import { isSqliteCorruptError, sqliteRepairGuidance } from "@oh-my-pi/pi-utils/sqlite";
 import { removeWithRetries } from "../../utils/src/temp";
 
 const PROVIDER = "anthropic";
@@ -228,9 +227,7 @@ describe("AuthStorage corrupt-store reporting", () => {
 		// The repair guidance must point at the actual store file, not a
 		// hardcoded default path (profiles relocate agent.db).
 		expect(String(damagedErrors[0]?.[0])).toContain(dbPath);
-		// F2: repair guidance must preserve credential-file permissions.
-		expect(String(damagedErrors[0]?.[0])).toContain("chmod 600");
-		expect(String(damagedErrors[0]?.[0])).toContain("--ignore-freelist");
+		expect(String(damagedErrors[0]?.[0])).toContain(sqliteRepairGuidance(dbPath, { restrictPermissions: true }));
 
 		const swallowDebugs = debugSpy.mock.calls.filter(
 			call => typeof call[0] === "string" && call[0] === "Failed to read credential block from persistent store",
@@ -328,7 +325,8 @@ describe("AuthStorage corrupt-store shell-balanced repair guidance", () => {
 		expect(damagedCall).toBeDefined();
 		const message = String(damagedCall?.[0]);
 		expect(message).toContain("--ignore-freelist");
-		expect(message).toContain("chmod 600");
+		const expectedDbPath = path.join(tempDir, "omp's agent", "agent.db");
+		expect(message).toContain(sqliteRepairGuidance(expectedDbPath, { restrictPermissions: true }));
 		// The repair command must be shell-balanced: every unescaped single
 		// quote toggles open/close state, so the string ends closed.
 		let open = false;
@@ -351,8 +349,7 @@ describe("AuthStorage corrupt-store shell-balanced repair guidance", () => {
 			await SqliteAuthCredentialStore.open(dbPath);
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
-			expect(message).toContain(".recover --ignore-freelist");
-			expect(message).toContain(shellQuote(dbPath));
+			expect(message).toContain(sqliteRepairGuidance(dbPath, { restrictPermissions: true }));
 			// Shell-balanced check.
 			let open = false;
 			for (let i = 0; i < message.length; i++) {
