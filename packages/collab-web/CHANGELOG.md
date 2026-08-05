@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Tool renderers now use the canonical home-relative middle-elided path format (matching `shortenPath` in `lib/format.ts`) for filesystem paths, unifying summary and body display across all tool cards.
+- Tool renderers now use a single `compactPath` path formatter (replacing the duplicate `shortenPath` implementation) for filesystem paths, unifying summary and body display with unconditional home-directory redaction and safe handling of URLs, globs, brace patterns, and multi-pattern scope values.
 
 ### Fixed
 
