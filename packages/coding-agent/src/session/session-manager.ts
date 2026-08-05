@@ -2380,6 +2380,122 @@ export class SessionManager {
 	}
 
 	/**
+	 * Prune every branch with nothing to read in it.
+	 *
+	 * An entry is kept when an answered assistant reply sits at or below it — so
+	 * a prompt survives on the strength of what came back, and everything on the
+	 * way down to that reply survives with it. A reply that errored, was
+	 * aborted, or stopped waiting on a tool call is not an answer: it records a
+	 * request that never landed, so a branch holding nothing else is as empty as
+	 * one holding no reply at all and goes whole, prompt included. A tool call
+	 * mid-conversation is answered by the reply that follows it, so it survives
+	 * on that reply the same way the prompt above it does; only the call left
+	 * dangling at the tail of an abandoned branch goes. The failure itself is
+	 * kept only when the retry that finally worked hangs below it.
+	 *
+	 * That leaves nothing behind at the tail of a branch: a prompt that was never
+	 * answered, a summary of a branch you abandoned, or the metadata
+	 * stranded at its head all go with it. Tool results are the exception, kept
+	 * with the reply that called them — nothing answers a tool result, and it is
+	 * not what you came back to the branch to read. The active path is always
+	 * kept, so pruning can never delete the conversation you are in, including a
+	 * failure or an unanswered prompt you are still looking at. A label is kept
+	 * when its target is.
+	 *
+	 * Runs in linear tree passes — no per-entry ancestor walks — so it stays
+	 * usable on deep sessions. Returns the number of pruned entries, and rewrites
+	 * the session file when anything was pruned.
+	 */
+	async pruneEmptyBranches(): Promise<number> {
+		// A reply that stopped on `toolUse` is mid-turn by construction: the model
+		// asked for a tool and the answer, if it ever came, is the reply below it.
+		// Counting it as an answer would strand every abandoned branch whose last
+		// act was a tool call — the prompt reads as answered when nothing came
+		// back. It still survives whenever a real reply hangs underneath, since
+		// the verdict propagates up from the children.
+		const isUnansweredAssistant = (entry: SessionEntry): boolean =>
+			entry.type === "message" &&
+			entry.message.role === "assistant" &&
+			(entry.message.stopReason === "error" ||
+				entry.message.stopReason === "aborted" ||
+				entry.message.stopReason === "toolUse");
+		const isAnsweringAssistant = (entry: SessionEntry): boolean =>
+			entry.type === "message" && entry.message.role === "assistant" && !isUnansweredAssistant(entry);
+		const isToolResult = (entry: SessionEntry): boolean =>
+			entry.type === "message" && entry.message.role === "toolResult";
+
+		const kept = new Set<string>();
+		for (const entry of this.getBranch()) kept.add(entry.id);
+
+		const roots = this.getTree();
+
+		// Post-order: does an answered reply sit at or below this entry? Children
+		// are visited first, so a node's verdict only reads settled state.
+		const replyBelow = new Set<string>();
+		const preOrder: SessionTreeNode[] = [];
+		const stack = [...roots];
+		while (stack.length > 0) {
+			const node = stack.pop() as SessionTreeNode;
+			preOrder.push(node);
+			for (const child of node.children) stack.push(child);
+		}
+		for (let i = preOrder.length - 1; i >= 0; i--) {
+			const node = preOrder[i] as SessionTreeNode;
+			const id = node.entry.id;
+			if (isAnsweringAssistant(node.entry) || node.children.some(child => replyBelow.has(child.entry.id))) {
+				replyBelow.add(id);
+				kept.add(id);
+			}
+		}
+
+		// Pre-order: tool results belong to the reply that called them, so they
+		// live and die with their parent rather than earning a verdict of their
+		// own — nothing answers a tool result, and it is not what you came back to
+		// the branch to read. The same pass drops the children of anything else we
+		// dropped: they would reload as orphan roots, leaving a detached stub of a
+		// message that no longer exists. A parent is always visited first, so each
+		// verdict is final when it is read.
+		for (const node of preOrder) {
+			const { id, parentId } = node.entry;
+			if (!parentId) continue;
+			if (!kept.has(parentId)) kept.delete(id);
+			else if (isToolResult(node.entry)) kept.add(id);
+		}
+
+		// Labels live outside the parent chain: they follow their target.
+		for (const entry of this.#entries) {
+			if (entry.type === "label" && kept.has(entry.targetId)) kept.add(entry.id);
+		}
+
+		// Records that are not tree nodes — the session header, the title — carry
+		// no id the tree ever sees, so a verdict was never computed for them and
+		// dropping them would take the session's own metadata with the branches.
+		const inTree = new Set<string>();
+		for (const node of preOrder) inTree.add(node.entry.id);
+
+		const oldLength = this.#entries.length;
+		const activeLeafId = this.#index.leafId();
+
+		this.#entries = this.#entries.filter(entry => !inTree.has(entry.id) || kept.has(entry.id));
+		this.#index.rebuild(this.#entries);
+		this.#setLeaf(activeLeafId);
+
+		const prunedCount = oldLength - this.#entries.length;
+		if (prunedCount > 0) {
+			// Deleting entries can only be published by rewriting the whole file:
+			// the append path never removes lines, and close() marks the file
+			// current without rewriting, so without this the prune would be lost
+			// on reload.
+			this.#fileIsCurrent = false;
+			this.#rewriteRequired = true;
+			this.#atomicRewriteDirty = true;
+			await this.#rewriteAtomically();
+		}
+
+		return prunedCount;
+	}
+
+	/**
 	 * Move the leaf to an earlier entry so the next append forms a new branch.
 	 * Existing entries are never modified or deleted.
 	 */

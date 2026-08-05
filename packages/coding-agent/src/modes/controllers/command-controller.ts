@@ -1306,6 +1306,27 @@ export class CommandController {
 		this.ctx.showStatus(formatShakeSummary(result));
 	}
 
+	/**
+	 * TUI handler for `/prune`. Prunes empty branches from the session history.
+	 */
+	async handlePruneCommand(): Promise<void> {
+		let count: number;
+		try {
+			count = await this.ctx.session.pruneEmptyBranches();
+		} catch (error) {
+			this.ctx.showError(`Prune failed: ${error instanceof Error ? error.message : String(error)}`);
+			return;
+		}
+
+		if (count === 0) {
+			this.ctx.showStatus("No empty branches to prune.");
+			return;
+		}
+		this.ctx.statusLine.invalidate();
+		this.ctx.ui.requestRender();
+		this.ctx.showStatus(`Pruned ${count} empty branch ${count === 1 ? "entry" : "entries"}.`);
+	}
+
 	async executeCompaction(
 		customInstructionsOrOptions?: string | CompactOptions,
 		isAuto = false,

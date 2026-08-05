@@ -1,7 +1,8 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import type { CustomEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { assistantMsg, userMsg } from "../utilities";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { assistantMsg, failedAssistantMsg, toolCallMsg, toolResultMsg, userMsg } from "../utilities";
 
 describe("SessionManager append and tree traversal", () => {
 	describe("append operations", () => {
@@ -485,5 +486,317 @@ describe("createBranchedSession", () => {
 		const entries = session.getEntries();
 		expect(entries).toHaveLength(4);
 		expect(entries.map(e => e.id)).toEqual([id1, id2, id4, id5]);
+	});
+});
+
+describe("pruneEmptyBranches", () => {
+	it("prunes empty abandoned branches and keeps active path and branches with assistant messages", async () => {
+		const session = SessionManager.inMemory();
+
+		// Active branch: Root (user) -> Assistant -> user1 (active, no assistant response yet)
+		const idRoot = session.appendMessage(userMsg("Root"));
+		const idAsst = session.appendMessage(assistantMsg("Assistant"));
+		const idUser1 = session.appendMessage(userMsg("user1")); // active leaf
+
+		// Abandoned empty branch (no assistant messages): Root -> user2
+		session.branch(idRoot);
+		const idUser2 = session.appendMessage(userMsg("user2"));
+
+		// Abandoned non-empty branch (has assistant message): Root -> user3 -> asst3 -> user3_sub
+		session.branch(idRoot);
+		const idUser3 = session.appendMessage(userMsg("user3"));
+		const idAsst3 = session.appendMessage(assistantMsg("asst3"));
+		const idUser3Sub = session.appendMessage(userMsg("user3_sub"));
+
+		// Add a label to a kept entry
+		const labelId1 = session.appendLabelChange(idAsst3, "milestone");
+
+		// Add a label to an empty/prunable entry
+		const labelId2 = session.appendLabelChange(idUser2, "useless");
+
+		// Active leaf is still user1
+		session.branch(idUser1);
+
+		const prunedCount = await session.pruneEmptyBranches();
+		expect(prunedCount).toBe(3); // user2, labelId2, and the unanswered user3_sub
+
+		const entries = session.getEntries();
+		const entryIds = entries.map(e => e.id);
+
+		// Kept entries
+		expect(entryIds).toContain(idRoot);
+		expect(entryIds).toContain(idAsst);
+		expect(entryIds).toContain(idUser1);
+		expect(entryIds).toContain(idUser3);
+		expect(entryIds).toContain(idAsst3);
+		expect(entryIds).toContain(labelId1);
+
+		// Pruned entries
+		expect(entryIds).not.toContain(idUser2);
+		expect(entryIds).not.toContain(labelId2);
+		// Nothing answered user3_sub and it is not the branch we are in, so it is
+		// the same dead end as user2 — one row deeper.
+		expect(entryIds).not.toContain(idUser3Sub);
+	});
+
+	it("never prunes the active branch, even with no assistant message anywhere", async () => {
+		const session = SessionManager.inMemory();
+		session.appendMessage(userMsg("only"));
+		session.appendMessage(userMsg("still talking"));
+
+		expect(await session.pruneEmptyBranches()).toBe(0);
+		expect(session.getEntries()).toHaveLength(2);
+	});
+
+	it("keeps a branch whose only assistant message is below the fork", async () => {
+		const session = SessionManager.inMemory();
+		const idRoot = session.appendMessage(userMsg("root"));
+		const idAsst = session.appendMessage(assistantMsg("answer"));
+
+		// Abandoned branch: two user turns before the assistant finally replies.
+		session.branch(idRoot);
+		const idDeepUser = session.appendMessage(userMsg("retry"));
+		const idDeepUser2 = session.appendMessage(userMsg("retry harder"));
+		const idDeepAsst = session.appendMessage(assistantMsg("late answer"));
+		session.branch(idAsst);
+
+		expect(await session.pruneEmptyBranches()).toBe(0);
+		const ids = session.getEntries().map(e => e.id);
+		expect(ids).toContain(idDeepUser);
+		expect(ids).toContain(idDeepUser2);
+		expect(ids).toContain(idDeepAsst);
+	});
+
+	it("drops bookkeeping entries on a pruned branch but keeps them on a kept one", async () => {
+		const session = SessionManager.inMemory();
+		const idRoot = session.appendMessage(userMsg("root"));
+		session.appendMessage(assistantMsg("answer"));
+		const idKeptThinking = session.appendThinkingLevelChange("high");
+
+		session.branch(idRoot);
+		const idDoomedThinking = session.appendThinkingLevelChange("low");
+		const idDoomedUser = session.appendMessage(userMsg("abandoned"));
+		session.branch(idKeptThinking);
+
+		expect(await session.pruneEmptyBranches()).toBe(2);
+		const ids = session.getEntries().map(e => e.id);
+		expect(ids).toContain(idKeptThinking);
+		expect(ids).not.toContain(idDoomedThinking);
+		expect(ids).not.toContain(idDoomedUser);
+	});
+
+	it("is idempotent: a second prune finds nothing", async () => {
+		const session = SessionManager.inMemory();
+		const idRoot = session.appendMessage(userMsg("root"));
+		const idAsst = session.appendMessage(assistantMsg("answer"));
+		session.branch(idRoot);
+		session.appendMessage(userMsg("abandoned"));
+		session.branch(idAsst);
+
+		expect(await session.pruneEmptyBranches()).toBe(1);
+		expect(await session.pruneEmptyBranches()).toBe(0);
+	});
+
+	it("prunes a branch whose only reply errored or was aborted", async () => {
+		const session = SessionManager.inMemory();
+		const idRoot = session.appendMessage(userMsg("root"));
+		const idAsst = session.appendMessage(assistantMsg("answer"));
+
+		// Both attempts fork off the prompt itself, so nothing but the failure ever
+		// answered them.
+		session.branch(idRoot);
+		const idErrorPrompt = session.appendMessage(userMsg("try this"));
+		const idError = session.appendMessage(failedAssistantMsg("half a th", "error"));
+
+		session.branch(idRoot);
+		const idAbortPrompt = session.appendMessage(userMsg("no, this"));
+		const idAborted = session.appendMessage(failedAssistantMsg("stopp", "aborted"));
+
+		session.branch(idAsst);
+
+		expect(await session.pruneEmptyBranches()).toBe(4);
+		const ids = session.getEntries().map(e => e.id);
+		expect(ids).not.toContain(idError);
+		expect(ids).not.toContain(idErrorPrompt);
+		expect(ids).not.toContain(idAborted);
+		expect(ids).not.toContain(idAbortPrompt);
+		expect(ids).toContain(idAsst);
+	});
+
+	it("keeps a failure that the retry below it hangs off", async () => {
+		const session = SessionManager.inMemory();
+		session.appendMessage(userMsg("root"));
+		const idFailed = session.appendMessage(failedAssistantMsg("half a th", "error"));
+		const idRetry = session.appendMessage(assistantMsg("answer"));
+		session.branch(idRetry);
+
+		expect(await session.pruneEmptyBranches()).toBe(0);
+		expect(session.getEntries().map(e => e.id)).toContain(idFailed);
+	});
+
+	it("drops a dead-end failure hanging off an answered branch", async () => {
+		const session = SessionManager.inMemory();
+		session.appendMessage(userMsg("root"));
+		const idAsst = session.appendMessage(assistantMsg("answer"));
+		const idPrompt = session.appendMessage(userMsg("and now this"));
+		const idFailed = session.appendMessage(failedAssistantMsg("half a th", "error"));
+		session.branch(idAsst);
+
+		// Nothing answered the prompt, so the whole dead end goes — an answer
+		// further up the branch does not vouch for what came after it.
+		expect(await session.pruneEmptyBranches()).toBe(2);
+		const ids = session.getEntries().map(e => e.id);
+		expect(ids).not.toContain(idPrompt);
+		expect(ids).not.toContain(idFailed);
+	});
+
+	it("takes the tool traffic under a pruned failure with it", async () => {
+		const session = SessionManager.inMemory();
+		const idRoot = session.appendMessage(userMsg("root"));
+		const idAsst = session.appendMessage(assistantMsg("answer"));
+		session.branch(idAsst);
+		const idPrompt = session.appendMessage(userMsg("run the thing"));
+		const idFailed = session.appendMessage(failedAssistantMsg("calling", "aborted"));
+		const idToolResult = session.appendMessage(toolResultMsg("cancelled"));
+		session.branch(idRoot);
+
+		expect(await session.pruneEmptyBranches()).toBe(3);
+		const ids = session.getEntries().map(e => e.id);
+		// A surviving tool result would reload as an orphan root: a detached stub
+		// of a message that no longer exists. Its content also must not be what
+		// keeps the failure alive — that is the wreckage of the failed turn.
+		expect(ids).not.toContain(idToolResult);
+		expect(ids).not.toContain(idFailed);
+		expect(ids).not.toContain(idPrompt);
+	});
+
+	it("drops an unanswered prompt at the tail of an abandoned branch", async () => {
+		const session = SessionManager.inMemory();
+		const idRoot = session.appendMessage(userMsg("root"));
+		const idAsst = session.appendMessage(assistantMsg("answer"));
+		const idDangling = session.appendMessage(userMsg("and one more thing"));
+		session.branch(idRoot);
+		const idOther = session.appendMessage(assistantMsg("elsewhere"));
+		session.branch(idOther);
+
+		// The reply above it answered the prompt before it, not this one.
+		expect(await session.pruneEmptyBranches()).toBe(1);
+		const ids = session.getEntries().map(e => e.id);
+		expect(ids).not.toContain(idDangling);
+		expect(ids).toContain(idAsst);
+	});
+
+	it("keeps the tool results of a reply that was never followed up", async () => {
+		const session = SessionManager.inMemory();
+		const idRoot = session.appendMessage(userMsg("root"));
+		const idAsst = session.appendMessage(assistantMsg("running it"));
+		const idToolResult = session.appendMessage(toolResultMsg("output"));
+		session.branch(idRoot);
+		session.appendMessage(assistantMsg("elsewhere"));
+
+		// Nothing answers a tool result, so it cannot earn its own verdict — it
+		// belongs to the reply that called it.
+		expect(await session.pruneEmptyBranches()).toBe(0);
+		expect(session.getEntries().map(e => e.id)).toContain(idToolResult);
+		expect(session.getEntries().map(e => e.id)).toContain(idAsst);
+	});
+
+	it("drops a prompt whose only reply stopped on a tool call that never came back", async () => {
+		const session = SessionManager.inMemory();
+		const idRoot = session.appendMessage(userMsg("root"));
+		session.appendMessage(assistantMsg("answer"));
+		session.branch(idRoot);
+		const idPrompt = session.appendMessage(userMsg("Or are they something else?"));
+		const idCall = session.appendMessage(toolCallMsg("looking it up"));
+		session.branch(idRoot);
+
+		// A reply that stopped waiting on a tool is a request, not an answer:
+		// nothing came back, so the prompt reads as unanswered and goes with it.
+		expect(await session.pruneEmptyBranches()).toBe(2);
+		const ids = session.getEntries().map(e => e.id);
+		expect(ids).not.toContain(idPrompt);
+		expect(ids).not.toContain(idCall);
+	});
+
+	it("keeps a tool call that the reply below it answers", async () => {
+		const session = SessionManager.inMemory();
+		const idRoot = session.appendMessage(userMsg("root"));
+		const idPrompt = session.appendMessage(userMsg("run the thing"));
+		const idCall = session.appendMessage(toolCallMsg("running it"));
+		const idResult = session.appendMessage(toolResultMsg("output"));
+		const idAnswer = session.appendMessage(assistantMsg("here is what it said"));
+		session.branch(idRoot);
+
+		expect(await session.pruneEmptyBranches()).toBe(0);
+		const ids = session.getEntries().map(e => e.id);
+		for (const id of [idPrompt, idCall, idResult, idAnswer]) expect(ids).toContain(id);
+	});
+
+	it("never prunes a failure you are still looking at", async () => {
+		const session = SessionManager.inMemory();
+		session.appendMessage(userMsg("root"));
+		session.appendMessage(userMsg("try this"));
+		const idFailed = session.appendMessage(failedAssistantMsg("half a th", "error"));
+
+		expect(await session.pruneEmptyBranches()).toBe(0);
+		expect(session.getEntries().map(e => e.id)).toContain(idFailed);
+	});
+
+	it("keeps the session's own metadata, which is not part of the tree", async () => {
+		using tempDir = TempDir.createSync("@pi-session-prune-meta-");
+		const session = SessionManager.create(tempDir.path(), tempDir.path());
+		await session.setSessionName("irv extremism", "user");
+		const idRoot = session.appendMessage(userMsg("root"));
+		const idAsst = session.appendMessage(assistantMsg("answer"));
+		session.branch(idRoot);
+		session.appendMessage(userMsg("abandoned"));
+		session.branch(idAsst);
+		await session.flush();
+
+		expect(await session.pruneEmptyBranches()).toBe(1);
+		await session.flush();
+
+		// The header and title carry no id the tree ever sees, so there is no
+		// verdict on them to obey — dropping them would rename the session.
+		const reloaded = await SessionManager.open(session.getSessionFile() as string);
+		expect(reloaded.getSessionName()).toBe("irv extremism");
+	});
+
+	it("stays linear on a deep chain", async () => {
+		const session = SessionManager.inMemory();
+		const idRoot = session.appendMessage(userMsg("root"));
+		session.appendMessage(assistantMsg("answer"));
+		for (let i = 0; i < 20_000; i++) session.appendMessage(userMsg(`turn ${i}`));
+
+		// One abandoned empty branch off the root, so pruning has real work to do.
+		session.branch(idRoot);
+		session.appendMessage(userMsg("abandoned"));
+		session.branch(session.getBranch()[0]?.id ?? idRoot);
+
+		const started = performance.now();
+		await session.pruneEmptyBranches();
+		// A per-entry ancestor walk needs ~2x10^8 lookups here and blows past this;
+		// the linear passes land in single-digit milliseconds.
+		expect(performance.now() - started).toBeLessThan(2_000);
+	});
+
+	it("persists the prune: reloading from disk does not resurrect the branch", async () => {
+		using tempDir = TempDir.createSync("@pi-session-prune-");
+		const session = SessionManager.create(tempDir.path(), tempDir.path());
+		const idRoot = session.appendMessage(userMsg("root"));
+		const idAsst = session.appendMessage(assistantMsg("answer"));
+		session.branch(idRoot);
+		const idAbandoned = session.appendMessage(userMsg("abandoned"));
+		session.branch(idAsst);
+		await session.flush();
+
+		expect(await session.pruneEmptyBranches()).toBe(1);
+		await session.flush();
+
+		const reloaded = await SessionManager.open(session.getSessionFile() as string);
+		const ids = reloaded.getEntries().map(e => e.id);
+		expect(ids).toContain(idRoot);
+		expect(ids).toContain(idAsst);
+		expect(ids).not.toContain(idAbandoned);
 	});
 });

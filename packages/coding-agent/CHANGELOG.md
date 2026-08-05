@@ -160,6 +160,13 @@
 - Fixed parsing of POSIX `$EDITOR` commands that contain quoted arguments or executable paths with spaces.
 - Fixed persisted Agent Hub rows losing the explicit caller model role when a subagent used a model override, preserving role provenance across restarts.
 - Fixed unobserved promise rejections in browser helpers (such as `tab.waitForResponse()`) causing tab workers to hang or crash.
+### Added
+
+- Added collapsible branches to the HTML export's session tree: every node with children gets a ▾/▸ toggle that folds its subtree, alongside the existing active-path bullet.
+- Added collapsible branches to the `/tree` selector: `Space` folds the selected node's subtree behind a `▸` marker with a hidden-entry count, `Shift+Tab` folds every branch off the current thread down to one row each, and `←`/`→` jump to the fork above the cursor or the next fork below it along the branch.
+### Added
+
+- Added a `/prune` slash command that deletes conversation branches with nothing to read in them: an entry survives only if an answered assistant reply sits at or below it, so unanswered prompts, replies that errored or were aborted, replies left waiting on a tool call that never came back, and the tool traffic under them all go. The active branch is always kept intact.
 
 ## [17.2.9] - 2026-08-05
 
