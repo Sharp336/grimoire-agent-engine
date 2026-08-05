@@ -3516,8 +3516,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				: undefined,
 		);
 		// Insert gets the bar every non-modal editor uses; Normal/Visual rest *on* a grapheme, which
-		// is a block. Only reaches the terminal when the hardware cursor is actually on — the
-		// software cursor carries the same distinction itself (Editor#cursorCell).
+		// is a block. Sent unconditionally: the software cursor carries the same distinction itself
+		// (Editor#cursorCell), and when the hardware cursor is hidden this only reshapes something
+		// invisible. ProcessTerminal dedupes, so an unchanged shape costs nothing per frame.
 		this.ui.terminal.setCursorShape?.(
 			editor.vimEnabled && editor.vimMode !== "insert" ? "block" : editor.vimEnabled ? "bar" : "default",
 		);

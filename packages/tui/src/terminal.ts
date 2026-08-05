@@ -493,8 +493,10 @@ export interface Terminal {
 	hideCursor(force?: boolean): void; // Hide the cursor
 	showCursor(force?: boolean): void; // Show the cursor
 
-	// Cursor shape (DECSCUSR). Only reaches the terminal when the hardware
-	// cursor is actually visible; software-cursor rendering ignores it.
+	// Cursor shape (DECSCUSR). Written whenever it changes, whether or not the
+	// hardware cursor is currently visible: reshaping a hidden cursor has no
+	// visible effect, and `stop()` restores the user's configured shape. Hosts
+	// that render a software cursor simply never call this.
 	setCursorShape?(shape: CursorShape): void;
 
 	// Clear operations

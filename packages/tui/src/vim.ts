@@ -106,6 +106,13 @@ export class VimState {
 	#count = "";
 	#operator: VimOperator | null = null;
 	#pendingG = false;
+	/**
+	 * Vim's "desired column": `j`/`k` remember the column you started from, so descending through a
+	 * short line and back out returns to it instead of collapsing permanently. `null` means the
+	 * next vertical motion anchors it to the live cursor column; `Infinity` is `$`'s sticky
+	 * end-of-line, which keeps `$j` on the end of each line. Every non-vertical command clears it.
+	 */
+	#desiredCol: number | null = null;
 
 	/** True while a count, operator, or `g` prefix is half-typed — Escape cancels that first. */
 	get pending(): boolean {
@@ -128,6 +135,7 @@ export class VimState {
 	reset(): void {
 		this.mode = "normal";
 		this.anchor = null;
+		this.#desiredCol = null;
 		this.#clearPending();
 	}
 
@@ -174,9 +182,14 @@ export class VimState {
 				return [];
 			}
 			// `gg` goes to the first line; `5gg` to line 5.
+			this.#desiredCol = null;
 			const line = Math.min(this.#takeCount() - 1, buf.lines.length - 1);
 			return this.#applyMotion(buf, { to: { line, col: 0 }, inclusive: false, linewise: true });
 		}
+
+		// Only consecutive `j`/`k` carry the desired column; anything else re-anchors it. Counts and
+		// the `g` prefix returned above, so `2j` still continues an established column.
+		if (key !== "j" && key !== "k") this.#desiredCol = null;
 
 		const motion = this.#resolveMotion(key, buf);
 		if (motion) return this.#applyMotion(buf, motion);
@@ -229,13 +242,18 @@ export class VimState {
 			case "k": {
 				const delta = key === "j" ? count : -count;
 				const target = Math.max(0, Math.min(buf.cursorLine + delta, buf.lines.length - 1));
-				return { to: { line: target, col: buf.cursorCol }, inclusive: false, linewise: true };
+				// Anchor the desired column on the first vertical move, then keep reusing it. The host
+				// clamps the target to each line's length, so short lines en route never shrink it.
+				this.#desiredCol ??= buf.cursorCol;
+				return { to: { line: target, col: this.#desiredCol }, inclusive: false, linewise: true };
 			}
 			case "0":
 				return { to: at(0), inclusive: false, linewise: false };
 			case "^":
 				return { to: at(firstNonBlank(line)), inclusive: false, linewise: false };
 			case "$":
+				// Sticky end-of-line, so `$j` lands on the end of each line rather than a fixed column.
+				this.#desiredCol = Number.POSITIVE_INFINITY;
 				return { to: at(line.length), inclusive: false, linewise: false };
 			case "w": {
 				let col = buf.cursorCol;

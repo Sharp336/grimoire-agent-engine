@@ -19,11 +19,9 @@ function vimEditor(text = "", options: { cursorToStart?: boolean } = {}): Editor
 	return editor;
 }
 
-/** Buffer offset of the cursor, derived from the rendered CURSOR_MARKER-free text. */
+/** Cursor position, via the editor's public accessor. */
 function cursor(editor: Editor): { line: number; col: number } {
-	const state = editor as unknown as { getCursorPosition?: () => { line: number; col: number } };
-	if (state.getCursorPosition) return state.getCursorPosition();
-	throw new Error("cursor probe unavailable");
+	return editor.getCursor();
 }
 
 describe("Editor vim mode", () => {
@@ -490,8 +488,56 @@ describe("Editor vim mode", () => {
 			expect(editor.vimEnabled).toBe(false);
 		});
 	});
-});
 
-// Keep the helper referenced so an unused-import lint never fires while it stays available
-// for future cursor-position assertions.
-void cursor;
+	describe("desired column across vertical motions", () => {
+		// Vim remembers the column you left, so passing over a short line does not permanently
+		// collapse it. The middle line is deliberately shorter than the cursor column.
+		const buf = "alfa bravo charlie\nxy\ndelta echo foxtrot";
+
+		it("restores the column after descending through a shorter line", () => {
+			const editor = vimEditor(buf);
+			for (let i = 0; i < 12; i++) editor.handleInput("l");
+			expect(cursor(editor)).toEqual({ line: 0, col: 12 });
+
+			editor.handleInput("j");
+			// Clamped to the short line, but the desired column is remembered.
+			expect(cursor(editor)).toEqual({ line: 1, col: 1 });
+
+			editor.handleInput("j");
+			expect(cursor(editor)).toEqual({ line: 2, col: 12 });
+		});
+
+		it("re-anchors the column after a horizontal motion", () => {
+			const editor = vimEditor(buf);
+			for (let i = 0; i < 12; i++) editor.handleInput("l");
+			editor.handleInput("j");
+			// `0` is a horizontal motion, so the remembered column is dropped.
+			editor.handleInput("0");
+			editor.handleInput("j");
+			expect(cursor(editor)).toEqual({ line: 2, col: 0 });
+		});
+
+		it("keeps the column across a counted vertical motion", () => {
+			const editor = vimEditor(buf);
+			for (let i = 0; i < 12; i++) editor.handleInput("l");
+			editor.handleInput("j");
+			// The count prefix must not clear the column `j` established.
+			editor.handleInput("1");
+			editor.handleInput("j");
+			expect(cursor(editor)).toEqual({ line: 2, col: 12 });
+		});
+
+		it("makes `$` a sticky end-of-line column", () => {
+			const editor = vimEditor(buf);
+			editor.handleInput("$");
+			expect(cursor(editor)).toEqual({ line: 0, col: 17 });
+
+			editor.handleInput("j");
+			expect(cursor(editor)).toEqual({ line: 1, col: 1 });
+
+			// Not the 17 from line 0 — the end of *this* line.
+			editor.handleInput("j");
+			expect(cursor(editor)).toEqual({ line: 2, col: 17 });
+		});
+	});
+});
