@@ -71,21 +71,24 @@ const TodoOp = type('"init" | "start" | "done" | "rm" | "drop" | "block" | "unbl
 );
 
 const InitListEntry = type({
-	phase: type("string").describe("phase name"),
-	items: type("string").describe("task content").array().atLeastLength(1).describe("tasks for this phase"),
+	phase: type("string").describe("phase name for init"),
+	items: type("string").describe("task content").array().atLeastLength(1).describe("non-empty tasks for this phase (init)"),
 });
 
 const todoSchema = type({
 	op: TodoOp,
-	"list?": InitListEntry.array().describe("phased task list (init)"),
-	"task?": type("string").describe("task content"),
-	"phase?": type("string").describe("phase name"),
+	"list?": InitListEntry.array().describe("phased task list for init"),
+	"task?": type("string").describe("exact task content target (task operations)"),
+	"phase?": type("string").describe("phase name target (append or phase operations)"),
 	// No `atLeastLength(1)` here: `items` is only meaningful for `init`/`append`,
 	// and both enforce non-empty with op-specific errors. A stray `items: []` on
 	// an op that ignores it (e.g. `view`) must not be a hard schema rejection.
-	"items?": type("string").describe("task content").array().describe("tasks to append"),
-	"reason?": type("string").describe("blocker note (block op)"),
-}).describe("apply a single todo operation");
+	"items?": type("string")
+		.describe("task content")
+		.array()
+		.describe("task content list for init/append; non-empty for those operations"),
+	"reason?": type("string").describe("blocker note for block"),
+}).describe("apply a single todo operation; fields are operation-specific");
 
 type TodoParams = TodoSchema;
 type TodoSchema = typeof todoSchema.infer;

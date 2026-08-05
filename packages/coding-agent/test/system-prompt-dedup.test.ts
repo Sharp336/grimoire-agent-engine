@@ -1,7 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as discoveryModule from "../src/discovery";
 import {
 	buildSystemPrompt,
 	loadProjectContextFiles,
@@ -29,12 +30,17 @@ describe("SYSTEM.md prompt assembly", () => {
 	let tempDir = "";
 	let tempHomeDir = "";
 	let originalHome: string | undefined;
+	let restoreLoadCapabilitySpy: (() => void) | undefined;
 
 	beforeEach(() => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-system-prompt-"));
 		tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-system-home-"));
 		originalHome = process.env.HOME;
 		process.env.HOME = tempHomeDir;
+	});
+	afterEach(() => {
+		restoreLoadCapabilitySpy?.();
+		restoreLoadCapabilitySpy = undefined;
 	});
 
 	afterEach(cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome })));
@@ -284,5 +290,46 @@ describe("SYSTEM.md prompt assembly", () => {
 		const promptText = systemPrompt.join("\n\n");
 		const matches = promptText.match(new RegExp(escapeRegExp(sharedContent), "g")) ?? [];
 		expect(matches).toHaveLength(1);
+	});
+	it("surfaces context discovery loader failures instead of rendering a fallback", async () => {
+		const loaderError = new Error("context discovery loader failed");
+		const loadCapabilitySpy = spyOn(discoveryModule, "loadCapability").mockRejectedValue(loaderError);
+		restoreLoadCapabilitySpy = () => loadCapabilitySpy.mockRestore();
+
+		let error: unknown;
+		try {
+			await buildSystemPrompt({
+				cwd: tempDir,
+				customPrompt: "Base prompt",
+				skills: [],
+				rules: [],
+				toolNames: [],
+			});
+		} catch (caught) {
+			error = caught;
+		}
+
+		expect(error).toBe(loaderError);
+	});
+
+	it("surfaces SYSTEM.md loader failures instead of omitting customization", async () => {
+		const loaderError = new Error("system prompt loader failed");
+		const loadCapabilitySpy = spyOn(discoveryModule, "loadCapability").mockRejectedValue(loaderError);
+		restoreLoadCapabilitySpy = () => loadCapabilitySpy.mockRestore();
+
+		let error: unknown;
+		try {
+			await buildSystemPrompt({
+				cwd: tempDir,
+				contextFiles: [],
+				skills: [],
+				rules: [],
+				toolNames: [],
+			});
+		} catch (caught) {
+			error = caught;
+		}
+
+		expect(error).toBe(loaderError);
 	});
 });

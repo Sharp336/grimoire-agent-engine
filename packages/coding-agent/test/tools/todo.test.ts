@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
+import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -542,6 +543,22 @@ describe("TodoTool empty items tolerance", () => {
 		const summary = result.content.find(part => part.type === "text");
 		if (summary?.type !== "text") throw new Error("Expected text summary");
 		expect(summary.text).toContain("Missing items for append operation");
+	});
+});
+describe("TodoTool schema descriptions", () => {
+	it("documents operation-specific todo fields", () => {
+		const tool = new TodoTool(createSession());
+		const properties = toolWireSchema(tool).properties;
+		if (!properties || typeof properties !== "object" || !("items" in properties)) {
+			throw new Error("Expected todo schema properties");
+		}
+		const items = properties.items;
+		if (!items || typeof items !== "object" || !("description" in items)) {
+			throw new Error("Expected todo items description");
+		}
+		expect(items.description).toContain("init/append");
+		expect(items.description).toContain("non-empty");
+		expect(tool.description).toContain("`done`/`drop`/`rm` may omit a target");
 	});
 });
 

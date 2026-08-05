@@ -72,6 +72,8 @@
 - Fixed confirmed `/exit` and `/quit` closing the OMP backend before Ratatui finished its ordinary post-command refresh, which produced a broken pipe and exit code 1; slash execution now returns a typed shutdown action and completes the existing acknowledged RPC shutdown handshake before terminal exit.
 - Hardened Vibe workers with immutable per-turn output URLs, bounded useful previews, complete repository-context inheritance, non-accumulating mode guidance, tier-aware request and wall-clock limits with forced partial yield, and explicit latest/settled wait semantics.
 
+- Fixed required system prompt and context discovery failures falling back silently, and aligned read summary guidance with todo bulk bookkeeping and non-empty task-batch wire schemas.
+
 ## [17.2.7] - 2026-08-03
 
 ### Changed

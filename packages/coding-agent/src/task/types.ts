@@ -166,12 +166,12 @@ const taskSchemaNoIsolation = type({
 });
 const taskSchemaBatch = type({
 	context: "string",
-	tasks: taskItemSchemaIsolated.array(),
+	tasks: taskItemSchemaIsolated.array().atLeastLength(1),
 	"+": "delete",
 });
 const taskSchemaBatchNoIsolation = type({
 	context: "string",
-	tasks: taskItemSchema.array(),
+	tasks: taskItemSchema.array().atLeastLength(1),
 	"+": "delete",
 });
 const ALL_TASK_SCHEMAS = [taskSchema, taskSchemaNoIsolation, taskSchemaBatch, taskSchemaBatchNoIsolation] as const;

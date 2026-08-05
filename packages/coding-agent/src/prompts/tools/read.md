@@ -11,8 +11,8 @@ Read files, directories, archives, SQLite, images, documents, internal resources
 - `:conflicts` — one line per unresolved git merge conflict block
 
 ## Source kinds
-- Parseable code, no selector → structural summary (declarations only, body elided). Footer names recovery selector — re-issue ONLY those ranges.
-- {{#if IS_HL_MODE}}File + selector → `[foo.ts#1A2B]` snapshot header + numbered lines. Copy `[FILENAME#TAG]` for anchored edits; NEVER fabricate the tag.{{/if}}
+- Parseable code, no selector -> when structural summarization is enabled and applicable, structural summary (declarations only, body elided); otherwise read the full source. Footer names recovery selector — re-issue ONLY those ranges.
+- {{#if IS_HL_MODE}}File + selector -> `[foo.ts#1A2B]` snapshot header + numbered lines. Copy `[FILENAME#TAG]` for anchored edits; NEVER fabricate the tag.{{/if}}
 - Directory → depth-limited dirent listing.
 - SQLite (`.sqlite`, `.sqlite3`, `.db`, `.db3`): `file.db` (tables), `file.db:table` (schema+rows), `file.db:table:key` (by PK), `?limit=`/`?where=`/`?q=SELECT`.
 - Archives (`.tar`, `.tar.gz`, `.tgz`, `.zip`, plus ZIP-based `.jar`/`.war`/`.ear`/`.apk`): `archive.ext:path/inside/archive` reads a member.

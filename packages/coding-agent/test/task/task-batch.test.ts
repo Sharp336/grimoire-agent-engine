@@ -115,6 +115,9 @@ describe("task.batch schema gating", () => {
 		const on = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
 		const onProperties = getSchemaProperties(on);
 		expect(onProperties.tasks).toBeDefined();
+		const tasksSchema = onProperties.tasks;
+		if (!isRecord(tasksSchema)) throw new Error("Expected batch tasks schema");
+		expect(tasksSchema.minItems).toBe(1);
 		expect(onProperties.context).toBeDefined();
 		// The batch shape is { context, tasks[] } — the per-spawn fields live
 		// only inside the task items.

@@ -644,10 +644,11 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const timedOut: string[] = [];
 	const failed: Array<{ name: string; error: unknown }> = [];
 
-	async function withDeadline<T>(name: string, work: Promise<T>, fallback: T): Promise<T> {
-		const tagged = work
-			.then(value => ({ kind: "ok" as const, value }))
-			.catch(error => ({ kind: "err" as const, error }));
+	async function withDeadline<T>(name: string, work: Promise<T>, fallback: T, failClosed = false): Promise<T> {
+		const tagged = work.then(
+			value => ({ kind: "ok" as const, value }),
+			error => ({ kind: "err" as const, error }),
+		);
 		const result = await Promise.race([tagged, deadline]);
 		if (result === "__timeout__") {
 			timedOut.push(name);
@@ -659,10 +660,16 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 					logger.debug("Background system prompt preparation step completed after timeout", { name });
 				}
 			});
+			if (failClosed) {
+				throw new Error(`Required system prompt preparation step timed out: ${name}`);
+			}
 			return fallback;
 		}
 		if (result.kind === "err") {
 			failed.push({ name, error: result.error });
+			if (failClosed) {
+				throw result.error;
+			}
 			return fallback;
 		}
 		return result.value;
@@ -677,19 +684,17 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const systemPromptCustomizationPromise: Promise<string | null> = callerControlsCustomPrompt
 		? Promise.resolve(null)
 		: logger.time("loadSystemPromptFiles", loadSystemPromptFiles, { cwd: resolvedCwd });
+	const additionalRoots = additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd));
 	const contextFilesPromise = (async () => {
 		const primary = providedContextFiles
 			? providedContextFiles
 			: await logger.time("loadProjectContextFiles", loadProjectContextFiles, { cwd: resolvedCwd });
 		// Also discover context files (AGENTS.md, rules, etc.) for each additional workspace root.
-		const additionalRoots = additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd));
 		if (additionalRoots.length === 0) return primary;
-		const extra = await Promise.all(
-			additionalRoots.map(root => loadProjectContextFiles({ cwd: root }).catch(() => [])),
-		);
+		const extra = await Promise.all(additionalRoots.map(root => loadProjectContextFiles({ cwd: root })));
 		return dedupeExactContextFiles([...primary, ...extra.flat()]);
 	})();
-	const additionalRootsForTree = additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd));
+	const additionalRootsForTree = additionalRoots;
 	const workspaceTreePromise = (async () => {
 		const primary =
 			providedWorkspaceTree !== undefined
@@ -726,17 +731,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const cpuModelPromise = logger.time("getCpuModel", getCpuModel);
 	const gpuPromise = logger.time("getCachedGpu", getCachedGpu);
 
-	const [
-		resolvedCustomPrompt,
-		resolvedAppendPrompt,
-		systemPromptCustomization,
-		contextFiles,
-		skills,
-		workspaceTree,
-		activeRepoContext,
-		cpuModel,
-		gpu,
-	] = await Promise.all([
+	const prepared = await Promise.all([
 		withDeadline(
 			"customPrompt",
 			providedResolvedCustomPrompt !== undefined
@@ -751,8 +746,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 				: resolvePromptInput(appendSystemPrompt, "append system prompt"),
 			prepDefaults.resolvedAppendPrompt,
 		),
-		withDeadline("loadSystemPromptFiles", systemPromptCustomizationPromise, prepDefaults.systemPromptCustomization),
-		withDeadline("loadProjectContextFiles", contextFilesPromise, prepDefaults.contextFiles).then(
+		withDeadline("loadSystemPromptFiles", systemPromptCustomizationPromise, prepDefaults.systemPromptCustomization, true),
+		withDeadline("loadProjectContextFiles", contextFilesPromise, prepDefaults.contextFiles, true).then(
 			dedupeExactContextFiles,
 		),
 		withDeadline("loadSkills", skillsPromise, prepDefaults.skills),
@@ -760,8 +755,18 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		withDeadline("resolveActiveRepoContext", activeRepoContextPromise, prepDefaults.activeRepoContext),
 		withDeadline("getCpuModel", cpuModelPromise, prepDefaults.cpuModel),
 		withDeadline("getCachedGpu", gpuPromise, prepDefaults.gpu),
-	]);
-	clearTimeout(deadlineTimer);
+	]).finally(() => clearTimeout(deadlineTimer));
+	const [
+		resolvedCustomPrompt,
+		resolvedAppendPrompt,
+		systemPromptCustomization,
+		contextFiles,
+		skills,
+		workspaceTree,
+		activeRepoContext,
+		cpuModel,
+		gpu,
+	] = prepared;
 	const agentsMdFiles = Array.from(new Set(workspaceTree.agentsMdFiles)).sort().slice(0, AGENTS_MD_LIMIT);
 
 	if (timedOut.length > 0) {
