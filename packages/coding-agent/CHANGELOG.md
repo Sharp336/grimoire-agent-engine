@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `context.loadClaudeMd` (default off), which extends the `agents-md` ancestor walk to also discover standalone `CLAUDE.md` files. Previously only `.claude/CLAUDE.md` in the cwd was read, so a repository-root `CLAUDE.md` contributed no project context. Enabling it applies the same skip/stop rules used for `AGENTS.md`; when both files share a directory both are loaded, `AGENTS.md` first ([#2612](https://github.com/can1357/oh-my-pi/issues/2612)).
+
 ## [17.2.9] - 2026-08-05
 
 ### Breaking Changes

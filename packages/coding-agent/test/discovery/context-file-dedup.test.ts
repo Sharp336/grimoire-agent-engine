@@ -27,6 +27,72 @@ describe("contextFileCapability.key", () => {
 		expect(key(a)).toBe(key(b));
 	});
 
+	// Standalone CLAUDE.md (#2612) is the one filename with its own dedup slot, and only
+	// when the `agents-md` walk found it. Everything else keeps the shared one-per-scope slot.
+	test("standalone CLAUDE.md does not collide with a same-depth AGENTS.md", () => {
+		const agents = makeContextFile({
+			path: "/repo/AGENTS.md",
+			level: "project",
+			depth: 0,
+			_source: { provider: "agents-md", providerName: "AGENTS.md", path: "/repo/AGENTS.md", level: "project" },
+		});
+		const claude = makeContextFile({
+			path: "/repo/CLAUDE.md",
+			level: "project",
+			depth: 0,
+			_source: { provider: "agents-md", providerName: "AGENTS.md", path: "/repo/CLAUDE.md", level: "project" },
+		});
+		expect(key(agents)).not.toBe(key(claude));
+	});
+
+	test("config-directory CLAUDE.md still shares the scope slot", () => {
+		const claudeProvider = makeContextFile({
+			path: "/repo/.claude/CLAUDE.md",
+			level: "project",
+			depth: 0,
+			_source: {
+				provider: "claude",
+				providerName: "Claude Code",
+				path: "/repo/.claude/CLAUDE.md",
+				level: "project",
+			},
+		});
+		const copilot = makeContextFile({
+			path: "/repo/.github/copilot-instructions.md",
+			level: "project",
+			depth: 0,
+			_source: {
+				provider: "github",
+				providerName: "GitHub",
+				path: "/repo/.github/copilot-instructions.md",
+				level: "project",
+			},
+		});
+		expect(key(claudeProvider)).toBe(key(copilot));
+	});
+
+	test("standalone CLAUDE.md keys still differ across depths", () => {
+		const source = (p: string) => ({
+			provider: "agents-md",
+			providerName: "AGENTS.md",
+			path: p,
+			level: "project" as const,
+		});
+		const atCwd = makeContextFile({
+			path: "/repo/packages/app/CLAUDE.md",
+			level: "project",
+			depth: 0,
+			_source: source("/repo/packages/app/CLAUDE.md"),
+		});
+		const atRoot = makeContextFile({
+			path: "/repo/CLAUDE.md",
+			level: "project",
+			depth: 2,
+			_source: source("/repo/CLAUDE.md"),
+		});
+		expect(key(atCwd)).not.toBe(key(atRoot));
+	});
+
 	test("project-level files at different depths have different keys", () => {
 		const atCwd = makeContextFile({ path: "/repo/packages/app/AGENTS.md", level: "project", depth: 0 });
 		const atParent = makeContextFile({ path: "/repo/packages/AGENTS.md", level: "project", depth: 1 });
