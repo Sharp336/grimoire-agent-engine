@@ -2304,9 +2304,9 @@ export const FRIENDLI_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] 
 		baseUrl: "https://api.friendli.ai/serverless/v1",
 		reasoning: true,
 		input: ["text"],
-		cost: { input: 0.6, output: 2.2, cacheRead: 0, cacheWrite: 0 },
+		cost: { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 },
 		contextWindow: 1048576,
-		maxTokens: 32768,
+		maxTokens: 1048576,
 		thinking: { mode: "effort", efforts: [Effort.High, Effort.Max] },
 	},
 ];

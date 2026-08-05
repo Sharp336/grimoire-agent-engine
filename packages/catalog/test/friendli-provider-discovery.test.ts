@@ -34,9 +34,9 @@ describe("Friendli provider discovery", () => {
 							context_length: 131072,
 							max_completion_tokens: 8192,
 							pricing: {
-								input: "0.0000006",
-								output: "0.0000022",
-								input_cache_read: "0.0000001",
+								input: "0.0000014",
+								output: "0.0000044",
+								input_cache_read: "0.00000026",
 								cache_write: "0.0000003",
 							},
 							functionality: {
@@ -92,9 +92,9 @@ describe("Friendli provider discovery", () => {
 		expect(glm?.contextWindow).toBe(131_072);
 		expect(glm?.maxTokens).toBe(8_192);
 		// pricing fields are per-token strings → converted to per-million
-		expect(glm?.cost.input).toBeCloseTo(0.6, 10);
-		expect(glm?.cost.output).toBeCloseTo(2.2, 10);
-		expect(glm?.cost.cacheRead).toBeCloseTo(0.1, 10);
+		expect(glm?.cost.input).toBeCloseTo(1.4, 10);
+		expect(glm?.cost.output).toBeCloseTo(4.4, 10);
+		expect(glm?.cost.cacheRead).toBeCloseTo(0.26, 10);
 		expect(glm?.cost.cacheWrite).toBeCloseTo(0.3, 10);
 		// interleaved: "reasoning_content" → reasoningContentField compat override
 		expect(glm?.compat?.reasoningContentField).toBe("reasoning_content");
@@ -260,10 +260,10 @@ describe("Friendli provider discovery", () => {
 
 	test("uses the bundled reference cost as-is when /v1/models omits a pricing field", async () => {
 		// The seeded GLM-5.2 carries the authoritative per-million fallback
-		// (input 0.6 / output 2.2). When Friendli omits a pricing field, the
+		// (input 1.4 / output 4.4). When Friendli omits a pricing field, the
 		// reference cost must pass through unscaled — it is already in
 		// per-million-token units. Scaling it by 1e6 would report
-		// 600000/2200000 instead of the intended 0.6/2.2.
+		// 1400000/4400000 instead of the intended 1.4/4.4.
 		const fetchMock: FetchImpl = async (_input: string | URL | Request, _init?: RequestInit) => {
 			return new Response(
 				JSON.stringify({
@@ -294,9 +294,9 @@ describe("Friendli provider discovery", () => {
 		const glm = models![0];
 		// Reference fallback (per-million) flows through unscaled — NOT
 		// multiplied by 1e6.
-		expect(glm.cost.input).toBe(0.6);
-		expect(glm.cost.output).toBe(2.2);
-		expect(glm.cost.cacheRead).toBe(0);
+		expect(glm.cost.input).toBe(1.4);
+		expect(glm.cost.output).toBe(4.4);
+		expect(glm.cost.cacheRead).toBe(0.26);
 		expect(glm.cost.cacheWrite).toBe(0);
 	});
 
@@ -304,8 +304,8 @@ describe("Friendli provider discovery", () => {
 		// When Friendli reports "0" for an input/output price (e.g. a free or
 		// promotional model), the mapper must accept it as an authoritative
 		// API price — not fall back to the reference. The seeded GLM-5.2
-		// reference carries 0.6/2.2, so a zero-reporting free model would
-		// incorrectly show 0.6/2.2 if zero were rejected.
+		// reference carries 1.4/4.4, so a zero-reporting free model would
+		// incorrectly show 1.4/4.4 if zero were rejected.
 		const fetchMock: FetchImpl = async (_input: string | URL | Request, _init?: RequestInit) => {
 			return new Response(
 				JSON.stringify({
@@ -334,7 +334,7 @@ describe("Friendli provider discovery", () => {
 		expect(models).toBeDefined();
 		expect(models).toHaveLength(1);
 		const glm = models![0];
-		// Zero is a valid API price — NOT the reference fallback (0.6/2.2).
+		// Zero is a valid API price — NOT the reference fallback (1.4/4.4).
 		expect(glm.cost.input).toBe(0);
 		expect(glm.cost.output).toBe(0);
 	});
