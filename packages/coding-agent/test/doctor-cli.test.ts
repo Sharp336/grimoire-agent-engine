@@ -491,6 +491,40 @@ describe("omp doctor", () => {
 		}
 	});
 
+	test("a readdir failure on the project .omp dir surfaces an error but preserves agent-dir results", async () => {
+		// A searchable-but-not-listable project .omp must not be swallowed:
+		// doctor would otherwise report project settings as absent and hide
+		// existing config.yml.broken-* backups. The agent-dir quarantine
+		// listing must still be reported alongside the project scan error.
+		setProjectDir(root);
+		const projectOmp = path.join(root, ".omp");
+		await fs.mkdir(projectOmp, { recursive: true });
+		const agentQuarantine = path.join(root, "config.yml.broken-1700000000000-aaaa");
+		await fs.writeFile(agentQuarantine, "x", "utf8");
+
+		const realReaddir = nodeFs.promises.readdir.bind(nodeFs.promises);
+		const readdirSpy = spyOn(nodeFs.promises, "readdir").mockImplementation((async (
+			dirPath: unknown,
+			options: unknown,
+		) => {
+			if (path.resolve(String(dirPath)) === path.resolve(projectOmp)) {
+				throw Object.assign(new Error("EACCES: permission denied, scandir"), { code: "EACCES" });
+			}
+			return realReaddir(dirPath as never, options as never);
+		}) as never);
+		try {
+			const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+			const projectError = report.findings.find(entry => entry.id === "config.quarantined.project");
+			expect(projectError?.status).toBe("error");
+			expect(projectError?.summary).toContain("project .omp");
+			const listing = report.findings.find(entry => entry.id === "config.quarantined");
+			expect(listing?.status).toBe("error");
+			expect(listing?.details).toContain("config.yml.broken-1700000000000-aaaa");
+		} finally {
+			readdirSpy.mockRestore();
+		}
+	});
+
 	test("an unreadable settings file surfaces an error, not absent", async () => {
 		// root bypasses Unix file permissions, so this cannot exercise EACCES.
 		if (process.getuid?.() === 0) return;
@@ -985,6 +1019,42 @@ describe("omp doctor", () => {
 
 		const report = await runDoctorCommand({ flags: { agentDir: root } });
 		const finding = report.findings.find(entry => entry.id === "mcp.badTimeout");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(d => d.includes("timeout"))).toBe(true);
+	});
+
+	test("MCP server with a numeric-string timeout is ok (native provider coerces with Number())", async () => {
+		// The native provider converts "5000" via Number() and uses it; the
+		// doctor must classify through the same accepted forms instead of
+		// rejecting every string.
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(
+			mcpJson,
+			JSON.stringify({
+				mcpServers: { stringTimeout: { type: "stdio", command: "node", timeout: "5000" } },
+			}),
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "mcp.stringTimeout");
+		expect(finding?.status).toBe("ok");
+	});
+
+	test("MCP server with a negative numeric-string timeout is an error", async () => {
+		// Number("-5") parses but fails the provider's >= 0 gate, so the
+		// runtime ignores it — the doctor reports the malformed value.
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(
+			mcpJson,
+			JSON.stringify({
+				mcpServers: { negativeTimeout: { type: "stdio", command: "node", timeout: "-5" } },
+			}),
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "mcp.negativeTimeout");
 		expect(finding?.status).toBe("error");
 		expect(finding?.details.some(d => d.includes("timeout"))).toBe(true);
 	});
@@ -1535,6 +1605,94 @@ describe("omp doctor", () => {
 		expect(JSON.stringify(report)).not.toContain("ZKQMCMD");
 	});
 
+	test("auth: command-backed broker token with NO url is inert — local checks still run", async () => {
+		// The runtime resolver returns null when only auth.broker.token is
+		// configured (no URL), falling back to the local SQLite store. A
+		// command-backed token must not report a broker warning and skip the
+		// local credential checks.
+		const configPath = path.join(root, "config.yml");
+		await fs.writeFile(configPath, 'auth:\n  broker:\n    token: "!cat /tmp/token"\n', "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const brokerWarning = report.findings.find(entry => entry.id === "auth.broker");
+		expect(brokerWarning).toBeUndefined();
+		// Local storage checks ran instead of being skipped.
+		const storage = report.findings.find(entry => entry.id === "auth.storage");
+		expect(storage).toBeDefined();
+	});
+
+	test("auth: invalid broker account-pool file is an error, not a healthy broker", async () => {
+		// discoverAuthStorage() throws on a malformed pool file before
+		// constructing the remote store — doctor must surface that instead of
+		// reporting the broker healthy.
+		const poolPath = path.join(root, "pool.json");
+		await fs.writeFile(poolPath, "{ not valid json ", "utf8");
+		const oldUrl = process.env.OMP_AUTH_BROKER_URL;
+		const oldToken = process.env.OMP_AUTH_BROKER_TOKEN;
+		const oldPool = process.env.OMP_AUTH_BROKER_ACCOUNT_POOL_FILE;
+		process.env.OMP_AUTH_BROKER_URL = "https://broker.example";
+		process.env.OMP_AUTH_BROKER_TOKEN = "test-token";
+		process.env.OMP_AUTH_BROKER_ACCOUNT_POOL_FILE = poolPath;
+		try {
+			const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+			const finding = report.findings.find(entry => entry.id === "auth.broker");
+			expect(finding?.status).toBe("error");
+			expect(finding?.summary).toContain("account pool");
+		} finally {
+			if (oldUrl === undefined) delete process.env.OMP_AUTH_BROKER_URL;
+			else process.env.OMP_AUTH_BROKER_URL = oldUrl;
+			if (oldToken === undefined) delete process.env.OMP_AUTH_BROKER_TOKEN;
+			else process.env.OMP_AUTH_BROKER_TOKEN = oldToken;
+			if (oldPool === undefined) delete process.env.OMP_AUTH_BROKER_ACCOUNT_POOL_FILE;
+			else process.env.OMP_AUTH_BROKER_ACCOUNT_POOL_FILE = oldPool;
+		}
+	});
+
+	test("auth: missing broker account-pool file is an error, not a healthy broker", async () => {
+		const oldUrl = process.env.OMP_AUTH_BROKER_URL;
+		const oldToken = process.env.OMP_AUTH_BROKER_TOKEN;
+		const oldPool = process.env.OMP_AUTH_BROKER_ACCOUNT_POOL_FILE;
+		process.env.OMP_AUTH_BROKER_URL = "https://broker.example";
+		process.env.OMP_AUTH_BROKER_TOKEN = "test-token";
+		process.env.OMP_AUTH_BROKER_ACCOUNT_POOL_FILE = path.join(root, "no-such-pool.json");
+		try {
+			const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+			const finding = report.findings.find(entry => entry.id === "auth.broker");
+			expect(finding?.status).toBe("error");
+			expect(finding?.summary).toContain("account pool");
+		} finally {
+			if (oldUrl === undefined) delete process.env.OMP_AUTH_BROKER_URL;
+			else process.env.OMP_AUTH_BROKER_URL = oldUrl;
+			if (oldToken === undefined) delete process.env.OMP_AUTH_BROKER_TOKEN;
+			else process.env.OMP_AUTH_BROKER_TOKEN = oldToken;
+			if (oldPool === undefined) delete process.env.OMP_AUTH_BROKER_ACCOUNT_POOL_FILE;
+			else process.env.OMP_AUTH_BROKER_ACCOUNT_POOL_FILE = oldPool;
+		}
+	});
+
+	test("auth: valid broker account-pool file keeps the broker ok", async () => {
+		const poolPath = path.join(root, "pool.json");
+		await fs.writeFile(poolPath, JSON.stringify({ anthropic: ["email:a@example.com"] }), "utf8");
+		const oldUrl = process.env.OMP_AUTH_BROKER_URL;
+		const oldToken = process.env.OMP_AUTH_BROKER_TOKEN;
+		const oldPool = process.env.OMP_AUTH_BROKER_ACCOUNT_POOL_FILE;
+		process.env.OMP_AUTH_BROKER_URL = "https://broker.example";
+		process.env.OMP_AUTH_BROKER_TOKEN = "test-token";
+		process.env.OMP_AUTH_BROKER_ACCOUNT_POOL_FILE = poolPath;
+		try {
+			const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+			const finding = report.findings.find(entry => entry.id === "auth.broker");
+			expect(finding?.status).toBe("ok");
+		} finally {
+			if (oldUrl === undefined) delete process.env.OMP_AUTH_BROKER_URL;
+			else process.env.OMP_AUTH_BROKER_URL = oldUrl;
+			if (oldToken === undefined) delete process.env.OMP_AUTH_BROKER_TOKEN;
+			else process.env.OMP_AUTH_BROKER_TOKEN = oldToken;
+			if (oldPool === undefined) delete process.env.OMP_AUTH_BROKER_ACCOUNT_POOL_FILE;
+			else process.env.OMP_AUTH_BROKER_ACCOUNT_POOL_FILE = oldPool;
+		}
+	});
+
 	test("auth: WAL-mode agent.db is probed without creating -wal/-shm sidecars", async () => {
 		// A cleanly closed WAL-mode database with sidecars removed must be
 		// probed via the immutable URI so the read-only doctor run creates no
@@ -1592,6 +1750,40 @@ describe("omp doctor", () => {
 		}
 	});
 	// ── setup section ────────────────────────────────────────────────────────
+
+	test("setup: agent with a non-string tools entry → error, not silent full toolset", async () => {
+		// parseAgentFields drops non-string members; tools:[7] collapses to
+		// undefined, which the task executor reads as UNRESTRICTED — a
+		// malformed attempt to constrain the agent would grant it the full
+		// active tool set while doctor reported success.
+		const agentsDir = path.join(root, "agents");
+		await fs.mkdir(agentsDir, { recursive: true });
+		await fs.writeFile(
+			path.join(agentsDir, "bad-tools.md"),
+			"---\nname: bad-tools\ndescription: has a malformed tool list\ntools: [7]\n---\nbody\n",
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "setup.agents");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(d => d.includes("bad-tools.md") && d.includes("tools"))).toBe(true);
+	});
+
+	test("setup: agent with a non-list tools value → error naming the field", async () => {
+		const agentsDir = path.join(root, "agents");
+		await fs.mkdir(agentsDir, { recursive: true });
+		await fs.writeFile(
+			path.join(agentsDir, "scalar-tools.md"),
+			"---\nname: scalar-tools\ndescription: has a scalar tool field\ntools: 7\n---\nbody\n",
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "setup.agents");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(d => d.includes("scalar-tools.md") && d.includes("tools"))).toBe(true);
+	});
 
 	test("setup: agent .md with missing description → error naming the file", async () => {
 		const agentsDir = path.join(root, "agents");
@@ -1709,6 +1901,74 @@ describe("omp doctor", () => {
 		expect(finding?.category).toBe("setup");
 		expect(finding?.status).toBe("warning");
 		expect(finding?.details.some(d => d.includes("ctrl+x"))).toBe(true);
+	});
+
+	test("setup: legacy keybinding names migrate before validation (no false unknown-action warning)", async () => {
+		// The runtime migrates `interrupt` to `app.interrupt`; a raw-key probe
+		// wrongly reports the legacy name as an unknown action.
+		await fs.writeFile(path.join(root, "keybindings.yml"), "interrupt: ctrl+x\n", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "setup.keybindings");
+		expect(finding?.status).toBe("ok");
+	});
+
+	test("setup: legacy keybinding names participate in conflict detection after migration", async () => {
+		// `interrupt` migrates to `app.interrupt`, so it conflicts with
+		// `app.clear` bound to the same chord — a raw-key probe misses it.
+		await fs.writeFile(path.join(root, "keybindings.yml"), "interrupt: ctrl+x\napp.clear: ctrl+x\n", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "setup.keybindings");
+		expect(finding?.status).toBe("warning");
+		expect(finding?.details.some(d => d.includes("conflict"))).toBe(true);
+	});
+
+	test("setup: named profile diagnoses an unreadable default-profile keybindings file", async () => {
+		// Runtime merges the default profile's keybindings before the named
+		// profile's overlay; a broken default-profile file must surface even
+		// though the active profile's own file is clean.
+		const defaultAgentDir = path.join(root, "agent");
+		await fs.mkdir(defaultAgentDir, { recursive: true });
+		await fs.writeFile(path.join(defaultAgentDir, "keybindings.yml"), "{ broken yaml\n", "utf8");
+		const profileAgentDir = path.join(root, "profile-agent");
+		await fs.mkdir(profileAgentDir, { recursive: true });
+
+		const profileRootSpy = spyOn(piUtils, "getProfileRootDir").mockReturnValue(path.dirname(defaultAgentDir));
+		piUtils.setProfile("doctortestprofile");
+		try {
+			const report = await runDoctorCommand({ flags: { agentDir: profileAgentDir } });
+			const finding = report.findings.find(entry => entry.id === "setup.keybindings");
+			expect(finding?.status).toBe("error");
+			expect(finding?.details.some(d => d.includes("default profile"))).toBe(true);
+		} finally {
+			piUtils.setProfile(undefined);
+			profileRootSpy.mockRestore();
+		}
+	});
+
+	test("setup: named profile validates merged default-profile bindings (legacy names migrated)", async () => {
+		// The default profile binds legacy `interrupt` to ctrl+x; the named
+		// profile binds `app.clear` to the same chord. The merged, migrated
+		// config conflicts — a profile-only probe reports clean.
+		const defaultAgentDir = path.join(root, "agent");
+		await fs.mkdir(defaultAgentDir, { recursive: true });
+		await fs.writeFile(path.join(defaultAgentDir, "keybindings.yml"), "interrupt: ctrl+x\n", "utf8");
+		const profileAgentDir = path.join(root, "profile-agent");
+		await fs.mkdir(profileAgentDir, { recursive: true });
+		await fs.writeFile(path.join(profileAgentDir, "keybindings.yml"), "app.clear: ctrl+x\n", "utf8");
+
+		const profileRootSpy = spyOn(piUtils, "getProfileRootDir").mockReturnValue(path.dirname(defaultAgentDir));
+		piUtils.setProfile("doctortestprofile");
+		try {
+			const report = await runDoctorCommand({ flags: { agentDir: profileAgentDir } });
+			const finding = report.findings.find(entry => entry.id === "setup.keybindings");
+			expect(finding?.status).toBe("warning");
+			expect(finding?.details.some(d => d.includes("conflict"))).toBe(true);
+		} finally {
+			piUtils.setProfile(undefined);
+			profileRootSpy.mockRestore();
+		}
 	});
 
 	test("setup: WATCHDOG.yml failing the schema → error", async () => {
@@ -1868,6 +2128,29 @@ describe("omp doctor", () => {
 		expect(finding?.category).toBe("setup");
 		expect(finding?.status).toBe("error");
 		expect(finding?.details.some(d => d.includes("null-entry-ext") && d.includes("not a string"))).toBe(true);
+		// The report still completes — other categories are present.
+		expect(report.findings.some(entry => entry.category === "browser")).toBe(true);
+	});
+
+	test("setup: extension manifest with a non-array extensions container → error naming the package, report completes", async () => {
+		// A syntactically valid manifest with "extensions": "src/index.ts"
+		// (string, not array) has a truthy .length but no .entries() —
+		// iterating it would throw outside any catch and abort the report.
+		const extDir = path.join(root, "extensions", "string-container-ext");
+		await fs.mkdir(extDir, { recursive: true });
+		await fs.writeFile(
+			path.join(extDir, "package.json"),
+			JSON.stringify({ name: "string-container-ext", omp: { extensions: "src/index.ts" } }),
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "setup.extensions");
+		expect(finding?.category).toBe("setup");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(d => d.includes("string-container-ext") && d.includes("must be an array"))).toBe(
+			true,
+		);
 		// The report still completes — other categories are present.
 		expect(report.findings.some(entry => entry.category === "browser")).toBe(true);
 	});
@@ -2101,6 +2384,38 @@ describe("omp doctor", () => {
 		expect(finding?.summary).toContain("1 valid");
 	});
 
+	test("setup: direct native extension file under <agentDir>/extensions is discovered and counted", async () => {
+		// The runtime auto-discovers direct `extensions/*.ts` files through the
+		// native extension-module capability; the old explicit-root
+		// enumeration missed them and reported zero valid extensions.
+		const extDir = path.join(root, "extensions");
+		await fs.mkdir(extDir, { recursive: true });
+		await fs.writeFile(path.join(extDir, "foo.ts"), "export {};", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "setup.extensions");
+		expect(finding?.status).toBe("ok");
+		expect(finding?.summary).toContain("1 valid");
+	});
+
+	test("setup: native extension module with a missing declared entry is an error", async () => {
+		// A conventional extension directory whose manifest declares a
+		// missing entry point fails runtime loading; the shared discovery
+		// surface must report it, not omit the package.
+		const extDir = path.join(root, "extensions", "missing-entry-ext");
+		await fs.mkdir(extDir, { recursive: true });
+		await fs.writeFile(
+			path.join(extDir, "package.json"),
+			JSON.stringify({ name: "missing-entry-ext", omp: { extensions: ["./gone.ts"] } }),
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root } });
+		const finding = report.findings.find(entry => entry.id === "setup.extensions");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(d => d.includes("missing-entry-ext") && d.includes("gone.ts"))).toBe(true);
+	});
+
 	test("gc lock contention produces a storage warning without aborting the report", async () => {
 		// Pre-create gc.lock with a live PID so withGcLock cannot acquire it.
 		// The lock is only broken when the PID is dead; a spawned child stays alive.
@@ -2170,6 +2485,33 @@ describe("omp doctor", () => {
 		const finding = report.findings.find(entry => entry.id === "config.settings");
 		expect(finding?.status).toBe("error");
 		expect(finding?.details.some(d => d.includes("bashInterceptor.patterns[0]") && d.includes("object"))).toBe(true);
+	});
+
+	test("settings: incomplete bashInterceptor.patterns rule ({tool} only) is an error naming the index", async () => {
+		// compileRules would construct new RegExp(undefined) — an empty regex
+		// matching every command — blocking all bash calls with an undefined
+		// message. The shared rule validator requires pattern/tool/message.
+		const configPath = path.join(root, "config.yml");
+		await fs.writeFile(configPath, "bashInterceptor:\n  enabled: true\n  patterns:\n    - tool: read\n", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const finding = report.findings.find(entry => entry.id === "config.settings");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(d => d.includes("bashInterceptor.patterns[0]") && d.includes("pattern"))).toBe(true);
+	});
+
+	test("settings: bashInterceptor rule with an invalid regex pattern is an error", async () => {
+		const configPath = path.join(root, "config.yml");
+		await fs.writeFile(
+			configPath,
+			"bashInterceptor:\n  enabled: true\n  patterns:\n    - { pattern: '([', tool: read, message: use the read tool }\n",
+			"utf8",
+		);
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const finding = report.findings.find(entry => entry.id === "config.settings");
+		expect(finding?.status).toBe("error");
+		expect(finding?.details.some(d => d.includes("bashInterceptor.patterns[0]"))).toBe(true);
 	});
 
 	test("settings: valid typed array (bashInterceptor.patterns with real rules) passes", async () => {
@@ -2347,6 +2689,43 @@ describe("omp doctor", () => {
 		expect(finding?.status).toBe("error");
 		expect(details.filter(detail => detail.includes(rootMcpJson))).toHaveLength(1);
 		expect(details.filter(detail => detail.includes(rootDotMcpJson))).toHaveLength(1);
+	});
+
+	test("non-mapping MCP config root (array) produces an error, not mcp.none ok", async () => {
+		// `[]` is syntactically valid JSON but every provider silently
+		// discards it — zero items, zero warnings. Doctor must reject the
+		// malformed root instead of reporting a healthy "no MCP servers".
+		setProjectDir(root);
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(mcpJson, "[]", "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const noneOk = report.findings.find(entry => entry.id === "mcp.none" && entry.status === "ok");
+		expect(noneOk).toBeUndefined();
+		const rootError = report.findings.find(
+			entry =>
+				entry.category === "mcp" &&
+				entry.status === "error" &&
+				entry.details.some(d => d.includes(mcpJson) && d.includes("root must be a JSON object")),
+		);
+		expect(rootError).toBeDefined();
+	});
+
+	test("non-mapping MCP config root (string) produces an error, not mcp.none ok", async () => {
+		setProjectDir(root);
+		const mcpJson = path.join(root, "mcp.json");
+		await fs.writeFile(mcpJson, JSON.stringify("server"), "utf8");
+
+		const report = await runDoctorCommand({ flags: { agentDir: root, json: true } });
+		const noneOk = report.findings.find(entry => entry.id === "mcp.none" && entry.status === "ok");
+		expect(noneOk).toBeUndefined();
+		const rootError = report.findings.find(
+			entry =>
+				entry.category === "mcp" &&
+				entry.status === "error" &&
+				entry.details.some(d => d.includes(mcpJson) && d.includes("root must be a JSON object")),
+		);
+		expect(rootError).toBeDefined();
 	});
 
 	test("primitive mcpServers produces an MCP error finding, not mcp.none", async () => {
@@ -2693,6 +3072,7 @@ describe("omp doctor", () => {
 		const { chromePath } = await resolveManagedChromeTarget(fakeCacheDir);
 		await fs.mkdir(path.dirname(chromePath), { recursive: true });
 		await fs.writeFile(chromePath, "fake-binary", "utf8");
+		if (process.platform !== "win32") await fs.chmod(chromePath, 0o755);
 
 		const chromeSpy = spyOn(browserLaunch, "resolveSystemChromium").mockReturnValue(undefined);
 		const envSpy = spyOn(browserLaunch, "readChromiumEnvOverride").mockReturnValue(undefined);
@@ -2703,6 +3083,54 @@ describe("omp doctor", () => {
 			expect(finding?.status).toBe("ok");
 			expect(finding?.summary).toBe(chromePath);
 			expect(finding?.details.some(d => d.includes("Puppeteer cache"))).toBe(true);
+		} finally {
+			chromeSpy.mockRestore();
+			envSpy.mockRestore();
+			cacheSpy.mockRestore();
+		}
+	});
+
+	test("browser: cached Chromium entry without execute permission → first-use warning, not ok (POSIX)", async () => {
+		// A cache entry that lost its execute bit fails at Puppeteer launch;
+		// the cache probe must not report it as a healthy resolved binary.
+		if (process.platform === "win32") return;
+		const fakeCacheDir = path.join(root, "fake-puppeteer-cache-nonexec");
+		const { chromePath } = await resolveManagedChromeTarget(fakeCacheDir);
+		await fs.mkdir(path.dirname(chromePath), { recursive: true });
+		await fs.writeFile(chromePath, "fake-binary", "utf8");
+		await fs.chmod(chromePath, 0o644);
+
+		const chromeSpy = spyOn(browserLaunch, "resolveSystemChromium").mockReturnValue(undefined);
+		const envSpy = spyOn(browserLaunch, "readChromiumEnvOverride").mockReturnValue(undefined);
+		const cacheSpy = spyOn(piUtils, "getPuppeteerDir").mockReturnValue(fakeCacheDir);
+		try {
+			const report = await runDoctorCommand({ flags: { agentDir: root } });
+			const finding = report.findings.find(entry => entry.id === "browser.chromium");
+			expect(finding?.status).toBe("warning");
+			expect(finding?.summary.toLowerCase()).toContain("download");
+		} finally {
+			chromeSpy.mockRestore();
+			envSpy.mockRestore();
+			cacheSpy.mockRestore();
+		}
+	});
+
+	test("browser: cached Chromium entry that is a directory → first-use warning, not ok", async () => {
+		// The exact executable path existing as a DIRECTORY satisfies a bare
+		// existsSync but can never launch; the shared executable-file
+		// predicate rejects it.
+		const fakeCacheDir = path.join(root, "fake-puppeteer-cache-dir");
+		const { chromePath } = await resolveManagedChromeTarget(fakeCacheDir);
+		await fs.mkdir(chromePath, { recursive: true });
+
+		const chromeSpy = spyOn(browserLaunch, "resolveSystemChromium").mockReturnValue(undefined);
+		const envSpy = spyOn(browserLaunch, "readChromiumEnvOverride").mockReturnValue(undefined);
+		const cacheSpy = spyOn(piUtils, "getPuppeteerDir").mockReturnValue(fakeCacheDir);
+		try {
+			const report = await runDoctorCommand({ flags: { agentDir: root } });
+			const finding = report.findings.find(entry => entry.id === "browser.chromium");
+			expect(finding?.status).toBe("warning");
+			expect(finding?.summary.toLowerCase()).toContain("download");
 		} finally {
 			chromeSpy.mockRestore();
 			envSpy.mockRestore();

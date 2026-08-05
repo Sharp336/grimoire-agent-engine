@@ -50,6 +50,7 @@ import {
 	SETTINGS_SCHEMA,
 	type SettingPath,
 	type SettingValue,
+	validateBashInterceptorRule,
 } from "./settings-schema";
 
 // Re-export types that callers need
@@ -203,6 +204,16 @@ function validateSettingValueType(
 					const actual = item === null ? "null" : typeof item;
 					const ok = matchesSettingElementType(item, elementType);
 					if (!ok) return `Settings key "${path}[${i}]" must be a ${elementType}, got ${actual}`;
+				}
+			}
+			// bashInterceptor rules need more than object-ness: an incomplete
+			// rule (e.g. { tool: "read" } with no pattern) compiles to an empty
+			// regex at runtime and blocks every bash call. Validate the full
+			// rule shape through the shared validator compileRules uses.
+			if (path === "bashInterceptor.patterns") {
+				for (let i = 0; i < value.length; i++) {
+					const ruleError = validateBashInterceptorRule(value[i]);
+					if (ruleError !== null) return `Settings key "${path}[${i}]": ${ruleError}`;
 				}
 			}
 			return null;

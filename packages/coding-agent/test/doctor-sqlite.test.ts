@@ -200,6 +200,55 @@ describe("Item I: provenance swap recovery classification", () => {
 		expect(quickCheck(dbPath)).toBe("ok");
 	});
 
+	test("a mid-trio staging failure cleans every previously staged restore file", async () => {
+		// When the main-file staging copy succeeds but a later sidecar fails
+		// (ENOSPC/IO), every accumulated `.restore-*` staging file must be
+		// removed before the error propagates — otherwise the next repair run
+		// and the next swap trip over the debris.
+		const dbPath = path.join(root, "agent.db");
+		await createDatabaseWithRows(dbPath, 20);
+		const live = await snapshotTrioForTest(dbPath);
+		expect(live).toHaveLength(1); // DELETE-mode main only; reopening must not alter the trio
+
+		// The archived original carries a WAL the live database no longer has,
+		// so the restore plan has two copies: main succeeds, the WAL is made to
+		// fail mid-trio.
+		const archiveDir = path.join(root, ".omp-doctor-backups", "agent.db.test");
+		await fs.mkdir(archiveDir, { recursive: true });
+		const fakeWal = path.join(archiveDir, "agent.db-wal");
+		await Bun.write(fakeWal, "archived-wal-bytes");
+		await fs.copyFile(dbPath, path.join(archiveDir, "agent.db"));
+		const walHasher = new Bun.SHA256();
+		walHasher.update(await Bun.file(fakeWal).arrayBuffer());
+		const walStat = await fs.stat(fakeWal);
+		const source = [...live, { name: "agent.db-wal", size: walStat.size, hash: walHasher.digest("hex") }];
+
+		const candidateMain = { size: 1, hash: "0".repeat(64) };
+		const marker = await writeModernSwapMarker(dbPath, archiveDir, source, candidateMain);
+
+		const realCopyFile = fs.copyFile.bind(fs);
+		const copySpy = spyOn(fs, "copyFile").mockImplementation((async (src: unknown, dest: unknown) => {
+			if (String(dest).includes(".restore-") && String(src).endsWith("-wal")) {
+				throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+			}
+			return realCopyFile(src as never, dest as never);
+		}) as never);
+		let result: Awaited<ReturnType<typeof recoverInterruptedSwap>> | null = null;
+		try {
+			result = await recoverInterruptedSwap(makeDb(dbPath), true);
+		} finally {
+			copySpy.mockRestore();
+		}
+
+		expect(result.error).not.toBeNull();
+		// The original live database is untouched, the marker is retained for
+		// the next run, and NO staging file survives the failed copy.
+		expect(await snapshotTrioForTest(dbPath)).toEqual(live);
+		expect(await pathExists(marker)).toBe(true);
+		const leftovers = (await fs.readdir(root)).filter(entry => entry.includes(".restore-"));
+		expect(leftovers).toEqual([]);
+	});
+
 	test("candidate state preserves the live database and clears the marker", async () => {
 		const dbPath = path.join(root, "agent.db");
 		await createDatabaseWithRows(dbPath, 20);
@@ -734,5 +783,121 @@ describe("repair open create:false", () => {
 		expect(await pathExists(dbPath)).toBe(false);
 		// rollbackHotJournal must fail closed (false) rather than create+succeed.
 		expect(repair.actions).not.toContain("optimized");
+	});
+});
+
+// ============================================================================
+// Salvage/restore safety — recovery dump honesty and rollback-journal carryover
+// ============================================================================
+
+describe("salvage safety", () => {
+	test("a failed recovery-dump preservation copy is reported as not preserved", async () => {
+		// FK-violation fixture: .recover dumps the orphaned child row, so
+		// validateCandidate refuses the candidate and salvage tries to keep
+		// the recovery dump in the archive. When THAT copy fails (full or
+		// unwritable archive filesystem), the error must not claim the dump
+		// was preserved — the finally deletes the only other copy.
+		const dbPath = path.join(root, "agent.db");
+		const db = new Database(dbPath);
+		db.run("PRAGMA journal_mode=DELETE");
+		db.run("PRAGMA foreign_keys=OFF");
+		db.run("CREATE TABLE parent (id INTEGER PRIMARY KEY, v TEXT)");
+		db.run("CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id))");
+		db.run("CREATE TABLE filler (id INTEGER PRIMARY KEY, blob TEXT)");
+		db.run("BEGIN");
+		const insertFiller = db.prepare("INSERT INTO filler (blob) VALUES (?)");
+		for (let i = 0; i < 200; i++) insertFiller.run("x".repeat(1024));
+		db.run("COMMIT");
+		db.run("DELETE FROM filler");
+		db.run("INSERT INTO child (parent_id) VALUES (999)");
+		db.close();
+		const pageSize = 4096;
+		const handle = await fs.open(dbPath, "r+");
+		try {
+			await handle.write(Buffer.alloc(pageSize, 0xff), 0, pageSize, 4 * pageSize);
+		} finally {
+			await handle.close();
+		}
+		const probe = await probeDatabase(makeDb(dbPath));
+		expect(probe.quickCheck).not.toBe("ok");
+
+		const realCopyFile = fs.copyFile.bind(fs);
+		const copySpy = spyOn(fs, "copyFile").mockImplementation((async (src: unknown, dest: unknown) => {
+			if (path.basename(String(dest)) === "recovery.sql") {
+				throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+			}
+			return realCopyFile(src as never, dest as never);
+		}) as never);
+		spies.push(copySpy);
+
+		const repair = await repairDatabase(probe);
+		expect(repair.error).not.toBeNull();
+		expect(repair.error).toContain("could not be preserved");
+		expect(repair.error).not.toContain("; recovery dump preserved at");
+		// The corrupt original is untouched — no swap occurred.
+		expect(quickCheck(dbPath)).not.toBe("ok");
+	});
+
+	test("salvage carries an archived rollback journal into the recovery work trio", async () => {
+		// When the verified archive contains a `-journal` (a hot rollback
+		// journal whose live rollback failed because the main file is also
+		// corrupt), the .recover work copy must include it: without the
+		// pre-transaction pages, recovery can mine a half-applied
+		// transaction into a structurally valid but logically partial
+		// candidate. An in-process crash fixture cannot keep a valid hot
+		// journal past the repair ladder's own rollback attempt, so plant
+		// the journal into the archive via the archive copy itself.
+		const dbPath = path.join(root, "agent.db");
+		const db = new Database(dbPath);
+		db.run("PRAGMA journal_mode=DELETE");
+		db.run("PRAGMA foreign_keys=OFF");
+		db.run("CREATE TABLE parent (id INTEGER PRIMARY KEY, v TEXT)");
+		db.run("CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id))");
+		db.run("CREATE TABLE filler (id INTEGER PRIMARY KEY, blob TEXT)");
+		db.run("BEGIN");
+		const insertFiller = db.prepare("INSERT INTO filler (blob) VALUES (?)");
+		for (let i = 0; i < 200; i++) insertFiller.run("x".repeat(1024));
+		db.run("COMMIT");
+		db.run("DELETE FROM filler");
+		db.run("INSERT INTO child (parent_id) VALUES (999)");
+		db.close();
+		const pageSize = 4096;
+		const handle = await fs.open(dbPath, "r+");
+		try {
+			await handle.write(Buffer.alloc(pageSize, 0xff), 0, pageSize, 4 * pageSize);
+		} finally {
+			await handle.close();
+		}
+
+		const journalCopies: Array<{ src: string; dest: string }> = [];
+		const realCopyFile = fs.copyFile.bind(fs);
+		const copySpy = spyOn(fs, "copyFile").mockImplementation((async (src: unknown, dest: unknown) => {
+			const srcName = String(src);
+			const destName = String(dest);
+			if (srcName.endsWith("-journal")) {
+				journalCopies.push({ src: srcName, dest: destName });
+			}
+			await realCopyFile(src as never, dest as never);
+			// Plant a rollback journal next to the archived main file — the
+			// state a crash-interrupted repair leaves behind. Done as salvage
+			// copies the main file out of the archive (the archive snapshot
+			// verification already completed, and the journal existence check
+			// runs after this copy).
+			if (destName.includes("omp-doctor-salvage-") && path.basename(destName) === "agent.db") {
+				await Bun.write(`${srcName}-journal`, "archived-hot-journal-bytes");
+			}
+		}) as never);
+		spies.push(copySpy);
+
+		const probe = await probeDatabase(makeDb(dbPath));
+		expect(probe.quickCheck).not.toBe("ok");
+		const repair = await repairDatabase(probe);
+		// The candidate gate refuses the swap for this fixture regardless;
+		// the contract under test is the journal carry-over.
+		expect(repair.error).not.toBeNull();
+		const salvageCopy = journalCopies.find(
+			copy => path.basename(copy.dest).endsWith("-journal") && copy.dest.includes("omp-doctor-salvage-"),
+		);
+		expect(salvageCopy).toBeDefined();
 	});
 });

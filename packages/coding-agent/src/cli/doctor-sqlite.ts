@@ -466,6 +466,12 @@ async function stageRestoreFromArchive(dbPath: string, archiveDir: string): Prom
 				entries.push({ target, staging: null, remove: true });
 				continue;
 			}
+			// A mid-trio failure must not leak the previously staged
+			// `.restore-*` copies: they are database-sized and would
+			// accumulate across repeated --fix attempts after ENOSPC/IO errors.
+			for (const entry of entries) {
+				if (entry.staging !== null) await fs.rm(entry.staging, { force: true }).catch(() => undefined);
+			}
 			if (staging !== null) await fs.rm(staging, { force: true }).catch(() => undefined);
 			throw error;
 		}
@@ -1029,6 +1035,16 @@ async function salvageViaRecover(dbPath: string, archiveDir: string): Promise<st
 		const workDb = path.join(workDir, path.basename(dbPath));
 		await fs.copyFile(archivedMain, workDb);
 		if (await fileExistsOr(`${archivedMain}-wal`)) await fs.copyFile(`${archivedMain}-wal`, `${workDb}-wal`);
+		// A hot rollback journal holds the pre-transaction pages SQLite needs
+		// to roll back. Without it, .recover sees pages from a potentially
+		// half-applied transaction and can produce a structurally valid but
+		// logically partial candidate that passes the integrity/FK gates.
+		// Copy the archived journal so opening the work copy rolls back to
+		// the pre-transaction state; if the copy fails, the throw refuses
+		// automatic salvage while the unapplied journal remains.
+		if (await fileExistsOr(`${archivedMain}-journal`)) {
+			await fs.copyFile(`${archivedMain}-journal`, `${workDb}-journal`);
+		}
 		const dumpPath = path.join(workDir, "recovery.sql");
 		await runRecoverDump(sqlite, workDb, dumpPath);
 		const candidate = path.join(workDir, "candidate.db");
@@ -1063,10 +1079,17 @@ async function salvageViaRecover(dbPath: string, archiveDir: string): Promise<st
 				const stranded = check.query("SELECT count(*) AS n FROM lost_and_found").get() as Pick<PragmaRow, "n">;
 				if (stranded.n > 0) {
 					const keptDump = path.join(archiveDir, "recovery.sql");
-					await fs.copyFile(dumpPath, keptDump);
-					throw new Error(
-						`salvage left ${stranded.n} rows orphaned outside their tables; recovery dump preserved at ${keptDump}`,
-					);
+					// Same honesty rule as the validateCandidate gate below: the
+					// finally deletes the work-dir dump, so a failed preservation
+					// copy must be reported as failed — never as "preserved at".
+					let preservation: string;
+					try {
+						await fs.copyFile(dumpPath, keptDump);
+						preservation = `recovery dump preserved at ${keptDump}`;
+					} catch (copyError) {
+						preservation = `recovery dump could not be preserved: ${messageOf(copyError)}`;
+					}
+					throw new Error(`salvage left ${stranded.n} rows orphaned outside their tables; ${preservation}`);
 				}
 			}
 		} finally {
@@ -1081,8 +1104,19 @@ async function salvageViaRecover(dbPath: string, archiveDir: string): Promise<st
 			validateCandidate(candidate);
 		} catch (error) {
 			const keptDump = path.join(archiveDir, "recovery.sql");
-			await fs.copyFile(dumpPath, keptDump).catch(() => undefined);
-			throw new Error(`${messageOf(error)}; recovery dump preserved at ${keptDump}`);
+			// The finally below deletes the work directory — the only other
+			// copy of the dump. If the preservation copy itself fails (full or
+			// unwritable archive filesystem), say so instead of directing the
+			// user to a nonexistent artifact precisely when manual salvage is
+			// required.
+			let preservation: string;
+			try {
+				await fs.copyFile(dumpPath, keptDump);
+				preservation = `recovery dump preserved at ${keptDump}`;
+			} catch (copyError) {
+				preservation = `recovery dump could not be preserved: ${messageOf(copyError)}`;
+			}
+			throw new Error(`${messageOf(error)}; ${preservation}`);
 		}
 		// Stage next to the target so the swap rename is same-filesystem.
 		const staging = path.join(path.dirname(dbPath), `.${path.basename(dbPath)}.salvage-${process.pid}-${Date.now()}`);

@@ -166,7 +166,10 @@ async function resolveManagedChromiumTarget(cacheDir: string): Promise<ManagedCh
 export async function resolveCachedChromiumExecutable(cacheDir = getPuppeteerDir()): Promise<string | undefined> {
 	const target = await resolveManagedChromiumTarget(cacheDir);
 	if (!target) return undefined;
-	return fs.existsSync(target.executablePath) ? target.executablePath : undefined;
+	// A cache entry that is a directory or has lost its execute bit would
+	// fail at Puppeteer launch; report it as not-cached so the doctor probe
+	// (and the download path below) does not trust it.
+	return isExecutableFile(target.executablePath) ? target.executablePath : undefined;
 }
 
 /**
@@ -193,7 +196,10 @@ export async function ensureChromiumExecutable(): Promise<string | undefined> {
 			logger.warn("Could not detect browser platform; relying on puppeteer default resolution");
 			return undefined;
 		}
-		if (fs.existsSync(target.executablePath)) return target.executablePath;
+		// Same predicate as the system candidates: a cached entry that is not
+		// an executable regular file (lost +x, or a directory) fails at launch,
+		// so fall through to a fresh download instead of returning it.
+		if (isExecutableFile(target.executablePath)) return target.executablePath;
 
 		logger.warn("Downloading Chromium for puppeteer (first browser use)", {
 			buildId: target.buildId,

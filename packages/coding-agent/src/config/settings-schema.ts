@@ -5854,6 +5854,39 @@ export interface BashInterceptorRule {
 	allowSubcommands?: string[];
 }
 
+/**
+ * Validate one bash interceptor rule's required shape: string `pattern`,
+ * `tool`, and `message`, plus optional regex `flags` that compile. Returns an
+ * error message or null when valid. Shared by the settings validator (so
+ * `omp doctor` reports incomplete rules) and the interceptor's rule compiler
+ * (so an incomplete rule is skipped instead of compiling `new
+ * RegExp(undefined)` — an empty regex that matches every command).
+ */
+export function validateBashInterceptorRule(rule: unknown): string | null {
+	if (rule === null || typeof rule !== "object" || Array.isArray(rule)) {
+		return `rule must be an object, got ${rule === null ? "null" : Array.isArray(rule) ? "array" : typeof rule}`;
+	}
+	const record = rule as Record<string, unknown>;
+	if (typeof record.pattern !== "string" || record.pattern.length === 0) {
+		return 'rule "pattern" must be a non-empty string';
+	}
+	if (record.flags !== undefined && typeof record.flags !== "string") {
+		return `rule "flags" must be a string, got ${record.flags === null ? "null" : typeof record.flags}`;
+	}
+	try {
+		new RegExp(record.pattern, typeof record.flags === "string" ? record.flags : "");
+	} catch {
+		return 'rule "pattern"/"flags" is not a valid regular expression';
+	}
+	if (typeof record.tool !== "string" || record.tool.length === 0) {
+		return 'rule "tool" must be a non-empty string';
+	}
+	if (typeof record.message !== "string" || record.message.length === 0) {
+		return 'rule "message" must be a non-empty string';
+	}
+	return null;
+}
+
 export interface ShellMinimizerSettings {
 	enabled: boolean;
 	settingsPath: string | undefined;

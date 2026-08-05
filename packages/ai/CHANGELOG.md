@@ -7,6 +7,7 @@
 - Added `allowTokenFile` (default `true`) to `ResolveAuthBrokerConfigOptions`: when `false`, `resolveAuthBrokerConfig` skips reading the global `~/.omp/auth-broker.token` file entirely, so a scoped caller (e.g. `omp doctor --agent-dir`) can only resolve broker tokens from env or its own scoped config. Default `true` preserves existing behavior.
 - Added `validateCredentialPayload`, a shape-only validator for stored credential JSON that lets diagnostics reject malformed rows without exposing secret fields.
 - Exported `AUTH_SCHEMA_VERSION` and `inferAuthSchemaVersionFromColumns` (a pure schema-version classifier for the `auth_credentials` table) so read-only diagnostics like `omp doctor` can detect a legacy schema pending automatic migration without instantiating the store (which would migrate it).
+- Exported `readAuthBrokerConfigSnapshot` (and the `ConfigSnapshot` type): a read-only peek at the raw configured broker url/token strings with no env resolution and no `!command` execution, so `omp doctor` can distinguish a command-backed broker URL (active at runtime) from an inert command-backed token (ignored at runtime when no URL exists).
 
 ## [17.2.5] - 2026-08-03
 

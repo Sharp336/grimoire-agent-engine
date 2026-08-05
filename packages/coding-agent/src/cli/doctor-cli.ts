@@ -9,7 +9,12 @@ import type { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type AuthBrokerClientConfig, resolveAuthBrokerConfig } from "@oh-my-pi/pi-ai/auth-broker/discover";
+import {
+	type AuthBrokerClientConfig,
+	loadAuthBrokerAccountPool,
+	readAuthBrokerConfigSnapshot,
+	resolveAuthBrokerConfig,
+} from "@oh-my-pi/pi-ai/auth-broker/discover";
 import {
 	AUTH_SCHEMA_VERSION,
 	inferAuthSchemaVersionFromColumns,
@@ -36,16 +41,17 @@ import {
 	VERSION,
 } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
-import { JSONC, YAML } from "bun";
+import { YAML } from "bun";
 import { watchdogYamlSchema } from "../advisor/config";
 import { collectConfigCandidates } from "../advisor/watchdog";
+import { type ExtensionModule, extensionModuleCapability } from "../capability/extension-module";
 import { type Hook, hookCapability } from "../capability/hook";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
 import { type Skill, skillCapability } from "../capability/skill";
 import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadResult } from "../config/config-file";
-import { KEYBINDINGS, KeybindingsManager, resolveKeybindingsConfigPaths } from "../config/keybindings";
+import { KEYBINDINGS, KeybindingsManager, loadKeybindingsConfigForDiagnostics } from "../config/keybindings";
 import { ModelsConfigFile } from "../config/models-config";
 import {
 	classifySettingsYaml,
@@ -58,6 +64,7 @@ import {
 } from "../config/settings";
 import { collectSystemInfo, formatSystemInfo } from "../debug/system-info";
 import { loadCapability } from "../discovery";
+import { coerceNativeMcpTimeout } from "../discovery/builtin";
 import { type ParsedAgentFields, parseAgentFields } from "../discovery/helpers";
 import { getMcpJsonCandidatePaths } from "../discovery/mcp-json";
 import { listOmpExtensionRoots } from "../discovery/omp-extension-roots";
@@ -70,7 +77,7 @@ import { convertToLegacyConfig, validateServerConfig } from "../mcp/config";
 import { readDisabledServers, readEnabledServers } from "../mcp/config-writer";
 import { resolveStdioCommandPath } from "../mcp/transports/stdio";
 import type { MCPServerConfig } from "../mcp/types";
-import { loadMnemopiConfig } from "../mnemopi/config";
+import { resolveMnemopiDbPath } from "../mnemopi/config";
 import { resolveThemeColors, theme, themeJsonSchema } from "../modes/theme/theme";
 import { AgentParsingError, loadBundledAgents } from "../task/agents";
 import { discoverAgents } from "../task/discovery";
@@ -441,16 +448,31 @@ async function collectAuthFindings(flags: DoctorCommandFlags): Promise<DoctorFin
 		];
 	}
 	if (commandBackedField !== null) {
-		return [
-			{
-				id: "auth.broker",
-				category: "auth",
-				status: "warning",
-				summary: "auth broker config is command-backed; doctor cannot resolve it without executing a shell command",
-				details: [],
-				remedy: "Run `omp doctor` in a context where the broker command resolves, or use a literal URL/token",
-			},
-		];
+		// Distinguish WHICH field was command-backed when no broker config was
+		// resolved. A command-backed URL is an active broker configuration the
+		// doctor cannot resolve — report it. A command-backed TOKEN with no
+		// URL is inert: the runtime resolver returns null and falls back to
+		// the local SQLite store, so doctor must continue into the local
+		// credential checks instead of warning and skipping them.
+		if (brokerConfig === null) {
+			const snapshot = await readAuthBrokerConfigSnapshot(agentDir);
+			if (snapshot.url === undefined) {
+				commandBackedField = null;
+			}
+		}
+		if (commandBackedField !== null) {
+			return [
+				{
+					id: "auth.broker",
+					category: "auth",
+					status: "warning",
+					summary:
+						"auth broker config is command-backed; doctor cannot resolve it without executing a shell command",
+					details: [],
+					remedy: "Run `omp doctor` in a context where the broker command resolves, or use a literal URL/token",
+				},
+			];
+		}
 	}
 	if (brokerConfig) {
 		let brokerUrl: URL;
@@ -477,6 +499,25 @@ async function collectAuthFindings(flags: DoctorCommandFlags): Promise<DoctorFin
 					summary: "auth broker URL is unusable",
 					details: ["Auth broker URL must be an absolute HTTP(S) URL"],
 					remedy: "Set OMP_AUTH_BROKER_URL or the `auth.broker.url` config entry to an HTTP(S) URL",
+				},
+			];
+		}
+		// Production discoverAuthStorage() loads the account pool before
+		// constructing the remote store and THROWS on a missing/malformed/
+		// invalid OMP_AUTH_BROKER_ACCOUNT_POOL_FILE — validate through the
+		// shared loader so doctor cannot report the broker healthy when
+		// startup cannot initialize authentication.
+		try {
+			await loadAuthBrokerAccountPool();
+		} catch (error) {
+			return [
+				{
+					id: "auth.broker",
+					category: "auth",
+					status: "error",
+					summary: "auth broker account pool is invalid",
+					details: [error instanceof Error ? error.message : String(error)],
+					remedy: "Fix the JSON referenced by OMP_AUTH_BROKER_ACCOUNT_POOL_FILE or unset it",
 				},
 			];
 		}
@@ -1173,13 +1214,15 @@ async function collectQuarantinedConfigs(agentDir: string): Promise<DoctorFindin
 		scanError = error instanceof Error ? error : new Error(String(error));
 	}
 	// The project dir is always getProjectDir() — even under --agent-dir
-	// scoping — mirroring diagnoseProjectSettingsConfig.
+	// scoping — mirroring diagnoseProjectSettingsConfig. A non-ENOENT failure
+	// here (e.g. a searchable-but-not-listable .omp) must surface: swallowing
+	// it would report project settings as absent and hide existing
+	// config.yml.broken-* backups.
+	let projectScanError: Error | null = null;
 	try {
 		quarantined.push(...(await scanDir(path.join(getProjectDir(), ".omp"), ".omp/")));
-	} catch {
-		// The project scan is supplemental. A readable agent directory still
-		// yields its quarantine findings if `<project>/.omp` cannot be read.
-		// An earlier agent-dir failure remains in `scanError`.
+	} catch (error) {
+		projectScanError = error instanceof Error ? error : new Error(String(error));
 	}
 	if (scanError !== null) {
 		return [
@@ -1192,18 +1235,27 @@ async function collectQuarantinedConfigs(agentDir: string): Promise<DoctorFindin
 			},
 		];
 	}
-	if (quarantined.length === 0) return [];
-	quarantined.sort();
-	return [
-		{
-			id: "config.quarantined",
+	const findings: DoctorFinding[] = [];
+	if (projectScanError !== null) {
+		findings.push({
+			id: "config.quarantined.project",
 			category: "config",
 			status: "error",
-			summary: `${quarantined.length} quarantined config backup${quarantined.length === 1 ? "" : "s"} after failed loads`,
-			details: quarantined,
-			remedy: "Review each backup and restore or delete it",
-		},
-	];
+			summary: "quarantine scan: cannot read project .omp directory",
+			details: [projectScanError.message],
+		});
+	}
+	if (quarantined.length === 0) return findings;
+	quarantined.sort();
+	findings.push({
+		id: "config.quarantined",
+		category: "config",
+		status: "error",
+		summary: `${quarantined.length} quarantined config backup${quarantined.length === 1 ? "" : "s"} after failed loads`,
+		details: quarantined,
+		remedy: "Review each backup and restore or delete it",
+	});
+	return findings;
 }
 
 async function collectStorageFindings(flags: DoctorCommandFlags): Promise<DoctorFinding[]> {
@@ -1211,7 +1263,10 @@ async function collectStorageFindings(flags: DoctorCommandFlags): Promise<Doctor
 	let mnemopiDbPath: string | undefined;
 	try {
 		const settings = await Settings.loadReadOnly({ agentDir, cwd: getProjectDir() });
-		mnemopiDbPath = loadMnemopiConfig(settings, agentDir).dbPath;
+		// Side-effect-free path resolution: loadMnemopiConfig runs legacy-bank
+		// discovery, whose per-bank open can recreate -wal/-shm sidecars — a
+		// read-only doctor run must not mutate bank directories.
+		mnemopiDbPath = resolveMnemopiDbPath(settings, agentDir);
 	} catch {
 		// Config diagnostics own this error. Keep storage useful with its default layout.
 	}
@@ -1389,6 +1444,16 @@ async function probeMcpSourceParseErrors(agentDir: string | undefined, projectDi
 		const parsed = tryParseJson<unknown>(content);
 		if (parsed === null) {
 			errors.push(`${candidate}: invalid JSON (parse failed)`);
+			continue;
+		}
+		// A syntactically valid JSON document with a non-object root (`[]`,
+		// `"server"`) is silently discarded by every MCP provider — zero
+		// items, zero warnings — so doctor must reject it here instead of
+		// reporting `mcp.none` as healthy.
+		if (!isRecord(parsed)) {
+			errors.push(
+				`${candidate}: root must be a JSON object, got ${Array.isArray(parsed) ? "array" : typeof parsed}`,
+			);
 		}
 	}
 	return errors;
@@ -1493,11 +1558,19 @@ function validateMcpFieldShapes(name: string, server: MCPServer, raw: unknown): 
 			);
 		}
 	}
-	// timeout: must be non-negative finite number if present (null is malformed, not absent)
+	// timeout: classified through the PROVIDER's accepted forms. The native
+	// provider coerces numeric strings with Number() (see builtin.ts
+	// coerceNativeMcpTimeout); other providers accept finite non-negative
+	// numbers only. null is malformed, not absent.
 	if ("timeout" in rawEntry && rawEntry.timeout !== undefined) {
-		if (typeof rawEntry.timeout !== "number" || !Number.isFinite(rawEntry.timeout) || rawEntry.timeout < 0) {
+		const rawTimeout: unknown = rawEntry.timeout;
+		const validTimeout =
+			server._source.provider === "native"
+				? coerceNativeMcpTimeout(rawTimeout) !== undefined
+				: typeof rawTimeout === "number" && Number.isFinite(rawTimeout) && rawTimeout >= 0;
+		if (!validTimeout) {
 			errors.push(
-				`Server "${name}": "timeout" must be a non-negative number, got ${rawEntry.timeout === null ? "null" : JSON.stringify(rawEntry.timeout)}`,
+				`Server "${name}": "timeout" must be a non-negative number, got ${rawTimeout === null ? "null" : JSON.stringify(rawTimeout)}`,
 			);
 		}
 	}
@@ -1843,7 +1916,11 @@ async function collectAgentSetupFinding(agentDir: string, projectDir: string, sc
 			const baseName = path.basename(filePath);
 			try {
 				const { frontmatter } = parseFrontmatter(content, { source: filePath, level: "fatal" });
-				const fields = parseAgentFields(frontmatter);
+				const fieldDiagnostics: string[] = [];
+				const fields = parseAgentFields(frontmatter, fieldDiagnostics);
+				for (const diagnostic of fieldDiagnostics) {
+					errors.push(`${baseName}: ${diagnostic}`);
+				}
 				if (!fields) {
 					errors.push(`${baseName}: missing name or description`);
 					continue;
@@ -1940,55 +2017,34 @@ async function collectAgentSetupFinding(agentDir: string, projectDir: string, sc
 	};
 }
 async function collectKeybindingsSetupFinding(agentDir: string): Promise<DoctorFinding> {
-	const { readPath } = resolveKeybindingsConfigPaths(agentDir);
-	let content: string;
-	try {
-		content = await fs.promises.readFile(readPath, "utf-8");
-	} catch (error) {
-		if (isEnoent(error)) {
-			return {
-				id: "setup.keybindings",
-				category: "setup",
-				status: "ok",
-				summary: "keybindings: defaults in use",
-				details: [],
-			};
-		}
+	// Diagnose through the shared loader's read-only seam so the probe sees
+	// exactly what the runtime resolves: legacy-name migration applied, and —
+	// under a named profile — the default profile's keybindings merged before
+	// the profile overlay. A broken inherited file is a runtime-relevant
+	// failure the old raw-file probe silently discarded.
+	const { config, sources } = loadKeybindingsConfigForDiagnostics(agentDir);
+	const unreadable = sources.filter(source => source.status === "unreadable");
+	if (unreadable.length > 0) {
 		return {
 			id: "setup.keybindings",
 			category: "setup",
 			status: "error",
 			summary: "keybindings: cannot read config",
-			details: [error instanceof Error ? error.message : String(error)],
+			details: unreadable.map(
+				source =>
+					`${source.kind === "inherited" ? "default profile: " : ""}${source.error ?? "unreadable"} (${source.path})`,
+			),
 		};
 	}
-	// Parse YAML/JSONC per extension — same parsers loadRawConfig uses.
-	let rawConfig: unknown;
-	try {
-		if (readPath.endsWith(".json")) {
-			rawConfig = JSONC.parse(content);
-		} else {
-			rawConfig = YAML.parse(content);
-		}
-	} catch (error) {
+	if (sources.every(source => source.status === "missing")) {
 		return {
 			id: "setup.keybindings",
 			category: "setup",
-			status: "error",
-			summary: "keybindings: syntax error",
-			details: [error instanceof Error ? error.message : String(error)],
-		};
-	}
-	if (!rawConfig || typeof rawConfig !== "object" || Array.isArray(rawConfig)) {
-		return {
-			id: "setup.keybindings",
-			category: "setup",
-			status: "error",
-			summary: "keybindings: expected a mapping",
+			status: "ok",
+			summary: "keybindings: defaults in use",
 			details: [],
 		};
 	}
-	const config = rawConfig as Record<string, unknown>;
 	const warnings: string[] = [];
 	for (const key of Object.keys(config)) {
 		if (!(key in KEYBINDINGS)) {
@@ -1997,7 +2053,7 @@ async function collectKeybindingsSetupFinding(agentDir: string): Promise<DoctorF
 	}
 	// Detect chord conflicts via the TUI's in-memory manager (no file persistence, no global set).
 	try {
-		const manager = KeybindingsManager.inMemory(config as Parameters<typeof KeybindingsManager.inMemory>[0]);
+		const manager = KeybindingsManager.inMemory(config);
 		for (const conflict of manager.getConflicts()) {
 			warnings.push(`chord conflict: "${conflict.key}" bound to ${conflict.keybindings.join(", ")}`);
 		}
@@ -2211,7 +2267,14 @@ async function validateExtensionPackage(pkgRoot: string, errors: string[]): Prom
 	}
 	if (pkgExists) {
 		const manifest = await readExtensionManifest(packageJsonPath);
-		if (manifest?.extensions?.length) {
+		// readExtensionManifest casts pkg.omp to ExtensionManifest without
+		// shape-checking, so a syntactically valid manifest with a NON-ARRAY
+		// "extensions" container (e.g. "extensions": "src/index.ts") reaches
+		// here: truthy .length, no .entries() — iterating would throw outside
+		// any catch and abort the whole report. Classify the container first.
+		if (manifest?.extensions !== undefined && !Array.isArray(manifest.extensions)) {
+			errors.push(`${pkgName}: manifest "extensions" must be an array, got ${typeof manifest.extensions}`);
+		} else if (manifest?.extensions?.length) {
 			for (const [idx, extPath] of manifest.extensions.entries()) {
 				// readExtensionManifest casts pkg.omp to ExtensionManifest
 				// without shape-checking the array entries, so a syntactically
@@ -2315,6 +2378,16 @@ async function collectExtensionsSetupFinding(
 ): Promise<DoctorFinding> {
 	const errors: string[] = [];
 	let count = 0;
+	const validatedPaths = new Set<string>();
+	const validatedDirs = new Set<string>();
+
+	const validateRoot = async (pkgRoot: string): Promise<void> => {
+		const resolved = path.resolve(pkgRoot);
+		if (validatedPaths.has(resolved)) return;
+		validatedPaths.add(resolved);
+		validatedDirs.add(resolved);
+		if (await validateExtensionPackage(pkgRoot, errors)) count++;
+	};
 
 	// Build the list of extension package roots to validate.
 	let pkgRoots: string[] = [];
@@ -2348,8 +2421,57 @@ async function collectExtensionsSetupFinding(
 	}
 
 	for (const pkgRoot of pkgRoots) {
-		const validated = await validateExtensionPackage(pkgRoot, errors);
-		if (validated) count++;
+		await validateRoot(pkgRoot);
+	}
+
+	// Ambient native extension modules: the runtime auto-discovers direct
+	// `extensions/*.ts` files, conventional `<ext>/index.ts` directories, and
+	// settings-declared modules under `<agentDir>/extensions` and
+	// `.omp/extensions` (discoverExtensionPaths' capability walk) — surfaces
+	// the explicit-root enumeration above misses. Drive this from the shared
+	// discovery result so a broken native module cannot hide behind a zero
+	// count. Scoped runs pass the scoped agent dir through the LoadContext,
+	// matching how the runtime scopes user config.
+	try {
+		const discovered = await loadCapability<ExtensionModule>(extensionModuleCapability.id, {
+			cwd: projectDir,
+			userAgentDir: scoped ? agentDir : undefined,
+			providers: ["native"],
+		});
+		for (const warning of discovered.warnings) {
+			errors.push(`extension modules: ${warning}`);
+		}
+		for (const module of discovered.items) {
+			const resolved = path.resolve(module.path);
+			if (validatedPaths.has(resolved)) continue;
+			// A module entry point inside an already-validated package root is covered.
+			let covered = false;
+			for (const dir of validatedDirs) {
+				if (resolved.startsWith(`${dir}${path.sep}`)) {
+					covered = true;
+					break;
+				}
+			}
+			if (covered) continue;
+			validatedPaths.add(resolved);
+			try {
+				const stat = await fs.promises.stat(resolved);
+				if (stat.isDirectory()) {
+					validatedDirs.add(resolved);
+					if (await validateExtensionPackage(resolved, errors)) count++;
+				} else {
+					count++;
+				}
+			} catch (error) {
+				if (isEnoent(error)) {
+					errors.push(`${module.name}: extension entry not found (${resolved})`);
+				} else {
+					errors.push(`${module.name}: ${error instanceof Error ? error.message : String(error)}`);
+				}
+			}
+		}
+	} catch (error) {
+		errors.push(`extension modules: ${error instanceof Error ? error.message : String(error)}`);
 	}
 
 	// Also scan top-level hooks/pre|post dirs (not inside an extension package).

@@ -246,17 +246,45 @@ export interface ParsedAgentFields {
 	prewalk?: boolean | string;
 }
 
+/** Report mis-shaped array-or-CSV agent fields (dropped non-string entries, non-list values) into `diagnostics`. */
+function diagnoseListField(field: string, value: unknown, diagnostics: string[] | undefined): void {
+	if (diagnostics === undefined || value === undefined) return;
+	if (Array.isArray(value)) {
+		for (const item of value) {
+			if (typeof item !== "string") {
+				diagnostics.push(`"${field}" entries must be strings, got ${item === null ? "null" : typeof item}`);
+			}
+		}
+		return;
+	}
+	if (typeof value !== "string") {
+		diagnostics.push(`"${field}" must be a string or list of strings, got ${value === null ? "null" : typeof value}`);
+	}
+}
+
 /**
  * Parse agent fields from frontmatter.
  * Returns null if required fields (name, description) are missing.
+ * When `diagnostics` is provided, mis-shaped list fields (`tools`, `spawns`,
+ * `autoloadSkills`) are reported: the parser silently drops non-string
+ * entries, and an all-invalid list collapses to `undefined` — which the task
+ * executor reads as UNRESTRICTED, so a malformed attempt to constrain an
+ * agent would otherwise grant it the full active tool set.
  */
-export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAgentFields | null {
+export function parseAgentFields(
+	frontmatter: Record<string, unknown>,
+	diagnostics?: string[],
+): ParsedAgentFields | null {
 	const name = typeof frontmatter.name === "string" ? frontmatter.name : undefined;
 	const description = typeof frontmatter.description === "string" ? frontmatter.description : undefined;
 
 	if (!name || !description) {
 		return null;
 	}
+
+	diagnoseListField("tools", frontmatter.tools, diagnostics);
+	diagnoseListField("spawns", frontmatter.spawns, diagnostics);
+	diagnoseListField("autoloadSkills", frontmatter.autoloadSkills, diagnostics);
 
 	let tools = parseArrayOrCSV(frontmatter.tools);
 	if (tools) tools = normalizeToolNames(tools);

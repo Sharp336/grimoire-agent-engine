@@ -99,6 +99,26 @@ async function findNearestProjectConfigDir(
 }
 
 // MCP
+/**
+ * Coerce a raw MCP `timeout` value the way the native provider accepts it:
+ * finite non-negative numbers, or numeric strings converted with `Number()`.
+ * Returns undefined for absent values (undefined/null) and for values the
+ * provider would reject and ignore. Exported so `omp doctor` classifies
+ * timeout specifications through the same accepted forms as the runtime
+ * instead of inventing its own rule.
+ */
+export function coerceNativeMcpTimeout(value: unknown): number | undefined {
+	if (value === undefined || value === null) return undefined;
+	if (typeof value === "number") {
+		return Number.isFinite(value) && value >= 0 ? value : undefined;
+	}
+	if (typeof value === "string") {
+		const parsed = Number(value);
+		return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+	}
+	return undefined;
+}
+
 async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> {
 	const items: MCPServer[] = [];
 	const warnings: string[] = [];
@@ -138,26 +158,13 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 
 			// Validate timeout: coerce numeric strings, warn on invalid
 			let timeout: number | undefined;
-			if (serverConfig.timeout === undefined || serverConfig.timeout === null) {
-				timeout = undefined;
-			} else if (typeof serverConfig.timeout === "number") {
-				if (Number.isFinite(serverConfig.timeout) && serverConfig.timeout >= 0) {
-					timeout = serverConfig.timeout;
-				} else {
-					logger.warn(`MCP server "${serverName}": invalid timeout ${serverConfig.timeout}, ignoring`);
-					timeout = undefined;
+			if (serverConfig.timeout !== undefined && serverConfig.timeout !== null) {
+				timeout = coerceNativeMcpTimeout(serverConfig.timeout);
+				if (timeout === undefined) {
+					logger.warn(
+						`MCP server "${serverName}": invalid timeout ${JSON.stringify(serverConfig.timeout)}, ignoring`,
+					);
 				}
-			} else if (typeof serverConfig.timeout === "string") {
-				const parsed = Number(serverConfig.timeout);
-				if (Number.isFinite(parsed) && parsed >= 0) {
-					timeout = parsed;
-				} else {
-					logger.warn(`MCP server "${serverName}": invalid timeout "${serverConfig.timeout}", ignoring`);
-					timeout = undefined;
-				}
-			} else {
-				logger.warn(`MCP server "${serverName}": invalid timeout type ${typeof serverConfig.timeout}, ignoring`);
-				timeout = undefined;
 			}
 
 			// Validate requestIdFormat: only the two documented encodings

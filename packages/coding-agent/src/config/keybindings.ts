@@ -393,6 +393,17 @@ export interface KeybindingsCreateOptions {
 	inheritedAgentDir?: string;
 }
 
+/** Parse keybindings content per extension — the single dispatch both the runtime loader and the read-only diagnostic path use. */
+function parseRawConfigContent(content: string, filePath: string): unknown {
+	if (filePath.endsWith(".json")) {
+		return JSONC.parse(content);
+	}
+	if (filePath.endsWith(".yml") || filePath.endsWith(".yaml")) {
+		return YAML.parse(content);
+	}
+	throw new Error(`Unsupported keybindings config extension: ${filePath}`);
+}
+
 /**
  * Load raw config from a file synchronously.
  * Returns parsed JSON/YAML or null if file doesn't exist or is invalid.
@@ -400,13 +411,7 @@ export interface KeybindingsCreateOptions {
 function loadRawConfig(filePath: string): unknown {
 	try {
 		const content = fs.readFileSync(filePath, "utf-8");
-		if (filePath.endsWith(".json")) {
-			return JSONC.parse(content);
-		}
-		if (filePath.endsWith(".yml") || filePath.endsWith(".yaml")) {
-			return YAML.parse(content);
-		}
-		throw new Error(`Unsupported keybindings config extension: ${filePath}`);
+		return parseRawConfigContent(content, filePath);
 	} catch (error) {
 		if (isEnoent(error)) {
 			return null;
@@ -486,6 +491,93 @@ function loadMergedKeybindingsConfig(
 		profilePath: profile.persistedPath,
 		inheritedPath: inherited.persistedPath,
 	};
+}
+
+/** One config source the merged keybindings load consults, with its read outcome. */
+export interface KeybindingsConfigSourceDiagnostic {
+	path: string;
+	/** `profile` = the active profile's agent dir; `inherited` = the default profile a named profile merges first. */
+	kind: "profile" | "inherited";
+	status: "loaded" | "missing" | "unreadable";
+	error?: string;
+}
+
+/** Read-only mirror of {@link loadMergedKeybindingsConfig}: the effective config plus per-source diagnostics. */
+export interface KeybindingsConfigDiagnostic {
+	/** Merged, name-migrated config exactly as the runtime manager resolves it. */
+	config: KeybindingsConfig;
+	sources: KeybindingsConfigSourceDiagnostic[];
+}
+
+/**
+ * Read-only diagnostic load of the effective keybindings config. Applies the
+ * same source resolution ({@link resolveKeybindingsConfigPaths}), legacy-name
+ * migration ({@link migrateKeybindingNames}), and default-profile inheritance
+ * ({@link resolveInheritedAgentDir} + {@link mergeKeybindingsConfig}) as the
+ * runtime loader, but never writes migration output, never instantiates a
+ * manager, and reports each source's read outcome instead of silently
+ * discarding unreadable files. Used by `omp doctor` so the probe cannot
+ * diverge from the runtime merge/migration semantics.
+ */
+export function loadKeybindingsConfigForDiagnostics(
+	agentDir: string,
+	options: KeybindingsCreateOptions = {},
+): KeybindingsConfigDiagnostic {
+	const sources: KeybindingsConfigSourceDiagnostic[] = [];
+	const readSource = (dir: string, kind: "profile" | "inherited"): KeybindingsConfig => {
+		const readPath = resolveKeybindingsConfigPaths(dir).readPath;
+		let content: string;
+		try {
+			content = fs.readFileSync(readPath, "utf-8");
+		} catch (error) {
+			if (isEnoent(error)) {
+				sources.push({ path: readPath, kind, status: "missing" });
+			} else {
+				sources.push({
+					path: readPath,
+					kind,
+					status: "unreadable",
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+			return {};
+		}
+		let raw: unknown;
+		try {
+			raw = parseRawConfigContent(content, readPath);
+		} catch (error) {
+			sources.push({
+				path: readPath,
+				kind,
+				status: "unreadable",
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return {};
+		}
+		// An empty or comment-only file parses to null; the runtime loader
+		// treats that as an empty config, so the diagnostic must too.
+		if (raw === null) {
+			sources.push({ path: readPath, kind, status: "loaded" });
+			return {};
+		}
+		if (typeof raw !== "object" || Array.isArray(raw)) {
+			sources.push({
+				path: readPath,
+				kind,
+				status: "unreadable",
+				error: "expected a mapping of action names to keys",
+			});
+			return {};
+		}
+		sources.push({ path: readPath, kind, status: "loaded" });
+		// Name migration applies in memory even in read-only mode, exactly like
+		// the inherited branch of the runtime merged load.
+		return migrateKeybindingNames(raw).config;
+	};
+	const inheritedAgentDir = resolveInheritedAgentDir(agentDir, options);
+	const inherited = inheritedAgentDir === undefined ? {} : readSource(inheritedAgentDir, "inherited");
+	const profile = readSource(agentDir, "profile");
+	return { config: mergeKeybindingsConfig(inherited, profile), sources };
 }
 
 /**

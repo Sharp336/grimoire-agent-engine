@@ -40,11 +40,20 @@ export interface MnemopiBackendConfig {
 	llmModel?: string;
 }
 
+/**
+ * Resolve the primary Mnemopi database path WITHOUT bank-scope discovery.
+ * `loadMnemopiConfig` additionally runs `extendRecallWithLegacyBanks`, whose
+ * per-bank open can recreate `-wal`/`-shm` sidecars — read-only diagnostics
+ * (`omp doctor`) must use this side-effect-free seam instead.
+ */
+export function resolveMnemopiDbPath(settings: Settings, agentDir: string): string {
+	return settings.get("mnemopi.dbPath") ?? path.join(getMemoriesDir(agentDir), "mnemopi", "mnemopi.db");
+}
+
 export function loadMnemopiConfig(settings: Settings, agentDir: string): MnemopiBackendConfig {
-	const configuredDbPath = settings.get("mnemopi.dbPath");
 	const cwd = settings.getCwd();
 	const scoping = settings.get("mnemopi.scoping");
-	const dbPath = configuredDbPath ?? path.join(getMemoriesDir(agentDir), "mnemopi", "mnemopi.db");
+	const dbPath = resolveMnemopiDbPath(settings, agentDir);
 	const scope = computeMnemopiBankScope(settings.get("mnemopi.bank"), cwd, scoping);
 	const recallBanks =
 		scoping === "global" ? scope.recallBanks : extendRecallWithLegacyBanks(scope.recallBanks, dbPath, cwd);

@@ -79,7 +79,7 @@ async function readTokenFile(): Promise<string | null> {
 	}
 }
 
-interface ConfigSnapshot {
+export interface ConfigSnapshot {
 	url?: string;
 	token?: string;
 }
@@ -122,6 +122,18 @@ async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
 		}
 	}
 	return {};
+}
+
+/**
+ * Read the raw configured broker url/token strings WITHOUT resolving env
+ * references or executing `!command` values. Diagnostic seam for `omp
+ * doctor`: when config value resolution fails, the doctor must distinguish a
+ * command-backed URL (an ACTIVE broker config it cannot resolve) from a
+ * command-backed token with no URL (inert — `resolveAuthBrokerConfig`
+ * returns null and the runtime falls back to the local SQLite store).
+ */
+export async function readAuthBrokerConfigSnapshot(agentDir: string): Promise<ConfigSnapshot> {
+	return readConfigYaml(agentDir);
 }
 
 export async function loadAuthBrokerAccountPool(): Promise<AuthBrokerAccountPool | undefined> {

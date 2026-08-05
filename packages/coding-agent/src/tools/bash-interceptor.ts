@@ -5,7 +5,11 @@
  * this interceptor provides helpful error messages directing them to use
  * the specialized tools instead.
  */
-import { type BashInterceptorRule, DEFAULT_BASH_INTERCEPTOR_RULES } from "../config/settings-schema";
+import {
+	type BashInterceptorRule,
+	DEFAULT_BASH_INTERCEPTOR_RULES,
+	validateBashInterceptorRule,
+} from "../config/settings-schema";
 import { extractFlatShellCommandSegments } from "./shell-tokenize";
 
 export interface InterceptionResult {
@@ -19,10 +23,14 @@ export interface InterceptionResult {
 
 /**
  * Compile bash interceptor rules into regexes, skipping invalid patterns.
+ * Incomplete rules (missing pattern/tool/message) are dropped through the
+ * shared settings validator — `new RegExp(undefined)` compiles to an empty
+ * regex that would match and block EVERY command.
  */
 function compileRules(rules: BashInterceptorRule[]): Array<{ rule: BashInterceptorRule; regex: RegExp }> {
 	const compiled: Array<{ rule: BashInterceptorRule; regex: RegExp }> = [];
 	for (const rule of rules) {
+		if (validateBashInterceptorRule(rule) !== null) continue;
 		const flags = rule.flags ?? "";
 		try {
 			compiled.push({ rule, regex: new RegExp(rule.pattern, flags) });
