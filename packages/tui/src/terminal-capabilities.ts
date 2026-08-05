@@ -175,10 +175,12 @@ export class TerminalInfo {
 		process.stdout.write(formatted);
 		// VTE-family terminals (Ptyxis, GNOME Terminal, Tilix, …) plus Alacritty
 		// and bare xterm-on-Wayland have no in-band escape that surfaces an
-		// arbitrary desktop toast (#3685). When the chosen `notifyProtocol` is
-		// BEL on a Linux session bus, also fan the notification out via
-		// libnotify so users see the toast and the BEL still fires for tmux
-		// `monitor-bell` / X11 urgency hints / audible bell.
+		// arbitrary desktop toast (#3685), and no Windows console host maps BEL
+		// to a toast either (#7272). When the chosen `notifyProtocol` is BEL on
+		// a Linux session bus or a local Windows desktop, also fan the
+		// notification out via libnotify / WinRT toast so users see the toast
+		// and the BEL still fires for tmux `monitor-bell` / X11 urgency hints /
+		// audible bell.
 		if (this.notifyProtocol === NotifyProtocol.Bell && shouldDeliverDesktopNotification(this.id, true)) {
 			sendDesktopNotification(message);
 		}
