@@ -630,6 +630,9 @@ export class ModelHubComponent implements Component {
 
 	#startRefreshSpinner(): void {
 		if (this.#refreshSpinnerInterval) return;
+		// A frozen single-frame spinner (reduce-motion) never advances; skip the
+		// tick — it would only drive full requestRender() wakeups for nothing.
+		if (theme.spinnerFrames.length <= 1) return;
 		this.#refreshSpinnerInterval = setInterval(() => {
 			const frameCount = theme.spinnerFrames.length;
 			if (frameCount > 0) {

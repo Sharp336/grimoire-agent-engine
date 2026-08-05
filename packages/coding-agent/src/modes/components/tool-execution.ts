@@ -704,19 +704,23 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 			const frame = sharedSpinnerFrame(frameCount);
 			this.#spinnerFrame = frame;
 			this.#renderState.spinnerFrame = frame;
-			this.#spinnerInterval = setInterval(() => {
-				// If a detached task interval from an older render path is still live,
-				// stop it the instant the block leaves the repaintable region.
-				if (this.#maybeFreezeBackgroundTask()) return;
-				const now = performance.now();
-				const frameCount = theme.spinnerFrames.length;
-				this.#spinnerFrame = sharedSpinnerFrame(frameCount, now);
-				this.#renderState.spinnerFrame = this.#spinnerFrame;
-				// Component-scoped: a spinner tick only changes this tool block, so
-				// the TUI reuses every other root subtree instead of walking the
-				// whole tree (issue #4377).
-				this.#ui.requestComponentRender(this);
-			}, SPINNER_RENDER_INTERVAL_MS);
+			// A frozen single-frame spinner (reduce-motion) never advances; skip
+			// the interval and keep the initial static frame.
+			if (theme.spinnerFrames.length > 1) {
+				this.#spinnerInterval = setInterval(() => {
+					// If a detached task interval from an older render path is still live,
+					// stop it the instant the block leaves the repaintable region.
+					if (this.#maybeFreezeBackgroundTask()) return;
+					const now = performance.now();
+					const frameCount = theme.spinnerFrames.length;
+					this.#spinnerFrame = sharedSpinnerFrame(frameCount, now);
+					this.#renderState.spinnerFrame = this.#spinnerFrame;
+					// Component-scoped: a spinner tick only changes this tool block, so
+					// the TUI reuses every other root subtree instead of walking the
+					// whole tree (issue #4377).
+					this.#ui.requestComponentRender(this);
+				}, SPINNER_RENDER_INTERVAL_MS);
+			}
 		} else if (!needsSpinner && this.#spinnerInterval) {
 			clearInterval(this.#spinnerInterval);
 			this.#spinnerInterval = undefined;

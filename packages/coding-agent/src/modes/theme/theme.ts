@@ -22,6 +22,7 @@ import type {
 import { adjustHsv, colorLuma, getCustomThemesDir, isEnoent, logger, relativeLuminance } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import { LRUCache } from "lru-cache/raw";
+import { isReduceMotion } from "../../config/reduce-motion";
 // Embed theme JSON files at build time
 import darkThemeJson from "./dark.json" with { type: "json" };
 import { defaultThemes } from "./defaults";
@@ -1488,6 +1489,8 @@ export class Theme {
 	readonly #hexBgColors: Record<ThemeBg, string>;
 	#symbols: SymbolMap;
 	#spinnerFramesOverrides: Partial<Record<SpinnerType, string[]>>;
+	/** Frozen single-frame spinner arrays, memoized per source identity (reduce-motion). */
+	#frozenSpinnerFrames = new Map<string[], string[]>();
 	/**
 	 * Perceptual luma (0..1) of the status-line background — used to classify the
 	 * theme light/dark. Undefined when it can't be resolved. Classified against the
@@ -1931,7 +1934,14 @@ export class Theme {
 	 * Get spinner frames by type.
 	 */
 	getSpinnerFrames(type: SpinnerType = "status"): string[] {
-		return this.#spinnerFramesOverrides[type] ?? SPINNER_FRAMES[this.symbolPreset][type];
+		const source = this.#spinnerFramesOverrides[type] ?? SPINNER_FRAMES[this.symbolPreset][type];
+		if (!isReduceMotion() || source.length <= 1) return source;
+		let frozen = this.#frozenSpinnerFrames.get(source);
+		if (frozen === undefined) {
+			frozen = [source[0]];
+			this.#frozenSpinnerFrames.set(source, frozen);
+		}
+		return frozen;
 	}
 
 	/**

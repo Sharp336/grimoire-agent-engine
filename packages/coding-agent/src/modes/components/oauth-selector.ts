@@ -199,6 +199,9 @@ export class OAuthSelectorComponent extends Container {
 
 	#startSpinner(): void {
 		if (this.#spinnerInterval) return;
+		// A frozen single-frame spinner (reduce-motion) never advances; skip the
+		// tick and keep the initial static frame.
+		if (theme.spinnerFrames.length <= 1) return;
 		this.#spinnerInterval = setInterval(() => {
 			const frameCount = theme.spinnerFrames.length;
 			if (frameCount > 0) {
