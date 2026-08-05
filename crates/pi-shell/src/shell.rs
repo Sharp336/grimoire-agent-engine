@@ -303,6 +303,11 @@ impl Shell {
 	/// Stop active work and release the persistent session.
 	///
 	/// Closing is terminal and idempotent. Future calls to [`Self::run`] fail.
+	/// It terminates processes whose spawn-time identities this session pinned,
+	/// plus descendants and process groups reachable from them at close time.
+	/// On Unix, a descendant that deliberately detaches and whose recorded
+	/// ancestor exited before close is out of scope: retaining only its numeric
+	/// pid or process-group id could signal an unrelated process after reuse.
 	pub async fn close(&self) {
 		self.close_now();
 		self.abort_state.wait_for_runs().await;

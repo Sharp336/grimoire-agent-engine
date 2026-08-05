@@ -1718,7 +1718,9 @@ pub const KILL_SIGNAL: i32 = 9;
 /// Built incrementally from job records or PTY metadata, then signalled
 /// in escalating waves (typically `TERM_SIGNAL` followed by
 /// `KILL_SIGNAL` after a grace period). Process-group calls are no-ops
-/// on platforms that do not expose process groups.
+/// on platforms that do not expose process groups. Process trees are reached
+/// through pinned process identities; detached descendants are not retained
+/// as bare numeric pids or process-group ids because either can be reused.
 #[derive(Default)]
 pub struct TerminationTargets {
 	processes: Vec<Process>,
@@ -1931,7 +1933,9 @@ impl SpawnRegistry {
 	/// without a live pinned member because the id can be reused.
 	///
 	/// Pruning also runs here so a cancellation cycle sees a compact target
-	/// set even when the record-time threshold hasn't fired yet.
+	/// set even when the record-time threshold hasn't fired yet. A descendant
+	/// that detached after its recorded ancestor exited is no longer reachable
+	/// from the pinned identity and is outside this target set.
 	#[must_use]
 	pub fn build_targets(&self) -> TerminationTargets {
 		let mut targets = TerminationTargets::new();

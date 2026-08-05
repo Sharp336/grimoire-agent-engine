@@ -213,6 +213,12 @@ export declare class Shell {
    * Stop active work and release this shell session.
    *
    * Closing is terminal and safe to call more than once.
+   * It terminates processes whose spawn-time identities this session pinned,
+   * plus descendants and process groups reachable from them at close time.
+   * On Unix, a descendant that deliberately detaches and whose recorded
+   * ancestor exited before close is out of scope because retaining only its
+   * numeric pid or process-group id could signal an unrelated process after
+   * reuse.
    */
   close(): Promise<void>
   /**

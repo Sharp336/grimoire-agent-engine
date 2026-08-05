@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Added deterministic, terminal cleanup for native shell sessions ([#7485](https://github.com/can1357/oh-my-pi/issues/7485)).
+- Added deterministic cleanup for native shell sessions' pinned processes and reachable descendants ([#7485](https://github.com/can1357/oh-my-pi/issues/7485)).
 
 ## [17.2.5] - 2026-08-03
 
