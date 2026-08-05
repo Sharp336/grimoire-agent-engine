@@ -4276,6 +4276,8 @@ export class AgentSession {
 	/** Marks streamed text as committed or buffered for turn-recovery replay decisions. */
 	setTextOutputCommitted(committed: boolean): void {
 		this.#textOutputCommitted = committed;
+	}
+
 	/** Latest accepted structured system prompt build. */
 	getSystemPromptResult(): BuildSystemPromptResult {
 		return this.#tools.systemPromptResult;
