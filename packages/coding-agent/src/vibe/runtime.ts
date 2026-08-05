@@ -30,6 +30,7 @@ import { getBundledAgent } from "../task/agents";
 import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "../task/executor";
 import { generateTaskName } from "../task/name-generator";
 import { AgentOutputManager } from "../task/output-manager";
+import { Semaphore } from "../task/parallel";
 import { type AgentDefinition, type AgentProgress, oneLineLabel, type SingleResult } from "../task/types";
 import type { ToolSession } from "../tools";
 import { formatDuration } from "../tools/render-utils";
@@ -152,6 +153,10 @@ interface VibeRestoreCandidate {
 interface ResolvedVibeWorker {
 	agent: AgentDefinition;
 	modelOverride?: string | string[];
+}
+interface VibeTurnLane {
+	semaphore: Semaphore;
+	users: number;
 }
 
 interface VibeTurn {
@@ -322,6 +327,10 @@ function scopeKey(scope: VibeOwnerScope, id: string): string {
 	return `${scope.parentSessionId}\0${scope.parentSessionFile ?? ""}\0${scope.ownerId}\0${id}`;
 }
 
+function workspaceLaneKey(scope: VibeOwnerScope, cwd: string): string {
+	return `${scopeKey(scope, "")}\0${path.resolve(cwd)}`;
+}
+
 function matchesScope(record: VibeRecord, scope: VibeOwnerScope): boolean {
 	return (
 		record.ownerId === scope.ownerId &&
@@ -481,6 +490,7 @@ export class VibeSessionRegistry {
 	setTeardownGraceForTesting(timeoutMs: number): void {
 		this.#teardownGraceMs = Math.max(1, timeoutMs);
 	}
+	readonly #turnLanes = new Map<string, VibeTurnLane>();
 
 	ownerScope(session: VibeParentSession): VibeOwnerScope {
 		const parentSessionId = session.getSessionId?.();
@@ -512,6 +522,28 @@ export class VibeSessionRegistry {
 		} finally {
 			released.resolve();
 			if (this.#terminationTails.get(key) === tail) this.#terminationTails.delete(key);
+		}
+	}
+
+	async #withTurnLane<T>(key: string, signal: AbortSignal, operation: () => Promise<T>): Promise<T> {
+		let lane = this.#turnLanes.get(key);
+		if (!lane) {
+			lane = { semaphore: new Semaphore(1), users: 0 };
+			this.#turnLanes.set(key, lane);
+		}
+		lane.users++;
+		let acquired = false;
+		try {
+			await lane.semaphore.acquire(signal);
+			acquired = true;
+			if (signal.aborted) {
+				throw signal.reason ?? new Error("Vibe turn cancelled while waiting for the shared workspace.");
+			}
+			return await operation();
+		} finally {
+			if (acquired) lane.semaphore.release();
+			lane.users--;
+			if (lane.users === 0 && this.#turnLanes.get(key) === lane) this.#turnLanes.delete(key);
 		}
 	}
 
@@ -1297,6 +1329,7 @@ export class VibeSessionRegistry {
 			await this.#persistModeExit(session, scope, records);
 		} catch (error) {
 			if (error instanceof SessionPersistenceIndeterminateError) {
+				this.#cancelTurnJobs(records, session.asyncJobManager);
 				const teardownDeadline = Date.now() + this.#teardownGraceMs;
 				await Promise.all(
 					records.map(record =>
@@ -1306,6 +1339,7 @@ export class VibeSessionRegistry {
 			}
 			throw error;
 		}
+		this.#cancelTurnJobs(records, session.asyncJobManager);
 		const teardownDeadline = Date.now() + this.#teardownGraceMs;
 		await Promise.all(
 			records.map(record =>
@@ -1313,6 +1347,14 @@ export class VibeSessionRegistry {
 			),
 		);
 		return records.length;
+	}
+
+	#cancelTurnJobs(records: readonly VibeRecord[], manager: AsyncJobManager | undefined): void {
+		for (const record of records) {
+			record.killed = true;
+			record.queue.length = 0;
+			if (record.turn && manager) manager.cancel(record.turn.jobId, { ownerId: record.ownerId });
+		}
 	}
 
 	async #killRecord(
@@ -1540,42 +1582,47 @@ export class VibeSessionRegistry {
 			if (gist) record.lastActivity = firstLine(gist);
 			record.lastActivityAt = Date.now();
 		};
-
+		const laneKey = workspaceLaneKey(record, session.cwd);
+		const queued = this.#turnLanes.has(laneKey);
 		const jobId = manager.register(
 			"task",
 			`vibe ${record.cli} ${record.id}: ${firstLine(message, 60)}`,
-			async ({ jobId: ownJobId, signal }) => {
-				record.state = "running";
-				record.turnCount = turnIndex;
-				record.lastActivityAt = Date.now();
+			async ({ jobId: ownJobId, signal, markRunning }) => {
 				try {
-					const turnStartedPersisted = await this.#appendLifecycleEvent(
-						session,
-						{
-							...this.#eventBase(record),
-							action: "turn-started",
-							turn: turnIndex,
-						},
-						record.parentSessionFile,
-					);
-					if (record.childSessionFile && !turnStartedPersisted) {
-						throw new ToolError(`Vibe session "${record.id}" changed parent scope before its turn started.`);
-					}
-					const result = options.first
-						? await runSubprocess(await this.#buildSpawnOptions(session, record, message, signal, onProgress))
-						: await runSubagentFollowUpTurn({
-								id: record.id,
-								agent: record.agent,
-								message,
-								description: `vibe ${record.cli} session`,
-								signal,
-								onProgress,
-								eventBus: session.eventBus,
-								artifactsDir: record.artifactsDir,
-								maxRequests: record.maxRequests,
-								maxRuntimeMs: record.timeoutMs,
-							});
-					return await this.#settleTurn(session, manager, record, turn, ownJobId, turnIndex, result);
+					return await this.#withTurnLane(laneKey, signal, async () => {
+						markRunning();
+						turn.startedAt = Date.now();
+						record.state = "running";
+						record.turnCount = turnIndex;
+						record.lastActivityAt = Date.now();
+						const turnStartedPersisted = await this.#appendLifecycleEvent(
+							session,
+							{
+								...this.#eventBase(record),
+								action: "turn-started",
+								turn: turnIndex,
+							},
+							record.parentSessionFile,
+						);
+						if (record.childSessionFile && !turnStartedPersisted) {
+							throw new ToolError(`Vibe session "${record.id}" changed parent scope before its turn started.`);
+						}
+						const result = options.first
+							? await runSubprocess(await this.#buildSpawnOptions(session, record, message, signal, onProgress))
+							: await runSubagentFollowUpTurn({
+									id: record.id,
+									agent: record.agent,
+									message,
+									description: `vibe ${record.cli} session`,
+									signal,
+									onProgress,
+									eventBus: session.eventBus,
+									artifactsDir: record.artifactsDir,
+									maxRequests: record.maxRequests,
+									maxRuntimeMs: record.timeoutMs,
+								});
+						return await this.#settleTurn(session, manager, record, turn, ownJobId, turnIndex, result);
+					});
 				} catch (error) {
 					if (error instanceof VibeTurnError) throw error;
 					await this.#finishTurn(session, manager, record, ownJobId);
@@ -1586,10 +1633,11 @@ export class VibeSessionRegistry {
 					);
 				}
 			},
-			{ id: `${record.id}-t${turnIndex}`, agentId: record.id, ownerId: record.ownerId },
+			{ id: `${record.id}-t${turnIndex}`, agentId: record.id, ownerId: record.ownerId, queued },
 		);
 		turn.jobId = jobId;
 		record.turn = turn;
+		record.state = "starting";
 		return jobId;
 	}
 

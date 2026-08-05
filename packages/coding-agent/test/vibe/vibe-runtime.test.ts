@@ -494,6 +494,135 @@ describe("vibe session registry", () => {
 		expect(entry.turns).toBe(1);
 	});
 
+	it("serializes complete worker turns FIFO within one parent workspace scope", async () => {
+		const gates = new Map([
+			["First", deferred()],
+			["Second", deferred()],
+		]);
+		const order: string[] = [];
+		let active = 0;
+		let maxActive = 0;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			active++;
+			maxActive = Math.max(maxActive, active);
+			order.push(`start:${options.id}`);
+			AgentRegistry.global().register({
+				id: options.id,
+				displayName: options.id,
+				kind: "sub",
+				parentId: "Main",
+				session: createFakeWorkerSession().session,
+				status: "running",
+			});
+			await gates.get(options.id)!.promise;
+			AgentRegistry.global().setStatus(options.id, "idle");
+			order.push(`end:${options.id}`);
+			active--;
+			return makeResult(options.id);
+		});
+
+		const manager = createManager();
+		const session = createSession({ manager });
+		const registry = VibeSessionRegistry.global();
+		const first = await registry.spawn(session, { cli: "fast", name: "First", prompt: "First turn." });
+		const second = await registry.spawn(session, { cli: "good", name: "Second", prompt: "Second turn." });
+
+		await pollUntil(() => order.length === 1);
+		expect(order).toEqual(["start:First"]);
+		expect(manager.getJob(second.jobId)?.queued).toBe(true);
+
+		gates.get("First")!.resolve();
+		await manager.getJob(first.jobId)!.promise;
+		await pollUntil(() => order.includes("start:Second"));
+		gates.get("Second")!.resolve();
+		await manager.getJob(second.jobId)!.promise;
+
+		expect(maxActive).toBe(1);
+		expect(order).toEqual(["start:First", "end:First", "start:Second", "end:Second"]);
+	});
+
+	it("runs worker turns from different parent scopes concurrently", async () => {
+		const release = deferred();
+		const started: string[] = [];
+		let active = 0;
+		let maxActive = 0;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			active++;
+			maxActive = Math.max(maxActive, active);
+			started.push(options.id);
+			AgentRegistry.global().register({
+				id: options.id,
+				displayName: options.id,
+				kind: "sub",
+				parentId: "Main",
+				session: createFakeWorkerSession().session,
+				status: "running",
+			});
+			await release.promise;
+			AgentRegistry.global().setStatus(options.id, "idle");
+			active--;
+			return makeResult(options.id);
+		});
+
+		const manager = createManager();
+		const registry = VibeSessionRegistry.global();
+		const scopeA = createSession({ manager, parentSessionId: "parent-a" });
+		const scopeB = createSession({ manager, parentSessionId: "parent-b" });
+		const first = await registry.spawn(scopeA, { cli: "fast", name: "ScopeA", prompt: "A." });
+		const second = await registry.spawn(scopeB, { cli: "good", name: "ScopeB", prompt: "B." });
+
+		await pollUntil(() => active === 2);
+		expect(maxActive).toBe(2);
+		expect(started.toSorted()).toEqual(["ScopeA", "ScopeB"]);
+		release.resolve();
+		await Promise.all([manager.getJob(first.jobId)!.promise, manager.getJob(second.jobId)!.promise]);
+	});
+
+	it("settles a worker cancelled while waiting without executing it or leaking the workspace lane", async () => {
+		const firstGate = deferred();
+		const thirdGate = deferred();
+		const invoked: string[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			invoked.push(options.id);
+			AgentRegistry.global().register({
+				id: options.id,
+				displayName: options.id,
+				kind: "sub",
+				parentId: "Main",
+				session: createFakeWorkerSession().session,
+				status: "running",
+			});
+			if (options.id === "Blocker") await firstGate.promise;
+			if (options.id === "After") await thirdGate.promise;
+			AgentRegistry.global().setStatus(options.id, "idle");
+			return makeResult(options.id);
+		});
+
+		const manager = createManager();
+		const session = createSession({ manager });
+		const registry = VibeSessionRegistry.global();
+		const blocker = await registry.spawn(session, { cli: "fast", name: "Blocker", prompt: "Hold the lane." });
+		await pollUntil(() => invoked.includes("Blocker"));
+		const cancelled = await registry.spawn(session, { cli: "good", name: "Cancelled", prompt: "Never execute." });
+		expect(manager.getJob(cancelled.jobId)?.queued).toBe(true);
+
+		const killed = await registry.kill(session, "Cancelled");
+		expect(killed.cancelledTurn).toBe(true);
+		await manager.getJob(cancelled.jobId)!.promise;
+		expect(manager.getJob(cancelled.jobId)?.status).toBe("cancelled");
+		expect(invoked).toEqual(["Blocker"]);
+
+		const after = await registry.spawn(session, { cli: "fast", name: "After", prompt: "Run after cancellation." });
+		await flushMicrotasks();
+		expect(invoked).toEqual(["Blocker"]);
+		firstGate.resolve();
+		await manager.getJob(blocker.jobId)!.promise;
+		await pollUntil(() => invoked.includes("After"));
+		thirdGate.resolve();
+		await manager.getJob(after.jobId)!.promise;
+		expect(invoked).toEqual(["Blocker", "After"]);
+	});
+
 	it("preserves immutable full output per turn while agent://id remains the latest alias", async () => {
 		let artifactsDir = "";
 		const writeTurnOutput = async (id: string, output: string): Promise<SingleResult> => {
@@ -727,14 +856,16 @@ describe("vibe session registry", () => {
 		// Not streaming → queued for the next turn.
 		fake.setStreaming(false);
 		const queued = await registry.send(session, { session: "Good", message: "Then write tests." });
+		const queuedLater = await registry.send(session, { session: "Good", message: "Finally run checks." });
 		expect(queued.mode).toBe("queued");
-		expect(registry.screens(session)[0]?.queued).toBe(1);
+		expect(queuedLater.mode).toBe("queued");
+		expect(registry.screens(session)[0]?.queued).toBe(2);
 
 		// Settling the turn drains the queue into an automatic follow-up turn.
 		gate.resolve();
 		await manager.getJob(jobId)!.promise;
 		await pollUntil(() => followUps.length === 1);
-		expect(followUps[0]).toEqual({ id: "Good", message: "Then write tests." });
+		expect(followUps[0]).toEqual({ id: "Good", message: "Then write tests.\n\nFinally run checks." });
 	});
 
 	it("send to an idle session starts a follow-up turn on the same worker", async () => {
@@ -1964,7 +2095,7 @@ describe("vibe session registry", () => {
 		expect(fake.isDisposed()).toBe(false);
 	});
 
-	it("wait wakes on the first settling turn among concurrent sessions and suppresses its re-delivery", async () => {
+	it("wait wakes on the first settled turn while the next shared-workspace turn remains in flight", async () => {
 		const gates = new Map<string, Deferred>();
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
 			AgentRegistry.global().register({
@@ -1987,7 +2118,9 @@ describe("vibe session registry", () => {
 		const registry = VibeSessionRegistry.global();
 		const fast = await registry.spawn(session, { cli: "fast", name: "Fast", prompt: "Task A." });
 		const good = await registry.spawn(session, { cli: "good", name: "Good", prompt: "Task B." });
-		await pollUntil(() => gates.size === 2);
+		await pollUntil(() => gates.has("Fast"));
+		expect(gates.has("Good")).toBe(false);
+		expect(manager.getJob(good.jobId)?.queued).toBe(true);
 
 		const waitPromise = registry.wait(session, { sessions: ["Fast", "Good"], timeoutMs: 5000 });
 		gates.get("Fast")!.resolve();
@@ -2001,6 +2134,7 @@ describe("vibe session registry", () => {
 		expect(manager.isDeliverySuppressed(fast.jobId)).toBe(true);
 		expect(manager.isDeliverySuppressed(good.jobId)).toBe(false);
 
+		await pollUntil(() => gates.has("Good"));
 		gates.get("Good")!.resolve();
 		await manager.getJob(good.jobId)!.promise;
 	});
@@ -2318,13 +2452,14 @@ describe("vibe session registry", () => {
 		const registry = VibeSessionRegistry.global();
 		const one = await registry.spawn(session, { cli: "fast", name: "One", prompt: "A." });
 		const two = await registry.spawn(session, { cli: "good", name: "Two", prompt: "B." });
-		await pollUntil(() => gates.size === 2);
+		await pollUntil(() => gates.has("One"));
+		expect(gates.has("Two")).toBe(false);
 
 		const killPromise = registry.killAll(session);
 		await pollUntil(() => manager.getJob(one.jobId)?.status === "cancelled");
 		gates.get("One")!.resolve();
 		await pollUntil(() => manager.getJob(two.jobId)?.status === "cancelled");
-		gates.get("Two")!.resolve();
+		expect(gates.has("Two")).toBe(false);
 		const killed = await killPromise;
 		expect(killed).toBe(2);
 		expect(registry.listIds(session)).toEqual([]);

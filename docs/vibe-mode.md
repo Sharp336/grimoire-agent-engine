@@ -42,7 +42,7 @@ The tier always selects the bundled `sonic` or `task` definition, not a same-nam
 | `vibe_kill`  | `{ session }`. Cancels an in-flight turn, clears queued messages, releases the worker, and retains any initialized transcript at `history://<id>`.                                                   |
 | `vibe_list`  | `{}`. Lists sessions in spawn order with tier, state, turn/queue counts, resolved model, and recent activity.                                                                                        |
 
-Spawn and send return immediately. Each worker-turn result self-delivers into the director conversation through the async job manager; long response text is preview-capped there, with full output available at `agent://<id>`. Running `fast` and `good` workers on independent workstreams concurrently is the normal shape.
+Spawn and send return immediately. Complete worker turns are serialized FIFO per exact parent scope and working directory, preventing overlapping bash/edit/write mutations in a shared checkout. Queue time does not consume a turn's request or wall-clock budget because those limits begin when the executor starts. Worker sessions and conversations remain persistent; different parent scopes may execute concurrently. Each result self-delivers through the async job manager; long response text is preview-capped there, with full output available at `agent://<id>`.
 
 ## Scope and failure behavior
 
@@ -52,7 +52,7 @@ Worker ids are scoped to the owning agent and parent session; a worker from anot
 
 1. Split the request into independent workstreams — one persistent worker per workstream so each accumulates useful conversation context.
 2. Call `vibe_spawn` with a self-contained brief: files, constraints, and observable acceptance criteria. Workers start blank and never see the director's conversation.
-3. Keep directing other workers while turns are in flight. Use `vibe_wait` only when blocked; a timed-out wait can be reissued.
+3. Keep directing other workers while turns are in flight. Their complete turns queue FIFO in the shared parent workspace; do not decompose work expecting same-workspace execution concurrency. Use `vibe_wait` only when blocked; a timed-out wait can be reissued.
 4. Use `vibe_send` naturally for corrections and next steps. A mid-turn send steers when possible; otherwise it becomes the worker's next turn automatically.
 5. When a result arrives, `read` touched files and inspect full output when the preview is insufficient. Reconcile verified work through the optional parent `todo`.
 6. Route by difficulty: draft with `fast`, escalate to `good` when mechanical execution stalls or judgment is required.

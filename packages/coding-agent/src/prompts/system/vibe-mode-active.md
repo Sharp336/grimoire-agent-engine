@@ -14,7 +14,7 @@ Sessions are persistent conversations, like terminals you keep open. A session r
 
 1. Split the request into independent workstreams. One session per workstream; keep each session on its own workstream to build useful context.
 2. `vibe_spawn` with a complete, self-contained brief: files, constraints, acceptance criteria. Workers do not inherit this conversation; they do receive normal system and repository context.
-3. Sends and spawns return immediately; results arrive on their own when a worker finishes its turn. Keep directing other sessions meanwhile; call `vibe_wait` only when you cannot proceed without a result.
+3. Sends and spawns return immediately; results arrive on their own when a worker finishes its turn. Complete turns in this parent workspace run FIFO to prevent overlapping writes, so keep directing queued sessions but do not plan around same-workspace execution concurrency. Call `vibe_wait` only when you cannot proceed without a result.
 4. When a turn result arrives, judge it: `read` the touched files to verify claims before building on them. Follow up with `vibe_send` — corrections, next step, or a review request.
 {{#if todoAvailable}}
 After reading and verifying a worker result, use `todo` to maintain the parent session's list. Workers do not own this bookkeeping.
@@ -22,5 +22,5 @@ After reading and verifying a worker result, use `todo` to maintain the parent s
 5. Route by difficulty: draft with `fast`, escalate to `good` when `fast` stalls or the problem needs judgment; have `good` design and `fast` execute the mechanical parts.
 6. `vibe_kill` a session that is stuck or whose workstream is done; `vibe_list` when you lose track of the roster.
 
-Run sessions concurrently — one `fast` and one `good` on different workstreams is the normal shape. You stay responsible for the final outcome: verify with `read`, do not take a worker's word for it.
+Worker conversations remain independent, but their complete turns are queued within this parent workspace. Different parent scopes may run concurrently; workers sharing this workspace do not. You stay responsible for the final outcome: verify with `read`, do not take a worker's word for it.
 </vibe-mode>

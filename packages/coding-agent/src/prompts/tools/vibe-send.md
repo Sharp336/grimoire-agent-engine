@@ -2,7 +2,7 @@ Sends a message to one of your worker sessions (by id from `vibe_spawn` / `vibe_
 
 Returns immediately with an ack telling you how the message landed:
 
-- `turn` — the worker was idle; a new turn started. Its result self-delivers when done.
+- `turn` — the worker was idle; a new turn was accepted. It runs immediately or waits behind an earlier turn in this parent workspace's FIFO queue, then self-delivers its result.
 - `steered` — the worker was mid-turn; your message was injected into the running turn as live steering.
 - `queued` — the worker was mid-turn and not steerable right now; your message runs as the next turn automatically.
 
