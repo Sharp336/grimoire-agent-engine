@@ -4,8 +4,10 @@ import type * as TypeBox from "@oh-my-pi/omptype/typebox";
 import * as zod from "@oh-my-pi/omptype/zod";
 import * as piCodingAgent from "@oh-my-pi/pi-coding-agent";
 import { GreenCommand } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/ci-green";
-import type { CustomCommandAPI } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/types";
-import type { HookCommandContext } from "@oh-my-pi/pi-coding-agent/extensibility/hooks/types";
+import type {
+	CustomCommandAPI,
+	CustomCommandContext,
+} from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/types";
 import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
 
 afterEach(() => {
@@ -33,7 +35,7 @@ describe("GreenCommand", () => {
 		vi.spyOn(git.ref, "tags").mockResolvedValue(["v0.1.0-alpha2"]);
 		const command = new GreenCommand(createApi());
 
-		const result = await command.execute([], {} as HookCommandContext);
+		const result = await command.execute([], {} as CustomCommandContext);
 
 		expect(result).toContain("v0.1.0-alpha2");
 		expect(result).not.toContain("timeouts due to the harnesses");
@@ -43,7 +45,7 @@ describe("GreenCommand", () => {
 		vi.spyOn(git.ref, "tags").mockResolvedValue([]);
 		const command = new GreenCommand(createApi());
 
-		const result = await command.execute([], {} as HookCommandContext);
+		const result = await command.execute([], {} as CustomCommandContext);
 
 		expect(result).not.toContain("v0.1.0-alpha2");
 	});

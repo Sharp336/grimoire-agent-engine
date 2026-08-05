@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/code-review`, a fullscreen diff annotation flow that reuses `/review` targets and can either pass multiline, line-anchored comments into AI review or insert them into the current prompt.
+
+### Changed
+
+- Extended bundled custom-command UI contexts with editor insertion and configurable fullscreen/mouse-tracking overlay options.
+
+### Fixed
+
+- Kept diff rendering usable when a source checkout loads a stale native binding without `diffWords`; only intra-line emphasis is omitted until the bindings are rebuilt.
+
 ## [17.2.9] - 2026-08-05
 
 ### Breaking Changes

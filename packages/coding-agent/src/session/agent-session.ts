@@ -110,7 +110,7 @@ import { getFileSnapshotStore } from "../edit/file-snapshot-store";
 import type { PythonResult } from "../eval/py/executor";
 import type { BashResult } from "../exec/bash-executor";
 import type { TtsrManager } from "../export/ttsr";
-import type { LoadedCustomCommand } from "../extensibility/custom-commands";
+import type { CustomCommandContext, LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type {
 	ExtensionCommandContext,
@@ -134,7 +134,6 @@ import { emitSessionShutdownEvent } from "../extensibility/extensions";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
-import type { HookCommandContext } from "../extensibility/hooks/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
 import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility/tool-event-input";
@@ -5454,10 +5453,15 @@ export class AgentSession {
 
 		// Get command context from extension runner (includes session control methods)
 		const baseCtx = this.#createCommandContext();
-		const ctx = {
+		const ctx: CustomCommandContext = {
 			...baseCtx,
+			ui: {
+				...baseCtx.ui,
+				custom: (factory, options) =>
+					baseCtx.ui.custom((tui, uiTheme, _keybindings, done) => factory(tui, uiTheme, done), options),
+			},
 			hasQueuedMessages: baseCtx.hasPendingMessages,
-		} as unknown as HookCommandContext;
+		};
 
 		try {
 			const args = parseCommandArgs(argsString);

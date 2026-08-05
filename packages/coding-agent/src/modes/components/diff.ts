@@ -53,6 +53,11 @@ function parseDiffLine(line: string): { prefix: CodeFrameMarker; lineNum: string
  * Strips leading whitespace from inverse to avoid highlighting indentation.
  */
 function renderIntraLineDiff(oldContent: string, newContent: string): { removedLine: string; addedLine: string } {
+	if (typeof diffWords !== "function") {
+		// Source checkouts can load an older native binary before bindings are
+		// rebuilt. Keep diff rendering usable; only intra-line emphasis degrades.
+		return { removedLine: oldContent, addedLine: newContent };
+	}
 	const wordDiff = diffWords(oldContent, newContent);
 
 	let removedLine = "";

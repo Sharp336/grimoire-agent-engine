@@ -216,6 +216,14 @@ export type ExtensionWidgetContent = string[] | ExtensionUiComponentFactory | un
 
 /** Wrap the current autocomplete provider with additional behavior (pi-compatible). */
 export type AutocompleteProviderFactory = (current: AutocompleteProvider) => AutocompleteProvider;
+export interface ExtensionUICustomOptions {
+	/** Mount the component through the TUI overlay host instead of the editor slot. */
+	overlay?: boolean;
+	/** Let the overlay occupy the full terminal viewport. */
+	fullscreen?: boolean;
+	/** Override terminal mouse tracking while the overlay is mounted. */
+	mouseTracking?: boolean;
+}
 
 /**
  * UI context for extensions to request interactive UI.
@@ -280,7 +288,7 @@ export interface ExtensionUIContext {
 			keybindings: KeybindingsManager,
 			done: (result: T) => void,
 		) => ExtensionUiComponent | Promise<ExtensionUiComponent>,
-		options?: { overlay?: boolean },
+		options?: ExtensionUICustomOptions,
 	): Promise<T>;
 
 	/** Set the text in the core input editor. */

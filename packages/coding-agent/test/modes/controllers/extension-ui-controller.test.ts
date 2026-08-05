@@ -24,6 +24,8 @@ function makeHarness() {
 	editorContainer.addChild(editor);
 	const requestRender = vi.fn();
 	const setFocus = vi.fn();
+	const hideOverlay = vi.fn();
+	const showOverlay = vi.fn(() => ({ hide: hideOverlay }) as never);
 	const addAutocompleteProvider = vi.fn();
 	let uiContext: ExtensionUIContext | undefined;
 	const ctx = {
@@ -32,6 +34,7 @@ function makeHarness() {
 			requestRender,
 			setFocus,
 			terminal: { rows: 40 },
+			showOverlay,
 		},
 		editorContainer,
 		session: {
@@ -52,6 +55,8 @@ function makeHarness() {
 		requestRender,
 		addAutocompleteProvider,
 		editorContainer,
+		hideOverlay,
+		showOverlay,
 		setFocus,
 		controller,
 		async init(): Promise<ExtensionUIContext> {
@@ -82,6 +87,36 @@ describe("ExtensionUiController editor UI", () => {
 
 		expect(harness.editor.getText()).toBe("hello");
 		expect(harness.requestRender).toHaveBeenCalledTimes(1);
+	});
+
+	it("forwards fullscreen custom overlay options and restores editor focus", async () => {
+		const harness = makeHarness();
+		const ui = await harness.init();
+		harness.editor.setText("existing draft");
+		const mounted = Promise.withResolvers<void>();
+		let close: ((result: string) => void) | undefined;
+
+		const pending = ui.custom<string>(
+			(_tui, _theme, _keybindings, done) => {
+				close = done;
+				mounted.resolve();
+				return new Container();
+			},
+			{ overlay: true, fullscreen: true, mouseTracking: false },
+		);
+		await mounted.promise;
+
+		expect(harness.showOverlay).toHaveBeenCalledWith(
+			expect.any(Container),
+			expect.objectContaining({ fullscreen: true, mouseTracking: false }),
+		);
+		expect(harness.setFocus).toHaveBeenLastCalledWith(expect.any(Container));
+		close?.("complete");
+
+		await expect(pending).resolves.toBe("complete");
+		expect(harness.hideOverlay).toHaveBeenCalledTimes(1);
+		expect(harness.setFocus).toHaveBeenLastCalledWith(harness.editor);
+		expect(harness.editor.getText()).toBe("existing draft");
 	});
 
 	it("keeps a populated prompt visible and routes input to it until the draft is cleared", async () => {

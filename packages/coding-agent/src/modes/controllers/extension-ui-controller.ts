@@ -12,6 +12,7 @@ import type {
 	ExtensionContextActions,
 	ExtensionError,
 	ExtensionUIContext,
+	ExtensionUICustomOptions,
 	ExtensionUIDialogOptions,
 	ExtensionUISelectItem,
 	ExtensionUiComponent,
@@ -1047,7 +1048,7 @@ export class ExtensionUiController {
 			keybindings: KeybindingsManager,
 			done: (result: T) => void,
 		) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
-		options?: { overlay?: boolean },
+		options?: ExtensionUICustomOptions,
 	): Promise<T> {
 		const savedText = this.ctx.editor.getText();
 		const keybindings = KeybindingsManager.inMemory();
@@ -1085,7 +1086,10 @@ export class ExtensionUiController {
 					width: "100%",
 					maxHeight: "100%",
 					margin: 0,
+					fullscreen: options.fullscreen,
+					mouseTracking: options.mouseTracking,
 				});
+				this.ctx.ui.setFocus(component);
 				return;
 			}
 			this.ctx.editorContainer.clear();
