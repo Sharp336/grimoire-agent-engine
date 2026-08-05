@@ -4,7 +4,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { computeDefaultSessionDir } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
-import { logger } from "@oh-my-pi/pi-utils";
 
 const cleanup: string[] = [];
 
@@ -42,7 +41,7 @@ afterEach(() => {
 	for (const dir of cleanup.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
-describe("legacy session directory migration", () => {
+describe("legacy session directory coexistence", () => {
 	test("recognizes a hashed bucket created before the legacy-name rollback", () => {
 		const sessionsRoot = makeTempDir("omp-session-root-");
 		const cwd = makeTempDir("omp-session-cwd-");
@@ -53,10 +52,31 @@ describe("legacy session directory migration", () => {
 
 		expect(computeDefaultSessionDir(cwd, storage, sessionsRoot)).toBe(hashedDir);
 		expect(fs.readFileSync(path.join(hashedDir, "existing.jsonl"), "utf8")).toBe("hashed session\n");
-		expect(fs.realpathSync(relativeLegacySessionDir(sessionsRoot, cwd))).toBe(fs.realpathSync(hashedDir));
+		expect(fs.existsSync(relativeLegacySessionDir(sessionsRoot, cwd))).toBe(false);
 	});
 
-	test("moves an unambiguous legacy bucket to hashed storage and leaves a compatible alias", () => {
+	test("does not claim an absent lossy legacy name for one project", () => {
+		const sessionsRoot = makeTempDir("omp-session-root-");
+		const parent = makeTempDir("omp-session-collision-");
+		const firstCwd = path.join(parent, "project", "hail-mary");
+		const secondCwd = path.join(parent, "project-hail", "mary");
+		fs.mkdirSync(firstCwd, { recursive: true });
+		fs.mkdirSync(secondCwd, { recursive: true });
+		const storage = new FileSessionStorage();
+		const sharedLegacyDir = relativeLegacySessionDir(sessionsRoot, firstCwd);
+		expect(sharedLegacyDir).toBe(relativeLegacySessionDir(sessionsRoot, secondCwd));
+
+		const firstCanonicalDir = computeDefaultSessionDir(firstCwd, storage, sessionsRoot);
+		expect(fs.existsSync(sharedLegacyDir)).toBe(false);
+
+		const oldClientFile = path.join(sharedLegacyDir, "second.jsonl");
+		fs.mkdirSync(sharedLegacyDir, { recursive: true });
+		fs.writeFileSync(oldClientFile, sessionHeader(secondCwd, "second"));
+		expect(fs.existsSync(path.join(firstCanonicalDir, "second.jsonl"))).toBe(false);
+		expect(fs.readFileSync(oldClientFile, "utf8")).toBe(sessionHeader(secondCwd, "second"));
+	});
+
+	test("keeps an existing legacy bucket in place beside hashed storage", () => {
 		const sessionsRoot = makeTempDir("omp-session-root-");
 		const cwd = makeTempDir("omp-session-cwd-");
 		const storage = new FileSessionStorage();
@@ -70,15 +90,17 @@ describe("legacy session directory migration", () => {
 		fs.mkdirSync(path.dirname(artifactFile), { recursive: true });
 		fs.writeFileSync(artifactFile, "artifact bytes");
 		const descriptor = fs.openSync(sessionFile, "a");
+		const rename = vi.spyOn(fs, "renameSync");
 
 		expect(computeDefaultSessionDir(cwd, storage, sessionsRoot)).toBe(hashedDir);
-		fs.writeSync(descriptor, "after migration\n");
+		fs.writeSync(descriptor, "after startup\n");
 		fs.closeSync(descriptor);
-		expect(fs.readFileSync(path.join(hashedDir, "existing.jsonl"), "utf8")).toBe(`${contents}after migration\n`);
-		expect(fs.readFileSync(path.join(hashedDir, "existing", "blobs", "payload"), "utf8")).toBe("artifact bytes");
-		expect(fs.realpathSync(legacyDir)).toBe(fs.realpathSync(hashedDir));
+		expect(fs.readFileSync(sessionFile, "utf8")).toBe(`${contents}after startup\n`);
+		expect(fs.readFileSync(artifactFile, "utf8")).toBe("artifact bytes");
+		expect(fs.existsSync(path.join(hashedDir, "existing.jsonl"))).toBe(false);
+		expect(fs.lstatSync(legacyDir).isDirectory()).toBe(true);
+		expect(rename).not.toHaveBeenCalled();
 		expect(computeDefaultSessionDir(cwd, storage, sessionsRoot)).toBe(hashedDir);
-		expect(fs.realpathSync(legacyDir)).toBe(fs.realpathSync(hashedDir));
 	});
 
 	test("keeps a colliding live legacy session reachable through its path", () => {
@@ -89,25 +111,19 @@ describe("legacy session directory migration", () => {
 		const legacyDir = legacySessionDir(sessionsRoot, cwd);
 		const source = path.join(legacyDir, "active.jsonl");
 		const destination = path.join(canonicalDir, "active.jsonl");
-		fs.rmSync(legacyDir);
 		fs.mkdirSync(legacyDir, { recursive: true });
 		const sourceContents = sessionHeader(cwd, "live");
 		const destinationContents = sessionHeader(cwd, "stale");
 		fs.writeFileSync(source, sourceContents);
 		fs.writeFileSync(destination, destinationContents);
-		const fd = fs.openSync(source, "a");
+		const descriptor = fs.openSync(source, "a");
 
-		const warning = vi.spyOn(logger, "warn").mockImplementation(() => {});
 		computeDefaultSessionDir(cwd, storage, sessionsRoot);
-		fs.writeSync(fd, "live-after\n");
-		fs.closeSync(fd);
+		fs.writeSync(descriptor, "live-after\n");
+		fs.closeSync(descriptor);
 
 		expect(fs.readFileSync(source, "utf8")).toBe(`${sourceContents}live-after\n`);
 		expect(fs.readFileSync(destination, "utf8")).toBe(destinationContents);
-		expect(warning).toHaveBeenCalledWith("Session directory migration collision; preserving legacy entry", {
-			source,
-			target: destination,
-		});
 	});
 
 	test("preserves writes when an older process recreates its cached legacy directory", () => {
@@ -120,7 +136,6 @@ describe("legacy session directory migration", () => {
 		const canonicalContents = sessionHeader(cwd, "canonical");
 		fs.writeFileSync(destination, canonicalContents);
 
-		fs.rmSync(legacyDir);
 		fs.mkdirSync(legacyDir, { recursive: true });
 		const recreated = path.join(legacyDir, "active.jsonl");
 		const recreatedContents = sessionHeader(cwd, "recreated");
@@ -129,29 +144,5 @@ describe("legacy session directory migration", () => {
 
 		expect(fs.readFileSync(recreated, "utf8")).toBe(recreatedContents);
 		expect(fs.readFileSync(destination, "utf8")).toBe(canonicalContents);
-	});
-
-	test("logs migration failures and leaves the legacy directory reachable", () => {
-		const sessionsRoot = makeTempDir("omp-session-root-");
-		const cwd = makeTempDir("omp-session-cwd-");
-		const storage = new FileSessionStorage();
-		const canonicalDir = hashedSessionDir(sessionsRoot, cwd);
-		const legacyDir = relativeLegacySessionDir(sessionsRoot, cwd);
-		const legacyFile = path.join(legacyDir, "active.jsonl");
-		fs.mkdirSync(legacyDir, { recursive: true });
-		const contents = sessionHeader(cwd, "legacy");
-		fs.writeFileSync(legacyFile, contents);
-		const warning = vi.spyOn(logger, "warn").mockImplementation(() => {});
-		vi.spyOn(fs, "renameSync").mockImplementationOnce(() => {
-			throw new Error("blocked");
-		});
-
-		expect(computeDefaultSessionDir(cwd, storage, sessionsRoot)).toBe(canonicalDir);
-		expect(fs.readFileSync(legacyFile, "utf8")).toBe(contents);
-		expect(warning).toHaveBeenCalledWith("Failed to migrate legacy session directory", {
-			legacyDir,
-			canonicalDir,
-			error: "Error: blocked",
-		});
 	});
 });

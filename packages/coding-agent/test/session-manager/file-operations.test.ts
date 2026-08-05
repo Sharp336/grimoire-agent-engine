@@ -202,7 +202,7 @@ describe("SessionManager temp cwd session dirs", () => {
 		expect(path.dirname(sessionFile)).toBe(path.join(getSessionsDir(), expectedTempSessionDirName(tempCwd)));
 	});
 
-	it("migrates legacy temp-root absolute session dirs and leaves a compatible alias", () => {
+	it("keeps legacy temp-root absolute sessions readable beside hashed storage", async () => {
 		const tempCwd = path.join(testAgentDir, `legacy-cwd-${Snowflake.next()}`);
 		fs.mkdirSync(tempCwd, { recursive: true });
 
@@ -225,9 +225,11 @@ describe("SessionManager temp cwd session dirs", () => {
 		if (!sessionFile) throw new Error("Expected session file path");
 
 		const expectedDir = path.join(getSessionsDir(), expectedTempSessionDirName(tempCwd));
-		expect(fs.realpathSync(legacyDir)).toBe(fs.realpathSync(expectedDir));
+		expect(fs.lstatSync(legacyDir).isDirectory()).toBe(true);
 		expect(path.dirname(sessionFile)).toBe(expectedDir);
-		expect(fs.existsSync(path.join(expectedDir, "carried.jsonl"))).toBe(true);
+		expect(fs.existsSync(markerFile)).toBe(true);
+		expect(fs.existsSync(path.join(expectedDir, "carried.jsonl"))).toBe(false);
+		expect((await SessionManager.list(tempCwd)).map(info => info.path)).toEqual([markerFile]);
 	});
 });
 

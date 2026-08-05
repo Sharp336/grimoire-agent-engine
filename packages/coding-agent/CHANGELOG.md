@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Restored collision-safe hashed project session directories with legacy compatibility aliases and dual-read recovery: same-session candidates are compared by entry graph, strict supersets win, and divergent histories remain visible and require an explicit path instead of being deleted or selected by timestamp ([#7593](https://github.com/can1357/oh-my-pi/issues/7593)).
+- Restored collision-safe hashed project session directories while retaining existing legacy buckets for dual-read recovery: lossy legacy names are never aliased to one project, same-session candidates are compared by entry graph, strict supersets win, and divergent or ambiguous histories require an explicit selection instead of being chosen by timestamp ([#7593](https://github.com/can1357/oh-my-pi/issues/7593)).
 
 ## [17.2.9] - 2026-08-05
 

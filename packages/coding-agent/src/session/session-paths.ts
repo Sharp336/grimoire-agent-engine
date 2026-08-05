@@ -2,56 +2,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getTerminalId } from "@oh-my-pi/pi-tui";
-import {
-	getSessionsDir,
-	getTerminalSessionsDir,
-	hasFsCode,
-	isEnoent,
-	logger,
-	parseJsonlLenient,
-	resolveEquivalentPath,
-} from "@oh-my-pi/pi-utils";
+import { getSessionsDir, getTerminalSessionsDir, isEnoent, logger, resolveEquivalentPath } from "@oh-my-pi/pi-utils";
 import type { SessionStorage } from "./session-storage";
-
-/**
- * Merge or rename a legacy session directory into its canonical target.
- * Returns false when a collision leaves reachable source entries behind.
- */
-function migrateSessionDirPath(oldPath: string, newPath: string): boolean {
-	const existing = fs.statSync(newPath, { throwIfNoEntry: false });
-	if (existing?.isDirectory()) {
-		let complete = true;
-		for (const file of fs.readdirSync(oldPath)) {
-			const source = path.join(oldPath, file);
-			const target = path.join(newPath, file);
-			const sourceStat = fs.statSync(source, { throwIfNoEntry: false });
-			if (!sourceStat) continue;
-			const targetStat = fs.statSync(target, { throwIfNoEntry: false });
-			if (!targetStat) {
-				fs.renameSync(source, target);
-				continue;
-			}
-			if (sourceStat.isDirectory() && targetStat.isDirectory()) {
-				if (!migrateSessionDirPath(source, target)) complete = false;
-				continue;
-			}
-			logger.warn("Session directory migration collision; preserving legacy entry", { source, target });
-			complete = false;
-		}
-		if (!complete) return false;
-		fs.rmdirSync(oldPath);
-		return true;
-	}
-	if (existing) {
-		logger.warn("Session directory migration collision; preserving legacy directory", {
-			source: oldPath,
-			target: newPath,
-		});
-		return false;
-	}
-	fs.renameSync(oldPath, newPath);
-	return true;
-}
 
 function encodeLegacyAbsoluteSessionDirName(cwd: string): string {
 	const resolvedCwd = path.resolve(cwd);
@@ -100,104 +52,6 @@ function getDefaultSessionDirName(cwd: string): {
 	return { encodedDirName, legacyRelativeDirName, resolvedCwd };
 }
 
-function legacyAliasPointsTo(legacyDir: string, canonicalDir: string): boolean {
-	const legacyStat = fs.lstatSync(legacyDir, { throwIfNoEntry: false });
-	if (!legacyStat?.isSymbolicLink()) return false;
-	try {
-		return resolveEquivalentPath(legacyDir) === resolveEquivalentPath(canonicalDir);
-	} catch {
-		return false;
-	}
-}
-
-function ensureLegacyAlias(legacyDir: string, canonicalDir: string): void {
-	try {
-		if (legacyAliasPointsTo(legacyDir, canonicalDir) || fs.existsSync(legacyDir)) return;
-		const target = process.platform === "win32" ? canonicalDir : path.relative(path.dirname(legacyDir), canonicalDir);
-		fs.symlinkSync(target, legacyDir, process.platform === "win32" ? "junction" : "dir");
-	} catch (error) {
-		if (hasFsCode(error, "EEXIST")) return;
-		logger.warn("Failed to create legacy session directory alias", {
-			legacyDir,
-			canonicalDir,
-			error: String(error),
-		});
-	}
-}
-
-const SESSION_HEADER_PREFIX_BYTES = 4096;
-const utf8Decoder = new TextDecoder();
-
-function pathsReferToSameDirectory(left: string, right: string): boolean {
-	try {
-		return resolveEquivalentPath(left) === resolveEquivalentPath(right);
-	} catch {
-		return path.resolve(left) === path.resolve(right);
-	}
-}
-
-function readRecordedSessionCwd(file: string): string | undefined {
-	const buffer = new Uint8Array(SESSION_HEADER_PREFIX_BYTES);
-	let descriptor: number | undefined;
-	try {
-		descriptor = fs.openSync(file, "r");
-		const bytesRead = fs.readSync(descriptor, buffer, 0, buffer.byteLength, 0);
-		const entries = parseJsonlLenient<Record<string, unknown>>(utf8Decoder.decode(buffer.subarray(0, bytesRead)));
-		const header = entries.find(entry => entry.type === "session");
-		return typeof header?.cwd === "string" ? header.cwd : undefined;
-	} catch {
-		return undefined;
-	} finally {
-		if (descriptor !== undefined) fs.closeSync(descriptor);
-	}
-}
-
-function legacySessionDirBelongsToCwd(legacyDir: string, cwd: string): boolean {
-	const entries = fs.readdirSync(legacyDir, { withFileTypes: true });
-	if (entries.length === 0) return true;
-	const sessionArtifacts = new Set<string>();
-	for (const entry of entries) {
-		if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
-		const recordedCwd = readRecordedSessionCwd(path.join(legacyDir, entry.name));
-		if (!recordedCwd || !pathsReferToSameDirectory(recordedCwd, cwd)) return false;
-		sessionArtifacts.add(entry.name.slice(0, -".jsonl".length));
-	}
-	if (sessionArtifacts.size === 0) return false;
-	return entries.every(
-		entry =>
-			(entry.isFile() && entry.name.endsWith(".jsonl")) || (entry.isDirectory() && sessionArtifacts.has(entry.name)),
-	);
-}
-
-function migrateLegacySessionDir(legacyDir: string, canonicalDir: string, cwd: string): void {
-	try {
-		if (legacyDir === canonicalDir || legacyAliasPointsTo(legacyDir, canonicalDir)) return;
-		const legacyStat = fs.lstatSync(legacyDir, { throwIfNoEntry: false });
-		if (!legacyStat) return;
-		if (legacyStat.isSymbolicLink()) {
-			logger.warn("Refusing to migrate an unexpected legacy session directory symlink", {
-				legacyDir,
-				canonicalDir,
-			});
-			return;
-		}
-		if (!legacySessionDirBelongsToCwd(legacyDir, cwd)) {
-			logger.warn("Legacy session directory ownership is ambiguous; preserving directory", {
-				legacyDir,
-				canonicalDir,
-			});
-			return;
-		}
-		if (migrateSessionDirPath(legacyDir, canonicalDir)) ensureLegacyAlias(legacyDir, canonicalDir);
-	} catch (error) {
-		logger.warn("Failed to migrate legacy session directory", {
-			legacyDir,
-			canonicalDir,
-			error: String(error),
-		});
-	}
-}
-
 export function resolveManagedSessionRoot(sessionDir: string, cwd: string): string | undefined {
 	const currentDirName = path.basename(sessionDir);
 	const { encodedDirName, legacyRelativeDirName } = getDefaultSessionDirName(cwd);
@@ -225,8 +79,8 @@ export interface DefaultSessionDirectories {
 }
 
 /**
- * Resolve the canonical session directory and any residual legacy directories
- * that remain readable because migration could not safely complete.
+ * Resolve the canonical session directory and any coexisting legacy
+ * directories that may still contain sessions from older versions.
  */
 export function resolveDefaultSessionDirectories(
 	cwd: string,
@@ -239,9 +93,7 @@ export function resolveDefaultSessionDirectories(
 		legacyRelativeDirName ? path.join(sessionsRoot, legacyRelativeDirName) : undefined,
 		path.join(sessionsRoot, encodeLegacyAbsoluteSessionDirName(resolvedCwd)),
 	].filter((legacyDir): legacyDir is string => legacyDir !== undefined && legacyDir !== canonicalDir);
-	for (const legacyDir of legacyDirs) migrateLegacySessionDir(legacyDir, canonicalDir, resolvedCwd);
 	storage.ensureDirSync(canonicalDir);
-	for (const legacyDir of legacyDirs) ensureLegacyAlias(legacyDir, canonicalDir);
 
 	const readableDirs: ManagedSessionDirectory[] = [{ path: canonicalDir, kind: "hashed" }];
 	for (const legacyDir of legacyDirs) {

@@ -130,6 +130,51 @@ describe("session candidate resolution", () => {
 		expect(hashedSessionDir(sessionsRoot, firstCwd)).not.toBe(hashedSessionDir(sessionsRoot, secondCwd));
 	});
 
+	test("rejects a prefix that matches multiple session IDs", async () => {
+		const sessionsRoot = getSessionsDir();
+		const firstId = "019fshared-a";
+		const secondId = "019fshared-b";
+		writeSession(path.join(hashedSessionDir(sessionsRoot, cwd), `${firstId}.jsonl`), firstId, cwd, ["first-entry"]);
+		writeSession(path.join(hashedSessionDir(sessionsRoot, cwd), `${secondId}.jsonl`), secondId, cwd, [
+			"second-entry",
+		]);
+
+		await expect(resolveResumableSession("019fshared", cwd)).rejects.toThrow(
+			'Session prefix "019fshared" matches multiple session IDs: 019fshared-a, 019fshared-b',
+		);
+	});
+
+	test("prefers an exact session ID over a longer ID with the same prefix", async () => {
+		const sessionsRoot = getSessionsDir();
+		const exactId = "019fshared";
+		const longerId = "019fshared-longer";
+		const exactFile = path.join(hashedSessionDir(sessionsRoot, cwd), `${exactId}.jsonl`);
+		writeSession(exactFile, exactId, cwd, ["exact-entry"]);
+		writeSession(path.join(hashedSessionDir(sessionsRoot, cwd), `${longerId}.jsonl`), longerId, cwd, [
+			"longer-entry",
+		]);
+
+		expect((await resolveResumableSession(exactId, cwd))?.session.path).toBe(exactFile);
+	});
+
+	test("rejects a prefix that matches multiple divergent session IDs", async () => {
+		const sessionsRoot = getSessionsDir();
+		const hashedDir = hashedSessionDir(sessionsRoot, cwd);
+		const legacyDir = legacySessionDir(sessionsRoot, cwd);
+		for (const sessionId of ["019fshared-a", "019fshared-b"]) {
+			writeSession(path.join(hashedDir, `${sessionId}.jsonl`), sessionId, cwd, [`${sessionId}-entry`], {
+				contentById: { [`${sessionId}-entry`]: "hashed content" },
+			});
+			writeSession(path.join(legacyDir, `${sessionId}.jsonl`), sessionId, cwd, [`${sessionId}-entry`], {
+				contentById: { [`${sessionId}-entry`]: "legacy content" },
+			});
+		}
+
+		await expect(resolveResumableSession("019fshared", cwd)).rejects.toThrow(
+			'Session prefix "019fshared" matches multiple session IDs: 019fshared-a, 019fshared-b',
+		);
+	});
+
 	test("keeps divergent candidates visible and refuses to choose one implicitly", async () => {
 		const sessionsRoot = getSessionsDir();
 		const sessionId = "019fcandidate-diverged";

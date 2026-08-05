@@ -901,17 +901,38 @@ export class SessionCandidateConflictError extends Error {
 	}
 }
 
+export class SessionPrefixAmbiguityError extends Error {
+	readonly sessionIds: readonly string[];
+
+	constructor(sessionArg: string, sessionIds: readonly string[]) {
+		const sortedIds = sessionIds.toSorted();
+		super(`Session prefix "${sessionArg}" matches multiple session IDs: ${sortedIds.join(", ")}`);
+		this.name = "SessionPrefixAmbiguityError";
+		this.sessionIds = sortedIds;
+	}
+}
+
+function selectResumableCandidate(candidates: readonly SessionInfo[]): SessionInfo | undefined {
+	const first = candidates[0];
+	if (!first) return undefined;
+	const conflicts = candidates.filter(session => session.candidateConflict === true);
+	if (conflicts.length > 0) throw new SessionCandidateConflictError(first.id, conflicts);
+	return first;
+}
+
 function findResumableSession(sessions: readonly SessionInfo[], sessionArg: string): SessionInfo | undefined {
 	const exactPath = path.resolve(sessionArg);
 	const exact = sessions.find(session => path.resolve(session.path) === exactPath);
 	if (exact) return exact;
 
+	const normalizedArg = sessionArg.toLowerCase();
+	const exactIdMatches = sessions.filter(session => session.id.toLowerCase() === normalizedArg);
+	if (exactIdMatches.length > 0) return selectResumableCandidate(exactIdMatches);
+
 	const matches = sessions.filter(session => sessionMatchesResumeArg(session, sessionArg));
-	const conflicts = matches.filter(session => session.candidateConflict === true);
-	if (conflicts.length > 1 && conflicts.every(session => session.id === conflicts[0].id)) {
-		throw new SessionCandidateConflictError(conflicts[0].id, conflicts);
-	}
-	return matches[0];
+	const matchingIds = Array.from(new Set(matches.map(session => session.id)));
+	if (matchingIds.length > 1) throw new SessionPrefixAmbiguityError(sessionArg, matchingIds);
+	return selectResumableCandidate(matches);
 }
 
 /** Controls cross-directory fallback for resumable session lookup. */
