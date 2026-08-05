@@ -1323,6 +1323,35 @@ describe("executeBash :async: background retention", () => {
 		expect(result.exitCode).toBe(0);
 		expect(closeSpy).toHaveBeenCalledTimes(1);
 	});
+	it("closeShellSession disposes an in-flight :async: shell registered with a distinct owner key", async () => {
+		const runResult = Promise.withResolvers<ShellRunResult>();
+		const dispatched = Promise.withResolvers<void>();
+		vi.spyOn(piNatives.Shell.prototype, "run").mockImplementation(() => {
+			dispatched.resolve();
+			return runResult.promise;
+		});
+		const closeSpy = vi.spyOn(piNatives.Shell.prototype, "close").mockResolvedValue();
+		vi.spyOn(piNatives.Shell.prototype, "abort").mockResolvedValue();
+
+		const owner = "dispose-owner-probe";
+		const execution = executeBash("blocked", {
+			sessionKey: `${owner}:async:job1`,
+			ownerSessionKey: owner,
+			cwd: tmp,
+			timeout: 0,
+		});
+		await dispatched.promise;
+
+		// The shell is still in the process-global map (command in flight).
+		// closeShellSession must find it via the owner key — NOT the per-job
+		// sessionKey, which embeds ":async:job1" and would never match.
+		await closeShellSession(owner);
+		expect(closeSpy).toHaveBeenCalledTimes(1);
+
+		runResult.resolve({ exitCode: 0, cancelled: false, timedOut: false });
+		const result = await execution;
+		expect(result.exitCode).toBe(0);
+	});
 
 	it("closes an aborted per-job :async: shell after native cleanup settles", async () => {
 		const runResult = Promise.withResolvers<ShellRunResult>();
