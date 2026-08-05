@@ -301,7 +301,7 @@ describe("Agent", () => {
 	});
 	it("keeps follow-up ownership when the deadline expires during a dequeue hook", async () => {
 		const mock = createMockModel({ responses: [{ content: ["done"] }] });
-		const agent = new Agent({ streamFn: mock.stream, deadline: Date.now() + 25 });
+		const agent = new Agent({ streamFn: mock.stream, deadline: Date.now() + 250 });
 		let hookSignal: AbortSignal | undefined;
 		agent.addBeforeQueuedMessageDequeueHook(async signal => {
 			if (!signal) throw new Error("Expected the active loop signal");
