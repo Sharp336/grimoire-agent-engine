@@ -81,7 +81,7 @@ const InitListEntry = type({
 
 const todoSchema = type({
 	op: TodoOp,
-	"list?": InitListEntry.array().describe("phased task list for init"),
+	"list?": InitListEntry.array().atLeastLength(1).describe("non-empty phased task list for init"),
 	"task?": type("string").describe("exact task content target (task operations)"),
 	"phase?": type("string").describe("phase name target (append or phase operations)"),
 	// No `atLeastLength(1)` here: `items` is only meaningful for `init`/`append`,
@@ -378,7 +378,7 @@ function initPhases(entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
 		(entry.items && entry.items.length > 0
 			? [{ phase: entry.phase ?? DEFAULT_INIT_PHASE, items: entry.items }]
 			: undefined);
-	if (!list) {
+	if (!list || list.length === 0) {
 		errors.push("Missing list for init operation");
 		return [];
 	}

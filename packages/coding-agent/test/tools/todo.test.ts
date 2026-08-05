@@ -545,6 +545,28 @@ describe("TodoTool empty items tolerance", () => {
 		expect(summary.text).toContain("Missing items for append operation");
 	});
 });
+describe("TodoTool phased init bounds", () => {
+	it("rejects an empty phased list without clearing existing todos", async () => {
+		const initial = [{ name: "Work", tasks: [{ content: "Keep this", status: "pending" as const }] }];
+		const session = createSession(initial);
+		const tool = new TodoTool(session);
+		const properties = toolWireSchema(tool).properties;
+		if (!properties || typeof properties !== "object" || !("list" in properties)) {
+			throw new Error("Expected todo list schema");
+		}
+		const list = properties.list;
+		if (!list || typeof list !== "object" || !("minItems" in list)) {
+			throw new Error("Expected todo list minItems");
+		}
+		expect(list.minItems).toBe(1);
+		expect(tool.parameters({ op: "init", list: [] }) instanceof type.errors).toBe(true);
+
+		const result = await tool.execute("call-1", { op: "init", list: [] } as never);
+		expect(result.isError).toBe(true);
+		expect(session.getTodoPhases?.()).toEqual(initial);
+		expect(result.details?.phases).toEqual(initial);
+	});
+});
 describe("TodoTool schema descriptions", () => {
 	it("documents operation-specific todo fields", () => {
 		const tool = new TodoTool(createSession());

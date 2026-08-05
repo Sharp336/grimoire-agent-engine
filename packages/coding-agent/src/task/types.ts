@@ -214,7 +214,7 @@ function createTaskSchema(options: {
 			});
 			return type.raw({
 				context: "string",
-				tasks: item.array(),
+				tasks: item.array().atLeastLength(1),
 				"+": "delete",
 			});
 		}
@@ -229,7 +229,7 @@ function createTaskSchema(options: {
 		});
 		return type.raw({
 			context: "string",
-			tasks: item.array(),
+			tasks: item.array().atLeastLength(1),
 			"+": "delete",
 		});
 	}

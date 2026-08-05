@@ -14,6 +14,7 @@
  *    runtime for internal callers.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -155,6 +156,19 @@ describe("task.batch schema gating", () => {
 		batchSession.settings.override("task.enableEffort", true);
 		expect(getBatchItemProperties(batch).effort).toBeDefined();
 		expect(batch.description).toContain("`effort`");
+	});
+	it("bounds dynamic batch task arrays for both isolation variants", async () => {
+		for (const settings of [
+			{ "task.batch": true, "task.enableEffort": true },
+			{ "task.batch": true, "task.enableEffort": true, "task.isolation.mode": "auto" },
+		]) {
+			mockDiscovery();
+			const tool = await TaskTool.create(createSession({ settings }));
+			const tasksSchema = getSchemaProperties(tool).tasks;
+			if (!isRecord(tasksSchema)) throw new Error("Expected dynamic batch tasks schema");
+			expect(tasksSchema.minItems).toBe(1);
+			expect(tool.parameters({ context: "shared", tasks: [] }) instanceof type.errors).toBe(true);
+		}
 	});
 
 	it("keeps isolation boolean-only in the batch item schema", async () => {
