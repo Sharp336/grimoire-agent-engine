@@ -727,6 +727,18 @@ export interface ImageContent {
 	detail?: "auto" | "low" | "high" | "original";
 }
 
+export interface VideoContent {
+	type: "video";
+	data: string; // base64 encoded video data
+	mimeType: string; // e.g., "video/mp4", "video/webm"
+}
+
+/** A single block in a multimodal message content array. */
+export type ContentBlock = TextContent | ImageContent | VideoContent;
+
+/** Message content: a plain string or an array of text/media blocks. */
+export type MessageContent = string | ContentBlock[];
+
 export type ComputerAction =
 	| {
 			type: "click";
@@ -809,7 +821,7 @@ export type ProviderPayload = OpenAIResponsesHistoryPayload;
 
 export interface UserMessage {
 	role: "user";
-	content: string | (TextContent | ImageContent)[];
+	content: MessageContent;
 	/** True if the message was injected by the system (e.g., auto-continue). */
 	synthetic?: boolean;
 	/** True when injected mid-turn as a steer; consumed by the agent's pre-LLM transform to wrap it for emphasis. Never rendered. */
@@ -823,7 +835,7 @@ export interface UserMessage {
 
 export interface DeveloperMessage {
 	role: "developer";
-	content: string | (TextContent | ImageContent)[];
+	content: MessageContent;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
 	/** Provider-specific opaque payload used to reconstruct transport-native history. */
@@ -865,6 +877,7 @@ export interface AssistantMessage {
 		| AnthropicFallbackContent
 		| AnthropicServerToolContent
 		| ImageContent
+		| VideoContent
 		| ToolCall
 	)[];
 	api: Api;
@@ -910,7 +923,7 @@ export interface ToolResultMessage<TDetails = unknown> {
 	role: "toolResult";
 	toolCallId: string;
 	toolName: string;
-	content: (TextContent | ImageContent)[]; // Supports text and images
+	content: ContentBlock[]; // Supports text, images, and videos
 	details?: TDetails;
 	isError: boolean;
 	/** Who initiated this message for billing/attribution semantics. */

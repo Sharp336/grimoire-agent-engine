@@ -39,6 +39,7 @@ import {
 	type CacheRetention,
 	type ComputerAction,
 	type ComputerToolCallMetadata,
+	type ContentBlock,
 	type Context,
 	type ImageContent,
 	type Message,
@@ -112,7 +113,13 @@ import type {
 	ResponseStreamEvent,
 } from "./openai-responses-wire";
 import { transformMessages } from "./transform-messages";
-import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
+import {
+	joinTextWithImagePlaceholder,
+	NON_VIDEO_PLACEHOLDER,
+	NON_VISION_IMAGE_PLACEHOLDER,
+	partitionVideoContent,
+	partitionVisionContent,
+} from "./vision-guard";
 
 /**
  * Keyless-provider sentinel. Custom providers configured with `auth: none`
@@ -1507,7 +1514,7 @@ function clampResponsesImageDetail(
 }
 
 export function convertResponsesInputContent(
-	content: string | Array<TextContent | ImageContent>,
+	content: string | ContentBlock[],
 	supportsImages: boolean,
 	supportsImageDetailOriginal: boolean,
 	escapeControlTokens = false,
@@ -1545,6 +1552,13 @@ export function convertResponsesInputContent(
 		normalizedContent.push({
 			type: "input_text",
 			text: NON_VISION_IMAGE_PLACEHOLDER,
+		} satisfies ResponseInputText);
+	}
+	// The Responses API has no video input part; degrade to a text placeholder.
+	if (partitionVideoContent(content, false).omittedVideos) {
+		normalizedContent.push({
+			type: "input_text",
+			text: NON_VIDEO_PLACEHOLDER,
 		} satisfies ResponseInputText);
 	}
 	return normalizedContent.length > 0 ? normalizedContent : undefined;

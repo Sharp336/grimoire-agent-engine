@@ -39,7 +39,7 @@ import type {
 	ThinkingLevel,
 } from "./google-types";
 import { transformMessages } from "./transform-messages";
-import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
+import { NON_VIDEO_PLACEHOLDER, NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 
 export type {
 	Content,
@@ -204,11 +204,16 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				const supportsImages = model.input.includes("image");
 				const parts: Part[] = [];
 				let omittedImages = false;
+				let omittedVideos = false;
 				for (const item of msg.content) {
 					if (item.type === "text") {
 						const text = item.text.toWellFormed();
 						if (text.trim().length === 0) continue;
 						parts.push({ text });
+					} else if (item.type === "video") {
+						// Gemini accepts video inlineData, but catalog google models do not
+						// carry the "video" input capability yet; degrade for now.
+						omittedVideos = true;
 					} else if (supportsImages) {
 						parts.push({
 							inlineData: {
@@ -222,6 +227,9 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				}
 				if (omittedImages) {
 					parts.push({ text: NON_VISION_IMAGE_PLACEHOLDER });
+				}
+				if (omittedVideos) {
+					parts.push({ text: NON_VIDEO_PLACEHOLDER });
 				}
 				if (parts.length === 0) continue;
 				contents.push({
@@ -293,6 +301,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 			const textResult = textContent.map(c => c.text).join("\n");
 			const imageContent = supportsImages ? msg.content.filter((c): c is ImageContent => c.type === "image") : [];
 			const omittedImages = !supportsImages && msg.content.some((c): c is ImageContent => c.type === "image");
+			const omittedVideos = msg.content.some(c => c.type === "video");
 
 			const hasText = textResult.length > 0;
 			const hasImages = imageContent.length > 0;
@@ -310,6 +319,9 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					: hasImages
 						? "(see attached image)"
 						: "";
+			const responseValueWithVideo = omittedVideos
+				? [responseValue, NON_VIDEO_PLACEHOLDER].filter(Boolean).join("\n")
+				: responseValue;
 
 			const imageParts: Part[] = imageContent.map(imageBlock => ({
 				inlineData: {
@@ -323,7 +335,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 			const functionResponsePart: Part = {
 				functionResponse: {
 					name: emittedName ?? msg.toolName,
-					response: msg.isError ? { error: responseValue } : { output: responseValue },
+					response: msg.isError ? { error: responseValueWithVideo } : { output: responseValueWithVideo },
 					...(hasImages && modelSupportsMultimodalFunctionResponse && { parts: imageParts }),
 					...(includeId ? { id: msg.toolCallId } : {}),
 				},

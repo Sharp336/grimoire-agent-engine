@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `"video"` to `Model.input` capability metadata; Kimi Code discovery now stamps it from the model card's `supports_video_in` flag, and the model cache schema was bumped to invalidate rows predating video capability metadata.
+
 ## [17.2.9] - 2026-08-05
 
 ### Fixed

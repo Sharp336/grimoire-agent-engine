@@ -17,6 +17,7 @@ import type {
 	ServiceTierByFamily,
 	SimpleStreamOptions,
 	ToolChoice,
+	VideoContent,
 } from "@oh-my-pi/pi-ai";
 import type { postmortem } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig } from "../advisor";
@@ -284,6 +285,8 @@ export interface PromptOptions {
 	expandPromptTemplates?: boolean;
 	/** Image attachments. */
 	images?: ImageContent[];
+	/** Video attachments. */
+	videos?: VideoContent[];
 	/** Queue behavior while streaming. */
 	streamingBehavior?: "steer" | "followUp";
 	/** Optional tool choice override for the next LLM call. */

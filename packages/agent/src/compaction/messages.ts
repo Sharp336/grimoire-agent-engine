@@ -1,7 +1,9 @@
 import type {
+	ContentBlock,
 	ImageContent,
 	Message,
 	MessageAttribution,
+	MessageContent,
 	ProviderPayload,
 	TextContent,
 	ToolResultMessage,
@@ -17,7 +19,7 @@ const BRANCH_SUMMARY_TEMPLATE = branchSummaryContextPrompt;
 export interface CustomMessage<T = unknown> {
 	role: "custom";
 	customType: string;
-	content: string | (TextContent | ImageContent)[];
+	content: MessageContent;
 	display: boolean;
 	details?: T;
 	/** Who initiated this message for billing/attribution semantics. */
@@ -29,7 +31,7 @@ export interface CustomMessage<T = unknown> {
 export interface HookMessage<T = unknown> {
 	role: "hookMessage";
 	customType: string;
-	content: string | (TextContent | ImageContent)[];
+	content: MessageContent;
 	display: boolean;
 	details?: T;
 	/** Who initiated this message for billing/attribution semantics. */
@@ -53,7 +55,7 @@ export interface CompactionSummaryMessage {
 	/** Runtime-only ordered archive blocks for snapcompact: old text region,
 	 *  imaged middle, then new text region. When present, `summary` is already
 	 *  the final lead-in text (no legacy wrapper applied). */
-	blocks?: (TextContent | ImageContent)[];
+	blocks?: ContentBlock[];
 	/** Snapcompact image blocks, kept for display counts / legacy consumers. */
 	images?: ImageContent[];
 	/** Post-pass dead-end warning attached to this compaction (progress guard). */
@@ -73,7 +75,7 @@ declare module "../types" {
 }
 export type ConvertToLlm = (messages: AgentMessage[]) => Message[];
 
-function getPrunedToolResultContent(message: ToolResultMessage): (TextContent | ImageContent)[] {
+function getPrunedToolResultContent(message: ToolResultMessage): ContentBlock[] {
 	if (message.prunedAt === undefined) {
 		return message.content;
 	}
@@ -127,7 +129,7 @@ export function createCompactionSummaryMessage(
 
 export function createCustomMessage(
 	customType: string,
-	content: string | (TextContent | ImageContent)[],
+	content: MessageContent,
 	display: boolean,
 	details: unknown | undefined,
 	timestamp: string,

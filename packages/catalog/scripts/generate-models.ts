@@ -18,6 +18,7 @@ import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { $env } from "@oh-my-pi/pi-utils";
 import { ANTIGRAVITY_PRIMARY_ENDPOINT, fetchAntigravityDiscoveryModels } from "../src/discovery/antigravity";
 import { buildGitLabDuoWorkflowFallbackModel } from "../src/discovery/gitlab-duo-workflow";
+import { isKimiK3ModelId } from "../src/identity/family";
 import { createModelManager } from "../src/model-manager";
 import prevModelsJson from "../src/models.json" with { type: "json" };
 import { toModelSpec } from "../src/provider-models/bundled-references";
@@ -319,6 +320,23 @@ function applyKimiMaxTokensCap(models: readonly ModelSpec[]): ModelSpec[] {
 			return capped === model.maxTokens ? model : { ...model, maxTokens: capped };
 		}
 		return model;
+	});
+}
+
+/**
+ * Kimi K3 is documented video-capable (platform.kimi.ai/docs/guide/use-kimi-vision-model),
+ * but previous bundled snapshots predate the `supports_video_in` model-card field that
+ * runtime discovery maps from. Pin the documented input set on K3 rows so the committed
+ * catalog matches what credentialed discovery reports.
+ */
+function applyKimiK3VideoInput(models: readonly ModelSpec[]): ModelSpec[] {
+	return models.map(model => {
+		const isK3 =
+			model.provider === "kimi-code"
+				? model.id.startsWith("k3")
+				: model.provider === "moonshot" && isKimiK3ModelId(model.id);
+		if (!isK3 || model.input.includes("video")) return model;
+		return { ...model, input: [...model.input, "video"] };
 	});
 }
 
@@ -661,6 +679,7 @@ async function generateModels() {
 	allModels = applyCodexPricingFallback(allModels);
 	allModels = applyAntigravityPricingFallback(allModels);
 	allModels = applyKimiMaxTokensCap(allModels);
+	allModels = applyKimiK3VideoInput(allModels);
 	allModels = applyFireworksDeepSeekReasoningShape(allModels);
 	allModels = dropFireworksWireIds(allModels);
 	allModels = dropUnusableZaiContextTierIds(allModels);

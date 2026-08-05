@@ -4,13 +4,12 @@ import { getEnvApiKey } from "../stream";
 import type {
 	Api,
 	AssistantMessage,
+	ContentBlock,
 	Context,
-	ImageContent,
 	Message,
 	Model,
 	StreamFunction,
 	StreamOptions,
-	TextContent,
 	Tool,
 	ToolChoice,
 } from "../types";
@@ -32,7 +31,12 @@ import {
 	type StreamMarkupHealingEvent,
 } from "../utils/stream-markup-healing";
 import { transformMessages } from "./transform-messages";
-import { joinTextWithImagePlaceholder, partitionVisionContent } from "./vision-guard";
+import {
+	joinTextWithImagePlaceholder,
+	NON_VIDEO_PLACEHOLDER,
+	partitionVideoContent,
+	partitionVisionContent,
+} from "./vision-guard";
 
 export interface OllamaChatOptions extends StreamOptions {
 	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -173,7 +177,7 @@ function selectToolsForToolChoice(tools: Tool[] | undefined, toolChoice: ToolCho
 }
 
 function toPlainContent(
-	content: string | ReadonlyArray<TextContent | ImageContent>,
+	content: string | ReadonlyArray<ContentBlock>,
 	supportsImages: boolean,
 ): {
 	content: string;
@@ -183,9 +187,13 @@ function toPlainContent(
 		return { content };
 	}
 	const { textBlocks, imageBlocks, omittedImages } = partitionVisionContent(content, supportsImages);
-	const text = textBlocks.map(block => block.text).join("\n");
+	const { omittedVideos } = partitionVideoContent(content, false);
+	let text = joinTextWithImagePlaceholder(textBlocks.map(block => block.text).join("\n"), omittedImages);
+	if (omittedVideos) {
+		text = text ? `${text}\n${NON_VIDEO_PLACEHOLDER}` : NON_VIDEO_PLACEHOLDER;
+	}
 	return {
-		content: joinTextWithImagePlaceholder(text, omittedImages),
+		content: text,
 		...(imageBlocks.length > 0 ? { images: imageBlocks.map(block => block.data) } : {}),
 	};
 }

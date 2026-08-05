@@ -347,6 +347,7 @@ function snapshotAssistantContentBlock(block: AssistantContentBlock): AssistantC
 	switch (block.type) {
 		case "text":
 		case "image":
+		case "video":
 			return { ...block };
 		case "thinking":
 			return { ...block };

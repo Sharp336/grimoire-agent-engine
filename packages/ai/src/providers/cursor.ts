@@ -154,6 +154,7 @@ import * as AIError from "../error";
 import type {
 	Api,
 	AssistantMessage,
+	ContentBlock,
 	Context,
 	CursorExecHandlerResult,
 	CursorExecHandlers,
@@ -166,6 +167,7 @@ import type {
 	CursorToolResultHandler,
 	ImageContent,
 	Message,
+	MessageContent,
 	Model,
 	StreamFunction,
 	StreamOptions,
@@ -219,6 +221,7 @@ import {
 	piReadPathHasRange,
 	piTimeout,
 } from "./cursor/exec-modern";
+import { NON_VIDEO_PLACEHOLDER } from "./vision-guard";
 
 export const CURSOR_API_URL = "https://api2.cursor.sh";
 export const CURSOR_CLIENT_VERSION = "cli-2026.07.23-e383d2b";
@@ -3467,7 +3470,7 @@ function buildMcpResultFromToolResult(_mcpCall: CursorMcpCall, toolResult: ToolR
 		return create(McpToolResultContentItemSchema, {
 			content: {
 				case: "text",
-				value: create(McpTextContentSchema, { text: item.text }),
+				value: create(McpTextContentSchema, { text: item.type === "video" ? NON_VIDEO_PLACEHOLDER : item.text }),
 			},
 		});
 	});
@@ -4038,7 +4041,7 @@ function hasUserMessageImages(msg: Message): boolean {
 
 type CursorRootPromptContentPart = { type: "text"; text: string } | { type: "image"; image: string; mediaType: string };
 
-function buildCursorRootPromptContent(content: string | (TextContent | ImageContent)[]): CursorRootPromptContentPart[] {
+function buildCursorRootPromptContent(content: MessageContent): CursorRootPromptContentPart[] {
 	if (typeof content === "string") {
 		const text = content.trim();
 		return text ? [{ type: "text", text }] : [];
@@ -4050,6 +4053,9 @@ function buildCursorRootPromptContent(content: string | (TextContent | ImageCont
 			if (text) {
 				parts.push({ type: "text", text });
 			}
+		} else if (item.type === "video") {
+			// Cursor has no video input; degrade to a text placeholder.
+			parts.push({ type: "text", text: NON_VIDEO_PLACEHOLDER });
 		} else {
 			parts.push({ type: "image", image: `data:${item.mimeType};base64,${item.data}`, mediaType: item.mimeType });
 		}
@@ -4057,7 +4063,7 @@ function buildCursorRootPromptContent(content: string | (TextContent | ImageCont
 	return parts;
 }
 
-function cursorUserContentKey(content: string | (TextContent | ImageContent)[]): string {
+function cursorUserContentKey(content: MessageContent): string {
 	if (typeof content === "string") {
 		return content.trim();
 	}
@@ -4488,11 +4494,7 @@ export function buildCursorHistoryForTest(
 	}
 	return { rootPromptMessagesJson, turnUserMessagesJson, turnStepMessagesJson };
 }
-function createCursorUserMessage(
-	content: string | (TextContent | ImageContent)[],
-	text: string,
-	messageId = crypto.randomUUID(),
-) {
+function createCursorUserMessage(content: MessageContent, text: string, messageId = crypto.randomUUID()) {
 	const images = typeof content === "string" ? [] : extractImages(content);
 	return create(UserMessageSchema, {
 		text,
@@ -4507,7 +4509,7 @@ function createCursorUserMessage(
 	});
 }
 
-function extractImages(content: (TextContent | ImageContent)[]) {
+function extractImages(content: ContentBlock[]) {
 	return content
 		.filter((item): item is ImageContent => item.type === "image")
 		.map(image =>
@@ -4546,7 +4548,7 @@ function buildGrpcRequest(
 	const activeMessage = context.messages[activeUserMessageIndex];
 	const activeUserMessage =
 		activeMessage?.role === "user" || activeMessage?.role === "developer" ? activeMessage : undefined;
-	let userContent: string | (TextContent | ImageContent)[] | undefined;
+	let userContent: MessageContent | undefined;
 	let userText = "";
 	let hasUserImages = false;
 	if (activeUserMessage?.role === "user" || activeUserMessage?.role === "developer") {
@@ -4678,10 +4680,10 @@ function buildGrpcRequest(
 	return { requestBytes, blobStore, conversationState };
 }
 
-function hasImages(content: (TextContent | ImageContent)[]): boolean {
+function hasImages(content: ContentBlock[]): boolean {
 	return content.some(item => item.type === "image");
 }
-function extractText(content: (TextContent | ImageContent)[]): string {
+function extractText(content: ContentBlock[]): string {
 	return content
 		.filter((c): c is TextContent => c.type === "text")
 		.map(c => c.text)

@@ -46,6 +46,7 @@ import { invalidateAwsCredentialCache, resolveAwsCredentials } from "./aws-crede
 import { decodeEventStream } from "./aws-eventstream";
 import { signRequest } from "./aws-sigv4";
 import { transformMessages } from "./transform-messages";
+import { NON_VIDEO_PLACEHOLDER } from "./vision-guard";
 
 export type BedrockThinkingDisplay = "summarized" | "omitted";
 
@@ -867,7 +868,7 @@ function convertMessages(
 						content: m.content.map(c =>
 							c.type === "image"
 								? { image: createImageBlock(c.mimeType, c.data) }
-								: { text: c.text.toWellFormed() },
+								: { text: c.type === "video" ? NON_VIDEO_PLACEHOLDER : c.text.toWellFormed() },
 						),
 						status: m.isError ? "error" : "success",
 					},
@@ -882,7 +883,7 @@ function convertMessages(
 							content: nextMsg.content.map(c =>
 								c.type === "image"
 									? { image: createImageBlock(c.mimeType, c.data) }
-									: { text: c.text.toWellFormed() },
+									: { text: c.type === "video" ? NON_VIDEO_PLACEHOLDER : c.text.toWellFormed() },
 							),
 							status: nextMsg.isError ? "error" : "success",
 						},

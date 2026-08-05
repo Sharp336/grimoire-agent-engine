@@ -268,7 +268,25 @@ export type ChatCompletionContentPart =
 	| ChatCompletionContentPartText
 	| ChatCompletionContentPartImage
 	| ChatCompletionContentPartInputAudio
-	| ChatCompletionContentPartFile;
+	| ChatCompletionContentPartFile
+	| ChatCompletionContentPartVideo;
+
+/**
+ * Video content part. Moonshot's chat-completions extension
+ * (platform.kimi.ai/docs/guide/use-kimi-vision-model): `url` is either a
+ * `data:video/...;base64,...` payload or an `ms://<file-id>` reference to a
+ * file uploaded with `purpose="video"`.
+ */
+export interface ChatCompletionContentPartVideo {
+	video_url: ChatCompletionContentPartVideoVideoURL;
+	/** Always `video_url`. */
+	type: "video_url";
+}
+
+export interface ChatCompletionContentPartVideoVideoURL {
+	/** Either a base64 data URL or an `ms://<file-id>` upload reference. */
+	url: string;
+}
 
 // ─── Tool calls ──────────────────────────────────────────────────────────────
 
