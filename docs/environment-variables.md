@@ -318,6 +318,7 @@ therefore completes through the paste-code path.
 | `PERPLEXITY_COOKIES`                                | Perplexity cookie-auth search mode                                        |
 | `PI_PERPLEXITY_RESPONSES`                           | `1` selects the Perplexity Responses endpoint instead of Chat Completions |
 | `TAVILY_API_KEY`                                    | Tavily search provider                                                    |
+| `ANYSEARCH_API_KEY`                                 | AnySearch search provider (optional; falls back to anonymous tier)        |
 | `ZAI_API_KEY`                                       | z.ai search provider (also checks stored OAuth in `agent.db`)             |
 | `OPENAI_API_KEY` / Codex OAuth in DB                | Codex search provider availability/auth                                   |
 | `PI_CODEX_WEB_SEARCH_MODEL`                         | Codex search provider model override                                      |

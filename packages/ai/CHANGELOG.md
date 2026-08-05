@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the AnySearch provider to the auth registry: `/login anysearch` paste-key flow and `ANYSEARCH_API_KEY` env-key resolution for the web search integration.
 ## [17.2.9] - 2026-08-05
 
 ### Fixed

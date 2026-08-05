@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added AnySearch as a built-in web search provider: unified `/v1/search` REST integration with an optional `ANYSEARCH_API_KEY` (or `/login anysearch`) and a free anonymous tier when no key is configured.
 ## [17.2.9] - 2026-08-05
 
 ### Breaking Changes
