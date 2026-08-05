@@ -57,10 +57,10 @@ const vibeSpawnSchema = type({
 	prompt: type("string > 0").describe(
 		"first instruction; no parent conversation is inherited, but normal system and repository context is present",
 	),
-	"maxRequests?": type("number.integer >= 1").describe(
+	"maxRequests?": type("1 <= number.integer <= 1000").describe(
 		"forced-wrap request cap per turn; defaults: fast 100, good 200",
 	),
-	"timeout?": type("number > 0").describe("wall-clock seconds per turn; default 1200"),
+	"timeout?": type("0 < number <= 86400").describe("wall-clock seconds per turn; default 1200"),
 });
 
 const vibeSendSchema = type({

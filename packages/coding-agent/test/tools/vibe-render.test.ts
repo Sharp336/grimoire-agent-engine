@@ -13,6 +13,7 @@
  * 4. Every emitted line respects the render width (sanitized, truncated).
  */
 import { beforeAll, describe, expect, it } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import { Settings } from "../../src/config/settings";
 import { getThemeByName, setThemeInstance, type Theme } from "../../src/modes/theme/theme";
 import type { ToolSession } from "../../src/tools";
@@ -61,6 +62,20 @@ describe("vibe tool renderers", () => {
 		expect(waitDescription).toContain("bounded preview");
 		expect(waitDescription).toContain("immutable `fullOutputUrl`");
 		expect(waitDescription).toContain("latest-output alias");
+	});
+
+	it("rejects request and timeout values outside runtime bounds at the wire schema", () => {
+		const session = { cwd: "/tmp", settings: Settings.isolated({}) } as ToolSession;
+		const parameters = new VibeSpawnTool(session).parameters;
+		const base = { cli: "fast" as const, prompt: "Work." };
+
+		expect(parameters({ ...base, maxRequests: 1, timeout: Number.MIN_VALUE }) instanceof type.errors).toBe(false);
+		expect(parameters({ ...base, maxRequests: 1000, timeout: 86_400 }) instanceof type.errors).toBe(false);
+		expect(parameters({ ...base, maxRequests: 0, timeout: 1 }) instanceof type.errors).toBe(true);
+		expect(parameters({ ...base, maxRequests: 1001, timeout: 1 }) instanceof type.errors).toBe(true);
+		expect(parameters({ ...base, maxRequests: 1.5, timeout: 1 }) instanceof type.errors).toBe(true);
+		expect(parameters({ ...base, maxRequests: 1, timeout: 0 }) instanceof type.errors).toBe(true);
+		expect(parameters({ ...base, maxRequests: 1, timeout: 86_400.001 }) instanceof type.errors).toBe(true);
 	});
 
 	it("send composer types the message into a mini CLI frame with a blinking cursor while pending", () => {
