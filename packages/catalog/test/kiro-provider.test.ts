@@ -16,14 +16,18 @@ import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 const PROFILE_ARN = "arn:aws:codewhisperer:us-east-1:123456789012:profile/kiro-default";
 const API_ENDPOINT = "https://management.us-east-1.kiro.dev/";
 
-function catalogResponse(modelIds: readonly string[]): Record<string, unknown> {
+function catalogResponse(
+	modelIds: readonly string[],
+	options: { inputTypes?: unknown; defaultModel?: unknown; omitInputTypes?: boolean } = {},
+): Record<string, unknown> {
+	const inputTypes = "inputTypes" in options ? options.inputTypes : ["TEXT"];
+	const defaultModel = "defaultModel" in options ? options.defaultModel : modelIds[0];
 	return {
-		defaultModel: modelIds[0],
+		defaultModel,
 		models: modelIds.map(modelId => ({
 			modelId,
 			modelName: modelId,
-			supportedInputModalities: ["TEXT"],
-			supportedOutputModalities: ["TEXT"],
+			...(options.omitInputTypes ? {} : { supportedInputTypes: inputTypes }),
 			tokenLimits: { maxInputTokens: 100_000, maxOutputTokens: 8_192 },
 		})),
 	};
@@ -69,7 +73,7 @@ describe("Kiro provider discovery", () => {
 			catalogResponse(modelIds),
 			{ ...catalogResponse(modelIds), defaultModel: "not-an-advertised-model" },
 			{ ...catalogResponse(modelIds), defaultModel: 42 },
-			{ ...catalogResponse(modelIds), defaultModel: { id: modelIds[0] } },
+			{ ...catalogResponse(modelIds), defaultModel: { modelId: "auto" } },
 		];
 
 		for (const payload of payloads) {
@@ -80,15 +84,89 @@ describe("Kiro provider discovery", () => {
 	});
 
 	test("preserves every exact live model ID and authoritative order", async () => {
-		const modelIds = ["provider/model-z", "provider/model-a", "provider/model-zeta"];
+		const modelIds = ["auto", "provider/model-z", "provider/model-a", "provider/model-zeta"];
 		const options = kiroModelManagerOptions({
 			apiKey: JSON.stringify({ token: "catalog-token", apiEndpoint: API_ENDPOINT }),
-			fetch: jsonFetch({ ...catalogResponse(modelIds), defaultModel: "unknown-model" }),
+			fetch: jsonFetch(catalogResponse(modelIds, { defaultModel: { modelId: "auto" } })),
 		});
 
 		const models = await options.fetchDynamicModels?.();
 
 		expect(models?.map(model => model.id)).toEqual(modelIds);
+	});
+
+	test("maps TEXT and IMAGE supportedInputTypes in order without output metadata", async () => {
+		const textOptions = kiroModelManagerOptions({
+			apiKey: JSON.stringify({ token: "text-token", apiEndpoint: API_ENDPOINT }),
+			fetch: jsonFetch(catalogResponse(["text-model"], { inputTypes: ["TEXT"] })),
+		});
+		const multimodalOptions = kiroModelManagerOptions({
+			apiKey: JSON.stringify({ token: "image-token", apiEndpoint: API_ENDPOINT }),
+			fetch: jsonFetch(catalogResponse(["image-model"], { inputTypes: ["TEXT", "IMAGE"] })),
+		});
+
+		expect((await textOptions.fetchDynamicModels?.())?.[0]?.input).toEqual(["text"]);
+		expect((await multimodalOptions.fetchDynamicModels?.())?.[0]?.input).toEqual(["text", "image"]);
+	});
+
+	test("rejects missing, null, non-array, empty, unknown, non-string, and duplicate input types", () => {
+		const invalidInputTypes: unknown[] = [undefined, null, "TEXT", [], ["VIDEO"], [1], ["TEXT", "TEXT"]];
+		for (const inputTypes of invalidInputTypes) {
+			expect(() => sanitizeKiroModelCatalog(catalogResponse(["invalid-model"], { inputTypes }))).toThrow(
+				"Unsafe ListAvailableModels response",
+			);
+		}
+		expect(() => sanitizeKiroModelCatalog(catalogResponse(["missing-model"], { omitInputTypes: true }))).toThrow(
+			"Unsafe ListAvailableModels response",
+		);
+	});
+
+	test("rejects duplicate model IDs and malformed recognized schemas", () => {
+		expect(() => sanitizeKiroModelCatalog(catalogResponse(["duplicate-model", "duplicate-model"]))).toThrow(
+			"models.duplicate-id",
+		);
+
+		const malformedLimits = catalogResponse(["malformed-model"]);
+		const malformedModel = (malformedLimits.models as Array<Record<string, unknown>>)[0]!;
+		malformedModel.tokenLimits = { maxInputTokens: 0, maxOutputTokens: 8_192 };
+		expect(() => sanitizeKiroModelCatalog(malformedLimits)).toThrow("model.max-input");
+
+		const malformedSchema = catalogResponse(["malformed-schema-model"]);
+		const schemaModel = (malformedSchema.models as Array<Record<string, unknown>>)[0]!;
+		schemaModel.additionalModelRequestFieldsSchema = null;
+		expect(() => sanitizeKiroModelCatalog(malformedSchema)).toThrow("schema.object");
+	});
+
+	test("preserves prompt caching, request schema, token limits, and rate metadata", () => {
+		const payload = catalogResponse(["metadata-model"], { inputTypes: ["TEXT"] });
+		const model = (payload.models as Array<Record<string, unknown>>)[0]!;
+		model.description = "Synthetic metadata";
+		model.promptCaching = {
+			supportsPromptCaching: true,
+			maximumCacheCheckpointsPerRequest: 2,
+			minimumTokensPerCacheCheckpoint: 1_024,
+		};
+		model.additionalModelRequestFieldsSchema = {
+			type: "object",
+			properties: { reasoning: { type: "string" } },
+		};
+		model.rateMultiplier = 1.5;
+		model.rateUnit = "Credit";
+
+		const sanitized = sanitizeKiroModelCatalog(payload).models[0]!;
+		expect(sanitized).toMatchObject({
+			supportedInputTypes: ["TEXT"],
+			description: "Synthetic metadata",
+			tokenLimits: { maxInputTokens: 100_000, maxOutputTokens: 8_192 },
+			promptCaching: {
+				supportsPromptCaching: true,
+				maximumCacheCheckpointsPerRequest: 2,
+				minimumTokensPerCacheCheckpoint: 1_024,
+			},
+			rateMultiplier: 1.5,
+			rateUnit: "Credit",
+		});
+		expect(sanitized.additionalModelRequestFieldsSchema?.properties?.reasoning?.type).toBe("string");
 	});
 
 	test("sends the selected OAuth profile ARN in the ListAvailableModels body", async () => {

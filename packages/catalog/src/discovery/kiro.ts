@@ -70,7 +70,7 @@ export interface SanitizedKiroModel {
 	modelId: string;
 	modelName: string;
 	description?: string;
-	supportedInputModalities: Array<"TEXT" | "IMAGE">;
+	supportedInputTypes: Array<"TEXT" | "IMAGE">;
 	tokenLimits: { maxInputTokens: number; maxOutputTokens: number };
 	additionalModelRequestFieldsSchema?: SanitizedJsonSchema;
 	promptCaching?: {
@@ -210,25 +210,22 @@ function sanitizeModel(value: unknown): SanitizedKiroModel {
 	const modelId = safeId(raw.modelId, "model.id");
 	const modelName = boundedString(raw.modelName, "model.name", 128);
 
-	if (!Array.isArray(raw.supportedInputModalities) || raw.supportedInputModalities.length === 0) {
-		failSanitize("model.input-modalities");
+	if (!Array.isArray(raw.supportedInputTypes) || raw.supportedInputTypes.length === 0) {
+		failSanitize("model.input-types");
 	}
-	const supportedInputModalities = raw.supportedInputModalities.map(input => {
-		if (input !== "TEXT" && input !== "IMAGE") failSanitize("model.input-modality");
+	const supportedInputTypes = raw.supportedInputTypes.map(input => {
+		if (input !== "TEXT" && input !== "IMAGE") failSanitize("model.input-type");
 		return input;
 	});
-	if (new Set(supportedInputModalities).size !== supportedInputModalities.length) {
+	if (new Set(supportedInputTypes).size !== supportedInputTypes.length) {
 		failSanitize("model.input-duplicate");
-	}
-	if (!Array.isArray(raw.supportedOutputModalities) || !raw.supportedOutputModalities.includes("TEXT")) {
-		failSanitize("model.output-modalities");
 	}
 
 	const rawLimits = record(raw.tokenLimits, "model.token-limits");
 	const model: SanitizedKiroModel = {
 		modelId,
 		modelName,
-		supportedInputModalities,
+		supportedInputTypes,
 		tokenLimits: {
 			maxInputTokens: positiveInteger(rawLimits.maxInputTokens, "model.max-input"),
 			maxOutputTokens: positiveInteger(rawLimits.maxOutputTokens, "model.max-output"),
@@ -465,7 +462,7 @@ export function mapKiroModel(model: SanitizedKiroModel, runtimeBaseUrl: string):
 		baseUrl: runtimeBaseUrl,
 		reasoning: requestMetadata.reasoning,
 		...(requestMetadata.thinking ? { thinking: requestMetadata.thinking } : {}),
-		input: model.supportedInputModalities.map(input => (input === "IMAGE" ? "image" : "text")),
+		input: model.supportedInputTypes.map(input => (input === "IMAGE" ? "image" : "text")),
 		cost: { ...ZERO_COST },
 		...(multiplier !== undefined ? { premiumMultiplier: multiplier } : {}),
 		contextWindow: model.tokenLimits.maxInputTokens,

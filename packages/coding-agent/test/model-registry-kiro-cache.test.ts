@@ -47,8 +47,7 @@ describe("ModelRegistry Kiro cache isolation", () => {
 					{
 						modelId: discoveredModelId,
 						modelName: "Profile A model",
-						supportedInputModalities: ["TEXT"],
-						supportedOutputModalities: ["TEXT"],
+						supportedInputTypes: ["TEXT"],
 						tokenLimits: { maxInputTokens: 32_000, maxOutputTokens: 4_000 },
 					},
 				],
@@ -109,8 +108,7 @@ describe("ModelRegistry Kiro cache isolation", () => {
 					{
 						modelId: discoveredModelId,
 						modelName: "API key model",
-						supportedInputModalities: ["TEXT"],
-						supportedOutputModalities: ["TEXT"],
+						supportedInputTypes: ["TEXT"],
 						tokenLimits: { maxInputTokens: 32_000, maxOutputTokens: 4_000 },
 					},
 				],

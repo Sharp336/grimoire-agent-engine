@@ -30,8 +30,7 @@ function modelCatalog(): Record<string, unknown> {
 			{
 				modelId: "model-one",
 				modelName: "Model One",
-				supportedInputModalities: ["TEXT"],
-				supportedOutputModalities: ["TEXT"],
+				supportedInputTypes: ["TEXT"],
 				tokenLimits: { maxInputTokens: 1000, maxOutputTokens: 500 },
 			},
 		],
