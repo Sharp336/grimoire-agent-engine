@@ -53,9 +53,10 @@ describe("issue #5764: registerTool loadMode default", () => {
 	});
 
 	it("tolerates malformed tools.xdevPromote config values", () => {
-		// A hand-edited scalar (`tools.xdevPromote: lsp`) or non-string entries
-		// must degrade to no promotion instead of crashing mounting.
-		expect(compileXdevPromoteSet("lsp" as unknown as string[])).toBeUndefined();
+		// A hand-edited scalar (`tools.xdevPromote: lsp`) promotes that single
+		// tool instead of crashing mounting; objects/numbers are dropped.
+		expect(compileXdevPromoteSet("lsp" as unknown as string[])).toEqual(new Set(["lsp"]));
+		expect(compileXdevPromoteSet("LSP, ast_grep" as unknown as string[])).toEqual(new Set(["lsp", "ast_grep"]));
 		expect(compileXdevPromoteSet({ lsp: true } as unknown as string[])).toBeUndefined();
 		expect(compileXdevPromoteSet([42] as unknown as string[])).toBeUndefined();
 		// Mixed lists keep the valid names, normalized case-insensitively.

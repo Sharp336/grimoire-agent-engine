@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `tools.xdevPromote` (and the per-agent `xdevPromote` frontmatter) to keep specific tools top-level instead of mounting them under `xd://`, without disabling `tools.xdev` globally. Promotion only changes presentation; tools still need their normal enablement, and an explicitly empty per-agent `xdevPromote` clears the inherited global promotion ([#5648](https://github.com/can1357/oh-my-pi/issues/5648)).
+- Added `tools.xdevPromote` (and the per-agent `xdevPromote` frontmatter) to keep specific tools top-level instead of mounting them under `xd://`, without disabling `tools.xdev` globally. The setting accepts a list or a single name / comma-separated string (e.g. `tools.xdevPromote: lsp`). Promotion only changes presentation; tools still need their normal enablement, and an explicitly empty per-agent `xdevPromote` clears the inherited global promotion ([#5648](https://github.com/can1357/oh-my-pi/issues/5648)).
 ### Changed
 
 - Restored the legacy project-scoped session directory naming scheme and removed its automatic migration ([#7646](https://github.com/can1357/oh-my-pi/issues/7646)).

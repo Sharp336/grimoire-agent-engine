@@ -32,6 +32,7 @@ import type { AgentToolContext, AgentToolResult, AgentToolUpdateCallback, ToolLo
 import { type Tool as AiTool, jsonSchemaToTypeScript, toolWireSchema, validateToolArguments } from "@oh-my-pi/pi-ai";
 import { type Component, Container, Text } from "@oh-my-pi/pi-tui";
 import { parseStreamingJson } from "@oh-my-pi/pi-utils";
+import { parseArrayOrCSV } from "../discovery/helpers";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { XD_URL_PREFIX } from "../internal-urls/xd-protocol";
 import type { Theme } from "../modes/theme/theme";
@@ -89,15 +90,15 @@ export function isMountableUnderXdev(
 	return tool.loadMode === "discoverable";
 }
 
-/** Compile a `tools.xdevPromote` list into a normalized lookup. Malformed
- *  (non-array or non-string) values are dropped so bad config cannot break
- *  mounting — a hand-edited scalar like `tools.xdevPromote: lsp` must not
- *  crash session/tool creation. */
-export function compileXdevPromoteSet(names: readonly unknown[] | undefined): ReadonlySet<string> | undefined {
-	if (!Array.isArray(names) || names.length === 0) return undefined;
-	const strings = names.filter((name): name is string => typeof name === "string");
-	if (strings.length === 0) return undefined;
-	return new Set(normalizeToolNames(strings));
+/** Compile a `tools.xdevPromote` value into a normalized lookup. Accepts a
+ *  list or a single tool name / comma-separated string — a hand-edited scalar
+ *  like `tools.xdevPromote: lsp` promotes that tool rather than being
+ *  dropped; non-string values are ignored so bad config cannot break
+ *  mounting. */
+export function compileXdevPromoteSet(names: readonly unknown[] | string | undefined): ReadonlySet<string> | undefined {
+	const parsed = parseArrayOrCSV(names);
+	if (!parsed) return undefined;
+	return new Set(normalizeToolNames(parsed));
 }
 
 /** Dispatch metadata carried on write-tool details for renderer delegation. */
