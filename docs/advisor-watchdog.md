@@ -53,9 +53,14 @@ If `advisor.enabled` is true but no `modelRoles.advisor` value resolves to an av
 
 ## What the advisor sees
 
-At each primary turn end, `AdvisorRuntime` receives only the new transcript delta since the last advisor update. Deltas are rendered with `formatSessionHistoryMarkdown(..., { includeThinking: true, includeToolIntent: true, watchedRoles: true, expandPrimaryContext: true })`, so the advisor can review assistant reasoning as well as user-visible text, tool calls, and tool results.
+At each primary turn end, `AdvisorRuntime` receives only the new transcript delta since the last advisor update. In the default `full` mode, each delta is rendered with `formatSessionHistoryMarkdown(..., { includeThinking: true, includeToolIntent: true, watchedRoles: true, expandPrimaryContext: true })`, so the advisor can review assistant reasoning as well as user-visible text, tool calls, and tool results.
 
-Most hidden `custom` messages collapse to a one-line summary in the delta. The exception is the primary agent's injected constraint context — the types in `PRIMARY_CONTEXT_CUSTOM_TYPES` (`plan-mode-context`, `plan-mode-reference`). `expandPrimaryContext` renders these verbatim inside a `<primary-context kind="…">` wrapper (XML-escaped, so plan/objective text cannot break out or read as advisor instructions). Without this the advisor only saw a 120-char truncation of the plan-mode rules — which cut off mid-sentence at `NEVER create, edit, or delete files — excep…`, hiding the "except the single plan file" carve-out and producing false blockers against the agent writing its own plan file. Because these prompts are re-injected verbatim every primary turn, `AdvisorRuntime` dedupes them: a byte-identical re-injection collapses to a `(unchanged — still in effect)` marker, and the full body re-expands whenever the content changes or the advisor re-primes. `goal-mode-context` is deliberately excluded — its live budget counters change every turn, so it can neither dedupe nor expand cheaply.
+Per-advisor `context` settings in `WATCHDOG.yml` change that view:
+
+- `full` (default): append each rendered primary delta to the advisor's private conversation. This is usually the cheapest mode on providers with prefix-based prompt caching, because the growing prefix is cached once and only the new delta is re-tokenized each turn.
+- `minimal`: also append each delta, but omit reasoning, tool intent, and expanded edit diffs. Like `full`, it keeps a stable, growing prefix, so it reduces per-delta size without breaking cache. Use this when the goal is to reduce token usage per turn while keeping full advisor history.
+
+Most hidden `custom` messages collapse to a one-line summary in the delta. The exception is the primary agent's injected constraint context — the types in `PRIMARY_CONTEXT_CUSTOM_TYPES` (`plan-mode-context`, `plan-mode-reference`) — plus hidden companions such as `image-attachment-description` that describe visible transcript entries. `expandPrimaryContext` renders plan/goal constraints verbatim inside a `<primary-context kind="…">` wrapper (XML-escaped, so plan/objective text cannot break out or read as advisor instructions); image descriptions render normally. Because these prompts are re-injected verbatim every primary turn, `AdvisorRuntime` collapses an unchanged copy to a short marker until the advisor is re-primed.
 
 Advisor messages already injected into the primary transcript are filtered out before the next delta is rendered. This prevents the advisor from recursively reviewing its own advice.
 
@@ -66,9 +71,9 @@ When the primary transcript is rewritten, the advisor runtime is reset:
 - branch/fork style history replacement
 - context-maintenance re-prime when the advisor's own context cannot fit
 
-Reset clears the advisor's private in-memory transcript and rewinds its cursor. The next advisor update replays the current bounded primary transcript instead of continuing from stale pre-rewrite context.
+Reset clears the advisor's private in-memory transcript and rewinds its cursor. The next advisor update replays the configured current primary view instead of continuing from stale pre-rewrite context.
 
-When the advisor is enabled mid-session, the cursor seeds to the current primary transcript length. That avoids replaying the whole old conversation on the first enabled turn.
+When the advisor is enabled mid-session, the runtime seeds the cursor to the current primary transcript length so the next update only sends the new delta.
 
 ## Tools and isolation
 
@@ -218,6 +223,7 @@ advisors:
   - name: Architecture
     model: anthropic/claude-sonnet-4-5:medium
     tools: [read, grep, glob]
+    context: minimal
     instructions: |
       Watch cross-module coupling and public-API growth.
 
@@ -235,6 +241,7 @@ Fields:
 - `advisors[].model`: optional model selector with optional `:level` thinking suffix (e.g. `x-ai/grok-code-fast:high`). Omitted → the advisor uses `modelRoles.advisor`.
 - `advisors[].tools`: optional list of built-in tool names to grant. Omitted or empty → the default `read`/`grep`/`glob` subset. Any name in [`BUILTIN_TOOL_NAMES`](../packages/coding-agent/src/tools/builtin-names.ts) is accepted, including mutating tools (`edit`, `write`, `bash`, `eval`, `browser`, `debug`, `ast_edit`, `task`, `job`, and the memory tools). Legacy aliases (`search`→`grep`, `find`→`glob`) are normalized. Unknown names are dropped with a warning. See [Tools and isolation](#tools-and-isolation) for the safety implications of granting mutating tools.
 - `advisors[].instructions`: this advisor's specialization, appended after the shared baseline. Both instruction fields expand `@path` imports like `WATCHDOG.md`.
+- `advisors[].context`: optional primary-context policy: `full` (default) or `minimal`. `minimal` reduces each rendered delta but retains the normal append-only advisor history.
 
 ### Discovery locations
 
@@ -253,13 +260,11 @@ Subagent advisors remain isolated from the subagent's primary tool session in th
 
 Advisor usage is separate model usage. `/advisor status` reports advisor token counts and cost from the advisor agent's own transcript.
 
-The advisor has its own append-only context. Before each advisor prompt, `AgentSession` estimates incoming tokens and may maintain advisor context:
+In `full` and `minimal` modes, the advisor has its own append-only context. Before each advisor prompt, `AgentSession` estimates incoming tokens and may maintain that context:
 
 1. try model-level context promotion when enabled and a larger compatible model is available
 2. if promotion cannot fit enough context, compact the advisor's own message history
-3. if compaction has no candidates or still cannot fit, re-prime from the current bounded primary transcript
-
-The advisor's live context is in-memory and append-only; it is retained while the session runs so `/advisor dump` can inspect it, and is independently promoted/compacted/re-primed (above). It is not a replacement for the primary persisted transcript.
+3. if compaction has no candidates or still cannot fit, re-prime from the configured current primary view
 
 ## Transcript persistence and observability
 

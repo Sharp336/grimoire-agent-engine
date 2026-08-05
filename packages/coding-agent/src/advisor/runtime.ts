@@ -63,9 +63,25 @@ export interface AdvisorRuntimeHost {
 	notifyFailure?(error: unknown): void;
 }
 
+/** Controls how much primary-session context an advisor retains. */
+export type AdvisorContextMode = "full" | "minimal";
+
+/** Per-advisor controls for how much of the primary transcript the advisor sees. */
+export interface AdvisorContextConfig {
+	/**
+	 * `full` appends each primary delta; `minimal` omits verbose reasoning and
+	 * diffs from each delta while keeping the same append-only history.
+	 */
+	mode?: AdvisorContextMode;
+}
+
 interface PendingDelta {
 	text: string;
 	turns: number;
+}
+
+interface RenderedDelta {
+	text: string;
 }
 
 interface CatchupWaiter {
@@ -101,6 +117,7 @@ export class AdvisorRuntime {
 		private readonly agent: AdvisorAgent,
 		private readonly host: AdvisorRuntimeHost,
 		private readonly retryDelayMs = 1000,
+		private readonly contextConfig: AdvisorContextConfig = {},
 	) {}
 
 	get backlog(): number {
@@ -111,9 +128,9 @@ export class AdvisorRuntime {
 		if (this.disposed) return;
 		const all = messages ?? this.host.snapshotMessages();
 		this.#latestMessages = all;
-		const render = this.#renderDelta(all);
-		if (render) {
-			this.#pending.push({ text: render, turns: 1 });
+		const rendered = this.#renderDelta(all);
+		if (rendered) {
+			this.#pending.push({ text: rendered.text, turns: 1 });
 			this.#backlog++;
 			this.#notifyWaiters();
 			void this.#drain();
@@ -200,7 +217,7 @@ export class AdvisorRuntime {
 		this.#wakeAllWaiters();
 	}
 
-	#renderDelta(messages?: AgentMessage[]): string | null {
+	#renderDelta(messages?: AgentMessage[]): RenderedDelta | null {
 		const all = messages ?? this.#latestMessages ?? this.host.snapshotMessages();
 		if (all.length < this.#lastCount) {
 			this.#lastCount = all.length;
@@ -213,17 +230,19 @@ export class AdvisorRuntime {
 			.map(m => this.#dedupContextMessage(m));
 		this.#lastCount = all.length;
 		if (delta.length === 0) return null;
+
+		const mode = this.contextConfig.mode ?? "full";
 		const obfuscator = this.host.obfuscator;
 		const formattedDelta = obfuscator?.hasSecrets() ? obfuscateAdvisorDelta(obfuscator, delta) : delta;
 		const md = formatSessionHistoryMarkdown(formattedDelta, {
-			includeThinking: true,
-			includeToolIntent: true,
+			includeThinking: mode !== "minimal",
+			includeToolIntent: mode !== "minimal",
 			watchedRoles: true,
 			expandPrimaryContext: true,
-			expandEditDiffs: true,
+			expandEditDiffs: mode !== "minimal",
 		});
 		if (!md.trim()) return null;
-		return `### Session update\n\n${md}`;
+		return { text: `### Session update\n\n${md}` };
 	}
 
 	/**
@@ -291,10 +310,9 @@ export class AdvisorRuntime {
 			while (!this.disposed && this.#pending.length) {
 				const popped = this.#pending.splice(0);
 				const epoch = this.#epoch;
-				// Each delta already opens with a `### Session update` heading, so
-				// join with a blank line rather than a `---` rule.
 				const candidateBatch = popped.map(b => b.text).join("\n\n");
 				const turnsCovered = popped.reduce((sum, b) => sum + b.turns, 0);
+
 				const incomingTokens = estimateTokens({
 					role: "user",
 					content: candidateBatch,
@@ -318,7 +336,7 @@ export class AdvisorRuntime {
 					// Promotion could not fit the advisor's context — re-prime.
 					const newTurns = this.#pending.reduce((sum, b) => sum + b.turns, 0);
 					this.#resetAdvisorContext(false, false);
-					batch = this.#renderDelta(this.#latestMessages);
+					batch = this.#renderDelta(this.#latestMessages)?.text ?? null;
 					finalTurns = turnsCovered + newTurns;
 				} else {
 					batch = candidateBatch;

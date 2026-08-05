@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added per-advisor primary-context policies in `WATCHDOG.yml`: `context: full | minimal`. `minimal` mode keeps append-only history but omits verbose reasoning, tool intent, and expanded edit diffs from each primary delta, giving the advisor a lighter view of the session without changing the append-only delivery model.
+
 ## [16.3.15] - 2026-07-09
 
 ### Changed

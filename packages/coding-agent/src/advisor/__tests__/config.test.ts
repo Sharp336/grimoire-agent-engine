@@ -35,6 +35,7 @@ describe("discoverAdvisorConfigs", () => {
 			"  - name: Architecture",
 			"    model: x-ai/grok-code-fast:high",
 			"    instructions: Watch module boundaries.",
+			"    context: minimal",
 			"  - name: Security Reviewer",
 			"    tools: [read, definitely-not-a-tool]",
 		].join("\n");
@@ -48,6 +49,7 @@ describe("discoverAdvisorConfigs", () => {
 		// resolution happens later in the session, not here.
 		expect(arch.model).toBe("x-ai/grok-code-fast:high");
 		expect(arch.instructions).toBe("Watch module boundaries.");
+		expect(arch.context).toBe("minimal");
 		expect(sec.name).toBe("Security Reviewer");
 		expect(sec.model).toBeUndefined();
 		// The unknown/non-read-only tool is dropped; only `read` survives.
@@ -98,7 +100,12 @@ describe("WATCHDOG.yml file round-trip", () => {
 	const doc: WatchdogConfigDoc = {
 		instructions: 'Shared baseline.\nSecond line with: a colon and "quotes".',
 		advisors: [
-			{ name: "Architecture", model: "x-ai/grok-code-fast:high", instructions: "Watch module boundaries." },
+			{
+				name: "Architecture",
+				model: "x-ai/grok-code-fast:high",
+				instructions: "Watch module boundaries.",
+				context: "minimal",
+			},
 			{ name: "Security", tools: ["read", "grep"] },
 		],
 	};

@@ -1572,6 +1572,54 @@ describe("advisor", () => {
 			expect(promptInputs[1]).toContain("new-conversation");
 			expect(promptInputs[1]).not.toContain("old-conversation");
 		});
+
+		it("full context mode includes the entire delta by default", async () => {
+			const promptInputs: string[] = [];
+			const agent = makeAgent(promptInputs);
+			const messages: AgentMessage[] = [
+				{ role: "user", content: "first", timestamp: 1 } as AgentMessage,
+				{ role: "assistant", content: "reply first", timestamp: 2 } as unknown as AgentMessage,
+				{ role: "user", content: "second", timestamp: 3 } as AgentMessage,
+				{ role: "assistant", content: "reply second", timestamp: 4 } as unknown as AgentMessage,
+			];
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => messages,
+				enqueueAdvice: () => {},
+			};
+			const runtime = new AdvisorRuntime(agent, host, 0);
+			runtime.onTurnEnd();
+			await Promise.resolve();
+			expect(promptInputs).toHaveLength(1);
+			expect(promptInputs[0]).toContain("first");
+			expect(promptInputs[0]).toContain("second");
+		});
+
+		it("minimal context mode strips thinking from the advisor prompt", async () => {
+			const promptInputs: string[] = [];
+			const agent = makeAgent(promptInputs);
+			const messages: AgentMessage[] = [
+				{ role: "user", content: "hello", timestamp: 1 } as AgentMessage,
+				{
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "I should check the edge case first." },
+						{ type: "text", text: "ok" },
+					],
+					timestamp: 2,
+				} as AgentMessage,
+			];
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => messages,
+				enqueueAdvice: () => {},
+			};
+			const runtime = new AdvisorRuntime(agent, host, 0, { mode: "minimal" });
+			runtime.onTurnEnd();
+			await Promise.resolve();
+			expect(promptInputs).toHaveLength(1);
+			expect(promptInputs[0]).not.toContain("I should check the edge case first");
+			expect(promptInputs[0]).not.toContain("_thinking:_");
+			expect(promptInputs[0]).toContain("hello");
+		});
 	});
 
 	describe("advisor default tools", () => {
@@ -1851,6 +1899,19 @@ describe("advisor", () => {
 			const text = strip(overlay.render(120));
 			expect(text).toContain("Editing");
 			expect(text).toContain("Architecture");
+		});
+
+		it("exposes a minimal-context policy in the detail editor", async () => {
+			const uiTheme = await getThemeByName("dark");
+			if (!uiTheme) throw new Error("theme unavailable");
+			setThemeInstance(uiTheme);
+			const overlay = make({ advisors: [{ name: "Architecture", context: "minimal" }] });
+			overlay.render(120);
+			overlay.handleInput("\x1b[<0;4;2M");
+
+			const text = strip(overlay.render(120));
+			expect(text).toContain("Context");
+			expect(text).toContain("minimal");
 		});
 
 		it("seeds a visible default advisor (labeled with the role model) when the config is empty", async () => {

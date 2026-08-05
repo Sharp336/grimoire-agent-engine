@@ -104,7 +104,7 @@ function wrap(text: string, width: number): string[] {
 	return Bun.wrapAnsi(text, Math.max(1, width), { trim: false }).split("\n");
 }
 
-type Screen = "list" | "detail" | "name" | "model" | "tools" | "thinking" | "instructions";
+type Screen = "list" | "detail" | "name" | "model" | "tools" | "context" | "thinking" | "instructions";
 
 /**
  * Fullscreen advisor-configuration overlay. Implements {@link Component} directly
@@ -267,11 +267,13 @@ export class AdvisorConfigOverlayComponent implements Component {
 	#advisorPreview(advisor: AdvisorConfig, bodyWidth: number): string[] {
 		const model = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";
 		const tools = advisor.tools?.length ? advisor.tools.join(", ") : "read, grep, glob (default)";
+		const context = advisor.context ?? "full";
 		const lines = [
 			theme.bold(advisor.name || "(unnamed)"),
 			"",
 			`${theme.fg("dim", "Model:")} ${model}`,
 			`${theme.fg("dim", "Tools:")} ${tools}`,
+			`${theme.fg("dim", "Context:")} ${context}`,
 			"",
 			theme.fg("dim", "Instructions:"),
 		];
@@ -303,14 +305,19 @@ export class AdvisorConfigOverlayComponent implements Component {
 		const advisor = doc.advisors[0];
 		if (!advisor) return false;
 		return (
-			advisor.name === "default" && !advisor.model?.trim() && !advisor.tools?.length && !advisor.instructions?.trim()
+			advisor.name === "default" &&
+			!advisor.model?.trim() &&
+			!advisor.tools?.length &&
+			!advisor.instructions?.trim() &&
+			!advisor.context
 		);
 	}
 
 	#advisorSummary(advisor: AdvisorConfig): string {
 		const model = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";
 		const tools = advisor.tools?.length ? advisor.tools.join(", ") : "(default: read/grep/glob)";
-		return `${model} · ${tools}`;
+		const context = advisor.context ?? "full";
+		return `${model} · ${tools} · ${context}`;
 	}
 
 	#showList(): void {
@@ -385,6 +392,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 		}
 		const modelDescription = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";
 		const toolsDescription = advisor.tools?.length ? advisor.tools.join(", ") : "(default: read/grep/glob)";
+		const context = advisor.context ?? "full";
 		const items: SelectItem[] = [
 			{ value: "name", label: "Name", description: advisor.name },
 			{ value: "model", label: "Model", description: modelDescription },
@@ -394,6 +402,9 @@ export class AdvisorConfigOverlayComponent implements Component {
 		}
 		items.push(
 			{ value: "tools", label: "Tools", description: toolsDescription },
+			{ value: "context", label: "Context", description: context },
+		);
+		items.push(
 			{ value: "instructions", label: "Instructions", description: previewLine(advisor.instructions) },
 			{ value: "delete", label: "Delete this advisor" },
 			{ value: "back", label: "Back" },
@@ -418,6 +429,9 @@ export class AdvisorConfigOverlayComponent implements Component {
 					new Set(this.#doc.advisors[index].tools ?? [...ADVISOR_DEFAULT_TOOL_NAMES]),
 					0,
 				);
+				return;
+			case "context":
+				this.#showContextPicker(index);
 				return;
 			case "resetModel":
 				this.#doc.advisors[index].model = undefined;
@@ -526,6 +540,24 @@ export class AdvisorConfigOverlayComponent implements Component {
 			list,
 			"Enter / click toggle · select Done or Esc to apply (empty or read/grep/glob = default)",
 		);
+	}
+
+	#showContextPicker(index: number): void {
+		const items: SelectItem[] = [
+			{ value: "full", label: "Full", description: "Append each primary transcript delta (default)" },
+			{ value: "minimal", label: "Minimal", description: "Omit reasoning, tool intent, and expanded edit diffs" },
+		];
+		const current = this.#doc.advisors[index].context ?? "full";
+		const list = new SelectList(items, Math.max(1, items.length), getSelectListTheme());
+		list.setSelectedIndex(items.findIndex(item => item.value === current));
+		list.onSelect = item => {
+			this.#doc.advisors[index].context =
+				item.value === "full" ? undefined : (item.value as AdvisorConfig["context"]);
+			this.#dirty = true;
+			this.#showDetail(index);
+		};
+		list.onCancel = () => this.#showDetail(index);
+		this.#setScreen("context", list, "Select a primary-context policy · Enter / click apply · Esc cancel");
 	}
 
 	/** `index === -1` edits the shared top-level instructions; otherwise advisor[index]. */

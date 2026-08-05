@@ -15,12 +15,18 @@ import { collectConfigCandidates } from "./watchdog";
  * `edit`/`write`/`bash` (the advisor is a full agent). Omitted or empty falls
  * back to the default `read`/`grep`/`glob` subset. `instructions` is the
  * advisor's specialization, appended to the shared baseline.
+ *
+ * `context` controls the advisor's retained primary-session context. `full`
+ * (default) keeps the normal append-only behavior; `minimal` strips verbose
+ * reasoning and diffs from each update, reducing the per-delta size without
+ * invalidating provider prefix caching.
  */
 export interface AdvisorConfig {
 	name: string;
 	model?: string;
 	tools?: string[];
 	instructions?: string;
+	context?: "full" | "minimal";
 }
 
 /**
@@ -38,6 +44,7 @@ const advisorEntrySchema = type({
 	"model?": "string",
 	"tools?": "string[]",
 	"instructions?": "string",
+	"context?": "'full' | 'minimal'",
 });
 
 const watchdogYamlSchema = type({
@@ -125,6 +132,7 @@ export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Pr
 				model: entry.model?.trim() || undefined,
 				tools: filterAdvisorTools(entry.tools, item.path),
 				instructions,
+				context: entry.context,
 			});
 		}
 	}
@@ -212,6 +220,7 @@ export async function loadWatchdogConfigFile(filePath: string): Promise<Watchdog
 			model: a.model?.trim() || undefined,
 			tools: a.tools?.length ? [...a.tools] : undefined,
 			instructions: a.instructions?.trim() ? a.instructions : undefined,
+			context: a.context,
 		})),
 	};
 }
@@ -231,6 +240,7 @@ export function serializeWatchdogConfig(doc: WatchdogConfigDoc): string {
 			if (a.model?.trim()) entry.model = a.model;
 			if (a.tools?.length) entry.tools = [...a.tools];
 			if (a.instructions?.trim()) entry.instructions = a.instructions;
+			if (a.context) entry.context = a.context;
 			return entry;
 		});
 	}

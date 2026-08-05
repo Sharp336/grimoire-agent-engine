@@ -234,6 +234,14 @@ const CONTEXTUAL_NON_PRIMARY_HIDDEN_CUSTOM_TYPES: Record<string, true> = {
 	"image-attachment-description": true,
 };
 
+/** Combined set of hidden custom-message types that should be retained when a
+ *  rolling advisor context window starts after them, because they describe or
+ *  constrain the visible transcript that follows. */
+export const CONTEXTUAL_HIDDEN_CUSTOM_TYPES: ReadonlySet<string> = new Set([
+	...PRIMARY_CONTEXT_CUSTOM_TYPES,
+	...Object.keys(CONTEXTUAL_NON_PRIMARY_HIDDEN_CUSTOM_TYPES),
+]);
+
 /** One-liner for custom/hook messages: `[irc] A → B: body…`. */
 function customOneLiner(msg: CustomMessage | HookMessage): string {
 	const details = (msg.details ?? {}) as Record<string, unknown>;
@@ -360,11 +368,7 @@ export function formatSessionHistoryMarkdown(messages: unknown[], opts?: History
 			case "custom":
 			case "hookMessage": {
 				const custom = msg as CustomMessage | HookMessage;
-				if (
-					custom.display === false &&
-					!PRIMARY_CONTEXT_CUSTOM_TYPES.has(custom.customType) &&
-					CONTEXTUAL_NON_PRIMARY_HIDDEN_CUSTOM_TYPES[custom.customType] !== true
-				) {
+				if (custom.display === false && !CONTEXTUAL_HIDDEN_CUSTOM_TYPES.has(custom.customType)) {
 					break;
 				}
 				if (opts?.expandPrimaryContext && PRIMARY_CONTEXT_CUSTOM_TYPES.has(custom.customType)) {
