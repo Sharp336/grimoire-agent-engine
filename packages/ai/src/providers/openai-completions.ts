@@ -61,6 +61,7 @@ import type {
 	ChatCompletionContentPart,
 	ChatCompletionContentPartImage,
 	ChatCompletionContentPartText,
+	ChatCompletionContentPartVideo,
 	ChatCompletionMessageParam,
 	ChatCompletionTool,
 	ChatCompletionToolMessageParam,
@@ -110,6 +111,7 @@ import { transformMessages } from "./transform-messages";
 import {
 	isDashscopeCompatibleModeTextOnlyQwen,
 	joinTextWithImagePlaceholder,
+	NON_VIDEO_PLACEHOLDER,
 	NON_VISION_IMAGE_PLACEHOLDER,
 } from "./vision-guard";
 
@@ -1913,8 +1915,10 @@ export function convertMessages(
 				});
 			} else {
 				const supportsImages = model.input.includes("image") && !isDashscopeCompatibleModeTextOnlyQwen(model);
+				const supportsVideos = model.input.includes("video");
 				const content: ChatCompletionContentPart[] = [];
 				let omittedImages = false;
+				let omittedVideos = false;
 				for (const item of msg.content) {
 					if (item.type === "text") {
 						const text = item.text.toWellFormed();
@@ -1923,6 +1927,17 @@ export function convertMessages(
 							type: "text",
 							text,
 						} satisfies ChatCompletionContentPartText);
+					} else if (item.type === "video") {
+						if (!supportsVideos) {
+							omittedVideos = true;
+							continue;
+						}
+						content.push({
+							type: "video_url",
+							video_url: {
+								url: `data:${item.mimeType};base64,${item.data}`,
+							},
+						} satisfies ChatCompletionContentPartVideo);
 					} else if (supportsImages) {
 						content.push({
 							type: "image_url",
@@ -1940,6 +1955,12 @@ export function convertMessages(
 					content.push({
 						type: "text",
 						text: NON_VISION_IMAGE_PLACEHOLDER,
+					} satisfies ChatCompletionContentPartText);
+				}
+				if (omittedVideos) {
+					content.push({
+						type: "text",
+						text: NON_VIDEO_PLACEHOLDER,
 					} satisfies ChatCompletionContentPartText);
 				}
 				if (content.length === 0) continue;
@@ -2190,8 +2211,8 @@ export function convertMessages(
 			}
 			params.push(assistantMsg);
 		} else if (msg.role === "toolResult") {
-			// Batch consecutive tool results and collect all images
-			const imageBlocks: Array<{ type: "image_url"; image_url: { url: string } }> = [];
+			// Batch consecutive tool results and collect all media
+			const mediaBlocks: ChatCompletionContentPart[] = [];
 			let j = i;
 
 			for (; j < transformedMessages.length && transformedMessages[j].role === "toolResult"; j++) {
@@ -2203,21 +2224,31 @@ export function convertMessages(
 					.map(c => (c as TextContent).text)
 					.join("\n");
 				const supportsImages = model.input.includes("image") && !isDashscopeCompatibleModeTextOnlyQwen(model);
+				const supportsVideos = model.input.includes("video");
 				const hasImages = toolMsg.content.some(c => c.type === "image");
+				const hasVideos = toolMsg.content.some(c => c.type === "video");
 				const omittedImages = hasImages && !supportsImages;
+				const omittedVideos = hasVideos && !supportsVideos;
 
-				// Always send tool result with text (or placeholder if only images)
+				// Always send tool result with text (or placeholder if only media)
 				const hasText = textResult.length > 0;
 				const remappedToolCallId = consumeToolCallId(toolMsg.toolCallId);
 				const resolvedToolCallId =
 					remappedToolCallId ?? ensureToolCallId(toolMsg.toolCallId, `${j}:${toolMsg.toolName ?? "tool"}`);
-				const toolResultContent = omittedImages
+				let toolResultContent = omittedImages
 					? joinTextWithImagePlaceholder(textResult, true)
 					: hasText
 						? textResult
 						: hasImages
 							? "(see attached image)"
 							: "";
+				if (omittedVideos) {
+					toolResultContent = toolResultContent
+						? `${toolResultContent}\n${NON_VIDEO_PLACEHOLDER}`
+						: NON_VIDEO_PLACEHOLDER;
+				} else if (!toolResultContent && hasVideos) {
+					toolResultContent = "(see attached video)";
+				}
 				const toolResultMsg: OpenAICompletionsToolMessageParam = {
 					role: "tool",
 					content: toolResultContent.toWellFormed(),
@@ -2231,9 +2262,21 @@ export function convertMessages(
 				if (hasImages && supportsImages) {
 					for (const block of toolMsg.content) {
 						if (block.type === "image") {
-							imageBlocks.push({
+							mediaBlocks.push({
 								type: "image_url",
 								image_url: {
+									url: `data:${block.mimeType};base64,${block.data}`,
+								},
+							});
+						}
+					}
+				}
+				if (hasVideos && supportsVideos) {
+					for (const block of toolMsg.content) {
+						if (block.type === "video") {
+							mediaBlocks.push({
+								type: "video_url",
+								video_url: {
 									url: `data:${block.mimeType};base64,${block.data}`,
 								},
 							});
@@ -2244,8 +2287,8 @@ export function convertMessages(
 
 			i = j - 1;
 
-			// After all consecutive tool results, add a single user message with all images
-			if (imageBlocks.length > 0) {
+			// After all consecutive tool results, add a single user message with all media
+			if (mediaBlocks.length > 0) {
 				if (compat.requiresAssistantAfterToolResult) {
 					params.push({
 						role: "assistant",
@@ -2258,9 +2301,9 @@ export function convertMessages(
 					content: [
 						{
 							type: "text",
-							text: "Attached image(s) from tool result:",
+							text: "Attached media from tool result:",
 						},
-						...imageBlocks,
+						...mediaBlocks,
 					],
 				});
 				lastRole = "user";

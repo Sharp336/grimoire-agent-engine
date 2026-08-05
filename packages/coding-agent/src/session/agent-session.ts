@@ -55,6 +55,7 @@ import {
 import type {
 	AssistantMessage,
 	CodexCompactionContext,
+	ContentBlock,
 	ImageContent,
 	Message,
 	Model,
@@ -4993,9 +4994,12 @@ export class AgentSession {
 			!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTaskPrelude(expandedText) : undefined;
 		const normalizedImages = await this.#normalizeImagesForModel(options?.images);
 
-		const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
+		const userContent: ContentBlock[] = [{ type: "text", text: expandedText }];
 		if (normalizedImages?.length) {
 			userContent.push(...normalizedImages);
+		}
+		if (options?.videos?.length) {
+			userContent.push(...options.videos);
 		}
 		// Text-only model + image attachment: describe via a vision model and inject the
 		// description as a hidden companion (the image stays in the visible user message).

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added video blocks to custom/hook message content and tool-result content unions, preserving video attachments through compaction and session persistence.
+
 ## [17.2.9] - 2026-08-05
 
 ### Fixed

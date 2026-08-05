@@ -16,9 +16,11 @@ import {
 } from "@oh-my-pi/pi-agent-core/compaction/messages";
 import type {
 	AssistantMessage,
+	ContentBlock,
 	ImageContent,
 	Message,
 	MessageAttribution,
+	MessageContent,
 	TextContent,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
@@ -311,7 +313,7 @@ export const DEFAULT_CUSTOM_MESSAGE_TYPE = "custom-message";
 export const LIVE_DELEGATION_MESSAGE_TYPE = "live-delegation";
 
 /** Content shape accepted for extension-injected messages. */
-export type CustomMessageContent = string | (TextContent | ImageContent)[];
+export type CustomMessageContent = MessageContent;
 
 /** Public input accepted by `pi.sendMessage` and `AgentSession.sendCustomMessage`. */
 export type CustomMessagePayload<T = unknown> =
@@ -639,7 +641,7 @@ function renderSteeringEnvelope(message: string): string {
 	return prompt.render(userInterjectionTemplate, { message });
 }
 
-function getArrayContentText(content: (TextContent | ImageContent)[]): string {
+function getArrayContentText(content: ContentBlock[]): string {
 	let firstText: string | undefined;
 	let textParts: string[] | undefined;
 	for (const part of content) {
@@ -656,7 +658,7 @@ function getArrayContentText(content: (TextContent | ImageContent)[]): string {
 	return textParts === undefined ? (firstText ?? "") : textParts.join("\n");
 }
 
-function getArrayContentImages(content: (TextContent | ImageContent)[]): ImageContent[] {
+function getArrayContentImages(content: ContentBlock[]): ImageContent[] {
 	let images: ImageContent[] | undefined;
 	for (const part of content) {
 		if (part.type !== "image") continue;
@@ -709,15 +711,15 @@ export function wrapSteeringForModel(messages: AgentMessage[]): AgentMessage[] {
 	return wrappedMessages ?? messages;
 }
 
-/** Result of filtering image blocks out of a `(TextContent | ImageContent)[]` array. */
+/** Result of filtering image blocks out of a `ContentBlock[]` array. */
 interface StripContentResult {
-	content: (TextContent | ImageContent)[];
+	content: ContentBlock[];
 	removed: number;
 }
 
-function stripImagesFromArrayContent(content: (TextContent | ImageContent)[]): StripContentResult {
+function stripImagesFromArrayContent(content: ContentBlock[]): StripContentResult {
 	let removed = 0;
-	const kept: (TextContent | ImageContent)[] = [];
+	const kept: ContentBlock[] = [];
 	for (const part of content) {
 		if (part.type === "image") {
 			removed++;
@@ -830,9 +832,36 @@ export function replaceLlmImagesWithText(messages: Message[], placeholder: strin
 		if (msg.role !== "user" && msg.role !== "developer" && msg.role !== "toolResult") continue;
 		const content = msg.content;
 		if (!Array.isArray(content) || !content.some(part => part.type === "image")) continue;
-		const replaced: (TextContent | ImageContent)[] = [];
+		const replaced: ContentBlock[] = [];
 		for (const part of content) {
 			if (part.type !== "image") {
+				replaced.push(part);
+				continue;
+			}
+			const prev = replaced[replaced.length - 1];
+			if (prev?.type === "text" && prev.text === placeholder) continue;
+			replaced.push({ type: "text", text: placeholder });
+		}
+		if (out === undefined) out = messages.slice();
+		out[i] = { ...msg, content: replaced } as Message;
+	}
+	return out ?? messages;
+}
+
+/**
+ * Video counterpart to {@link replaceLlmImagesWithText}: keeps video blocks off
+ * the wire when the active model has no video input capability.
+ */
+export function replaceLlmVideosWithText(messages: Message[], placeholder: string): Message[] {
+	let out: Message[] | undefined;
+	for (let i = 0; i < messages.length; i++) {
+		const msg = messages[i];
+		if (msg.role !== "user" && msg.role !== "developer" && msg.role !== "toolResult") continue;
+		const content = msg.content;
+		if (!Array.isArray(content) || !content.some(part => part.type === "video")) continue;
+		const replaced: ContentBlock[] = [];
+		for (const part of content) {
+			if (part.type !== "video") {
 				replaced.push(part);
 				continue;
 			}
@@ -1014,7 +1043,7 @@ export function sanitizeRehydratedOpenAIResponsesAssistantMessage(message: Assis
 	};
 }
 
-function customMessageContentToLlmContent(content: CustomMessage["content"]): (TextContent | ImageContent)[] {
+function customMessageContentToLlmContent(content: CustomMessage["content"]): ContentBlock[] {
 	return typeof content === "string" ? [{ type: "text", text: content }] : content;
 }
 

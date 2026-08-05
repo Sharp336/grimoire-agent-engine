@@ -8,7 +8,7 @@ import * as fsSync from "node:fs";
 import * as os from "node:os";
 import { createInterface } from "node:readline/promises";
 import { EventLoopKeepalive } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, VideoContent } from "@oh-my-pi/pi-ai";
 import {
 	$env,
 	directoryExists,
@@ -423,6 +423,7 @@ async function runInteractiveMode(
 	eventBus?: EventBus,
 	initialMessage?: string,
 	initialImages?: ImageContent[],
+	initialVideos?: VideoContent[],
 	joinLink?: string,
 ): Promise<void> {
 	const mode = new InteractiveMode(
@@ -509,7 +510,7 @@ async function runInteractiveMode(
 		session.maybeStartTitleGeneration(initialMessage);
 		try {
 			using _keepalive = new EventLoopKeepalive();
-			await session.prompt(initialMessage, { images: initialImages });
+			await session.prompt(initialMessage, { images: initialImages, videos: initialVideos });
 		} catch (error: unknown) {
 			const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 			mode.showError(errorMessage);
@@ -1580,10 +1581,11 @@ export async function runRootCommand(
 						}),
 					)
 				: undefined;
-		const { initialMessage, initialImages } = buildInitialMessage({
+		const { initialMessage, initialImages, initialVideos } = buildInitialMessage({
 			parsed: initialArgs,
 			fileText: processedFiles?.text,
 			fileImages: processedFiles?.images,
+			fileVideos: processedFiles?.videos,
 			stdinContent: pipedInput,
 		});
 
@@ -1706,6 +1708,7 @@ export async function runRootCommand(
 				eventBus,
 				initialMessage,
 				initialImages,
+				initialVideos,
 				parsedArgs.join,
 			);
 		} else {
@@ -1717,6 +1720,7 @@ export async function runRootCommand(
 				messages: initialArgs.messages,
 				initialMessage,
 				initialImages,
+				initialVideos,
 				printThoughts: initialArgs.printThoughts,
 			});
 			if ($env.PI_TIMING) {

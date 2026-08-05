@@ -24,6 +24,7 @@ import type {
 	Api,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
+	ContentBlock,
 	Context,
 	ImageContent,
 	Model,
@@ -875,7 +876,7 @@ interface ToolResultEventBase {
 	type: "tool_result";
 	toolCallId: string;
 	input: Record<string, unknown>;
-	content: (TextContent | ImageContent)[];
+	content: ContentBlock[];
 	isError: boolean;
 }
 

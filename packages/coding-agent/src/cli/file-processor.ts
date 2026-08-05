@@ -3,7 +3,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, VideoContent } from "@oh-my-pi/pi-ai";
 import { getProjectDir, isEnoent, readImageMetadata } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import { resolveReadPath } from "../tools/path-utils";
@@ -15,10 +15,31 @@ import { CONVERTIBLE_EXTENSIONS, convertFileWithMarkit } from "../utils/markit";
 // If a file exceeds these limits, we include it as a path-only <file/> block.
 const MAX_CLI_TEXT_BYTES = 5 * 1024 * 1024; // 5MB
 const MAX_CLI_IMAGE_BYTES = 25 * 1024 * 1024; // 25MB
+// Base64 inflates ~4/3; keep inline videos under the provider's 100MB request-body cap.
+const MAX_CLI_VIDEO_BYTES = 75 * 1024 * 1024; // 75MB
+
+/**
+ * Extension → MIME for video attachments. Detection is by extension only (no
+ * container sniffing); format support is the provider's call, not ours.
+ */
+const VIDEO_EXTENSION_MIME: Record<string, string> = {
+	".mp4": "video/mp4",
+	".m4v": "video/mp4",
+	".mpeg": "video/mpeg",
+	".mpg": "video/mpg",
+	".mov": "video/mov",
+	".avi": "video/avi",
+	".flv": "video/x-flv",
+	".webm": "video/webm",
+	".wmv": "video/wmv",
+	".mkv": "video/x-matroska",
+	".3gp": "video/3gpp",
+};
 
 export interface ProcessedFiles {
 	text: string;
 	images: ImageContent[];
+	videos: VideoContent[];
 }
 
 export interface ProcessFileOptions {
@@ -31,6 +52,7 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 	const autoResizeImages = options?.autoResizeImages ?? true;
 	let text = "";
 	const images: ImageContent[] = [];
+	const videos: VideoContent[] = [];
 
 	for (const fileArg of fileArgs) {
 		// Expand and resolve path (handles ~ expansion and macOS screenshot Unicode spaces)
@@ -45,7 +67,8 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 		const imageMetadata = await readImageMetadata(absolutePath);
 		const mimeType = imageMetadata?.mimeType;
 		const ext = path.extname(absolutePath).toLowerCase();
-		const maxBytes = mimeType ? MAX_CLI_IMAGE_BYTES : MAX_CLI_TEXT_BYTES;
+		const videoMimeType = mimeType ? undefined : VIDEO_EXTENSION_MIME[ext];
+		const maxBytes = mimeType ? MAX_CLI_IMAGE_BYTES : videoMimeType ? MAX_CLI_VIDEO_BYTES : MAX_CLI_TEXT_BYTES;
 		if (stat.size > maxBytes) {
 			console.error(
 				chalk.yellow(`Warning: Skipping file contents (too large: ${formatBytes(stat.size)}): ${absolutePath}`),
@@ -108,6 +131,14 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 			} else {
 				text += `<file name="${absolutePath}"></file>\n`;
 			}
+		} else if (videoMimeType) {
+			// Handle video file: inline base64, no resize pipeline
+			videos.push({
+				type: "video",
+				mimeType: videoMimeType,
+				data: buffer.toBase64(),
+			});
+			text += `<file name="${absolutePath}"></file>\n`;
 		} else if (CONVERTIBLE_EXTENSIONS.has(ext)) {
 			const result = await convertFileWithMarkit(absolutePath);
 			if (result.ok) {
@@ -128,5 +159,5 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 		}
 	}
 
-	return { text, images };
+	return { text, images, videos };
 }

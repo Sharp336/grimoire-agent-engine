@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `VideoContent` (`type: "video"`, base64 `data` + `mimeType`) plus the `ContentBlock` / `MessageContent` aliases, and wired video blocks through the chat-completions converters (`video_url` data-URL parts) with omission placeholders on text-only models.
+
 ## [17.2.9] - 2026-08-05
 
 ### Fixed

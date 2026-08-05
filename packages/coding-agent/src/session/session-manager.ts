@@ -1,13 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type {
-	ImageContent,
-	Message,
-	MessageAttribution,
-	ServiceTierByFamily,
-	TextContent,
-	Usage,
-} from "@oh-my-pi/pi-ai";
+import type { Message, MessageAttribution, MessageContent, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import {
 	directoryExists,
 	getBlobsDir,
@@ -2130,7 +2123,7 @@ export class SessionManager {
 	 */
 	appendCustomMessageEntry<T = unknown>(
 		customType: string | undefined,
-		content: string | (TextContent | ImageContent)[] | undefined,
+		content: MessageContent | undefined,
 		display: boolean | undefined,
 		details?: T,
 		attribution: MessageAttribution | undefined = "agent",

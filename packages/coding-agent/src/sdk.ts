@@ -145,6 +145,7 @@ import {
 	convertToLlm,
 	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
 	replaceLlmImagesWithText,
+	replaceLlmVideosWithText,
 	USER_INTERRUPT_LABEL,
 	wrapSteeringForModel,
 } from "./session/messages";
@@ -3110,6 +3111,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return replaceLlmImagesWithText(
 					converted,
 					"[image omitted: the active model does not support image input]",
+				);
+			}
+			if (activeModel && !activeModel.input.includes("video")) {
+				return replaceLlmVideosWithText(
+					converted,
+					"[video omitted: the active model does not support video input]",
 				);
 			}
 			return converted;

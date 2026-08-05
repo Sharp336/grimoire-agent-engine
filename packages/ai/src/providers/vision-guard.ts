@@ -1,12 +1,13 @@
 import { isDashscopeCompatibleModeUrl } from "@oh-my-pi/pi-catalog/hosts";
 import { isQwenModelId } from "@oh-my-pi/pi-catalog/identity";
 
-import type { ImageContent, Model, TextContent } from "../types";
+import type { ContentBlock, ImageContent, Model, TextContent, VideoContent } from "../types";
 
 export const NON_VISION_IMAGE_PLACEHOLDER = "[image omitted: model does not support vision]";
+export const NON_VIDEO_PLACEHOLDER = "[video omitted: model does not support video input]";
 
 export function partitionVisionContent(
-	content: ReadonlyArray<TextContent | ImageContent>,
+	content: ReadonlyArray<ContentBlock>,
 	supportsImages: boolean,
 ): {
 	textBlocks: TextContent[];
@@ -19,6 +20,20 @@ export function partitionVisionContent(
 		textBlocks,
 		imageBlocks: supportsImages ? imageBlocks : [],
 		omittedImages: !supportsImages && imageBlocks.length > 0,
+	};
+}
+
+export function partitionVideoContent(
+	content: ReadonlyArray<ContentBlock>,
+	supportsVideos: boolean,
+): {
+	videoBlocks: VideoContent[];
+	omittedVideos: boolean;
+} {
+	const videoBlocks = content.filter((block): block is VideoContent => block.type === "video");
+	return {
+		videoBlocks: supportsVideos ? videoBlocks : [],
+		omittedVideos: !supportsVideos && videoBlocks.length > 0,
 	};
 }
 

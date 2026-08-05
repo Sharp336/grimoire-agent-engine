@@ -118,6 +118,12 @@ type AgentImageContent = {
 	mimeType: string;
 };
 
+type AgentVideoContent = {
+	type: "video";
+	data: string;
+	mimeType: string;
+};
+
 type PromptQueueState = {
 	promise: Promise<void>;
 	release: (() => void) | undefined;
@@ -731,9 +737,11 @@ export class AcpAgent implements Agent {
 				this.#trackPromptEvent(record, event);
 			});
 
-			this.#runPromptOrCommand(record, converted.text, converted.images).catch((error: unknown) => {
-				this.#finishPrompt(record, undefined, error);
-			});
+			this.#runPromptOrCommand(record, converted.text, converted.images, converted.videos).catch(
+				(error: unknown) => {
+					this.#finishPrompt(record, undefined, error);
+				},
+			);
 
 			return await pendingPrompt.promise;
 		});
@@ -808,7 +816,12 @@ export class AcpAgent implements Agent {
 		}
 	}
 
-	async #runPromptOrCommand(record: ManagedSessionRecord, text: string, images: AgentImageContent[]): Promise<void> {
+	async #runPromptOrCommand(
+		record: ManagedSessionRecord,
+		text: string,
+		images: AgentImageContent[],
+		videos: AgentVideoContent[],
+	): Promise<void> {
 		const skillResult = await this.#tryRunSkillCommand(record, text);
 		if (skillResult) {
 			return;
@@ -838,7 +851,7 @@ export class AcpAgent implements Agent {
 		});
 		if (builtinResult !== false) {
 			if ("prompt" in builtinResult) {
-				await record.session.prompt(builtinResult.prompt, { images });
+				await record.session.prompt(builtinResult.prompt, { images, videos });
 				return;
 			}
 			const promptTurn = record.promptTurn;
@@ -854,7 +867,7 @@ export class AcpAgent implements Agent {
 		}
 
 		const extensionPromptBaseline = new Set(record.extensionUserMessageTasks);
-		const agentInvoked = await record.session.prompt(text, { images });
+		const agentInvoked = await record.session.prompt(text, { images, videos });
 		// Extension and custom-TS commands are handled locally inside session.prompt().
 		// An ACP extension command can still call pi.sendUserMessage(), which starts
 		// an async nested prompt through the extension runtime. Keep the ACP turn
@@ -1489,9 +1502,14 @@ export class AcpAgent implements Agent {
 		}
 	}
 
-	#convertPromptBlocks(blocks: PromptRequest["prompt"]): { text: string; images: AgentImageContent[] } {
+	#convertPromptBlocks(blocks: PromptRequest["prompt"]): {
+		text: string;
+		images: AgentImageContent[];
+		videos: AgentVideoContent[];
+	} {
 		const textParts: string[] = [];
 		const images: AgentImageContent[] = [];
+		const videos: AgentVideoContent[] = [];
 		for (const block of blocks) {
 			switch (block.type) {
 				case "text":
@@ -1509,6 +1527,8 @@ export class AcpAgent implements Agent {
 						// to the images array so the user's intent survives; everything
 						// else falls back to the URI placeholder below.
 						images.push({ type: "image", data: block.resource.blob, mimeType: block.resource.mimeType });
+					} else if (typeof block.resource.mimeType === "string" && block.resource.mimeType.startsWith("video/")) {
+						videos.push({ type: "video", data: block.resource.blob, mimeType: block.resource.mimeType });
 					} else {
 						textParts.push(`[embedded resource: ${block.resource.uri}]`);
 					}
@@ -1524,6 +1544,7 @@ export class AcpAgent implements Agent {
 		return {
 			text: textParts.join("\n\n").trim(),
 			images,
+			videos,
 		};
 	}
 

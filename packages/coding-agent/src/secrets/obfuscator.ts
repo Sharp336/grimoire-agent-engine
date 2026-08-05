@@ -1,6 +1,6 @@
 import * as crypto from "node:crypto";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Context, ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ContentBlock, Context, Message } from "@oh-my-pi/pi-ai";
 import type { SessionContext } from "../session/session-context";
 import { compileSecretRegex } from "./regex";
 
@@ -1968,11 +1968,11 @@ type UserFacingMessage = Extract<Message, { role: "user" | "developer" | "toolRe
 /** Obfuscate `text` blocks of a content array; image and other blocks pass through. */
 function obfuscateTextBlocks(
 	obfuscator: SecretObfuscator,
-	content: (TextContent | ImageContent)[],
+	content: ContentBlock[],
 	sharedRegexSecretValues?: ReadonlySet<string>,
-): (TextContent | ImageContent)[] {
+): ContentBlock[] {
 	let changed = false;
-	const result = content.map((block): TextContent | ImageContent => {
+	const result = content.map((block): ContentBlock => {
 		if (block.type !== "text") return block;
 		const text = obfuscator.obfuscate(block.text, sharedRegexSecretValues);
 		if (text === block.text) return block;
@@ -1983,12 +1983,9 @@ function obfuscateTextBlocks(
 }
 
 /** Restore placeholders in `text` blocks of a content array; image and other blocks pass through. */
-function deobfuscateTextBlocks(
-	obfuscator: SecretObfuscator,
-	content: (TextContent | ImageContent)[],
-): (TextContent | ImageContent)[] {
+function deobfuscateTextBlocks(obfuscator: SecretObfuscator, content: ContentBlock[]): ContentBlock[] {
 	let changed = false;
-	const result = content.map((block): TextContent | ImageContent => {
+	const result = content.map((block): ContentBlock => {
 		if (block.type !== "text") return block;
 		const text = obfuscator.deobfuscate(block.text);
 		if (text === block.text) return block;

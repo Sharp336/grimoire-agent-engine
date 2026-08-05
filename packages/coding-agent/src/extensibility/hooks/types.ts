@@ -1,7 +1,7 @@
 import type { Type } from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
 import type * as zod from "@oh-my-pi/omptype/zod";
-import type { ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
+import type { ContentBlock, ImageContent, Message, Model } from "@oh-my-pi/pi-ai";
 import type { Component, TUI } from "@oh-my-pi/pi-tui";
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../config/model-registry";
@@ -323,7 +323,7 @@ interface ToolResultEventBase {
 	/** Tool input parameters */
 	input: Record<string, unknown>;
 	/** Full content array (text and images) */
-	content: (TextContent | ImageContent)[];
+	content: ContentBlock[];
 	/** Whether the tool execution was an error */
 	isError?: boolean;
 }

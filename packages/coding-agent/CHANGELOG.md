@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added video file attachments: `@path/to/video.mp4` (and paste equivalents) are inlined as base64 `VideoContent` blocks and sent to models whose catalog metadata advertises video input (e.g. `kimi-code/k3`); unsupported models receive a placeholder notice instead.
+
 ## [17.2.9] - 2026-08-05
 
 ### Breaking Changes

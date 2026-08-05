@@ -3,16 +3,15 @@ import type {
 	AssistantMessage,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
+	ContentBlock,
 	Context,
 	Effort,
-	ImageContent,
 	Message,
 	Model,
 	ServiceTier,
 	SimpleStreamOptions,
 	Static,
 	streamSimple,
-	TextContent,
 	Tool,
 	ToolCallProviderMetadata,
 	ToolChoice,
@@ -589,7 +588,7 @@ export interface BeforeToolCallResult {
  */
 export interface AfterToolCallResult {
 	/** If provided, replaces the tool result content array in full. */
-	content?: (TextContent | ImageContent)[];
+	content?: ContentBlock[];
 	/** If provided, replaces the tool result details payload in full. */
 	details?: unknown;
 	/** If provided, replaces the provider-native result metadata in full. */
@@ -676,8 +675,8 @@ export interface AgentState {
 }
 
 export interface AgentToolResult<T = any, _TInput = unknown> {
-	// Content blocks supporting text and images
-	content: (TextContent | ImageContent)[];
+	// Content blocks supporting text, images, and videos
+	content: ContentBlock[];
 	// Details to be displayed in a UI or logged
 	details?: T;
 	// Marks a non-throwing failure (e.g. an aggregator catching per-entry errors).

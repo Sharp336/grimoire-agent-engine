@@ -3076,11 +3076,17 @@ export function kimiCodeModelManagerOptions(
 						const id = defaults.id;
 						const reasoning = kimiSupportsReasoning(entry, id);
 						const thinking = reasoning ? mapKimiThinking(entry) : undefined;
+						// Capability flags come from the model card (`supports_image_in` /
+						// `supports_video_in`), never from hard-coded id lists; the k2.5
+						// image fallback predates the card carrying the flag.
+						const input: ModelSpec<"openai-completions">["input"] = ["text"];
+						if (entry.supports_image_in === true || id.includes("k2.5")) input.push("image");
+						if (entry.supports_video_in === true) input.push("video");
 						return {
 							...defaults,
 							name: typeof entry.display_name === "string" ? entry.display_name : defaults.name,
 							reasoning,
-							input: entry.supports_image_in === true || id.includes("k2.5") ? ["text", "image"] : ["text"],
+							input,
 							contextWindow: typeof entry.context_length === "number" ? entry.context_length : 262144,
 							maxTokens: kimiCodeMaxTokens(id),
 							thinking,
@@ -3829,7 +3835,7 @@ export function moonshotModelManagerOptions(
 							return {
 								...model,
 								reasoning: true,
-								input: ["text", "image"],
+								input: ["text", "image", "video"],
 								cost: isZeroCost ? { ...MOONSHOT_KIMI_K3_COST } : model.cost,
 								contextWindow: model.contextWindow ?? MOONSHOT_KIMI_K3_CONTEXT_WINDOW,
 								maxTokens: model.maxTokens ?? MOONSHOT_KIMI_K3_MAX_TOKENS,
