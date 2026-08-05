@@ -59,7 +59,7 @@ import type { CollabHost } from "../collab/host";
 import { KeybindingsManager } from "../config/keybindings";
 import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
-import { REDUCE_MOTION_STRICT_RENDER_INTERVAL_MS, reduceMotionLevel } from "../config/reduce-motion";
+import { isReduceMotion, REDUCE_MOTION_STRICT_RENDER_INTERVAL_MS, reduceMotionLevel } from "../config/reduce-motion";
 import {
 	isSettingsInitialized,
 	onModelRolesChanged,
@@ -4608,6 +4608,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#voiceAnimationInterval) return;
 		this.#voiceHue = 0;
 		this.#updateMicIcon();
+		// Reduce motion: keep the static first hue; no color sweep.
+		if (isReduceMotion()) return;
 		this.#voiceAnimationInterval = setInterval(() => {
 			this.#voiceHue = (this.#voiceHue + 8) % 360;
 			this.#updateMicIcon();
