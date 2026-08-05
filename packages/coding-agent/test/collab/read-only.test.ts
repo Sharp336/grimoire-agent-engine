@@ -146,11 +146,19 @@ async function joinAsGuest(link: string, name: string, writeTokenOverride?: stri
 const guestCleanups: (() => void)[] = [];
 let harness: HostHarness;
 let host: CollabHost;
+/**
+ * Registry instance the host bound at construction. Test registrations MUST
+ * use this exact instance — another test file resets the process-wide
+ * `AgentRegistry.global()` singleton mid-flight, so re-reading the global
+ * here would register the kill target on a registry the host never queries.
+ */
+let registry: AgentRegistry;
 
 beforeAll(async () => {
 	installInMemoryRelay();
 	harness = makeHostContext();
 	host = new CollabHost(harness.ctx);
+	registry = host.registry;
 	// Port is irrelevant: the fake transport routes by the `role` query param.
 	await host.start("ws://localhost:8787");
 });
@@ -220,7 +228,6 @@ describe("collab read-only links", () => {
 		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
 
 		const id = "Remote-Killed-Sub";
-		const registry = AgentRegistry.global();
 		let aborts = 0;
 		const session = {
 			abort: async () => {

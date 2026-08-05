@@ -3,6 +3,7 @@ import * as net from "node:net";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import {
+	__resetProxyCache,
 	connectProxiedSocket,
 	getProxyForProvider,
 	getProxyForUrl,
@@ -106,6 +107,11 @@ beforeEach(() => {
 		saved[key] = Bun.env[key];
 		delete Bun.env[key];
 	}
+	// `getProxyForProvider` memoizes per provider id. Other test files share
+	// this module-level cache in the same worker (e.g. `github-copilot` is
+	// exercised by the copilot suites), so clear it or a stale `undefined`
+	// entry poisons this file's assertions.
+	__resetProxyCache();
 });
 
 afterEach(() => {

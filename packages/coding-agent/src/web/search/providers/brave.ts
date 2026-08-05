@@ -4,7 +4,7 @@
  * Calls Brave's web search REST API and maps results into the unified
  * SearchResponse shape used by the web search tool.
  */
-import { type AuthStorage, type FetchImpl, getEnvApiKey } from "@oh-my-pi/pi-ai";
+import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
 import type { SearchResponse, SearchSource } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
 import type { QuerySyntax, StructuredQuery } from "../query";
@@ -54,6 +54,8 @@ export interface BraveSearchParams {
 	signal?: AbortSignal;
 	timeoutMs?: number;
 	fetch?: FetchImpl;
+	authStorage: AuthStorage;
+	sessionId?: string;
 }
 
 interface BraveSearchResult {
@@ -70,9 +72,13 @@ interface BraveSearchResponse {
 	};
 }
 
-/** Find BRAVE_API_KEY from environment or .env files. */
-export function findApiKey(): string | null {
-	return getEnvApiKey("brave") ?? null;
+/** Resolve Brave API key through the shared auth storage pipeline. */
+export function findApiKey(
+	authStorage: AuthStorage,
+	sessionId?: string,
+	signal?: AbortSignal,
+): Promise<string | undefined> {
+	return authStorage.getApiKey("brave", sessionId, { signal });
 }
 
 function buildSnippet(result: BraveSearchResult): string | undefined {
@@ -132,9 +138,11 @@ async function callBraveSearch(
 /** Execute Brave web search. */
 export async function searchBrave(params: BraveSearchParams): Promise<SearchResponse> {
 	const numResults = clampNumResults(params.num_results, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS);
-	const apiKey = findApiKey();
+	const apiKey = await findApiKey(params.authStorage, params.sessionId, params.signal);
 	if (!apiKey) {
-		throw new Error("BRAVE_API_KEY not found. Set it in environment or .env file.");
+		throw new Error(
+			"Brave credentials not found. Set BRAVE_API_KEY or login with 'omp /login brave' or 'omp /login' and pick Brave.",
+		);
 	}
 
 	const { response, requestId } = await callBraveSearch(apiKey, params);
@@ -163,8 +171,8 @@ export class BraveProvider extends SearchProvider {
 	readonly id = "brave";
 	readonly label = "Brave";
 
-	isAvailable(_authStorage: AuthStorage): boolean {
-		return !!findApiKey();
+	isAvailable(authStorage: AuthStorage): boolean {
+		return authStorage.hasAuth("brave");
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {
@@ -176,6 +184,8 @@ export class BraveProvider extends SearchProvider {
 			signal: params.signal,
 			timeoutMs: params.timeoutMs,
 			fetch: params.fetch,
+			authStorage: params.authStorage,
+			sessionId: params.sessionId,
 		});
 	}
 }

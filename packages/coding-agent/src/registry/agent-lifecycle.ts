@@ -134,6 +134,17 @@ export class AgentLifecycleManager {
 	}
 
 	/**
+	 * Detach this manager's registry listener without releasing any agents.
+	 * Used when a consumer (e.g. CollabHost) owns a private manager instance
+	 * and stops reacting to registry events; `dispose()` also releases adopted
+	 * agents and is not appropriate for that teardown path.
+	 */
+	detach(): void {
+		this.#unsubscribe?.();
+		this.#unsubscribe = undefined;
+	}
+
+	/**
 	 * Install the factory used to cold-revive `parked` refs restored from disk
 	 * (Agent Hub scan, collab mirror, resumed process) — they carry a sessionFile
 	 * but no adoption. Set by the top-level session, which owns the ambient deps

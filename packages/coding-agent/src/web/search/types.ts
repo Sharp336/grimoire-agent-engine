@@ -38,16 +38,21 @@ export const SEARCH_PROVIDER_OPTIONS = [
 	},
 	{ value: "zai", label: "Z.AI", description: "Calls Z.AI webSearchPrime MCP" },
 	{ value: "exa", label: "Exa", description: "API via /login exa or EXA_API_KEY; explicit keyless fallback via MCP" },
-	{ value: "tinyfish", label: "TinyFish", description: "Requires TINYFISH_API_KEY" },
-	{ value: "jina", label: "Jina", description: "Requires JINA_API_KEY" },
-	{ value: "kagi", label: "Kagi", description: "Requires KAGI_API_KEY and Kagi Search API beta access" },
-	{ value: "tavily", label: "Tavily", description: "Requires TAVILY_API_KEY" },
+	{ value: "tinyfish", label: "TinyFish", description: "API via /login tinyfish or TINYFISH_API_KEY" },
+	{ value: "jina", label: "Jina", description: "API via /login jina or JINA_API_KEY" },
+	{
+		value: "kagi",
+		label: "Kagi",
+		description: "API via /login kagi or KAGI_API_KEY (requires Kagi Search API beta access)",
+	},
+	{ value: "tavily", label: "Tavily", description: "API via /login tavily or TAVILY_API_KEY" },
 	{
 		value: "firecrawl",
 		label: "Firecrawl",
-		description: "Uses Firecrawl API when FIRECRAWL_API_KEY is set; falls back to keyless mode",
+		description:
+			"Uses Firecrawl API when configured (via /login firecrawl or FIRECRAWL_API_KEY); falls back to keyless mode",
 	},
-	{ value: "brave", label: "Brave", description: "Requires BRAVE_API_KEY" },
+	{ value: "brave", label: "Brave", description: "API via /login brave or BRAVE_API_KEY" },
 	{
 		value: "kimi",
 		label: "Kimi",

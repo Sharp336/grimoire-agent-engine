@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added interactive API-key paste logins (`/login`) for providers that previously only accepted environment variables: OpenAI, Google Gemini, Groq, Mistral, MiniMax, AIML API, and Azure OpenAI. Pasting a key stores it as a login credential that takes precedence over the matching env var.
+
+### Fixed
+
+- Fixed `getProxyForProvider` tests failing in the full suite: the provider-proxy memo cache is shared across test files in the same worker, so a stale `undefined` entry from another file poisoned assertions. The proxy tests now clear the cache per case.
+
 ## [17.2.9] - 2026-08-05
 
 ### Fixed

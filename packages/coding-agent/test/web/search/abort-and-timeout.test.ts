@@ -155,7 +155,13 @@ describe("Brave provider hard-timeout wiring", () => {
 			});
 		};
 
-		await searchBrave({ query: "ping", fetch: fetchMock });
+		await searchBrave({
+			query: "ping",
+			fetch: fetchMock,
+			authStorage: {
+				getApiKey: async () => "brave-test-key",
+			} as unknown as AuthStorage,
+		});
 
 		expect(capturedSignal).toBeInstanceOf(AbortSignal);
 		expect(capturedSignal?.aborted).toBe(false);

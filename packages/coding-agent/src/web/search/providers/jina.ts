@@ -5,7 +5,7 @@
  * cleaned content.
  */
 
-import { type AuthStorage, type FetchImpl, getEnvApiKey } from "@oh-my-pi/pi-ai";
+import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
 import type { SearchResponse, SearchSource } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
 import { formatQuery, parseSearchQuery } from "../query";
@@ -24,6 +24,8 @@ export interface JinaSearchParams {
 	signal?: AbortSignal;
 	timeoutMs?: number;
 	fetch?: FetchImpl;
+	authStorage: AuthStorage;
+	sessionId?: string;
 }
 
 interface JinaSearchResult {
@@ -34,9 +36,13 @@ interface JinaSearchResult {
 
 type JinaSearchResponse = JinaSearchResult[];
 
-/** Find JINA_API_KEY from environment or .env files. */
-export function findApiKey(): string | null {
-	return getEnvApiKey("jina") ?? null;
+/** Resolve Jina API key through the shared auth storage pipeline. */
+export function findApiKey(
+	authStorage: AuthStorage,
+	sessionId?: string,
+	signal?: AbortSignal,
+): Promise<string | undefined> {
+	return authStorage.getApiKey("jina", sessionId, { signal });
 }
 
 /** Call Jina Reader search API. */
@@ -72,9 +78,11 @@ async function callJinaSearch(
 
 /** Execute Jina web search. */
 export async function searchJina(params: JinaSearchParams): Promise<SearchResponse> {
-	const apiKey = findApiKey();
+	const apiKey = await findApiKey(params.authStorage, params.sessionId, params.signal);
 	if (!apiKey) {
-		throw new Error("JINA_API_KEY not found. Set it in environment or .env file.");
+		throw new Error(
+			"Jina credentials not found. Set JINA_API_KEY or login with 'omp /login jina' or 'omp /login' and pick Jina.",
+		);
 	}
 
 	const response = await callJinaSearch(
@@ -109,8 +117,8 @@ export class JinaProvider extends SearchProvider {
 	readonly id = "jina";
 	readonly label = "Jina";
 
-	isAvailable(_authStorage: AuthStorage): boolean {
-		return !!findApiKey();
+	isAvailable(authStorage: AuthStorage): boolean {
+		return authStorage.hasAuth("jina");
 	}
 
 	search(params: SearchParamsWithFetch): Promise<SearchResponse> {
@@ -139,6 +147,8 @@ export class JinaProvider extends SearchProvider {
 			signal: params.signal,
 			timeoutMs: params.timeoutMs,
 			fetch: params.fetch,
+			authStorage: params.authStorage,
+			sessionId: params.sessionId,
 		});
 	}
 }

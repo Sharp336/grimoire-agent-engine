@@ -61,15 +61,26 @@ describe("provider registry auth surface", () => {
 		expect(getEnvApiKey("coreweave")).toBe("coreweave-env");
 	});
 
-	test("login list contains loginable providers and excludes env-only model providers", () => {
+	test("login list contains loginable providers including env-key model and search providers", () => {
 		const ids = getOAuthProviders().map(provider => provider.id);
 		expect(ids).toContain("zenmux");
 		expect(ids).toContain("kagi");
 		expect(ids).toContain("exa");
 		expect(ids).toContain("umans");
 		expect(ids).toContain("llama.cpp");
-		// openai has no interactive login flow.
-		expect(ids).not.toContain("openai");
+		// Env-key-only providers now ship interactive API-key paste logins, so
+		// they appear in the /login list instead of requiring manual env setup.
+		expect(ids).toContain("openai");
+		expect(ids).toContain("google");
+		expect(ids).toContain("groq");
+		expect(ids).toContain("mistral");
+		expect(ids).toContain("minimax");
+		expect(ids).toContain("aimlapi");
+		expect(ids).toContain("azure");
+		expect(ids).toContain("brave");
+		expect(ids).toContain("jina");
+		expect(ids).toContain("tinyfish");
+		expect(ids).toContain("firecrawl");
 	});
 
 	test("paste-code login set is derived from pasteCodeFlow", () => {

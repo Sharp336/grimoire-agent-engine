@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added interactive API-key paste logins (`/login`) for the web search providers Brave, Jina, TinyFish, and Firecrawl, so their keys can be entered in the TUI instead of manually setting `BRAVE_API_KEY`/`JINA_API_KEY`/`TINYFISH_API_KEY`/`FIRECRAWL_API_KEY`; Brave and Jina now resolve keys through the shared auth-storage pipeline (login credential takes precedence over env).
+
+### Fixed
+
+- Fixed the collab read-only test (`keeps a remotely killed subagent tombstoned`) timing out in the full suite: `CollabHost` now binds the agent registry and lifecycle manager at construction instead of re-reading the process-wide singletons on every request, so a parallel test file resetting those singletons can no longer make a remote `kill` silently target a different registry instance.
+
 ## [17.2.9] - 2026-08-05
 
 ### Breaking Changes

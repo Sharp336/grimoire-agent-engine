@@ -8,6 +8,7 @@ import { anthropicProvider } from "./anthropic";
 import { azureProvider } from "./azure";
 import { basetenProvider } from "./baseten";
 import { bedrockMantleProvider } from "./bedrock-mantle";
+import { braveProvider } from "./brave";
 import { cerebrasProvider } from "./cerebras";
 import { cloudflareAiGatewayProvider } from "./cloudflare-ai-gateway";
 import { coreWeaveProvider } from "./coreweave";
@@ -15,6 +16,7 @@ import { cursorProvider } from "./cursor";
 import { deepseekProvider } from "./deepseek";
 import { devinProvider } from "./devin";
 import { exaProvider } from "./exa";
+import { firecrawlProvider } from "./firecrawl";
 import { firepassProvider } from "./firepass";
 import { fireworksProvider } from "./fireworks";
 import { githubCopilotProvider } from "./github-copilot";
@@ -27,6 +29,7 @@ import { googleGeminiCliProvider } from "./google-gemini-cli";
 import { googleVertexProvider } from "./google-vertex";
 import { groqProvider } from "./groq";
 import { huggingfaceProvider } from "./huggingface";
+import { jinaProvider } from "./jina";
 import { kagiProvider } from "./kagi";
 import { kiloProvider } from "./kilo";
 import { kimiCodeProvider } from "./kimi-code";
@@ -59,6 +62,7 @@ import { siliconflowProvider } from "./siliconflow";
 import { siliconflowCnProvider } from "./siliconflow-cn";
 import { syntheticProvider } from "./synthetic";
 import { tavilyProvider } from "./tavily";
+import { tinyfishProvider } from "./tinyfish";
 import { togetherProvider } from "./together";
 import type { ProviderDefinition } from "./types";
 import { umansProvider } from "./umans";
@@ -146,6 +150,10 @@ const ALL = [
 	kagiProvider,
 	exaProvider,
 	parallelProvider,
+	braveProvider,
+	jinaProvider,
+	tinyfishProvider,
+	firecrawlProvider,
 	ollamaProvider,
 	ollamaCloudProvider,
 	lmStudioProvider,

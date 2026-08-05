@@ -138,14 +138,29 @@ export class CollabHost {
 	#agentsDebounce: Timer | null = null;
 	#busUnsubscribers: (() => void)[] = [];
 	#registryUnsubscribe?: () => void;
+	/** Agent registry bound at construction: the wire snapshot/kill paths and
+	 * the subscription below must address the same instance even if a parallel
+	 * test resets the process-wide singleton mid-flight. */
+	#registry: AgentRegistry;
+	/** Lifecycle manager bound to {@link #registry} so kill/revive resolve the
+	 * same refs the registry queries (a global `AgentLifecycleManager` reset by
+	 * a parallel test would otherwise wrap a different registry instance). */
+	#lifecycle: AgentLifecycleManager;
 	#stopped = false;
 
 	constructor(ctx: InteractiveModeContext) {
 		this.#ctx = ctx;
+		this.#registry = AgentRegistry.global();
+		this.#lifecycle = new AgentLifecycleManager(this.#registry);
 	}
 
 	get link(): string {
 		return this.#link;
+	}
+
+	/** Agent registry this host reads/writes (bound at construction). */
+	get registry(): AgentRegistry {
+		return this.#registry;
 	}
 
 	/** Browser deep link for the configured collab web UI. */
@@ -277,7 +292,7 @@ export class CollabHost {
 				this.#busUnsubscribers.push(bus.on(channel, data => this.#broadcast({ t: "bus", channel, data })));
 			}
 		}
-		this.#registryUnsubscribe = AgentRegistry.global().onChange(() => this.#scheduleAgentsBroadcast());
+		this.#registryUnsubscribe = this.#registry.onChange(() => this.#scheduleAgentsBroadcast());
 		this.#ctx.sessionManager.onEntryAppended = entry => {
 			if (isWireSessionEntry(entry)) this.#broadcast({ t: "entry", entry: shrinkForReplication(entry) });
 			// Model/thinking/title changes land as entries while idle; refresh
@@ -304,6 +319,9 @@ export class CollabHost {
 		this.#busUnsubscribers = [];
 		this.#registryUnsubscribe?.();
 		this.#registryUnsubscribe = undefined;
+		// Detach the bound lifecycle manager's registry listener so a stopped
+		// host cannot keep reacting to registry events (its instance is private).
+		this.#lifecycle.detach();
 		clearTimeout(this.#stateDebounce ?? undefined);
 		this.#stateDebounce = null;
 		clearTimeout(this.#agentsDebounce ?? undefined);
@@ -556,7 +574,7 @@ export class CollabHost {
 
 	#snapshotAgents(): AgentSnapshot[] {
 		return (
-			AgentRegistry.global()
+			this.#registry
 				.list()
 				// Advisor transcripts are local observability only; never mirror them to
 				// guests (the wire AgentSnapshot kind has no `advisor`, and guests must not
@@ -590,7 +608,7 @@ export class CollabHost {
 		}
 		// Advisor refs are excluded from snapshots, but reject control by id defensively:
 		// a stale/malicious client must never chat/kill/revive a read-only advisor transcript.
-		if (AgentRegistry.global().get(agentId)?.kind === "advisor") {
+		if (this.#registry.get(agentId)?.kind === "advisor") {
 			this.#socket?.send({ t: "error", message: `agent ${agentId}: advisor transcripts are read-only` }, fromPeer);
 			return;
 		}
@@ -606,7 +624,7 @@ export class CollabHost {
 					return;
 				}
 				// Mirrors the hub's #submitChatMessage: revive if parked, steer if mid-turn.
-				AgentLifecycleManager.global()
+				this.#lifecycle
 					.ensureLive(agentId)
 					.then(session => session.prompt(trimmed, { streamingBehavior: "steer" }))
 					.catch(fail);
@@ -614,18 +632,18 @@ export class CollabHost {
 			}
 			case "kill": {
 				const kill = async () => {
-					const ref = AgentRegistry.global().get(agentId);
+					const ref = this.#registry.get(agentId);
 					if (!ref) return;
 					if (ref.status === "running" && ref.session) {
 						await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
 					}
-					await AgentLifecycleManager.global().release(agentId, ref, { tombstone: true });
+					await this.#lifecycle.release(agentId, ref, { tombstone: true });
 				};
 				kill().catch(fail);
 				break;
 			}
 			case "revive":
-				AgentLifecycleManager.global().ensureLive(agentId).catch(fail);
+				this.#lifecycle.ensureLive(agentId).catch(fail);
 				break;
 		}
 	}
@@ -634,7 +652,7 @@ export class CollabHost {
 	async #handleFetchTranscript(reqId: number, agentId: string, fromByte: number, fromPeer: number): Promise<void> {
 		const reply = (text: string, newSize: number, error?: string) =>
 			this.#socket?.send({ t: "transcript", reqId, text, newSize, error }, fromPeer);
-		const file = AgentRegistry.global().get(agentId)?.sessionFile;
+		const file = this.#registry.get(agentId)?.sessionFile;
 		if (!file) {
 			reply("", fromByte, "no transcript available");
 			return;
