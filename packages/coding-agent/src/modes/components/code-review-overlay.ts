@@ -26,7 +26,7 @@ import {
 	matchesSelectPageUp,
 	matchesSelectUp,
 } from "../utils/keybinding-matchers";
-import { renderDiff } from "./diff";
+import * as diffRenderer from "./diff";
 import {
 	bottomBorder,
 	divider,
@@ -119,6 +119,7 @@ export class CodeReviewOverlay implements Component {
 	#annotating = false;
 	#finished = false;
 	#annotations: CommittedAnnotation[] = [];
+	#staticRenderedDiffBodies = new WeakMap<ReviewDiffFile, RenderedDiffBody>();
 
 	constructor(
 		private readonly tui: TUI,
@@ -135,7 +136,9 @@ export class CodeReviewOverlay implements Component {
 		this.#resetSourceCursor();
 	}
 
-	invalidate(): void {}
+	invalidate(): void {
+		this.#staticRenderedDiffBodies = new WeakMap();
+	}
 
 	dispose(): void {
 		this.#finished = true;
@@ -399,49 +402,68 @@ export class CodeReviewOverlay implements Component {
 	#renderBody(contentWidth: number): RenderedDiffBody {
 		const file = this.#currentFile();
 		if (!file) return { lines: [theme.fg("dim", "No reviewable files")], renderedRowBySource: [] };
-		if (file.isBinary) {
-			return { lines: [theme.fg("dim", "Binary diff; no annotatable source rows")], renderedRowBySource: [] };
-		}
-		if (file.rows.length === 0) {
-			return {
-				lines: [theme.fg("dim", "No diff hunks; this may be a rename-only change")],
-				renderedRowBySource: [],
-			};
-		}
 
+		const staticBody = this.#getStaticRenderedBody(file);
 		const lines: string[] = [];
 		const renderedRowBySource: number[] = [];
 		let sourceIndex = 0;
-		let run: ReviewSourceRow[] = [];
-		const flushRun = (): void => {
-			if (run.length === 0) return;
-			const rendered = renderDiff(run.map(canonicalDiffRow).join("\n"), { filePath: file.path }).split("\n");
-			for (let index = 0; index < run.length; index++) {
-				const currentSourceIndex = sourceIndex++;
-				renderedRowBySource[currentSourceIndex] = lines.length;
-				let renderedLine = rendered[index] ?? "";
-				if (this.#focus === "diff" && currentSourceIndex === this.#sourceIndex) {
-					renderedLine = theme.bg("selectedBg", fit(`${theme.nav.cursor} ${renderedLine}`, contentWidth));
-				}
-				lines.push(truncateToWidth(renderedLine, contentWidth));
-				for (const entry of this.#annotations) {
-					if (entry.fileIndex === this.#fileIndex && entry.sourceIndex === currentSourceIndex) {
-						this.#appendAnnotationCallout(lines, entry.annotation.note, contentWidth);
-					}
+		for (let staticRow = 0; staticRow < staticBody.lines.length; staticRow++) {
+			const currentSourceIndex =
+				staticBody.renderedRowBySource[sourceIndex] === staticRow ? sourceIndex++ : undefined;
+			let renderedLine = staticBody.lines[staticRow] ?? "";
+			if (currentSourceIndex !== undefined) renderedRowBySource[currentSourceIndex] = lines.length;
+			if (currentSourceIndex !== undefined && this.#focus === "diff" && currentSourceIndex === this.#sourceIndex) {
+				renderedLine = theme.bg("selectedBg", fit(`${theme.nav.cursor} ${renderedLine}`, contentWidth));
+			}
+			lines.push(truncateToWidth(renderedLine, contentWidth));
+			if (currentSourceIndex === undefined) continue;
+			for (const entry of this.#annotations) {
+				if (entry.fileIndex === this.#fileIndex && entry.sourceIndex === currentSourceIndex) {
+					this.#appendAnnotationCallout(lines, entry.annotation.note, contentWidth);
 				}
 			}
-			run = [];
-		};
-		for (const diffRow of file.rows) {
-			if (isSourceRow(diffRow)) {
-				run.push(diffRow);
-				continue;
+		}
+		return { lines, renderedRowBySource };
+	}
+
+	#getStaticRenderedBody(file: ReviewDiffFile): RenderedDiffBody {
+		const cached = this.#staticRenderedDiffBodies.get(file);
+		if (cached) return cached;
+
+		const lines: string[] = [];
+		const renderedRowBySource: number[] = [];
+		if (file.isBinary) {
+			lines.push(theme.fg("dim", "Binary diff; no annotatable source rows"));
+		} else if (file.rows.length === 0) {
+			lines.push(theme.fg("dim", "No diff hunks; this may be a rename-only change"));
+		} else {
+			let sourceIndex = 0;
+			let run: ReviewSourceRow[] = [];
+			const flushRun = (): void => {
+				if (run.length === 0) return;
+				const rendered = diffRenderer
+					.renderDiff(run.map(canonicalDiffRow).join("\n"), { filePath: file.path })
+					.split("\n");
+				for (let index = 0; index < run.length; index++) {
+					renderedRowBySource[sourceIndex++] = lines.length;
+					lines.push(rendered[index] ?? "");
+				}
+				run = [];
+			};
+			for (const diffRow of file.rows) {
+				if (isSourceRow(diffRow)) {
+					run.push(diffRow);
+					continue;
+				}
+				flushRun();
+				lines.push(theme.fg(diffRow.kind === "hunk" ? "accent" : "dim", replaceTabs(sanitizeText(diffRow.raw))));
 			}
 			flushRun();
-			lines.push(theme.fg(diffRow.kind === "hunk" ? "accent" : "dim", replaceTabs(sanitizeText(diffRow.raw))));
 		}
-		flushRun();
-		return { lines, renderedRowBySource };
+
+		const body = { lines, renderedRowBySource };
+		this.#staticRenderedDiffBodies.set(file, body);
+		return body;
 	}
 
 	#appendAnnotationCallout(lines: string[], note: string, width: number): void {

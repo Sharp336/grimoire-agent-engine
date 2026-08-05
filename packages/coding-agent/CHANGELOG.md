@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/code-review`, a fullscreen diff annotation flow that reuses `/review` targets and can either pass multiline, line-anchored comments into AI review or insert them into the current prompt.
+
+### Changed
+
+- Extended bundled custom-command UI contexts with editor insertion and configurable fullscreen/mouse-tracking overlay options.
+
+### Fixed
+
+- Kept diff rendering usable when a source checkout loads a stale native binding without `diffWords`; only intra-line emphasis is omitted until the bindings are rebuilt.
+
 ## [17.2.9] - 2026-08-05
 
 ### Breaking Changes
@@ -57,9 +69,6 @@
 ### Changed
 
 - Upgraded the bundled omptype schema engine: intersection and pipe operators, bigint and RegExp literals in the string DSL, Standard Schema V1 interop, JSON Schema import via fromJsonSchema(), and richer union/collection error reporting.
-### Added
-
-- Added `/code-review`, a fullscreen diff annotation flow that reuses `/review` targets and can either pass multiline, line-anchored comments into AI review or insert them into the current prompt.
 
 ## [17.2.7] - 2026-08-03
 

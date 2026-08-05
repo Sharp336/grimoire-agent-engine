@@ -178,7 +178,12 @@ function parseHeaderPaths(header: string): { oldPath?: string; newPath?: string 
 
 function parseMarkerPath(line: string): string | undefined {
 	const payload = line.slice(4);
-	const token = readGitToken(payload, 0)?.token ?? payload.split("\t", 1)[0] ?? "";
+	const separator = payload.indexOf("\t");
+	const token = payload.startsWith('"')
+		? (readGitToken(payload, 0)?.token ?? "")
+		: separator < 0
+			? payload
+			: payload.slice(0, separator);
 	const decoded = decodeGitPath(token);
 	return decoded === "/dev/null" ? undefined : stripDiffPrefix(decoded);
 }

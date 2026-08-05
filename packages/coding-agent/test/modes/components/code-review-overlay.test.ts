@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -11,6 +11,7 @@ import {
 	type CodeReviewOverlayResult,
 	PASTE_CODE_REVIEW_ACTION,
 } from "@oh-my-pi/pi-coding-agent/modes/components/code-review-overlay";
+import * as diffRenderer from "@oh-my-pi/pi-coding-agent/modes/components/diff";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
 
@@ -20,9 +21,10 @@ const TAB = "\t";
 const SHIFT_ENTER = "\x1b[13;2~";
 
 let darkTheme = await getThemeByName("dark");
+let lightTheme = await getThemeByName("light");
 
 function render(component: CodeReviewOverlay, width = 90): string {
-	return stripVTControlCharacters(component.render(width).join("\n"));
+	return component.render(width).map(stripVTControlCharacters).join("\n");
 }
 
 function makeOverlay(
@@ -41,12 +43,18 @@ function makeOverlay(
 describe("CodeReviewOverlay", () => {
 	beforeAll(async () => {
 		darkTheme = await getThemeByName("dark");
+		lightTheme = await getThemeByName("light");
 		if (!darkTheme) throw new Error("Failed to load dark theme");
+		if (!lightTheme) throw new Error("Failed to load light theme");
 	});
 
 	beforeEach(() => {
 		setThemeInstance(darkTheme!);
 		setKeybindings(KeybindingsManager.inMemory());
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
 	});
 
 	it("renders changed files, diff contents, and review actions", () => {
@@ -138,6 +146,73 @@ diff --git a/src/beta.ts b/src/beta.ts
 		const out = render(overlay);
 		expect(out).toContain("first line");
 		expect(out).toContain("second line");
+	});
+
+	it("keeps static diff rows cached while dynamic interactions update", () => {
+		const trailingRows = Array.from(
+			{ length: 40 },
+			(_, index) => ` context-tail-${String(index).padStart(3, "0")}`,
+		).join("\n");
+		const longContent = `long-${"x".repeat(56)}`;
+		const { overlay } = makeOverlay(`diff --git a/src/alpha.ts b/src/alpha.ts
+--- a/src/alpha.ts
++++ b/src/alpha.ts
+@@ -1,41 +1,42 @@
+ context-first
++${longContent}
+${trailingRows}
+diff --git a/src/beta.ts b/src/beta.ts
+--- a/src/beta.ts
++++ b/src/beta.ts
+@@ -0,0 +1 @@
++beta`);
+		const renderDiffSpy = vi.spyOn(diffRenderer, "renderDiff");
+
+		expect(render(overlay, 120)).toContain(longContent);
+		expect(renderDiffSpy).toHaveBeenCalledTimes(1);
+
+		overlay.handleInput(TAB);
+		overlay.handleInput(DOWN);
+		expect(render(overlay, 120)).toContain(longContent);
+		expect(renderDiffSpy).toHaveBeenCalledTimes(1);
+
+		overlay.handleInput("a");
+		for (const char of "cached annotation") overlay.handleInput(char);
+		overlay.handleInput(ENTER);
+		expect(render(overlay, 120)).toContain("cached annotation");
+		expect(overlay.getAnnotations()).toEqual([expect.objectContaining({ newLine: 2, note: "cached annotation" })]);
+		expect(renderDiffSpy).toHaveBeenCalledTimes(1);
+
+		const narrow = render(overlay, 45);
+		expect(narrow).not.toContain(longContent);
+		expect(narrow).toContain("long-");
+		expect(narrow.split("\n").every(line => Bun.stringWidth(line) <= 45)).toBe(true);
+		expect(renderDiffSpy).toHaveBeenCalledTimes(1);
+
+		for (let index = 0; index < 40; index++) overlay.handleInput(DOWN);
+		expect(render(overlay, 120)).toContain("context-tail-039");
+		expect(renderDiffSpy).toHaveBeenCalledTimes(1);
+
+		overlay.handleInput("]");
+		expect(render(overlay, 120)).toContain("beta");
+		expect(renderDiffSpy).toHaveBeenCalledTimes(2);
+
+		overlay.handleInput("[");
+		expect(render(overlay, 120)).toContain("cached annotation");
+		expect(renderDiffSpy).toHaveBeenCalledTimes(2);
+
+		const darkLine = overlay.render(120).find(line => stripVTControlCharacters(line).includes("context-first"));
+		try {
+			setThemeInstance(lightTheme!);
+			overlay.invalidate();
+			const lightLine = overlay.render(120).find(line => stripVTControlCharacters(line).includes("context-first"));
+			expect(stripVTControlCharacters(lightLine ?? "")).toContain("context-first");
+			expect(lightLine).not.toBe(darkLine);
+			expect(renderDiffSpy).toHaveBeenCalledTimes(3);
+		} finally {
+			setThemeInstance(darkTheme!);
+			overlay.invalidate();
+		}
 	});
 
 	it("gates paste until annotations exist and supports undo", () => {

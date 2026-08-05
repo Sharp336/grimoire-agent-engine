@@ -630,6 +630,53 @@ rename to "src/new name.ts"
 		]);
 	});
 
+	it("parses unquoted marker paths with spaces through a tab suffix or end of line", () => {
+		const snapshot = parseReviewDiffSnapshot(`diff --git a/src/old-name.ts b/src/new-name.ts
+--- a/src/old name.ts	2026-08-05 12:00:00
++++ b/src/new name.ts
+@@ -1 +1 @@
+-old
++new
+diff --git a/src/created-name.ts b/src/created-name.ts
+new file mode 100644
+--- /dev/null
++++ b/src/created name.ts
+@@ -0,0 +1 @@
++created`);
+
+		expect(snapshot.files.map(file => ({ path: file.path, oldPath: file.oldPath, newPath: file.newPath }))).toEqual([
+			{
+				path: "src/new name.ts",
+				oldPath: "src/old name.ts",
+				newPath: "src/new name.ts",
+			},
+			{
+				path: "src/created name.ts",
+				oldPath: undefined,
+				newPath: "src/created name.ts",
+			},
+		]);
+	});
+
+	it("applies review exclusions to complete unquoted spaced marker paths", () => {
+		const snapshot = parseReviewDiffSnapshot(`diff --git a/config/workspace-lock.json b/config/workspace-lock.json
+--- a/config/workspace lockfile.lock
++++ b/config/workspace lockfile.lock	2026-08-05 12:00:00
+@@ -1 +1 @@
+-old
++new`);
+
+		expect(snapshot.files).toHaveLength(0);
+		expect(snapshot.excluded).toEqual([
+			{
+				path: "config/workspace lockfile.lock",
+				reason: "lock file",
+				linesAdded: 1,
+				linesRemoved: 1,
+			},
+		]);
+	});
+
 	it("keeps duplicate staged and unstaged file diffs independently addressable", () => {
 		const fileDiff = `diff --git a/src/value.ts b/src/value.ts
 --- a/src/value.ts
