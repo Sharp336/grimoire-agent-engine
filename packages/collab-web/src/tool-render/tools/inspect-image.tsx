@@ -2,13 +2,15 @@
 import type { ReactNode } from "react";
 import { Badge, Badges, InvalidArg, PathText, ResultImages, ResultText, Row } from "../parts";
 import type { ToolRenderer, ToolRenderProps } from "../types";
-import { detailsRecord, normalizeWs, shortenPath, str, truncate } from "../util";
+import { compactPath, detailsRecord, normalizeWs, str, truncate } from "../util";
 
 function Summary({ args, result }: ToolRenderProps): ReactNode {
 	const rec = detailsRecord(result);
 	const target = str(args.path) ?? str(args.url) ?? (rec ? str(rec.imagePath) : null);
 	if (target === null) return <InvalidArg what="image path" />;
-	return <span>{truncate(shortenPath(target))}</span>;
+	// compactPath redacts the home prefix but skips elision for URLs and glob patterns, which splitting on "/" would corrupt.
+	const display = compactPath(target);
+	return <span>{truncate(display)}</span>;
 }
 
 function Body({ args, result }: ToolRenderProps): ReactNode {

@@ -2,7 +2,7 @@
 import type { ReactNode } from "react";
 import { Badge, Badges, Kv, KvGrid, PathText, ResultImages, ResultText } from "../parts";
 import type { ToolRenderer, ToolRenderProps } from "../types";
-import { detailsRecord, isRecord, languageFromPath, num, shortenPath, str } from "../util";
+import { compactPath, detailsRecord, isRecord, languageFromPath, num, str } from "../util";
 
 /** Fields of `ReadToolDetails` the web view surfaces (untrusted wire JSON). */
 interface ReadDetails {
@@ -90,7 +90,7 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 							<PathText path={resolved} />
 						</Kv>
 					)}
-					{d.suffixFrom !== null && <Kv k="corrected from">{shortenPath(d.suffixFrom)}</Kv>}
+					{d.suffixFrom !== null && <Kv k="corrected from">{compactPath(d.suffixFrom)}</Kv>}
 				</KvGrid>
 			)}
 			<Badges items={[conflictBadge, elidedBadge, truncatedBadge]} />

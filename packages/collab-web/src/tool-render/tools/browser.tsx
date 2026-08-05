@@ -2,7 +2,7 @@
 import type { ReactNode } from "react";
 import { Badge, CodeBlock, ResultImages, ResultText, type Tone } from "../parts";
 import type { ToolRenderer, ToolRenderProps } from "../types";
-import { detailsRecord, isRecord, num, shortenPath, str, truncate } from "../util";
+import { compactPath, detailsRecord, isRecord, num, str, truncate } from "../util";
 
 interface BrowserDetails {
 	action: string | null;
@@ -45,10 +45,14 @@ function actionTone(action: string): Tone | undefined {
 	}
 }
 
+function displayUrl(url: string, maxLen: number): string {
+	return /^file:/i.test(url) ? compactPath(url) : truncate(url, maxLen);
+}
+
 /** Mirrors the TUI's `describeBrowser`: explicit app args win over reported mode. */
 function describeBrowser(app: AppArg | null, details: BrowserDetails): string | null {
 	if (app?.cdpUrl) return `connected ${app.cdpUrl}`;
-	if (app?.path) return `spawned ${shortenPath(app.path)}`;
+	if (app?.path) return `spawned ${compactPath(app.path)}`;
 	return details.browser;
 }
 
@@ -63,7 +67,7 @@ function Summary({ args, result }: ToolRenderProps): ReactNode {
 			<Badge tone={actionTone(action)}>{action}</Badge>
 			<span>{closeAll ? "all tabs" : tab}</span>
 			{args.kill === true && <Badge tone="err">kill</Badge>}
-			{url && <span className="tv-faint">{truncate(shortenPath(url), 72)}</span>}
+			{url && <span className="tv-faint">{displayUrl(url, 72)}</span>}
 		</>
 	);
 }
@@ -84,7 +88,7 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 		<>
 			<span className="tv-badges">
 				{tab !== null && <Badge>tab {tab}</Badge>}
-				{url && <Badge tone="accent">{truncate(shortenPath(url), 120)}</Badge>}
+				{url && <Badge tone="accent">{displayUrl(url, 120)}</Badge>}
 				{browserDesc && <Badge>{browserDesc}</Badge>}
 				{app?.target && <Badge>target {app.target}</Badge>}
 				{args.all === true && <Badge tone="warn">all</Badge>}

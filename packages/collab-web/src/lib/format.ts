@@ -50,13 +50,43 @@ export function fmtPercent(p: number | null | undefined): string {
 	return `${Math.round(Math.min(100, Math.max(0, p)))}%`;
 }
 
+/**
+ * Replace a leading `/home/<user>` or `/Users/<user>` with `~`.
+ * Unconditional — applied to every path before any elision decision,
+ * so glob/URI/bracketed scopes under a home directory never leak the
+ * username. A home path immediately after a URI scheme prefix
+ * (`file:///home/<user>/…`, optional authority) is redacted too, with
+ * the prefix kept intact. No-op for values carrying no home prefix;
+ * a `/home/<user>` mid-string in unrelated text is never touched.
+ */
+export function redactHome(p: string): string {
+	if (typeof p !== "string" || p.length === 0) return "";
+	return p.replace(/^((?:file:\/\/[^/]*)?)\/(?:Users|home)\/[^/]+(?=\/|$)/i, "$1~");
+}
+
+/**
+ * Middle-elide a path to at most four segments. A UNC root (`//server/share`
+ * or `\\server\share`) is retained verbatim so paths on different shares stay
+ * distinguishable; only the tail beyond `server/share` is elided. Ordinary
+ * POSIX/relative paths behave exactly as before.
+ */
+export function elideMiddle(p: string): string {
+	if (typeof p !== "string" || p.length === 0) return "";
+	const unc = p.match(/^(?:\/\/|\\\\)([^/\\]+\/[^/]+)/);
+	if (unc) {
+		const root = unc[0];
+		const rest = p.slice(root.length).split("/").filter(Boolean);
+		if (rest.length <= 2) return p;
+		return `${root}/…/${rest.slice(-2).join("/")}`;
+	}
+	const segs = p.split("/");
+	if (segs.length > 4) return `${segs[0]}/…/${segs.slice(-2).join("/")}`;
+	return p;
+}
+
 /** Home-relative, middle-elided path: "~/…/packages/collab-web". */
 export function shortenPath(p: string): string {
-	if (typeof p !== "string" || p.length === 0) return "";
-	let out = p.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, "~");
-	const segs = out.split("/");
-	if (segs.length > 4) out = `${segs[0]}/…/${segs.slice(-2).join("/")}`;
-	return out;
+	return elideMiddle(redactHome(p));
 }
 
 /** Tolerant text extraction from string | content-block array | message-like objects. */

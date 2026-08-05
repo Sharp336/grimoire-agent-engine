@@ -2,11 +2,11 @@
 import type { ReactNode } from "react";
 import { Badge, Badges, InvalidArg, Note, ResultText } from "../parts";
 import type { ToolRenderer, ToolRenderProps } from "../types";
-import { detailsRecord, num, resultTextOf, scopePaths, shortenPath, str } from "../util";
+import { compactPath, detailsRecord, num, resultTextOf, scopePaths, str } from "../util";
 
 /** Grep scope: current `path` (string, delimited, or JSON array) or legacy `paths`; defaults to workspace root. */
 function pathsOf(args: Record<string, unknown>): string[] {
-	const list = scopePaths(args).map(shortenPath);
+	const list = scopePaths(args).map(compactPath);
 	return list.length ? list : ["."];
 }
 
@@ -49,7 +49,7 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 	const missing: string[] = [];
 	if (details && Array.isArray(details.missingPaths)) {
 		for (const p of details.missingPaths) {
-			if (typeof p === "string") missing.push(shortenPath(p));
+			if (typeof p === "string") missing.push(compactPath(p));
 		}
 	}
 	const badges = argBadges(args);

@@ -2,12 +2,12 @@
 import type { ReactNode } from "react";
 import { Badge, Badges, InvalidArg, Note, ResultText } from "../parts";
 import type { ToolRenderer, ToolRenderProps } from "../types";
-import { detailsRecord, isRecord, num, scopePaths, shortenPath, str, truncate } from "../util";
+import { compactPath, detailsRecord, isRecord, num, scopePaths, str, truncate } from "../util";
 
 function Summary({ args }: ToolRenderProps): ReactNode {
 	const raw = args.path ?? args.paths;
 	if (raw !== undefined && typeof raw !== "string" && !Array.isArray(raw)) return <InvalidArg what="path" />;
-	const globs = scopePaths(args).map(shortenPath).join(", ");
+	const globs = scopePaths(args).map(compactPath).join(", ");
 	return <span className="tv-pattern">{truncate(globs || "*", 120)}</span>;
 }
 
@@ -44,13 +44,13 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 							{fileCount} file{fileCount === 1 ? "" : "s"}
 						</Badge>
 					),
-					scopePath !== null && <Badge>in {shortenPath(scopePath)}</Badge>,
+					scopePath !== null && <Badge>in {compactPath(scopePath)}</Badge>,
 					truncated && (
 						<Badge tone="warn">{resultLimit !== null ? `truncated at ${resultLimit}` : "truncated"}</Badge>
 					),
 				]}
 			/>
-			{missing.length > 0 && <Note tone="warn">skipped missing: {missing.map(shortenPath).join(", ")}</Note>}
+			{missing.length > 0 && <Note tone="warn">skipped missing: {missing.map(compactPath).join(", ")}</Note>}
 			{error !== null && !result?.isError && <Note tone="err">{error}</Note>}
 			<ResultText result={result} maxLines={12} />
 		</>

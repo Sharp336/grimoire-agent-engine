@@ -29,16 +29,28 @@ export function display(value: unknown): string {
 	}
 }
 
-/** Replace `/Users/<x>` / `/home/<x>` prefix with `~` for display. */
-export function shortenPath(p: string): string {
-	for (const prefix of ["/Users/", "/home/"]) {
-		if (p.startsWith(prefix)) {
-			const rest = p.slice(prefix.length);
-			const slash = rest.indexOf("/");
-			return slash < 0 ? "~" : `~${rest.slice(slash)}`;
-		}
+import { elideMiddle, redactHome } from "../lib/format";
+
+/**
+ * Display-safe path compaction. Home redaction is UNCONDITIONAL — every
+ * value is normalized to `~` first so a glob/URI/bracketed scope under a
+ * home directory never leaks the username. Middle elision is the only
+ * conditional part: it is skipped for scheme-bearing values (`://`, which
+ * `elideMiddle` would corrupt by splitting on `/`) and glob patterns — the
+ * canonical metacharacter set is `*`, `?`, `[`, `{` (matching
+ * `hasGlobPathChars` in coding-agent `path-utils.ts`), which carry scope
+ * meaning that elision would hide.
+ */
+export function compactPath(p: string): string {
+	if (/[,;]/.test(p)) {
+		return p
+			.split(/([,;]\s*)/)
+			.map((part, index) => (index % 2 === 0 ? compactPath(part) : part))
+			.join("");
 	}
-	return p;
+	const redacted = redactHome(p);
+	if (/:\/\//.test(redacted) || /[*?[{]/.test(redacted)) return redacted;
+	return elideMiddle(redacted);
 }
 
 /**

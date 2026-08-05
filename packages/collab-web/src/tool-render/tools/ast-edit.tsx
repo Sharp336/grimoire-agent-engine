@@ -2,7 +2,7 @@
 import type { ReactNode } from "react";
 import { Badge, CodeBlock, DiffBlock, InvalidArg, Note, Output, PathText, ResultText, Row } from "../parts";
 import type { ToolRenderer, ToolRenderProps } from "../types";
-import { detailsRecord, isRecord, languageFromPath, num, shortenPath, str } from "../util";
+import { compactPath, detailsRecord, isRecord, languageFromPath, num, str } from "../util";
 
 interface AstEditOp {
 	pat: string;
@@ -150,7 +150,7 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 						</Badge>
 					)}
 					{details.filesSearched != null && <Badge>searched {details.filesSearched}</Badge>}
-					{details.scopePath && <Badge>in {shortenPath(details.scopePath)}</Badge>}
+					{details.scopePath && <Badge>in {compactPath(details.scopePath)}</Badge>}
 					{details.limitReached && <Badge tone="warn">limit reached</Badge>}
 				</span>
 			)}
