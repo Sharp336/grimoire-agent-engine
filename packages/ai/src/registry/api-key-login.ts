@@ -11,6 +11,7 @@ import {
 	validateAnthropicCompatibleApiKey,
 	validateApiKeyAgainstModelsEndpoint,
 	validateOpenAICompatibleApiKey,
+	validateOpenAIResponsesApiKey,
 } from "./api-key-validation";
 import type { OAuthController } from "./oauth/types";
 
@@ -19,6 +20,12 @@ type ChatCompletionsValidation = {
 	provider: string;
 	baseUrl: string;
 	model: string;
+};
+type ResponsesValidation = {
+	kind: "responses";
+	provider: string;
+	baseUrl: string;
+	acceptedErrorCode: string;
 };
 
 type AnthropicMessagesValidation = {
@@ -47,7 +54,12 @@ export type ApiKeyLoginConfig = {
 	/** Placeholder string for the prompt (e.g. "sk-...", "csk-..."). */
 	placeholder: string;
 	/** Validation strategy, or `null` to skip validation. */
-	validation: ChatCompletionsValidation | AnthropicMessagesValidation | ModelsEndpointValidation | null;
+	validation:
+		| ChatCompletionsValidation
+		| ResponsesValidation
+		| AnthropicMessagesValidation
+		| ModelsEndpointValidation
+		| null;
 	/** Value returned for an empty key; also allows an empty prompt response. */
 	emptyKeyFallback?: string;
 };
@@ -97,6 +109,15 @@ export function createApiKeyLogin(config: ApiKeyLoginConfig): (options: OAuthCon
 					apiKey: trimmed,
 					baseUrl: config.validation.baseUrl,
 					model: config.validation.model,
+					signal: options.signal,
+					fetch: options.fetch,
+				});
+			} else if (config.validation.kind === "responses") {
+				await validateOpenAIResponsesApiKey({
+					provider: config.validation.provider,
+					apiKey: trimmed,
+					baseUrl: config.validation.baseUrl,
+					acceptedErrorCode: config.validation.acceptedErrorCode,
 					signal: options.signal,
 					fetch: options.fetch,
 				});
