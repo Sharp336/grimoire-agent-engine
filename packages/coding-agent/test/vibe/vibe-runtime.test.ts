@@ -424,6 +424,7 @@ describe("vibe session registry", () => {
 		AgentRegistry.resetGlobalForTests();
 		AgentLifecycleManager.resetGlobalForTests();
 		VibeSessionRegistry.resetGlobalForTests();
+		VibeSessionRegistry.global().setTeardownGraceForTesting(250);
 	});
 
 	afterEach(async () => {
