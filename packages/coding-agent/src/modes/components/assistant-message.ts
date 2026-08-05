@@ -12,6 +12,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
+import { isReduceMotion } from "../../config/reduce-motion";
 import type { AssistantThinkingRenderer } from "../../extensibility/extensions/types";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
 import { expandKeyHint, getPreviewLines, resolveImageOptions, TRUNCATE_LENGTHS } from "../../tools/render-utils";
@@ -384,7 +385,7 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	#startThinkingAnimation(): void {
-		if (this.#thinkingDotsTimer) return;
+		if (this.#thinkingDotsTimer || isReduceMotion()) return;
 		this.#scheduleThinkingFrame();
 	}
 

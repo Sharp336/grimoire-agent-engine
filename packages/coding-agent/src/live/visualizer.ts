@@ -8,6 +8,7 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { isReduceMotion } from "../config/reduce-motion";
 import { type ThemeColor, theme } from "../modes/theme/theme";
 
 /** Distinct states of a realtime call connection. */
@@ -173,7 +174,10 @@ export class LiveVisualizer implements Component {
 			muted: "×",
 			error: "!",
 		};
-		const icon = this.#phase === "working" ? spinners[this.#frame % spinners.length] : staticIcons[this.#phase];
+		const icon =
+			this.#phase === "working" && !isReduceMotion()
+				? spinners[this.#frame % spinners.length]
+				: staticIcons[this.#phase];
 		const phaseColors: Record<LivePhase, ThemeColor> = {
 			connecting: "dim",
 			listening: "success",
