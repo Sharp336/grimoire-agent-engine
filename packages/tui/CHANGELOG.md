@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Native Windows toast notifications for BEL-only terminals: when the chosen notify protocol is BEL on a local Windows desktop, notifications now also fan out as WinRT toasts via Windows PowerShell (`-EncodedCommand`, fire-and-forget), mirroring the existing Linux D-Bus fallback. Opt out with `PI_NO_DESKTOP_NOTIFY=1` ([#7272](https://github.com/can1357/oh-my-pi/issues/7272)).
+
 ## [17.2.9] - 2026-08-05
 
 ### Fixed

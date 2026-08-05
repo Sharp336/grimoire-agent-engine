@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import {
 	buildDesktopNotifyCommand,
+	buildWindowsToastScript,
 	type DesktopNotifier,
 	hasLinuxDesktopSession,
+	hasWindowsDesktopSession,
 	resetDesktopNotifierCache,
 	resolveDesktopNotifier,
 	sendDesktopNotification,
@@ -51,10 +53,33 @@ describe("shouldDeliverDesktopNotification", () => {
 		).toBe(false);
 	});
 
-	it("requires a Linux desktop session — silent on macOS / Windows / headless Linux", () => {
+	it("requires a desktop session — silent on macOS / headless Linux", () => {
 		expect(shouldDeliverDesktopNotification("trueColor", true, "darwin", LINUX_ENV)).toBe(false);
-		expect(shouldDeliverDesktopNotification("trueColor", true, "win32", LINUX_ENV)).toBe(false);
 		expect(shouldDeliverDesktopNotification("trueColor", true, "linux", {})).toBe(false);
+	});
+
+	it("fires for Bell-only terminals on a local Windows desktop, but not over SSH", () => {
+		const WIN_ENV: NodeJS.ProcessEnv = { SESSIONNAME: "Console" };
+		expect(shouldDeliverDesktopNotification("trueColor", true, "win32", WIN_ENV)).toBe(true);
+		expect(
+			shouldDeliverDesktopNotification("trueColor", true, "win32", { ...WIN_ENV, SSH_CONNECTION: "1.2.3.4" }),
+		).toBe(false);
+		expect(
+			shouldDeliverDesktopNotification("trueColor", true, "win32", { ...WIN_ENV, PI_NO_DESKTOP_NOTIFY: "1" }),
+		).toBe(false);
+		expect(shouldDeliverDesktopNotification("kitty", false, "win32", WIN_ENV)).toBe(false);
+	});
+});
+
+describe("hasWindowsDesktopSession", () => {
+	it("requires win32 + an interactive logon session + no SSH markers", () => {
+		expect(hasWindowsDesktopSession("win32", { SESSIONNAME: "Console" })).toBe(true);
+		expect(hasWindowsDesktopSession("win32", { SESSIONNAME: "RDP-Tcp#3" })).toBe(true);
+		// Services / session-0 hosts have no SESSIONNAME — a toast can never surface there.
+		expect(hasWindowsDesktopSession("win32", {})).toBe(false);
+		expect(hasWindowsDesktopSession("win32", { SESSIONNAME: "Console", SSH_CLIENT: "1.2.3.4 5 22" })).toBe(false);
+		expect(hasWindowsDesktopSession("win32", { SESSIONNAME: "Console", SSH_TTY: "/dev/pts/0" })).toBe(false);
+		expect(hasWindowsDesktopSession("linux", { SESSIONNAME: "Console" })).toBe(false);
 	});
 });
 
@@ -72,32 +97,43 @@ describe("resolveDesktopNotifier", () => {
 		vi.spyOn(utils, "$which").mockImplementation(name =>
 			name === "notify-send" ? "/usr/bin/notify-send" : "/usr/bin/gdbus",
 		);
-		expect(resolveDesktopNotifier()).toEqual({ kind: "notify-send", path: "/usr/bin/notify-send" });
+		expect(resolveDesktopNotifier("linux")).toEqual({ kind: "notify-send", path: "/usr/bin/notify-send" });
 	});
 
 	it("falls back to gdbus when notify-send is missing", () => {
 		vi.spyOn(utils, "$which").mockImplementation(name => (name === "gdbus" ? "/usr/bin/gdbus" : null));
-		expect(resolveDesktopNotifier()).toEqual({ kind: "gdbus", path: "/usr/bin/gdbus" });
+		expect(resolveDesktopNotifier("linux")).toEqual({ kind: "gdbus", path: "/usr/bin/gdbus" });
 	});
 
 	it("returns null when neither binary is installed", () => {
 		vi.spyOn(utils, "$which").mockReturnValue(null);
-		expect(resolveDesktopNotifier()).toBeNull();
+		expect(resolveDesktopNotifier("linux")).toBeNull();
 	});
 
 	it("caches the resolution so repeat calls do not re-probe PATH", () => {
 		const spy = vi.spyOn(utils, "$which").mockReturnValue("/usr/bin/notify-send");
-		resolveDesktopNotifier();
-		resolveDesktopNotifier();
-		resolveDesktopNotifier();
+		resolveDesktopNotifier("linux");
+		resolveDesktopNotifier("linux");
+		resolveDesktopNotifier("linux");
 		// One call per probed binary on the first invocation, zero on cache hits.
 		expect(spy).toHaveBeenCalledTimes(1);
+	});
+
+	it("resolves Windows PowerShell on win32", () => {
+		vi.spyOn(utils, "$which").mockImplementation(name =>
+			name === "powershell.exe" ? "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" : null,
+		);
+		expect(resolveDesktopNotifier("win32")).toEqual({
+			kind: "powershell",
+			path: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+		});
 	});
 });
 
 describe("buildDesktopNotifyCommand", () => {
 	const notifySend: DesktopNotifier = { kind: "notify-send", path: "/usr/bin/notify-send" };
 	const gdbus: DesktopNotifier = { kind: "gdbus", path: "/usr/bin/gdbus" };
+	const powershell: DesktopNotifier = { kind: "powershell", path: "C:\\pwsh\\powershell.exe" };
 
 	it("encodes string messages as title=app + body=message for notify-send", () => {
 		expect(buildDesktopNotifyCommand(notifySend, "ping")).toEqual([
@@ -162,6 +198,37 @@ describe("buildDesktopNotifyCommand", () => {
 			"5000",
 		]);
 	});
+
+	it("runs the WinRT toast script through -EncodedCommand for powershell", () => {
+		const argv = buildDesktopNotifyCommand(powershell, { title: "Session", body: "Complete" });
+		expect(argv.slice(0, 7)).toEqual([
+			"C:\\pwsh\\powershell.exe",
+			"-NoLogo",
+			"-NoProfile",
+			"-NonInteractive",
+			"-WindowStyle",
+			"Hidden",
+			"-EncodedCommand",
+		]);
+		const decoded = Buffer.from(argv[7], "base64").toString("utf16le");
+		expect(decoded).toBe(buildWindowsToastScript({ title: "Session", body: "Complete" }));
+	});
+});
+
+describe("buildWindowsToastScript", () => {
+	it("XML-escapes title/body and embeds them in a ToastGeneric payload", () => {
+		const script = buildWindowsToastScript({ title: "a<b> & 'c'", body: 'say "hi"' });
+		expect(script).toContain("<text>a&lt;b&gt; &amp; &apos;c&apos;</text>");
+		expect(script).toContain("<text>say &quot;hi&quot;</text>");
+		expect(script).toContain("CreateToastNotifier");
+	});
+
+	it("maps critical urgency to the urgent toast scenario", () => {
+		expect(buildWindowsToastScript({ title: "t", body: "b", urgency: "critical" })).toContain(
+			'<toast scenario="urgent">',
+		);
+		expect(buildWindowsToastScript({ title: "t", body: "b" })).toContain("<toast>");
+	});
 });
 
 describe("sendDesktopNotification", () => {
@@ -179,7 +246,7 @@ describe("sendDesktopNotification", () => {
 		const unref = vi.fn();
 		const spawn = vi.spyOn(Bun, "spawn").mockImplementation((..._args: unknown[]) => ({ unref }) as never);
 
-		sendDesktopNotification({ title: "Session", body: "Complete" });
+		sendDesktopNotification({ title: "Session", body: "Complete" }, "linux");
 
 		expect(spawn).toHaveBeenCalledTimes(1);
 		const opts = spawn.mock.calls[0]?.[0] as unknown as {
@@ -210,7 +277,7 @@ describe("sendDesktopNotification", () => {
 		vi.spyOn(utils, "$which").mockReturnValue(null);
 		const spawn = vi.spyOn(Bun, "spawn").mockImplementation((..._args: unknown[]) => ({ unref: vi.fn() }) as never);
 
-		sendDesktopNotification("ping");
+		sendDesktopNotification("ping", "linux");
 
 		expect(spawn).not.toHaveBeenCalled();
 	});
@@ -221,6 +288,6 @@ describe("sendDesktopNotification", () => {
 			throw new Error("ENOENT");
 		});
 
-		expect(() => sendDesktopNotification("ping")).not.toThrow();
+		expect(() => sendDesktopNotification("ping", "linux")).not.toThrow();
 	});
 });
