@@ -9,6 +9,7 @@
  * endpoint.
  */
 import { type AuthStorage, type FetchImpl, type OAuthAccess, withOAuthAccess } from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	ANTIGRAVITY_SYSTEM_INSTRUCTION,
 	getAntigravityUserAgent,
@@ -29,7 +30,7 @@ const DEVELOPER_API_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta
 const ANTIGRAVITY_DAILY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 const ANTIGRAVITY_SANDBOX_ENDPOINT = "https://daily-cloudcode-pa.sandbox.googleapis.com";
 const ANTIGRAVITY_ENDPOINT_FALLBACKS = [ANTIGRAVITY_DAILY_ENDPOINT, ANTIGRAVITY_SANDBOX_ENDPOINT] as const;
-const DEFAULT_MODEL = "gemini-2.5-flash";
+const DEFAULT_MODEL = "gemini-3.5-flash";
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
 const RATE_LIMIT_BUDGET_MS = 5 * 60 * 1000;
@@ -39,6 +40,18 @@ function resolveGeminiSearchModel(configuredModel: string | undefined): string {
 	if (envModel) return envModel;
 	const model = configuredModel?.trim();
 	return model || DEFAULT_MODEL;
+}
+
+/**
+ * Cloud Code Assist wire ids differ from the user-facing catalog id: the
+ * google-antigravity catalog entry declares the wire id via `requestModelId`
+ * (e.g. bare `gemini-3.5-flash` → `gemini-3.5-flash-extra-low`). Resolve the
+ * wire id through the bundled catalog; ids without a mapping (e.g. 2.5-flash,
+ * custom/unknown ids) pass through unchanged.
+ */
+function resolveCcaWireModel(modelId: string): string {
+	const model = getBundledModel("google-antigravity", modelId);
+	return model?.requestModelId ?? modelId;
 }
 
 const GEMINI_PROVIDERS = ["google-gemini-cli", "google-antigravity"] as const;
@@ -347,7 +360,7 @@ async function callGeminiSearch(
 
 	const requestBody: Record<string, unknown> = {
 		project: auth.projectId,
-		model,
+		model: resolveCcaWireModel(model),
 		request: {
 			contents: [
 				{

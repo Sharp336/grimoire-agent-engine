@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Default Gemini web search model to `gemini-3.5-flash` (from `gemini-2.5-flash`) for Google Search grounding. Gemini 3.5 Flash is GA and faster and more capable than 2.5 Flash; the old default remains selectable via `providers.webSearchGeminiModel` or `GEMINI_SEARCH_MODEL`. Cloud Code Assist (OAuth) requests route the model id through the catalog's `requestModelId` mapping (bare `gemini-3.5-flash` → `gemini-3.5-flash-extra-low`), so both auth paths work out of the box.
+
 ## [17.2.9] - 2026-08-05
 
 ### Breaking Changes

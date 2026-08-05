@@ -97,7 +97,7 @@ describe("searchGemini tools serialization", () => {
 
 		expect(capturedRequest).not.toBeNull();
 		expect(capturedRequest?.url).toBe(
-			"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+			"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:streamGenerateContent?alt=sse",
 		);
 		expect(capturedRequest?.headers["x-goog-api-key"]).toBe("test-gemini-api-key");
 		expect(capturedRequest?.body).toMatchObject({
@@ -154,7 +154,7 @@ describe("searchGemini tools serialization", () => {
 		expect(response.model).toBe("gemini-3.5-flash");
 	});
 
-	it("uses configured OAuth model in the Cloud Code request body", async () => {
+	it("routes configured OAuth model to its Cloud Code wire id in the request body", async () => {
 		const fetchMock = mockGeminiFetch();
 		await searchGemini({
 			...makeParams("oauth configured"),
@@ -163,7 +163,20 @@ describe("searchGemini tools serialization", () => {
 		});
 
 		expect(capturedRequest?.body).toMatchObject({
-			model: "gemini-3.5-flash",
+			model: "gemini-3.5-flash-extra-low",
+		});
+	});
+
+	it("passes unknown model ids through unchanged on the Cloud Code path", async () => {
+		const fetchMock = mockGeminiFetch();
+		await searchGemini({
+			...makeParams("custom model"),
+			geminiModel: "my-custom-gemini-model",
+			fetch: fetchMock,
+		});
+
+		expect(capturedRequest?.body).toMatchObject({
+			model: "my-custom-gemini-model",
 		});
 	});
 
@@ -189,7 +202,7 @@ describe("searchGemini tools serialization", () => {
 			tools: [{ googleSearch: {} }],
 		});
 		expect(capturedRequest?.body).toMatchObject({
-			model: "gemini-2.5-flash",
+			model: "gemini-3.5-flash-extra-low",
 		});
 	});
 

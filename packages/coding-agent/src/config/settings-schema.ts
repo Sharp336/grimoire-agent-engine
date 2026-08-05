@@ -4928,7 +4928,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "providers",
 			group: "Services",
 			label: "Gemini web_search model",
-			description: "Model ID for Gemini Google Search grounding. Defaults to gemini-2.5-flash.",
+			description: "Model ID for Gemini Google Search grounding. Defaults to gemini-3.5-flash.",
 		},
 	},
 	"providers.antigravityEndpoint": {
