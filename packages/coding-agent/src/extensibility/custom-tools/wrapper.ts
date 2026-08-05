@@ -36,15 +36,4 @@ export class CustomToolAdapter<TParams extends TSchema = TSchema, TDetails = any
 	) {
 		return this.tool.execute(toolCallId, params, onUpdate, context ?? this.getContext(), signal);
 	}
-
-	/**
-	 * Backward-compatible export of factory function for existing callers.
-	 * Prefer CustomToolAdapter constructor directly.
-	 */
-	static wrap<TParams extends TSchema = TSchema, TDetails = any, TTheme extends Theme = Theme>(
-		tool: CustomTool<TParams, TDetails>,
-		getContext: () => CustomToolContext,
-	): AgentTool<TParams, TDetails, TTheme> {
-		return new CustomToolAdapter(tool, getContext);
-	}
 }

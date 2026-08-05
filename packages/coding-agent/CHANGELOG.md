@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed the `CustomToolAdapter.wrap(tool, getContext)` static factory from `@oh-my-pi/pi-coding-agent/extensibility/custom-tools`. Construct the adapter directly with `new CustomToolAdapter(tool, getContext)`; the arguments and behavior are unchanged.
+
 ## [17.2.9] - 2026-08-05
 
 ### Breaking Changes
