@@ -165,6 +165,35 @@ describe("InteractiveMode vibe mode toggle", () => {
 		expect(session.getAllToolNames().toSorted()).toEqual(["read", "todo"]);
 	});
 
+	it("keeps at most one active Vibe overlay in canonical history and removes it on exit", async () => {
+		await mode.handleVibeModeCommand();
+		const sendCustomMessage = vi.spyOn(session, "sendCustomMessage");
+		await session.sendVibeModeContext({ deliverAs: "nextTurn" });
+		expect(
+			session.messages.filter(message => message.role === "custom" && message.customType === "vibe-mode-context"),
+		).toHaveLength(1);
+
+		sendCustomMessage.mockClear();
+		await session.sendVibeModeContext({ deliverAs: "nextTurn" });
+		expect(sendCustomMessage).not.toHaveBeenCalled();
+		expect(
+			session.messages.filter(message => message.role === "custom" && message.customType === "vibe-mode-context"),
+		).toHaveLength(1);
+
+		session.messages.push({ ...session.messages[0]!, timestamp: Date.now() } as never);
+		await session.sendVibeModeContext({ deliverAs: "nextTurn" });
+		expect(sendCustomMessage).toHaveBeenCalledTimes(1);
+		expect(
+			session.messages.filter(message => message.role === "custom" && message.customType === "vibe-mode-context"),
+		).toHaveLength(1);
+
+		await mode.handleVibeModeCommand();
+		await session.sendVibeModeContext({ deliverAs: "nextTurn" });
+		expect(
+			session.messages.some(message => message.role === "custom" && message.customType === "vibe-mode-context"),
+		).toBe(false);
+	});
+
 	it("keeps a same-named non-built-in Todo tool unavailable in Vibe mode", async () => {
 		const model = session.model;
 		if (!model) throw new Error("Expected active model");

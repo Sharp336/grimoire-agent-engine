@@ -15,7 +15,8 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { Settings } from "../../src/config/settings";
 import { getThemeByName, setThemeInstance, type Theme } from "../../src/modes/theme/theme";
-import { createVibeToolRenderer, type VibeToolDetails } from "../../src/tools/vibe";
+import type { ToolSession } from "../../src/tools";
+import { createVibeToolRenderer, VibeSpawnTool, type VibeToolDetails, VibeWaitTool } from "../../src/tools/vibe";
 import type { VibeScreenSnapshot } from "../../src/vibe/runtime";
 
 const strip = (lines: readonly string[]): string[] =>
@@ -48,6 +49,18 @@ describe("vibe tool renderers", () => {
 		if (!loaded) throw new Error("theme unavailable");
 		uiTheme = loaded;
 		setThemeInstance(uiTheme);
+	});
+
+	it("states repository-context inheritance and immutable wait output semantics", () => {
+		const session = { cwd: "/tmp", settings: Settings.isolated({}) } as ToolSession;
+		const spawnDescription = new VibeSpawnTool(session).description;
+		const waitDescription = new VibeWaitTool(session).description;
+		expect(spawnDescription).toContain("does not inherit the parent conversation");
+		expect(spawnDescription).toContain("normal system prompt and discovered repository context");
+		expect(spawnDescription).toContain("including applicable `AGENTS.md`");
+		expect(waitDescription).toContain("bounded preview");
+		expect(waitDescription).toContain("immutable `fullOutputUrl`");
+		expect(waitDescription).toContain("latest-output alias");
 	});
 
 	it("send composer types the message into a mini CLI frame with a blinking cursor while pending", () => {

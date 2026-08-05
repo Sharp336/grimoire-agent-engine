@@ -118,8 +118,8 @@ export function resolveSoftRequestBudget(agentName: string, configuredBudget: nu
 export const BUDGET_STOP_GRACE_REQUESTS = 5;
 
 /** Steering notice injected when a subagent crosses its soft request budget. */
-export function buildBudgetNotice(requests: number, budget: number): string {
-	return `[budget notice] You have used ${requests} requests in this run (soft budget: ${budget}). Wrap up now: finish the current step and yield your final report. At ${Math.ceil(budget * 1.5)} requests the run is force-stopped and you will be asked to yield whatever you have.`;
+export function buildBudgetNotice(requests: number, budget: number, stopThreshold = Math.ceil(budget * 1.5)): string {
+	return `[budget notice] You have used ${requests} requests in this run (soft budget: ${budget}). Wrap up now: finish the current step and yield your final report. At ${stopThreshold} requests the run is force-stopped and you will be asked to yield whatever you have.`;
 }
 
 /** Flatten whitespace and clip salvage text for the cancelled-child summary line. */
@@ -376,6 +376,8 @@ export interface ExecutorOptions {
 	 * watchdog is already suspended for the call's duration.
 	 */
 	maxRuntimeMs?: number;
+	/** Exact assistant-request count that force-stops the free-running turn for a partial yield. */
+	maxRequests?: number;
 	/** Include IRC only when the invocation policy permits collaboration. */
 	enableIrc?: boolean;
 	enableLsp?: boolean;
@@ -906,6 +908,8 @@ interface RunMonitorArgs {
 	softRequestBudget: number;
 	/** Whether crossing the soft budget injects a wrap-up steering notice. */
 	softRequestBudgetNotice: boolean;
+	/** Exact request count that triggers forced wrap-up; omitted preserves the legacy 1.5x soft-budget threshold. */
+	maxRequests?: number;
 	/** Wall-clock cap in ms; 0 disables the timer. */
 	maxRuntimeMs: number;
 }
@@ -989,6 +993,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		onProgress,
 		softRequestBudget,
 		softRequestBudgetNotice,
+		maxRequests,
 		maxRuntimeMs,
 	} = args;
 	const startTime = Date.now();
@@ -1551,7 +1556,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 						}
 					}
 					if (softRequestBudget > 0 && !abortSent && !yieldCallPending) {
-						const stopThreshold = softRequestBudget * 1.5;
+						const stopThreshold = maxRequests ?? softRequestBudget * 1.5;
 						if (budgetStopRequested) {
 							// Grace window after the stop: the forced yield needs a
 							// request or two; a child that keeps burning requests
@@ -1568,7 +1573,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 								// Build the notice now (the count at crossing time), but send
 								// behind an async boundary: a synchronously-throwing send must
 								// never take down event processing (which escalates to terminate).
-								const notice = buildBudgetNotice(progress.requests, softRequestBudget);
+								const notice = buildBudgetNotice(progress.requests, softRequestBudget, stopThreshold);
 								void Promise.resolve()
 									.then(() => steerSession.sendUserMessage(notice, { deliverAs: "steer" }))
 									.catch(err => {
@@ -2481,6 +2486,8 @@ export interface FollowUpTurnOptions {
 	artifactsDir?: string;
 	/** Wall-clock cap in ms for this turn; 0 disables. */
 	maxRuntimeMs?: number;
+	/** Exact assistant-request count that force-stops this turn for a partial yield. */
+	maxRequests?: number;
 }
 
 /**
@@ -2515,8 +2522,9 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		parentToolCallId: options.parentToolCallId,
 		detached: true,
 		sessionFile,
-		softRequestBudget: 0,
-		softRequestBudgetNotice: false,
+		softRequestBudget: options.maxRequests === undefined ? 0 : Math.max(1, Math.floor(options.maxRequests * (2 / 3))),
+		softRequestBudgetNotice: options.maxRequests !== undefined,
+		maxRequests: options.maxRequests,
 		maxRuntimeMs: options.maxRuntimeMs ?? 0,
 	});
 
@@ -2650,8 +2658,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		0,
 		Math.trunc(Number(settings.get("task.softRequestBudget") ?? SOFT_REQUEST_BUDGET.default) || 0),
 	);
-	const softRequestBudget = resolveSoftRequestBudget(agent.name, configuredDefaultBudget);
-	const softRequestBudgetNotice = settings.get("task.softRequestBudgetNotice") ?? false;
+	const configuredMaxRequests =
+		options.maxRequests === undefined ? undefined : Math.max(1, Math.trunc(options.maxRequests));
+	const softRequestBudget =
+		configuredMaxRequests === undefined
+			? resolveSoftRequestBudget(agent.name, configuredDefaultBudget)
+			: Math.max(1, Math.floor(configuredMaxRequests * (2 / 3)));
+	const softRequestBudgetNotice =
+		configuredMaxRequests === undefined ? (settings.get("task.softRequestBudgetNotice") ?? false) : true;
 	const parentDepth = options.taskDepth ?? 0;
 	const childDepth = parentDepth + 1;
 	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
@@ -2715,6 +2729,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		sessionFile: subtaskSessionFile,
 		softRequestBudget,
 		softRequestBudgetNotice,
+		maxRequests: configuredMaxRequests,
 		maxRuntimeMs,
 	});
 	const progress = monitor.progress;

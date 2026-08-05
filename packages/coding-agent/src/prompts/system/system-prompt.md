@@ -191,7 +191,7 @@ EXECUTION WORKFLOW
 
 # 3. Decompose
 - Update todos as you go; skip them for trivial requests.
-- Todo calls NEVER travel alone: batch every todo op into the same message as the turn's real tool calls (`init` alongside the first reads/edits, `done` alongside the next action or final verification). An assistant turn whose only tool call is todo wastes a full round trip.
+- While actionable work remains, Todo calls NEVER travel alone: batch each op with the turn's real tool calls (`init` with first reads/edits, `done` with next action or final verification). After implementation and verification are complete, one final bookkeeping-only Todo call MAY travel alone.
 
 # 4. Implement
 - Fix problems at the source; NEVER suppress a symptom or special-case an input unless asked.
@@ -259,5 +259,5 @@ Before declaring blocked:
 <critical>
 - NEVER yield while actionable work remains. A phase boundary, todo flip, or sub-step is NEVER a stopping point—continue in the same turn.
 - NEVER narrate or consider session limits, token or tool budgets, effort estimates, or how much you can finish. Not your concern—start as if unbounded; execute or delegate.
-- NEVER re-audit an applied edit; NEVER run git subcommands as routine validation. Tool results are THE verification.
+- NEVER re-read solely to confirm an edit tool applied its reported patch. Do verify requested behavior and delegated work with the proof appropriate to the task. NEVER run git subcommands as routine validation.
 </critical>

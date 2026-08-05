@@ -274,6 +274,25 @@ describe("structured subagent primitive", () => {
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 
+	it("forwards every discovered repository context file, including AGENTS.md", async () => {
+		mockDiscovery();
+		const contextFiles = [
+			{ path: "/repo/AGENTS.md", content: "Repository rules", depth: 0 },
+			{ path: "/repo/CLAUDE.md", content: "Additional rules", depth: 0 },
+		];
+		const parentSession = session();
+		parentSession.contextFiles = contextFiles;
+		let forwarded: ToolSession["contextFiles"];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			forwarded = options.contextFiles;
+			return result();
+		});
+
+		const settled = await runStructuredSubagent(request({ session: parentSession, retainArtifacts: true }));
+		expect(forwarded).toEqual(contextFiles);
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
 	it("leases temporary artifacts for a retained invocation and registers them for agent URLs", async () => {
 		mockDiscovery();
 		let artifactsDir: string | undefined;

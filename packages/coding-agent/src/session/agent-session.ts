@@ -4800,13 +4800,27 @@ export class AgentSession {
 	}
 
 	#buildVibeModeMessage(): CustomMessage | null {
-		if (!this.#vibeModeState?.enabled) return null;
+		const content = this.#vibeModeState?.enabled
+			? prompt.render(vibeModeActivePrompt, {
+					todoAvailable: this.getActiveToolNames().includes("todo"),
+				})
+			: undefined;
+		const messages = this.agent.state.messages;
+		const existing = messages.filter(
+			(message): message is CustomMessage => message.role === "custom" && message.customType === "vibe-mode-context",
+		);
+		if (content !== undefined && existing.length === 1) return null;
+		if (existing.length > 0) {
+			this.agent.replaceMessages(
+				messages.filter(message => message.role !== "custom" || message.customType !== "vibe-mode-context"),
+			);
+			this.#closeCodexProviderSessionsForHistoryRewrite();
+		}
+		if (content === undefined) return null;
 		return {
 			role: "custom",
 			customType: "vibe-mode-context",
-			content: prompt.render(vibeModeActivePrompt, {
-				todoAvailable: this.getActiveToolNames().includes("todo"),
-			}),
+			content,
 			display: false,
 			attribution: "agent",
 			timestamp: Date.now(),

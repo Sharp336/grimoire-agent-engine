@@ -204,14 +204,14 @@ describe("runSubprocess soft request budget", () => {
 		});
 	}
 
-	it("a budget stop drives one forced final yield and finishes as a normal completion", async () => {
+	it("an exact request cap stops at maxRequests and drives one forced final yield", async () => {
 		const id = "BudgetScout";
 		let abortCallsAtReminder: number | undefined;
 		const handle = createMockSession(({ promptIndex, emit, pushMessage }) => {
 			if (promptIndex === 1) {
-				// Free-running exploration: budget 2 → stop threshold 3.
-				for (let i = 1; i <= 3; i++) {
-					const message = assistantText(`exploring ${i}`, i === 3 ? "aborted" : "stop");
+				// Explicit cap 2 overrides the legacy soft-budget 1.5x threshold (3).
+				for (let i = 1; i <= 2; i++) {
+					const message = assistantText(`exploring ${i}`, i === 2 ? "aborted" : "stop");
 					pushMessage(message);
 					emit({ type: "message_end", message } as unknown as AgentSessionEvent);
 				}
@@ -247,7 +247,7 @@ describe("runSubprocess soft request budget", () => {
 		mockCreateAgentSession(handle.session);
 		registerRunning(id, handle.session);
 
-		const result = await runSubprocess(baseOptions(id));
+		const result = await runSubprocess({ ...baseOptions(id), maxRequests: 2 });
 
 		// The budget stop aborted the free-running turn exactly once before the
 		// wrap-up reminder; the second abort (after the terminal yield) is the

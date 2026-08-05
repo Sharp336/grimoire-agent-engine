@@ -7,7 +7,7 @@
 - … {{traceOverflow}} earlier tool call(s) not shown
 {{/if}}
 </activity>
-<response{{#if responseTruncated}} truncated="true" full-output="agent://{{id}}"{{/if}}>
+<response{{#if responseTruncated}} truncated="true"{{/if}}{{#if fullOutputUrl}} full-output="{{fullOutputUrl}}"{{/if}}>
 {{response}}
 </response>
 {{#if error}}

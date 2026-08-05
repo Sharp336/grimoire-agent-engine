@@ -54,7 +54,13 @@ const vibeSpawnSchema = type({
 		"worker flavor: fast = low-latency model for mechanical work; good = strong model for hard work",
 	),
 	"name?": type("string <= 48").describe("optional session name; generated when omitted"),
-	prompt: type("string > 0").describe("first instruction; the worker starts with no other context"),
+	prompt: type("string > 0").describe(
+		"first instruction; no parent conversation is inherited, but normal system and repository context is present",
+	),
+	"maxRequests?": type("number.integer >= 1").describe(
+		"forced-wrap request cap per turn; defaults: fast 100, good 200",
+	),
+	"timeout?": type("number > 0").describe("wall-clock seconds per turn; default 1200"),
 });
 
 const vibeSendSchema = type({
@@ -83,7 +89,12 @@ export interface VibeToolDetails {
 	spawned?: { id: string; cli: VibeCli; jobId: string };
 	send?: VibeSendOutcome;
 	wait?: {
-		settled: Array<{ id: string; jobId: string; status: "completed" | "failed" | "cancelled" }>;
+		settled: Array<{
+			id: string;
+			jobId: string;
+			status: "completed" | "failed" | "cancelled";
+			fullOutputUrl?: string;
+		}>;
 		stillRunning: string[];
 		timedOut: boolean;
 		/** True on interim progress emissions while the wait is still blocking. */
@@ -195,7 +206,12 @@ export class VibeWaitTool implements AgentTool<typeof vibeWaitSchema, VibeToolDe
 			op: "wait",
 			screens: screensOf(this.session, params.sessions),
 			wait: {
-				settled: outcome.settled.map(({ id, jobId, status }) => ({ id, jobId, status })),
+				settled: outcome.settled.map(({ id, jobId, status, fullOutputUrl }) => ({
+					id,
+					jobId,
+					status,
+					...(fullOutputUrl ? { fullOutputUrl } : {}),
+				})),
 				stillRunning: outcome.stillRunning,
 				timedOut: outcome.timedOut,
 			},

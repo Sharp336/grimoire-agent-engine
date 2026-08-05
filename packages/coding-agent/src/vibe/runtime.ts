@@ -67,7 +67,13 @@ const TURN_TRACE_CAP = 40;
 const TRACE_LINE_MAX = 120;
 /** Default `vibe_wait` window when no timeout was given (ms). */
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
-/** Response text cap inside a delivered turn result; full output stays at agent://<id>. */
+/** Default forced-wrap request cap for every Vibe worker turn, aligned with bundled agent tiers. */
+export const VIBE_DEFAULT_MAX_REQUESTS: Record<VibeCli, number> = { fast: 100, good: 200 };
+/** Default wall-clock cap for every Vibe worker turn (seconds). */
+export const VIBE_DEFAULT_TIMEOUT_SECONDS = 20 * 60;
+const VIBE_MAX_REQUESTS_LIMIT = 1000;
+const VIBE_MAX_TIMEOUT_SECONDS = 24 * 60 * 60;
+/** Response text cap inside a delivered turn result; full output stays at the immutable turn URL. */
 const RESPONSE_PREVIEW_MAX = 6000;
 /** Grace period for Vibe cancellation/release cleanup before teardown detaches (ms). */
 const VIBE_TEARDOWN_GRACE_MS = 5_000;
@@ -110,6 +116,8 @@ interface VibeSpawnLifecycleEvent extends VibeLifecycleBase {
 	agent: string;
 	childSessionFile: string;
 	createdAt: number;
+	maxRequests?: number;
+	timeoutMs?: number;
 }
 
 interface VibeTurnLifecycleEvent extends VibeLifecycleBase {
@@ -165,6 +173,9 @@ interface VibeRecord {
 	childSessionFile?: string;
 	agent: AgentDefinition;
 	modelOverride?: string | string[];
+	maxRequests: number;
+	timeoutMs: number;
+	artifactsDir?: string;
 	state: VibeSessionState;
 	createdAt: number;
 	lastActivityAt: number;
@@ -183,6 +194,8 @@ interface VibeRecord {
 	};
 	/** Job id of the most recently settled turn (wait snapshots after settle). */
 	lastJobId?: string;
+	/** Immutable full-output URL for `lastJobId`. */
+	lastFullOutputUrl?: string;
 	/** Messages queued while a turn was in flight; drained into the next turn. */
 	queue: string[];
 	turnCount: number;
@@ -245,7 +258,14 @@ export interface VibeKillOutcome {
 export interface VibeWaitOutcome {
 	/** Watched sessions whose snapshotted turn settled during (or before) the wait.
 	 * May overlap `stillRunning` when a queued follow-up turn already started. */
-	settled: Array<{ id: string; jobId: string; status: "completed" | "failed" | "cancelled"; resultText: string }>;
+	settled: Array<{
+		id: string;
+		jobId: string;
+		status: "completed" | "failed" | "cancelled";
+		resultText: string;
+		/** Immutable full output for this exact settled turn, when artifact persistence succeeded. */
+		fullOutputUrl?: string;
+	}>;
 	/** Watched sessions with a turn in flight when the wait returned. */
 	stillRunning: string[];
 	timedOut: boolean;
@@ -331,6 +351,14 @@ function parseLifecycleEvent(value: unknown): VibeLifecycleEvent | undefined {
 		const cli = data.cli === "fast" || data.cli === "good" ? data.cli : undefined;
 		if (!cli || typeof data.agent !== "string" || typeof data.childSessionFile !== "string") return undefined;
 		if (typeof data.createdAt !== "number" || !Number.isFinite(data.createdAt)) return undefined;
+		const maxRequests =
+			typeof data.maxRequests === "number" && Number.isInteger(data.maxRequests) && data.maxRequests > 0
+				? data.maxRequests
+				: undefined;
+		const timeoutMs =
+			typeof data.timeoutMs === "number" && Number.isInteger(data.timeoutMs) && data.timeoutMs > 0
+				? data.timeoutMs
+				: undefined;
 		return {
 			...base,
 			action: "spawn",
@@ -338,6 +366,8 @@ function parseLifecycleEvent(value: unknown): VibeLifecycleEvent | undefined {
 			agent: data.agent,
 			childSessionFile: data.childSessionFile,
 			createdAt: data.createdAt,
+			maxRequests,
+			timeoutMs,
 		};
 	}
 	if (data.action === "turn-started" || data.action === "turn-settled") {
@@ -429,6 +459,8 @@ export class VibeSessionRegistry {
 			parentSessionId: "test-parent-session",
 			parentSessionFile: null,
 			agent: getBundledAgent("sonic")!,
+			maxRequests: VIBE_DEFAULT_MAX_REQUESTS[record.cli ?? "fast"],
+			timeoutMs: VIBE_DEFAULT_TIMEOUT_SECONDS * 1000,
 			state: record.state ?? "running",
 			createdAt: Date.now(),
 			lastActivityAt: Date.now(),
@@ -911,6 +943,9 @@ export class VibeSessionRegistry {
 				childSessionFile,
 				agent,
 				modelOverride,
+				maxRequests: spawn.maxRequests ?? VIBE_DEFAULT_MAX_REQUESTS[spawn.cli],
+				timeoutMs: spawn.timeoutMs ?? VIBE_DEFAULT_TIMEOUT_SECONDS * 1000,
+				artifactsDir: path.dirname(childSessionFile),
 				state: "idle",
 				createdAt: spawn.createdAt,
 				lastActivityAt: candidate.lastActivityAt,
@@ -931,7 +966,10 @@ export class VibeSessionRegistry {
 	}
 
 	/** Spawn a persistent worker session and start its first turn in the background. */
-	async spawn(session: ToolSession, args: { cli: VibeCli; name?: string; prompt: string }): Promise<VibeSpawnOutcome> {
+	async spawn(
+		session: ToolSession,
+		args: { cli: VibeCli; name?: string; prompt: string; maxRequests?: number; timeout?: number },
+	): Promise<VibeSpawnOutcome> {
 		const scope = this.ownerScope(session);
 		return this.#withTerminationLock(scope, () => this.#spawnLocked(session, scope, args));
 	}
@@ -939,10 +977,18 @@ export class VibeSessionRegistry {
 	async #spawnLocked(
 		session: ToolSession,
 		scope: VibeOwnerScope,
-		args: { cli: VibeCli; name?: string; prompt: string },
+		args: { cli: VibeCli; name?: string; prompt: string; maxRequests?: number; timeout?: number },
 	): Promise<VibeSpawnOutcome> {
 		if (this.#terminatedScopes.has(scopeKey(scope, ""))) {
 			throw new ToolError("Vibe mode has exited; enter Vibe mode again before spawning a worker.");
+		}
+		const maxRequests = args.maxRequests ?? VIBE_DEFAULT_MAX_REQUESTS[args.cli];
+		if (!Number.isInteger(maxRequests) || maxRequests < 1 || maxRequests > VIBE_MAX_REQUESTS_LIMIT) {
+			throw new ToolError(`maxRequests must be an integer between 1 and ${VIBE_MAX_REQUESTS_LIMIT}.`);
+		}
+		const timeoutSeconds = args.timeout ?? VIBE_DEFAULT_TIMEOUT_SECONDS;
+		if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0 || timeoutSeconds > VIBE_MAX_TIMEOUT_SECONDS) {
+			throw new ToolError(`timeout must be greater than 0 and at most ${VIBE_MAX_TIMEOUT_SECONDS} seconds.`);
 		}
 		const manager = this.#manager(session);
 		const { agent, modelOverride } = this.#resolveWorker(session, args.cli);
@@ -969,6 +1015,8 @@ export class VibeSessionRegistry {
 			childSessionFile,
 			agent,
 			modelOverride,
+			maxRequests,
+			timeoutMs: Math.ceil(timeoutSeconds * 1000),
 			state: "starting",
 			createdAt,
 			lastActivityAt: createdAt,
@@ -991,6 +1039,8 @@ export class VibeSessionRegistry {
 						cli: args.cli,
 						agent: agent.name,
 						childSessionFile: childSessionName,
+						maxRequests: record.maxRequests,
+						timeoutMs: record.timeoutMs,
 						createdAt,
 					},
 					record.parentSessionFile,
@@ -1095,6 +1145,9 @@ export class VibeSessionRegistry {
 					jobId,
 					status: job.status,
 					resultText: job.resultText ?? job.errorText ?? "(no output)",
+					...(record.lastJobId === jobId && record.lastFullOutputUrl
+						? { fullOutputUrl: record.lastFullOutputUrl }
+						: {}),
 				});
 			}
 			return settled;
@@ -1403,12 +1456,15 @@ export class VibeSessionRegistry {
 		const artifactsDir = sessionArtifactsDir ?? path.join(os.tmpdir(), `omp-vibe-${Snowflake.next()}`);
 		await fs.mkdir(artifactsDir, { recursive: true });
 		if (!sessionArtifactsDir) registerArtifactsDir(artifactsDir);
+		record.artifactsDir = artifactsDir;
 		const localProtocolOptions: LocalProtocolOptions = session.localProtocolOptions ?? {
 			getArtifactsDir: session.getArtifactsDir ?? (() => null),
 			getSessionId: session.getSessionId ?? (() => null),
 		};
 		return {
 			cwd: session.cwd,
+			additionalDirectories: session.additionalDirectories,
+			getApiKey: session.getApiKey,
 			agent: record.agent,
 			task: message,
 			assignment: message,
@@ -1421,6 +1477,8 @@ export class VibeSessionRegistry {
 			parentActiveModelPattern: session.getActiveModelString?.(),
 			thinkingLevel: record.agent.thinkingLevel,
 			sessionFile,
+			maxRequests: record.maxRequests,
+			maxRuntimeMs: record.timeoutMs,
 			persistArtifacts: Boolean(sessionFile),
 			artifactsDir,
 			enableLsp: (session.enableLsp ?? true) && session.settings.get("task.enableLsp"),
@@ -1431,7 +1489,7 @@ export class VibeSessionRegistry {
 			modelRegistry: session.modelRegistry,
 			settings: session.settings,
 			mcpManager: session.mcpManager ?? MCPManager.instance(),
-			contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
+			contextFiles: session.contextFiles,
 			skills: [...(session.skills ?? [])],
 			workspaceTree: session.workspaceTree,
 			promptTemplates: session.promptTemplates,
@@ -1513,7 +1571,9 @@ export class VibeSessionRegistry {
 								signal,
 								onProgress,
 								eventBus: session.eventBus,
-								artifactsDir: session.getSessionFile()?.slice(0, -6),
+								artifactsDir: record.artifactsDir,
+								maxRequests: record.maxRequests,
+								maxRuntimeMs: record.timeoutMs,
 							});
 					return await this.#settleTurn(session, manager, record, turn, ownJobId, turnIndex, result);
 				} catch (error) {
@@ -1582,6 +1642,24 @@ export class VibeSessionRegistry {
 		}
 	}
 
+	/** Preserve one turn's full output before a queued follow-up can overwrite the latest alias. */
+	async #snapshotTurnOutput(record: VibeRecord, turnIndex: number, result: SingleResult): Promise<string | undefined> {
+		if (!result.outputPath) return undefined;
+		const snapshotId = `${record.id}.turn-${turnIndex}`;
+		const snapshotPath = path.join(path.dirname(result.outputPath), `${snapshotId}.md`);
+		try {
+			await fs.copyFile(result.outputPath, snapshotPath);
+			return `agent://${record.id}/turn-${turnIndex}`;
+		} catch (error) {
+			logger.warn("vibe: failed to preserve immutable turn output", {
+				id: record.id,
+				turn: turnIndex,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return undefined;
+		}
+	}
+
 	/** Format a settled turn into the self-delivering result text (activity trace + response). */
 	async #settleTurn(
 		session: ToolSession,
@@ -1592,6 +1670,8 @@ export class VibeSessionRegistry {
 		turnIndex: number,
 		result: SingleResult,
 	): Promise<string> {
+		const fullOutputUrl = await this.#snapshotTurnOutput(record, turnIndex, result);
+		record.lastFullOutputUrl = fullOutputUrl;
 		await this.#finishTurn(session, manager, record, settledJobId);
 		const failed = result.exitCode !== 0 || result.aborted === true;
 		const status = result.aborted ? "aborted" : failed ? "failed" : "completed";
@@ -1610,7 +1690,8 @@ export class VibeSessionRegistry {
 		if (response.length > RESPONSE_PREVIEW_MAX) {
 			const slice = response.slice(0, RESPONSE_PREVIEW_MAX);
 			const lastNewline = slice.lastIndexOf("\n");
-			response = lastNewline > 0 ? slice.slice(0, lastNewline) : slice;
+			const safeBoundary = lastNewline >= RESPONSE_PREVIEW_MAX * 0.8 ? lastNewline : RESPONSE_PREVIEW_MAX;
+			response = slice.slice(0, safeBoundary).trimEnd();
 			responseTruncated = true;
 		}
 		let text: string;
@@ -1630,6 +1711,7 @@ export class VibeSessionRegistry {
 					response,
 					responseTruncated,
 					error: failed ? (result.abortReason ?? result.error ?? result.stderr ?? "") : "",
+					fullOutputUrl,
 					alive: record.state !== "dead",
 				})
 				.trim();
