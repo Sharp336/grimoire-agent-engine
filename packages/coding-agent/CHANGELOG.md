@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The `/guided-goal` interview previously could not use the ask dialog at all (tool calls were forbidden while interviewing, so it was plain chat only); it now asks its one question per turn via the ask dialog when the `ask` tool is available, falling back to a plain assistant message when `ask` is disabled.
+
 ## [17.2.9] - 2026-08-05
 
 ### Breaking Changes

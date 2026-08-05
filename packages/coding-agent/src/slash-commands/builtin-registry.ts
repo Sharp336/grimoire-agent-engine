@@ -494,7 +494,8 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "guided-goal",
-		description: "Have the agent interview you in chat, then set up goal mode",
+		description:
+			"Interviews you to set up goal mode — one question per turn via the ask dialog when available, plain chat otherwise",
 		inlineHint: "[rough objective]",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {

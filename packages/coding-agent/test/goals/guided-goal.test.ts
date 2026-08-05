@@ -48,8 +48,15 @@ async function createHarness(options?: { goalEnabled?: boolean }): Promise<Guide
 	if (!model) {
 		throw new Error("Expected claude-sonnet-4-5 to exist in registry");
 	}
-	const initialTools = await createTools(createToolSession(tempDir.path(), settings), ["read"]);
-	const toolRegistry = new Map<string, Tool>(initialTools.map(tool => [tool.name, tool] as const));
+	const initialTools = await createTools(createToolSession(tempDir.path(), settings, { hasUI: true }), ["read"]);
+	// Register `ask` without enabling it: the registry must know the tool so a
+	// command that force-activated it would show up in getEnabledToolNames(),
+	// while the session starts with it disabled (as if the user turned it off).
+	const registryTools = await createTools(createToolSession(tempDir.path(), settings, { hasUI: true }), [
+		"read",
+		"ask",
+	]);
+	const toolRegistry = new Map<string, Tool>(registryTools.map(tool => [tool.name, tool] as const));
 	const session = new AgentSession({
 		agent: new Agent({
 			initialState: {
@@ -119,6 +126,30 @@ describe("guided goal setup", () => {
 			// The goal tool is activated up front so the agent can create the goal
 			// once the interview concludes.
 			expect(harness.session.getEnabledToolNames()).toContain("goal");
+			// The command activates `goal` only — it must not auto-enable `ask`
+			// (the user may have disabled it deliberately); the prompt falls back
+			// to plain chat when the ask tool is absent.
+			expect(harness.session.getEnabledToolNames()).not.toContain("ask");
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("renders the interview prompt with a plain-chat fallback when the ask tool is disabled", async () => {
+		const harness = await createHarness();
+		try {
+			const promptSpy = vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
+
+			await harness.mode.handleGuidedGoalCommand("ship the release");
+
+			expect(promptSpy).toHaveBeenCalledTimes(1);
+			const call = promptSpy.mock.calls[0];
+			if (!call) throw new Error("expected a prompt call");
+			const [text] = call;
+			// The prompt must instruct the agent to fall back to a plain assistant
+			// message when the ask tool is unavailable — not require it unconditionally.
+			expect(text).toContain("plain assistant message");
+			expect(text).toContain("when it is not");
 		} finally {
 			await harness.cleanup();
 		}
