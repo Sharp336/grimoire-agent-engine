@@ -4,7 +4,8 @@
 
 ### Added
 
-- Added opt-in `tier.autoFastMode` (default `false`) and `tier.autoFastModeDurationMinutes` (default `20`). Primary-session requests use priority processing for the configured duration after a user prompt; manual `/fast` remains authoritative, while tasks, advisors, panels, side-channel turns, and auto-learn capture keep their configured tiers.
+- Added opt-in `tier.autoFastMode` (default `false`) and `tier.autoFastModeDurationMinutes` (default `20`). Primary-session requests use priority processing for the configured duration after a user prompt; manual `/fast` remains authoritative, while tasks, advisors, panels, side-channel turns, and auto-learn capture keep their configured tiers. A provider that refuses the lease's priority request is reported once per model instead of silently dropping the status-line indicator.
+
 ## [17.2.8] - 2026-08-04
 
 ### Changed
