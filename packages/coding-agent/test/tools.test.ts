@@ -17,6 +17,7 @@ import * as toolTimeouts from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { unzip } from "@oh-my-pi/pi-coding-agent/utils/zip";
 import { $which, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { shellQuote as shellEscape } from "@oh-my-pi/pi-utils/shell";
 import { GlobTool } from "../src/tools/glob";
 import { DEFAULT_FILE_LIMIT, GrepTool, MULTI_FILE_PER_FILE_MATCHES } from "../src/tools/grep";
 import { HubTool } from "../src/tools/hub";
@@ -36,10 +37,6 @@ function writeFileWithMtime(filePath: string, content: string, mtimeMs: number):
 	fs.writeFileSync(filePath, content);
 	const mtime = new Date(mtimeMs);
 	fs.utimesSync(filePath, mtime, mtime);
-}
-
-function shellEscape(value: string): string {
-	return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function createFifoOrSkip(fifoPath: string): boolean {

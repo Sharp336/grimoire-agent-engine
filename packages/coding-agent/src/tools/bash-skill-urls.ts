@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { shellQuote } from "@oh-my-pi/pi-utils/shell";
 import type { Skill } from "../extensibility/skills";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import { validateRelativePath } from "../internal-urls/skill-protocol";
@@ -217,11 +218,6 @@ function isEmbeddedInQuotedText(command: string, token: string, index: number): 
 	return isInsideShellQuote(command, index);
 }
 
-/** Shell-escape a path using single quotes. */
-function shellEscape(p: string): string {
-	return `'${p.replace(/'/g, "'\\''")}'`;
-}
-
 async function resolveInternalUrlToPath(
 	rawUrl: string,
 	skills: readonly Skill[],
@@ -288,7 +284,7 @@ export function expandSkillUrls(command: string, skills: readonly Skill[]): stri
 	return command.replace(SKILL_URL_PATTERN, token => {
 		const url = unquoteToken(token);
 		const resolvedPath = resolveSkillUrlToPath(url, skills);
-		return shellEscape(resolvedPath);
+		return shellQuote(resolvedPath);
 	});
 }
 
@@ -327,7 +323,7 @@ export async function expandInternalUrls(command: string, options: InternalUrlEx
 		} catch {
 			continue;
 		}
-		const replacement = options.noEscape ? resolvedPath : shellEscape(resolvedPath);
+		const replacement = options.noEscape ? resolvedPath : shellQuote(resolvedPath);
 		expanded = `${expanded.slice(0, index)}${replacement}${expanded.slice(index + token.length)}`;
 	}
 
