@@ -735,14 +735,12 @@ dependencies = [
  "chrono",
  "clap",
  "fancy-regex 0.17.0",
- "futures",
  "itertools 0.14.0",
  "nix 0.31.3",
  "pretty_assertions",
  "procfs",
  "rlimit",
  "strum",
- "strum_macros",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
@@ -7639,7 +7637,6 @@ name = "uu_b2sum"
 version = "0.8.0"
 dependencies = [
  "clap",
- "pi-uutils-ctx",
  "uu_checksum_common",
  "uucore 0.8.0",
 ]
@@ -7748,7 +7745,6 @@ version = "0.8.0"
 dependencies = [
  "argmax",
  "chrono",
- "clap",
  "faccess",
  "filetime",
  "nix 0.29.0",
@@ -7959,7 +7955,6 @@ name = "uu_sha1sum"
 version = "0.8.0"
 dependencies = [
  "clap",
- "pi-uutils-ctx",
  "uu_checksum_common",
  "uucore 0.8.0",
 ]
@@ -7969,7 +7964,6 @@ name = "uu_sha224sum"
 version = "0.8.0"
 dependencies = [
  "clap",
- "pi-uutils-ctx",
  "uu_checksum_common",
  "uucore 0.8.0",
 ]
@@ -7979,7 +7973,6 @@ name = "uu_sha256sum"
 version = "0.8.0"
 dependencies = [
  "clap",
- "pi-uutils-ctx",
  "uu_checksum_common",
  "uucore 0.8.0",
 ]
@@ -7989,7 +7982,6 @@ name = "uu_sha384sum"
 version = "0.8.0"
 dependencies = [
  "clap",
- "pi-uutils-ctx",
  "uu_checksum_common",
  "uucore 0.8.0",
 ]
@@ -7999,7 +7991,6 @@ name = "uu_sha512sum"
 version = "0.8.0"
 dependencies = [
  "clap",
- "pi-uutils-ctx",
  "uu_checksum_common",
  "uucore 0.8.0",
 ]

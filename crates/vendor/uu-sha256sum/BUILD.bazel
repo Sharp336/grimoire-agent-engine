@@ -15,7 +15,6 @@ rust_library(
     proc_macro_deps = all_crate_deps(proc_macro = True),
     version = "0.8.0",
     deps = all_crate_deps(normal = True) + [
-        "//crates/pi-uutils-ctx",
         "//crates/vendor/uu-checksum-common",
     ],
 )
