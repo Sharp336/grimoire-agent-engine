@@ -246,7 +246,7 @@ describe("sqliteRepairGuidance", () => {
 		const dbPath = "C:\\Users\\me\\agent.db";
 		const restricted = sqliteRepairGuidance(dbPath, { platform: "win32", restrictPermissions: true });
 		const plain = sqliteRepairGuidance(dbPath, { platform: "win32" });
-		const hardening = `icacls '${dbPath}' /inheritance:r /grant:r ("{0}:(F)" -f $env:USERNAME) | Out-Null`;
+		const hardening = `icacls '${dbPath}' /inheritance:r /grant:r ("{0}\\{1}:(F)" -f $env:USERDOMAIN, $env:USERNAME) | Out-Null`;
 
 		expect(restricted).toContain(hardening);
 		expect(plain).not.toContain("icacls");

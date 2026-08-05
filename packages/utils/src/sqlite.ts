@@ -20,7 +20,11 @@ export function isSqliteCorruptError(err: unknown): boolean {
 }
 
 export interface SqliteRepairGuidanceOptions {
-	/** Create the recovered file under `umask 077` — for stores holding secrets. Default false. */
+	/**
+	 * Restrict recovered secret-store permissions: POSIX uses `umask 077`;
+	 * Windows applies a current-user ACL after installation because there is no
+	 * umask and the recovered file inherits the containing directory ACL.
+	 */
 	restrictPermissions?: boolean;
 	/** Target shell platform. Defaults to the host platform. */
 	platform?: NodeJS.Platform;
@@ -44,7 +48,6 @@ export function sqliteRepairGuidance(dbPath: string | undefined, options: Sqlite
 	const shmPath = `${dbPath}-shm`;
 	const backupWalPath = `${backupPath}-wal`;
 	const backupShmPath = `${backupPath}-shm`;
-	const recover = `sqlite3 ${shellQuote(dbPath)} '.recover --ignore-freelist' | sqlite3 ${shellQuote(fixedPath)}`;
 	if (platform === "win32") {
 		const psDbPath = powershellQuote(dbPath);
 		const psFixedPath = powershellQuote(fixedPath);
@@ -54,7 +57,7 @@ export function sqliteRepairGuidance(dbPath: string | undefined, options: Sqlite
 		const psShmPath = powershellQuote(shmPath);
 		const psBackupShmPath = powershellQuote(backupShmPath);
 		const hardening = options.restrictPermissions
-			? `; icacls ${psDbPath} /inheritance:r /grant:r ("{0}:(F)" -f $env:USERNAME) | Out-Null`
+			? `; icacls ${psDbPath} /inheritance:r /grant:r ("{0}\\{1}:(F)" -f $env:USERDOMAIN, $env:USERNAME) | Out-Null`
 			: "";
 		const command =
 			`sqlite3 ${psDbPath} '.recover --ignore-freelist' | sqlite3 ${psFixedPath}; ` +
@@ -65,6 +68,7 @@ export function sqliteRepairGuidance(dbPath: string | undefined, options: Sqlite
 			`Move-Item -Force ${psFixedPath} ${psDbPath}${hardening} }`;
 		return `Stop omp, then repair the database in place in PowerShell with: ${command}`;
 	}
+	const recover = `sqlite3 ${shellQuote(dbPath)} '.recover --ignore-freelist' | sqlite3 ${shellQuote(fixedPath)}`;
 	const recoverStep = options.restrictPermissions ? `(umask 077 && ${recover})` : recover;
 	const sidecarBackup = `{ mv ${shellQuote(walPath)} ${shellQuote(backupWalPath)} 2>/dev/null; mv ${shellQuote(shmPath)} ${shellQuote(backupShmPath)} 2>/dev/null; true; }`;
 	const command =
