@@ -242,20 +242,23 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
  * rules get the same frontmatter handling (globs, alwaysApply, conditions,
  * scope) as every other rule provider.
  *
- * Roots are ordered project-scope-first because rule dedup is first-wins by
- * name: a plugin installed at both scopes (or two plugins shipping the same
- * rule name) would otherwise resolve in registry order, letting a user-scoped
- * rule shadow the project-specific one. `discoverAgents` sorts the same roots
- * the same way for the same reason.
+ * `--plugin-dir` roots are prepended by `listClaudePluginRoots` with highest
+ * precedence. Scope-sort only the remaining registry roots so project
+ * marketplace rules beat user ones without demoting explicit local plugin dirs
+ * (synthetic roots are `scope: "user"` and would otherwise lose).
  */
 async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
 	const { roots, warnings: rootWarnings } = await listClaudePluginRoots(ctx.home, ctx.cwd);
-	const scopedRoots = [...roots].sort((a, b) => {
+	const firstRegistry = roots.findIndex(root => root.marketplace !== "__local__");
+	const injected = firstRegistry === -1 ? roots : roots.slice(0, firstRegistry);
+	const registry = firstRegistry === -1 ? [] : roots.slice(firstRegistry);
+	const scopedRegistry = [...registry].sort((a, b) => {
 		if (a.scope === b.scope) return 0;
 		return a.scope === "project" ? -1 : 1;
 	});
+	const orderedRoots = [...injected, ...scopedRegistry];
 	const results = await Promise.all(
-		scopedRoots.map(root =>
+		orderedRoots.map(root =>
 			loadFilesFromDir<Rule>(ctx, path.join(root.path, "rules"), PROVIDER_ID, root.scope, {
 				extensions: ["md", "mdc"],
 				transform: (name, content, filePath, source) =>

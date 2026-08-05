@@ -6,6 +6,7 @@ import { loadCapability } from "@oh-my-pi/pi-coding-agent/capability";
 import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
 import {
 	clearClaudePluginRootsCache,
+	injectPluginDirRoots,
 	listClaudePluginRoots,
 	parseClaudePluginsRegistry,
 } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
@@ -1491,6 +1492,44 @@ describe("listClaudePluginRoots", () => {
 		expect(survivor).toBeDefined();
 		expect(survivor?.content.trim()).toBe("Project body");
 		expect(survivor?.path).toContain(path.join("project-pack", "rules", "shared.md"));
+	});
+
+	test("--plugin-dir rules beat same-named project marketplace rules", async () => {
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const projectPluginPath = path.join(tempDir, "plugins", "project-pack");
+		const pluginDirPath = path.join(tempDir, "plugins", "explicit-local");
+		await fs.mkdir(pluginsDir, { recursive: true });
+		await fs.mkdir(path.join(projectPluginPath, "rules"), { recursive: true });
+		await fs.mkdir(path.join(pluginDirPath, "rules"), { recursive: true });
+
+		const registry = {
+			version: 2,
+			plugins: {
+				"project-pack@market": [
+					{
+						scope: "project",
+						installPath: projectPluginPath,
+						version: "1.0.0",
+						installedAt: "2025-01-01T00:00:00Z",
+						lastUpdated: "2025-01-01T00:00:00Z",
+					},
+				],
+			},
+		};
+		await fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify(registry));
+		await fs.writeFile(path.join(projectPluginPath, "rules", "shared.md"), "Project marketplace body\n");
+		await fs.writeFile(path.join(pluginDirPath, "rules", "shared.md"), "Explicit plugin-dir body\n");
+
+		// injectPluginDirRoots prepends synthetic roots (scope: user). Scope-sort
+		// must not demote them behind the project marketplace root.
+		await injectPluginDirRoots(tempDir, [pluginDirPath], tempDir);
+
+		const result = await loadCapability<Rule>("rules", { cwd: tempDir });
+		expect(result.warnings).toEqual([]);
+		const survivor = result.items.find(rule => rule.name === "shared");
+		expect(survivor).toBeDefined();
+		expect(survivor?.content.trim()).toBe("Explicit plugin-dir body");
+		expect(survivor?.path).toContain(path.join("explicit-local", "rules", "shared.md"));
 	});
 });
 
