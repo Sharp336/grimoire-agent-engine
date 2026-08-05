@@ -9,7 +9,13 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { AsyncDrain, getAgentDbPath, getStatsDbPath, isRecord, logger } from "@oh-my-pi/pi-utils";
 import { shellQuote } from "@oh-my-pi/pi-utils/shell";
-import { isSqliteBusyError, isSqliteCorruptError } from "@oh-my-pi/pi-utils/sqlite";
+import {
+	configureSqliteDatabase,
+	isSqliteBusyError,
+	isSqliteCorruptError,
+	openSqliteDatabase,
+	sqliteRepairGuidance,
+} from "@oh-my-pi/pi-utils/sqlite";
 import type { RawSettings as Settings } from "../config/settings";
 
 /** Row shape for settings table queries */
@@ -144,6 +150,8 @@ export class AgentStorage {
 	#perfBackfillChecked = false;
 	/** Coalesces per-turn perf samples into one deferred transaction off the turn's hot path. */
 	#perfDrain = new AsyncDrain<ModelPerfInsert>(MODEL_PERF_FLUSH_DELAY_MS);
+	/** Per-path latch: stats.db paths that reported unrecoverable corruption. Backfill is skipped for each latched path, but a different valid path still imports. */
+	#statsDbDamagedPaths = new Set<string>();
 
 	private constructor(dbPath: string) {
 		this.#autoPerfBackfill = dbPath === getAgentDbPath();
@@ -169,7 +177,7 @@ export class AgentStorage {
 			this.#db.close();
 			if (isSqliteCorruptError(err)) {
 				throw new Error(
-					`Agent database at ${shellQuote(dbPath)} is damaged. Stop omp, back up the store (including -wal/-shm), then repair with: sqlite3 ${shellQuote(dbPath)} '.recover --ignore-freelist' | sqlite3 ${shellQuote(`${dbPath}.fixed`)} && chmod 600 ${shellQuote(`${dbPath}.fixed`)}`,
+					`Agent database at ${shellQuote(dbPath)} is damaged. ${sqliteRepairGuidance(dbPath, { restrictPermissions: true })}`,
 					{ cause: err },
 				);
 			}
@@ -214,11 +222,8 @@ ON CONFLICT(model_key) DO UPDATE SET
 		// `PRAGMA journal_mode=WAL`, which acquires an exclusive lock during WAL
 		// recovery). Without this, concurrent omp startups can crash here with
 		// `SQLITE_BUSY` / `SQLITE_BUSY_RECOVERY`. See issue #2421.
-		this.#db.run("PRAGMA busy_timeout = 5000");
+		configureSqliteDatabase(this.#db, { wal: true, synchronousNormal: true });
 		this.#db.run(`
-PRAGMA journal_mode=WAL;
-PRAGMA synchronous=NORMAL;
-
 CREATE TABLE IF NOT EXISTS model_usage (
 	model_key TEXT PRIMARY KEY,
 	last_used_at INTEGER NOT NULL DEFAULT (${SQLITE_NOW_EPOCH})
@@ -554,6 +559,7 @@ FROM model_usage_legacy
 			if (!fs.existsSync(statsDbPath)) return;
 			void this.backfillModelPerfFromStats(statsDbPath)
 				.then(imported => {
+					if (imported < 0) return;
 					this.#db
 						.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
 						.run(MODEL_PERF_BACKFILL_KEY, "complete");
@@ -579,13 +585,16 @@ FROM model_usage_legacy
 	 * Sums land in one additive transaction at the end, so concurrent live
 	 * samples merge correctly regardless of order.
 	 * @param statsDbPath - Path to a stats.db file; opened read-only
-	 * @returns Number of rows folded in
-	 * @throws When the stats db cannot be opened or queried
+	 * @returns Number of rows folded in, or `-1` when the source store is damaged/latched (the import is skipped and the persistent completion marker must NOT be written so a later repair retries)
+	 * @throws When the stats db cannot be opened or queried for a non-corrupt reason
 	 */
 	async backfillModelPerfFromStats(statsDbPath: string): Promise<number> {
-		const statsDb = new Database(statsDbPath, { readonly: true });
+		if (this.#statsDbDamagedPaths.has(statsDbPath)) return -1;
+		let statsDb: Database | undefined;
+		let sums: Map<string, PerfAccum>;
+		let imported = 0;
 		try {
-			statsDb.run("PRAGMA busy_timeout = 5000");
+			statsDb = openSqliteDatabase(statsDbPath, { readonly: true });
 			const select = statsDb.prepare(
 				`SELECT rowid, timestamp, provider, model, output_tokens, duration, ttft
 FROM messages
@@ -596,11 +605,10 @@ ORDER BY timestamp DESC, rowid DESC
 LIMIT ?4`,
 			);
 			const cutoff = Date.now() - MODEL_PERF_BACKFILL_MAX_AGE_MS;
-			const sums = new Map<string, PerfAccum>();
+			sums = new Map<string, PerfAccum>();
 			let cursorTimestamp = Number.MAX_SAFE_INTEGER;
 			let cursorRowid = Number.MAX_SAFE_INTEGER;
 			let scanned = 0;
-			let imported = 0;
 			while (scanned < MODEL_PERF_BACKFILL_MAX_ROWS) {
 				const chunk = Math.min(MODEL_PERF_BACKFILL_CHUNK, MODEL_PERF_BACKFILL_MAX_ROWS - scanned);
 				const rows = select.all(cursorTimestamp, cursorRowid, cutoff, chunk) as StatsMessageRow[];
@@ -634,9 +642,26 @@ LIMIT ?4`,
 				// Yield so a chunked walk never freezes the TUI (bun:sqlite is sync).
 				await Bun.sleep(0);
 			}
-			if (sums.size > 0) {
-				const upsert = this.#db.prepare(
-					`INSERT INTO model_perf (model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms, updated_at)
+		} catch (err) {
+			if (isSqliteCorruptError(err)) {
+				this.#statsDbDamagedPaths.add(statsDbPath);
+				logger.error(
+					`Stats database is damaged; model-perf backfill is disabled for this path. ` +
+						sqliteRepairGuidance(statsDbPath),
+					{ err, statsDbPath },
+				);
+				return -1;
+			}
+			throw err;
+		} finally {
+			statsDb?.close();
+		}
+		// The destination transaction runs OUTSIDE the stats-db catch so a
+		// corrupt agent.db (this.#db) propagates to the caller's existing warn
+		// instead of being mislabelled as a damaged stats.db.
+		if (sums && sums.size > 0) {
+			const upsert = this.#db.prepare(
+				`INSERT INTO model_perf (model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms, updated_at)
 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ${SQLITE_NOW_EPOCH})
 ON CONFLICT(model_key) DO UPDATE SET
 	samples = model_perf.samples + excluded.samples,
@@ -645,17 +670,14 @@ ON CONFLICT(model_key) DO UPDATE SET
 	ttft_samples = model_perf.ttft_samples + excluded.ttft_samples,
 	ttft_ms = model_perf.ttft_ms + excluded.ttft_ms,
 	updated_at = ${SQLITE_NOW_EPOCH}`,
-				);
-				this.#db.transaction(() => {
-					for (const [key, accum] of sums) {
-						upsert.run(key, accum.samples, accum.outputTokens, accum.genMs, accum.ttftSamples, accum.ttftMs);
-					}
-				})();
-			}
-			return imported;
-		} finally {
-			statsDb.close();
+			);
+			this.#db.transaction(() => {
+				for (const [key, accum] of sums) {
+					upsert.run(key, accum.samples, accum.outputTokens, accum.genMs, accum.ttftSamples, accum.ttftMs);
+				}
+			})();
 		}
+		return imported;
 	}
 
 	/**

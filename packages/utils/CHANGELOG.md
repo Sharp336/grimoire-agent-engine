@@ -4,8 +4,11 @@
 
 ### Added
 
+- Added `sqliteRepairGuidance` to `@oh-my-pi/pi-utils/sqlite` for verified, in-place SQLite recovery commands with optional restrictive permissions.
 - Added `@oh-my-pi/pi-utils/sqlite` with `isSqliteCorruptError`, the shared classifier for SQLite's unrecoverable-file result codes (`SQLITE_CORRUPT` family plus `SQLITE_NOTADB`). ([#7296](https://github.com/can1357/oh-my-pi/issues/7296))
 - Added `isSqliteBusyError` to `@oh-my-pi/pi-utils/sqlite`, co-locating the busy-family classifier (`SQLITE_BUSY`, `SQLITE_BUSY_RECOVERY`, `SQLITE_BUSY_SNAPSHOT`, `SQLITE_BUSY_TIMEOUT`) with its corrupt counterpart; moved from `@oh-my-pi/pi-ai`.
+- Added `@oh-my-pi/pi-utils/sqlite` with `isSqliteCorruptError`, the shared classifier for SQLite's unrecoverable-file result codes (`SQLITE_CORRUPT` family plus `SQLITE_NOTADB`).
+- Added `configureSqliteDatabase` and `openSqliteDatabase` to `@oh-my-pi/pi-utils/sqlite`: the central opener enforcing the issue-#2421 ordering invariant (busy handler validated to the `sqlite3_busy_timeout(int)` range and installed before any lock-taking statement, then named pragmas, then WAL), closing the handle and rethrowing when a pragma fails.
 
 ## [17.2.1] - 2026-07-30
 

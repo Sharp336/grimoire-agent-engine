@@ -1,6 +1,8 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { logger } from "@oh-my-pi/pi-utils";
+import { configureSqliteDatabase, isSqliteCorruptError, sqliteRepairGuidance } from "@oh-my-pi/pi-utils/sqlite";
 import { type Env, enhancedRecallEnabled } from "../config";
 import { cosineSimilarity } from "./vector-math";
 
@@ -58,6 +60,10 @@ export class QueryCache {
 	#tier4 = new Map<string, readonly QueryCacheResult[]>();
 	#insertTimes = new Map<string, number>();
 	#conn: Database | null = null;
+	/** Latched once the persistent store reports unrecoverable damage; never cleared. */
+	#persistenceDamaged = false;
+	/** Path of the backing db, captured for the one-time damage report. */
+	#dbPath = "";
 
 	hits = 0;
 	misses = 0;
@@ -81,20 +87,40 @@ export class QueryCache {
 
 	#initDb(dbPath: string): void {
 		if (dbPath !== ":memory:") mkdirSync(dirname(dbPath), { recursive: true });
+		this.#dbPath = dbPath;
 		const db = new Database(dbPath, { create: true, readwrite: true, strict: true });
 		this.#conn = db;
-		if (dbPath !== ":memory:") db.exec("PRAGMA journal_mode=WAL");
-		db.exec(`
-			CREATE TABLE IF NOT EXISTS query_cache (
-				normalized TEXT PRIMARY KEY,
-				embedding_json TEXT,
-				results_json TEXT,
-				hit_count INTEGER DEFAULT 0,
-				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-				last_hit TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-			);
-			CREATE INDEX IF NOT EXISTS idx_cache_hits ON query_cache(hit_count DESC);
-		`);
+		// Issue #2421: install the busy handler before the schema DDL below
+		// (CREATE TABLE/INDEX take locks). Replaces a bare journal_mode=WAL
+		// exec that left busy_timeout at the default of 0.
+		try {
+			configureSqliteDatabase(db, { wal: dbPath !== ":memory:" });
+			db.exec(`
+				CREATE TABLE IF NOT EXISTS query_cache (
+					normalized TEXT PRIMARY KEY,
+					embedding_json TEXT,
+					results_json TEXT,
+					hit_count INTEGER DEFAULT 0,
+					created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+					last_hit TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+				);
+				CREATE INDEX IF NOT EXISTS idx_cache_hits ON query_cache(hit_count DESC);
+			`);
+		} catch (err) {
+			if (isSqliteCorruptError(err)) {
+				this.#latchPersistenceDamaged(err);
+				return;
+			}
+			// Non-corrupt setup error: close the handle and rethrow — no leaked
+			// partial handle, caller sees the real failure.
+			this.#conn = null;
+			try {
+				db.close();
+			} catch {
+				// Closing after a failed pragma/DDL may itself throw; ignore.
+			}
+			throw err;
+		}
 
 		try {
 			const rows = db.query("SELECT normalized, embedding_json, results_json FROM query_cache").all() as CacheRow[];
@@ -113,7 +139,10 @@ export class QueryCache {
 					// Match Python's best-effort persistence loading: corrupt rows are ignored.
 				}
 			}
-		} catch {
+		} catch (err) {
+			if (isSqliteCorruptError(err)) {
+				this.#latchPersistenceDamaged(err);
+			}
 			// Keep an in-memory cache if persistence loading fails after schema setup.
 		}
 	}
@@ -124,8 +153,16 @@ export class QueryCache {
 		this.#tier23.clear();
 		this.#tier4.clear();
 		this.#insertTimes.clear();
-		if (this.#conn !== null) {
-			this.#conn.run("DELETE FROM query_cache");
+		if (this.#conn !== null && !this.#persistenceDamaged) {
+			try {
+				this.#conn.run("DELETE FROM query_cache");
+			} catch (err) {
+				if (isSqliteCorruptError(err)) {
+					this.#latchPersistenceDamaged(err);
+					return;
+				}
+				throw err;
+			}
 		}
 	}
 
@@ -214,6 +251,29 @@ export class QueryCache {
 		this.#evictIfNeeded();
 	}
 
+	/**
+	 * Latch the persistence layer as damaged: close the handle, clear `#conn` so
+	 * no later code path touches SQLite, and report once at `error` level. The
+	 * in-memory tiers remain authoritative for the rest of this process.
+	 */
+	#latchPersistenceDamaged(err: unknown): void {
+		if (this.#persistenceDamaged) return;
+		this.#persistenceDamaged = true;
+		const conn = this.#conn;
+		this.#conn = null;
+		if (conn !== null) {
+			try {
+				conn.close();
+			} catch {
+				// The file is already damaged; closing may throw — ignore.
+			}
+		}
+		logger.error(
+			`Query-cache persistence store is damaged (${this.#dbPath}); persistence is disabled for this process. ` +
+				`In-memory tiers keep working. ${sqliteRepairGuidance(this.#dbPath)}`,
+			{ err, dbPath: this.#dbPath },
+		);
+	}
 	close(): void {
 		if (this.#conn === null) return;
 		this.#conn.close();
@@ -304,7 +364,17 @@ export class QueryCache {
 		this.#tier23.delete(key);
 		this.#tier4.delete(key);
 		this.#insertTimes.delete(key);
-		if (persistent && this.#conn !== null) this.#conn.run("DELETE FROM query_cache WHERE normalized = ?", [key]);
+		if (persistent && this.#conn !== null && !this.#persistenceDamaged) {
+			try {
+				this.#conn.run("DELETE FROM query_cache WHERE normalized = ?", [key]);
+			} catch (err) {
+				if (isSqliteCorruptError(err)) {
+					this.#latchPersistenceDamaged(err);
+					return;
+				}
+				throw err;
+			}
+		}
 	}
 
 	#evictIfNeeded(): void {
@@ -324,7 +394,7 @@ export class QueryCache {
 		results: readonly QueryCacheResult[],
 		embedding: QueryEmbedding | null | undefined,
 	): void {
-		if (this.#conn === null) return;
+		if (this.#conn === null || this.#persistenceDamaged) return;
 		try {
 			this.#conn.run(
 				"INSERT OR REPLACE INTO query_cache (normalized, embedding_json, results_json) VALUES (?, ?, ?)",
@@ -334,19 +404,25 @@ export class QueryCache {
 					JSON.stringify(results),
 				],
 			);
-		} catch {
+		} catch (err) {
+			if (isSqliteCorruptError(err)) {
+				this.#latchPersistenceDamaged(err);
+			}
 			// Persistence is best-effort; in-memory tiers remain authoritative for this process.
 		}
 	}
 
 	#recordPersistentHit(normalized: string): void {
-		if (this.#conn === null) return;
+		if (this.#conn === null || this.#persistenceDamaged) return;
 		try {
 			this.#conn.run(
 				"UPDATE query_cache SET hit_count = hit_count + 1, last_hit = CURRENT_TIMESTAMP WHERE normalized = ?",
 				[normalized],
 			);
-		} catch {
+		} catch (err) {
+			if (isSqliteCorruptError(err)) {
+				this.#latchPersistenceDamaged(err);
+			}
 			// Match Python's best-effort persistence behavior.
 		}
 	}

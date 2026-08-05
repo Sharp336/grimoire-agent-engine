@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
+import { shellQuote } from "@oh-my-pi/pi-utils/shell";
 
 interface RunnerFrame {
 	type?: string;
@@ -12,10 +13,6 @@ const pythonPath = Bun.env.PYTHON ?? "python3";
 const runnerPath = path.resolve(import.meta.dir, "../../../src/eval/py/runner.py");
 const repoRoot = path.resolve(import.meta.dir, "../../../../..");
 const encoder = new TextEncoder();
-
-function shellQuote(value: string): string {
-	return `'${value.replaceAll("'", `'"'"'`)}'`;
-}
 
 async function runCell(code: string): Promise<RunnerFrame[]> {
 	const proc = Bun.spawn([pythonPath, "-u", runnerPath], {

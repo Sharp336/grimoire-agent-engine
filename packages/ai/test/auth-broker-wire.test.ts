@@ -43,6 +43,23 @@ function fetchWithoutAuthBrokerCapabilities(): typeof fetch {
 	);
 }
 
+/**
+ * Make block reads fail the way a malformed store does: a real `SQLITE_NOTADB`
+ * raised by SQLite itself, so the latch classifier sees a genuine error code.
+ */
+async function damageCredentialBlockReads(store: SqliteAuthCredentialStore, malformedPath: string): Promise<void> {
+	await fs.writeFile(malformedPath, "not sqlite");
+	vi.spyOn(store, "listCredentialBlocks").mockImplementation(() => {
+		const damaged = new Database(malformedPath);
+		try {
+			damaged.run("PRAGMA integrity_check");
+			throw new Error("expected the malformed database to reject reads");
+		} finally {
+			damaged.close();
+		}
+	});
+}
+
 function credentialBlocks(snapshot: SnapshotResponse, credentialId: number) {
 	return snapshot.credentials.find(entry => entry.id === credentialId)?.blocks ?? [];
 }
@@ -125,6 +142,15 @@ describe("auth-broker wire surface", () => {
 			// Refresh token is replaced with the wire sentinel — clients never see it.
 			expect(entry.credential.refresh).toBe(REMOTE_REFRESH_SENTINEL);
 		}
+	});
+
+	test("damaged snapshot storage returns an error and the broker remains available", async () => {
+		await damageCredentialBlockReads(store!, path.join(tempDir, "malformed.db"));
+		const snapshot = await fetch(`${handle!.url}/v1/snapshot`, {
+			headers: { Authorization: `Bearer ${token}` },
+		});
+		expect(snapshot.status).toBe(500);
+		expect(await (await fetch(`${handle!.url}/v1/healthz`)).json()).toEqual({ ok: true });
 	});
 
 	test("preserves an HTTP rejection when the caller aborts while reading its body", async () => {
@@ -594,6 +620,18 @@ describe("auth-broker wire surface", () => {
 			controller.abort();
 			await iter.return(undefined).catch(() => {});
 		}
+	});
+
+	test("damaged SSE snapshots close without emitting a blockless snapshot", async () => {
+		await damageCredentialBlockReads(store!, path.join(tempDir, "malformed-stream.db"));
+		const response = await fetch(`${handle!.url}/v1/snapshot/stream`, {
+			headers: { Authorization: `Bearer ${token}`, Accept: "text/event-stream" },
+		});
+		expect(response.status).toBe(200);
+		const body = await response.text();
+		expect(body).not.toContain("event: snapshot");
+		expect(body).not.toContain("event: entry");
+		expect(await (await fetch(`${handle!.url}/v1/healthz`)).json()).toEqual({ ok: true });
 	});
 
 	test("SSE stream projects Codex meter blocks only for clients without the capability", async () => {

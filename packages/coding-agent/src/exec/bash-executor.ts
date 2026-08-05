@@ -6,6 +6,7 @@
 import { ExponentialYield } from "@oh-my-pi/pi-agent-core/utils/yield";
 import { type MinimizerOptions, Shell, type ShellRunResult } from "@oh-my-pi/pi-natives";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
+import { shellQuote } from "@oh-my-pi/pi-utils/shell";
 import { Settings, type ShellMinimizerSettings } from "../config/settings";
 import { OutputSink } from "../session/streaming-output";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../tools/output-meta";
@@ -312,12 +313,8 @@ function ensureInteractiveShellArgs(shell: string, args: string[]): string[] {
 	return [...effectiveArgs, "-i"];
 }
 
-function quoteShellArg(value: string): string {
-	return `'${value.replace(/'/g, "'\\''")}'`;
-}
-
 function buildUserShellCommand(shell: string, args: string[], command: string): string {
-	return [shell, ...ensureInteractiveShellArgs(shell, args), command].map(quoteShellArg).join(" ");
+	return [shell, ...ensureInteractiveShellArgs(shell, args), command].map(shellQuote).join(" ");
 }
 
 function resolveUserShellConfig(settings: Settings, baseConfig: ShellConfig): ShellConfig {

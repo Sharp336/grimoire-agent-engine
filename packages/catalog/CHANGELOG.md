@@ -4,7 +4,9 @@
 
 ### Fixed
 
+- Routed model-cache SQLite damage guidance through the shared verified, in-place repair formatter.
 - Fixed `gen:models` Codex discovery to union models across every stored OAuth account and fail closed on partial resolution, matching runtime discovery ([#6265](https://github.com/can1357/oh-my-pi/issues/6265)); restored the bundled `gpt-5.4`, `gpt-5.6-sol`, and `gpt-5.3-codex-spark` entries a single-account regen had dropped.
+- Fixed the model cache silently swallowing a damaged SQLite database on every read and write: the first `SQLITE_CORRUPT`/`SQLITE_NOTADB` error now latches the cache file, logs once at error level with repair guidance, and degrades to cache-miss/no-op without touching the file again. ([#7302](https://github.com/can1357/oh-my-pi/issues/7302))
 
 ## [17.2.3] - 2026-08-01
 

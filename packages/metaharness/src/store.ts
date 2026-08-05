@@ -10,6 +10,7 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { configureSqliteDatabase } from "@oh-my-pi/pi-utils/sqlite";
 import { readBenchmarkSnapshot } from "./benchmarks";
 import { readJobResult } from "./runner";
 
@@ -188,7 +189,7 @@ export class RunStore {
 		this.jobsDir = jobsDir;
 		fs.mkdirSync(path.join(jobsDir, "_manager"), { recursive: true });
 		this.#db = new Database(dbPath ?? path.join(jobsDir, "_manager", "metaharness.sqlite"));
-		this.#db.run("PRAGMA busy_timeout = 5000");
+		configureSqliteDatabase(this.#db);
 		enableWal(this.#db);
 		this.#db.run(SCHEMA);
 		const runColumns = new Set(

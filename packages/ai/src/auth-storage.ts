@@ -13,8 +13,8 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 import { $env, getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
-import { shellQuote } from "@oh-my-pi/pi-utils/shell";
-import { isSqliteBusyError, isSqliteCorruptError } from "@oh-my-pi/pi-utils/sqlite";
+import { configureSqliteDatabase, isSqliteCorruptError, sqliteRepairGuidance } from "@oh-my-pi/pi-utils/sqlite";
+import { isSqliteBusyError } from "@oh-my-pi/pi-utils/sqlite";
 import type { ApiKeyResolver } from "./auth-retry";
 import * as AIError from "./error";
 import { isUsageLimitOutcome } from "./error/rate-limit";
@@ -1718,13 +1718,23 @@ export class AuthStorage {
 		logger.error(
 			storePath
 				? `Credential store is damaged; persisted rate-limit blocks are disabled for this process. ` +
-						`Stop omp, back up the store (including -wal/-shm), then repair with: sqlite3 ${shellQuote(storePath)} '.recover --ignore-freelist' | sqlite3 ${shellQuote(`${storePath}.fixed`)} && chmod 600 ${shellQuote(`${storePath}.fixed`)}`
+						sqliteRepairGuidance(storePath, { restrictPermissions: true })
 				: "Credential store is damaged; persisted rate-limit blocks are disabled for this process. " +
-						"Repair the store file with sqlite3's .recover and restart.",
+						sqliteRepairGuidance(undefined),
 			{ err, op, storePath, ...context },
 		);
 		this.#bumpGeneration("store-damaged");
 		return true;
+	}
+
+	#damagedStoreError(cause?: unknown): Error {
+		const storePath = this.#store.databasePath;
+		return new Error(
+			storePath
+				? `Credential store at ${storePath} is damaged. ${sqliteRepairGuidance(storePath, { restrictPermissions: true })}`
+				: `Credential store is damaged. ${sqliteRepairGuidance(undefined)}`,
+			cause === undefined ? undefined : { cause },
+		);
 	}
 
 	#readPersistedCredentialBlock(
@@ -6390,11 +6400,11 @@ export class AuthStorage {
 	 * Broker-server seam: list non-expired persisted blocks for snapshot entries.
 	 */
 	listCredentialBlocks(credentialIds: readonly number[]): StoredCredentialBlock[] {
-		if (this.#storeDamaged) return [];
+		if (this.#storeDamaged) throw this.#damagedStoreError();
 		try {
 			return this.#store.listCredentialBlocks?.(credentialIds) ?? [];
 		} catch (err) {
-			if (this.#latchStoreDamage(err, "listCredentialBlocks", {})) return [];
+			if (this.#latchStoreDamage(err, "listCredentialBlocks", {})) throw this.#damagedStoreError(err);
 			throw err;
 		}
 	}
@@ -7046,8 +7056,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	static #damagedStoreError(dbPath: string | undefined, cause: unknown): Error {
 		return new Error(
 			dbPath
-				? `Credential store at ${shellQuote(dbPath)} is damaged. Stop omp, back up the store (including -wal/-shm), then repair with: sqlite3 ${shellQuote(dbPath)} '.recover --ignore-freelist' | sqlite3 ${shellQuote(`${dbPath}.fixed`)} && chmod 600 ${shellQuote(`${dbPath}.fixed`)}`
-				: "Credential store is damaged. Repair the store file with sqlite3's .recover and restart.",
+				? `Credential store at ${shellQuote(dbPath)} is damaged. ${sqliteRepairGuidance(dbPath, { restrictPermissions: true })}`
+				: `Credential store is damaged. ${sqliteRepairGuidance(undefined)}`,
 			{ cause },
 		);
 	}
@@ -7057,10 +7067,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		// `PRAGMA journal_mode=WAL`, which acquires an exclusive lock during WAL
 		// recovery). Without this, concurrent omp startups can crash here with
 		// `SQLITE_BUSY` / `SQLITE_BUSY_RECOVERY`. See issue #2421.
-		this.#db.run("PRAGMA busy_timeout = 5000");
+		configureSqliteDatabase(this.#db, { wal: true, synchronousNormal: true });
 		this.#db.run(`
-			PRAGMA journal_mode=WAL;
-			PRAGMA synchronous=NORMAL;
 			CREATE TABLE IF NOT EXISTS auth_schema_version (
 				id INTEGER PRIMARY KEY CHECK (id = 1),
 				version INTEGER NOT NULL

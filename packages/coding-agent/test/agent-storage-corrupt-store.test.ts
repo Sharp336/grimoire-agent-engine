@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import { sqliteRepairGuidance } from "@oh-my-pi/pi-utils/sqlite";
 import { removeWithRetries } from "../../utils/src/temp";
 
 describe("AgentStorage corrupt-store schema init guidance", () => {
@@ -27,9 +28,7 @@ describe("AgentStorage corrupt-store schema init guidance", () => {
 			}
 			expect(thrown).toBeDefined();
 			const message = thrown instanceof Error ? thrown.message : String(thrown);
-			expect(message).toContain(".recover --ignore-freelist");
-			expect(message).toContain(dbPath);
-			expect(message).toContain("chmod 600");
+			expect(message).toContain(sqliteRepairGuidance(dbPath, { restrictPermissions: true }));
 		} finally {
 			await removeWithRetries(dir);
 		}

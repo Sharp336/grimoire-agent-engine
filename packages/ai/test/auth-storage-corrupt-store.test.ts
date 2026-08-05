@@ -23,8 +23,7 @@ import * as path from "node:path";
 import { AuthStorage, type OAuthCredential, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { logger } from "@oh-my-pi/pi-utils";
-import { shellQuote } from "@oh-my-pi/pi-utils/shell";
-import { isSqliteCorruptError } from "@oh-my-pi/pi-utils/sqlite";
+import { isSqliteCorruptError, sqliteRepairGuidance } from "@oh-my-pi/pi-utils/sqlite";
 import { removeWithRetries } from "../../utils/src/temp";
 
 const PROVIDER = "anthropic";
@@ -194,6 +193,17 @@ describe("AuthStorage corrupt-store latch", () => {
 			call => typeof call[0] === "string" && call[0].includes("Credential store is damaged"),
 		);
 		expect(damagedErrors).toHaveLength(1);
+	});
+
+	test("listCredentialBlocks throws after the store is damaged instead of reporting no blocks", async () => {
+		const malformedDbPath = await writeMalformedDb(tempDir);
+		vi.spyOn(store, "listCredentialBlocks").mockImplementation(() => {
+			throw realCorruptError(malformedDbPath);
+		});
+		vi.spyOn(logger, "error").mockImplementation(() => {});
+
+		expect(() => storage.listCredentialBlocks([1])).toThrow(/Credential store .* damaged/);
+		expect(() => storage.listCredentialBlocks([1])).toThrow(/\.recover/);
 	});
 });
 
@@ -637,9 +647,7 @@ describe("AuthStorage corrupt-store reporting", () => {
 		// The repair guidance must point at the actual store file, not a
 		// hardcoded default path (profiles relocate agent.db).
 		expect(String(damagedErrors[0]?.[0])).toContain(dbPath);
-		// F2: repair guidance must preserve credential-file permissions.
-		expect(String(damagedErrors[0]?.[0])).toContain("chmod 600");
-		expect(String(damagedErrors[0]?.[0])).toContain("--ignore-freelist");
+		expect(String(damagedErrors[0]?.[0])).toContain(sqliteRepairGuidance(dbPath, { restrictPermissions: true }));
 
 		const swallowDebugs = debugSpy.mock.calls.filter(
 			call => typeof call[0] === "string" && call[0] === "Failed to read credential block from persistent store",
@@ -737,7 +745,8 @@ describe("AuthStorage corrupt-store shell-balanced repair guidance", () => {
 		expect(damagedCall).toBeDefined();
 		const message = String(damagedCall?.[0]);
 		expect(message).toContain("--ignore-freelist");
-		expect(message).toContain("chmod 600");
+		const expectedDbPath = path.join(tempDir, "omp's agent", "agent.db");
+		expect(message).toContain(sqliteRepairGuidance(expectedDbPath, { restrictPermissions: true }));
 		// The repair command must be shell-balanced: every unescaped single
 		// quote toggles open/close state, so the string ends closed.
 		let open = false;
@@ -760,8 +769,7 @@ describe("AuthStorage corrupt-store shell-balanced repair guidance", () => {
 			await SqliteAuthCredentialStore.open(dbPath);
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
-			expect(message).toContain(".recover --ignore-freelist");
-			expect(message).toContain(shellQuote(dbPath));
+			expect(message).toContain(sqliteRepairGuidance(dbPath, { restrictPermissions: true }));
 			// Shell-balanced check.
 			let open = false;
 			for (let i = 0; i < message.length; i++) {
@@ -1000,6 +1008,62 @@ describe("AuthStorage corrupt-store heal while latched", () => {
 		const selections = new Set<string>();
 		for (let i = 0; i < 20; i++) {
 			const key = await storage.getApiKey("openai-codex", `heal-after-${i}`);
+			if (key) selections.add(key);
+		}
+		expect(selections.has("access-acct-blocked")).toBe(true);
+	});
+
+	test("F7: redeeming a reset clears the in-memory block when persistence is damaged", async () => {
+		const usageFetch = Object.assign(
+			async (input: string | URL | Request) => {
+				if (String(input).endsWith("/rate-limit-reset-credits/consume")) {
+					return Response.json({ code: "reset" });
+				}
+				throw new Error(`unexpected reset-credit request: ${String(input)}`);
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		storage.close();
+		store.close();
+		store = await SqliteAuthCredentialStore.open(dbPath);
+		storage = new AuthStorage(store, { usageFetch });
+		await storage.set("openai-codex", [
+			codexCredential("acct-blocked", "blocked@example.com"),
+			codexCredential("acct-sibling", "sibling@example.com"),
+		]);
+		const blockedRow = store.listAuthCredentials("openai-codex").find(row => {
+			const credential = row.credential;
+			return credential.type === "oauth" && credential.accountId === "acct-blocked";
+		});
+		if (!blockedRow) throw new Error("expected blocked credential row");
+
+		await storage.markUsageLimitReached("openai-codex", "reset-session", {
+			credentialId: blockedRow.id,
+			retryAfterMs: HOUR_MS,
+		});
+		const blockedKey = await storage.getApiKey("openai-codex", "reset-before");
+		expect(blockedKey).toBe("access-acct-sibling");
+
+		const malformedDbPath = await writeMalformedDb(tempDir);
+		vi.spyOn(store, "upsertCredentialBlock").mockImplementation(() => {
+			throw realCorruptError(malformedDbPath);
+		});
+		vi.spyOn(logger, "error").mockImplementation(() => {});
+		storage.upsertCredentialBlock({
+			credentialId: blockedRow.id,
+			providerKey: "openai-codex:oauth",
+			blockScope: "",
+			blockedUntilMs: Date.now() + HOUR_MS,
+		});
+
+		const redeemed = await storage.redeemResetCredit({
+			target: { credentialId: blockedRow.id },
+			creditId: "RateLimitResetCredit_test",
+		});
+		expect(redeemed).toMatchObject({ ok: true, code: "reset", creditId: "RateLimitResetCredit_test" });
+		const selections = new Set<string>();
+		for (let i = 0; i < 20; i++) {
+			const key = await storage.getApiKey("openai-codex", `reset-after-${i}`);
 			if (key) selections.add(key);
 		}
 		expect(selections.has("access-acct-blocked")).toBe(true);

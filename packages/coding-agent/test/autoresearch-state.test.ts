@@ -1,3 +1,4 @@
+import { type Changes, Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { createAutoresearchExtension } from "@oh-my-pi/pi-coding-agent/autoresearch";
 import {
@@ -17,6 +18,8 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
 import { TempDir } from "@oh-my-pi/pi-utils";
+
+const EMPTY_CHANGES: Changes = { changes: 0, lastInsertRowid: 0 };
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -364,6 +367,50 @@ describe("AutoresearchStorage round-trip", () => {
 		});
 		storage.updateSession(session.id, { notes: "## Plan\n- step 1\n" });
 		expect(storage.getSessionById(session.id)?.notes).toBe("## Plan\n- step 1\n");
+		storage.close();
+	});
+
+	it("enables foreign_keys via the shared configurator (not hand-run pragmas)", () => {
+		// After the wave-1 centralization, SCHEMA_SQL no longer hand-runs
+		// PRAGMA foreign_keys=ON; the constructor passes { foreignKeys: true }
+		// to configureSqliteDatabase. Capture every run() call during
+		// construction and verify the pragma is issued by the configurator.
+		const statements: string[] = [];
+		const runSpy = vi.spyOn(Database.prototype, "run").mockImplementation(function (
+			this: Database,
+			sql: string,
+		): Changes {
+			statements.push(sql);
+			return EMPTY_CHANGES;
+		});
+		const storage = openStorage();
+		runSpy.mockRestore();
+		storage.close();
+		// foreign_keys is issued by configureSqliteDatabase, not SCHEMA_SQL.
+		expect(statements).toContain("PRAGMA foreign_keys = ON");
+		// SCHEMA_SQL must no longer contain hand-run pragmas.
+		const schemaStatements = statements.filter(s => /PRAGMA (journal_mode|synchronous|foreign_keys)/i.test(s));
+		// The only foreign_keys pragma is the one from the configurator.
+		expect(schemaStatements.filter(s => /foreign_keys/i.test(s))).toHaveLength(1);
+	});
+
+	it("enforces foreign keys on the live connection (observable)", () => {
+		// Observable contract: a run referencing a non-existent session must be
+		// rejected by the foreign-key constraint. This proves PRAGMA foreign_keys
+		// is actually ON on the connection — not merely that the pragma string
+		// was issued during construction. The wiring spy test above would pass
+		// even if foreign keys were never enabled; this one cannot.
+		const storage = openStorage();
+		expect(() =>
+			storage.insertRun({
+				sessionId: 999999,
+				segment: 0,
+				command: "bun bench",
+				logPath: "/tmp/run.log",
+				preRunDirtyPaths: [],
+				startedAt: 1,
+			}),
+		).toThrow(/FOREIGN KEY|foreign key|constraint/i);
 		storage.close();
 	});
 });

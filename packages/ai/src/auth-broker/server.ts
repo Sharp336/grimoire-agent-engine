@@ -596,6 +596,9 @@ function serveSnapshotStream(
 					logger.debug("auth-broker stream removed", { peer, id, generation: snapshot.generation });
 				}
 			} while (pendingBumps > 0 && !closed);
+		} catch (error) {
+			logger.error("auth-broker stream generation update failed", { peer, error: String(error) });
+			cleanup();
 		} finally {
 			processing = false;
 		}
@@ -604,22 +607,27 @@ function serveSnapshotStream(
 	const stream = new ReadableStream<Uint8Array>({
 		async start(c) {
 			controller = c;
-			await storage.reload();
-			const initial = buildSnapshot(storage, refresher, clientSupportsCodexMeterBlockScopes);
-			lastGeneration = initial.generation;
-			for (const entry of initial.credentials) lastByCredId.set(entry.id, fingerprintEntry(entry));
-			const initialEvent: SnapshotStreamSnapshotEvent = { kind: "snapshot", ...initial };
-			if (!write(sseEvent("snapshot", initialEvent))) return;
-			keepaliveTimer = setInterval(() => {
-				write(": keepalive\n\n");
-			}, keepaliveMs);
-			keepaliveTimer.unref?.();
-			unsubscribe = storage.onGenerationChanged(() => {
-				void processGenerationBump();
-			});
-			abortHandler = (): void => cleanup();
-			req.signal.addEventListener("abort", abortHandler);
-			logger.info("auth-broker stream opened", { peer, generation: initial.generation });
+			try {
+				await storage.reload();
+				const initial = buildSnapshot(storage, refresher, clientSupportsCodexMeterBlockScopes);
+				lastGeneration = initial.generation;
+				for (const entry of initial.credentials) lastByCredId.set(entry.id, fingerprintEntry(entry));
+				const initialEvent: SnapshotStreamSnapshotEvent = { kind: "snapshot", ...initial };
+				if (!write(sseEvent("snapshot", initialEvent))) return;
+				keepaliveTimer = setInterval(() => {
+					write(": keepalive\n\n");
+				}, keepaliveMs);
+				keepaliveTimer.unref?.();
+				unsubscribe = storage.onGenerationChanged(() => {
+					void processGenerationBump();
+				});
+				abortHandler = (): void => cleanup();
+				req.signal.addEventListener("abort", abortHandler);
+				logger.info("auth-broker stream opened", { peer, generation: initial.generation });
+			} catch (error) {
+				logger.error("auth-broker stream failed", { peer, error: String(error) });
+				cleanup();
+			}
 		},
 		cancel() {
 			cleanup();
@@ -678,7 +686,7 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					return serveSnapshotStream(req, opts.storage, refresher, peer, streamKeepaliveMs);
 				}
 				if (req.method === "GET" && pathname === "/v1/snapshot") {
-					return serveSnapshot(req, url, opts.storage, generationGate, refresher, peer);
+					return await serveSnapshot(req, url, opts.storage, generationGate, refresher, peer);
 				}
 				if (req.method === "GET" && pathname === "/v1/usage") {
 					try {

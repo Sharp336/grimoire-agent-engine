@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { configureSqliteDatabase } from "@oh-my-pi/pi-utils/sqlite";
 import { dbPath } from "./config";
 
 export type DatabasePath = string | ":memory:";
@@ -35,9 +36,10 @@ export function openDatabase(path: DatabasePath = dbPath(), options: OpenDatabas
 }
 
 export function enablePragmas(db: Database, path?: DatabasePath): void {
-	db.exec("PRAGMA foreign_keys=ON");
-	db.exec("PRAGMA busy_timeout=5000");
-	if (path !== ":memory:") db.exec("PRAGMA journal_mode=WAL");
+	// Issue #2421: the busy handler must be installed before any lock-taking
+	// statement. configureSqliteDatabase honours that ordering internally
+	// (busy_timeout first, then foreign_keys, then WAL).
+	configureSqliteDatabase(db, { foreignKeys: true, wal: path !== ":memory:" });
 }
 
 export function loadExtensions(db: Database, extensions: string | readonly string[]): void {

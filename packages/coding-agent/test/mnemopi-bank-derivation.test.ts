@@ -1,10 +1,15 @@
 import { Database } from "bun:sqlite";
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { mkdirSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { computeMnemopiBankScope, extendRecallWithLegacyBanks } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
-import { removeWithRetries, TempDir } from "@oh-my-pi/pi-utils";
+import {
+	computeMnemopiBankScope,
+	extendRecallWithLegacyBanks,
+	resetLegacyBankCorruptLatchForTests,
+} from "@oh-my-pi/pi-coding-agent/mnemopi/config";
+import { logger, removeWithRetries, TempDir } from "@oh-my-pi/pi-utils";
+import { sqliteRepairGuidance } from "@oh-my-pi/pi-utils/sqlite";
 
 // Set up a fixture filesystem we can reuse across the two regression
 // suites — same shape as `~/.omp/memories/mnemopi/` on a real install.
@@ -145,5 +150,76 @@ describe("extendRecallWithLegacyBanks edge cases", () => {
 		const out = extendRecallWithLegacyBanks(["active"], mainDbPath, path.join(rootDir.path(), "some", "cwd"));
 		expect(out).toContain("active");
 		expect(out).not.toContain("corrupt-C");
+	});
+
+	it("bounds the total scan time when legacy banks are exclusively locked", () => {
+		const lockedBanks: Database[] = [];
+		const suffix = crypto.randomUUID();
+		try {
+			for (let index = 0; index < 3; index++) {
+				const bank = `aaa-locked-${suffix}-${index}`;
+				createBankFixture(bank, [{ cwd: path.join(rootDir.path(), "projects", "locked") }]);
+				const db = new Database(path.join(banksDir, bank, "mnemopi.db"));
+				db.exec("BEGIN EXCLUSIVE");
+				lockedBanks.push(db);
+			}
+
+			const started = performance.now();
+			const extended = extendRecallWithLegacyBanks(
+				["active"],
+				mainDbPath,
+				path.join(rootDir.path(), "projects", "locked"),
+			);
+			const elapsedMs = performance.now() - started;
+
+			expect(extended).toEqual(["active"]);
+			expect(elapsedMs).toBeLessThan(5000);
+		} finally {
+			for (const db of lockedBanks) {
+				db.exec("ROLLBACK");
+				db.close();
+			}
+		}
+	});
+});
+
+describe("bankOnlyHasCwd corrupt-store latch", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+		resetLegacyBankCorruptLatchForTests();
+	});
+
+	it("latches after one corrupt probe and stops re-opening the damaged bank", async () => {
+		const corruptDir = path.join(banksDir, "corrupt-latch-D");
+		await fs.mkdir(corruptDir, { recursive: true });
+		const corruptDbPath = path.join(corruptDir, "mnemopi.db");
+		await fs.writeFile(corruptDbPath, "not a sqlite file");
+
+		const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => {});
+		const debugSpy = vi.spyOn(logger, "debug").mockImplementation(() => {});
+		const cwd = path.join(rootDir.path(), "projects", "latch-test");
+
+		// First call probes the corrupt bank, throws SQLITE_NOTADB, and latches.
+		const out1 = extendRecallWithLegacyBanks(["active"], mainDbPath, cwd);
+		expect(out1).toContain("active");
+		expect(out1).not.toContain("corrupt-latch-D");
+
+		// Second call short-circuits before touching the damaged file.
+		const out2 = extendRecallWithLegacyBanks(["active"], mainDbPath, cwd);
+		expect(out2).toContain("active");
+		expect(out2).not.toContain("corrupt-latch-D");
+
+		const damagedErrors = errorSpy.mock.calls.filter(
+			call => typeof call[0] === "string" && call[0].includes("legacy bank database is damaged"),
+		);
+		expect(damagedErrors).toHaveLength(1);
+		expect(String(damagedErrors[0]?.[0])).toContain(corruptDbPath);
+		expect(String(damagedErrors[0]?.[0])).toContain(sqliteRepairGuidance(corruptDbPath));
+
+		// Non-corrupt errors still use debug, not error.
+		const legacyDebugs = debugSpy.mock.calls.filter(
+			call => typeof call[0] === "string" && call[0] === "Mnemopi: legacy bank probe failed",
+		);
+		expect(legacyDebugs).toHaveLength(0);
 	});
 });

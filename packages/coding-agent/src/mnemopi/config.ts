@@ -1,8 +1,9 @@
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { MnemopiOptions } from "@oh-my-pi/pi-mnemopi";
 import { getMemoriesDir, logger } from "@oh-my-pi/pi-utils";
+import { isSqliteCorruptError, openSqliteDatabase, sqliteRepairGuidance } from "@oh-my-pi/pi-utils/sqlite";
 import type { Settings } from "../config/settings";
 
 export type MnemopiLlmMode = "none" | "smol" | "remote";
@@ -106,6 +107,10 @@ const DEFAULT_SHARED_BANK = "default";
 // Cap legacy-bank scanning at session start so a pathological banks/
 // directory cannot dominate startup latency.
 const LEGACY_BANK_SCAN_LIMIT = 64;
+const LEGACY_BANK_SCAN_BUDGET_MS = 2000;
+
+/** Latched bank mnemopi.db paths that reported unrecoverable damage. */
+const damagedBankDbs = new Set<string>();
 
 export interface MnemopiBankScope {
 	baseBank: string;
@@ -209,21 +214,33 @@ export function extendRecallWithLegacyBanks(
 	}
 	const have = new Set(resolved);
 	const extras: string[] = [];
+	const deadline = Date.now() + LEGACY_BANK_SCAN_BUDGET_MS;
 	let scanned = 0;
 	for (const entry of entries) {
 		if (!entry.isDirectory() || have.has(entry.name)) continue;
 		if (scanned >= LEGACY_BANK_SCAN_LIMIT) break;
+		const remainingMs = deadline - Date.now();
+		if (remainingMs <= 0) {
+			logger.debug("Mnemopi: legacy bank scan budget exhausted", {
+				scanned,
+				budgetMs: LEGACY_BANK_SCAN_BUDGET_MS,
+			});
+			break;
+		}
 		scanned++;
 		const candidate = path.join(banksDir, entry.name, "mnemopi.db");
-		if (bankOnlyHasCwd(candidate, cwdAbs)) extras.push(entry.name);
+		if (bankOnlyHasCwd(candidate, cwdAbs, remainingMs)) {
+			extras.push(entry.name);
+		}
 	}
 	return extras.length === 0 ? resolved : [...resolved, ...extras];
 }
 
-function bankOnlyHasCwd(dbPath: string, cwd: string): boolean {
+function bankOnlyHasCwd(dbPath: string, cwd: string, busyTimeoutMs: number): boolean {
+	if (damagedBankDbs.has(dbPath)) return false;
 	let db: Database | undefined;
 	try {
-		db = new Database(dbPath, { readonly: true });
+		db = openSqliteDatabase(dbPath, { readonly: true, busyTimeoutMs });
 		const row = db
 			.prepare<{ matching: number; unsafe: number }, [string, string]>(`
 				SELECT
@@ -234,7 +251,16 @@ function bankOnlyHasCwd(dbPath: string, cwd: string): boolean {
 			.get(cwd, cwd);
 		return (row?.matching ?? 0) > 0 && (row?.unsafe ?? 0) === 0;
 	} catch (error) {
-		logger.debug("Mnemopi: legacy bank probe failed", { dbPath, error: String(error) });
+		if (isSqliteCorruptError(error)) {
+			damagedBankDbs.add(dbPath);
+			logger.error(
+				`Mnemopi: legacy bank database is damaged; this bank is skipped for the rest of the process. ` +
+					sqliteRepairGuidance(dbPath),
+				{ dbPath, error: String(error) },
+			);
+		} else {
+			logger.debug("Mnemopi: legacy bank probe failed", { dbPath, error: String(error) });
+		}
 		return false;
 	} finally {
 		try {
@@ -264,4 +290,9 @@ export function truncateApproxTokens(text: string, tokenLimit: number): string {
 	const maxChars = Math.max(0, tokenLimit * 4);
 	if (text.length <= maxChars) return text;
 	return `${text.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+}
+
+/** @internal Reset the legacy-bank corrupt latch — test-only. */
+export function resetLegacyBankCorruptLatchForTests(): void {
+	damagedBankDbs.clear();
 }

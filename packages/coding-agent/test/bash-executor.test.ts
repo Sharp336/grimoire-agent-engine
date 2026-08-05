@@ -15,6 +15,7 @@ import * as shellSnapshot from "@oh-my-pi/pi-coding-agent/utils/shell-snapshot";
 import type { Shell, ShellRunResult } from "@oh-my-pi/pi-natives";
 import * as piNatives from "@oh-my-pi/pi-natives";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { shellQuote } from "@oh-my-pi/pi-utils/shell";
 
 // Matches the schema default for `tools.artifactHeadBytes` (20 KB) used by
 // OutputSink when bash-executor pulls settings via resolveOutputSinkHeadBytes.
@@ -31,10 +32,6 @@ const KILL_REACT_MS = 50; // > one poll interval: a survivor would write its mar
 
 function makeTempDir(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "omp-bash-exec-"));
-}
-
-function shellQuote(value: string): string {
-	return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 function configureBashUserShell(homeDir: string): boolean {
