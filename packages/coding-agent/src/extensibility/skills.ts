@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
-import { getProjectDir, prompt } from "@oh-my-pi/pi-utils";
+import { expandTilde, getProjectDir, prompt } from "@oh-my-pi/pi-utils";
 import {
 	isValidManagedSkillName,
 	MANAGED_SKILLS_PROVIDER_ID,
@@ -14,7 +14,6 @@ import { compareSkillOrder, scanSkillsFromDir } from "../discovery/helpers";
 import autoloadTemplate from "../prompts/skills/autoload.md" with { type: "text" };
 import userInvocationTemplate from "../prompts/skills/user-invocation.md" with { type: "text" };
 import type { SkillPromptDetails } from "../session/messages";
-import { expandTilde } from "../tools/path-utils";
 export interface Skill {
 	name: string;
 	description: string;

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed the `expandTilde` re-export from the `tools/path-utils` subpath; import it from `@oh-my-pi/pi-utils` instead.
+
+### Changed
+
+- Migrated all `expandTilde` imports from the local `tools/path-utils` re-export to the canonical `@oh-my-pi/pi-utils` implementation and removed the now-dead shim.
+
 ## [17.2.9] - 2026-08-05
 
 ### Breaking Changes
