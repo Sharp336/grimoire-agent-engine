@@ -230,7 +230,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		});
 		await revivalStarted.promise;
 		vi.advanceTimersByTime(31);
-		revival.resolve(handle.session);
 		const result = await run;
 
 		expect(result.aborted).toBe(true);
@@ -238,7 +237,22 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		expect(result.abortReason).toContain("runtime limit exceeded");
 		expect(result.abortReason).toContain("task.maxRuntimeMs=30");
 		expect(promptCalls).toBe(0);
+		expect(handle.abortCalls()).toBe(0);
+
+		const replacement = createHangingSession();
+		AgentRegistry.global().register({
+			id: "parked-revival-timeout",
+			displayName: "newer replacement",
+			kind: "sub",
+			parentId: "Main",
+			session: replacement.session,
+			status: "idle",
+		});
+		revival.resolve(handle.session);
+		await Promise.resolve();
+		await Promise.resolve();
 		expect(handle.abortCalls()).toBeGreaterThanOrEqual(1);
+		expect(replacement.abortCalls()).toBe(0);
 	});
 
 	it("a cancelled late initializer cannot replace a newer same-id worker", async () => {

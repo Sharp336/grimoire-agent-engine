@@ -2529,49 +2529,94 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		maxRequests: options.maxRequests,
 		maxRuntimeMs: options.maxRuntimeMs ?? 0,
 	});
-	let session: AgentSession;
-	try {
-		session = await AgentLifecycleManager.global().ensureLive(id);
-	} catch (error) {
-		monitor.finish();
-		throw error;
-	}
-
-	if (options.eventBus) {
-		options.eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
-			id,
-			agent: agent.name,
-			parentToolCallId: options.parentToolCallId,
-			detached: true,
-			agentSource: agent.source,
-			description: options.description,
-			status: "started",
-			sessionFile,
-			index,
-		});
-	}
-
-	monitor.setActiveSession(session);
-	const unsubscribe = monitor.attach(session);
-	let outcome: DriveOutcome;
-	try {
-		outcome = monitor.abortSignal.aborted
-			? {
-					exitCode: 1,
-					aborted: monitor.isAbortedRun(),
-					abortReasonText: monitor.resolveAbortReasonText(),
-				}
-			: await driveSessionToYield(session, monitor, message);
-	} finally {
+	const revivalPromise = AgentLifecycleManager.global().ensureLive(id);
+	const abortGate = Promise.withResolvers<{ kind: "aborted" }>();
+	const onRevivalAbort = () => abortGate.resolve({ kind: "aborted" });
+	let revivalResult:
+		| { kind: "session"; session: AgentSession }
+		| { kind: "error"; error: unknown }
+		| { kind: "aborted" };
+	if (monitor.abortSignal.aborted) {
+		revivalResult = { kind: "aborted" };
+	} else {
+		monitor.abortSignal.addEventListener("abort", onRevivalAbort, { once: true });
 		try {
-			await untilAborted(AbortSignal.timeout(5000), () => monitor.waitForActiveSessionAbort());
-		} catch {
-			// Ignore abort cleanup timeouts; the session stays adopted either way.
+			revivalResult = await Promise.race([
+				revivalPromise.then(
+					session => ({ kind: "session" as const, session }),
+					error => ({ kind: "error" as const, error }),
+				),
+				abortGate.promise,
+			]);
+		} finally {
+			monitor.abortSignal.removeEventListener("abort", onRevivalAbort);
 		}
-		unsubscribe();
-		const active = monitor.takeActiveSession();
-		if (active) monitor.captureSalvage(active);
+	}
+
+	let outcome: DriveOutcome;
+	if (revivalResult.kind === "aborted") {
+		// The caller must return at the deadline even if revival never settles.
+		// If it does settle later, abort only that returned session object. A
+		// newer registry generation occupying the same id remains untouched.
+		void revivalPromise
+			.then(async lateSession => {
+				const current = AgentRegistry.global().get(id);
+				if (current !== ref && current?.session === lateSession) return;
+				await lateSession.abort();
+			})
+			.catch(error => {
+				logger.debug("Late subagent revival cleanup failed", {
+					id,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
+		outcome = {
+			exitCode: 1,
+			aborted: monitor.isAbortedRun(),
+			abortReasonText: monitor.resolveAbortReasonText(),
+		};
 		monitor.finish();
+	} else {
+		if (revivalResult.kind === "error") {
+			monitor.finish();
+			throw revivalResult.error;
+		}
+		const session = revivalResult.session;
+		if (options.eventBus) {
+			options.eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+				id,
+				agent: agent.name,
+				parentToolCallId: options.parentToolCallId,
+				detached: true,
+				agentSource: agent.source,
+				description: options.description,
+				status: "started",
+				sessionFile,
+				index,
+			});
+		}
+
+		monitor.setActiveSession(session);
+		const unsubscribe = monitor.attach(session);
+		try {
+			outcome = monitor.abortSignal.aborted
+				? {
+						exitCode: 1,
+						aborted: monitor.isAbortedRun(),
+						abortReasonText: monitor.resolveAbortReasonText(),
+					}
+				: await driveSessionToYield(session, monitor, message);
+		} finally {
+			try {
+				await untilAborted(AbortSignal.timeout(5000), () => monitor.waitForActiveSessionAbort());
+			} catch {
+				// Ignore abort cleanup timeouts; the session stays adopted either way.
+			}
+			unsubscribe();
+			const active = monitor.takeActiveSession();
+			if (active) monitor.captureSalvage(active);
+			monitor.finish();
+		}
 	}
 
 	return finalizeRunResult({
