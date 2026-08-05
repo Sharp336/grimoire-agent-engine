@@ -1,9 +1,21 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Message } from "@oh-my-pi/pi-ai";
-import { getAgentDir as getDefaultAgentDir, logger, parseJsonlLenient, toError } from "@oh-my-pi/pi-utils";
+import {
+	getAgentDir as getDefaultAgentDir,
+	logger,
+	parseJsonlLenient,
+	resolveEquivalentPath,
+	toError,
+} from "@oh-my-pi/pi-utils";
 import { LRUCache } from "lru-cache/raw";
-import { computeDefaultSessionDir } from "./session-paths";
+import type { FileEntry } from "./session-entries";
+import { loadEntriesFromFile } from "./session-loader";
+import {
+	type ManagedSessionDirectoryKind,
+	resolveDefaultSessionDirectories,
+	resolveManagedSessionRoot,
+} from "./session-paths";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 
 /**
@@ -42,6 +54,10 @@ export interface SessionInfo {
 	 * synthesized {@link SessionInfo}s (cross-project stubs, tests) leave it unset.
 	 */
 	status?: SessionStatus;
+	/** Physical bucket carrying this candidate when multiple directory generations coexist. */
+	candidateLocation?: ManagedSessionDirectoryKind;
+	/** True when another candidate for the same session has a divergent entry graph. */
+	candidateConflict?: boolean;
 }
 
 export interface ResolvedSessionMatch {
@@ -517,6 +533,123 @@ async function collectSessionsFromFiles(
 	return sessions;
 }
 
+function comparableSessionEntry(entry: FileEntry): Record<string, unknown> {
+	const comparable = { ...entry } as Record<string, unknown>;
+	if (entry.type === "session") {
+		delete comparable.version;
+		delete comparable.title;
+		delete comparable.titleSource;
+		delete comparable.previousSessionFiles;
+	}
+	return comparable;
+}
+
+function buildSessionEntryGraph(entries: readonly FileEntry[]): Map<string, Record<string, unknown>> | undefined {
+	if (entries.length === 0 || entries[0]?.type !== "session") return undefined;
+	const graph = new Map<string, Record<string, unknown>>();
+	for (let index = 0; index < entries.length; index++) {
+		const entry = entries[index];
+		const id =
+			index === 0 ? "header" : "id" in entry && typeof entry.id === "string" ? `entry:${entry.id}` : undefined;
+		if (!id || graph.has(id)) return undefined;
+		graph.set(id, comparableSessionEntry(entry));
+	}
+	return graph;
+}
+
+function sessionEntryGraphDominates(
+	candidate: ReadonlyMap<string, Record<string, unknown>>,
+	other: ReadonlyMap<string, Record<string, unknown>>,
+): boolean {
+	for (const [id, entry] of other) {
+		const candidateEntry = candidate.get(id);
+		if (!candidateEntry || !Bun.deepEquals(candidateEntry, entry)) return false;
+	}
+	return true;
+}
+
+function candidateLocationFromPath(file: string): ManagedSessionDirectoryKind {
+	const dirName = path.basename(path.dirname(file));
+	return /^(?:home|tmp|abs)-.*-[a-f0-9]{64}$/.test(dirName) ? "hashed" : "legacy";
+}
+
+function physicalSessionPath(file: string): string {
+	try {
+		return resolveEquivalentPath(file);
+	} catch {
+		return path.resolve(file);
+	}
+}
+
+async function resolveSessionCandidates(
+	sessions: readonly SessionInfo[],
+	storage: SessionStorage,
+): Promise<SessionInfo[]> {
+	const groups = new Map<string, SessionInfo[]>();
+	for (const session of sessions) {
+		const candidate = {
+			...session,
+			candidateLocation: session.candidateLocation ?? candidateLocationFromPath(session.path),
+		};
+		const key = candidate.id;
+		const group = groups.get(key);
+		if (group) group.push(candidate);
+		else groups.set(key, [candidate]);
+	}
+
+	const resolved: SessionInfo[] = [];
+	for (const group of groups.values()) {
+		const physicalCandidates = new Map<string, SessionInfo>();
+		for (const candidate of group) {
+			const physicalPath = physicalSessionPath(candidate.path);
+			const existing = physicalCandidates.get(physicalPath);
+			if (!existing || (existing.candidateLocation === "legacy" && candidate.candidateLocation === "hashed")) {
+				physicalCandidates.set(physicalPath, candidate);
+			}
+		}
+		const candidates = Array.from(physicalCandidates.values());
+		if (candidates.length === 1) {
+			resolved.push(candidates[0]);
+			continue;
+		}
+
+		const graphs = await Promise.all(
+			candidates.map(async candidate => {
+				try {
+					return buildSessionEntryGraph(await loadEntriesFromFile(candidate.path, storage));
+				} catch (error) {
+					logger.warn("Failed to compare session directory candidates", {
+						path: candidate.path,
+						error: toError(error).message,
+					});
+					return undefined;
+				}
+			}),
+		);
+		const dominators = candidates.filter((_, candidateIndex) => {
+			const candidateGraph = graphs[candidateIndex];
+			return (
+				candidateGraph !== undefined &&
+				graphs.every(
+					otherGraph => otherGraph !== undefined && sessionEntryGraphDominates(candidateGraph, otherGraph),
+				)
+			);
+		});
+		if (dominators.length > 0) {
+			resolved.push(
+				dominators.find(candidate => candidate.candidateLocation === "hashed") ??
+					dominators.toSorted((a, b) => b.modified.getTime() - a.modified.getTime())[0],
+			);
+			continue;
+		}
+
+		resolved.push(...candidates.map(candidate => ({ ...candidate, candidateConflict: true })));
+	}
+
+	resolved.sort((a, b) => b.modified.getTime() - a.modified.getTime());
+	return resolved;
+}
+
 /**
  * Promote orphaned `<basename>.jsonl.<snowflake>.bak` backups created by the
  * EPERM-rewrite path back to their primary path when the primary is missing.
@@ -602,6 +735,46 @@ async function scanSessionDirReadOnly(
 	}
 }
 
+function sessionBelongsToProject(session: SessionInfo, cwd: string): boolean {
+	if (!session.cwd) return true;
+	try {
+		return resolveEquivalentPath(session.cwd) === resolveEquivalentPath(cwd);
+	} catch {
+		return path.resolve(session.cwd) === path.resolve(cwd);
+	}
+}
+
+async function scanProjectSessionDirs(
+	cwd: string,
+	sessionDir: string | undefined,
+	storage: SessionStorage,
+	withStatus: boolean,
+): Promise<SessionInfo[]> {
+	const sessionsRoot = sessionDir ? resolveManagedSessionRoot(sessionDir, cwd) : undefined;
+	if (sessionDir && sessionsRoot === undefined) {
+		return await scanSessionDir(sessionDir, storage, withStatus);
+	}
+	const directories = resolveDefaultSessionDirectories(cwd, storage, sessionsRoot);
+	const scans = await Promise.all(
+		directories.readableDirs.map(async directory => {
+			const sessions = await scanSessionDir(directory.path, storage, withStatus);
+			const projectSessions =
+				directory.kind === "legacy" ? sessions.filter(session => sessionBelongsToProject(session, cwd)) : sessions;
+			return projectSessions.map(session => ({ ...session, candidateLocation: directory.kind }));
+		}),
+	);
+	return await resolveSessionCandidates(scans.flat(), storage);
+}
+
+/** List every reachable candidate for a project's managed session directories. */
+export function listProjectSessions(
+	cwd: string,
+	sessionDir: string | undefined,
+	storage: SessionStorage = new FileSessionStorage(),
+): Promise<SessionInfo[]> {
+	return scanProjectSessionDirs(cwd, sessionDir, storage, true);
+}
+
 /**
  * List sessions in a resolved session directory (newest first), reading each
  * file's lifecycle {@link SessionStatus}.
@@ -624,7 +797,8 @@ export async function listAllSessions(storage: SessionStorage = new FileSessionS
 		const files = await Array.fromAsync(new Bun.Glob("*/*.jsonl").scan(sessionsRoot), name =>
 			path.join(sessionsRoot, name),
 		);
-		return await collectSessionsFromFiles(files, storage, true);
+		const sessions = await collectSessionsFromFiles(files, storage, true);
+		return await resolveSessionCandidates(sessions, storage);
 	} catch {
 		return [];
 	}
@@ -639,6 +813,24 @@ export async function findMostRecentSession(
 	return sessions[0]?.path ?? null;
 }
 
+/** Find the newest safe candidate across a project's managed directory generations. */
+export async function findMostRecentProjectSession(
+	cwd: string,
+	sessionDir: string | undefined,
+	storage: SessionStorage = new FileSessionStorage(),
+): Promise<string | null> {
+	const sessions = await scanProjectSessionDirs(cwd, sessionDir, storage, false);
+	const newest = sessions[0];
+	if (!newest) return null;
+	if (newest.candidateConflict === true) {
+		throw new SessionCandidateConflictError(
+			newest.id,
+			sessions.filter(session => session.id === newest.id && session.candidateConflict === true),
+		);
+	}
+	return newest.path;
+}
+
 /** Get recent sessions for display in the welcome screen. */
 export async function getRecentSessions(
 	sessionDir: string,
@@ -650,6 +842,23 @@ export async function getRecentSessions(
 	for (let i = 0; i < sessions.length && i < limit; i++) {
 		const info = sessions[i];
 		recent.push({ path: info.path, name: sessionDisplayName(info), timeAgo: formatTimeAgo(info.modified) });
+	}
+	return recent;
+}
+
+/** Get recent safe candidates across a project's managed directory generations. */
+export async function getRecentProjectSessions(
+	cwd: string,
+	sessionDir: string | undefined,
+	limit = 4,
+	storage: SessionStorage = new FileSessionStorage(),
+): Promise<RecentSessionInfo[]> {
+	const sessions = await scanProjectSessionDirs(cwd, sessionDir, storage, false);
+	const recent: RecentSessionInfo[] = [];
+	for (const info of sessions) {
+		if (info.candidateConflict === true) continue;
+		recent.push({ path: info.path, name: sessionDisplayName(info), timeAgo: formatTimeAgo(info.modified) });
+		if (recent.length === limit) break;
 	}
 	return recent;
 }
@@ -675,6 +884,36 @@ function sessionMatchesResumeArg(session: SessionInfo, sessionArg: string): bool
 	return fileSessionId.startsWith(normalizedArg);
 }
 
+export class SessionCandidateConflictError extends Error {
+	readonly candidates: readonly string[];
+
+	constructor(sessionId: string, candidates: readonly SessionInfo[]) {
+		const ordered = candidates.toSorted((left, right) => {
+			if (left.candidateLocation !== right.candidateLocation) {
+				return left.candidateLocation === "hashed" ? -1 : 1;
+			}
+			return left.path.localeCompare(right.path);
+		});
+		const paths = ordered.map(candidate => candidate.path);
+		super(`Session "${sessionId}" has divergent candidates at ${paths.join(" and ")}`);
+		this.name = "SessionCandidateConflictError";
+		this.candidates = paths;
+	}
+}
+
+function findResumableSession(sessions: readonly SessionInfo[], sessionArg: string): SessionInfo | undefined {
+	const exactPath = path.resolve(sessionArg);
+	const exact = sessions.find(session => path.resolve(session.path) === exactPath);
+	if (exact) return exact;
+
+	const matches = sessions.filter(session => sessionMatchesResumeArg(session, sessionArg));
+	const conflicts = matches.filter(session => session.candidateConflict === true);
+	if (conflicts.length > 1 && conflicts.every(session => session.id === conflicts[0].id)) {
+		throw new SessionCandidateConflictError(conflicts[0].id, conflicts);
+	}
+	return matches[0];
+}
+
 /** Controls cross-directory fallback for resumable session lookup. */
 export interface ResolveResumableSessionOptions {
 	/** Search default global session buckets after the active/custom session directory misses. */
@@ -694,9 +933,8 @@ export async function resolveResumableSession(
 ): Promise<ResolvedSessionMatch | undefined> {
 	const storage = isSessionStorage(storageOrOptions) ? storageOrOptions : new FileSessionStorage();
 	const resolvedOptions = isSessionStorage(storageOrOptions) ? options : storageOrOptions;
-	const localSessionDir = sessionDir ?? computeDefaultSessionDir(cwd, storage);
-	const localSessions = await listSessions(localSessionDir, storage);
-	const localMatch = localSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
+	const localSessions = await scanProjectSessionDirs(cwd, sessionDir, storage, true);
+	const localMatch = findResumableSession(localSessions, sessionArg);
 	if (localMatch) {
 		return { session: localMatch, scope: "local" };
 	}
@@ -706,7 +944,7 @@ export async function resolveResumableSession(
 	}
 
 	const globalSessions = await listAllSessions(storage);
-	const globalMatch = globalSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
+	const globalMatch = findResumableSession(globalSessions, sessionArg);
 	if (!globalMatch) {
 		return undefined;
 	}

@@ -107,7 +107,7 @@ import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import { HistoryStorage } from "../session/history-storage";
 import type { SessionContext } from "../session/session-context";
-import { getRecentSessions } from "../session/session-listing";
+import { getRecentProjectSessions } from "../session/session-listing";
 import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
@@ -922,7 +922,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Get recent sessions
 		const recentSessions = await logger.time("InteractiveMode.init:recentSessions", () =>
-			getRecentSessions(this.sessionManager.getSessionDir()).then(sessions =>
+			getRecentProjectSessions(this.sessionManager.getCwd(), this.sessionManager.getSessionDir()).then(sessions =>
 				sessions.map(s => ({
 					name: s.name,
 					timeAgo: s.timeAgo,

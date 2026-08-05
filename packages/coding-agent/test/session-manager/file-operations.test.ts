@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -6,6 +6,7 @@ import type { FileEntry, SessionHeader } from "@oh-my-pi/pi-coding-agent/session
 import { findMostRecentSession, resolveResumableSession } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as tui from "@oh-my-pi/pi-tui";
 import { getConfigRootDir, getSessionsDir, removeSyncWithRetries, Snowflake, setAgentDir } from "@oh-my-pi/pi-utils";
 
 describe("loadEntriesFromFile", () => {
@@ -163,7 +164,9 @@ describe("SessionManager temp cwd session dirs", () => {
 	const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 
 	function expectedTempSessionDirName(tempCwd: string): string {
-		return `-tmp-${path.relative(os.tmpdir(), path.resolve(tempCwd)).replace(/[/\\:]/g, "-")}`;
+		const resolvedCwd = path.resolve(tempCwd);
+		const digest = Bun.SHA256.hash(resolvedCwd.replaceAll("\\", "/"), "hex");
+		return `tmp-${path.basename(resolvedCwd)}-${digest}`;
 	}
 
 	function toLegacyAbsoluteSessionDirName(cwd: string): string {
@@ -188,7 +191,7 @@ describe("SessionManager temp cwd session dirs", () => {
 		removeSyncWithRetries(testAgentDir);
 	});
 
-	it("stores temp-root cwd sessions under -tmp-prefixed directories", () => {
+	it("stores temp-root cwd sessions under collision-safe hashed directories", () => {
 		const tempCwd = path.join(testAgentDir, `temp-cwd-${Snowflake.next()}`);
 		fs.mkdirSync(tempCwd, { recursive: true });
 
@@ -199,21 +202,30 @@ describe("SessionManager temp cwd session dirs", () => {
 		expect(path.dirname(sessionFile)).toBe(path.join(getSessionsDir(), expectedTempSessionDirName(tempCwd)));
 	});
 
-	it("migrates legacy temp-root absolute session dirs to -tmp prefixes", () => {
+	it("migrates legacy temp-root absolute session dirs and leaves a compatible alias", () => {
 		const tempCwd = path.join(testAgentDir, `legacy-cwd-${Snowflake.next()}`);
 		fs.mkdirSync(tempCwd, { recursive: true });
 
 		const legacyDir = path.join(getSessionsDir(), toLegacyAbsoluteSessionDirName(tempCwd));
 		const markerFile = path.join(legacyDir, "carried.jsonl");
 		fs.mkdirSync(legacyDir, { recursive: true });
-		fs.writeFileSync(markerFile, "marker\n");
+		fs.writeFileSync(
+			markerFile,
+			`${JSON.stringify({
+				type: "session",
+				version: 3,
+				id: "carried",
+				timestamp: "2026-01-01T00:00:00.000Z",
+				cwd: tempCwd,
+			})}\n`,
+		);
 
 		const session = SessionManager.create(tempCwd);
 		const sessionFile = session.getSessionFile();
 		if (!sessionFile) throw new Error("Expected session file path");
 
 		const expectedDir = path.join(getSessionsDir(), expectedTempSessionDirName(tempCwd));
-		expect(fs.existsSync(legacyDir)).toBe(false);
+		expect(fs.realpathSync(legacyDir)).toBe(fs.realpathSync(expectedDir));
 		expect(path.dirname(sessionFile)).toBe(expectedDir);
 		expect(fs.existsSync(path.join(expectedDir, "carried.jsonl"))).toBe(true);
 	});
@@ -247,10 +259,12 @@ describe("SessionManager legacy session migration persistence", () => {
 	}
 
 	beforeEach(() => {
+		vi.spyOn(tui, "getTerminalId").mockReturnValue(null);
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-session-manager-legacy-"));
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		removeSyncWithRetries(tempDir);
 	});
 

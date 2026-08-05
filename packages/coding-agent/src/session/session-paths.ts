@@ -2,34 +2,55 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getTerminalId } from "@oh-my-pi/pi-tui";
-import { getSessionsDir, getTerminalSessionsDir, isEnoent, logger, resolveEquivalentPath } from "@oh-my-pi/pi-utils";
+import {
+	getSessionsDir,
+	getTerminalSessionsDir,
+	hasFsCode,
+	isEnoent,
+	logger,
+	parseJsonlLenient,
+	resolveEquivalentPath,
+} from "@oh-my-pi/pi-utils";
 import type { SessionStorage } from "./session-storage";
-
-const migratedSessionRoots = new Set<string>();
 
 /**
  * Merge or rename a legacy session directory into its canonical target.
- * Best effort: callers decide whether migration failures should surface.
+ * Returns false when a collision leaves reachable source entries behind.
  */
-function migrateSessionDirPath(oldPath: string, newPath: string): void {
+function migrateSessionDirPath(oldPath: string, newPath: string): boolean {
 	const existing = fs.statSync(newPath, { throwIfNoEntry: false });
 	if (existing?.isDirectory()) {
+		let complete = true;
 		for (const file of fs.readdirSync(oldPath)) {
-			const src = path.join(oldPath, file);
-			const dst = path.join(newPath, file);
-			if (fs.existsSync(dst)) {
-				logger.warn("Session directory migration collision; preserving legacy entry", { src, dst });
+			const source = path.join(oldPath, file);
+			const target = path.join(newPath, file);
+			const sourceStat = fs.statSync(source, { throwIfNoEntry: false });
+			if (!sourceStat) continue;
+			const targetStat = fs.statSync(target, { throwIfNoEntry: false });
+			if (!targetStat) {
+				fs.renameSync(source, target);
 				continue;
 			}
-			fs.renameSync(src, dst);
+			if (sourceStat.isDirectory() && targetStat.isDirectory()) {
+				if (!migrateSessionDirPath(source, target)) complete = false;
+				continue;
+			}
+			logger.warn("Session directory migration collision; preserving legacy entry", { source, target });
+			complete = false;
 		}
+		if (!complete) return false;
 		fs.rmdirSync(oldPath);
-		return;
+		return true;
 	}
 	if (existing) {
-		fs.rmSync(newPath, { recursive: true, force: true });
+		logger.warn("Session directory migration collision; preserving legacy directory", {
+			source: oldPath,
+			target: newPath,
+		});
+		return false;
 	}
 	fs.renameSync(oldPath, newPath);
+	return true;
 }
 
 function encodeLegacyAbsoluteSessionDirName(cwd: string): string {
@@ -42,7 +63,11 @@ function encodeRelativeSessionDirName(prefix: string, relative: string): string 
 	return encoded ? (prefix.endsWith("-") ? `${prefix}${encoded}` : `${prefix}-${encoded}`) : prefix;
 }
 
-function getDefaultSessionDirName(cwd: string): { encodedDirName: string; resolvedCwd: string } {
+function getDefaultSessionDirName(cwd: string): {
+	encodedDirName: string;
+	legacyRelativeDirName: string | undefined;
+	resolvedCwd: string;
+} {
 	const resolvedCwd = path.resolve(cwd);
 	const canonicalCwd = resolveEquivalentPath(resolvedCwd);
 	const home = os.homedir();
@@ -51,71 +76,123 @@ function getDefaultSessionDirName(cwd: string): { encodedDirName: string; resolv
 	const canonicalTempRoot = resolveEquivalentPath(tempRoot);
 	const homeRelative = path.relative(canonicalHome, canonicalCwd);
 	const tempRelative = path.relative(canonicalTempRoot, canonicalCwd);
-	const encodedDirName =
-		homeRelative === "" || (!homeRelative.startsWith("..") && !path.isAbsolute(homeRelative))
-			? encodeRelativeSessionDirName("-", homeRelative)
-			: tempRelative === "" || (!tempRelative.startsWith("..") && !path.isAbsolute(tempRelative))
-				? encodeRelativeSessionDirName("-tmp", tempRelative)
-				: encodeLegacyAbsoluteSessionDirName(canonicalCwd);
-	return { encodedDirName, resolvedCwd };
+
+	let scope: "home" | "tmp" | "abs";
+	let legacyRelativeDirName: string | undefined;
+	if (homeRelative === "" || (!homeRelative.startsWith("..") && !path.isAbsolute(homeRelative))) {
+		scope = "home";
+		legacyRelativeDirName = encodeRelativeSessionDirName("-", homeRelative);
+	} else if (tempRelative === "" || (!tempRelative.startsWith("..") && !path.isAbsolute(tempRelative))) {
+		scope = "tmp";
+		legacyRelativeDirName = encodeRelativeSessionDirName("-tmp", tempRelative);
+	} else {
+		scope = "abs";
+	}
+
+	const normalized = canonicalCwd.replaceAll("\\", "/");
+	const readable = path
+		.basename(canonicalCwd)
+		.replace(/[^a-zA-Z0-9._-]+/g, "-")
+		.replace(/^-+|-+$/g, "")
+		.slice(-80);
+	const digest = Bun.SHA256.hash(normalized, "hex");
+	const encodedDirName = `${scope}-${readable || "project"}-${digest}`;
+	return { encodedDirName, legacyRelativeDirName, resolvedCwd };
 }
 
-/**
- * Migrate old `--<home-encoded>-*--` session dirs to the new `-*` format.
- * Runs once per sessions root on first access, best-effort.
- */
-function migrateHomeSessionDirs(sessionsRoot: string): void {
-	if (migratedSessionRoots.has(sessionsRoot)) return;
-	migratedSessionRoots.add(sessionsRoot);
-
-	const home = os.homedir();
-	const homeEncoded = home.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-");
-	const oldPrefix = `--${homeEncoded}-`;
-	const oldExact = `--${homeEncoded}--`;
-
-	let entries: string[];
+function legacyAliasPointsTo(legacyDir: string, canonicalDir: string): boolean {
+	const legacyStat = fs.lstatSync(legacyDir, { throwIfNoEntry: false });
+	if (!legacyStat?.isSymbolicLink()) return false;
 	try {
-		entries = fs.readdirSync(sessionsRoot);
+		return resolveEquivalentPath(legacyDir) === resolveEquivalentPath(canonicalDir);
 	} catch {
-		return;
-	}
-
-	for (const entry of entries) {
-		let remainder: string;
-		if (entry === oldExact) {
-			remainder = "";
-		} else if (entry.startsWith(oldPrefix) && entry.endsWith("--")) {
-			remainder = entry.slice(oldPrefix.length, -2);
-		} else {
-			continue;
-		}
-
-		const newName = remainder ? `-${remainder}` : "-";
-		const oldPath = path.join(sessionsRoot, entry);
-		const newPath = path.join(sessionsRoot, newName);
-
-		try {
-			migrateSessionDirPath(oldPath, newPath);
-		} catch (error) {
-			logger.warn("Failed to migrate legacy home session directory", {
-				oldPath,
-				newPath,
-				error: String(error),
-			});
-		}
+		return false;
 	}
 }
 
-function migrateLegacyAbsoluteSessionDir(cwd: string, sessionDir: string, sessionsRoot: string): void {
-	const legacyDir = path.join(sessionsRoot, encodeLegacyAbsoluteSessionDirName(cwd));
-	if (legacyDir === sessionDir || !fs.existsSync(legacyDir)) return;
-
+function ensureLegacyAlias(legacyDir: string, canonicalDir: string): void {
 	try {
-		migrateSessionDirPath(legacyDir, sessionDir);
+		if (legacyAliasPointsTo(legacyDir, canonicalDir) || fs.existsSync(legacyDir)) return;
+		const target = process.platform === "win32" ? canonicalDir : path.relative(path.dirname(legacyDir), canonicalDir);
+		fs.symlinkSync(target, legacyDir, process.platform === "win32" ? "junction" : "dir");
+	} catch (error) {
+		if (hasFsCode(error, "EEXIST")) return;
+		logger.warn("Failed to create legacy session directory alias", {
+			legacyDir,
+			canonicalDir,
+			error: String(error),
+		});
+	}
+}
+
+const SESSION_HEADER_PREFIX_BYTES = 4096;
+const utf8Decoder = new TextDecoder();
+
+function pathsReferToSameDirectory(left: string, right: string): boolean {
+	try {
+		return resolveEquivalentPath(left) === resolveEquivalentPath(right);
+	} catch {
+		return path.resolve(left) === path.resolve(right);
+	}
+}
+
+function readRecordedSessionCwd(file: string): string | undefined {
+	const buffer = new Uint8Array(SESSION_HEADER_PREFIX_BYTES);
+	let descriptor: number | undefined;
+	try {
+		descriptor = fs.openSync(file, "r");
+		const bytesRead = fs.readSync(descriptor, buffer, 0, buffer.byteLength, 0);
+		const entries = parseJsonlLenient<Record<string, unknown>>(utf8Decoder.decode(buffer.subarray(0, bytesRead)));
+		const header = entries.find(entry => entry.type === "session");
+		return typeof header?.cwd === "string" ? header.cwd : undefined;
+	} catch {
+		return undefined;
+	} finally {
+		if (descriptor !== undefined) fs.closeSync(descriptor);
+	}
+}
+
+function legacySessionDirBelongsToCwd(legacyDir: string, cwd: string): boolean {
+	const entries = fs.readdirSync(legacyDir, { withFileTypes: true });
+	if (entries.length === 0) return true;
+	const sessionArtifacts = new Set<string>();
+	for (const entry of entries) {
+		if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+		const recordedCwd = readRecordedSessionCwd(path.join(legacyDir, entry.name));
+		if (!recordedCwd || !pathsReferToSameDirectory(recordedCwd, cwd)) return false;
+		sessionArtifacts.add(entry.name.slice(0, -".jsonl".length));
+	}
+	if (sessionArtifacts.size === 0) return false;
+	return entries.every(
+		entry =>
+			(entry.isFile() && entry.name.endsWith(".jsonl")) || (entry.isDirectory() && sessionArtifacts.has(entry.name)),
+	);
+}
+
+function migrateLegacySessionDir(legacyDir: string, canonicalDir: string, cwd: string): void {
+	try {
+		if (legacyDir === canonicalDir || legacyAliasPointsTo(legacyDir, canonicalDir)) return;
+		const legacyStat = fs.lstatSync(legacyDir, { throwIfNoEntry: false });
+		if (!legacyStat) return;
+		if (legacyStat.isSymbolicLink()) {
+			logger.warn("Refusing to migrate an unexpected legacy session directory symlink", {
+				legacyDir,
+				canonicalDir,
+			});
+			return;
+		}
+		if (!legacySessionDirBelongsToCwd(legacyDir, cwd)) {
+			logger.warn("Legacy session directory ownership is ambiguous; preserving directory", {
+				legacyDir,
+				canonicalDir,
+			});
+			return;
+		}
+		if (migrateSessionDirPath(legacyDir, canonicalDir)) ensureLegacyAlias(legacyDir, canonicalDir);
 	} catch (error) {
 		logger.warn("Failed to migrate legacy session directory", {
-			oldPath: legacyDir,
-			newPath: sessionDir,
+			legacyDir,
+			canonicalDir,
 			error: String(error),
 		});
 	}
@@ -123,29 +200,72 @@ function migrateLegacyAbsoluteSessionDir(cwd: string, sessionDir: string, sessio
 
 export function resolveManagedSessionRoot(sessionDir: string, cwd: string): string | undefined {
 	const currentDirName = path.basename(sessionDir);
-	const { encodedDirName } = getDefaultSessionDirName(cwd);
-	if (currentDirName !== encodedDirName && currentDirName !== encodeLegacyAbsoluteSessionDirName(cwd)) {
+	const { encodedDirName, legacyRelativeDirName } = getDefaultSessionDirName(cwd);
+	if (
+		currentDirName !== encodedDirName &&
+		currentDirName !== legacyRelativeDirName &&
+		currentDirName !== encodeLegacyAbsoluteSessionDirName(cwd)
+	) {
 		return undefined;
 	}
 	return path.dirname(sessionDir);
 }
 
+/** A managed session directory that remains part of the project's read set. */
+export type ManagedSessionDirectoryKind = "hashed" | "legacy";
+
+export interface ManagedSessionDirectory {
+	path: string;
+	kind: ManagedSessionDirectoryKind;
+}
+
+export interface DefaultSessionDirectories {
+	canonicalDir: string;
+	readableDirs: readonly ManagedSessionDirectory[];
+}
+
 /**
- * Compute the default session directory for a cwd.
- * Classifies cwd by canonical location so symlink/alias paths resolve to the
- * same home-relative or temp-root directory names as their real targets.
+ * Resolve the canonical session directory and any residual legacy directories
+ * that remain readable because migration could not safely complete.
  */
+export function resolveDefaultSessionDirectories(
+	cwd: string,
+	storage: SessionStorage,
+	sessionsRoot: string = getSessionsDir(),
+): DefaultSessionDirectories {
+	const { encodedDirName, legacyRelativeDirName, resolvedCwd } = getDefaultSessionDirName(cwd);
+	const canonicalDir = path.join(sessionsRoot, encodedDirName);
+	const legacyDirs = [
+		legacyRelativeDirName ? path.join(sessionsRoot, legacyRelativeDirName) : undefined,
+		path.join(sessionsRoot, encodeLegacyAbsoluteSessionDirName(resolvedCwd)),
+	].filter((legacyDir): legacyDir is string => legacyDir !== undefined && legacyDir !== canonicalDir);
+	for (const legacyDir of legacyDirs) migrateLegacySessionDir(legacyDir, canonicalDir, resolvedCwd);
+	storage.ensureDirSync(canonicalDir);
+	for (const legacyDir of legacyDirs) ensureLegacyAlias(legacyDir, canonicalDir);
+
+	const readableDirs: ManagedSessionDirectory[] = [{ path: canonicalDir, kind: "hashed" }];
+	for (const legacyDir of legacyDirs) {
+		try {
+			const stat = fs.lstatSync(legacyDir, { throwIfNoEntry: false });
+			if (stat?.isDirectory()) readableDirs.push({ path: legacyDir, kind: "legacy" });
+		} catch (error) {
+			logger.warn("Failed to inspect legacy session directory", {
+				legacyDir,
+				canonicalDir,
+				error: String(error),
+			});
+		}
+	}
+	return { canonicalDir, readableDirs };
+}
+
+/** Compute the collision-safe canonical session directory for a cwd. */
 export function computeDefaultSessionDir(
 	cwd: string,
 	storage: SessionStorage,
 	sessionsRoot: string = getSessionsDir(),
 ): string {
-	const { encodedDirName, resolvedCwd } = getDefaultSessionDirName(cwd);
-	migrateHomeSessionDirs(sessionsRoot);
-	const sessionDir = path.join(sessionsRoot, encodedDirName);
-	migrateLegacyAbsoluteSessionDir(resolvedCwd, sessionDir, sessionsRoot);
-	storage.ensureDirSync(sessionDir);
-	return sessionDir;
+	return resolveDefaultSessionDirectories(cwd, storage, sessionsRoot).canonicalDir;
 }
 
 // =============================================================================

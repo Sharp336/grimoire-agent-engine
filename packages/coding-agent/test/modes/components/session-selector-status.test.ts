@@ -87,4 +87,16 @@ describe("SessionSelectorComponent status labels", () => {
 			expect(rendered).not.toContain(label);
 		}
 	});
+
+	it("labels divergent directory candidates with their physical location", () => {
+		const rendered = renderPlain([
+			{
+				...createSession("conflict", "complete"),
+				candidateLocation: "legacy",
+				candidateConflict: true,
+			},
+		]);
+
+		expect(rendered).toContain(`${theme.status.error} divergent legacy`);
+	});
 });

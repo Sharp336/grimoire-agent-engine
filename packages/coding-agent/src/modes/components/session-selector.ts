@@ -613,6 +613,10 @@ class SessionList implements Component {
 			if (status) {
 				metadata += ` ${dot} ${status}`;
 			}
+			if (session.candidateConflict) {
+				const location = session.candidateLocation ?? "unknown";
+				metadata += ` ${dot} ${theme.fg("error", `${theme.status.error} divergent ${location}`)}`;
+			}
 			if (session.parentSessionPath) {
 				metadata += ` ${dot} ${dim(`${theme.icon.branch} fork`)}`;
 			}

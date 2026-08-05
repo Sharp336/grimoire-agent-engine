@@ -58,7 +58,12 @@ import {
 	type TtsrInjectionEntry,
 	type UsageStatistics,
 } from "./session-entries";
-import { findMostRecentSession, listAllSessions, listSessions, type SessionInfo } from "./session-listing";
+import {
+	findMostRecentProjectSession,
+	listAllSessions,
+	listProjectSessions,
+	type SessionInfo,
+} from "./session-listing";
 import { loadEntriesFromFile, readTitleSlotFromFile, resolveBlobRefsInEntries } from "./session-loader";
 import { generateId, migrateToCurrentVersion } from "./session-migrations";
 import {
@@ -2607,7 +2612,7 @@ export class SessionManager {
 			// A fresh `/new` boundary whose JSONL was never materialized (lazy
 			// new-session persistence, then a process exit before any assistant
 			// output). Honor the boundary: start fresh rather than falling back to
-			// findMostRecentSession(), which would resurrect the pre-`/new`
+			// findMostRecentProjectSession(), which would resurrect the pre-`/new`
 			// transcript. A materialized (or genuinely stale/deleted) crumb reports
 			// exists=false only when fresh, so this never masks a real stale crumb.
 			if (breadcrumb.fresh && !breadcrumb.exists) {
@@ -2628,7 +2633,7 @@ export class SessionManager {
 				// own, re-root the moved session here instead of starting fresh. When an
 				// explicit sessionDir is reused across the move, the stale breadcrumb file
 				// may be the newest entry there; prefer a genuine current-cwd session.
-				let newestInTargetDir = await findMostRecentSession(dir, storage);
+				let newestInTargetDir = await findMostRecentProjectSession(cwd, dir, storage);
 				const breadcrumbFile = path.resolve(breadcrumb.sessionFile);
 				const breadcrumbCwdMissing = !fs.existsSync(breadcrumbCwd);
 				const newestIsBreadcrumb = newestInTargetDir ? path.resolve(newestInTargetDir) === breadcrumbFile : false;
@@ -2666,7 +2671,7 @@ export class SessionManager {
 			}
 		}
 
-		if (chosenSession === undefined) chosenSession = await findMostRecentSession(dir, storage);
+		if (chosenSession === undefined) chosenSession = await findMostRecentProjectSession(cwd, dir, storage);
 
 		const manager = new SessionManager(cwd, dir, true, storage);
 		if (chosenSession) await manager.setSessionFile(chosenSession);
@@ -2693,8 +2698,7 @@ export class SessionManager {
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
 	): Promise<SessionInfo[]> {
-		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
-		return listSessions(dir, storage);
+		return listProjectSessions(cwd, sessionDir, storage);
 	}
 
 	/** List all sessions across all project directories. */
