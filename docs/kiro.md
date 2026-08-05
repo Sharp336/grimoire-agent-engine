@@ -23,9 +23,9 @@ The Start URL must be an HTTPS `*.awsapps.com/start` URL without a port, query s
 
 OMP registers a public Kiro client for the selected OIDC region, requests a device code, displays the verification URL and one-time user code, and waits for browser approval. When more than one Kiro profile is available, the login dialog presents a profile selector. The terminal shows a profile name or a region-based fallback, never the full profile ARN or AWS account number.
 
-The selected profile determines the Kiro runtime route. Its profile identity, registered client metadata, and validated token endpoint are stored with the OAuth credential. If a registration response omits `tokenEndpoint`, OMP uses and persists the validated canonical regional endpoint `https://oidc.<region>.amazonaws.com/token`; a returned endpoint is preserved only after the same validation.
+The selected profile determines the Kiro runtime route. Its profile identity, registered client metadata, and validated token endpoint are stored with the OAuth credential. If a registration response omits `tokenEndpoint` or returns it as `null`, OMP uses and persists the validated canonical regional endpoint `https://oidc.<region>.amazonaws.com/token`; a returned non-null endpoint is preserved only after the same validation.
 
-OMP caches the validated Start URL, OIDC region, and registered public client locally. Cached registrations are scoped to their region, expire with the registered client, and are repaired with the canonical token endpoint when an older cache entry omitted that field.
+OMP caches the validated Start URL, OIDC region, and registered public client locally. Cached registrations are scoped to their region, expire with the registered client, and are repaired with the canonical token endpoint when an older cache entry omitted that field or stored `null`.
 
 ## Kiro API-key login
 

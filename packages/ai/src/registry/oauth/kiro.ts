@@ -432,9 +432,10 @@ function canonicalKiroTokenEndpoint(region: string): string {
 }
 
 function resolveKiroTokenEndpoint(value: unknown, region: string): string {
-	return value === undefined
-		? canonicalKiroTokenEndpoint(region)
-		: validateOidcEndpoint(value, region, "tokenEndpoint");
+	if (value === undefined || value === null) {
+		return canonicalKiroTokenEndpoint(region);
+	}
+	return validateOidcEndpoint(value, region, "tokenEndpoint");
 }
 
 function validateVerificationUri(value: unknown, field: string): string {

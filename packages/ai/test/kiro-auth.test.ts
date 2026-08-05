@@ -343,38 +343,19 @@ describe("Kiro authentication", () => {
 		expect(refreshed.kiroTokenEndpoint).toBe(canonical);
 	});
 
-	it("reuses and repairs a cached registration that omits tokenEndpoint", async () => {
+	it("uses the canonical regional token endpoint when fresh registration returns null", async () => {
 		const { cache, values } = memoryCache();
-		const canonical = "https://oidc.us-east-1.amazonaws.com/token";
-		cache.set(
-			"oauth:kiro:iam-identity-center:registration:us-east-1",
-			JSON.stringify({
-				registrationVersion: 1,
-				region: "us-east-1",
-				flow: "device_code",
-				clientName: "Kiro CLI",
-				scopes: [...KIRO_IDENTITY_CENTER_SCOPES],
-				clientId: "cached-client",
-				clientSecret: "cached-secret",
-				clientSecretExpiresAt: Date.now() + 3_600_000,
-			}),
-			Math.floor(Date.now() / 1000) + 3_600,
-		);
-		let registrationRequests = 0;
+		const canonical = "https://oidc.eu-west-1.amazonaws.com/token";
 		const requests: string[] = [];
-		const profiles = profileResponses();
+		const responses: Response[] = [
+			json(registeredClient("eu-west-1", null)),
+			json(deviceAuthorization()),
+			json({ accessToken: "access-token", refreshToken: "refresh-token", expiresIn: 3600 }),
+			...profileResponses(),
+		];
 		const fetch: FetchImpl = async input => {
-			const url = String(input);
-			requests.push(url);
-			if (url.endsWith("/client/register")) {
-				registrationRequests += 1;
-				return json(registeredClient());
-			}
-			if (url.endsWith("/device_authorization")) return json(deviceAuthorization());
-			if (url.endsWith("/token")) {
-				return json({ accessToken: "access-token", refreshToken: "refresh-token", expiresIn: 3600 });
-			}
-			return url.includes("management") ? (profiles.shift() ?? json({ profiles: [] })) : json({}, 500);
+			requests.push(String(input));
+			return responses.shift() ?? json({ error: "unexpected request" }, 500);
 		};
 
 		const loggedIn = await loginKiroDevice(
@@ -385,20 +366,74 @@ describe("Kiro authentication", () => {
 				cache,
 				sleep: async () => {},
 			},
-			{ region: "us-east-1", startUrl: "https://example.awsapps.com/start" },
+			{ region: "eu-west-1", startUrl: "https://example.awsapps.com/start" },
 		);
 
-		expect(registrationRequests).toBe(0);
-		expect(requests.filter(url => url === canonical)).toHaveLength(1);
 		expect(loggedIn.kiroTokenEndpoint).toBe(canonical);
-		expect(JSON.parse(values.get("oauth:kiro:iam-identity-center:registration:us-east-1")!)).toMatchObject({
+		expect(requests.filter(url => url === canonical)).toHaveLength(1);
+		expect(JSON.parse(values.get("oauth:kiro:iam-identity-center:registration:eu-west-1")!)).toMatchObject({
 			tokenEndpoint: canonical,
 		});
 	});
 
+	it("reuses and repairs cached registrations that omit tokenEndpoint or return null", async () => {
+		for (const tokenEndpoint of [undefined, null]) {
+			const { cache, values } = memoryCache();
+			const canonical = "https://oidc.us-east-1.amazonaws.com/token";
+			cache.set(
+				"oauth:kiro:iam-identity-center:registration:us-east-1",
+				JSON.stringify({
+					registrationVersion: 1,
+					region: "us-east-1",
+					flow: "device_code",
+					clientName: "Kiro CLI",
+					scopes: [...KIRO_IDENTITY_CENTER_SCOPES],
+					clientId: "cached-client",
+					clientSecret: "cached-secret",
+					clientSecretExpiresAt: Date.now() + 3_600_000,
+					...(tokenEndpoint === undefined ? {} : { tokenEndpoint }),
+				}),
+				Math.floor(Date.now() / 1000) + 3_600,
+			);
+			let registrationRequests = 0;
+			const requests: string[] = [];
+			const profiles = profileResponses();
+			const fetch: FetchImpl = async input => {
+				const url = String(input);
+				requests.push(url);
+				if (url.endsWith("/client/register")) {
+					registrationRequests += 1;
+					return json(registeredClient());
+				}
+				if (url.endsWith("/device_authorization")) return json(deviceAuthorization());
+				if (url.endsWith("/token")) {
+					return json({ accessToken: "access-token", refreshToken: "refresh-token", expiresIn: 3600 });
+				}
+				return url.includes("management") ? (profiles.shift() ?? json({ profiles: [] })) : json({}, 500);
+			};
+
+			const loggedIn = await loginKiroDevice(
+				{
+					onAuth: () => {},
+					onPrompt: async () => "",
+					fetch,
+					cache,
+					sleep: async () => {},
+				},
+				{ region: "us-east-1", startUrl: "https://example.awsapps.com/start" },
+			);
+
+			expect(registrationRequests).toBe(0);
+			expect(requests.filter(url => url === canonical)).toHaveLength(1);
+			expect(loggedIn.kiroTokenEndpoint).toBe(canonical);
+			expect(JSON.parse(values.get("oauth:kiro:iam-identity-center:registration:us-east-1")!)).toMatchObject({
+				tokenEndpoint: canonical,
+			});
+		}
+	});
+
 	it("rejects present invalid registration endpoints instead of treating them as omitted", async () => {
 		const invalidEndpoints: unknown[] = [
-			null,
 			"",
 			"not-a-url",
 			"https://oidc.us-west-2.amazonaws.com/token",
