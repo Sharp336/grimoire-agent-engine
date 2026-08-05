@@ -159,10 +159,16 @@ interface VibeTurnLane {
 	users: number;
 }
 
+interface VibeClosedTurn {
+	job?: AsyncJob;
+	cancelled: boolean;
+}
+
 interface VibeTurn {
 	jobId: string;
 	message: string;
 	startedAt: number;
+	started: boolean;
 	/** Trace of tool calls completed during this turn, oldest first. */
 	trace: VibeTraceEntry[];
 	/** Total completed tool calls (trace may be narrower than this). */
@@ -205,6 +211,8 @@ interface VibeRecord {
 	queue: string[];
 	turnCount: number;
 	killed: boolean;
+	/** Admission barrier set synchronously before explicit or scope teardown can await persistence. */
+	terminating: boolean;
 	/** True while a parent switch is detaching this process-local record without terminating it. */
 	suspended: boolean;
 	/** True only after a terminal lifecycle event has durably flushed. */
@@ -476,6 +484,7 @@ export class VibeSessionRegistry {
 			queue: [],
 			turnCount: 0,
 			killed: false,
+			terminating: false,
 			suspended: false,
 			terminalPersisted: false,
 		});
@@ -490,6 +499,7 @@ export class VibeSessionRegistry {
 	setTeardownGraceForTesting(timeoutMs: number): void {
 		this.#teardownGraceMs = Math.max(1, timeoutMs);
 	}
+	readonly #terminatingScopes = new Set<string>();
 	readonly #turnLanes = new Map<string, VibeTurnLane>();
 
 	ownerScope(session: VibeParentSession): VibeOwnerScope {
@@ -507,7 +517,9 @@ export class VibeSessionRegistry {
 
 	/** Re-open spawn admission after an explicit Vibe-mode entry. */
 	activateScope(scope: VibeOwnerScope): void {
-		this.#terminatedScopes.delete(scopeKey(scope, ""));
+		const key = scopeKey(scope, "");
+		this.#terminatingScopes.delete(key);
+		this.#terminatedScopes.delete(key);
 	}
 
 	async #withTerminationLock<T>(scope: VibeOwnerScope, operation: () => Promise<T>): Promise<T> {
@@ -989,6 +1001,7 @@ export class VibeSessionRegistry {
 				queue: [],
 				turnCount: candidate.turnCount,
 				killed: false,
+				terminating: false,
 				suspended: false,
 				terminalPersisted: false,
 			});
@@ -1003,6 +1016,12 @@ export class VibeSessionRegistry {
 		args: { cli: VibeCli; name?: string; prompt: string; maxRequests?: number; timeout?: number },
 	): Promise<VibeSpawnOutcome> {
 		const scope = this.ownerScope(session);
+		if (this.#terminatingScopes.has(scopeKey(scope, ""))) {
+			throw new ToolError("Vibe mode is exiting; enter Vibe mode again before spawning a worker.");
+		}
+		if (this.#terminatedScopes.has(scopeKey(scope, ""))) {
+			throw new ToolError("Vibe mode has exited; enter Vibe mode again before spawning a worker.");
+		}
 		return this.#withTerminationLock(scope, () => this.#spawnLocked(session, scope, args));
 	}
 
@@ -1011,6 +1030,9 @@ export class VibeSessionRegistry {
 		scope: VibeOwnerScope,
 		args: { cli: VibeCli; name?: string; prompt: string; maxRequests?: number; timeout?: number },
 	): Promise<VibeSpawnOutcome> {
+		if (this.#terminatingScopes.has(scopeKey(scope, ""))) {
+			throw new ToolError("Vibe mode is exiting; enter Vibe mode again before spawning a worker.");
+		}
 		if (this.#terminatedScopes.has(scopeKey(scope, ""))) {
 			throw new ToolError("Vibe mode has exited; enter Vibe mode again before spawning a worker.");
 		}
@@ -1055,6 +1077,7 @@ export class VibeSessionRegistry {
 			queue: [],
 			turnCount: 0,
 			killed: false,
+			terminating: false,
 			suspended: false,
 			terminalPersisted: false,
 		};
@@ -1078,6 +1101,9 @@ export class VibeSessionRegistry {
 					record.parentSessionFile,
 				);
 				if (!spawnPersisted) throw new ToolError("Vibe parent session changed before the worker could start.");
+			}
+			if (record.terminating || this.#terminatingScopes.has(scopeKey(scope, ""))) {
+				throw new ToolError("Vibe mode is exiting; the worker was not started.");
 			}
 			const jobId = this.#registerTurnJob(session, manager, record, args.prompt, { first: true });
 			return { id, jobId };
@@ -1105,7 +1131,13 @@ export class VibeSessionRegistry {
 	 */
 	async send(session: ToolSession, args: { session: string; message: string }): Promise<VibeSendOutcome> {
 		const scope = this.ownerScope(session);
+		if (this.#terminatingScopes.has(scopeKey(scope, "")) || this.#terminatedScopes.has(scopeKey(scope, ""))) {
+			throw new ToolError("Vibe mode is exiting or has exited; enter Vibe mode again before sending work.");
+		}
 		const record = this.#record(scope, args.session);
+		if (record.terminating) {
+			throw new ToolError(`Vibe session "${record.id}" is terminating and cannot accept more work.`);
+		}
 		if (record.state === "dead") {
 			throw new ToolError(`Vibe session "${record.id}" is dead. Spawn a new one with vibe_spawn.`);
 		}
@@ -1286,36 +1318,47 @@ export class VibeSessionRegistry {
 			});
 	}
 
-	/** Terminate one worker; a tombstone failure still tears it down before reconciliation and error delivery. */
+	/** Terminate one worker; admission closes before any durable tombstone write can block. */
 	async kill(session: ToolSession, id: string): Promise<VibeKillOutcome> {
 		const scope = this.ownerScope(session);
-		return this.#withTerminationLock(scope, () => {
-			const record = this.#record(scope, id);
-			return this.#killRecord(record, session.asyncJobManager, session, "explicit-kill");
-		});
+		const record = this.#record(scope, id);
+		const closedTurn = this.#closeRecordAdmission(record, session.asyncJobManager);
+		return this.#withTerminationLock(scope, () =>
+			this.#killRecord(record, session.asyncJobManager, session, "explicit-kill", true, closedTurn),
+		);
 	}
 
-	/** Kill every live session in one parent scope after durably recording the complete mode-exit intent. */
+	/** Terminate one parent scope after synchronously closing every worker admission path. */
 	async killAll(session: VibeParentSession, ownerScope?: VibeOwnerScope): Promise<number> {
 		const scope = ownerScope ?? this.ownerScope(session);
+		const key = scopeKey(scope, "");
+		const records = [...this.#records.values()].filter(
+			record => matchesScope(record, scope) && !(record.state === "dead" && record.terminalPersisted),
+		);
+		this.#terminatingScopes.add(key);
+		const closedTurns = new Map(
+			records.map(record => [record, this.#closeRecordAdmission(record, session.asyncJobManager)]),
+		);
 		return this.#withTerminationLock(scope, async () => {
 			try {
-				const killed = await this.#killAllLocked(session, scope);
-				this.#terminatedScopes.add(scopeKey(scope, ""));
+				const killed = await this.#killAllLocked(session, scope, records, closedTurns);
+				this.#terminatingScopes.delete(key);
+				this.#terminatedScopes.add(key);
 				return killed;
 			} catch (error) {
-				if (error instanceof SessionPersistenceIndeterminateError) {
-					this.#terminatedScopes.add(scopeKey(scope, ""));
-				}
+				this.#terminatingScopes.delete(key);
+				this.#terminatedScopes.add(key);
 				throw error;
 			}
 		});
 	}
 
-	async #killAllLocked(session: VibeParentSession, scope: VibeOwnerScope): Promise<number> {
-		const records = [...this.#records.values()].filter(
-			record => matchesScope(record, scope) && !(record.state === "dead" && record.terminalPersisted),
-		);
+	async #killAllLocked(
+		session: VibeParentSession,
+		scope: VibeOwnerScope,
+		records: readonly VibeRecord[],
+		closedTurns: ReadonlyMap<VibeRecord, VibeClosedTurn>,
+	): Promise<number> {
 		if (records.length === 0) {
 			const entries = session.sessionManager?.getBranch() ?? [];
 			for (let index = entries.length - 1; index >= 0; index--) {
@@ -1328,33 +1371,53 @@ export class VibeSessionRegistry {
 		try {
 			await this.#persistModeExit(session, scope, records);
 		} catch (error) {
-			if (error instanceof SessionPersistenceIndeterminateError) {
-				this.#cancelTurnJobs(records, session.asyncJobManager);
-				const teardownDeadline = Date.now() + this.#teardownGraceMs;
-				await Promise.all(
-					records.map(record =>
-						this.#killRecord(record, session.asyncJobManager, session, "mode-exit", false, teardownDeadline),
-					),
-				);
-			}
+			const persistTerminal = !(error instanceof SessionPersistenceIndeterminateError);
+			const teardownDeadline = Date.now() + this.#teardownGraceMs;
+			await Promise.all(
+				records.map(async record => {
+					try {
+						await this.#killRecord(
+							record,
+							session.asyncJobManager,
+							session,
+							"mode-exit",
+							persistTerminal,
+							closedTurns.get(record),
+							teardownDeadline,
+						);
+					} catch (teardownError) {
+						logger.warn("vibe: failed to reconcile mode-exit teardown persistence", {
+							id: record.id,
+							error: teardownError instanceof Error ? teardownError.message : String(teardownError),
+						});
+					}
+				}),
+			);
 			throw error;
 		}
-		this.#cancelTurnJobs(records, session.asyncJobManager);
 		const teardownDeadline = Date.now() + this.#teardownGraceMs;
 		await Promise.all(
 			records.map(record =>
-				this.#killRecord(record, session.asyncJobManager, session, "mode-exit", true, teardownDeadline),
+				this.#killRecord(
+					record,
+					session.asyncJobManager,
+					session,
+					"mode-exit",
+					true,
+					closedTurns.get(record),
+					teardownDeadline,
+				),
 			),
 		);
 		return records.length;
 	}
 
-	#cancelTurnJobs(records: readonly VibeRecord[], manager: AsyncJobManager | undefined): void {
-		for (const record of records) {
-			record.killed = true;
-			record.queue.length = 0;
-			if (record.turn && manager) manager.cancel(record.turn.jobId, { ownerId: record.ownerId });
-		}
+	#closeRecordAdmission(record: VibeRecord, manager: AsyncJobManager | undefined): VibeClosedTurn {
+		record.terminating = true;
+		record.queue.length = 0;
+		const job = record.turn && manager ? manager.getJob(record.turn.jobId) : undefined;
+		const cancelled = record.turn && manager ? manager.cancel(record.turn.jobId, { ownerId: record.ownerId }) : false;
+		return { job, cancelled };
 	}
 
 	async #killRecord(
@@ -1363,10 +1426,12 @@ export class VibeSessionRegistry {
 		session: VibeParentSession,
 		reason: VibeTombstoneReason,
 		persistTerminal = true,
+		closedTurn?: VibeClosedTurn,
 		teardownDeadline?: number,
 	): Promise<VibeKillOutcome> {
 		const registered = this.#registeredAgent(record);
 		const settlingJobs = new Set<AsyncJob>();
+		if (closedTurn?.job) settlingJobs.add(closedTurn.job);
 		if (record.turn && manager) {
 			const job = manager.getJob(record.turn.jobId);
 			if (job) settlingJobs.add(job);
@@ -1391,11 +1456,11 @@ export class VibeSessionRegistry {
 		}
 		record.killed = true;
 		record.queue.length = 0;
-		let cancelledTurn = false;
+		let cancelledTurn = closedTurn?.cancelled ?? false;
 		if (record.turn && manager) {
 			const job = manager.getJob(record.turn.jobId);
 			if (job) settlingJobs.add(job);
-			cancelledTurn = manager.cancel(record.turn.jobId, { ownerId: record.ownerId });
+			cancelledTurn = manager.cancel(record.turn.jobId, { ownerId: record.ownerId }) || cancelledTurn;
 		}
 		record.state = "dead";
 		record.lastActivityAt = Date.now();
@@ -1563,6 +1628,7 @@ export class VibeSessionRegistry {
 			jobId: "",
 			message,
 			startedAt: Date.now(),
+			started: false,
 			trace: [],
 			toolCount: 0,
 		};
@@ -1590,7 +1656,14 @@ export class VibeSessionRegistry {
 			async ({ jobId: ownJobId, signal, markRunning }) => {
 				try {
 					return await this.#withTurnLane(laneKey, signal, async () => {
+						const scopeClosing =
+							this.#terminatingScopes.has(scopeKey(record, "")) ||
+							this.#terminatedScopes.has(scopeKey(record, ""));
+						if (record.killed || record.terminating || record.suspended || scopeClosing) {
+							throw new ToolError(`Vibe session "${record.id}" is terminating; its queued turn was cancelled.`);
+						}
 						markRunning();
+						turn.started = true;
 						turn.startedAt = Date.now();
 						record.state = "running";
 						record.turnCount = turnIndex;
@@ -1625,7 +1698,13 @@ export class VibeSessionRegistry {
 					});
 				} catch (error) {
 					if (error instanceof VibeTurnError) throw error;
-					await this.#finishTurn(session, manager, record, ownJobId);
+					const scopeClosing =
+						this.#terminatingScopes.has(scopeKey(record, "")) || this.#terminatedScopes.has(scopeKey(record, ""));
+					if (!turn.started && (record.killed || record.terminating || record.suspended || scopeClosing)) {
+						this.#discardUnstartedTurn(record, ownJobId);
+					} else {
+						await this.#finishTurn(session, manager, record, ownJobId);
+					}
 					const reason = error instanceof Error ? error.message : String(error);
 					record.lastActivity = firstLine(`turn failed: ${reason}`);
 					throw new VibeTurnError(
@@ -1641,6 +1720,15 @@ export class VibeSessionRegistry {
 		return jobId;
 	}
 
+	/** Clear a turn cancelled before lane admission without inventing lifecycle events. */
+	#discardUnstartedTurn(record: VibeRecord, jobId: string): void {
+		record.lastJobId = jobId;
+		if (record.turn?.jobId === jobId) record.turn = undefined;
+		record.live = undefined;
+		record.lastActivityAt = Date.now();
+		record.state = "dead";
+	}
+
 	/** Post-turn bookkeeping shared by success and failure paths: clear the in-flight turn, flush the queue. */
 	async #finishTurn(
 		session: ToolSession,
@@ -1652,7 +1740,7 @@ export class VibeSessionRegistry {
 		record.turn = undefined;
 		record.live = undefined;
 		record.lastActivityAt = Date.now();
-		if (record.killed || record.suspended) {
+		if (record.killed || record.terminating || record.suspended) {
 			record.state = "dead";
 			return;
 		}

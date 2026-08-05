@@ -57,9 +57,11 @@ async function fileExists(file: string): Promise<boolean> {
 }
 
 type AtomicWriteHook = (commit: () => Promise<void>) => Promise<void>;
+type AppendHook = (commit: () => Promise<void>) => Promise<void>;
 
 class FaultInjectingSessionStorage extends FileSessionStorage {
 	readonly atomicWriteHooks: AtomicWriteHook[] = [];
+	readonly appendHooks: AppendHook[] = [];
 	atomicWriteAttempts = 0;
 	failedWriterClosed = false;
 	#appendFault: { error: Error; prefixBytes: number } | undefined;
@@ -86,6 +88,8 @@ class FaultInjectingSessionStorage extends FileSessionStorage {
 		let faulted = false;
 		return {
 			append: line => {
+				const hook = this.appendHooks.shift();
+				if (hook) return hook(() => inner.append(line));
 				const fault = this.#appendFault;
 				if (!fault) return inner.append(line);
 				this.#appendFault = undefined;
@@ -1581,14 +1585,43 @@ describe("vibe session registry", () => {
 		expect(AgentRegistry.global().get("collision")).toMatchObject({ status: "aborted", session: null });
 	});
 
-	it("rejects a spawn queued behind mode exit and leaves no live or untombstoned worker", async () => {
+	it("closes mode-exit admission before gated persistence and never runs a queued worker", async () => {
+		const holderGate = deferred();
+		const invoked: string[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			invoked.push(options.id);
+			const childSessionFile = path.join(options.artifactsDir!, `${options.id}.jsonl`);
+			AgentRegistry.global().register({
+				id: options.id,
+				displayName: options.id,
+				kind: "sub",
+				parentId: "Main",
+				session: createFakeWorkerSession().session,
+				sessionFile: childSessionFile,
+				status: "running",
+			});
+			if (options.id === "ExitHolder") await holderGate.promise;
+			AgentRegistry.global().setStatus(options.id, "idle");
+			return makeResult(options.id);
+		});
 		const storage = new FaultInjectingSessionStorage();
 		const parentManager = await createPersistedParent(storage);
 		parentManager.appendModeChange("vibe");
-		await parentManager.ensureOnDisk();
 		const jobs = createManager();
 		const session = createSession({ manager: jobs, sessionManager: parentManager });
 		const registry = VibeSessionRegistry.global();
+		const holder = await registry.spawn(session, {
+			cli: "fast",
+			name: "ExitHolder",
+			prompt: "Hold the workspace lane.",
+		});
+		await pollUntil(() => invoked.includes("ExitHolder"));
+		const queued = await registry.spawn(session, {
+			cli: "good",
+			name: "ExitQueued",
+			prompt: "Must never execute.",
+		});
+		await parentManager.flush();
 		const exitWriteStarted = Promise.withResolvers<void>();
 		const releaseExitWrite = Promise.withResolvers<void>();
 		storage.atomicWriteHooks.push(async commit => {
@@ -1599,37 +1632,111 @@ describe("vibe session registry", () => {
 
 		const exiting = registry.killAll(session);
 		await exitWriteStarted.promise;
-		let spawnSettled = false;
-		const lateSpawn = registry
-			.spawn(session, { cli: "fast", name: "late-after-exit", prompt: INITIAL_VIBE_TASK })
-			.then(
-				() => ({ error: undefined }),
-				error => ({ error }),
-			)
-			.finally(() => {
-				spawnSettled = true;
-			});
-		await flushMicrotasks();
-		expect(spawnSettled).toBe(false);
+		const jobsBeforeSend = jobs.getAllJobs().length;
+		await expect(registry.send(session, { session: "ExitQueued", message: "Do not admit this." })).rejects.toThrow(
+			"exiting",
+		);
+		expect(jobs.getAllJobs()).toHaveLength(jobsBeforeSend);
+		await expect(
+			registry.spawn(session, { cli: "fast", name: "late-after-exit", prompt: "Do not spawn." }),
+		).rejects.toThrow("exiting");
+
+		holderGate.resolve();
+		await Promise.all([jobs.getJob(holder.jobId)!.promise, jobs.getJob(queued.jobId)!.promise]);
+		expect(invoked).toEqual(["ExitHolder"]);
 
 		releaseExitWrite.resolve();
-		expect(await exiting).toBe(0);
-		const { error } = await lateSpawn;
-		expect(error).toBeInstanceOf(Error);
-		expect(String(error)).toContain("Vibe mode has exited");
+		expect(await exiting).toBe(2);
 		expect(registry.listIds(session)).toEqual([]);
-		expect(AgentRegistry.global().get("late-after-exit")).toBeUndefined();
 		expect(parentManager.buildSessionContext().mode).toBe("none");
-		expect(
-			parentManager.getEntries().some(entry => {
-				if (entry.type !== "custom" || typeof entry.data !== "object" || entry.data === null) return false;
-				const data = entry.data as Record<string, unknown>;
-				return data.id === "late-after-exit" && data.action === "spawn";
-			}),
-		).toBe(false);
+
+		parentManager.appendModeChange("vibe");
+		registry.activateScope(registry.ownerScope(session));
+		const reentered = await registry.spawn(session, {
+			cli: "fast",
+			name: "ExitReentered",
+			prompt: "Run after explicit re-entry.",
+		});
+		await jobs.getJob(reentered.jobId)!.promise;
+		expect(invoked).toEqual(["ExitHolder", "ExitReentered"]);
 	});
 
-	it("keeps mode and workers live after a real atomic mode-exit failure, then retries cleanly", async () => {
+	it("closes explicit-kill admission before gated tombstone persistence", async () => {
+		const holderGate = deferred();
+		const invoked: string[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			invoked.push(options.id);
+			const childSessionFile = path.join(options.artifactsDir!, `${options.id}.jsonl`);
+			AgentRegistry.global().register({
+				id: options.id,
+				displayName: options.id,
+				kind: "sub",
+				parentId: "Main",
+				session: createFakeWorkerSession().session,
+				sessionFile: childSessionFile,
+				status: "running",
+			});
+			if (options.id === "KillHolder") await holderGate.promise;
+			AgentRegistry.global().setStatus(options.id, "idle");
+			return makeResult(options.id);
+		});
+		const storage = new FaultInjectingSessionStorage();
+		const parentManager = await createPersistedParent(storage);
+		parentManager.appendModeChange("vibe");
+		const jobs = createManager();
+		const session = createSession({ manager: jobs, sessionManager: parentManager });
+		const registry = VibeSessionRegistry.global();
+		const holder = await registry.spawn(session, {
+			cli: "fast",
+			name: "KillHolder",
+			prompt: "Hold the workspace lane.",
+		});
+		await pollUntil(() => invoked.includes("KillHolder"));
+		const queued = await registry.spawn(session, {
+			cli: "good",
+			name: "KillQueued",
+			prompt: "Must never execute.",
+		});
+		await parentManager.flush();
+		const killWriteStarted = Promise.withResolvers<void>();
+		const releaseKillWrite = Promise.withResolvers<void>();
+		storage.appendHooks.push(async commit => {
+			killWriteStarted.resolve();
+			await releaseKillWrite.promise;
+			await commit();
+		});
+
+		const killing = registry.kill(session, "KillQueued");
+		await killWriteStarted.promise;
+		const jobsBeforeSend = jobs.getAllJobs().length;
+		await expect(registry.send(session, { session: "KillQueued", message: "Do not admit this." })).rejects.toThrow(
+			"terminating",
+		);
+		expect(jobs.getAllJobs()).toHaveLength(jobsBeforeSend);
+
+		await jobs.getJob(queued.jobId)!.promise;
+		expect(invoked).toEqual(["KillHolder"]);
+
+		releaseKillWrite.resolve();
+		expect((await killing).cancelledTurn).toBe(true);
+		holderGate.resolve();
+		await jobs.getJob(holder.jobId)!.promise;
+		expect(registry.listIds(session)).toEqual(["KillHolder"]);
+		expect(await registry.killAll(session)).toBe(1);
+		expect(registry.listIds(session)).toEqual([]);
+
+		parentManager.appendModeChange("vibe");
+		registry.activateScope(registry.ownerScope(session));
+		const reentered = await registry.spawn(session, {
+			cli: "fast",
+			name: "KillReentered",
+			prompt: "Run after explicit re-entry.",
+		});
+		await jobs.getJob(reentered.jobId)!.promise;
+		expect(invoked).toEqual(["KillHolder", "KillReentered"]);
+	});
+
+	it("fail-closes workers after a real atomic mode-exit failure until explicit re-entry", async () => {
 		installPersistedSpawnMock();
 		const storage = new FaultInjectingSessionStorage();
 		const parentManager = await createPersistedParent(storage);
@@ -1650,11 +1757,7 @@ describe("vibe session registry", () => {
 			prompt: INITIAL_VIBE_TASK,
 		});
 		await Promise.all([jobs.getJob(first.jobId)!.promise, jobs.getJob(second.jobId)!.promise]);
-		const firstRef = AgentRegistry.global().get("retry-exit-one");
-		const secondRef = AgentRegistry.global().get("retry-exit-two");
-		if (!firstRef || !secondRef) throw new Error("Expected both live worker refs");
 		await parentManager.flush();
-		const beforeBytes = await fs.readFile(parentSessionFile);
 		const beforeSize = (await fs.stat(parentSessionFile)).size;
 		storage.atomicWriteHooks.push(async () => {
 			throw Object.assign(new Error("atomic publish unavailable"), { code: "ENOSPC" });
@@ -1662,36 +1765,46 @@ describe("vibe session registry", () => {
 
 		await expect(registry.killAll(session)).rejects.toThrow("atomic publish unavailable");
 
-		expect((await fs.stat(parentSessionFile)).size).toBe(beforeSize);
-		expect(await fs.readFile(parentSessionFile)).toEqual(beforeBytes);
+		expect((await fs.stat(parentSessionFile)).size).toBeGreaterThan(beforeSize);
 		expect(registry.screens(session).map(screen => [screen.id, screen.state])).toEqual([
-			["retry-exit-one", "idle"],
-			["retry-exit-two", "idle"],
+			["retry-exit-one", "dead"],
+			["retry-exit-two", "dead"],
 		]);
-		expect(AgentRegistry.global().get("retry-exit-one")?.status).toBe("idle");
-		expect(AgentRegistry.global().get("retry-exit-two")?.status).toBe("idle");
+		expect(registry.listIds(session)).toEqual([]);
+		expect(AgentRegistry.global().get("retry-exit-one")).toMatchObject({ status: "aborted", session: null });
+		expect(AgentRegistry.global().get("retry-exit-two")).toMatchObject({ status: "aborted", session: null });
 		expect(parentManager.buildSessionContext().mode).toBe("vibe");
-		const failedExitActions = parentManager.getEntries().flatMap(entry => {
+		const failedExitTombstones = parentManager.getEntries().flatMap(entry => {
 			if (entry.type !== "custom" || typeof entry.data !== "object" || entry.data === null) return [];
 			const data = entry.data as Record<string, unknown>;
 			return typeof data.id === "string" && data.id.startsWith("retry-exit-") && data.action === "tombstone"
-				? [data.action]
+				? [data.id]
 				: [];
 		});
-		expect(failedExitActions).toEqual([]);
+		expect(failedExitTombstones).toEqual(["retry-exit-one", "retry-exit-two"]);
+		await expect(registry.send(session, { session: "retry-exit-one", message: "Do not revive." })).rejects.toThrow(
+			"exited",
+		);
+		await expect(
+			registry.spawn(session, { cli: "fast", name: "blocked-after-failure", prompt: "Do not spawn." }),
+		).rejects.toThrow("exited");
 
-		VibeSessionRegistry.resetGlobalForTests();
-		const reloadedRegistry = VibeSessionRegistry.global();
-		expect(await reloadedRegistry.rehydrate(session)).toBe(2);
-		expect(reloadedRegistry.listIds(session)).toEqual(["retry-exit-one", "retry-exit-two"]);
-		expect(AgentRegistry.global().get("retry-exit-one")).toBe(firstRef);
-		expect(AgentRegistry.global().get("retry-exit-two")).toBe(secondRef);
-
-		expect(await reloadedRegistry.killAll(session)).toBe(2);
-		expect(reloadedRegistry.listIds(session)).toEqual([]);
-		expect(AgentRegistry.global().get("retry-exit-one")?.status).toBe("aborted");
-		expect(AgentRegistry.global().get("retry-exit-two")?.status).toBe("aborted");
+		expect(await registry.killAll(session)).toBe(0);
 		expect(parentManager.buildSessionContext().mode).toBe("none");
+		await expect(
+			registry.spawn(session, { cli: "fast", name: "blocked-after-retry", prompt: "Do not spawn." }),
+		).rejects.toThrow("exited");
+
+		parentManager.appendModeChange("vibe");
+		registry.activateScope(registry.ownerScope(session));
+		const reentered = await registry.spawn(session, {
+			cli: "fast",
+			name: "retry-exit-reentered",
+			prompt: "Run only after explicit re-entry.",
+		});
+		await jobs.getJob(reentered.jobId)!.promise;
+		expect(AgentRegistry.global().get("retry-exit-reentered")?.status).toBe("idle");
+		expect(await registry.killAll(session)).toBe(1);
 
 		await parentManager.close();
 		await simulateProcessBoundary();
@@ -1702,6 +1815,7 @@ describe("vibe session registry", () => {
 		expect(await VibeSessionRegistry.global().rehydrate(resumedSession)).toBe(0);
 		expect(AgentRegistry.global().get("retry-exit-one")).toMatchObject({ status: "aborted", session: null });
 		expect(AgentRegistry.global().get("retry-exit-two")).toMatchObject({ status: "aborted", session: null });
+		expect(AgentRegistry.global().get("retry-exit-reentered")).toMatchObject({ status: "aborted", session: null });
 	});
 
 	it("fail-closes workers when mode-exit rollback durability is indeterminate", async () => {
@@ -1774,6 +1888,9 @@ describe("vibe session registry", () => {
 		expect(storage.failedWriterClosed).toBe(true);
 		expect(registry.listIds(session)).toEqual([]);
 		expect(AgentRegistry.global().get("explicit-io-failure")).toMatchObject({ status: "aborted", session: null });
+		await expect(
+			registry.send(session, { session: "explicit-io-failure", message: "Do not revive." }),
+		).rejects.toThrow("terminating");
 		await parentManager.flush();
 		expect((await fs.stat(parentSessionFile)).size).toBeGreaterThan(beforeSize);
 		const repairedLines = (await fs.readFile(parentSessionFile, "utf8")).trimEnd().split("\n");
@@ -1857,10 +1974,10 @@ describe("vibe session registry", () => {
 		const exitError = await failedExit;
 		expect(exitError).toBeInstanceOf(Error);
 		expect(String(exitError)).toContain("overlapping mode exit failed");
-		expect(flushCalls).toBe(2);
+		expect(flushCalls).toBe(3);
 		expect(parentManager.buildSessionContext().mode).toBe("vibe");
 		expect(AgentRegistry.global().get("overlap-explicit")).toMatchObject({ status: "aborted", session: null });
-		expect(AgentRegistry.global().get("overlap-survivor")?.status).toBe("idle");
+		expect(AgentRegistry.global().get("overlap-survivor")).toMatchObject({ status: "aborted", session: null });
 
 		flush.mockRestore();
 		releaseSpy.mockRestore();
@@ -1869,9 +1986,9 @@ describe("vibe session registry", () => {
 		const reopened = await SessionManager.open(parentSessionFile, undefined, undefined, { suppressBreadcrumb: true });
 		persistedManagers.push(reopened);
 		const resumedSession = createSession({ manager: createManager(), sessionManager: reopened });
-		expect(await VibeSessionRegistry.global().rehydrate(resumedSession)).toBe(1);
+		expect(await VibeSessionRegistry.global().rehydrate(resumedSession)).toBe(0);
 		expect(AgentRegistry.global().get("overlap-explicit")).toMatchObject({ status: "aborted", session: null });
-		expect(AgentRegistry.global().get("overlap-survivor")).toMatchObject({ status: "parked", session: null });
+		expect(AgentRegistry.global().get("overlap-survivor")).toMatchObject({ status: "aborted", session: null });
 	});
 
 	it("serializes overlapping mode exits so a later success cannot be revoked by an earlier failure", async () => {
@@ -1914,12 +2031,12 @@ describe("vibe session registry", () => {
 		expect(firstError).toBeInstanceOf(Error);
 		expect(String(firstError)).toContain("first mode exit failed");
 		expect(await successfulExit).toBe(1);
-		expect(flushCalls).toBe(2);
+		expect(flushCalls).toBe(3);
 		expect(parentManager.buildSessionContext().mode).toBe("none");
 		expect(registry.listIds(session)).toEqual([]);
 		expect(AgentRegistry.global().get("overlap-mode-exit")).toMatchObject({ status: "aborted", session: null });
 		expect(await registry.killAll(session)).toBe(0);
-		expect(flushCalls).toBe(2);
+		expect(flushCalls).toBe(3);
 
 		flush.mockRestore();
 		await parentManager.close();
@@ -2231,7 +2348,7 @@ describe("vibe session registry", () => {
 			expect(AgentRegistry.global().get("IgnoresKillAbort")).toBeUndefined();
 			expect(registry.screens(session)[0]?.state).toBe("dead");
 			await expect(registry.send(session, { session: "IgnoresKillAbort", message: "hello?" })).rejects.toThrow(
-				"dead",
+				"terminating",
 			);
 
 			gate.resolve();
@@ -2241,7 +2358,7 @@ describe("vibe session registry", () => {
 			expect(AgentRegistry.global().get("IgnoresKillAbort")).toBeUndefined();
 			expect(registry.screens(session)[0]?.state).toBe("dead");
 			await expect(registry.send(session, { session: "IgnoresKillAbort", message: "still there?" })).rejects.toThrow(
-				"dead",
+				"terminating",
 			);
 		} finally {
 			gate.resolve();
