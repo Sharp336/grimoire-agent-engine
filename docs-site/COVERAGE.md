@@ -9,13 +9,13 @@ frontmatter when a ranking changes. Source map: `SOURCES.md`.
 - **B — Medium**: solid guide coverage of primary workflows; secondary detail omitted.
 - **C — Low**: sketch; meaningful documented surface missing.
 
-## A (19)
+## A (18)
 
-`configuration/settings` · `configuration/environment-variables` · `configuration/keybindings` · `configuration/themes` · `configuration/context-files` · `configuration/system-prompt` · `configuration/approvals` · `models/providers` · `features/compaction` · `features/collab` · `features/computer-use` · `features/magic-keywords` · `features/vibe-mode` · `extending/hooks` · `extending/custom-tools` · `getting-started/installation` · `reference/cli` · `reference/slash-commands` · `reference/configuration`
+`configuration/settings` · `configuration/environment-variables` · `configuration/keybindings` · `configuration/themes` · `configuration/context-files` · `configuration/system-prompt` · `configuration/approvals` · `models/providers` · `features/compaction` · `features/collab` · `features/computer-use` · `features/magic-keywords` · `features/vibe-mode` · `extending/hooks` · `extending/custom-tools` · `getting-started/installation` · `reference/cli` · `reference/slash-commands`
 
-## B (26)
+## B (27)
 
-`getting-started/quickstart` · `getting-started/first-session` · `models/model-roles` · `models/local-models` · `features/sessions` · `features/memory` · `features/advisor` · `features/stats` · `features/code-execution` · `features/code-intelligence` · `features/debugging` · `features/subagents` · `features/code-review` · `features/merge-conflicts` · `features/atomic-commits` · `features/github` · `features/editor-integration` · `features/browser` · `features/web-search` · `features/stream-rules` · `features/voice` · `extending/extensions` · `extending/skills` · `extending/mcp` · `extending/plugins` · `extending/sdk`
+`getting-started/quickstart` · `getting-started/first-session` · `models/model-roles` · `models/local-models` · `features/sessions` · `features/memory` · `features/advisor` · `features/stats` · `features/code-execution` · `features/code-intelligence` · `features/debugging` · `features/subagents` · `features/code-review` · `features/merge-conflicts` · `features/atomic-commits` · `features/github` · `features/editor-integration` · `features/browser` · `features/web-search` · `features/stream-rules` · `features/voice` · `extending/extensions` · `extending/skills` · `extending/mcp` · `extending/plugins` · `extending/sdk` · `reference/configuration`
 
 ## C (1)
 
