@@ -2556,20 +2556,14 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	let outcome: DriveOutcome;
 	if (revivalResult.kind === "aborted") {
 		// The caller must return at the deadline even if revival never settles.
-		// If it does settle later, abort only that returned session object. A
-		// newer registry generation occupying the same id remains untouched.
-		void revivalPromise
-			.then(async lateSession => {
-				const current = AgentRegistry.global().get(id);
-				if (current !== ref && current?.session === lateSession) return;
-				await lateSession.abort();
-			})
-			.catch(error => {
-				logger.debug("Late subagent revival cleanup failed", {
-					id,
-					error: error instanceof Error ? error.message : String(error),
-				});
+		// A later resolution remains idle and lifecycle-managed; only consume a
+		// late rejection so the abandoned waiter cannot leak it.
+		void revivalPromise.catch(error => {
+			logger.debug("Late subagent revival failed after turn abort", {
+				id,
+				error: error instanceof Error ? error.message : String(error),
 			});
+		});
 		outcome = {
 			exitCode: 1,
 			aborted: monitor.isAbortedRun(),

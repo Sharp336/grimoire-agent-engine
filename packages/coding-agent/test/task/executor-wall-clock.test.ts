@@ -206,53 +206,84 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		expect(promptCalls).toBe(0);
 	});
 
-	it("charges parked-session revival against the follow-up wall-clock limit", async () => {
+	it("preserves a coalesced revival for a later follow-up after the first times out", async () => {
 		vi.useFakeTimers();
-		const handle = createHangingSession();
 		let promptCalls = 0;
-		const originalPrompt = handle.session.prompt;
-		handle.session.prompt = async (text, options) => {
-			promptCalls += 1;
-			return originalPrompt.call(handle.session, text, options);
+		let abortCalls = 0;
+		let listener: ((event: AgentSessionEvent) => void) | undefined;
+		const sharedSession: Partial<AgentSession> = {
+			setIrcWakeTurnObserver: () => {},
+			state: { messages: [] } as never,
+			agent: { state: { systemPrompt: ["test"] } } as never,
+			extensionRunner: undefined as never,
+			sessionManager: { appendSessionInit: () => {} } as never,
+			getActiveToolNames: () => ["read", "yield"],
+			getEnabledToolNames: () => ["read", "yield"],
+			setActiveToolsByName: async () => {},
+			subscribe: callback => {
+				listener = callback;
+				return () => {};
+			},
+			prompt: async () => {
+				promptCalls += 1;
+				listener?.({
+					type: "tool_execution_end",
+					toolCallId: "tool-coalesced-yield",
+					toolName: "yield",
+					result: {
+						content: [{ type: "text", text: "Result submitted." }],
+						details: { status: "success", data: { completedBy: "turn-b" } },
+					},
+					isError: false,
+				} as AgentSessionEvent);
+				return true;
+			},
+			waitForIdle: async () => {},
+			getLastAssistantMessage: () => undefined,
+			abort: async () => {
+				abortCalls += 1;
+			},
+			dispose: async () => {},
 		};
 		const revivalStarted = Promise.withResolvers<void>();
 		const revival = Promise.withResolvers<AgentSession>();
+		let revivalCalls = 0;
 		vi.spyOn(AgentLifecycleManager.global(), "ensureLive").mockImplementation(() => {
+			revivalCalls += 1;
 			revivalStarted.resolve();
 			return revival.promise;
 		});
 
-		const run = runSubagentFollowUpTurn({
-			id: "parked-revival-timeout",
+		const turnA = runSubagentFollowUpTurn({
+			id: "coalesced-revival",
 			agent: baseAgent,
-			message: "continue work",
+			message: "turn A",
 			maxRuntimeMs: 30,
 		});
 		await revivalStarted.promise;
 		vi.advanceTimersByTime(31);
-		const result = await run;
+		const resultA = await turnA;
 
-		expect(result.aborted).toBe(true);
-		expect(result.exitCode).toBe(1);
-		expect(result.abortReason).toContain("runtime limit exceeded");
-		expect(result.abortReason).toContain("task.maxRuntimeMs=30");
+		expect(resultA.aborted).toBe(true);
+		expect(resultA.exitCode).toBe(1);
+		expect(resultA.abortReason).toContain("runtime limit exceeded");
+		expect(resultA.abortReason).toContain("task.maxRuntimeMs=30");
 		expect(promptCalls).toBe(0);
-		expect(handle.abortCalls()).toBe(0);
+		expect(abortCalls).toBe(0);
 
-		const replacement = createHangingSession();
-		AgentRegistry.global().register({
-			id: "parked-revival-timeout",
-			displayName: "newer replacement",
-			kind: "sub",
-			parentId: "Main",
-			session: replacement.session,
-			status: "idle",
+		const turnB = runSubagentFollowUpTurn({
+			id: "coalesced-revival",
+			agent: baseAgent,
+			message: "turn B",
 		});
-		revival.resolve(handle.session);
-		await Promise.resolve();
-		await Promise.resolve();
-		expect(handle.abortCalls()).toBeGreaterThanOrEqual(1);
-		expect(replacement.abortCalls()).toBe(0);
+		expect(revivalCalls).toBe(2);
+		revival.resolve(sharedSession as AgentSession);
+		const resultB = await turnB;
+
+		expect(resultB.exitCode).toBe(0);
+		expect(resultB.aborted).toBe(false);
+		expect(resultB.extractedToolData?.yield).toMatchObject([{ status: "success", data: { completedBy: "turn-b" } }]);
+		expect(promptCalls).toBe(1);
 	});
 
 	it("a cancelled late initializer cannot replace a newer same-id worker", async () => {
