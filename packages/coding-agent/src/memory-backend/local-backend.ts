@@ -5,6 +5,7 @@ import {
 	enqueueMemoryConsolidation,
 	saveLearnedLesson,
 	startMemoryStartupTask,
+	stopMemoryStartupTask,
 } from "../memories";
 import type { MemoryBackend } from "./types";
 
@@ -22,7 +23,7 @@ export const localBackend: MemoryBackend = {
 		startMemoryStartupTask(options);
 	},
 	async stop({ session }) {
-		session?.cancelLocalMemoryStartup();
+		await stopMemoryStartupTask(session);
 		clearMemoryToolDeveloperInstructionsCache(session);
 	},
 	async buildDeveloperInstructions(agentDir, settings, session) {

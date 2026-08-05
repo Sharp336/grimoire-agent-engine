@@ -115,6 +115,14 @@ interface ConsolidationOutputSchema {
 	skills: ConsolidationSkillSchema[];
 }
 
+interface MemoryStartupRun {
+	controller: AbortController;
+	done: Promise<void>;
+	cancel: (reason?: unknown) => void;
+}
+
+const memoryStartupRuns = new WeakMap<AgentSession, MemoryStartupRun>();
+
 /**
  * Start the background memory startup pipeline.
  *
@@ -142,12 +150,50 @@ export function startMemoryStartupTask(options: {
 		return;
 	}
 
-	const signal = session.beginLocalMemoryStartup?.() ?? new AbortController().signal;
-	void runMemoryStartup({ session, settings, modelRegistry, agentDir, config: cfg, signal })
-		.catch(error => {
-			if (!signal.aborted) logger.warn("Memory startup failed", { error: String(error) });
+	const previous = memoryStartupRuns.get(session);
+	if (previous) previous.cancel(new Error("Memory startup superseded"));
+
+	const controller = new AbortController();
+	const sessionSignal = session.beginLocalMemoryStartup?.();
+	const forwardSessionAbort = (): void => {
+		if (!controller.signal.aborted) controller.abort(sessionSignal?.reason);
+	};
+	if (sessionSignal) {
+		if (sessionSignal.aborted) forwardSessionAbort();
+		else sessionSignal.addEventListener("abort", forwardSessionAbort, { once: true });
+	}
+	const run: MemoryStartupRun = {
+		controller,
+		done: Promise.resolve(),
+		cancel: reason => {
+			if (!controller.signal.aborted) controller.abort(reason);
+			session.cancelLocalMemoryStartup?.();
+		},
+	};
+	memoryStartupRuns.set(session, run);
+	run.done = (previous?.done ?? Promise.resolve())
+		.then(async () => {
+			await runMemoryStartup({ session, settings, modelRegistry, agentDir, config: cfg, signal: controller.signal });
 		})
-		.finally(() => session.endLocalMemoryStartup?.(signal));
+		.catch(error => {
+			if (!controller.signal.aborted) logger.warn("Memory startup failed", { error: String(error) });
+		})
+		.finally(() => {
+			if (sessionSignal) sessionSignal.removeEventListener("abort", forwardSessionAbort);
+			session.endLocalMemoryStartup?.(sessionSignal ?? controller.signal);
+			if (memoryStartupRuns.get(session) === run) memoryStartupRuns.delete(session);
+		});
+}
+
+/** Cancel and drain this session's background memory startup before detaching the local backend. */
+export async function stopMemoryStartupTask(session: AgentSession): Promise<void> {
+	const run = memoryStartupRuns.get(session);
+	if (!run) {
+		session.cancelLocalMemoryStartup?.();
+		return;
+	}
+	run.cancel(new Error("Memory startup stopped"));
+	await run.done;
 }
 
 interface MemoryInstructionSession {
@@ -344,7 +390,7 @@ async function runMemoryStartup(options: MemoryStartupOptions): Promise<void> {
 
 async function runPhase1(options: MemoryStartupOptions): Promise<void> {
 	if (!isMemoryStartupActive(options)) return;
-	const { session, modelRegistry, agentDir, config } = options;
+	const { session, modelRegistry, agentDir, config, signal } = options;
 	const db = openMemoryDb(getAgentDbPath(agentDir));
 	const nowSec = unixNow();
 	const workerId = `memory-${process.pid}`;
@@ -396,8 +442,21 @@ async function runPhase1(options: MemoryStartupOptions): Promise<void> {
 			produced: 0,
 			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
+		const markCancelled = (claim: Stage1Claim): void => {
+			markStage1Failed(db, {
+				threadId: claim.threadId,
+				ownershipToken: claim.ownershipToken,
+				retryDelaySeconds: 0,
+				reason: "Memory startup stopped",
+				nowSec: unixNow(),
+			});
+		};
 
 		await runWithConcurrency(claims, config.stage1Concurrency, async claim => {
+			if (signal.aborted) {
+				markCancelled(claim);
+				return;
+			}
 			if (!isMemoryStartupActive(options)) return;
 			const result = await runStage1Job({
 				claim,
@@ -406,7 +465,12 @@ async function runPhase1(options: MemoryStartupOptions): Promise<void> {
 				modelMaxTokens: computeModelTokenBudget(phase1Model, config),
 				config,
 				metadata: session.agent?.metadataForProvider(phase1Model.provider),
+				signal,
 			});
+			if (signal.aborted) {
+				markCancelled(claim);
+				return;
+			}
 			if (!isMemoryStartupActive(options)) return;
 
 			if (result.kind === "failed") {
@@ -458,6 +522,7 @@ async function runPhase1(options: MemoryStartupOptions): Promise<void> {
 				stats.usage.total += result.usage.totalTokens || 0;
 			}
 		});
+		if (signal.aborted) return;
 
 		logger.debug("Memory phase1 completed", {
 			memoryRoot,
@@ -475,7 +540,7 @@ async function runPhase1(options: MemoryStartupOptions): Promise<void> {
 
 async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 	if (!isMemoryStartupActive(options)) return;
-	const { session, modelRegistry, agentDir, config } = options;
+	const { session, modelRegistry, agentDir, config, signal } = options;
 	const cwd = session.sessionManager.getCwd();
 	const db = openMemoryDb(getAgentDbPath(agentDir));
 	const nowSec = unixNow();
@@ -492,13 +557,34 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 		if (claimResult.kind !== "claimed") return;
 
 		const claim = claimResult.claim;
+		const cancelClaim = (): void => {
+			markPhase2FailureWithFallback(db, {
+				claim,
+				retryDelaySeconds: 0,
+				reason: "Memory startup stopped",
+				memoryRoot,
+				cwd,
+			});
+		};
+		if (signal.aborted) {
+			cancelClaim();
+			return;
+		}
 		const outputs = listStage1OutputsForGlobal(db, config.maxRawMemoriesForGlobal, cwd);
 		const newWatermark = computeCompletionWatermark(claim.inputWatermark, outputs);
 
 		await syncPhase2Artifacts(memoryRoot, outputs);
+		if (signal.aborted) {
+			cancelClaim();
+			return;
+		}
 		if (!isMemoryStartupActive(options)) return;
 		if (outputs.length === 0) {
 			await cleanupConsolidatedArtifacts(memoryRoot);
+			if (signal.aborted) {
+				cancelClaim();
+				return;
+			}
 			if (!isMemoryStartupActive(options)) return;
 			const marked = markGlobalPhase2Succeeded(db, {
 				ownershipToken: claim.ownershipToken,
@@ -518,6 +604,10 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 			session,
 			fallbackRole: "smol",
 		});
+		if (signal.aborted) {
+			cancelClaim();
+			return;
+		}
 		if (!phase2Model) {
 			markPhase2FailureWithFallback(db, {
 				claim,
@@ -529,6 +619,10 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 			return;
 		}
 		const phase2ApiKey = await modelRegistry.getApiKey(phase2Model, session.sessionId);
+		if (signal.aborted) {
+			cancelClaim();
+			return;
+		}
 		if (!phase2ApiKey) {
 			markPhase2FailureWithFallback(db, {
 				claim,
@@ -560,15 +654,28 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 		}, config.phase2HeartbeatSeconds * 1000);
 
 		try {
+			if (signal.aborted) {
+				cancelClaim();
+				return;
+			}
 			if (!isMemoryStartupActive(options)) return;
 			const consolidated = await runConsolidationModel({
 				memoryRoot,
 				model: phase2Model,
 				apiKey: modelRegistry.resolver(phase2Model, session.sessionId),
 				metadata: session.agent?.metadataForProvider(phase2Model.provider),
+				signal,
 			});
+			if (signal.aborted) {
+				cancelClaim();
+				return;
+			}
 			if (!isMemoryStartupActive(options)) return;
 			await applyConsolidation(memoryRoot, consolidated);
+			if (signal.aborted) {
+				cancelClaim();
+				return;
+			}
 			if (!isMemoryStartupActive(options)) return;
 			if (heartbeatLostOwnership) {
 				throw new Error("Phase2 lease ownership lost before completion");
@@ -583,11 +690,11 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 				throw new Error("Phase2 could not mark success: ownership lost");
 			}
 		} catch (error) {
-			if (!isMemoryStartupActive(options)) return;
+			if (!signal.aborted && !isMemoryStartupActive(options)) return;
 			markPhase2FailureWithFallback(db, {
 				claim,
-				retryDelaySeconds: config.phase2RetryDelaySeconds,
-				reason: String(error),
+				retryDelaySeconds: signal.aborted ? 0 : config.phase2RetryDelaySeconds,
+				reason: signal.aborted ? "Memory startup stopped" : String(error),
 				memoryRoot,
 				cwd,
 				error,
@@ -726,6 +833,7 @@ async function runStage1Job(options: {
 	modelMaxTokens: number;
 	config: MemoryRuntimeConfig;
 	metadata?: Record<string, unknown>;
+	signal: AbortSignal;
 }): Promise<
 	| {
 			kind: "output";
@@ -761,6 +869,7 @@ async function runStage1Job(options: {
 				metadata: options.metadata,
 				maxTokens: Math.max(1024, Math.min(4096, Math.floor(modelMaxTokens * 0.2))),
 				reasoning: clampThinkingLevelForModel(model, Effort.Low),
+				signal: options.signal,
 			},
 		);
 
@@ -868,6 +977,7 @@ async function runConsolidationModel(options: {
 	model: Model;
 	apiKey: ApiKey;
 	metadata?: Record<string, unknown>;
+	signal: AbortSignal;
 }): Promise<{
 	memoryMd: string;
 	memorySummary: string;
@@ -898,6 +1008,7 @@ async function runConsolidationModel(options: {
 			metadata: options.metadata,
 			maxTokens: 8192,
 			reasoning: clampThinkingLevelForModel(model, Effort.Medium),
+			signal: options.signal,
 		},
 	);
 	if (response.stopReason === "error") {

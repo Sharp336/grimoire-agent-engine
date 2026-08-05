@@ -289,7 +289,7 @@ describe("config CLI schema coverage", () => {
 		expect(textGet).toBe("(configured)");
 
 		const textList = Bun.stripANSI(await capture({ action: "list", flags: {} }));
-		expect(textList).toContain("openviking.apiKey = (configured)");
+		expect(textList).toContain("openviking.apiKey = ********");
 
 		const textReset = Bun.stripANSI(await capture({ action: "reset", key: "openviking.apiKey", flags: {} }));
 		expect(textReset).toContain("Reset openviking.apiKey to (not set)");
@@ -316,7 +316,8 @@ describe("config CLI schema coverage", () => {
 			string,
 			{ value: unknown; configured?: boolean; redacted?: boolean }
 		>;
-		expect(jsonList["openviking.apiKey"]).toMatchObject({ value: null, configured: true, redacted: true });
+		expect(jsonList["openviking.apiKey"]).toMatchObject({ configured: true, redacted: true });
+		expect(jsonList["openviking.apiKey"]).not.toHaveProperty("value");
 
 		const jsonReset = JSON.parse(
 			await capture({ action: "reset", key: "openviking.apiKey", flags: { json: true } }),
