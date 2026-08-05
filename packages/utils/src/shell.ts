@@ -12,3 +12,11 @@
 export function shellQuote(value: string): string {
 	return `'${value.replace(/'/g, "'\\''")}'`;
 }
+
+/**
+ * Quote a string for a PowerShell single-quoted literal. This is separate
+ * from shellQuote because PowerShell escapes embedded quotes by doubling them.
+ */
+export function powershellQuote(value: string): string {
+	return `'${value.replace(/'/g, "''")}'`;
+}
