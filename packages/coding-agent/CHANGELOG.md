@@ -415,6 +415,13 @@
 - Fixed parsing of POSIX `$EDITOR` commands that contain quoted arguments or executable paths with spaces.
 - Fixed persisted Agent Hub rows losing the explicit caller model role when a subagent used a model override, preserving role provenance across restarts.
 - Fixed unobserved promise rejections in browser helpers (such as `tab.waitForResponse()`) causing tab workers to hang or crash.
+### Added
+
+- Added native Kiro AWS device/API-key login UX with local profile selection and credential-scoped model discovery.
+
+### Fixed
+
+- Prevented false login success for deferred Kiro Builder login and blocked legacy extensions from shadowing the native Kiro provider.
 
 ## [17.2.9] - 2026-08-05
 

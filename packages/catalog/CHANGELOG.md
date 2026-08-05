@@ -153,6 +153,13 @@
 ### Fixed
 
 - Corrected thinking-effort tiers for deepseek-v4-flash to include the low tier alongside high and max.
+### Added
+
+- Added credential-scoped Kiro model discovery and cache namespaces for OAuth profiles and API keys.
+
+### Changed
+
+- Marked Kiro discovery as authoritative and explicit-only so the catalog does not fabricate a default model.
 
 ## [17.2.9] - 2026-08-05
 

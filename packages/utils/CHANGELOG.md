@@ -74,6 +74,9 @@
 ### Removed
 
 - Removed external dependencies on `handlebars`, `winston`, and `winston-daily-rotate-file`.
+### Added
+
+- Added bounded UTF-8 JSON response reading for provider registration and discovery paths.
 
 ## [17.2.9] - 2026-08-05
 

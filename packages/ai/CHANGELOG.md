@@ -169,6 +169,14 @@
 ### Breaking Changes
 
 - Removed the `zod` dependency and `z`/`ZodType` re-exports. Tool schemas now use `omptype` `type()` schemas, with Zod-style authoring still available via `@oh-my-pi/omptype/zod`.
+### Added
+
+- Added a native Kiro provider with AWS IAM Identity Center device login, Kiro API-key login, profile selection, credential-scoped model discovery, AWS EventStream streaming, and native text, reasoning, tool, image, cancellation, and error handling.
+
+### Fixed
+
+- Hardened Kiro registration caching and refresh endpoint validation, including the canonical regional fallback when `tokenEndpoint` is omitted.
+- Redacted Kiro registered-client secrets alongside OAuth refresh tokens in generic remote credential snapshots.
 
 ## [17.2.9] - 2026-08-05
 
