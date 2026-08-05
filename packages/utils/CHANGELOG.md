@@ -5,6 +5,7 @@
 ### Added
 
 - Added `sqliteRepairGuidance` to `@oh-my-pi/pi-utils/sqlite` for verified, in-place SQLite recovery commands with optional restrictive permissions.
+- Added PowerShell-specific SQLite repair guidance on Windows, including guarded verification, sidecar backups, and current-user ACL hardening for restricted stores.
 - Added `@oh-my-pi/pi-utils/sqlite` with `isSqliteCorruptError`, the shared classifier for SQLite's unrecoverable-file result codes (`SQLITE_CORRUPT` family plus `SQLITE_NOTADB`). ([#7296](https://github.com/can1357/oh-my-pi/issues/7296))
 - Added `@oh-my-pi/pi-utils/sqlite` with `isSqliteCorruptError`, the shared classifier for SQLite's unrecoverable-file result codes (`SQLITE_CORRUPT` family plus `SQLITE_NOTADB`).
 - Added `configureSqliteDatabase` and `openSqliteDatabase` to `@oh-my-pi/pi-utils/sqlite`: the central opener enforcing the issue-#2421 ordering invariant (busy handler validated to the `sqlite3_busy_timeout(int)` range and installed before any lock-taking statement, then named pragmas, then WAL), closing the handle and rethrowing when a pragma fails.

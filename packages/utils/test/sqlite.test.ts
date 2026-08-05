@@ -179,7 +179,7 @@ describe("isSqliteCorruptError", () => {
 describe("sqliteRepairGuidance", () => {
 	test("builds restrictive in-place repair guidance with balanced quoting", () => {
 		const dbPath = "/tmp/omp agent's.db";
-		const guidance = sqliteRepairGuidance(dbPath, { restrictPermissions: true });
+		const guidance = sqliteRepairGuidance(dbPath, { platform: "linux", restrictPermissions: true });
 		const quotedPath = "'/tmp/omp agent'\\''s.db'";
 		const fixedPath = "'/tmp/omp agent'\\''s.db.fixed'";
 		const backupPath = "'/tmp/omp agent'\\''s.db.bak'";
@@ -203,13 +203,53 @@ describe("sqliteRepairGuidance", () => {
 	});
 
 	test("does not add a restrictive umask to non-secret repair guidance", () => {
-		const guidance = sqliteRepairGuidance("/tmp/model cache.db");
+		const guidance = sqliteRepairGuidance("/tmp/model cache.db", { platform: "linux" });
 		expect(guidance).not.toContain("umask 077");
 		expect(guidance).toContain("PRAGMA integrity_check");
 		expect(guidance).toContain("mv '/tmp/model cache.db.fixed' '/tmp/model cache.db'");
 	});
 
 	test("keeps the path-free fallback", () => {
-		expect(sqliteRepairGuidance(undefined)).toBe("Repair the store file with sqlite3's .recover and restart.");
+		const fallback = "Repair the store file with sqlite3's .recover and restart.";
+		expect(sqliteRepairGuidance(undefined, { platform: "linux" })).toBe(fallback);
+		expect(sqliteRepairGuidance(undefined, { platform: "win32" })).toBe(fallback);
+	});
+
+	test("emits POSIX guidance for every non-Windows platform", () => {
+		const guidance = sqliteRepairGuidance("/tmp/model cache.db", { platform: "darwin" });
+		expect(guidance).not.toContain("PowerShell");
+		expect(guidance).toContain("grep -qx 'ok'");
+		expect(guidance).toContain("mv '/tmp/model cache.db.fixed' '/tmp/model cache.db'");
+	});
+
+	test("builds guarded PowerShell repair guidance with quoted paths", () => {
+		const dbPath = "C:\\Users\\A O'Brien\\agent.db";
+		const guidance = sqliteRepairGuidance(dbPath, { platform: "win32" });
+		const quotedPath = "'C:\\Users\\A O''Brien\\agent.db'";
+		const fixedPath = "'C:\\Users\\A O''Brien\\agent.db.fixed'";
+		const walPath = "'C:\\Users\\A O''Brien\\agent.db-wal'";
+		const backupWalPath = "'C:\\Users\\A O''Brien\\agent.db.bak-wal'";
+		const shmPath = "'C:\\Users\\A O''Brien\\agent.db-shm'";
+		const backupShmPath = "'C:\\Users\\A O''Brien\\agent.db.bak-shm'";
+
+		expect(guidance).toContain("in PowerShell");
+		expect(guidance).toContain(`sqlite3 ${quotedPath} '.recover --ignore-freelist' | sqlite3 ${fixedPath}`);
+		expect(guidance).toContain("$LASTEXITCODE -eq 0 -and");
+		expect(guidance.indexOf("$LASTEXITCODE -eq 0 -and")).toBeLessThan(guidance.indexOf("Move-Item"));
+		expect(guidance).toContain(`Move-Item -Force ${fixedPath} ${quotedPath}`);
+		expect(guidance).toContain(`Move-Item -Force -ErrorAction SilentlyContinue ${walPath} ${backupWalPath}`);
+		expect(guidance).toContain(`Move-Item -Force -ErrorAction SilentlyContinue ${shmPath} ${backupShmPath}`);
+		expect(guidance).not.toContain("umask");
+	});
+
+	test("adds ACL hardening only for restricted PowerShell repair", () => {
+		const dbPath = "C:\\Users\\me\\agent.db";
+		const restricted = sqliteRepairGuidance(dbPath, { platform: "win32", restrictPermissions: true });
+		const plain = sqliteRepairGuidance(dbPath, { platform: "win32" });
+		const hardening = `icacls '${dbPath}' /inheritance:r /grant:r ("{0}:(F)" -f $env:USERNAME) | Out-Null`;
+
+		expect(restricted).toContain(hardening);
+		expect(plain).not.toContain("icacls");
+		expect(restricted.indexOf(hardening)).toBeGreaterThan(restricted.indexOf(`Move-Item -Force '${dbPath}.fixed'`));
 	});
 });

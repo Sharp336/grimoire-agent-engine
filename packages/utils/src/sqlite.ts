@@ -6,7 +6,7 @@
  * file damage apart from transient lock contention.
  */
 import { Database } from "bun:sqlite";
-import { shellQuote } from "./shell";
+import { powershellQuote, shellQuote } from "./shell";
 
 /**
  * SQLite's unrecoverable-file result codes: the `SQLITE_CORRUPT` family plus
@@ -22,17 +22,22 @@ export function isSqliteCorruptError(err: unknown): boolean {
 export interface SqliteRepairGuidanceOptions {
 	/** Create the recovered file under `umask 077` — for stores holding secrets. Default false. */
 	restrictPermissions?: boolean;
+	/** Target shell platform. Defaults to the host platform. */
+	platform?: NodeJS.Platform;
 }
 
 /**
  * Build copy-pasteable SQLite repair guidance that recovers, verifies, backs
  * up the original database and sidecars, then installs the repaired file.
- * Steps are `&&`-chained so failed recovery cannot reach installation;
- * restrictive permissions protect stores holding secrets during recovery.
+ * POSIX guidance uses `umask` and `&&`-chained steps so failed recovery cannot
+ * reach installation. Windows guidance targets PowerShell, where the recovered
+ * file inherits the containing directory ACL; restricted credential stores add
+ * an explicit current-user ACL after installation.
  */
 export function sqliteRepairGuidance(dbPath: string | undefined, options: SqliteRepairGuidanceOptions = {}): string {
 	if (dbPath === undefined) return "Repair the store file with sqlite3's .recover and restart.";
 
+	const platform = options.platform ?? process.platform;
 	const fixedPath = `${dbPath}.fixed`;
 	const backupPath = `${dbPath}.bak`;
 	const walPath = `${dbPath}-wal`;
@@ -40,6 +45,26 @@ export function sqliteRepairGuidance(dbPath: string | undefined, options: Sqlite
 	const backupWalPath = `${backupPath}-wal`;
 	const backupShmPath = `${backupPath}-shm`;
 	const recover = `sqlite3 ${shellQuote(dbPath)} '.recover --ignore-freelist' | sqlite3 ${shellQuote(fixedPath)}`;
+	if (platform === "win32") {
+		const psDbPath = powershellQuote(dbPath);
+		const psFixedPath = powershellQuote(fixedPath);
+		const psBackupPath = powershellQuote(backupPath);
+		const psWalPath = powershellQuote(walPath);
+		const psBackupWalPath = powershellQuote(backupWalPath);
+		const psShmPath = powershellQuote(shmPath);
+		const psBackupShmPath = powershellQuote(backupShmPath);
+		const hardening = options.restrictPermissions
+			? `; icacls ${psDbPath} /inheritance:r /grant:r ("{0}:(F)" -f $env:USERNAME) | Out-Null`
+			: "";
+		const command =
+			`sqlite3 ${psDbPath} '.recover --ignore-freelist' | sqlite3 ${psFixedPath}; ` +
+			`if ($LASTEXITCODE -eq 0 -and (sqlite3 ${psFixedPath} 'PRAGMA integrity_check') -eq 'ok') { ` +
+			`Move-Item -Force ${psDbPath} ${psBackupPath}; ` +
+			`Move-Item -Force -ErrorAction SilentlyContinue ${psWalPath} ${psBackupWalPath}; ` +
+			`Move-Item -Force -ErrorAction SilentlyContinue ${psShmPath} ${psBackupShmPath}; ` +
+			`Move-Item -Force ${psFixedPath} ${psDbPath}${hardening} }`;
+		return `Stop omp, then repair the database in place in PowerShell with: ${command}`;
+	}
 	const recoverStep = options.restrictPermissions ? `(umask 077 && ${recover})` : recover;
 	const sidecarBackup = `{ mv ${shellQuote(walPath)} ${shellQuote(backupWalPath)} 2>/dev/null; mv ${shellQuote(shmPath)} ${shellQuote(backupShmPath)} 2>/dev/null; true; }`;
 	const command =

@@ -238,7 +238,9 @@ describe("AuthStorage corrupt-store reporting", () => {
 		// The repair guidance must point at the actual store file, not a
 		// hardcoded default path (profiles relocate agent.db).
 		expect(String(damagedErrors[0]?.[0])).toContain(dbPath);
-		expect(String(damagedErrors[0]?.[0])).toContain(sqliteRepairGuidance(dbPath, { restrictPermissions: true }));
+		expect(String(damagedErrors[0]?.[0])).toContain(
+			sqliteRepairGuidance(dbPath, { platform: "linux", restrictPermissions: true }),
+		);
 
 		const swallowDebugs = debugSpy.mock.calls.filter(
 			call => typeof call[0] === "string" && call[0] === "Failed to read credential block from persistent store",
@@ -337,7 +339,7 @@ describe("AuthStorage corrupt-store shell-balanced repair guidance", () => {
 		const message = String(damagedCall?.[0]);
 		expect(message).toContain("--ignore-freelist");
 		const expectedDbPath = path.join(tempDir, "omp's agent", "agent.db");
-		expect(message).toContain(sqliteRepairGuidance(expectedDbPath, { restrictPermissions: true }));
+		expect(message).toContain(sqliteRepairGuidance(expectedDbPath, { platform: "linux", restrictPermissions: true }));
 		// The repair command must be shell-balanced: every unescaped single
 		// quote toggles open/close state, so the string ends closed.
 		let open = false;
@@ -360,7 +362,7 @@ describe("AuthStorage corrupt-store shell-balanced repair guidance", () => {
 			await SqliteAuthCredentialStore.open(dbPath);
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
-			expect(message).toContain(sqliteRepairGuidance(dbPath, { restrictPermissions: true }));
+			expect(message).toContain(sqliteRepairGuidance(dbPath, { platform: "linux", restrictPermissions: true }));
 			// Shell-balanced check.
 			let open = false;
 			for (let i = 0; i < message.length; i++) {
