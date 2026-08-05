@@ -1,14 +1,10 @@
-import { isRecord, ptree } from "@oh-my-pi/pi-utils";
+import { asRecord, isRecord, ptree } from "@oh-my-pi/pi-utils";
 
-export { isRecord };
+export { asRecord, isRecord };
 
 import { ToolAbortError } from "../../tools/tool-errors";
 import { convertBufferWithMarkit } from "../../utils/markit";
 import { MAX_BYTES } from "./types";
-
-export function asRecord(value: unknown): Record<string, unknown> | null {
-	return isRecord(value) ? value : null;
-}
 
 export function asString(value: unknown): string | null {
 	if (typeof value !== "string") return null;
