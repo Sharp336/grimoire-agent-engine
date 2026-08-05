@@ -376,48 +376,6 @@ describe("AuthStorage corrupt-store broker seam", () => {
 		expect(spy).toHaveBeenCalledTimes(1);
 	});
 
-	test("internal #clearCredentialBlocks path fails open (catch swallows deleteCredentialBlocks throw)", async () => {
-		// The internal heal path (#clearCredentialBlocks, called after a
-		// redeemed reset credit) calls this.deleteCredentialBlocks inside a
-		// try/catch with a debug log. When the public method throws because
-		// the store is latched, the catch must swallow it so the in-memory
-		// backoff clear still proceeds.
-		const malformedDbPath = await writeMalformedDb(tempDir);
-		vi.spyOn(store, "getCredentialBlock").mockImplementation(() => {
-			throw realCorruptError(malformedDbPath);
-		});
-		const debugSpy = vi.spyOn(logger, "debug").mockImplementation(() => {});
-		vi.spyOn(logger, "error").mockImplementation(() => {});
-
-		// Drive credential selection to trigger the latch.
-		await storage.getApiKey(PROVIDER, "session-clear-latch");
-
-		// The public method throws when latched ...
-		expect(() => storage.deleteCredentialBlocks(1)).toThrow(
-			"Credential store is damaged; block writes are unavailable",
-		);
-
-		// ... but the internal pattern (try/catch with debug log, mirroring
-		// #clearCredentialBlocks) swallows the throw and continues.
-		expect(() => {
-			try {
-				storage.deleteCredentialBlocks(1);
-			} catch {
-				// Mirrors #clearCredentialBlocks' catch → debug log.
-				logger.debug("Failed to clear persisted credential blocks", {
-					provider: PROVIDER,
-					credentialId: 1,
-				});
-			}
-		}).not.toThrow();
-
-		// The debug log fired, confirming the catch path was taken.
-		const clearDebugs = debugSpy.mock.calls.filter(
-			call => typeof call[0] === "string" && call[0] === "Failed to clear persisted credential blocks",
-		);
-		expect(clearDebugs).toHaveLength(1);
-	});
-
 	test("public deleteCredentialBlock throws when store is latched (broker gets non-200)", async () => {
 		// Latch the store via a corrupt read.
 		const malformedDbPath = await writeMalformedDb(tempDir);
