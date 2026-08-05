@@ -81,11 +81,38 @@ describe("resolveWindowsShell", () => {
 		expect(resolveWindowsShell({ ProgramFiles: programFiles, ComSpec: "C:\\Windows\\System32\\cmd.exe" })).toBe(bash);
 	});
 
-	// On a real Windows host bash.exe/sh.exe may resolve from PATH before the
-	// cmd.exe fallback is reached, so the fallback contract is only
-	// deterministic off-Windows.
-	it.skipIf(process.platform === "win32")("falls back to cmd.exe instead of failing when no bash exists", () => {
+	it("falls back to cmd.exe instead of failing when no bash or PowerShell exists", () => {
 		expect(resolveWindowsShell({})).toBe("C:\\Windows\\System32\\cmd.exe");
 		expect(resolveWindowsShell({ ComSpec: "D:\\win\\cmd.exe" })).toBe("D:\\win\\cmd.exe");
+	});
+
+	function makeExecutable(dir: string, name: string): string {
+		const file = path.join(dir, name);
+		fs.writeFileSync(file, "");
+		fs.chmodSync(file, 0o755);
+		return file;
+	}
+
+	it("prefers PowerShell on PATH over the cmd.exe fallback when no bash exists", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-ps-path-"));
+		tempDirs.push(dir);
+		const powershell = makeExecutable(dir, "powershell.exe");
+		expect(resolveWindowsShell({ PATH: dir, ComSpec: "C:\\Windows\\System32\\cmd.exe" })).toBe(powershell);
+	});
+
+	it("prefers pwsh over Windows PowerShell, and any bash over both", () => {
+		// Separate dirs per assertion: $which caches misses per (command, PATH).
+		const psDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-ps-priority-"));
+		tempDirs.push(psDir);
+		makeExecutable(psDir, "powershell.exe");
+		const pwsh = makeExecutable(psDir, "pwsh.exe");
+		expect(resolveWindowsShell({ PATH: psDir })).toBe(pwsh);
+
+		const bashDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-bash-priority-"));
+		tempDirs.push(bashDir);
+		makeExecutable(bashDir, "powershell.exe");
+		makeExecutable(bashDir, "pwsh.exe");
+		const bash = makeExecutable(bashDir, "bash.exe");
+		expect(resolveWindowsShell({ PATH: bashDir })).toBe(bash);
 	});
 });

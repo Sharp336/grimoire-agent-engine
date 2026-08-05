@@ -141,11 +141,17 @@ export function resolveBasicShell(): string | undefined {
  * 3. bash.exe on PATH (Cygwin, MSYS2, ...)
  * 4. sh.exe on PATH (Git for Windows' sh.exe is bash; prefer a sibling
  *    bash.exe when present)
- * 5. cmd.exe from ComSpec
+ * 5. pwsh.exe / powershell.exe on PATH — a far more capable interactive
+ *    shell than cmd.exe for the spawn paths, and the native PTY layer
+ *    already speaks its `-Command` convention
+ * 6. cmd.exe from ComSpec
  *
- * Exported for tests; `env` overrides Bun.env-based discovery.
+ * Exported for tests; `env` overrides Bun.env-based discovery, including
+ * `env.PATH` for the on-PATH lookups so the fallback chain is testable on
+ * hosts that have a real bash/PowerShell installed.
  */
 export function resolveWindowsShell(env: Record<string, string | undefined> = Bun.env): string {
+	const whichOnEnvPath = (name: string): string | null => $which(name, { PATH: env.PATH ?? "" });
 	const gitRoots = [
 		env.ProgramFiles && path.join(env.ProgramFiles, "Git"),
 		env["ProgramFiles(x86)"] && path.join(env["ProgramFiles(x86)"], "Git"),
@@ -160,13 +166,18 @@ export function resolveWindowsShell(env: Record<string, string | undefined> = Bu
 		if (fs.existsSync(candidate)) return candidate;
 	}
 
-	const bashOnPath = $which("bash.exe");
+	const bashOnPath = whichOnEnvPath("bash.exe");
 	if (bashOnPath) return bashOnPath;
 
-	const shOnPath = $which("sh.exe");
+	const shOnPath = whichOnEnvPath("sh.exe");
 	if (shOnPath) {
 		const siblingBash = path.join(path.dirname(shOnPath), "bash.exe");
 		return fs.existsSync(siblingBash) ? siblingBash : shOnPath;
+	}
+
+	for (const name of ["pwsh.exe", "powershell.exe"]) {
+		const psOnPath = whichOnEnvPath(name);
+		if (psOnPath) return psOnPath;
 	}
 
 	return env.ComSpec || env.COMSPEC || "C:\\Windows\\System32\\cmd.exe";
@@ -176,8 +187,8 @@ export function resolveWindowsShell(env: Record<string, string | undefined> = Bu
  * Get shell configuration based on platform.
  * Resolution order:
  * 1. User-specified shellPath from the active settings source
- * 2. On Windows: Git Bash / bash / sh discovery, then cmd.exe (see
- *    {@link resolveWindowsShell}) — never fails
+ * 2. On Windows: Git Bash / bash / sh discovery, then PowerShell, then
+ *    cmd.exe (see {@link resolveWindowsShell}) — never fails
  * 3. On Unix: $SHELL if bash/zsh, then fallback paths
  * 4. Fallback: sh
  */

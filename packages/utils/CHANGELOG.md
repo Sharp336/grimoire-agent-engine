@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Windows shell discovery now prefers PowerShell (`pwsh.exe`, then `powershell.exe`) over cmd.exe as the last-resort fallback when no bash/sh is installed, and `resolveWindowsShell` honors an injected `env.PATH` for its on-PATH lookups so the fallback chain is deterministic in tests.
+
 ### Fixed
 
 - Support PowerShell (`powershell.exe` / `pwsh`) as a custom `shellPath`: spawn paths now pass `-NoLogo -Command` (plus `-NoProfile` under `PI_BASH_NO_LOGIN`) instead of the POSIX `-l -c` pair, which PowerShell rejected with `The term '-l' is not recognized`.
