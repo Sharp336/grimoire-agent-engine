@@ -65,7 +65,13 @@ const BUILT_IN_DISCOVERY_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 const BUILT_IN_DISCOVERY_NON_AUTHORITATIVE_RETRY_MS = 5 * 60 * 1000;
 
 import type { ApiKeyResolver, FetchImpl } from "@oh-my-pi/pi-ai";
-import { createConfiguredOAuthProvider, registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import {
+	createConfiguredOAuthProvider,
+	getOAuthProvider,
+	registerOAuthProvider,
+	unregisterOAuthProvider,
+	unregisterOAuthProviders,
+} from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
@@ -858,6 +864,8 @@ export class ModelRegistry {
 	#runtimeModelManagers: Map<string, { options: ModelManagerOptions<Api>; sourceId: string }> = new Map();
 	#ignoreLocalModelConfig: boolean;
 	#allowConfiguredOAuth: boolean;
+	/** Provider IDs this registry currently owns under source `models-config`. */
+	#configuredOAuthIds: string[] = [];
 	#fetch: FetchImpl;
 
 	#resolveCommandBackedApiKey(provider: string): CommandApiKeyResolution {
@@ -1097,7 +1105,10 @@ export class ModelRegistry {
 		this.#customProviderApiKeys.clear();
 		this.#keylessProviders.clear();
 		this.#discoverableProviders = [];
-		if (this.#allowConfiguredOAuth) unregisterOAuthProviders("models-config");
+		if (this.#allowConfiguredOAuth) {
+			for (const id of this.#configuredOAuthIds) unregisterOAuthProvider(id);
+			this.#configuredOAuthIds = [];
+		}
 		// Drop config-sourced apiKeys from AuthStorage before reload; entries
 		// removed from models.yml must actually disappear from the resolver, not
 		// linger from the previous parse. The post-load setters below repopulate.
@@ -1605,6 +1616,7 @@ export class ModelRegistry {
 		const providerEntries = Object.entries(value.providers ?? {});
 		const configuredProviders = new Set(Object.keys(value.providers ?? {}));
 		let oauthError: ConfigError | undefined;
+		const registeredOAuthIds: string[] = [];
 		for (const [providerName, providerConfig] of providerEntries) {
 			const resolvedProviderHeaders = resolveConfigHeaders(providerConfig.headers);
 			// Always set overrides when baseUrl/headers/apiKey/authHeader/compat/disableStrictTools/transport are present
@@ -1647,6 +1659,13 @@ export class ModelRegistry {
 					oauthFailure = new Error(
 						`Provider ${providerName}: configured OAuth is supported only in the user models.yml.`,
 					);
+				} else {
+					const existing = getOAuthProvider(providerName);
+					if (existing && existing.sourceId !== "models-config") {
+						oauthFailure = new Error(
+							`Provider ${providerName}: OAuth is already registered by source "${existing.sourceId ?? "unknown"}".`,
+						);
+					}
 				}
 				const oauth = oauthFailure ? undefined : resolveConfiguredOAuth(providerConfig.oauth);
 				if (!oauth && !oauthFailure)
@@ -1655,11 +1674,20 @@ export class ModelRegistry {
 					oauthError = new ConfigError("models", undefined, { err: oauthFailure!, stage: "OAuth" });
 					break;
 				}
-				registerOAuthProvider({
-					...createConfiguredOAuthProvider(providerName, { ...oauth, fetch: this.#fetch }),
-					id: providerName,
-					sourceId: "models-config",
-				});
+				try {
+					registerOAuthProvider({
+						...createConfiguredOAuthProvider(providerName, { ...oauth, fetch: this.#fetch }),
+						id: providerName,
+						sourceId: "models-config",
+					});
+					registeredOAuthIds.push(providerName);
+				} catch (err) {
+					oauthError = new ConfigError("models", undefined, {
+						err: err instanceof Error ? err : new Error(String(err)),
+						stage: "OAuth",
+					});
+					break;
+				}
 			}
 
 			if (providerConfig.discovery && (providerConfig.api || providerConfig.discovery.type === "proxy")) {
@@ -1700,7 +1728,7 @@ export class ModelRegistry {
 			}
 		}
 		if (oauthError) {
-			unregisterOAuthProviders("models-config");
+			for (const id of registeredOAuthIds) unregisterOAuthProvider(id);
 			return {
 				models: [],
 				overrides: new Map(),
@@ -1712,6 +1740,7 @@ export class ModelRegistry {
 				found: true,
 			};
 		}
+		if (this.#allowConfiguredOAuth) this.#configuredOAuthIds = registeredOAuthIds;
 
 		return {
 			models: this.#parseModels(value),

@@ -4921,9 +4921,9 @@ export class AuthStorage {
 						provider,
 					});
 				}
-				refreshPromise = customProvider.refreshToken(credential);
+				refreshPromise = customProvider.refreshToken(credential, signal);
 			} else {
-				refreshPromise = refreshOAuthToken(provider as OAuthProvider, credential);
+				refreshPromise = refreshOAuthToken(provider as OAuthProvider, credential, signal);
 			}
 		}
 		// Bound the refresh so a slow/hanging token endpoint cannot stall credential selection.
