@@ -1,18 +1,20 @@
 ---
 title: Magic Keywords
-description: Standalone prompt words — ultrathink, orchestrate, workflowz — that add a hidden instruction for the turn.
+description: Standalone prose words in a user prompt — ultrathink, orchestrate, workflowz — that add a hidden instruction for the turn.
 coverage: A
 ---
 
-Magic keywords are standalone words in a user prompt that add a hidden instruction for that turn. They are enabled by default and glow in the editor when `omp` recognizes them.
+Magic keywords are standalone prose words in a user prompt that add a hidden, user-attributed instruction for that turn. Notice injection is enabled by default. The TUI highlights recognized words with animated gradients while editing and static gradients in sent messages; highlighting is a visual affordance and currently remains even when notice injection is disabled in settings.
 
 ## Keywords
 
+Each keyword adds its own hidden instruction when matched. Visit a keyword's page for the exact contract it injects, examples, and matching edge cases.
+
 | Keyword | Effect |
 | --- | --- |
-| `ultrathink` | Asks the agent to reason carefully through a multi-step task. When automatic thinking is active, it also selects the highest reasoning effort supported by the current model for that turn. |
-| `orchestrate` | Switches the agent to the multi-agent orchestration contract: scope the full task, delegate substantial independent work in parallel, verify each phase, and continue until the request is complete. |
-| `workflowz` | Asks the agent to build and run a deterministic multi-subagent workflow with the `task` tool. It is intended for broad research, reviews, migrations, or other work that benefits from parallel coverage. The keyword only adds its instruction when `task` is available in the active tool set. |
+| [`ultrathink`](/oh-my-pi/features/magic-ultrathink/) | Adds a careful multi-step reasoning notice. When automatic thinking is active, it also selects the highest reasoning effort supported by the current model for that turn. |
+| [`orchestrate`](/oh-my-pi/features/magic-orchestrate/) | Adds the multi-agent orchestration contract: scope the full task, delegate substantial independent work in parallel, verify each phase, and continue until the request is complete. |
+| [`workflowz`](/oh-my-pi/features/magic-workflowz/) | Adds a deterministic multi-subagent workflow contract through the `task` tool. The notice is injected only when `task` is available in the active tool set. |
 
 Use a keyword anywhere in the prose of the prompt:
 
@@ -24,16 +26,17 @@ orchestrate the migration described in docs/plan.md
 workflowz an adversarial review of the authentication changes
 ```
 
-The highlighted word stays visible in the prompt; the added instruction is hidden.
+The highlighted word stays visible in the prompt; the added instruction is hidden. All three keywords can fire in one prompt, each adding its own instruction.
 
 ## Matching rules
 
 Matching is deliberate so source code and paths do not accidentally change agent behavior:
 
 - Use the exact lowercase spelling. `Ultrathink`, `Orchestrate`, and `Workflowz` do not trigger.
-- The keyword must be standalone. Sentence punctuation may touch it, but identifiers, inflections, paths, and file extensions do not match. For example, `orchestrate,` matches; `orchestrated` and `orchestrate.ts` do not.
-- Fenced code blocks, inline code spans, and XML/HTML sections are ignored.
-- The instruction applies to the user turn containing the keyword.
+- The keyword must be standalone prose. Sentence punctuation and quotes may touch it, but letters, digits, underscores, slashes, backslashes, hyphens, file extensions, symbol references, and call syntax do not match. For example, `orchestrate,` matches; `orchestrated`, `orchestrate.ts`, `foo::orchestrate`, and `orchestrate()` do not.
+- Fenced code blocks (backticks or tildes), inline code spans, and HTML/XML comments, tags, elements, and their contents are ignored.
+- The visible word remains in the user message; hidden notices are non-displayed custom messages attributed to the user.
+- The instruction applies only to the turn containing the keyword.
 
 ## Configuration
 
@@ -49,4 +52,4 @@ omp config set magicKeywords.orchestrate false
 omp config set magicKeywords.workflow false
 ```
 
-All four settings default to `true`. Run `omp config list` to inspect every available setting and its current value. See [Settings](/oh-my-pi/configuration/settings/) for configuration scopes, precedence, and project-local overrides.
+The global switch and three per-keyword switches default to `true`. The global switch gates every hidden notice; a per-keyword switch gates only that notice (and, for `ultrathink`, the maximum-auto-thinking override). These settings do not currently disable the editor/message gradient — the highlighting remains visible even when notice injection is off. Run `omp config list` to inspect every setting and its current value. See [Settings](/oh-my-pi/configuration/settings/) for configuration scopes, precedence, and project-local overrides.
