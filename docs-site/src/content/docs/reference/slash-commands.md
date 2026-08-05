@@ -16,15 +16,18 @@ Built-in commands are grouped below by what they do, in the same order they appe
 | --- | --- | --- |
 | `/settings` | Open settings menu | `/settings` |
 | `/setup` _(alias `/providers`)_ | Open provider setup | `/setup [providers]` |
-| `/plan` | Toggle plan mode (agent plans before executing) | `/plan [prompt]` |
-| `/plan-review` | Re-open the plan review for the latest plan (plan mode only) | `/plan-review` |
-| `/vibe` | Toggle vibe mode (direct persistent fast/good worker sessions; read-only toolset) | `/vibe [prompt]` |
-| `/goal` | Toggle goal mode (persistent autonomous objective for this session) | `/goal [objective]` |
-| `/guided-goal` | Have the agent interview you in chat, then set up goal mode | `/guided-goal [rough objective]` |
-| `/loop` | Toggle loop mode. While enabled, the next prompt you send re-submits after every yield. Esc cancels the current iteration; /loop again to disable. | `/loop [count\|duration] [prompt]` |
-| `/queue` | Queue a message for after the agent yields | `/queue <message>` |
 
-`/goal` subcommands: `set <objective>`, `show`, `pause`, `resume`, `drop`, `budget <N|off>`.
+Mode-toggling commands — each opens its own page for full usage and subcommands:
+
+| Command | Description |
+| --- | --- |
+| [`/plan`](/oh-my-pi/modes/plan-mode/) | Toggle plan mode (agent plans before executing) |
+| [`/plan-review`](/oh-my-pi/modes/plan-mode/) | Re-open the plan review for the latest plan (plan mode only) |
+| [`/vibe`](/oh-my-pi/features/vibe-mode/) | Toggle vibe mode (direct persistent fast/good worker sessions; read-only toolset) |
+| [`/goal`](/oh-my-pi/modes/goal-mode/) | Toggle goal mode (persistent autonomous objective for this session) |
+| [`/guided-goal`](/oh-my-pi/modes/goal-mode/) | Have the agent interview you in chat, then set up goal mode |
+| [`/loop`](/oh-my-pi/modes/loop-mode/) | Toggle loop mode. While enabled, the next prompt you send re-submits after every yield. Esc cancels the current iteration; /loop again to disable. |
+| [`/queue`](/oh-my-pi/modes/queue-mode/) | Queue a message for after the agent yields |
 
 ## Model and runtime
 
