@@ -48,11 +48,14 @@ describe("SessionManager.peekSessionInit", () => {
 		manager.appendSessionInit({ systemPrompt: "first", task: "t1", tools: ["read"], spawns: "" });
 		manager.appendSessionInit({
 			systemPrompt: "second",
+			subagentSystemPrompt: "subagent role",
 			task: "t2",
 			tools: ["read", "bash", "yield"],
 			spawns: "task",
 			readSummarize: false,
 			restrictToolNames: true,
+			parentTranscriptId: "parent-transcript-a",
+			parentWorkspaceCwd: "/tmp/parent-workspace-a",
 		});
 		// Flush buffered entries (header + inits) so the lock-free peek can read them off disk.
 		manager.appendMessage(assistantMessage("flush"));
@@ -61,10 +64,13 @@ describe("SessionManager.peekSessionInit", () => {
 		expect(peek?.cwd).toBe(manager.getCwd());
 		// Latest init wins — the reviver must rebuild from the most recent contract.
 		expect(peek?.init?.systemPrompt).toBe("second");
+		expect(peek?.init?.subagentSystemPrompt).toBe("subagent role");
 		expect(peek?.init?.tools).toEqual(["read", "bash", "yield"]);
 		expect(peek?.init?.spawns).toBe("task");
 		expect(peek?.init?.readSummarize).toBe(false);
 		expect(peek?.init?.restrictToolNames).toBe(true);
+		expect(peek?.init?.parentTranscriptId).toBe("parent-transcript-a");
+		expect(peek?.init?.parentWorkspaceCwd).toBe("/tmp/parent-workspace-a");
 	});
 
 	it("returns init: null for a session file with no session_init (a main/legacy session)", async () => {

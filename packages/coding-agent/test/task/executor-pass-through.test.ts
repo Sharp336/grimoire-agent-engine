@@ -168,6 +168,8 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 			...baseOptions,
 			id: "ChildAgent",
 			parentAgentId: "SpawnerAgent",
+			parentTranscriptId: "parent-transcript-a",
+			parentWorkspaceCwd: "/tmp/parent-workspace-a",
 		});
 
 		expect(result.exitCode).toBe(0);
@@ -178,6 +180,8 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.parentAgentId).toBe("SpawnerAgent");
 		expect(forwarded?.agentId).toBe("ChildAgent");
 		expect(forwarded?.parentTaskPrefix).toBe("ChildAgent");
+		expect(forwarded?.parentTranscriptId).toBe("parent-transcript-a");
+		expect(forwarded?.parentWorkspaceCwd).toBe("/tmp/parent-workspace-a");
 	});
 
 	it("removes all MCP and discovered capability sources for a restricted child", async () => {

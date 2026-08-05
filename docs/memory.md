@@ -1,6 +1,6 @@
 # Autonomous Memory
 
-Oh My Pi supports four memory modes. Memory is disabled by default; select one backend via `/settings` or `config.yml`:
+Oh My Pi supports five memory modes. Memory is disabled by default; select one backend via `/settings` or `config.yml`:
 
 | `memory.backend` | Storage and behavior                                                   | Guide                                                   |
 | ---------------- | ---------------------------------------------------------------------- | ------------------------------------------------------- |
@@ -8,6 +8,7 @@ Oh My Pi supports four memory modes. Memory is disabled by default; select one b
 | `local`          | Project-scoped summaries and lessons generated from persisted sessions | This page                                               |
 | `hindsight`      | Remote, bank-scoped Hindsight memory                                   | [Hindsight](#hindsight-remote-backend)                  |
 | `mnemopi`        | Local Mnemopi SQLite memory                                            | [Mnemopi memory backend](./mnemosyne-memory-backend.md) |
+| `openviking`     | Remote OpenViking archival, extraction, and recall                    | [OpenViking](#openviking-remote-backend)                |
 
 Enable the local summary pipeline:
 
@@ -44,8 +45,10 @@ The agent can read memory files directly using `memory://` URLs with the `read` 
 | `view`                | Show the current backend injection payload                |
 | `stats`               | Show backend-specific memory statistics, when supported   |
 | `diagnose`            | Show backend-specific diagnostics, when supported         |
-| `clear` / `reset`     | Delete active backend memory data/artifacts               |
+| `clear` / `reset`     | Clear backend-owned data where supported                   |
 | `enqueue` / `rebuild` | Force consolidation/retention work for the active backend |
+
+OpenViking memories live on the server and must be deleted by specific resource URI. Consequently, `/memory clear` and `/memory reset` fail for that backend without detaching the active OpenViking session state.
 
 ### Capturing lessons
 
@@ -57,6 +60,16 @@ autolearn:
 ```
 
 With the local backend active, `learn` saves explicit durable lessons to the project's `learned.md`. Lessons are newest-first, deduplicated, secret-redacted, capped at 100 entries, and injected starting with the next session; a `learn` call does not mutate the active session's prompt-cache prefix. Each lesson's content is capped at 2,000 characters and optional context at 400 characters. Structured memory search, `recall`, `retain`, `reflect`, and `memory_edit` are not available for the local backend.
+
+## OpenViking remote backend
+
+Set `memory.backend: openviking` to archive conversation turns and extract durable memories through an OpenViking server. OMP reads the official `~/.openviking/ovcli.conf` profile by default; explicit `openviking.*` settings override profile values, and `OPENVIKING_*` environment variables have the highest precedence unless `OPENVIKING_CREDENTIAL_SOURCE=cli` selects the CLI profile.
+
+OpenViking uses a collision-resistant peer derived from the current workspace by default. This keeps project memory isolated while actor-scoped recall can still return global memory. Configure `openviking.peerId` for a fixed peer, disable `openviking.workspacePeer` for an unscoped server default, or set `openviking.recallPeerScope: all` to include penalized cross-project results.
+
+Conversation messages are archived synchronously and durable-memory extraction continues asynchronously. Explicit `retain` and `learn` calls wait up to `openviking.captureTimeoutMs`; a timeout reports queued work rather than claiming extraction succeeded. Automatic capture and timed-out extraction are reconciled in the background, including across session and workspace transitions.
+
+OpenViking resources returned by `recall` and `reflect` use `memory://` identifiers and can be read through the normal `read` tool. Bulk `/memory clear` and `/memory reset` are intentionally unsupported because deletion requires a specific server resource URI.
 
 ## How it works
 

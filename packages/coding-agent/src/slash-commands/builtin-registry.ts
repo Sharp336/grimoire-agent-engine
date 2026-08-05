@@ -39,7 +39,7 @@ import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import { theme } from "../modes/theme/theme";
 import type { InteractiveModeContext } from "../modes/types";
 import { extractLastCodeBlock, extractLastCommand } from "../modes/utils/copy-targets";
-import type { AgentSession, FreshSessionResult } from "../session/agent-session";
+import type { AgentSession, FreshSessionResult, MemoryBackendWorkspaceTransition } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { resolveResumableSession } from "../session/session-listing";
@@ -1931,6 +1931,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			const verb = (command.args.trim().split(/\s+/)[0] ?? "").toLowerCase() || "view";
+			await runtime.session.waitForMemoryBackendReconcile();
 			const backend = await resolveMemoryBackend(runtime.settings);
 			switch (verb) {
 				case "view": {
@@ -1944,15 +1945,27 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				}
 				case "clear":
 				case "reset": {
-					await backend.clear(runtime.settings.getAgentDir(), runtime.cwd, runtime.session);
-					await runtime.session.refreshBaseSystemPrompt();
-					await runtime.output("Memory cleared.");
+					try {
+						await backend.clear(runtime.settings.getAgentDir(), runtime.cwd, runtime.session);
+						await runtime.session.refreshBaseSystemPrompt();
+						await runtime.output("Memory cleared.");
+					} catch (error) {
+						await runtime.output(
+							`Memory clear failed: ${error instanceof Error ? error.message : String(error)}`,
+						);
+					}
 					return commandConsumed();
 				}
 				case "enqueue":
 				case "rebuild": {
-					await backend.enqueue(runtime.settings.getAgentDir(), runtime.cwd, runtime.session);
-					await runtime.output("Memory consolidation enqueued.");
+					try {
+						await backend.enqueue(runtime.settings.getAgentDir(), runtime.cwd, runtime.session);
+						await runtime.output("Memory consolidation enqueued.");
+					} catch (error) {
+						await runtime.output(
+							`Memory enqueue failed: ${error instanceof Error ? error.message : String(error)}`,
+						);
+					}
 					return commandConsumed();
 				}
 				case "stats":
@@ -2013,6 +2026,10 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			if (runtime.session.isStreaming) return usage("Cannot move while streaming.", runtime);
 			if (!command.args) return usage("Usage: /move <path>", runtime);
 			const resolvedPath = resolveToCwd(command.args, runtime.cwd);
+			if (path.resolve(resolvedPath) === path.resolve(runtime.sessionManager.getCwd())) {
+				await runtime.output(`Already in ${resolvedPath}.`);
+				return commandConsumed();
+			}
 			try {
 				const stat = await fs.stat(resolvedPath);
 				if (!stat.isDirectory()) {
@@ -2020,6 +2037,12 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				}
 			} catch {
 				return usage(`Directory does not exist: ${resolvedPath}`, runtime);
+			}
+			let memoryTransition: MemoryBackendWorkspaceTransition | undefined;
+			try {
+				memoryTransition = await runtime.session.suspendMemoryBackendForWorkspaceTransition();
+			} catch (err) {
+				return usage(`Move cancelled: ${errorMessage(err)}`, runtime);
 			}
 			try {
 				await runtime.settings.flush();
@@ -2029,11 +2052,44 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			try {
 				await runtime.session.moveSession(resolvedPath);
 			} catch (err) {
-				return usage(`Move failed: ${errorMessage(err)}`, runtime);
+				const partiallyMoved = path.resolve(runtime.sessionManager.getCwd()) !== path.resolve(runtime.cwd);
+				if (memoryTransition) {
+					try {
+						await memoryTransition.complete({ restart: !partiallyMoved });
+					} catch (restartError) {
+						await runtime.output(`Memory backend restore failed: ${errorMessage(restartError)}`);
+					}
+				}
+				return usage(
+					partiallyMoved
+						? `Move partially applied; memory remains inactive: ${errorMessage(err)}`
+						: `Move failed: ${errorMessage(err)}`,
+					runtime,
+				);
 			}
-			setProjectDir(resolvedPath);
-			await runtime.settings.reloadForCwd(resolvedPath);
-			applyProviderGlobalsFromSettings(runtime.settings);
+			try {
+				setProjectDir(resolvedPath);
+				await runtime.settings.reloadForCwd(resolvedPath);
+				applyProviderGlobalsFromSettings(runtime.settings);
+			} catch (error) {
+				try {
+					await memoryTransition?.complete({ restart: false });
+				} catch {
+					// The transition already released fail-closed; preserve the cwd error below.
+				}
+				await runtime.output(
+					`Moved to ${resolvedPath}, but destination state could not be applied; memory remains inactive: ${errorMessage(error)}`,
+				);
+				await runtime.notifyConfigChanged?.();
+				await runtime.notifyTitleChanged?.();
+				return commandConsumed();
+			}
+			try {
+				if (memoryTransition) await memoryTransition.complete();
+				else await runtime.session.reconcileMemoryBackend();
+			} catch (error) {
+				await runtime.output(`Memory backend reload failed after move: ${errorMessage(error)}`);
+			}
 			// Reload plugin/capability caches so the next prompt sees commands and
 			// capabilities scoped to the new cwd.
 			await runtime.reloadPlugins();

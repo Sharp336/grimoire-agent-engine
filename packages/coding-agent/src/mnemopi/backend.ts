@@ -86,28 +86,51 @@ export const mnemopiBackend: MemoryBackend = {
 
 		if (options.taskDepth > 0) {
 			const parent = getMnemopiSessionStateFromParent(options);
-			if (!parent) return;
-			const previous = setMnemopiSessionState(
+			if (!parent || session.isDisposed) return;
+			const state = new MnemopiSessionState({
+				sessionId,
+				config: parent.config,
 				session,
-				new MnemopiSessionState({
-					sessionId,
-					config: parent.config,
-					session,
-					aliasOf: parent,
-					hasRecalledForFirstTurn: true,
-				}),
-			);
+				aliasOf: parent,
+				hasRecalledForFirstTurn: true,
+			});
+			const previous = setMnemopiSessionState(session, state);
 			await previous?.dispose();
+			if (getMnemopiSessionState(session) !== state) {
+				if (!session.isDisposed) await state.dispose();
+				return;
+			}
 			return;
 		}
 
 		try {
-			const config = await loadMnemopiConfigWithProviders(settings, agentDir, modelRegistry, sessionId);
 			await Promise.all([loadMnemopi(), loadMnemopiCore()]);
-			await installMnemopiState(session, config);
+			while (!session.isDisposed) {
+				const liveSessionId = session.sessionId;
+				if (!liveSessionId) return;
+				const config = await loadMnemopiConfigWithProviders(settings, agentDir, modelRegistry, liveSessionId);
+				if (session.isDisposed) return;
+				if (session.sessionId !== liveSessionId) continue;
+
+				const state = new MnemopiSessionState({ sessionId: liveSessionId, config, session });
+				const previous = setMnemopiSessionState(session, state);
+				await previous?.dispose();
+				if (getMnemopiSessionState(session) !== state) {
+					if (!session.isDisposed) await state.dispose();
+					return;
+				}
+				if (session.isDisposed) return;
+				state.attachSessionListeners();
+				return;
+			}
 		} catch (error) {
 			logger.warn("Mnemopi: backend startup failed; memory backend inert.", { error: String(error) });
 		}
+	},
+
+	async stop({ session, consolidateTimeoutMs }): Promise<void> {
+		const state = setMnemopiSessionState(session, undefined);
+		await state?.dispose({ timeoutMs: consolidateTimeoutMs });
 	},
 
 	async buildDeveloperInstructions(_agentDir, settings, session): Promise<string | undefined> {

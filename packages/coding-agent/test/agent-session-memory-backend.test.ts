@@ -146,4 +146,25 @@ describe("AgentSession memory backend lifecycle", () => {
 		expect(maxRunning).toBe(1);
 		expect(calls).toBe(2);
 	});
+
+	it("stops the live backend reconciler within the requested disposal budget", async () => {
+		const current = createSession(async () => []);
+		let stopCalls = 0;
+		let stopBudget: number | undefined;
+		current.setMemoryBackendReconciler({
+			depth: 0,
+			parentSession: () => undefined,
+			relatedSessions: () => [current],
+			start: async () => {},
+			stop: async options => {
+				stopCalls++;
+				stopBudget = options?.consolidateTimeoutMs;
+			},
+		});
+
+		await current.dispose({ mnemopiConsolidateTimeoutMs: 123 });
+
+		expect(stopCalls).toBe(1);
+		expect(stopBudget).toBe(123);
+	});
 });
