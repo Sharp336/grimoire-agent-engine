@@ -1727,6 +1727,16 @@ export class AuthStorage {
 		return true;
 	}
 
+	#damagedStoreError(cause?: unknown): Error {
+		const storePath = this.#store.databasePath;
+		return new Error(
+			storePath
+				? `Credential store at ${storePath} is damaged. ${sqliteRepairGuidance(storePath, { restrictPermissions: true })}`
+				: `Credential store is damaged. ${sqliteRepairGuidance(undefined)}`,
+			cause === undefined ? undefined : { cause },
+		);
+	}
+
 	#readPersistedCredentialBlock(
 		credentialId: number,
 		providerKey: string,
@@ -6390,11 +6400,11 @@ export class AuthStorage {
 	 * Broker-server seam: list non-expired persisted blocks for snapshot entries.
 	 */
 	listCredentialBlocks(credentialIds: readonly number[]): StoredCredentialBlock[] {
-		if (this.#storeDamaged) return [];
+		if (this.#storeDamaged) throw this.#damagedStoreError();
 		try {
 			return this.#store.listCredentialBlocks?.(credentialIds) ?? [];
 		} catch (err) {
-			if (this.#latchStoreDamage(err, "listCredentialBlocks", {})) return [];
+			if (this.#latchStoreDamage(err, "listCredentialBlocks", {})) throw this.#damagedStoreError(err);
 			throw err;
 		}
 	}
