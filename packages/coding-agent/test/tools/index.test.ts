@@ -322,7 +322,7 @@ describe("createTools", () => {
 		expect(session.isToolActive?.("read")).toBe(false);
 	});
 
-	it("HIDDEN_TOOLS contains yield and goal", () => {
-		expect(Object.keys(HIDDEN_TOOLS).sort()).toEqual(["goal", "yield"]);
+	it("HIDDEN_TOOLS contains yield, goal and mission", () => {
+		expect(Object.keys(HIDDEN_TOOLS).sort()).toEqual(["goal", "mission", "yield"]);
 	});
 });

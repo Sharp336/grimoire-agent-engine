@@ -8,7 +8,7 @@ import { editToolRenderer } from "../edit/renderer";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { goalToolRenderer } from "../goals/tools/goal-tool";
 import { lspToolRenderer } from "../lsp/render";
-import { missionToolRenderer } from "../missions/tools/mission-tool";
+import { missionToolRenderer } from "../missions/tools/mission-render";
 import type { Theme } from "../modes/theme/theme";
 import { taskToolRenderer } from "../task/renderer";
 import { webSearchToolRenderer } from "../web/search/render";
