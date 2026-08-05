@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Windows hosts now get tailored shell guidance in the system prompt and bash tool description: the model is told the bash tool stays an embedded POSIX bash (bash syntax, forward-slash or quoted backslash paths) and how to invoke cmd.exe / PowerShell explicitly, instead of inferring cmd/PowerShell syntax from the win32 workstation block.
+
 ## [17.2.9] - 2026-08-05
 
 ### Breaking Changes

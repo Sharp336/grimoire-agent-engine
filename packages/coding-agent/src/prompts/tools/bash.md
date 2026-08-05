@@ -4,7 +4,8 @@ Use ONLY for one binary or a short pipeline that computes a fact (`wc -l`, `sort
 {{#if hasEval}}Inline scripts, heredocs, `$(…)`, complex control flow/quoting, and non-trivial pipelines → `eval`.{{else}}Inline scripts, heredocs, `$(…)`, and complex control flow → a purpose-built tool or checked-in script.{{/if}}
 
 <instruction>
-- Set `cwd` instead of `cd`; use `env: { NAME: "…" }` for multiline/quote-heavy values.
+{{#if isWindows}}- Windows host, but this tool is an embedded POSIX bash: write bash syntax (`&&`, `$VAR`, `C:/fwd/slash` or quoted `'C:\back\slash'` paths). cmd/PowerShell syntax (`%VAR%`, `$env:X`, `-and`) never parses here; run native tooling as a program: `cmd.exe /c "…"`, `powershell -NoProfile -Command "…"`.
+{{/if}}- Set `cwd` instead of `cd`; use `env: { NAME: "…" }` for multiline/quote-heavy values.
 - `pty: true` only for terminal interaction (`sudo`, `ssh`).
 - Order-dependent commands use `&&` in one call; independent calls may run concurrently.
 - Internal URIs (`skill://`, `agent://`, …) auto-resolve to paths.

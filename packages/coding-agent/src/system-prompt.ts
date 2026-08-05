@@ -889,6 +889,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		hasMemoryRoot: memoryRootEnabled,
 		securityEnabled,
 		hasObsidian: hasObsidian(),
+		isWindows: os.platform() === "win32",
 		includeWorkspaceTree,
 		renderMermaid,
 		xdevTools,
