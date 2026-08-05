@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getWorktreeDir, hashPath, isEnoent } from "@oh-my-pi/pi-utils";
+import { getWorktreeDir, hashPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import type { GitStatusSummary, GitWorktreeEntry } from "../utils/git";
 import * as git from "../utils/git";
 import type {
@@ -453,8 +453,8 @@ export class MissionWorkspaceManager {
 		});
 	}
 
-	async release(descriptor: MissionWorkspaceDescriptor): Promise<void> {
-		await git.withRepoLock(descriptor.repoRoot, () => this.#removeWorkspace(descriptor));
+	async release(descriptor: MissionWorkspaceDescriptor, options: { expectedHead?: string } = {}): Promise<void> {
+		await git.withRepoLock(descriptor.repoRoot, () => this.#removeWorkspace(descriptor, options.expectedHead));
 	}
 
 	async releaseIfEmpty(descriptor: MissionWorkspaceDescriptor): Promise<boolean> {
@@ -588,8 +588,11 @@ export class MissionWorkspaceManager {
 	 * refuse a worktree holding uncommitted work, and a path that is not a registered
 	 * worktree is never deleted — unowned state is preserved, never reclaimed. Only a
 	 * feature owns a branch; a validator worktree is detached at a recorded head.
+	 * When the caller names the accepted handoff head, a feature branch whose head no
+	 * longer equals it was moved after integration-advance and is preserved, never
+	 * force-deleted.
 	 */
-	async #removeWorkspace(descriptor: MissionWorkspaceDescriptor): Promise<void> {
+	async #removeWorkspace(descriptor: MissionWorkspaceDescriptor, expectedHead?: string): Promise<void> {
 		const entries = await git.worktree.list(descriptor.repoRoot);
 		const entry = findWorktreeEntry(entries, descriptor.path);
 		if (entry) {
@@ -607,6 +610,18 @@ export class MissionWorkspaceManager {
 			);
 		}
 		if (descriptor.kind === "feature") {
+			if (expectedHead !== undefined) {
+				const branchHead = await git.ref.resolve(descriptor.repoRoot, toLocalBranchRef(descriptor.branch));
+				if (branchHead !== expectedHead) {
+					logger.info("Mission feature branch preserved: head moved after the accepted handoff", {
+						featureId: descriptor.featureId,
+						branch: descriptor.branch,
+						expectedHead,
+						actualHead: branchHead,
+					});
+					return;
+				}
+			}
 			await git.branch.tryDelete(descriptor.repoRoot, descriptor.branch);
 		}
 	}

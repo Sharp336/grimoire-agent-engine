@@ -44,7 +44,7 @@ import type { AgentSession, AgentSessionEvent, Prewalk } from "../session/agent-
 import type { ArtifactManager } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
-import type { ClientBridge } from "../session/client-bridge";
+import type { ClientBridge, ClientBridgePermissionOutcome } from "../session/client-bridge";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
 import type { MissionChildOwnerEntry } from "../session/session-entries";
 import { SessionManager } from "../session/session-manager";
@@ -138,6 +138,38 @@ export function createDelegatedParentApprovalUIContext(parent: ExtensionUIContex
 		setTheme: theme => parent.setTheme(theme),
 		getToolsExpanded: () => parent.getToolsExpanded(),
 		setToolsExpanded: expanded => parent.setToolsExpanded(expanded),
+	};
+}
+
+/**
+ * Forward the parent client bridge while enforcing the mission approval timeout
+ * ({@link MISSION_PARENT_APPROVAL_TIMEOUT_MS}) on permission prompts: an
+ * ACP/bridge-only mission child must fail closed instead of waiting on the
+ * client forever. Timeout returns `cancelled`, which the permission gate maps
+ * to a denial.
+ */
+export function createDelegatedParentApprovalClientBridge(parent: ClientBridge): ClientBridge {
+	const requestPermission = parent.requestPermission;
+	if (!requestPermission) return parent;
+	return {
+		...parent,
+		requestPermission: async (toolCall, options, signal) => {
+			if (signal?.aborted) return { outcome: "cancelled" };
+			type RaceResult = { kind: "permission"; outcome: ClientBridgePermissionOutcome } | { kind: "timeout" };
+			const { promise: timeoutPromise, resolve: resolveTimeout } = Promise.withResolvers<RaceResult>();
+			const timer = setTimeout(() => resolveTimeout({ kind: "timeout" }), MISSION_PARENT_APPROVAL_TIMEOUT_MS);
+			try {
+				const raced = await Promise.race([
+					requestPermission
+						.call(parent, toolCall, options, signal)
+						.then((outcome): RaceResult => ({ kind: "permission", outcome })),
+					timeoutPromise,
+				]);
+				return raced.kind === "timeout" ? { outcome: "cancelled" } : raced.outcome;
+			} finally {
+				clearTimeout(timer);
+			}
+		},
 	};
 }
 
@@ -2986,7 +3018,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					setChildToolUIContext(delegatedUi, true);
 				}
 				if (parentApproval.clientBridge) {
-					childSession.setClientBridge(parentApproval.clientBridge);
+					// Bridge-only (ACP) children get the same fail-closed approval
+					// timeout as the delegated UI path.
+					childSession.setClientBridge(createDelegatedParentApprovalClientBridge(parentApproval.clientBridge));
 				}
 			};
 			applyParentApprovalDelegate(session, setToolUIContext);

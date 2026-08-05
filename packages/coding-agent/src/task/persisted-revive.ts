@@ -3,18 +3,34 @@ import * as fs from "node:fs/promises";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import { MCPManager } from "../mcp/manager";
+import { isMissionTerminal } from "../missions/state";
 import type { PersistedSubagentReviverFactory } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
+import type { MissionChildOwnerEntry } from "../session/session-entries";
 import { SessionManager } from "../session/session-manager";
 import {
+	createDelegatedParentApprovalClientBridge,
 	createDelegatedParentApprovalUIContext,
 	createMCPProxyTools,
 	createSubagentSettings,
 	initializeDelegatedParentApprovalRunner,
 } from "./executor";
+
+/**
+ * A fixed mission child may revive only while its mission is still live and
+ * the child remains the feature's current worker. A `retry_fresh` release
+ * keeps the old id in `feature.workerSessionIds`, and restore() re-registers a
+ * persisted reviver for every historical id, so registration alone cannot
+ * prove the child is still current — the mission state snapshot can.
+ */
+function isCurrentMissionWorker(session: AgentSession, owner: MissionChildOwnerEntry, agentId: string): boolean {
+	const state = session.missionRuntime.snapshot();
+	if (!state || state.id !== owner.missionId || isMissionTerminal(state)) return false;
+	return state.features.find(feature => feature.id === owner.featureId)?.currentWorkerSessionId === agentId;
+}
 
 /**
  * Ambient context the reviver needs at revive time. The top-level session is
@@ -74,6 +90,10 @@ export function createPersistedSubagentReviverFactory(
 			if (!missionOwner || missionOwner.ownerSessionId !== ctx.session.sessionManager.getSessionId()) {
 				return undefined;
 			}
+			// A released worker (retry_fresh, cancel_feature, feature completion,
+			// or a terminal mission) must stay transcript-only: reviving it would
+			// resurrect a session the mission has already replaced or torn down.
+			if (!isCurrentMissionWorker(ctx.session, missionOwner, ref.id)) return undefined;
 		}
 		// taskDepth drives real capability gating (task-spawn allowance, memory
 		// startup, …); derive it from the persisted parent chain rather than
@@ -87,6 +107,12 @@ export function createPersistedSubagentReviverFactory(
 			parentId = registry.get(parentId)?.parentId;
 		}
 		return async expectedRef => {
+			// State can move between reviver resolution and the revive itself
+			// (the adoption is cached by the lifecycle): re-verify so a worker
+			// released in the interim is refused rather than resurrected.
+			if (isFixedMissionChild && missionOwner && !isCurrentMissionWorker(ctx.session, missionOwner, ref.id)) {
+				throw new Error(`Cannot revive mission child ${ref.id}: its mission released it or is no longer active.`);
+			}
 			// Re-open fresh on every revive: park closes the writer, so this takes
 			// the single-writer lock cleanly and restores the full message history.
 			const reopened = await SessionManager.open(sessionFile, undefined, undefined, {
@@ -159,8 +185,11 @@ export function createPersistedSubagentReviverFactory(
 				if (delegatedUi) {
 					setToolUIContext(delegatedUi, true);
 				}
+				// F28: a bridge-only (ACP) cold-revived mission child must fail closed
+				// under the same 300s mission approval timeout as the live path, not
+				// hang on the client until the inactivity abort.
 				const bridge = ctx.session.clientBridge;
-				if (bridge) session.setClientBridge(bridge);
+				if (bridge) session.setClientBridge(createDelegatedParentApprovalClientBridge(bridge));
 				if (delegatedUi) initializeDelegatedParentApprovalRunner(session, delegatedUi);
 			}
 			// Clamp the active set to the persisted list: createAgentSession's

@@ -7,7 +7,7 @@
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
@@ -16,7 +16,7 @@ import { resolveScheduleDueAtMs } from "../session/session-schedule";
 import { framedBlock, renderStatusLine, truncateToWidth } from "../tui";
 import type { ToolSession } from ".";
 import type { OutputMeta } from "./output-meta";
-import { formatErrorDetail, TRUNCATE_LENGTHS } from "./render-utils";
+import { formatErrorDetail, replaceTabs, TRUNCATE_LENGTHS } from "./render-utils";
 import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
@@ -142,23 +142,43 @@ interface ScheduleRenderArgs {
 	cancel?: string;
 }
 
-function describeCall(args: ScheduleRenderArgs | undefined): string {
-	if (args?.cancel) return "cancel";
-	if (args?.delayMs !== undefined) return `in ${args.delayMs}ms`;
-	if (args?.atIso) return `at ${args.atIso}`;
+/**
+ * Streamed/partial tool calls hand the renderer arbitrary decoded JSON, so every
+ * field is treated as unknown and narrowed before use. Model-supplied strings are
+ * tab-replaced and width-capped so they cannot punch layout holes in the TUI.
+ */
+function coerceScheduleRenderArgs(args: unknown): ScheduleRenderArgs {
+	if (!isRecord(args)) return {};
+	return {
+		delayMs: typeof args.delayMs === "number" ? args.delayMs : undefined,
+		atIso: typeof args.atIso === "string" ? args.atIso : undefined,
+		prompt: typeof args.prompt === "string" ? args.prompt : undefined,
+		cancel: typeof args.cancel === "string" ? args.cancel : undefined,
+	};
+}
+
+function sanitizeMeta(value: string): string {
+	return truncateToWidth(replaceTabs(value), TRUNCATE_LENGTHS.TITLE);
+}
+
+function describeCall(args: ScheduleRenderArgs): string {
+	if (args.cancel) return "cancel";
+	if (args.delayMs !== undefined) return `in ${args.delayMs}ms`;
+	if (args.atIso) return `at ${sanitizeMeta(args.atIso)}`;
 	return "create";
 }
 
 export const scheduleToolRenderer = {
-	renderCall(args: ScheduleRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
+	renderCall(rawArgs: unknown, _options: RenderResultOptions, uiTheme: Theme): Component {
+		const args = coerceScheduleRenderArgs(rawArgs);
 		const description = describeCall(args);
 		const meta: string[] = [];
-		const trimmed = args?.prompt?.trim();
+		const trimmed = args.prompt?.trim();
 		if (trimmed) {
-			meta.push(uiTheme.italic(uiTheme.fg("muted", `"${truncateToWidth(trimmed, TRUNCATE_LENGTHS.TITLE)}"`)));
+			meta.push(uiTheme.italic(uiTheme.fg("muted", `"${sanitizeMeta(trimmed)}"`)));
 		}
-		if (args?.cancel) {
-			meta.push(uiTheme.fg("muted", args.cancel));
+		if (args.cancel) {
+			meta.push(uiTheme.fg("muted", sanitizeMeta(args.cancel)));
 		}
 		return new Text(renderStatusLine({ icon: "pending", title: "Schedule", description, meta }, uiTheme), 0, 0);
 	},
@@ -167,7 +187,7 @@ export const scheduleToolRenderer = {
 		result: { content: Array<{ type: string; text?: string }>; details?: ScheduleToolDetails; isError?: boolean },
 		_options: RenderResultOptions,
 		uiTheme: Theme,
-		args?: ScheduleRenderArgs,
+		rawArgs?: unknown,
 	): Component {
 		const fallbackText = result.content?.find(part => part.type === "text")?.text ?? "";
 		const details = result.details;
@@ -177,7 +197,7 @@ export const scheduleToolRenderer = {
 		} else if (details?.op === "create") {
 			description = "create";
 		} else {
-			description = describeCall(args);
+			description = describeCall(coerceScheduleRenderArgs(rawArgs));
 		}
 
 		if (result.isError) {

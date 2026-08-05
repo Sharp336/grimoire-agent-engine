@@ -1,16 +1,21 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import {
+	MISSION_INACTIVITY_TIMEOUT_MS,
 	MISSION_STATE_CUSTOM_TYPE,
 	type MissionFeature,
 	type MissionHandoff,
+	type MissionMilestone,
+	type MissionPlan,
 	MissionRuntime,
 	MissionRuntimeError,
 	type MissionRuntimeHost,
 	type MissionState,
 } from "../../src/missions";
+import type { MissionFeatureWorkspaceDescriptor } from "../../src/missions/types";
 import { MissionWorkspaceManager } from "../../src/missions/workspace";
 import type { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import type { SessionEntry } from "../../src/session/session-entries";
+import * as structuredSubagent from "../../src/task/structured-subagent";
 import type { ToolSession } from "../../src/tools";
 
 function state(overrides: Partial<MissionState> = {}): MissionState {
@@ -54,6 +59,10 @@ function validation(id: string): MissionFeature {
 	};
 }
 
+function milestone(id: string, featureIds: string[]): MissionMilestone {
+	return { id, description: id, featureIds, validators: ["scrutiny"], kind: "planned" };
+}
+
 function validatorFailure(): MissionHandoff {
 	return {
 		kind: "validation",
@@ -69,6 +78,7 @@ function runtime(
 	initial: MissionState | null = null,
 	failPersistence = false,
 	released: string[] = [],
+	onRelease?: (workerSessionId: string) => void,
 ): MissionRuntime {
 	const entries: SessionEntry[] = initial
 		? [
@@ -117,6 +127,7 @@ function runtime(
 			({
 				release: async (workerSessionId: string) => {
 					released.push(workerSessionId);
+					onRelease?.(workerSessionId);
 					return true;
 				},
 			}) as AgentLifecycleManager,
@@ -300,5 +311,139 @@ describe("MissionRuntime", () => {
 		const mission = runtime(null, true);
 		await expect(mission.start("goal")).rejects.toThrow("disk full");
 		expect(mission.snapshot()).toBeNull();
+	});
+
+	test("rejects a remediation that depends on the milestone's own validator (F12)", async () => {
+		const failed: MissionFeature = { ...validation("validate"), status: "in_progress" };
+		const mission = runtime(
+			state({
+				status: "orchestrator_turn",
+				milestones: [milestone("milestone", ["validate"])],
+				features: [failed],
+				pendingHandoff: validatorFailure(),
+			}),
+		);
+		await mission.restore();
+
+		await expect(
+			mission.revisePending({
+				addFeatures: [{ id: "repair", description: "r", preconditions: ["validate"], expectedBehavior: ["r"] }],
+			}),
+		).rejects.toThrow("cannot depend on validator");
+		expect(mission.snapshot()?.status).toBe("orchestrator_turn");
+	});
+
+	test("persists the cancelled snapshot before releasing the worker (F13)", async () => {
+		const released: string[] = [];
+		let statusAtRelease: string | undefined;
+		let mission: MissionRuntime | null = null;
+		const active: MissionFeature = { ...implementation("feature"), workerSessionIds: ["worker"] };
+		mission = runtime(
+			state({ milestones: [milestone("milestone", ["feature"])], features: [active] }),
+			false,
+			released,
+			() => {
+				statusAtRelease = mission?.snapshot()?.status;
+			},
+		);
+		await mission.restore();
+
+		const cancelled = await mission.cancel();
+
+		expect(cancelled.status).toBe("cancelled");
+		expect(released).toEqual(["worker"]);
+		expect(statusAtRelease).toBe("cancelled");
+	});
+
+	test("pause() refuses to mutate a foreign-owner mission (F14)", async () => {
+		const mission = runtime(state({ ownerSessionId: "other-owner", features: [implementation("feature")] }));
+		await mission.restore();
+
+		await expect(mission.pause("user_requested")).rejects.toThrow("read-only");
+		expect(mission.snapshot()?.status).toBe("running");
+	});
+
+	test("cancel() refuses to mutate a foreign-owner mission (F14)", async () => {
+		const mission = runtime(state({ ownerSessionId: "other-owner", features: [implementation("feature")] }));
+		await mission.restore();
+
+		await expect(mission.cancel()).rejects.toThrow("read-only");
+		expect(mission.snapshot()?.status).toBe("running");
+	});
+
+	test("re-reads state inside the tail so a concurrent set_plan cannot overwrite from a stale snapshot (F20)", async () => {
+		const plan = (goal: string): MissionPlan => ({
+			goal,
+			runbook: { setup: [], services: [], userTests: [] },
+			milestones: [{ id: "m1", description: "M1", featureIds: ["f1"], validators: ["scrutiny"] }],
+			features: [{ id: "f1", description: "F1", milestoneId: "m1", preconditions: [], expectedBehavior: ["works"] }],
+		});
+		const mission = runtime();
+		await mission.start("goal");
+
+		// Both calls capture "planning" before either enters the serialized tail. The second
+		// must build on the awaiting_input state the first committed, so revisions advance to 2
+		// rather than both writing revision 1 off the same stale planning snapshot.
+		await Promise.all([mission.setPlan(plan("first")), mission.setPlan(plan("second"))]);
+
+		expect(mission.snapshot()?.revision).toBe(2);
+	});
+
+	test("persists the inactivity recovery intent before releasing the worker (F22)", async () => {
+		const released: string[] = [];
+		let statusAtRelease: string | undefined;
+		let mission: MissionRuntime | null = null;
+
+		const descriptor: MissionFeatureWorkspaceDescriptor = {
+			id: "ws-feature",
+			ownerSessionId: "owner",
+			repoRoot: "/repo",
+			path: "/repo-feature",
+			featureId: "feature",
+			phase: "ready",
+			kind: "feature",
+			branch: "mission/feature",
+			baseSha: "base123",
+		};
+		vi.spyOn(MissionWorkspaceManager.prototype, "reserveFeature").mockResolvedValue(descriptor);
+		vi.spyOn(MissionWorkspaceManager.prototype, "materialize").mockResolvedValue(descriptor);
+		vi.spyOn(structuredSubagent, "reserveStructuredSubagentId").mockResolvedValue("worker-1");
+
+		const childStarted = Promise.withResolvers<void>();
+		vi.spyOn(structuredSubagent, "runStructuredSubagent").mockImplementation(
+			options =>
+				new Promise<never>((_resolve, reject) => {
+					options.signal?.addEventListener("abort", () => reject(new Error("inactivity abort")), { once: true });
+					childStarted.resolve();
+				}),
+		);
+
+		mission = runtime(
+			state({ milestones: [milestone("milestone", ["feature"])], features: [implementation("feature")] }),
+			false,
+			released,
+			() => {
+				statusAtRelease = mission?.snapshot()?.status;
+			},
+		);
+		await mission.restore();
+
+		vi.useFakeTimers();
+		try {
+			const runPromise = mission.runNext();
+			await childStarted.promise;
+			vi.advanceTimersByTime(MISSION_INACTIVITY_TIMEOUT_MS + 1);
+			expect(await runPromise).toBeNull();
+		} finally {
+			vi.useRealTimers();
+		}
+
+		expect(released).toEqual(["worker-1"]);
+		// The recovery intent (pending + fresh-run + worker_inactive pause) is authoritative
+		// BEFORE the child is released, so a failed release can never strand an in_progress feature.
+		expect(statusAtRelease).toBe("paused");
+		const snapshot = mission.snapshot();
+		expect(snapshot?.pauseReason).toBe("worker_inactive");
+		expect(snapshot?.features[0]).toMatchObject({ status: "pending", nextRunIntent: { mode: "fresh" } });
 	});
 });

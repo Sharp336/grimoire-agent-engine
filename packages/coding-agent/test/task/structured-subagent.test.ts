@@ -359,10 +359,12 @@ describe("structured subagent primitive", () => {
 			return result();
 		});
 
+		const approvalDelegate = { kind: "parent" as const, clientBridge: { capabilities: {} } };
 		const run = await runStructuredSubagent(
 			request({
 				session: fixedSession,
 				workspace: { cwd: "/fixed", binding: "fixed" },
+				approvalDelegate,
 				missionOwner: {
 					missionId: "mission",
 					ownerSessionId: "owner",
@@ -375,11 +377,41 @@ describe("structured subagent primitive", () => {
 		);
 
 		expect(options).toMatchObject({ cwd: "/fixed", workspace: { cwd: "/fixed", binding: "fixed" } });
+		expect(options?.approvalDelegate).toBe(approvalDelegate);
 		expect(options?.contextFiles).toBeUndefined();
 		expect(options?.workspaceTree).toBeUndefined();
 		expect(options?.promptTemplates).toBeUndefined();
 		expect(options?.rules).toBeUndefined();
 		await fs.rm(run.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("refuses fixed-workspace dispatch without a parent approval delegate before executor side effects", async () => {
+		mockDiscovery();
+		const workspace = { cwd: "/fixed", binding: "fixed" as const };
+		const missionOwner = {
+			missionId: "mission",
+			ownerSessionId: "owner",
+			role: "implementation" as const,
+			milestoneId: "milestone",
+			featureId: "feature",
+		};
+
+		// Headless host wiring returns no delegate at all.
+		await expect(resolveEffectiveSubagentPolicy(request({ workspace, missionOwner }))).rejects.toThrow(
+			"Fixed-workspace subagents require a parent approval delegate",
+		);
+
+		// A delegate without any live channel cannot mediate approvals either.
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ workspace, missionOwner, approvalDelegate: { kind: "parent" } })),
+		).rejects.toThrow("Fixed-workspace subagents require a parent approval delegate");
+
+		// The refusal is a preflight decision: no artifact lease, no executor dispatch.
+		const run = vi.spyOn(executorModule, "runSubprocess").mockImplementation(async () => result());
+		await expect(runStructuredSubagent(request({ workspace, missionOwner }))).rejects.toThrow(
+			StructuredSubagentError,
+		);
+		expect(run).not.toHaveBeenCalled();
 	});
 
 	it("unregisters and removes a temporary lease when output ID allocation fails", async () => {

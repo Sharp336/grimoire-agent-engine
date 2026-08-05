@@ -3,6 +3,7 @@ import * as path from "node:path";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import type { MissionState, MissionStatus } from "@oh-my-pi/pi-coding-agent/missions/types";
 import type { AgentRef } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
@@ -90,7 +91,49 @@ async function createPersistedSession(
 	return sessionFile;
 }
 
-function createFactory(cwd: string, persistedSessionId = "", providerSessionId = "provider-session") {
+/** The mission snapshot the owning session would hold while `feature` is in progress. */
+function createMissionSnapshot(overrides: {
+	currentWorkerSessionId?: string;
+	status?: MissionStatus;
+	missionId?: string;
+}): MissionState {
+	return {
+		version: 1,
+		id: overrides.missionId ?? "mission",
+		ownerSessionId: "owner",
+		revision: 1,
+		goal: "goal",
+		autoAccept: false,
+		status: overrides.status ?? "running",
+		runbook: { setup: [], services: [], userTests: [] },
+		milestones: [
+			{ id: "milestone", description: "milestone", featureIds: ["feature"], validators: [], kind: "planned" },
+		],
+		features: [
+			{
+				id: "feature",
+				description: "feature",
+				milestoneId: "milestone",
+				preconditions: [],
+				expectedBehavior: [],
+				kind: "implementation",
+				status: "in_progress",
+				workerSessionIds: ["persisted-restricted", "replacement-worker"],
+				currentWorkerSessionId: overrides.currentWorkerSessionId,
+				retryBudgetUsed: 1,
+			},
+		],
+		createdAt: 0,
+		updatedAt: 0,
+	};
+}
+
+function createFactory(
+	cwd: string,
+	persistedSessionId = "",
+	providerSessionId = "provider-session",
+	missionSnapshot: () => MissionState | null = () => null,
+) {
 	const parentSession = {
 		sessionId: providerSessionId,
 		sessionManager: {
@@ -98,6 +141,7 @@ function createFactory(cwd: string, persistedSessionId = "", providerSessionId =
 			getSessionId: () => persistedSessionId,
 			getArtifactManager: () => undefined,
 		},
+		missionRuntime: { snapshot: missionSnapshot },
 	} as unknown as AgentSession;
 	return createPersistedSubagentReviverFactory({
 		session: parentSession,
@@ -178,18 +222,64 @@ describe("persisted subagent revival", () => {
 		const cwd = makeTempDir("@pi-fixed-revive-");
 		const sessionFile = await createPersistedSession(cwd, false, { ownerSessionId: "owner" });
 		const ref = createRef(sessionFile);
+		const currentWorker = () => createMissionSnapshot({ currentWorkerSessionId: ref.id });
 
-		expect(await createFactory(cwd, "other")(ref)).toBeUndefined();
+		// Owner gate: rejected even while the mission still lists the child as current.
+		expect(await createFactory(cwd, "other", "provider-session", currentWorker)(ref)).toBeUndefined();
 
 		let capturedOptions: CreateAgentSessionOptions | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			capturedOptions = options;
 			return { session: createRevivedSession([]) } as CreateAgentSessionResult;
 		});
-		const reviver = await createFactory("/parent", "owner")(ref);
+		const reviver = await createFactory("/parent", "owner", "provider-session", currentWorker)(ref);
 		if (!reviver) throw new Error("Expected fixed workspace reviver");
 		await reviver(ref);
 
 		expect(capturedOptions?.cwd).toBe(cwd);
+	});
+
+	it("rejects a fixed child whose mission released it or is no longer active", async () => {
+		const cwd = makeTempDir("@pi-released-revive-");
+		const sessionFile = await createPersistedSession(cwd, false, { ownerSessionId: "owner" });
+		const ref = createRef(sessionFile);
+		const createAgentSessionSpy = vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+			throw new Error("createAgentSession must not run for a released mission child");
+		});
+
+		// retry_fresh: the released id stays in workerSessionIds but is no longer current.
+		const replaced = () => createMissionSnapshot({ currentWorkerSessionId: "replacement-worker" });
+		expect(await createFactory(cwd, "owner", "provider-session", replaced)(ref)).toBeUndefined();
+
+		// Terminal mission: no child of it may resurrect.
+		const completed = () => createMissionSnapshot({ currentWorkerSessionId: ref.id, status: "completed" });
+		expect(await createFactory(cwd, "owner", "provider-session", completed)(ref)).toBeUndefined();
+
+		// A different mission now owns the session.
+		const otherMission = () => createMissionSnapshot({ currentWorkerSessionId: ref.id, missionId: "other-mission" });
+		expect(await createFactory(cwd, "owner", "provider-session", otherMission)(ref)).toBeUndefined();
+
+		// The mission is not restored/active in this process at all.
+		expect(await createFactory(cwd, "owner")(ref)).toBeUndefined();
+
+		expect(createAgentSessionSpy).not.toHaveBeenCalled();
+	});
+
+	it("refuses to revive a fixed child released after its reviver was resolved", async () => {
+		const cwd = makeTempDir("@pi-stale-revive-");
+		const sessionFile = await createPersistedSession(cwd, false, { ownerSessionId: "owner" });
+		const ref = createRef(sessionFile);
+		let currentWorkerSessionId: string | undefined = ref.id;
+		const snapshot = () => createMissionSnapshot({ currentWorkerSessionId });
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(
+			async () => ({ session: createRevivedSession([]) }) as CreateAgentSessionResult,
+		);
+
+		const reviver = await createFactory(cwd, "owner", "provider-session", snapshot)(ref);
+		if (!reviver) throw new Error("Expected a reviver while the child is still current");
+
+		// retry_fresh lands between reviver resolution and the revive itself.
+		currentWorkerSessionId = "replacement-worker";
+		await expect(reviver(ref)).rejects.toThrow("its mission released it or is no longer active");
 	});
 });

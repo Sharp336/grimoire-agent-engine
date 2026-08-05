@@ -186,7 +186,6 @@ import {
 	toReasoningEffort,
 } from "../thinking";
 import { shutdownTinyTitleClient } from "../tiny/title-client";
-import type { ToolSession } from "../tools";
 import { type AskToolDetails, type AskToolInput, recoverAskQuestions } from "../tools/ask";
 import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
@@ -4287,6 +4286,9 @@ export class AgentSession {
 			ownerSessionId: () => this.sessionManager.getSessionId(),
 			cwd: () => this.sessionManager.getCwd(),
 			sessionManager: this.sessionManager,
+			// Live UI/transcript surfacing of mission update+progress events is deferred to a
+			// later PR in this stack; state is still durably persisted via sessionManager, so
+			// discarding the emit hooks only omits real-time display, not authoritative state.
 			emitUpdated: () => {},
 			emitProgress: () => {},
 			sendHiddenMessage: async message => {
@@ -4325,7 +4327,7 @@ export class AgentSession {
 				const available = new Set(this.skills.map(skill => skill.name));
 				for (const name of names) if (!available.has(name)) throw new Error(`Unknown mission skill: ${name}`);
 			},
-			getToolSession: () => config.toolSession as ToolSession,
+			getToolSession: () => config.toolSession,
 			isPlanModeActive: () => this.#planModeState?.enabled === true,
 			isGoalModeActive: () => this.#goalModeState?.enabled === true,
 			isVibeModeActive: () => this.#vibeModeState?.enabled === true,
@@ -4340,8 +4342,12 @@ export class AgentSession {
 	}
 
 	#assertMissionTransitionAllowed(action: string): void {
-		if (this.#missionRuntime.isBusy() || this.#missionRuntime.hasActiveMission()) {
-			throw new Error(`MISSION_BUSY: Cannot ${action} while a mission is active.`);
+		// Gate only on in-flight work: an idle (paused/awaiting) mission must fall
+		// through so newSession/fork/switchSession can prepareToSuspend() and then
+		// restore() it across the transition. Blocking on any owned nonterminal
+		// mission made those suspend/restore paths unreachable.
+		if (this.#missionRuntime.isBusy()) {
+			throw new Error(`MISSION_BUSY: Cannot ${action} while mission work is in flight.`);
 		}
 	}
 
@@ -7784,7 +7790,7 @@ export class AgentSession {
 		this.#todo.syncFromBranch();
 		this.#rearmSessionSchedules();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
-
+		await this.#missionRuntime.restore();
 		this.#branchSummaryAbortController = undefined;
 
 		// Emit session_tree event; only handlers can mutate session entries, so skip

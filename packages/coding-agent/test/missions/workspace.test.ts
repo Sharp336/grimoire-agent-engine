@@ -303,4 +303,54 @@ describe("MissionWorkspaceManager", () => {
 		gitRun(root, ["branch", "-D", "unowned-workspace"]);
 		gitRun(root, ["branch", "-D", descriptor.branch]);
 	});
+
+	test("preserves a feature branch that moved after the accepted handoff", async () => {
+		const { root, repository } = await makeRepository();
+		roots.push(root);
+		const manager = new MissionWorkspaceManager();
+		const descriptor = (await manager.materialize(
+			await manager.reserveFeature("owner", mission(repository), feature),
+		)) as MissionFeatureWorkspaceDescriptor;
+		await fs.writeFile(path.join(descriptor.path, "feature.txt"), "done\n");
+		gitRun(descriptor.path, ["add", "feature.txt"]);
+		gitRun(descriptor.path, ["commit", "-q", "-m", "feature"]);
+		const acceptedHead = gitRun(descriptor.path, ["rev-parse", "HEAD"]);
+		await expect(manager.advanceIntegration(repository, descriptor, handoff([acceptedHead]))).resolves.toMatchObject({
+			kind: "advanced",
+		});
+
+		// A commit lands on the feature branch after integration-advance but before cleanup.
+		await fs.writeFile(path.join(descriptor.path, "late.txt"), "late\n");
+		gitRun(descriptor.path, ["add", "late.txt"]);
+		gitRun(descriptor.path, ["commit", "-q", "-m", "late"]);
+		const movedHead = gitRun(descriptor.path, ["rev-parse", "HEAD"]);
+		expect(movedHead).not.toBe(acceptedHead);
+
+		await manager.release(descriptor, { expectedHead: acceptedHead });
+
+		expect(gitRun(root, ["rev-parse", descriptor.branch])).toBe(movedHead);
+		await expect(fs.stat(descriptor.path)).rejects.toMatchObject({ code: "ENOENT" });
+		gitRun(root, ["branch", "-D", descriptor.branch]);
+	});
+
+	test("deletes a feature branch still at the accepted handoff head", async () => {
+		const { root, repository } = await makeRepository();
+		roots.push(root);
+		const manager = new MissionWorkspaceManager();
+		const descriptor = (await manager.materialize(
+			await manager.reserveFeature("owner", mission(repository), feature),
+		)) as MissionFeatureWorkspaceDescriptor;
+		await fs.writeFile(path.join(descriptor.path, "feature.txt"), "done\n");
+		gitRun(descriptor.path, ["add", "feature.txt"]);
+		gitRun(descriptor.path, ["commit", "-q", "-m", "feature"]);
+		const acceptedHead = gitRun(descriptor.path, ["rev-parse", "HEAD"]);
+		await expect(manager.advanceIntegration(repository, descriptor, handoff([acceptedHead]))).resolves.toMatchObject({
+			kind: "advanced",
+		});
+
+		await manager.release(descriptor, { expectedHead: acceptedHead });
+
+		expect(gitRun(root, ["branch", "--list", descriptor.branch])).toBe("");
+		await expect(fs.stat(descriptor.path)).rejects.toMatchObject({ code: "ENOENT" });
+	});
 });

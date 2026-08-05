@@ -1476,7 +1476,7 @@ export async function runRootCommand(
 						}),
 					)
 				: undefined;
-		const { initialMessage, initialImages } = buildInitialMessage({
+		let { initialMessage, initialImages } = buildInitialMessage({
 			parsed: initialArgs,
 			fileText: processedFiles?.text,
 			fileImages: processedFiles?.images,
@@ -1517,12 +1517,16 @@ export async function runRootCommand(
 		AgentLifecycleManager.global().setPersistedSubagentReviverFactory(persistedReviverFactory, persistedReviveTtlMs);
 		session.setMissionPersistedReviverFactory(persistedReviverFactory, persistedReviveTtlMs);
 		await session.restoreMission();
-		if (parsedArgs.mission) {
+		const missionStarted = parsedArgs.mission;
+		if (missionStarted) {
 			const missionGoal = initialMessage ?? initialArgs.messages.join(" ");
 			await session.startMission(missionGoal, {
 				workerModel: parsedArgs.missionWorkerModel,
 				validatorModel: parsedArgs.missionValidatorModel,
 			});
+			// The mission runtime queues the planning turn; suppress the ordinary initial prompt.
+			initialMessage = undefined;
+			initialArgs.messages = [];
 		}
 		if (parsedArgs.apiKey && !sessionOptions.model && session.model) {
 			authStorage.setRuntimeApiKey(session.model.provider, parsedArgs.apiKey);

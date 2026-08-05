@@ -48,7 +48,18 @@ function scheduleEntriesOf(entries: readonly SessionEntry[]): CustomEntry[] {
 	);
 }
 
-function createHarness(initialNowMs = 1_000_000) {
+interface ScheduleHarness {
+	controller: SessionScheduleController;
+	entries: SessionEntry[];
+	hiddenMessages: HiddenMessage[];
+	timers: ManagedTimers;
+	host: SessionScheduleFireHost;
+	now: () => number;
+	setNow: (next: number) => void;
+	dispose: () => void;
+}
+
+function createHarness(initialNowMs = 1_000_000): ScheduleHarness {
 	let nowMs = initialNowMs;
 	const entries: SessionEntry[] = [];
 	const hiddenMessages: HiddenMessage[] = [];
@@ -94,7 +105,7 @@ function createHarness(initialNowMs = 1_000_000) {
 }
 
 describe("session-schedule", () => {
-	let harness: ReturnType<typeof createHarness> | undefined;
+	let harness: ScheduleHarness | undefined;
 
 	beforeEach(() => {
 		vi.useFakeTimers();
@@ -223,12 +234,9 @@ describe("session-schedule", () => {
 	it("does not deliver after a fire loses session liveness during flush", async () => {
 		harness = createHarness(1_000_000);
 		let live = true;
-		let releaseFlush: (() => void) | undefined;
-		const flushStarted = new Promise<void>(resolve => {
-			releaseFlush = resolve;
-		});
+		const flushGate = Promise.withResolvers<void>();
 		harness.host.isLive = () => live;
-		harness.host.flush = () => flushStarted;
+		harness.host.flush = () => flushGate.promise;
 		harness.entries.push(
 			scheduleCustomEntry({ id: "liveness", dueAtMs: harness.now(), prompt: "must not deliver", createdAt: 0 }),
 		);
@@ -237,11 +245,14 @@ describe("session-schedule", () => {
 
 		vi.advanceTimersByTime(0);
 		await flushMicrotasks();
-		expect(scheduleEntriesOf(harness.entries)).toHaveLength(2);
+		// The fired tombstone is only persisted after a successful enqueue.
+		expect(scheduleEntriesOf(harness.entries)).toHaveLength(1);
 		live = false;
-		releaseFlush?.();
+		flushGate.resolve();
 		await flushMicrotasks();
 		expect(harness.hiddenMessages).toEqual([]);
+		// Liveness loss aborts delivery but keeps the wake pending for a later session.
+		expect(foldPendingSessionSchedules(harness.entries).map(entry => entry.id)).toEqual(["liveness"]);
 	});
 
 	it("does not deliver after the transcript branch changes during flush", async () => {
@@ -260,12 +271,15 @@ describe("session-schedule", () => {
 
 		vi.advanceTimersByTime(0);
 		await flushMicrotasks();
-		expect(scheduleEntriesOf(harness.entries)).toHaveLength(2);
+		// The fired tombstone is only persisted after a successful enqueue.
+		expect(scheduleEntriesOf(harness.entries)).toHaveLength(1);
 
 		harness.host.getEntries = () => [];
 		flush.resolve();
 		await flushMicrotasks();
 		expect(harness.hiddenMessages).toEqual([]);
+		// No tombstone is written onto the new branch; the old branch keeps the wake.
+		expect(scheduleEntriesOf(harness.entries)).toHaveLength(1);
 	});
 
 	it("delivers a committed wake after an unrelated same-branch rearm during flush", async () => {
@@ -329,6 +343,102 @@ describe("session-schedule", () => {
 
 		armed.disarm();
 		rearmed.disarm();
+	});
+
+	it("a failed enqueue leaves the wake pending and a re-arm delivers it once", async () => {
+		harness = createHarness(1_000_000);
+		const local = harness;
+		let failSends = true;
+		local.host.sendHiddenMessage = async message => {
+			if (failSends) throw new Error("queue unavailable");
+			local.hiddenMessages.push({ ...message });
+		};
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+		const created = local.controller.create({ delayMs: 1_000, prompt: "retry me" });
+		vi.advanceTimersByTime(1_000);
+		await flushMicrotasks();
+
+		// Regression: the fired tombstone used to be persisted before sendHiddenMessage,
+		// so one failed enqueue permanently dropped the wake. Failure must leave the
+		// create pending — no delivery, no tombstone, and no hot retry loop.
+		expect(local.hiddenMessages).toEqual([]);
+		expect(scheduleEntriesOf(local.entries)).toHaveLength(1);
+		expect(foldPendingSessionSchedules(local.entries).map(entry => entry.id)).toEqual([created.id]);
+		expect(vi.getTimerCount()).toBe(0);
+		expect(warn).toHaveBeenCalledWith("session-schedule fire failed", expect.objectContaining({ id: created.id }));
+
+		// The pending intent re-arms and delivers once the enqueue works again.
+		failSends = false;
+		local.setNow(local.now() + 1_000);
+		local.controller.rearmFromEntries();
+		vi.advanceTimersByTime(0);
+		await flushMicrotasks();
+
+		expect(local.hiddenMessages).toEqual([
+			{
+				customType: SESSION_SCHEDULE_MESSAGE_TYPE,
+				content: "retry me",
+				deliverAs: "nextTurn",
+				triggerTurn: false,
+			},
+		]);
+		expect(foldPendingSessionSchedules(local.entries)).toEqual([]);
+	});
+
+	it("a freshly created delayMs:0 schedule fires immediately and triggers a turn", async () => {
+		harness = createHarness(1_000_000);
+		harness.controller.create({ delayMs: 0, prompt: "wake now" });
+
+		expect(vi.getTimerCount()).toBe(1);
+		vi.advanceTimersByTime(0);
+		await flushMicrotasks();
+
+		// Regression: a due-now create took the restored-overdue path and queued the
+		// wake without starting a turn. Unlike a restored overdue schedule (turn
+		// boundary, triggerTurn: false, covered above), a fresh delayMs:0 fires a turn.
+		expect(harness.hiddenMessages).toEqual([
+			{
+				customType: SESSION_SCHEDULE_MESSAGE_TYPE,
+				content: "wake now",
+				deliverAs: "nextTurn",
+				triggerTurn: true,
+			},
+		]);
+		expect(foldPendingSessionSchedules(harness.entries)).toEqual([]);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("an unrelated rearm during an in-flight delivery does not double-fire the wake", async () => {
+		harness = createHarness(1_000_000);
+		const local = harness;
+		const sendGate = Promise.withResolvers<void>();
+		let sendsStarted = 0;
+		local.host.sendHiddenMessage = async message => {
+			sendsStarted += 1;
+			await sendGate.promise;
+			local.hiddenMessages.push({ ...message });
+		};
+
+		local.controller.create({ delayMs: 1_000, prompt: "in flight" });
+		vi.advanceTimersByTime(1_000);
+		await flushMicrotasks();
+		expect(sendsStarted).toBe(1);
+
+		// An unrelated create rearms every pending schedule while the first delivery is
+		// still awaiting its enqueue; the in-flight id must not be armed a second time.
+		const second = local.controller.create({ delayMs: 5_000, prompt: "unrelated" });
+		expect(vi.getTimerCount()).toBe(1);
+
+		sendGate.resolve();
+		await flushMicrotasks();
+		expect(local.hiddenMessages.map(message => message.content)).toEqual(["in flight"]);
+		expect(foldPendingSessionSchedules(local.entries).map(entry => entry.id)).toEqual([second.id]);
+
+		vi.advanceTimersByTime(5_000);
+		await flushMicrotasks();
+		expect(local.hiddenMessages.map(message => message.content)).toEqual(["in flight", "unrelated"]);
+		expect(foldPendingSessionSchedules(local.entries)).toEqual([]);
 	});
 
 	it("resolveScheduleDueAtMs rejects both delayMs+atIso and neither", () => {

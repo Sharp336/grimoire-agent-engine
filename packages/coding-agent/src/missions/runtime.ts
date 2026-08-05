@@ -231,7 +231,7 @@ export interface MissionRuntimeHost {
 	resolveChildModels(worker?: string | string[], validator?: string | string[]): Promise<void>;
 	/** Throw when any name is absent from the session's loaded skill inventory. */
 	assertSkillsExist(names: readonly string[]): void;
-	getToolSession(): ToolSession;
+	getToolSession(): ToolSession | undefined;
 	isPlanModeActive(): boolean;
 	isGoalModeActive(): boolean;
 	isVibeModeActive(): boolean;
@@ -539,6 +539,9 @@ export class MissionRuntime implements MissionRuntimeContract {
 		if (goal.trim().length === 0) {
 			throw new MissionRuntimeError("Mission goal must not be blank.");
 		}
+		// Fail closed before any persistence if this session cannot host mission
+		// workers; accepting a mission that can never dispatch would strand it.
+		this.#requireToolSession();
 
 		const now = this.#now();
 		const created: MissionState = {
@@ -596,10 +599,17 @@ export class MissionRuntime implements MissionRuntimeContract {
 			retryBudgetUsed: 0,
 		}));
 
-		return this.#withTransitionTail(() =>
-			this.#commit({
-				...state,
-				revision: state.revision + 1,
+		const planned = await this.#withTransitionTail(() => {
+			// Re-read and re-validate inside the serialized tail: two concurrent set_plan
+			// calls both capture "planning" outside it, so without this the second would
+			// overwrite the first after the mission already moved to awaiting_input.
+			const current = this.#requireOwnedState();
+			if (current.status !== "planning" && current.status !== "awaiting_input") {
+				throw new MissionRuntimeError(`set_plan is valid only while planning (status is "${current.status}").`);
+			}
+			return this.#commit({
+				...current,
+				revision: current.revision + 1,
 				goal: plan.goal,
 				runbook: {
 					setup: [...plan.runbook.setup],
@@ -609,8 +619,12 @@ export class MissionRuntime implements MissionRuntimeContract {
 				milestones,
 				features,
 				status: "awaiting_input",
-			}),
-		);
+			});
+		});
+		// autoAccept (a start() option persisted on the mission) means skip the manual
+		// approval gate: accept and initialize immediately instead of stopping here.
+		if (planned.autoAccept) return this.accept();
+		return planned;
 	}
 
 	async accept(): Promise<MissionState> {
@@ -760,6 +774,25 @@ export class MissionRuntime implements MissionRuntimeContract {
 				}
 			}
 		}
+		// A remediation runs before the milestone's validators, and every reset validator
+		// gains a precondition on it (below). So a remediation may not itself depend on one
+		// of those validators: that would form a validator<->remediation cycle that persists
+		// successfully yet leaves both features permanently unrunnable. Reject it here,
+		// before any irreversible workspace release.
+		const milestoneValidatorIds = new Set(
+			state.features
+				.filter(item => item.kind === "validation" && item.milestoneId === milestone.id)
+				.map(item => item.id),
+		);
+		for (const remediation of remediations) {
+			for (const precondition of remediation.preconditions) {
+				if (milestoneValidatorIds.has(precondition)) {
+					throw new MissionRuntimeError(
+						`Remediation feature "${remediation.id}" cannot depend on validator "${precondition}" of the milestone it remediates.`,
+					);
+				}
+			}
+		}
 		assertAcyclicFeaturePreconditions([...state.features, ...remediations]);
 
 		// Every validator checkout released here must be clean; a dirty one is preserved.
@@ -818,7 +851,7 @@ export class MissionRuntime implements MissionRuntimeContract {
 	}
 
 	async pause(reason: MissionPauseReason): Promise<MissionState> {
-		const state = this.#requireState();
+		const state = this.#requireOwnedState();
 		if (isMissionTerminal(state)) {
 			throw new MissionRuntimeError(`Mission ${state.id} is already ${state.status}.`);
 		}
@@ -857,6 +890,15 @@ export class MissionRuntime implements MissionRuntimeContract {
 				break;
 			case "repository_dirty":
 				this.#pauseRequested = false;
+				// #initializeRepository() only runs while status is "initializing"; the pause
+				// left it "paused", so re-enter initializing before retrying or the cleaned
+				// checkout would stay paused with no continuation.
+				await this.#withTransitionTail(() =>
+					this.#commit(
+						{ ...this.#requireState(), status: "initializing", pauseReason: undefined },
+						{ mode: "mission" },
+					),
+				);
 				resumed = await this.#initializeRepository();
 				break;
 			case "workspace_conflict":
@@ -887,7 +929,7 @@ export class MissionRuntime implements MissionRuntimeContract {
 	}
 
 	async cancel(): Promise<MissionState> {
-		const state = this.#requireState();
+		const state = this.#requireOwnedState();
 		if (isMissionTerminal(state)) return state;
 
 		this.#cancelRequested = true;
@@ -897,10 +939,33 @@ export class MissionRuntime implements MissionRuntimeContract {
 		if (this.#inFlight) await this.#inFlight.catch(() => {});
 
 		const current = this.#requireState();
-		const owner = this.#isOwner();
-		if (owner) {
+		const features = current.features.map(feature =>
+			feature.status === "pending" || feature.status === "in_progress"
+				? { ...feature, status: "cancelled" as const, currentWorkerSessionId: undefined, nextRunIntent: undefined }
+				: feature,
+		);
+		// Persist the terminal snapshot BEFORE the irreversible worker/workspace cleanup:
+		// a write that fails after cleanup would leave the authoritative state describing an
+		// active feature whose child and worktree are already gone. Terminal restore re-runs
+		// the same idempotent cleanup (#restoreTerminalCleanup), so a crash between this
+		// commit and the cleanup below recovers cleanly.
+		const cancelled = await this.#withTransitionTail(() =>
+			this.#commit(
+				{
+					...current,
+					features,
+					activeRun: undefined,
+					pendingHandoff: undefined,
+					integrationPending: undefined,
+					status: "cancelled",
+					pauseReason: undefined,
+				},
+				{ progress: { type: "cancelled" }, mode: "none" },
+			),
+		);
+		if (this.#isOwner()) {
 			// Preserve every nonempty workspace; only clean, unmodified ones are removed.
-			for (const feature of current.features) {
+			for (const feature of cancelled.features) {
 				if (feature.status === "completed") continue;
 				await this.#releaseWorkers(feature);
 				const workspace = feature.workspace;
@@ -922,26 +987,6 @@ export class MissionRuntime implements MissionRuntimeContract {
 				}
 			}
 		}
-
-		const features = current.features.map(feature =>
-			feature.status === "pending" || feature.status === "in_progress"
-				? { ...feature, status: "cancelled" as const, currentWorkerSessionId: undefined, nextRunIntent: undefined }
-				: feature,
-		);
-		const cancelled = await this.#withTransitionTail(() =>
-			this.#commit(
-				{
-					...current,
-					features,
-					activeRun: undefined,
-					pendingHandoff: undefined,
-					integrationPending: undefined,
-					status: "cancelled",
-					pauseReason: undefined,
-				},
-				{ progress: { type: "cancelled" }, mode: "none" },
-			),
-		);
 		await this.#deactivateTool();
 		this.#unregisterAllRevivers();
 		return cancelled;
@@ -952,7 +997,8 @@ export class MissionRuntime implements MissionRuntimeContract {
 		this.#clearInactivity();
 		this.#childAbort = undefined;
 		this.#suspended = true;
-		if (!state || isMissionTerminal(state)) return;
+		// A foreign (inspection-only) mission is never mutated: skip the pause snapshot.
+		if (!state || isMissionTerminal(state) || !this.#isOwner()) return;
 		if (state.status !== "paused") {
 			await this.pause("user_requested");
 		} else {
@@ -1015,9 +1061,18 @@ export class MissionRuntime implements MissionRuntimeContract {
 		return this.#inFlight !== undefined || this.#externalWork > 0;
 	}
 
-	/** Nonterminal owned mission that blocks destructive session transitions. */
-	hasActiveMission(): boolean {
-		return this.#state !== null && !isMissionTerminal(this.#state) && this.#isOwner();
+	/**
+	 * A mission-capable session MUST carry a ToolSession — child dispatch reserves
+	 * subagent ids and runs structured workers through it. `start()` calls this
+	 * before persisting anything so a session without one fails closed instead of
+	 * accepting a mission that can never dispatch.
+	 */
+	#requireToolSession(): ToolSession {
+		const toolSession = this.#host.getToolSession();
+		if (!toolSession) {
+			throw new MissionRuntimeError("Missions require a ToolSession, but this session has none.");
+		}
+		return toolSession;
 	}
 
 	/** Parent system-prompt context while a mission is active; null when there is none. */
@@ -1405,7 +1460,7 @@ export class MissionRuntime implements MissionRuntimeContract {
 		} else if (mode === "initial" && feature.currentWorkerSessionId) {
 			workerSessionId = feature.currentWorkerSessionId;
 		} else {
-			workerSessionId = await reserveStructuredSubagentId(this.#host.getToolSession(), {
+			workerSessionId = await reserveStructuredSubagentId(this.#requireToolSession(), {
 				label: `mission-${feature.id}`,
 			});
 		}
@@ -1580,7 +1635,7 @@ export class MissionRuntime implements MissionRuntimeContract {
 		}
 
 		const invocation = await runStructuredSubagent({
-			session: this.#host.getToolSession(),
+			session: this.#requireToolSession(),
 			invocationKind: "task",
 			assignment: message,
 			agent: agentName,
@@ -1616,7 +1671,10 @@ export class MissionRuntime implements MissionRuntimeContract {
 
 	/** Inactivity: the turn is consumed, the worker id is dropped, and no handoff is recorded. */
 	async #settleInactivity(dispatch: { workerSessionId: string; turn: number }, featureId: string): Promise<void> {
-		await this.#releaseWorkerId(dispatch.workerSessionId);
+		// Persist the fresh-worker recovery intent BEFORE releasing the child: if the
+		// append fails after release, the authoritative state would still name an
+		// in_progress feature with an active-run token whose worker no longer exists,
+		// and runNext could neither redispatch nor recover it.
 		await this.#withTransitionTail(async () => {
 			const state = this.#activeRunFor(featureId, dispatch.workerSessionId, dispatch.turn);
 			if (!state) return;
@@ -1638,6 +1696,7 @@ export class MissionRuntime implements MissionRuntimeContract {
 			);
 			this.#pauseRequested = true;
 		});
+		await this.#releaseWorkerId(dispatch.workerSessionId);
 	}
 
 	async #settleTurn(
@@ -1864,9 +1923,13 @@ export class MissionRuntime implements MissionRuntimeContract {
 		const feature = featureById(completed, featureId);
 		if (feature) {
 			await this.#releaseWorkers(feature);
-			await this.#guardExternal(() => this.#workspaces.release(workspace)).catch(error =>
-				logger.warn("Mission feature workspace release failed", { featureId, error: String(error) }),
-			);
+			await this.#guardExternal(() =>
+				// F27: the integration advance left `repository.integrationHead` at the
+				// accepted feature-branch head; pass it so a commit landing after
+				// integration-advance but before cleanup preserves the branch instead
+				// of being force-deleted.
+				this.#workspaces.release(workspace, { expectedHead: repository.integrationHead }),
+			).catch(error => logger.warn("Mission feature workspace release failed", { featureId, error: String(error) }));
 		}
 		return this.#requireState();
 	}
@@ -2225,6 +2288,12 @@ export class MissionRuntime implements MissionRuntimeContract {
 			return;
 		}
 		if (parentHead === integrationHead) {
+			if (integrationHead !== repository.integrationHead) {
+				// Both refs point at the same commit, but it is NOT the validated mission
+				// head — an out-of-band move of both branches, never the mission result.
+				await this.#pauseWith("parent_diverged");
+				return;
+			}
 			// Already applied (crash after the fast-forward, or an out-of-band merge of the exact head).
 			await this.#finishCompleted();
 			return;

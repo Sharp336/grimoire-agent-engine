@@ -118,7 +118,11 @@ export interface StructuredSubagentRequest {
 	isolation?: StructuredSubagentIsolationControls;
 	/** Fixed mission worktree; omitted callers keep parent cwd. */
 	workspace?: PersistentSubagentWorkspace;
-	/** Parent-mediated approvals; omitted callers keep the yolo subagent boundary. */
+	/**
+	 * Parent-mediated approvals; non-mission callers may omit it and keep the yolo
+	 * subagent boundary. Fixed-workspace mission children MUST supply a delegate
+	 * with a live channel — preflight refuses dispatch without one (fail closed).
+	 */
 	approvalDelegate?: ParentApprovalDelegate;
 	/** Mission ownership markers written to session_init for cold revive. */
 	missionOwner?: MissionChildOwnerEntry;
@@ -270,11 +274,20 @@ export async function resolveEffectiveSubagentPolicy(
 	const spawnPolicy = resolveSpawnPolicy(request.session.getSessionSpawns());
 	const agentName = request.agent?.trim() || spawnPolicy.defaultAgent;
 	const planMode = request.session.getPlanModeState?.()?.enabled === true;
-	if (request.workspace?.binding === "fixed" && !request.missionOwner) {
-		throw new StructuredSubagentError(
-			"preflight",
-			"Fixed-workspace subagents require mission ownership for safe revival.",
-		);
+	if (request.workspace?.binding === "fixed") {
+		if (!request.missionOwner) {
+			throw new StructuredSubagentError(
+				"preflight",
+				"Fixed-workspace subagents require mission ownership for safe revival.",
+			);
+		}
+		const delegate = request.approvalDelegate;
+		if (delegate?.kind !== "parent" || (!delegate.uiContext && !delegate.clientBridge)) {
+			throw new StructuredSubagentError(
+				"preflight",
+				"Fixed-workspace subagents require a parent approval delegate; refusing to dispatch onto the unattended yolo boundary.",
+			);
+		}
 	}
 	assertPlanControlsAllowed(request, planMode);
 	assertDepthAndSpawnAllowed(request, agentName);
@@ -407,7 +420,10 @@ function buildExecutorOptions(
 	const enableMCP = !policy.planMode && (session.enableMCP ?? true);
 	return {
 		cwd: request.workspace?.cwd ?? session.cwd,
-		additionalDirectories: session.additionalDirectories,
+		// A fixed mission workspace confines the child to request.workspace.cwd; forwarding
+		// the parent's additionalDirectories would let read/write/bash escape the promised
+		// worktree (and cold revives inherit it), so drop them when a workspace is set.
+		additionalDirectories: request.workspace ? [] : session.additionalDirectories,
 		agent: policy.effectiveAgent,
 		task: renderSubagentPrompt(request.assignment),
 		assignment: request.assignment.trim(),

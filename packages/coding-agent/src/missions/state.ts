@@ -864,15 +864,40 @@ function preconditionsSatisfied(feature: MissionFeature, byId: Map<string, Missi
 }
 
 /**
+ * The first milestone (in plan order) that still owns a non-terminal feature.
+ * Selection is confined to it so later milestones never run ahead of this
+ * milestone's implementation and validation — the runtime's validation barrier.
+ */
+function earliestUnfinishedMilestoneId(state: MissionState): string | undefined {
+	for (const milestone of state.milestones) {
+		const unfinished = state.features.some(
+			feature =>
+				feature.milestoneId === milestone.id && (feature.status === "pending" || feature.status === "in_progress"),
+		);
+		if (unfinished) {
+			return milestone.id;
+		}
+	}
+	return undefined;
+}
+
+/**
  * Cancel unsatisfiable pending implementation features, then return at most one next pending feature
- * in plan order. Never schedules in parallel.
+ * in plan order, confined to the earliest unfinished milestone. Never schedules in parallel.
  */
 export function nextMissionFeature(state: MissionState): NextMissionFeatureResult {
 	const cancelledState = cancelUnsatisfiableFeatures(state);
 	const byId = new Map(cancelledState.features.map(feature => [feature.id, feature]));
+	// Confine selection to the earliest unfinished milestone: a later milestone's
+	// feature must not build on an integration head that this milestone's validators
+	// have not yet accepted. With no milestones recorded, fall back to a global scan.
+	const barrierMilestoneId = earliestUnfinishedMilestoneId(cancelledState);
 
 	for (const feature of cancelledState.features) {
 		if (feature.status !== "pending") {
+			continue;
+		}
+		if (barrierMilestoneId !== undefined && feature.milestoneId !== barrierMilestoneId) {
 			continue;
 		}
 		if (!preconditionsSatisfied(feature, byId)) {
