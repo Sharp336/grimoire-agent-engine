@@ -6,56 +6,23 @@ import starlight from '@astrojs/starlight';
 // https://astro.build/config
 
 // GitHub Pages serves this site under the project path (/oh-my-pi/), so every
-// internal URL needs the `base` prefix. Astro prefixes the links it generates
-// (sidebar, pagination, assets) but not absolute paths authored in markdown —
-// and the docs convention is exactly those (`[Sessions](/features/sessions/)`,
-// per src/content/docs/_template.md). This rehype plugin prepends `base` to
-// root-relative hrefs/srcs in rendered content so authored links resolve under
-// the project path, with zero content edits and surviving upstream syncs.
-const base = '/oh-my-pi/';
-function rehypePrefixBase() {
-	const prefix = base.replace(/\/$/, '');
-	/**
-	 * @param {string} value
-	 * @returns {string}
-	 */
-	const rewrite = (value) =>
-		value.startsWith('/') && !value.startsWith('//') && !value.startsWith(prefix)
-			? `${prefix}${value}`
-			: value;
-	/**
-	 * @param {Root | Element} node
-	 * @returns {void}
-	 */
-	const visit = (node) => {
-		if (node.type === 'element') {
-			const { properties } = node;
-			if (properties) {
-				if (typeof properties.href === 'string') properties.href = rewrite(properties.href);
-				if (typeof properties.src === 'string') properties.src = rewrite(properties.src);
-			}
-		}
-		for (const child of node.children) {
-			if (child.type === 'element') visit(child);
-		}
-	};
-	return /** @param {Root} tree */ (tree) => {
-		visit(tree);
-	};
-}
+// internal URL needs the `base` prefix. Astro/Starlight auto-prefixes the
+// links it generates (sidebar, pagination, processed assets). Authored
+// markdown links must include the prefix explicitly because no rehype
+// pipeline runs over Starlight's content collections with this configuration.
 
 export default defineConfig({
 	site: 'https://nibblebot.github.io',
-	base,
-	markdown: {
-		rehypePlugins: [rehypePrefixBase],
-	},
+	base: '/oh-my-pi/',
 	integrations: [
 		starlight({
 			title: 'omp',
 			description: 'Documentation for omp, the coding agent with the IDE wired in.',
 			logo: {
-				src: './src/assets/logo.svg',
+				dark: './src/assets/logo.svg',
+				light: './src/assets/logo-light.svg',
+				alt: 'omp',
+				replacesTitle: true,
 			},
 			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/can1357/oh-my-pi' }],
 			components: {
@@ -139,7 +106,18 @@ export default defineConfig({
 						{ label: 'CLI Reference', slug: 'reference/cli' },
 						{ label: 'Slash Commands', slug: 'reference/slash-commands' },
 						{ label: 'Configuration Reference', slug: 'reference/configuration' },
+						{ label: 'Settings — Models', slug: 'reference/settings/models' },
+						{ label: 'Settings — Generation', slug: 'reference/settings/generation' },
+						{ label: 'Settings — Tools', slug: 'reference/settings/tools' },
+						{ label: 'Settings — Context', slug: 'reference/settings/context' },
+						{ label: 'Settings — Interface', slug: 'reference/settings/interface' },
+						{ label: 'Settings — Interaction', slug: 'reference/settings/interaction' },
+						{ label: 'Settings — Providers', slug: 'reference/settings/providers' },
 					],
+				},
+				{
+					label: 'About',
+					items: [{ label: 'Coverage Badges', slug: 'about/coverage' }],
 				},
 			],
 		}),
