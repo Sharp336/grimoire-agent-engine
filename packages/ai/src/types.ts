@@ -2,6 +2,7 @@ export * from "@oh-my-pi/pi-catalog/effort";
 export * from "@oh-my-pi/pi-catalog/types";
 
 import type { Type } from "@oh-my-pi/omptype";
+import type { ZodLikeSchema } from "@oh-my-pi/omptype/zod";
 import type {
 	DeleteArgs,
 	DeleteResult,
@@ -1145,7 +1146,7 @@ export type TJsonSchema = Record<string, unknown>;
  * Canonical authoring uses Zod or ArkType. Extension compat may supply a JSON
  * Schema object (including TypeBox static schema objects).
  */
-export type TSchema = ZodType | Type | TJsonSchema;
+export type TSchema = ZodType | Type | ZodLikeSchema<unknown> | TJsonSchema;
 
 /** Resolve parameter types for tool execution / handlers. */
 export type Static<S> = S extends ZodType
