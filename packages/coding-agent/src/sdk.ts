@@ -522,7 +522,12 @@ export interface CreateAgentSessionOptions {
 	agentId?: string;
 	/** Display name for the agent in IRC. Default: "main" or "sub". */
 	agentDisplayName?: string;
-	/** Optional shared agent registry for IRC routing. Default: AgentRegistry.global(). */
+	/**
+	 * Whether peer agents can address this session via IRC (`hub send`).
+	 * Default `true`. Set `false` for throwaway sessions (side conversations)
+	 * whose isolation boundary must not be crossed by inbound peer messages.
+	 */
+	messageable?: boolean;
 	agentRegistry?: AgentRegistry;
 	/**
 	 * Registry generation authorized for this creation. `null` requires the id
@@ -3031,6 +3036,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			session: null,
 			sessionFile: sessionManager.getSessionFile() ?? null,
 			status: "running" as const,
+			messageable: options.messageable ?? true,
 		};
 		registeredAgentRef =
 			options.expectedAgentRef === undefined

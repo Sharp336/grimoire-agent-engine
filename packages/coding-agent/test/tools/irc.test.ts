@@ -666,6 +666,42 @@ describe("IRC", () => {
 			expect(peerIds).not.toContain("0-Main/advisor");
 		});
 
+		it("op=list hides non-messageable refs from the peer roster", async () => {
+			const sub = makeFakeSession();
+			registry.register({ id: "0-Worker", displayName: "task", kind: "sub", session: sub.session });
+			registry.register({
+				id: "0-Side",
+				displayName: "side",
+				kind: "sub",
+				session: makeFakeSession().session,
+				messageable: false,
+			});
+
+			const tool = new HubTool(makeToolSession(registry, "0-Main"));
+			const result = await tool.execute("call-1", { op: "list" });
+			const details = result.details as CoordinationDetails | undefined;
+			const peerIds = details?.peers?.map(peer => peer.id) ?? [];
+			expect(peerIds).toContain("0-Worker");
+			expect(peerIds).not.toContain("0-Side");
+		});
+
+		it("op=send to a non-messageable ref fails with 'not messageable'", async () => {
+			registry.register({
+				id: "0-Side",
+				displayName: "side",
+				kind: "sub",
+				session: makeFakeSession().session,
+				messageable: false,
+			});
+
+			const tool = new HubTool(makeToolSession(registry, "0-Main"));
+			const result = await tool.execute("call-1", { op: "send", to: "0-Side", message: "ping" });
+			const details = result.details as CoordinationDetails | undefined;
+			expect(details?.receipts).toEqual([
+				{ to: "0-Side", outcome: "failed", error: 'Agent "0-Side" is not messageable.' },
+			]);
+		});
+
 		it("op=send returns receipts immediately without waiting for a reply", async () => {
 			const sub = makeFakeSession();
 			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });

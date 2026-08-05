@@ -91,14 +91,16 @@ export async function executeList(
 	senderId: string,
 ): Promise<AgentToolResult<CoordinationDetails>> {
 	let refs = registry.list();
-	if (!refs.some(ref => ref.id !== senderId && ref.status !== "aborted" && ref.kind !== "advisor")) {
+	if (
+		!refs.some(ref => ref.id !== senderId && ref.status !== "aborted" && ref.kind !== "advisor" && ref.messageable)
+	) {
 		await registerPersistedSubagents(registry, registry.get(senderId)?.sessionFile);
 		refs = registry.list();
 	}
 
 	const bus = IrcBus.global();
 	const peers = refs
-		.filter(ref => ref.id !== senderId && ref.status !== "aborted" && ref.kind !== "advisor")
+		.filter(ref => ref.id !== senderId && ref.status !== "aborted" && ref.kind !== "advisor" && ref.messageable)
 		.map(ref => ({
 			id: ref.id,
 			displayName: ref.displayName,

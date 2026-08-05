@@ -1004,12 +1004,21 @@ export class CommandController {
 			try {
 				const entries = await fs.readdir(forkedArtifactDir);
 				for (const entry of entries) {
-					if (!entry.startsWith(SIDE_SESSION_FILE_PREFIX) || !entry.endsWith(".jsonl")) continue;
+					if (!entry.startsWith(SIDE_SESSION_FILE_PREFIX)) continue;
+					const entryPath = path.join(forkedArtifactDir, entry);
 					// Per-entry catch: one stubborn copy must not strand the rest.
 					try {
-						await SessionManager.removeSessionFiles(path.join(forkedArtifactDir, entry));
+						if (entry.endsWith(".jsonl")) {
+							await SessionManager.removeSessionFiles(entryPath);
+						} else {
+							// Directory-only artifact copy: indexed backends store the
+							// transcript in the backend, not on disk, but ArtifactManager
+							// still spills tool output to the physical directory. The
+							// fork copies that directory; sweep it recursively.
+							await fs.rm(entryPath, { recursive: true, force: true });
+						}
 					} catch (entryError) {
-						logger.warn("Failed to remove copied side transcript", { file: entry, error: String(entryError) });
+						logger.warn("Failed to remove copied side artifact", { file: entry, error: String(entryError) });
 					}
 				}
 			} catch (error) {
@@ -1101,6 +1110,14 @@ export class CommandController {
 			await this.ctx.settings.flush();
 		} catch (err) {
 			this.ctx.showError(`Failed to save pending settings: ${err instanceof Error ? err.message : String(err)}`);
+			return;
+		}
+
+		// Detect the no-op BEFORE disposal: moveTo returns immediately when the
+		// resolved cwd equals the current cwd, so disposing the side here would
+		// destroy a live conversation for a move that performs no relocation.
+		if (path.resolve(resolvedPath) === path.resolve(cwd)) {
+			this.ctx.showStatus(`Already in ${resolvedPath}`);
 			return;
 		}
 

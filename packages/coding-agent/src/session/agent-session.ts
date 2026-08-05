@@ -4436,6 +4436,17 @@ export class AgentSession {
 		this.#rewoundToolResultIds.clear();
 	}
 
+	/**
+	 * Clear all checkpoint/rewind runtime state. Throwaway forks (side
+	 * conversations) call this after construction to avoid inheriting the
+	 * parent's active checkpoint, which would force a rewind at the end of
+	 * the first side turn and branch back to the parent's checkpoint —
+	 * dropping the side boundary and the user's question.
+	 */
+	clearCheckpointRuntimeState(): void {
+		this.#clearCheckpointRuntimeState();
+	}
+
 	/** Drop mutable tool decisions and directives owned by the previous logical session. */
 	#clearSessionScopedToolState(): void {
 		this.agent.clearDeferredToolDirectives();

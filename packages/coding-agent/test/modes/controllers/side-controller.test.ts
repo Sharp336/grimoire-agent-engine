@@ -35,6 +35,7 @@ interface SideSessionStub {
 	prompt: () => Promise<void>;
 	dispose: () => Promise<void>;
 	getActiveToolNames: () => string[];
+	clearCheckpointRuntimeState: () => void;
 	systemPrompt: string[];
 }
 
@@ -93,6 +94,7 @@ function createSideStub(overrides?: {
 		prompt: vi.fn(overrides?.prompt ?? (async () => {})),
 		dispose: vi.fn(async () => {}),
 		getActiveToolNames: vi.fn(() => overrides?.activeToolNames ?? ["read", "bash"]),
+		clearCheckpointRuntimeState: vi.fn(),
 		systemPrompt: overrides?.systemPrompt ?? ["system prompt"],
 	};
 	return {
@@ -194,6 +196,7 @@ function createAgentSessionSpy(
 				session: null,
 				sessionFile: sideFile ?? null,
 				status: "running",
+				messageable: options.messageable ?? true,
 			},
 			options.expectedAgentRef ?? null,
 		);
@@ -445,6 +448,7 @@ describe("SideController", () => {
 					session: null,
 					sessionFile: sideFile2 ?? null,
 					status: "running",
+					messageable: options.messageable ?? true,
 				},
 				options.expectedAgentRef ?? null,
 			);
@@ -726,5 +730,60 @@ describe("SideController", () => {
 		expect(harness.ctx.showError).toHaveBeenCalledWith("disk full");
 		expect(forkSpy).not.toHaveBeenCalled();
 		expect(AgentRegistry.global().get(SIDE_AGENT_ID)).toBeUndefined();
+	});
+
+	it("registers the side ref as non-messageable for IRC isolation", async () => {
+		tempDir = TempDir.createSync("@omp-side-messageable-");
+		const harness = createContext(tempDir);
+		const { stub } = createSideStub({ activeToolNames: ["read", "bash"] });
+
+		let capturedCreateOpts: CreateAgentSessionOptions | undefined;
+		let sideFile: string | undefined;
+		const realForkFrom = SessionManager.forkFrom;
+		vi.spyOn(SessionManager, "forkFrom").mockImplementation(async (...args) => {
+			sideFile = args[4]?.sessionFile;
+			return realForkFrom(...args);
+		});
+		const createSpy = createAgentSessionSpy(stub, vi.fn(), () => sideFile);
+		const origImpl = createSpy.getMockImplementation();
+		if (!origImpl) throw new Error("createAgentSession spy has no implementation");
+		createSpy.mockImplementation(async (options?: CreateAgentSessionOptions) => {
+			if (!options) throw new Error("options required");
+			capturedCreateOpts = options;
+			return origImpl(options);
+		});
+
+		const controller = new SideController(harness.ctx);
+		await controller.start("q");
+
+		// The side ref must be non-messageable so peer IRC cannot wake or steer it.
+		expect(capturedCreateOpts?.messageable).toBe(false);
+		const ref = AgentRegistry.global().get(SIDE_AGENT_ID);
+		expect(ref?.messageable).toBe(false);
+
+		await controller.start("end");
+	});
+
+	it("clears inherited checkpoint/rewind state so the side does not rewind to the parent checkpoint", async () => {
+		tempDir = TempDir.createSync("@omp-side-checkpoint-");
+		const harness = createContext(tempDir);
+		const { stub } = createSideStub({ activeToolNames: ["read", "bash"] });
+
+		let sideFile: string | undefined;
+		const realForkFrom = SessionManager.forkFrom;
+		vi.spyOn(SessionManager, "forkFrom").mockImplementation(async (...args) => {
+			sideFile = args[4]?.sessionFile;
+			return realForkFrom(...args);
+		});
+		createAgentSessionSpy(stub, vi.fn(), () => sideFile);
+
+		const controller = new SideController(harness.ctx);
+		await controller.start("q");
+
+		// clearCheckpointRuntimeState must be called exactly once after creation
+		// to reset the parent's active checkpoint that the fork rehydrated.
+		expect(stub.clearCheckpointRuntimeState).toHaveBeenCalledTimes(1);
+
+		await controller.start("end");
 	});
 });

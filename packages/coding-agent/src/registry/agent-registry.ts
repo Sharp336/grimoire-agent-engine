@@ -43,6 +43,13 @@ export interface AgentRef {
 	lastActivity: number;
 	/** Short gist of what the agent is currently doing (latest intent or tool), for the work-aware roster. Display-only. */
 	activity?: string;
+	/**
+	 * Whether peer agents can address this ref via IRC (`hub send`). Default
+	 * `true`. Set `false` for throwaway sessions whose isolation boundary must
+	 * not be crossed by inbound peer messages — the side conversation is
+	 * user-only after the boundary marker.
+	 */
+	messageable: boolean;
 }
 
 export type AgentRefExpectation = AgentRef | AgentSession;
@@ -62,6 +69,8 @@ export interface RegisterInput {
 	session: AgentSession | null;
 	sessionFile?: string | null;
 	status?: AgentStatus;
+	/** See {@link AgentRef.messageable}. Default `true`. */
+	messageable?: boolean;
 }
 
 export class AgentRegistry {
@@ -96,6 +105,7 @@ export class AgentRegistry {
 			status: input.status ?? "running",
 			session: input.session,
 			sessionFile: input.sessionFile ?? null,
+			messageable: input.messageable ?? true,
 			createdAt: now,
 			lastActivity: now,
 		};

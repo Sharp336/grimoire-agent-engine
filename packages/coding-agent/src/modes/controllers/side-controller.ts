@@ -167,6 +167,9 @@ export class SideController {
 				enableLsp: this.ctx.settings.get("task.enableLsp") !== false,
 				agentId: SIDE_AGENT_ID,
 				agentDisplayName: "side",
+				// The side is user-only after the boundary marker: peer IRC must
+				// not wake or steer it, and the side must not send content back.
+				messageable: false,
 				taskDepth: 1,
 				parentAgentId: ownerId,
 				agentRegistry: AgentRegistry.global(),
@@ -189,6 +192,12 @@ export class SideController {
 			// 1. Clear inherited todos so the fork does not drag the parent's task.
 			side.setTodoPhases([]);
 			sideManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: [] });
+
+			// 1b. Clear inherited checkpoint/rewind state. The fork rehydrates the
+			//     parent's active checkpoint from the copied branch entries; without
+			//     this, end-of-turn enforcement forces a rewind that branches back
+			//     to the parent checkpoint, dropping the side boundary and question.
+			side.clearCheckpointRuntimeState();
 
 			// 2. Append the boundary as one message that is both model context and
 			//    a visible transcript rule. A freshly created session is idle, so

@@ -1,3 +1,4 @@
+import * as fsp from "node:fs/promises";
 import { toError } from "@oh-my-pi/pi-utils";
 import type {
 	SessionStorage,
@@ -338,6 +339,18 @@ export class IndexedSessionStorage implements SessionStorage {
 			await this.#enqueuePaths(paths, () => this.#backend.remove(paths), { trackDrain: false });
 		} catch (err) {
 			for (const [path, entry] of previous) this.#index.set(path, entry);
+			throw toError(err);
+		}
+
+		// Also remove the physical artifact directory. ArtifactManager always
+		// spills tool output to the on-disk directory at sessionPath.slice(0, -6),
+		// even when the session transcript itself lives in the indexed backend.
+		// Without this, /side end removes the backend keys but leaves spilled
+		// artifacts on disk. Tolerate missing directories (force: true) so a
+		// session that never spilled artifacts cleans up cleanly.
+		try {
+			await fsp.rm(artifactsDir, { recursive: true, force: true });
+		} catch (err) {
 			throw toError(err);
 		}
 	}

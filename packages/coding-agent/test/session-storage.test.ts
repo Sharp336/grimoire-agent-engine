@@ -201,6 +201,72 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 	});
 });
 
+describe("IndexedSessionStorage.deleteSessionWithArtifacts", () => {
+	let tempDir: string;
+
+	beforeEach(async () => {
+		tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-indexed-delete-"));
+	});
+
+	afterEach(async () => {
+		await fsp.rm(tempDir, { recursive: true, force: true });
+	});
+
+	/** Simple non-blocking in-memory backend for delete tests. */
+	class InMemoryBackend implements SessionStorageBackend {
+		readonly #files = new Map<string, string>();
+		init(): Promise<void> {
+			return Promise.resolve();
+		}
+		loadIndex(): Promise<Iterable<SessionStorageIndexEntry>> {
+			return Promise.resolve([]);
+		}
+		readFull(p: string): Promise<string | null> {
+			return Promise.resolve(this.#files.get(p) ?? null);
+		}
+		readSlices(): Promise<[string, string]> {
+			return Promise.resolve(["", ""]);
+		}
+		async writeFull(p: string, content: string): Promise<void> {
+			this.#files.set(p, content);
+		}
+		async append(p: string, line: string): Promise<void> {
+			this.#files.set(p, (this.#files.get(p) ?? "") + line);
+		}
+		updateSessionTitle(): Promise<void> {
+			return Promise.resolve();
+		}
+		truncate(): Promise<void> {
+			return Promise.resolve();
+		}
+		async remove(paths: string[]): Promise<void> {
+			for (const p of paths) this.#files.delete(p);
+		}
+		move(): Promise<void> {
+			return Promise.resolve();
+		}
+	}
+
+	it("removes the physical artifact directory alongside backend keys", async () => {
+		const sessionPath = path.join(tempDir, "side.jsonl");
+		const artifactsDir = sessionPath.slice(0, -6);
+		const backend = new InMemoryBackend();
+		const storage = new IndexedSessionStorage(backend);
+		await storage.initialize();
+		await storage.writeText(sessionPath, "session body\n");
+		// Simulate ArtifactManager spilling tool output to the physical dir.
+		await fsp.mkdir(artifactsDir, { recursive: true });
+		await Bun.write(path.join(artifactsDir, "artifact.txt"), "spilled output");
+
+		expect(fs.existsSync(artifactsDir)).toBe(true);
+
+		await storage.deleteSessionWithArtifacts(sessionPath);
+
+		expect(storage.existsSync(sessionPath)).toBe(false);
+		expect(fs.existsSync(artifactsDir)).toBe(false);
+	});
+});
+
 describe("FileSessionStorage.writeTextSync", () => {
 	let tempDir: string;
 

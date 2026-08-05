@@ -36,6 +36,7 @@ function createRef(sessionFile: string): AgentRef {
 		sessionFile,
 		createdAt: 0,
 		lastActivity: 0,
+		messageable: true,
 	};
 }
 
