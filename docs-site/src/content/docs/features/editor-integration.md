@@ -78,7 +78,7 @@ The same engine ships four wrappers:
 
 ## External editor from the TUI
 
-The TUI also hands its draft to your external editor. Press **Ctrl+G** to pop the current draft into `$VISUAL`, falling back to `$EDITOR`. The keybinding is `app.editor.external` and the chord is `Ctrl+G` by default; remap it from `/settings` → [Keybindings](/configuration/keybindings/).
+The TUI also hands its draft to your external editor. Press **Ctrl+G** to pop the current draft into `$VISUAL`, falling back to `$EDITOR`. The keybinding is `app.editor.external` and the chord is `Ctrl+G` by default; remap it from `/settings` → [Keybindings](/oh-my-pi/configuration/keybindings/).
 
 ```bash
 VISUAL="code -w" omp           # opens the draft in VS Code and waits

@@ -121,5 +121,5 @@ Inspection actions default to the current stopped child/thread/frame when the ca
 
 ## See also
 
-- [Tools: code execution](/features/tools/#code-execution) — `debug` lives next to `bash` and `eval` in the tool registry
-- [Settings](/configuration/settings/) — `debug.enabled`
+- [Tools: code execution](/oh-my-pi/features/tools/#code-execution) — `debug` lives next to `bash` and `eval` in the tool registry
+- [Settings](/oh-my-pi/configuration/settings/) — `debug.enabled`

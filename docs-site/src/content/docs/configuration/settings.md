@@ -4,7 +4,7 @@ description: Where omp settings live, how the layers merge, and how to inspect a
 coverage: A
 ---
 
-`omp` resolves settings from built-in defaults, a persistent global config file, optional project-local config, one-shot CLI overlays, and in-memory runtime overrides. Settings are plain YAML mappings; every key, type, default, and enum value comes from the settings schema. You can inspect or change any of them with `omp config` from a shell or the interactive `/settings` panel inside a session. For the full key-by-key catalog, see the [Configuration reference](/reference/configuration/).
+`omp` resolves settings from built-in defaults, a persistent global config file, optional project-local config, one-shot CLI overlays, and in-memory runtime overrides. Settings are plain YAML mappings; every key, type, default, and enum value comes from the settings schema. You can inspect or change any of them with `omp config` from a shell or the interactive `/settings` panel inside a session. For the full key-by-key catalog, see the [Configuration reference](/oh-my-pi/reference/configuration/).
 
 ## Where settings live
 
@@ -114,7 +114,7 @@ Environment variables are **not** a single settings layer. Each is read by the f
 | `PI_CODING_AGENT_DIR` | (relocates agent dir) | Moves `config.yml`, `agent.db`, and the whole agent base. |
 | `PI_CONFIG_FILES` | CLI config overlays | Platform path-list (`:` on Unix, `;` on Windows); files load in order before `--config` overlays. |
 
-Provider API keys are resolved separately (stored auth, OAuth, `models.yml`, environment, and `.env` files); see [Providers](/models/providers/) and the full [Environment variables](/configuration/environment-variables/) reference.
+Provider API keys are resolved separately (stored auth, OAuth, `models.yml`, environment, and `.env` files); see [Providers](/oh-my-pi/models/providers/) and the full [Environment variables](/oh-my-pi/configuration/environment-variables/) reference.
 
 ## Merge rules
 
@@ -275,7 +275,7 @@ Accepted **path** keys (any of them, combined): `path`, `paths`, `pathPrefix`, `
 
 | Entry kind | Example ids | Effect |
 |---|---|---|
-| Model providers | `anthropic`, `openai`, `gemini`, `groq`, `ollama`, `openrouter` | Removes those backends from model selection, even when credentials are available. See [Providers](/models/providers/). |
+| Model providers | `anthropic`, `openai`, `gemini`, `groq`, `ollama`, `openrouter` | Removes those backends from model selection, even when credentials are available. See [Providers](/oh-my-pi/models/providers/). |
 | Discovery sources | `native`, `claude`, `codex`, `gemini`, `github`, `opencode`, `cursor`, `agents-md` | Stops that source from contributing context files, MCP servers, commands, skills, hooks, tools, prompts, or settings. |
 
 Disabling the `claude` discovery source is different from disabling the `anthropic` model provider — one stops Claude-format config discovery, the other stops the Anthropic model backend.
@@ -303,7 +303,7 @@ The relocation is uniform: it covers slash commands, rules, prompts, instruction
 
 Two things are not profile-scoped:
 
-- **Keybindings** — a named profile merges the default profile's `~/.omp/agent/keybindings.*` under its own, with the profile file overriding per binding, because keybindings describe the terminal in front of you rather than the active profile. The inherited file is read-only for the profile process. See [Keybindings](/configuration/keybindings/).
+- **Keybindings** — a named profile merges the default profile's `~/.omp/agent/keybindings.*` under its own, with the profile file overriding per binding, because keybindings describe the terminal in front of you rather than the active profile. The inherited file is read-only for the profile process. See [Keybindings](/oh-my-pi/configuration/keybindings/).
 - **External and project bases** — `~/.claude`, `~/.codex`, `~/.gemini`, and the project-level `<cwd>/.omp`, `<cwd>/.claude`, … load identically under every profile.
 
 ## Legacy migration
@@ -312,7 +312,7 @@ Two things are not profile-scoped:
 
 **Startup migration to `config.yml`.** When `~/.omp/agent/config.yml` does not exist, startup builds it once from `~/.omp/agent/settings.json` (renamed to `settings.json.bak` after a successful migration) and from settings persisted in `agent.db`, then writes the result. After `config.yml` exists, these legacy sources are no longer consulted.
 
-**Field-level migrations.** Applied whenever raw settings are loaded (global, project, overlays, and runtime overrides) — for example `queueMode` becomes `steeringMode`, an `ask.timeout` in milliseconds becomes seconds, and a flat `theme: "<name>"` string becomes `theme.dark` / `theme.light`. The full mapping table is in the [Configuration reference](/reference/configuration/#legacy-key-migrations).
+**Field-level migrations.** Applied whenever raw settings are loaded (global, project, overlays, and runtime overrides) — for example `queueMode` becomes `steeringMode`, an `ask.timeout` in milliseconds becomes seconds, and a flat `theme: "<name>"` string becomes `theme.dark` / `theme.light`. The full mapping table is in the [Configuration reference](/oh-my-pi/reference/configuration/#legacy-key-migrations).
 
 ## Troubleshooting
 

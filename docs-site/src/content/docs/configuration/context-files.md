@@ -236,7 +236,7 @@ Files without valid frontmatter still load as rules with empty metadata and full
 
 Every discovered rule lands in exactly one of three buckets:
 
-- **TTSR rules** — any rule with a non-empty `condition` or `astCondition`. These stay out of the prompt entirely until the model's own output matches the trigger, then interrupt the stream. TTSR takes priority over the other buckets. See [Stream Rules](/features/stream-rules/) for how triggering works.
+- **TTSR rules** — any rule with a non-empty `condition` or `astCondition`. These stay out of the prompt entirely until the model's own output matches the trigger, then interrupt the stream. TTSR takes priority over the other buckets. See [Stream Rules](/oh-my-pi/features/stream-rules/) for how triggering works.
 - **Always-apply rules** — `alwaysApply: true` and not TTSR. Full content is injected into the system prompt; the rule is also re-readable via `rule://<name>`.
 - **Rulebook rules** — have a `description`, are not TTSR, and are not always-apply. Listed in the system prompt by name and description; the model reads the full content on demand via `rule://<name>`. Rulebook matching is advisory — the prompt tells the model to read relevant rules, but `globs` do not automatically select them.
 
@@ -260,7 +260,7 @@ disabledProviders:
 | Id kind | Examples | Effect when listed |
 |---|---|---|
 | Discovery provider ids | `native`, `claude`, `codex`, `gemini`, `opencode`, `github`, `agents`, `agents-md` | The entire config source is removed — not just its context files, but also any MCP servers, slash commands, skills, hooks, tools, prompts, and settings it would have contributed. |
-| Model provider ids | `anthropic`, `openai`, `google`, `groq`, `ollama`, `openrouter` | The model backend is removed from selection even when its credentials are present. See [Providers](/models/providers/). |
+| Model provider ids | `anthropic`, `openai`, `google`, `groq`, `ollama`, `openrouter` | The model backend is removed from selection even when its credentials are present. See [Providers](/oh-my-pi/models/providers/). |
 
 Ids are exact and the two namespaces do not collide by accident: `google` disables the Google model backend, while `gemini` disables the Gemini CLI discovery files. Disabling a discovery provider is heavier than it looks — disabling `claude`, for instance, also drops Claude-discovered MCP servers, commands, skills, hooks, tools, and settings, not only `CLAUDE.md`.
 
@@ -277,7 +277,7 @@ disabledProviders:
 A scoped entry applies when the cwd equals the configured path or sits beneath it; `~` expands to home. Bare string entries apply everywhere.
 
 :::caution
-Higher-precedence settings layers **replace** array settings rather than appending to them. If your global config disables `claude` but a project config sets `disabledProviders: [github]`, then inside that project Claude discovery is re-enabled and only GitHub is disabled. See [Settings](/configuration/settings/) for layer precedence and merge rules.
+Higher-precedence settings layers **replace** array settings rather than appending to them. If your global config disables `claude` but a project config sets `disabledProviders: [github]`, then inside that project Claude discovery is re-enabled and only GitHub is disabled. See [Settings](/oh-my-pi/configuration/settings/) for layer precedence and merge rules.
 :::
 
 ## Troubleshooting

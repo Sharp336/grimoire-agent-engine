@@ -77,7 +77,7 @@ Some engines serve bot-detection pages when throttled. DuckDuckGo, Bing, Yahoo, 
 
 ## Settings
 
-`omp config set <key> <value>` configures the search layer; see [Settings](/configuration/settings/) for scopes and precedence.
+`omp config set <key> <value>` configures the search layer; see [Settings](/oh-my-pi/configuration/settings/) for scopes and precedence.
 
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |

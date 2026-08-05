@@ -87,5 +87,5 @@ Supported local voices: `af_heart`, `af_bella`, `af_nicole`, `af_aoede`, `af_kor
 
 ## See also
 
-- [Tools: media and desktop](/features/tools/#media-and-desktop) — `tts` and `computer` live in the same group
-- [Settings](/configuration/settings/) — `tts.*` and `speechgen.enabled`
+- [Tools: media and desktop](/oh-my-pi/features/tools/#media-and-desktop) — `tts` and `computer` live in the same group
+- [Settings](/oh-my-pi/configuration/settings/) — `tts.*` and `speechgen.enabled`

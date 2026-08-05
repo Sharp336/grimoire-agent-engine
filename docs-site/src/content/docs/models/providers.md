@@ -85,7 +85,7 @@ Each provider supplies its API key through one or more environment variables whe
 | `lm-studio` | `LM_STUDIO_API_KEY` (optional; keyless by default) |
 | `llama.cpp` | `LLAMA_CPP_API_KEY` (only when the server requires auth) |
 
-OAuth-backed providers such as `anthropic`, `github-copilot`, `cursor`, `ollama-cloud`, `qwen-portal`, `kimi-code`, `xai-oauth`, `wafer-serverless`, `google-gemini-cli`, and `google-antigravity` are normally reached through `/login` rather than an environment variable. See [Environment variables](/configuration/environment-variables/) for the full variable reference.
+OAuth-backed providers such as `anthropic`, `github-copilot`, `cursor`, `ollama-cloud`, `qwen-portal`, `kimi-code`, `xai-oauth`, `wafer-serverless`, `google-gemini-cli`, and `google-antigravity` are normally reached through `/login` rather than an environment variable. See [Environment variables](/oh-my-pi/configuration/environment-variables/) for the full variable reference.
 
 ## Authenticating
 
@@ -245,7 +245,7 @@ Three local engines are discovered automatically without a `models.yml` entry, a
 | `llama.cpp` | `LLAMA_CPP_BASE_URL`, else `http://127.0.0.1:8080` |
 | `lm-studio` | `LM_STUDIO_BASE_URL`, else `http://127.0.0.1:1234/v1` |
 
-Their discovered models are selectable as soon as the engine answers — no login required. See [Local Models](/models/local-models/) for setup, discovery behavior, and limitations.
+Their discovered models are selectable as soon as the engine answers — no login required. See [Local Models](/oh-my-pi/models/local-models/) for setup, discovery behavior, and limitations.
 
 ## Disabling providers
 

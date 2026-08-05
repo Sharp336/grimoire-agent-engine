@@ -4,7 +4,7 @@ description: Rules that watch the agent's output as it streams and interrupt or 
 coverage: B
 ---
 
-Stream rules — Time-Traveling Stream Rules, or TTSR — let you watch the agent's output as it streams and have omp interrupt the turn, retry, and inject a reminder the moment a pattern matches. A rule with no `condition` or `astCondition` is just a rulebook rule (see [Context Files](/configuration/context-files/)); once it has a condition, it becomes a TTSR rule.
+Stream rules — Time-Traveling Stream Rules, or TTSR — let you watch the agent's output as it streams and have omp interrupt the turn, retry, and inject a reminder the moment a pattern matches. A rule with no `condition` or `astCondition` is just a rulebook rule (see [Context Files](/oh-my-pi/configuration/context-files/)); once it has a condition, it becomes a TTSR rule.
 
 ## What "interrupting" means
 
@@ -121,7 +121,7 @@ omp ships 28 language-specific rules in `packages/coding-agent/src/discovery/bui
 
 ## Settings
 
-`omp config set <key> <value>`; see [Settings](/configuration/settings/) for scopes and precedence.
+`omp config set <key> <value>`; see [Settings](/oh-my-pi/configuration/settings/) for scopes and precedence.
 
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |

@@ -65,7 +65,7 @@ Three different ways to get a clean slate, in increasing order of preservation:
 
 A session is internally a tree: rewinding to an earlier point and continuing creates a branch rather than erasing the abandoned path.
 
-- `/tree` opens an interactive view of the session tree and moves the conversation pointer to the entry you select. Selecting a user message prefills its text into the editor so you can rephrase it. The abandoned path stays in the file and can be summarized into a branch summary that travels with the new direction (when `branchSummary.enabled` is on; see [Compaction](/features/compaction/)).
+- `/tree` opens an interactive view of the session tree and moves the conversation pointer to the entry you select. Selecting a user message prefills its text into the editor so you can rephrase it. The abandoned path stays in the file and can be summarized into a branch summary that travels with the new direction (when `branchSummary.enabled` is on; see [Compaction](/oh-my-pi/features/compaction/)).
 - `/branch` creates a new session file that forks the history at a user message you pick, with the selected text prefilled for editing.
 
 Both open selectors; `/branch` restricts the choice to user messages.

@@ -112,7 +112,7 @@ Set `collab.webUrl` when the browser UI is hosted separately from the websocket 
 | `share.serverUrl` | `https://my.omp.sh/s` | Share viewer/upload base used by `/share` (links are `<base>/<id>#<key>`) |
 | `share.redactSecrets` | `true` | Run the secret obfuscator over `/share` snapshots before upload |
 
-Change them with `omp config set <key> <value>`; see [Settings](/configuration/settings/).
+Change them with `omp config set <key> <value>`; see [Settings](/oh-my-pi/configuration/settings/).
 
 ## Self-hosting the relay
 

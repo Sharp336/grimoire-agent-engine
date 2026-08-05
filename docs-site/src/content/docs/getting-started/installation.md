@@ -117,4 +117,4 @@ On first run, omp inherits whatever is already on disk: rules, skills, and MCP s
 `omp install <target>` does **not** install omp itself — it installs or links an extension package (an alias of `omp plugin install` / `omp plugin link`). Local paths (`./foo`, `/abs/foo`, `~/foo`) are symlinked into the plugin set; anything else (`pkg`, `pkg@1.2.3`, `name@marketplace`) is installed from a package source.
 :::
 
-Next: [Quickstart](/getting-started/quickstart/) to go from install to your first prompt, or the [CLI reference](/reference/cli/) for every flag.
+Next: [Quickstart](/oh-my-pi/getting-started/quickstart/) to go from install to your first prompt, or the [CLI reference](/oh-my-pi/reference/cli/) for every flag.

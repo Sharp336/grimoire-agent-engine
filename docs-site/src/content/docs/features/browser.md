@@ -91,7 +91,7 @@ Saves a full-resolution PNG to `browser.screenshotDir` (when set) or the OS temp
 | `PUPPETEER_PROXY_BYPASS_LOOPBACK` | Bypass loopback addresses through the proxy |
 | `PUPPETEER_PROXY_IGNORE_CERT_ERRORS` | Ignore TLS errors when the proxy is in use |
 
-Change settings with `omp config set <key> <value>`; see [Settings](/configuration/settings/).
+Change settings with `omp config set <key> <value>`; see [Settings](/oh-my-pi/configuration/settings/).
 
 :::caution
 - Tool timeout is clamped to `1..300` seconds with a default of `30`; long-running `run` blocks must be sliced.

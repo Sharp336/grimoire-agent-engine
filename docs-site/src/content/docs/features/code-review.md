@@ -71,7 +71,7 @@ When you review a PR, `/review` calls `gh pr view` to fetch PR metadata and the 
 - GitHub PR URLs: `https://github.com/<owner>/<repo>/pull/<number>`
 - `pr://<owner>/<repo>/<number>` URIs (also `/diff`, `/diff/<i>`, or `/diff/all`)
 
-When the command runs in an interactive UI, the most recent PR refs found in conversation context (up to `3`) are offered as menu shortcuts, so a PR discussed in chat can be reviewed without re-typing the URL. See [GitHub Integration](/features/github/) for the `pr://` URL scheme and the `pr_create` / `pr_checkout` / `pr_push` ops.
+When the command runs in an interactive UI, the most recent PR refs found in conversation context (up to `3`) are offered as menu shortcuts, so a PR discussed in chat can be reviewed without re-typing the URL. See [GitHub Integration](/oh-my-pi/features/github/) for the `pr://` URL scheme and the `pr_create` / `pr_checkout` / `pr_push` ops.
 
 For large PRs (`> 50_000` chars of diff or `> 20` files), the reviewer is told to fetch its slice with `gh pr diff` for the assigned files; for normal PRs the diff is inlined.
 
@@ -81,4 +81,4 @@ Choosing Custom (or invoking `/review` with extra instructions in headless mode)
 
 ## Follow-up flow
 
-`/review` only builds and returns the prompt — the actual reviewer agent work runs through the same `task` tool fan-out as a regular subagent. To follow up on a finding or chase a deeper review, use `hub` to message the reviewer agent (its id is shown in the spawn summary). See [Subagents](/features/subagents/) for the hub messaging and artifact URLs.
+`/review` only builds and returns the prompt — the actual reviewer agent work runs through the same `task` tool fan-out as a regular subagent. To follow up on a finding or chase a deeper review, use `hub` to message the reviewer agent (its id is shown in the spawn summary). See [Subagents](/oh-my-pi/features/subagents/) for the hub messaging and artifact URLs.

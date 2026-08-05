@@ -38,7 +38,7 @@ A sharp edge: data loss, surprising behavior, security implications.
 
 ## Links
 
-- Internal docs links use absolute site paths without extension: `[Sessions](/features/sessions/)`.
+- Internal docs links include the site base (`/oh-my-pi/`): `[Sessions](/oh-my-pi/features/sessions/)`. The site is hosted at the project path on GitHub Pages; root-relative paths would 404 in production.
 - Reference source code by repo path in backticks (`` `packages/coding-agent/src/...` ``), not by URL.
 - External links only for upstream projects (protocol specs, provider docs).
 

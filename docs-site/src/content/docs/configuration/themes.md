@@ -40,7 +40,7 @@ Built-ins      dark.json, light.json, and every defaults/*.json compiled into th
 Custom         <customThemesDir>/<name>.json
 ```
 
-The custom themes directory is `~/.omp/agent/themes` by default, or `$PI_CODING_AGENT_DIR/themes` when `PI_CODING_AGENT_DIR` is set (see [Environment Variables](/configuration/environment-variables/)).
+The custom themes directory is `~/.omp/agent/themes` by default, or `$PI_CODING_AGENT_DIR/themes` when `PI_CODING_AGENT_DIR` is set (see [Environment Variables](/oh-my-pi/configuration/environment-variables/)).
 
 ## Theme file format
 

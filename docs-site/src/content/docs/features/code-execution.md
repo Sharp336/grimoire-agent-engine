@@ -1,5 +1,5 @@
 ---
-title: Code execution
+title: Code Execution
 description: The bash shell, Python and JavaScript cell runtimes, and how to run code against your project workspace.
 coverage: B
 ---
@@ -121,6 +121,6 @@ There is no separate tool that starts or talks to a Python kernel for `.ipynb` f
 
 ## See also
 
-- [Tools: files and editing](/features/tools/#files-and-editing) — `read`, `write`, `edit`
-- [Debugging](/features/debugging/) — `debug` for the DAP-driven code-execution path
-- [Code intelligence](/features/code-intelligence/) — `ast_grep` and `ast_edit` for structural searches and rewrites
+- [Tools: files and editing](/oh-my-pi/features/tools/#files-and-editing) — `read`, `write`, `edit`
+- [Debugging](/oh-my-pi/features/debugging/) — `debug` for the DAP-driven code-execution path
+- [Code intelligence](/oh-my-pi/features/code-intelligence/) — `ast_grep` and `ast_edit` for structural searches and rewrites

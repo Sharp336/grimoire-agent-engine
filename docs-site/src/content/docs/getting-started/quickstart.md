@@ -4,7 +4,7 @@ description: Go from install to your first agent session in a few minutes.
 coverage: B
 ---
 
-This page is the shortest path from a fresh install to a working session. Three steps: install, connect a model provider, send a prompt. See the [Installation page](/getting-started/installation/) for every install method, and the [CLI reference](/reference/cli/) for the full flag set.
+This page is the shortest path from a fresh install to a working session. Three steps: install, connect a model provider, send a prompt. See the [Installation page](/oh-my-pi/getting-started/installation/) for every install method, and the [CLI reference](/oh-my-pi/reference/cli/) for the full flag set.
 
 ## 1. Install omp
 
@@ -14,7 +14,7 @@ The one-liner is fine for most desktops:
 curl -fsSL https://omp.sh/install | sh
 ```
 
-Other install methods (Homebrew, Bun, Windows PowerShell, pinned via mise) are on the [Installation page](/getting-started/installation/). Confirm the binary is reachable:
+Other install methods (Homebrew, Bun, Windows PowerShell, pinned via mise) are on the [Installation page](/oh-my-pi/getting-started/installation/). Confirm the binary is reachable:
 
 ```bash
 omp --version
@@ -44,7 +44,7 @@ omp setup
 | `GROQ_API_KEY`        | Groq                    |
 | `MISTRAL_API_KEY`     | Mistral                 |
 
-A `COPILOT_GITHUB_TOKEN` covers GitHub Copilot; the full provider list is in [Providers](/models/providers/).
+A `COPILOT_GITHUB_TOKEN` covers GitHub Copilot; the full provider list is in [Providers](/oh-my-pi/models/providers/).
 
 **Self-hosted or custom endpoints.** Anything speaking the OpenAI, Anthropic, Google, or Vertex APIs can be declared in `~/.omp/agent/models.yml`; local instances can skip the key entirely. Verify a custom provider is discovered with `omp models <provider>`, then choose it in the `omp setup` default-model step or assign it to a role in a session with `/model`.
 
@@ -79,6 +79,6 @@ opens the TUI and starts a turn with that prompt.
 
 ## Where to go next
 
-- [Your first session](/getting-started/first-session/) — the keyboard shortcuts, model cycling, and how to resume.
-- [Model roles](/models/model-roles/) — `default`, `smol`, `slow`, and `plan` routes and the role flags.
-- [CLI reference](/reference/cli/) — every launch flag.
+- [Your first session](/oh-my-pi/getting-started/first-session/) — the keyboard shortcuts, model cycling, and how to resume.
+- [Model roles](/oh-my-pi/models/model-roles/) — `default`, `smol`, `slow`, and `plan` routes and the role flags.
+- [CLI reference](/oh-my-pi/reference/cli/) — every launch flag.

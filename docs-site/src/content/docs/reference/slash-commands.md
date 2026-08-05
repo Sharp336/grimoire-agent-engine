@@ -4,7 +4,7 @@ description: Slash commands available in the TUI.
 coverage: A
 ---
 
-Slash commands are typed into the interactive prompt (after a `/`) and execute a built-in action — switch model, open a dashboard, branch the session, manage plugins, and so on. This page lists every built-in command registered in the TUI. Commands from skills, extensions, custom commands, MCP prompts, and file-based commands also appear in the picker; see [Other command sources](#other-command-sources) and [Custom slash commands](/extending/extensions/).
+Slash commands are typed into the interactive prompt (after a `/`) and execute a built-in action — switch model, open a dashboard, branch the session, manage plugins, and so on. This page lists every built-in command registered in the TUI. Commands from skills, extensions, custom commands, MCP prompts, and file-based commands also appear in the picker; see [Other command sources](#other-command-sources) and [Custom slash commands](/oh-my-pi/extending/extensions/).
 
 Unknown `/...` text is not rejected by the TUI: if the command has no handler, the literal text is sent to the agent as a prompt.
 
@@ -175,4 +175,4 @@ For each source, the first match wins on a name collision. Project-scoped comman
 
 ## Custom slash commands
 
-To author your own slash commands (including file-based Markdown templates and TypeScript extensions), see [Extensions](/extending/extensions/). The page covers the directory layout, frontmatter, argument expansion (`$1`, `$@`, `$ARGUMENTS`), and how to register a command from a plugin.
+To author your own slash commands (including file-based Markdown templates and TypeScript extensions), see [Extensions](/oh-my-pi/extending/extensions/). The page covers the directory layout, frontmatter, argument expansion (`$1`, `$@`, `$ARGUMENTS`), and how to register a command from a plugin.

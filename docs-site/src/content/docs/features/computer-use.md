@@ -1,13 +1,14 @@
 ---
-title: Computer use
+title: Computer Use
 description: Native desktop capture and control — what the computer tool can do, how to enable it, and the safety layers around it.
 coverage: A
 ---
 
-The `computer` tool captures and controls the desktop that is running `omp` through native OS APIs. It does not launch Chromium, does not use Puppeteer, and does not expose a DOM. Use it for visible desktop applications: IDEs, terminals, native apps, browser windows, menus, and system dialogs. For headless/CDP browser tabs, DOM or ARIA inspection, selectors, or deterministic page automation, use the [browser](/features/browser/) tool instead.
+The `computer` tool captures and controls the desktop that is running `omp` through native OS APIs. It does not launch Chromium, does not use Puppeteer, and does not expose a DOM. Use it for visible desktop applications: IDEs, terminals, native apps, browser windows, menus, and system dialogs. For headless/CDP browser tabs, DOM or ARIA inspection, selectors, or deterministic page automation, use the [browser](/oh-my-pi/features/browser/) tool instead.
 
-> [!WARNING]
-> Enabling `computer` gives the model mouse and keyboard access to your real desktop. Close unrelated sensitive applications, use a dedicated OS account or VM when practical, and configure approval policy before enabling it.
+::::caution
+Enabling `computer` gives the model mouse and keyboard access to your real desktop. Close unrelated sensitive applications, use a dedicated OS account or VM when practical, and configure approval policy before enabling it.
+::::
 
 ## Enable and configure
 
@@ -220,6 +221,6 @@ The native composite safety ceiling is 268,435,456 pixels. Normal defaults are f
 
 ## See also
 
-- [Browser](/features/browser/) — headless/CDP browser automation
-- [Tools: media and desktop](/features/tools/#media-and-desktop) — `computer`, `inspect_image`, `generate_image`, `tts`
-- [Settings](/configuration/settings/) — `computer.*` and `tools.approval.*`
+- [Browser](/oh-my-pi/features/browser/) — headless/CDP browser automation
+- [Tools: media and desktop](/oh-my-pi/features/tools/#media-and-desktop) — `computer`, `inspect_image`, `generate_image`, `tts`
+- [Settings](/oh-my-pi/configuration/settings/) — `computer.*` and `tools.approval.*`

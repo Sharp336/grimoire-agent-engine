@@ -6,7 +6,7 @@ coverage: A
 
 Custom tools are model-callable modules that plug into the same tool execution pipeline as built-in tools. A custom tool is a TypeScript or JavaScript module that exports a factory; the factory receives a `CustomToolAPI` and returns one tool or an array of tools. Schemas are authored with [Zod](https://zod.dev) (available as `pi.zod`) and flow through the shared validation pipeline.
 
-If you need the model to call code directly, use a custom tool. If you need lifecycle and events around that tool, use an [extension](/extending/extensions/) instead — extensions register custom tools through `pi.registerTool` and gain full event interception on top. Use [hooks](/extending/hooks/) when you only need pre/post-tool interception of any tool. Use [skills](/extending/skills/) when you only need context and guidance.
+If you need the model to call code directly, use a custom tool. If you need lifecycle and events around that tool, use an [extension](/oh-my-pi/extending/extensions/) instead — extensions register custom tools through `pi.registerTool` and gain full event interception on top. Use [hooks](/oh-my-pi/extending/hooks/) when you only need pre/post-tool interception of any tool. Use [skills](/oh-my-pi/extending/skills/) when you only need context and guidance.
 
 ## A minimal custom tool
 

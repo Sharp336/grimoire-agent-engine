@@ -4,7 +4,7 @@ description: Extend omp with TypeScript modules that add tools, slash commands, 
 coverage: B
 ---
 
-An extension is a TypeScript or JavaScript module that omp loads at startup. From a single file you can register tools the model can call, slash commands you can type, event handlers that intercept the session lifecycle, keyboard shortcuts, CLI flags, and custom renderers. Extensions are omp's most capable extension point — a strict superset of [hooks](/extending/hooks/) and [custom tools](/extending/custom-tools/).
+An extension is a TypeScript or JavaScript module that omp loads at startup. From a single file you can register tools the model can call, slash commands you can type, event handlers that intercept the session lifecycle, keyboard shortcuts, CLI flags, and custom renderers. Extensions are omp's most capable extension point — a strict superset of [hooks](/oh-my-pi/extending/hooks/) and [custom tools](/oh-my-pi/extending/custom-tools/).
 
 ## A minimal extension
 
@@ -29,7 +29,7 @@ omp discovers extension modules from these sources, in order:
 1. **Project directory** — `<cwd>/.omp/extensions/`
 2. **User directory** — `~/.omp/agent/extensions/` (under `omp --profile <name>` this becomes `~/.omp/profiles/<name>/agent/extensions/`)
 3. **Settings lists** — `extensions` entries in `<cwd>/.omp/settings.json` and `~/.omp/agent/settings.json`
-4. **Installed plugins** — extension entries from plugin `package.json` manifests (`omp.extensions` or legacy `pi.extensions`); see [Plugins](/extending/plugins/)
+4. **Installed plugins** — extension entries from plugin `package.json` manifests (`omp.extensions` or legacy `pi.extensions`); see [Plugins](/oh-my-pi/extending/plugins/)
 5. **Explicit paths** — CLI flags and the `extensions` setting (below)
 
 When omp scans an `extensions/` directory it loads direct `*.ts`/`*.js` files and one level of subdirectories (each with an `index.ts`, `index.js`, or a `package.json` manifest). It does not recurse deeper.
@@ -171,9 +171,9 @@ Handlers subscribe with `pi.on(event, handler)`. The main groups:
 - **Session lifecycle** — `session_start`, `session_before_switch` / `session_switch`, `session_before_branch` / `session_branch`, `session_before_compact` / `session_compact`, `session_before_tree` / `session_tree`, `session_shutdown`. The `before_*` events are cancelable by returning `{ cancel: true }`.
 - **Prompt and turn lifecycle** — `input`, `before_agent_start`, `agent_start` / `agent_end`, `turn_start` / `turn_end`, `message_start` / `message_update` / `message_end`, `session_stop`.
 - **Tool lifecycle** — `tool_call` (pre-execution; may block the call or revise its input), `tool_result` (post-execution; may patch content, details, or the error flag — handlers run in extension order and each sees prior modifications), plus `tool_execution_start` / `tool_execution_update` / `tool_execution_end` and `tool_approval_requested` / `tool_approval_resolved` for observability.
-- **MCP notifications** — `mcp_notification` fires for every JSON-RPC notification from a connected MCP server, with payload `{ server, method, params }`. See [MCP](/extending/mcp/).
+- **MCP notifications** — `mcp_notification` fires for every JSON-RPC notification from a connected MCP server, with payload `{ server, method, params }`. See [MCP](/oh-my-pi/extending/mcp/).
 
-For the intercept-style hook events (`PreToolUse`, `PostToolUse`, and friends), see [Hooks](/extending/hooks/).
+For the intercept-style hook events (`PreToolUse`, `PostToolUse`, and friends), see [Hooks](/oh-my-pi/extending/hooks/).
 
 ## Sharp edges
 

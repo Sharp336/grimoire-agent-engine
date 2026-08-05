@@ -1,5 +1,5 @@
 ---
-title: Code intelligence
+title: Code Intelligence
 description: Language Server Protocol integration, AST-based search, and structural rewrites against the agent's project.
 coverage: B
 ---
@@ -194,5 +194,5 @@ The wrapper always sends a one-element `patterns` array; the model cannot pass m
 
 ## See also
 
-- [Tools: search and navigation](/features/tools/#search-and-navigation) — `grep`, `glob`
-- [Settings](/configuration/settings/) — `lsp.enabled`, `lsp.lazy`
+- [Tools: search and navigation](/oh-my-pi/features/tools/#search-and-navigation) — `grep`, `glob`
+- [Settings](/oh-my-pi/configuration/settings/) — `lsp.enabled`, `lsp.lazy`

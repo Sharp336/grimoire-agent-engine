@@ -168,7 +168,7 @@ Disabled or unauthenticated providers are skipped.
 
 ### Round-robin credentials
 
-Stack multiple API keys per provider and the runtime rotates them with session affinity and per-credential backoff — useful when a single key would burn its quota by lunch. Combine this with the credential resolution order in [Providers](/models/providers/#credential-resolution-order): the runtime override, then `models.yml` `apiKey`, then stored OAuth, then login-sourced keys, then environment variables, then any other stored API key.
+Stack multiple API keys per provider and the runtime rotates them with session affinity and per-credential backoff — useful when a single key would burn its quota by lunch. Combine this with the credential resolution order in [Providers](/oh-my-pi/models/providers/#credential-resolution-order): the runtime override, then `models.yml` `apiKey`, then stored OAuth, then login-sourced keys, then environment variables, then any other stored API key.
 
 ## Inspecting and swapping
 

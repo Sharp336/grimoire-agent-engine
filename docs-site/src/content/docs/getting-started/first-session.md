@@ -4,7 +4,7 @@ description: "A guided tour of the omp interactive session: sending prompts, int
 coverage: B
 ---
 
-omp's interactive TUI is the default surface for working on a project. This page walks through the parts you'll touch in every session: the prompt editor, the keyboard shortcuts, model and thinking controls, slash commands, and how to leave and come back. See the [Keybindings reference](/configuration/keybindings/) for the full remap table.
+omp's interactive TUI is the default surface for working on a project. This page walks through the parts you'll touch in every session: the prompt editor, the keyboard shortcuts, model and thinking controls, slash commands, and how to leave and come back. See the [Keybindings reference](/oh-my-pi/configuration/keybindings/) for the full remap table.
 
 ## Starting a session
 
@@ -46,19 +46,19 @@ To stop an in-flight turn, press **Esc**. The current generation aborts at the n
 `Shift+Tab` steps through the configured levels for the active model. `Ctrl+T` hides or shows the rendered thinking blocks in the transcript without changing the level.
 
 :::tip
-The word `ultrathink` inside a turn requests the highest supported automatic thinking effort for that one prompt. See [Magic keywords](/features/magic-keywords/) for the full set.
+The word `ultrathink` inside a turn requests the highest supported automatic thinking effort for that one prompt. See [Magic keywords](/oh-my-pi/features/magic-keywords/) for the full set.
 :::
 
 ## Slash commands
 
-Slash commands shift how a session runs. Type `/` to start one; autocomplete (set up via the [Installation page's](/getting-started/installation/) shell completions, or [Remap keybindings](/configuration/keybindings/)) narrows the list. A few that matter on the first session:
+Slash commands shift how a session runs. Type `/` to start one; autocomplete (set up via the [Installation page's](/oh-my-pi/getting-started/installation/) shell completions, or [Remap keybindings](/oh-my-pi/configuration/keybindings/)) narrows the list. A few that matter on the first session:
 
 - `/model` — pick a model or assign a model to a role.
 - `/fresh` — reset the provider's stream state (stale prompt cache, wedged stream) without touching the local transcript.
 - `/hotkeys` — list the active key chords for your current build, including any remaps loaded from disk.
 - `/help` — show the slash-command help.
 
-See the [slash-command reference](/reference/slash-commands/) for the complete list.
+See the [slash-command reference](/oh-my-pi/reference/slash-commands/) for the complete list.
 
 ## Ending and resuming a session
 
@@ -73,7 +73,7 @@ To come back, launch `omp` with one of the resume flags. The first two are also 
 | `omp --resume <id\|path>`  | —             | Open a specific session; a global match re-roots into the session's project or forks into the current one. |
 | `omp --fork <id\|path>`    | `/fork`       | Branch a new session from an existing one at startup.                    |
 
-`/fork` is rejected while the agent is streaming — abort the current turn first. See the [Sessions page](/features/sessions/) for tree/leaf semantics and full resume behavior.
+`/fork` is rejected while the agent is streaming — abort the current turn first. See the [Sessions page](/oh-my-pi/features/sessions/) for tree/leaf semantics and full resume behavior.
 
 ## Key cheat sheet
 

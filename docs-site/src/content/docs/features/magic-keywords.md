@@ -49,4 +49,4 @@ omp config set magicKeywords.orchestrate false
 omp config set magicKeywords.workflow false
 ```
 
-All four settings default to `true`. Run `omp config list` to inspect every available setting and its current value. See [Settings](/configuration/settings/) for configuration scopes, precedence, and project-local overrides.
+All four settings default to `true`. Run `omp config list` to inspect every available setting and its current value. See [Settings](/oh-my-pi/configuration/settings/) for configuration scopes, precedence, and project-local overrides.

@@ -48,7 +48,7 @@ The summary itself contains a `<files>` tag listing the files touched during the
 
 - `snapcompact` (default) — replaces the LLM summarization call with a local, deterministic archival pass that prints the discarded history onto bitmap images (model-aware frame dimensions). Safe for overflow recovery because it makes no model call. Falls back to context-full with a warning if the current model is not vision-capable. Manual `/compact` honors this strategy unless you pass custom instructions.
 - `context-full` — the original LLM-summarize-the-history pipeline.
-- `handoff` — generates a handoff document instead of writing a compaction entry; the document lands as a `custom_message` in a brand-new session (see [Sessions](/features/sessions/)). Used by post-turn threshold maintenance to start a fresh session without losing context.
+- `handoff` — generates a handoff document instead of writing a compaction entry; the document lands as a `custom_message` in a brand-new session (see [Sessions](/oh-my-pi/features/sessions/)). Used by post-turn threshold maintenance to start a fresh session without losing context.
 - `shake` — additional supported strategy.
 - `off` — disables automatic compaction (manual `/compact` still runs).
 

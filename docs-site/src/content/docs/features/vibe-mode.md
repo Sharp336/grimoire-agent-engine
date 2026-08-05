@@ -30,7 +30,7 @@ Every worker is a full coding agent with the normal tool surface. Choose a tier 
 | `fast` | `sonic` | `@smol` (low-latency role) | Mechanical execution, drafts, high-volume work |
 | `good` | `task`  | `@task` (the session's strong model) | Design, judgment calls, reviewing `fast` output |
 
-Model resolution follows the same path as a `task` spawn, so `task.agentModelOverrides` and your model-role settings apply. See [Model Roles](/models/model-roles/).
+Model resolution follows the same path as a `task` spawn, so `task.agentModelOverrides` and your model-role settings apply. See [Model Roles](/oh-my-pi/models/model-roles/).
 
 ## Worker-control tools
 
