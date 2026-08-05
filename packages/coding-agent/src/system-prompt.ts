@@ -746,7 +746,12 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 				: resolvePromptInput(appendSystemPrompt, "append system prompt"),
 			prepDefaults.resolvedAppendPrompt,
 		),
-		withDeadline("loadSystemPromptFiles", systemPromptCustomizationPromise, prepDefaults.systemPromptCustomization, true),
+		withDeadline(
+			"loadSystemPromptFiles",
+			systemPromptCustomizationPromise,
+			prepDefaults.systemPromptCustomization,
+			true,
+		),
 		withDeadline("loadProjectContextFiles", contextFilesPromise, prepDefaults.contextFiles, true).then(
 			dedupeExactContextFiles,
 		),

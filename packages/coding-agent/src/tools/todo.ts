@@ -72,7 +72,11 @@ const TodoOp = type('"init" | "start" | "done" | "rm" | "drop" | "block" | "unbl
 
 const InitListEntry = type({
 	phase: type("string").describe("phase name for init"),
-	items: type("string").describe("task content").array().atLeastLength(1).describe("non-empty tasks for this phase (init)"),
+	items: type("string")
+		.describe("task content")
+		.array()
+		.atLeastLength(1)
+		.describe("non-empty tasks for this phase (init)"),
 });
 
 const todoSchema = type({

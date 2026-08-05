@@ -2,13 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import * as discoveryModule from "../src/discovery";
 import {
 	buildSystemPrompt,
 	loadProjectContextFiles,
 	loadSystemPromptFiles,
 	type SystemPromptToolMetadata,
 } from "@oh-my-pi/pi-coding-agent/system-prompt";
+import * as discoveryModule from "../src/discovery";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
 function escapeRegExp(text: string): string {
