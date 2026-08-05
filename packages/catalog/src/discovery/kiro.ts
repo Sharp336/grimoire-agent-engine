@@ -399,8 +399,7 @@ function gptThinking(model: SanitizedKiroModel): ThinkingConfig {
 	if (rootSchema.additionalProperties !== false) schemaError(modelId, "gpt.additionalProperties");
 	const root = exactPropertyNames(modelId, rootSchema, ["reasoning"], "gpt.root");
 	exactSchemaKeywords(modelId, root.reasoning, ["type", "properties"], "gpt.reasoning");
-	const hasLegacyMode =
-		root.reasoning.properties !== undefined && Object.hasOwn(root.reasoning.properties, "mode");
+	const hasLegacyMode = root.reasoning.properties !== undefined && Object.hasOwn(root.reasoning.properties, "mode");
 	const reasoning = exactPropertyNames(
 		modelId,
 		root.reasoning,

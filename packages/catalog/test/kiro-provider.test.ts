@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { kiroManagementRequest, sanitizeKiroModelCatalog } from "@oh-my-pi/pi-catalog/discovery/kiro";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import {
 	DEFAULT_MODEL_PER_PROVIDER,
@@ -10,7 +11,6 @@ import {
 	resolveKiroModelCacheProviderId,
 	resolveModelCacheProviderId,
 } from "@oh-my-pi/pi-catalog/provider-models";
-import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { kiroModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/special";
 import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
