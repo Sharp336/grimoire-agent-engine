@@ -13,8 +13,13 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 import { $env, getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
-import { configureSqliteDatabase, isSqliteCorruptError, sqliteRepairGuidance } from "@oh-my-pi/pi-utils/sqlite";
-import { isSqliteBusyError } from "@oh-my-pi/pi-utils/sqlite";
+import { shellQuote } from "@oh-my-pi/pi-utils/shell";
+import {
+	configureSqliteDatabase,
+	isSqliteBusyError,
+	isSqliteCorruptError,
+	sqliteRepairGuidance,
+} from "@oh-my-pi/pi-utils/sqlite";
 import type { ApiKeyResolver } from "./auth-retry";
 import * as AIError from "./error";
 import { isUsageLimitOutcome } from "./error/rate-limit";

@@ -1007,12 +1007,14 @@ describe("AuthStorage corrupt-store heal while latched", () => {
 			throw realCorruptError(malformedDbPath);
 		});
 		vi.spyOn(logger, "error").mockImplementation(() => {});
-		storage.upsertCredentialBlock({
-			credentialId: blockedRow.id,
-			providerKey: "openai-codex:oauth",
-			blockScope: "",
-			blockedUntilMs: Date.now() + HOUR_MS,
-		});
+		expect(() =>
+			storage.upsertCredentialBlock({
+				credentialId: blockedRow.id,
+				providerKey: "openai-codex:oauth",
+				blockScope: "",
+				blockedUntilMs: Date.now() + HOUR_MS,
+			}),
+		).toThrow("Credential store is damaged; block writes are unavailable");
 
 		const redeemed = await storage.redeemResetCredit({
 			target: { credentialId: blockedRow.id },

@@ -52,7 +52,6 @@ describe("isSqliteBusyError", () => {
  * fresh handle before the error propagates.
  */
 
-
 describe("configureSqliteDatabase", () => {
 	let tempDir = "";
 
