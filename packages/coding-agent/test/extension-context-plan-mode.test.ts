@@ -50,8 +50,10 @@ describe("ExtensionRunner plan mode context", () => {
 		expect(ctx.getPlanModeState()?.enabled).toBe(true);
 		expect(ctx.getPlanModeState()?.planFilePath).toBe("local://feature-plan.md");
 
-		current = { enabled: false, planFilePath: planModeState.planFilePath };
-		expect(ctx.getPlanModeState()?.enabled).toBe(false);
+		// Leaving plan mode clears the state rather than flipping `enabled`
+		// (`setPlanModeState(undefined)`), so cover the real exit shape.
+		current = undefined;
+		expect(ctx.getPlanModeState()).toBeUndefined();
 	});
 
 	// createCommandContext() spreads createContext(). A spread snapshots a getter
