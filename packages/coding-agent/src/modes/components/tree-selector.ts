@@ -71,6 +71,8 @@ class TreeList implements Component {
 	#multipleRoots = false;
 	#activePathIds: Set<string> = new Set();
 	#lastSelectedId: string | null = null;
+	#collapsedIds: Set<string> = new Set();
+	#hiddenDescendantCounts: Map<string, number> = new Map();
 
 	onSelect?: (entryId: string, options: { summarize: boolean }) => void;
 	onCancel?: () => void;
@@ -259,6 +261,97 @@ class TreeList implements Component {
 		return result;
 	}
 
+	/**
+	 * Drop the descendants of collapsed nodes and record how many each collapse
+	 * hides. `#flatNodes` is pre-order, so a node's parent is always classified
+	 * before the node itself — one linear pass, no per-node ancestor walk.
+	 *
+	 * Connector metadata is deliberately left alone. A collapsed subtree is
+	 * hidden the same way a filtered one is, so the gutters of the rows that
+	 * survive keep describing the real tree they belong to.
+	 */
+	#hideCollapsedDescendants(flatNodes: FlatNode[]): FlatNode[] {
+		this.#hiddenDescendantCounts.clear();
+		if (this.#collapsedIds.size === 0) return flatNodes;
+
+		// id -> the collapsed ancestor that hid it, so counts land on the node the
+		// user actually collapsed rather than on intermediate descendants.
+		const hiddenUnder = new Map<string, string>();
+		return flatNodes.filter(flatNode => {
+			const parentId = flatNode.node.entry.parentId;
+			if (!parentId) return true;
+			// An already-hidden parent wins over a collapsed one: a collapse nested
+			// inside another collapse is invisible, so its descendants belong to the
+			// outermost fold — the only one whose count the user can see.
+			const collapseRoot = hiddenUnder.get(parentId) ?? (this.#collapsedIds.has(parentId) ? parentId : undefined);
+			if (collapseRoot === undefined) return true;
+			hiddenUnder.set(flatNode.node.entry.id, collapseRoot);
+			this.#hiddenDescendantCounts.set(collapseRoot, (this.#hiddenDescendantCounts.get(collapseRoot) ?? 0) + 1);
+			return false;
+		});
+	}
+
+	/**
+	 * Whether a row survives the current filter mode and search, ignoring
+	 * collapse. Split out of {@link #applyFilter} because folding a branch has to
+	 * know which of its rows the user can actually see.
+	 */
+	#passesFilter(flatNode: FlatNode, searchTokens: string[]): boolean {
+		const entry = flatNode.node.entry;
+		const isCurrentLeaf = entry.id === this.currentLeafId;
+
+		// Skip assistant messages with only tool calls (no text) unless error/aborted
+		// Always show current leaf so active position is visible
+		if (entry.type === "message" && entry.message.role === "assistant" && !isCurrentLeaf) {
+			const msg = entry.message as { stopReason?: string; content?: unknown };
+			const hasText = this.#hasTextContent(msg.content);
+			const isErrorOrAborted = msg.stopReason && msg.stopReason !== "stop" && msg.stopReason !== "toolUse";
+			// Only hide if no text AND not an error/aborted message
+			if (!hasText && !isErrorOrAborted) return false;
+		}
+
+		// Entry types hidden in default view (settings/bookkeeping)
+		const isSettingsEntry =
+			entry.type === "label" ||
+			entry.type === "custom" ||
+			entry.type === "model_change" ||
+			entry.type === "thinking_level_change";
+
+		let passesFilter: boolean;
+		switch (this.#filterMode) {
+			case "user-only":
+				// Just user messages
+				passesFilter = entry.type === "message" && entry.message.role === "user";
+				break;
+			case "no-tools":
+				// Default minus tool results
+				passesFilter = !isSettingsEntry && !(entry.type === "message" && entry.message.role === "toolResult");
+				break;
+			case "labeled-only":
+				// Just labeled entries
+				passesFilter = flatNode.node.label !== undefined;
+				break;
+			case "all":
+				// Show everything
+				passesFilter = true;
+				break;
+			default:
+				// Default mode: hide settings/bookkeeping entries
+				passesFilter = !isSettingsEntry;
+				break;
+		}
+
+		if (!passesFilter) return false;
+
+		// Apply fuzzy search filter
+		if (searchTokens.length > 0) {
+			const nodeText = this.#getSearchableText(flatNode.node);
+			return searchTokens.every(token => fuzzyMatch(token, nodeText).matches);
+		}
+
+		return true;
+	}
+
 	#applyFilter(): void {
 		// Update lastSelectedId only when we have a valid selection (non-empty list)
 		// This preserves the selection when switching through empty filter results
@@ -266,66 +359,12 @@ class TreeList implements Component {
 			this.#lastSelectedId = this.#filteredNodes[this.#selectedIndex]?.node.entry.id ?? this.#lastSelectedId;
 		}
 
+		// Collapse first, filter second: a collapsed subtree is gone regardless of
+		// which filter mode is active.
 		const searchTokens = this.#searchQuery.toLowerCase().split(/\s+/).filter(Boolean);
-
-		this.#filteredNodes = this.#flatNodes.filter(flatNode => {
-			const entry = flatNode.node.entry;
-			const isCurrentLeaf = entry.id === this.currentLeafId;
-
-			// Skip assistant messages with only tool calls (no text) unless error/aborted
-			// Always show current leaf so active position is visible
-			if (entry.type === "message" && entry.message.role === "assistant" && !isCurrentLeaf) {
-				const msg = entry.message as { stopReason?: string; content?: unknown };
-				const hasText = this.#hasTextContent(msg.content);
-				const isErrorOrAborted = msg.stopReason && msg.stopReason !== "stop" && msg.stopReason !== "toolUse";
-				// Only hide if no text AND not an error/aborted message
-				if (!hasText && !isErrorOrAborted) {
-					return false;
-				}
-			}
-
-			// Apply filter mode
-			let passesFilter = true;
-			// Entry types hidden in default view (settings/bookkeeping)
-			const isSettingsEntry =
-				entry.type === "label" ||
-				entry.type === "custom" ||
-				entry.type === "model_change" ||
-				entry.type === "thinking_level_change";
-
-			switch (this.#filterMode) {
-				case "user-only":
-					// Just user messages
-					passesFilter = entry.type === "message" && entry.message.role === "user";
-					break;
-				case "no-tools":
-					// Default minus tool results
-					passesFilter = !isSettingsEntry && !(entry.type === "message" && entry.message.role === "toolResult");
-					break;
-				case "labeled-only":
-					// Just labeled entries
-					passesFilter = flatNode.node.label !== undefined;
-					break;
-				case "all":
-					// Show everything
-					passesFilter = true;
-					break;
-				default:
-					// Default mode: hide settings/bookkeeping entries
-					passesFilter = !isSettingsEntry;
-					break;
-			}
-
-			if (!passesFilter) return false;
-
-			// Apply fuzzy search filter
-			if (searchTokens.length > 0) {
-				const nodeText = this.#getSearchableText(flatNode.node);
-				return searchTokens.every(token => fuzzyMatch(token, nodeText).matches);
-			}
-
-			return true;
-		});
+		this.#filteredNodes = this.#hideCollapsedDescendants(this.#flatNodes).filter(flatNode =>
+			this.#passesFilter(flatNode, searchTokens),
+		);
 
 		// Try to preserve cursor on the same node, or find nearest visible ancestor
 		if (this.#lastSelectedId) {
@@ -403,6 +442,138 @@ class TreeList implements Component {
 
 	getSelectedNode(): SessionTreeNode | undefined {
 		return this.#filteredNodes[this.#selectedIndex]?.node;
+	}
+
+	/** Entry ids currently drawn, in display order. */
+	getVisibleEntryIds(): string[] {
+		return this.#filteredNodes.map(flatNode => flatNode.node.entry.id);
+	}
+
+	isCollapsed(entryId: string): boolean {
+		return this.#collapsedIds.has(entryId);
+	}
+
+	/**
+	 * Collapse or expand the selected node's subtree. Childless nodes are left
+	 * alone so the key is a no-op instead of a silent state change the user
+	 * cannot see or undo.
+	 */
+	toggleCollapse(): void {
+		const selected = this.#filteredNodes[this.#selectedIndex];
+		if (!selected || selected.node.children.length === 0) return;
+		const entryId = selected.node.entry.id;
+		if (!this.#collapsedIds.delete(entryId)) this.#collapsedIds.add(entryId);
+		this.#applyFilter();
+	}
+
+	/**
+	 * Fold every branch that hangs off the current thread, leaving the path to
+	 * the active leaf fully expanded and each abandoned branch showing as a
+	 * single row. Pressing it again expands everything.
+	 *
+	 * This is the useful shape of a bulk collapse: folding *all* fork points also
+	 * folds the thread you are reading, which is the one thing you never want
+	 * hidden.
+	 */
+	focusCurrentThread(): void {
+		if (this.#collapsedIds.size > 0) {
+			this.#collapsedIds.clear();
+			this.#applyFilter();
+			return;
+		}
+		const searchTokens = this.#searchQuery.toLowerCase().split(/\s+/).filter(Boolean);
+		const byId = new Map(this.#flatNodes.map(flatNode => [flatNode.node.entry.id, flatNode]));
+		for (const flatNode of this.#flatNodes) {
+			const { id, parentId } = flatNode.node.entry;
+			// One fold per off-thread branch, anchored at its head — the first node
+			// that leaves the active path. Folding its descendants too would be
+			// invisible (they are already hidden) and would leave stale collapse
+			// state behind once the head is reopened.
+			if (this.#activePathIds.has(id)) continue;
+			if (!parentId || !this.#activePathIds.has(parentId)) continue;
+
+			// The head itself is often filtered away (a bare tool call, say). Folding
+			// it would hide the branch entirely, marker and count included, so the
+			// fold slides down to the first row the user can actually see.
+			let anchor: FlatNode | undefined = flatNode;
+			while (anchor && !this.#passesFilter(anchor, searchTokens)) {
+				anchor = anchor.node.children.length === 1 ? byId.get(anchor.node.children[0]!.entry.id) : undefined;
+			}
+			if (!anchor || anchor.node.children.length === 0) continue;
+			this.#collapsedIds.add(anchor.node.entry.id);
+		}
+		this.#applyFilter();
+	}
+
+	/**
+	 * Move the cursor along the branch you are on: `-1` climbs to the nearest
+	 * fork above the selection, `1` descends to the nearest fork below it. Both
+	 * follow parent links rather than screen order, so a fork on a sibling branch
+	 * is never what you land on — with the active branch drawn first, the row
+	 * above the cursor often belongs to another thread entirely. Row depth cannot
+	 * stand in for this: linear continuations share their branch head's indent.
+	 *
+	 * A fork whose branches are hidden (collapsed, or filtered away) is not a
+	 * fork worth stopping at, so what counts is the visible child count. With no
+	 * fork left in the chosen direction the cursor rides the chain to its end.
+	 */
+	jumpToBranchPoint(direction: 1 | -1): void {
+		const nodes = this.#filteredNodes;
+		const current = nodes[this.#selectedIndex];
+		if (!current) return;
+
+		const indexById = new Map<string, number>();
+		const visibleChildCounts = new Map<string, number>();
+		const firstChildByParent = new Map<string, number>();
+		for (let i = 0; i < nodes.length; i++) {
+			indexById.set(nodes[i].node.entry.id, i);
+			const parentId = nodes[i].node.entry.parentId;
+			if (!parentId) continue;
+			visibleChildCounts.set(parentId, (visibleChildCounts.get(parentId) ?? 0) + 1);
+			if (!firstChildByParent.has(parentId)) firstChildByParent.set(parentId, i);
+		}
+		const isFork = (index: number): boolean => (visibleChildCounts.get(nodes[index].node.entry.id) ?? 0) > 1;
+		// Ancestry comes off the full tree: a hidden parent still links its child
+		// to the fork above it.
+		const parentByChild = new Map<string, string | null>(
+			this.#flatNodes.map(flatNode => [flatNode.node.entry.id, flatNode.node.entry.parentId]),
+		);
+
+		if (direction < 0) {
+			// Skip straight over ancestors the filter hid, or the climb would stop
+			// dead at the first gap instead of reaching the fork above it.
+			let parentId = current.node.entry.parentId;
+			let highest = -1;
+			const seen = new Set<string>();
+			while (parentId && !seen.has(parentId)) {
+				seen.add(parentId);
+				const index = indexById.get(parentId);
+				if (index !== undefined) {
+					highest = index;
+					if (isFork(index)) {
+						this.#selectedIndex = index;
+						return;
+					}
+				}
+				parentId = parentByChild.get(parentId) ?? null;
+			}
+			if (highest >= 0) this.#selectedIndex = highest;
+			return;
+		}
+
+		// The first child listed is the one on the active branch, which is the
+		// thread being read.
+		let index = firstChildByParent.get(current.node.entry.id);
+		let deepest = -1;
+		while (index !== undefined) {
+			deepest = index;
+			if (isFork(index)) {
+				this.#selectedIndex = index;
+				return;
+			}
+			index = firstChildByParent.get(nodes[index].node.entry.id);
+		}
+		if (deepest >= 0) this.#selectedIndex = deepest;
 	}
 
 	updateNodeLabel(entryId: string, label: string | undefined): void {
@@ -549,10 +720,18 @@ class TreeList implements Component {
 			const isOnActivePath = this.#activePathIds.has(entry.id);
 			const pathMarker = isOnActivePath ? theme.fg("accent", `${theme.md.bullet} `) : "";
 
+			// Only collapsed rows carry a marker. Reserving a chevron column for
+			// every row would push all content right and stamp one on each link of
+			// every single-child chain — noise on the common case, and it disturbs
+			// the connector geometry the tree is read by.
+			const hidden = this.#hiddenDescendantCounts.get(entry.id) ?? 0;
+			const collapseMarker = hidden > 0 ? theme.fg("warning", `${theme.nav.expand} `) : "";
+			const hiddenCount = hidden > 0 ? theme.fg("muted", ` (+${hidden})`) : "";
+
 			const label = flatNode.node.label ? theme.fg("warning", `[${flatNode.node.label}] `) : "";
 			const content = this.#getEntryDisplayText(flatNode.node, isSelected);
 
-			let line = cursor + theme.fg("dim", prefix) + pathMarker + label + content;
+			let line = cursor + theme.fg("dim", prefix) + collapseMarker + pathMarker + label + content + hiddenCount;
 			if (isSelected) {
 				line = theme.bg("selectedBg", line);
 			}
@@ -786,9 +965,13 @@ class TreeList implements Component {
 			this.#selectedIndex = 0;
 		} else if (matchesKey(keyData, "end")) {
 			this.#selectedIndex = Math.max(0, this.#filteredNodes.length - 1);
-		} else if (matchesSelectPageUp(keyData) || matchesKey(keyData, "left")) {
+		} else if (matchesKey(keyData, "left")) {
+			this.jumpToBranchPoint(-1);
+		} else if (matchesKey(keyData, "right")) {
+			this.jumpToBranchPoint(1);
+		} else if (matchesSelectPageUp(keyData)) {
 			this.#selectedIndex = Math.max(0, this.#selectedIndex - this.maxVisibleLines);
-		} else if (matchesSelectPageDown(keyData) || matchesKey(keyData, "right")) {
+		} else if (matchesSelectPageDown(keyData)) {
 			this.#selectedIndex = Math.min(this.#filteredNodes.length - 1, this.#selectedIndex + this.maxVisibleLines);
 		} else if (matchesKey(keyData, "shift+enter") || matchesKey(keyData, "shift+return")) {
 			// Summarize-and-switch: fork with a branch summary without the extra prompt.
@@ -837,6 +1020,12 @@ class TreeList implements Component {
 		} else if (matchesKey(keyData, "alt+a")) {
 			this.#filterMode = "all";
 			this.#applyFilter();
+		} else if (matchesKey(keyData, "shift+tab")) {
+			this.focusCurrentThread();
+		} else if (matchesKey(keyData, "tab") || (matchesKey(keyData, "space") && !this.#searchQuery)) {
+			// Space is the natural collapse key, but it is also a search character,
+			// so it only collapses while no search is being typed. Tab always works.
+			this.toggleCollapse();
 		} else if (matchesKey(keyData, "backspace")) {
 			if (this.#searchQuery.length > 0) {
 				this.#searchQuery = this.#searchQuery.slice(0, -1);
@@ -944,7 +1133,6 @@ export class TreeSelectorComponent extends Container {
 		this.#treeContainer.addChild(this.#treeList);
 
 		this.#labelInputContainer = new Container();
-
 		this.addChild(new Spacer(1));
 		this.addChild(new DynamicBorder());
 		this.addChild(new Text(theme.bold("  Session Tree"), 1, 0));
@@ -952,7 +1140,7 @@ export class TreeSelectorComponent extends Container {
 			new TruncatedText(
 				theme.fg(
 					"muted",
-					"Enter: switch. Alt+↑/↓: previous/next turn. PgUp/PgDn (←/→): page. Home/End: first/last item. Shift+Enter: summarize & switch. Shift+L: label. Ctrl+O: filter. Alt+D/T/U/L/A: filter. Type to search",
+					"Enter: switch. Space: collapse. Alt+↑/↓: previous/next turn. ←/→: fork above/below. PgUp/PgDn: page. Home/End: first/last item. Shift+Tab: focus thread. Shift+Enter: summarize & switch. Shift+L: label. Ctrl+O: filter. Alt+D/T/U/L/A: filter. Type to search",
 				),
 				0,
 				0,

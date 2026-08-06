@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added collapsible branches to the `/tree` selector: `Space` folds the selected node's subtree behind a `▸` marker with a hidden-entry count, `Shift+Tab` folds every branch off the current thread down to one row each, and `←`/`→` jump to the fork above the cursor or the next fork below it along the branch.
+
 ## [17.2.9] - 2026-08-05
 
 ### Breaking Changes
