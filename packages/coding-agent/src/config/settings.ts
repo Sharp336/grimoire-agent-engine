@@ -30,6 +30,7 @@ import {
 	setWorktreesDir,
 	toError,
 } from "@oh-my-pi/pi-utils";
+import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { JSONC, YAML } from "bun";
 import { invalidate as invalidateCapabilityFsCache } from "../capability/fs";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
@@ -41,7 +42,6 @@ import { AUTO_IMAGE_PROVIDER_ORDER, isImageProviderId } from "../tools/image-pro
 import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
 import { INSPECT_IMAGE_MODES } from "../utils/inspect-image-mode";
 import { isSearchProviderId, SEARCH_PROVIDER_ORDER } from "../web/search/types";
-import { withFileLock } from "./file-lock";
 import {
 	type BashInterceptorRule,
 	type GroupPrefix,
@@ -1345,6 +1345,31 @@ export class Settings {
 			this.#legacyLastChangelogVersion ??= raw.lastChangelogVersion;
 		}
 		delete raw.lastChangelogVersion;
+
+		// collapseChangelog (boolean) -> startup.changelogMode (enum). Preserve
+		// every explicit legacy choice while giving new installs the schema's
+		// "summary" default: true -> summary, false -> expanded. A separately
+		// configured new mode always wins.
+		const startupObj = isRecord(raw.startup) ? (raw.startup as Record<string, unknown>) : undefined;
+		const legacyCollapseChangelog = typeof raw.collapseChangelog === "boolean" ? raw.collapseChangelog : undefined;
+		const flatChangelogMode = raw["startup.changelogMode"];
+		const normalizedFlatChangelogMode =
+			flatChangelogMode === "summary" || flatChangelogMode === "expanded" || flatChangelogMode === "hidden"
+				? flatChangelogMode
+				: undefined;
+		if (legacyCollapseChangelog !== undefined || normalizedFlatChangelogMode !== undefined) {
+			if (!startupObj) {
+				raw.startup = {};
+			}
+			const target = raw.startup as Record<string, unknown>;
+			if (target.changelogMode === undefined) {
+				target.changelogMode =
+					normalizedFlatChangelogMode ??
+					(legacyCollapseChangelog !== undefined ? (legacyCollapseChangelog ? "summary" : "expanded") : undefined);
+			}
+		}
+		delete raw.collapseChangelog;
+		delete raw["startup.changelogMode"];
 
 		// ask.timeout: ms -> seconds (if value > 1000, it's old ms format)
 		if (raw.ask && typeof (raw.ask as Record<string, unknown>).timeout === "number") {

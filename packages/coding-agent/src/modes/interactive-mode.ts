@@ -37,6 +37,7 @@ import {
 	TUI,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
+import type { TerminalAppearanceRequestToken } from "@oh-my-pi/pi-tui/terminal";
 import { isInsideTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import {
 	$env,
@@ -103,6 +104,7 @@ import {
 	SHUTDOWN_CONSOLIDATE_BUDGET_MS,
 } from "../session/agent-session";
 import type { CompactMode } from "../session/compact-modes";
+import type { ForeignSessionSource } from "../session/foreign-session-store";
 import { HistoryStorage } from "../session/history-storage";
 import type { SessionContext } from "../session/session-context";
 import { getRecentSessions } from "../session/session-listing";
@@ -127,6 +129,7 @@ import {
 } from "../tools/todo";
 import { vocalizer } from "../tts/vocalizer";
 import { renderTreeList } from "../tui/tree-list";
+import { formatStartupChangelogSummary, type StartupChangelogSelection } from "../utils/changelog";
 import { copyToClipboard } from "../utils/clipboard";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
@@ -148,6 +151,7 @@ import {
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
 import { ChatBlock, type ChatBlockHost } from "./components/chat-block";
+import { CodexResetFireworksController } from "./components/codex-reset-fireworks";
 import { CustomEditor } from "./components/custom-editor";
 import { DynamicBorder } from "./components/dynamic-border";
 import { ErrorBannerComponent } from "./components/error-banner";
@@ -203,6 +207,7 @@ import {
 	onTerminalAppearanceChange,
 	onThemeChange,
 	setMarkdownMermaidRendering,
+	startMacOSAppearanceReprobeFallback,
 	theme,
 } from "./theme/theme";
 import type {
@@ -426,6 +431,8 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 	return ["", theme.bold(theme.fg("accent", "Subagents")), ...rows.map(line => ` ${line}`)];
 }
 
+const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
+
 export class InteractiveMode implements InteractiveModeContext {
 	session: AgentSession;
 	sessionManager: SessionManager;
@@ -454,6 +461,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	initialChatRendered = false;
 	isBashMode = false;
 	toolOutputExpanded = false;
+	hideToolActivity = false;
 	todoExpanded = false;
 	planModeEnabled = false;
 	planModePaused = false;
@@ -468,6 +476,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#loopAutoSubmitTimer: NodeJS.Timeout | undefined;
 	#todoAutoClearTimer: NodeJS.Timeout | undefined;
 	#modelCycleClearTimer: NodeJS.Timeout | undefined;
+	#nextAppearanceRequestToken = 1;
+	#appearanceRefreshRequest: { token: TerminalAppearanceRequestToken; deadline: number } | undefined;
 	todoPhases: TodoPhase[] = [];
 	hideThinkingBlock = false;
 	#sessionsWithDisplayableThinkingContent = new WeakSet<AgentSession>();
@@ -555,7 +565,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#cleanupUnsubscribe?: () => void;
 	#signalTeardown?: SessionTeardown;
 	readonly #version: string;
-	readonly #changelogMarkdown: string | undefined;
+	readonly #startupChangelog: StartupChangelogSelection | undefined;
 	#planModePreviousTools: string[] | undefined;
 	#goalModePreviousTools: string[] | undefined;
 	#vibeModePreviousTools: string[] | undefined;
@@ -581,6 +591,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	mcpManager?: MCPManager;
 	readonly #toolUiContextSetter: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
 
+	readonly #codexResetFireworksController: CodexResetFireworksController;
 	readonly #btwController: BtwController;
 	readonly #tanCommandController: TanCommandController;
 	readonly #omfgController: OmfgController;
@@ -665,7 +676,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	constructor(
 		session: AgentSession,
 		version: string,
-		changelogMarkdown: string | undefined = undefined,
+		startupChangelog: StartupChangelogSelection | undefined = undefined,
 		setToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void = () => {},
 		lspServers: LspStartupServerInfo[] | undefined = undefined,
 		mcpManager?: MCPManager,
@@ -677,7 +688,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.keybindings = KeybindingsManager.inMemory();
 		this.agent = session.agent;
 		this.#version = version;
-		this.#changelogMarkdown = changelogMarkdown;
+		this.#startupChangelog = startupChangelog;
 		this.#toolUiContextSetter = setToolUIContext;
 		this.lspServers = lspServers;
 		this.mcpManager = mcpManager;
@@ -755,6 +766,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editorContainer.addChild(this.editor);
 		this.statusLine = new StatusLineComponent(session);
 		this.statusLine.setAutoCompactEnabled(session.autoCompactionEnabled);
+		this.#codexResetFireworksController = new CodexResetFireworksController(this);
+		this.statusLine.setCodexResetFireworksHandler(event => {
+			this.#codexResetFireworksController.show(event);
+		});
 		// Vibe worker tok/s aggregator — keeps the status-line render layer off
 		// the heavy vibe/task dependency graph. The director is often idle while
 		// workers stream, so without this the tok/s badge would show a stale
@@ -769,6 +784,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// hot path where the render never gets to paint the result.
 		this.editor.setTopBorderProvider(availableWidth => this.statusLine.getTopBorder(availableWidth));
 
+		this.hideToolActivity = settings.get("display.hideToolActivity");
 		this.hideThinkingBlock = settings.get("hideThinkingBlock");
 		this.proseOnlyThinking = settings.get("proseOnlyThinking");
 
@@ -946,19 +962,20 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 
 			// Add changelog if provided
-			if (this.#changelogMarkdown) {
+			if (this.#startupChangelog && settings.get("startup.changelogMode") !== "hidden") {
 				this.ui.addChild(new DynamicBorder());
-				if (settings.get("collapseChangelog")) {
-					const versionMatch = this.#changelogMarkdown.match(/##\s+\[?(\d+\.\d+\.\d+)\]?/);
-					const latestVersion = versionMatch ? versionMatch[1] : this.#version;
-					const condensedText = `Updated to v${latestVersion}. Use ${theme.bold("/changelog")} to view full changelog.`;
-					this.ui.addChild(new Text(condensedText, 1, 0));
+				this.ui.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
+				this.ui.addChild(new Spacer(1));
+				if (settings.get("startup.changelogMode") === "summary") {
+					const summary = formatStartupChangelogSummary(this.#startupChangelog).replace(
+						/\/changelog(?: full)?/g,
+						command => theme.bold(command),
+					);
+					this.ui.addChild(new Text(summary, 1, 0));
 				} else {
-					this.ui.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
-					this.ui.addChild(new Spacer(1));
-					this.ui.addChild(new Markdown(this.#changelogMarkdown.trim(), 1, 0, getMarkdownTheme()));
-					this.ui.addChild(new Spacer(1));
+					this.ui.addChild(new Markdown(this.#startupChangelog.markdown?.trim() ?? "", 1, 0, getMarkdownTheme()));
 				}
+				this.ui.addChild(new Spacer(1));
 				this.ui.addChild(new DynamicBorder());
 			}
 		}
@@ -999,6 +1016,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Load initial todos
 		await this.#loadTodoList();
+
+		if (process.platform === "darwin" && TERMINAL.id === "wezterm" && !isInsideTerminalMultiplexer()) {
+			this.#eventBusUnsubscribers.push(startMacOSAppearanceReprobeFallback(this.ui.terminal));
+		}
 
 		// Start the UI. Cold `omp` launch opts into clearing on the first paint so
 		// the initial welcome frame does not append over the previous run's scrollback.
@@ -1132,8 +1153,38 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Subscribe to terminal dark/light appearance changes.
 		// The terminal queries background color via OSC 11 at startup and on
 		// Mode 2031 notifications, computing luminance to detect dark/light.
-		this.ui.terminal.onAppearanceChange(mode => {
-			onTerminalAppearanceChange(mode);
+		const unsubscribeAppearanceReport = this.ui.terminal.onAppearanceReport?.((_mode, requestToken) => {
+			const request = this.#appearanceRefreshRequest;
+			if (request === undefined || requestToken !== request.token) return;
+			// ProcessTerminal dispatches report callbacks first, then synchronously
+			// dispatches onAppearanceChange when the reported appearance changed.
+			// That change callback consumes the request below before this microtask
+			// runs; an unchanged matching report has no change callback, so it
+			// consumes the one-shot here. Comparing the captured request prevents a
+			// newer Ctrl+L request from being cleared by this report's microtask.
+			queueMicrotask(() => {
+				if (this.#appearanceRefreshRequest === request) {
+					this.#appearanceRefreshRequest = undefined;
+				}
+			});
+		});
+		if (unsubscribeAppearanceReport) {
+			this.#eventBusUnsubscribers.push(unsubscribeAppearanceReport);
+		}
+		this.ui.terminal.onAppearanceChange((mode, requestToken) => {
+			const request = this.#appearanceRefreshRequest;
+			const appearanceRefreshWasRequested =
+				request !== undefined &&
+				Date.now() <= request.deadline &&
+				(requestToken === request.token || requestToken === undefined);
+			if (request !== undefined && requestToken === request.token) {
+				this.#appearanceRefreshRequest = undefined;
+			}
+			// Ctrl+L already replays immediately below. If either its asynchronous
+			// OSC 11 response or an automatic query ahead of it reveals a theme
+			// change, commit that change so theme loading performs a second full
+			// replay with the newly detected palette.
+			onTerminalAppearanceChange(mode, appearanceRefreshWasRequested ? {} : undefined);
 		});
 
 		// A branch change (checkout, worktree switch, `git switch`) invalidates
@@ -1278,8 +1329,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.refreshSkillState();
 		await this.refreshSlashCommandState(newCwd);
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
-		this.statusLine.invalidate();
-		this.ui.requestRender();
+		this.statusLine.applyCwdChange();
 	}
 
 	async getUserInput(): Promise<SubmittedUserInput> {
@@ -3925,6 +3975,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	stop(): void {
 		this.nextPromptSuggestionController.dispose();
+		this.#appearanceRefreshRequest = undefined;
 		if (this.loadingAnimation) {
 			this.#stopLoadingAnimation(false);
 		}
@@ -3948,6 +3999,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#agentRegistryUnsubscribe = undefined;
 		this.#agentRegistrySubscriptionTarget = undefined;
 		this.#eventController.dispose();
+		this.#codexResetFireworksController.dispose();
 		this.statusLine.dispose();
 		if (this.#resizeHandler) {
 			process.stdout.removeListener("resize", this.#resizeHandler);
@@ -4470,6 +4522,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleFreshCommand();
 	}
 
+	handleResetContextCommand(): Promise<void> {
+		return this.#commandController.handleResetContextCommand();
+	}
+
 	async handleDropCommand(): Promise<void> {
 		if (this.#vibeSessionTransitionBlocked()) return;
 		this.#prepareSessionSwitch();
@@ -4691,8 +4747,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController.showTreeSelector();
 	}
 
-	showSessionSelector(): void {
-		this.#selectorController.showSessionSelector();
+	showSessionSelector(source?: ForeignSessionSource): void {
+		void this.#selectorController.showSessionSelector(source);
 	}
 
 	async handleResumeSession(sessionPath: string): Promise<void> {
@@ -4748,6 +4804,27 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#inputController.handleCtrlZ();
 	}
 
+	resetDisplayAfterAppearanceRefresh(): void {
+		const refreshAppearance = this.ui.terminal.refreshAppearance;
+		if (refreshAppearance) {
+			const token = this.#nextAppearanceRequestToken++;
+			const request = {
+				token,
+				deadline: Date.now() + CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS,
+			};
+			this.#appearanceRefreshRequest = request;
+			const acceptedToken = refreshAppearance.call(this.ui.terminal, token);
+			if (acceptedToken !== token && this.#appearanceRefreshRequest === request) {
+				this.#appearanceRefreshRequest = undefined;
+			}
+		} else {
+			this.#appearanceRefreshRequest = undefined;
+		}
+		// Preserve Ctrl+L's immediate full replay when the probe is unsupported,
+		// receives no response, or reports an unchanged appearance.
+		this.ui.resetDisplay();
+	}
+
 	handleDequeue(): void {
 		this.#inputController.handleDequeue();
 	}
@@ -4781,6 +4858,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#btwController.canBranch();
 	}
 
+	/** Reserves plain `b` only after /btw has a completed branch action to handle. */
+	handlesBtwBranchKey(): boolean {
+		return this.#btwController.handlesBranchKey();
+	}
+
 	handleBtwBranchKey(): Promise<boolean> {
 		return this.#btwController.handleBranch();
 	}
@@ -4793,9 +4875,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#btwController.handleCopy();
 	}
 
-	async handleBtwBranch(question: string, assistantMessage: AssistantMessage): Promise<void> {
+	async handleBtwBranch(
+		question: string,
+		assistantMessage: AssistantMessage,
+		leafId: string,
+		sessionId: string,
+	): Promise<void> {
 		try {
-			const result = await this.session.branchFromBtw(question, assistantMessage);
+			const result = await this.session.branchFromBtw(question, assistantMessage, leafId, sessionId);
 			if (result.cancelled) {
 				this.showStatus("/btw branch cancelled", { dim: true });
 				return;

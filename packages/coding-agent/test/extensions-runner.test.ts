@@ -5,6 +5,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, expectTypeOf, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { Type } from "@oh-my-pi/omptype/typebox";
 import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -21,7 +22,6 @@ import type {
 	ExtensionUIContext,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
-import { Type } from "@oh-my-pi/pi-coding-agent/extensibility/typebox";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
@@ -97,6 +97,25 @@ describe("ExtensionRunner", () => {
 		);
 
 		expect(runner.createContext().localProtocolOptions).toBe(localProtocolOptions);
+	});
+
+	it("reflects SessionManager.moveTo() changes instead of the constructor-time snapshot (/move)", async () => {
+		const dirA = tempDir.join("dirA");
+		const dirB = tempDir.join("dirB");
+		fs.mkdirSync(dirA, { recursive: true });
+		fs.mkdirSync(dirB, { recursive: true });
+		const movableSessionManager = SessionManager.inMemory(dirA);
+
+		const result = await loadTestExtensions();
+		const runner = new ExtensionRunner(result.extensions, result.runtime, dirA, movableSessionManager, modelRegistry);
+
+		expect(runner.cwd).toBe(dirA);
+		expect(runner.createContext().cwd).toBe(dirA);
+
+		await movableSessionManager.moveTo(dirB);
+
+		expect(runner.cwd).toBe(dirB);
+		expect(runner.createContext().cwd).toBe(dirB);
 	});
 
 	describe("shortcut conflicts", () => {
@@ -2523,6 +2542,50 @@ describe("ExtensionRunner", () => {
 			expect(fs.existsSync(recordPath)).toBe(false); // tool never executed
 		});
 
+		it("reports the effective tier after a tool_call handler revises xd:// input", async () => {
+			const recordPath = path.join(tempDir.path(), "xdev-effective-tier.jsonl");
+			const extCode = `
+				export default function(pi) {
+					pi.on("tool_call", async (event) => {
+						if (event.toolName !== "bash") return;
+						return { input: { command: "echo revised" } };
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-xdev-tier.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const tool = createRecordingTool(recordPath);
+			tool.approval = args =>
+				args &&
+				typeof args === "object" &&
+				"command" in args &&
+				typeof args.command === "string" &&
+				args.command.includes("revised")
+					? "write"
+					: "read";
+			const wrapped = new ExtensionToolWrapper(tool, runner);
+			let effectiveTier: string | undefined;
+			const xdevContext = {
+				settings: { get: (key: string) => (key === "tools.approvalMode" ? "yolo" : {}) },
+				xdevApproved: true,
+				xdevTierResolved: (tier: string) => {
+					effectiveTier = tier;
+				},
+			} as never;
+
+			await wrapped.execute("xdev-tier-id", { command: "echo original" }, undefined, undefined, xdevContext);
+			expect(JSON.parse(fs.readFileSync(recordPath, "utf8"))).toEqual({ command: "echo revised" });
+			expect(effectiveTier).toBe("write");
+		});
+
 		it("emits tool_call before the approval prompt so approval sees the final input", async () => {
 			const order: string[] = [];
 			const extCode = `
@@ -2829,6 +2892,169 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	describe("mcp_notification", () => {
+		it("delivers mcp_notification events to subscribed extensions with the typed payload", async () => {
+			const eventsPath = path.join(tempDir.path(), "mcp-notification-events.jsonl");
+			const extCode = `
+				import * as fs from "node:fs";
+
+				export default function(pi) {
+					pi.on("mcp_notification", async (event) => {
+						fs.appendFileSync(
+							${JSON.stringify(eventsPath)},
+							JSON.stringify({
+								type: event.type,
+								server: event.server,
+								method: event.method,
+								params: event.params,
+							}) + "\\n",
+						);
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "mcp-notification.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			runner.initialize(
+				{
+					sendMessage: () => {},
+					sendUserMessage: () => {},
+					appendEntry: () => {},
+					setLabel: () => {},
+					getActiveTools: () => [],
+					getAllTools: () => [],
+					setActiveTools: async () => {},
+					getCommands: () => [],
+					setModel: async () => false,
+					getThinkingLevel: () => undefined,
+					setThinkingLevel: () => {},
+					getSessionName: () => sessionManager.getSessionName(),
+					setSessionName: async () => {},
+				},
+				{
+					getModel: () => undefined,
+					isIdle: () => true,
+					abort: () => {},
+					hasPendingMessages: () => false,
+					shutdown: () => {},
+					getContextUsage: () => undefined,
+					compact: async () => {},
+					getSystemPrompt: () => [],
+				},
+			);
+
+			await runner.emitMcpNotification({
+				server: "peers",
+				method: "notifications/peer_message",
+				params: { from: "alice", text: "hi" },
+			});
+
+			const events = fs
+				.readFileSync(eventsPath, "utf8")
+				.trim()
+				.split("\n")
+				.map(line => JSON.parse(line));
+			expect(events).toEqual([
+				{
+					type: "mcp_notification",
+					server: "peers",
+					method: "notifications/peer_message",
+					params: { from: "alice", text: "hi" },
+				},
+			]);
+		});
+
+		it("buffers pre-initialize events and drains them on initialize (caps at 100, drops oldest)", async () => {
+			// Guard against regression of the two-layer startup race that Codex flagged
+			// on PR #6535 (commit ffa058aa8): the sdk.ts bridge wires
+			// mcpManager.addNotificationListener inside createAgentSession BEFORE the
+			// mode controller calls ExtensionRunner.initialize(). Frames the manager
+			// drains from its own buffer arrive here pre-init. Prior behavior silently
+			// dropped them; the fix buffers and drains on initialize (same shape as
+			// emitCredentialDisabled).
+			const eventsPath = path.join(tempDir.path(), "mcp-notification-cap.jsonl");
+			const extCode = `
+				import * as fs from "node:fs";
+
+				export default function(pi) {
+					pi.on("mcp_notification", async (event) => {
+						fs.appendFileSync(
+							${JSON.stringify(eventsPath)},
+							JSON.stringify({ server: event.server, method: event.method }) + "\\n",
+						);
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "mcp-notification-cap.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			// Push 101 events while uninitialized — the 1st should be dropped, next 100 buffered.
+			for (let i = 0; i < 101; i++) {
+				await runner.emitMcpNotification({
+					server: "peers",
+					method: `notifications/test/${i}`,
+					params: null,
+				});
+			}
+
+			runner.initialize(
+				{
+					sendMessage: () => {},
+					sendUserMessage: () => {},
+					appendEntry: () => {},
+					setLabel: () => {},
+					getActiveTools: () => [],
+					getAllTools: () => [],
+					setActiveTools: async () => {},
+					getCommands: () => [],
+					setModel: async () => false,
+					getThinkingLevel: () => undefined,
+					setThinkingLevel: () => {},
+					getSessionName: () => sessionManager.getSessionName(),
+					setSessionName: async () => {},
+				},
+				{
+					getModel: () => undefined,
+					isIdle: () => true,
+					abort: () => {},
+					hasPendingMessages: () => false,
+					shutdown: () => {},
+					getContextUsage: () => undefined,
+					compact: async () => {},
+					getSystemPrompt: () => [],
+				},
+			);
+
+			// Drain microtasks so the fire-and-forget emit() calls inside initialize() complete.
+			for (let i = 0; i < 5; i++) await Promise.resolve();
+
+			const events = fs
+				.readFileSync(eventsPath, "utf8")
+				.trim()
+				.split("\n")
+				.map(line => JSON.parse(line));
+			expect(events).toHaveLength(100);
+			// Drop-oldest policy: test/0 was evicted, test/1 survives as the head.
+			expect(events[0]?.method).toBe("notifications/test/1");
+			expect(events[99]?.method).toBe("notifications/test/100");
+		});
+	});
+
 	describe("managed timers (ctx.setInterval / ctx.setTimeout)", () => {
 		it("contains a throwing interval callback instead of letting it escape as uncaughtException", () => {
 			vi.useFakeTimers();
@@ -2942,6 +3168,93 @@ describe("ExtensionRunner", () => {
 			} finally {
 				vi.useRealTimers();
 			}
+		});
+	});
+
+	describe("invokeTool same-tool delegation", () => {
+		// Records what the native tool actually received, so the inherited abort/progress channels and
+		// the caller context are observable.
+		function nativeProbe(seen: { signal?: AbortSignal; onUpdate?: unknown; params?: unknown }): AgentTool {
+			return {
+				name: "bash",
+				label: "Bash",
+				description: "native bash",
+				parameters: Type.Object({ command: Type.String() }),
+				execute: async (_id: string, params: unknown, signal?: AbortSignal, onUpdate?: unknown) => {
+					seen.params = params;
+					seen.signal = signal;
+					seen.onUpdate = onUpdate;
+					return { content: [{ type: "text", text: "native ran" }], details: {} };
+				},
+			} as AgentTool;
+		}
+
+		const runnerWithNative = async (native: AgentTool) => {
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			runner.setNativeToolResolver(name =>
+				name === native.name ? { tool: native, makeContext: () => ({}) as never } : undefined,
+			);
+			return runner;
+		};
+
+		it("inherits the wrapper call's signal and onUpdate for a bare invokeTool", async () => {
+			const seen: { signal?: AbortSignal; onUpdate?: unknown; params?: unknown } = {};
+			const runner = await runnerWithNative(nativeProbe(seen));
+			const controller = new AbortController();
+			const onUpdate = () => {};
+
+			const ctx = runner.createContext(undefined, {
+				toolName: "bash",
+				signal: controller.signal,
+				onUpdate,
+			});
+			await ctx.invokeTool?.({ command: "echo hi" });
+
+			// Aborting the outer tool call must reach the native one, and native progress must stream.
+			expect(seen.signal).toBe(controller.signal);
+			expect(seen.onUpdate).toBe(onUpdate);
+			expect(seen.params).toEqual({ command: "echo hi" });
+		});
+
+		it("lets explicit invokeTool options override the inherited channels", async () => {
+			const seen: { signal?: AbortSignal; onUpdate?: unknown; params?: unknown } = {};
+			const runner = await runnerWithNative(nativeProbe(seen));
+			const outer = new AbortController();
+			const inner = new AbortController();
+			const innerOnUpdate = () => {};
+
+			const ctx = runner.createContext(undefined, {
+				toolName: "bash",
+				signal: outer.signal,
+				onUpdate: () => {},
+			});
+			await ctx.invokeTool?.({ command: "echo hi" }, { signal: inner.signal, onUpdate: innerOnUpdate });
+
+			expect(seen.signal).toBe(inner.signal);
+			expect(seen.onUpdate).toBe(innerOnUpdate);
+		});
+
+		it("omits invokeTool when no native built-in of that name exists", async () => {
+			const runner = await runnerWithNative(nativeProbe({}));
+			expect(runner.createContext(undefined, { toolName: "not_a_builtin" }).invokeTool).toBeUndefined();
+			// Also absent when the context is not scoped to a tool at all.
+			expect(runner.createContext().invokeTool).toBeUndefined();
+		});
+
+		it("bounds recursion per call chain", async () => {
+			const runner = await runnerWithNative(nativeProbe({}));
+			await expect(runner.invokeNativeTool("bash", { command: "echo hi" }, { depth: 8 })).rejects.toThrow(
+				/delegation depth exceeded/,
+			);
+			// A fresh chain at depth 0 is unaffected by another chain's depth.
+			await expect(runner.invokeNativeTool("bash", { command: "echo hi" }, { depth: 0 })).resolves.toBeDefined();
 		});
 	});
 });
