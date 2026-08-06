@@ -4161,11 +4161,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#pendingCommandOutputSessionId = sessionId;
 		const items = Array.isArray(content) ? content : [content as Component];
 		this.#pendingCommandOutput.push(...items);
-		// Deferring silently reads as a dead command: the panel can be minutes
-		// away on a long turn, so say where it went. "Pauses" rather than
-		// "finishes" because an async fan-out settles without ending the run,
-		// and the queue flushes at that settle too.
-		this.showStatus("Command output queued until the agent pauses.");
+		// No feedback here on purpose: mounting anything into the transcript
+		// mid-turn (even a status line) re-renders rows below the growing live
+		// block and duplicates them in native scrollback — the exact regression
+		// issues #4806/#6767 pin. The queue flushes at the next settle.
 	}
 
 	/** Mount every command panel queued for the current session while the agent was streaming. */

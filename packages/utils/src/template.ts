@@ -426,6 +426,9 @@ function evaluateCall(
 	const hash = evaluateHash(call.hash, frame, evaluation);
 	if (helper)
 		return helper.call(frame.context, ...args, helperOptions(call.name, hash, frame, evaluation, body, inverse));
+	// Handlebars built-in: `{{lookup obj key}}` → proto-safe `obj[key]`.
+	// Resolved after user helpers so a registered `lookup` override wins.
+	if (call.name === "lookup" && args.length >= 2) return property(args[0], String(args[1]));
 	if (forceHelper || args.length) throw new Error(`Missing helper: "${call.name}"`);
 	for (const _key in hash) throw new Error(`Missing helper: "${call.name}"`);
 	return resolvePath(call.name, frame);
