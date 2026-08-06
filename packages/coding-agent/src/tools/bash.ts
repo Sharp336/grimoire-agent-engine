@@ -132,7 +132,8 @@ const BASH_PATTERN_APPROVAL_VALUES = new Set(["allow", "deny", "prompt"]);
  *
  * The wrap reuses the same shell binary + args the local `bash-executor` would
  * pick via `settings.getShellConfig()` — Git Bash / `bash.exe` on Windows
- * (`cmd.exe /c` as the last-resort fallback when no bash exists on the host),
+ * (PowerShell `-Command`, then `cmd.exe /c`, as fallbacks when no bash
+ * exists on the host),
  * `$SHELL` (bash/zsh) with the `sh` fallback on POSIX — so the ACP path
  * preserves `bash` tool semantics (`$VAR`, `$(...)`, `source`, POSIX quoting,
  * `-l`) wherever a POSIX shell is available. The agent host's shell path is

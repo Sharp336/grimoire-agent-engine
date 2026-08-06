@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Windows shell discovery now prefers PowerShell (`pwsh.exe`, then `powershell.exe`) over cmd.exe as the last-resort fallback when no bash/sh is installed, and `resolveWindowsShell` honors an injected `env.PATH` for its on-PATH lookups so the fallback chain is deterministic in tests.
+
 ### Fixed
 
 - Fixed the in-house `marked` list tokenizer still consuming a trailing blank run into the list token at end of input (17.2.10 fixed only the mid-document case). `- item\n\n` now lexes as a tight list plus a `space` token, matching real marked, instead of a loose list whose raw includes the blank.
