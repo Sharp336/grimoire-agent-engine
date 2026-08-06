@@ -97,10 +97,6 @@ const DATA_CHANGE_RENDER_COALESCE_MS = 100;
 /** Double-tap window for the table's left-left "close hub" gesture. */
 const LEFT_TAP_WINDOW_MS = 500;
 
-/** Two-pane mode needs a useful roster and a readable inspector. */
-const SPLIT_MIN_WIDTH = 96;
-const DETAIL_MIN_WIDTH = 34;
-const ROSTER_MIN_WIDTH = 48;
 
 function activityGlyph(row: AgentActivityRow): string {
 	if (row.status === "error") return theme.fg("error", theme.status.error);
@@ -1179,7 +1175,7 @@ if (lines.length < rows) add();
 
 	handleWheel(delta: -1 | 1): void {
 		this.#hoveredRow = null;
-if (this.#section === "activity") {
+		if (this.#section === "activity") {
 			if (this.#activityRows.length > 0) {
 				this.#activityFollow = false;
 				this.#selectedActivityRow = Math.max(
@@ -1188,8 +1184,7 @@ if (this.#section === "activity") {
 				);
 			}
 		} else if (this.#rows.length > 0) {
-				this.#selectRow(Math.max(0, Math.min(this.#selectedRow + delta, this.#rows.length - 1)));
-			}
+			this.#selectRow(Math.max(0, Math.min(this.#selectedRow + delta, this.#rows.length - 1)));
 		}
 		this.#requestRender();
 	}
