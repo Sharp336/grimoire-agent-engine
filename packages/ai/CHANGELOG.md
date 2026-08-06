@@ -40,6 +40,11 @@
   provider-registry union grows, surfacing as a spurious `TS2322` at unrelated
   `registerTool({ parameters: pi.zod.object(...) })` callsites. Naming the facade
   in the union lets the compiler decide by declared variance instead.
+## [17.2.10] - 2026-08-06
+
+### Breaking Changes
+
+- Removed the `zod` dependency and `z`/`ZodType` re-exports. Tool schemas now use `omptype` `type()` schemas, with Zod-style authoring still available via `@oh-my-pi/omptype/zod`.
 
 ## [17.2.9] - 2026-08-05
 
