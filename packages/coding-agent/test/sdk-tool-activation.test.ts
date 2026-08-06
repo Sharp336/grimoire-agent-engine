@@ -632,6 +632,31 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("drives scout availability from the persona spawn policy", async () => {
+		const tempDir = makeTempDir();
+		// A persona whose spawns excludes scout must not advertise the scout
+		// agent in the base system prompt: the prompt is initialized from the
+		// resolved persona spawns, not the raw options.spawns default.
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			agentPersona: {
+				name: "no-scout",
+				description: "Persona with restricted spawns",
+				systemPrompt: "",
+				spawns: ["reviewer"],
+				source: "project" as const,
+			},
+		});
+
+		try {
+			const prompt = session.systemPrompt.join("\n");
+			// scoutAvailable=false drops the "single read-only scout" clause.
+			expect(prompt).not.toContain("a single read-only scout while you keep working is fine");
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("rejects a subagent-only persona passed as agentPersona", async () => {
 		const tempDir = makeTempDir();
 
@@ -939,6 +964,44 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				// stable identity fields.
 				expect.objectContaining({ agent: "foo", source: "project" }),
 			);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("re-appends the persona when same identity content changed since save", async () => {
+		const tempDir = makeTempDir();
+		const sessionManager = SessionManager.inMemory();
+		// Transcript records project/foo with the OLD definition fingerprint; the
+		// persona file's model:/thinkingLevel: was edited since, so the explicit
+		// --agent foo resolves to the same name+source but different content.
+		// Without a re-append the next resume would rehydrate the stale
+		// transcript values even though this run applied the new defaults.
+		sessionManager.appendAgentChange(
+			"foo",
+			"project",
+			fingerprintAgentContent({ name: "foo", description: "old", systemPrompt: "old body", source: "project" }),
+		);
+		sessionManager.appendMessage({ role: "user", content: "prior turn", timestamp: Date.now() });
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			sessionManager,
+			agentPersona: {
+				name: "foo",
+				description: "Edited persona",
+				systemPrompt: "new body",
+				source: "project" as const,
+			},
+		});
+
+		try {
+			expect(sessionManager.buildSessionContext().agentPersona).toEqual(
+				expect.objectContaining({ agent: "foo", source: "project" }),
+			);
+			// The changed fingerprint must have appended a second entry so the
+			// latest agent_change carries the new content.
+			expect(sessionManager.getEntries().filter(e => e.type === "agent_change")).toHaveLength(2);
 		} finally {
 			await session.dispose();
 		}

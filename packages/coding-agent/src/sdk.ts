@@ -3054,7 +3054,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				taskMaxConcurrency: settings.get("task.maxConcurrency"),
 				scoutAvailable: isScoutSpawnable(
 					settings.get("task.disabledAgents") as string[] | undefined,
-					options.spawns ?? "*",
+					sessionSpawns,
 				),
 				taskIrcEnabled: !restrictToolNames && isIrcEnabled(settings, options.taskDepth ?? 0),
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
@@ -3458,7 +3458,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (
 				options.agentPersona &&
 				(existingSession.agentPersona?.agent !== options.agentPersona.name ||
-					existingSession.agentPersona?.source !== options.agentPersona.source)
+					existingSession.agentPersona?.source !== options.agentPersona.source ||
+					// Same identity but the definition content changed since the
+					// transcript was saved (e.g. model:/thinkingLevel: edited): the
+					// live run applies the new defaults, so record the change or the
+					// next resume would rehydrate the stale transcript values.
+					(existingSession.agentPersona?.fingerprint !== undefined &&
+						personaFingerprint !== undefined &&
+						existingSession.agentPersona.fingerprint !== personaFingerprint))
 			) {
 				sessionManager.appendAgentChange(
 					options.agentPersona.name,
@@ -3588,7 +3595,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			initialAdvisorCosts,
 			settings,
 			autoApprove: options.autoApprove,
-			scoutAllowedBySpawnPolicy: isScoutSpawnable(undefined, options.spawns ?? "*"),
+			scoutAllowedBySpawnPolicy: isScoutSpawnable(undefined, sessionSpawns),
 			evalKernelOwnerId,
 			// Defined only for top-level sessions (creation is gated above).
 			// AgentSession uses this to decide whether it may dispose the global

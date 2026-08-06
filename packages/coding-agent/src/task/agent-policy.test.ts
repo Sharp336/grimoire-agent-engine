@@ -88,4 +88,18 @@ describe("resolveAgentSessionPolicy", () => {
 		});
 		expect(result.toolNames).toEqual(["read", "hub", "task"]);
 	});
+
+	test("wildcard tools resolves to unrestricted (undefined toolNames)", () => {
+		// `tools: ["*"]` is the custom-agent sentinel for "all available tools";
+		// a literal `*` is not a registered tool name and would be filtered out
+		// during activation, leaving only the auto-added task/hub.
+		const result = resolveAgentSessionPolicy({
+			name: "test",
+			description: "test",
+			systemPrompt: "",
+			tools: ["*"],
+			source: "project",
+		});
+		expect(result.toolNames).toBeUndefined();
+	});
 });

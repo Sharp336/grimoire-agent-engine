@@ -30,10 +30,14 @@ export function resolveAgentSessionPolicy(agent: AgentDefinition): AgentSessionP
 					: agent.spawns.join(",");
 
 	// Tools: replicate executor.ts:2244-2268 logic.
+	// `tools: ["*"]` (or a bare `*`) is the GitHub custom-agent sentinel for
+	// "all available tools" — equivalent to omitting tools. Treat it as
+	// unrestricted: a literal `*` is not a registered tool name, so activation
+	// would otherwise filter it out and leave only the auto-added task/hub.
 	// Auto-add `task` when spawning is enabled (resolved spawns is non-empty),
 	// so a persona with explicit tools but no `spawns` field can still spawn.
 	let toolNames: string[] | undefined;
-	if (agent.tools && agent.tools.length > 0) {
+	if (agent.tools && agent.tools.length > 0 && !agent.tools.includes("*")) {
 		toolNames = [...agent.tools];
 		// `yield` is auto-added by parseAgentFields for non-primary agents
 		// (helpers.ts:271) but has no meaningful behavior in the main session.
