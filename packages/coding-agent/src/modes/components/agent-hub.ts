@@ -1005,14 +1005,17 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	#footer(showingNarrowDetails: boolean, availableWidth: number): string {
 		const nextView = this.#viewMode === "roster" ? "by parent" : "flat";
 		if (showingNarrowDetails) {
-return theme.fg("dim", `1:agents  2:activity  3:messages  Tab:roster  PgUp/PgDn:scroll  Enter:open  Esc:roster`);
+			return theme.fg(
+				"dim",
+				`1:agents  2:activity  3:messages  Tab:roster  PgUp/PgDn:scroll  Enter:open  Esc:roster`,
+			);
 		}
 		if (availableWidth < 96) {
 			return theme.fg("dim", `1/2/3:view  j/k:select  t:${nextView}  Tab:details  r/x:manage`);
 		}
 		return theme.fg(
 			"dim",
-`1:agents  2:activity  3:messages  j/k/wheel:select  PgUp/PgDn:details  Enter/click:open  t:${nextView}  r:revive  x:kill  Esc:close`
+			`1:agents  2:activity  3:messages  j/k/wheel:select  PgUp/PgDn:details  Enter/click:open  t:${nextView}  r:revive  x:kill  Esc:close`,
 		);
 	}
 
@@ -1453,7 +1456,7 @@ return theme.fg("dim", `1:agents  2:activity  3:messages  Tab:roster  PgUp/PgDn:
 			this.#requestRender();
 			return;
 		}
-if (this.#section === "messages") {
+		if (this.#section === "messages") {
 			if (index === this.#selectedConversationRow) {
 				this.#messageFocus = "thread";
 				this.#messageThreadOpen = true;
