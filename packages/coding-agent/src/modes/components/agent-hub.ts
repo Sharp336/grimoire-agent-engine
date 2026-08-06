@@ -26,7 +26,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
-import { formatAge, formatDuration, formatNumber, getProjectDir, logger } from "@oh-my-pi/pi-utils";
+import { formatAge, formatNumber, getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import {
 	AgentActivityIndex,
 	type AgentActivityKind,
@@ -96,7 +96,6 @@ const AGE_TICK_MS = 5_000;
 const DATA_CHANGE_RENDER_COALESCE_MS = 100;
 /** Double-tap window for the table's left-left "close hub" gesture. */
 const LEFT_TAP_WINDOW_MS = 500;
-
 
 function activityGlyph(row: AgentActivityRow): string {
 	if (row.status === "error") return theme.fg("error", theme.status.error);
@@ -427,7 +426,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	 * owns the alternate screen; the hub table stays mounted underneath and is
 	 * restored when the viewer closes. No-op without a real TUI (render-only test stub).
 	 */
-openChat(id: string, entryId?: string): void {
+	openChat(id: string, entryId?: string): void {
 		if (this.#disposed || !this.#registry.get(id)) return;
 		if (typeof this.#ui.showOverlay !== "function") return;
 		this.#closeTranscriptOverlay();
@@ -551,7 +550,7 @@ openChat(id: string, entryId?: string): void {
 		}
 		this.#statusCounts = { running: 0, idle: 0, parked: 0, aborted: 0 };
 		for (const ref of rosterRows) this.#statusCounts[ref.status]++;
-this.#refreshAggregate();
+		this.#refreshAggregate();
 		this.#refreshActivityData(rosterRows);
 		this.#refreshActivityRows();
 	}
@@ -719,13 +718,16 @@ this.#refreshAggregate();
 		const observed = this.#observedById.get(activity.agentId);
 		const role = observed?.progress?.modelRole ?? ref?.history?.modelRole;
 		const roleBadge = role && this.#settings ? `${formatRoleBadge(role, this.#settings)} ` : "";
-		const agent = truncateToWidth(replaceTabs(activity.agentId), Math.max(8, Math.min(18, Math.floor(width * 0.18))));
-		const title = activity.kind === "tool" ? (activity.toolName ?? activity.title) : activity.title;
+		const agent = sanitizeLine(activity.agentId, Math.max(8, Math.min(18, Math.floor(width * 0.18))));
+		const title = sanitizeLine(
+			activity.kind === "tool" ? (activity.toolName ?? activity.title) : activity.title,
+			width,
+		);
 		const prefix =
 			`${cursor} ${theme.fg("dim", activityClock(activity.timestamp))} ${activityGlyph(activity)} ` +
 			`${roleBadge}${theme.bold(agent)} ${theme.fg(activity.kind === "response" ? "success" : "muted", title)}`;
 		const available = Math.max(1, width - visibleWidth(prefix) - visibleWidth(theme.sep.dot));
-		return `${prefix}${theme.fg("dim", theme.sep.dot)}${truncateToWidth(activity.summary, available)}`;
+		return `${prefix}${theme.fg("dim", theme.sep.dot)}${sanitizeLine(activity.summary, available)}`;
 	}
 
 	#renderTable(width: number, termHeight: number): string[] {
@@ -783,14 +785,14 @@ this.#refreshAggregate();
 	#footer(showingNarrowDetails: boolean, availableWidth: number): string {
 		const nextView = this.#viewMode === "roster" ? "by parent" : "flat";
 		if (showingNarrowDetails) {
-return theme.fg("dim", `1:agents  2:activity  Tab:roster  PgUp/PgDn:scroll  Enter:open  Esc:roster`);
+			return theme.fg("dim", `1:agents  2:activity  Tab:roster  PgUp/PgDn:scroll  Enter:open  Esc:roster`);
 		}
 		if (availableWidth < 96) {
 			return theme.fg("dim", `1:agents  2:activity  j/k:select  t:${nextView}  Tab:details  r/x:manage`);
 		}
 		return theme.fg(
 			"dim",
-`1:agents  2:activity  j/k/wheel:select  PgUp/PgDn:details  Enter/click:open  t:${nextView}  r:revive  x:kill  Esc:close`
+			`1:agents  2:activity  j/k/wheel:select  PgUp/PgDn:details  Enter/click:open  t:${nextView}  r:revive  x:kill  Esc:close`,
 		);
 	}
 
@@ -1001,15 +1003,13 @@ return theme.fg("dim", `1:agents  2:activity  Tab:roster  PgUp/PgDn:scroll  Ente
 		const add = (line = ""): void => {
 			lines.push(truncateToWidth(line, width));
 		};
-const addWrapped = (text: string, maxRows = 2): void => {
+		const addWrapped = (text: string, maxRows = 2): void => {
 			for (const wrapped of wrapTextWithAnsi(sanitizeLine(text), Math.max(1, width)).slice(0, maxRows)) add(wrapped);
 		};
-		const section = (sectionLabel: string, contentRows = 0): void => {
+		const section = (label: string, contentRows = 0): void => {
 			if (lines.length > 0 && lines.length + 1 + contentRows < rows) add();
-			add(theme.bold(theme.fg("accent", sectionLabel)));
+			add(theme.bold(theme.fg("accent", label)));
 		};
-		const label = (name: string, value: string): string =>
-			`${theme.bold(theme.fg("accent", name))} ${truncateToWidth(sanitizeLine(value), Math.max(1, width - name.length - 1))}`;
 
 		add(`${statusGlyph(ref.status)} ${theme.bold(sanitizeDisplayText(ref.displayName || ref.id))}`);
 		if (ref.displayName && ref.displayName !== ref.id) add(theme.fg("dim", sanitizeDisplayText(ref.id)));
@@ -1028,14 +1028,20 @@ const addWrapped = (text: string, maxRows = 2): void => {
 		if (modelDetails.length > 0) add(modelDetails.join(theme.sep.dot));
 
 		const task = observed?.description ?? progress?.task ?? ref.activity;
-		if (task) add(label("Task", task));
+		if (task) {
+			section("Task");
+			addWrapped(task);
+		}
+
 		const current = progress?.currentTool
 			? `${progress.currentTool}${progress.currentToolArgs ? ` · ${progress.currentToolArgs}` : ""}`
-			: progress?.lastIntent;
-		if (current) add(label("Current", current));
-		add(label("Usage", metrics ? formatMetrics(metrics) : "—"));
-		if (metrics?.contextTokens !== undefined && metrics.contextWindow && rows >= 18) {
-			add(contextGauge(metrics.contextTokens, metrics.contextWindow));
+			: (progress?.lastIntent ?? ref.activity);
+		if (current) {
+			section("Current");
+			addWrapped(current);
+			if (progress?.retryState) {
+				add(theme.fg("warning", `retry ${progress.retryState.attempt}/${progress.retryState.maxAttempts}`));
+			}
 		}
 
 		section("Usage", 1);
@@ -1052,6 +1058,10 @@ const addWrapped = (text: string, maxRows = 2): void => {
 		add(
 			`Spawned by ${sanitizeDisplayText(ref.parentId ?? MAIN_AGENT_ID)}${children.length > 0 ? ` · ${children.length} children` : ""}`,
 		);
+		if (children.length > 0) add(theme.fg("dim", formatChildIds(children, width)));
+		add(theme.fg("dim", `Registered ${new Date(ref.createdAt).toISOString().slice(0, 16).replace("T", " ")}Z`));
+
+		section("Changes");
 		add(
 			theme.fg(
 				"dim",
@@ -1065,16 +1075,16 @@ const addWrapped = (text: string, maxRows = 2): void => {
 		if (artifacts?.patchPath) addWrapped(`Patch ${shortenPath(artifacts.patchPath)}`);
 		if (artifacts?.branchName) addWrapped(`Worktree branch ${artifacts.branchName}`);
 
-if (lines.length < rows) add();
+		if (lines.length < rows) add();
 		if (lines.length < rows) add(theme.bold(theme.fg("accent", "Recent activity")));
 		const activityBudget = Math.max(0, rows - lines.length);
 		const activity = this.#activity.recent(ref.id, activityBudget);
 		if (activity.length === 0 && activityBudget > 0) add(theme.fg("muted", "No response or tool activity yet"));
 		else {
 			for (const event of activity) {
-				const title = event.kind === "tool" ? (event.toolName ?? event.title) : event.title;
+				const title = sanitizeLine(event.kind === "tool" ? (event.toolName ?? event.title) : event.title, width);
 				const prefix = `${theme.fg("dim", activityClock(event.timestamp))} ${activityGlyph(event)} ${theme.fg("muted", title)} `;
-				add(`${prefix}${truncateToWidth(event.summary, Math.max(1, width - visibleWidth(prefix)))}`);
+				add(`${prefix}${sanitizeLine(event.summary, Math.max(1, width - visibleWidth(prefix)))}`);
 			}
 		}
 
@@ -1201,7 +1211,7 @@ if (lines.length < rows) add();
 	}
 
 	clickItem(index: number): void {
-if (this.#section === "activity") {
+		if (this.#section === "activity") {
 			if (index === this.#selectedActivityRow) {
 				const activity = this.#activityRows[index];
 				if (activity) this.openChat(activity.agentId, activity.entryId);
