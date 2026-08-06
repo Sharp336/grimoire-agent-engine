@@ -140,6 +140,6 @@ export async function discoverAgents(cwd: string, home: string = os.homedir()): 
 /**
  * Get an agent by name from discovered agents.
  */
-export function getAgent(agents: AgentDefinition[], name: string): AgentDefinition | undefined {
+export function getAgent(agents: readonly AgentDefinition[], name: string): AgentDefinition | undefined {
 	return agents.find(a => a.name === name);
 }

@@ -32,7 +32,13 @@ The subsystem requires `advisor.enabled: true`. Which advisors run is decided pe
 
 Legacy fallback: a main session with `advisor.enabled: true` and an empty `advisor.agents` list still runs the default advisor, with its model resolved from `modelRoles.advisor`. Subagents have no such fallback — undeclared means none.
 
+The reserved name `default` refers to the built-in default advisor: the baseline advisor prompt, the model resolved from `modelRoles.advisor`, and the read-only `read`/`grep`/`glob` toolset. Listing `default` in `advisor.agents` or in a definition's `advisors:` frontmatter attaches it explicitly — alongside other named advisors, and for subagents too. A definition actually named `default` takes precedence over the built-in. The legacy empty-`advisor.agents` main-session fallback is unchanged.
+
 Names resolve against the usual agent discovery roots: bundled agent definitions, user-level `<active agent dir>/agents` (`~/.omp/agent/agents` by default; relocated by `PI_CODING_AGENT_DIR`), project-level `.omp/agents`, and extension package roots. A name that matches no definition is skipped with a warning notice.
+
+`/advisor configure` opens a two-pane configurator. The left pane lists the global advisor-runtime master switch (the `advisor.enabled` setting, the same toggle as `/advisor on` and `/advisor off`), then the driving agents: `default` (the main session) pinned at the top, then every discovered agent definition. The right pane configures the selected agent's advisors — the built-in `default` advisor and a checkbox row for every other agent definition.
+
+Below the built-in `default` advisor row, a `default model` row sets the built-in advisor's model: it opens a searchable picker offering the built-in roles (`@fast`, `@slow`, `@tiny`, …), any custom role, and the full model catalog, persisted to `modelRoles.advisor` on "Save & apply" — an `auto` row clears the assignment back to the default `slow` chain. Selections for the main session persist to `advisor.agents`; selections for an agent definition persist to its `advisors:` frontmatter. User-level and project-level agent files are edited in place; bundled or plugin-provided definitions (which have no writable file) are shadowed by a copy written to the user agents directory, which outranks them in discovery.
 
 Each referenced definition is wrapped in the advisor role ([`createAdvisorAgent`](../packages/coding-agent/src/session/session-advisors.ts)): its model, thinking level, tools, and body survive as the advisor's identity and specialization, while driving-agent concerns are dropped (see [The advisor role](#the-advisor-role)).
 
@@ -99,7 +105,7 @@ Slash commands:
 | `/advisor status`    | Show each advisor's runtime state, model, context usage, token usage, and cost.                                                      |
 | `/advisor dump`      | Copy the compact transcript (all active advisors when a roster is present) to the clipboard.                                         |
 | `/advisor dump raw`  | Copy the full dump, including system prompt, tools, thinking, and calls.                                                             |
-| `/advisor configure` | Open an interactive agent picker over the discovered roster; the selection is written to `advisor.agents`. Non-TUI command hosts report that the picker is TUI-only. |
+| `/advisor configure` | Open a two-pane configurator: the global enable switch tops the left pane above the driving agents (`default` = the main session, then every discovered agent definition); the right pane toggles the selected agent's advisors — the built-in `default` advisor and checkbox rows for the other agent definitions — and sets the built-in advisor's model via a `default model` row (roles and models, persisted to `modelRoles.advisor`). Main-session selections persist to `advisor.agents`; per-agent selections persist to the definition's `advisors:` frontmatter. Non-TUI command hosts report that the configurator is TUI-only. |
 
 If the subsystem is enabled but no advisor model resolves, status reports the configured advisors as inactive/`no_model`.
 

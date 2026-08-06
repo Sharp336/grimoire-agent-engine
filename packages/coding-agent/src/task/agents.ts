@@ -3,8 +3,10 @@
  *
  * Agents are embedded at build time via Bun's import with { type: "text" }.
  */
+import * as path from "node:path";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { parseFrontmatter, prompt } from "@oh-my-pi/pi-utils";
+import { YAML } from "bun";
 import { parseAgentFields } from "../discovery/helpers";
 import designerMd from "../prompts/agents/designer.md" with { type: "text" };
 // Embed agent markdown files at build time
@@ -122,6 +124,106 @@ export function parseAgent(
 		source,
 		filePath,
 	};
+}
+
+/** Build the frontmatter record for an agent definition with a fresh `advisors` list. */
+function buildAdvisorFrontmatterRecord(agent: AgentDefinition, advisors: string[]): Record<string, unknown> {
+	const record: Record<string, unknown> = {
+		name: agent.name,
+		description: agent.description,
+	};
+	if (agent.tools && agent.tools.length > 0) record.tools = agent.tools;
+	if (agent.spawns !== undefined) record.spawns = agent.spawns;
+	if (advisors.length > 0) record.advisors = advisors;
+	if (agent.model && agent.model.length > 0) record.model = agent.model;
+	if (agent.thinkingLevel !== undefined) record.thinkingLevel = agent.thinkingLevel;
+	if (agent.output !== undefined) record.output = agent.output;
+	if (agent.autoloadSkills && agent.autoloadSkills.length > 0) record.autoloadSkills = agent.autoloadSkills;
+	if (agent.readSummarize !== undefined) record.readSummarize = agent.readSummarize;
+	if (agent.blocking !== undefined) record.blocking = agent.blocking;
+	if (agent.prewalk !== undefined) record.prewalk = agent.prewalk;
+	return record;
+}
+
+/**
+ * Parse a raw frontmatter block into a record; falls back to the normalized
+ * frontmatter parser when the raw YAML fails to parse.
+ */
+function parseRawFrontmatterRecord(block: string, raw: string): Record<string, unknown> {
+	try {
+		const parsed = YAML.parse(block);
+		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+			return parsed as Record<string, unknown>;
+		}
+	} catch {
+		// Fall through to the normalized frontmatter parser.
+	}
+	return parseFrontmatter(raw).frontmatter;
+}
+
+/**
+ * Rewrite only the `advisors` key of a raw agent file's frontmatter, splicing
+ * the raw block so the body and all unrelated keys survive unchanged.
+ */
+function updateAdvisorsFrontmatter(raw: string, advisors: string[], agent: AgentDefinition): string {
+	const endIndex = raw.startsWith("---") ? raw.indexOf("\n---", 3) : -1;
+	const record =
+		endIndex !== -1
+			? parseRawFrontmatterRecord(raw.slice(4, endIndex), raw)
+			: buildAdvisorFrontmatterRecord(agent, advisors);
+	if (advisors.length > 0) {
+		record.advisors = advisors;
+	} else {
+		delete record.advisors;
+	}
+	const yaml = YAML.stringify(record, null, 2).trimEnd();
+	if (endIndex !== -1) {
+		return `---\n${yaml}${raw.slice(endIndex)}`;
+	}
+	return `---\n${yaml}\n---\n\n${raw}`;
+}
+
+/** Rebuild a full agent file from a definition, replacing the frontmatter's `advisors`. */
+function serializeAgentWithAdvisors(agent: AgentDefinition, advisors: string[]): string {
+	const record = buildAdvisorFrontmatterRecord(agent, advisors);
+	const yaml = YAML.stringify(record, null, 2).trimEnd();
+	return `---\n${yaml}\n---\n\n${agent.systemPrompt.trimEnd()}\n`;
+}
+
+/** Whether a discovered agent file may be edited where it lives (user or project agents dir). */
+function isAgentFileWritableInPlace(filePath: string, userAgentsDir: string): boolean {
+	const resolved = path.resolve(filePath);
+	return (
+		resolved.startsWith(path.resolve(userAgentsDir) + path.sep) ||
+		resolved.includes(`${path.sep}.omp${path.sep}agents${path.sep}`)
+	);
+}
+
+/**
+ * Persist an agent definition's `advisors` frontmatter list.
+ *
+ * Real agent files are edited in place when they live in the user agents dir
+ * or any project `.omp/agents` dir. Files anywhere else (plugins, extensions)
+ * and bundled `embedded:` definitions are shadowed by writing a copy into
+ * `userAgentsDir`, so the edit sticks and discovery precedence keeps the
+ * shadowed file winning.
+ */
+export async function writeAgentAdvisors(
+	agent: AgentDefinition,
+	advisors: string[],
+	userAgentsDir: string,
+): Promise<{ filePath: string; shadowed: boolean }> {
+	const filePath = agent.filePath;
+	if (filePath !== undefined && !filePath.startsWith("embedded:")) {
+		const inPlace = isAgentFileWritableInPlace(filePath, userAgentsDir);
+		const target = inPlace ? filePath : path.join(userAgentsDir, `${agent.name}.md`);
+		const content = updateAdvisorsFrontmatter(await Bun.file(filePath).text(), advisors, agent);
+		await Bun.write(target, content);
+		return { filePath: target, shadowed: target !== filePath };
+	}
+	const target = path.join(userAgentsDir, `${agent.name}.md`);
+	await Bun.write(target, serializeAgentWithAdvisors(agent, advisors));
+	return { filePath: target, shadowed: target !== filePath };
 }
 
 /** Cache for bundled agents */

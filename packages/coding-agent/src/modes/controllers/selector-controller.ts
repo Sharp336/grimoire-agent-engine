@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import { PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
@@ -5,13 +6,10 @@ import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
 import { Loader, Spacer, setTuiTight, Text } from "@oh-my-pi/pi-tui";
-import { getAgentDbPath, getProjectDir, normalizePathForComparison } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getAgentDir, getProjectDir, normalizePathForComparison } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../../capability";
-import {
-	formatModelSelectorValue,
-	resolveAdvisorRoleSelection,
-	resolveModelRoleValue,
-} from "../../config/model-resolver";
+import { getConfigDirs } from "../../config";
+import { formatModelSelectorValue, resolveModelRoleValue } from "../../config/model-resolver";
 import { getRoleInfo } from "../../config/model-roles";
 import { settings } from "../../config/settings";
 import { disableProvider, enableProvider } from "../../discovery";
@@ -268,33 +266,40 @@ export class SelectorController {
 				this.ctx.ui.requestRender();
 			};
 			// The picker lists the same discovered roster the task spawner uses;
-			// the ordered selection is persisted to `advisor.agents` on save.
+			// the master switch + main roster are persisted to `advisor.enabled` /
+			// `advisor.agents` on save, and edited agent frontmatter is written
+			// through the user agent dir (shadow copies for unwritable files).
 			const { agents } = await discoverAgents(cwd);
-			// Name the legacy default advisor's model so an empty selection still
-			// tells the user what will run (the roster itself has no row for it).
-			const advisorRoleSel = resolveAdvisorRoleSelection(
-				this.ctx.settings,
-				this.ctx.session.modelRegistry.getAvailable(),
-			);
-			const defaultAdvisorModel = advisorRoleSel?.model;
+			// The default advisor's model (and the empty-roster fallback label)
+			// are derived inside the picker from the `advisor` role; it only
+			// needs the available model list.
+			const userAgentsDir =
+				getConfigDirs("agents", { project: false }).find(entry => entry.source === ".omp")?.path ??
+				path.join(getAgentDir() ?? getProjectDir(), "agents");
 			const deps: AdvisorAgentsPickerDeps = {
 				settings: this.ctx.settings,
 				agents,
-				defaultModelLabel: defaultAdvisorModel
-					? `${defaultAdvisorModel.provider}/${defaultAdvisorModel.id}`
-					: undefined,
+				availableModels: this.ctx.session.modelRegistry.getAvailable(),
+				userAgentsDir,
 			};
 			const overlay = new AdvisorAgentsPickerComponent(deps, {
-				// Persisting `advisor.agents` is the component's job (the dashboard
-				// `task.disabledAgents` pattern); this callback rebuilds the live
-				// advisors so the new roster applies without a restart.
-				save: async names => {
-					const count = this.ctx.session.applyAdvisorAgents(names);
+				// Persisting settings/frontmatter is the component's job; this
+				// callback rebuilds the live advisors so the new roster applies
+				// without a restart (agents FIRST, then the master switch).
+				save: async ({ enabled, agents }) => {
+					// Agents first (a no-op rebuild while disabled), then the master
+					// switch; the live count comes from stats because
+					// applyAdvisorAgents early-returns 0 on a disabled runtime.
+					this.ctx.session.applyAdvisorAgents(agents);
+					const active = this.ctx.session.setAdvisorEnabled(enabled);
+					const count = active ? this.ctx.session.getAdvisorStats().advisors.length : 0;
 					this.ctx.statusLine.invalidate();
 					this.ctx.showStatus(
-						count > 0
-							? `Advisor roster saved — ${count} advisor${count === 1 ? "" : "s"} active.`
-							: `Advisor roster saved. Run /advisor on to activate the configured advisors.`,
+						!enabled
+							? "Advisor configuration saved — advisor is off."
+							: active && count > 0
+								? `Advisor configuration saved — ${count} advisor${count === 1 ? "" : "s"} active.`
+								: "Advisor configuration saved — no advisor model resolved (assign the 'advisor' role).",
 					);
 					this.ctx.ui.requestRender();
 				},

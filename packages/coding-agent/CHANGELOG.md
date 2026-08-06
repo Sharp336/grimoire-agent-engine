@@ -52,7 +52,16 @@
 ### Added
 
 - Advisors are now ordinary agent definitions referenced by name: `advisors:` agent frontmatter for subagents and the `advisor.agents` setting for the main session.
-- `/advisor configure` is now an agent picker over the discovered roster instead of a YAML editor.
+- The reserved advisor name `default` explicitly attaches the built-in default advisor (baseline prompt, `advisor`-role model, read-only tools) from `advisor.agents` or a definition's `advisors:` frontmatter, including alongside other advisors and for subagents.
+- `/advisor configure` can now set the built-in default advisor's model: a `default model` row in the right pane opens a searchable picker offering the built-in roles (`@fast`, `@slow`, …), any custom role, and the full model catalog, persisted to `modelRoles.advisor` (an `auto` row clears the assignment).
+
+### Changed
+
+- `/advisor configure` is now a two-pane configurator: the left pane carries the global advisor enable switch above the driving agents (the main session or any agent definition); the right pane toggles the selected agent's advisors — the built-in default advisor and any agent definition. Per-agent selections persist to the definition's `advisors:` frontmatter (bundled/plugin definitions are shadowed into the user agents directory).
+
+### Fixed
+
+- Fixed `/advisor configure` showing the last driving agent's advisor checklist in the right pane while the global master switch is selected; the right pane now renders empty on the switch row, since it configures nothing per driving agent.
 
 ### Removed
 

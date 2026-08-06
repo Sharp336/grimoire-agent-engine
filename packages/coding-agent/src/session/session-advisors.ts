@@ -75,7 +75,6 @@ import { estimateToolSchemaTokens } from "../modes/utils/context-usage";
 import type { PlanModeState } from "../plan-mode/state";
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
 import type { SecretObfuscator } from "../secrets/obfuscator";
-import { getAgent } from "../task/discovery";
 import type { AgentDefinition } from "../task/types";
 import {
 	concreteThinkingLevel,
@@ -196,6 +195,38 @@ const ADVISOR_STRIPPED_TOOL_NAMES: Record<string, true> = { task: true, hub: tru
 export function createAdvisorAgent(agent: AgentDefinition): AgentDefinition {
 	const tools = agent.tools?.filter(tool => !ADVISOR_STRIPPED_TOOL_NAMES[tool]);
 	return { ...agent, tools, spawns: undefined, prewalk: undefined, output: undefined };
+}
+
+/**
+ * Reserved name for the built-in default advisor: the main-session
+ * compatibility advisor (baseline prompt, `advisor` role model, read-only
+ * tools) that also serves as a fallback when no roster definition matches.
+ * An explicit agent definition literally named "default" wins over the
+ * built-in.
+ */
+export const DEFAULT_ADVISOR_NAME = "default";
+
+/** Roster lookup outcome for one advisor name. */
+export interface AdvisorRosterEntry {
+	/** The matching roster definition; undefined for the built-in default advisor. */
+	definition: AgentDefinition | undefined;
+	/** True when the name resolved to the reserved built-in default advisor. */
+	builtinDefault: boolean;
+}
+
+/**
+ * Resolve an advisor name against the roster. A roster hit wins; otherwise
+ * the reserved name `"default"` maps to the built-in default advisor; any
+ * other name resolves to undefined.
+ */
+export function resolveAdvisorRosterEntry(
+	roster: readonly AgentDefinition[],
+	name: string,
+): AdvisorRosterEntry | undefined {
+	const definition = roster.find(agent => agent.name === name);
+	if (definition) return { definition, builtinDefault: false };
+	if (name === DEFAULT_ADVISOR_NAME) return { definition: undefined, builtinDefault: true };
+	return undefined;
 }
 
 /** Inputs that configure the advisor roster owned by a session. */
@@ -584,17 +615,21 @@ export class SessionAdvisors {
 		const descriptors: AdvisorRuntimeDescriptor[] = [];
 		const usedSlugs = new Set<string>();
 		for (const name of names) {
-			const definition = legacy ? undefined : getAgent(this.#advisorAgentRoster ?? [], name);
-			if (!legacy && !definition) {
+			const rosterEntry = legacy ? undefined : resolveAdvisorRosterEntry(this.#advisorAgentRoster ?? [], name);
+			if (!legacy && !rosterEntry) {
 				if (emitWarnings) {
 					this.#host.emitNotice("warning", `Advisor "${name}": no matching agent definition`, "advisor");
 				}
 				continue;
 			}
+			// The built-in default advisor has no roster definition: the baseline
+			// prompt, `advisor` role model and read-only toolset come from the
+			// runtime, with no source attribution on notes.
+			const isBuiltinDefault = legacy || rosterEntry?.builtinDefault === true;
 			// Wrap the roster definition in the advisor role: identity, prompt,
 			// model and investigative tools survive; driving-agent concerns do not.
-			const agent = definition ? createAdvisorAgent(definition) : undefined;
-			let slug = legacy ? "" : slugifyAdvisorName(name);
+			const agent = rosterEntry?.definition ? createAdvisorAgent(rosterEntry.definition) : undefined;
+			let slug = isBuiltinDefault ? "" : slugifyAdvisorName(name);
 			if (slug) {
 				let candidate = slug;
 				let n = 2;

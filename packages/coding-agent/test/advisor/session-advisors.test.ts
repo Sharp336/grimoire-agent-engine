@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { createAdvisorAgent } from "../../src/session/session-advisors";
+import { createAdvisorAgent, resolveAdvisorRosterEntry } from "../../src/session/session-advisors";
 import type { AgentDefinition } from "../../src/task/types";
 
 describe("createAdvisorAgent", () => {
@@ -43,5 +43,41 @@ describe("createAdvisorAgent", () => {
 		};
 
 		expect(createAdvisorAgent(definition)).toEqual(definition);
+	});
+});
+
+describe("resolveAdvisorRosterEntry", () => {
+	it('resolves the reserved "default" name to the built-in default advisor when no roster definition matches', () => {
+		expect(resolveAdvisorRosterEntry([], "default")).toEqual({ definition: undefined, builtinDefault: true });
+	});
+
+	it('lets an explicit roster definition named "default" win over the built-in', () => {
+		const definition: AgentDefinition = {
+			name: "default",
+			description: "An explicit default advisor.",
+			systemPrompt: "",
+			source: "user" as const,
+		};
+
+		expect(resolveAdvisorRosterEntry([definition], "default")).toEqual({ definition, builtinDefault: false });
+	});
+
+	it("returns undefined for a name that matches neither the roster nor the reserved name", () => {
+		expect(resolveAdvisorRosterEntry([], "no-such-agent")).toBeUndefined();
+	});
+
+	it("resolves an ordinary roster definition", () => {
+		const definition: AgentDefinition = {
+			name: "security-reviewer",
+			description: "Reviews each primary turn for safety and correctness.",
+			systemPrompt: "Watch module boundaries.",
+			tools: ["read", "grep", "write"],
+			source: "user" as const,
+		};
+
+		expect(resolveAdvisorRosterEntry([definition], "security-reviewer")).toEqual({
+			definition,
+			builtinDefault: false,
+		});
 	});
 });

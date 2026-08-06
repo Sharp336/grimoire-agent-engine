@@ -747,6 +747,28 @@ describe("resolveModelRoleValue", () => {
 		expect(result.warning).toBeUndefined();
 	});
 
+	test("resolves a configured cross-role alias (modelRoles.advisor = @slow) to the target role's model", () => {
+		const settings = Settings.isolated({
+			modelRoles: { slow: "anthropic/claude-sonnet-4-5", advisor: "@slow" },
+		});
+
+		const result = resolveModelRoleValue("@advisor", allModels, { settings });
+
+		expect(result.model?.provider).toBe("anthropic");
+		expect(result.model?.id).toBe("claude-sonnet-4-5");
+		expect(result.explicitThinkingLevel).toBe(false);
+	});
+
+	test("keeps a configured self-alias unresolvable instead of looping", () => {
+		const settings = Settings.isolated({
+			modelRoles: { advisor: "@advisor" },
+		});
+
+		const result = resolveModelRoleValue("@advisor", allModels, { settings });
+
+		expect(result.model).toBeUndefined();
+	});
+
 	test("splits direct comma fallback chains before parsing thinking selectors", () => {
 		const result = resolveModelRoleValue("anthropic/claude-sonnet-4-5:off,openai/gpt-4o:off", allModels);
 
