@@ -26,6 +26,7 @@ import type {
 	AssistantThinkingRenderer,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
+	BeforeProviderHeadersEvent,
 	BeforeProviderRequestEvent,
 	BeforeProviderRequestEventResult,
 	CompactOptions,
@@ -1319,6 +1320,26 @@ export class ExtensionRunner {
 		}
 
 		return currentPayload;
+	}
+
+	async emitBeforeProviderHeaders(headers: Record<string, string>, model?: Model): Promise<Record<string, string>> {
+		const ctx = this.createContext(model);
+
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get("before_provider_headers");
+			if (!handlers || handlers.length === 0) continue;
+
+			for (const handler of handlers) {
+				// Handlers mutate `headers` in place; the return value is ignored.
+				const event: BeforeProviderHeadersEvent = {
+					type: "before_provider_headers",
+					headers,
+				};
+				await this.#runHandlerWithTimeout(handler, event, ctx, ext, extensionHandlerTimeoutMs);
+			}
+		}
+
+		return headers;
 	}
 
 	async emitAfterProviderResponse(response: ProviderResponseMetadata, _model?: Model): Promise<void> {

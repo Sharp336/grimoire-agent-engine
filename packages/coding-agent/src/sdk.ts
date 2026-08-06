@@ -94,6 +94,7 @@ import {
 	type ToolDefinition,
 	wrapRegisteredTools,
 } from "./extensibility/extensions";
+import { wrapStreamFnWithProviderHeaders } from "./extensibility/extensions/provider-headers";
 import {
 	loadSkills as loadSkillsInternal,
 	type Skill,
@@ -3192,9 +3193,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// the session drives. Wrapped in a per-provider concurrency limiter so
 		// each LLM HTTP request — not the whole subagent lifecycle — holds the
 		// slot, preventing the nested-spawn deadlock from issue #3749.
-		const settingsAwareStreamFn = wrapStreamFnWithProviderConcurrency(
-			settings,
-			createSettingsAwareStreamFn(settings),
+		const settingsAwareStreamFn = wrapStreamFnWithProviderHeaders(
+			extensionRunner,
+			wrapStreamFnWithProviderConcurrency(settings, createSettingsAwareStreamFn(settings)),
 		);
 		const transformToolCallArguments = (args: Record<string, unknown>): Record<string, unknown> => {
 			let result = args;

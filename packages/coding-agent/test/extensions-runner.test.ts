@@ -650,6 +650,118 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	describe("before_provider_headers", () => {
+		it("lets handlers add, overwrite and delete headers in place", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("before_provider_headers", async (event) => {
+						event.headers["x-added"] = "1";
+						event.headers["x-existing"] = "overwritten";
+						delete event.headers["x-removed"];
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "headers-mutate.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			const headers = await runner.emitBeforeProviderHeaders({
+				"x-existing": "original",
+				"x-removed": "gone",
+				"x-untouched": "kept",
+			});
+			expect(headers).toEqual({ "x-added": "1", "x-existing": "overwritten", "x-untouched": "kept" });
+		});
+
+		it("applies every handler to the same object in load order", async () => {
+			const extCode1 = `
+				export default function(pi) {
+					pi.on("before_provider_headers", async (event) => {
+						event.headers["x-chain"] = (event.headers["x-chain"] ?? "") + "ext1";
+					});
+				}
+			`;
+			const extCode2 = `
+				export default function(pi) {
+					pi.on("before_provider_headers", async (event) => {
+						event.headers["x-chain"] = (event.headers["x-chain"] ?? "") + "-ext2";
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "headers-1.ts"), extCode1);
+			fs.writeFileSync(path.join(extensionsDir, "headers-2.ts"), extCode2);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			const headers = await runner.emitBeforeProviderHeaders({});
+			expect(headers["x-chain"]).toBe("ext1-ext2");
+		});
+
+		it("keeps earlier edits after a handler throws", async () => {
+			const extCode1 = `
+				export default function(pi) {
+					pi.on("before_provider_headers", async (event) => {
+						event.headers["x-kept"] = "yes";
+					});
+				}
+			`;
+			const extCode2 = `
+				export default function(pi) {
+					pi.on("before_provider_headers", async () => {
+						throw new Error("headers failed");
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "headers-ok.ts"), extCode1);
+			fs.writeFileSync(path.join(extensionsDir, "headers-throw.ts"), extCode2);
+
+			const result = await loadTestExtensions();
+			const errors: ExtensionError[] = [];
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			runner.onError(error => errors.push(error));
+
+			const headers = await runner.emitBeforeProviderHeaders({});
+			expect(headers["x-kept"]).toBe("yes");
+			expect(errors).toHaveLength(1);
+			expect(errors[0]?.event).toBe("before_provider_headers");
+			expect(errors[0]?.error).toContain("headers failed");
+		});
+
+		it("returns the headers untouched when nothing subscribes", async () => {
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			expect(runner.hasHandlers("before_provider_headers")).toBe(false);
+			expect(await runner.emitBeforeProviderHeaders({ "x-a": "1" })).toEqual({ "x-a": "1" });
+		});
+	});
+
 	describe("after_provider_response", () => {
 		it("calls handlers with response metadata and reports handler errors without throwing", async () => {
 			const eventsPath = path.join(tempDir.path(), "after-provider-response-events.jsonl");
