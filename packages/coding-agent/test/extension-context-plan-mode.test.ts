@@ -22,7 +22,7 @@ function createRunner(getPlanModeState?: () => PlanModeState | undefined): Exten
 	);
 }
 
-const planState: PlanModeState = { enabled: true, planFilePath: "local://feature-plan.md" };
+const planModeState: PlanModeState = { enabled: true, planFilePath: "local://feature-plan.md" };
 
 describe("ExtensionRunner plan mode context", () => {
 	it("defaults to undefined outside a session", () => {
@@ -31,10 +31,10 @@ describe("ExtensionRunner plan mode context", () => {
 
 	it("exposes the owning session state", () => {
 		expect(
-			createRunner(() => planState)
+			createRunner(() => planModeState)
 				.createContext()
 				.getPlanModeState(),
-		).toBe(planState);
+		).toBe(planModeState);
 	});
 
 	// Reads must be live: a handler that spans a plan-mode toggle has to observe
@@ -46,11 +46,11 @@ describe("ExtensionRunner plan mode context", () => {
 
 		expect(ctx.getPlanModeState()).toBeUndefined();
 
-		current = planState;
+		current = planModeState;
 		expect(ctx.getPlanModeState()?.enabled).toBe(true);
 		expect(ctx.getPlanModeState()?.planFilePath).toBe("local://feature-plan.md");
 
-		current = { enabled: false, planFilePath: planState.planFilePath };
+		current = { enabled: false, planFilePath: planModeState.planFilePath };
 		expect(ctx.getPlanModeState()?.enabled).toBe(false);
 	});
 
@@ -62,7 +62,7 @@ describe("ExtensionRunner plan mode context", () => {
 
 		expect(ctx.getPlanModeState()).toBeUndefined();
 
-		current = planState;
-		expect(ctx.getPlanModeState()).toBe(planState);
+		current = planModeState;
+		expect(ctx.getPlanModeState()).toBe(planModeState);
 	});
 });

@@ -447,12 +447,7 @@ export interface ExtensionContext {
 	getContextUsage(): ContextUsage | undefined;
 	/** Get a read-only snapshot of async jobs owned by this session. */
 	getAsyncJobSnapshot(): AsyncJobSnapshot | null;
-	/**
-	 * Get this session's plan-mode state, or `undefined` when plan mode has
-	 * never been engaged. Read live on every call, so a handler that runs
-	 * across a plan-mode toggle observes the change. A subagent session
-	 * reports its own state rather than its parent's.
-	 */
+	/** Get this session's plan mode state (if active). Read live per call. */
 	getPlanModeState(): PlanModeState | undefined;
 	/** Compact the session context (interactive mode shows UI). */
 	compact(instructionsOrOptions?: string | CompactOptions): Promise<void>;
