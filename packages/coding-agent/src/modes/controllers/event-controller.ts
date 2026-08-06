@@ -1605,11 +1605,28 @@ export class EventController {
 				typeof details.title === "string" &&
 				typeof details.planExists === "boolean"
 			) {
-				await this.ctx.handlePlanApproval({
-					planFilePath: details.planFilePath,
-					title: details.title,
-					planExists: details.planExists,
-				});
+				// Fire-and-forget off the serialized dispatch chain: the approval
+				// flow awaits the operator's review choice AND then blocks on the
+				// synthetic execution `session.prompt` for the whole run. An
+				// in-chain await would park every subsequent agent event behind
+				// that blocking prompt — the TUI freezes with zero streaming
+				// feedback (message deltas, tool cards) while the agent executes,
+				// and the transcript only materializes after the run settles.
+				// The flow aborts the proposing turn at its top, so nothing
+				// meaningful can render in the gap before the review overlay;
+				// rejections are surfaced by the flow's own error handling, with
+				// a logger catch as the last-resort backstop.
+				void this.ctx
+					.handlePlanApproval({
+						planFilePath: details.planFilePath,
+						title: details.title,
+						planExists: details.planExists,
+					})
+					.catch(error => {
+						logger.warn("Plan approval flow failed", {
+							error: error instanceof Error ? error.message : String(error),
+						});
+					});
 			}
 		}
 	}

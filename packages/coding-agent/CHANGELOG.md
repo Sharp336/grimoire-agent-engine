@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed plan approval freezing the TUI for the whole approved-plan run: the `xd://propose` completion started `handlePlanApproval` inside the event controller's serialized dispatch chain, so the operator's review choice and the blocking synthetic execution turn parked every subsequent agent event (streamed deltas, tool cards) behind an in-chain `await` — the agent executed with zero live rendering and the transcript only materialized after the run settled. The approval flow now runs off-chain, so events render in real time while the review is open and while the plan executes.
+
 ## [17.2.9] - 2026-08-05
 
 ### Breaking Changes
