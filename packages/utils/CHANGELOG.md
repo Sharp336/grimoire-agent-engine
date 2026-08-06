@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [17.2.10] - 2026-08-06
+
+### Added
+
+- Introduced zero-dependency in-house modules replacing external packages, importable via `@oh-my-pi/pi-utils/<module>`: `acp` (Agent Client Protocol), `browsers` (Chrome for Testing discovery/install), `chalk` (ANSI styling), `dates` (date formatting), `dom` (HTML parser, WHATWG DOM subset, and CSS selectors), `docx` (DOCX to HTML), `headers` (browser header generation), `lru` (LRU cache), `marked` (GFM markdown lexer/parser), `readability` (article extraction), `template` (Handlebars-compatible templating), `turndown` (HTML to Markdown), `vterm` (headless terminal emulator), and `xml` (XML parser).
+- Added postmortem fatal recovery hint providers to allow applications to print actionable recovery commands before cleanup starts.
+
+### Changed
+
+- Rewrote the logger file backend in-house, maintaining the identical line format, daily rotation, and pruning behavior without external dependencies.
+
+### Fixed
+
+- Fixed PowerShell (`powershell.exe` / `pwsh`) support when used as a custom `shellPath` by correctly passing `-NoLogo -Command` (and `-NoProfile` under `PI_BASH_NO_LOGIN`) instead of POSIX flags.
+
+### Removed
+
+- Removed external dependencies on `handlebars`, `winston`, and `winston-daily-rotate-file`.
+
 ## [17.2.9] - 2026-08-05
 
 ### Added

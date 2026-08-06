@@ -6,6 +6,16 @@
 
 - Added `thinking.supportsDisabledThinking`, marking adaptive Claude models that accept an explicit `thinking.type: "disabled"` request instead of the legacy low-effort fallback. Claude Opus 5 and Sonnet 5 are marked; older adaptive Claude models keep the fallback.
 - Added `thinking.disabledThinkingMaxEffort`, the highest effort that may accompany `thinking.type: "disabled"`. Claude Opus 5 rejects that combination above `high` with a 400, so requests are clamped instead of dropping the caller's effort.
+## [17.2.10] - 2026-08-06
+
+### Changed
+
+- Removed the zod dependency by migrating GitLab Duo Workflow discovery schemas to omptype.
+
+### Fixed
+
+- Corrected thinking-effort tiers for deepseek-v4-flash to include the low tier alongside high and max.
+
 ## [17.2.9] - 2026-08-05
 
 ### Fixed

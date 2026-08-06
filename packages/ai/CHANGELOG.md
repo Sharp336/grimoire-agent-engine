@@ -13,6 +13,12 @@
 - Fixed the GitLab Duo and OpenAI/Anthropic shim providers dropping the explicit thinking-off signal on their OpenAI-format transports.
 - Fixed Anthropic Messages gateway requests that set `thinking.type: "adaptive"` without `output_config.effort` being translated as thinking-off. The gateway, direct Anthropic provider, Bedrock Claude, GitLab Duo Anthropic proxy, OpenAI/Anthropic shim providers, and pi-native forwarding path now preserve Claude adaptive thinking mode separately from effort.
 - Fixed neutral `thinkingMode: "adaptive"` incorrectly enabling thinking on budget Claude models when no effort was set.
+## [17.2.10] - 2026-08-06
+
+### Breaking Changes
+
+- Removed the `zod` dependency and `z`/`ZodType` re-exports. Tool schemas now use `omptype` `type()` schemas, with Zod-style authoring still available via `@oh-my-pi/omptype/zod`.
+
 ## [17.2.9] - 2026-08-05
 
 ### Fixed
