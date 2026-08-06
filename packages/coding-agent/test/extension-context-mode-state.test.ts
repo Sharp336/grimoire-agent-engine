@@ -1,9 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type { GoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
 
-function createRunner(getPlanModeState?: () => PlanModeState | undefined): ExtensionRunner {
+function createRunner(
+	getPlanModeState?: () => PlanModeState | undefined,
+	getGoalModeState?: () => GoalModeState | undefined,
+): ExtensionRunner {
 	const runtime = {
 		flagValues: new Map(),
 		pendingProviderRegistrations: [],
@@ -19,10 +23,28 @@ function createRunner(getPlanModeState?: () => PlanModeState | undefined): Exten
 		undefined,
 		undefined,
 		getPlanModeState,
+		getGoalModeState,
 	);
 }
 
 const planModeState: PlanModeState = { enabled: true, planFilePath: "local://feature-plan.md" };
+
+function activeGoalState(): GoalModeState {
+	const now = Date.now();
+	return {
+		enabled: true,
+		mode: "active",
+		goal: {
+			id: "goal-extension-context",
+			objective: "Ship the release",
+			status: "active",
+			tokensUsed: 0,
+			timeUsedSeconds: 0,
+			createdAt: now,
+			updatedAt: now,
+		},
+	};
+}
 
 describe("ExtensionRunner plan mode context", () => {
 	it("defaults to undefined outside a session", () => {
@@ -66,5 +88,44 @@ describe("ExtensionRunner plan mode context", () => {
 
 		current = planModeState;
 		expect(ctx.getPlanModeState()).toBe(planModeState);
+	});
+});
+
+describe("ExtensionRunner goal mode context", () => {
+	it("defaults to undefined outside a session", () => {
+		expect(createRunner().createContext().getGoalModeState()).toBeUndefined();
+	});
+
+	it("exposes the owning session state", () => {
+		const goal = activeGoalState();
+		expect(
+			createRunner(undefined, () => goal)
+				.createContext()
+				.getGoalModeState(),
+		).toBe(goal);
+	});
+
+	it("reads live through a single context object, including the exiting phase", () => {
+		let current: GoalModeState | undefined;
+		const ctx = createRunner(undefined, () => current).createContext();
+
+		expect(ctx.getGoalModeState()).toBeUndefined();
+
+		current = activeGoalState();
+		expect(ctx.getGoalModeState()?.mode).toBe("active");
+
+		current = { ...activeGoalState(), mode: "exiting", reason: "completed" };
+		expect(ctx.getGoalModeState()?.mode).toBe("exiting");
+	});
+
+	it("is independent of plan mode state", () => {
+		const goal = activeGoalState();
+		const ctx = createRunner(
+			() => planModeState,
+			() => goal,
+		).createContext();
+
+		expect(ctx.getPlanModeState()).toBe(planModeState);
+		expect(ctx.getGoalModeState()).toBe(goal);
 	});
 });
