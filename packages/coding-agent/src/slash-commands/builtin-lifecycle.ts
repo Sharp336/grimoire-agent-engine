@@ -10,6 +10,7 @@ import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { resolveToCwd } from "../tools/path-utils";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
+import { parsePruneMode, parseUnarchiveMode, runPrune, runUnarchive } from "./prune-modes";
 import type {
 	ParsedSlashCommand,
 	SlashCommandResult,
@@ -195,16 +196,55 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	},
 	{
 		name: "prune",
-		description: "Prune all empty branches (no assistant reply, or only a failed one)",
-		acpDescription: "Prune empty conversation branches",
-		handle: async (_command, runtime) => {
-			const count = await runtime.session.pruneEmptyBranches();
-			await runtime.output(`Pruned ${count} empty branch ${count === 1 ? "entry" : "entries"}.`);
+		description: "Hide empty branches (no assistant reply, or only a failed one)",
+		acpDescription: "Hide empty conversation branches",
+		subcommands: [
+			{ name: "archive", description: "Hide empty branches, deleting nothing (default)" },
+			{ name: "delete", description: "Delete empty branches for good" },
+		],
+		acpInputHint: "[archive|delete]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const mode = parsePruneMode(command.args);
+			if (typeof mode !== "string") return usage(mode.error, runtime);
+			await runtime.output(await runPrune(mode, runtime.session));
 			return commandConsumed();
 		},
-		handleTui: async (_command, runtime) => {
+		handleTui: async (command, runtime) => {
 			runtime.ctx.editor.setText("");
-			await runtime.ctx.handlePruneCommand();
+			const mode = parsePruneMode(command.args);
+			if (typeof mode !== "string") {
+				runtime.ctx.showWarning(mode.error);
+				return;
+			}
+			await runtime.ctx.handlePruneCommand(mode);
+		},
+	},
+	{
+		name: "unarchive",
+		description: "Bring archived branches back into view",
+		acpDescription: "Restore archived conversation branches",
+		subcommands: [
+			{ name: "all", description: "Restore every archived branch (default)" },
+			{ name: "list", description: "Show which branches are archived" },
+		],
+		acpInputHint: "[list|all|<branch id>]",
+		inlineHint: "[list|all|<branch id>]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const mode = parseUnarchiveMode(command.args);
+			if ("error" in mode) return usage(mode.error, runtime);
+			await runtime.output(await runUnarchive(mode, runtime.session));
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			runtime.ctx.editor.setText("");
+			const mode = parseUnarchiveMode(command.args);
+			if ("error" in mode) {
+				runtime.ctx.showWarning(mode.error);
+				return;
+			}
+			await runtime.ctx.handleUnarchiveCommand(mode);
 		},
 	},
 	{

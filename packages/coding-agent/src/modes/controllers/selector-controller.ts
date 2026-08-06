@@ -1201,8 +1201,9 @@ export class SelectorController {
 		this.ctx.ui.requestRender();
 	}
 
-	showTreeSelector(): void {
-		const tree = this.ctx.sessionManager.getTree();
+	showTreeSelector(options: { includeArchived?: boolean } = {}): void {
+		const includeArchived = options.includeArchived ?? false;
+		const tree = this.ctx.sessionManager.getTree({ includeArchived });
 		const realLeafId = this.ctx.sessionManager.getLeafId();
 
 		if (tree.length === 0) {
@@ -1362,6 +1363,16 @@ export class SelectorController {
 					this.ctx.ui.requestRender();
 				},
 				settings.get("treeFilterMode"),
+				{
+					showing: includeArchived,
+					// Archived branches were filtered out before the component saw the
+					// tree, so revealing them means fetching a new one — the same
+					// rebuild Escape already does.
+					onToggle: () => {
+						done();
+						this.showTreeSelector({ includeArchived: !includeArchived });
+					},
+				},
 			);
 			return { component: selector, focus: selector };
 		});

@@ -164,9 +164,9 @@
 
 - Added collapsible branches to the HTML export's session tree: every node with children gets a ▾/▸ toggle that folds its subtree, alongside the existing active-path bullet.
 - Added collapsible branches to the `/tree` selector: `Space` folds the selected node's subtree behind a `▸` marker with a hidden-entry count, `Shift+Tab` folds every branch off the current thread down to one row each, and `←`/`→` jump to the fork above the cursor or the next fork below it along the branch.
-### Added
-
 - Added a `/prune` slash command that deletes conversation branches with nothing to read in them: an entry survives only if an answered assistant reply sits at or below it, so unanswered prompts, replies that errored or were aborted, replies left waiting on a tool call that never came back, and the tool traffic under them all go. The active branch is always kept intact.
+- `/prune` now hides empty branches instead of deleting them. An archive record is appended to the session file, the branch stays on disk byte for byte, and the tree, the HTML export, and `/share` stop offering it. `/prune delete` is the old destructive behavior, now opt-in, and archiving a branch also shields it from it.
+- Added `/unarchive` to bring hidden branches back: `/unarchive` restores them all, `/unarchive <branch id>` restores one, and `/unarchive list` shows what is hidden.
 
 ## [17.2.9] - 2026-08-05
 

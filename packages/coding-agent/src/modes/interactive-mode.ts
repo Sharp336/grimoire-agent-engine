@@ -113,6 +113,7 @@ import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
 import { formatDuration } from "../slash-commands/helpers/format";
+import type { PruneMode, UnarchiveMode } from "../slash-commands/prune-modes";
 import { STTController, type SttState } from "../stt";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { formatTaskId } from "../task/render";
@@ -4882,8 +4883,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleShakeCommand(mode);
 	}
 
-	handlePruneCommand(): Promise<void> {
-		return this.#commandController.handlePruneCommand();
+	handlePruneCommand(mode?: PruneMode): Promise<void> {
+		return this.#commandController.handlePruneCommand(mode);
+	}
+
+	handleUnarchiveCommand(mode?: UnarchiveMode): Promise<void> {
+		return this.#commandController.handleUnarchiveCommand(mode);
 	}
 
 	executeCompaction(

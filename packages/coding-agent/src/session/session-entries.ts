@@ -158,6 +158,19 @@ export interface LabelEntry extends SessionEntryBase {
 	label: string | undefined;
 }
 
+/**
+ * Append-only record hiding a branch from view without deleting anything. The
+ * subtree rooted at `targetId` stays in the file, byte for byte; it just stops
+ * being offered by the tree. `archived: false` is the undo, written as a new
+ * record rather than by erasing the old one, so the journal never rewrites
+ * history and the last record for a target wins.
+ */
+export interface ArchiveEntry extends SessionEntryBase {
+	type: "archive";
+	targetId: string;
+	archived: boolean;
+}
+
 /** Append-only audit entry recording a session title change. */
 export interface TitleChangeEntry extends SessionEntryBase {
 	type: typeof TITLE_CHANGE_ENTRY_TYPE;
@@ -172,6 +185,7 @@ declare module "@oh-my-pi/pi-agent-core/compaction/entries" {
 		titleChange: TitleChangeEntry;
 		credentialPin: CredentialPinEntry;
 		resetBoundary: ResetBoundaryEntry;
+		archive: ArchiveEntry;
 	}
 }
 
@@ -271,6 +285,7 @@ export type SessionEntry =
 	| CustomEntry
 	| CustomMessageEntry
 	| LabelEntry
+	| ArchiveEntry
 	| TitleChangeEntry
 	| TtsrInjectionEntry
 	| SessionInitEntry

@@ -1,5 +1,5 @@
 import { describe, expect, it, spyOn } from "bun:test";
-import type { CustomEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import type { CustomEntry, SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { assistantMsg, failedAssistantMsg, toolCallMsg, toolResultMsg, userMsg } from "../utilities";
@@ -798,5 +798,156 @@ describe("pruneEmptyBranches", () => {
 		expect(ids).toContain(idRoot);
 		expect(ids).toContain(idAsst);
 		expect(ids).not.toContain(idAbandoned);
+	});
+});
+
+describe("archiveEmptyBranches", () => {
+	/** Every entry id reachable in a tree, in pre-order. */
+	function treeIds(nodes: SessionTreeNode[]): string[] {
+		const ids: string[] = [];
+		const walk = (list: SessionTreeNode[]) => {
+			for (const node of list) {
+				ids.push(node.entry.id);
+				walk(node.children);
+			}
+		};
+		walk(nodes);
+		return ids;
+	}
+
+	/**
+	 * One answered branch plus two abandoned empty ones, so archive and prune both
+	 * have the same real work to do.
+	 */
+	function buildForkedSession() {
+		const session = SessionManager.inMemory();
+		const idRoot = session.appendMessage(userMsg("root"));
+		const idAsst = session.appendMessage(assistantMsg("answer"));
+
+		session.branch(idRoot);
+		const idEmptyA = session.appendMessage(userMsg("abandoned A"));
+
+		session.branch(idRoot);
+		const idEmptyB = session.appendMessage(userMsg("abandoned B"));
+		const idEmptyBTool = session.appendMessage(toolCallMsg("stalled"));
+
+		session.branch(idAsst);
+		// Entry ids are random per session, so the two builds are compared by the
+		// stable role each entry plays rather than by raw id.
+		const names = new Map<string, string>([
+			[idRoot, "root"],
+			[idAsst, "asst"],
+			[idEmptyA, "emptyA"],
+			[idEmptyB, "emptyB"],
+			[idEmptyBTool, "emptyBTool"],
+		]);
+		return { session, names, idRoot, idAsst, idEmptyA, idEmptyB, idEmptyBTool };
+	}
+
+	it("hides exactly the entries a prune would have deleted", async () => {
+		const pruned = buildForkedSession();
+		const before = new Set(pruned.session.getEntries().map(e => e.id));
+		expect(await pruned.session.pruneEmptyBranches()).toBeGreaterThan(0);
+		const after = new Set(pruned.session.getEntries().map(e => e.id));
+		const deleted = [...before].filter(id => !after.has(id)).map(id => pruned.names.get(id));
+
+		const archived = buildForkedSession();
+		await archived.session.archiveEmptyBranches();
+		const hidden = [...archived.session.getArchivedEntryIds()].map(id => archived.names.get(id));
+
+		expect(deleted).not.toHaveLength(0);
+		expect(hidden.sort()).toEqual(deleted.sort());
+	});
+
+	it("deletes nothing: every original entry survives the archive", async () => {
+		const { session } = buildForkedSession();
+		const before = session.getEntries().map(e => e.id);
+
+		const { branches, entries } = await session.archiveEmptyBranches();
+		expect(branches).toBeGreaterThan(0);
+		expect(entries).toBeGreaterThan(0);
+
+		const after = new Set(session.getEntries().map(e => e.id));
+		for (const id of before) expect(after.has(id)).toBe(true);
+	});
+
+	it("drops archived branches from getTree but returns them with includeArchived", async () => {
+		const { session, idRoot, idAsst, idEmptyA, idEmptyB, idEmptyBTool } = buildForkedSession();
+		await session.archiveEmptyBranches();
+
+		const visible = treeIds(session.getTree());
+		expect(visible).toContain(idRoot);
+		expect(visible).toContain(idAsst);
+		expect(visible).not.toContain(idEmptyA);
+		expect(visible).not.toContain(idEmptyB);
+		expect(visible).not.toContain(idEmptyBTool);
+
+		const all = treeIds(session.getTree({ includeArchived: true }));
+		expect(all).toContain(idEmptyA);
+		expect(all).toContain(idEmptyB);
+		expect(all).toContain(idEmptyBTool);
+	});
+
+	it("restores every branch with no argument and only one when given an id", async () => {
+		const one = buildForkedSession();
+		await one.session.archiveEmptyBranches();
+		expect(await one.session.restoreArchived()).toBe(2);
+		const restored = treeIds(one.session.getTree());
+		expect(restored).toContain(one.idEmptyA);
+		expect(restored).toContain(one.idEmptyB);
+
+		const targeted = buildForkedSession();
+		await targeted.session.archiveEmptyBranches();
+		expect(await targeted.session.restoreArchived(targeted.idEmptyA)).toBe(1);
+		const partial = treeIds(targeted.session.getTree());
+		expect(partial).toContain(targeted.idEmptyA);
+		expect(partial).not.toContain(targeted.idEmptyB);
+	});
+
+	it("writes one record for the outermost node of a multi-level empty subtree", async () => {
+		const session = SessionManager.inMemory();
+		const idRoot = session.appendMessage(userMsg("root"));
+		const idAsst = session.appendMessage(assistantMsg("answer"));
+
+		session.branch(idRoot);
+		const idTop = session.appendMessage(userMsg("abandoned"));
+		const idMid = session.appendMessage(toolCallMsg("stalled"));
+		const idDeep = session.appendMessage(toolResultMsg("stalled"));
+		session.branch(idAsst);
+
+		const { branches, entries } = await session.archiveEmptyBranches();
+		expect(branches).toBe(1);
+		expect(entries).toBe(3);
+		expect(session.getArchivedRootIds()).toEqual([idTop]);
+		expect([...session.getArchivedEntryIds()].sort()).toEqual([idTop, idMid, idDeep].sort());
+	});
+
+	it("shields the archived branch from a later prune", async () => {
+		const { session } = buildForkedSession();
+		await session.archiveEmptyBranches();
+		const before = session.getEntries().map(e => e.id);
+
+		expect(await session.pruneEmptyBranches()).toBe(0);
+		expect(session.getEntries().map(e => e.id)).toEqual(before);
+	});
+
+	it("persists the archive: the branch is still hidden after reloading from disk", async () => {
+		using tempDir = TempDir.createSync("@pi-session-archive-");
+		const session = SessionManager.create(tempDir.path(), tempDir.path());
+		const idRoot = session.appendMessage(userMsg("root"));
+		const idAsst = session.appendMessage(assistantMsg("answer"));
+		session.branch(idRoot);
+		const idAbandoned = session.appendMessage(userMsg("abandoned"));
+		session.branch(idAsst);
+		await session.flush();
+
+		expect((await session.archiveEmptyBranches()).branches).toBe(1);
+		await session.flush();
+
+		const reloaded = await SessionManager.open(session.getSessionFile() as string);
+		expect(reloaded.getEntries().map(e => e.id)).toContain(idAbandoned);
+		expect(reloaded.getArchivedRootIds()).toEqual([idAbandoned]);
+		expect(treeIds(reloaded.getTree())).not.toContain(idAbandoned);
+		expect(treeIds(reloaded.getTree({ includeArchived: true }))).toContain(idAbandoned);
 	});
 });
