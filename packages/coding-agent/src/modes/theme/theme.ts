@@ -116,6 +116,7 @@ export type SymbolKey =
 	| "icon.context"
 	| "icon.cost"
 	| "icon.time"
+	| "icon.health"
 	| "icon.pi"
 	| "icon.ghost"
 	| "icon.agents"
@@ -171,6 +172,7 @@ export type SymbolKey =
 	| "md.colorSwatch"
 	// Advisor note rail
 	| "advisor.rail"
+	| "thinking.rail"
 	// Language/file type icons
 	| "lang.default"
 	| "lang.typescript"
@@ -326,6 +328,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"icon.context": "◫",
 	"icon.cost": "💲",
 	"icon.time": "⏱",
+	"icon.health": "✓",
 	"icon.pi": "π",
 	"icon.ghost": "👻",
 	"icon.agents": "👥",
@@ -381,6 +384,9 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"md.colorSwatch": "■",
 	// Advisor note rail (heavier than md.quoteBorder so notes read as a distinct voice)
 	"advisor.rail": "▎",
+	// Thinking-trace rail (lighter than md.quoteBorder so a recessed trace never
+	// out-weighs a real blockquote inside it)
+	"thinking.rail": "╎",
 	// Language/file icons (emoji-centric, no Nerd Font required)
 	"lang.default": "⌘",
 	"lang.typescript": "🟦",
@@ -602,6 +608,8 @@ const NERD_SYMBOLS: SymbolMap = {
 	"icon.cost": "\uf155",
 	// pick:  | alt: ◷ ◴
 	"icon.time": "\uf017",
+	// pick: ✓ | alt:  (nf-fa-shield) 󰒃 (nf-md-shield)
+	"icon.health": "✓",
 	// pick:  | alt: π ∏ ∑
 	"icon.pi": "\ue22c",
 	// pick: 󰊠 (nf-md-ghost) | alt: 👻
@@ -692,6 +700,7 @@ const NERD_SYMBOLS: SymbolMap = {
 	"md.colorSwatch": "■",
 	// pick: ▎ | alt: ┃ │
 	"advisor.rail": "▎",
+	"thinking.rail": "╎",
 	// Language icons (nerd font devicons)
 	"lang.default": "",
 	"lang.typescript": "\u{E628}",
@@ -846,6 +855,7 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"icon.context": "ctx:",
 	"icon.cost": "$",
 	"icon.time": "t:",
+	"icon.health": "ok",
 	"icon.pi": "pi",
 	"icon.ghost": "@",
 	"icon.agents": "AG",
@@ -898,6 +908,7 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"md.bullet": "*",
 	"md.colorSwatch": "[]",
 	"advisor.rail": "|",
+	"thinking.rail": ":",
 	// Language icons (ASCII uses abbreviations)
 	"lang.default": "code",
 	"lang.typescript": "ts",
@@ -1846,6 +1857,7 @@ export class Theme {
 			context: this.#symbols["icon.context"],
 			cost: this.#symbols["icon.cost"],
 			time: this.#symbols["icon.time"],
+			health: this.#symbols["icon.health"],
 			pi: this.#symbols["icon.pi"],
 			ghost: this.#symbols["icon.ghost"],
 			agents: this.#symbols["icon.agents"],
