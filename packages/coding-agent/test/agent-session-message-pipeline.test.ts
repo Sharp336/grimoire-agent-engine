@@ -237,6 +237,59 @@ describe("AgentSession message pipeline", () => {
 		expect(requestOnPayload).toHaveBeenCalledWith({ original: true, session: true }, undefined);
 		expect(result).toEqual({ original: true, session: true });
 	});
+
+	it("completes direct side requests through the configured stream wrapper and session hooks", async () => {
+		const model = buildModel({
+			id: "direct-side-stream-model",
+			name: "Direct Side Stream Model",
+			api: "anthropic",
+			provider: "test-provider",
+			baseUrl: "",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		let capturedContext: Context | undefined;
+		let capturedOptions: SimpleStreamOptions | undefined;
+		const sideStreamFn: StreamFn = (_model, context, options) => {
+			capturedContext = context;
+			capturedOptions = options;
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage("Wrapped answer");
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+		const sessionOnPayload = vi.fn(async (payload: unknown) => ({
+			...(payload as Record<string, unknown>),
+			session: true,
+		}));
+		const session = new AgentSession({
+			agent: createAgent(),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+			sideStreamFn,
+			onPayload: sessionOnPayload,
+		});
+		sessions.push(session);
+		const context: Context = {
+			systemPrompt: ["Suggest a follow-up"],
+			messages: [{ role: "user", content: "Current result", timestamp: 1 }],
+		};
+
+		const result = await session.completeSideRequest(model, context, { maxTokens: 64 });
+		const payload = await capturedOptions?.onPayload?.({ request: true }, model);
+
+		expect(result.content).toEqual([{ type: "text", text: "Wrapped answer" }]);
+		expect(capturedContext).toBe(context);
+		expect(capturedOptions?.maxTokens).toBe(64);
+		expect(sessionOnPayload).toHaveBeenCalledTimes(1);
+		expect(payload).toEqual({ request: true, session: true });
+	});
 	it("keeps ephemeral side-channel cache key separate from provider routing while preserving websocket state", async () => {
 		const api = "test-ephemeral-side-channel";
 		let capturedOptions: SimpleStreamOptions | undefined;

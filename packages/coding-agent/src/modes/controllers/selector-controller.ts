@@ -181,6 +181,7 @@ export class SelectorController {
 	}
 
 	showSettingsSelector(): void {
+		this.ctx.nextPromptSuggestionController?.invalidate();
 		getAvailableThemes().then(availableThemes => {
 			// Fullscreen settings editor on the alternate screen: the overlay
 			// enables mouse tracking (click/hover/wheel) for its lifetime and
@@ -482,6 +483,9 @@ export class SelectorController {
 
 			case "autocompleteMaxVisible":
 				this.ctx.editor.setAutocompleteMaxVisible(typeof value === "number" ? value : Number(value));
+				break;
+			case "nextPromptSuggestion.enabled":
+				if (value === false) this.ctx.nextPromptSuggestionController?.invalidate();
 				break;
 
 			// Settings with UI side effects
@@ -1408,6 +1412,7 @@ export class SelectorController {
 	}
 
 	async showSessionSelector(source?: ForeignSessionSource): Promise<void> {
+		this.ctx.nextPromptSuggestionController?.invalidate();
 		let sessions: SessionInfo[];
 		let onSelectSession: (session: SessionInfo) => Promise<boolean>;
 		let selectorOptions: SessionSelectorOptions;
@@ -1986,6 +1991,7 @@ export class SelectorController {
 	}
 
 	async showDebugSelector(): Promise<void> {
+		this.ctx.nextPromptSuggestionController?.invalidate();
 		const { DebugSelectorComponent } = await import("../../debug");
 		this.showSelector(done => {
 			const selector = new DebugSelectorComponent(this.ctx, done);
@@ -1997,6 +2003,7 @@ export class SelectorController {
 		observers: SessionObserverRegistry,
 		options?: { requireContent?: boolean; armCloseTap?: boolean },
 	): void {
+		this.ctx.nextPromptSuggestionController?.invalidate();
 		const hubKeys = [
 			...this.ctx.keybindings.getKeys("app.agents.hub"),
 			...this.ctx.keybindings.getKeys("app.session.observe"),

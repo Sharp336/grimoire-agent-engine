@@ -8,9 +8,11 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { SETTINGS_SCHEMA } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-coding-agent/modes/components/read-tool-group";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
+import type { NextPromptSuggestionController } from "@oh-my-pi/pi-coding-agent/modes/controllers/next-prompt-suggestion-controller";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -32,6 +34,45 @@ afterEach(() => {
 });
 
 describe("selector setting side effects", () => {
+	it("registers next prompt suggestions as a persisted opt-in setting with the auxiliary-provider cost warning", () => {
+		const definition = SETTINGS_SCHEMA["nextPromptSuggestion.enabled"];
+
+		expect(definition.type).toBe("boolean");
+		expect(definition.default).toBe(false);
+		expect(definition.ui.description).toContain("additional");
+		expect(definition.ui.description).toContain("context");
+		expect(definition.ui.description).toContain("cost");
+		expect(definition.ui.description).toContain("auxiliary role");
+		expect(definition.ui.description).toContain("provider");
+
+		Settings.instance.set("nextPromptSuggestion.enabled", true);
+		expect(Settings.instance.get("nextPromptSuggestion.enabled")).toBe(true);
+	});
+
+	it("invalidates an active next prompt suggestion immediately when disabled", () => {
+		const invalidate = vi.fn();
+		const nextPromptSuggestionController = {
+			invalidate,
+		} as unknown as NextPromptSuggestionController;
+		const controller = new SelectorController({ nextPromptSuggestionController } as InteractiveModeContext);
+
+		controller.handleSettingChange("nextPromptSuggestion.enabled", false);
+
+		expect(invalidate).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not generate or invalidate a next prompt suggestion retroactively when enabled", () => {
+		const invalidate = vi.fn();
+		const nextPromptSuggestionController = {
+			invalidate,
+		} as unknown as NextPromptSuggestionController;
+		const controller = new SelectorController({ nextPromptSuggestionController } as InteractiveModeContext);
+
+		controller.handleSettingChange("nextPromptSuggestion.enabled", true);
+
+		expect(invalidate).not.toHaveBeenCalled();
+	});
+
 	it("refreshes the status line when git integration changes at runtime", () => {
 		const updateSettings = vi.fn();
 		const requestRender = vi.fn();

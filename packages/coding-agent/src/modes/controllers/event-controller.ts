@@ -170,6 +170,7 @@ export class EventController {
 	#prevHideThinking = false;
 	#handlers: AgentSessionEventHandlers;
 	#terminalProgressActive = false;
+	#agentActivityEpoch = 0;
 	// Coalescing window for `message_update` events at the subscription boundary.
 	// `message_update` carries the CUMULATIVE assistant message (every update
 	// re-lists all content blocks), so when a burst of deltas arrives faster than
@@ -687,6 +688,8 @@ export class EventController {
 	}
 
 	async #handleAgentStart(_event: Extract<AgentSessionEvent, { type: "agent_start" }>): Promise<void> {
+		this.#agentActivityEpoch++;
+		this.ctx.nextPromptSuggestionController?.invalidate();
 		this.#toolTimelineComponents.clear();
 		this.#streamedToolCallIdByIndex.clear();
 		this.#retractedToolCallIds.clear();
@@ -1664,7 +1667,18 @@ export class EventController {
 		}
 		setTerminalTitleState("idle");
 
+		const agentActivityEpoch = this.#agentActivityEpoch;
+		const nextPromptSuggestionController = this.ctx.nextPromptSuggestionController;
+		const nextPromptSuggestionRevision = nextPromptSuggestionController?.revision;
 		await this.#finishAgentEnd(event);
+		if (
+			agentActivityEpoch !== this.#agentActivityEpoch ||
+			this.ctx.session.isStreaming ||
+			nextPromptSuggestionRevision !== nextPromptSuggestionController?.revision
+		) {
+			return;
+		}
+		nextPromptSuggestionController?.request(event);
 	}
 
 	async #finishAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {

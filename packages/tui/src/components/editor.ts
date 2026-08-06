@@ -412,7 +412,18 @@ export class Editor implements Component, Focusable {
 	};
 
 	/** Focusable interface - set by TUI when focus changes */
-	focused: boolean = false;
+	#focused = false;
+	onFocusChange?: (focused: boolean) => void;
+
+	get focused(): boolean {
+		return this.#focused;
+	}
+
+	set focused(focused: boolean) {
+		if (focused === this.#focused) return;
+		this.#focused = focused;
+		this.onFocusChange?.(focused);
+	}
 
 	#theme: EditorTheme;
 	#useTerminalCursor = false;
@@ -467,6 +478,8 @@ export class Editor implements Component, Focusable {
 	#autocompleteRequestId: number = 0;
 	#autocompleteMaxVisible: number = 5;
 	onAutocompleteUpdate?: () => void;
+	#nextPromptSuggestion: string | undefined;
+	#nextPromptSuggestionVisible = false;
 
 	// Paste tracking for large pastes
 	#pastes: Map<number, string> = new Map();
@@ -524,6 +537,34 @@ export class Editor implements Component, Focusable {
 
 	setAutocompleteProvider(provider: AutocompleteProvider): void {
 		this.#autocompleteProvider = provider;
+	}
+
+	setNextPromptSuggestion(text: string): void {
+		this.#nextPromptSuggestion = text || undefined;
+		this.#nextPromptSuggestionVisible = false;
+	}
+
+	clearNextPromptSuggestion(): void {
+		this.#nextPromptSuggestion = undefined;
+		this.#nextPromptSuggestionVisible = false;
+	}
+
+	acceptNextPromptSuggestion(): boolean {
+		const suggestion = this.#nextPromptSuggestion;
+		if (
+			!suggestion ||
+			!this.#nextPromptSuggestionVisible ||
+			!this.#isEditorEmpty() ||
+			this.#autocompleteState !== null ||
+			this.#getInlineHint() !== null
+		) {
+			return false;
+		}
+
+		this.clearNextPromptSuggestion();
+		this.#cancelAutocomplete();
+		this.#insertTextAtCursor(suggestion, false);
+		return true;
 	}
 
 	/**
@@ -855,6 +896,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	render(width: number): readonly string[] {
+		this.#nextPromptSuggestionVisible = false;
 		const paddingX = this.#getEditorPaddingX();
 		const borderVisible = this.#borderVisible;
 		const promptGutter = this.#getPromptGutter(width, paddingX);
@@ -926,8 +968,25 @@ export class Editor implements Component, Focusable {
 		const lineContentWidth = contentAreaWidth;
 
 		// Compute inline hint text (dim ghost text after cursor)
-		const inlineHint = this.#getInlineHint();
+		const providerInlineHint = this.#getInlineHint();
+		const contextualInlineHint =
+			providerInlineHint === null && this.#autocompleteState === null && this.#isEditorEmpty()
+				? this.#nextPromptSuggestion
+				: undefined;
+		const inlineHint = providerInlineHint ?? contextualInlineHint ?? null;
 		const hintStyle = this.#theme.hintStyle ?? ((t: string) => `\x1b[2m${t}\x1b[0m`);
+		const renderInlineHint = (availableWidth: number): { text: string; width: number } => {
+			if (!inlineHint) return { text: "", width: 0 };
+			const renderedHint =
+				contextualInlineHint === undefined
+					? truncateToWidth(inlineHint, availableWidth)
+					: truncateToWidth(inlineHint, availableWidth, "");
+			const renderedWidth = visibleWidth(renderedHint);
+			if (contextualInlineHint !== undefined && renderedWidth > 0) {
+				this.#nextPromptSuggestionVisible = true;
+			}
+			return { text: hintStyle(renderedHint), width: renderedWidth };
+		};
 
 		for (let visibleIndex = 0; visibleIndex < visibleLayoutLines.length; visibleIndex++) {
 			const layoutLine = visibleLayoutLines[visibleIndex]!;
@@ -1000,9 +1059,9 @@ export class Editor implements Component, Focusable {
 						imeSafeCursorTail = true;
 					} else if (after.length === 0 && inlineHint) {
 						const availWidth = Math.max(0, lineContentWidth - displayWidth);
-						const hintText = hintStyle(truncateToWidth(inlineHint, availWidth));
-						displayText = before + marker + hintText;
-						displayWidth += Math.min(visibleWidth(inlineHint), availWidth);
+						const renderedHint = renderInlineHint(availWidth);
+						displayText = before + marker + renderedHint.text;
+						displayWidth += renderedHint.width;
 					} else if (after.length === 0 && !borderVisible && displayWidth >= lineContentWidth) {
 						displayText = this.#renderTerminalCursorMarker(before, marker, lineContentWidth);
 					} else {
@@ -1040,9 +1099,9 @@ export class Editor implements Component, Focusable {
 						displayWidth = widthLimitedCursor.width;
 					} else if (inlineHint) {
 						const availWidth = Math.max(0, lineContentWidth - displayWidth - overrideWidth);
-						const hintText = hintStyle(truncateToWidth(inlineHint, availWidth));
-						displayText = before + marker + this.cursorOverride + hintText;
-						displayWidth += overrideWidth + Math.min(visibleWidth(inlineHint), availWidth);
+						const renderedHint = renderInlineHint(availWidth);
+						displayText = before + marker + this.cursorOverride + renderedHint.text;
+						displayWidth += overrideWidth + renderedHint.width;
 					} else {
 						displayText = before + marker + this.cursorOverride;
 						displayWidth += overrideWidth;
@@ -1058,9 +1117,9 @@ export class Editor implements Component, Focusable {
 						displayWidth = widthLimitedCursor.width;
 					} else if (inlineHint) {
 						const availWidth = Math.max(0, lineContentWidth - displayWidth - cursorWidth);
-						const hintText = hintStyle(truncateToWidth(inlineHint, availWidth));
-						displayText = before + marker + cursor + hintText;
-						displayWidth += cursorWidth + Math.min(visibleWidth(inlineHint), availWidth);
+						const renderedHint = renderInlineHint(availWidth);
+						displayText = before + marker + cursor + renderedHint.text;
+						displayWidth += cursorWidth + renderedHint.width;
 					} else {
 						displayText = before + marker + cursor;
 						displayWidth += cursorWidth;
@@ -1100,22 +1159,28 @@ export class Editor implements Component, Focusable {
 			// trailing `─`, but never the corner/vertical bar itself.
 			const isLastLine = visibleIndex === visibleLayoutLines.length - 1;
 			const rightChromeCells = Math.max(1, paddingX + 1 - cursorPaddingOverflow);
-			if (isLastLine && imeSafeCursorTail) {
-				const leftBorder = this.borderColor(`${box.vertical}${padding(paddingX)}`);
-				const bottomBorder = this.borderColor(
-					`${box.bottomLeft}${box.horizontal.repeat(Math.max(0, width - 2))}${box.bottomRight}`,
-				);
-				result.push(leftBorder + displayText);
-				result.push(bottomBorder);
-				continue;
-			}
 			if (isLastLine) {
 				const rightPad = Math.max(0, rightChromeCells - 2);
 				const includeHorizontal = rightChromeCells >= 2;
 				const bottomRightAdjusted = this.borderColor(
 					`${padding(rightPad)}${includeHorizontal ? box.horizontal : ""}${box.bottomRight}`,
 				);
-				result.push(`${bottomLeft}${displayText}${linePad}${bottomRightAdjusted}`);
+				if (imeSafeCursorTail) {
+					const leftBorder = this.borderColor(`${box.vertical}${padding(paddingX)}`);
+					const renderedHint = inlineHint ? renderInlineHint(lineContentWidth) : undefined;
+					result.push(leftBorder + displayText);
+					if (renderedHint && renderedHint.width > 0) {
+						const hintPad = padding(Math.max(0, lineContentWidth - renderedHint.width));
+						result.push(`${bottomLeft}${renderedHint.text}${hintPad}${bottomRightAdjusted}`);
+					} else {
+						const bottomBorder = this.borderColor(
+							`${box.bottomLeft}${box.horizontal.repeat(Math.max(0, width - 2))}${box.bottomRight}`,
+						);
+						result.push(bottomBorder);
+					}
+				} else {
+					result.push(`${bottomLeft}${displayText}${linePad}${bottomRightAdjusted}`);
+				}
 			} else {
 				const leftBorder = this.borderColor(`${box.vertical}${padding(paddingX)}`);
 				// When scrollbar is active, replace the right border vertical with a
@@ -1362,6 +1427,9 @@ export class Editor implements Component, Focusable {
 
 		// Tab key - context-aware completion (but not when already autocompleting)
 		if (kb.matchesCanonical(canonical, "tui.input.tab") && !this.#autocompleteState) {
+			if (this.acceptNextPromptSuggestion()) {
+				return;
+			}
 			this.#handleTabCompletion();
 			return;
 		}
@@ -2474,7 +2542,7 @@ export class Editor implements Component, Focusable {
 		this.#lastAction = "kill";
 	}
 
-	#insertTextAtCursor(text: string): void {
+	#insertTextAtCursor(text: string, retriggerAutocomplete = true): void {
 		this.#historyIndex = -1;
 		this.#resetKillSequence();
 		this.#recordUndoState();
@@ -2516,7 +2584,9 @@ export class Editor implements Component, Focusable {
 		if (this.onChange) {
 			this.onChange(this.getText());
 		}
-		this.#retriggerAutocompleteAtCursor();
+		if (retriggerAutocomplete) {
+			this.#retriggerAutocompleteAtCursor();
+		}
 	}
 
 	#yankFromKillRing(): void {

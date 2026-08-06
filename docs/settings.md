@@ -683,15 +683,18 @@ For a custom status line, set `statusLine.preset: custom` and configure `statusL
 
 ### Interaction
 
-| Key                  | Type    | Default         | Values                                                                                                  |
-| -------------------- | ------- | --------------- | ------------------------------------------------------------------------------------------------------- |
-| `steeringMode`       | enum    | `one-at-a-time` | `all`, `one-at-a-time`. How queued steering messages are delivered.                                     |
-| `followUpMode`       | enum    | `one-at-a-time` | `all`, `one-at-a-time`.                                                                                 |
-| `interruptMode`      | enum    | `immediate`     | `immediate`, `wait`.                                                                                    |
-| `doubleEscapeAction` | enum    | `tree`          | `branch`, `tree`, `none`.                                                                               |
-| `autoResume`         | boolean | `false`         | Auto-resume the most recent session in the cwd.                                                         |
-| `ask.timeout`        | number  | `0`             | Seconds before an `ask` prompt times out; `0` = no timeout. (Legacy ms values are migrated to seconds.) |
-| `ask.notify`         | enum    | `on`            | `on`, `off`.                                                                                            |
+| Key                            | Type    | Default         | Values                                                                                                  |
+| ------------------------------ | ------- | --------------- | ------------------------------------------------------------------------------------------------------- |
+| `steeringMode`                 | enum    | `one-at-a-time` | `all`, `one-at-a-time`. How queued steering messages are delivered.                                     |
+| `followUpMode`                 | enum    | `one-at-a-time` | `all`, `one-at-a-time`.                                                                                 |
+| `interruptMode`                | enum    | `immediate`     | `immediate`, `wait`.                                                                                    |
+| `doubleEscapeAction`           | enum    | `tree`          | `branch`, `tree`, `none`.                                                                               |
+| `autoResume`                   | boolean | `false`         | Auto-resume the most recent session in the cwd.                                                         |
+| `nextPromptSuggestion.enabled` | boolean | `false`         | Generate a contextual next-prompt suggestion after eligible terminal responses.                         |
+| `ask.timeout`                  | number  | `0`             | Seconds before an `ask` prompt times out; `0` = no timeout. (Legacy ms values are migrated to seconds.) |
+| `ask.notify`                   | enum    | `on`            | `on`, `off`.                                                                                            |
+
+Enable this feature with `omp config set nextPromptSuggestion.enabled true`. Suggestions expire after 30 seconds; while visible in an empty editor, Tab inserts the suggestion without submitting it. Generation sends additional conversation context through the configurable `@tiny` role, which can use a different provider and incur additional cost.
 
 ### Providers and services
 

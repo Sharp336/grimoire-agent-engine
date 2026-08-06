@@ -1,7 +1,9 @@
-import { describe, expect, it, type Mock, vi } from "bun:test";
+import { afterEach, describe, expect, it, type Mock, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import * as externalEditor from "@oh-my-pi/pi-coding-agent/utils/external-editor";
 import { type KeyId, matchesKey } from "@oh-my-pi/pi-tui";
 import manualContinuePrompt from "../src/prompts/system/manual-continue.md" with { type: "text" };
 
@@ -25,6 +27,10 @@ type FakeEditor = {
 	onExternalEditor?: () => void;
 	onRetry?: () => void;
 	onChange?: (text: string) => void;
+	onFocusChange?: (focused: boolean) => void;
+	onPasteImagePath?: (path: string) => void | Promise<void>;
+	onPasteTextRaw?: () => void;
+	onLargePaste?: (text: string, lineCount: number) => boolean;
 	onSubmit?: (text: string) => Promise<void>;
 	setText(text: string): void;
 	getText(): string;
@@ -34,6 +40,8 @@ type FakeEditor = {
 	setCustomKeyHandler(key: string, handler: () => void): void;
 	clearCustomKeyHandlers(): void;
 	pasteText(text: string): void;
+	insertText(text: string): void;
+	insertPaste(text: string): void;
 	imageLinks?: (string | undefined)[];
 	pendingImages: ImageContent[];
 	pendingImageLinks: (string | undefined)[];
@@ -54,6 +62,11 @@ function dispatchInput(listeners: InputListener[], data: string): InputListenerR
 function registeredInputListeners(addInputListener: Mock<(listener: InputListener) => void>): InputListener[] {
 	return addInputListener.mock.calls.map(call => call[0]);
 }
+
+afterEach(() => {
+	vi.restoreAllMocks();
+	resetSettingsForTest();
+});
 
 async function createContext() {
 	let editorText = "";
@@ -78,6 +91,8 @@ async function createContext() {
 	const showModelSelector = vi.fn();
 	const requestRender = vi.fn();
 	const showError = vi.fn();
+	const showHookSelector = vi.fn(async () => undefined);
+	const invalidateNextPromptSuggestion = vi.fn();
 	let focused: unknown;
 	const addInputListener = vi.fn((listener: InputListener) => {
 		void listener;
@@ -125,6 +140,12 @@ async function createContext() {
 		pasteText(text: string) {
 			editorText += text;
 		},
+		insertText(text: string) {
+			editorText += text;
+		},
+		insertPaste(text: string) {
+			editorText += text;
+		},
 		setActionKeys,
 		setCustomKeyHandler,
 		clearCustomKeyHandlers,
@@ -157,6 +178,10 @@ async function createContext() {
 		autoCompactionEscapeHandler: undefined,
 		retryEscapeHandler: undefined,
 		session: session as unknown as InteractiveModeContext["session"],
+		sessionManager: {
+			getCwd: () => process.cwd(),
+			putBlob: async () => ({ hash: "test-image", path: "/tmp/test-image", displayPath: "/tmp/test-image" }),
+		} as unknown as InteractiveModeContext["sessionManager"],
 		viewSession: session as unknown as InteractiveModeContext["viewSession"],
 		keybindings: {
 			getKeys(action: string) {
@@ -198,7 +223,10 @@ async function createContext() {
 		isPythonMode: false,
 		hideToolActivity: false,
 		toolOutputExpanded: false,
-		settings: { set: vi.fn() },
+		settings: {
+			get: (path: string) => (path === "paste.largeMenuThreshold" ? 1 : undefined),
+			set: vi.fn(),
+		} as unknown as InteractiveModeContext["settings"],
 		chatContainer: { children: [] },
 		handleHotkeysCommand: vi.fn(),
 		handlePlanModeCommand: vi.fn(),
@@ -220,6 +248,11 @@ async function createContext() {
 		handleBtwCopyKey,
 		showError,
 		showStatus: vi.fn(),
+		showWarning: vi.fn(),
+		showHookSelector,
+		nextPromptSuggestionController: {
+			invalidate: invalidateNextPromptSuggestion,
+		},
 	} as unknown as InteractiveModeContext;
 
 	return {
@@ -250,6 +283,8 @@ async function createContext() {
 			handleBtwCopyKey,
 			canCopyBtw,
 			showError,
+			showHookSelector,
+			invalidateNextPromptSuggestion,
 		},
 	};
 }
@@ -310,6 +345,100 @@ describe("InputController keybinding setup", () => {
 
 		expect(ctx.isPythonMode).toBe(true);
 		expect(ctx.updateEditorBorderColor).toHaveBeenCalledTimes(1);
+	});
+
+	it("invalidates on draft changes and blur, and before input work can cross async boundaries", async () => {
+		const imageRead = Promise.withResolvers<null>();
+		const { InputController, ctx, editor, setFocused, spies } = await createContext();
+		const controller = new InputController(ctx, {
+			readImage: () => imageRead.promise,
+			readText: async () => "raw clipboard text",
+		});
+		const getEditorCommand = vi.spyOn(externalEditor, "getEditorCommand").mockReturnValue(undefined);
+
+		controller.setupKeyHandlers();
+		controller.setupEditorSubmitHandler();
+
+		editor.onChange?.("new draft");
+		editor.onFocusChange?.(false);
+		setFocused(null);
+		await editor.onSubmit?.("");
+		expect(spies.invalidateNextPromptSuggestion).toHaveBeenCalledTimes(3);
+
+		spies.invalidateNextPromptSuggestion.mockClear();
+		const imagePaste = editor.onPasteImage?.();
+		expect(spies.invalidateNextPromptSuggestion).toHaveBeenCalledTimes(1);
+		imageRead.resolve(null);
+		await imagePaste;
+
+		spies.invalidateNextPromptSuggestion.mockClear();
+		const imagePathPaste = editor.onPasteImagePath?.("/tmp/next-prompt-suggestion-missing-image.png");
+		expect(spies.invalidateNextPromptSuggestion).toHaveBeenCalledTimes(1);
+		await imagePathPaste;
+
+		spies.invalidateNextPromptSuggestion.mockClear();
+		const rawPaste = controller.handleClipboardTextRawPaste();
+		expect(spies.invalidateNextPromptSuggestion).toHaveBeenCalledTimes(1);
+		await rawPaste;
+
+		spies.invalidateNextPromptSuggestion.mockClear();
+		expect(editor.onLargePaste?.("large paste", 1)).toBe(true);
+		expect(spies.invalidateNextPromptSuggestion).toHaveBeenCalledTimes(1);
+		expect(spies.showHookSelector).toHaveBeenCalledTimes(1);
+
+		spies.invalidateNextPromptSuggestion.mockClear();
+		await controller.openExternalEditor();
+		expect(spies.invalidateNextPromptSuggestion).toHaveBeenCalledTimes(1);
+		getEditorCommand.mockRestore();
+	});
+
+	it("keeps a suggestion when the same editor regains focus but invalidates it after focus leaves", async () => {
+		const { InputController, ctx, editor, setFocused, spies } = await createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+
+		editor.onFocusChange?.(false);
+		editor.onFocusChange?.(true);
+		await Promise.resolve();
+
+		expect(spies.invalidateNextPromptSuggestion).not.toHaveBeenCalled();
+
+		editor.onFocusChange?.(false);
+		setFocused(null);
+		await Promise.resolve();
+
+		expect(spies.invalidateNextPromptSuggestion).toHaveBeenCalledTimes(1);
+	});
+
+	it("invalidates enhanced text and image pastes before they mutate the editor", async () => {
+		await Settings.init({ inMemory: true, overrides: { "images.autoResize": false } });
+		const { InputController, ctx, spies } = await createContext();
+		const controller = new InputController(ctx, {
+			readImage: async () => null,
+			readText: async () => "",
+		});
+
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(spies.addInputListener);
+		const pngMime = Buffer.from("image/png", "utf8").toString("base64");
+		const textMime = Buffer.from("text/plain", "utf8").toString("base64");
+		const imagePayload = Buffer.from("not an image", "utf8").toString("base64");
+		const textPayload = Buffer.from("enhanced text", "utf8").toString("base64");
+
+		dispatchInput(listeners, "\x1b]5522;type=read:status=OK\x07");
+		dispatchInput(listeners, `\x1b]5522;type=read:status=DATA:mime=${pngMime};\x07`);
+		dispatchInput(listeners, "\x1b]5522;type=read:status=DONE\x07");
+		dispatchInput(listeners, `\x1b]5522;type=read:status=DATA:mime=${pngMime};${imagePayload}\x07`);
+		dispatchInput(listeners, "\x1b]5522;type=read:status=DONE\x07");
+		await Promise.resolve();
+		dispatchInput(listeners, "\x1b]5522;type=read:status=OK\x07");
+		dispatchInput(listeners, `\x1b]5522;type=read:status=DATA:mime=${textMime};\x07`);
+		dispatchInput(listeners, "\x1b]5522;type=read:status=DONE\x07");
+		dispatchInput(listeners, `\x1b]5522;type=read:status=DATA:mime=${textMime};${textPayload}\x07`);
+		dispatchInput(listeners, "\x1b]5522;type=read:status=DONE\x07");
+		await Promise.resolve();
+
+		expect(spies.invalidateNextPromptSuggestion).toHaveBeenCalledTimes(2);
 	});
 
 	it("registers retry as an editor action and retries the failed turn", async () => {

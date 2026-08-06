@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added contextual next-prompt ghost text to `Editor`; Tab accepts it only while visible and inserts it without submitting, while autocomplete retains precedence.
 ## [17.2.10] - 2026-08-06
 
 ### Fixed

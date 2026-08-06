@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
+import type { NextPromptSuggestionController } from "@oh-my-pi/pi-coding-agent/modes/controllers/next-prompt-suggestion-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -11,9 +12,22 @@ import { TERMINAL } from "@oh-my-pi/pi-tui";
  * loader via `ensureLoadingAnimation`; `agent_end` stops and drops it. The
  * streaming getter is backed by mutable flags the tests drive directly.
  */
-function createContext() {
+function createContext(options?: { flushPendingModelSwitch?: () => Promise<void> }) {
 	const streamState = { isStreaming: false };
 	const loader = { stop: vi.fn() };
+	const ensureLoadingAnimation = vi.fn();
+	let nextPromptSuggestionRevision = 0;
+	const invalidateNextPromptSuggestion = vi.fn(() => {
+		nextPromptSuggestionRevision++;
+	});
+	const requestNextPromptSuggestion = vi.fn();
+	const nextPromptSuggestionController = {
+		get revision() {
+			return nextPromptSuggestionRevision;
+		},
+		invalidate: invalidateNextPromptSuggestion,
+		request: requestNextPromptSuggestion,
+	} as unknown as NextPromptSuggestionController;
 	const ctx = {
 		isInitialized: true,
 		settings: { get: () => false },
@@ -31,10 +45,10 @@ function createContext() {
 		streamingMessage: undefined,
 		statusContainer: { clear: vi.fn(), disposeChildren: vi.fn() },
 		chatContainer: { removeChild: vi.fn() },
-		flushPendingModelSwitch: vi.fn(async () => {}),
+		flushPendingModelSwitch: vi.fn(options?.flushPendingModelSwitch ?? (async () => {})),
 		editor: { getText: () => "" },
 		sessionManager: { getSessionName: () => "test-session" },
-		ensureLoadingAnimation: vi.fn(),
+		ensureLoadingAnimation,
 		ui: { requestRender: vi.fn() },
 		viewSession: { isCompacting: false, getLastAssistantMessage: () => undefined },
 		session: {
@@ -43,15 +57,23 @@ function createContext() {
 			},
 			getToolByName: () => undefined,
 		},
+		nextPromptSuggestionController,
 	} as unknown as InteractiveModeContext;
-	ctx.ensureLoadingAnimation = vi.fn(() => {
+	ensureLoadingAnimation.mockImplementation(() => {
 		ctx.loadingAnimation ??= loader as unknown as typeof ctx.loadingAnimation;
 	});
-	return { ctx, streamState, loader };
+	return {
+		ctx,
+		streamState,
+		loader,
+		invalidateNextPromptSuggestion,
+		requestNextPromptSuggestion,
+		ensureLoadingAnimation,
+	};
 }
 
 const AGENT_START = { type: "agent_start" } as unknown as AgentSessionEvent;
-const AGENT_END = { type: "agent_end", messages: [] } as unknown as AgentSessionEvent;
+const AGENT_END = { type: "agent_end", isTerminal: true, messages: [] } as unknown as AgentSessionEvent;
 
 describe("EventController superseded agent_end", () => {
 	beforeAll(async () => {
@@ -108,6 +130,69 @@ describe("EventController superseded agent_end", () => {
 
 		expect(loader.stop).toHaveBeenCalledTimes(1);
 		expect(ctx.loadingAnimation).toBeUndefined();
+	});
+
+	it("invalidates before the agent-start visual work and requests only after a terminal end finishes", async () => {
+		const finish = Promise.withResolvers<void>();
+		const { ctx, invalidateNextPromptSuggestion, requestNextPromptSuggestion, ensureLoadingAnimation } =
+			createContext({
+				flushPendingModelSwitch: () => finish.promise,
+			});
+		const controller = new EventController(ctx);
+
+		await controller.handleEvent(AGENT_START);
+
+		expect(invalidateNextPromptSuggestion).toHaveBeenCalledTimes(1);
+		expect(invalidateNextPromptSuggestion.mock.invocationCallOrder[0]!).toBeLessThan(
+			ensureLoadingAnimation.mock.invocationCallOrder[0]!,
+		);
+		invalidateNextPromptSuggestion.mockClear();
+
+		const ending = controller.handleEvent(AGENT_END);
+		await Promise.resolve();
+		expect(requestNextPromptSuggestion).not.toHaveBeenCalled();
+
+		finish.resolve();
+		await ending;
+
+		expect(requestNextPromptSuggestion).toHaveBeenCalledTimes(1);
+		expect(requestNextPromptSuggestion).toHaveBeenCalledWith(AGENT_END);
+	});
+
+	it("does not request after an agent_start supersedes an agent_end while it awaits teardown", async () => {
+		const finish = Promise.withResolvers<void>();
+		const { ctx, invalidateNextPromptSuggestion, requestNextPromptSuggestion } = createContext({
+			flushPendingModelSwitch: () => finish.promise,
+		});
+		const controller = new EventController(ctx);
+
+		await controller.handleEvent(AGENT_START);
+		invalidateNextPromptSuggestion.mockClear();
+
+		const ending = controller.handleEvent(AGENT_END);
+		await Promise.resolve();
+		await controller.handleEvent(AGENT_START);
+		finish.resolve();
+		await ending;
+
+		expect(invalidateNextPromptSuggestion).toHaveBeenCalledTimes(1);
+		expect(requestNextPromptSuggestion).not.toHaveBeenCalled();
+	});
+
+	it("does not request when the suggestion controller is invalidated while terminal teardown is pending", async () => {
+		const finish = Promise.withResolvers<void>();
+		const { ctx, invalidateNextPromptSuggestion, requestNextPromptSuggestion } = createContext({
+			flushPendingModelSwitch: () => finish.promise,
+		});
+		const controller = new EventController(ctx);
+
+		const ending = controller.handleEvent(AGENT_END);
+		await Promise.resolve();
+		invalidateNextPromptSuggestion();
+		finish.resolve();
+		await ending;
+
+		expect(requestNextPromptSuggestion).not.toHaveBeenCalled();
 	});
 
 	it("flushes queued command panels at a non-terminal settle", async () => {
