@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `display.showUsageModels` setting (default `true`) that opts out of the "Models with usage data" list in `/usage`, for users who only want the quota bars. Leaving it at the default keeps the existing `/usage` output unchanged.
+
 ## [17.2.10] - 2026-08-06
 
 ### Breaking Changes
