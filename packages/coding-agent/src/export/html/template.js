@@ -567,12 +567,40 @@
       let currentLeafId = leafId;
       let currentTargetId = urlTargetId || leafId;
       let treeRendered = false;
+      const collapsedNodeIds = new Set();
+
+      /**
+       * Drop descendants of collapsed nodes. flatNodes is pre-order, so a node's
+       * parent is always classified before the node itself — one pass, no
+       * per-node ancestor walk (that would be quadratic on deep chains).
+       *
+       * Connector prefixes are left as the layout computed them, so a folded
+       * subtree hides exactly the way a filtered one does.
+       */
+      function hideCollapsedDescendants(flatNodes) {
+        if (collapsedNodeIds.size === 0) return flatNodes;
+        const hiddenIds = new Set();
+        return flatNodes.filter(flatNode => {
+          const parentId = flatNode.node.entry.parentId;
+          if (parentId && (collapsedNodeIds.has(parentId) || hiddenIds.has(parentId))) {
+            hiddenIds.add(flatNode.node.entry.id);
+            return false;
+          }
+          return true;
+        });
+      }
+
+      function toggleTreeNode(entryId) {
+        if (collapsedNodeIds.has(entryId)) collapsedNodeIds.delete(entryId);
+        else collapsedNodeIds.add(entryId);
+        forceTreeRerender();
+      }
 
       function renderTree() {
         const tree = buildTree();
         const activePathIds = buildActivePathIds(currentLeafId);
         const flatNodes = flattenTree(tree, activePathIds);
-        const filtered = filterNodes(flatNodes, currentLeafId);
+        const filtered = filterNodes(hideCollapsedDescendants(flatNodes), currentLeafId);
         const container = document.getElementById('tree-container');
 
         // Full render only on first call or when filter/search changes
@@ -599,12 +627,34 @@
             marker.className = 'tree-marker';
             marker.textContent = isOnPath ? '•' : ' ';
 
+            // The toggle sits beside the path bullet rather than replacing it:
+            // the bullet says "this is your thread", the chevron says "there is
+            // more underneath", and collapsing must not cost you the first.
+            const collapse = document.createElement('button');
+            collapse.className = 'tree-collapse';
+            if (flatNode.node.children.length > 0) {
+              const isCollapsed = collapsedNodeIds.has(entry.id);
+              collapse.textContent = isCollapsed ? '▸' : '▾';
+              collapse.title = isCollapsed ? 'Expand branch' : 'Collapse branch';
+              collapse.setAttribute('aria-label', collapse.title);
+              collapse.setAttribute('aria-expanded', String(!isCollapsed));
+              collapse.addEventListener('click', (event) => {
+                event.stopPropagation();
+                toggleTreeNode(entry.id);
+              });
+            } else {
+              collapse.classList.add('empty');
+              collapse.tabIndex = -1;
+              collapse.setAttribute('aria-hidden', 'true');
+            }
+
             const content = document.createElement('span');
             content.className = 'tree-content';
             content.innerHTML = getTreeNodeDisplayHtml(entry, flatNode.node.label);
 
             div.appendChild(prefixSpan);
             div.appendChild(marker);
+            div.appendChild(collapse);
             div.appendChild(content);
             div.addEventListener('click', () => navigateTo(entry.id));
 
@@ -1255,7 +1305,7 @@
         let html = `
           <div class="header">
             <h1>Session: ${escapeHtml(header?.id || 'unknown')}</h1>
-            <div class="help-bar">T toggle thinking · O toggle tools</div>
+            <div class="help-bar">T toggle thinking · O toggle tools · ▾ collapse a branch</div>
             <div class="header-info">
               <div class="info-item"><span class="info-label">Date:</span><span class="info-value">${header?.timestamp ? new Date(header.timestamp).toLocaleString() : 'unknown'}</span></div>
               <div class="info-item"><span class="info-label">Models:</span><span class="info-value">${globalStats.models.join(', ') || 'unknown'}</span></div>

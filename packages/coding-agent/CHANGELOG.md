@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added collapsible branches to the HTML export's session tree: every node with children gets a ▾/▸ toggle that folds its subtree, alongside the existing active-path bullet.
+
 ## [17.2.9] - 2026-08-05
 
 ### Breaking Changes
