@@ -130,6 +130,8 @@ type ReadUsageRow = {
 	durationMs?: number;
 	ttftMs?: number;
 	timestamp?: number;
+	model?: string;
+	thinkingLevel?: string;
 };
 
 /** Number of code lines to show in collapsed preview mode */
@@ -475,6 +477,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		durationMs?: number,
 		ttftMs?: number,
 		timestamp?: number,
+		model?: string,
+		thinkingLevel?: string,
 	): boolean {
 		const attachedToolCallIds: string[] = [];
 		let anchorId: string | undefined;
@@ -487,7 +491,15 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		for (const toolCallId of attachedToolCallIds) {
 			this.#usageBatchByToolCallId.set(toolCallId, anchorId);
 		}
-		this.#usageRows.set(anchorId, { toolCallIds: attachedToolCallIds, usage, durationMs, ttftMs, timestamp });
+		this.#usageRows.set(anchorId, {
+			toolCallIds: attachedToolCallIds,
+			usage,
+			durationMs,
+			ttftMs,
+			timestamp,
+			model,
+			thinkingLevel,
+		});
 		this.#updateDisplay();
 		return true;
 	}
@@ -684,7 +696,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			lines.push(
 				theme.fg(
 					"dim",
-					`${prefix}${formatUsageRow(usageRow.usage, usageRow.durationMs, usageRow.ttftMs, usageRow.timestamp)}`,
+					`${prefix}${formatUsageRow(usageRow.usage, usageRow.durationMs, usageRow.ttftMs, usageRow.timestamp, usageRow.model, usageRow.thinkingLevel)}`,
 				),
 			);
 		}
@@ -830,7 +842,17 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		if (!usageRow) return;
 		this.addChild(
 			new Text(
-				theme.fg("dim", formatUsageRow(usageRow.usage, usageRow.durationMs, usageRow.ttftMs, usageRow.timestamp)),
+				theme.fg(
+					"dim",
+					formatUsageRow(
+						usageRow.usage,
+						usageRow.durationMs,
+						usageRow.ttftMs,
+						usageRow.timestamp,
+						usageRow.model,
+						usageRow.thinkingLevel,
+					),
+				),
 				3,
 				0,
 			),
