@@ -314,11 +314,7 @@ import {
 	queueChipText,
 	toRestoredQueuedMessage,
 } from "./queued-messages";
-import {
-	formatRetryFallbackSelector,
-	parseRetryFallbackSelector,
-	type RetryFallbackSelector,
-} from "./retry-fallback-chains";
+import { parseRetryFallbackSelector } from "./retry-fallback-chains";
 import { type AdvisorStats, SessionAdvisors, type SessionAdvisorsHost } from "./session-advisors";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getRestorableSessionModels } from "./session-context";
