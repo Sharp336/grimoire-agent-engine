@@ -56,10 +56,9 @@ Inside a running session, the `/computer` slash command (`/computer`, `/computer
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `computer.enabled` | `false` | Register the essential `computer` tool. |
-| `computer.backend` | `auto` | `auto` or `native`. Both require a native backend; neither falls back to browser or software automation. |
 | `computer.display` | `all` | Composite every active display, or select one numeric native display ID. |
-| `computer.maxWidth` | `1920` | Maximum composite screenshot width in pixels. Coordinate-safe transports cap the effective width at `1280`. |
-| `computer.maxHeight` | `1200` | Maximum composite screenshot height in pixels. Coordinate-safe transports cap the effective height at `896`. |
+| `computer.maxWidth` | `3840` | Maximum composite screenshot width in pixels. Coordinate-safe transports cap the effective width at `1280`. |
+| `computer.maxHeight` | `2400` | Maximum composite screenshot height in pixels. Coordinate-safe transports cap the effective height at `896`. |
 
 Image transports that cannot preserve original detail (GitHub Copilot Responses, xAI OAuth) cap the effective width at `1280` and effective height at `896`. Claude-family models use the same cap as a compatibility fallback. Other providers retain the configured limits.
 

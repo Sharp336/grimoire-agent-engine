@@ -1,7 +1,7 @@
 ---
 title: Built-in Tools
 description: The inventory of tools the agent can call — files, search, execution, web, agents, memory, and media — and where each is documented.
-coverage: C
+coverage: B
 ---
 
 Every `omp` session gives the agent a set of built-in tools: callable operations for reading and editing files, running code, searching the web, spawning subagents, and more. You never call tools directly, but knowing what exists helps you phrase requests and understand what the agent is doing. Individual tools can be toggled or gated through settings (for example `bash.enabled`, `lsp.enabled`, `debug.enabled`, `computer.enabled`); see [Settings](/oh-my-pi/configuration/settings/).
@@ -21,6 +21,10 @@ Every `omp` session gives the agent a set of built-in tools: callable operations
 - **ast_grep** — Structural code search over supported source files using AST patterns with metavariables. See [Code intelligence](/oh-my-pi/features/code-intelligence/).
 - **lsp** — Queries language servers for diagnostics, definitions, references, hover, symbols, renames, and code actions. See [Code intelligence](/oh-my-pi/features/code-intelligence/).
 
+:::note
+Legacy tool aliases `search` and `find` still resolve to `grep` and `glob`.
+:::
+
 ## Code execution
 
 - **bash** — Executes a shell command in the session workspace, with optional PTY or background-job handling. See [Code execution](/oh-my-pi/features/code-execution/).
@@ -34,12 +38,30 @@ Every `omp` session gives the agent a set of built-in tools: callable operations
 - **browser** — Opens, reuses, and scripts browser tabs against headless Chromium or CDP-attached apps. See [Browser](/oh-my-pi/features/browser/).
 - **github** — Dispatches GitHub CLI operations for repositories, issues, pull requests, search, and Actions run watching. See [GitHub](/oh-my-pi/features/github/).
 
+## Security
+
+- **security_scan** — Plans and runs OMP-native security reviews, validates findings, and interacts with Codex Security cloud scans. Gated by `security.enabled`. See [Security](/oh-my-pi/features/security/).
+
 ## Agents and coordination
 
 - **task** — Spawns subagents, one per call or as a `tasks[]` batch; with async enabled, spawns run in the background. See [Subagents](/oh-my-pi/features/subagents/).
 - **hub** — The agent-coordination surface: peer messaging, background-job control, and supervision of shared long-running processes. See [Collaboration](/oh-my-pi/features/collab/).
 - **ask** — Prompts you interactively for option-picker or free-form answers when the agent needs a decision.
 - **todo** — Maintains the session todo list you see in the UI, one mutation per call.
+- **vibe_spawn** — Starts a persistent `fast` or `good` worker session with a self-contained brief; the turn result arrives when the worker finishes.
+- **vibe_send** — Sends a message to a worker session; steers it mid-turn or runs as its next turn.
+- **vibe_wait** — Blocks until a worker session finishes its turn, with an optional timeout window.
+- **vibe_kill** — Terminates a worker session.
+- **vibe_list** — Lists worker sessions and their states.
+
+Available only while `/vibe` mode is active. See [Vibe mode](/oh-my-pi/features/vibe-mode/).
+
+## Hidden and gated tools
+
+Two tools exist but stay out of the normal toolset, appearing only in their respective contexts:
+
+- **yield** — Submits the agent's final result; the subagent result channel. See [Subagents](/oh-my-pi/features/subagents/).
+- **goal** — Manages the active goal-mode objective. See [Goal mode](/oh-my-pi/modes/goal-mode/).
 
 ## Memory and skills
 

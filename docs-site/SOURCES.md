@@ -53,6 +53,12 @@ Format: `page → sources` (repo-relative paths).
 - `features/voice.md` → `docs/tools/tts.md`, `packages/coding-agent/src/commands/say.ts`, `docs/settings.md` (stt/tts groups)
 - `features/computer-use.md` → `docs/computer-use.md`, `docs/tools/computer.md`
 - `features/stats.md` → `docs/user-facing-packages.md`, `packages/stats/src/index.ts`
+- `features/ssh.md` → `packages/coding-agent/src/ssh/`, `packages/coding-agent/src/commands/ssh.ts`, `packages/coding-agent/src/cli/ssh-cli.ts`, `packages/coding-agent/src/internal-urls/ssh-protocol.ts`, `docs/tools/read.md` (ssh://), `docs/tools/glob.md`
+- `features/security.md` → `packages/coding-agent/src/security/`, `packages/coding-agent/src/tools/security-scan.ts`, `packages/coding-agent/src/slash-commands/builtin-registry.ts` (/security), `docs/tools/security_scan.md`
+- `features/cleanse.md` → `packages/coding-agent/src/cleanse/`, `packages/coding-agent/src/commands/cleanse.ts`, `packages/coding-agent/src/cli/cleanse-cli.ts`
+- `features/live-voice.md` → `packages/coding-agent/src/live/`, `packages/coding-agent/src/slash-commands/builtin-registry.ts` (/live), `docs/keybindings.md` (`app.live.toggle`)
+- `features/autoresearch.md` → `packages/coding-agent/src/autoresearch/`, `docs/session.md` (autoresearch-control), `docs/environment-variables.md` (`OMP_AUTORESEARCH_DB_DIR`)
+- `features/memory.md` → `docs/memory.md`, `docs/mnemosyne-memory-backend.md`, `docs/tools/memory_edit.md`, `docs/tools/recall.md`, `docs/tools/retain.md`, `docs/tools/reflect.md`, `packages/coding-agent/src/autolearn/` (managed skills)
 
 ## Extending
 
@@ -69,3 +75,22 @@ Format: `page → sources` (repo-relative paths).
 - `reference/cli.md` → `packages/coding-agent/src/cli-commands.ts`, `packages/coding-agent/src/commands/*.ts`, `packages/coding-agent/src/cli/args.ts`
 - `reference/slash-commands.md` → `docs/slash-command-internals.md`, `packages/coding-agent/src/slash-commands/available-commands.ts`, `packages/coding-agent/src/slash-commands/builtin-registry.ts`
 - `reference/configuration.md` → `docs/settings.md` (Settings catalog)
+- `reference/settings/general.md` → `packages/coding-agent/src/config/settings-schema.ts` (General section), `docs/settings.md`
+- `reference/settings/tasks.md` → `packages/coding-agent/src/config/settings-schema.ts` (Tasks section), `packages/coding-agent/src/task/`, `packages/coding-agent/src/goals/`, `packages/coding-agent/src/plan-mode/`, `packages/coding-agent/src/discovery/` (skills/commands sources)
+
+## Guides
+
+- `guides/steering-the-agent.md` → `configuration/context-files.md`, `configuration/system-prompt.md`, `features/stream-rules.md`, `features/magic-keywords.md`, `extending/skills.md`, `docs/rulebook-matching-pipeline.md`, `docs/ttsr-injection-lifecycle.md`, `docs/system-prompt-customization.md`, `packages/coding-agent/src/modes/turn-budget.ts`
+- `guides/workflow-recipes.md` → `modes/*.md`, `features/*.md` (code-review, atomic-commits, github, subagents, security, cleanse, autoresearch), `packages/coding-agent/src/extensibility/custom-commands/bundled/review/`, `docs/tools/security_scan.md`
+- `guides/multi-agent.md` → `packages/coding-agent/src/task/`, `packages/coding-agent/src/registry/`, `packages/coding-agent/src/vibe/`, `packages/coding-agent/src/advisor/`, `packages/coding-agent/src/collab/`, `packages/swarm-extension/README.md`, `docs/tools/task.md`, `docs/tools/hub.md`
+- `guides/automation-headless.md` → `packages/coding-agent/src/modes/rpc/`, `packages/coding-agent/src/modes/print-mode.ts`, `packages/coding-agent/src/sdk.ts`, `python/omp-rpc/`, `python/robomp/`, `docs/rpc.md`, `extending/hooks.md`
+- `guides/choosing-extension-points.md` → `extending/{skills,extensions,hooks,custom-tools,plugins,mcp,sdk}.md`, `docs/extension-loading.md`, `docs/custom-tools.md`, `docs/marketplace.md`, `docs/slash-command-internals.md`
+- `guides/internal-urls.md` → `packages/coding-agent/src/internal-urls/`, `docs/tools/read.md`, `docs/blob-artifact-architecture.md`
+- `guides/architecture.md` → `packages/*/README.md`, `crates/*/Cargo.toml`, `python/*/README.md`, `docs/user-facing-packages.md`, `docs/native-crates.md`
+
+## Modes
+
+- `modes/plan-mode.md` → `packages/coding-agent/src/plan-mode/`, `packages/coding-agent/src/modes/controllers/`
+- `modes/goal-mode.md` → `packages/coding-agent/src/goals/`, `packages/coding-agent/src/modes/controllers/`
+- `modes/loop-mode.md` → `packages/coding-agent/src/modes/loop-limit.ts`
+- `modes/queue-mode.md` → `packages/coding-agent/src/modes/queue-input.ts`, `packages/coding-agent/src/slash-commands/builtin-registry.ts` (/queue)

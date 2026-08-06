@@ -1,7 +1,7 @@
 ---
 title: Settings — Generation
 description: Sampling, thinking budgets, provider tiers, and retry/fallback chains.
-coverage: B
+coverage: A
 sidebar:
   label: Settings — Generation
   order: 1
@@ -76,6 +76,9 @@ retry:
 | `retry.baseDelayMs` | number | `500` | Initial backoff. |
 | `retry.maxDelayMs` | number | `300000` | Backoff ceiling (5 min). |
 | `retry.modelFallback` | boolean | `true` | Fall back to another model when one is unavailable. |
+| `retry.usageAwareFallback` | boolean | `false` | Use reliable coding-plan quota reports to prefer same-provider accounts, then configured fallback models, before a hard usage limit. Ordinary configured API keys are excluded. |
+| `retry.usageReservePct` | number | `10` | Treat a coding-plan model as near its limit below this remaining percentage. Unknown or unmapped usage keeps the primary model. |
+| `retry.usageReservePolicy` | enum | `confirm` | What to do when every same-provider coding-plan account is inside the reserve margin: `confirm` keeps interactive sessions on the primary until confirmed (background agents auto-fallback), `auto` always selects the next eligible configured fallback, `fail-closed` does not spend reserve quota or select a fallback. |
 | `retry.fallbackChains` | record | `{}` | Maps roles, model selectors, or `provider/*` wildcards to ordered fallback selectors. Keys containing `/` are model-oriented and win over roles: `provider/model-id` matches that exact model, `provider/*` matches every model of the provider. A `provider/*` *entry* keeps the failing model's id and swaps the provider. The `default` chain covers every assigned role without its own chain. Unknown models/providers or malformed chains are reported as config warnings at startup. |
 | `retry.fallbackRevertPolicy` | enum | `cooldown-expiry` | One of `cooldown-expiry`, `never`. `cooldown-expiry` returns to the primary model once its suppression window ends; `never` stays on the fallback until switched manually. |
 

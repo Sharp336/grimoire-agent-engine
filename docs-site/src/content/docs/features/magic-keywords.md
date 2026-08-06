@@ -38,6 +38,25 @@ Matching is deliberate so source code and paths do not accidentally change agent
 - The visible word remains in the user message; hidden notices are non-displayed custom messages attributed to the user.
 - The instruction applies only to the turn containing the keyword.
 
+## Per-turn output budget (+Nk)
+
+A standalone `+N` token in the prompt sets a per-turn output-token budget. It is parsed at turn start in the same path as magic keywords, and the token stays visible in the message.
+
+```text
+be exhaustive +500k please
+```
+
+| Form | Budget |
+| --- | --- |
+| `+N` | `N` output tokens |
+| `+Nk` | `N × 1,000` output tokens |
+| `+Nm` | `N × 1,000,000` output tokens |
+| trailing `!` (`+500k!`) | Enforces the ceiling instead of advising it |
+
+`N` is an integer or decimal (`+1.5k`), the `k`/`m` suffix is case-insensitive, and the token must be bounded by whitespace or the start/end of the prompt — so prices, version strings, and `c++` do not trigger it. The first match in the prompt wins; `+0` is rejected and negative values never match.
+
+The budget is surfaced to the eval `budget` helper as `total`, `spent`, and `hard`; spend counts the turn's model output plus output from eval-spawned subagents. By default the budget is advisory — the model self-limits against `budget.remaining()`. A trailing `!` makes it a hard ceiling: once the turn's spend reaches `total`, eval's `agent()` refuses to spawn further subagents until the ceiling is raised or dropped. The budget applies only to the turn containing the token; a turn without a directive starts with no ceiling.
+
 ## Configuration
 
 Open `/settings` and use **Interaction → Magic Keywords**, or change the settings from a shell:

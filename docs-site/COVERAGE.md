@@ -9,14 +9,14 @@ frontmatter when a ranking changes. Source map: `SOURCES.md`.
 - **B — Medium**: solid guide coverage of primary workflows; secondary detail omitted.
 - **C — Low**: sketch; meaningful documented surface missing.
 
-## A (18)
+## A (36)
 
-`configuration/settings` · `configuration/environment-variables` · `configuration/keybindings` · `configuration/themes` · `configuration/context-files` · `configuration/system-prompt` · `configuration/approvals` · `models/providers` · `features/compaction` · `features/collab` · `features/computer-use` · `features/magic-keywords` · `features/vibe-mode` · `extending/hooks` · `extending/custom-tools` · `getting-started/installation` · `reference/cli` · `reference/slash-commands`
+`configuration/approvals` · `configuration/context-files` · `configuration/environment-variables` · `configuration/keybindings` · `configuration/settings` · `configuration/system-prompt` · `configuration/themes` · `extending/custom-tools` · `extending/hooks` · `features/collab` · `features/compaction` · `features/computer-use` · `features/magic-keywords` · `features/magic-orchestrate` · `features/magic-ultrathink` · `features/magic-workflowz` · `features/vibe-mode` · `getting-started/installation` · `guides/internal-urls` · `models/providers` · `modes/goal-mode` · `modes/loop-mode` · `modes/plan-mode` · `modes/queue-mode` · `reference/cli` · `reference/configuration` · `reference/settings/context` · `reference/settings/general` · `reference/settings/generation` · `reference/settings/interaction` · `reference/settings/interface` · `reference/settings/models` · `reference/settings/providers` · `reference/settings/tasks` · `reference/settings/tools` · `reference/slash-commands`
 
-## B (27)
+## B (38)
 
-`getting-started/quickstart` · `getting-started/first-session` · `models/model-roles` · `models/local-models` · `features/sessions` · `features/memory` · `features/advisor` · `features/stats` · `features/code-execution` · `features/code-intelligence` · `features/debugging` · `features/subagents` · `features/code-review` · `features/merge-conflicts` · `features/atomic-commits` · `features/github` · `features/editor-integration` · `features/browser` · `features/web-search` · `features/stream-rules` · `features/voice` · `extending/extensions` · `extending/skills` · `extending/mcp` · `extending/plugins` · `extending/sdk` · `reference/configuration`
+`extending/extensions` · `extending/mcp` · `extending/plugins` · `extending/sdk` · `extending/skills` · `features/advisor` · `features/atomic-commits` · `features/autoresearch` · `features/browser` · `features/cleanse` · `features/code-execution` · `features/code-intelligence` · `features/code-review` · `features/debugging` · `features/editor-integration` · `features/github` · `features/live-voice` · `features/memory` · `features/merge-conflicts` · `features/security` · `features/sessions` · `features/ssh` · `features/stats` · `features/stream-rules` · `features/subagents` · `features/tools` · `features/voice` · `features/web-search` · `getting-started/first-session` · `getting-started/quickstart` · `guides/architecture` · `guides/automation-headless` · `guides/choosing-extension-points` · `guides/multi-agent` · `guides/steering-the-agent` · `guides/workflow-recipes` · `models/local-models` · `models/model-roles`
 
-## C (1)
+## C (0)
 
-`features/tools` — intentional one-line-per-tool index; per-tool parameter detail lives in `docs/tools/*.md`. Promote to B by adding a short parameters block per high-traffic tool (bash, read, edit, write, grep, glob, task).
+(none)

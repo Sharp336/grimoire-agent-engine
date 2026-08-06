@@ -108,11 +108,20 @@ Mode-toggling commands — each opens its own page for full usage and subcommand
 
 `/ssh` subcommands: `add <name> --host <host> [--user <user>] [--port <port>] [--key <keyPath>]`, `list`, `remove <name> [--scope project|user]`, `help`.
 
+## Security
+
+| Command | Description | Usage |
+| --- | --- | --- |
+| [`/security`](/oh-my-pi/features/security/) | Plan, run, inspect, import, and compare OMP-native security scans | `/security <subcommand>` |
+
+`/security` subcommands: `plan` (create an immutable security scan plan), `scan` (start a planned or newly planned native scan), `status` (show native scan operation status), `cancel` (cancel a running native scan), `scans` (list stored project security scans), `show` (render a scan or `security://` resource), `import` (import SARIF or a Codex Security bundle), `export` (export a canonical bundle, SARIF, or report), `validate` (validate one finding with OMP-native tools), `compare` (compare finding lineage across two scans), `disposition` (set a finding disposition with rationale).
+
 ## Session lifecycle
 
 | Command | Description | Usage |
 | --- | --- | --- |
-| `/new` _(alias `/clear`)_ | Start a new session | `/new` |
+| `/new` | Start a new session | `/new` |
+| `/clear` | Clear the conversation context in place, keeping the session | `/clear` |
 | `/fresh` | Reset provider stream state without changing the local transcript | `/fresh` |
 | `/drop` | Delete the current session and start a new one | `/drop` |
 | `/compact` | Manually compact the session context | `/compact [<mode>] [focus]` |

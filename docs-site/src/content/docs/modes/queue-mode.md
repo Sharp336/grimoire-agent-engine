@@ -16,6 +16,27 @@ Use it when the agent is mid-turn on a long task and you realize what you want n
 
 The queued message is held in the session's input controller until the agent yields. The status line shows a `Queued` indicator while one is pending.
 
+## Composer shorthand
+
+`/queue` is not required: a prompt that starts with `->` or `=>` is queued the same way, with the rest of the prompt as the message body.
+
+```text
+-> also rename getUserById to fetchUser while you're at it
+```
+
+The editor highlights the shorthand and any recognized list markers while you type. The composer and `/queue` share the same delivery path — see [Slash Commands](/oh-my-pi/reference/slash-commands/) for the full command reference.
+
+A sequential enumerated list composes multiple queued messages from one prompt. Each item becomes its own queued message, delivered in order after the current turn yields:
+
+```text
+=> summarize the PR feedback and propose a plan:
+1. list the blocking issues
+2. draft a fix for each one
+3. flag anything that needs product input
+```
+
+Items use numeric (`1.`), alphabetic (`a.`), or Roman-numeral (`i.`) markers with `.` or `)` and must count up by one. Lines that are not list items — including indented lines — stay attached to the preceding item as continuation lines, and a trailing marker with no content is dropped. If the markers are not sequential (for example `1.` followed by `3.`), mix letter case, or mix punctuation, the prompt is not treated as a list and is queued as a single message.
+
 ## How queued messages are delivered
 
 - Queued messages are delivered as the next user prompt, not as a hidden injection or a follow-up — same path as a manually-typed prompt that arrives right after a yield.

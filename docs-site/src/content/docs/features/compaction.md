@@ -60,7 +60,7 @@ Defaults from `settings-schema.ts`:
 | --- | --- | --- |
 | `compaction.enabled` | `true` | Master switch for automatic compaction. |
 | `compaction.strategy` | `snapcompact` | `context-full`, `handoff`, `shake`, or `off` are also supported. |
-| `compaction.reserveTokens` | `16384` | Tokens reserved for output and overhead when computing the threshold. |
+| `compaction.reserveTokens` | unset | Tokens reserved for output and overhead when computing the threshold. When unset, the effective reserve is the larger of `16384` and 15% of the context window. |
 | `compaction.keepRecentTokens` | `20000` | Tokens kept fresh on the most recent side of the cut. |
 | `compaction.thresholdPercent` | `-1` | Override as a percentage of context window. |
 | `compaction.thresholdTokens` | `-1` | Override as an absolute token count. With no positive override the threshold is `contextWindow - max(15% of contextWindow, reserveTokens)`. |

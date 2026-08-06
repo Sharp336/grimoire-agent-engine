@@ -83,6 +83,9 @@ export default defineConfig({
 						{ label: 'Compaction', slug: 'features/compaction' },
 						{ label: 'Code Review', slug: 'features/code-review' },
 						{ label: 'Atomic Commits', slug: 'features/atomic-commits' },
+						{ label: 'Security Scanning', slug: 'features/security' },
+						{ label: 'Cleanse', slug: 'features/cleanse' },
+						{ label: 'Auto-research', slug: 'features/autoresearch' },
 						{ label: 'Magic Keywords', slug: 'features/magic-keywords' },
 						{ label: 'ultrathink', slug: 'features/magic-ultrathink' },
 						{ label: 'orchestrate', slug: 'features/magic-orchestrate' },
@@ -110,7 +113,9 @@ export default defineConfig({
 						{ label: 'Web Search & Reading', slug: 'features/web-search' },
 						{ label: 'Browser & App Automation', slug: 'features/browser' },
 						{ label: 'Computer Use', slug: 'features/computer-use' },
+						{ label: 'SSH Remote Hosts', slug: 'features/ssh' },
 						{ label: 'Voice (STT/TTS)', slug: 'features/voice' },
+						{ label: 'Live Voice', slug: 'features/live-voice' },
 						{ label: 'Usage Statistics', slug: 'features/stats' },
 						{ label: 'The Advisor', slug: 'features/advisor' },
 					],
@@ -128,6 +133,18 @@ export default defineConfig({
 					],
 				},
 				{
+					label: 'Guides',
+					items: [
+						{ label: 'Steering the Agent', slug: 'guides/steering-the-agent' },
+						{ label: 'Workflow Recipes', slug: 'guides/workflow-recipes' },
+						{ label: 'Multi-Agent Workflows', slug: 'guides/multi-agent' },
+						{ label: 'Automation & Headless', slug: 'guides/automation-headless' },
+						{ label: 'Choosing Extension Points', slug: 'guides/choosing-extension-points' },
+						{ label: 'Internal URLs', slug: 'guides/internal-urls' },
+						{ label: 'Architecture', slug: 'guides/architecture' },
+					],
+				},
+				{
 					label: 'Reference',
 					items: [
 						{ label: 'CLI Reference', slug: 'reference/cli' },
@@ -140,6 +157,8 @@ export default defineConfig({
 						{ label: 'Settings — Interface', slug: 'reference/settings/interface' },
 						{ label: 'Settings — Interaction', slug: 'reference/settings/interaction' },
 						{ label: 'Settings — Providers', slug: 'reference/settings/providers' },
+						{ label: 'Settings — Tasks', slug: 'reference/settings/tasks' },
+						{ label: 'Settings — General', slug: 'reference/settings/general' },
 					],
 				},
 				{

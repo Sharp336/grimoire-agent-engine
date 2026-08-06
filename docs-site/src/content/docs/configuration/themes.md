@@ -54,7 +54,7 @@ Top-level fields:
 | `colors` | yes | Every token listed in [Required color tokens](#required-color-tokens) must be present |
 | `vars` | no | Named color variables reused inside `colors` |
 | `export` | no | HTML export colors (`pageBg`, `cardBg`, `infoBg`) |
-| `symbols` | no | Symbol preset and per-key overrides (see [Symbols and box drawing](#symbols-and-box-drawing)) |
+| `symbols` | no | Symbol preset and per-key overrides (see [Symbols](#symbols) and [Box-drawing borders](#box-drawing-borders)) |
 
 Color values accept any of:
 

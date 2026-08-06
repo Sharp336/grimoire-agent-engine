@@ -226,6 +226,7 @@ OAuth host chain: `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `https://auth
 | `ZAI_API_KEY` | z.ai search provider (also checks stored OAuth in `agent.db`) |
 | `OPENAI_API_KEY` / Codex OAuth in DB | Codex search provider availability/auth |
 | `PI_CODEX_WEB_SEARCH_MODEL` | Codex search provider model override |
+| `GEMINI_SEARCH_MODEL` | Gemini search provider model override; wins over `providers.webSearchGeminiModel` (default `gemini-2.5-flash`) |
 | `MOONSHOT_SEARCH_API_KEY` / `KIMI_SEARCH_API_KEY` | Kimi/Moonshot search provider env auth |
 | `MOONSHOT_SEARCH_BASE_URL` / `KIMI_SEARCH_BASE_URL` | Kimi/Moonshot search endpoint override |
 | `KAGI_API_KEY` | Kagi search provider |
@@ -235,6 +236,8 @@ OAuth host chain: `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `https://auth
 | `SEARXNG_BASIC_USERNAME`, `SEARXNG_BASIC_PASSWORD` | SearXNG HTTP Basic Auth credentials |
 
 SearXNG also reads the equivalent `searxng.endpoint`, `searxng.token`, `searxng.basicUsername`, and `searxng.basicPassword` settings from `~/.omp/agent/config.yml`; the environment variables are fallbacks.
+
+The Gemini search provider resolves its model as `GEMINI_SEARCH_MODEL` → `providers.webSearchGeminiModel` → `gemini-2.5-flash`. See [Settings — Providers](/oh-my-pi/reference/settings/providers/) and [Web search](/oh-my-pi/features/web-search/).
 
 ### Anthropic web search auth chain
 
@@ -320,10 +323,14 @@ If `BUN_ENV=test` or `NODE_ENV=test`, Python availability checks are treated as 
 
 | Variable | Behavior |
 | --- | --- |
+| `OMP_PROFILE` | Named profile for isolated agent state; same as `--profile <name>`. Canonical variable: takes precedence over `PI_PROFILE`, and an explicitly empty value selects the default profile. Profile state lives under `<config-root>/profiles/<name>/` (e.g. `~/.omp/profiles/<name>/agent`). Names must match `^[a-z0-9][a-z0-9._-]{0,63}$`; an invalid value fails at startup with a clean error |
+| `PI_PROFILE` | Legacy compatibility alias for `OMP_PROFILE`; consulted only when `OMP_PROFILE` is unset |
 | `PI_CONFIG_DIR` | Config root dirname under home (default `.omp`) |
 | `PI_CODING_AGENT_DIR` | Full override for the agent directory (default `~/<PI_CONFIG_DIR or .omp>/agent`) |
 | `PI_CONFIG_FILES` | Platform path-list of settings overlays (`:` on Unix, `;` on Windows); loaded in order before explicit `--config` overlays |
 | `PWD` | Used when matching the canonical current working directory in path helpers |
+
+A named profile relocates the entire OMP user base — settings, auth, sessions, and MCP config — under the profile directory. See [Settings](/oh-my-pi/configuration/settings/) and [MCP servers](/oh-my-pi/extending/mcp/).
 
 ## Shell and tool execution environment
 

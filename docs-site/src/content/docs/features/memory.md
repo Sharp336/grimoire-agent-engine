@@ -70,6 +70,44 @@ replacement_id: "<id of the memory that supersedes this one>"
 
 `update` replaces memory text and/or importance (`importance` is clamped to `0..1`). `forget` hard-deletes a memory. `invalidate` softly supersedes one and may point at a `replacement_id`. The `id` must come from a previous `recall` — the tool does not search by content. Available only when `memory.backend == "mnemopi"`.
 
+## Auto-learn and managed skills
+
+Auto-learn is an experimental companion to memory. With `autolearn.enabled: true`, after a substantive turn omp nudges the agent — or, with `autolearn.autoContinue`, runs one private capture turn — to codify anything reusable from that turn as a managed skill, and to store durable facts with the `learn` tool when a memory backend is active.
+
+A turn counts as substantive when it used at least `autolearn.minToolCalls` tools (default 5), did not start in goal mode, was not in plan mode, and was not aborted. The capture turn decides what is worth keeping: a repeatable procedure becomes a managed skill, a durable fact, convention, or preference goes to memory — and then it stops without touching further work.
+
+| Setting | Type | Default | Description |
+| --- | --- | --- | --- |
+| `autolearn.enabled` | boolean | `false` | Master switch. Enables the `manage_skill` tool (and `learn` when a memory backend is active) and the post-stop capture behavior. |
+| `autolearn.autoContinue` | boolean | `false` | Auto-run one private capture turn at stop (uses extra tokens). Off means only the standing auto-learn guidance remains in the system prompt. |
+| `autolearn.minToolCalls` | number | `5` | Only capture after a turn that used at least this many tools. |
+
+These keys are listed in [Settings — Context](/oh-my-pi/reference/settings/context/).
+
+### Managed skills
+
+Managed skills are `SKILL.md` files kept in an isolated directory, `~/.omp/agent/managed-skills`. They are surfaced to the agent in future sessions like any other skill, and they are the only skills the agent may write — user-authored skills under `~/.omp/agent/skills` and `.omp/skills` are never edited by it. Skill names are lowercase kebab-case, and a generated skill is capped at 64,000 bytes.
+
+The `manage_skill` tool creates, updates, and deletes managed skills (`action: create | update | delete`, with `description` and `body` required for create/update). It requires write approval and is available when `autolearn.enabled` is on.
+
+### The `learn` tool
+
+`learn` persists a self-contained lesson to the active memory backend and can mint or enhance a managed skill in the same call:
+
+```yaml
+memory: "Project uses Bun, not Node, for the test runner."
+context: "Discovered while debugging the CI matrix."
+skill:
+  action: create
+  name: bun-test-runner
+  description: "Run the project test suite with Bun"
+  body: "…"
+```
+
+It is gated behind `autolearn.enabled` plus a live memory backend — `hindsight`, `mnemopi`, or `local`. A call that writes (`skill` present, or the `local` backend) requires approval.
+
+Tool availability is decided at session start: enable the `autolearn.*` settings, then start a new session. A mid-session disable is honored, but a mid-session enable does not retroactively install the tools.
+
 ## The `/memory` slash command
 
 | Subcommand | Effect |

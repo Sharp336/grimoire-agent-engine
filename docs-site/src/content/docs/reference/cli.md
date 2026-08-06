@@ -31,6 +31,9 @@ These flags apply to the default launch command (`omp`, `omp -p`, `omp acp`). Va
 | `--plan <model>` | Plan model for architectural planning (or `PI_PLAN_MODEL` env) |
 | `--provider <provider>` | Provider to use (legacy; prefer `--model`) |
 | `--api-key <key>` | API key (defaults to env vars) |
+| `--service-tier <tier>` | Service-tier override for OpenAI-family models: `none`, `auto`, `default`, `flex`, `scale`, or `priority` (default: `tier.openai` setting; not persisted; `none` omits it) |
+| `--provider-session-id <id>` | Force the provider session id (provider session/routing headers and sticky credential selection) |
+| `--prompt-cache-key <key>` | Override the provider prompt-cache key (sent as `prompt_cache_key` where supported; independent of the session id) |
 | `--models <list>` | Comma-separated model patterns for Ctrl+P cycling |
 | `--thinking <level>` | Set thinking level (see `--help` for valid levels) |
 | `--hide-thinking` | Hide thinking blocks in TUI output (display only, does not disable model thinking) |
@@ -51,6 +54,7 @@ These flags apply to the default launch command (`omp`, `omp -p`, `omp acp`). Va
 | `-c, --continue` | Continue previous session |
 | `-r, --resume [session]` | Resume a session (by ID prefix, path, or picker if omitted) |
 | `--session [session]` | Alternate spelling of `--resume` |
+| `--fork <id\|path>` | Start a new session forked from an existing session (id prefix or path); the fork is created in the current cwd/session dir |
 | `--from-claude` | Import a Claude Code session into OMP |
 | `--from-codex` | Import a Codex session into OMP |
 | `--session-dir <dir>` | Directory for session storage and lookup |
@@ -202,6 +206,28 @@ Positional: `models` (required, repeatable) — model selectors (provider/model 
 | `--cache-prefix-bytes <n>` | Stable prefix byte budget for --cache (default: 8192) |
 | `--cache-pairs <n>` | Cold/warm pairs per model for --cache (default: 1) |
 | `--cache-concurrency <n>` | Concurrent cache pairs for --cache; each pair remains sequential (default: 1) |
+
+### browser-relay
+
+Run the local CDP relay that lets the browser tool drive your own Chrome tabs, or install its companion Chrome extension.
+
+```bash
+omp browser-relay install              # write the Chrome extension to ~/.omp/browser-relay/extension
+omp browser-relay                      # serve the relay on the default port
+omp browser-relay -p 9333 --token s3cret
+```
+
+`install` writes the MV3 extension files (manifest, background worker, options page) to `~/.omp/browser-relay/extension` (or `--dir`) and prints the Chrome setup steps: enable Developer mode in `chrome://extensions`, load the folder as an unpacked extension, and run `omp config set browser.relay true`. `serve` (the default action) starts the relay on `http://127.0.0.1:<port>` with the extension endpoint `ws://127.0.0.1:<port>/ext` and waits for the extension to connect. omp starts the relay automatically when the browser tool needs it, so running `serve` manually is only needed for `--token` or `--no-group`. See [Browser & App Automation](/oh-my-pi/features/browser/).
+
+Positional: `action` — `serve` or `install` (default `serve`).
+
+| Flag | Description |
+| --- | --- |
+| `-p, --port <port>` | Port to listen on (default: 9224) |
+| `--token <token>` | Require the extension to present this token |
+| `--dir <dir>` | Extension install directory (install; default `~/.omp/browser-relay/extension`) |
+| `--no-group` | Don't gather controllable tabs into an 'omp' tab group |
+| `-v, --verbose` | Log relay traffic summaries to stderr |
 
 ### cleanse
 

@@ -6,6 +6,8 @@ coverage: B
 
 OMP exposes text-to-speech through a local on-device engine (Kokoro-82M) and an xAI Grok Voice cloud option, and a separate setting group `stt.*` for speech-to-text. The local backend needs no network call after model weights are cached; the cloud backend requires xAI credentials.
 
+For realtime spoken conversation, see [Live voice](/oh-my-pi/features/live-voice/).
+
 The `tts` tool is only registered when `speechgen.enabled` is set. The `omp say` command always uses the local backend.
 
 ## `omp say`
