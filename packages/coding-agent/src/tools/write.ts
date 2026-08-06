@@ -507,8 +507,8 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		// wrapped `[ssh://h/x#ABCD]` can't dodge scheme detection and the tier checks below.
 		const path = unwrapHashlineHeaderPath(rawPath);
 		// xd:// device writes execute the mounted tool — take its approval tier.
-		// The resolution devices (xd://resolve, xd://reject, xd://propose)
-		// finalize a staged, already-previewed action, so they stay at read tier.
+		// Resolution devices finalize an already-authorized flow, so they stay
+		// at read tier.
 		const xdevTarget = parseXdUrl(path);
 		if (xdevTarget) {
 			if (xdevTarget.name === REPORT_ISSUE_DEVICE_NAME) return "write";

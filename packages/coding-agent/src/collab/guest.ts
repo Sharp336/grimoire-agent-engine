@@ -614,6 +614,7 @@ export class CollabGuestLink {
 					id: snap.id,
 					displayName: snap.displayName,
 					kind: snap.kind,
+					inspectOnly: snap.inspectOnly,
 					parentId: snap.parentId,
 					session: null,
 					status: snap.status,
@@ -626,6 +627,7 @@ export class CollabGuestLink {
 				ref.createdAt = snap.createdAt;
 				ref.lastActivity = snap.lastActivity;
 				ref.displayName = snap.displayName;
+				ref.inspectOnly = snap.inspectOnly || undefined;
 			}
 			this.#agentHasTranscript.set(snap.id, snap.hasSessionFile);
 		}

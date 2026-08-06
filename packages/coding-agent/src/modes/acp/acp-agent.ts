@@ -45,6 +45,8 @@ import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { getBlobsDir, isEnoent, logger, type postmortem, VERSION } from "@oh-my-pi/pi-utils";
 import { disableProvider, enableProvider, reset as resetCapabilities } from "../../capability";
 import { Settings } from "../../config/settings";
+import { getCouncilCoordinator } from "../../council/coordinator";
+import { isCouncilTerminalState } from "../../council/state";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
 	type ExtensionUIContext,
@@ -126,6 +128,10 @@ type PromptLifecycleError = Error & { readonly code: "ACP_SESSION_CLOSED" };
 
 type PromptTurnState = {
 	cancelRequested: boolean;
+	finishStarted: boolean;
+	finishResponse: PromptResponse | undefined;
+	finishError: unknown;
+	councilHoldCancellation: PromiseWithResolvers<void>;
 	settled: boolean;
 	/**
 	 * Delivery of streamed assistant `error` chunks this turn (the mapper
@@ -167,6 +173,7 @@ type ManagedSessionRecord = {
 	// `#configureMcpServers` call; drained on reconfigure so a stale in-flight
 	// refresh can never land after a newer configuration's tools.
 	mcpRefreshChain: Promise<void> | undefined;
+	councilRunTask: Promise<void> | undefined;
 	promptTurn: PromptTurnState | undefined;
 	promptQueue: PromptQueueState;
 	liveMessageId: string | undefined;
@@ -215,6 +222,10 @@ type MCPSourceMap = {
 };
 
 type CreateAcpSession = (cwd: string) => Promise<AgentSession>;
+export interface AcpAgentDependencies {
+	executeBuiltinSlashCommand?: typeof executeAcpBuiltinSlashCommand;
+	getCouncilCoordinator?: typeof getCouncilCoordinator;
+}
 
 type AcpSpeechOption = {
 	value: string;
@@ -472,6 +483,8 @@ export class AcpAgent implements Agent {
 	#connection: AgentSideConnection;
 	#initialSession: AgentSession | undefined;
 	#createSession: CreateAcpSession;
+	#executeBuiltinSlashCommand: typeof executeAcpBuiltinSlashCommand;
+	#getCouncilCoordinator: typeof getCouncilCoordinator;
 	#sessions = new Map<string, ManagedSessionRecord>();
 	#disposePromise: Promise<void> | undefined;
 	#cleanupRegistered = false;
@@ -479,10 +492,17 @@ export class AcpAgent implements Agent {
 	#cancelCleanupTimeoutMs = ACP_CANCEL_CLEANUP_TIMEOUT_MS;
 	#blobs = new BlobStore(getBlobsDir());
 
-	constructor(connection: AgentSideConnection, createSession: CreateAcpSession, initialSession?: AgentSession) {
+	constructor(
+		connection: AgentSideConnection,
+		createSession: CreateAcpSession,
+		initialSession?: AgentSession,
+		dependencies: AcpAgentDependencies = {},
+	) {
 		this.#connection = connection;
 		this.#initialSession = initialSession;
 		this.#createSession = createSession;
+		this.#executeBuiltinSlashCommand = dependencies.executeBuiltinSlashCommand ?? executeAcpBuiltinSlashCommand;
+		this.#getCouncilCoordinator = dependencies.getCouncilCoordinator ?? getCouncilCoordinator;
 	}
 
 	setCancelCleanupTimeoutForTesting(timeoutMs: number): void {
@@ -715,9 +735,14 @@ export class AcpAgent implements Agent {
 
 			const converted = this.#convertPromptBlocks(params.prompt);
 			const pendingPrompt = Promise.withResolvers<PromptResponse>();
-			record.promptTurn = {
+			const councilHoldCancellation = Promise.withResolvers<void>();
+			const promptTurn: PromptTurnState = {
 				cancelRequested: false,
 				settled: false,
+				finishStarted: false,
+				finishResponse: undefined,
+				finishError: undefined,
+				councilHoldCancellation,
 				errorTextDelivery: undefined,
 				cleanup: undefined,
 				usageBaseline: this.#cloneUsageStatistics(record.session.sessionManager.getUsageStatistics()),
@@ -726,13 +751,14 @@ export class AcpAgent implements Agent {
 				reject: pendingPrompt.reject,
 				promise: pendingPrompt.promise,
 			};
+			record.promptTurn = promptTurn;
 
-			record.promptTurn.unsubscribe = record.session.subscribe(event => {
-				this.#trackPromptEvent(record, event);
+			promptTurn.unsubscribe = record.session.subscribe(event => {
+				this.#trackPromptEvent(record, promptTurn, event);
 			});
 
-			this.#runPromptOrCommand(record, converted.text, converted.images).catch((error: unknown) => {
-				this.#finishPrompt(record, undefined, error);
+			this.#runPromptOrCommand(record, promptTurn, converted.text, converted.images).catch((error: unknown) => {
+				this.#finishPrompt(record, promptTurn, undefined, error);
 			});
 
 			return await pendingPrompt.promise;
@@ -769,8 +795,8 @@ export class AcpAgent implements Agent {
 		return Object.assign(new Error(message), { code: "ACP_SESSION_CLOSED" as const });
 	}
 
-	#trackPromptEvent(record: ManagedSessionRecord, event: AgentSessionEvent): void {
-		const handling = this.#handlePromptEvent(record, event).catch((error: unknown) => {
+	#trackPromptEvent(record: ManagedSessionRecord, promptTurn: PromptTurnState, event: AgentSessionEvent): void {
+		const handling = this.#handlePromptEvent(record, promptTurn, event).catch((error: unknown) => {
 			logger.warn("ACP prompt event handler failed", { error });
 		});
 		record.promptEventHandlers.add(handling);
@@ -808,21 +834,41 @@ export class AcpAgent implements Agent {
 		}
 	}
 
-	async #runPromptOrCommand(record: ManagedSessionRecord, text: string, images: AgentImageContent[]): Promise<void> {
+	async #runPromptOrCommand(
+		record: ManagedSessionRecord,
+		commandTurn: PromptTurnState,
+		text: string,
+		images: AgentImageContent[],
+	): Promise<void> {
+		const ownsCommandTurn = (): boolean =>
+			record.promptTurn === commandTurn && !commandTurn.cancelRequested && !commandTurn.settled;
 		const skillResult = await this.#tryRunSkillCommand(record, text);
-		if (skillResult) {
+		if (skillResult || !ownsCommandTurn()) {
 			return;
 		}
 
-		const builtinResult = await executeAcpBuiltinSlashCommand(text, {
+		const builtinResult = await this.#executeBuiltinSlashCommand(text, {
 			session: record.session,
 			sessionManager: record.session.sessionManager,
 			settings: record.session.settings,
 			cwd: record.session.sessionManager.getCwd(),
-			output: output => this.#emitCommandOutput(record, output),
-			refreshCommands: () => this.#emitAvailableCommandsUpdate(record),
-			reloadPlugins: () => this.#reloadPluginState(record),
+			output: output => (ownsCommandTurn() ? this.#emitCommandOutput(record, output) : undefined),
+			refreshCommands: () => (ownsCommandTurn() ? this.#emitAvailableCommandsUpdate(record) : undefined),
+			reloadPlugins: () => (ownsCommandTurn() ? this.#reloadPluginState(record) : Promise.resolve()),
+			holdTurn: task => {
+				const held = task.catch((error: unknown) => {
+					logger.warn("ACP council run failed", { error });
+				});
+				if (!ownsCommandTurn()) return;
+				record.councilRunTask = held;
+				void held.then(() => {
+					if (record.councilRunTask === held) {
+						record.councilRunTask = undefined;
+					}
+				});
+			},
 			notifyTitleChanged: async () => {
+				if (!ownsCommandTurn()) return;
 				await this.#connection.sessionUpdate({
 					sessionId: record.session.sessionId,
 					update: {
@@ -833,22 +879,18 @@ export class AcpAgent implements Agent {
 				});
 			},
 			notifyConfigChanged: async () => {
-				await this.#pushConfigOptionUpdate(record);
+				if (ownsCommandTurn()) await this.#pushConfigOptionUpdate(record);
 			},
 		});
+		if (!ownsCommandTurn()) return;
 		if (builtinResult !== false) {
 			if ("prompt" in builtinResult) {
 				await record.session.prompt(builtinResult.prompt, { images });
 				return;
 			}
-			const promptTurn = record.promptTurn;
-			this.#finishPrompt(record, {
+			this.#finishPrompt(record, commandTurn, {
 				stopReason: "end_turn",
-				usage: this.#buildTurnUsage(
-					promptTurn?.usageBaseline ??
-						this.#cloneUsageStatistics(record.session.sessionManager.getUsageStatistics()),
-					record.session.sessionManager.getUsageStatistics(),
-				),
+				usage: this.#buildTurnUsage(commandTurn.usageBaseline, record.session.sessionManager.getUsageStatistics()),
 			});
 			return;
 		}
@@ -860,10 +902,10 @@ export class AcpAgent implements Agent {
 		// an async nested prompt through the extension runtime. Keep the ACP turn
 		// subscribed until those scheduled prompts and their event handlers drain;
 		// only then is `false` proof that the slash command was purely local.
-		if (!agentInvoked) {
+		if (!agentInvoked && ownsCommandTurn()) {
 			await this.#waitForExtensionUserMessages(record, extensionPromptBaseline);
 			await this.#waitForPromptEventHandlers(record);
-			this.#finishPrompt(record, { stopReason: "end_turn" });
+			this.#finishPrompt(record, commandTurn, { stopReason: "end_turn" });
 		}
 	}
 
@@ -910,35 +952,59 @@ export class AcpAgent implements Agent {
 
 	/**
 	 * Transition a still-running turn into cancellation: mark intent, drop the live-event
-	 * subscription, start the bounded `abort()` race, and resolve the ACP prompt response
-	 * with `stopReason: "cancelled"` so the client sees acceptance immediately. The
-	 * returned promise is the cleanup barrier — it resolves when `abort()` completes and
-	 * rejects when the timeout fires. Idempotent: a second call returns the same barrier.
+	 * subscription, cancel any active council, start the bounded `abort()` race, and
+	 * resolve the ACP prompt response with `stopReason: "cancelled"`. The returned
+	 * promise is the cleanup barrier. Idempotent: a second call returns the same barrier.
 	 */
 	#beginCancelCleanup(record: ManagedSessionRecord, promptTurn: PromptTurnState): Promise<void> {
 		if (promptTurn.cleanup) {
 			return promptTurn.cleanup;
 		}
 		promptTurn.cancelRequested = true;
+		promptTurn.councilHoldCancellation.resolve();
 		promptTurn.unsubscribe?.();
-		const cleanup = this.#runCancelCleanup(record, promptTurn);
+		const coordinator = this.#getCouncilCoordinator({
+			session: record.session,
+			toolSession: record.session.getToolSession(),
+			sessionManager: record.session.sessionManager,
+			settings: record.session.settings,
+			modelRegistry: record.session.modelRegistry,
+		});
+		const councilCleanup = coordinator.executionInFlight
+			? coordinator.cancelForSessionTransition()
+			: coordinator.snapshot && !isCouncilTerminalState(coordinator.snapshot.state)
+				? coordinator.cancel().then(() => undefined)
+				: Promise.resolve();
+		void councilCleanup.catch((error: unknown) => {
+			logger.warn("ACP council cancel failed", { error });
+		});
+		record.councilRunTask = undefined;
+		const cleanup = this.#runCancelCleanup(record, promptTurn, councilCleanup);
 		promptTurn.cleanup = cleanup;
-		this.#finishPrompt(record, {
+		this.#finishPrompt(record, promptTurn, {
 			stopReason: "cancelled",
 			usage: this.#buildTurnUsage(promptTurn.usageBaseline, record.session.sessionManager.getUsageStatistics()),
 		});
 		return cleanup;
 	}
 
-	async #runCancelCleanup(record: ManagedSessionRecord, promptTurn: PromptTurnState): Promise<void> {
-		let timer: NodeJS.Timeout | undefined;
-		const timeout = new Promise<never>((_, reject) => {
-			timer = setTimeout(() => reject(new Error("ACP cancel cleanup timed out")), this.#cancelCleanupTimeoutMs);
-		});
+	async #runCancelCleanup(
+		record: ManagedSessionRecord,
+		promptTurn: PromptTurnState,
+		councilCleanup: Promise<void>,
+	): Promise<void> {
+		const timeout = Promise.withResolvers<never>();
+		const timer = setTimeout(
+			() => timeout.reject(new Error("ACP cancel cleanup timed out")),
+			this.#cancelCleanupTimeoutMs,
+		);
 		try {
-			await Promise.race([record.session.abort({ reason: USER_INTERRUPT_LABEL }), timeout]);
+			await Promise.race([
+				Promise.all([record.session.abort({ reason: USER_INTERRUPT_LABEL }), councilCleanup]),
+				timeout.promise,
+			]);
 		} finally {
-			if (timer) clearTimeout(timer);
+			clearTimeout(timer);
 			// Order matters: clear `cleanup` before evicting the slot so the slot-eviction
 			// branch matches what `#finishPrompt` saw if it ran first.
 			promptTurn.cleanup = undefined;
@@ -1157,6 +1223,7 @@ export class AcpAgent implements Agent {
 			liveMessageId: undefined,
 			liveMessageProgress: undefined,
 			toolArgsById: new Map(),
+			councilRunTask: undefined,
 			extensionsConfigured: false,
 			closedError: undefined,
 			promptEventHandlers: new Set(),
@@ -1217,11 +1284,14 @@ export class AcpAgent implements Agent {
 		return storedSession.path;
 	}
 
-	async #handlePromptEvent(record: ManagedSessionRecord, event: AgentSessionEvent): Promise<void> {
-		const promptTurn = record.promptTurn;
-		if (!promptTurn || promptTurn.settled || promptTurn.cancelRequested) {
-			return;
-		}
+	async #handlePromptEvent(
+		record: ManagedSessionRecord,
+		promptTurn: PromptTurnState,
+		event: AgentSessionEvent,
+	): Promise<void> {
+		const ownsPromptTurn = (): boolean =>
+			record.promptTurn === promptTurn && !promptTurn.settled && !promptTurn.cancelRequested;
+		if (!ownsPromptTurn()) return;
 
 		if (event.type === "tool_execution_start" || event.type === "tool_execution_update") {
 			record.toolArgsById.set(event.toolCallId, event.args);
@@ -1260,7 +1330,9 @@ export class AcpAgent implements Agent {
 				promptTurn.errorTextDelivery = prior ? Promise.all([prior, outcome]).then(([a, b]) => a || b) : outcome;
 			}
 			await delivery;
+			if (!ownsPromptTurn()) return;
 		}
+		if (!ownsPromptTurn()) return;
 		if (event.type === "tool_execution_end") {
 			record.toolArgsById.delete(event.toolCallId);
 		}
@@ -1268,12 +1340,16 @@ export class AcpAgent implements Agent {
 
 		if (event.type === "agent_end") {
 			await this.#flushMissedFinalAssistantText(record, event);
+			if (!ownsPromptTurn()) return;
 			await this.#flushUnreportedTurnError(record, event);
+			if (!ownsPromptTurn()) return;
 			await this.#emitEndOfTurnUpdates(record);
+			if (!ownsPromptTurn()) return;
 			await this.#waitForAcpPromptIdle(record);
+			if (!ownsPromptTurn()) return;
 			record.liveMessageId = undefined;
 			record.liveMessageProgress = undefined;
-			this.#finishPrompt(record, {
+			this.#finishPrompt(record, promptTurn, {
 				stopReason: this.#resolveStopReason(event, promptTurn.cancelRequested),
 				usage: this.#buildTurnUsage(promptTurn.usageBaseline, record.session.sessionManager.getUsageStatistics()),
 			});
@@ -1422,23 +1498,60 @@ export class AcpAgent implements Agent {
 		return record.liveMessageProgress;
 	}
 
-	#finishPrompt(record: ManagedSessionRecord, response?: PromptResponse, error?: unknown): void {
-		const promptTurn = record.promptTurn;
-		if (!promptTurn || promptTurn.settled) {
+	#finishPrompt(
+		record: ManagedSessionRecord,
+		promptTurn: PromptTurnState,
+		response?: PromptResponse,
+		error?: unknown,
+	): void {
+		if (record.promptTurn !== promptTurn || promptTurn.settled) {
+			return;
+		}
+		if (
+			response !== undefined &&
+			(response.stopReason === "cancelled" || promptTurn.finishResponse?.stopReason !== "cancelled")
+		) {
+			promptTurn.finishResponse = response;
+		}
+		if (error !== undefined && promptTurn.finishError === undefined) {
+			promptTurn.finishError = error;
+		}
+		if (promptTurn.finishStarted) {
+			return;
+		}
+		promptTurn.finishStarted = true;
+		void this.#settlePromptAfterCouncil(record, promptTurn);
+	}
+
+	async #settlePromptAfterCouncil(record: ManagedSessionRecord, promptTurn: PromptTurnState): Promise<void> {
+		if (record.promptTurn !== promptTurn) return;
+		const held = record.councilRunTask;
+		if (held) {
+			await Promise.race([held, promptTurn.councilHoldCancellation.promise]);
+		}
+		if (record.promptTurn !== promptTurn) return;
+		if (!promptTurn.cancelRequested) {
+			await this.#waitForPromptEventHandlers(record);
+		}
+		if (record.promptTurn !== promptTurn) return;
+		if (record.councilRunTask === held) {
+			record.councilRunTask = undefined;
+		}
+		if (promptTurn.settled || record.promptTurn !== promptTurn) {
 			return;
 		}
 		promptTurn.settled = true;
 		promptTurn.unsubscribe?.();
 		// Keep the slot occupied until cancel cleanup finishes — `#runCancelCleanup`
 		// evicts the slot in its finally block once both flags say it's safe.
-		if (!promptTurn.cleanup && record.promptTurn === promptTurn) {
+		if (!promptTurn.cleanup) {
 			record.promptTurn = undefined;
 		}
-		if (error !== undefined) {
-			promptTurn.reject(error);
+		if (promptTurn.finishError !== undefined) {
+			promptTurn.reject(promptTurn.finishError);
 			return;
 		}
-		promptTurn.resolve(response ?? { stopReason: "end_turn" });
+		promptTurn.resolve(promptTurn.finishResponse ?? { stopReason: "end_turn" });
 	}
 
 	#resolveStopReason(
@@ -2536,6 +2649,7 @@ export class AcpAgent implements Agent {
 
 	async #disposeSessionRecord(record: ManagedSessionRecord, reason?: postmortem.Reason): Promise<void> {
 		record.lifetimeUnsubscribe?.();
+		record.councilRunTask = undefined;
 		if (record.mcpManager) {
 			try {
 				await record.mcpManager.disconnectAll();

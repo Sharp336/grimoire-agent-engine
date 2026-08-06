@@ -118,6 +118,13 @@ export class IrcBus {
 				error: `Agent "${message.to}" was hard-aborted and cannot be messaged or revived. Its transcript remains readable at history://${message.to}.`,
 			};
 		}
+		if (ref.inspectOnly) {
+			return {
+				to: message.to,
+				outcome: "failed",
+				error: `Agent "${message.to}" is inspect-only and cannot be messaged or revived. Its transcript remains readable at history://${message.to}.`,
+			};
+		}
 		// Advisor refs are observability-only transcripts, never messageable peers.
 		if (ref.kind === "advisor") {
 			return {

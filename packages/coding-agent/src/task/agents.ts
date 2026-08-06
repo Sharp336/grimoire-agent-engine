@@ -6,6 +6,8 @@
 import { Effort } from "@oh-my-pi/pi-ai";
 import { parseFrontmatter, prompt } from "@oh-my-pi/pi-utils";
 import { parseAgentFields } from "../discovery/helpers";
+import councilMemberMd from "../prompts/agents/council-member.md" with { type: "text" };
+import councilPlannerMd from "../prompts/agents/council-planner.md" with { type: "text" };
 import designerMd from "../prompts/agents/designer.md" with { type: "text" };
 // Embed agent markdown files at build time
 import agentFrontmatterTemplate from "../prompts/agents/frontmatter.md" with { type: "text" };
@@ -47,6 +49,8 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
 	{ fileName: "reviewer.md", template: reviewerMd },
 	{ fileName: "security-reviewer.md", template: securityReviewerMd },
 	{ fileName: "librarian.md", template: librarianMd },
+	{ fileName: "council-planner.md", template: councilPlannerMd },
+	{ fileName: "council-member.md", template: councilMemberMd },
 	{
 		fileName: "task.md",
 		frontmatter: {

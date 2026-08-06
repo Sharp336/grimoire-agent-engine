@@ -158,6 +158,16 @@ describe("structured subagent primitive", () => {
 		expect(policy.enableLsp).toBe(false);
 		expect(policy.enableIrc).toBe(false);
 
+		const explicitlyRestricted = await resolveEffectiveSubagentPolicy(
+			request({
+				session: session({ planMode: true }),
+				tools: ["write", "bash", "read", "ast_grep"],
+			}),
+		);
+		expect(explicitlyRestricted.effectiveAgent.tools).toEqual(["read", "ast_grep"]);
+		expect(explicitlyRestricted.effectiveAgent.tools).not.toContain("write");
+		expect(explicitlyRestricted.effectiveAgent.tools).not.toContain("bash");
+
 		vi.restoreAllMocks();
 		const discover = vi.spyOn(discoveryModule, "discoverAgents");
 		await expect(
@@ -167,6 +177,136 @@ describe("structured subagent primitive", () => {
 		).rejects.toThrow("isolation, apply, and merge controls are unavailable in plan mode");
 		expect(discover).not.toHaveBeenCalled();
 	});
+	it("honors restricted request tools and explicit inherited context snapshots", async () => {
+		const customAgent: AgentDefinition = {
+			...AGENT,
+			spawns: "*",
+			prewalk: true,
+			autoloadSkills: ["parent-skill"],
+		};
+		mockDiscovery(customAgent);
+		const childSession = session();
+		childSession.settings.set("includeWorkspaceTree", true);
+		childSession.workspaceTree = {
+			rootPath: "/tmp/subdir",
+			rendered: "partial parent tree",
+			truncated: false,
+			totalLines: 1,
+			agentsMdFiles: [],
+		};
+		const parentContext = [
+			{ path: "/tmp/AGENTS.md", content: "root instructions" },
+			{ path: "/tmp/notes.txt", content: "parent notes" },
+		];
+		childSession.contextFiles = parentContext;
+		childSession.skills = [{ name: "parent-skill" }] as never;
+		childSession.rules = [{ name: "parent-rule" }] as never;
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		const settled = await runStructuredSubagent(
+			request({
+				session: childSession,
+				cwd: "/tmp/repo-root",
+				tools: ["read"],
+				restrictToolNames: true,
+				inheritContextFiles: true,
+				additionalContextFiles: [{ path: "/tmp/council-context.txt", content: "snapshot" }],
+				skills: [],
+				rules: [],
+				autoloadSkills: [],
+				pinModel: true,
+				retainArtifacts: true,
+			}),
+		);
+
+		expect(settled.policy.effectiveAgent.tools).toEqual(["read"]);
+		expect(settled.policy.effectiveAgent.spawns).toBeUndefined();
+		expect(settled.policy.effectiveAgent.prewalk).toBeUndefined();
+		expect(settled.policy.restrictToolNames).toBe(true);
+		expect(settled.policy.enableIrc).toBe(false);
+		expect(dispatched[0]?.agent.tools).toEqual(["read"]);
+		expect(dispatched[0]?.cwd).toBe("/tmp/repo-root");
+		expect(dispatched[0]?.settings?.get("includeWorkspaceTree")).toBe(true);
+		expect(dispatched[0]?.workspaceTree).toBeUndefined();
+		expect(dispatched[0]?.restrictToolNames).toBe(true);
+		expect(dispatched[0]?.enableMCP).toBe(false);
+		expect(dispatched[0]?.preloadedExtensionPaths).toEqual([]);
+		expect(dispatched[0]?.preloadedCustomToolPaths).toEqual([]);
+		expect(dispatched[0]?.contextFiles).toEqual([
+			...parentContext,
+			{ path: "/tmp/council-context.txt", content: "snapshot" },
+		]);
+		expect(childSession.contextFiles).toBe(parentContext);
+		expect(dispatched[0]?.skills).toEqual([]);
+		expect(dispatched[0]?.rules).toEqual([]);
+		expect(dispatched[0]?.autoloadSkills).toEqual([]);
+		expect(dispatched[0]?.suppressPrewalk).toBe(true);
+		expect(dispatched[0]?.pinModel).toBe(true);
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+	it("deduplicates structured child context by path with later snapshots winning in the first position", async () => {
+		mockDiscovery();
+		const childSession = session();
+		const parentContext = [
+			{ path: "/tmp/AGENTS.md", content: "parent instructions", depth: 0 },
+			{ path: "/tmp/notes.txt", content: "parent notes" },
+		];
+		const additionalContext = [
+			{ path: "/tmp/AGENTS.md", content: "captured instructions", depth: 0 },
+			{ path: "/tmp/council.txt", content: "council snapshot" },
+			{ path: "/tmp/AGENTS.md", content: "authoritative instructions", depth: 0 },
+		];
+		childSession.contextFiles = parentContext;
+		let dispatched: executorModule.ExecutorOptions | undefined;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched = options;
+			return result();
+		});
+
+		const settled = await runStructuredSubagent(
+			request({
+				session: childSession,
+				inheritContextFiles: true,
+				additionalContextFiles: additionalContext,
+				retainArtifacts: true,
+			}),
+		);
+
+		expect(dispatched?.contextFiles).toEqual([
+			{ path: "/tmp/AGENTS.md", content: "authoritative instructions", depth: 0 },
+			{ path: "/tmp/notes.txt", content: "parent notes" },
+			{ path: "/tmp/council.txt", content: "council snapshot" },
+		]);
+		expect(childSession.contextFiles).toBe(parentContext);
+		expect(parentContext[0]!.content).toBe("parent instructions");
+		expect(additionalContext[0]!.content).toBe("captured instructions");
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+	it("retains the default AGENTS.md filter when context inheritance is disabled", async () => {
+		mockDiscovery();
+		const childSession = session();
+		childSession.contextFiles = [
+			{ path: "/tmp/AGENTS.md", content: "root instructions" },
+			{ path: "/tmp/notes.txt", content: "parent notes" },
+		];
+		let dispatched: executorModule.ExecutorOptions | undefined;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched = options;
+			return result();
+		});
+
+		const settled = await runStructuredSubagent(
+			request({ session: childSession, inheritContextFiles: false, retainArtifacts: true }),
+		);
+
+		expect(dispatched?.contextFiles).toEqual([{ path: "/tmp/notes.txt", content: "parent notes" }]);
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
 	it("propagates a custom thinking-suffixed role alias through policy, dispatch, and settlement", async () => {
 		const customAgent = { ...AGENT, model: ["@reviewer:high"] };
 		mockDiscovery(customAgent);
@@ -295,6 +435,28 @@ describe("structured subagent primitive", () => {
 		expect(path.basename(settled.artifactsDir)).toStartWith("omp-task-");
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
+	it("marks nonzero executor fallback metadata unavailable rather than schema-invalid", async () => {
+		mockDiscovery();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async () => ({
+			...result(),
+			exitCode: 1,
+			output: '{"partial":"provider text"}',
+			error: "provider unavailable",
+			structuredOutput: undefined,
+		}));
+
+		const settled = await runStructuredSubagent(request({ retainArtifacts: true }));
+
+		expect(settled.result.structuredOutput).toEqual({
+			source: "agent",
+			mode: "permissive",
+			status: "unavailable",
+			data: { partial: "provider text" },
+			error: "provider unavailable",
+		});
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
 	it("uses identical non-plan LSP and IRC policy for task and eval invocations", async () => {
 		mockDiscovery();
 		const taskPolicy = await resolveEffectiveSubagentPolicy(request());
@@ -369,13 +531,20 @@ describe("structured subagent primitive", () => {
 
 	it("cleans ephemeral artifacts when isolation setup fails without recovery", async () => {
 		mockDiscovery();
-		vi.spyOn(isolationRunner, "prepareIsolationContext").mockRejectedValue(new Error("not a repository"));
+		const prepare = vi
+			.spyOn(isolationRunner, "prepareIsolationContext")
+			.mockRejectedValue(new Error("not a repository"));
 
 		await expect(
 			runStructuredSubagent(
-				request({ session: session({ isolationMode: "worktree" }), isolation: { requested: true } }),
+				request({
+					session: session({ isolationMode: "worktree" }),
+					cwd: "/tmp/canonical-repo",
+					isolation: { requested: true },
+				}),
 			),
 		).rejects.toThrow("Isolated subagent execution requires a git repository");
+		expect(prepare).toHaveBeenCalledWith("/tmp/canonical-repo");
 		expect(artifactsDirsFromRegistry()).toEqual([]);
 	});
 

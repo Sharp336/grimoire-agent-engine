@@ -378,6 +378,11 @@ export interface CreateAgentSessionOptions {
 	modelPatternFallbackRole?: string;
 	/** Validated default retry chain to install when a deferred singleton pattern resolves. */
 	modelPatternDefaultFallbackChain?: string[];
+	/**
+	 * Keep the selected model fixed for the session; suppress deferred auth substitution,
+	 * retry-chain routing, usage-aware fallback, and intrinsic provider fallback.
+	 */
+	pinModel?: boolean;
 	/** Thinking selector. Default: from settings, else unset */
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); retry-fallback recovery re-clamps to it. */
@@ -521,6 +526,8 @@ export interface CreateAgentSessionOptions {
 	agentId?: string;
 	/** Display name for the agent in IRC. Default: "main" or "sub". */
 	agentDisplayName?: string;
+	/** Transcript-only capability: callers may inspect this agent but cannot contact or control it. */
+	inspectOnly?: boolean;
 	/** Optional shared agent registry for IRC routing. Default: AgentRegistry.global(). */
 	agentRegistry?: AgentRegistry;
 	/**
@@ -590,6 +597,16 @@ export interface CreateAgentSessionOptions {
 	autoApprove?: boolean;
 }
 
+/** Final resolution details for a model selector deferred until extension discovery. */
+export interface DeferredModelResolution {
+	/** Concrete selector chosen after extension providers and auth fallback resolve. */
+	resolvedSelector: string;
+	/** Concrete model selected for the session. */
+	resolvedModel: Model;
+	/** Whether credential probing substituted the authenticated fallback selector. */
+	authFallbackUsed: boolean;
+}
+
 /** Result from createAgentSession */
 export interface CreateAgentSessionResult {
 	/** The created session */
@@ -606,6 +623,8 @@ export interface CreateAgentSessionResult {
 	lspServers?: LspStartupServerInfo[];
 	/** Shared event bus for tool/extension communication */
 	eventBus: EventBus;
+	/** Final metadata when {@link CreateAgentSessionOptions.modelPattern} was resolved after extension discovery. */
+	deferredModelResolution?: DeferredModelResolution;
 }
 
 export type DialectFormat = "auto" | "native" | Dialect;
@@ -638,6 +657,7 @@ export type { MCPManager, MCPServerConfig, MCPServerConnection, MCPToolsLoadResu
 // embedding several concurrent top-level sessions in one process (the default
 // global registry admits only one "Main" per process generation).
 export { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
+export { getSessionSpawnSemaphore, withSessionSpawnPermit } from "./task";
 export type { Tool } from "./tools";
 export { buildDirectoryTree, buildWorkspaceTree, type DirectoryTree, type WorkspaceTree } from "./workspace-tree";
 
@@ -1455,6 +1475,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let model = options.model;
 	let modelFallbackMessage: string | undefined;
 	let initialRetryFallback: InitialRetryFallbackState | undefined;
+	let deferredModelResolution: DeferredModelResolution | undefined;
 	// Identify session model strings to restore in fallback order. We do an
 	// initial pass here so model-dependent setup (thinking-level resolution,
 	// host preconnect) can use the restored model; extension-registered
@@ -1806,6 +1827,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			clearPendingInvokers: () => session.clearPendingInvokers(),
 			peekPlanProposalHandler: () => session.peekPlanProposalHandler(),
 			setPlanProposalHandler: handler => session.setPlanProposalHandler(handler),
+			peekCouncilHandler: () => session.peekCouncilHandler(),
+			setCouncilHandler: handler => session.setCouncilHandler(handler),
 			allocateOutputArtifact: async toolType => {
 				try {
 					return await sessionManager.allocateArtifactPath(toolType);
@@ -2200,7 +2223,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							pattern,
 							retryFallback: undefined,
 						}));
-						if (!resolved.configuredRole || !settings.get("retry.modelFallback")) {
+						if (options.pinModel || !resolved.configuredRole || !settings.get("retry.modelFallback")) {
 							return primaryPatterns;
 						}
 						const fallbackContext: RetryFallbackResolutionContext = {
@@ -2262,7 +2285,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				? availableModels
 				: allModels;
 			let usageFallbackTriggered = false;
-			for (let patternIndex = 0; patternIndex < expandedModelPatterns.length; patternIndex += 1) {
+			for (
+				let patternIndex = 0;
+				patternIndex < expandedModelPatterns.length && (!options.pinModel || patternIndex === 0);
+				patternIndex += 1
+			) {
 				const { pattern, retryFallback } = expandedModelPatterns[patternIndex];
 				const primary = parseModelPattern(pattern, resolutionModels, matchPreferences);
 				if (!primary.model || (retryFallback && !hasModelAuth(primary.model))) continue;
@@ -2283,7 +2310,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					}
 				}
 				const usageReservePolicy = settings.get("retry.usageReservePolicy");
-				const modelFallbackEnabled = settings.get("retry.modelFallback");
+				const modelFallbackEnabled = !options.pinModel && settings.get("retry.modelFallback");
 				if (
 					((modelFallbackEnabled && (hasUsageFallbackCandidate || usageFallbackTriggered)) ||
 						usageReservePolicy === "fail-closed") &&
@@ -2340,7 +2367,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					selectedExplicitThinkingLevel = true;
 				}
 				let authFallbackUsed = false;
-				if (options.modelPatternAuthFallback) {
+				if (!options.pinModel && options.modelPatternAuthFallback) {
 					const primaryKey = await modelRegistry.getApiKey(primary.model);
 					if (primaryKey !== kNoAuth && !isAuthenticated(primaryKey)) {
 						const fallback = parseModelPattern(
@@ -2359,7 +2386,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						}
 					}
 				}
-				if (!authFallbackUsed && options.modelPatternFallbackRole) {
+				if (!options.pinModel && !authFallbackUsed && options.modelPatternFallbackRole) {
 					const primarySelector = formatModelSelectorValue(
 						formatModelStringWithRouting(primary.model),
 						primary.thinkingLevel,
@@ -2408,8 +2435,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					}
 				}
 				model = selectedModel;
-				initialRetryFallback =
-					retryFallback && usageFallbackTriggered ? { ...retryFallback, pinned: true } : retryFallback;
+				initialRetryFallback = options.pinModel
+					? undefined
+					: retryFallback && usageFallbackTriggered
+						? { ...retryFallback, pinned: true }
+						: retryFallback;
+				deferredModelResolution = {
+					resolvedSelector: formatModelSelectorValue(
+						formatModelStringWithRouting(selectedModel),
+						selectedExplicitThinkingLevel ? selectedThinkingLevel : undefined,
+					),
+					resolvedModel: selectedModel,
+					authFallbackUsed,
+				};
 				modelFallbackMessage = undefined;
 				if (selectedExplicitThinkingLevel) {
 					restoredSessionThinkingLevel = selectedThinkingLevel;
@@ -3045,6 +3083,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			displayName: resolvedAgentDisplayName,
 			kind: agentKind,
 			parentId: options.parentAgentId,
+			inspectOnly: options.inspectOnly,
 			session: null,
 			sessionFile: sessionManager.getSessionFile() ?? null,
 			status: "running" as const,
@@ -3375,12 +3414,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
 			initialRetryFallback,
+			modelSwitchPolicy: Object.freeze({ allowAutomaticSwitches: options.pinModel !== true }),
 			prewalk: options.prewalk,
 			planYolo: options.planYolo,
 			serviceTierByFamily: initialServiceTierByFamily,
 			sessionManager,
 			initialAdvisorCosts,
 			settings,
+			toolSession,
 			autoApprove: options.autoApprove,
 			scoutAllowedBySpawnPolicy: isScoutSpawnable(undefined, options.spawns ?? "*"),
 			evalKernelOwnerId,
@@ -3810,6 +3851,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			mcpManager,
 			modelFallbackMessage,
 			lspServers,
+			deferredModelResolution,
 			eventBus,
 		};
 	} catch (error) {

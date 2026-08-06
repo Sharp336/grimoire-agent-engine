@@ -26,7 +26,7 @@ import { hubToolRenderer } from "./hub";
 import { inspectImageToolRenderer } from "./inspect-image-renderer";
 import { recallToolRenderer, reflectToolRenderer, retainToolRenderer } from "./memory-render";
 import { readToolRenderer } from "./read";
-import { resolveRenderer } from "./resolve";
+import { councilRenderer, resolveRenderer } from "./resolve";
 import { todoToolRenderer } from "./todo";
 import { createVibeToolRenderer } from "./vibe";
 import { writeToolRenderer } from "./write";
@@ -100,9 +100,8 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 		return hubToolRenderer as ToolRenderer;
 	},
 	read: readToolRenderer as ToolRenderer,
-	// Keyed by xd:// resolution-device names: the write dispatch delegates here
-	// by dispatch tool, and historical `resolve` tool transcripts still render
-	// through the `resolve` entry. Both devices carry the same ResolveDetails.
+	// Keyed by xd:// resolution-device names: write dispatch delegates here.
+	council: councilRenderer as ToolRenderer,
 	resolve: resolveRenderer as ToolRenderer,
 	reject: resolveRenderer as ToolRenderer,
 	retain: retainToolRenderer as ToolRenderer,

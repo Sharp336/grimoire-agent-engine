@@ -898,6 +898,15 @@ const MODEL_ROLE_ALIAS_PREFIXES = [MODEL_ROLE_ALIAS_PREFIX, LEGACY_MODEL_ROLE_AL
 
 export interface ModelRoleLookup {
 	getModelRole(role: ModelRole | string): string | undefined;
+	/** Raw selector patterns for strict read-only validation; defaults to getModelRole. */
+	getModelRolePatterns?(role: ModelRole | string): string | string[] | undefined;
+}
+
+function getModelRolePatterns(
+	settings: ModelRoleLookup | undefined,
+	role: ModelRole | string,
+): string | string[] | undefined {
+	return settings?.getModelRolePatterns?.(role) ?? settings?.getModelRole(role);
 }
 
 function isModelRole(role: string): role is ModelRole {
@@ -922,7 +931,7 @@ function getModelRoleAlias(value: string, settings?: ModelRoleLookup): string | 
 	if (prefixLength === undefined) return undefined;
 
 	const candidate = normalized === DEFAULT_MODEL_ROLE_ALIAS ? DEFAULT_MODEL_ROLE : normalized.slice(prefixLength);
-	if (isModelRole(candidate) || settings?.getModelRole(candidate) !== undefined) return candidate;
+	if (isModelRole(candidate) || getModelRolePatterns(settings, candidate) !== undefined) return candidate;
 	return undefined;
 }
 
@@ -992,7 +1001,7 @@ function rolePriorityDefaults(role: ModelRole): string[] {
 
 function resolveDefaultInheritedPatterns(
 	role: ModelRole,
-	configuredDefault: string | undefined,
+	configuredDefault: string | string[] | undefined,
 	roleDefaults: string[],
 	settings: ModelRoleLookup | undefined,
 	visited: Set<string>,
@@ -1034,34 +1043,47 @@ function resolveConfiguredRolePattern(
 	value: string,
 	settings?: ModelRoleLookup,
 	visited: Set<string> = new Set(),
+	fallbackToRoleDefaults = true,
 ): string[] | undefined {
 	const normalized = value.trim();
 	if (!normalized) return undefined;
 
+	const aliasPrefixLength = modelRoleAliasPrefixLength(normalized);
 	const { base: aliasCandidate, level: thinkingLevel } = splitThinkingSuffix(
 		normalized,
-		modelRoleAliasPrefixLength(normalized) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length,
+		aliasPrefixLength ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length,
 		MAX_THINKING_SUFFIX_OPTIONS,
 	);
 	const role = getModelRoleAlias(aliasCandidate, settings);
-	if (!role) return [normalized];
+	if (!role) return aliasPrefixLength === undefined ? [normalized] : undefined;
 	if (visited.has(role)) return undefined;
 	visited.add(role);
 
-	const configured = settings?.getModelRole(role)?.trim();
-	const configuredDefault = settings?.getModelRole(DEFAULT_MODEL_ROLE)?.trim();
-	const roleDefaults = isModelRole(role) ? rolePriorityDefaults(role) : [];
-	const resolved = configured
+	const configured = getModelRolePatterns(settings, role);
+	const configuredDefault = getModelRolePatterns(settings, DEFAULT_MODEL_ROLE);
+	const roleDefaults = fallbackToRoleDefaults && isModelRole(role) ? rolePriorityDefaults(role) : [];
+	const sourcePatterns = configured
 		? normalizeModelPatternList(configured)
-		: isModelRole(role)
+		: fallbackToRoleDefaults && isModelRole(role)
 			? resolveDefaultInheritedPatterns(role, configuredDefault, roleDefaults, settings, visited)
 			: roleDefaults;
-	if (resolved.length === 0) {
-		resolved.push(...roleDefaults);
+	if (sourcePatterns.length === 0) {
+		sourcePatterns.push(...roleDefaults);
 	}
-	if (resolved.length === 0) {
+	if (sourcePatterns.length === 0) {
 		return undefined;
 	}
+
+	const resolved = sourcePatterns.flatMap(pattern => {
+		const terminalPatterns = resolveConfiguredRolePattern(
+			pattern,
+			settings,
+			new Set(visited),
+			fallbackToRoleDefaults,
+		);
+		return terminalPatterns ?? [];
+	});
+	if (resolved.length === 0) return undefined;
 
 	return thinkingLevel ? resolved.map(pattern => `${pattern}:${thinkingLevel}`) : resolved;
 }
@@ -1082,10 +1104,16 @@ export function expandRoleAlias(value: string, settings?: ModelRoleLookup): stri
 export function resolveConfiguredModelPatterns(
 	value: string | string[] | undefined,
 	settings?: ModelRoleLookup,
+	options?: { fallbackToRoleDefaults?: boolean },
 ): string[] {
 	const patterns = normalizeModelPatternList(value);
 	return patterns.flatMap(pattern => {
-		const resolved = resolveConfiguredRolePattern(pattern, settings);
+		const resolved = resolveConfiguredRolePattern(
+			pattern,
+			settings,
+			new Set(),
+			options?.fallbackToRoleDefaults ?? true,
+		);
 		return resolved ?? [];
 	});
 }

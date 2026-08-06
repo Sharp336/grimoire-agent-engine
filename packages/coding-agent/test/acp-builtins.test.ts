@@ -9,6 +9,8 @@ import type {
 	UsageReport,
 } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { getCouncilCoordinator, resetCouncilCoordinatorsForTests } from "@oh-my-pi/pi-coding-agent/council/coordinator";
+import type { CouncilManifest } from "@oh-my-pi/pi-coding-agent/council/state";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
@@ -36,6 +38,8 @@ interface FakeAcpBuiltinSession {
 	messages: unknown[];
 	settings: Settings;
 	model: { provider: string; id: string } | undefined;
+	modelRegistry: unknown;
+	getToolSession(): unknown;
 	newSession(opts?: { drop?: boolean; parentSession?: string }): Promise<boolean>;
 	switchSession(sessionPath: string): Promise<boolean>;
 	moveSession(newCwd: string, targetSessionDir?: string): Promise<void>;
@@ -151,6 +155,8 @@ function createRuntime() {
 		getLastAssistantText: () => undefined,
 		messages: [],
 		model: undefined,
+		modelRegistry: {},
+		getToolSession: () => ({}),
 		settings,
 		getToolByName: (_name: string) => undefined,
 		async compact(_args?: string) {},
@@ -1198,6 +1204,34 @@ describe("wave 5 — adapters and polish", () => {
 });
 
 describe("/move preflight flush", () => {
+	it("refuses text-mode /move while the session has a nonterminal council snapshot", async () => {
+		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-move-council-"));
+		const { output, fakeSessionManager, runtime } = createRuntime();
+		const toolSession = runtime.session.getToolSession();
+		runtime.session.getToolSession = () => toolSession;
+		const coordinator = getCouncilCoordinator({
+			session: runtime.session,
+			toolSession,
+			sessionManager: runtime.sessionManager,
+			settings: runtime.settings,
+			modelRegistry: runtime.session.modelRegistry,
+		});
+		coordinator.snapshot = {
+			runId: "council-active",
+			state: "reviewing",
+		} as CouncilManifest;
+		try {
+			const result = await executeAcpBuiltinSlashCommand(`/move ${targetDir}`, runtime);
+			expect(result).toEqual({ consumed: true });
+			expect(output).toEqual([
+				"Cannot move while council run council-active is reviewing; use /council cancel first.",
+			]);
+			expect(fakeSessionManager!._movedTo).toBeUndefined();
+		} finally {
+			resetCouncilCoordinatorsForTests();
+			await fs.rm(targetDir, { recursive: true, force: true });
+		}
+	});
 	it("aborts text-mode /move when pending settings flush fails", async () => {
 		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-move-"));
 		try {

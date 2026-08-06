@@ -65,6 +65,18 @@ export interface RawSettings {
 	[key: string]: unknown;
 }
 
+export type RawSettingLayer = "effective" | "global" | "project";
+
+export type RawSettingInspection =
+	| { configured: false }
+	| {
+			configured: true;
+			/** Raw leaf value, or the malformed parent that blocked traversal to the leaf. */
+			value: unknown;
+			/** The value came from a malformed parent before the requested leaf. */
+			blockedByParent?: true;
+	  };
+
 type YamlLoadResult =
 	| { kind: "missing" }
 	| { kind: "loaded"; settings: RawSettings }
@@ -102,6 +114,20 @@ function getByPath(obj: RawSettings, segments: readonly string[]): unknown {
 		current = (current as Record<string, unknown>)[segment];
 	}
 	return current;
+}
+
+function inspectByPath(obj: RawSettings, segments: readonly string[]): RawSettingInspection {
+	let current: unknown = obj;
+	for (const segment of segments) {
+		if (current === null || typeof current !== "object" || Array.isArray(current)) {
+			return { configured: true, value: current, blockedByParent: true };
+		}
+		if (!Object.hasOwn(current, segment)) {
+			return { configured: false };
+		}
+		current = (current as Record<string, unknown>)[segment];
+	}
+	return { configured: true, value: current };
 }
 
 const SETTING_PATH_SEGMENTS: Record<SettingPath, readonly string[]> = Object.fromEntries(
@@ -491,6 +517,17 @@ export class Settings {
 	}
 
 	/**
+	 * Inspect a configured value without applying schema defaults or type casts.
+	 * A malformed parent counts as configured so strict consumers can distinguish
+	 * it from an absent leaf. Explicit layer inspection bypasses higher-precedence
+	 * layers.
+	 */
+	getRawSetting(path: SettingPath, layer: RawSettingLayer = "effective"): RawSettingInspection {
+		const source = layer === "global" ? this.#global : layer === "project" ? this.#project : this.#merged;
+		return inspectByPath(source, SETTING_PATH_SEGMENTS[path]);
+	}
+
+	/**
 	 * Set a setting value (sync).
 	 * Updates global settings and queues a background save.
 	 * Triggers hooks for settings that have side effects.
@@ -661,6 +698,10 @@ export class Settings {
 
 	getAgentDir(): string {
 		return this.#agentDir;
+	}
+
+	getGlobalConfigPath(): string {
+		return this.#configPath ?? path.join(this.#agentDir, MAIN_CONFIG_FILENAMES[0]);
 	}
 
 	getPlansDirectory(): string {

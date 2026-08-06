@@ -73,6 +73,8 @@ export interface AgentRef {
 	displayName: string;
 	kind: AgentKind;
 	parentId?: string;
+	/** Authoritative transcript-only capability; absent is equivalent to false. */
+	inspectOnly?: boolean;
 	status: AgentStatus;
 	/** Null exactly when parked/aborted. */
 	session: AgentSession | null;
@@ -100,6 +102,8 @@ export interface RegisterInput {
 	displayName: string;
 	kind: AgentKind;
 	parentId?: string;
+	/** Authoritative transcript-only capability; absent is equivalent to false. */
+	inspectOnly?: boolean;
 	session: AgentSession | null;
 	sessionFile?: string | null;
 	status?: AgentStatus;
@@ -141,6 +145,7 @@ export class AgentRegistry {
 			id: input.id,
 			displayName: input.displayName,
 			kind: input.kind,
+			inspectOnly: input.inspectOnly || undefined,
 			parentId: input.parentId,
 			status: input.status ?? "running",
 			session: input.session,

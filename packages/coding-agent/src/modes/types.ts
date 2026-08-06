@@ -29,6 +29,7 @@ import type { LspStartupServerInfo } from "../tools";
 import type { EventBus } from "../utils/event-bus";
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
+import type { CouncilPaneComponent } from "./components/council-pane";
 import type { CustomEditor } from "./components/custom-editor";
 import type { EvalExecutionComponent } from "./components/eval-execution";
 import type { HookEditorComponent } from "./components/hook-editor";
@@ -105,6 +106,7 @@ export interface InteractiveModeContext {
 	// UI access
 	ui: TUI;
 	chatContainer: TranscriptContainer;
+	councilPane: CouncilPaneComponent;
 	pendingMessagesContainer: Container;
 	statusContainer: Container;
 	todoContainer: Container;
@@ -386,7 +388,7 @@ export interface InteractiveModeContext {
 	showHistorySearch(): void;
 	showExtensionsDashboard(): void;
 	showAgentsDashboard(): void;
-	showModelSelector(options?: { temporaryOnly?: boolean }): void;
+	showModelSelector(options?: { temporaryOnly?: boolean; section?: "council" }): void;
 	showPluginSelector(mode?: "install" | "uninstall"): void;
 	showUserMessageSelector(): void;
 	showCopySelector(): void;
@@ -415,6 +417,11 @@ export interface InteractiveModeContext {
 	handleQueueCommand(message: string): Promise<void>;
 	handleBtwCommand(question: string): Promise<void>;
 	handleTanCommand(work: string): Promise<void>;
+	hasActiveCouncil(): boolean;
+	isCouncilAdjudicating(): boolean;
+	cancelCouncilRun(): boolean;
+	setCouncilPaneExpanded(expanded: boolean): void;
+	toggleCouncilPaneExpansion(): boolean;
 	hasActiveBtw(): boolean;
 	handleBtwEscape(): boolean;
 	handleBtwBranchKey(): Promise<boolean>;

@@ -129,6 +129,70 @@ describe("AgentSession concurrent prompt guard", () => {
 		throw new Error("Timed out waiting for condition");
 	}
 
+	it("skips a custom append bound to a different active session", async () => {
+		await createSession();
+		const before = session.messages.length;
+		const receipt = { delivered: false };
+
+		const started = await session.sendCustomMessage(
+			{ customType: "session-bound", content: "old session summary", display: true },
+			{ deliverAs: "nextTurn", expectedSessionId: "different-session", deliveryReceipt: receipt },
+		);
+
+		expect(started).toBe(false);
+		expect(session.messages).toHaveLength(before);
+		expect(receipt.delivered).toBe(false);
+	});
+
+	it("confirms an appended no-turn custom message independently of turn startup", async () => {
+		await createSession();
+		const receipt = { delivered: false };
+
+		const started = await session.sendCustomMessage(
+			{ customType: "delivery-receipt", content: "Queued summary", display: true },
+			{ deliverAs: "nextTurn", deliveryReceipt: receipt },
+		);
+
+		expect(started).toBe(false);
+		expect(receipt.delivered).toBe(true);
+		expect(session.messages.at(-1)).toMatchObject({ role: "custom", customType: "delivery-receipt" });
+	});
+
+	it("confirms a streaming next-turn queue without claiming that it started a turn", async () => {
+		await createSession();
+		const firstPrompt = session.prompt("First message");
+		await waitFor(() => session.isStreaming);
+		const receipt = { delivered: false };
+
+		const started = await session.sendCustomMessage(
+			{ customType: "delivery-receipt", content: "Queued while streaming", display: true },
+			{ deliverAs: "nextTurn", deliveryReceipt: receipt },
+		);
+
+		expect(started).toBe(false);
+		expect(receipt.delivered).toBe(true);
+		await session.abort();
+		await firstPrompt;
+	});
+
+	it("invokes custom prompt ownership only after the busy guard succeeds", async () => {
+		await createSession();
+		const firstPrompt = session.prompt("First message");
+		await waitFor(() => session.isStreaming);
+		const onPromptStart = vi.fn();
+
+		await expect(
+			session.promptCustomMessage(
+				{ customType: "ownership", content: "Council adjudication", display: false },
+				{ onPromptStart },
+			),
+		).rejects.toBeInstanceOf(AgentBusyError);
+		expect(onPromptStart).not.toHaveBeenCalled();
+
+		await session.abort();
+		await firstPrompt;
+	});
+
 	it("should throw when prompt() called while streaming", async () => {
 		await createSession();
 

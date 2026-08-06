@@ -84,6 +84,7 @@ import { AgentDashboard } from "../components/agent-dashboard";
 import { AgentHubOverlayComponent } from "../components/agent-hub";
 import { AssistantMessageComponent } from "../components/assistant-message";
 import { CopySelectorComponent } from "../components/copy-selector";
+import { createCouncilSummaryManifestLoader } from "../components/council-summary";
 import { ExtensionDashboard } from "../components/extensions";
 import { HistorySearchComponent } from "../components/history-search";
 import { LoginDialogComponent } from "../components/login-dialog";
@@ -693,12 +694,12 @@ export class SelectorController {
 		}
 	}
 
-	showModelSelector(options?: { temporaryOnly?: boolean }): void {
+	showModelSelector(options?: { temporaryOnly?: boolean; section?: "council" }): void {
 		if (options?.temporaryOnly) {
 			this.#showModelPicker();
 			return;
 		}
-		this.#showModelHub({});
+		this.#showModelHub({ initialSection: options?.section });
 	}
 
 	/**
@@ -805,7 +806,7 @@ export class SelectorController {
 	 * untouched underneath. `initialProviderId` preselects a provider's sidebar
 	 * entry — used when reopening the hub after a /login round-trip.
 	 */
-	#showModelHub(hubOptions: { initialProviderId?: string }): void {
+	#showModelHub(hubOptions: { initialProviderId?: string; initialSection?: "council" }): void {
 		let overlayHandle: OverlayHandle | undefined;
 		let hub: ModelHubComponent | undefined;
 		let closed = false;
@@ -1026,10 +1027,20 @@ export class SelectorController {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					}
 				},
+				onCouncilRosterChange: members => {
+					try {
+						this.ctx.settings.set("council.members", members);
+						const enabled = members.reduce((count, member) => count + (member.enabled ? 1 : 0), 0);
+						this.ctx.showStatus(`Council roster: ${enabled}/${members.length} enabled`);
+					} catch (error) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					}
+				},
 				onCancel: () => done(),
 			},
 			{
 				initialProviderId: hubOptions.initialProviderId,
+				initialSection: hubOptions.initialSection,
 			},
 		);
 		overlayHandle = this.#showFullscreenMenu(hub);
@@ -2027,6 +2038,7 @@ export class SelectorController {
 			ui: this.ctx.ui,
 			getTool: name => this.ctx.session.getToolByName(name),
 			getMessageRenderer: type => this.ctx.session.extensionRunner?.getMessageRenderer(type),
+			loadCouncilManifest: this.ctx.collabGuest ? undefined : createCouncilSummaryManifestLoader(this.ctx.session),
 			cwd: this.ctx.sessionManager.getCwd(),
 			hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
 			proseOnlyThinking: () => this.ctx.proseOnlyThinking,

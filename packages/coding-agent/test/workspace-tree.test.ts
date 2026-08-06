@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { buildDirectoryTree, buildWorkspaceTree } from "@oh-my-pi/pi-coding-agent/workspace-tree";
+import { AGENTS_MD_LIMIT, buildDirectoryTree, buildWorkspaceTree } from "@oh-my-pi/pi-coding-agent/workspace-tree";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const tempDirs: string[] = [];
@@ -173,6 +173,17 @@ describe("buildWorkspaceTree", () => {
 			"one/two/three/AGENTS.md",
 			"one/two/three/four/AGENTS.md",
 		]);
+	});
+
+	it("strict discovery rejects the ambiguous native AGENTS.md cap boundary", async () => {
+		const cwd = await makeTempDir();
+		await Promise.all(
+			Array.from({ length: AGENTS_MD_LIMIT }, (_, index) =>
+				Bun.write(path.join(cwd, `rules-${String(index).padStart(3, "0")}`, "AGENTS.md"), "rules"),
+			),
+		);
+
+		await expect(buildWorkspaceTree(cwd, { strict: true })).rejects.toThrow(`${AGENTS_MD_LIMIT}-file AGENTS.md cap`);
 	});
 
 	it("surfaces gitignored AGENTS.md files but not AGENTS.md under ignored directories", async () => {

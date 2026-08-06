@@ -182,7 +182,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			if (requested.provider === parentModel.provider) return "test-key";
 			return undefined;
 		});
-		const { session, modelFallbackMessage } = await createAgentSession({
+		const { session, modelFallbackMessage, deferredModelResolution } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
 			authStorage,
@@ -205,9 +205,62 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			expect(session.model?.provider).toBe(parentModel.provider);
 			expect(session.model?.id).toBe(parentModel.id);
 			expect(modelFallbackMessage).toBeUndefined();
+			expect(deferredModelResolution).toEqual({
+				resolvedSelector: `${parentModel.provider}/${parentModel.id}`,
+				resolvedModel: parentModel,
+				authFallbackUsed: true,
+			});
 		} finally {
 			await session.dispose();
 			getApiKeySpy.mockRestore();
+		}
+	});
+
+	test("keeps a pinned deferred modelPattern instead of auth or retry-chain substitution", async () => {
+		const parentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!parentModel) throw new Error("Expected bundled anthropic parent model");
+		const authStorage = await AuthStorage.create(path.join(tempDir, "pinned-fallback-auth.db"));
+		authStoragesToClose.push(authStorage);
+		authStorage.setRuntimeApiKey(parentModel.provider, "test-key");
+		const settings = Settings.isolated();
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "pinned-fallback-models.yml"));
+		vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async requested =>
+			requested.provider === parentModel.provider ? "test-key" : undefined,
+		);
+		const { session, deferredModelResolution } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			disableExtensionDiscovery: true,
+			extensions: [providerExtension],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			modelPattern: ["runtime-provider/runtime-model", "runtime-provider/runtime-reasoning-model"],
+			modelPatternAuthFallback: `${parentModel.provider}/${parentModel.id}`,
+			modelPatternFallbackRole: "subagent:pinned",
+			pinModel: true,
+			settings,
+		});
+
+		try {
+			expect(session.model?.provider).toBe("runtime-provider");
+			expect(session.model?.id).toBe("runtime-model");
+			expect(session.settings.getModelRole("subagent:pinned")).toBeUndefined();
+			expect(session.settings.get("retry.fallbackChains")["subagent:pinned"]).toBeUndefined();
+			expect(deferredModelResolution).toMatchObject({
+				resolvedSelector: "runtime-provider/runtime-model",
+				authFallbackUsed: false,
+			});
+			expect(deferredModelResolution?.resolvedModel).toBe(session.model);
+		} finally {
+			await session.dispose();
 		}
 	});
 

@@ -693,6 +693,30 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 	return filePath;
 }
 
+/** Shorten home-directory paths embedded in display text without rewriting URL path fragments or username prefixes. */
+export function shortenEmbeddedPaths(text: string, homeDir?: string): string {
+	const home = homeDir ?? os.homedir();
+	if (!home) return text;
+	let index = text.indexOf(home);
+	if (index < 0) return text;
+
+	const parts: string[] = [];
+	let cursor = 0;
+	while (index >= 0) {
+		const before = index > 0 ? text[index - 1] : undefined;
+		const after = text[index + home.length];
+		const startsAtBoundary = before === undefined || !/[A-Za-z0-9._~-]/.test(before);
+		const endsAtBoundary = after === undefined || !/[A-Za-z0-9._~-]/.test(after);
+		const end = index + home.length;
+		parts.push(text.slice(cursor, end - (startsAtBoundary && endsAtBoundary ? home.length : 0)));
+		if (startsAtBoundary && endsAtBoundary) parts.push("~");
+		cursor = end;
+		index = text.indexOf(home, cursor);
+	}
+	parts.push(text.slice(cursor));
+	return parts.join("");
+}
+
 export function formatToolWorkingDirectory(workdir: string | undefined, projectDir: string): string | undefined {
 	if (!workdir) return undefined;
 	const resolvedProjectDir = path.resolve(projectDir);

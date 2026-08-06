@@ -29,6 +29,7 @@ import { getEditorTheme, theme } from "../theme/theme";
 import { matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
 import type { AgentHubRemote } from "./agent-hub";
 import { ChatTranscriptBuilder } from "./chat-transcript-builder";
+import type { CouncilSummaryManifestLoader } from "./council-summary";
 import { DynamicBorder } from "./dynamic-border";
 import { formatContextUsage } from "./status-line/context-thresholds";
 
@@ -44,6 +45,7 @@ export interface AgentTranscriptViewerDeps {
 	ui: TUI;
 	getTool?: (name: string) => AgentTool | undefined;
 	getMessageRenderer?: (customType: string) => MessageRenderer | undefined;
+	loadCouncilManifest?: CouncilSummaryManifestLoader;
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
@@ -163,6 +165,7 @@ export class AgentTranscriptViewer implements Component {
 			getTool: deps.getTool,
 			getMessageRenderer: deps.getMessageRenderer,
 			cwd: deps.cwd,
+			loadCouncilManifest: deps.loadCouncilManifest,
 			hideThinkingBlock: deps.hideThinkingBlock,
 			proseOnlyThinking: deps.proseOnlyThinking,
 			requestRender: deps.requestRender,
@@ -182,10 +185,10 @@ export class AgentTranscriptViewer implements Component {
 		this.#pollTimer.unref?.();
 	}
 
-	/** Advisor transcripts are read-only; everything else may be messaged. */
+	/** Transcript-only and advisor refs never create an editor or a follow-up route. */
 	get #sendable(): boolean {
 		const ref = this.deps.registry.get(this.deps.agentId);
-		if (!ref || ref.kind === "advisor") return false;
+		if (!ref || ref.kind === "advisor" || ref.inspectOnly) return false;
 		return Boolean(this.deps.remote || this.deps.lifecycle);
 	}
 
@@ -521,6 +524,12 @@ export class AgentTranscriptViewer implements Component {
 		this.#editor?.setText("");
 		if (!trimmed) return;
 		this.#notice = undefined;
+		const ref = this.deps.registry.get(this.deps.agentId);
+		if (!ref || ref.inspectOnly) {
+			this.#notice = "This transcript is inspect-only.";
+			this.deps.requestRender();
+			return;
+		}
 		const id = this.deps.agentId;
 		if (this.deps.remote) {
 			this.deps.remote.chat(id, trimmed);
@@ -558,6 +567,7 @@ export class AgentTranscriptViewer implements Component {
 		const innerWidth = Math.max(20, width - 2);
 		const contentWidth = Math.max(1, width - 1);
 		const ref = this.deps.registry.get(this.deps.agentId);
+		if (ref?.inspectOnly) this.#editor = undefined;
 
 		const headerLines = this.#headerLines(ref?.status, ref?.kind, ref?.parentId);
 		const footerLines = this.#footerLines();

@@ -19,7 +19,6 @@ import type {
 	Component,
 	EditorTheme,
 	LoaderMessageColorFn,
-	NativeScrollbackLiveRegion,
 	OverlayHandle,
 	SlashCommand,
 } from "@oh-my-pi/pi-tui";
@@ -152,6 +151,7 @@ import type { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
 import { ChatBlock, type ChatBlockHost } from "./components/chat-block";
 import { CodexResetFireworksController } from "./components/codex-reset-fireworks";
+import { AnchoredLiveContainer, CouncilPaneComponent, SUBAGENT_HUD_VISIBLE_LIMIT } from "./components/council-pane";
 import { CustomEditor } from "./components/custom-editor";
 import { DynamicBorder } from "./components/dynamic-border";
 import { ErrorBannerComponent } from "./components/error-banner";
@@ -166,6 +166,7 @@ import { TranscriptContainer } from "./components/transcript-container";
 import { WelcomeComponent, type LspServerInfo as WelcomeLspServerInfo } from "./components/welcome";
 import { BtwController } from "./controllers/btw-controller";
 import { CommandController } from "./controllers/command-controller";
+import { CouncilController } from "./controllers/council-controller";
 import { EventController } from "./controllers/event-controller";
 import { ExtensionUiController } from "./controllers/extension-ui-controller";
 import { InputController } from "./controllers/input-controller";
@@ -358,26 +359,10 @@ export interface InteractiveModeOptions {
 	initialMessages?: string[];
 }
 
-/**
- * Anchored live-region container for the HUD/status rows between the transcript
- * and the editor (working loader, todo + subagent HUDs, transient notification
- * panels). While it has content every row is live: it reports a seam at 0 so the
- * engine never commits these anchored, rebuilt-in-place rows to native
- * scrollback — otherwise stale duplicates pile up above the live copy on short
- * terminals once the loader sits below a tall HUD. The transcript's own seam,
- * when present, sits higher and wins (topmost-seam merge in TUI.render).
- */
-class AnchoredLiveContainer extends Container implements NativeScrollbackLiveRegion {
-	getNativeScrollbackLiveRegionStart(): number | undefined {
-		return this.children.length > 0 ? 0 : undefined;
-	}
-}
-
 /** How long the ctrl+p model-role cycle chip track lingers above the editor
  *  before it auto-clears, mirroring the todo HUD's auto-clear timer. */
 const MODEL_CYCLE_TRACK_CLEAR_MS = 4000;
 
-const SUBAGENT_HUD_VISIBLE_LIMIT = 8;
 const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
 
 /**
@@ -442,6 +427,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	ui: TUI;
 	chatContainer: TranscriptContainer;
+	councilPane: CouncilPaneComponent;
 	pendingMessagesContainer: Container;
 	statusContainer: Container;
 	todoContainer: Container;
@@ -595,6 +581,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #tanCommandController: TanCommandController;
 	readonly #omfgController: OmfgController;
 	readonly #commandController: CommandController;
+	readonly #councilController: CouncilController;
 	readonly #todoCommandController: TodoCommandController;
 	readonly #liveCommandController: LiveCommandController;
 	readonly #eventController: EventController;
@@ -625,6 +612,21 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 	unfocusSession(): Promise<void> {
 		return this.#focusController.unfocus();
+	}
+	hasActiveCouncil(): boolean {
+		return this.#councilController.hasActiveCouncil();
+	}
+	isCouncilAdjudicating(): boolean {
+		return this.#councilController.isCouncilAdjudicating();
+	}
+	cancelCouncilRun(): boolean {
+		return this.#councilController.cancelCouncilRun();
+	}
+	setCouncilPaneExpanded(expanded: boolean): void {
+		this.#councilController.setPaneExpanded(expanded);
+	}
+	toggleCouncilPaneExpansion(): boolean {
+		return this.#councilController.togglePaneExpanded();
 	}
 	clearTransientSessionUi(): void {
 		if (this.loadingAnimation) {
@@ -721,6 +723,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		// unless the user opts in, and never emits raw escapes on other terminals.
 		setTerminalTextSizing(settings.get("tui.textSizing") && TERMINAL.textSizing);
 		this.chatContainer = new TranscriptContainer();
+		this.councilPane = new CouncilPaneComponent({
+			tui: this.ui,
+			getTerminalRows: () => this.ui.terminal.rows,
+			getEditorMaxHeight: () => this.#computeEditorMaxHeight(),
+		});
 		this.pendingMessagesContainer = new AnchoredLiveContainer();
 		this.statusContainer = new AnchoredLiveContainer();
 		this.todoContainer = new AnchoredLiveContainer();
@@ -805,6 +812,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		this.#uiHelpers = new UiHelpers(this);
 		this.#btwController = new BtwController(this);
+		this.#councilController = new CouncilController(this);
 		this.#tanCommandController = new TanCommandController(this);
 		this.#omfgController = new OmfgController(this);
 		this.#extensionUiController = new ExtensionUiController(this);
@@ -976,6 +984,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		this.ui.addChild(this.chatContainer);
+		this.ui.addChild(this.councilPane);
 		this.ui.addChild(this.pendingMessagesContainer);
 		this.ui.addChild(this.todoContainer);
 		this.ui.addChild(this.subagentContainer);
@@ -992,6 +1001,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.addChild(this.editorContainer);
 		this.ui.addChild(this.hookWidgetContainerBelow);
 		this.ui.setFocus(this.editor);
+		this.#councilController.attach();
 
 		this.#inputController.setupKeyHandlers();
 		this.#inputController.setupEditorSubmitHandler();
@@ -1055,7 +1065,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.initHooksAndCustomTools();
 
 		// Restore mode from session (e.g. plan mode on resume)
-		this.session.setSessionBeforeSwitchReconciler?.(async () => {
+		this.session.setSessionTransitionReconciler?.(async () => {
+			await this.#councilController.quiesceForSessionTransition();
 			await this.#liveCommandController.stop();
 			await this.#quiesceVibeForSessionSwitch();
 		});
@@ -1789,6 +1800,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				}
 			}
 		}
+		this.#uiHelpers.disposeCouncilSummaries();
 		this.chatContainer.clear();
 		// Live display collapses to the compacted transcript tail unless the
 		// user opted into the full inline history; export/resume callers choose
@@ -2491,6 +2503,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** Reconcile mode state from session entries on resume/switch. */
 	async #reconcileModeFromSession(options?: { preserveActiveGoal?: boolean }): Promise<void> {
+		this.#councilController.rebindForSession();
 		const vibeScopeAlreadySuspended = this.#vibeScopeSuspendedForSwitch;
 		this.#vibeScopeSuspendedForSwitch = false;
 		const sessionContext = this.sessionManager.buildSessionContext();
@@ -3975,6 +3988,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.#cleanupMicAnimation();
 		this.#liveCommandController.dispose();
+		this.#councilController.dispose();
 		this.#cancelTodoAutoClearTimer();
 		this.#cancelObserverUiSyncTimer();
 		this.#cancelGoalContinuation();
@@ -4717,7 +4731,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		void this.#selectorController.showAgentsDashboard();
 	}
 
-	showModelSelector(options?: { temporaryOnly?: boolean }): void {
+	showModelSelector(options?: { temporaryOnly?: boolean; section?: "council" }): void {
 		this.#selectorController.showModelSelector(options);
 	}
 

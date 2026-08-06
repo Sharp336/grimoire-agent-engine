@@ -386,11 +386,11 @@ and fuzzy patterns are resolved against the available concrete models.
 
 ### Role aliases and settings
 
-Supported model roles:
+Supported built-in model roles:
 
 - `default`, `smol`, `slow`, `vision`, `plan`, `designer`, `commit`, `tiny`, `task`, `advisor`
 
-The `tiny` role overrides the online model used for lightweight background tasks (session titles, memory, `auto`-thinking difficulty classification, unexpected-stop detection); when unset, these fall back to `@smol`. Pick one in `/models`.
+The default Council roster separately uses the custom role ids `council1` through `council4`; assign one `modelRoles` selector to each enabled member. The `tiny` built-in role overrides the online model used for lightweight background tasks (session titles, memory, `auto`-thinking difficulty classification, unexpected-stop detection); when unset, these fall back to `@smol`. Pick roles in `/models`.
 
 Role aliases like `@smol` expand through `settings.modelRoles`; `*` selects `@default`. Quote `@` aliases in YAML values (`fable: "@slow"`). Each role value can also append a thinking selector such as `:minimal`, `:low`, `:medium`, or `:high`.
 
@@ -406,6 +406,12 @@ Related settings:
 
 `modelRoles` stores model selectors such as `provider/modelId`; `enabledModels` and CLI `--models`
 accept exact selectors, globs, and fuzzy matches.
+
+### Council roles in Model Hub
+
+The **Roles** view in Model Hub has a **Council** section. Its ordered roster defaults to enabled `council1` through `council4`; each member gets one model selector through the corresponding `modelRoles` entry. From this section you can assign a model, enable or disable a member, reorder members, or edit the roster. `/council config` opens the section directly.
+
+The roster itself is stored only in global `council.members`; `council.rounds` selects one or two review rounds. Before `/council <task>` dispatches any model, every enabled member must have exactly one resolvable, available selector. A missing or unavailable enabled member blocks the whole dispatch before spend rather than silently shrinking the roster.
 
 Global `enabledModels` and `disabledProviders` entries may also be scoped to a path prefix:
 

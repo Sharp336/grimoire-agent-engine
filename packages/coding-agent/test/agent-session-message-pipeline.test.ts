@@ -994,11 +994,12 @@ describe("AgentSession message pipeline", () => {
 		// Re-register `bash`: the wrapper ignores the model's args, delegates to the native bash with
 		// its own command via ctx.invokeTool, and returns the native result.
 		const wrapBash: ExtensionFactory = pi => {
+			const { Type } = pi.typebox;
 			pi.registerTool({
 				name: "bash",
 				label: "Bash",
 				description: "wrapped bash",
-				parameters: pi.zod.object({ command: pi.zod.string() }),
+				parameters: Type.Object({ command: Type.String() }),
 				async execute(
 					_toolCallId: string,
 					_params: unknown,

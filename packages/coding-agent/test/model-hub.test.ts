@@ -9,6 +9,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { CouncilMemberSetting } from "@oh-my-pi/pi-coding-agent/council/config";
 import {
 	type ModelHubCallbacks,
 	ModelHubComponent,
@@ -17,7 +18,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/components/model-hub";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
-import type { TUI } from "@oh-my-pi/pi-tui";
+import { type TUI, visibleWidth } from "@oh-my-pi/pi-tui";
 
 function normalize(lines: readonly string[]): string {
 	return stripVTControlCharacters(lines.join("\n")).replace(/\s+/g, " ").trim();
@@ -81,6 +82,7 @@ interface HubHarness {
 	onLoginRequest: ReturnType<typeof vi.fn>;
 	onCancel: ReturnType<typeof vi.fn>;
 	onFallbackChainChange: Mock<(role: string, chain: string[]) => void>;
+	onCouncilRosterChange: Mock<(members: CouncilMemberSetting[]) => void>;
 }
 
 const openHubs: ModelHubComponent[] = [];
@@ -92,12 +94,13 @@ function createHub(options: {
 	registry?: RegistryOverrides;
 	hub?: ModelHubOptions;
 	callbacks?: Partial<ModelHubCallbacks>;
+	terminalRows?: number;
 }): HubHarness {
 	installTestTheme();
 	const modelsFn = typeof options.models === "function" ? options.models : () => options.models as Model[];
 	const settings = options.settings ?? Settings.isolated({});
 	const registry = makeRegistry(modelsFn, options.registry);
-	const ui = { requestRender: vi.fn(), terminal: { rows: 40 } } as unknown as TUI;
+	const ui = { requestRender: vi.fn(), terminal: { rows: options.terminalRows ?? 40 } } as unknown as TUI;
 	const onAssign = vi.fn();
 	const onUnassign = vi.fn();
 	const onLoginRequest = vi.fn();
@@ -112,6 +115,9 @@ function createHub(options: {
 		}
 		settings.override("retry.fallbackChains", chains);
 	});
+	const onCouncilRosterChange = vi.fn((members: CouncilMemberSetting[]) => {
+		settings.override("council.members", members);
+	});
 	const hub = new ModelHubComponent(
 		ui,
 		settings,
@@ -123,12 +129,21 @@ function createHub(options: {
 			onLoginRequest: options.callbacks?.onLoginRequest ?? onLoginRequest,
 			onCycleOrderChange: options.callbacks?.onCycleOrderChange,
 			onFallbackChainChange: options.callbacks?.onFallbackChainChange ?? onFallbackChainChange,
+			onCouncilRosterChange: options.callbacks?.onCouncilRosterChange ?? onCouncilRosterChange,
 			onCancel: options.callbacks?.onCancel ?? onCancel,
 		},
 		options.hub,
 	);
 	openHubs.push(hub);
-	return { hub, onAssign, onUnassign, onLoginRequest, onCancel, onFallbackChainChange };
+	return {
+		hub,
+		onAssign,
+		onUnassign,
+		onLoginRequest,
+		onCancel,
+		onFallbackChainChange,
+		onCouncilRosterChange,
+	};
 }
 
 const DOWN = "\x1b[B";
@@ -336,9 +351,7 @@ describe("ModelHub", () => {
 
 			hub.handleInput(UP); // All models → Roles (since Recent is removed)
 			hub.handleInput("\n"); // dive into rows
-			hub.handleInput(UP); // wraps to the trailing "+ New fallback…" row
-			hub.handleInput(UP); // skips the section divider up to "+ New role…"
-			hub.handleInput("\n");
+			hub.handleInput("n"); // semantic new-role action, independent of intervening sections
 			expect(footerLine(hub.render(220))).toContain("New role name:");
 
 			for (const ch of "reviewer") hub.handleInput(ch);
@@ -806,6 +819,208 @@ describe("ModelHub", () => {
 			hub.handleInput("x");
 			expect(onFallbackChainChange).toHaveBeenLastCalledWith("test/*", []);
 			expect(normalize(hub.render(220))).not.toContain("↳ test/model-a");
+		});
+	});
+
+	describe("council roster", () => {
+		test("opens directly on the council section, filters roster roles from generic roles, and honors modelTags", () => {
+			const model = makeModel("test", "council-model");
+			const settings = Settings.isolated({
+				"council.members": [
+					{ role: "council1", enabled: true },
+					{ role: "reviewpeer", enabled: false },
+				],
+				"council.rounds": 2,
+				modelRoles: { council1: "test/council-model" },
+				modelTags: { reviewpeer: { name: "Safety Judge", color: "warning" } },
+			});
+			const { hub } = createHub({
+				models: [model],
+				scoped: true,
+				settings,
+				hub: { initialSection: "council" },
+			});
+
+			const rendered = normalize(hub.render(220));
+			expect(rendered).toContain("Council 1/2 enabled · rounds 2");
+			expect(rendered).toContain("Council 1 test/council-model");
+			expect(rendered).toContain("Safety Judge");
+			expect(footerLine(hub.render(220))).toContain("Space toggle");
+			expect(rendered.match(/test\/council-model/g)).toHaveLength(1);
+		});
+
+		test("matches Council preflight by keeping an unconfigured built-in role visibly unassigned", () => {
+			const model = makeModel("test", "gpt-5.1-codex");
+			const settings = Settings.isolated({
+				"council.members": [{ role: "slow", enabled: true }],
+			});
+			const { hub } = createHub({
+				models: [model],
+				scoped: true,
+				settings,
+				hub: { initialSection: "council" },
+				callbacks: {
+					onUnassign: role => settings.setModelRole(role, undefined),
+				},
+			});
+			const councilRow = (): string =>
+				hub
+					.render(100)
+					.map(line => stripVTControlCharacters(line))
+					.find(line => line.includes("SLOW")) ?? "";
+
+			expect(settings.getModelRole("slow")).toBeUndefined();
+			expect(councilRow()).toContain("unassigned");
+			expect(councilRow()).not.toContain("auto →");
+			expect(councilRow()).not.toContain("test/gpt-5.1-codex");
+
+			settings.setModelRole("slow", "test/gpt-5.1-codex");
+			hub.refreshAfterExternalMutation();
+			expect(councilRow()).toContain("test/gpt-5.1-codex");
+
+			hub.handleInput("x");
+			expect(settings.getModelRole("slow")).toBeUndefined();
+			expect(councilRow()).toContain("unassigned");
+			expect(councilRow()).not.toContain("auto →");
+			expect(councilRow()).not.toContain("test/gpt-5.1-codex");
+
+			const { hub: genericHub } = createHub({
+				models: [model],
+				scoped: true,
+				settings: Settings.isolated({ "council.members": [] }),
+			});
+			genericHub.handleInput(UP);
+			const genericSlowRow =
+				genericHub
+					.render(100)
+					.map(line => stripVTControlCharacters(line))
+					.find(line => line.includes("SLOW")) ?? "";
+			expect(genericSlowRow).toContain("auto → test/gpt-5.1-codex");
+		});
+
+		test("bounds long Council labels so narrow rows keep normal and Council selectors readable", () => {
+			const width = 64;
+			const longRole = `council${"x".repeat(64 - "council".length)}`;
+			const settings = Settings.isolated({
+				"council.members": [
+					{ role: longRole, enabled: true },
+					{ role: "council1", enabled: true },
+				],
+				modelRoles: {
+					default: "test/model-a",
+					council1: "test/model-b",
+				},
+			});
+			const { hub } = createHub({
+				models: [makeModel("test", "model-a"), makeModel("test", "model-b")],
+				scoped: true,
+				settings,
+			});
+
+			hub.handleInput(UP);
+			const lines = hub.render(width);
+			const plain = lines.map(line => stripVTControlCharacters(line));
+			expect(plain.find(line => line.includes("DEFAULT"))).toContain("test/model-a");
+			expect(plain.some(line => line.includes("Council 1") && line.includes("test/model-b"))).toBeTrue();
+			expect(
+				plain.some(line => line.includes("Councilx") && line.includes("…") && line.includes("unassigned")),
+			).toBeTrue();
+			expect(lines.every(line => visibleWidth(line) <= width)).toBeTrue();
+		});
+
+		test("toggles, reorders, unassigns, and deletes the focused council slot", () => {
+			const { hub, onCouncilRosterChange, onUnassign } = createHub({
+				models: [makeModel("test", "model-a")],
+				scoped: true,
+				hub: { initialSection: "council" },
+			});
+
+			hub.handleInput(" ");
+			expect(onCouncilRosterChange.mock.lastCall?.[0][0]).toEqual({ role: "council1", enabled: false });
+
+			hub.handleInput("]");
+			expect(onCouncilRosterChange.mock.lastCall?.[0].slice(0, 2).map(member => member.role)).toEqual([
+				"council2",
+				"council1",
+			]);
+
+			hub.handleInput("x");
+			expect(onUnassign).toHaveBeenLastCalledWith("council1");
+			expect(onCouncilRosterChange.mock.lastCall?.[0].some(member => member.role === "council1")).toBe(true);
+
+			hub.handleInput("\x1b[3~");
+			expect(onCouncilRosterChange.mock.lastCall?.[0].some(member => member.role === "council1")).toBe(false);
+		});
+
+		test("allows disabling and deleting the final council slot", () => {
+			const settings = Settings.isolated({
+				"council.members": [{ role: "onlymember", enabled: true }],
+			});
+			const { hub, onCouncilRosterChange } = createHub({
+				models: [makeModel("test", "model-a")],
+				scoped: true,
+				settings,
+				hub: { initialSection: "council" },
+			});
+
+			hub.handleInput(" ");
+			expect(onCouncilRosterChange).toHaveBeenLastCalledWith([{ role: "onlymember", enabled: false }]);
+			expect(normalize(hub.render(160))).toContain("Council 0/1 enabled · rounds 1");
+
+			hub.handleInput("\x1b[3~");
+			expect(onCouncilRosterChange).toHaveBeenLastCalledWith([]);
+			expect(normalize(hub.render(160))).toContain("Council 0/0 enabled · rounds 1");
+		});
+
+		test("invalid council config focuses a bounded non-mutating error row", () => {
+			const settings = Settings.isolated({
+				"council.members": [{ role: "not a valid role", enabled: true }],
+				modelRoles: { "not a valid role": "test/model-a" },
+			});
+			const { hub, onAssign, onUnassign, onCouncilRosterChange } = createHub({
+				models: [makeModel("test", "model-a")],
+				scoped: true,
+				settings,
+				hub: { initialSection: "council" },
+			});
+
+			const rendered = normalize(hub.render(160));
+			expect(rendered).toContain("Council config error");
+			expect(rendered).toContain("Council configuration is invalid");
+			expect(rendered).toContain("must match");
+			expect(rendered).not.toContain("Council 1/1 enabled");
+			expect(rendered).not.toContain("test/model-a");
+			expect(footerLine(hub.render(160))).toContain("Fix council configuration");
+
+			hub.handleInput("\n");
+			expect(onAssign).not.toHaveBeenCalled();
+			expect(onUnassign).not.toHaveBeenCalled();
+			expect(onCouncilRosterChange).not.toHaveBeenCalled();
+			expect(normalize(hub.render(160))).not.toContain("Assigning");
+		});
+
+		test("council viewport follows initial focus while wheel panning leaves the cursor unchanged", () => {
+			const members = Array.from({ length: 20 }, (_, index) => ({
+				role: `council${index + 1}`,
+				enabled: true,
+			}));
+			const settings = Settings.isolated({ "council.members": members });
+			const { hub } = createHub({
+				models: [makeModel("test", "model-a")],
+				scoped: true,
+				settings,
+				hub: { initialSection: "council" },
+				terminalRows: 16,
+			});
+
+			const initial = normalize(hub.render(120));
+			expect(initial).toContain("▲");
+			expect(initial).toContain("Council 1");
+			expect(initial).toContain("▼");
+			for (let index = 0; index < 8; index++) hub.handleInput("\x1b[<65;100;10M");
+			hub.render(120);
+			hub.handleInput("\n");
+			expect(normalize(hub.render(120))).toContain("Assigning Council 1");
 		});
 	});
 

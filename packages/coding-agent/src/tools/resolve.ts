@@ -1,14 +1,15 @@
 /**
- * Resolution devices: staged work is finalized through plain-text writes to
- * always-available `xd://` URLs — no tool schema, no JSON protocol.
+ * Resolution devices dispatch plain-text writes to always-available `xd://`
+ * URLs without adding tool schemas.
  *
  *   write xd://resolve   reason text  → APPLY the pending staged preview
  *   write xd://reject    reason text  → DISCARD the pending staged preview
  *   write xd://propose   plan <slug>  → submit the plan for approval (plan mode)
+ *   write xd://council   adjudication → submit a council run's JSON decision
  *
- * Nothing rides the system prompt: the flows that stage work teach the call
- * shape at the moment it becomes relevant (the preview reminder for
- * resolve/reject, the plan-mode prompt for propose).
+ * Flows teach the write shape when it becomes relevant: staged previews own
+ * resolve/reject reminders, plan mode owns propose, and council coordination
+ * owns adjudication instructions.
  *
  * Rendering rides the write tool's xd:// delegation: renderers.ts keys the
  * resolve renderer under `resolve` and `reject` so device writes and legacy
@@ -17,7 +18,7 @@
 import type { AgentToolResult, CustomMessage } from "@oh-my-pi/pi-agent-core";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { parseXdUrl, XD_URL_PREFIX } from "../internal-urls/xd-protocol";
 import type { Theme } from "../modes/theme/theme";
@@ -31,11 +32,13 @@ import type { XdevDispatch } from "./xdev";
 export const RESOLVE_DEVICE_NAME = "resolve";
 export const REJECT_DEVICE_NAME = "reject";
 export const PROPOSE_DEVICE_NAME = "propose";
+export const COUNCIL_DEVICE_NAME = "council";
 
 /** The plain-text resolution device URLs (`xd://resolve`, …). */
 export const RESOLVE_DEVICE_PATH = `${XD_URL_PREFIX}${RESOLVE_DEVICE_NAME}`;
 export const REJECT_DEVICE_PATH = `${XD_URL_PREFIX}${REJECT_DEVICE_NAME}`;
 export const PROPOSE_DEVICE_PATH = `${XD_URL_PREFIX}${PROPOSE_DEVICE_NAME}`;
+export const COUNCIL_DEVICE_PATH = `${XD_URL_PREFIX}${COUNCIL_DEVICE_NAME}`;
 
 /**
  * Model-visible banner prepended to a staged preview's tool result text. The
@@ -45,11 +48,20 @@ export const PROPOSE_DEVICE_PATH = `${XD_URL_PREFIX}${PROPOSE_DEVICE_NAME}`;
  */
 export const PREVIEW_PENDING_NOTICE = `Staged as a proposal — files NOT modified yet. To apply: write a one-sentence reason to ${RESOLVE_DEVICE_PATH}. To discard: write to ${REJECT_DEVICE_PATH}.`;
 
-export type ResolutionDeviceName = typeof RESOLVE_DEVICE_NAME | typeof REJECT_DEVICE_NAME | typeof PROPOSE_DEVICE_NAME;
+export type ResolutionDeviceName =
+	| typeof RESOLVE_DEVICE_NAME
+	| typeof REJECT_DEVICE_NAME
+	| typeof PROPOSE_DEVICE_NAME
+	| typeof COUNCIL_DEVICE_NAME;
 
 /** Whether an xd:// device name is one of the plain-text resolution devices. */
 export function isResolutionDeviceName(name: string): name is ResolutionDeviceName {
-	return name === RESOLVE_DEVICE_NAME || name === REJECT_DEVICE_NAME || name === PROPOSE_DEVICE_NAME;
+	return (
+		name === RESOLVE_DEVICE_NAME ||
+		name === REJECT_DEVICE_NAME ||
+		name === PROPOSE_DEVICE_NAME ||
+		name === COUNCIL_DEVICE_NAME
+	);
 }
 
 /** One-line usage string returned by `read xd://<device>` — the only "docs" these devices carry. */
@@ -61,6 +73,8 @@ export function resolutionDeviceUsage(device: ResolutionDeviceName): string {
 			return `Write a one-sentence reason as plain text to ${REJECT_DEVICE_PATH} to DISCARD the pending staged action (e.g. a tool preview).`;
 		case PROPOSE_DEVICE_NAME:
 			return `Write your plan's <slug> (matching local://<slug>-plan.md) as plain text to ${PROPOSE_DEVICE_PATH} to submit the plan for approval. Valid only while plan mode is active.`;
+		case COUNCIL_DEVICE_NAME:
+			return `Write the JSON adjudication as plain text to ${COUNCIL_DEVICE_PATH} for the active council run.`;
 	}
 }
 
@@ -108,6 +122,9 @@ export function writeDeviceDispatch(toolName: string, result: unknown): XdevDisp
 
 /** Handler installed by plan mode; `xd://propose` dispatches the written plan title to it. */
 export type PlanProposalHandler = (title: string) => Promise<AgentToolResult<unknown>>;
+
+/** Handler installed by a council run; `xd://council` dispatches the raw JSON adjudication to it. */
+export type CouncilAdjudicationHandler = (payload: string) => Promise<AgentToolResult<unknown>>;
 
 type ResolveAction = "apply" | "discard";
 
@@ -293,12 +310,21 @@ async function runResolveInvocation(
  *   preview invoker (in-flight queue directive first).
  * - `xd://propose` → the plan title; dispatches to the plan-proposal handler
  *   installed by plan mode.
+ * - `xd://council` → the JSON adjudication; dispatches unchanged to the active
+ *   council run's handler.
  */
 export async function dispatchResolutionDevice(
 	session: ToolSession,
 	device: ResolutionDeviceName,
 	text: string,
 ): Promise<{ result: AgentToolResult<unknown>; xdev: XdevDispatch }> {
+	if (device === COUNCIL_DEVICE_NAME) {
+		const handler = session.peekCouncilHandler?.();
+		if (!handler) throw new ToolError("No council run is awaiting adjudication.");
+		const result = await handler(text);
+		return { result, xdev: { tool: device, mode: "execute", args: { payload: text }, inner: result.details } };
+	}
+
 	const body = text.trim();
 	if (device === PROPOSE_DEVICE_NAME) {
 		const handler = session.peekPlanProposalHandler?.();
@@ -341,10 +367,17 @@ export async function dispatchResolutionDevice(
 	return { result, xdev: { ...xdevBase, inner: result.details } };
 }
 
-/** Streaming-safe call preview for a resolution-device write: `Resolve/Reject/Propose: <text>`. */
+/** Streaming-safe call preview for a resolution-device write: `Resolve/Reject/Propose/Council: <text>`. */
 export function renderResolutionDeviceCall(device: ResolutionDeviceName, content: unknown, uiTheme: Theme): Component {
-	const body = typeof content === "string" ? replaceTabs(content.trim().split("\n")[0] ?? "") : "";
-	const title = device === PROPOSE_DEVICE_NAME ? "Propose" : device === REJECT_DEVICE_NAME ? "Reject" : "Resolve";
+	const body = typeof content === "string" ? (replaceTabs(sanitizeText(content)).trim().split("\n")[0] ?? "") : "";
+	const title =
+		device === COUNCIL_DEVICE_NAME
+			? "Council"
+			: device === PROPOSE_DEVICE_NAME
+				? "Propose"
+				: device === REJECT_DEVICE_NAME
+					? "Reject"
+					: "Resolve";
 	const text = renderStatusLine(
 		{
 			icon: "pending",
@@ -416,6 +449,36 @@ export const resolveRenderer = {
 			},
 			invalidate() {},
 		};
+	},
+
+	inline: true,
+	mergeCallAndResult: true,
+};
+
+export const councilRenderer = {
+	renderCall(args: Partial<{ payload: string }>, _options: RenderResultOptions, uiTheme: Theme): Component {
+		return renderResolutionDeviceCall(COUNCIL_DEVICE_NAME, args.payload, uiTheme);
+	},
+
+	renderResult(
+		result: { content: Array<{ type: string; text?: string }>; isError?: boolean },
+		_options: RenderResultOptions,
+		uiTheme: Theme,
+	): Component {
+		const output = replaceTabs(sanitizeText(result.content.find(item => item.type === "text")?.text ?? ""));
+		const firstLine = output.trim().split("\n")[0];
+		return new Text(
+			renderStatusLine(
+				{
+					icon: result.isError ? "error" : "success",
+					title: "Council",
+					description: firstLine ? truncateToWidth(firstLine, 72, Ellipsis.Omit) : undefined,
+				},
+				uiTheme,
+			),
+			0,
+			0,
+		);
 	},
 
 	inline: true,

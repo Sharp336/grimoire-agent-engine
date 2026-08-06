@@ -48,6 +48,12 @@ import {
 	CompactionSummaryMessageComponent,
 	createHandoffSummaryMessageComponent,
 } from "./compaction-summary-message";
+import {
+	COUNCIL_SUMMARY_MESSAGE_TYPE,
+	CouncilSummaryComponent,
+	type CouncilSummaryDetails,
+	type CouncilSummaryManifestLoader,
+} from "./council-summary";
 import { CustomMessageComponent } from "./custom-message";
 import { EvalExecutionComponent } from "./eval-execution";
 import { type LateDiagnosticsFile, LateDiagnosticsMessageComponent } from "./late-diagnostics-message";
@@ -66,6 +72,8 @@ export interface ChatTranscriptBuilderDeps {
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
 	requestRender: () => void;
+	/** Session-pinned durable manifest loader; callers without artifact access get the bounded fallback card. */
+	loadCouncilManifest?: CouncilSummaryManifestLoader;
 }
 
 /** Extracts the plain-text content of a user message (string or text blocks). */
@@ -466,6 +474,21 @@ export class ChatTranscriptBuilder {
 		if (!message.display) return;
 		if (message.customType === "async-result") {
 			this.container.addChild(buildAsyncResultBlock(message));
+			return;
+		}
+		if (message.customType === COUNCIL_SUMMARY_MESSAGE_TYPE) {
+			const loader: CouncilSummaryManifestLoader =
+				this.deps.loadCouncilManifest ??
+				(async () => {
+					throw new Error("Council manifest access is unavailable");
+				});
+			this.container.addChild(
+				new CouncilSummaryComponent(
+					message as CustomMessage<CouncilSummaryDetails>,
+					loader,
+					this.deps.requestRender,
+				),
+			);
 			return;
 		}
 		if (message.customType === LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE) {

@@ -41,6 +41,8 @@ export interface BuildDirectoryTreeOptions {
 export interface BuildWorkspaceTreeOptions {
 	/** Abort the native workspace scan after this many milliseconds. */
 	timeoutMs?: number;
+	/** Reject scan errors, native truncation, and ambiguous AGENTS.md cap exhaustion instead of returning a partial tree. */
+	strict?: boolean;
 }
 
 /**
@@ -97,6 +99,14 @@ export async function buildWorkspaceTree(cwd: string, options: BuildWorkspaceTre
 			collectAgentsMd: true,
 			timeoutMs: options.timeoutMs,
 		});
+		if (options.strict && result.truncated) {
+			throw new Error(`Workspace scan for ${JSON.stringify(rootPath)} was truncated`);
+		}
+		if (options.strict && result.agentsMdFiles.length >= AGENTS_MD_LIMIT) {
+			throw new Error(
+				`Workspace scan for ${JSON.stringify(rootPath)} reached the ${AGENTS_MD_LIMIT}-file AGENTS.md cap`,
+			);
+		}
 		const tree = assembleTree(rootPath, result.entries, {
 			perDirLimit: WORKSPACE_DEFAULTS.perDirLimit,
 			rootLimit: WORKSPACE_DEFAULTS.perDirLimit,
@@ -108,7 +118,8 @@ export async function buildWorkspaceTree(cwd: string, options: BuildWorkspaceTre
 			ageMode: "absolute",
 		});
 		return { ...tree, agentsMdFiles: result.agentsMdFiles };
-	} catch {
+	} catch (error) {
+		if (options.strict) throw error;
 		return { ...emptyTree(rootPath), agentsMdFiles: [] };
 	}
 }

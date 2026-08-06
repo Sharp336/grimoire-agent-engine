@@ -111,6 +111,7 @@ export function runningAgentsOutsideJobs(session: ToolSession): AgentActivitySna
 		out.push({
 			id: ref.id,
 			...(ref.parentId ? { parentId: ref.parentId } : {}),
+			...(ref.inspectOnly ? { inspectOnly: true } : {}),
 			...(ref.activity ? { activity: ref.activity } : {}),
 			ageMs: Math.max(0, now - ref.createdAt),
 		});

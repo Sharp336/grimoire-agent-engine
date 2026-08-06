@@ -16,6 +16,7 @@ import {
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import type { SettingPath, SettingValue } from "../config/settings";
 import { settings } from "../config/settings";
+import { getCouncilCoordinator } from "../council/coordinator";
 import {
 	clearPluginRootsAndCaches,
 	resolveActiveProjectRegistryPath,
@@ -58,6 +59,7 @@ import { copyToClipboard } from "../utils/clipboard";
 import type { InspectImageMode } from "../utils/inspect-image-mode";
 import { CollabQrCodeComponent } from "./helpers/collab-qrcode";
 import { buildContextReportText } from "./helpers/context-report";
+import { councilMoveBlockMessage, handleCouncilCommand } from "./helpers/council";
 import { formatDuration } from "./helpers/format";
 import { createMarketplaceManager } from "./helpers/marketplace-manager";
 import { handleMcpAcp } from "./helpers/mcp";
@@ -397,6 +399,19 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			{ name: "disposition", description: "Set a finding disposition with rationale" },
 		],
 		handle: handleSecurityCommand,
+	},
+	{
+		name: "council",
+		description: "Run a multi-model planning council",
+		acpInputHint: "<task>|status|cancel|resume [run-id]|config",
+		allowArgs: true,
+		subcommands: [
+			{ name: "status", description: "Show the active council run" },
+			{ name: "cancel", description: "Cancel the active council run" },
+			{ name: "resume", description: "Resume an interrupted council run", usage: "[run-id]" },
+			{ name: "config", description: "Open council role configuration" },
+		],
+		handle: handleCouncilCommand,
 	},
 	{
 		name: "settings",
@@ -2011,6 +2026,16 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			if (runtime.session.isStreaming) return usage("Cannot move while streaming.", runtime);
+			const councilBlock = councilMoveBlockMessage(
+				getCouncilCoordinator({
+					session: runtime.session,
+					toolSession: runtime.session.getToolSession(),
+					sessionManager: runtime.sessionManager,
+					settings: runtime.settings,
+					modelRegistry: runtime.session.modelRegistry,
+				}),
+			);
+			if (councilBlock) return usage(councilBlock, runtime);
 			if (!command.args) return usage("Usage: /move <path>", runtime);
 			const resolvedPath = resolveToCwd(command.args, runtime.cwd);
 			try {
@@ -2043,6 +2068,21 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
+			const ctx = runtime.ctx;
+			const councilBlock = councilMoveBlockMessage(
+				getCouncilCoordinator({
+					session: ctx.session,
+					toolSession: ctx.session.getToolSession(),
+					sessionManager: ctx.sessionManager,
+					settings: ctx.settings,
+					modelRegistry: ctx.session.modelRegistry,
+				}),
+			);
+			if (councilBlock) {
+				ctx.showError(councilBlock);
+				ctx.editor.setText("");
+				return;
+			}
 			runtime.ctx.editor.addToHistory(command.text);
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleMoveCommand(command.args || undefined);
@@ -3132,6 +3172,10 @@ export async function executeBuiltinSlashCommand(
 			},
 			refreshCommands: () => ctx.refreshSlashCommandState(),
 			reloadPlugins: () => reloadTuiPluginState(ctx),
+			openCouncilConfig: () => ctx.showModelSelector({ section: "council" }),
+			holdTurn: task => {
+				void task.catch(() => undefined);
+			},
 		};
 		const result = await command.handle(parsed, adapted);
 		ctx.editor.setText("");

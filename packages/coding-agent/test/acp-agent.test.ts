@@ -24,6 +24,7 @@ import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import {
 	ACP_BOOTSTRAP_RACE_GUARD_MS,
 	AcpAgent,
+	type AcpAgentDependencies,
 	createAcpExtensionUiContext,
 } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
@@ -166,6 +167,10 @@ class FakeAgentSession {
 		return {
 			getApiKey: async (_model: Model) => "test-key",
 		};
+	}
+
+	getToolSession(): unknown {
+		return {};
 	}
 
 	getAvailableModels(): Model[] {
@@ -460,7 +465,10 @@ afterEach(async () => {
 });
 
 async function createHarness(
-	options: { elicitationHandler?: (req: CreateElicitationRequest) => Promise<CreateElicitationResponse> } = {},
+	options: {
+		elicitationHandler?: (req: CreateElicitationRequest) => Promise<CreateElicitationResponse>;
+		dependencies?: AcpAgentDependencies;
+	} = {},
 ): Promise<AgentHarness> {
 	const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-acp-test-"));
 	cleanupRoots.push(root);
@@ -495,7 +503,7 @@ async function createHarness(
 		return session as unknown as AgentSession;
 	};
 
-	const agent = new AcpAgent(connection, factory, initialSession as unknown as AgentSession);
+	const agent = new AcpAgent(connection, factory, initialSession as unknown as AgentSession, options.dependencies);
 	if (options.elicitationHandler) {
 		// Drive `initialize` so the agent caches `clientCapabilities.elicitation.form`
 		// and `#requestAcpPlanApprovalChoice` actually goes through the elicitation.
@@ -2701,6 +2709,286 @@ describe("ACP agent", () => {
 			expect(second.sessionId).toBe("session-after-switch");
 			expect(third.sessionId).toBe("session-after-switch");
 		});
+	});
+});
+
+describe("ACP council turn ownership", () => {
+	it("keeps a consumed builtin prompt open until its held council task settles", async () => {
+		const held = Promise.withResolvers<void>();
+		const builtinStarted = Promise.withResolvers<void>();
+		const harness = await createHarness({
+			dependencies: {
+				executeBuiltinSlashCommand: async (text, runtime) => {
+					expect(text).toBe("/council plan the migration");
+					runtime.holdTurn?.(held.promise);
+					builtinStarted.resolve();
+					return { consumed: true };
+				},
+			},
+		});
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		let settled = false;
+		const prompt = harness.agent
+			.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "/council plan the migration" }],
+			})
+			.then(response => {
+				settled = true;
+				return response;
+			});
+		await builtinStarted.promise;
+		await Promise.resolve();
+		expect(settled).toBe(false);
+		expect(harness.findSession(created.sessionId)?.promptCalls).toEqual([]);
+
+		held.resolve();
+		expect(await prompt).toEqual(expect.objectContaining({ stopReason: "end_turn" }));
+	});
+
+	it("gates the agent_end finish path and still resolves the ACP turn exactly once", async () => {
+		const held = Promise.withResolvers<void>();
+		const releaseBuiltin = Promise.withResolvers<void>();
+		const holdInstalled = Promise.withResolvers<void>();
+		const harness = await createHarness({
+			dependencies: {
+				executeBuiltinSlashCommand: async (_text, runtime) => {
+					runtime.holdTurn?.(held.promise);
+					holdInstalled.resolve();
+					await releaseBuiltin.promise;
+					return { consumed: true };
+				},
+			},
+		});
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		let resolveCount = 0;
+		const prompt = harness.agent
+			.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "/council review agent-end" }],
+			})
+			.then(response => {
+				resolveCount++;
+				return response;
+			});
+		await holdInstalled.promise;
+		const assistant = makeAssistantMessage("council kickoff");
+		for (const listener of session.listeners()) {
+			listener({ type: "agent_end", messages: [assistant] } as AgentSessionEvent);
+		}
+		releaseBuiltin.resolve();
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(resolveCount).toBe(0);
+
+		held.resolve();
+		expect(await prompt).toEqual(expect.objectContaining({ stopReason: "end_turn" }));
+		expect(resolveCount).toBe(1);
+	});
+
+	it("settles a held council turn with usage from the latest agent_end", async () => {
+		const held = Promise.withResolvers<void>();
+		const holdInstalled = Promise.withResolvers<void>();
+		const harness = await createHarness({
+			dependencies: {
+				executeBuiltinSlashCommand: async (_text, runtime) => {
+					runtime.holdTurn?.(held.promise);
+					holdInstalled.resolve();
+					return { consumed: true };
+				},
+			},
+		});
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "/council usage accounting" }],
+		});
+		await holdInstalled.promise;
+		for (let index = 0; index < 4; index++) await Promise.resolve();
+
+		const assistant = makeAssistantMessage("final adjudication");
+		session.sessionManager.appendMessage(assistant);
+		for (const listener of session.listeners()) {
+			listener({ type: "agent_end", messages: [assistant] } as AgentSessionEvent);
+		}
+		held.resolve();
+
+		expect((await prompt).usage).toEqual({
+			inputTokens: 10,
+			outputTokens: 5,
+			cachedReadTokens: 2,
+			cachedWriteTokens: 1,
+			totalTokens: 18,
+		});
+	});
+
+	it("cancels Main and a preflight-only council even when its held task never settles, then permits the next turn", async () => {
+		const held = Promise.withResolvers<void>();
+		const holdInstalled = Promise.withResolvers<void>();
+		let councilCancelCalls = 0;
+		const coordinator = {
+			executionInFlight: true,
+			snapshot: undefined,
+			completion: undefined,
+			async cancelForSessionTransition() {
+				councilCancelCalls++;
+			},
+		};
+		const harness = await createHarness({
+			dependencies: {
+				executeBuiltinSlashCommand: async (text, runtime) => {
+					if (text.startsWith("/council start")) {
+						runtime.holdTurn?.(held.promise);
+						holdInstalled.resolve();
+					}
+					return { consumed: true };
+				},
+				getCouncilCoordinator: (() => coordinator) as unknown as NonNullable<
+					AcpAgentDependencies["getCouncilCoordinator"]
+				>,
+			},
+		});
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		let abortCalls = 0;
+		session.abort = async () => {
+			abortCalls++;
+			session.isStreaming = false;
+		};
+		const firstPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "/council start cancellable work" }],
+		});
+		await holdInstalled.promise;
+		await harness.agent.cancel({ sessionId: created.sessionId });
+		expect(await firstPrompt).toEqual(expect.objectContaining({ stopReason: "cancelled" }));
+		expect(councilCancelCalls).toBe(1);
+		expect(abortCalls).toBe(1);
+
+		const later = await harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "/council status" }],
+		});
+		expect(later).toEqual(expect.objectContaining({ stopReason: "end_turn" }));
+	});
+
+	it("suppresses late output and holds from preflight that outlives bounded cancellation", async () => {
+		const preflightStarted = Promise.withResolvers<void>();
+		const releasePreflight = Promise.withResolvers<void>();
+		const lateKickoffFinished = Promise.withResolvers<void>();
+		const secondStarted = Promise.withResolvers<void>();
+		const releaseSecond = Promise.withResolvers<void>();
+		const ghostHold = Promise.withResolvers<void>();
+		const coordinator = {
+			executionInFlight: true,
+			snapshot: undefined,
+			completion: undefined,
+			async cancelForSessionTransition() {
+				// Models the coordinator's bounded transition wait returning while
+				// an uncooperative setup dependency is still in flight.
+			},
+		};
+		const harness = await createHarness({
+			dependencies: {
+				executeBuiltinSlashCommand: async (text, runtime) => {
+					if (text.startsWith("/council start")) {
+						preflightStarted.resolve();
+						await releasePreflight.promise;
+						await runtime.output("late cancelled council output");
+						runtime.holdTurn?.(ghostHold.promise);
+						lateKickoffFinished.resolve();
+					} else if (text === "unrelated next turn") {
+						secondStarted.resolve();
+						await releaseSecond.promise;
+					}
+					return { consumed: true };
+				},
+				getCouncilCoordinator: (() => coordinator) as unknown as NonNullable<
+					AcpAgentDependencies["getCouncilCoordinator"]
+				>,
+			},
+		});
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const cancelledPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "/council start slow preflight" }],
+		});
+		await preflightStarted.promise;
+		await harness.agent.cancel({ sessionId: created.sessionId });
+		expect(await cancelledPrompt).toEqual(expect.objectContaining({ stopReason: "cancelled" }));
+
+		let secondSettled = false;
+		const secondPrompt = harness.agent
+			.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "unrelated next turn" }],
+			})
+			.then(response => {
+				secondSettled = true;
+				return response;
+			});
+		await secondStarted.promise;
+		releasePreflight.resolve();
+		await lateKickoffFinished.promise;
+		for (let index = 0; index < 4; index++) await Promise.resolve();
+
+		expect(
+			harness.updates.some(
+				notification =>
+					notification.update.sessionUpdate === "agent_message_chunk" &&
+					notification.update.content.type === "text" &&
+					notification.update.content.text.includes("late cancelled council output"),
+			),
+		).toBe(false);
+		expect(secondSettled).toBe(false);
+
+		releaseSecond.resolve();
+		expect(await secondPrompt).toEqual(expect.objectContaining({ stopReason: "end_turn" }));
+	});
+
+	it("quarantines the ACP session when Council transition cancellation reaches its deadline", async () => {
+		const held = Promise.withResolvers<void>();
+		const holdInstalled = Promise.withResolvers<void>();
+		let builtinCalls = 0;
+		const coordinator = {
+			executionInFlight: true,
+			snapshot: undefined,
+			completion: held.promise,
+			async cancelForSessionTransition() {
+				throw new Error("Council cancellation did not settle before the transition deadline");
+			},
+		};
+		const harness = await createHarness({
+			dependencies: {
+				executeBuiltinSlashCommand: async (_text, runtime) => {
+					builtinCalls++;
+					runtime.holdTurn?.(held.promise);
+					holdInstalled.resolve();
+					return { consumed: true };
+				},
+				getCouncilCoordinator: (() => coordinator) as unknown as NonNullable<
+					AcpAgentDependencies["getCouncilCoordinator"]
+				>,
+			},
+		});
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const firstPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "/council start uncancellable work" }],
+		});
+		await holdInstalled.promise;
+
+		await harness.agent.cancel({ sessionId: created.sessionId });
+		expect(await firstPrompt).toEqual(expect.objectContaining({ stopReason: "cancelled" }));
+		await expect(
+			harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "must not run after failed cancellation" }],
+			}),
+		).rejects.toThrow("Unsupported ACP session");
+		expect(builtinCalls).toBe(1);
 	});
 });
 

@@ -215,14 +215,20 @@ export interface SessionInitEntry extends SessionEntryBase {
 	modelRole?: string;
 	/** Initially resolved provider/model selector for historical display. */
 	resolvedModel?: string;
+	/** Whether startup credential probing substituted an authenticated fallback model. */
+	authFallbackUsed?: boolean;
 	/** Whether the agent definition is read-only, allowing an exact zero-LoC attribution. */
 	readOnly?: boolean;
+	/** Transcript-only capability retained across parking, failure, cancellation, and reload. */
+	inspectOnly?: boolean;
 	/** Output schema if structured output was requested. */
 	outputSchema?: unknown;
 	/** Enforcement policy recorded with the output schema for faithful revival. */
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	/** Whether revival must retain only the explicitly persisted tool names. */
 	restrictToolNames?: boolean;
+	/** Whether model substitution was disabled for this subagent. */
+	pinModel?: boolean;
 	/** Spawn allowlist the subagent ran with ("" = none, "*" = any, else CSV); absent on pre-spawns files. */
 	spawns?: string;
 	/** The agent's `readSummarize` setting (`false` = read summarization disabled); absent uses the session default. */

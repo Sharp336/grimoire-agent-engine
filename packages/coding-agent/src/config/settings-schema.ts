@@ -154,7 +154,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Discovery & MCP",
 		"Developer",
 	],
-	tasks: ["Modes", "Subagents", "Isolation", "Commands & Skills"],
+	tasks: ["Modes", "Subagents", "Isolation", "Council", "Commands & Skills"],
 	providers: ["Services", "Fireworks", "Tiny Model", "Protocol", "Timeouts", "Privacy"],
 };
 
@@ -312,6 +312,11 @@ export interface ModelTagsSettings {
 	[key: string]: ModelTagDef;
 }
 
+export interface CouncilMemberSetting {
+	role: string;
+	enabled: boolean;
+}
+
 // Typed defaults for array/record settings — named constants avoid `as` casts
 // under `as const` while still letting SettingValue infer the correct element type.
 const EMPTY_STRING_ARRAY: string[] = [];
@@ -321,6 +326,12 @@ const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["hub"];
 const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
 const HINDSIGHT_RECALL_TYPES_DEFAULT: string[] = ["world", "experience"];
+export const DEFAULT_COUNCIL_MEMBERS: CouncilMemberSetting[] = [
+	{ role: "council1", enabled: true },
+	{ role: "council2", enabled: true },
+	{ role: "council3", enabled: true },
+	{ role: "council4", enabled: true },
+];
 export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	{
 		pattern: "^\\s*(cat|head|tail|less|more)\\s+",
@@ -573,6 +584,23 @@ export const SETTINGS_SCHEMA = {
 	modelProviderOrder: { type: "array", default: EMPTY_STRING_ARRAY },
 
 	cycleOrder: { type: "array", default: DEFAULT_CYCLE_ORDER },
+
+	"council.members": { type: "array", default: DEFAULT_COUNCIL_MEMBERS },
+
+	"council.rounds": {
+		type: "number",
+		default: 1,
+		ui: {
+			tab: "tasks",
+			group: "Council",
+			label: "Review Rounds",
+			description: "Number of independent council review rounds",
+			options: [
+				{ value: "1", label: "1", description: "One review round" },
+				{ value: "2", label: "2", description: "Two review rounds" },
+			],
+		},
+	},
 
 	// ────────────────────────────────────────────────────────────────────────
 	// Appearance

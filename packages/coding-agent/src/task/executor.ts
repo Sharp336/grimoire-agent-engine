@@ -39,7 +39,12 @@ import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prom
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
-import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage } from "../sdk";
+import {
+	type CreateAgentSessionOptions,
+	type CreateAgentSessionResult,
+	createAgentSession,
+	discoverAuthStorage,
+} from "../sdk";
 import type { AgentSession, AgentSessionEvent, Prewalk } from "../session/agent-session";
 import type { ArtifactManager } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
@@ -337,6 +342,8 @@ export interface ExecutorOptions {
 	description?: string;
 	index: number;
 	id: string;
+	/** Transcript-only capability persisted on the AgentRef and session contract. */
+	inspectOnly?: boolean;
 	parentToolCallId?: string;
 	/**
 	 * Spawn runs as a detached background job (parent turn not blocked on it).
@@ -356,6 +363,10 @@ export interface ExecutorOptions {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Caller-requested coarse effort (`lo`/`med`/`hi`); maps onto the resolved model's supported thinking range and wins over {@link thinkingLevel}. */
 	effort?: TaskEffort;
+	/** Keep the requested model fixed; suppress auth, prewalk, and retry-chain substitutions. */
+	pinModel?: boolean;
+	/** Ignore agent and settings prewalk configuration for this invocation. */
+	suppressPrewalk?: boolean;
 	/** Schema used to validate the final structured completion. */
 	outputSchema?: unknown;
 	/** Enforcement policy for {@link outputSchema}; defaults to legacy permissive behavior. */
@@ -1002,6 +1013,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		task,
 		assignment,
 		description: args.description,
+		authFallbackUsed: undefined,
 		lastIntent: undefined,
 		recentTools: [],
 		recentOutput: [],
@@ -2213,6 +2225,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		modelRole,
 		resolvedModel: progress.resolvedModel,
 		resolvedModelIsFallback: progress.resolvedModelIsFallback,
+		authFallbackUsed: progress.authFallbackUsed,
 		error: exitCode !== 0 && stderr ? stderr : undefined,
 		aborted: wasAborted,
 		abortReason: finalAbortReason,
@@ -2635,6 +2648,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			...(agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
 			// Isolated runs must not expose roots outside the worktree.
 			...(worktree !== undefined ? { "workspace.additionalDirectories": [] } : undefined),
+			// A restricted tool surface is a complete capability boundary: no independently-tooled/modelled side agents.
+			...(options.restrictToolNames ? { "advisor.enabled": false } : undefined),
 		},
 		options.parentServiceTier,
 	);
@@ -2659,11 +2674,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 	// Add tools if specified
 	let toolNames: string[] | undefined;
-	if (agent.tools && agent.tools.length > 0) {
-		toolNames = agent.tools;
+	if (agent.tools !== undefined) {
+		toolNames = [...agent.tools];
 		// Auto-include task tool if spawns defined but task not in tools
 		if (agent.spawns !== undefined && !toolNames.includes("task") && !atMaxDepth) {
-			toolNames = [...toolNames, "task"];
+			toolNames.push("task");
 		}
 	}
 
@@ -2819,24 +2834,30 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 			const configuredModelPatterns = resolveConfiguredModelPatterns(modelPatterns, settings);
 			const defaultRetryFallbackChain =
-				configuredModelPatterns.length === 1
+				!options.pinModel && configuredModelPatterns.length === 1
 					? resolveSubagentDefaultRetryFallbackChain(subagentSettings, modelRegistry)
 					: undefined;
+			const modelResolution = options.pinModel
+				? {
+						...resolveModelOverride(modelPatterns.slice(0, 1), modelRegistry, settings),
+						authFallbackUsed: false,
+					}
+				: await awaitAbortable(
+						resolveModelOverrideWithAuthFallback(
+							modelPatterns,
+							options.parentActiveModelPattern,
+							modelRegistry,
+							settings,
+							id,
+						),
+					);
 			const {
 				model,
 				thinkingLevel: resolvedThinkingLevel,
 				explicitThinkingLevel,
 				authFallbackUsed,
 				warning: modelResolutionWarning,
-			} = await awaitAbortable(
-				resolveModelOverrideWithAuthFallback(
-					modelPatterns,
-					options.parentActiveModelPattern,
-					modelRegistry,
-					settings,
-					id,
-				),
-			);
+			} = modelResolution;
 			if (modelResolutionWarning) {
 				logger.warn("Subagent model resolution warning", {
 					warning: modelResolutionWarning,
@@ -2844,6 +2865,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				});
 			}
 			if (authFallbackUsed && model) {
+				progress.authFallbackUsed = true;
+				monitor.scheduleProgress(true);
 				logger.warn("Subagent model has no working credentials; falling back to parent session model", {
 					requested: modelPatterns,
 					parentModel: options.parentActiveModelPattern,
@@ -2851,14 +2874,16 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					resolvedModel: model.id,
 				});
 			}
-			const retryFallbackRole = installSubagentRetryFallbackChain({
-				settings: subagentSettings,
-				id,
-				candidates: resolveSubagentRetryFallbackCandidates(modelPatterns, modelRegistry, subagentSettings),
-				defaultFallbackChain: defaultRetryFallbackChain,
-				model,
-				authFallbackUsed,
-			});
+			const retryFallbackRole = options.pinModel
+				? undefined
+				: installSubagentRetryFallbackChain({
+						settings: subagentSettings,
+						id,
+						candidates: resolveSubagentRetryFallbackCandidates(modelPatterns, modelRegistry, subagentSettings),
+						defaultFallbackChain: defaultRetryFallbackChain,
+						model,
+						authFallbackUsed,
+					});
 			if (retryFallbackRole) {
 				logger.debug("Configured subagent runtime model fallback chain", {
 					role: retryFallbackRole,
@@ -2913,7 +2938,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				settingsOverride: settings.get("task.agentPrewalk")[agent.name],
 				agentPrewalk: resolveAgentPrewalkDefault(agent, settings.get("task.prewalk")),
 			});
-			if (prewalkPattern) {
+			if (!options.pinModel && !options.suppressPrewalk && prewalkPattern) {
 				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
 				const resolvedPrewalk = resolveModelOverride([prewalkPattern], modelRegistry, settings);
 				const target = resolvedPrewalk.model;
@@ -2993,12 +3018,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				settings: subagentSettings,
 				model,
 				modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
+				pinModel: options.pinModel,
 				modelPatternAuthFallback:
-					model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
+					!options.pinModel && !model && modelOverride !== undefined
+						? options.parentActiveModelPattern
+						: undefined,
 				modelPatternFallbackRole:
-					model || modelOverride === undefined ? undefined : `${SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX}${id}`,
+					!options.pinModel && !model && modelOverride !== undefined
+						? `${SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX}${id}`
+						: undefined,
 				modelPatternDefaultFallbackChain:
-					model || modelOverride === undefined ? undefined : defaultRetryFallbackChain,
+					!options.pinModel && !model && modelOverride !== undefined ? defaultRetryFallbackChain : undefined,
 				thinkingLevel: effectiveThinkingLevel,
 				thinkingLevelCeiling: spawnEffortCeiling,
 				toolNames,
@@ -3040,6 +3070,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				parentAgentId: options.parentAgentId,
 				agentId: id,
 				agentDisplayName: agent.name,
+				inspectOnly: options.inspectOnly,
 				expectedAgentRef,
 				enableLsp: lspEnabled,
 				enableIrc: options.enableIrc,
@@ -3061,16 +3092,29 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 			sessionOpenedAt = performance.now();
 
-			const sessionPromise = createAgentSession(buildSubagentSessionOptions(sessionManager, null));
-			let session: AgentSession;
+			const sessionPromise: Promise<CreateAgentSessionResult> = createAgentSession(
+				buildSubagentSessionOptions(sessionManager, null),
+			);
+			let createdSession: CreateAgentSessionResult;
 			try {
-				({ session } = await awaitAbortable(sessionPromise));
+				createdSession = await awaitAbortable(sessionPromise);
 			} catch (err) {
 				// Abort raced session startup. The session may still resolve later
 				// holding live LSP/MCP child processes — dispose it when it does so
 				// a cancelled subagent cannot leak them.
 				void sessionPromise.then(created => created.session.dispose()).catch(() => {});
 				throw err;
+			}
+			const session = createdSession.session;
+			const deferredResolution = createdSession.deferredModelResolution;
+			if (deferredResolution) {
+				progress.resolvedModel = deferredResolution.resolvedSelector;
+				progress.authFallbackUsed = deferredResolution.authFallbackUsed;
+				const deferredContextWindow = deferredResolution.resolvedModel.contextWindow;
+				if (deferredContextWindow !== null && deferredContextWindow > 0) {
+					progress.contextWindow = deferredContextWindow;
+				}
+				monitor.scheduleProgress(true);
 			}
 			sessionCreatedAt = performance.now();
 
@@ -3129,12 +3173,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				agent: agent.name,
 				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
 				resolvedModel: progress.resolvedModel,
+				authFallbackUsed: progress.authFallbackUsed,
 				readOnly: isReadOnlyAgent(agent),
+				inspectOnly: options.inspectOnly || undefined,
 				spawns: spawnsEnv,
 				readSummarize: agent.readSummarize,
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
+				pinModel: options.pinModel || undefined,
 			});
 
 			abortSignal.addEventListener(

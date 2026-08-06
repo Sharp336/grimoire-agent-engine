@@ -79,12 +79,12 @@ export function createPersistedSubagentReviverFactory(
 			taskDepth++;
 			parentId = registry.get(parentId)?.parentId;
 		}
-		const subagentSettings = createSubagentSettings(
-			ctx.settings,
-			init.readSummarize === false ? { "read.summarize.enabled": false } : undefined,
-		);
-		const persistedModelPattern =
-			init.modelRole && init.modelRole !== "default"
+		const subagentSettings = createSubagentSettings(ctx.settings, {
+			...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
+		});
+		const persistedModelPattern = init.pinModel
+			? init.resolvedModel
+			: init.modelRole && init.modelRole !== "default"
 				? [formatModelRoleAlias(init.modelRole), ...(init.resolvedModel ? [init.resolvedModel] : [])]
 				: init.resolvedModel;
 		return async expectedRef => {
@@ -98,6 +98,7 @@ export function createPersistedSubagentReviverFactory(
 			// A restricted persisted contract must not consult process-global MCP
 			// state: same-name MCP tools are untrusted capability sources.
 			const restrictToolNames = init.restrictToolNames === true;
+			const enableLsp = ctx.enableLsp && (!restrictToolNames || init.tools.includes("lsp"));
 			const mcpManager = restrictToolNames ? undefined : MCPManager.instance();
 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
 			const { session } = await createAgentSession({
@@ -105,11 +106,13 @@ export function createPersistedSubagentReviverFactory(
 				authStorage: ctx.authStorage,
 				modelRegistry: ctx.modelRegistry,
 				...(persistedModelPattern ? { modelPattern: persistedModelPattern } : {}),
-				modelPatternAuthFallback: init.resolvedModel,
+				modelPatternAuthFallback: init.pinModel ? undefined : init.resolvedModel,
+				pinModel: init.pinModel,
 				settings: subagentSettings,
 				sessionManager: reopened,
 				agentId: ref.id,
 				agentDisplayName: ref.displayName,
+				inspectOnly: ref.inspectOnly,
 				parentTaskPrefix: ref.id,
 				parentAgentId: ref.parentId,
 				expectedAgentRef: expectedRef,
@@ -124,7 +127,8 @@ export function createPersistedSubagentReviverFactory(
 				// createAgentSession default to wildcard ("*").
 				spawns: init.spawns ?? "",
 				hasUI: false,
-				enableLsp: restrictToolNames ? false : ctx.enableLsp,
+				enableLsp,
+				lspReadOnly: restrictToolNames || undefined,
 				...(restrictToolNames
 					? {
 							enableIrc: false,

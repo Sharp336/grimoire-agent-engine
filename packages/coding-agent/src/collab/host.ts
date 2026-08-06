@@ -567,6 +567,7 @@ export class CollabHost {
 					displayName: ref.displayName,
 					kind: ref.kind,
 					parentId: ref.parentId,
+					inspectOnly: ref.inspectOnly,
 					status: ref.status,
 					hasSessionFile: !!ref.sessionFile,
 					createdAt: ref.createdAt,
@@ -588,10 +589,11 @@ export class CollabHost {
 			this.#rejectReadOnly("agent control", fromPeer);
 			return;
 		}
-		// Advisor refs are excluded from snapshots, but reject control by id defensively:
-		// a stale/malicious client must never chat/kill/revive a read-only advisor transcript.
-		if (AgentRegistry.global().get(agentId)?.kind === "advisor") {
-			this.#socket?.send({ t: "error", message: `agent ${agentId}: advisor transcripts are read-only` }, fromPeer);
+		// Reject transcript-only capabilities on the authoritative host even if a
+		// stale or malicious guest fabricates a control command.
+		const controlledRef = AgentRegistry.global().get(agentId);
+		if (controlledRef?.kind === "advisor" || controlledRef?.inspectOnly) {
+			this.#socket?.send({ t: "error", message: `agent ${agentId}: transcript is inspect-only` }, fromPeer);
 			return;
 		}
 		const fail = (err: unknown) => {

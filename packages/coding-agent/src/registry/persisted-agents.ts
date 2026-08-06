@@ -20,6 +20,7 @@ const MAX_METADATA_LINES = 64;
 
 interface PersistedAgentMetadata {
 	activity?: string;
+	inspectOnly?: boolean;
 	createdAt?: number;
 	lastActivity?: number;
 	history?: AgentHistorySummary;
@@ -208,6 +209,7 @@ async function readPersistedAgentMetadata(sessionFile: string): Promise<Persiste
 	const artifactFiles = Promise.all([Bun.file(outputPath).exists(), Bun.file(patchPath).exists()]);
 	let createdAt: number | undefined;
 	let activity: string | undefined;
+	let inspectOnly: boolean | undefined;
 	let history: AgentHistorySummary = {};
 	try {
 		await visitEntriesFromFileStream(
@@ -231,6 +233,7 @@ async function readPersistedAgentMetadata(sessionFile: string): Promise<Persiste
 				}
 				if (record.type !== "session_init") return;
 				createdAt ??= timestampOf(record.timestamp);
+				if (typeof record.inspectOnly === "boolean") inspectOnly = record.inspectOnly;
 				if (typeof record.task === "string") activity = summarizePersistedTask(record.task);
 				const inferred = typeof record.systemPrompt === "string" ? inferBundledAgent(record.systemPrompt) : {};
 				history = {
@@ -252,6 +255,7 @@ async function readPersistedAgentMetadata(sessionFile: string): Promise<Persiste
 	}
 	const [file, [hasOutput, hasPatch]] = await Promise.all([stat, artifactFiles]);
 	return {
+		inspectOnly,
 		activity,
 		createdAt: createdAt ?? file?.birthtimeMs,
 		lastActivity: file?.mtimeMs,
@@ -395,6 +399,7 @@ async function registerPersistedSubagentsFromDir(
 				displayName: id,
 				kind: "sub",
 				parentId: parentId ?? MAIN_AGENT_ID,
+				inspectOnly: metadata.inspectOnly,
 				session: null,
 				sessionFile,
 				activity: metadata.activity,

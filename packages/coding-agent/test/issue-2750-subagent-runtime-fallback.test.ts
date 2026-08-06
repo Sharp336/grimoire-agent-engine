@@ -22,7 +22,7 @@ function model(provider: string, id: string): Model<Api> {
 	});
 }
 
-function createYieldingSession(): AgentSession {
+function createYieldingSession(emitRetryFallback = true): AgentSession {
 	const listeners: Array<(event: { type: string; [key: string]: unknown }) => void> = [];
 	const session = {
 		agent: { state: { systemPrompt: ["test"] } },
@@ -39,12 +39,14 @@ function createYieldingSession(): AgentSession {
 		},
 		prompt: async () => {
 			for (const listener of listeners) {
-				listener({
-					type: "retry_fallback_applied",
-					from: "primary/bad-runtime-model",
-					to: "fallback/working-model",
-					role: "subagent:issue-2750",
-				});
+				if (emitRetryFallback) {
+					listener({
+						type: "retry_fallback_applied",
+						from: "primary/bad-runtime-model",
+						to: "fallback/working-model",
+						role: "subagent:issue-2750",
+					});
+				}
 				listener({
 					type: "tool_execution_end",
 					toolCallId: "tool-yield",
@@ -338,6 +340,9 @@ describe("subagent runtime model resolution", () => {
 		let childModelPatternAuthFallback: unknown;
 		let childModelPatternFallbackRole: unknown;
 		let childModelPatternDefaultFallbackChain: unknown;
+		const resolvedAfterExtensions = model("openai-codex", "gpt-5.5");
+		let persistedInit: { resolvedModel?: string; authFallbackUsed?: boolean } | undefined;
+		const progressFallbackFlags: Array<boolean | undefined> = [];
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			if (!options) throw new Error("Expected createAgentSession options");
 			childModel = options.model;
@@ -345,11 +350,25 @@ describe("subagent runtime model resolution", () => {
 			childModelPatternAuthFallback = options.modelPatternAuthFallback;
 			childModelPatternFallbackRole = options.modelPatternFallbackRole;
 			childModelPatternDefaultFallbackChain = options.modelPatternDefaultFallbackChain;
-			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
+			const session = createYieldingSession(false);
+			session.sessionManager.appendSessionInit = init => {
+				persistedInit = init;
+				return "session-init";
+			};
+			return {
+				session,
+				extensionsResult: {},
+				setToolUIContext: () => {},
+				deferredModelResolution: {
+					resolvedSelector: "openai-codex/gpt-5.5:auto",
+					resolvedModel: resolvedAfterExtensions,
+					authFallbackUsed: true,
+				},
+			} as never;
 		});
 
 		const agent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
-		await runSubprocess({
+		const result = await runSubprocess({
 			cwd: "/tmp",
 			agent,
 			task: "work",
@@ -368,6 +387,7 @@ describe("subagent runtime model resolution", () => {
 				getApiKey: async () => "test-key",
 			} as never,
 			enableLsp: false,
+			onProgress: progress => progressFallbackFlags.push(progress.authFallbackUsed),
 		});
 
 		expect(childModel).toBeUndefined();
@@ -375,5 +395,115 @@ describe("subagent runtime model resolution", () => {
 		expect(childModelPatternAuthFallback).toBe("openai-codex/gpt-5.5");
 		expect(childModelPatternFallbackRole).toBe("subagent:issue-4421");
 		expect(childModelPatternDefaultFallbackChain).toEqual(["openai-codex/gpt-5.6-sol"]);
+		expect(progressFallbackFlags).toContain(true);
+		expect(result.resolvedModel).toBe("openai-codex/gpt-5.5:auto");
+		expect(result.authFallbackUsed).toBe(true);
+		expect(persistedInit).toMatchObject({
+			resolvedModel: "openai-codex/gpt-5.5:auto",
+			authFallbackUsed: true,
+		});
+	});
+
+	it("keeps a pinned model fixed across auth, prewalk, and retry fallback policy", async () => {
+		const primary = model("primary", "requested-model");
+		const parent = model("parent", "authenticated-model");
+		let selectedModel: Model | undefined;
+		let pinModel: boolean | undefined;
+		let authFallback: string | undefined;
+		let fallbackRole: string | undefined;
+		let defaultFallbackChain: string[] | undefined;
+		let retryFallbackChains: unknown;
+		let retryModelFallback: boolean | undefined;
+		let prewalk: unknown;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (!options) throw new Error("Expected createAgentSession options");
+			selectedModel = options.model;
+			pinModel = options.pinModel;
+			authFallback = options.modelPatternAuthFallback;
+			fallbackRole = options.modelPatternFallbackRole;
+			defaultFallbackChain = options.modelPatternDefaultFallbackChain;
+			retryFallbackChains = options.settings?.get("retry.fallbackChains");
+			retryModelFallback = options.settings?.get("retry.modelFallback");
+			prewalk = options.prewalk;
+			return { session: createYieldingSession(false), extensionsResult: {}, setToolUIContext: () => {} } as never;
+		});
+		let authChecks = 0;
+		const agent: AgentDefinition = {
+			name: "task",
+			description: "test",
+			systemPrompt: "test",
+			source: "bundled",
+			prewalk: "parent/authenticated-model",
+		};
+		const result = await runSubprocess({
+			cwd: "/tmp",
+			agent,
+			task: "work",
+			index: 0,
+			id: "pinned-model",
+			modelOverride: ["primary/requested-model", "parent/authenticated-model"],
+			parentActiveModelPattern: "parent/authenticated-model",
+			pinModel: true,
+			settings: Settings.isolated({
+				"retry.modelFallback": true,
+				"retry.fallbackChains": { default: ["parent/authenticated-model"] },
+			}),
+			modelRegistry: {
+				refresh: async () => {},
+				getAvailable: () => [primary, parent],
+				getApiKey: async () => {
+					authChecks++;
+					return "test-key";
+				},
+			} as never,
+			enableLsp: false,
+		});
+
+		expect(selectedModel).toBe(primary);
+		expect(pinModel).toBe(true);
+		expect(authChecks).toBe(0);
+		expect(authFallback).toBeUndefined();
+		expect(fallbackRole).toBeUndefined();
+		expect(defaultFallbackChain).toBeUndefined();
+		expect(retryFallbackChains).toEqual({ default: ["parent/authenticated-model"] });
+		expect(retryModelFallback).toBe(true);
+		expect(prewalk).toBeUndefined();
+		expect(result.resolvedModel).toBe("primary/requested-model");
+		expect(result.authFallbackUsed).toBeUndefined();
+	});
+
+	it("telemeters normal authenticated-parent fallback in progress and the settled result", async () => {
+		const primary = model("primary", "unauthed-model");
+		const parent = model("parent", "authenticated-model");
+		let selectedModel: Model | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (!options) throw new Error("Expected createAgentSession options");
+			selectedModel = options.model;
+			return { session: createYieldingSession(false), extensionsResult: {}, setToolUIContext: () => {} } as never;
+		});
+		const progressFallbackFlags: Array<boolean | undefined> = [];
+		const agent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
+		const result = await runSubprocess({
+			cwd: "/tmp",
+			agent,
+			task: "work",
+			index: 0,
+			id: "auth-fallback-telemetry",
+			modelOverride: "primary/unauthed-model",
+			parentActiveModelPattern: "parent/authenticated-model",
+			settings: Settings.isolated(),
+			modelRegistry: {
+				refresh: async () => {},
+				getAvailable: () => [primary, parent],
+				getApiKey: async (candidate: Model) => (candidate.provider === "parent" ? "authenticated-key" : undefined),
+			} as never,
+			enableLsp: false,
+			onProgress: progress => progressFallbackFlags.push(progress.authFallbackUsed),
+		});
+
+		expect(selectedModel).toBe(parent);
+		expect(progressFallbackFlags).toContain(true);
+		expect(result.resolvedModel).toBe("parent/authenticated-model");
+		expect(result.authFallbackUsed).toBe(true);
 	});
 });

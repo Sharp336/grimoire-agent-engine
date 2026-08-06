@@ -18,6 +18,12 @@ import {
 	CompactionSummaryMessageComponent,
 	createHandoffSummaryMessageComponent,
 } from "../../modes/components/compaction-summary-message";
+import {
+	COUNCIL_SUMMARY_MESSAGE_TYPE,
+	CouncilSummaryComponent,
+	type CouncilSummaryDetails,
+	createCouncilSummaryManifestLoader,
+} from "../../modes/components/council-summary";
 import { CustomMessageComponent } from "../../modes/components/custom-message";
 import { DynamicBorder } from "../../modes/components/dynamic-border";
 import { EvalExecutionComponent } from "../../modes/components/eval-execution";
@@ -91,7 +97,13 @@ function imageLinksForMessage(
 }
 
 export class UiHelpers {
+	readonly #councilSummaryComponents = new Set<CouncilSummaryComponent>();
 	constructor(private ctx: InteractiveModeContext) {}
+	/** Invalidate detached summary hydration before a non-preserving transcript rebuild. */
+	disposeCouncilSummaries(): void {
+		for (const component of this.#councilSummaryComponents) component.dispose();
+		this.#councilSummaryComponents.clear();
+	}
 
 	/** Extract text content from a user message */
 	getUserMessageText(message: Message): string {
@@ -161,6 +173,16 @@ export class UiHelpers {
 				if (message.display) {
 					if (message.customType === "async-result") {
 						this.ctx.chatContainer.addChild(buildAsyncResultBlock(message));
+						break;
+					}
+					if (message.customType === COUNCIL_SUMMARY_MESSAGE_TYPE) {
+						const component = new CouncilSummaryComponent(
+							message as CustomMessage<CouncilSummaryDetails>,
+							createCouncilSummaryManifestLoader(this.ctx.viewSession),
+							() => this.ctx.ui.requestRender(),
+						);
+						this.#councilSummaryComponents.add(component);
+						this.ctx.chatContainer.addChild(component);
 						break;
 					}
 					if (message.customType === LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE) {
@@ -680,6 +702,7 @@ export class UiHelpers {
 		if (preservedChatChildren) {
 			this.ctx.chatContainer.clear();
 		} else {
+			this.disposeCouncilSummaries();
 			this.ctx.resetTranscript();
 		}
 		this.ctx.pendingMessagesContainer.disposeChildren();

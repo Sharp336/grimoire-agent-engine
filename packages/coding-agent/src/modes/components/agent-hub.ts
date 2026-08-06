@@ -64,6 +64,7 @@ import {
 	treeBranch,
 } from "./agent-hub-renderer";
 import { AgentTranscriptViewer } from "./agent-transcript-viewer";
+import type { CouncilSummaryManifestLoader } from "./council-summary";
 import {
 	bottomBorder,
 	divider,
@@ -125,6 +126,8 @@ export interface AgentHubDeps {
 	getTool?: (name: string) => AgentTool | undefined;
 	/** Extension message renderers for custom messages in the transcript. */
 	getMessageRenderer?: (customType: string) => MessageRenderer | undefined;
+	/** Session-pinned loader for durable council summary cards in rebuilt transcripts. */
+	loadCouncilManifest?: CouncilSummaryManifestLoader;
 	/** Cwd used by tool renderers for path shortening; defaults to the project dir. */
 	cwd?: string;
 	/** Mirrors the main transcript's thinking-block visibility. */
@@ -207,6 +210,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	#ui: TUI;
 	#getTool: ((name: string) => AgentTool | undefined) | undefined;
 	#getMessageRenderer: ((customType: string) => MessageRenderer | undefined) | undefined;
+	#loadCouncilManifest: CouncilSummaryManifestLoader | undefined;
 	#cwd: string;
 	#hideThinkingBlock: (() => boolean) | undefined;
 	#proseOnlyThinking: (() => boolean) | undefined;
@@ -239,6 +243,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			} as unknown as TUI);
 		this.#getTool = deps.getTool;
 		this.#getMessageRenderer = deps.getMessageRenderer;
+		this.#loadCouncilManifest = deps.loadCouncilManifest;
 		this.#cwd = deps.cwd ?? getProjectDir();
 		this.#hideThinkingBlock = deps.hideThinkingBlock;
 		this.#proseOnlyThinking = deps.proseOnlyThinking;
@@ -365,6 +370,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			ui: this.#ui,
 			getTool: this.#getTool,
 			getMessageRenderer: this.#getMessageRenderer,
+			loadCouncilManifest: this.#loadCouncilManifest,
 			cwd: this.#cwd,
 			hideThinkingBlock: this.#hideThinkingBlock,
 			proseOnlyThinking: this.#proseOnlyThinking,
@@ -1048,9 +1054,9 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	#activateAgent(ref: AgentRef): void {
 		this.#notice = undefined;
 		const focusAgent = this.#focusAgent;
-		// Advisor refs are read-only transcripts with no live/ revivable session;
-		// open the in-hub chat view (file-backed) instead of trying to focus one.
-		if (ref.kind === "advisor" || this.#remote || !focusAgent) {
+		// Transcript-only capability always opens the read-only viewer, even while
+		// its session is live; it must never route through the focus/editor path.
+		if (ref.kind === "advisor" || ref.inspectOnly || this.#remote || !focusAgent) {
 			this.openChat(ref.id);
 			return;
 		}
@@ -1068,6 +1074,11 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	#reviveSelected(): void {
 		const ref = this.#rows[this.#selectedRow];
 		if (!ref) return;
+		if (ref.inspectOnly) {
+			this.#notice = `"${ref.id}" is inspect-only — cannot be revived.`;
+			this.#requestRender();
+			return;
+		}
 		if (ref.kind === "advisor") {
 			this.#notice = `"${ref.id}" is a read-only advisor transcript — nothing to revive.`;
 			this.#requestRender();
@@ -1097,6 +1108,11 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	#killSelected(): void {
 		const ref = this.#rows[this.#selectedRow];
 		if (!ref) return;
+		if (ref.inspectOnly) {
+			this.#notice = `"${ref.id}" is inspect-only — cannot be killed.`;
+			this.#requestRender();
+			return;
+		}
 		if (ref.kind === "advisor") {
 			this.#notice = `"${ref.id}" is a read-only advisor transcript — cannot be killed.`;
 			this.#requestRender();

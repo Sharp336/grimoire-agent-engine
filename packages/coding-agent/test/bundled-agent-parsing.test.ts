@@ -24,6 +24,17 @@ describe("bundled agent parsing", () => {
 		expect(task?.thinkingLevel).toBe(AUTO_THINKING);
 	});
 
+	it("registers council agents without pinning a model", () => {
+		const expectedTools = ["read", "grep", "glob", "lsp", "ast_grep", "yield"];
+		for (const name of ["council-planner", "council-member"]) {
+			const agent = getBundledAgent(name);
+			expect(agent).toBeDefined();
+			expect(agent?.source).toBe("bundled");
+			expect(agent?.tools).toEqual(expectedTools);
+			expect(agent?.model).toBeUndefined();
+		}
+	});
+
 	// Issue #4761: with `modelRoles.slow: ...:xhigh`, the role's explicit effort
 	// suffix must survive agent-pattern expansion and model resolution for the
 	// bundled agents routed at that role. The executor prefers an explicit

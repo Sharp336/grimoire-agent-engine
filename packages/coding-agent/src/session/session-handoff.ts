@@ -44,6 +44,7 @@ export interface SessionHandoffHost {
 	sessionFile(): string | undefined;
 	baseSystemPrompt(): string[];
 	assertVibeSessionTransitionAllowed(action: string): void;
+	reconcileBeforeSessionTransition(): Promise<void>;
 	setSkipPostTurnMaintenance(timestamp: number | undefined): void;
 	obfuscateTextForProvider(text: string | undefined): string | undefined;
 	deobfuscateFromProvider(text: string): string;
@@ -227,6 +228,7 @@ export class SessionHandoff {
 					return undefined;
 				}
 			}
+			await this.#host.reconcileBeforeSessionTransition();
 			await this.#host.flushPendingBash();
 			await this.#host.sessionManager.flush();
 			advisorRecordersDetached = true;

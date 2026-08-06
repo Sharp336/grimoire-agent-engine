@@ -34,6 +34,7 @@ import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "../thinking";
+import type { ToolSession } from "../tools";
 import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
 import type { SessionManager } from "./session-manager";
@@ -111,12 +112,21 @@ export interface InitialRetryFallbackState {
 	/** Prevent cooldown restoration when startup selected this fallback from live usage health. */
 	pinned?: boolean;
 }
+/**
+ * Immutable per-session policy for model changes initiated by recovery or
+ * usage routing. Explicit user-driven model changes remain available.
+ */
+export interface ModelSwitchPolicy {
+	readonly allowAutomaticSwitches: boolean;
+}
 
 /** Dependencies and initial state used to construct an AgentSession. */
 export interface AgentSessionConfig {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
+	/** Exact ToolSession assembled by the SDK and shared by every mounted tool. */
+	toolSession?: ToolSession;
 	/** Whether the session spawn policy permits the read-only `scout` subagent. Defaults to true. */
 	scoutAllowedBySpawnPolicy?: boolean;
 	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */
@@ -129,6 +139,8 @@ export interface AgentSessionConfig {
 	thinkingLevelCeiling?: Effort;
 	/** Retry chain ownership when startup selected one of its fallback entries. */
 	initialRetryFallback?: InitialRetryFallbackState;
+	/** Construction-time policy for automatic model substitution. Defaults to allowed. */
+	modelSwitchPolicy?: Readonly<ModelSwitchPolicy>;
 	/** Prewalk from the starting model to a fast/cheap target after implementation begins. */
 	prewalk?: Prewalk;
 	/** Force read-only plan mode at start, auto-approve, then switch to the target. */

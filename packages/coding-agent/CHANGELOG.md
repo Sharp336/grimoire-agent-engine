@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added first-class `/council` planning with an ordered Model Hub roster, one or two independent review rounds, pre-spend model validation, explicit same-session recovery, and publication of one adjudicated plan under `plans/`.
+
 ## [17.2.9] - 2026-08-05
 
 ### Breaking Changes

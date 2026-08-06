@@ -328,6 +328,12 @@ export class InputController {
 				this.ctx.lastEscapeTime = 0;
 				return;
 			}
+			// Once Council has reserved Main's streaming turn for adjudication, Esc
+			// cancels the run rather than leaving coordinator state behind.
+			if (this.ctx.isCouncilAdjudicating()) {
+				this.ctx.cancelCouncilRun();
+				return;
+			}
 
 			if (this.ctx.loopModeEnabled) {
 				if (this.ctx.session.isStreaming) {
@@ -378,6 +384,11 @@ export class InputController {
 				this.ctx.updateEditorBorderColor();
 			} else if (this.ctx.session.isStreaming) {
 				this.#abortStreamingTurn();
+			} else if (this.ctx.hasActiveCouncil()) {
+				// A reviewing/planning Council does not own an unrelated user turn:
+				// streaming won above. Once Main is idle, Council owns Esc before
+				// draft preservation and the double-Esc navigation gesture.
+				this.ctx.cancelCouncilRun();
 			} else if (this.ctx.editor.getText().trim()) {
 				// Esc must not destroy an in-progress draft.
 				this.ctx.lastEscapeTime = 0;
@@ -1870,7 +1881,7 @@ export class InputController {
 	}
 
 	toggleToolOutputExpansion(): void {
-		if (this.ctx.hideToolActivity) {
+		if (this.ctx.hideToolActivity && !this.ctx.hasActiveCouncil()) {
 			const visibilityKey = this.ctx.keybindings.getDisplayString("app.tools.toggleVisibility");
 			const visibilityHint = visibilityKey ? `${visibilityKey} or /settings` : "/settings";
 			this.ctx.showStatus(`Tool activity is hidden — show it with ${visibilityHint} before expanding`);
@@ -1885,6 +1896,7 @@ export class InputController {
 
 		if (!this.ctx.hideToolActivity) {
 			this.ctx.toolOutputExpanded = false;
+			this.ctx.setCouncilPaneExpanded(false);
 		}
 
 		for (const child of this.ctx.chatContainer.children) {
@@ -1905,6 +1917,7 @@ export class InputController {
 
 	setToolsExpanded(expanded: boolean): void {
 		this.ctx.toolOutputExpanded = expanded;
+		this.ctx.setCouncilPaneExpanded(expanded);
 		for (const child of this.ctx.chatContainer.children) {
 			if (isExpandable(child)) {
 				child.setExpanded(expanded);

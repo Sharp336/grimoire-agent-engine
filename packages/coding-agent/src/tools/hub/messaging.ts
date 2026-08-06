@@ -105,6 +105,7 @@ export async function executeList(
 			kind: ref.kind,
 			status: ref.status,
 			parentId: ref.parentId,
+			inspectOnly: ref.inspectOnly,
 			unread: bus.unreadCount(ref.id),
 			lastActivity: ref.lastActivity,
 			activity: ref.activity,

@@ -62,17 +62,25 @@ function createRevivedSession(activeToolNames: string[][]): RevivedSessionHandle
 	return { session, observer: () => observer };
 }
 
-async function createPersistedSession(cwd: string, restrictToolNames?: boolean, modelRole?: string): Promise<string> {
+async function createPersistedSession(
+	cwd: string,
+	restrictToolNames?: boolean,
+	modelRole?: string,
+	pinModel?: boolean,
+	tools: string[] = ["read", "yield"],
+	resolvedModel = modelRole ? "anthropic/claude-sonnet-4-5" : undefined,
+): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
 	const sessionFile = manager.getSessionFile();
 	if (!sessionFile) throw new Error("Expected a persisted session file");
 	manager.appendSessionInit({
 		systemPrompt: "persisted prompt",
 		task: "persisted task",
-		tools: ["read", "yield"],
+		tools,
 		restrictToolNames,
 		modelRole,
-		resolvedModel: modelRole ? "anthropic/claude-sonnet-4-5" : undefined,
+		resolvedModel,
+		pinModel,
 	});
 	manager.appendMessage({
 		role: "assistant",
@@ -95,7 +103,7 @@ async function createPersistedSession(cwd: string, restrictToolNames?: boolean, 
 	return sessionFile;
 }
 
-function createFactory(cwd: string, eventBus?: EventBus) {
+function createFactory(cwd: string, eventBus?: EventBus, enableLsp = true) {
 	const parentSession = {
 		sessionManager: {
 			getCwd: () => cwd,
@@ -110,7 +118,7 @@ function createFactory(cwd: string, eventBus?: EventBus) {
 		authStorage: {} as never,
 		modelRegistry: { authStorage: {} } as ModelRegistry,
 		settings: Settings.isolated(),
-		enableLsp: true,
+		enableLsp,
 		eventBus,
 	});
 }
@@ -155,6 +163,53 @@ describe("persisted subagent revival", () => {
 		expect(hostileMcpGetTools).not.toHaveBeenCalled();
 		expect(attemptedDiscovery).toEqual([]);
 		expect(activeToolNames).toEqual([["read", "yield"]]);
+	});
+
+	it("preserves an explicitly selected read-only LSP in a restricted revive while honoring the host prohibition", async () => {
+		const enabledCwd = makeTempDir("@pi-restricted-lsp-revive-");
+		const enabledFile = await createPersistedSession(enabledCwd, true, undefined, undefined, [
+			"read",
+			"lsp",
+			"yield",
+		]);
+		const captured: CreateAgentSessionOptions[] = [];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (!options) throw new Error("Expected revive options");
+			captured.push(options);
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+		const enabledRef = createRef(enabledFile);
+		const enabledReviver = await createFactory(enabledCwd)(enabledRef);
+		if (!enabledReviver) throw new Error("Expected restricted LSP reviver");
+		await enabledReviver(enabledRef);
+
+		const prohibitedCwd = makeTempDir("@pi-restricted-lsp-prohibited-");
+		const prohibitedFile = await createPersistedSession(prohibitedCwd, true, undefined, undefined, [
+			"read",
+			"lsp",
+			"yield",
+		]);
+		const prohibitedRef = createRef(prohibitedFile);
+		const prohibitedReviver = await createFactory(prohibitedCwd, undefined, false)(prohibitedRef);
+		if (!prohibitedReviver) throw new Error("Expected host-prohibited LSP reviver");
+		await prohibitedReviver(prohibitedRef);
+
+		expect(captured[0]).toMatchObject({
+			restrictToolNames: true,
+			enableLsp: true,
+			lspReadOnly: true,
+			enableMCP: false,
+			enableIrc: false,
+			preloadedExtensionPaths: [],
+			preloadedCustomToolPaths: [],
+		});
+		expect(captured[1]).toMatchObject({
+			restrictToolNames: true,
+			enableLsp: false,
+			lspReadOnly: true,
+			enableMCP: false,
+			enableIrc: false,
+		});
 	});
 
 	it("preserves normal revival capability wiring for contracts without the marker", async () => {
@@ -215,6 +270,53 @@ describe("persisted subagent revival", () => {
 
 		expect(capturedOptions?.modelPattern).toBe("anthropic/claude-sonnet-4-5");
 		expect(capturedOptions?.modelPatternAuthFallback).toBe("anthropic/claude-sonnet-4-5");
+	});
+
+	it("preserves pinned model policy across a cold revive", async () => {
+		const cwd = makeTempDir("@pi-pinned-model-revive-");
+		const sessionFile = await createPersistedSession(cwd, false, "review-fast", true);
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.modelPattern).toBe("anthropic/claude-sonnet-4-5");
+		expect(capturedOptions?.modelPatternAuthFallback).toBeUndefined();
+		expect(capturedOptions?.pinModel).toBe(true);
+		expect(capturedOptions?.settings?.get("retry.modelFallback")).toBe(true);
+		expect(capturedOptions?.settings?.get("retry.fallbackChains")).toEqual({});
+	});
+
+	it("revives a prefix-selected pinned run from its persisted concrete SDK resolution", async () => {
+		const cwd = makeTempDir("@pi-prefix-pinned-revive-");
+		const sessionFile = await createPersistedSession(
+			cwd,
+			false,
+			undefined,
+			true,
+			["read", "yield"],
+			"runtime-provider/runtime-model",
+		);
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected prefix-pinned reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.modelPattern).toBe("runtime-provider/runtime-model");
+		expect(capturedOptions?.pinModel).toBe(true);
+		expect(capturedOptions?.modelPatternAuthFallback).toBeUndefined();
 	});
 
 	it("installs an IRC wake monitor that emits cold-revive lifecycle frames on the shared bus", async () => {

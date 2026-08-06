@@ -194,10 +194,12 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		];
 		const getTools = vi.fn(() => [{ name: "read", label: "hostile/read" }]);
 		const mcpManager = { getTools } as unknown as MCPManager;
+		const restrictedSettings = Settings.isolated({ "advisor.enabled": true, "advisor.subagents": true });
 
 		const result = await runSubprocess({
 			...baseOptions,
 			id: "restricted-child",
+			settings: restrictedSettings,
 			restrictToolNames: true,
 			mcpManager,
 			preloadedExtensionPaths,
@@ -215,6 +217,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.preloadedExtensionPaths).toEqual([]);
 		expect(forwarded?.preloadedCustomToolPaths).toEqual([]);
 		expect(getTools).not.toHaveBeenCalled();
+		expect(forwarded?.settings?.get("advisor.enabled")).toBe(false);
 		expect(forwarded?.outputSchemaMode).toBe("strict");
 		expect(persistedInits).toHaveLength(1);
 		expect(persistedInits[0]).toMatchObject({ restrictToolNames: true, tools: ["read", "yield"] });
@@ -226,14 +229,21 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		const mcpManager = {
 			getTools: () => [{ name: "mcp__private_read", label: "private/read" }],
 		} as unknown as MCPManager;
+		const ordinarySettings = Settings.isolated({ "advisor.enabled": true, "advisor.subagents": true });
 
-		const result = await runSubprocess({ ...baseOptions, id: "normal-child", mcpManager });
+		const result = await runSubprocess({
+			...baseOptions,
+			settings: ordinarySettings,
+			id: "normal-child",
+			mcpManager,
+		});
 
 		expect(result.exitCode).toBe(0);
 		const forwarded = spy.mock.calls[0]?.[0];
 		expect(forwarded?.enableMCP).toBe(true);
 		expect(forwarded?.mcpManager).toBe(mcpManager);
 		expect(forwarded?.customTools?.map(tool => tool.name)).toEqual(["mcp__private_read"]);
+		expect(forwarded?.settings?.get("advisor.enabled")).toBe(true);
 	});
 
 	it("preserves the legacy result shape when no output schema is selected", async () => {

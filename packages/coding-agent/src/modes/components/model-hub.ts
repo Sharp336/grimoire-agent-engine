@@ -27,10 +27,12 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../config/model-registry";
 import { type ModelRoleLookup, type ResolvedModelRoleValue, resolveModelRoleValue } from "../../config/model-resolver";
 import { getKnownRoleIds, getRoleInfo } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
+import { CouncilConfigError, type CouncilMemberSetting, parseCouncilConfig } from "../../council/config";
 import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../../thinking";
 import { theme } from "../theme/theme";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
@@ -47,10 +49,9 @@ import { bottomBorder, dividerSplit, row, splitBodyWidth, splitRow, topBorderSpl
 import { renderSegmentTrack } from "./segment-track";
 
 /**
- * A row of the Roles view: a role, a model/wildcard chain-key header, one of a
- * chain's fallback entries, or the trailing "+ New role…". Fallback rows under
- * a chain-key header carry the key in `role` — `retry.fallbackChains` treats
- * roles, `provider/model-id`, and `provider/*` keys uniformly.
+ * A row of the Roles view: a generic role, a model/wildcard chain-key
+ * header, a fallback entry, or one of the council roster controls.
+ * `sectionHeader` rows are presentation-only and never receive focus.
  */
 type RolesRow =
 	| { kind: "role"; role: string }
@@ -58,7 +59,11 @@ type RolesRow =
 	| { kind: "fallback"; role: string; chainIndex: number; selector: string }
 	| { kind: "separator" }
 	| { kind: "newFallback" }
-	| { kind: "newRole" };
+	| { kind: "newRole" }
+	| { kind: "sectionHeader"; section: "council"; label: string; meta: string; error?: string }
+	| { kind: "councilError" }
+	| { kind: "councilRole"; member: CouncilMemberSetting }
+	| { kind: "newCouncilMember" };
 
 /**
  * What the model browser is currently picking for: a role's model, a slot in
@@ -95,12 +100,16 @@ export interface ModelHubCallbacks {
 	onLoginRequest?: (providerId: string) => void;
 	/** Persist a new quick-switch cycle order (the ctrl+p role cycle). */
 	onCycleOrderChange?: (order: string[]) => void;
+	/** Persist the ordered council roster. Model assignments continue through onAssign/onUnassign. */
+	onCouncilRosterChange?: (members: CouncilMemberSetting[]) => void;
 	onCancel: () => void;
 }
 
 export interface ModelHubOptions {
 	/** Preselect this provider's sidebar entry (e.g. when reopening after /login). */
 	initialProviderId?: string;
+	/** Open directly on the requested Roles subsection. */
+	initialSection?: "council";
 }
 
 interface SidebarEntry {
@@ -149,10 +158,27 @@ interface ChipRange {
 	index: number;
 }
 
+interface RoleRowPresentation {
+	dot: string;
+	label: string;
+	value: string;
+	effort: string;
+	provenance: string;
+}
 const PROVIDER_REFRESH_DEBOUNCE_MS = 120;
 const RECENT_LIMIT = 15;
 const SIDEBAR_MIN_WIDTH = 18;
+const COUNCIL_ERROR_MAX_LENGTH = 160;
 const SIDEBAR_MAX_WIDTH = 26;
+const ROLE_LABEL_COLUMN_DIVISOR = 3;
+
+/** Strip terminal controls and collapse user-authored text to one display line. */
+function sanitizeInline(text: string): string {
+	return sanitizeText(text)
+		.replace(/[\r\n\t]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
 
 /**
  * Providers already auto-refreshed this process. Selecting a provider fetches
@@ -182,6 +208,10 @@ export class ModelHubComponent implements Component {
 	#availableItems: ModelBrowserItem[] = [];
 	#recentItems: ModelBrowserItem[] = [];
 	#configError: string | undefined;
+	#councilMembers: CouncilMemberSetting[] = [];
+	#councilRosterRoleIds = new Set<string>();
+	#councilConfigError: string | undefined;
+	#councilRounds: 1 | 2 = 1;
 
 	#entries: SidebarEntry[] = [];
 	// Sidebar sections from the last registry sync; #composeEntries assembles
@@ -207,6 +237,12 @@ export class ModelHubComponent implements Component {
 	#rolesRows: RolesRow[] = [];
 	#roleIndex = 0;
 	#roleHover: number | null = null;
+	#rolesScroll = 0;
+	/** One-shot reveal request; wheel panning deliberately consumes it. */
+	#rolesFollowActive = true;
+	#rolesViewportRows = 1;
+	/** Rendered body line → source row index, rebuilt for every viewport. */
+	#rolesLineToRow = new Map<number, number>();
 
 	#assigning: AssignTarget | null = null;
 	#strip: StripState | null = null;
@@ -227,7 +263,6 @@ export class ModelHubComponent implements Component {
 	#footerRow = 0;
 	#chipRanges: ChipRange[] = [];
 	#lockedLoginLine: number | null = null;
-	#rolesRowStart = 1;
 
 	constructor(
 		tui: TUI,
@@ -256,7 +291,24 @@ export class ModelHubComponent implements Component {
 		this.#syncFromRegistryState();
 
 		const initialProvider = options.initialProviderId;
-		if (initialProvider && this.#entries.some(entry => entry.providerId === initialProvider)) {
+		if (options.initialSection === "council") {
+			this.#setActiveEntry("roles");
+			this.#focus = "list";
+			const councilIndex = this.#rolesRows.findIndex(
+				row => row.kind === "councilError" || row.kind === "councilRole" || row.kind === "newCouncilMember",
+			);
+			if (councilIndex >= 0) {
+				this.#setRoleIndex(councilIndex);
+			} else {
+				const headerIndex = this.#rolesRows.findIndex(
+					row => row.kind === "sectionHeader" && row.section === "council",
+				);
+				if (headerIndex >= 0) {
+					this.#rolesScroll = headerIndex;
+					this.#rolesFollowActive = false;
+				}
+			}
+		} else if (initialProvider && this.#entries.some(entry => entry.providerId === initialProvider)) {
 			this.#setActiveEntry(`provider:${initialProvider}`);
 		} else {
 			this.#setActiveEntry("all");
@@ -297,6 +349,50 @@ export class ModelHubComponent implements Component {
 		return getKnownRoleIds(this.#settings).filter(role => !getRoleInfo(role, this.#settings).hidden);
 	}
 
+	#genericRoleIds(): string[] {
+		return this.#visibleRoleIds().filter(role => !this.#councilRosterRoleIds.has(role));
+	}
+
+	/** Strictly validate the roster before exposing it. Invalid config never falls back to defaults. */
+	#reloadCouncilConfig(): void {
+		this.#councilRosterRoleIds.clear();
+		try {
+			const config = parseCouncilConfig(this.#settings);
+			this.#councilMembers = config.members.map(member => ({
+				role: member.role,
+				enabled: member.enabled,
+			}));
+			this.#councilRounds = config.rounds;
+			for (const member of config.members) this.#councilRosterRoleIds.add(member.role);
+			this.#councilConfigError = undefined;
+		} catch (error) {
+			this.#councilMembers = [];
+			this.#councilRounds = 1;
+			try {
+				const rawMembers: unknown = this.#settings.get("council.members");
+				if (Array.isArray(rawMembers)) {
+					for (const member of rawMembers) {
+						if (
+							typeof member === "object" &&
+							member !== null &&
+							"role" in member &&
+							typeof member.role === "string"
+						) {
+							this.#councilRosterRoleIds.add(member.role);
+						}
+					}
+				}
+			} catch {}
+			const message =
+				error instanceof CouncilConfigError
+					? error.message
+					: error instanceof Error
+						? error.message
+						: String(error);
+			this.#councilConfigError = sanitizeInline(message).slice(0, COUNCIL_ERROR_MAX_LENGTH);
+		}
+	}
+
 	/** Resolve every known role: configured values first, auto-selection for the rest. */
 	#reloadRoles(autoCandidates: ReadonlyArray<Model>): void {
 		const allModels = this.#scopedModels.length > 0 ? autoCandidates : this.#registry.getAll();
@@ -323,6 +419,7 @@ export class ModelHubComponent implements Component {
 			}
 		}
 
+		this.#reloadCouncilConfig();
 		this.#reloadRoles(availableModels);
 		this.#buildRolesRows();
 
@@ -467,6 +564,7 @@ export class ModelHubComponent implements Component {
 		if (!this.#entries.some(entry => entry.id === id)) return;
 		this.#activeEntryId = id;
 		this.#sidebarFollowActive = true;
+		if (id === "roles") this.#rolesFollowActive = true;
 		this.#applyScope();
 		const entry = this.#activeEntry();
 		// Hops must never steal arrow focus: landing on a scope keeps provider
@@ -499,9 +597,15 @@ export class ModelHubComponent implements Component {
 				this.#browser.setItems(this.#availableItems.filter(item => item.provider === providerId));
 				break;
 			}
-			case "roles":
-				this.#roleIndex = Math.min(this.#roleIndex, Math.max(0, this.#rolesRowCount - 1));
+			case "roles": {
+				let index = Math.min(this.#roleIndex, Math.max(0, this.#rolesRowCount - 1));
+				if (!this.#isSelectableRolesRow(this.#rolesRows[index])) {
+					const next = this.#stepRoleIndex(index, 1, { wrap: false });
+					index = next === index ? this.#stepRoleIndex(index, -1, { wrap: false }) : next;
+				}
+				this.#roleIndex = index;
 				break;
+			}
 			default:
 				this.#browser.setShowProvider(true);
 				this.#browser.setItems([...this.#availableItems]);
@@ -530,15 +634,11 @@ export class ModelHubComponent implements Component {
 		}
 	}
 
-	/**
-	 * Rebuild the Roles view rows: each visible role followed by its
-	 * fallback-chain entries, then model-oriented chains (`provider/model-id`
-	 * and `provider/*` keys) as headed groups.
-	 */
+	/** Rebuild generic roles, the council roster, then model-oriented fallback chains. */
 	#buildRolesRows(): void {
 		const rows: RolesRow[] = [];
 		const chains = this.#fallbackChains();
-		for (const role of this.#visibleRoleIds()) {
+		for (const role of this.#genericRoleIds()) {
 			rows.push({ kind: "role", role });
 			const chain = chains[role] ?? [];
 			for (let i = 0; i < chain.length; i++) {
@@ -546,6 +646,25 @@ export class ModelHubComponent implements Component {
 			}
 		}
 		rows.push({ kind: "newRole" });
+		rows.push({ kind: "separator" });
+
+		const enabledCount = this.#councilMembers.reduce((count, member) => count + (member.enabled ? 1 : 0), 0);
+		rows.push({
+			kind: "sectionHeader",
+			section: "council",
+			label: "Council",
+			meta: this.#councilConfigError
+				? "config error"
+				: `${enabledCount}/${this.#councilMembers.length} enabled · rounds ${this.#councilRounds}`,
+			error: this.#councilConfigError,
+		});
+		if (this.#councilConfigError) {
+			rows.push({ kind: "councilError" });
+		} else {
+			for (const member of this.#councilMembers) rows.push({ kind: "councilRole", member });
+			rows.push({ kind: "newCouncilMember" });
+		}
+
 		rows.push({ kind: "separator" });
 		const modelKeys = Object.keys(chains)
 			.filter(key => key.includes("/"))
@@ -801,9 +920,9 @@ export class ModelHubComponent implements Component {
 		this.#openThinkingStrip(item, role, returnToRoles, scope);
 	}
 
-	#unassignRole(role: string): void {
+	#unassignRole(role: string, force = false): void {
 		const assignment = this.#roles[role];
-		if (!assignment || assignment.autoSelected) return;
+		if (!force && (!assignment || assignment.autoSelected)) return;
 		if (this.#settings.get("modelRoleStorage") === "project") {
 			const source = this.#settings.getModelRoleSource(role);
 			this.#callbacks.onUnassign(role, source === "default" ? undefined : source);
@@ -821,7 +940,7 @@ export class ModelHubComponent implements Component {
 		const chips: StripChip[] = [];
 		const scopedStorage = this.#settings.get("modelRoleStorage") === "project";
 		const scopes: readonly ModelRoleSelectionScope[] = scopedStorage ? ["project", "global"] : ["global"];
-		for (const role of this.#visibleRoleIds()) {
+		for (const role of this.#genericRoleIds()) {
 			const info = getRoleInfo(role, this.#settings);
 			const assignment = this.#roles[role];
 			for (const scope of scopes) {
@@ -1039,7 +1158,7 @@ export class ModelHubComponent implements Component {
 		const rowIndex = this.#rolesRows.findIndex(
 			row => row.kind === "fallback" && row.role === target.role && row.selector === selector,
 		);
-		if (rowIndex >= 0) this.#roleIndex = rowIndex;
+		if (rowIndex >= 0) this.#setRoleIndex(rowIndex);
 	}
 
 	/** Persist `role`'s chain through the host callback and rebuild dependent state. */
@@ -1062,7 +1181,7 @@ export class ModelHubComponent implements Component {
 		if (row.chainIndex >= chain.length) return;
 		chain.splice(row.chainIndex, 1);
 		this.#setFallbackChain(row.role, chain);
-		this.#roleIndex = Math.min(this.#roleIndex, Math.max(0, this.#rolesRows.length - 1));
+		this.#setRoleIndex(Math.min(this.#roleIndex, Math.max(0, this.#rolesRows.length - 1)));
 	}
 
 	/** Move a chain entry one slot earlier/later; the cursor follows the moved entry. */
@@ -1072,7 +1191,62 @@ export class ModelHubComponent implements Component {
 		if (row.chainIndex >= chain.length || target < 0 || target >= chain.length) return;
 		[chain[row.chainIndex], chain[target]] = [chain[target], chain[row.chainIndex]];
 		this.#setFallbackChain(row.role, chain);
-		this.#roleIndex += delta;
+		this.#setRoleIndex(this.#roleIndex + delta);
+	}
+
+	/** Persist a roster edit, then restore focus to the edited member in the rebuilt row list. */
+	#persistCouncilMembers(members: CouncilMemberSetting[], focusRole?: string): void {
+		this.#callbacks.onCouncilRosterChange?.(members);
+		this.#refreshAfterMutation();
+		if (focusRole) {
+			const index = this.#rolesRows.findIndex(row => row.kind === "councilRole" && row.member.role === focusRole);
+			if (index >= 0) this.#setRoleIndex(index);
+		}
+	}
+
+	#toggleCouncilMember(role: string): void {
+		const member = this.#councilMembers.find(candidate => candidate.role === role);
+		if (!member) return;
+		const members = this.#councilMembers.map(candidate =>
+			candidate.role === role ? { ...candidate, enabled: !candidate.enabled } : { ...candidate },
+		);
+		this.#persistCouncilMembers(members, role);
+	}
+
+	#moveCouncilMember(role: string, delta: -1 | 1): void {
+		const members = this.#councilMembers.map(member => ({ ...member }));
+		const index = members.findIndex(member => member.role === role);
+		const target = index + delta;
+		if (index < 0 || target < 0 || target >= members.length) return;
+		[members[index], members[target]] = [members[target], members[index]];
+		this.#persistCouncilMembers(members, role);
+	}
+
+	#removeCouncilMember(role: string): void {
+		const index = this.#councilMembers.findIndex(member => member.role === role);
+		if (index < 0) return;
+		const nextMembers = this.#councilMembers
+			.filter(candidate => candidate.role !== role)
+			.map(candidate => ({ ...candidate }));
+		const nextFocus = nextMembers[Math.min(index, nextMembers.length - 1)]?.role;
+		this.#unassignRole(role, true);
+		this.#persistCouncilMembers(nextMembers, nextFocus);
+		if (!nextFocus) {
+			const addIndex = this.#rolesRows.findIndex(row => row.kind === "newCouncilMember");
+			if (addIndex >= 0) this.#setRoleIndex(addIndex);
+		}
+	}
+
+	#addCouncilMember(): void {
+		const used = new Set(this.#councilMembers.map(member => member.role));
+		let suffix = 1;
+		while (used.has(`council${suffix}`)) suffix++;
+		const role = `council${suffix}`;
+		this.#persistCouncilMembers(
+			[...this.#councilMembers.map(member => ({ ...member })), { role, enabled: true }],
+			role,
+		);
+		this.#startAssign(role);
 	}
 
 	#cancelAssign(): void {
@@ -1129,7 +1303,7 @@ export class ModelHubComponent implements Component {
 		if (strip?.kind !== "roleName") return;
 		const name = strip.input.getValue().trim();
 		if (!/^[a-zA-Z][\w-]*$/.test(name)) return;
-		if (this.#visibleRoleIds().includes(name)) return;
+		if (this.#visibleRoleIds().includes(name) || this.#councilRosterRoleIds.has(name)) return;
 		this.#strip = null;
 		this.#chipRanges = [];
 		this.#startAssign(name);
@@ -1271,9 +1445,18 @@ export class ModelHubComponent implements Component {
 		}
 	}
 
-	/** Row count of the roles view (roles, their fallback entries, and the trailing "+ New role…" row). */
+	/** Row count of the combined generic-role and council view. */
 	get #rolesRowCount(): number {
 		return this.#rolesRows.length;
+	}
+
+	#isSelectableRolesRow(row: RolesRow | undefined): boolean {
+		return row !== undefined && row.kind !== "separator" && row.kind !== "sectionHeader";
+	}
+
+	#setRoleIndex(index: number): void {
+		this.#roleIndex = Math.max(0, Math.min(index, Math.max(0, this.#rolesRows.length - 1)));
+		this.#rolesFollowActive = true;
 	}
 
 	/** Enter/click activation for a Roles-view row. */
@@ -1281,6 +1464,9 @@ export class ModelHubComponent implements Component {
 		switch (row.kind) {
 			case "role":
 				this.#startAssign(row.role);
+				return;
+			case "councilRole":
+				this.#startAssign(row.member.role);
 				return;
 			case "chainKey":
 				this.#startAssignFallback(row.role, null);
@@ -1294,7 +1480,12 @@ export class ModelHubComponent implements Component {
 			case "newRole":
 				this.#openRoleNameStrip();
 				return;
+			case "newCouncilMember":
+				this.#addCouncilMember();
+				return;
+			case "councilError":
 			case "separator":
+			case "sectionHeader":
 				return;
 		}
 	}
@@ -1313,7 +1504,7 @@ export class ModelHubComponent implements Component {
 			} else {
 				index = next;
 			}
-			if (this.#rolesRows[index]?.kind !== "separator") return index;
+			if (this.#isSelectableRolesRow(this.#rolesRows[index])) return index;
 		}
 		return from;
 	}
@@ -1328,17 +1519,27 @@ export class ModelHubComponent implements Component {
 			return;
 		}
 		if (matchesSelectUp(data)) {
-			this.#roleIndex = this.#stepRoleIndex(this.#roleIndex, -1);
+			this.#setRoleIndex(this.#stepRoleIndex(this.#roleIndex, -1));
 			return;
 		}
 		if (matchesSelectDown(data)) {
-			this.#roleIndex = this.#stepRoleIndex(this.#roleIndex, 1);
+			this.#setRoleIndex(this.#stepRoleIndex(this.#roleIndex, 1));
 			return;
 		}
 		const row = this.#rolesRows[this.#roleIndex];
+		if (row?.kind === "councilError") return;
 		const role = row?.kind === "role" ? row.role : undefined;
+		const councilRole = row?.kind === "councilRole" ? row.member.role : undefined;
 		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
 			if (row) this.#activateRolesRow(row);
+			return;
+		}
+		if (councilRole && matchesKey(data, "space")) {
+			this.#toggleCouncilMember(councilRole);
+			return;
+		}
+		if (councilRole && matchesKey(data, "delete")) {
+			this.#removeCouncilMember(councilRole);
 			return;
 		}
 		if (matchesKey(data, "backspace") || matchesKey(data, "delete")) {
@@ -1350,25 +1551,32 @@ export class ModelHubComponent implements Component {
 		// Reordering: [ / shift+↑ moves the row earlier, ] / shift+↓ later —
 		// cycle order on a role row, chain order on a fallback row.
 		if (matchesKey(data, "shift+up")) {
+			if (councilRole) return;
 			if (role) this.#moveCycleMembership(role, -1);
 			else if (row?.kind === "fallback") this.#moveFallback(row, -1);
 			return;
 		}
 		if (matchesKey(data, "shift+down")) {
+			if (councilRole) return;
 			if (role) this.#moveCycleMembership(role, 1);
 			else if (row?.kind === "fallback") this.#moveFallback(row, 1);
 			return;
 		}
 		const printable = extractPrintableText(data);
+		if (printable === " " && councilRole) {
+			this.#toggleCouncilMember(councilRole);
+			return;
+		}
 		if (printable === "x") {
-			if (role) this.#unassignRole(role);
+			if (councilRole) this.#unassignRole(councilRole, true);
+			else if (role) this.#unassignRole(role);
 			else if (row?.kind === "fallback") this.#removeFallback(row);
 			else if (row?.kind === "chainKey") this.#setFallbackChain(row.role, []);
 			return;
 		}
 		if (printable === "f") {
 			if (row?.kind === "newFallback") this.#startAssignFallbackKey();
-			else if (row && row.kind !== "newRole" && row.kind !== "separator") {
+			else if (row?.kind === "role" || row?.kind === "chainKey" || row?.kind === "fallback") {
 				this.#startAssignFallback(row.role, null);
 			}
 			return;
@@ -1378,17 +1586,19 @@ export class ModelHubComponent implements Component {
 			return;
 		}
 		if (printable === "[") {
-			if (role) this.#moveCycleMembership(role, -1);
+			if (councilRole) this.#moveCouncilMember(councilRole, -1);
+			else if (role) this.#moveCycleMembership(role, -1);
 			else if (row?.kind === "fallback") this.#moveFallback(row, -1);
 			return;
 		}
 		if (printable === "]") {
-			if (role) this.#moveCycleMembership(role, 1);
+			if (councilRole) this.#moveCouncilMember(councilRole, 1);
+			else if (role) this.#moveCycleMembership(role, 1);
 			else if (row?.kind === "fallback") this.#moveFallback(row, 1);
 			return;
 		}
 		if (printable === "n") {
-			this.#openRoleNameStrip();
+			if (!councilRole && row?.kind !== "newCouncilMember") this.#openRoleNameStrip();
 			return;
 		}
 		if (printable === "t") {
@@ -1458,7 +1668,10 @@ export class ModelHubComponent implements Component {
 				this.#sidebarHover = this.#sidebarEntryIndexAt(contentLine);
 			} else if (overBody) {
 				if (entry.kind === "roles" && this.#assigning === null) {
-					this.#roleIndex = this.#stepRoleIndex(this.#roleIndex, event.wheel > 0 ? 1 : -1, { wrap: false });
+					const maxScroll = Math.max(0, this.#rolesRows.length - this.#rolesViewportRows);
+					this.#rolesScroll = Math.max(0, Math.min(this.#rolesScroll + event.wheel, maxScroll));
+					this.#rolesFollowActive = false;
+					this.#roleHover = null;
 				} else if (this.#isBrowserView(entry)) {
 					this.#browser.routeMouse(event, bodyLine);
 				}
@@ -1469,8 +1682,12 @@ export class ModelHubComponent implements Component {
 		if (event.motion) {
 			this.#sidebarHover = overSidebar ? this.#sidebarEntryIndexAt(contentLine) : null;
 			if (overBody && entry.kind === "roles" && this.#assigning === null) {
-				const roleLine = bodyLine - this.#rolesRowStart;
-				this.#roleHover = roleLine >= 0 && roleLine < this.#rolesRowCount ? roleLine : null;
+				const hoveredRow = this.#rolesLineToRow.get(bodyLine);
+				this.#roleHover = this.#isSelectableRolesRow(
+					hoveredRow === undefined ? undefined : this.#rolesRows[hoveredRow],
+				)
+					? (hoveredRow ?? null)
+					: null;
 			} else {
 				this.#roleHover = null;
 				if (overBody && this.#isBrowserView(entry)) {
@@ -1504,16 +1721,14 @@ export class ModelHubComponent implements Component {
 
 		if (overBody) {
 			if (entry.kind === "roles" && this.#assigning === null) {
-				this.#focus = "list";
-				const roleLine = bodyLine - this.#rolesRowStart;
-				if (roleLine >= 0 && roleLine < this.#rolesRowCount) {
-					const rowDef = this.#rolesRows[roleLine];
-					if (rowDef && rowDef.kind !== "separator") {
-						if (roleLine === this.#roleIndex) {
-							this.#activateRolesRow(rowDef);
-						} else {
-							this.#roleIndex = roleLine;
-						}
+				const rowIndex = this.#rolesLineToRow.get(bodyLine);
+				const rowDef = rowIndex === undefined ? undefined : this.#rolesRows[rowIndex];
+				if (rowIndex !== undefined && this.#isSelectableRolesRow(rowDef)) {
+					this.#focus = "list";
+					if (rowIndex === this.#roleIndex && rowDef) {
+						this.#activateRolesRow(rowDef);
+					} else {
+						this.#setRoleIndex(rowIndex);
 					}
 				}
 			} else if (entry.kind === "provider" && entry.locked && this.#assigning === null) {
@@ -1644,7 +1859,10 @@ export class ModelHubComponent implements Component {
 				);
 			}
 			const info = getRoleInfo(this.#assigning.role, this.#settings);
-			const label = info.tag ?? info.name ?? this.#assigning.role;
+			const label =
+				this.#assigning.kind === "role" && this.#councilRosterRoleIds.has(this.#assigning.role)
+					? this.#roleDisplayLabel(this.#assigning.role, true)
+					: sanitizeInline(info.tag ?? info.name ?? this.#assigning.role);
 			if (this.#assigning.kind === "fallback") {
 				const verb = this.#assigning.index === null ? "Adding fallback for" : "Replacing fallback of";
 				return truncateToWidth(
@@ -1664,9 +1882,20 @@ export class ModelHubComponent implements Component {
 			case "recent":
 				text = `Recently used models${scopedSuffix}`;
 				break;
-			case "roles":
-				text = "Model roles — f adds a retry fallback, cleared roles fall back to auto-selection";
+			case "roles": {
+				const selectedRow = this.#rolesRows[this.#roleIndex];
+				const councilSelected =
+					selectedRow?.kind === "councilError" ||
+					selectedRow?.kind === "councilRole" ||
+					selectedRow?.kind === "newCouncilMember" ||
+					selectedRow?.kind === "sectionHeader";
+				text = councilSelected
+					? selectedRow?.kind === "councilError"
+						? "Council roster — configuration must be fixed in settings before editing"
+						: "Council roster — Enter assigns models; disabled slots remain configured"
+					: "Model roles — f adds a retry fallback, cleared roles fall back to auto-selection";
 				break;
+			}
 			case "provider":
 				if (entry.locked) {
 					text = `${entry.label} · not configured`;
@@ -1681,10 +1910,9 @@ export class ModelHubComponent implements Component {
 				break;
 		}
 		if (this.#configError && entry.kind !== "provider") {
-			text = this.#configError;
-			return truncateToWidth(theme.fg("error", ` ${text}`), width);
+			return truncateToWidth(theme.fg("error", ` ${sanitizeInline(this.#configError)}`), width);
 		}
-		return truncateToWidth(theme.fg("muted", ` ${text}`), width);
+		return truncateToWidth(theme.fg("muted", ` ${sanitizeInline(text)}`), width);
 	}
 
 	/** Clamp a roles row to `width`; the bg band is reserved for mouse hover. */
@@ -1698,130 +1926,240 @@ export class ModelHubComponent implements Component {
 		return out;
 	}
 
+	#roleDisplayLabel(role: string, council: boolean): string {
+		const info = getRoleInfo(role, this.#settings);
+		const modelTags = this.#settings.get("modelTags");
+		let label = info.tag ?? info.name ?? role;
+		if (council && !Object.hasOwn(modelTags, role) && !info.tag) {
+			label = role
+				.replace(/([a-z\d])([A-Z])/g, "$1 $2")
+				.replace(/([A-Za-z])(\d)/g, "$1 $2")
+				.replace(/[-_]+/g, " ")
+				.split(/\s+/)
+				.filter(Boolean)
+				.map(part => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
+				.join(" ");
+		}
+		return sanitizeInline(label);
+	}
+
+	#roleRowPresentation(
+		role: string,
+		displayLabel: string,
+		selected: boolean,
+		labelWidth: number,
+		requiresExplicitSelector: boolean,
+	): RoleRowPresentation {
+		const info = getRoleInfo(role, this.#settings);
+		const assignment = this.#roles[role];
+		const shownLabel = truncateToWidth(sanitizeInline(displayLabel), labelWidth);
+		const cleanLabel = `${shownLabel}${" ".repeat(Math.max(0, labelWidth - visibleWidth(shownLabel)))}`;
+		let dot: string;
+		let label: string;
+		let value: string;
+		let effort = "";
+		let provenance = "";
+		if (assignment && !assignment.autoSelected) {
+			dot = theme.fg(info.color ?? "muted", theme.status.enabled);
+			label = theme.fg(info.color ?? "muted", cleanLabel);
+			const provider = sanitizeInline(assignment.model.provider);
+			const modelId = sanitizeInline(assignment.model.id);
+			value = `${theme.fg("dim", `${provider}/`)}${selected ? theme.fg("accent", modelId) : modelId}`;
+			const glyph = thinkingLevelGlyph(assignment.thinkingLevel);
+			const effortLabel = sanitizeInline(getConfiguredThinkingLevelMetadata(assignment.thinkingLevel).label);
+			if (assignment.thinkingLevel !== ThinkingLevel.Inherit) {
+				effort = theme.fg("dim", glyph ? `${glyph} ${effortLabel}` : effortLabel);
+			}
+			const source = this.#settings.getModelRoleProvenance(role);
+			if (source !== "default") provenance = theme.fg("dim", sanitizeInline(source));
+		} else if (assignment && !requiresExplicitSelector) {
+			dot = theme.fg("dim", theme.status.shadowed);
+			label = theme.fg("dim", cleanLabel);
+			value = theme.fg(
+				"dim",
+				`auto → ${sanitizeInline(assignment.model.provider)}/${sanitizeInline(assignment.model.id)}`,
+			);
+		} else {
+			dot = theme.fg("dim", theme.status.shadowed);
+			label = theme.fg("dim", cleanLabel);
+			value = theme.fg("dim", requiresExplicitSelector ? "unassigned" : "—");
+		}
+		return { dot, label, value, effort, provenance };
+	}
+
+	#renderRoleRow(
+		role: string,
+		displayLabel: string,
+		selected: boolean,
+		hovered: boolean,
+		width: number,
+		labelWidth: number,
+		cycleOrder: readonly string[],
+		enabled?: boolean,
+	): string {
+		const cursor = selected && this.#focus === "list" ? theme.fg("accent", theme.nav.cursor) : " ";
+		const presentation = this.#roleRowPresentation(role, displayLabel, selected, labelWidth, enabled !== undefined);
+		const cycleIndex = cycleOrder.indexOf(role);
+		const cycleBadge = cycleIndex >= 0 ? theme.fg("accent", `${theme.icon.loop}${cycleIndex + 1}`) : "";
+		const rosterBadge =
+			enabled === undefined ? "" : enabled ? `${theme.fg("success", "[on]")} ` : `${theme.fg("dim", "[off]")} `;
+		const right = [presentation.effort, presentation.provenance, cycleBadge]
+			.filter(part => part.length > 0)
+			.join("  ");
+		let line = ` ${cursor} ${rosterBadge}${presentation.dot} ${presentation.label}  ${presentation.value}`;
+		const rightWidth = visibleWidth(right);
+		const lineWidth = visibleWidth(line);
+		if (rightWidth > 0 && lineWidth + rightWidth + 2 <= width) {
+			line = `${line}${" ".repeat(width - lineWidth - rightWidth - 1)}${right}`;
+		}
+		return this.#finishRolesRow(line, width, hovered);
+	}
+
 	#renderRolesView(width: number, rows: number): string[] {
 		const lines: string[] = [];
-		lines.push("");
-		// First row's offset in bodyLine coordinates: the mouse router's
-		// `bodyLine` has already dropped the status row, so this is just the
-		// leading blank line — no extra status-row offset here.
-		this.#rolesRowStart = lines.length;
+		this.#rolesLineToRow.clear();
+		const viewportRows = Math.max(1, rows - 3);
+		this.#rolesViewportRows = viewportRows;
+		const maxScroll = Math.max(0, this.#rolesRows.length - viewportRows);
+		if (this.#rolesFollowActive) {
+			if (this.#roleIndex < this.#rolesScroll) {
+				this.#rolesScroll = this.#roleIndex;
+			} else if (this.#roleIndex >= this.#rolesScroll + viewportRows) {
+				this.#rolesScroll = this.#roleIndex - viewportRows + 1;
+			}
+			this.#rolesFollowActive = false;
+		}
+		this.#rolesScroll = Math.max(0, Math.min(this.#rolesScroll, maxScroll));
 
-		let tagWidth = 0;
+		const above = this.#rolesScroll;
+		lines.push(above > 0 ? truncateToWidth(theme.fg("dim", `  ▲ ${above} more`), width) : "");
+
+		let labelWidth = 0;
+		const labelWidthLimit = Math.max(1, Math.floor(width / ROLE_LABEL_COLUMN_DIVISOR));
 		for (const rowDef of this.#rolesRows) {
-			if (rowDef.kind !== "role") continue;
-			const info = getRoleInfo(rowDef.role, this.#settings);
-			tagWidth = Math.max(tagWidth, visibleWidth(info.tag ?? info.name ?? rowDef.role));
+			if (rowDef.kind === "role") {
+				labelWidth = Math.min(
+					labelWidthLimit,
+					Math.max(labelWidth, visibleWidth(this.#roleDisplayLabel(rowDef.role, false))),
+				);
+			} else if (rowDef.kind === "councilRole") {
+				labelWidth = Math.min(
+					labelWidthLimit,
+					Math.max(labelWidth, visibleWidth(this.#roleDisplayLabel(rowDef.member.role, true))),
+				);
+			}
 		}
 
 		const cycleOrder = this.#cycleOrder();
-		const listFocused = this.#focus === "list";
-		for (let i = 0; i < this.#rolesRows.length && lines.length < rows - 2; i++) {
-			const rowDef = this.#rolesRows[i];
+		const end = Math.min(this.#rolesRows.length, this.#rolesScroll + viewportRows);
+		for (let index = this.#rolesScroll; index < end; index++) {
+			const rowDef = this.#rolesRows[index];
 			if (!rowDef) continue;
-			const selected = i === this.#roleIndex;
-			const hovered = i === this.#roleHover;
-			// The unfocused pane draws no cursor; accent text still marks the row.
-			const cursor = selected && listFocused ? theme.fg("accent", theme.nav.cursor) : " ";
+			this.#rolesLineToRow.set(lines.length, index);
+			const selected = index === this.#roleIndex;
+			const hovered = index === this.#roleHover;
+			const cursor = selected && this.#focus === "list" ? theme.fg("accent", theme.nav.cursor) : " ";
 
 			if (rowDef.kind === "separator") {
 				lines.push(`   ${theme.fg("border", "─".repeat(Math.max(1, width - 6)))}`);
 				continue;
 			}
-
-			if (rowDef.kind === "newRole" || rowDef.kind === "newFallback") {
-				const label = rowDef.kind === "newRole" ? "+ New role…" : "+ New fallback…";
-				let line = ` ${cursor} ${theme.fg(selected ? "accent" : "dim", label)}`;
-				line = this.#finishRolesRow(line, width, hovered);
-				lines.push(line);
+			if (rowDef.kind === "sectionHeader") {
+				const label = theme.bold(theme.fg("accent", sanitizeInline(rowDef.label)));
+				const meta = theme.fg("dim", sanitizeInline(rowDef.meta));
+				const error = rowDef.error ? ` ${theme.fg("error", `— ${sanitizeInline(rowDef.error)}`)}` : "";
+				lines.push(truncateToWidth(`   ${label}  ${meta}${error}`, width));
 				continue;
 			}
-
+			if (rowDef.kind === "councilError") {
+				const label = "Council configuration is invalid; edit settings to continue";
+				lines.push(
+					this.#finishRolesRow(` ${cursor} ${theme.fg(selected ? "error" : "dim", label)}`, width, hovered),
+				);
+				continue;
+			}
+			if (rowDef.kind === "newRole" || rowDef.kind === "newFallback" || rowDef.kind === "newCouncilMember") {
+				const label =
+					rowDef.kind === "newRole"
+						? "+ New role…"
+						: rowDef.kind === "newFallback"
+							? "+ New fallback…"
+							: "+ Add council member…";
+				lines.push(
+					this.#finishRolesRow(` ${cursor} ${theme.fg(selected ? "accent" : "dim", label)}`, width, hovered),
+				);
+				continue;
+			}
 			if (rowDef.kind === "chainKey") {
-				const key = rowDef.role;
+				const key = sanitizeInline(rowDef.role);
 				const slash = key.lastIndexOf("/");
 				const tail = key.slice(slash + 1);
 				const keyStyled = theme.fg("dim", key.slice(0, slash + 1)) + (selected ? theme.fg("accent", tail) : tail);
-				let line = ` ${cursor} ${theme.fg("dim", theme.status.shadowed)} ${keyStyled}`;
-				line = this.#finishRolesRow(line, width, hovered);
-				lines.push(line);
+				lines.push(
+					this.#finishRolesRow(
+						` ${cursor} ${theme.fg("dim", theme.status.shadowed)} ${keyStyled}`,
+						width,
+						hovered,
+					),
+				);
 				continue;
 			}
-
 			if (rowDef.kind === "fallback") {
-				const branch = theme.fg("dim", `${"".padEnd(tagWidth + 3)}↳`);
-				const selector = selected ? theme.fg("accent", rowDef.selector) : theme.fg("muted", rowDef.selector);
-				let line = ` ${cursor} ${branch} ${selector}`;
-				line = this.#finishRolesRow(line, width, hovered);
-				lines.push(line);
+				const branch = theme.fg("dim", `${"".padEnd(labelWidth + 3)}↳`);
+				const cleanSelector = sanitizeInline(rowDef.selector);
+				const selector = selected ? theme.fg("accent", cleanSelector) : theme.fg("muted", cleanSelector);
+				lines.push(this.#finishRolesRow(` ${cursor} ${branch} ${selector}`, width, hovered));
 				continue;
 			}
-
-			const role = rowDef.role;
-			const info = getRoleInfo(role, this.#settings);
-			const assignment = this.#roles[role];
-			const tag = (info.tag ?? info.name ?? role).padEnd(tagWidth);
-
-			let dot: string;
-			let tagStyled: string;
-			let value: string;
-			let levelStyled = "";
-			if (assignment && !assignment.autoSelected) {
-				dot = theme.fg(info.color ?? "muted", theme.status.enabled);
-				tagStyled = theme.fg(info.color ?? "muted", tag);
-				value = `${theme.fg("dim", `${assignment.model.provider}/`)}${selected ? theme.fg("accent", assignment.model.id) : assignment.model.id}`;
-				const glyph = thinkingLevelGlyph(assignment.thinkingLevel);
-				const label = getConfiguredThinkingLevelMetadata(assignment.thinkingLevel).label;
-				if (assignment.thinkingLevel !== ThinkingLevel.Inherit) {
-					levelStyled = theme.fg("dim", glyph ? `${glyph} ${label}` : label);
-				}
-			} else if (assignment) {
-				dot = theme.fg("dim", theme.status.shadowed);
-				tagStyled = theme.fg("dim", tag);
-				value = theme.fg("dim", `auto → ${assignment.model.provider}/${assignment.model.id}`);
-			} else {
-				dot = theme.fg("dim", theme.status.shadowed);
-				tagStyled = theme.fg("dim", tag);
-				value = theme.fg("dim", "—");
-			}
-
-			// Quick-cycle membership badge (`⟳2` = second stop of the ctrl+p cycle).
-			const cycleIndex = cycleOrder.indexOf(role);
-			const cycleStyled = cycleIndex >= 0 ? theme.fg("accent", `${theme.icon.loop}${cycleIndex + 1}`) : "";
-
-			let line = ` ${cursor} ${dot} ${tagStyled}  ${value}`;
-			const right = [levelStyled, cycleStyled].filter(part => part.length > 0).join("  ");
-			const rightWidth = visibleWidth(right);
-			const lineWidth = visibleWidth(line);
-			if (rightWidth > 0 && lineWidth + rightWidth + 2 <= width) {
-				line = `${line}${" ".repeat(width - lineWidth - rightWidth - 1)}${right}`;
-			}
-			line = this.#finishRolesRow(line, width, hovered);
-			lines.push(line);
-		}
-
-		// Live preview of the quick-switch cycle, rendered with the exact
-		// segment track the ctrl+p status uses; the selected role's chip fills.
-		while (lines.length < rows - 1) lines.push("");
-		if (rows >= 2) {
-			const cycleKey = getKeybindings().getKeys("app.model.cycleForward")[0] ?? "ctrl+p";
-			if (cycleOrder.length > 0) {
-				const selectedRow = this.#rolesRows[this.#roleIndex];
-				const selectedRole =
-					selectedRow && (selectedRow.kind === "role" || selectedRow.kind === "fallback") ? selectedRow.role : "";
-				const activeIndex = cycleOrder.indexOf(selectedRole);
-				const track = renderSegmentTrack(
-					cycleOrder.map(role => ({ label: role })),
-					activeIndex,
+			if (rowDef.kind === "councilRole") {
+				lines.push(
+					this.#renderRoleRow(
+						rowDef.member.role,
+						this.#roleDisplayLabel(rowDef.member.role, true),
+						selected,
+						hovered,
+						width,
+						labelWidth,
+						cycleOrder,
+						rowDef.member.enabled,
+					),
 				);
-				lines[rows - 1] = truncateToWidth(`  ${theme.fg("dim", `${cycleKey} cycle:`)} ${track}`, width);
-			} else {
-				lines[rows - 1] = truncateToWidth(
-					theme.fg("dim", `  ${cycleKey} cycle is empty — press c on a role to add it`),
+				continue;
+			}
+			lines.push(
+				this.#renderRoleRow(
+					rowDef.role,
+					this.#roleDisplayLabel(rowDef.role, false),
+					selected,
+					hovered,
 					width,
-				);
-			}
+					labelWidth,
+					cycleOrder,
+				),
+			);
 		}
-		return lines;
+		while (lines.length < viewportRows + 1) lines.push("");
+
+		const below = Math.max(0, this.#rolesRows.length - (this.#rolesScroll + viewportRows));
+		lines.push(below > 0 ? truncateToWidth(theme.fg("dim", `  ▼ ${below} more`), width) : "");
+
+		const cycleKey = getKeybindings().getKeys("app.model.cycleForward")[0] ?? "ctrl+p";
+		if (cycleOrder.length > 0) {
+			const selectedRow = this.#rolesRows[this.#roleIndex];
+			const selectedRole =
+				selectedRow && (selectedRow.kind === "role" || selectedRow.kind === "fallback") ? selectedRow.role : "";
+			const activeIndex = cycleOrder.indexOf(selectedRole);
+			const track = renderSegmentTrack(
+				cycleOrder.map(role => ({ label: sanitizeInline(role) })),
+				activeIndex,
+			);
+			lines.push(truncateToWidth(`  ${theme.fg("dim", `${cycleKey} cycle:`)} ${track}`, width));
+		} else {
+			lines.push(
+				truncateToWidth(theme.fg("dim", `  ${cycleKey} cycle is empty — press c on a role to add it`), width),
+			);
+		}
+		return lines.slice(0, rows);
 	}
 
 	#renderLockedView(entry: SidebarEntry, width: number, rows: number): string[] {
@@ -1886,6 +2224,15 @@ export class ModelHubComponent implements Component {
 				return "↑/↓ providers · → roles · Esc close";
 			}
 			const row = this.#rolesRows[this.#roleIndex];
+			if (row?.kind === "councilError") {
+				return "↑/↓ rows · Fix council configuration in settings · ← providers";
+			}
+			if (row?.kind === "councilRole") {
+				return "↑/↓ rows · Enter model · Space toggle · [/] reorder · x unassign · Del remove · ← providers";
+			}
+			if (row?.kind === "newCouncilMember") {
+				return "↑/↓ rows · Enter add + assign council member · ← providers";
+			}
 			if (row?.kind === "fallback") {
 				return "↑/↓ rows · Enter replace · f add another · x remove · [/] reorder · ← providers";
 			}

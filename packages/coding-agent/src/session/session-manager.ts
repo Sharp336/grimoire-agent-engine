@@ -2068,10 +2068,13 @@ export class SessionManager {
 		agent?: string;
 		modelRole?: string;
 		resolvedModel?: string;
+		authFallbackUsed?: boolean;
 		readOnly?: boolean;
+		inspectOnly?: boolean;
 		outputSchema?: unknown;
 		outputSchemaMode?: StructuredSubagentSchemaMode;
 		restrictToolNames?: boolean;
+		pinModel?: boolean;
 		spawns?: string;
 		readSummarize?: boolean;
 	}): string {
@@ -2561,9 +2564,12 @@ export class SessionManager {
 			agent?: string;
 			modelRole?: string;
 			resolvedModel?: string;
+			authFallbackUsed?: boolean;
+			inspectOnly?: boolean;
 			outputSchema?: unknown;
 			outputSchemaMode?: StructuredSubagentSchemaMode;
 			restrictToolNames?: boolean;
+			pinModel?: boolean;
 			spawns?: string;
 			readSummarize?: boolean;
 		} | null;
@@ -2584,9 +2590,12 @@ export class SessionManager {
 			agent?: string;
 			modelRole?: string;
 			resolvedModel?: string;
+			authFallbackUsed?: boolean;
+			inspectOnly?: boolean;
 			outputSchema?: unknown;
 			outputSchemaMode?: StructuredSubagentSchemaMode;
 			restrictToolNames?: boolean;
+			pinModel?: boolean;
 			spawns?: string;
 			readSummarize?: boolean;
 		} | null = null;
@@ -2600,9 +2609,12 @@ export class SessionManager {
 					agent: entry.agent,
 					modelRole: entry.modelRole,
 					resolvedModel: entry.resolvedModel,
+					authFallbackUsed: entry.authFallbackUsed,
+					inspectOnly: entry.inspectOnly,
 					outputSchema: entry.outputSchema,
 					outputSchemaMode: entry.outputSchemaMode,
 					restrictToolNames: entry.restrictToolNames,
+					pinModel: entry.pinModel,
 					readSummarize: entry.readSummarize,
 					spawns: entry.spawns,
 				};

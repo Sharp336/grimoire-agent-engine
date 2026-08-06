@@ -41,6 +41,7 @@ import {
 import type { AgentSessionEvent } from "./agent-session-events";
 import type {
 	InitialRetryFallbackState,
+	ModelSwitchPolicy,
 	UsageFallbackConfirmation,
 	UsageFallbackConfirmer,
 } from "./agent-session-types";
@@ -159,6 +160,7 @@ export interface TurnRecoveryHost {
 /** Construction-time retry state restored from model selection. */
 export interface TurnRecoveryOptions {
 	initialRetryFallback?: InitialRetryFallbackState;
+	modelSwitchPolicy?: Readonly<ModelSwitchPolicy>;
 }
 
 type PendingRecoveredRetryError = {
@@ -178,6 +180,7 @@ type UsageLimitOutcome = {
 /** Owns terminal-stop recovery, automatic retries, and fallback routing. */
 export class TurnRecovery {
 	readonly #host: TurnRecoveryHost;
+	readonly #modelSwitchPolicy: Readonly<ModelSwitchPolicy>;
 	#retryAbortController: AbortController | undefined;
 	#retryAttempt = 0;
 	#retryPromise: Promise<void> | undefined;
@@ -192,6 +195,9 @@ export class TurnRecovery {
 
 	constructor(host: TurnRecoveryHost, options: TurnRecoveryOptions = {}) {
 		this.#host = host;
+		this.#modelSwitchPolicy = Object.freeze({
+			allowAutomaticSwitches: options.modelSwitchPolicy?.allowAutomaticSwitches ?? true,
+		});
 		if (options.initialRetryFallback) {
 			this.#activeRetryFallback = {
 				...options.initialRetryFallback,
@@ -1159,6 +1165,7 @@ export class TurnRecovery {
 			return false;
 		}
 		if (!this.#host.settings.get("retry.modelFallback")) return false;
+		if (!this.#modelSwitchPolicy.allowAutomaticSwitches) return false;
 
 		const role = this.#activeRetryFallback?.role ?? this.resolveRetryFallbackRole(currentSelector, currentModel);
 		if (!role) return false;
@@ -1268,6 +1275,7 @@ export class TurnRecovery {
 		currentSelector: string,
 		options?: { pinFallback?: boolean; apiKey?: string; signal?: AbortSignal },
 	): Promise<boolean> {
+		if (!this.#modelSwitchPolicy.allowAutomaticSwitches) return false;
 		const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 		const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 		if (!candidate) {
@@ -1327,6 +1335,7 @@ export class TurnRecovery {
 	}
 
 	async #tryRetryModelFallback(currentSelector: string, options?: { pinFallback?: boolean }): Promise<boolean> {
+		if (!this.#modelSwitchPolicy.allowAutomaticSwitches) return false;
 		const role = this.#activeRetryFallback?.role ?? this.resolveRetryFallbackRole(currentSelector);
 		if (!role) return false;
 
@@ -1364,6 +1373,7 @@ export class TurnRecovery {
 	 * Requires the base model to exist in the registry.
 	 */
 	isFireworksFastFallbackEligible(message: AssistantMessage): boolean {
+		if (!this.#modelSwitchPolicy.allowAutomaticSwitches) return false;
 		const model = this.#activeFireworksFastModel();
 		if (!model) return false;
 		if (message.stopReason !== "error") return false;
@@ -1390,6 +1400,7 @@ export class TurnRecovery {
 	 * `pinFallback`), and turns that already emitted replay-unsafe output.
 	 */
 	isHardErrorFallbackEligible(message: AssistantMessage): boolean {
+		if (!this.#modelSwitchPolicy.allowAutomaticSwitches) return false;
 		if (message.stopReason !== "error") return false;
 		if (this.#isUsagePreflightBlocked(message)) return false;
 		const model = this.#host.model();
@@ -1414,6 +1425,7 @@ export class TurnRecovery {
 	 * model is not a fast variant, the base id is missing, or it has no key.
 	 */
 	async #tryFireworksFastFallback(currentSelector: string): Promise<boolean> {
+		if (!this.#modelSwitchPolicy.allowAutomaticSwitches) return false;
 		const model = this.#activeFireworksFastModel();
 		if (!model) return false;
 		const baseModel = this.#host.modelRegistry.find("fireworks", toFireworksBaseModelId(model.id));
@@ -1434,6 +1446,7 @@ export class TurnRecovery {
 	}
 
 	async #maybeRestoreRetryFallbackPrimary(): Promise<void> {
+		if (!this.#modelSwitchPolicy.allowAutomaticSwitches) return;
 		if (!this.#activeRetryFallback) return;
 		if (this.#activeRetryFallback.pinned) return;
 		if (this.#getRetryFallbackRevertPolicy() !== "cooldown-expiry") return;
@@ -1647,7 +1660,8 @@ export class TurnRecovery {
 			}
 		}
 
-		const allowModelFallback = options?.allowModelFallback !== false;
+		const allowModelFallback =
+			this.#modelSwitchPolicy.allowAutomaticSwitches && options?.allowModelFallback !== false;
 		const currentModel = this.#host.model();
 		const currentSelector = currentModel
 			? formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel())

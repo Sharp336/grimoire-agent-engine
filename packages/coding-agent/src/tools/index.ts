@@ -31,6 +31,7 @@ import type { SessionManager } from "../session/session-manager";
 import type { ToolChoiceQueue } from "../session/tool-choice-queue";
 import { TaskTool } from "../task";
 import type { AgentOutputManager } from "../task/output-manager";
+import type { Semaphore } from "../task/parallel";
 import { canSpawnAtDepth, type StructuredSubagentSchemaMode } from "../task/types";
 import type { EventBus } from "../utils/event-bus";
 import { type InspectImageMode, isInspectImageToolActive } from "../utils/inspect-image-mode";
@@ -60,7 +61,7 @@ import { MemoryReflectTool } from "./memory-reflect";
 import { MemoryRetainTool } from "./memory-retain";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
-import type { PlanProposalHandler } from "./resolve";
+import type { CouncilAdjudicationHandler, PlanProposalHandler } from "./resolve";
 import { SecurityScanTool } from "./security-scan";
 import { type TodoPhase, TodoTool } from "./todo";
 import { WriteTool } from "./write";
@@ -231,8 +232,11 @@ export interface ToolSession {
 	getEvalSessionId?: () => string | null;
 	/** Get session file */
 	getSessionFile: () => string | null;
-	/** Parent session journal used by tools that persist runtime lifecycle state. */
-	sessionManager?: Pick<SessionManager, "appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries">;
+	/** Parent session journal and identity used by tools that persist session-scoped runtime state. */
+	sessionManager?: Pick<
+		SessionManager,
+		"appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries" | "getSessionId"
+	>;
 	/** Get eval kernel owner ID for session-scoped retained-kernel cleanup. */
 	getEvalKernelOwnerId?: () => string | null;
 	/** Reject new eval work once session disposal has started. */
@@ -300,6 +304,8 @@ export interface ToolSession {
 	 * session never borrows the owning session's manager by accident.
 	 */
 	asyncJobManager?: AsyncJobManager;
+	/** Session-owned limiter shared by every task-spawn caller in this agent session. */
+	spawnSemaphore?: Semaphore;
 	/** MCP manager visible to subagents without relying on the process-global singleton. */
 	mcpManager?: MCPManager;
 	/** Local protocol root to propagate to nested subagents and eval-created agents. */
@@ -347,6 +353,10 @@ export interface ToolSession {
 	peekPlanProposalHandler?(): PlanProposalHandler | undefined;
 	/** Register or clear the plan-proposal handler. Passing `null` clears it. */
 	setPlanProposalHandler?(handler: PlanProposalHandler | null): void;
+	/** Peek the adjudication handler installed by the active council run. */
+	peekCouncilHandler?(): CouncilAdjudicationHandler | undefined;
+	/** Register or clear the active council run's adjudication handler. */
+	setCouncilHandler?(handler: CouncilAdjudicationHandler | null): void;
 	/** Get active checkpoint state if any. */
 	getCheckpointState?: () => CheckpointState | undefined;
 	/** Set or clear active checkpoint state. */

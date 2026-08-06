@@ -432,6 +432,8 @@ export interface AgentProgress {
 	resolvedModel?: string;
 	/** True when {@link resolvedModel} is the target of an active retry fallback (not the originally configured model). Lets observer-only UIs (collab guests, Agent Hub rows with no live session) flag the fallback and keep the provider. */
 	resolvedModelIsFallback?: boolean;
+	/** True when initial credential resolution substituted the authenticated parent model. */
+	authFallbackUsed?: boolean;
 	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
 	extractedToolData?: Record<string, unknown[]>;
 	/**
@@ -503,6 +505,8 @@ export interface SingleResult {
 	resolvedModel?: string;
 	/** True when {@link resolvedModel} is the target of an active retry fallback. Mirrors {@link AgentProgress.resolvedModelIsFallback} onto the settled result. */
 	resolvedModelIsFallback?: boolean;
+	/** True when initial credential resolution substituted the authenticated parent model. */
+	authFallbackUsed?: boolean;
 	error?: string;
 	aborted?: boolean;
 	abortReason?: string;

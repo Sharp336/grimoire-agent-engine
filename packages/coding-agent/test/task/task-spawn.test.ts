@@ -16,10 +16,10 @@ import { type AsyncJob, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
+import { getSessionSpawnSemaphore, TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
-import type { AgentDefinition, SingleResult, TaskParams } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { AgentDefinition, AgentProgress, SingleResult, TaskParams } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 const taskAgent: AgentDefinition = {
@@ -148,6 +148,62 @@ describe("task spawn routing", () => {
 		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["openai/gpt-4.1-mini"]);
 	});
 
+	it("projects auth fallback metadata from background progress and the settled result", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		const progressReported = deferred();
+		const settle = deferred();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			const progress: AgentProgress = {
+				index: 0,
+				id: options.id ?? "FallbackProjection",
+				agent: "task",
+				agentSource: "bundled",
+				status: "running",
+				task: "task prompt",
+				recentTools: [],
+				recentOutput: [],
+				toolCount: 0,
+				requests: 0,
+				tokens: 0,
+				cost: 0,
+				durationMs: 0,
+				resolvedModel: "parent/authenticated-model",
+				authFallbackUsed: true,
+			};
+			options.onProgress?.(progress);
+			progressReported.resolve();
+			await settle.promise;
+			return makeResult(options.id ?? "FallbackProjection", {
+				resolvedModel: "parent/authenticated-model",
+				authFallbackUsed: true,
+			});
+		});
+		const manager = createManager();
+		const tool = await TaskTool.create(createSession({ manager }));
+		const spawned = await tool.execute("tc-auth-fallback", {
+			agent: "task",
+			name: "FallbackProjection",
+			task: "Do the thing.",
+		} as TaskParams);
+		const jobId = spawned.details?.async?.jobId;
+		if (!jobId) throw new Error("Expected background job id");
+		const job = manager.getJob(jobId);
+		if (!job) throw new Error("Expected background job");
+
+		await progressReported.promise;
+		expect(job.latestDetails).toMatchObject({
+			progress: [{ resolvedModel: "parent/authenticated-model", authFallbackUsed: true }],
+		});
+		settle.resolve();
+		await job.promise;
+		expect(job.latestDetails).toMatchObject({
+			progress: [{ resolvedModel: "parent/authenticated-model", authFallbackUsed: true, status: "completed" }],
+		});
+	});
+
 	it("bounds concurrent job bodies with the session spawn semaphore", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 			agents: [taskAgent],
@@ -165,10 +221,13 @@ describe("task spawn routing", () => {
 		});
 
 		const manager = createManager();
-		const tool = await TaskTool.create(createSession({ manager, settings: { "task.maxConcurrency": 1 } }));
+		const toolSession = createSession({ manager, settings: { "task.maxConcurrency": 1 } });
+		const sharedSemaphore = getSessionSpawnSemaphore(toolSession);
+		const tool = await TaskTool.create(toolSession);
 
 		const first = await tool.execute("tc-1", { agent: "task", name: "First", task: "Work A." } as TaskParams);
 		const second = await tool.execute("tc-2", { agent: "task", name: "Second", task: "Work B." } as TaskParams);
+		expect(toolSession.spawnSemaphore).toBe(sharedSemaphore);
 		const firstJob = manager.getJob(first.details!.async!.jobId)!;
 		const secondJob = manager.getJob(second.details!.async!.jobId)!;
 
@@ -188,6 +247,7 @@ describe("task spawn routing", () => {
 		await secondJob.promise;
 		expect(firstJob.status).toBe("completed");
 		expect(secondJob.status).toBe("completed");
+		expect(toolSession.spawnSemaphore).toBe(sharedSemaphore);
 	});
 
 	it("settles a cancelled spawn while it is queued behind the semaphore", async () => {

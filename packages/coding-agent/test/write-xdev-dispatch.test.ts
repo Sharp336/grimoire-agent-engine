@@ -9,6 +9,11 @@ import * as themeModule from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { ToolChoiceQueue } from "@oh-my-pi/pi-coding-agent/session/tool-choice-queue";
 import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { githubToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/gh-renderer";
+import {
+	COUNCIL_DEVICE_NAME,
+	COUNCIL_DEVICE_PATH,
+	type CouncilAdjudicationHandler,
+} from "@oh-my-pi/pi-coding-agent/tools/resolve";
 import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { WriteTool, writeToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/write";
 import {
@@ -22,7 +27,7 @@ import {
 	xdevDocsAll,
 	xdevEntries,
 } from "@oh-my-pi/pi-coding-agent/tools/xdev";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { removeWithRetries, sanitizeText } from "@oh-my-pi/pi-utils";
 
 // xdev mounting is default-on: discoverable tools like ast_edit unmount into
 // xd://, and a plain `write xd://ast_edit` dispatches them. These guard the
@@ -76,6 +81,8 @@ describe("read and write route xd:// device URLs", () => {
 			expect(listing.content.find(entry => entry.type === "text")?.text).toContain("xd://ast_edit");
 			const docs = await read!.execute("read-xd-docs", { path: "xd://ast_edit" });
 			expect(docs.content.find(entry => entry.type === "text")?.text).toContain("# ast_edit");
+			const councilDocs = await read!.execute("read-council-docs", { path: COUNCIL_DEVICE_PATH });
+			expect(councilDocs.content.find(entry => entry.type === "text")?.text).toContain("JSON adjudication");
 
 			const content = JSON.stringify({
 				ops: [{ pat: "legacyWrap($A, $B)", out: "modernWrap($A, $B)" }],
@@ -129,6 +136,61 @@ describe("read and write route xd:// device URLs", () => {
 		const result = await write.execute("write-xdev-read", { path: "xd://peek", content: JSON.stringify({ q: "x" }) });
 		expect(result.isError).toBeUndefined();
 		expect(result.details?.xdev).toMatchObject({ tool: "peek", mode: "execute", tier: "read" });
+	});
+
+	it("preserves council handler success and error results through write dispatch", async () => {
+		const payloads: string[] = [];
+		const responses = [
+			{
+				content: [{ type: "text" as const, text: "Adjudication accepted." }],
+				details: { winner: "A1", round: 1 },
+			},
+			{
+				content: [{ type: "text" as const, text: "Adjudication rejected." }],
+				details: { issue: "unknown member" },
+				isError: true,
+			},
+		];
+		const councilHandler: CouncilAdjudicationHandler = async payload => {
+			payloads.push(payload);
+			const response = responses.shift();
+			if (!response) throw new Error("unexpected council handler invocation");
+			return response;
+		};
+		const write = new WriteTool(
+			xdevSession(process.cwd(), {
+				peekCouncilHandler: () => councilHandler,
+			}),
+		);
+		const approval = write.approval;
+		expect(typeof approval).toBe("function");
+		if (typeof approval === "function") {
+			expect(approval({ path: COUNCIL_DEVICE_PATH, content: "{}" })).toBe("read");
+		}
+
+		const successPayload = ' {\n  "winner": "A1"\n}\n';
+		const success = await write.execute("write-council-success", {
+			path: COUNCIL_DEVICE_PATH,
+			content: successPayload,
+		});
+		expect(success.content).toEqual([{ type: "text", text: "Adjudication accepted." }]);
+		expect(success.details?.xdev).toEqual({
+			tool: COUNCIL_DEVICE_NAME,
+			mode: "execute",
+			args: { payload: successPayload },
+			inner: { winner: "A1", round: 1 },
+		});
+		expect(success.isError).toBeUndefined();
+
+		const errorPayload = '{"winner":"missing"}';
+		const error = await write.execute("write-council-error", {
+			path: COUNCIL_DEVICE_PATH,
+			content: errorPayload,
+		});
+		expect(error.content).toEqual([{ type: "text", text: "Adjudication rejected." }]);
+		expect(error.details?.xdev?.inner).toEqual({ issue: "unknown member" });
+		expect(error.isError).toBe(true);
+		expect(payloads).toEqual([successPayload, errorPayload]);
 	});
 
 	it("records the effective tier reported after an execution decorator rewrites device args", async () => {
@@ -263,6 +325,41 @@ describe("read and write route xd:// device URLs", () => {
 		// instead of throwing ReferenceError inside a generic Write frame.
 		const rendered = writeToolRenderer.renderCall({ path: "xd://ast_edit", content }, options, uiTheme);
 		expect(rendered).toBeDefined();
+
+		const council = writeToolRenderer.renderCall(
+			{ path: COUNCIL_DEVICE_PATH, content: '{"winner":"A1"}' },
+			options,
+			uiTheme,
+		);
+		expect(council).toBeDefined();
+		expect(sanitizeText(council!.render(90).join("\n"))).toContain("Council");
+	});
+
+	it("keeps the Council title after successful and failed device results settle", async () => {
+		await themeModule.initTheme();
+		const uiTheme = (await themeModule.getThemeByName("dark")) ?? (await themeModule.getThemeByName("light"));
+		if (!uiTheme) throw new Error("expected an initialized theme");
+		const args = { path: COUNCIL_DEVICE_PATH, content: '{"winner":"A1"}' };
+		for (const result of [
+			{
+				content: [{ type: "text" as const, text: "Adjudication accepted." }],
+				details: {
+					xdev: { tool: "council", mode: "execute" as const, args: { payload: args.content } },
+				},
+			},
+			{
+				content: [{ type: "text" as const, text: "Adjudication is invalid." }],
+				isError: true,
+				details: {
+					xdev: { tool: "council", mode: "execute" as const, args: { payload: args.content } },
+				},
+			},
+		]) {
+			const component = writeToolRenderer.renderResult(result, { expanded: false, isPartial: false }, uiTheme, args);
+			const rendered = sanitizeText(component.render(90).join("\n"));
+			expect(rendered).toContain("Council");
+			expect(rendered).not.toContain("Write");
+		}
 	});
 
 	it("renders device execution errors as the mounted tool instead of write", async () => {

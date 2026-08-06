@@ -12,6 +12,7 @@ import {
 	formatExpandHint,
 	formatParseErrors,
 	formatScreenshot,
+	shortenEmbeddedPaths,
 	shortenPath,
 	truncateDiffByHunk,
 } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
@@ -114,6 +115,16 @@ describe("formatScreenshot", () => {
 		const home = String.raw`C:\Users\me`;
 		const sibling = String.raw`C:\Users\me2\projects\demo`;
 		expect(shortenPath(sibling, home)).toBe(sibling);
+	});
+
+	it("shortens embedded home paths without rewriting URL fragments or sibling usernames", () => {
+		const home = "/home/test";
+		expect(
+			shortenEmbeddedPaths(
+				`at "${home}/one.log" {"path":"${home}/two.log"} https://example.com${home}/remote ${home}2/sibling`,
+				home,
+			),
+		).toBe(`at "~/one.log" {"path":"~/two.log"} https://example.com${home}/remote ${home}2/sibling`);
 	});
 
 	it("formats non-home path without tilde", () => {

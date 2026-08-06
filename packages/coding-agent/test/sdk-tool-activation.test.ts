@@ -17,6 +17,7 @@ import {
 	createAgentSession,
 	discoverAuthStorage,
 	type ExtensionFactory,
+	getSessionSpawnSemaphore,
 } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -136,6 +137,25 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(session.getActiveToolNames()).not.toContain("default_inactive_tool");
 			expect(session.systemPrompt.join("\n")).toContain("default_active_tool");
 			expect(session.systemPrompt.join("\n")).not.toContain("default_inactive_tool");
+		} finally {
+			await session.dispose();
+		}
+	});
+	it("publishes the exact ToolSession used by mounted tools", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession(baseOptions(tempDir));
+
+		try {
+			const toolSession = session.getToolSession();
+			const taskTool = session.getToolByName("task");
+
+			expect(session.getToolSession()).toBe(toolSession);
+			expect(taskTool).toBeDefined();
+			expect(toolSession.toolRegistry?.get("task")).toBe(taskTool);
+
+			const semaphore = getSessionSpawnSemaphore(toolSession);
+			expect(toolSession.spawnSemaphore).toBe(semaphore);
+			expect(getSessionSpawnSemaphore(session.getToolSession())).toBe(semaphore);
 		} finally {
 			await session.dispose();
 		}

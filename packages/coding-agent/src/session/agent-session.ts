@@ -184,6 +184,7 @@ import {
 } from "../thinking";
 import { isLowSignalTitleInput } from "../tiny/text";
 import { shutdownTinyTitleClient } from "../tiny/title-client";
+import type { ToolSession } from "../tools";
 import { resolveApproval } from "../tools/approval";
 import { type AskToolDetails, type AskToolInput, recoverAskQuestions } from "../tools/ask";
 import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
@@ -192,6 +193,7 @@ import { releaseComputerSessionsForOwner } from "../tools/computer/supervisor";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
 import {
 	buildResolveReminderMessage,
+	type CouncilAdjudicationHandler,
 	isPreviewResolutionToolCall,
 	isProposeToolCall,
 	type PlanProposalHandler,
@@ -424,6 +426,7 @@ export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
 	readonly settings: Settings;
+	readonly #toolSession: ToolSession | undefined;
 	/** Entries of tools mounted under `xd://`; empty when virtual devices are unmounted. */
 	getXdevToolEntries: () => Array<{ name: string; summary: string }>;
 	readonly yieldQueue: YieldQueue;
@@ -919,6 +922,7 @@ export class AgentSession {
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
+		this.#toolSession = config.toolSession;
 		this.#modelRegistry = config.modelRegistry;
 		this.#codexResetCoordinator = config.codexResetCoordinator ?? defaultCodexAutoRedeemCoordinator;
 		const bashHost: BashRunnerHost = {
@@ -1059,7 +1063,12 @@ export class AgentSession {
 				this.#maintenance.runAutoCompaction(reason, willRetry, deferred, allowDefer, options),
 			withBashBranchTransition: operation => this.#bash.withBranchTransition(operation),
 		};
-		this.#recovery = new TurnRecovery(recoveryHost, { initialRetryFallback: config.initialRetryFallback });
+		this.#recovery = new TurnRecovery(recoveryHost, {
+			initialRetryFallback: config.initialRetryFallback,
+			modelSwitchPolicy: Object.freeze({
+				allowAutomaticSwitches: config.modelSwitchPolicy?.allowAutomaticSwitches ?? true,
+			}),
+		});
 		this.#detachUsageBeforeQueueDequeue = this.agent.addBeforeQueuedMessageDequeueHook(async signal => {
 			if (
 				!this.settings.get("retry.usageAwareFallback") ||
@@ -1521,6 +1530,7 @@ export class AgentSession {
 			sessionFile: () => this.sessionFile,
 			baseSystemPrompt: () => this.#tools.baseSystemPrompt,
 			assertVibeSessionTransitionAllowed: action => this.#assertVibeSessionTransitionAllowed(action),
+			reconcileBeforeSessionTransition: () => this.#sessionTransitionReconciler?.() ?? Promise.resolve(),
 			setSkipPostTurnMaintenance: timestamp => {
 				this.#maintenance.skipPostTurnMaintenanceAssistantTimestamp = timestamp;
 			},
@@ -1673,10 +1683,21 @@ export class AgentSession {
 		this.#planProposalHandler = handler ?? undefined;
 	}
 
-	#sessionBeforeSwitchReconciler: (() => Promise<void>) | undefined;
+	/** Adjudication handler consulted by `xd://council` while a council run is active. */
+	#councilHandler: CouncilAdjudicationHandler | undefined;
 
-	setSessionBeforeSwitchReconciler(reconciler: (() => Promise<void>) | null): void {
-		this.#sessionBeforeSwitchReconciler = reconciler ?? undefined;
+	peekCouncilHandler(): CouncilAdjudicationHandler | undefined {
+		return this.#councilHandler;
+	}
+
+	setCouncilHandler(handler: CouncilAdjudicationHandler | null): void {
+		this.#councilHandler = handler ?? undefined;
+	}
+
+	#sessionTransitionReconciler: (() => Promise<void>) | undefined;
+
+	setSessionTransitionReconciler(reconciler: (() => Promise<void>) | null): void {
+		this.#sessionTransitionReconciler = reconciler ?? undefined;
 	}
 
 	#sessionSwitchReconciler: (() => Promise<void>) | undefined;
@@ -3765,6 +3786,7 @@ export class AgentSession {
 
 	async #doDispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
 		this.beginDispose();
+		await this.#sessionTransitionReconciler?.();
 		this.#recordSessionExit(options.reason ?? "dispose");
 		this.#cancelExitRecorder?.();
 		this.#cancelExitRecorder = undefined;
@@ -4164,6 +4186,14 @@ export class AgentSession {
 	/** Whether the edit tool is registered in this session. */
 	get hasEditTool(): boolean {
 		return this.#tools.hasEditTool;
+	}
+
+	/** Exact mutable ToolSession shared by the SDK's mounted tool instances. */
+	getToolSession(): ToolSession {
+		if (!this.#toolSession) {
+			throw new Error("ToolSession is unavailable on directly constructed AgentSession");
+		}
+		return this.#toolSession;
 	}
 
 	/** Looks up a registered tool by name. */
@@ -5055,6 +5085,8 @@ export class AgentSession {
 		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice"> & {
 			queueChipText?: string;
 			queueOnly?: boolean;
+			/** Called synchronously only after the idle guard wins, immediately before prompt ownership begins. */
+			onPromptStart?: () => void;
 		},
 	): Promise<void> {
 		const textContent =
@@ -5106,6 +5138,7 @@ export class AgentSession {
 			timestamp: Date.now(),
 		};
 
+		options?.onPromptStart?.();
 		await this.#promptWithMessage(customMessage, textContent, {
 			...options,
 			prependMessages: keywordNotices.length > 0 ? keywordNotices : undefined,
@@ -5819,6 +5852,10 @@ export class AgentSession {
 			deliverAs?: "steer" | "followUp" | "nextTurn";
 			queueChipText?: string;
 			acceptTerminalEmptyStop?: boolean;
+			/** Skip delivery if the active session changed while asynchronous normalization was pending. */
+			expectedSessionId?: string;
+			/** Set to true only after the session-bound message is appended or queued. */
+			deliveryReceipt?: { delivered: boolean };
 		},
 	): Promise<boolean> {
 		const normalizedPayload = normalizeCustomMessagePayload<T>(message);
@@ -5841,9 +5878,14 @@ export class AgentSession {
 			timestamp: Date.now(),
 		};
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
+		const confirmDelivery = () => {
+			if (options?.deliveryReceipt) options.deliveryReceipt.delivered = true;
+		};
+		if (options?.expectedSessionId && this.sessionManager.getSessionId() !== options.expectedSessionId) return false;
 		if (this.isStreaming) {
 			if (options?.deliverAs === "nextTurn") {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, options?.triggerTurn ?? false);
+				confirmDelivery();
 				return false;
 			}
 			this.#allowQueuedMessageDrainRetry();
@@ -5853,6 +5895,7 @@ export class AgentSession {
 			} else {
 				this.agent.steer(normalizedAppMessage);
 			}
+			confirmDelivery();
 			this.#scheduleIdleQueueDrain();
 			return false;
 		}
@@ -5861,11 +5904,13 @@ export class AgentSession {
 			if (options?.triggerTurn) {
 				if (this.#clientBridge?.deferAgentInitiatedTurns && !this.#allowAcpAgentInitiatedTurns) {
 					this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
+					confirmDelivery();
 					return false;
 				}
 				await this.#promptAgentInitiatedMessage(normalizedAppMessage, {
 					acceptTerminalEmptyStop: options.acceptTerminalEmptyStop === true,
 				});
+				confirmDelivery();
 				return true;
 			}
 			this.agent.appendMessage(normalizedAppMessage);
@@ -5876,15 +5921,18 @@ export class AgentSession {
 				normalizedAppMessage.details,
 				normalizedAppMessage.attribution,
 			);
+			confirmDelivery();
 			return false;
 		}
 
 		if (options?.triggerTurn) {
 			if (this.#clientBridge?.deferAgentInitiatedTurns && !this.#allowAcpAgentInitiatedTurns) {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
+				confirmDelivery();
 				return false;
 			}
 			await this.#promptAgentInitiatedMessage(normalizedAppMessage);
+			confirmDelivery();
 			return true;
 		}
 
@@ -5896,6 +5944,7 @@ export class AgentSession {
 			normalizedAppMessage.details,
 			normalizedAppMessage.attribution,
 		);
+		confirmDelivery();
 		return false;
 	}
 
@@ -6268,6 +6317,7 @@ export class AgentSession {
 				return false;
 			}
 		}
+		await this.#sessionTransitionReconciler?.();
 
 		this.#disconnectFromAgent();
 		let advisorRecordersDetached = false;
@@ -6378,6 +6428,7 @@ export class AgentSession {
 				return false;
 			}
 		}
+		await this.#sessionTransitionReconciler?.();
 
 		await this.#bash.flushPending();
 		// Flush current session to ensure all entries are written
@@ -6451,6 +6502,7 @@ export class AgentSession {
 	/** Move the active session and artifacts after enforcing mode transition invariants. */
 	async moveSession(newCwd: string, targetSessionDir?: string): Promise<void> {
 		this.#assertVibeSessionTransitionAllowed("move the session");
+		await this.#sessionTransitionReconciler?.();
 		await this.sessionManager.moveTo(newCwd, targetSessionDir);
 	}
 
@@ -7315,9 +7367,9 @@ export class AgentSession {
 			}
 		}
 
+		await this.#sessionTransitionReconciler?.();
 		this.#disconnectFromAgent();
 		await this.abort({ goalReason: "internal" });
-		await this.#sessionBeforeSwitchReconciler?.();
 
 		await this.#bash.flushPending();
 		// Flush pending writes before switching so restore snapshots reflect committed state.
@@ -7626,6 +7678,7 @@ export class AgentSession {
 			}
 			skipConversationRestore = result?.skipConversationRestore ?? false;
 		}
+		await this.#sessionTransitionReconciler?.();
 
 		// Clear pending messages (bound to old session state)
 		this.#pendingNextTurnMessages = [];
@@ -7739,6 +7792,7 @@ export class AgentSession {
 		if (this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getLeafId() !== leafId) {
 			throw new Error("Cannot branch /btw: session changed since /btw started");
 		}
+		await this.#sessionTransitionReconciler?.();
 
 		await withTimeout(
 			this.#cancelPostPromptTasks(),

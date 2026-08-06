@@ -1217,7 +1217,6 @@ export class SettingsSelectorComponent implements Component {
 	 * Set a setting value, handling type conversion.
 	 */
 	#setSettingValue(path: SettingPath, value: string): void {
-		const currentValue = settings.get(path);
 		const schemaType = getType(path);
 		if (path === "compaction.thresholdPercent" && value === "default") {
 			settings.set(path, -1 as never);
@@ -1237,9 +1236,13 @@ export class SettingsSelectorComponent implements Component {
 				parsed = validateProviderMaxInFlightRequests(parsed);
 			}
 			settings.set(path, parsed as never);
-		} else if (typeof currentValue === "number") {
-			settings.set(path, Number(value) as never);
-		} else if (typeof currentValue === "boolean") {
+		} else if (schemaType === "number") {
+			const numberValue = Number(value);
+			if (!Number.isFinite(numberValue)) {
+				throw new Error(`Invalid numeric value for ${path}`);
+			}
+			settings.set(path, numberValue as never);
+		} else if (schemaType === "boolean") {
 			settings.set(path, (value === "true") as never);
 		} else {
 			settings.set(path, value as never);

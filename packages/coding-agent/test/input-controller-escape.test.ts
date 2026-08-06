@@ -63,6 +63,7 @@ function createContext(): {
 		abortHandoff: Spy;
 		addMessageToChat: Spy;
 		cancelPendingSubmission: Spy;
+		cancelCouncilRun: Spy;
 		clearEditor: Spy;
 		clearQueue: Spy;
 		flushSync: Spy;
@@ -71,12 +72,15 @@ function createContext(): {
 		handleBtwCommand: Spy;
 		handleBtwEscape: Spy;
 		handleOmfgEscape: Spy;
+		hasActiveCouncil: Spy;
+		isCouncilAdjudicating: Spy;
 		hasActiveBtw: Spy;
 		hasActiveOmfg: Spy;
 		onInputCallback: Spy;
 		prompt: Spy;
 		requestRender: Spy;
 		resetDisplay: Spy;
+		setCouncilPaneExpanded: Spy;
 		shutdown: Spy;
 		showStatus: Spy;
 		startPendingSubmission: StartPendingSubmissionSpy;
@@ -93,6 +97,7 @@ function createContext(): {
 	const addMessageToChat = vi.fn();
 	const cancelPendingSubmission = vi.fn(() => false);
 	const clearQueue = vi.fn(() => ({ steering: [], followUp: [] }));
+	const cancelCouncilRun = vi.fn(() => true);
 	const getQueuedMessages = vi.fn(() => ({ steering: [], followUp: [] }));
 	const onInputCallback = vi.fn();
 	const requestRender = vi.fn();
@@ -102,7 +107,10 @@ function createContext(): {
 	const sessionListeners: Array<(event: { type: string }) => void> = [];
 	const handleBtwCommand = vi.fn(async () => {});
 	const handleBtwEscape = vi.fn(() => true);
+	const hasActiveCouncil = vi.fn(() => false);
+	const isCouncilAdjudicating = vi.fn(() => false);
 	const hasActiveBtw = vi.fn(() => false);
+	const setCouncilPaneExpanded = vi.fn();
 	const handleOmfgEscape = vi.fn(() => true);
 	const hasActiveOmfg = vi.fn(() => false);
 	const updatePendingMessagesDisplay = vi.fn();
@@ -135,6 +143,7 @@ function createContext(): {
 
 	ctx = {
 		editor: editor as unknown as InteractiveModeContext["editor"],
+		chatContainer: { children: [] } as unknown as InteractiveModeContext["chatContainer"],
 		ui: {
 			requestRender,
 			resetDisplay,
@@ -209,6 +218,11 @@ function createContext(): {
 		unfocusSession: vi.fn(async () => {}),
 		focusParentSession: vi.fn(async () => {}),
 		handleSTTToggle: vi.fn(),
+		cancelCouncilRun,
+		hasActiveCouncil,
+		isCouncilAdjudicating,
+		setCouncilPaneExpanded,
+		toggleCouncilPaneExpansion: vi.fn(() => false),
 		handleBtwEscape,
 		handleBtwCommand,
 		hasActiveBtw,
@@ -232,6 +246,7 @@ function createContext(): {
 			abortHandoff,
 			addMessageToChat,
 			cancelPendingSubmission,
+			cancelCouncilRun,
 			clearQueue,
 			clearEditor: ctx.clearEditor as Spy,
 			getQueuedMessages,
@@ -240,6 +255,8 @@ function createContext(): {
 			handleBtwCommand,
 			handleBtwEscape,
 			hasActiveBtw,
+			hasActiveCouncil,
+			isCouncilAdjudicating,
 			handleOmfgEscape,
 			hasActiveOmfg,
 			onInputCallback,
@@ -249,6 +266,7 @@ function createContext(): {
 			showStatus,
 			shutdown: ctx.shutdown as Spy,
 			startPendingSubmission,
+			setCouncilPaneExpanded,
 			updatePendingMessagesDisplay,
 		},
 		inputListeners,
@@ -738,6 +756,108 @@ describe("InputController escape behavior", () => {
 		isSpeaking.mockReturnValue(false);
 		editor.onEscape?.();
 		expect(ctx.showTreeSelector).not.toHaveBeenCalled();
+	});
+	it("aborts a user stream while Council is adjudicating but does not own Main", () => {
+		const { ctx, editor, spies } = createContext();
+		const council: { state: string; mainTurnOwned: boolean } = { state: "adjudicating", mainTurnOwned: false };
+		spies.hasActiveCouncil.mockReturnValue(true);
+		spies.isCouncilAdjudicating.mockImplementation(() => council.state === "adjudicating" && council.mainTurnOwned);
+		mutableSessionState(ctx).isStreaming = true;
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+
+		editor.onEscape?.();
+
+		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
+		expect(spies.cancelCouncilRun).not.toHaveBeenCalled();
+	});
+
+	it("cancels Council when its adjudication owns Main before the streaming arm", () => {
+		const { ctx, editor, spies } = createContext();
+		const council: { state: string; mainTurnOwned: boolean } = { state: "adjudicating", mainTurnOwned: true };
+		spies.hasActiveCouncil.mockReturnValue(true);
+		spies.isCouncilAdjudicating.mockImplementation(() => council.state === "adjudicating" && council.mainTurnOwned);
+		mutableSessionState(ctx).isStreaming = true;
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+
+		editor.onEscape?.();
+
+		expect(spies.cancelCouncilRun).toHaveBeenCalledTimes(1);
+		expect(spies.abort).not.toHaveBeenCalled();
+	});
+
+	it("cancels an idle Council before double-Esc navigation and preserves the draft", () => {
+		const { ctx, editor, spies } = createContext();
+		spies.hasActiveCouncil.mockReturnValue(true);
+		editor.setText("keep this draft");
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+
+		editor.onEscape?.();
+
+		expect(spies.cancelCouncilRun).toHaveBeenCalledTimes(1);
+		expect(editor.getText()).toBe("keep this draft");
+		expect(ctx.showTreeSelector).not.toHaveBeenCalled();
+	});
+
+	it("retains ordinary double-Esc navigation when no Council exists", () => {
+		const { ctx, editor, spies } = createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+
+		editor.onEscape?.();
+		editor.onEscape?.();
+
+		expect(spies.cancelCouncilRun).not.toHaveBeenCalled();
+		expect(ctx.showTreeSelector).toHaveBeenCalledTimes(1);
+	});
+
+	it("cancels adjudication before loop-mode streaming", () => {
+		const { ctx, editor, spies } = createContext();
+		const pauseLoop = vi.fn();
+		ctx.loopModeEnabled = true;
+		ctx.pauseLoop = pauseLoop;
+		spies.hasActiveCouncil.mockReturnValue(true);
+		spies.isCouncilAdjudicating.mockReturnValue(true);
+		mutableSessionState(ctx).isStreaming = true;
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+
+		editor.onEscape?.();
+
+		expect(spies.cancelCouncilRun).toHaveBeenCalledTimes(1);
+		expect(spies.abort).not.toHaveBeenCalled();
+		expect(pauseLoop).not.toHaveBeenCalled();
+	});
+});
+
+describe("InputController Council expansion behavior", () => {
+	it("keeps the Council pane on the shared Ctrl+O expansion lifecycle", () => {
+		const { ctx, editor, spies } = createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+
+		editor.onExpandTools?.();
+		expect(ctx.toolOutputExpanded).toBeTrue();
+		expect(spies.setCouncilPaneExpanded).toHaveBeenLastCalledWith(true);
+
+		editor.onExpandTools?.();
+		expect(ctx.toolOutputExpanded).toBeFalse();
+		expect(spies.setCouncilPaneExpanded).toHaveBeenLastCalledWith(false);
+	});
+
+	it("still expands an active Council when transcript tool activity is hidden", () => {
+		const { ctx, editor, spies } = createContext();
+		ctx.hideToolActivity = true;
+		spies.hasActiveCouncil.mockReturnValue(true);
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+
+		editor.onExpandTools?.();
+
+		expect(spies.setCouncilPaneExpanded).toHaveBeenCalledWith(true);
+		expect(spies.showStatus).not.toHaveBeenCalledWith(expect.stringContaining("Tool activity is hidden"));
 	});
 });
 

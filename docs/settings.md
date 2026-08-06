@@ -354,7 +354,7 @@ enabledModels:
 
 | Key                    | Type    | Default                     | Notes                                                                                                                                                                                                                                                                                                                                                                                                            |
 | ---------------------- | ------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `modelRoles`           | record  | `{}`                        | Map of role name -> model id. Built-in roles: `default`, `smol`, `slow`, `vision`, `plan`, `designer`, `commit`, `tiny`, `task`, `advisor`. The `tiny` role overrides the online model for lightweight background tasks (titles, memory, auto-thinking, unexpected-stop), else `@smol`. Per-role env/flags exist only for `--model`/`--smol`/`--slow`/`--plan`; configure the advisor with `modelRoles.advisor`. |
+| `modelRoles`           | record  | `{}`                        | Map of role name -> model id. Built-in roles: `default`, `smol`, `slow`, `vision`, `plan`, `designer`, `commit`, `tiny`, `task`, `advisor`. The default Council roster uses the separate custom role ids `council1` through `council4`, which must each be assigned here. The `tiny` role overrides the online model for lightweight background tasks (titles, memory, auto-thinking, unexpected-stop), else `@smol`. Per-role env/flags exist only for `--model`/`--smol`/`--slow`/`--plan`; configure other roles here. |
 | `modelRoleStorage`     | enum    | `global`                    | `global` saves model-selector role assignments in the active global/profile config; `project` saves only those role assignments in `<cwd>/.omp/config.yml`. Missing project roles fall back to global roles.                                                                                                                                                                                                     |
 | `modelTags`            | record  | `{}`                        | Custom role/tag metadata; can introduce additional roles.                                                                                                                                                                                                                                                                                                                                                        |
 | `modelProviderOrder`   | array   | `[]`                        | Preferred provider order when a model id is ambiguous.                                                                                                                                                                                                                                                                                                                                                           |
@@ -364,6 +364,53 @@ enabledModels:
 | `includeModelInPrompt` | boolean | `true`                      | Include the active model name in the system prompt.                                                                                                                                                                                                                                                                                                                                                              |
 
 See [Models](./models.md) for the `models.yml` schema and custom-provider definitions.
+
+### Council
+
+Council runs an independent, ordered model roster over a task, adjudicates the reviews, and publishes one plan at `plans/<slug>.md` when successful. Configure the roster in the global settings file and assign each roster role exactly one model selector through `modelRoles`:
+
+```yaml
+modelRoles:
+  council1: anthropic/claude-opus-4-5
+  council2: openai/gpt-5.5:high
+  council3: google/gemini-3.1-pro-preview
+  council4: xai/grok-4
+
+council:
+  members:
+    - role: council1
+      enabled: true
+    - role: council2
+      enabled: true
+    - role: council3
+      enabled: true
+    - role: council4
+      enabled: true
+  rounds: 1
+```
+
+| Key               | Type   | Default                                    | Notes                                                                                                                                                           |
+| ----------------- | ------ | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `council.members` | array  | `council1` through `council4`, all enabled | Global-only ordered roster of `{ role, enabled }` entries. Project configuration is rejected. Every enabled role must resolve through `modelRoles` to one model. |
+| `council.rounds`  | number | `1`                                        | Number of independent review rounds: `1` or `2`.                                                                                                                |
+
+The Model Hub **Roles** view includes a **Council** section for assigning each member's model, enabling or disabling members, changing their order, and editing the roster. `/council config` opens that section.
+
+Command forms:
+
+- `/council <task>` starts a run.
+- `/council status` reports the current run or configured idle roster.
+- `/council cancel` cancels the active run.
+- `/council resume [run-id]` explicitly resumes an interrupted run belonging to the current session; without an id, it selects that session's latest run.
+- `/council config` opens the Model Hub Council roster.
+
+`/council <task>` dispatches immediately without a confirmation step. Any unavailable enabled member blocks the entire run before model spend rather than silently shrinking the roster. A live Council pane stays docked below the transcript while work runs; ordinary user turns remain available, and the pane can be collapsed without cancelling the run.
+
+A successful run writes exactly one published plan to `plans/<slug>.md`.
+
+Reviewer read-only and repository-root confinement are a prompt contract plus a restricted tool-name set, not data-source or OS-level enforcement. Retained read tools can address internal URLs, absolute paths, and HTTP sources where supported.
+
+Resume is limited to the same session: after reloading or restarting that session, use `/council resume` explicitly. Runs belonging to another session cannot be resumed.
 
 ### Advisor
 

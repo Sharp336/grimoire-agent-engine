@@ -72,6 +72,10 @@ export interface SlashCommandRuntime {
 	reloadPlugins: () => Promise<void>;
 	notifyTitleChanged?: () => Promise<void> | void;
 	notifyConfigChanged?: () => Promise<void> | void;
+	/** Open the council roles configuration UI when the host provides one (TUI only). */
+	openCouncilConfig?: () => Promise<void> | void;
+	/** Keep the current transport turn open until background command work settles. */
+	holdTurn?: (task: Promise<void>) => void;
 }
 
 /**

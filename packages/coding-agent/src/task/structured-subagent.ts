@@ -8,7 +8,9 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import type { Rule } from "../capability/rule";
 import { resolveAgentModelPatterns, resolveAgentModelSource, resolveExplicitModelRole } from "../config/model-resolver";
+import type { Skill } from "../extensibility/skills";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
@@ -17,7 +19,7 @@ import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" wit
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { TaskEffort } from "../thinking";
-import type { ToolSession } from "../tools";
+import type { ContextFileEntry, ToolSession } from "../tools";
 import { isIrcEnabled } from "../tools/hub";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
@@ -76,16 +78,38 @@ export interface StructuredSubagentIdentity {
 	id?: string;
 	/** Stable user-facing label used when allocating a new id. */
 	label?: string;
+	/** Capability flag for transcript-only children that must never be contacted or controlled. */
+	inspectOnly?: boolean;
 }
 
 /** One normalized child invocation. */
 export interface StructuredSubagentRequest {
 	session: ToolSession;
+	/**
+	 * Child execution root. Agent/capability discovery intentionally remains bound to the parent session snapshot/cwd.
+	 */
+	cwd?: string;
 	invocationKind: "task" | "eval";
 	assignment: string;
 	context?: string;
 	agent?: string;
 	model?: string | string[];
+	/** Replace the selected agent's tools for this invocation. Presence also disables spawning and prewalk. */
+	tools?: readonly string[];
+	/** Suppress every tool source except the explicit host tool list and required yield tool. */
+	restrictToolNames?: boolean;
+	/** Pass inherited AGENTS.md entries instead of the default filtered context. */
+	inheritContextFiles?: boolean;
+	/** Context entries appended to this child's snapshot without mutating the parent session. */
+	additionalContextFiles?: readonly ContextFileEntry[];
+	/** Override the parent-discovered skill snapshot; an explicit empty list suppresses inheritance. */
+	skills?: readonly Skill[];
+	/** Override the parent-discovered rule snapshot; an explicit empty list suppresses inheritance. */
+	rules?: readonly Rule[];
+	/** Override the selected agent's autoload skill names; an explicit empty list suppresses autoloading. */
+	autoloadSkills?: readonly string[];
+	/** Keep the requested model fixed: no auth, prewalk, or retry-chain substitution. */
+	pinModel?: boolean;
 	/** Presence, rather than truthiness, makes this the highest-priority schema. */
 	outputSchema?: unknown;
 	schemaMode?: StructuredSubagentSchemaMode;
@@ -133,6 +157,7 @@ export interface EffectiveSubagentPolicy {
 	applyChanges: boolean;
 	enableLsp: boolean;
 	enableIrc: boolean;
+	restrictToolNames: boolean;
 }
 
 /** Settled child execution plus data needed by the frontends' own rendering. */
@@ -157,6 +182,13 @@ export class StructuredSubagentError extends Error {
 }
 
 const PLAN_MODE_TOOLS = ["read", "grep", "glob", "web_search"] as const;
+const PLAN_MODE_TOOL_LOOKUP: Readonly<Record<string, true>> = {
+	read: true,
+	grep: true,
+	glob: true,
+	web_search: true,
+	ast_grep: true,
+};
 
 function renderSubagentPrompt(assignment: string): string {
 	return prompt.render(subagentUserPromptTemplate, { assignment: assignment.trim() });
@@ -187,12 +219,24 @@ function resolveSchema(request: StructuredSubagentRequest, agent: AgentDefinitio
 	return { schema: undefined, source: "none", mode, outputSchemaOverridesAgent: false };
 }
 
-function createPlanModeAgent(agent: AgentDefinition): AgentDefinition {
-	const tools = [...PLAN_MODE_TOOLS, ...(agent.tools ?? []).filter(tool => tool === "ast_grep")];
+function createPlanModeAgent(agent: AgentDefinition, intersectExistingTools: boolean): AgentDefinition {
+	const tools = intersectExistingTools
+		? (agent.tools ?? []).filter(tool => PLAN_MODE_TOOL_LOOKUP[tool] === true)
+		: [...PLAN_MODE_TOOLS, ...(agent.tools ?? []).filter(tool => tool === "ast_grep")];
 	return {
 		...agent,
 		systemPrompt: `${planModeSubagentPrompt}\n\n${agent.systemPrompt}`,
 		tools,
+		spawns: undefined,
+		prewalk: undefined,
+	};
+}
+
+function applyRequestedTools(agent: AgentDefinition, tools: readonly string[] | undefined): AgentDefinition {
+	if (tools === undefined) return agent;
+	return {
+		...agent,
+		tools: [...tools],
 		spawns: undefined,
 		prewalk: undefined,
 	};
@@ -268,7 +312,10 @@ export async function resolveEffectiveSubagentPolicy(
 		);
 	}
 
-	const effectiveAgent = planMode ? createPlanModeAgent(agent) : agent;
+	const requestedAgent = applyRequestedTools(agent, request.tools);
+	const effectiveAgent = planMode ? createPlanModeAgent(requestedAgent, request.tools !== undefined) : requestedAgent;
+	const restrictToolNames =
+		planMode || request.restrictToolNames === true || request.session.restrictToolNames === true;
 	const schema = resolveSchema(request, effectiveAgent);
 	if (schema.source === "caller" || (schema.source !== "none" && schema.mode === "strict")) {
 		const { error } = buildOutputValidator(schema.schema);
@@ -311,6 +358,7 @@ export async function resolveEffectiveSubagentPolicy(
 		schema,
 		planMode,
 		isIsolated,
+		restrictToolNames,
 		mergeMode: request.isolation?.merge ?? request.session.settings.get("task.isolation.merge"),
 		applyChanges:
 			request.isolation?.apply ??
@@ -319,7 +367,7 @@ export async function resolveEffectiveSubagentPolicy(
 			!planMode &&
 			(request.enableLsp ?? ((request.session.enableLsp ?? true) && request.session.settings.get("task.enableLsp"))),
 		enableIrc:
-			!planMode &&
+			!restrictToolNames &&
 			(request.enableIrc ??
 				(request.session.enableIrc !== false &&
 					isIrcEnabled(request.session.settings, request.session.taskDepth ?? 0))),
@@ -362,12 +410,25 @@ async function leaseArtifacts(
 	return { sessionFile: null, artifactsDir, temporary: true, unregister: registerArtifactsDir(artifactsDir) };
 }
 
-function resolveAutoloadSkills(session: ToolSession, agent: AgentDefinition) {
-	const skills = [...(session.skills ?? [])];
-	const autoloadSkills = agent.autoloadSkills?.length
-		? agent.autoloadSkills.map(name => skills.find(skill => skill.name === name)).filter(skill => skill !== undefined)
-		: [];
-	return { skills, autoloadSkills };
+function resolveInheritedCapabilities(request: StructuredSubagentRequest, agent: AgentDefinition) {
+	const skills = [...(request.skills ?? request.session.skills ?? [])];
+	const autoloadSkillNames = request.autoloadSkills ?? agent.autoloadSkills ?? [];
+	const autoloadSkills = autoloadSkillNames
+		.map(name => skills.find(skill => skill.name === name))
+		.filter(skill => skill !== undefined);
+	const rules = request.rules === undefined ? request.session.rules : [...request.rules];
+	return { skills, autoloadSkills, rules };
+}
+
+function resolveContextFiles(request: StructuredSubagentRequest): ContextFileEntry[] | undefined {
+	const inherited = request.inheritContextFiles
+		? request.session.contextFiles
+		: request.session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md");
+	if (request.additionalContextFiles === undefined) return inherited;
+	const byPath = new Map<string, ContextFileEntry>();
+	for (const entry of inherited ?? []) byPath.set(entry.path, entry);
+	for (const entry of request.additionalContextFiles) byPath.set(entry.path, entry);
+	return [...byPath.values()];
 }
 
 function buildExecutorOptions(
@@ -377,15 +438,20 @@ function buildExecutorOptions(
 	id: string,
 ): ExecutorOptions {
 	const { session } = request;
-	const { skills, autoloadSkills } = resolveAutoloadSkills(session, policy.agent);
+	const { skills, autoloadSkills, rules } = resolveInheritedCapabilities(request, policy.agent);
 	const localProtocolOptions: LocalProtocolOptions = session.localProtocolOptions ?? {
 		getArtifactsDir: session.getArtifactsDir ?? (() => null),
 		getSessionId: session.getSessionId ?? (() => null),
 	};
-	const restrictToolNames = policy.planMode || session.restrictToolNames === true;
+	const cwd = request.cwd ?? session.cwd;
+	const workspaceTree =
+		session.workspaceTree && path.resolve(session.workspaceTree.rootPath) === path.resolve(cwd)
+			? session.workspaceTree
+			: undefined;
+	const restrictToolNames = policy.restrictToolNames;
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
 	return {
-		cwd: session.cwd,
+		cwd,
 		additionalDirectories: session.additionalDirectories,
 		getApiKey: session.getApiKey,
 		agent: policy.effectiveAgent,
@@ -406,6 +472,8 @@ function buildExecutorOptions(
 		parentActiveModelPattern: policy.parentActiveModelPattern,
 		thinkingLevel: policy.effectiveAgent.thinkingLevel,
 		effort: request.effort,
+		pinModel: request.pinModel,
+		suppressPrewalk: request.tools !== undefined,
 		...(policy.schema.source === "none"
 			? {}
 			: {
@@ -422,6 +490,7 @@ function buildExecutorOptions(
 		maxRuntimeMs: request.maxRuntimeMs,
 		restrictToolNames,
 		keepAlive: request.keepAlive,
+		inspectOnly: request.identity?.inspectOnly,
 		signal: request.signal,
 		eventBus: session.eventBus,
 		onProgress: request.onProgress,
@@ -430,12 +499,12 @@ function buildExecutorOptions(
 		settings: session.settings,
 		mcpManager: enableMCP ? (session.mcpManager ?? MCPManager.instance()) : undefined,
 		enableMCP,
-		contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
+		contextFiles: resolveContextFiles(request),
 		skills,
 		autoloadSkills,
-		workspaceTree: session.workspaceTree,
+		workspaceTree,
 		promptTemplates: session.promptTemplates,
-		rules: session.rules,
+		rules,
 		preloadedExtensionPaths: restrictToolNames ? [] : session.extensionPaths,
 		preloadedCustomToolPaths: restrictToolNames ? [] : session.customToolPaths,
 		localProtocolOptions,
@@ -533,7 +602,7 @@ function attachStructuredOutputMetadata(result: SingleResult, schema: Structured
 	const output: StructuredSubagentOutput = {
 		source: schema.source,
 		mode: schema.mode,
-		status: result.exitCode === 0 ? "valid" : "invalid",
+		status: result.exitCode === 0 ? "valid" : "unavailable",
 		data: fallbackData,
 		...(result.error ? { error: result.error } : {}),
 	};
@@ -565,7 +634,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		let isolationContext: IsolationContext | null = null;
 		if (policy.isIsolated) {
 			try {
-				isolationContext = await prepareIsolationContext(request.session.cwd);
+				isolationContext = await prepareIsolationContext(baseOptions.cwd);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				throw new StructuredSubagentError(

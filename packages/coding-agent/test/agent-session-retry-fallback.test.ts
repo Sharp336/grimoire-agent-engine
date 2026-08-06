@@ -550,6 +550,55 @@ describe("AgentSession retry fallback", () => {
 		expect(requestedModels).toEqual([]);
 	});
 
+	it("keeps a policy-pinned model through the real usage-aware preflight seam", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled pinned usage models");
+		const requestedModels: string[] = [];
+		const mock = createMockModel({ responses: [{ content: ["Stayed pinned"] }] });
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.usageAwareFallback": true,
+			"retry.usageReservePolicy": "auto",
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		const usageHealth = vi.spyOn(modelRegistry.authStorage, "getModelUsageHealth").mockResolvedValue({
+			state: "reserve",
+			accounts: [
+				{
+					credentialId: 1,
+					credentialType: "oauth",
+					state: "reserve",
+					remainingFraction: 0.05,
+					selected: true,
+				},
+			],
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			modelSwitchPolicy: Object.freeze({ allowAutomaticSwitches: false }),
+		});
+
+		await session.prompt("Stay on the selected model");
+		await session.waitForIdle();
+
+		expect(usageHealth).toHaveBeenCalledTimes(1);
+		expect(requestedModels).toEqual([`${primaryModel.provider}/${primaryModel.id}`]);
+		expect(session.model).toBe(primaryModel);
+	});
+
 	it("cancels a pending reserve confirmation without dispatching the prompt", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
@@ -1760,6 +1809,78 @@ describe("AgentSession retry fallback", () => {
 		]);
 		expect(session.model?.provider).toBe(fallbackModel.provider);
 		expect(getLastAssistantMessage(session).stopReason).toBe("stop");
+	});
+
+	it("keeps a policy-pinned model when the real hard-error chain seam is eligible", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled pinned hard-error models");
+		const requestedModels: string[] = [];
+		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				mock.push({ throw: "unrecoverable model quirk" });
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.fallbackChains": { "anthropic/*": [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			modelSwitchPolicy: Object.freeze({ allowAutomaticSwitches: false }),
+		});
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") fallbackAppliedEvents.push(event);
+		});
+
+		await session.prompt("Surface this without switching");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([`${primaryModel.provider}/${primaryModel.id}`]);
+		expect(fallbackAppliedEvents).toEqual([]);
+		expect(session.model).toBe(primaryModel);
+		expect(getLastAssistantMessage(session).stopReason).toBe("error");
+	});
+
+	it("keeps a policy-pinned Fireworks Fast model through its intrinsic degrade seam", async () => {
+		const fastModel = getBundledModel("fireworks", "kimi-k2.6-fast");
+		const baseModel = getBundledModel("fireworks", "kimi-k2.6");
+		if (!fastModel || !baseModel) throw new Error("Expected bundled Fireworks Fast and base models");
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: () => "fireworks-test-key",
+			initialState: { model: fastModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				mock.push({ throw: "unrecoverable model quirk" });
+				return mock.stream(model, context, options);
+			},
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			modelSwitchPolicy: Object.freeze({ allowAutomaticSwitches: false }),
+		});
+
+		await session.prompt("Do not degrade");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([`${fastModel.provider}/${fastModel.id}`]);
+		expect(session.model).toBe(fastModel);
+		expect(session.model).not.toBe(baseModel);
+		expect(getLastAssistantMessage(session).stopReason).toBe("error");
 	});
 
 	it("surfaces a non-retryable error without same-model retries when no fallback candidate has a credential", async () => {

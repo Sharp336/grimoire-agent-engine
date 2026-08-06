@@ -3,9 +3,13 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getThemeByName } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
+	COUNCIL_DEVICE_NAME,
+	COUNCIL_DEVICE_PATH,
+	type CouncilAdjudicationHandler,
 	dispatchResolutionDevice,
 	isPreviewResolutionToolCall,
 	isProposeToolCall,
+	isResolutionDeviceName,
 	type PlanProposalHandler,
 	PROPOSE_DEVICE_NAME,
 	PROPOSE_DEVICE_PATH,
@@ -13,6 +17,7 @@ import {
 	REJECT_DEVICE_PATH,
 	RESOLVE_DEVICE_NAME,
 	RESOLVE_DEVICE_PATH,
+	renderResolutionDeviceCall,
 	resolutionDeviceUsage,
 	resolveRenderer,
 	writeDeviceDispatch,
@@ -23,6 +28,7 @@ function createSession(
 	options: {
 		handler?: (input: unknown) => Promise<unknown>;
 		proposalHandler?: PlanProposalHandler;
+		councilHandler?: CouncilAdjudicationHandler;
 		clearPendingInvokers?: () => void;
 	} = {},
 ): ToolSession {
@@ -34,6 +40,7 @@ function createSession(
 		settings: Settings.isolated(),
 		peekQueueInvoker: options.handler ? () => options.handler : () => undefined,
 		peekPlanProposalHandler: options.proposalHandler ? () => options.proposalHandler : () => undefined,
+		peekCouncilHandler: options.councilHandler ? () => options.councilHandler : () => undefined,
 		clearPendingInvokers: options.clearPendingInvokers,
 	};
 }
@@ -47,6 +54,9 @@ describe("dispatchResolutionDevice", () => {
 		expect(resolutionDeviceUsage(RESOLVE_DEVICE_NAME)).toContain(RESOLVE_DEVICE_PATH);
 		expect(resolutionDeviceUsage(REJECT_DEVICE_NAME)).toContain(REJECT_DEVICE_PATH);
 		expect(resolutionDeviceUsage(PROPOSE_DEVICE_NAME)).toContain(PROPOSE_DEVICE_PATH);
+		expect(resolutionDeviceUsage(COUNCIL_DEVICE_NAME)).toContain(
+			`JSON adjudication as plain text to ${COUNCIL_DEVICE_PATH}`,
+		);
 	});
 
 	it("errors and clears stale pending markers when resolve has no invoker", async () => {
@@ -175,6 +185,43 @@ describe("dispatchResolutionDevice", () => {
 		expect(getText(result)).toContain("Plan ready for approval.");
 		expect(xdev).toMatchObject({ tool: PROPOSE_DEVICE_NAME, mode: "execute", args: { title: "demo" } });
 	});
+
+	it("errors when no council run is awaiting adjudication", async () => {
+		await expect(dispatchResolutionDevice(createSession(), COUNCIL_DEVICE_NAME, "{}")).rejects.toThrow(
+			"No council run is awaiting adjudication.",
+		);
+	});
+
+	it("forwards the raw council adjudication and carries handler details", async () => {
+		const payload = ' {\n  "winner": "A2"\n}\n';
+		let received = "";
+		const councilHandler: CouncilAdjudicationHandler = async raw => {
+			received = raw;
+			return {
+				content: [{ type: "text", text: "Adjudication accepted." }],
+				details: { winner: "A2", round: 2 },
+				isError: true,
+			};
+		};
+
+		const { result, xdev } = await dispatchResolutionDevice(
+			createSession({ councilHandler }),
+			COUNCIL_DEVICE_NAME,
+			payload,
+		);
+		expect(received).toBe(payload);
+		expect(result).toEqual({
+			content: [{ type: "text", text: "Adjudication accepted." }],
+			details: { winner: "A2", round: 2 },
+			isError: true,
+		});
+		expect(xdev).toEqual({
+			tool: COUNCIL_DEVICE_NAME,
+			mode: "execute",
+			args: { payload },
+			inner: { winner: "A2", round: 2 },
+		});
+	});
 });
 
 describe("device tool-call predicates", () => {
@@ -191,6 +238,18 @@ describe("device tool-call predicates", () => {
 		expect(isProposeToolCall({ name: "write", arguments: { path: RESOLVE_DEVICE_PATH } })).toBe(false);
 		expect(isProposeToolCall({ name: "ask", arguments: {} })).toBe(false);
 	});
+
+	it("lists council as a resolution device", () => {
+		expect(isResolutionDeviceName(COUNCIL_DEVICE_NAME)).toBe(true);
+		expect(isResolutionDeviceName("not-a-device")).toBe(false);
+	});
+});
+
+it("renders Council as the streaming preview title", async () => {
+	const theme = await getThemeByName("dark");
+	expect(theme).toBeDefined();
+	const component = renderResolutionDeviceCall(COUNCIL_DEVICE_NAME, '{"winner":"A2"}', theme!);
+	expect(sanitizeText(component.render(90).join("\n"))).toContain("Council");
 });
 
 it("renders a highlighted apply summary", async () => {

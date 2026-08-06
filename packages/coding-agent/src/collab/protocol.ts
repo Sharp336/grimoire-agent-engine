@@ -43,7 +43,7 @@ export { COLLAB_PROMPT_MESSAGE_TYPE, COLLAB_PROTO } from "@oh-my-pi/pi-wire";
 export { DEFAULT_RELAY_URL, ENVELOPE_HEADER_LENGTH, ROOM_ID_BYTES };
 
 export type CollabParticipant = Participant;
-export type AgentSnapshot = WireAgentSnapshot;
+export type AgentSnapshot = WireAgentSnapshot & { inspectOnly?: boolean };
 
 /** Debounced footer snapshot broadcast by the host. */
 export type CollabSessionState = SessionState & {

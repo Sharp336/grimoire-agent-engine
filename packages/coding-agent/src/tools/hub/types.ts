@@ -37,6 +37,8 @@ export interface HubPeerInfo {
 	unread: number;
 	lastActivity: number;
 	activity?: string;
+	/** Transcript-only capability; metadata only, never inferred from id or label. */
+	inspectOnly?: boolean;
 }
 
 /** Background-job row surfaced by `wait`/`cancel`/`jobs` results. */
@@ -70,6 +72,7 @@ export interface CancelOutcome {
 export interface AgentActivitySnapshot {
 	id: string;
 	parentId?: string;
+	inspectOnly?: boolean;
 	/** Latest activity gist recorded by the registry (display-only). */
 	activity?: string;
 	/** Time since the agent was registered. */
