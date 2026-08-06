@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Container, Text } from "@oh-my-pi/pi-tui";
@@ -131,7 +132,7 @@ type ReadUsageRow = {
 	ttftMs?: number;
 	timestamp?: number;
 	model?: string;
-	thinkingLevel?: string;
+	thinkingLevel?: ThinkingLevel;
 };
 
 /** Number of code lines to show in collapsed preview mode */
@@ -478,7 +479,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		ttftMs?: number,
 		timestamp?: number,
 		model?: string,
-		thinkingLevel?: string,
+		thinkingLevel?: ThinkingLevel,
 	): boolean {
 		const attachedToolCallIds: string[] = [];
 		let anchorId: string | undefined;

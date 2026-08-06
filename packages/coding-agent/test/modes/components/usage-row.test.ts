@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it } from "bun:test";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { ReadToolGroupComponent } from "../../../src/modes/components/read-tool-group";
 import { createUsageRowBlock, formatUsageRow } from "../../../src/modes/components/usage-row";
@@ -29,7 +30,7 @@ describe("formatUsageRow", () => {
 			undefined,
 			undefined,
 			"openrouter/deepseek/deepseek-v4-pro",
-			"xhigh",
+			ThinkingLevel.XHigh,
 		);
 		expect(row.endsWith("openrouter/deepseek/deepseek-v4-pro  xhigh")).toBe(true);
 	});
@@ -41,7 +42,7 @@ describe("formatUsageRow", () => {
 			undefined,
 			undefined,
 			"openrouter/deepseek/deepseek-v4-pro",
-			"off",
+			ThinkingLevel.Off,
 		);
 		expect(withLevel.endsWith("openrouter/deepseek/deepseek-v4-pro")).toBe(true);
 		expect(withLevel).not.toContain("off");
@@ -64,7 +65,9 @@ describe("formatUsageRow", () => {
 
 describe("createUsageRowBlock", () => {
 	it("renders model and level in the block text", () => {
-		const text = plain(createUsageRowBlock(usage, undefined, undefined, undefined, "p/m", "high").render(120));
+		const text = plain(
+			createUsageRowBlock(usage, undefined, undefined, undefined, "p/m", ThinkingLevel.High).render(120),
+		);
 		expect(text).toContain("p/m");
 		expect(text).toContain("high");
 	});
@@ -75,7 +78,7 @@ describe("ReadToolGroupComponent attachUsage", () => {
 		const group = new ReadToolGroupComponent({ showContentPreview: false });
 		group.updateArgs({ path: "file.ts" }, "c1");
 		group.updateResult({ content: [{ type: "text", text: "ok" }], isError: false }, false, "c1");
-		expect(group.attachUsage(["c1"], usage, undefined, undefined, undefined, "p/m", "high")).toBe(true);
+		expect(group.attachUsage(["c1"], usage, undefined, undefined, undefined, "p/m", ThinkingLevel.High)).toBe(true);
 		const text = plain(group.render(120));
 		expect(text).toContain("p/m");
 		expect(text).toContain("high");

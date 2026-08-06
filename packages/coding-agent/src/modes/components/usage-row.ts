@@ -23,7 +23,7 @@ export function formatUsageRow(
 	ttftMs?: number,
 	timestamp?: number,
 	model?: string,
-	thinkingLevel?: string,
+	thinkingLevel?: ThinkingLevel,
 ): string {
 	const totalInput = usage.input + usage.cacheWrite;
 	const parts: string[] = [];
@@ -65,7 +65,7 @@ export function createUsageRowBlock(
 	ttftMs?: number,
 	timestamp?: number,
 	model?: string,
-	thinkingLevel?: string,
+	thinkingLevel?: ThinkingLevel,
 ): Container {
 	const block = new Container();
 	block.addChild(new Spacer(1));
