@@ -1221,15 +1221,13 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			this.#requestRender();
 			return;
 		}
+		const selected = this.#rows[index];
+		if (!selected) return;
 		this.#hoveredRow = index;
-		if (index === this.#selectedRow) {
-			const selected = this.#rows[index];
-			if (selected) this.#activateAgent(selected);
-			return;
-		}
 		this.#selectRow(index);
 		this.#refreshActivityRows();
 		this.#requestRender();
+		this.#activateAgent(selected);
 	}
 
 	#switchSection(section: AgentHubSection): void {
