@@ -11,6 +11,7 @@ import * as path from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { $env, $which, APP_NAME, compareVersions, isEnoent } from "@oh-my-pi/pi-utils";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import { $ } from "bun";
 import { APP_DISPLAY_NAME, APP_PACKAGE_NAME, isMompPackageName, APP_VERSION as VERSION } from "../app-version";
 import { theme } from "../modes/theme/theme";

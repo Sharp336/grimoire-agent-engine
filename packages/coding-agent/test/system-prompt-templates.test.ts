@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
@@ -13,7 +14,6 @@ import {
 import { getProjectDir, prompt, setProjectDir } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import Handlebars from "handlebars";
-import * as z from "zod/v4";
 import type { Args } from "../src/cli/args";
 import { inspectSystemPrompt } from "../src/commands/system-prompt";
 import { ModelRegistry } from "../src/config/model-registry";
@@ -961,7 +961,7 @@ describe("system Handlebars prompt templates", () => {
 			name: "edit",
 			label: "Edit",
 			description: "Edits files",
-			parameters: z.object({}),
+			parameters: type({}),
 			customWireName: "apply_patch",
 			execute: async () => ({ content: [] }),
 		} satisfies AgentTool;
