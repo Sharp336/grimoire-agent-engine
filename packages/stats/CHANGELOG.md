@@ -28,6 +28,10 @@
 
 - Ensured the embedded dashboard archive is byte-reproducible by sorting entries and zeroing tar and gzip timestamps during compilation.
 
+### Fixed
+
+- Requests page time column now correctly displays in Chinese when locale is set to zh (previously always showed English due to custom `formatDistanceToNow` in pi-utils not supporting locale parameter)
+
 ## [17.2.10] - 2026-08-06
 
 ### Changed
