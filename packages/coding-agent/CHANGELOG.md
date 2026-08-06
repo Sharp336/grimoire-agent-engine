@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `tui.tmuxWindowName` (default off), which renames the enclosing tmux window to the active session name so `tmux list-windows -a` identifies live sessions across machines, restoring the original window name on exit.
+
 ## [17.2.10] - 2026-08-06
 
 ### Breaking Changes
