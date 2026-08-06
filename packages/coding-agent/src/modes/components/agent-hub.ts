@@ -936,7 +936,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 				: `${inactive("Flat")}${theme.fg("dim", "/")}${active("By parent")}`;
 		const counts = this.#statusSummary();
 		const header = `${theme.bold("Roster")}${theme.fg("dim", theme.sep.dot)}${projection}${counts ? theme.fg("dim", theme.sep.dot) + counts : ""}`;
-		const lines = [this.#sectionTabs(), ...wrapTextWithAnsi(header, Math.max(1, width))];
+		const lines = wrapTextWithAnsi(header, Math.max(1, width));
 
 		const metrics = this.#aggregate;
 		if (metrics.reportedAgents === 0) {
@@ -1019,7 +1019,6 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			`active ${formatAge(Math.max(1, Math.round((Date.now() - ref.lastActivity) / 1000)))}`,
 		].filter(Boolean);
 		add(lifecycle.join(theme.fg("dim", theme.sep.dot)));
-		add(`Registered ${formatAge(Math.max(1, Math.round((Date.now() - ref.createdAt) / 1000)))}`);
 		const modelDetails: string[] = [];
 		const modelRole = progress?.modelRole ?? ref.history?.modelRole;
 		if (modelRole && this.#settings) modelDetails.push(formatRoleBadge(modelRole, this.#settings));
@@ -1231,7 +1230,6 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		this.#selectRow(index);
 		this.#refreshActivityRows();
 		this.#requestRender();
-		this.#activateAgent(selected);
 	}
 
 	#switchSection(section: AgentHubSection): void {
