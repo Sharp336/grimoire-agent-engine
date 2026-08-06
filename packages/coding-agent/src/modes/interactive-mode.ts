@@ -61,6 +61,7 @@ import { formatModelString, type ResolvedModelRoleValue } from "../config/model-
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import {
 	isSettingsInitialized,
+	onCommandPriorityOverridesChanged,
 	onModelRolesChanged,
 	onStatusLineSessionAccentChanged,
 	Settings,
@@ -1118,6 +1119,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			}),
 		);
 		this.#eventBusUnsubscribers.push(
+			onCommandPriorityOverridesChanged(() => {
+				void this.refreshSlashCommandState().catch(error => {
+					logger.warn("Failed to refresh slash commands after priority override change", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+				});
+			}),
+		);
+		this.#eventBusUnsubscribers.push(
 			this.session.subscribeCommandMetadataChanged(() => {
 				const retainedCommands = this.#pendingSlashCommands.filter(command => !command.name.startsWith("skill:"));
 				const skillCommands = this.#rebuildSkillCommandsFromSession();
@@ -1223,6 +1233,39 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#pendingSlashCommands = [...retainedCommands, ...skillCommands];
 	}
 
+	/**
+	 * Apply user-configured priority overrides to slash commands before they are
+	 * handed to the autocomplete provider. Keys in `commands.priorityOverrides`
+	 * may match either a command name or one of its aliases. Commands without a
+	 * matching override keep any intrinsic priority they already have.
+	 */
+	#applyCommandPriorityOverrides(commands: SlashCommand[]): SlashCommand[] {
+		if (!isSettingsInitialized()) return commands;
+		const overrides = settings.get("commands.priorityOverrides");
+		if (!overrides || Object.keys(overrides).length === 0) return commands;
+		return commands.map(cmd => {
+			let override: number | undefined;
+			const rawOverride = overrides[cmd.name];
+			if (rawOverride !== undefined && typeof rawOverride === "number" && Number.isFinite(rawOverride)) {
+				override = rawOverride;
+			}
+			if (override === undefined) {
+				for (const alias of cmd.aliases ?? []) {
+					const rawAliasOverride = overrides[alias];
+					if (
+						rawAliasOverride !== undefined &&
+						typeof rawAliasOverride === "number" &&
+						Number.isFinite(rawAliasOverride)
+					) {
+						override = rawAliasOverride;
+						break;
+					}
+				}
+			}
+			return override === undefined ? cmd : { ...cmd, priority: Math.max(0, Math.min(99, override)) };
+		});
+	}
+
 	/** Reload slash commands and autocomplete for the provided working directory. */
 	async refreshSlashCommandState(cwd?: string): Promise<void> {
 		const basePath = cwd ?? this.sessionManager.getCwd();
@@ -1255,7 +1298,11 @@ export class InteractiveMode implements InteractiveModeContext {
 				description: template.description,
 			}));
 		this.#baseAutocompleteProvider = this.#inputController.createAutocompleteProvider(
-			[...this.#pendingSlashCommands, ...fileSlashCommands, ...promptTemplateCommands],
+			this.#applyCommandPriorityOverrides([
+				...this.#pendingSlashCommands,
+				...fileSlashCommands,
+				...promptTemplateCommands,
+			]),
 			basePath,
 		);
 		this.#applyAutocompleteProvider();

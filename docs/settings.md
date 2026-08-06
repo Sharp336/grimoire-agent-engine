@@ -751,6 +751,25 @@ searxng:
 
 Provider credentials and custom model definitions are configured separately — see [Providers](./providers.md) and [Models](./models.md).
 
+### Slash command priority overrides
+
+When several slash commands share the same prefix, autocomplete ranks them by match quality. You can give specific commands a boost so that short prefixes resolve the way you expect.
+
+```yaml
+commands:
+  priorityOverrides:
+    exit: 10
+    q: 5
+```
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `commands.priorityOverrides` | record | `{ exit: 10 }` | Map of slash-command name or alias to a numeric priority boost. Higher values rank first. Exact matches still win over boosted prefix matches, and ties keep registry order. |
+
+For example, the default `{ exit: 10 }` ensures that typing `/ex` offers `/exit` (an alias of `/quit`) before `/export`. To make `/qu` prefer `/quit` over `/queue` or `/quote`, set `quit: 10` or `q: 10`.
+
+Keys may match either a command's canonical name or any of its aliases; aliases are resolved per-command so an alias override affects that command's ranking, not other commands.
+
 ### Other groups
 
 `omp config list` exposes many more grouped settings, including: `task.*` (subagent concurrency, isolation, model overrides), `skills.*` and `commands.*` (discovery toggles), `mcp.*`, `github.*`, `async.*`, `goal.*`, `loop.*`, `todo.*`, `magicKeywords.*`, `ttsr.*` (time-traveling stream rules), `display.*`, `startup.*`, `share.*`, `collab.*`, `stt.*`/`tts.*`, `memories.*`/`hindsight.*`/`mnemopi.*` (memory backends), and `bashInterceptor.*`. Each follows the same type/default rules shown above.

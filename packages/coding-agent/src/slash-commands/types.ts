@@ -18,6 +18,8 @@ export interface BuiltinSlashCommand {
 	description: string;
 	/** Whether the command consumes text after the command name. */
 	allowArgs?: boolean;
+	/** Numeric priority boost for slash-command autocomplete. Higher values rank the command before others that share the same prefix. */
+	priority?: number;
 	/** Subcommands for dropdown completion (e.g. /mcp add, /mcp list). */
 	subcommands?: SubcommandDef[];
 	/** Static inline hint when command takes a simple argument (no subcommands). */
