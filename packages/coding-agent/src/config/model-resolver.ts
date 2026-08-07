@@ -16,6 +16,7 @@
  */
 
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { CompactionSettings as AgentCompactionSettings } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Api, Effort, KnownProvider, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
@@ -46,6 +47,7 @@ import {
 	type ModelRole,
 } from "./model-roles";
 import type { Settings } from "./settings";
+import type { CompactionModelThreshold, CompactionModelThresholds } from "./settings-schema";
 
 function isKnownProvider(provider: string): provider is KnownProvider {
 	return provider in DEFAULT_MODEL_PER_PROVIDER;
@@ -129,12 +131,53 @@ function splitThinkingSuffix(
 	return level ? { base: pattern.slice(0, colonIdx), level } : { base: pattern };
 }
 
-function matchingGlobModels(pattern: string, availableModels: readonly Model<Api>[]): Model<Api>[] {
+export function matchesModelGlob(pattern: string, model: Pick<Model<Api>, "provider" | "id">): boolean {
 	const glob = new Bun.Glob(pattern.toLowerCase());
-	return availableModels.filter(model => {
-		const fullId = `${model.provider}/${model.id}`;
-		return glob.match(fullId.toLowerCase()) || glob.match(model.id.toLowerCase());
-	});
+	const fullId = `${model.provider}/${model.id}`.toLowerCase();
+	return glob.match(fullId) || glob.match(model.id.toLowerCase());
+}
+
+function matchingGlobModels(pattern: string, availableModels: readonly Model<Api>[]): Model<Api>[] {
+	return availableModels.filter(model => matchesModelGlob(pattern, model));
+}
+
+export function resolveCompactionSettingsForModel(
+	settings: AgentCompactionSettings & { modelThresholds: CompactionModelThresholds },
+	model: Model<Api>,
+): AgentCompactionSettings {
+	const fullId = `${model.provider}/${model.id}`.toLowerCase();
+	const bareId = model.id.toLowerCase();
+	let selectedThresholds: CompactionModelThreshold | undefined;
+
+	// Exact selectors always win, regardless of where any matching glob appears
+	// in the effective settings object.
+	for (const [selector, thresholds] of Object.entries(settings.modelThresholds)) {
+		const normalizedSelector = selector.toLowerCase();
+		if (normalizedSelector === fullId || normalizedSelector === bareId) {
+			selectedThresholds = thresholds;
+			break;
+		}
+	}
+
+	// When no exact selector applies, preserve effective YAML/object insertion
+	// order and choose the first matching glob.
+	if (!selectedThresholds) {
+		for (const [selector, thresholds] of Object.entries(settings.modelThresholds)) {
+			if (matchesModelGlob(selector, model)) {
+				selectedThresholds = thresholds;
+				break;
+			}
+		}
+	}
+
+	if (!selectedThresholds) return settings;
+
+	const { modelThresholds: _modelThresholds, ...globalSettings } = settings;
+	return {
+		...globalSettings,
+		thresholdPercent: selectedThresholds.thresholdPercent,
+		thresholdTokens: selectedThresholds.thresholdTokens,
+	};
 }
 
 function resolveGlobScopePattern(

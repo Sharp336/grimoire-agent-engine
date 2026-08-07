@@ -8,8 +8,10 @@
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { arkToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	type ContextBreakdown,
+	computeContextBreakdown,
 	computeNonMessageBreakdown,
 	computeNonMessageTokens,
 	estimateToolSchemaTokens,
@@ -29,6 +31,36 @@ describe("estimateToolSchemaTokens", () => {
 			{ name: "web_search", description: "Searches the web.", parameters: arkToWireSchema(parameters) } as never,
 		]);
 		expect(arktypeEstimate).toBe(wireEstimate);
+	});
+});
+
+describe("computeContextBreakdown compaction threshold", () => {
+	it("uses the active model's threshold override for the automatic buffer", () => {
+		const settings = Settings.isolated({
+			"compaction.enabled": true,
+			"compaction.strategy": "context-full",
+			"compaction.thresholdPercent": -1,
+			"compaction.thresholdTokens": 160_000,
+			"compaction.modelThresholds": {
+				"anthropic/claude-sonnet-4-5": { thresholdPercent: 40 },
+			},
+		});
+		const session = {
+			model: {
+				provider: "anthropic",
+				id: "claude-sonnet-4-5",
+				contextWindow: 200_000,
+			},
+			settings,
+			messages: [],
+			systemPrompt: [],
+			agent: { state: { tools: [] } },
+			skills: [],
+		} as never;
+
+		const breakdown = computeContextBreakdown(session);
+
+		expect(breakdown.autoCompactBufferTokens).toBe(120_000);
 	});
 });
 

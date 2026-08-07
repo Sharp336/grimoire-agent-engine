@@ -103,7 +103,7 @@ describe("AgentSession mid-run threshold compaction", () => {
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [mockBashTool], messages: [] },
 			convertToLlm,
-			streamFn: (_model, context) => {
+			streamFn: (requestModel, context) => {
 				const index = call++;
 				observedContexts.push(context.messages.map(message => JSON.stringify(message)));
 				const stream = new AssistantMessageEventStream();
@@ -115,8 +115,8 @@ describe("AgentSession mid-run threshold compaction", () => {
 								{ type: "toolCall" as const, id: `tc-${index}`, name: "bash", arguments: { cmd: "pwd" } },
 							],
 							api: "anthropic-messages" as const,
-							provider: "anthropic" as const,
-							model: "claude-sonnet-4-5",
+							provider: requestModel.provider,
+							model: requestModel.id,
 							usage: highUsage(50_000),
 							stopReason: "toolUse" as const,
 							timestamp: Date.now(),
@@ -125,8 +125,8 @@ describe("AgentSession mid-run threshold compaction", () => {
 							role: "assistant" as const,
 							content: [{ type: "text" as const, text: "All done." }],
 							api: "anthropic-messages" as const,
-							provider: "anthropic" as const,
-							model: "claude-sonnet-4-5",
+							provider: requestModel.provider,
+							model: requestModel.id,
 							usage: highUsage(200),
 							stopReason: "stop" as const,
 							timestamp: Date.now(),
@@ -174,6 +174,23 @@ describe("AgentSession mid-run threshold compaction", () => {
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 		expect(observedContexts.length).toBeGreaterThanOrEqual(2);
 		expect(observedContexts[1].join("\n")).toContain("MID-RUN-COMPACTED");
+	});
+
+	it("uses the active model threshold after switching before a mid-run tool turn", async () => {
+		const { session, observedContexts } = await createHarness({
+			"compaction.modelThresholds": {
+				"anthropic/claude-sonnet-4-5": { thresholdTokens: 60_000 },
+				"anthropic/claude-haiku-4-5": { thresholdTokens: 1_000 },
+			},
+		});
+		await session.setModel(getBundledModel("anthropic", "claude-haiku-4-5")!);
+		const compactSpy = mockCompaction("ACTIVE-MODEL-MID-RUN-COMPACTED");
+
+		await session.prompt("work on the release");
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(observedContexts.length).toBeGreaterThanOrEqual(2);
+		expect(observedContexts[1].join("\n")).toContain("ACTIVE-MODEL-MID-RUN-COMPACTED");
 	});
 
 	it("compacts in place between tool-call turns during an active goal run", async () => {

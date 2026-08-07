@@ -312,6 +312,13 @@ export interface ModelTagsSettings {
 	[key: string]: ModelTagDef;
 }
 
+export interface CompactionModelThreshold {
+	thresholdPercent?: number;
+	thresholdTokens?: number;
+}
+
+export type CompactionModelThresholds = Record<string, CompactionModelThreshold>;
+
 // Typed defaults for array/record settings — named constants avoid `as` casts
 // under `as const` while still letting SettingValue infer the correct element type.
 const EMPTY_STRING_ARRAY: string[] = [];
@@ -320,6 +327,7 @@ const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["hub"];
 const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
+const EMPTY_COMPACTION_MODEL_THRESHOLDS_RECORD: CompactionModelThresholds = {};
 const HINDSIGHT_RECALL_TYPES_DEFAULT: string[] = ["world", "experience"];
 export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	{
@@ -2241,6 +2249,10 @@ export const SETTINGS_SCHEMA = {
 				{ value: "500000", label: "500K tokens", description: "Very large context window" },
 			],
 		},
+	},
+	"compaction.modelThresholds": {
+		type: "record",
+		default: EMPTY_COMPACTION_MODEL_THRESHOLDS_RECORD,
 	},
 
 	"compaction.handoffSaveToDisk": {
@@ -5588,6 +5600,7 @@ export type SettingValue<P extends SettingPath> = Schema[P] extends { type: "boo
 
 /** Get the default value for a setting path */
 export function getDefault<P extends SettingPath>(path: P): SettingValue<P> {
+	if (path === "compaction.modelThresholds") return {} as SettingValue<P>;
 	return SETTINGS_SCHEMA[path].default as SettingValue<P>;
 }
 
@@ -5660,6 +5673,7 @@ export interface CompactionSettings {
 	strategy: "context-full" | "handoff" | "shake" | "snapcompact" | "off";
 	thresholdPercent: number;
 	thresholdTokens: number;
+	modelThresholds: CompactionModelThresholds;
 	reserveTokens: number | undefined;
 	keepRecentTokens: number;
 	midTurnEnabled: boolean;

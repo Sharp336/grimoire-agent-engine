@@ -12,12 +12,12 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import {
 	AGGRESSIVE_SHAKE_CONFIG,
+	type CompactionSettings as AgentCompactionSettings,
 	AUTO_HANDOFF_THRESHOLD_FOCUS,
 	applyShakeRegions,
 	CompactionCancelledError,
 	type CompactionPreparation,
 	type CompactionResult,
-	type CompactionSettings,
 	calculateContextTokens,
 	collectShakeRegions,
 	compact,
@@ -53,6 +53,7 @@ import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { ModelRegistry } from "../config/model-registry";
+import { resolveCompactionSettingsForModel } from "../config/model-resolver";
 import { MODEL_ROLE_IDS } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { getDefault } from "../config/settings";
@@ -290,6 +291,11 @@ export class SessionMaintenance {
 
 	get #model(): Model | undefined {
 		return this.#host.model();
+	}
+
+	#effectiveCompactionSettings(model: Model | undefined = this.#model): AgentCompactionSettings {
+		const settings = this.#host.settings.getGroup("compaction");
+		return model ? resolveCompactionSettingsForModel(settings, model) : settings;
 	}
 
 	get #goalModeState(): GoalModeState | undefined {
@@ -1014,7 +1020,7 @@ export class SessionMaintenance {
 		if (!model) return;
 		const contextWindow = model.contextWindow ?? 0;
 		if (contextWindow <= 0) return;
-		const compactionSettings = this.#host.settings.getGroup("compaction");
+		const compactionSettings = this.#effectiveCompactionSettings(model);
 		const contextTokens = this.#estimatePrePromptContextTokens(messages, contextWindow);
 		const pendingMidTurnDeadEnd = this.#midTurnDeadEndPendingPrePrompt;
 		this.#midTurnDeadEndPendingPrePrompt = false;
@@ -1051,6 +1057,7 @@ export class SessionMaintenance {
 			autoContinue: false,
 			triggerContextTokens: contextTokens,
 			phase: "pre_turn",
+			effectiveSettings: compactionSettings,
 		});
 	}
 
@@ -1083,7 +1090,7 @@ export class SessionMaintenance {
 		const contextWindow = model?.contextWindow ?? 0;
 		if (contextWindow <= 0) return;
 
-		const compactionSettings = this.#host.settings.getGroup("compaction");
+		const compactionSettings = this.#effectiveCompactionSettings(model);
 		if (
 			!compactionSettings.enabled ||
 			compactionSettings.strategy === "off" ||
@@ -1145,6 +1152,7 @@ export class SessionMaintenance {
 			suppressHandoff: true,
 			triggerContextTokens: contextTokens,
 			phase: "mid_turn",
+			effectiveSettings: compactionSettings,
 		});
 		if (result.automaticContinuationBlocked) {
 			this.#midTurnCompactionDeadEnds.add(activeMessages);
@@ -1200,6 +1208,7 @@ export class SessionMaintenance {
 		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return COMPACTION_CHECK_NONE;
 		const contextWindow = this.#model?.contextWindow ?? 0;
+		const compactionSettings = this.#effectiveCompactionSettings();
 		const generation = this.#host.promptGeneration();
 		// Skip overflow check if the message came from a different model.
 		// This handles the case where user switched from a smaller-context model (e.g. opus)
@@ -1233,7 +1242,6 @@ export class SessionMaintenance {
 			}
 
 			// No promotion target available fall through to compaction
-			const compactionSettings = this.#host.settings.getGroup("compaction");
 			if (compactionSettings.enabled && compactionSettings.strategy !== "off") {
 				return await this.#host.runRecoveryCompactionWithRollback("overflow", assistantMessage, allowDefer, {
 					autoContinue,
@@ -1306,11 +1314,10 @@ export class SessionMaintenance {
 				return COMPACTION_CHECK_CONTINUATION;
 			}
 
-			const incompleteCompactionSettings = this.#host.settings.getGroup("compaction");
-			if (incompleteCompactionSettings.enabled && incompleteCompactionSettings.strategy !== "off") {
+			if (compactionSettings.enabled && compactionSettings.strategy !== "off") {
 				logger.debug("Compaction triggered by response.incomplete (length stop, no promotion target)", {
 					model: `${assistantMessage.provider}/${assistantMessage.model}`,
-					strategy: incompleteCompactionSettings.strategy,
+					strategy: compactionSettings.strategy,
 				});
 				return await this.#host.runRecoveryCompactionWithRollback("incomplete", assistantMessage, allowDefer, {
 					autoContinue,
@@ -1330,7 +1337,6 @@ export class SessionMaintenance {
 		// setting.
 		const supersedeResult = await this.#pruneStaleToolResults();
 
-		const compactionSettings = this.#host.settings.getGroup("compaction");
 		if (!compactionSettings.enabled || compactionSettings.strategy === "off") return COMPACTION_CHECK_NONE;
 
 		// Case 4: Threshold - turn succeeded but context is getting large
@@ -1397,6 +1403,7 @@ export class SessionMaintenance {
 					triggerContextTokens: postMaintenanceContextTokens,
 					phase: "pre_turn",
 					terminalTextAnswer: isTerminalTextAssistantAnswer(assistantMessage),
+					effectiveSettings: compactionSettings,
 				});
 			}
 			logger.debug("Auto-compaction threshold satisfied but context promotion took over", {
@@ -1696,7 +1703,7 @@ export class SessionMaintenance {
 	 * ~402k frame-token projection always overflows any sub-1M-token window
 	 * (issue #3247).
 	 */
-	#computeSnapcompactMaxFrames(preparation: CompactionPreparation, settings: CompactionSettings): number {
+	#computeSnapcompactMaxFrames(preparation: CompactionPreparation, settings: AgentCompactionSettings): number {
 		const ctxWindow = this.#model?.contextWindow ?? 0;
 		if (ctxWindow <= 0) return Math.min(snapcompact.MAX_FRAMES_DEFAULT, snapcompact.maxFramesForDataBudget());
 		const reserve = effectiveReserveTokens(ctxWindow, settings);
@@ -1795,15 +1802,14 @@ export class SessionMaintenance {
 	 * When the model/window is unknown we cannot evaluate the band, so we
 	 * optimistically allow the continuation (preserving prior behavior).
 	 */
-	#compactionCreatedHeadroom(): boolean {
+	#compactionCreatedHeadroom(settings: AgentCompactionSettings = this.#effectiveCompactionSettings()): boolean {
 		const contextWindow = this.#model?.contextWindow ?? 0;
 		if (contextWindow <= 0) return true;
-		const compactionSettings = this.#host.settings.getGroup("compaction");
 		const residualTokens = compactionContextTokens(
 			this.#host.getContextUsage({ contextWindow })?.tokens ?? 0,
 			this.#estimateStoredContextTokens(),
 		);
-		const thresholdTokens = resolveThresholdTokens(contextWindow, compactionSettings);
+		const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
 		const recoveryBand = Math.floor(thresholdTokens * COMPACTION_RECOVERY_BAND);
 		// Residual at/below the band is authoritative headroom: the band sits
 		// strictly under the compaction threshold, so the next turn cannot
@@ -1874,6 +1880,7 @@ export class SessionMaintenance {
 	 */
 	async #rescueCompactionDeadEnd(
 		signal: AbortSignal,
+		settings: AgentCompactionSettings,
 		options: { skipElide: boolean; hasProgress: () => boolean },
 	): Promise<boolean> {
 		if (signal.aborted) return false;
@@ -1884,7 +1891,7 @@ export class SessionMaintenance {
 		// a threshold-derived frame budget.
 		const frameRescue = await this.#rescueSnapcompactFrameOverflow(
 			this.#host.sessionManager.getBranch(),
-			this.#host.settings.getGroup("compaction"),
+			settings,
 			signal,
 		);
 		if (frameRescue !== undefined && options.hasProgress()) return true;
@@ -1957,7 +1964,7 @@ export class SessionMaintenance {
 	 * Returns 0 when not even one frame fits that budget — the rebuild could
 	 * never create headroom, so the caller must not append it.
 	 */
-	#computeSnapcompactRescueMaxFrames(settings: CompactionSettings, keptTailTokens: number): number {
+	#computeSnapcompactRescueMaxFrames(settings: AgentCompactionSettings, keptTailTokens: number): number {
 		const ctxWindow = this.#model?.contextWindow ?? 0;
 		if (ctxWindow <= 0) return Math.min(snapcompact.MAX_FRAMES_DEFAULT, snapcompact.maxFramesForDataBudget());
 		const thresholdTokens = resolveThresholdTokens(ctxWindow, settings);
@@ -2001,7 +2008,7 @@ export class SessionMaintenance {
 	 */
 	async #rescueSnapcompactFrameOverflow(
 		branchEntries: SessionEntry[],
-		settings: CompactionSettings,
+		settings: AgentCompactionSettings,
 		signal: AbortSignal,
 	): Promise<snapcompact.CompactionResult | undefined> {
 		if (signal.aborted) return undefined;
@@ -2142,9 +2149,10 @@ export class SessionMaintenance {
 			suppressHandoff?: boolean;
 			phase?: CodexCompactionContext["phase"];
 			terminalTextAnswer?: boolean;
+			effectiveSettings?: AgentCompactionSettings;
 		} = {},
 	): Promise<CompactionCheckResult> {
-		const compactionSettings = this.#host.settings.getGroup("compaction");
+		const compactionSettings = options.effectiveSettings ?? this.#effectiveCompactionSettings();
 		if (compactionSettings.strategy === "off") return COMPACTION_CHECK_NONE;
 		if (reason !== "idle" && !compactionSettings.enabled) return COMPACTION_CHECK_NONE;
 		const generation = this.#host.promptGeneration();
@@ -2165,6 +2173,7 @@ export class SessionMaintenance {
 				generation,
 				shouldAutoContinue,
 				terminalTextAnswer,
+				compactionSettings,
 				options.triggerContextTokens,
 				suppressContinuation,
 			);
@@ -2190,6 +2199,7 @@ export class SessionMaintenance {
 					await this.runAutoCompaction(reason, willRetry, true, true, {
 						...options,
 						terminalTextAnswer,
+						effectiveSettings: undefined,
 					});
 				},
 				{ generation },
@@ -2347,10 +2357,10 @@ export class SessionMaintenance {
 					if (frameRescueResult) {
 						rescueRewroteHistory = true;
 						pathEntriesForCompaction = this.#host.sessionManager.getBranch();
-						frameRescueCreatedHeadroom = this.#compactionCreatedHeadroom();
+						frameRescueCreatedHeadroom = this.#compactionCreatedHeadroom(compactionSettings);
 					}
 					if (!frameRescueCreatedHeadroom) {
-						await this.#rescueCompactionDeadEnd(autoCompactionSignal, {
+						await this.#rescueCompactionDeadEnd(autoCompactionSignal, compactionSettings, {
 							skipElide: fallbackFromShake,
 							hasProgress: () => {
 								// Only reached when a tier actually freed something, so the
@@ -2840,7 +2850,7 @@ export class SessionMaintenance {
 				// so use the looser fit budget.
 				retryFits = this.#compactionCreatedRetryFit();
 				if (!retryFits) {
-					retryFits = await this.#rescueCompactionDeadEnd(autoCompactionSignal, {
+					retryFits = await this.#rescueCompactionDeadEnd(autoCompactionSignal, compactionSettings, {
 						skipElide: fallbackFromShake,
 						hasProgress: () => this.#compactionCreatedRetryFit(),
 					});
@@ -2856,11 +2866,11 @@ export class SessionMaintenance {
 				// when auto-continue is disabled, a no-headroom threshold pass must still
 				// block later automatic continuations (todo reminders/session_stop hooks)
 				// from re-entering the same oversized context.
-				hasHeadroom = this.#compactionCreatedHeadroom();
+				hasHeadroom = this.#compactionCreatedHeadroom(compactionSettings);
 				if (!hasHeadroom) {
-					hasHeadroom = await this.#rescueCompactionDeadEnd(autoCompactionSignal, {
+					hasHeadroom = await this.#rescueCompactionDeadEnd(autoCompactionSignal, compactionSettings, {
 						skipElide: fallbackFromShake,
-						hasProgress: () => this.#compactionCreatedHeadroom(),
+						hasProgress: () => this.#compactionCreatedHeadroom(compactionSettings),
 					});
 				}
 				if (!hasHeadroom) {
@@ -2951,6 +2961,7 @@ export class SessionMaintenance {
 		generation: number,
 		autoContinue: boolean,
 		terminalTextAnswer: boolean,
+		compactionSettings: AgentCompactionSettings,
 		triggerContextTokens?: number,
 		suppressContinuation = false,
 	): Promise<CompactionCheckResult | "fallback"> {
@@ -2994,7 +3005,6 @@ export class SessionMaintenance {
 			// without that pre-shake savings, shake can fall through to context-full
 			// even though the post-prune history is already inside the recovery band.
 			const contextWindow = this.#model?.contextWindow ?? 0;
-			const compactionSettings = this.#host.settings.getGroup("compaction");
 			let stillOverThreshold = false;
 			if (contextWindow > 0) {
 				if (typeof triggerContextTokens === "number" && Number.isFinite(triggerContextTokens)) {

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { resolveThresholdTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
@@ -14,6 +15,7 @@ import {
 	resolveAgentPrewalkPattern,
 	resolveAllowedModels,
 	resolveCliModel,
+	resolveCompactionSettingsForModel,
 	resolveExplicitModelRole,
 	resolveModelFromString,
 	resolveModelOverride,
@@ -2129,5 +2131,87 @@ describe("effort-tier variant aliases", () => {
 	test("consumed X-thinking twins resolve via the grammar fallback", () => {
 		expect(parseModelPattern("venice/kimi-k2-thinking", variantModels).model?.id).toBe("kimi-k2");
 		expect(parseModelPattern("kimi-k2-thinking", variantModels).model?.id).toBe("kimi-k2");
+	});
+});
+
+type CompactionModelThresholdOverride = {
+	thresholdPercent?: number;
+	thresholdTokens?: number;
+};
+
+function createCompactionSettings(modelThresholds: Record<string, CompactionModelThresholdOverride> = {}) {
+	return {
+		enabled: true,
+		thresholdPercent: -1,
+		thresholdTokens: 160_000,
+		keepRecentTokens: 20_000,
+		modelThresholds,
+	};
+}
+
+describe("resolveCompactionSettingsForModel", () => {
+	test("uses an exact full selector case-insensitively over a broad glob", () => {
+		const model = createOpusModel("anthropic", "claude-sonnet-4-5", "Claude Sonnet 4.5");
+		const settings = createCompactionSettings({
+			"**": { thresholdTokens: 1_000 },
+			"AnThRoPiC/CLAUDE-SONNET-4-5": { thresholdPercent: 40 },
+		});
+
+		const resolved = resolveCompactionSettingsForModel(settings, model);
+
+		expect(resolved.thresholdPercent).toBe(40);
+		expect(resolved.thresholdTokens).toBeUndefined();
+		expect(resolveThresholdTokens(200_000, resolved)).toBe(80_000);
+	});
+
+	test("uses a bare exact selector case-insensitively over a broad glob", () => {
+		const model = createOpusModel("anthropic", "claude-sonnet-4-5", "Claude Sonnet 4.5");
+		const settings = createCompactionSettings({
+			"**": { thresholdTokens: 1_000 },
+			"CLAUDE-SONNET-4-5": { thresholdTokens: 40_000 },
+		});
+
+		const resolved = resolveCompactionSettingsForModel(settings, model);
+
+		expect(resolved.thresholdTokens).toBe(40_000);
+	});
+
+	test("uses the first matching glob in effective object insertion order", () => {
+		const model = createOpusModel("anthropic", "claude-sonnet-4-5", "Claude Sonnet 4.5");
+		const settings = createCompactionSettings({
+			"**": { thresholdTokens: 11_000 },
+			"anthropic/*": { thresholdTokens: 22_000 },
+		});
+
+		const resolved = resolveCompactionSettingsForModel(settings, model);
+
+		expect(resolved.thresholdTokens).toBe(11_000);
+	});
+
+	test("preserves global trigger settings when no selector matches", () => {
+		const model = createOpusModel("openai", "gpt-5.6", "GPT-5.6");
+		const settings = createCompactionSettings({
+			"anthropic/*": { thresholdTokens: 22_000 },
+		});
+
+		const resolved = resolveCompactionSettingsForModel(settings, model);
+
+		expect(resolved.thresholdPercent).toBe(-1);
+		expect(resolved.thresholdTokens).toBe(160_000);
+	});
+
+	test("resolves each model independently when reusing one settings object", () => {
+		const settings = createCompactionSettings({
+			"anthropic/claude-sonnet-*": { thresholdTokens: 10_000 },
+			"anthropic/claude-haiku-*": { thresholdTokens: 20_000 },
+		});
+		const sonnet = createOpusModel("anthropic", "claude-sonnet-4-5", "Claude Sonnet 4.5");
+		const haiku = createOpusModel("anthropic", "claude-haiku-4-5", "Claude Haiku 4.5");
+
+		const resolvedSonnet = resolveCompactionSettingsForModel(settings, sonnet);
+		const resolvedHaiku = resolveCompactionSettingsForModel(settings, haiku);
+
+		expect(resolvedSonnet.thresholdTokens).toBe(10_000);
+		expect(resolvedHaiku.thresholdTokens).toBe(20_000);
 	});
 });

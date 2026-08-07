@@ -54,6 +54,7 @@ describe("AgentSession advisor context maintenance", () => {
 		});
 		const advisorMock = createMockModel({
 			provider: "anthropic",
+			id: "advisor-model",
 			contextWindow: CONTEXT_WINDOW,
 			responses: [{ content: ["advisor reviewed current update"] }],
 		});
@@ -241,6 +242,23 @@ describe("AgentSession advisor context maintenance", () => {
 
 		expect(credentialSignal?.aborted).toBe(true);
 		expect(session.getAdvisorAgent()?.state.model).toBe(advisorMock);
+	});
+
+	it("uses the advisor model's compaction threshold instead of the global trigger", async () => {
+		const { advisor, advisorMock, settings } = createHarness();
+		settings.set("compaction.thresholdTokens", 300_000);
+		settings.set("compaction.modelThresholds", {
+			"anthropic/advisor-model": { thresholdTokens: 400_000 },
+		});
+
+		advisor.state.messages.push(usageAnchor(advisorMock, Date.now() - 1_000));
+
+		await session.prompt("normal current update");
+
+		expect(advisorMock.calls).toHaveLength(1);
+		const sentContext = JSON.stringify(advisorMock.calls[0].context.messages);
+		expect(sentContext).toContain("prior advisor output");
+		expect(sentContext).toContain("normal current update");
 	});
 
 	it("includes advisor system prompt and tool schemas in the local maintenance floor", async () => {

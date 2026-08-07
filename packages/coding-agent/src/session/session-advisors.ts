@@ -65,6 +65,7 @@ import {
 	formatModelString,
 	formatModelStringWithRouting,
 	resolveAdvisorRoleSelection,
+	resolveCompactionSettingsForModel,
 	resolveModelOverride,
 } from "../config/model-resolver";
 import { MODEL_ROLES } from "../config/model-roles";
@@ -1304,11 +1305,14 @@ export class SessionAdvisors {
 		await this.#maybeRestoreAdvisorRetryFallbackPrimary(advisor, signal);
 		const agent = advisor.agent;
 
-		const compactionSettings = this.#host.settings.getGroup("compaction");
+		let advisorModel = agent.state.model;
+		let compactionSettings = resolveCompactionSettingsForModel(
+			this.#host.settings.getGroup("compaction"),
+			advisorModel,
+		);
 		if (compactionSettings.strategy === "off") return false;
 		if (!compactionSettings.enabled) return false;
 
-		const advisorModel = agent.state.model;
 		const contextWindow = advisorModel.contextWindow ?? 0;
 		if (contextWindow <= 0) return false;
 
@@ -1339,11 +1343,17 @@ export class SessionAdvisors {
 		if (await this.#promoteAdvisorContextModel(advisor, advisorModel, signal)) {
 			// Promotion succeeded, check if new model has enough space
 			const newModel = agent.state.model;
+			const newCompactionSettings = resolveCompactionSettingsForModel(
+				this.#host.settings.getGroup("compaction"),
+				newModel,
+			);
 			const newWindow = newModel.contextWindow ?? 0;
 			if (newWindow > 0) {
-				const stillNeedsCompaction = shouldCompact(contextTokens, newWindow, compactionSettings);
+				const stillNeedsCompaction = shouldCompact(contextTokens, newWindow, newCompactionSettings);
 				if (!stillNeedsCompaction) return false;
 			}
+			advisorModel = newModel;
+			compactionSettings = newCompactionSettings;
 		}
 
 		// 2. Run compaction on advisor messages

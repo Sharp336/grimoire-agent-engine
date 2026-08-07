@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { __providerInFlightForTesting, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context } from "@oh-my-pi/pi-ai/types";
@@ -438,6 +439,213 @@ describe("Settings", () => {
 				"gemma",
 				"minimax",
 			]);
+		});
+	});
+
+	describe("compaction.modelThresholds", () => {
+		const modelThresholds = {
+			"anthropic/claude-sonnet-4-5": { thresholdPercent: 40 },
+			"openai-codex/gpt-5.6*": { thresholdTokens: 200_000 },
+		};
+
+		const expectConfigurationError = async (initialization: Promise<Settings>, message: string): Promise<void> => {
+			await expect(initialization).rejects.toBeInstanceOf(AIError.ConfigurationError);
+			await expect(initialization).rejects.toThrow(message);
+		};
+
+		it("defaults to an empty map", () => {
+			const settings = Settings.isolated();
+
+			expect(settings.get("compaction.modelThresholds")).toEqual({});
+			expect(getDefault("compaction.modelThresholds")).toEqual({});
+		});
+
+		it("does not expose a shared mutable default map", () => {
+			const settings = Settings.isolated();
+			const exposed = settings.get("compaction.modelThresholds");
+			exposed["anthropic/*"] = { thresholdTokens: 1_000 };
+
+			expect(settings.get("compaction.modelThresholds")).toEqual({});
+
+			const defaultValue = getDefault("compaction.modelThresholds");
+			defaultValue["anthropic/*"] = { thresholdTokens: 1_000 };
+			expect(getDefault("compaction.modelThresholds")).toEqual({});
+		});
+
+		it("validates model threshold maps loaded through the read-only API", async () => {
+			await writeSettings({
+				compaction: {
+					modelThresholds: {
+						"anthropic/*": {},
+					},
+				},
+			});
+
+			await expectConfigurationError(
+				Settings.loadReadOnly({ cwd: projectDir, agentDir }),
+				'compaction.modelThresholds entry "anthropic/*" must define thresholdPercent or thresholdTokens',
+			);
+		});
+
+		it("rejects non-record threshold maps", () => {
+			expect(() =>
+				Settings.isolated({
+					"compaction.modelThresholds": new Map([["anthropic/*", { thresholdTokens: 1_000 }]]),
+				}),
+			).toThrow("compaction.modelThresholds must be a mapping");
+		});
+
+		it("isolates validated threshold maps from caller mutations", () => {
+			const settings = Settings.isolated();
+			const input = {
+				"anthropic/*": { thresholdTokens: 12_345 },
+			};
+			settings.set("compaction.modelThresholds", input);
+			input["anthropic/*"].thresholdTokens = 0;
+
+			expect(settings.get("compaction.modelThresholds")).toEqual({
+				"anthropic/*": { thresholdTokens: 12_345 },
+			});
+
+			const exposed = settings.get("compaction.modelThresholds");
+			exposed["anthropic/*"].thresholdTokens = 0;
+			expect(settings.get("compaction.modelThresholds")).toEqual({
+				"anthropic/*": { thresholdTokens: 12_345 },
+			});
+
+			const override = {
+				"anthropic/*": { thresholdTokens: 54_321 },
+			};
+			settings.override("compaction.modelThresholds", override);
+			override["anthropic/*"].thresholdTokens = 0;
+			expect(settings.get("compaction.modelThresholds")).toEqual({
+				"anthropic/*": { thresholdTokens: 54_321 },
+			});
+		});
+
+		it("retains configured entries, fields, and insertion order from config.yml", async () => {
+			await writeSettings({ compaction: { modelThresholds } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const loaded = settings.get("compaction.modelThresholds");
+
+			expect(loaded).toEqual(modelThresholds);
+			expect(Object.keys(loaded)).toEqual(Object.keys(modelThresholds));
+			expect(loaded["anthropic/claude-sonnet-4-5"]).toEqual({ thresholdPercent: 40 });
+			expect(loaded["openai-codex/gpt-5.6*"]).toEqual({ thresholdTokens: 200_000 });
+		});
+
+		it("rejects a non-object trigger from config.yml", async () => {
+			await writeSettings({
+				compaction: {
+					modelThresholds: {
+						"anthropic/*": "not-an-object",
+					},
+				},
+			});
+
+			await expectConfigurationError(
+				Settings.init({ cwd: projectDir, agentDir }),
+				'compaction.modelThresholds entry "anthropic/*" must be an object',
+			);
+		});
+
+		it("rejects a blank selector from project settings", async () => {
+			await Bun.write(
+				path.join(getProjectAgentDir(projectDir), "settings.json"),
+				JSON.stringify({
+					compaction: {
+						modelThresholds: {
+							"   ": { thresholdTokens: 1_000 },
+						},
+					},
+				}),
+			);
+
+			await expectConfigurationError(
+				Settings.init({ cwd: projectDir, agentDir, inMemory: true }),
+				"compaction.modelThresholds selectors must not be blank",
+			);
+		});
+
+		it("rejects an entry with no trigger from a config overlay", async () => {
+			const overlayPath = tempDir.join("overlay.yml");
+			await Bun.write(
+				overlayPath,
+				YAML.stringify({
+					compaction: {
+						modelThresholds: {
+							"anthropic/*": {},
+						},
+					},
+				}),
+			);
+
+			await expectConfigurationError(
+				Settings.init({ cwd: projectDir, agentDir, inMemory: true, configFiles: [overlayPath] }),
+				'compaction.modelThresholds entry "anthropic/*" must define thresholdPercent or thresholdTokens',
+			);
+		});
+
+		it.each([
+			{ label: "non-positive", value: 0, message: "a positive finite number" },
+			{ label: "non-finite", value: Number.NaN, message: "a positive finite number" },
+		])("rejects a $label threshold value from config.yml", async ({ value, message }) => {
+			await writeSettings({
+				compaction: {
+					modelThresholds: {
+						"anthropic/*": { thresholdTokens: value },
+					},
+				},
+			});
+
+			await expectConfigurationError(
+				Settings.init({ cwd: projectDir, agentDir }),
+				`compaction.modelThresholds entry "anthropic/*" thresholdTokens must be ${message}`,
+			);
+		});
+
+		it("loads an unmatched but well-formed selector", async () => {
+			const unmatched = {
+				"provider-that-is-not-configured/*": { thresholdTokens: 12_345 },
+			};
+			await writeSettings({ compaction: { modelThresholds: unmatched } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("compaction.modelThresholds")).toEqual(unmatched);
+		});
+
+		it("rejects invalid isolated, set, and override writes before mutating state or persistence", async () => {
+			const initial = {
+				"anthropic/*": { thresholdTokens: 12_345 },
+			};
+			await writeSettings({ compaction: { modelThresholds: initial } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const invalid = {
+				"anthropic/*": { thresholdTokens: 0 },
+			};
+			const before = settings.get("compaction.modelThresholds");
+
+			expect(() =>
+				Settings.isolated({
+					"compaction.modelThresholds": invalid,
+				}),
+			).toThrow('compaction.modelThresholds entry "anthropic/*" thresholdTokens must be a positive finite number');
+
+			expect(() => settings.set("compaction.modelThresholds", invalid as never)).toThrow(
+				'compaction.modelThresholds entry "anthropic/*" thresholdTokens must be a positive finite number',
+			);
+			expect(settings.get("compaction.modelThresholds")).toEqual(before);
+
+			expect(() => settings.override("compaction.modelThresholds", invalid as never)).toThrow(
+				'compaction.modelThresholds entry "anthropic/*" thresholdTokens must be a positive finite number',
+			);
+			expect(settings.get("compaction.modelThresholds")).toEqual(before);
+
+			await settings.flush();
+			expect(await readSettings()).toEqual({ compaction: { modelThresholds: initial } });
 		});
 	});
 

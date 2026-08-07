@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { configureCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
 import {
@@ -44,6 +45,8 @@ import { INSPECT_IMAGE_MODES } from "../utils/inspect-image-mode";
 import { isSearchProviderId, SEARCH_PROVIDER_ORDER } from "../web/search/types";
 import {
 	type BashInterceptorRule,
+	type CompactionModelThreshold,
+	type CompactionModelThresholds,
 	type GroupPrefix,
 	type GroupTypeMap,
 	getDefault,
@@ -151,6 +154,102 @@ export function validateProviderMaxInFlightRequests(value: unknown): Record<stri
 	return normalized;
 }
 
+export function validateCompactionModelThresholds(value: unknown): CompactionModelThresholds {
+	if (!isPlainRecord(value)) {
+		throw new AIError.ConfigurationError("compaction.modelThresholds must be a mapping");
+	}
+
+	const validated: CompactionModelThresholds = {};
+	for (const [selector, rawThresholds] of Object.entries(value)) {
+		if (selector.length === 0 || selector.trim().length === 0) {
+			throw new AIError.ConfigurationError("compaction.modelThresholds selectors must not be blank");
+		}
+		if (selector !== selector.trim()) {
+			throw new AIError.ConfigurationError(
+				`compaction.modelThresholds selector "${selector}" must not have surrounding whitespace`,
+			);
+		}
+
+		try {
+			new Bun.Glob(selector.toLowerCase());
+		} catch (error) {
+			throw new AIError.ConfigurationError(`compaction.modelThresholds selector "${selector}" is not a valid glob`, {
+				cause: error,
+			});
+		}
+
+		if (!isPlainRecord(rawThresholds)) {
+			throw new AIError.ConfigurationError(`compaction.modelThresholds entry "${selector}" must be an object`);
+		}
+
+		const unknownProperties = Object.keys(rawThresholds).filter(
+			property => property !== "thresholdPercent" && property !== "thresholdTokens",
+		);
+		if (unknownProperties.length > 0) {
+			throw new AIError.ConfigurationError(
+				`compaction.modelThresholds entry "${selector}" has unknown properties: ${unknownProperties.join(", ")}`,
+			);
+		}
+
+		const hasThresholdPercent = Object.hasOwn(rawThresholds, "thresholdPercent");
+		const hasThresholdTokens = Object.hasOwn(rawThresholds, "thresholdTokens");
+		if (!hasThresholdPercent && !hasThresholdTokens) {
+			throw new AIError.ConfigurationError(
+				`compaction.modelThresholds entry "${selector}" must define thresholdPercent or thresholdTokens`,
+			);
+		}
+
+		const threshold: CompactionModelThreshold = {};
+		if (hasThresholdPercent) {
+			const rawThresholdPercent = rawThresholds.thresholdPercent;
+			if (
+				typeof rawThresholdPercent !== "number" ||
+				!Number.isFinite(rawThresholdPercent) ||
+				rawThresholdPercent <= 0
+			) {
+				throw new AIError.ConfigurationError(
+					`compaction.modelThresholds entry "${selector}" thresholdPercent must be a positive finite number`,
+				);
+			}
+			threshold.thresholdPercent = rawThresholdPercent;
+		}
+		if (hasThresholdTokens) {
+			const rawThresholdTokens = rawThresholds.thresholdTokens;
+			if (
+				typeof rawThresholdTokens !== "number" ||
+				!Number.isFinite(rawThresholdTokens) ||
+				rawThresholdTokens <= 0
+			) {
+				throw new AIError.ConfigurationError(
+					`compaction.modelThresholds entry "${selector}" thresholdTokens must be a positive finite number`,
+				);
+			}
+			threshold.thresholdTokens = rawThresholdTokens;
+		}
+
+		Object.defineProperty(validated, selector, {
+			configurable: true,
+			enumerable: true,
+			value: threshold,
+			writable: true,
+		});
+	}
+	return validated;
+}
+
+function cloneCompactionModelThresholds(value: CompactionModelThresholds): CompactionModelThresholds {
+	const clone: CompactionModelThresholds = {};
+	for (const [selector, threshold] of Object.entries(value)) {
+		Object.defineProperty(clone, selector, {
+			configurable: true,
+			enumerable: true,
+			value: { ...threshold },
+			writable: true,
+		});
+	}
+	return clone;
+}
+
 const PATH_SCOPED_ARRAY_SETTINGS = new Set<SettingPath>(["enabledModels", "disabledProviders"]);
 type PathScopedStringArrayEntry = {
 	path?: unknown;
@@ -184,6 +283,11 @@ function stringArrayFromUnknown(value: unknown): string[] {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	if (!isRecord(value)) return false;
+	const prototype = Object.getPrototypeOf(value);
+	return prototype === Object.prototype || prototype === null;
 }
 
 /**
@@ -386,7 +490,9 @@ export class Settings {
 
 		if (options.overrides) {
 			for (const [key, value] of Object.entries(options.overrides)) {
-				setByPath(this.#overrides, key.split("."), value);
+				const normalizedValue =
+					key === "compaction.modelThresholds" ? validateCompactionModelThresholds(value) : value;
+				setByPath(this.#overrides, key.split("."), normalizedValue);
 			}
 
 			this.#overrides = this.#migrateRawSettings(this.#overrides);
@@ -476,12 +582,20 @@ export class Settings {
 	 */
 	get<P extends SettingPath>(path: P): SettingValue<P> {
 		if (this.#resolvedCache.has(path)) {
-			return this.#resolvedCache.get(path) as SettingValue<P>;
+			const cached = this.#resolvedCache.get(path);
+			return path === "compaction.modelThresholds"
+				? (cloneCompactionModelThresholds(cached as CompactionModelThresholds) as SettingValue<P>)
+				: (cached as SettingValue<P>);
 		}
 
 		const value = getByPath(this.#merged, SETTING_PATH_SEGMENTS[path]);
 		const resolved =
 			value !== undefined ? (resolvePathScopedStringArray(path, value, this.#cwd) ?? value) : getDefault(path);
+		if (path === "compaction.modelThresholds") {
+			const normalized = validateCompactionModelThresholds(resolved);
+			this.#resolvedCache.set(path, normalized);
+			return cloneCompactionModelThresholds(normalized) as SettingValue<P>;
+		}
 		this.#resolvedCache.set(path, resolved);
 		return resolved as SettingValue<P>;
 	}
@@ -500,9 +614,11 @@ export class Settings {
 	 * Triggers hooks for settings that have side effects.
 	 */
 	set<P extends SettingPath>(path: P, value: SettingValue<P>): void {
+		const nextValue = path === "compaction.modelThresholds" ? validateCompactionModelThresholds(value) : value;
 		const prev = this.get(path);
 		const segments = path.split(".");
-		setByPath(this.#global, segments, value);
+		setByPath(this.#global, segments, nextValue);
+
 		this.#modified.add(path);
 		this.#rebuildMerged();
 		const next = this.get(path);
@@ -520,12 +636,15 @@ export class Settings {
 	 * Apply runtime overrides (not persisted).
 	 */
 	override<P extends SettingPath>(path: P, value: SettingValue<P>): void {
+		const nextValue = path === "compaction.modelThresholds" ? validateCompactionModelThresholds(value) : value;
+
 		if (path === "modelRoles") {
 			this.#savedRuntimeModelRoleOverrides.clear();
 		}
 		const prev = this.get(path);
 		const segments = path.split(".");
-		setByPath(this.#overrides, segments, value);
+		setByPath(this.#overrides, segments, nextValue);
+
 		this.#rebuildMerged();
 		this.#fireEffectiveSettingChanged(path, this.get(path), prev);
 	}
@@ -1083,6 +1202,7 @@ export class Settings {
 		this.#project = projectResult.value;
 		this.#configOverlay = await this.#loadConfigOverlays();
 		this.#rebuildMerged();
+		validateCompactionModelThresholds(this.get("compaction.modelThresholds"));
 		return this;
 	}
 
@@ -2310,6 +2430,9 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	},
 	"providers.maxInFlightRequests": value => {
 		configureProviderMaxInFlightRequests(validateProviderMaxInFlightRequests(value));
+	},
+	"compaction.modelThresholds": value => {
+		validateCompactionModelThresholds(value);
 	},
 	"secrets.enabled": value => {
 		configureCredentialRedaction(value === true);

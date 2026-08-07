@@ -4,6 +4,7 @@ import { effectiveReserveTokens, estimateTokens, resolveThresholdTokens } from "
 import type { Tool as AiTool, Model } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { formatNumber } from "@oh-my-pi/pi-utils";
+import { resolveCompactionSettingsForModel } from "../../config/model-resolver";
 import type { Skill } from "../../extensibility/skills";
 import type { AgentSession } from "../../session/agent-session";
 import { estimateInlineSavings, type SnapcompactSavingsEstimate } from "../../session/snapcompact-inline";
@@ -262,7 +263,10 @@ export function computeContextBreakdown(
 
 	let autoCompactBufferTokens = 0;
 	if (contextWindow > 0) {
-		const compactionSettings = session.settings.getGroup("compaction") as CompactionSettings;
+		const configuredCompactionSettings = session.settings.getGroup("compaction");
+		const compactionSettings = model
+			? resolveCompactionSettingsForModel(configuredCompactionSettings, model)
+			: (configuredCompactionSettings as CompactionSettings);
 		if (compactionSettings.enabled && compactionSettings.strategy !== "off") {
 			const threshold = resolveThresholdTokens(contextWindow, compactionSettings);
 			autoCompactBufferTokens = Math.max(0, contextWindow - threshold);
