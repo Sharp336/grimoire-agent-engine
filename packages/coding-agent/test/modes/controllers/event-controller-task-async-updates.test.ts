@@ -70,7 +70,7 @@ describe("EventController async update finalization", () => {
 			chatContainer,
 			session: { getToolByName: () => undefined, isStreaming: true },
 			showWarning: vi.fn(),
-			viewSession: { getToolByName: () => undefined },
+			viewSession: { getToolByName: () => undefined, hasBuiltInTool: () => false },
 			sessionManager: { getCwd: () => process.cwd() },
 			setTodos: vi.fn(),
 		} as unknown as InteractiveModeContext;
