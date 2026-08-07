@@ -309,7 +309,11 @@ export class SessionHandoff {
 
 			return { document: handoffText, savedPath };
 		} catch (error) {
-			if (handoffSignal.aborted || (error instanceof Error && error.name === "AbortError")) {
+			// Only a genuine abort (user Esc or the source turn cancelling) is a
+			// cancellation. A provider that throws a name==="AbortError" error without the
+			// handoff signal being aborted (stall/idle timeout, nested resolution failure)
+			// is a real failure and must surface verbatim, not be masked as "cancelled".
+			if (handoffSignal.aborted) {
 				throw new Error("Handoff cancelled");
 			}
 			throw error;

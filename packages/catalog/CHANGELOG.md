@@ -6,11 +6,13 @@
 
 - Exposed the `xhigh` thinking effort for adaptive Claude models on Amazon Bedrock (Opus 4.7/4.8/5, Sonnet 5, Fable/Mythos 5) — the model-side `output_config.effort` validation accepts the full five-tier `low..max` scale on Bedrock Converse, matching the Messages API; only 4.6-generation models remain on the four-tier scale ([#7924](https://github.com/can1357/oh-my-pi/pull/7924) by [@voonfoo](https://github.com/voonfoo)).
 
+## [17.2.11] - 2026-08-07
+
 ### Fixed
 
-- Widened the Amazon Bedrock stream idle-timeout floor for reasoning models (600s, matching the GLM coding-plan floor) and for adaptive-thinking Claude — Opus 4.7+, Sonnet/Opus 5, and Fable/Mythos 5, where stalls were most frequent — to 900s, matching the tolerance direct Anthropic gets from ping keepalives. Bedrock ConverseStream sends no keepalive events, so long quiet reasoning stretches previously tripped the generic 300s watchdog with `Provider stream stalled while waiting for the next event` during plan writing and todo execution. Explicit `compat.streamIdleTimeoutMs` overrides still win (`0` disables the watchdog) ([#7892](https://github.com/can1357/oh-my-pi/pull/7892) by [@voonfoo](https://github.com/voonfoo)).
-- Fixed current Devin model families, including SWE-1.7, Claude 5, Gemini 3.6 Flash, Kimi K3, Grok 4.5, and Inkling, appearing as separate wire variants instead of logical models with reasoning-effort routing.
-- Filled in context-window and output-token limits for known dynamically discovered Alibaba Token Plan models ([#7849](https://github.com/can1357/oh-my-pi/pull/7849) by [@Mustaqeem66](https://github.com/Mustaqeem66)).
+- Increased the default stream idle-timeout floor on Amazon Bedrock to 900 seconds for reasoning and adaptive-thinking models (such as Claude) to prevent premature watchdog timeouts during long reasoning stretches.
+- Fixed Devin model families (including SWE-1.7, Claude 5, Gemini 3.6 Flash, Kimi K3, Grok 4.5, and Inkling) to correctly group as logical models with reasoning-effort routing instead of separate wire variants.
+- Added missing context-window and output-token limits for dynamically discovered Alibaba Token Plan models.
 
 ## [17.2.10] - 2026-08-06
 

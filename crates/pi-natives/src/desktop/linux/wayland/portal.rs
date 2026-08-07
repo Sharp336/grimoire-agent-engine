@@ -1,6 +1,8 @@
-use std::sync::LazyLock;
-#[cfg(feature = "wayland-pipewire")]
-use std::{fs, path::PathBuf};
+use std::{
+	fs,
+	path::{Path, PathBuf},
+	sync::LazyLock,
+};
 
 use tokio::runtime::{Builder, Runtime};
 
@@ -26,12 +28,36 @@ pub(super) fn portal_runtime() -> CoreResult<&'static Runtime> {
 		.map_err(|err| DesktopError::internal(format!("xdg-desktop-portal runtime: {err}")))
 }
 
-#[cfg(feature = "wayland-pipewire")]
-fn token_path(name: &str) -> Option<PathBuf> {
+/// File name of the `RemoteDesktop` restore token that pre-#7884 builds wrote
+/// (world-readable) during read-only `computer` calls. Nothing reads it after
+/// #7884 dropped the restore-token path.
+const ORPHANED_REMOTE_DESKTOP_TOKEN: &str = "remote-desktop-token";
+
+/// Resolves the `omp` state directory (`$XDG_STATE_HOME/omp` or
+/// `~/.local/state/omp`) that holds portal tokens.
+fn omp_state_dir() -> Option<PathBuf> {
 	let base = std::env::var_os("XDG_STATE_HOME")
 		.map(PathBuf::from)
 		.or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))?;
-	Some(base.join("omp").join(name))
+	Some(base.join("omp"))
+}
+
+fn remove_token_in(dir: &Path) {
+	let _ = fs::remove_file(dir.join(ORPHANED_REMOTE_DESKTOP_TOKEN));
+}
+
+/// Best-effort removal of the orphaned `RemoteDesktop` restore token left
+/// behind by pre-#7884 builds. Runs on Wayland backend construction; a missing
+/// file is success, so it is safe to call on every session.
+pub(super) fn remove_orphaned_remote_desktop_token() {
+	if let Some(dir) = omp_state_dir() {
+		remove_token_in(&dir);
+	}
+}
+
+#[cfg(feature = "wayland-pipewire")]
+fn token_path(name: &str) -> Option<PathBuf> {
+	Some(omp_state_dir()?.join(name))
 }
 
 #[cfg(feature = "wayland-pipewire")]
@@ -70,5 +96,19 @@ mod tests {
 			std::ptr::eq(first, second),
 			"portal_runtime must hand back one long-lived runtime, not a fresh per-call instance"
 		);
+	}
+
+	/// The orphaned RemoteDesktop token written by pre-#7884 builds must be
+	/// removed, and a second removal on the now-missing file must stay a no-op.
+	#[test]
+	fn removes_orphaned_remote_desktop_token() {
+		let dir = std::env::temp_dir().join(format!("omp-token-test-{}", std::process::id()));
+		fs::create_dir_all(&dir).expect("create token test dir");
+		let token = dir.join(ORPHANED_REMOTE_DESKTOP_TOKEN);
+		fs::write(&token, "cafef00d").expect("plant orphaned token");
+		remove_token_in(&dir);
+		assert!(!token.exists(), "orphaned token must be removed");
+		remove_token_in(&dir);
+		let _ = fs::remove_dir_all(&dir);
 	}
 }
