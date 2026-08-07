@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the sidecar-free `factory-droid-agent` transport: direct HTTPS calls to Factory's OpenAI-compatible subscription LLM proxy, authenticated by the local Droid WorkOS session (`~/.factory/auth.v2.file`, decrypted with its adjacent key, refreshed through WorkOS with token rotation written back) or `FACTORY_DROID_ACCESS_TOKEN`, with the proxy's required client-version/`x-api-provider` headers and Droid system-prompt prefix handled transparently.
+
 ## [17.2.10] - 2026-08-06
 
 ### Breaking Changes
