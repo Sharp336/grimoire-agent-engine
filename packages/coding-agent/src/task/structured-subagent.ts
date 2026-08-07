@@ -386,6 +386,7 @@ function buildExecutorOptions(
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
 	return {
 		cwd: session.cwd,
+		costGate: session.costGate,
 		additionalDirectories: session.additionalDirectories,
 		getApiKey: session.getApiKey,
 		agent: policy.effectiveAgent,

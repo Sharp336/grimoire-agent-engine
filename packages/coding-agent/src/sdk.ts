@@ -131,6 +131,7 @@ import {
 	type SecretObfuscator,
 } from "./secrets";
 import { AgentSession, type InitialRetryFallbackState, type PlanYolo, type Prewalk } from "./session/agent-session";
+import { applyCostGate, type CostGateController } from "./session/cost-gate";
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import { createInterruptedTurnAbortMessage } from "./session/exit-diagnostics";
@@ -409,6 +410,8 @@ export interface CreateAgentSessionOptions {
 	providerPromptCacheKeySource?: "explicit" | "fork";
 	/** Absolute wall-clock deadline in Unix epoch milliseconds. */
 	deadline?: number;
+	/** Cost gate controller shared across the session tree; checked before each provider dispatch. */
+	costGate?: CostGateController;
 
 	/** Custom tools to register (in addition to built-in tools). Accepts both CustomTool and ToolDefinition. */
 	customTools?: (CustomTool | ToolDefinition)[];
@@ -1656,6 +1659,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get cwd() {
 				return sessionManager.getCwd();
 			},
+			costGate: options.costGate,
 			isToolActive: name => activeToolNames.has(name),
 			setActiveToolNames,
 			toolRegistry,
@@ -3215,7 +3219,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						});
 					}
 				}
-				return settingsAwareStreamFn(streamModel, context, streamOptions);
+				const gate = options.costGate;
+				if (gate === undefined) {
+					return settingsAwareStreamFn(streamModel, context, streamOptions);
+				}
+				// The first dispatcher (the root session) binds the authoritative
+				// cumulative cost getter; subagent sessions inherit it via the shared
+				// controller, so the gate reads the whole session tree's spend.
+				gate.getCost ??= () => session.getSessionStats().cost;
+				return applyCostGate(
+					gate,
+					() => gate.getCost!(),
+					message => session.emitNotice("warning", message, "cost-gate"),
+					() => settingsAwareStreamFn(streamModel, context, streamOptions),
+				);
 			},
 			cursorExecHandlers,
 			getCursorTools: () => (toolSession.xdev ? listXdevTools(toolSession.xdev) : []),

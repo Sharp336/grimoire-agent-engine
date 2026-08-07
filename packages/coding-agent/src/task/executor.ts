@@ -40,6 +40,7 @@ import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
 import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage } from "../sdk";
+import type { CostGateController } from "../session/cost-gate";
 import type { AgentSession, AgentSessionEvent, Prewalk } from "../session/agent-session";
 import type { ArtifactManager } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
@@ -332,6 +333,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** Options for subagent execution */
 export interface ExecutorOptions {
 	cwd: string;
+	/** Cost gate controller inherited from the parent session tree. */
+	costGate?: CostGateController;
 	/** Additional workspace directories to seed on the subagent session (multi-root). */
 	additionalDirectories?: string[];
 	/** Exact provider credential resolver inherited from the parent session. */
@@ -3001,6 +3004,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				expectedAgentRef: CreateAgentSessionOptions["expectedAgentRef"],
 			): CreateAgentSessionOptions => ({
 				cwd: worktree ?? cwd,
+				costGate: options.costGate,
 				additionalDirectories: worktree !== undefined ? undefined : options.additionalDirectories,
 				authStorage,
 				modelRegistry,

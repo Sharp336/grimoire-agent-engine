@@ -75,6 +75,7 @@ import {
 } from "./sdk";
 import type { AgentSession } from "./session/agent-session";
 import type { AuthStorage } from "./session/auth-storage";
+import { resolveCostGate } from "./session/cost-gate";
 import { describePendingToolCalls } from "./session/exit-diagnostics";
 import {
 	createForeignSessionStore,
@@ -907,6 +908,16 @@ export async function buildSessionOptions(
 	}
 	if (parsed.maxTime !== undefined) {
 		options.deadline = Date.now() + parsed.maxTime * 1000;
+	}
+	const costGate = resolveCostGate(
+		{ warnCost: parsed.warnCost, maxCost: parsed.maxCost },
+		{
+			warnCost: activeSettings.get("session.warnCost"),
+			maxCost: activeSettings.get("session.maxCost"),
+		},
+	);
+	if (costGate !== undefined) {
+		options.costGate = costGate;
 	}
 
 	// Auto-discover SYSTEM.md if no CLI system prompt provided

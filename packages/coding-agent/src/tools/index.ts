@@ -3,6 +3,7 @@ import type { AgentOptions, AgentTelemetryConfig, AgentTool } from "@oh-my-pi/pi
 import type { FetchImpl, ImageContent, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManager } from "../async/job-manager";
+import type { CostGateController } from "../session/cost-gate";
 import type { Rule } from "../capability/rule";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
@@ -152,6 +153,8 @@ export interface DeferredDiagnosticsEntry {
 export interface ToolSession {
 	/** Current working directory */
 	cwd: string;
+	/** Cost gate controller shared across the session tree, forwarded to subagents. */
+	costGate?: CostGateController;
 	/** Additional workspace directories beyond cwd (multi-root), forwarded to subagents. */
 	additionalDirectories?: string[];
 	/** Whether UI is available */
