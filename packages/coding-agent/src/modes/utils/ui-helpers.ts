@@ -63,6 +63,13 @@ import {
 } from "./transcript-render-helpers";
 
 type TextBlock = { type: "text"; text: string };
+function timestampComponent(timestamp: number | string | undefined): Text | undefined {
+	if (timestamp === undefined) return undefined;
+	const date = new Date(timestamp);
+	if (Number.isNaN(date.getTime())) return undefined;
+	return new Text(theme.fg("dim", date.toLocaleString()), 1, 0);
+}
+
 interface RenderInitialMessagesOptions {
 	preserveExistingChat?: boolean;
 	clearTerminalHistory?: boolean;
@@ -133,6 +140,10 @@ export class UiHelpers {
 	}
 
 	addMessageToChat(message: AgentMessage, options?: AddMessageOptions): Component[] {
+		if (message.role !== "toolResult" && message.role !== "user" && message.role !== "developer") {
+			const timestamp = timestampComponent(message.timestamp);
+			if (timestamp) this.ctx.chatContainer.addChild(timestamp);
+		}
 		switch (message.role) {
 			case "bashExecution": {
 				const component = new BashExecutionComponent(message.command, this.ctx.ui, message.excludeFromContext);
@@ -147,9 +158,6 @@ export class UiHelpers {
 			}
 			case "pythonExecution": {
 				const component = new EvalExecutionComponent(message.code, this.ctx.ui, message.excludeFromContext);
-				if (message.output) {
-					component.appendOutput(message.output);
-				}
 				component.setComplete(message.exitCode, message.cancelled, {
 					truncation: message.meta?.truncation,
 				});
@@ -159,6 +167,8 @@ export class UiHelpers {
 			case "hookMessage":
 			case "custom": {
 				if (message.display) {
+					const timestamp = timestampComponent(message.timestamp);
+					if (timestamp) this.ctx.chatContainer.addChild(timestamp);
 					if (message.customType === "async-result") {
 						this.ctx.chatContainer.addChild(buildAsyncResultBlock(message));
 						break;
@@ -243,6 +253,8 @@ export class UiHelpers {
 			case "developer": {
 				const textContent = this.ctx.getUserMessageText(message);
 				if (textContent) {
+					const timestamp = timestampComponent(message.timestamp);
+					if (timestamp) this.ctx.chatContainer.addChild(timestamp);
 					const isSynthetic = message.role === "developer" ? true : (message.synthetic ?? false);
 					const cached = options?.reuseSettledComponent
 						? this.ctx.transcriptMessageComponents.get(message)

@@ -53,6 +53,10 @@ function sessionSearchText(session: SessionInfo): string {
 		session.title ?? "",
 		session.cwd ?? "",
 		session.firstMessage ?? "",
+		session.lastUserMessage ?? "",
+		session.userMessages?.map(message => message.text).join(" ") ?? "",
+		session.goal ?? "",
+		session.goalHistory?.map(goal => goal.text).join(" ") ?? "",
 		session.allMessagesText,
 		session.path,
 	];
@@ -573,12 +577,10 @@ class SessionList implements Component {
 		const overflow = this.#filteredSessions.length > maxVisible;
 		const rowWidth = Math.max(0, width - (overflow ? 1 : 0));
 		for (let i = startIndex; i < endIndex; i++) {
-			const blockStart = sessionLines.length;
 			const session = this.#filteredSessions[i];
+			const blockStart = sessionLines.length;
+			const normalizedMessage = (session.lastUserMessage ?? session.firstMessage).replace(/\n/g, " ").trim();
 			const isSelected = i === this.#selectedIndex;
-
-			// Normalize first message to single line
-			const normalizedMessage = session.firstMessage.replace(/\n/g, " ").trim();
 
 			// First line: cursor + title (or first message if no title)
 			const cursorSymbol = `${theme.nav.cursor} `;
@@ -602,13 +604,15 @@ class SessionList implements Component {
 				sessionLines.push(messageLine);
 			}
 
-			// Metadata line: date + file size + lifecycle status (+ project dir in
-			// all-projects scope). The status segment carries its own color, so each
-			// segment is dimmed individually rather than wrapping the whole line.
+			// Metadata line: date + last-said time + file size + lifecycle status
+			// (+ project dir in all-projects scope).
 			const dim = (s: string) => theme.fg("dim", s);
 			const dot = dim(theme.sep.dot);
 			const modified = formatDate(session.modified);
-			let metadata = `  ${dim(modified)} ${dot} ${dim(formatBytes(session.size))}`;
+			const lastSaid = session.lastUserMessageTimestamp
+				? ` ${dot} ${dim(`said ${formatDate(session.lastUserMessageTimestamp)}`)}`
+				: "";
+			let metadata = `  ${dim(modified)}${lastSaid} ${dot} ${dim(formatBytes(session.size))}`;
 			const status = formatSessionStatus(session.status);
 			if (status) {
 				metadata += ` ${dot} ${status}`;
