@@ -1305,20 +1305,38 @@ export class SessionMaintenance {
 				this.#host.scheduleAgentContinue({ delayMs: 100, generation });
 				return COMPACTION_CHECK_CONTINUATION;
 			}
-
 			const incompleteCompactionSettings = this.#host.settings.getGroup("compaction");
 			if (incompleteCompactionSettings.enabled && incompleteCompactionSettings.strategy !== "off") {
-				logger.debug("Compaction triggered by response.incomplete (length stop, no promotion target)", {
+				// Gate on shouldCompact: a `stopReason === "length"` from a gateway
+				// timeout or transient stall is output-side — if context is well below
+				// the compaction threshold, compacting cannot help (there's nothing to
+				// summarize). Retry on the same model instead of wastefully compacting
+				// a near-empty history. Issue: compaction fires at 27.7% context on a
+				// 1M-token model because the incomplete path never checked context size.
+				const incompleteContextTokens = calculateContextTokens(assistantMessage.usage);
+				if (shouldCompact(incompleteContextTokens, contextWindow, incompleteCompactionSettings)) {
+					logger.debug("Compaction triggered by response.incomplete (length stop, no promotion target)", {
+						model: `${assistantMessage.provider}/${assistantMessage.model}`,
+						strategy: incompleteCompactionSettings.strategy,
+						contextTokens: incompleteContextTokens,
+						contextWindow,
+					});
+					return await this.#host.runRecoveryCompactionWithRollback("incomplete", assistantMessage, allowDefer, {
+						autoContinue,
+						triggerContextTokens: incompleteContextTokens,
+					});
+				}
+				// Context below threshold — the model burned its output budget without
+				// context pressure. Compaction can't help; retry on the same model.
+				logger.debug("response.incomplete (length stop) but context below threshold; skipping compaction", {
 					model: `${assistantMessage.provider}/${assistantMessage.model}`,
-					strategy: incompleteCompactionSettings.strategy,
+					contextTokens: incompleteContextTokens,
+					contextWindow,
+					threshold: resolveThresholdTokens(contextWindow, incompleteCompactionSettings),
 				});
-				return await this.#host.runRecoveryCompactionWithRollback("incomplete", assistantMessage, allowDefer, {
-					autoContinue,
-					triggerContextTokens: calculateContextTokens(assistantMessage.usage),
-				});
+				this.#host.scheduleAgentContinue({ delayMs: 100, generation });
+				return COMPACTION_CHECK_CONTINUATION;
 			}
-			// Neither promotion nor compaction is available — surface the dead-end so
-			// the user understands why the turn yielded with nothing.
 			logger.warn("response.incomplete with no recovery path (promotion + compaction both unavailable)", {
 				model: `${assistantMessage.provider}/${assistantMessage.model}`,
 			});
