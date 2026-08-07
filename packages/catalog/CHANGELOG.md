@@ -5,6 +5,7 @@
 ### Added
 
 - Added the Fireworks Kimi K3 Fast serving-path variant (`fireworks/kimi-k3-fast`, routed to `accounts/fireworks/routers/kimi-k3-fast`) with Fast-tier pricing ($4.50/$22.50 per 1M tokens, $0.45 cache read), inheriting Kimi K3's 1M context, 131K output, and low/high/max thinking ladder.
+
 ### Fixed
 
 - Widened the Amazon Bedrock stream idle-timeout floor for reasoning models (600s, matching the GLM coding-plan floor) and for adaptive-thinking Claude — Opus 4.7+, Sonnet/Opus 5, and Fable/Mythos 5, where stalls were most frequent — to 900s, matching the tolerance direct Anthropic gets from ping keepalives. Bedrock ConverseStream sends no keepalive events, so long quiet reasoning stretches previously tripped the generic 300s watchdog with `Provider stream stalled while waiting for the next event` during plan writing and todo execution. Explicit `compat.streamIdleTimeoutMs` overrides still win (`0` disables the watchdog) ([#7892](https://github.com/can1357/oh-my-pi/pull/7892) by [@voonfoo](https://github.com/voonfoo)).
