@@ -15,6 +15,8 @@ export interface CheckpointState {
 	checkpointEntryId: string | null;
 	/** Timestamp */
 	startedAt: string;
+	/** Investigation goal supplied when the checkpoint was created. */
+	goal?: string;
 }
 
 export interface CompletedRewindState {

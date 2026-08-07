@@ -68,4 +68,37 @@ describe("SessionQueueService", () => {
 		expect(cleared.steering.map(entry => entry.text)).toEqual(["two", "one"]);
 		expect(agent.peekSteeringQueue()).toEqual([advisor]);
 	});
+
+	test("inserts, updates, and reclassifies entries without losing companions or agent rows", () => {
+		const companion: AgentMessage = {
+			role: "custom",
+			customType: "image-attachment-description",
+			content: "hidden",
+			display: false,
+			attribution: "user",
+			timestamp: Date.now(),
+		};
+		const advisor: AgentMessage = {
+			role: "custom",
+			customType: "advisor",
+			content: "advice",
+			display: true,
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+		const agent = queuedAgent([companion, user("one"), advisor], [user("later")]);
+		const service = new SessionQueueService(agent, () => 0);
+
+		const inserted = service.insert("steering", "zero", 0);
+		expect(inserted.snapshot.steering.map(entry => entry.text)).toEqual(["zero", "one"]);
+		const updated = service.update(inserted.entry.entryId, "first");
+		expect(updated.entry).toMatchObject({ entryId: inserted.entry.entryId, lane: "steering", text: "first" });
+
+		const original = updated.snapshot.steering[1]!;
+		const moved = service.move(original.entryId, "followUp", 1);
+		expect(moved.steering.map(entry => entry.text)).toEqual(["first"]);
+		expect(moved.followUp.map(entry => entry.text)).toEqual(["later", "one"]);
+		expect(agent.peekSteeringQueue()).toContain(advisor);
+		expect(agent.peekFollowUpQueue()[1]).toBe(companion);
+	});
 });

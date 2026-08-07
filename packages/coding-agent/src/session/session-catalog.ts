@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { SessionHeader } from "./session-entries";
+import type { SessionHeader, SessionTreeNode } from "./session-entries";
 import type { SessionInfo, SessionStatus } from "./session-listing";
 import { loadEntriesFromFile } from "./session-loader";
 import { SessionManager } from "./session-manager";
@@ -8,6 +8,31 @@ import { FileSessionStorage, type SessionStorage } from "./session-storage";
 import { normalizeSessionWorkspace, type SessionWorkspace } from "./session-workspace";
 
 export type SessionCatalogScope = "cwd" | "all";
+export type SessionCatalogContinuation = "complete" | "incomplete" | "failed" | "ambiguous";
+
+export interface SessionCatalogLifecycle {
+	activity: "active" | "closed";
+	continuation: SessionCatalogContinuation;
+	resumable: boolean;
+	recoverable: boolean;
+	reconnectable: boolean;
+}
+
+export interface SessionCatalogProjectionContext {
+	activeSessionId?: string;
+}
+
+export interface SessionCatalogTreeNode {
+	id: string;
+	parentId: string | null;
+	timestamp: string;
+	entryType: string;
+	messageRole?: string;
+	label?: string;
+	activeBranch: boolean;
+	activeLeaf: boolean;
+	children: SessionCatalogTreeNode[];
+}
 
 export interface SessionCatalogEntry {
 	path: string;
@@ -20,6 +45,7 @@ export interface SessionCatalogEntry {
 	messageCount: number;
 	size: number;
 	status?: SessionStatus;
+	lifecycle: SessionCatalogLifecycle;
 }
 
 export interface SessionCatalogQuery {
@@ -77,7 +103,53 @@ function assertAbsoluteCwd(cwd: string): string {
 	return path.resolve(cwd);
 }
 
-export function projectSessionCatalogEntry(session: SessionInfo): SessionCatalogEntry {
+export function projectSessionCatalogLifecycle(
+	status: SessionStatus | undefined,
+	active: boolean,
+): SessionCatalogLifecycle {
+	const continuation: SessionCatalogContinuation =
+		status === "complete"
+			? "complete"
+			: status === "interrupted" || status === "aborted" || status === "pending"
+				? "incomplete"
+				: status === "error"
+					? "failed"
+					: "ambiguous";
+	return {
+		activity: active ? "active" : "closed",
+		continuation,
+		resumable: true,
+		recoverable: continuation === "incomplete" || continuation === "failed",
+		reconnectable: active,
+	};
+}
+
+export function projectSessionTree(
+	nodes: readonly SessionTreeNode[],
+	activeLeafId: string | null,
+): SessionCatalogTreeNode[] {
+	return nodes.map(node => {
+		const children = projectSessionTree(node.children, activeLeafId);
+		const activeLeaf = node.entry.id === activeLeafId;
+		const activeBranch = activeLeaf || children.some(child => child.activeBranch);
+		return {
+			id: node.entry.id,
+			parentId: node.entry.parentId,
+			timestamp: node.entry.timestamp,
+			entryType: node.entry.type,
+			...(node.entry.type === "message" ? { messageRole: node.entry.message.role } : {}),
+			...(node.label === undefined ? {} : { label: node.label }),
+			activeBranch,
+			activeLeaf,
+			children,
+		};
+	});
+}
+
+export function projectSessionCatalogEntry(
+	session: SessionInfo,
+	context: SessionCatalogProjectionContext = {},
+): SessionCatalogEntry {
 	return {
 		path: path.resolve(session.path),
 		id: session.id,
@@ -89,6 +161,7 @@ export function projectSessionCatalogEntry(session: SessionInfo): SessionCatalog
 		messageCount: session.messageCount,
 		size: session.size,
 		...(session.status ? { status: session.status } : {}),
+		lifecycle: projectSessionCatalogLifecycle(session.status, context.activeSessionId === session.id),
 	};
 }
 
@@ -240,10 +313,11 @@ export async function listCatalogSessionInfoPage(
 export async function listSessionCatalog(
 	query: SessionCatalogQuery = {},
 	storage: SessionStorage = new FileSessionStorage(),
+	context: SessionCatalogProjectionContext = {},
 ): Promise<SessionCatalogPage> {
 	const page = await listCatalogSessionInfoPage(query, storage);
 	return {
-		sessions: page.sessions.map(projectSessionCatalogEntry),
+		sessions: page.sessions.map(session => projectSessionCatalogEntry(session, context)),
 		total: page.total,
 		...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
 	};

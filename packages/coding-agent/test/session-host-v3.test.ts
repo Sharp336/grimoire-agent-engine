@@ -1,0 +1,457 @@
+import { describe, expect, test } from "bun:test";
+import {
+	createSessionHostManifest,
+	negotiateSessionHost,
+	type SessionAuthority,
+	type SessionAuthorityObservation,
+	type SessionAuthorityReplay,
+	type SessionAuthoritySnapshot,
+	SessionHost,
+	type SessionHostCapabilityDefinition,
+	type SessionJournalCursor,
+} from "@oh-my-pi/pi-coding-agent/session/session-host";
+
+const capabilities = [
+	{
+		id: "session.observe",
+		version: 1,
+		supported: true,
+		operations: ["snapshot", "subscribe", "acknowledge"],
+		events: ["observation", "gap"],
+		platforms: ["all"],
+	},
+	{
+		id: "collaboration.control",
+		version: 1,
+		supported: false,
+		operations: [],
+		events: [],
+		platforms: ["all"],
+		unsupportedReason: { code: "not_configured", message: "Collaboration is not configured" },
+	},
+] as const satisfies readonly SessionHostCapabilityDefinition[];
+
+const recovery = {
+	transportReplay: "bounded",
+	durableReplay: "session_journal",
+	snapshotHandoff: "watermark",
+	acknowledgement: "cumulative",
+	gapRecovery: "resnapshot",
+	duplicateHandling: "stable_event_id",
+} as const;
+
+const mutations = {
+	correlation: "request_id",
+	concurrency: "expected_revision",
+	cancellation: "cooperative",
+	terminalOutcomes: ["completed", "cancelled", "failed", "unknown"],
+	idempotency: {
+		scope: "authority_lifetime",
+		retention: "bounded",
+		conflict: "reject",
+		overflow: "reject",
+	},
+} as const;
+
+describe("session host semantic negotiation", () => {
+	test("selects semantic v3 independently from framing and reports omitted capabilities unsupported", () => {
+		const manifest = createSessionHostManifest({
+			ompVersion: "17.2.10",
+			framingVersions: [1, 2],
+			limits: {
+				maxFrameBytes: 1_048_576,
+				maxReassembledFrameBytes: 67_108_864,
+				maxArtifactReadBytes: 1_048_576,
+				maxPendingObservations: 1_024,
+				maxIdempotencyKeys: 1_024,
+			},
+			capabilities,
+			recovery,
+			mutations,
+		});
+
+		const result = negotiateSessionHost(manifest, {
+			profile: { name: "omp.session", major: 3, minMinor: 0, maxMinor: 0 },
+			framingVersion: 2,
+			hostCapabilities: {
+				interactions: ["select", "confirm"],
+				semanticContent: ["markdown", "fields"],
+			},
+			requestedCapabilities: ["session.observe", "artifact.read", "collaboration.control"],
+		});
+
+		expect(result).toEqual({
+			ok: true,
+			profile: { name: "omp.session", major: 3, minor: 0 },
+			framingVersion: 2,
+			capabilities: [
+				expect.objectContaining({ id: "session.observe", supported: true }),
+				{
+					id: "artifact.read",
+					version: 0,
+					supported: false,
+					operations: [],
+					events: [],
+					platforms: [],
+					unsupportedReason: { code: "unknown_capability", message: "Capability is not advertised" },
+				},
+				expect.objectContaining({
+					id: "collaboration.control",
+					supported: false,
+					unsupportedReason: { code: "not_configured", message: "Collaboration is not configured" },
+				}),
+			],
+			hostCapabilities: {
+				interactions: ["select", "confirm"],
+				semanticContent: ["markdown", "fields"],
+			},
+		});
+	});
+
+	test("returns typed incompatibility instead of silently downgrading", () => {
+		const manifest = createSessionHostManifest({
+			ompVersion: "17.2.10",
+			framingVersions: [1, 2],
+			limits: {
+				maxFrameBytes: 1_048_576,
+				maxReassembledFrameBytes: 67_108_864,
+				maxArtifactReadBytes: 1_048_576,
+				maxPendingObservations: 1_024,
+				maxIdempotencyKeys: 1_024,
+			},
+			recovery,
+			capabilities,
+			mutations,
+		});
+
+		expect(
+			negotiateSessionHost(manifest, {
+				profile: { name: "omp.session", major: 4 },
+				framingVersion: 2,
+				hostCapabilities: { interactions: [], semanticContent: [] },
+				requestedCapabilities: [],
+			}),
+		).toEqual({
+			ok: false,
+			code: "unsupported_semantic_version",
+			message: "Unsupported omp.session semantic major 4",
+			supportedProfiles: [{ name: "omp.session", major: 3, minMinor: 0, maxMinor: 0 }],
+		});
+	});
+});
+
+class InMemorySessionAuthority implements SessionAuthority {
+	readonly sessionId: string;
+	#listeners = new Set<(observation: SessionAuthorityObservation) => void>();
+	#snapshot: () => Promise<SessionAuthoritySnapshot>;
+	#beforeSettle: (() => void) | undefined;
+	#replay: (after: SessionJournalCursor) => Promise<SessionAuthorityReplay>;
+
+	constructor(
+		snapshot: () => Promise<SessionAuthoritySnapshot>,
+		beforeSettle?: () => void,
+		replay: (after: SessionJournalCursor) => Promise<SessionAuthorityReplay> = async after => ({
+			observations: [],
+			journalCursor: after,
+		}),
+		sessionId = "session-1",
+	) {
+		this.#snapshot = snapshot;
+		this.#beforeSettle = beforeSettle;
+		this.sessionId = sessionId;
+		this.#replay = replay;
+	}
+
+	async snapshot(captureWatermark: () => void): Promise<SessionAuthoritySnapshot> {
+		const snapshot = await this.#snapshot();
+		captureWatermark();
+		return snapshot;
+	}
+	replay(after: SessionJournalCursor): Promise<SessionAuthorityReplay> {
+		return this.#replay(after);
+	}
+
+	subscribe(listener: (observation: SessionAuthorityObservation) => void): () => void {
+		this.#listeners.add(listener);
+		return () => this.#listeners.delete(listener);
+	}
+
+	emit(observation: SessionAuthorityObservation): void {
+		for (const listener of this.#listeners) listener(observation);
+	}
+
+	dispose(): void {
+		this.#listeners.clear();
+	}
+
+	async invoke(): Promise<never> {
+		throw new Error("not used");
+	}
+
+	async settle(): Promise<{ state: "settled" }> {
+		this.#beforeSettle?.();
+		return { state: "settled" };
+	}
+}
+
+describe("session host ordered observations", () => {
+	test("watermarks observations already reflected by the authoritative snapshot", async () => {
+		const snapshotReady = Promise.withResolvers<SessionAuthoritySnapshot>();
+		const authority = new InMemorySessionAuthority(() => snapshotReady.promise);
+		const host = new SessionHost(authority, { epoch: "epoch-1", maxBufferedObservations: 8 });
+
+		const opening = host.open();
+		authority.emit({
+			kind: "assistant_output_committed",
+			payload: { text: "complete" },
+			durability: "durable",
+			eventId: "entry-1",
+			journalCursor: { sessionId: "session-1", leafId: "entry-1", entryId: "entry-1" },
+			terminalSettlement: "none",
+		});
+		snapshotReady.resolve({
+			revision: 3,
+			state: { status: "active", lastEntryId: "entry-1" },
+			journalCursor: { sessionId: "session-1", leafId: "entry-1", entryId: "entry-1" },
+		});
+
+		const subscription = await opening;
+		expect(subscription.snapshot).toEqual({
+			sessionId: "session-1",
+			revision: 3,
+			state: { status: "active", lastEntryId: "entry-1" },
+			journalCursor: { sessionId: "session-1", leafId: "entry-1", entryId: "entry-1" },
+			watermark: { epoch: "epoch-1", sequence: 1 },
+		});
+		authority.emit({
+			kind: "progress",
+			payload: { phase: "next" },
+			durability: "transient",
+			terminalSettlement: "none",
+		});
+		expect((await subscription.observations.next()).value).toMatchObject({
+			sessionId: "session-1",
+			epoch: "epoch-1",
+			sequence: 2,
+			kind: "progress",
+		});
+		await subscription.close();
+		await host.close();
+	});
+
+	test("replays the same durable event identity after reconnect", async () => {
+		const authority = new InMemorySessionAuthority(async () => ({
+			revision: 0,
+			state: {},
+			journalCursor: { sessionId: "session-1", leafId: null, entryId: null },
+		}));
+		const host = new SessionHost(authority, { epoch: "epoch-1", maxBufferedObservations: 8 });
+		authority.emit({
+			kind: "tool_result_committed",
+			payload: { toolCallId: "call-1" },
+			durability: "durable",
+			eventId: "entry-1",
+			journalCursor: { sessionId: "session-1", leafId: "entry-1", entryId: "entry-1" },
+			terminalSettlement: "none",
+		});
+
+		const first = await host.open({ after: { epoch: "epoch-1", sequence: 0 }, snapshot: false });
+		const delivered = (await first.observations.next()).value;
+		await first.close();
+		const reconnected = await host.open({ after: { epoch: "epoch-1", sequence: 0 }, snapshot: false });
+		const replayed = (await reconnected.observations.next()).value;
+
+		expect(replayed).toEqual(delivered);
+		await reconnected.acknowledge(1);
+		await reconnected.close();
+		await host.close();
+	});
+
+	test("reports an explicit resnapshot gap when bounded replay is exceeded", async () => {
+		const authority = new InMemorySessionAuthority(async () => ({
+			revision: 0,
+			state: {},
+			journalCursor: { sessionId: "session-1", leafId: null, entryId: null },
+		}));
+		const host = new SessionHost(authority, { epoch: "epoch-1", maxBufferedObservations: 2 });
+		for (let index = 1; index <= 3; index++) {
+			authority.emit({
+				kind: "progress",
+				payload: { index },
+				durability: "transient",
+				terminalSettlement: "none",
+			});
+		}
+
+		const subscription = await host.open({ after: { epoch: "epoch-1", sequence: 0 }, snapshot: false });
+		expect((await subscription.observations.next()).value).toEqual({
+			type: "gap",
+			sessionId: "session-1",
+			epoch: "epoch-1",
+			afterSequence: 0,
+			firstAvailableSequence: 2,
+			latestSequence: 3,
+			recovery: "resnapshot",
+		});
+		await subscription.close();
+		await host.close();
+	});
+
+	test("requires cumulative acknowledgement before delivering beyond the pending window", async () => {
+		const authority = new InMemorySessionAuthority(async () => ({
+			revision: 0,
+			state: {},
+			journalCursor: { sessionId: "session-1", leafId: null, entryId: null },
+		}));
+		const host = new SessionHost(authority, { epoch: "epoch-1", maxBufferedObservations: 2 });
+		const subscription = await host.open({ snapshot: false });
+		for (let index = 1; index <= 2; index++) {
+			authority.emit({
+				kind: "progress",
+				payload: { index },
+				durability: "transient",
+				terminalSettlement: "none",
+			});
+			expect((await subscription.observations.next()).value).toMatchObject({ type: "observation", sequence: index });
+		}
+
+		const overflow = subscription.observations.next();
+		authority.emit({
+			kind: "progress",
+			payload: { index: 3 },
+			durability: "transient",
+			terminalSettlement: "none",
+		});
+		expect((await overflow).value).toEqual({
+			type: "gap",
+			sessionId: "session-1",
+			epoch: "epoch-1",
+			afterSequence: 0,
+			firstAvailableSequence: 2,
+			latestSequence: 3,
+			recovery: "resnapshot",
+		});
+		await subscription.close();
+		await host.close();
+	});
+
+	test("delivers final observations emitted while authority settlement drains", async () => {
+		let authority: InMemorySessionAuthority;
+		authority = new InMemorySessionAuthority(
+			async () => ({
+				revision: 0,
+				state: {},
+				journalCursor: { sessionId: "session-1", leafId: null, entryId: null },
+			}),
+			() => {
+				authority.emit({
+					kind: "shutdown_settled",
+					payload: {},
+					durability: "transient",
+					terminalSettlement: "completed",
+				});
+			},
+		);
+		const host = new SessionHost(authority, { epoch: "epoch-1", maxBufferedObservations: 2 });
+		const subscription = await host.open({ snapshot: false });
+
+		const closing = host.close();
+
+		expect((await subscription.observations.next()).value).toMatchObject({
+			kind: "shutdown_settled",
+			terminalSettlement: "completed",
+		});
+		await closing;
+		expect((await subscription.observations.next()).done).toBe(true);
+	});
+
+	test("replays from a durable cursor after the observation epoch restarts", async () => {
+		const authority = new InMemorySessionAuthority(
+			async () => ({
+				revision: 2,
+				state: {},
+				journalCursor: { sessionId: "session-1", leafId: "entry-2", entryId: "entry-2" },
+			}),
+			undefined,
+			async () => ({
+				observations: [
+					{
+						kind: "journal_entry",
+						payload: { id: "entry-2" },
+						durability: "durable",
+						eventId: "session-1:entry-2",
+						journalCursor: { sessionId: "session-1", leafId: "entry-2", entryId: "entry-2" },
+						terminalSettlement: "none",
+					},
+				],
+				journalCursor: { sessionId: "session-1", leafId: "entry-2", entryId: "entry-2" },
+			}),
+		);
+		const host = new SessionHost(authority, { epoch: "epoch-2", maxBufferedObservations: 8 });
+
+		const subscription = await host.open({
+			afterCursor: { sessionId: "session-1", leafId: "entry-1", entryId: "entry-1" },
+			snapshot: false,
+		});
+
+		expect((await subscription.observations.next()).value).toMatchObject({
+			epoch: "epoch-2",
+			eventId: "session-1:entry-2",
+			replay: true,
+			journalCursor: { sessionId: "session-1", leafId: "entry-2", entryId: "entry-2" },
+		});
+		await subscription.close();
+		await host.close();
+	});
+
+	test("isolates concurrent session hosts and their observation streams", async () => {
+		const createAuthority = (sessionId: string) =>
+			new InMemorySessionAuthority(
+				async () => ({
+					revision: 0,
+					state: { sessionId },
+					journalCursor: { sessionId, leafId: null, entryId: null },
+				}),
+				undefined,
+				undefined,
+				sessionId,
+			);
+		const firstAuthority = createAuthority("session-1");
+		const secondAuthority = createAuthority("session-2");
+		const firstHost = new SessionHost(firstAuthority, { epoch: "epoch-1", maxBufferedObservations: 8 });
+		const secondHost = new SessionHost(secondAuthority, { epoch: "epoch-2", maxBufferedObservations: 8 });
+		const [first, second] = await Promise.all([
+			firstHost.open({ snapshot: false }),
+			secondHost.open({ snapshot: false }),
+		]);
+
+		firstAuthority.emit({
+			kind: "progress",
+			payload: { session: "first" },
+			durability: "transient",
+			terminalSettlement: "none",
+		});
+		secondAuthority.emit({
+			kind: "progress",
+			payload: { session: "second" },
+			durability: "transient",
+			terminalSettlement: "none",
+		});
+
+		expect((await first.observations.next()).value).toMatchObject({
+			sessionId: "session-1",
+			epoch: "epoch-1",
+			sequence: 1,
+			payload: { session: "first" },
+		});
+		expect((await second.observations.next()).value).toMatchObject({
+			sessionId: "session-2",
+			epoch: "epoch-2",
+			sequence: 1,
+			payload: { session: "second" },
+		});
+
+		await Promise.all([first.close(), second.close()]);
+		await Promise.all([firstHost.close(), secondHost.close()]);
+	});
+});

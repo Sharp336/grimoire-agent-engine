@@ -54,6 +54,7 @@ import type { Theme } from "../../modes/theme/theme";
 import type { AsyncJobSnapshot } from "../../session/agent-session";
 import type { CompactMode } from "../../session/compact-modes";
 import type { CustomMessage, CustomMessagePayload } from "../../session/messages";
+import type { SemanticRenderResult } from "../../session/semantic-content";
 import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
 import type {
 	BashToolDetails,
@@ -66,7 +67,7 @@ import type {
 	ReadToolInput,
 	WriteToolInput,
 } from "../../tools";
-import type { ApprovalMode } from "../../tools/approval";
+import type { ApprovalMode, ApprovalPolicy, ToolTier } from "../../tools/approval";
 import type { EventBus } from "../../utils/event-bus";
 import type {
 	AgentEndEvent,
@@ -215,6 +216,27 @@ export type ExtensionUiComponentFactory = (tui: TUI, theme: Theme) => ExtensionU
 export type ExtensionWidgetContent = string[] | ExtensionUiComponentFactory | undefined;
 
 /** Wrap the current autocomplete provider with additional behavior (pi-compatible). */
+
+export interface ExtensionToolApprovalRequest {
+	title: string;
+	toolCallId: string;
+	toolName: string;
+	operation: ToolTier;
+	approvalMode: ApprovalMode;
+	resolvedPolicy: "prompt";
+	policySource?: "tool" | "user" | "mode";
+	declarationPolicy?: ApprovalPolicy;
+	escalationReason?: string;
+	providerSafety: { required: boolean; checks: string[] };
+	choices: readonly ["Approve", "Deny"];
+	defaultChoice: "Deny";
+}
+
+export interface ExtensionToolApprovalDecision {
+	approved: boolean;
+	provenance: "user" | "host";
+	reason?: string;
+}
 export type AutocompleteProviderFactory = (current: AutocompleteProvider) => AutocompleteProvider;
 
 /**
@@ -247,6 +269,12 @@ export interface ExtensionUIContext {
 		questions: ExtensionAskDialogQuestion[],
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<ExtensionAskDialogResult | undefined>;
+
+	/** Request a structured tool approval; modes without this surface fall back to a selector. */
+	requestApproval?(
+		request: ExtensionToolApprovalRequest,
+		dialogOptions?: ExtensionUIDialogOptions,
+	): Promise<ExtensionToolApprovalDecision>;
 
 	/** Show a notification to the user. */
 	notify(message: string, type?: "info" | "warning" | "error"): void;
@@ -587,6 +615,9 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	/** Custom rendering for tool call display */
 	renderCall?: (args: Static<TParams>, options: ToolRenderResultOptions, theme: Theme) => Component;
 
+	/** Host-neutral rendering for non-terminal clients. Existing TUI rendering remains independent. */
+	renderCallSemantic?: (args: Static<TParams>, options: ToolRenderResultOptions) => SemanticRenderResult;
+
 	/** Custom rendering for tool result display */
 	renderResult?: (
 		result: AgentToolResult<TDetails>,
@@ -594,6 +625,13 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 		theme: Theme,
 		args?: Static<TParams>,
 	) => Component;
+
+	/** Host-neutral result rendering for non-terminal clients. */
+	renderResultSemantic?: (
+		result: AgentToolResult<TDetails>,
+		options: ToolRenderResultOptions,
+		args?: Static<TParams>,
+	) => SemanticRenderResult;
 }
 
 /** Whether a tool's source is scoped to the user, the project, or a transient runtime session. */

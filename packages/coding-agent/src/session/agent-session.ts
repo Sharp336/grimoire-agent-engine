@@ -243,9 +243,11 @@ import {
 } from "./async-job-delivery";
 import { BashRunner, type BashRunnerHost } from "./bash-runner";
 import {
+	checkpointGoalFromEntry,
 	checkpointStartedAtFromEntry,
 	completedRewindFromEntry,
 	isSuccessfulCheckpointEntry,
+	RPC_CHECKPOINT_CUSTOM_TYPE,
 	semanticToolResult,
 } from "./checkpoint-entries";
 import type { ClientBridge } from "./client-bridge";
@@ -313,6 +315,12 @@ import { formatSessionDumpText } from "./session-dump-format";
 import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
 import {
+	SessionLoopController,
+	type SessionLoopEnableInput,
+	type SessionLoopIteration,
+	type SessionLoopState,
+} from "./session-loop";
+import {
 	COMPACTION_CHECK_NONE,
 	createCodexCompactionContext as createMaintenanceCodexCompactionContext,
 	SessionMaintenance,
@@ -338,7 +346,7 @@ import {
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
-import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
+import { TurnRecovery, type TurnRecoveryHost, type TurnRecoverySnapshot } from "./turn-recovery";
 import { YieldQueue } from "./yield-queue";
 
 export * from "./agent-session-events";
@@ -348,7 +356,7 @@ export type { AdvisorStats, PerAdvisorStat } from "./session-advisors";
 const SESSION_STOP_CONTINUATION_CAP = 8;
 
 import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
-import { TodoTracker, type TodoTrackerHost } from "./todo-tracker";
+import { TodoTracker, type TodoTrackerHost, type TodoTrackerSnapshot } from "./todo-tracker";
 import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
 const PLAN_MODE_REMINDER_MAX = 3;
@@ -478,6 +486,7 @@ export class AgentSession {
 	#vibeModeState: VibeModeState | undefined;
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
+	readonly #loop = new SessionLoopController();
 	readonly #advisors: SessionAdvisors;
 	#goalTurnCounter = 0;
 	#planReferenceSent = false;
@@ -2715,6 +2724,7 @@ export class AgentSession {
 						checkpointEntryId,
 						startedAt:
 							(semanticDetails && stringProperty(semanticDetails, "startedAt")) ?? new Date().toISOString(),
+						goal: semanticDetails ? stringProperty(semanticDetails, "goal")?.trim() || undefined : undefined,
 					};
 					this.#pendingRewindReport = undefined;
 					this.#lastCompletedRewind = undefined;
@@ -3587,6 +3597,11 @@ export class AgentSession {
 		};
 	}
 
+	/** Wait until a message-end observation has been committed by SessionManager. */
+	waitForSessionMessagePersistence(message: AgentMessage): Promise<void> {
+		return this.#waitForSessionMessagePersistence(message);
+	}
+
 	/** Register cleanup that runs when this AgentSession adopts a different session ID. */
 	registerSessionChangeCallback(callback: () => void): () => void {
 		this.#sessionChangeCallbacks.add(callback);
@@ -4187,6 +4202,10 @@ export class AgentSession {
 	get retryFallbackModel(): string | undefined {
 		return this.#recovery.retryFallbackModel;
 	}
+	/** Secret-safe projection of the active recovery saga. */
+	getRecoverySnapshot(): TurnRecoverySnapshot {
+		return this.#recovery.snapshot;
+	}
 
 	/** Install the interactive decision surface for reserve-triggered model changes. */
 	setUsageFallbackConfirmer(confirmer: UsageFallbackConfirmer | undefined): void {
@@ -4764,6 +4783,34 @@ export class AgentSession {
 	get goalRuntime(): GoalRuntime {
 		return this.#goalRuntime;
 	}
+	/** Current host-neutral loop lifecycle projection. */
+	getLoopState(): SessionLoopState {
+		return this.#loop.snapshot;
+	}
+
+	enableLoop(input: SessionLoopEnableInput = {}): SessionLoopState {
+		return this.#loop.enable(input);
+	}
+
+	disableLoop(): SessionLoopState {
+		return this.#loop.disable();
+	}
+
+	pauseLoop(): SessionLoopState {
+		return this.#loop.pause();
+	}
+
+	resumeLoop(prompt: string): SessionLoopState {
+		return this.#loop.resume(prompt);
+	}
+
+	captureLoopPrompt(prompt: string): SessionLoopState {
+		return this.#loop.capturePrompt(prompt);
+	}
+
+	beginLoopIteration(): SessionLoopIteration | undefined {
+		return this.#loop.beginIteration();
+	}
 
 	markPlanReferenceSent(): void {
 		this.#planReferenceSent = true;
@@ -4816,7 +4863,7 @@ export class AgentSession {
 	#rehydrateCheckpointRewindState(): void {
 		this.#clearCheckpointRuntimeState();
 		let completed: CompletedRewindState | undefined;
-		let pending: { entryId: string; startedAt: string; messageCount: number } | undefined;
+		let pending: { entryId: string; startedAt: string; messageCount: number; goal?: string } | undefined;
 		let messageCount = 0;
 		for (const entry of this.sessionManager.getBranch()) {
 			if (entry.type === "message") messageCount++;
@@ -4826,6 +4873,7 @@ export class AgentSession {
 					entryId: entry.id,
 					startedAt: checkpointStartedAtFromEntry(entry) ?? entry.timestamp,
 					messageCount,
+					goal: checkpointGoalFromEntry(entry),
 				};
 				continue;
 			}
@@ -4840,6 +4888,7 @@ export class AgentSession {
 				checkpointEntryId: pending.entryId,
 				startedAt: pending.startedAt,
 				checkpointMessageCount: pending.messageCount,
+				goal: pending.goal,
 			};
 			return;
 		}
@@ -4852,6 +4901,41 @@ export class AgentSession {
 
 	getLastCompletedRewind(): CompletedRewindState | undefined {
 		return this.#lastCompletedRewind;
+	}
+	/** Create a durable checkpoint owned by AgentSession rather than a presentation adapter. */
+	createCheckpoint(goal: string): CheckpointState {
+		if (this.#checkpointState) throw new Error("Checkpoint already active.");
+		const normalizedGoal = goal.trim();
+		if (!normalizedGoal) throw new Error("Checkpoint goal cannot be empty.");
+		const startedAt = new Date().toISOString();
+		const checkpointEntryId = this.sessionManager.appendCustomEntry(RPC_CHECKPOINT_CUSTOM_TYPE, {
+			goal: normalizedGoal,
+			startedAt,
+		});
+		const state: CheckpointState = {
+			checkpointMessageCount: this.agent.state.messages.length,
+			checkpointEntryId,
+			startedAt,
+			goal: normalizedGoal,
+		};
+		this.setCheckpointState(state);
+		return { ...state };
+	}
+
+	/** Rewind the active durable checkpoint and retain only the supplied report. */
+	async rewindCheckpoint(report: string): Promise<CompletedRewindState> {
+		if (!this.#checkpointState) {
+			if (this.#lastCompletedRewind) {
+				throw new Error("Checkpoint already completed; continue from the retained rewind report.");
+			}
+			throw new Error("No active checkpoint.");
+		}
+		const normalizedReport = report.trim();
+		if (!normalizedReport) throw new Error("Rewind report cannot be empty.");
+		await this.#applyRewind(normalizedReport);
+		const completed = this.#lastCompletedRewind;
+		if (!completed) throw new Error("Checkpoint rewind did not settle.");
+		return { ...completed };
 	}
 
 	setCheckpointState(state: CheckpointState | undefined): void {
@@ -6279,6 +6363,9 @@ export class AgentSession {
 
 	getTodoPhases(): TodoPhase[] {
 		return this.#todo.phases;
+	}
+	getTodoSnapshot(): TodoTrackerSnapshot {
+		return this.#todo.snapshot;
 	}
 
 	setTodoPhases(phases: TodoPhase[]): void {

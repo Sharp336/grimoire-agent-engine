@@ -4,7 +4,7 @@ import {
 	createLoopLimitRuntime,
 	isLoopDurationExpired,
 	parseLoopLimitArgs,
-} from "@oh-my-pi/pi-coding-agent/modes/loop-limit";
+} from "@oh-my-pi/pi-coding-agent/session/session-loop-limit";
 import type { BuiltinSlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 

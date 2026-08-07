@@ -1,10 +1,12 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -215,6 +217,42 @@ describe("tools.approvalMode setting", () => {
 		).rejects.toThrow(/blocked by user policy/);
 	});
 
+	it("passes structured approval identity and policy provenance to capable hosts", async () => {
+		const requestApproval = vi.fn<NonNullable<ExtensionUIContext["requestApproval"]>>(async request => {
+			expect(request).toEqual({
+				title: expect.stringContaining("bash"),
+				toolCallId: "structured-approval",
+				toolName: "bash",
+				operation: "exec",
+				approvalMode: "always-ask",
+				resolvedPolicy: "prompt",
+				policySource: "mode",
+				declarationPolicy: undefined,
+				escalationReason: undefined,
+				providerSafety: { required: false, checks: [] },
+				choices: ["Approve", "Deny"],
+				defaultChoice: "Deny",
+			});
+			return { approved: true, provenance: "user" };
+		});
+		await initializeExtensions(session, {
+			reportSendError: () => {},
+			reportRuntimeError: () => {},
+			uiContext: { requestApproval } as unknown as ExtensionUIContext,
+		});
+		const settings = approvalSettings({ "tools.approvalMode": "always-ask" });
+
+		const result = await bashTool().execute(
+			"structured-approval",
+			{ command: "echo structured" },
+			undefined,
+			undefined,
+			{ settings } as AgentToolContext,
+		);
+
+		expect(textOf(result)).toContain("structured");
+		expect(requestApproval).toHaveBeenCalledTimes(1);
+	});
 	it("constructs an extensionRunner unconditionally so the approval gate is always installed", async () => {
 		// Regression lock for the architectural fix: the per-tool approval gate is implemented
 		// inside `ExtensionToolWrapper`, which is only attached when `session.extensionRunner` exists.

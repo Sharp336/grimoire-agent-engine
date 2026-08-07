@@ -35,6 +35,7 @@ const RECENT_OPERATION_TTL_MS = 5 * 60_000;
 export class RpcOperationManager {
 	readonly #active = new Map<string, ActiveRpcOperation>();
 	readonly #recent = new Map<string, { frame: RpcOperationTerminalFrame; expiresAt: number }>();
+	readonly #settlementWaiters = new Map<string, Set<(frame: RpcOperationTerminalFrame) => void>>();
 	readonly #output: (frame: RpcOperationOutputFrame) => void;
 	readonly #nextId: () => string;
 	readonly #now: () => number;
@@ -86,6 +87,22 @@ export class RpcOperationManager {
 			if (operation.command === command) return true;
 		}
 		return false;
+	}
+
+	/** Resolve when an accepted operation reaches its exactly-once terminal outcome. */
+	waitForSettlement(operationId: string): Promise<RpcOperationTerminalFrame | undefined> {
+		this.#pruneRecent();
+		const recent = this.#recent.get(operationId)?.frame;
+		if (recent) return Promise.resolve(recent);
+		if (!this.#active.has(operationId)) return Promise.resolve(undefined);
+		const waiter = Promise.withResolvers<RpcOperationTerminalFrame>();
+		let waiters = this.#settlementWaiters.get(operationId);
+		if (!waiters) {
+			waiters = new Set();
+			this.#settlementWaiters.set(operationId, waiters);
+		}
+		waiters.add(waiter.resolve);
+		return waiter.promise;
 	}
 
 	complete(
@@ -204,6 +221,11 @@ export class RpcOperationManager {
 		});
 		this.#pruneRecent();
 		this.#output(terminal);
+		const waiters = this.#settlementWaiters.get(handle.operationId);
+		if (waiters) {
+			this.#settlementWaiters.delete(handle.operationId);
+			for (const resolve of waiters) resolve(terminal);
+		}
 		return true;
 	}
 

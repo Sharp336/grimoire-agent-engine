@@ -39,6 +39,8 @@ export class CollabSocket {
 	onControl?: (msg: RelayControlMessage) => void;
 	/** Fires once per terminal close (intentional, fatal code, or bad key). willReconnect=true for transient drops that will retry. */
 	onClose?: (reason: string, willReconnect: boolean) => void;
+	/** Fires when bounded send buffering overflows and the socket forces a reconnect/resync. */
+	onDrop?: (frameType: CollabFrame["t"], pendingFrames: number) => void;
 
 	readonly #opts: CollabSocketOptions;
 	#ws: WebSocket | null = null;
@@ -108,7 +110,18 @@ export class CollabSocket {
 
 	#enqueuePendingSend(envelope: Uint8Array, frameType: CollabFrame["t"]): void {
 		if (this.#pendingSends.length >= MAX_PENDING_SENDS) {
-			logger.debug("collab: dropping frame, reconnect buffer full", { t: frameType });
+			logger.warn("collab: reconnect buffer full; forcing resync", { t: frameType });
+			this.#pendingSends.length = 0;
+			this.onDrop?.(frameType, MAX_PENDING_SENDS);
+			this.#clearBackpressureDrain();
+			const ws = this.#ws;
+			if (ws && ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
+				try {
+					ws.close(1013, "backpressure overflow");
+				} catch {
+					// The reconnect loop is already authoritative for recovery.
+				}
+			}
 			return;
 		}
 		this.#pendingSends.push(envelope);

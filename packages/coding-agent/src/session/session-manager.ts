@@ -19,7 +19,7 @@ import {
 	toError,
 } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentSchemaMode } from "../task/types";
-import { ArtifactManager } from "./artifacts";
+import { type ArtifactAllocationContext, ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore } from "./blob-store";
 import {
 	type BashExecutionMessage,
@@ -1896,13 +1896,34 @@ export class SessionManager {
 		return this.#artifactManagerForSession();
 	}
 
-	async allocateArtifactPath(toolType: string): Promise<{ id?: string; path?: string }> {
-		return (await this.#artifactManagerForSession()?.allocatePath(toolType)) ?? {};
+	async allocateArtifactPath(
+		toolType: string,
+		related: Pick<ArtifactAllocationContext, "toolCallId"> = {},
+	): Promise<{ id?: string; path?: string }> {
+		const manager = this.#artifactManagerForSession();
+		if (!manager) return {};
+		const turnId = this.getLeafId();
+		return manager.allocatePath(toolType, {
+			sessionId: this.#sessionId,
+			...(turnId == null ? {} : { turnId }),
+			...related,
+		});
 	}
 
-	async saveArtifact(content: string, toolType: string): Promise<string | undefined> {
+	async saveArtifact(
+		content: string,
+		toolType: string,
+		related: Pick<ArtifactAllocationContext, "toolCallId"> = {},
+	): Promise<string | undefined> {
 		const manager = this.#artifactManagerForSession();
-		if (manager) return manager.save(content, toolType);
+		if (manager) {
+			const turnId = this.getLeafId();
+			return manager.save(content, toolType, {
+				sessionId: this.#sessionId,
+				...(turnId == null ? {} : { turnId }),
+				...related,
+			});
+		}
 
 		// Non-persistent session: keep an in-memory copy so spill truncation works.
 		this.#inMemoryArtifacts ??= new Map();

@@ -12,7 +12,7 @@
  */
 import { once } from "node:events";
 import * as path from "node:path";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { serviceTierFamily } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { $env, isEnoent, isRecord, readLines, Snowflake } from "@oh-my-pi/pi-utils";
@@ -21,6 +21,10 @@ import { reset as resetCapabilities } from "../../capability";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import type { EvalToolDetails } from "../../eval/types";
 import {
+	type ExtensionAskDialogQuestion,
+	type ExtensionAskDialogResult,
+	type ExtensionToolApprovalDecision,
+	type ExtensionToolApprovalRequest,
 	type ExtensionUIContext,
 	type ExtensionUIDialogOptions,
 	type ExtensionUISelectItem,
@@ -29,19 +33,40 @@ import {
 } from "../../extensibility/extensions";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
+import { type MCPManager, reloadMcpResources } from "../../mcp";
 import { type Theme, theme } from "../../modes/theme/theme";
 import { AgentControlService } from "../../registry/agent-control";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { AgentSession } from "../../session/agent-session";
+import { AgentSessionAuthority } from "../../session/agent-session-authority";
+import type { PromptOptions } from "../../session/agent-session-types";
+import {
+	ArtifactHashMismatchError,
+	ArtifactNotFoundError,
+	ArtifactRangeError,
+	MAX_ARTIFACT_RANGE_BYTES,
+} from "../../session/artifacts";
 import { type PythonExecutionMessage, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
+import { adaptSemanticRenderResultToHost } from "../../session/semantic-content";
 import {
 	inspectPersistedSessionWorkspace,
 	listSessionCatalog,
 	listSessionWorkspaceRoots,
+	projectSessionCatalogEntry,
+	projectSessionTree,
 	resolveSessionCatalogReference,
 	SessionCatalogError,
 } from "../../session/session-catalog";
+import {
+	negotiateSessionHost,
+	SESSION_SEMANTIC_PROFILE,
+	SessionCursorError,
+	SessionHost,
+	type SessionHostNegotiated,
+	type SessionJsonValue,
+} from "../../session/session-host";
+import { SessionLoopScheduler } from "../../session/session-loop";
 import { SessionQueueEntryNotFoundError, SessionQueueInvalidPositionError } from "../../session/session-queue-service";
 import { FileSessionStorage } from "../../session/session-storage";
 import { ToolInventoryUnavailableError } from "../../session/session-tools";
@@ -61,6 +86,12 @@ import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
 import {
+	RpcCollaborationAuthorityError,
+	RpcCollaborationManager,
+	RpcCollaborationStateError,
+} from "./rpc-collaboration";
+import { RpcCollaborationSessionMediaStore, RpcCollaborationTransportFactoryImpl } from "./rpc-collaboration-transport";
+import {
 	getRpcCapabilityManifest,
 	RPC_APPLICATION_API_VERSION,
 	RpcToolActivationValidationError,
@@ -68,13 +99,34 @@ import {
 	validateRpcToolActivationBatch,
 } from "./rpc-command-registry";
 import { RpcEvalOutputStream } from "./rpc-eval";
+import {
+	applyRpcTodoOperation,
+	controlRpcCheckpoint,
+	controlRpcGoal,
+	controlRpcLoop,
+	RpcTodoOperationError,
+	setRpcModelRole,
+	setRpcServiceTier,
+	setRpcTodoPhases,
+} from "./rpc-execution-controls";
+import { projectRpcSessionExecution } from "./rpc-execution-snapshot";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
 import { handleGetSettings } from "./rpc-get-settings";
 import { claimRpcInput } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
 import { type RpcOperationHandle, RpcOperationManager } from "./rpc-operations";
+import { RpcProvenanceManager, type RpcProvenanceSource } from "./rpc-provenance";
+import { RpcResourceLifecycleManager, RpcResourceNotFoundError } from "./rpc-resource-lifecycle";
+import { RpcSemanticRenderingManager } from "./rpc-semantic-rendering";
+import {
+	createRpcSessionCommandInvoker,
+	getRpcSessionCommandCapability,
+	RpcSessionHostAdapter,
+	RpcSessionSubscriptionNotFoundError,
+} from "./rpc-session-host";
 import { handleSetSettings } from "./rpc-set-settings";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
+import { projectRpcToolSemantic } from "./rpc-tool-semantic-rendering";
 import type {
 	RpcCancelOperationResult,
 	RpcCommand,
@@ -91,6 +143,8 @@ import type {
 	RpcHostUriCancelRequest,
 	RpcHostUriRequest,
 	RpcHostUriResult,
+	RpcInteractionSettledFrame,
+	RpcPendingInteractionSnapshot,
 	RpcRenameSessionResult,
 	RpcResponse,
 	RpcResumeSessionResult,
@@ -99,6 +153,7 @@ import type {
 	RpcSubagentSubscriptionLevel,
 	RpcToolActivationResult,
 } from "./rpc-types";
+import { getRpcV3CapabilityManifest } from "./rpc-v3";
 
 // Re-export types for consumers
 export type * from "./rpc-types";
@@ -106,11 +161,13 @@ export type * from "./rpc-types";
 export type PendingExtensionRequest = {
 	resolve: (response: RpcExtensionUIResponse) => void;
 	reject: (error: Error) => void;
+	snapshot?: RpcPendingInteractionSnapshot;
 };
 
 /** Pending extension UI request map that can fail closed when the RPC client disconnects. */
 export class RpcPendingExtensionRequests extends Map<string, PendingExtensionRequest> {
 	#closedError: Error | undefined;
+	#supportedMethods: ReadonlySet<string> | undefined;
 
 	override set(id: string, request: PendingExtensionRequest): this {
 		if (this.#closedError) {
@@ -120,9 +177,24 @@ export class RpcPendingExtensionRequests extends Map<string, PendingExtensionReq
 		return super.set(id, request);
 	}
 
+	/** Constrain interactive requests to the exact host surface negotiated by RPC v3. */
+	configureHostCapabilities(methods: readonly string[]): void {
+		this.#supportedMethods = new Set(methods);
+	}
+
+	supports(method: string): boolean {
+		return this.#supportedMethods?.has(method) ?? true;
+	}
+
+	snapshot(): RpcPendingInteractionSnapshot[] {
+		return Array.from(this.values(), request => request.snapshot)
+			.filter((value): value is RpcPendingInteractionSnapshot => value !== undefined)
+			.sort((a, b) => a.startedAt - b.startedAt || a.id.localeCompare(b.id));
+	}
+
 	/** Reject every active and future extension UI request. */
 	rejectAll(message: string): void {
-		if (!this.#closedError) this.#closedError = new Error(message);
+		if (!this.#closedError) this.#closedError = new RpcInteractionDisconnectedError(message);
 		const requests = Array.from(this.values());
 		this.clear();
 		for (const request of requests) {
@@ -130,6 +202,8 @@ export class RpcPendingExtensionRequests extends Map<string, PendingExtensionReq
 		}
 	}
 }
+
+class RpcInteractionDisconnectedError extends Error {}
 
 type RpcOutput = (
 	obj:
@@ -459,12 +533,22 @@ export function dispatchRpcInputFrame(parsed: unknown, deps: RpcInputFrameDeps):
 export class RpcInputDispatcher {
 	#tail: Promise<void> = Promise.resolve();
 	#tasks = new Set<Promise<void>>();
+	#accepting = true;
 	readonly #deps: RpcInputFrameDeps;
 	readonly #afterSerialCommand: (() => Promise<void>) | undefined;
+	readonly #onShutdownInitiated: (() => void) | undefined;
+	readonly #beforeShutdown: (() => Promise<void>) | undefined;
 
-	constructor(options: { deps: RpcInputFrameDeps; afterSerialCommand?: () => Promise<void> }) {
+	constructor(options: {
+		deps: RpcInputFrameDeps;
+		afterSerialCommand?: () => Promise<void>;
+		onShutdownInitiated?: () => void;
+		beforeShutdown?: () => Promise<void>;
+	}) {
 		this.#deps = options.deps;
 		this.#afterSerialCommand = options.afterSerialCommand;
+		this.#onShutdownInitiated = options.onShutdownInitiated;
+		this.#beforeShutdown = options.beforeShutdown;
 	}
 
 	/** Accept a parsed input frame without blocking the stdin reader. */
@@ -477,6 +561,40 @@ export class RpcInputDispatcher {
 				this.#deps.output(
 					this.#deps.errorResponse(validation.id, validation.command, validation.error, validation.code),
 				);
+				return;
+			}
+			if (!this.#accepting) {
+				this.#deps.output(
+					this.#deps.errorResponse(
+						validation.command.id,
+						validation.command.type,
+						"RPC session is shutting down",
+						"session_closing",
+					),
+				);
+				return;
+			}
+			if (validation.command.type === "session_shutdown") {
+				this.#accepting = false;
+				this.#onShutdownInitiated?.();
+				const serialTail = this.#tail;
+				const task = (async () => {
+					try {
+						await serialTail;
+						await this.#beforeShutdown?.();
+						const response = await this.#deps.handleCommand(validation.command);
+						this.#deps.output(response);
+					} catch (err: unknown) {
+						const message = err instanceof Error ? err.message : String(err);
+						this.#deps.output(this.#deps.errorResponse(validation.command.id, validation.command.type, message));
+					} finally {
+						await this.#afterSerialCommand?.();
+					}
+				})();
+				this.#tasks.add(task);
+				void task.finally(() => {
+					this.#tasks.delete(task);
+				});
 				return;
 			}
 			if (validation.scheduling !== "serial") {
@@ -666,60 +784,19 @@ export function requestRpcEditor(
 	dialogOptions?: ExtensionUIDialogOptions,
 	editorOptions?: { promptStyle?: boolean },
 ): Promise<string | undefined> {
-	if (dialogOptions?.signal?.aborted) return Promise.resolve(undefined);
-
-	const id = Snowflake.next() as string;
-	const { promise, resolve, reject } = Promise.withResolvers<string | undefined>();
-	let settled = false;
-
-	const cleanup = () => {
-		dialogOptions?.signal?.removeEventListener("abort", onAbort);
-		pendingRequests.delete(id);
-	};
-	const finish = (value: string | undefined) => {
-		if (settled) return;
-		settled = true;
-		cleanup();
-		resolve(value);
-	};
-	const fail = (error: Error) => {
-		if (settled) return;
-		settled = true;
-		cleanup();
-		reject(error);
-	};
-	const onAbort = () => {
-		output({
-			type: "extension_ui_request",
-			id: Snowflake.next() as string,
-			method: "cancel",
-			targetId: id,
-		} as RpcExtensionUIRequest);
-		finish(undefined);
-	};
-
-	dialogOptions?.signal?.addEventListener("abort", onAbort, { once: true });
-	pendingRequests.set(id, {
-		resolve: response => {
-			if ("cancelled" in response && response.cancelled) {
-				finish(undefined);
-			} else if ("value" in response) {
-				finish(response.value);
-			} else {
-				finish(undefined);
-			}
+	return requestRpcDialog(
+		pendingRequests,
+		output,
+		dialogOptions,
+		undefined,
+		{
+			method: "editor",
+			title,
+			prefill,
+			promptStyle: editorOptions?.promptStyle,
 		},
-		reject: fail,
-	});
-	output({
-		type: "extension_ui_request",
-		id,
-		method: "editor",
-		title,
-		prefill,
-		promptStyle: editorOptions?.promptStyle,
-	} as RpcExtensionUIRequest);
-	return promise;
+		response => ("value" in response ? response.value : undefined),
+	);
 }
 
 /** Sends an RPC extension dialog and cancels the remote presentation when its signal aborts. */
@@ -733,50 +810,146 @@ export function requestRpcDialog<T>(
 ): Promise<T> {
 	if (opts?.signal?.aborted) return Promise.resolve(defaultValue);
 
+	const method = request.method;
+	if (
+		method !== "select" &&
+		method !== "confirm" &&
+		method !== "input" &&
+		method !== "editor" &&
+		method !== "approval" &&
+		method !== "ask"
+	) {
+		throw new Error("RPC dialog request must declare a supported interactive method");
+	}
 	const id = Snowflake.next() as string;
+	const operationId = typeof request.operationId === "string" ? request.operationId : undefined;
+	const emitOutcome = (outcome: RpcInteractionSettledFrame["outcome"]) => {
+		output({
+			type: "interaction_settled",
+			id,
+			method,
+			...(operationId ? { operationId } : {}),
+			outcome,
+		});
+	};
+	if (pendingRequests instanceof RpcPendingExtensionRequests && !pendingRequests.supports(method)) {
+		emitOutcome({
+			state: "unsupported",
+			message: `RPC host did not negotiate the "${method}" interaction`,
+		});
+		return Promise.resolve(defaultValue);
+	}
+
 	const { promise, resolve, reject } = Promise.withResolvers<T>();
 	let timeoutId: NodeJS.Timeout | undefined;
+	let settled = false;
 
 	const cleanup = () => {
 		clearTimeout(timeoutId);
 		opts?.signal?.removeEventListener("abort", onAbort);
 		pendingRequests.delete(id);
 	};
-	const onAbort = () => {
+	const cancelRemote = () => {
 		output({
 			type: "extension_ui_request",
 			id: Snowflake.next() as string,
 			method: "cancel",
 			targetId: id,
 		} as RpcExtensionUIRequest);
+	};
+	const finish = (value: T, outcome: RpcInteractionSettledFrame["outcome"]) => {
+		if (settled) return;
+		settled = true;
 		cleanup();
-		resolve(defaultValue);
+		emitOutcome(outcome);
+		resolve(value);
+	};
+	const fail = (cause: Error) => {
+		if (settled) return;
+		settled = true;
+		cleanup();
+		emitOutcome({
+			state: cause instanceof RpcInteractionDisconnectedError ? "disconnected" : "failed",
+			message: cause.message,
+		});
+		reject(cause);
+	};
+	const onAbort = () => {
+		cancelRemote();
+		finish(defaultValue, { state: "cancelled" });
 	};
 	opts?.signal?.addEventListener("abort", onAbort, { once: true });
 
 	if (opts?.timeout !== undefined) {
 		timeoutId = setTimeout(() => {
 			opts.onTimeout?.();
-			cleanup();
-			resolve(defaultValue);
+			cancelRemote();
+			finish(defaultValue, { state: "timed_out" });
 		}, opts.timeout);
 	}
 
+	const snapshot: RpcPendingInteractionSnapshot = {
+		id,
+		method,
+		startedAt: Date.now(),
+		...(typeof request.title === "string" ? { title: request.title } : {}),
+		...(operationId ? { operationId } : {}),
+		sensitive: request.sensitive === true,
+		...(typeof request.toolCallId === "string" ? { toolCallId: request.toolCallId } : {}),
+		...(typeof request.toolName === "string" ? { toolName: request.toolName } : {}),
+	};
 	pendingRequests.set(id, {
 		resolve: response => {
-			cleanup();
-			resolve(parseResponse(response));
+			if (settled) return;
+			if ("cancelled" in response && response.cancelled) {
+				let value: T;
+				try {
+					value = parseResponse(response);
+				} catch (cause) {
+					fail(cause instanceof Error ? cause : new Error(String(cause)));
+					return;
+				}
+				finish(value, { state: response.timedOut ? "timed_out" : "cancelled" });
+				return;
+			}
+			try {
+				const value = parseResponse(response);
+				finish(value, {
+					state: "accepted",
+					provenance: "provenance" in response ? (response.provenance ?? "host") : "host",
+					...("decision" in response ? { decision: response.decision } : {}),
+				});
+			} catch (cause) {
+				fail(cause instanceof Error ? cause : new Error(String(cause)));
+			}
 		},
-		reject,
+		reject: fail,
+		snapshot,
 	});
+	if (settled) return promise;
 	output({ type: "extension_ui_request", id, ...request } as RpcExtensionUIRequest);
 	return promise;
+}
+
+type RpcPassiveInteractionCapability = "notification" | "status" | "progress";
+type RpcPassiveInteractionRequest = Extract<RpcExtensionUIRequest, { method: "notify" | "setStatus" | "progress" }>;
+
+/** Emits a negotiated one-way host interaction without creating pending response state. */
+export function emitRpcPassiveInteraction(
+	pendingRequests: Map<string, PendingExtensionRequest>,
+	output: RpcOutput,
+	capability: RpcPassiveInteractionCapability,
+	request: RpcPassiveInteractionRequest,
+): boolean {
+	if (pendingRequests instanceof RpcPendingExtensionRequests && !pendingRequests.supports(capability)) return false;
+	output(request);
+	return true;
 }
 
 export function requestRpcAgentMutationConfirmation(
 	pendingRequests: Map<string, PendingExtensionRequest>,
 	output: RpcOutput,
-	command: "cancel_agent" | "release_agent",
+	command: "start_agent" | "cancel_agent" | "release_agent",
 	agentId: string,
 	tombstone = false,
 	timeout = 30_000,
@@ -789,11 +962,18 @@ export function requestRpcAgentMutationConfirmation(
 		false,
 		{
 			method: "confirm",
-			title: command === "cancel_agent" ? "Cancel agent" : "Release agent",
+			title:
+				command === "start_agent"
+					? "Start child agent"
+					: command === "cancel_agent"
+						? "Cancel agent"
+						: "Release agent",
 			message:
-				command === "cancel_agent"
-					? `Cancel agent ${agentId}?`
-					: `Release agent ${agentId} (tombstone: ${tombstone})?`,
+				command === "start_agent"
+					? `Start child agent ${agentId}?`
+					: command === "cancel_agent"
+						? `Cancel agent ${agentId}?`
+						: `Release agent ${agentId} (tombstone: ${tombstone})?`,
 			timeout,
 			operationId,
 			command,
@@ -910,6 +1090,7 @@ export async function runRpcMode(
 	setToolUIContext?: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
 	eventBus?: EventBus,
 	input: ReadableStream<Uint8Array> = claimRpcInput(),
+	mcpManager?: MCPManager,
 ): Promise<never> {
 	// Signal to RPC clients that the server is ready to accept commands
 	// Suppress terminal notifications: they write \x07 (BEL) or OSC sequences directly to
@@ -919,15 +1100,41 @@ export async function runRpcMode(
 	process.env.PI_NOTIFICATIONS = "off";
 
 	const frameEncoder = new RpcFrameEncoder();
-	const getCapabilityManifest = () => {
+	const getCapabilityFeatures = () => {
 		const features = new Set<string>();
 		if (eventBus) features.add("subagent-event-bus");
 		features.add("agent-control");
+		features.add("session-catalog");
+		features.add("session-observe");
+		features.add("session-execute");
+		features.add("session-shutdown");
+		features.add("interaction");
+		features.add("approval");
+		features.add("semantic-rendering");
+		if (session.sessionManager.getArtifactManager()) features.add("artifact");
+		if (mcpManager) features.add("resource-lifecycle");
+		features.add("runtime-provenance");
+		features.add("collaboration");
 		if (session.asyncJobManager && session.getAgentId()) features.add("job-control");
 		if (session.model && serviceTierFamily(session.model)) features.add("model.fast-mode");
-		return getRpcCapabilityManifest({ features });
+		return features;
+	};
+	const getSessionHostManifest = () => getRpcV3CapabilityManifest({ features: getCapabilityFeatures() });
+	const getCapabilityManifest = () => {
+		const features = getCapabilityFeatures();
+		const manifest = getRpcCapabilityManifest({ features });
+		manifest.sessionHost = getSessionHostManifest();
+		return manifest;
 	};
 	const capabilityManifest = getCapabilityManifest();
+	let selectedFramingVersion = 1;
+	let semanticNegotiation:
+		| {
+				requestKey: string;
+				result: SessionHostNegotiated;
+		  }
+		| undefined;
+	let negotiatedSemanticContent = new Set<string>();
 	// Ordered stdout writer honoring backpressure: chunked v2 frames are produced
 	// lazily by the encoder and written one physical line at a time, so a near-limit
 	// logical frame never materializes its full base64 transport in memory.
@@ -952,10 +1159,17 @@ export async function runRpcMode(
 			capabilities: capabilityManifest,
 		}),
 	);
+	let protocolSettled = false;
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
+		if (protocolSettled) return;
 		writeFrames(frameEncoder.encodeFrames(obj));
-		if (isRecord(obj) && obj.type === "response" && obj.command === "negotiate_protocol" && obj.success === true)
+		if (isRecord(obj) && obj.type === "response" && obj.command === "session_shutdown" && obj.success === true) {
+			protocolSettled = true;
+		}
+		if (isRecord(obj) && obj.type === "response" && obj.command === "negotiate_protocol" && obj.success === true) {
 			frameEncoder.setProtocolVersion(2);
+			selectedFramingVersion = 2;
+		}
 	};
 	const emitRpcTitles = shouldEmitRpcTitles();
 
@@ -979,6 +1193,49 @@ export async function runRpcMode(
 			: cause instanceof RpcSessionTransitionBusyError
 				? error(id, command, cause.message, "session_busy")
 				: error(id, command, cause instanceof Error ? cause.message : String(cause));
+	const loopScheduler = new SessionLoopScheduler(session, {
+		waitForIdle: () => session.waitForIdle(),
+		compact: async () => {
+			await session.compact();
+		},
+		reset: async () => {
+			if (!(await session.newSession())) throw new Error("Loop could not reset the active session.");
+		},
+		prompt: async (prompt, causationId) => {
+			await session.prompt(prompt, { ...(causationId === undefined ? {} : { messageTag: causationId }) });
+			await waitForQueuedRpcPrompt(session);
+		},
+		onStateChange: (state, causationId) => {
+			output({
+				type: "loop_state_update",
+				state,
+				...(causationId === undefined ? {} : { causationId }),
+			});
+		},
+		onError: cause => {
+			output({
+				type: "loop_error",
+				error: cause instanceof Error ? cause.message : String(cause),
+				state: session.getLoopState(),
+			});
+		},
+	});
+	const startRpcPrompt = (prompt: string, options: PromptOptions): Promise<boolean> => {
+		const loopState = session.getLoopState();
+		const loopEnabled = loopState.enabled;
+		if (loopEnabled) {
+			if (loopState.phase === "paused") session.resumeLoop(prompt);
+			else session.captureLoopPrompt(prompt);
+			output({
+				type: "loop_state_update",
+				state: session.getLoopState(),
+				...(options.messageTag === undefined ? {} : { causationId: options.messageTag }),
+			});
+		}
+		const task = session.prompt(prompt, options);
+		if (loopEnabled) loopScheduler.request(options.messageTag);
+		return task;
+	};
 	const operationOwnership = new RpcOperationMessageOwnership(session);
 	const rpcEvalOperationIds = new Set<string>();
 	const rpcEvalConfirmationControllers = new Map<string, AbortController>();
@@ -1113,6 +1370,51 @@ export async function runRpcMode(
 			);
 		}
 
+		requestApproval(
+			request: ExtensionToolApprovalRequest,
+			dialogOptions?: ExtensionUIDialogOptions,
+		): Promise<ExtensionToolApprovalDecision> {
+			return requestRpcDialog(
+				this.pendingRequests,
+				this.output,
+				dialogOptions,
+				{ approved: false, provenance: "host", reason: "Approval was not accepted by the RPC host" },
+				{ method: "approval", ...request },
+				response => {
+					if ("decision" in response) {
+						return {
+							approved: response.decision === "approve",
+							provenance: response.provenance ?? "host",
+							...(response.decision === "deny" ? { reason: "denied by user" } : {}),
+						};
+					}
+					return {
+						approved: false,
+						provenance: "host",
+						reason: "cancelled" in response && response.timedOut ? "approval timed out" : "approval cancelled",
+					};
+				},
+			);
+		}
+
+		askDialog(
+			questions: ExtensionAskDialogQuestion[],
+			dialogOptions?: ExtensionUIDialogOptions,
+		): Promise<ExtensionAskDialogResult | undefined> {
+			return requestRpcDialog(
+				this.pendingRequests,
+				this.output,
+				dialogOptions,
+				undefined,
+				{ method: "ask", questions, timeout: dialogOptions?.timeout },
+				response => {
+					if ("result" in response) return response.result;
+					if ("cancelled" in response && response.timedOut) dialogOptions?.onTimeout?.();
+					return undefined;
+				},
+			);
+		}
+
 		input(
 			title: string,
 			placeholder?: string,
@@ -1134,29 +1436,32 @@ export async function runRpcMode(
 		}
 
 		notify(message: string, type?: "info" | "warning" | "error"): void {
-			// Fire and forget - no response needed
-			this.output({
+			emitRpcPassiveInteraction(this.pendingRequests, this.output, "notification", {
 				type: "extension_ui_request",
 				id: Snowflake.next() as string,
 				method: "notify",
 				message,
 				notifyType: type,
-			} as RpcExtensionUIRequest);
+			});
 		}
 
 		setStatus(key: string, text: string | undefined): void {
-			// Fire and forget - no response needed
-			this.output({
+			emitRpcPassiveInteraction(this.pendingRequests, this.output, "status", {
 				type: "extension_ui_request",
 				id: Snowflake.next() as string,
 				method: "setStatus",
 				statusKey: key,
 				statusText: text,
-			} as RpcExtensionUIRequest);
+			});
 		}
 
-		setWorkingMessage(_message?: string): void {
-			// Not supported in RPC mode
+		setWorkingMessage(message?: string): void {
+			emitRpcPassiveInteraction(this.pendingRequests, this.output, "progress", {
+				type: "extension_ui_request",
+				id: Snowflake.next() as string,
+				method: "progress",
+				message,
+			});
 		}
 
 		setWidget(key: string, content: unknown, options?: ExtensionWidgetOptions): void {
@@ -1285,6 +1590,38 @@ export async function runRpcMode(
 		},
 		uiContext: rpcUiContext,
 	});
+	const semanticRendering = new RpcSemanticRenderingManager(output);
+	const provenanceSource: RpcProvenanceSource = {
+		get model() {
+			return session.model;
+		},
+		get serviceTierByFamily() {
+			return session.serviceTierByFamily;
+		},
+		get messages() {
+			return session.messages;
+		},
+		getActiveRole: () => session.sessionManager.getLastModelChangeRole() ?? "default",
+		getRecoverySnapshot: () => session.getRecoverySnapshot(),
+		fetchUsageReports: signal => session.fetchUsageReports(signal),
+		subscribe: listener => session.subscribe(listener),
+	};
+	const provenance = new RpcProvenanceManager(provenanceSource, frame => output(frame));
+	const collaboration = new RpcCollaborationManager({
+		factory: new RpcCollaborationTransportFactoryImpl(session, eventBus),
+		media: new RpcCollaborationSessionMediaStore(
+			() => session.sessionManager.getArtifactManager() ?? undefined,
+			() => session.sessionId,
+		),
+		getSessionId: () => session.sessionId,
+		output: frame => output(frame),
+	});
+	const semanticToolRenderIds = new Map<string, string>();
+	const semanticRenderingEnabled = (): boolean =>
+		negotiatedSemanticContent.size > 0 &&
+		semanticNegotiation?.result.capabilities.some(
+			capability => capability.id === "semantic-rendering" && capability.supported,
+		) === true;
 
 	// Output all agent events as JSON
 	let lastQueueFrame = "";
@@ -1298,6 +1635,29 @@ export async function runRpcMode(
 	session.subscribe(event => {
 		if (event.type === "message_start") operationOwnership.observeMessageStart(event.message);
 		output(event);
+		if (
+			semanticRenderingEnabled() &&
+			(event.type === "tool_execution_start" ||
+				event.type === "tool_execution_update" ||
+				event.type === "tool_execution_end")
+		) {
+			try {
+				const projection = projectRpcToolSemantic(event, session.extensionRunner?.getAllRegisteredTools() ?? []);
+				const adapted = adaptSemanticRenderResultToHost(projection, negotiatedSemanticContent);
+				const registration = { source: projection.source, ...adapted };
+				const existingRenderId = semanticToolRenderIds.get(event.toolCallId);
+				if (!existingRenderId || !semanticRendering.update(existingRenderId, registration)) {
+					semanticToolRenderIds.set(event.toolCallId, semanticRendering.register(registration));
+				}
+			} catch (cause) {
+				output({
+					type: "extension_error",
+					extensionPath: "semantic-rendering",
+					event: event.type,
+					error: cause instanceof Error ? cause.message : String(cause),
+				});
+			}
+		}
 		emitQueueUpdate();
 	});
 	session.planMode.onStateChange(state => {
@@ -1323,6 +1683,115 @@ export async function runRpcMode(
 
 	const getAvailableCommands = async () => buildAvailableSlashCommands(session);
 	const getAdvisorState = () => session.getAdvisorStateOverview();
+	const getRpcSessionState = async (): Promise<RpcSessionState> => ({
+		mode: session.planMode.mode,
+		plan: await session.planMode.project(),
+		model: session.model,
+		thinkingLevel: session.thinkingLevel,
+		isStreaming: session.isStreaming,
+		activityPhase: session.activityPhase,
+		isCompacting: session.isCompacting,
+		steeringMode: session.steeringMode,
+		followUpMode: session.followUpMode,
+		interruptMode: session.interruptMode,
+		sessionFile: session.sessionFile,
+		sessionId: session.sessionId,
+		sessionName: session.sessionName,
+		autoCompactionEnabled: session.autoCompactionEnabled,
+		queuedMessageCount: session.queuedMessageCount,
+		todoPhases: session.getTodoPhases(),
+		fastModeEnabled: session.isFastModeEnabled(),
+		tokensPerSecond: calculateTokensPerSecond(session.messages, session.isStreaming),
+		fastModeActive: session.isFastModeActive(),
+		messageCount: session.messages.length,
+		systemPrompt: session.systemPrompt,
+		dumpTools: session.agent.state.tools.map(tool => ({
+			name: tool.name,
+			description: tool.description,
+			parameters: isZodSchema(tool.parameters) ? zodToWireSchema(tool.parameters) : tool.parameters,
+			examples: tool.examples,
+		})),
+		contextUsage: session.getContextUsage(),
+		advisor: getAdvisorState(),
+	});
+	let executeRpcCommand: (command: RpcCommand) => Promise<RpcResponse>;
+	let rpcSessionHost: RpcSessionHostAdapter | undefined;
+	const ensureRpcSessionHost = (): RpcSessionHostAdapter => {
+		if (rpcSessionHost) return rpcSessionHost;
+		const authority = new AgentSessionAuthority(session, {
+			snapshotState: async () => {
+				const operations = operationManager.snapshot();
+				return {
+					session: await getRpcSessionState(),
+					sessionTree: {
+						sessionId: session.sessionId,
+						leafId: session.sessionManager.getLeafId(),
+						roots: projectSessionTree(session.sessionManager.getTree(), session.sessionManager.getLeafId()),
+					},
+					execution: await projectRpcSessionExecution(session, {
+						applicationApiVersion: RPC_APPLICATION_API_VERSION,
+						operations,
+						pendingInteractions: pendingExtensionRequests.snapshot(),
+					}),
+					operations,
+					agents: agentControl.list({ includeAdvisors: true }),
+					subagents: subagentRegistry?.getSubagents() ?? [],
+					jobs: jobProjection?.list() ?? null,
+					resources: resourceLifecycle?.snapshot() ?? null,
+					provenance: provenance.snapshot(),
+				} as unknown as SessionJsonValue;
+			},
+			invoke: createRpcSessionCommandInvoker({
+				execute: command => executeRpcCommand(command),
+				waitForSettlement: operationId => operationManager.waitForSettlement(operationId),
+				cancelOperation: operationId => {
+					void executeRpcCommand({
+						id: Snowflake.next() as string,
+						type: "cancel_operation",
+						operationId,
+					});
+				},
+			}),
+			settle: async () => {
+				session.disableLoop();
+				const loopSettled = loopScheduler.dispose();
+				const protectedOperations = new Set(providerAuthController.close());
+				pendingExtensionRequests.rejectAll("RPC session is shutting down");
+				hostToolBridge.close("RPC session is shutting down");
+				hostUriBridge.clear("RPC session is shutting down");
+				for (const controller of pendingRpcBashConfirmations) controller.abort();
+				session.abortBash();
+				const evalOperationIds = Array.from(rpcEvalOperationIds);
+				operationManager.cancelAll("shutdown", "session_shutdown", protectedOperations);
+				for (const operationId of evalOperationIds) session.abortEvalExecution(operationId);
+				if (session.isStreaming) await session.abort({ reason: "RPC session shutdown" });
+				await Promise.allSettled([...rpcEvalTasks, ...rpcBashExecutions]);
+				await Promise.all(
+					Array.from(protectedOperations, operationId => operationManager.waitForSettlement(operationId)),
+				);
+				await session.waitForIdle();
+				await loopSettled;
+				await session.planMode.abandonPendingApproval();
+				semanticRendering.dispose();
+				resourceLifecycle?.dispose();
+				provenance.dispose();
+				await collaboration.dispose();
+				unsubscribeAgentRegistry();
+				unsubscribeJobUpdates?.();
+				subagentRegistry?.dispose();
+				await session.dispose();
+				return { state: "settled" };
+			},
+		});
+		const limits = getSessionHostManifest().limits;
+		rpcSessionHost = new RpcSessionHostAdapter(
+			new SessionHost(authority, { maxBufferedObservations: limits.maxPendingObservations }),
+			{
+				output: frame => output(frame),
+			},
+		);
+		return rpcSessionHost;
+	};
 	const emitConfigUpdate = () => {
 		output({
 			type: "config_update",
@@ -1337,9 +1806,20 @@ export async function runRpcMode(
 		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
 		resetCapabilities();
 		await session.refreshSkills();
+		if (mcpManager) {
+			await reloadMcpResources({
+				session,
+				manager: mcpManager,
+				enableProjectConfig: session.settings.get("mcp.enableProjectConfig") ?? true,
+				browserEnabled: session.settings.get("browser.enabled") ?? false,
+			});
+		}
 		session.setSlashCommands(await loadSlashCommands({ cwd }));
 		await emitAvailableCommandsUpdate();
 	};
+	const resourceLifecycle = mcpManager
+		? new RpcResourceLifecycleManager(mcpManager, frame => output(frame))
+		: undefined;
 	const emitAvailableCommandsUpdate = async () => {
 		output({ type: "available_commands_update", commands: await getAvailableCommands() });
 	};
@@ -1386,30 +1866,74 @@ export async function runRpcMode(
 				await session.abort({ reason: USER_INTERRUPT_LABEL });
 				await session.waitForIdle();
 			}
+			await rpcSessionHost?.disconnect();
+			rpcSessionHost = undefined;
 		} catch (cause) {
 			sessionTransitionInFlight = false;
 			throw cause;
 		}
 	};
-	const completeSessionTransition = async (
+	const completeSessionTransition = async <T extends { cancelled: boolean }>(
 		id: string | undefined,
 		command: RpcCommand["type"],
-		data: { cancelled: boolean } & object,
+		data: T,
 	): Promise<RpcResponse> => {
 		if (!data.cancelled) await emitAvailableCommandsUpdate();
 		return success(id, command, data);
 	};
 	let toolActivationInFlight = false;
 	const confirmAgentMutation = (
-		command: "cancel_agent" | "release_agent",
+		command: "start_agent" | "cancel_agent" | "release_agent",
 		agentId: string,
 		tombstone = false,
 	): Promise<boolean> =>
 		requestRpcAgentMutationConfirmation(pendingExtensionRequests, output, command, agentId, tombstone);
+	const hasNegotiatedCapability = (capabilityId: string): boolean =>
+		semanticNegotiation?.result.capabilities.some(
+			capability => capability.id === capabilityId && capability.supported,
+		) === true;
+	const collaborationGuestCommands = new Set<RpcCommand["type"]>([
+		"get_capabilities",
+		"initialize",
+		"session_shutdown",
+		"collaboration_get",
+		"collaboration_leave",
+		"collaboration_acknowledge",
+		"collaboration_read_media",
+		"prompt",
+		"steer",
+		"follow_up",
+		"abort",
+		"abort_and_prompt",
+	]);
+
+	const collaborationFailure = (id: string | undefined, command: RpcCommand["type"], cause: unknown): RpcResponse => {
+		if (cause instanceof RpcCollaborationAuthorityError || cause instanceof RpcCollaborationStateError) {
+			return error(id, command, cause.message, cause.code);
+		}
+		if (
+			cause instanceof ArtifactNotFoundError ||
+			cause instanceof ArtifactRangeError ||
+			cause instanceof ArtifactHashMismatchError
+		) {
+			return error(id, command, cause.message, cause.code);
+		}
+		return error(id, command, "Collaboration operation failed", "collaboration_operation_failed");
+	};
 
 	// Handle a single command
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
 		const id = command.id;
+		await collaboration.assertSessionIsolation();
+		const collaborationSnapshot = collaboration.snapshot();
+		if (collaborationSnapshot.role === "guest" && !collaborationGuestCommands.has(command.type)) {
+			return error(
+				id,
+				command.type,
+				"Local session mutation is unavailable while joined to a collaboration replica",
+				"collaboration_authority_denied",
+			);
+		}
 
 		switch (command.type) {
 			case "negotiate_protocol": {
@@ -1421,11 +1945,463 @@ export async function runRpcMode(
 			case "get_capabilities":
 				return success(id, "get_capabilities", getCapabilityManifest());
 
+			case "initialize": {
+				const requestKey = JSON.stringify({
+					profile: command.profile,
+					framingVersion: command.framingVersion,
+					hostCapabilities: command.hostCapabilities,
+					requestedCapabilities: command.requestedCapabilities,
+				});
+				if (semanticNegotiation) {
+					if (semanticNegotiation.requestKey !== requestKey) {
+						return error(
+							id,
+							"initialize",
+							"RPC v3 semantic profile is already initialized with different capabilities",
+							"invalid_request_state",
+						);
+					}
+					return success(id, "initialize", semanticNegotiation.result);
+				}
+				if (command.framingVersion !== selectedFramingVersion) {
+					return success(id, "initialize", {
+						ok: false,
+						code: "framing_not_selected",
+						message: `RPC framing version ${command.framingVersion} must be selected before semantic initialization`,
+						supportedProfiles: [SESSION_SEMANTIC_PROFILE],
+					});
+				}
+				const sessionHostManifest = getSessionHostManifest();
+				const result = negotiateSessionHost(sessionHostManifest, {
+					profile: command.profile,
+					framingVersion: command.framingVersion,
+					hostCapabilities: command.hostCapabilities,
+					requestedCapabilities: command.requestedCapabilities,
+				});
+				if (result.ok) {
+					semanticNegotiation = { requestKey, result };
+					negotiatedSemanticContent = new Set(command.hostCapabilities.semanticContent);
+					pendingExtensionRequests.configureHostCapabilities(command.hostCapabilities.interactions);
+				}
+				return success(id, "initialize", result);
+			}
+
+			case "semantic_action": {
+				if (!hasNegotiatedCapability("semantic-rendering")) {
+					return error(
+						id,
+						"semantic_action",
+						"RPC v3 semantic rendering capability was not negotiated",
+						"capability_not_negotiated",
+					);
+				}
+				const settled = await semanticRendering.invoke(
+					command.renderId,
+					command.actionId,
+					command.input,
+					command.id,
+				);
+				return success(id, "semantic_action", settled);
+			}
+
+			case "semantic_cancel": {
+				if (!hasNegotiatedCapability("semantic-rendering")) {
+					return error(
+						id,
+						"semantic_cancel",
+						"RPC v3 semantic rendering capability was not negotiated",
+						"capability_not_negotiated",
+					);
+				}
+				return success(id, "semantic_cancel", {
+					cancelled: semanticRendering.cancel(command.renderId, command.actionId),
+				});
+			}
+
+			case "artifact_describe": {
+				if (!hasNegotiatedCapability("artifact.read")) {
+					return error(
+						id,
+						"artifact_describe",
+						"RPC v3 artifact capability was not negotiated",
+						"capability_not_negotiated",
+					);
+				}
+				const manager = session.sessionManager.getArtifactManager();
+				if (!manager)
+					return error(id, "artifact_describe", "Artifact storage is unavailable", "artifact_unavailable");
+				try {
+					return success(id, "artifact_describe", await manager.describe(command.artifactId));
+				} catch (cause) {
+					if (cause instanceof ArtifactNotFoundError) {
+						return error(id, "artifact_describe", cause.message, cause.code);
+					}
+					throw cause;
+				}
+			}
+
+			case "artifact_read": {
+				if (!hasNegotiatedCapability("artifact.read")) {
+					return error(
+						id,
+						"artifact_read",
+						"RPC v3 artifact capability was not negotiated",
+						"capability_not_negotiated",
+					);
+				}
+				const manager = session.sessionManager.getArtifactManager();
+				if (!manager) return error(id, "artifact_read", "Artifact storage is unavailable", "artifact_unavailable");
+				try {
+					return success(
+						id,
+						"artifact_read",
+						await manager.readRange(command.artifactId, {
+							offset: command.offset ?? 0,
+							length: command.length ?? MAX_ARTIFACT_RANGE_BYTES,
+						}),
+					);
+				} catch (cause) {
+					if (cause instanceof ArtifactNotFoundError || cause instanceof ArtifactRangeError) {
+						return error(id, "artifact_read", cause.message, cause.code);
+					}
+					throw cause;
+				}
+			}
+
+			case "artifact_export": {
+				if (!hasNegotiatedCapability("artifact.read")) {
+					return error(
+						id,
+						"artifact_export",
+						"RPC v3 artifact capability was not negotiated",
+						"capability_not_negotiated",
+					);
+				}
+				const manager = session.sessionManager.getArtifactManager();
+				if (!manager)
+					return error(id, "artifact_export", "Artifact storage is unavailable", "artifact_unavailable");
+				try {
+					const destination = path.resolve(session.sessionManager.getCwd(), command.destination);
+					return success(
+						id,
+						"artifact_export",
+						await manager.exportTo(command.artifactId, destination, command.expectedSha256),
+					);
+				} catch (cause) {
+					if (cause instanceof ArtifactNotFoundError || cause instanceof ArtifactHashMismatchError) {
+						return error(id, "artifact_export", cause.message, cause.code);
+					}
+					throw cause;
+				}
+			}
+			case "resource_list": {
+				if (!hasNegotiatedCapability("resource.lifecycle")) {
+					return error(
+						id,
+						"resource_list",
+						"RPC v3 resource lifecycle capability was not negotiated",
+						"capability_not_negotiated",
+					);
+				}
+				if (!resourceLifecycle) {
+					return error(id, "resource_list", "Resource management is unavailable", "resource_unavailable");
+				}
+				return success(id, "resource_list", resourceLifecycle.snapshot());
+			}
+
+			case "resource_refresh": {
+				if (!hasNegotiatedCapability("resource.lifecycle")) {
+					return error(
+						id,
+						"resource_refresh",
+						"RPC v3 resource lifecycle capability was not negotiated",
+						"capability_not_negotiated",
+					);
+				}
+				if (!resourceLifecycle) {
+					return error(id, "resource_refresh", "Resource management is unavailable", "resource_unavailable");
+				}
+				try {
+					return success(id, "resource_refresh", resourceLifecycle.startRefresh(command.serverId, id));
+				} catch (cause) {
+					if (cause instanceof RpcResourceNotFoundError) {
+						return error(id, "resource_refresh", cause.message, cause.code);
+					}
+					throw cause;
+				}
+			}
+
+			case "resource_reload": {
+				if (!hasNegotiatedCapability("resource.lifecycle")) {
+					return error(
+						id,
+						"resource_reload",
+						"RPC v3 resource lifecycle capability was not negotiated",
+						"capability_not_negotiated",
+					);
+				}
+				if (!resourceLifecycle) {
+					return error(id, "resource_reload", "Resource management is unavailable", "resource_unavailable");
+				}
+				return success(id, "resource_reload", resourceLifecycle.startReload(reloadPluginState, id));
+			}
+
+			case "resource_cancel": {
+				if (!hasNegotiatedCapability("resource.lifecycle")) {
+					return error(
+						id,
+						"resource_cancel",
+						"RPC v3 resource lifecycle capability was not negotiated",
+						"capability_not_negotiated",
+					);
+				}
+				if (!resourceLifecycle) {
+					return error(id, "resource_cancel", "Resource management is unavailable", "resource_unavailable");
+				}
+				return success(id, "resource_cancel", { cancelled: resourceLifecycle.cancel(command.operationId) });
+			}
+
+			case "resource_dispose": {
+				if (!hasNegotiatedCapability("resource.lifecycle")) {
+					return error(
+						id,
+						"resource_dispose",
+						"RPC v3 resource lifecycle capability was not negotiated",
+						"capability_not_negotiated",
+					);
+				}
+				if (!resourceLifecycle) {
+					return error(id, "resource_dispose", "Resource management is unavailable", "resource_unavailable");
+				}
+				try {
+					return success(id, "resource_dispose", await resourceLifecycle.disposeServer(command.serverId, id));
+				} catch (cause) {
+					if (cause instanceof RpcResourceNotFoundError) {
+						return error(id, "resource_dispose", cause.message, cause.code);
+					}
+					throw cause;
+				}
+			}
+			case "provenance_get": {
+				if (!hasNegotiatedCapability("runtime-provenance")) {
+					return error(
+						id,
+						"provenance_get",
+						"RPC v3 runtime provenance capability was not negotiated",
+						"capability_not_negotiated",
+					);
+				}
+				return success(
+					id,
+					"provenance_get",
+					command.refreshUsage === true ? await provenance.refresh() : provenance.snapshot(),
+				);
+			}
+			case "collaboration_get":
+				return success(id, "collaboration_get", collaboration.snapshot());
+			case "collaboration_host": {
+				if (!hasNegotiatedCapability("collaboration")) {
+					return error(
+						id,
+						"collaboration_host",
+						"RPC v3 collaboration capability was not negotiated",
+						"capability_not_negotiated",
+					);
+				}
+				try {
+					return success(
+						id,
+						"collaboration_host",
+						await collaboration.host({ relayUrl: command.relayUrl, webUrl: command.webUrl }),
+					);
+				} catch (cause) {
+					return collaborationFailure(id, "collaboration_host", cause);
+				}
+			}
+			case "collaboration_join": {
+				if (!hasNegotiatedCapability("collaboration")) {
+					return error(
+						id,
+						"collaboration_join",
+						"RPC v3 collaboration capability was not negotiated",
+						"capability_not_negotiated",
+					);
+				}
+				try {
+					return success(
+						id,
+						"collaboration_join",
+						await collaboration.join({ link: command.link, displayName: command.displayName }),
+					);
+				} catch (cause) {
+					return collaborationFailure(id, "collaboration_join", cause);
+				}
+			}
+			case "collaboration_leave":
+				try {
+					return success(id, "collaboration_leave", await collaboration.leave(command.reason));
+				} catch (cause) {
+					return collaborationFailure(id, "collaboration_leave", cause);
+				}
+			case "collaboration_revoke":
+				try {
+					return success(id, "collaboration_revoke", await collaboration.revoke(command.participantId));
+				} catch (cause) {
+					return collaborationFailure(id, "collaboration_revoke", cause);
+				}
+			case "collaboration_rotate":
+				try {
+					return success(id, "collaboration_rotate", await collaboration.rotate());
+				} catch (cause) {
+					return collaborationFailure(id, "collaboration_rotate", cause);
+				}
+			case "collaboration_acknowledge":
+				try {
+					return success(
+						id,
+						"collaboration_acknowledge",
+						collaboration.acknowledge({ generation: command.generation, sequence: command.sequence }),
+					);
+				} catch (cause) {
+					return collaborationFailure(id, "collaboration_acknowledge", cause);
+				}
+			case "collaboration_read_media":
+				try {
+					return success(
+						id,
+						"collaboration_read_media",
+						await collaboration.readMedia(command.mediaId, command.offset, command.length),
+					);
+				} catch (cause) {
+					return collaborationFailure(id, "collaboration_read_media", cause);
+				}
+			case "session_open": {
+				if (!hasNegotiatedCapability("session.observe")) {
+					return error(
+						id,
+						"session_open",
+						"RPC v3 session observation capability was not negotiated",
+						"capability_not_negotiated",
+					);
+				}
+				try {
+					const opened = await ensureRpcSessionHost().open({
+						...(command.after === undefined ? {} : { after: command.after }),
+						...(command.afterCursor === undefined ? {} : { afterCursor: command.afterCursor }),
+						...(command.snapshot === undefined ? {} : { snapshot: command.snapshot }),
+					});
+					return success(id, "session_open", opened);
+				} catch (cause) {
+					if (cause instanceof SessionCursorError) {
+						return error(id, "session_open", cause.message, cause.code);
+					}
+					throw cause;
+				}
+			}
+
+			case "session_ack": {
+				if (!hasNegotiatedCapability("session.observe")) {
+					return error(
+						id,
+						"session_ack",
+						"RPC v3 session observation capability was not negotiated",
+						"capability_not_negotiated",
+					);
+				}
+				try {
+					await ensureRpcSessionHost().acknowledge(command.subscriptionId, command.sequence);
+					return success(id, "session_ack");
+				} catch (cause) {
+					if (cause instanceof RpcSessionSubscriptionNotFoundError) {
+						return error(id, "session_ack", cause.message, cause.code);
+					}
+					return error(
+						id,
+						"session_ack",
+						cause instanceof Error ? cause.message : String(cause),
+						"invalid_acknowledgement",
+					);
+				}
+			}
+
+			case "session_unsubscribe": {
+				if (!hasNegotiatedCapability("session.observe")) {
+					return error(
+						id,
+						"session_unsubscribe",
+						"RPC v3 session observation capability was not negotiated",
+						"capability_not_negotiated",
+					);
+				}
+				try {
+					await ensureRpcSessionHost().unsubscribe(command.subscriptionId);
+					return success(id, "session_unsubscribe");
+				} catch (cause) {
+					if (cause instanceof RpcSessionSubscriptionNotFoundError) {
+						return error(id, "session_unsubscribe", cause.message, cause.code);
+					}
+					throw cause;
+				}
+			}
+
+			case "session_invoke": {
+				const requiredCapability = getRpcSessionCommandCapability(command.command.kind);
+				if (!hasNegotiatedCapability(requiredCapability)) {
+					return error(
+						id,
+						"session_invoke",
+						`RPC v3 ${requiredCapability} capability was not negotiated`,
+						"capability_not_negotiated",
+					);
+				}
+				const outcome = await ensureRpcSessionHost().invoke(command.command, { requestId: command.id });
+				return success(id, "session_invoke", outcome);
+			}
+
+			case "session_shutdown": {
+				if (!hasNegotiatedCapability("session.shutdown")) {
+					return error(
+						id,
+						"session_shutdown",
+						"RPC v3 session shutdown capability was not negotiated",
+						"capability_not_negotiated",
+					);
+				}
+				shutdownState.requested = true;
+				return success(id, "session_shutdown", await ensureRpcSessionHost().shutdown());
+			}
+
 			// =================================================================
 			// Prompting
 			// =================================================================
 
 			case "prompt": {
+				if (collaborationSnapshot.role === "guest") {
+					if (collaborationSnapshot.authority !== "full") {
+						return error(
+							id,
+							"prompt",
+							"Collaboration guest access is read-only",
+							"collaboration_authority_denied",
+						);
+					}
+					const operation = operationManager.start(id, "prompt");
+					setImmediate(() => {
+						if (!operationManager.begin(operation)) return;
+						try {
+							collaboration.sendPrompt(command.message, command.images);
+							output({ type: "prompt_result", id, operationId: operation.operationId, agentInvoked: true });
+							operationManager.complete(operation, true);
+						} catch (cause) {
+							operationManager.fail(
+								operation,
+								cause instanceof Error ? cause : new Error(String(cause)),
+								"collaboration_prompt_failed",
+							);
+						}
+					});
+					return success(id, "prompt", { operationId: operation.operationId, accepted: true });
+				}
 				if (sessionTransitionInFlight) {
 					return error(id, "prompt", "Session transition is in progress", "session_busy");
 				}
@@ -1480,7 +2456,7 @@ export async function runRpcMode(
 								watchAndReportLocalOnlyPromptResult({
 									id,
 									startPrompt: () =>
-										session.prompt(builtinResult.prompt, {
+										startRpcPrompt(builtinResult.prompt, {
 											images: command.images,
 											messageTag: operation.operationId,
 										}),
@@ -1503,7 +2479,7 @@ export async function runRpcMode(
 						watchAndReportLocalOnlyPromptResult({
 							id,
 							startPrompt: () =>
-								session.prompt(command.message, {
+								startRpcPrompt(command.message, {
 									images: command.images,
 									streamingBehavior: command.streamingBehavior,
 									messageTag: operation.operationId,
@@ -1529,6 +2505,14 @@ export async function runRpcMode(
 			}
 
 			case "steer": {
+				if (collaborationSnapshot.role === "guest") {
+					try {
+						collaboration.sendPrompt(command.message, command.images);
+						return success(id, "steer");
+					} catch (cause) {
+						return collaborationFailure(id, "steer", cause);
+					}
+				}
 				if (sessionTransitionInFlight) {
 					return error(id, "steer", "Session transition is in progress", "session_busy");
 				}
@@ -1541,6 +2525,14 @@ export async function runRpcMode(
 			}
 
 			case "follow_up": {
+				if (collaborationSnapshot.role === "guest") {
+					try {
+						collaboration.sendPrompt(command.message, command.images);
+						return success(id, "follow_up");
+					} catch (cause) {
+						return collaborationFailure(id, "follow_up", cause);
+					}
+				}
 				if (sessionTransitionInFlight) {
 					return error(id, "follow_up", "Session transition is in progress", "session_busy");
 				}
@@ -1553,6 +2545,14 @@ export async function runRpcMode(
 			}
 
 			case "abort": {
+				if (collaborationSnapshot.role === "guest") {
+					try {
+						collaboration.sendAbort();
+						return success(id, "abort");
+					} catch (cause) {
+						return collaborationFailure(id, "abort", cause);
+					}
+				}
 				const protectedOperations = protectedCommitOperationIds();
 				for (const operationId of providerAuthController.cancelAll("user", "cancelled_by_client")) {
 					protectedOperations.add(operationId);
@@ -1564,6 +2564,33 @@ export async function runRpcMode(
 			}
 
 			case "abort_and_prompt": {
+				if (collaborationSnapshot.role === "guest") {
+					if (collaborationSnapshot.authority !== "full") {
+						return error(
+							id,
+							"abort_and_prompt",
+							"Collaboration guest access is read-only",
+							"collaboration_authority_denied",
+						);
+					}
+					const operation = operationManager.start(id, "abort_and_prompt");
+					setImmediate(() => {
+						if (!operationManager.begin(operation)) return;
+						try {
+							collaboration.sendAbort();
+							collaboration.sendPrompt(command.message, command.images);
+							output({ type: "prompt_result", id, operationId: operation.operationId, agentInvoked: true });
+							operationManager.complete(operation, true);
+						} catch (cause) {
+							operationManager.fail(
+								operation,
+								cause instanceof Error ? cause : new Error(String(cause)),
+								"collaboration_prompt_failed",
+							);
+						}
+					});
+					return success(id, "abort_and_prompt", { operationId: operation.operationId, accepted: true });
+				}
 				if (sessionTransitionInFlight) {
 					return error(id, "abort_and_prompt", "Session transition is in progress", "session_busy");
 				}
@@ -1588,7 +2615,7 @@ export async function runRpcMode(
 						watchAndReportLocalOnlyPromptResult({
 							id,
 							startPrompt: () =>
-								session.prompt(command.message, {
+								startRpcPrompt(command.message, {
 									images: command.images,
 									messageTag: operation.operationId,
 								}),
@@ -2027,40 +3054,8 @@ export async function runRpcMode(
 				}
 			}
 
-			case "get_state": {
-				const state: RpcSessionState = {
-					mode: session.planMode.mode,
-					plan: await session.planMode.project(),
-					model: session.model,
-					thinkingLevel: session.thinkingLevel,
-					isStreaming: session.isStreaming,
-					activityPhase: session.activityPhase,
-					isCompacting: session.isCompacting,
-					steeringMode: session.steeringMode,
-					followUpMode: session.followUpMode,
-					interruptMode: session.interruptMode,
-					sessionFile: session.sessionFile,
-					sessionId: session.sessionId,
-					sessionName: session.sessionName,
-					autoCompactionEnabled: session.autoCompactionEnabled,
-					queuedMessageCount: session.queuedMessageCount,
-					todoPhases: session.getTodoPhases(),
-					fastModeEnabled: session.isFastModeEnabled(),
-					tokensPerSecond: calculateTokensPerSecond(session.messages, session.isStreaming),
-					fastModeActive: session.isFastModeActive(),
-					messageCount: session.messages.length,
-					systemPrompt: session.systemPrompt,
-					dumpTools: session.agent.state.tools.map(tool => ({
-						name: tool.name,
-						description: tool.description,
-						parameters: toolWireSchema(tool),
-						examples: tool.examples,
-					})),
-					contextUsage: session.getContextUsage(),
-					advisor: getAdvisorState(),
-				};
-				return success(id, "get_state", state);
-			}
+			case "get_state":
+				return success(id, "get_state", await getRpcSessionState());
 
 			case "get_advisor_state":
 				return success(id, "get_advisor_state", getAdvisorState());
@@ -2087,9 +3082,38 @@ export async function runRpcMode(
 				return success(id, "get_available_commands", { commands: await getAvailableCommands() });
 			}
 
-			case "set_todos": {
-				session.setTodoPhases(command.phases);
-				return success(id, "set_todos", { todoPhases: session.getTodoPhases() });
+			case "set_todos":
+				return success(id, "set_todos", { todoPhases: setRpcTodoPhases(session, command.phases) });
+
+			case "todo_apply":
+				try {
+					return success(id, "todo_apply", {
+						todoPhases: applyRpcTodoOperation(session, command.operation),
+					});
+				} catch (cause) {
+					if (cause instanceof RpcTodoOperationError) {
+						return error(id, "todo_apply", cause.message, "invalid_request");
+					}
+					throw cause;
+				}
+
+			case "goal_control":
+				return success(id, "goal_control", await controlRpcGoal(session, command));
+			case "checkpoint_control":
+				return success(id, "checkpoint_control", await controlRpcCheckpoint(session, command));
+			case "loop_control": {
+				const result = controlRpcLoop(session, command);
+				if (command.op !== "get") {
+					output({
+						type: "loop_state_update",
+						state: result.state,
+						...(id === undefined ? {} : { causationId: id }),
+					});
+				}
+				if ((command.op === "enable" || command.op === "resume") && result.state.phase === "running") {
+					loopScheduler.request(id);
+				}
+				return success(id, "loop_control", result);
 			}
 
 			case "set_host_tools": {
@@ -2147,6 +3171,48 @@ export async function runRpcMode(
 			}
 			case "get_queue":
 				return success(id, "get_queue", session.getQueueSnapshot());
+
+			case "queue_insert": {
+				try {
+					const result = session.queueService.insert(command.lane, command.text, command.toIndex);
+					emitQueueUpdate();
+					return success(id, "queue_insert", { entry: result.entry, queue: result.snapshot });
+				} catch (cause) {
+					if (cause instanceof SessionQueueInvalidPositionError) {
+						return error(id, "queue_insert", cause.message, "invalid_queue_position");
+					}
+					throw cause;
+				}
+			}
+
+			case "queue_update": {
+				try {
+					const result = session.queueService.update(command.entryId, command.text);
+					emitQueueUpdate();
+					return success(id, "queue_update", { entry: result.entry, queue: result.snapshot });
+				} catch (cause) {
+					if (cause instanceof SessionQueueEntryNotFoundError) {
+						return error(id, "queue_update", cause.message, "stale_queue_entry");
+					}
+					throw cause;
+				}
+			}
+
+			case "queue_move": {
+				try {
+					const queue = session.queueService.move(command.entryId, command.lane, command.toIndex);
+					emitQueueUpdate();
+					return success(id, "queue_move", queue);
+				} catch (cause) {
+					if (cause instanceof SessionQueueEntryNotFoundError) {
+						return error(id, "queue_move", cause.message, "stale_queue_entry");
+					}
+					if (cause instanceof SessionQueueInvalidPositionError) {
+						return error(id, "queue_move", cause.message, "invalid_queue_position");
+					}
+					throw cause;
+				}
+			}
 
 			case "remove_queued_message": {
 				try {
@@ -2227,6 +3293,52 @@ export async function runRpcMode(
 					return success(id, "get_agent", { agent: agentControl.get(command.agentId) });
 				} catch (cause) {
 					return error(id, "get_agent", cause instanceof Error ? cause.message : String(cause), "not_found");
+				}
+
+			case "start_agent":
+				try {
+					const label = command.name ?? command.agent ?? "task";
+					if (!(await confirmAgentMutation("start_agent", label))) {
+						return error(id, "start_agent", "Agent start was not confirmed.", "confirmation_required");
+					}
+					const taskTool = session.getToolByName("task");
+					if (!taskTool) {
+						return error(id, "start_agent", "Task tool is unavailable.", "agent_start_failed");
+					}
+					const result: AgentToolResult<unknown> = await taskTool.execute(id ?? (Snowflake.next() as string), {
+						task: command.task,
+						...(command.agent === undefined ? {} : { agent: command.agent }),
+						...(command.name === undefined ? {} : { name: command.name }),
+						...(command.context === undefined ? {} : { context: command.context }),
+					});
+					if (result.isError) {
+						const message = result.content.find(part => part.type === "text")?.text ?? "Child agent start failed";
+						return error(id, "start_agent", message, "agent_start_failed");
+					}
+					const details = isRecord(result.details) ? result.details : {};
+					const agentIds = new Set<string>();
+					for (const key of ["progress", "results"] as const) {
+						const entries = details[key];
+						if (!Array.isArray(entries)) continue;
+						for (const entry of entries) {
+							if (isRecord(entry) && typeof entry.id === "string") agentIds.add(entry.id);
+						}
+					}
+					if (agentIds.size === 0) {
+						return error(id, "start_agent", "Task execution did not create a child agent.", "agent_start_failed");
+					}
+					const asyncDetails = isRecord(details.async) ? details.async : undefined;
+					return success(id, "start_agent", {
+						agentIds: [...agentIds],
+						...(typeof asyncDetails?.jobId === "string" ? { jobId: asyncDetails.jobId } : {}),
+					});
+				} catch (cause) {
+					return error(
+						id,
+						"start_agent",
+						cause instanceof Error ? cause.message : String(cause),
+						"agent_start_failed",
+					);
 				}
 
 			case "get_agent_result":
@@ -2310,6 +3422,11 @@ export async function runRpcMode(
 				await session.setModel(model);
 				return success(id, "set_model", model);
 			}
+			case "set_model_role":
+				return success(id, "set_model_role", await setRpcModelRole(session, command.role));
+
+			case "set_service_tier":
+				return success(id, "set_service_tier", setRpcServiceTier(session, command.family, command.tier));
 
 			case "cycle_model": {
 				const result = await session.cycleModel();
@@ -2474,6 +3591,7 @@ export async function runRpcMode(
 								search: command.search,
 							},
 							sessionStorage,
+							{ activeSessionId: session.sessionId },
 						),
 					);
 				} catch (cause) {
@@ -2500,11 +3618,57 @@ export async function runRpcMode(
 								],
 							}
 						: await inspectPersistedSessionWorkspace(resolved.entry.path, resolved.entry.cwd, sessionStorage);
-					const data: RpcSessionInfoResult = { session: resolved.entry, workspace, active };
+					const data: RpcSessionInfoResult = {
+						session: projectSessionCatalogEntry(resolved.session, { activeSessionId: session.sessionId }),
+						workspace,
+						active,
+					};
 					return success(id, "get_session_info", data);
 				} catch (cause) {
 					return catalogError(id, "get_session_info", cause);
 				}
+			}
+			case "get_session_tree": {
+				const leafId = session.sessionManager.getLeafId();
+				return success(id, "get_session_tree", {
+					sessionId: session.sessionId,
+					leafId,
+					roots: projectSessionTree(session.sessionManager.getTree(), leafId),
+				});
+			}
+
+			case "select_session_leaf": {
+				if (session.isStreaming || session.isCompacting) {
+					return error(
+						id,
+						"select_session_leaf",
+						"Session mutation is unavailable while the session is busy",
+						"session_busy",
+					);
+				}
+				await prepareSessionTransition();
+				const selected = await session.navigateTree(command.entryId, {
+					summarize: command.summarize,
+					customInstructions: command.customInstructions,
+				});
+				if (!selected.cancelled) subagentRegistry?.clear();
+				return completeSessionTransition(id, "select_session_leaf", {
+					cancelled: selected.cancelled,
+					leafId: session.sessionManager.getLeafId(),
+				});
+			}
+
+			case "reset_session": {
+				const result = await session.resetSessionContext();
+				if (!result) {
+					return error(
+						id,
+						"reset_session",
+						"Session mutation is unavailable while the session is busy",
+						"session_busy",
+					);
+				}
+				return success(id, "reset_session", result);
 			}
 
 			case "list_workspace_roots": {
@@ -2840,6 +4004,7 @@ export async function runRpcMode(
 			}
 		}
 	};
+	executeRpcCommand = handleCommand;
 
 	// Deferred shutdown (pi.shutdown() from an extension) must not kill the
 	// process while a background-dispatched command still owes the client its
@@ -2848,12 +4013,21 @@ export async function runRpcMode(
 	const shutdownCoordinator = new RpcShutdownCoordinator({
 		isShutdownRequested: () => shutdownState.requested,
 		performShutdown: async () => {
+			await rpcSessionHost?.shutdown();
+			session.disableLoop();
+			semanticRendering.dispose();
+			resourceLifecycle?.dispose();
+			provenance.dispose();
+			await collaboration.dispose();
+			const loopSettled = loopScheduler.dispose();
 			// Route through the idempotent session.dispose() so the browser
 			// reaper (releaseTabsForOwner) and other bounded teardown run before
 			// the process exits. dispose() also emits `session_shutdown`, so we
 			// must NOT emit it separately here or the event fires twice. Skipping
 			// dispose left OMP-owned Chromium alive after RPC shutdown (#5643).
 			await session.dispose();
+			await loopSettled;
+			await stdoutQueue;
 			process.exit(0);
 		},
 	});
@@ -2872,6 +4046,14 @@ export async function runRpcMode(
 
 	const inputDispatcher = new RpcInputDispatcher({
 		deps: dispatchFrameDeps,
+		onShutdownInitiated: () => {
+			pendingExtensionRequests.rejectAll("RPC session is shutting down");
+			hostToolBridge.close("RPC session is shutting down");
+			hostUriBridge.clear("RPC session is shutting down");
+		},
+		beforeShutdown: async () => {
+			await shutdownCoordinator.drain();
+		},
 		afterSerialCommand: async () => {
 			sessionTransitionInFlight = false;
 			shutdownCoordinator.checkShutdownRequested();
@@ -2901,16 +4083,25 @@ export async function runRpcMode(
 
 	// stdin closed — stop accepting side-channel work, drain every command that
 	// already owes a response, then settle any operation still running.
+	session.disableLoop();
+	const loopSettled = loopScheduler.dispose();
 	const protectedOperations = new Set(providerAuthController.close());
 	pendingExtensionRequests.rejectAll("RPC client disconnected before extension UI response completed");
+	semanticRendering.dispose();
+	resourceLifecycle?.dispose();
+	provenance.dispose();
+	await collaboration.dispose();
 	session.abortBash();
+	hostToolBridge.close("RPC client disconnected before host tool execution completed");
+	hostUriBridge.clear("RPC client disconnected before host URI request completed");
 	await inputDispatcher.drain();
 	for (const operationId of protectedCommitOperationIds()) protectedOperations.add(operationId);
 	const rpcEvalsToAbort = Array.from(rpcEvalOperationIds);
 	operationManager.cancelAll("client_disconnected", "client_disconnected", protectedOperations);
 	for (const operationId of rpcEvalsToAbort) session.abortEvalExecution(operationId);
-	hostToolBridge.close("RPC client disconnected before host tool execution completed");
-	hostUriBridge.clear("RPC client disconnected before host URI request completed");
+	if (session.isStreaming) await session.abort({ reason: "RPC client disconnected" });
+	await loopSettled;
+	await rpcSessionHost?.disconnect();
 	await shutdownCoordinator.drain();
 	await session.planMode.abandonPendingApproval();
 	unsubscribeAgentRegistry();
@@ -2923,5 +4114,6 @@ export async function runRpcMode(
 		await session.asyncJobManager.waitForOwnerJobs(rpcJobOwnerId);
 	}
 	await session.dispose({ preserveAsyncJobs: true });
+	await stdoutQueue;
 	process.exit(0);
 }

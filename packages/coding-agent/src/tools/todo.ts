@@ -89,8 +89,12 @@ const todoSchema = type({
 
 type TodoParams = TodoSchema;
 type TodoSchema = typeof todoSchema.infer;
-/** A single todo op entry (the params object itself). */
-type TodoOpEntryValue = TodoParams;
+/** A validated semantic todo operation accepted by non-tool session hosts. */
+export type TodoOperationInput = TodoParams;
+/** Whether an unknown value is a structurally valid semantic todo operation. */
+export function isTodoOperationInput(value: unknown): value is TodoOperationInput {
+	return !(todoSchema(value) instanceof type.errors);
+}
 
 // =============================================================================
 // State helpers
@@ -346,7 +350,7 @@ function resolvePhaseOrError(phases: TodoPhase[], name: string | undefined, erro
 	return phase;
 }
 
-function getTaskTargets(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string[]): TodoItem[] {
+function getTaskTargets(phases: TodoPhase[], entry: TodoOperationInput, errors: string[]): TodoItem[] {
 	if (entry.task) {
 		const hit = resolveTaskOrError(phases, entry.task, errors);
 		return hit ? [hit.task] : [];
@@ -361,7 +365,7 @@ function getTaskTargets(phases: TodoPhase[], entry: TodoOpEntryValue, errors: st
 /** Phase name for `init` given a flat `items` list with no explicit `phase`. */
 const DEFAULT_INIT_PHASE = "Tasks";
 
-function initPhases(entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
+function initPhases(entry: TodoOperationInput, errors: string[]): TodoPhase[] {
 	// Models routinely flatten the single-phase init into `{op:"init", items:[...]}`
 	// (optionally with a bare `phase`) instead of the canonical
 	// `list: [{phase, items}]`. Accept that shape by synthesizing a one-phase list
@@ -397,7 +401,7 @@ function initPhases(entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
 	}));
 }
 
-function appendItems(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
+function appendItems(phases: TodoPhase[], entry: TodoOperationInput, errors: string[]): TodoPhase[] {
 	if (!entry.phase) {
 		errors.push("Missing phase name for append operation");
 		return phases;
@@ -432,7 +436,7 @@ function appendItems(phases: TodoPhase[], entry: TodoOpEntryValue, errors: strin
 	return phases;
 }
 
-function removeTasks(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
+function removeTasks(phases: TodoPhase[], entry: TodoOperationInput, errors: string[]): TodoPhase[] {
 	if (entry.task) {
 		const hit = resolveTaskOrError(phases, entry.task, errors);
 		if (!hit) return phases;
@@ -451,7 +455,7 @@ function removeTasks(phases: TodoPhase[], entry: TodoOpEntryValue, errors: strin
 	return phases;
 }
 
-function applyEntry(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
+function applyEntry(phases: TodoPhase[], entry: TodoOperationInput, errors: string[]): TodoPhase[] {
 	switch (entry.op) {
 		case "init":
 			return initPhases(entry, errors);
@@ -550,7 +554,7 @@ function inferTodoOp(args: Record<string, unknown>, hasExistingPhases: boolean):
  * `{list:[...]}` with no op). Anything else returns the schema error text
  * for a normal model retry.
  */
-function resolveTodoParams(raw: unknown, hasExistingPhases: boolean): TodoOpEntryValue | string {
+function resolveTodoParams(raw: unknown, hasExistingPhases: boolean): TodoOperationInput | string {
 	const direct = todoSchema(raw);
 	if (!(direct instanceof type.errors)) return direct;
 	if (isRecord(raw) && raw.op === undefined) {
@@ -563,7 +567,7 @@ function resolveTodoParams(raw: unknown, hasExistingPhases: boolean): TodoOpEntr
 	return `Invalid todo arguments: ${direct.summary}`;
 }
 
-function applyParams(phases: TodoPhase[], params: TodoOpEntryValue): { phases: TodoPhase[]; errors: string[] } {
+function applyParams(phases: TodoPhase[], params: TodoOperationInput): { phases: TodoPhase[]; errors: string[] } {
 	const errors: string[] = [];
 	const next = applyEntry(phases, params, errors);
 	normalizeInProgressTask(next);
@@ -573,7 +577,7 @@ function applyParams(phases: TodoPhase[], params: TodoOpEntryValue): { phases: T
 /** Apply an array of `todo`-style ops to existing phases. Used by /todo slash command. */
 export function applyOpsToPhases(
 	currentPhases: TodoPhase[],
-	ops: TodoOpEntryValue[],
+	ops: TodoOperationInput[],
 ): { phases: TodoPhase[]; errors: string[] } {
 	const errors: string[] = [];
 	let next = clonePhases(currentPhases);

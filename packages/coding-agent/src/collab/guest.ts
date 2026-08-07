@@ -520,6 +520,12 @@ export class CollabGuestLink {
 				this.#ctx.ui.requestRender();
 				break;
 			}
+			case "authority":
+				this.#readOnly = frame.readOnly;
+				this.#updateStatusSegment();
+				this.#ctx.showStatus(frame.readOnly ? "Collab access changed to read-only" : "Collab write access granted");
+				this.#ctx.ui.requestRender();
+				break;
 			case "bus":
 				// Mirrored host EventBus traffic (task subagent lifecycle/progress)
 				// feeding the observer HUD and Agent Hub progress columns.

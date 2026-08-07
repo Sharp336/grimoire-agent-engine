@@ -6,12 +6,26 @@
  */
 import type { AgentMessage, AgentToolResult, ThinkingLevel, ToolLoadMode } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
-import type { Effort, ImageContent, Model, ToolExample } from "@oh-my-pi/pi-ai";
+import type {
+	Effort,
+	ImageContent,
+	Model,
+	ServiceTier,
+	ServiceTierByFamily,
+	ServiceTierFamily,
+	ToolExample,
+} from "@oh-my-pi/pi-ai";
 import type { AdvisorRuntimeStatus } from "../../advisor";
 import type { SettingTab } from "../../config/settings-schema";
 import type { SettingsSnapshot } from "../../config/settings-snapshot";
 import type { BashResult } from "../../exec/bash-executor";
-import type { ContextUsage } from "../../extensibility/extensions/types";
+import type {
+	ContextUsage,
+	ExtensionAskDialogQuestion,
+	ExtensionAskDialogResult,
+} from "../../extensibility/extensions/types";
+import type { GoalRuntimeSnapshot } from "../../goals/runtime";
+import type { Goal, GoalModeState } from "../../goals/state";
 import type {
 	AgentControlRegistryUpdate,
 	AgentControlReleaseResult,
@@ -19,20 +33,50 @@ import type {
 	AgentControlSendResult,
 	AgentControlSnapshot,
 } from "../../registry/agent-control";
-import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
+import type { AgentSessionEvent } from "../../session/agent-session-events";
+import type { SessionStats } from "../../session/agent-session-types";
+import type { ArtifactDescriptor, ArtifactExportResult, ArtifactRange } from "../../session/artifacts";
 import type {
 	SessionCatalogEntry,
 	SessionCatalogPage,
 	SessionCatalogScope,
+	SessionCatalogTreeNode,
 	SessionWorkspaceRoot,
 } from "../../session/session-catalog";
 import type {
+	SessionAuthoritySettlement,
+	SessionCommand,
+	SessionCommandOutcome,
+	SessionHostClientCapabilities,
+	SessionHostManifest,
+	SessionHostNegotiationResult,
+	SessionJournalCursor,
+	SessionObservation,
+	SessionObservationPosition,
+	SessionSemanticProfileRange,
+	SessionSnapshot,
+} from "../../session/session-host";
+import type { SessionLoopAction, SessionLoopState } from "../../session/session-loop";
+import type { LoopLimitConfig } from "../../session/session-loop-limit";
+import type {
 	SessionQueueClearResult,
+	SessionQueueEntry,
 	SessionQueueLane,
 	SessionQueueSnapshot,
 } from "../../session/session-queue-service";
 import type { ToolInventory } from "../../session/session-tools";
+import type { TodoTrackerSnapshot } from "../../session/todo-tracker";
+import type { TurnRecoverySnapshot } from "../../session/turn-recovery";
+import type { ConfiguredThinkingLevel } from "../../thinking";
+import type { CheckpointState, CompletedRewindState } from "../../tools/checkpoint";
 import type { AgentActivitySnapshot, CancelOutcome, JobSnapshot } from "../../tools/hub/types";
+import type { RpcCollaborationFrame, RpcCollaborationMediaRange, RpcCollaborationSnapshot } from "./rpc-collaboration";
+import type { RpcProvenanceFrame, RpcProvenanceSnapshot } from "./rpc-provenance";
+import type {
+	RpcResourceLifecycleFrame,
+	RpcResourceLifecycleSnapshot,
+	RpcResourceServerSnapshot,
+} from "./rpc-resource-lifecycle";
 
 export type {
 	ToolInventory,
@@ -50,8 +94,18 @@ import type {
 	SubagentLifecyclePayload,
 	SubagentProgressPayload,
 } from "../../task";
-import type { TodoPhase } from "../../tools/todo";
+import type { TodoOperationInput, TodoPhase } from "../../tools/todo";
 import type { RpcMessagesPage } from "./rpc-messages";
+import type {
+	RpcSemanticActionRequestedFrame,
+	RpcSemanticActionSettledFrame,
+	RpcSemanticContentFrame,
+} from "./rpc-semantic-rendering";
+
+export type * from "./rpc-collaboration";
+export type * from "./rpc-provenance";
+export type * from "./rpc-resource-lifecycle";
+export type * from "./rpc-semantic-rendering";
 
 export type RpcJsonValue = string | number | boolean | null | RpcJsonValue[] | { [key: string]: RpcJsonValue };
 
@@ -68,6 +122,56 @@ export type RpcCommand =
 	// Protocol
 	| { id?: string; type: "negotiate_protocol"; protocolVersion: number }
 	| { id?: string; type: "get_capabilities" }
+	| {
+			id?: string;
+			type: "initialize";
+			profile: SessionSemanticProfileRange;
+			framingVersion: number;
+			hostCapabilities: SessionHostClientCapabilities;
+			requestedCapabilities: string[];
+	  }
+	| {
+			id: string;
+			type: "session_open";
+			after?: SessionObservationPosition;
+			afterCursor?: SessionJournalCursor;
+			snapshot?: boolean;
+	  }
+	| { id: string; type: "session_ack"; subscriptionId: string; sequence: number }
+	| { id: string; type: "session_unsubscribe"; subscriptionId: string }
+	| { id: string; type: "session_invoke"; command: SessionCommand }
+	| { id: string; type: "session_shutdown" }
+	| {
+			id: string;
+			type: "semantic_action";
+			renderId: string;
+			actionId: string;
+			input?: Record<string, RpcJsonValue>;
+	  }
+	| { id: string; type: "semantic_cancel"; renderId: string; actionId?: string }
+	| { id: string; type: "artifact_describe"; artifactId: string }
+	| { id: string; type: "artifact_read"; artifactId: string; offset?: number; length?: number }
+	| {
+			id: string;
+			type: "artifact_export";
+			artifactId: string;
+			destination: string;
+			expectedSha256: string;
+	  }
+	| { id: string; type: "resource_list" }
+	| { id: string; type: "resource_refresh"; serverId?: string }
+	| { id: string; type: "resource_reload" }
+	| { id: string; type: "resource_cancel"; operationId: string }
+	| { id: string; type: "resource_dispose"; serverId: string }
+	| { id: string; type: "provenance_get"; refreshUsage?: boolean }
+	| { id: string; type: "collaboration_get" }
+	| { id: string; type: "collaboration_host"; relayUrl?: string; webUrl?: string }
+	| { id: string; type: "collaboration_join"; link: string; displayName?: string }
+	| { id: string; type: "collaboration_leave"; reason?: string }
+	| { id: string; type: "collaboration_revoke"; participantId: string }
+	| { id: string; type: "collaboration_rotate" }
+	| { id: string; type: "collaboration_acknowledge"; generation: number; sequence: number }
+	| { id: string; type: "collaboration_read_media"; mediaId: string; offset?: number; length?: number }
 
 	// Prompting
 	| { id?: string; type: "prompt"; message: string; images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" }
@@ -124,6 +228,21 @@ export type RpcCommand =
 	| { id?: string; type: "get_settings"; tab?: SettingTab }
 	| { id?: string; type: "set_settings"; changes: RpcSettingsChange[] }
 	| { id?: string; type: "set_todos"; phases: TodoPhase[] }
+	| { id?: string; type: "todo_apply"; operation: TodoOperationInput }
+	| {
+			id?: string;
+			type: "goal_control";
+			op: RpcGoalControlOperation;
+			objective?: string;
+			tokenBudget?: number;
+	  }
+	| {
+			id?: string;
+			type: "checkpoint_control";
+			op: RpcCheckpointControlOperation;
+			goal?: string;
+			report?: string;
+	  }
 	| { id?: string; type: "set_host_tools"; tools: RpcHostToolDefinition[] }
 	| { id?: string; type: "set_host_uri_schemes"; schemes: RpcHostUriSchemeDefinition[] }
 	| { id?: string; type: "set_subagent_subscription"; level: RpcSubagentSubscriptionLevel }
@@ -131,6 +250,22 @@ export type RpcCommand =
 	| { id?: string; type: "get_subagent_messages"; subagentId?: string; sessionFile?: string; fromByte?: number }
 	| { id?: string; type: "list_agents"; includeAdvisors?: boolean }
 	| { id?: string; type: "get_agent"; agentId: string }
+	| {
+			id?: string;
+			type: "loop_control";
+			op: RpcLoopControlOperation;
+			action?: SessionLoopAction;
+			prompt?: string;
+			limit?: LoopLimitConfig;
+	  }
+	| {
+			id?: string;
+			type: "start_agent";
+			task: string;
+			agent?: string;
+			name?: string;
+			context?: string;
+	  }
 	| { id?: string; type: "get_agent_result"; agentId: string }
 	| { id?: string; type: "send_agent_message"; agentId: string; message: string; replyTo?: string }
 	| { id?: string; type: "park_agent"; agentId: string }
@@ -138,6 +273,9 @@ export type RpcCommand =
 	| { id?: string; type: "cancel_agent"; agentId: string }
 	| { id?: string; type: "release_agent"; agentId: string; tombstone?: boolean }
 	| { id?: string; type: "get_queue" }
+	| { id?: string; type: "queue_insert"; lane: SessionQueueLane; text: string; toIndex?: number }
+	| { id?: string; type: "queue_update"; entryId: string; text: string }
+	| { id?: string; type: "queue_move"; entryId: string; lane: SessionQueueLane; toIndex: number }
 	| { id?: string; type: "remove_queued_message"; entryId: string }
 	| { id?: string; type: "reorder_queued_message"; entryId: string; toIndex: number }
 	| { id?: string; type: "clear_queue"; lane?: SessionQueueLane | "all" }
@@ -147,6 +285,8 @@ export type RpcCommand =
 
 	// Model
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
+	| { id?: string; type: "set_model_role"; role: string }
+	| { id?: string; type: "set_service_tier"; family: ServiceTierFamily; tier: ServiceTier | null }
 	| { id?: string; type: "cycle_model" }
 	| { id?: string; type: "get_available_models" }
 
@@ -189,6 +329,15 @@ export type RpcCommand =
 			search?: string;
 	  }
 	| { id?: string; type: "get_session_info"; session: string; scope?: SessionCatalogScope; cwd?: string }
+	| { id?: string; type: "get_session_tree" }
+	| {
+			id?: string;
+			type: "select_session_leaf";
+			entryId: string;
+			summarize?: boolean;
+			customInstructions?: string;
+	  }
+	| { id?: string; type: "reset_session" }
 	| { id?: string; type: "list_workspace_roots" }
 	| { id?: string; type: "resume_session"; session: string; scope?: SessionCatalogScope; cwd?: string }
 	| { id?: string; type: "fork_session" }
@@ -293,6 +442,124 @@ export interface RpcSessionState {
 	contextUsage?: ContextUsage;
 	advisor?: RpcAdvisorState;
 }
+export interface RpcSessionTurnSnapshot {
+	phase: RpcSessionActivityPhase;
+	streaming: boolean;
+	aborting: boolean;
+	messageCount: number;
+	activeOperations: RpcActiveOperation[];
+}
+
+export interface RpcSessionQueueAuthoritySnapshot {
+	state: SessionQueueSnapshot;
+	modes: {
+		steering: "all" | "one-at-a-time";
+		followUp: "all" | "one-at-a-time";
+		interrupt: "immediate" | "wait";
+	};
+}
+
+export interface RpcSessionGoalSnapshot {
+	state: GoalModeState | null;
+	runtime: GoalRuntimeSnapshot;
+	turnBudget: { total: number | null; spent: number; hard: boolean };
+}
+export type RpcGoalControlOperation =
+	| "create"
+	| "replace"
+	| "get"
+	| "resume"
+	| "pause"
+	| "drop"
+	| "complete"
+	| "set_budget"
+	| "clear_budget";
+export interface RpcGoalControlResult {
+	operation: RpcGoalControlOperation;
+	state: GoalModeState | null;
+	goal: Goal | null;
+}
+
+export interface RpcSessionModelSnapshot {
+	active?: { provider: string; id: string; api: string };
+	activeRole: string;
+	configuredThinkingLevel?: ConfiguredThinkingLevel;
+	effectiveThinkingLevel?: ThinkingLevel;
+	autoThinking: boolean;
+	autoResolvedThinkingLevel?: Effort;
+	serviceTiers: ServiceTierByFamily;
+	retryFallbackModel?: string;
+	advisor: RpcAdvisorState;
+}
+export interface RpcModelRoleResult {
+	role: string;
+	model: { provider: string; id: string; api: string };
+	thinkingLevel?: ConfiguredThinkingLevel;
+}
+
+export interface RpcServiceTierResult {
+	family: ServiceTierFamily;
+	tier: ServiceTier | null;
+	serviceTiers: ServiceTierByFamily;
+}
+
+export interface RpcSessionMaintenanceSnapshot {
+	compaction: { active: boolean; automatic: boolean };
+	retry: { active: boolean; automatic: boolean; attempt: number; fallbackModel?: string };
+}
+
+export interface RpcSessionCheckpointSnapshot {
+	active: CheckpointState | null;
+	lastCompleted: CompletedRewindState | null;
+}
+export type RpcCheckpointControlOperation = "get" | "create" | "rewind";
+export interface RpcCheckpointControlResult extends RpcSessionCheckpointSnapshot {
+	operation: RpcCheckpointControlOperation;
+}
+
+export interface RpcSessionToolPolicySnapshot {
+	active: string[];
+	enabled: string[];
+	mounted: string[];
+	inventory: ToolInventory;
+}
+export interface RpcSessionExtensionSnapshot {
+	loaded: boolean;
+	uiAvailable: boolean;
+	paths: string[];
+	registeredTools: Array<{ name: string; extensionPath: string }>;
+}
+
+export interface RpcSessionResourceSnapshot {
+	mcp: {
+		selectedTools: string[];
+		prompts: Array<{ name: string; description?: string; source: string }>;
+	};
+}
+
+export type RpcLoopControlOperation = "get" | "enable" | "pause" | "resume" | "disable";
+export interface RpcLoopControlResult {
+	operation: RpcLoopControlOperation;
+	state: SessionLoopState;
+}
+
+export interface RpcSessionExecutionSnapshot {
+	turn: RpcSessionTurnSnapshot;
+	queue: RpcSessionQueueAuthoritySnapshot;
+	goal: RpcSessionGoalSnapshot;
+	todos: TodoTrackerSnapshot;
+	plan: RpcPlanState;
+	model: RpcSessionModelSnapshot;
+	maintenance: RpcSessionMaintenanceSnapshot;
+	recovery: TurnRecoverySnapshot;
+	checkpoint: RpcSessionCheckpointSnapshot;
+	tools: RpcSessionToolPolicySnapshot;
+	interactions: { pending: RpcPendingInteractionSnapshot[] };
+	loop: SessionLoopState;
+	extensions: RpcSessionExtensionSnapshot;
+	resources: RpcSessionResourceSnapshot;
+}
+
 export type RpcProviderAuthMethod = "oauth_callback" | "paste_code" | "device_code" | "api_key";
 export type RpcProviderAuthCredentialOrigin = "runtime" | "config" | "oauth" | "api_key" | "env" | "fallback";
 
@@ -355,6 +622,19 @@ export interface RpcToolInventoryUpdateFrame {
 export interface RpcQueueUpdateFrame {
 	type: "queue_update";
 	queue: SessionQueueSnapshot;
+}
+
+export interface RpcLoopStateUpdateFrame {
+	type: "loop_state_update";
+	state: SessionLoopState;
+	causationId?: string;
+}
+
+export interface RpcLoopErrorFrame {
+	type: "loop_error";
+	error: string;
+	state: SessionLoopState;
+	causationId?: string;
 }
 
 export interface RpcJobUpdateFrame {
@@ -426,12 +706,18 @@ export type RpcOperationCommand =
 	| "resolve_plan_approval"
 	| "provider_auth"
 	| "eval_execute";
-export type RpcOperationCancellationReason = "user" | "replaced" | "session_transition" | "client_disconnected";
+export type RpcOperationCancellationReason =
+	| "user"
+	| "replaced"
+	| "session_transition"
+	| "client_disconnected"
+	| "shutdown";
 export type RpcOperationCancellationCode =
 	| "cancelled_by_client"
 	| "replaced_by_prompt"
 	| "session_changed"
-	| "client_disconnected";
+	| "client_disconnected"
+	| "session_shutdown";
 
 interface RpcOperationFrameBase {
 	operationId: string;
@@ -563,6 +849,8 @@ export interface RpcCapabilityManifest {
 	events: RpcEventType[];
 	extensionUiMethods: RpcExtensionUIMethod[];
 	hostProtocols: string[];
+	/** Present only when the host implements the explicitly negotiated omp.session semantic profile. */
+	sessionHost?: SessionHostManifest;
 }
 
 export interface RpcReadyFrame {
@@ -592,6 +880,20 @@ export interface RpcSessionInfoResult {
 	session: SessionCatalogEntry;
 	workspace: SessionWorkspace;
 	active: boolean;
+}
+export interface RpcSessionTreeResult {
+	sessionId: string;
+	leafId: string | null;
+	roots: SessionCatalogTreeNode[];
+}
+
+export interface RpcSelectSessionLeafResult {
+	cancelled: boolean;
+	leafId: string | null;
+}
+
+export interface RpcResetSessionResult {
+	droppedCount: number;
 }
 
 export interface RpcResumeSessionResult {
@@ -656,6 +958,17 @@ export interface RpcAgentRegistryUpdateFrame extends AgentControlRegistryUpdate 
 	type: "agent_registry_update";
 }
 
+export interface RpcSessionObservationFrame {
+	type: "session_observation";
+	subscriptionId: string;
+	observation: SessionObservation;
+}
+
+export interface RpcSessionOpenResult {
+	subscriptionId: string;
+	snapshot?: SessionSnapshot;
+}
+
 // ============================================================================
 // RPC Responses (stdout)
 // ============================================================================
@@ -676,6 +989,133 @@ export type RpcResponse =
 			command: "get_capabilities";
 			success: true;
 			data: RpcCapabilityManifest;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "initialize";
+			success: true;
+			data: SessionHostNegotiationResult;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "session_open";
+			success: true;
+			data: RpcSessionOpenResult;
+	  }
+	| { id?: string; type: "response"; command: "session_ack"; success: true }
+	| { id?: string; type: "response"; command: "session_unsubscribe"; success: true }
+	| {
+			id?: string;
+			type: "response";
+			command: "session_invoke";
+			success: true;
+			data: SessionCommandOutcome;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "session_shutdown";
+			success: true;
+			data: SessionAuthoritySettlement;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "semantic_action";
+			success: true;
+			data: RpcSemanticActionSettledFrame;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "semantic_cancel";
+			success: true;
+			data: { cancelled: boolean };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "artifact_describe";
+			success: true;
+			data: ArtifactDescriptor;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "artifact_read";
+			success: true;
+			data: ArtifactRange;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "artifact_export";
+			success: true;
+			data: ArtifactExportResult;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "resource_list";
+			success: true;
+			data: RpcResourceLifecycleSnapshot;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "resource_refresh" | "resource_reload";
+			success: true;
+			data: { operationId: string };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "resource_cancel";
+			success: true;
+			data: { cancelled: boolean };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "resource_dispose";
+			success: true;
+			data: RpcResourceServerSnapshot;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "provenance_get";
+			success: true;
+			data: RpcProvenanceSnapshot;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command:
+				| "collaboration_get"
+				| "collaboration_host"
+				| "collaboration_join"
+				| "collaboration_leave"
+				| "collaboration_revoke"
+				| "collaboration_rotate";
+			success: true;
+			data: RpcCollaborationSnapshot;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "collaboration_acknowledge";
+			success: true;
+			data: { acknowledged: number; retained: number };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "collaboration_read_media";
+			success: true;
+			data: RpcCollaborationMediaRange;
 	  }
 
 	// Prompting (async - events follow)
@@ -779,7 +1219,11 @@ export type RpcResponse =
 			success: true;
 			data: { commands: RpcAvailableSlashCommand[] };
 	  }
+	| { id?: string; type: "response"; command: "checkpoint_control"; success: true; data: RpcCheckpointControlResult }
+	| { id?: string; type: "response"; command: "loop_control"; success: true; data: RpcLoopControlResult }
 	| { id?: string; type: "response"; command: "set_todos"; success: true; data: { todoPhases: TodoPhase[] } }
+	| { id?: string; type: "response"; command: "todo_apply"; success: true; data: { todoPhases: TodoPhase[] } }
+	| { id?: string; type: "response"; command: "goal_control"; success: true; data: RpcGoalControlResult }
 	| { id?: string; type: "response"; command: "set_host_tools"; success: true; data: { toolNames: string[] } }
 	| { id?: string; type: "response"; command: "set_host_uri_schemes"; success: true; data: { schemes: string[] } }
 	| {
@@ -804,6 +1248,21 @@ export type RpcResponse =
 			data: RpcSubagentMessagesResult;
 	  }
 	| { id?: string; type: "response"; command: "get_queue"; success: true; data: SessionQueueSnapshot }
+	| {
+			id?: string;
+			type: "response";
+			command: "queue_insert";
+			success: true;
+			data: { entry: SessionQueueEntry; queue: SessionQueueSnapshot };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "queue_update";
+			success: true;
+			data: { entry: SessionQueueEntry; queue: SessionQueueSnapshot };
+	  }
+	| { id?: string; type: "response"; command: "queue_move"; success: true; data: SessionQueueSnapshot }
 	| {
 			id?: string;
 			type: "response";
@@ -877,6 +1336,13 @@ export type RpcResponse =
 			success: true;
 			data: RpcAgentReleaseResult;
 	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "start_agent";
+			success: true;
+			data: { agentIds: string[]; jobId?: string };
+	  }
 
 	// Model
 	| {
@@ -900,6 +1366,8 @@ export type RpcResponse =
 			success: true;
 			data: { models: Model[] };
 	  }
+	| { id?: string; type: "response"; command: "set_model_role"; success: true; data: RpcModelRoleResult }
+	| { id?: string; type: "response"; command: "set_service_tier"; success: true; data: RpcServiceTierResult }
 	| {
 			id?: string;
 			type: "response";
@@ -947,6 +1415,15 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "export_html"; success: true; data: { path: string } }
 	| { id?: string; type: "response"; command: "list_sessions"; success: true; data: SessionCatalogPage }
 	| { id?: string; type: "response"; command: "get_session_info"; success: true; data: RpcSessionInfoResult }
+	| { id?: string; type: "response"; command: "get_session_tree"; success: true; data: RpcSessionTreeResult }
+	| {
+			id?: string;
+			type: "response";
+			command: "select_session_leaf";
+			success: true;
+			data: RpcSelectSessionLeafResult;
+	  }
+	| { id?: string; type: "response"; command: "reset_session"; success: true; data: RpcResetSessionResult }
 	| {
 			id?: string;
 			type: "response";
@@ -1011,6 +1488,35 @@ export type RpcSessionEventFrame = AgentSessionEvent | RpcSubagentFrame | RpcAge
 // Extension UI Events (stdout)
 // ============================================================================
 
+export type RpcInteractiveMethod = "select" | "confirm" | "input" | "editor" | "approval" | "ask";
+
+export interface RpcPendingInteractionSnapshot {
+	id: string;
+	method: RpcInteractiveMethod;
+	startedAt: number;
+	title?: string;
+	operationId?: string;
+	sensitive: boolean;
+	toolCallId?: string;
+	toolName?: string;
+}
+
+export type RpcInteractionOutcome =
+	| { state: "accepted"; provenance: "user" | "host"; decision?: "approve" | "deny" }
+	| { state: "cancelled" }
+	| { state: "timed_out" }
+	| { state: "unsupported"; message: string }
+	| { state: "failed"; message: string }
+	| { state: "disconnected"; message: string };
+
+export interface RpcInteractionSettledFrame {
+	type: "interaction_settled";
+	id: string;
+	method: RpcInteractiveMethod;
+	operationId?: string;
+	outcome: RpcInteractionOutcome;
+}
+
 /** Emitted when an extension needs user input */
 export type RpcExtensionUIRequest =
 	| { type: "extension_ui_request"; id: string; method: "select"; title: string; options: string[]; timeout?: number }
@@ -1052,6 +1558,30 @@ export type RpcExtensionUIRequest =
 			prefill?: string;
 			promptStyle?: boolean;
 	  }
+	| {
+			type: "extension_ui_request";
+			id: string;
+			method: "approval";
+			title: string;
+			toolCallId: string;
+			toolName: string;
+			operation: "read" | "write" | "exec";
+			approvalMode: "always-ask" | "write" | "yolo";
+			resolvedPolicy: "prompt";
+			policySource?: "tool" | "user" | "mode";
+			declarationPolicy?: "allow" | "deny" | "prompt";
+			escalationReason?: string;
+			providerSafety: { required: boolean; checks: string[] };
+			choices: readonly ["Approve", "Deny"];
+			defaultChoice: "Deny";
+	  }
+	| {
+			type: "extension_ui_request";
+			id: string;
+			method: "ask";
+			questions: ExtensionAskDialogQuestion[];
+			timeout?: number;
+	  }
 	| { type: "extension_ui_request"; id: string; method: "cancel"; targetId: string }
 	| {
 			type: "extension_ui_request";
@@ -1066,6 +1596,12 @@ export type RpcExtensionUIRequest =
 			method: "setStatus";
 			statusKey: string;
 			statusText: string | undefined;
+	  }
+	| {
+			type: "extension_ui_request";
+			id: string;
+			method: "progress";
+			message?: string;
 	  }
 	| {
 			type: "extension_ui_request";
@@ -1199,6 +1735,14 @@ export interface RpcHostUriResult {
 export type RpcExtensionUIResponse =
 	| { type: "extension_ui_response"; id: string; value: string }
 	| { type: "extension_ui_response"; id: string; confirmed: boolean; operationId?: string }
+	| {
+			type: "extension_ui_response";
+			id: string;
+			decision: "approve" | "deny";
+			operationId?: string;
+			provenance?: "user";
+	  }
+	| { type: "extension_ui_response"; id: string; result: ExtensionAskDialogResult }
 	| { type: "extension_ui_response"; id: string; cancelled: true; timedOut?: boolean };
 
 type RpcManifestEvent =
@@ -1221,10 +1765,19 @@ type RpcManifestEvent =
 	| RpcSettingsUpdateFrame
 	| RpcQueueUpdateFrame
 	| RpcJobUpdateFrame
+	| RpcLoopStateUpdateFrame
+	| RpcLoopErrorFrame
+	| RpcInteractionSettledFrame
 	| RpcHostToolCallRequest
 	| RpcHostToolCancelRequest
 	| RpcHostUriRequest
 	| RpcHostUriCancelRequest
+	| RpcSemanticContentFrame
+	| RpcSemanticActionRequestedFrame
+	| RpcSemanticActionSettledFrame
+	| RpcResourceLifecycleFrame
+	| RpcProvenanceFrame
+	| RpcCollaborationFrame
 	| {
 			type:
 				| "command_output"
@@ -1251,6 +1804,19 @@ export const RPC_EVENT_TYPES = eventInventory([
 	"eval_complete",
 	"queue_update",
 	"job_update",
+	"loop_state_update",
+	"loop_error",
+	"interaction_settled",
+	"semantic_content",
+	"semantic_action_requested",
+	"semantic_action_settled",
+	"resource_lifecycle",
+	"resource_operation",
+	"provenance_update",
+	"collaboration_state",
+	"collaboration_replicated",
+	"collaboration_gap",
+	"collaboration_stale",
 	"operation_started",
 	"operation_completed",
 	"operation_failed",
@@ -1290,6 +1856,7 @@ export const RPC_EVENT_TYPES = eventInventory([
 	"auto_retry_end",
 	"retry_fallback_applied",
 	"retry_fallback_succeeded",
+	"credential_rotated",
 	"model_changed",
 	"ttsr_triggered",
 	"todo_reminder",
@@ -1315,10 +1882,13 @@ export const RPC_EXTENSION_UI_METHODS = extensionUiMethodInventory([
 	"confirm",
 	"input",
 	"editor",
+	"approval",
+	"ask",
 	"cancel",
 	"notify",
 	"setStatus",
 	"setWidget",
+	"progress",
 	"setTitle",
 	"set_editor_text",
 	"open_url",

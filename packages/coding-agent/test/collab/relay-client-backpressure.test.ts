@@ -39,10 +39,10 @@ class BackpressuredWebSocket {
 		this.onopen?.(new Event("open"));
 	}
 
-	close(): void {
+	close(code = 1000, reason = "closed"): void {
 		if (this.readyState === BackpressuredWebSocket.CLOSED) return;
 		this.readyState = BackpressuredWebSocket.CLOSED;
-		this.onclose?.({ code: 1000, reason: "closed" } as CloseEvent);
+		this.onclose?.({ code, reason } as CloseEvent);
 	}
 }
 
@@ -117,6 +117,35 @@ describe("CollabSocket send backpressure", () => {
 			vi.advanceTimersByTime(DRAIN_RETRY_MS);
 			for (let flush = 0; flush < 5; flush++) await Promise.resolve();
 			expect(ws.sent).toHaveLength(1);
+		} finally {
+			socket.close();
+		}
+	});
+	it("forces reconnect and reports a gap instead of silently dropping on overflow", async () => {
+		vi.useFakeTimers();
+		vi.spyOn(crypto.subtle, "encrypt").mockResolvedValue(new Uint8Array([1, 2, 3, 4]).buffer);
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({
+			wsUrl: "ws://localhost:8788/r/backpressure",
+			role: "guest",
+			key: {} as CryptoKey,
+		});
+		const drops: Array<{ type: string; pending: number }> = [];
+		socket.onDrop = (type, pending) => drops.push({ type, pending });
+
+		try {
+			socket.connect();
+			const ws = BackpressuredWebSocket.instances[0];
+			if (!ws) throw new Error("CollabSocket did not construct a WebSocket");
+			ws.open();
+			for (let index = 0; index <= 256; index++) socket.send({ t: "abort" });
+			for (let flush = 0; flush < 2_000; flush++) await Promise.resolve();
+
+			expect(drops).toEqual([{ type: "abort", pending: 256 }]);
+			expect(ws.readyState).toBe(BackpressuredWebSocket.CLOSED);
+			expect(ws.sent).toHaveLength(0);
 		} finally {
 			socket.close();
 		}

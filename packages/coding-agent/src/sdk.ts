@@ -1764,9 +1764,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			clearPendingInvokers: () => session.clearPendingInvokers(),
 			peekPlanProposalHandler: () => session.peekPlanProposalHandler(),
 			setPlanProposalHandler: handler => session.setPlanProposalHandler(handler),
-			allocateOutputArtifact: async toolType => {
+			allocateOutputArtifact: async (toolType, related) => {
 				try {
-					return await sessionManager.allocateArtifactPath(toolType);
+					return await sessionManager.allocateArtifactPath(toolType, related);
 				} catch {
 					return {};
 				}

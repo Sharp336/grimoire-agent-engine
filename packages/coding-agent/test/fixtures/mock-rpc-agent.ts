@@ -65,6 +65,58 @@ function writeFrame(frame: Record<string, unknown>): void {
 		);
 	}
 }
+function mockResourceServer(state: "connected" | "disabled" = "connected"): Record<string, unknown> {
+	return {
+		serverId: "alpha",
+		state,
+		capabilities: { tools: true, resources: true, prompts: true },
+		tools: { items: [{ name: "alpha_search", description: "Search" }], total: 1 },
+		resources: { items: [{ uri: "docs://one", name: "One", mediaType: "text/plain" }], total: 1 },
+		resourceTemplates: { items: [{ uriTemplate: "docs://{id}", name: "By id" }], total: 1 },
+		prompts: { items: [{ name: "summarize", description: "Summarize" }], total: 1 },
+		diagnostics: [],
+	};
+}
+function mockProvenance(usageAvailable: boolean): Record<string, unknown> {
+	return {
+		revision: 1,
+		model: {
+			active: { provider: "anthropic", id: "claude-sonnet", api: "anthropic-messages" },
+			role: "reviewer",
+			serviceTiers: { openai: "priority" },
+		},
+		fallback: null,
+		credentialRotation: null,
+		usage: {
+			available: usageAvailable,
+			reports: usageAvailable ? [{ provider: "anthropic", fetchedAt: 123, limits: [] }] : [],
+			...(usageAvailable ? {} : { diagnostic: "not_requested" }),
+		},
+		failure: null,
+	};
+}
+function mockCollaboration(role: "none" | "host" | "guest" = "guest"): Record<string, unknown> {
+	const active = role !== "none";
+	return {
+		revision: 3,
+		state: active ? "connected" : "off",
+		role,
+		authority: active ? "full" : "none",
+		authoritative: role === "host",
+		...(active ? { sessionId: "mock-session" } : {}),
+		...(role === "host" ? { links: { link: "wss://relay/r/room.full", viewLink: "wss://relay/r/room.view" } } : {}),
+		participants: active
+			? [{ participantId: role === "host" ? "host" : "guest-1", displayName: "fixture", role, authority: "full" }]
+			: [],
+		replication: {
+			generation: role === "guest" ? 1 : 0,
+			latestSequence: role === "guest" ? 1 : 0,
+			acknowledgedSequence: 0,
+			retainedFrames: role === "guest" ? 1 : 0,
+			stale: false,
+		},
+	};
+}
 
 if (Bun.env.MOCK_RPC_CLIENT_FRAMES === "1") {
 	writeFrame({ type: "command_output", text: "extension output" });
@@ -127,6 +179,27 @@ if (Bun.env.MOCK_RPC_CLIENT_FRAMES === "1") {
 		}, 25);
 	}
 	writeFrame({ type: "future_server_frame", value: 1 });
+}
+if (Bun.env.MOCK_RPC_RESOURCES === "1") {
+	writeFrame({
+		type: "resource_lifecycle",
+		revision: 1,
+		serverId: "alpha",
+		state: "connected",
+		diagnostics: [],
+	});
+}
+if (Bun.env.MOCK_RPC_PROVENANCE === "1") {
+	writeFrame({ type: "provenance_update", provenance: mockProvenance(false) });
+}
+if (Bun.env.MOCK_RPC_COLLABORATION === "1") {
+	writeFrame({
+		type: "collaboration_replicated",
+		authoritative: false,
+		cursor: { generation: 1, sequence: 1 },
+		kind: "snapshot",
+		payload: { sessionName: "remote" },
+	});
 }
 
 const captureFile = Bun.env.MOCK_RPC_CAPTURE_FILE;
@@ -353,6 +426,202 @@ for await (const raw of console) {
 					command: frame.type,
 					success: true,
 					data: advisor,
+				});
+				continue;
+			}
+
+			if (frame.type === "initialize") {
+				const requestedCapabilities = Array.isArray(frame.requestedCapabilities) ? frame.requestedCapabilities : [];
+				writeFrame({
+					id,
+					type: "response",
+					command: frame.type,
+					success: true,
+					data: {
+						ok: true,
+						profile: { name: "omp.session", major: 3, minor: 0 },
+						framingVersion: frame.framingVersion,
+						capabilities: requestedCapabilities.map(capabilityId => ({
+							id: capabilityId,
+							version: 1,
+							supported: true,
+							operations: [],
+							events: [],
+							platforms: ["linux", "darwin", "win32"],
+						})),
+						hostCapabilities: frame.hostCapabilities,
+					},
+				});
+				continue;
+			}
+			if (Bun.env.MOCK_RPC_SESSION_V3 === "1" && frame.type === "session_open") {
+				writeFrame({
+					id,
+					type: "response",
+					command: frame.type,
+					success: true,
+					data: {
+						subscriptionId: "subscription-1",
+						snapshot: {
+							sessionId: "mock-session",
+							revision: 7,
+							state: { activity: "idle" },
+							journalCursor: { sessionId: "mock-session", leafId: "leaf-1", entryId: "entry-7" },
+							watermark: { epoch: "epoch-1", sequence: 4 },
+						},
+					},
+				});
+				writeFrame({
+					type: "session_observation",
+					subscriptionId: "subscription-1",
+					observation: {
+						type: "observation",
+						sessionId: "mock-session",
+						epoch: "epoch-1",
+						sequence: 5,
+						eventId: "event-5",
+						kind: "queue_update",
+						payload: { pending: 1 },
+						durability: "transient",
+						replay: false,
+						terminalSettlement: "none",
+					},
+				});
+				continue;
+			}
+			if (
+				Bun.env.MOCK_RPC_SESSION_V3 === "1" &&
+				(frame.type === "session_ack" || frame.type === "session_unsubscribe")
+			) {
+				writeFrame({ id, type: "response", command: frame.type, success: true });
+				continue;
+			}
+			if (Bun.env.MOCK_RPC_SESSION_V3 === "1" && frame.type === "session_invoke") {
+				writeFrame({
+					id,
+					type: "response",
+					command: frame.type,
+					success: true,
+					data: { outcome: "completed", revision: 8, result: { applied: true } },
+				});
+				continue;
+			}
+			if (Bun.env.MOCK_RPC_SESSION_V3 === "1" && frame.type === "session_shutdown") {
+				writeFrame({
+					id,
+					type: "response",
+					command: frame.type,
+					success: true,
+					data: { state: "settled" },
+				});
+				continue;
+			}
+
+			if (Bun.env.MOCK_RPC_PROVENANCE === "1" && frame.type === "provenance_get") {
+				writeFrame({
+					id,
+					type: "response",
+					command: frame.type,
+					success: true,
+					data: mockProvenance(frame.refreshUsage === true),
+				});
+				continue;
+			}
+			if (Bun.env.MOCK_RPC_COLLABORATION === "1" && frame.type === "collaboration_get") {
+				writeFrame({ id, type: "response", command: frame.type, success: true, data: mockCollaboration() });
+				continue;
+			}
+			if (
+				Bun.env.MOCK_RPC_COLLABORATION === "1" &&
+				(frame.type === "collaboration_host" ||
+					frame.type === "collaboration_join" ||
+					frame.type === "collaboration_leave" ||
+					frame.type === "collaboration_revoke" ||
+					frame.type === "collaboration_rotate")
+			) {
+				const role =
+					frame.type === "collaboration_leave" ? "none" : frame.type === "collaboration_join" ? "guest" : "host";
+				writeFrame({ id, type: "response", command: frame.type, success: true, data: mockCollaboration(role) });
+				continue;
+			}
+			if (Bun.env.MOCK_RPC_COLLABORATION === "1" && frame.type === "collaboration_acknowledge") {
+				writeFrame({
+					id,
+					type: "response",
+					command: frame.type,
+					success: true,
+					data: { acknowledged: frame.sequence, retained: 0 },
+				});
+				continue;
+			}
+			if (Bun.env.MOCK_RPC_COLLABORATION === "1" && frame.type === "collaboration_read_media") {
+				writeFrame({
+					id,
+					type: "response",
+					command: frame.type,
+					success: true,
+					data: {
+						mediaId: frame.mediaId,
+						mediaType: "image/png",
+						offset: frame.offset ?? 0,
+						byteLength: 2,
+						eof: true,
+						encoding: "base64",
+						data: "AQI=",
+					},
+				});
+				continue;
+			}
+
+			if (Bun.env.MOCK_RPC_RESOURCES === "1" && frame.type === "resource_list") {
+				writeFrame({
+					id,
+					type: "response",
+					command: frame.type,
+					success: true,
+					data: { revision: 1, servers: [mockResourceServer()], activeOperations: [] },
+				});
+				continue;
+			}
+			if (
+				Bun.env.MOCK_RPC_RESOURCES === "1" &&
+				(frame.type === "resource_refresh" || frame.type === "resource_reload")
+			) {
+				const operationId = frame.type === "resource_refresh" ? "resource-refresh-1" : "resource-reload-1";
+				writeFrame({
+					type: "resource_operation",
+					operationId,
+					requestId: id,
+					kind: frame.type === "resource_refresh" ? "refresh" : "reload",
+					outcome: "completed",
+					serverIds: ["alpha"],
+				});
+				writeFrame({
+					id,
+					type: "response",
+					command: frame.type,
+					success: true,
+					data: { operationId },
+				});
+				continue;
+			}
+			if (Bun.env.MOCK_RPC_RESOURCES === "1" && frame.type === "resource_cancel") {
+				writeFrame({
+					id,
+					type: "response",
+					command: frame.type,
+					success: true,
+					data: { cancelled: frame.operationId === "resource-refresh-1" },
+				});
+				continue;
+			}
+			if (Bun.env.MOCK_RPC_RESOURCES === "1" && frame.type === "resource_dispose") {
+				writeFrame({
+					id,
+					type: "response",
+					command: frame.type,
+					success: true,
+					data: mockResourceServer("disabled"),
 				});
 				continue;
 			}

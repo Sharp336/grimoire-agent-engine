@@ -160,6 +160,22 @@ export interface TurnRecoveryHost {
 export interface TurnRecoveryOptions {
 	initialRetryFallback?: InitialRetryFallbackState;
 }
+/** Secret-safe projection of the active turn-recovery saga. */
+export interface TurnRecoverySnapshot {
+	retrying: boolean;
+	attempt: number;
+	fallbackModel?: string;
+	fallback?: {
+		role: string;
+		from: string;
+		to: string;
+		pinned: boolean;
+	};
+	pendingRecoveredErrors: number;
+	emptyStopRetries: number;
+	unexpectedStopRetries: number;
+	acceptingTerminalEmptyStop: boolean;
+}
 
 type PendingRetryError = {
 	entryId: string;
@@ -218,6 +234,30 @@ export class TurnRecovery {
 		return this.#activeRetryFallback && model
 			? formatRetryFallbackSelector(model, this.#host.thinkingLevel())
 			: undefined;
+	}
+	/** Secret-safe recovery state for non-terminal session hosts. */
+	get snapshot(): TurnRecoverySnapshot {
+		const fallbackModel = this.retryFallbackModel;
+		const fallback = this.#activeRetryFallback;
+		return {
+			retrying: this.#retryPromise !== undefined,
+			attempt: this.#retryAttempt,
+			...(fallbackModel ? { fallbackModel } : {}),
+			...(fallback && fallbackModel
+				? {
+						fallback: {
+							role: fallback.role,
+							from: fallback.originalSelector,
+							to: fallbackModel,
+							pinned: fallback.pinned,
+						},
+					}
+				: {}),
+			pendingRecoveredErrors: this.#pendingRecoveredRetryErrors.length,
+			emptyStopRetries: this.#emptyStopRetryCount,
+			unexpectedStopRetries: this.#unexpectedStopRetryCount,
+			acceptingTerminalEmptyStop: this.#acceptTerminalEmptyStopForPrompt,
+		};
 	}
 
 	/** Resets per-prompt recovery counters and terminal-stop acceptance. */
@@ -359,6 +399,14 @@ export class TurnRecovery {
 					this.#host.sessionId(),
 					{ retryAfterMs, baseUrl: activeModel.baseUrl, modelId: activeModel.id },
 				);
+				if (outcome.switched) {
+					await this.#host.emitSessionEvent({
+						type: "credential_rotated",
+						provider: activeModel.provider,
+						model: activeModel.id,
+						reason: "usage_limit",
+					});
+				}
 				return {
 					switchedCredential: outcome.switched,
 					retryAfterMs,

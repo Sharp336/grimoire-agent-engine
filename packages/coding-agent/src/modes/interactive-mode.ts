@@ -104,6 +104,7 @@ import type { ForeignSessionSource } from "../session/foreign-session-store";
 import { HistoryStorage } from "../session/history-storage";
 import type { SessionContext } from "../session/session-context";
 import { getRecentSessions } from "../session/session-listing";
+import { describeLoopLimit, describeLoopLimitRuntime, parseLoopLimitArgs } from "../session/session-loop-limit";
 import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
@@ -173,15 +174,6 @@ import { SessionFocusController } from "./controllers/session-focus-controller";
 import { SSHCommandController } from "./controllers/ssh-command-controller";
 import { TanCommandController } from "./controllers/tan-command-controller";
 import { TodoCommandController } from "./controllers/todo-command-controller";
-import {
-	consumeLoopLimitIteration,
-	createLoopLimitRuntime,
-	describeLoopLimit,
-	describeLoopLimitRuntime,
-	isLoopDurationExpired,
-	type LoopLimitRuntime,
-	parseLoopLimitArgs,
-} from "./loop-limit";
 import { OAuthManualInputManager } from "./oauth-manual-input";
 import { countRunningSubagentBadgeAgents, getRunningSubagentBadgeRegistry } from "./running-subagent-badge";
 import {
@@ -470,10 +462,18 @@ export class InteractiveMode implements InteractiveModeContext {
 	get planModePlanFilePath(): string | undefined {
 		return this.session.getPlanModeState()?.planFilePath;
 	}
-	loopModeEnabled = false;
-	loopModePaused = false;
-	loopPrompt: string | undefined = undefined;
-	loopLimit: LoopLimitRuntime | undefined = undefined;
+	get loopModeEnabled(): boolean {
+		return this.session.getLoopState().enabled;
+	}
+	get loopModePaused(): boolean {
+		return this.session.getLoopState().phase === "paused";
+	}
+	get loopPrompt(): string | undefined {
+		return this.session.getLoopState().prompt;
+	}
+	get loopLimit() {
+		return this.session.getLoopState().limit;
+	}
 	#loopAutoSubmitTimer: NodeJS.Timeout | undefined;
 	#todoAutoClearTimer: NodeJS.Timeout | undefined;
 	#modelCycleClearTimer: NodeJS.Timeout | undefined;
@@ -1352,11 +1352,11 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#scheduleLoopAutoSubmit(): void {
 		this.#cancelLoopAutoSubmit();
-		if (!this.loopModeEnabled || !this.loopPrompt) return;
-		const prompt = this.loopPrompt;
-		const loopAction = settings.get("loop.mode");
+		const state = this.session.getLoopState();
+		if (!state.enabled || !state.prompt) return;
+		const prompt = state.prompt;
 		this.#deferLoopAutoSubmit(() => {
-			void this.#runLoopIteration(loopAction, prompt);
+			void this.#runLoopIteration(prompt);
 		});
 	}
 
@@ -1431,11 +1431,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	#submitLoopPromptWhenReady(prompt: string): void {
-		if (!this.loopModeEnabled || this.loopPrompt !== prompt || !this.onInputCallback) return;
-		if (isLoopDurationExpired(this.loopLimit)) {
-			this.disableLoopMode("Loop time limit reached. Loop mode disabled.");
-			return;
-		}
+		const state = this.session.getLoopState();
+		if (!state.enabled || state.prompt !== prompt || !this.onInputCallback) return;
 		if (this.#isAutoSubmitBlocked()) {
 			this.#deferLoopAutoSubmit(() => this.#submitLoopPromptWhenReady(prompt));
 			return;
@@ -1443,50 +1440,53 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.onInputCallback(this.startPendingSubmission({ text: prompt }));
 	}
 
-	async #runLoopIteration(action: "prompt" | "compact" | "reset", prompt: string): Promise<void> {
-		if (!this.loopModeEnabled || this.loopPrompt !== prompt || !this.onInputCallback) return;
+	async #runLoopIteration(prompt: string): Promise<void> {
+		const state = this.session.getLoopState();
+		if (!state.enabled || state.prompt !== prompt || !this.onInputCallback) return;
 		if (this.#isAutoSubmitBlocked()) {
 			this.#deferLoopAutoSubmit(() => {
-				void this.#runLoopIteration(action, prompt);
+				void this.#runLoopIteration(prompt);
 			});
 			return;
 		}
 
-		if (action === "reset" && this.vibeModeEnabled) {
+		if (state.action === "reset" && this.vibeModeEnabled) {
 			this.disableLoopMode("Exit vibe mode before using reset loops. Loop mode disabled.");
 			return;
 		}
 
-		if (!consumeLoopLimitIteration(this.loopLimit)) {
-			this.disableLoopMode("Loop limit reached. Loop mode disabled.");
+		const iteration = this.session.beginLoopIteration();
+		if (!iteration) {
+			this.#cancelLoopAutoSubmit();
+			this.#syncLoopModeStatus();
+			this.showStatus(
+				state.limit?.kind === "duration"
+					? "Loop time limit reached. Loop mode disabled."
+					: "Loop limit reached. Loop mode disabled.",
+			);
 			return;
 		}
 		this.#syncLoopModeStatus();
 
-		if (action === "compact") {
+		if (iteration.action === "compact") {
 			await this.handleCompactCommand();
-		} else if (action === "reset") {
+		} else if (iteration.action === "reset") {
 			await this.handleClearCommand();
 		}
-		this.#submitLoopPromptWhenReady(prompt);
+		this.#submitLoopPromptWhenReady(iteration.prompt);
 	}
 
 	#syncLoopModeStatus(): void {
-		const state: "waiting" | "running" | "paused" = this.loopModePaused
-			? "paused"
-			: this.loopPrompt
-				? "running"
-				: "waiting";
-		this.statusLine.setLoopModeStatus(this.loopModeEnabled ? { state, limit: this.loopLimit } : undefined);
+		const state = this.session.getLoopState();
+		this.statusLine.setLoopModeStatus(
+			state.enabled && state.phase !== "disabled" ? { state: state.phase, limit: state.limit } : undefined,
+		);
 		this.ui.requestRender();
 	}
 
 	disableLoopMode(message = "Loop mode disabled."): void {
 		const wasEnabled = this.loopModeEnabled;
-		this.loopModeEnabled = false;
-		this.loopModePaused = false;
-		this.loopPrompt = undefined;
-		this.loopLimit = undefined;
+		this.session.disableLoop();
 		this.#cancelLoopAutoSubmit();
 		this.#syncLoopModeStatus();
 		if (wasEnabled) {
@@ -1496,8 +1496,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	setLoopPrompt(prompt: string): void {
 		if (!this.loopModeEnabled) return;
-		this.loopPrompt = prompt;
-		this.loopModePaused = false;
+		this.session.captureLoopPrompt(prompt);
 		this.#syncLoopModeStatus();
 	}
 
@@ -1507,8 +1506,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * user submits becomes the new loop prompt and resumes iteration.
 	 */
 	pauseLoop(): void {
-		this.loopPrompt = undefined;
-		this.loopModePaused = true;
+		this.session.pauseLoop();
 		this.#cancelLoopAutoSubmit();
 		this.#syncLoopModeStatus();
 	}
@@ -1523,13 +1521,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showError(parsed);
 			return undefined;
 		}
-		this.loopModeEnabled = true;
-		this.loopModePaused = false;
-		this.loopPrompt = undefined;
-		this.loopLimit = createLoopLimitRuntime(parsed.limit);
+		const state = this.session.enableLoop({ action: settings.get("loop.mode"), limit: parsed.limit });
 		this.#syncLoopModeStatus();
 		const limitSuffix = parsed.limit ? ` Limited to ${describeLoopLimit(parsed.limit)}.` : "";
-		const remainingSuffix = this.loopLimit ? ` ${describeLoopLimitRuntime(this.loopLimit)}.` : "";
+		const remainingSuffix = state.limit ? ` ${describeLoopLimitRuntime(state.limit)}.` : "";
 		const tail = parsed.prompt ? "Repeating it after each turn." : "Your next prompt will repeat after each turn.";
 		this.showStatus(
 			`Loop mode enabled.${limitSuffix}${remainingSuffix} ${tail} Esc cancels the current iteration; /loop again to disable.`,

@@ -794,6 +794,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 
 	#startManagedBashJob(options: {
 		command: string;
+		toolCallId: string;
 		commandCwd: string;
 		timeoutMs: number | undefined;
 		timeoutSec: number | undefined;
@@ -818,7 +819,8 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			"bash",
 			label,
 			async ({ jobId, signal: runSignal, reportProgress }) => {
-				const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
+				const { path: artifactPath, id: artifactId } =
+					(await this.session.allocateOutputArtifact?.("bash", { toolCallId: options.toolCallId })) ?? {};
 				const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES);
 				const wallTimeStart = performance.now();
 				try {
@@ -943,7 +945,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 	}
 
 	async execute(
-		_toolCallId: string,
+		toolCallId: string,
 		{
 			command: rawCommand,
 			env: rawEnv,
@@ -1058,6 +1060,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				throw new ToolError("Async job manager unavailable for this session.");
 			}
 			const job = this.#startManagedBashJob({
+				toolCallId,
 				command,
 				commandCwd,
 				timeoutMs,
@@ -1096,6 +1099,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			const autoBackgroundWaitMs = this.#resolveAutoBackgroundWaitMs(timeoutMs);
 			const startBackgrounded = autoBackgroundWaitMs === 0;
 			const job = this.#startManagedBashJob({
+				toolCallId,
 				command,
 				commandCwd,
 				timeoutMs,
@@ -1426,7 +1430,8 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES);
 
 		// Allocate artifact for truncated output storage
-		const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
+		const { path: artifactPath, id: artifactId } =
+			(await this.session.allocateOutputArtifact?.("bash", { toolCallId })) ?? {};
 
 		const interactiveUi = canUseInteractiveBashPty(pty, ctx) ? ctx?.ui : undefined;
 		if (pty && !interactiveUi) {

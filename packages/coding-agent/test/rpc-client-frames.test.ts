@@ -330,4 +330,132 @@ describe("RpcClient frame coverage", () => {
 			schemes: [{ scheme: "fixture", immutable: true }],
 		});
 	});
+	test("exposes the resource lifecycle control surface and typed events", async () => {
+		using client = new RpcClient({
+			cliPath: MOCK_AGENT,
+			env: { MOCK_RPC_RESOURCES: "1" },
+		});
+		const eventTypes: string[] = [];
+		client.onResourceLifecycle(frame => eventTypes.push(frame.type));
+
+		await client.start();
+		const snapshot = await client.listResources();
+		expect(snapshot.servers[0]).toMatchObject({
+			serverId: "alpha",
+			state: "connected",
+			tools: { total: 1, items: [{ name: "alpha_search" }] },
+			resources: { total: 1, items: [{ uri: "docs://one" }] },
+			prompts: { total: 1, items: [{ name: "summarize" }] },
+		});
+		expect(await client.refreshResources("alpha")).toEqual({ operationId: "resource-refresh-1" });
+		expect(await client.reloadResources()).toEqual({ operationId: "resource-reload-1" });
+		expect(await client.cancelResourceOperation("resource-refresh-1")).toBe(true);
+		expect(await client.disposeResource("alpha")).toMatchObject({ serverId: "alpha", state: "disabled" });
+		expect(eventTypes).toEqual(["resource_lifecycle", "resource_operation", "resource_operation"]);
+	});
+
+	test("exposes typed secret-safe runtime provenance snapshots and updates", async () => {
+		using client = new RpcClient({
+			cliPath: MOCK_AGENT,
+			env: { MOCK_RPC_PROVENANCE: "1" },
+		});
+		const revisions: number[] = [];
+		client.onProvenanceUpdate(frame => revisions.push(frame.provenance.revision));
+
+		await client.start();
+		expect(await client.getRuntimeProvenance()).toMatchObject({
+			model: { active: { provider: "anthropic", id: "claude-sonnet" }, role: "reviewer" },
+			usage: { available: false, diagnostic: "not_requested" },
+		});
+		expect(await client.getRuntimeProvenance(true)).toMatchObject({
+			usage: { available: true, reports: [{ provider: "anthropic", fetchedAt: 123 }] },
+		});
+		expect(revisions).toEqual([1]);
+	});
+
+	test("exposes typed collaboration authority, replication, acknowledgement, and media controls", async () => {
+		using client = new RpcClient({
+			cliPath: MOCK_AGENT,
+			env: { MOCK_RPC_COLLABORATION: "1" },
+		});
+		const replicatedKinds: string[] = [];
+		client.onCollaboration(frame => {
+			if (frame.type === "collaboration_replicated") replicatedKinds.push(frame.kind);
+		});
+
+		await client.start();
+		expect(await client.getCollaboration()).toMatchObject({
+			role: "guest",
+			authority: "full",
+			authoritative: false,
+			replication: { generation: 1, latestSequence: 1 },
+		});
+		expect(await client.hostCollaboration()).toMatchObject({
+			role: "host",
+			authoritative: true,
+			links: { link: "wss://relay/r/room.full", viewLink: "wss://relay/r/room.view" },
+		});
+		expect(await client.joinCollaboration("wss://relay/r/room.full")).toMatchObject({
+			role: "guest",
+			authoritative: false,
+		});
+		expect(await client.acknowledgeCollaboration(1, 1)).toEqual({ acknowledged: 1, retained: 0 });
+		expect(await client.readCollaborationMedia("0", 0, 2)).toMatchObject({
+			mediaId: "0",
+			mediaType: "image/png",
+			byteLength: 2,
+			data: "AQI=",
+		});
+		expect(await client.revokeCollaborationParticipant("7")).toMatchObject({ role: "host" });
+		expect(await client.rotateCollaborationAccess()).toMatchObject({ role: "host" });
+		expect(await client.leaveCollaboration()).toMatchObject({ role: "none", state: "off" });
+		expect(replicatedKinds).toEqual(["snapshot"]);
+	});
+
+	test("exposes the ordered authoritative RPC v3 session surface", async () => {
+		using client = new RpcClient({
+			cliPath: MOCK_AGENT,
+			env: { MOCK_RPC_SESSION_V3: "1" },
+		});
+		const delivered = Promise.withResolvers<{ subscriptionId: string; sequence: number }>();
+		client.onSessionObservation(frame => {
+			if (frame.observation.type === "observation") {
+				delivered.resolve({ subscriptionId: frame.subscriptionId, sequence: frame.observation.sequence });
+			}
+		});
+
+		await client.start();
+		const negotiation = await client.initializeV3({
+			requestedCapabilities: ["session.observe", "session.mutate", "session.shutdown"],
+			hostCapabilities: { interactions: ["confirm"], semanticContent: ["markdown"] },
+		});
+		expect(negotiation).toMatchObject({
+			ok: true,
+			profile: { name: "omp.session", major: 3, minor: 0 },
+			framingVersion: 1,
+		});
+
+		const opened = await client.openSession({ snapshot: true });
+		expect(opened).toMatchObject({
+			subscriptionId: "subscription-1",
+			snapshot: {
+				sessionId: "mock-session",
+				revision: 7,
+				journalCursor: { sessionId: "mock-session", leafId: "leaf-1", entryId: "entry-7" },
+				watermark: { epoch: "epoch-1", sequence: 4 },
+			},
+		});
+		expect(await delivered.promise).toEqual({ subscriptionId: "subscription-1", sequence: 5 });
+		await client.acknowledgeSession("subscription-1", 5);
+		expect(
+			await client.invokeSession({
+				kind: "queue_update",
+				input: { entryId: "queue-1", text: "updated" },
+				expectedRevision: 7,
+				idempotencyKey: "mutation-1",
+			}),
+		).toEqual({ outcome: "completed", revision: 8, result: { applied: true } });
+		await client.unsubscribeSession("subscription-1");
+		expect(await client.shutdownSession()).toEqual({ state: "settled" });
+	});
 });

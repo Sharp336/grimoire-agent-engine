@@ -1,6 +1,8 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import {
 	listSessionCatalog,
+	projectSessionCatalogLifecycle,
+	projectSessionTree,
 	resolveSessionCatalogReference,
 	type SessionCatalogError,
 	setSessionCatalogSnapshotEntryLimitForTesting,
@@ -45,6 +47,127 @@ function seededCatalog(): { storage: MemorySessionStorage; paths: string[] } {
 	}
 	return { storage, paths };
 }
+
+describe("session catalog authority projections", () => {
+	it("separates live activity from durable continuation state", () => {
+		expect(projectSessionCatalogLifecycle("complete", true)).toEqual({
+			activity: "active",
+			continuation: "complete",
+			resumable: true,
+			recoverable: false,
+			reconnectable: true,
+		});
+		expect(projectSessionCatalogLifecycle("interrupted", false)).toEqual({
+			activity: "closed",
+			continuation: "incomplete",
+			resumable: true,
+			recoverable: true,
+			reconnectable: false,
+		});
+		expect(projectSessionCatalogLifecycle("error", false)).toEqual({
+			activity: "closed",
+			continuation: "failed",
+			resumable: true,
+			recoverable: true,
+			reconnectable: false,
+		});
+		expect(projectSessionCatalogLifecycle("unknown", false)).toEqual({
+			activity: "closed",
+			continuation: "ambiguous",
+			resumable: true,
+			recoverable: false,
+			reconnectable: false,
+		});
+	});
+
+	it("projects the real tree without copying journal payloads", () => {
+		const roots = projectSessionTree(
+			[
+				{
+					entry: {
+						type: "message",
+						id: "root",
+						parentId: null,
+						timestamp: "2026-08-01T00:00:00.000Z",
+						message: { role: "user", content: "private root prompt", timestamp: 1 },
+					},
+					children: [
+						{
+							entry: {
+								type: "message",
+								id: "leaf",
+								parentId: "root",
+								timestamp: "2026-08-01T00:00:01.000Z",
+								message: {
+									role: "assistant",
+									content: [],
+									api: "anthropic-messages",
+									provider: "anthropic",
+									model: "claude-sonnet-4-5",
+									usage: {
+										input: 0,
+										output: 0,
+										cacheRead: 0,
+										cacheWrite: 0,
+										totalTokens: 0,
+										cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+									},
+									stopReason: "stop",
+									timestamp: 2,
+								},
+							},
+							children: [],
+							label: "selected",
+						},
+					],
+				},
+			],
+			"leaf",
+		);
+
+		expect(roots).toEqual([
+			{
+				id: "root",
+				parentId: null,
+				timestamp: "2026-08-01T00:00:00.000Z",
+				entryType: "message",
+				messageRole: "user",
+				activeBranch: true,
+				activeLeaf: false,
+				children: [
+					{
+						id: "leaf",
+						parentId: "root",
+						timestamp: "2026-08-01T00:00:01.000Z",
+						entryType: "message",
+						messageRole: "assistant",
+						label: "selected",
+						activeBranch: true,
+						activeLeaf: true,
+						children: [],
+					},
+				],
+			},
+		]);
+		expect(JSON.stringify(roots)).not.toContain("private root prompt");
+	});
+	it("marks only the authoritative live session reconnectable", async () => {
+		const { storage } = seededCatalog();
+		const page = await listSessionCatalog({ scope: "cwd", cwd: CWD }, storage, { activeSessionId: "0190aaaa-2222" });
+
+		expect(
+			page.sessions.map(session => ({
+				id: session.id,
+				activity: session.lifecycle.activity,
+				reconnectable: session.lifecycle.reconnectable,
+			})),
+		).toEqual([
+			{ id: "0190aaaa-1111", activity: "closed", reconnectable: false },
+			{ id: "0190aaaa-2222", activity: "active", reconnectable: true },
+			{ id: "0190cccc-3333", activity: "closed", reconnectable: false },
+		]);
+	});
+});
 
 describe("session catalog", () => {
 	it("uses an opaque snapshot cursor and never leaks transcript text", async () => {

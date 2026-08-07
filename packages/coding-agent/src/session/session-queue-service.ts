@@ -1,4 +1,5 @@
 import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import type { RestoredQueuedMessage } from "./agent-session-types";
 import type { CustomMessage } from "./messages";
 import {
@@ -75,6 +76,60 @@ export class SessionQueueService {
 			};
 		});
 	}
+	#copyIdentity(from: AgentMessage, to: AgentMessage): AgentMessage {
+		const entryId = this.#entryIds.get(from);
+		if (entryId) this.#entryIds.set(to, entryId);
+		const tag = this.#messageTags.get(from);
+		if (tag) this.#messageTags.set(to, tag);
+		return to;
+	}
+	#replaceText(message: AgentMessage, text: string): AgentMessage {
+		const replaceContent = (
+			content: string | (TextContent | ImageContent)[],
+		): string | (TextContent | ImageContent)[] => {
+			if (typeof content === "string") return text;
+			const index = content.findIndex(part => part.type === "text");
+			if (index < 0) return [{ type: "text", text }, ...content];
+			return content.map((part, partIndex) => (partIndex === index ? { ...part, text } : part));
+		};
+		if (message.role === "user") {
+			return this.#copyIdentity(message, { ...message, content: replaceContent(message.content) });
+		}
+		if (message.role === "custom") {
+			const details =
+				typeof message.details === "object" && message.details !== null && !Array.isArray(message.details)
+					? { ...message.details, __queueChipText: text }
+					: { __queueChipText: text };
+			return this.#copyIdentity(message, {
+				...message,
+				content: replaceContent(message.content),
+				details,
+			});
+		}
+		throw new Error("Only user-authored queue entries can be updated");
+	}
+	#withLane(message: AgentMessage, lane: SessionQueueLane): AgentMessage {
+		if (message.role !== "user") return message;
+		if (lane === "steering") return this.#copyIdentity(message, { ...message, steering: true });
+		const next = { ...message };
+		delete next.steering;
+		return this.#copyIdentity(message, next);
+	}
+	#rowInsertionOffset(queue: readonly AgentMessage[], toIndex: number): number {
+		const rowCount = queue.filter(isUserQueuedMessage).length;
+		if (!Number.isSafeInteger(toIndex) || toIndex < 0 || toIndex > rowCount) {
+			throw new SessionQueueInvalidPositionError(toIndex, rowCount + 1);
+		}
+		if (toIndex === rowCount) return queue.length;
+		let row = 0;
+		for (let index = 0; index < queue.length; index++) {
+			if (!isUserQueuedMessage(queue[index]!)) continue;
+			if (row++ !== toIndex) continue;
+			while (index > 0 && isHiddenUserCompanion(queue[index - 1]!)) index--;
+			return index;
+		}
+		return queue.length;
+	}
 	snapshot(): SessionQueueSnapshot {
 		const steeringAll = this.agent.peekSteeringQueue();
 		const followUpAll = this.agent.peekFollowUpQueue();
@@ -91,6 +146,88 @@ export class SessionQueueService {
 			pendingCount: displayableCount + pendingNextTurnCount,
 			pendingNextTurnCount,
 		};
+	}
+	insert(
+		lane: SessionQueueLane,
+		text: string,
+		toIndex: number = this.#entries(
+			lane,
+			lane === "steering" ? this.agent.peekSteeringQueue() : this.agent.peekFollowUpQueue(),
+		).length,
+	): { entry: SessionQueueEntry; snapshot: SessionQueueSnapshot } {
+		const steering = this.agent.peekSteeringQueue();
+		const followUp = this.agent.peekFollowUpQueue();
+		const target = lane === "steering" ? steering : followUp;
+		const message: AgentMessage = {
+			role: "user",
+			content: [{ type: "text", text }],
+			...(lane === "steering" ? { steering: true } : {}),
+			attribution: "user",
+			timestamp: Date.now(),
+		};
+		const entryId = this.#idFor(message);
+		const next = target.slice();
+		next.splice(this.#rowInsertionOffset(target, toIndex), 0, message);
+		this.#setQueues(lane === "steering" ? next : steering, lane === "followUp" ? next : followUp);
+		const snapshot = this.snapshot();
+		return { entry: { entryId, lane, text }, snapshot };
+	}
+	update(entryId: string, text: string): { entry: SessionQueueEntry; snapshot: SessionQueueSnapshot } {
+		const steering = this.agent.peekSteeringQueue();
+		const followUp = this.agent.peekFollowUpQueue();
+		for (const [lane, queue] of [
+			["steering", steering],
+			["followUp", followUp],
+		] as const) {
+			const index = queue.findIndex(message => isUserQueuedMessage(message) && this.#idFor(message) === entryId);
+			if (index < 0) continue;
+			const next = queue.slice();
+			next[index] = this.#replaceText(next[index]!, text);
+			this.#setQueues(lane === "steering" ? next : steering, lane === "followUp" ? next : followUp);
+			const snapshot = this.snapshot();
+			const entry = snapshot[lane].find(candidate => candidate.entryId === entryId)!;
+			return { entry, snapshot };
+		}
+		throw new SessionQueueEntryNotFoundError(entryId);
+	}
+	move(entryId: string, lane: SessionQueueLane, toIndex: number): SessionQueueSnapshot {
+		const steering = this.agent.peekSteeringQueue();
+		const followUp = this.agent.peekFollowUpQueue();
+		for (const [sourceLane, source] of [
+			["steering", steering],
+			["followUp", followUp],
+		] as const) {
+			const index = source.findIndex(message => isUserQueuedMessage(message) && this.#idFor(message) === entryId);
+			if (index < 0) continue;
+			let start = index;
+			while (start > 0 && isHiddenUserCompanion(source[start - 1]!)) start--;
+			const sourceNext = source.slice();
+			const unit = sourceNext.splice(start, index - start + 1);
+			const primary = this.#withLane(unit[unit.length - 1]!, lane);
+			unit[unit.length - 1] = primary;
+			const target = sourceLane === lane ? sourceNext : lane === "steering" ? steering : followUp;
+			const targetNext = target.slice();
+			targetNext.splice(this.#rowInsertionOffset(target, toIndex), 0, ...unit);
+			const nextSteering =
+				sourceLane === "steering"
+					? lane === "steering"
+						? targetNext
+						: sourceNext
+					: lane === "steering"
+						? targetNext
+						: steering;
+			const nextFollowUp =
+				sourceLane === "followUp"
+					? lane === "followUp"
+						? targetNext
+						: sourceNext
+					: lane === "followUp"
+						? targetNext
+						: followUp;
+			this.#setQueues(nextSteering, nextFollowUp);
+			return this.snapshot();
+		}
+		throw new SessionQueueEntryNotFoundError(entryId);
 	}
 	clear(options?: { lane?: SessionQueueLane | "all"; forInterrupt?: boolean }): SessionQueueClearResult {
 		const lane = options?.lane ?? "all";

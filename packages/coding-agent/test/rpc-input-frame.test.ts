@@ -570,6 +570,140 @@ describe("RpcInputDispatcher", () => {
 			},
 		]);
 	});
+
+	test("session shutdown rejects later commands before the settlement response", async () => {
+		const started: string[] = [];
+		const { deps, outputs } = makeDeps(async command => {
+			started.push(command.type);
+			if (command.type !== "session_shutdown") throw new Error(`unexpected command type: ${command.type}`);
+			return {
+				id: command.id,
+				type: "response",
+				command: "session_shutdown",
+				success: true,
+				data: { state: "settled" },
+			};
+		});
+		const dispatcher = new RpcInputDispatcher({ deps });
+
+		dispatcher.dispatch({ id: "shutdown", type: "session_shutdown" });
+		dispatcher.dispatch({ id: "late", type: "set_auto_retry", enabled: true });
+		await dispatcher.drain();
+
+		expect(started).toEqual(["session_shutdown"]);
+		expect(outputs).toEqual([
+			{
+				id: "late",
+				type: "response",
+				command: "set_auto_retry",
+				success: false,
+				error: "RPC session is shutting down",
+				code: "session_closing",
+			},
+			{
+				id: "shutdown",
+				type: "response",
+				command: "session_shutdown",
+				success: true,
+				data: { state: "settled" },
+			},
+		]);
+	});
+	test("session shutdown settles every previously accepted serial command before its final response", async () => {
+		const gate = Promise.withResolvers<void>();
+		const { deps, outputs } = makeDeps(async command => {
+			if (command.type === "set_auto_retry") {
+				await gate.promise;
+				return { id: command.id, type: "response", command: "set_auto_retry", success: true };
+			}
+			if (command.type === "session_shutdown") {
+				return {
+					id: command.id,
+					type: "response",
+					command: "session_shutdown",
+					success: true,
+					data: { state: "settled" },
+				};
+			}
+			throw new Error(`unexpected command type: ${command.type}`);
+		});
+		const dispatcher = new RpcInputDispatcher({ deps });
+
+		dispatcher.dispatch({ id: "accepted", type: "set_auto_retry", enabled: true });
+		dispatcher.dispatch({ id: "shutdown", type: "session_shutdown" });
+		dispatcher.dispatch({ id: "late", type: "set_auto_retry", enabled: false });
+		await flushMicrotasks();
+		expect(outputs).toEqual([
+			{
+				id: "late",
+				type: "response",
+				command: "set_auto_retry",
+				success: false,
+				error: "RPC session is shutting down",
+				code: "session_closing",
+			},
+		]);
+
+		gate.resolve();
+		await dispatcher.drain();
+		expect(outputs.map(frame => ("id" in frame ? frame.id : undefined))).toEqual(["late", "accepted", "shutdown"]);
+	});
+
+	test("session shutdown rejects pending interactions before draining accepted commands", async () => {
+		const pendingExtensionRequests = new RpcPendingExtensionRequests();
+		let depsRef: RpcInputFrameDeps;
+		let interactionRejected = false;
+		let drainObservedRejection = false;
+		const { deps, outputs } = makeDeps(
+			async command => {
+				if (command.type === "prompt") {
+					try {
+						await requestExtensionInput(depsRef, "ui-shutdown", "Continue?");
+					} catch {
+						interactionRejected = true;
+					}
+					return {
+						id: command.id,
+						type: "response",
+						command: "prompt",
+						success: false,
+						error: "RPC session is shutting down",
+					};
+				}
+				if (command.type === "session_shutdown") {
+					return {
+						id: command.id,
+						type: "response",
+						command: "session_shutdown",
+						success: true,
+						data: { state: "settled" },
+					};
+				}
+				throw new Error(`unexpected command type: ${command.type}`);
+			},
+			{ pendingExtensionRequests },
+		);
+		depsRef = deps;
+		const dispatcher = new RpcInputDispatcher({
+			deps,
+			onShutdownInitiated: () => pendingExtensionRequests.rejectAll("RPC session is shutting down"),
+			beforeShutdown: async () => {
+				drainObservedRejection = interactionRejected;
+			},
+		});
+
+		dispatcher.dispatch({ id: "prompt", type: "prompt", message: "ask extension" });
+		await flushMicrotasks();
+		dispatcher.dispatch({ id: "shutdown", type: "session_shutdown" });
+		await dispatcher.drain();
+
+		expect(drainObservedRejection).toBe(true);
+		expect(outputs.map(frame => ("id" in frame ? frame.id : undefined))).toEqual([
+			"ui-shutdown",
+			"prompt",
+			"shutdown",
+		]);
+	});
 });
 
 describe("RpcShutdownCoordinator", () => {

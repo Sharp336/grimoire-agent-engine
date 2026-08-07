@@ -72,6 +72,38 @@ describe("RpcOperationManager", () => {
 		expect(manager.hasActiveCommand("set_mode")).toBe(false);
 	});
 
+	test("waits for the terminal outcome of an accepted operation", async () => {
+		const manager = new RpcOperationManager(
+			() => {},
+			() => "operation-1",
+			() => 100,
+		);
+		const operation = manager.start("request-1", "set_mode");
+		const settlement = manager.waitForSettlement(operation.operationId);
+
+		manager.begin(operation);
+		manager.complete(operation, false, {
+			state: {
+				providerId: "test",
+				name: "Test",
+				authenticated: true,
+				disabled: false,
+				available: true,
+				methods: [],
+			},
+		});
+
+		await expect(settlement).resolves.toMatchObject({
+			type: "operation_completed",
+			operationId: "operation-1",
+			data: { state: { providerId: "test", authenticated: true } },
+		});
+		await expect(manager.waitForSettlement(operation.operationId)).resolves.toMatchObject({
+			type: "operation_completed",
+			operationId: "operation-1",
+		});
+	});
+
 	test("bulk cancellation preserves explicitly protected operations", () => {
 		let sequence = 0;
 		const manager = new RpcOperationManager(

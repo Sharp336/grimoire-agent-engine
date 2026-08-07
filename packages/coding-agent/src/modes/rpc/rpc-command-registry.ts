@@ -1,6 +1,7 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import { isTodoPhase } from "../../tools/todo";
+import { MAX_ARTIFACT_RANGE_BYTES } from "../../session/artifacts";
+import { isTodoOperationInput, isTodoPhase } from "../../tools/todo";
 import { sanitizeExternalToolText } from "../../tools/xdev";
 import {
 	RPC_EVENT_TYPES,
@@ -16,6 +17,7 @@ import {
 	type RpcCommandScope,
 	type RpcCommandType,
 	type RpcInputSchema,
+	type RpcJsonValue,
 } from "./rpc-types";
 
 export const RPC_APPLICATION_API_VERSION = 2;
@@ -123,6 +125,35 @@ const positiveIntegerField = optional("a positive integer", value => Number.isSa
 	type: ["integer", "null"],
 	minimum: 1,
 });
+const loopActionField = optional(
+	"a loop action",
+	value => value === "prompt" || value === "compact" || value === "reset",
+	{ type: ["string", "null"], enum: ["prompt", "compact", "reset", null] },
+);
+const loopLimitField = optional(
+	"a positive iteration or duration loop limit",
+	value =>
+		isRecord(value) &&
+		((value.kind === "iterations" && Number.isSafeInteger(value.iterations) && Number(value.iterations) > 0) ||
+			(value.kind === "duration" && Number.isSafeInteger(value.durationMs) && Number(value.durationMs) > 0)),
+	{
+		oneOf: [
+			{
+				type: "object",
+				properties: { kind: { const: "iterations" }, iterations: { type: "integer", minimum: 1 } },
+				required: ["kind", "iterations"],
+				additionalProperties: false,
+			},
+			{
+				type: "object",
+				properties: { kind: { const: "duration" }, durationMs: { type: "integer", minimum: 1 } },
+				required: ["kind", "durationMs"],
+				additionalProperties: false,
+			},
+			{ type: "null" },
+		],
+	},
+);
 const optionalIntegerField = optional("an integer", value => Number.isSafeInteger(value), {
 	type: ["integer", "null"],
 });
@@ -132,12 +163,36 @@ const optionalBoundedPositiveIntegerField = (maximum: number): RpcFieldDefinitio
 		value => Number.isSafeInteger(value) && Number(value) > 0 && Number(value) <= maximum,
 		{ type: ["integer", "null"], minimum: 1, maximum },
 	);
+const requiredNonNegativeIntegerField = required(
+	"a non-negative integer",
+	value => Number.isSafeInteger(value) && Number(value) >= 0,
+	{ type: "integer", minimum: 0 },
+);
 
 const MAX_OPAQUE_ID_BYTES = 256;
 const opaqueIdField = required(
 	`a non-empty opaque id of at most ${MAX_OPAQUE_ID_BYTES} UTF-8 bytes`,
 	value => typeof value === "string" && value.length > 0 && Buffer.byteLength(value, "utf8") <= MAX_OPAQUE_ID_BYTES,
 	{ type: "string", minLength: 1, maxLength: MAX_OPAQUE_ID_BYTES, "x-maxUtf8Bytes": MAX_OPAQUE_ID_BYTES },
+);
+const optionalOpaqueIdField = optional(
+	`a non-empty opaque id of at most ${MAX_OPAQUE_ID_BYTES} UTF-8 bytes`,
+	value => typeof value === "string" && value.length > 0 && Buffer.byteLength(value, "utf8") <= MAX_OPAQUE_ID_BYTES,
+	{ type: ["string", "null"], minLength: 1, maxLength: MAX_OPAQUE_ID_BYTES, "x-maxUtf8Bytes": MAX_OPAQUE_ID_BYTES },
+);
+const artifactIdField = required("a numeric artifact id", value => typeof value === "string" && /^\d+$/.test(value), {
+	type: "string",
+	pattern: "^\\d+$",
+});
+const artifactDestinationField = required(
+	"a non-empty artifact export path of at most 4096 UTF-8 bytes",
+	value => typeof value === "string" && value.length > 0 && Buffer.byteLength(value, "utf8") <= 4096,
+	{ type: "string", minLength: 1, maxLength: 4096, "x-maxUtf8Bytes": 4096 },
+);
+const artifactSha256Field = required(
+	"a lowercase SHA-256 digest",
+	value => typeof value === "string" && /^[a-f0-9]{64}$/.test(value),
+	{ type: "string", pattern: "^[a-f0-9]{64}$" },
 );
 const queueIndexField = required("a non-negative integer", value => Number.isSafeInteger(value) && Number(value) >= 0, {
 	type: "integer",
@@ -262,6 +317,177 @@ function optionalEnumField<const TValue extends string>(...values: readonly TVal
 	});
 }
 
+function isBoundedStringArray(value: unknown, maxItems: number, maxBytes: number): value is string[] {
+	return (
+		Array.isArray(value) &&
+		value.length <= maxItems &&
+		value.every(item => typeof item === "string" && item.length > 0 && Buffer.byteLength(item, "utf8") <= maxBytes)
+	);
+}
+
+const semanticProfileField = required(
+	"an omp.session semantic profile range",
+	value => {
+		if (!isRecord(value) || value.name !== "omp.session" || !Number.isSafeInteger(value.major)) return false;
+		const allowed = new Set(["name", "major", "minMinor", "maxMinor"]);
+		if (Object.keys(value).some(key => !allowed.has(key))) return false;
+		return (
+			(value.minMinor === undefined || Number.isSafeInteger(value.minMinor)) &&
+			(value.maxMinor === undefined || Number.isSafeInteger(value.maxMinor))
+		);
+	},
+	{
+		type: "object",
+		properties: {
+			name: { const: "omp.session" },
+			major: { type: "integer", minimum: 1 },
+			minMinor: { type: "integer", minimum: 0 },
+			maxMinor: { type: "integer", minimum: 0 },
+		},
+		required: ["name", "major"],
+		additionalProperties: false,
+	},
+);
+
+const hostCapabilitiesField = required(
+	"a host capability declaration",
+	value => {
+		if (!isRecord(value)) return false;
+		if (Object.keys(value).some(key => key !== "interactions" && key !== "semanticContent")) return false;
+		return (
+			isBoundedStringArray(value.interactions, 32, 64) &&
+			isBoundedStringArray(value.semanticContent, 32, 64) &&
+			new Set(value.interactions).size === value.interactions.length &&
+			new Set(value.semanticContent).size === value.semanticContent.length
+		);
+	},
+	{
+		type: "object",
+		properties: {
+			interactions: {
+				type: "array",
+				maxItems: 32,
+				uniqueItems: true,
+				items: { type: "string", minLength: 1, maxLength: 64, "x-maxUtf8Bytes": 64 },
+			},
+			semanticContent: {
+				type: "array",
+				maxItems: 32,
+				uniqueItems: true,
+				items: { type: "string", minLength: 1, maxLength: 64, "x-maxUtf8Bytes": 64 },
+			},
+		},
+		required: ["interactions", "semanticContent"],
+		additionalProperties: false,
+	},
+);
+
+const requestedCapabilitiesField = required(
+	"an array of at most 256 unique capability ids",
+	value => isBoundedStringArray(value, 256, 128) && new Set(value).size === value.length,
+	{
+		type: "array",
+		maxItems: 256,
+		uniqueItems: true,
+		items: { type: "string", minLength: 1, maxLength: 128, "x-maxUtf8Bytes": 128 },
+	},
+);
+
+export function isRpcJsonValue(value: unknown, depth = 0): value is RpcJsonValue {
+	if (depth > 64) return false;
+	if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+	if (typeof value === "number") return Number.isFinite(value);
+	if (Array.isArray(value)) return value.every(item => isRpcJsonValue(item, depth + 1));
+	if (!isRecord(value)) return false;
+	return Object.values(value).every(item => isRpcJsonValue(item, depth + 1));
+}
+
+const optionalJsonObjectField = optional("a JSON object", value => isRecord(value) && isRpcJsonValue(value), {
+	type: ["object", "null"],
+});
+
+const observationPositionField = optional(
+	"an observation epoch and non-negative sequence",
+	value =>
+		isRecord(value) &&
+		Object.keys(value).every(key => key === "epoch" || key === "sequence") &&
+		typeof value.epoch === "string" &&
+		value.epoch.length > 0 &&
+		Buffer.byteLength(value.epoch, "utf8") <= MAX_OPAQUE_ID_BYTES &&
+		Number.isSafeInteger(value.sequence) &&
+		Number(value.sequence) >= 0,
+	{
+		type: ["object", "null"],
+		properties: {
+			epoch: { type: "string", minLength: 1, maxLength: MAX_OPAQUE_ID_BYTES },
+			sequence: { type: "integer", minimum: 0 },
+		},
+		required: ["epoch", "sequence"],
+		additionalProperties: false,
+	},
+);
+
+const durableCursorField = optional(
+	"a durable session journal cursor",
+	value =>
+		isRecord(value) &&
+		Object.keys(value).every(key => key === "sessionId" || key === "leafId" || key === "entryId") &&
+		typeof value.sessionId === "string" &&
+		value.sessionId.length > 0 &&
+		Buffer.byteLength(value.sessionId, "utf8") <= MAX_OPAQUE_ID_BYTES &&
+		(value.leafId === null ||
+			(typeof value.leafId === "string" &&
+				value.leafId.length > 0 &&
+				Buffer.byteLength(value.leafId, "utf8") <= MAX_OPAQUE_ID_BYTES)) &&
+		(value.entryId === null ||
+			(typeof value.entryId === "string" &&
+				value.entryId.length > 0 &&
+				Buffer.byteLength(value.entryId, "utf8") <= MAX_OPAQUE_ID_BYTES)),
+	{
+		type: ["object", "null"],
+		properties: {
+			sessionId: { type: "string", minLength: 1, maxLength: MAX_OPAQUE_ID_BYTES },
+			leafId: { type: ["string", "null"], maxLength: MAX_OPAQUE_ID_BYTES },
+			entryId: { type: ["string", "null"], maxLength: MAX_OPAQUE_ID_BYTES },
+		},
+		required: ["sessionId", "leafId", "entryId"],
+		additionalProperties: false,
+	},
+);
+
+const sessionInvocationField = required(
+	"a bounded session command",
+	value => {
+		if (!isRecord(value)) return false;
+		if (Object.keys(value).some(key => !["kind", "input", "expectedRevision", "idempotencyKey"].includes(key))) {
+			return false;
+		}
+		return (
+			typeof value.kind === "string" &&
+			value.kind.length > 0 &&
+			Buffer.byteLength(value.kind, "utf8") <= 128 &&
+			(value.input === undefined || isRpcJsonValue(value.input)) &&
+			(value.expectedRevision === undefined ||
+				(Number.isSafeInteger(value.expectedRevision) && Number(value.expectedRevision) >= 0)) &&
+			(value.idempotencyKey === undefined ||
+				(typeof value.idempotencyKey === "string" &&
+					value.idempotencyKey.length > 0 &&
+					Buffer.byteLength(value.idempotencyKey, "utf8") <= MAX_OPAQUE_ID_BYTES))
+		);
+	},
+	{
+		type: "object",
+		properties: {
+			kind: { type: "string", minLength: 1, maxLength: 128 },
+			input: {},
+			expectedRevision: { type: "integer", minimum: 0 },
+			idempotencyKey: { type: "string", minLength: 1, maxLength: MAX_OPAQUE_ID_BYTES },
+		},
+		required: ["kind"],
+		additionalProperties: false,
+	},
+);
+
 const AVAILABLE: RpcCommandAvailabilityResult = { availability: "available" };
 
 function requiresFeature(feature: string): Pick<RpcCommandMetadata, "requiredFeatures" | "availability"> {
@@ -336,6 +562,188 @@ export const RPC_COMMAND_DEFINITIONS = {
 		{ protocolVersion: required("an integer", value => Number.isSafeInteger(value)) },
 	),
 	get_capabilities: hostCommand({ type: "get_capabilities" }),
+	initialize: hostCommand(
+		{
+			type: "initialize",
+			profile: { name: "omp.session", major: 3 },
+			framingVersion: 2,
+			hostCapabilities: { interactions: [], semanticContent: [] },
+			requestedCapabilities: [],
+		},
+		{
+			profile: semanticProfileField,
+			framingVersion: required("an integer", value => Number.isSafeInteger(value), { type: "integer" }),
+			hostCapabilities: hostCapabilitiesField,
+			requestedCapabilities: requestedCapabilitiesField,
+		},
+	),
+	session_open: sessionCommand(
+		{ type: "session_open", id: "request-1" },
+		{ after: observationPositionField, afterCursor: durableCursorField, snapshot: optionalBooleanField },
+		"serial",
+		{ version: 3, ...requiresFeature("session-observe") },
+	),
+	session_ack: sessionCommand(
+		{ type: "session_ack", id: "request-1", subscriptionId: "subscription-1", sequence: 0 },
+		{ subscriptionId: opaqueIdField, sequence: queueIndexField },
+		"control",
+		{ version: 3, ...requiresFeature("session-observe") },
+	),
+	session_unsubscribe: sessionCommand(
+		{ type: "session_unsubscribe", id: "request-1", subscriptionId: "subscription-1" },
+		{ subscriptionId: opaqueIdField },
+		"control",
+		{ version: 3, ...requiresFeature("session-observe") },
+	),
+	session_invoke: sessionCommand(
+		{ type: "session_invoke", id: "request-1", command: { kind: "get_state" } },
+		{ command: sessionInvocationField },
+		"serial",
+		{ version: 3, ...requiresFeature("session-execute") },
+	),
+	session_shutdown: sessionCommand({ type: "session_shutdown", id: "request-1" }, {}, "control", {
+		version: 3,
+		...requiresFeature("session-shutdown"),
+	}),
+	semantic_action: sessionCommand(
+		{
+			type: "semantic_action",
+			id: "request-1",
+			renderId: "render-1",
+			actionId: "apply",
+		},
+		{
+			renderId: opaqueIdField,
+			actionId: opaqueIdField,
+			input: optionalJsonObjectField,
+		},
+		"serial",
+		{ version: 3, ...requiresFeature("semantic-rendering") },
+	),
+	semantic_cancel: sessionCommand(
+		{ type: "semantic_cancel", id: "request-1", renderId: "render-1" },
+		{ renderId: opaqueIdField, actionId: optionalOpaqueIdField },
+		"control",
+		{ version: 3, ...requiresFeature("semantic-rendering") },
+	),
+	artifact_describe: sessionCommand(
+		{ type: "artifact_describe", id: "request-1", artifactId: "0" },
+		{ artifactId: artifactIdField },
+		"serial",
+		{ version: 3, ...requiresFeature("artifact") },
+	),
+	artifact_read: sessionCommand(
+		{ type: "artifact_read", id: "request-1", artifactId: "0", offset: 0, length: MAX_ARTIFACT_RANGE_BYTES },
+		{
+			artifactId: artifactIdField,
+			offset: nonNegativeIntegerField,
+			length: optionalBoundedPositiveIntegerField(MAX_ARTIFACT_RANGE_BYTES),
+		},
+		"serial",
+		{ version: 3, ...requiresFeature("artifact") },
+	),
+	artifact_export: sessionCommand(
+		{
+			type: "artifact_export",
+			id: "request-1",
+			artifactId: "0",
+			destination: "output.txt",
+			expectedSha256: "0".repeat(64),
+		},
+		{
+			artifactId: artifactIdField,
+			destination: artifactDestinationField,
+			expectedSha256: artifactSha256Field,
+		},
+		"serial",
+		{ version: 3, ...requiresFeature("artifact") },
+	),
+	resource_list: sessionCommand({ type: "resource_list", id: "request-1" }, {}, "concurrent", {
+		version: 3,
+		...requiresFeature("resource-lifecycle"),
+	}),
+	resource_refresh: sessionCommand(
+		{ type: "resource_refresh", id: "request-1", serverId: "resource-server-1" },
+		{ serverId: optionalOpaqueIdField },
+		"serial",
+		{ version: 3, ...requiresFeature("resource-lifecycle") },
+	),
+	resource_reload: sessionCommand({ type: "resource_reload", id: "request-1" }, {}, "serial", {
+		version: 3,
+		...requiresFeature("resource-lifecycle"),
+	}),
+	resource_cancel: sessionCommand(
+		{ type: "resource_cancel", id: "request-1", operationId: "resource-operation-1" },
+		{ operationId: opaqueIdField },
+		"control",
+		{ version: 3, ...requiresFeature("resource-lifecycle") },
+	),
+	resource_dispose: sessionCommand(
+		{ type: "resource_dispose", id: "request-1", serverId: "resource-server-1" },
+		{ serverId: opaqueIdField },
+		"serial",
+		{ version: 3, ...requiresFeature("resource-lifecycle") },
+	),
+	provenance_get: sessionCommand(
+		{ type: "provenance_get", id: "request-1", refreshUsage: true },
+		{ refreshUsage: optionalBooleanField },
+		"concurrent",
+		{ version: 3, ...requiresFeature("runtime-provenance") },
+	),
+	collaboration_get: sessionCommand({ type: "collaboration_get", id: "request-1" }, {}, "concurrent", {
+		version: 3,
+		...requiresFeature("collaboration"),
+	}),
+	collaboration_host: sessionCommand(
+		{ type: "collaboration_host", id: "request-1", relayUrl: "wss://relay.example", webUrl: "https://example" },
+		{
+			relayUrl: optionalBoundedStringField("a relay URL of at most 2048 UTF-8 bytes", 2048),
+			webUrl: optionalBoundedStringField("a web URL of at most 2048 UTF-8 bytes", 2048),
+		},
+		"serial",
+		{ version: 3, ...requiresFeature("collaboration") },
+	),
+	collaboration_join: sessionCommand(
+		{ type: "collaboration_join", id: "request-1", link: "wss://relay.example/r/room.key", displayName: "guest" },
+		{
+			link: boundedStringField("a collaboration link of at most 8192 UTF-8 bytes", 8192),
+			displayName: optionalBoundedStringField("a display name of at most 256 UTF-8 bytes", 256),
+		},
+		"serial",
+		{ version: 3, ...requiresFeature("collaboration") },
+	),
+	collaboration_leave: sessionCommand(
+		{ type: "collaboration_leave", id: "request-1", reason: "client_requested" },
+		{ reason: optionalBoundedStringField("a leave reason of at most 1024 UTF-8 bytes", 1024) },
+		"control",
+		{ version: 3, ...requiresFeature("collaboration") },
+	),
+	collaboration_revoke: sessionCommand(
+		{ type: "collaboration_revoke", id: "request-1", participantId: "7" },
+		{ participantId: opaqueIdField },
+		"control",
+		{ version: 3, ...requiresFeature("collaboration") },
+	),
+	collaboration_rotate: sessionCommand({ type: "collaboration_rotate", id: "request-1" }, {}, "control", {
+		version: 3,
+		...requiresFeature("collaboration"),
+	}),
+	collaboration_acknowledge: sessionCommand(
+		{ type: "collaboration_acknowledge", id: "request-1", generation: 1, sequence: 1 },
+		{ generation: requiredNonNegativeIntegerField, sequence: requiredNonNegativeIntegerField },
+		"concurrent",
+		{ version: 3, ...requiresFeature("collaboration") },
+	),
+	collaboration_read_media: sessionCommand(
+		{ type: "collaboration_read_media", id: "request-1", mediaId: "0", offset: 0, length: MAX_ARTIFACT_RANGE_BYTES },
+		{
+			mediaId: artifactIdField,
+			offset: nonNegativeIntegerField,
+			length: optionalBoundedPositiveIntegerField(MAX_ARTIFACT_RANGE_BYTES),
+		},
+		"concurrent",
+		{ version: 3, ...requiresFeature("collaboration") },
+	),
 	prompt: turnCommand(
 		{ type: "prompt", message: "hello" },
 		{
@@ -516,6 +924,84 @@ export const RPC_COMMAND_DEFINITIONS = {
 		{ type: "set_todos", phases: [] },
 		{ phases: required("an array of valid todo phases", value => Array.isArray(value) && value.every(isTodoPhase)) },
 	),
+	todo_apply: sessionCommand(
+		{ type: "todo_apply", operation: { op: "view" } },
+		{
+			operation: required("a valid semantic todo operation", isTodoOperationInput, {
+				type: "object",
+				properties: {
+					op: {
+						type: "string",
+						enum: ["init", "start", "done", "rm", "drop", "block", "unblock", "append", "view"],
+					},
+					list: { type: "array" },
+					task: { type: "string" },
+					phase: { type: "string" },
+					items: { type: "array", items: { type: "string" } },
+					reason: { type: "string" },
+				},
+				required: ["op"],
+				additionalProperties: false,
+			}),
+		},
+		"serial",
+	),
+	goal_control: sessionCommand(
+		{ type: "goal_control", op: "get" },
+		{
+			op: required(
+				"a goal lifecycle operation",
+				value =>
+					value === "create" ||
+					value === "replace" ||
+					value === "get" ||
+					value === "resume" ||
+					value === "pause" ||
+					value === "drop" ||
+					value === "complete" ||
+					value === "set_budget" ||
+					value === "clear_budget",
+				{
+					type: "string",
+					enum: ["create", "replace", "get", "resume", "pause", "drop", "complete", "set_budget", "clear_budget"],
+				},
+			),
+			objective: optionalBoundedStringField("a goal objective", 65_536),
+			tokenBudget: positiveIntegerField,
+		},
+		"serial",
+	),
+	checkpoint_control: sessionCommand(
+		{ type: "checkpoint_control", op: "get" },
+		{
+			op: required(
+				"a checkpoint lifecycle operation",
+				value => value === "get" || value === "create" || value === "rewind",
+				{
+					type: "string",
+					enum: ["get", "create", "rewind"],
+				},
+			),
+			goal: optionalBoundedStringField("an investigation goal", 65_536),
+			report: optionalBoundedStringField("a retained rewind report", 262_144),
+		},
+		"serial",
+	),
+	loop_control: sessionCommand(
+		{ type: "loop_control", op: "get" },
+		{
+			op: required(
+				"a loop lifecycle operation",
+				value =>
+					value === "get" || value === "enable" || value === "pause" || value === "resume" || value === "disable",
+				{ type: "string", enum: ["get", "enable", "pause", "resume", "disable"] },
+			),
+			action: loopActionField,
+			prompt: optionalBoundedStringField("a loop prompt", 262_144),
+			limit: loopLimitField,
+		},
+		"serial",
+	),
 	set_host_tools: hostCommand(
 		{ type: "set_host_tools", tools: [] },
 		{
@@ -580,6 +1066,17 @@ export const RPC_COMMAND_DEFINITIONS = {
 		"concurrent",
 		requiresFeature("agent-control"),
 	),
+	start_agent: agentCommand(
+		{ type: "start_agent", task: "Investigate" },
+		{
+			task: agentMessageField,
+			agent: optionalBoundedStringField("an agent type", 256),
+			name: optionalBoundedStringField("a display name", 64),
+			context: optionalBoundedStringField("shared context", 65_536),
+		},
+		"control",
+		{ ...requiresFeature("agent-control"), confirmation: "required" },
+	),
 	get_agent_result: agentCommand(
 		{ type: "get_agent_result", agentId: "SubagentA" },
 		{ agentId: agentIdField },
@@ -615,6 +1112,21 @@ export const RPC_COMMAND_DEFINITIONS = {
 		{ ...requiresFeature("agent-control"), confirmation: "required" },
 	),
 	get_queue: sessionCommand({ type: "get_queue" }, {}, "control"),
+	queue_insert: sessionCommand(
+		{ type: "queue_insert", lane: "steering", text: "interrupt" },
+		{ lane: enumField("steering", "followUp"), text: agentMessageField, toIndex: nonNegativeIntegerField },
+		"control",
+	),
+	queue_update: sessionCommand(
+		{ type: "queue_update", entryId: "queue-entry", text: "updated" },
+		{ entryId: opaqueIdField, text: agentMessageField },
+		"control",
+	),
+	queue_move: sessionCommand(
+		{ type: "queue_move", entryId: "queue-entry", lane: "followUp", toIndex: 0 },
+		{ entryId: opaqueIdField, lane: enumField("steering", "followUp"), toIndex: queueIndexField },
+		"control",
+	),
 	remove_queued_message: sessionCommand(
 		{ type: "remove_queued_message", entryId: "queue-entry" },
 		{ entryId: opaqueIdField },
@@ -644,6 +1156,39 @@ export const RPC_COMMAND_DEFINITIONS = {
 	set_model: sessionCommand(
 		{ type: "set_model", provider: "anthropic", modelId: "claude" },
 		{ provider: stringField, modelId: stringField },
+	),
+	set_model_role: sessionCommand(
+		{ type: "set_model_role", role: "default" },
+		{ role: boundedStringField("a model role name", 128) },
+		"serial",
+	),
+	set_service_tier: sessionCommand(
+		{ type: "set_service_tier", family: "openai", tier: null },
+		{
+			family: required(
+				"a service-tier family",
+				value => value === "openai" || value === "anthropic" || value === "google",
+				{
+					type: "string",
+					enum: ["openai", "anthropic", "google"],
+				},
+			),
+			tier: required(
+				"a service tier or null to clear it",
+				value =>
+					value === null ||
+					value === "auto" ||
+					value === "default" ||
+					value === "flex" ||
+					value === "scale" ||
+					value === "priority",
+				{
+					type: ["string", "null"],
+					enum: ["auto", "default", "flex", "scale", "priority", null],
+				},
+			),
+		},
+		"serial",
 	),
 	cycle_model: sessionCommand({ type: "cycle_model" }),
 	get_available_models: sessionCommand({ type: "get_available_models" }),
@@ -694,6 +1239,12 @@ export const RPC_COMMAND_DEFINITIONS = {
 		{ session: stringField, scope: optionalEnumField("cwd", "all"), cwd: optionalStringField },
 		"concurrent",
 	),
+	get_session_tree: sessionCommand({ type: "get_session_tree" }, {}, "concurrent"),
+	select_session_leaf: sessionCommand(
+		{ type: "select_session_leaf", entryId: "entry-1" },
+		{ entryId: stringField, summarize: optionalBooleanField, customInstructions: optionalStringField },
+	),
+	reset_session: sessionCommand({ type: "reset_session" }),
 	list_workspace_roots: hostCommand({ type: "list_workspace_roots" }, {}, "concurrent"),
 	resume_session: sessionCommand(
 		{ type: "resume_session", session: "01901234" },

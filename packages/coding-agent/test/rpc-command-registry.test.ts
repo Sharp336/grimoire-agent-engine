@@ -206,6 +206,9 @@ describe("RPC command registry", () => {
 		const expected = {
 			list_sessions: ["host", "concurrent"],
 			get_session_info: ["host", "concurrent"],
+			get_session_tree: ["session", "concurrent"],
+			select_session_leaf: ["session", "serial"],
+			reset_session: ["session", "serial"],
 			list_workspace_roots: ["host", "concurrent"],
 			resume_session: ["session", "serial"],
 			fork_session: ["session", "serial"],
@@ -222,5 +225,160 @@ describe("RPC command registry", () => {
 				concurrencyClass,
 			});
 		}
+	});
+	test("advertises validated semantic todo, goal, loop, model-role, and tier controls", () => {
+		const manifest = getRpcCapabilityManifest();
+		for (const name of [
+			"todo_apply",
+			"goal_control",
+			"checkpoint_control",
+			"loop_control",
+			"set_model_role",
+			"set_service_tier",
+		]) {
+			expect(manifest.commands.find(command => command.name === name)).toMatchObject({
+				scope: "session",
+				execution: "sync",
+				concurrencyClass: "serial",
+			});
+		}
+		expect(
+			validateRpcCommand({ type: "todo_apply", operation: { op: "block", task: "Deploy", reason: "CI" } }),
+		).toMatchObject({
+			ok: true,
+			scheduling: "serial",
+		});
+		expect(validateRpcCommand({ type: "todo_apply", operation: { op: "invalid" } })).toMatchObject({
+			ok: false,
+			code: "invalid_request",
+		});
+		expect(validateRpcCommand({ type: "goal_control", op: "clear_budget" })).toMatchObject({
+			ok: true,
+			scheduling: "serial",
+		});
+		expect(validateRpcCommand({ type: "goal_control", op: "set_budget", tokenBudget: 0 })).toMatchObject({
+			ok: false,
+			code: "invalid_request",
+		});
+		expect(validateRpcCommand({ type: "set_service_tier", family: "anthropic", tier: null })).toMatchObject({
+			ok: true,
+			scheduling: "serial",
+		});
+		expect(validateRpcCommand({ type: "set_service_tier", family: "unknown", tier: "priority" })).toMatchObject({
+			ok: false,
+			code: "invalid_request",
+		});
+		expect(validateRpcCommand({ type: "checkpoint_control", op: "rewind", report: "Findings" })).toMatchObject({
+			ok: true,
+			scheduling: "serial",
+		});
+		expect(
+			validateRpcCommand({
+				type: "loop_control",
+				op: "enable",
+				action: "compact",
+				prompt: "Continue",
+				limit: { kind: "iterations", iterations: 3 },
+			}),
+		).toMatchObject({ ok: true, scheduling: "serial" });
+		expect(
+			validateRpcCommand({
+				type: "loop_control",
+				op: "enable",
+				limit: { kind: "duration", durationMs: 0 },
+			}),
+		).toMatchObject({ ok: false, code: "invalid_request" });
+	});
+
+	test("advertises validated insert, update, move, and reclassification queue controls", () => {
+		const manifest = getRpcCapabilityManifest();
+		for (const name of ["queue_insert", "queue_update", "queue_move"]) {
+			expect(manifest.commands.find(command => command.name === name)).toMatchObject({
+				scope: "session",
+				execution: "sync",
+				concurrencyClass: "control",
+			});
+		}
+		expect(
+			validateRpcCommand({ type: "queue_insert", lane: "steering", text: "interrupt", toIndex: 0 }),
+		).toMatchObject({
+			ok: true,
+			scheduling: "control",
+		});
+		expect(
+			validateRpcCommand({ type: "queue_move", entryId: "queue-entry", lane: "followUp", toIndex: 1 }),
+		).toMatchObject({ ok: true, scheduling: "control" });
+		expect(validateRpcCommand({ type: "queue_update", entryId: "queue-entry", text: "" })).toMatchObject({
+			ok: false,
+			code: "invalid_request",
+		});
+	});
+
+	test("advertises typed start, steer, pause, cancel, kill, and revive child-agent controls", () => {
+		const commands = getRpcCapabilityManifest({
+			features: new Set(["agent-control"]),
+		}).commands;
+		for (const name of [
+			"start_agent",
+			"send_agent_message",
+			"park_agent",
+			"cancel_agent",
+			"release_agent",
+			"resume_agent",
+		]) {
+			expect(commands.find(command => command.name === name)).toMatchObject({
+				scope: "agent",
+				execution: "sync",
+				concurrencyClass: "control",
+				availability: "available",
+			});
+		}
+		expect(commands.find(command => command.name === "start_agent")?.confirmation).toBe("required");
+		expect(validateRpcCommand({ type: "start_agent", task: "Investigate", agent: "scout" })).toMatchObject({
+			ok: true,
+			scheduling: "control",
+		});
+	});
+
+	test("advertises bounded semantic action and cancellation controls only when available", () => {
+		const unavailable = getRpcCapabilityManifest();
+		const available = getRpcCapabilityManifest({ features: new Set(["semantic-rendering"]) });
+		for (const name of ["semantic_action", "semantic_cancel"]) {
+			expect(unavailable.commands.find(command => command.name === name)).toMatchObject({
+				version: 3,
+				scope: "session",
+				availability: "conditional",
+				requiredFeatures: ["semantic-rendering"],
+			});
+			expect(available.commands.find(command => command.name === name)).toMatchObject({
+				availability: "available",
+			});
+		}
+		expect(
+			validateRpcCommand({
+				id: "action-1",
+				type: "semantic_action",
+				renderId: "render-1",
+				actionId: "apply",
+				input: { scope: "focused" },
+			}),
+		).toMatchObject({ ok: true, scheduling: "serial" });
+		expect(
+			validateRpcCommand({
+				id: "action-2",
+				type: "semantic_action",
+				renderId: "render-1",
+				actionId: "apply",
+				input: ["not-an-object"],
+			}),
+		).toMatchObject({ ok: false, code: "invalid_request" });
+		expect(
+			validateRpcCommand({
+				id: "cancel-1",
+				type: "semantic_cancel",
+				renderId: "render-1",
+				actionId: "apply",
+			}),
+		).toMatchObject({ ok: true, scheduling: "control" });
 	});
 });

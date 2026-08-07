@@ -65,8 +65,8 @@ describe("InteractiveMode loop auto-submit", () => {
 		Object.defineProperty(session, "isCompacting", { configurable: true, get: () => compacting });
 		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => false });
 
-		mode.loopModeEnabled = true;
-		mode.loopPrompt = "repeat this";
+		await mode.handleLoopCommand();
+		mode.setLoopPrompt("repeat this");
 		const resolved: SubmittedUserInput[] = [];
 		void mode.getUserInput().then(input => resolved.push(input));
 
@@ -93,8 +93,8 @@ describe("InteractiveMode loop auto-submit", () => {
 			return "ok";
 		});
 
-		mode.loopModeEnabled = true;
-		mode.loopPrompt = "repeat after compact";
+		await mode.handleLoopCommand();
+		mode.setLoopPrompt("repeat after compact");
 		const resolved: SubmittedUserInput[] = [];
 		void mode.getUserInput().then(input => resolved.push(input));
 
@@ -119,8 +119,8 @@ describe("InteractiveMode loop auto-submit", () => {
 		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => false });
 		Object.defineProperty(session, "hasPostPromptWork", { configurable: true, get: () => hasPendingWork });
 
-		mode.loopModeEnabled = true;
-		mode.loopPrompt = "deliver this";
+		await mode.handleLoopCommand();
+		mode.setLoopPrompt("deliver this");
 		const resolved: SubmittedUserInput[] = [];
 		void mode.getUserInput().then(input => resolved.push(input));
 
@@ -142,8 +142,8 @@ describe("InteractiveMode loop auto-submit", () => {
 		vi.useFakeTimers();
 		settings.set("loop.mode", "reset");
 		mode.vibeModeEnabled = true;
-		mode.loopModeEnabled = true;
-		mode.loopPrompt = "do not resubmit";
+		await mode.handleLoopCommand();
+		mode.setLoopPrompt("do not resubmit");
 		const showStatus = vi.spyOn(mode, "showStatus");
 		const resolved: SubmittedUserInput[] = [];
 		void mode.getUserInput().then(input => resolved.push(input));

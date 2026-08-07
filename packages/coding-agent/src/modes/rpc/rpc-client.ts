@@ -14,12 +14,24 @@ import type { SettingTab } from "../../config/settings-schema";
 import type { SettingsSnapshot } from "../../config/settings-snapshot";
 import type { BashResult } from "../../exec/bash-executor";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
+import type { ArtifactDescriptor, ArtifactExportResult, ArtifactRange } from "../../session/artifacts";
 import type {
 	SessionCatalogPage,
 	SessionCatalogQuery,
 	SessionCatalogScope,
 	SessionWorkspaceRoot,
 } from "../../session/session-catalog";
+import type {
+	SessionAuthoritySettlement,
+	SessionCommand,
+	SessionCommandOutcome,
+	SessionHostClientCapabilities,
+	SessionHostIncompatible,
+	SessionHostNegotiated,
+	SessionHostNegotiationResult,
+	SessionJournalCursor,
+	SessionObservationPosition,
+} from "../../session/session-host";
 import type { ToolInventory } from "../../session/session-tools";
 import type { TodoPhase } from "../../tools/todo";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameDecoder, type RpcProtocolVersion } from "./rpc-frame";
@@ -40,6 +52,9 @@ import type {
 	RpcAvailableSlashCommand,
 	RpcCancelOperationResult,
 	RpcCapabilityManifest,
+	RpcCollaborationFrame,
+	RpcCollaborationMediaRange,
+	RpcCollaborationSnapshot,
 	RpcCommand,
 	RpcCommandOutputFrame,
 	RpcConfigUpdateFrame,
@@ -64,6 +79,7 @@ import type {
 	RpcHostUriSchemeDefinition,
 	RpcJobListResult,
 	RpcJobUpdateFrame,
+	RpcJsonValue,
 	RpcModeChangeResult,
 	RpcOperationAccepted,
 	RpcOperationStartedFrame,
@@ -75,17 +91,25 @@ import type {
 	RpcPlanStateUpdateFrame,
 	RpcPlanWorkflow,
 	RpcPromptResultFrame,
+	RpcProvenanceFrame,
+	RpcProvenanceSnapshot,
 	RpcProviderAuthMethod,
 	RpcProviderAuthRequestFrame,
 	RpcProviderAuthState,
 	RpcProviderAuthUpdateFrame,
 	RpcQueueUpdateFrame,
 	RpcRenameSessionResult,
+	RpcResourceLifecycleFrame,
+	RpcResourceLifecycleSnapshot,
+	RpcResourceServerSnapshot,
 	RpcResponse,
 	RpcResumeSessionResult,
+	RpcSemanticActionSettledFrame,
 	RpcSessionInfoResult,
 	RpcSessionInfoUpdateFrame,
 	RpcSessionMode,
+	RpcSessionObservationFrame,
+	RpcSessionOpenResult,
 	RpcSessionState,
 	RpcSettingsChange,
 	RpcSettingsUpdateFrame,
@@ -107,6 +131,13 @@ type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : n
 /** RpcCommand without the id field (for internal send) */
 type RpcCommandBody = DistributiveOmit<RpcCommand, "id">;
 
+export interface RpcV3ClientOptions {
+	hostCapabilities: SessionHostClientCapabilities;
+	requestedCapabilities: string[];
+	minMinor?: number;
+	maxMinor?: number;
+}
+
 export interface RpcClientOptions {
 	/** Path to the CLI entry point (default: searches for dist/cli.js) */
 	cliPath?: string;
@@ -124,6 +155,8 @@ export interface RpcClientOptions {
 	args?: string[];
 	/** Custom tools owned by the embedding host and exposed over the RPC transport */
 	customTools?: RpcClientCustomTool[];
+	/** Explicitly require the omp.session semantic v3 profile during startup. */
+	rpcV3?: RpcV3ClientOptions;
 }
 
 export type ModelInfo = Pick<Model, "provider" | "id" | "contextWindow" | "reasoning" | "thinking">;
@@ -155,6 +188,10 @@ export type RpcProviderAuthRequestListener = (request: RpcProviderAuthRequestFra
 export type RpcProviderAuthUpdateListener = (state: RpcProviderAuthState) => void;
 export type RpcQueueUpdateListener = (frame: RpcQueueUpdateFrame) => void;
 export type RpcJobUpdateListener = (frame: RpcJobUpdateFrame) => void;
+export type RpcResourceLifecycleListener = (frame: RpcResourceLifecycleFrame) => void;
+export type RpcProvenanceListener = (frame: RpcProvenanceFrame) => void;
+export type RpcCollaborationListener = (frame: RpcCollaborationFrame) => void;
+export type RpcSessionObservationListener = (frame: RpcSessionObservationFrame) => void;
 
 export interface RpcClientHostUriContext {
 	signal: AbortSignal;
@@ -314,6 +351,53 @@ function isRpcAvailableCommandsUpdateFrame(value: unknown): value is RpcAvailabl
 }
 function isRpcToolInventoryUpdateFrame(value: unknown): value is RpcToolInventoryUpdateFrame {
 	return isRecord(value) && value.type === "tool_inventory_update";
+}
+function isRpcSessionObservationFrame(value: unknown): value is RpcSessionObservationFrame {
+	return (
+		isRecord(value) &&
+		value.type === "session_observation" &&
+		typeof value.subscriptionId === "string" &&
+		isRecord(value.observation)
+	);
+}
+
+function isRpcResourceLifecycleFrame(value: unknown): value is RpcResourceLifecycleFrame {
+	if (!isRecord(value)) return false;
+	if (value.type === "resource_lifecycle") {
+		return (
+			typeof value.revision === "number" &&
+			typeof value.serverId === "string" &&
+			(value.state === "discovered" ||
+				value.state === "connecting" ||
+				value.state === "connected" ||
+				value.state === "disconnected" ||
+				value.state === "authentication_required" ||
+				value.state === "reconnecting" ||
+				value.state === "failed" ||
+				value.state === "disabled") &&
+			Array.isArray(value.diagnostics)
+		);
+	}
+	return (
+		value.type === "resource_operation" &&
+		typeof value.operationId === "string" &&
+		(value.kind === "refresh" || value.kind === "reload" || value.kind === "dispose") &&
+		(value.outcome === "completed" || value.outcome === "cancelled" || value.outcome === "failed") &&
+		Array.isArray(value.serverIds) &&
+		value.serverIds.every(serverId => typeof serverId === "string")
+	);
+}
+function isRpcProvenanceFrame(value: unknown): value is RpcProvenanceFrame {
+	return isRecord(value) && value.type === "provenance_update" && isRecord(value.provenance);
+}
+function isRpcCollaborationFrame(value: unknown): value is RpcCollaborationFrame {
+	return (
+		isRecord(value) &&
+		(value.type === "collaboration_state" ||
+			value.type === "collaboration_replicated" ||
+			value.type === "collaboration_gap" ||
+			value.type === "collaboration_stale")
+	);
 }
 function isRpcEvalOutputFrame(value: unknown): value is RpcEvalOutputFrame {
 	return (
@@ -601,6 +685,13 @@ export class RpcCommandError extends Error {
 	}
 }
 
+export class RpcSemanticIncompatibilityError extends Error {
+	constructor(readonly result: SessionHostIncompatible) {
+		super(result.message);
+		this.name = "RpcSemanticIncompatibilityError";
+	}
+}
+
 /** True when a high-level `getMessages()` drain should discard partial pages and fall back to `get_messages`. */
 function isPageFallbackError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
@@ -629,6 +720,10 @@ export class RpcClient {
 	#rawFrameListeners = new Set<RpcRawFrameListener>();
 	#promptResultListeners = new Set<RpcPromptResultListener>();
 	#evalOutputListeners = new Set<RpcEvalOutputListener>();
+	#resourceLifecycleListeners = new Set<RpcResourceLifecycleListener>();
+	#provenanceListeners = new Set<RpcProvenanceListener>();
+	#collaborationListeners = new Set<RpcCollaborationListener>();
+	#sessionObservationListeners = new Set<RpcSessionObservationListener>();
 	#evalCompleteListeners = new Set<RpcEvalCompleteListener>();
 	#operationTerminalListeners = new Set<RpcOperationTerminalListener>();
 	#operationStartedListeners = new Set<RpcOperationStartedListener>();
@@ -661,6 +756,7 @@ export class RpcClient {
 	#providerAuthRequestListeners = new Set<RpcProviderAuthRequestListener>();
 	#providerAuthUpdateListeners = new Set<RpcProviderAuthUpdateListener>();
 	#abortController = new AbortController();
+	#v3Negotiation: SessionHostNegotiated | undefined;
 
 	constructor(private options: RpcClientOptions = {}) {
 		this.#customTools = [...(options.customTools ?? [])];
@@ -684,6 +780,7 @@ export class RpcClient {
 		// short-circuit the new stdout reader (issue #4079).
 		this.#abortController = new AbortController();
 		this.#protocolVersion = 1;
+		this.#v3Negotiation = undefined;
 		this.#activeOperationIds.clear();
 		this.#settledOperationIds.clear();
 		this.#agentStreaming = false;
@@ -830,6 +927,10 @@ export class RpcClient {
 				)
 					throw new Error("RPC protocol v2 negotiation failed");
 				this.#protocolVersion = 2;
+			}
+			if (this.options.rpcV3) {
+				const result = await this.initializeV3(this.options.rpcV3);
+				if (!result.ok) throw new RpcSemanticIncompatibilityError(result);
 			}
 			if (this.#customTools.length > 0) {
 				await this.setCustomTools(this.#customTools);
@@ -982,6 +1083,27 @@ export class RpcClient {
 		return () => this.#rawFrameListeners.delete(listener);
 	}
 
+	/** Subscribe to resource lifecycle transitions and operation settlement. */
+	onResourceLifecycle(listener: RpcResourceLifecycleListener): () => void {
+		this.#resourceLifecycleListeners.add(listener);
+		return () => this.#resourceLifecycleListeners.delete(listener);
+	}
+	/** Subscribe to secret-safe runtime provenance changes. */
+	onProvenanceUpdate(listener: RpcProvenanceListener): () => void {
+		this.#provenanceListeners.add(listener);
+		return () => this.#provenanceListeners.delete(listener);
+	}
+	/** Subscribe to collaboration role, replication, gap, and stale-state frames. */
+	onCollaboration(listener: RpcCollaborationListener): () => void {
+		this.#collaborationListeners.add(listener);
+		return () => this.#collaborationListeners.delete(listener);
+	}
+	/** Subscribe to ordered RPC v3 session observations. */
+	onSessionObservation(listener: RpcSessionObservationListener): () => void {
+		this.#sessionObservationListeners.add(listener);
+		return () => this.#sessionObservationListeners.delete(listener);
+	}
+
 	/** Subscribe to prompt scheduling outcomes emitted after acknowledgement. */
 	onPromptResult(listener: RpcPromptResultListener): () => void {
 		this.#promptResultListeners.add(listener);
@@ -1116,6 +1238,166 @@ export class RpcClient {
 	async getCapabilities(): Promise<RpcCapabilityManifest> {
 		const response = await this.#send({ type: "get_capabilities" });
 		return this.#getData(response);
+	}
+
+	/** Explicitly negotiate the host-neutral omp.session semantic v3 profile. */
+	async initializeV3(options: RpcV3ClientOptions): Promise<SessionHostNegotiationResult> {
+		const response = await this.#send({
+			type: "initialize",
+			profile: {
+				name: "omp.session",
+				major: 3,
+				...(options.minMinor === undefined ? {} : { minMinor: options.minMinor }),
+				...(options.maxMinor === undefined ? {} : { maxMinor: options.maxMinor }),
+			},
+			framingVersion: this.#protocolVersion,
+			hostCapabilities: options.hostCapabilities,
+			requestedCapabilities: options.requestedCapabilities,
+		});
+		const result = this.#getData<SessionHostNegotiationResult>(response);
+		if (result.ok) this.#v3Negotiation = result;
+		return result;
+	}
+
+	get rpcV3Negotiation(): SessionHostNegotiated | undefined {
+		return this.#v3Negotiation;
+	}
+	/** Open an ordered RPC v3 session subscription, optionally replaying after a cursor or delivery position. */
+	async openSession(
+		options: { after?: SessionObservationPosition; afterCursor?: SessionJournalCursor; snapshot?: boolean } = {},
+	): Promise<RpcSessionOpenResult> {
+		return this.#getData(await this.#send({ type: "session_open", ...options }));
+	}
+
+	/** Cumulatively acknowledge delivered observations for one subscription. */
+	async acknowledgeSession(subscriptionId: string, sequence: number): Promise<void> {
+		await this.#send({ type: "session_ack", subscriptionId, sequence });
+	}
+
+	/** Close one RPC v3 observation subscription without closing the session authority. */
+	async unsubscribeSession(subscriptionId: string): Promise<void> {
+		await this.#send({ type: "session_unsubscribe", subscriptionId });
+	}
+
+	/** Invoke one authoritative RPC v3 session mutation. */
+	async invokeSession(command: SessionCommand): Promise<SessionCommandOutcome> {
+		return this.#getData(await this.#send({ type: "session_invoke", command }));
+	}
+
+	/** Settle the session authority and return only after durable teardown completes. */
+	async shutdownSession(): Promise<SessionAuthoritySettlement> {
+		return this.#getData(await this.#send({ type: "session_shutdown" }));
+	}
+
+	/** Invoke one server-correlated semantic action. */
+	async invokeSemanticAction(
+		renderId: string,
+		actionId: string,
+		input?: Record<string, RpcJsonValue>,
+	): Promise<RpcSemanticActionSettledFrame> {
+		const response = await this.#send({ type: "semantic_action", renderId, actionId, input });
+		return this.#getData(response);
+	}
+
+	/** Cancel one active semantic action, or every active action for a render. */
+	async cancelSemanticAction(renderId: string, actionId?: string): Promise<boolean> {
+		const response = await this.#send({ type: "semantic_cancel", renderId, actionId });
+		return this.#getData<{ cancelled: boolean }>(response).cancelled;
+	}
+
+	/** Read stable artifact metadata without transferring its content. */
+	async describeArtifact(artifactId: string): Promise<ArtifactDescriptor> {
+		const response = await this.#send({ type: "artifact_describe", artifactId });
+		return this.#getData(response);
+	}
+
+	/** Read one bounded, binary-safe artifact range. */
+	async readArtifact(artifactId: string, options: { offset?: number; length?: number } = {}): Promise<ArtifactRange> {
+		const response = await this.#send({ type: "artifact_read", artifactId, ...options });
+		return this.#getData(response);
+	}
+
+	/** Export an artifact on the RPC host only after SHA-256 verification. */
+	async exportArtifact(
+		artifactId: string,
+		destination: string,
+		expectedSha256: string,
+	): Promise<ArtifactExportResult> {
+		const response = await this.#send({ type: "artifact_export", artifactId, destination, expectedSha256 });
+		return this.#getData(response);
+	}
+
+	/** Read the authoritative resource-server projection for this session. */
+	async listResources(): Promise<RpcResourceLifecycleSnapshot> {
+		return this.#getData(await this.#send({ type: "resource_list" }));
+	}
+
+	/** Refresh one resource server, or every enabled server when omitted. */
+	async refreshResources(serverId?: string): Promise<{ operationId: string }> {
+		return this.#getData(await this.#send({ type: "resource_refresh", serverId }));
+	}
+
+	/** Reload project resources and return the accepted operation id. */
+	async reloadResources(): Promise<{ operationId: string }> {
+		return this.#getData(await this.#send({ type: "resource_reload" }));
+	}
+
+	/** Cancel one active resource refresh or reload. */
+	async cancelResourceOperation(operationId: string): Promise<boolean> {
+		const result = this.#getData<{ cancelled: boolean }>(await this.#send({ type: "resource_cancel", operationId }));
+		return result.cancelled;
+	}
+
+	/** Disconnect and disable one resource server for this session. */
+	async disposeResource(serverId: string): Promise<RpcResourceServerSnapshot> {
+		return this.#getData(await this.#send({ type: "resource_dispose", serverId }));
+	}
+	/** Read secret-safe model, fallback, usage-limit, credential-rotation, and failure provenance. */
+	async getRuntimeProvenance(refreshUsage = false): Promise<RpcProvenanceSnapshot> {
+		return this.#getData(await this.#send({ type: "provenance_get", refreshUsage }));
+	}
+	/** Read the current collaboration role, authority, participants, links, and replication cursor. */
+	async getCollaboration(): Promise<RpcCollaborationSnapshot> {
+		return this.#getData(await this.#send({ type: "collaboration_get" }));
+	}
+
+	/** Host the active authoritative session. Full and view links are returned separately. */
+	async hostCollaboration(options: { relayUrl?: string; webUrl?: string } = {}): Promise<RpcCollaborationSnapshot> {
+		return this.#getData(await this.#send({ type: "collaboration_host", ...options }));
+	}
+
+	/** Join a remote host as a non-authoritative replica. */
+	async joinCollaboration(link: string, displayName?: string): Promise<RpcCollaborationSnapshot> {
+		return this.#getData(await this.#send({ type: "collaboration_join", link, displayName }));
+	}
+
+	async leaveCollaboration(reason?: string): Promise<RpcCollaborationSnapshot> {
+		return this.#getData(await this.#send({ type: "collaboration_leave", reason }));
+	}
+
+	/** Revoke one guest's write authority without disclosing or changing the room key. */
+	async revokeCollaborationParticipant(participantId: string): Promise<RpcCollaborationSnapshot> {
+		return this.#getData(await this.#send({ type: "collaboration_revoke", participantId }));
+	}
+
+	/** Rotate write authority, demoting existing guests and returning fresh full-access links. */
+	async rotateCollaborationAccess(): Promise<RpcCollaborationSnapshot> {
+		return this.#getData(await this.#send({ type: "collaboration_rotate" }));
+	}
+
+	async acknowledgeCollaboration(
+		generation: number,
+		sequence: number,
+	): Promise<{ acknowledged: number; retained: number }> {
+		return this.#getData(await this.#send({ type: "collaboration_acknowledge", generation, sequence }));
+	}
+
+	async readCollaborationMedia(
+		mediaId: string,
+		offset?: number,
+		length?: number,
+	): Promise<RpcCollaborationMediaRange> {
+		return this.#getData(await this.#send({ type: "collaboration_read_media", mediaId, offset, length }));
 	}
 
 	/**
@@ -2158,6 +2440,22 @@ export class RpcClient {
 		}
 		if (isRecord(data) && data.type === "job_update" && Array.isArray(data.jobs) && Array.isArray(data.agents)) {
 			for (const listener of this.#jobUpdateListeners) listener(data as unknown as RpcJobUpdateFrame);
+			return;
+		}
+		if (isRpcSessionObservationFrame(data)) {
+			for (const listener of this.#sessionObservationListeners) listener(data);
+			return;
+		}
+		if (isRpcResourceLifecycleFrame(data)) {
+			for (const listener of this.#resourceLifecycleListeners) listener(data);
+			return;
+		}
+		if (isRpcProvenanceFrame(data)) {
+			for (const listener of this.#provenanceListeners) listener(data);
+			return;
+		}
+		if (isRpcCollaborationFrame(data)) {
+			for (const listener of this.#collaborationListeners) listener(data);
 			return;
 		}
 

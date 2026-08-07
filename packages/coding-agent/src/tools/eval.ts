@@ -398,7 +398,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 	}
 
 	async execute(
-		_toolCallId: string,
+		toolCallId: string,
 		params: typeof evalSchema.infer,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback,
@@ -514,7 +514,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 
 				const sessionFile = session.getSessionFile?.() ?? undefined;
 				const kernelOwnerId = session.getEvalKernelOwnerId?.() ?? undefined;
-				const { path: artifactPath, id: artifactId } = (await session.allocateOutputArtifact?.("eval")) ?? {};
+				const { path: artifactPath, id: artifactId } =
+					(await session.allocateOutputArtifact?.("eval", { toolCallId })) ?? {};
 				session.assertEvalExecutionAllowed?.();
 				outputSink = new OutputSink({
 					artifactPath,
