@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `repair` and `rawKeys` options to `parseFrontmatter` for spec-conformant loaders: `repair: false` disables lenient input recovery (ambiguous-scalar quoting, tab replacement, leading HTML-comment stripping) and `rawKeys: true` preserves frontmatter keys verbatim; exported `normalizeFrontmatterKeys` for callers that validate raw keys before normalizing.
+
 ### Fixed
 
 - Fixed the in-house `marked` list tokenizer still consuming a trailing blank run into the list token at end of input (17.2.10 fixed only the mid-document case). `- item\n\n` now lexes as a tight list plus a `space` token, matching real marked, instead of a loose list whose raw includes the blank.
