@@ -196,6 +196,13 @@ A missing name fails preflight with `Unknown agent "...". Available: ...`; no su
 
 `TaskTool.create()` memoizes discovery per resolved working directory when building the model-facing tool description. Execution rediscovers agents, so the runtime set can differ from the earlier description if agent or extension files changed mid-session. Blocking behavior is determined after policy resolution rather than from a stale description-time agent object.
 
+`refreshAgentDiscovery(cwd?)` (`src/task/index.ts`) drops that memo and re-scans, then republishes the result to every live `TaskTool` — the description getter reads the refreshed per-cwd snapshot, not the array the tool was constructed with. Without it, an edited, added, or deleted `.omp/agents/*.md` stays invisible to the model for the life of the process, because the built-in tool slate is only built once at session start. It runs from:
+
+- `/reload-plugins` and its ACP twin (`#reloadPluginState`), whose documented scope includes agents
+- the Agent Control Center after it writes a generated agent definition
+
+Every cwd already scanned in the process is refreshed, plus the supplied one, so subagent sessions rooted in other directories also pick the edit up.
+
 ## Model and structured-output precedence
 
 For task dispatch, model precedence is:

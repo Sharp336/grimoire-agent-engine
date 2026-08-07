@@ -1,6 +1,9 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
+import { refreshAgentDiscovery, TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
@@ -62,5 +65,50 @@ describe("TaskTool.create discovery memo", () => {
 
 		expect(tool.description).toContain("task");
 		expect(spy).toHaveBeenCalledTimes(2);
+	});
+});
+
+describe("refreshAgentDiscovery", () => {
+	let projectDir: string;
+	let agentFile: string;
+
+	const agentMd = (description: string) =>
+		["---", "name: reload-probe", `description: ${description}`, "---", "", "Probe body."].join("\n");
+
+	beforeAll(async () => {
+		projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-agent-reload-"));
+		agentFile = path.join(projectDir, ".omp", "agents", "reload-probe.md");
+	});
+
+	afterAll(async () => {
+		await fs.rm(projectDir, { recursive: true, force: true });
+	});
+
+	it("republishes edited agent definitions to a live TaskTool", async () => {
+		await Bun.write(agentFile, agentMd("PROBE_BEFORE"));
+		const tool = await TaskTool.create(createSession(projectDir));
+		expect(tool.description).toContain("PROBE_BEFORE");
+
+		await Bun.write(agentFile, agentMd("PROBE_AFTER"));
+		// Without a refresh the create-time scan is memoized for the process.
+		expect((await TaskTool.create(createSession(projectDir))).description).toContain("PROBE_BEFORE");
+
+		await refreshAgentDiscovery(projectDir);
+
+		// The already-constructed tool — the one the running session holds — sees it.
+		expect(tool.description).toContain("PROBE_AFTER");
+		expect(tool.description).not.toContain("PROBE_BEFORE");
+	});
+
+	it("drops agents whose definition file was deleted", async () => {
+		await Bun.write(agentFile, agentMd("PROBE_DOOMED"));
+		await refreshAgentDiscovery(projectDir);
+		const tool = await TaskTool.create(createSession(projectDir));
+		expect(tool.description).toContain("reload-probe");
+
+		await fs.rm(agentFile);
+		await refreshAgentDiscovery(projectDir);
+
+		expect(tool.description).not.toContain("reload-probe");
 	});
 });
