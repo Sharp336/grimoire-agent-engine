@@ -41,12 +41,18 @@ describe("ModelRegistry default custom models config", () => {
 			modelId: "us.anthropic.claude-opus-4-8",
 		});
 
-		expect(model?.compat).toEqual({
-			promptCacheMode: "explicit",
-			supportsLongPromptCacheRetention: false,
-			promptCacheMinimumTokens: 1024,
-			promptCacheMaximumCheckpoints: 4,
-		});
+		expect(model?.compat).toEqual(
+			expect.objectContaining({
+				promptCacheMode: "explicit",
+				// Bundled Bedrock compat resolves the adaptive-thinking stream
+				// idle watchdog for reasoning Opus models; a cache-capability
+				// override does not reset it.
+				streamIdleTimeoutMs: 900_000,
+				supportsLongPromptCacheRetention: false,
+				promptCacheMinimumTokens: 1024,
+				promptCacheMaximumCheckpoints: 4,
+			}),
+		);
 	});
 
 	test("prefers default models.yml over models.yaml when both exist", () => {

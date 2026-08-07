@@ -47,7 +47,7 @@ impl Drop for Libei {
 	}
 }
 
-/// Closes a RemoteDesktop portal session, bounded by `CLOSE_TIMEOUT` so an
+/// Closes a `RemoteDesktop` portal session, bounded by `CLOSE_TIMEOUT` so an
 /// unresponsive `xdg-desktop-portal` cannot hang teardown indefinitely.
 fn close_session(runtime: &tokio::runtime::Runtime, session: &RemoteDesktopSession) {
 	let _ = runtime.block_on(async {

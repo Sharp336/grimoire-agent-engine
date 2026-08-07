@@ -51,6 +51,7 @@ import type { SessionContext, StrippedToolCallsMarker } from "../../session/sess
 import { replaceTabs } from "../../tools/render-utils";
 import { buildSkillCommandPrompt, invokeSkillCommandFromText, isKnownSkillCommand } from "../skill-command";
 import { createAssistantMessageComponent } from "./interactive-context-helpers";
+import { isBuiltInTool } from "./tool-provenance";
 import {
 	assistantHasVisibleContent,
 	assistantUsageIsBilled,
@@ -500,7 +501,7 @@ export class UiHelpers {
 						content.name,
 						renderArgs,
 						{
-							useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(content.name),
+							useBuiltInRenderer: isBuiltInTool(this.ctx.viewSession, content.name),
 							snapshots: getFileSnapshotStore(this.ctx.viewSession),
 							clipboard: getEditClipboard(this.ctx.viewSession),
 							showImages: settings.get("terminal.showImages"),

@@ -2393,14 +2393,30 @@ describe("AgentSession retry fallback", () => {
 				role: "default",
 			},
 		]);
-		expect(retryEndEvents).toEqual([
-			{
-				type: "auto_retry_end",
-				success: false,
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({
+			type: "auto_retry_end",
+			success: false,
+			attempt: 1,
+			finalError: refusalMessage,
+		});
+		// The exhausted saga closes with the superseded retry error attached so
+		// subscribers can mark the failed turn's transcript entry as retried
+		// (see #markPendingRetryErrors). Entry id and persistence key are
+		// per-run values; the recovery payload is the stable contract.
+		expect(retryEndEvents[0].retryErrors).toHaveLength(1);
+		expect(retryEndEvents[0].retryErrors?.[0]).toMatchObject({
+			note: "switched model; retried",
+			retryRecovery: {
+				kind: "auto-retry",
+				status: "superseded",
 				attempt: 1,
-				finalError: refusalMessage,
+				recovery: "model",
+				note: "switched model; retried",
 			},
-		]);
+		});
+		expect(retryEndEvents[0].retryErrors?.[0].entryId).toEqual(expect.any(String));
+		expect(retryEndEvents[0].retryErrors?.[0].persistenceKey).toMatch(/^assistant:\d+:mock:mock-model::error$/);
 	});
 
 	it("emits auto_retry_end when a mid-saga classifier refusal has no fallback to switch to", async () => {
@@ -2608,13 +2624,16 @@ describe("AgentSession retry fallback", () => {
 			`${primaryModel.provider}/${primaryModel.id}`,
 		]);
 		expect(retryStartEvents).toHaveLength(1);
+		// Transient rate-limit retries floor the wait at the reason-specific
+		// window (30s) instead of the sub-window retry-after hint, so the
+		// retry does not re-hit the cap and burn the budget before it clears.
 		expect(retryStartEvents[0]).toMatchObject({
 			attempt: 1,
 			maxAttempts: 1,
-			delayMs: 200,
+			delayMs: 30_000,
 			errorMessage: "rate limit exceeded retry-after-ms=200",
 		});
-		expect(waitSpy).toHaveBeenCalledWith(200, { signal: expect.any(AbortSignal) });
+		expect(waitSpy).toHaveBeenCalledWith(30_000, { signal: expect.any(AbortSignal) });
 		expect(retryEndEvents).toHaveLength(1);
 		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 1 });
 		expect(fallbackAppliedEvents).toHaveLength(0);

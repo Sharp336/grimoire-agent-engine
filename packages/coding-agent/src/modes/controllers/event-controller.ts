@@ -35,6 +35,7 @@ import { canonicalizeMessage } from "../../utils/thinking-display";
 import { setTerminalTitleState } from "../../utils/title-generator";
 import { interruptHint } from "../shared";
 import { createAssistantMessageComponent } from "../utils/interactive-context-helpers";
+import { isBuiltInTool } from "../utils/tool-provenance";
 import {
 	assistantHasVisibleContent,
 	assistantUsageIsBilled,
@@ -1073,7 +1074,7 @@ export class EventController {
 						content.name,
 						renderArgs,
 						{
-							useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(content.name),
+							useBuiltInRenderer: isBuiltInTool(this.ctx.viewSession, content.name),
 							snapshots: getFileSnapshotStore(this.ctx.viewSession),
 							clipboard: getEditClipboard(this.ctx.viewSession),
 							showImages: settings.get("terminal.showImages"),
@@ -1323,7 +1324,7 @@ export class EventController {
 				event.toolName,
 				event.args,
 				{
-					useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(event.toolName),
+					useBuiltInRenderer: isBuiltInTool(this.ctx.viewSession, event.toolName),
 					snapshots: getFileSnapshotStore(this.ctx.viewSession),
 					clipboard: getEditClipboard(this.ctx.viewSession),
 					showImages: settings.get("terminal.showImages"),
