@@ -4,7 +4,7 @@ use std::{
 };
 
 use ashpd::desktop::{
-	PersistMode,
+	PersistMode, Session,
 	remote_desktop::{DeviceType, RemoteDesktop},
 };
 use reis::{
@@ -12,7 +12,6 @@ use reis::{
 	event::{Device, DeviceCapability, EiConvertEventIterator, EiEvent},
 };
 
-use super::portal::{REMOTE_DESKTOP_TOKEN, read_token, store_token};
 use crate::desktop::{
 	backend::{Modifiers, MouseButton, PointerEvent},
 	error::{CoreResult, DesktopError},
@@ -24,24 +23,54 @@ struct EiDevice {
 	serial: u32,
 }
 
+type RemoteDesktopSession = Session<'static, RemoteDesktop<'static>>;
+
+struct PortalSession {
+	runtime: &'static tokio::runtime::Runtime,
+	session: RemoteDesktopSession,
+}
+
 pub(super) struct Libei {
-	context:  ei::Context,
-	pointer:  Option<EiDevice>,
-	keyboard: Option<EiDevice>,
-	sequence: u32,
+	context:        ei::Context,
+	pointer:        Option<EiDevice>,
+	keyboard:       Option<EiDevice>,
+	sequence:       u32,
+	portal_session: Option<PortalSession>,
+}
+
+impl Drop for Libei {
+	fn drop(&mut self) {
+		let Some(portal) = self.portal_session.take() else {
+			return;
+		};
+		close_session(portal.runtime, &portal.session);
+	}
+}
+
+/// Closes a RemoteDesktop portal session, bounded by `CLOSE_TIMEOUT` so an
+/// unresponsive `xdg-desktop-portal` cannot hang teardown indefinitely.
+fn close_session(runtime: &tokio::runtime::Runtime, session: &RemoteDesktopSession) {
+	let _ = runtime.block_on(async {
+		tokio::time::timeout(crate::desktop::CLOSE_TIMEOUT, session.close()).await
+	});
 }
 
 impl Libei {
 	pub(super) fn new() -> CoreResult<Self> {
-		let context = match ei::Context::connect_to_env() {
-			Ok(Some(context)) => context,
-			Ok(None) => Self::portal_context()?,
+		let (context, portal_session) = match ei::Context::connect_to_env() {
+			Ok(Some(context)) => (context, None),
+			Ok(None) => {
+				let (context, session) = Self::portal_context()?;
+				(context, Some(session))
+			},
 			Err(err) => return Err(DesktopError::permission_denied(format!("LIBEI_SOCKET: {err}"))),
 		};
-		let (_connection, mut events) = context
+		let mut backend =
+			Self { context, pointer: None, keyboard: None, sequence: 1, portal_session };
+		let (_connection, mut events) = backend
+			.context
 			.handshake_blocking("omp-computer", ei::handshake::ContextType::Sender)
 			.map_err(|err| DesktopError::input_failed(format!("libei handshake: {err}")))?;
-		let mut backend = Self { context, pointer: None, keyboard: None, sequence: 1 };
 		backend.discover_devices(&mut events)?;
 		if backend.pointer.is_none() && backend.keyboard.is_none() {
 			return Err(DesktopError::permission_denied(
@@ -51,14 +80,9 @@ impl Libei {
 		Ok(backend)
 	}
 
-	fn portal_context() -> CoreResult<ei::Context> {
-		let runtime = tokio::runtime::Builder::new_current_thread()
-			.enable_all()
-			.build()
-			.map_err(|err| {
-				DesktopError::input_failed(format!("RemoteDesktop portal runtime: {err}"))
-			})?;
-		let fd = runtime
+	fn portal_context() -> CoreResult<(ei::Context, PortalSession)> {
+		let runtime = super::portal::portal_runtime()?;
+		let (fd, session) = runtime
 			.block_on(async {
 				let portal = RemoteDesktop::new()
 					.await
@@ -67,31 +91,45 @@ impl Libei {
 					.create_session()
 					.await
 					.map_err(|err| format!("RemoteDesktop CreateSession: {err}"))?;
-				let restore_token = read_token(REMOTE_DESKTOP_TOKEN);
-				portal
-					.select_devices(
-						&session,
-						DeviceType::Keyboard | DeviceType::Pointer,
-						restore_token.as_deref(),
-						PersistMode::ExplicitlyRevoked,
-					)
-					.await
-					.map_err(|err| format!("RemoteDesktop SelectDevices: {err}"))?;
-				let response = portal
-					.start(&session, None)
-					.await
-					.map_err(|err| format!("RemoteDesktop Start: {err}"))?
-					.response()
-					.map_err(|err| format!("RemoteDesktop permission: {err}"))?;
-				store_token(REMOTE_DESKTOP_TOKEN, response.restore_token());
-				portal
-					.connect_to_eis(&session)
-					.await
-					.map_err(|err| format!("RemoteDesktop ConnectToEIS: {err}"))
+				let fd = async {
+					portal
+						.select_devices(
+							&session,
+							DeviceType::Keyboard | DeviceType::Pointer,
+							None,
+							PersistMode::DoNot,
+						)
+						.await
+						.map_err(|err| format!("RemoteDesktop SelectDevices: {err}"))?;
+					portal
+						.start(&session, None)
+						.await
+						.map_err(|err| format!("RemoteDesktop Start: {err}"))?
+						.response()
+						.map_err(|err| format!("RemoteDesktop permission: {err}"))?;
+					portal
+						.connect_to_eis(&session)
+						.await
+						.map_err(|err| format!("RemoteDesktop ConnectToEIS: {err}"))
+				}
+				.await;
+				match fd {
+					Ok(fd) => Ok((fd, session)),
+					Err(err) => {
+						let _ = session.close().await;
+						Err(err)
+					},
+				}
 			})
 			.map_err(DesktopError::permission_denied)?;
-		ei::Context::new(UnixStream::from(fd))
-			.map_err(|err| DesktopError::input_failed(format!("libei portal socket: {err}")))
+		let context = match ei::Context::new(UnixStream::from(fd)) {
+			Ok(context) => context,
+			Err(err) => {
+				close_session(runtime, &session);
+				return Err(DesktopError::input_failed(format!("libei portal socket: {err}")));
+			},
+		};
+		Ok((context, PortalSession { runtime, session }))
 	}
 
 	fn discover_devices(&mut self, events: &mut EiConvertEventIterator) -> CoreResult<()> {

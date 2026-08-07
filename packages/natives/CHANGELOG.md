@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+
+- `bun run build` (`scripts/bazel-natives.ts`) now supports Windows hosts: the `host` pseudo-target delegates to the local napi build against VS Build Tools (the bazel msvc cross toolchain remains linux/mac-only), and other targets fail fast with guidance instead of dying deep inside a bazel repo rule. The local build also auto-appends VS Build Tools' bundled CMake/Ninja to `PATH` via vswhere, so it works outside a vcvars prompt.
+
+### Fixed
+
+- Fixed the native addon loader selecting the `baseline` CPU variant on every Windows host whose `powershell.exe` is Windows PowerShell 5.1: `[System.Runtime.Intrinsics.X86.Avx2]` only exists on .NET Core, so the probe never reported AVX2. Detection now calls `IsProcessorFeaturePresent` through `bun:ffi`, which is both correct and ~270 ms cheaper at startup (the PowerShell spawn is gone); Node embeds fall back to `pwsh` before `powershell.exe`.
+- Fixed `bun run build:bindings` failing on Windows: the `node_modules/.bin` entry is a `napi.exe` launcher there, which Bun tried to parse as JavaScript. The CLI's JS entry is now resolved from the `@napi-rs/cli` manifest.
+- Fixed the local (non-Bazel) addon build always producing the `baseline` variant on Windows — `scripts/host-detect.ts` shared the broken PowerShell AVX2 probe.
+- Fixed a rustc ICE building `maudio` for `x86_64-pc-windows-msvc` under the pinned rustup nightly by capping that package at `opt-level = 1`; MIR const-folding turned `MaybeUninit<ma_fence>` into an `Uninit` operand that codegen rejects for a ScalarPair argument.
+- Fixed synthesized macOS keyboard and pointer events suppressing the user's physical input.
+- Fixed read-only Wayland `computer` calls acquiring persistent keyboard and pointer control; RemoteDesktop input permission is now requested only on first input, is not persisted, and closes with the desktop session ([#7884](https://github.com/can1357/oh-my-pi/issues/7884)).
+- Fixed Wayland `libei` input initialization poisoning PipeWire screen capture: both paths now share one long-lived Tokio runtime so `ashpd`'s process-global D-Bus connection is never orphaned by a dropped runtime ([#7886](https://github.com/can1357/oh-my-pi/issues/7886)).
+- Fixed the `wayland-pipewire` Cargo feature failing to compile: the PipeWire capture path still used the removed 0.8 `MainLoop::new` / `Context::new` / `connect_fd` constructors instead of the 0.9 `MainLoopRc` / `ContextRc` / `connect_fd_rc` handle API ([#7885](https://github.com/can1357/oh-my-pi/issues/7885)).
+
 ## [17.2.10] - 2026-08-06
 
 ### Fixed

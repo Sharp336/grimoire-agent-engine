@@ -762,10 +762,12 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			if (!runtime.session.modelRegistry.hasConfiguredAuth(resolved.model)) {
 				return usage(`No API key for ${resolved.model.provider}/${resolved.model.id}`, runtime);
 			}
-			runtime.session.armPrewalk(resolved.model, resolved.thinkingLevel);
-			await runtime.output(
-				`Prewalk on: switching to ${resolved.model.provider}/${resolved.model.id} at the next edit/write (todo-gated).`,
-			);
+			const armed = runtime.session.armPrewalk(resolved.model, resolved.thinkingLevel);
+			if (armed) {
+				await runtime.output(
+					`Prewalk on: switching to ${resolved.model.provider}/${resolved.model.id} at the next edit/write (todo-gated).`,
+				);
+			}
 			return commandConsumed();
 		},
 	},
