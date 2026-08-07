@@ -9,6 +9,7 @@ An advisor does not approve actions or mutate primary session state directly. It
 - [`src/advisor/runtime.ts`](../packages/coding-agent/src/advisor/runtime.ts)
 - [`src/advisor/advise-tool.ts`](../packages/coding-agent/src/advisor/advise-tool.ts)
 - [`src/advisor/emission-guard.ts`](../packages/coding-agent/src/advisor/emission-guard.ts)
+- [`src/advisor/review-budget.ts`](../packages/coding-agent/src/advisor/review-budget.ts)
 - [`src/advisor/watchdog.ts`](../packages/coding-agent/src/advisor/watchdog.ts)
 - [`src/advisor/config.ts`](../packages/coding-agent/src/advisor/config.ts)
 - [`src/advisor/transcript-recorder.ts`](../packages/coding-agent/src/advisor/transcript-recorder.ts)
@@ -312,6 +313,31 @@ The advisor has its own append-only context. Before each advisor prompt, `AgentS
 3. if compaction has no candidates or still cannot fit, re-prime from the current bounded primary transcript
 
 The advisor's live context is in-memory and append-only; it is retained while the session runs so `/advisor dump` can inspect it, and is independently promoted/compacted/re-primed (above). It is not a replacement for the primary persisted transcript.
+
+### Per-review safety limits
+
+One advisor update can make several provider requests: the first request may
+call an investigative tool, and the advisor's private agent loop continues
+until the model stops calling tools. OMP bounds each update independently:
+
+- `advisor.maxRequestsPerReview` defaults to `32`. This is a hard request cap:
+  the gate runs before every provider request, so the refused request is not
+  sent or billed. Set it to `0` to disable the cap.
+- `advisor.maxCostPerReview` defaults to `10` USD. This sums finalized advisor
+  responses in the current update and refuses the next request once completed
+  spend reaches the ceiling. It is exact for completed requests but may
+  overshoot by the cost of one in-flight request; it is a backstop, not a
+  dollar-precise cutoff. Set it to `0` to disable the ceiling.
+- `advisor.maxIdenticalToolCalls` defaults to `2`. The first identical
+  `(tool name, arguments)` call runs; its first repeat is refused with guidance
+  to use the existing result and finish the review. Object-key order does not
+  change call identity. Set it to `0` to disable the repeat guard.
+
+Limits reset for every new advisor update, remain in force when that update is
+retried after a provider failure, and apply independently to every advisor
+runtime. Setting changes are read by already-running advisors before each gate.
+A limit ending a review does not mark the advisor unavailable, invoke provider
+recovery, or affect the primary agent's work.
 
 ## Transcript persistence and observability
 

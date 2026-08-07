@@ -510,6 +510,42 @@ export const SETTINGS_SCHEMA = {
 			condition: "advisorEnabled",
 		},
 	},
+	"advisor.maxRequestsPerReview": {
+		type: "number",
+		default: 32,
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Advisor Request Limit",
+			description:
+				"Maximum provider requests in one advisor review. The hard gate runs before each request; 0 disables it.",
+			condition: "advisorEnabled",
+		},
+	},
+	"advisor.maxCostPerReview": {
+		type: "number",
+		default: 10,
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Advisor Cost Ceiling",
+			description:
+				"Stop before the next request after completed requests in one review reach this USD cost. The current request may cross the ceiling; 0 disables it.",
+			condition: "advisorEnabled",
+		},
+	},
+	"advisor.maxIdenticalToolCalls": {
+		type: "number",
+		default: 2,
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Advisor Repeated Tool Limit",
+			description:
+				"Refuse this occurrence of an identical tool call within one review. 2 refuses the first repeat; 0 disables it.",
+			condition: "advisorEnabled",
+		},
+	},
 	shellPath: { type: "string", default: undefined },
 	"git.enabled": {
 		type: "boolean",

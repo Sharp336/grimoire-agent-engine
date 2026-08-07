@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added configurable per-review advisor request, completed-cost, and identical-tool-call safety limits.
+
+### Fixed
+
+- Fixed advisor reviews being able to issue unbounded provider requests or repeatedly execute the same tool call, causing runaway context growth and cost.
+
 ## [17.2.11] - 2026-08-07
 
 ### Added

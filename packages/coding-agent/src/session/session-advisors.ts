@@ -46,6 +46,7 @@ import {
 	type AdvisorMessageDetails,
 	type AdvisorNote,
 	AdvisorOutputQuarantinedError,
+	AdvisorReviewBudget,
 	AdvisorRuntime,
 	type AdvisorRuntimeStatus,
 	type AdvisorSeverity,
@@ -152,6 +153,7 @@ interface ActiveAdvisor {
 	runtime: AdvisorRuntime;
 	adviseTool: AdviseTool;
 	emissionGuard: AdvisorEmissionGuard;
+	reviewBudget: AdvisorReviewBudget;
 	recorder: AdvisorTranscriptRecorder;
 	recorderClosed: Promise<void>;
 	agentUnsubscribe?: () => void;
@@ -689,6 +691,14 @@ export class SessionAdvisors {
 
 			const emissionGuard = new AdvisorEmissionGuard();
 			const adviseTool = new AdviseTool((note, severity) => this.#routeAdvice(advisorRef, note, severity));
+			const reviewBudget = new AdvisorReviewBudget(
+				() => ({
+					maxRequests: this.#host.settings.get("advisor.maxRequestsPerReview"),
+					maxCostUsd: this.#host.settings.get("advisor.maxCostPerReview"),
+					maxIdenticalToolCalls: this.#host.settings.get("advisor.maxIdenticalToolCalls"),
+				}),
+				stop => logger.warn("advisor review budget reached", { advisor: advisorName, ...stop }),
+			);
 
 			// `#advisorWatchdogPrompt` already carries WATCHDOG.md + YAML shared
 			// instructions; `config.instructions` adds this advisor's specialization.
@@ -699,7 +709,7 @@ export class SessionAdvisors {
 			if (config.instructions?.trim()) systemPrompt.push(config.instructions.trim());
 
 			const names = config.tools === undefined ? ADVISOR_DEFAULT_TOOL_NAMES : new Set(config.tools);
-			const tools = (this.#advisorTools ?? []).filter(t => names.has(t.name));
+			const tools = (this.#advisorTools ?? []).filter(t => names.has(t.name)).map(t => reviewBudget.guardTool(t));
 			const advisorLoopTools: AgentTool<any>[] = [adviseTool, ...tools];
 			const advisorToolMap = new Map<string, AgentTool<any>>();
 			const availableAdvisorToolNames = new Set<string>();
@@ -766,10 +776,16 @@ export class SessionAdvisors {
 			// swaps in a `replace` instance for the exec channel only — the
 			// advisor's own loop keeps the tool it was given — and only when
 			// `edit` was actually granted.
+			const createGuardedBridgeEditTool = this.#advisorCreateEditTool
+				? () => {
+						const tool = this.#advisorCreateEditTool?.();
+						return tool ? reviewBudget.guardTool(tool) : undefined;
+					}
+				: undefined;
 			const advisorCursorExecHandlers = new CursorExecHandlers({
 				cwd: this.#host.sessionManager.getCwd(),
 				getCwd: () => this.#host.sessionManager.getCwd(),
-				tools: bridgeToolMap(advisorToolMap, this.#advisorCreateEditTool),
+				tools: bridgeToolMap(advisorToolMap, createGuardedBridgeEditTool),
 				// Approval mode, per-tool policies and `autoApprove` live only on
 				// this context; without it every bridge tool resolves as `yolo`.
 				getToolContext: this.#advisorGetToolContext,
@@ -777,7 +793,12 @@ export class SessionAdvisors {
 				// Gated on the advisor's own grant: the factory builds a fresh
 				// tool, so handing it over unconditionally would give a roster
 				// without `grep` a search tool it was denied.
-				createGrepTool: advisorToolMap.has("grep") ? this.#advisorCreateGrepTool : undefined,
+				createGrepTool: advisorToolMap.has("grep")
+					? options => {
+							const tool = this.#advisorCreateGrepTool?.(options);
+							return tool ? reviewBudget.guardTool(tool, options) : undefined;
+						}
+					: undefined,
 				// Advisors share the session's live MCP connections, so their
 				// resource frames answer from the same catalog the primary sees.
 				// Not gated on a tool grant: reading what a server advertises is
@@ -826,6 +847,7 @@ export class SessionAdvisors {
 				serviceTierResolver: advisorServiceTierResolver,
 			});
 			advisorAgent.setDisableReasoning(shouldDisableReasoning(advisorThinkingLevel));
+			advisorAgent.addBeforeModelCall(() => reviewBudget.beforeModelCall());
 
 			const advisorAgentFacade: AdvisorAgent = {
 				prompt: async input => {
@@ -877,8 +899,9 @@ export class SessionAdvisors {
 					this.#maintainAdvisorContext(advisorRef, incomingTokens, signal),
 				obfuscator: this.#host.obfuscator,
 				getModelIdentity: () => formatModelString(advisorRef.agent.state.model),
-				beginAdvisorUpdate: inProgress => {
+				beginAdvisorUpdate: (inProgress, reviewId) => {
 					advisorRef.adviseTool.beginUpdate(inProgress);
+					advisorRef.reviewBudget.beginReview(reviewId);
 					advisorRef.emissionGuard.beginUpdate();
 				},
 				onTurnError: (error, failedMessages, signal) =>
@@ -919,6 +942,7 @@ export class SessionAdvisors {
 				runtime,
 				adviseTool,
 				emissionGuard,
+				reviewBudget,
 				recorder,
 				recorderClosed: Promise.resolve(),
 				model: advisorModel,
@@ -1082,7 +1106,9 @@ export class SessionAdvisors {
 	}
 
 	#recordAdvisorCost(advisor: ActiveAdvisor, message: AssistantMessage): void {
-		this.#advisorCosts.set(advisor.slug, (this.#advisorCosts.get(advisor.slug) ?? 0) + message.usage.cost.total);
+		const cost = message.usage.cost.total;
+		this.#advisorCosts.set(advisor.slug, (this.#advisorCosts.get(advisor.slug) ?? 0) + cost);
+		advisor.reviewBudget.recordCompletedCost(cost);
 	}
 
 	/** Subscribe the advisor agent's finalized messages into the transcript recorder.

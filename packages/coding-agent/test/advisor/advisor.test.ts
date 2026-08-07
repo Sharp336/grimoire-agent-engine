@@ -3960,6 +3960,7 @@ describe("advisor", () => {
 			const promptInputs: string[] = [];
 			const turnErrors: unknown[] = [];
 			const events: string[] = [];
+			const reviewIds: number[] = [];
 			const state: { messages: AgentMessage[]; error?: string } = { messages: [] };
 			let promptCalls = 0;
 			const agent: AdvisorAgent = {
@@ -3979,6 +3980,7 @@ describe("advisor", () => {
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
 				enqueueAdvice: () => {},
+				beginAdvisorUpdate: (_inProgress, reviewId) => reviewIds.push(reviewId),
 				onTurnError: error => {
 					turnErrors.push(error);
 					events.push(`hook:${error instanceof Error ? error.message : String(error)}`);
@@ -3995,6 +3997,8 @@ describe("advisor", () => {
 			if (!(error instanceof Error)) throw new Error("expected advisor turn error");
 			expect(error.message).toBe("provider failed");
 			expect(events).toEqual(["prompt:1", "hook:provider failed", "prompt:2"]);
+			expect(reviewIds).toHaveLength(2);
+			expect(new Set(reviewIds).size).toBe(1);
 			expect(runtime.backlog).toBe(0);
 		});
 
