@@ -2276,7 +2276,7 @@ export class ModelRegistry {
 			if (available === undefined) {
 				available =
 					!disabledProviders.has(provider) &&
-					(this.#keylessProviders.has(provider) || this.authStorage.hasAuth(provider));
+					(this.#canUseWithoutApiKey(provider) || this.authStorage.hasAuth(provider));
 				byProvider.set(provider, available);
 			}
 			return available;
@@ -2316,7 +2316,7 @@ export class ModelRegistry {
 		const keyConfig = this.#customProviderApiKeys.get(model.provider);
 		return (
 			isCommandConfigValue(keyConfig) ||
-			this.#keylessProviders.has(model.provider) ||
+			this.#canUseWithoutApiKey(model.provider) ||
 			this.authStorage.hasAuth(model.provider)
 		);
 	}
@@ -2330,6 +2330,10 @@ export class ModelRegistry {
 	hasCommandBackedApiKey(provider: string): boolean {
 		const keyConfig = this.#customProviderApiKeys.get(provider);
 		return isCommandConfigValue(keyConfig);
+	}
+
+	#canUseWithoutApiKey(provider: string): boolean {
+		return this.#keylessProviders.has(provider) || getProviderDefinition(provider)?.allowsMissingApiKey === true;
 	}
 
 	getDiscoverableProviders(): string[] {
@@ -2395,7 +2399,7 @@ export class ModelRegistry {
 	): Promise<string | undefined> {
 		const commandKey = this.#resolveCommandBackedApiKey(model.provider);
 		if (commandKey.configured) return commandKey.value;
-		if (this.#keylessProviders.has(model.provider) && !this.authStorage.hasAuth(model.provider)) {
+		if (this.#canUseWithoutApiKey(model.provider) && !this.authStorage.hasAuth(model.provider)) {
 			return kNoAuth;
 		}
 		return this.authStorage.getApiKey(model.provider, sessionId, {
@@ -2433,7 +2437,7 @@ export class ModelRegistry {
 	): Promise<string | undefined> {
 		const commandKey = this.#resolveCommandBackedApiKey(provider);
 		if (commandKey.configured) return commandKey.value;
-		if (this.#keylessProviders.has(provider) && !this.authStorage.hasAuth(provider)) {
+		if (this.#canUseWithoutApiKey(provider) && !this.authStorage.hasAuth(provider)) {
 			return kNoAuth;
 		}
 		return this.authStorage.getApiKey(provider, sessionId, {
@@ -2468,7 +2472,7 @@ export class ModelRegistry {
 	async #peekApiKeyForProvider(provider: string): Promise<string | undefined> {
 		const commandKey = this.#resolveCommandBackedApiKey(provider);
 		if (commandKey.configured) return commandKey.value;
-		if (this.#keylessProviders.has(provider) && !this.authStorage.hasAuth(provider)) {
+		if (this.#canUseWithoutApiKey(provider) && !this.authStorage.hasAuth(provider)) {
 			return kNoAuth;
 		}
 		return this.authStorage.peekApiKey(provider);
