@@ -175,7 +175,7 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promis
 			// `display.showUsageModels` (default on) opts out of the per-provider model list.
 			// Skipping the registry walk here is cheaper than filtering it away in the renderer.
 			const usageModelSelectors =
-				runtime.settings?.get("display.showUsageModels") === false
+				runtime.settings.get("display.showUsageModels") === false
 					? []
 					: (provider.getUsageReportingModelSelectors?.(reports) ?? []);
 			return renderUsageReports(

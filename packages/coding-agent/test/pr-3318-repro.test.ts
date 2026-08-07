@@ -23,6 +23,7 @@ describe("PR 3318 repro", () => {
 				fetchUsageReports: async () => [report],
 				getUsageReportingModelSelectors: () => ["test-provider/coding-plan-model"],
 			},
+			settings: { get: () => undefined },
 		} as never);
 
 		expect(text).toContain("scoped-account: 1.00 requests used");
