@@ -65,6 +65,7 @@ import { umansProvider } from "./umans";
 import { veniceProvider } from "./venice";
 import { vercelAiGatewayProvider } from "./vercel-ai-gateway";
 import { vllmProvider } from "./vllm";
+import { volcengineAgentPlanProvider } from "./volcengine-agent-plan";
 import { volcengineCodingPlanProvider } from "./volcengine-coding-plan";
 import { waferServerlessProvider } from "./wafer-serverless";
 import { xaiProvider } from "./xai";
@@ -108,6 +109,7 @@ const ALL = [
 	aimlApiProvider,
 	zhipuCodingPlanProvider,
 	volcengineCodingPlanProvider,
+	volcengineAgentPlanProvider,
 	umansProvider,
 	qwenPortalProvider,
 	sakanaProvider,

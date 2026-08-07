@@ -52,6 +52,7 @@ import {
 	veniceModelManagerOptions,
 	vercelAiGatewayModelManagerOptions,
 	vllmModelManagerOptions,
+	volcengineAgentPlanModelManagerOptions,
 	volcengineCodingPlanModelManagerOptions,
 	waferServerlessModelManagerOptions,
 	xaiModelManagerOptions,
@@ -550,6 +551,13 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["VOLCENGINE_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => volcengineCodingPlanModelManagerOptions(config),
 		catalogDiscovery: { label: "Volcengine Coding Plan" },
+	},
+	{
+		id: "volcengine-agent-plan",
+		defaultModel: "ark-code-latest",
+		envVars: ["VOLCENGINE_AGENT_PLAN_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => volcengineAgentPlanModelManagerOptions(config),
+		catalogDiscovery: { label: "Volcengine Agent Plan" },
 	},
 ] as const satisfies readonly ProviderCatalogEntry[];
 

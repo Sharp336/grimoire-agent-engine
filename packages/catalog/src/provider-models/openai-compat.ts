@@ -1781,6 +1781,29 @@ export function volcengineCodingPlanModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 7.4c Volcengine Agent Plan (火山引擎)
+// ---------------------------------------------------------------------------
+
+export interface VolcengineAgentPlanModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function volcengineAgentPlanModelManagerOptions(
+	config?: VolcengineAgentPlanModelManagerConfig,
+): ModelManagerOptions<"anthropic-messages"> {
+	return createSimpleAnthropicProviderOptions(
+		"volcengine-agent-plan",
+		"https://ark.cn-beijing.volces.com/api/plan",
+		{
+			...config,
+			authStyle: "bearer",
+		},
+	);
+}
+
+// ---------------------------------------------------------------------------
 // 7.5 Fireworks
 // ---------------------------------------------------------------------------
 
