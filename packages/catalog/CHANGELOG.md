@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added Amazon Bedrock Converse Stream runtime discovery via the Bedrock control plane (`ListInferenceProfiles` / `ListFoundationModels`) so authenticated AWS profiles (including GovCloud) surface the inference profiles and models available in the ambient region instead of relying only on the static catalog.
+- Added Amazon Bedrock Converse Stream runtime discovery via the Bedrock control plane (`ListInferenceProfiles` / `ListFoundationModels`) across the ambient partition's regions (GovCloud east+west, common commercial regions) so authenticated AWS profiles surface the inference profiles and on-demand text models available in the account instead of relying only on the static catalog.
 
 ## [17.2.10] - 2026-08-06
 

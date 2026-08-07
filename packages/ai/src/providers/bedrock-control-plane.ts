@@ -5,6 +5,10 @@
  * against `bedrock.{region}.amazonaws.com`. Runtime inference continues to
  * use `bedrock-runtime.{region}.amazonaws.com` via the Converse Stream
  * provider.
+ *
+ * Multi-region discovery signs each request for the region embedded in the
+ * request hostname so GovCloud (east+west) and commercial multi-region sweeps
+ * work with a single fetch implementation.
  */
 
 import { type AwsBedrockProviderOptions, resolveAwsBearerToken } from "../registry/aws";
@@ -14,6 +18,7 @@ import { invalidateAwsCredentialCache, resolveAwsCredentials } from "./aws-crede
 import { signRequest } from "./aws-sigv4";
 
 export interface BedrockControlPlaneFetchOptions {
+	/** Fallback region when the request host does not embed one. */
 	region?: string;
 	profile?: string;
 	bearerToken?: string;
@@ -34,9 +39,18 @@ async function requestBody(input: string | URL | Request, init?: RequestInit): P
 	return new Uint8Array();
 }
 
+/**
+ * Extract the AWS region from a Bedrock control-plane or runtime hostname.
+ * Exported for tests and multi-region discovery.
+ */
+export function regionFromBedrockHost(host: string): string | undefined {
+	const match = /^bedrock(?:-runtime)?(?:-fips)?\.([a-z0-9-]+)\.amazonaws\.com(?:\.cn)?$/i.exec(host);
+	return match?.[1];
+}
+
 function createSignedControlPlaneFetch(
 	baseFetch: FetchImpl,
-	region: string,
+	fallbackRegion: string,
 	profile: string | undefined,
 	signal: AbortSignal | undefined,
 ): FetchImpl {
@@ -47,6 +61,7 @@ function createSignedControlPlaneFetch(
 		for (const [name, value] of new Headers(init?.headers)) headers.set(name, value);
 		headers.delete("authorization");
 		const body = await requestBody(input, init);
+		const region = regionFromBedrockHost(url.hostname) ?? fallbackRegion;
 		const credentials = await resolveAwsCredentials({
 			profile,
 			region,
@@ -111,8 +126,7 @@ export function bedrockRuntimeBaseUrl(region: string): string {
 }
 
 /**
- * Derive the Converse Stream base URL from a control-plane base URL prepared
- * for model discovery.
+ * Derive the Converse Stream base URL from a control-plane discovery base URL.
  */
 export function bedrockRuntimeBaseUrlFromControlPlane(controlPlaneBaseUrl: string): string {
 	try {
@@ -122,6 +136,58 @@ export function bedrockRuntimeBaseUrlFromControlPlane(controlPlaneBaseUrl: strin
 	} catch {
 		return controlPlaneBaseUrl.replace("://bedrock.", "://bedrock-runtime.");
 	}
+}
+
+/**
+ * Regions to sweep for discovery given the ambient AWS region.
+ *
+ * Bedrock model availability is regional: GovCloud Llama/Nova are only listed
+ * in us-gov-west-1 while many Claude geo profiles appear in both gov regions.
+ * We always include the ambient region first so duplicate ids prefer its
+ * runtime endpoint.
+ */
+export function bedrockDiscoveryRegions(ambientRegion: string): string[] {
+	if (ambientRegion.startsWith("us-gov-")) {
+		return uniqueRegions([ambientRegion, "us-gov-east-1", "us-gov-west-1"]);
+	}
+	if (ambientRegion.startsWith("cn-")) {
+		return uniqueRegions([ambientRegion, "cn-north-1", "cn-northwest-1"]);
+	}
+	// Commercial: ambient + common Bedrock regions. Parallel + 2h model cache
+	// keeps startup cost acceptable; per-region failures are skipped.
+	return uniqueRegions([
+		ambientRegion,
+		"us-east-1",
+		"us-east-2",
+		"us-west-1",
+		"us-west-2",
+		"ca-central-1",
+		"eu-central-1",
+		"eu-west-1",
+		"eu-west-2",
+		"eu-west-3",
+		"eu-north-1",
+		"eu-south-1",
+		"ap-northeast-1",
+		"ap-northeast-2",
+		"ap-northeast-3",
+		"ap-south-1",
+		"ap-southeast-1",
+		"ap-southeast-2",
+		"sa-east-1",
+	]);
+}
+
+function uniqueRegions(regions: string[]): string[] {
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const region of regions) {
+		const trimmed = region.trim();
+		if (!trimmed || seen.has(trimmed)) continue;
+		seen.add(trimmed);
+		out.push(trimmed);
+	}
+	return out;
 }
 
 export type { AwsBedrockProviderOptions };

@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
 	bedrockControlPlaneBaseUrl,
+	bedrockDiscoveryRegions,
 	bedrockRuntimeBaseUrlFromControlPlane,
 	createBedrockControlPlaneFetch,
+	regionFromBedrockHost,
 } from "../src/providers/bedrock-control-plane";
 import { getProviderDefinition } from "../src/registry/registry";
 
@@ -68,5 +70,8 @@ describe("Bedrock control-plane discovery auth", () => {
 		expect(bedrockRuntimeBaseUrlFromControlPlane("https://bedrock.us-gov-west-1.amazonaws.com")).toBe(
 			"https://bedrock-runtime.us-gov-west-1.amazonaws.com",
 		);
+		expect(regionFromBedrockHost("bedrock.us-gov-west-1.amazonaws.com")).toBe("us-gov-west-1");
+		expect(regionFromBedrockHost("bedrock-runtime.us-east-1.amazonaws.com")).toBe("us-east-1");
+		expect(bedrockDiscoveryRegions("us-gov-east-1")).toEqual(["us-gov-east-1", "us-gov-west-1"]);
 	});
 });

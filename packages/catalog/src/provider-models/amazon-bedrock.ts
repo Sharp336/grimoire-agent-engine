@@ -2,11 +2,11 @@
  * Runtime model discovery for Amazon Bedrock Converse Stream.
  *
  * When AWS credentials (or a Bedrock API key) are available, lists inference
- * profiles and text foundation models from the control plane in the ambient
- * region and maps them onto `bedrock-converse-stream` specs. Successful
- * discovery is authoritative so GovCloud accounts see their real `us-gov.*`
- * system profiles instead of a commercial-only (or over-synthesized) static
- * catalog.
+ * profiles and on-demand text foundation models from the control plane across
+ * the ambient partition's Bedrock regions and maps them onto
+ * `bedrock-converse-stream` specs. Successful discovery is authoritative so
+ * each account/region set surfaces what the control plane actually exposes
+ * (GovCloud east+west, commercial multi-region) instead of a static catalog.
  */
 
 import type { ModelManagerOptions } from "../model-manager";
@@ -22,6 +22,53 @@ const MAX_PAGES = 50;
 /** Geo prefixes used by Bedrock system inference profiles (including GovCloud). */
 const BEDROCK_GEO_PREFIXES = ["us-gov.", "global.", "us.", "eu.", "au.", "jp.", "apac."] as const;
 
+/**
+ * Regions to sweep for discovery given the ambient AWS region.
+ * Kept in catalog so discovery unit tests do not need pi-ai.
+ * Must stay aligned with `bedrockDiscoveryRegions` in pi-ai control-plane.
+ */
+export function bedrockDiscoveryRegions(ambientRegion: string): string[] {
+	if (ambientRegion.startsWith("us-gov-")) {
+		return uniqueRegions([ambientRegion, "us-gov-east-1", "us-gov-west-1"]);
+	}
+	if (ambientRegion.startsWith("cn-")) {
+		return uniqueRegions([ambientRegion, "cn-north-1", "cn-northwest-1"]);
+	}
+	return uniqueRegions([
+		ambientRegion,
+		"us-east-1",
+		"us-east-2",
+		"us-west-1",
+		"us-west-2",
+		"ca-central-1",
+		"eu-central-1",
+		"eu-west-1",
+		"eu-west-2",
+		"eu-west-3",
+		"eu-north-1",
+		"eu-south-1",
+		"ap-northeast-1",
+		"ap-northeast-2",
+		"ap-northeast-3",
+		"ap-south-1",
+		"ap-southeast-1",
+		"ap-southeast-2",
+		"sa-east-1",
+	]);
+}
+
+function uniqueRegions(regions: string[]): string[] {
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const region of regions) {
+		const trimmed = region.trim();
+		if (!trimmed || seen.has(trimmed)) continue;
+		seen.add(trimmed);
+		out.push(trimmed);
+	}
+	return out;
+}
+
 export interface AmazonBedrockModelManagerConfig extends ModelManagerConfig {}
 
 export function amazonBedrockModelManagerOptions(
@@ -36,8 +83,7 @@ export function amazonBedrockModelManagerOptions(
 			? {
 					fetchDynamicModels: () =>
 						fetchAmazonBedrockDiscoveredModels({
-							controlPlaneBaseUrl: config.baseUrl as string,
-							runtimeBaseUrl: bedrockRuntimeBaseUrlFromControlPlane(config.baseUrl as string),
+							ambientControlPlaneBaseUrl: config.baseUrl as string,
 							fetch: config.fetch as FetchImpl,
 						}),
 				}
@@ -59,6 +105,31 @@ export function bedrockRuntimeBaseUrlFromControlPlane(controlPlaneBaseUrl: strin
 			.replace("://bedrock.", "://bedrock-runtime.")
 			.replace("://bedrock-fips.", "://bedrock-runtime-fips.");
 	}
+}
+
+/** Control-plane base URL for a concrete region. */
+export function bedrockControlPlaneBaseUrl(region: string): string {
+	return `https://bedrock.${region}.amazonaws.com`;
+}
+
+/** Runtime base URL for a concrete region. */
+export function bedrockRuntimeBaseUrl(region: string): string {
+	return `https://bedrock-runtime.${region}.amazonaws.com`;
+}
+
+/**
+ * Parse ambient region from a control-plane base URL prepared by
+ * `prepareModelDiscovery`. Exported for tests.
+ */
+export function regionFromControlPlaneBaseUrl(controlPlaneBaseUrl: string): string {
+	try {
+		const host = new URL(controlPlaneBaseUrl).hostname;
+		const match = /^bedrock(?:-fips)?\.([a-z0-9-]+)\.amazonaws\.com(?:\.cn)?$/i.exec(host);
+		if (match?.[1]) return match[1];
+	} catch {
+		// fall through
+	}
+	return "us-east-1";
 }
 
 /**
@@ -96,47 +167,92 @@ export function resolveBedrockDiscoveredModelId(summary: {
 }
 
 interface DiscoveryFetchOptions {
-	controlPlaneBaseUrl: string;
-	runtimeBaseUrl: string;
+	/** Ambient control-plane base URL from prepareModelDiscovery (sets preferred region). */
+	ambientControlPlaneBaseUrl: string;
 	fetch: FetchImpl;
 }
 
 /**
- * List inference profiles + on-demand text foundation models and map them to
- * Converse Stream specs. Returns `null` on transport/API failure so the model
- * manager keeps the bundled catalog rather than caching an empty authoritative set.
+ * List inference profiles + on-demand text foundation models across the
+ * ambient partition's Bedrock regions and map them to Converse Stream specs.
+ * Returns `null` only when every region fails so the model manager keeps the
+ * bundled catalog rather than caching an empty authoritative set.
  */
 export async function fetchAmazonBedrockDiscoveredModels(
 	options: DiscoveryFetchOptions,
 ): Promise<ModelSpec<"bedrock-converse-stream">[] | null> {
+	const ambientRegion = regionFromControlPlaneBaseUrl(options.ambientControlPlaneBaseUrl);
+	const regions = bedrockDiscoveryRegions(ambientRegion);
 	const referenceIndex = buildBedrockReferenceIndex();
 	const collected = new Map<string, ModelSpec<"bedrock-converse-stream">>();
+	let anyRegionSucceeded = false;
 
-	const profiles = await listAllInferenceProfiles(options);
+	const regionResults = await Promise.all(
+		regions.map(region => discoverRegion(region, options.fetch, referenceIndex)),
+	);
+
+	for (let i = 0; i < regions.length; i++) {
+		const region = regions[i];
+		const result = regionResults[i];
+		if (!result) continue;
+		anyRegionSucceeded = true;
+		const preferAmbient = region === ambientRegion;
+		for (const model of result) {
+			const existing = collected.get(model.id);
+			if (!existing) {
+				collected.set(model.id, model);
+				continue;
+			}
+			// Prefer ambient-region endpoint when the same id is listed in multiple regions.
+			if (preferAmbient) collected.set(model.id, model);
+		}
+	}
+
+	if (!anyRegionSucceeded) return null;
+	return Array.from(collected.values());
+}
+
+async function discoverRegion(
+	region: string,
+	fetchImpl: FetchImpl,
+	referenceIndex: Map<string, ModelSpec<"bedrock-converse-stream">>,
+): Promise<ModelSpec<"bedrock-converse-stream">[] | null> {
+	const controlPlaneBaseUrl = bedrockControlPlaneBaseUrl(region);
+	const runtimeBaseUrl = bedrockRuntimeBaseUrl(region);
+	const profiles = await listAllInferenceProfiles({ controlPlaneBaseUrl, fetch: fetchImpl });
+	// A region with no ListInferenceProfiles access is skipped, not fatal.
 	if (profiles === null) return null;
+
+	const out: ModelSpec<"bedrock-converse-stream">[] = [];
+	const seen = new Set<string>();
+
 	for (const summary of profiles) {
 		const id = resolveBedrockDiscoveredModelId(summary);
-		if (!id || collected.has(id)) continue;
+		if (!id || seen.has(id)) continue;
+		seen.add(id);
 		const name =
 			typeof summary.inferenceProfileName === "string" && summary.inferenceProfileName.trim()
 				? summary.inferenceProfileName.trim()
 				: id;
-		collected.set(id, toDiscoveredBedrockModel(id, name, options.runtimeBaseUrl, referenceIndex));
+		out.push(toDiscoveredBedrockModel(id, name, runtimeBaseUrl, referenceIndex));
 	}
 
-	const foundations = await listAllFoundationModels(options);
-	// Foundation list is best-effort: profiles alone are enough for a successful discovery.
+	const foundations = await listAllFoundationModels({ controlPlaneBaseUrl, fetch: fetchImpl });
+	// Foundation list is best-effort per region.
 	if (foundations) {
 		for (const summary of foundations) {
 			const id = typeof summary.modelId === "string" ? summary.modelId.trim() : "";
-			if (!id || collected.has(id)) continue;
-			if (!isConverseCapableFoundationModel(summary)) continue;
+			if (!id || seen.has(id)) continue;
+			// Bare foundation ids that only support INFERENCE_PROFILE cannot be
+			// invoked on-demand (common on GovCloud). Prefer the geo profile id.
+			if (!isOnDemandConverseFoundationModel(summary)) continue;
+			seen.add(id);
 			const name = typeof summary.modelName === "string" && summary.modelName.trim() ? summary.modelName.trim() : id;
-			collected.set(id, toDiscoveredBedrockModel(id, name, options.runtimeBaseUrl, referenceIndex));
+			out.push(toDiscoveredBedrockModel(id, name, runtimeBaseUrl, referenceIndex));
 		}
 	}
 
-	return Array.from(collected.values());
+	return out;
 }
 
 function toDiscoveredBedrockModel(
@@ -198,7 +314,12 @@ function extractProfileLeafId(id: string): string {
 	return slash === -1 ? id : id.slice(slash + 1);
 }
 
-function isConverseCapableFoundationModel(summary: Record<string, unknown>): boolean {
+/**
+ * Bare foundation-model ids are only useful when on-demand Converse works.
+ * Profile-only models must be selected via their inference-profile id.
+ * Exported for tests.
+ */
+export function isOnDemandConverseFoundationModel(summary: Record<string, unknown>): boolean {
 	const streaming = summary.responseStreamingSupported;
 	if (streaming === false) return false;
 	const outputs = summary.outputModalities;
@@ -207,18 +328,16 @@ function isConverseCapableFoundationModel(summary: Record<string, unknown>): boo
 	}
 	const inferenceTypes = summary.inferenceTypesSupported;
 	if (Array.isArray(inferenceTypes) && inferenceTypes.length > 0) {
-		const allowed = inferenceTypes.some(t => {
-			const upper = String(t).toUpperCase();
-			return upper === "ON_DEMAND" || upper === "INFERENCE_PROFILE";
-		});
-		if (!allowed) return false;
+		return inferenceTypes.some(t => String(t).toUpperCase() === "ON_DEMAND");
 	}
+	// Missing inferenceTypes: keep (legacy rows); invoke may still fail.
 	return true;
 }
 
-async function listAllInferenceProfiles(
-	options: DiscoveryFetchOptions,
-): Promise<Array<Record<string, unknown>> | null> {
+async function listAllInferenceProfiles(options: {
+	controlPlaneBaseUrl: string;
+	fetch: FetchImpl;
+}): Promise<Array<Record<string, unknown>> | null> {
 	const out: Array<Record<string, unknown>> = [];
 	let nextToken: string | undefined;
 	for (let page = 0; page < MAX_PAGES; page++) {
@@ -243,7 +362,10 @@ async function listAllInferenceProfiles(
 	return out;
 }
 
-async function listAllFoundationModels(options: DiscoveryFetchOptions): Promise<Array<Record<string, unknown>> | null> {
+async function listAllFoundationModels(options: {
+	controlPlaneBaseUrl: string;
+	fetch: FetchImpl;
+}): Promise<Array<Record<string, unknown>> | null> {
 	const url = new URL(
 		"/foundation-models",
 		options.controlPlaneBaseUrl.endsWith("/") ? options.controlPlaneBaseUrl : `${options.controlPlaneBaseUrl}/`,

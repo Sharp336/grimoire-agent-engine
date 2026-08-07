@@ -2,8 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { createModelManager } from "@oh-my-pi/pi-catalog/model-manager";
 import {
 	amazonBedrockModelManagerOptions,
+	bedrockDiscoveryRegions,
 	bedrockRuntimeBaseUrlFromControlPlane,
 	fetchAmazonBedrockDiscoveredModels,
+	isOnDemandConverseFoundationModel,
 	resolveBedrockDiscoveredModelId,
 	stripBedrockGeoPrefix,
 } from "@oh-my-pi/pi-catalog/provider-models";
@@ -29,6 +31,11 @@ describe("Amazon Bedrock discovery helpers", () => {
 		);
 	});
 
+	test("bedrockDiscoveryRegions sweeps both GovCloud regions", () => {
+		expect(bedrockDiscoveryRegions("us-gov-east-1")).toEqual(["us-gov-east-1", "us-gov-west-1"]);
+		expect(bedrockDiscoveryRegions("us-gov-west-1")).toEqual(["us-gov-west-1", "us-gov-east-1"]);
+	});
+
 	test("resolveBedrockDiscoveredModelId prefers ARN for application profiles", () => {
 		expect(
 			resolveBedrockDiscoveredModelId({
@@ -47,83 +54,139 @@ describe("Amazon Bedrock discovery helpers", () => {
 			}),
 		).toBe("us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0");
 	});
+
+	test("isOnDemandConverseFoundationModel requires TEXT + ON_DEMAND and streaming", () => {
+		expect(
+			isOnDemandConverseFoundationModel({
+				responseStreamingSupported: true,
+				outputModalities: ["TEXT"],
+				inferenceTypesSupported: ["ON_DEMAND"],
+			}),
+		).toBe(true);
+		// Profile-only foundation rows are not usable as bare model ids.
+		expect(
+			isOnDemandConverseFoundationModel({
+				responseStreamingSupported: true,
+				outputModalities: ["TEXT"],
+				inferenceTypesSupported: ["INFERENCE_PROFILE"],
+			}),
+		).toBe(false);
+		expect(
+			isOnDemandConverseFoundationModel({
+				responseStreamingSupported: true,
+				outputModalities: ["EMBEDDING"],
+				inferenceTypesSupported: ["ON_DEMAND"],
+			}),
+		).toBe(false);
+	});
 });
 
 describe("fetchAmazonBedrockDiscoveredModels", () => {
-	test("maps system inference profiles from the control plane and is authoritative-ready", async () => {
+	test("merges system profiles and on-demand foundations across GovCloud regions", async () => {
 		const calls: string[] = [];
 		const fetchImpl = async (input: string | URL | Request): Promise<Response> => {
 			const url = new URL(input instanceof Request ? input.url : String(input));
-			calls.push(`${url.pathname}${url.search}`);
+			calls.push(`${url.host}${url.pathname}`);
+			const region = url.hostname.split(".")[1]; // bedrock.{region}.amazonaws.com
 			if (url.pathname.endsWith("/inference-profiles")) {
-				return Response.json({
-					inferenceProfileSummaries: [
-						{
-							inferenceProfileId: "us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0",
-							inferenceProfileName: "US-GOV Anthropic Claude Sonnet 4.5",
-							type: "SYSTEM_DEFINED",
-							inferenceProfileArn:
-								"arn:aws-us-gov:bedrock:us-gov-east-1:005444746089:inference-profile/us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0",
-						},
-						{
-							inferenceProfileId: "us-gov.anthropic.claude-opus-4-8",
-							inferenceProfileName: "US-GOV Anthropic Claude Opus 4.8",
-							type: "SYSTEM_DEFINED",
-						},
-					],
-				});
+				if (region === "us-gov-east-1") {
+					return Response.json({
+						inferenceProfileSummaries: [
+							{
+								inferenceProfileId: "us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0",
+								inferenceProfileName: "US-GOV Anthropic Claude Sonnet 4.5",
+								type: "SYSTEM_DEFINED",
+							},
+							{
+								inferenceProfileId: "us-gov.nvidia.nemotron-nano-9b-v2",
+								inferenceProfileName: "US-GOV NVIDIA Nemotron Nano 9B v2",
+								type: "SYSTEM_DEFINED",
+							},
+						],
+					});
+				}
+				if (region === "us-gov-west-1") {
+					return Response.json({
+						inferenceProfileSummaries: [
+							{
+								inferenceProfileId: "us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0",
+								inferenceProfileName: "US-GOV Anthropic Claude Sonnet 4.5",
+								type: "SYSTEM_DEFINED",
+							},
+						],
+					});
+				}
+				return Response.json({ inferenceProfileSummaries: [] });
 			}
 			if (url.pathname.endsWith("/foundation-models")) {
-				return Response.json({
-					modelSummaries: [
-						{
-							modelId: "anthropic.claude-sonnet-4-5-20250929-v1:0",
-							modelName: "Claude Sonnet 4.5",
-							responseStreamingSupported: true,
-							outputModalities: ["TEXT"],
-							inferenceTypesSupported: ["INFERENCE_PROFILE"],
-						},
-						// Embedding-only / non-text should be dropped.
-						{
-							modelId: "amazon.titan-embed-text-v2:0",
-							modelName: "Titan Embed",
-							responseStreamingSupported: false,
-							outputModalities: ["EMBEDDING"],
-							inferenceTypesSupported: ["ON_DEMAND"],
-						},
-					],
-				});
+				if (region === "us-gov-west-1") {
+					return Response.json({
+						modelSummaries: [
+							{
+								modelId: "meta.llama3-70b-instruct-v1:0",
+								modelName: "Llama 3 70B Instruct",
+								responseStreamingSupported: true,
+								outputModalities: ["TEXT"],
+								inferenceTypesSupported: ["ON_DEMAND"],
+							},
+							{
+								modelId: "amazon.nova-lite-v1:0",
+								modelName: "Nova Lite",
+								responseStreamingSupported: true,
+								outputModalities: ["TEXT"],
+								inferenceTypesSupported: ["ON_DEMAND"],
+							},
+							// Profile-only — must not appear as bare id.
+							{
+								modelId: "anthropic.claude-sonnet-4-5-20250929-v1:0",
+								modelName: "Claude Sonnet 4.5",
+								responseStreamingSupported: true,
+								outputModalities: ["TEXT"],
+								inferenceTypesSupported: ["INFERENCE_PROFILE"],
+							},
+							// Embeddings — not Converse chat.
+							{
+								modelId: "amazon.titan-embed-text-v2:0",
+								modelName: "Titan Embed",
+								responseStreamingSupported: false,
+								outputModalities: ["EMBEDDING"],
+								inferenceTypesSupported: ["ON_DEMAND"],
+							},
+						],
+					});
+				}
+				return Response.json({ modelSummaries: [] });
 			}
 			return new Response("not found", { status: 404 });
 		};
 
 		const models = await fetchAmazonBedrockDiscoveredModels({
-			controlPlaneBaseUrl: "https://bedrock.us-gov-east-1.amazonaws.com",
-			runtimeBaseUrl: "https://bedrock-runtime.us-gov-east-1.amazonaws.com",
+			ambientControlPlaneBaseUrl: "https://bedrock.us-gov-east-1.amazonaws.com",
 			fetch: fetchImpl,
 		});
 
 		expect(models).not.toBeNull();
 		const ids = models!.map(m => m.id);
 		expect(ids).toContain("us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0");
-		expect(ids).toContain("us-gov.anthropic.claude-opus-4-8");
-		expect(ids).toContain("anthropic.claude-sonnet-4-5-20250929-v1:0");
+		expect(ids).toContain("us-gov.nvidia.nemotron-nano-9b-v2");
+		expect(ids).toContain("meta.llama3-70b-instruct-v1:0");
+		expect(ids).toContain("amazon.nova-lite-v1:0");
+		expect(ids).not.toContain("anthropic.claude-sonnet-4-5-20250929-v1:0");
 		expect(ids).not.toContain("amazon.titan-embed-text-v2:0");
 
+		const llama = models!.find(m => m.id === "meta.llama3-70b-instruct-v1:0");
+		expect(llama?.baseUrl).toBe("https://bedrock-runtime.us-gov-west-1.amazonaws.com");
+		// Ambient-region preference for duplicate profile id.
 		const sonnet = models!.find(m => m.id === "us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0");
-		expect(sonnet?.api).toBe("bedrock-converse-stream");
-		expect(sonnet?.provider).toBe("amazon-bedrock");
 		expect(sonnet?.baseUrl).toBe("https://bedrock-runtime.us-gov-east-1.amazonaws.com");
-		expect(sonnet?.name).toContain("Sonnet");
 
-		expect(calls.some(c => c.includes("/inference-profiles"))).toBe(true);
-		expect(calls.some(c => c.includes("/foundation-models"))).toBe(true);
+		expect(calls.some(c => c.includes("bedrock.us-gov-east-1.amazonaws.com"))).toBe(true);
+		expect(calls.some(c => c.includes("bedrock.us-gov-west-1.amazonaws.com"))).toBe(true);
 	});
 
-	test("returns null when the inference-profile list fails so static catalog is retained", async () => {
+	test("returns null when every region fails so static catalog is retained", async () => {
 		const models = await fetchAmazonBedrockDiscoveredModels({
-			controlPlaneBaseUrl: "https://bedrock.us-east-1.amazonaws.com",
-			runtimeBaseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+			ambientControlPlaneBaseUrl: "https://bedrock.us-east-1.amazonaws.com",
 			fetch: async () => new Response("nope", { status: 403 }),
 		});
 		expect(models).toBeNull();
@@ -165,11 +228,6 @@ describe("fetchAmazonBedrockDiscoveredModels", () => {
 		);
 		const result = await manager.refresh("online");
 		expect(result.stale).toBe(false);
-		const ids = result.models.map(m => m.id);
-		expect(ids).toContain("us.anthropic.claude-sonnet-4-5-20250929-v1:0");
-		// Authoritative discovery should not keep unrelated static-only commercial geos
-		// that were not returned by the control plane (exact set depends on cache merge,
-		// but the discovered id must be present and provider must match).
 		const hit = result.models.find(m => m.id === "us.anthropic.claude-sonnet-4-5-20250929-v1:0");
 		expect(hit?.provider).toBe("amazon-bedrock");
 		expect(hit?.api).toBe("bedrock-converse-stream");
