@@ -79,6 +79,14 @@ interface ApprovalPreviewGate {
 	started: boolean;
 }
 
+/**
+ * Host-internal controller that presents live session events in the active
+ * transcript. The host constructs it with an {@link InteractiveModeContext},
+ * subscribes it to the session, and disposes it when that surface ends.
+ * Extensions may wrap only the documented prototype methods exposed by the
+ * extension surface; they must not construct, subscribe, dispose, or depend on
+ * this implementation's other members.
+ */
 export class EventController {
 	#lastReadGroup: ReadToolGroupComponent | undefined = undefined;
 	// Count of visible assistant content blocks (rendered non-empty text/thinking)
@@ -199,6 +207,12 @@ export class EventController {
 	#vocalizedMessageUpdates = new WeakSet<object>();
 	static readonly #MESSAGE_UPDATE_COALESCE_MS = 33;
 
+	/**
+	 * Creates a host-owned event controller and wires its live rendering state
+	 * to the supplied interactive context. The host controls subscription and
+	 * disposal for this instance; extensions must not call the constructor or
+	 * manage its lifecycle.
+	 */
 	constructor(private ctx: InteractiveModeContext) {
 		// Enhanced speech (`speech.enhanced`) rewrites blocks through the
 		// tiny/smol role with this session's registry and credentials; the

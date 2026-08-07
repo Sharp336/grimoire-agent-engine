@@ -92,7 +92,20 @@ function imageLinksForMessage(
 	return materializeImageReferenceLinksSync(images, putBlobSync);
 }
 
+/**
+ * Host-internal helpers for presenting messages and session context in the
+ * active interactive transcript. The host constructs this helper with its
+ * {@link InteractiveModeContext}, owns the instance and its lifecycle, and
+ * retires it with the enclosing interactive surface. Extensions may wrap only
+ * the documented prototype methods exposed by the extension surface; they must
+ * not construct, dispose, or depend on this implementation's other members.
+ */
 export class UiHelpers {
+	/**
+	 * Creates a host-owned helper bound to the supplied interactive context.
+	 * The host controls this instance until its enclosing surface is retired;
+	 * extensions must not call the constructor or manage disposal.
+	 */
 	constructor(private ctx: InteractiveModeContext) {}
 
 	/** Extract text content from a user message */

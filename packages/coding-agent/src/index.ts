@@ -23,6 +23,7 @@ export * from "./extensibility/custom-tools";
 export type * from "./extensibility/extensions";
 // Extension types and utilities
 export * from "./extensibility/extensions";
+export * from "./extensibility/extensions/transcript-presentation";
 // Hook system types (legacy re-export)
 // Skills
 export * from "./extensibility/skills";
@@ -34,11 +35,8 @@ export * from "./main";
 // Run modes for programmatic SDK usage
 export * from "./modes";
 export * from "./modes/components";
-export * from "./modes/components/chat-transcript-builder";
-export * from "./modes/controllers/event-controller";
 // Theme utilities for custom tools
 export * from "./modes/theme/theme";
-export * from "./modes/utils/ui-helpers";
 // SDK for programmatic usage
 export * from "./sdk";
 export * from "./session/agent-session";

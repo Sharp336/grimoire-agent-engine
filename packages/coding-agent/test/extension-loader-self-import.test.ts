@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as PiCodingAgent from "@oh-my-pi/pi-coding-agent";
@@ -6,11 +6,17 @@ import { loadCustomCommands } from "@oh-my-pi/pi-coding-agent/extensibility/cust
 import { loadCustomTools } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/loader";
 import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { loadHooks } from "@oh-my-pi/pi-coding-agent/extensibility/hooks/loader";
+import { ChatTranscriptBuilder as HostChatTranscriptBuilder } from "@oh-my-pi/pi-coding-agent/modes/components/chat-transcript-builder";
+import { EventController as HostEventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
+import { UiHelpers as HostUiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 declare global {
 	var __ompHostPiForLoaderIdentityTest: typeof PiCodingAgent | undefined;
 }
+
+type IsConstructible<T> = T extends abstract new (...args: infer _Args) => infer _Instance ? true : false;
+type AssertNotConstructible<T extends false> = T;
 
 describe("extension loader host runtime binding", () => {
 	let projectDir: TempDir | undefined;
@@ -112,6 +118,35 @@ describe("extension loader host runtime binding", () => {
 		expect(hookResult.errors).toEqual([]);
 		expect(hookResult.hooks).toHaveLength(1);
 		expect(hookResult.hooks[0].handlers.has("identity:event")).toBe(true);
+	});
+
+	it("keeps transcript handles identical to host constructors and non-constructible in TypeScript", () => {
+		expect(PiCodingAgent.ChatTranscriptBuilder).toBe(HostChatTranscriptBuilder);
+		expect(PiCodingAgent.ChatTranscriptBuilder.prototype).toBe(HostChatTranscriptBuilder.prototype);
+		expect(typeof PiCodingAgent.ChatTranscriptBuilder).toBe("function");
+		expect(PiCodingAgent.EventController).toBe(HostEventController);
+		expect(PiCodingAgent.EventController.prototype).toBe(HostEventController.prototype);
+		expect(typeof PiCodingAgent.EventController).toBe("function");
+		expect(PiCodingAgent.UiHelpers).toBe(HostUiHelpers);
+		expect(PiCodingAgent.UiHelpers.prototype).toBe(HostUiHelpers.prototype);
+		expect(typeof PiCodingAgent.UiHelpers).toBe("function");
+
+		expectTypeOf<typeof PiCodingAgent.ChatTranscriptBuilder>().toEqualTypeOf<{
+			readonly prototype: Pick<HostChatTranscriptBuilder, "rebuild" | "append" | "setExpanded" | "reset">;
+		}>();
+		expectTypeOf<typeof PiCodingAgent.EventController>().toEqualTypeOf<{
+			readonly prototype: Pick<HostEventController, "resetTranscriptAnchors" | "handleEvent">;
+		}>();
+		expectTypeOf<typeof PiCodingAgent.UiHelpers>().toEqualTypeOf<{
+			readonly prototype: Pick<HostUiHelpers, "addMessageToChat" | "renderSessionContext" | "renderInitialMessages">;
+		}>();
+
+		const nonConstructible: [
+			AssertNotConstructible<IsConstructible<typeof PiCodingAgent.ChatTranscriptBuilder>>,
+			AssertNotConstructible<IsConstructible<typeof PiCodingAgent.EventController>>,
+			AssertNotConstructible<IsConstructible<typeof PiCodingAgent.UiHelpers>>,
+		] = [false, false, false];
+		expect(nonConstructible).toEqual([false, false, false]);
 	});
 
 	it("exposes the live transcript presentation constructors to extensions", async () => {

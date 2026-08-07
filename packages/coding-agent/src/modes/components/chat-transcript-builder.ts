@@ -60,15 +60,36 @@ import { TranscriptContainer } from "./transcript-container";
 import { createUsageRowBlock } from "./usage-row";
 import { CollapsedSyntheticMessageComponent, UserMessageComponent } from "./user-message";
 
+/**
+ * Host-owned dependencies for constructing a {@link ChatTranscriptBuilder}.
+ * Extensions do not construct builders or provide these dependencies; the
+ * host supplies them and owns the resulting builder's lifecycle.
+ */
 export interface ChatTranscriptBuilderDeps {
+	/** Terminal UI that owns the rendered transcript components. */
 	ui: TUI;
+	/** Resolves a tool name to its host-registered tool definition. */
 	getTool?: (name: string) => AgentTool | undefined;
-	/** Whether the active registry entry came from a built-in factory. */
+1: 	/** Whether the active registry entry came from a built-in factory. */
 	isBuiltInTool?: (name: string) => boolean;
+	/** Resolves an extension message type to its host-registered renderer. */
+2: 	/**
+	 * Creates a host-owned builder with the dependencies for its transcript
+	 * container. The host controls this instance until its enclosing transcript
+	 * viewer is disposed; extensions must not call the constructor or manage
+	 * disposal.
+	 */
+	constructor(private readonly deps: ChatTranscriptBuilderDeps) {
+		this.container.setToolActivityVisible(!settings.get("display.hideToolActivity"));
+	}
 	getMessageRenderer?: (customType: string) => MessageRenderer | undefined;
+	/** Working directory used when rendering file-backed transcript entries. */
 	cwd: string;
+	/** Reports whether the host hides thinking blocks. */
 	hideThinkingBlock?: () => boolean;
+	/** Reports whether the host renders thinking as prose only. */
 	proseOnlyThinking?: () => boolean;
+	/** Requests a host UI render after transcript state changes. */
 	requestRender: () => void;
 }
 
@@ -81,6 +102,14 @@ function userMessageText(message: Extract<AgentMessage, { role: "user" }>): stri
 		.join("");
 }
 
+/**
+ * Host-internal builder for transcript components from persisted session
+ * entries. The host constructs it with {@link ChatTranscriptBuilderDeps},
+ * owns its instance and rendered container, and disposes it with the enclosing
+ * transcript viewer. Extensions may wrap only the documented prototype
+ * methods exposed by the extension surface; they must not construct, dispose,
+ * or depend on this implementation's other members.
+ */
 export class ChatTranscriptBuilder {
 	readonly container = new TranscriptContainer();
 	#pendingTools = new Map<string, ToolExecutionComponent | ReadToolGroupComponent>();
@@ -97,6 +126,15 @@ export class ChatTranscriptBuilder {
 	#expandables: Array<{ setExpanded(expanded: boolean): void }> = [];
 	#expanded = false;
 
+1: 	/** Whether the active registry entry came from a built-in factory. */
+	isBuiltInTool?: (name: string) => boolean;
+	/** Resolves an extension message type to its host-registered renderer. */
+2: 	/**
+	 * Creates a host-owned builder with the dependencies for its transcript
+	 * container. The host controls this instance until its enclosing transcript
+	 * viewer is disposed; extensions must not call the constructor or manage
+	 * disposal.
+	 */
 	constructor(private readonly deps: ChatTranscriptBuilderDeps) {
 		this.container.setToolActivityVisible(!settings.get("display.hideToolActivity"));
 	}
