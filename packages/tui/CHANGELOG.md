@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Herdr panes losing native scrollback when TUI transcript replacement or resize redraws emitted destructive terminal-history clears.
+- Fixed explicit display resets inside tmux retaining the stale attach-time light/dark palette and leaking terminal capability bytes into the editor. OMP now lets the passthrough OSC 11 probe update tmux's background cache without sending a passthrough DA1 sentinel, then reads that refreshed cache directly.
+
 ## [17.2.10] - 2026-08-06
 
 ### Fixed

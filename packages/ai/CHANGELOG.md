@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Fixed GitHub Copilot's permanent `model_not_available_for_integrator` response being retried and replaced with transient fleet-skew guidance, preserving the provider's actionable `Available models` list instead ([#7819](https://github.com/can1357/oh-my-pi/issues/7819)).
+
+### Added
+
+- Added Cursor personal monthly USD quota and remaining-balance reporting with verified profile email account labels.
+
+### Fixed
+
+- Fixed `ANTHROPIC_BASE_URL` being ignored for Anthropic chat requests, which sent gateway-scoped keys to `api.anthropic.com` (401 `invalid x-api-key`, and a credential disclosure) instead of the configured host. Chat now resolves the base URL to `ANTHROPIC_BASE_URL` (after Foundry, ahead of the official default) and forwards `ANTHROPIC_CUSTOM_HEADERS` to non-official gateways, matching the documented behavior and the web-search fix from #1693 ([#7874](https://github.com/can1357/oh-my-pi/issues/7874)).
+- Fixed a pre-org OAuth tombstone (`email:<e>`) surviving a later org-scoped login of the same account (`email:<e>|org:<ws>`) for `openai-codex` and `anthropic`, leaving a permanent red row in `omp usage` that re-login could not clear. `#purgeSupersededDisabledRows` now reuses the `matchesReplacementCredential` semantics of the active-replacement path instead of exact identity-key equality, so an org-scoped login claims and hard-deletes its pre-org legacy tombstone ([#7876](https://github.com/can1357/oh-my-pi/issues/7876)).
+- Fixed lazy provider streams (Amazon Bedrock, Google, Cursor, Devin, Ollama) ignoring the model's catalog `compat.streamIdleTimeoutMs`, which pinned Bedrock reasoning models to the generic 300s idle watchdog and killed healthy-but-quiet plan-writing/todo-execution turns with `Provider stream stalled while waiting for the next event`; Bedrock ConverseStream sends no ping keepalives, so long thinking gaps read as dead streams. The terminal message now also carries the watchdog's structural transient+timeout `errorId`, so session-level auto-retry classifies these stalls without depending on message text ([#7892](https://github.com/can1357/oh-my-pi/pull/7892) by [@voonfoo](https://github.com/voonfoo)).
+- Fixed Simplified Chinese quota-exhaustion errors (e.g. Zhipu Coding Plan's `429 已达到 5 小时的使用上限。您的限额将在 … 重置。`) being classified as `UNKNOWN`, which left multi-key sessions pinned to the exhausted api_key credential instead of rotating to a sibling key. Simplified Chinese quota phrasing (`达到…使用上限`, `额度已用完`, `配额已耗尽`, `限额 … 重置`, `余额不足`) now classifies as `QUOTA_EXHAUSTED`, and a 429 body carrying classifier-recognized Simplified Chinese phrasing (quota or throttle) is treated as informative rather than opaque, so a plain Chinese throttle (e.g. `已达到速率限制`) defers to the classifier and stays in the backoff lane instead of over-rotating credentials.
+- Classified subscription/plan-cap 429 responses as credential-rotatable usage limits instead of transient per-minute throttles ([#7767](https://github.com/can1357/oh-my-pi/issues/7767)).
+
 ## [17.2.10] - 2026-08-06
 
 ### Breaking Changes
