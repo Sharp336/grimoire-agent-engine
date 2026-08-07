@@ -790,7 +790,7 @@ export class EventController {
 			this.ctx.addMessageToChat(event.message);
 			this.ctx.ui.requestRender();
 		} else if (event.message.role === "assistant") {
-			this.#lastVisibleBlockCount = 0;
+			this.#streamedToolCallIdByIndex.clear();
 			const streamingComponent = createAssistantMessageComponent(this.ctx);
 			this.ctx.streamingComponent = streamingComponent;
 			this.ctx.streamingMessage = event.message;
