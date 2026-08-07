@@ -689,13 +689,12 @@ export class SessionMaintenance {
 			// A bare `/compact` follows the same provider-native preference as auto
 			// compaction. An explicit `/compact snapcompact` is a deliberate local-only
 			// archive request and keeps its contract.
-			if (
-				wantsSnapcompact &&
-				!explicitSnapcompact &&
-				this.#model &&
-				shouldUseProviderNativeCompaction(this.#model, effectiveSettings)
-			) {
-				this.#host.emitNotice("info", nativeOverSnapcompactNotice(this.#model.provider), "compaction");
+			const manualNativeTarget =
+				wantsSnapcompact && !explicitSnapcompact
+					? this.#nativeCompactionTarget(compactionCandidates, effectiveSettings)
+					: undefined;
+			if (manualNativeTarget) {
+				this.#host.emitNotice("info", nativeOverSnapcompactNotice(manualNativeTarget.provider), "compaction");
 				wantsSnapcompact = false;
 			}
 			let snapcompactReady = wantsSnapcompact;
@@ -1499,6 +1498,24 @@ export class SessionMaintenance {
 		return this.resolveCompactionModelCandidates(this.#model, availableModels, filter);
 	}
 
+	/**
+	 * The compaction candidate that provider-native compaction would actually run
+	 * on, or undefined when the summary will be an ordinary LLM call.
+	 *
+	 * Keyed on the head of the candidate chain rather than on `#model`: both
+	 * summary paths consume `#getCompactionModelCandidates()`, whose first entry is
+	 * the active model's configured `compactionModel`. A native-capable active
+	 * model with a non-native `compactionModel` would otherwise skip snapcompact,
+	 * announce native replay, and then hand the work to the configured summarizer.
+	 */
+	#nativeCompactionTarget(
+		candidates: Model[],
+		settings: Pick<CompactionSettings, "remoteEnabled" | "remoteStreamingV2Enabled">,
+	): Model | undefined {
+		const target = candidates[0] ?? this.#model;
+		return target && shouldUseProviderNativeCompaction(target, settings) ? target : undefined;
+	}
+
 	resolveCompactionModelCandidates(
 		preferredModel: Model | null | undefined,
 		availableModels: Model[],
@@ -2230,12 +2247,15 @@ export class SessionMaintenance {
 				: compactionSettings.strategy === "handoff" && reason !== "overflow" && !suppressHandoff
 					? "handoff"
 					: "context-full";
-		if (
-			action === "snapcompact" &&
-			this.#model &&
-			shouldUseProviderNativeCompaction(this.#model, compactionSettings)
-		) {
-			this.#host.emitNotice("info", nativeOverSnapcompactNotice(this.#model.provider), "compaction");
+		const autoNativeTarget =
+			action === "snapcompact"
+				? this.#nativeCompactionTarget(
+						this.#getCompactionModelCandidates(this.#host.modelRegistry.getAvailable()),
+						compactionSettings,
+					)
+				: undefined;
+		if (autoNativeTarget) {
+			this.#host.emitNotice("info", nativeOverSnapcompactNotice(autoNativeTarget.provider), "compaction");
 			action = "context-full";
 		}
 		if (action === "snapcompact" && this.#model && !this.#model.input.includes("image")) {
