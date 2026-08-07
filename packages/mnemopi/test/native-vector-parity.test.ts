@@ -72,51 +72,57 @@ describe("native vector kernel parity", () => {
 		}
 	});
 
-	test("mmrRerankIndices selects identical index sequences to the TS loop", () => {
-		const rng = makeRng(0x33a11);
-		const words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa"];
-		const count = 60;
-		const contents: string[] = [];
-		const scores = new Float64Array(count);
-		for (let i = 0; i < count; i += 1) {
-			const n = 1 + Math.floor(rng() * 8);
-			contents.push(Array.from({ length: n }, () => words[Math.floor(rng() * words.length)]).join(" "));
-			scores[i] = rng();
-		}
-		scores[5] = scores[6] = 0.5; // exercise strict-> tie keeping the earlier candidate
-		for (const lambda of [0.0, 0.3, 0.7, 1.0]) {
-			for (const topK of [1, 10, count, count + 5]) {
-				// TS reference selection over pre-sorted candidates (mirrors mmrRerank
-				// after its sort step).
-				const order = contents.map((_, i) => i).sort((a, b) => (scores[b] ?? 0) - (scores[a] ?? 0));
-				const sortedContents = order.map(i => contents[i] ?? "");
-				const sortedScores = order.map(i => scores[i] ?? 0);
-				const selected: number[] = [0];
-				const remaining = sortedContents.map((_, i) => i).slice(1);
-				while (remaining.length > 0 && selected.length < topK) {
-					let bestIdx = 0;
-					let bestScore = Number.NEGATIVE_INFINITY;
-					for (let idx = 0; idx < remaining.length; idx += 1) {
-						const candidate = remaining[idx] ?? 0;
-						let maxSimilarity = 0;
-						for (const picked of selected) {
-							const sim = jaccardSimilarity(sortedContents[candidate] ?? "", sortedContents[picked] ?? "");
-							if (sim > maxSimilarity) maxSimilarity = sim;
-						}
-						const mmrScore = lambda * (sortedScores[candidate] ?? 0) - (1 - lambda) * maxSimilarity;
-						if (mmrScore > bestScore) {
-							bestScore = mmrScore;
-							bestIdx = idx;
-						}
-					}
-					selected.push(remaining.splice(bestIdx, 1)[0] ?? 0);
-				}
-				if (selected.length < topK) selected.push(...remaining.slice(0, topK - selected.length));
-				const native = mmrRerankIndices(sortedContents, Float64Array.from(sortedScores), lambda, topK);
-				expect(Array.from(native)).toEqual(selected.slice(0, topK));
+	test(
+		"mmrRerankIndices selects identical index sequences to the TS loop",
+		() => {
+			const rng = makeRng(0x33a11);
+			const words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa"];
+			const count = 60;
+			const contents: string[] = [];
+			const scores = new Float64Array(count);
+			for (let i = 0; i < count; i += 1) {
+				const n = 1 + Math.floor(rng() * 8);
+				contents.push(Array.from({ length: n }, () => words[Math.floor(rng() * words.length)]).join(" "));
+				scores[i] = rng();
 			}
-		}
-	});
+			scores[5] = scores[6] = 0.5; // exercise strict-> tie keeping the earlier candidate
+			for (const lambda of [0.0, 0.3, 0.7, 1.0]) {
+				for (const topK of [1, 10, count, count + 5]) {
+					// TS reference selection over pre-sorted candidates (mirrors mmrRerank
+					// after its sort step).
+					const order = contents.map((_, i) => i).sort((a, b) => (scores[b] ?? 0) - (scores[a] ?? 0));
+					const sortedContents = order.map(i => contents[i] ?? "");
+					const sortedScores = order.map(i => scores[i] ?? 0);
+					const selected: number[] = [0];
+					const remaining = sortedContents.map((_, i) => i).slice(1);
+					while (remaining.length > 0 && selected.length < topK) {
+						let bestIdx = 0;
+						let bestScore = Number.NEGATIVE_INFINITY;
+						for (let idx = 0; idx < remaining.length; idx += 1) {
+							const candidate = remaining[idx] ?? 0;
+							let maxSimilarity = 0;
+							for (const picked of selected) {
+								const sim = jaccardSimilarity(sortedContents[candidate] ?? "", sortedContents[picked] ?? "");
+								if (sim > maxSimilarity) maxSimilarity = sim;
+							}
+							const mmrScore = lambda * (sortedScores[candidate] ?? 0) - (1 - lambda) * maxSimilarity;
+							if (mmrScore > bestScore) {
+								bestScore = mmrScore;
+								bestIdx = idx;
+							}
+						}
+						selected.push(remaining.splice(bestIdx, 1)[0] ?? 0);
+					}
+					if (selected.length < topK) selected.push(...remaining.slice(0, topK - selected.length));
+					const native = mmrRerankIndices(sortedContents, Float64Array.from(sortedScores), lambda, topK);
+					expect(Array.from(native)).toEqual(selected.slice(0, topK));
+				}
+			}
+		},
+		// Native addon startup and the O(n^2) parity loop can exceed Bun's 5 s
+		// default when mnemopi's suite runs eight files concurrently in CI.
+		{ timeout: 30_000 },
+	);
 
 	test("mmrRerank wrapper preserves the pre-native limit contract at u32 boundaries", () => {
 		const results = Array.from({ length: 8 }, (_v, i) => ({

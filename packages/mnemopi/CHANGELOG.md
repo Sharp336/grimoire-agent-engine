@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Increased the native MMR parity test timeout so parallel CI load cannot turn a correct parity check into a false failure.
+
 ## [17.2.10] - 2026-08-06
 
 ### Changed
