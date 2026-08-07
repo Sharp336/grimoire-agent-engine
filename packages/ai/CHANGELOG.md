@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Amazon Bedrock control-plane authentication for model discovery (`prepareModelDiscovery` on `amazon-bedrock`), signing `ListInferenceProfiles` / `ListFoundationModels` requests with SigV4 or a Bedrock API key so the catalog can load per-account/region profiles including AWS GovCloud `us-gov.*` ids.
+
 ## [17.2.10] - 2026-08-06
 
 ### Breaking Changes

@@ -5,6 +5,7 @@
  * half (env keys, OAuth login/refresh) stays in the pi-ai registry, which
  * type-checks itself against `KnownProvider` from this table.
  */
+import { amazonBedrockModelManagerOptions } from "./amazon-bedrock";
 import type { ModelManagerConfig, ProviderCatalogEntry, ProviderDescriptor } from "./descriptor-types";
 import { googleModelManagerOptions, googleVertexModelManagerOptions } from "./google";
 import { ollamaCloudModelManagerOptions } from "./ollama";
@@ -109,6 +110,9 @@ export const CATALOG_PROVIDERS = [
 	{
 		id: "amazon-bedrock",
 		defaultModel: "us.anthropic.claude-opus-4-8",
+		// IAM/profile/bearer via pi-ai envKeys (AUTHENTICATED_SENTINEL); no plain env var string.
+		createModelManagerOptions: (config: ModelManagerConfig) => amazonBedrockModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
 	},
 	{
 		id: "bedrock-mantle",
