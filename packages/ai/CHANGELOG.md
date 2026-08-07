@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an Upstage provider registry entry with a paste-key `/login` flow (`UPSTAGE_API_KEY`), validated against `https://api.upstage.ai/v1/models`.
+
 ## [17.2.10] - 2026-08-06
 
 ### Breaking Changes

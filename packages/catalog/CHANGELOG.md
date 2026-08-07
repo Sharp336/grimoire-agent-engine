@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Upstage as a first-class chat provider: bundled Solar models (`solar-mini`, `solar-pro2`, `solar-pro3`, `solar-pro4`, default `solar-pro4`), `/v1/models` discovery that keeps only chat-capable SKUs and hydrates dated snapshot ids (e.g. `solar-pro4-260806`) from their alias rows, and endpoint compat verified live (`store` and the `developer` role are rejected).
+
+### Fixed
+
+- Corrected Solar Pro thinking-effort tiers to the wire-exact ladders: `solar-pro4` exposes `minimal..max` with lowest-effort disable (the model reasons by default), while `solar-pro2`/`solar-pro3` top out at `high` — the previously derived `xhigh` tier is rejected by the API (also fixes the stale `kilo`/`nanogpt` `upstage/solar-pro-3` gateway rows).
+
 ## [17.2.10] - 2026-08-06
 
 ### Changed

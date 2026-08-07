@@ -49,6 +49,7 @@ import {
 	syntheticModelManagerOptions,
 	togetherModelManagerOptions,
 	umansModelManagerOptions,
+	upstageModelManagerOptions,
 	veniceModelManagerOptions,
 	vercelAiGatewayModelManagerOptions,
 	vllmModelManagerOptions,
@@ -433,6 +434,13 @@ export const CATALOG_PROVIDERS = [
 		createModelManagerOptions: (config: ModelManagerConfig) => umansModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
 		catalogDiscovery: { label: "Umans AI Coding Plan", allowUnauthenticated: true },
+	},
+	{
+		id: "upstage",
+		defaultModel: "solar-pro4",
+		envVars: ["UPSTAGE_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => upstageModelManagerOptions(config),
+		catalogDiscovery: { label: "Upstage" },
 	},
 	{
 		id: "venice",

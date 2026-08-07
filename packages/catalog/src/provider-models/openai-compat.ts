@@ -15,6 +15,7 @@ import {
 	isKimiK3ModelId,
 	isKimiModelId,
 	isReasoningGlmModelId,
+	isSolarPro4ModelId,
 } from "../identity/family";
 import { resolveModelReference } from "../identity/reference";
 import type { ModelManagerOptions } from "../model-manager";
@@ -1548,6 +1549,87 @@ export function deepseekModelManagerOptions(
 	config?: DeepSeekModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
 	return createSimpleOpenAICompletionsOptions("deepseek", "https://api.deepseek.com", config);
+}
+
+// ---------------------------------------------------------------------------
+// Upstage
+// ---------------------------------------------------------------------------
+
+const UPSTAGE_BASE_URL = "https://api.upstage.ai/v1";
+
+/**
+ * Upstage serves non-chat SKUs (embeddings, document AI, groundedness
+ * checkers) from the same API base, and `/v1/models` carries no per-model type
+ * field — so non-chat rows are dropped by id to keep the picker usable.
+ */
+const UPSTAGE_NON_CHAT_MODEL_TOKENS = [
+	"embedding",
+	"document",
+	"groundedness",
+	"layout",
+	"ocr",
+	"docvision",
+] as const;
+
+export function isLikelyUpstageChatModelId(id: string): boolean {
+	const normalized = id.trim().toLowerCase();
+	if (!normalized) {
+		return false;
+	}
+	return !UPSTAGE_NON_CHAT_MODEL_TOKENS.some(token => normalized.includes(token));
+}
+
+/** Strip the Upstage dated-snapshot suffix (`solar-pro4-260806` → `solar-pro4`). */
+export function upstageSnapshotAliasId(id: string): string {
+	return id.replace(/-\d{6}$/, "");
+}
+
+/**
+ * Applied to discovered rows with no bundled reference (e.g. `solar-open2`,
+ * `syn-pro`) so they still avoid the wire fields the endpoint rejects; mirrors
+ * the bundled descriptor compat below.
+ */
+const UPSTAGE_DISCOVERY_COMPAT: OpenAICompat = {
+	supportsStore: false,
+	supportsDeveloperRole: false,
+	supportsReasoningEffort: true,
+	supportsMultipleSystemMessages: true,
+};
+
+export interface UpstageModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function upstageModelManagerOptions(
+	config?: UpstageModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? UPSTAGE_BASE_URL;
+	const references = createBundledReferenceMap<"openai-completions">("upstage");
+	return {
+		providerId: "upstage",
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "upstage",
+					baseUrl,
+					apiKey,
+					filterModel: (_entry, model) => isLikelyUpstageChatModelId(model.id),
+					mapModel: (entry, defaults) => {
+						// Dated snapshots (`solar-pro4-260806`) hydrate from their alias's
+						// bundled row so they keep reasoning and provider compat metadata.
+						const reference =
+							references.get(defaults.id) ?? references.get(upstageSnapshotAliasId(defaults.id));
+						const model = mapWithBundledReference(entry, defaults, reference);
+						return model.compat ? model : { ...model, compat: { ...UPSTAGE_DISCOVERY_COMPAT } };
+					},
+					fetch: config?.fetch,
+				}),
+		}),
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -5872,6 +5954,34 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDes
 	openAiCompletionsDescriptor("nano-gpt", "nanogpt", "https://nano-gpt.com/api/v1"),
 	// --- Synthetic ---
 	openAiCompletionsDescriptor("synthetic", "synthetic", "https://api.synthetic.new/openai/v1"),
+	// --- Upstage ---
+	openAiCompletionsDescriptor("upstage", "upstage", "https://api.upstage.ai/v1", {
+		compat: {
+			// Verified against api.upstage.ai (2026-08-07): the `store` field and the
+			// `developer` role are rejected with a 400 ("Unrecognized request
+			// arguments supplied: store" / `role` must be system/assistant/user/tool),
+			// while top-level `reasoning_effort`, multiple leading system messages,
+			// and `stream_options.include_usage` are all accepted.
+			supportsStore: false,
+			supportsDeveloperRole: false,
+			supportsReasoningEffort: true,
+			supportsMultipleSystemMessages: true,
+		},
+		transformModel: model => {
+			if (!model.reasoning || !isSolarPro4ModelId(model.id)) {
+				return model;
+			}
+			// solar-pro4 reasons BY DEFAULT: omitting `reasoning_effort` leaves
+			// thinking on, and only `none`/`minimal` turn it off. Disable via
+			// lowest-effort (`minimal`) instead of the omit default, which would
+			// silently fall back to the server-side thinking-on default. The
+			// effort ladder itself is family-derived in model-thinking.
+			return {
+				...model,
+				compat: { ...model.compat, reasoningDisableMode: "lowest-effort" },
+			};
+		},
+	}),
 	// --- Venice AI ---
 	openAiCompletionsDescriptor("venice", "venice", "https://api.venice.ai/api/v1", {
 		transformModel: model => {

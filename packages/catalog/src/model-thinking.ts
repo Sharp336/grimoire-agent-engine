@@ -31,6 +31,8 @@ import {
 	isMinimaxM2FamilyModelId,
 	isMinimaxM3FamilyModelId,
 	isOpenAIGptOssModelId,
+	isSolarPro4ModelId,
+	isSolarProModelId,
 	supportsAdaptiveThinkingDisplay,
 } from "./identity/family";
 import type {
@@ -341,6 +343,13 @@ function getModelDefinedEfforts<TApi extends Api>(
 	}
 	if (isKimiK3ModelId(spec.id)) {
 		return LOW_HIGH_MAX_REASONING_EFFORTS;
+	}
+	if (isOpenAICompatReasoningApi(spec.api) && isSolarProModelId(spec.id)) {
+		// Upstage Solar Pro reasoners are wire-strict about `reasoning_effort`
+		// (verified against api.upstage.ai, 2026-08-07): Pro 4 accepts the full
+		// minimal..max ladder (`none`/`minimal` turn thinking off), while Pro 2/3
+		// 400 on `xhigh`/`max` and top out at `high`.
+		return isSolarPro4ModelId(spec.id) ? THINKING_EFFORTS : DEFAULT_REASONING_EFFORTS;
 	}
 	if (isSakanaFuguReasoningModel(spec)) {
 		return HIGH_MAX_REASONING_EFFORTS;
