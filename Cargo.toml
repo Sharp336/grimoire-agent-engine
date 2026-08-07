@@ -33,6 +33,20 @@ strip = true
 # (see crates/pi-natives/src/crash_handler.rs).
 panic = "unwind"
 
+# rustc ICEs codegenning `MaybeUninit<maudio_sys::ffi::ma_fence>` — a union with
+# ScalarPair backend repr on x86_64-pc-windows-msvc — once the MIR opts that run
+# from opt-level 2 upward const-fold it into an `Uninit` operand
+# (`rustc_codegen_ssa/src/mir/block.rs`: "codegen_argument: OperandRef(Uninit …)
+# invalid for pair argument"). Hit by the rustup toolchain this repo pins
+# (nightly-2026-07-28) on the local napi path (`packages/natives` →
+# `build:bindings`); Bazel's older pin (nightly/2026-04-29, MODULE.bazel) is
+# unaffected, which is why CI never saw it. opt-level 1 keeps those MIR opts off.
+# maudio is a thin FFI shim — miniaudio itself is C compiled by `cc` at its own
+# optimization level — so the cost is noise. Drop this once the rustup pin moves
+# past the fix. `ci` and `local` inherit this override from `release`.
+[profile.release.package.maudio]
+opt-level = 1
+
 [profile.ci]
 inherits = "release"
 lto = "thin"
@@ -60,6 +74,9 @@ split-debuginfo = "unpacked"
 [profile.dev.package."*"]
 opt-level = 2
 debug = false
+
+[profile.dev.package.maudio]
+opt-level = 1
 
 [workspace.lints.rust]
 # ──────────────────────────────────────────────────────────────────────────────
