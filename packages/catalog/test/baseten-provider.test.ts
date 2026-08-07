@@ -108,8 +108,6 @@ describe("Baseten provider discovery", () => {
 			},
 		});
 
-		// GLM-5.2-Fast shares GLM-5.2's weights and reasoning API: Baseten
-		// documents reasoning_effort none|high|max for both routes.
 		const glmFast = models?.find(model => model.id === "zai-org/GLM-5.2-Fast");
 		expect(glmFast).toBeDefined();
 		expect(glmFast).toMatchObject({
