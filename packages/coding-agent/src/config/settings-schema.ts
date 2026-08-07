@@ -133,6 +133,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Notifications",
 		"Speech",
 		"Collab",
+		"Agent Channels",
 		"Magic Keywords",
 		"Startup & Updates",
 		"Power (macOS)",
@@ -1993,6 +1994,18 @@ export const SETTINGS_SCHEMA = {
 				{ value: "300", label: "5 minutes" },
 				{ value: "600", label: "10 minutes" },
 			],
+		},
+	},
+
+	// Cross-session agent channels are opt-in while the feature stabilizes.
+	"channels.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "interaction",
+			group: "Agent Channels",
+			label: "Cross-session agent channels",
+			description: "Advertise this session to other local OMP sessions and allow user-authorized agent channels",
 		},
 	},
 

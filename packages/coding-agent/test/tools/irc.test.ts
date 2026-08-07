@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SettingPath } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
-import { IrcBus, type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { IrcBus, type IrcExternalTransport, type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -677,6 +677,58 @@ describe("IRC", () => {
 			expect(details?.receipts).toEqual([{ to: "0-Sub", outcome: "injected" }]);
 			expect(details?.waited).toBeUndefined();
 			expect(sub.delivered.map(msg => msg.body)).toEqual(["ping"]);
+		});
+
+		it("op=send targets one or more agents from one channel, or the channel broadcast address", async () => {
+			const sent: string[] = [];
+			const transport: IrcExternalTransport = {
+				handles: address => address.startsWith("channel-a/") || address === "channel-b/session-c/Main",
+				validateTargets: addresses => {
+					const channels = new Set(addresses.map(address => address.split("/")[0]));
+					return channels.size === 1 ? undefined : "Every recipient in an array must belong to the same channel.";
+				},
+				send: async message => {
+					sent.push(message.to);
+					return { to: message.to, outcome: "injected" };
+				},
+				listPeers: () => [],
+				isPeerRunning: () => true,
+				onPeersChanged: () => () => {},
+			};
+			bus.setExternalTransport(transport);
+			const tool = new HubTool(makeToolSession(registry, "0-Main"));
+			const selected = await tool.execute("call-selected", {
+				op: "send",
+				to: ["channel-a/session-b/Main", "channel-a/session-c/Worker"],
+				message: "selected",
+			});
+			expect(selected.isError).toBeFalsy();
+			expect(sent).toEqual(["channel-a/session-b/Main", "channel-a/session-c/Worker"]);
+
+			const crossChannel = await tool.execute("call-cross-channel", {
+				op: "send",
+				to: ["channel-a/session-b/Main", "channel-b/session-c/Main"],
+				message: "must not leak",
+			});
+			expect(crossChannel.isError).toBe(true);
+			expect(sent).toHaveLength(2);
+
+			const awaitedBroadcast = await tool.execute("call-awaited-all", {
+				op: "send",
+				to: "channel-a/all",
+				message: "who replies?",
+				await: true,
+			});
+			expect(awaitedBroadcast.isError).toBe(true);
+			expect(sent).toHaveLength(2);
+
+			const all = await tool.execute("call-all", {
+				op: "send",
+				to: "channel-a/all",
+				message: "everyone",
+			});
+			expect(all.isError).toBeFalsy();
+			expect(sent.at(-1)).toBe("channel-a/all");
 		});
 
 		it("op=send to=all fans out to live peers and reports per-recipient receipts", async () => {

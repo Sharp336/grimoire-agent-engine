@@ -1,11 +1,23 @@
-Agent coordination: peer messaging, background-job control, and supervised long-running processes. Main agent is `Main`; subagents inherit task ID.
-Use `op: "list"` to discover peers. Address peers by exact roster ID — NEVER invent names.
+Agent coordination: peer messaging, user-authorized cross-session channels, background jobs, and supervised processes. Main agent is `Main`; subagents inherit task ID.
+Use `op: "list"` to discover exact peer addresses. NEVER invent addresses.
+
+# Cross-Session Channels
+
+Users alone open or add sessions to channels. Agents NEVER authorize communication.
+
+- **`channels`** lists active groups, member agents, and broadcast addresses.
+- **Direct**: send to one exact roster address.
+- **Selected**: `to` MAY be an array of 1+ same-channel addresses.
+- **All**: send to `<channel-id>/all`; plain `all` remains process-local.
+- **`disconnect`** leaves this session's channel by agent initiative.
+- Disconnect is final. Resuming REQUIRES new user authorization.
+- Session/agent termination notices reach every remaining channel agent.
 
 # Messaging & Jobs
 
 Background jobs auto-deliver when they finish. You NEVER need to poll; if `jobs`/`wait` observes a settled job first, that snapshot is the delivery and suppresses duplicate `async-result`.
 
-- **`send`** (with `to`): fire-and-forget, NEVER blocks. Delivery receipts (`delivered`/`failed`) immediate; `failed` → peer gone, don't retry.
+- **`send`** (with `to`): fire-and-forget, NEVER blocks. Receipts (`injected`/`woken`/`revived`/`failed`) are immediate; `failed` → peer unavailable.
   Sending wakes `idle`/`parked` peers. Answering: lead with answer, NEVER quote, set `replyTo`.
 - **Format**: plain prose ONLY. No JSON status objects. Share paths via `local://`/`artifact://` URLs, not pasted blobs.
 - **`wait`**: use ONLY when completely blocked with no other work. Returns on the FIRST of: an incoming message, a watched job finishing, the wait window elapsing, or a steering interrupt — NOT when all jobs finish; re-issue to keep waiting.

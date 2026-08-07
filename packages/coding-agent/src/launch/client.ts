@@ -111,6 +111,8 @@ function requestTimeoutMs(operation: DaemonOperation): number {
 		case "logs":
 		case "stop":
 			return operation.timeoutMs + 5_000;
+		case "channel":
+			return operation.operation.op === "wait" ? operation.operation.timeoutMs + 5_000 : 30_000;
 		default:
 			return 30_000;
 	}

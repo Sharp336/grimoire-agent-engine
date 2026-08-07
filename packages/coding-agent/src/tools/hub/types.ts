@@ -6,6 +6,7 @@
 
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { IrcDeliveryReceipt, IrcMessage } from "../../irc/bus";
+import type { SessionChannelSnapshot } from "../../session-channels/protocol";
 import type { LaunchParams, LaunchToolDetails } from "./launch";
 
 /**
@@ -18,6 +19,8 @@ export type HubOp =
 	| "wait"
 	| "inbox"
 	| "list"
+	| "channels"
+	| "disconnect"
 	| "jobs"
 	| "cancel"
 	| "start"
@@ -37,6 +40,7 @@ export interface HubPeerInfo {
 	unread: number;
 	lastActivity: number;
 	activity?: string;
+	channelId?: string;
 }
 
 /** Background-job row surfaced by `wait`/`cancel`/`jobs` results. */
@@ -90,6 +94,8 @@ export interface CoordinationDetails {
 	cancelled?: { id: string; status: CancelStatus }[];
 	/** Running subagents not represented by a job row in this result. */
 	agents?: AgentActivitySnapshot[];
+	/** User-authorized cross-session groups visible to this agent. */
+	channels?: SessionChannelSnapshot[];
 }
 
 /** Hub result details: coordination snapshots or launch (process) state. */
@@ -98,13 +104,14 @@ export type HubDetails = CoordinationDetails | LaunchToolDetails;
 /** Partially-streamed hub call arguments, as seen by the renderers. */
 export type HubRenderArgs = {
 	op?: string;
-	to?: string;
+	to?: string | string[];
 	message?: string;
 	replyTo?: string;
 	await?: boolean;
 	from?: string;
 	timeoutMs?: number;
 	peek?: boolean;
+	channel?: string;
 	ids?: string[];
 } & Partial<Omit<LaunchParams, "op">>;
 
