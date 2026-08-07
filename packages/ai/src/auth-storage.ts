@@ -50,6 +50,7 @@ import { resolveUsedFraction } from "./usage";
 import { alibabaTokenPlanRankingStrategy, alibabaTokenPlanUsageProvider } from "./usage/alibaba-token-plan";
 import { claudeRankingStrategy, claudeUsageProvider } from "./usage/claude";
 import { cursorUsageProvider } from "./usage/cursor";
+import { factoryDroidUsageProvider } from "./usage/factory-droid";
 import { googleGeminiCliUsageProvider } from "./usage/gemini";
 import { githubCopilotUsageProvider } from "./usage/github-copilot";
 import { antigravityRankingStrategy, antigravityUsageProvider } from "./usage/google-antigravity";
@@ -668,6 +669,7 @@ const DEFAULT_USAGE_PROVIDERS: UsageProvider[] = [
 	opencodeGoUsageProvider,
 	githubCopilotUsageProvider,
 	cursorUsageProvider,
+	factoryDroidUsageProvider,
 	syntheticUsageProvider,
 	xaiOauthUsageProvider,
 ];
