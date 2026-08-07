@@ -93,6 +93,7 @@ import {
 } from "./model-discovery";
 import { ModelsConfigFile, type ProviderValidationModel, validateProviderConfiguration } from "./models-config";
 import type { ModelOverride, ModelsConfig, ProviderAuthMode } from "./models-config-schema";
+import { ModelRuntime, isModelRuntime } from "./model-runtime";
 import { settings } from "./settings";
 
 // DeviceCheck attestation (`x-oai-attestation`) for ChatGPT-OAuth Codex
@@ -834,6 +835,10 @@ export class ModelRegistry {
 	#runtimeModelManagers: Map<string, { options: ModelManagerOptions<Api>; sourceId: string }> = new Map();
 	#ignoreLocalModelConfig: boolean;
 	#fetch: FetchImpl;
+	/** Auth storage backing this registry (assigned by the constructor). */
+	readonly authStorage: AuthStorage;
+	/** Lazily-created legacy {@link ModelRuntime} facade wrapping this registry. */
+	#legacyRuntime?: ModelRuntime;
 
 	#resolveCommandBackedApiKey(provider: string): CommandApiKeyResolution {
 		const keyConfig = this.#customProviderApiKeys.get(provider);
@@ -865,9 +870,17 @@ export class ModelRegistry {
 	 * when synchronous callers query them. Production boot paths SHOULD prefer
 	 * {@link ModelRegistry.create} so the YAML/JSONC migration step lands off the
 	 * event loop's hot path before the first `tryLoad()` runs.
+	 *
+	 * pi `>=0.80.8` extensions construct `new ModelRegistry(runtime)` instead
+	 * (issue #7068). The legacy {@link ModelRuntime} facade already wraps a
+	 * fully-constructed registry, so that call resolves to the wrapped instance
+	 * — the returned registry shares the exact catalog and auth identity the
+	 * caller's runtime was built on. Note the returned instance is the wrapped
+	 * registry, not a wrapper around `this`; subclasses must not expect
+	 * `super(runtime)` to preserve the subclass.
 	 */
 	constructor(
-		readonly authStorage: AuthStorage,
+		authStorageOrRuntime: AuthStorage | ModelRuntime,
 		modelsPath?: string,
 		options?: {
 			/**
@@ -880,6 +893,19 @@ export class ModelRegistry {
 			fetch?: FetchImpl;
 		},
 	) {
+		if (isModelRuntime(authStorageOrRuntime)) {
+			// Assign every strict-property-initialization field before
+			// returning the wrapped registry — `this` is discarded, so the
+			// values only need to be well-formed.
+			this.authStorage = ModelRuntime.registryOf(authStorageOrRuntime).authStorage;
+			this.#modelsConfigFile = ModelsConfigFile.relocate(undefined);
+			this.#ignoreLocalModelConfig = false;
+			this.#fetch = isBunTestRuntime()
+				? () => Promise.reject(new Error("network disabled in model-registry runtime test"))
+				: wrapFetchForExtraCa(fetch);
+			return ModelRuntime.registryOf(authStorageOrRuntime);
+		}
+		this.authStorage = authStorageOrRuntime;
 		this.#ignoreLocalModelConfig = options?.ignoreLocalModelConfig ?? false;
 		this.#fetch =
 			options?.fetch ??
@@ -1091,6 +1117,18 @@ export class ModelRegistry {
 	 */
 	getError(): ConfigError | undefined {
 		return this.#configError;
+	}
+
+	/**
+	 * Legacy pi `>=0.80.8` {@link ModelRuntime} backing this registry (issue
+	 * #7068). pi's `ModelRegistry` wraps a runtime and extensions reach into
+	 * the private field via `runtimeOf()`; OMP's registry owns auth + models
+	 * directly, so this lazily materializes the facade wrapping this instance
+	 * — same catalog and auth identity, cheap for extensions that never touch
+	 * it.
+	 */
+	get runtime(): ModelRuntime {
+		return (this.#legacyRuntime ??= ModelRuntime.wrap(this));
 	}
 
 	#loadModels() {

@@ -112,6 +112,16 @@ const kJsonWireSchema = Symbol("pi.schema.json.wire");
 const kArkWireSchema = Symbol("pi.schema.ark.wire");
 const kStrippedSchema = Symbol("pi.schema.descriptions.stripped");
 
+/**
+ * Marker carried by legacy TypeBox `Type.Unsafe` schemas (legacy coding-agent
+ * typebox shim). The schema itself is a live omptype schema so it can compose
+ * (`Type.Optional(Type.Unsafe(...))`, issue #7068), but its wire form must be
+ * the original JSON Schema document — open objects included — not the
+ * Ark-derived model-facing closing policy. The value is the source document,
+ * already upgraded to draft 2020-12.
+ */
+export const LEGACY_JSON_SCHEMA_DOCUMENT: unique symbol = Symbol("omp.legacyJsonSchemaDocument");
+
 function postProcessJsonSchema(schema: Record<string, unknown>): Record<string, unknown> {
 	walk(schema);
 	normalizeArkPropertyComments(schema);
@@ -569,7 +579,21 @@ export function arkToWireSchema(schema: Type): Record<string, unknown> {
  */
 export function toolWireSchema(tool: Tool): Record<string, unknown> {
 	const params: TSchema = tool.parameters;
-	if (isArkSchema(params)) return arkToWireSchema(params);
+	if (isArkSchema(params)) {
+		const legacyDocument = (params as { [LEGACY_JSON_SCHEMA_DOCUMENT]?: Record<string, unknown> })[
+			LEGACY_JSON_SCHEMA_DOCUMENT
+		];
+		// Legacy `Type.Unsafe` documents pass through as authored (open objects
+		// stay open) instead of the Ark-derived closing policy. Clone before the
+		// in-place post-processing: the marker's document is the same object the
+		// legacy `__validator` validates against.
+		if (legacyDocument !== undefined) {
+			return stamp(params, kJsonWireSchema, () =>
+				postProcessJsonSchema(structuredClone(legacyDocument)),
+			);
+		}
+		return arkToWireSchema(params);
+	}
 	return stamp(params as Record<string, unknown>, kJsonWireSchema, p => {
 		const raw = isArkJsonAst(p) ? arkJsonAstToWire(p) : p;
 		const upgraded = upgradeJsonSchemaTo202012(raw) as Record<string, unknown>;

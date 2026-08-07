@@ -4,7 +4,8 @@ import {
 	type TypeBuilder as OmpTypeBuilder,
 	type TUnsafe,
 } from "@oh-my-pi/omptype/typebox";
-import { upgradeJsonSchemaTo202012, validateJsonSchemaValue } from "@oh-my-pi/pi-ai/utils/schema";
+import { fromJsonSchema } from "@oh-my-pi/omptype/from-json-schema";
+import { LEGACY_JSON_SCHEMA_DOCUMENT, upgradeJsonSchemaTo202012, validateJsonSchemaValue } from "@oh-my-pi/pi-ai/utils/schema";
 
 export * from "@oh-my-pi/omptype/typebox";
 
@@ -39,8 +40,48 @@ function defineHidden(target: object, key: PropertyKey, value: unknown): void {
 	});
 }
 
+const JSON_SCHEMA_OBJECT_MAP_KEYS = ["properties", "patternProperties", "$defs", "definitions"] as const;
+const JSON_SCHEMA_OBJECT_LIST_KEYS = ["anyOf", "oneOf", "allOf", "prefixItems"] as const;
+const JSON_SCHEMA_OBJECT_NODE_KEYS = [
+	"items",
+	"additionalProperties",
+	"unevaluatedProperties",
+	"contains",
+	"propertyNames",
+	"if",
+	"then",
+	"else",
+	"not",
+	"contentSchema",
+] as const;
+
+/**
+ * JSON Schema objects are open by default; omptype objects are closed. Mark
+ * every unadorned object node as explicitly open so the rebuilt schema accepts
+ * exactly what the source document accepts (and re-emits without an
+ * `additionalProperties: false` the document never declared).
+ */
+function openUnadornedObjects(node: unknown): unknown {
+	if (typeof node !== "object" || node === null || Array.isArray(node)) return node;
+	const doc = node as Record<string, unknown>;
+	if (doc.type === "object" && doc.additionalProperties === undefined) {
+		doc.additionalProperties = true;
+	}
+	for (const key of JSON_SCHEMA_OBJECT_MAP_KEYS) {
+		const map = doc[key];
+		if (typeof map === "object" && map !== null) {
+			for (const value of Object.values(map as Record<string, unknown>)) openUnadornedObjects(value);
+		}
+	}
+	for (const key of JSON_SCHEMA_OBJECT_LIST_KEYS) {
+		const list = doc[key];
+		if (Array.isArray(list)) for (const value of list) openUnadornedObjects(value);
+	}
+	for (const key of JSON_SCHEMA_OBJECT_NODE_KEYS) openUnadornedObjects(doc[key]);
+	return doc;
+}
+
 function unsafe<T = unknown>(jsonSchema: Record<string, unknown> = {}): LegacyUnsafeSchema<T> {
-	const schema = { ...jsonSchema } as LegacyUnsafeSchema<T>;
 	const upgradedSchema = upgradeJsonSchemaTo202012(jsonSchema);
 	const validate = (data: unknown): T | ValidationFailure => {
 		const result = validateJsonSchemaValue(upgradedSchema, data);
@@ -54,6 +95,25 @@ function unsafe<T = unknown>(jsonSchema: Record<string, unknown> = {}): LegacyUn
 		defineHidden(failure, VALIDATION_FAILURE, true);
 		return failure;
 	};
+	// Rebuild the document as a composable omptype schema so legacy TypeBox
+	// compositions (`Type.Optional(Type.Unsafe(...))`, `Type.Union`,
+	// `Type.Array`, ...) keep working instead of throwing on a plain object
+	// (observed with @quintinshaw/pi-dynamic-workflows@3.4.1, issue #7068).
+	// The importer covers the draft-07/2020-12 structural surface; schemas it
+	// cannot express (e.g. exotic `$ref`s) fall back to the plain validated
+	// document, which still validates standalone and emits faithfully.
+	let schema: LegacyUnsafeSchema<T>;
+	try {
+		// Import from a copy so the original (also carried on the wire marker
+		// and used by the validator) is never mutated.
+		schema = fromJsonSchema(openUnadornedObjects(structuredClone(upgradedSchema))) as unknown as LegacyUnsafeSchema<T>;
+		// The composable schema emits through the Ark wire path; carry the
+		// original document so `toolWireSchema` passes it through as authored
+		// (open objects stay open, no model-facing closing).
+		defineHidden(schema, LEGACY_JSON_SCHEMA_DOCUMENT, upgradedSchema);
+	} catch {
+		schema = { ...jsonSchema } as LegacyUnsafeSchema<T>;
+	}
 	defineHidden(schema, "__validator", validate);
 	defineHidden(schema, "safeParse", (input: unknown): SafeParseSuccess<T> | SafeParseFailure => {
 		const result = validate(input);

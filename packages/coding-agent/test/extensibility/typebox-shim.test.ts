@@ -71,6 +71,30 @@ describe("pi.typebox compatibility shim", () => {
 		expect(schema.safeParse({}).success).toBe(false);
 	});
 
+	it("composes Type.Unsafe inside Optional and emits the JSON Schema (issue #7068)", () => {
+		// pi-dynamic-workflows builds `Type.Optional(Type.Unsafe({ type:
+		// "object", description }))` for its `args` tool parameter. The legacy
+		// shim's Unsafe used to return a plain object, so the Optional wrapper
+		// threw `asRuntime(schema).or is not a function` at module load.
+		const schema = Type.Object({
+			script: Type.String(),
+			args: Type.Optional(Type.Unsafe({ type: "object", description: "Optional JSON value" })),
+		});
+
+		expect(schema.safeParse({ script: "x" }).success).toBe(true);
+		expect(schema.safeParse({ script: "x", args: { scope: "repo" } }).success).toBe(true);
+		expect(schema.safeParse({ args: { scope: "repo" } }).success).toBe(false);
+
+		const wire = toolWireSchema({ name: "workflow", description: "", parameters: schema });
+		const properties = wire.properties as Record<string, unknown>;
+		expect(wire.type).toBe("object");
+		// The raw JSON Schema survives into the wire shape (tool bridges need
+		// the explicit `type: "object"`), and the optional field stays out of
+		// `required`.
+		expect((properties.args as Record<string, unknown>).type).toBe("object");
+		expect(wire.required).toEqual(["script"]);
+	});
+
 	it("preserves numeric enum values from TypeScript enum objects", () => {
 		const schema = Type.Enum({ 0: "Fast", 1: "Slow", Fast: 0, Slow: 1 });
 
