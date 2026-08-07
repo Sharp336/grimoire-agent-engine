@@ -2497,6 +2497,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const imageMetadata = await readImageMetadata(absolutePath);
 		const mimeType = imageMetadata?.mimeType;
 		const ext = path.extname(absolutePath).toLowerCase();
+		const resolvedDisplayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
 		const shouldConvertWithMarkit = CONVERTIBLE_EXTENSIONS.has(ext);
 
 		// Profiler reports (macOS `sample` call trees, V8 `.cpuprofile` JSON):
@@ -2541,7 +2542,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				fileSize,
 			}));
 		} else if (isNotebookPath(absolutePath) && !isRawSelector(parsed)) {
-			const notebookText = await readEditableNotebookText(absolutePath, localReadPath);
+			const notebookText = await readEditableNotebookText(absolutePath, resolvedDisplayPath);
 			if (isMultiRange(parsed) && parsed.kind === "lines") {
 				return this.#buildInMemoryMultiRangeResult(notebookText, parsed.ranges, {
 					details: { resolvedPath: absolutePath },
@@ -2560,7 +2561,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			const result = await convertFileWithMarkit(absolutePath, signal);
 			if (result.ok) {
 				const renderedContent =
-					ext === ".pdf" ? rewritePdfImagePlaceholders(result.content, localReadPath) : result.content;
+					ext === ".pdf" ? rewritePdfImagePlaceholders(result.content, resolvedDisplayPath) : result.content;
 				// Route the converted markdown through the in-memory text builder
 				// so line-range selectors (`file.pdf:50-100`, `:5-16,40-80`) and
 				// raw mode apply against the converted output. Without this,
@@ -2603,7 +2604,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				return toolResult<ReadToolDetails>({ resolvedPath: absolutePath, suffixResolution })
 					.text(
 						prependSuffixResolutionNotice(
-							`[Cannot read binary file '${formatPathRelativeToCwd(absolutePath, this.session.cwd)}' (${formatBytes(fileSize)}); not valid UTF-8 text. Use ':raw' to read bytes verbatim.]`,
+							`[Cannot read binary file '${resolvedDisplayPath}' (${formatBytes(fileSize)}); not valid UTF-8 text. Use ':raw' to read bytes verbatim.]`,
 							suffixResolution,
 						),
 					)
@@ -2620,7 +2621,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				if (summary?.parsed && summary.elided) {
 					const renderedSummary = this.#renderSummary(summary);
 					const footer = formatSummaryElisionFooter(
-						localReadPath,
+						resolvedDisplayPath,
 						renderedSummary.elidedRanges,
 						renderedSummary.elidedLines,
 					);

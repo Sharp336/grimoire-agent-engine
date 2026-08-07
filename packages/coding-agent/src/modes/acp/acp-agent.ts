@@ -2019,7 +2019,16 @@ export class AcpAgent implements Agent {
 
 	async #findStoredSession(sessionId: string, cwd: string): Promise<StoredSessionInfo | undefined> {
 		const sessions = await this.#listStoredSessions(cwd);
-		return sessions.find(session => session.id === sessionId);
+		const scoped = sessions.find(session => session.id === sessionId);
+		if (scoped) {
+			return scoped;
+		}
+		// The cwd-derived directory only covers sessions stored under the current
+		// naming scheme. Sessions written under a legacy/hashed project directory
+		// (the 17.2.5+ scheme reverted in #7656) live elsewhere, so fall back to a
+		// global by-id scan: the session id is globally unique, and
+		// #openStoredSession reopens the file with the request cwd. See #7779.
+		return this.#findStoredSessionById(sessionId);
 	}
 
 	async #findStoredSessionById(sessionId: string): Promise<StoredSessionInfo | undefined> {
