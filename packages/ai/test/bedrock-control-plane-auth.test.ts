@@ -1,4 +1,5 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
+import * as awsCredentials from "../src/providers/aws-credentials";
 import {
 	bedrockControlPlaneBaseUrl,
 	bedrockDiscoveryRegions,
@@ -6,45 +7,37 @@ import {
 	createBedrockControlPlaneFetch,
 	regionFromBedrockHost,
 } from "../src/providers/bedrock-control-plane";
+import * as awsRegistry from "../src/registry/aws";
 import { getProviderDefinition } from "../src/registry/registry";
 
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
 describe("Bedrock control-plane discovery auth", () => {
-	test("prepareModelDiscovery is unauthenticated without AWS credential sources", async () => {
-		const prev = {
-			AWS_PROFILE: process.env.AWS_PROFILE,
-			AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
-			AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
-			AWS_BEARER_TOKEN_BEDROCK: process.env.AWS_BEARER_TOKEN_BEDROCK,
-			AWS_WEB_IDENTITY_TOKEN_FILE: process.env.AWS_WEB_IDENTITY_TOKEN_FILE,
-			AWS_ROLE_ARN: process.env.AWS_ROLE_ARN,
-			AWS_CONFIG_FILE: process.env.AWS_CONFIG_FILE,
-			AWS_SHARED_CREDENTIALS_FILE: process.env.AWS_SHARED_CREDENTIALS_FILE,
-			AWS_EC2_METADATA_DISABLED: process.env.AWS_EC2_METADATA_DISABLED,
-			AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI,
-			AWS_CONTAINER_CREDENTIALS_FULL_URI: process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI,
-		};
-		const emptyConfig = `${await import("node:os").then(o => o.tmpdir())}/omp-empty-aws-config-${process.pid}`;
-		const emptyCreds = `${emptyConfig}.creds`;
-		await Bun.write(emptyConfig, "");
-		await Bun.write(emptyCreds, "");
-		try {
-			for (const key of Object.keys(prev)) delete process.env[key];
-			process.env.AWS_CONFIG_FILE = emptyConfig;
-			process.env.AWS_SHARED_CREDENTIALS_FILE = emptyCreds;
-			process.env.AWS_EC2_METADATA_DISABLED = "true";
-			const prepared = getProviderDefinition("amazon-bedrock")?.prepareModelDiscovery?.({});
-			expect(prepared?.authenticated).toBe(false);
-		} finally {
-			for (const [key, value] of Object.entries(prev)) {
-				if (value === undefined) delete process.env[key];
-				else process.env[key] = value;
-			}
-		}
+	test("prepareModelDiscovery is unauthenticated without AWS credential sources", () => {
+		vi.spyOn(awsRegistry, "hasAwsCredentialSource").mockReturnValue(false);
+		vi.spyOn(awsRegistry, "resolveAwsBearerToken").mockReturnValue(undefined);
+		const prepared = getProviderDefinition("amazon-bedrock")?.prepareModelDiscovery?.({});
+		expect(prepared?.authenticated).toBe(false);
 	});
 
-	test("prepareModelDiscovery with bearer token signs via Authorization header", async () => {
+	test("prepareModelDiscovery honors explicit region and profile for control-plane base URL", () => {
+		vi.spyOn(awsRegistry, "hasAwsCredentialSource").mockReturnValue(true);
+		const prepared = getProviderDefinition("amazon-bedrock")?.prepareModelDiscovery?.({
+			region: "us-gov-east-1",
+			profile: "faa_sandbox",
+		});
+		expect(prepared?.authenticated).toBe(true);
+		expect(prepared?.baseUrl).toBe("https://bedrock.us-gov-east-1.amazonaws.com");
+		expect(prepared?.region).toBe("us-gov-east-1");
+		expect(prepared?.profile).toBe("faa_sandbox");
+	});
+
+	test("prepareModelDiscovery with bearer token attaches Authorization header", async () => {
 		const prepared = getProviderDefinition("amazon-bedrock")?.prepareModelDiscovery?.({
 			apiKey: "bedrock-api-key-test",
+			region: "us-east-1",
 		});
 		expect(prepared?.authenticated).toBe(true);
 		expect(prepared?.baseUrl).toMatch(/^https:\/\/bedrock\./);
@@ -63,6 +56,47 @@ describe("Bedrock control-plane discovery auth", () => {
 		});
 		await fetchImpl("https://bedrock.us-east-1.amazonaws.com/inference-profiles");
 		expect(sawAuth).toBe(true);
+	});
+
+	test("SigV4 control-plane fetch signs host path query with service bedrock", async () => {
+		vi.spyOn(awsCredentials, "resolveAwsCredentials").mockResolvedValue({
+			accessKeyId: "AKIATESTACCESSKEY12",
+			secretAccessKey: "test-secret-access-key-value-xx",
+			sessionToken: "test-session-token",
+		});
+
+		const seen: Array<{ url: string; authorization?: string | null; amzDate?: string | null }> = [];
+		const baseFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			const url = input instanceof Request ? input.url : String(input);
+			const headers = new Headers(init?.headers);
+			seen.push({
+				url,
+				authorization: headers.get("authorization"),
+				amzDate: headers.get("x-amz-date"),
+			});
+			return Response.json({ inferenceProfileSummaries: [] });
+		};
+
+		const fetchImpl = createBedrockControlPlaneFetch({
+			region: "us-gov-west-1",
+			profile: "test-profile",
+			fetch: baseFetch,
+		});
+		await fetchImpl(
+			"https://bedrock.us-gov-west-1.amazonaws.com/inference-profiles?maxResults=5&typeEquals=SYSTEM_DEFINED",
+			{ method: "GET", headers: { accept: "application/json" } },
+		);
+
+		expect(seen).toHaveLength(1);
+		expect(seen[0].url).toContain("bedrock.us-gov-west-1.amazonaws.com/inference-profiles");
+		expect(seen[0].url).toContain("maxResults=5");
+		expect(seen[0].amzDate).toMatch(/^\d{8}T\d{6}Z$/);
+		// Credential scope must use the host region and service "bedrock".
+		expect(seen[0].authorization).toContain("AWS4-HMAC-SHA256");
+		expect(seen[0].authorization).toContain("Credential=AKIATESTACCESSKEY12/");
+		expect(seen[0].authorization).toContain("/us-gov-west-1/bedrock/aws4_request");
+		expect(seen[0].authorization).toContain("SignedHeaders=");
+		expect(seen[0].authorization).toContain("Signature=");
 	});
 
 	test("control plane and runtime URL helpers", () => {

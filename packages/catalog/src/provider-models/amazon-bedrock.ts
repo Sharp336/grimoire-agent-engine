@@ -4,14 +4,17 @@
  * When AWS credentials (or a Bedrock API key) are available, lists inference
  * profiles and on-demand text foundation models from the control plane across
  * the ambient partition's Bedrock regions and maps them onto
- * `bedrock-converse-stream` specs. Successful discovery is authoritative so
- * each account/region set surfaces what the control plane actually exposes
- * (GovCloud east+west, commercial multi-region) instead of a static catalog.
+ * `bedrock-converse-stream` specs. Successful non-empty discovery is
+ * authoritative; failures return `null` so the static catalog is retained.
+ *
+ * Unknown / unsupported models fail closed: only rows that pass the shared
+ * Bedrock eligibility policy and resolve to a bundled reference are emitted,
+ * so discovery never invents limits or promotes catalog-rejected SKUs.
  */
 
 import type { ModelManagerOptions } from "../model-manager";
 import { getBundledModels } from "../models";
-import type { FetchImpl, ModelSpec } from "../types";
+import type { FetchImpl, Model, ModelSpec } from "../types";
 import { isRecord } from "../utils";
 import type { ModelManagerConfig } from "./descriptor-types";
 
@@ -76,8 +79,9 @@ export function amazonBedrockModelManagerOptions(
 ): ModelManagerOptions<"bedrock-converse-stream"> {
 	return {
 		providerId: "amazon-bedrock",
-		// A successful control-plane list is the account/region-visible set;
-		// keep the large commercial static catalog only when discovery does not run.
+		// Authoritative only when fetchDynamicModels returns a non-null list.
+		// fetchAmazonBedrockDiscoveredModels returns null on incomplete/failed
+		// discovery so the static catalog is never wiped.
 		dynamicModelsAuthoritative: true,
 		...(config.authenticated && config.fetch && config.baseUrl
 			? {
@@ -144,6 +148,19 @@ export function stripBedrockGeoPrefix(modelId: string): string {
 }
 
 /**
+ * Shared Bedrock catalog denylist — mirrors models.dev filterModel for amazon-bedrock.
+ * Exported for tests.
+ */
+export function isBedrockCatalogEligibleModelId(modelId: string): boolean {
+	const bare = stripBedrockGeoPrefix(extractProfileLeafId(modelId));
+	if (bare.startsWith("ai21.jamba")) return false;
+	if (bare.startsWith("amazon.titan-text-express") || bare.startsWith("mistral.mistral-7b-instruct-v0")) return false;
+	// Embeddings and non-chat SKUs are never Converse coding models.
+	if (bare.includes("embed") || bare.includes("titan-embed")) return false;
+	return true;
+}
+
+/**
  * Extract a selectable model id from an inference-profile summary.
  * Application profiles use the full ARN (already accepted by the model resolver);
  * system profiles use the short inference profile id (`us-gov.anthropic.…`).
@@ -166,17 +183,71 @@ export function resolveBedrockDiscoveredModelId(summary: {
 	return undefined;
 }
 
+/**
+ * Resolve underlying foundation model id(s) from an inference-profile summary.
+ * Application profiles require `models[].modelArn` for metadata inheritance.
+ * Exported for tests.
+ */
+export function foundationIdsFromInferenceProfileSummary(summary: Record<string, unknown>): string[] {
+	const out: string[] = [];
+	const models = summary.models;
+	if (Array.isArray(models)) {
+		for (const entry of models) {
+			if (!isRecord(entry)) continue;
+			const arn = typeof entry.modelArn === "string" ? entry.modelArn.trim() : "";
+			if (!arn) continue;
+			const id = foundationIdFromModelArn(arn);
+			if (id) out.push(id);
+		}
+	}
+	// System geo profiles encode the foundation id after the geo prefix.
+	const profileId = typeof summary.inferenceProfileId === "string" ? summary.inferenceProfileId.trim() : "";
+	if (profileId && !profileId.startsWith("arn:")) {
+		const bare = stripBedrockGeoPrefix(profileId);
+		if (bare && bare !== profileId) out.push(bare);
+	}
+	return out;
+}
+
+/** Parse `…foundation-model/<id>` (or trailing leaf) from a model ARN. Exported for tests. */
+export function foundationIdFromModelArn(modelArn: string): string | undefined {
+	const marker = "foundation-model/";
+	const idx = modelArn.indexOf(marker);
+	if (idx !== -1) {
+		const id = modelArn.slice(idx + marker.length).trim();
+		return id || undefined;
+	}
+	const slash = modelArn.lastIndexOf("/");
+	if (slash === -1) return undefined;
+	const leaf = modelArn.slice(slash + 1).trim();
+	return leaf || undefined;
+}
+
 interface DiscoveryFetchOptions {
 	/** Ambient control-plane base URL from prepareModelDiscovery (sets preferred region). */
 	ambientControlPlaneBaseUrl: string;
 	fetch: FetchImpl;
 }
 
+interface RegionDiscoveryOutcome {
+	/** null = region control-plane list failed entirely. */
+	models: ModelSpec<"bedrock-converse-stream">[] | null;
+	/** false when ListFoundationModels failed for this region after profiles succeeded. */
+	foundationsOk: boolean;
+	/** true when ListInferenceProfiles returned a non-null result (even if empty). */
+	profilesOk: boolean;
+	profileCount: number;
+}
+
 /**
  * List inference profiles + on-demand text foundation models across the
  * ambient partition's Bedrock regions and map them to Converse Stream specs.
- * Returns `null` only when every region fails so the model manager keeps the
- * bundled catalog rather than caching an empty authoritative set.
+ *
+ * Returns `null` when discovery cannot establish a usable complete set:
+ * - every region fails, or
+ * - no eligible models after policy filtering, or
+ * - profiles empty everywhere and foundation listing failed (would otherwise
+ *   authoritatively wipe the static catalog).
  */
 export async function fetchAmazonBedrockDiscoveredModels(
 	options: DiscoveryFetchOptions,
@@ -185,30 +256,48 @@ export async function fetchAmazonBedrockDiscoveredModels(
 	const regions = bedrockDiscoveryRegions(ambientRegion);
 	const referenceIndex = buildBedrockReferenceIndex();
 	const collected = new Map<string, ModelSpec<"bedrock-converse-stream">>();
-	let anyRegionSucceeded = false;
 
 	const regionResults = await Promise.all(
 		regions.map(region => discoverRegion(region, options.fetch, referenceIndex)),
 	);
 
+	let anyRegionSucceeded = false;
+	let totalProfiles = 0;
+	let anyFoundationsOk = false;
+	let anyProfilesOk = false;
+
 	for (let i = 0; i < regions.length; i++) {
 		const region = regions[i];
-		const result = regionResults[i];
-		if (!result) continue;
+		const outcome = regionResults[i];
+		if (!outcome.models) continue;
 		anyRegionSucceeded = true;
+		if (outcome.profilesOk) {
+			anyProfilesOk = true;
+			totalProfiles += outcome.profileCount;
+		}
+		if (outcome.foundationsOk) anyFoundationsOk = true;
 		const preferAmbient = region === ambientRegion;
-		for (const model of result) {
+		for (const model of outcome.models) {
 			const existing = collected.get(model.id);
 			if (!existing) {
 				collected.set(model.id, model);
 				continue;
 			}
-			// Prefer ambient-region endpoint when the same id is listed in multiple regions.
 			if (preferAmbient) collected.set(model.id, model);
 		}
 	}
 
 	if (!anyRegionSucceeded) return null;
+	// Profiles empty + foundations failed ⇒ incomplete set; do not authoritatively wipe.
+	if (totalProfiles === 0 && !anyFoundationsOk) return null;
+	// Profiles listed empty and foundations ok but yielded nothing after policy.
+	if (collected.size === 0) {
+		// Empty but complete (account truly has no eligible models) is still
+		// dangerous to treat as authoritative during partial API outages.
+		// Only accept empty when profiles succeeded with zero rows and foundations succeeded.
+		if (anyProfilesOk && anyFoundationsOk && totalProfiles === 0) return null;
+		return null;
+	}
 	return Array.from(collected.values());
 }
 
@@ -216,12 +305,13 @@ async function discoverRegion(
 	region: string,
 	fetchImpl: FetchImpl,
 	referenceIndex: Map<string, ModelSpec<"bedrock-converse-stream">>,
-): Promise<ModelSpec<"bedrock-converse-stream">[] | null> {
+): Promise<RegionDiscoveryOutcome> {
 	const controlPlaneBaseUrl = bedrockControlPlaneBaseUrl(region);
 	const runtimeBaseUrl = bedrockRuntimeBaseUrl(region);
 	const profiles = await listAllInferenceProfiles({ controlPlaneBaseUrl, fetch: fetchImpl });
-	// A region with no ListInferenceProfiles access is skipped, not fatal.
-	if (profiles === null) return null;
+	if (profiles === null) {
+		return { models: null, foundationsOk: false, profilesOk: false, profileCount: 0 };
+	}
 
 	const out: ModelSpec<"bedrock-converse-stream">[] = [];
 	const seen = new Set<string>();
@@ -229,54 +319,49 @@ async function discoverRegion(
 	for (const summary of profiles) {
 		const id = resolveBedrockDiscoveredModelId(summary);
 		if (!id || seen.has(id)) continue;
+		if (!isBedrockCatalogEligibleModelId(id)) continue;
+		const referenceIds = foundationIdsFromInferenceProfileSummary(summary);
+		const reference = findBedrockReferenceFromCandidates([id, ...referenceIds], referenceIndex);
+		// Fail closed: no fabricated limits for unknown models.
+		if (!reference) continue;
 		seen.add(id);
 		const name =
 			typeof summary.inferenceProfileName === "string" && summary.inferenceProfileName.trim()
 				? summary.inferenceProfileName.trim()
 				: id;
-		out.push(toDiscoveredBedrockModel(id, name, runtimeBaseUrl, referenceIndex));
+		out.push(toDiscoveredBedrockModel(id, name, runtimeBaseUrl, reference));
 	}
 
 	const foundations = await listAllFoundationModels({ controlPlaneBaseUrl, fetch: fetchImpl });
-	// Foundation list is best-effort per region.
+	const foundationsOk = foundations !== null;
 	if (foundations) {
 		for (const summary of foundations) {
 			const id = typeof summary.modelId === "string" ? summary.modelId.trim() : "";
 			if (!id || seen.has(id)) continue;
-			// Bare foundation ids that only support INFERENCE_PROFILE cannot be
-			// invoked on-demand (common on GovCloud). Prefer the geo profile id.
+			if (!isBedrockCatalogEligibleModelId(id)) continue;
 			if (!isOnDemandConverseFoundationModel(summary)) continue;
+			const reference = findBedrockReferenceFromCandidates([id], referenceIndex);
+			if (!reference) continue;
 			seen.add(id);
 			const name = typeof summary.modelName === "string" && summary.modelName.trim() ? summary.modelName.trim() : id;
-			out.push(toDiscoveredBedrockModel(id, name, runtimeBaseUrl, referenceIndex));
+			out.push(toDiscoveredBedrockModel(id, name, runtimeBaseUrl, reference));
 		}
 	}
 
-	return out;
+	return {
+		models: out,
+		foundationsOk,
+		profilesOk: true,
+		profileCount: profiles.length,
+	};
 }
 
 function toDiscoveredBedrockModel(
 	id: string,
 	name: string,
 	runtimeBaseUrl: string,
-	references: Map<string, ModelSpec<"bedrock-converse-stream">>,
+	reference: ModelSpec<"bedrock-converse-stream">,
 ): ModelSpec<"bedrock-converse-stream"> {
-	const reference = findBedrockReference(id, references);
-	const defaults: ModelSpec<"bedrock-converse-stream"> = {
-		id,
-		name,
-		api: "bedrock-converse-stream",
-		provider: "amazon-bedrock",
-		baseUrl: runtimeBaseUrl || DEFAULT_RUNTIME_BASE_URL,
-		reasoning: reference?.reasoning ?? false,
-		input: reference?.input ?? ["text"],
-		cost: reference?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: reference?.contextWindow ?? 200_000,
-		maxTokens: reference?.maxTokens ?? 64_000,
-		...(reference?.thinking ? { thinking: reference.thinking } : {}),
-		...(reference?.compat ? { compat: reference.compat } : {}),
-	};
-	if (!reference) return defaults;
 	return {
 		...reference,
 		id,
@@ -290,22 +375,70 @@ function toDiscoveredBedrockModel(
 function buildBedrockReferenceIndex(): Map<string, ModelSpec<"bedrock-converse-stream">> {
 	const map = new Map<string, ModelSpec<"bedrock-converse-stream">>();
 	for (const model of getBundledModels("amazon-bedrock")) {
-		const spec = model as unknown as ModelSpec<"bedrock-converse-stream">;
+		if (model.api !== "bedrock-converse-stream") continue;
+		const spec = modelToBedrockSpec(model);
+		if (!spec) continue;
 		map.set(spec.id, spec);
 		const bare = stripBedrockGeoPrefix(spec.id);
 		if (!map.has(bare)) map.set(bare, spec);
+		// Index us./eu. variants under bare foundation id for geo profile lookup.
+		if (bare !== spec.id && !map.has(bare)) map.set(bare, spec);
 	}
 	return map;
+}
+
+function modelToBedrockSpec(model: Model): ModelSpec<"bedrock-converse-stream"> | undefined {
+	if (model.api !== "bedrock-converse-stream") return undefined;
+	// Copy only fields safe on ModelSpec<"bedrock-converse-stream">. `compat` is
+	// re-derived by buildModel / catalog policies at load time; copying the union
+	// Model.compat would require an unsafe cast.
+	return {
+		id: model.id,
+		name: model.name,
+		api: "bedrock-converse-stream",
+		provider: model.provider,
+		baseUrl: model.baseUrl,
+		reasoning: model.reasoning,
+		input: model.input,
+		cost: model.cost,
+		contextWindow: model.contextWindow,
+		maxTokens: model.maxTokens,
+		...(model.thinking ? { thinking: model.thinking } : {}),
+	};
+}
+
+function findBedrockReferenceFromCandidates(
+	candidates: string[],
+	references: Map<string, ModelSpec<"bedrock-converse-stream">>,
+): ModelSpec<"bedrock-converse-stream"> | undefined {
+	for (const candidate of candidates) {
+		const hit = findBedrockReference(candidate, references);
+		if (hit) return hit;
+	}
+	return undefined;
 }
 
 function findBedrockReference(
 	id: string,
 	references: Map<string, ModelSpec<"bedrock-converse-stream">>,
 ): ModelSpec<"bedrock-converse-stream"> | undefined {
-	const direct = references.get(id);
+	const leaf = extractProfileLeafId(id);
+	const bare = stripBedrockGeoPrefix(leaf);
+	const direct = references.get(id) ?? references.get(leaf) ?? references.get(bare);
 	if (direct) return direct;
-	const bare = stripBedrockGeoPrefix(extractProfileLeafId(id));
-	return references.get(bare) ?? references.get(extractProfileLeafId(id));
+	// us./eu./global. siblings of the bare foundation id.
+	for (const prefix of BEDROCK_GEO_PREFIXES) {
+		const hit = references.get(`${prefix}${bare}`);
+		if (hit) return hit;
+	}
+	// GovCloud often lists llama3-8b while the commercial catalog has llama3-1-8b.
+	const llama = /^meta\.llama3-(\d+b-instruct(?:-v\d+(?::\d+)?)?)$/i.exec(bare);
+	if (llama) {
+		const alt = `meta.llama3-1-${llama[1]}`;
+		const hit = references.get(alt) ?? references.get(`us.${alt}`);
+		if (hit) return hit;
+	}
+	return undefined;
 }
 
 function extractProfileLeafId(id: string): string {
@@ -330,8 +463,8 @@ export function isOnDemandConverseFoundationModel(summary: Record<string, unknow
 	if (Array.isArray(inferenceTypes) && inferenceTypes.length > 0) {
 		return inferenceTypes.some(t => String(t).toUpperCase() === "ON_DEMAND");
 	}
-	// Missing inferenceTypes: keep (legacy rows); invoke may still fail.
-	return true;
+	// Missing inferenceTypes: do not invent eligibility (fail closed).
+	return false;
 }
 
 async function listAllInferenceProfiles(options: {

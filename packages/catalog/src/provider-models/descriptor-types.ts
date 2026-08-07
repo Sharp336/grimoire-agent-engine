@@ -8,6 +8,13 @@ export type ModelManagerConfig = {
 	fetch?: FetchImpl;
 	/** The supplied fetch already applies provider-specific authentication. */
 	authenticated?: boolean;
+	/**
+	 * Optional AWS (or other cloud) region for credential scope and discovery
+	 * endpoints. When omitted, providers fall back to ambient env/profile config.
+	 */
+	region?: string;
+	/** Optional named cloud credentials profile (e.g. AWS shared-config profile). */
+	profile?: string;
 };
 
 /** Catalog discovery configuration for providers that support endpoint-based model listing. */

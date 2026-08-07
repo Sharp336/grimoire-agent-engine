@@ -1,5 +1,5 @@
 import { bedrockControlPlaneBaseUrl, createBedrockControlPlaneFetch } from "../providers/bedrock-control-plane";
-import { resolveAwsRegion } from "../utils/aws-profile";
+import { resolveAwsProfile, resolveAwsRegion } from "../utils/aws-profile";
 import {
 	type AwsBedrockProviderOptions,
 	hasAwsCredentialSource,
@@ -26,15 +26,21 @@ export const amazonBedrockProvider = {
 	},
 	prepareModelDiscovery: config => {
 		const bearerToken = resolveAwsBearerToken(config.apiKey);
+		// Honor explicit discovery region/profile when ModelRegistry (or tests)
+		// threads them; otherwise fall back to ambient AWS env/shared-config.
+		const profile = config.profile || resolveAwsProfile();
+		const region = resolveAwsRegion(config.region, profile);
 		if (!bearerToken && !hasAwsCredentialSource()) {
-			return { ...config, apiKey: undefined, authenticated: false };
+			return { ...config, apiKey: undefined, authenticated: false, region, profile };
 		}
-		const region = resolveAwsRegion();
 		return {
 			authenticated: true,
+			region,
+			profile,
 			baseUrl: bedrockControlPlaneBaseUrl(region),
 			fetch: createBedrockControlPlaneFetch({
 				region,
+				profile,
 				fetch: config.fetch,
 				apiKey: config.apiKey,
 				bearerToken,
