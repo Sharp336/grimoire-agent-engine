@@ -142,7 +142,7 @@ import {
 	setSessionTerminalTitle,
 	setTerminalTitleStateEnabled,
 } from "../utils/title-generator";
-import { restoreTmuxWindowName, setTmuxWindowName, setTmuxWindowNameEnabled } from "../utils/tmux-session";
+import { TmuxWindowNamer } from "../utils/tmux-session";
 import {
 	aggregateVibeWorkerTokensPerSecond,
 	type VibeOwnerScope,
@@ -564,6 +564,12 @@ export class InteractiveMode implements InteractiveModeContext {
 	#autocompleteProviderFactories: AutocompleteProviderFactory[] = [];
 	#cleanupUnsubscribe?: () => void;
 	#signalTeardown?: SessionTeardown;
+	/**
+	 * Owns this mode's tmux window name. Instance-scoped so two in-process modes
+	 * cannot clobber each other's captured window name; restored by `shutdown()`
+	 * and, on signal/fatal exits, by the postmortem cleanup it registers itself.
+	 */
+	readonly #tmuxWindow = new TmuxWindowNamer();
 	readonly #version: string;
 	readonly #startupChangelog: StartupChangelogSelection | undefined;
 	#planModePreviousTools: string[] | undefined;
@@ -1022,9 +1028,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.start({ clearScrollback: options.clearInitialTerminalHistory === true });
 		pushTerminalTitle();
 		setTerminalTitleStateEnabled(this.settings.get("tui.titleState"));
-		setTmuxWindowNameEnabled(this.settings.get("tui.tmuxWindowName"));
+		this.#tmuxWindow.setEnabled(this.settings.get("tui.tmuxWindowName"));
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
-		setTmuxWindowName(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+		this.#tmuxWindow.sync(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		this.updateEditorBorderColor();
 		// Single side-effect point for title changes: every setSessionName caller
 		// (first-input titling, /rename, extension renames, plan seeding, replan
@@ -1035,7 +1041,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#eventBusUnsubscribers.push(
 			this.sessionManager.onSessionNameChanged(() => {
 				setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
-				setTmuxWindowName(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+				this.#tmuxWindow.sync(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 				this.#handleSessionAccentInputsChanged();
 			}),
 		);
@@ -1330,7 +1336,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.refreshSlashCommandState(newCwd);
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		// The tmux window name falls back to the cwd basename for unnamed sessions.
-		setTmuxWindowName(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+		this.#tmuxWindow.sync(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		this.statusLine.applyCwdChange();
 	}
 
@@ -4069,7 +4075,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// terminal back (which would leave the parent shell with a `π ⠋ …` tab).
 		disposeTerminalTitleState();
 		popTerminalTitle();
-		restoreTmuxWindowName();
+		this.#tmuxWindow.restore();
 		this.stop();
 
 		// Print resumption hint if this is a persisted session
