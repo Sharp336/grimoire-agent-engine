@@ -71,8 +71,9 @@ const HIGH_MAX_REASONING_EFFORTS: readonly Effort[] = [Effort.High, Effort.Max];
 const HIGH_ONLY_REASONING_EFFORTS: readonly Effort[] = [Effort.High];
 /**
  * Five wire tiers with a `low` floor: GPT-5.6+, Anthropic adaptive models
- * with the real xhigh tier (Opus 4.7+, Sonnet 5+, Fable/Mythos 5), and the
- * Fire Pass Kimi router (distinct xhigh and max budgets).
+ * with the real xhigh tier (Opus 4.7+, Sonnet 5+, Fable/Mythos 5, on both the
+ * Messages API and Bedrock Converse), and the Fire Pass Kimi router (distinct
+ * xhigh and max budgets).
  */
 const FIVE_TIER_EFFORTS_LOW_TO_MAX: readonly Effort[] = [
 	Effort.Low,
@@ -81,7 +82,7 @@ const FIVE_TIER_EFFORTS_LOW_TO_MAX: readonly Effort[] = [
 	Effort.XHigh,
 	Effort.Max,
 ];
-/** Legacy adaptive scale (Opus/Sonnet 4.6, every Bedrock adaptive model): four wire tiers, no xhigh. */
+/** Legacy adaptive scale (Opus/Sonnet 4.6 on any transport): four wire tiers, no xhigh. */
 const FOUR_TIER_EFFORTS_LOW_TO_MAX: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High, Effort.Max];
 /** GLM-5.2 resellers that pass the default lower tiers verbatim and expose the genuine `max` top tier. */
 const DEFAULT_REASONING_EFFORTS_WITH_MAX: readonly Effort[] = [
@@ -390,9 +391,9 @@ function getModelDefinedEfforts<TApi extends Api>(
 
 /**
  * Wire-exact effort ladders for Anthropic adaptive models (4.6+). Model-defined
- * so stale cached surfaces normalize on every build: Messages-API models with
- * the real xhigh tier (4.7+) expose the full five-tier `low..max` scale;
- * Opus/Sonnet 4.6 and every Bedrock adaptive model stay on the four-tier
+ * so stale cached surfaces normalize on every build: models with the real
+ * xhigh tier (4.7+) expose the full five-tier `low..max` scale on both the
+ * Messages API and Bedrock Converse; Opus/Sonnet 4.6 stays on the four-tier
  * `low/medium/high/max` scale.
  */
 function getAnthropicAdaptiveEfforts<TApi extends Api>(spec: ModelSpec<TApi>): readonly Effort[] | undefined {
@@ -687,12 +688,14 @@ function isOpenRouterAnthropicAdaptiveReasoningModel<TApi extends Api>(
 }
 
 /**
- * Opus 4.7+, Sonnet 5+, and Fable/Mythos 5+ on the Messages API expose the full five-tier
- * adaptive scale (low/medium/high/xhigh/max). Bedrock Converse stays on the
- * four-tier scale regardless of model version.
+ * Opus 4.7+, Sonnet 5+, and Fable/Mythos 5+ expose the full five-tier adaptive
+ * scale (low/medium/high/xhigh/max) on the Messages API and Bedrock Converse
+ * alike — Bedrock validation is model-side and accepts `xhigh` for 4.7+ while
+ * 4.6 rejects it (`output_config.effort: Input should be 'low', 'medium',
+ * 'high' or 'max'`), verified against live Converse endpoints.
  */
 function anthropicModelHasRealXHighEffort<TApi extends Api>(spec: ModelSpec<TApi>, parsedModel: ParsedModel): boolean {
-	if (spec.api !== "anthropic-messages") return false;
+	if (spec.api !== "anthropic-messages" && spec.api !== "bedrock-converse-stream") return false;
 	if (parsedModel.family !== "anthropic") return false;
 	return isAnthropicAdaptiveGenAtLeast(parsedModel, "4.7");
 }

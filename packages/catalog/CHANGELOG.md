@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Exposed the `xhigh` thinking effort for adaptive Claude models on Amazon Bedrock (Opus 4.7/4.8/5, Sonnet 5, Fable/Mythos 5) — the model-side `output_config.effort` validation accepts the full five-tier `low..max` scale on Bedrock Converse, matching the Messages API; only 4.6-generation models remain on the four-tier scale ([#7924](https://github.com/can1357/oh-my-pi/pull/7924) by [@voonfoo](https://github.com/voonfoo)).
+
 ## [17.2.11] - 2026-08-07
 
 ### Fixed
