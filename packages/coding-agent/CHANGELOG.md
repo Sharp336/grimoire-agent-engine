@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `/usage`, `/advisor status`, and every other panel command answering only after the agent stopped working. Since `17.0.1` their output was queued until the turn settled (to stop mid-turn transcript mounts duplicating rows in native scrollback, issues #4806/#6767), and the deferral was silent, so on a long turn the command was indistinguishable from a dead one. The panel now renders immediately above the editor in an anchored container that is cleared and rebuilt in place, never entering the transcript, and the full output still lands in the transcript at the next settle. The preview is capped to 40% of the viewport (minimum 6 rows) so a tall report cannot push the prompt off screen.
 ### Added
 
 - Added support for the [Agent Plugins 1.0.0 standard](https://agent-plugins.org): plugin packages with a root `plugin.json` targeting the canonical schema are discovered from marketplace installs, `--plugin-dir`, and configured extension roots, with `skills/` and `mcp.json` loaded per the specification (closed-schema validation per skills-ref, `${PLUGIN_ROOT}`/`${PLUGIN_DATA}` expansion, reserved subprocess environment, instance-keyed persistent data directories, and per-component failure isolation). Package-boundary containment is enforced before every read — including `skill://` resource access from the read tool and bash, where plugin skill files must realpath-resolve inside the plugin root.

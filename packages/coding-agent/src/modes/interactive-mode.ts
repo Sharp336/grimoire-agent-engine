@@ -373,6 +373,42 @@ class AnchoredLiveContainer extends Container implements NativeScrollbackLiveReg
 	}
 }
 
+/**
+ * Preview of the command panels queued while the agent streams, rendered above
+ * the editor so `/usage` and friends answer immediately mid-turn.
+ *
+ * Capped in height: the panels are shown in full in the transcript at the next
+ * settle, so the preview only has to answer the question, not reproduce the
+ * whole report. Rendering is delegated to the real panels at the real width, so
+ * the preview cannot drift from what eventually lands in the transcript.
+ */
+class DeferredCommandPreview implements Component {
+	constructor(
+		private readonly items: readonly Component[],
+		private readonly maxRows: number,
+		private readonly commandCount: number,
+	) {}
+
+	render(width: number): readonly string[] {
+		const rows: string[] = [];
+		for (const item of this.items) rows.push(...item.render(width));
+		const queued = this.commandCount === 1 ? "1 command output" : `${this.commandCount} command outputs`;
+		if (rows.length <= this.maxRows) {
+			rows.push(theme.fg("dim", `${queued} — repeated in the transcript when the agent pauses`));
+			return rows;
+		}
+		const shown = rows.slice(0, Math.max(1, this.maxRows - 1));
+		const hidden = rows.length - shown.length;
+		shown.push(theme.fg("dim", `… ${hidden} more rows — ${queued} shown in full when the agent pauses`));
+		return shown;
+	}
+}
+
+/** Never shrink the queued-output preview below this, even on a short terminal. */
+const DEFERRED_PREVIEW_MIN_ROWS = 6;
+/** Ceiling for the preview as a share of the viewport, so the prompt stays visible. */
+const DEFERRED_PREVIEW_VIEWPORT_FRACTION = 0.4;
+
 /** How long the ctrl+p model-role cycle chip track lingers above the editor
  *  before it auto-clears, mirroring the todo HUD's auto-clear timer. */
 const MODEL_CYCLE_TRACK_CLEAR_MS = 4000;
@@ -450,6 +486,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	omfgContainer: Container;
 	errorBannerContainer: Container;
 	modelCycleContainer: Container;
+	deferredCommandContainer: Container;
 	editor: CustomEditor;
 	editorContainer: Container;
 	hookWidgetContainerAbove: Container;
@@ -556,6 +593,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#pendingCommandOutput: Component[] = [];
 	#pendingCommandOutputSessionId: string | undefined;
+	/** Commands (not components) queued while streaming, for the deferral hint. */
+	#pendingCommandOutputCommands = 0;
 	#pendingSlashCommands: SlashCommand[] = [];
 	/** Built-in editor autocomplete provider, before extension wrapping. */
 	#baseAutocompleteProvider: AutocompleteProvider | undefined;
@@ -643,6 +682,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.pendingMessagesContainer.disposeChildren();
 		this.#cancelModelCycleClearTimer();
 		this.modelCycleContainer.disposeChildren();
+		this.deferredCommandContainer.disposeChildren();
+		this.#pendingCommandOutput = [];
+		this.#pendingCommandOutputSessionId = undefined;
+		this.#pendingCommandOutputCommands = 0;
 		this.compactionQueuedMessages = [];
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
@@ -729,6 +772,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.omfgContainer = new AnchoredLiveContainer();
 		this.errorBannerContainer = new AnchoredLiveContainer();
 		this.modelCycleContainer = new AnchoredLiveContainer();
+		this.deferredCommandContainer = new AnchoredLiveContainer();
 		this.editor = new CustomEditor(getEditorTheme());
 		this.ui.enableScopedInputRender(this.editor);
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
@@ -983,6 +1027,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.addChild(this.omfgContainer);
 		this.ui.addChild(this.errorBannerContainer);
 		this.ui.addChild(this.modelCycleContainer);
+		this.ui.addChild(this.deferredCommandContainer);
 		// Working loader / transient status sits below the sticky todo + subagent
 		// HUDs, just above the editor's hook-widget top margin — so it reads next to
 		// the prompt while keeping the one-line gap above the editor.
@@ -4148,6 +4193,14 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * flushed there. That is preferred over leaving it queued behind a command
 	 * the user runs during the pause, which mounts immediately and would put the
 	 * older panel out of order.
+	 *
+	 * The deferral is acknowledged in {@link deferredCommandContainer}, an
+	 * anchored container above the editor. Nothing is mounted into the
+	 * transcript: a mid-turn transcript mount re-renders rows below the growing
+	 * live block and duplicates them in native scrollback (issues #4806/#6767),
+	 * which is why the earlier `showStatus` acknowledgment was reverted. An
+	 * anchored container is cleared and rebuilt in place, so it costs no
+	 * scrollback rows — the same reason the ctrl+p role-cycle track lives there.
 	 */
 	presentCommandOutput(content: Component | readonly Component[]): void {
 		if (!this.session.isStreaming) {
@@ -4157,14 +4210,35 @@ export class InteractiveMode implements InteractiveModeContext {
 		const sessionId = this.sessionManager.getSessionId();
 		if (this.#pendingCommandOutput.length > 0 && this.#pendingCommandOutputSessionId !== sessionId) {
 			this.#pendingCommandOutput = [];
+			this.#pendingCommandOutputCommands = 0;
 		}
 		this.#pendingCommandOutputSessionId = sessionId;
 		const items = Array.isArray(content) ? content : [content as Component];
 		this.#pendingCommandOutput.push(...items);
-		// No feedback here on purpose: mounting anything into the transcript
-		// mid-turn (even a status line) re-renders rows below the growing live
-		// block and duplicates them in native scrollback — the exact regression
-		// issues #4806/#6767 pin. The queue flushes at the next settle.
+		this.#pendingCommandOutputCommands += 1;
+		this.#renderDeferredCommandNotice();
+		this.ui.requestRender();
+	}
+
+	/**
+	 * Preview the queued panels above the editor so a command answers straight
+	 * away, then clear at settle when the real panels enter the transcript.
+	 *
+	 * Height is capped against the viewport: a `/usage` report with several
+	 * providers is tall enough to push the prompt off screen, and the full text
+	 * is a moment away in the transcript either way.
+	 */
+	#renderDeferredCommandNotice(): void {
+		this.deferredCommandContainer.clear();
+		if (this.#pendingCommandOutput.length === 0) return;
+		const maxRows = Math.max(
+			DEFERRED_PREVIEW_MIN_ROWS,
+			Math.floor(this.ui.terminal.rows * DEFERRED_PREVIEW_VIEWPORT_FRACTION),
+		);
+		this.deferredCommandContainer.addChild(new Spacer(1));
+		this.deferredCommandContainer.addChild(
+			new DeferredCommandPreview([...this.#pendingCommandOutput], maxRows, this.#pendingCommandOutputCommands),
+		);
 	}
 
 	/** Mount every command panel queued for the current session while the agent was streaming. */
@@ -4174,6 +4248,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		const pendingSessionId = this.#pendingCommandOutputSessionId;
 		this.#pendingCommandOutput = [];
 		this.#pendingCommandOutputSessionId = undefined;
+		this.#pendingCommandOutputCommands = 0;
+		this.#renderDeferredCommandNotice();
 		if (pendingSessionId !== this.sessionManager.getSessionId()) return;
 		this.present(pending);
 	}
