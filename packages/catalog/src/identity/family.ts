@@ -98,6 +98,29 @@ export const isMimoModelIdOrName = memo((value: string): boolean => {
 	return value.toLowerCase().includes("mimo");
 });
 
+/**
+ * Upstage Solar Pro family in any namespace form (`solar-pro2`, dated
+ * `solar-pro3-260323`, aggregator `upstage/solar-pro-3`). The reasoning SKUs
+ * are wire-strict about `reasoning_effort`: Pro 2/3 reject `xhigh`/`max` and
+ * top out at `high`, while Pro 4 accepts the full `minimal..max` ladder — see
+ * {@link isSolarPro4ModelId} and the effort rules in model-thinking.
+ */
+export const isSolarProModelId = memo((modelId: string): boolean => {
+	return /(^|\/)solar-pro/i.test(bareModelId(modelId));
+});
+
+/**
+ * Upstage Solar Pro 4 specifically (`solar-pro4`, dated `solar-pro4-260806`,
+ * aggregator `upstage/solar-pro-4`). Pro 4 reasons BY DEFAULT (omitting
+ * `reasoning_effort` leaves thinking on; only `none`/`minimal` turn it off)
+ * and accepts every wire tier from `none` through `max` — verified against
+ * api.upstage.ai; see
+ * https://console.upstage.ai/docs/capabilities/generate/reasoning.
+ */
+export const isSolarPro4ModelId = memo((modelId: string): boolean => {
+	return /(^|\/)solar-pro-?4(?:[-.:]|$)/i.test(bareModelId(modelId));
+});
+
 const GROK_EFFORT_CAPABLE_PREFIXES = ["grok-3-mini", "grok-4.20-multi-agent", "grok-4.3", "grok-4.5"] as const;
 
 /**

@@ -39011,8 +39011,7 @@
 					"minimal",
 					"low",
 					"medium",
-					"high",
-					"xhigh"
+					"high"
 				]
 			}
 		},
@@ -60089,8 +60088,7 @@
 					"minimal",
 					"low",
 					"medium",
-					"high",
-					"xhigh"
+					"high"
 				]
 			},
 			"supportsComputerUse": false,
@@ -87389,6 +87387,138 @@
 			"supportsComputerUseConfig": false,
 			"compat": {
 				"escapeBuiltinToolNames": true
+			}
+		}
+	},
+	"upstage": {
+		"solar-mini": {
+			"id": "solar-mini",
+			"name": "solar-mini",
+			"api": "openai-completions",
+			"provider": "upstage",
+			"baseUrl": "https://api.upstage.ai/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.15,
+				"output": 0.15,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 4096,
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false,
+				"supportsReasoningEffort": true,
+				"supportsMultipleSystemMessages": true
+			}
+		},
+		"solar-pro2": {
+			"id": "solar-pro2",
+			"name": "solar-pro2",
+			"api": "openai-completions",
+			"provider": "upstage",
+			"baseUrl": "https://api.upstage.ai/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.25,
+				"output": 0.25,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 65536,
+			"maxTokens": 8192,
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false,
+				"supportsReasoningEffort": true,
+				"supportsMultipleSystemMessages": true
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				]
+			}
+		},
+		"solar-pro3": {
+			"id": "solar-pro3",
+			"name": "solar-pro3",
+			"api": "openai-completions",
+			"provider": "upstage",
+			"baseUrl": "https://api.upstage.ai/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.25,
+				"output": 0.25,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8192,
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false,
+				"supportsReasoningEffort": true,
+				"supportsMultipleSystemMessages": true
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				]
+			}
+		},
+		"solar-pro4": {
+			"id": "solar-pro4",
+			"name": "Solar Pro 4",
+			"api": "openai-completions",
+			"provider": "upstage",
+			"baseUrl": "https://api.upstage.ai/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.3,
+				"output": 1.2,
+				"cacheRead": 0.06,
+				"cacheWrite": 0
+			},
+			"contextWindow": 524288,
+			"maxTokens": 131072,
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false,
+				"supportsReasoningEffort": true,
+				"supportsMultipleSystemMessages": true,
+				"reasoningDisableMode": "lowest-effort"
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh",
+					"max"
+				]
 			}
 		}
 	},

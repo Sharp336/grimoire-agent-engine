@@ -15,6 +15,7 @@ import {
 	isKimiK3ModelId,
 	isKimiModelId,
 	isReasoningGlmModelId,
+	isSolarPro4ModelId,
 } from "../identity/family";
 import { resolveModelReference } from "../identity/reference";
 import type { ModelManagerOptions } from "../model-manager";
@@ -1548,6 +1549,22 @@ export function deepseekModelManagerOptions(
 	config?: DeepSeekModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
 	return createSimpleOpenAICompletionsOptions("deepseek", "https://api.deepseek.com", config);
+}
+
+// ---------------------------------------------------------------------------
+// Upstage
+// ---------------------------------------------------------------------------
+
+export interface UpstageModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function upstageModelManagerOptions(
+	config?: UpstageModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createSimpleOpenAICompletionsOptions("upstage", "https://api.upstage.ai/v1", config);
 }
 
 // ---------------------------------------------------------------------------
@@ -5872,6 +5889,34 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDes
 	openAiCompletionsDescriptor("nano-gpt", "nanogpt", "https://nano-gpt.com/api/v1"),
 	// --- Synthetic ---
 	openAiCompletionsDescriptor("synthetic", "synthetic", "https://api.synthetic.new/openai/v1"),
+	// --- Upstage ---
+	openAiCompletionsDescriptor("upstage", "upstage", "https://api.upstage.ai/v1", {
+		compat: {
+			// Verified against api.upstage.ai (2026-08-07): the `store` field and the
+			// `developer` role are rejected with a 400 ("Unrecognized request
+			// arguments supplied: store" / `role` must be system/assistant/user/tool),
+			// while top-level `reasoning_effort`, multiple leading system messages,
+			// and `stream_options.include_usage` are all accepted.
+			supportsStore: false,
+			supportsDeveloperRole: false,
+			supportsReasoningEffort: true,
+			supportsMultipleSystemMessages: true,
+		},
+		transformModel: model => {
+			if (!model.reasoning || !isSolarPro4ModelId(model.id)) {
+				return model;
+			}
+			// solar-pro4 reasons BY DEFAULT: omitting `reasoning_effort` leaves
+			// thinking on, and only `none`/`minimal` turn it off. Disable via
+			// lowest-effort (`minimal`) instead of the omit default, which would
+			// silently fall back to the server-side thinking-on default. The
+			// effort ladder itself is family-derived in model-thinking.
+			return {
+				...model,
+				compat: { ...model.compat, reasoningDisableMode: "lowest-effort" },
+			};
+		},
+	}),
 	// --- Venice AI ---
 	openAiCompletionsDescriptor("venice", "venice", "https://api.venice.ai/api/v1", {
 		transformModel: model => {
