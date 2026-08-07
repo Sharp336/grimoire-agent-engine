@@ -2250,6 +2250,8 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
+	// A matching entry replaces both global trigger fields; an omitted field is
+	// intentionally not inherited. If both fields are present, tokens win.
 	"compaction.modelThresholds": {
 		type: "record",
 		default: EMPTY_COMPACTION_MODEL_THRESHOLDS_RECORD,

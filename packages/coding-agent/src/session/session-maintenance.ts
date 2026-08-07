@@ -1845,15 +1845,14 @@ export class SessionMaintenance {
 	 * When the model/window is unknown we cannot evaluate the budget, so we
 	 * optimistically allow the retry (preserving prior behavior).
 	 */
-	#compactionCreatedRetryFit(): boolean {
+	#compactionCreatedRetryFit(settings: AgentCompactionSettings = this.#effectiveCompactionSettings()): boolean {
 		const contextWindow = this.#model?.contextWindow ?? 0;
 		if (contextWindow <= 0) return true;
-		const compactionSettings = this.#host.settings.getGroup("compaction");
 		const residualTokens = compactionContextTokens(
 			this.#host.getContextUsage({ contextWindow })?.tokens ?? 0,
 			this.#estimateStoredContextTokens(),
 		);
-		const fitBudget = Math.max(0, contextWindow - resolveBudgetReserveTokens(contextWindow, compactionSettings));
+		const fitBudget = Math.max(0, contextWindow - resolveBudgetReserveTokens(contextWindow, settings));
 		return residualTokens <= fitBudget;
 	}
 
@@ -2847,12 +2846,11 @@ export class SessionMaintenance {
 				// AFTER the drop above so the just-failed turn (which the retry prompt
 				// won't include) is excluded. Reusing the auto-continue recovery band
 				// here turned recoverable overflows into manual dead-ends (#3412 review),
-				// so use the looser fit budget.
-				retryFits = this.#compactionCreatedRetryFit();
+				retryFits = this.#compactionCreatedRetryFit(compactionSettings);
 				if (!retryFits) {
 					retryFits = await this.#rescueCompactionDeadEnd(autoCompactionSignal, compactionSettings, {
 						skipElide: fallbackFromShake,
-						hasProgress: () => this.#compactionCreatedRetryFit(),
+						hasProgress: () => this.#compactionCreatedRetryFit(compactionSettings),
 					});
 				}
 				if (!retryFits) {
