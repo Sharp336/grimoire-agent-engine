@@ -5483,6 +5483,10 @@ export const SETTINGS_SCHEMA = {
 
 	"commit.changelogMaxDiffChars": { type: "number", default: 120000 },
 
+	"commit.analyzeFiles": { type: "boolean", default: true },
+
+	"commit.analyzeFilesMaxFiles": { type: "number", default: undefined },
+
 	"dev.autoqa": {
 		type: "boolean",
 		default: true,
@@ -5750,6 +5754,8 @@ export interface CommitSettings {
 	mapReduceTimeoutMs: number;
 	mapReduceMaxConcurrency: number;
 	changelogMaxDiffChars: number;
+	analyzeFiles: boolean;
+	analyzeFilesMaxFiles?: number;
 }
 
 export interface TtsrSettings {

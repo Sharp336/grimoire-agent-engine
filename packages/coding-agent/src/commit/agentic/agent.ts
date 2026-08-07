@@ -52,7 +52,8 @@ export async function runCommitAgentSession(input: CommitAgentInput): Promise<Co
 		spawns,
 		state,
 		changelogTargets: input.changelogTargets,
-		enableAnalyzeFiles: true,
+		enableAnalyzeFiles: input.settings.get("commit.analyzeFiles"),
+		maxAnalyzeFiles: input.settings.get("commit.analyzeFilesMaxFiles"),
 	});
 
 	const { session } = await createAgentSession({

@@ -59,6 +59,7 @@ export function createAnalyzeFileTool(options: {
 	settings: Settings;
 	spawns: string;
 	state: CommitAgentState;
+	maxFiles?: number;
 }): CustomTool<typeof analyzeFileSchema> {
 	return {
 		name: "analyze_files",
@@ -73,9 +74,11 @@ export function createAnalyzeFileTool(options: {
 			// The tool's session semaphore bounds the parallel fan-out.
 			const taskTool = await TaskTool.create(toolSession);
 			const numstat = options.state.overview?.numstat ?? [];
+			const files = options.maxFiles === undefined ? params.files : params.files.slice(0, options.maxFiles);
+			const skipped = params.files.slice(files.length);
 
 			const analyses = await Promise.all(
-				params.files.map((file, index) => {
+				files.map((file, index) => {
 					const relatedFiles = formatRelatedFiles(params.files, file, numstat);
 					const assignment = prompt.render(analyzeFilePrompt, {
 						file,
@@ -95,8 +98,12 @@ export function createAnalyzeFileTool(options: {
 				.map(analysis => analysis.content.find(part => part.type === "text")?.text ?? "")
 				.filter(Boolean)
 				.join("\n\n");
+			const capWarning =
+				skipped.length > 0
+					? `\n\nwarning: analyze_files capped at ${files.length} file${files.length === 1 ? "" : "s"}; skipped: ${skipped.join(", ")}`
+					: "";
 			return {
-				content: [{ type: "text", text: text || "(no output)" }],
+				content: [{ type: "text", text: (text || "(no output)") + capWarning }],
 				details: {
 					projectAgentsDir: null,
 					results,
