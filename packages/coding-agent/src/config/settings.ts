@@ -36,6 +36,7 @@ import { invalidate as invalidateCapabilityFsCache } from "../capability/fs";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
 import type { ModelRole } from "../config/model-roles";
 import { loadCapability } from "../discovery";
+import { isVoiceProviderId, VOICE_PROVIDER_ORDER } from "../live/providers/base";
 import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "../modes/theme/theme";
 import { AgentStorage } from "../session/agent-storage";
 import { AUTO_IMAGE_PROVIDER_ORDER, isImageProviderId } from "../tools/image-providers";
@@ -1392,6 +1393,31 @@ export class Settings {
 		}
 		delete raw["live.voice"];
 		delete raw["live.codexVoice"];
+
+		// live.provider -> providers.voiceOrder. Provider IDs were also shortened
+		// when voice selection moved to the shared ranked-provider contract.
+		const legacyVoiceProvider = liveObj?.provider ?? raw["live.provider"];
+		const voiceProvidersObj = isRecord(raw.providers) ? raw.providers : undefined;
+		const existingVoiceOrder = voiceProvidersObj?.voiceOrder ?? raw["providers.voiceOrder"];
+		if (
+			(!Array.isArray(existingVoiceOrder) || existingVoiceOrder.length === 0) &&
+			typeof legacyVoiceProvider === "string" &&
+			legacyVoiceProvider !== "auto"
+		) {
+			const id =
+				legacyVoiceProvider === "openai-codex"
+					? "codex"
+					: legacyVoiceProvider === "xai-grok"
+						? "grok"
+						: legacyVoiceProvider;
+			if (isVoiceProviderId(id)) {
+				const target = voiceProvidersObj ?? {};
+				target.voiceOrder = [id, ...VOICE_PROVIDER_ORDER.filter(providerId => providerId !== id)];
+				raw.providers = target;
+			}
+		}
+		if (liveObj) delete liveObj.provider;
+		delete raw["live.provider"];
 
 		// ask.timeout: ms -> seconds (if value > 1000, it's old ms format)
 		if (raw.ask && typeof (raw.ask as Record<string, unknown>).timeout === "number") {

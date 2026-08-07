@@ -1,8 +1,6 @@
-import type { AuthStorage } from "@oh-my-pi/pi-ai";
+import type { Api, AuthStorage } from "@oh-my-pi/pi-ai";
 import type { LiveClientMessage, LiveServerEvent } from "./protocol";
-
-export type LiveProvider = "auto" | "openai-codex" | "xai-grok";
-export type ResolvedLiveProvider = Exclude<LiveProvider, "auto">;
+import type { VoiceProviderId } from "./providers/base";
 
 /** Callbacks emitted by a live transport implementation. */
 export interface LiveTransportCallbacks {
@@ -10,24 +8,32 @@ export interface LiveTransportCallbacks {
 	onOutputLevel(level: number): void;
 }
 
-/** Configuration required to establish a live call. */
-export interface LiveTransportOptions {
+/** Shared configuration passed from the live-session controller to a provider. */
+export interface LiveTransportBaseOptions {
 	authStorage: AuthStorage;
 	sessionId: string;
 	instructions: string;
-	voice: string;
-	codexVoice?: string;
-	grokVoice?: string;
-	provider?: LiveProvider;
-	grokModel?: string;
 	callbacks: LiveTransportCallbacks;
 	signal?: AbortSignal;
 }
 
+/** Provider-resolved configuration required to establish a live transport. */
+export interface LiveTransportOptions extends LiveTransportBaseOptions {
+	voice: string;
+	model?: string;
+}
+
+/** Message identity attached to transcripts emitted by a live transport. */
+export interface LiveTransportIdentity {
+	voiceProvider: VoiceProviderId;
+	api: Api;
+	provider: string;
+	model: string;
+}
+
 /** Unified real-time transport interface powering `/live` mode. */
 export interface ILiveTransport {
-	readonly provider: ResolvedLiveProvider;
-	readonly model: string;
+	readonly identity: LiveTransportIdentity;
 
 	/** Connect to the realtime backend. */
 	connect(): Promise<void>;

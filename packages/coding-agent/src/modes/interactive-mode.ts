@@ -81,7 +81,7 @@ import type { Skill } from "../extensibility/skills";
 import { loadSlashCommands } from "../extensibility/slash-commands";
 import type { Goal, GoalModeState } from "../goals/state";
 import { resolveLocalUrlToPath } from "../internal-urls";
-import type { LiveProvider } from "../live/transport-types";
+import type { VoiceProviderId } from "../live/providers/base";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
 import type { MCPManager } from "../mcp";
 import {
@@ -4593,7 +4593,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/** Start or stop the realtime voice surface, optionally overriding its provider for this session. */
-	async handleLiveCommand(provider?: LiveProvider): Promise<void> {
+	async handleLiveCommand(provider?: VoiceProviderId): Promise<void> {
 		if (this.#sttController && this.#sttController.state !== "idle") {
 			this.showWarning("Finish the current speech-to-text capture before starting live mode.");
 			return;

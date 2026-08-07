@@ -2,6 +2,7 @@ import { THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
 import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 import { DEFAULT_RELAY_URL } from "../collab/protocol";
+import { VOICE_PROVIDER_CHOICES, type VoiceProviderId } from "../live/providers/base";
 import {
 	CODEX_LIVE_VOICE_OPTIONS,
 	CODEX_LIVE_VOICE_VALUES,
@@ -4999,32 +5000,16 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
-	"live.provider": {
-		type: "enum",
-		values: ["auto", "openai-codex", "xai-grok"] as const,
-		default: "auto",
+	"providers.voiceOrder": {
+		type: "array",
+		default: [] as VoiceProviderId[],
 		ui: {
 			tab: "providers",
 			group: "Services",
-			label: "Live Voice Provider",
-			description: "Realtime backend for /live mode: Auto, OpenAI Codex, or xAI Grok Voice",
-			options: [
-				{
-					value: "auto",
-					label: "Auto",
-					description: "Prefer Codex when configured; otherwise use an available xAI API key",
-				},
-				{
-					value: "openai-codex",
-					label: "OpenAI Codex",
-					description: "Codex WebRTC realtime API",
-				},
-				{
-					value: "xai-grok",
-					label: "xAI Grok Voice",
-					description: "xAI Grok Realtime WebSocket API (grok-voice-think-fast-2.0)",
-				},
-			],
+			label: "Voice Provider Order",
+			description: "Prioritized providers for /live mode; unlisted providers follow the built-in order",
+			options: VOICE_PROVIDER_CHOICES,
+			ordered: true,
 		},
 	},
 	"live.codexVoice": {

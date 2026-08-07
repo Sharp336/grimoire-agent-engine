@@ -20,6 +20,27 @@ describe("GrokLiveTransport", () => {
 		});
 	});
 
+	test("owns the transcript identity for its selected model", () => {
+		const transport = new GrokLiveTransport({
+			authStorage: {} as LiveTransportOptions["authStorage"],
+			sessionId: "test-session-123",
+			instructions: "Test instructions",
+			voice: "eve",
+			model: "grok-voice-custom",
+			callbacks: {
+				onEvent: () => {},
+				onOutputLevel: () => {},
+			},
+		});
+
+		expect(transport.identity).toEqual({
+			voiceProvider: "grok",
+			api: "openai-completions",
+			provider: "xai",
+			model: "grok-voice-custom",
+		});
+	});
+
 	test("translates Grok function calls into delegation.created events", () => {
 		const events: LiveServerEvent[] = [];
 		const callbacks: LiveTransportCallbacks = {

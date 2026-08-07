@@ -1,8 +1,7 @@
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import { LiveSessionController, type LiveSessionControllerOptions, type LiveTranscript } from "../../live/controller";
-import { LIVE_MODEL } from "../../live/protocol";
-import type { LiveProvider } from "../../live/transport-types";
+import type { VoiceProviderId } from "../../live/providers/base";
 import { LiveVisualizer } from "../../live/visualizer";
 import { vocalizer } from "../../tts/vocalizer";
 import type { AssistantMessageComponent } from "../components/assistant-message";
@@ -54,7 +53,7 @@ export class LiveCommandController {
 	}
 
 	/** Start live mode with an optional one-session provider override, or stop the active session. */
-	async handleCommand(provider?: LiveProvider): Promise<void> {
+	async handleCommand(provider?: VoiceProviderId): Promise<void> {
 		if (this.#session) {
 			await this.stop();
 			return;
@@ -92,7 +91,7 @@ export class LiveCommandController {
 		}
 	}
 
-	async #start(provider?: LiveProvider): Promise<void> {
+	async #start(provider?: VoiceProviderId): Promise<void> {
 		this.#assistantTranscriptTurn = 0;
 		this.#assistantTranscriptStartedAt = 0;
 		const visualizer = new LiveVisualizer({
@@ -108,9 +107,12 @@ export class LiveCommandController {
 		const options: LiveSessionControllerOptions = {
 			session: this.#ctx.session,
 			extractAssistantText: message => this.#ctx.extractAssistantText(message),
-			codexVoice: this.#ctx.settings.get("live.codexVoice"),
-			grokVoice: this.#ctx.settings.get("live.grokVoice"),
-			provider: provider ?? this.#ctx.settings.get("live.provider"),
+			providerOrder: this.#ctx.settings.get("providers.voiceOrder"),
+			provider,
+			providerConfigs: {
+				codex: { voice: this.#ctx.settings.get("live.codexVoice") },
+				grok: { voice: this.#ctx.settings.get("live.grokVoice") },
+			},
 			callbacks: {
 				onPhase: phase => {
 					if (this.#visualizer !== visualizer) return;
@@ -169,13 +171,12 @@ export class LiveCommandController {
 			this.#assistantTranscriptComponent = component;
 			this.#assistantTranscriptStartedAt = Date.now();
 		}
-		const isGrok = this.#session?.provider === "xai-grok";
 		const message: AssistantMessage = {
 			role: "assistant",
 			content: [{ type: "text", text: transcript.text }],
-			api: isGrok ? "openai-completions" : "openai-codex-responses",
-			provider: isGrok ? "xai" : "openai-codex",
-			model: this.#session?.model ?? LIVE_MODEL,
+			api: transcript.identity.api,
+			provider: transcript.identity.provider,
+			model: transcript.identity.model,
 			usage: { ...LIVE_MESSAGE_USAGE },
 			stopReason: "stop",
 			timestamp: this.#assistantTranscriptStartedAt,

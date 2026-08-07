@@ -2,7 +2,7 @@ import { getProxyForUrl } from "@oh-my-pi/pi-ai/utils/proxy";
 import { AudioPlayback } from "@oh-my-pi/pi-natives";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { LiveClientMessage } from "./protocol";
-import type { ILiveTransport, LiveTransportOptions } from "./transport-types";
+import type { ILiveTransport, LiveTransportIdentity, LiveTransportOptions } from "./transport-types";
 import { DEFAULT_GROK_LIVE_VOICE, GROK_LIVE_VOICE_LOOKUP } from "./voices";
 
 const DEFAULT_GROK_REALTIME_MODEL = "grok-voice-think-fast-2.0";
@@ -56,8 +56,7 @@ export function buildGrokSessionUpdate(instructions: string, requestedVoice: str
 
 /** Native WebSocket transport powering Grok Realtime voice sessions (`grok-voice-think-fast-2.0`). */
 export class GrokLiveTransport implements ILiveTransport {
-	readonly provider = "xai-grok";
-	readonly model: string;
+	readonly identity: LiveTransportIdentity;
 	readonly #options: LiveTransportOptions;
 	#socket: Bun.WebSocket | undefined;
 	#playback: AudioPlayback | undefined;
@@ -79,7 +78,13 @@ export class GrokLiveTransport implements ILiveTransport {
 		this.#abortListener = () => {
 			void this.close();
 		};
-		this.model = options.grokModel?.trim() || DEFAULT_GROK_REALTIME_MODEL;
+		const model = options.model?.trim() || DEFAULT_GROK_REALTIME_MODEL;
+		this.identity = {
+			voiceProvider: "grok",
+			api: "openai-completions",
+			provider: "xai",
+			model,
+		};
 		if (!options.signal?.aborted) {
 			options.signal?.addEventListener("abort", this.#abortListener, { once: true });
 		}
@@ -116,7 +121,7 @@ export class GrokLiveTransport implements ILiveTransport {
 			);
 		}
 
-		const url = `${REALTIME_BASE_URL}?model=${encodeURIComponent(this.model)}`;
+		const url = `${REALTIME_BASE_URL}?model=${encodeURIComponent(this.identity.model)}`;
 
 		if (typeof AudioPlayback !== "function") {
 			throw new Error(

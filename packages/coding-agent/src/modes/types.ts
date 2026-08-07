@@ -16,7 +16,7 @@ import type {
 } from "../extensibility/extensions";
 import type { CompactOptions } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
-import type { LiveProvider } from "../live/transport-types";
+import type { VoiceProviderId } from "../live/providers/base";
 import type { MCPManager } from "../mcp";
 import type { PlanApprovalDetails } from "../plan-mode/approved-plan";
 import type { AgentSession } from "../session/agent-session";
@@ -370,7 +370,7 @@ export interface InteractiveModeContext {
 	handleMemoryCommand(text: string): Promise<void>;
 	handleSTTToggle(): Promise<void>;
 	/** Start or stop realtime voice, optionally overriding its provider for this session. */
-	handleLiveCommand(provider?: LiveProvider): Promise<void>;
+	handleLiveCommand(provider?: VoiceProviderId): Promise<void>;
 	executeCompaction(
 		customInstructionsOrOptions?: string | CompactOptions,
 		isAuto?: boolean,

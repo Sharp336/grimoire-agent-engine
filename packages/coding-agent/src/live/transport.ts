@@ -41,7 +41,7 @@ class LiveSignalingError extends Error {
 
 export * from "./transport-types";
 
-import type { ILiveTransport, LiveTransportOptions } from "./transport-types";
+import type { ILiveTransport, LiveTransportIdentity, LiveTransportOptions } from "./transport-types";
 
 /** Extracts the server-assigned `rtc_*` call ID from a signaling Location header. */
 export function parseLiveCallId(location: string | null): string | undefined {
@@ -99,8 +99,12 @@ function abortReason(signal: AbortSignal | undefined): Error {
 
 /** Native WebRTC transport for a Codex Frameless Bidi live session. */
 export class CodexLiveTransport implements ILiveTransport {
-	readonly provider = LIVE_PROVIDER;
-	readonly model = LIVE_MODEL;
+	readonly identity = {
+		voiceProvider: "codex",
+		api: "openai-codex-responses",
+		provider: LIVE_PROVIDER,
+		model: LIVE_MODEL,
+	} satisfies LiveTransportIdentity;
 	readonly #options: LiveTransportOptions;
 	#peer: LiveWebRtcPeer | undefined;
 	readonly #realtimeSessionId = crypto.randomUUID();

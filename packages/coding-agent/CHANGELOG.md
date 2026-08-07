@@ -4,7 +4,7 @@
 
 ## [17.2.12] - 2026-08-08
 ### Added
-- Added xAI Grok Voice support for `/live` mode (`grok-voice-think-fast-2.0`) using xAI Realtime WebSockets, with automatic or per-invocation provider selection (`/live grok|codex`) and separate Codex/Grok voice settings.
+- Added xAI Grok Voice support for `/live` mode (`grok-voice-think-fast-2.0`) using xAI Realtime WebSockets, with ranked voice providers configured by `providers.voiceOrder`, per-invocation `/live grok|codex` overrides, and separate Codex/Grok voice settings.
 
 - Added support for the [Agent Plugins 1.0.0 standard](https://agent-plugins.org): plugin packages with a root `plugin.json` targeting the canonical schema are discovered from marketplace installs, `--plugin-dir`, and configured extension roots, with `skills/` and `mcp.json` loaded per the specification (closed-schema validation per skills-ref, `${PLUGIN_ROOT}`/`${PLUGIN_DATA}` expansion, reserved subprocess environment, instance-keyed persistent data directories, and per-component failure isolation). Package-boundary containment is enforced before every read — including `skill://` resource access from the read tool and bash, where plugin skill files must realpath-resolve inside the plugin root.
 - Remote MCP transports now enforce header precedence and origin policy: client-generated HTTP/MCP/authorization headers win over configured headers case-insensitively, and Agent Plugins servers never forward configured headers across a redirect to a different origin (method-changing redirects of JSON-RPC POSTs are refused). Agent Plugins stdio `env` values and remote `headers` are likewise exempt from config-value resolution (no ambient env-name lookup, no `!command` execution, empty values preserved).
