@@ -2834,6 +2834,64 @@ export const ALIBABA_TOKEN_PLAN_STATIC_MODELS: readonly ModelSpec<"openai-comple
 	},
 ];
 
+/**
+ * Metadata for Alibaba Token Plan models that are dynamically discovered but not
+ * in the static catalog. Context window and max tokens are sourced from
+ * official model documentation and provider catalogs. Unknown future models
+ * remain available with null limits instead of assigning unsafe guessed limits.
+ */
+export interface AlibabaTokenPlanModelLimits {
+	contextWindow: number;
+	maxTokens: number;
+}
+
+export const ALIBABA_TOKEN_PLAN_DISCOVERED_MODEL_LIMITS: Readonly<Record<string, AlibabaTokenPlanModelLimits>> = {
+	"qwen3.6-plus": {
+		contextWindow: 1_000_000,
+		maxTokens: 65_536,
+	},
+	"qwen3.8-max": {
+		contextWindow: 1_000_000,
+		maxTokens: 131_072,
+	},
+	"deepseek-v4-flash": {
+		contextWindow: 1_000_000,
+		maxTokens: 384_000,
+	},
+	"deepseek-v4-flash-0731": {
+		contextWindow: 1_000_000,
+		maxTokens: 384_000,
+	},
+	"deepseek-v3.2": {
+		contextWindow: 131_072,
+		maxTokens: 65_536,
+	},
+	"glm-5.1": {
+		contextWindow: 202_752,
+		maxTokens: 128_000,
+	},
+	"glm-5": {
+		contextWindow: 202_752,
+		maxTokens: 16_384,
+	},
+	"kimi-k2.7-code": {
+		contextWindow: 262_144,
+		maxTokens: 262_144,
+	},
+	"kimi-k2.6": {
+		contextWindow: 262_144,
+		maxTokens: 262_144,
+	},
+	"kimi-k2.5": {
+		contextWindow: 262_144,
+		maxTokens: 98_304,
+	},
+	"minimax-m2.5": {
+		contextWindow: 196_608,
+		maxTokens: 32_768,
+	},
+};
+
 const ALIBABA_TOKEN_PLAN_NON_CHAT_MODEL_PREFIXES = [
 	"fun-asr",
 	"happyhorse-",
@@ -2888,10 +2946,19 @@ export function alibabaTokenPlanModelManagerOptions(
 								baseUrl: defaults.baseUrl,
 							};
 						}
-						// DeepSeek V4 family models discovered dynamically need reasoning config
-						if (defaults.id.startsWith("deepseek-v4")) {
+						const normalizedId = defaults.id.trim().toLowerCase();
+						const limits = ALIBABA_TOKEN_PLAN_DISCOVERED_MODEL_LIMITS[normalizedId];
+						const enriched = limits
+							? {
+									...defaults,
+									contextWindow: limits.contextWindow,
+									maxTokens: limits.maxTokens,
+								}
+							: defaults;
+
+						if (normalizedId.startsWith("deepseek-v4")) {
 							return {
-								...defaults,
+								...enriched,
 								reasoning: true,
 								thinking: {
 									mode: "effort" as const,
@@ -2899,7 +2966,7 @@ export function alibabaTokenPlanModelManagerOptions(
 								},
 							};
 						}
-						return defaults;
+						return enriched;
 					},
 					fetch: config?.fetch,
 				}),
