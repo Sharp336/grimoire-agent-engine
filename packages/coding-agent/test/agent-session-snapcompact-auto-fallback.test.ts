@@ -172,9 +172,47 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 		);
 		expect(unsupportedGlyphNotice).toBeDefined();
 		expect(unsupportedGlyphNotice).toContain("using context-full auto-compaction instead.");
+		expect(harness.notices).not.toContain(
+			"aimlapi compacts server-side; using provider-native compaction instead of snapcompact.",
+		);
 		expect(harness.sessionManager.getBranch().find(entry => entry.type === "compaction")).toMatchObject({
 			type: "compaction",
 			summary: "compacted",
 		});
+	});
+});
+
+describe("AgentSession auto-compaction provider-native override", () => {
+	let session: AgentSession | undefined;
+	let authStorage: AuthStorage | undefined;
+	let tempDir: TempDir | undefined;
+
+	afterEach(async () => {
+		try {
+			await session?.dispose();
+		} finally {
+			authStorage?.close();
+			await tempDir?.remove();
+			vi.restoreAllMocks();
+			session = undefined;
+			authStorage = undefined;
+			tempDir = undefined;
+		}
+	});
+
+	it("routes a codex session to provider-native compaction instead of snapcompact", async () => {
+		tempDir = TempDir.createSync("@pi-codex-native-compaction-");
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		const harness = await createHarness(tempDir, authStorage, {
+			activeModel: { provider: "openai-codex", id: "gpt-5.5" },
+		});
+		session = harness.session;
+		harness.triggerThreshold();
+
+		const result = await harness.awaitCompactionEnd();
+		expect(result.action).toBe("context-full");
+		expect(harness.notices).toContain(
+			"openai-codex compacts server-side; using provider-native compaction instead of snapcompact.",
+		);
 	});
 });

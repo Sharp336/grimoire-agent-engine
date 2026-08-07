@@ -8,6 +8,10 @@
 - Remote MCP transports now enforce header precedence and origin policy: client-generated HTTP/MCP/authorization headers win over configured headers case-insensitively, and Agent Plugins servers never forward configured headers across a redirect to a different origin (method-changing redirects of JSON-RPC POSTs are refused). Agent Plugins stdio `env` values and remote `headers` are likewise exempt from config-value resolution (no ambient env-name lookup, no `!command` execution, empty values preserved).
 - Added `omp share <session>`: share a saved session by id prefix or `.jsonl` path without launching the agent — same encrypted upload, store selection, and `share.redactSecrets` handling as the `/share` slash command.
 
+### Changed
+
+- Auto-compaction and a bare `/compact` now use provider-native compaction instead of a local snapcompact archive when the active model supports it. The backend compacts server-side and keeps the encrypted history it replays into later turns, which a local image archive cannot preserve. An explicit `/compact snapcompact` still produces a local archive, and `compaction.remoteEnabled: false` opts out.
+
 ## [17.2.10] - 2026-08-06
 
 ### Breaking Changes

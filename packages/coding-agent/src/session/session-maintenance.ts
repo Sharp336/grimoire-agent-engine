@@ -165,6 +165,15 @@ const PRUNE_IDLE_FLUSH_MS = 90 * 60_000;
  */
 const COMPACTION_RECOVERY_BAND = 0.8;
 
+/**
+ * Provider-native compaction supersedes a local snapcompact archive: the
+ * backend compacts server-side and keeps the encrypted history it replays
+ * into later turns, which a local image archive cannot preserve.
+ */
+function nativeOverSnapcompactNotice(provider: string): string {
+	return `${provider} compacts server-side; using provider-native compaction instead of snapcompact.`;
+}
+
 function mergeLlmCompactionPreserveData(
 	hookPreserveData: Record<string, unknown> | undefined,
 	resultPreserveData: Record<string, unknown> | undefined,
@@ -662,14 +671,6 @@ export class SessionMaintenance {
 
 			const compactionPrep = await this.#prepareCompactionFromHooks(preparation, hookCompaction);
 
-			// Strategy honored on manual /compact too. Custom instructions (public
-			// user focus OR internal plan-mode guidance) imply a directed LLM
-			// summary; a text-only model cannot read snapcompact frames.
-			const wantsSnapcompact =
-				compactionPrep.kind !== "fromHook" &&
-				effectiveSettings.strategy === "snapcompact" &&
-				!customInstructions &&
-				!options?.internalGuidance;
 			// `/compact snapcompact` is an explicit no-LLM archive request: honor
 			// its contract by failing locally rather than silently shipping the
 			// transcript to a provider. The default-configured snapcompact
@@ -677,6 +678,26 @@ export class SessionMaintenance {
 			// auto-compaction path) so a routine /compact still completes on a
 			// text-only model (issue #5064).
 			const explicitSnapcompact = compactMode?.name === "snapcompact";
+			// Strategy honored on manual /compact too. Custom instructions (public
+			// user focus OR internal plan-mode guidance) imply a directed LLM
+			// summary; a text-only model cannot read snapcompact frames.
+			let wantsSnapcompact =
+				compactionPrep.kind !== "fromHook" &&
+				effectiveSettings.strategy === "snapcompact" &&
+				!customInstructions &&
+				!options?.internalGuidance;
+			// A bare `/compact` follows the same provider-native preference as auto
+			// compaction. An explicit `/compact snapcompact` is a deliberate local-only
+			// archive request and keeps its contract.
+			if (
+				wantsSnapcompact &&
+				!explicitSnapcompact &&
+				this.#model &&
+				shouldUseProviderNativeCompaction(this.#model, effectiveSettings)
+			) {
+				this.#host.emitNotice("info", nativeOverSnapcompactNotice(this.#model.provider), "compaction");
+				wantsSnapcompact = false;
+			}
 			let snapcompactReady = wantsSnapcompact;
 			const snapcompactShapeSetting = this.#host.settings.get("snapcompact.shape");
 			let snapcompactShape: snapcompact.Shape | undefined;
@@ -2209,6 +2230,14 @@ export class SessionMaintenance {
 				: compactionSettings.strategy === "handoff" && reason !== "overflow" && !suppressHandoff
 					? "handoff"
 					: "context-full";
+		if (
+			action === "snapcompact" &&
+			this.#model &&
+			shouldUseProviderNativeCompaction(this.#model, compactionSettings)
+		) {
+			this.#host.emitNotice("info", nativeOverSnapcompactNotice(this.#model.provider), "compaction");
+			action = "context-full";
+		}
 		if (action === "snapcompact" && this.#model && !this.#model.input.includes("image")) {
 			this.#host.emitNotice(
 				"warning",
