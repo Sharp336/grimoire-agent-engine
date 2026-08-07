@@ -37,6 +37,14 @@ type WarningRecord = {
 	fired: boolean;
 };
 
+type WarningEntryData = {
+	filePath: string;
+	message: string;
+	sourceToolName: string;
+	ts: number;
+	fired: boolean;
+};
+
 class SelfHealStore {
 	#records = new Map<string, WarningRecord>();
 
@@ -66,6 +74,21 @@ class SelfHealStore {
 		};
 		this.#records.set(id, record);
 		return record;
+	}
+
+	rehydrate(entries: WarningEntryData[]): void {
+		for (const entry of entries) {
+			const filePath = path.resolve(entry.filePath);
+			const id = `${filePath}:${entry.ts ?? Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+			this.#records.set(id, {
+				id,
+				filePath,
+				message: entry.message,
+				sourceToolName: entry.sourceToolName,
+				ts: entry.ts ?? Date.now(),
+				fired: entry.fired,
+			});
+		}
 	}
 
 	unfired(): WarningRecord[] {
@@ -196,6 +219,17 @@ export const createCommentCheckerExtension: ExtensionFactory = api => {
 			}
 			return;
 		}
+		// Rehydrate warnings from persisted session entries
+		const persistedWarnings: WarningEntryData[] = ctx.sessionManager
+			.getEntries()
+			.filter(
+				(entry): entry is { type: "custom"; customType: string; data: WarningEntryData } =>
+					entry.type === "custom" && entry.customType === OMP_WARNING_ENTRY_TYPE,
+			)
+			.map(entry => entry.data);
+		if (persistedWarnings.length > 0) {
+			store.rehydrate(persistedWarnings);
+		}
 		if (!getCachedBinary()) {
 			setState(ctx, { status: "missing", checkedFiles: [], warnings: [] });
 			logger.warn("omp-comment-checker enabled in settings, but binary is not accessible on host system.");
@@ -219,6 +253,13 @@ export const createCommentCheckerExtension: ExtensionFactory = api => {
 			run: input => runCommentChecker(input, { customPrompt: Settings.instance.get("commentChecker.prompt") }),
 			onWarning: warning => {
 				store.record(warning);
+				api.appendEntry(OMP_WARNING_ENTRY_TYPE, {
+					filePath: warning.filePath,
+					message: warning.message,
+					sourceToolName: warning.sourceToolName,
+					ts: Date.now(),
+					fired: false,
+				} satisfies WarningEntryData);
 			},
 			onClearWarnings: cleanFiles => {
 				store.clearFiles(cleanFiles);

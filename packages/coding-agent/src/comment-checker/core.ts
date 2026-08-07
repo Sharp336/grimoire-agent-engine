@@ -26,6 +26,7 @@ export type CommentCheckRequest = {
 export type OmpPerFileEditResult = {
 	filePath: string;
 	movePath?: string | undefined;
+	sourcePath?: string | undefined;
 	oldText: string;
 	newText: string;
 	success: boolean;
@@ -71,7 +72,6 @@ export function extractFromOmpEditDetails(
 	input?: Record<string, unknown>,
 ): Array<OmpPerFileEditResult & { op: "write" | "edit" | "delete" }> {
 	if (!isRecord(details)) return [];
-	if (details.isError === true || details.success === false || details.error !== undefined) return [];
 	const source = details.perFileResults ?? details.files;
 	const results: Array<OmpPerFileEditResult & { op: "write" | "edit" | "delete" }> = [];
 	if (Array.isArray(source)) {
@@ -93,6 +93,7 @@ export function extractFromOmpEditDetails(
 				continue;
 			}
 			const movePath = getString(item, ["move", "movePath", "move_path"]);
+			const sourcePath = getString(item, ["sourcePath", "source_path", "preMovePath", "pre_move_path"]);
 			let oldText = getString(item, ["oldText", "old_text", "oldString", "old_string", "before", "old"]) ?? "";
 			let newText = getString(item, ["newText", "new_text", "newString", "new_string", "after", "new"]) ?? "";
 
@@ -116,6 +117,20 @@ export function extractFromOmpEditDetails(
 					}
 				}
 				if (oldText.length === 0 || newText.length === 0) {
+					// Cannot reconstruct text from pruned snapshot — emit a
+					// file-path-only request so the checker can read the file
+					// from disk itself instead of skipping it entirely.
+					if (typeof filePath === "string" && filePath.length > 0) {
+						results.push({
+							filePath,
+							movePath: typeof movePath === "string" && movePath.length > 0 ? movePath : undefined,
+							sourcePath: typeof sourcePath === "string" && sourcePath.length > 0 ? sourcePath : undefined,
+							oldText: "",
+							newText: "",
+							op: "write",
+							success: true,
+						});
+					}
 					continue;
 				}
 			} else if (!hasSnapshotText) {
@@ -127,6 +142,7 @@ export function extractFromOmpEditDetails(
 				results.push({
 					filePath,
 					movePath: typeof movePath === "string" && movePath.length > 0 ? movePath : undefined,
+					sourcePath: typeof sourcePath === "string" && sourcePath.length > 0 ? sourcePath : undefined,
 					oldText,
 					newText: "",
 					op: "delete",
@@ -137,6 +153,7 @@ export function extractFromOmpEditDetails(
 			results.push({
 				filePath,
 				movePath: typeof movePath === "string" && movePath.length > 0 ? movePath : undefined,
+				sourcePath: typeof sourcePath === "string" && sourcePath.length > 0 ? sourcePath : undefined,
 				oldText,
 				newText,
 				op: oldText.length === 0 ? "write" : "edit",
@@ -162,6 +179,7 @@ export function extractFromOmpEditDetails(
 		}
 		if (typeof filePath !== "string" || filePath.length === 0) return [];
 		const movePath = getString(details, ["move", "movePath", "move_path"]);
+		const sourcePath = getString(details, ["sourcePath", "source_path", "preMovePath", "pre_move_path"]);
 		let oldText = getString(details, ["oldText", "old_text", "oldString", "old_string", "before", "old"]) ?? "";
 		let newText = getString(details, ["newText", "new_text", "newString", "new_string", "after", "new"]) ?? "";
 
@@ -185,7 +203,20 @@ export function extractFromOmpEditDetails(
 				}
 			}
 			if (oldText.length === 0 || newText.length === 0) {
-				return [];
+				// Cannot reconstruct text from pruned snapshot — emit a
+				// file-path-only request so the checker can read the file
+				// from disk itself instead of skipping it entirely.
+				return [
+					{
+						filePath,
+						movePath: typeof movePath === "string" && movePath.length > 0 ? movePath : undefined,
+						sourcePath: typeof sourcePath === "string" && sourcePath.length > 0 ? sourcePath : undefined,
+						oldText: "",
+						newText: "",
+						op: "write",
+						success: true,
+					},
+				];
 			}
 		} else if (!hasSnapshotText) {
 			return [];
@@ -195,6 +226,7 @@ export function extractFromOmpEditDetails(
 			results.push({
 				filePath,
 				movePath: typeof movePath === "string" && movePath.length > 0 ? movePath : undefined,
+				sourcePath: typeof sourcePath === "string" && sourcePath.length > 0 ? sourcePath : undefined,
 				oldText,
 				newText: "",
 				op: "delete",
@@ -204,6 +236,7 @@ export function extractFromOmpEditDetails(
 			results.push({
 				filePath,
 				movePath: typeof movePath === "string" && movePath.length > 0 ? movePath : undefined,
+				sourcePath: typeof sourcePath === "string" && sourcePath.length > 0 ? sourcePath : undefined,
 				oldText,
 				newText,
 				op: oldText.length === 0 ? "write" : "edit",
@@ -221,6 +254,17 @@ function ompEditResultsToCommentCheckRequests(
 	const requests: CommentCheckRequest[] = [];
 	for (const result of results) {
 		const targetPath = result.movePath ?? result.filePath;
+		// When a move is detected, emit a delete request for the source path
+		// to clear any orphaned warnings from the pre-move file.
+		if (result.sourcePath && result.sourcePath !== result.filePath && result.movePath) {
+			requests.push({
+				sourceToolName,
+				toolName: "Edit",
+				filePath: result.sourcePath,
+				toolInput: { file_path: result.sourcePath },
+				isDelete: true,
+			});
+		}
 		if (result.op === "delete") {
 			requests.push({
 				sourceToolName,
@@ -258,14 +302,15 @@ function ompEditResultsToCommentCheckRequests(
 }
 
 export function extractCommentCheckRequests(event: ToolResultLike): CommentCheckRequest[] {
-	const hasPerFileResults =
-		isRecord(event.details) && (Array.isArray(event.details.perFileResults) || Array.isArray(event.details.files));
-
-	if (!hasPerFileResults) {
+	// When details is not a record at all, bail early on errors.
+	if (!isRecord(event.details)) {
 		if (event.isError) return [];
 		if (isToolFailureOutput(getContentText(event.content))) return [];
 	}
 
+	// Try extracting from edit details first — even when isError is true,
+	// top-level single-file details may contain a successfully applied edit
+	// (e.g. partial success where the edit applied but a post-step failed).
 	const ompResults = extractFromOmpEditDetails(event.details, event.input);
 	const ompRequests = ompEditResultsToCommentCheckRequests(event.toolName, ompResults);
 	if (ompRequests.length > 0) return ompRequests;

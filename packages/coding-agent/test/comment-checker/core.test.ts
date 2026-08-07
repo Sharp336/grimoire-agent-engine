@@ -14,9 +14,16 @@ import {
 import { createCommentCheckerExtension, createCommentCheckerToolResultHandler } from "../../src/comment-checker/index";
 import { formatFooterStatus, formatPreview, getCommentCheckerWidgetLines } from "../../src/comment-checker/ui";
 import { Settings } from "../../src/config/settings";
-import type { ExtensionContext, ToolResultEvent } from "../../src/extensibility/extensions";
-import type { ExtensionUIContext } from "../../src/extensibility/extensions/types";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+	ExtensionHandler,
+	ToolResultEvent,
+} from "../../src/extensibility/extensions";
+import type { ExtensionUIContext, SessionStartEvent } from "../../src/extensibility/extensions/types";
 import type { ReadonlySessionManager } from "../../src/session/session-manager";
+
+type MockExtensionApi = Pick<ExtensionAPI, "on" | "registerCommand" | "sendMessage" | "appendEntry">;
 
 describe("extractCommentCheckRequests", () => {
 	it("maps a write tool result to a Write hook input", () => {
@@ -1047,7 +1054,8 @@ describe("createCommentCheckerExtension disabled state", () => {
 				sessionManager: {
 					getSessionId: () => "sess-1",
 					getHeader: () => null,
-				} as unknown as ReadonlySessionManager,
+					getEntries: () => [],
+				} as Pick<ReadonlySessionManager, "getSessionId" | "getHeader" | "getEntries">,
 				cwd: "/workspace",
 				ui: {
 					setWidget: (key: string, lines?: string[]) => {
@@ -1057,22 +1065,25 @@ describe("createCommentCheckerExtension disabled state", () => {
 						statusCalls.push({ key, text });
 					},
 					notify: () => {},
-				} as unknown as ExtensionUIContext,
+				} as Pick<ExtensionUIContext, "setWidget" | "setStatus" | "notify">,
 			} as ExtensionContext;
 
-			let sessionStartHandler: ((event: any, ctx: ExtensionContext) => Promise<void>) | undefined;
-			let toolResultHandler: ((event: any, ctx: ExtensionContext) => Promise<any>) | undefined;
+			let sessionStartHandler: ((event: SessionStartEvent, ctx: ExtensionContext) => Promise<void>) | undefined;
+			let toolResultHandler: ((event: ToolResultEvent, ctx: ExtensionContext) => Promise<unknown>) | undefined;
 
-			const mockApi = {
-				on: (event: string, handler: any) => {
-					if (event === "session_start") sessionStartHandler = handler;
-					if (event === "tool_result") toolResultHandler = handler;
-				},
+			const mockApi: MockExtensionApi = {
+				on: ((event: string, handler: ExtensionHandler<never, never>) => {
+					if (event === "session_start")
+						sessionStartHandler = handler as (event: SessionStartEvent, ctx: ExtensionContext) => Promise<void>;
+					if (event === "tool_result")
+						toolResultHandler = handler as (event: ToolResultEvent, ctx: ExtensionContext) => Promise<unknown>;
+				}) as ExtensionAPI["on"],
 				registerCommand: () => {},
 				sendMessage: () => {},
+				appendEntry: () => {},
 			};
 
-			createCommentCheckerExtension(mockApi as any);
+			createCommentCheckerExtension(mockApi);
 
 			// Start session with checker enabled, but binary missing to set state to "missing" (non-idle)
 			Settings.instance.set("commentChecker.enabled", true);
