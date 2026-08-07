@@ -16,6 +16,7 @@ import { deepinfraProvider } from "./deepinfra";
 import { deepseekProvider } from "./deepseek";
 import { devinProvider } from "./devin";
 import { exaProvider } from "./exa";
+import { factoryDroidProvider } from "./factory-droid";
 import { firepassProvider } from "./firepass";
 import { fireworksProvider } from "./fireworks";
 import { githubCopilotProvider } from "./github-copilot";
@@ -117,6 +118,7 @@ const ALL = [
 	xiaomiTokenPlanSgpProvider,
 	xiaomiTokenPlanAmsProvider,
 	xiaomiTokenPlanCnProvider,
+	factoryDroidProvider,
 	firepassProvider,
 	deepseekProvider,
 	metaProvider,
