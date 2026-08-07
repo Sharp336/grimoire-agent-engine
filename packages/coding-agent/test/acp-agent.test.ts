@@ -1098,6 +1098,48 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
+	it("loads a session stored under a legacy/hashed project directory (#7779)", async () => {
+		const harness = await createHarness();
+		const stored = new FakeAgentSession(harness.cwdA);
+		harness.sessions.push(stored);
+		stored.sessionManager.appendMessage({ role: "user", content: "legacy hello", timestamp: Date.now() });
+		stored.sessionManager.appendMessage(makeAssistantMessage("legacy reply"));
+		await stored.sessionManager.ensureOnDisk();
+		await stored.sessionManager.flush();
+
+		const sessionFile = stored.sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("session file not persisted");
+		const sessionId = stored.sessionId;
+		// Release the writer so the directory can be renamed out from under it.
+		await stored.dispose();
+
+		// Simulate the hashed-directory era (#7397, reverted in #7656): the
+		// session file lives under a project directory whose name the current
+		// cwd->dir scheme would never produce, so the cwd-scoped scan misses it.
+		const cwdDerivedDir = path.dirname(sessionFile);
+		const sessionsRoot = path.dirname(cwdDerivedDir);
+		const hashedDir = path.join(sessionsRoot, `home-cwd-a-${"a".repeat(64)}`);
+		await fs.promises.rename(cwdDerivedDir, hashedDir);
+
+		const loaded = await harness.agent.loadSession({
+			sessionId,
+			cwd: harness.cwdA,
+			mcpServers: [],
+		});
+		expectAcpStructure(zLoadSessionResponse, loaded);
+
+		const replayChunks = harness.updates.filter(
+			update =>
+				update.sessionId === sessionId &&
+				(update.update.sessionUpdate === "user_message_chunk" ||
+					update.update.sessionUpdate === "agent_message_chunk"),
+		);
+		expect(replayChunks.length).toBeGreaterThan(0);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
 	it("delivers the final visible answer when agent_end overtakes the assistant message_end (#4902)", async () => {
 		const harness = await createHarness();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });

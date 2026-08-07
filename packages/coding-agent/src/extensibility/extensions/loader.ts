@@ -311,12 +311,33 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 	};
 }
 
-async function loadExtension(
-	extensionPath: string,
-	cwd: string,
-	eventBus: EventBus,
+/**
+ * Runs an extension factory with provider registration rollback on failure.
+ * Records the number of pending provider registrations before the factory runs,
+ * and restores that checkpoint if the factory throws.
+ */
+async function runExtensionFactory(
+	factory: ExtensionFactory,
+	api: ExtensionAPI,
 	runtime: IExtensionRuntime,
-): Promise<{ extension: Extension | null; error: string | null }> {
+): Promise<void> {
+	const providerRegistrationCheckpoint = runtime.pendingProviderRegistrations.length;
+
+	try {
+		await factory(api);
+	} catch (error) {
+		runtime.pendingProviderRegistrations.length = providerRegistrationCheckpoint;
+		throw error;
+	}
+}
+
+interface ImportedExtensionModule {
+	factory: ExtensionFactory | null;
+	resolvedPath: string;
+	error: string | null;
+}
+
+async function importExtensionModule(extensionPath: string, cwd: string): Promise<ImportedExtensionModule> {
 	const resolvedPath = resolvePath(extensionPath, cwd);
 	try {
 		const module = (await withHostGuard(() => loadLegacyPiModule(resolvedPath))) as LoadedExtensionModule;
@@ -324,16 +345,34 @@ async function loadExtension(
 
 		if (typeof factory !== "function") {
 			return {
-				extension: null,
+				factory: null,
+				resolvedPath,
 				error: `Extension does not export a valid factory function: ${extensionPath}`,
 			};
 		}
 
-		const extension = createExtension(extensionPath, resolvedPath);
+		return { factory, resolvedPath, error: null };
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		return { factory: null, resolvedPath, error: `Failed to load extension: ${message}` };
+	}
+}
+
+async function bindExtension(
+	extensionPath: string,
+	imported: ImportedExtensionModule,
+	cwd: string,
+	eventBus: EventBus,
+	runtime: IExtensionRuntime,
+): Promise<{ extension: Extension | null; error: string | null }> {
+	const factory = imported.factory;
+	if (imported.error !== null || factory === null) {
+		return { extension: null, error: imported.error };
+	}
+	try {
+		const extension = createExtension(extensionPath, imported.resolvedPath);
 		const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus);
-		await withHostGuard(async () => {
-			await factory(api);
-		});
+		await withHostGuard(() => runExtensionFactory(factory, api, runtime));
 
 		return { extension, error: null };
 	} catch (err) {
@@ -354,12 +393,17 @@ export async function loadExtensionFromFactory(
 ): Promise<Extension> {
 	const extension = createExtension(name, name);
 	const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus);
-	await factory(api);
+	await runExtensionFactory(factory, api, runtime);
 	return extension;
 }
 
 /**
  * Load extensions from paths.
+ *
+ * Module import (the dominant cold-start cost — file I/O plus module
+ * evaluation) runs concurrently across extensions; factory binding then runs
+ * sequentially in the original path order, so registration semantics
+ * (last-wins collisions, shared runtime flag defaults) stay deterministic.
  */
 export async function loadExtensions(paths: string[], cwd: string, eventBus?: EventBus): Promise<LoadExtensionsResult> {
 	const extensions: Extension[] = [];
@@ -367,8 +411,11 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 	const resolvedEventBus = eventBus ?? new EventBus();
 	const runtime = new ExtensionRuntime();
 
-	for (const extPath of paths) {
-		const { extension, error } = await loadExtension(extPath, cwd, resolvedEventBus, runtime);
+	const imported = await Promise.all(paths.map(extPath => importExtensionModule(extPath, cwd)));
+
+	for (let i = 0; i < paths.length; i++) {
+		const extPath = paths[i]!;
+		const { extension, error } = await bindExtension(extPath, imported[i]!, cwd, resolvedEventBus, runtime);
 
 		if (error) {
 			errors.push({ path: extPath, error });

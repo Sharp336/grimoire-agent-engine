@@ -28,7 +28,7 @@ import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
 
 import type { Settings } from "../config/settings";
-import type { RecoveredRetryError } from "../extensibility/shared-events";
+import type { RetryErrorUpdate } from "../extensibility/shared-events";
 import emptyStopRetryTemplate from "../prompts/system/empty-stop-retry.md" with { type: "text" };
 import thinkingLoopRedirectTemplate from "../prompts/system/thinking-loop-redirect.md" with { type: "text" };
 import unexpectedStopRetryTemplate from "../prompts/system/unexpected-stop-retry.md" with { type: "text" };
@@ -161,7 +161,7 @@ export interface TurnRecoveryOptions {
 	initialRetryFallback?: InitialRetryFallbackState;
 }
 
-type PendingRecoveredRetryError = {
+type PendingRetryError = {
 	entryId: string;
 	persistenceKey: string;
 	recovery: AssistantRetryRecoveryKind;
@@ -184,7 +184,7 @@ export class TurnRecovery {
 	#retryResolve: (() => void) | undefined;
 	#activeRetryFallback: ActiveRetryFallbackState | undefined;
 	#usageReserveApprovedSelector: string | undefined;
-	#pendingRecoveredRetryErrors: PendingRecoveredRetryError[] = [];
+	#pendingRetryErrors: PendingRetryError[] = [];
 	#usageLimitOutcomes = new WeakMap<AssistantMessage, Promise<UsageLimitOutcome>>();
 	#emptyStopRetryCount = 0;
 	#unexpectedStopRetryCount = 0;
@@ -250,14 +250,17 @@ export class TurnRecovery {
 				role: this.#activeRetryFallback.role,
 			});
 		}
-		const recoveredErrors = await this.#markPendingRecoveredRetryErrors(message);
+		const retryErrors = await this.#markPendingRetryErrors({
+			status: "recovered",
+			supersedingMessage: message,
+		});
 		await this.#host.emitSessionEvent({
 			type: "auto_retry_end",
 			success: true,
 			attempt: this.#retryAttempt,
-			recoveredErrors,
+			retryErrors,
 		});
-		this.#clearPendingRecoveredRetryErrors();
+		this.#clearPendingRetryErrors();
 		this.#retryAttempt = 0;
 	}
 
@@ -272,7 +275,7 @@ export class TurnRecovery {
 			attempt,
 			finalError: message.errorMessage,
 		});
-		this.#clearPendingRecoveredRetryErrors();
+		this.#clearPendingRetryErrors();
 	}
 
 	/** Persists an otherwise skipped terminal empty error turn. */
@@ -381,8 +384,8 @@ export class TurnRecovery {
 		}
 	}
 
-	#clearPendingRecoveredRetryErrors(): void {
-		this.#pendingRecoveredRetryErrors = [];
+	#clearPendingRetryErrors(): void {
+		this.#pendingRetryErrors = [];
 	}
 
 	/**
@@ -432,7 +435,7 @@ export class TurnRecovery {
 		return parts.join("; ");
 	}
 
-	async #recordPendingRecoveredRetryError(
+	async #recordPendingRetryError(
 		message: AssistantMessage,
 		id: number,
 		options: { switchedCredential: boolean; switchedModel: boolean; delayMs: number },
@@ -451,11 +454,11 @@ export class TurnRecovery {
 			break;
 		}
 		if (!branchEntry) return;
-		if (this.#pendingRecoveredRetryErrors.some(error => error.entryId === branchEntry.id)) return;
+		if (this.#pendingRetryErrors.some(error => error.entryId === branchEntry.id)) return;
 		const rateLimited = AIError.is(id, AIError.Flag.UsageLimit);
 		const recovery = this.#retryRecoveryKind(id, options.switchedCredential, options.switchedModel, options.delayMs);
 		const note = this.#retryRecoveryNote(recovery, rateLimited);
-		this.#pendingRecoveredRetryErrors.push({
+		this.#pendingRetryErrors.push({
 			entryId: branchEntry.id,
 			persistenceKey,
 			recovery,
@@ -464,24 +467,17 @@ export class TurnRecovery {
 		});
 	}
 
-	async #markPendingRecoveredRetryErrors(supersedingMessage: AssistantMessage): Promise<RecoveredRetryError[]> {
-		if (this.#pendingRecoveredRetryErrors.length === 0) return [];
+	async #markPendingRetryErrors(
+		completion: { status: "recovered"; supersedingMessage: AssistantMessage } | { status: "superseded" },
+	): Promise<RetryErrorUpdate[]> {
+		if (this.#pendingRetryErrors.length === 0) return [];
 		const branch = this.#host.sessionManager.getBranch();
 		const branchById = new Map<string, SessionEntry>();
 		for (const entry of branch) {
 			branchById.set(entry.id, entry);
 		}
-		const recoveredAt = new Date().toISOString();
-		const supersededBy: AssistantRetryRecovery["supersededBy"] = {
-			timestamp: supersedingMessage.timestamp,
-			provider: supersedingMessage.provider,
-			model: supersedingMessage.model,
-		};
-		if (supersedingMessage.responseId) {
-			supersededBy.responseId = supersedingMessage.responseId;
-		}
-		const recoveredErrors: RecoveredRetryError[] = [];
-		for (const pending of this.#pendingRecoveredRetryErrors) {
+		const retryErrors: RetryErrorUpdate[] = [];
+		for (const pending of this.#pendingRetryErrors) {
 			let entry = branchById.get(pending.entryId);
 			if (entry?.type !== "message" || entry.message.role !== "assistant") {
 				entry = branch
@@ -495,27 +491,45 @@ export class TurnRecovery {
 					);
 			}
 			if (entry?.type !== "message" || entry.message.role !== "assistant") continue;
-			const retryRecovery: AssistantRetryRecovery = {
-				kind: "auto-retry",
-				status: "recovered",
-				attempt: pending.attempt,
-				recoveredAt,
-				recovery: pending.recovery,
-				note: pending.note,
-				supersededBy,
-			};
+			let retryRecovery: AssistantRetryRecovery;
+			if (completion.status === "recovered") {
+				retryRecovery = {
+					kind: "auto-retry",
+					status: "recovered",
+					attempt: pending.attempt,
+					recoveredAt: new Date().toISOString(),
+					recovery: pending.recovery,
+					note: pending.note,
+					supersededBy: {
+						timestamp: completion.supersedingMessage.timestamp,
+						...(completion.supersedingMessage.responseId === undefined
+							? {}
+							: { responseId: completion.supersedingMessage.responseId }),
+						provider: completion.supersedingMessage.provider,
+						model: completion.supersedingMessage.model,
+					},
+				};
+			} else {
+				retryRecovery = {
+					kind: "auto-retry",
+					status: "superseded",
+					attempt: pending.attempt,
+					recovery: pending.recovery,
+					note: pending.note,
+				};
+			}
 			entry.message.retryRecovery = retryRecovery;
-			recoveredErrors.push({
+			retryErrors.push({
 				entryId: entry.id,
 				persistenceKey: pending.persistenceKey,
 				note: retryRecovery.note,
 				retryRecovery,
 			});
 		}
-		if (recoveredErrors.length > 0) {
+		if (retryErrors.length > 0) {
 			await this.#host.sessionManager.rewriteEntries();
 		}
-		return recoveredErrors;
+		return retryErrors;
 	}
 
 	async #handleEmptyAssistantStop(assistantMessage: AssistantMessage): Promise<boolean> {
@@ -547,7 +561,7 @@ export class TurnRecovery {
 				attempt: this.#retryAttempt > 0 ? this.#retryAttempt : attempts,
 				finalError,
 			});
-			this.#clearPendingRecoveredRetryErrors();
+			this.#clearPendingRetryErrors();
 			this.#retryAttempt = 0;
 			this.resolveRetry();
 			// A zero-content turn carries no transcript value, while its provider usage
@@ -1581,27 +1595,24 @@ export class TurnRecovery {
 
 		const errorMessage = message.errorMessage || "Unknown error";
 		const id = this.#classifyRetryMessage(message);
+		const rateLimitReason = parseRateLimitReason(errorMessage);
 		const staleOpenAIResponsesReplayError = AIError.is(id, AIError.Flag.StaleResponsesItem);
 		const recordedUsageLimitOutcome = await this.#usageLimitOutcomes.get(message);
 		const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
 		let delayMs = staleOpenAIResponsesReplayError
 			? 0
 			: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
-		// Concurrency caps shed-and-backoff (5s) rather than burning a sibling
-		// credential, so the usage-limit rotation branch below is deliberately
-		// skipped for them. Apply the reason-based backoff to the transient
-		// same-model retry path too — otherwise the default exponential base
-		// (≈500ms) re-hits the cap immediately and burns the retry budget while
-		// the concurrency slot stays occupied. A categorical 402 billing cap whose
-		// body merely mentions concurrency is still a usage limit (handled below),
-		// so gate on the flag matching the rotation decision.
+		// Transient rate/concurrency caps stay on the same credential, but must
+		// honor their reason-specific windows. The default exponential base
+		// (≈500ms, capped at 8s) otherwise re-hits the cap and burns the retry
+		// budget before either window can clear.
 		if (
 			!staleOpenAIResponsesReplayError &&
 			!AIError.is(id, AIError.Flag.UsageLimit) &&
-			parseRateLimitReason(errorMessage) === "CONCURRENT_LIMIT"
+			(rateLimitReason === "CONCURRENT_LIMIT" || rateLimitReason === "RATE_LIMIT_EXCEEDED")
 		) {
-			const concurrentBackoffMs = calculateRateLimitBackoffMs("CONCURRENT_LIMIT");
-			if (concurrentBackoffMs > delayMs) delayMs = concurrentBackoffMs;
+			const reasonBackoffMs = calculateRateLimitBackoffMs(rateLimitReason);
+			if (reasonBackoffMs > delayMs) delayMs = reasonBackoffMs;
 		}
 		let switchedCredential = false;
 		let switchedModel = false;
@@ -1677,16 +1688,18 @@ export class TurnRecovery {
 
 		if (retryBudgetExhausted) {
 			if (!switchedModel) {
+				const attempt = this.#retryAttempt - 1;
+				message.errorMessage = `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${errorMessage}`;
 				await this.persistTerminalEmptyErrorTurn(message);
-				// Max retries exceeded and no fallback model to switch to: emit
-				// final failure and reset.
+				const retryErrors = await this.#markPendingRetryErrors({ status: "superseded" });
 				await this.#host.emitSessionEvent({
 					type: "auto_retry_end",
 					success: false,
-					attempt: this.#retryAttempt - 1,
-					finalError: message.errorMessage,
+					attempt,
+					finalError: errorMessage,
+					retryErrors,
 				});
-				this.#clearPendingRecoveredRetryErrors();
+				this.#clearPendingRetryErrors();
 				this.#retryAttempt = 0;
 				this.resolveRetry(); // Resolve so waitForRetry() completes
 				return false;
@@ -1711,7 +1724,7 @@ export class TurnRecovery {
 					attempt: this.#retryAttempt - 1,
 					finalError: errorMessage,
 				});
-				this.#clearPendingRecoveredRetryErrors();
+				this.#clearPendingRetryErrors();
 			}
 			this.#retryAttempt = 0;
 			this.resolveRetry();
@@ -1736,7 +1749,7 @@ export class TurnRecovery {
 					attempt: this.#retryAttempt - 1,
 					finalError: errorMessage,
 				});
-				this.#clearPendingRecoveredRetryErrors();
+				this.#clearPendingRetryErrors();
 			}
 			this.#retryAttempt = 0;
 			this.resolveRetry();
@@ -1761,12 +1774,12 @@ export class TurnRecovery {
 				attempt,
 				finalError: `Provider requested ${delayMs}ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${errorMessage}`,
 			});
-			this.#clearPendingRecoveredRetryErrors();
+			this.#clearPendingRetryErrors();
 			this.resolveRetry();
 			return false;
 		}
 
-		await this.#recordPendingRecoveredRetryError(message, id, { switchedCredential, switchedModel, delayMs });
+		await this.#recordPendingRetryError(message, id, { switchedCredential, switchedModel, delayMs });
 
 		await this.#host.emitSessionEvent({
 			type: "auto_retry_start",
@@ -1808,7 +1821,7 @@ export class TurnRecovery {
 				attempt,
 				finalError: "Retry cancelled",
 			});
-			this.#clearPendingRecoveredRetryErrors();
+			this.#clearPendingRetryErrors();
 			this.resolveRetry();
 			return false;
 		}
@@ -1881,7 +1894,7 @@ export class TurnRecovery {
 			attempt,
 			finalError: `Retry continuation failed locally: ${localError}. Original error: ${message.errorMessage ?? "Unknown error"}`,
 		});
-		this.#clearPendingRecoveredRetryErrors();
+		this.#clearPendingRetryErrors();
 		this.resolveRetry();
 	}
 
