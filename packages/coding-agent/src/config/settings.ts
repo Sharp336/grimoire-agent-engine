@@ -36,7 +36,6 @@ import { invalidate as invalidateCapabilityFsCache } from "../capability/fs";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
 import type { ModelRole } from "../config/model-roles";
 import { loadCapability } from "../discovery";
-import { isVoiceProviderId, VOICE_PROVIDER_ORDER } from "../live/providers/base";
 import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "../modes/theme/theme";
 import { AgentStorage } from "../session/agent-storage";
 import { AUTO_IMAGE_PROVIDER_ORDER, isImageProviderId } from "../tools/image-providers";
@@ -1377,47 +1376,19 @@ export class Settings {
 		delete raw["startup.changelogMode"];
 		// live.voice -> live.codexVoice. `/live` now keeps provider-specific
 		// voice preferences so selecting a Grok voice never overwrites Codex.
-		// Preserve an explicit new key and normalize flat dotted sources.
+		// Preserve an explicit new key and handle nested or quoted-dotted legacy sources.
 		const liveObj = isRecord(raw.live) ? (raw.live as Record<string, unknown>) : undefined;
 		const nestedLegacyVoice = typeof liveObj?.voice === "string" ? liveObj.voice : undefined;
 		const flatLegacyVoice = typeof raw["live.voice"] === "string" ? (raw["live.voice"] as string) : undefined;
-		const flatCodexVoice =
-			typeof raw["live.codexVoice"] === "string" ? (raw["live.codexVoice"] as string) : undefined;
-		if (nestedLegacyVoice !== undefined || flatLegacyVoice !== undefined || flatCodexVoice !== undefined) {
+		if (nestedLegacyVoice !== undefined || flatLegacyVoice !== undefined) {
 			if (!liveObj) raw.live = {};
 			const target = raw.live as Record<string, unknown>;
 			if (target.codexVoice === undefined) {
-				target.codexVoice = flatCodexVoice ?? nestedLegacyVoice ?? flatLegacyVoice;
+				target.codexVoice = nestedLegacyVoice ?? flatLegacyVoice;
 			}
 			delete target.voice;
 		}
 		delete raw["live.voice"];
-		delete raw["live.codexVoice"];
-
-		// live.provider -> providers.voiceOrder. Provider IDs were also shortened
-		// when voice selection moved to the shared ranked-provider contract.
-		const legacyVoiceProvider = liveObj?.provider ?? raw["live.provider"];
-		const voiceProvidersObj = isRecord(raw.providers) ? raw.providers : undefined;
-		const existingVoiceOrder = voiceProvidersObj?.voiceOrder ?? raw["providers.voiceOrder"];
-		if (
-			(!Array.isArray(existingVoiceOrder) || existingVoiceOrder.length === 0) &&
-			typeof legacyVoiceProvider === "string" &&
-			legacyVoiceProvider !== "auto"
-		) {
-			const id =
-				legacyVoiceProvider === "openai-codex"
-					? "codex"
-					: legacyVoiceProvider === "xai-grok"
-						? "grok"
-						: legacyVoiceProvider;
-			if (isVoiceProviderId(id)) {
-				const target = voiceProvidersObj ?? {};
-				target.voiceOrder = [id, ...VOICE_PROVIDER_ORDER.filter(providerId => providerId !== id)];
-				raw.providers = target;
-			}
-		}
-		if (liveObj) delete liveObj.provider;
-		delete raw["live.provider"];
 
 		// ask.timeout: ms -> seconds (if value > 1000, it's old ms format)
 		if (raw.ask && typeof (raw.ask as Record<string, unknown>).timeout === "number") {

@@ -12,6 +12,11 @@ const OUTPUT_SAMPLE_RATE = 24_000;
 const INPUT_SAMPLE_RATE = 16_000;
 
 type Lifecycle = "idle" | "connecting" | "connected" | "closing" | "closed";
+
+interface PendingFunctionCall {
+	callId: string;
+	request: string;
+}
 /** Build the xAI session configuration sent when the realtime socket opens. */
 export function buildGrokSessionUpdate(instructions: string, requestedVoice: string): Record<string, unknown> {
 	const rawVoice = requestedVoice.trim().toLowerCase();
@@ -71,6 +76,8 @@ export class GrokLiveTransport implements ILiveTransport {
 	#outputActiveUntil = 0;
 	#outputIdleTimer: NodeJS.Timeout | undefined;
 	readonly #delegationContext = new Map<string, string[]>();
+	readonly #queuedFunctionCalls: PendingFunctionCall[] = [];
+	readonly #pendingFunctionOutputIds = new Set<string>();
 	readonly #abortListener: () => void;
 
 	constructor(options: LiveTransportOptions) {
@@ -145,6 +152,7 @@ export class GrokLiveTransport implements ILiveTransport {
 
 		const socket: Bun.WebSocket = Reflect.construct(WebSocket, [url, socketOptions]);
 		socket.binaryType = "nodebuffer";
+		this.#socket = socket;
 
 		const { promise, resolve, reject } = Promise.withResolvers<void>();
 		let opened = false;
@@ -175,14 +183,13 @@ export class GrokLiveTransport implements ILiveTransport {
 		};
 
 		socket.onopen = () => {
-			if (settled) {
+			if (settled || this.#state !== "connecting" || this.#socket !== socket) {
 				socket.close(1000, "stale");
 				return;
 			}
 			opened = true;
 			settled = true;
 			cleanup();
-			this.#socket = socket;
 			this.#state = "connected";
 
 			// Initialize session parameters
@@ -334,21 +341,12 @@ export class GrokLiveTransport implements ILiveTransport {
 					const args = JSON.parse(String(payload.arguments ?? "{}"));
 					request = String(args.request ?? "").trim();
 				} catch {}
-
-				if (request) {
-					this.#options.callbacks.onEvent({
-						type: "delegation.created",
-						item: {
-							type: "delegation",
-							target: "client",
-							id: callId,
-							content: [{ type: "input_text", text: request }],
-						},
-					});
-					this.#delegationContext.set(callId, []);
-				}
+				this.#queuedFunctionCalls.push({ callId, request });
 				break;
 			}
+			case "response.done":
+				this.#dispatchFunctionCalls();
+				break;
 			case "error": {
 				const errObj =
 					typeof payload.error === "object" && payload.error ? (payload.error as Record<string, unknown>) : {};
@@ -357,6 +355,49 @@ export class GrokLiveTransport implements ILiveTransport {
 				break;
 			}
 		}
+	}
+
+	#dispatchFunctionCalls(): void {
+		if (this.#queuedFunctionCalls.length === 0) return;
+		if (this.#pendingFunctionOutputIds.size > 0) {
+			this.#reportFailure("Grok issued new function calls before the previous function-call batch completed.");
+			return;
+		}
+
+		const calls = this.#queuedFunctionCalls.splice(0);
+		if (calls.some(call => !call.request)) {
+			this.#reportFailure("Grok function call omitted the required delegation request.");
+			return;
+		}
+		for (const { callId } of calls) {
+			this.#pendingFunctionOutputIds.add(callId);
+			this.#delegationContext.set(callId, []);
+		}
+		for (const { callId, request } of calls) {
+			this.#options.callbacks.onEvent({
+				type: "delegation.created",
+				item: {
+					type: "delegation",
+					target: "client",
+					id: callId,
+					content: [{ type: "input_text", text: request }],
+				},
+			});
+		}
+	}
+
+	#completeFunctionCall(callId: string, output: string): void {
+		if (!this.#pendingFunctionOutputIds.delete(callId)) return;
+		this.#delegationContext.delete(callId);
+		this.#sendRaw({
+			type: "conversation.item.create",
+			item: {
+				type: "function_call_output",
+				call_id: callId,
+				output,
+			},
+		});
+		if (this.#pendingFunctionOutputIds.size === 0) this.#sendRaw({ type: "response.create" });
 	}
 
 	#handleAudioOutput(base64Pcm: string): void {
@@ -456,16 +497,7 @@ export class GrokLiveTransport implements ILiveTransport {
 				if (!context) return;
 				context.push(text);
 				if (message.channel !== "speakable") return;
-				this.#delegationContext.delete(message.delegation_item_id);
-				this.#sendRaw({
-					type: "conversation.item.create",
-					item: {
-						type: "function_call_output",
-						call_id: message.delegation_item_id,
-						output: context.join("\n"),
-					},
-				});
-				this.#sendRaw({ type: "response.create" });
+				this.#completeFunctionCall(message.delegation_item_id, context.join("\n"));
 				return;
 			}
 
@@ -481,6 +513,11 @@ export class GrokLiveTransport implements ILiveTransport {
 		});
 		this.#sendTail = operation.catch(() => {});
 		return operation;
+	}
+
+	/** xAI server VAD receives every unmuted frame, including while output is playing. */
+	shouldStreamAudio(_inputLevel: number, _outputLevel: number): boolean {
+		return true;
 	}
 
 	/** Stream unscaled 16 kHz mono PCM for provider-managed VAD and interruption handling. */
@@ -521,6 +558,9 @@ export class GrokLiveTransport implements ILiveTransport {
 		const playback = this.#playback;
 		this.#socket = undefined;
 		this.#playback = undefined;
+		this.#queuedFunctionCalls.length = 0;
+		this.#pendingFunctionOutputIds.clear();
+		this.#delegationContext.clear();
 
 		if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
 			try {

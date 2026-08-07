@@ -2,7 +2,7 @@ import { THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
 import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 import { DEFAULT_RELAY_URL } from "../collab/protocol";
-import { VOICE_PROVIDER_CHOICES, type VoiceProviderId } from "../live/providers/base";
+import { VOICE_PROVIDER_OPTIONS, type VoiceProviderId } from "../live/provider";
 import {
 	CODEX_LIVE_VOICE_OPTIONS,
 	CODEX_LIVE_VOICE_VALUES,
@@ -5008,7 +5008,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Services",
 			label: "Voice Provider Order",
 			description: "Prioritized providers for /live mode; unlisted providers follow the built-in order",
-			options: VOICE_PROVIDER_CHOICES,
+			options: VOICE_PROVIDER_OPTIONS,
 			ordered: true,
 		},
 	},

@@ -21,6 +21,11 @@ import type { LivePhase } from "./visualizer";
 
 const OUTPUT_ACTIVE_LEVEL = 0.015;
 
+interface PendingDelegation {
+	id: string;
+	request: string;
+}
+
 /** Incremental or final transcript for one realtime conversational turn. */
 export interface LiveTranscript {
 	role: "user" | "assistant";
@@ -113,6 +118,7 @@ export class LiveSessionController {
 	#inputLevel = 0;
 	#outputLevel = 0;
 	#activeDelegationId: string | undefined;
+	readonly #delegationQueue: PendingDelegation[] = [];
 	#userTranscript = "";
 	#assistantTranscript = "";
 	#userTranscriptFinal = false;
@@ -247,6 +253,8 @@ export class LiveSessionController {
 		this.#stopped = true;
 		this.#unsubscribeSession?.();
 		this.#unsubscribeSession = undefined;
+		this.#activeDelegationId = undefined;
+		this.#delegationQueue.length = 0;
 		let cleanupError: Error | undefined;
 
 		const recorder = this.#recorder;
@@ -323,13 +331,24 @@ export class LiveSessionController {
 		}
 		request = request.trim();
 		if (!request) return;
-		this.#activeDelegationId = event.item.id;
+		this.#delegationQueue.push({ id: event.item.id, request });
+		this.#startNextDelegation();
+	}
+
+	#startNextDelegation(): void {
+		if (this.#activeDelegationId || this.#stopped) return;
+		const delegation = this.#delegationQueue.shift();
+		if (!delegation) {
+			this.#refreshAudioPhase();
+			return;
+		}
+		this.#activeDelegationId = delegation.id;
 		this.#emitPhase("working");
 		void this.#session
 			.sendCustomMessage(
 				{
 					customType: LIVE_DELEGATION_MESSAGE_TYPE,
-					content: request,
+					content: delegation.request,
 					display: true,
 					attribution: "agent",
 				},
@@ -360,20 +379,20 @@ export class LiveSessionController {
 	#appendFinalResponse(messages: readonly AgentMessage[]): void {
 		const delegationId = this.#activeDelegationId;
 		if (!delegationId) return;
+		let text = "";
 		for (let index = messages.length - 1; index >= 0; index -= 1) {
 			const message = messages[index];
 			if (message?.role !== "assistant") continue;
-			const text = this.#extractAssistantText(message).trim();
-			if (!text) continue;
-			const finalContext = chunkLiveContext(prompt.render(agentFinalMessageTemplate, { message: text }));
-			for (const [chunkIndex, chunk] of finalContext.entries()) {
-				const channel = chunkIndex === finalContext.length - 1 ? "speakable" : "commentary";
-				this.#queueSend(buildDelegationContextAppend(delegationId, chunk, channel));
-			}
-			break;
+			text = this.#extractAssistantText(message).trim();
+			if (text) break;
+		}
+		const finalContext = chunkLiveContext(prompt.render(agentFinalMessageTemplate, { message: text }));
+		for (const [chunkIndex, chunk] of finalContext.entries()) {
+			const channel = chunkIndex === finalContext.length - 1 ? "speakable" : "commentary";
+			this.#queueSend(buildDelegationContextAppend(delegationId, chunk, channel));
 		}
 		this.#activeDelegationId = undefined;
-		this.#refreshAudioPhase();
+		this.#startNextDelegation();
 	}
 
 	#handleOutputLevel(level: number): void {
@@ -386,6 +405,7 @@ export class LiveSessionController {
 		if (this.#stopped || !this.#transport || this.#muted) return;
 		this.#inputLevel = microphoneLevel(samples);
 		this.#emitLevels();
+		if (!this.#transport.shouldStreamAudio(this.#inputLevel, this.#outputLevel)) return;
 		try {
 			this.#transport.pushAudio(samples);
 		} catch (cause) {

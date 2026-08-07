@@ -17,6 +17,9 @@ const SIDEBAND_CONNECT_TIMEOUT_MS = 15_000;
 const LIVE_PROVIDER = "openai-codex";
 const LIVE_ORIGINATOR = "Codex Desktop";
 const LIVE_CALL_ID_PATTERN = /^rtc_[\w-]+$/;
+const MIN_BARGE_IN_LEVEL = 0.04;
+const OUTPUT_ACTIVE_LEVEL = 0.015;
+const OUTPUT_ECHO_RATIO = 0.65;
 
 type Lifecycle = "idle" | "connecting" | "connected" | "closing" | "closed";
 
@@ -369,6 +372,13 @@ export class CodexLiveTransport implements ILiveTransport {
 		});
 		this.#sendTail = operation.catch(() => {});
 		return operation;
+	}
+
+	/** Preserve Codex's client-side speaker-echo gate while output audio is active. */
+	shouldStreamAudio(inputLevel: number, outputLevel: number): boolean {
+		if (outputLevel <= OUTPUT_ACTIVE_LEVEL) return true;
+		const echoThreshold = Math.max(MIN_BARGE_IN_LEVEL, outputLevel * OUTPUT_ECHO_RATIO);
+		return inputLevel >= echoThreshold;
 	}
 
 	/** Queue 16 kHz mono Float32 PCM for native Opus transmission. */

@@ -1,7 +1,7 @@
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import { LiveSessionController, type LiveSessionControllerOptions, type LiveTranscript } from "../../live/controller";
-import type { VoiceProviderId } from "../../live/providers/base";
+import type { VoiceProviderId } from "../../live/provider";
 import { LiveVisualizer } from "../../live/visualizer";
 import { vocalizer } from "../../tts/vocalizer";
 import type { AssistantMessageComponent } from "../components/assistant-message";

@@ -1,6 +1,6 @@
 import type { Api, AuthStorage } from "@oh-my-pi/pi-ai";
 import type { LiveClientMessage, LiveServerEvent } from "./protocol";
-import type { VoiceProviderId } from "./providers/base";
+import type { VoiceProviderId } from "./provider";
 
 /** Callbacks emitted by a live transport implementation. */
 export interface LiveTransportCallbacks {
@@ -40,6 +40,9 @@ export interface ILiveTransport {
 
 	/** Send a control or context message to the realtime session. */
 	send(message: LiveClientMessage): Promise<void>;
+
+	/** Decide whether the current microphone frame should reach this provider. */
+	shouldStreamAudio(inputLevel: number, outputLevel: number): boolean;
 
 	/** Push Float32 PCM audio samples (16 kHz mono) from microphone. */
 	pushAudio(samples: Float32Array): void;

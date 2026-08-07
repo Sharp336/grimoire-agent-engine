@@ -3,9 +3,11 @@ import { CodexLiveTransport } from "../transport";
 import { DEFAULT_CODEX_LIVE_VOICE } from "../voices";
 import { VoiceProvider, type VoiceProviderAvailability, type VoiceProviderCreateOptions } from "./base";
 
-export class CodexVoiceProvider extends VoiceProvider {
+/** Codex realtime provider using OAuth-authenticated WebRTC and sideband control. */
+export class CodexVoiceProvider extends VoiceProvider<"codex"> {
 	readonly id = "codex";
 	readonly label = "OpenAI Codex";
+	readonly description = "Codex WebRTC realtime API";
 
 	isAvailable({ authStorage }: VoiceProviderAvailability): boolean {
 		return (
