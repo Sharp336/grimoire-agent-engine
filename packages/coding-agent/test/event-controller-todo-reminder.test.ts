@@ -24,7 +24,7 @@ function createContext() {
 		// which runs at the top of `tool_execution_end` (and other streaming-event
 		// handlers). Leaving it false matches the implicit assumption in this
 		// fixture: the todo HUD lifecycle is independent of the working loader.
-		viewSession: { isStreaming: false },
+		viewSession: { isStreaming: false, hasBuiltInTool: () => true },
 		setTodos: vi.fn(),
 		present,
 	} as unknown as InteractiveModeContext;

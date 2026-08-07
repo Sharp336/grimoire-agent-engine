@@ -87,6 +87,7 @@ function createContext(options: { terminalProgress?: boolean } = {}) {
 				return streamState.isStreaming;
 			},
 			getToolByName: () => undefined,
+			hasBuiltInTool: () => true,
 		},
 	} as unknown as InteractiveModeContext;
 	ctx.ensureLoadingAnimation = vi.fn(() => {

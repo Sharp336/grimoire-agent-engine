@@ -97,6 +97,11 @@ describe("issue #6879 — tool output appears twice after a superseded turn", ()
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
+		// This harness never mounts the built-in tool factories (tools: []), but
+		// event/transcript paths gate the bash/read renderers on hasBuiltInTool
+		// (#7774). Stub provenance so `$ command` / read-group output matches
+		// production once tools are registered.
+		vi.spyOn(session, "hasBuiltInTool").mockReturnValue(true);
 		mode = new InteractiveMode(session, "test");
 		mode.ui.requestRender = vi.fn();
 		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => true });

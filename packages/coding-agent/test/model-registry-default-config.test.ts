@@ -130,6 +130,8 @@ interface ModelSnapshot {
 		supportsLongPromptCacheRetention: boolean;
 		promptCacheMinimumTokens: number;
 		promptCacheMaximumCheckpoints: number;
+		/** Catalog policy for Bedrock reasoning models; see #7892. */
+		streamIdleTimeoutMs?: number;
 	};
 }
 

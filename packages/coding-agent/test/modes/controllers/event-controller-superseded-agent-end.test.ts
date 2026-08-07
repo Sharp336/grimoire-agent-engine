@@ -36,12 +36,13 @@ function createContext() {
 		sessionManager: { getSessionName: () => "test-session" },
 		ensureLoadingAnimation: vi.fn(),
 		ui: { requestRender: vi.fn() },
-		viewSession: { isCompacting: false, getLastAssistantMessage: () => undefined },
+		viewSession: { isCompacting: false, getLastAssistantMessage: () => undefined, hasBuiltInTool: () => true },
 		session: {
 			get isStreaming() {
 				return streamState.isStreaming;
 			},
 			getToolByName: () => undefined,
+			hasBuiltInTool: () => true,
 		},
 	} as unknown as InteractiveModeContext;
 	ctx.ensureLoadingAnimation = vi.fn(() => {

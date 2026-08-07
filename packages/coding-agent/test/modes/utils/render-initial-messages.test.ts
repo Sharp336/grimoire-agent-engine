@@ -173,6 +173,7 @@ function makeRenderCtx(
 		viewSession: {
 			buildTranscriptSessionContext: () => transcript,
 			getToolByName: () => undefined,
+			hasBuiltInTool: () => true,
 			extensionRunner: undefined,
 			sessionManager: {
 				getEntries: vi.fn(() => []),

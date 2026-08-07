@@ -47,6 +47,7 @@ function createInitialRenderHarness(): { ctx: InteractiveModeContext; helpers: U
 		session: {
 			retryAttempt: 0,
 			getToolByName: () => undefined,
+			hasBuiltInTool: () => true,
 			buildTranscriptSessionContext: () => buildSessionContext([]),
 			sessionManager: {
 				buildSessionContext: () => buildSessionContext([]),
@@ -145,7 +146,7 @@ describe("InteractiveMode.showStatus", () => {
 			transcriptMessageComponents: new WeakMap(),
 			pendingTools: new Map(),
 			ui: { requestRender: vi.fn() },
-			viewSession: { isStreaming: false },
+			viewSession: { isStreaming: false, hasBuiltInTool: () => true },
 			optimisticUserMessageSignature: "hello\u00001",
 		} as unknown as InteractiveModeContext;
 		const helpers = new UiHelpers(ctx);

@@ -42,7 +42,7 @@ function createStreamingFixture() {
 		requestRender: vi.fn(),
 		requestComponentRender: vi.fn(),
 	} as unknown as TUI;
-	const viewSession = { isStreaming: true, getToolByName: () => undefined };
+	const viewSession = { isStreaming: true, getToolByName: () => undefined, hasBuiltInTool: () => true };
 	const ctx = {
 		isInitialized: true,
 		init: vi.fn(async () => {}),
