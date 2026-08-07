@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ## [17.2.11] - 2026-08-07
+### Added
+
+- Added Chutes provider catalog entry with dynamic model discovery, custom pricing mapper for Chutes-specific `/v1/models` fields, and default model `deepseek-ai/DeepSeek-V4-Flash-0731-TEE`.
 
 ### Fixed
 
