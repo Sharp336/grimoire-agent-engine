@@ -163,6 +163,408 @@ Important edge behavior from runtime:
 - `agent_end` remains a streaming session event. It is not the operation
   completion primitive, and `agent_end.isTerminal: false` never settles a wait.
 
+## RPC v3 semantic profile
+
+RPC v3 is the explicitly negotiated `omp.session` application profile. It is
+independent of transport framing:
+
+- JSONL framing v1 and chunked framing v2 define how bytes are transported.
+- `omp.session` major version 3 defines session authority, recovery, typed
+  interactions, artifacts, resources, collaboration, provenance, and shutdown.
+
+A client MUST NOT treat framing v2 as semantic v3. Existing clients can continue
+using the v1/v2 commands below without sending `initialize`.
+
+### Capability discovery and initialization
+
+The initial `ready.capabilities.sessionHost` manifest is machine-readable and
+contains:
+
+- `ompVersion`
+- `semanticProfiles`
+- `framingVersions`
+- `limits` for frames, reassembly, artifact reads, pending observations, and
+  idempotency keys
+- `recovery` guarantees
+- `mutations` guarantees
+- versioned capability descriptors with operations, events, platforms, and
+  explicit unsupported reasons
+
+Capability IDs are stable protocol identities. Clients MUST inspect
+`supported`; a command with a similar name is not proof that a capability is
+available.
+
+After optional framing-v2 negotiation, request semantic v3:
+
+```json
+{
+  "id": "initialize-1",
+  "type": "initialize",
+  "profile": {
+    "name": "omp.session",
+    "major": 3,
+    "minMinor": 0,
+    "maxMinor": 0
+  },
+  "framingVersion": 2,
+  "hostCapabilities": {
+    "interactions": ["confirm", "input", "approval", "ask"],
+    "semanticContent": ["markdown", "fields", "table", "tree", "diff", "file", "progress", "form", "artifact"]
+  },
+  "requestedCapabilities": [
+    "session.catalog",
+    "session.observe",
+    "session.execute",
+    "interaction",
+    "approval",
+    "semantic-rendering",
+    "artifact.read",
+    "resource.lifecycle",
+    "collaboration",
+    "runtime-provenance",
+    "session.shutdown"
+  ]
+}
+```
+
+A compatible response has `data.ok: true`, the selected semantic profile and
+framing version, the requested capability descriptors, and the normalized host
+capabilities. An incompatible request still receives a successful RPC response,
+but its data is typed:
+
+```json
+{
+  "ok": false,
+  "code": "unsupported_semantic_version",
+  "message": "Requested semantic profile is not supported",
+  "supportedProfiles": [
+    { "name": "omp.session", "major": 3, "minMinor": 0, "maxMinor": 0 }
+  ]
+}
+```
+
+V3-only clients MUST stop after `ok: false`; they MUST NOT continue with v2
+behavior while assuming v3 guarantees.
+
+### Capability IDs
+
+The current profile advertises these capability IDs:
+
+| Capability | Operations |
+|---|---|
+| `session.catalog` | List, inspect, resume, select, fork, reset, branch, and close sessions |
+| `session.observe` | Snapshot, subscribe, acknowledge, replay, and gap recovery |
+| `session.execute` | Execute and control turns, queues, goals, todos, children, modes, retries, checkpoints, and tools |
+| `interaction` | Structured host interactions and typed settlement |
+| `approval` | Structured approval requests and settlement provenance |
+| `semantic-rendering` | Host-neutral semantic content and correlated actions |
+| `artifact.read` | Describe, range-read, and verified-export artifacts |
+| `resource.lifecycle` | Inspect and control OMP-owned MCP/LSP/DAP resource lifecycles |
+| `collaboration` | Host, join, leave, administer, acknowledge, and transfer collaboration media |
+| `runtime-provenance` | Read secret-safe provider, model, tier, usage, and fallback state |
+| `session.shutdown` | Settle the authority and drain output before process exit |
+
+The manifest is authoritative. A capability can be present with
+`supported: false` and an `unsupportedReason`.
+
+### Ordered session observations
+
+Open a subscription after successful initialization:
+
+```json
+{ "id": "open-1", "type": "session_open", "snapshot": true }
+```
+
+The response contains a `subscriptionId` and, when requested, an authoritative
+snapshot:
+
+```json
+{
+  "subscriptionId": "subscription-1",
+  "snapshot": {
+    "sessionId": "019...",
+    "revision": 14,
+    "state": {},
+    "journalCursor": {
+      "sessionId": "019...",
+      "leafId": "entry-leaf",
+      "entryId": "entry-14"
+    },
+    "watermark": { "epoch": "process-epoch", "sequence": 27 }
+  }
+}
+```
+
+`snapshot.state` is the execution snapshot. It includes the current turn,
+queues and modes, goal and budget, todos, plan and loop, model/role/thinking and
+service tiers, compaction/retry state, recovery, checkpoint/rewind state, tool
+policy and inventory, pending interactions, extensions, and resources.
+
+The server installs the subscription before taking the snapshot. Observations
+after `snapshot.watermark` therefore form the live continuation; clients do not
+need a race-prone second subscribe step.
+
+Live events use `session_observation`:
+
+```json
+{
+  "type": "session_observation",
+  "subscriptionId": "subscription-1",
+  "observation": {
+    "type": "observation",
+    "sessionId": "019...",
+    "epoch": "process-epoch",
+    "sequence": 28,
+    "eventId": "event-28",
+    "causationId": "mutation-1",
+    "kind": "queue_updated",
+    "payload": {},
+    "durability": "durable",
+    "journalCursor": {
+      "sessionId": "019...",
+      "leafId": "entry-leaf",
+      "entryId": "entry-15"
+    },
+    "replay": false,
+    "terminalSettlement": "none"
+  }
+}
+```
+
+Invariants:
+
+- `(epoch, sequence)` is the delivery position for one running host.
+- `eventId` is stable across replay and is the duplicate-suppression key.
+- `causationId`, when present, is the initiating RPC request ID.
+- Only durable observations carry a `journalCursor`.
+- A journal cursor identifies SessionManager state. It is not a transport
+  sequence number.
+- `terminalSettlement` is `none`, `completed`, `cancelled`, or `failed`.
+
+Acknowledgement is cumulative:
+
+```json
+{
+  "id": "ack-1",
+  "type": "session_ack",
+  "subscriptionId": "subscription-1",
+  "sequence": 28
+}
+```
+
+Unacknowledged delivery is bounded by
+`limits.maxPendingObservations`. If a client falls behind, the server emits:
+
+```json
+{
+  "type": "session_observation",
+  "subscriptionId": "subscription-1",
+  "observation": {
+    "type": "gap",
+    "sessionId": "019...",
+    "epoch": "process-epoch",
+    "afterSequence": 28,
+    "firstAvailableSequence": 36,
+    "latestSequence": 48,
+    "recovery": "resnapshot"
+  }
+}
+```
+
+After a gap, discard derived state and call `session_open` with
+`snapshot: true`. To reconnect within one host epoch, pass `after` with the last
+acknowledged epoch and sequence. To recover durable state across process
+epochs, pass `afterCursor` with the last committed SessionManager cursor.
+`stale_cursor` and `replay_limit_exceeded` are explicit command errors; recovery
+is a fresh snapshot. Close a subscription with `session_unsubscribe`.
+
+### Authoritative commands
+
+`session_invoke` applies one existing RPC command through the session
+authority:
+
+```json
+{
+  "id": "mutation-1",
+  "type": "session_invoke",
+  "command": {
+    "kind": "queue_insert",
+    "input": {
+      "lane": "followUp",
+      "text": "Review the current changes."
+    },
+    "expectedRevision": 14,
+    "idempotencyKey": "9c059948-1381-4df1-9b1e-54a9d876084c"
+  }
+}
+```
+
+The nested `kind` uses the command names and field schemas advertised by
+`get_capabilities`; `input` contains that command's fields without `type` or
+`id`. Recursive host-management commands are rejected.
+
+Every invocation settles as:
+
+```ts
+{
+  outcome: "completed" | "cancelled" | "failed" | "unknown";
+  revision?: number;
+  result?: JsonValue;
+  error?: { code: string; message: string; retryable: boolean };
+}
+```
+
+`expectedRevision` prevents stale writes. Safe mutations can use an
+`idempotencyKey`; the key is scoped to the authority lifetime and stored in a
+bounded table. Reusing a key with a different command, or exceeding the
+advertised table limit, is rejected. Commands that cannot provide safe
+idempotency fail explicitly rather than pretending to deduplicate.
+
+### Interactions, approvals, and semantic content
+
+Initialization declares which host interactions and semantic elements the
+client can render. Interactive requests never coerce a missing UI into a
+boolean decision. Each request terminates in `interaction_settled` with one of:
+
+- `accepted`
+- `cancelled`
+- `timed_out`
+- `unsupported`
+- `failed`
+- `disconnected`
+
+Approval requests preserve the tool-call ID, tool name, operation class
+(`read`, `write`, or `exec`), approval mode, resolved and declared policy,
+policy source, escalation reason, provider-safety state, choices, deny-by-
+default behavior, and final outcome provenance.
+
+`semantic_content` carries validated host-neutral elements, not terminal escape
+sequences. Supported families include Markdown/plain text, fields, tables,
+trees, diffs, files and locations, progress, forms, actions, artifacts, and
+tool-call/result details. Unknown elements remain observable and use the
+documented text fallback. Actions are correlated by `renderId` and `actionId`:
+
+```json
+{
+  "id": "action-1",
+  "type": "semantic_action",
+  "renderId": "render-7",
+  "actionId": "apply",
+  "input": {}
+}
+```
+
+Cancel pending actions with `semantic_cancel`. Semantic documents and action
+inputs are validated and size-bounded at the adapter boundary.
+
+### Artifacts and large output
+
+Artifact descriptors contain:
+
+- stable `id`
+- `mediaType`
+- `byteLength`
+- lowercase SHA-256 `sha256`
+- structured `provenance`
+- related session, turn, and tool identities
+- `lifecycle`: `pending`, `available`, or `cancelled`
+- cancellation state and reason
+
+Use `artifact_describe` for metadata and `artifact_read` with `offset` and
+`length` for bounded base64 ranges. `length` cannot exceed
+`limits.maxArtifactReadBytes`; callers continue until `eof: true`. The server
+does not silently truncate a successful range.
+
+`artifact_export` writes through the OMP artifact store and requires
+`expectedSha256`. Success includes the destination path, byte length, digest,
+and `verified: true`. A hash mismatch fails without claiming a verified export.
+
+The range protocol keeps large output out of a single logical RPC response. The
+framing-v2 chunk layer remains available for other large JSON frames, but it is
+not a substitute for bounded artifact transfer.
+
+### Resources, collaboration, and runtime provenance
+
+`resource_list` returns OMP-owned MCP/LSP/DAP lifecycle state. Server states are
+`discovered`, `connecting`, `connected`, `disconnected`,
+`authentication_required`, `reconnecting`, `failed`, or `disabled`, with
+isolated diagnostics and advertised tools/resources/prompts.
+`resource_refresh` and `resource_reload` return operation IDs;
+`resource_cancel` cooperatively cancels an operation; `resource_dispose`
+releases one server. Lifecycle and operation changes are also emitted as
+`resource_lifecycle` and `resource_operation`.
+
+Collaboration commands are `collaboration_get`, `collaboration_host`,
+`collaboration_join`, `collaboration_leave`, `collaboration_revoke`,
+`collaboration_rotate`, `collaboration_acknowledge`, and
+`collaboration_read_media`. State includes role, full/view-only authority,
+generation, replication sequence, acknowledgement, stale/gap state, and
+session identity. Media uses the same bounded base64 range shape as artifacts.
+Collaboration transport is encrypted and backpressured, but it does not replace
+the local RPC session authority.
+
+`provenance_get` returns structured, secret-safe runtime state: usage limits,
+provider and model fallback, credential rotation, active role and service tier,
+failure reason, and next user action. It never returns credentials or infers
+provenance solely from the resulting model identity.
+
+### Graceful shutdown
+
+After negotiating `session.shutdown`, send:
+
+```json
+{ "id": "shutdown-1", "type": "session_shutdown" }
+```
+
+The server immediately stops accepting new commands, then settles commands
+already accepted, rejects pending interactions, emits final observations,
+hands durable state to SessionManager, finalizes artifacts, disposes owned
+resources and child processes, and drains the stdout queue. The final response
+is:
+
+```json
+{
+  "id": "shutdown-1",
+  "type": "response",
+  "command": "session_shutdown",
+  "success": true,
+  "data": { "state": "settled" }
+}
+```
+
+No protocol frame follows this successful settlement response. EOF or process
+exit without it is not proof of complete delivery.
+
+### Compatibility and migration
+
+- Existing RPC v1/v2 clients do not send `initialize` and retain their existing
+  command and event behavior.
+- Additive v3 events are safe for old clients that ignore unknown event types.
+- New clients SHOULD retain unknown envelopes and fields for diagnostics and
+  forward compatibility.
+- Clients that require v3 send `initialize`, require `data.ok: true`, and verify
+  every required capability has `supported: true`.
+- Migrate state mirrors to `session_open` snapshots plus ordered observations.
+  Do not parse or write private session JSONL files.
+- Migrate mutations that need concurrency or replay safety to
+  `session_invoke`; keep legacy commands only where v3 authority is not needed.
+- Replace inline large output with artifact descriptors and bounded reads.
+- Call `session_shutdown` before closing stdin or terminating the child.
+
+### Performance and memory
+
+- Each open subscription retains at most
+  `limits.maxPendingObservations` unacknowledged observations. Acknowledge
+  cumulatively and unsubscribe unused subscriptions.
+- Idempotency retention is bounded by `limits.maxIdempotencyKeys`.
+- Artifact and collaboration media reads allocate only the requested bounded
+  range plus base64 encoding overhead. Stream ranges instead of concatenating
+  an entire artifact in memory.
+- Framing v2 reassembly is bounded by `maxReassembledFrameBytes`.
+- Execution snapshots are complete authority projections. Cache one snapshot,
+  apply ordered observations, and resnapshot only after an explicit gap instead
+  of polling snapshots continuously.
+
 ## Command Schema (canonical)
 
 `RpcCommand` is defined in `packages/coding-agent/src/modes/rpc/rpc-types.ts`. Runtime field
