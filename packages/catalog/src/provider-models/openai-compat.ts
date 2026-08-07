@@ -1555,6 +1555,47 @@ export function deepseekModelManagerOptions(
 // Upstage
 // ---------------------------------------------------------------------------
 
+const UPSTAGE_BASE_URL = "https://api.upstage.ai/v1";
+
+/**
+ * Upstage serves non-chat SKUs (embeddings, document AI, groundedness
+ * checkers) from the same API base, and `/v1/models` carries no per-model type
+ * field — so non-chat rows are dropped by id to keep the picker usable.
+ */
+const UPSTAGE_NON_CHAT_MODEL_TOKENS = [
+	"embedding",
+	"document",
+	"groundedness",
+	"layout",
+	"ocr",
+	"docvision",
+] as const;
+
+export function isLikelyUpstageChatModelId(id: string): boolean {
+	const normalized = id.trim().toLowerCase();
+	if (!normalized) {
+		return false;
+	}
+	return !UPSTAGE_NON_CHAT_MODEL_TOKENS.some(token => normalized.includes(token));
+}
+
+/** Strip the Upstage dated-snapshot suffix (`solar-pro4-260806` → `solar-pro4`). */
+export function upstageSnapshotAliasId(id: string): string {
+	return id.replace(/-\d{6}$/, "");
+}
+
+/**
+ * Applied to discovered rows with no bundled reference (e.g. `solar-open2`,
+ * `syn-pro`) so they still avoid the wire fields the endpoint rejects; mirrors
+ * the bundled descriptor compat below.
+ */
+const UPSTAGE_DISCOVERY_COMPAT: OpenAICompat = {
+	supportsStore: false,
+	supportsDeveloperRole: false,
+	supportsReasoningEffort: true,
+	supportsMultipleSystemMessages: true,
+};
+
 export interface UpstageModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
@@ -1564,7 +1605,31 @@ export interface UpstageModelManagerConfig {
 export function upstageModelManagerOptions(
 	config?: UpstageModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
-	return createSimpleOpenAICompletionsOptions("upstage", "https://api.upstage.ai/v1", config);
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? UPSTAGE_BASE_URL;
+	const references = createBundledReferenceMap<"openai-completions">("upstage");
+	return {
+		providerId: "upstage",
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "upstage",
+					baseUrl,
+					apiKey,
+					filterModel: (_entry, model) => isLikelyUpstageChatModelId(model.id),
+					mapModel: (entry, defaults) => {
+						// Dated snapshots (`solar-pro4-260806`) hydrate from their alias's
+						// bundled row so they keep reasoning and provider compat metadata.
+						const reference =
+							references.get(defaults.id) ?? references.get(upstageSnapshotAliasId(defaults.id));
+						const model = mapWithBundledReference(entry, defaults, reference);
+						return model.compat ? model : { ...model, compat: { ...UPSTAGE_DISCOVERY_COMPAT } };
+					},
+					fetch: config?.fetch,
+				}),
+		}),
+	};
 }
 
 // ---------------------------------------------------------------------------
