@@ -62,6 +62,7 @@ import {
 import {
 	cursorModelManagerOptions,
 	devinModelManagerOptions,
+	factoryDroidModelManagerOptions,
 	gitLabDuoWorkflowModelManagerOptions,
 	zaiModelManagerOptions,
 } from "./special";
@@ -164,6 +165,16 @@ export const CATALOG_PROVIDERS = [
 		createModelManagerOptions: (config: ModelManagerConfig) => devinModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
 		catalogDiscovery: { label: "Devin", envVars: ["DEVIN_API_KEY"], oauthProvider: "devin" },
+	},
+	{
+		id: "factory-droid",
+		defaultModel: "kimi-k3",
+		// No envVars: FACTORY_API_KEY authenticates the control plane only, not
+		// the subscription LLM proxy. Inference rides the local Droid WorkOS
+		// session (see packages/ai factory-droid provider).
+		createModelManagerOptions: (config: ModelManagerConfig) => factoryDroidModelManagerOptions(config),
+		allowUnauthenticated: true,
+		dynamicModelsAuthoritative: true,
 	},
 	{
 		id: "firepass",

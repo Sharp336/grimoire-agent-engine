@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `factory-droid` provider with a static Droid Core model registry mirroring the Droid CLI's bundled catalog (Kimi K3, Kimi K2.6/K2.7 Code, DeepSeek V4 Pro/Flash, GLM-5.2/5.2 Fast, GLM-4.6, Nemotron 3 Ultra), per-model upstream routing headers, reasoning ladders, and zero-cost subscription accounting.
+
 ## [17.2.10] - 2026-08-06
 
 ### Changed

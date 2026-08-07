@@ -1,6 +1,7 @@
 import { once } from "@oh-my-pi/pi-utils";
 import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/codex";
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
+import { buildFactoryDroidModel, FACTORY_DROID_MODELS, fetchFactoryDroidModels } from "../discovery/factory-droid";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
 import type { ModelManagerOptions } from "../model-manager";
 import type { FetchImpl, ModelSpec } from "../types";
@@ -202,6 +203,29 @@ export function devinModelManagerOptions(config: DevinModelManagerConfig = {}): 
 }
 
 const devinDiscovery = once(() => import("../discovery/devin"));
+
+// ---------------------------------------------------------------------------
+// Factory Droid
+// ---------------------------------------------------------------------------
+
+export interface FactoryDroidModelManagerConfig {
+	apiKey?: string;
+	fetch?: FetchImpl;
+}
+
+export function factoryDroidModelManagerOptions(
+	config: FactoryDroidModelManagerConfig = {},
+): ModelManagerOptions<"factory-droid-agent"> {
+	return {
+		providerId: "factory-droid",
+		// Factory exposes no model-listing endpoint; the Droid CLI ships its
+		// registry in the binary, so the catalog ships the same static list.
+		// Dynamic fetch filters it by the account's Statsig feature flags.
+		staticModels: FACTORY_DROID_MODELS.map(buildFactoryDroidModel),
+		dynamicModelsAuthoritative: true,
+		fetchDynamicModels: () => fetchFactoryDroidModels(config),
+	};
+}
 // ---------------------------------------------------------------------------
 // Zai
 // ---------------------------------------------------------------------------
