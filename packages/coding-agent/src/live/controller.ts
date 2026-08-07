@@ -2,10 +2,11 @@ import * as os from "node:os";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AudioCapture } from "@oh-my-pi/pi-natives";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { $env, prompt } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
 import type { AgentSessionEvent } from "../session/agent-session-events";
 import { LIVE_DELEGATION_MESSAGE_TYPE } from "../session/messages";
+import { GrokLiveTransport } from "./grok-transport";
 import agentFinalMessageTemplate from "./prompts/agent-final-message.md" with { type: "text" };
 import liveInstructionsTemplate from "./prompts/live-instructions.md" with { type: "text" };
 import {
@@ -16,12 +17,43 @@ import {
 	type LiveServerEvent,
 } from "./protocol";
 import { CodexLiveTransport } from "./transport";
+import type { ILiveTransport, LiveProvider, LiveTransportOptions, ResolvedLiveProvider } from "./transport-types";
 import type { LivePhase } from "./visualizer";
-import { DEFAULT_LIVE_VOICE } from "./voices";
+import { DEFAULT_CODEX_LIVE_VOICE, DEFAULT_GROK_LIVE_VOICE } from "./voices";
 
+async function createLiveTransport(options: LiveTransportOptions): Promise<ILiveTransport> {
+	const requested = options.provider ?? "auto";
+	if (requested === "xai-grok") {
+		return new GrokLiveTransport({
+			...options,
+			voice: options.grokVoice || options.voice || DEFAULT_GROK_LIVE_VOICE,
+		});
+	}
+	if (requested === "openai-codex") {
+		return new CodexLiveTransport({
+			...options,
+			voice: options.codexVoice || options.voice || DEFAULT_CODEX_LIVE_VOICE,
+		});
+	}
+
+	const hasXaiKey = $env.XAI_API_KEY ?? (await options.authStorage.getApiKey("xai", options.sessionId));
+
+	const hasCodexKey =
+		options.authStorage.hasNonEnvCredential("openai-codex") ||
+		Boolean($env.OPENAI_OAUTH_TOKEN || $env.CODEX_OAUTH_TOKEN);
+
+	if (hasXaiKey && !hasCodexKey) {
+		return new GrokLiveTransport({
+			...options,
+			voice: options.grokVoice || options.voice || DEFAULT_GROK_LIVE_VOICE,
+		});
+	}
+	return new CodexLiveTransport({
+		...options,
+		voice: options.codexVoice || options.voice || DEFAULT_CODEX_LIVE_VOICE,
+	});
+}
 const OUTPUT_ACTIVE_LEVEL = 0.015;
-const MIN_BARGE_IN_LEVEL = 0.04;
-const OUTPUT_ECHO_RATIO = 0.65;
 
 /** Incremental or final transcript for one realtime conversational turn. */
 export interface LiveTranscript {
@@ -52,8 +84,14 @@ export interface LiveSessionControllerOptions {
 	callbacks: LiveSessionCallbacks;
 	/** Extracts visible assistant text using the caller's normal UI rules. */
 	extractAssistantText(message: AssistantMessage): string;
-	/** Realtime output voice, defaulting to sol. */
-	voice?: string;
+	/** Codex realtime output voice. */
+	codexVoice?: string;
+	/** Grok realtime output voice. */
+	grokVoice?: string;
+	/** Provider selection override (auto, openai-codex, or xai-grok). */
+	provider?: LiveProvider;
+	/** Custom Grok model name (e.g. grok-voice-think-fast-2.0). */
+	grokModel?: string;
 }
 
 function errorFrom(cause: unknown): Error {
@@ -92,9 +130,12 @@ export class LiveSessionController {
 	readonly #session: AgentSession;
 	readonly #callbacks: LiveSessionCallbacks;
 	readonly #extractAssistantText: (message: AssistantMessage) => string;
-	readonly #voice: string;
+	readonly #codexVoice: string;
+	readonly #grokVoice: string;
+	readonly #provider: LiveProvider | undefined;
+	readonly #grokModel: string | undefined;
 
-	#transport: CodexLiveTransport | undefined;
+	#transport: ILiveTransport | undefined;
 	#recorder: AudioCapture | undefined;
 	#unsubscribeSession: (() => void) | undefined;
 	#sendChain: Promise<void> = Promise.resolve();
@@ -120,12 +161,24 @@ export class LiveSessionController {
 		this.#session = options.session;
 		this.#callbacks = options.callbacks;
 		this.#extractAssistantText = options.extractAssistantText;
-		this.#voice = options.voice?.trim() || DEFAULT_LIVE_VOICE;
+		this.#codexVoice = options.codexVoice?.trim() || DEFAULT_CODEX_LIVE_VOICE;
+		this.#grokVoice = options.grokVoice?.trim() || DEFAULT_GROK_LIVE_VOICE;
+		this.#provider = options.provider;
+		this.#grokModel = options.grokModel;
 	}
-
 	/** Current realtime call phase. */
 	get phase(): LivePhase {
 		return this.#phase;
+	}
+
+	/** Provider selected for the active transport. */
+	get provider(): ResolvedLiveProvider | undefined {
+		return this.#transport?.provider;
+	}
+
+	/** Model selected for the active transport. */
+	get model(): string | undefined {
+		return this.#transport?.model;
 	}
 
 	/** Whether microphone input is currently muted. */
@@ -151,16 +204,24 @@ export class LiveSessionController {
 		try {
 			const user = currentUser();
 			const instructions = prompt.render(liveInstructionsTemplate, user);
-			const transport = new CodexLiveTransport({
+			const transport = await createLiveTransport({
 				authStorage: this.#session.modelRegistry.authStorage,
 				sessionId: this.#session.sessionId,
 				instructions,
-				voice: this.#voice,
+				voice: this.#codexVoice,
+				codexVoice: this.#codexVoice,
+				grokVoice: this.#grokVoice,
+				provider: this.#provider,
+				grokModel: this.#grokModel,
 				callbacks: {
 					onEvent: event => this.#guardEvent(() => this.#handleLiveEvent(event)),
 					onOutputLevel: level => this.#guardEvent(() => this.#handleOutputLevel(level)),
 				},
 			});
+			if (this.#stopped) {
+				await transport.close();
+				throw this.#failure ?? new Error("The live session stopped while selecting a provider.");
+			}
 			this.#transport = transport;
 			await transport.connect();
 			if (this.#stopped) {
@@ -172,6 +233,11 @@ export class LiveSessionController {
 			if (this.#muted) await transport.setMuted(true);
 			if (this.#stopped) {
 				throw this.#failure ?? new Error("The live session stopped before recording began.");
+			}
+			if (typeof AudioCapture !== "function") {
+				throw new Error(
+					"Microphone capture is unavailable because the installed native bindings do not include AudioCapture.",
+				);
 			}
 			const recorder = new AudioCapture(16_000, (error, samples) => {
 				if (error) {
@@ -341,9 +407,10 @@ export class LiveSessionController {
 			if (message?.role !== "assistant") continue;
 			const text = this.#extractAssistantText(message).trim();
 			if (!text) continue;
-			const finalContext = prompt.render(agentFinalMessageTemplate, { message: text });
-			for (const chunk of chunkLiveContext(finalContext)) {
-				this.#queueSend(buildDelegationContextAppend(delegationId, chunk));
+			const finalContext = chunkLiveContext(prompt.render(agentFinalMessageTemplate, { message: text }));
+			for (const [chunkIndex, chunk] of finalContext.entries()) {
+				const channel = chunkIndex === finalContext.length - 1 ? "speakable" : "commentary";
+				this.#queueSend(buildDelegationContextAppend(delegationId, chunk, channel));
 			}
 			break;
 		}
@@ -358,13 +425,9 @@ export class LiveSessionController {
 	}
 
 	#handleMicrophoneAudio(samples: Float32Array): void {
-		if (this.#stopped || !this.#transport) return;
-		if (this.#muted) return;
+		if (this.#stopped || !this.#transport || this.#muted) return;
 		this.#inputLevel = microphoneLevel(samples);
 		this.#emitLevels();
-		const outputActive = this.#outputLevel > OUTPUT_ACTIVE_LEVEL;
-		const echoThreshold = Math.max(MIN_BARGE_IN_LEVEL, this.#outputLevel * OUTPUT_ECHO_RATIO);
-		if (outputActive && this.#inputLevel < echoThreshold) return;
 		try {
 			this.#transport.pushAudio(samples);
 		} catch (cause) {

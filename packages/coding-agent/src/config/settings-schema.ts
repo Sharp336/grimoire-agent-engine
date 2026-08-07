@@ -2,7 +2,14 @@ import { THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
 import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 import { DEFAULT_RELAY_URL } from "../collab/protocol";
-import { DEFAULT_LIVE_VOICE, LIVE_VOICE_OPTIONS, LIVE_VOICE_VALUES } from "../live/voices";
+import {
+	CODEX_LIVE_VOICE_OPTIONS,
+	CODEX_LIVE_VOICE_VALUES,
+	DEFAULT_CODEX_LIVE_VOICE,
+	DEFAULT_GROK_LIVE_VOICE,
+	GROK_LIVE_VOICE_OPTIONS,
+	GROK_LIVE_VOICE_VALUES,
+} from "../live/voices";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS, STT_MODEL_VALUES } from "../stt/models";
 import { STT_SUBMIT_TRIGGER_OPTIONS, STT_SUBMIT_TRIGGER_VALUES } from "../stt/submit-trigger";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "../thinking";
@@ -4992,16 +4999,56 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
-	"live.voice": {
+	"live.provider": {
 		type: "enum",
-		values: LIVE_VOICE_VALUES,
-		default: DEFAULT_LIVE_VOICE,
+		values: ["auto", "openai-codex", "xai-grok"] as const,
+		default: "auto",
 		ui: {
 			tab: "providers",
 			group: "Services",
-			label: "Live Voice",
+			label: "Live Voice Provider",
+			description: "Realtime backend for /live mode: Auto, OpenAI Codex, or xAI Grok Voice",
+			options: [
+				{
+					value: "auto",
+					label: "Auto",
+					description: "Prefer Codex when configured; otherwise use an available xAI API key",
+				},
+				{
+					value: "openai-codex",
+					label: "OpenAI Codex",
+					description: "Codex WebRTC realtime API",
+				},
+				{
+					value: "xai-grok",
+					label: "xAI Grok Voice",
+					description: "xAI Grok Realtime WebSocket API (grok-voice-think-fast-2.0)",
+				},
+			],
+		},
+	},
+	"live.codexVoice": {
+		type: "enum",
+		values: CODEX_LIVE_VOICE_VALUES,
+		default: DEFAULT_CODEX_LIVE_VOICE,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Codex Live Voice",
 			description: "Voice used by Codex-backed realtime voice sessions",
-			options: LIVE_VOICE_OPTIONS,
+			options: CODEX_LIVE_VOICE_OPTIONS,
+		},
+	},
+	"live.grokVoice": {
+		type: "enum",
+		values: GROK_LIVE_VOICE_VALUES,
+		default: DEFAULT_GROK_LIVE_VOICE,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Grok Live Voice",
+			description: "Voice used by xAI Grok-backed realtime voice sessions",
+			options: GROK_LIVE_VOICE_OPTIONS,
 		},
 	},
 	"providers.tts": {

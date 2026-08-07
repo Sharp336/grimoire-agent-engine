@@ -81,6 +81,7 @@ import type { Skill } from "../extensibility/skills";
 import { loadSlashCommands } from "../extensibility/slash-commands";
 import type { Goal, GoalModeState } from "../goals/state";
 import { resolveLocalUrlToPath } from "../internal-urls";
+import type { LiveProvider } from "../live/transport-types";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
 import type { MCPManager } from "../mcp";
 import {
@@ -4591,13 +4592,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 	}
 
-	/** Start or stop the Codex-backed realtime voice surface. */
-	async handleLiveCommand(): Promise<void> {
+	/** Start or stop the realtime voice surface, optionally overriding its provider for this session. */
+	async handleLiveCommand(provider?: LiveProvider): Promise<void> {
 		if (this.#sttController && this.#sttController.state !== "idle") {
 			this.showWarning("Finish the current speech-to-text capture before starting live mode.");
 			return;
 		}
-		await this.#liveCommandController.handleCommand();
+		await this.#liveCommandController.handleCommand(provider);
 	}
 
 	#setMicCursor(color: { r: number; g: number; b: number }): void {

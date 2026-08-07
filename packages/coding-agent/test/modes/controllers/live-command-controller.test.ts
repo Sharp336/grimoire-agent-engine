@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { LiveSessionController } from "@oh-my-pi/pi-coding-agent/live/controller";
+import { LiveSessionController, type LiveTranscript } from "@oh-my-pi/pi-coding-agent/live/controller";
 import { LiveVisualizer } from "@oh-my-pi/pi-coding-agent/live/visualizer";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
 import { LiveCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/live-command-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 
 /** Fake InteractiveModeContext plus typed capture channels for focus/mount traffic. */
 interface ContextHarness {
@@ -22,15 +24,26 @@ function createContext(): ContextHarness {
 	const editor = {
 		getUseTerminalCursor: vi.fn(() => true),
 		setUseTerminalCursor: vi.fn(),
+		setText: vi.fn(),
 	};
 	const focused: unknown[] = [];
 	const mounted: unknown[] = [];
 	const refocused = Promise.withResolvers<void>();
 	const ctx = {
-		settings: Settings.isolated({ "live.voice": "vale" }),
+		settings: Settings.isolated({
+			"live.provider": "xai-grok",
+			"live.codexVoice": "vale",
+			"live.grokVoice": "leo",
+		}),
 		keybindings: { getKeys: vi.fn(() => ["ctrl+l"]) },
 		session: {},
 		extractAssistantText: vi.fn(() => ""),
+		handleLiveCommand: vi.fn(async () => {}),
+		effectiveHideThinkingBlock: false,
+		viewSession: {},
+		proseOnlyThinking: false,
+		hideToolActivity: false,
+		toolOutputExpanded: false,
 		editor,
 		editorContainer: {
 			clear: vi.fn(),
@@ -60,11 +73,15 @@ afterEach(() => {
 });
 
 describe("LiveCommandController", () => {
-	it("forwards the selected voice across the live-session boundary", async () => {
+	it("forwards a one-session provider override with separate Codex and Grok voices", async () => {
 		const { ctx } = createContext();
-		let receivedVoice: string | undefined;
+		let receivedProvider: string | undefined;
+		let receivedCodexVoice: string | undefined;
+		let receivedGrokVoice: string | undefined;
 		const controller = new LiveCommandController(ctx, options => {
-			receivedVoice = options.voice;
+			receivedProvider = options.provider;
+			receivedCodexVoice = options.codexVoice;
+			receivedGrokVoice = options.grokVoice;
 			const session = new LiveSessionController(options);
 			vi.spyOn(session, "start").mockResolvedValue();
 			vi.spyOn(session, "stop").mockResolvedValue();
@@ -72,8 +89,43 @@ describe("LiveCommandController", () => {
 		});
 
 		try {
-			await controller.handleCommand();
-			expect(receivedVoice).toBe("vale");
+			await controller.handleCommand("openai-codex");
+			expect(receivedProvider).toBe("openai-codex");
+			expect(receivedCodexVoice).toBe("vale");
+			expect(receivedGrokVoice).toBe("leo");
+		} finally {
+			await controller.stop();
+		}
+	});
+
+	it("labels Grok transcript messages with the effective provider and model", async () => {
+		const { ctx } = createContext();
+		const updateContent = vi.spyOn(AssistantMessageComponent.prototype, "updateContent").mockImplementation(() => {});
+		let emitTranscript: ((transcript: LiveTranscript | undefined) => void) | undefined;
+		const controller = new LiveCommandController(ctx, options => {
+			emitTranscript = options.callbacks.onTranscript;
+			const session = new LiveSessionController(options);
+			Object.defineProperties(session, {
+				provider: { get: () => "xai-grok" },
+				model: { get: () => "grok-voice-think-fast-2.0" },
+			});
+			vi.spyOn(session, "start").mockResolvedValue();
+			vi.spyOn(session, "stop").mockResolvedValue();
+			return session;
+		});
+
+		try {
+			await controller.handleCommand("xai-grok");
+			if (!emitTranscript) throw new Error("expected transcript callback");
+			emitTranscript({ role: "assistant", turn: 1, text: "Hello", final: false });
+			expect(updateContent).toHaveBeenCalledWith(
+				expect.objectContaining({
+					api: "openai-completions",
+					provider: "xai",
+					model: "grok-voice-think-fast-2.0",
+				}),
+				{ transient: true },
+			);
 		} finally {
 			await controller.stop();
 		}
@@ -108,5 +160,19 @@ describe("LiveCommandController", () => {
 		// clears; drain microtasks deterministically instead of sleeping.
 		for (let i = 0; controller.active && i < 20; i++) await Promise.resolve();
 		expect(controller.active).toBe(false);
+	});
+
+	it("maps /live provider arguments and rejects unknown providers", async () => {
+		const { ctx } = createContext();
+
+		expect(await executeBuiltinSlashCommand("/live grok", { ctx })).toBe(true);
+		expect(ctx.handleLiveCommand).toHaveBeenLastCalledWith("xai-grok");
+
+		expect(await executeBuiltinSlashCommand("/live codex", { ctx })).toBe(true);
+		expect(ctx.handleLiveCommand).toHaveBeenLastCalledWith("openai-codex");
+
+		expect(await executeBuiltinSlashCommand("/live unknown", { ctx })).toBe(true);
+		expect(ctx.handleLiveCommand).toHaveBeenCalledTimes(2);
+		expect(ctx.showError).toHaveBeenCalledWith("Usage: /live [grok|codex]");
 	});
 });

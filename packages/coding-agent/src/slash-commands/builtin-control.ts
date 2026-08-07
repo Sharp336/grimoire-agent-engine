@@ -55,10 +55,21 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "live",
-		description: "Start Codex-backed realtime voice mode",
-		handleTui: async (_command, runtime) => {
+		description: "Start or stop realtime voice mode; optionally use Grok or Codex",
+		allowArgs: true,
+		subcommands: [
+			{ name: "grok", description: "Start with xAI Grok Voice for this session" },
+			{ name: "codex", description: "Start with OpenAI Codex Voice for this session" },
+		],
+		handleTui: async (command, runtime) => {
+			const providerName = command.args.trim().toLowerCase();
 			runtime.ctx.editor.setText("");
-			await runtime.ctx.handleLiveCommand();
+			if (providerName && providerName !== "grok" && providerName !== "codex") {
+				runtime.ctx.showError("Usage: /live [grok|codex]");
+				return;
+			}
+			const provider = providerName === "grok" || providerName === "codex" ? providerName : undefined;
+			await runtime.ctx.handleLiveCommand(provider);
 		},
 	},
 	{

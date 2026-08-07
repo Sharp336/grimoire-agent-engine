@@ -1,4 +1,4 @@
-import { type AuthStorage, isAuthRetryableError, type OAuthAccess, withOAuthAccess } from "@oh-my-pi/pi-ai";
+import { isAuthRetryableError, type OAuthAccess, withOAuthAccess } from "@oh-my-pi/pi-ai";
 import { getProxyForUrl, wrapFetchForProxy } from "@oh-my-pi/pi-ai/utils/proxy";
 import {
 	CODEX_BASE_URL,
@@ -8,12 +8,7 @@ import {
 } from "@oh-my-pi/pi-catalog/wire/codex";
 import { LiveWebRtcPeer } from "@oh-my-pi/pi-natives";
 import { generateCodexAttestation } from "./attestation";
-import {
-	buildLiveSessionPayload,
-	type LiveClientMessage,
-	type LiveServerEvent,
-	parseLiveServerEvent,
-} from "./protocol";
+import { buildLiveSessionPayload, LIVE_MODEL, type LiveClientMessage, parseLiveServerEvent } from "./protocol";
 
 const SIGNALING_URL = `${CODEX_BASE_URL}/codex/realtime/calls?intent=quicksilver&architecture=avas`;
 const MAX_ERROR_BODY_LENGTH = 2_048;
@@ -44,21 +39,9 @@ class LiveSignalingError extends Error {
 	}
 }
 
-/** Callbacks emitted by the live WebRTC transport. */
-export interface LiveTransportCallbacks {
-	onEvent(event: LiveServerEvent): void;
-	onOutputLevel(level: number): void;
-}
+export * from "./transport-types";
 
-/** Configuration required to establish a Codex live call. */
-export interface LiveTransportOptions {
-	authStorage: AuthStorage;
-	sessionId: string;
-	instructions: string;
-	voice: string;
-	callbacks: LiveTransportCallbacks;
-	signal?: AbortSignal;
-}
+import type { ILiveTransport, LiveTransportOptions } from "./transport-types";
 
 /** Extracts the server-assigned `rtc_*` call ID from a signaling Location header. */
 export function parseLiveCallId(location: string | null): string | undefined {
@@ -115,7 +98,9 @@ function abortReason(signal: AbortSignal | undefined): Error {
 }
 
 /** Native WebRTC transport for a Codex Frameless Bidi live session. */
-export class CodexLiveTransport {
+export class CodexLiveTransport implements ILiveTransport {
+	readonly provider = LIVE_PROVIDER;
+	readonly model = LIVE_MODEL;
 	readonly #options: LiveTransportOptions;
 	#peer: LiveWebRtcPeer | undefined;
 	readonly #realtimeSessionId = crypto.randomUUID();
