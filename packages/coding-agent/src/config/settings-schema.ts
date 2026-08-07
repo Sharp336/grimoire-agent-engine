@@ -631,6 +631,24 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"ui.language": {
+		type: "enum",
+		values: ["system", "en", "zh-CN"] as const,
+		default: "system",
+		ui: {
+			tab: "appearance",
+			group: "Theme",
+			label: "Language",
+			description:
+				"UI language for Settings, welcome screen, and other interface text. English is the fallback for untranslated strings.",
+			options: [
+				{ value: "system", label: "System (env)", description: "Follow LANG / LC_ALL (zh* → 简体中文)" },
+				{ value: "en", label: "English", description: "English UI" },
+				{ value: "zh-CN", label: "简体中文", description: "Simplified Chinese UI" },
+			],
+		},
+	},
+
 	// Status line
 	"statusLine.preset": {
 		type: "enum",

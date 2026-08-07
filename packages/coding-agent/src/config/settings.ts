@@ -41,6 +41,7 @@ import { AgentStorage } from "../session/agent-storage";
 import { AUTO_IMAGE_PROVIDER_ORDER, isImageProviderId } from "../tools/image-providers";
 import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
 import { INSPECT_IMAGE_MODES } from "../utils/inspect-image-mode";
+import { applyUiLanguage } from "../i18n";
 import { isSearchProviderId, SEARCH_PROVIDER_ORDER } from "../web/search/types";
 import {
 	type BashInterceptorRule,
@@ -2297,6 +2298,11 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 			setColorBlindMode(value).catch(err => {
 				logger.warn("Settings: colorBlindMode hook failed", { enabled: value, error: String(err) });
 			});
+		}
+	},
+	"ui.language": value => {
+		if (typeof value === "string") {
+			applyUiLanguage(value);
 		}
 	},
 	"provider.appendOnlyContext": value => {

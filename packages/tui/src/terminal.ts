@@ -1740,10 +1740,12 @@ export class ProcessTerminal implements Terminal {
 				accepted = true;
 				for (const chunk of chunkForConPTY(data, MAX_CONPTY_WRITE_CHUNK_BYTES)) {
 					if (this.#dead) break;
-					accepted = process.stdout.write(chunk);
+					// Explicit UTF-8 Buffer write: Bun's string fast-path can double-encode
+					// CJK under some WSL/pipe hosts, garbling UI text.
+					accepted = process.stdout.write(Buffer.from(chunk, "utf8"));
 				}
 			} else {
-				accepted = process.stdout.write(data);
+				accepted = process.stdout.write(Buffer.from(data, "utf8"));
 			}
 			// A stalled-but-alive PTY consumer never throws: write() just returns
 			// false and queues the bytes. Bound that never-draining backlog by

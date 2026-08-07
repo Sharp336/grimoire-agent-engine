@@ -25,6 +25,7 @@ import {
 	type SubmenuOption,
 	TAB_GROUPS,
 } from "../../config/settings-schema";
+import { t } from "../../i18n";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // UI Definition Types
@@ -156,13 +157,28 @@ function resolveOptions(ui: AnyUiMetadata): OptionList | "runtime" | undefined {
 	return ui.options;
 }
 
+function localizeOptions(options: OptionList): OptionList {
+	return options.map(option => ({
+		...option,
+		label: t(option.label),
+		...(option.description !== undefined ? { description: t(option.description) } : {}),
+	}));
+}
+
 function pathToSettingDef(path: SettingPath): SettingDef | null {
 	const ui = getUi(path);
 	if (!ui) return null;
 
 	const schemaType = getType(path);
 	const condition = ui.condition ? CONDITIONS[ui.condition] : undefined;
-	const base = { path, label: ui.label, description: ui.description, tab: ui.tab, group: ui.group, condition };
+	const base = {
+		path,
+		label: t(ui.label),
+		description: t(ui.description),
+		tab: ui.tab,
+		group: ui.group ? t(ui.group) : ui.group,
+		condition,
+	};
 
 	if (schemaType === "boolean") {
 		return { ...base, type: "boolean" };
@@ -176,13 +192,17 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 		}
 		// "runtime" is not a valid sentinel for enums — schema types prevent this,
 		// but treat defensively as an empty submenu.
-		return { ...base, type: "submenu", options: options === "runtime" ? [] : options };
+		return {
+			...base,
+			type: "submenu",
+			options: options === "runtime" ? [] : localizeOptions(options),
+		};
 	}
 
 	if (schemaType === "number") {
 		// Numbers without options are intentionally hidden from the UI.
 		if (!options || options === "runtime") return null;
-		return { ...base, type: "submenu", options };
+		return { ...base, type: "submenu", options: localizeOptions(options) };
 	}
 
 	if (schemaType === "string") {
@@ -191,7 +211,7 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 			return { ...base, type: "submenu", options: [] };
 		}
 		if (options) {
-			return { ...base, type: "submenu", options };
+			return { ...base, type: "submenu", options: localizeOptions(options) };
 		}
 		// One classification drives both surfaces: a setting marked `credential`
 		// masks here too, so the panel cannot display one that only the CLI knows
@@ -203,7 +223,7 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 		// Arrays without declared options stay config-file only (free-form lists
 		// like extension paths have no finite choice set to toggle).
 		if (!options || options === "runtime") return null;
-		return { ...base, type: "multiselect", options, ordered: ui.ordered === true };
+		return { ...base, type: "multiselect", options: localizeOptions(options), ordered: ui.ordered === true };
 	}
 
 	if (schemaType === "record") {
