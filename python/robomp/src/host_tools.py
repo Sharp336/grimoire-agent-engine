@@ -1757,15 +1757,21 @@ def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
             _raise_command(msg)
         staged = bindings.db.list_staged_review_comments(bindings.issue_key)
         comments = [_review_comment_to_payload(comment) for comment in staged]
-        # Resolve the PR head SHA so Forgejo can anchor inline comments even
-        # when the worktree's HEAD diverges from the remote PR head (rebase,
-        # force-push). Without commit_id, Forgejo resolves the head itself and
-        # can 500 on PRs in a transient merge state. The worktree is a checkout
-        # of the PR head, so rev-parse HEAD gives us the right SHA.
+        # commit_id is only needed by Forgejo to anchor inline review comments.
+        # GitHub's reviews endpoint ignores it, so skip the extra API call.
         commit_id: str | None = None
-        head_proc = _run_repo_command(bindings, ["git", "rev-parse", "HEAD"], timeout=10.0)
-        if head_proc.returncode == 0:
-            commit_id = head_proc.stdout.strip() or None
+        if getattr(bindings.github, "_platform", "github") == "forgejo":
+            try:
+                pr = _run_coro(
+                    bindings.loop,
+                    bindings.github.get_pull_request(
+                        repo=bindings.repo.full_name,
+                        number=bindings.default_comment_number,
+                    ),
+                )
+                commit_id = pr.head_sha or None
+            except GitHubError:
+                commit_id = None
         try:
             review = _run_coro(
                 bindings.loop,
@@ -1830,8 +1836,7 @@ def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
                 },
             )
             return (
-                f"review rejected ({exc.status}); posted summary + {posted_inline} inline comment(s) "
-                "as issue comments"
+                f"review rejected ({exc.status}); posted summary + {posted_inline} inline comment(s) as issue comments"
             )
         cleared = bindings.db.clear_staged_review_comments(bindings.issue_key)
         _audit(

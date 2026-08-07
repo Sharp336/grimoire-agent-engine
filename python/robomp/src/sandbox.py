@@ -784,7 +784,9 @@ class SandboxManager:
     def pool_path(self, repo: str) -> Path:
         return self.pool / repo.replace("/", "__")
 
-    def ensure_clone(self, *, repo: str, clone_url: str, default_branch: str, transport: GitTransport | None = None) -> Path:
+    def ensure_clone(
+        self, *, repo: str, clone_url: str, default_branch: str, transport: GitTransport | None = None
+    ) -> Path:
         """Idempotent shared clone for `repo`.
 
         `clone_url` MUST be a plain `https://github.com/<owner>/<repo>.git`

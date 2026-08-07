@@ -2,6 +2,12 @@
 
 A review comment landed on the PR you opened.
 
+## Prior conversation
+
+{{thread}}
+
+---
+
 ## @{{comment.author}} on `{{comment.path}}`{{comment.line_range}}
 
 {{comment.body}}

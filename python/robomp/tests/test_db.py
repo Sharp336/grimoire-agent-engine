@@ -652,8 +652,6 @@ def test_requeue_claimed_closure_only_flips_claimed(db: Database) -> None:
     assert not db.requeue_claimed_closure(_KEY)
 
 
-
-
 # ---- _platform_from_row ----
 
 
