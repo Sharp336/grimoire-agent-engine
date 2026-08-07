@@ -18,6 +18,9 @@ from .host_tools import HostTool, HostToolContext
 from .host_uris import HostUri, HostUriContext, normalize_read_result
 from .protocol import (
     ActiveOperation,
+    ArtifactDescriptor,
+    ArtifactExportResult,
+    ArtifactRange,
     AdvisorState,
     AgentEndEvent,
     AgentMessage,
@@ -39,6 +42,7 @@ from .protocol import (
     CancelAgentResult,
     CancelJobResult,
     CancellationResult,
+    CollaborationMediaRange,
     CancelOperationResult,
     CommandOutputEvent,
     CompactionResult,
@@ -92,10 +96,26 @@ from .protocol import (
     RetryFallbackSucceededEvent,
     RpcAgentEvent,
     RpcCapabilityManifest,
+    RpcV3ClientOptions,
+    RpcCollaborationSnapshot,
+    RpcProvenanceSnapshot,
+    RpcResourceLifecycleSnapshot,
+    RpcResourceServerSnapshot,
+    RpcSemanticActionResult,
+    RpcV3Frame,
     RpcEvalLanguage,
     RpcNotification,
     RpcOperationCommand,
     RpcOperationTerminalEvent,
+    SessionAuthoritySettlement,
+    SessionCommand,
+    SessionCommandOutcome,
+    SessionHostIncompatible,
+    SessionHostNegotiated,
+    SessionJournalCursor,
+    SessionObservationEvent,
+    SessionObservationPosition,
+    SessionOpenResult,
     SessionCatalogPage,
     SessionCatalogScope,
     SessionInfoResult,
@@ -135,6 +155,9 @@ from .protocol import (
     assistant_text,
     parse_advisor_state,
     parse_agent_messages,
+    parse_artifact_descriptor,
+    parse_artifact_export_result,
+    parse_artifact_range,
     parse_agent_release_result,
     parse_agent_result,
     parse_agent_send_result,
@@ -145,6 +168,7 @@ from .protocol import (
     parse_cancel_agent_result,
     parse_cancel_job_result,
     parse_cancellation_result,
+    parse_collaboration_media_range,
     parse_compaction_result,
     parse_delete_session_result,
     parse_eval_history_entry,
@@ -162,6 +186,9 @@ from .protocol import (
     parse_rename_session_result,
     parse_resume_session_result,
     parse_rpc_capability_manifest,
+    parse_session_host_negotiation_result,
+    parse_session_command_outcome,
+    parse_session_open_result,
     parse_session_catalog_page,
     parse_session_info_result,
     parse_session_queue_clear_result,
@@ -178,6 +205,8 @@ from .protocol import (
 
 AgentEventListener = Callable[[RpcAgentEvent], None]
 NotificationListener = Callable[[RpcNotification], None]
+SessionObservationListener = Callable[[SessionObservationEvent], None]
+V3FrameListener = Callable[[RpcV3Frame], None]
 UiRequestListener = Callable[[ExtensionUiRequest], None]
 ExtensionErrorListener = Callable[[ExtensionError], None]
 ReadyListener = Callable[[ReadyEvent], None]
@@ -478,6 +507,13 @@ class RpcCommandError(RpcError):
         self.error = error
         self.code = code
 
+class RpcSemanticIncompatibilityError(RpcError):
+    """Raised when an explicitly requested RPC semantic profile is unavailable."""
+
+    def __init__(self, result: SessionHostIncompatible):
+        super().__init__(result.message)
+        self.result = result
+
 
 class RpcProtocolError(RpcError):
     """Raised or reported when the transport receives an unmatched RPC error response."""
@@ -616,6 +652,7 @@ class RpcClient:
         extra_args: Sequence[str] = (),
         startup_timeout: float = 30.0,
         request_timeout: float = 30.0,
+        rpc_v3: RpcV3ClientOptions | None = None,
         max_event_history: int | None = 10_000,
         max_stderr_chunks: int | None = 512,
     ) -> None:
@@ -643,6 +680,7 @@ class RpcClient:
         self._extra_args = tuple(extra_args)
         self._startup_timeout = startup_timeout
         self._request_timeout = request_timeout
+        self._rpc_v3 = rpc_v3
         self._max_event_history = self._validate_history_limit(
             "max_event_history", max_event_history
         )
@@ -685,6 +723,7 @@ class RpcClient:
         self._ready_event: ReadyEvent | None = None
         self._protocol_version = 1
         self._protocol_v2_enabled = False
+        self._rpc_v3_negotiation: SessionHostNegotiated | None = None
         self._frame_decoder = _RpcFrameDecoder()
         self._protocol_errors = _BoundedHistory[RpcProtocolError](
             _DEFAULT_ERROR_HISTORY_LIMIT
@@ -728,6 +767,10 @@ class RpcClient:
         with self._state_lock:
             return self._protocol_errors.snapshot()
 
+
+    @property
+    def rpc_v3_negotiation(self) -> SessionHostNegotiated | None:
+        return self._rpc_v3_negotiation
     @property
     def listener_errors(self) -> tuple[ListenerErrorEvent, ...]:
         with self._state_lock:
@@ -744,6 +787,7 @@ class RpcClient:
         self._ready_event = None
         self._protocol_version = 1
         self._protocol_v2_enabled = False
+        self._rpc_v3_negotiation = None
         self._frame_decoder = _RpcFrameDecoder()
         self._events.clear()
         self._async_errors.clear()
@@ -826,6 +870,13 @@ class RpcClient:
                 if negotiation.get("protocolVersion") != 2:
                     raise RpcError("RPC protocol v2 negotiation failed")
                 self._protocol_version = 2
+            except BaseException:
+                self.stop()
+                raise
+
+        if self._rpc_v3 is not None:
+            try:
+                self.initialize_v3(self._rpc_v3)
             except BaseException:
                 self.stop()
                 raise
@@ -1117,6 +1168,18 @@ class RpcClient:
         return lambda: self._remove_listener(
             self._operation_terminal_listeners, listener
         )
+    def on_session_observation(
+        self, listener: SessionObservationListener
+    ) -> Callable[[], None]:
+        return self._add_typed_notification_listener("session_observation", listener)
+
+    def on_v3_frame(self, listener: V3FrameListener) -> Callable[[], None]:
+        def forward(notification: RpcNotification) -> None:
+            if isinstance(notification, RpcV3Frame):
+                listener(notification)
+
+        return self.on_notification(forward)
+
 
     def install_headless_ui(
         self,
@@ -1322,6 +1385,238 @@ class RpcClient:
 
     def get_capabilities(self) -> RpcCapabilityManifest:
         return parse_rpc_capability_manifest(self._request("get_capabilities"))
+
+    def initialize_v3(self, options: RpcV3ClientOptions) -> SessionHostNegotiated:
+        result = parse_session_host_negotiation_result(
+            self._request(
+                "initialize",
+                profile={
+                    "name": "omp.session",
+                    "major": 3,
+                    "minMinor": options.min_minor,
+                    "maxMinor": options.max_minor,
+                },
+                framingVersion=self._protocol_version,
+                hostCapabilities={
+                    "interactions": list(options.host_capabilities.interactions),
+                    "semanticContent": list(
+                        options.host_capabilities.semantic_content
+                    ),
+                },
+                requestedCapabilities=list(options.requested_capabilities),
+            )
+        )
+        if isinstance(result, SessionHostIncompatible):
+            raise RpcSemanticIncompatibilityError(result)
+        self._rpc_v3_negotiation = result
+        return result
+    def open_session(
+        self,
+        *,
+        after: SessionObservationPosition | None = None,
+        after_cursor: SessionJournalCursor | None = None,
+        snapshot: bool | None = None,
+    ) -> SessionOpenResult:
+        return parse_session_open_result(
+            self._request(
+                "session_open",
+                after=(
+                    {"epoch": after.epoch, "sequence": after.sequence}
+                    if after is not None
+                    else None
+                ),
+                afterCursor=(
+                    {
+                        "sessionId": after_cursor.session_id,
+                        "leafId": after_cursor.leaf_id,
+                        "entryId": after_cursor.entry_id,
+                    }
+                    if after_cursor is not None
+                    else None
+                ),
+                snapshot=snapshot,
+            )
+        )
+
+    def acknowledge_session(self, subscription_id: str, sequence: int) -> None:
+        self._request(
+            "session_ack", subscriptionId=subscription_id, sequence=sequence
+        )
+
+    def unsubscribe_session(self, subscription_id: str) -> None:
+        self._request("session_unsubscribe", subscriptionId=subscription_id)
+
+    def invoke_session(self, command: SessionCommand) -> SessionCommandOutcome:
+        return parse_session_command_outcome(
+            self._request(
+                "session_invoke",
+                command={
+                    "kind": command.kind,
+                    "input": command.input,
+                    "expectedRevision": command.expected_revision,
+                    "idempotencyKey": command.idempotency_key,
+                },
+            )
+        )
+
+    def shutdown_session(self) -> SessionAuthoritySettlement:
+        payload = self._request("session_shutdown")
+        if payload.get("state") != "settled":
+            raise RpcError("session_shutdown response did not settle the authority")
+        return SessionAuthoritySettlement()
+
+    def invoke_semantic_action(
+        self,
+        render_id: str,
+        action_id: str,
+        *,
+        input: JsonObject | None = None,
+    ) -> RpcSemanticActionResult:
+        return self._request(
+            "semantic_action", renderId=render_id, actionId=action_id, input=input
+        )
+
+    def cancel_semantic_action(
+        self, render_id: str, *, action_id: str | None = None
+    ) -> bool:
+        return bool(
+            self._request(
+                "semantic_cancel", renderId=render_id, actionId=action_id
+            ).get("cancelled", False)
+        )
+
+    def describe_artifact(self, artifact_id: str) -> ArtifactDescriptor:
+        return parse_artifact_descriptor(
+            self._request("artifact_describe", artifactId=artifact_id)
+        )
+
+    def read_artifact(
+        self,
+        artifact_id: str,
+        *,
+        offset: int | None = None,
+        length: int | None = None,
+    ) -> ArtifactRange:
+        return parse_artifact_range(
+            self._request(
+                "artifact_read",
+                artifactId=artifact_id,
+                offset=offset,
+                length=length,
+            )
+        )
+
+    def export_artifact(
+        self, artifact_id: str, destination: str | Path, expected_sha256: str
+    ) -> ArtifactExportResult:
+        return parse_artifact_export_result(
+            self._request(
+                "artifact_export",
+                artifactId=artifact_id,
+                destination=str(destination),
+                expectedSha256=expected_sha256,
+            )
+        )
+
+    def list_resources(self) -> RpcResourceLifecycleSnapshot:
+        return self._request("resource_list")
+
+    def refresh_resources(self, server_id: str | None = None) -> str:
+        payload = self._request("resource_refresh", serverId=server_id)
+        operation_id = payload.get("operationId")
+        if not isinstance(operation_id, str):
+            raise RpcError("resource_refresh response did not include operationId")
+        return operation_id
+
+    def reload_resources(self) -> str:
+        payload = self._request("resource_reload")
+        operation_id = payload.get("operationId")
+        if not isinstance(operation_id, str):
+            raise RpcError("resource_reload response did not include operationId")
+        return operation_id
+
+    def cancel_resource_operation(self, operation_id: str) -> bool:
+        return bool(
+            self._request("resource_cancel", operationId=operation_id).get(
+                "cancelled", False
+            )
+        )
+
+    def dispose_resource(self, server_id: str) -> RpcResourceServerSnapshot:
+        return self._request("resource_dispose", serverId=server_id)
+
+    def get_runtime_provenance(
+        self, *, refresh_usage: bool = False
+    ) -> RpcProvenanceSnapshot:
+        return self._request("provenance_get", refreshUsage=refresh_usage)
+
+    def get_collaboration(self) -> RpcCollaborationSnapshot:
+        return self._request("collaboration_get")
+
+    def host_collaboration(
+        self, *, relay_url: str | None = None, web_url: str | None = None
+    ) -> RpcCollaborationSnapshot:
+        return self._request(
+            "collaboration_host", relayUrl=relay_url, webUrl=web_url
+        )
+
+    def join_collaboration(
+        self, link: str, *, display_name: str | None = None
+    ) -> RpcCollaborationSnapshot:
+        return self._request(
+            "collaboration_join", link=link, displayName=display_name
+        )
+
+    def leave_collaboration(
+        self, *, reason: str | None = None
+    ) -> RpcCollaborationSnapshot:
+        return self._request("collaboration_leave", reason=reason)
+
+    def revoke_collaboration_participant(
+        self, participant_id: str
+    ) -> RpcCollaborationSnapshot:
+        return self._request(
+            "collaboration_revoke", participantId=participant_id
+        )
+
+    def rotate_collaboration_access(self) -> RpcCollaborationSnapshot:
+        return self._request("collaboration_rotate")
+
+    def acknowledge_collaboration(
+        self, generation: int, sequence: int
+    ) -> tuple[int, int]:
+        payload = self._request(
+            "collaboration_acknowledge",
+            generation=generation,
+            sequence=sequence,
+        )
+        acknowledged = payload.get("acknowledged")
+        retained = payload.get("retained")
+        if (
+            not isinstance(acknowledged, int)
+            or isinstance(acknowledged, bool)
+            or not isinstance(retained, int)
+            or isinstance(retained, bool)
+        ):
+            raise RpcError("collaboration_acknowledge response is malformed")
+        return acknowledged, retained
+
+    def read_collaboration_media(
+        self,
+        media_id: str,
+        *,
+        offset: int | None = None,
+        length: int | None = None,
+    ) -> CollaborationMediaRange:
+        return parse_collaboration_media_range(
+            self._request(
+                "collaboration_read_media",
+                mediaId=media_id,
+                offset=offset,
+                length=length,
+            )
+        )
+
 
     def get_settings(self, tab: str | None = None) -> SettingsSnapshot:
         return parse_settings_snapshot(self._request("get_settings", tab=tab))

@@ -188,6 +188,21 @@ _AUTO_COMPACTION_REASON_VALUES: Final[frozenset[str]] = frozenset(
 _AUTO_COMPACTION_ACTION_VALUES: Final[frozenset[str]] = frozenset(
     {"context-full", "handoff", "shake", "snapcompact"}
 )
+_RPC_V3_FRAME_TYPES: Final[frozenset[str]] = frozenset(
+    {
+        "interaction_settled",
+        "semantic_content",
+        "semantic_action_requested",
+        "semantic_action_settled",
+        "resource_lifecycle",
+        "resource_operation",
+        "provenance_update",
+        "collaboration_state",
+        "collaboration_replicated",
+        "collaboration_gap",
+        "collaboration_stale",
+    }
+)
 
 
 def _clone_json_value(value: object, *, field: str) -> JsonValue:
@@ -1430,12 +1445,261 @@ class RpcCommandCapability:
 
 
 @dataclass(slots=True, frozen=True)
+class SessionSemanticProfileRange:
+    name: str
+    major: int
+    min_minor: int
+    max_minor: int
+
+@dataclass(slots=True, frozen=True)
+class SessionSemanticProfile:
+    name: str
+    major: int
+    minor: int
+
+
+@dataclass(slots=True, frozen=True)
+class SessionHostLimits:
+    max_frame_bytes: int
+    max_reassembled_frame_bytes: int
+    max_artifact_read_bytes: int
+    max_pending_observations: int
+    max_idempotency_keys: int
+
+@dataclass(slots=True, frozen=True)
+class SessionHostRecoveryGuarantees:
+    transport_replay: str
+    durable_replay: str
+    snapshot_handoff: str
+    acknowledgement: str
+    gap_recovery: str
+    duplicate_handling: str
+@dataclass(slots=True, frozen=True)
+class SessionHostIdempotencyGuarantees:
+    scope: str
+    retention: str
+    conflict: str
+    overflow: str
+
+
+@dataclass(slots=True, frozen=True)
+class SessionHostMutationGuarantees:
+    correlation: str
+    concurrency: str
+    cancellation: str
+    terminal_outcomes: tuple[str, ...]
+    idempotency: SessionHostIdempotencyGuarantees
+
+
+
+
+@dataclass(slots=True, frozen=True)
+class SessionHostUnsupportedReason:
+    code: str
+    message: str
+
+
+@dataclass(slots=True, frozen=True)
+class SessionHostCapability:
+    id: str
+    version: int
+    supported: bool
+    operations: tuple[str, ...]
+    events: tuple[str, ...]
+    platforms: tuple[str, ...]
+    unsupported_reason: SessionHostUnsupportedReason | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class SessionHostManifest:
+    omp_version: str
+    semantic_profiles: tuple[SessionSemanticProfileRange, ...]
+    framing_versions: tuple[int, ...]
+    limits: SessionHostLimits
+    recovery: SessionHostRecoveryGuarantees
+    mutations: SessionHostMutationGuarantees
+    capabilities: tuple[SessionHostCapability, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class SessionHostClientCapabilities:
+    interactions: tuple[str, ...] = ()
+    semantic_content: tuple[str, ...] = ()
+
+
+@dataclass(slots=True, frozen=True)
+class SessionHostNegotiated:
+    profile: SessionSemanticProfile
+    framing_version: int
+    capabilities: tuple[SessionHostCapability, ...]
+    host_capabilities: SessionHostClientCapabilities
+    ok: Literal[True] = True
+
+
+@dataclass(slots=True, frozen=True)
+class SessionHostIncompatible:
+    code: str
+    message: str
+    supported_profiles: tuple[SessionSemanticProfileRange, ...]
+    ok: Literal[False] = False
+
+
+SessionHostNegotiationResult: TypeAlias = (
+    SessionHostNegotiated | SessionHostIncompatible
+)
+
+
+@dataclass(slots=True, frozen=True)
+class RpcV3ClientOptions:
+    requested_capabilities: tuple[str, ...]
+    host_capabilities: SessionHostClientCapabilities = SessionHostClientCapabilities()
+    min_minor: int = 0
+    max_minor: int = 0
+
+
+@dataclass(slots=True, frozen=True)
+class SessionJournalCursor:
+    session_id: str
+    leaf_id: str | None
+    entry_id: str | None
+
+
+@dataclass(slots=True, frozen=True)
+class SessionObservationPosition:
+    epoch: str
+    sequence: int
+
+
+@dataclass(slots=True, frozen=True)
+class SessionSnapshot:
+    session_id: str
+    revision: int
+    state: JsonValue
+    journal_cursor: SessionJournalCursor
+    watermark: SessionObservationPosition
+
+
+@dataclass(slots=True, frozen=True)
+class SessionObservationEnvelope:
+    session_id: str
+    epoch: str
+    sequence: int
+    event_id: str
+    kind: str
+    payload: JsonValue
+    durability: Literal["durable", "transient"]
+    replay: bool
+    terminal_settlement: Literal["none", "completed", "cancelled", "failed"]
+    causation_id: str | None = None
+    journal_cursor: SessionJournalCursor | None = None
+    type: Literal["observation"] = "observation"
+
+
+@dataclass(slots=True, frozen=True)
+class SessionObservationGap:
+    session_id: str
+    epoch: str
+    after_sequence: int
+    first_available_sequence: int
+    latest_sequence: int
+    recovery: Literal["resnapshot"] = "resnapshot"
+    type: Literal["gap"] = "gap"
+
+
+SessionObservation: TypeAlias = SessionObservationEnvelope | SessionObservationGap
+
+
+@dataclass(slots=True, frozen=True)
+class SessionOpenResult:
+    subscription_id: str
+    snapshot: SessionSnapshot | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class SessionCommand:
+    kind: str
+    input: JsonValue | None = None
+    expected_revision: int | None = None
+    idempotency_key: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class SessionCommandError:
+    code: str
+    message: str
+    retryable: bool
+
+
+@dataclass(slots=True, frozen=True)
+class SessionCommandOutcome:
+    outcome: Literal["completed", "cancelled", "failed", "unknown"]
+    revision: int | None = None
+    result: JsonValue | None = None
+    error: SessionCommandError | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class SessionAuthoritySettlement:
+    state: Literal["settled"] = "settled"
+
+
+@dataclass(slots=True, frozen=True)
+class ArtifactDescriptor:
+    id: str
+    media_type: str
+    byte_length: int | None
+    sha256: str | None
+    provenance: JsonObject
+    related: JsonObject
+    lifecycle: Literal["pending", "available", "cancelled"]
+    cancelled: bool
+    cancellation_reason: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class ArtifactRange:
+    descriptor: ArtifactDescriptor
+    offset: int
+    byte_length: int
+    eof: bool
+    data: str
+    encoding: Literal["base64"] = "base64"
+
+
+@dataclass(slots=True, frozen=True)
+class ArtifactExportResult:
+    path: str
+    byte_length: int
+    sha256: str
+    verified: Literal[True] = True
+
+
+RpcResourceLifecycleSnapshot: TypeAlias = JsonObject
+RpcResourceServerSnapshot: TypeAlias = JsonObject
+RpcProvenanceSnapshot: TypeAlias = JsonObject
+RpcCollaborationSnapshot: TypeAlias = JsonObject
+RpcSemanticActionResult: TypeAlias = JsonObject
+
+
+@dataclass(slots=True, frozen=True)
+class CollaborationMediaRange:
+    media_id: str
+    media_type: str
+    offset: int
+    byte_length: int
+    eof: bool
+    data: str
+    encoding: Literal["base64"] = "base64"
+
+
+@dataclass(slots=True, frozen=True)
 class RpcCapabilityManifest:
     application_api_version: int
     commands: tuple[RpcCommandCapability, ...]
     events: tuple[str, ...]
     extension_ui_methods: tuple[str, ...]
     host_protocols: tuple[str, ...]
+    session_host: SessionHostManifest | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -1939,6 +2203,19 @@ class JobUpdateEvent:
 
 
 @dataclass(slots=True, frozen=True)
+class SessionObservationEvent:
+    subscription_id: str
+    observation: SessionObservation
+    type: Literal["session_observation"] = "session_observation"
+
+
+@dataclass(slots=True, frozen=True)
+class RpcV3Frame:
+    type: str
+    payload: JsonObject
+
+
+@dataclass(slots=True, frozen=True)
 class UnknownNotification:
     payload: JsonObject
     type: Literal["unknown"] = "unknown"
@@ -1998,6 +2275,8 @@ RpcNotification: TypeAlias = (
     | PlanStateUpdateEvent
     | PlanApprovalRequestEvent
     | PlanApprovalSettledEvent
+    | SessionObservationEvent
+    | RpcV3Frame
     | UnknownNotification
 )
 
@@ -2644,6 +2923,405 @@ def parse_settings_snapshot(payload: JsonObject) -> SettingsSnapshot:
     return SettingsSnapshot(tabs=tuple(tabs), settings=tuple(entries))
 
 
+def _parse_string_tuple(value: object, *, field: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ValueError(f"{field} must be a list")
+    result: list[str] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, str):
+            raise ValueError(f"{field}[{index}] must be a string")
+        result.append(item)
+    return tuple(result)
+
+
+def _parse_session_host_capability(
+    value: object, *, field: str
+) -> SessionHostCapability:
+    capability = _clone_json_object(value, field=field)
+    supported = _require_bool(capability, "supported")
+    raw_reason = capability.get("unsupportedReason")
+    unsupported_reason = None
+    if raw_reason is not None:
+        reason = _clone_json_object(raw_reason, field=f"{field}.unsupportedReason")
+        unsupported_reason = SessionHostUnsupportedReason(
+            code=_require_str(reason, "code"),
+            message=_require_str(reason, "message"),
+        )
+    if not supported and unsupported_reason is None:
+        raise ValueError(f"{field}.unsupportedReason is required when unsupported")
+    return SessionHostCapability(
+        id=_require_str(capability, "id"),
+        version=_require_int_value(capability, "version"),
+        supported=supported,
+        operations=_parse_string_tuple(
+            capability.get("operations"), field=f"{field}.operations"
+        ),
+        events=_parse_string_tuple(capability.get("events"), field=f"{field}.events"),
+        platforms=_parse_string_tuple(
+            capability.get("platforms"), field=f"{field}.platforms"
+        ),
+        unsupported_reason=unsupported_reason,
+    )
+
+
+def _parse_session_host_manifest(payload: JsonObject) -> SessionHostManifest:
+    
+
+    raw_profiles = payload.get("semanticProfiles")
+    if not isinstance(raw_profiles, list) or not raw_profiles:
+        raise ValueError("capabilities.sessionHost.semanticProfiles must be a non-empty list")
+    profiles: list[SessionSemanticProfileRange] = []
+    for index, raw_profile in enumerate(raw_profiles):
+        field = f"capabilities.sessionHost.semanticProfiles[{index}]"
+        profile = _clone_json_object(raw_profile, field=field)
+        profiles.append(
+            SessionSemanticProfileRange(
+                name=_require_str(profile, "name"),
+                major=_require_int_value(profile, "major"),
+                min_minor=_require_int_value(profile, "minMinor"),
+                max_minor=_require_int_value(profile, "maxMinor"),
+            )
+        )
+
+    raw_framing_versions = payload.get("framingVersions")
+    if not isinstance(raw_framing_versions, list):
+        raise ValueError("capabilities.sessionHost.framingVersions must be a list")
+    framing_versions: list[int] = []
+    for index, version in enumerate(raw_framing_versions):
+        if isinstance(version, bool) or not isinstance(version, int):
+            raise ValueError(
+                f"capabilities.sessionHost.framingVersions[{index}] must be an integer"
+            )
+        framing_versions.append(version)
+
+    raw_limits = _clone_json_object(
+        payload.get("limits"), field="capabilities.sessionHost.limits"
+    )
+    limits = SessionHostLimits(
+        max_frame_bytes=_require_int_value(raw_limits, "maxFrameBytes"),
+        max_reassembled_frame_bytes=_require_int_value(
+            raw_limits, "maxReassembledFrameBytes"
+        ),
+        max_artifact_read_bytes=_require_int_value(raw_limits, "maxArtifactReadBytes"),
+        max_pending_observations=_require_int_value(
+            raw_limits, "maxPendingObservations"
+        ),
+        max_idempotency_keys=_require_int_value(raw_limits, "maxIdempotencyKeys"),
+    )
+
+    raw_recovery = _clone_json_object(
+        payload.get("recovery"), field="capabilities.sessionHost.recovery"
+    )
+    recovery = SessionHostRecoveryGuarantees(
+        transport_replay=_require_str(raw_recovery, "transportReplay"),
+        durable_replay=_require_str(raw_recovery, "durableReplay"),
+        snapshot_handoff=_require_str(raw_recovery, "snapshotHandoff"),
+        acknowledgement=_require_str(raw_recovery, "acknowledgement"),
+        gap_recovery=_require_str(raw_recovery, "gapRecovery"),
+        duplicate_handling=_require_str(raw_recovery, "duplicateHandling"),
+    )
+    raw_mutations = _clone_json_object(
+        payload.get("mutations"), field="capabilities.sessionHost.mutations"
+    )
+    raw_idempotency = _clone_json_object(
+        raw_mutations.get("idempotency"),
+        field="capabilities.sessionHost.mutations.idempotency",
+    )
+    mutations = SessionHostMutationGuarantees(
+        correlation=_require_str(raw_mutations, "correlation"),
+        concurrency=_require_str(raw_mutations, "concurrency"),
+        cancellation=_require_str(raw_mutations, "cancellation"),
+        terminal_outcomes=_parse_string_tuple(
+            raw_mutations.get("terminalOutcomes"),
+            field="capabilities.sessionHost.mutations.terminalOutcomes",
+        ),
+        idempotency=SessionHostIdempotencyGuarantees(
+            scope=_require_str(raw_idempotency, "scope"),
+            retention=_require_str(raw_idempotency, "retention"),
+            conflict=_require_str(raw_idempotency, "conflict"),
+            overflow=_require_str(raw_idempotency, "overflow"),
+        ),
+    )
+
+
+    raw_capabilities = payload.get("capabilities")
+    if not isinstance(raw_capabilities, list):
+        raise ValueError("capabilities.sessionHost.capabilities must be a list")
+    capabilities: list[SessionHostCapability] = []
+    for index, raw_capability in enumerate(raw_capabilities):
+        capabilities.append(
+            _parse_session_host_capability(
+                raw_capability,
+                field=f"capabilities.sessionHost.capabilities[{index}]",
+            )
+        )
+
+    return SessionHostManifest(
+        omp_version=_require_str(payload, "ompVersion"),
+        semantic_profiles=tuple(profiles),
+        framing_versions=tuple(framing_versions),
+        limits=limits,
+        recovery=recovery,
+        mutations=mutations,
+        capabilities=tuple(capabilities),
+    )
+
+
+def parse_session_host_negotiation_result(
+    payload: JsonObject,
+) -> SessionHostNegotiationResult:
+    ok = _require_bool(payload, "ok")
+    raw_profiles = payload.get("supportedProfiles")
+    if not ok:
+        if not isinstance(raw_profiles, list) or not raw_profiles:
+            raise ValueError("initialize.supportedProfiles must be a non-empty list")
+        supported_profiles: list[SessionSemanticProfileRange] = []
+        for index, raw_profile in enumerate(raw_profiles):
+            profile = _clone_json_object(
+                raw_profile, field=f"initialize.supportedProfiles[{index}]"
+            )
+            supported_profiles.append(
+                SessionSemanticProfileRange(
+                    name=_require_str(profile, "name"),
+                    major=_require_int_value(profile, "major"),
+                    min_minor=_require_int_value(profile, "minMinor"),
+                    max_minor=_require_int_value(profile, "maxMinor"),
+                )
+            )
+        return SessionHostIncompatible(
+            code=_require_str(payload, "code"),
+            message=_require_str(payload, "message"),
+            supported_profiles=tuple(supported_profiles),
+        )
+
+    raw_profile = _clone_json_object(payload.get("profile"), field="initialize.profile")
+    raw_capabilities = payload.get("capabilities")
+    if not isinstance(raw_capabilities, list):
+        raise ValueError("initialize.capabilities must be a list")
+    raw_host_capabilities = _clone_json_object(
+        payload.get("hostCapabilities"), field="initialize.hostCapabilities"
+    )
+    return SessionHostNegotiated(
+        profile=SessionSemanticProfile(
+            name=_require_str(raw_profile, "name"),
+            major=_require_int_value(raw_profile, "major"),
+            minor=_require_int_value(raw_profile, "minor"),
+        ),
+        framing_version=_require_int_value(payload, "framingVersion"),
+        capabilities=tuple(
+            _parse_session_host_capability(
+                capability, field=f"initialize.capabilities[{index}]"
+            )
+            for index, capability in enumerate(raw_capabilities)
+        ),
+        host_capabilities=SessionHostClientCapabilities(
+            interactions=_parse_string_tuple(
+                raw_host_capabilities.get("interactions"),
+                field="initialize.hostCapabilities.interactions",
+            ),
+            semantic_content=_parse_string_tuple(
+                raw_host_capabilities.get("semanticContent"),
+                field="initialize.hostCapabilities.semanticContent",
+            ),
+        ),
+    )
+
+
+def parse_session_journal_cursor(payload: object, *, field: str = "journalCursor") -> SessionJournalCursor:
+    cursor = _clone_json_object(payload, field=field)
+    leaf_id = cursor.get("leafId")
+    entry_id = cursor.get("entryId")
+    if leaf_id is not None and not isinstance(leaf_id, str):
+        raise ValueError(f"{field}.leafId must be a string or null")
+    if entry_id is not None and not isinstance(entry_id, str):
+        raise ValueError(f"{field}.entryId must be a string or null")
+    return SessionJournalCursor(
+        session_id=_require_str(cursor, "sessionId"),
+        leaf_id=leaf_id,
+        entry_id=entry_id,
+    )
+
+
+def parse_session_observation_position(
+    payload: object, *, field: str = "position"
+) -> SessionObservationPosition:
+    position = _clone_json_object(payload, field=field)
+    return SessionObservationPosition(
+        epoch=_require_str(position, "epoch"),
+        sequence=_require_int_value(position, "sequence"),
+    )
+
+
+def parse_session_snapshot(payload: JsonObject) -> SessionSnapshot:
+    return SessionSnapshot(
+        session_id=_require_str(payload, "sessionId"),
+        revision=_require_int_value(payload, "revision"),
+        state=_clone_json_value(payload.get("state"), field="sessionSnapshot.state"),
+        journal_cursor=parse_session_journal_cursor(
+            payload.get("journalCursor"), field="sessionSnapshot.journalCursor"
+        ),
+        watermark=parse_session_observation_position(
+            payload.get("watermark"), field="sessionSnapshot.watermark"
+        ),
+    )
+
+
+def parse_session_observation(payload: JsonObject) -> SessionObservation:
+    observation_type = _require_literal(
+        payload.get("type"), frozenset({"observation", "gap"}), field="sessionObservation.type"
+    )
+    if observation_type == "gap":
+        recovery = _require_literal(
+            payload.get("recovery"), frozenset({"resnapshot"}), field="sessionObservation.recovery"
+        )
+        return SessionObservationGap(
+            session_id=_require_str(payload, "sessionId"),
+            epoch=_require_str(payload, "epoch"),
+            after_sequence=_require_int_value(payload, "afterSequence"),
+            first_available_sequence=_require_int_value(payload, "firstAvailableSequence"),
+            latest_sequence=_require_int_value(payload, "latestSequence"),
+            recovery=cast(Literal["resnapshot"], recovery),
+        )
+
+    durability = _require_literal(
+        payload.get("durability"),
+        frozenset({"durable", "transient"}),
+        field="sessionObservation.durability",
+    )
+    settlement = _require_literal(
+        payload.get("terminalSettlement"),
+        frozenset({"none", "completed", "cancelled", "failed"}),
+        field="sessionObservation.terminalSettlement",
+    )
+    raw_cursor = payload.get("journalCursor")
+    return SessionObservationEnvelope(
+        session_id=_require_str(payload, "sessionId"),
+        epoch=_require_str(payload, "epoch"),
+        sequence=_require_int_value(payload, "sequence"),
+        event_id=_require_str(payload, "eventId"),
+        kind=_require_str(payload, "kind"),
+        payload=_clone_json_value(payload.get("payload"), field="sessionObservation.payload"),
+        durability=cast(Literal["durable", "transient"], durability),
+        replay=_require_bool(payload, "replay"),
+        terminal_settlement=cast(
+            Literal["none", "completed", "cancelled", "failed"], settlement
+        ),
+        causation_id=_optional_str(payload, "causationId"),
+        journal_cursor=(
+            parse_session_journal_cursor(raw_cursor, field="sessionObservation.journalCursor")
+            if raw_cursor is not None
+            else None
+        ),
+    )
+
+
+def parse_session_open_result(payload: JsonObject) -> SessionOpenResult:
+    raw_snapshot = payload.get("snapshot")
+    return SessionOpenResult(
+        subscription_id=_require_str(payload, "subscriptionId"),
+        snapshot=(
+            parse_session_snapshot(
+                _clone_json_object(raw_snapshot, field="sessionOpen.snapshot")
+            )
+            if raw_snapshot is not None
+            else None
+        ),
+    )
+
+
+def parse_session_command_outcome(payload: JsonObject) -> SessionCommandOutcome:
+    outcome = _require_literal(
+        payload.get("outcome"),
+        frozenset({"completed", "cancelled", "failed", "unknown"}),
+        field="sessionInvoke.outcome",
+    )
+    raw_error = payload.get("error")
+    parsed_error: SessionCommandError | None = None
+    if raw_error is not None:
+        error = _clone_json_object(raw_error, field="sessionInvoke.error")
+        parsed_error = SessionCommandError(
+            code=_require_str(error, "code"),
+            message=_require_str(error, "message"),
+            retryable=_require_bool(error, "retryable"),
+        )
+    return SessionCommandOutcome(
+        outcome=cast(Literal["completed", "cancelled", "failed", "unknown"], outcome),
+        revision=_optional_int(payload, "revision"),
+        result=(
+            _clone_json_value(payload.get("result"), field="sessionInvoke.result")
+            if "result" in payload
+            else None
+        ),
+        error=parsed_error,
+    )
+
+
+def parse_artifact_descriptor(payload: JsonObject) -> ArtifactDescriptor:
+    lifecycle = _require_literal(
+        payload.get("lifecycle"),
+        frozenset({"pending", "available", "cancelled"}),
+        field="artifact.lifecycle",
+    )
+    cancellation = _clone_json_object(
+        payload.get("cancellation"), field="artifact.cancellation"
+    )
+    byte_length = _optional_int(payload, "byteLength")
+    sha256 = _optional_str(payload, "sha256")
+    return ArtifactDescriptor(
+        id=_require_str(payload, "id"),
+        media_type=_require_str(payload, "mediaType"),
+        byte_length=byte_length,
+        sha256=sha256,
+        provenance=_clone_json_object(payload.get("provenance"), field="artifact.provenance"),
+        related=_clone_json_object(payload.get("related"), field="artifact.related"),
+        lifecycle=cast(Literal["pending", "available", "cancelled"], lifecycle),
+        cancelled=_require_bool(cancellation, "cancelled"),
+        cancellation_reason=_optional_str(cancellation, "reason"),
+    )
+
+
+def parse_artifact_range(payload: JsonObject) -> ArtifactRange:
+    descriptor = _clone_json_object(payload.get("descriptor"), field="artifactRange.descriptor")
+    encoding = _require_literal(
+        payload.get("encoding"), frozenset({"base64"}), field="artifactRange.encoding"
+    )
+    return ArtifactRange(
+        descriptor=parse_artifact_descriptor(descriptor),
+        offset=_require_int_value(payload, "offset"),
+        byte_length=_require_int_value(payload, "byteLength"),
+        eof=_require_bool(payload, "eof"),
+        data=_require_str(payload, "data"),
+        encoding=cast(Literal["base64"], encoding),
+    )
+
+
+def parse_artifact_export_result(payload: JsonObject) -> ArtifactExportResult:
+    if payload.get("verified") is not True:
+        raise ValueError("artifactExport.verified must be true")
+    return ArtifactExportResult(
+        path=_require_str(payload, "path"),
+        byte_length=_require_int_value(payload, "byteLength"),
+        sha256=_require_str(payload, "sha256"),
+    )
+
+
+def parse_collaboration_media_range(payload: JsonObject) -> CollaborationMediaRange:
+    encoding = _require_literal(
+        payload.get("encoding"),
+        frozenset({"base64"}),
+        field="collaborationMedia.encoding",
+    )
+    return CollaborationMediaRange(
+        media_id=_require_str(payload, "mediaId"),
+        media_type=_require_str(payload, "mediaType"),
+        offset=_require_int_value(payload, "offset"),
+        byte_length=_require_int_value(payload, "byteLength"),
+        eof=_require_bool(payload, "eof"),
+        data=_require_str(payload, "data"),
+        encoding=cast(Literal["base64"], encoding),
+    )
+
+
 def parse_rpc_capability_manifest(payload: JsonObject) -> RpcCapabilityManifest:
     raw_api_version = payload.get("applicationApiVersion")
     if not isinstance(raw_api_version, int) or isinstance(raw_api_version, bool):
@@ -2723,6 +3401,13 @@ def parse_rpc_capability_manifest(payload: JsonObject) -> RpcCapabilityManifest:
         host_protocols=string_tuple(
             payload.get("hostProtocols"), field="capabilities.hostProtocols"
         ),
+        session_host=_parse_session_host_manifest(
+            _clone_json_object(
+                payload.get("sessionHost"), field="capabilities.sessionHost"
+            )
+        )
+        if payload.get("sessionHost") is not None
+        else None,
     )
 
 
@@ -3484,6 +4169,19 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
                 payload, "maxReassembledFrameBytes"
             ),
             capabilities=capabilities,
+        )
+    if event_type == "session_observation":
+        raw_observation = _clone_json_object(
+            payload.get("observation"), field="session_observation.observation"
+        )
+        return SessionObservationEvent(
+            subscription_id=_require_str(payload, "subscriptionId"),
+            observation=parse_session_observation(raw_observation),
+        )
+    if isinstance(event_type, str) and event_type in _RPC_V3_FRAME_TYPES:
+        return RpcV3Frame(
+            type=event_type,
+            payload=_clone_json_object(payload, field=event_type),
         )
     if event_type == "extension_ui_request":
         return parse_extension_ui_request(payload)

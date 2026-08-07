@@ -29,9 +29,11 @@ from omp_rpc import (
     ProviderAuthRequest,
     ProviderAuthUpdate,
     QueueUpdateEvent,
+    RpcV3Frame,
     ReadyEvent,
     SessionActivityPhase,
     SessionInfoUpdateEvent,
+    SessionObservationEvent,
     SessionState,
     SubagentEvent,
     SubagentLifecycleEvent,
@@ -42,9 +44,11 @@ from omp_rpc import (
     ToolInventoryUpdateEvent,
     assistant_text,
     assistant_text_with_thinking,
+    parse_artifact_range,
     parse_advisor_state,
     parse_mode_change_result,
     parse_notification,
+    parse_session_observation,
     parse_session_state,
     parse_tool_activation_result,
     parse_tool_inventory,
@@ -142,6 +146,166 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertEqual(activation.scope, "session")
         self.assertEqual(activation.execution, "sync")
         self.assertEqual(activation.concurrency_class, "serial")
+
+    def test_parse_ready_session_host_manifest_preserves_unknown_capabilities(self) -> None:
+        manifest = json.loads(
+            (
+                Path(__file__).parent / "fixtures" / "rpc-capability-manifest.json"
+            ).read_text(encoding="utf-8")
+        )
+        manifest["sessionHost"] = {
+            "ompVersion": "17.3.0",
+            "semanticProfiles": [
+                {
+                    "name": "omp.session",
+                    "major": 3,
+                    "minMinor": 0,
+                    "maxMinor": 1,
+                }
+            ],
+            "framingVersions": [1, 2],
+            "limits": {
+                "maxFrameBytes": 1_048_576,
+                "maxReassembledFrameBytes": 67_108_864,
+                "maxArtifactReadBytes": 1_048_576,
+                "maxPendingObservations": 1_024,
+                "maxIdempotencyKeys": 1_024,
+            },
+            "recovery": {
+                "transportReplay": "bounded",
+                "durableReplay": "session_journal",
+                "snapshotHandoff": "watermark",
+                "acknowledgement": "cumulative",
+                "gapRecovery": "resnapshot",
+                "duplicateHandling": "stable_event_id",
+            },
+            "mutations": {
+                "correlation": "request_id",
+                "concurrency": "expected_revision",
+                "cancellation": "cooperative",
+                "terminalOutcomes": ["completed", "cancelled", "failed", "unknown"],
+                "idempotency": {
+                    "scope": "authority_lifetime",
+                    "retention": "bounded",
+                    "conflict": "reject",
+                    "overflow": "reject",
+                },
+            },
+            "capabilities": [
+                {
+                    "id": "future.capability",
+                    "version": 7,
+                    "supported": False,
+                    "operations": ["futureOperation"],
+                    "events": ["futureEvent"],
+                    "platforms": ["future-platform"],
+                    "unsupportedReason": {
+                        "code": "not_available",
+                        "message": "Not available here",
+                    },
+                }
+            ],
+        }
+
+        notification = parse_notification(
+            {"type": "ready", "protocolVersion": 1, "capabilities": manifest}
+        )
+
+        self.assertIsInstance(notification, ReadyEvent)
+        assert isinstance(notification, ReadyEvent)
+        assert notification.capabilities is not None
+        session_host = notification.capabilities.session_host
+        assert session_host is not None
+        self.assertEqual(session_host.omp_version, "17.3.0")
+        self.assertEqual(session_host.semantic_profiles[0].major, 3)
+        self.assertEqual(session_host.semantic_profiles[0].max_minor, 1)
+        self.assertEqual(session_host.limits.max_pending_observations, 1_024)
+        self.assertEqual(session_host.limits.max_idempotency_keys, 1_024)
+        self.assertEqual(session_host.recovery.durable_replay, "session_journal")
+        self.assertEqual(session_host.mutations.concurrency, "expected_revision")
+        self.assertEqual(session_host.mutations.idempotency.overflow, "reject")
+        self.assertEqual(session_host.capabilities[0].id, "future.capability")
+        self.assertFalse(session_host.capabilities[0].supported)
+        self.assertEqual(
+            session_host.capabilities[0].unsupported_reason.code, "not_available"
+        )
+
+    def test_parse_session_observations_and_generic_v3_frames(self) -> None:
+        observation = parse_notification(
+            {
+                "type": "session_observation",
+                "subscriptionId": "subscription-1",
+                "observation": {
+                    "type": "observation",
+                    "sessionId": "session-1",
+                    "epoch": "epoch-1",
+                    "sequence": 7,
+                    "eventId": "event-7",
+                    "kind": "queue_updated",
+                    "payload": {"revision": 3},
+                    "durability": "durable",
+                    "replay": False,
+                    "terminalSettlement": "none",
+                    "causationId": "request-1",
+                    "journalCursor": {
+                        "sessionId": "session-1",
+                        "leafId": "leaf-1",
+                        "entryId": "entry-7",
+                    },
+                },
+            }
+        )
+        gap = parse_session_observation(
+            {
+                "type": "gap",
+                "sessionId": "session-1",
+                "epoch": "epoch-1",
+                "afterSequence": 7,
+                "firstAvailableSequence": 10,
+                "latestSequence": 12,
+                "recovery": "resnapshot",
+            }
+        )
+        semantic_frame = parse_notification(
+            {
+                "type": "semantic_content",
+                "content": [{"type": "future_widget", "payload": {"answer": 42}}],
+            }
+        )
+
+        self.assertIsInstance(observation, SessionObservationEvent)
+        assert isinstance(observation, SessionObservationEvent)
+        self.assertEqual(observation.observation.sequence, 7)
+        self.assertEqual(observation.observation.journal_cursor.entry_id, "entry-7")
+        self.assertEqual(gap.first_available_sequence, 10)
+        self.assertIsInstance(semantic_frame, RpcV3Frame)
+        assert isinstance(semantic_frame, RpcV3Frame)
+        self.assertEqual(semantic_frame.payload["content"][0]["type"], "future_widget")
+
+    def test_parse_bounded_artifact_range(self) -> None:
+        artifact_range = parse_artifact_range(
+            {
+                "descriptor": {
+                    "id": "artifact-1",
+                    "mediaType": "text/plain",
+                    "byteLength": 5,
+                    "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+                    "provenance": {"sessionId": "session-1"},
+                    "related": {"turnId": "turn-1"},
+                    "lifecycle": "available",
+                    "cancellation": {"cancelled": False},
+                },
+                "offset": 0,
+                "byteLength": 5,
+                "eof": True,
+                "data": "aGVsbG8=",
+                "encoding": "base64",
+            }
+        )
+
+        self.assertEqual(artifact_range.descriptor.id, "artifact-1")
+        self.assertEqual(artifact_range.byte_length, 5)
+        self.assertTrue(artifact_range.eof)
 
     def test_parse_ready_preserves_future_capability_classifiers(self) -> None:
         manifest = json.loads(

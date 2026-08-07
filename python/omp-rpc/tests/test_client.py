@@ -21,7 +21,11 @@ from omp_rpc import (
     RpcCommandError,
     RpcConcurrencyError,
     RpcError,
+    RpcV3ClientOptions,
+    RpcSemanticIncompatibilityError,
+    SessionHostClientCapabilities,
     RpcTimeoutError,
+    SessionCommand,
     host_tool,
 )
 from omp_rpc.client import _RpcFrameDecoder
@@ -306,6 +310,186 @@ FAKE_SERVER = textwrap.dedent(
                 "get_capabilities",
                 capability_manifest,
             )
+        elif command_type == "initialize":
+            requested = command.get("requestedCapabilities", [])
+            respond(
+                request_id,
+                "initialize",
+                {
+                    "ok": True,
+                    "profile": {"name": "omp.session", "major": 3, "minor": 0},
+                    "framingVersion": 1,
+                    "capabilities": [
+                        {
+                            "id": capability_id,
+                            "version": 0,
+                            "supported": False,
+                            "operations": [],
+                            "events": [],
+                            "platforms": [],
+                            "unsupportedReason": {
+                                "code": "unknown_capability",
+                                "message": "Capability is not advertised",
+                            },
+                        }
+                        for capability_id in requested
+                    ],
+                    "hostCapabilities": command["hostCapabilities"],
+                },
+            )
+        elif command_type == "session_open":
+            respond(
+                request_id,
+                "session_open",
+                {
+                    "subscriptionId": "subscription-1",
+                    "snapshot": {
+                        "sessionId": "fake-session",
+                        "revision": 4,
+                        "state": {"phase": "idle"},
+                        "journalCursor": {
+                            "sessionId": "fake-session",
+                            "leafId": "leaf-1",
+                            "entryId": "entry-4",
+                        },
+                        "watermark": {"epoch": "epoch-1", "sequence": 4},
+                    },
+                },
+            )
+            print(
+                json.dumps(
+                    {
+                        "type": "session_observation",
+                        "subscriptionId": "subscription-1",
+                        "observation": {
+                            "type": "observation",
+                            "sessionId": "fake-session",
+                            "epoch": "epoch-1",
+                            "sequence": 5,
+                            "eventId": "event-5",
+                            "kind": "queue_updated",
+                            "payload": {"revision": 5},
+                            "durability": "durable",
+                            "replay": False,
+                            "terminalSettlement": "none",
+                            "journalCursor": {
+                                "sessionId": "fake-session",
+                                "leafId": "leaf-1",
+                                "entryId": "entry-5",
+                            },
+                        },
+                    }
+                ),
+                flush=True,
+            )
+        elif command_type in {"session_ack", "session_unsubscribe"}:
+            respond(request_id, command_type, {})
+        elif command_type == "session_invoke":
+            nested = command["command"]
+            respond(
+                request_id,
+                "session_invoke",
+                {
+                    "outcome": "completed",
+                    "revision": nested["expectedRevision"] + 1,
+                    "result": {
+                        "kind": nested["kind"],
+                        "idempotencyKey": nested["idempotencyKey"],
+                    },
+                },
+            )
+        elif command_type == "artifact_describe":
+            respond(
+                request_id,
+                "artifact_describe",
+                {
+                    "id": command["artifactId"],
+                    "mediaType": "text/plain",
+                    "byteLength": 5,
+                    "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+                    "provenance": {"sessionId": "fake-session"},
+                    "related": {"turnId": "turn-1"},
+                    "lifecycle": "available",
+                    "cancellation": {"cancelled": False},
+                },
+            )
+        elif command_type == "artifact_read":
+            descriptor = {
+                "id": command["artifactId"],
+                "mediaType": "text/plain",
+                "byteLength": 5,
+                "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+                "provenance": {"sessionId": "fake-session"},
+                "related": {"turnId": "turn-1"},
+                "lifecycle": "available",
+                "cancellation": {"cancelled": False},
+            }
+            respond(
+                request_id,
+                "artifact_read",
+                {
+                    "descriptor": descriptor,
+                    "offset": command.get("offset", 0),
+                    "byteLength": 5,
+                    "eof": True,
+                    "data": "aGVsbG8=",
+                    "encoding": "base64",
+                },
+            )
+        elif command_type == "artifact_export":
+            respond(
+                request_id,
+                "artifact_export",
+                {
+                    "path": command["destination"],
+                    "byteLength": 5,
+                    "sha256": command["expectedSha256"],
+                    "verified": True,
+                },
+            )
+        elif command_type == "resource_list":
+            respond(request_id, "resource_list", {"revision": 2, "servers": []})
+        elif command_type == "resource_refresh":
+            respond(request_id, "resource_refresh", {"operationId": "resource-op-1"})
+        elif command_type == "resource_reload":
+            respond(request_id, "resource_reload", {"operationId": "resource-op-2"})
+        elif command_type == "resource_cancel":
+            respond(request_id, "resource_cancel", {"cancelled": True})
+        elif command_type == "resource_dispose":
+            respond(
+                request_id,
+                "resource_dispose",
+                {"id": command["serverId"], "lifecycle": "disabled"},
+            )
+        elif command_type == "provenance_get":
+            respond(
+                request_id,
+                "provenance_get",
+                {"provider": "anthropic", "model": "claude-sonnet-4-5"},
+            )
+        elif command_type.startswith("collaboration_"):
+            if command_type == "collaboration_acknowledge":
+                payload = {"acknowledged": command["sequence"], "retained": 3}
+            elif command_type == "collaboration_read_media":
+                payload = {
+                    "mediaId": command["mediaId"],
+                    "mediaType": "image/png",
+                    "offset": command.get("offset", 0),
+                    "byteLength": 3,
+                    "eof": True,
+                    "data": "UE5H",
+                    "encoding": "base64",
+                }
+            else:
+                payload = {
+                    "state": "hosting",
+                    "role": "host",
+                    "generation": 2,
+                    "sequence": 3,
+                }
+            respond(request_id, command_type, payload)
+        elif command_type == "session_shutdown":
+            respond(request_id, "session_shutdown", {"state": "settled"})
         elif command_type == "get_tool_inventory":
             print(json.dumps({"type": "tool_inventory_update"}), flush=True)
             respond(
@@ -779,6 +963,17 @@ FAKE_SERVER = textwrap.dedent(
             respond(request_id, command_type, success=False, error=f"unsupported: {command_type}")
     """
 ).replace("__CAPABILITY_MANIFEST_JSON__", repr(CAPABILITY_MANIFEST_JSON))
+
+INCOMPATIBLE_V3_SERVER = FAKE_SERVER.replace(
+    '"ok": True,\n                "profile":',
+    '"ok": False,\n'
+    '                "code": "unsupported_semantic_version",\n'
+    '                "message": "RPC semantic v3 is unavailable",\n'
+    '                "supportedProfiles": [\n'
+    '                    {"name": "omp.session", "major": 2, "minMinor": 0, "maxMinor": 0}\n'
+    '                ],\n'
+    '                "profile":',
+)
 
 STALLED_STATE_SERVER = FAKE_SERVER.replace(
     'elif command_type == "get_state":\n'
@@ -1305,6 +1500,7 @@ OPERATION_SERVER = textwrap.dedent(
                 "settledAt": sequence + 0.5,
             }
         else:
+
             print(json.dumps({"type": "agent_start"}), flush=True)
             print(
                 json.dumps(
@@ -1423,7 +1619,6 @@ class RpcClientTests(unittest.TestCase):
             )
             self.assertEqual(capabilities.commands[0].name, "get_capabilities")
             self.assertEqual(capabilities.commands[0].concurrency_class, "serial")
-
             state = client.get_state()
             self.assertEqual(state.session_id, "fake-session")
             self.assertEqual(
@@ -1437,6 +1632,117 @@ class RpcClientTests(unittest.TestCase):
             result = client.bash("echo hello")
             self.assertEqual(result.output, "hello\n")
             self.assertEqual(result.exit_code, 0)
+
+    def test_explicit_rpc_v3_startup_negotiates_without_silent_downgrade(self) -> None:
+        options = RpcV3ClientOptions(
+            requested_capabilities=("future.capability",),
+            host_capabilities=SessionHostClientCapabilities(
+                interactions=("confirm",),
+                semantic_content=("markdown",),
+            ),
+        )
+
+        with self.make_client(rpc_v3=options) as client:
+            negotiation = client.rpc_v3_negotiation
+
+        assert negotiation is not None
+        self.assertEqual(negotiation.profile.major, 3)
+        self.assertEqual(negotiation.profile.minor, 0)
+        self.assertEqual(negotiation.framing_version, 1)
+        self.assertEqual(negotiation.capabilities[0].id, "future.capability")
+        self.assertFalse(negotiation.capabilities[0].supported)
+        self.assertEqual(
+            negotiation.host_capabilities.interactions, ("confirm",)
+        )
+
+    def test_rpc_v3_authority_and_host_service_methods(self) -> None:
+        options = RpcV3ClientOptions(
+            requested_capabilities=(
+                "session.observe",
+                "session.mutate",
+                "artifact.transfer",
+                "resource.lifecycle",
+                "runtime.provenance",
+                "collaboration",
+            )
+        )
+        observations = []
+        observation_received = threading.Event()
+
+        with self.make_client(rpc_v3=options) as client:
+            client.on_session_observation(
+                lambda event: (
+                    observations.append(event),
+                    observation_received.set(),
+                )
+            )
+            opened = client.open_session(snapshot=True)
+            self.assertEqual(opened.subscription_id, "subscription-1")
+            assert opened.snapshot is not None
+            self.assertEqual(opened.snapshot.revision, 4)
+            self.assertTrue(observation_received.wait(1))
+            self.assertEqual(observations[0].observation.sequence, 5)
+
+            client.acknowledge_session(opened.subscription_id, 5)
+            outcome = client.invoke_session(
+                SessionCommand(
+                    kind="queue_clear",
+                    expected_revision=4,
+                    idempotency_key="idempotency-1",
+                )
+            )
+            self.assertEqual(outcome.outcome, "completed")
+            self.assertEqual(outcome.revision, 5)
+            self.assertEqual(outcome.result["idempotencyKey"], "idempotency-1")
+            client.unsubscribe_session(opened.subscription_id)
+
+            descriptor = client.describe_artifact("artifact-1")
+            self.assertEqual(descriptor.byte_length, 5)
+            artifact_range = client.read_artifact("artifact-1", offset=0, length=5)
+            self.assertEqual(base64.b64decode(artifact_range.data), b"hello")
+            exported = client.export_artifact(
+                "artifact-1",
+                "/tmp/artifact-1.txt",
+                descriptor.sha256 or "",
+            )
+            self.assertTrue(exported.verified)
+
+            self.assertEqual(client.list_resources()["revision"], 2)
+            self.assertEqual(client.refresh_resources(), "resource-op-1")
+            self.assertEqual(client.reload_resources(), "resource-op-2")
+            self.assertTrue(client.cancel_resource_operation("resource-op-1"))
+            self.assertEqual(
+                client.dispose_resource("server-1")["lifecycle"], "disabled"
+            )
+            self.assertEqual(
+                client.get_runtime_provenance()["provider"], "anthropic"
+            )
+
+            collaboration = client.host_collaboration()
+            self.assertEqual(collaboration["role"], "host")
+            self.assertEqual(client.get_collaboration()["generation"], 2)
+            self.assertEqual(client.join_collaboration("omp://invite")["state"], "hosting")
+            self.assertEqual(client.leave_collaboration()["state"], "hosting")
+            self.assertEqual(
+                client.revoke_collaboration_participant("participant-1")["sequence"],
+                3,
+            )
+            self.assertEqual(client.rotate_collaboration_access()["generation"], 2)
+            self.assertEqual(client.acknowledge_collaboration(2, 3), (3, 3))
+            media = client.read_collaboration_media("media-1", offset=0, length=3)
+            self.assertEqual(base64.b64decode(media.data), b"PNG")
+
+            settlement = client.shutdown_session()
+            self.assertEqual(settlement.state, "settled")
+    def test_explicit_rpc_v3_startup_raises_typed_incompatibility(self) -> None:
+        options = RpcV3ClientOptions(requested_capabilities=("session.observe",))
+
+        with self.assertRaises(RpcSemanticIncompatibilityError) as context:
+            self.make_client(INCOMPATIBLE_V3_SERVER, rpc_v3=options).start()
+
+        self.assertEqual(context.exception.result.code, "unsupported_semantic_version")
+        self.assertEqual(context.exception.result.supported_profiles[0].major, 2)
+
 
     def test_set_fast_mode_preserves_provider_tier_state(self) -> None:
         with self.make_client() as client:

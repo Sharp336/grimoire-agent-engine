@@ -14,6 +14,8 @@ provides:
 - typed per-event listeners plus a typed catch-all notification hook
 - helpers for collecting prompt runs and handling extension UI requests in manual or headless mode
 - typed host-tool helpers so Python RPC owners can expose custom tools with JSON Schema metadata
+- explicit RPC v3 negotiation, ordered session observations, authoritative mutations,
+  artifacts, resource lifecycle, collaboration, provenance, and graceful shutdown
 
 ## Basic Usage
 
@@ -98,6 +100,68 @@ with RpcClient(
 ) as client:
     print(client.get_state().session_id)
 ```
+
+## RPC v3 Session Authority
+
+Pass `rpc_v3` to require the `omp.session` v3 semantic profile. Startup raises
+`RpcSemanticIncompatibilityError` instead of silently falling back:
+
+```python
+import threading
+
+from omp_rpc import (
+    RpcClient,
+    RpcV3ClientOptions,
+    SessionCommand,
+    SessionHostClientCapabilities,
+)
+
+observation_received = threading.Event()
+observations = []
+
+options = RpcV3ClientOptions(
+    requested_capabilities=("session.observe", "session.execute", "session.shutdown"),
+    host_capabilities=SessionHostClientCapabilities(
+        interactions=("confirm", "input", "approval", "ask"),
+        semantic_content=("markdown", "fields", "table", "diff", "artifact"),
+    ),
+)
+
+with RpcClient(rpc_v3=options) as client:
+    client.on_session_observation(
+        lambda event: (observations.append(event), observation_received.set())
+    )
+    opened = client.open_session(snapshot=True)
+    assert opened.snapshot is not None
+
+    outcome = client.invoke_session(
+        SessionCommand(
+            kind="queue_insert",
+            input={"lane": "followUp", "text": "Review the current changes."},
+            expected_revision=opened.snapshot.revision,
+            idempotency_key="host-generated-unique-key",
+        )
+    )
+    if outcome.outcome != "completed":
+        raise RuntimeError(f"queue insertion settled as {outcome.outcome}")
+
+    if observation_received.wait(timeout=5):
+        observation = observations[-1].observation
+        if observation.type == "observation":
+            client.acknowledge_session(opened.subscription_id, observation.sequence)
+
+    client.unsubscribe_session(opened.subscription_id)
+    client.shutdown_session()
+```
+
+Do not issue blocking client requests from a notification listener: listeners
+run on the stdout reader thread. Hand observations to the owning thread or a
+worker, then acknowledge cumulatively.
+
+The same client exposes bounded artifact reads and verified export,
+`list_resources()` plus resource lifecycle controls, collaboration controls,
+and `get_runtime_provenance()`. See the canonical protocol reference for wire
+schemas, reconnect behavior, and shutdown guarantees.
 
 ## Host-Owned Custom Tools
 
