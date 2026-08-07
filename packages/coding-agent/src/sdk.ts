@@ -46,6 +46,7 @@ import { bucketRules } from "./capability/rule-buckets";
 import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode";
 import { shouldInlineToolDescriptors } from "./config/inline-tool-descriptors-mode";
 import { isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry";
+import { ModelRuntime } from "./config/model-runtime";
 import {
 	formatModelSelectorValue,
 	formatModelString,
@@ -353,6 +354,13 @@ export interface CreateAgentSessionOptions {
 	authStorage?: AuthStorage;
 	/** Model registry. Default: discoverModels(authStorage, agentDir) */
 	modelRegistry?: ModelRegistry;
+	/**
+	 * Legacy pi `>=0.80.8` model/auth runtime (issue #7068). When provided
+	 * without `modelRegistry`, the session is built on the runtime's
+	 * underlying registry — sharing its exact catalog and auth storage,
+	 * including extension-registered providers.
+	 */
+	modelRuntime?: ModelRuntime;
 	/**
 	 * Request credential resolver. Defaults to the model registry's normal
 	 * session-affine resolver. Security scans use this narrow seam to keep one
@@ -1238,10 +1246,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// / session would silently miss credential_disabled events.
 	const modelRegistry =
 		options.modelRegistry ??
+		(options.modelRuntime !== undefined ? ModelRuntime.registryOf(options.modelRuntime) : undefined) ??
 		new ModelRegistry(options.authStorage ?? (await logger.time("discoverModels", discoverAuthStorage, agentDir)));
 	// Track whether we internally created the authStorage so we can close it
 	// if construction fails before the session takes ownership.
-	const ownsAuthStorage = !options.authStorage && !options.modelRegistry;
+	const ownsAuthStorage = !options.authStorage && !options.modelRegistry && !options.modelRuntime;
 	const authStorage = modelRegistry.authStorage;
 	if (options.authStorage && options.authStorage !== authStorage) {
 		throw new Error(
