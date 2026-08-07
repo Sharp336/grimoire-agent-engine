@@ -468,13 +468,32 @@ describe("model thinking derivation", () => {
 		expect(() => mapEffortToAnthropicAdaptiveEffort(opus47, Effort.Minimal)).toThrow(/not supported/);
 		expect(mapEffortToAnthropicAdaptiveEffort(mythos, Effort.XHigh)).toBe("xhigh");
 		expect(mapEffortToAnthropicAdaptiveEffort(sonnet5, Effort.Max)).toBe("max");
-		// Bedrock Converse stays on the four-tier scale regardless of version.
-		expect(getSupportedEfforts(opus47Bedrock)).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.Max]);
+		// Bedrock Converse 4.7+ carries the same five-tier scale as the Messages
+		// API — the model itself validates `output_config.effort` and accepts
+		// xhigh (verified live: Fable 5, Opus 4.7/4.8/5, Sonnet 5 accept; 4.6
+		// rejects with "Input should be 'low', 'medium', 'high' or 'max'").
+		expect(getSupportedEfforts(opus47Bedrock)).toEqual([
+			Effort.Low,
+			Effort.Medium,
+			Effort.High,
+			Effort.XHigh,
+			Effort.Max,
+		]);
 		expect(opus47Bedrock.thinking?.effortMap).toBeUndefined();
 		expect(mapEffortToAnthropicAdaptiveEffort(opus47Bedrock, Effort.High)).toBe("high");
+		expect(mapEffortToAnthropicAdaptiveEffort(opus47Bedrock, Effort.XHigh)).toBe("xhigh");
 		expect(mapEffortToAnthropicAdaptiveEffort(opus47Bedrock, Effort.Max)).toBe("max");
 		expect(mapEffortToAnthropicAdaptiveEffort(sonnet5Bedrock, Effort.Max)).toBe("max");
-		expect(() => mapEffortToAnthropicAdaptiveEffort(sonnet5Bedrock, Effort.XHigh)).toThrow(/not supported/);
+		expect(mapEffortToAnthropicAdaptiveEffort(sonnet5Bedrock, Effort.XHigh)).toBe("xhigh");
+		expect(mapEffortToAnthropicAdaptiveEffort(mythosBedrock, Effort.XHigh)).toBe("xhigh");
+		// Bedrock 4.6 keeps the four-tier boundary: no xhigh below 4.7.
+		const opus46Bedrock = createModel({
+			id: "us.anthropic.claude-opus-4-6-v1",
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+		});
+		expect(getSupportedEfforts(opus46Bedrock)).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.Max]);
+		expect(() => mapEffortToAnthropicAdaptiveEffort(opus46Bedrock, Effort.XHigh)).toThrow(/not supported/);
 		// Sonnet 4.6 runs adaptive mode on the three-tier low/medium/high scale.
 		expect(getSupportedEfforts(sonnet46)).toEqual([Effort.Low, Effort.Medium, Effort.High]);
 		expect(() => mapEffortToAnthropicAdaptiveEffort(sonnet46, Effort.XHigh)).toThrow(/not supported/);
