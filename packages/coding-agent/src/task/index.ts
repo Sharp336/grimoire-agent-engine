@@ -449,8 +449,14 @@ class TaskJobError extends Error {}
  * (`#runSpawn`) intentionally stays fresh. The memo also tracks the live
  * `discoverAgents` binding: test spies swap that binding, which invalidates
  * the memo automatically.
+ *
+ * `discoverySnapshots` holds the settled agent list per cwd. A live `TaskTool`
+ * renders its description from the snapshot rather than the array it was
+ * constructed with, so {@link refreshAgentDiscovery} can republish edited
+ * `.omp/agents/*.md` definitions to sessions that are already running.
  */
 const discoveryMemo = new Map<string, Promise<DiscoveryResult>>();
+const discoverySnapshots = new Map<string, AgentDefinition[]>();
 let discoveryMemoFn: typeof discoverAgents | undefined;
 
 function discoverAgentsForCreate(cwd: string): Promise<DiscoveryResult> {
@@ -458,17 +464,49 @@ function discoverAgentsForCreate(cwd: string): Promise<DiscoveryResult> {
 	if (discoveryMemoFn !== fn) {
 		discoveryMemoFn = fn;
 		discoveryMemo.clear();
+		discoverySnapshots.clear();
 	}
 	const key = path.resolve(cwd);
 	let pending = discoveryMemo.get(key);
 	if (!pending) {
 		pending = fn(cwd);
 		discoveryMemo.set(key, pending);
-		pending.catch(() => {
-			if (discoveryMemo.get(key) === pending) discoveryMemo.delete(key);
-		});
+		pending.then(
+			result => {
+				if (discoveryMemo.get(key) === pending) discoverySnapshots.set(key, result.agents);
+			},
+			() => {
+				if (discoveryMemo.get(key) === pending) discoveryMemo.delete(key);
+			},
+		);
 	}
 	return pending;
+}
+
+/**
+ * Re-read agent definitions from disk and republish them to live `TaskTool`
+ * instances.
+ *
+ * Agent files are only scanned once per cwd per process, and the built-in tool
+ * slate is built once at session start — so without this, an edited, added, or
+ * removed `.omp/agents/*.md` only reached the model after a restart. Called by
+ * `/reload-plugins` (which advertises agents in its scope), its ACP twin, and
+ * the Agent Control Center after it writes a new definition.
+ *
+ * Every cwd already scanned in this process is refreshed, plus `cwd` when
+ * given, so subagent sessions rooted elsewhere pick the edit up too.
+ */
+export async function refreshAgentDiscovery(cwd?: string): Promise<void> {
+	const keys = new Set(discoveryMemo.keys());
+	if (cwd !== undefined) keys.add(path.resolve(cwd));
+	discoveryMemo.clear();
+	await Promise.all(
+		[...keys].map(key =>
+			discoverAgentsForCreate(key).catch(error => {
+				logger.warn("Agent discovery refresh failed", { cwd: key, error });
+			}),
+		),
+	);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -554,7 +592,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	// so the task renders as ONE block that transitions in place — not a pending
 	// call frame stacked above the result frame. Mirrors `taskToolRenderer`.
 	readonly mergeCallAndResult = true;
-	readonly #discoveredAgents: AgentDefinition[];
+	readonly #discoveryKey: string;
+	readonly #seededAgents: AgentDefinition[];
 	readonly #blockedAgent: string | undefined;
 	/**
 	 * One semaphore per TaskTool instance (i.e. per session): bounds concurrent
@@ -587,7 +626,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
 		const isolationMode = this.session.settings.get("task.isolation.mode");
 		return renderDescription({
-			agents: this.#discoveredAgents,
+			// Live snapshot, not the create-time list: `/reload-plugins` (and an
+			// Agent Control Center write) republishes edited definitions to a
+			// session that is already running. Falls back to the seed if a failed
+			// refresh dropped the entry.
+			agents: discoverySnapshots.get(this.#discoveryKey) ?? this.#seededAgents,
 			isolationEnabled: !planMode && isolationMode !== "none",
 			applyIsolatedChanges: this.session.settings.get("task.isolation.apply"),
 			disabledAgents,
@@ -603,7 +646,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		discoveredAgents: AgentDefinition[],
 	) {
 		this.#blockedAgent = $env.PI_BLOCKED_AGENT;
-		this.#discoveredAgents = discoveredAgents;
+		this.#discoveryKey = path.resolve(session.cwd);
+		this.#seededAgents = discoveredAgents;
 	}
 
 	#isBatchEnabled(): boolean {

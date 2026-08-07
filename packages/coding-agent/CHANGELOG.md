@@ -17,6 +17,7 @@
 
 ### Fixed
 
+- Fixed agent definition edits requiring a restart. `.omp/agents/*.md` was scanned once per cwd per process (`discoveryMemo`) and the resulting list was frozen into the `task` tool at session start, so an edited, added, or deleted agent never reached the model — not even through `/reload-plugins`, whose description advertises agents in its scope. `refreshAgentDiscovery()` now re-scans and republishes to live `task` tools from `/reload-plugins`, its ACP equivalent, and the Agent Control Center after it writes a generated agent ([#7940](https://github.com/can1357/oh-my-pi/issues/7940)).
 - Fixed proxy discovery preferring the bundled catalog name over the proxy-reported name, so `omp models refresh` now updates stale display names (e.g. a proxy serving `longcat-2.0` as `"LongCat"` no longer shows the raw id).
 - Fixed the compiled binary build on Windows: `Bun.Glob.scan` yields backslash-separated paths, which the legacy Pi virtual module used verbatim for export keys and generated identifiers, producing invalid JavaScript.
 - Fixed Ctrl+O (`app.tools.expand`) not expanding truncated tool output while a tool-approval prompt or other selection dialog held keyboard focus, by promoting the shortcut to a global input listener that fires regardless of focus (it still defers to fullscreen overlays and the tree selector's own Ctrl+O filter cycle) ([#7837](https://github.com/can1357/oh-my-pi/issues/7837)).
