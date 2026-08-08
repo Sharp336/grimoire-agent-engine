@@ -1,5 +1,6 @@
 import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
 import { COLLAB_GUEST_ALLOWED_COMMANDS } from "../collab/guest";
+import { discoverAgents, getAgent } from "../task/discovery";
 import { BUILTIN_COLLABORATION_SLASH_COMMANDS } from "./builtin-collaboration";
 import {
 	buildArgumentCompletions,
@@ -13,8 +14,7 @@ import { BUILTIN_LIFECYCLE_SLASH_COMMANDS } from "./builtin-lifecycle";
 import { BUILTIN_MARKETPLACE_SLASH_COMMANDS, reloadTuiPluginState } from "./builtin-marketplace";
 import { BUILTIN_MODE_SLASH_COMMANDS } from "./builtin-modes";
 import { BUILTIN_SESSION_SLASH_COMMANDS } from "./builtin-session";
-import { parseSlashCommand, commandConsumed } from "./helpers/parse";
-import { discoverAgents, getAgent } from "../task/discovery";
+import { commandConsumed, parseSlashCommand } from "./helpers/parse";
 import type {
 	BuiltinSlashCommand,
 	ParsedSlashCommand,
