@@ -311,10 +311,15 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		.filter(Boolean);
 	const rawXdevPromote = frontmatter.xdevPromote;
 	const xdevPromote = parseArrayOrCSV(rawXdevPromote);
-	// Distinguish an explicitly empty field (xdevPromote: [] / "") — which
-	// clears the inherited tools.xdevPromote — from an absent one (undefined).
+	// An explicitly empty field (xdevPromote: [] / "") clears the inherited
+	// tools.xdevPromote; an absent one (undefined) inherits it. Malformed
+	// values (false/0/object) are treated as absent so they cannot clear a
+	// parent's promoted tools.
+	const isEmptyOverride =
+		(Array.isArray(rawXdevPromote) && rawXdevPromote.length === 0) ||
+		(typeof rawXdevPromote === "string" && rawXdevPromote.trim() === "");
 	const normalizedXdevPromote =
-		xdevPromote !== undefined ? normalizeToolNames(xdevPromote) : rawXdevPromote !== undefined ? [] : undefined;
+		xdevPromote !== undefined ? normalizeToolNames(xdevPromote) : isEmptyOverride ? [] : undefined;
 	return {
 		name,
 		description,
