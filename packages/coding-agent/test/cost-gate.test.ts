@@ -116,6 +116,13 @@ describe("resolveCostGate", () => {
 		expect(gate?.maxCost).toBe(10);
 		expect(gate?.warned).toBe(false);
 	});
+
+	it("ignores negative or non-finite configured thresholds", () => {
+		expect(resolveCostGate({}, { warnCost: -5, maxCost: Number.NaN })).toBeUndefined();
+		const gate = resolveCostGate({}, { warnCost: -5, maxCost: 10 });
+		expect(gate?.warnCost).toBeUndefined();
+		expect(gate?.maxCost).toBe(10);
+	});
 });
 
 describe("session cost settings (issue #7802)", () => {

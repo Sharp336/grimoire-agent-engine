@@ -49,12 +49,19 @@ export function applyCostGate<T>(
 	return dispatch();
 }
 
+// A negative or non-finite threshold can never be crossed by a cumulative
+// cost, so it most likely means a misconfigured settings value; treat it as
+// unset rather than enforcing a broken contract.
+function normalizeThreshold(value: number | undefined): number | undefined {
+	return value !== undefined && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
 export function resolveCostGate(
 	flags: { warnCost?: number; maxCost?: number },
 	configured: { warnCost?: number; maxCost?: number },
 ): CostGateController | undefined {
-	const warnCost = flags.warnCost ?? configured.warnCost;
-	const maxCost = flags.maxCost ?? configured.maxCost;
+	const warnCost = normalizeThreshold(flags.warnCost ?? configured.warnCost);
+	const maxCost = normalizeThreshold(flags.maxCost ?? configured.maxCost);
 	if (warnCost === undefined && maxCost === undefined) return undefined;
 	return createCostGateController({ warnCost, maxCost });
 }
