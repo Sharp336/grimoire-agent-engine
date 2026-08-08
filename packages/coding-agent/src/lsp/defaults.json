@@ -503,7 +503,7 @@
 		"isLinter": true
 	},
 	"vala-language-server": {
-		"command": ["vala-language-server"],
+		"command": "vala-language-server",
 		"args": [],
 		"fileTypes": [".vala", ".vapi", ".gs"],
 		"rootMarkers": ["meson.build", "CMakeLists.txt", "configure.ac", ".git"]
