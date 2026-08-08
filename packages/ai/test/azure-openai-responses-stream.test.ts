@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { streamSimple } from "@oh-my-pi/pi-ai";
 import {
 	type AzureOpenAIResponsesOptions,
 	streamAzureOpenAIResponses,
 } from "@oh-my-pi/pi-ai/providers/azure-openai-responses";
 import type { Context, FetchImpl, Model, ModelSpec, Tool } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 
 const azureModel: Model<"azure-openai-responses"> = buildModel({
 	id: "gpt-5-mini",
@@ -93,6 +95,48 @@ describe("azure openai responses streaming", () => {
 			{ role: "system", content: "Second instruction" },
 			{ role: "user", content: [{ type: "input_text", text: "Say hello" }] },
 		]);
+	});
+
+	it("omits reasoning summaries for pre-5.4 Azure Codex models through streamSimple", async () => {
+		const unsupportedModel: Model<"azure-openai-responses"> = buildModel({
+			id: "gpt-5.3-codex",
+			name: "GPT-5.3 Codex",
+			api: "azure-openai-responses",
+			provider: "azure",
+			baseUrl: azureModel.baseUrl,
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400_000,
+			maxTokens: 128_000,
+		});
+		let capturedBody: Record<string, unknown> | undefined;
+		const fetchMock: FetchImpl = async (_input, init) => {
+			capturedBody = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : undefined;
+			return createSseResponse([
+				{
+					type: "response.completed",
+					response: {
+						status: "completed",
+						usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+					},
+				},
+			]);
+		};
+
+		const result = await streamSimple(
+			unsupportedModel,
+			{ messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }] },
+			{
+				apiKey: "test-key",
+				fetch: fetchMock,
+				reasoning: Effort.High,
+				reasoningSummary: "detailed",
+			},
+		).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(capturedBody?.reasoning).toEqual({ effort: "high" });
 	});
 
 	it("sends an async onPayload replacement body", async () => {

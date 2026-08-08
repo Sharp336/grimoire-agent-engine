@@ -1409,6 +1409,29 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	openaiReasoningSummary: {
+		type: "enum",
+		values: ["provider-default", "none", "auto", "concise", "detailed"] as const,
+		default: "provider-default",
+		ui: {
+			tab: "model",
+			group: "Thinking",
+			label: "OpenAI Reasoning Summary",
+			description: "Summary detail requested from OpenAI Responses and Codex models",
+			options: [
+				{
+					value: "provider-default",
+					label: "Provider Default",
+					description: "Omit the request field and use the provider/model default",
+				},
+				{ value: "none", label: "None", description: "Do not request a reasoning summary" },
+				{ value: "auto", label: "Auto", description: "Let the model choose summary detail" },
+				{ value: "concise", label: "Concise", description: "Request a short reasoning summary" },
+				{ value: "detailed", label: "Detailed", description: "Request the most detailed available summary" },
+			],
+		},
+	},
+
 	"model.loopGuard.enabled": {
 		type: "boolean",
 		default: true,
