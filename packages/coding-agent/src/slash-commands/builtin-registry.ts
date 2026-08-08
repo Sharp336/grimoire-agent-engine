@@ -77,6 +77,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			const discovery = await discoverAgents(runtime.cwd, undefined, {
 				includeExtensions: true,
 				extensionMode: runtime.session.getExtensionDiscoveryMode(),
+				extensionRoots: runtime.session.extensionPaths,
 			});
 			const disabled = new Set((runtime.settings.get("task.disabledAgents") as string[] | undefined) ?? []);
 			const agent = getAgent(discovery.agents, agentName);
@@ -133,6 +134,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				const discovery = await discoverAgents(runtime.ctx.sessionManager.getCwd(), undefined, {
 					includeExtensions: true,
 					extensionMode: runtime.ctx.session.getExtensionDiscoveryMode(),
+					extensionRoots: runtime.ctx.session.extensionPaths,
 				});
 				const disabled = new Set((runtime.ctx.settings.get("task.disabledAgents") as string[] | undefined) ?? []);
 				const agent = getAgent(discovery.agents, agentName);

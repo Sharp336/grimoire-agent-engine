@@ -724,6 +724,7 @@ export class SelectorController {
 		const discovery = await discoverAgents(this.ctx.sessionManager.getCwd(), undefined, {
 			includeExtensions: true,
 			extensionMode: this.ctx.session.getExtensionDiscoveryMode(),
+			extensionRoots: this.ctx.session.extensionPaths,
 		});
 		const disabled = new Set((this.ctx.settings.get("task.disabledAgents") as string[] | undefined) ?? []);
 		const available = discovery.agents.filter(a => a.availability !== "subagent" && !disabled.has(a.name));

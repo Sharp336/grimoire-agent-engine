@@ -944,6 +944,80 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("preserves a locked CLI thinking level when a persona switch changes the model", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			model: getBundledModel("openai", "gpt-5"),
+			thinkingLevel: ThinkingLevel.Low,
+			// --thinking only: the model is NOT locked, so a persona with model:
+			// reaches the switch's model step, whose inline model suffix would
+			// otherwise setThinkingLevel(high) over the locked CLI level.
+			cliThinkingLocked: true,
+		});
+
+		try {
+			const thinkingBefore = session.configuredThinkingLevel();
+			expect(thinkingBefore).toBe(ThinkingLevel.Low);
+
+			await withProviderAuth(["openai"], async () => {
+				await session.switchAgentPersona({
+					name: "thinking-lock-target",
+					description: "Target persona whose inline model suffix demands high thinking",
+					systemPrompt: "",
+					model: ["openai/gpt-5:high"],
+					source: "project" as const,
+				});
+			});
+
+			// The persona's model may apply, but the locked CLI thinking must survive.
+			expect(session.configuredThinkingLevel()).toBe(ThinkingLevel.Low);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("rehydrates the recorded persona when switching sessions", async () => {
+		const tempDir = makeTempDir();
+		const targetFile = path.join(tempDir, "target-persona.jsonl");
+		const timestamp = "2026-08-08T00:00:00.000Z";
+		// A transcript whose agent_change records the bundled `reviewer` persona.
+		await Bun.write(
+			targetFile,
+			`${[
+				{ type: "session", version: 3, id: "target-persona", timestamp, cwd: tempDir },
+				{
+					type: "agent_change",
+					id: "persona-change",
+					parentId: null,
+					timestamp,
+					agent: "reviewer",
+					source: "bundled",
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+
+		// Persisting manager so switchSession can read the target file.
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			sessionManager: SessionManager.create(tempDir, path.join(tempDir, "active")),
+		});
+		try {
+			await expect(session.switchSession(targetFile)).resolves.toBe(true);
+			// The target transcript's recorded persona must become live: /resume
+			// and tree switches previously kept the previous session's persona
+			// (or none) until a full restart (codex review 3741561701).
+			expect(session.agentPersona?.name).toBe("reviewer");
+			expect(session.agentPersona?.source).toBe("bundled");
+			// The reviewer persona's tool policy is applied, not the previous set.
+			expect(session.getEnabledToolNames()).toEqual(expect.arrayContaining(["read", "grep"]));
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("restores the registry-default tool set after a persona switch leaves the agent tool policy", async () => {
 		const tempDir = makeTempDir();
 		// Control session with no persona: its enabled set IS the registry default

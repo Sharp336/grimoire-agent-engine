@@ -177,6 +177,7 @@ import {
 } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { fingerprintAgentContent, resolveAgentSessionPolicy } from "../task/agent-policy";
+import { discoverAgents, getAgent } from "../task/discovery";
 import { getDiscoveredAgentsSnapshot } from "../task/discovery-snapshot";
 import { isScoutSpawnable } from "../task/spawn-policy";
 import type { AgentDefinition } from "../task/types";
@@ -6749,8 +6750,17 @@ export class AgentSession {
 			if (!this.#cliModelLocked && policy.modelPatterns?.length) {
 				const resolved = resolveModelOverride(policy.modelPatterns, this.modelRegistry, this.settings);
 				if (resolved.model) {
+					// setModel() re-applies the target model's default thinking
+					// and the inline model suffix may setThinkingLevel too —
+					// both would clobber an explicit CLI --thinking (locked,
+					// but no --model so #cliModelLocked is false). Capture the
+					// locked selector and restore it after the model lands.
+					const lockedThinking = this.#cliThinkingLocked ? this.configuredThinkingLevel() : undefined;
 					await this.setModel(resolved.model, "default");
-					if (resolved.thinkingLevel && !policy.thinkingLevel) this.setThinkingLevel(resolved.thinkingLevel);
+					if (lockedThinking !== undefined) this.setThinkingLevel(lockedThinking);
+					else if (resolved.thinkingLevel && !policy.thinkingLevel) {
+						this.setThinkingLevel(resolved.thinkingLevel);
+					}
 				} else {
 					// The persona declares a model that does not resolve (typo,
 					// disabled provider, missing extension model). `/agent`
@@ -7658,6 +7668,9 @@ export class AgentSession {
 		const previousAutoThinking = this.isAutoThinking;
 		const previousAutoResolvedLevel = this.autoResolvedThinkingLevel();
 		const previousServiceTierByFamily = this.serviceTierByFamily;
+		const previousPersona = this.#agentPersona;
+		const previousPersonaOverlay = this.#agentToolOverlay;
+		const previousSpawns = this.#getSessionSpawns?.();
 		const previousTools = [...this.agent.state.tools];
 		const previousBaseSystemPrompt = this.#tools.baseSystemPrompt;
 		const previousSystemPrompt = this.agent.state.systemPrompt;
@@ -7697,7 +7710,48 @@ export class AgentSession {
 			this.#syncAgentSessionId(undefined, false);
 			this.#memory.rekeyForCurrentSessionId();
 
+			// Rehydrate the target transcript's recorded persona: switchSession
+			// restores messages/model/thinking below but never consumes
+			// sessionContext.agentPersona, so an interactive /resume or tree
+			// switch kept the previous session's persona prompt/tools (or missed
+			// the target's) until a full restart. Apply the recorded persona's
+			// tools/spawns/model/thinking — but not its frontmatter model as a
+			// fresh selection: the transcript's own model_change is restored
+			// below and must win (mirrors main.ts agentRehydratedFromContext).
 			let sessionContext = this.buildDisplaySessionContext();
+			if (switchingToDifferentSession) {
+				const recorded = sessionContext.agentPersona;
+				if (recorded) {
+					const discovery = await discoverAgents(this.sessionManager.getCwd(), undefined, {
+						includeExtensions: true,
+						extensionMode: this.getExtensionDiscoveryMode(),
+						extensionRoots: this.extensionPaths,
+					});
+					const persona =
+						discovery.agents.find(a => a.name === recorded.agent && a.source === recorded.source) ??
+						getAgent(discovery.agents, recorded.agent);
+					if (persona && persona.availability !== "subagent") {
+						const policy = resolveAgentSessionPolicy(persona);
+						if (!this.#cliToolsLocked) {
+							if (this.#agentToolOverlay) await this.#agentToolOverlay.restore();
+							this.#agentToolOverlay = policy.toolNames
+								? await this.applyToolOverlay(policy.toolNames)
+								: undefined;
+						}
+						if (policy.spawns !== undefined) this.#setSessionSpawns?.(policy.spawns);
+						this.#agentPersona = persona;
+						this.#setAgentPersona?.(persona);
+					} else {
+						// Deleted / subagent-only: clear the stale persona.
+						if (!this.#cliToolsLocked && this.#agentToolOverlay) {
+							await this.#agentToolOverlay.restore();
+							this.#agentToolOverlay = undefined;
+						}
+						this.#agentPersona = undefined;
+						this.#setAgentPersona?.(undefined);
+					}
+				}
+			}
 			const didReloadConversationChange =
 				previousSessionContext !== undefined &&
 				didSessionMessagesChange(previousSessionContext.messages, sessionContext.messages);
@@ -7876,6 +7930,10 @@ export class AgentSession {
 			}
 			this.#models.restoreThinkingSnapshot(previousThinkingLevel, previousAutoThinking, previousAutoResolvedLevel);
 			this.#models.restoreServiceTiers(previousServiceTierByFamily);
+			this.#agentPersona = previousPersona;
+			this.#setAgentPersona?.(previousPersona);
+			this.#agentToolOverlay = previousPersonaOverlay;
+			if (previousSpawns !== undefined) this.#setSessionSpawns?.(previousSpawns);
 			if (modelRolledBack) {
 				this.#emit({ type: "model_changed" });
 			}
