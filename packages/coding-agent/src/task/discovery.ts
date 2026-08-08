@@ -111,7 +111,7 @@ export async function discoverAgents(
 	// disabledProviders suppresses the whole extension-package surface.
 	if (options?.includeExtensions !== false) {
 		const extensionRoots = isProviderEnabled("omp-plugins")
-			? await listOmpExtensionRoots({ cwd: resolvedCwd, home, repoRoot: null })
+			? await listOmpExtensionRoots({ cwd: resolvedCwd, home, repoRoot: null }, { mode: options?.extensionMode })
 			: [];
 		for (const root of extensionRoots) {
 			orderedDirs.push({ dir: path.join(root.path, "agents"), source: root.level });

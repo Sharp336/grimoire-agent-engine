@@ -183,10 +183,19 @@ async function isDirectory(p: string): Promise<boolean> {
  * Installed-plugin enumeration failures (missing lockfile, unreadable
  * `package.json`, etc.) are logged at `debug` and degrade gracefully — the
  * other sources still surface.
+ *
+ * Under `explicit-only` mode only sources from step 1 are returned: configured
+ * (`settings.json#extensions`) and installed plugin roots are suppressed, so
+ * `--no-extensions` sessions surface exactly the roots the invocation named.
+ * The mode resolves as explicit `options.mode` (what the calling discovery
+ * surface was asked for) > invocation-scoped ALS mode > global injected mode.
  */
-export async function listOmpExtensionRoots(ctx: LoadContext): Promise<OmpExtensionRoot[]> {
+export async function listOmpExtensionRoots(
+	ctx: LoadContext,
+	options?: { mode?: OmpExtensionRootMode },
+): Promise<OmpExtensionRoot[]> {
 	const scopedRoots = invocationRootScope.getStore();
-	const rootMode = scopedRoots?.mode ?? injectedCliRootMode;
+	const rootMode = options?.mode ?? scopedRoots?.mode ?? injectedCliRootMode;
 	let candidates: InjectedRoot[] = scopedRoots
 		? scopedRoots.paths.map(raw => ({ path: resolveAgainst(raw, ctx), level: "user" }))
 		: injectedCliRoots.map(root =>

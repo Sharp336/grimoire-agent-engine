@@ -275,4 +275,39 @@ describe("discoverAgents", () => {
 		expect(names).toContain("explicit-agent");
 		expect(names).not.toContain("simplifier");
 	});
+
+	test("explicit-only extensionMode option suppresses ambient OMP roots outside the injected scope", async () => {
+		// Global injected mode stays "merge": the explicit-only signal must come
+		// from the discovery call's own extensionMode option (dashboard reloads,
+		// refreshAgentDiscovery, and structured-subagent preflight run outside
+		// the SDK's withOmpExtensionRootScope).
+		const ambientExt = path.join(tempHome, "ambient-ext");
+		await fs.mkdir(path.join(ambientExt, "agents"), { recursive: true });
+		await fs.writeFile(
+			path.join(ambientExt, "agents", "ambient-ext-agent.md"),
+			["---", "name: ambient-ext-agent", "description: from settings extensions", "---", "body"].join("\n"),
+		);
+		await fs.mkdir(path.join(projectDir, ".omp"), { recursive: true });
+		await fs.writeFile(path.join(projectDir, ".omp", "settings.json"), JSON.stringify({ extensions: [ambientExt] }));
+		await writeOmpPluginAgent(tempHome);
+
+		const explicitExt = path.join(tempHome, "explicit-ext");
+		await fs.mkdir(path.join(explicitExt, "agents"), { recursive: true });
+		await fs.writeFile(
+			path.join(explicitExt, "agents", "explicit-agent.md"),
+			["---", "name: explicit-agent", "description: explicitly requested", "---", "body"].join("\n"),
+		);
+		injectOmpExtensionCliRoots([explicitExt], tempHome, projectDir);
+
+		const { agents } = await discoverAgents(projectDir, tempHome, {
+			includeExtensions: true,
+			extensionMode: "explicit-only",
+		});
+		const names = agents.map(agent => agent.name);
+
+		expect(names).toContain("explicit-agent");
+		// Ambient OMP roots (settings extension + installed plugin) must not
+		// surface even though the global injected mode is still "merge".
+		expect(names).not.toEqual(expect.arrayContaining(["ambient-ext-agent", "loom-verify-spec"]));
+	});
 });
