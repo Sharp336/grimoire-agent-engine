@@ -45,6 +45,7 @@ import {
 	resolveModelOverride,
 } from "../../config/model-resolver";
 import { Settings } from "../../config/settings";
+import { localizeUiText } from "../../i18n";
 import agentCreationArchitectPrompt from "../../prompts/system/agent-creation-architect.md" with { type: "text" };
 import agentCreationUserPrompt from "../../prompts/system/agent-creation-user.md" with { type: "text" };
 import { createAgentSession } from "../../sdk";
@@ -206,13 +207,13 @@ class AgentListPane implements Component {
 
 	render(width: number): readonly string[] {
 		const lines: string[] = [];
-		const searchPrefix = theme.fg("muted", "Search: ");
-		const searchText = this.searchQuery || theme.fg("dim", "type to filter");
+		const searchPrefix = theme.fg("muted", localizeUiText("Search: "));
+		const searchText = this.searchQuery || theme.fg("dim", localizeUiText("type to filter"));
 		lines.push(`${searchPrefix}${searchText}`);
 		lines.push("");
 
 		if (this.agents.length === 0) {
-			lines.push(theme.fg("muted", "  No agents found."));
+			lines.push(theme.fg("muted", `  ${localizeUiText("No agents found.")}`));
 			return lines;
 		}
 
@@ -269,7 +270,10 @@ class AgentInspectorPane implements Component {
 
 	render(width: number): readonly string[] {
 		if (!this.agent) {
-			return [theme.fg("muted", "Select an agent"), theme.fg("dim", "to inspect settings")];
+			return [
+				theme.fg("muted", localizeUiText("Select an agent")),
+				theme.fg("dim", localizeUiText("to inspect settings")),
+			];
 		}
 
 		const lines: string[] = [];

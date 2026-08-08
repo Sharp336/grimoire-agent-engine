@@ -1,4 +1,5 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { initializeLanguage } from "@oh-my-pi/pi-coding-agent/i18n";
 import { renderWelcomeTip } from "@oh-my-pi/pi-coding-agent/modes/components/welcome";
 import { initTheme, setTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
@@ -6,6 +7,10 @@ import { visibleWidth } from "@oh-my-pi/pi-tui";
 describe("renderWelcomeTip", () => {
 	beforeAll(async () => {
 		await initTheme(false);
+	});
+
+	afterAll(() => {
+		initializeLanguage("en");
 	});
 
 	it("wraps long tips under the label instead of truncating", () => {
@@ -61,6 +66,16 @@ describe("renderWelcomeTip", () => {
 		const plain = lines.map(line => Bun.stripANSI(line)).join("\n");
 		expect(plain).not.toContain("NEW!");
 		expect(plain).toContain("Tip: Plain old tip");
+	});
+
+	it("localizes bundled tips and the Tip label in Chinese", () => {
+		initializeLanguage("zh-CN");
+		const lines = renderWelcomeTip("Tired of typing \"keep going\"? Just send a '.'", 80);
+		const plain = lines.map(line => Bun.stripANSI(line)).join("\n");
+
+		expect(plain).toContain("提示：");
+		expect(plain).toContain("不想一直输入");
+		expect(plain).not.toContain("Tip:");
 	});
 
 	it("derives label and body colors from the active theme, with no manual dim layer", async () => {

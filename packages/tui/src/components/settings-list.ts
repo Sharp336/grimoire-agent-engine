@@ -24,6 +24,8 @@ export interface SettingItem {
 	currentValue: string;
 	/** If provided, Enter/Space cycles through these values */
 	values?: string[];
+	/** Optional display labels for raw values; callbacks still receive the raw value. */
+	valueLabels?: Readonly<Record<string, string>>;
 	/** If provided, Enter opens this submenu. Receives current value and done callback. */
 	submenu?: (currentValue: string, done: (selectedValue?: string) => void) => Component;
 	/** True when the displayed setting differs from its default value. */
@@ -86,6 +88,7 @@ export function getSettingItemFilterText(item: SettingItem): string {
 	}
 	if (item.values) {
 		text += ` ${item.values.join(" ")}`;
+		if (item.valueLabels) text += ` ${Object.values(item.valueLabels).join(" ")}`;
 	}
 	return sanitizeSingleLine(text);
 }
@@ -498,7 +501,8 @@ export class SettingsList implements Component {
 		const labelPadded = item.label + padding(Math.max(0, maxLabelWidth - visibleWidth(item.label)));
 		const separator = "  ";
 		const valueMaxWidth = rowWidth - prefixWidth - maxLabelWidth - visibleWidth(separator) - 2;
-		const valuePlain = truncateToWidth(String(item.currentValue ?? ""), valueMaxWidth, Ellipsis.Omit);
+		const rawValue = String(item.currentValue ?? "");
+		const valuePlain = truncateToWidth(item.valueLabels?.[rawValue] ?? rawValue, valueMaxWidth, Ellipsis.Omit);
 		const hovered = !isSelected && this.#theme.hovered !== undefined && item.id === this.#hoveredItemId;
 		// De-emphasized rows (outside the active section) render as plain text
 		// under one dim wash so inner label/value colors don't fight it.

@@ -1,12 +1,11 @@
 # OMP Coding Agent Installer for Windows
-# Usage: irm https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.ps1 | iex
+# Usage: irm https://raw.githubusercontent.com/yequ172672/oh-my-pi-cn/agent/zh-cn-localization/scripts/install.ps1 | iex
 #
 # Or with options:
-#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.ps1))) -Source
-#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.ps1))) -Binary
-#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.ps1))) -Source -Ref v3.20.1
-#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.ps1))) -Source -Ref main
-#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.ps1))) -Binary -Ref v3.20.1
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/yequ172672/oh-my-pi-cn/agent/zh-cn-localization/scripts/install.ps1))) -Source
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/yequ172672/oh-my-pi-cn/agent/zh-cn-localization/scripts/install.ps1))) -Binary
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/yequ172672/oh-my-pi-cn/agent/zh-cn-localization/scripts/install.ps1))) -Source -Ref agent/zh-cn-localization
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/yequ172672/oh-my-pi-cn/agent/zh-cn-localization/scripts/install.ps1))) -Binary -Ref v17.2.11
 
 param(
     [switch]$Source,
@@ -16,8 +15,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Repo = "can1357/oh-my-pi"
-$Package = "@oh-my-pi/pi-coding-agent"
+$Repo = if ($env:OMP_REPO) { $env:OMP_REPO } else { "yequ172672/oh-my-pi-cn" }
+$Package = if ($env:OMP_PACKAGE) { $env:OMP_PACKAGE } else { "omp-cn" }
+$DefaultRef = if ($env:OMP_REF) { $env:OMP_REF } else { "agent/zh-cn-localization" }
 $InstallDir = if ($env:PI_INSTALL_DIR) { $env:PI_INSTALL_DIR } else { "$env:LOCALAPPDATA\omp" }
 $BinaryName = "omp-windows-x64.exe"
 $MinimumBunVersion = "1.3.14"
@@ -171,62 +171,77 @@ function Install-Bun {
     Assert-BunVersion $MinimumBunVersion
 }
 
+function Install-FromSource {
+    param([string]$SourceRef)
+
+    if (-not (Test-GitInstalled)) {
+        throw "git is required for source installation"
+    }
+
+    $tmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("omp-install-" + [System.Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path $tmpRoot | Out-Null
+
+    try {
+        $repoUrl = "https://github.com/$Repo.git"
+        $cloneOk = $false
+        try {
+            git clone --depth 1 --branch $SourceRef $repoUrl $tmpRoot | Out-Null
+            $cloneOk = ($LASTEXITCODE -eq 0)
+        } catch {
+            $cloneOk = $false
+        }
+
+        if (-not $cloneOk) {
+            Remove-Item -Recurse -Force $tmpRoot -ErrorAction SilentlyContinue
+            New-Item -ItemType Directory -Force -Path $tmpRoot | Out-Null
+            git clone $repoUrl $tmpRoot | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to clone $repoUrl"
+            }
+            Push-Location $tmpRoot
+            try {
+                git checkout $SourceRef | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Failed to checkout $SourceRef"
+                }
+            } finally {
+                Pop-Location
+            }
+        }
+
+        # Pull LFS files
+        if (Test-GitLfsInstalled) {
+            Push-Location $tmpRoot
+            try {
+                git lfs pull | Out-Null
+            } finally {
+                Pop-Location
+            }
+        }
+
+        $packagePath = Join-Path $tmpRoot "packages\coding-agent"
+        if (-not (Test-Path $packagePath)) {
+            throw "Expected package at $packagePath"
+        }
+
+        bun install -g $packagePath
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to install from $packagePath via bun"
+        }
+    } finally {
+        Remove-Item -Recurse -Force $tmpRoot -ErrorAction SilentlyContinue
+    }
+}
+
 function Install-ViaBun {
     Write-Host "Installing via bun..."
     if ($Ref) {
-        if (-not (Test-GitInstalled)) {
-            throw "git is required for -Ref when installing from source"
-        }
-
-        $tmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("omp-install-" + [System.Guid]::NewGuid().ToString("N"))
-        New-Item -ItemType Directory -Force -Path $tmpRoot | Out-Null
-
-        try {
-            $repoUrl = "https://github.com/$Repo.git"
-            $cloneOk = $false
-            try {
-                git clone --depth 1 --branch $Ref $repoUrl $tmpRoot | Out-Null
-                $cloneOk = $true
-            } catch {
-                $cloneOk = $false
-            }
-
-            if (-not $cloneOk) {
-                git clone $repoUrl $tmpRoot | Out-Null
-                Push-Location $tmpRoot
-                try {
-                    git checkout $Ref | Out-Null
-                } finally {
-                    Pop-Location
-                }
-            }
-
-            # Pull LFS files
-            if (Test-GitLfsInstalled) {
-                Push-Location $tmpRoot
-                try {
-                    git lfs pull | Out-Null
-                } finally {
-                    Pop-Location
-                }
-            }
-
-            $packagePath = Join-Path $tmpRoot "packages\coding-agent"
-            if (-not (Test-Path $packagePath)) {
-                throw "Expected package at $packagePath"
-            }
-
-            bun install -g $packagePath
-            if ($LASTEXITCODE -ne 0) {
-                throw "Failed to install from $packagePath via bun"
-            }
-        } finally {
-            Remove-Item -Recurse -Force $tmpRoot -ErrorAction SilentlyContinue
-        }
+        Install-FromSource $Ref
     } else {
         bun install -g $Package
         if ($LASTEXITCODE -ne 0) {
-            throw "Failed to install $Package via bun"
+            Write-Host "[WARN] $Package is unavailable; falling back to source ref $DefaultRef" -ForegroundColor Yellow
+            Install-FromSource $DefaultRef
         }
     }
 

@@ -36,6 +36,7 @@ import { invalidate as invalidateCapabilityFsCache } from "../capability/fs";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
 import type { ModelRole } from "../config/model-roles";
 import { loadCapability } from "../discovery";
+import { setLanguage } from "../i18n";
 import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "../modes/theme/theme";
 import { AgentStorage } from "../session/agent-storage";
 import { AUTO_IMAGE_PROVIDER_ORDER, isImageProviderId } from "../tools/image-providers";
@@ -2275,6 +2276,11 @@ class SettingSignal<A extends unknown[] = []> {
 }
 
 const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
+	language: value => {
+		if (value === "en" || value === "zh-CN") {
+			setLanguage(value);
+		}
+	},
 	"theme.dark": value => {
 		if (typeof value === "string") {
 			setAutoThemeMapping("dark", value);

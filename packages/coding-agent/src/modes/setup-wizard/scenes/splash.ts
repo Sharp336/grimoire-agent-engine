@@ -1,4 +1,5 @@
 import { padding, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
+import { localizeUiText } from "../../../i18n";
 import { gradientEscape, gradientLogo, PI_LOGO, type ShineConfig } from "../../components/welcome";
 import { theme } from "../../theme/theme";
 
@@ -129,6 +130,7 @@ export function renderSetupSplash(width: number, height: number, elapsedMs: numb
 	const progress = Math.max(0, Math.min(1, elapsedMs / SETUP_SPLASH_MS));
 	const phase = progress * 1.8;
 	const shine: ShineConfig = { pos: (progress * 2.5) % 1, strength: Math.max(0, 1 - progress * 0.35) };
+	const skipHint = localizeUiText(SKIP_HINT);
 
 	if (w < MIN_SCENE_WIDTH || h < MIN_SCENE_HEIGHT) return renderCompactSplash(w, h, phase, shine);
 
@@ -176,18 +178,19 @@ export function renderSetupSplash(width: number, height: number, elapsedMs: numb
 		}
 	});
 	// 4. skip hint on a cleared strip at the bottom so it stays legible over the water
-	const hintWidth = visibleWidth(SKIP_HINT);
+	const hintWidth = visibleWidth(skipHint);
 	const hintStart = Math.floor((w - hintWidth) / 2);
 	const hintRow = h - 1;
 	for (let x = hintStart - 1; x <= hintStart + hintWidth; x++) put(x, hintRow, " ");
 	let col = hintStart;
-	for (const ch of SKIP_HINT) put(col++, hintRow, ch === " " ? " " : theme.fg("dim", ch));
+	for (const ch of skipHint) put(col++, hintRow, ch === " " ? " " : theme.fg("dim", ch));
 
 	return cells.map(row => row.join(""));
 }
 
 /** Centered fallback for windows too small to hold the full scene. */
 function renderCompactSplash(width: number, height: number, phase: number, shine: ShineConfig): string[] {
+	const skipHint = localizeUiText(SKIP_HINT);
 	const art = height >= 14 ? LARGE_LOGO : PI_LOGO;
 	const content = [...gradientLogo(art, phase, shine), "", theme.bold("O h   M y   P i")];
 	const start = Math.max(0, Math.floor((height - content.length) / 2));
@@ -196,6 +199,6 @@ function renderCompactSplash(width: number, height: number, phase: number, shine
 		const item = content[y - start];
 		lines.push(clampLine(item !== undefined ? centerLine(item, width) : "", width));
 	}
-	if (height > 2) lines[height - 2] = clampLine(centerLine(theme.fg("dim", SKIP_HINT), width), width);
+	if (height > 2) lines[height - 2] = clampLine(centerLine(theme.fg("dim", skipHint), width), width);
 	return lines;
 }

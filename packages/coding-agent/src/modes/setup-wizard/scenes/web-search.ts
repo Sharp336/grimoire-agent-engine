@@ -5,6 +5,7 @@ import {
 	type SgrMouseEvent,
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui";
+import { localizeUiText } from "../../../i18n";
 import { getSearchProvider, setSearchProviderOrder } from "../../../web/search/provider";
 import {
 	isSearchProviderId,
@@ -18,11 +19,13 @@ import type { SetupSceneHost, SetupTab } from "./types";
 const MAX_VISIBLE = 8;
 
 /** Reuse the shared provider options as the single source of truth for labels/descriptions. */
-const WEB_SEARCH_ITEMS: readonly SelectItem[] = SEARCH_PROVIDER_OPTIONS.map(option => ({
-	value: option.value,
-	label: option.label,
-	description: option.description,
-}));
+function getWebSearchItems(): readonly SelectItem[] {
+	return SEARCH_PROVIDER_OPTIONS.map(option => ({
+		value: option.value,
+		label: localizeUiText(option.label),
+		description: localizeUiText(option.description),
+	}));
+}
 
 type Availability = "checking" | boolean;
 
@@ -34,7 +37,9 @@ type Availability = "checking" | boolean;
  */
 export class WebSearchTab implements SetupTab {
 	readonly id = "web-search";
-	readonly label = "Web search";
+	get label(): string {
+		return localizeUiText("Web search");
+	}
 	readonly modal = false;
 
 	#list: SelectList;
@@ -45,10 +50,15 @@ export class WebSearchTab implements SetupTab {
 	#listRowStart = 0;
 
 	constructor(private readonly host: SetupSceneHost) {
-		this.#list = new SelectList(WEB_SEARCH_ITEMS, MAX_VISIBLE, getSelectListTheme());
+		const items = getWebSearchItems();
+		this.#list = new SelectList(items, MAX_VISIBLE, getSelectListTheme(), {
+			searchLabel: localizeUiText("Search"),
+			searchHint: localizeUiText("Type to search"),
+			noMatchText: localizeUiText("No matching items"),
+		});
 		const order = host.ctx.settings.get("providers.webSearchOrder");
 		const current = Array.isArray(order) && typeof order[0] === "string" ? order[0] : "auto";
-		const index = WEB_SEARCH_ITEMS.findIndex(item => item.value === current);
+		const index = items.findIndex(item => item.value === current);
 		if (index >= 0) this.#list.setSelectedIndex(index);
 		this.#list.onSelectionChange = item => this.#onHighlight(item.value);
 		this.#list.onSelect = item => this.#apply(item.value);
@@ -82,7 +92,7 @@ export class WebSearchTab implements SetupTab {
 	}
 
 	render(width: number, maxLines?: number): readonly string[] {
-		const lines = [theme.fg("muted", "Choose the provider the web_search tool should prefer."), ""];
+		const lines = [theme.fg("muted", localizeUiText("Choose the provider the web_search tool should prefer.")), ""];
 		this.#listRowStart = lines.length;
 		if (maxLines !== undefined) {
 			// Above: hint + blank. Below: the list's own search-status row plus
@@ -130,24 +140,26 @@ export class WebSearchTab implements SetupTab {
 		const order = value === "auto" ? [] : [value, ...SEARCH_PROVIDER_ORDER.filter(id => id !== value)];
 		this.host.ctx.settings.set("providers.webSearchOrder", order);
 		setSearchProviderOrder(order);
-		const label = WEB_SEARCH_ITEMS.find(item => item.value === value)?.label ?? value;
-		this.#status = [theme.fg("success", `${theme.status.success} Web search set to ${label}`)];
+		const label = getWebSearchItems().find(item => item.value === value)?.label ?? value;
+		this.#status = [theme.fg("success", `${theme.status.success} ${localizeUiText("Web search set to")} ${label}`)];
 		if (value !== "auto" && this.#availability.get(value as SearchProviderId) === false) {
-			this.#status.push(theme.fg("dim", "Not configured yet — add its API key or sign in to enable it."));
+			this.#status.push(
+				theme.fg("dim", localizeUiText("Not configured yet — add its API key or sign in to enable it.")),
+			);
 		}
 		this.host.requestRender();
 	}
 
 	#readinessLines(value: string): string[] {
 		if (value === "auto") {
-			return [theme.fg("dim", "Automatically uses the first configured provider.")];
+			return [theme.fg("dim", localizeUiText("Automatically uses the first configured provider."))];
 		}
 		const state = this.#availability.get(value as SearchProviderId);
 		if (state === undefined || state === "checking") {
-			return [theme.fg("dim", "Checking availability…")];
+			return [theme.fg("dim", localizeUiText("Checking availability…"))];
 		}
 		return state
-			? [theme.fg("success", `${theme.status.success} Ready to use`)]
-			: [theme.fg("warning", `${theme.status.pending} Needs credentials`)];
+			? [theme.fg("success", `${theme.status.success} ${localizeUiText("Ready to use")}`)]
+			: [theme.fg("warning", `${theme.status.pending} ${localizeUiText("Needs credentials")}`)];
 	}
 }

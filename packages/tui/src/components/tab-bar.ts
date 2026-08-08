@@ -58,6 +58,7 @@ export class TabBar implements Component {
 	#activeIndex: number = 0;
 	#theme: TabBarTheme;
 	#label: string;
+	#hintText: string;
 	#hoverTabId: string | null = null;
 	/** Per-render tab hit zones: 0-based line + [start, end) columns. */
 	#hitZones: { line: number; start: number; end: number; index: number }[] = [];
@@ -68,11 +69,12 @@ export class TabBar implements Component {
 	/** Render the trailing "(tab to cycle)" hint. Disable when the host folds the hint into its own footer. */
 	showHint = true;
 
-	constructor(label: string, tabs: Tab[], theme: TabBarTheme, initialIndex: number = 0) {
+	constructor(label: string, tabs: Tab[], theme: TabBarTheme, initialIndex: number = 0, hintText = "(tab to cycle)") {
 		this.#label = label;
 		this.#tabs = tabs;
 		this.#theme = theme;
 		this.#activeIndex = initialIndex;
+		this.#hintText = hintText;
 	}
 
 	/** Get the currently active tab */
@@ -208,7 +210,7 @@ export class TabBar implements Component {
 			// Navigation hint
 			if (this.showHint) {
 				chunks.push({ text: "  " });
-				chunks.push({ text: this.#theme.hint("(tab to cycle)") });
+				chunks.push({ text: this.#theme.hint(this.#hintText) });
 			}
 			return chunks;
 		};

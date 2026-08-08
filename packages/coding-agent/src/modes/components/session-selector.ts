@@ -14,6 +14,7 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import { formatBytes } from "@oh-my-pi/pi-utils";
+import { localizeUiText } from "../../i18n";
 import { theme } from "../../modes/theme/theme";
 import { matchesAppInterrupt, matchesSelectDown, matchesSelectUp } from "../../modes/utils/keybinding-matchers";
 import type { SessionInfo, SessionStatus } from "../../session/session-listing";
@@ -847,7 +848,7 @@ export class SessionSelectorComponent extends Container {
 
 	#headerLabel(): string {
 		if (this.#scopeLabel === false) return theme.bold(this.#title);
-		const scopeLabel = this.#scopeLabel ?? (this.#scope === "all" ? "all projects" : "current folder");
+		const scopeLabel = this.#scopeLabel ?? localizeUiText(this.#scope === "all" ? "all projects" : "current folder");
 		return `${theme.bold(this.#title)} ${theme.fg("muted", `(${scopeLabel})`)}`;
 	}
 
@@ -864,7 +865,9 @@ export class SessionSelectorComponent extends Container {
 				if (!this.#loadAllSessions) return;
 				this.#toggling = true;
 				this.#messageContainer.clear();
-				this.#messageContainer.addChild(new Text(theme.fg("muted", "  Loading all projects…"), 1, 0));
+				this.#messageContainer.addChild(
+					new Text(theme.fg("muted", `  ${localizeUiText("Loading all projects…")}`), 1, 0),
+				);
 				this.#onRequestRender?.();
 				try {
 					global = await this.#loadAllSessions();

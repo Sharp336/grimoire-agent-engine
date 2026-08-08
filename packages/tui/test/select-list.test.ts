@@ -213,6 +213,26 @@ describe("SelectList", () => {
 		expect(list.getSelectedItem()?.value).toBe("alpha");
 	});
 
+	it("renders localized search and empty-result text from its layout", () => {
+		const items = [
+			{ value: "alpha", label: "Alpha" },
+			{ value: "beta", label: "Beta" },
+			{ value: "gamma", label: "Gamma" },
+		];
+		const list = new SelectList(items, 2, testTheme, {
+			searchLabel: "查找",
+			searchHint: "输入以查找",
+			noMatchText: "没有匹配项",
+		});
+
+		expect(list.render(80).join("\n")).toContain("输入以查找");
+		list.setFilter("不存在");
+		const rendered = list.render(80).join("\n");
+		expect(rendered).toContain("查找: 不存在");
+		expect(rendered).toContain("没有匹配项");
+		expect(rendered).not.toContain("No matching items");
+	});
+
 	it("renders a right-edge scrollbar when the list overflows maxVisible", () => {
 		const items = Array.from({ length: 8 }, (_, i) => ({ value: `v${i}`, label: `Item ${i}` }));
 		const list = new SelectList(items, 3, testTheme);

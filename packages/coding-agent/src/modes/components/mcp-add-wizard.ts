@@ -9,11 +9,12 @@ import {
 	matchesKey,
 	replaceTabs,
 	Spacer,
-	Text,
 	TruncatedText,
+	Text as TuiText,
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
+import { localizeUiText } from "../../i18n";
 import { validateServerName } from "../../mcp/config-writer";
 import { analyzeAuthError, discoverOAuthEndpoints, fetchResourceMetadataScopes } from "../../mcp/oauth-discovery";
 import type { MCPHttpServerConfig, MCPServerConfig, MCPSseServerConfig, MCPStdioServerConfig } from "../../mcp/types";
@@ -21,6 +22,12 @@ import { shortenPath } from "../../tools/render-utils";
 import { theme } from "../theme/theme";
 import { matchesAppInterrupt, matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
 import { DynamicBorder } from "./dynamic-border";
+
+class Text extends TuiText {
+	constructor(text = "", paddingX = 1, paddingY = 1, customBgFn?: (text: string) => string) {
+		super(localizeUiText(text), paddingX, paddingY, customBgFn);
+	}
+}
 
 type TransportType = "stdio" | "http" | "sse";
 type AuthMethod = "none" | "oauth" | "manual";
@@ -267,7 +274,7 @@ export class MCPAddWizard extends Container {
 	}
 
 	#renderNameStep(): void {
-		this.#contentContainer.addChild(new Text(theme.fg("accent", "Step 1: Server Name")));
+		this.#contentContainer.addChild(new Text(theme.fg("accent", localizeUiText("Step 1: Server Name"))));
 		this.#contentContainer.addChild(new Spacer(1));
 		this.#contentContainer.addChild(new Text("Enter a unique name for this server:", 0, 0));
 		this.#contentContainer.addChild(new Spacer(1));
@@ -284,13 +291,15 @@ export class MCPAddWizard extends Container {
 		}
 
 		this.#contentContainer.addChild(
-			new Text(theme.fg("muted", "[Only letters, numbers, dash, underscore, dot, colon]"), 0, 0),
+			new Text(theme.fg("muted", localizeUiText("[Only letters, numbers, dash, underscore, dot, colon]")), 0, 0),
 		);
-		this.#contentContainer.addChild(new Text(theme.fg("muted", "[Enter to continue, Esc to cancel]"), 0, 0));
+		this.#contentContainer.addChild(
+			new Text(theme.fg("muted", localizeUiText("[Enter to continue, Esc to cancel]")), 0, 0),
+		);
 	}
 
 	#renderTransportStep(): void {
-		this.#contentContainer.addChild(new Text(theme.fg("accent", "Step 2: Transport Type")));
+		this.#contentContainer.addChild(new Text(theme.fg("accent", localizeUiText("Step 2: Transport Type"))));
 		this.#contentContainer.addChild(new Spacer(1));
 		this.#contentContainer.addChild(new Text("Select the transport type:", 0, 0));
 		this.#contentContainer.addChild(new Spacer(1));
@@ -311,12 +320,12 @@ export class MCPAddWizard extends Container {
 
 		this.#contentContainer.addChild(new Spacer(1));
 		this.#contentContainer.addChild(
-			new Text(theme.fg("muted", "[↑↓ to navigate, Enter to select, Esc to cancel]"), 0, 0),
+			new Text(theme.fg("muted", localizeUiText("[↑↓ to navigate, Enter to select, Esc to cancel]")), 0, 0),
 		);
 	}
 
 	#renderCommandStep(): void {
-		this.#contentContainer.addChild(new Text(theme.fg("accent", "Step 3: Command")));
+		this.#contentContainer.addChild(new Text(theme.fg("accent", localizeUiText("Step 3: Command"))));
 		this.#contentContainer.addChild(new Spacer(1));
 		this.#contentContainer.addChild(new Text("Enter the command to run:", 0, 0));
 		this.#contentContainer.addChild(new Spacer(1));
@@ -325,11 +334,13 @@ export class MCPAddWizard extends Container {
 		this.#inputField.setValue(this.#state.command);
 		this.#contentContainer.addChild(this.#inputField);
 		this.#contentContainer.addChild(new Spacer(1));
-		this.#contentContainer.addChild(new Text(theme.fg("muted", "[Enter to continue, Esc to go back]"), 0, 0));
+		this.#contentContainer.addChild(
+			new Text(theme.fg("muted", localizeUiText("[Enter to continue, Esc to go back]")), 0, 0),
+		);
 	}
 
 	#renderArgsStep(): void {
-		this.#contentContainer.addChild(new Text(theme.fg("accent", "Step 4: Arguments (Optional)")));
+		this.#contentContainer.addChild(new Text(theme.fg("accent", localizeUiText("Step 4: Arguments (Optional)"))));
 		this.#contentContainer.addChild(new Spacer(1));
 		this.#contentContainer.addChild(new Text("Enter command arguments (space-separated):", 0, 0));
 		this.#contentContainer.addChild(new Spacer(1));
@@ -338,11 +349,13 @@ export class MCPAddWizard extends Container {
 		this.#inputField.setValue(this.#state.args);
 		this.#contentContainer.addChild(this.#inputField);
 		this.#contentContainer.addChild(new Spacer(1));
-		this.#contentContainer.addChild(new Text(theme.fg("muted", "[Press Enter to skip or continue]"), 0, 0));
+		this.#contentContainer.addChild(
+			new Text(theme.fg("muted", localizeUiText("[Press Enter to skip or continue]")), 0, 0),
+		);
 	}
 
 	#renderUrlStep(): void {
-		this.#contentContainer.addChild(new Text(theme.fg("accent", "Step 3: Server URL")));
+		this.#contentContainer.addChild(new Text(theme.fg("accent", localizeUiText("Step 3: Server URL"))));
 		this.#contentContainer.addChild(new Spacer(1));
 		this.#contentContainer.addChild(new Text("Enter the server URL:", 0, 0));
 		this.#contentContainer.addChild(new Spacer(1));
@@ -358,12 +371,14 @@ export class MCPAddWizard extends Container {
 			this.#contentContainer.addChild(new Spacer(1));
 		}
 
-		this.#contentContainer.addChild(new Text(theme.fg("muted", "[Must start with http:// or https://]"), 0, 0));
+		this.#contentContainer.addChild(
+			new Text(theme.fg("muted", localizeUiText("[Must start with http:// or https://]")), 0, 0),
+		);
 		this.#contentContainer.addChild(new Text(theme.fg("muted", "[Enter to continue, Esc to go back]"), 0, 0));
 	}
 
 	#renderAuthLocationStep(): void {
-		this.#contentContainer.addChild(new Text(theme.fg("accent", "Step: How to provide the key?")));
+		this.#contentContainer.addChild(new Text(theme.fg("accent", localizeUiText("Step: How to provide the key?"))));
 		this.#contentContainer.addChild(new Spacer(1));
 
 		const options = [
@@ -381,12 +396,12 @@ export class MCPAddWizard extends Container {
 
 		this.#contentContainer.addChild(new Spacer(1));
 		this.#contentContainer.addChild(
-			new Text(theme.fg("muted", "[↑↓ to navigate, Enter to select, Esc to go back]"), 0, 0),
+			new Text(theme.fg("muted", localizeUiText("[↑↓ to navigate, Enter to select, Esc to go back]")), 0, 0),
 		);
 	}
 
 	#renderEnvVarNameStep(): void {
-		this.#contentContainer.addChild(new Text(theme.fg("accent", "Step: Environment Variable Name")));
+		this.#contentContainer.addChild(new Text(theme.fg("accent", localizeUiText("Step: Environment Variable Name"))));
 		this.#contentContainer.addChild(new Spacer(1));
 		this.#contentContainer.addChild(new Text("Enter the environment variable name:", 0, 0));
 		this.#contentContainer.addChild(new Spacer(1));
@@ -395,7 +410,9 @@ export class MCPAddWizard extends Container {
 		this.#inputField.setValue(this.#state.envVarName);
 		this.#contentContainer.addChild(this.#inputField);
 		this.#contentContainer.addChild(new Spacer(1));
-		this.#contentContainer.addChild(new Text(theme.fg("muted", "[Enter to continue, Esc to go back]"), 0, 0));
+		this.#contentContainer.addChild(
+			new Text(theme.fg("muted", localizeUiText("[Enter to continue, Esc to go back]")), 0, 0),
+		);
 	}
 
 	#renderHeaderNameStep(): void {

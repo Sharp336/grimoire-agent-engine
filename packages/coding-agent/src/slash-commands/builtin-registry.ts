@@ -1,5 +1,6 @@
 import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
 import { COLLAB_GUEST_ALLOWED_COMMANDS } from "../collab/guest";
+import { getLanguage, localizeUiText, normalizeLanguage, setLanguage } from "../i18n";
 import { BUILTIN_COLLABORATION_SLASH_COMMANDS } from "./builtin-collaboration";
 import {
 	buildArgumentCompletions,
@@ -34,8 +35,44 @@ export interface TuiBuiltinSlashCommand extends BuiltinSlashCommand {
 	getAutocompleteDescription?: () => string | undefined;
 }
 
+const BUILTIN_LANGUAGE_SLASH_COMMAND: SlashCommandSpec = {
+	name: "language",
+	description: "Switch interface language",
+	allowArgs: true,
+	subcommands: [
+		{ name: "en", description: "Use the English interface" },
+		{ name: "zh-CN", description: "使用简体中文界面" },
+	],
+	handleTui: async (command, runtime) => {
+		const requested = command.args.trim();
+		if (!requested) {
+			const language = getLanguage();
+			const label = language === "zh-CN" ? "简体中文 (zh-CN)" : "English (en)";
+			runtime.ctx.showStatus(`${localizeUiText("Current language:")} ${label}`);
+			runtime.ctx.editor.setText("");
+			return;
+		}
+
+		const language = normalizeLanguage(requested);
+		if (!language) {
+			runtime.ctx.showWarning(localizeUiText("Unknown language. Use /language en or /language zh-CN."));
+			runtime.ctx.editor.setText("");
+			return;
+		}
+
+		runtime.ctx.settings.set("language", language);
+		setLanguage(language);
+		await runtime.ctx.refreshSlashCommandState();
+		runtime.ctx.ui.requestRender();
+		const label = language === "zh-CN" ? "简体中文 (zh-CN)" : "English (en)";
+		runtime.ctx.showStatus(`${localizeUiText("Language changed to:")} ${label}`);
+		runtime.ctx.editor.setText("");
+	},
+};
+
 const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	...BUILTIN_MODE_SLASH_COMMANDS,
+	BUILTIN_LANGUAGE_SLASH_COMMAND,
 	...BUILTIN_COLLABORATION_SLASH_COMMANDS,
 	...BUILTIN_SESSION_SLASH_COMMANDS,
 	...BUILTIN_LIFECYCLE_SLASH_COMMANDS,
@@ -70,7 +107,14 @@ function materializeTuiBuiltinSlashCommand(
 	cmd: BuiltinSlashCommand,
 	runtime?: TuiSlashCommandRuntime,
 ): TuiBuiltinSlashCommand {
-	const materialized: TuiBuiltinSlashCommand = { ...cmd };
+	const materialized: TuiBuiltinSlashCommand = {
+		...cmd,
+		description: localizeUiText(cmd.description),
+		subcommands: cmd.subcommands?.map(subcommand => ({
+			...subcommand,
+			description: localizeUiText(subcommand.description),
+		})),
+	};
 	if (cmd.subcommands) {
 		materialized.getArgumentCompletions =
 			cmd.name === "mcp" && runtime
@@ -84,7 +128,10 @@ function materializeTuiBuiltinSlashCommand(
 		materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
 	}
 	if (runtime && cmd.getTuiAutocompleteDescription) {
-		materialized.getAutocompleteDescription = () => cmd.getTuiAutocompleteDescription?.(runtime);
+		materialized.getAutocompleteDescription = () => {
+			const description = cmd.getTuiAutocompleteDescription?.(runtime);
+			return description ? localizeUiText(description) : description;
+		};
 	}
 	return materialized;
 }

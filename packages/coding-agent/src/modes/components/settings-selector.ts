@@ -41,6 +41,7 @@ import type {
 	StatusLineSeparatorStyle,
 } from "../../config/settings-schema";
 import { SETTING_TABS, TAB_METADATA } from "../../config/settings-schema";
+import { localizeUiText } from "../../i18n";
 import { getCurrentThemeName, getSelectListTheme, getSettingsListTheme, theme } from "../../modes/theme/theme";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../../thinking";
 import { getTabBarTheme } from "../shared";
@@ -49,6 +50,20 @@ import { handleInputOrEscape, PluginSettingsComponent } from "./plugin-settings"
 import { getSettingDef, getSettingsForTab, type SettingDef } from "./settings-defs";
 import { SnapcompactShapePreview } from "./snapcompact-shape-preview";
 import { getPreset } from "./status-line/presets";
+
+function buildSettingValueLabels(
+	values: readonly string[],
+	options?: ReadonlyArray<{ value: string; label: string }>,
+): Readonly<Record<string, string>> | undefined {
+	const labels: Record<string, string> = {};
+	for (const value of new Set(values)) {
+		labels[value] = localizeUiText(value);
+	}
+	for (const option of options ?? []) {
+		labels[option.value] = option.label;
+	}
+	return Object.entries(labels).some(([value, label]) => value !== label) ? labels : undefined;
+}
 
 /**
  * A submenu component for selecting from a list of options.
@@ -95,7 +110,9 @@ class TextInputSubmenu extends Container {
 		this.addChild(this.#input);
 		this.addChild(new Spacer(1));
 		this.addChild(this.#error);
-		this.addChild(new Text(theme.fg("dim", "  Enter to save · Esc to cancel · Clear field to unset"), 0, 0));
+		this.addChild(
+			new Text(theme.fg("dim", `  ${localizeUiText("Enter to save · Esc to cancel · Clear field to unset")}`), 0, 0),
+		);
 	}
 
 	handleInput(data: string): void {
@@ -134,7 +151,7 @@ class SelectSubmenu extends Container {
 		// Preview (if provided)
 		if (getPreview) {
 			this.addChild(new Spacer(1));
-			this.addChild(new Text(theme.fg("muted", "Preview:"), 0, 0));
+			this.addChild(new Text(theme.fg("muted", localizeUiText("Preview:")), 0, 0));
 			this.#previewText = new Text(getPreview(), 0, 0);
 			this.addChild(this.#previewText);
 		}
@@ -179,7 +196,7 @@ class SelectSubmenu extends Container {
 
 		// Hint
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "  Enter to select · Esc to go back"), 0, 0));
+		this.addChild(new Text(theme.fg("dim", `  ${localizeUiText("Enter to select · Esc to go back")}`), 0, 0));
 
 		// Footer (e.g. the snapcompact shape preview) below the interactive rows,
 		// so the list never shifts while browsing.
@@ -277,8 +294,8 @@ class MultiSelectSubmenu extends Container {
 
 		this.addChild(new Spacer(1));
 		const hint = this.ordered
-			? "  Enter/Space to toggle · ←/→ move · 1-9 place at position · Esc to go back"
-			: "  Enter/Space to toggle · Esc to go back";
+			? `  ${localizeUiText("Enter/Space to toggle · ←/→ move · 1-9 place at position · Esc to go back")}`
+			: `  ${localizeUiText("Enter/Space to toggle · Esc to go back")}`;
 		this.addChild(new Text(theme.fg("dim", hint), 0, 0));
 	}
 
@@ -366,13 +383,15 @@ class ProviderLimitsSubmenu extends Container {
 
 	#showProviderList(): void {
 		this.clear();
-		this.addChild(new Text(theme.bold(theme.fg("accent", "Max In-Flight Requests")), 0, 0));
+		this.addChild(new Text(theme.bold(theme.fg("accent", localizeUiText("Max In-Flight Requests"))), 0, 0));
 		this.addChild(new Spacer(1));
 		this.addChild(
 			new Text(
 				theme.fg(
 					"muted",
-					"Select a provider, enter a positive number to cap concurrent LLM requests, or clear it for unlimited.",
+					localizeUiText(
+						"Select a provider, enter a positive number to cap concurrent LLM requests, or clear it for unlimited.",
+					),
 				),
 				0,
 				0,
@@ -386,13 +405,19 @@ class ProviderLimitsSubmenu extends Container {
 			return {
 				value: provider,
 				label: provider,
-				description: limit === undefined ? "Unlimited" : `Limit: ${limit}`,
+				description: limit === undefined ? localizeUiText("Unlimited") : `${localizeUiText("Limit:")} ${limit}`,
 			};
 		});
 		const clearItem: SelectItem[] =
 			Object.keys(limits).length === 0
 				? []
-				: [{ value: "__clear_all", label: "Clear all limits", description: "Make every provider unlimited" }];
+				: [
+						{
+							value: "__clear_all",
+							label: localizeUiText("Clear all limits"),
+							description: localizeUiText("Make every provider unlimited"),
+						},
+					];
 		const items = [...providerItems, ...clearItem];
 		this.#selectList = new SelectList(items, Math.min(Math.max(items.length, 1), 12), getSelectListTheme());
 		this.#selectList.onSelect = item => {
@@ -408,7 +433,7 @@ class ProviderLimitsSubmenu extends Container {
 		this.#selectList.onCancel = this.onCancel;
 		this.addChild(this.#selectList);
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "  Enter to edit provider · Esc to go back"), 0, 0));
+		this.addChild(new Text(theme.fg("dim", `  ${localizeUiText("Enter to edit provider · Esc to go back")}`), 0, 0));
 	}
 
 	#showProviderEditor(provider: string): void {
@@ -417,8 +442,10 @@ class ProviderLimitsSubmenu extends Container {
 		this.#selectList = undefined;
 		this.addChild(
 			new TextInputSubmenu(
-				`Max In-Flight Requests: ${provider}`,
-				"Enter a positive number. Decimals round down. Clear the field to make this provider unlimited.",
+				`${localizeUiText("Max In-Flight Requests:")} ${provider}`,
+				localizeUiText(
+					"Enter a positive number. Decimals round down. Clear the field to make this provider unlimited.",
+				),
 				limits[provider]?.toString() ?? "",
 				false,
 				value => {
@@ -428,7 +455,9 @@ class ProviderLimitsSubmenu extends Container {
 						delete next[provider];
 					} else {
 						const limit = Number(trimmed);
-						if (!Number.isFinite(limit) || limit <= 0) throw new Error("Limit must be a positive number.");
+						if (!Number.isFinite(limit) || limit <= 0) {
+							throw new Error(localizeUiText("Limit must be a positive number."));
+						}
 						next[provider] = Math.max(1, Math.floor(limit));
 					}
 					const normalized = validateProviderMaxInFlightRequests(next);
@@ -478,9 +507,9 @@ function getSettingsTabs(): Tab[] {
 		...SETTING_TABS.map(id => {
 			const meta = TAB_METADATA[id];
 			const icon = theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]);
-			return { id, label: `${icon} ${meta.label}`, short: icon };
+			return { id, label: `${icon} ${localizeUiText(meta.label)}`, short: icon };
 		}),
-		{ id: "plugins", label: `${theme.icon.package} Plugins`, short: theme.icon.package },
+		{ id: "plugins", label: `${theme.icon.package} ${localizeUiText("Plugins")}`, short: theme.icon.package },
 	];
 }
 
@@ -610,16 +639,26 @@ export class SettingsSelectorComponent implements Component {
 
 	#footerHintText(): string {
 		if (this.#searchList) {
-			return "Enter to change · Tab to jump tabs · Esc to exit search";
+			return localizeUiText("Enter to change · Tab to jump tabs · Esc to exit search");
 		}
 		if (this.#currentTabId === "plugins") {
-			return "Tab to switch tabs · Esc to close";
+			return localizeUiText("Tab to switch tabs · Esc to close");
 		}
 		if (this.#currentList?.sectionFocused) {
-			return "↑/↓ to jump sections · Tab/Enter to settings · ←/→ to switch tabs · Esc to close";
+			return localizeUiText("↑/↓ to jump sections · Tab/Enter to settings · ←/→ to switch tabs · Esc to close");
 		}
-		const nav = this.#hasSectionJump ? "Tab to jump sections · ←/→ to switch tabs" : "Tab to switch tabs";
-		return `Enter/Space to change · ${nav} · Type to search · Esc to close`;
+		const nav = this.#hasSectionJump
+			? localizeUiText("Tab to jump sections · ←/→ to switch tabs")
+			: localizeUiText("Tab to switch tabs");
+		return (
+			localizeUiText("Enter/Space to change") +
+			" · " +
+			nav +
+			" · " +
+			localizeUiText("Type to search") +
+			" · " +
+			localizeUiText("Esc to close")
+		);
 	}
 
 	/** Single-line search banner: accent icon, editable query with live cursor, right-aligned match count. */
@@ -647,7 +686,9 @@ export class SettingsSelectorComponent implements Component {
 		const tabLines = this.#tabBar.render(innerWidth);
 		const searching = this.#searchList !== null;
 		const showPreview = !searching && this.#currentTabId === "appearance";
-		const previewLines = showPreview ? ["", theme.fg("muted", "Preview:"), this.#getStatusPreviewString()] : [];
+		const previewLines = showPreview
+			? ["", theme.fg("muted", localizeUiText("Preview:")), this.#getStatusPreviewString()]
+			: [];
 
 		// Fixed chrome: top border, tabs, divider, [search row], divider, hint, bottom border.
 		const fixedRows = 1 + tabLines.length + 1 + (searching ? 1 : 0) + 1 + 1 + 1;
@@ -666,7 +707,7 @@ export class SettingsSelectorComponent implements Component {
 		}
 
 		const out: string[] = [];
-		out.push(topBorder(width, "Settings"));
+		out.push(topBorder(width, localizeUiText("Settings")));
 		this.#tabRowStart = out.length;
 		this.#tabRowCount = tabLines.length;
 		for (const line of tabLines) {
@@ -772,7 +813,7 @@ export class SettingsSelectorComponent implements Component {
 			{
 				layout: "flat",
 				typeToSearch: false,
-				emptyText: "No matching settings",
+				emptyText: localizeUiText("No matching settings"),
 				hint: "",
 			},
 		);
@@ -826,7 +867,7 @@ export class SettingsSelectorComponent implements Component {
 			const meta = TAB_METADATA[result.tab];
 			items.push({
 				id: `__tab:${result.tab}`,
-				label: `${theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0])} ${meta.label}`,
+				label: `${theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0])} ${localizeUiText(meta.label)}`,
 				currentValue: "",
 				heading: true,
 			});
@@ -876,17 +917,26 @@ export class SettingsSelectorComponent implements Component {
 			const icon = theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]);
 			const count = counts.get(id) ?? 0;
 			if (count > 0) {
-				matched.push({ id, label: `${icon} ${meta.label} (${count})`, short: `${icon} ${count}` });
+				matched.push({
+					id,
+					label: `${icon} ${localizeUiText(meta.label)} (${count})`,
+					short: `${icon} ${count}`,
+				});
 			}
 		}
 		for (const id of SETTING_TABS) {
 			if (matchedIds.has(id)) continue;
 			const meta = TAB_METADATA[id];
 			const icon = theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]);
-			empty.push({ id, label: `${icon} ${meta.label}`, short: icon, muted: true });
+			empty.push({ id, label: `${icon} ${localizeUiText(meta.label)}`, short: icon, muted: true });
 		}
 		// Plugins hosts its own UI; it is not part of the schema-backed search.
-		empty.push({ id: "plugins", label: `${theme.icon.package} Plugins`, short: theme.icon.package, muted: true });
+		empty.push({
+			id: "plugins",
+			label: `${theme.icon.package} ${localizeUiText("Plugins")}`,
+			short: theme.icon.package,
+			muted: true,
+		});
 		return [...matched, ...empty];
 	}
 
@@ -937,6 +987,7 @@ export class SettingsSelectorComponent implements Component {
 					description: def.description,
 					currentValue: currentValue ? "true" : "false",
 					values: ["true", "false"],
+					valueLabels: buildSettingValueLabels(["true", "false"]),
 					changed,
 				};
 
@@ -947,6 +998,7 @@ export class SettingsSelectorComponent implements Component {
 					description: def.description,
 					currentValue: String(currentValue ?? ""),
 					values: [...def.values],
+					valueLabels: buildSettingValueLabels(def.values),
 					changed,
 				};
 
@@ -956,6 +1008,10 @@ export class SettingsSelectorComponent implements Component {
 					label: def.label,
 					description: def.description,
 					currentValue: this.#getSubmenuCurrentValue(def.path, currentValue),
+					valueLabels: buildSettingValueLabels(
+						[String(currentValue ?? ""), ...def.options.map(option => option.value)],
+						def.options,
+					),
 					submenu: (cv, done) => this.#createSubmenu(def, cv, done),
 					changed,
 				};
@@ -1037,7 +1093,7 @@ export class SettingsSelectorComponent implements Component {
 			const levels: ConfiguredThinkingLevel[] = [AUTO_THINKING, ...this.context.availableThinkingLevels];
 			options = levels.map(level => {
 				const baseOpt = options.find(o => o.value === level);
-				return baseOpt || { value: level, label: level };
+				return baseOpt || { value: level, label: localizeUiText(level) };
 			});
 		} else if (def.path === "theme.dark" || def.path === "theme.light") {
 			options = this.context.availableThemes.map(t => ({ value: t, label: t }));
@@ -1307,7 +1363,12 @@ export class SettingsSelectorComponent implements Component {
 			const item = this.#defToItem(def);
 			if (!item) continue;
 			if (def.group && def.group !== lastGroup) {
-				items.push({ id: `__heading:${def.group}`, label: def.group, currentValue: "", heading: true });
+				items.push({
+					id: `__heading:${def.group}`,
+					label: localizeUiText(def.group),
+					currentValue: "",
+					heading: true,
+				});
 				lastGroup = def.group;
 			}
 			items.push(item);
