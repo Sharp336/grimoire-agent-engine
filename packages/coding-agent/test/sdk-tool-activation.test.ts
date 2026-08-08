@@ -1018,6 +1018,101 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("clears the previous persona when the target session records none", async () => {
+		const tempDir = makeTempDir();
+		const targetFile = path.join(tempDir, "target-plain.jsonl");
+		const timestamp = "2026-08-08T00:00:00.000Z";
+		// Target transcript with NO agent_change at all.
+		await Bun.write(
+			targetFile,
+			`${[
+				{ type: "session", version: 3, id: "target-plain", timestamp, cwd: tempDir },
+				{
+					type: "model_change",
+					id: "model",
+					parentId: null,
+					timestamp,
+					model: "openai/gpt-4o-mini",
+					role: "default",
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+
+		// Control session with no persona: its enabled set IS the registry
+		// default the cleared session must return to.
+		const { session: control } = await createAgentSession(baseOptions(tempDir));
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			sessionManager: SessionManager.create(tempDir, path.join(tempDir, "active")),
+			spawns: "*",
+			agentPersona: {
+				name: "pre-switch-persona",
+				description: "Persona active before the switch",
+				systemPrompt: "",
+				tools: ["read"],
+				spawns: ["scout"],
+				source: "project" as const,
+			},
+		});
+		try {
+			expect(session.agentPersona?.name).toBe("pre-switch-persona");
+			// The persona's restricted tool policy is active pre-switch.
+			expect(session.getEnabledToolNames()).not.toContain("write");
+
+			await expect(session.switchSession(targetFile)).resolves.toBe(true);
+
+			// The target has no recorded persona: the previous persona's prompt,
+			// tool overlay, and spawn policy must be cleared back to the launch
+			// baseline, not carried over (codex review 3741664565).
+			expect(session.agentPersona).toBeUndefined();
+			expect([...session.getEnabledToolNames()].sort()).toEqual([...control.getEnabledToolNames()].sort());
+		} finally {
+			await session.dispose();
+			await control.dispose();
+		}
+	});
+
+	it("does not restore a disabled persona during a session switch", async () => {
+		const tempDir = makeTempDir();
+		const targetFile = path.join(tempDir, "target-disabled.jsonl");
+		const timestamp = "2026-08-08T00:00:00.000Z";
+		// Target transcript recording the bundled reviewer persona, which the
+		// session now disables.
+		await Bun.write(
+			targetFile,
+			`${[
+				{ type: "session", version: 3, id: "target-disabled", timestamp, cwd: tempDir },
+				{
+					type: "agent_change",
+					id: "persona-change",
+					parentId: null,
+					timestamp,
+					agent: "reviewer",
+					source: "bundled",
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			sessionManager: SessionManager.create(tempDir, path.join(tempDir, "active")),
+			settings: Settings.isolated({ "task.disabledAgents": ["reviewer"] }),
+		});
+		try {
+			await expect(session.switchSession(targetFile)).resolves.toBe(true);
+
+			// Startup resume and live /agent both reject disabled personas; the
+			// in-process switch must not restore one (codex review 3741664569).
+			expect(session.agentPersona).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("restores the registry-default tool set after a persona switch leaves the agent tool policy", async () => {
 		const tempDir = makeTempDir();
 		// Control session with no persona: its enabled set IS the registry default

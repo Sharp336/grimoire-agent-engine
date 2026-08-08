@@ -634,6 +634,7 @@ export class AgentSession {
 	#setAgentPersona: ((agent: AgentDefinition | undefined) => void) | undefined;
 	#getSessionSpawns: (() => string | undefined) | undefined;
 	#setSessionSpawns: ((spawns: string) => void) | undefined;
+	#baselineSpawns = "*";
 	#getExtensionDiscoveryMode: (() => "explicit-only" | "merge") | undefined;
 	#extensionPaths: string[] | undefined;
 	#extensionRoots: string[] | undefined;
@@ -1286,6 +1287,7 @@ export class AgentSession {
 		this.#setAgentPersona = config.setAgentPersona;
 		this.#getSessionSpawns = config.getSessionSpawns;
 		this.#setSessionSpawns = config.setSessionSpawns;
+		this.#baselineSpawns = config.baselineSpawns ?? "*";
 		this.#getExtensionDiscoveryMode = config.getExtensionDiscoveryMode;
 		this.#extensionPaths = config.extensionPaths;
 		this.#extensionRoots = config.extensionRoots;
@@ -7717,46 +7719,54 @@ export class AgentSession {
 			this.#syncAgentSessionId(undefined, false);
 			this.#memory.rekeyForCurrentSessionId();
 
-			// Rehydrate the target transcript's recorded persona: switchSession
-			// restores messages/model/thinking below but never consumes
+			// Reconcile the target transcript's persona: switchSession restores
+			// messages/model/thinking below but never consumed
 			// sessionContext.agentPersona, so an interactive /resume or tree
 			// switch kept the previous session's persona prompt/tools (or missed
 			// the target's) until a full restart. Apply the recorded persona's
-			// tools/spawns/model/thinking — but not its frontmatter model as a
-			// fresh selection: the transcript's own model_change is restored
-			// below and must win (mirrors main.ts agentRehydratedFromContext).
+			// tools/spawns — but not its frontmatter model as a fresh selection:
+			// the transcript's own model_change is restored below and must win
+			// (mirrors main.ts agentRehydratedFromContext). When the target has
+			// no recorded persona (or it was deleted / became subagent-only /
+			// is now disabled), clear the previous persona's overlay and spawns
+			// back to the launch baseline.
 			let sessionContext = this.buildDisplaySessionContext();
 			if (switchingToDifferentSession) {
 				const recorded = sessionContext.agentPersona;
+				let persona: AgentDefinition | undefined;
 				if (recorded) {
 					const discovery = await discoverAgents(this.sessionManager.getCwd(), undefined, {
 						includeExtensions: true,
 						extensionMode: this.getExtensionDiscoveryMode(),
 						extensionRoots: this.extensionRoots,
 					});
-					const persona =
+					const candidate =
 						discovery.agents.find(a => a.name === recorded.agent && a.source === recorded.source) ??
 						getAgent(discovery.agents, recorded.agent);
-					if (persona && persona.availability !== "subagent") {
-						const policy = resolveAgentSessionPolicy(persona);
-						if (!this.#cliToolsLocked) {
-							if (this.#agentToolOverlay) await this.#agentToolOverlay.restore();
-							this.#agentToolOverlay = policy.toolNames
-								? await this.applyToolOverlay(policy.toolNames)
-								: undefined;
-						}
-						if (policy.spawns !== undefined) this.#setSessionSpawns?.(policy.spawns);
-						this.#agentPersona = persona;
-						this.#setAgentPersona?.(persona);
-					} else {
-						// Deleted / subagent-only: clear the stale persona.
-						if (!this.#cliToolsLocked && this.#agentToolOverlay) {
-							await this.#agentToolOverlay.restore();
-							this.#agentToolOverlay = undefined;
-						}
-						this.#agentPersona = undefined;
-						this.#setAgentPersona?.(undefined);
+					const disabledAgents = this.settings.get("task.disabledAgents") as string[] | undefined;
+					if (candidate && candidate.availability !== "subagent" && !disabledAgents?.includes(candidate.name)) {
+						persona = candidate;
 					}
+				}
+				if (persona) {
+					const policy = resolveAgentSessionPolicy(persona);
+					if (!this.#cliToolsLocked) {
+						if (this.#agentToolOverlay) await this.#agentToolOverlay.restore();
+						this.#agentToolOverlay = policy.toolNames ? await this.applyToolOverlay(policy.toolNames) : undefined;
+					}
+					if (policy.spawns !== undefined) this.#setSessionSpawns?.(policy.spawns);
+					this.#agentPersona = persona;
+					this.#setAgentPersona?.(persona);
+				} else {
+					// No recorded persona, deleted, subagent-only, or disabled:
+					// clear the previous persona's state to the launch baseline.
+					if (!this.#cliToolsLocked && this.#agentToolOverlay) {
+						await this.#agentToolOverlay.restore();
+						this.#agentToolOverlay = undefined;
+					}
+					this.#setSessionSpawns?.(this.#baselineSpawns);
+					this.#agentPersona = undefined;
+					this.#setAgentPersona?.(undefined);
 				}
 			}
 			const didReloadConversationChange =

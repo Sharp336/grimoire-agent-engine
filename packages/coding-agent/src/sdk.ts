@@ -3639,6 +3639,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				sessionSpawns = spawns;
 			},
 			getSessionSpawns: () => sessionSpawns,
+			baselineSpawns: options.spawns ?? "*",
 			getExtensionDiscoveryMode: () => rootMode,
 			extensionPaths,
 			extensionRoots: toolSession.extensionRoots,

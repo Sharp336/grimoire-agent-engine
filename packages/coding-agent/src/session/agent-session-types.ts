@@ -285,6 +285,8 @@ export interface AgentSessionConfig {
 	setSessionSpawns?: (spawns: string) => void;
 	/** Callback to read the session-level spawns allowlist. */
 	getSessionSpawns?: () => string | undefined;
+	/** The session's spawns baseline (options.spawns ?? "*"), restored when a persona without spawns is cleared. */
+	baselineSpawns?: string;
 	/** Callback to update the active agent persona in the SDK closure. */
 	setAgentPersona?: (agent: AgentDefinition | undefined) => void;
 	/** Initial agent persona (from --agent CLI or resume). */
