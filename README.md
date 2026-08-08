@@ -51,6 +51,15 @@
 
 ## 安装
 
+> [!WARNING]
+> 本中文分支在 npm 上的包名是 **`omp-cn`**，不是官方的 **`@oh-my-pi/pi-coding-agent`**。
+> 两者都会安装名为 `omp` 的命令，安装后请确认来源是 `omp-cn`，否则可能实际运行的是官方英文版本。
+> 如果之前安装过官方包，请先执行 `npm uninstall -g @oh-my-pi/pi-coding-agent`，再安装本分支：
+>
+> ```sh
+> npm install -g omp-cn
+> ```
+
 **macOS · Linux**
 
 ```sh
