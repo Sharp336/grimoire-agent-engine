@@ -396,15 +396,18 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		// Wait window: explicit timeout wins (0 = no window); otherwise the
 		// `async.pollWaitDuration` fixed value or smart ladder (see
 		// AsyncJobManager.nextPollWaitMs). `all` mode has no default window:
-		// only an explicit timeoutMs bounds a wait-for-the-batch call.
-		const window = resolvePollWindow(this.session, manager, ownerId);
+		// only an explicit timeoutMs bounds a wait-for-the-batch call, and it
+		// must not advance the smart poll ladder it ignores.
 		const windowMs =
 			params.timeoutMs !== undefined
 				? normalizeIrcTimeoutMs(params.timeoutMs)
 				: all
 					? 0
-					: window.waitMs;
-		const usedSmartWindow = !all && window.smart && params.timeoutMs === undefined;
+					: resolvePollWindow(this.session, manager, ownerId).waitMs;
+		const usedSmartWindow =
+			!all &&
+			params.timeoutMs === undefined &&
+			this.session.settings.get("async.pollWaitDuration") === "smart";
 
 		const racePromises: Promise<unknown>[] = all
 			? [Promise.all(runningJobs.map(j => j.promise))]
