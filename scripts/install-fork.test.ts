@@ -321,10 +321,10 @@ function Invoke-RestMethod {
 function Invoke-WebRequest {
     param([string]$Uri, [string]$OutFile, [int]$TimeoutSec)
     if ($Uri -like '*SHA256SUMS.txt') {
-        $binary = Get-ChildItem -LiteralPath '${installDir.replaceAll("'", "''")}' -Filter '.omp-download-*.exe' | Select-Object -First 1
-        $digest = (Get-FileHash -LiteralPath $binary.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        $digest = (Get-FileHash -LiteralPath $script:DownloadedFixture -Algorithm SHA256).Hash.ToLowerInvariant()
         [IO.File]::WriteAllText($OutFile, "$digest  omp-windows-x64.exe\`n")
     } else {
+        $script:DownloadedFixture = $OutFile
         if ($IsWindows) {
             Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\\cmd.exe') -Destination $OutFile
         } else {

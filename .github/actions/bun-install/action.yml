@@ -39,7 +39,20 @@ runs:
         shell: bash
         run: |
            export BUN_INSTALL="${HOME}/.bun"
-           curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.14"
+           installed=false
+           for attempt in 1 2 3; do
+             if curl -fsSL --retry 5 --retry-all-errors https://bun.sh/install | bash -s "bun-v1.3.14"; then
+               installed=true
+               break
+             fi
+             echo "::warning title=Bun setup retry::attempt $attempt failed while downloading Bun"
+             rm -f "${BUN_INSTALL}/bin/bun"
+             sleep "$((attempt * 2))"
+           done
+           if [ "$installed" != true ] || [ "$("${BUN_INSTALL}/bin/bun" --version)" != "1.3.14" ]; then
+             echo "::error title=Bun setup failed::could not install the pinned Bun 1.3.14 runtime"
+             exit 1
+           fi
            echo "${BUN_INSTALL}/bin" >> "$GITHUB_PATH"
 
       # Off-infra (GitHub-hosted): actions/cache for the bun store, split into
