@@ -5,7 +5,7 @@
  * They can provide custom rendering for tool calls and results in the TUI.
  */
 
-import type { type as ArkType } from "@oh-my-pi/omptype";
+import type * as ArkTypeNamespace from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
 import type * as zod from "@oh-my-pi/omptype/zod";
 import type {
@@ -68,8 +68,8 @@ export interface CustomToolAPI {
 	logger: typeof PiLogger;
 	/** Injected typebox shim (legacy/compat — arktype-authored tools are preferred). */
 	typebox: typeof TypeBox;
-	/** Injected arktype module for arktype-authored custom tools. */
-	arktype: typeof ArkType;
+	/** Injected omptype module namespace (provides .type() builder and utilities). */
+	arktype: typeof ArkTypeNamespace;
 	/** Injected Zod-compatible omptype builder for custom tools. */
 	zod: typeof zod;
 	/** Injected pi-coding-agent exports */

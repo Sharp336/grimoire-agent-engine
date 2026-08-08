@@ -8,7 +8,7 @@
  * - Interact with the user via UI primitives
  */
 
-import type { type as ArkType } from "@oh-my-pi/omptype";
+import type * as ArkTypeNamespace from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
 import type * as zod from "@oh-my-pi/omptype/zod";
 import type {
@@ -1142,8 +1142,8 @@ export interface ExtensionAPI {
 	/** Injected TypeBox shim for legacy `Type.Object(...)` parameter authoring. */
 	typebox: typeof TypeBox;
 
-	/** Injected omptype schema builder for extension tools. */
-	arktype: typeof ArkType;
+	/** Injected omptype module namespace (provides .type() builder and utilities). */
+	arktype: typeof ArkTypeNamespace;
 
 	/** Injected Zod-compatible omptype builder for extension tools. */
 	zod: typeof zod;

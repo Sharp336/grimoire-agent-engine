@@ -4,7 +4,7 @@
 import type * as fs1 from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { type } from "@oh-my-pi/omptype";
+import * as arktype from "@oh-my-pi/omptype";
 import * as zod from "@oh-my-pi/omptype/zod";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type {
@@ -142,7 +142,7 @@ export class ExtensionRuntime implements IExtensionRuntime {
 class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	readonly logger = logger;
 	readonly typebox = TypeBox;
-	readonly arktype = type;
+	readonly arktype = arktype;
 	readonly zod = zod;
 	readonly flagValues = new Map<string, boolean | string>();
 	readonly pendingProviderRegistrations: Array<{

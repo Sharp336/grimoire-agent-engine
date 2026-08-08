@@ -5,7 +5,7 @@
  * directories do not depend on workspace module resolution.
  */
 import * as path from "node:path";
-import { type } from "@oh-my-pi/omptype";
+import * as arktype from "@oh-my-pi/omptype";
 import * as zod from "@oh-my-pi/omptype/zod";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -148,7 +148,7 @@ export class CustomToolLoader {
 			hasUI: false,
 			logger,
 			typebox,
-			arktype: type,
+			arktype,
 			zod,
 			pi,
 			pushPendingAction: action => {
