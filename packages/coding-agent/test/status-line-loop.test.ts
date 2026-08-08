@@ -42,6 +42,8 @@ function createContext(loopMode: SegmentContext["loopMode"]): SegmentContext {
 		autoCompactEnabled: false,
 		subagentCount: 0,
 		activeMs: 0,
+		roundActiveStartedAt: null,
+		lastRoundMs: 0,
 		activeRepo: null,
 		worktree: null,
 		git: { branch: null, status: null, pr: null },
