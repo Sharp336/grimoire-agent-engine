@@ -1383,10 +1383,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// persisted fingerprint (legacy entries, older write paths) is unknown,
 	// so treat it as changed rather than trusting the inherited cache key.
 	const personaChanged =
-		options.agentPersona !== undefined &&
-		(!personaIdentityRehydrated ||
-			persistedPersona?.fingerprint === undefined ||
-			persistedPersona.fingerprint !== personaFingerprint);
+		// The transcript recorded a persona that this run cannot rehydrate
+		// (definition deleted, disabled, or switched to subagent-only): the
+		// system prompt and tool set are rebuilt without it, so an inherited
+		// cache key built for the recorded persona's prompt must not survive.
+		(persistedPersona !== undefined && options.agentPersona === undefined) ||
+		(options.agentPersona !== undefined &&
+			(!personaIdentityRehydrated ||
+				persistedPersona?.fingerprint === undefined ||
+				persistedPersona.fingerprint !== personaFingerprint));
 	// Apply the persona policy for SDK/embedding callers that pass agentPersona
 	// directly (the CLI path pre-resolves these in buildSessionOptions).
 	const personaPolicy = options.agentPersona ? resolveAgentSessionPolicy(options.agentPersona) : undefined;
@@ -3420,9 +3425,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// transcript was saved (e.g. model:/thinkingLevel: edited): the
 					// live run applies the new defaults, so record the change or the
 					// next resume would rehydrate the stale transcript values.
-					(existingSession.agentPersona?.fingerprint !== undefined &&
-						personaFingerprint !== undefined &&
-						existingSession.agentPersona.fingerprint !== personaFingerprint))
+					// A stored entry without a fingerprint (legacy write paths) is
+					// unknown content: record the current definition so the next
+					// resume rehydrates this run's values instead of the stale ones.
+					existingSession.agentPersona?.fingerprint === undefined ||
+					existingSession.agentPersona.fingerprint !== personaFingerprint)
 			) {
 				sessionManager.appendAgentChange(
 					options.agentPersona.name,

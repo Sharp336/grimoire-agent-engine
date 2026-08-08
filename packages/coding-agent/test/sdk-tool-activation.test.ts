@@ -1007,30 +1007,73 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("re-appends the persona when the stored legacy entry has no fingerprint", async () => {
+		const tempDir = makeTempDir();
+		const sessionManager = SessionManager.inMemory();
+		// Legacy transcript: the agent_change was written without a content
+		// fingerprint. An explicit --agent resume of the same identity applies
+		// the current definition; without a re-append the next resume would
+		// rehydrate the stale transcript values (thread sdk.ts:3423).
+		sessionManager.appendAgentChange("foo", "project");
+		sessionManager.appendMessage({ role: "user", content: "prior turn", timestamp: Date.now() });
+
+		const persona = {
+			name: "foo",
+			description: "Edited persona",
+			systemPrompt: "new body",
+			source: "project" as const,
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			sessionManager,
+			agentPersona: persona,
+		});
+
+		try {
+			expect(sessionManager.buildSessionContext().agentPersona).toEqual(
+				expect.objectContaining({
+					agent: "foo",
+					source: "project",
+					fingerprint: fingerprintAgentContent(persona),
+				}),
+			);
+			// The legacy entry migrated: a second agent_change now carries the
+			// current definition's fingerprint.
+			expect(sessionManager.getEntries().filter(e => e.type === "agent_change")).toHaveLength(2);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("skips the append when the resumed persona matches name and source", async () => {
 		const tempDir = makeTempDir();
 		const sessionManager = SessionManager.inMemory();
 		// Plain resume rehydrates the persisted persona; a matching append would
 		// only duplicate the entry.
-		sessionManager.appendAgentChange("foo", "project");
+		const persona = {
+			name: "foo",
+			description: "Persisted persona",
+			systemPrompt: "",
+			source: "project" as const,
+		};
+		sessionManager.appendAgentChange("foo", "project", fingerprintAgentContent(persona));
 		sessionManager.appendMessage({ role: "user", content: "prior turn", timestamp: Date.now() });
 
 		const { session } = await createAgentSession({
 			...baseOptions(tempDir),
 			sessionManager,
-			agentPersona: {
-				name: "foo",
-				description: "Persisted persona",
-				systemPrompt: "",
-				source: "project" as const,
-			},
+			agentPersona: persona,
 		});
 
 		try {
-			expect(sessionManager.buildSessionContext().agentPersona).toEqual({
-				agent: "foo",
-				source: "project",
-			});
+			expect(sessionManager.buildSessionContext().agentPersona).toEqual(
+				expect.objectContaining({
+					agent: "foo",
+					source: "project",
+					fingerprint: fingerprintAgentContent(persona),
+				}),
+			);
 			// Exactly one agent_change entry: the guard did not append a duplicate.
 			expect(sessionManager.getEntries().filter(e => e.type === "agent_change")).toHaveLength(1);
 		} finally {

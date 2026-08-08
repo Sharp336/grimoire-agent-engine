@@ -629,4 +629,37 @@ describe("provider prompt-cache key session affinity", () => {
 			authStorage.close();
 		}
 	});
+
+	it("drops the fork-inherited prompt-cache key when the persisted persona cannot be rehydrated", async () => {
+		using tempDir = TempDir.createSync("@omp-prompt-cache-unresolved-persona-");
+		// Transcript records bundled/gone-persona, but the definition was deleted
+		// (or disabled / switched to subagent-only) since: startup rehydrates
+		// nothing, so the prompt and tool set are rebuilt without the persona.
+		const { cwd, sessionFile, sessionDir } = await createPersonaResumeFixture(
+			tempDir,
+			"unresolved-persona-session",
+			"gone-persona",
+			"stale-fingerprint",
+		);
+		const forkedManager = await SessionManager.forkFrom(sessionFile, cwd, sessionDir);
+		expect(forkedManager.getHeader()?.providerPromptCacheKey).toBe("unresolved-persona-session");
+		const authStorage = await AuthStorage.create(tempDir.join("unresolved-auth.db"));
+		let session: AgentSession | undefined;
+		try {
+			// No agentPersona passed and discovery would resolve none: the
+			// recorded-but-unresolvable persona is still cache-changing, so the
+			// fork-sourced key must be dropped (thread sdk.ts:1385).
+			const created = await createMinimalSession(tempDir, {
+				cwd,
+				sessionManager: forkedManager,
+				providerPromptCacheKey: forkedManager.getHeader()?.providerPromptCacheKey,
+				providerPromptCacheKeySource: "fork",
+			});
+			session = created.session;
+			expect(session.agent.promptCacheKey).toBeUndefined();
+		} finally {
+			await session?.dispose();
+			authStorage.close();
+		}
+	});
 });
