@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added the `round_time` status-line segment, showing the live elapsed time of the current round while the agent is processing and the most recently completed round's duration (`last <dur>`) while idle. ([#8013](https://github.com/can1357/oh-my-pi/pull/8013) by [@YounesRahimi](https://github.com/YounesRahimi))
+- Added the `round_time` status-line segment, showing the live elapsed time of the current round while the agent is processing and the most recently completed round's duration (`last <dur>`) while idle.
 
 ## [17.2.11] - 2026-08-07
 
