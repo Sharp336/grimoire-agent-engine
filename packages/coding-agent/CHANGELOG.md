@@ -8,6 +8,8 @@
 - `applyToolOverlay` primitive extracted on AgentSession, generalizing the snapshot/apply/restore pattern shared by plan mode, plan-yolo, print-mode, and agent-selection. ([#6836](https://github.com/can1357/oh-my-pi/issues/6836))
 ### Fixed
 
+- Fixed startup `alwaysInclude` widening leaking SDK/extension tools past a persona's explicit `tools:` list: the startup activation of custom/extension tools is now filtered through the persona's tool policy (registry stays full for a future persona switch).
+- Fixed `--agent` + `--tools` sessions installing the persona's tool policy over the explicit CLI selection: the persona overlay/filter is only installed when the active tool set actually came from the persona, so deferred MCP refreshes keep honoring the CLI-granted set.
 - Fixed SDK/embedding resumes of an edited persona (same name+source, changed `model:`/`thinkingLevel:` content) silently keeping the transcript's stale model/thinking: the rehydrated gate now includes the content fingerprint, so a changed definition is treated as a fresh selection — the new defaults apply and are recorded for the next resume.
 - Fixed deferred MCP tool refreshes bypassing a persona's explicit `tools:` policy: `refreshMCPTools` now filters the activated set through the active persona's tool allow-list (tools still register for a future persona switch), so a restricted persona's catalog is not broadened by servers connecting mid-session.
 - Fixed `/reload-plugins` and agent-creation invalidations leaving stale agent snapshots for live sessions on the same cwd with a different extension mode/roots tuple: the refresh now clears every snapshot for the cwd before republishing the fresh definitions.

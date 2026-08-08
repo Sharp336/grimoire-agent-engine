@@ -3158,8 +3158,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					...sdkCustomTools.map(t => (isCustomTool(t) ? t.name : t.name)),
 					...registeredTools.filter(t => !t.definition.defaultInactive).map(t => t.definition.name),
 				];
+		// When the active set came from a persona's explicit tools: list, the
+		// always-include widening must stay INSIDE that policy — a persona that
+		// grants only `read` must not expose SDK/extension write-like tools at
+		// startup (codex 3741730336). The registry stays full for a future
+		// persona switch; only the startup activation is filtered.
+		const personaPolicyNames = options.toolNamesFromAgent ? new Set(options.toolNames ?? []) : undefined;
 		for (const name of alwaysInclude) {
 			if (toolRegistry.has(name) && !initialToolNames.includes(name)) {
+				if (personaPolicyNames && !personaPolicyNames.has(name)) continue;
 				initialToolNames.push(name);
 			}
 		}

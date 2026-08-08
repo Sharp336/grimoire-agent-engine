@@ -1296,7 +1296,7 @@ export class AgentSession {
 		this.#cliToolsLocked = config.cliToolsLocked ?? false;
 		this.#cliModelLocked = config.cliModelLocked ?? false;
 		this.#cliThinkingLocked = config.cliThinkingLocked ?? false;
-		if (config.agentPersona?.tools?.length && config.initialToolOverlayRestore) {
+		if (!config.cliToolsLocked && config.agentPersona?.tools?.length && config.initialToolOverlayRestore) {
 			this.#agentToolOverlay = { restore: config.initialToolOverlayRestore };
 			const startupPolicy = resolveAgentSessionPolicy(config.agentPersona);
 			this.#personaToolPolicy = startupPolicy.toolNames;

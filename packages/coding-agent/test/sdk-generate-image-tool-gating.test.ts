@@ -239,6 +239,67 @@ describe("generate_image tool gating", () => {
 		expect(session.getEnabledToolNames()).not.toContain(mcpTool.name);
 	});
 
+	it("does not install the persona tool policy when the CLI locked the tool set", async () => {
+		const mcpTool = customTool("mcp__test__search", true);
+		// --agent reviewer --tools read,mcp__test__search: the CLI list wins, so
+		// a deferred MCP refresh must not filter the CLI-granted MCP tool against
+		// the persona's own tools (codex 3741730337).
+		const { session } = await createAgentSession({
+			cwd: registryDir,
+			agentDir: registryDir,
+			enableMCP: false,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "plan.enabled": false }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			toolNames: ["read", mcpTool.name],
+			cliToolsLocked: true,
+			agentPersona: {
+				name: "restricted-persona",
+				description: "Persona whose own tools would exclude the MCP tool",
+				systemPrompt: "",
+				tools: ["read"],
+				source: "project" as const,
+			},
+		});
+		sessions.push(session);
+
+		await session.refreshMCPTools([mcpTool]);
+
+		// The CLI-granted MCP tool stays active: no persona filter is installed.
+		expect(session.getEnabledToolNames()).toContain(mcpTool.name);
+	});
+
+	it("filters startup always-include tools through the persona tool policy", async () => {
+		const ambientTool = customTool("ambient_write_like", false);
+		// Persona grants only `read`; an SDK custom tool would normally be
+		// always-included at startup. It must stay registered but OUT of the
+		// initial active set (codex 3741730336).
+		const { session } = await createAgentSession({
+			cwd: registryDir,
+			agentDir: registryDir,
+			enableMCP: false,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "plan.enabled": false }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			customTools: [ambientTool],
+			agentPersona: {
+				name: "readonly-persona-2",
+				description: "Persona granting only read",
+				systemPrompt: "",
+				tools: ["read"],
+				source: "project" as const,
+			},
+		});
+		sessions.push(session);
+
+		expect(session.getAllToolNames()).toContain(ambientTool.name);
+		expect(session.getEnabledToolNames()).not.toContain(ambientTool.name);
+	});
+
 	it("preserves explicitly requested write after MCP devices disconnect", async () => {
 		const session = await sessionWithCustomTools(["read", "write"], [customTool("mcp__test__search", true)]);
 
