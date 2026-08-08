@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { runCommitAgentSession } from "@oh-my-pi/pi-coding-agent/commit/agentic/agent";
+import * as toolsModule from "@oh-my-pi/pi-coding-agent/commit/agentic/tools";
 import { createAnalyzeFileTool } from "@oh-my-pi/pi-coding-agent/commit/agentic/tools/analyze-file";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
-import * as toolsModule from "@oh-my-pi/pi-coding-agent/commit/agentic/tools";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 
 describe("commit.analyzeFiles settings (issue #7833)", () => {
 	it("defaults analyzeFiles to true and maxFiles to undefined", () => {
