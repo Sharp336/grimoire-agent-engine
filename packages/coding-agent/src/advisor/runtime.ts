@@ -52,10 +52,12 @@ export interface AdvisorRuntimeHost {
 	/**
 	 * Called immediately before each `agent.prompt(batch)` cycle. Lets the host
 	 * clear per-update advisor state and apply the in-progress delivery policy.
+	 * `reviewId` stays stable when the same logical batch is retried, so
+	 * per-review safety budgets are not reset by provider recovery.
 	 * The host owns these gates because it routes `advise()` results back to the
 	 * primary.
 	 */
-	beginAdvisorUpdate?(inProgress: boolean): void;
+	beginAdvisorUpdate?(inProgress: boolean, reviewId: number): void;
 	/**
 	 * Called with the error of every failed advisor turn, before the retry sleep
 	 * or the dropped-after-3 path. Lets the host apply credential-level remedies
@@ -243,6 +245,7 @@ interface PendingDelta {
 	rawMessages: AgentMessage[];
 	renderRevision: number;
 	turns: number;
+	reviewId: number;
 	/** Whether the primary was mid-turn (willContinue:true) when this delta was rendered. */
 	wip: boolean;
 	overflowRecovery?: boolean;
@@ -287,6 +290,7 @@ export class AdvisorRuntime {
 	/** Regex secret values observed in primary deltas and retained until advisor context resets. */
 	#advisorRegexSecretValues = new Set<string>();
 	#pending: PendingDelta[] = [];
+	#nextReviewId = 1;
 	#busy = false;
 	#sessionTransitionPaused = false;
 	#promptInFlight: Promise<void> | undefined;
@@ -372,7 +376,7 @@ export class AdvisorRuntime {
 		const all = messages ?? this.host.snapshotMessages();
 		this.#latestMessages = all;
 		const wip = opts?.willContinue ?? false;
-		let rendered: Omit<PendingDelta, "turns" | "overflowRecovery"> | null = null;
+		let rendered: Omit<PendingDelta, "turns" | "overflowRecovery" | "reviewId"> | null = null;
 		// #renderDelta advances the cursor/prefix/dedup state before formatting
 		// can throw; snapshot them so a formatter bug loses NOTHING — the next
 		// turn re-renders this delta (a prefix change mid-render self-heals via
@@ -395,7 +399,7 @@ export class AdvisorRuntime {
 			logger.warn("advisor delta render failed", { err: String(err) });
 		}
 		if (rendered) {
-			this.#pending.push({ ...rendered, turns: 1 });
+			this.#pending.push({ ...rendered, turns: 1, reviewId: this.#nextReviewId++ });
 			this.#backlog++;
 			this.#notifyWaiters();
 			void this.#drain();
@@ -634,7 +638,10 @@ export class AdvisorRuntime {
 		return `${heading}\n\n${md}`;
 	}
 
-	#renderDelta(messages?: AgentMessage[], wip = false): Omit<PendingDelta, "turns" | "overflowRecovery"> | null {
+	#renderDelta(
+		messages?: AgentMessage[],
+		wip = false,
+	): Omit<PendingDelta, "turns" | "overflowRecovery" | "reviewId"> | null {
 		const all = messages ?? this.#latestMessages ?? this.host.snapshotMessages();
 		let prefixChanged = all.length < this.#lastCount;
 		for (let i = 0; !prefixChanged && i < this.#lastCount; i++) {
@@ -876,6 +883,7 @@ export class AdvisorRuntime {
 				} else {
 					popped = this.#pending.splice(0);
 				}
+				const reviewId = popped[0]!.reviewId;
 				const iterationAbort = new AbortController();
 				this.#iterationAbort = iterationAbort;
 				const epoch = this.#epoch;
@@ -919,7 +927,7 @@ export class AdvisorRuntime {
 				try {
 					// Reset the host's per-update advisor state (one-advise-per-update
 					// gate) and pass through whether this batch reviews partial work.
-					this.host.beginAdvisorUpdate?.(wip);
+					this.host.beginAdvisorUpdate?.(wip, reviewId);
 					const prompt = this.agent.prompt(batch);
 					this.#promptInFlight = prompt;
 					try {
@@ -998,6 +1006,7 @@ export class AdvisorRuntime {
 									rawMessages,
 									renderRevision: this.#renderRevision,
 									turns: finalTurns,
+									reviewId,
 									wip,
 									overflowRecovery: recoveringOverflow || undefined,
 								});
@@ -1040,6 +1049,7 @@ export class AdvisorRuntime {
 								rawMessages,
 								renderRevision: this.#renderRevision,
 								turns: finalTurns,
+								reviewId,
 								wip,
 								overflowRecovery: recoveringOverflow || undefined,
 							});
@@ -1100,6 +1110,7 @@ export class AdvisorRuntime {
 							rawMessages,
 							renderRevision: this.#renderRevision,
 							turns: finalTurns,
+							reviewId,
 							wip,
 							overflowRecovery: recoveringOverflow || undefined,
 						});
@@ -1120,6 +1131,7 @@ export class AdvisorRuntime {
 							rawMessages,
 							renderRevision: this.#renderRevision,
 							turns: finalTurns,
+							reviewId,
 							wip,
 							overflowRecovery: recoveringOverflow || undefined,
 						});
@@ -1158,6 +1170,7 @@ export class AdvisorRuntime {
 								rawMessages,
 								renderRevision: this.#renderRevision,
 								turns: finalTurns,
+								reviewId,
 								wip,
 								overflowRecovery: true,
 							});
@@ -1180,6 +1193,7 @@ export class AdvisorRuntime {
 								rawMessages,
 								renderRevision: this.#renderRevision,
 								turns: finalTurns,
+								reviewId,
 								wip,
 								overflowRecovery: recoveringOverflow || undefined,
 							});

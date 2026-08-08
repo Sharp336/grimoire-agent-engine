@@ -9,6 +9,7 @@ An advisor does not approve actions or mutate primary session state directly. It
 - [`src/advisor/runtime.ts`](../packages/coding-agent/src/advisor/runtime.ts)
 - [`src/advisor/advise-tool.ts`](../packages/coding-agent/src/advisor/advise-tool.ts)
 - [`src/advisor/emission-guard.ts`](../packages/coding-agent/src/advisor/emission-guard.ts)
+- [`src/advisor/review-budget.ts`](../packages/coding-agent/src/advisor/review-budget.ts)
 - [`src/advisor/watchdog.ts`](../packages/coding-agent/src/advisor/watchdog.ts)
 - [`src/advisor/config.ts`](../packages/coding-agent/src/advisor/config.ts)
 - [`src/advisor/transcript-recorder.ts`](../packages/coding-agent/src/advisor/transcript-recorder.ts)
@@ -312,6 +313,38 @@ The advisor has its own append-only context. Before each advisor prompt, `AgentS
 3. if compaction has no candidates or still cannot fit, re-prime from the current bounded primary transcript
 
 The advisor's live context is in-memory and append-only; it is retained while the session runs so `/advisor dump` can inspect it, and is independently promoted/compacted/re-primed (above). It is not a replacement for the primary persisted transcript.
+
+### Per-review safety limits
+
+One advisor update is one logical review (`agent.prompt(batch)`). It can make
+several provider requests while the advisor investigates, and each advisor
+runtime has its own counters:
+
+- `advisor.maxRequestsPerReview` defaults to `0` (disabled). When set to a
+  positive value, the gate runs before each provider request, so the refused
+  request is not sent or billed.
+- `advisor.maxCostPerReview` defaults to `0` (disabled). When set, it sums
+  finalized advisor responses in the current review and refuses the next
+  request once completed spend reaches the ceiling. It may overshoot by one
+  in-flight request, so it is a backstop rather than a dollar-precise cutoff.
+- `advisor.maxToolCallsPerTurn` defaults to `10`. It limits investigative tool
+  executions in one provider turn; further investigative calls in that response
+  are blocked, while the next provider turn gets a fresh allowance.
+  `advise` remains available after the investigative allowance is exhausted.
+  The same gate covers ordinary advisor tools and Cursor-resolved direct
+  resource/delete handlers. Set it to `0` to disable the per-turn gate.
+- `advisor.maxIdenticalToolCalls` defaults to `2`. The first identical
+  `(tool name, arguments)` call runs; its first repeat is refused with guidance
+  to use the existing result and finish the review. Object-key order does not
+  change call identity. Set it to `0` to disable the repeat guard.
+
+The request, cost, and repeat limits reset for every new logical review, remain
+in force when that review is retried after a provider failure, and apply
+independently to every advisor runtime. The per-turn tool allowance resets at
+each provider turn. Setting changes are read by already-running advisors
+before each gate. A request or cost ceiling ending a review does not mark the
+advisor unavailable, invoke provider recovery, or affect the primary agent's
+work.
 
 ## Transcript persistence and observability
 

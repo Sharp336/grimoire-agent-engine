@@ -33,6 +33,7 @@ import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import type { TruncationMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { AdviseTool } from "../src/advisor/advise-tool";
+import { AdvisorReviewBudget } from "../src/advisor/review-budget";
 
 function createTestSession(cwd: string, overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -796,6 +797,41 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		]);
 		// A server filter narrows to that server alone.
 		expect((await handlers.listMcpResources({ server: "issues" })).map(r => r.uri)).toEqual(["issues://open"]);
+	});
+
+	it("gates advisor-resolved resource calls before executing them", async () => {
+		const budget = new AdvisorReviewBudget({
+			maxRequests: 0,
+			maxCostUsd: 0,
+			maxIdenticalToolCalls: 2,
+			maxToolCallsPerTurn: 2,
+		});
+		budget.beginReview(1);
+		expect(budget.beforeModelCall()).toBeUndefined();
+
+		let listed = 0;
+		const handlers = new CursorExecHandlers({
+			cwd: ".",
+			tools: new Map(),
+			beforeToolCall: (name, args) => budget.beforeToolCall(name, args)?.reason,
+			mcpResources: {
+				serverNames: () => [],
+				getServerResources: async () => {
+					listed++;
+					return { resources: [] };
+				},
+				readServerResource: async () => undefined,
+			},
+		});
+
+		await handlers.listMcpResources({ server: "one" });
+		await handlers.listMcpResources({ server: "two" });
+		await expect(handlers.listMcpResources({ server: "three" })).rejects.toThrow(/already used 2/);
+		expect(listed).toBe(2);
+
+		expect(budget.beforeModelCall()).toBeUndefined();
+		await handlers.listMcpResources({ server: "three" });
+		expect(listed).toBe(3);
 	});
 
 	it("waits for a server's catalog instead of reporting it empty", async () => {

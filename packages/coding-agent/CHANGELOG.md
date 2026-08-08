@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added configurable per-review advisor request, completed-cost, repeated-tool-call, and per-provider-turn investigative-tool safety limits. Request and cost ceilings are disabled by default; the per-turn tool cap defaults to ten.
+
+### Fixed
+
+- Fixed advisor reviews being able to issue unbounded provider requests or repeatedly execute the same tool call, causing runaway context growth and cost; investigative tool execution is now bounded per provider turn without limiting later turns by default, including Cursor-resolved direct resource/delete handlers.
+
 ## [17.2.11] - 2026-08-07
 
 ### Added
