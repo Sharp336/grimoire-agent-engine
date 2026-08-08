@@ -262,6 +262,7 @@ function resolveWorktreeContext(cwd: string): WorktreeContext | null {
 interface ActiveMeter {
 	activeMs: number;
 	activeStartedAt: number | null;
+	lastRoundMs: number;
 	sessionFile: string | undefined;
 }
 
@@ -527,6 +528,7 @@ export class StatusLineComponent implements Component {
 		const meter = this.#meter();
 		meter.activeMs = 0;
 		meter.activeStartedAt = null;
+		meter.lastRoundMs = 0;
 	}
 
 	/**
@@ -551,7 +553,9 @@ export class StatusLineComponent implements Component {
 	markActivityEnd(): void {
 		const meter = this.#meter();
 		if (meter.activeStartedAt === null) return;
-		meter.activeMs += Math.max(0, Date.now() - meter.activeStartedAt);
+		const roundMs = Math.max(0, Date.now() - meter.activeStartedAt);
+		meter.lastRoundMs = roundMs;
+		meter.activeMs += roundMs;
 		meter.activeStartedAt = null;
 	}
 
@@ -564,6 +568,18 @@ export class StatusLineComponent implements Component {
 		const meter = this.#meter();
 		if (meter.activeStartedAt === null) return meter.activeMs;
 		return meter.activeMs + Math.max(0, Date.now() - meter.activeStartedAt);
+	}
+
+	/**
+	 * Live current-round timer plus the duration of the most recently
+	 * completed round. `roundActiveStartedAt` is non-null while the agent is
+	 * processing (the `round_time` segment renders live elapsed); when
+	 * idle it is null and `lastRoundMs` holds the previous round's
+	 * duration for the `last <dur>` display.
+	 */
+	getRoundTime(): { roundActiveStartedAt: number | null; lastRoundMs: number } {
+		const meter = this.#meter();
+		return { roundActiveStartedAt: meter.activeStartedAt, lastRoundMs: meter.lastRoundMs };
 	}
 
 	/**
@@ -589,7 +605,7 @@ export class StatusLineComponent implements Component {
 			}
 		}
 		if (!meter) {
-			meter = { activeMs: 0, activeStartedAt: null, sessionFile: currentFile };
+			meter = { activeMs: 0, activeStartedAt: null, lastRoundMs: 0, sessionFile: currentFile };
 			this.#activeMeters.set(this.session, meter);
 		}
 		return meter;
@@ -1577,6 +1593,7 @@ export class StatusLineComponent implements Component {
 			autoCompactEnabled: this.#autoCompactEnabled,
 			subagentCount: this.#subagentCount,
 			activeMs: this.getActiveMs(),
+			...this.getRoundTime(),
 			git: {
 				branch: gitBranch,
 				status: gitStatus,

@@ -520,6 +520,18 @@ const timeSegment: StatusLineSegment = {
 	},
 };
 
+const roundTimeSegment: StatusLineSegment = {
+	id: "round_time",
+	render(ctx) {
+		if (ctx.roundActiveStartedAt !== null) {
+			const elapsed = Math.max(0, Date.now() - ctx.roundActiveStartedAt);
+			return { content: withIcon(theme.icon.time, formatDuration(elapsed)), visible: true };
+		}
+		if (ctx.lastRoundMs < 1000) return { content: "", visible: false };
+		return { content: withIcon(theme.icon.time, `last ${formatDuration(ctx.lastRoundMs)}`), visible: true };
+	},
+};
+
 const sessionSegment: StatusLineSegment = {
 	id: "session",
 	render(ctx) {
@@ -691,6 +703,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	context_total: contextTotalSegment,
 	time_spent: timeSpentSegment,
 	time: timeSegment,
+	round_time: roundTimeSegment,
 	session: sessionSegment,
 	hostname: hostnameSegment,
 	cache_read: cacheReadSegment,

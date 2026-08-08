@@ -64,6 +64,8 @@ function createCtx(activeMs: number): SegmentContext {
 		autoCompactEnabled: false,
 		subagentCount: 0,
 		activeMs,
+		roundActiveStartedAt: null,
+		lastRoundMs: 0,
 		activeRepo: null,
 		worktree: null,
 		git: { branch: null, status: null, pr: null },

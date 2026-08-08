@@ -106,6 +106,8 @@ export interface SegmentContext {
 	 * `Date.now() - sessionStart`.
 	 */
 	activeMs: number;
+	roundActiveStartedAt: number | null;
+	lastRoundMs: number;
 	git: {
 		branch: string | null;
 		status: { staged: number; unstaged: number; untracked: number } | null;

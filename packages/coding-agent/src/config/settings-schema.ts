@@ -176,6 +176,7 @@ export type StatusLineSegmentId =
 	| "context_total"
 	| "time_spent"
 	| "time"
+	| "round_time"
 	| "session"
 	| "hostname"
 	| "cache_read"
