@@ -5483,6 +5483,10 @@ export const SETTINGS_SCHEMA = {
 
 	"commit.changelogMaxDiffChars": { type: "number", default: 120000 },
 
+	"session.warnCost": { type: "number", default: undefined },
+
+	"session.maxCost": { type: "number", default: undefined },
+
 	"dev.autoqa": {
 		type: "boolean",
 		default: true,
@@ -5752,6 +5756,11 @@ export interface CommitSettings {
 	changelogMaxDiffChars: number;
 }
 
+export interface SessionSettings {
+	warnCost?: number;
+	maxCost?: number;
+}
+
 export interface TtsrSettings {
 	enabled: boolean;
 	contextMode: "discard" | "keep";
@@ -5840,6 +5849,7 @@ export interface GroupTypeMap {
 	branchSummary: BranchSummarySettings;
 	skills: SkillsSettings;
 	commit: CommitSettings;
+	session: SessionSettings;
 	ttsr: TtsrSettings;
 	exa: ExaSettings;
 	statusLine: StatusLineSettings;
