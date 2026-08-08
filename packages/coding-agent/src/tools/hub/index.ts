@@ -11,6 +11,8 @@
  *
  * The unified `wait` blocks until the FIRST of: a matching peer message, a
  * watched job settling, the wait window elapsing, or a steering interrupt.
+ * With `all: true` it instead blocks until every watched job settles (a
+ * matching peer message and an explicit timeoutMs still short-circuit).
  * Job results always deliver themselves when they finish — `wait` exists for
  * when the agent has nothing else to do.
  */
@@ -80,6 +82,9 @@ const hubSchema = type({
 	"await?": type("boolean").describe('send: wait for the recipient\'s reply (invalid with to:"all")'),
 	"from?": type("string").describe("wait: only accept a message from this agent id"),
 	"ids?": type("string[]").describe("wait: job ids to watch (omit = all running jobs); cancel: job ids to kill"),
+	"all?": type("boolean").describe(
+		"wait: block until every watched job settles instead of the first; incoming messages and an explicit timeoutMs still short-circuit",
+	),
 	"timeoutMs?": type("number").describe("wait (messages/jobs): timeout in milliseconds (0 waits indefinitely)"),
 	"peek?": type("boolean").describe("inbox: list messages without consuming them"),
 	"name?": type("string <= 48").describe("process ops: stable project-scoped launch name"),
@@ -190,6 +195,10 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		{
 			caption: "Completely blocked: wait for the first finished job or incoming message",
 			call: { op: "wait" },
+		},
+		{
+			caption: "Block until every watched job settles (messages still short-circuit)",
+			call: { op: "wait", all: true },
 		},
 		{
 			caption: "Block until a specific peer answers",
@@ -343,6 +352,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		const manager = this.session.asyncJobManager;
 		const ownerId = this.#ownerId();
 		const from = params.from?.trim() || undefined;
+		const all = params.all === true;
 
 		// A message already buffered on the session satisfies the wait first.
 		if (messaging) {
@@ -384,14 +394,22 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		}
 
 		// Wait window: explicit timeout wins (0 = no window); otherwise the
-		// `async.pollWaitDuration` fixed value or smart ladder. The ladder
-		// starts at the floor and climbs as the agent waits in a tight loop,
-		// then resets once it steps away (see AsyncJobManager.nextPollWaitMs).
-		const window = resolvePollWindow(this.session, manager, ownerId);
-		const windowMs = params.timeoutMs !== undefined ? normalizeIrcTimeoutMs(params.timeoutMs) : window.waitMs;
-		const usedSmartWindow = window.smart && params.timeoutMs === undefined;
+		// `async.pollWaitDuration` fixed value or smart ladder (see
+		// AsyncJobManager.nextPollWaitMs). `all` mode has no default window:
+		// only an explicit timeoutMs bounds a wait-for-the-batch call, and it
+		// must not advance the smart poll ladder it ignores.
+		const windowMs =
+			params.timeoutMs !== undefined
+				? normalizeIrcTimeoutMs(params.timeoutMs)
+				: all
+					? 0
+					: resolvePollWindow(this.session, manager, ownerId).waitMs;
+		const usedSmartWindow =
+			!all && params.timeoutMs === undefined && this.session.settings.get("async.pollWaitDuration") === "smart";
 
-		const racePromises: Promise<unknown>[] = runningJobs.map(j => j.promise);
+		const racePromises: Promise<unknown>[] = all
+			? [Promise.all(runningJobs.map(j => j.promise))]
+			: runningJobs.map(j => j.promise);
 
 		// Message leg: park a bus waiter with no timeout of its own — the race
 		// window governs. Cancelled via sentinel so late losers do not reject.

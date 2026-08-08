@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `all: true` to `hub wait`: the call now blocks until every watched job settles instead of returning on the first, while an incoming peer message or an explicit `timeoutMs` still short-circuits ([#6906](https://github.com/can1357/oh-my-pi/issues/6906)).
 ## [17.2.11] - 2026-08-07
 
 ### Added
