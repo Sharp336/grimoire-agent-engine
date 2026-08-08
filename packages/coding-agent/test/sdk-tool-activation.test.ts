@@ -19,10 +19,20 @@ import {
 	type ExtensionFactory,
 } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { CustomMessageEntry, SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { fingerprintAgentContent } from "@oh-my-pi/pi-coding-agent/task/agent-policy";
 import { VIBE_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/vibe";
 import { logger, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+
+/** All persisted session entries for a session created with SessionManager.inMemory(). */
+function sessionManagerEntries(session: AgentSession): SessionEntry[] {
+	return session.sessionManager.getEntries();
+}
+
+function isCustomMessageEntry(entry: SessionEntry): entry is CustomMessageEntry {
+	return entry.type === "custom_message";
+}
 
 const toolActivationExtension: ExtensionFactory = pi => {
 	pi.registerTool({
@@ -653,6 +663,57 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			// scoutAvailable=false drops the "single read-only scout" clause.
 			expect(prompt).not.toContain("a single read-only scout while you keep working is fine");
 		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("recomputes plan-mode scout availability after a live persona switch", async () => {
+		const tempDir = makeTempDir();
+		// Session manager cwd must match the discovery-snapshot key the SDK
+		// publishes for `options.cwd`; the default in-memory manager uses
+		// getProjectDir() and would miss the snapshot.
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			sessionManager: SessionManager.inMemory(tempDir),
+		});
+		const restrictedPersona = {
+			name: "restricted-spawns",
+			description: "Persona whose spawns exclude scout",
+			systemPrompt: "",
+			spawns: ["reviewer"],
+			source: "project" as const,
+		};
+		const unrestrictedPersona = {
+			name: "unrestricted-spawns",
+			description: "Persona with unrestricted spawns",
+			systemPrompt: "",
+			source: "project" as const,
+		};
+
+		try {
+			// Restricted persona: plan-mode context must not advertise scout.
+			await session.switchAgentPersona(restrictedPersona);
+			session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
+			await session.sendPlanModeContext();
+			const restrictedMessage = sessionManagerEntries(session)
+				.filter(isCustomMessageEntry)
+				.find(entry => entry.customType === "plan-mode-context");
+			const restrictedContent = String(restrictedMessage?.content ?? "");
+			expect(restrictedContent).not.toContain("Launch parallel `scout` subagents");
+			session.setPlanModeState(undefined);
+
+			// Unrestricted persona: the same plan-mode message advertises scout again.
+			await session.switchAgentPersona(unrestrictedPersona);
+			session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
+			await session.sendPlanModeContext();
+			const unrestrictedMessage = sessionManagerEntries(session)
+				.filter(isCustomMessageEntry)
+				.filter(entry => entry.customType === "plan-mode-context")
+				.at(-1);
+			const unrestrictedContent = String(unrestrictedMessage?.content ?? "");
+			expect(unrestrictedContent).toContain("Launch parallel `scout` subagents");
+		} finally {
+			session.setPlanModeState(undefined);
 			await session.dispose();
 		}
 	});

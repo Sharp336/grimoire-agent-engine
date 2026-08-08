@@ -177,6 +177,8 @@ import {
 } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { fingerprintAgentContent, resolveAgentSessionPolicy } from "../task/agent-policy";
+import { getDiscoveredAgentsSnapshot } from "../task/discovery-snapshot";
+import { isScoutSpawnable } from "../task/spawn-policy";
 import type { AgentDefinition } from "../task/types";
 import {
 	AUTO_THINKING,
@@ -533,7 +535,6 @@ export class AgentSession {
 	// Agent identity (registry id) used for IRC routing and job ownership.
 	#agentId: string | undefined;
 	#agentKind: "main" | "sub" = "main";
-	#scoutAllowedBySpawnPolicy = true;
 	#providerSessionId: string | undefined;
 	#freshProviderSessionId: string | undefined;
 	#inheritedProviderPromptCacheKey: string | undefined;
@@ -1322,7 +1323,6 @@ export class AgentSession {
 		this.#loopGuards = new LoopGuards(streamGuardsHost);
 		this.#agentId = config.agentId;
 		this.#agentKind = config.agentKind ?? "main";
-		this.#scoutAllowedBySpawnPolicy = config.scoutAllowedBySpawnPolicy ?? true;
 		this.#providerSessionId = config.providerSessionId;
 		this.#inheritedProviderPromptCacheKey =
 			config.providerPromptCacheKeySource === "fork" ? this.agent.promptCacheKey : undefined;
@@ -4808,7 +4808,12 @@ export class AgentSession {
 
 	#isScoutAvailable(): boolean {
 		const disabledAgents = this.settings.get("task.disabledAgents") as string[] | undefined;
-		return this.#scoutAllowedBySpawnPolicy && !disabledAgents?.includes("scout");
+		const spawns = this.#getSessionSpawns?.() ?? "*";
+		if (!isScoutSpawnable(disabledAgents, spawns)) return false;
+		const agents = getDiscoveredAgentsSnapshot(this.sessionManager.getCwd());
+		if (agents === undefined) return true;
+		const scout = agents.find(agent => agent.name === "scout");
+		return scout !== undefined && scout.availability !== "primary";
 	}
 
 	async #buildPlanModeMessage(): Promise<CustomMessage | null> {

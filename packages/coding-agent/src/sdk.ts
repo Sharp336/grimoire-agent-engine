@@ -3565,11 +3565,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			initialAdvisorCosts,
 			settings,
 			autoApprove: options.autoApprove,
-			scoutAllowedBySpawnPolicy: isSpawnableScoutInAgents(
-				spawnableAgents,
-				settings.get("task.disabledAgents") as string[] | undefined,
-				sessionSpawns,
-			),
 			evalKernelOwnerId,
 			// Defined only for top-level sessions (creation is gated above).
 			// AgentSession uses this to decide whether it may dispose the global
