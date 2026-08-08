@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added quality gates for goal mode. Configure verification commands via `goal.gates` (e.g. `["npm test", "cargo clippy"]`) and they run automatically when the agent calls `goal({op:"complete"})`. A failing gate blocks completion and returns the failure output to the agent. Gates are bypassed after `goal.gateMaxRetries` (default: 3) failed attempts to prevent permanent blocking.
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed

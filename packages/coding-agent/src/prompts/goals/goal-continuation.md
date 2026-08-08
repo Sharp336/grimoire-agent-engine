@@ -25,4 +25,6 @@ Before calling `goal({op:"complete"})`, you MUST perform a completion audit agai
 
 Call `goal({op:"complete"})` only when every deliverable has direct, current-state evidence proving it is satisfied. The completion call is a load-bearing claim; it ends the autonomous loop and surfaces a "done" report to the user.
 
+If quality gates are configured (`goal.gates` setting), they run automatically when you call `goal({op:"complete"})`. A failing gate blocks completion and returns the failure output — fix it and try again. Gates are bypassed after `goal.gateMaxRetries` failed attempts.
+
 If the work is not done, just keep working. NEVER narrate that you are continuing — execute.
