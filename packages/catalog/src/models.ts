@@ -1,5 +1,6 @@
 import { buildModel } from "./build";
 import MODELS from "./models.json" with { type: "json" };
+import { applyDeepSeekV4BuiltinPolicy } from "./provider-models/deepseek-policy";
 import type { Api, KnownProvider, Model, ModelSpec, Usage } from "./types";
 
 /**
@@ -21,7 +22,8 @@ function getProviderModels(provider: string): Map<string, Model<Api>> | undefine
 	const providerModels = new Map<string, Model<Api>>();
 	const rawModels = MODELS[provider as keyof typeof MODELS];
 	for (const [id, model] of Object.entries(rawModels)) {
-		providerModels.set(id, buildModel(model as ModelSpec<Api>));
+		const modelSpec = applyDeepSeekV4BuiltinPolicy(provider, id, model as ModelSpec<Api>);
+		providerModels.set(id, buildModel(modelSpec));
 	}
 	modelRegistry.set(provider, providerModels);
 	return providerModels;
