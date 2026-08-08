@@ -3,7 +3,6 @@ import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import { type Model, PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
-import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
 import { Loader, Spacer, setTuiTight, Text } from "@oh-my-pi/pi-tui";
 import { getAgentDbPath, getAgentDir, getProjectDir, normalizePathForComparison } from "@oh-my-pi/pi-utils";
@@ -66,6 +65,7 @@ import {
 	type ConfiguredThinkingLevel,
 	concreteThinkingLevel,
 	parseConfiguredThinkingLevel,
+	sessionSwitchThinkingOptions,
 } from "../../thinking";
 import {
 	isSearchProviderId,
@@ -100,7 +100,7 @@ import { SessionAccountSelectorComponent } from "../components/session-account-s
 import { SessionSelectorComponent, type SessionSelectorOptions } from "../components/session-selector";
 import { SettingsSelectorComponent } from "../components/settings-selector";
 import { StrippedToolCallsPlaceholder } from "../components/stripped-tool-calls-placeholder";
-import { ThinkingSelectorComponent } from "../components/thinking-selector";
+import { ThinkingStripComponent } from "../components/thinking-strip";
 import { ToolExecutionComponent } from "../components/tool-execution";
 import { TranscriptBlock } from "../components/transcript-container";
 import { TreeSelectorComponent } from "../components/tree-selector";
@@ -803,34 +803,44 @@ export class SelectorController {
 	}
 
 	/**
-	 * Effort picker shown after a session-only model pick (alt+p / `/switch`).
-	 * Resolves with the chosen thinking level for the target model. A
-	 * non-reasoning model skips the picker; Esc keeps the previous behavior by
-	 * resolving with the role-configured level for the model (or the model's
-	 * default when none is configured).
+	 * Effort strip shown after a session-only model pick (alt+p / `/switch`),
+	 * hosted as a bottom-anchored overlay like the model picker itself so it
+	 * never displaces whatever occupies the editor slot (e.g. an extension
+	 * approval dialog). Resolves with the chosen thinking level for the target
+	 * model. A non-reasoning model skips the strip; Esc keeps the previous
+	 * behavior by resolving with the role-configured level for the model (or
+	 * the model's default when none is configured).
 	 */
 	#pickSessionThinkingLevel(model: Model): Promise<ConfiguredThinkingLevel | undefined> {
 		const fallback = this.ctx.session.resolveTemporaryModelThinkingLevel(model);
-		const efforts = getSupportedEfforts(model);
-		if (!model.reasoning || efforts.length === 0) return Promise.resolve(fallback);
-		const levels: ConfiguredThinkingLevel[] = [ThinkingLevel.Off, AUTO_THINKING, ...efforts];
-		const current = fallback ?? model.thinking?.defaultLevel;
+		const options = sessionSwitchThinkingOptions(model, fallback);
+		if (!options) return Promise.resolve(fallback);
 		const { promise, resolve } = Promise.withResolvers<ConfiguredThinkingLevel | undefined>();
-		this.showSelector(closeSelector => {
-			const selector = new ThinkingSelectorComponent(
-				current,
-				levels,
-				level => {
-					closeSelector();
-					resolve(level);
-				},
-				() => {
-					closeSelector();
-					resolve(fallback);
-				},
-			);
-			return { component: selector, focus: selector.getSelectList() };
+		let overlayHandle: OverlayHandle | undefined;
+		let closed = false;
+		const finish = (level: ConfiguredThinkingLevel | undefined) => {
+			if (closed) return;
+			closed = true;
+			overlayHandle?.hide();
+			this.focusActiveEditorArea();
+			this.ctx.ui.requestRender();
+			resolve(level);
+		};
+		const strip = new ThinkingStripComponent(
+			`${model.provider}/${model.id}`,
+			options.levels,
+			options.preselect,
+			level => finish(level),
+			() => finish(fallback),
+		);
+		overlayHandle = this.ctx.ui.showOverlay(strip, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
 		});
+		this.ctx.ui.setFocus(strip);
+		this.ctx.ui.requestRender();
 		return promise;
 	}
 

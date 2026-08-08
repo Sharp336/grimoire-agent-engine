@@ -375,3 +375,27 @@ export function resolveProvisionalAutoLevel(model: Model | undefined): Effort | 
 	const preferred = model.thinking?.defaultLevel ?? Effort.High;
 	return clampAutoThinkingEffort(model, preferred === Effort.Max ? Effort.XHigh : preferred, Effort.XHigh);
 }
+
+/**
+ * Options for the effort picker shown after a session-only model pick
+ * (alt+p / `/switch`). Returns `undefined` when the picker should be skipped
+ * — a non-reasoning model or one with no supported efforts — and the switch
+ * should apply the fallback level directly. `preselect` is the first of the
+ * role-configured `fallback`, the model's `defaultLevel`, or `auto` that is
+ * present in `levels` (e.g. a `model:inherit` fallback is not listed and
+ * falls through to the model default).
+ */
+export function sessionSwitchThinkingOptions(
+	model: Model,
+	fallback: ConfiguredThinkingLevel | undefined,
+): { levels: ConfiguredThinkingLevel[]; preselect: ConfiguredThinkingLevel } | undefined {
+	if (!model.reasoning) return undefined;
+	const efforts = getSupportedEfforts(model);
+	if (efforts.length === 0) return undefined;
+	const levels: ConfiguredThinkingLevel[] = [ThinkingLevel.Off, AUTO_THINKING, ...efforts];
+	const candidates = [fallback, model.thinking?.defaultLevel, AUTO_THINKING];
+	const preselect =
+		candidates.find((level): level is ConfiguredThinkingLevel => level !== undefined && levels.includes(level)) ??
+		AUTO_THINKING;
+	return { levels, preselect };
+}

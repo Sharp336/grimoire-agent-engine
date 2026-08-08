@@ -5,7 +5,6 @@ import { QueueModeSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/comp
 import { ThemeSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/theme-selector";
 import { ThinkingSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/thinking-selector";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-coding-agent/thinking";
 import type { SgrMouseEvent } from "@oh-my-pi/pi-tui";
 
 beforeAll(async () => {
@@ -44,7 +43,7 @@ describe("inline-picker wrapper routeMouse offset", () => {
 	});
 
 	it("ThinkingSelectorComponent ignores the border row and selects the first level below it", () => {
-		let selected: ConfiguredThinkingLevel | undefined;
+		let selected: Effort | undefined;
 		const levels = [Effort.Low, Effort.High];
 		const component = new ThinkingSelectorComponent(
 			Effort.Low,
