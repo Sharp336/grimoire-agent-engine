@@ -77,6 +77,10 @@ export interface SegmentContext {
 	vibeMode: {
 		enabled: boolean;
 	} | null;
+	heartbeat: {
+		status: "active" | "paused";
+		intervalLabel: string;
+	} | null;
 	collab: CollabStatus | null;
 	// Cached values for performance (computed once per render)
 	usageStats: {

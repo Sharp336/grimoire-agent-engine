@@ -6,6 +6,7 @@ import {
 	resolveCliModel,
 } from "../config/model-resolver";
 import type { SettingPath } from "../config/settings";
+import { describeHeartbeatInterval } from "../modes/heartbeat";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
 import type { AgentSession } from "../session/agent-session";
@@ -277,6 +278,29 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			await runtime.ctx.handleQueueCommand(command.args);
+		},
+	},
+	{
+		name: "heartbeat",
+		description: "Set a recurring prompt that fires on a timer",
+		subcommands: [
+			{ name: "every", description: "Set interval and instruction", usage: "<INTERVAL> <instruction>" },
+			{ name: "status", description: "Show heartbeat details" },
+			{ name: "pause", description: "Pause the heartbeat" },
+			{ name: "resume", description: "Resume a paused heartbeat" },
+			{ name: "clear", description: "Clear the heartbeat" },
+		],
+		inlineHint: "every <INTERVAL> <instruction>",
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime => {
+			const state = runtime.ctx.heartbeatState;
+			if (!state) return "Heartbeat: off";
+			if (state.status === "paused") return "Heartbeat: paused";
+			return `Heartbeat: every ${describeHeartbeatInterval(state.intervalMs)}`;
+		},
+		handleTui: async (command, runtime) => {
+			await runtime.ctx.handleHeartbeatCommand(command.args || "");
+			runtime.ctx.editor.setText("");
 		},
 	},
 	{

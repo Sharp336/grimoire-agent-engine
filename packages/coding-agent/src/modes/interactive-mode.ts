@@ -178,6 +178,12 @@ import { SSHCommandController } from "./controllers/ssh-command-controller";
 import { TanCommandController } from "./controllers/tan-command-controller";
 import { TodoCommandController } from "./controllers/todo-command-controller";
 import {
+	describeHeartbeatInterval,
+	formatHeartbeatStatus,
+	type HeartbeatState,
+	parseHeartbeatCommand,
+} from "./heartbeat";
+import {
 	consumeLoopLimitIteration,
 	createLoopLimitRuntime,
 	describeLoopLimit,
@@ -477,6 +483,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#modelCycleClearTimer: NodeJS.Timeout | undefined;
 	#nextAppearanceRequestToken = 1;
 	#appearanceRefreshRequest: { token: TerminalAppearanceRequestToken; deadline: number } | undefined;
+	heartbeatState: HeartbeatState | undefined = undefined;
+	#heartbeatTimer: NodeJS.Timeout | undefined;
 	todoPhases: TodoPhase[] = [];
 	hideThinkingBlock = false;
 	#sessionsWithDisplayableThinkingContent = new WeakSet<AgentSession>();
@@ -1532,6 +1540,127 @@ export class InteractiveMode implements InteractiveModeContext {
 		// auto-resubmits it after each yield, identical to typing the prompt right
 		// after enabling loop mode.
 		return parsed.prompt;
+	}
+
+	async handleHeartbeatCommand(args: string): Promise<void> {
+		const parsed = parseHeartbeatCommand(args);
+		if (typeof parsed === "string") {
+			this.showError(parsed);
+			return;
+		}
+
+		switch (parsed.type) {
+			case "status":
+				this.showStatus(formatHeartbeatStatus(this.heartbeatState));
+				return;
+
+			case "pause":
+				if (!this.heartbeatState) {
+					this.showStatus("No heartbeat set.");
+					return;
+				}
+				if (this.heartbeatState.status === "paused") {
+					this.showStatus("Heartbeat already paused.");
+					return;
+				}
+				this.heartbeatState = { ...this.heartbeatState, status: "paused" };
+				this.#cancelHeartbeatTimer();
+				this.#syncHeartbeatStatus();
+				this.showStatus("Heartbeat paused.");
+				return;
+
+			case "resume":
+				if (!this.heartbeatState) {
+					this.showStatus("No heartbeat set.");
+					return;
+				}
+				if (this.heartbeatState.status === "active") {
+					this.showStatus("Heartbeat already active.");
+					return;
+				}
+				this.heartbeatState = { ...this.heartbeatState, status: "active" };
+				this.#startHeartbeatTimer();
+				this.#syncHeartbeatStatus();
+				this.showStatus("Heartbeat resumed.");
+				return;
+
+			case "clear":
+				this.#clearHeartbeat();
+				this.showStatus("Heartbeat cleared.");
+				return;
+
+			case "set": {
+				this.heartbeatState = {
+					intervalMs: parsed.intervalMs,
+					instruction: parsed.instruction,
+					status: "active",
+				};
+				this.#startHeartbeatTimer();
+				this.#syncHeartbeatStatus();
+				const label = describeHeartbeatInterval(parsed.intervalMs);
+				this.showStatus(
+					`Heartbeat set: every ${label}. Instruction: ${parsed.instruction} Use /heartbeat pause, /heartbeat status, or /heartbeat clear to manage.`,
+				);
+				return;
+			}
+		}
+	}
+
+	#clearHeartbeat(): void {
+		this.heartbeatState = undefined;
+		this.#cancelHeartbeatTimer();
+		this.#syncHeartbeatStatus();
+	}
+
+	#startHeartbeatTimer(): void {
+		this.#cancelHeartbeatTimer();
+		if (this.heartbeatState?.status !== "active") return;
+		this.#heartbeatTimer = setInterval(() => {
+			this.#fireHeartbeat();
+		}, this.heartbeatState.intervalMs);
+		this.#heartbeatTimer.unref?.();
+	}
+
+	#cancelHeartbeatTimer(): void {
+		if (this.#heartbeatTimer) {
+			clearInterval(this.#heartbeatTimer);
+			this.#heartbeatTimer = undefined;
+		}
+	}
+
+	#fireHeartbeat(): void {
+		const state = this.heartbeatState;
+		if (state?.status !== "active") return;
+		// If the agent is busy, skip this tick — the next interval will fire
+		// when the session is likely idle. This prevents stacking queued
+		// prompts and avoids AgentBusyError from submitInteractiveInput.
+		if (this.#isAutoSubmitBlocked()) return;
+		if (this.#pendingSubmittedInput) return;
+		if (!this.onInputCallback) return;
+		if (this.editor.getText().trim().length > 0) return;
+		if ((this.editor.pendingImages?.length ?? 0) > 0) return;
+
+		const instruction = state.instruction;
+		this.onInputCallback(
+			this.startPendingSubmission({
+				text: instruction,
+				customType: "heartbeat",
+				display: false,
+			}),
+		);
+	}
+
+	#syncHeartbeatStatus(): void {
+		const state = this.heartbeatState;
+		this.statusLine.setHeartbeatStatus(
+			state
+				? {
+						status: state.status,
+						intervalLabel: describeHeartbeatInterval(state.intervalMs),
+					}
+				: undefined,
+		);
+		this.ui.requestRender();
 	}
 
 	recordLocalSubmission(text: string, imageCount = 0): () => void {
@@ -3978,6 +4107,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#cancelTodoAutoClearTimer();
 		this.#cancelObserverUiSyncTimer();
 		this.#cancelGoalContinuation();
+		this.#cancelHeartbeatTimer();
 		if (this.#sttController) {
 			this.#sttController.dispose();
 			this.#sttController = undefined;

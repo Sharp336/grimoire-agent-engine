@@ -38,6 +38,7 @@ import type { StatusLineComponent } from "./components/status-line";
 import type { ToolExecutionHandle } from "./components/tool-execution";
 import type { TranscriptContainer } from "./components/transcript-container";
 import type { EventController } from "./controllers/event-controller";
+import type { HeartbeatState } from "./heartbeat";
 import type { LoopLimitRuntime } from "./loop-limit";
 import type { OAuthManualInputManager } from "./oauth-manual-input";
 import type { Theme } from "./theme/theme";
@@ -172,6 +173,7 @@ export interface InteractiveModeContext {
 	loopModePaused: boolean;
 	loopPrompt?: string;
 	loopLimit?: LoopLimitRuntime;
+	heartbeatState?: HeartbeatState;
 	planModePlanFilePath?: string;
 	hideThinkingBlock: boolean;
 	/**
@@ -446,6 +448,7 @@ export interface InteractiveModeContext {
 	setLoopPrompt(prompt: string): void;
 	disableLoopMode(): void;
 	pauseLoop(): void;
+	handleHeartbeatCommand(args: string): Promise<void>;
 	handlePlanApproval(details: PlanApprovalDetails): Promise<void>;
 	openPlanReview(): Promise<void>;
 
