@@ -72,6 +72,31 @@ export interface RpcCollaborationMediaDescriptor {
 	sha256: string;
 }
 
+export type RpcCollaborationProjectionLossReason =
+	| "depth_limit"
+	| "array_item_limit"
+	| "object_key_limit"
+	| "unsupported_value"
+	| "invalid_media"
+	| "source_transport_elision"
+	| "loss_record_limit";
+
+export interface RpcCollaborationProjectionLoss {
+	/** JSON Pointer into the source collaboration payload; the empty string identifies the root. */
+	path: string;
+	reason: RpcCollaborationProjectionLossReason;
+	omittedCount?: number;
+	/** True when fullPayload can recover the source value. */
+	recoverable: boolean;
+}
+
+export interface RpcCollaborationProjection {
+	fidelity: "lossy";
+	losses: RpcCollaborationProjectionLoss[];
+	/** Complete source JSON, persisted through collaboration_read_media when locally available. */
+	fullPayload?: RpcCollaborationMediaDescriptor;
+}
+
 export interface RpcCollaborationMediaRange {
 	mediaId: string;
 	mediaType: string;
@@ -91,6 +116,7 @@ export type RpcCollaborationFrame =
 			kind: string;
 			payload?: RpcCollaborationJsonValue;
 			media?: RpcCollaborationMediaDescriptor;
+			projection?: RpcCollaborationProjection;
 	  }
 	| {
 			type: "collaboration_gap";
@@ -112,11 +138,14 @@ export type RpcCollaborationStatusReason = "network_lost" | "room_closed" | "tra
 export interface RpcCollaborationReplicatedInput {
 	kind: string;
 	payload?: RpcCollaborationJsonValue;
+	projection?: RpcCollaborationProjection;
 }
 
 export interface RpcCollaborationMediaInput {
 	mediaType: string;
 	data: Uint8Array;
+	/** False persists a referenced payload without emitting a standalone media frame. */
+	announce?: boolean;
 }
 
 export interface RpcCollaborationOpenEvents {
@@ -453,7 +482,7 @@ export class RpcCollaborationManager {
 		this.#emitState();
 	}
 	#onReplicated(input: RpcCollaborationReplicatedInput): void {
-		if (this.#role !== "guest" || this.#state === "off" || this.#state === "leaving") return;
+		if (this.#role !== "guest" || this.#state === "off" || this.#state === "leaving" || this.#stale) return;
 		this.#latestSequence += 1;
 		const cursor = { generation: this.#generation, sequence: this.#latestSequence };
 		const frame: Extract<RpcCollaborationFrame, { type: "collaboration_replicated" }> = {
@@ -462,6 +491,7 @@ export class RpcCollaborationManager {
 			cursor,
 			kind: input.kind,
 			...(input.payload === undefined ? {} : { payload: input.payload }),
+			...(input.projection === undefined ? {} : { projection: input.projection }),
 		};
 		this.#retainAndEmit(cursor, frame);
 	}
@@ -471,6 +501,7 @@ export class RpcCollaborationManager {
 			throw new RpcCollaborationStateError("Collaboration media arrived without an active guest replica");
 		}
 		const media = await this.#media.save(input.mediaType, input.data);
+		if (input.announce === false) return media;
 		this.#latestSequence += 1;
 		const cursor = { generation: this.#generation, sequence: this.#latestSequence };
 		const frame: Extract<RpcCollaborationFrame, { type: "collaboration_replicated" }> = {
@@ -511,6 +542,7 @@ export class RpcCollaborationManager {
 			reason,
 		});
 		this.#markStale(reason);
+		this.#reconnecting = true;
 		this.#connection?.requestResync();
 	}
 

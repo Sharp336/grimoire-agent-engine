@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
 	type RpcResourceLifecycleFrame,
 	RpcResourceLifecycleManager,
+	type RpcResourceLifecycleState,
 	type RpcResourceManagerSource,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-resource-lifecycle";
 
@@ -62,6 +63,25 @@ class FakeResourceSource implements RpcResourceManagerSource {
 	async disconnectServer(name: string): Promise<void> {
 		this.disconnected.push(name);
 		this.statuses.delete(name);
+	}
+}
+
+class FakeHostResourceSource extends FakeResourceSource {
+	constructor() {
+		super();
+		this.statuses.clear();
+		this.statuses.set("lsp:typescript", "disconnected");
+		this.statuses.set("dap:gdb", "disconnected");
+	}
+
+	getResourceKind(serverId: string): "lsp" | "dap" {
+		return serverId.startsWith("lsp:") ? "lsp" : "dap";
+	}
+
+	async refreshLifecycle(serverId: string): Promise<RpcResourceLifecycleState> {
+		const state = serverId.startsWith("lsp:") ? "connected" : "discovered";
+		this.statuses.set(serverId, state === "connected" ? "connected" : "disconnected");
+		return state;
 	}
 }
 
@@ -198,5 +218,34 @@ describe("RPC resource lifecycle", () => {
 		await manager.disposeServer("alpha", "request-3");
 		expect(source.disconnected).toEqual(["alpha"]);
 		expect(manager.snapshot().servers[0].state).toBe("disabled");
+	});
+	test("projects and refreshes OMP-owned LSP and DAP lifecycles without MCP metadata", async () => {
+		const source = new FakeHostResourceSource();
+		const manager = new RpcResourceLifecycleManager(source, () => {});
+
+		expect(manager.snapshot().servers).toEqual([
+			expect.objectContaining({
+				serverId: "dap:gdb",
+				kind: "dap",
+				state: "discovered",
+				capabilities: { tools: false, resources: false, prompts: false },
+			}),
+			expect.objectContaining({
+				serverId: "lsp:typescript",
+				kind: "lsp",
+				state: "discovered",
+				capabilities: { tools: false, resources: false, prompts: false },
+			}),
+		]);
+
+		manager.startRefresh("lsp:typescript", "request-lsp");
+		manager.startRefresh("dap:gdb", "request-dap");
+		await settle(manager);
+
+		expect(manager.snapshot().servers).toEqual([
+			expect.objectContaining({ serverId: "dap:gdb", kind: "dap", state: "discovered" }),
+			expect.objectContaining({ serverId: "lsp:typescript", kind: "lsp", state: "connected" }),
+		]);
+		expect(source.reconnects).toEqual([]);
 	});
 });

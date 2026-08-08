@@ -143,7 +143,7 @@ class FakeAgentSession {
 		this.refreshSkillsCalls++;
 	}
 	planModeState: PlanModeState | undefined;
-	private pendingPlanApproval: { approvalId: string; planFilePath: string } | undefined;
+	#pendingPlanApproval: { approvalId: string; planFilePath: string } | undefined;
 	readonly planMode = {
 		enter: async (options?: { planFilePath?: string; workflow?: "parallel" | "iterative" }): Promise<void> => {
 			if (this.planModeState?.enabled) return;
@@ -161,7 +161,7 @@ class FakeAgentSession {
 		disable: async (): Promise<void> => {
 			this.planModeState = undefined;
 			this.planProposalHandler = undefined;
-			this.pendingPlanApproval = undefined;
+			this.#pendingPlanApproval = undefined;
 			this.sessionManager.appendModeChange("none");
 		},
 		promoteReviewedPlan: async (details: {
@@ -178,16 +178,16 @@ class FakeAgentSession {
 				});
 			}
 			const approvalId = "test-plan-approval";
-			this.pendingPlanApproval = { approvalId, planFilePath: details.planFilePath };
+			this.#pendingPlanApproval = { approvalId, planFilePath: details.planFilePath };
 			return { approvalId, planFilePath: details.planFilePath, title: details.title, planContent: "test plan" };
 		},
 		resolveApproval: async (
 			approvalId: string,
 			decision: { kind: "approve" | "refine" | "reject" },
 		): Promise<void> => {
-			const approval = this.pendingPlanApproval;
+			const approval = this.#pendingPlanApproval;
 			if (!approval || approval.approvalId !== approvalId) throw new Error("Unknown plan approval.");
-			this.pendingPlanApproval = undefined;
+			this.#pendingPlanApproval = undefined;
 			if (decision.kind !== "approve") return;
 			this.planReferencePath = approval.planFilePath;
 			this.planModeState = undefined;
@@ -200,11 +200,10 @@ class FakeAgentSession {
 	asyncJobDrain: ((options?: { timeoutMs?: number }) => Promise<boolean>) | undefined;
 	usageFallbackConfirmer: ((confirmation: UsageFallbackConfirmation) => Promise<boolean>) | undefined;
 	#listeners = new Set<(event: AgentSessionEvent) => void>();
+	readonly #models: Model[];
 
-	constructor(
-		cwd: string,
-		private readonly models: Model[] = TEST_MODELS,
-	) {
+	constructor(cwd: string, models: Model[] = TEST_MODELS) {
+		this.#models = models;
 		this.sessionManager = SessionManager.create(cwd);
 		this.sessionId = this.sessionManager.getSessionId();
 		this.agent = {
@@ -227,7 +226,7 @@ class FakeAgentSession {
 	}
 
 	getAvailableModels(): Model[] {
-		return this.models;
+		return this.#models;
 	}
 
 	getAvailableThinkingLevels(): ReadonlyArray<string> {

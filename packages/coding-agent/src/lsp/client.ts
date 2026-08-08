@@ -1427,6 +1427,7 @@ export async function shutdownAll(): Promise<void> {
 
 /** Status of an LSP server */
 export interface LspServerStatus {
+	serverId?: string;
 	name: string;
 	status: "connecting" | "ready" | "error";
 	fileTypes: string[];
@@ -1437,7 +1438,8 @@ export interface LspServerStatus {
  * Get status of all active LSP clients.
  */
 export function getActiveClients(): LspServerStatus[] {
-	return Array.from(clients.values()).map(client => ({
+	return Array.from(clients, ([serverId, client]) => ({
+		serverId,
 		name: client.config.command,
 		status: client.status,
 		fileTypes: client.config.fileTypes,

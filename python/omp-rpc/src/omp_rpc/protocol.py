@@ -2965,7 +2965,6 @@ def _parse_session_host_capability(
 
 
 def _parse_session_host_manifest(payload: JsonObject) -> SessionHostManifest:
-    
 
     raw_profiles = payload.get("semanticProfiles")
     if not isinstance(raw_profiles, list) or not raw_profiles:

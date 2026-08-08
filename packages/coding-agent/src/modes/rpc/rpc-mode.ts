@@ -117,6 +117,7 @@ import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } f
 import { type RpcOperationHandle, RpcOperationManager } from "./rpc-operations";
 import { RpcProvenanceManager, type RpcProvenanceSource } from "./rpc-provenance";
 import { RpcResourceLifecycleManager, RpcResourceNotFoundError } from "./rpc-resource-lifecycle";
+import { RpcRuntimeResourceSource } from "./rpc-runtime-resources";
 import { RpcSemanticRenderingManager } from "./rpc-semantic-rendering";
 import {
 	createRpcSessionCommandInvoker,
@@ -1112,7 +1113,7 @@ export async function runRpcMode(
 		features.add("approval");
 		features.add("semantic-rendering");
 		if (session.sessionManager.getArtifactManager()) features.add("artifact");
-		if (mcpManager) features.add("resource-lifecycle");
+		features.add("resource-lifecycle");
 		features.add("runtime-provenance");
 		features.add("collaboration");
 		if (session.asyncJobManager && session.getAgentId()) features.add("job-control");
@@ -1708,7 +1709,7 @@ export async function runRpcMode(
 		dumpTools: session.agent.state.tools.map(tool => ({
 			name: tool.name,
 			description: tool.description,
-			parameters: isZodSchema(tool.parameters) ? zodToWireSchema(tool.parameters) : tool.parameters,
+			parameters: toolWireSchema(tool),
 			examples: tool.examples,
 		})),
 		contextUsage: session.getContextUsage(),
@@ -1817,9 +1818,10 @@ export async function runRpcMode(
 		session.setSlashCommands(await loadSlashCommands({ cwd }));
 		await emitAvailableCommandsUpdate();
 	};
-	const resourceLifecycle = mcpManager
-		? new RpcResourceLifecycleManager(mcpManager, frame => output(frame))
-		: undefined;
+	const resourceLifecycle = new RpcResourceLifecycleManager(
+		new RpcRuntimeResourceSource(session.sessionManager.getCwd(), mcpManager),
+		frame => output(frame),
+	);
 	const emitAvailableCommandsUpdate = async () => {
 		output({ type: "available_commands_update", commands: await getAvailableCommands() });
 	};
@@ -2931,20 +2933,20 @@ export async function runRpcMode(
 					}
 				};
 				const deferred = session.isStreaming && command.when === "next_idle";
-				const task = new Promise<void>(resolve => {
-					setImmediate(() => {
-						void (async () => {
-							try {
-								if (deferred) await session.waitForIdle();
-								if (!operationManager.begin(operation)) return;
-								await apply();
-								operationManager.complete(operation, false);
-							} catch (cause) {
-								operationManager.fail(operation, cause instanceof Error ? cause : new Error(String(cause)));
-							}
-						})().finally(resolve);
-					});
+				const taskCompletion = Promise.withResolvers<void>();
+				setImmediate(() => {
+					void (async () => {
+						try {
+							if (deferred) await session.waitForIdle();
+							if (!operationManager.begin(operation)) return;
+							await apply();
+							operationManager.complete(operation, false);
+						} catch (cause) {
+							operationManager.fail(operation, cause instanceof Error ? cause : new Error(String(cause)));
+						}
+					})().finally(taskCompletion.resolve);
 				});
+				const task = taskCompletion.promise;
 				rpcTaskTracker(task);
 				return success(id, "set_mode", {
 					operationId: operation.operationId,
@@ -2970,36 +2972,36 @@ export async function runRpcMode(
 				}
 				const operation = operationManager.start(id, "resolve_plan_approval");
 				planApprovalOperations.set(operation.operationId, command.approvalId);
-				const task = new Promise<void>(resolve => {
-					setImmediate(() => {
-						if (!operationManager.begin(operation)) {
+				const taskCompletion = Promise.withResolvers<void>();
+				setImmediate(() => {
+					if (!operationManager.begin(operation)) {
+						planApprovalOperations.delete(operation.operationId);
+						taskCompletion.resolve();
+						return;
+					}
+					void session.planMode
+						.resolveApproval(
+							command.approvalId,
+							command.decision === "approve"
+								? {
+										kind: "approve",
+										preserveContext: command.preserveContext === true,
+										compactBeforeExecute: command.compactBeforeExecute === true,
+										executionModelRole: command.executionModelRole,
+										editedContent: command.editedContent,
+									}
+								: { kind: command.decision, feedback: command.feedback },
+						)
+						.then(result => operationManager.complete(operation, result.executionDispatched))
+						.catch(cause =>
+							operationManager.fail(operation, cause instanceof Error ? cause : new Error(String(cause))),
+						)
+						.finally(() => {
 							planApprovalOperations.delete(operation.operationId);
-							resolve();
-							return;
-						}
-						void session.planMode
-							.resolveApproval(
-								command.approvalId,
-								command.decision === "approve"
-									? {
-											kind: "approve",
-											preserveContext: command.preserveContext === true,
-											compactBeforeExecute: command.compactBeforeExecute === true,
-											executionModelRole: command.executionModelRole,
-											editedContent: command.editedContent,
-										}
-									: { kind: command.decision, feedback: command.feedback },
-							)
-							.then(result => operationManager.complete(operation, result.executionDispatched))
-							.catch(cause =>
-								operationManager.fail(operation, cause instanceof Error ? cause : new Error(String(cause))),
-							)
-							.finally(() => {
-								planApprovalOperations.delete(operation.operationId);
-								resolve();
-							});
-					});
+							taskCompletion.resolve();
+						});
 				});
+				const task = taskCompletion.promise;
 				rpcTaskTracker(task);
 				return success(id, "resolve_plan_approval", { operationId: operation.operationId, accepted: true });
 			}

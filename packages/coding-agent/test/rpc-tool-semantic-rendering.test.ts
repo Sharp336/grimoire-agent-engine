@@ -1,7 +1,7 @@
 import { describe, expect, test, vi } from "bun:test";
+import { Type } from "@oh-my-pi/omptype/typebox";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { RegisteredTool } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
-import { Type } from "@oh-my-pi/pi-coding-agent/extensibility/typebox";
 import { projectRpcToolSemantic } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-tool-semantic-rendering";
 
 describe("RPC tool semantic rendering", () => {

@@ -6,6 +6,8 @@ const MAX_RESOURCE_ITEMS = 512;
 const MAX_RESOURCE_DIAGNOSTICS = 64;
 const MAX_RESOURCE_TEXT_BYTES = 4096;
 
+export type RpcResourceKind = "mcp" | "lsp" | "dap";
+
 export type RpcResourceLifecycleState =
 	| "discovered"
 	| "connecting"
@@ -50,6 +52,8 @@ export interface RpcResourcePromptSource {
 
 export interface RpcResourceManagerSource {
 	getAllServerNames(): string[];
+	getResourceKind?(name: string): RpcResourceKind;
+	refreshLifecycle?(name: string): Promise<RpcResourceLifecycleState | undefined>;
 	getConnectionStatus(name: string): "connected" | "connecting" | "disconnected";
 	getConnection(name: string):
 		| {
@@ -80,6 +84,7 @@ export interface RpcResourceCollection<T> {
 
 export interface RpcResourceServerSnapshot {
 	serverId: string;
+	kind: RpcResourceKind;
 	state: RpcResourceLifecycleState;
 	capabilities: {
 		tools: boolean;
@@ -335,6 +340,12 @@ export class RpcResourceLifecycleManager {
 
 	async #refreshServer(operation: ResourceOperation, serverId: string): Promise<void> {
 		try {
+			const lifecycleState = await this.#source.refreshLifecycle?.(serverId);
+			if (operation.controller.signal.aborted || operation.settled) return;
+			if (lifecycleState !== undefined) {
+				this.#transition(serverId, lifecycleState, [], operation.operationId);
+				return;
+			}
 			if (this.#source.getConnectionStatus(serverId) !== "connected") {
 				const connection = await this.#source.reconnectServer(serverId, { manual: true });
 				if (operation.controller.signal.aborted || operation.settled) return;
@@ -514,6 +525,7 @@ export class RpcResourceLifecycleManager {
 		}));
 		return {
 			serverId,
+			kind: this.#source.getResourceKind?.(serverId) ?? "mcp",
 			state: record.state,
 			capabilities: {
 				tools: connection?.capabilities.tools !== undefined,

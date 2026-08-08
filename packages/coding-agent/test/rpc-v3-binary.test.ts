@@ -2,13 +2,12 @@ import { describe, expect, test } from "bun:test";
 import * as path from "node:path";
 import { isRecord, readJsonl } from "@oh-my-pi/pi-utils";
 
-describe("RPC v3 real process conformance", () => {
+const binaryPath = Bun.env.OMP_RPC_CONFORMANCE_BIN ?? path.join(import.meta.dir, "..", "dist", "omp");
+const hasConformanceBinary = await Bun.file(binaryPath).exists();
+
+describe.skipIf(!hasConformanceBinary)("RPC v3 real process conformance", () => {
 	test("negotiates authority, snapshots, invokes, and settles with the final frame", async () => {
-		const binaryPath = Bun.env.OMP_RPC_CONFORMANCE_BIN;
-		const cliPath = path.join(import.meta.dir, "..", "src", "cli.ts");
-		const command = binaryPath
-			? [binaryPath, "--mode", "rpc", "--provider", "anthropic", "--model", "claude-sonnet-4-5"]
-			: ["bun", cliPath, "--mode", "rpc", "--provider", "anthropic", "--model", "claude-sonnet-4-5"];
+		const command = [binaryPath, "--mode", "rpc", "--provider", "anthropic", "--model", "claude-sonnet-4-5"];
 		const child = Bun.spawn(command, {
 			cwd: path.join(import.meta.dir, ".."),
 			env: { ...Bun.env, PI_NO_TITLE: "1" },

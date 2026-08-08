@@ -9,7 +9,10 @@ import {
 	type RpcCollaborationOpenEvents,
 	type RpcCollaborationTransportFactory,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-collaboration";
-import { RpcCollaborationSessionMediaStore } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-collaboration-transport";
+import {
+	projectCollaborationPayload,
+	RpcCollaborationSessionMediaStore,
+} from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-collaboration-transport";
 import { ArtifactManager } from "@oh-my-pi/pi-coding-agent/session/artifacts";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -194,6 +197,41 @@ describe("RPC collaboration authority", () => {
 		});
 	});
 
+	test("preserves typed projection loss metadata on replicated frames", async () => {
+		const { manager, factory, frames } = makeManager();
+		await manager.join({ link: "wss://relay/r/room.full" });
+		factory.events?.replicated({
+			kind: "event",
+			payload: { items: [] },
+			projection: {
+				fidelity: "lossy",
+				losses: [
+					{
+						path: "/items",
+						reason: "array_item_limit",
+						omittedCount: 1,
+						recoverable: true,
+					},
+				],
+				fullPayload: {
+					mediaId: "full",
+					mediaType: "application/json",
+					byteLength: 12,
+					sha256: "abc",
+				},
+			},
+		});
+
+		expect(frames.at(-1)).toMatchObject({
+			type: "collaboration_replicated",
+			projection: {
+				fidelity: "lossy",
+				losses: [{ path: "/items", reason: "array_item_limit", recoverable: true }],
+				fullPayload: { mediaId: "full", mediaType: "application/json" },
+			},
+		});
+	});
+
 	test("marks gaps stale and requests resync when the unacknowledged window overflows", async () => {
 		const { manager, factory, frames } = makeManager({ maxRetainedFrames: 2 });
 		await manager.join({ link: "wss://relay/r/room.full" });
@@ -207,6 +245,31 @@ describe("RPC collaboration authority", () => {
 			expect.objectContaining({ type: "collaboration_gap", reason: "backpressure_overflow" }),
 		);
 		expect(frames).toContainEqual(expect.objectContaining({ type: "collaboration_stale" }));
+	});
+
+	test("drops old-generation replication after a gap until resync starts a new generation", async () => {
+		const { manager, factory, frames } = makeManager({ maxRetainedFrames: 2 });
+		await manager.join({ link: "wss://relay/r/room.full" });
+		factory.events?.replicated({ kind: "event", payload: { n: 1 } });
+		factory.events?.replicated({ kind: "event", payload: { n: 2 } });
+		factory.events?.replicated({ kind: "event", payload: { n: 3 } });
+		const replicatedBeforeStaleFrame = frames.filter(frame => frame.type === "collaboration_replicated");
+
+		factory.events?.replicated({ kind: "event", payload: { n: 4 } });
+
+		expect(frames.filter(frame => frame.type === "collaboration_replicated")).toEqual(replicatedBeforeStaleFrame);
+		expect(manager.snapshot().replication).toMatchObject({
+			generation: 1,
+			latestSequence: 3,
+			stale: true,
+		});
+
+		factory.events?.status("connected");
+		factory.events?.replicated({ kind: "snapshot", payload: { n: 5 } });
+		expect(frames.at(-1)).toMatchObject({
+			type: "collaboration_replicated",
+			cursor: { generation: 2, sequence: 1 },
+		});
 	});
 
 	test("reconnects with a new generation and rejects stale acknowledgements", async () => {
@@ -273,5 +336,84 @@ describe("RPC collaboration authority", () => {
 			eof: true,
 			data: "AgM=",
 		});
+	});
+
+	test("reports projection limits and persists a full JSON reference", async () => {
+		const stored: Uint8Array[] = [];
+		const events = {
+			status: () => {},
+			participants: () => {},
+			authority: () => {},
+			replicated: () => {},
+			media: async ({ mediaType, data }) => {
+				stored.push(data);
+				return {
+					mediaId: "full",
+					mediaType,
+					byteLength: data.byteLength,
+					sha256: new Bun.CryptoHasher("sha256").update(data).digest("hex"),
+				};
+			},
+			gap: () => {},
+		} satisfies RpcCollaborationOpenEvents;
+		const original = { items: Array.from({ length: 4097 }, (_, index) => index) };
+
+		const projected = await projectCollaborationPayload(original, events);
+
+		if (
+			projected.payload === null ||
+			Array.isArray(projected.payload) ||
+			typeof projected.payload !== "object" ||
+			!Array.isArray(projected.payload.items)
+		) {
+			throw new Error("Expected projected items");
+		}
+		expect(projected.payload.items).toHaveLength(4096);
+		expect(projected.projection).toMatchObject({
+			fidelity: "lossy",
+			losses: [
+				{
+					path: "/items",
+					reason: "array_item_limit",
+					omittedCount: 1,
+					recoverable: true,
+				},
+			],
+			fullPayload: { mediaId: "full", mediaType: "application/json" },
+		});
+		expect(JSON.parse(Buffer.from(stored[0]).toString("utf8"))).toEqual(original);
+	});
+
+	test("surfaces unrecoverable truncation inherited from the collaboration transport", async () => {
+		let mediaCalls = 0;
+		const events = {
+			status: () => {},
+			participants: () => {},
+			authority: () => {},
+			replicated: () => {},
+			media: async ({ mediaType, data }) => {
+				mediaCalls += 1;
+				return { mediaId: "unused", mediaType, byteLength: data.byteLength, sha256: "unused" };
+			},
+			gap: () => {},
+		} satisfies RpcCollaborationOpenEvents;
+
+		const projected = await projectCollaborationPayload(
+			{ text: "partial\n…[42 chars elided for collab session]" },
+			events,
+		);
+
+		expect(projected.projection).toEqual({
+			fidelity: "lossy",
+			losses: [
+				{
+					path: "/text",
+					reason: "source_transport_elision",
+					omittedCount: 42,
+					recoverable: false,
+				},
+			],
+		});
+		expect(mediaCalls).toBe(0);
 	});
 });

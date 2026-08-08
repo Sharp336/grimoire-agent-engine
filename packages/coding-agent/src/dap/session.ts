@@ -1109,6 +1109,14 @@ export class DapSessionManager {
 		return summary;
 	}
 
+	async terminateAdapter(adapterName: string, signal?: AbortSignal, timeoutMs: number = 30_000): Promise<number> {
+		const roots = [...this.#sessions.values()].filter(
+			session => session.parentSessionId === undefined && session.adapter.name === adapterName,
+		);
+		await Promise.all(roots.map(session => this.#terminateSessionTree(session, signal, timeoutMs)));
+		return roots.length;
+	}
+
 	async #terminateSessionTree(session: DapSession, signal?: AbortSignal, timeoutMs: number = 30_000): Promise<void> {
 		session.status = "terminated";
 		try {

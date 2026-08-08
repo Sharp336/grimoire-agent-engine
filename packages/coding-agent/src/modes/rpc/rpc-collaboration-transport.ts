@@ -18,6 +18,8 @@ import type {
 	RpcCollaborationMediaStore,
 	RpcCollaborationOpenEvents,
 	RpcCollaborationParticipant,
+	RpcCollaborationProjection,
+	RpcCollaborationProjectionLoss,
 	RpcCollaborationTransportFactory,
 } from "./rpc-collaboration";
 import { sanitizeRpcText } from "./rpc-safe-text";
@@ -27,6 +29,8 @@ const MAX_PROJECTED_DEPTH = 32;
 const MAX_PROJECTED_ARRAY_ITEMS = 4096;
 const MAX_PROJECTED_OBJECT_KEYS = 256;
 const MAX_MEDIA_TYPE_BYTES = 256;
+const MAX_RECORDED_PROJECTION_LOSSES = 128;
+const COLLAB_SOURCE_ELISION = /…\[(\d+) (?:chars|items) elided for collab session\]$/;
 
 type WelcomeFrame = Extract<CollabFrame, { t: "welcome" }>;
 type SnapshotChunkFrame = Extract<CollabFrame, { t: "snapshot-chunk" }>;
@@ -70,31 +74,90 @@ function projectGuestParticipants(
 	});
 }
 
+interface RecordedProjectionLoss extends RpcCollaborationProjectionLoss {
+	local: boolean;
+}
+
+interface ProjectionContext {
+	events: RpcCollaborationOpenEvents;
+	losses: RecordedProjectionLoss[];
+	droppedLosses: number;
+	droppedUnrecoverableLoss: boolean;
+}
+
+function appendPointer(path: string, component: string | number): string {
+	return `${path}/${String(component).replaceAll("~", "~0").replaceAll("/", "~1")}`;
+}
+
+function recordProjectionLoss(context: ProjectionContext, loss: RecordedProjectionLoss): void {
+	if (context.losses.length < MAX_RECORDED_PROJECTION_LOSSES - 1) {
+		context.losses.push(loss);
+		return;
+	}
+	context.droppedLosses += 1;
+	if (!loss.local) context.droppedUnrecoverableLoss = true;
+}
+
 async function projectUnknown(
 	value: unknown,
-	events: RpcCollaborationOpenEvents,
+	context: ProjectionContext,
+	path: string,
 	depth = 0,
 ): Promise<RpcCollaborationJsonValue> {
-	if (depth >= MAX_PROJECTED_DEPTH) return null;
-	if (value === null || typeof value === "string" || typeof value === "boolean") return value;
-	if (typeof value === "number") return Number.isFinite(value) ? value : null;
+	if (depth >= MAX_PROJECTED_DEPTH) {
+		recordProjectionLoss(context, { path, reason: "depth_limit", recoverable: false, local: true });
+		return null;
+	}
+	if (value === null || typeof value === "boolean") return value;
+	if (typeof value === "string") {
+		const sourceElision = COLLAB_SOURCE_ELISION.exec(value);
+		if (sourceElision) {
+			recordProjectionLoss(context, {
+				path,
+				reason: "source_transport_elision",
+				omittedCount: Number(sourceElision[1]),
+				recoverable: false,
+				local: false,
+			});
+		}
+		return value;
+	}
+	if (typeof value === "number") {
+		if (Number.isFinite(value)) return value;
+		recordProjectionLoss(context, { path, reason: "unsupported_value", recoverable: false, local: true });
+		return null;
+	}
 	if (typeof value === "bigint") return value.toString();
 	if (Array.isArray(value)) {
+		const keep = Math.min(value.length, MAX_PROJECTED_ARRAY_ITEMS);
+		if (keep < value.length) {
+			recordProjectionLoss(context, {
+				path,
+				reason: "array_item_limit",
+				omittedCount: value.length - keep,
+				recoverable: false,
+				local: true,
+			});
+		}
 		const projected: RpcCollaborationJsonValue[] = [];
-		for (const item of value.slice(0, MAX_PROJECTED_ARRAY_ITEMS)) {
-			projected.push(await projectUnknown(item, events, depth + 1));
+		for (let index = 0; index < keep; index++) {
+			projected.push(await projectUnknown(value[index], context, appendPointer(path, index), depth + 1));
 		}
 		return projected;
 	}
-	if (!isRecord(value)) return null;
+	if (!isRecord(value)) {
+		recordProjectionLoss(context, { path, reason: "unsupported_value", recoverable: false, local: true });
+		return null;
+	}
 	if (value.type === "image" && typeof value.data === "string" && typeof value.mimeType === "string") {
 		let bytes: Uint8Array;
 		try {
 			bytes = Buffer.from(value.data, "base64");
 		} catch {
+			recordProjectionLoss(context, { path, reason: "invalid_media", recoverable: false, local: true });
 			return { type: "image", unavailable: true };
 		}
-		const media = await events.media({ mediaType: value.mimeType, data: bytes });
+		const media = await context.events.media({ mediaType: value.mimeType, data: bytes });
 		return {
 			type: "image",
 			media: {
@@ -105,12 +168,74 @@ async function projectUnknown(
 			},
 		};
 	}
+	const entries = Object.entries(value).filter(([, child]) => child !== undefined);
+	const keep = Math.min(entries.length, MAX_PROJECTED_OBJECT_KEYS);
+	if (keep < entries.length) {
+		recordProjectionLoss(context, {
+			path,
+			reason: "object_key_limit",
+			omittedCount: entries.length - keep,
+			recoverable: false,
+			local: true,
+		});
+	}
 	const projected: Record<string, RpcCollaborationJsonValue> = {};
-	for (const [key, child] of Object.entries(value).slice(0, MAX_PROJECTED_OBJECT_KEYS)) {
-		if (child === undefined) continue;
-		projected[key] = await projectUnknown(child, events, depth + 1);
+	for (let index = 0; index < keep; index++) {
+		const [key, child] = entries[index];
+		projected[key] = await projectUnknown(child, context, appendPointer(path, key), depth + 1);
 	}
 	return projected;
+}
+
+export async function projectCollaborationPayload(
+	value: unknown,
+	events: RpcCollaborationOpenEvents,
+): Promise<{ payload: RpcCollaborationJsonValue; projection?: RpcCollaborationProjection }> {
+	const context: ProjectionContext = {
+		events,
+		losses: [],
+		droppedLosses: 0,
+		droppedUnrecoverableLoss: false,
+	};
+	const payload = await projectUnknown(value, context, "");
+	if (context.losses.length === 0 && context.droppedLosses === 0) return { payload };
+
+	let fullPayload: RpcCollaborationMediaDescriptor | undefined;
+	if (context.losses.some(loss => loss.local) || context.droppedLosses > 0) {
+		try {
+			const json = JSON.stringify(value);
+			if (json !== undefined) {
+				fullPayload = await events.media({
+					mediaType: "application/json",
+					data: Buffer.from(json, "utf8"),
+					announce: false,
+				});
+			}
+		} catch (cause) {
+			logger.warn("rpc collaboration full projection payload could not be persisted", { error: String(cause) });
+		}
+	}
+
+	const losses: RpcCollaborationProjectionLoss[] = context.losses.map(({ local, ...loss }) => ({
+		...loss,
+		recoverable: local && fullPayload !== undefined,
+	}));
+	if (context.droppedLosses > 0) {
+		losses.push({
+			path: "",
+			reason: "loss_record_limit",
+			omittedCount: context.droppedLosses,
+			recoverable: fullPayload !== undefined && !context.droppedUnrecoverableLoss,
+		});
+	}
+	return {
+		payload,
+		projection: {
+			fidelity: "lossy",
+			losses,
+			...(fullPayload === undefined ? {} : { fullPayload }),
+		},
+	};
 }
 
 class RpcCollaborationHostConnection implements RpcCollaborationConnection {
@@ -309,7 +434,7 @@ class RpcCollaborationGuestConnection implements RpcCollaborationConnection {
 	}
 
 	async #emitSnapshot(initial: InitialReplica): Promise<void> {
-		const payload = await projectUnknown(
+		const projected = await projectCollaborationPayload(
 			{
 				header: initial.welcome.header,
 				state: initial.welcome.state,
@@ -318,12 +443,12 @@ class RpcCollaborationGuestConnection implements RpcCollaborationConnection {
 			},
 			this.#events,
 		);
-		this.#events.replicated({ kind: "snapshot", payload });
+		this.#events.replicated({ kind: "snapshot", ...projected });
 	}
 
 	async #emitLiveFrame(frame: CollabFrame): Promise<void> {
-		const payload = await projectUnknown(frame, this.#events);
-		this.#events.replicated({ kind: frame.t, payload });
+		const projected = await projectCollaborationPayload(frame, this.#events);
+		this.#events.replicated({ kind: frame.t, ...projected });
 	}
 
 	#clearJoinTimer(): void {

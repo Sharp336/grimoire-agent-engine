@@ -363,7 +363,21 @@ export class SessionHost {
 		if (options.after && options.afterCursor) {
 			throw new SessionCursorError("stale_cursor", "Transport and durable cursors cannot be combined");
 		}
+		if (options.after && (!Number.isSafeInteger(options.after.sequence) || options.after.sequence < 0)) {
+			throw new SessionCursorError("stale_cursor", "Transport cursor sequence must be a non-negative safe integer");
+		}
 		if (options.after && options.after.epoch !== this.#epoch) {
+			return this.#createSubscription(options.after.sequence, {
+				type: "gap",
+				sessionId: this.sessionId,
+				epoch: this.#epoch,
+				afterSequence: options.after.sequence,
+				firstAvailableSequence: this.#firstAvailableSequence(),
+				latestSequence: this.#latestSequence,
+				recovery: "resnapshot",
+			});
+		}
+		if (options.after && options.after.sequence > this.#latestSequence) {
 			return this.#createSubscription(options.after.sequence, {
 				type: "gap",
 				sessionId: this.sessionId,

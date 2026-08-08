@@ -253,7 +253,7 @@ export class TurnRecovery {
 						},
 					}
 				: {}),
-			pendingRecoveredErrors: this.#pendingRecoveredRetryErrors.length,
+			pendingRecoveredErrors: this.#pendingRetryErrors.length,
 			emptyStopRetries: this.#emptyStopRetryCount,
 			unexpectedStopRetries: this.#unexpectedStopRetryCount,
 			acceptingTerminalEmptyStop: this.#acceptTerminalEmptyStopForPrompt,

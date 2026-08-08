@@ -404,6 +404,51 @@ describe("session host ordered observations", () => {
 		await host.close();
 	});
 
+	test("keeps a stable event id when durable replay duplicates an event from the transport ring", async () => {
+		const durable = {
+			kind: "journal_entry",
+			payload: { id: "entry-1" },
+			durability: "durable",
+			eventId: "session-1:entry-1",
+			journalCursor: { sessionId: "session-1", leafId: "entry-1", entryId: "entry-1" },
+			terminalSettlement: "none",
+		} as const satisfies SessionAuthorityObservation;
+		const authority = new InMemorySessionAuthority(
+			async () => ({
+				revision: 1,
+				state: {},
+				journalCursor: durable.journalCursor,
+			}),
+			undefined,
+			async () => ({ observations: [durable], journalCursor: durable.journalCursor }),
+		);
+		const host = new SessionHost(authority, { epoch: "epoch-1", maxBufferedObservations: 8 });
+		authority.emit(durable);
+
+		const replay = await host.open({
+			afterCursor: { sessionId: "session-1", leafId: null, entryId: null },
+			snapshot: false,
+		});
+		const duplicate = (await replay.observations.next()).value;
+
+		expect(duplicate).toMatchObject({
+			sequence: 2,
+			eventId: "session-1:entry-1",
+			replay: true,
+		});
+		await replay.close();
+
+		const transportReplay = await host.open({ after: { epoch: "epoch-1", sequence: 0 }, snapshot: false });
+		const original = (await transportReplay.observations.next()).value;
+		const replayed = (await transportReplay.observations.next()).value;
+		expect([original, replayed]).toMatchObject([
+			{ sequence: 1, eventId: "session-1:entry-1", replay: false },
+			{ sequence: 2, eventId: "session-1:entry-1", replay: true },
+		]);
+		await transportReplay.close();
+		await host.close();
+	});
+
 	test("isolates concurrent session hosts and their observation streams", async () => {
 		const createAuthority = (sessionId: string) =>
 			new InMemorySessionAuthority(
@@ -453,5 +498,34 @@ describe("session host ordered observations", () => {
 
 		await Promise.all([first.close(), second.close()]);
 		await Promise.all([firstHost.close(), secondHost.close()]);
+	});
+
+	test("returns a resnapshot gap instead of waiting on a future transport cursor", async () => {
+		const authority = new InMemorySessionAuthority(async () => ({
+			revision: 0,
+			state: {},
+			journalCursor: { sessionId: "session-1", leafId: null, entryId: null },
+		}));
+		const host = new SessionHost(authority, { epoch: "epoch-1", maxBufferedObservations: 8 });
+		const subscription = await host.open({
+			after: { epoch: "epoch-1", sequence: 5 },
+			snapshot: false,
+		});
+
+		const outcome = await subscription.observations.next();
+		expect(outcome).toEqual({
+			done: false,
+			value: {
+				type: "gap",
+				sessionId: "session-1",
+				epoch: "epoch-1",
+				afterSequence: 5,
+				firstAvailableSequence: 1,
+				latestSequence: 0,
+				recovery: "resnapshot",
+			},
+		});
+		await subscription.close();
+		await host.close();
 	});
 });

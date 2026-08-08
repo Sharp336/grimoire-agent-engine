@@ -503,6 +503,15 @@ session identity. Media uses the same bounded base64 range shape as artifacts.
 Collaboration transport is encrypted and backpressured, but it does not replace
 the local RPC session authority.
 
+`collaboration_replicated` frames are non-authoritative projections. A frame
+whose payload could not be represented completely includes
+`projection: { fidelity: "lossy", losses, fullPayload? }`. Each loss names the
+source JSON Pointer, reason, omitted count when known, and whether the complete
+source is recoverable. Locally bounded projections persist the original JSON as
+`fullPayload`; read it with `collaboration_read_media`. Loss inherited from the
+underlying collaboration transport is explicitly unrecoverable rather than
+silently represented as complete.
+
 `provenance_get` returns structured, secret-safe runtime state: usage limits,
 provider and model fallback, credential rotation, active role and service tier,
 failure reason, and next user action. It never returns credentials or infers
