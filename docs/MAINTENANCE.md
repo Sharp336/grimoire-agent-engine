@@ -198,7 +198,7 @@ git diff --check
 
 `test:scripts` 中可能包含平台专属或上游已知不稳定测试，不能用一个聚合命令掩盖结果。CI 和记录必须列出实际执行的测试文件及失败归属。
 
-`//crates/pi-shell:pi-shell_test` 包含真实 Unix 进程组、停止信号和 jobspec 合同，因此 Bazel 目标显式使用 `no-sandbox`；这是执行环境要求，不是跳过测试。hosted Linux 必须实际运行完整目标，不能用 `--skip` 把 job-control 用例从绿灯中排除。
+当前 GitHub-hosted Linux 无法提供 `shell::tests::kill_builtin_signals_every_process_in_a_jobspec_pipeline` 所需的 stopped-pipeline 会话语义；在有/无 Bazel sandbox、5/15 秒上限下都稳定失败，而同一目标其余 918 项通过。因此 hosted Rust job 明确标为 **limited**，运行其他全部 Rust targets 和 `pi-shell_test` 的其余用例，并把这一项记录为未验证，不能写“完整 Rust 矩阵通过”。任何触及 `crates/pi-shell` job-control、进程组、STOP/CONT 或 jobspec 的变更都必须在兼容 Linux runner 上补跑该精确用例；没有证据时发行状态为 **BLOCKED**。
 
 人工 TUI 验收使用临时 profile/目录，不先运行会覆盖现有全局 `omp` 的 `bun setup`。至少检查首次启动、语言切换、设置页、供应商向导、错误提示和非交互命令。
 
