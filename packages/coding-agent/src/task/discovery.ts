@@ -78,7 +78,18 @@ async function loadAgentsFromDir(dir: string, source: AgentSource): Promise<Agen
 export async function discoverAgents(
 	cwd: string,
 	home: string = os.homedir(),
-	options?: { includeExtensions?: boolean; extensionMode?: "merge" | "explicit-only" },
+	options?: {
+		includeExtensions?: boolean;
+		extensionMode?: "merge" | "explicit-only";
+		/**
+		 * Session-persisted explicit extension-package roots (resolved paths).
+		 * SDK sessions pass `additionalExtensionPaths` (and subagents inherit
+		 * `preloadedExtensionPaths`); those live in the construction-time ALS
+		 * scope only, so task-time rediscovery must supply them explicitly or
+		 * the agents/skills they ship vanish mid-session ("Unknown agent").
+		 */
+		extensionRoots?: readonly string[];
+	},
 ): Promise<DiscoveryResult> {
 	const resolvedCwd = path.resolve(cwd);
 
@@ -111,7 +122,10 @@ export async function discoverAgents(
 	// disabledProviders suppresses the whole extension-package surface.
 	if (options?.includeExtensions !== false) {
 		const extensionRoots = isProviderEnabled("omp-plugins")
-			? await listOmpExtensionRoots({ cwd: resolvedCwd, home, repoRoot: null }, { mode: options?.extensionMode })
+			? await listOmpExtensionRoots(
+					{ cwd: resolvedCwd, home, repoRoot: null },
+					{ mode: options?.extensionMode, explicitRoots: options?.extensionRoots },
+				)
 			: [];
 		for (const root of extensionRoots) {
 			orderedDirs.push({ dir: path.join(root.path, "agents"), source: root.level });

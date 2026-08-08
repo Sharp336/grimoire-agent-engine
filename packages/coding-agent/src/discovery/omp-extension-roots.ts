@@ -189,18 +189,25 @@ async function isDirectory(p: string): Promise<boolean> {
  * `--no-extensions` sessions surface exactly the roots the invocation named.
  * The mode resolves as explicit `options.mode` (what the calling discovery
  * surface was asked for) > invocation-scoped ALS mode > global injected mode.
+ *
+ * `options.explicitRoots` (session-persisted, resolved against `ctx.cwd`)
+ * overrides both ALS and injected candidates: SDK sessions that pass explicit
+ * extension packages must keep seeing exactly those roots when discovery
+ * re-runs after the construction-time invocation scope is gone.
  */
 export async function listOmpExtensionRoots(
 	ctx: LoadContext,
-	options?: { mode?: OmpExtensionRootMode },
+	options?: { mode?: OmpExtensionRootMode; explicitRoots?: readonly string[] },
 ): Promise<OmpExtensionRoot[]> {
 	const scopedRoots = invocationRootScope.getStore();
 	const rootMode = options?.mode ?? scopedRoots?.mode ?? injectedCliRootMode;
-	let candidates: InjectedRoot[] = scopedRoots
-		? scopedRoots.paths.map(raw => ({ path: resolveAgainst(raw, ctx), level: "user" }))
-		: injectedCliRoots.map(root =>
-				root.relativePath ? { ...root, path: path.resolve(ctx.cwd, root.relativePath) } : root,
-			);
+	let candidates: InjectedRoot[] = options?.explicitRoots
+		? options.explicitRoots.map(raw => ({ path: resolveAgainst(raw, ctx), level: "user" }))
+		: scopedRoots
+			? scopedRoots.paths.map(raw => ({ path: resolveAgainst(raw, ctx), level: "user" }))
+			: injectedCliRoots.map(root =>
+					root.relativePath ? { ...root, path: path.resolve(ctx.cwd, root.relativePath) } : root,
+				);
 	if (rootMode === "merge") {
 		const { project, user } = scopeDirs(ctx);
 		const [projectExtensions, userExtensions, installedPlugins] = await Promise.all([

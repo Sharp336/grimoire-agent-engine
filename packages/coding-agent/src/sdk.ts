@@ -2910,7 +2910,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Definitions the task tool actually advertises (same memoized discovery it
 		// renders): scout availability in the system prompt must match spawn
 		// reality, not just the name-based spawn policy.
-		const spawnableAgents = (await discoverAgentsForCreate(cwd, rootMode)).agents;
+		const spawnableAgents = (await discoverAgentsForCreate(cwd, rootMode, extensionPaths)).agents;
 		const rebuildSystemPrompt = async (
 			toolNames: string[],
 			tools: Map<string, AgentTool>,
@@ -3022,7 +3022,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				taskBatch: settings.get("task.batch"),
 				taskMaxConcurrency: settings.get("task.maxConcurrency"),
 				scoutAvailable: isSpawnableScoutInAgents(
-					getDiscoveredAgentsSnapshot(promptCwd, rootMode) ?? spawnableAgents,
+					getDiscoveredAgentsSnapshot(promptCwd, rootMode, extensionPaths) ?? spawnableAgents,
 					settings.get("task.disabledAgents") as string[] | undefined,
 					sessionSpawns,
 				),
@@ -3624,6 +3624,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			},
 			getSessionSpawns: () => sessionSpawns,
 			getExtensionDiscoveryMode: () => rootMode,
+			extensionPaths,
 			setAgentPersona: (agent: AgentDefinition | undefined) => {
 				activeAgentPersona = agent;
 			},

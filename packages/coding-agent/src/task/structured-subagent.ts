@@ -254,6 +254,7 @@ export async function resolveEffectiveSubagentPolicy(
 	const discovery = await discoverAgents(request.session.cwd, undefined, {
 		includeExtensions: true,
 		extensionMode: request.session.getExtensionDiscoveryMode?.(),
+		extensionRoots: request.session.extensionPaths,
 	});
 	const agent = getAgent(discovery.agents, agentName);
 	if (!agent) {

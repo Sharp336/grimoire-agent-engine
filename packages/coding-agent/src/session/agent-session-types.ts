@@ -307,6 +307,13 @@ export interface AgentSessionConfig {
 	 * persona that startup suppressed.
 	 */
 	getExtensionDiscoveryMode?: () => "explicit-only" | "merge";
+	/**
+	 * Resolved explicit extension-package root paths for this session (from
+	 * `additionalExtensionPaths` / `preloadedExtensionPaths`). Persisted so
+	 * task-time rediscovery and the persona picker keep resolving the agents
+	 * these roots ship after the construction-time invocation scope is gone.
+	 */
+	extensionPaths?: string[];
 }
 
 /** Options for AgentSession.prompt(). */

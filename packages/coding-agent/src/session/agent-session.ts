@@ -634,6 +634,7 @@ export class AgentSession {
 	#getSessionSpawns: (() => string | undefined) | undefined;
 	#setSessionSpawns: ((spawns: string) => void) | undefined;
 	#getExtensionDiscoveryMode: (() => "explicit-only" | "merge") | undefined;
+	#extensionPaths: string[] | undefined;
 	#agentToolOverlay: { restore: () => Promise<void> } | undefined;
 	#cliToolsLocked = false;
 	#cliModelLocked = false;
@@ -1284,6 +1285,7 @@ export class AgentSession {
 		this.#getSessionSpawns = config.getSessionSpawns;
 		this.#setSessionSpawns = config.setSessionSpawns;
 		this.#getExtensionDiscoveryMode = config.getExtensionDiscoveryMode;
+		this.#extensionPaths = config.extensionPaths;
 		this.#cliToolsLocked = config.cliToolsLocked ?? false;
 		this.#cliModelLocked = config.cliModelLocked ?? false;
 		this.#cliThinkingLocked = config.cliThinkingLocked ?? false;
@@ -4317,6 +4319,11 @@ export class AgentSession {
 		return this.#getExtensionDiscoveryMode?.() ?? "merge";
 	}
 
+	/** Resolved explicit extension-package root paths (additionalExtensionPaths / preloadedExtensionPaths). */
+	get extensionPaths(): string[] | undefined {
+		return this.#extensionPaths;
+	}
+
 	/** Whether the edit tool is registered in this session. */
 	get hasEditTool(): boolean {
 		return this.#tools.hasEditTool;
@@ -4914,7 +4921,11 @@ export class AgentSession {
 		const disabledAgents = this.settings.get("task.disabledAgents") as string[] | undefined;
 		const spawns = this.#getSessionSpawns?.() ?? "*";
 		if (!isScoutSpawnable(disabledAgents, spawns)) return false;
-		const agents = getDiscoveredAgentsSnapshot(this.sessionManager.getCwd(), this.getExtensionDiscoveryMode());
+		const agents = getDiscoveredAgentsSnapshot(
+			this.sessionManager.getCwd(),
+			this.getExtensionDiscoveryMode(),
+			this.extensionPaths,
+		);
 		if (agents === undefined) return true;
 		const scout = agents.find(agent => agent.name === "scout");
 		return scout !== undefined && scout.availability !== "primary";

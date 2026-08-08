@@ -93,6 +93,23 @@ describe("TaskTool.create discovery memo", () => {
 		expect(spy).toHaveBeenCalledTimes(2);
 	});
 
+	it("rescans when a session supplies explicit extension roots", async () => {
+		const spy = vi
+			.spyOn(discoveryModule, "discoverAgents")
+			.mockResolvedValue({ agents: TEST_AGENTS, projectAgentsDir: null });
+
+		await TaskTool.create(createSession("/tmp"));
+		const rootedSession = createSession("/tmp");
+		rootedSession.extensionPaths = ["./pack"];
+
+		await TaskTool.create(rootedSession);
+
+		// Explicit-root sessions resolve a different agent set (the roots' own
+		// agents must be present), so the memo key must include the roots — a
+		// plain same-cwd entry must not serve them.
+		expect(spy).toHaveBeenCalledTimes(2);
+	});
+
 	it("publishes refreshed definitions to existing and future tools", async () => {
 		const spy = vi
 			.spyOn(discoveryModule, "discoverAgents")

@@ -407,6 +407,7 @@ export class SelectorController {
 				defaultModelPattern,
 			},
 			this.ctx.session.getExtensionDiscoveryMode,
+			this.ctx.session.extensionPaths,
 		);
 		const overlay = this.ctx.ui.showOverlay(dashboard, {
 			width: "100%",
