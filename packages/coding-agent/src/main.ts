@@ -157,6 +157,10 @@ const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	"advisor.subagents",
 	"advisor.syncBacklog",
 	"advisor.immuneTurns",
+	"advisor.maxRequestsPerReview",
+	"advisor.maxCostPerReview",
+	"advisor.maxToolCallsPerTurn",
+	"advisor.maxIdenticalToolCalls",
 	"tier.advisor",
 ];
 

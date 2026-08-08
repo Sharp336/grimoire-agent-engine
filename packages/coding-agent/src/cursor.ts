@@ -76,6 +76,12 @@ interface CursorExecBridgeOptions {
 	 */
 	getEditReplaceTool?: () => CursorBridgeTool | undefined;
 	getToolContext?: () => AgentToolContext | undefined;
+	/**
+	 * Gate Cursor-resolved calls that bypass the model-facing tool registry.
+	 * A refusal is thrown so the provider returns an error/rejected result
+	 * without executing the underlying handler.
+	 */
+	beforeToolCall?: (name: string, args: unknown) => string | undefined;
 	emitEvent?: (event: AgentEvent) => void;
 	/**
 	 * Whether frames that mutate the filesystem WITHOUT running a registry tool
@@ -316,6 +322,8 @@ async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, 
 		const result = buildToolErrorResult(`Tool "${toolName}" not available`);
 		return createToolResultMessage(toolCallId, toolName, result, true);
 	}
+	const budgetRefusal = options.beforeToolCall?.(toolName, { path: pathArg });
+	if (budgetRefusal) throw new Error(budgetRefusal);
 
 	// Unlike every other frame, this one mutates the filesystem directly instead
 	// of running a registry tool, so no approval wrapper sits in front of it.
@@ -731,6 +739,8 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 * it came from. An absent `server` filter means "all of them".
 	 */
 	async listMcpResources({ server }: { server?: string }): Promise<CursorMcpResource[]> {
+		const budgetRefusal = this.options.beforeToolCall?.("list_mcp_resources", { server });
+		if (budgetRefusal) throw new Error(budgetRefusal);
 		const mcp = this.options.mcpResources;
 		if (!mcp) return [];
 		const names = server ? [server] : mcp.serverNames();
@@ -777,6 +787,12 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		uri: string;
 		downloadPath?: string;
 	}): Promise<CursorMcpResourceContent | null> {
+		const budgetRefusal = this.options.beforeToolCall?.("read_mcp_resource", {
+			server,
+			uri,
+			downloadPath,
+		});
+		if (budgetRefusal) throw new Error(budgetRefusal);
 		if (downloadPath) {
 			if (this.options.allowDirectFileMutation === false) {
 				throw new Error('Tool "write" not available: this session cannot download resources to disk.');

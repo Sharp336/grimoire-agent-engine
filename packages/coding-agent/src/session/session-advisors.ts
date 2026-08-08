@@ -696,6 +696,7 @@ export class SessionAdvisors {
 					maxRequests: this.#host.settings.get("advisor.maxRequestsPerReview"),
 					maxCostUsd: this.#host.settings.get("advisor.maxCostPerReview"),
 					maxIdenticalToolCalls: this.#host.settings.get("advisor.maxIdenticalToolCalls"),
+					maxToolCallsPerTurn: this.#host.settings.get("advisor.maxToolCallsPerTurn"),
 				}),
 				stop => logger.warn("advisor review budget reached", { advisor: advisorName, ...stop }),
 			);
@@ -709,7 +710,7 @@ export class SessionAdvisors {
 			if (config.instructions?.trim()) systemPrompt.push(config.instructions.trim());
 
 			const names = config.tools === undefined ? ADVISOR_DEFAULT_TOOL_NAMES : new Set(config.tools);
-			const tools = (this.#advisorTools ?? []).filter(t => names.has(t.name)).map(t => reviewBudget.guardTool(t));
+			const tools = (this.#advisorTools ?? []).filter(t => names.has(t.name));
 			const advisorLoopTools: AgentTool<any>[] = [adviseTool, ...tools];
 			const advisorToolMap = new Map<string, AgentTool<any>>();
 			const availableAdvisorToolNames = new Set<string>();
@@ -721,6 +722,9 @@ export class SessionAdvisors {
 					advisorToolMap.set(tool.customWireName, tool);
 				}
 			}
+			const advisorBridgeToolMap = new Map(
+				[...advisorToolMap.entries()].map(([name, tool]) => [name, reviewBudget.guardTool(tool)] as const),
+			);
 			let quarantinedAdvisorOutput: string | undefined;
 			let currentAdvisorInput = "";
 
@@ -785,10 +789,11 @@ export class SessionAdvisors {
 			const advisorCursorExecHandlers = new CursorExecHandlers({
 				cwd: this.#host.sessionManager.getCwd(),
 				getCwd: () => this.#host.sessionManager.getCwd(),
-				tools: bridgeToolMap(advisorToolMap, createGuardedBridgeEditTool),
+				tools: bridgeToolMap(advisorBridgeToolMap, createGuardedBridgeEditTool),
 				// Approval mode, per-tool policies and `autoApprove` live only on
 				// this context; without it every bridge tool resolves as `yolo`.
 				getToolContext: this.#advisorGetToolContext,
+				beforeToolCall: (name, args) => reviewBudget.beforeToolCall(name, args)?.reason,
 				allowDirectFileMutation: advisorCanMutateFiles,
 				// Gated on the advisor's own grant: the factory builds a fresh
 				// tool, so handing it over unconditionally would give a roster
@@ -834,6 +839,7 @@ export class SessionAdvisors {
 				onResponse: this.#host.onResponse,
 				onSseEvent: this.#host.onSseEvent,
 				transformProviderContext: this.#transformProviderContext,
+				beforeToolCall: ({ tool, args }) => reviewBudget.beforeToolCall(tool.name, args),
 				intentTracing: false,
 				transformAssistantMessage: message => {
 					quarantinedAdvisorOutput = quarantineAdvisorUnsafeOutput(

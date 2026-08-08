@@ -512,25 +512,37 @@ export const SETTINGS_SCHEMA = {
 	},
 	"advisor.maxRequestsPerReview": {
 		type: "number",
-		default: 32,
+		default: 0,
 		ui: {
 			tab: "model",
 			group: "Advisor",
 			label: "Advisor Request Limit",
 			description:
-				"Maximum provider requests in one advisor review. The hard gate runs before each request; 0 disables it.",
+				"Optional maximum provider requests in one logical advisor review (not the whole session). The gate runs before each request; 0 leaves it unset.",
 			condition: "advisorEnabled",
 		},
 	},
 	"advisor.maxCostPerReview": {
 		type: "number",
-		default: 10,
+		default: 0,
 		ui: {
 			tab: "model",
 			group: "Advisor",
 			label: "Advisor Cost Ceiling",
 			description:
-				"Stop before the next request after completed requests in one review reach this USD cost. The current request may cross the ceiling; 0 disables it.",
+				"Optional USD ceiling for completed requests in one logical advisor review (not the whole session). The current request may cross it; 0 leaves it unset.",
+			condition: "advisorEnabled",
+		},
+	},
+	"advisor.maxToolCallsPerTurn": {
+		type: "number",
+		default: 10,
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Advisor Tool Calls Per Turn",
+			description:
+				"Maximum investigative tool executions in one provider turn. Further investigative tools in that response are blocked; the next provider turn gets a fresh allowance. 0 disables it.",
 			condition: "advisorEnabled",
 		},
 	},
@@ -542,7 +554,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Advisor",
 			label: "Advisor Repeated Tool Limit",
 			description:
-				"Refuse this occurrence of an identical tool call within one review. 2 refuses the first repeat; 0 disables it.",
+				"Refuse this occurrence of an identical investigative tool call within one review. 2 refuses the first repeat; 0 disables it.",
 			condition: "advisorEnabled",
 		},
 	},

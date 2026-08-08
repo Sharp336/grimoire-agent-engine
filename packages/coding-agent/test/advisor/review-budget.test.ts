@@ -6,9 +6,10 @@ import { AdvisorReviewBudget } from "../../src/advisor/review-budget";
 import { Settings } from "../../src/config/settings";
 
 const defaults = {
-	maxRequests: 32,
-	maxCostUsd: 10,
+	maxRequests: 0,
+	maxCostUsd: 0,
 	maxIdenticalToolCalls: 2,
+	maxToolCallsPerTurn: 10,
 };
 
 function createReadTool(execute: (params: { path?: string; line?: number }) => string): AgentTool {
@@ -44,9 +45,10 @@ describe("AdvisorReviewBudget", () => {
 	it("uses conservative configurable defaults", () => {
 		const settings = Settings.isolated();
 
-		expect(settings.get("advisor.maxRequestsPerReview")).toBe(32);
-		expect(settings.get("advisor.maxCostPerReview")).toBe(10);
+		expect(settings.get("advisor.maxRequestsPerReview")).toBe(0);
+		expect(settings.get("advisor.maxCostPerReview")).toBe(0);
 		expect(settings.get("advisor.maxIdenticalToolCalls")).toBe(2);
+		expect(settings.get("advisor.maxToolCallsPerTurn")).toBe(10);
 	});
 
 	it("hard-stops before the request after the configured request count", () => {
@@ -82,6 +84,7 @@ describe("AdvisorReviewBudget", () => {
 			maxRequests: settings.get("advisor.maxRequestsPerReview"),
 			maxCostUsd: settings.get("advisor.maxCostPerReview"),
 			maxIdenticalToolCalls: settings.get("advisor.maxIdenticalToolCalls"),
+			maxToolCallsPerTurn: settings.get("advisor.maxToolCallsPerTurn"),
 		}));
 		budget.beginReview(1);
 		expect(budget.beforeModelCall()).toBeUndefined();
@@ -188,7 +191,12 @@ describe("AdvisorReviewBudget", () => {
 
 	it("disables each limiter independently with a non-positive value", async () => {
 		let executions = 0;
-		const budget = new AdvisorReviewBudget({ maxRequests: 0, maxCostUsd: 0, maxIdenticalToolCalls: 0 });
+		const budget = new AdvisorReviewBudget({
+			maxRequests: 0,
+			maxCostUsd: 0,
+			maxIdenticalToolCalls: 0,
+			maxToolCallsPerTurn: 0,
+		});
 		const tool = budget.guardTool(
 			createReadTool(() => {
 				executions++;
@@ -202,6 +210,79 @@ describe("AdvisorReviewBudget", () => {
 		await tool.execute("tc-1", { path: "a.ts" });
 		await tool.execute("tc-2", { path: "a.ts" });
 		expect(executions).toBe(2);
+	});
+
+	it("refreshes the investigative allowance for each provider turn", () => {
+		const budget = new AdvisorReviewBudget({ ...defaults, maxToolCallsPerTurn: 2 });
+		budget.beginReview(1);
+
+		expect(budget.beforeModelCall()).toBeUndefined();
+		expect(budget.beforeToolCall("read", { path: "a.ts" })).toBeUndefined();
+		expect(budget.beforeToolCall("read", { path: "b.ts" })).toBeUndefined();
+		expect(budget.beforeToolCall("read", { path: "c.ts" })).toEqual({
+			block: true,
+			reason:
+				"Refused: this advisor provider turn already used 2 investigative tool calls. Use the results you have and call `advise`, or end this provider turn.",
+		});
+		expect(budget.beforeToolCall("advise", {})).toBeUndefined();
+
+		expect(budget.beforeModelCall()).toBeUndefined();
+		expect(budget.beforeToolCall("read", { path: "c.ts" })).toBeUndefined();
+		expect(budget.stop).toBeUndefined();
+	});
+	it("does not charge refused repeats against the per-turn execution allowance", () => {
+		const budget = new AdvisorReviewBudget({ ...defaults, maxToolCallsPerTurn: 2 });
+		budget.beginReview(1);
+		expect(budget.beforeModelCall()).toBeUndefined();
+
+		expect(budget.beforeToolCall("read", { path: "a.ts" })).toBeUndefined();
+		expect(budget.beforeToolCall("read", { path: "a.ts" })?.reason).toContain("already ran");
+		expect(budget.beforeToolCall("read", { path: "b.ts" })).toBeUndefined();
+		expect(budget.beforeToolCall("read", { path: "c.ts" })?.reason).toContain("already used 2");
+	});
+
+	it("applies the per-turn gate to ordinary Agent tool dispatch", async () => {
+		const executed: number[] = [];
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", name: "read", arguments: { path: "a.ts", line: 1 } },
+						{ type: "toolCall", name: "read", arguments: { path: "a.ts", line: 2 } },
+						{ type: "toolCall", name: "read", arguments: { path: "a.ts", line: 3 } },
+					],
+				},
+				{
+					content: [{ type: "toolCall", name: "read", arguments: { path: "a.ts", line: 4 } }],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const budget = new AdvisorReviewBudget({ ...defaults, maxToolCallsPerTurn: 2 });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model: mock.model,
+				systemPrompt: ["Test"],
+				tools: [
+					createReadTool(params => {
+						executed.push(params.line ?? -1);
+						return "ok";
+					}),
+				],
+			},
+			beforeToolCall: ({ tool, args }) => budget.beforeToolCall(tool.name, args),
+			streamFn: mock.stream,
+		});
+		agent.addBeforeModelCall(() => budget.beforeModelCall());
+		budget.beginReview(1);
+
+		await agent.prompt("Review this change");
+
+		expect(mock.calls).toHaveLength(3);
+		expect(executed).toEqual([1, 2, 4]);
+		expect(budget.requests).toBe(3);
+		expect(budget.stop).toBeUndefined();
 	});
 
 	it("enforces completed cost between provider calls in one Agent.prompt loop", async () => {

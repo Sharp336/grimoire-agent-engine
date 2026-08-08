@@ -1,4 +1,4 @@
-import type { AgentPreModelCallStop, AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { AgentPreModelCallStop, AgentTool, AgentToolResult, BeforeToolCallResult } from "@oh-my-pi/pi-agent-core";
 
 /**
  * Per-review spend guard for one advisor.
@@ -10,18 +10,19 @@ import type { AgentPreModelCallStop, AgentTool, AgentToolResult } from "@oh-my-p
  * unbounded number of provider requests, each one re-sending the advisor's
  * whole append-only context. Observed worst case: 95 requests for one review.
  *
- * Two independent limiters, both scoped to the current review:
+ * Three independent limiters are scoped to the current review:
  *
- * - **Request cap** — a counter this class owns, so it is exact. Enforced from
+ * - **Request cap** — an optional exact counter. Enforced from
  *   `beforeModelCall`, which ends the loop *before* the request is prepared;
  *   the loop records a zero-usage `stopReason: "aborted"` message, so nothing
- *   is billed and the advisor's failure ladder sees a normal completed turn.
- * - **Cost ceiling** — compares the summed cost of requests that have already
- *   **completed** in this review, fed by {@link recordCompletedCost} from the
- *   advisor's live `message_end` subscription. It is exact for completed work
- *   and lags by at most the in-flight request: the ceiling refuses to dispatch
- *   the *next* request, it cannot cut off the current one. It is a backstop for
- *   very large contexts, not a dollar-precise cutoff.
+ *   is billed.
+ * - **Cost ceiling** — an optional backstop that compares the summed cost of
+ *   requests that have already **completed** in this review. It is exact for
+ *   completed work and lags by at most the in-flight request.
+ * - **Per-provider-turn tool cap** — an execution cap for investigative tools
+ *   in one assistant response. The first `N` tools can execute; later tools
+ *   in that response are blocked. The next provider turn gets a fresh allowance;
+ *   `advise` is not an investigative tool and remains available.
  *
  * Separately, {@link guardTool} short-circuits a tool call whose `(name, args)`
  * pair already ran in this review. A degenerate reviewer can otherwise spend
@@ -29,15 +30,20 @@ import type { AgentPreModelCallStop, AgentTool, AgentToolResult } from "@oh-my-p
  * pattern, and every repeated result stays in the append-only context and
  * inflates every later request in the session.
  *
- * Each limit is disabled by a non-positive value.
+ * A review is one `agent.prompt(batch)` cycle for one transcript delta. It may
+ * contain several provider turns/requests. These counters are not session-wide.
+ * Each limit is disabled by a non-positive value except the per-turn tool
+ * default, which is configured by the caller.
  */
 export interface AdvisorReviewBudgetLimits {
-	/** Max provider requests per review; `0` disables the cap. */
+	/** Max provider requests per logical review; `0` disables the cap. */
 	maxRequests: number;
-	/** Max USD of completed requests per review; `0` disables the ceiling. */
+	/** Max USD of completed requests per logical review; `0` disables it. */
 	maxCostUsd: number;
-	/** Occurrence at which an identical `(tool, args)` call is refused; `0` disables the guard. */
+	/** Occurrence at which an identical `(tool, args)` call is refused; `0` disables. */
 	maxIdenticalToolCalls: number;
+	/** Max investigative tool executions per provider turn; `0` disables. */
+	maxToolCallsPerTurn: number;
 }
 
 export interface AdvisorReviewBudgetStop {
@@ -61,6 +67,7 @@ export class AdvisorReviewBudget {
 	#reviewId: number | undefined;
 	#requests = 0;
 	#costUsd = 0;
+	#turnToolCalls = 0;
 	#toolCalls = new Map<string, number>();
 	#stop: AdvisorReviewBudgetStop | undefined;
 
@@ -81,6 +88,7 @@ export class AdvisorReviewBudget {
 		this.#reviewId = reviewId;
 		this.#requests = 0;
 		this.#costUsd = 0;
+		this.#turnToolCalls = 0;
 		this.#toolCalls.clear();
 		this.#stop = undefined;
 	}
@@ -120,15 +128,22 @@ export class AdvisorReviewBudget {
 				`advisor review spent $${this.#costUsd.toFixed(2)} of its $${maxCostUsd.toFixed(2)} ceiling`,
 			);
 		}
+		this.#turnToolCalls = 0;
 		this.#requests++;
 		return undefined;
 	}
 
 	/**
-	 * Record one tool call and return a refusal message when this exact
-	 * `(name, args)` pair has already run in this review, or `undefined` to let
-	 * it execute.
+	 * Hook for ordinary model-facing tools. Cursor's resolved registry tools use
+	 * `guardTool`, while its direct non-registry handlers use the same hook
+	 * through `CursorExecBridgeOptions`.
 	 */
+	beforeToolCall(name: string, args: unknown): BeforeToolCallResult | undefined {
+		const refusal = this.#prepareToolCall(name, args);
+		return refusal === undefined ? undefined : { block: true, reason: refusal };
+	}
+
+	/** Record a tool call and return a refusal when its exact identity repeats. */
 	noteToolCall(name: string, args: unknown): string | undefined {
 		const max = this.#resolveLimits().maxIdenticalToolCalls;
 		if (max <= 0) return undefined;
@@ -156,7 +171,10 @@ export class AdvisorReviewBudget {
 					onUpdate: never,
 					context: never,
 				) => {
-					const refusal = this.noteToolCall(target.name, identity === undefined ? params : { identity, params });
+					const refusal = this.#prepareToolCall(
+						target.name,
+						identity === undefined ? params : { identity, params },
+					);
 					if (refusal !== undefined) {
 						// Not `isError`: an error result feeds the advisor failure
 						// ladder, and a refused repeat is a healthy outcome.
@@ -169,6 +187,18 @@ export class AdvisorReviewBudget {
 				};
 			},
 		}) as T;
+	}
+
+	#prepareToolCall(name: string, args: unknown): string | undefined {
+		if (name === "advise") return undefined;
+		const { maxToolCallsPerTurn } = this.#resolveLimits();
+		if (maxToolCallsPerTurn > 0 && this.#turnToolCalls >= maxToolCallsPerTurn) {
+			return `Refused: this advisor provider turn already used ${maxToolCallsPerTurn} investigative tool calls. Use the results you have and call \`advise\`, or end this provider turn.`;
+		}
+		const refusal = this.noteToolCall(name, args);
+		if (refusal !== undefined) return refusal;
+		if (maxToolCallsPerTurn > 0) this.#turnToolCalls++;
+		return undefined;
 	}
 
 	#halt(kind: AdvisorReviewBudgetStop["kind"], reason: string): AgentPreModelCallStop {
