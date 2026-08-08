@@ -325,7 +325,13 @@ function Invoke-WebRequest {
         $digest = (Get-FileHash -LiteralPath $binary.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
         [IO.File]::WriteAllText($OutFile, "$digest  omp-windows-x64.exe\`n")
     } else {
-        Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\\cmd.exe') -Destination $OutFile
+        if ($IsWindows) {
+            Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\\cmd.exe') -Destination $OutFile
+        } else {
+            [IO.File]::WriteAllText($OutFile, "#!/bin/sh\`necho omp/0.0.0\`n")
+            & chmod +x -- $OutFile
+            if ($LASTEXITCODE -ne 0) { throw 'failed to mark fixture executable' }
+        }
     }
 }
 try {
