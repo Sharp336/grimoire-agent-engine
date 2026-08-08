@@ -4,11 +4,12 @@
  * Runs each subagent on the main thread and forwards AgentEvents for progress tracking.
  */
 
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
-import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
+import { getAgentDir, logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../async";
 import type { Rule } from "../capability/rule";
 import { ModelRegistry } from "../config/model-registry";
@@ -59,6 +60,18 @@ import { trackLateCleanup } from "../utils/late-cleanup";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
 import { generateTaskLabel } from "./label";
+
+/** Harness-owned standing directives injected into every subagent system prompt.
+ * Optional: missing file means no directives block (byte-identical stock prompt).
+ * Read on every spawn so edits apply to new dispatches without a restart. */
+function readSubagentDirectives(): string {
+	try {
+		return readFileSync(path.join(getAgentDir(), "subagent-directives.md"), "utf8").trim();
+	} catch {
+		return "";
+	}
+}
+
 import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
@@ -3035,6 +3048,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						planReference: options.planReference?.content ?? "",
 						planReferencePath: options.planReference?.path ?? "",
 						worktree: worktree ?? "",
+						directives: readSubagentDirectives(),
 						outputSchema: normalizedOutputSchema,
 						outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
 						ircPeers: ircEnabled ? renderIrcPeerRoster(id) : "",
