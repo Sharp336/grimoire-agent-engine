@@ -52,6 +52,9 @@ import {
 	veniceModelManagerOptions,
 	vercelAiGatewayModelManagerOptions,
 	vllmModelManagerOptions,
+	volcengineAgentPlanModelManagerOptions,
+	volcengineCodingPlanModelManagerOptions,
+	volcengineModelManagerOptions,
 	waferServerlessModelManagerOptions,
 	xaiModelManagerOptions,
 	xaiOAuthModelManagerOptions,
@@ -542,6 +545,28 @@ export const CATALOG_PROVIDERS = [
 		createModelManagerOptions: (config: ModelManagerConfig) => zhipuCodingPlanModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
 		catalogDiscovery: { label: "Zhipu Coding Plan" },
+	},
+	{
+		id: "volcengine-coding-plan",
+		defaultModel: "ark-code-latest",
+		envVars: ["VOLCENGINE_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => volcengineCodingPlanModelManagerOptions(config),
+		catalogDiscovery: { label: "Volcengine Coding Plan" },
+	},
+	{
+		id: "volcengine-agent-plan",
+		defaultModel: "ark-code-latest",
+		envVars: ["VOLCENGINE_AGENT_PLAN_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => volcengineAgentPlanModelManagerOptions(config),
+		catalogDiscovery: { label: "Volcengine Agent Plan" },
+	},
+	{
+		id: "volcengine",
+		defaultModel: "doubao-seed-2-1-pro-260628",
+		envVars: ["ARK_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => volcengineModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Volcengine Ark" },
 	},
 ] as const satisfies readonly ProviderCatalogEntry[];
 
