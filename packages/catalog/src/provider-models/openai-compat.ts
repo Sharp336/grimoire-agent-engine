@@ -1815,8 +1815,8 @@ export interface VolcengineModelManagerConfig {
 
 export function volcengineModelManagerOptions(
 	config?: VolcengineModelManagerConfig,
-): ModelManagerOptions<"openai-completions"> {
-	return createSimpleOpenAICompletionsOptions("volcengine", "https://ark.cn-beijing.volces.com/api/v3", config);
+): ModelManagerOptions<"openai-responses"> {
+	return createSimpleOpenAIResponsesOptions("volcengine", "https://ark.cn-beijing.volces.com/api/v3", config);
 }
 
 // ---------------------------------------------------------------------------
@@ -5840,7 +5840,7 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CORE: readonly ModelsDevProviderDescriptor
 		},
 	}),
 	// --- Volcengine Ark (pay-as-you-go) ---
-	openAiCompletionsDescriptor("volcengine", "volcengine", "https://ark.cn-beijing.volces.com/api/v3", {
+	simpleModelsDevDescriptor("volcengine", "volcengine", "openai-responses", "https://ark.cn-beijing.volces.com/api/v3", {
 		defaultContextWindow: 256000,
 		defaultMaxTokens: 32768,
 	}),
