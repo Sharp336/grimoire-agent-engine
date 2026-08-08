@@ -2,20 +2,25 @@
 
 ## [Unreleased]
 
+## [17.2.11] - 2026-08-07
+
 ### Added
 
-- `bun run build` (`scripts/bazel-natives.ts`) now supports Windows hosts: the `host` pseudo-target delegates to the local napi build against VS Build Tools (the bazel msvc cross toolchain remains linux/mac-only), and other targets fail fast with guidance instead of dying deep inside a bazel repo rule. The local build also auto-appends VS Build Tools' bundled CMake/Ninja to `PATH` via vswhere, so it works outside a vcvars prompt.
+- Added support for Windows hosts in `bun run build`, enabling local N-API builds against VS Build Tools without requiring a pre-configured vcvars prompt.
+
+### Changed
+
+- Replaced the miniaudio (`maudio`) dependency with in-house platform audio backends for `AudioCapture`/`AudioPlayback`: CoreAudio AudioQueue on macOS, shared-mode WASAPI on Windows, and PulseAudio (ALSA fallback) loaded via `dlopen` on Linux. Removes the bindgen/libclang requirement and the Windows rustc-ICE workaround from the native build.
 
 ### Fixed
 
-- Fixed the native addon loader selecting the `baseline` CPU variant on every Windows host whose `powershell.exe` is Windows PowerShell 5.1: `[System.Runtime.Intrinsics.X86.Avx2]` only exists on .NET Core, so the probe never reported AVX2. Detection now calls `IsProcessorFeaturePresent` through `bun:ffi`, which is both correct and ~270 ms cheaper at startup (the PowerShell spawn is gone); Node embeds fall back to `pwsh` before `powershell.exe`.
-- Fixed `bun run build:bindings` failing on Windows: the `node_modules/.bin` entry is a `napi.exe` launcher there, which Bun tried to parse as JavaScript. The CLI's JS entry is now resolved from the `@napi-rs/cli` manifest.
-- Fixed the local (non-Bazel) addon build always producing the `baseline` variant on Windows — `scripts/host-detect.ts` shared the broken PowerShell AVX2 probe.
-- Fixed a rustc ICE building `maudio` for `x86_64-pc-windows-msvc` under the pinned rustup nightly by capping that package at `opt-level = 1`; MIR const-folding turned `MaybeUninit<ma_fence>` into an `Uninit` operand that codegen rejects for a ScalarPair argument.
-- Fixed synthesized macOS keyboard and pointer events suppressing the user's physical input.
-- Fixed read-only Wayland `computer` calls acquiring persistent keyboard and pointer control; RemoteDesktop input permission is now requested only on first input, is not persisted, and closes with the desktop session ([#7884](https://github.com/can1357/oh-my-pi/issues/7884)).
-- Fixed Wayland `libei` input initialization poisoning PipeWire screen capture: both paths now share one long-lived Tokio runtime so `ashpd`'s process-global D-Bus connection is never orphaned by a dropped runtime ([#7886](https://github.com/can1357/oh-my-pi/issues/7886)).
-- Fixed the `wayland-pipewire` Cargo feature failing to compile: the PipeWire capture path still used the removed 0.8 `MainLoop::new` / `Context::new` / `connect_fd` constructors instead of the 0.9 `MainLoopRc` / `ContextRc` / `connect_fd_rc` handle API ([#7885](https://github.com/can1357/oh-my-pi/issues/7885)).
+- Fixed CPU feature detection (AVX2) on Windows hosts, resolving an issue where the native addon loader and local builds incorrectly fell back to the baseline variant, while improving startup performance by ~270ms.
+- Fixed `bun run build:bindings` failing on Windows due to incorrect resolution of the `@napi-rs/cli` entry point.
+- Fixed a compiler crash (rustc ICE) when building the `maudio` package for Windows.
+- Fixed synthesized macOS keyboard and pointer events suppressing physical user input.
+- Fixed several Wayland input and capture issues, including preventing read-only calls from acquiring persistent input control, fixing GNOME Wayland pointer input initialization, and resolving conflicts between `libei` input and PipeWire screen capture.
+- Fixed compilation of the `wayland-pipewire` Cargo feature.
+- Improved security on Wayland by cleaning up orphaned world-readable RemoteDesktop restore tokens on startup.
 
 ## [17.2.10] - 2026-08-06
 
