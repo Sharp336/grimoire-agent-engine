@@ -1347,11 +1347,28 @@ def _emit_error(rid: str, exc: BaseException) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _read_stdin(loop: asyncio.AbstractEventLoop, queue: asyncio.Queue, stdin) -> None:
-    for raw_line in stdin:
+async def _main_async() -> None:
+    sys.stdout = _StreamProxy("stdout")
+    sys.stderr = _StreamProxy("stderr")
+    _install_idle_sigint()
+    _start_parent_watchdog()
+    _start_capture_drain()
+
+    stdin = sys.__stdin__
+    if stdin is None:
+        return
+
+    _STATE.loop = asyncio.get_running_loop()
+
+    while True:
+        raw_line = stdin.readline()
+        if not raw_line:
+            break
+
         line = raw_line.strip()
         if not line:
             continue
+
         try:
             req = json.loads(line)
         except json.JSONDecodeError as exc:
@@ -1365,56 +1382,23 @@ def _read_stdin(loop: asyncio.AbstractEventLoop, queue: asyncio.Queue, stdin) ->
                 }
             )
             continue
-        loop.call_soon_threadsafe(queue.put_nowait, req)
-    loop.call_soon_threadsafe(queue.put_nowait, {"type": "exit"})
 
+        if not isinstance(req, dict):
+            _emit(
+                {
+                    "type": "error",
+                    "id": "",
+                    "ename": "ProtocolError",
+                    "evalue": "Invalid JSON request: expected an object",
+                    "traceback": [],
+                }
+            )
+            continue
 
-async def _main_async() -> None:
-    sys.stdout = _StreamProxy("stdout")
-    sys.stderr = _StreamProxy("stderr")
-    _install_idle_sigint()
-    _start_parent_watchdog()
-    _start_capture_drain()
+        if req.get("type") == "exit":
+            break
 
-    stdin = sys.__stdin__
-    if stdin is None:
-        return
-
-    loop = asyncio.get_running_loop()
-    _STATE.loop = loop
-    queue: asyncio.Queue = asyncio.Queue()
-    reader = threading.Thread(
-        target=_read_stdin,
-        args=(loop, queue, stdin),
-        name="omp-stdin-reader",
-        daemon=True,
-    )
-    reader.start()
-
-    tasks: set[asyncio.Task] = set()
-
-    def _task_done(task: asyncio.Task) -> None:
-        tasks.discard(task)
-        try:
-            exc = task.exception()
-        except asyncio.CancelledError:
-            return
-        if exc is not None:
-            _emit_error("", exc)
-
-    try:
-        while True:
-            req = await queue.get()
-            if req.get("type") == "exit":
-                break
-            task = asyncio.create_task(_handle_request_async(req))
-            tasks.add(task)
-            task.add_done_callback(_task_done)
-    finally:
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        await _handle_request_async(req)
 
 
 def main() -> None:
