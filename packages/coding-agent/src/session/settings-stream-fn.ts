@@ -11,7 +11,7 @@
  * and OpenRouter response-cache hits across advisor calls.
  */
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
-import { type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
+import { isOfficialCodexApiUrl, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { isOfficialOpenAIEndpoint } from "@oh-my-pi/pi-catalog/compat/openai";
 import { isAnthropicFableOrMythosModel } from "@oh-my-pi/pi-catalog/identity";
 import { type Settings, validateProviderMaxInFlightRequests } from "../config/settings";
@@ -53,7 +53,9 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 		const usesOpenAIReasoningSummaries =
 			(model.api === "openai-responses" && isOfficialOpenAIEndpoint(model.provider, model.baseUrl)) ||
 			(model.api === "azure-openai-responses" && model.provider === "azure") ||
-			(model.api === "openai-codex-responses" && model.provider === "openai-codex");
+			(model.api === "openai-codex-responses" &&
+				model.provider === "openai-codex" &&
+				isOfficialCodexApiUrl(model.baseUrl));
 		const summarySetting = settings.get("openaiReasoningSummary");
 		const configuredReasoningSummary =
 			!usesOpenAIReasoningSummaries || summarySetting === "provider-default"

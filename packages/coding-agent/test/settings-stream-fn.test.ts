@@ -24,7 +24,11 @@ function captureBase(): { fn: StreamFn; calls: Array<{ options?: SimpleStreamOpt
 }
 
 const stubModel = {} as unknown as Model;
-const stubCodexModel = { api: "openai-codex-responses", provider: "openai-codex" } as unknown as Model;
+const stubCodexModel = {
+	api: "openai-codex-responses",
+	provider: "openai-codex",
+	baseUrl: "https://chatgpt.com/backend-api",
+} as unknown as Model;
 const stubResponsesModel = {
 	api: "openai-responses",
 	provider: "openai",
@@ -35,6 +39,11 @@ const stubOpenAICompatibleResponsesModel = {
 	api: "openai-responses",
 	provider: "openai",
 	baseUrl: "https://gateway.example/v1",
+} as unknown as Model;
+const stubCompatibleCodexModel = {
+	api: "openai-codex-responses",
+	provider: "openai-codex",
+	baseUrl: "https://gateway.example/codex",
 } as unknown as Model;
 const stubContext = { messages: [], tools: [], systemPrompt: [] } as unknown as Context;
 
@@ -100,6 +109,7 @@ describe("createSettingsAwareStreamFn", () => {
 		wrapped(stubResponsesModel, stubContext, undefined);
 		wrapped(stubCompatibleResponsesModel, stubContext, undefined);
 		wrapped(stubOpenAICompatibleResponsesModel, stubContext, undefined);
+		wrapped(stubCompatibleCodexModel, stubContext, undefined);
 		wrapped(stubModel, stubContext, undefined);
 
 		expect(calls[0]?.options?.reasoningSummary).toBe("detailed");
@@ -107,6 +117,7 @@ describe("createSettingsAwareStreamFn", () => {
 		expect(calls[2]?.options?.reasoningSummary).toBeUndefined();
 		expect(calls[3]?.options?.reasoningSummary).toBeUndefined();
 		expect(calls[4]?.options?.reasoningSummary).toBeUndefined();
+		expect(calls[5]?.options?.reasoningSummary).toBeUndefined();
 	});
 
 	it("lets omitThinking suppress configured and caller-supplied OpenAI summaries", () => {
