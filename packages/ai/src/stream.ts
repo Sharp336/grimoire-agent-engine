@@ -1872,7 +1872,12 @@ function resolveOpenAiReasoningSummary<TApi extends Api>(
 ): SimpleStreamOptions["reasoningSummary"] {
 	if (options?.hideThinkingSummary) return null;
 	const requested = options?.reasoningSummary;
-	if (requested === undefined) return undefined;
+	if (requested === undefined) {
+		const suppressImplicitSummary =
+			(model.api === "openai-responses" && model.provider === "openai" && isOfficialOpenAIApiUrl(model.baseUrl)) ||
+			(model.api === "azure-openai-responses" && model.provider === "azure");
+		return suppressImplicitSummary ? null : undefined;
+	}
 	const parsed = parseOpenAIModel(model.id);
 	const isCodexVariant = parsed?.variant.startsWith("codex") === true;
 	return isCodexVariant && !supportsCodexReasoningSummary(model.id)

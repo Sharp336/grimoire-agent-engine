@@ -4,7 +4,7 @@ import {
 	type AzureOpenAIResponsesOptions,
 	streamAzureOpenAIResponses,
 } from "@oh-my-pi/pi-ai/providers/azure-openai-responses";
-import type { Context, FetchImpl, Model, ModelSpec, Tool } from "@oh-my-pi/pi-ai/types";
+import type { Context, FetchImpl, Model, ModelSpec, SimpleStreamOptions, Tool } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 
@@ -19,6 +19,19 @@ const azureModel: Model<"azure-openai-responses"> = buildModel({
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	contextWindow: 400000,
 	maxTokens: 128000,
+});
+
+const legacyAzureCodexModel: Model<"azure-openai-responses"> = buildModel({
+	id: "gpt-5.3-codex",
+	name: "GPT-5.3 Codex",
+	api: "azure-openai-responses",
+	provider: "azure",
+	baseUrl: azureModel.baseUrl,
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 400_000,
+	maxTokens: 128_000,
 });
 
 function createAbortedSignal(): AbortSignal {
@@ -40,6 +53,32 @@ function createSseResponse(events: unknown[]): Response {
 		status: 200,
 		headers: { "content-type": "text/event-stream" },
 	});
+}
+
+async function captureLegacyAzureCodexPayload(
+	options: Pick<SimpleStreamOptions, "reasoning" | "reasoningSummary">,
+): Promise<Record<string, unknown>> {
+	let capturedBody: Record<string, unknown> | undefined;
+	const fetchMock: FetchImpl = async (_input, init) => {
+		capturedBody = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : undefined;
+		return createSseResponse([
+			{
+				type: "response.completed",
+				response: {
+					status: "completed",
+					usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+				},
+			},
+		]);
+	};
+
+	await streamSimple(
+		legacyAzureCodexModel,
+		{ messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }] },
+		{ apiKey: "test-key", fetch: fetchMock, ...options },
+	).result();
+	if (!capturedBody) throw new Error("Azure Responses request body was not captured");
+	return capturedBody;
 }
 
 function createAssistantMessage(text: string, textSignature?: string) {
@@ -97,87 +136,25 @@ describe("azure openai responses streaming", () => {
 		]);
 	});
 
-	it("omits reasoning summaries for pre-5.4 Azure Codex models through streamSimple", async () => {
-		const unsupportedModel: Model<"azure-openai-responses"> = buildModel({
-			id: "gpt-5.3-codex",
-			name: "GPT-5.3 Codex",
-			api: "azure-openai-responses",
-			provider: "azure",
-			baseUrl: azureModel.baseUrl,
-			reasoning: true,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 400_000,
-			maxTokens: 128_000,
+	it("omits explicitly requested summaries for legacy Azure Codex models", async () => {
+		const payload = await captureLegacyAzureCodexPayload({
+			reasoning: Effort.High,
+			reasoningSummary: "detailed",
 		});
-		let capturedBody: Record<string, unknown> | undefined;
-		const fetchMock: FetchImpl = async (_input, init) => {
-			capturedBody = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : undefined;
-			return createSseResponse([
-				{
-					type: "response.completed",
-					response: {
-						status: "completed",
-						usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
-					},
-				},
-			]);
-		};
 
-		const result = await streamSimple(
-			unsupportedModel,
-			{ messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }] },
-			{
-				apiKey: "test-key",
-				fetch: fetchMock,
-				reasoning: Effort.High,
-				reasoningSummary: "detailed",
-			},
-		).result();
+		expect(payload.reasoning).toEqual({ effort: "high" });
+	});
 
-		expect(result.stopReason).toBe("stop");
-		expect(capturedBody?.reasoning).toEqual({ effort: "high" });
+	it("omits the summary field for an unconfigured legacy Azure Codex reasoning request", async () => {
+		const payload = await captureLegacyAzureCodexPayload({ reasoning: Effort.High });
+
+		expect(payload.reasoning).toEqual({ effort: "high" });
 	});
 
 	it("does not synthesize reasoning effort when only an unsupported summary is requested", async () => {
-		const unsupportedModel: Model<"azure-openai-responses"> = buildModel({
-			id: "gpt-5.3-codex",
-			name: "GPT-5.3 Codex",
-			api: "azure-openai-responses",
-			provider: "azure",
-			baseUrl: azureModel.baseUrl,
-			reasoning: true,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 400_000,
-			maxTokens: 128_000,
-		});
-		let capturedBody: Record<string, unknown> | undefined;
-		const fetchMock: FetchImpl = async (_input, init) => {
-			capturedBody = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : undefined;
-			return createSseResponse([
-				{
-					type: "response.completed",
-					response: {
-						status: "completed",
-						usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
-					},
-				},
-			]);
-		};
+		const payload = await captureLegacyAzureCodexPayload({ reasoningSummary: "detailed" });
 
-		const result = await streamSimple(
-			unsupportedModel,
-			{ messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }] },
-			{
-				apiKey: "test-key",
-				fetch: fetchMock,
-				reasoningSummary: "detailed",
-			},
-		).result();
-
-		expect(result.stopReason).toBe("stop");
-		expect(capturedBody?.reasoning).toBeUndefined();
+		expect(payload.reasoning).toBeUndefined();
 	});
 
 	it("sends an async onPayload replacement body", async () => {

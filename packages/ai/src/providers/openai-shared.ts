@@ -3583,7 +3583,7 @@ export function applyResponsesCompatPolicy<P extends ResponseCreateParamsStreami
 		return;
 	}
 
-	if (reasoning.requestedEffort !== undefined || options?.reasoningSummary !== undefined) {
+	if (reasoning.requestedEffort !== undefined || options?.reasoningSummary != null) {
 		if (reasoning.omitReasoningEffort) {
 			if (options?.reasoningSummary !== undefined && options.reasoningSummary !== null) {
 				type ReasoningParam = NonNullable<ResponseCreateParamsStreaming["reasoning"]>;
