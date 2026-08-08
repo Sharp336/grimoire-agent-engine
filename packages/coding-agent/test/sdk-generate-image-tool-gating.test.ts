@@ -441,4 +441,43 @@ describe("generate_image tool gating", () => {
 		expect(session.getActiveToolNames()).not.toContain("write");
 		expect(session.getXdevToolEntries()).toEqual([]);
 	});
+
+	it("filters deferred RPC host tools through the persona tool policy", async () => {
+		const { session } = await createAgentSession({
+			cwd: registryDir,
+			agentDir: registryDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "plan.enabled": false, "generate_image.enabled": false }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			enableMCP: false,
+			agentPersona: {
+				name: "readonly-rpc-persona",
+				description: "Persona granting only read",
+				systemPrompt: "",
+				tools: ["read"],
+				source: "project" as const,
+			},
+		});
+		sessions.push(session);
+
+		const rpcTool: AgentTool = {
+			name: "rpc_write_like",
+			label: "RPC Write Like",
+			description: "Write-like RPC host tool",
+			parameters: type({}),
+			loadMode: "discoverable",
+			async execute() {
+				return { content: [] };
+			},
+		};
+		await session.refreshRpcHostTools([rpcTool]);
+
+		// The persona grants only read: a deferred host set_host_tools must not
+		// auto-activate a write-like tool past the policy (codex 3741758358),
+		// mirroring the MCP refresh gate.
+		expect(session.getAllToolNames()).toContain(rpcTool.name);
+		expect(session.getEnabledToolNames()).not.toContain(rpcTool.name);
+	});
 });

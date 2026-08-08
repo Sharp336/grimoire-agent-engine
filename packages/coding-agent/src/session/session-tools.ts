@@ -1428,9 +1428,14 @@ export class SessionTools {
 		const preservedRpcToolNames = previousActiveToolNames.filter(
 			name => previousRpcHostToolNames.has(name) && this.#rpcHostToolNames.has(name),
 		);
+		const personaPolicy = this.#host.getPersonaToolPolicy();
 		const autoActivatedRpcToolNames = rpcTools
 			.filter(tool => !tool.hidden && !previousRpcHostToolNames.has(tool.name))
-			.map(tool => tool.name);
+			.map(tool => tool.name)
+			// The persona's explicit tools: policy stays authoritative for
+			// deferred host refreshes too, mirroring the MCP refresh gate
+			// (codex 3741758358).
+			.filter(name => personaPolicy === undefined || personaPolicy.includes(name));
 		try {
 			await this.applyActiveToolsByName(
 				Array.from(new Set([...activeNonRpcToolNames, ...preservedRpcToolNames, ...autoActivatedRpcToolNames])),

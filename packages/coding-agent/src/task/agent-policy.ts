@@ -71,9 +71,11 @@ export function resolveAgentSessionPolicy(agent: AgentDefinition): AgentSessionP
 /**
  * Fingerprint the content of an agent definition: everything that shapes the
  * session's system prompt, tool set, model, or thinking (system prompt body,
- * tools, model patterns, thinking level). Used to detect that a persona's
- * content changed between saves without its name/source changing, so the
- * inherited provider prompt-cache key can be dropped on resume.
+ * tools, model patterns, thinking level, spawns policy). Used to detect that a
+ * persona's content changed between saves without its name/source changing, so
+ * the inherited provider prompt-cache key can be dropped on resume. Spawns are
+ * included because the task/scout prompt text is built from the spawn policy —
+ * a spawns-only edit must invalidate the cache too (codex 3741758350).
  */
 export function fingerprintAgentContent(agent: AgentDefinition): string {
 	const policy = resolveAgentSessionPolicy(agent);
@@ -84,6 +86,7 @@ export function fingerprintAgentContent(agent: AgentDefinition): string {
 				...(policy.toolNames ? [...policy.toolNames].sort() : []),
 				...(policy.modelPatterns ? [...policy.modelPatterns] : []),
 				policy.thinkingLevel ?? "",
+				policy.spawns ?? "",
 			].join("\u0000"),
 		),
 	);

@@ -8,6 +8,9 @@
 - `applyToolOverlay` primitive extracted on AgentSession, generalizing the snapshot/apply/restore pattern shared by plan mode, plan-yolo, print-mode, and agent-selection. ([#6836](https://github.com/can1357/oh-my-pi/issues/6836))
 ### Fixed
 
+- Fixed the persona content fingerprint ignoring `spawns:` edits: a spawns-only frontmatter change now invalidates the inherited provider prompt-cache key on resume, since the task/scout prompt text is built from the spawn policy.
+- Fixed interactive session switches restoring the SOURCE session's plan-mode tool overlay over the target's rehydrated persona tools: the switch-time plan-mode teardown drops the source overlay handle instead of re-applying it (mirroring the vibe branch), so a read-only target persona no longer inherits the source's full tool baseline.
+- Fixed deferred RPC host-tool refreshes (`set_host_tools`) auto-activating write-like tools past a restrictive persona: `refreshRpcHostTools` now filters auto-activated host tools through the persona tool policy, mirroring the MCP refresh gate.
 - Fixed startup `alwaysInclude` widening leaking SDK/extension tools past a persona's explicit `tools:` list: the startup activation of custom/extension tools is now filtered through the persona's tool policy (registry stays full for a future persona switch).
 - Fixed `--agent` + `--tools` sessions installing the persona's tool policy over the explicit CLI selection: the persona overlay/filter is only installed when the active tool set actually came from the persona, so deferred MCP refreshes keep honoring the CLI-granted set.
 - Fixed SDK/embedding resumes of an edited persona (same name+source, changed `model:`/`thinkingLevel:` content) silently keeping the transcript's stale model/thinking: the rehydrated gate now includes the content fingerprint, so a changed definition is treated as a fresh selection — the new defaults apply and are recorded for the next resume.

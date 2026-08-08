@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { fingerprintAgentContent } from "../../src/task/agent-policy";
 import { Settings } from "../../src/config/settings";
 import initAgentPrompt from "../../src/prompts/agents/init.md" with { type: "text" };
 import * as taskDiscovery from "../../src/task/discovery";
@@ -41,6 +42,21 @@ function makeSession(spawns: string): ToolSession {
 describe("task spawn policy surfaces", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
+	});
+
+	it("includes the spawns policy in the persona content fingerprint", () => {
+		// A spawns-only frontmatter edit changes the task/scout prompt text, so
+		// the provider prompt-cache key must be invalidated on resume — the
+		// fingerprint hashes everything that shapes that text (codex 3741758350).
+		const base = {
+			name: "spawns-fp",
+			description: "Persona",
+			systemPrompt: "Body.",
+			source: "project" as const,
+		};
+		const unrestricted = fingerprintAgentContent(base);
+		const restricted = fingerprintAgentContent({ ...base, spawns: ["scout"] });
+		expect(restricted).not.toBe(unrestricted);
 	});
 
 	it("uses the first allowed spawn as the schema default", () => {

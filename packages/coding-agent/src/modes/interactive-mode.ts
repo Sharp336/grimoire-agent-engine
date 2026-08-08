@@ -2439,7 +2439,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.planModeEnabled || this.planModePaused) {
 			this.session.setPlanModeState(undefined);
 			try {
-				await this.#planModeToolOverlay?.restore();
+				// This runs only from #reconcileModeFromSession, i.e. after
+				// switchSession already loaded and rehydrated the target
+				// session's persona tools. The #planModeToolOverlay handle
+				// belongs to the SOURCE session — restoring it would clobber
+				// the target's active set (e.g. a read-only persona suddenly
+				// running the source's full baseline) until another restart or
+				// persona switch. Drop the handle without re-applying it
+				// (mirrors the vibe branch below); a same-session /plan exit
+				// still restores through #exitPlanMode's own path.
 				this.#planModeToolOverlay = undefined;
 			} finally {
 				this.session.setPlanProposalHandler?.(null);
