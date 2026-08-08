@@ -1307,27 +1307,35 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		);
 		sessionManager.appendMessage({ role: "user", content: "prior turn", timestamp: Date.now() });
 
-		const { session } = await createAgentSession({
-			...baseOptions(tempDir),
-			sessionManager,
-			agentPersona: {
-				name: "foo",
-				description: "Edited persona",
-				systemPrompt: "new body",
-				source: "project" as const,
-			},
-		});
+		await withProviderAuth(["openai"], async () => {
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				sessionManager,
+				model: undefined,
+				agentPersona: {
+					name: "foo",
+					description: "Edited persona",
+					systemPrompt: "new body",
+					model: ["openai/gpt-4o"],
+					source: "project" as const,
+				},
+			});
 
-		try {
-			expect(sessionManager.buildSessionContext().agentPersona).toEqual(
-				expect.objectContaining({ agent: "foo", source: "project" }),
-			);
-			// The changed fingerprint must have appended a second entry so the
-			// latest agent_change carries the new content.
-			expect(sessionManager.getEntries().filter(e => e.type === "agent_change")).toHaveLength(2);
-		} finally {
-			await session.dispose();
-		}
+			try {
+				expect(sessionManager.buildSessionContext().agentPersona).toEqual(
+					expect.objectContaining({ agent: "foo", source: "project" }),
+				);
+				// The changed fingerprint must have appended a second entry so the
+				// latest agent_change carries the new content.
+				expect(sessionManager.getEntries().filter(e => e.type === "agent_change")).toHaveLength(2);
+				// The edited persona's model: is a fresh selection (content
+				// changed since the transcript), so it must be applied — not
+				// skipped by the identity-only rehydrated gate (codex 3741691583).
+				expect(session.model?.id).toBe("gpt-4o");
+			} finally {
+				await session.dispose();
+			}
+		});
 	});
 
 	it("re-appends the persona when the stored legacy entry has no fingerprint", async () => {

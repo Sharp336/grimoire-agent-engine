@@ -53,3 +53,16 @@ export function setDiscoveredAgentsSnapshot(
 export function clearDiscoveredAgentSnapshots(): void {
 	discoverySnapshots.clear();
 }
+
+/**
+ * Drop every snapshot for a cwd (any extension mode / roots tuple). A
+ * plugin/skill reload changes what discovery resolves for the cwd across all
+ * scopes, so live sessions with a different mode/roots tuple must not keep
+ * advertising the pre-reload definitions.
+ */
+export function clearDiscoveredAgentSnapshotsForCwd(cwd: string): void {
+	const resolved = path.resolve(cwd);
+	for (const key of discoverySnapshots.keys()) {
+		if (key.startsWith(`${resolved}\0`)) discoverySnapshots.delete(key);
+	}
+}

@@ -204,6 +204,41 @@ describe("generate_image tool gating", () => {
 		expect(session.getActiveToolNames()).not.toContain("write");
 	});
 
+	it("keeps deferred MCP tool refreshes inside the persona tool policy", async () => {
+		const mcpTool = customTool("mcp__test__search", true);
+		// No startup custom tools: the MCP server connects after the persona is
+		// applied, so the deferred refresh must not broaden the active set.
+		const { session } = await createAgentSession({
+			cwd: registryDir,
+			agentDir: registryDir,
+			enableMCP: false,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "plan.enabled": false }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			agentPersona: {
+				name: "readonly-persona",
+				description: "Persona granting only read",
+				systemPrompt: "",
+				tools: ["read"],
+				source: "project" as const,
+			},
+		});
+		sessions.push(session);
+
+		// The persona overlay is active pre-refresh.
+		expect(session.getEnabledToolNames()).toContain("read");
+		expect(session.getEnabledToolNames()).not.toContain(mcpTool.name);
+
+		// A deferred MCP connect must not broaden the catalog past the persona's
+		// explicit tools (codex 3741691577): the tool is registered (visible for
+		// a future switch) but stays OUT of the active set.
+		await session.refreshMCPTools([mcpTool]);
+		expect(session.getAllToolNames()).toContain(mcpTool.name);
+		expect(session.getEnabledToolNames()).not.toContain(mcpTool.name);
+	});
+
 	it("preserves explicitly requested write after MCP devices disconnect", async () => {
 		const session = await sessionWithCustomTools(["read", "write"], [customTool("mcp__test__search", true)]);
 

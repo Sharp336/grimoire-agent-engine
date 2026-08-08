@@ -639,6 +639,7 @@ export class AgentSession {
 	#extensionPaths: string[] | undefined;
 	#extensionRoots: string[] | undefined;
 	#agentToolOverlay: { restore: () => Promise<void> } | undefined;
+	#personaToolPolicy: string[] | undefined;
 	#cliToolsLocked = false;
 	#cliModelLocked = false;
 	#cliThinkingLocked = false;
@@ -1250,6 +1251,7 @@ export class AgentSession {
 			setInspectImageModeOverride: mode => {
 				this.#inspectImageModeOverride = mode;
 			},
+			getPersonaToolPolicy: () => this.#personaToolPolicy,
 		};
 		this.#tools = new SessionTools(sessionToolsHost, {
 			autoApprove: config.autoApprove,
@@ -1296,6 +1298,8 @@ export class AgentSession {
 		this.#cliThinkingLocked = config.cliThinkingLocked ?? false;
 		if (config.agentPersona?.tools?.length && config.initialToolOverlayRestore) {
 			this.#agentToolOverlay = { restore: config.initialToolOverlayRestore };
+			const startupPolicy = resolveAgentSessionPolicy(config.agentPersona);
+			this.#personaToolPolicy = startupPolicy.toolNames;
 		}
 		const providerBoundaryHost: SessionProviderBoundaryHost = {
 			agent: this.agent,
@@ -6737,6 +6741,7 @@ export class AgentSession {
 		const policy = resolveAgentSessionPolicy(agent);
 		const previousPersona = this.#agentPersona;
 		const previousOverlay = this.#agentToolOverlay;
+		const previousPersonaToolPolicy = this.#personaToolPolicy;
 		const previousModel = this.model;
 		const previousThinking = this.configuredThinkingLevel();
 		const previousToolNames = this.getEnabledToolNames();
@@ -6752,6 +6757,9 @@ export class AgentSession {
 				} else {
 					this.#agentToolOverlay = undefined;
 				}
+				this.#personaToolPolicy = this.#cliToolsLocked ? undefined : policy.toolNames;
+			} else {
+				this.#personaToolPolicy = undefined;
 			}
 			// 2. Spawns
 			if (policy.spawns !== undefined) this.#setSessionSpawns?.(policy.spawns);
@@ -6798,6 +6806,7 @@ export class AgentSession {
 			this.#agentPersona = previousPersona;
 			this.#setAgentPersona?.(previousPersona);
 			this.#agentToolOverlay = previousOverlay;
+			this.#personaToolPolicy = previousPersonaToolPolicy;
 			try {
 				await this.setActiveToolPresentation(previousToolNames, previousMounted);
 				if (previousSpawns !== undefined) this.#setSessionSpawns?.(previousSpawns);
@@ -7679,6 +7688,7 @@ export class AgentSession {
 		const previousServiceTierByFamily = this.serviceTierByFamily;
 		const previousPersona = this.#agentPersona;
 		const previousPersonaOverlay = this.#agentToolOverlay;
+		const previousPersonaToolPolicy = this.#personaToolPolicy;
 		const previousSpawns = this.#getSessionSpawns?.();
 		const previousTools = [...this.agent.state.tools];
 		const previousBaseSystemPrompt = this.#tools.baseSystemPrompt;
@@ -7753,6 +7763,9 @@ export class AgentSession {
 					if (!this.#cliToolsLocked) {
 						if (this.#agentToolOverlay) await this.#agentToolOverlay.restore();
 						this.#agentToolOverlay = policy.toolNames ? await this.applyToolOverlay(policy.toolNames) : undefined;
+						this.#personaToolPolicy = policy.toolNames;
+					} else {
+						this.#personaToolPolicy = undefined;
 					}
 					if (policy.spawns !== undefined) this.#setSessionSpawns?.(policy.spawns);
 					this.#agentPersona = persona;
@@ -7764,6 +7777,7 @@ export class AgentSession {
 						await this.#agentToolOverlay.restore();
 						this.#agentToolOverlay = undefined;
 					}
+					this.#personaToolPolicy = undefined;
 					this.#setSessionSpawns?.(this.#baselineSpawns);
 					this.#agentPersona = undefined;
 					this.#setAgentPersona?.(undefined);
@@ -7950,6 +7964,7 @@ export class AgentSession {
 			this.#agentPersona = previousPersona;
 			this.#setAgentPersona?.(previousPersona);
 			this.#agentToolOverlay = previousPersonaOverlay;
+			this.#personaToolPolicy = previousPersonaToolPolicy;
 			if (previousSpawns !== undefined) this.#setSessionSpawns?.(previousSpawns);
 			if (modelRolledBack) {
 				this.#emit({ type: "model_changed" });

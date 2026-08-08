@@ -29,6 +29,7 @@ import { isIrcEnabled } from "../tools/hub";
 import { formatBytes, formatDuration } from "../tools/render-utils";
 import {
 	clearDiscoveredAgentSnapshots,
+	clearDiscoveredAgentSnapshotsForCwd,
 	getDiscoveredAgentsSnapshot,
 	setDiscoveredAgentsSnapshot,
 } from "./discovery-snapshot";
@@ -520,13 +521,16 @@ export async function refreshAgentDiscovery(
 	const resolvedCwd = path.resolve(cwd);
 	// A plugin/skill reload changes both scopes: the merge-mode scan this call
 	// performs, and the explicit-only snapshot the same cwd keeps. Invalidate
-	// both mode prefixes (any explicit-roots variant) so the next discovery in
-	// either mode re-resolves lazily.
+	// both mode prefixes (any explicit-roots variant) AND every published
+	// snapshot for the cwd, so live sessions with a different mode/roots tuple
+	// don't keep advertising pre-reload definitions while preflight resolves
+	// the fresh set (codex 3741691585).
 	for (const mode of ["explicit-only", "merge"] as const) {
 		for (const key of discoveryMemo.keys()) {
 			if (key.startsWith(`${resolvedCwd}\0${mode}\0`)) discoveryMemo.delete(key);
 		}
 	}
+	clearDiscoveredAgentSnapshotsForCwd(cwd);
 	const key = `${resolvedCwd}\0${extensionMode}\0${extensionRoots.map(raw => path.resolve(cwd, raw)).join(";")}`;
 	const pending = discoverAgentsForCreate(cwd, extensionMode, extensionRoots);
 	const { agents } = await pending;

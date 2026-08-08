@@ -60,6 +60,13 @@ export interface SessionToolsHost {
 	/** Session-scoped `/vision` override; undefined means "follow the persisted setting". */
 	getInspectImageModeOverride(): InspectImageMode | undefined;
 	setInspectImageModeOverride(mode: InspectImageMode | undefined): void;
+	/**
+	 * The active persona's explicit tool allow-list, when one is installed
+	 * (undefined = unrestricted). Deferred tool refreshes (MCP connect/
+	 * reconnect, RPC rebinds) must stay inside this policy instead of
+	 * unconditionally activating every discovered tool.
+	 */
+	getPersonaToolPolicy(): string[] | undefined;
 }
 
 interface SessionToolsOptions {
@@ -1361,9 +1368,16 @@ export class SessionTools {
 			this.#toolRegistry.set(finalTool.name, finalTool);
 		}
 
-		// Every connected MCP tool is selected; centralized repartitioning owns
-		// presentation pins and write-transport activation/removal.
-		const nextActive = [...new Set([...this.#getActiveNonMCPToolNames(), ...uniqueMcpTools.map(tool => tool.name)])];
+		// Every connected MCP tool is selected UNLESS an active persona pins an
+		// explicit tool list: the overlay is the persona's granted policy, so
+		// deferred MCP discovery must not broaden the catalog past it (codex
+		// 3741691577). Register the tools (the model can still see/describe
+		// them for a future persona switch) but keep them out of the active set.
+		const personaPolicy = this.#host.getPersonaToolPolicy();
+		const allowedMcpToolNames = personaPolicy
+			? uniqueMcpTools.map(tool => tool.name).filter(name => personaPolicy.includes(name))
+			: uniqueMcpTools.map(tool => tool.name);
+		const nextActive = [...new Set([...this.#getActiveNonMCPToolNames(), ...allowedMcpToolNames])];
 		try {
 			await this.applyActiveToolsByName(nextActive);
 			if (this.#host.isDisposed()) restorePreviousMcpTools();

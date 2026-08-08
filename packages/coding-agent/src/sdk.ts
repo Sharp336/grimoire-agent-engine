@@ -1379,14 +1379,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// cache prefix would be built for the old system prompt/tool set.
 	const persistedPersona = sessionManager.buildSessionContext().agentPersona;
 	const personaFingerprint = options.agentPersona ? fingerprintAgentContent(options.agentPersona) : undefined;
-	// A persona rehydrated from the transcript (same name+source) must not
-	// reapply its model/thinking — the transcript records the authoritative
-	// values, mirroring the CLI's agentRehydratedFromContext gate. Tools still
-	// re-resolve from the current definition (documented resume behavior).
+	// A persona rehydrated from the transcript (same name+source AND same
+	// content fingerprint) must not reapply its model/thinking — the
+	// transcript records the authoritative values, mirroring the CLI's
+	// agentRehydratedFromContext gate. Tools still re-resolve from the current
+	// definition (documented resume behavior). When the definition CONTENT
+	// changed since the transcript was saved (model:/thinkingLevel: edited),
+	// the caller's explicit persona is a fresh selection: apply the new
+	// defaults and record them so the next resume rehydrates the new values.
+	// A missing persisted fingerprint (legacy write paths) is unknown content,
+	// so treat it as changed and apply (codex 3741691583).
 	const personaIdentityRehydrated =
 		options.agentPersona !== undefined &&
 		persistedPersona?.agent === options.agentPersona.name &&
-		persistedPersona?.source === options.agentPersona.source;
+		persistedPersona?.source === options.agentPersona.source &&
+		persistedPersona?.fingerprint !== undefined &&
+		persistedPersona.fingerprint === personaFingerprint;
 	// Content fingerprint additionally drives cache invalidation: the persona
 	// file may have changed since the transcript was saved, and the cache
 	// prefix would be built for the old system prompt/tool set. A missing
