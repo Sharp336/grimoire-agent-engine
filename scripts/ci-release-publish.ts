@@ -292,7 +292,7 @@ export async function inspectPackedTarball(tarballPath: string): Promise<PackedT
 	return { name: manifest.name, version: manifest.version, path: tarballPath };
 }
 
-async function packAndPublish(dir: string, name: string): Promise<void> {
+export async function packAndPublish(dir: string, name: string): Promise<void> {
 	if (isDryRun) {
 		console.log(`DRY RUN bun pm pack && npm publish --access public (${path.relative(repoRoot, dir)})`);
 		return;

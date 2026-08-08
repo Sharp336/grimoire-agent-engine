@@ -1,12 +1,22 @@
-# @oh-my-pi/pi-coding-agent
+# omp-cn（@oh-my-pi/pi-coding-agent）
 
-Core implementation package for the `omp` coding agent in the `oh-my-pi` monorepo.
+这是 `oh-my-pi-cn` monorepo 中 coding agent 的核心实现包，也是中文本地化 CLI 的主要代码目录。
 
-For installation, setup, provider configuration, model roles, slash commands, and full CLI reference, see:
+本分支由 `yequ172672` 维护，B 站 ID 为 `夜曲_flac`，对外发布的本地化 CLI 包名为
+[`omp-cn`](https://www.npmjs.com/package/omp-cn)。内部 workspace 包名仍保持为
+`@oh-my-pi/pi-coding-agent`，以维持源码导入和上游兼容性。
+
+本包基于 [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi)，重点维护设置中心、
+供应商配置、首次启动向导、随机提示和常用 CLI 文案的简体中文本地化。上游原作者
+Mario Zechner、Can Bölük 及其版权信息保留不变，项目继续使用 MIT 协议。
+
+安装、供应商配置、模型角色、斜杠命令和完整 CLI 参考见：
+
 - [Monorepo README (local)](../../README.md)
-- [Monorepo README (GitHub)](https://github.com/can1357/oh-my-pi#readme)
+- [Monorepo README (GitHub)](https://github.com/yequ172672/oh-my-pi-cn#readme)
 
 Package-specific references:
+
 - [CHANGELOG](./CHANGELOG.md)
 - [MCP configuration guide](../../docs/mcp-config.md)
 - [MCP runtime lifecycle](../../docs/mcp-runtime-lifecycle.md)

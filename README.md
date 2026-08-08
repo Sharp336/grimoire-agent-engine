@@ -1,17 +1,17 @@
 <p align="center">
-  <img src="https://github.com/can1357/oh-my-pi/blob/main/assets/hero.png?raw=true" alt="omp">
+  <img src="https://github.com/yequ172672/oh-my-pi-cn/blob/agent/zh-cn-localization/assets/hero.png?raw=true" alt="omp">
 </p>
 
 <p align="center">
-  <strong>A coding agent with the IDE wired in.</strong>
-  <strong><a href="https://omp.sh">omp.sh</a></strong>
+  <strong>面向中文用户的终端 AI 编程代理。</strong>
+  <strong><a href="https://github.com/yequ172672/oh-my-pi-cn">oh-my-pi-cn</a></strong>
 </p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/@oh-my-pi/pi-coding-agent"><img src="https://img.shields.io/npm/v/@oh-my-pi/pi-coding-agent?style=flat&colorA=222222&colorB=CB3837" alt="npm version"></a>
-  <a href="https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-keep-E05735?style=flat&colorA=222222" alt="Changelog"></a>
-  <a href="https://github.com/can1357/oh-my-pi/actions"><img src="https://img.shields.io/github/actions/workflow/status/can1357/oh-my-pi/ci.yml?style=flat&colorA=222222&colorB=3FB950" alt="CI"></a>
-  <a href="https://github.com/can1357/oh-my-pi/blob/main/LICENSE"><img src="https://img.shields.io/github/license/can1357/oh-my-pi?style=flat&colorA=222222&colorB=58A6FF" alt="License"></a>
+  <a href="https://www.npmjs.com/package/omp-cn"><img src="https://img.shields.io/npm/v/omp-cn?style=flat&colorA=222222&colorB=CB3837" alt="npm version"></a>
+  <a href="https://github.com/yequ172672/oh-my-pi-cn/blob/agent/zh-cn-localization/packages/coding-agent/CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-keep-E05735?style=flat&colorA=222222" alt="Changelog"></a>
+  <a href="https://github.com/yequ172672/oh-my-pi-cn/actions"><img src="https://img.shields.io/github/actions/workflow/status/yequ172672/oh-my-pi-cn/ci.yml?style=flat&colorA=222222&colorB=3FB950" alt="CI"></a>
+  <a href="https://github.com/yequ172672/oh-my-pi-cn/blob/agent/zh-cn-localization/LICENSE"><img src="https://img.shields.io/github/license/yequ172672/oh-my-pi-cn?style=flat&colorA=222222&colorB=58A6FF" alt="License"></a>
   <a href="https://www.typescriptlang.org"><img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat&colorA=222222&logo=typescript&logoColor=white" alt="TypeScript"></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/Rust-DEA584?style=flat&colorA=222222&logo=rust&logoColor=white" alt="Rust"></a>
   <a href="https://bun.sh"><img src="https://img.shields.io/badge/runtime-Bun-f472b6?style=flat&colorA=222222" alt="Bun"></a>
@@ -19,54 +19,72 @@
 </p>
 
 <p align="center">
-  Fork of <a href="https://github.com/badlogic/pi-mono">Pi</a> by <a href="https://github.com/mariozechner">@mariozechner</a> 
+  基于 <a href="https://github.com/badlogic/pi-mono">Pi</a> 与
+  <a href="https://github.com/can1357/oh-my-pi">oh-my-pi</a> 的简体中文本地化分支
 </p>
 
-The most capable agent surface that ships. Continuously tuned by real-world use — complete out of the box, open all the way down.
+## 中文本地化分支
+
+本仓库是 [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi) 的简体中文本地化分支，
+由 `yequ172672` 维护，B 站 ID：`夜曲_flac`。分支在保留上游核心能力和提交历史的基础上，
+持续同步上游更新，并将中文用户实际使用到的界面、提示和安装体验作为重点维护范围。
+
+当前分支的特色包括：
+
+- 设置中心的中文界面，覆盖外观、模型、交互、上下文、记忆、文件、终端等栏目及其选项提示；
+- 供应商配置和首次启动向导的中文说明，降低模型登录与 Web 搜索配置门槛；
+- 主界面随机 `tip` 提示、模型思考等级和常用操作说明的中文本地化；
+- 语言设置持久化，重启后继续使用已选择的语言；
+- 独立的 `omp-cn` 安装、更新和 npm 发布路径，避免覆盖官方 `omp` 安装；
+- 以 `can1357/oh-my-pi` 为上游，保留上游功能演进，同时持续维护中文翻译和本分支体验。
+
+上游原作者、版权声明和开源协议保持不变；本分支维护者信息见文末的“分支维护与致谢”。
+
+面向终端工作流打造的完整 AI 编程代理：开箱即用，并保留从 CLI 到底层工具链的可扩展能力。
 
 **60+** providers · **31** built-in tools · **14** lsp ops · **28** dap ops · **~80k** lines of Rust core.
 
 > [!NOTE]
-> Pull requests are **temporarily open to everyone** as a trial. We previously
-> required a vouch before accepting PRs; that requirement is lifted for now
-> while we evaluate how open contributions go. Depending on the results, the
-> vouch system may return.
+> 本分支以简体中文本地化为维护重点，同时跟踪
+> [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi) 的核心能力更新。
+> 安装和更新请优先使用本仓库提供的 `omp-cn` 路径，以便保留官方 `omp` 与本分支并行使用的能力。
 
-## Install
+## 安装
 
 **macOS · Linux**
 
 ```sh
-curl -fsSL https://omp.sh/install | sh
+curl -fsSL https://raw.githubusercontent.com/yequ172672/oh-my-pi-cn/agent/zh-cn-localization/scripts/install.sh | sh
 ```
 
 > **Alpine / musl:** the prebuilt musl binary links `libstdc++`/`libgcc` dynamically, which stock Alpine does not ship. Install them first: `apk add libstdc++ libgcc`.
 
-**Homebrew**
+**GitHub Release binary**
+
+Download a platform binary from the [fork releases](https://github.com/yequ172672/oh-my-pi-cn/releases) when one is available.
+
+**Bun（推荐）**
 
 ```sh
-brew install can1357/tap/omp
-```
-
-**Bun (recommended)**
-
-```sh
-bun install -g @oh-my-pi/pi-coding-agent
+bun install -g omp-cn
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-irm https://omp.sh/install.ps1 | iex
+irm https://raw.githubusercontent.com/yequ172672/oh-my-pi-cn/agent/zh-cn-localization/scripts/install.ps1 | iex
 ```
 
 **Pinned versions (mise)**
 
 ```sh
-mise use -g github:can1357/oh-my-pi
+mise use -g github:yequ172672/oh-my-pi-cn
 ```
 
 macOS · Linux · Windows · bun ≥ 1.3.14
+
+安装脚本默认使用 `yequ172672/oh-my-pi-cn` 分支和 `omp-cn` npm 包；如果 npm
+包暂时不可用，会回退到 `agent/zh-cn-localization` 源码分支安装。
 
 ### Shell completions
 
@@ -541,11 +559,14 @@ The [Agent Client Protocol](https://github.com/zed-industries/agent-client-proto
 
 Full reference: [omp.sh/docs/sdk](https://omp.sh/docs/sdk).
 
-## A harness worth keeping is one you _don't_ outgrow.
+## 面向中文用户的可扩展终端工作流
 
-Pick it up at **[omp.sh](https://omp.sh)**.
+`oh-my-pi-cn` 延续上游面向终端的工作流设计，并将中文界面、供应商配置和日常操作提示作为本分支的重点。
 
-omp is a fork of [Pi](https://github.com/badlogic/pi-mono) by [Mario Zechner](https://github.com/mariozechner), rewritten as a coding-first surface: sessions, subagents, slash commands, extensions — all TypeScript, all MIT, all on [GitHub](https://github.com/can1357/oh-my-pi). Shape it from config, hook it from outside, or read the source when you need to.
+本项目基于 [Pi](https://github.com/badlogic/pi-mono)（作者
+[Mario Zechner](https://github.com/mariozechner)）和
+[can1357/oh-my-pi](https://github.com/can1357/oh-my-pi)，提供会话、子代理、斜杠命令和扩展能力。
+核心代码继续采用 TypeScript，并遵循 MIT 协议；本分支在此基础上维护简体中文体验。
 
 ### Primitives
 
@@ -638,27 +659,39 @@ For architecture and contribution guidelines, see [packages/coding-agent/DEVELOP
 | **[jaq](crates/vendor/jaq)**                       | Vendored jq-compatible JSON query engine, run as an in-process builtin                              |
 | **uu-\* family** ([crates/vendor](crates/vendor))  | 46 vendored uutils coreutils (ls, sed, sort, xargs, …) executed in-process, no fork/exec            |
 
-## Contributing
+## 参与贡献
 
-Issues and pull requests are open to everyone. Open PRs are currently a
-**trial** — the previous vouch requirement is lifted while we evaluate how it
-goes, and it may return. See **[CONTRIBUTING.md](CONTRIBUTING.md)** for
-guidelines on contributing.
+欢迎提交 Issue 和 Pull Request。涉及上游核心能力的改动，请同时关注
+`can1357/oh-my-pi` 的实现和更新；涉及中文界面、提示、供应商向导与安装体验的改动，
+可直接在本分支提出。具体方式见 **[CONTRIBUTING.md](CONTRIBUTING.md)**。
+
+## 分支维护与致谢
+
+- 分支维护者：`yequ172672`
+- B 站 ID：`夜曲_flac`
+- 当前维护分支：`agent/zh-cn-localization`
+- 上游项目：[can1357/oh-my-pi](https://github.com/can1357/oh-my-pi)
+- 上游原作者：Mario Zechner、Can Bölük
+- 本分支特色：简体中文界面与提示本地化、供应商设置与首次启动向导本地化，以及独立的
+  `omp-cn` 安装和更新路径。
+
+本分支是在上游项目基础上的本地化维护工作；上游作者、版权声明和原有 MIT 开源协议均予以保留。
 
 ---
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+本项目及本分支均遵循 MIT 协议，详见 [LICENSE](LICENSE)。LICENSE 文件中的上游版权声明保持不变。
 
 © 2025 Mario Zechner  
 © 2025-2026 Can Bölük
+© 2026 yequ172672
 
 _made for terminals that stay open_
 
 - [omp.sh](https://omp.sh)
-- [GitHub](https://github.com/can1357/oh-my-pi)
-- [Changelog](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/CHANGELOG.md)
-- [npm](https://www.npmjs.com/package/@oh-my-pi/pi-coding-agent)
+- [GitHub](https://github.com/yequ172672/oh-my-pi-cn)
+- [Changelog](https://github.com/yequ172672/oh-my-pi-cn/blob/agent/zh-cn-localization/packages/coding-agent/CHANGELOG.md)
+- [npm](https://www.npmjs.com/package/omp-cn)
 - [Discord](https://discord.gg/4NMW9cdXZa)
-- [MIT](https://github.com/can1357/oh-my-pi/blob/main/LICENSE)
+- [MIT](https://github.com/yequ172672/oh-my-pi-cn/blob/agent/zh-cn-localization/LICENSE)

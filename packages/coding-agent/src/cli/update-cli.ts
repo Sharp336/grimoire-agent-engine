@@ -16,12 +16,23 @@ import { $ } from "bun";
 import { theme } from "../modes/theme/theme";
 import { isTimeoutError, withTimeoutSignal } from "../utils/fetch-timeout";
 
-const REPO = "can1357/oh-my-pi";
-const PACKAGE = "@oh-my-pi/pi-coding-agent";
-const HOMEBREW_FORMULA = "can1357/tap/omp";
-const MISE_TOOL = "github:can1357/oh-my-pi";
+/** Public fork endpoints used by `omp update` and release-binary updates. */
+export const FORK_REPOSITORY = "yequ172672/oh-my-pi-cn";
+export const FORK_PACKAGE = "omp-cn";
+export const FORK_MISE_TOOL = `github:${FORK_REPOSITORY}`;
 /**
- * Official npm registry origin.
+ * The fork does not ship a Homebrew tap yet. Keep the target on the fork so
+ * an eventual tap can be added without routing updates back to upstream.
+ * `OMP_HOMEBREW_FORMULA` is an escape hatch for a locally maintained tap.
+ */
+export const FORK_HOMEBREW_FORMULA = process.env.OMP_HOMEBREW_FORMULA ?? "yequ172672/tap/omp-cn";
+
+const REPO = FORK_REPOSITORY;
+const PACKAGE = FORK_PACKAGE;
+const HOMEBREW_FORMULA = FORK_HOMEBREW_FORMULA;
+const MISE_TOOL = FORK_MISE_TOOL;
+/**
+ * Public npm registry origin.
  *
  * Pinned across both the version check and the bun install step so the two
  * agree on which catalog they are talking to. A user's bun may be pointed at
