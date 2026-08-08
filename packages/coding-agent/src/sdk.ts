@@ -3506,6 +3506,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// Do not write the `auto` selector before the first turn resolves; auto
 				// classification persists its concrete effort once a real user turn runs.
 				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel);
+			} else if (options.agentPersona) {
+				// A persona records an agent_change that resume treats as
+				// rehydratable (frontmatter intentionally not reapplied). With no
+				// thinking_level_change on disk the resume falls back to the model/
+				// settings default and silently leaves auto mode, so persist the
+				// configured auto selector here (concrete provisional effort for the
+				// display, configured=auto for the intent). The first turn's
+				// classification still overwrites the concrete effort later.
+				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, AUTO_THINKING);
 			}
 			if (options.openAIServiceTier !== undefined || Object.keys(initialServiceTierByFamily).length > 0) {
 				sessionManager.appendServiceTierChange(

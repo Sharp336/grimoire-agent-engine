@@ -429,6 +429,52 @@ describe("AgentSession model persistence", () => {
 		expect(result.session.configuredThinkingLevel()).toBe(AUTO_THINKING);
 	});
 
+	it("persists auto thinking for persona sessions so resume stays in auto mode", async () => {
+		// Codex 3741805310: a new session with a persona whose frontmatter sets
+		// thinkingLevel: auto must record the configured auto selector at
+		// startup. Resume treats the recorded persona as rehydrated and
+		// intentionally does not reapply its frontmatter, so without a
+		// thinking_level_change carrying configured: "auto" the next resume
+		// falls back to the model/settings default thinking instead of auto.
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const tempDir = TempDir.createSync("@pi-persona-auto-");
+		try {
+			const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "active"));
+			const created = await createAgentSession({
+				cwd: tempDir.path(),
+				agentDir: tempDir.path(),
+				authStorage: sharedAuthStorage,
+				modelRegistry: sharedModelRegistry,
+				sessionManager,
+				settings: Settings.isolated(),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+				model: defaultModel,
+				agentPersona: {
+					name: "auto-thinking-persona",
+					description: "Persona with auto thinking",
+					systemPrompt: "",
+					thinkingLevel: "auto",
+					source: "project" as const,
+				},
+			});
+			// The startup entry carries the provisional concrete effort (display)
+			// AND configured: "auto" (intent) — resume restores the selector from
+			// configured (sdk.ts pickInitialThinkingLevel), not the provisional
+			// effort.
+			expect(sessionManager.buildSessionContext().configuredThinkingLevel).toBe(AUTO_THINKING);
+			await created.session.dispose();
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
 	it("marks an incomplete process-exit transcript aborted during SDK resume without dropping history", async () => {
 		const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "interrupted"));
 		const interruptedAssistant: AssistantMessage = {

@@ -8,6 +8,7 @@
 - `applyToolOverlay` primitive extracted on AgentSession, generalizing the snapshot/apply/restore pattern shared by plan mode, plan-yolo, print-mode, and agent-selection. ([#6836](https://github.com/can1357/oh-my-pi/issues/6836))
 ### Fixed
 
+- Fixed persona sessions with `thinkingLevel: auto` silently leaving auto mode on resume: the startup entry now records the configured `auto` selector (with the provisional concrete effort for display), so a resume — which treats the recorded persona as rehydrated and does not reapply its frontmatter — restores `auto` instead of falling back to the model/settings default.
 - Fixed the persona content fingerprint ignoring `spawns:` edits: a spawns-only frontmatter change now invalidates the inherited provider prompt-cache key on resume, since the task/scout prompt text is built from the spawn policy.
 - Fixed interactive session switches restoring the SOURCE session's plan-mode tool overlay over the target's rehydrated persona tools: the switch-time plan-mode teardown drops the source overlay handle instead of re-applying it (mirroring the vibe branch), so a read-only target persona no longer inherits the source's full tool baseline.
 - Fixed deferred RPC host-tool refreshes (`set_host_tools`) auto-activating write-like tools past a restrictive persona: `refreshRpcHostTools` now filters auto-activated host tools through the persona tool policy, mirroring the MCP refresh gate.
