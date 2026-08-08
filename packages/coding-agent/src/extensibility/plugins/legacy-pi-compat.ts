@@ -2105,7 +2105,7 @@ async function collectExtensionModules(
 						});
 					}
 				}
-				if (options.required && !resolved && (specifier.startsWith(".") || specifier.startsWith("#"))) {
+				if (options.required && !resolved) {
 					throw new UnsupportedExtensionGraphError(
 						`Required extension graph import could not be resolved: ${specifier} from ${file}`,
 					);

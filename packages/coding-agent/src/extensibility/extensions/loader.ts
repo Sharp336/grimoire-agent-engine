@@ -492,7 +492,7 @@ async function loadRequiredExtensions(
 			const existing = snapshots.get(canonicalPath);
 			if (existing !== undefined) {
 				source = existing;
-				actualSha256 = spec.sha256;
+				actualSha256 = Bun.SHA256.hash(new TextEncoder().encode(source), "hex");
 			} else {
 				const snapshot = await readExtensionSnapshot(canonicalPath);
 				source = snapshot.source;
@@ -584,7 +584,6 @@ export async function loadExtensions(
 		runtime,
 	};
 }
-
 interface ExtensionManifest {
 	extensions?: string[];
 	themes?: string[];
