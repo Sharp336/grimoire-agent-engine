@@ -157,6 +157,8 @@ import { containsWorkflow, renderWorkflowNotice } from "../modes/workflow";
 import { type PlanApprovalDetails, resolveApprovedPlan } from "../plan-mode/approved-plan";
 import { listPlanFiles, readPlanFile } from "../plan-mode/plan-files";
 import type { PlanModeState } from "../plan-mode/state";
+import type { PromptGateDelivery } from "../prompt-gate/runtime";
+import { runPromptGates } from "../prompt-gate/runtime";
 import goalModeContextPrompt from "../prompts/goals/goal-mode-context.md" with { type: "text" };
 import goalTodoContextPrompt from "../prompts/goals/goal-todo-context.md" with { type: "text" };
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
@@ -4981,7 +4983,20 @@ export class AgentSession {
 		}
 
 		// Expand file-based prompt templates if requested
-		const expandedText = expandPromptTemplates ? expandPromptTemplate(text, [...this.#promptTemplates]) : text;
+		let expandedText = expandPromptTemplates ? expandPromptTemplate(text, [...this.#promptTemplates]) : text;
+		const promptAttribution = options?.attribution ?? (options?.synthetic ? "agent" : "user");
+		let promptGateDelivery: PromptGateDelivery | undefined;
+		if (!options?.synthetic && promptAttribution === "user") {
+			const evaluation = await runPromptGates({
+				text: expandedText,
+				images: options?.images,
+				sessionId: this.sessionManager.getSessionId(),
+				cwd: this.sessionManager.getCwd(),
+				source: "prompt",
+			});
+			expandedText = evaluation.text;
+			promptGateDelivery = evaluation.delivery;
+		}
 
 		// Magic keywords ("ultrathink", "orchestrate"): append hidden system notices after the
 		// user's message that steer this turn. User-authored prompts only — synthetic /
@@ -5003,19 +5018,27 @@ export class AgentSession {
 		// If streaming, queue via steer() or followUp() based on option
 		if (this.isStreaming) {
 			const streamingBehavior = options?.streamingBehavior;
-			if (!streamingBehavior) throw new AgentBusyError();
+			if (!streamingBehavior) {
+				await promptGateDelivery?.cancel();
+				throw new AgentBusyError();
+			}
 
-			// Steer/follow-up the keyword notices BEFORE the queued user message so the
-			// model reads the steering notice ahead of the prompt it modifies.
-			for (const notice of keywordNotices) {
-				await this.#queueCustomMessage(notice, streamingBehavior);
+			try {
+				// Steer/follow-up the keyword notices BEFORE the queued user message so the
+				// model reads the steering notice ahead of the prompt it modifies.
+				for (const notice of keywordNotices) {
+					await this.#queueCustomMessage(notice, streamingBehavior);
+				}
+				if (streamingBehavior === "followUp") {
+					await this.#queueUserMessage(expandedText, options?.images, "followUp", promptGateDelivery);
+				} else {
+					await this.#queueUserMessage(expandedText, options?.images, "steer", promptGateDelivery);
+				}
+				return true;
+			} catch (error) {
+				await promptGateDelivery?.cancel();
+				throw error;
 			}
-			if (streamingBehavior === "followUp") {
-				await this.#queueUserMessage(expandedText, options?.images, "followUp");
-			} else {
-				await this.#queueUserMessage(expandedText, options?.images, "steer");
-			}
-			return true;
 		}
 
 		// Skip eager preludes when the user has already queued a directive
@@ -5024,21 +5047,32 @@ export class AgentSession {
 			!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTodoPrelude(expandedText) : undefined;
 		const eagerTaskPrelude =
 			!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTaskPrelude(expandedText) : undefined;
-		const normalizedImages = await this.#normalizeImagesForModel(options?.images);
+		let normalizedImages: ImageContent[] | undefined;
+		let imageDescriptionNotice: CustomMessage | undefined;
+		try {
+			normalizedImages = await this.#normalizeImagesForModel(options?.images);
+			// Text-only model + image attachment: describe via a vision model and inject the
+			// description as a hidden companion (the image stays in the visible user message).
+			imageDescriptionNotice = normalizedImages?.length
+				? await this.#buildImageDescriptionNotice(normalizedImages)
+				: undefined;
+		} catch (error) {
+			await promptGateDelivery?.cancel();
+			throw error;
+		}
 
 		const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
 		if (normalizedImages?.length) {
 			userContent.push(...normalizedImages);
 		}
-		// Text-only model + image attachment: describe via a vision model and inject the
-		// description as a hidden companion (the image stays in the visible user message).
-		const imageDescriptionNotice = normalizedImages?.length
-			? await this.#buildImageDescriptionNotice(normalizedImages)
-			: undefined;
 
-		const promptAttribution = options?.attribution ?? (options?.synthetic ? "agent" : "user");
 		const message = options?.synthetic
-			? { role: "developer" as const, content: userContent, attribution: promptAttribution, timestamp: Date.now() }
+			? {
+					role: "developer" as const,
+					content: userContent,
+					attribution: promptAttribution,
+					timestamp: Date.now(),
+				}
 			: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: Date.now() };
 
 		const preludeMessages: AgentMessage[] = [];
@@ -5058,6 +5092,8 @@ export class AgentSession {
 			await this.#promptWithMessage(message, expandedText, {
 				...options,
 				images: normalizedImages,
+				acknowledgePromptGateDelivery: promptGateDelivery?.acknowledge,
+				cancelPromptGateDelivery: promptGateDelivery?.cancel,
 				prependMessages:
 					preludeMessages.length > 0 || keywordNotices.length > 0 || imageDescriptionNotice
 						? [...preludeMessages, ...keywordNotices, ...(imageDescriptionNotice ? [imageDescriptionNotice] : [])]
@@ -5139,6 +5175,8 @@ export class AgentSession {
 		options?: Pick<PromptOptions, "toolChoice" | "images" | "skipCompactionCheck"> & {
 			prependMessages?: AgentMessage[];
 			skipPostPromptRecoveryWait?: boolean;
+			acknowledgePromptGateDelivery?: () => Promise<void>;
+			cancelPromptGateDelivery?: () => Promise<void>;
 			acceptTerminalEmptyStop?: boolean;
 		},
 	): Promise<void> {
@@ -5339,18 +5377,19 @@ export class AgentSession {
 				nonMessageTokens,
 				cutoffCount: this.messages.length + messages.length,
 			});
-			// Commit the plan-reference delivery flag only now that the message is
-			// actually handed to agent.prompt. Every pre-send setup step above can
-			// return (generation-bail) or throw (@-mention reads, before_agent_start
-			// hooks, pre-prompt compaction) before this point; setting the flag at
-			// construction time (#buildPlanReferenceMessage) stranded it `true` with
-			// nothing delivered, so the retry skipped re-injection and the executor
-			// lost the approved plan (issue #4094). The compaction-success resets
-			// (issue #1246) still clear it for re-injection on the next turn.
-			if (planReferenceMessage) {
-				this.#planReferenceSent = true;
-			}
 			try {
+				await options?.acknowledgePromptGateDelivery?.();
+				// Commit the plan-reference delivery flag only now that the message is
+				// actually handed to agent.prompt. Every pre-send setup step above can
+				// return (generation-bail) or throw (@-mention reads, before_agent_start
+				// hooks, pre-prompt compaction) before this point; setting the flag at
+				// construction time (#buildPlanReferenceMessage) stranded it `true` with
+				// nothing delivered, so the retry skipped re-injection and the executor
+				// lost the approved plan (issue #4094). The compaction-success resets
+				// (issue #1246) still clear it for re-injection on the next turn.
+				if (planReferenceMessage) {
+					this.#planReferenceSent = true;
+				}
 				await this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions);
 			} finally {
 				this.#stats.setPendingSnapshot(undefined);
@@ -5359,6 +5398,7 @@ export class AgentSession {
 				await this.#waitForPostPromptRecovery(generation);
 			}
 		} finally {
+			await options?.cancelPromptGateDelivery?.();
 			// The per-turn before_agent_start override lives only for this turn.
 			this.#tools.clearTurnSystemPromptOverride();
 			this.#usagePreflightReadyForNextModelCall = false;
@@ -5575,21 +5615,42 @@ export class AgentSession {
 		text: string,
 		images: ImageContent[] | undefined,
 		mode: "steer" | "followUp",
+		promptGateDelivery?: PromptGateDelivery,
 	): Promise<void> {
+		const evaluation =
+			promptGateDelivery === undefined
+				? await runPromptGates({
+						text,
+						images,
+						sessionId: this.sessionManager.getSessionId(),
+						cwd: this.sessionManager.getCwd(),
+						source: mode,
+					})
+				: { text, delivery: promptGateDelivery };
+		text = evaluation.text;
+		promptGateDelivery = evaluation.delivery;
 		// A queued user message (RPC/SDK/collab steer or follow-up, or a typed message
 		// while streaming) is a deliberate resume; re-enable advisor auto-resume that
 		// a user interrupt suppressed.
 		this.#advisors.autoResumeSuppressed = false;
-		const normalizedImages = await this.#normalizeImagesForModel(images);
+		let normalizedImages: ImageContent[] | undefined;
+		let imageDescriptionNotice: CustomMessage | undefined;
+		try {
+			normalizedImages = await this.#normalizeImagesForModel(images);
+			// Text-only model + image attachment: describe via a vision model and enqueue the
+			// description as a hidden companion immediately before the user message.
+			imageDescriptionNotice = normalizedImages?.length
+				? await this.#buildImageDescriptionNotice(normalizedImages)
+				: undefined;
+			await promptGateDelivery?.acknowledge();
+		} catch (error) {
+			await promptGateDelivery?.cancel();
+			throw error;
+		}
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (normalizedImages?.length) {
 			content.push(...normalizedImages);
 		}
-		// Text-only model + image attachment: describe via a vision model and enqueue the
-		// description as a hidden companion immediately before the user message.
-		const imageDescriptionNotice = normalizedImages?.length
-			? await this.#buildImageDescriptionNotice(normalizedImages)
-			: undefined;
 		this.#allowQueuedMessageDrainRetry();
 		if (mode === "followUp") {
 			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);

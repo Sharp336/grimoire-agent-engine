@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the machine-readable `omp capabilities --json` command and native `prompt-gate-v1` runtime for profile-scoped, fail-closed prompt review integrations.
+
 ## [17.2.11] - 2026-08-07
 
 ### Added
