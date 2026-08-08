@@ -150,16 +150,16 @@ jobs:
          - name: Rust tests
            run: |
               if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
-              bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" test \
+              bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" test -- \
                 //crates/... -//crates/pi-shell:pi-shell_test
               # GitHub-hosted Linux does not deliver the stopped-pipeline state
               # required by this one jobspec contract, even without Bazel's
               # sandbox. Run every other pi-shell test and record the exception
               # in docs/MAINTENANCE.md rather than reporting a full Rust matrix.
               bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" test \
-                //crates/pi-shell:pi-shell_test \
                 --test_arg=--skip \
-                --test_arg=shell::tests::kill_builtin_signals_every_process_in_a_jobspec_pipeline
+                --test_arg=shell::tests::kill_builtin_signals_every_process_in_a_jobspec_pipeline \
+                -- //crates/pi-shell:pi-shell_test
          - name: Clippy
            run: |
               bazelisk query "kind('rust_library|rust_shared_library', //crates/pi-ast/... + //crates/pi-iso/... + //crates/pi-natives/... + //crates/pi-shell/... + //crates/pi-voice/... + //crates/pi-walker/...)" \
