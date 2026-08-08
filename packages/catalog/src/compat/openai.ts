@@ -125,7 +125,7 @@ function detectStreamMarkupHealingPattern(
 }
 
 /** Strict official-OpenAI check: provider id `openai` and an `api.openai.com` host (missing baseUrl defaults there). */
-function isOfficialOpenAIEndpoint(provider: string, baseUrl: string): boolean {
+export function isOfficialOpenAIEndpoint(provider: string, baseUrl: string): boolean {
 	if (provider !== "openai") return false;
 	if (!baseUrl) return true;
 	try {

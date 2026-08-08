@@ -139,6 +139,47 @@ describe("azure openai responses streaming", () => {
 		expect(capturedBody?.reasoning).toEqual({ effort: "high" });
 	});
 
+	it("does not synthesize reasoning effort when only an unsupported summary is requested", async () => {
+		const unsupportedModel: Model<"azure-openai-responses"> = buildModel({
+			id: "gpt-5.3-codex",
+			name: "GPT-5.3 Codex",
+			api: "azure-openai-responses",
+			provider: "azure",
+			baseUrl: azureModel.baseUrl,
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400_000,
+			maxTokens: 128_000,
+		});
+		let capturedBody: Record<string, unknown> | undefined;
+		const fetchMock: FetchImpl = async (_input, init) => {
+			capturedBody = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : undefined;
+			return createSseResponse([
+				{
+					type: "response.completed",
+					response: {
+						status: "completed",
+						usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+					},
+				},
+			]);
+		};
+
+		const result = await streamSimple(
+			unsupportedModel,
+			{ messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }] },
+			{
+				apiKey: "test-key",
+				fetch: fetchMock,
+				reasoningSummary: "detailed",
+			},
+		).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(capturedBody?.reasoning).toBeUndefined();
+	});
+
 	it("sends an async onPayload replacement body", async () => {
 		let capturedBody: Record<string, unknown> | undefined;
 		const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {

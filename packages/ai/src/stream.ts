@@ -1875,7 +1875,11 @@ function resolveOpenAiReasoningSummary<TApi extends Api>(
 	if (requested === undefined) return undefined;
 	const parsed = parseOpenAIModel(model.id);
 	const isCodexVariant = parsed?.variant.startsWith("codex") === true;
-	return isCodexVariant && !supportsCodexReasoningSummary(model.id) ? null : requested;
+	return isCodexVariant && !supportsCodexReasoningSummary(model.id)
+		? options?.reasoning === undefined
+			? undefined
+			: null
+		: requested;
 }
 
 const castApi = <TApi extends Api>(api: OptionsForApi<TApi>): OptionsForApi<Api> => api as OptionsForApi<Api>;
