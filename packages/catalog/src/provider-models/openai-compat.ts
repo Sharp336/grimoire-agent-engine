@@ -1804,6 +1804,22 @@ export function volcengineAgentPlanModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 7.4d Volcengine Ark (火山引擎方舟) - pay-as-you-go
+// ---------------------------------------------------------------------------
+
+export interface VolcengineModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function volcengineModelManagerOptions(
+	config?: VolcengineModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createSimpleOpenAICompletionsOptions("volcengine", "https://ark.cn-beijing.volces.com/api/v3", config);
+}
+
+// ---------------------------------------------------------------------------
 // 7.5 Fireworks
 // ---------------------------------------------------------------------------
 
@@ -5822,6 +5838,11 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CORE: readonly ModelsDevProviderDescriptor
 			requiresReasoningContentForToolCalls: true,
 			requiresAssistantContentForToolCalls: true,
 		},
+	}),
+	// --- Volcengine Ark (pay-as-you-go) ---
+	openAiCompletionsDescriptor("volcengine", "volcengine", "https://ark.cn-beijing.volces.com/api/v3", {
+		defaultContextWindow: 256000,
+		defaultMaxTokens: 32768,
 	}),
 ];
 

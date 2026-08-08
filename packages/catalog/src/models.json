@@ -106483,5 +106483,32 @@
 			"contextWindow": 256000,
 			"maxTokens": 32768
 		}
+	},
+	"volcengine": {
+		"doubao-seed-2-1-pro-260628": {
+			"id": "doubao-seed-2-1-pro-260628",
+			"name": "Doubao Seed 2.1 Pro",
+			"api": "openai-completions",
+			"provider": "volcengine",
+			"baseUrl": "https://ark.cn-beijing.volces.com/api/v3",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 256000,
+			"maxTokens": 32768,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			}
+		}
 	}
 }

@@ -67,6 +67,7 @@ import { vercelAiGatewayProvider } from "./vercel-ai-gateway";
 import { vllmProvider } from "./vllm";
 import { volcengineAgentPlanProvider } from "./volcengine-agent-plan";
 import { volcengineCodingPlanProvider } from "./volcengine-coding-plan";
+import { volcengineProvider } from "./volcengine";
 import { waferServerlessProvider } from "./wafer-serverless";
 import { xaiProvider } from "./xai";
 import { xaiOauthProvider } from "./xai-oauth";
@@ -110,6 +111,7 @@ const ALL = [
 	zhipuCodingPlanProvider,
 	volcengineCodingPlanProvider,
 	volcengineAgentPlanProvider,
+	volcengineProvider,
 	umansProvider,
 	qwenPortalProvider,
 	sakanaProvider,

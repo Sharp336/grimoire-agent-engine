@@ -54,6 +54,7 @@ import {
 	vllmModelManagerOptions,
 	volcengineAgentPlanModelManagerOptions,
 	volcengineCodingPlanModelManagerOptions,
+	volcengineModelManagerOptions,
 	waferServerlessModelManagerOptions,
 	xaiModelManagerOptions,
 	xaiOAuthModelManagerOptions,
@@ -558,6 +559,14 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["VOLCENGINE_AGENT_PLAN_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => volcengineAgentPlanModelManagerOptions(config),
 		catalogDiscovery: { label: "Volcengine Agent Plan" },
+	},
+	{
+		id: "volcengine",
+		defaultModel: "doubao-seed-2-1-pro-260628",
+		envVars: ["ARK_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => volcengineModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Volcengine Ark" },
 	},
 ] as const satisfies readonly ProviderCatalogEntry[];
 
