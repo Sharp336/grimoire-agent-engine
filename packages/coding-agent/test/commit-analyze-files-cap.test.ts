@@ -130,4 +130,16 @@ describe("analyze_files cap behavior (issue #7833)", () => {
 		const text = result.content.find(p => p.type === "text")?.text ?? "";
 		expect(text).toContain("skipped: a.ts, b.ts");
 	});
+
+	it("treats a negative maxFiles as zero instead of slicing from the tail", async () => {
+		const execute = mockTaskTool();
+		const tool = await makeTool(-3);
+		const files = ["a.ts", "b.ts", "c.ts"];
+
+		const result = await tool.execute("tc1", { files }, () => {}, makeContext(), new AbortController().signal);
+
+		expect(execute).toHaveBeenCalledTimes(0);
+		const text = result.content.find(p => p.type === "text")?.text ?? "";
+		expect(text).toContain("skipped: a.ts, b.ts, c.ts");
+	});
 });
