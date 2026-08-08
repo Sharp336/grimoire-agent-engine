@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## [17.2.11] - 2026-08-07
+
+### Added
+
+- Added support for Windows hosts in `bun run build`, enabling local N-API builds against VS Build Tools without requiring a pre-configured vcvars prompt.
+
+### Changed
+
+- Replaced the miniaudio (`maudio`) dependency with in-house platform audio backends for `AudioCapture`/`AudioPlayback`: CoreAudio AudioQueue on macOS, shared-mode WASAPI on Windows, and PulseAudio (ALSA fallback) loaded via `dlopen` on Linux. Removes the bindgen/libclang requirement and the Windows rustc-ICE workaround from the native build.
+
+### Fixed
+
+- Fixed CPU feature detection (AVX2) on Windows hosts, resolving an issue where the native addon loader and local builds incorrectly fell back to the baseline variant, while improving startup performance by ~270ms.
+- Fixed `bun run build:bindings` failing on Windows due to incorrect resolution of the `@napi-rs/cli` entry point.
+- Fixed a compiler crash (rustc ICE) when building the `maudio` package for Windows.
+- Fixed synthesized macOS keyboard and pointer events suppressing physical user input.
+- Fixed several Wayland input and capture issues, including preventing read-only calls from acquiring persistent input control, fixing GNOME Wayland pointer input initialization, and resolving conflicts between `libei` input and PipeWire screen capture.
+- Fixed compilation of the `wayland-pipewire` Cargo feature.
+- Improved security on Wayland by cleaning up orphaned world-readable RemoteDesktop restore tokens on startup.
+
 ## [17.2.10] - 2026-08-06
 
 ### Fixed
