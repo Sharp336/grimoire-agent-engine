@@ -225,6 +225,50 @@ describe("OpenAI completions disableReasoning and thinking dialects", () => {
 		expect(payload.chat_template_kwargs).toBeUndefined();
 	});
 
+	it("preserves the native-on default for the bundled Neuralwatt no-effort Qwen model when reasoning is not requested", async () => {
+		// Neuralwatt's `qwen3.6-35b` thinks natively and its base disable mode
+		// is `qwen-template-false` — an implicit "off" here would send
+		// `chat_template_kwargs.enable_thinking: false` on every ordinary
+		// request, silently disabling the provider default. An ordinary request
+		// (no effort, no `disableReasoning`) must instead leave every thinking
+		// switch off the wire.
+		const model = getBundledModel<"openai-completions">("neuralwatt", "qwen3.6-35b");
+
+		// Pin the premise so a catalog/discovery regression points at the model
+		// row rather than surfacing as a bare wire-field diff.
+		expect(model.reasoning).toBe(true);
+		expect(model.thinking).toBeUndefined();
+		expect(model.compat.supportsReasoningEffort).toBe(false);
+		expect(model.compat.thinkingFormat).toBe("openai");
+
+		const { promise, resolve } = Promise.withResolvers<unknown>();
+		streamOpenAICompletions(model, testContext, {
+			apiKey: "test-key",
+			fetch: createMockFetchForQwen(resolve),
+			// no reasoning requested — the provider's native-on default applies
+		});
+		const payload = (await promise) as Record<string, unknown>;
+		expect(payload.enable_thinking).toBeUndefined();
+		expect(payload.chat_template_kwargs).toBeUndefined();
+		expect(payload.reasoning_effort).toBeUndefined();
+		expect(payload.reasoning).toBeUndefined();
+	});
+
+	it("encodes explicit disableReasoning as chat_template_kwargs.enable_thinking: false for the bundled Neuralwatt no-effort model", async () => {
+		// `qwen3.6-35b` reports `reasoning_effort: false`, so there is no
+		// lowest effort to fall back on: Neuralwatt's documented off switch is
+		// the chat-template flag. A `lowest-effort` encoding here would crash
+		// on the empty ladder; silently dropping the caller's off switch would
+		// leave the route thinking.
+		const model = getBundledModel<"openai-completions">("neuralwatt", "qwen3.6-35b");
+
+		const payload = await captureDisableReasoningPayload(model);
+		expect(payload.chat_template_kwargs).toEqual({ enable_thinking: false });
+		expect(payload.enable_thinking).toBeUndefined();
+		expect(payload.reasoning_effort).toBeUndefined();
+		expect(payload.reasoning).toBeUndefined();
+	});
+
 	it("sets Z.AI thinking format and toggles type logically based on forced tool choice", async () => {
 		const model = buildModel({
 			id: "zai-reasoner",

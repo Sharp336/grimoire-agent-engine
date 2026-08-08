@@ -22,11 +22,17 @@ function formatWindowSuffix(label: string, windowLabel: string | undefined): str
 
 function formatUsageAmount(limit: UsageLimit): string {
 	const amount = limit.amount;
-	const used = amount.used ?? (amount.usedFraction !== undefined ? amount.usedFraction * 100 : undefined);
+	const used =
+		amount.used ??
+		(amount.limit !== undefined && amount.remaining !== undefined
+			? amount.limit - amount.remaining
+			: amount.unit === "percent" && amount.usedFraction !== undefined
+				? amount.usedFraction * 100
+				: undefined);
 	const remainingFraction =
 		amount.remainingFraction ??
 		(amount.usedFraction !== undefined ? Math.max(0, 1 - amount.usedFraction) : undefined);
-	const unit = amount.unit === "percent" ? "%" : ` ${amount.unit}`;
+	const unit = amount.unit === "percent" ? "%" : amount.unit === "kwh" ? " kWh" : ` ${amount.unit}`;
 	const usedText = used === undefined ? "unknown used" : `${used.toFixed(2)}${unit} used`;
 	const remainingText = remainingFraction === undefined ? "" : ` (${(remainingFraction * 100).toFixed(1)}% left)`;
 	return `${usedText}${remainingText}`;
@@ -88,7 +94,7 @@ function renderUsageReports(
 		const providerNotes = [...new Set(providerReports.flatMap(report => report.notes ?? []))];
 		for (const note of providerNotes)
 			lines.push(`  ${sanitizeText(note.replace(/[\r\n]+/g, " ").replace(/\t/g, "  "))}`);
-		for (const report of providerReports) {
+		for (const [reportIndex, report] of providerReports.entries()) {
 			const inUse = reportMatchesActiveAccount(report, activeAccount);
 			const savedResets = report.resetCredits?.availableCount ?? 0;
 			if (savedResets > 0) {
@@ -134,7 +140,7 @@ function renderUsageReports(
 						: "";
 				lines.push(`- ${limit.label}${tier}${formatWindowSuffix(limit.label, window)}`);
 				lines.push(
-					`  ${formatUsageReportAccount(report, limit, index)}: ${formatUsageAmount(limit)}${inUse ? "  ← in use by this session" : ""}`,
+					`  ${formatUsageReportAccount(report, limit, reportIndex)}: ${formatUsageAmount(limit)}${inUse ? "  ← in use by this session" : ""}`,
 				);
 				lines.push(`  ${renderAsciiBar(limit.amount.usedFraction)}`);
 				if (limit.window?.resetsAt && limit.window.resetsAt > nowMs) {

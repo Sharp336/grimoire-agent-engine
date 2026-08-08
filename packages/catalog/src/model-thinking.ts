@@ -38,6 +38,7 @@ import type {
 	CompatOf,
 	Model,
 	ModelSpec,
+	OpenAICompat,
 	ResolvedDevinCompat,
 	ResolvedOpenAICompat,
 	ResolvedOpenAIResponsesCompat,
@@ -125,10 +126,10 @@ const MINIMAX_ANTHROPIC_ADAPTIVE_EFFORT_MAP: Readonly<EffortMap> = {
  * model by `buildModel`, after compat resolution.
  *
  * - Non-reasoning models never carry thinking.
- * - Models that reason natively but reject the wire effort param
- *   (`compat.supportsReasoningEffort: false` on openai-responses*) carry no
- *   thinking either: `reasoning: true, thinking: undefined` IS the encoding
- *   for "thinks, but exposes no control surface".
+ * - Models that reason natively but reject the wire effort param carry no
+ *   thinking either (`openai-responses*` compat, or Neuralwatt's live
+ *   `reasoning_effort: false`): `reasoning: true, thinking: undefined` encodes
+ *   "thinks, but exposes no control surface".
  * - Explicit spec thinking (generator-baked or user-authored) owns the
  *   capability surface (`mode`, `efforts`, `defaultLevel`); the wire facts
  *   (`effortMap`, `supportsDisplay`) are backfilled from identity when not
@@ -141,6 +142,11 @@ export function resolveModelThinking<TApi extends Api>(
 ): ThinkingConfig | undefined {
 	if (!spec.reasoning) return undefined;
 	if (omitsWireReasoningEffort(spec.api, compat)) return undefined;
+	// Neuralwatt's live `reasoning_effort: false` capability means the wire
+	// cannot honor any tier. It overrides stale bundled thinking metadata.
+	if (spec.provider === "neuralwatt" && (spec.compat as OpenAICompat | undefined)?.supportsReasoningEffort === false) {
+		return undefined;
+	}
 	if (spec.thinking && Array.isArray(spec.thinking.efforts) && spec.thinking.efforts.length > 0) {
 		return fillThinkingWireDefaults(spec, compat, spec.thinking);
 	}
@@ -166,7 +172,11 @@ function fillThinkingWireDefaults<TApi extends Api>(
 	thinking: ThinkingConfig,
 ): ThinkingConfig {
 	const parsed = parseKnownModel(spec.id);
-	const normalizedEfforts = getModelDefinedEfforts(spec, compat) ?? thinking.efforts;
+	// Neuralwatt's rich discovery metadata is the route's wire truth. Identity
+	// tables describe model families across hosts and may invent unsupported
+	// lower tiers for provider-specific fast/default-off routes.
+	const normalizedEfforts =
+		spec.provider === "neuralwatt" ? thinking.efforts : (getModelDefinedEfforts(spec, compat) ?? thinking.efforts);
 	const effortsChanged = !sameEffortList(normalizedEfforts, thinking.efforts);
 	const effortMap =
 		thinking.effortMap === undefined || effortsChanged
@@ -178,7 +188,8 @@ function fillThinkingWireDefaults<TApi extends Api>(
 		(spec.api === "anthropic-messages" || spec.api === "bedrock-converse-stream") &&
 		supportsAdaptiveThinkingDisplay(spec.id);
 	const needsRequiresEffort = thinking.requiresEffort === undefined && impliesMandatoryReasoning(parsed, spec.id);
-	const needsDefaultLevel = thinking.defaultLevel === undefined && isKimiK3ModelId(spec.id);
+	const needsDefaultLevel =
+		thinking.defaultLevel === undefined && spec.provider !== "neuralwatt" && isKimiK3ModelId(spec.id);
 	if (!effortsChanged && !shouldReplaceEffortMap && !needsDisplay && !needsRequiresEffort && !needsDefaultLevel) {
 		return thinking;
 	}

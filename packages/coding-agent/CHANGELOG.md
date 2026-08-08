@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Neuralwatt energy-quota rendering with correctly capitalized kWh units in `omp usage` and `/usage`.
+
+### Fixed
+
+- Fixed anonymous multi-limit usage reports to keep one fallback account label per report instead of renumbering each limit.
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed

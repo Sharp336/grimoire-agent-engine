@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Api, ModelSpec, Provider } from "@oh-my-pi/pi-catalog/types";
 import {
@@ -183,6 +184,37 @@ describe("generated model policies", () => {
 				defaultLevel: Effort.XHigh,
 			},
 		]);
+	});
+
+	it("preserves Neuralwatt provider-authored effort ladders through generation and runtime build", () => {
+		const models = [
+			createSpec({
+				id: "kimi-k3",
+				api: "openai-completions",
+				provider: "neuralwatt",
+				thinking: {
+					mode: "effort",
+					efforts: [Effort.Low, Effort.High, Effort.Max],
+					defaultLevel: Effort.Max,
+					requiresEffort: false,
+				},
+			}),
+		];
+
+		applyGeneratedModelPolicies(models);
+
+		expect(models[0]?.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.High, Effort.Max],
+			defaultLevel: Effort.Max,
+			requiresEffort: false,
+		});
+		expect(buildModel(models[0]!).thinking).toMatchObject({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.High, Effort.Max],
+			defaultLevel: Effort.Max,
+			requiresEffort: false,
+		});
 	});
 
 	it("pins zai glm-5.2 base id to 1M context", () => {

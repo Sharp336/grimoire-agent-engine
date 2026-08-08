@@ -213,6 +213,7 @@ const UNIT_SUFFIX: Record<UsageUnit, string> = {
 	requests: " requests",
 	minutes: " min",
 	bytes: " bytes",
+	kwh: " kWh",
 	percent: "",
 	usd: "",
 	unknown: "",

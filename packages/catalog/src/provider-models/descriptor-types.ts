@@ -23,6 +23,8 @@ export interface CatalogDiscoveryConfig {
 	oauthProvider?: string;
 	/** When true, catalog discovery proceeds even without credentials. */
 	allowUnauthenticated?: boolean;
+	/** When true, catalog generation never loads or forwards credentials. Implies unauthenticated discovery. */
+	forceUnauthenticated?: boolean;
 }
 
 /** Unified provider descriptor used by both runtime discovery and catalog generation. */
@@ -49,7 +51,10 @@ export function isCatalogDescriptor(d: ProviderDescriptor): d is CatalogProvider
 
 /** Whether catalog discovery may run without provider credentials. */
 export function allowsUnauthenticatedCatalogDiscovery(descriptor: CatalogProviderDescriptor): boolean {
-	return descriptor.catalogDiscovery.allowUnauthenticated ?? descriptor.allowUnauthenticated ?? false;
+	return (
+		descriptor.catalogDiscovery.forceUnauthenticated === true ||
+		(descriptor.catalogDiscovery.allowUnauthenticated ?? descriptor.allowUnauthenticated ?? false)
+	);
 }
 
 /**

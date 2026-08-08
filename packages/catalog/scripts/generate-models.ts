@@ -120,7 +120,9 @@ type CatalogProviderFetchResult = { models: ModelSpec[]; succeeded: boolean };
 async function fetchProviderModelsFromCatalog(
 	descriptor: CatalogProviderDescriptor,
 ): Promise<CatalogProviderFetchResult> {
-	const apiKey = await resolveProviderApiKey(descriptor.providerId, descriptor.catalogDiscovery);
+	const apiKey = descriptor.catalogDiscovery.forceUnauthenticated
+		? undefined
+		: await resolveProviderApiKey(descriptor.providerId, descriptor.catalogDiscovery);
 
 	if (!apiKey && !allowsUnauthenticatedCatalogDiscovery(descriptor)) {
 		console.log(`No ${descriptor.catalogDiscovery.label} credentials found (env or agent.db), using fallback models`);
@@ -208,7 +210,8 @@ function applyGlobalModelsDevFallback(
 		if (
 			providerScopedKeys.has(`${model.provider}/${model.id}`) ||
 			model.provider === "devin" ||
-			model.provider === "baseten"
+			model.provider === "baseten" ||
+			model.provider === "neuralwatt"
 		) {
 			return model;
 		}

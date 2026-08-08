@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a Neuralwatt provider registry entry with interactive API-key login (`/login neuralwatt`), validated against the public `/v1/models` endpoint.
+- Added a Neuralwatt provider registry entry with interactive API-key login (`/login neuralwatt`), validated against the authenticated `/v1/quota` endpoint.
+- Added Neuralwatt subscription energy, PAYG credit balance, subscription-overage capacity, and per-key allowance reporting from the documented `/v1/quota` endpoint.
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed

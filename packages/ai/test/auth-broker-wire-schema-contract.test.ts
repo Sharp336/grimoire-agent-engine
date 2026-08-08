@@ -251,6 +251,23 @@ describe("auth-broker public wire schemas", () => {
 		reject(wireSchemas.snapshotStreamEventSchema, { kind: "unknown" });
 	});
 
+	test("accepts kwh usage amounts", () => {
+		accept(wireSchemas.usageResponseSchema, {
+			generatedAt: 2_000,
+			reports: [
+				{
+					...USAGE_REPORT,
+					limits: [
+						{
+							...USAGE_REPORT.limits[0],
+							amount: { ...USAGE_REPORT.limits[0].amount, unit: "kwh" },
+						},
+					],
+				},
+			],
+		});
+	});
+
 	test("preserves usage extensions while rejecting envelope and enum violations", () => {
 		const response = { generatedAt: 2_000, reports: [USAGE_REPORT] };
 		expect(accept(wireSchemas.usageResponseSchema, response)).toEqual(response);

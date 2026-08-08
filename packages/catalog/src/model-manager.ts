@@ -465,7 +465,7 @@ function retainModelIds<TApi extends Api>(
  * arms calling `resolveProviderModels` with the same `staticModels` array)
  * skip the JSON+hash work after the first call.
  */
-const MODEL_CACHE_FINGERPRINT_VERSION = "merge-v3";
+const MODEL_CACHE_FINGERPRINT_VERSION = "merge-v5";
 const kStaticFingerprint = Symbol("model-manager.staticFingerprint");
 type ModelArrayWithFingerprint = readonly Model<Api>[] & { [kStaticFingerprint]?: string };
 function fingerprintStatic<TApi extends Api>(
@@ -486,27 +486,28 @@ function fingerprintStatic<TApi extends Api>(
 }
 
 function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamicModel: Model<TApi>): Model<TApi> {
-	// When discovery resolves the same model id to a different endpoint (e.g.
-	// a GitHub Copilot business/enterprise host), the bundled reference's
-	// capabilities are pinned to another endpoint and no longer apply. Copilot
-	// dynamic discovery also pre-applies the correct image fallback for omitted
-	// `supports.vision`, so its explicit `false` must not be OR-upgraded by the
-	// canonical bundled model.
+	// A different endpoint invalidates the bundled reference's capability flags.
+	// Copilot and Neuralwatt mappers resolve omitted live capabilities against
+	// their own provider references before this merge, so their mapped fields
+	// are authoritative for matching rows.
 	const endpointChanged = existingModel.baseUrl !== dynamicModel.baseUrl;
+	const neuralwattDiscoveryAuthoritative =
+		existingModel.provider === "neuralwatt" && dynamicModel.provider === "neuralwatt";
 	const dynamicInputAuthoritative =
-		endpointChanged || (existingModel.provider === "github-copilot" && dynamicModel.provider === "github-copilot");
+		endpointChanged ||
+		neuralwattDiscoveryAuthoritative ||
+		(existingModel.provider === "github-copilot" && dynamicModel.provider === "github-copilot");
 	const supportsImage = dynamicInputAuthoritative
 		? dynamicModel.input.includes("image")
 		: existingModel.input.includes("image") || dynamicModel.input.includes("image");
-	// Synthetic's discovery is authoritative (`dynamicModelsAuthoritative`) and
-	// its per-model `reasoning_parameters.efforts` vocabulary is the route's
-	// whole truth: when the wire advertises only the `none` off-state the
-	// mapper emits `reasoning: false`, and OR-ing the bundled reference's
-	// stale `reasoning: true` back would re-arm an effort dial the route
-	// doesn't expose. Other providers keep the OR so a bundled reasoning flag
-	// survives a discovery row that simply omits the capability.
+	// Synthetic's per-model `reasoning_parameters.efforts` vocabulary is the
+	// route's whole truth: when it advertises only the `none` off-state, the
+	// mapper emits `reasoning: false`. Neuralwatt's mapper likewise resolves the
+	// live capability before this merge. Do not OR either provider's stale
+	// bundled `true` back into the resolved model.
 	const dynamicReasoningAuthoritative =
-		existingModel.provider === "synthetic" && dynamicModel.provider === "synthetic";
+		neuralwattDiscoveryAuthoritative ||
+		(existingModel.provider === "synthetic" && dynamicModel.provider === "synthetic");
 	const reasoning = dynamicReasoningAuthoritative
 		? dynamicModel.reasoning
 		: existingModel.reasoning || dynamicModel.reasoning;
@@ -518,14 +519,18 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 		name: preferDiscoveryName(dynamicModel.name, existingModel.name, dynamicModel.id),
 		reasoning,
 		input: supportsImage ? ["text", "image"] : ["text"],
-		cost: {
-			input: preferDiscoveryCost(dynamicModel.cost.input, existingModel.cost.input),
-			output: preferDiscoveryCost(dynamicModel.cost.output, existingModel.cost.output),
-			cacheRead: preferDiscoveryCost(dynamicModel.cost.cacheRead, existingModel.cost.cacheRead),
-			cacheWrite: preferDiscoveryCost(dynamicModel.cost.cacheWrite, existingModel.cost.cacheWrite),
-		},
+		cost: neuralwattDiscoveryAuthoritative
+			? dynamicModel.cost
+			: {
+					input: preferDiscoveryCost(dynamicModel.cost.input, existingModel.cost.input),
+					output: preferDiscoveryCost(dynamicModel.cost.output, existingModel.cost.output),
+					cacheRead: preferDiscoveryCost(dynamicModel.cost.cacheRead, existingModel.cost.cacheRead),
+					cacheWrite: preferDiscoveryCost(dynamicModel.cost.cacheWrite, existingModel.cost.cacheWrite),
+				},
 		contextWindow: preferDiscoveryLimit(dynamicModel.contextWindow, existingModel.contextWindow),
-		maxTokens: preferDiscoveryLimit(dynamicModel.maxTokens, existingModel.maxTokens),
+		maxTokens: neuralwattDiscoveryAuthoritative
+			? dynamicModel.maxTokens
+			: preferDiscoveryLimit(dynamicModel.maxTokens, existingModel.maxTokens),
 		headers: dynamicModel.headers ? { ...existingModel.headers, ...dynamicModel.headers } : existingModel.headers,
 		compat: dynamicModel.compatConfig ?? existingModel.compatConfig,
 		contextPromotionTarget: dynamicModel.contextPromotionTarget ?? existingModel.contextPromotionTarget,

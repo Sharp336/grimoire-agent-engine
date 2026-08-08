@@ -228,7 +228,7 @@ function buildAuthBrokerWireSchemas(): AuthBrokerWireSchemas {
 
 	// ─── Usage ─────────────────────────────────────────────────────────────────
 
-	const usageUnitSchema = type("'percent' | 'tokens' | 'requests' | 'usd' | 'minutes' | 'bytes' | 'unknown'");
+	const usageUnitSchema = type("'percent' | 'tokens' | 'requests' | 'usd' | 'minutes' | 'bytes' | 'kwh' | 'unknown'");
 	const usageStatusSchema = type("'ok' | 'warning' | 'exhausted' | 'unknown'");
 
 	const usageWindowSchema = type({

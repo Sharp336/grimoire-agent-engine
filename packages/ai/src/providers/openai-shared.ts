@@ -879,8 +879,11 @@ export function resolveOpenAICompatPolicy<TApi extends Api>(
 	const disableMode = compat.reasoningDisableMode;
 	let wireEffort =
 		enabled && requestedEffort !== undefined ? mapOpenAIReasoningEffort(model, compat, requestedEffort) : undefined;
+	// No control surface means native provider behavior, not implicit "off".
+	// Explicit caller disable still uses the configured wire switch below.
 	const disabledWithoutRequest =
 		modelSupported &&
+		model.thinking !== undefined &&
 		requestedEffort === undefined &&
 		!options.disableReasoning &&
 		isImplicitDisableWhenNotRequested(disableMode);

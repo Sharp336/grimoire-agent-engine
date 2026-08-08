@@ -252,19 +252,19 @@ describe("ACP builtin slash commands", () => {
 		expect(output).toEqual(["Next turn forced to use read."]);
 	});
 
-	it("renders provider usage reports when the session can fetch them", async () => {
+	it("renders kWh usage reports when the session can fetch them", async () => {
 		const { output, runtime } = createRuntime();
 		runtime.session.fetchUsageReports = async () => [
 			{
-				provider: "openai-codex",
+				provider: "neuralwatt",
 				fetchedAt: Date.now(),
 				limits: [
 					{
-						id: "codex-5h",
-						label: "5 hours",
-						scope: { provider: "openai-codex", tier: "prolite", accountId: "account-1" },
-						window: { id: "5h", label: "5 hours", resetsAt: Date.now() + 60 * 60 * 1000 },
-						amount: { used: 0.24, usedFraction: 0.24, unit: "unknown" },
+						id: "neuralwatt:subscription",
+						label: "Subscription Energy",
+						scope: { provider: "neuralwatt", tier: "pro", accountId: "account-1" },
+						window: { id: "billing", label: "Billing Period", resetsAt: Date.now() + 60 * 60 * 1000 },
+						amount: { limit: 500, remaining: 100, usedFraction: 0.8, remainingFraction: 0.2, unit: "kwh" },
 					},
 				],
 				metadata: { email: "user@example.com" },
@@ -274,10 +274,54 @@ describe("ACP builtin slash commands", () => {
 		const result = await executeAcpBuiltinSlashCommand("/usage", runtime);
 
 		expect(result).toEqual({ consumed: true });
-		expect(output[0]).toContain("Openai Codex");
-		expect(output[0]).toContain("5 hours (prolite)");
-		expect(output[0]).toContain("user@example.com: 0.24 unknown used (76.0% left)");
+		expect(output[0]).toContain("Neuralwatt");
+		expect(output[0]).toContain("Subscription Energy (pro) — Billing Period");
+		expect(output[0]).toContain("user@example.com: 400.00 kWh used (20.0% left)");
 		expect(output[0]).toContain("resets in");
+	});
+
+	it("uses one fallback account label for every limit from an anonymous report", async () => {
+		const { output, runtime } = createRuntime();
+		const reports: UsageReport[] = [
+			{
+				provider: "neuralwatt",
+				fetchedAt: 0,
+				limits: [
+					{
+						id: "neuralwatt:burst",
+						label: "Burst quota",
+						scope: { provider: "neuralwatt" },
+						amount: { used: 12, limit: 100, usedFraction: 0.12, unit: "kwh" },
+					},
+					{
+						id: "neuralwatt:monthly",
+						label: "Monthly quota",
+						scope: { provider: "neuralwatt" },
+						amount: { used: 34, limit: 100, usedFraction: 0.34, unit: "kwh" },
+					},
+				],
+			},
+			{
+				provider: "neuralwatt",
+				fetchedAt: 0,
+				limits: [
+					{
+						id: "neuralwatt:second-credential",
+						label: "Second credential quota",
+						scope: { provider: "neuralwatt" },
+						amount: { used: 56, limit: 100, usedFraction: 0.56, unit: "kwh" },
+					},
+				],
+			},
+		];
+		runtime.session.fetchUsageReports = async () => reports;
+
+		const result = await executeAcpBuiltinSlashCommand("/usage", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(output[0]).toContain("- Burst quota\n  account 1:");
+		expect(output[0]).toContain("- Monthly quota\n  account 1:");
+		expect(output[0]).toContain("- Second credential quota\n  account 2:");
 	});
 
 	it("suppresses redundant usage window suffixes while retaining legitimate ones", async () => {
