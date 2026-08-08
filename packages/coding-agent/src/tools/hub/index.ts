@@ -405,9 +405,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 					? 0
 					: resolvePollWindow(this.session, manager, ownerId).waitMs;
 		const usedSmartWindow =
-			!all &&
-			params.timeoutMs === undefined &&
-			this.session.settings.get("async.pollWaitDuration") === "smart";
+			!all && params.timeoutMs === undefined && this.session.settings.get("async.pollWaitDuration") === "smart";
 
 		const racePromises: Promise<unknown>[] = all
 			? [Promise.all(runningJobs.map(j => j.promise))]
