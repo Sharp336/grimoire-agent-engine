@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a thinking-effort picker to the session-only model switch (alt+p / `/switch`): after choosing a reasoning model, a follow-up selector offers `off`, `auto`, and the model's supported effort levels before the switch applies. Esc keeps the previous behavior (the role-configured or model-default level). Non-reasoning models switch immediately as before.
+
 ## [17.2.11] - 2026-08-07
 
 ### Added

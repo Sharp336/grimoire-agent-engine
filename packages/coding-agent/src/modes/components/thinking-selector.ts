@@ -1,7 +1,6 @@
-import type { Effort } from "@oh-my-pi/pi-ai";
 import { Container, type SelectItem, SelectList, type SgrMouseEvent } from "@oh-my-pi/pi-tui";
 import { getSelectListTheme } from "../../modes/theme/theme";
-import { getThinkingLevelMetadata } from "../../thinking";
+import { type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../../thinking";
 import { DynamicBorder } from "./dynamic-border";
 import { routeSelectListMouseWithTopBorder } from "./select-list-mouse-routing";
 
@@ -12,14 +11,14 @@ export class ThinkingSelectorComponent extends Container {
 	#selectList: SelectList;
 
 	constructor(
-		currentLevel: Effort,
-		availableLevels: Effort[],
-		onSelect: (level: Effort) => void,
+		currentLevel: ConfiguredThinkingLevel | undefined,
+		availableLevels: ConfiguredThinkingLevel[],
+		onSelect: (level: ConfiguredThinkingLevel) => void,
 		onCancel: () => void,
 	) {
 		super();
 
-		const thinkingLevels: SelectItem[] = availableLevels.map(getThinkingLevelMetadata);
+		const thinkingLevels: SelectItem[] = availableLevels.map(getConfiguredThinkingLevelMetadata);
 
 		// Add top border
 		this.addChild(new DynamicBorder());
@@ -28,13 +27,14 @@ export class ThinkingSelectorComponent extends Container {
 		this.#selectList = new SelectList(thinkingLevels, thinkingLevels.length, getSelectListTheme());
 
 		// Preselect current level
-		const currentIndex = thinkingLevels.findIndex(item => item.value === currentLevel);
+		const currentIndex =
+			currentLevel === undefined ? -1 : thinkingLevels.findIndex(item => item.value === currentLevel);
 		if (currentIndex !== -1) {
 			this.#selectList.setSelectedIndex(currentIndex);
 		}
 
 		this.#selectList.onSelect = item => {
-			onSelect(item.value as Effort);
+			onSelect(item.value as ConfiguredThinkingLevel);
 		};
 
 		this.#selectList.onCancel = () => {

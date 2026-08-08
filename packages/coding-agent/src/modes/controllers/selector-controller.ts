@@ -1,8 +1,9 @@
 import { type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
-import { PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
+import { type Model, PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
+import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
 import { Loader, Spacer, setTuiTight, Text } from "@oh-my-pi/pi-tui";
 import { getAgentDbPath, getAgentDir, getProjectDir, normalizePathForComparison } from "@oh-my-pi/pi-utils";
@@ -99,6 +100,7 @@ import { SessionAccountSelectorComponent } from "../components/session-account-s
 import { SessionSelectorComponent, type SessionSelectorOptions } from "../components/session-selector";
 import { SettingsSelectorComponent } from "../components/settings-selector";
 import { StrippedToolCallsPlaceholder } from "../components/stripped-tool-calls-placeholder";
+import { ThinkingSelectorComponent } from "../components/thinking-selector";
 import { ToolExecutionComponent } from "../components/tool-execution";
 import { TranscriptBlock } from "../components/transcript-container";
 import { TreeSelectorComponent } from "../components/tree-selector";
@@ -728,9 +730,8 @@ export class SelectorController {
 			{
 				onPick: async (model, selector, { overContext }) => {
 					// Session-only: update agent state but don't persist the model to settings.
-					const applySessionModel = async () => {
-						const roleThinkingLevel = this.ctx.session.resolveTemporaryModelThinkingLevel(model);
-						await this.ctx.session.setModelTemporary(model, roleThinkingLevel);
+					const applySessionModel = async (thinkingLevel: ConfiguredThinkingLevel | undefined) => {
+						await this.ctx.session.setModelTemporary(model, thinkingLevel);
 						this.ctx.statusLine.invalidate();
 						this.ctx.updateEditorBorderColor();
 						const roleSelectorHint = this.ctx.keybindings.getKeys("app.model.select")[0] ?? "Alt+M";
@@ -747,18 +748,20 @@ export class SelectorController {
 							// compaction keeps the current model — the target still cannot
 							// fit the transcript.
 							done();
+							const thinkingLevel = await this.#pickSessionThinkingLevel(model);
 							let switched = false;
 							const switchAfterCompaction = async (outcome: CompactionOutcome) => {
 								if (switched || outcome !== "ok") return;
 								switched = true;
-								await applySessionModel();
+								await applySessionModel(thinkingLevel);
 							};
 							const outcome = await this.ctx.handleCompactCommand(undefined, undefined, switchAfterCompaction);
 							await switchAfterCompaction(outcome);
 							return;
 						}
-						await applySessionModel();
 						done();
+						const thinkingLevel = await this.#pickSessionThinkingLevel(model);
+						await applySessionModel(thinkingLevel);
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					}
@@ -797,6 +800,38 @@ export class SelectorController {
 		});
 		this.ctx.ui.setFocus(picker);
 		this.ctx.ui.requestRender();
+	}
+
+	/**
+	 * Effort picker shown after a session-only model pick (alt+p / `/switch`).
+	 * Resolves with the chosen thinking level for the target model. A
+	 * non-reasoning model skips the picker; Esc keeps the previous behavior by
+	 * resolving with the role-configured level for the model (or the model's
+	 * default when none is configured).
+	 */
+	#pickSessionThinkingLevel(model: Model): Promise<ConfiguredThinkingLevel | undefined> {
+		const fallback = this.ctx.session.resolveTemporaryModelThinkingLevel(model);
+		const efforts = getSupportedEfforts(model);
+		if (!model.reasoning || efforts.length === 0) return Promise.resolve(fallback);
+		const levels: ConfiguredThinkingLevel[] = [ThinkingLevel.Off, AUTO_THINKING, ...efforts];
+		const current = fallback ?? model.thinking?.defaultLevel;
+		const { promise, resolve } = Promise.withResolvers<ConfiguredThinkingLevel | undefined>();
+		this.showSelector(closeSelector => {
+			const selector = new ThinkingSelectorComponent(
+				current,
+				levels,
+				level => {
+					closeSelector();
+					resolve(level);
+				},
+				() => {
+					closeSelector();
+					resolve(fallback);
+				},
+			);
+			return { component: selector, focus: selector.getSelectList() };
+		});
+		return promise;
 	}
 
 	/**
