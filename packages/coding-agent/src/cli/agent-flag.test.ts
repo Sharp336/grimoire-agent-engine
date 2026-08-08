@@ -344,6 +344,58 @@ describe("buildSessionOptions --agent", () => {
 
 		expect(options.model).toBe(cliModel);
 	});
+
+	test("--agent with deferred --model suffix preserves CLI thinking over persona default", async () => {
+		// A deferred --model selector (e.g. a role like `slow:low` whose model
+		// only resolves after extensions register) sets options.modelPattern and
+		// must also carry the inline `:low` thinking suffix through deferral, so
+		// a persona's thinkingLevel frontmatter cannot clobber the user's
+		// explicit CLI thinking choice.
+		const mockAgent = {
+			name: "test-agent",
+			description: "A test agent",
+			systemPrompt: "",
+			tools: ["read"],
+			model: ["@slow"],
+			thinkingLevel: HIGH,
+			source: "project" as const,
+		};
+
+		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
+			agents: [mockAgent],
+			projectAgentsDir: null,
+		});
+		vi.spyOn(discovery, "getAgent").mockImplementation((agents, name) => agents.find(a => a.name === name));
+		vi.spyOn(systemPrompt, "resolvePromptInput").mockResolvedValue(undefined);
+		// Deferred resolution: model not found in the built-in registry, but a
+		// configured pattern (role) exists — extensions may register it later.
+		vi.spyOn(modelResolver, "resolveCliModel").mockReturnValue({
+			model: undefined,
+			configuredPatterns: ["@slow"],
+			configuredPatternIndex: 0,
+			warning: undefined,
+			error: 'Model "slow:low" not found. Run "omp models" to see available models.',
+		});
+		vi.spyOn(modelResolver, "getModelMatchPreferences").mockReturnValue({
+			usageOrder: [],
+			providerOrder: [],
+			deprioritizeProviders: [],
+		});
+
+		const options = await buildSessionOptions(
+			{ agent: "test-agent", model: "slow:low" } as any,
+			[],
+			undefined,
+			makeModelRegistry(),
+			makeSettings(),
+		);
+
+		expect(options.modelPattern).toBe("slow:low");
+		// The inline `:low` suffix must win over the persona's HIGH default and
+		// be locked against a later persona switch.
+		expect(options.thinkingLevel).toBe(LOW);
+		expect(options.cliThinkingLocked).toBe(true);
+	});
 });
 
 describe("buildSessionOptions resume agent persona", () => {

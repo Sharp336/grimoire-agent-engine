@@ -34,6 +34,7 @@ import { ModelRegistry } from "./config/model-registry";
 import {
 	DEFAULT_PREWALK_TARGET,
 	expandRoleAlias,
+	extractExplicitThinkingSelector,
 	getModelMatchPreferences,
 	resolveCliModel,
 	resolveModelOverride,
@@ -1040,11 +1041,30 @@ export async function buildSessionOptions(
 		if (matchedAfterMissingRolePattern) {
 			// Extensions may register an earlier configured role candidate.
 			options.modelPattern = parsed.model;
+			// Preserve an inline `:<level>` suffix through deferral so the
+			// explicit CLI thinking choice is not clobbered by persona default
+			// thinking (createAgentSession prefers options.thinkingLevel over a
+			// persona's frontmatter level).
+			if (!parsed.thinking) {
+				const inlineThinking = extractExplicitThinkingSelector(parsed.model, activeSettings);
+				if (inlineThinking) {
+					options.thinkingLevel = inlineThinking;
+					options.cliThinkingLocked = true;
+				}
+			}
 		} else if (resolved.error) {
 			if (!parsed.provider && ((resolved.configuredPatterns?.length ?? 0) > 0 || !parsed.model.includes(":"))) {
 				// Model not found in built-in registry — defer resolution to after extensions load
 				// (extensions may register additional providers/models via registerProvider)
 				options.modelPattern = parsed.model;
+				// Preserve an inline `:<level>` suffix through deferral (see above).
+				if (!parsed.thinking) {
+					const inlineThinking = extractExplicitThinkingSelector(parsed.model, activeSettings);
+					if (inlineThinking) {
+						options.thinkingLevel = inlineThinking;
+						options.cliThinkingLocked = true;
+					}
+				}
 			} else {
 				process.stderr.write(`${chalk.red(resolved.error)}\n`);
 				process.exit(1);
