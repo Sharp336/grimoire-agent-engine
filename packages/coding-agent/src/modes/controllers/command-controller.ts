@@ -1496,6 +1496,11 @@ function formatNumber(value: number, maxFractionDigits = 1): string {
 	return new Intl.NumberFormat("en-US", { maximumFractionDigits: maxFractionDigits }).format(value);
 }
 
+function formatAbsoluteUsageAmount(value: number, unit: UsageLimit["amount"]["unit"]): string {
+	if (unit === "usd") return `$${value.toFixed(2)}`;
+	return `${formatNumber(value, 2)} ${unit === "kwh" ? "kWh" : unit}`;
+}
+
 function resolveProviderAuthMode(authStorage: AuthStorage, provider: string): string {
 	if (authStorage.hasOAuth(provider)) {
 		return "oauth";
@@ -1786,10 +1791,7 @@ function resolveStatusColor(status: UsageLimit["status"]): "success" | "warning"
 function renderUsageBar(limit: UsageLimit, uiTheme: typeof theme, barWidth: number): string {
 	const usedAmount = limit.amount.used;
 	if (usedAmount !== undefined && isUsedOnlyAbsoluteAmount(limit)) {
-		const used =
-			limit.amount.unit === "usd"
-				? `$${usedAmount.toFixed(2)}`
-				: `${formatNumber(usedAmount, 2)} ${limit.amount.unit}`;
+		const used = formatAbsoluteUsageAmount(usedAmount, limit.amount.unit);
 		return uiTheme.fg("dim", truncateJobLabel(`${used} used`, barWidth));
 	}
 	const fraction = resolveUsedFraction(limit);

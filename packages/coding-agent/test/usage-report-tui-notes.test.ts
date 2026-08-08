@@ -139,6 +139,32 @@ describe("renderUsageReports (#3268 TUI aggregate)", () => {
 		expect(text).not.toContain("1 accts");
 	});
 
+	it("renders resetless used-only kWh amounts canonically without warning or exhausted badges", () => {
+		const now = 1_700_000_000_000;
+		const reports: UsageReport[] = [
+			{
+				provider: "anthropic",
+				fetchedAt: now,
+				limits: [
+					{
+						id: "anthropic:energy",
+						label: "Energy Usage",
+						scope: { provider: "anthropic", windowId: "energy" },
+						amount: { used: 0.24, unit: "kwh" },
+					},
+				],
+			},
+		];
+
+		const text = stripVTControlCharacters(renderUsageReports(reports, theme, now, 120));
+
+		expect(text).toContain(theme.status.info);
+		expect(text).not.toContain(theme.status.warning);
+		expect(text).not.toContain(theme.status.error);
+		expect(text).toContain("0.24 kWh used");
+		expect(text).not.toContain("0.24 kwh used");
+	});
+
 	it("preserves capped aggregate status when a group mixes capped and used-only amounts", () => {
 		const reports: UsageReport[] = [
 			report("anthropic", "capped@example.test", [

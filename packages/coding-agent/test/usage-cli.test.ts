@@ -255,6 +255,20 @@ describe("formatUsageBreakdown", () => {
 		expect(text).not.toContain("%");
 		expect(text).not.toContain("resets");
 	});
+	it("renders kWh energy limits with standard capitalization", () => {
+		const report = makeReport("neuralwatt", "energy@example.test", [
+			{
+				id: "neuralwatt:subscription",
+				label: "Energy",
+				scope: { provider: "neuralwatt", windowId: "billing" },
+				amount: { used: 120.5, limit: 500, unit: "kwh" },
+			},
+		]);
+
+		const text = stripVTControlCharacters(formatUsageBreakdown([report], [], Date.now()));
+
+		expect(text).toContain("kWh");
+	});
 	it("renders every account: reported ones with limits, credential-only ones as no-data rows", () => {
 		const text = stripVTControlCharacters(formatUsageBreakdown(reports, accounts, Date.now()));
 		expect(text).toContain("dummy.primary@example.test");
