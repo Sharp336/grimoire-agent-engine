@@ -577,6 +577,25 @@ describe("CombinedAutocompleteProvider", () => {
 			expect(values.some(value => value === "@.git" || value.startsWith("@.git/"))).toBe(false);
 		});
 
+		it("includes git-ignored hidden paths when opted in", async () => {
+			fs.mkdirSync(path.join(baseDir, ".private"), { recursive: true });
+			fs.writeFileSync(path.join(baseDir, ".gitignore"), ".private/\n");
+			fs.writeFileSync(path.join(baseDir, ".private", "token.txt"), "secret");
+			const line = "@token";
+
+			const defaultResult = await new CombinedAutocompleteProvider([], baseDir).getSuggestions(
+				[line],
+				0,
+				line.length,
+			);
+			const includedResult = await new CombinedAutocompleteProvider([], baseDir, {
+				fuzzyFind: { gitignore: false },
+			}).getSuggestions([line], 0, line.length);
+
+			expect(defaultResult?.items.map(item => item.value) ?? []).not.toContain("@.private/token.txt");
+			expect(includedResult?.items.map(item => item.value) ?? []).toContain("@.private/token.txt");
+		});
+
 		it("returns more than 20 fuzzy matches when the project contains them", async () => {
 			// Regression: previously hard-capped at 20 by `slice(0, 20)`.
 			const total = 30;

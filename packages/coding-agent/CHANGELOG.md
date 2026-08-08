@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `autocomplete.includeIgnoredFiles` to include git-ignored files in `@` file autocomplete.
+
 ## [17.2.11] - 2026-08-07
 
 ### Added

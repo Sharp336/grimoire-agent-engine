@@ -1,29 +1,28 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { fuzzyFind } from "@oh-my-pi/pi-natives";
+import { type FuzzyFindOptions, fuzzyFind } from "@oh-my-pi/pi-natives";
 import { getProjectDir } from "@oh-my-pi/pi-utils";
 
 const PATH_DELIMITERS = new Set([" ", "\t", '"', "'", "="]);
 
+export type AutocompleteFuzzyFindOptions = Partial<
+	Pick<FuzzyFindOptions, "maxResults" | "hidden" | "gitignore" | "cache" | "timeoutMs">
+>;
+
 function buildAutocompleteFuzzyDiscoveryProfile(
 	query: string,
 	basePath: string,
-): {
-	query: string;
-	path: string;
-	maxResults: number;
-	hidden: boolean;
-	gitignore: boolean;
-	cache: boolean;
-} {
+	overrides: AutocompleteFuzzyFindOptions = {},
+): FuzzyFindOptions {
 	return {
-		query,
-		path: basePath,
 		maxResults: 100,
 		hidden: true,
 		gitignore: true,
 		cache: true,
+		...overrides,
+		query,
+		path: basePath,
 	};
 }
 
@@ -397,19 +396,29 @@ function buildMidPromptSkillCompletions(commands: CommandEntry[], lowerPrefix: s
 	);
 }
 
+export interface CombinedAutocompleteProviderOptions {
+	fuzzyFind?: AutocompleteFuzzyFindOptions;
+}
+
 // Combined provider that handles both slash commands and file paths.
 export class CombinedAutocompleteProvider implements AutocompleteProvider {
 	#commands: CommandEntry[];
 	#basePath: string;
+	#fuzzyFindOptions: AutocompleteFuzzyFindOptions;
 	// Intentionally separate from pi-natives cache: this cache is a local,
 	// per-directory readdir fast-path for prefix completions. Global fuzzy
 	// discovery continues to use native fuzzyFind + shared scan cache.
 	#dirCache: Map<string, { entries: fs.Dirent[]; timestamp: number }> = new Map();
 	readonly #DIR_CACHE_TTL = 2000; // 2 seconds
 
-	constructor(commands: CommandEntry[] = [], basePath: string = getProjectDir()) {
+	constructor(
+		commands: CommandEntry[] = [],
+		basePath: string = getProjectDir(),
+		options: CombinedAutocompleteProviderOptions = {},
+	) {
 		this.#commands = commands;
 		this.#basePath = basePath;
+		this.#fuzzyFindOptions = options.fuzzyFind ?? {};
 	}
 
 	async getSuggestions(
@@ -956,7 +965,9 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			const scopedQuery = await this.#resolveScopedFuzzyQuery(query);
 			const searchPath = scopedQuery?.baseDir ?? this.#basePath;
 			const fuzzyQuery = scopedQuery?.query ?? query;
-			const result = await fuzzyFind(buildAutocompleteFuzzyDiscoveryProfile(fuzzyQuery, searchPath));
+			const result = await fuzzyFind(
+				buildAutocompleteFuzzyDiscoveryProfile(fuzzyQuery, searchPath, this.#fuzzyFindOptions),
+			);
 			const lowerQuery = fuzzyQuery.toLowerCase();
 			const filteredMatches = result.matches.filter(entry => {
 				const p = entry.path.endsWith("/") ? entry.path.slice(0, -1) : entry.path;

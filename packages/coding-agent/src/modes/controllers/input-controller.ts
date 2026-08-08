@@ -1797,6 +1797,7 @@ export class InputController {
 		return createPromptActionAutocompleteProvider({
 			commands,
 			basePath,
+			includeIgnoredFiles: this.ctx.settings.get("autocomplete.includeIgnoredFiles"),
 			keybindings: this.ctx.keybindings,
 			copyCurrentLine: () => this.handleCopyCurrentLine(),
 			copyPrompt: () => this.handleCopyPrompt(),

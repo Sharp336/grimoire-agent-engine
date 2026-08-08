@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added configurable fuzzy-discovery options to `CombinedAutocompleteProvider`, including support for git-ignored files.
+
 ## [17.2.11] - 2026-08-07
 
 ### Fixed

@@ -32,6 +32,7 @@ interface PromptActionAutocompleteItem extends AutocompleteItem {
 interface PromptActionAutocompleteOptions {
 	commands: SlashCommand[];
 	basePath: string;
+	includeIgnoredFiles?: boolean;
 	keybindings: KeybindingsManager;
 	copyCurrentLine: () => void;
 	copyPrompt: () => void;
@@ -131,9 +132,16 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 	#actions: PromptActionDefinition[];
 	#basePath: string;
 
-	constructor(commands: SlashCommand[], basePath: string, actions: PromptActionDefinition[]) {
+	constructor(
+		commands: SlashCommand[],
+		basePath: string,
+		actions: PromptActionDefinition[],
+		includeIgnoredFiles: boolean = false,
+	) {
 		this.#commands = commands;
-		this.#baseProvider = new CombinedAutocompleteProvider(commands, basePath);
+		this.#baseProvider = new CombinedAutocompleteProvider(commands, basePath, {
+			fuzzyFind: { gitignore: !includeIgnoredFiles },
+		});
 		this.#basePath = basePath;
 		this.#actions = actions;
 	}
@@ -318,5 +326,10 @@ export function createPromptActionAutocompleteProvider(
 		},
 	];
 
-	return new PromptActionAutocompleteProvider(options.commands, options.basePath, actions);
+	return new PromptActionAutocompleteProvider(
+		options.commands,
+		options.basePath,
+		actions,
+		options.includeIgnoredFiles,
+	);
 }

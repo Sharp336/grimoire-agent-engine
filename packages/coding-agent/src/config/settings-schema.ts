@@ -1747,6 +1747,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"autocomplete.includeIgnoredFiles": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Include Git-Ignored Files",
+			description: "Include files excluded by .gitignore in @ file autocomplete",
+		},
+	},
+
 	emojiAutocomplete: {
 		type: "boolean",
 		default: true,
