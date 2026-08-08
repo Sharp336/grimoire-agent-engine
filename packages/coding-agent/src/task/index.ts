@@ -624,6 +624,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	readonly mergeCallAndResult = true;
 	readonly #discoveredAgents: AgentDefinition[];
 	readonly #blockedAgent: string | undefined;
+	#refreshPending: Promise<void> | undefined;
 	/**
 	 * One semaphore per TaskTool instance (i.e. per session): bounds concurrent
 	 * subagents across parallel `task` calls within the session. Resized in
@@ -655,12 +656,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
 		const isolationMode = this.session.settings.get("task.isolation.mode");
 		return renderDescription({
-			agents:
-				getDiscoveredAgentsSnapshot(
-					this.session.cwd,
-					this.session.getExtensionDiscoveryMode?.(),
-					this.session.extensionRoots,
-				) ?? this.#discoveredAgents,
+			agents: this.#readAgentsForPrompt(),
 			isolationEnabled: !planMode && isolationMode !== "none",
 			applyIsolatedChanges: this.session.settings.get("task.isolation.apply"),
 			disabledAgents,
@@ -679,6 +675,32 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		this.#discoveredAgents = discoveredAgents;
 	}
 
+	/**
+	 * The current agent definitions for prompt surfaces (description, scout
+	 * availability): the published snapshot for this session's (cwd, mode,
+	 * roots), or the constructor-time capture while the snapshot is absent. On
+	 * a miss (a reload cleared it for another session's tuple) kick an async
+	 * rediscovery so the NEXT render reads the fresh definitions instead of
+	 * stale startup ones (codex 3741858155); the current render keeps the
+	 * capture as the best synchronous answer.
+	 */
+	#readAgentsForPrompt(): AgentDefinition[] {
+		const mode = this.session.getExtensionDiscoveryMode?.();
+		const snapshot = getDiscoveredAgentsSnapshot(this.session.cwd, mode, this.session.extensionRoots);
+		if (snapshot !== undefined) return snapshot;
+		if (!this.#refreshPending) {
+			this.#refreshPending = discoverAgentsForCreate(this.session.cwd, mode, this.session.extensionRoots).then(
+				() => {
+					this.#refreshPending = undefined;
+				},
+				() => {
+					this.#refreshPending = undefined;
+				},
+			);
+		}
+		return this.#discoveredAgents;
+	}
+
 	#isBatchEnabled(): boolean {
 		return this.session.settings.get("task.batch");
 	}
@@ -686,11 +708,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	#isScoutAvailable(): boolean {
 		const disabledAgents = this.session.settings.get("task.disabledAgents") as string[] | undefined;
 		return isSpawnableScoutInAgents(
-			getDiscoveredAgentsSnapshot(
-				this.session.cwd,
-				this.session.getExtensionDiscoveryMode?.(),
-				this.session.extensionRoots,
-			) ?? this.#discoveredAgents,
+			this.#readAgentsForPrompt(),
 			disabledAgents,
 			this.session.getSessionSpawns?.() ?? "*",
 		);
