@@ -228,6 +228,11 @@ export const isOpenAIModelId = memo((modelId: string): boolean => {
 	);
 });
 
+/** OpenAI Codex ids, including versionless aliases such as `codex-mini` and `codex-mini-latest`. */
+export const isOpenAICodexModelId = memo((modelId: string): boolean => {
+	return /(^|[-._])codex(?:[-.:_]|$)/i.test(bareModelId(modelId));
+});
+
 /** OpenAI models at or above the gpt-5.4 wire generation, keyed off the parsed version. */
 const isOpenAIWireGen54Plus = memo((modelId: string): boolean => {
 	const parsed = parseOpenAIModel(bareModelId(modelId));

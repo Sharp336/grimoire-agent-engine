@@ -34,6 +34,19 @@ const legacyAzureCodexModel: Model<"azure-openai-responses"> = buildModel({
 	maxTokens: 128_000,
 });
 
+const versionlessAzureCodexModel: Model<"azure-openai-responses"> = buildModel({
+	id: "codex-mini",
+	name: "Codex Mini",
+	api: "azure-openai-responses",
+	provider: "azure",
+	baseUrl: azureModel.baseUrl,
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 200_000,
+	maxTokens: 100_000,
+});
+
 function createAbortedSignal(): AbortSignal {
 	const controller = new AbortController();
 	controller.abort();
@@ -55,8 +68,9 @@ function createSseResponse(events: unknown[]): Response {
 	});
 }
 
-async function captureLegacyAzureCodexPayload(
+async function captureAzureCodexPayload(
 	options: Pick<SimpleStreamOptions, "reasoning" | "reasoningSummary">,
+	model = legacyAzureCodexModel,
 ): Promise<Record<string, unknown>> {
 	let capturedBody: Record<string, unknown> | undefined;
 	const fetchMock: FetchImpl = async (_input, init) => {
@@ -73,7 +87,7 @@ async function captureLegacyAzureCodexPayload(
 	};
 
 	await streamSimple(
-		legacyAzureCodexModel,
+		model,
 		{ messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }] },
 		{ apiKey: "test-key", fetch: fetchMock, ...options },
 	).result();
@@ -137,7 +151,7 @@ describe("azure openai responses streaming", () => {
 	});
 
 	it("omits explicitly requested summaries for legacy Azure Codex models", async () => {
-		const payload = await captureLegacyAzureCodexPayload({
+		const payload = await captureAzureCodexPayload({
 			reasoning: Effort.High,
 			reasoningSummary: "detailed",
 		});
@@ -146,15 +160,24 @@ describe("azure openai responses streaming", () => {
 	});
 
 	it("omits the summary field for an unconfigured legacy Azure Codex reasoning request", async () => {
-		const payload = await captureLegacyAzureCodexPayload({ reasoning: Effort.High });
+		const payload = await captureAzureCodexPayload({ reasoning: Effort.High });
 
 		expect(payload.reasoning).toEqual({ effort: "high" });
 	});
 
 	it("does not synthesize reasoning effort when only an unsupported summary is requested", async () => {
-		const payload = await captureLegacyAzureCodexPayload({ reasoningSummary: "detailed" });
+		const payload = await captureAzureCodexPayload({ reasoningSummary: "detailed" });
 
 		expect(payload.reasoning).toBeUndefined();
+	});
+
+	it("omits explicitly requested summaries for versionless Azure Codex models", async () => {
+		const payload = await captureAzureCodexPayload(
+			{ reasoning: Effort.High, reasoningSummary: "detailed" },
+			versionlessAzureCodexModel,
+		);
+
+		expect(payload.reasoning).toEqual({ effort: "high" });
 	});
 
 	it("sends an async onPayload replacement body", async () => {

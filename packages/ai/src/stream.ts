@@ -6,7 +6,7 @@ import { scheduler } from "node:timers/promises";
 import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { isVertexExpressOpenAIUrl, isVertexRawPredictUrl, resolveVertexEndpointHost } from "@oh-my-pi/pi-catalog/hosts";
-import { parseOpenAIModel, supportsCodexReasoningSummary } from "@oh-my-pi/pi-catalog/identity";
+import { isOpenAICodexModelId, supportsCodexReasoningSummary } from "@oh-my-pi/pi-catalog/identity";
 import {
 	defaultSupportedEffort,
 	mapEffortToAnthropicAdaptiveEffort,
@@ -1878,9 +1878,8 @@ function resolveOpenAiReasoningSummary<TApi extends Api>(
 			(model.api === "azure-openai-responses" && model.provider === "azure");
 		return suppressImplicitSummary ? null : undefined;
 	}
-	const parsed = parseOpenAIModel(model.id);
-	const isCodexVariant = parsed?.variant.startsWith("codex") === true;
-	return isCodexVariant && !supportsCodexReasoningSummary(model.id)
+	const isCodexModel = isOpenAICodexModelId(model.id);
+	return isCodexModel && !supportsCodexReasoningSummary(model.id)
 		? options?.reasoning === undefined
 			? undefined
 			: null
