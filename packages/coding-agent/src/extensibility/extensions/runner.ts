@@ -21,6 +21,7 @@ import type { SessionManager } from "../../session/session-manager";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
+import { getActiveSkills } from "../skills";
 import type {
 	AfterProviderResponseEvent,
 	AssistantThinkingRenderer,
@@ -662,7 +663,19 @@ export class ExtensionRunner {
 		const tools: RegisteredTool[] = [];
 		for (const ext of this.extensions) {
 			for (const tool of ext.tools.values()) {
-				tools.push(tool);
+				// Mirror pi's top-level `sourceInfo` (pi-fabric's
+				// registered-tool capture reads `tool.sourceInfo.path` and
+				// filters by it). Pi-fabric only consumes `path`; the other
+				// fields are best-effort provenance.
+				tools.push({
+					...tool,
+					sourceInfo: {
+						path: tool.extensionPath,
+						source: "extension",
+						scope: "user",
+						origin: "package",
+					},
+				});
 			}
 		}
 		return tools;
@@ -842,6 +855,7 @@ export class ExtensionRunner {
 			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),
 			getAsyncJobSnapshot: () => this.#getAsyncJobSnapshotFn(),
 			hasUI: this.hasUI(),
+			isProjectTrusted: () => true,
 			cwd: this.cwd,
 			sessionManager: this.sessionManager,
 			modelRegistry: this.modelRegistry,
@@ -1361,6 +1375,7 @@ export class ExtensionRunner {
 					prompt,
 					images,
 					systemPrompt: currentSystemPrompt,
+					systemPromptOptions: { skills: getActiveSkills() },
 				};
 				const handlerResult = await this.#runHandlerWithTimeout(
 					handler,

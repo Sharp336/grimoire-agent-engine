@@ -423,6 +423,12 @@ export interface ExtensionContext {
 	compact(instructionsOrOptions?: string | CompactOptions): Promise<void>;
 	/** Whether UI is available (false in print/RPC mode) */
 	hasUI: boolean;
+	/**
+	 * Pi-compatible project trust check (pi >= 0.80.6 extension context).
+	 * OMP has no project-trust gate — approvals are governed by OMP's own
+	 * approval system — so this always reports the project as trusted.
+	 */
+	isProjectTrusted(): boolean;
 	/** Current working directory */
 	cwd: string;
 	/** Session manager (read-only) */
@@ -687,6 +693,15 @@ export interface BeforeAgentStartEvent {
 	prompt: string;
 	images?: ImageContent[];
 	systemPrompt: string[];
+	/**
+	 * Pi-compatible prompt options. Upstream pi's event carries
+	 * `systemPromptOptions.skills` and pi-fabric's `before_agent_start`
+	 * handler reads it unconditionally; OMP keeps skills out of the event, so
+	 * this mirrors the active skill snapshot with pi's `Skill` shape.
+	 */
+	systemPromptOptions: {
+		skills: readonly { name: string; description: string; filePath: string }[];
+	};
 }
 
 export type {
@@ -1457,6 +1472,13 @@ export type ExtensionFactory = (pi: ExtensionAPI) => void | Promise<void>;
 export interface RegisteredTool<TParams extends TSchema = TSchema, TDetails = unknown> {
 	definition: ToolDefinition<TParams, TDetails>;
 	extensionPath: string;
+	/**
+	 * Pi-compatible provenance mirror. Upstream pi exposes `sourceInfo` at the
+	 * top level of a registered tool and pi-fabric's registered-tool capture
+	 * reads `tool.sourceInfo.path`; OMP keeps it on the definition. Populated
+	 * by {@link ExtensionRunner.getAllRegisteredTools}.
+	 */
+	sourceInfo?: SourceInfo;
 }
 
 export interface ExtensionFlag {

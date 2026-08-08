@@ -1,0 +1,14 @@
+{
+  "format": 1,
+  "entries": {},
+  "versions": {
+    "topology/hosts/93c443eadb3d02687e7b527ddc35306456a845ffab1516d0fe65430e1459e9d4": 7,
+    "sessions/019fe05f-c0a6-7000-8c44-f0c73b270cb3": 6,
+    "topology/participants/93c443eadb3d02687e7b527ddc35306456a845ffab1516d0fe65430e1459e9d4": 7
+  },
+  "tombstoneOrder": [
+    "sessions/019fe05f-c0a6-7000-8c44-f0c73b270cb3",
+    "topology/participants/93c443eadb3d02687e7b527ddc35306456a845ffab1516d0fe65430e1459e9d4",
+    "topology/hosts/93c443eadb3d02687e7b527ddc35306456a845ffab1516d0fe65430e1459e9d4"
+  ]
+}

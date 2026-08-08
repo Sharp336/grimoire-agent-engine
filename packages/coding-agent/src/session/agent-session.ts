@@ -5393,6 +5393,7 @@ export class AgentSession {
 		return {
 			ui: noOpUIContext,
 			hasUI: false,
+			isProjectTrusted: () => true,
 			cwd: this.sessionManager.getCwd(),
 			sessionManager: this.sessionManager,
 			modelRegistry: this.#modelRegistry,
