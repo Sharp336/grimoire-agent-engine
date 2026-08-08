@@ -91,6 +91,7 @@ rust_test(
     crate = ":pi-shell",
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    tags = ["no-sandbox"],
     deps = all_crate_deps(normal_dev = True),
 )
 
