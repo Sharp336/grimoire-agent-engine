@@ -5834,10 +5834,16 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CORE: readonly ModelsDevProviderDescriptor
 		},
 	}),
 	// --- Volcengine Ark (pay-as-you-go) ---
-	simpleModelsDevDescriptor("volcengine", "volcengine", "openai-responses", "https://ark.cn-beijing.volces.com/api/v3", {
-		defaultContextWindow: 256000,
-		defaultMaxTokens: 32768,
-	}),
+	simpleModelsDevDescriptor(
+		"volcengine",
+		"volcengine",
+		"openai-responses",
+		"https://ark.cn-beijing.volces.com/api/v3",
+		{
+			defaultContextWindow: 256000,
+			defaultMaxTokens: 32768,
+		},
+	),
 ];
 
 const MODELS_DEV_PROVIDER_DESCRIPTORS_CODING_PLANS: readonly ModelsDevProviderDescriptor[] = [
