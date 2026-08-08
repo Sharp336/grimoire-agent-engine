@@ -372,6 +372,25 @@ describe("xAI Responses reasoning-effort suppression", () => {
 	});
 });
 
+describe("Responses reasoning-summary compatibility", () => {
+	it("defaults support on and honors an explicit opt-out", () => {
+		const spec = {
+			id: "gpt-5.6-sol",
+			provider: "openai-codex",
+			name: "GPT-5.6 Sol",
+			baseUrl: "https://gateway.example/codex",
+		};
+
+		expect(buildOpenAIResponsesCompat(spec).supportsReasoningSummary).toBe(true);
+		expect(
+			buildOpenAIResponsesCompat({
+				...spec,
+				compat: { supportsReasoningSummary: false },
+			}).supportsReasoningSummary,
+		).toBe(false);
+	});
+});
+
 describe("openai-completions wire-quirk compat detection", () => {
 	it("derives wireModelIdMode from provider/host", () => {
 		expect(buildOpenAICompat(completionsSpec({ provider: "firepass" })).wireModelIdMode).toBe("firepass");

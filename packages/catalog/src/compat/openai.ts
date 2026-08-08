@@ -125,7 +125,7 @@ function detectStreamMarkupHealingPattern(
 }
 
 /** Strict official-OpenAI check: provider id `openai` and an `api.openai.com` host (missing baseUrl defaults there). */
-export function isOfficialOpenAIEndpoint(provider: string, baseUrl: string): boolean {
+function isOfficialOpenAIEndpoint(provider: string, baseUrl: string): boolean {
 	if (provider !== "openai") return false;
 	if (!baseUrl) return true;
 	try {
@@ -846,6 +846,7 @@ type ResponsesOnlyCompat = Omit<ResolvedOpenAIResponsesCompat, keyof ResolvedOpe
 function pickResponsesOnly(compat: ResolvedOpenAIResponsesCompat): ResponsesOnlyCompat {
 	return {
 		supportsLongPromptCacheRetention: compat.supportsLongPromptCacheRetention,
+		supportsReasoningSummary: compat.supportsReasoningSummary,
 		strictResponsesPairing: compat.strictResponsesPairing,
 		supportsImageDetailOriginal: compat.supportsImageDetailOriginal,
 		supportsObfuscationOptOut: compat.supportsObfuscationOptOut,

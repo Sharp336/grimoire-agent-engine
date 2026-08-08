@@ -163,14 +163,13 @@ function getReasoningConfig(
 	const config: ReasoningConfig = {
 		effort: effort === "none" ? "none" : mapCodexWireEffort(model, effort),
 	};
-	// The backend only emits reasoning summaries when `reasoning.summary` is
-	// present: omitting it yields zero `response.reasoning_summary_text.*`
-	// events (measured against gpt-5.5, gpt-5.6-sol and gpt-5.6-terra). So
-	// `undefined` means "default on" — matching `applyResponsesCompatPolicy`
-	// on the plain Responses path — and only an explicit `null` (the caller
-	// hiding thinking) opts out.
-	if (options.reasoningSummary !== null && supportsCodexReasoningSummary(model.id)) {
-		config.summary = options.reasoningSummary ?? "auto";
+	if (
+		model.compat.supportsReasoningSummary &&
+		options.reasoningSummary !== undefined &&
+		options.reasoningSummary !== null &&
+		supportsCodexReasoningSummary(model.id)
+	) {
+		config.summary = options.reasoningSummary;
 	}
 	return config;
 }

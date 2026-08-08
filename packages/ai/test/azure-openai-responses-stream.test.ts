@@ -47,6 +47,20 @@ const versionlessAzureCodexModel: Model<"azure-openai-responses"> = buildModel({
 	maxTokens: 100_000,
 });
 
+const incompatibleAzureCodexModel: Model<"azure-openai-responses"> = buildModel({
+	id: "gpt-5.6-codex",
+	name: "GPT-5.6 Codex",
+	api: "azure-openai-responses",
+	provider: "azure",
+	baseUrl: azureModel.baseUrl,
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 400_000,
+	maxTokens: 128_000,
+	compat: { supportsReasoningSummary: false },
+});
+
 function createAbortedSignal(): AbortSignal {
 	const controller = new AbortController();
 	controller.abort();
@@ -175,6 +189,15 @@ describe("azure openai responses streaming", () => {
 		const payload = await captureAzureCodexPayload(
 			{ reasoning: Effort.High, reasoningSummary: "detailed" },
 			versionlessAzureCodexModel,
+		);
+
+		expect(payload.reasoning).toEqual({ effort: "high" });
+	});
+
+	it("omits explicitly requested summaries when endpoint compatibility disables them", async () => {
+		const payload = await captureAzureCodexPayload(
+			{ reasoning: Effort.High, reasoningSummary: "detailed" },
+			incompatibleAzureCodexModel,
 		);
 
 		expect(payload.reasoning).toEqual({ effort: "high" });

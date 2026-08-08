@@ -3628,7 +3628,7 @@ export function applyResponsesReasoningParams<P extends ResponseCreateParamsStre
 			includeEncryptedReasoning,
 			omitReasoningEffort,
 		}),
-		{ reasoningSummary: options?.reasoningSummary, mapEffort },
+		{ reasoningSummary: model.compat.supportsReasoningSummary ? options?.reasoningSummary : null, mapEffort },
 	);
 }
 

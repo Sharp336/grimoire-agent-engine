@@ -174,6 +174,17 @@ describe("openai-codex optional response controls", () => {
 		expect(body.reasoning).toEqual({ effort: "none" });
 	});
 
+	it("omits reasoning.summary when endpoint compatibility disables it", async () => {
+		const model = createCodexModel("gpt-5.5", { compat: { supportsReasoningSummary: false } });
+		const transformed = await transformRequestBody({ model: model.id }, model, {
+			reasoningEffort: "medium",
+			reasoningSummary: "detailed",
+		});
+
+		expect(transformed.reasoning).toEqual({ effort: "medium" });
+		expect("stream_options" in transformed).toBe(false);
+	});
+
 	it("forces reasoning.context to all_turns for Responses Lite", async () => {
 		const model = createCodexModel("gpt-5.5");
 

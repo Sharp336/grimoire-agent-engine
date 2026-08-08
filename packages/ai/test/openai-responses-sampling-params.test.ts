@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context, FetchImpl, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
@@ -84,6 +85,26 @@ describe("openai-responses reasoning-summary defaults", () => {
 		const model = getBundledModel("openai", "gpt-5.4") as Model<"openai-responses">;
 
 		const body = await drain(model, { reasoning: Effort.High });
+
+		expect(body.reasoning).toEqual({ effort: "high" });
+	});
+
+	it("omits explicitly requested summaries when endpoint compatibility disables them", async () => {
+		const model: Model<"openai-responses"> = buildModel({
+			id: "gpt-5.4",
+			name: "GPT-5.4 via incompatible gateway",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://gateway.example/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400_000,
+			maxTokens: 128_000,
+			compat: { supportsReasoningSummary: false },
+		});
+
+		const body = await drain(model, { reasoning: Effort.High, reasoningSummary: "detailed" });
 
 		expect(body.reasoning).toEqual({ effort: "high" });
 	});

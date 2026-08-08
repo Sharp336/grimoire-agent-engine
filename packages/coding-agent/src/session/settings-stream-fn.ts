@@ -11,8 +11,7 @@
  * and OpenRouter response-cache hits across advisor calls.
  */
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
-import { isOfficialCodexApiUrl, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
-import { isOfficialOpenAIEndpoint } from "@oh-my-pi/pi-catalog/compat/openai";
+import { type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { isAnthropicFableOrMythosModel } from "@oh-my-pi/pi-catalog/identity";
 import { type Settings, validateProviderMaxInFlightRequests } from "../config/settings";
 
@@ -50,12 +49,18 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 		// implicitly disables the short-entry keep-alive refresh loop).
 		const cacheRetentionSetting = settings.get("providers.cacheRetention");
 		const cacheRetention = cacheRetentionSetting === "auto" ? undefined : cacheRetentionSetting;
+		const supportsReasoningSummary =
+			(model.api === "openai-responses" ||
+				model.api === "azure-openai-responses" ||
+				model.api === "openai-codex-responses") &&
+			model.compat !== undefined &&
+			"supportsReasoningSummary" in model.compat &&
+			model.compat.supportsReasoningSummary === true;
 		const usesOpenAIReasoningSummaries =
-			(model.api === "openai-responses" && isOfficialOpenAIEndpoint(model.provider, model.baseUrl)) ||
-			(model.api === "azure-openai-responses" && model.provider === "azure") ||
-			(model.api === "openai-codex-responses" &&
-				model.provider === "openai-codex" &&
-				isOfficialCodexApiUrl(model.baseUrl));
+			supportsReasoningSummary &&
+			((model.api === "openai-responses" && model.provider === "openai") ||
+				(model.api === "azure-openai-responses" && model.provider === "azure") ||
+				(model.api === "openai-codex-responses" && model.provider === "openai-codex"));
 		const summarySetting = settings.get("openaiReasoningSummary");
 		const configuredReasoningSummary =
 			!usesOpenAIReasoningSummaries || summarySetting === "provider-default"
