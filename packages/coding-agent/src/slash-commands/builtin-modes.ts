@@ -280,6 +280,29 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "schedule",
+		description: "Schedule a prompt to fire once, repeatedly, or on a cron expression",
+		subcommands: [
+			{ name: "in", description: "One-shot after a delay", usage: "<DELAY> <instruction>" },
+			{ name: "every", description: "Recurring at an interval", usage: "<INTERVAL> <instruction>" },
+			{ name: "cron", description: "Cron-based schedule", usage: '"<EXPR>" <instruction>' },
+			{ name: "list", description: "List active schedules" },
+			{ name: "cancel", description: "Cancel a schedule", usage: "<id>" },
+			{ name: "clear", description: "Cancel all schedules" },
+		],
+		inlineHint: "in <DELAY> <instruction>",
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime => {
+			const items = runtime.ctx.scheduledItems;
+			if (!items || items.length === 0) return "Schedule: none";
+			return `Schedule: ${items.length} active`;
+		},
+		handleTui: async (command, runtime) => {
+			await runtime.ctx.handleScheduleCommand(command.args || "");
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "model",
 		aliases: ["models"],
 		description: "Switch model for this session",

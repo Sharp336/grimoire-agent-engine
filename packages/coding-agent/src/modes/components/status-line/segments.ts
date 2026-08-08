@@ -225,47 +225,62 @@ function formatLoopLimit(limit: NonNullable<SegmentContext["loopMode"]>["limit"]
 	return `${seconds}s left`;
 }
 
+function renderPrimaryModeSegment(ctx: SegmentContext): RenderedSegment {
+	const pauseSuffix = theme.icon.pause ? ` ${theme.icon.pause}` : " (paused)";
+
+	const plan = ctx.planMode;
+	if (plan && (plan.enabled || plan.paused)) {
+		const label = plan.paused ? `Plan${pauseSuffix}` : "Plan";
+		const content = withIcon(theme.icon.plan, label);
+		const color = plan.paused ? "warning" : "accent";
+		return { content: theme.fg(color, content), visible: true };
+	}
+
+	const prewalk = ctx.prewalk;
+	if (prewalk?.enabled) {
+		const content = withIcon(theme.icon.prewalk, "Prewalk");
+		return { content: theme.fg("accent", content), visible: true };
+	}
+
+	const goal = ctx.goalMode;
+	if (goal && (goal.enabled || goal.paused)) {
+		return renderGoalMode(ctx, goal);
+	}
+
+	const vibe = ctx.vibeMode;
+	if (vibe?.enabled) {
+		const content = withIcon(theme.icon.agents, "Vibe");
+		return { content: theme.fg("accent", content), visible: true };
+	}
+
+	const loop = ctx.loopMode;
+	if (loop) {
+		const icon = loop.state === "paused" ? theme.icon.pause || theme.icon.loop : theme.icon.loop;
+		const color: ThemeColor = loop.state === "paused" ? "warning" : "customMessageLabel";
+		const parts = [withIcon(icon, `Loop ${loop.state}`)];
+		const limit = formatLoopLimit(loop.limit);
+		if (limit) parts.push(limit);
+		return { content: theme.fg(color, parts.join(" ")), visible: true };
+	}
+
+	return { content: "", visible: false };
+}
+
 const modeSegment: StatusLineSegment = {
 	id: "mode",
 	render(ctx) {
-		const pauseSuffix = theme.icon.pause ? ` ${theme.icon.pause}` : " (paused)";
+		const primary = renderPrimaryModeSegment(ctx);
 
-		const plan = ctx.planMode;
-		if (plan && (plan.enabled || plan.paused)) {
-			const label = plan.paused ? `Plan${pauseSuffix}` : "Plan";
-			const content = withIcon(theme.icon.plan, label);
-			const color = plan.paused ? "warning" : "accent";
-			return { content: theme.fg(color, content), visible: true };
+		const schedule = ctx.schedule;
+		if (schedule && schedule.count > 0) {
+			const schedContent = theme.fg("customMessageLabel", `⏰${schedule.count}`);
+			if (primary.visible) {
+				return { content: `${primary.content} ${schedContent}`, visible: true };
+			}
+			return { content: schedContent, visible: true };
 		}
 
-		const prewalk = ctx.prewalk;
-		if (prewalk?.enabled) {
-			const content = withIcon(theme.icon.prewalk, "Prewalk");
-			return { content: theme.fg("accent", content), visible: true };
-		}
-
-		const goal = ctx.goalMode;
-		if (goal && (goal.enabled || goal.paused)) {
-			return renderGoalMode(ctx, goal);
-		}
-
-		const vibe = ctx.vibeMode;
-		if (vibe?.enabled) {
-			const content = withIcon(theme.icon.agents, "Vibe");
-			return { content: theme.fg("accent", content), visible: true };
-		}
-
-		const loop = ctx.loopMode;
-		if (loop) {
-			const icon = loop.state === "paused" ? theme.icon.pause || theme.icon.loop : theme.icon.loop;
-			const color: ThemeColor = loop.state === "paused" ? "warning" : "customMessageLabel";
-			const parts = [withIcon(icon, `Loop ${loop.state}`)];
-			const limit = formatLoopLimit(loop.limit);
-			if (limit) parts.push(limit);
-			return { content: theme.fg(color, parts.join(" ")), visible: true };
-		}
-
-		return { content: "", visible: false };
+		return primary;
 	},
 };
 
