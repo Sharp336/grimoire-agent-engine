@@ -19,7 +19,6 @@ import {
 	postmortem,
 	setInteractiveHost,
 	setProjectDir,
-	VERSION,
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "./capability";
@@ -51,6 +50,7 @@ import {
 	resolveActiveProjectRegistryPath,
 } from "./discovery/helpers";
 import { injectOmpExtensionCliRoots } from "./discovery/omp-extension-roots";
+import { FORK_NPM_PACKAGE_URL, VERSION } from "./distribution";
 import { formatExtensionLoadNotifications } from "./extensibility/extensions/load-errors";
 import { loadExtensions } from "./extensibility/extensions/loader";
 import { ExtensionRunner } from "./extensibility/extensions/runner";
@@ -115,7 +115,7 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
 		return;
 	}
 	try {
-		const response = await fetch("https://registry.npmjs.org/@oh-my-pi/pi-coding-agent/latest", {
+		const response = await fetch(`${FORK_NPM_PACKAGE_URL}/latest`, {
 			signal: withTimeoutSignal(5_000),
 		});
 		if (!response.ok) return undefined;

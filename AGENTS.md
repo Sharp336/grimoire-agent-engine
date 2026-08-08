@@ -275,9 +275,24 @@ Location: `packages/*/CHANGELOG.md` (per package).
 - Internal (from issues): `Fixed foo bar ([#123](https://github.com/can1357/oh-my-pi/issues/123))`.
 - External contributions: `Added feature X ([#456](https://github.com/can1357/oh-my-pi/pull/456) by [@username](https://github.com/username))`.
 
+## Fork Distribution
+
+`packages/coding-agent/fork-release.json` is the single source of truth for the independently versioned `omp-cn` distribution. It records `forkVersion`, `upstreamVersion`, `nativeVersion`, and the exact `upstreamCommit`. Application-facing version consumers in coding-agent import `VERSION` from `src/distribution.ts`; shared `@oh-my-pi/pi-utils` keeps the upstream workspace version.
+
+- A fork release changes `forkVersion` and the fork changelog. It does not lockstep-bump workspace package versions, the root catalog, Cargo manifests, or the native sentinel.
+- Fork tags use `omp-cn-v<forkVersion>`. Never create new `v<version>` tags in this repository; that namespace belongs to upstream and already has historical collisions.
+- The published `omp-cn` manifest carries validated `ompFork` metadata. Update logic must install `omp-cn@forkVersion` and `@oh-my-pi/pi-natives@nativeVersion` independently; packages without metadata are legacy and use their historical same-version/tag behavior.
+- Runtime and release tooling share the strict, side-effect-free parser in `src/distribution-schema.ts`; do not add a second SemVer/SHA/schema parser or compatibility-only field aliases.
+- Local package tooling is validation-only (`--dry-run` or `--pack`) and cannot publish npm. Tag CI alone may publish the same verified tgz after isolated `--version`, `--help`, and `--smoke-test` checks. The temporary package manifest must be restored even on failure.
+- The legacy `omp-cn@17.2.11` updater requires a one-time bridge release where `forkVersion === nativeVersion`, unless maintainers explicitly approve and document a manual global-install migration.
+- Operational gates, failure recovery, installer behavior, and release authorization are defined in `docs/MAINTENANCE.md`.
+
 ## Releasing
 
-1. Ensure all changes since last release are in each affected package's `[Unreleased]` section.
-2. Run `bun run release`.
+Upstream workspace releases and fork releases are separate workflows:
 
-The script handles version bump, CHANGELOG finalization, commit, tag, publish, and adding new `[Unreleased]` sections.
+1. For upstream package work, keep each affected package's `[Unreleased]` section current. Do not publish upstream packages from this fork.
+2. For `omp-cn`, update `docs/FORK_CHANGELOG.md` and the fork release manifest, then use the fork-specific prepare/release commands documented in `docs/MAINTENANCE.md`.
+3. Never run `bun run release` as an `omp-cn` release shortcut; it is the upstream lockstep release path.
+
+Fork publishing requires explicit authorization for the atomic Git push, npm publish, and GitHub Release steps.

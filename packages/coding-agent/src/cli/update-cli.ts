@@ -10,16 +10,24 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { $env, $which, APP_NAME, compareVersions, isEnoent, VERSION } from "@oh-my-pi/pi-utils";
+import { $env, $which, APP_NAME, compareVersions, isEnoent } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { $ } from "bun";
+import {
+	FORK_PACKAGE as DISTRIBUTION_PACKAGE,
+	FORK_REPOSITORY as DISTRIBUTION_REPOSITORY,
+	FORK_NPM_REGISTRY,
+	isValidReleaseVersion,
+	resolveForkDistribution,
+	VERSION,
+} from "../distribution";
 import { theme } from "../modes/theme/theme";
 import { isTimeoutError, withTimeoutSignal } from "../utils/fetch-timeout";
 
 /** Public fork endpoints used by `omp update` and release-binary updates. */
-export const FORK_REPOSITORY = "yequ172672/oh-my-pi-cn";
-export const FORK_PACKAGE = "omp-cn";
-export const FORK_MISE_TOOL = `github:${FORK_REPOSITORY}`;
+export const FORK_REPOSITORY = DISTRIBUTION_REPOSITORY;
+export const FORK_PACKAGE = DISTRIBUTION_PACKAGE;
+export const FORK_MISE_TOOL = `github:${FORK_REPOSITORY}[version_prefix=omp-cn-v]`;
 /**
  * The fork does not ship a Homebrew tap yet. Keep the target on the fork so
  * an eventual tap can be added without routing updates back to upstream.
@@ -42,16 +50,15 @@ const MISE_TOOL = FORK_MISE_TOOL;
  * `No version matching "X" found for specifier "<pkg>" (but package exists)`.
  * See #1686.
  */
-const NPM_REGISTRY = "https://registry.npmjs.org/";
+const NPM_REGISTRY = FORK_NPM_REGISTRY;
 const GITHUB_API = "https://api.github.com";
 const RELEASE_METADATA_TIMEOUT_MS = 30_000;
 const BINARY_DOWNLOAD_TIMEOUT_MS = 15 * 60_000;
 
 /**
- * Core native addon package. Bumped in lock-step with {@link PACKAGE} so the
- * version sentinel the loader looks up at runtime matches the `.node` on
- * disk; see {@link buildBunInstallArgs} for why this must be installed
- * explicitly rather than inherited as a transitive dependency.
+ * Core native addon package. Its independently published version is selected
+ * from the fork release metadata so the loader wrapper and `.node` sentinel
+ * remain in lock-step even when the `omp-cn` package version advances alone.
  */
 const NATIVES_PACKAGE = "@oh-my-pi/pi-natives";
 
@@ -74,9 +81,13 @@ function currentNativeTag(): string {
 	return `${process.platform}-${process.arch}`;
 }
 
-interface ReleaseInfo {
+export interface ReleaseInfo {
+	schemaVersion: 0 | 1;
 	tag: string;
 	version: string;
+	upstreamVersion: string;
+	nativeVersion: string;
+	upstreamCommit: string | null;
 }
 
 export interface ReleaseBinaryAsset {
@@ -149,8 +160,8 @@ async function getReleaseBinaryAsset(
 	binaryName: string,
 	fetchImpl: Fetch = fetch,
 	githubToken: string | undefined = $env.GITHUB_TOKEN || $env.GH_TOKEN,
+	expectedTag: string = `v${expectedVersion}`,
 ): Promise<ReleaseBinaryAsset> {
-	const tag = `v${expectedVersion}`;
 	const headers: Record<string, string> = {
 		Accept: "application/vnd.github+json",
 		"X-GitHub-Api-Version": "2022-11-28",
@@ -159,7 +170,7 @@ async function getReleaseBinaryAsset(
 
 	let response: Response;
 	try {
-		response = await fetchImpl(`${GITHUB_API}/repos/${REPO}/releases/tags/${encodeURIComponent(tag)}`, {
+		response = await fetchImpl(`${GITHUB_API}/repos/${REPO}/releases/tags/${encodeURIComponent(expectedTag)}`, {
 			headers,
 			signal: withTimeoutSignal(RELEASE_METADATA_TIMEOUT_MS),
 		});
@@ -178,7 +189,7 @@ async function getReleaseBinaryAsset(
 		throw new Error(`Failed to fetch GitHub release metadata: ${response.statusText}`);
 	}
 
-	return resolveReleaseBinaryAsset(await response.json(), tag, binaryName);
+	return resolveReleaseBinaryAsset(await response.json(), expectedTag, binaryName);
 }
 
 export interface VerifiedBinaryDownloadOptions {
@@ -393,6 +404,8 @@ interface UpdateMethodResolutionOptions {
 	miseBinDirs?: readonly string[];
 	miseDataDir?: string;
 	npmBinDir?: string;
+	/** Platform override for deterministic cross-platform policy tests. */
+	platform?: NodeJS.Platform;
 	/**
 	 * Whether the resolved omp path is a plain file (the standalone binary)
 	 * rather than a package-manager symlink. Stops a binary install from being
@@ -414,7 +427,14 @@ function resolveUpdateMethod(
 	bunBinDir: string | undefined,
 	options: UpdateMethodResolutionOptions = {},
 ): UpdateMethod {
-	const { homebrewPrefix, miseBinDirs = [], miseDataDir, npmBinDir, ompIsRegularFile = false } = options;
+	const {
+		homebrewPrefix,
+		miseBinDirs = [],
+		miseDataDir,
+		npmBinDir,
+		ompIsRegularFile = false,
+		platform = process.platform,
+	} = options;
 	const launcherExtension = path.extname(ompPath).toLowerCase();
 	const isWindowsScriptLauncher =
 		launcherExtension === ".cmd" || launcherExtension === ".ps1" || launcherExtension === ".bat";
@@ -430,7 +450,7 @@ function resolveUpdateMethod(
 	// Windows is excluded: there package managers write regular-file shims
 	// (bun's .exe launcher, npm's .cmd/.ps1), so a regular file is NOT evidence
 	// of a standalone install and the override would hijack managed installs.
-	const isStandaloneRegularFile = ompIsRegularFile && process.platform !== "win32";
+	const isStandaloneRegularFile = ompIsRegularFile && platform !== "win32";
 	if (bunBinDir && isPathInDirectory(ompPath, bunBinDir) && !isStandaloneRegularFile) return "bun";
 	if ((npmBinDir && isPathInDirectory(ompPath, npmBinDir) && !isStandaloneRegularFile) || isWindowsScriptLauncher)
 		return "npm";
@@ -483,7 +503,40 @@ async function resolveUpdateTarget(): Promise<UpdateTarget> {
  * Get the latest release info from the npm registry.
  * Uses npm instead of GitHub API to avoid unauthenticated rate limiting.
  */
-async function getLatestRelease(): Promise<ReleaseInfo> {
+export function resolveRegistryRelease(value: unknown): ReleaseInfo {
+	if (!isRecord(value) || !isValidReleaseVersion(value.version)) {
+		throw new Error("Invalid npm release metadata: version must be a valid SemVer version");
+	}
+
+	if (value.ompFork === undefined) {
+		return {
+			schemaVersion: 0,
+			tag: `v${value.version}`,
+			version: value.version,
+			upstreamVersion: value.version,
+			nativeVersion: value.version,
+			upstreamCommit: null,
+		};
+	}
+
+	const distribution = resolveForkDistribution(value.ompFork);
+	if (distribution.forkVersion !== value.version) {
+		throw new Error(
+			`Invalid npm release metadata: ompFork.forkVersion ${distribution.forkVersion} does not match package version ${value.version}`,
+		);
+	}
+
+	return {
+		schemaVersion: distribution.schemaVersion,
+		tag: distribution.releaseTag,
+		version: distribution.forkVersion,
+		upstreamVersion: distribution.upstreamVersion,
+		nativeVersion: distribution.nativeVersion,
+		upstreamCommit: distribution.upstreamCommit,
+	};
+}
+
+export async function getLatestRelease(): Promise<ReleaseInfo> {
 	let response: Response;
 	try {
 		response = await fetch(`${NPM_REGISTRY}${PACKAGE}/latest`, {
@@ -499,14 +552,7 @@ async function getLatestRelease(): Promise<ReleaseInfo> {
 		throw new Error(`Failed to fetch release info: ${response.statusText}`);
 	}
 
-	const data = (await response.json()) as { version: string };
-	const version = data.version;
-	const tag = `v${version}`;
-
-	return {
-		tag,
-		version,
-	};
+	return resolveRegistryRelease(await response.json());
 }
 
 interface BunInstallCachePruneResult {
@@ -934,13 +980,15 @@ export async function replaceBinaryForUpdate(options: BinaryReplacementOptions):
 	}
 }
 
-function buildVersionedPackageInstallArgs(expectedVersion: string, nativeTag: string): string[] {
-	const args = [`${PACKAGE}@${expectedVersion}`, `${NATIVES_PACKAGE}@${expectedVersion}`];
+function buildVersionedPackageInstallArgs(packageVersion: string, nativeVersion: string, nativeTag: string): string[] {
+	const args = [`${PACKAGE}@${packageVersion}`, `${NATIVES_PACKAGE}@${nativeVersion}`];
 	if (SUPPORTED_NATIVE_TAGS.has(nativeTag)) {
-		args.push(`${NATIVES_PACKAGE}-${nativeTag}@${expectedVersion}`);
+		args.push(`${NATIVES_PACKAGE}-${nativeTag}@${nativeVersion}`);
 	}
 	return args;
 }
+
+type PackageReleaseVersions = Pick<ReleaseInfo, "version" | "nativeVersion">;
 
 /**
  * Build the bun argv used to globally install a specific omp version.
@@ -959,38 +1007,55 @@ function buildVersionedPackageInstallArgs(expectedVersion: string, nativeTag: st
  * lookup the version check just performed. See #1686.
  *
  * Also pins {@link NATIVES_PACKAGE} and the platform-specific
- * `@oh-my-pi/pi-natives-<tag>` leaf to `expectedVersion`. `bun install -g`
+ * `@oh-my-pi/pi-natives-<tag>` leaf to the release's `nativeVersion`. `bun install -g`
  * does not reliably refresh transitive `optionalDependencies` when the
  * top-level package is the only one bumped, so the native addon and its
  * version sentinel can drift out of sync with the freshly installed
  * `@oh-my-pi/pi-coding-agent` and the loader aborts at
  * `validateLoadedBindings` on the next launch
  * (`The .node file on disk is from a different release than this loader`).
- * Listing the natives explicitly forces bun to replace them in lock-step.
+ * Listing the natives explicitly forces bun to replace the core and leaf in lock-step
+ * without incorrectly coupling either one to the fork package version.
  * The leaf is added only on tags the release pipeline actually publishes
  * ({@link SUPPORTED_NATIVE_TAGS}) so unsupported platforms still fail with
  * the original "no matching version" message instead of `EBADPLATFORM`.
  * See #1824.
  */
-export function buildBunInstallArgs(expectedVersion: string, nativeTag: string = currentNativeTag()): string[] {
+export function buildBunInstallArgsForRelease(
+	release: PackageReleaseVersions,
+	nativeTag: string = currentNativeTag(),
+): string[] {
 	return [
 		"install",
 		"-g",
 		"--no-cache",
 		`--registry=${NPM_REGISTRY}`,
-		...buildVersionedPackageInstallArgs(expectedVersion, nativeTag),
+		...buildVersionedPackageInstallArgs(release.version, release.nativeVersion, nativeTag),
 	];
 }
 
+/** Legacy same-version interface retained for external callers. */
+export function buildBunInstallArgs(expectedVersion: string, nativeTag: string = currentNativeTag()): string[] {
+	return buildBunInstallArgsForRelease({ version: expectedVersion, nativeVersion: expectedVersion }, nativeTag);
+}
+
 /** Build the npm argv used to update npm-managed global installs. */
-export function buildNpmInstallArgs(expectedVersion: string, nativeTag: string = currentNativeTag()): string[] {
+export function buildNpmInstallArgsForRelease(
+	release: PackageReleaseVersions,
+	nativeTag: string = currentNativeTag(),
+): string[] {
 	const args = [
 		"install",
 		"-g",
 		`--registry=${NPM_REGISTRY}`,
-		...buildVersionedPackageInstallArgs(expectedVersion, nativeTag),
+		...buildVersionedPackageInstallArgs(release.version, release.nativeVersion, nativeTag),
 	];
 	return args;
+}
+
+/** Legacy same-version interface retained for external callers. */
+export function buildNpmInstallArgs(expectedVersion: string, nativeTag: string = currentNativeTag()): string[] {
+	return buildNpmInstallArgsForRelease({ version: expectedVersion, nativeVersion: expectedVersion }, nativeTag);
 }
 
 export function buildHomebrewUpdateArgs(force: boolean): string[] {
@@ -1008,15 +1073,15 @@ export function buildMiseForceInstallArgs(expectedVersion: string): string[] {
 /**
  * Update via package manager.
  */
-async function updateViaBun(expectedVersion: string): Promise<void> {
+async function updateViaBun(release: ReleaseInfo): Promise<void> {
 	console.log(chalk.dim("Updating via bun..."));
-	const args = buildBunInstallArgs(expectedVersion);
+	const args = buildBunInstallArgsForRelease(release);
 	const result = await $`bun ${args}`.nothrow();
 	if (result.exitCode !== 0) {
 		throw new Error(`bun install failed with exit code ${result.exitCode}`);
 	}
 
-	await printVerification(expectedVersion);
+	await printVerification(release.version);
 	try {
 		const pruneResult = await pruneBunCacheAfterGlobalInstall();
 		if (pruneResult && pruneResult.removedEntries > 0) {
@@ -1027,15 +1092,15 @@ async function updateViaBun(expectedVersion: string): Promise<void> {
 	}
 }
 
-async function updateViaNpm(expectedVersion: string): Promise<void> {
+async function updateViaNpm(release: ReleaseInfo): Promise<void> {
 	console.log(chalk.dim("Updating via npm..."));
-	const args = buildNpmInstallArgs(expectedVersion);
+	const args = buildNpmInstallArgsForRelease(release);
 	const result = await $`npm ${args}`.nothrow();
 	if (result.exitCode !== 0) {
 		throw new Error(`npm install failed with exit code ${result.exitCode}`);
 	}
 
-	await printVerification(expectedVersion);
+	await printVerification(release.version);
 }
 
 async function updateViaHomebrew(expectedVersion: string, force: boolean): Promise<void> {
@@ -1084,6 +1149,7 @@ export async function updateViaBinaryAt(
 		binaryName?: string;
 		fetchImpl?: Fetch;
 		githubToken?: string;
+		releaseTag?: string;
 		verifyInstalledVersion?: typeof verifyInstalledVersion;
 	} = {},
 ): Promise<void> {
@@ -1094,7 +1160,13 @@ export async function updateViaBinaryAt(
 	// would force the move-aside rename to overwrite it. pid + timestamp keeps
 	// two forced updates in the same millisecond from colliding.
 	const backupPath = `${targetPath}.${Date.now()}.${process.pid}.bak`;
-	const asset = await getReleaseBinaryAsset(expectedVersion, binaryName, options.fetchImpl, options.githubToken);
+	const asset = await getReleaseBinaryAsset(
+		expectedVersion,
+		binaryName,
+		options.fetchImpl,
+		options.githubToken,
+		options.releaseTag,
+	);
 	console.log(chalk.dim(`Downloading ${binaryName}…`));
 	await downloadVerifiedBinary({
 		url: asset.url,
@@ -1160,11 +1232,11 @@ export async function runUpdateCommand(opts: { force: boolean; check: boolean })
 		} else if (target.method === "mise") {
 			await updateViaMise(release.version, opts.force);
 		} else if (target.method === "bun") {
-			await updateViaBun(release.version);
+			await updateViaBun(release);
 		} else if (target.method === "npm") {
-			await updateViaNpm(release.version);
+			await updateViaNpm(release);
 		} else {
-			await updateViaBinaryAt(target.path, release.version);
+			await updateViaBinaryAt(target.path, release.version, { releaseTag: release.tag });
 		}
 	} catch (err) {
 		console.error(chalk.red(`Update failed: ${err}`));

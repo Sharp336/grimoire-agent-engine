@@ -8,16 +8,19 @@ import * as pluginCli from "@oh-my-pi/pi-coding-agent/cli/plugin-cli";
 import * as updateCli from "@oh-my-pi/pi-coding-agent/cli/update-cli";
 import {
 	buildBunInstallArgs,
+	buildBunInstallArgsForRelease,
 	buildHomebrewUpdateArgs,
 	buildMiseForceInstallArgs,
 	buildMiseUpgradeArgs,
 	buildNpmInstallArgs,
+	buildNpmInstallArgsForRelease,
 	downloadVerifiedBinary,
 	isMuslLinuxForTest,
 	parseUpdateArgs,
 	pruneBunInstallCache,
 	replaceBinaryForUpdate,
 	resolveBunGlobalNodeModulesDirFromLocations,
+	resolveRegistryRelease,
 	resolveReleaseBinaryAsset,
 	resolveUpdateMethodForTest,
 	sweepStaleBackups,
@@ -127,6 +130,7 @@ describe("update-cli install target detection", () => {
 		const method = resolveUpdateMethodForTest("/home/u/.local/bin/omp", undefined, {
 			npmBinDir: "/home/u/.local/bin",
 			ompIsRegularFile: true,
+			platform: "linux",
 		});
 
 		expect(method).toBe("binary");
@@ -135,6 +139,7 @@ describe("update-cli install target detection", () => {
 	it("uses binary update when a plain file in the bun global bin dir is the standalone binary", () => {
 		const method = resolveUpdateMethodForTest("/home/u/.local/bin/omp", "/home/u/.local/bin", {
 			ompIsRegularFile: true,
+			platform: "linux",
 		});
 
 		expect(method).toBe("binary");
@@ -146,18 +151,12 @@ describe("update-cli install target detection", () => {
 		// apply there — it would clobber the shim with a raw binary. Paths use
 		// forward slashes so the lexical containment check works on the POSIX
 		// host running this suite; the platform gate is what is under test.
-		const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
-		if (!platformDescriptor) throw new Error("process.platform descriptor missing");
-		Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
-		try {
-			const method = resolveUpdateMethodForTest("C:/Users/test/.bun/bin/omp.exe", "C:/Users/test/.bun/bin", {
-				ompIsRegularFile: true,
-			});
+		const method = resolveUpdateMethodForTest("C:/Users/test/.bun/bin/omp.exe", "C:/Users/test/.bun/bin", {
+			ompIsRegularFile: true,
+			platform: "win32",
+		});
 
-			expect(method).toBe("bun");
-		} finally {
-			Object.defineProperty(process, "platform", platformDescriptor);
-		}
+		expect(method).toBe("bun");
 	});
 
 	it("still uses npm update when the npm global bin entry is a package-manager symlink, not a plain file", () => {
@@ -225,11 +224,15 @@ describe("update-cli package manager commands", () => {
 	});
 
 	it("targets the mise GitHub backend tool and force-reinstalls the checked version when requested", () => {
-		expect(buildMiseUpgradeArgs()).toEqual(["upgrade", "github:yequ172672/oh-my-pi-cn", "--bump"]);
+		expect(buildMiseUpgradeArgs()).toEqual([
+			"upgrade",
+			"github:yequ172672/oh-my-pi-cn[version_prefix=omp-cn-v]",
+			"--bump",
+		]);
 		expect(buildMiseForceInstallArgs("15.10.5")).toEqual([
 			"install",
 			"--force",
-			"github:yequ172672/oh-my-pi-cn@15.10.5",
+			"github:yequ172672/oh-my-pi-cn[version_prefix=omp-cn-v]@15.10.5",
 		]);
 	});
 
@@ -241,6 +244,71 @@ describe("update-cli package manager commands", () => {
 		expect(args).toContain("omp-cn@16.3.15");
 		expect(args).toContain("@oh-my-pi/pi-natives@16.3.15");
 		expect(args).toContain("@oh-my-pi/pi-natives-win32-x64@16.3.15");
+	});
+
+	it("installs an independently versioned fork package with its declared native core and leaf", () => {
+		const release = { version: "17.2.12", nativeVersion: "17.2.11" };
+		const npmArgs = buildNpmInstallArgsForRelease(release, "win32-x64");
+		const bunArgs = buildBunInstallArgsForRelease(release, "linux-x64");
+
+		expect(npmArgs).toContain("omp-cn@17.2.12");
+		expect(npmArgs).toContain("@oh-my-pi/pi-natives@17.2.11");
+		expect(npmArgs).toContain("@oh-my-pi/pi-natives-win32-x64@17.2.11");
+		expect(bunArgs).toContain("omp-cn@17.2.12");
+		expect(bunArgs).toContain("@oh-my-pi/pi-natives@17.2.11");
+		expect(bunArgs).toContain("@oh-my-pi/pi-natives-linux-x64@17.2.11");
+	});
+});
+
+describe("update-cli registry release metadata", () => {
+	it("maps the published legacy 17.2.11 package to its original same-version native packages and v-tag", () => {
+		expect(resolveRegistryRelease({ version: "17.2.11" })).toEqual({
+			schemaVersion: 0,
+			tag: "v17.2.11",
+			version: "17.2.11",
+			upstreamVersion: "17.2.11",
+			nativeVersion: "17.2.11",
+			upstreamCommit: null,
+		});
+	});
+
+	it("uses schema 1 metadata to separate the fork, native, upstream, and GitHub release identities", () => {
+		expect(
+			resolveRegistryRelease({
+				version: "17.2.12",
+				ompFork: {
+					schemaVersion: 1,
+					forkVersion: "17.2.12",
+					upstreamVersion: "17.2.11",
+					nativeVersion: "17.2.11",
+					upstreamCommit: "08819b279cf02ae2545e69dad7111ab48d91d35e",
+				},
+			}),
+		).toEqual({
+			schemaVersion: 1,
+			tag: "omp-cn-v17.2.12",
+			version: "17.2.12",
+			upstreamVersion: "17.2.11",
+			nativeVersion: "17.2.11",
+			upstreamCommit: "08819b279cf02ae2545e69dad7111ab48d91d35e",
+		});
+	});
+
+	it("rejects malformed schema metadata and a fork version that disagrees with npm", () => {
+		const metadata = {
+			schemaVersion: 1,
+			forkVersion: "17.2.12",
+			upstreamVersion: "17.2.11",
+			nativeVersion: "17.2.11",
+			upstreamCommit: "08819b279cf02ae2545e69dad7111ab48d91d35e",
+		};
+
+		expect(() => resolveRegistryRelease({ version: "17.2.12", ompFork: { ...metadata, schemaVersion: 2 } })).toThrow(
+			"schemaVersion must be 1",
+		);
+		expect(() => resolveRegistryRelease({ version: "17.2.13", ompFork: metadata })).toThrow(
+			"does not match package version 17.2.13",
+		);
 	});
 });
 
@@ -486,7 +554,7 @@ describe("update-cli release binary integrity", () => {
 		});
 
 		expect(await Bun.file(targetPath).text()).toBe(content);
-		expect((await fs.stat(targetPath)).mode & 0o777).toBe(0o755);
+		if (process.platform !== "win32") expect((await fs.stat(targetPath)).mode & 0o777).toBe(0o755);
 	});
 
 	it("aborts the response stream as soon as it exceeds the expected size", async () => {
@@ -610,7 +678,7 @@ describe("update-cli release binary integrity", () => {
 			).rejects.toThrow("digest mismatch");
 			expect(metadataAuthorizations).toEqual(["Bearer test-token"]);
 			expect(await Bun.file(targetPath).text()).toBe(installed);
-			expect((await fs.stat(targetPath)).mode & 0o777).toBe(0o755);
+			if (process.platform !== "win32") expect((await fs.stat(targetPath)).mode & 0o777).toBe(0o755);
 			expect(await Bun.file(`${targetPath}.new`).exists()).toBe(false);
 		} finally {
 			if (previousGitHubToken === undefined) delete Bun.env.GITHUB_TOKEN;

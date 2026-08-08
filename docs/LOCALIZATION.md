@@ -1,6 +1,6 @@
 # 本地化维护指南
 
-本分支以 `upstream/main` 为上游基线，`origin/main` 为分叉发布分支。英文是默认语言和资源基线，简体中文通过 `packages/coding-agent/src/i18n/` 提供覆盖。
+本仓库以 `upstream/main` 为上游基线，`origin/main` 为唯一维护与发布分支。英文是默认语言和资源基线，简体中文通过 `packages/coding-agent/src/i18n/` 提供覆盖。上游同步、冲突处理、验证和发行门禁以 [MAINTENANCE.md](MAINTENANCE.md) 为准；本文只说明本地化边界。
 
 ## 语言行为
 
@@ -12,38 +12,50 @@
 
 ## 同步上游
 
-每次同步前确认工作区干净，并单独记录本地化改动：
+本仓库使用全量 merge，而不是在合并后挑选保留哪些上游提交。开始前确认工作区干净并记录精确基线：
 
 ```powershell
-git fetch upstream --prune
+$env:GIT_TERMINAL_PROMPT = "0"
+git fetch upstream main --prune --no-tags
 git switch main
-git diff --stat upstream/main...HEAD
-git merge upstream/main
+git status --short
+$base = git rev-parse HEAD
+$upstream = git rev-parse upstream/main
+git diff --stat main...upstream/main
+git merge --no-ff --no-commit upstream/main
 ```
 
-合并冲突时优先保留上游的业务逻辑，再重新接回本地化边界：
+必须在 merge 前保存 `$base`。遇到冲突时逐文件保留上游业务行为，再重新接入中文资源和适配层；无法确认时停止并说明双方行为，不能批量选择 `ours` 或 `theirs`。
 
-1. `src/i18n/` 中的语言类型、资源和翻译测试属于本分支维护内容。
-2. `config/settings-schema.ts` 中的 `language` 字段必须保留。
-3. `main.ts`、`settings.ts`、`builtin-registry.ts`、`available-commands.ts`、`acp-builtins.ts`、`ui-helpers.ts` 和设置面板中的本地化调用必须保留。
-4. 上游新增用户可见英文时，先保留英文作为 fallback，再在 `zh-CN` 资源中增加对应翻译；不要把业务逻辑复制到中文分支。
+重点保留并验证：
 
-合并后执行：
+1. `src/i18n/` 中的语言类型、资源和翻译测试。
+2. `config/settings-schema.ts` 中的 `language` 字段和 profile 持久化。
+3. `main.ts`、`settings.ts`、命令注册、ACP、UI helper 和设置面板中的本地化调用。
+4. `src/distribution.ts`、`fork-release.json`、更新器和安装器中的 `omp-cn` 身份。
+5. 上游新增用户可见英文的 fallback，以及 `zh-CN` 资源中的对应翻译。
+
+不要为了中文发行修改 workspace、Cargo 或 native 版本；版本协议见维护文档。
+
+合并和适配后至少执行：
 
 ```powershell
-bun check
+bun run ci:check:full
 bun test packages/coding-agent/test/i18n.test.ts
+bun run ci:test:smoke
 git diff --check
 ```
+
+大范围上游合并还要按 [维护验证矩阵](MAINTENANCE.md#7-路径驱动的验证矩阵) 增加 coding-agent、workspace、Rust/native 和安装测试。没有执行的矩阵必须明确记录为未验证。
 
 ## 设置页翻译
 
 设置页的标签、分组、选项和描述来自 `packages/coding-agent/src/config/settings-schema.ts`，对应中文资源集中在 `packages/coding-agent/src/i18n/locales/zh-CN-settings.ts`。设置行使用原始配置值进行交互，同时通过 `SettingItem.valueLabels` 显示本地化值，因此翻译不会把 `true`、`high` 等显示文本写回配置文件。
 
-上游新增设置时，先保留英文 fallback，再补充设置资源；如果新增的是枚举值，同时确认主列表和子菜单都使用了中文显示标签。
+上游新增设置时，先保留英文 fallback，再补充设置资源；如果新增的是枚举值，同时确认主列表和子菜单都使用中文显示标签。
 
 ## 添加翻译
 
 新增用户可见文本时，优先使用 `t()` 的稳定键；对已有的大量英文出口使用 `localizeUiText()` 作为兼容层。英文资源表达默认行为，中文资源只覆盖同一个键或同一条英文 UI 文本。动态错误详情、路径、模型名、插件名和用户输入必须作为变量或 fallback 保持原样。
 
-完成翻译后，至少验证：启动时配置语言、`/language` 切换、命令自动补全描述、设置面板、错误/警告/状态消息，以及非交互模式不受影响。
+完成翻译后，使用隔离 profile 验证启动语言、`/language` 切换、命令自动补全描述、设置面板、错误/警告/状态消息，以及非交互模式。不要以会覆盖现有全局 `omp` 的 `bun setup` 作为人工验收前置。

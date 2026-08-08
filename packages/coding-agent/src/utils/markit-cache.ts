@@ -2,7 +2,7 @@ import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getDocumentConversionCacheDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
-import packageJson from "../../package.json" with { type: "json" };
+import { VERSION } from "../distribution";
 
 /**
  * Cache schema/format revision. Bumping it changes the on-disk key prefix
@@ -30,7 +30,7 @@ interface MarkitConversionCacheEntry {
 export function markitConversionCacheKey(bytes: Uint8Array, extension: string): string {
 	const normalizedExtension = extension.trim().toLowerCase().replace(/^\.+/, "") || "bin";
 	const safeExtension = normalizedExtension.replace(/[^a-z0-9]+/g, "_") || "bin";
-	const safeVersion = packageJson.version.replace(/[^a-z0-9]+/gi, "_");
+	const safeVersion = VERSION.replace(/[^a-z0-9]+/gi, "_");
 	const digest = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
 	return `v${MARKIT_CONVERSION_CACHE_VERSION}-${safeVersion}-${safeExtension}-${digest}`;
 }

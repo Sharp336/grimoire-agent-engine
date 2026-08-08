@@ -91,6 +91,7 @@
     "bun": ">=1.3.14"
   },
   "files": [
+    "fork-release.json",
     "src",
     "dist/cli.js",
     "dist/CHANGELOG-*.md",

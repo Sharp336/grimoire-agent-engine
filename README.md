@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://github.com/yequ172672/oh-my-pi-cn/blob/agent/zh-cn-localization/assets/hero.png?raw=true" alt="omp">
+  <img src="https://github.com/yequ172672/oh-my-pi-cn/blob/main/assets/hero.png?raw=true" alt="omp">
 </p>
 
 <p align="center">
@@ -9,9 +9,9 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/omp-cn"><img src="https://img.shields.io/npm/v/omp-cn?style=flat&colorA=222222&colorB=CB3837" alt="npm 版本"></a>
-  <a href="https://github.com/yequ172672/oh-my-pi-cn/blob/agent/zh-cn-localization/packages/coding-agent/CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-keep-E05735?style=flat&colorA=222222" alt="变更日志"></a>
+  <a href="https://github.com/yequ172672/oh-my-pi-cn/blob/main/docs/FORK_CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-keep-E05735?style=flat&colorA=222222" alt="变更日志"></a>
   <a href="https://github.com/yequ172672/oh-my-pi-cn/actions"><img src="https://img.shields.io/github/actions/workflow/status/yequ172672/oh-my-pi-cn/ci.yml?style=flat&colorA=222222&colorB=3FB950" alt="持续集成"></a>
-  <a href="https://github.com/yequ172672/oh-my-pi-cn/blob/agent/zh-cn-localization/LICENSE"><img src="https://img.shields.io/github/license/yequ172672/oh-my-pi-cn?style=flat&colorA=222222&colorB=58A6FF" alt="许可证"></a>
+  <a href="https://github.com/yequ172672/oh-my-pi-cn/blob/main/LICENSE"><img src="https://img.shields.io/github/license/yequ172672/oh-my-pi-cn?style=flat&colorA=222222&colorB=58A6FF" alt="许可证"></a>
   <a href="https://www.typescriptlang.org"><img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat&colorA=222222&logo=typescript&logoColor=white" alt="TypeScript"></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/Rust-DEA584?style=flat&colorA=222222&logo=rust&logoColor=white" alt="Rust"></a>
   <a href="https://bun.sh"><img src="https://img.shields.io/badge/runtime-Bun-f472b6?style=flat&colorA=222222" alt="Bun"></a>
@@ -47,7 +47,7 @@
 > [!NOTE]
 > 本分支以简体中文本地化为维护重点，同时跟踪
 > [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi) 的核心能力更新。
-> 安装和更新请优先使用本仓库提供的 omp-cn 路径，以便保留官方 omp 与本分支并行使用的能力。
+> 安装和更新请使用本仓库提供的 omp-cn 路径。官方包和中文包都会提供 `omp` 命令，不能依靠 PATH 同时维护两套全局安装。
 
 ## 安装
 
@@ -63,7 +63,7 @@
 **macOS · Linux**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/yequ172672/oh-my-pi-cn/agent/zh-cn-localization/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/yequ172672/oh-my-pi-cn/main/scripts/install.sh | sh
 ```
 
 > **Alpine / musl：**预构建的 musl 二进制文件会动态链接 libstdc++/libgcc，而标准 Alpine 默认不提供它们。请先执行：apk add libstdc++ libgcc。
@@ -81,18 +81,18 @@ bun install -g omp-cn
 **Windows（PowerShell）**
 
 ```powershell
-irm https://raw.githubusercontent.com/yequ172672/oh-my-pi-cn/agent/zh-cn-localization/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/yequ172672/oh-my-pi-cn/main/scripts/install.ps1 | iex
 ```
 
 **固定版本（mise）**
 
 ```sh
-mise use -g github:yequ172672/oh-my-pi-cn
+mise use -g "github:yequ172672/oh-my-pi-cn[version_prefix=omp-cn-v]"
 ```
 
 支持 macOS、Linux、Windows，以及 bun ≥ 1.3.14。
 
-安装脚本默认使用 yequ172672/oh-my-pi-cn 分支和 omp-cn npm 包；如果 npm 包暂时不可用，会回退到 agent/zh-cn-localization 源码分支安装。
+安装脚本默认使用 `yequ172672/oh-my-pi-cn` 的 `main` 分支和 `omp-cn` npm 包。有可用 Bun 时直接安装 npm 包；没有 Bun 时优先安装同时通过 Release SHA-256 和精确版本校验的二进制，资产不可用时再安装 Bun 并走 npm。显式源码安装会保留完整 workspace，避免临时目录被删除后全局链接失效。
 
 ### Shell 补全
 
@@ -673,11 +673,14 @@ bun dev -- --version
 can1357/oh-my-pi 的实现和更新；涉及中文界面、提示、供应商向导与安装体验的改动，
 可直接在本分支提出。具体方式见 **[CONTRIBUTING.md](CONTRIBUTING.md)**。
 
+维护、上游同步、冲突处理、本地化适配、npm 发布和 GitHub Release 的操作说明见
+**[中文分支维护与发布流程](docs/MAINTENANCE.md)**。
+
 ## 分支维护与致谢
 
 - 分支维护者：yequ172672
 - B 站 ID：夜曲_flac
-- 当前维护分支：agent/zh-cn-localization
+- 当前维护分支：main
 - 上游项目：[can1357/oh-my-pi](https://github.com/can1357/oh-my-pi)
 - 上游原作者：Mario Zechner、Can Bölük
 - 本分支特色：简体中文界面与提示本地化、供应商设置与首次启动向导本地化，以及独立的
@@ -699,7 +702,8 @@ _为始终保持打开的终端而作_
 
 - [上游项目主页](https://omp.sh)
 - [GitHub 仓库](https://github.com/yequ172672/oh-my-pi-cn)
-- [变更日志](https://github.com/yequ172672/oh-my-pi-cn/blob/agent/zh-cn-localization/packages/coding-agent/CHANGELOG.md)
+- [中文分支变更日志](https://github.com/yequ172672/oh-my-pi-cn/blob/main/docs/FORK_CHANGELOG.md)
+- [上游包变更日志](https://github.com/yequ172672/oh-my-pi-cn/blob/main/packages/coding-agent/CHANGELOG.md)
 - [npm 软件包](https://www.npmjs.com/package/omp-cn)
 - [Discord 社区](https://discord.gg/4NMW9cdXZa)
-- [MIT 许可证](https://github.com/yequ172672/oh-my-pi-cn/blob/agent/zh-cn-localization/LICENSE)
+- [MIT 许可证](https://github.com/yequ172672/oh-my-pi-cn/blob/main/LICENSE)

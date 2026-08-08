@@ -543,6 +543,27 @@ async function runText(cwd: string, args: readonly string[], options: CommandOpt
 	return (await runChecked(cwd, args, options)).stdout;
 }
 
+export interface GitPlumbingOptions {
+	readonly readOnly?: boolean;
+	readonly signal?: AbortSignal;
+	readonly timeoutMs?: number;
+}
+
+/**
+ * Hardened escape hatch for repository-level infrastructure that needs Git
+ * plumbing not represented by a domain helper yet. It preserves the shared
+ * non-interactive environment, output bounds, timeout, and error semantics.
+ */
+export const plumbing = {
+	async result(cwd: string, args: readonly string[], options: GitPlumbingOptions = {}): Promise<GitCommandResult> {
+		ensureAvailable();
+		return git(cwd, args, options);
+	},
+	async text(cwd: string, args: readonly string[], options: GitPlumbingOptions = {}): Promise<string> {
+		return runText(cwd, args, options);
+	},
+};
+
 async function tryText(
 	cwd: string,
 	args: readonly string[],

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Separated the `omp-cn` distribution version from upstream workspace and native package versions, including schema-validated release metadata and fork-specific Git tags.
+
+### Fixed
+
+- Fixed fork updates requesting nonexistent same-version native packages when the `omp-cn` release version differs from its upstream native dependency.
+- Hardened fork installation and release packaging with verified artifacts, isolated smoke tests, and safe fallback behavior.
+
 ## [17.2.11] - 2026-08-07
 
 ### Added
