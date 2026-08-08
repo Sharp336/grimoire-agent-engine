@@ -282,9 +282,10 @@ class SessionList implements Component {
 	readonly #getTerminalRows: () => number;
 
 	onDeleteRequest?: (session: SessionInfo) => void;
-
 	#allSessions: SessionInfo[];
 	#showCwd: boolean;
+	#showRecentUserMessages: boolean;
+	#showGoalHistory: boolean;
 	readonly #historyMatcher?: SessionHistoryMatcher;
 	#historyMergeTimer: NodeJS.Timeout | undefined;
 	/** Re-render hook for async list updates (fuzzy scan chunks, history merge). */
@@ -315,12 +316,15 @@ class SessionList implements Component {
 		showCwd = false,
 		historyMatcher?: SessionHistoryMatcher,
 		getTerminalRows: () => number = () => 24,
+		showRecentUserMessages = true,
+		showGoalHistory = true,
 	) {
 		this.#getTerminalRows = getTerminalRows;
 		this.#allSessions = sessions;
 		this.#showCwd = showCwd;
 		this.#historyMatcher = historyMatcher;
-		this.#filteredSessions = sessions;
+		this.#showRecentUserMessages = showRecentUserMessages;
+		this.#showGoalHistory = showGoalHistory;
 		this.#searchInput = new Input();
 
 		// Handle Enter in search input - select current item
@@ -579,7 +583,10 @@ class SessionList implements Component {
 		for (let i = startIndex; i < endIndex; i++) {
 			const session = this.#filteredSessions[i];
 			const blockStart = sessionLines.length;
-			const normalizedMessage = (session.lastUserMessage ?? session.firstMessage).replace(/\n/g, " ").trim();
+			const previewText = this.#showRecentUserMessages
+				? (session.lastUserMessage ?? session.firstMessage)
+				: session.firstMessage;
+			const normalizedMessage = previewText.replace(/\n/g, " ").trim();
 			const isSelected = i === this.#selectedIndex;
 
 			// First line: cursor + title (or first message if no title)
@@ -609,10 +616,15 @@ class SessionList implements Component {
 			const dim = (s: string) => theme.fg("dim", s);
 			const dot = dim(theme.sep.dot);
 			const modified = formatDate(session.modified);
-			const lastSaid = session.lastUserMessageTimestamp
-				? ` ${dot} ${dim(`said ${formatDate(session.lastUserMessageTimestamp)}`)}`
-				: "";
-			let metadata = `  ${dim(modified)}${lastSaid} ${dot} ${dim(formatBytes(session.size))}`;
+			const lastSaid =
+				this.#showRecentUserMessages && session.lastUserMessageTimestamp
+					? ` ${dot} ${dim(`said ${formatDate(session.lastUserMessageTimestamp)}`)}`
+					: "";
+			const goalSummary =
+				this.#showGoalHistory && session.goalHistory?.length
+					? ` ${dot} ${dim(`goals ${session.goalHistory.length}`)}`
+					: "";
+			let metadata = `  ${dim(modified)}${lastSaid}${goalSummary} ${dot} ${dim(formatBytes(session.size))}`;
 			const status = formatSessionStatus(session.status);
 			if (status) {
 				metadata += ` ${dot} ${status}`;
@@ -746,6 +758,9 @@ export interface SessionSelectorOptions {
 	 * in-editor selector leaves it off and renders compactly.
 	 */
 	fillHeight?: boolean;
+	showRecentUserMessages?: boolean;
+	showGoalHistory?: boolean;
+	settings?: { get(key: string): unknown };
 }
 
 /**
@@ -815,11 +830,19 @@ export class SessionSelectorComponent extends Container {
 		// Create session list in folder scope; the empty-state hint invites the
 		// user to Tab into all-projects rather than silently surfacing other
 		// projects' history (issue #3099).
+		const showRecentUserMessages =
+			options.showRecentUserMessages ??
+			(options.settings?.get("display.showRecentUserMessages") as boolean | undefined) ??
+			true;
+		const showGoalHistory =
+			options.showGoalHistory ?? (options.settings?.get("display.showGoalHistory") as boolean | undefined) ?? true;
 		this.#sessionList = new SessionList(
 			sessions,
 			options.showCwd ?? false,
 			options.historyMatcher,
 			options.getTerminalRows,
+			showRecentUserMessages,
+			showGoalHistory,
 		);
 		// Every exit path cancels the list's pending history merge, so a stale
 		// debounce timer can never run its SQLite lookup after the picker closed.

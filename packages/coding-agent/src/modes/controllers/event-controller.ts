@@ -794,7 +794,8 @@ export class EventController {
 			const streamingComponent = createAssistantMessageComponent(this.ctx);
 			this.ctx.streamingComponent = streamingComponent;
 			this.ctx.streamingMessage = event.message;
-			const timestamp = createTimestampComponent(event.message.timestamp);
+			const showTimestamps = this.ctx.settings?.get?.("display.showTimestamps") ?? true;
+			const timestamp = createTimestampComponent(event.message.timestamp, showTimestamps);
 			this.ctx.present(timestamp ? [timestamp, streamingComponent] : streamingComponent);
 			this.#streamingReveal.begin(
 				streamingComponent,

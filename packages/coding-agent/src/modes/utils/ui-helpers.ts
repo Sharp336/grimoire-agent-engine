@@ -63,8 +63,11 @@ import {
 } from "./transcript-render-helpers";
 
 type TextBlock = { type: "text"; text: string };
-export function createTimestampComponent(timestamp: number | string | undefined): Text | undefined {
-	if (timestamp === undefined) return undefined;
+export function createTimestampComponent(
+	timestamp: number | string | undefined,
+	enabled: boolean = true,
+): Text | undefined {
+	if (!enabled || timestamp === undefined) return undefined;
 	const date = new Date(timestamp);
 	if (Number.isNaN(date.getTime())) return undefined;
 	return new Text(theme.fg("dim", date.toLocaleString()), 1, 0);
@@ -140,8 +143,9 @@ export class UiHelpers {
 	}
 
 	addMessageToChat(message: AgentMessage, options?: AddMessageOptions): Component[] {
+		const showTimestamps = this.ctx.settings?.get?.("display.showTimestamps") ?? true;
 		const presentTimestamped = (component: Component): Component[] => {
-			const timestamp = createTimestampComponent(message.timestamp);
+			const timestamp = createTimestampComponent(message.timestamp, showTimestamps);
 			const components = timestamp ? [timestamp, component] : [component];
 			this.ctx.present(components);
 			return components;
