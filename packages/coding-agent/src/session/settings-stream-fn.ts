@@ -54,8 +54,7 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 				model.api === "azure-openai-responses" ||
 				model.api === "openai-codex-responses") &&
 			model.compat !== undefined &&
-			"supportsReasoningSummary" in model.compat &&
-			model.compat.supportsReasoningSummary === true;
+			(!("supportsReasoningSummary" in model.compat) || model.compat.supportsReasoningSummary !== false);
 		const usesOpenAIReasoningSummaries =
 			supportsReasoningSummary &&
 			((model.api === "openai-responses" && model.provider === "openai") ||

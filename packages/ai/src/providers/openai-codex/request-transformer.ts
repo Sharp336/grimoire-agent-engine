@@ -164,7 +164,7 @@ function getReasoningConfig(
 		effort: effort === "none" ? "none" : mapCodexWireEffort(model, effort),
 	};
 	if (
-		model.compat.supportsReasoningSummary &&
+		model.compat.supportsReasoningSummary !== false &&
 		options.reasoningSummary !== undefined &&
 		options.reasoningSummary !== null &&
 		supportsCodexReasoningSummary(model.id)
