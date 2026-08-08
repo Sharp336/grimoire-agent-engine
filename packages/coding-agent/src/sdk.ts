@@ -214,6 +214,7 @@ import {
 import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
 import { ToolContextStore } from "./tools/context";
 import { isIrcEnabled } from "./tools/hub";
+import { expandTilde } from "./tools/path-utils";
 import { getImageGenTools } from "./tools/image-gen";
 import { wrapToolWithMetaNotice } from "./tools/output-meta";
 import { isAutoQaEnabled } from "./tools/report-tool-issue";
@@ -2156,8 +2157,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// additionalExtensionPaths named, resolved against cwd. Agent/skill
 		// discovery needs these directories (pack/agents/*.md), not the entry
 		// modules, and must keep resolving them after the construction-time
-		// withOmpExtensionRootScope is gone.
-		const explicitRoots = (options.additionalExtensionPaths ?? []).map(raw => path.resolve(cwd, raw));
+		// withOmpExtensionRootScope is gone. Tilde spellings (~/pack) expand
+		// like the extension loader does, so a stored root is never the
+		// literal "/repo/~/pack" (codex 3741885997).
+		const explicitRoots = (options.additionalExtensionPaths ?? []).map(raw => path.resolve(cwd, expandTilde(raw)));
 		toolSession.extensionRoots =
 			options.preloadedExtensionRoots ?? (explicitRoots.length > 0 ? explicitRoots : undefined);
 
