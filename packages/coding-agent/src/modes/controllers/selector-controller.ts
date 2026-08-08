@@ -407,7 +407,7 @@ export class SelectorController {
 				defaultModelPattern,
 			},
 			this.ctx.session.getExtensionDiscoveryMode,
-			this.ctx.session.extensionPaths,
+			this.ctx.session.extensionRoots,
 		);
 		const overlay = this.ctx.ui.showOverlay(dashboard, {
 			width: "100%",
@@ -724,7 +724,7 @@ export class SelectorController {
 		const discovery = await discoverAgents(this.ctx.sessionManager.getCwd(), undefined, {
 			includeExtensions: true,
 			extensionMode: this.ctx.session.getExtensionDiscoveryMode(),
-			extensionRoots: this.ctx.session.extensionPaths,
+			extensionRoots: this.ctx.session.extensionRoots,
 		});
 		const disabled = new Set((this.ctx.settings.get("task.disabledAgents") as string[] | undefined) ?? []);
 		const available = discovery.agents.filter(a => a.availability !== "subagent" && !disabled.has(a.name));

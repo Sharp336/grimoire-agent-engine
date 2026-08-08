@@ -314,6 +314,13 @@ export interface AgentSessionConfig {
 	 * these roots ship after the construction-time invocation scope is gone.
 	 */
 	extensionPaths?: string[];
+	/**
+	 * Explicit extension-package ROOT directories (resolved), distinct from
+	 * {@link extensionPaths} (entry files). Agent/skill discovery (task tool,
+	 * scout availability, live /agent, picker) needs these directories so
+	 * `pack/agents/*.md` keeps surfacing at task time.
+	 */
+	extensionRoots?: string[];
 }
 
 /** Options for AgentSession.prompt(). */

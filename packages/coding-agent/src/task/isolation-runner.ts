@@ -166,6 +166,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			...opts.baseOptions,
 			worktree: isolationDir,
 			preloadedExtensionPaths: undefined,
+			preloadedExtensionRoots: undefined,
 			preloadedCustomToolPaths: undefined,
 			onCleanupDeferred: completion => {
 				deferredCleanup = completion;

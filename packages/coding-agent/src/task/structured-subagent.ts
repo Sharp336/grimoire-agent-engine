@@ -254,7 +254,7 @@ export async function resolveEffectiveSubagentPolicy(
 	const discovery = await discoverAgents(request.session.cwd, undefined, {
 		includeExtensions: true,
 		extensionMode: request.session.getExtensionDiscoveryMode?.(),
-		extensionRoots: request.session.extensionPaths,
+		extensionRoots: request.session.extensionRoots,
 	});
 	const agent = getAgent(discovery.agents, agentName);
 	if (!agent) {
@@ -448,6 +448,7 @@ function buildExecutorOptions(
 		promptTemplates: session.promptTemplates,
 		rules: session.rules,
 		preloadedExtensionPaths: restrictToolNames ? [] : session.extensionPaths,
+		preloadedExtensionRoots: restrictToolNames ? [] : session.extensionRoots,
 		preloadedCustomToolPaths: restrictToolNames ? [] : session.customToolPaths,
 		localProtocolOptions,
 		parentArtifactManager: session.getArtifactManager?.() ?? undefined,

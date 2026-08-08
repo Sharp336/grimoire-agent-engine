@@ -1437,6 +1437,7 @@ export class VibeSessionRegistry {
 			promptTemplates: session.promptTemplates,
 			rules: session.rules,
 			preloadedExtensionPaths: session.extensionPaths,
+			preloadedExtensionRoots: session.extensionRoots,
 			preloadedCustomToolPaths: session.customToolPaths,
 			localProtocolOptions,
 			parentArtifactManager: session.getArtifactManager?.() ?? undefined,

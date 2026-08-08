@@ -636,6 +636,7 @@ export class AgentSession {
 	#setSessionSpawns: ((spawns: string) => void) | undefined;
 	#getExtensionDiscoveryMode: (() => "explicit-only" | "merge") | undefined;
 	#extensionPaths: string[] | undefined;
+	#extensionRoots: string[] | undefined;
 	#agentToolOverlay: { restore: () => Promise<void> } | undefined;
 	#cliToolsLocked = false;
 	#cliModelLocked = false;
@@ -1287,6 +1288,7 @@ export class AgentSession {
 		this.#setSessionSpawns = config.setSessionSpawns;
 		this.#getExtensionDiscoveryMode = config.getExtensionDiscoveryMode;
 		this.#extensionPaths = config.extensionPaths;
+		this.#extensionRoots = config.extensionRoots;
 		this.#cliToolsLocked = config.cliToolsLocked ?? false;
 		this.#cliModelLocked = config.cliModelLocked ?? false;
 		this.#cliThinkingLocked = config.cliThinkingLocked ?? false;
@@ -4325,6 +4327,11 @@ export class AgentSession {
 		return this.#extensionPaths;
 	}
 
+	/** Explicit extension-package ROOT directories (resolved), distinct from entry-file extensionPaths. */
+	get extensionRoots(): string[] | undefined {
+		return this.#extensionRoots;
+	}
+
 	/** Whether the edit tool is registered in this session. */
 	get hasEditTool(): boolean {
 		return this.#tools.hasEditTool;
@@ -4925,7 +4932,7 @@ export class AgentSession {
 		const agents = getDiscoveredAgentsSnapshot(
 			this.sessionManager.getCwd(),
 			this.getExtensionDiscoveryMode(),
-			this.extensionPaths,
+			this.extensionRoots,
 		);
 		if (agents === undefined) return true;
 		const scout = agents.find(agent => agent.name === "scout");
@@ -7725,7 +7732,7 @@ export class AgentSession {
 					const discovery = await discoverAgents(this.sessionManager.getCwd(), undefined, {
 						includeExtensions: true,
 						extensionMode: this.getExtensionDiscoveryMode(),
-						extensionRoots: this.extensionPaths,
+						extensionRoots: this.extensionRoots,
 					});
 					const persona =
 						discovery.agents.find(a => a.name === recorded.agent && a.source === recorded.source) ??

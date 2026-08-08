@@ -434,6 +434,13 @@ export interface ExecutorOptions {
 	 */
 	preloadedExtensionPaths?: string[];
 	/**
+	 * Parent's explicit extension-package ROOT directories (resolved),
+	 * distinct from {@link preloadedExtensionPaths} (entry files). Forwarded
+	 * so the subagent's agent/skill discovery keeps resolving
+	 * `pack/agents/*.md` after the parent's invocation scope is gone.
+	 */
+	preloadedExtensionRoots?: string[];
+	/**
 	 * Parent's discovered custom-tool source paths. Forwarded to skip the
 	 * `.omp/tools/` FS scan in the subagent; the subagent then re-binds each
 	 * tool against its own `CustomToolAPI` (cwd, exec, pushPendingAction, UI).
@@ -3038,6 +3045,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				workspaceTree: options.workspaceTree,
 				rules: options.rules,
 				preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
+				preloadedExtensionRoots: restrictToolNames ? [] : options.preloadedExtensionRoots,
 				preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
 				systemPrompt: defaultPrompt => {
 					const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {

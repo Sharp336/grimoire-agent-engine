@@ -310,4 +310,32 @@ describe("discoverAgents", () => {
 		// surface even though the global injected mode is still "merge".
 		expect(names).not.toEqual(expect.arrayContaining(["ambient-ext-agent", "loom-verify-spec"]));
 	});
+
+	test("extensionRoots resolves pack agents even when entry files would not", async () => {
+		// Codex 3741581909: session.extensionPaths holds ENTRY files
+		// (pack/index.ts); discovery roots must be the PACKAGE DIRECTORY
+		// (pack/), or listOmpExtensionRoots filters them as non-directories
+		// and pack/agents/*.md vanishes at task time.
+		const packRoot = path.join(tempHome, "explicit-pack");
+		await fs.mkdir(path.join(packRoot, "agents"), { recursive: true });
+		await fs.writeFile(
+			path.join(packRoot, "agents", "pack-agent.md"),
+			["---", "name: pack-agent", "description: from explicit pack agents dir", "---", "body"].join("\n"),
+		);
+
+		// Entry-file spelling alone must NOT surface the pack agent: the root
+		// lookup filters non-directories.
+		const { agents: viaEntry } = await discoverAgents(projectDir, tempHome, {
+			includeExtensions: true,
+			extensionRoots: [path.join(packRoot, "index.ts")],
+		});
+		expect(viaEntry.map(agent => agent.name)).not.toContain("pack-agent");
+
+		// Package-root spelling DOES surface it.
+		const { agents: viaRoot } = await discoverAgents(projectDir, tempHome, {
+			includeExtensions: true,
+			extensionRoots: [packRoot],
+		});
+		expect(viaRoot.map(agent => agent.name)).toContain("pack-agent");
+	});
 });

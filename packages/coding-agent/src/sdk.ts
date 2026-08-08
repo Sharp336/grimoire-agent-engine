@@ -28,6 +28,7 @@ import {
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import type { Component } from "@oh-my-pi/pi-tui";
+import * as path from "node:path";
 import { $env, $flag, getAgentDir, getProjectDir, logger, postmortem, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import {
@@ -457,6 +458,13 @@ export interface CreateAgentSessionOptions {
 	 * This is the safe pass-through for parent → subagent forwarding.
 	 */
 	preloadedExtensionPaths?: string[];
+	/**
+	 * Parent's explicit extension-package ROOT directories (resolved), distinct
+	 * from {@link preloadedExtensionPaths} (entry files). Forwarded so the
+	 * subagent's agent/skill discovery keeps resolving `pack/agents/*.md`
+	 * after the parent's invocation scope is gone.
+	 */
+	preloadedExtensionRoots?: string[];
 	/**
 	 * Pre-discovered custom-tool source paths from `.omp/tools/`, `.claude/tools/`,
 	 * plugins, etc. When provided, the filesystem-scan inside
@@ -2136,6 +2144,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Forward the source-path list (NOT the loaded instances) so subagents
 		// rebuild their own session-scoped extensions.
 		toolSession.extensionPaths = extensionPaths;
+		// Explicit package ROOTS (distinct from entry files above): what
+		// additionalExtensionPaths named, resolved against cwd. Agent/skill
+		// discovery needs these directories (pack/agents/*.md), not the entry
+		// modules, and must keep resolving them after the construction-time
+		// withOmpExtensionRootScope is gone.
+		const explicitRoots = (options.additionalExtensionPaths ?? []).map(raw => path.resolve(cwd, raw));
+		toolSession.extensionRoots =
+			options.preloadedExtensionRoots ?? (explicitRoots.length > 0 ? explicitRoots : undefined);
 
 		// Load inline extensions from factories
 		if (inlineExtensions.length > 0) {
@@ -2910,7 +2926,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Definitions the task tool actually advertises (same memoized discovery it
 		// renders): scout availability in the system prompt must match spawn
 		// reality, not just the name-based spawn policy.
-		const spawnableAgents = (await discoverAgentsForCreate(cwd, rootMode, extensionPaths)).agents;
+		const spawnableAgents = (await discoverAgentsForCreate(cwd, rootMode, toolSession.extensionRoots)).agents;
 		const rebuildSystemPrompt = async (
 			toolNames: string[],
 			tools: Map<string, AgentTool>,
@@ -3022,7 +3038,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				taskBatch: settings.get("task.batch"),
 				taskMaxConcurrency: settings.get("task.maxConcurrency"),
 				scoutAvailable: isSpawnableScoutInAgents(
-					getDiscoveredAgentsSnapshot(promptCwd, rootMode, extensionPaths) ?? spawnableAgents,
+					getDiscoveredAgentsSnapshot(promptCwd, rootMode, toolSession.extensionRoots) ?? spawnableAgents,
 					settings.get("task.disabledAgents") as string[] | undefined,
 					sessionSpawns,
 				),
@@ -3625,6 +3641,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getSessionSpawns: () => sessionSpawns,
 			getExtensionDiscoveryMode: () => rootMode,
 			extensionPaths,
+			extensionRoots: toolSession.extensionRoots,
 			setAgentPersona: (agent: AgentDefinition | undefined) => {
 				activeAgentPersona = agent;
 			},

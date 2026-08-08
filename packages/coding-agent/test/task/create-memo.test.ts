@@ -100,7 +100,7 @@ describe("TaskTool.create discovery memo", () => {
 
 		await TaskTool.create(createSession("/tmp"));
 		const rootedSession = createSession("/tmp");
-		rootedSession.extensionPaths = ["./pack"];
+		rootedSession.extensionRoots = ["./pack"];
 
 		await TaskTool.create(rootedSession);
 

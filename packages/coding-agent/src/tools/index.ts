@@ -191,6 +191,15 @@ export interface ToolSession {
 	 */
 	extensionPaths?: string[];
 	/**
+	 * Resolved explicit extension-package ROOT directories (e.g. `./pack` →
+	 * `/abs/pack`), distinct from {@link extensionPaths} (entry files like
+	 * `pack/index.ts`). Agent/skill discovery surfaces (task tool, scout
+	 * availability, spawn preflight, live /agent) must resolve these package
+	 * roots so `pack/agents/*.md` keeps surfacing after the construction-time
+	 * invocation scope is gone.
+	 */
+	extensionRoots?: string[];
+	/**
 	 * Pre-discovered custom-tool source paths from `.omp/tools/`, `.claude/tools/`,
 	 * plugins, etc. Forwarded to subagents so they skip the FS scan but still
 	 * re-bind tools to their own session-scoped `CustomToolAPI`.

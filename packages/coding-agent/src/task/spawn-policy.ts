@@ -104,7 +104,7 @@ export function scoutAvailableForSession(session: ToolSession): boolean {
 	const agents = getDiscoveredAgentsSnapshot(
 		session.cwd,
 		session.getExtensionDiscoveryMode?.(),
-		session.extensionPaths,
+		session.extensionRoots,
 	);
 	if (agents === undefined) return true;
 	const scout = agents.find(agent => agent.name === "scout");
