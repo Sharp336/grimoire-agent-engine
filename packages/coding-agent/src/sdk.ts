@@ -3340,6 +3340,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// line would restart its `(adv)` total at zero for the rest of the session.
 		const initialAdvisorCosts = await loadAdvisorTranscriptCosts(sessionManager.getSessionFile());
 		session = new AgentSession({
+			costGate: options.costGate,
 			advisorWatchdogPrompt,
 			advisorContextPrompt,
 			advisorSharedInstructions: discoveredAdvisors.sharedInstructions,
