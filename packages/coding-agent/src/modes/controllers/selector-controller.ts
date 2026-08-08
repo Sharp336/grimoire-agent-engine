@@ -1523,6 +1523,7 @@ export class SelectorController {
 				...selectorOptions,
 				getTerminalRows: () => this.ctx.ui.terminal.rows,
 				fillHeight: true,
+				settings: this.ctx.settings,
 			},
 		);
 		selector.setOnRequestRender(() => this.ctx.ui.requestRender());

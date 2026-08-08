@@ -1,11 +1,11 @@
 import { ProcessTerminal, TUI } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
+import { Settings } from "../config/settings";
 import { SessionSelectorComponent } from "../modes/components/session-selector";
 import { HistoryStorage } from "../session/history-storage";
 import type { SessionInfo } from "../session/session-listing";
 import { SessionManager } from "../session/session-manager";
 import { FileSessionStorage } from "../session/session-storage";
-
 /** Presentation and capability controls for the standalone session picker. */
 export interface SessionPickerOptions {
 	allSessions?: SessionInfo[];
@@ -31,7 +31,12 @@ export async function selectSession(
 	const ui = new TUI(new ProcessTerminal());
 	let resolved = false;
 	const storage = new FileSessionStorage();
-
+	let settings: Pick<Settings, "get"> | undefined;
+	try {
+		settings = await Settings.loadReadOnly();
+	} catch (error) {
+		logger.warn("Settings unavailable for session picker", { error: String(error) });
+	}
 	// Rank sessions with prompt-history matches too, recovering prompts the 4KB
 	// session-list prefix never sees. Best-effort: a missing/locked history.db
 	// must not break the picker.
@@ -80,11 +85,11 @@ export async function selectSession(
 				historyMatcher,
 				loadAllSessions: options.allowGlobalScope === false ? undefined : () => SessionManager.listAll(storage),
 				allSessions: options.allSessions,
-				getTerminalRows: () => ui.terminal.rows,
+				showCwd: options.showCwd,
+				settings,
 				fillHeight: true,
 				title: options.title,
 				scopeLabel: options.scopeLabel,
-				showCwd: options.showCwd,
 			},
 		);
 		return selector;

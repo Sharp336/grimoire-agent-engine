@@ -212,4 +212,27 @@ describe("session picker incremental search", () => {
 		expect(ids(rankSessionSearchMatches(sessions, "latest request"))).toEqual(["recent"]);
 		expect(ids(rankSessionSearchMatches(sessions, "ship timestamps"))).toEqual(["recent"]);
 	});
+
+	it("hides recent-message and goal metadata when disabled", () => {
+		const session = makeSession("hidden", {
+			firstMessage: "old request",
+			lastUserMessage: "latest request",
+			lastUserMessageTimestamp: new Date("2026-01-01T00:00:00.000Z"),
+			goalHistory: [{ text: "ship timestamps", timestamp: "2026-01-01T00:00:00.000Z", source: "initial" }],
+		});
+		const selector = new SessionSelectorComponent(
+			[session],
+			() => {},
+			() => {},
+			() => {},
+			{
+				showRecentUserMessages: false,
+				showGoalHistory: false,
+			},
+		);
+		const rendered = selector.render(120).join("\n");
+		expect(rendered).toContain("old request");
+		expect(rendered).not.toContain("latest request");
+		expect(rendered).not.toContain("goals 1");
+	});
 });
