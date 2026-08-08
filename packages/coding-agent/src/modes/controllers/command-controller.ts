@@ -1436,7 +1436,10 @@ export class CommandController {
 			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			if (message === "Handoff cancelled" || (error instanceof Error && error.name === "AbortError")) {
+			// `session.handoff()` normalizes genuine cancellations to this exact message; a
+			// provider error (even one named AbortError) is re-thrown verbatim so it surfaces
+			// as a real failure instead of a false "cancelled".
+			if (message === "Handoff cancelled") {
 				this.ctx.showError("Handoff cancelled");
 			} else {
 				this.ctx.showError(`Handoff failed: ${message}`);
