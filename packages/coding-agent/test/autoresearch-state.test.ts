@@ -432,7 +432,7 @@ function createCommandHarness(
 			if (result.code !== 0) throw new Error(result.stderr || "git status failed");
 			return result.stdout;
 		},
-		{ parse: git.status.parse, summary: git.status.summary },
+		{ parse: git.status.parse, summary: git.status.summary, divergence: () => Promise.resolve(null) },
 	);
 	vi.spyOn(git, "status").mockImplementation(mockStatus);
 	vi.spyOn(git.ref, "exists").mockImplementation(async (_workDir, refName) => {

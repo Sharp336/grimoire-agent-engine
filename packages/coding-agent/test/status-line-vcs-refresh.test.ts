@@ -11,7 +11,7 @@
  * requests a repaint via #onBranchChange. (Post-dispose suppression of the
  * same callback is covered by status-line-dispose-async-leak.test.ts.)
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { EventEmitter } from "node:events";
 import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
@@ -25,10 +25,18 @@ import type { GitHeadState, GitRefHead, GitRepository } from "@oh-my-pi/pi-codin
 import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
 import * as jj from "@oh-my-pi/pi-coding-agent/utils/jj";
 import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { $ } from "bun";
 
 type GitStatus = { staged: number; unstaged: number; untracked: number };
 
 const originalProjectDir = getProjectDir();
+
+beforeEach(() => {
+	// upstream-divergence rides the same throttled git refresh; resolved here so
+	// the controlled-promise timing of each test is not perturbed by a real
+	// subprocess. (Its value is not asserted in this file.)
+	vi.spyOn(git.status, "divergence").mockResolvedValue(null);
+});
 
 beforeAll(async () => {
 	resetSettingsForTest();
@@ -119,6 +127,107 @@ describe("StatusLineComponent repaints when an async VCS fetch resolves", () => 
 		expect(onBranchChange).toHaveBeenCalled();
 		component.dispose();
 	});
+
+	it("fires #onBranchChange when upstream divergence changes while git status stays identical", async () => {
+		// The divergence cache participates in the repaint decision on its own: a
+		// fetch that only moves the ahead/behind counters (git status unchanged)
+		// must still request a repaint so the new `↑N` reaches the screen
+		// without an unrelated re-render.
+		vi.spyOn(git.head, "resolveSync").mockReturnValue(fakeRefHead);
+		vi.spyOn(git.branch, "default").mockReturnValue(Promise.withResolvers<string | null>().promise);
+		const fixedStatus: GitStatus = { staged: 0, unstaged: 0, untracked: 0 };
+		vi.spyOn(git.status, "summary").mockResolvedValue(fixedStatus);
+		vi.spyOn(git.status, "divergence")
+			.mockResolvedValueOnce(null) // in sync on the cold paint
+			.mockResolvedValueOnce({ ahead: 2, behind: 0 }); // a later fetch introduced commits
+
+		let now = 1_000_000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		const onBranchChange = vi.fn();
+		const component = new StatusLineComponent(makeSession());
+		component.updateSettings(gitSegment);
+		component.watchBranch(onBranchChange);
+
+		component.getTopBorder(80); // cold paint: status same, divergence null
+		await Promise.resolve();
+		await Promise.resolve();
+		const callsAfterColdPaint = onBranchChange.mock.calls.length;
+
+		now += 1_001; // step past the 1s status-line throttle
+		component.getTopBorder(80); // refresh #2: status identical, divergence changed
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(onBranchChange.mock.calls.length).toBeGreaterThan(callsAfterColdPaint);
+		component.dispose();
+	});
+
+	it("skips the divergence subprocess when git.showRemote is disabled", async () => {
+		vi.spyOn(git.head, "resolveSync").mockReturnValue(fakeRefHead);
+		vi.spyOn(git.branch, "default").mockReturnValue(Promise.withResolvers<string | null>().promise);
+		const statusSpy = vi.spyOn(git.status, "summary").mockResolvedValue({ staged: 0, unstaged: 0, untracked: 0 });
+		const divSpy = vi.spyOn(git.status, "divergence").mockResolvedValue(null);
+
+		const component = new StatusLineComponent(makeSession());
+		component.updateSettings({ ...gitSegment, segmentOptions: { git: { showRemote: false } } });
+		component.watchBranch(vi.fn());
+		component.getTopBorder(80);
+		// Flush the (stubbed) status fetch: it must resolve and complete the
+		// throttled block *without* ever reaching the divergence subprocess.
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(statusSpy).toHaveBeenCalled();
+		expect(divSpy).not.toHaveBeenCalled();
+		component.dispose();
+	});
+
+	it("renders upstream divergence from a real repository in the top border", async () => {
+		// Real end-to-end (no mocks): a repo with unpushed commits must show `↑N`
+		// in the rendered top border once the throttled refresh resolves. Covers
+		// git.status.divergence -> component cache -> gitSegment.render together.
+		// We await #onBranchChange (the real git-fetch signal) rather than fake
+		// timers: completion depends on OS subprocesses that fake time cannot
+		// advance, so this is the rare case where an event-driven wait is right.
+		vi.restoreAllMocks(); // lift the beforeEach divergence stub for a real fetch
+
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-statusline-vcs-div-"));
+		const origin = path.join(dir, "origin.git");
+		const work = path.join(dir, "work");
+		try {
+			await $`git init --bare --initial-branch=main origin.git`.cwd(dir).quiet();
+			await $`git init --initial-branch=main work`.cwd(dir).quiet();
+			await $`git config user.email tester@example.com`.cwd(work).quiet();
+			await $`git config user.name Tester`.cwd(work).quiet();
+			await $`git config commit.gpgsign false`.cwd(work).quiet();
+			await $`git remote add origin ${origin}`.cwd(work).quiet();
+			await fs.writeFile(path.join(work, "a.txt"), "a");
+			await $`git add -A`.cwd(work).quiet();
+			await $`git commit -qm base`.cwd(work).quiet();
+			await $`git push -qu origin HEAD:main`.cwd(work).quiet();
+			await fs.writeFile(path.join(work, "b.txt"), "b");
+			await $`git add -A`.cwd(work).quiet();
+			await $`git commit -qm one`.cwd(work).quiet();
+			await fs.writeFile(path.join(work, "c.txt"), "c");
+			await $`git add -A`.cwd(work).quiet();
+			await $`git commit -qm two`.cwd(work).quiet();
+
+			setProjectDir(work);
+			const refreshDone = Promise.withResolvers<void>();
+			const component = new StatusLineComponent(makeSession());
+			component.updateSettings(gitSegment);
+			component.watchBranch(() => refreshDone.resolve());
+			component.getTopBorder(80); // cold paint starts the real refresh
+			await refreshDone.promise; // the real git fetch has resolved + cached
+			const border = Bun.stripANSI(component.getTopBorder(80).content);
+			expect(border).toContain("↑2");
+			component.dispose();
+		} finally {
+			setProjectDir(originalProjectDir);
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	}, 15_000);
 
 	it("fires #onBranchChange when the jj label resolves on the cold paint", async () => {
 		vi.spyOn(git.head, "resolveSync").mockReturnValue(null); // no git branch -> jj overlay

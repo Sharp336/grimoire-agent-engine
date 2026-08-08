@@ -315,8 +315,8 @@ const pathSegment: StatusLineSegment = {
 const gitSegment: StatusLineSegment = {
 	id: "git",
 	render(ctx) {
-		const { branch, status } = ctx.git;
-		if (!branch && !status) return { content: "", visible: false };
+		const { branch, status, remote } = ctx.git;
+		if (!branch && !status && !remote) return { content: "", visible: false };
 
 		const opts = ctx.options.git ?? {};
 		const gitStatus = status;
@@ -326,6 +326,24 @@ const gitSegment: StatusLineSegment = {
 		let content = "";
 		if (showBranch && branch) {
 			content = withIcon(theme.icon.branch, branch);
+		}
+
+		// Upstream divergence markers (`↑N` ahead / `↓N` behind) — a few extra
+		// glyphs after the branch so un-pushed / un-pulled state is visible at a
+		// glance. Only rendered when non-zero; adds nothing for in-sync branches.
+		if (opts.showRemote !== false && ctx.git.remote) {
+			const { ahead, behind } = ctx.git.remote;
+			const markers: string[] = [];
+			if (ahead > 0) markers.push(theme.fg("statusLineGitClean", `↑${ahead}`));
+			if (behind > 0) markers.push(theme.fg("statusLineGitDirty", `↓${behind}`));
+			if (markers.length > 0) {
+				const markerText = markers.join(" ");
+				if (!content && showBranch === false) {
+					content = withIcon(theme.icon.git, markerText);
+				} else {
+					content += content ? ` ${markerText}` : markerText;
+				}
+			}
 		}
 
 		// Add status indicators

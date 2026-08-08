@@ -17,7 +17,14 @@ export interface CollabStatus {
 export interface StatusLineSegmentOptions {
 	model?: { showThinkingLevel?: boolean };
 	path?: { abbreviate?: boolean; maxLength?: number; stripWorkPrefix?: boolean };
-	git?: { showBranch?: boolean; showStaged?: boolean; showUnstaged?: boolean; showUntracked?: boolean };
+	git?: {
+		showBranch?: boolean;
+		showStaged?: boolean;
+		showUnstaged?: boolean;
+		showUntracked?: boolean;
+		/** Appends compact upstream divergence (`↑N`/`↓N`) after the branch name. */
+		showRemote?: boolean;
+	};
 	time?: { format?: "12h" | "24h"; showSeconds?: boolean };
 }
 
@@ -109,6 +116,9 @@ export interface SegmentContext {
 	git: {
 		branch: string | null;
 		status: { staged: number; unstaged: number; untracked: number } | null;
+		/** Upstream divergence (`@{upstream}` diff). Absent when unknown (no
+		 *  upstream, jj workspace, or the refresh has not resolved). */
+		remote?: { ahead: number; behind: number } | null;
 		pr: { number: number; url: string } | null;
 	};
 	/**

@@ -37,6 +37,16 @@ export interface GitStatusSummary {
 	untracked: number;
 }
 
+/**
+ * How many commits the current branch has drifted from its configured upstream
+ * (`@{upstream}`): `ahead` = local commits not on the remote, `behind` =
+ * remote commits not yet pulled. Both are 0 when the branch is in sync.
+ */
+export interface GitDivergence {
+	ahead: number;
+	behind: number;
+}
+
 export type HunkSelection = {
 	path: string;
 	hunks: { type: "all" } | { type: "indices"; indices: number[] } | { type: "lines"; start: number; end: number };
@@ -1318,6 +1328,28 @@ export const status = Object.assign(
 		},
 		/** Parse porcelain status text into counts. */
 		parse: parseStatusPorcelain,
+		/**
+		 * Divergence of HEAD from its configured upstream (`@{upstream}`), or
+		 * `null` when the branch has no upstream, HEAD is detached, or the repo
+		 * is bare — cases where there is nothing to compare against. This is a
+		 * local plumbing query (no network), so it is safe on the status-line
+		 * refresh cadence.
+		 */
+		async divergence(cwd: string, signal?: AbortSignal): Promise<GitDivergence | null> {
+			const result = await git(cwd, ["rev-list", "--left-right", "--count", "@{upstream}...HEAD"], {
+				readOnly: true,
+				signal,
+			});
+			if (result.exitCode !== 0) return null;
+			// `--left-right --count A...B` prints "<A-only> <B-only>" (one line):
+			// the first number counts commits reachable from the first listed
+			// ref but not the second, and vice versa. With A=`@{upstream}`,
+			// B=`HEAD`: first = behind, second = ahead. (Verified: an
+			// ahead=2/behind=0 branch prints "0 2".)
+			const [behind, ahead] = result.stdout.trim().split(/\s+/).map(Number);
+			if (!Number.isFinite(behind) || !Number.isFinite(ahead)) return null;
+			return ahead > 0 || behind > 0 ? { ahead, behind } : null;
+		},
 	},
 );
 
