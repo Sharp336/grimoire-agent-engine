@@ -112,10 +112,18 @@ function isGoogleVertexAuthenticatedModel(model: Model<Api>): boolean {
  */
 function isLeakedThinkingHealExempt(model: Model<Api>): boolean {
 	switch (model.provider) {
-		case "anthropic":
-			// Mirror resolveAnthropicBaseUrl: Foundry redirects an empty baseUrl to
-			// FOUNDRY_BASE_URL, so exempt only when the effective endpoint is official.
-			return isOfficialAnthropicApiUrl((isFoundryEnabled() && $env.FOUNDRY_BASE_URL?.trim()) || model.baseUrl);
+		case "anthropic": {
+			// Mirror resolveAnthropicBaseUrl's effective endpoint: Foundry redirects
+			// an empty baseUrl to FOUNDRY_BASE_URL; otherwise an explicit non-official
+			// model.baseUrl wins, then the ANTHROPIC_BASE_URL gateway fallback, then
+			// the official default. Exempt only when the effective endpoint is official.
+			if (isFoundryEnabled()) {
+				const foundry = $env.FOUNDRY_BASE_URL?.trim();
+				if (foundry) return isOfficialAnthropicApiUrl(foundry);
+			}
+			if (model.baseUrl && !isOfficialAnthropicApiUrl(model.baseUrl)) return false;
+			return isOfficialAnthropicApiUrl($env.ANTHROPIC_BASE_URL?.trim() || model.baseUrl);
+		}
 		case "openai":
 			return isOfficialOpenAIApiUrl(model.baseUrl);
 		case "openai-codex":

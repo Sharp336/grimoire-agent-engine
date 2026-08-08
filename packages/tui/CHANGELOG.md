@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [17.2.11] - 2026-08-07
+
+### Fixed
+
+- Fixed an issue where Herdr panes lost native terminal scrollback during TUI transcript replacements or resize redraws.
+- Fixed an issue inside tmux where explicit display resets retained stale light/dark palettes and leaked terminal capability bytes into the editor.
+
 ## [17.2.10] - 2026-08-06
 
 ### Fixed
