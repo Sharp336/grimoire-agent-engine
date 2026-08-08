@@ -9,11 +9,9 @@ const loginVolcengineCodingPlan = createApiKeyLogin({
 	promptMessage: "Paste your Volcengine API key",
 	placeholder: "sk-...",
 	validation: {
-		kind: "anthropic-messages",
+		kind: "models-endpoint",
 		provider: "Volcengine Coding Plan",
-		baseUrl: "https://ark.cn-beijing.volces.com/api/coding",
-		model: "doubao-seed-2.1-turbo",
-		authStyle: "bearer",
+		modelsUrl: "https://ark.cn-beijing.volces.com/api/coding/v3/models",
 	},
 });
 

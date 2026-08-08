@@ -1769,14 +1769,11 @@ export interface VolcengineCodingPlanModelManagerConfig {
 
 export function volcengineCodingPlanModelManagerOptions(
 	config?: VolcengineCodingPlanModelManagerConfig,
-): ModelManagerOptions<"anthropic-messages"> {
-	return createSimpleAnthropicProviderOptions(
+): ModelManagerOptions<"openai-responses"> {
+	return createSimpleOpenAIResponsesOptions(
 		"volcengine-coding-plan",
-		"https://ark.cn-beijing.volces.com/api/coding",
-		{
-			...config,
-			authStyle: "bearer",
-		},
+		"https://ark.cn-beijing.volces.com/api/coding/v3",
+		config,
 	);
 }
 
@@ -1792,14 +1789,11 @@ export interface VolcengineAgentPlanModelManagerConfig {
 
 export function volcengineAgentPlanModelManagerOptions(
 	config?: VolcengineAgentPlanModelManagerConfig,
-): ModelManagerOptions<"anthropic-messages"> {
-	return createSimpleAnthropicProviderOptions(
+): ModelManagerOptions<"openai-responses"> {
+	return createSimpleOpenAIResponsesOptions(
 		"volcengine-agent-plan",
-		"https://ark.cn-beijing.volces.com/api/plan",
-		{
-			...config,
-			authStyle: "bearer",
-		},
+		"https://ark.cn-beijing.volces.com/api/plan/v3",
+		config,
 	);
 }
 
