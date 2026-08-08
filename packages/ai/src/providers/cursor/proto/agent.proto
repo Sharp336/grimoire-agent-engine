@@ -417,6 +417,7 @@ message ToolCall {
       TruncatedToolCall truncated_tool_call = 34;
       StartGrindExecutionToolCall start_grind_execution_tool_call = 35;
       StartGrindPlanningToolCall start_grind_planning_tool_call = 36;
+      WebFetchToolCall web_fetch_tool_call = 37;
       PiReadToolCall pi_read_tool_call = 61;
       PiBashToolCall pi_bash_tool_call = 62;
       PiEditToolCall pi_edit_tool_call = 63;
@@ -883,6 +884,7 @@ message InteractionQuery {
       ExaFetchRequestQuery exa_fetch_request_query = 6;
       CreatePlanRequestQuery create_plan_request_query = 7;
       SetupVmEnvironmentArgs setup_vm_environment_args = 8;
+      WebFetchRequestQuery web_fetch_request_query = 9;
    }
 }
 
@@ -896,6 +898,7 @@ message InteractionResponse {
       ExaFetchRequestResponse exa_fetch_request_response = 6;
       CreatePlanRequestResponse create_plan_request_response = 7;
       SetupVmEnvironmentResult setup_vm_environment_result = 8;
+      WebFetchRequestResponse web_fetch_request_response = 9;
    }
 }
 
@@ -1826,6 +1829,59 @@ message FetchSuccess {
 message FetchError {
    string url = 1;
    string error = 2;
+}
+
+message WebFetchArgs {
+   string url = 1;
+   string tool_call_id = 2;
+}
+
+message WebFetchResult {
+   oneof result {
+      WebFetchSuccess success = 1;
+      WebFetchError error = 2;
+      WebFetchRejected rejected = 3;
+   }
+}
+
+message WebFetchSuccess {
+   string url = 1;
+   string markdown = 2;
+   optional OutputLocation output_location = 3;
+}
+
+message WebFetchError {
+   string url = 1;
+   string error = 2;
+}
+
+message WebFetchRejected {
+   string reason = 1;
+}
+
+message WebFetchToolCall {
+   WebFetchArgs args = 1;
+   WebFetchResult result = 2;
+}
+
+message WebFetchRequestQuery {
+   WebFetchArgs args = 1;
+   bool skip_approval = 2;
+   optional SmartModeApproval smart_mode_approval = 3;
+}
+
+message WebFetchRequestResponse {
+   oneof result {
+      WebFetchRequestResponse_Approved approved = 1;
+      WebFetchRequestResponse_Rejected rejected = 2;
+   }
+}
+
+message WebFetchRequestResponse_Approved {
+}
+
+message WebFetchRequestResponse_Rejected {
+   string reason = 1;
 }
 
 message GenerateImageArgs {

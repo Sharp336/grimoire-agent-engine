@@ -12,6 +12,9 @@ import {
 	AgentServerMessageSchema,
 	AgentStoreConflictErrorSchema,
 	AgentStoreConflictResultSchema,
+	AskQuestionInteractionResponseSchema,
+	AskQuestionRejectedSchema,
+	AskQuestionResultSchema,
 	AssistantMessageSchema,
 	BackgroundShellSpawnResultSchema,
 	CanvasDiagnosticsErrorSchema,
@@ -26,6 +29,9 @@ import {
 	ConversationStateStructureSchema,
 	ConversationStepSchema,
 	ConversationTurnStructureSchema,
+	CreatePlanErrorSchema,
+	CreatePlanRequestResponseSchema,
+	CreatePlanResultSchema,
 	DeleteErrorSchema,
 	DeleteRejectedSchema,
 	DeleteResultSchema,
@@ -34,6 +40,10 @@ import {
 	DiagnosticsRejectedSchema,
 	DiagnosticsResultSchema,
 	DiagnosticsSuccessSchema,
+	ExaFetchRequestResponse_ApprovedSchema,
+	ExaFetchRequestResponseSchema,
+	ExaSearchRequestResponse_ApprovedSchema,
+	ExaSearchRequestResponseSchema,
 	ExecClientControlMessageSchema,
 	type ExecClientMessage,
 	ExecClientMessageSchema,
@@ -59,6 +69,8 @@ import {
 	GrepSuccessSchema,
 	type GrepUnionResult,
 	GrepUnionResultSchema,
+	type InteractionQuery,
+	InteractionResponseSchema,
 	KvClientMessageSchema,
 	type KvServerMessage,
 	ListMcpResourcesErrorSchema,
@@ -109,6 +121,8 @@ import {
 	SelectedContextSchema,
 	SelectedImageSchema,
 	SetBlobResultSchema,
+	SetupVmEnvironmentResultSchema,
+	SetupVmEnvironmentSuccessSchema,
 	ShellAllowlistPrecheckResultSchema,
 	type ShellArgs,
 	ShellFailureSchema,
@@ -128,11 +142,17 @@ import {
 	SubagentAwaitResultSchema,
 	SubagentErrorSchema,
 	SubagentResultSchema,
+	SwitchModeRequestResponse_RejectedSchema,
+	SwitchModeRequestResponseSchema,
 	ThinkingMessageSchema,
 	ToolCallSchema,
 	UserMessageActionSchema,
 	UserMessageSchema,
 	WebFetchAllowlistPrecheckResultSchema,
+	WebFetchRequestResponse_ApprovedSchema,
+	WebFetchRequestResponseSchema,
+	WebSearchRequestResponse_ApprovedSchema,
+	WebSearchRequestResponseSchema,
 	WriteErrorSchema,
 	WriteRejectedSchema,
 	WriteResultSchema,
@@ -909,6 +929,15 @@ export async function handleServerMessage(
 		);
 	} else if (msgCase === "conversationCheckpointUpdate") {
 		handleConversationCheckpointUpdate(msg.message.value, output, usageState, onConversationCheckpoint);
+	} else if (msgCase === "interactionQuery") {
+		// Server is blocked on InteractionResponse (permission / UX gate). Same
+		// local-work attribution as exec so the idle watchdog does not fire while
+		// we handle the query.
+		await stream.trackLocalWork(
+			handleInteractionQuery(msg.message.value as InteractionQuery, h2Request, output, stream),
+		);
+	} else if (!msgCase) {
+		log("warn", "unknownServerMessage", { hasValue: msg.message.value != null });
 	}
 }
 
@@ -2078,6 +2107,9 @@ async function handleExecServerMessage(
 			return;
 		}
 		case "webFetchAllowlistPrecheckArgs": {
+			// Same policy as shell/mcp allowlists: this client keeps no allowlist, so
+			// the answer is always no. WebFetch permission is handled separately via
+			// `interactionQuery` / `webFetchRequestQuery` (approve there, not here).
 			sendExecClientMessage(
 				h2Request,
 				execMsg,
@@ -2145,6 +2177,167 @@ async function handleExecServerMessage(
 			);
 		}
 	}
+}
+
+/**
+ * Answer an `InteractionQuery`.
+ *
+ * These are permission / UX gates: the server waits on `InteractionResponse`
+ * before continuing the AgentRun. Dropping the frame (the previous behaviour)
+ * produces the intermittent pre-dispatch hang — heartbeats only, until the
+ * idle watchdog fires ~300s later.
+ */
+async function handleInteractionQuery(
+	queryMsg: InteractionQuery,
+	h2Request: http2.ClientHttp2Stream,
+	output: AssistantMessage,
+	_stream: AssistantMessageEventStream,
+): Promise<void> {
+	const queryCase = queryMsg.query.case;
+	log("interactionQuery", queryCase, queryMsg.query.value);
+
+	switch (queryCase) {
+		case "webFetchRequestQuery": {
+			const url = queryMsg.query.value?.args?.url;
+			log("info", "webFetchApproved", { id: queryMsg.id, url });
+			sendInteractionResponse(h2Request, queryMsg.id, {
+				case: "webFetchRequestResponse",
+				value: create(WebFetchRequestResponseSchema, {
+					result: {
+						case: "approved",
+						value: create(WebFetchRequestResponse_ApprovedSchema, {}),
+					},
+				}),
+			});
+			return;
+		}
+		case "webSearchRequestQuery": {
+			sendInteractionResponse(h2Request, queryMsg.id, {
+				case: "webSearchRequestResponse",
+				value: create(WebSearchRequestResponseSchema, {
+					result: {
+						case: "approved",
+						value: create(WebSearchRequestResponse_ApprovedSchema, {}),
+					},
+				}),
+			});
+			return;
+		}
+		case "exaSearchRequestQuery": {
+			sendInteractionResponse(h2Request, queryMsg.id, {
+				case: "exaSearchRequestResponse",
+				value: create(ExaSearchRequestResponseSchema, {
+					result: {
+						case: "approved",
+						value: create(ExaSearchRequestResponse_ApprovedSchema, {}),
+					},
+				}),
+			});
+			return;
+		}
+		case "exaFetchRequestQuery": {
+			sendInteractionResponse(h2Request, queryMsg.id, {
+				case: "exaFetchRequestResponse",
+				value: create(ExaFetchRequestResponseSchema, {
+					result: {
+						case: "approved",
+						value: create(ExaFetchRequestResponse_ApprovedSchema, {}),
+					},
+				}),
+			});
+			return;
+		}
+		case "askQuestionInteractionQuery": {
+			const reason = "Ask-question prompts are not supported in this client.";
+			sendInteractionResponse(h2Request, queryMsg.id, {
+				case: "askQuestionInteractionResponse",
+				value: create(AskQuestionInteractionResponseSchema, {
+					result: create(AskQuestionResultSchema, {
+						result: {
+							case: "rejected",
+							value: create(AskQuestionRejectedSchema, { reason }),
+						},
+					}),
+				}),
+			});
+			return;
+		}
+		case "switchModeRequestQuery": {
+			const reason = "Mode switches are not supported in this client.";
+			sendInteractionResponse(h2Request, queryMsg.id, {
+				case: "switchModeRequestResponse",
+				value: create(SwitchModeRequestResponseSchema, {
+					result: {
+						case: "rejected",
+						value: create(SwitchModeRequestResponse_RejectedSchema, { reason }),
+					},
+				}),
+			});
+			return;
+		}
+		case "createPlanRequestQuery": {
+			const error = "Create-plan is not supported in this client.";
+			sendInteractionResponse(h2Request, queryMsg.id, {
+				case: "createPlanRequestResponse",
+				value: create(CreatePlanRequestResponseSchema, {
+					result: create(CreatePlanResultSchema, {
+						result: {
+							case: "error",
+							value: create(CreatePlanErrorSchema, { error }),
+						},
+					}),
+				}),
+			});
+			return;
+		}
+		case "setupVmEnvironmentArgs": {
+			// Proto only models success; rejecting would require an unmodeled
+			// variant. Acknowledge so the server is not stranded, then surface a
+			// soft warning in logs — VM setup is a no-op for local omp.
+			log("warn", "setupVmEnvironmentQueryAcked", { id: queryMsg.id });
+			sendInteractionResponse(h2Request, queryMsg.id, {
+				case: "setupVmEnvironmentResult",
+				value: create(SetupVmEnvironmentResultSchema, {
+					result: {
+						case: "success",
+						value: create(SetupVmEnvironmentSuccessSchema, {}),
+					},
+				}),
+			});
+			return;
+		}
+		default: {
+			// Unknown / unmodeled oneof (future Cursor fields). We cannot craft a
+			// typed InteractionResponse without the matching result field, so fail
+			// the turn fast instead of hanging for the idle timeout.
+			const detail = queryCase
+				? `Unhandled Cursor interaction query: ${queryCase}`
+				: `Unhandled Cursor interaction query (id=${queryMsg.id}; unknown proto field)`;
+			log("warn", "unknownInteractionQuery", { id: queryMsg.id, queryCase });
+			output.stopReason = "error";
+			output.errorMessage = detail;
+			try {
+				h2Request.close();
+			} catch {
+				/* ignore */
+			}
+			return;
+		}
+	}
+}
+
+function sendInteractionResponse(
+	h2Request: http2.ClientHttp2Stream,
+	id: number,
+	result: NonNullable<import("@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb").InteractionResponse["result"]>,
+): void {
+	const response = create(InteractionResponseSchema, { id, result });
+	const clientMessage = create(AgentClientMessageSchema, {
+		message: { case: "interactionResponse", value: response },
+	});
+	const responseBytes = toBinary(AgentClientMessageSchema, clientMessage);
+	h2Request.write(frameConnectMessage(responseBytes));
+	log("interactionResponse", result.case, { id });
 }
 
 /**
