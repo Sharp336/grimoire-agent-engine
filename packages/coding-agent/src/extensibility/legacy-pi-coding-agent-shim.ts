@@ -15,7 +15,7 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { type AuthCredential, SqliteAuthCredentialStore, type TSchema } from "@oh-my-pi/pi-ai";
 import { piEscapeRegexLiteral, piJoinPath } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
 import { getKeybindings, type Keybinding, Text } from "@oh-my-pi/pi-tui";
@@ -46,6 +46,12 @@ import {
 	truncateHead,
 	truncateTail,
 } from "../session/streaming-output";
+import type { SessionEntry } from "../session/session-entries";
+import {
+	createBranchSummaryMessage,
+	createCompactionSummaryMessage,
+	createCustomMessage,
+} from "../session/messages";
 import type { Tool, ToolSession } from "../tools";
 import { BashTool } from "../tools/bash";
 import { GlobTool } from "../tools/glob";
@@ -1414,6 +1420,154 @@ export function readStoredCredential(provider: string): AuthCredential | undefin
 	return storage.get(provider);
 }
 
+// Legacy pi package-root helpers pi-fabric and other extensions import that
+// OMP's barrel does not forward. Implemented against OMP's own session/skills
+// primitives so the behavior matches what pi's equivalents would produce.
+
+/**
+ * Format skills as the Agent Skills XML block pi emits in the system prompt
+ * (https://agentskills.io/integrate-skills). OMP's `Skill.hide` carries the
+ * same meaning as pi's `disableModelInvocation`: loaded and reachable, but
+ * excluded from the model-visible listing.
+ */
+export function formatSkillsForPrompt(skills: readonly Skill[]): string {
+	const visibleSkills = skills.filter(skill => !skill.hide);
+	if (visibleSkills.length === 0) return "";
+	const lines = [
+		"\n\nThe following skills provide specialized instructions for specific tasks.",
+		"Use the read tool to load a skill's file when the task matches its description.",
+		"",
+		"<available_skills>",
+	];
+	for (const skill of visibleSkills) {
+		lines.push("  <skill>");
+		lines.push(`    <name>${escapeSkillXml(skill.name)}</name>`);
+		lines.push(`    <description>${escapeSkillXml(skill.description)}</description>`);
+		lines.push(`    <location>${escapeSkillXml(skill.filePath)}</location>`);
+		lines.push("  </skill>");
+	}
+	lines.push("</available_skills>");
+	return lines.join("\n");
+}
+
+function escapeSkillXml(value: string): string {
+	return value
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&apos;");
+}
+
+/** A `<skill>` block parsed from message text (pi's `ParsedSkillBlock`). */
+export interface ParsedSkillBlock {
+	name: string;
+	location: string;
+	content: string;
+	userMessage?: string;
+}
+
+/**
+ * Parse a skill block from message text. Returns null when the text does not
+ * contain a well-formed `<skill name=... location=...>` block.
+ */
+export function parseSkillBlock(text: string): ParsedSkillBlock | null {
+	const match = text.match(/^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]+))?$/);
+	if (!match) return null;
+	return {
+		name: match[1],
+		location: match[2],
+		content: match[3],
+		userMessage: match[4]?.trim() || undefined,
+	};
+}
+
+/**
+ * Convert one session entry into the context messages pi's compaction layer
+ * feeds back into the model. Mirrors pi's `sessionEntryToContextMessages` over
+ * OMP's session entry types (same factories the OMP context rebuild uses).
+ */
+export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage[] {
+	if (entry.type === "message") {
+		const message = entry.message;
+		// Session files are parsed without validation; old versions, forks, or
+		// hand-edited files can contain messages with null/missing content.
+		if (
+			(message.role === "user" || message.role === "assistant" || message.role === "toolResult") &&
+			message.content == null
+		) {
+			return [{ ...message, content: [] }];
+		}
+		return [message];
+	}
+	if (entry.type === "custom_message") {
+		return [createCustomMessage(entry.customType, entry.content ?? [], entry.display, entry.details, entry.timestamp)];
+	}
+	if (entry.type === "branch_summary" && entry.summary) {
+		return [createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp)];
+	}
+	if (entry.type === "compaction") {
+		return [createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp)];
+	}
+	return [];
+}
+
+// Serialize file mutations targeting the same file; operations on different
+// files still run in parallel. Port of pi's `withFileMutationQueue`.
+const fileMutationQueues = new Map<string, Promise<void>>();
+let fileMutationRegistrationQueue: Promise<void> = Promise.resolve();
+
+function isMissingPathError(error: unknown): boolean {
+	return (
+		typeof error === "object" &&
+		error !== null &&
+		"code" in error &&
+		(error.code === "ENOENT" || error.code === "ENOTDIR")
+	);
+}
+
+async function getFileMutationQueueKey(filePath: string): Promise<string> {
+	const resolvedPath = path.resolve(filePath);
+	try {
+		return await fs.promises.realpath(resolvedPath);
+	} catch (error) {
+		if (isMissingPathError(error)) return resolvedPath;
+		throw error;
+	}
+}
+
+/**
+ * Serialize file mutation operations targeting the same file. Operations for
+ * different files still run in parallel.
+ */
+export async function withFileMutationQueue<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
+	const registration = fileMutationRegistrationQueue.then(async () => {
+		const key = await getFileMutationQueueKey(filePath);
+		const currentQueue = fileMutationQueues.get(key) ?? Promise.resolve();
+		let releaseNext!: () => void;
+		const nextQueue = new Promise<void>(resolveQueue => {
+			releaseNext = resolveQueue;
+		});
+		const chainedQueue = currentQueue.then(() => nextQueue);
+		fileMutationQueues.set(key, chainedQueue);
+		return { key, currentQueue, chainedQueue, releaseNext };
+	});
+	fileMutationRegistrationQueue = registration.then(
+		() => undefined,
+		() => undefined,
+	);
+	const { key, currentQueue, chainedQueue, releaseNext } = await registration;
+	await currentQueue;
+	try {
+		return await fn();
+	} finally {
+		releaseNext();
+		if (fileMutationQueues.get(key) === chainedQueue) {
+			fileMutationQueues.delete(key);
+		}
+	}
+}
+
 // Pi SDK path helpers. `export * from "../index"` above only forwards
 // `getAgentDir`; `getProjectDir` (a `@oh-my-pi/pi-utils` helper) and
 // `getPackageDir` are absent from that barrel, so legacy extensions importing
@@ -1444,7 +1598,15 @@ export function getPackageDir(): string {
 // `@oh-my-pi/pi-agent-core/compaction`, and the coding-agent barrel below does
 // not forward them, so legacy extensions importing them fail Bun's static
 // export check during validation (issues #6583, #7174, #7403).
-export { compact, estimateTokens, serializeConversation } from "@oh-my-pi/pi-agent-core/compaction";
+// `DEFAULT_COMPACTION_SETTINGS` and `calculateContextTokens` sit in the same
+// module and are imported by pi-fabric (issue #7933 follow-on).
+export {
+	calculateContextTokens,
+	compact,
+	DEFAULT_COMPACTION_SETTINGS,
+	estimateTokens,
+	serializeConversation,
+} from "@oh-my-pi/pi-agent-core/compaction";
 
 // Same barrel gap for two more legacy package-root exports: pi re-exported the
 // `CONFIG_DIR_NAME` constant and the CLI parser `parseArgs`. In omp
