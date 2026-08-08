@@ -8,6 +8,8 @@
 - `applyToolOverlay` primitive extracted on AgentSession, generalizing the snapshot/apply/restore pattern shared by plan mode, plan-yolo, print-mode, and agent-selection. ([#6836](https://github.com/can1357/oh-my-pi/issues/6836))
 ### Fixed
 
+- Fixed task/system prompts advertising `scout` subagents when the resolved scout definition is `mode: primary` (user/project shadowing): scout availability is now computed from the filtered spawnable definitions, not just the name-based spawn policy, across the task description, spawn advisories, system prompt, plan/workflow notices, and the ast-grep/glob/grep tool descriptions.
+- Fixed `/agent` (and SDK `switchAgentPersona`) silently succeeding when the persona's `model:` frontmatter does not resolve (typo, disabled provider, missing extension model): the switch now fails before recording the persona change instead of keeping the previous model.
 - Fixed resume/fork cache and persona persistence edge cases for the main-session persona: a recorded persona that can no longer be rehydrated (definition deleted, disabled, or switched to subagent-only) now invalidates the inherited provider prompt-cache key, and a legacy `agent_change` entry without a content fingerprint is treated as changed so an explicit `--agent` resume records the applied persona/model/thinking instead of rehydrating stale values.
 ### Breaking Changes
 

@@ -165,9 +165,10 @@ import {
 	projectSystemPromptToolMetadata,
 } from "./system-prompt";
 import { fingerprintAgentContent, resolveAgentSessionPolicy } from "./task/agent-policy";
+import { discoverAgentsForCreate } from "./task/index";
 import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
-import { isScoutSpawnable } from "./task/spawn-policy";
+import { isSpawnableScoutInAgents } from "./task/spawn-policy";
 import type { AgentDefinition, StructuredSubagentSchemaMode } from "./task/types";
 import {
 	AUTO_THINKING,
@@ -2904,6 +2905,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const eagerTasksAlways = settings.get("task.eager") === "always";
 		const intentField = $flag("PI_INTENT_TRACING", settings.get("tools.intentTracing")) ? INTENT_FIELD : undefined;
 		const includeWorkspaceTree = settings.get("includeWorkspaceTree") ?? false;
+		// Definitions the task tool actually advertises (same memoized discovery it
+		// renders): scout availability in the system prompt must match spawn
+		// reality, not just the name-based spawn policy.
+		const spawnableAgents = (await discoverAgentsForCreate(cwd)).agents;
 		const rebuildSystemPrompt = async (
 			toolNames: string[],
 			tools: Map<string, AgentTool>,
@@ -3014,7 +3019,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				eagerTasksAlways,
 				taskBatch: settings.get("task.batch"),
 				taskMaxConcurrency: settings.get("task.maxConcurrency"),
-				scoutAvailable: isScoutSpawnable(
+				scoutAvailable: isSpawnableScoutInAgents(
+					spawnableAgents,
 					settings.get("task.disabledAgents") as string[] | undefined,
 					sessionSpawns,
 				),
@@ -3559,7 +3565,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			initialAdvisorCosts,
 			settings,
 			autoApprove: options.autoApprove,
-			scoutAllowedBySpawnPolicy: isScoutSpawnable(undefined, sessionSpawns),
+			scoutAllowedBySpawnPolicy: isSpawnableScoutInAgents(
+				spawnableAgents,
+				settings.get("task.disabledAgents") as string[] | undefined,
+				sessionSpawns,
+			),
 			evalKernelOwnerId,
 			// Defined only for top-level sessions (creation is gated above).
 			// AgentSession uses this to decide whether it may dispose the global

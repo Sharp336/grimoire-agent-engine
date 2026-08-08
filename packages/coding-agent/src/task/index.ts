@@ -27,8 +27,13 @@ import { TASK_EFFORTS, type TaskEffort } from "../thinking";
 import { truncateForPrompt } from "../tools/approval";
 import { isIrcEnabled } from "../tools/hub";
 import { formatBytes, formatDuration } from "../tools/render-utils";
+import {
+	clearDiscoveredAgentSnapshots,
+	getDiscoveredAgentsSnapshot,
+	setDiscoveredAgentsSnapshot,
+} from "./discovery-snapshot";
 import { isReadOnlyAgent } from "./read-only-policy";
-import { isScoutSpawnable, resolveSpawnPolicy } from "./spawn-policy";
+import { isSpawnableScoutInAgents, resolveSpawnPolicy } from "./spawn-policy";
 import {
 	type AgentDefinition,
 	type AgentProgress,
@@ -159,13 +164,17 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		const allowed = new Set(spawnPolicy.allowedAgents);
 		filteredAgents = filteredAgents.filter(agent => allowed.has(agent.name));
 	}
+	// Scout availability must reflect the filtered definition set, not just the
+	// name-based spawn policy: a `mode: primary` scout is removed above, and
+	// advertising it would steer the model into spawn attempts that preflight
+	// rejects.
+	const scoutAvailable = isSpawnableScoutInAgents(filteredAgents, options.disabledAgents, options.parentSpawns);
 	const renderedAgents = filteredAgents.map(agent => ({
 		name: agent.name,
 		description: agent.description,
 		readOnly: isReadOnlyAgent(agent),
 		blocking: agent.blocking === true,
 	}));
-	const scoutAvailable = isScoutSpawnable(options.disabledAgents, options.parentSpawns);
 	return prompt.render(taskDescriptionTemplate, {
 		agents: renderedAgents,
 		scoutAvailable,
@@ -454,24 +463,39 @@ class TaskJobError extends Error {}
  * swap that binding, which invalidates both caches automatically.
  */
 const discoveryMemo = new Map<string, Promise<DiscoveryResult>>();
-const discoverySnapshots = new Map<string, AgentDefinition[]>();
 let discoveryMemoFn: typeof discoverAgents | undefined;
 
-function discoverAgentsForCreate(cwd: string): Promise<DiscoveryResult> {
+/**
+ * Memoized agent discovery for a cwd, shared with `TaskTool.create`. Returns
+ * the same cached definitions snapshot the task tool renders, so prompt-side
+ * scout availability is always computed from the same set spawn preflight
+ * resolves against.
+ */
+export function discoverAgentsForCreate(cwd: string): Promise<DiscoveryResult> {
 	const fn = discoverAgents;
 	if (discoveryMemoFn !== fn) {
 		discoveryMemoFn = fn;
 		discoveryMemo.clear();
-		discoverySnapshots.clear();
+		clearDiscoveredAgentSnapshots();
 	}
 	const key = path.resolve(cwd);
 	let pending = discoveryMemo.get(key);
 	if (!pending) {
 		pending = fn(cwd);
 		discoveryMemo.set(key, pending);
-		pending.catch(() => {
-			if (discoveryMemo.get(key) === pending) discoveryMemo.delete(key);
-		});
+		// Two-arg then: both branches run on the memoized promise itself, so a
+		// rejection is consumed here and never leaves an unhandled derived
+		// promise behind.
+		pending.then(
+			({ agents }) => {
+				if (discoveryMemo.get(key) === pending) {
+					setDiscoveredAgentsSnapshot(cwd, agents);
+				}
+			},
+			() => {
+				if (discoveryMemo.get(key) === pending) discoveryMemo.delete(key);
+			},
+		);
 	}
 	return pending;
 }
@@ -483,7 +507,7 @@ export async function refreshAgentDiscovery(cwd: string): Promise<void> {
 	const pending = discoverAgentsForCreate(cwd);
 	const { agents } = await pending;
 	if (discoveryMemo.get(key) === pending) {
-		discoverySnapshots.set(key, agents);
+		setDiscoveredAgentsSnapshot(cwd, agents);
 	}
 }
 
@@ -603,7 +627,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
 		const isolationMode = this.session.settings.get("task.isolation.mode");
 		return renderDescription({
-			agents: discoverySnapshots.get(path.resolve(this.session.cwd)) ?? this.#discoveredAgents,
+			agents: getDiscoveredAgentsSnapshot(this.session.cwd) ?? this.#discoveredAgents,
 			isolationEnabled: !planMode && isolationMode !== "none",
 			applyIsolatedChanges: this.session.settings.get("task.isolation.apply"),
 			disabledAgents,
@@ -624,6 +648,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 	#isBatchEnabled(): boolean {
 		return this.session.settings.get("task.batch");
+	}
+
+	#isScoutAvailable(): boolean {
+		const disabledAgents = this.session.settings.get("task.disabledAgents") as string[] | undefined;
+		return isSpawnableScoutInAgents(
+			getDiscoveredAgentsSnapshot(this.session.cwd) ?? this.#discoveredAgents,
+			disabledAgents,
+			this.session.getSessionSpawns?.() ?? "*",
+		);
 	}
 
 	#getSpawnSemaphore(): Semaphore {
@@ -750,10 +783,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						depthCapacity,
 						ircEnabled,
 						willRunAsync: false,
-						scoutAvailable: isScoutSpawnable(
-							this.session.settings.get("task.disabledAgents") as string[] | undefined,
-							this.session.getSessionSpawns?.() ?? "*",
-						),
+						scoutAvailable: this.#isScoutAvailable(),
 					});
 			const result = await this.#executeSyncFanout(
 				toolCallId,
@@ -787,10 +817,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					depthCapacity,
 					ircEnabled,
 					willRunAsync: asyncItems.length > 0,
-					scoutAvailable: isScoutSpawnable(
-						this.session.settings.get("task.disabledAgents") as string[] | undefined,
-						this.session.getSessionSpawns?.() ?? "*",
-					),
+					scoutAvailable: this.#isScoutAvailable(),
 				});
 		// Returns a fresh result (copied content array, copied text part) rather
 		// than mutating the caller's — task results are short-lived here, but an

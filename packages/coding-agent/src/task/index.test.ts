@@ -109,4 +109,30 @@ describe("renderDescription agent filtering", () => {
 		expect(description).toContain("### all-agent");
 		expect(description).not.toContain("### disabled-agent");
 	});
+
+	it("does not advertise scout when the resolved scout definition is primary-only", async () => {
+		// A user/project `mode: primary` scout shadows the bundled one, so the
+		// name-based spawn policy alone would advertise a scout every spawn
+		// preflight rejects. The description must reflect the filtered set.
+		const primaryScout = {
+			name: "scout",
+			description: "User-invocable only",
+			systemPrompt: "",
+			availability: "primary" as const,
+			source: "project",
+		} satisfies AgentDefinition;
+
+		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({
+			agents: [primaryScout, allAgent],
+			projectAgentsDir: null,
+		});
+
+		const tool = await TaskTool.create(makeSession("*"));
+		const description = tool.description;
+
+		expect(description).toContain("### all-agent");
+		expect(description).not.toContain("### scout");
+		expect(description).not.toContain('agent: "scout"');
+		expect(description).not.toContain("Read-only research MUST use");
+	});
 });

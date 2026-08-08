@@ -6607,8 +6607,22 @@ export class AgentSession {
 			// 3. Model (skipped when the CLI explicitly selected the model)
 			if (!this.#cliModelLocked && policy.modelPatterns?.length) {
 				const resolved = resolveModelOverride(policy.modelPatterns, this.modelRegistry, this.settings);
-				if (resolved.model) await this.setModel(resolved.model, "default");
-				if (resolved.thinkingLevel && !policy.thinkingLevel) this.setThinkingLevel(resolved.thinkingLevel);
+				if (resolved.model) {
+					await this.setModel(resolved.model, "default");
+					if (resolved.thinkingLevel && !policy.thinkingLevel) this.setThinkingLevel(resolved.thinkingLevel);
+				} else {
+					// The persona declares a model that does not resolve (typo,
+					// disabled provider, missing extension model). `/agent`
+					// promises to apply the persona's model policy; silently
+					// keeping the previous model would persist an agent_change
+					// claiming the switch succeeded while the session runs on
+					// the wrong model. Fail before any persona change is
+					// recorded (the catch below rolls back the tool overlay).
+					throw new Error(
+						`Agent "${agent.name}" declares model "${policy.modelPatterns.join(", ")}" which does not resolve. ` +
+							`Fix the model: frontmatter or run "omp models" to see available models.`,
+					);
+				}
 				if (resolved.warning) this.emitNotice("warning", resolved.warning);
 			}
 			// 4. Thinking (skipped when the CLI explicitly selected thinking)

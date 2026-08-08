@@ -770,6 +770,36 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("rejects a persona switch when the persona model does not resolve", async () => {
+		const tempDir = makeTempDir();
+		const sessionManager = SessionManager.inMemory();
+		const { session } = await createAgentSession({ ...baseOptions(tempDir), sessionManager });
+		try {
+			const personaBefore = session.agentPersona;
+			const toolsBefore = session.getEnabledToolNames();
+			const modelBefore = session.model;
+
+			await expect(
+				session.switchAgentPersona({
+					name: "unresolved-model-target",
+					description: "Target persona",
+					systemPrompt: "",
+					model: ["zzz-no-such-provider/zzz-no-such-model"],
+					source: "project" as const,
+				}),
+			).rejects.toThrow(/declares model "zzz-no-such-provider\/zzz-no-such-model" which does not resolve/);
+
+			// The failed switch must not have mutated persona, tools, or model,
+			// and must not have recorded an agent_change.
+			expect(session.agentPersona).toBe(personaBefore);
+			expect(session.getEnabledToolNames()).toEqual(toolsBefore);
+			expect(session.model).toBe(modelBefore);
+			expect(sessionManager.buildSessionContext().agentPersona).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("keeps explicit CLI tool/model/thinking selections across a persona switch", async () => {
 		const tempDir = makeTempDir();
 		// A reasoning-capable model so the thinking-level assertion is meaningful:
