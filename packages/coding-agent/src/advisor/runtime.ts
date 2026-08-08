@@ -5,7 +5,8 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { raceWithSignal } from "@oh-my-pi/pi-ai/utils/abort";
 import { type CursorExecResolvedCarrier, kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { logger } from "@oh-my-pi/pi-utils";
-import { obfuscateToolArguments, type SecretObfuscator } from "../secrets/obfuscator";
+import { obfuscateToolArguments } from "../secrets/message-transform";
+import type { SecretObfuscator } from "../secrets/obfuscator";
 import {
 	formatExecutionSourcePreview,
 	formatSessionHistoryMarkdown,

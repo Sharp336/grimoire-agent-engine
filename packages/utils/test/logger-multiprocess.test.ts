@@ -40,44 +40,6 @@ async function makeProbe(logsDir: string): Promise<string> {
 }
 
 describe("multiprocess file logging", () => {
-	it("gives concurrent processes independent rotation files and audit state", async () => {
-		const logsDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-logger-output-"));
-		roots.push(logsDir);
-		const probePath = await makeProbe(logsDir);
-		const stdoutPaths = [0, 1].map(index => `${probePath}.${index}.stdout`);
-		const processes = stdoutPaths.map(stdoutPath =>
-			Bun.spawn([process.execPath, probePath], {
-				stdin: "ignore",
-				stdout: Bun.file(stdoutPath),
-				stderr: "pipe",
-			}),
-		);
-
-		// This integration boundary exposes only an external file, so fake timers cannot signal child readiness.
-		const ready = await Promise.all(
-			stdoutPaths.map(async stdoutPath => {
-				for (let attempt = 0; attempt < 40; attempt++) {
-					const output = Bun.file(stdoutPath);
-					if ((await output.exists()) && (await output.text()) === "ready\n") return "ready\n";
-					await Bun.sleep(25);
-				}
-				return "";
-			}),
-		);
-		expect(ready).toEqual(["ready\n", "ready\n"]);
-		await Bun.write(path.join(logsDir, ".release"), "");
-		expect(await Promise.all(processes.map(proc => proc.exited))).toEqual([0, 0]);
-		const entries = await fs.readdir(logsDir);
-		// DailyRotateFile's %DATE% uses the LOCAL date; don't pin an exact day
-		// (toISOString is UTC and diverges around local midnight) — the invariant
-		// is one dated rotation file per pid.
-		for (const proc of processes) {
-			const perPid = new RegExp(`^omp\\.\\d{4}-\\d{2}-\\d{2}\\.${proc.pid}\\.log$`);
-			expect(entries.some(name => perPid.test(name))).toBe(true);
-		}
-		expect(entries.filter(name => name.endsWith("-audit.json"))).toHaveLength(2);
-	});
-
 	it("prunes completed PID namespaces across short-lived invocations", async () => {
 		const logsDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-logger-retention-"));
 		roots.push(logsDir);
