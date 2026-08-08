@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import shutil
 import signal
@@ -16,6 +17,8 @@ from typing import cast
 
 from omp_rpc import (
     AgentEndEvent,
+    ExtensionAskDialogResultItem,
+    ExtensionAskDialogSubmitResult,
     ExtensionUiRequest,
     RpcClient,
     RpcCommandError,
@@ -277,6 +280,11 @@ FAKE_SERVER = textwrap.dedent(
     last_assistant_text = None
     session_mode = "none"
     plan_state = {"mode": "none"}
+    advertised_session_capabilities = {
+        capability["id"]: capability
+        for capability in capability_manifest.get("sessionHost", {}).get("capabilities", [])
+        if isinstance(capability, dict) and isinstance(capability.get("id"), str)
+    }
 
     for raw_line in sys.stdin:
         raw_line = raw_line.strip()
@@ -310,16 +318,60 @@ FAKE_SERVER = textwrap.dedent(
                 "get_capabilities",
                 capability_manifest,
             )
-        elif command_type == "initialize":
-            requested = command.get("requestedCapabilities", [])
+        elif command_type == "context_get":
             respond(
                 request_id,
-                "initialize",
+                "context_get",
                 {
-                    "ok": True,
-                    "profile": {"name": "omp.session", "major": 3, "minor": 0},
-                    "framingVersion": 1,
-                    "capabilities": [
+                    "snapshot": {
+                        "revision": 3,
+                        "sessionId": "fake-session",
+                        "leafId": "leaf-1",
+                        "sources": [
+                            {
+                                "id": "source-1",
+                                "category": "stored",
+                                "kind": "message",
+                                "visibility": {
+                                    "persisted": True,
+                                    "display": True,
+                                    "model": True,
+                                },
+                                "inclusion": {
+                                    "included": True,
+                                    "reason": "active-branch",
+                                },
+                            }
+                        ],
+                        "relations": [],
+                        "systemPrompt": {"logicalSources": [], "rendered": []},
+                    },
+                    "bounds": {
+                        "maxSources": command["maxSources"] if command.get("maxSources") is not None else 256,
+                        "maxRelations": command["maxRelations"] if command.get("maxRelations") is not None else 512,
+                        "maxContentBytes": (
+                            command["maxContentBytes"] if command.get("maxContentBytes") is not None else 262144
+                        ),
+                    },
+                    "returned": {
+                        "sources": 1,
+                        "relations": 0,
+                        "contentBytes": 0,
+                    },
+                    "truncated": {
+                        "sources": False,
+                        "relations": False,
+                        "content": False,
+                    },
+                },
+            )
+        elif command_type == "initialize":
+            requested = command.get("requestedCapabilities", [])
+            negotiated_capabilities = []
+            for capability_id in requested:
+                advertised = advertised_session_capabilities.get(capability_id)
+                if advertised is None:
+                    negotiated_capabilities.append(
                         {
                             "id": capability_id,
                             "version": 0,
@@ -332,8 +384,17 @@ FAKE_SERVER = textwrap.dedent(
                                 "message": "Capability is not advertised",
                             },
                         }
-                        for capability_id in requested
-                    ],
+                    )
+                else:
+                    negotiated_capabilities.append(dict(advertised))
+            respond(
+                request_id,
+                "initialize",
+                {
+                    "ok": True,
+                    "profile": {"name": "omp.session", "major": 3, "minor": 0},
+                    "framingVersion": 1,
+                    "capabilities": negotiated_capabilities,
                     "hostCapabilities": command["hostCapabilities"],
                 },
             )
@@ -343,6 +404,13 @@ FAKE_SERVER = textwrap.dedent(
                 "session_open",
                 {
                     "subscriptionId": "subscription-1",
+                    "replayComplete": True,
+                    "durableCursor": {
+                        "sessionId": "fake-session",
+                        "leafId": "leaf-1",
+                        "entryId": "entry-4",
+                    },
+                    "watermark": {"epoch": "epoch-1", "sequence": 4},
                     "snapshot": {
                         "sessionId": "fake-session",
                         "revision": 4,
@@ -386,16 +454,16 @@ FAKE_SERVER = textwrap.dedent(
             respond(request_id, command_type, {})
         elif command_type == "session_invoke":
             nested = command["command"]
+            result = {"kind": nested["kind"]}
+            if "idempotencyKey" in nested:
+                result["idempotencyKey"] = nested["idempotencyKey"]
             respond(
                 request_id,
                 "session_invoke",
                 {
                     "outcome": "completed",
-                    "revision": nested["expectedRevision"] + 1,
-                    "result": {
-                        "kind": nested["kind"],
-                        "idempotencyKey": nested["idempotencyKey"],
-                    },
+                    "revision": nested.get("expectedRevision", 0) + 1,
+                    "result": result,
                 },
             )
         elif command_type == "artifact_describe":
@@ -843,6 +911,76 @@ FAKE_SERVER = textwrap.dedent(
             if message == "needs confirm":
                 print(json.dumps({"type": "extension_ui_request", "id": "ui-2", "method": "confirm", "title": "Confirm", "message": "Continue?"}), flush=True)
                 continue
+            if message == "needs progress":
+                print(
+                    json.dumps(
+                        {
+                            "type": "extension_ui_request",
+                            "id": "ui-progress",
+                            "method": "progress",
+                            "message": "Working",
+                        }
+                    ),
+                    flush=True,
+                )
+                emit_prompt_turn("progress acknowledged")
+                continue
+            if message == "needs approval":
+                print(
+                    json.dumps(
+                        {
+                            "type": "extension_ui_request",
+                            "id": "ui-approval",
+                            "method": "approval",
+                            "title": "Approve write",
+                            "toolCallId": "tool-call-approval",
+                            "toolName": "edit",
+                            "operation": "write",
+                            "approvalMode": "write",
+                            "resolvedPolicy": "prompt",
+                            "policySource": "mode",
+                            "declarationPolicy": "prompt",
+                            "escalationReason": "write requires approval",
+                            "providerSafety": {
+                                "required": True,
+                                "checks": ["workspace"],
+                            },
+                            "choices": ["Approve", "Deny"],
+                            "defaultChoice": "Deny",
+                        }
+                    ),
+                    flush=True,
+                )
+                continue
+            if message == "needs ask":
+                print(
+                    json.dumps(
+                        {
+                            "type": "extension_ui_request",
+                            "id": "ui-ask",
+                            "method": "ask",
+                            "questions": [
+                                {
+                                    "id": "scope",
+                                    "question": "Which scope?",
+                                    "header": "Scope",
+                                    "options": [
+                                        {
+                                            "label": "Workspace",
+                                            "description": "Current workspace",
+                                            "preview": "workspace files",
+                                        },
+                                        {"label": "Home"},
+                                    ],
+                                    "multi": False,
+                                    "recommended": 0,
+                                }
+                            ],
+                        }
+                    ),
+                    flush=True,
+                )
+                continue
             if message == "needs privileged confirm":
                 print(
                     json.dumps(
@@ -924,7 +1062,18 @@ FAKE_SERVER = textwrap.dedent(
                 )
                 continue
             if message == "notifications":
-                print(json.dumps({"type": "extension_error", "extensionPath": "/tmp/ext.py", "event": "run", "error": "boom"}), flush=True)
+                print(
+                    json.dumps(
+                        {
+                            "type": "extension_error",
+                            "extensionPath": "/tmp/ext.py",
+                            "event": "run",
+                            "error": "boom",
+                            "futureField": {"safeToIgnore": True},
+                        }
+                    ),
+                    flush=True,
+                )
                 print(json.dumps({"type": "unknown_future_event", "value": 1}), flush=True)
             emit_prompt_turn(
                 "pong",
@@ -1499,6 +1648,16 @@ OPERATION_SERVER = textwrap.dedent(
                 "code": "prompt_scheduling_failed",
                 "settledAt": sequence + 0.5,
             }
+        elif command["message"] == "shutdown terminal":
+            terminal = {
+                "type": "operation_cancelled",
+                "operationId": operation_id,
+                "requestId": request_id,
+                "command": "prompt",
+                "reason": "shutdown",
+                "code": "session_shutdown",
+                "settledAt": sequence + 0.5,
+            }
         else:
 
             print(json.dumps({"type": "agent_start"}), flush=True)
@@ -1633,6 +1792,22 @@ class RpcClientTests(unittest.TestCase):
             self.assertEqual(result.output, "hello\n")
             self.assertEqual(result.exit_code, 0)
 
+    def test_get_context_returns_typed_bounded_projection(self) -> None:
+        with self.make_client() as client:
+            context = client.get_context(
+                max_sources=3,
+                max_relations=4,
+                max_content_bytes=5,
+            )
+
+        self.assertEqual(context.snapshot["sessionId"], "fake-session")
+        self.assertEqual(context.bounds.max_sources, 3)
+        self.assertEqual(context.bounds.max_relations, 4)
+        self.assertEqual(context.bounds.max_content_bytes, 5)
+        self.assertEqual(context.returned.sources, 1)
+        self.assertEqual(context.returned.content_bytes, 0)
+        self.assertFalse(context.truncated.content)
+
     def test_explicit_rpc_v3_startup_negotiates_without_silent_downgrade(self) -> None:
         options = RpcV3ClientOptions(
             requested_capabilities=("future.capability",),
@@ -1659,10 +1834,11 @@ class RpcClientTests(unittest.TestCase):
         options = RpcV3ClientOptions(
             requested_capabilities=(
                 "session.observe",
-                "session.mutate",
-                "artifact.transfer",
+                "session.execute",
+                "session.shutdown",
+                "artifact.read",
                 "resource.lifecycle",
-                "runtime.provenance",
+                "runtime-provenance",
                 "collaboration",
             )
         )
@@ -1670,6 +1846,23 @@ class RpcClientTests(unittest.TestCase):
         observation_received = threading.Event()
 
         with self.make_client(rpc_v3=options) as client:
+            negotiation = client.rpc_v3_negotiation
+            assert negotiation is not None
+            self.assertEqual(
+                [capability.id for capability in negotiation.capabilities],
+                [
+                    "session.observe",
+                    "session.execute",
+                    "session.shutdown",
+                    "artifact.read",
+                    "resource.lifecycle",
+                    "runtime-provenance",
+                    "collaboration",
+                ],
+            )
+            self.assertTrue(
+                all(capability.supported for capability in negotiation.capabilities)
+            )
             client.on_session_observation(
                 lambda event: (
                     observations.append(event),
@@ -1678,6 +1871,11 @@ class RpcClientTests(unittest.TestCase):
             )
             opened = client.open_session(snapshot=True)
             self.assertEqual(opened.subscription_id, "subscription-1")
+            self.assertTrue(opened.replay_complete)
+            assert opened.durable_cursor is not None
+            assert opened.watermark is not None
+            self.assertEqual(opened.durable_cursor.entry_id, "entry-4")
+            self.assertEqual(opened.watermark.sequence, 4)
             assert opened.snapshot is not None
             self.assertEqual(opened.snapshot.revision, 4)
             self.assertTrue(observation_received.wait(1))
@@ -1694,6 +1892,10 @@ class RpcClientTests(unittest.TestCase):
             self.assertEqual(outcome.outcome, "completed")
             self.assertEqual(outcome.revision, 5)
             self.assertEqual(outcome.result["idempotencyKey"], "idempotency-1")
+            default_outcome = client.invoke_session(SessionCommand(kind="get_state"))
+            self.assertEqual(default_outcome.outcome, "completed")
+            self.assertEqual(default_outcome.result, {"kind": "get_state"})
+            self.assertTrue(default_outcome.has_result)
             client.unsubscribe_session(opened.subscription_id)
 
             descriptor = client.describe_artifact("artifact-1")
@@ -1734,6 +1936,15 @@ class RpcClientTests(unittest.TestCase):
 
             settlement = client.shutdown_session()
             self.assertEqual(settlement.state, "settled")
+
+    def test_session_invoke_rejects_nonfinite_json_locally(self) -> None:
+        client = self.make_client()
+        with self.assertRaises(RpcError):
+            client.invoke_session(
+                SessionCommand(kind="set_state", input={"values": [math.nan, math.inf]})
+            )
+
+
     def test_explicit_rpc_v3_startup_raises_typed_incompatibility(self) -> None:
         options = RpcV3ClientOptions(requested_capabilities=("session.observe",))
 
@@ -1956,6 +2167,17 @@ class RpcClientTests(unittest.TestCase):
 
         self.assertEqual(turn.events, ())
         self.assertEqual(terminal_types, ["operation_failed"])
+
+    def test_prompt_shutdown_cancellation_terminal_is_typed(self) -> None:
+        terminal_types: list[str] = []
+        with self.make_client(OPERATION_SERVER) as client:
+            client.on_operation_terminal(
+                lambda event: terminal_types.append(event.type)
+            )
+            turn = client.prompt_and_wait("shutdown terminal", timeout=2.0)
+
+        self.assertEqual(turn.events, ())
+        self.assertEqual(terminal_types, ["operation_cancelled"])
 
     def test_operation_state_is_current_for_listeners_and_malformed_terminal(
         self,
@@ -2227,6 +2449,44 @@ class RpcClientTests(unittest.TestCase):
             client.send_ui_value(request.id, "approved")
             client.wait_for_idle(timeout=2.0)
 
+    def test_v3_ui_progress_approval_and_ask_round_trip(self) -> None:
+        with self.make_client() as client:
+            client.prompt("needs progress")
+            progress = client.next_ui_request(timeout=2.0)
+            self.assertEqual(progress.method, "progress")
+            self.assertTrue(progress.is_passive())
+            client.wait_for_idle(timeout=2.0)
+
+            client.prompt("needs approval")
+            approval = client.next_ui_request(timeout=2.0)
+            self.assertEqual(approval.method, "approval")
+            self.assertEqual(approval.tool_call_id, "tool-call-approval")
+            self.assertEqual(approval.choices, ("Approve", "Deny"))
+            client.send_ui_approval(approval.id, "approve")
+            client.wait_for_idle(timeout=2.0)
+
+            client.prompt("needs ask")
+            ask = client.next_ui_request(timeout=2.0)
+            self.assertEqual(ask.method, "ask")
+            self.assertIsNotNone(ask.questions)
+            assert ask.questions is not None
+            self.assertEqual(ask.questions[0].id, "scope")
+            client.send_ui_ask(
+                ask.id,
+                ExtensionAskDialogSubmitResult(
+                    results=(
+                        ExtensionAskDialogResultItem(
+                            id="scope",
+                            question="Which scope?",
+                            options=("Workspace", "Home"),
+                            multi=False,
+                            selected_options=("Workspace",),
+                        ),
+                    )
+                ),
+            )
+            client.wait_for_idle(timeout=2.0)
+
     def test_install_headless_ui_cancels_interactive_requests(self) -> None:
         seen_methods: list[str] = []
 
@@ -2237,6 +2497,24 @@ class RpcClientTests(unittest.TestCase):
             client.prompt_and_wait("needs ui", timeout=2.0)
 
         self.assertEqual(seen_methods, ["input"])
+
+    def test_install_headless_ui_handles_v3_interactions_fail_closed(self) -> None:
+        seen_methods: list[str] = []
+        with self.make_client() as client:
+            client.install_headless_ui(
+                on_request=lambda request: seen_methods.append(request.method)
+            )
+            progress = client.prompt_and_wait("needs progress", timeout=2.0)
+            approval = client.prompt_and_wait("needs approval", timeout=2.0)
+            ask = client.prompt_and_wait("needs ask", timeout=2.0)
+
+        self.assertEqual(
+            seen_methods,
+            ["progress", "approval", "ask"],
+        )
+        self.assertEqual(progress.require_assistant_text(), "progress acknowledged")
+        self.assertEqual(approval.require_assistant_text(), "ui acknowledged")
+        self.assertEqual(ask.require_assistant_text(), "ui acknowledged")
 
     def test_install_headless_ui_preserves_privileged_correlation(self) -> None:
         with self.make_client() as client:
@@ -2531,6 +2809,29 @@ class RpcClientTests(unittest.TestCase):
 
         self.assertEqual(seen_extension_errors, ["boom"])
         self.assertEqual(seen_unknown, ["unknown_future_event"])
+
+    def test_raw_frame_listener_receives_wire_responses_known_and_unknown(self) -> None:
+        raw_frames: list[JsonObject] = []
+        with self.make_client() as client:
+            client.on_raw_frame(raw_frames.append)
+            client.prompt_and_wait("notifications", timeout=2.0)
+
+        response = next(
+            frame
+            for frame in raw_frames
+            if frame.get("type") == "response" and frame.get("command") == "prompt"
+        )
+        extension_error = next(
+            frame for frame in raw_frames if frame.get("type") == "extension_error"
+        )
+        unknown = next(
+            frame for frame in raw_frames if frame.get("type") == "unknown_future_event"
+        )
+        self.assertTrue(response["success"])
+        self.assertEqual(extension_error["futureField"], {"safeToIgnore": True})
+        self.assertEqual(extension_error["error"], "boom")
+        self.assertEqual(unknown, {"type": "unknown_future_event", "value": 1})
+
 
     def test_additive_notification_values_do_not_stop_the_reader(self) -> None:
         unknown_errors: list[str | None] = []

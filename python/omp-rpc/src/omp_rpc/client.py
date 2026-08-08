@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import math
 import os
 import queue
 import signal
@@ -51,6 +52,10 @@ from .protocol import (
     EvalCompleteEvent,
     EvalHistoryEntry,
     EvalOutputEvent,
+    ExtensionAskDialogChatResult,
+    ExtensionAskDialogResult,
+    ExtensionAskDialogSubmitResult,
+    ExtensionAskDialogResultItem,
     ExtensionError,
     ExtensionUiRequest,
     FastModeResult,
@@ -96,6 +101,7 @@ from .protocol import (
     RetryFallbackSucceededEvent,
     RpcAgentEvent,
     RpcCapabilityManifest,
+    RpcContextGetResult,
     RpcV3ClientOptions,
     RpcCollaborationSnapshot,
     RpcProvenanceSnapshot,
@@ -186,6 +192,7 @@ from .protocol import (
     parse_rename_session_result,
     parse_resume_session_result,
     parse_rpc_capability_manifest,
+    parse_rpc_context_get_result,
     parse_session_host_negotiation_result,
     parse_session_command_outcome,
     parse_session_open_result,
@@ -207,6 +214,7 @@ AgentEventListener = Callable[[RpcAgentEvent], None]
 NotificationListener = Callable[[RpcNotification], None]
 SessionObservationListener = Callable[[SessionObservationEvent], None]
 V3FrameListener = Callable[[RpcV3Frame], None]
+RawFrameListener = Callable[[JsonObject], None]
 UiRequestListener = Callable[[ExtensionUiRequest], None]
 ExtensionErrorListener = Callable[[ExtensionError], None]
 ReadyListener = Callable[[ReadyEvent], None]
@@ -459,8 +467,12 @@ def _terminate_process_group(process: subprocess.Popen[Any], pgid: int | None) -
 
 
 def _clone_json_value(value: object) -> JsonValue:
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if value is None or isinstance(value, (str, bool, int)):
         return cast(JsonValue, value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise RpcError("RPC payload must contain only finite numbers")
+        return value
     if isinstance(value, list):
         return [_clone_json_value(item) for item in value]
     if isinstance(value, dict):
@@ -630,6 +642,7 @@ class RpcClient:
         *,
         command: Sequence[str] | None = None,
         executable: str = "omp",
+        mode: Literal["rpc", "rpc-ui"] = "rpc",
         provider: str | None = None,
         model: str | None = None,
         session_dir: str | Path | None = None,
@@ -658,6 +671,7 @@ class RpcClient:
     ) -> None:
         self._command = tuple(command) if command is not None else None
         self._executable = executable
+        self._mode = mode
         self._provider = provider
         self._model = model
         self._session_dir = Path(session_dir) if session_dir is not None else None
@@ -734,6 +748,7 @@ class RpcClient:
         self._prompt_lifecycle = _PromptLifecycleCoordinator()
 
         self._notification_listeners: list[NotificationListener] = []
+        self._raw_frame_listeners: list[RawFrameListener] = []
         self._event_listeners: list[AgentEventListener] = []
         self._typed_event_listeners: dict[str, list[AgentEventListener]] = {}
         self._typed_notification_listeners: dict[str, list[NotificationListener]] = {}
@@ -1168,6 +1183,7 @@ class RpcClient:
         return lambda: self._remove_listener(
             self._operation_terminal_listeners, listener
         )
+
     def on_session_observation(
         self, listener: SessionObservationListener
     ) -> Callable[[], None]:
@@ -1179,6 +1195,12 @@ class RpcClient:
                 listener(notification)
 
         return self.on_notification(forward)
+
+    def on_raw_frame(self, listener: RawFrameListener) -> Callable[[], None]:
+        """Subscribe to every decoded logical JSON frame before typed routing."""
+        self._raw_frame_listeners.append(listener)
+        return lambda: self._remove_listener(self._raw_frame_listeners, listener)
+
 
 
     def install_headless_ui(
@@ -1192,9 +1214,12 @@ class RpcClient:
     ) -> Callable[[], None]:
         """Auto-handle RPC UI requests for non-interactive hosts.
 
-        Passive UI methods such as notifications and status updates are ignored.
-        Confirm dialogs default to `False`. Select, input, and editor requests
-        are cancelled unless an explicit value is provided.
+        Passive UI methods such as notifications, status updates, and progress
+        are ignored. Confirm dialogs default to ``False``. Approval requests
+        always receive a deny decision, and ask dialogs are cancelled; this
+        keeps headless execution fail-closed for privileged or interactive work.
+        Select, input, and editor requests are cancelled unless an explicit
+        value is provided.
         """
 
         def handle(request: ExtensionUiRequest) -> None:
@@ -1217,6 +1242,14 @@ class RpcClient:
                 self.send_ui_confirmation(
                     request.id, confirm, operation_id=request.operation_id
                 )
+                return
+            if request.method == "approval":
+                self.send_ui_approval(
+                    request.id, "deny", operation_id=request.operation_id
+                )
+                return
+            if request.method == "ask":
+                self.cancel_ui_request(request.id)
                 return
             if request.method == "select":
                 if select_value is not None:
@@ -1254,12 +1287,76 @@ class RpcClient:
     def send_ui_confirmation(
         self, request_id: str, confirmed: bool, operation_id: str | None = None
     ) -> None:
+        payload: JsonObject = {
+            "type": "extension_ui_response",
+            "id": request_id,
+            "confirmed": confirmed,
+        }
+        if operation_id is not None:
+            payload["operationId"] = operation_id
+        self._send_notification(payload)
+
+    def send_ui_approval(
+        self,
+        request_id: str,
+        decision: Literal["approve", "deny"],
+        *,
+        operation_id: str | None = None,
+        provenance: Literal["user"] | None = "user",
+    ) -> None:
+        if decision not in {"approve", "deny"}:
+            raise RpcError("UI approval decision must be approve or deny")
+        payload: JsonObject = {
+            "type": "extension_ui_response",
+            "id": request_id,
+            "decision": decision,
+        }
+        if operation_id is not None:
+            payload["operationId"] = operation_id
+        if provenance is not None:
+            payload["provenance"] = provenance
+        self._send_notification(payload)
+
+    @staticmethod
+    def _serialize_ask_result_item(item: ExtensionAskDialogResultItem) -> JsonObject:
+        payload: JsonObject = {
+            "id": item.id,
+            "question": item.question,
+            "options": list(item.options),
+            "multi": item.multi,
+            "selectedOptions": list(item.selected_options),
+        }
+        if item.custom_input is not None:
+            payload["customInput"] = item.custom_input
+        if item.note is not None:
+            payload["note"] = item.note
+        if item.timed_out is not None:
+            payload["timedOut"] = item.timed_out
+        return payload
+
+    def send_ui_ask(
+        self,
+        request_id: str,
+        result: ExtensionAskDialogResult | JsonObject,
+    ) -> None:
+        if isinstance(result, ExtensionAskDialogSubmitResult):
+            result_payload: JsonObject = {
+                "kind": result.kind,
+                "results": [
+                    self._serialize_ask_result_item(item) for item in result.results
+                ],
+            }
+        elif isinstance(result, ExtensionAskDialogChatResult):
+            result_payload = {"kind": result.kind}
+        elif isinstance(result, Mapping):
+            result_payload = cast(JsonObject, dict(result))
+        else:
+            raise RpcError("UI ask result must be a submit or chat result")
         self._send_notification(
             {
                 "type": "extension_ui_response",
                 "id": request_id,
-                "confirmed": confirmed,
-                "operationId": operation_id,
+                "result": result_payload,
             }
         )
 
@@ -1386,6 +1483,22 @@ class RpcClient:
     def get_capabilities(self) -> RpcCapabilityManifest:
         return parse_rpc_capability_manifest(self._request("get_capabilities"))
 
+    def get_context(
+        self,
+        *,
+        max_sources: int | None = None,
+        max_relations: int | None = None,
+        max_content_bytes: int | None = None,
+    ) -> RpcContextGetResult:
+        return parse_rpc_context_get_result(
+            self._request(
+                "context_get",
+                maxSources=max_sources,
+                maxRelations=max_relations,
+                maxContentBytes=max_content_bytes,
+            )
+        )
+
     def initialize_v3(self, options: RpcV3ClientOptions) -> SessionHostNegotiated:
         result = parse_session_host_negotiation_result(
             self._request(
@@ -1447,16 +1560,15 @@ class RpcClient:
         self._request("session_unsubscribe", subscriptionId=subscription_id)
 
     def invoke_session(self, command: SessionCommand) -> SessionCommandOutcome:
+        nested: JsonObject = {"kind": command.kind}
+        if command.input is not None:
+            nested["input"] = command.input
+        if command.expected_revision is not None:
+            nested["expectedRevision"] = command.expected_revision
+        if command.idempotency_key is not None:
+            nested["idempotencyKey"] = command.idempotency_key
         return parse_session_command_outcome(
-            self._request(
-                "session_invoke",
-                command={
-                    "kind": command.kind,
-                    "input": command.input,
-                    "expectedRevision": command.expected_revision,
-                    "idempotencyKey": command.idempotency_key,
-                },
-            )
+            self._request("session_invoke", command=nested)
         )
 
     def shutdown_session(self) -> SessionAuthoritySettlement:
@@ -2612,12 +2724,18 @@ class RpcClient:
         response_timeout: float,
         **payload: JsonValue,
     ) -> JsonObject:
+        wire_payload: JsonObject = {
+            key: value for key, value in payload.items() if value is not None
+        }
+        try:
+            json.dumps(wire_payload, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise RpcError("RPC payload must contain only valid JSON values") from exc
+
         process = self._require_process()
         request_id = self._next_request_id()
         envelope: JsonObject = {"id": request_id, "type": command_type}
-        for key, value in payload.items():
-            if value is not None:
-                envelope[key] = value
+        envelope.update(wire_payload)
 
         response_queue: queue.Queue[JsonObject | BaseException] = queue.Queue(maxsize=1)
         with self._state_lock:
@@ -3045,7 +3163,7 @@ class RpcClient:
         if self._command is not None:
             return self._command
 
-        command: list[str] = [self._executable, "--mode", "rpc"]
+        command: list[str] = [self._executable, "--mode", self._mode]
         if self._provider:
             command.extend(["--provider", self._provider])
         if self._model:
@@ -3090,9 +3208,13 @@ class RpcClient:
     def _write_json(self, process: subprocess.Popen[str], payload: JsonObject) -> None:
         if process.stdin is None:
             raise RpcProcessExitError("RPC process stdin is unavailable")
+        try:
+            serialized = json.dumps(payload, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise RpcError("RPC payload must contain only valid JSON values") from exc
         with self._write_lock:
             try:
-                process.stdin.write(json.dumps(payload))
+                process.stdin.write(serialized)
                 process.stdin.write("\n")
                 process.stdin.flush()
             except (BrokenPipeError, OSError) as exc:
@@ -3131,6 +3253,13 @@ class RpcClient:
                 payload = self._frame_decoder.push(raw_payload)
                 if payload is None:
                     continue
+                payload_type = payload.get("type")
+                self._dispatch_listeners(
+                    "raw_frame",
+                    payload_type if isinstance(payload_type, str) else None,
+                    self._raw_frame_listeners,
+                    _clone_json_object(payload),
+                )
                 if payload.get("type") == "response":
                     self._handle_response(payload)
                     continue

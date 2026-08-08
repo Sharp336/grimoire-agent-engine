@@ -342,6 +342,9 @@ export class ProviderAuthController {
 
 	async #run(active: ActiveAuthOperation): Promise<void> {
 		if (!this.#operations.begin(active.handle)) {
+			if (active.abortController.signal.aborted) {
+				this.#operations.settleCancellation(active.handle.operationId);
+			}
 			if (this.#active?.handle.operationId === active.handle.operationId) this.#active = undefined;
 			return;
 		}
@@ -366,21 +369,14 @@ export class ProviderAuthController {
 					active.commitStarted = true;
 				},
 			});
+			if (active.abortController.signal.aborted) return;
 			if (!this.#operations.isActive(active.handle)) return;
 			for (const state of result.states ?? [result.state]) {
 				this.#output({ type: "provider_auth_update", state });
 			}
 			this.#operations.complete(active.handle, false, { state: result.state });
 		} catch (error) {
-			if (!this.#operations.isActive(active.handle)) return;
-			if (active.abortController.signal.aborted) {
-				this.#operations.cancel(
-					active.handle.operationId,
-					active.cancelReason ?? "user",
-					active.cancelCode ?? "cancelled_by_client",
-				);
-				return;
-			}
+			if (active.abortController.signal.aborted) return;
 			const providerError = error instanceof ProviderAuthError ? error : undefined;
 			this.#operations.fail(
 				active.handle,
@@ -394,6 +390,9 @@ export class ProviderAuthController {
 					: (providerError?.code ?? "provider_auth_failed"),
 			);
 		} finally {
+			if (active.abortController.signal.aborted) {
+				this.#operations.settleCancellation(active.handle.operationId);
+			}
 			if (this.#active?.handle.operationId === active.handle.operationId) this.#active = undefined;
 		}
 	}

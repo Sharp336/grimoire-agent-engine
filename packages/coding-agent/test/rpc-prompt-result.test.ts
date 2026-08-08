@@ -407,4 +407,36 @@ describe("watchAndReportLocalOnlyPromptResult", () => {
 
 		expect(output).toEqual([]);
 	});
+	test("exposes prompt scheduling separately from turn completion", async () => {
+		const output: object[] = [];
+		const manager = new RpcOperationManager(frame => output.push(frame));
+		const operation = manager.start("req_1", "prompt");
+		const completion = Promise.withResolvers<void>();
+		const tracked = watchAndReportLocalOnlyPromptResult({
+			id: "req_1",
+			startPrompt: async () => true,
+			output: frame => output.push(frame),
+			onError: error => {
+				throw error;
+			},
+			extensionUserMessageTracker: new RpcExtensionUserMessageTracker(),
+			operation: {
+				handle: operation,
+				manager,
+				waitForAgentCompletion: () => completion.promise,
+			},
+		});
+		let lifecycleSettled = false;
+		void tracked.lifecycle.then(() => {
+			lifecycleSettled = true;
+		});
+
+		await expect(tracked.scheduling).resolves.toBe(true);
+		await Promise.resolve();
+		expect(lifecycleSettled).toBe(false);
+
+		completion.resolve();
+		await tracked.lifecycle;
+		expect(lifecycleSettled).toBe(true);
+	});
 });

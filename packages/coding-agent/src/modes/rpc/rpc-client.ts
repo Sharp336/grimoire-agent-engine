@@ -58,6 +58,8 @@ import type {
 	RpcCommand,
 	RpcCommandOutputFrame,
 	RpcConfigUpdateFrame,
+	RpcContextGetOptions,
+	RpcContextGetResult,
 	RpcDeleteSessionResult,
 	RpcEvalCompleteFrame,
 	RpcEvalHistoryEntry,
@@ -141,6 +143,10 @@ export interface RpcV3ClientOptions {
 export interface RpcClientOptions {
 	/** Path to the CLI entry point (default: searches for dist/cli.js) */
 	cliPath?: string;
+	/** Explicit compiled OMP executable. Runs directly instead of through Bun. */
+	executablePath?: string;
+	/** CLI RPC host mode. `rpc-ui` enables native UI-dependent tools such as `ask`. Default: `rpc`. */
+	mode?: "rpc" | "rpc-ui";
 	/** Working directory for the agent */
 	cwd?: string;
 	/** Environment variables */
@@ -759,6 +765,9 @@ export class RpcClient {
 	#v3Negotiation: SessionHostNegotiated | undefined;
 
 	constructor(private options: RpcClientOptions = {}) {
+		if (options.executablePath !== undefined && options.cliPath !== undefined) {
+			throw new Error("RpcClient options executablePath and cliPath are mutually exclusive");
+		}
 		this.#customTools = [...(options.customTools ?? [])];
 	}
 
@@ -791,7 +800,7 @@ export class RpcClient {
 		this.#legacyPromptRequestIds.clear();
 
 		const cliPath = this.options.cliPath ?? "dist/cli.js";
-		const args = ["--mode", "rpc"];
+		const args = ["--mode", this.options.mode ?? "rpc"];
 
 		if (this.options.provider) {
 			args.push("--provider", this.options.provider);
@@ -806,7 +815,9 @@ export class RpcClient {
 			args.push(...this.options.args);
 		}
 
-		const child = ptree.spawn(["bun", cliPath, ...args], {
+		const launchCommand =
+			this.options.executablePath !== undefined ? [this.options.executablePath, ...args] : ["bun", cliPath, ...args];
+		const child = ptree.spawn(launchCommand, {
 			cwd: this.options.cwd,
 			env: { ...Bun.env, ...this.options.env },
 			stdin: "pipe",
@@ -1197,6 +1208,11 @@ export class RpcClient {
 		return () => this.#providerAuthUpdateListeners.delete(listener);
 	}
 
+	/** Send a typed response for any interactive extension UI request. */
+	respondToExtensionUi(response: RpcExtensionUIResponse): void {
+		this.#writeFrame(response);
+	}
+
 	/** Respond to a confirmation request. Privileged mutations require the server-issued operation id. */
 	sendUiConfirmation(id: string, confirmed: boolean, operationId?: string): void {
 		this.#writeFrame({ type: "extension_ui_response", id, confirmed, operationId });
@@ -1267,6 +1283,11 @@ export class RpcClient {
 		options: { after?: SessionObservationPosition; afterCursor?: SessionJournalCursor; snapshot?: boolean } = {},
 	): Promise<RpcSessionOpenResult> {
 		return this.#getData(await this.#send({ type: "session_open", ...options }));
+	}
+
+	/** Read a bounded authoritative context assembly snapshot for the active session. */
+	async getContext(options: RpcContextGetOptions = {}): Promise<RpcContextGetResult> {
+		return this.#getData(await this.#send({ type: "context_get", ...options }));
 	}
 
 	/** Cumulatively acknowledge delivered observations for one subscription. */
@@ -2361,16 +2382,6 @@ export class RpcClient {
 			}
 			return;
 		}
-		if (isRpcProviderAuthRequestFrame(data)) {
-			for (const listener of this.#providerAuthRequestListeners) listener(data);
-			return;
-		}
-		if (isRpcProviderAuthUpdateFrame(data)) {
-			const state = parseProviderAuthState(data.state);
-			for (const listener of this.#providerAuthUpdateListeners) listener(state);
-			return;
-		}
-
 		if (isRpcProviderAuthRequestFrame(data)) {
 			for (const listener of this.#providerAuthRequestListeners) listener(data);
 			return;

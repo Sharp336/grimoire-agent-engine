@@ -15,6 +15,21 @@ if (Bun.env.MOCK_RPC_IGNORE_SIGTERM === "1") {
 }
 
 const supportsProtocolV2 = Bun.env.MOCK_RPC_V2 === "1";
+
+const CANONICAL_V3_CAPABILITIES: Record<string, true> = {
+	"session.catalog": true,
+	"session.observe": true,
+	"session.execute": true,
+	interaction: true,
+	approval: true,
+	"semantic-rendering": true,
+	"artifact.read": true,
+	"resource.lifecycle": true,
+	collaboration: true,
+	"runtime-provenance": true,
+	"context.projection": true,
+	"session.shutdown": true,
+};
 const legacyState = {
 	thinkingLevel: "off",
 	isStreaming: false,
@@ -115,6 +130,40 @@ function mockCollaboration(role: "none" | "host" | "guest" = "guest"): Record<st
 			retainedFrames: role === "guest" ? 1 : 0,
 			stale: false,
 		},
+	};
+}
+function mockContextProjection(): Record<string, unknown> {
+	return {
+		snapshot: {
+			revision: 1,
+			sessionId: "mock-session",
+			leafId: "leaf-1",
+			requestId: "context-request-1",
+			sources: [
+				{
+					id: "source-1",
+					category: "stored",
+					kind: "message",
+					content: "hello",
+					branch: {
+						entryId: "entry-1",
+						entryType: "message",
+						parentId: null,
+						position: 0,
+						active: true,
+					},
+					visibility: { persisted: true, display: true, model: true },
+					inclusion: { included: true, reason: "active-branch" },
+				},
+			],
+			relations: [{ kind: "branch-order", sourceId: "source-1", position: 0 }],
+			systemPrompt: { logicalSources: [], rendered: [] },
+			provider: { messages: [], relations: [] },
+			tokenEvidence: [],
+		},
+		bounds: { maxSources: 256, maxRelations: 512, maxContentBytes: 262_144 },
+		returned: { sources: 1, relations: 1, contentBytes: 5 },
+		truncated: { sources: false, relations: false, content: false },
 	};
 }
 
@@ -441,14 +490,25 @@ for await (const raw of console) {
 						ok: true,
 						profile: { name: "omp.session", major: 3, minor: 0 },
 						framingVersion: frame.framingVersion,
-						capabilities: requestedCapabilities.map(capabilityId => ({
-							id: capabilityId,
-							version: 1,
-							supported: true,
-							operations: [],
-							events: [],
-							platforms: ["linux", "darwin", "win32"],
-						})),
+						capabilities: requestedCapabilities.map(capabilityId => {
+							const supported = CANONICAL_V3_CAPABILITIES[capabilityId] === true;
+							return {
+								id: capabilityId,
+								version: 1,
+								supported,
+								operations: [],
+								events: [],
+								platforms: ["linux", "darwin", "win32"],
+								...(supported
+									? {}
+									: {
+											unsupportedReason: {
+												code: "unknown_capability",
+												message: "Capability is not part of the canonical v3 surface",
+											},
+										}),
+							};
+						}),
 						hostCapabilities: frame.hostCapabilities,
 					},
 				});
@@ -462,6 +522,9 @@ for await (const raw of console) {
 					success: true,
 					data: {
 						subscriptionId: "subscription-1",
+						durableCursor: { sessionId: "mock-session", leafId: "leaf-1", entryId: "entry-7" },
+						watermark: { epoch: "epoch-1", sequence: 4 },
+						replayComplete: true,
 						snapshot: {
 							sessionId: "mock-session",
 							revision: 7,
@@ -486,6 +549,16 @@ for await (const raw of console) {
 						replay: false,
 						terminalSettlement: "none",
 					},
+				});
+				continue;
+			}
+			if (frame.type === "context_get") {
+				writeFrame({
+					id,
+					type: "response",
+					command: frame.type,
+					success: true,
+					data: mockContextProjection(),
 				});
 				continue;
 			}

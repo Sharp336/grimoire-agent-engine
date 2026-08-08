@@ -36,6 +36,7 @@ import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
+import type { SessionContextProjection, SystemPromptLogicalSource } from "./session-context-projection";
 import type { SessionManager } from "./session-manager";
 
 /** Maximum time the interactive shutdown path waits for Mnemopi consolidation. */
@@ -125,6 +126,8 @@ export interface AgentSessionConfig {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
+	initialSystemPromptSources?: readonly SystemPromptLogicalSource[];
+	contextProjection?: SessionContextProjection;
 	/** Whether the session spawn policy permits the read-only `scout` subagent. Defaults to true. */
 	scoutAllowedBySpawnPolicy?: boolean;
 	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */
@@ -210,7 +213,11 @@ export interface AgentSessionConfig {
 	rebuildSystemPrompt?: (
 		toolNames: string[],
 		tools: Map<string, AgentTool>,
-	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
+	) => Promise<{
+		systemPrompt: string[];
+		xdevCatalogNames?: readonly string[];
+		logicalSources?: readonly SystemPromptLogicalSource[];
+	}>;
 	/** Local calendar date provider used by prompt-cache invalidation. */
 	getLocalCalendarDate?: () => string;
 	/** Tools mounted under `xd://`, for `/tools` display. */
@@ -308,6 +315,8 @@ export interface PromptOptions {
 	skipCompactionCheck?: boolean;
 	/** Stable caller-owned tag attached to the prompt's agent message. */
 	messageTag?: string;
+	/** Abort pre-start preparation before an agent message becomes active. */
+	signal?: AbortSignal;
 }
 
 /** Options for AgentSession.followUp(). */

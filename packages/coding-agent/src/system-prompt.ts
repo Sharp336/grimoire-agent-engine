@@ -24,6 +24,7 @@ import friendlyPersonality from "./prompts/system/personalities/friendly.md" wit
 import pragmaticPersonality from "./prompts/system/personalities/pragmatic.md" with { type: "text" };
 import projectPromptTemplate from "./prompts/system/project-prompt.md" with { type: "text" };
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
+import type { SystemPromptLogicalSource } from "./session/session-context-projection";
 import { normalizeConcurrencyLimit } from "./task/parallel";
 import { usesCodexTaskPrompt } from "./task/prompt-policy";
 import { type ActiveRepoContext, resolveActiveRepoContext } from "./utils/active-repo-context";
@@ -563,6 +564,7 @@ export interface BuildSystemPromptOptions {
 export interface BuildSystemPromptResult {
 	/** Ordered system prompt blocks. Providers should preserve entries as distinct messages/blocks. */
 	systemPrompt: string[];
+	logicalSources: readonly SystemPromptLogicalSource[];
 	/**
 	 * Names of `xd://` devices whose catalog/protocol section this prompt renders.
 	 * Empty/undefined when no catalog was emitted (no mounted devices, or a custom
@@ -576,7 +578,7 @@ export interface BuildSystemPromptResult {
 /** Build the system prompt with tools, guidelines, and context */
 export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}): Promise<BuildSystemPromptResult> {
 	if ($env.NULL_PROMPT === "true") {
-		return { systemPrompt: [] };
+		return { systemPrompt: [], logicalSources: [] };
 	}
 
 	const {
@@ -898,24 +900,140 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	};
 	const rendered = prompt.render(resolvedCustomPrompt ? customSystemPromptTemplate : systemPromptTemplate, data);
 	const systemPrompt = [rendered];
+	let computerSafetyPromptIndex: number | undefined;
 	if (toolNames.includes("computer")) {
-		systemPrompt.push(computerSafetyPrompt.trim());
+		computerSafetyPromptIndex = systemPrompt.push(computerSafetyPrompt.trim()) - 1;
 	}
 	// Custom prompt templates already render context files and append text; the
 	// project footer still carries environment, cwd, workspace, and dir-context.
 	const projectPrompt = prompt
 		.render(projectPromptTemplate, resolvedCustomPrompt ? { ...data, contextFiles: [], appendPrompt: "" } : data)
 		.trim();
+	let projectPromptIndex: number | undefined;
 	if (projectPrompt) {
-		systemPrompt.push(projectPrompt);
+		projectPromptIndex = systemPrompt.push(projectPrompt) - 1;
 	}
+	let activeRepoContextPromptIndex: number | undefined;
 	if (activeRepoContextPrompt) {
-		systemPrompt.push(activeRepoContextPrompt);
+		activeRepoContextPromptIndex = systemPrompt.push(activeRepoContextPrompt) - 1;
 	}
 
 	// The xd:// protocol section (with its device catalog) is only rendered by the
 	// default template; a resolved custom prompt uses a template that omits it.
 	const xdevCatalogNames =
 		!resolvedCustomPrompt && xdevTools.length > 0 ? xdevTools.map(mounted => mounted.name) : undefined;
-	return { systemPrompt, xdevCatalogNames };
+	const primaryFoldTargets = projectPromptIndex === undefined ? [0] : [0, projectPromptIndex];
+	const logicalSources: SystemPromptLogicalSource[] = [];
+	logicalSources.push({
+		id: resolvedCustomPrompt ? "custom" : "default",
+		kind: resolvedCustomPrompt ? "custom" : "default",
+		content: resolvedCustomPrompt ?? systemPromptTemplate,
+		foldedInto: [0],
+	});
+	if (effectiveSystemPromptCustomization) {
+		logicalSources.push({
+			id: "system-file",
+			kind: "system-file",
+			content: effectiveSystemPromptCustomization,
+			foldedInto: primaryFoldTargets,
+		});
+	}
+	if (resolvedAppendPrompt) {
+		logicalSources.push({
+			id: "append",
+			kind: "append",
+			content: resolvedAppendPrompt,
+			foldedInto: primaryFoldTargets,
+		});
+	}
+	for (let index = 0; index < contextFiles.length; index++) {
+		const file = contextFiles[index];
+		logicalSources.push({
+			id: `context-file:${index}:${file.path}`,
+			kind: "context-file",
+			content: file.content,
+			path: file.path,
+			foldedInto: primaryFoldTargets,
+			metadata: file.depth === undefined ? undefined : { depth: file.depth },
+		});
+	}
+	for (const skill of filteredSkills) {
+		logicalSources.push({
+			id: `skill:${skill.name}`,
+			kind: "skill",
+			name: skill.name,
+			path: skill.filePath,
+			content: skill.description,
+			foldedInto: [0],
+		});
+	}
+	for (const rule of rules ?? []) {
+		logicalSources.push({
+			id: `rule:${rule.name}`,
+			kind: "rule",
+			name: rule.name,
+			path: rule.path,
+			content: rule.description,
+			foldedInto: [0],
+			metadata: rule.globs ? { globs: rule.globs } : undefined,
+		});
+	}
+	for (const rule of injectedAlwaysApplyRules) {
+		logicalSources.push({
+			id: `always-apply-rule:${rule.name}`,
+			kind: "always-apply-rule",
+			name: rule.name,
+			path: rule.path,
+			content: rule.content,
+			foldedInto: [0],
+		});
+	}
+	logicalSources.push({
+		id: "tools",
+		kind: "tools",
+		content: toolInventory || undefined,
+		foldedInto: [0],
+		metadata: { names: toolNames },
+	});
+	logicalSources.push({
+		id: "environment",
+		kind: "environment",
+		foldedInto: primaryFoldTargets,
+		metadata: Object.fromEntries(environment.map(item => [item.label, item.value])),
+	});
+	if (personality !== "none") {
+		logicalSources.push({
+			id: `personality:${personality}`,
+			kind: "personality",
+			content: PERSONALITY_SPECS[personality].trim(),
+			foldedInto: [0],
+		});
+	}
+	if (workspaceTree.rendered) {
+		logicalSources.push({
+			id: "workspace",
+			kind: "workspace",
+			content: workspaceTree.rendered,
+			path: workspaceTree.rootPath,
+			foldedInto: primaryFoldTargets,
+			metadata: { truncated: workspaceTree.truncated, totalLines: workspaceTree.totalLines },
+		});
+	}
+	if (toolNames.includes("computer")) {
+		logicalSources.push({
+			id: "computer-safety",
+			kind: "computer-safety",
+			content: computerSafetyPrompt.trim(),
+			foldedInto: computerSafetyPromptIndex === undefined ? [] : [computerSafetyPromptIndex],
+		});
+	}
+	if (activeRepoContextPrompt) {
+		logicalSources.push({
+			id: "active-repository",
+			kind: "active-repository",
+			content: activeRepoContextPrompt,
+			foldedInto: activeRepoContextPromptIndex === undefined ? [] : [activeRepoContextPromptIndex],
+		});
+	}
+	return { systemPrompt, xdevCatalogNames, logicalSources };
 }

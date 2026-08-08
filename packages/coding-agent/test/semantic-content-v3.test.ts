@@ -51,6 +51,18 @@ describe("semantic content v3", () => {
 		expect(validateSemanticContent(content)).toEqual({ ok: true, content });
 	});
 
+	test("returns a typed invalid result for every non-serializable root", () => {
+		const cyclic: Record<string, unknown> = {};
+		cyclic.self = cyclic;
+		for (const value of [undefined, () => {}, Symbol("semantic"), 1n, cyclic]) {
+			expect(validateSemanticContent(value)).toEqual({
+				ok: false,
+				code: "invalid_semantic_content",
+				error: "Semantic content must be JSON serializable",
+			});
+		}
+	});
+
 	test("rejects unknown elements, duplicate actions, excessive nesting, and oversized content", () => {
 		expect(
 			validateSemanticContent({

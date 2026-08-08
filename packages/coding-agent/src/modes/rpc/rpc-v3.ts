@@ -102,6 +102,7 @@ export function getRpcV3CapabilityManifest(context: RpcV3CapabilityContext = {})
 				],
 				["operationAccepted", "operationProgress", "operationSettled"],
 			),
+			capability(context, "context.projection", "context.projection", ["read"], []),
 			capability(
 				context,
 				"interaction",

@@ -34,10 +34,11 @@ describe("JobProjectionService", () => {
 			manager.register(
 				"bash",
 				id,
-				({ signal }) =>
-					new Promise<string>((_, reject) => {
-						signal.addEventListener("abort", () => reject(new Error("cancelled")), { once: true });
-					}),
+				({ signal }) => {
+					const { promise, reject } = Promise.withResolvers<string>();
+					signal.addEventListener("abort", () => reject(new Error("cancelled")), { once: true });
+					return promise;
+				},
 				{ id, ownerId: "Main" },
 			);
 		registerAbortable("reused");

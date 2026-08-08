@@ -53,7 +53,7 @@ export interface RpcResourcePromptSource {
 export interface RpcResourceManagerSource {
 	getAllServerNames(): string[];
 	getResourceKind?(name: string): RpcResourceKind;
-	refreshLifecycle?(name: string): Promise<RpcResourceLifecycleState | undefined>;
+	refreshLifecycle?(name: string, signal: AbortSignal): Promise<RpcResourceLifecycleState | undefined>;
 	getConnectionStatus(name: string): "connected" | "connecting" | "disconnected";
 	getConnection(name: string):
 		| {
@@ -69,11 +69,12 @@ export interface RpcResourceManagerSource {
 		name: string,
 	): { resources: RpcResourceItemSource[]; templates: RpcResourceTemplateSource[] } | undefined;
 	getServerPrompts(name: string): RpcResourcePromptSource[] | undefined;
-	reconnectServer(name: string, options?: { manual?: boolean }): Promise<unknown | null>;
-	refreshServerTools(name: string): Promise<void>;
-	refreshServerResources(name: string): Promise<void>;
-	refreshServerPrompts(name: string): Promise<void>;
+	reconnectServer(name: string, options?: { manual?: boolean; signal?: AbortSignal }): Promise<unknown | null>;
+	refreshServerTools(name: string, signal?: AbortSignal): Promise<void>;
+	refreshServerResources(name: string, signal?: AbortSignal): Promise<void>;
+	refreshServerPrompts(name: string, signal?: AbortSignal): Promise<void>;
 	disconnectServer(name: string): Promise<void>;
+	rebind?(): void;
 }
 
 export interface RpcResourceCollection<T> {
@@ -150,6 +151,7 @@ interface ResourceOperation {
 	serverIds: string[];
 	controller: AbortController;
 	previous: Map<string, ResourceStateRecord>;
+	generations: Map<string, number>;
 	settled: boolean;
 }
 
@@ -159,6 +161,13 @@ export class RpcResourceNotFoundError extends Error {
 	constructor(serverId: string) {
 		super(`Resource server is not available in this session: ${serverId}`);
 		this.name = "RpcResourceNotFoundError";
+	}
+}
+
+export class RpcResourceAuthenticationRequiredError extends Error {
+	constructor() {
+		super("Resource authentication is required");
+		this.name = "RpcResourceAuthenticationRequiredError";
 	}
 }
 
@@ -190,13 +199,18 @@ function sameDiagnostics(left: readonly RpcResourceDiagnostic[], right: readonly
 }
 
 export class RpcResourceLifecycleManager {
-	readonly #source: RpcResourceManagerSource;
+	#source: RpcResourceManagerSource;
 	readonly #output: (frame: RpcResourceLifecycleFrame) => void;
 	readonly #states = new Map<string, ResourceStateRecord>();
 	readonly #operations = new Map<string, ResourceOperation>();
 	readonly #tasks = new Set<Promise<void>>();
+	readonly #serverEffects = new Map<string, Promise<void>>();
+	readonly #serverGenerations = new Map<string, number>();
 	#revision = 0;
 	#disposed = false;
+	#draining = false;
+	#drainPromise: Promise<void> | undefined;
+	#disposePromise: Promise<void> | undefined;
 
 	constructor(source: RpcResourceManagerSource, output: (frame: RpcResourceLifecycleFrame) => void) {
 		this.#source = source;
@@ -226,7 +240,10 @@ export class RpcResourceLifecycleManager {
 			serverId === undefined
 				? [...this.#states.keys()].filter(id => this.#states.get(id)?.state !== "disabled")
 				: [serverId];
-		for (const id of serverIds) this.#assertKnown(id);
+		for (const id of serverIds) {
+			this.#assertKnown(id);
+			if (this.#states.get(id)?.state === "disabled") throw new RpcResourceNotFoundError(id);
+		}
 		return this.#startOperation("refresh", serverIds, requestId, operation => this.#runRefresh(operation));
 	}
 
@@ -239,17 +256,8 @@ export class RpcResourceLifecycleManager {
 
 	cancel(operationId: string): boolean {
 		const operation = this.#operations.get(operationId);
-		if (!operation || operation.settled) return false;
+		if (!operation || operation.settled || operation.controller.signal.aborted) return false;
 		operation.controller.abort();
-		for (const [serverId, previous] of operation.previous) {
-			this.#transition(
-				serverId,
-				previous.state,
-				[diagnostic("operation_cancelled", "Resource operation was cancelled", true)],
-				operationId,
-			);
-		}
-		this.#settleOperation(operation, "cancelled");
 		return true;
 	}
 
@@ -257,12 +265,25 @@ export class RpcResourceLifecycleManager {
 		this.#assertActive();
 		this.#syncSourceStates();
 		this.#assertKnown(serverId);
+		this.#advanceGeneration(serverId);
 		for (const operation of [...this.#operations.values()]) {
 			if (operation.serverIds.includes(serverId)) this.cancel(operation.operationId);
 		}
+		const disposal = this.#disposeServerOwned(serverId, requestId);
+		const task = disposal
+			.then(
+				() => undefined,
+				() => undefined,
+			)
+			.finally(() => this.#tasks.delete(task));
+		this.#tasks.add(task);
+		return disposal;
+	}
+
+	async #disposeServerOwned(serverId: string, requestId?: string): Promise<RpcResourceServerSnapshot> {
 		const operationId = `resource_${Snowflake.next()}`;
 		try {
-			await this.#source.disconnectServer(serverId);
+			await this.#serializeServerEffect(serverId, () => this.#source.disconnectServer(serverId));
 			this.#transition(serverId, "disabled", [], operationId);
 			this.#output({
 				type: "resource_operation",
@@ -287,14 +308,66 @@ export class RpcResourceLifecycleManager {
 		}
 	}
 
-	dispose(): void {
-		if (this.#disposed) return;
-		this.#disposed = true;
+	/**
+	 * Fence new work, abort every accepted operation, and wait until all
+	 * implementation effects quiesce. The manager remains reusable after the
+	 * caller commits an authority transition and invokes {@link rebind}.
+	 */
+	async drain(): Promise<void> {
+		if (this.#drainPromise) return this.#drainPromise;
+		this.#draining = true;
+		for (const serverId of this.#states.keys()) this.#advanceGeneration(serverId);
 		for (const operation of [...this.#operations.values()]) this.cancel(operation.operationId);
+		const drain = this.#waitForTasks().finally(() => {
+			if (this.#drainPromise === drain) this.#drainPromise = undefined;
+		});
+		this.#drainPromise = drain;
+		return drain;
+	}
+
+	/**
+	 * Install a new runtime binding after {@link drain} and after the authority
+	 * transition commits. Old snapshots and disabled tombstones never cross the
+	 * binding generation.
+	 */
+	rebind(source: RpcResourceManagerSource = this.#source): void {
+		if (this.#disposed) throw new Error("RPC resource lifecycle manager is disposed");
+		if (!this.#draining || this.#tasks.size > 0 || this.#drainPromise) {
+			throw new Error("RPC resource lifecycle manager must be drained before rebinding");
+		}
+		this.#source = source;
+		this.#source.rebind?.();
+		this.#states.clear();
+		this.#serverGenerations.clear();
+		this.#syncSourceStates();
+		this.#draining = false;
+	}
+
+	dispose(): Promise<void> {
+		if (this.#disposePromise) return this.#disposePromise;
+		this.#disposed = true;
+		const dispose = this.drain()
+			.then(async () => {
+				const serverIds = [...this.#states].flatMap(([serverId, record]) =>
+					record.state === "disabled" ? [] : [serverId],
+				);
+				const outcomes = await Promise.allSettled(
+					serverIds.map(serverId =>
+						this.#serializeServerEffect(serverId, () => this.#source.disconnectServer(serverId)),
+					),
+				);
+				const failures = outcomes.flatMap(outcome => (outcome.status === "rejected" ? [outcome.reason] : []));
+				if (failures.length > 0) throw new AggregateError(failures);
+			})
+			.finally(() => {
+				this.#draining = true;
+			});
+		this.#disposePromise = dispose;
+		return dispose;
 	}
 
 	async waitForIdle(): Promise<void> {
-		await Promise.allSettled([...this.#tasks]);
+		await this.#waitForTasks();
 	}
 
 	#startOperation(
@@ -305,10 +378,12 @@ export class RpcResourceLifecycleManager {
 	): { operationId: string } {
 		const operationId = `resource_${Snowflake.next()}`;
 		const previous = new Map<string, ResourceStateRecord>();
+		const generations = new Map<string, number>();
 		for (const serverId of serverIds) {
 			const current = this.#states.get(serverId);
 			if (!current) continue;
 			previous.set(serverId, { state: current.state, diagnostics: [...current.diagnostics] });
+			generations.set(serverId, this.#generation(serverId));
 			const nextState =
 				current.state === "connected" ? "connected" : kind === "reload" ? "connecting" : "reconnecting";
 			this.#transition(serverId, nextState, [], operationId);
@@ -320,6 +395,7 @@ export class RpcResourceLifecycleManager {
 			serverIds: [...serverIds],
 			controller: new AbortController(),
 			previous,
+			generations,
 			settled: false,
 		};
 		this.#operations.set(operationId, operation);
@@ -334,21 +410,39 @@ export class RpcResourceLifecycleManager {
 	}
 
 	async #runRefresh(operation: ResourceOperation): Promise<void> {
-		await Promise.allSettled(operation.serverIds.map(serverId => this.#refreshServer(operation, serverId)));
-		if (!operation.settled) this.#settleOperation(operation, "completed");
+		const outcomes = await Promise.all(
+			operation.serverIds.map(serverId =>
+				this.#serializeServerEffect(serverId, () => this.#refreshServer(operation, serverId)),
+			),
+		);
+		if (operation.settled) return;
+		if (operation.controller.signal.aborted) {
+			this.#restoreCancelled(operation);
+			this.#settleOperation(operation, "cancelled");
+			return;
+		}
+		this.#settleOperation(operation, outcomes.every(Boolean) ? "completed" : "failed");
 	}
 
-	async #refreshServer(operation: ResourceOperation, serverId: string): Promise<void> {
+	async #refreshServer(operation: ResourceOperation, serverId: string): Promise<boolean> {
+		if (!this.#canContinue(operation, serverId)) return false;
+		let reconnected = false;
 		try {
-			const lifecycleState = await this.#source.refreshLifecycle?.(serverId);
-			if (operation.controller.signal.aborted || operation.settled) return;
+			const lifecycleState = await this.#source.refreshLifecycle?.(serverId, operation.controller.signal);
+			if (!this.#canContinue(operation, serverId)) return false;
 			if (lifecycleState !== undefined) {
 				this.#transition(serverId, lifecycleState, [], operation.operationId);
-				return;
+				return lifecycleState !== "failed" && lifecycleState !== "authentication_required";
 			}
 			if (this.#source.getConnectionStatus(serverId) !== "connected") {
-				const connection = await this.#source.reconnectServer(serverId, { manual: true });
-				if (operation.controller.signal.aborted || operation.settled) return;
+				const connection = await this.#source.reconnectServer(serverId, {
+					manual: true,
+					signal: operation.controller.signal,
+				});
+				if (!this.#canContinue(operation, serverId)) {
+					if (connection) await this.#compensateStaleEffect(serverId);
+					return false;
+				}
 				if (!connection) {
 					this.#transition(
 						serverId,
@@ -356,15 +450,19 @@ export class RpcResourceLifecycleManager {
 						[diagnostic("connection_failed", "Resource connection failed", true)],
 						operation.operationId,
 					);
-					return;
+					return false;
 				}
+				reconnected = true;
 			}
 			const refreshed = await Promise.allSettled([
-				this.#source.refreshServerTools(serverId),
-				this.#source.refreshServerResources(serverId),
-				this.#source.refreshServerPrompts(serverId),
+				this.#source.refreshServerTools(serverId, operation.controller.signal),
+				this.#source.refreshServerResources(serverId, operation.controller.signal),
+				this.#source.refreshServerPrompts(serverId, operation.controller.signal),
 			]);
-			if (operation.controller.signal.aborted || operation.settled) return;
+			if (!this.#canContinue(operation, serverId)) {
+				if (reconnected) await this.#compensateStaleEffect(serverId);
+				return false;
+			}
 			const labels = ["tool metadata", "resource metadata", "prompt metadata"] as const;
 			const diagnostics = refreshed.flatMap((result, index) =>
 				result.status === "rejected"
@@ -378,33 +476,59 @@ export class RpcResourceLifecycleManager {
 					: [],
 			);
 			this.#transition(serverId, "connected", diagnostics, operation.operationId);
+			return diagnostics.length === 0;
 		} catch (cause) {
-			if (operation.controller.signal.aborted || operation.settled) return;
+			if (!this.#canContinue(operation, serverId)) {
+				if (reconnected) await this.#compensateStaleEffect(serverId);
+				return false;
+			}
 			this.#transitionFailure(serverId, cause, operation.operationId);
+			return false;
 		}
 	}
 
 	async #runReload(operation: ResourceOperation, reload: () => Promise<void>): Promise<void> {
 		try {
-			await reload();
-			if (operation.controller.signal.aborted || operation.settled) return;
-			this.#syncSourceStates(operation.operationId);
+			await this.#serializeServerEffects(operation.serverIds, () => {
+				if (
+					operation.controller.signal.aborted ||
+					operation.serverIds.some(serverId => !this.#ownsGeneration(operation, serverId))
+				) {
+					throw operation.controller.signal.reason instanceof Error
+						? operation.controller.signal.reason
+						: new Error("Resource reload authority changed");
+				}
+				return reload();
+			});
+			if (operation.controller.signal.aborted) {
+				this.#restoreCancelled(operation);
+				this.#settleOperation(operation, "cancelled");
+				return;
+			}
+			this.#syncSourceStates(operation.operationId, true);
 			for (const serverId of operation.serverIds) {
+				if (!this.#canContinue(operation, serverId)) continue;
 				if (!this.#source.getAllServerNames().includes(serverId)) {
 					this.#transition(serverId, "disconnected", [], operation.operationId);
 				}
 			}
 			this.#settleOperation(operation, "completed");
 		} catch (cause) {
-			if (operation.controller.signal.aborted || operation.settled) return;
-			for (const serverId of operation.serverIds) this.#transitionFailure(serverId, cause, operation.operationId);
+			if (operation.controller.signal.aborted) {
+				this.#restoreCancelled(operation);
+				this.#settleOperation(operation, "cancelled");
+				return;
+			}
+			for (const serverId of operation.serverIds) {
+				if (this.#canContinue(operation, serverId)) this.#transitionFailure(serverId, cause, operation.operationId);
+			}
 			this.#settleOperation(operation, "failed");
 		}
 	}
 
 	#transitionFailure(serverId: string, cause: unknown, operationId: string): void {
 		const error = cause instanceof Error ? cause : new Error(String(cause));
-		if (analyzeAuthError(error).requiresAuth) {
+		if (error instanceof RpcResourceAuthenticationRequiredError || analyzeAuthError(error).requiresAuth) {
 			this.#transition(
 				serverId,
 				"authentication_required",
@@ -421,10 +545,11 @@ export class RpcResourceLifecycleManager {
 		);
 	}
 
-	#syncSourceStates(operationId?: string): void {
+	#syncSourceStates(operationId?: string, reactivateDisabled = false): void {
 		for (const serverId of this.#source.getAllServerNames()) {
 			const current = this.#states.get(serverId);
-			if (current?.state === "disabled") continue;
+			if (current?.state === "disabled" && !reactivateDisabled) continue;
+			if (current?.state === "disabled") this.#advanceGeneration(serverId);
 			const sourceState = this.#source.getConnectionStatus(serverId);
 			const hasActiveOperation = [...this.#operations.values()].some(
 				operation => !operation.settled && operation.serverIds.includes(serverId),
@@ -436,14 +561,19 @@ export class RpcResourceLifecycleManager {
 						? "connected"
 						: sourceState === "connecting"
 							? "connecting"
-							: current === undefined
+							: current === undefined || current.state === "disabled"
 								? "discovered"
 								: current.state === "connected" ||
 										current.state === "connecting" ||
 										current.state === "reconnecting"
 									? "disconnected"
 									: current.state;
-			this.#transition(serverId, state, current?.diagnostics ?? [], operationId);
+			this.#transition(
+				serverId,
+				state,
+				current?.state === "disabled" ? [] : (current?.diagnostics ?? []),
+				operationId,
+			);
 		}
 	}
 
@@ -481,6 +611,70 @@ export class RpcResourceLifecycleManager {
 			outcome,
 			serverIds: [...operation.serverIds],
 		});
+	}
+
+	#restoreCancelled(operation: ResourceOperation): void {
+		for (const [serverId, previous] of operation.previous) {
+			if (!this.#ownsGeneration(operation, serverId)) continue;
+			this.#transition(
+				serverId,
+				previous.state,
+				[diagnostic("operation_cancelled", "Resource operation was cancelled", true)],
+				operation.operationId,
+			);
+		}
+	}
+
+	async #compensateStaleEffect(serverId: string): Promise<void> {
+		try {
+			await this.#source.disconnectServer(serverId);
+		} catch {
+			/* The owning dispose/drain path reports teardown failure. */
+		}
+	}
+
+	async #serializeServerEffect<T>(serverId: string, effect: () => Promise<T>): Promise<T> {
+		const previous = this.#serverEffects.get(serverId) ?? Promise.resolve();
+		const tail = Promise.withResolvers<void>();
+		this.#serverEffects.set(serverId, tail.promise);
+		await previous;
+		try {
+			return await effect();
+		} finally {
+			tail.resolve();
+			if (this.#serverEffects.get(serverId) === tail.promise) this.#serverEffects.delete(serverId);
+		}
+	}
+
+	async #serializeServerEffects<T>(serverIds: readonly string[], effect: () => Promise<T>): Promise<T> {
+		const ordered = [...new Set(serverIds)].sort();
+		const acquire = (index: number): Promise<T> => {
+			const serverId = ordered[index];
+			return serverId === undefined ? effect() : this.#serializeServerEffect(serverId, () => acquire(index + 1));
+		};
+		return acquire(0);
+	}
+
+	#canContinue(operation: ResourceOperation, serverId: string): boolean {
+		return !operation.settled && !operation.controller.signal.aborted && this.#ownsGeneration(operation, serverId);
+	}
+
+	#ownsGeneration(operation: ResourceOperation, serverId: string): boolean {
+		return operation.generations.get(serverId) === this.#generation(serverId);
+	}
+
+	#generation(serverId: string): number {
+		return this.#serverGenerations.get(serverId) ?? 0;
+	}
+
+	#advanceGeneration(serverId: string): void {
+		this.#serverGenerations.set(serverId, this.#generation(serverId) + 1);
+	}
+
+	async #waitForTasks(): Promise<void> {
+		while (this.#tasks.size > 0 || this.#serverEffects.size > 0) {
+			await Promise.allSettled([...this.#tasks, ...this.#serverEffects.values()]);
+		}
 	}
 
 	#projectServer(serverId: string): RpcResourceServerSnapshot {
@@ -546,5 +740,6 @@ export class RpcResourceLifecycleManager {
 
 	#assertActive(): void {
 		if (this.#disposed) throw new Error("RPC resource lifecycle manager is disposed");
+		if (this.#draining) throw new Error("RPC resource lifecycle manager is draining");
 	}
 }

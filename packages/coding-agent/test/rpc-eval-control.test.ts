@@ -3,12 +3,11 @@ import { RPC_COMMAND_DEFINITIONS, validateRpcCommand } from "../src/modes/rpc/rp
 import { MAX_RPC_EVAL_OUTPUT_CHARACTERS, RpcEvalOutputStream } from "../src/modes/rpc/rpc-eval";
 import {
 	handleRpcSessionChange,
-	RpcOperationMessageOwnership,
 	type RpcSessionChangeSession,
 	requestRpcDialog,
 	requestRpcPrivilegedConfirmation,
 } from "../src/modes/rpc/rpc-mode";
-import { RpcOperationManager } from "../src/modes/rpc/rpc-operations";
+import { RpcOperationManager, RpcOperationMessageOwnership } from "../src/modes/rpc/rpc-operations";
 import type { RpcEvalOutputFrame } from "../src/modes/rpc/rpc-types";
 import { EvalRunner, type EvalRunnerHost } from "../src/session/eval-runner";
 
@@ -21,7 +20,7 @@ describe("RPC eval control", () => {
 		const runner = createRunner();
 		const first = new AbortController();
 		const second = new AbortController();
-		const pending = new Promise<void>(() => {});
+		const pending = Promise.withResolvers<void>().promise;
 		runner.trackExecution(pending, first, "rpc-eval-1");
 		runner.trackExecution(pending, second, "rpc-eval-2");
 
@@ -35,7 +34,7 @@ describe("RPC eval control", () => {
 		const runner = createRunner();
 		const first = new AbortController();
 		const second = new AbortController();
-		const pending = new Promise<void>(() => {});
+		const pending = Promise.withResolvers<void>().promise;
 		runner.trackExecution(pending, first, "rpc-eval-1");
 		runner.trackExecution(pending, second, "rpc-eval-2");
 
@@ -129,6 +128,8 @@ describe("RPC eval control", () => {
 		);
 		stream.push("before");
 		manager.cancel(operation.operationId);
+		expect(frames.some(frame => Reflect.get(frame, "type") === "operation_cancelled")).toBe(false);
+		manager.settleCancellation(operation.operationId);
 		stream.push("after");
 		expect(frames.at(-1)).toMatchObject({ type: "operation_cancelled", operationId: "eval-1" });
 	});
@@ -260,10 +261,30 @@ describe("RPC eval control", () => {
 			output: "2",
 			exitCode: 0,
 			cancelled: false,
-			truncated: false,
+			truncated: true,
+			outputBytes: 2,
+			outputPreviewBytes: 1,
+			outputTruncation: { truncated: true, direction: "tail" },
+			artifact: {
+				id: "1",
+				mediaType: "text/plain; charset=utf-8",
+				byteLength: 2,
+				sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				provenance: { source: "tool_output", toolName: "rpc-eval" },
+				related: { sessionId: "session" },
+				lifecycle: "available",
+				cancellation: { cancelled: false },
+			},
+			artifactRef: "artifact://1",
 		});
 		expect(runner.pendingMessages()).toHaveLength(1);
-		expect(runner.pendingMessages()[0]).toMatchObject({ language: "js", output: "2" });
+		expect(runner.pendingMessages()[0]).toMatchObject({
+			language: "js",
+			output: "2",
+			outputBytes: 2,
+			outputTruncation: { truncated: true, direction: "tail" },
+			artifactRef: "artifact://1",
+		});
 		expect(appended).toHaveLength(0);
 		runner.flushPending();
 		expect(appended).toHaveLength(1);

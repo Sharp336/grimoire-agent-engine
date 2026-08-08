@@ -45,6 +45,7 @@ import {
 } from "./acp-permission-gate";
 import type { ClientBridge, ClientBridgePermissionOutcome } from "./client-bridge";
 import type { CustomMessage } from "./messages";
+import type { SystemPromptLogicalSource } from "./session-context-projection";
 import type { SessionManager } from "./session-manager";
 
 /** Capabilities borrowed from the owning AgentSession. */
@@ -65,6 +66,7 @@ export interface SessionToolsHost {
 	clearInheritedProviderPromptCacheKey(): void;
 	clearMemoryPromotionSnapshot(): void;
 	captureMemoryPromotionSnapshot(prompt: string[]): void;
+	setSystemPromptSources(sources: readonly SystemPromptLogicalSource[]): void;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	notifyCommandMetadataChanged(): void;
 	notifyToolInventoryChanged(): void;
@@ -88,7 +90,11 @@ interface SessionToolsOptions {
 	rebuildSystemPrompt?: (
 		toolNames: string[],
 		tools: Map<string, AgentTool>,
-	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
+	) => Promise<{
+		systemPrompt: string[];
+		xdevCatalogNames?: readonly string[];
+		logicalSources?: readonly SystemPromptLogicalSource[];
+	}>;
 	getLocalCalendarDate?: () => string;
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
 	xdev?: XdevState;
@@ -1056,6 +1062,7 @@ export class SessionTools {
 		let rebuiltSystemPrompt: string[] | undefined;
 		let rebuiltSignature: string | undefined;
 		let rebuiltXdevCatalogNames: readonly string[] | undefined;
+		let rebuiltLogicalSources: readonly SystemPromptLogicalSource[] | undefined;
 		try {
 			if (this.#rebuildSystemPrompt) {
 				const signature = this.#computeAppliedToolSignature(validToolNames, tools);
@@ -1064,6 +1071,7 @@ export class SessionTools {
 					rebuiltSystemPrompt = built.systemPrompt;
 					rebuiltSignature = signature;
 					rebuiltXdevCatalogNames = built.xdevCatalogNames;
+					rebuiltLogicalSources = built.logicalSources;
 				}
 			}
 		} catch (error) {
@@ -1083,6 +1091,7 @@ export class SessionTools {
 		if (rebuiltSystemPrompt && rebuiltSignature) {
 			if (this.#lastAppliedToolSignature !== undefined) this.#host.clearInheritedProviderPromptCacheKey();
 			this.#baseSystemPrompt = rebuiltSystemPrompt;
+			this.#host.setSystemPromptSources(rebuiltLogicalSources ?? []);
 			this.#host.clearMemoryPromotionSnapshot();
 			this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
 			this.#lastAppliedToolSignature = rebuiltSignature;
@@ -1519,6 +1528,7 @@ export class SessionTools {
 		const built = await this.#rebuildSystemPrompt(activeToolNames, this.#toolRegistry);
 		if (this.#host.isDisposed()) return;
 		this.#baseSystemPrompt = built.systemPrompt;
+		this.#host.setSystemPromptSources(built.logicalSources ?? []);
 		this.#basePromptXdevNames = new Set(built.xdevCatalogNames);
 		this.#host.clearMemoryPromotionSnapshot();
 		if (
@@ -1539,13 +1549,18 @@ export class SessionTools {
 	}
 
 	/** Applies one-turn memory prompt injection before an agent run. */
-	async buildSystemPromptForAgentStart(promptText: string): Promise<string[]> {
+	async buildSystemPromptForAgentStart(promptText: string): Promise<{
+		systemPrompt: string[];
+		additionalLogicalSources: readonly SystemPromptLogicalSource[];
+	}> {
 		const backend = await resolveMemoryBackend(this.#host.settings);
-		if (!backend.beforeAgentStartPrompt) return this.#baseSystemPrompt;
+		if (!backend.beforeAgentStartPrompt) {
+			return { systemPrompt: this.#baseSystemPrompt, additionalLogicalSources: [] };
+		}
 
 		try {
 			const injected = await backend.beforeAgentStartPrompt(this.#host.memoryBackendSession(), promptText);
-			if (!injected) return this.#baseSystemPrompt;
+			if (!injected) return { systemPrompt: this.#baseSystemPrompt, additionalLogicalSources: [] };
 
 			const previousBaseSystemPrompt = this.#baseSystemPrompt;
 			try {
@@ -1561,20 +1576,31 @@ export class SessionTools {
 				this.#baseSystemPrompt.length !== previousBaseSystemPrompt.length ||
 				this.#baseSystemPrompt.some((part, index) => part !== previousBaseSystemPrompt[index])
 			) {
-				return this.#baseSystemPrompt;
+				return { systemPrompt: this.#baseSystemPrompt, additionalLogicalSources: [] };
 			}
 
 			this.#host.captureMemoryPromotionSnapshot(previousBaseSystemPrompt);
 			const stablePrompt = [...previousBaseSystemPrompt, injected];
 			this.#baseSystemPrompt = stablePrompt;
 			this.#applyAgentSystemPrompt(stablePrompt);
-			return stablePrompt;
+			return {
+				systemPrompt: stablePrompt,
+				additionalLogicalSources: [
+					{
+						id: `memory:${backend.id}`,
+						kind: "turn-override",
+						content: injected,
+						metadata: { backend: backend.id },
+						foldedInto: [stablePrompt.length - 1],
+					},
+				],
+			};
 		} catch (err) {
 			logger.debug("Memory backend beforeAgentStartPrompt failed", {
 				backend: backend.id,
 				error: String(err),
 			});
-			return this.#baseSystemPrompt;
+			return { systemPrompt: this.#baseSystemPrompt, additionalLogicalSources: [] };
 		}
 	}
 

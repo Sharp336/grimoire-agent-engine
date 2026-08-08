@@ -16,11 +16,11 @@
 - Fixed `/handoff` masking empty/whitespace-only generation and harness-initiated aborts as "Handoff cancelled"; manual empty generation now surfaces a logged failure, harness aborts preserve their reason (or report "Handoff aborted by session"), and auto-handoff still falls back to context-full compaction ([#7993](https://github.com/can1357/oh-my-pi/issues/7993)).
 ### Added
 
-- Added the host-neutral `omp.session` RPC v3 semantic profile with capability negotiation, authoritative session observation and mutation, typed interactions, artifacts, MCP/LSP/DAP lifecycle control, collaboration, provenance, and graceful settlement, plus TypeScript and Python client support.
+- Added the host-neutral `omp.session` RPC v3 semantic profile with capability negotiation, authoritative session observation and mutation, typed interactions, artifacts, MCP/LSP/DAP lifecycle control, collaboration, provenance, and graceful settlement, plus TypeScript and Python clients with explicit headless `rpc` and interactive `rpc-ui` process selection.
 
 ### Fixed
 
-- Hardened RPC v3 replay and collaboration recovery so future transport cursors resnapshot immediately, stale replica frames are discarded until a new generation starts, and lossy collaboration projections carry typed loss details with recoverable full-payload references.
+- Hardened RPC v3 operation ownership, cancellation settlement, session transitions, collaboration authority, resource rebinding, provider authentication, durable replay, bounded recovery, lossless eval artifacts, workspace-scoped exports, effective-context provenance, capability negotiation, and native `AskTool` RPC UI invocation; added fresh-binary raw JSONL, TypeScript, and Python conformance coverage.
 
 ## [17.2.11] - 2026-08-07
 

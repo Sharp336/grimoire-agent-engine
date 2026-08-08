@@ -426,7 +426,7 @@ describe("RpcClient frame coverage", () => {
 
 		await client.start();
 		const negotiation = await client.initializeV3({
-			requestedCapabilities: ["session.observe", "session.mutate", "session.shutdown"],
+			requestedCapabilities: ["session.observe", "session.execute", "session.shutdown", "context.projection"],
 			hostCapabilities: { interactions: ["confirm"], semanticContent: ["markdown"] },
 		});
 		expect(negotiation).toMatchObject({
@@ -438,12 +438,21 @@ describe("RpcClient frame coverage", () => {
 		const opened = await client.openSession({ snapshot: true });
 		expect(opened).toMatchObject({
 			subscriptionId: "subscription-1",
+			durableCursor: { sessionId: "mock-session", leafId: "leaf-1", entryId: "entry-7" },
+			watermark: { epoch: "epoch-1", sequence: 4 },
+			replayComplete: true,
 			snapshot: {
 				sessionId: "mock-session",
 				revision: 7,
 				journalCursor: { sessionId: "mock-session", leafId: "leaf-1", entryId: "entry-7" },
 				watermark: { epoch: "epoch-1", sequence: 4 },
 			},
+		});
+		expect(await client.getContext({ maxSources: 256, maxRelations: 512, maxContentBytes: 262_144 })).toMatchObject({
+			bounds: { maxSources: 256, maxRelations: 512, maxContentBytes: 262_144 },
+			returned: { sources: 1, relations: 1, contentBytes: 5 },
+			truncated: { sources: false, relations: false, content: false },
+			snapshot: { sessionId: "mock-session", leafId: "leaf-1", requestId: "context-request-1" },
 		});
 		expect(await delivered.promise).toEqual({ subscriptionId: "subscription-1", sequence: 5 });
 		await client.acknowledgeSession("subscription-1", 5);
@@ -455,7 +464,26 @@ describe("RpcClient frame coverage", () => {
 				idempotencyKey: "mutation-1",
 			}),
 		).toEqual({ outcome: "completed", revision: 8, result: { applied: true } });
+
 		await client.unsubscribeSession("subscription-1");
 		expect(await client.shutdownSession()).toEqual({ state: "settled" });
+	});
+	test("uses canonical v3 capability identifiers in the external-client fixture", async () => {
+		using client = new RpcClient({ cliPath: MOCK_AGENT });
+		await client.start();
+		const negotiation = await client.initializeV3({
+			requestedCapabilities: ["session.mutate"],
+			hostCapabilities: { interactions: [], semanticContent: [] },
+		});
+		expect(negotiation).toMatchObject({
+			ok: true,
+			capabilities: [
+				{
+					id: "session.mutate",
+					supported: false,
+					unsupportedReason: { code: "unknown_capability" },
+				},
+			],
+		});
 	});
 });

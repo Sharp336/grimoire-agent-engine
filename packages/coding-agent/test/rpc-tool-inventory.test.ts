@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { type } from "arktype";
+import { Settings } from "../src/config/settings";
 import type { RegisteredTool } from "../src/extensibility/extensions";
 import { MAX_RPC_FRAME_BYTES } from "../src/modes/rpc/rpc-frame";
 import {
@@ -9,6 +10,7 @@ import {
 	type SessionToolsHost,
 	ToolInventoryUnavailableError,
 } from "../src/session/session-tools";
+import { createTools, type ToolSession } from "../src/tools";
 
 function tool(name: string, overrides: Record<string, unknown> = {}): AgentTool {
 	return {
@@ -28,7 +30,52 @@ function registered(name: string, extensionPath: string): RegisteredTool {
 	} as unknown as RegisteredTool;
 }
 
+async function nativeInventory(hasUI: boolean) {
+	const activeNames = new Set<string>();
+	const session: ToolSession = {
+		cwd: "/tmp/rpc-native-tool-parity",
+		hasUI,
+		skipPythonPreflight: true,
+		enableLsp: false,
+		getSessionFile: () => null,
+		getSessionSpawns: () => "*",
+		setActiveToolNames: names => {
+			activeNames.clear();
+			for (const name of names) activeNames.add(name);
+		},
+		settings: Settings.isolated(),
+	};
+	await createTools(session);
+	const registry = session.toolRegistry ?? new Map<string, AgentTool>();
+	return projectToolInventory({
+		applicationApiVersion: 2,
+		registry,
+		activeNames,
+		mountedNames: session.xdev?.mountedNames ?? new Set(),
+		builtInNames: session.xdev?.builtInNames ?? new Set(registry.keys()),
+		rpcHostNames: new Set(),
+		registeredTools: [],
+	});
+}
+
 describe("tool inventory projection", () => {
+	it("keeps TUI and rpc-ui native registries identical while headless rpc omits only AskTool", async () => {
+		const [tui, rpcUi, rpc] = await Promise.all([
+			nativeInventory(true),
+			nativeInventory(true),
+			nativeInventory(false),
+		]);
+
+		expect(rpcUi).toEqual(tui);
+		const ask = rpcUi.tools.find(tool => tool.name === "ask");
+		expect(ask).toMatchObject({
+			name: "ask",
+			source: { kind: "builtin" },
+			parameters: expect.objectContaining({ type: "object" }),
+		});
+		expect(rpc.tools).toEqual(rpcUi.tools.filter(tool => tool.name !== "ask"));
+		expect(rpc.xdev).toEqual(rpcUi.xdev);
+	});
 	it("projects live presentation, schemas, metadata, and source precedence", () => {
 		const builtin = tool("read", {
 			parameters: type({ path: "string" }),

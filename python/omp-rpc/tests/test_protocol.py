@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import math
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -44,10 +46,12 @@ from omp_rpc import (
     ToolInventoryUpdateEvent,
     assistant_text,
     assistant_text_with_thinking,
+    image_from_path,
     parse_artifact_range,
     parse_advisor_state,
     parse_mode_change_result,
     parse_notification,
+    parse_session_command_outcome,
     parse_session_observation,
     parse_session_state,
     parse_tool_activation_result,
@@ -58,6 +62,16 @@ from omp_rpc import (
 class ProtocolParsingTests(unittest.TestCase):
     def test_root_package_exports_session_activity_phase(self) -> None:
         self.assertIsNotNone(SessionActivityPhase)
+
+    def test_image_from_path_infers_mime_type(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory, "image.png")
+            image_path.write_bytes(b"png")
+
+            image = image_from_path(image_path)
+
+        self.assertEqual(image["mimeType"], "image/png")
+        self.assertEqual(image["data"], "cG5n")
 
     def test_parse_operation_lifecycle_notifications(self) -> None:
         started = parse_notification(
@@ -109,6 +123,39 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertEqual(failed.code, "prompt_scheduling_failed")
         self.assertIsInstance(cancelled, OperationCancelledEvent)
         self.assertEqual(cancelled.reason, "user")
+
+    def test_session_command_outcome_distinguishes_absent_and_null_results(self) -> None:
+        absent = parse_session_command_outcome({"outcome": "completed"})
+        explicit_null = parse_session_command_outcome(
+            {"outcome": "completed", "result": None}
+        )
+
+        self.assertFalse(absent.has_result)
+        self.assertIsNone(absent.result)
+        self.assertTrue(explicit_null.has_result)
+        self.assertIsNone(explicit_null.result)
+
+    def test_session_command_outcome_rejects_nonfinite_nested_result(self) -> None:
+        with self.assertRaisesRegex(ValueError, "sessionInvoke.result"):
+            parse_session_command_outcome(
+                {"outcome": "completed", "result": {"values": [math.nan, math.inf]}}
+            )
+
+    def test_parse_shutdown_operation_cancellation(self) -> None:
+        notification = parse_notification(
+            {
+                "type": "operation_cancelled",
+                "operationId": "operation-shutdown",
+                "command": "session_shutdown",
+                "reason": "shutdown",
+                "code": "session_shutdown",
+                "settledAt": 13,
+            }
+        )
+
+        self.assertIsInstance(notification, OperationCancelledEvent)
+        self.assertEqual(notification.reason, "shutdown")
+        self.assertEqual(notification.code, "session_shutdown")
 
     def test_parse_ready_capability_manifest(self) -> None:
         manifest = json.loads(
@@ -655,12 +702,77 @@ class ProtocolParsingTests(unittest.TestCase):
                 "willRetry": False,
             }
         )
-
         self.assertIsInstance(start, AutoCompactionStartEvent)
         self.assertEqual(start.reason, "incomplete")
         self.assertEqual(start.action, "snapcompact")
         self.assertIsInstance(end, AutoCompactionEndEvent)
         self.assertEqual(end.action, "shake")
+
+    def test_parse_v3_extension_ui_interactions(self) -> None:
+        progress = parse_notification(
+            {
+                "type": "extension_ui_request",
+                "id": "ui-progress",
+                "method": "progress",
+                "message": "Working",
+            }
+        )
+        approval = parse_notification(
+            {
+                "type": "extension_ui_request",
+                "id": "ui-approval",
+                "method": "approval",
+                "title": "Approve write",
+                "toolCallId": "tool-call-1",
+                "toolName": "edit",
+                "operation": "write",
+                "approvalMode": "write",
+                "resolvedPolicy": "prompt",
+                "policySource": "mode",
+                "declarationPolicy": "prompt",
+                "escalationReason": "write requires approval",
+                "providerSafety": {"required": True, "checks": ["workspace"]},
+                "choices": ["Approve", "Deny"],
+                "defaultChoice": "Deny",
+            }
+        )
+        ask = parse_notification(
+            {
+                "type": "extension_ui_request",
+                "id": "ui-ask",
+                "method": "ask",
+                "questions": [
+                    {
+                        "id": "scope",
+                        "question": "Which scope?",
+                        "header": "Scope",
+                        "options": [
+                            {
+                                "label": "Workspace",
+                                "description": "Current workspace",
+                                "preview": "workspace files",
+                            }
+                        ],
+                        "multi": False,
+                        "recommended": 0,
+                    }
+                ],
+            }
+        )
+
+        self.assertIsInstance(progress, ExtensionUiRequest)
+        self.assertTrue(progress.is_passive())
+        self.assertFalse(progress.requires_response())
+        self.assertIsInstance(approval, ExtensionUiRequest)
+        self.assertEqual(approval.tool_call_id, "tool-call-1")
+        assert approval.provider_safety is not None
+        self.assertEqual(approval.provider_safety.checks, ("workspace",))
+        self.assertEqual(approval.choices, ("Approve", "Deny"))
+        self.assertEqual(approval.default_choice, "Deny")
+        self.assertIsInstance(ask, ExtensionUiRequest)
+        assert ask.questions is not None
+        self.assertTrue(ask.requires_response())
+        self.assertEqual(ask.questions[0].options[0].preview, "workspace files")
 
     def test_parse_extension_ui_request(self) -> None:
         notification = parse_notification(

@@ -22,6 +22,7 @@ import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { SessionContext, StrippedToolCallsMarker } from "@oh-my-pi/pi-coding-agent/session/session-context";
+import { StoredContextAssemblyBuilder } from "@oh-my-pi/pi-coding-agent/session/session-context-projection";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { type Component, Container, Image, ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -53,6 +54,7 @@ function makeEmptyContext(): SessionContext {
 		models: {},
 		injectedTtsrRules: [],
 		mode: "none",
+		contextAssembly: new StoredContextAssemblyBuilder([], null).finish(),
 	};
 }
 

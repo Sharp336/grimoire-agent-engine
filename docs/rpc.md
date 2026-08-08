@@ -43,7 +43,7 @@ The initial ready frame uses protocol v1 and advertises the opt-in lossless tran
   "maxFrameBytes": 1048576,
   "maxReassembledFrameBytes": 67108864,
   "capabilities": {
-    "applicationApiVersion": 1,
+    "applicationApiVersion": 2,
     "commands": [
       {
         "id": "rpc.command.get_capabilities",
@@ -779,11 +779,6 @@ the server-issued `operationId` with `confirmed: true`.
 `get_messages_page` returns a stable chronological page with `messages`, `totalMessages`, and an opaque `nextCursor` when more messages remain. Cursors are bound to the session ID, durable leaf, and message count. The server rejects stale cursors if the session changes between requests, and refuses to start a paging walk while the session is streaming or compacting. Failed page requests carry a machine-readable `code` on the error response — `session_busy` (session is streaming or compacting) or `stale_cursor` (the snapshot behind the cursor changed, e.g. a background bash appended a message between pages) — so clients can react without matching error-message text. Pages contain at most 256 messages and normally stay below the v1 physical-frame ceiling. A v1 caller can page ordinary histories, but an individual message whose response exceeds that ceiling produces an overflow error; retrieving it losslessly requires negotiated v2 framing.
 
 The bundled TypeScript `RpcClient.getMessages()` and Python `RpcClient.get_messages()` drain this paged endpoint automatically after negotiating v2. They retain the legacy monolithic command when connected to a v1 server, and on either `session_busy` or `stale_cursor` they discard partial pages and fall back to the legacy best-effort snapshot. Direct `getMessagesPage()` and `get_messages_page()` calls remain strict so incremental hosts never mix snapshots silently.
-
-### Login
-
-- `{ id?, type: "get_login_providers" }`
-- `{ id?, type: "login", providerId: string }`
 
 ### Provider Authentication
 
@@ -1661,7 +1656,7 @@ Current helper characteristics:
 - Correlates responses by generated `req_<n>` ids
 - Dispatches recognized core `AgentEvent` types to listeners
 - Supports host-owned custom tools via `setCustomTools()` and automatic handling of `host_tool_call` / `host_tool_cancel`
-- Wraps common protocol commands including OAuth `getLoginProviders()` / `login(...)`; use raw protocol frames for any surface not wrapped by the helper.
+- Wraps provider authentication with `listProviderAuth()`, `beginProviderAuth(...)`, `cancelProviderAuth(...)`, and `removeProviderAuth(...)`; use raw protocol frames for any surface not wrapped by the helper.
 
 ### Python package
 

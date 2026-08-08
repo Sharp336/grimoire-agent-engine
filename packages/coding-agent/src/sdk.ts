@@ -152,6 +152,7 @@ import {
 } from "./session/retry-fallback-chains";
 import { getRestorableSessionModels } from "./session/session-context";
 import { SessionManager } from "./session/session-manager";
+import { ActiveSessionProviderProjection } from "./session/session-provider-boundary";
 import { collectMountedMCPToolRoutes, projectMountedMCPXdevGuidance } from "./session/session-tools";
 import { createSettingsAwareStreamFn } from "./session/settings-stream-fn";
 import { SnapcompactInlineTransformer } from "./session/snapcompact-inline";
@@ -2914,8 +2915,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				typeof options.systemPrompt === "function"
 					? options.systemPrompt(defaultPrompt.systemPrompt)
 					: options.systemPrompt;
+			const resolved = typeof customPrompt === "string" ? [customPrompt] : customPrompt;
 			return {
-				systemPrompt: typeof customPrompt === "string" ? [customPrompt] : customPrompt,
+				systemPrompt: resolved,
+				logicalSources: resolved.map((content, index) => ({
+					id: `sdk-system-override:${index}`,
+					kind: "custom",
+					content,
+					foldedInto: [index],
+				})),
 			};
 		};
 
@@ -3040,12 +3048,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 
 		setActiveToolNames(initialToolNames);
-		const { systemPrompt } = await logger.time(
+		const initialSystemPromptResult = await logger.time(
 			"buildSystemPrompt",
 			rebuildSystemPrompt,
 			initialToolNames,
 			toolRegistry,
 		);
+		const { systemPrompt } = initialSystemPromptResult;
 
 		const promptTemplates = await promptTemplatesPromise;
 		toolSession.promptTemplates = promptTemplates;
@@ -3085,6 +3094,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const withContext = await extensionRunner.emitContext(messages);
 			return wrapSteeringForModel(withContext);
 		};
+
 		// Per-request provider-context transforms. Obfuscate FIRST so secrets are
 		// redacted from text before snapcompact rasterizes it into PNG frames, then
 		// clamp images to the active provider budget before the request is sent.
@@ -3107,6 +3117,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (snapcompactInline) transformed = await snapcompactInline.transform(transformed, transformModel);
 			return clampProviderContextImages(transformed, transformModel);
 		};
+		const activeProviderProjection = new ActiveSessionProviderProjection({
+			projection: () => (hasSession ? session.contextProjection : undefined),
+			transformContext,
+			convertToLlm: convertToLlmFinal,
+			transformProviderContext,
+		});
 		const onPayload = async (payload: unknown, model?: Model) => {
 			return await extensionRunner.emitBeforeProviderRequest(payload, model);
 		};
@@ -3181,14 +3197,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// namespace/project discovery on the original repo's git remote. Re-read it
 			// per turn from the SessionManager.
 			cwdResolver: () => sessionManager.getCwd(),
-			convertToLlm: convertToLlmFinal,
+			convertToLlm: activeProviderProjection.convertToLlm,
 			onPayload,
 			onResponse,
 			sessionId: providerSessionId,
 			promptCacheKey: providerPromptCacheKey,
 			deadline: options.deadline,
-			transformContext,
-			transformProviderContext,
+			transformContext: activeProviderProjection.transformContext,
+			transformProviderContext: activeProviderProjection.transformProviderContext,
 			steeringMode: settings.get("steeringMode") ?? "one-at-a-time",
 			followUpMode: settings.get("followUpMode") ?? "one-at-a-time",
 			interruptMode: settings.get("interruptMode") ?? "immediate",
@@ -3360,6 +3376,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			modelRegistry,
 			toolRegistry,
 			memoryAgentDir: agentDir,
+			initialSystemPromptSources: initialSystemPromptResult.logicalSources,
 			memoryTaskDepth: taskDepth,
 			createMemoryTools: restrictToolNames
 				? undefined

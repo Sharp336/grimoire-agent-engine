@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import path from "node:path";
+import * as path from "node:path";
 import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 import type { RpcOperationTerminalFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 

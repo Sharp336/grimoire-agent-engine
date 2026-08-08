@@ -70,25 +70,128 @@ describe("RPC v3 artifact authority", () => {
 		).rejects.toThrow("range length");
 	});
 
-	test("exports atomically only when source and destination hashes verify", async () => {
+	test("exports only into a contained fresh destination after hash verification", async () => {
 		const manager = createManager();
 		const allocation = await manager.allocatePath("read", { sessionId: "session-1" });
 		await Bun.write(allocation.path, "verified export");
 		const descriptor = await manager.describe(allocation.id);
 		if (!descriptor.sha256) throw new Error("Expected artifact hash");
 
-		const destination = path.join(tempDir.path(), "export.txt");
-		await expect(manager.exportTo(allocation.id, destination, descriptor.sha256)).resolves.toEqual({
-			path: destination,
+		const exportRoot = path.resolve(tempDir.path(), "workspace");
+		await fs.mkdir(exportRoot);
+		const destination = "export.txt";
+		const resolvedDestination = path.join(exportRoot, destination);
+		await expect(
+			manager.exportTo(allocation.id, {
+				exportRoot,
+				destination,
+				expectedSha256: descriptor.sha256,
+			}),
+		).resolves.toEqual({
+			path: resolvedDestination,
 			byteLength: 15,
 			sha256: descriptor.sha256,
 			verified: true,
 		});
-		expect(await Bun.file(destination).text()).toBe("verified export");
+		expect(await Bun.file(resolvedDestination).text()).toBe("verified export");
 
-		const rejected = path.join(tempDir.path(), "rejected.txt");
-		await expect(manager.exportTo(allocation.id, rejected, "0".repeat(64))).rejects.toThrow("hash mismatch");
+		const rejected = path.join(exportRoot, "rejected.txt");
+		await expect(
+			manager.exportTo(allocation.id, {
+				exportRoot,
+				destination: "rejected.txt",
+				expectedSha256: "0".repeat(64),
+			}),
+		).rejects.toThrow("hash mismatch");
 		await expect(fs.stat(rejected)).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
+	test("rejects absolute, traversal, symlink escapes, root symlinks, and existing destinations", async () => {
+		const manager = createManager();
+		const allocation = await manager.allocatePath("read", { sessionId: "session-1" });
+		await Bun.write(allocation.path, "sentinel-safe");
+		const descriptor = await manager.describe(allocation.id);
+		if (!descriptor.sha256) throw new Error("Expected artifact hash");
+
+		const exportRoot = path.resolve(tempDir.path(), "workspace");
+		const outside = path.resolve(tempDir.path(), "outside");
+		await fs.mkdir(exportRoot);
+		await fs.mkdir(outside);
+		const outsideSentinel = path.join(outside, "sentinel.txt");
+		await Bun.write(outsideSentinel, "outside-original");
+
+		await expect(
+			manager.exportTo(allocation.id, {
+				exportRoot,
+				destination: outsideSentinel,
+				expectedSha256: descriptor.sha256,
+			}),
+		).rejects.toThrow("relative");
+		await expect(Bun.file(outsideSentinel).text()).resolves.toBe("outside-original");
+
+		await expect(
+			manager.exportTo(allocation.id, {
+				exportRoot,
+				destination: "../outside/sentinel.txt",
+				expectedSha256: descriptor.sha256,
+			}),
+		).rejects.toThrow("traversal");
+		await expect(Bun.file(outsideSentinel).text()).resolves.toBe("outside-original");
+
+		await fs.symlink(outside, path.join(exportRoot, "linked"));
+		await expect(
+			manager.exportTo(allocation.id, {
+				exportRoot,
+				destination: "linked/escaped.txt",
+				expectedSha256: descriptor.sha256,
+			}),
+		).rejects.toThrow("escapes");
+		await expect(fs.stat(path.join(outside, "escaped.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+
+		const existing = path.join(exportRoot, "existing.txt");
+		await Bun.write(existing, "existing-original");
+		await expect(
+			manager.exportTo(allocation.id, {
+				exportRoot,
+				destination: "existing.txt",
+				expectedSha256: descriptor.sha256,
+			}),
+		).rejects.toThrow("already exists");
+		await expect(Bun.file(existing).text()).resolves.toBe("existing-original");
+
+		const rootLink = path.join(tempDir.path(), "workspace-link");
+		await fs.symlink(exportRoot, rootLink);
+		await expect(
+			manager.exportTo(allocation.id, {
+				exportRoot: rootLink,
+				destination: "root-escape.txt",
+				expectedSha256: descriptor.sha256,
+			}),
+		).rejects.toThrow("symbolic link");
+		await expect(fs.stat(path.join(exportRoot, "root-escape.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
+	test("concurrent target creation cannot replace the winner", async () => {
+		const manager = createManager();
+		const allocation = await manager.allocatePath("read", { sessionId: "session-1" });
+		await Bun.write(allocation.path, "race-proof");
+		const descriptor = await manager.describe(allocation.id);
+		if (!descriptor.sha256) throw new Error("Expected artifact hash");
+		const expectedSha256 = descriptor.sha256;
+		const exportRoot = path.join(tempDir.path(), "workspace");
+		await fs.mkdir(exportRoot);
+		const results = await Promise.allSettled(
+			[1, 2].map(() =>
+				manager.exportTo(allocation.id, {
+					exportRoot,
+					destination: "race.txt",
+					expectedSha256,
+				}),
+			),
+		);
+		expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+		expect(results.filter(result => result.status === "rejected")).toHaveLength(1);
+		await expect(Bun.file(path.join(exportRoot, "race.txt")).text()).resolves.toBe("race-proof");
 	});
 
 	test("preserves readable partial content while exposing cancellation", async () => {

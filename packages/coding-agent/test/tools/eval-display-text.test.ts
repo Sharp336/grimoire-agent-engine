@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as evalIndex from "@oh-my-pi/pi-coding-agent/eval";
 import * as pyKernel from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 function makeSession(): ToolSession {
 	return {
@@ -41,8 +43,12 @@ async function makeRedPng(width: number, height: number): Promise<string> {
 }
 
 describe("EvalTool display() text surfacing", () => {
+	let tempDir: TempDir | undefined;
+
 	afterEach(() => {
 		vi.restoreAllMocks();
+		tempDir?.removeSync();
+		tempDir = undefined;
 	});
 
 	it("includes display() JSON values in the text content the model sees", async () => {
@@ -85,6 +91,31 @@ describe("EvalTool display() text surfacing", () => {
 		expect(text).toContain("before");
 		expect(text.indexOf("before")).toBeLessThan(text.indexOf("display[1]"));
 		expect(text).toContain("[\n  1,\n  2,\n  3\n]");
+	});
+
+	it("persists exact stdout and display text in one complete artifact", async () => {
+		vi.spyOn(pyKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		const stdout = "  before  \n";
+		vi.spyOn(evalIndex.jsBackend, "execute").mockResolvedValue(
+			baseResult({
+				output: stdout,
+				displayOutputs: [{ type: "json", data: { answer: 42 } }],
+			}) as never,
+		);
+		tempDir = TempDir.createSync("omp-eval-display-artifact-");
+		const artifactPath = path.join(tempDir.path(), "eval.log");
+		const tool = new EvalTool({
+			...makeSession(),
+			allocateOutputArtifact: async () => ({ id: "eval-complete", path: artifactPath }),
+		});
+
+		const result = await tool.execute("call-complete-artifact", {
+			language: "js",
+			code: "print('  before  '); display({ answer: 42 });",
+		});
+
+		expect(result.details?.outputArtifactId).toBe("eval-complete");
+		expect(await Bun.file(artifactPath).text()).toBe(`${stdout}\n\ndisplay[1]:\n{\n  "answer": 42\n}`);
 	});
 
 	it("surfaces displayed images to the model as ImageContent blocks, not inlined base64", async () => {

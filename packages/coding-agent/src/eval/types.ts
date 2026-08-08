@@ -40,6 +40,8 @@ export interface EvalToolDetails {
 	statusEvents?: EvalStatusEvent[];
 	isError?: boolean;
 	meta?: OutputMeta;
+	/** Complete backend output artifact, including output hidden by rendering limits. */
+	outputArtifactId?: string;
 	/** First backend that produced cells. Kept for transcript compatibility. */
 	language?: EvalLanguage;
 	/** Backends that produced cells in this call, in first-use order. */

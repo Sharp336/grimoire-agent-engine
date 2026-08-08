@@ -45,6 +45,7 @@ export * from "./session/indexed-session-storage";
 export * from "./session/messages";
 export * from "./session/redis-session-storage";
 export * from "./session/session-context";
+export * from "./session/session-context-projection";
 export * from "./session/session-dump-format";
 export * from "./session/session-entries";
 export * from "./session/session-listing";

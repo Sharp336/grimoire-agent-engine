@@ -6,9 +6,11 @@ import {
 	type SessionAuthorityObservation,
 	type SessionAuthorityReplay,
 	type SessionAuthoritySnapshot,
+	SessionCursorError,
 	SessionHost,
 	type SessionHostCapabilityDefinition,
 	type SessionJournalCursor,
+	SessionSubscriptionCapacityError,
 } from "@oh-my-pi/pi-coding-agent/session/session-host";
 
 const capabilities = [
@@ -393,18 +395,27 @@ describe("session host ordered observations", () => {
 			afterCursor: { sessionId: "session-1", leafId: "entry-1", entryId: "entry-1" },
 			snapshot: false,
 		});
+		expect(subscription).toMatchObject({
+			durableCursor: { sessionId: "session-1", leafId: "entry-2", entryId: "entry-2" },
+			watermark: { sequence: 1 },
+			replayComplete: true,
+			replayPending: true,
+		});
+		expect(subscription.watermark.epoch).not.toBe("epoch-2");
 
 		expect((await subscription.observations.next()).value).toMatchObject({
-			epoch: "epoch-2",
+			epoch: subscription.watermark.epoch,
+			sequence: 1,
 			eventId: "session-1:entry-2",
 			replay: true,
 			journalCursor: { sessionId: "session-1", leafId: "entry-2", entryId: "entry-2" },
 		});
+		await subscription.replayBarrier;
 		await subscription.close();
 		await host.close();
 	});
 
-	test("keeps a stable event id when durable replay duplicates an event from the transport ring", async () => {
+	test("isolates durable replay from the transport ring while preserving stable event ids", async () => {
 		const durable = {
 			kind: "journal_entry",
 			payload: { id: "entry-1" },
@@ -430,20 +441,27 @@ describe("session host ordered observations", () => {
 			snapshot: false,
 		});
 		const duplicate = (await replay.observations.next()).value;
-
 		expect(duplicate).toMatchObject({
-			sequence: 2,
+			epoch: replay.watermark.epoch,
+			sequence: 1,
 			eventId: "session-1:entry-1",
 			replay: true,
 		});
+		expect(replay.watermark.epoch).not.toBe("epoch-1");
 		await replay.close();
 
 		const transportReplay = await host.open({ after: { epoch: "epoch-1", sequence: 0 }, snapshot: false });
 		const original = (await transportReplay.observations.next()).value;
-		const replayed = (await transportReplay.observations.next()).value;
-		expect([original, replayed]).toMatchObject([
+		authority.emit({
+			kind: "progress",
+			payload: { phase: "live" },
+			durability: "transient",
+			terminalSettlement: "none",
+		});
+		const live = (await transportReplay.observations.next()).value;
+		expect([original, live]).toMatchObject([
 			{ sequence: 1, eventId: "session-1:entry-1", replay: false },
-			{ sequence: 2, eventId: "session-1:entry-1", replay: true },
+			{ sequence: 2, eventId: "epoch-1:2", replay: false },
 		]);
 		await transportReplay.close();
 		await host.close();
@@ -526,6 +544,147 @@ describe("session host ordered observations", () => {
 			},
 		});
 		await subscription.close();
+		await host.close();
+	});
+	test("serializes durable replay handoffs and orders each replay before deferred live observations", async () => {
+		const firstReplayStarted = Promise.withResolvers<void>();
+		const releaseReplay = Promise.withResolvers<void>();
+		let replayCalls = 0;
+		const durable: SessionAuthorityObservation = {
+			kind: "journal_entry",
+			payload: { id: "entry-replay" },
+			durability: "durable",
+			eventId: "session-1:entry-replay",
+			journalCursor: { sessionId: "session-1", leafId: "entry-replay", entryId: "entry-replay" },
+			terminalSettlement: "none",
+		};
+		const authority = new InMemorySessionAuthority(
+			async () => ({
+				revision: 1,
+				state: {},
+				journalCursor: durable.journalCursor,
+			}),
+			undefined,
+			async () => {
+				replayCalls++;
+				if (replayCalls === 1) firstReplayStarted.resolve();
+				await releaseReplay.promise;
+				return { observations: [durable], journalCursor: durable.journalCursor };
+			},
+		);
+		const host = new SessionHost(authority, {
+			epoch: "epoch-1",
+			maxBufferedObservations: 8,
+			maxSubscriptions: 2,
+		});
+
+		const firstOpening = host.open({
+			afterCursor: { sessionId: "session-1", leafId: null, entryId: null },
+			snapshot: false,
+		});
+		await firstReplayStarted.promise;
+		const secondOpening = host.open({
+			afterCursor: { sessionId: "session-1", leafId: null, entryId: null },
+			snapshot: false,
+		});
+		authority.emit({
+			kind: "progress",
+			payload: { phase: "live" },
+			durability: "transient",
+			terminalSettlement: "none",
+		});
+		releaseReplay.resolve();
+
+		const first = await firstOpening;
+		const firstWatermark = first.watermark;
+		const second = await secondOpening;
+		expect(second.watermark.epoch).not.toBe(firstWatermark.epoch);
+
+		const firstReplay = (await first.observations.next()).value;
+		const firstLive = (await first.observations.next()).value;
+		expect([firstReplay, firstLive]).toMatchObject([
+			{ type: "observation", eventId: "session-1:entry-replay", replay: true, sequence: 1 },
+			{
+				type: "observation",
+				epoch: firstWatermark.epoch,
+				eventId: `${firstWatermark.epoch}:2`,
+				replay: false,
+				sequence: 2,
+			},
+		]);
+
+		expect((await second.observations.next()).value).toMatchObject({
+			type: "observation",
+			epoch: second.watermark.epoch,
+			sequence: 1,
+			eventId: "session-1:entry-replay",
+			replay: true,
+		});
+		expect(replayCalls).toBe(2);
+		await Promise.all([first.close(), second.close()]);
+		await host.close();
+	});
+
+	test("returns a typed resnapshot outcome when replay plus live handoff exceeds capacity", async () => {
+		const replayStarted = Promise.withResolvers<void>();
+		const releaseReplay = Promise.withResolvers<void>();
+		const durable: SessionAuthorityObservation = {
+			kind: "journal_entry",
+			payload: { id: "entry-replay" },
+			durability: "durable",
+			eventId: "session-1:entry-replay",
+			journalCursor: { sessionId: "session-1", leafId: "entry-replay", entryId: "entry-replay" },
+			terminalSettlement: "none",
+		};
+		const authority = new InMemorySessionAuthority(
+			async () => ({
+				revision: 1,
+				state: {},
+				journalCursor: durable.journalCursor,
+			}),
+			undefined,
+			async () => {
+				replayStarted.resolve();
+				await releaseReplay.promise;
+				return { observations: [durable], journalCursor: durable.journalCursor };
+			},
+		);
+		const host = new SessionHost(authority, { epoch: "epoch-1", maxBufferedObservations: 2 });
+		const opening = host.open({
+			afterCursor: { sessionId: "session-1", leafId: null, entryId: null },
+			snapshot: false,
+		});
+		await replayStarted.promise;
+		for (const phase of ["one", "two"]) {
+			authority.emit({
+				kind: "progress",
+				payload: { phase },
+				durability: "transient",
+				terminalSettlement: "none",
+			});
+		}
+		releaseReplay.resolve();
+		await expect(opening).rejects.toBeInstanceOf(SessionCursorError);
+		await expect(opening).rejects.toMatchObject({ code: "replay_limit_exceeded", recovery: "resnapshot" });
+		await host.close();
+	});
+
+	test("rejects opens at subscription capacity and frees the slot on close", async () => {
+		const authority = new InMemorySessionAuthority(async () => ({
+			revision: 0,
+			state: {},
+			journalCursor: { sessionId: "session-1", leafId: null, entryId: null },
+		}));
+		const host = new SessionHost(authority, {
+			epoch: "epoch-1",
+			maxBufferedObservations: 8,
+			maxSubscriptions: 1,
+		});
+		const first = await host.open({ snapshot: false });
+		await expect(host.open({ snapshot: false })).rejects.toBeInstanceOf(SessionSubscriptionCapacityError);
+		await first.close();
+		const second = await host.open({ snapshot: false });
+		await second.close();
 		await host.close();
 	});
 });

@@ -13,9 +13,14 @@ import {
 	type SessionAuthorityObservation,
 	SessionHost,
 	type SessionJsonValue,
+	SessionSubscriptionCapacityError,
 } from "@oh-my-pi/pi-coding-agent/session/session-host";
 
-const flushMicrotasks = () => new Promise<void>(resolve => setImmediate(resolve));
+const flushMicrotasks = () => {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	setImmediate(resolve);
+	return promise;
+};
 
 describe("RPC session command capabilities", () => {
 	test("routes catalog authority independently from execution authority", () => {
@@ -66,6 +71,11 @@ describe("RpcSessionHostAdapter", () => {
 			revision: 7,
 			watermark: { epoch: "epoch-1", sequence: 0 },
 		});
+		expect(opened.durableCursor).toEqual({
+			sessionId: "session-1",
+			leafId: "entry-7",
+			entryId: "entry-7",
+		});
 
 		listener?.({
 			durability: "transient",
@@ -95,6 +105,59 @@ describe("RpcSessionHostAdapter", () => {
 
 		await adapter.acknowledge(opened.subscriptionId, 1);
 		await adapter.unsubscribe(opened.subscriptionId);
+	});
+	test("waits for durable replay delivery before returning the cursor and watermark", async () => {
+		const durable: SessionAuthorityObservation = {
+			kind: "journal_entry",
+			payload: { id: "entry-2" },
+			durability: "durable",
+			eventId: "session-1:entry-2",
+			journalCursor: { sessionId: "session-1", leafId: "entry-2", entryId: "entry-2" },
+			terminalSettlement: "none",
+		};
+		const authority: SessionAuthority = {
+			sessionId: "session-1",
+			snapshot: async captureWatermark => {
+				captureWatermark();
+				return {
+					revision: 2,
+					state: {},
+					journalCursor: durable.journalCursor,
+				};
+			},
+			replay: async () => ({ observations: [durable], journalCursor: durable.journalCursor }),
+			subscribe: () => () => {},
+			invoke: async () => ({ outcome: "completed" }),
+			settle: async () => ({ state: "settled" }),
+			dispose: () => {},
+		};
+		const frames: RpcSessionObservationFrame[] = [];
+		const adapter = new RpcSessionHostAdapter(
+			new SessionHost(authority, { epoch: "epoch-2", maxBufferedObservations: 8 }),
+			{
+				output: frame => frames.push(frame),
+			},
+		);
+
+		const opened = await adapter.open({
+			afterCursor: { sessionId: "session-1", leafId: "entry-1", entryId: "entry-1" },
+			snapshot: false,
+		});
+		expect(opened).toMatchObject({
+			replayComplete: true,
+			durableCursor: durable.journalCursor,
+			watermark: { sequence: 1 },
+		});
+		expect(opened.watermark?.epoch).not.toBe("epoch-2");
+		expect(frames).toHaveLength(1);
+		expect(frames[0]?.observation).toMatchObject({
+			epoch: opened.watermark?.epoch,
+			eventId: durable.eventId,
+			replay: true,
+			sequence: 1,
+		});
+		await adapter.unsubscribe(opened.subscriptionId);
+		await adapter.shutdown();
 	});
 
 	test("delivers the terminal observation before graceful shutdown settles", async () => {
@@ -141,6 +204,108 @@ describe("RpcSessionHostAdapter", () => {
 		await adapter.open({ snapshot: false });
 
 		await expect(adapter.shutdown()).resolves.toEqual({ state: "settled" });
+		expect(frames).toHaveLength(1);
+		expect(frames[0]?.observation).toMatchObject({
+			kind: "session_settled",
+			terminalSettlement: "completed",
+		});
+	});
+
+	test("enforces the adapter subscription limit and frees a slot after unsubscribe", async () => {
+		const authority: SessionAuthority = {
+			sessionId: "session-1",
+			snapshot: async captureWatermark => {
+				captureWatermark();
+				return {
+					revision: 0,
+					state: {},
+					journalCursor: { sessionId: "session-1", leafId: null, entryId: null },
+				};
+			},
+			replay: async after => ({ observations: [], journalCursor: after }),
+			subscribe: () => () => {},
+			invoke: async () => ({ outcome: "completed" }),
+			settle: async () => ({ state: "settled" }),
+			dispose: () => {},
+		};
+		const adapter = new RpcSessionHostAdapter(
+			new SessionHost(authority, { epoch: "epoch-1", maxBufferedObservations: 8, maxSubscriptions: 4 }),
+			{ output: () => {}, maxSubscriptions: 1 },
+		);
+		const first = await adapter.open({ snapshot: false });
+		await expect(adapter.open({ snapshot: false })).rejects.toBeInstanceOf(SessionSubscriptionCapacityError);
+		await adapter.unsubscribe(first.subscriptionId);
+		const second = await adapter.open({ snapshot: false });
+		await adapter.unsubscribe(second.subscriptionId);
+		await adapter.shutdown();
+	});
+
+	test("shares shutdown settlement through final observation pump drain", async () => {
+		const settlementStarted = Promise.withResolvers<void>();
+		const releaseSettlement = Promise.withResolvers<void>();
+		let listener: ((observation: SessionAuthorityObservation) => void) | undefined;
+		const frames: RpcSessionObservationFrame[] = [];
+		const authority: SessionAuthority = {
+			sessionId: "session-1",
+			snapshot: async captureWatermark => {
+				captureWatermark();
+				return {
+					revision: 0,
+					state: {},
+					journalCursor: { sessionId: "session-1", leafId: null, entryId: null },
+				};
+			},
+			replay: async after => ({ observations: [], journalCursor: after }),
+			subscribe: next => {
+				listener = next;
+				return () => {
+					listener = undefined;
+				};
+			},
+			invoke: async () => ({ outcome: "completed" }),
+			settle: async () => {
+				settlementStarted.resolve();
+				await releaseSettlement.promise;
+				listener?.({
+					durability: "transient",
+					kind: "session_settled",
+					payload: {},
+					terminalSettlement: "completed",
+				});
+				return { state: "settled" };
+			},
+			dispose: () => {
+				listener = undefined;
+			},
+		};
+		const adapter = new RpcSessionHostAdapter(
+			new SessionHost(authority, { epoch: "epoch-1", maxBufferedObservations: 8 }),
+			{ output: frame => frames.push(frame) },
+		);
+		await adapter.open({ snapshot: false });
+
+		let firstSettled = false;
+		const shutdownPromise = adapter.shutdown();
+		const firstShutdown = shutdownPromise.then(value => {
+			firstSettled = true;
+			return value;
+		});
+		await settlementStarted.promise;
+		let secondSettled = false;
+		const secondPromise = adapter.shutdown();
+		expect(secondPromise).toBe(shutdownPromise);
+		const secondShutdown = secondPromise.then(value => {
+			secondSettled = true;
+			return value;
+		});
+		await flushMicrotasks();
+		expect(firstSettled).toBe(false);
+		expect(secondSettled).toBe(false);
+		releaseSettlement.resolve();
+		await expect(Promise.all([firstShutdown, secondShutdown])).resolves.toEqual([
+			{ state: "settled" },
+			{ state: "settled" },
+		]);
 		expect(frames).toHaveLength(1);
 		expect(frames[0]?.observation).toMatchObject({
 			kind: "session_settled",

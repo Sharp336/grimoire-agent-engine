@@ -213,11 +213,12 @@ describe("provider auth controller", () => {
 				operations,
 				frame => frames.push(frame),
 				task => tasks.push(task),
-				request =>
-					new Promise(resolve => {
-						if (request.signal.aborted) resolve(undefined);
-						else request.signal.addEventListener("abort", () => resolve(undefined), { once: true });
-					}),
+				request => {
+					const deferred = Promise.withResolvers<string | undefined>();
+					if (request.signal.aborted) deferred.resolve(undefined);
+					else request.signal.addEventListener("abort", () => deferred.resolve(undefined), { once: true });
+					return deferred.promise;
+				},
 			);
 			controller.begin(undefined, "anthropic", "paste_code");
 			await Promise.resolve();
@@ -237,12 +238,9 @@ describe("provider auth controller", () => {
 	test("operation-wide cancellation aborts provider work and retains exclusivity until cleanup", async () => {
 		const frames: object[] = [];
 		const tasks: Promise<void>[] = [];
-		let releaseProvider!: () => void;
+		const { promise: providerReleased, resolve: releaseProvider } = Promise.withResolvers<void>();
 		let committed = false;
 		let providerSignal: AbortSignal | undefined;
-		const providerReleased = new Promise<void>(resolve => {
-			releaseProvider = resolve;
-		});
 		const fakeService = {
 			assertMethod: () => {},
 			login: async (provider: string, _method: string, callbacks: { signal: AbortSignal }) => {
@@ -292,14 +290,8 @@ describe("provider auth controller", () => {
 	test("rejects cancellation after the persistence commit boundary", async () => {
 		const frames: object[] = [];
 		const tasks: Promise<void>[] = [];
-		let releasePersistence!: () => void;
-		let markCommitStarted!: () => void;
-		const persistenceReleased = new Promise<void>(resolve => {
-			releasePersistence = resolve;
-		});
-		const commitStarted = new Promise<void>(resolve => {
-			markCommitStarted = resolve;
-		});
+		const { promise: persistenceReleased, resolve: releasePersistence } = Promise.withResolvers<void>();
+		const { promise: commitStarted, resolve: markCommitStarted } = Promise.withResolvers<void>();
 		const fakeService = {
 			assertMethod: () => {},
 			login: async (provider: string, _method: string, callbacks: { onBeforePersist?: () => void }) => {

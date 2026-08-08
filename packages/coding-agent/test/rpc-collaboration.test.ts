@@ -4,9 +4,12 @@ import {
 	RpcCollaborationAuthorityError,
 	type RpcCollaborationConnection,
 	type RpcCollaborationFrame,
+	type RpcCollaborationJoinResult,
+	type RpcCollaborationLifecycleToken,
 	RpcCollaborationManager,
 	type RpcCollaborationMediaStore,
 	type RpcCollaborationOpenEvents,
+	type RpcCollaborationSessionAuthority,
 	type RpcCollaborationTransportFactory,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-collaboration";
 import {
@@ -51,13 +54,14 @@ class FakeConnection implements RpcCollaborationConnection {
 		this.resyncCount += 1;
 	}
 }
-
 class FakeFactory implements RpcCollaborationTransportFactory {
 	events: RpcCollaborationOpenEvents | undefined;
+	readonly eventHistory: RpcCollaborationOpenEvents[] = [];
 	connection: FakeConnection | undefined;
 
 	async host(_options: { relayUrl?: string; webUrl?: string }, events: RpcCollaborationOpenEvents) {
 		this.events = events;
+		this.eventHistory.push(events);
 		this.connection = new FakeConnection("host", "full");
 		return {
 			connection: this.connection,
@@ -75,18 +79,62 @@ class FakeFactory implements RpcCollaborationTransportFactory {
 
 	async join(_options: { link: string; displayName?: string }, events: RpcCollaborationOpenEvents) {
 		this.events = events;
+		this.eventHistory.push(events);
 		this.connection = new FakeConnection("guest", _options.link.endsWith(".view") ? "view" : "full");
 		return { connection: this.connection };
 	}
 }
 
+class DeferredJoinFactory implements RpcCollaborationTransportFactory {
+	readonly opened = Promise.withResolvers<RpcCollaborationJoinResult>();
+	events: RpcCollaborationOpenEvents | undefined;
+
+	async host(): Promise<never> {
+		throw new Error("host not used");
+	}
+
+	async join(
+		_options: { link: string; displayName?: string },
+		events: RpcCollaborationOpenEvents,
+	): Promise<RpcCollaborationJoinResult> {
+		this.events = events;
+		return this.opened.promise;
+	}
+}
+class SequenceHostFactory implements RpcCollaborationTransportFactory {
+	readonly events: RpcCollaborationOpenEvents[] = [];
+	readonly connections: FakeConnection[];
+
+	constructor(connections: FakeConnection[]) {
+		this.connections = connections;
+	}
+
+	async host(_options: { relayUrl?: string; webUrl?: string }, events: RpcCollaborationOpenEvents) {
+		this.events.push(events);
+		const connection = this.connections.shift();
+		if (!connection) throw new Error("no connection available");
+		return {
+			connection,
+			links: { link: "wss://relay/room", viewLink: "wss://relay/room.view" },
+			participants: [
+				{ participantId: "host", displayName: "owner", role: "host" as const, authority: "full" as const },
+			],
+		};
+	}
+
+	async join(): Promise<never> {
+		throw new Error("join not used");
+	}
+}
+
 class FakeMediaStore implements RpcCollaborationMediaStore {
+	readonly lifecycleTokens: Array<RpcCollaborationLifecycleToken | undefined> = [];
 	readonly values = new Map<string, { mediaType: string; data: Uint8Array }>();
 	#nextId = 0;
-
-	async save(mediaType: string, data: Uint8Array) {
+	async save(mediaType: string, data: Uint8Array, lifecycleToken?: RpcCollaborationLifecycleToken) {
 		const mediaId = String(this.#nextId++);
 		this.values.set(mediaId, { mediaType, data });
+		this.lifecycleTokens.push(lifecycleToken);
 		return {
 			mediaId,
 			mediaType,
@@ -179,6 +227,156 @@ describe("RPC collaboration authority", () => {
 		expect(rotated.links?.link).toEndWith("rotated.full");
 	});
 
+	test("atomically advances host authority while keeping transport callbacks bound", async () => {
+		const factory = new FakeFactory();
+		const frames: RpcCollaborationFrame[] = [];
+		let sessionAuthority: RpcCollaborationSessionAuthority = Object.freeze({
+			sessionId: "session-1",
+			sessionGeneration: 4,
+			authorityGeneration: 8,
+		});
+		const manager = new RpcCollaborationManager({
+			factory,
+			media: new FakeMediaStore(),
+			getSessionId: () => sessionAuthority.sessionId,
+			getSessionAuthority: () => sessionAuthority,
+			output: frame => frames.push(frame),
+		});
+		await manager.host({});
+		const events = factory.events;
+		if (!events) throw new Error("missing event bundle");
+		events.participants([
+			{ participantId: "host", displayName: "owner", role: "host", authority: "full" },
+			{ participantId: "7", displayName: "guest", role: "guest", authority: "full" },
+		]);
+		const originalToken = events.lifecycleToken;
+		if (!originalToken) throw new Error("missing lifecycle token");
+
+		await manager.revoke("7", expected => {
+			expect(expected).toEqual(sessionAuthority);
+			sessionAuthority = Object.freeze({
+				...expected,
+				authorityGeneration: expected.authorityGeneration + 1,
+			});
+			return sessionAuthority;
+		});
+
+		const revokedToken = events.lifecycleToken;
+		expect(revokedToken).toBeDefined();
+		expect(revokedToken).not.toBe(originalToken);
+		expect(manager.isLifecycleTokenCurrent(originalToken)).toBe(false);
+		if (revokedToken) expect(manager.isLifecycleTokenCurrent(revokedToken)).toBe(true);
+
+		events.participants([
+			{ participantId: "host", displayName: "owner", role: "host", authority: "full" },
+			{ participantId: "8", displayName: "new guest", role: "guest", authority: "full" },
+		]);
+		expect(manager.snapshot().participants.at(-1)?.participantId).toBe("8");
+
+		await manager.rotate(expected => {
+			sessionAuthority = Object.freeze({
+				...expected,
+				authorityGeneration: expected.authorityGeneration + 1,
+			});
+			return sessionAuthority;
+		});
+		expect(events.lifecycleToken?.sessionAuthority.authorityGeneration).toBe(10);
+		expect(frames.at(-1)).toMatchObject({
+			type: "collaboration_state",
+			snapshot: { links: { link: "wss://relay/r/rotated.full" } },
+		});
+		const rotatedToken = events.lifecycleToken;
+		if (!rotatedToken) throw new Error("missing rotated lifecycle token");
+		sessionAuthority = Object.freeze({
+			...sessionAuthority,
+			authorityGeneration: sessionAuthority.authorityGeneration + 1,
+		});
+		const reboundToken = manager.replaceAuthorityToken(rotatedToken, sessionAuthority);
+		expect(reboundToken.collaborationGeneration).toBe(rotatedToken.collaborationGeneration);
+		expect(reboundToken.sessionAuthority).toEqual({
+			sessionId: "session-1",
+			sessionGeneration: 4,
+			authorityGeneration: 11,
+		});
+		expect(() => manager.replaceAuthorityToken(rotatedToken, sessionAuthority)).toThrow("lifecycle token");
+	});
+
+	test("serializes remote guest authority changes and rebinds transport media", async () => {
+		const factory = new FakeFactory();
+		const media = new FakeMediaStore();
+		const frames: RpcCollaborationFrame[] = [];
+		const firstCleanup = Promise.withResolvers<void>();
+		const secondCleanup = Promise.withResolvers<void>();
+		const secondStarted = Promise.withResolvers<void>();
+		const secondInstalled = Promise.withResolvers<void>();
+		const cleanupGates = [firstCleanup, secondCleanup];
+		let transitionCount = 0;
+		let sessionAuthority: RpcCollaborationSessionAuthority = Object.freeze({
+			sessionId: "session-1",
+			sessionGeneration: 2,
+			authorityGeneration: 5,
+		});
+		const manager = new RpcCollaborationManager({
+			factory,
+			media,
+			getSessionId: () => sessionAuthority.sessionId,
+			getSessionAuthority: () => sessionAuthority,
+			transitionAuthority: async (captureAuthority, applyAuthority, installAuthority) => {
+				const transitionIndex = transitionCount++;
+				const expected = captureAuthority();
+				expect(expected).toEqual(sessionAuthority);
+				if (transitionIndex === 1) secondStarted.resolve();
+				applyAuthority();
+				await cleanupGates[transitionIndex]?.promise;
+				sessionAuthority = Object.freeze({
+					...expected,
+					authorityGeneration: expected.authorityGeneration + 1,
+				});
+				installAuthority(sessionAuthority);
+				if (transitionIndex === 1) secondInstalled.resolve();
+			},
+			output: frame => frames.push(frame),
+		});
+		await manager.join({ link: "wss://relay/r/room.full" });
+		const events = factory.events;
+		if (!events) throw new Error("missing event bundle");
+		const initialToken = events.lifecycleToken;
+		if (!initialToken) throw new Error("missing initial lifecycle token");
+
+		const framesBeforeChanges = frames.length;
+		events.authority("view");
+		events.participants([{ participantId: "queued", displayName: "queued", role: "guest", authority: "view" }]);
+		const queuedMedia = events.media({ mediaType: "image/png", data: Uint8Array.from([1]) });
+		events.authority("full");
+		expect(transitionCount).toBe(1);
+		expect(manager.snapshot().authority).toBe("view");
+		expect(manager.snapshot().participants).toEqual([]);
+		expect(events.lifecycleToken).toBeUndefined();
+		expect(media.values.size).toBe(0);
+		expect(frames).toHaveLength(framesBeforeChanges);
+
+		firstCleanup.resolve();
+		await secondStarted.promise;
+		expect(
+			frames.some(frame => frame.type === "collaboration_state" && frame.snapshot.authority === "view"),
+		).toBeTrue();
+		expect(transitionCount).toBe(2);
+		expect(events.lifecycleToken).toBeUndefined();
+		expect(manager.isLifecycleTokenCurrent(initialToken)).toBe(false);
+		await queuedMedia;
+		expect(manager.snapshot().participants.at(-1)?.participantId).toBe("queued");
+		expect(media.lifecycleTokens.at(-1)?.sessionAuthority.authorityGeneration).toBe(6);
+
+		secondCleanup.resolve();
+		await secondInstalled.promise;
+		await events.media({ mediaType: "image/png", data: Uint8Array.from([2]) });
+		expect(
+			frames.some(frame => frame.type === "collaboration_state" && frame.snapshot.authority === "full"),
+		).toBeTrue();
+		expect(manager.snapshot().authority).toBe("full");
+		expect(events.lifecycleToken?.sessionAuthority.authorityGeneration).toBe(7);
+		expect(media.lifecycleTokens.at(-1)).toBe(events.lifecycleToken);
+	});
 	test("tracks replication cursor and acknowledges retained non-authoritative frames", async () => {
 		const { manager, factory, frames } = makeManager();
 		await manager.join({ link: "wss://relay/r/room.full" });
@@ -289,13 +487,112 @@ describe("RPC collaboration authority", () => {
 		const { manager, factory, frames } = makeManager();
 		await manager.join({ link: "wss://relay/r/room.full" });
 		await factory.events?.media({ mediaType: "image/png", data: Uint8Array.from([1, 2, 3, 4]) });
-
 		const replicated = frames.find(frame => frame.type === "collaboration_replicated");
+
 		expect(replicated).toMatchObject({
 			kind: "media",
 			media: { mediaId: "0", mediaType: "image/png", byteLength: 4 },
 		});
 		expect(await manager.readMedia("0", 1, 2)).toMatchObject({ offset: 1, byteLength: 2, eof: false, data: "AgM=" });
+	});
+	test("closes a factory result that resolves after leave invalidates its lifecycle token", async () => {
+		const factory = new DeferredJoinFactory();
+		const manager = new RpcCollaborationManager({
+			factory,
+			media: new FakeMediaStore(),
+			getSessionId: () => "session-1",
+			output: () => {},
+		});
+		const opening = manager.join({ link: "wss://relay/r/room.full" });
+		await Promise.resolve();
+		await manager.leave("superseded");
+
+		const late = new FakeConnection("guest", "full");
+		factory.opened.resolve({ connection: late });
+		await expect(opening).rejects.toThrow("lifecycle token");
+		expect(late.leaveReasons).toEqual(["stale_open"]);
+		expect(manager.snapshot()).toMatchObject({ state: "off", role: "none", authority: "none" });
+	});
+
+	test("coalesces leaves while allowing a new generation without a stale reset", async () => {
+		const first = new FakeConnection("host", "full");
+		const second = new FakeConnection("host", "full");
+		const leaveGate = Promise.withResolvers<void>();
+		first.leave = async reason => {
+			first.leaveReasons.push(reason);
+			await leaveGate.promise;
+		};
+		const factory = new SequenceHostFactory([first, second]);
+		const manager = new RpcCollaborationManager({
+			factory,
+			media: new FakeMediaStore(),
+			getSessionId: () => "session-1",
+			output: () => {},
+		});
+		await manager.host({});
+		const leaveA = manager.leave("first");
+		const leaveB = manager.leave("second");
+		expect(leaveB).toBe(leaveA);
+
+		await manager.host({});
+		expect(manager.snapshot()).toMatchObject({ state: "connected", role: "host" });
+		leaveGate.resolve();
+		await leaveA;
+		expect(manager.snapshot()).toMatchObject({ state: "connected", role: "host" });
+		expect(first.leaveReasons).toEqual(["first"]);
+		expect(second.leaveReasons).toEqual([]);
+	});
+
+	test("rejects callbacks from an earlier connection after a new generation starts", async () => {
+		const { manager, factory, frames } = makeManager();
+		await manager.host({});
+		const eventsA = factory.eventHistory[0];
+		if (!eventsA) throw new Error("missing first event bundle");
+		await manager.leave("replace");
+		await manager.host({});
+
+		eventsA.participants([{ participantId: "old", displayName: "old", role: "guest", authority: "full" }]);
+		eventsA.replicated({ kind: "old", payload: { stale: true } });
+		eventsA.status("reconnecting", "network_lost");
+
+		expect(manager.snapshot()).toMatchObject({ state: "connected", role: "host" });
+		expect(manager.snapshot().participants).toEqual([
+			{ participantId: "host", displayName: "owner", role: "host", authority: "full" },
+		]);
+		expect(frames.filter(frame => frame.type === "collaboration_replicated")).toHaveLength(0);
+	});
+
+	test("drops media while stale and keeps prior-generation media unreadable", async () => {
+		const { manager, factory, media, frames } = makeManager({ maxRetainedFrames: 1 });
+		await manager.join({ link: "wss://relay/r/room.full" });
+		const events = factory.events;
+		if (!events) throw new Error("missing event bundle");
+		await events.media({ mediaType: "image/png", data: Uint8Array.from([1]) });
+		factory.events?.replicated({ kind: "one", payload: { n: 1 } });
+		factory.events?.replicated({ kind: "two", payload: { n: 2 } });
+		const savedBeforeStale = media.values.size;
+		const framesBeforeStale = frames.filter(frame => frame.type === "collaboration_replicated").length;
+
+		await expect(events.media({ mediaType: "image/png", data: Uint8Array.from([2]) })).rejects.toThrow();
+		expect(media.values.size).toBe(savedBeforeStale);
+		expect(frames.filter(frame => frame.type === "collaboration_replicated")).toHaveLength(framesBeforeStale);
+	});
+
+	test("scopes media reads to the active collaboration generation", async () => {
+		const { manager, factory } = makeManager();
+		await manager.join({ link: "wss://relay/r/room.full" });
+		const mediaA = await factory.events?.media({ mediaType: "image/png", data: Uint8Array.from([1]) });
+		if (!mediaA) throw new Error("missing first media descriptor");
+		expect(await manager.readMedia(mediaA.mediaId)).toMatchObject({ mediaId: mediaA.mediaId });
+
+		await manager.leave("room_changed");
+		await expect(manager.readMedia(mediaA.mediaId)).rejects.toThrow();
+
+		await manager.join({ link: "wss://relay/r/room.full" });
+		const mediaB = await factory.events?.media({ mediaType: "image/png", data: Uint8Array.from([2]) });
+		if (!mediaB) throw new Error("missing second media descriptor");
+		await expect(manager.readMedia(mediaA.mediaId)).rejects.toThrow();
+		expect(await manager.readMedia(mediaB.mediaId)).toMatchObject({ mediaId: mediaB.mediaId });
 	});
 
 	test("terminates when the bound local session changes", async () => {

@@ -228,7 +228,7 @@ export class AgentSessionAuthority implements SessionAuthority {
 			...(causationId === undefined ? {} : { causationId }),
 			kind: event.type,
 			payload: event as unknown as SessionJsonValue,
-			terminalSettlement: event.type === "agent_end" ? "completed" : "none",
+			terminalSettlement: event.type === "agent_end" && event.isTerminal !== false ? "completed" : "none",
 		});
 		if (event.type !== "message_end") return;
 		await this.#session.waitForSessionMessagePersistence(event.message);

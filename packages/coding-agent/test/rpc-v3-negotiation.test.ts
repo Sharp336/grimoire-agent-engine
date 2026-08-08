@@ -59,6 +59,7 @@ describe("RPC v3 semantic negotiation", () => {
 			"session.catalog",
 			"session.observe",
 			"session.execute",
+			"context.projection",
 			"interaction",
 			"approval",
 			"semantic-rendering",

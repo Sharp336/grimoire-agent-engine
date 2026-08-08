@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
 	getRpcCapabilityManifest,
+	getRpcCommandRequiredFeatures,
 	RPC_APPLICATION_API_VERSION,
 	RPC_COMMAND_DEFINITIONS,
 	validateRpcCommand,
@@ -35,6 +36,46 @@ describe("RPC command registry", () => {
 		}
 	});
 
+	test("requires correlation ids for every v3 command in schemas and validation", () => {
+		for (const [name, definition] of Object.entries(RPC_COMMAND_DEFINITIONS)) {
+			if (definition.version !== 3) continue;
+			const withoutId = { ...definition.example } as Record<string, unknown>;
+			delete withoutId.id;
+			expect(validateRpcCommand(withoutId)).toMatchObject({
+				ok: false,
+				command: name,
+				error: 'RPC command field "id" is required',
+				code: "invalid_request",
+			});
+			const capability = getRpcCapabilityManifest().commands.find(candidate => candidate.name === name);
+			expect(capability?.inputSchema?.required).toContain("id");
+		}
+	});
+
+	test("derives nested session invocation scheduling after nested validation", () => {
+		expect(
+			validateRpcCommand({
+				id: "outer-control",
+				type: "session_invoke",
+				command: { kind: "abort" },
+			}),
+		).toMatchObject({ ok: true, scheduling: "control" });
+		expect(
+			validateRpcCommand({
+				id: "outer-serial",
+				type: "session_invoke",
+				command: { kind: "prompt", input: { message: "continue" } },
+			}),
+		).toMatchObject({ ok: true, scheduling: "serial" });
+		expect(
+			validateRpcCommand({
+				id: "outer-invalid",
+				type: "session_invoke",
+				command: { kind: "prompt", input: { message: 42 } },
+			}),
+		).toMatchObject({ ok: false, command: "session_invoke", code: "invalid_request" });
+	});
+
 	test("advertises authoritative serial tool inventory reads and update signals in API v2", () => {
 		const manifest = getRpcCapabilityManifest();
 		expect(manifest.applicationApiVersion).toBe(2);
@@ -60,6 +101,19 @@ describe("RPC command registry", () => {
 			},
 		});
 	});
+
+	test("advertises tool inventory as unavailable when the current projection is unrepresentable", () => {
+		expect(
+			getRpcCapabilityManifest({ toolInventoryAvailable: false }).commands.find(
+				command => command.name === "get_tool_inventory",
+			),
+		).toMatchObject({
+			availability: "unavailable",
+			disabledReason: {
+				code: "tool_inventory_unavailable",
+			},
+		});
+	});
 	test("advertises every operation, plan, and provider-auth lifecycle event exactly once", () => {
 		const events = getRpcCapabilityManifest().events;
 		expect(events).toEqual(
@@ -68,6 +122,7 @@ describe("RPC command registry", () => {
 				"operation_completed",
 				"operation_failed",
 				"operation_cancelled",
+				"session_observation",
 				"plan_state_update",
 				"plan_approval_request",
 				"plan_approval_settled",
@@ -76,6 +131,50 @@ describe("RPC command registry", () => {
 			]),
 		);
 		expect(new Set(events).size).toBe(events.length);
+	});
+
+	test("declares one negotiation requirement for every collaboration operation", () => {
+		for (const name of [
+			"collaboration_get",
+			"collaboration_host",
+			"collaboration_join",
+			"collaboration_leave",
+			"collaboration_revoke",
+			"collaboration_rotate",
+			"collaboration_acknowledge",
+			"collaboration_read_media",
+		] as const) {
+			expect(getRpcCommandRequiredFeatures(name)).toEqual(["collaboration"]);
+		}
+	});
+
+	test("advertises bounded context projection reads behind explicit negotiation", () => {
+		const manifest = getRpcCapabilityManifest();
+		const command = manifest.commands.find(candidate => candidate.name === "context_get");
+		expect(command).toMatchObject({
+			scope: "session",
+			execution: "sync",
+			concurrencyClass: "concurrent",
+			requiredFeatures: ["context.projection"],
+			inputSchema: {
+				required: ["type", "id"],
+				properties: {
+					maxSources: { minimum: 0 },
+					maxRelations: { minimum: 0 },
+					maxContentBytes: { minimum: 0 },
+				},
+			},
+		});
+		expect(getRpcCommandRequiredFeatures("context_get")).toEqual(["context.projection"]);
+		expect(
+			validateRpcCommand({
+				id: "context-request",
+				type: "context_get",
+				maxSources: 0,
+				maxRelations: 0,
+				maxContentBytes: 0,
+			}),
+		).toMatchObject({ ok: true, scheduling: "concurrent" });
 	});
 
 	test("advertises bounded queue and owner-scoped job controls", () => {

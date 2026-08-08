@@ -35,7 +35,12 @@ import type {
 } from "../../registry/agent-control";
 import type { AgentSessionEvent } from "../../session/agent-session-events";
 import type { SessionStats } from "../../session/agent-session-types";
-import type { ArtifactDescriptor, ArtifactExportResult, ArtifactRange } from "../../session/artifacts";
+import type {
+	ArtifactDescriptor,
+	ArtifactExportResult,
+	ArtifactRange,
+	ArtifactReference,
+} from "../../session/artifacts";
 import type {
 	SessionCatalogEntry,
 	SessionCatalogPage,
@@ -43,6 +48,7 @@ import type {
 	SessionCatalogTreeNode,
 	SessionWorkspaceRoot,
 } from "../../session/session-catalog";
+import type { ContextAssemblySnapshot } from "../../session/session-context-projection";
 import type {
 	SessionAuthoritySettlement,
 	SessionCommand,
@@ -115,6 +121,39 @@ export interface RpcSettingsChange {
 }
 
 // ============================================================================
+// RPC Context Projection
+// ============================================================================
+
+export interface RpcContextGetOptions {
+	maxSources?: number;
+	maxRelations?: number;
+	maxContentBytes?: number;
+}
+
+export interface RpcContextGetBounds {
+	maxSources: number;
+	maxRelations: number;
+	maxContentBytes: number;
+}
+
+export interface RpcContextGetTruncation {
+	sources: boolean;
+	relations: boolean;
+	content: boolean;
+}
+
+export interface RpcContextGetResult {
+	snapshot: ContextAssemblySnapshot;
+	bounds: RpcContextGetBounds;
+	returned: {
+		sources: number;
+		relations: number;
+		contentBytes: number;
+	};
+	truncated: RpcContextGetTruncation;
+}
+
+// ============================================================================
 // RPC Commands (stdin)
 // ============================================================================
 
@@ -137,6 +176,7 @@ export type RpcCommand =
 			afterCursor?: SessionJournalCursor;
 			snapshot?: boolean;
 	  }
+	| ({ id: string; type: "context_get" } & RpcContextGetOptions)
 	| { id: string; type: "session_ack"; subscriptionId: string; sequence: number }
 	| { id: string; type: "session_unsubscribe"; subscriptionId: string }
 	| { id: string; type: "session_invoke"; command: SessionCommand }
@@ -676,9 +716,19 @@ export interface RpcPromptResultFrame {
 export interface RpcEvalHistoryEntry {
 	language: RpcEvalLanguage;
 	code: string;
+	/** Bounded UTF-8-safe tail preview; complete bytes are in artifact. */
 	output: string;
+	outputBytes: number;
+	outputPreviewBytes: number;
+	outputTruncation: {
+		truncated: boolean;
+		direction: "none" | "tail";
+	};
+	artifact: ArtifactDescriptor;
+	artifactRef: ArtifactReference;
 	exitCode: number | undefined;
 	cancelled: boolean;
+	/** Legacy shorthand retained alongside outputTruncation for existing clients. */
 	truncated: boolean;
 	timestamp: number;
 	excludeFromContext?: boolean;
@@ -756,7 +806,7 @@ export interface RpcOperationAccepted {
 }
 
 export interface RpcActiveOperation extends RpcOperationFrameBase {
-	status: "accepted" | "started";
+	status: "accepted" | "started" | "cancelling";
 	acceptedAt: number;
 	startedAt?: number;
 }
@@ -772,7 +822,7 @@ export type RpcCancelOperationResult =
 			status: "cancelled" | "completed" | "failed";
 			terminal: RpcOperationTerminalFrame;
 	  }
-	| { operationId: string; status: "not_found" };
+	| { operationId: string; status: "cancelling" | "not_found" };
 export interface RpcCommandOutputFrame {
 	type: "command_output";
 	text: string;
@@ -967,6 +1017,9 @@ export interface RpcSessionObservationFrame {
 export interface RpcSessionOpenResult {
 	subscriptionId: string;
 	snapshot?: SessionSnapshot;
+	durableCursor?: SessionJournalCursor;
+	watermark?: SessionObservationPosition;
+	replayComplete: true;
 }
 
 // ============================================================================
@@ -1003,6 +1056,13 @@ export type RpcResponse =
 			command: "session_open";
 			success: true;
 			data: RpcSessionOpenResult;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "context_get";
+			success: true;
+			data: RpcContextGetResult;
 	  }
 	| { id?: string; type: "response"; command: "session_ack"; success: true }
 	| { id?: string; type: "response"; command: "session_unsubscribe"; success: true }
@@ -1761,6 +1821,7 @@ type RpcManifestEvent =
 	| RpcProviderAuthRequestFrame
 	| RpcProviderAuthUpdateFrame
 	| RpcSessionEventFrame
+	| RpcSessionObservationFrame
 	| RpcExtensionUIRequest
 	| RpcSettingsUpdateFrame
 	| RpcQueueUpdateFrame
@@ -1799,6 +1860,7 @@ export const RPC_EVENT_TYPES = eventInventory([
 	"ready",
 	"prompt_result",
 	"available_commands_update",
+	"session_observation",
 	"tool_inventory_update",
 	"eval_output",
 	"eval_complete",

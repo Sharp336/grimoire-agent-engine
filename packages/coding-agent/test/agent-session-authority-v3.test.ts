@@ -94,6 +94,28 @@ describe("AgentSessionAuthority", () => {
 		});
 	});
 
+	test("keeps non-terminal agent_end observations unsettled", async () => {
+		const session = new FakeSession();
+		const authority = new AgentSessionAuthority(session, {
+			snapshotState: async () => ({ phase: "active" }),
+			invoke: async () => ({ outcome: "completed" }),
+			settle: async () => ({ state: "settled" }),
+		});
+		const observations: Array<{ kind: string; terminalSettlement: string }> = [];
+		authority.subscribe(observation =>
+			observations.push({ kind: observation.kind, terminalSettlement: observation.terminalSettlement }),
+		);
+
+		session.emit({ type: "agent_end", messages: [], isTerminal: false });
+		session.emit({ type: "agent_end", messages: [], isTerminal: true });
+		await authority.snapshot(() => {});
+
+		expect(observations).toEqual([
+			{ kind: "agent_end", terminalSettlement: "none" },
+			{ kind: "agent_end", terminalSettlement: "completed" },
+		]);
+	});
+
 	test("snapshots the authoritative journal watermark without exposing a transport cursor", async () => {
 		const session = new FakeSession();
 		const authority = new AgentSessionAuthority(session, {

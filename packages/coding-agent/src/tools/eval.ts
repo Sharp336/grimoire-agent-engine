@@ -474,6 +474,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				// double-counting against the aggregate `tailBuffer`; on completion the
 				// authoritative `cellResult.output` (below) overwrites this live tail.
 				let activeLiveCell: { result: EvalCellResult; buf: TailBuffer } | undefined;
+				let outputArtifactId: string | undefined;
 
 				const appendTail = (text: string) => {
 					tailBuffer.append(text);
@@ -487,6 +488,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 							...cell,
 							statusEvents: cell.statusEvents ? [...cell.statusEvents] : undefined,
 						})),
+						outputArtifactId,
 					};
 					if (jsonOutputs.length > 0) {
 						details.jsonOutputs = jsonOutputs;
@@ -514,12 +516,13 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 
 				const sessionFile = session.getSessionFile?.() ?? undefined;
 				const kernelOwnerId = session.getEvalKernelOwnerId?.() ?? undefined;
-				const { path: artifactPath, id: artifactId } =
-					(await session.allocateOutputArtifact?.("eval", { toolCallId })) ?? {};
+				const outputAllocation = await session.allocateOutputArtifact?.("eval", { toolCallId });
+				const artifactPath = outputAllocation?.path;
 				session.assertEvalExecutionAllowed?.();
 				outputSink = new OutputSink({
 					artifactPath,
-					artifactId,
+					artifactId: outputAllocation?.id,
+					mirrorAllToArtifact: true,
 					headBytes: resolveOutputSinkHeadBytes(session.settings),
 					maxColumns: resolveOutputMaxColumns(session.settings),
 					onChunk: chunk => {
@@ -532,6 +535,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					},
 				});
 				const sessionId = session.getEvalSessionId?.() ?? defaultEvalSessionId(session);
+				let artifactHasOutput = false;
 
 				for (let i = 0; i < cells.length; i++) {
 					const cell = cells[i];
@@ -566,6 +570,20 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					activeLiveCell = { result: cellResult, buf: new TailBuffer(DEFAULT_MAX_BYTES * 2) };
 					pushUpdate();
 
+					let cellHasStdout = false;
+					const pushCellStdout = (chunk: string) => {
+						if (chunk.length === 0) return;
+						if (!cellHasStdout && artifactHasOutput) {
+							const liveCell = activeLiveCell;
+							activeLiveCell = undefined;
+							outputSink!.push("\n\n");
+							activeLiveCell = liveCell;
+						}
+						cellHasStdout = true;
+						artifactHasOutput = true;
+						outputSink!.push(chunk);
+					};
+
 					const startTime = Date.now();
 					let result: ExecutorBackendResult;
 					try {
@@ -578,9 +596,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 							session,
 							idleTimeoutMs,
 							reset: cell.reset,
-							onChunk: chunk => {
-								outputSink!.push(chunk);
-							},
+							onChunk: pushCellStdout,
 							onStatus: event => {
 								if (event.op === EVAL_TIMEOUT_PAUSE_OP) {
 									idle?.pause();
@@ -649,6 +665,12 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					const displayText = formatDisplayOutputsForText(cellDisplayOutputs);
 					const visibleDisplayText =
 						displayText && imageText ? `${displayText}\n\n${imageText}` : displayText || imageText;
+					if (!cellHasStdout && result.output) pushCellStdout(result.output);
+					if (visibleDisplayText) {
+						if (artifactHasOutput) outputSink.push("\n\n");
+						outputSink.push(visibleDisplayText);
+						artifactHasOutput = true;
+					}
 					const cellOutput =
 						stdoutTrimmed && visibleDisplayText
 							? `${stdoutTrimmed}\n\n${visibleDisplayText}`
@@ -673,10 +695,12 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						const outputText = combinedOutput || errorMsg;
 
 						const summaryForMeta = await summarizeFinal(combinedOutput, finalizeOutput);
+						outputArtifactId = summaryForMeta.artifactId;
 						const details: EvalToolDetails = {
 							language: languages[0],
 							languages,
 							cells: cellResults,
+							outputArtifactId,
 							jsonOutputs: jsonOutputs.length > 0 ? jsonOutputs : undefined,
 							statusEvents: statusEvents.length > 0 ? statusEvents : undefined,
 							isError: true,
@@ -698,10 +722,12 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 							: `Command exited with code ${result.exitCode}`;
 
 						const summaryForMeta = await summarizeFinal(combinedOutput, finalizeOutput);
+						outputArtifactId = summaryForMeta.artifactId;
 						const details: EvalToolDetails = {
 							language: languages[0],
 							languages,
 							cells: cellResults,
+							outputArtifactId,
 							jsonOutputs: jsonOutputs.length > 0 ? jsonOutputs : undefined,
 							statusEvents: statusEvents.length > 0 ? statusEvents : undefined,
 							isError: true,
@@ -726,11 +752,13 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						? `(displayed ${images.length} image${images.length === 1 ? "" : "s"}; no text output)`
 						: "(no output)");
 				const summaryForMeta = await summarizeFinal(combinedOutput, finalizeOutput);
+				outputArtifactId = summaryForMeta.artifactId;
 
 				const details: EvalToolDetails = {
 					language: languages[0],
 					languages,
 					cells: cellResults,
+					outputArtifactId,
 					jsonOutputs: jsonOutputs.length > 0 ? jsonOutputs : undefined,
 					statusEvents: statusEvents.length > 0 ? statusEvents : undefined,
 				};

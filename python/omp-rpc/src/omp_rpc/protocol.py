@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import math
 import mimetypes
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,13 +29,14 @@ RpcOperationCommand: TypeAlias = str
 SessionMode: TypeAlias = Literal["none", "plan", "plan_paused"]
 PlanWorkflow: TypeAlias = Literal["parallel", "iterative"]
 RpcOperationCancellationReason: TypeAlias = Literal[
-    "user", "replaced", "session_transition", "client_disconnected"
+    "user", "replaced", "session_transition", "client_disconnected", "shutdown"
 ]
 RpcOperationCancellationCode: TypeAlias = Literal[
     "cancelled_by_client",
     "replaced_by_prompt",
     "session_changed",
     "client_disconnected",
+    "session_shutdown",
 ]
 RpcCommandScope: TypeAlias = str
 RpcCommandExecution: TypeAlias = str
@@ -71,20 +73,24 @@ ExtensionUiMethod: TypeAlias = Literal[
     "confirm",
     "input",
     "editor",
+    "approval",
+    "ask",
     "cancel",
     "notify",
     "setStatus",
+    "progress",
     "setWidget",
     "setTitle",
     "set_editor_text",
     "open_url",
 ]
 InteractiveExtensionUiMethod: TypeAlias = Literal[
-    "select", "confirm", "input", "editor"
+    "select", "confirm", "input", "editor", "approval", "ask"
 ]
 PassiveExtensionUiMethod: TypeAlias = Literal[
     "notify",
     "setStatus",
+    "progress",
     "setWidget",
     "setTitle",
     "set_editor_text",
@@ -96,6 +102,7 @@ PASSIVE_EXTENSION_UI_METHODS: Final[frozenset[PassiveExtensionUiMethod]] = froze
     {
         "notify",
         "setStatus",
+        "progress",
         "setWidget",
         "setTitle",
         "set_editor_text",
@@ -103,7 +110,7 @@ PASSIVE_EXTENSION_UI_METHODS: Final[frozenset[PassiveExtensionUiMethod]] = froze
     }
 )
 INTERACTIVE_EXTENSION_UI_METHODS: Final[frozenset[InteractiveExtensionUiMethod]] = (
-    frozenset({"select", "confirm", "input", "editor"})
+    frozenset({"select", "confirm", "input", "editor", "approval", "ask"})
 )
 VALUE_EXTENSION_UI_METHODS: Final[frozenset[ValueExtensionUiMethod]] = frozenset(
     {"select", "input", "editor"}
@@ -138,9 +145,12 @@ _EXTENSION_UI_METHOD_VALUES: Final[frozenset[str]] = frozenset(
         "confirm",
         "input",
         "editor",
+        "approval",
+        "ask",
         "cancel",
         "notify",
         "setStatus",
+        "progress",
         "setWidget",
         "setTitle",
         "set_editor_text",
@@ -206,8 +216,12 @@ _RPC_V3_FRAME_TYPES: Final[frozenset[str]] = frozenset(
 
 
 def _clone_json_value(value: object, *, field: str) -> JsonValue:
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if value is None or isinstance(value, (str, bool, int)):
         return cast(JsonValue, value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{field} must contain only finite numbers")
+        return value
     if isinstance(value, list):
         return [_clone_json_value(item, field=field) for item in value]
     if isinstance(value, dict):
@@ -325,7 +339,10 @@ def _optional_float(payload: JsonObject, field: str) -> float | None:
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{field} must be a number")
-    return float(value)
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(f"{field} must be finite")
+    return result
 
 
 def _tuple_of_strings(values: object, *, field: str) -> tuple[str, ...] | None:
@@ -1385,6 +1402,35 @@ class DeleteSessionResult:
 
 
 @dataclass(slots=True, frozen=True)
+class RpcContextGetBounds:
+    max_sources: int
+    max_relations: int
+    max_content_bytes: int
+
+
+@dataclass(slots=True, frozen=True)
+class RpcContextGetReturned:
+    sources: int
+    relations: int
+    content_bytes: int
+
+
+@dataclass(slots=True, frozen=True)
+class RpcContextGetTruncation:
+    sources: bool
+    relations: bool
+    content: bool
+
+
+@dataclass(slots=True, frozen=True)
+class RpcContextGetResult:
+    snapshot: JsonObject
+    bounds: RpcContextGetBounds
+    returned: RpcContextGetReturned
+    truncated: RpcContextGetTruncation
+
+
+@dataclass(slots=True, frozen=True)
 class SettingsChange:
     path: str
     value: JsonValue
@@ -1612,7 +1658,10 @@ SessionObservation: TypeAlias = SessionObservationEnvelope | SessionObservationG
 @dataclass(slots=True, frozen=True)
 class SessionOpenResult:
     subscription_id: str
+    replay_complete: Literal[True]
     snapshot: SessionSnapshot | None = None
+    durable_cursor: SessionJournalCursor | None = None
+    watermark: SessionObservationPosition | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -1636,6 +1685,7 @@ class SessionCommandOutcome:
     revision: int | None = None
     result: JsonValue | None = None
     error: SessionCommandError | None = None
+    has_result: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -1866,6 +1916,57 @@ class MessagesPage:
 
 
 @dataclass(slots=True, frozen=True)
+class ExtensionAskDialogOption:
+    label: str
+    description: str | None = None
+    preview: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class ExtensionAskDialogQuestion:
+    id: str
+    question: str
+    options: tuple[ExtensionAskDialogOption, ...]
+    header: str | None = None
+    multi: bool | None = None
+    recommended: int | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class ExtensionAskDialogResultItem:
+    id: str
+    question: str
+    options: tuple[str, ...]
+    multi: bool
+    selected_options: tuple[str, ...]
+    custom_input: str | None = None
+    note: str | None = None
+    timed_out: bool | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class ExtensionAskDialogSubmitResult:
+    results: tuple[ExtensionAskDialogResultItem, ...]
+    kind: Literal["submit"] = "submit"
+
+
+@dataclass(slots=True, frozen=True)
+class ExtensionAskDialogChatResult:
+    kind: Literal["chat"] = "chat"
+
+
+ExtensionAskDialogResult: TypeAlias = (
+    ExtensionAskDialogSubmitResult | ExtensionAskDialogChatResult
+)
+
+
+@dataclass(slots=True, frozen=True)
+class ExtensionApprovalProviderSafety:
+    required: bool
+    checks: tuple[str, ...]
+
+
+@dataclass(slots=True, frozen=True)
 class ExtensionUiRequest:
     id: str
     method: ExtensionUiMethod
@@ -1904,6 +2005,18 @@ class ExtensionUiRequest:
     launch_url: str | None = None
     instructions: str | None = None
     type: Literal["extension_ui_request"] = "extension_ui_request"
+    tool_call_id: str | None = None
+    tool_name: str | None = None
+    operation: Literal["read", "write", "exec"] | None = None
+    approval_mode: Literal["always-ask", "write", "yolo"] | None = None
+    resolved_policy: Literal["prompt"] | None = None
+    policy_source: Literal["tool", "user", "mode"] | None = None
+    declaration_policy: Literal["allow", "deny", "prompt"] | None = None
+    escalation_reason: str | None = None
+    provider_safety: ExtensionApprovalProviderSafety | None = None
+    choices: tuple[str, ...] | None = None
+    default_choice: str | None = None
+    questions: tuple[ExtensionAskDialogQuestion, ...] | None = None
 
     def is_passive(self) -> bool:
         return self.method in PASSIVE_EXTENSION_UI_METHODS
@@ -1916,6 +2029,7 @@ class ExtensionUiRequest:
 
     def requires_response(self) -> bool:
         return self.is_interactive()
+
 
 
 @dataclass(slots=True, frozen=True)
@@ -3215,14 +3329,33 @@ def parse_session_observation(payload: JsonObject) -> SessionObservation:
 
 
 def parse_session_open_result(payload: JsonObject) -> SessionOpenResult:
+    if not _require_bool(payload, "replayComplete"):
+        raise ValueError("sessionOpen.replayComplete must be true")
     raw_snapshot = payload.get("snapshot")
+    raw_durable_cursor = payload.get("durableCursor")
+    raw_watermark = payload.get("watermark")
     return SessionOpenResult(
         subscription_id=_require_str(payload, "subscriptionId"),
+        replay_complete=True,
         snapshot=(
             parse_session_snapshot(
                 _clone_json_object(raw_snapshot, field="sessionOpen.snapshot")
             )
             if raw_snapshot is not None
+            else None
+        ),
+        durable_cursor=(
+            parse_session_journal_cursor(
+                raw_durable_cursor, field="sessionOpen.durableCursor"
+            )
+            if raw_durable_cursor is not None
+            else None
+        ),
+        watermark=(
+            parse_session_observation_position(
+                raw_watermark, field="sessionOpen.watermark"
+            )
+            if raw_watermark is not None
             else None
         ),
     )
@@ -3251,6 +3384,7 @@ def parse_session_command_outcome(payload: JsonObject) -> SessionCommandOutcome:
             if "result" in payload
             else None
         ),
+        has_result="result" in payload,
         error=parsed_error,
     )
 
@@ -3318,6 +3452,36 @@ def parse_collaboration_media_range(payload: JsonObject) -> CollaborationMediaRa
         eof=_require_bool(payload, "eof"),
         data=_require_str(payload, "data"),
         encoding=cast(Literal["base64"], encoding),
+    )
+
+
+def parse_rpc_context_get_result(payload: JsonObject) -> RpcContextGetResult:
+    bounds = _clone_json_object(payload.get("bounds"), field="contextGet.bounds")
+    returned = _clone_json_object(
+        payload.get("returned"), field="contextGet.returned"
+    )
+    truncated = _clone_json_object(
+        payload.get("truncated"), field="contextGet.truncated"
+    )
+    return RpcContextGetResult(
+        snapshot=_clone_json_object(
+            payload.get("snapshot"), field="contextGet.snapshot"
+        ),
+        bounds=RpcContextGetBounds(
+            max_sources=_require_int_value(bounds, "maxSources"),
+            max_relations=_require_int_value(bounds, "maxRelations"),
+            max_content_bytes=_require_int_value(bounds, "maxContentBytes"),
+        ),
+        returned=RpcContextGetReturned(
+            sources=_require_int_value(returned, "sources"),
+            relations=_require_int_value(returned, "relations"),
+            content_bytes=_require_int_value(returned, "contentBytes"),
+        ),
+        truncated=RpcContextGetTruncation(
+            sources=_require_bool(truncated, "sources"),
+            relations=_require_bool(truncated, "relations"),
+            content=_require_bool(truncated, "content"),
+        ),
     )
 
 
@@ -3671,17 +3835,93 @@ def parse_provider_auth_state(payload: JsonObject) -> ProviderAuthState:
     )
 
 
+def _parse_extension_ask_option(
+    value: object, *, field: str
+) -> ExtensionAskDialogOption:
+    option = _clone_json_object(value, field=field)
+    return ExtensionAskDialogOption(
+        label=_require_str(option, "label"),
+        description=_optional_str(option, "description"),
+        preview=_optional_str(option, "preview"),
+    )
+
+
+def _parse_extension_ask_question(
+    value: object, *, field: str
+) -> ExtensionAskDialogQuestion:
+    question = _clone_json_object(value, field=field)
+    raw_options = question.get("options")
+    if not isinstance(raw_options, list):
+        raise ValueError(f"{field}.options must be an array")
+    return ExtensionAskDialogQuestion(
+        id=_require_str(question, "id"),
+        question=_require_str(question, "question"),
+        options=tuple(
+            _parse_extension_ask_option(
+                option, field=f"{field}.options[{index}]"
+            )
+            for index, option in enumerate(raw_options)
+        ),
+        header=_optional_str(question, "header"),
+        multi=_optional_bool(question, "multi"),
+        recommended=_optional_int(question, "recommended"),
+    )
+
+
+def _parse_extension_approval_safety(
+    value: object, *, field: str
+) -> ExtensionApprovalProviderSafety:
+    safety = _clone_json_object(value, field=field)
+    return ExtensionApprovalProviderSafety(
+        required=_require_bool(safety, "required"),
+        checks=_required_string_tuple(safety.get("checks"), field=f"{field}.checks"),
+    )
+
+
 def parse_extension_ui_request(payload: JsonObject) -> ExtensionUiRequest:
+    method = cast(
+        ExtensionUiMethod,
+        _require_literal(
+            payload.get("method"),
+            _EXTENSION_UI_METHOD_VALUES,
+            field="extension_ui_request.method",
+        ),
+    )
+    raw_questions = payload.get("questions")
+    questions: tuple[ExtensionAskDialogQuestion, ...] | None = None
+    if method == "ask":
+        if not isinstance(raw_questions, list):
+            raise ValueError("extension_ui_request.questions must be an array")
+        questions = tuple(
+            _parse_extension_ask_question(
+                question, field=f"extension_ui_request.questions[{index}]"
+            )
+            for index, question in enumerate(raw_questions)
+        )
+
+    provider_safety: ExtensionApprovalProviderSafety | None = None
+    if method == "approval":
+        provider_safety = _parse_extension_approval_safety(
+            payload.get("providerSafety"),
+            field="extension_ui_request.providerSafety",
+        )
+        choices = _required_string_tuple(
+            payload.get("choices"), field="extension_ui_request.choices"
+        )
+        if choices != ("Approve", "Deny"):
+            raise ValueError(
+                "extension_ui_request.choices must be ['Approve', 'Deny']"
+            )
+        default_choice = _require_str(payload, "defaultChoice")
+        if default_choice != "Deny":
+            raise ValueError("extension_ui_request.defaultChoice must be Deny")
+    else:
+        choices = None
+        default_choice = None
+
     return ExtensionUiRequest(
         id=_require_str(payload, "id"),
-        method=cast(
-            ExtensionUiMethod,
-            _require_literal(
-                payload.get("method"),
-                _EXTENSION_UI_METHOD_VALUES,
-                field="extension_ui_request.method",
-            ),
-        ),
+        method=method,
         title=_optional_str(payload, "title"),
         options=_tuple_of_strings(
             payload.get("options"), field="extension_ui_request.options"
@@ -3723,6 +3963,69 @@ def parse_extension_ui_request(payload: JsonObject) -> ExtensionUiRequest:
                 field="extension_ui_request.command",
             ),
         ),
+        tool_call_id=(
+            _require_str(payload, "toolCallId") if method == "approval" else None
+        ),
+        tool_name=(
+            _require_str(payload, "toolName") if method == "approval" else None
+        ),
+        operation=cast(
+            Literal["read", "write", "exec"] | None,
+            (
+                _require_literal(
+                    payload.get("operation"),
+                    frozenset({"read", "write", "exec"}),
+                    field="extension_ui_request.operation",
+                )
+                if method == "approval"
+                else None
+            ),
+        ),
+        approval_mode=cast(
+            Literal["always-ask", "write", "yolo"] | None,
+            (
+                _require_literal(
+                    payload.get("approvalMode"),
+                    frozenset({"always-ask", "write", "yolo"}),
+                    field="extension_ui_request.approvalMode",
+                )
+                if method == "approval"
+                else None
+            ),
+        ),
+        resolved_policy=cast(
+            Literal["prompt"] | None,
+            (
+                _require_literal(
+                    payload.get("resolvedPolicy"),
+                    frozenset({"prompt"}),
+                    field="extension_ui_request.resolvedPolicy",
+                )
+                if method == "approval"
+                else None
+            ),
+        ),
+        policy_source=cast(
+            Literal["tool", "user", "mode"] | None,
+            _optional_literal(
+                payload.get("policySource"),
+                frozenset({"tool", "user", "mode"}),
+                field="extension_ui_request.policySource",
+            ),
+        ),
+        declaration_policy=cast(
+            Literal["allow", "deny", "prompt"] | None,
+            _optional_literal(
+                payload.get("declarationPolicy"),
+                frozenset({"allow", "deny", "prompt"}),
+                field="extension_ui_request.declarationPolicy",
+            ),
+        ),
+        escalation_reason=_optional_str(payload, "escalationReason"),
+        provider_safety=provider_safety,
+        choices=choices,
+        default_choice=default_choice,
+        questions=questions,
         notify_type=cast(
             NotifyType | None,
             _optional_literal(
@@ -4479,6 +4782,7 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
                             "replaced",
                             "session_transition",
                             "client_disconnected",
+                            "shutdown",
                         }
                     ),
                     field="operation_cancelled.reason",
@@ -4494,6 +4798,7 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
                             "replaced_by_prompt",
                             "session_changed",
                             "client_disconnected",
+                            "session_shutdown",
                         }
                     ),
                     field="operation_cancelled.code",

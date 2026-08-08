@@ -163,6 +163,30 @@
     },
     "capabilities": [
       {
+        "id": "session.catalog",
+        "version": 1,
+        "supported": true,
+        "operations": [
+          "list",
+          "metadata",
+          "tree",
+          "open",
+          "resume",
+          "selectLeaf",
+          "fork",
+          "reset",
+          "branch",
+          "close"
+        ],
+        "events": [
+          "catalogChanged",
+          "sessionStateChanged"
+        ],
+        "platforms": [
+          "all"
+        ]
+      },
+      {
         "id": "session.observe",
         "version": 1,
         "supported": true,
@@ -174,6 +198,187 @@
         "events": [
           "observation",
           "gap"
+        ],
+        "platforms": [
+          "all"
+        ]
+      },
+      {
+        "id": "session.execute",
+        "version": 1,
+        "supported": true,
+        "operations": [
+          "prompt",
+          "queue",
+          "goal",
+          "todo",
+          "child",
+          "checkpoint",
+          "rewind",
+          "mode",
+          "role",
+          "compact",
+          "retry",
+          "toolPolicy",
+          "reload"
+        ],
+        "events": [
+          "operationAccepted",
+          "operationProgress",
+          "operationSettled"
+        ],
+        "platforms": [
+          "all"
+        ]
+      },
+      {
+        "id": "interaction",
+        "version": 1,
+        "supported": true,
+        "operations": [
+          "respond",
+          "cancel"
+        ],
+        "events": [
+          "select",
+          "confirm",
+          "input",
+          "editor",
+          "notification",
+          "status",
+          "progress",
+          "ask"
+        ],
+        "platforms": [
+          "all"
+        ]
+      },
+      {
+        "id": "approval",
+        "version": 1,
+        "supported": true,
+        "operations": [
+          "respond",
+          "cancel"
+        ],
+        "events": [
+          "requested",
+          "settled"
+        ],
+        "platforms": [
+          "all"
+        ]
+      },
+      {
+        "id": "semantic-rendering",
+        "version": 1,
+        "supported": true,
+        "operations": [
+          "render",
+          "act",
+          "cancel"
+        ],
+        "events": [
+          "content",
+          "actionRequested",
+          "actionSettled"
+        ],
+        "platforms": [
+          "all"
+        ]
+      },
+      {
+        "id": "artifact.read",
+        "version": 1,
+        "supported": true,
+        "operations": [
+          "metadata",
+          "readRange",
+          "export"
+        ],
+        "events": [],
+        "platforms": [
+          "all"
+        ]
+      },
+      {
+        "id": "resource.lifecycle",
+        "version": 1,
+        "supported": true,
+        "operations": [
+          "list",
+          "refresh",
+          "reload",
+          "cancel",
+          "dispose"
+        ],
+        "events": [
+          "discovered",
+          "connecting",
+          "connected",
+          "disconnected",
+          "authenticationRequired",
+          "reconnecting",
+          "failed",
+          "disabled",
+          "diagnostics"
+        ],
+        "platforms": [
+          "all"
+        ]
+      },
+      {
+        "id": "collaboration",
+        "version": 1,
+        "supported": true,
+        "operations": [
+          "get",
+          "host",
+          "join",
+          "leave",
+          "revoke",
+          "rotate",
+          "acknowledge",
+          "readMedia"
+        ],
+        "events": [
+          "state",
+          "replicated",
+          "gap",
+          "stale"
+        ],
+        "platforms": [
+          "all"
+        ]
+      },
+      {
+        "id": "runtime-provenance",
+        "version": 1,
+        "supported": true,
+        "operations": [
+          "snapshot"
+        ],
+        "events": [
+          "usageLimit",
+          "providerFallback",
+          "modelFallback",
+          "credentialRotation",
+          "failure"
+        ],
+        "platforms": [
+          "all"
+        ]
+      },
+      {
+        "id": "session.shutdown",
+        "version": 1,
+        "supported": true,
+        "operations": [
+          "shutdown"
+        ],
+        "events": [
+          "draining",
+          "settled"
         ],
         "platforms": [
           "all"

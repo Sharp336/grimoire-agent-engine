@@ -16,6 +16,27 @@ export type RpcCollaborationState =
 	| "leaving"
 	| "failed";
 
+export interface RpcCollaborationSessionAuthority {
+	readonly sessionId: string;
+	readonly sessionGeneration: number;
+	readonly authorityGeneration: number;
+}
+
+export interface RpcCollaborationLifecycleToken {
+	readonly collaborationGeneration: number;
+	readonly sessionAuthority: RpcCollaborationSessionAuthority;
+}
+
+export type RpcCollaborationAuthorityCommit = (
+	expected: RpcCollaborationSessionAuthority,
+) => RpcCollaborationSessionAuthority;
+
+export type RpcCollaborationAuthorityTransition = (
+	captureAuthority: () => RpcCollaborationSessionAuthority,
+	applyAuthority: () => void,
+	installAuthority: (next: RpcCollaborationSessionAuthority) => void,
+) => Promise<void>;
+
 export type RpcCollaborationJsonValue =
 	| string
 	| number
@@ -149,6 +170,7 @@ export interface RpcCollaborationMediaInput {
 }
 
 export interface RpcCollaborationOpenEvents {
+	readonly lifecycleToken?: RpcCollaborationLifecycleToken;
 	status(state: "connected" | "reconnecting" | "failed", reason?: RpcCollaborationStatusReason): void;
 	participants(participants: RpcCollaborationParticipant[]): void;
 	authority(authority: "full" | "view"): void;
@@ -193,7 +215,11 @@ export interface RpcCollaborationTransportFactory {
 }
 
 export interface RpcCollaborationMediaStore {
-	save(mediaType: string, data: Uint8Array): Promise<RpcCollaborationMediaDescriptor>;
+	save(
+		mediaType: string,
+		data: Uint8Array,
+		lifecycleToken?: RpcCollaborationLifecycleToken,
+	): Promise<RpcCollaborationMediaDescriptor>;
 	read(mediaId: string, offset?: number, length?: number): Promise<RpcCollaborationMediaRange>;
 }
 
@@ -201,6 +227,8 @@ export interface RpcCollaborationManagerOptions {
 	factory: RpcCollaborationTransportFactory;
 	media: RpcCollaborationMediaStore;
 	getSessionId(): string;
+	getSessionAuthority?: () => RpcCollaborationSessionAuthority;
+	transitionAuthority?: RpcCollaborationAuthorityTransition;
 	output(frame: RpcCollaborationFrame): void;
 	maxRetainedFrames?: number;
 	staleAfterMs?: number;
@@ -209,6 +237,16 @@ export interface RpcCollaborationManagerOptions {
 interface RetainedReplication {
 	cursor: RpcCollaborationCursor;
 	frame: Extract<RpcCollaborationFrame, { type: "collaboration_replicated" }>;
+}
+
+interface RpcCollaborationEventBinding {
+	readonly collaborationGeneration: number;
+	token: RpcCollaborationLifecycleToken;
+}
+
+interface RpcCollaborationAuthorityChange {
+	readonly binding: RpcCollaborationEventBinding;
+	readonly authority: "full" | "view";
 }
 
 export class RpcCollaborationAuthorityError extends Error {
@@ -238,9 +276,12 @@ export class RpcCollaborationManager {
 	readonly #factory: RpcCollaborationTransportFactory;
 	readonly #media: RpcCollaborationMediaStore;
 	readonly #getSessionId: () => string;
+	readonly #getSessionAuthority: (() => RpcCollaborationSessionAuthority) | undefined;
+	readonly #transitionAuthority: RpcCollaborationAuthorityTransition | undefined;
 	readonly #output: (frame: RpcCollaborationFrame) => void;
 	readonly #maxRetainedFrames: number;
 	readonly #staleAfterMs: number;
+	readonly #closedConnections = new WeakSet<RpcCollaborationConnection>();
 	#connection: RpcCollaborationConnection | null = null;
 	#revision = 0;
 	#state: RpcCollaborationState = "off";
@@ -257,11 +298,24 @@ export class RpcCollaborationManager {
 	#failure: { code: string; retryable: boolean } | undefined;
 	#reconnecting = false;
 	#staleTimer: Timer | null = null;
+	#lifecycleGeneration = 0;
+	#activeToken: RpcCollaborationLifecycleToken | undefined;
+	#activeBinding: RpcCollaborationEventBinding | undefined;
+	readonly #pendingAuthorityChanges: RpcCollaborationAuthorityChange[] = [];
+	#authorityChangeRunning = false;
+	readonly #pendingTransportCallbacks: Array<() => void> = [];
+	#transportCallbacksBlocked = false;
+	#mediaAuthorityGeneration = 0;
+	#authorizedMedia = new Set<string>();
+	#gapSignalled = false;
+	#leavePromise: Promise<RpcCollaborationSnapshot> | undefined;
 
 	constructor(options: RpcCollaborationManagerOptions) {
 		this.#factory = options.factory;
 		this.#media = options.media;
 		this.#getSessionId = options.getSessionId;
+		this.#getSessionAuthority = options.getSessionAuthority;
+		this.#transitionAuthority = options.transitionAuthority;
 		this.#output = options.output;
 		this.#maxRetainedFrames = Math.min(
 			MAX_RETAINED_FRAMES_LIMIT,
@@ -291,12 +345,34 @@ export class RpcCollaborationManager {
 		};
 	}
 
+	getLifecycleToken(): RpcCollaborationLifecycleToken | undefined {
+		return this.#activeToken;
+	}
+
+	isLifecycleTokenCurrent(token: RpcCollaborationLifecycleToken): boolean {
+		return this.#isCurrentToken(token);
+	}
+
+	replaceAuthorityToken(
+		expected: RpcCollaborationLifecycleToken,
+		nextAuthority: RpcCollaborationSessionAuthority,
+	): RpcCollaborationLifecycleToken {
+		return this.#installAuthoritySuccessor(expected, nextAuthority);
+	}
+
 	async host(options: { relayUrl?: string; webUrl?: string }): Promise<RpcCollaborationSnapshot> {
 		this.#assertOff();
-		this.#bind("hosting", "host", "full");
+		const { token, binding } = this.#bind("hosting", "host", "full");
+		let opened: RpcCollaborationHostResult | undefined;
+		let installed = false;
 		try {
-			const opened = await this.#factory.host(options, this.#events());
+			opened = await this.#factory.host(options, this.#events(binding));
+			if (!this.#isCurrentToken(token)) {
+				await this.#closeConnection(opened.connection, "stale_open");
+				throw this.#staleOpenError();
+			}
 			this.#connection = opened.connection;
+			installed = true;
 			this.#links = { ...opened.links };
 			this.#participants = opened.participants.map(participant => ({ ...participant }));
 			this.#state = "connected";
@@ -304,17 +380,27 @@ export class RpcCollaborationManager {
 			this.#emitState();
 			return this.snapshot();
 		} catch (cause) {
-			this.#failOpen(cause);
+			if (opened && !this.#closedConnections.has(opened.connection) && (installed || !this.#isCurrentToken(token))) {
+				await this.#closeConnection(opened.connection, "open_failed");
+			}
+			if (this.#isCurrentToken(token)) this.#failOpen(cause, token);
 			throw cause;
 		}
 	}
 
 	async join(options: { link: string; displayName?: string }): Promise<RpcCollaborationSnapshot> {
 		this.#assertOff();
-		this.#bind("joining", "guest", "none");
+		const { token, binding } = this.#bind("joining", "guest", "none");
+		let opened: RpcCollaborationJoinResult | undefined;
+		let installed = false;
 		try {
-			const opened = await this.#factory.join(options, this.#events());
+			opened = await this.#factory.join(options, this.#events(binding));
+			if (!this.#isCurrentToken(token)) {
+				await this.#closeConnection(opened.connection, "stale_open");
+				throw this.#staleOpenError();
+			}
 			this.#connection = opened.connection;
+			installed = true;
 			this.#role = opened.connection.role;
 			this.#authority = opened.connection.authority;
 			this.#participants = (opened.participants ?? []).map(participant => ({ ...participant }));
@@ -322,31 +408,51 @@ export class RpcCollaborationManager {
 			this.#state = "connected";
 			this.#revision += 1;
 			await opened.activate?.();
+			if (!this.#isCurrentToken(token)) {
+				this.#discardStaleOpen(token);
+				await this.#closeConnection(opened.connection, "stale_open");
+				throw this.#staleOpenError();
+			}
 			this.#emitState();
 			return this.snapshot();
 		} catch (cause) {
-			this.#failOpen(cause);
+			if (opened && !this.#closedConnections.has(opened.connection) && (installed || !this.#isCurrentToken(token))) {
+				await this.#closeConnection(opened.connection, "join_failed");
+			}
+			if (this.#isCurrentToken(token)) this.#failOpen(cause, token);
 			throw cause;
 		}
 	}
 
-	async leave(reason = "client_requested"): Promise<RpcCollaborationSnapshot> {
-		if (this.#state === "off") return this.snapshot();
+	leave(reason = "client_requested"): Promise<RpcCollaborationSnapshot> {
+		if (this.#leavePromise) return this.#leavePromise;
+		if (this.#state === "off") return Promise.resolve(this.snapshot());
+
+		const deferred = Promise.withResolvers<RpcCollaborationSnapshot>();
+		this.#leavePromise = deferred.promise;
+		const connection = this.#connection;
+		const token = this.#activeToken;
+		this.#invalidateToken(token);
+		this.#connection = null;
+		this.#clearStaleTimer();
 		this.#state = "leaving";
 		this.#revision += 1;
 		this.#emitState();
-		const connection = this.#connection;
-		this.#connection = null;
-		this.#clearStaleTimer();
-		try {
-			await connection?.leave(reason);
-		} finally {
-			this.#reset();
-		}
-		return this.snapshot();
+
+		// Make the authority boundary observable immediately. The physical close
+		// remains part of the shared settlement promise, so a new generation may
+		// start without an old leave continuation being able to reset it.
+		this.#reset();
+		const settledSnapshot = this.snapshot();
+		void this.#finishLeave(connection, reason, settledSnapshot, deferred);
+		return deferred.promise;
 	}
 
-	async revoke(participantId: string): Promise<RpcCollaborationSnapshot> {
+	async revoke(
+		participantId: string,
+		commitAuthority?: RpcCollaborationAuthorityCommit,
+	): Promise<RpcCollaborationSnapshot> {
+		const token = this.#requireCurrentToken();
 		const connection = this.#requireHost();
 		if (
 			!this.#participants.some(
@@ -356,22 +462,27 @@ export class RpcCollaborationManager {
 			throw new RpcCollaborationStateError(`Collaboration participant does not exist: ${participantId}`);
 		}
 		await connection.revoke(participantId);
+		if (!this.#isCurrentToken(token)) throw this.#staleOpenError();
 		this.#participants = this.#participants.map(participant =>
 			participant.participantId === participantId ? { ...participant, authority: "view" } : participant,
 		);
 		this.#revision += 1;
+		this.#installCommittedAuthority(token, commitAuthority);
 		this.#emitState();
 		return this.snapshot();
 	}
 
-	async rotate(): Promise<RpcCollaborationSnapshot> {
+	async rotate(commitAuthority?: RpcCollaborationAuthorityCommit): Promise<RpcCollaborationSnapshot> {
+		const token = this.#requireCurrentToken();
 		const connection = this.#requireHost();
 		const links = await connection.rotate();
+		if (!this.#isCurrentToken(token)) throw this.#staleOpenError();
 		this.#links = { ...links };
 		this.#participants = this.#participants.map(participant =>
 			participant.role === "guest" ? { ...participant, authority: "view" } : participant,
 		);
 		this.#revision += 1;
+		this.#installCommittedAuthority(token, commitAuthority);
 		this.#emitState();
 		return this.snapshot();
 	}
@@ -387,6 +498,7 @@ export class RpcCollaborationManager {
 	}
 
 	acknowledge(cursor: RpcCollaborationCursor): { acknowledged: number; retained: number } {
+		this.#requireCurrentToken();
 		if (this.#role !== "guest")
 			throw new RpcCollaborationAuthorityError("Only a collaboration guest acknowledges replication");
 		if (cursor.generation !== this.#generation) {
@@ -405,12 +517,23 @@ export class RpcCollaborationManager {
 		return { acknowledged: this.#acknowledgedSequence, retained: this.#retained.length };
 	}
 
-	readMedia(mediaId: string, offset?: number, length?: number): Promise<RpcCollaborationMediaRange> {
-		return this.#media.read(mediaId, offset, length);
+	async readMedia(mediaId: string, offset?: number, length?: number): Promise<RpcCollaborationMediaRange> {
+		const token = this.#requireReadableMedia(mediaId);
+		const mediaAuthorityGeneration = this.#mediaAuthorityGeneration;
+		const range = await this.#media.read(mediaId, offset, length);
+		if (
+			!this.#isCurrentToken(token) ||
+			mediaAuthorityGeneration !== this.#mediaAuthorityGeneration ||
+			!this.#authorizedMedia.has(mediaId)
+		) {
+			throw new RpcCollaborationStateError("Collaboration media authority is no longer active");
+		}
+		return range;
 	}
 
 	async assertSessionIsolation(): Promise<void> {
-		if (this.#sessionId === undefined || this.#getSessionId() === this.#sessionId) return;
+		const token = this.#activeToken;
+		if (!token || this.#sessionAuthorityMatches(token.sessionAuthority)) return;
 		await this.leave("session_changed");
 	}
 
@@ -418,28 +541,54 @@ export class RpcCollaborationManager {
 		await this.leave("rpc_disconnected");
 	}
 
-	#events(): RpcCollaborationOpenEvents {
+	#events(binding: RpcCollaborationEventBinding): RpcCollaborationOpenEvents {
+		const resolveToken = (): RpcCollaborationLifecycleToken | undefined => this.#resolveBindingToken(binding);
+		const resolveVisibleToken = (): RpcCollaborationLifecycleToken | undefined =>
+			this.#transportCallbacksBlocked ? undefined : resolveToken();
 		return {
-			status: (state, reason) => this.#onStatus(state, reason),
-			participants: participants => this.#onParticipants(participants),
-			authority: authority => this.#onAuthority(authority),
-			replicated: frame => this.#onReplicated(frame),
-			media: media => this.#onMedia(media),
-			gap: () => this.#markGap("transport_gap"),
+			get lifecycleToken() {
+				return resolveVisibleToken();
+			},
+			status: (state, reason) =>
+				this.#dispatchTransportCallback(binding, token => this.#onStatus(token, state, reason)),
+			participants: participants =>
+				this.#dispatchTransportCallback(binding, token => this.#onParticipants(token, participants)),
+			authority: authority =>
+				this.#dispatchTransportCallback(binding, () => this.#enqueueAuthorityChange(binding, authority)),
+			replicated: frame => this.#dispatchTransportCallback(binding, token => this.#onReplicated(token, frame)),
+			media: media => this.#dispatchTransportMedia(binding, media),
+			gap: () => this.#dispatchTransportCallback(binding, token => this.#markGap(token, "transport_gap")),
 		};
 	}
 
-	#bind(state: "hosting" | "joining", role: "host" | "guest", authority: RpcCollaborationAuthority): void {
-		this.#sessionId = this.#getSessionId();
+	#bind(
+		state: "hosting" | "joining",
+		role: "host" | "guest",
+		authority: RpcCollaborationAuthority,
+	): { token: RpcCollaborationLifecycleToken; binding: RpcCollaborationEventBinding } {
+		this.#leavePromise = undefined;
+		const sessionAuthority = this.#captureSessionAuthority();
+		const token = Object.freeze({
+			collaborationGeneration: ++this.#lifecycleGeneration,
+			sessionAuthority,
+		});
+		const binding = { collaborationGeneration: token.collaborationGeneration, token };
+		this.#activeToken = token;
+		this.#activeBinding = binding;
+		this.#sessionId = sessionAuthority.sessionId;
 		this.#state = state;
 		this.#role = role;
 		this.#authority = authority;
 		this.#failure = undefined;
+		this.#clearAuthorizedMedia();
 		this.#revision += 1;
 		this.#emitState();
+		return { token, binding };
 	}
 
-	#failOpen(_cause: unknown): void {
+	#failOpen(_cause: unknown, token: RpcCollaborationLifecycleToken): void {
+		if (this.#activeToken !== token) return;
+		this.#invalidateToken(token);
 		this.#connection = null;
 		this.#state = "failed";
 		this.#failure = { code: "collaboration_open_failed", retryable: true };
@@ -447,14 +596,20 @@ export class RpcCollaborationManager {
 		this.#emitState();
 	}
 
-	#onStatus(state: "connected" | "reconnecting" | "failed", reason?: RpcCollaborationStatusReason): void {
-		if (!this.#connection && this.#state !== "hosting" && this.#state !== "joining") return;
+	#onStatus(
+		token: RpcCollaborationLifecycleToken,
+		state: "connected" | "reconnecting" | "failed",
+		reason?: RpcCollaborationStatusReason,
+	): void {
+		if (!this.#isCurrentToken(token)) return;
 		this.#clearStaleTimer();
 		if (state === "reconnecting") {
 			this.#reconnecting = true;
 			this.#state = "reconnecting";
 			this.#failure = undefined;
-			this.#staleTimer = setTimeout(() => this.#markStale("reconnect_timeout"), this.#staleAfterMs);
+			this.#staleTimer = setTimeout(() => {
+				if (this.#isCurrentToken(token)) this.#markStale(token, "reconnect_timeout");
+			}, this.#staleAfterMs);
 		} else if (state === "connected") {
 			if (this.#role === "guest" && this.#reconnecting) this.#beginGeneration();
 			this.#reconnecting = false;
@@ -464,25 +619,72 @@ export class RpcCollaborationManager {
 		} else {
 			this.#state = "failed";
 			this.#failure = { code: reason ?? "transport_failed", retryable: reason !== "room_closed" };
+			this.#invalidateToken(token);
 		}
 		this.#revision += 1;
 		this.#emitState();
 	}
 
-	#onParticipants(participants: RpcCollaborationParticipant[]): void {
+	#onParticipants(token: RpcCollaborationLifecycleToken, participants: RpcCollaborationParticipant[]): void {
+		if (!this.#isCurrentToken(token)) return;
 		this.#participants = participants.map(participant => ({ ...participant }));
 		this.#revision += 1;
 		this.#emitState();
 	}
 
-	#onAuthority(authority: "full" | "view"): void {
-		if (this.#role !== "guest") return;
-		this.#authority = authority;
-		this.#revision += 1;
-		this.#emitState();
+	async #onAuthority(token: RpcCollaborationLifecycleToken, authority: "full" | "view"): Promise<void> {
+		if (!this.#isCurrentToken(token) || this.#role !== "guest" || authority === this.#authority) return;
+		if (this.#state !== "connected" || !this.#transitionAuthority) {
+			this.#clearAuthorizedMedia();
+			this.#authority = authority;
+			this.#revision += 1;
+			this.#emitState();
+			return;
+		}
+		let transitionToken: RpcCollaborationLifecycleToken | undefined;
+		let installed = false;
+		try {
+			await this.#transitionAuthority(
+				() => {
+					const current = this.#activeBinding ? this.#resolveBindingToken(this.#activeBinding) : undefined;
+					if (!current || current.collaborationGeneration !== token.collaborationGeneration) {
+						throw this.#staleOpenError();
+					}
+					transitionToken = current;
+					return current.sessionAuthority;
+				},
+				() => {
+					if (!transitionToken || !this.#isCurrentToken(transitionToken)) throw this.#staleOpenError();
+					this.#transportCallbacksBlocked = true;
+					this.#clearAuthorizedMedia();
+					this.#authority = authority;
+					this.#revision += 1;
+				},
+				nextAuthority => {
+					if (!transitionToken) throw this.#staleOpenError();
+					this.#installAuthoritySuccessor(transitionToken, nextAuthority);
+					installed = true;
+					this.#emitState();
+				},
+			);
+		} catch {
+			if (!installed && transitionToken) this.#failAuthorityChange(transitionToken);
+		} finally {
+			this.#transportCallbacksBlocked = false;
+			this.#flushTransportCallbacks();
+		}
 	}
-	#onReplicated(input: RpcCollaborationReplicatedInput): void {
-		if (this.#role !== "guest" || this.#state === "off" || this.#state === "leaving" || this.#stale) return;
+
+	#onReplicated(token: RpcCollaborationLifecycleToken, input: RpcCollaborationReplicatedInput): void {
+		if (
+			!this.#isCurrentToken(token) ||
+			this.#role !== "guest" ||
+			this.#state === "off" ||
+			this.#state === "leaving" ||
+			this.#state === "failed" ||
+			this.#stale
+		)
+			return;
 		this.#latestSequence += 1;
 		const cursor = { generation: this.#generation, sequence: this.#latestSequence };
 		const frame: Extract<RpcCollaborationFrame, { type: "collaboration_replicated" }> = {
@@ -493,14 +695,29 @@ export class RpcCollaborationManager {
 			...(input.payload === undefined ? {} : { payload: input.payload }),
 			...(input.projection === undefined ? {} : { projection: input.projection }),
 		};
-		this.#retainAndEmit(cursor, frame);
+		this.#retainAndEmit(token, cursor, frame);
 	}
 
-	async #onMedia(input: RpcCollaborationMediaInput): Promise<RpcCollaborationMediaDescriptor> {
-		if (this.#role !== "guest" || this.#state === "off" || this.#state === "leaving") {
+	async #onMedia(
+		token: RpcCollaborationLifecycleToken,
+		input: RpcCollaborationMediaInput,
+	): Promise<RpcCollaborationMediaDescriptor> {
+		if (
+			!this.#isCurrentToken(token) ||
+			this.#role !== "guest" ||
+			this.#state === "off" ||
+			this.#state === "leaving" ||
+			this.#state === "failed" ||
+			this.#stale
+		) {
 			throw new RpcCollaborationStateError("Collaboration media arrived without an active guest replica");
 		}
-		const media = await this.#media.save(input.mediaType, input.data);
+		const mediaAuthorityGeneration = this.#mediaAuthorityGeneration;
+		const media = await this.#media.save(input.mediaType, input.data, token);
+		if (!this.#isCurrentToken(token) || mediaAuthorityGeneration !== this.#mediaAuthorityGeneration) {
+			throw new RpcCollaborationStateError("Collaboration media arrived after its authority expired");
+		}
+		this.#authorizedMedia.add(media.mediaId);
 		if (input.announce === false) return media;
 		this.#latestSequence += 1;
 		const cursor = { generation: this.#generation, sequence: this.#latestSequence };
@@ -511,16 +728,18 @@ export class RpcCollaborationManager {
 			kind: "media",
 			media,
 		};
-		this.#retainAndEmit(cursor, frame);
+		this.#retainAndEmit(token, cursor, frame);
 		return media;
 	}
 
 	#retainAndEmit(
+		token: RpcCollaborationLifecycleToken,
 		cursor: RpcCollaborationCursor,
 		frame: Extract<RpcCollaborationFrame, { type: "collaboration_replicated" }>,
 	): void {
+		if (!this.#isCurrentToken(token)) return;
 		if (this.#retained.length >= this.#maxRetainedFrames) {
-			this.#markGap("backpressure_overflow");
+			this.#markGap(token, "backpressure_overflow");
 			return;
 		}
 		this.#retained.push({ cursor, frame });
@@ -528,8 +747,9 @@ export class RpcCollaborationManager {
 		this.#output(frame);
 	}
 
-	#markGap(reason: "backpressure_overflow" | "transport_gap"): void {
-		if (this.#role !== "guest") return;
+	#markGap(token: RpcCollaborationLifecycleToken, reason: "backpressure_overflow" | "transport_gap"): void {
+		if (!this.#isCurrentToken(token) || this.#role !== "guest" || this.#stale || this.#gapSignalled) return;
+		this.#gapSignalled = true;
 		const fromSequence = this.#acknowledgedSequence + 1;
 		const toSequence = this.#latestSequence;
 		this.#retained = [];
@@ -541,16 +761,21 @@ export class RpcCollaborationManager {
 			toSequence,
 			reason,
 		});
-		this.#markStale(reason);
+		if (!this.#isCurrentToken(token)) return;
 		this.#reconnecting = true;
-		this.#connection?.requestResync();
+		this.#markStale(token, reason);
+		if (this.#isCurrentToken(token)) this.#connection?.requestResync();
 	}
 
-	#markStale(reason: "backpressure_overflow" | "reconnect_timeout" | "transport_gap"): void {
-		if (this.#role !== "guest" || this.#stale) return;
+	#markStale(
+		token: RpcCollaborationLifecycleToken,
+		reason: "backpressure_overflow" | "reconnect_timeout" | "transport_gap",
+	): void {
+		if (!this.#isCurrentToken(token) || this.#role !== "guest" || this.#stale) return;
 		this.#clearStaleTimer();
 		this.#stale = true;
 		this.#state = "stale";
+		this.#clearAuthorizedMedia();
 		this.#revision += 1;
 		this.#output({
 			type: "collaboration_stale",
@@ -567,9 +792,12 @@ export class RpcCollaborationManager {
 		this.#acknowledgedSequence = 0;
 		this.#retained = [];
 		this.#stale = false;
+		this.#gapSignalled = false;
+		this.#clearAuthorizedMedia();
 	}
 
 	#requireHost(): RpcCollaborationConnection {
+		this.#requireCurrentToken();
 		if (this.#role !== "host" || this.#authority !== "full" || !this.#connection) {
 			throw new RpcCollaborationAuthorityError("Collaboration host authority is required");
 		}
@@ -577,14 +805,240 @@ export class RpcCollaborationManager {
 	}
 
 	#requireWritableGuest(): RpcCollaborationConnection {
+		this.#requireCurrentToken();
 		if (this.#role !== "guest" || this.#authority !== "full" || !this.#connection || this.#state !== "connected") {
 			throw new RpcCollaborationAuthorityError("Writable collaboration guest authority is required");
 		}
 		return this.#connection;
 	}
 
+	#requireCurrentToken(): RpcCollaborationLifecycleToken {
+		const token = this.#activeToken;
+		if (!token || !this.#isCurrentToken(token))
+			throw new RpcCollaborationStateError("Collaboration authority is stale");
+		return token;
+	}
+
+	#requireReadableMedia(mediaId: string): RpcCollaborationLifecycleToken {
+		const token = this.#requireCurrentToken();
+		if (this.#role !== "guest" || this.#state !== "connected" || this.#stale || !this.#authorizedMedia.has(mediaId)) {
+			throw new RpcCollaborationAuthorityError("Collaboration media authority is required");
+		}
+		return token;
+	}
+
 	#assertOff(): void {
 		if (this.#state !== "off") throw new RpcCollaborationStateError("A collaboration session is already active");
+	}
+
+	#captureSessionAuthority(): RpcCollaborationSessionAuthority {
+		const supplied = this.#getSessionAuthority?.();
+		const authority = supplied ?? {
+			sessionId: this.#getSessionId(),
+			sessionGeneration: 0,
+			authorityGeneration: 0,
+		};
+		return Object.freeze({
+			sessionId: authority.sessionId,
+			sessionGeneration: authority.sessionGeneration,
+			authorityGeneration: authority.authorityGeneration,
+		});
+	}
+
+	#installCommittedAuthority(
+		token: RpcCollaborationLifecycleToken,
+		commitAuthority: RpcCollaborationAuthorityCommit | undefined,
+	): RpcCollaborationLifecycleToken {
+		if (!commitAuthority) return token;
+		const binding = this.#activeBinding;
+		if (this.#activeToken !== token || !binding || binding.token !== token || !this.#isCurrentToken(token)) {
+			throw this.#staleOpenError();
+		}
+		return this.#installAuthoritySuccessor(token, commitAuthority(token.sessionAuthority));
+	}
+
+	#installAuthoritySuccessor(
+		token: RpcCollaborationLifecycleToken,
+		nextAuthority: RpcCollaborationSessionAuthority,
+	): RpcCollaborationLifecycleToken {
+		const binding = this.#activeBinding;
+		if (!binding || this.#activeToken !== token || this.#activeBinding !== binding || binding.token !== token) {
+			throw this.#staleOpenError();
+		}
+		if (
+			nextAuthority.sessionId !== token.sessionAuthority.sessionId ||
+			nextAuthority.sessionGeneration !== token.sessionAuthority.sessionGeneration ||
+			nextAuthority.authorityGeneration !== token.sessionAuthority.authorityGeneration + 1
+		) {
+			throw new RpcCollaborationStateError("Collaboration authority commit returned an invalid successor");
+		}
+		const nextToken = Object.freeze({
+			collaborationGeneration: token.collaborationGeneration,
+			sessionAuthority: Object.freeze({
+				sessionId: nextAuthority.sessionId,
+				sessionGeneration: nextAuthority.sessionGeneration,
+				authorityGeneration: nextAuthority.authorityGeneration,
+			}),
+		});
+		this.#activeToken = nextToken;
+		binding.token = nextToken;
+		return nextToken;
+	}
+
+	#sessionAuthorityMatches(expected: RpcCollaborationSessionAuthority): boolean {
+		try {
+			const current = this.#captureSessionAuthority();
+			return (
+				current.sessionId === expected.sessionId &&
+				current.sessionGeneration === expected.sessionGeneration &&
+				current.authorityGeneration === expected.authorityGeneration
+			);
+		} catch {
+			return false;
+		}
+	}
+
+	#dispatchTransportCallback(
+		binding: RpcCollaborationEventBinding,
+		callback: (token: RpcCollaborationLifecycleToken) => void,
+	): void {
+		const invoke = (): void => {
+			const token = this.#resolveBindingToken(binding);
+			if (token) callback(token);
+		};
+		if (this.#transportCallbacksBlocked) this.#pendingTransportCallbacks.push(invoke);
+		else invoke();
+	}
+
+	#dispatchTransportMedia(
+		binding: RpcCollaborationEventBinding,
+		media: RpcCollaborationMediaInput,
+	): Promise<RpcCollaborationMediaDescriptor> {
+		if (!this.#transportCallbacksBlocked) {
+			const token = this.#resolveBindingToken(binding);
+			if (!token) {
+				return Promise.reject(
+					new RpcCollaborationStateError("Collaboration media arrived without active authority"),
+				);
+			}
+			return this.#onMedia(token, media);
+		}
+		const deferred = Promise.withResolvers<RpcCollaborationMediaDescriptor>();
+		this.#pendingTransportCallbacks.push(() => {
+			const token = this.#resolveBindingToken(binding);
+			if (!token) {
+				deferred.reject(new RpcCollaborationStateError("Collaboration media arrived without active authority"));
+				return;
+			}
+			void this.#onMedia(token, media).then(deferred.resolve, deferred.reject);
+		});
+		return deferred.promise;
+	}
+
+	#flushTransportCallbacks(): void {
+		for (;;) {
+			const callback = this.#pendingTransportCallbacks.shift();
+			if (!callback) return;
+			try {
+				callback();
+			} catch {
+				// Deferred transport callbacks are isolated from authority settlement.
+			}
+		}
+	}
+
+	#resolveBindingToken(binding: RpcCollaborationEventBinding): RpcCollaborationLifecycleToken | undefined {
+		const token = binding.token;
+		return this.#activeBinding === binding &&
+			this.#activeToken === token &&
+			binding.collaborationGeneration === token.collaborationGeneration &&
+			this.#isCurrentToken(token)
+			? token
+			: undefined;
+	}
+
+	#enqueueAuthorityChange(binding: RpcCollaborationEventBinding, authority: "full" | "view"): void {
+		this.#pendingAuthorityChanges.push({ binding, authority });
+		if (this.#authorityChangeRunning) return;
+		this.#authorityChangeRunning = true;
+		void this.#drainAuthorityChanges();
+	}
+
+	async #drainAuthorityChanges(): Promise<void> {
+		try {
+			for (;;) {
+				const change = this.#pendingAuthorityChanges.shift();
+				if (!change) return;
+				const token = this.#resolveBindingToken(change.binding);
+				if (token) await this.#onAuthority(token, change.authority);
+			}
+		} finally {
+			this.#authorityChangeRunning = false;
+			if (this.#pendingAuthorityChanges.length > 0) {
+				this.#authorityChangeRunning = true;
+				void this.#drainAuthorityChanges();
+			}
+		}
+	}
+
+	#failAuthorityChange(token: RpcCollaborationLifecycleToken): void {
+		if (this.#activeToken !== token) return;
+		this.#state = "failed";
+		this.#failure = { code: "collaboration_authority_transition_failed", retryable: false };
+		this.#invalidateToken(token);
+		this.#revision += 1;
+		this.#emitState();
+	}
+
+	#isCurrentToken(token: RpcCollaborationLifecycleToken): boolean {
+		return (
+			this.#activeToken === token &&
+			this.#state !== "off" &&
+			this.#state !== "leaving" &&
+			this.#state !== "failed" &&
+			this.#sessionAuthorityMatches(token.sessionAuthority)
+		);
+	}
+
+	#invalidateToken(token: RpcCollaborationLifecycleToken | undefined): void {
+		if (!token || this.#activeToken !== token) return;
+		if (this.#activeBinding?.token === token) this.#activeBinding = undefined;
+		this.#activeToken = undefined;
+		this.#lifecycleGeneration += 1;
+		this.#clearAuthorizedMedia();
+	}
+
+	#discardStaleOpen(token: RpcCollaborationLifecycleToken): void {
+		if (this.#activeToken !== token) return;
+		this.#invalidateToken(token);
+		this.#connection = null;
+		this.#reset();
+	}
+
+	async #closeConnection(connection: RpcCollaborationConnection, reason: string): Promise<void> {
+		if (this.#closedConnections.has(connection)) return;
+		this.#closedConnections.add(connection);
+		try {
+			await connection.leave(reason);
+		} catch {
+			// Cleanup is best effort; the lifecycle token remains invalidated.
+		}
+	}
+
+	async #finishLeave(
+		connection: RpcCollaborationConnection | null,
+		reason: string,
+		snapshot: RpcCollaborationSnapshot,
+		deferred: PromiseWithResolvers<RpcCollaborationSnapshot>,
+	): Promise<void> {
+		try {
+			if (connection) await this.#closeConnection(connection, reason);
+			deferred.resolve(snapshot);
+		} catch (cause) {
+			deferred.reject(cause);
+		} finally {
+			if (this.#leavePromise === deferred.promise) this.#leavePromise = undefined;
+		}
 	}
 
 	#reset(): void {
@@ -602,14 +1056,27 @@ export class RpcCollaborationManager {
 		this.#stale = false;
 		this.#failure = undefined;
 		this.#reconnecting = false;
+		this.#activeToken = undefined;
+		this.#activeBinding = undefined;
+		this.#gapSignalled = false;
+		this.#clearAuthorizedMedia();
 		this.#revision += 1;
 		this.#emitState();
+	}
+
+	#clearAuthorizedMedia(): void {
+		this.#authorizedMedia.clear();
+		this.#mediaAuthorityGeneration += 1;
 	}
 
 	#clearStaleTimer(): void {
 		if (this.#staleTimer === null) return;
 		clearTimeout(this.#staleTimer);
 		this.#staleTimer = null;
+	}
+
+	#staleOpenError(): RpcCollaborationStateError {
+		return new RpcCollaborationStateError("Collaboration lifecycle token is no longer current");
 	}
 
 	#emitState(): void {

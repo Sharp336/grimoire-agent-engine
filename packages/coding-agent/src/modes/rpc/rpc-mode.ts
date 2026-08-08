@@ -12,8 +12,8 @@
  */
 import { once } from "node:events";
 import * as path from "node:path";
-import type { AgentMessage, AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { serviceTierFamily } from "@oh-my-pi/pi-ai";
+import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { type Message, serviceTierFamily } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { $env, isEnoent, isRecord, readLines, Snowflake } from "@oh-my-pi/pi-utils";
 import { JobProjectionService } from "../../async";
@@ -42,11 +42,13 @@ import type { AgentSession } from "../../session/agent-session";
 import { AgentSessionAuthority } from "../../session/agent-session-authority";
 import type { PromptOptions } from "../../session/agent-session-types";
 import {
+	ArtifactExportPathError,
 	ArtifactHashMismatchError,
 	ArtifactNotFoundError,
 	ArtifactRangeError,
 	MAX_ARTIFACT_RANGE_BYTES,
 } from "../../session/artifacts";
+import { materializeEvalOutput } from "../../session/eval-output";
 import { type PythonExecutionMessage, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { adaptSemanticRenderResultToHost } from "../../session/semantic-content";
 import {
@@ -58,6 +60,7 @@ import {
 	resolveSessionCatalogReference,
 	SessionCatalogError,
 } from "../../session/session-catalog";
+import type { ContextAssemblyRelation, ContextAssemblySnapshot } from "../../session/session-context-projection";
 import {
 	negotiateSessionHost,
 	SESSION_SEMANTIC_PROFILE,
@@ -86,13 +89,20 @@ import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
 import {
+	type RpcCollaborationAuthorityCommit,
 	RpcCollaborationAuthorityError,
+	type RpcCollaborationAuthorityTransition,
 	RpcCollaborationManager,
+	type RpcCollaborationSessionAuthority,
 	RpcCollaborationStateError,
 } from "./rpc-collaboration";
 import { RpcCollaborationSessionMediaStore, RpcCollaborationTransportFactoryImpl } from "./rpc-collaboration-transport";
 import {
 	getRpcCapabilityManifest,
+	getRpcCommandRequiredFeatures,
+	MAX_RPC_CONTEXT_CONTENT_BYTES,
+	MAX_RPC_CONTEXT_RELATIONS,
+	MAX_RPC_CONTEXT_SOURCES,
 	RPC_APPLICATION_API_VERSION,
 	RpcToolActivationValidationError,
 	validateRpcCommand,
@@ -114,14 +124,20 @@ import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from 
 import { handleGetSettings } from "./rpc-get-settings";
 import { claimRpcInput } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
-import { type RpcOperationHandle, RpcOperationManager } from "./rpc-operations";
+import { type RpcOperationHandle, RpcOperationManager, RpcOperationMessageOwnership } from "./rpc-operations";
 import { RpcProvenanceManager, type RpcProvenanceSource } from "./rpc-provenance";
 import { RpcResourceLifecycleManager, RpcResourceNotFoundError } from "./rpc-resource-lifecycle";
 import { RpcRuntimeResourceSource } from "./rpc-runtime-resources";
 import { RpcSemanticRenderingManager } from "./rpc-semantic-rendering";
 import {
+	type RpcExecutionAuthorityTransitionToken,
+	RpcSessionAuthorityCoordinator,
+	RpcSessionAuthorityError,
+	type RpcSessionAuthorityToken,
+	type RpcSessionTransitionToken,
+} from "./rpc-session-authority";
+import {
 	createRpcSessionCommandInvoker,
-	getRpcSessionCommandCapability,
 	RpcSessionHostAdapter,
 	RpcSessionSubscriptionNotFoundError,
 } from "./rpc-session-host";
@@ -129,8 +145,8 @@ import { handleSetSettings } from "./rpc-set-settings";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import { projectRpcToolSemantic } from "./rpc-tool-semantic-rendering";
 import type {
-	RpcCancelOperationResult,
 	RpcCommand,
+	RpcContextGetResult,
 	RpcDeleteSessionResult,
 	RpcEvalHistoryEntry,
 	RpcExtensionUIRequest,
@@ -217,6 +233,183 @@ type RpcOutput = (
 		| object,
 ) => void;
 
+export function projectBoundedRpcContext(
+	snapshot: ContextAssemblySnapshot,
+	options: {
+		maxSources?: number;
+		maxRelations?: number;
+		maxContentBytes?: number;
+	},
+): RpcContextGetResult {
+	const bounds = {
+		maxSources: options.maxSources ?? MAX_RPC_CONTEXT_SOURCES,
+		maxRelations: options.maxRelations ?? MAX_RPC_CONTEXT_RELATIONS,
+		maxContentBytes: options.maxContentBytes ?? MAX_RPC_CONTEXT_CONTENT_BYTES,
+	};
+	let contentBytes = 0;
+	let contentTruncated = false;
+	let sourcesTruncated = false;
+	let relationsTruncated = false;
+	const retainContent = <T>(content: T): T | undefined => {
+		const serialized = JSON.stringify(content);
+		const byteLength = serialized === undefined ? 0 : Buffer.byteLength(serialized, "utf8");
+		if (contentBytes + byteLength > bounds.maxContentBytes) {
+			contentTruncated = true;
+			return undefined;
+		}
+		contentBytes += byteLength;
+		return content;
+	};
+	const sourceSlice = snapshot.sources.slice(0, bounds.maxSources);
+	sourcesTruncated ||= sourceSlice.length < snapshot.sources.length;
+	const sources = sourceSlice.map(source => {
+		const { content, metadata, outputMeta, ...bounded } = source;
+		const retainedSourceContent = content === undefined ? undefined : retainContent(content);
+		const retainedMetadata = metadata === undefined ? undefined : retainContent(metadata);
+		const retainedOutputMeta = outputMeta === undefined ? undefined : retainContent(outputMeta);
+		return {
+			...bounded,
+			...(retainedSourceContent === undefined ? {} : { content: retainedSourceContent }),
+			...(retainedMetadata === undefined ? {} : { metadata: retainedMetadata }),
+			...(retainedOutputMeta === undefined ? {} : { outputMeta: retainedOutputMeta }),
+		};
+	});
+	const retainedSourceIds = new Set(sources.map(source => source.id));
+	const logicalSourceSlice = snapshot.systemPrompt.logicalSources.slice(0, bounds.maxSources);
+	sourcesTruncated ||= logicalSourceSlice.length < snapshot.systemPrompt.logicalSources.length;
+	const unmappedLogicalSources = logicalSourceSlice.map(source => {
+		const { content, metadata, ...bounded } = source;
+		const retainedSourceContent = content === undefined ? undefined : retainContent(content);
+		const retainedMetadata = metadata === undefined ? undefined : retainContent(metadata);
+		return {
+			...bounded,
+			...(retainedSourceContent === undefined ? {} : { content: retainedSourceContent }),
+			...(retainedMetadata === undefined ? {} : { metadata: retainedMetadata }),
+		};
+	});
+	const renderedSlice = snapshot.systemPrompt.rendered.slice(0, bounds.maxSources);
+	sourcesTruncated ||= renderedSlice.length < snapshot.systemPrompt.rendered.length;
+	const rendered: string[] = [];
+	const renderedIndexMap = new Map<number, number>();
+	for (const [index, value] of renderedSlice.entries()) {
+		const retainedValue = retainContent(value);
+		if (retainedValue === undefined) continue;
+		renderedIndexMap.set(index, rendered.length);
+		rendered.push(retainedValue);
+	}
+	const logicalSources = unmappedLogicalSources.map(source => {
+		const remappedFoldedInto = source.foldedInto.flatMap(index => {
+			const projectedIndex = renderedIndexMap.get(index);
+			return projectedIndex === undefined ? [] : [projectedIndex];
+		});
+		const foldedInto = remappedFoldedInto.slice(0, bounds.maxRelations);
+		relationsTruncated ||=
+			remappedFoldedInto.length < source.foldedInto.length || foldedInto.length < remappedFoldedInto.length;
+		return { ...source, foldedInto };
+	});
+	const relationSlice = snapshot.relations.slice(0, bounds.maxRelations);
+	relationsTruncated ||= relationSlice.length < snapshot.relations.length;
+	const relations = relationSlice.flatMap((relation): ContextAssemblyRelation[] => {
+		if (relation.kind === "branch-order") {
+			if (retainedSourceIds.has(relation.sourceId)) return [relation];
+			relationsTruncated = true;
+			return [];
+		}
+		const sourceIds = relation.sourceIds.filter(sourceId => retainedSourceIds.has(sourceId));
+		const targetIds = relation.targetIds.flatMap(targetId => {
+			if (retainedSourceIds.has(targetId)) return [targetId];
+			const renderedIndex = /^system-rendered:(\d+)$/.exec(targetId)?.[1];
+			if (renderedIndex === undefined) return [];
+			const projectedIndex = renderedIndexMap.get(Number(renderedIndex));
+			return projectedIndex === undefined ? [] : [`system-rendered:${projectedIndex}`];
+		});
+		relationsTruncated ||=
+			sourceIds.length < relation.sourceIds.length || targetIds.length < relation.targetIds.length;
+		return [{ ...relation, sourceIds, targetIds }];
+	});
+	const provider =
+		snapshot.provider === undefined
+			? undefined
+			: (() => {
+					const providerSystemPromptSlice = snapshot.provider.systemPrompt?.slice(0, bounds.maxSources);
+					if (
+						providerSystemPromptSlice &&
+						providerSystemPromptSlice.length < (snapshot.provider.systemPrompt?.length ?? 0)
+					) {
+						sourcesTruncated = true;
+					}
+					const messagesSlice = snapshot.provider.messages.slice(0, bounds.maxSources);
+					sourcesTruncated ||= messagesSlice.length < snapshot.provider.messages.length;
+					const providerMessages: Message[] = [];
+					const providerMessageIndexMap = new Map<number, number>();
+					for (const [index, message] of messagesSlice.entries()) {
+						const retainedMessage = retainContent(message);
+						if (retainedMessage === undefined) continue;
+						providerMessageIndexMap.set(index, providerMessages.length);
+						providerMessages.push(retainedMessage);
+					}
+					const providerRelationSlice = snapshot.provider.relations.slice(0, bounds.maxRelations);
+					relationsTruncated ||= providerRelationSlice.length < snapshot.provider.relations.length;
+					return {
+						...(providerSystemPromptSlice === undefined
+							? {}
+							: {
+									systemPrompt: providerSystemPromptSlice.flatMap(value =>
+										retainContent(value) === undefined ? [] : [value],
+									),
+								}),
+						messages: providerMessages,
+						relations: providerRelationSlice.map(relation => {
+							const sourceIds = relation.sourceIds.filter(sourceId => retainedSourceIds.has(sourceId));
+							const transformedMessageIndexes = relation.transformedMessageIndexes.filter(
+								index => index >= 0 && index < bounds.maxSources,
+							);
+							const providerMessageIndexes = relation.providerMessageIndexes.flatMap(index => {
+								const projectedIndex = providerMessageIndexMap.get(index);
+								return projectedIndex === undefined ? [] : [projectedIndex];
+							});
+							relationsTruncated ||=
+								sourceIds.length < relation.sourceIds.length ||
+								transformedMessageIndexes.length < relation.transformedMessageIndexes.length ||
+								providerMessageIndexes.length < relation.providerMessageIndexes.length;
+							return {
+								...relation,
+								sourceIds,
+								transformedMessageIndexes,
+								providerMessageIndexes,
+							};
+						}),
+					};
+				})();
+	const tokenEvidence = snapshot.tokenEvidence?.slice(0, bounds.maxSources);
+	if (tokenEvidence && tokenEvidence.length < (snapshot.tokenEvidence?.length ?? 0)) sourcesTruncated = true;
+	const boundedSnapshot: ContextAssemblySnapshot = {
+		...snapshot,
+		sources,
+		relations,
+		systemPrompt: {
+			logicalSources,
+			rendered,
+		},
+		...(provider === undefined ? {} : { provider }),
+		...(tokenEvidence === undefined ? {} : { tokenEvidence }),
+	};
+	return {
+		snapshot: boundedSnapshot,
+		bounds,
+		returned: {
+			sources: sources.length,
+			relations: relations.length,
+			contentBytes,
+		},
+		truncated: {
+			sources: sourcesTruncated,
+			relations: relationsTruncated,
+			content: contentTruncated,
+		},
+	};
+}
+
 export type RpcSessionChangeCommand = Extract<
 	RpcCommand,
 	{ type: "new_session" } | { type: "switch_session" } | { type: "branch" }
@@ -237,6 +430,7 @@ export async function tryRunRpcSkillCommand(
 	text: string,
 	streamingBehavior: "steer" | "followUp" = "steer",
 	messageTag?: string,
+	signal?: AbortSignal,
 ): Promise<RpcSkillCommandResult | false> {
 	if (!session.skillsSettings?.enableSkillCommands) return false;
 	const parsed = parseSkillInvocation(text);
@@ -244,6 +438,7 @@ export async function tryRunRpcSkillCommand(
 	const skill = session.skills.find(candidate => candidate.name === parsed.name);
 	if (!skill) return false;
 	const built = await buildSkillPromptMessage(skill, parsed.args, "user");
+	signal?.throwIfAborted();
 	await session.promptCustomMessage(
 		{
 			customType: SKILL_PROMPT_MESSAGE_TYPE,
@@ -252,7 +447,7 @@ export async function tryRunRpcSkillCommand(
 			details: built.details,
 			attribution: "user",
 		},
-		{ streamingBehavior, messageTag },
+		{ streamingBehavior, messageTag, signal },
 	);
 	return { agentInvoked: true };
 }
@@ -264,22 +459,26 @@ export function reportLocalOnlyPromptResult(input: {
 	onError: (error: Error) => void;
 	hasExtensionAgentMessageTask?: () => boolean;
 	waitForExtensionAgentMessageTasks?: () => Promise<void>;
+	isAuthorityCurrent?: () => boolean;
 	operation?: {
 		handle: RpcOperationHandle;
 		manager: RpcOperationManager;
 		waitForAgentCompletion?: () => Promise<void>;
 	};
-}): void {
-	void input.prompt
+}): Promise<void> {
+	return input.prompt
 		.then(async agentInvoked => {
 			await input.waitForExtensionAgentMessageTasks?.();
+			if (input.isAuthorityCurrent?.() === false) return;
 			const resolvedAgentInvoked = agentInvoked || Boolean(input.hasExtensionAgentMessageTask?.());
 			if (resolvedAgentInvoked) {
 				await input.operation?.waitForAgentCompletion?.();
+				if (input.isAuthorityCurrent?.() === false) return;
 			}
 			const operation = input.operation;
 			if (operation) {
 				setImmediate(() => {
+					if (input.isAuthorityCurrent?.() === false) return;
 					if (!resolvedAgentInvoked) {
 						input.output({
 							type: "prompt_result",
@@ -299,10 +498,14 @@ export function reportLocalOnlyPromptResult(input: {
 			}
 		})
 		.catch(error => {
+			if (input.isAuthorityCurrent?.() === false) return;
 			const promptError = error instanceof Error ? error : new Error(String(error));
 			const operation = input.operation;
 			if (operation) {
-				setImmediate(() => operation.manager.fail(operation.handle, promptError, "prompt_scheduling_failed"));
+				setImmediate(() => {
+					if (input.isAuthorityCurrent?.() === false) return;
+					operation.manager.fail(operation.handle, promptError, "prompt_scheduling_failed");
+				});
 			}
 			input.onError(promptError);
 		});
@@ -374,22 +577,27 @@ export function watchAndReportLocalOnlyPromptResult(input: {
 	output: (obj: object) => void;
 	onError: (error: Error) => void;
 	extensionUserMessageTracker: RpcExtensionUserMessageTracker;
+	isAuthorityCurrent?: () => boolean;
 	operation?: {
 		handle: RpcOperationHandle;
 		manager: RpcOperationManager;
 		waitForAgentCompletion?: () => Promise<void>;
 	};
-}): void {
+}): { scheduling: Promise<boolean>; lifecycle: Promise<void> } {
 	const trackedPrompt = input.extensionUserMessageTracker.watchPrompt(input.startPrompt);
-	reportLocalOnlyPromptResult({
-		id: input.id,
-		prompt: trackedPrompt.prompt,
-		output: input.output,
-		onError: input.onError,
-		hasExtensionAgentMessageTask: trackedPrompt.hasAgentMessageTask,
-		waitForExtensionAgentMessageTasks: trackedPrompt.waitForAgentMessageTasks,
-		operation: input.operation,
-	});
+	return {
+		scheduling: trackedPrompt.prompt,
+		lifecycle: reportLocalOnlyPromptResult({
+			id: input.id,
+			prompt: trackedPrompt.prompt,
+			output: input.output,
+			onError: input.onError,
+			isAuthorityCurrent: input.isAuthorityCurrent,
+			hasExtensionAgentMessageTask: trackedPrompt.hasAgentMessageTask,
+			waitForExtensionAgentMessageTasks: trackedPrompt.waitForAgentMessageTasks,
+			operation: input.operation,
+		}),
+	};
 }
 
 async function waitForQueuedRpcPrompt(
@@ -401,34 +609,6 @@ async function waitForQueuedRpcPrompt(
 		setImmediate(nextTurn.resolve);
 		await nextTurn.promise;
 		if (!session.isStreaming && session.queuedMessageCount === 0) return;
-	}
-}
-type RpcOperationMessageSession = Pick<AgentSession, "abort" | "getMessageTag" | "removeQueuedMessagesByTag">;
-
-/** Correlates accepted operations with the exact AgentSession message that owns the active turn. */
-export class RpcOperationMessageOwnership {
-	#activeOperationId: string | undefined;
-
-	constructor(readonly session: RpcOperationMessageSession) {}
-
-	observeMessageStart(message: AgentMessage): void {
-		this.#activeOperationId = this.session.getMessageTag(message);
-	}
-
-	settle(operationId: string): void {
-		if (this.#activeOperationId === operationId) this.#activeOperationId = undefined;
-	}
-
-	async cancel(manager: RpcOperationManager, operationId: string): Promise<RpcCancelOperationResult> {
-		const ownsActiveMessage = this.#activeOperationId === operationId;
-		const cancellation = manager.cancel(operationId);
-		if (!cancellation.wasStarted) return cancellation.result;
-		if (ownsActiveMessage) {
-			await this.session.abort({ reason: USER_INTERRUPT_LABEL });
-		} else {
-			this.session.removeQueuedMessagesByTag(operationId);
-		}
-		return cancellation.result;
 	}
 }
 
@@ -726,7 +906,6 @@ export async function handleRpcSessionChange(
 			return { type: "branch", data: { text: result.selectedText, cancelled: result.cancelled } };
 		}
 	}
-	throw new Error("Unsupported RPC session change command");
 }
 
 function normalizeHostToolDefinitions(tools: RpcHostToolDefinition[]): RpcHostToolDefinition[] {
@@ -928,7 +1107,7 @@ export function requestRpcDialog<T>(
 		snapshot,
 	});
 	if (settled) return promise;
-	output({ type: "extension_ui_request", id, ...request } as RpcExtensionUIRequest);
+	output({ type: "extension_ui_request", ...request, id } as RpcExtensionUIRequest);
 	return promise;
 }
 
@@ -1108,6 +1287,7 @@ export async function runRpcMode(
 		features.add("session-catalog");
 		features.add("session-observe");
 		features.add("session-execute");
+		features.add("context.projection");
 		features.add("session-shutdown");
 		features.add("interaction");
 		features.add("approval");
@@ -1120,10 +1300,19 @@ export async function runRpcMode(
 		if (session.model && serviceTierFamily(session.model)) features.add("model.fast-mode");
 		return features;
 	};
+	const getToolInventoryAvailability = (): boolean => {
+		try {
+			session.getToolInventory(RPC_APPLICATION_API_VERSION);
+			return true;
+		} catch (cause) {
+			if (cause instanceof ToolInventoryUnavailableError) return false;
+			throw cause;
+		}
+	};
 	const getSessionHostManifest = () => getRpcV3CapabilityManifest({ features: getCapabilityFeatures() });
 	const getCapabilityManifest = () => {
 		const features = getCapabilityFeatures();
-		const manifest = getRpcCapabilityManifest({ features });
+		const manifest = getRpcCapabilityManifest({ features, toolInventoryAvailable: getToolInventoryAvailability() });
 		manifest.sessionHost = getSessionHostManifest();
 		return manifest;
 	};
@@ -1191,22 +1380,42 @@ export async function runRpcMode(
 	const catalogError = (id: string | undefined, command: string, cause: unknown): RpcResponse =>
 		cause instanceof SessionCatalogError
 			? error(id, command, cause.message, cause.code)
-			: cause instanceof RpcSessionTransitionBusyError
-				? error(id, command, cause.message, "session_busy")
-				: error(id, command, cause instanceof Error ? cause.message : String(cause));
+			: cause instanceof RpcSessionAuthorityError
+				? error(id, command, cause.message, cause.code)
+				: cause instanceof RpcSessionTransitionBusyError
+					? error(id, command, cause.message, "session_busy")
+					: error(id, command, cause instanceof Error ? cause.message : String(cause));
+	const sessionAuthority = new RpcSessionAuthorityCoordinator(() => session.sessionId);
+	let callbackAuthorityToken = sessionAuthority.capture();
 	const loopScheduler = new SessionLoopScheduler(session, {
 		waitForIdle: () => session.waitForIdle(),
 		compact: async () => {
+			const authority = sessionAuthority.capture();
 			await session.compact();
+			sessionAuthority.assertCurrent(authority);
 		},
 		reset: async () => {
-			if (!(await session.newSession())) throw new Error("Loop could not reset the active session.");
+			try {
+				const started = await session.newSession(undefined, prepareSessionTransition);
+				if (!started) throw new Error("Loop could not reset the active session.");
+				await completeSessionTransition(undefined, "new_session", { cancelled: false });
+			} catch (cause) {
+				const cleanupCause = abandonPreparedSessionTransition();
+				if (cleanupCause) {
+					throw new AggregateError([cause, cleanupCause], "Loop reset and session-transition cleanup failed");
+				}
+				throw cause;
+			}
 		},
 		prompt: async (prompt, causationId) => {
+			const authority = sessionAuthority.capture();
 			await session.prompt(prompt, { ...(causationId === undefined ? {} : { messageTag: causationId }) });
+			sessionAuthority.assertCurrent(authority);
 			await waitForQueuedRpcPrompt(session);
+			sessionAuthority.assertCurrent(authority);
 		},
 		onStateChange: (state, causationId) => {
+			if (!sessionAuthority.isCurrent(callbackAuthorityToken)) return;
 			output({
 				type: "loop_state_update",
 				state,
@@ -1214,6 +1423,7 @@ export async function runRpcMode(
 			});
 		},
 		onError: cause => {
+			if (!sessionAuthority.isCurrent(callbackAuthorityToken)) return;
 			output({
 				type: "loop_error",
 				error: cause instanceof Error ? cause.message : String(cause),
@@ -1222,6 +1432,7 @@ export async function runRpcMode(
 		},
 	});
 	const startRpcPrompt = (prompt: string, options: PromptOptions): Promise<boolean> => {
+		options.signal?.throwIfAborted();
 		const loopState = session.getLoopState();
 		const loopEnabled = loopState.enabled;
 		if (loopEnabled) {
@@ -1244,7 +1455,7 @@ export async function runRpcMode(
 	const pendingRpcBashConfirmations = new Set<AbortController>();
 	const rpcBashExecutions = new Set<Promise<unknown>>();
 	const operationManager = new RpcOperationManager(frame => {
-		if (frame.type === "operation_completed") operationOwnership.settle(frame.operationId);
+		if (frame.type !== "operation_started") operationOwnership.settle(frame.operationId);
 		if (frame.type !== "operation_started") {
 			rpcEvalOperationIds.delete(frame.operationId);
 			rpcEvalConfirmationControllers.get(frame.operationId)?.abort();
@@ -1259,35 +1470,49 @@ export async function runRpcMode(
 	const pendingExtensionRequests = new RpcPendingExtensionRequests();
 	const hostToolBridge = new RpcHostToolBridge(output);
 	const hostUriBridge = new RpcHostUriBridge(output);
-	const subagentRegistry = eventBus ? new RpcSubagentRegistry(eventBus, output) : undefined;
+	const subagentRegistry = eventBus
+		? new RpcSubagentRegistry(eventBus, frame => {
+				if (sessionAuthority.isCurrent(callbackAuthorityToken)) output(frame);
+			})
+		: undefined;
 	const sessionStorage = new FileSessionStorage();
-	const providerAuthService = new ProviderAuthService(session.modelRegistry, session.sessionId);
+	let providerAuthService = new ProviderAuthService(session.modelRegistry, session.sessionId);
 	let rpcTaskTracker: (task: Promise<void>) => void = task => {
 		void task;
 	};
-	const providerAuthController = new ProviderAuthController(
-		providerAuthService,
-		operationManager,
-		frame => output(frame),
-		task => rpcTaskTracker(task),
-		request =>
-			requestRpcDialog(
-				pendingExtensionRequests,
-				output,
-				{ signal: request.signal },
-				undefined,
-				{
-					method: "input",
-					title: request.prompt,
-					placeholder: request.placeholder,
-					sensitive: true,
-					operationId: request.operationId,
-					purpose: "provider_auth",
-					providerId: request.providerId,
-				},
-				response => ("value" in response ? response.value : undefined),
-			),
-	);
+	const createProviderAuthController = () => {
+		const controllerAuthority = sessionAuthority.capture();
+		return new ProviderAuthController(
+			providerAuthService,
+			operationManager,
+			frame => {
+				if (sessionAuthority.isCurrent(controllerAuthority)) output(frame);
+			},
+			task => rpcTaskTracker(task),
+			async request => {
+				sessionAuthority.assertCurrent(controllerAuthority);
+				const response = await requestRpcDialog(
+					pendingExtensionRequests,
+					output,
+					{ signal: request.signal },
+					undefined,
+					{
+						method: "input",
+						title: request.prompt,
+						placeholder: request.placeholder,
+						sensitive: true,
+						operationId: request.operationId,
+						purpose: "provider_auth",
+						providerId: request.providerId,
+					},
+					result => ("value" in result ? result.value : undefined),
+				);
+				sessionAuthority.assertCurrent(controllerAuthority);
+				return response;
+			},
+		);
+	};
+	let providerAuthController = createProviderAuthController();
 	const agentSenderId = session.getAgentId?.() ?? MAIN_AGENT_ID;
 	const agentRegistry = AgentRegistry.global();
 	const agentLifecycle = AgentLifecycleManager.global();
@@ -1308,7 +1533,7 @@ export async function runRpcMode(
 		},
 	});
 	const unsubscribeAgentRegistry = agentControl.onRegistryUpdate(update => {
-		output({ type: "agent_registry_update", ...update });
+		if (sessionAuthority.isCurrent(callbackAuthorityToken)) output({ type: "agent_registry_update", ...update });
 	});
 	const rpcJobOwnerId = session.getAgentId();
 	const jobProjection =
@@ -1607,7 +1832,10 @@ export async function runRpcMode(
 		fetchUsageReports: signal => session.fetchUsageReports(signal),
 		subscribe: listener => session.subscribe(listener),
 	};
-	const provenance = new RpcProvenanceManager(provenanceSource, frame => output(frame));
+	const provenance = new RpcProvenanceManager(provenanceSource, frame => {
+		if (sessionAuthority.isCurrent(callbackAuthorityToken)) output(frame);
+	});
+	let collaborationAuthorityTransition: RpcCollaborationAuthorityTransition | undefined;
 	const collaboration = new RpcCollaborationManager({
 		factory: new RpcCollaborationTransportFactoryImpl(session, eventBus),
 		media: new RpcCollaborationSessionMediaStore(
@@ -1615,6 +1843,13 @@ export async function runRpcMode(
 			() => session.sessionId,
 		),
 		getSessionId: () => session.sessionId,
+		getSessionAuthority: () => sessionAuthority.captureLifecycleAuthority(),
+		transitionAuthority: (captureAuthority, applyAuthority, installAuthority) => {
+			const transition = collaborationAuthorityTransition;
+			return transition
+				? transition(captureAuthority, applyAuthority, installAuthority)
+				: Promise.reject(new RpcCollaborationStateError("Collaboration authority transition is unavailable"));
+		},
 		output: frame => output(frame),
 	});
 	const semanticToolRenderIds = new Map<string, string>();
@@ -1627,6 +1862,7 @@ export async function runRpcMode(
 	// Output all agent events as JSON
 	let lastQueueFrame = "";
 	const emitQueueUpdate = () => {
+		if (!sessionAuthority.isCurrent(callbackAuthorityToken)) return;
 		const queue = session.getQueueSnapshot();
 		const serialized = JSON.stringify(queue);
 		if (serialized === lastQueueFrame) return;
@@ -1634,7 +1870,11 @@ export async function runRpcMode(
 		output({ type: "queue_update", queue });
 	};
 	session.subscribe(event => {
-		if (event.type === "message_start") operationOwnership.observeMessageStart(event.message);
+		if (!sessionAuthority.isCurrent(callbackAuthorityToken)) return;
+		if (event.type === "message_start") {
+			const operationId = operationOwnership.observeMessageStart(event.message);
+			if (operationId !== undefined) operationManager.beginById(operationId);
+		}
 		output(event);
 		if (
 			semanticRenderingEnabled() &&
@@ -1662,9 +1902,11 @@ export async function runRpcMode(
 		emitQueueUpdate();
 	});
 	session.planMode.onStateChange(state => {
+		if (!sessionAuthority.isCurrent(callbackAuthorityToken)) return;
 		output({ type: "plan_state_update", state });
 	});
 	session.planMode.onApprovalRequest(approval => {
+		if (!sessionAuthority.isCurrent(callbackAuthorityToken)) return;
 		output({
 			type: "plan_approval_request",
 			approvalId: approval.approvalId,
@@ -1674,9 +1916,11 @@ export async function runRpcMode(
 		});
 	});
 	session.planMode.onApprovalSettled(result => {
+		if (!sessionAuthority.isCurrent(callbackAuthorityToken)) return;
 		output({ type: "plan_approval_settled", approvalId: result.approvalId, result });
 	});
 	const emitJobUpdate = () => {
+		if (!sessionAuthority.isCurrent(callbackAuthorityToken)) return;
 		const snapshot = jobProjection?.list();
 		if (snapshot) output({ type: "job_update", ...snapshot });
 	};
@@ -1721,19 +1965,24 @@ export async function runRpcMode(
 		if (rpcSessionHost) return rpcSessionHost;
 		const authority = new AgentSessionAuthority(session, {
 			snapshotState: async () => {
+				const snapshotAuthority = sessionAuthority.capture();
 				const operations = operationManager.snapshot();
+				const sessionState = await getRpcSessionState();
+				sessionAuthority.assertCurrent(snapshotAuthority);
+				const execution = await projectRpcSessionExecution(session, {
+					applicationApiVersion: RPC_APPLICATION_API_VERSION,
+					operations,
+					pendingInteractions: pendingExtensionRequests.snapshot(),
+				});
+				sessionAuthority.assertCurrent(snapshotAuthority);
 				return {
-					session: await getRpcSessionState(),
+					session: sessionState,
 					sessionTree: {
 						sessionId: session.sessionId,
 						leafId: session.sessionManager.getLeafId(),
 						roots: projectSessionTree(session.sessionManager.getTree(), session.sessionManager.getLeafId()),
 					},
-					execution: await projectRpcSessionExecution(session, {
-						applicationApiVersion: RPC_APPLICATION_API_VERSION,
-						operations,
-						pendingInteractions: pendingExtensionRequests.snapshot(),
-					}),
+					execution,
 					operations,
 					agents: agentControl.list({ includeAdvisors: true }),
 					subagents: subagentRegistry?.getSubagents() ?? [],
@@ -1756,25 +2005,26 @@ export async function runRpcMode(
 			settle: async () => {
 				session.disableLoop();
 				const loopSettled = loopScheduler.dispose();
+				const activeOperations = operationManager.snapshot().active;
+				const providerOperationIds = new Set(
+					activeOperations
+						.filter(operation => operation.command === "provider_auth")
+						.map(operation => operation.operationId),
+				);
 				const protectedOperations = new Set(providerAuthController.close());
+				for (const operationId of protectedCommitOperationIds()) protectedOperations.add(operationId);
 				pendingExtensionRequests.rejectAll("RPC session is shutting down");
 				hostToolBridge.close("RPC session is shutting down");
 				hostUriBridge.clear("RPC session is shutting down");
-				for (const controller of pendingRpcBashConfirmations) controller.abort();
-				session.abortBash();
-				const evalOperationIds = Array.from(rpcEvalOperationIds);
 				operationManager.cancelAll("shutdown", "session_shutdown", protectedOperations);
-				for (const operationId of evalOperationIds) session.abortEvalExecution(operationId);
-				if (session.isStreaming) await session.abort({ reason: "RPC session shutdown" });
-				await Promise.allSettled([...rpcEvalTasks, ...rpcBashExecutions]);
+				await quiesceCancelledImplementations(providerOperationIds, "RPC session shutdown");
 				await Promise.all(
 					Array.from(protectedOperations, operationId => operationManager.waitForSettlement(operationId)),
 				);
-				await session.waitForIdle();
 				await loopSettled;
 				await session.planMode.abandonPendingApproval();
 				semanticRendering.dispose();
-				resourceLifecycle?.dispose();
+				await resourceLifecycle?.dispose();
 				provenance.dispose();
 				await collaboration.dispose();
 				unsubscribeAgentRegistry();
@@ -1801,12 +2051,14 @@ export async function runRpcMode(
 			advisor: getAdvisorState(),
 		});
 	};
-	const reloadPluginState = async () => {
+	const reloadPluginState = async (authority: RpcSessionAuthorityToken = callbackAuthorityToken) => {
 		const cwd = session.sessionManager.getCwd();
 		const projectPath = await resolveActiveProjectRegistryPath(cwd);
+		sessionAuthority.assertCurrent(authority);
 		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
 		resetCapabilities();
 		await session.refreshSkills();
+		sessionAuthority.assertCurrent(authority);
 		if (mcpManager) {
 			await reloadMcpResources({
 				session,
@@ -1814,22 +2066,26 @@ export async function runRpcMode(
 				enableProjectConfig: session.settings.get("mcp.enableProjectConfig") ?? true,
 				browserEnabled: session.settings.get("browser.enabled") ?? false,
 			});
+			sessionAuthority.assertCurrent(authority);
 		}
-		session.setSlashCommands(await loadSlashCommands({ cwd }));
-		await emitAvailableCommandsUpdate();
+		const commands = await loadSlashCommands({ cwd });
+		sessionAuthority.assertCurrent(authority);
+		session.setSlashCommands(commands);
+		await emitAvailableCommandsUpdate(authority);
 	};
-	const resourceLifecycle = new RpcResourceLifecycleManager(
-		new RpcRuntimeResourceSource(session.sessionManager.getCwd(), mcpManager),
-		frame => output(frame),
-	);
-	const emitAvailableCommandsUpdate = async () => {
-		output({ type: "available_commands_update", commands: await getAvailableCommands() });
+	const runtimeResourceSource = new RpcRuntimeResourceSource(() => session.sessionManager.getCwd(), mcpManager);
+	const resourceLifecycle = new RpcResourceLifecycleManager(runtimeResourceSource, frame => {
+		if (sessionAuthority.isCurrent(callbackAuthorityToken)) output(frame);
+	});
+	const emitAvailableCommandsUpdate = async (authority: RpcSessionAuthorityToken = callbackAuthorityToken) => {
+		const commands = await getAvailableCommands();
+		if (sessionAuthority.isCurrent(authority)) output({ type: "available_commands_update", commands });
 	};
 	session.subscribeCommandMetadataChanged(() => {
-		void emitAvailableCommandsUpdate();
+		if (sessionAuthority.isCurrent(callbackAuthorityToken)) void emitAvailableCommandsUpdate();
 	});
 	session.subscribeToolInventoryChanged(() => {
-		output({ type: "tool_inventory_update" });
+		if (sessionAuthority.isCurrent(callbackAuthorityToken)) output({ type: "tool_inventory_update" });
 	});
 	await emitAvailableCommandsUpdate();
 	emitQueueUpdate();
@@ -1847,31 +2103,125 @@ export async function runRpcMode(
 		}
 		return protectedOperations;
 	};
-	let sessionTransitionInFlight = false;
-	let sessionGeneration = 0;
-	const prepareSessionTransition = async (): Promise<void> => {
-		if (providerAuthController.hasMutationInFlight()) throw new RpcSessionTransitionBusyError();
-		const protectedOperations = protectedCommitOperationIds();
-		if (protectedOperations.size > 0) throw new RpcSessionTransitionBusyError();
-		const providerProtected = providerAuthController.cancelAll("session_transition", "session_changed");
-		if (providerProtected.size > 0) throw new RpcSessionTransitionBusyError();
-		sessionTransitionInFlight = true;
-		sessionGeneration++;
-		try {
-			const evalOperationIds = Array.from(rpcEvalOperationIds);
-			operationManager.cancelAll("session_transition", "session_changed");
-			for (const controller of pendingRpcBashConfirmations) controller.abort();
-			session.abortBash();
-			for (const operationId of evalOperationIds) session.abortEvalExecution(operationId);
-			await Promise.allSettled([...rpcEvalTasks, ...rpcBashExecutions]);
-			if (session.isStreaming) {
-				await session.abort({ reason: USER_INTERRUPT_LABEL });
-				await session.waitForIdle();
+	let activeSessionTransition: RpcSessionTransitionToken | undefined;
+	let resourcesDrainedForTransition = false;
+	let sessionTransitionAuthorityInvalidationRequired = false;
+	const settleQuiescentCancellations = (excludedOperationIds: ReadonlySet<string> = new Set()): void => {
+		for (const operation of operationManager.snapshot().active) {
+			if (operation.status === "cancelling" && !excludedOperationIds.has(operation.operationId)) {
+				operationManager.settleCancellation(operation.operationId);
 			}
+		}
+	};
+	const quiesceCancelledImplementations = async (
+		providerOperationIds: ReadonlySet<string>,
+		abortReason: string,
+	): Promise<void> => {
+		const failures: unknown[] = [];
+		for (const controller of pendingRpcBashConfirmations) {
+			try {
+				controller.abort();
+			} catch (cause) {
+				failures.push(cause);
+			}
+		}
+		try {
+			session.abortBash();
+		} catch (cause) {
+			failures.push(cause);
+		}
+		for (const operationId of rpcEvalOperationIds) {
+			try {
+				session.abortEvalExecution(operationId);
+			} catch (cause) {
+				failures.push(cause);
+			}
+		}
+		if (session.isStreaming) {
+			try {
+				await session.abort({ reason: abortReason });
+			} catch (cause) {
+				failures.push(cause);
+			}
+		}
+		const implementationResults = await Promise.allSettled([...rpcEvalTasks, ...rpcBashExecutions]);
+		for (const result of implementationResults) {
+			if (result.status === "rejected") failures.push(result.reason);
+		}
+		let idle = false;
+		try {
+			await session.waitForIdle();
+			idle = true;
+		} catch (cause) {
+			failures.push(cause);
+		}
+		if (idle) settleQuiescentCancellations(providerOperationIds);
+		const providerResults = await Promise.allSettled(
+			Array.from(providerOperationIds, operationId => operationManager.waitForSettlement(operationId)),
+		);
+		for (const result of providerResults) {
+			if (result.status === "rejected") failures.push(result.reason);
+		}
+		if (failures.length > 0) throw new AggregateError(failures, "Failed to quiesce cancelled RPC operations");
+	};
+	const abandonPreparedSessionTransition = (): unknown | undefined => {
+		const transition = activeSessionTransition;
+		if (!transition) return undefined;
+		let authority: RpcSessionAuthorityToken;
+		if (sessionTransitionAuthorityInvalidationRequired) {
+			authority = sessionAuthority.invalidateSessionTransitionAuthority(transition);
+		} else {
+			sessionAuthority.failSessionTransition(transition);
+			authority = sessionAuthority.capture();
+		}
+		activeSessionTransition = undefined;
+		sessionTransitionAuthorityInvalidationRequired = false;
+		callbackAuthorityToken = authority;
+		providerAuthService = new ProviderAuthService(session.modelRegistry, session.sessionId);
+		providerAuthController = createProviderAuthController();
+		if (!resourcesDrainedForTransition) return undefined;
+		try {
+			resourceLifecycle.rebind(runtimeResourceSource);
+			resourcesDrainedForTransition = false;
+			return undefined;
+		} catch (cause) {
+			return cause;
+		}
+	};
+	const prepareSessionTransition = async (): Promise<void> => {
+		const transition = sessionAuthority.beginSessionTransition();
+		activeSessionTransition = transition;
+		callbackAuthorityToken = transition;
+		resourcesDrainedForTransition = false;
+		sessionTransitionAuthorityInvalidationRequired = false;
+		try {
+			if (providerAuthController.hasMutationInFlight()) throw new RpcSessionTransitionBusyError();
+			const protectedOperations = protectedCommitOperationIds();
+			if (protectedOperations.size > 0) throw new RpcSessionTransitionBusyError();
+			sessionTransitionAuthorityInvalidationRequired = true;
+			const activeOperations = operationManager.snapshot().active;
+			for (const operation of activeOperations) {
+				if (operation.status === "accepted") session.removeQueuedMessagesByTag(operation.operationId);
+			}
+			const providerOperationIds = new Set(
+				activeOperations
+					.filter(operation => operation.command === "provider_auth")
+					.map(operation => operation.operationId),
+			);
+			const providerProtected = providerAuthController.cancelAll("session_transition", "session_changed");
+			if (providerProtected.size > 0) throw new RpcSessionTransitionBusyError();
+			operationManager.cancelAll("session_transition", "session_changed");
+			await collaboration.leave("session_transition");
+			await resourceLifecycle.drain();
+			resourcesDrainedForTransition = true;
+			await quiesceCancelledImplementations(providerOperationIds, USER_INTERRUPT_LABEL);
 			await rpcSessionHost?.disconnect();
 			rpcSessionHost = undefined;
 		} catch (cause) {
-			sessionTransitionInFlight = false;
+			const cleanupCause = abandonPreparedSessionTransition();
+			if (cleanupCause) {
+				throw new AggregateError([cause, cleanupCause], "Session preparation and cleanup failed");
+			}
 			throw cause;
 		}
 	};
@@ -1880,9 +2230,216 @@ export async function runRpcMode(
 		command: RpcCommand["type"],
 		data: T,
 	): Promise<RpcResponse> => {
-		if (!data.cancelled) await emitAvailableCommandsUpdate();
+		const transition = activeSessionTransition;
+		let responseAuthority: RpcSessionAuthorityToken;
+		if (transition) {
+			if (data.cancelled) {
+				if (sessionTransitionAuthorityInvalidationRequired) {
+					responseAuthority = sessionAuthority.invalidateSessionTransitionAuthority(transition);
+				} else {
+					sessionAuthority.failSessionTransition(transition);
+					responseAuthority = sessionAuthority.capture();
+				}
+			} else {
+				responseAuthority = sessionAuthority.completeSessionTransition(transition);
+			}
+			activeSessionTransition = undefined;
+			sessionTransitionAuthorityInvalidationRequired = false;
+			if (resourcesDrainedForTransition) {
+				resourceLifecycle.rebind(runtimeResourceSource);
+				resourcesDrainedForTransition = false;
+			}
+			providerAuthService = new ProviderAuthService(session.modelRegistry, session.sessionId);
+			callbackAuthorityToken = responseAuthority;
+			providerAuthController = createProviderAuthController();
+		} else {
+			responseAuthority = sessionAuthority.capture();
+		}
+		if (!data.cancelled) {
+			session.contextProjection.reset(session.sessionId, session.sessionManager.getLeafId());
+			output({
+				type: "session_info_update",
+				title: session.sessionName,
+				sessionId: session.sessionId,
+				mode: session.planMode.mode,
+			});
+			emitQueueUpdate();
+			emitConfigUpdate();
+			output({ type: "tool_inventory_update" });
+			await emitAvailableCommandsUpdate(responseAuthority);
+			sessionAuthority.assertCurrent(responseAuthority);
+		}
 		return success(id, command, data);
 	};
+	const quiesceExecutionAuthorityOperations = async (): Promise<void> => {
+		const protectedOperations = protectedCommitOperationIds();
+		if (protectedOperations.size > 0) {
+			await Promise.all(
+				Array.from(protectedOperations, operationId => operationManager.waitForSettlement(operationId)),
+			);
+		}
+		const activeOperations = operationManager.snapshot().active;
+		const providerOperationIds = new Set(
+			activeOperations
+				.filter(operation => operation.command === "provider_auth")
+				.map(operation => operation.operationId),
+		);
+		for (const operation of activeOperations) {
+			if (operation.status === "accepted") session.removeQueuedMessagesByTag(operation.operationId);
+		}
+		providerAuthController.cancelAll("session_transition", "session_changed");
+		operationManager.cancelAll("session_transition", "session_changed", protectedOperations);
+		await quiesceCancelledImplementations(providerOperationIds, USER_INTERRUPT_LABEL);
+	};
+	const commitExecutionAuthorityTransition = (
+		transition: RpcExecutionAuthorityTransitionToken,
+	): RpcSessionAuthorityToken => {
+		const authority = sessionAuthority.completeExecutionAuthorityTransition(transition);
+		callbackAuthorityToken = authority;
+		providerAuthController = createProviderAuthController();
+		return authority;
+	};
+	const failExecutionAuthorityTransition = (transition: RpcExecutionAuthorityTransitionToken): void => {
+		sessionAuthority.failExecutionAuthorityTransition(transition);
+		callbackAuthorityToken = sessionAuthority.capture();
+	};
+	let authorityTransitionRunning = false;
+	const pendingAuthorityTransitions: Array<() => void> = [];
+	const serializeAuthorityTransition = <T>(transition: () => Promise<T>): Promise<T> => {
+		const deferred = Promise.withResolvers<T>();
+		const start = (): void => {
+			authorityTransitionRunning = true;
+			const finish = (settle: () => void): void => {
+				const next = pendingAuthorityTransitions.shift();
+				if (next) next();
+				else authorityTransitionRunning = false;
+				settle();
+			};
+			let work: Promise<T>;
+			try {
+				work = transition();
+			} catch (cause) {
+				finish(() => deferred.reject(cause));
+				return;
+			}
+			void work.then(
+				value => finish(() => deferred.resolve(value)),
+				cause => finish(() => deferred.reject(cause)),
+			);
+		};
+		if (authorityTransitionRunning) pendingAuthorityTransitions.push(start);
+		else start();
+		return deferred.promise;
+	};
+	const transitionExecutionAuthority = (): Promise<RpcSessionAuthorityToken> =>
+		serializeAuthorityTransition(async () => {
+			if (providerAuthController.hasMutationInFlight()) throw new RpcSessionTransitionBusyError();
+			const collaborationToken = collaboration.getLifecycleToken();
+			if (collaborationToken && !collaboration.isLifecycleTokenCurrent(collaborationToken)) {
+				throw new RpcCollaborationStateError("Collaboration authority is stale");
+			}
+			const transition = sessionAuthority.beginExecutionAuthorityTransition();
+			callbackAuthorityToken = transition;
+			try {
+				await quiesceExecutionAuthorityOperations();
+				const authority = commitExecutionAuthorityTransition(transition);
+				if (collaborationToken) collaboration.replaceAuthorityToken(collaborationToken, authority);
+				return authority;
+			} catch (cause) {
+				if (sessionAuthority.transitioning) failExecutionAuthorityTransition(transition);
+				throw cause;
+			}
+		});
+	const transitionCollaborationLeave = <T>(effect: () => Promise<T>): Promise<T> =>
+		serializeAuthorityTransition(async () => {
+			if (providerAuthController.hasMutationInFlight()) throw new RpcSessionTransitionBusyError();
+			const transition = sessionAuthority.beginExecutionAuthorityTransition();
+			callbackAuthorityToken = transition;
+			try {
+				const result = await effect();
+				await quiesceExecutionAuthorityOperations();
+				commitExecutionAuthorityTransition(transition);
+				return result;
+			} catch (cause) {
+				failExecutionAuthorityTransition(transition);
+				throw cause;
+			}
+		});
+	const transitionCollaborationAuthority = <T>(
+		effect: (commitAuthority: RpcCollaborationAuthorityCommit) => Promise<T>,
+	): Promise<T> =>
+		serializeAuthorityTransition(async () => {
+			if (providerAuthController.hasMutationInFlight()) throw new RpcSessionTransitionBusyError();
+			const transition = sessionAuthority.beginExecutionAuthorityTransition();
+			callbackAuthorityToken = transition;
+			let committed = false;
+			const commitAuthority = (expected: RpcCollaborationSessionAuthority): RpcSessionAuthorityToken => {
+				if (committed)
+					throw new RpcSessionAuthorityError("authority_changed", "Authority transition was already committed");
+				if (
+					expected.sessionId !== transition.sessionId ||
+					expected.sessionGeneration !== transition.sessionGeneration ||
+					expected.authorityGeneration !== transition.authorityGeneration
+				) {
+					throw new RpcSessionAuthorityError(
+						"authority_changed",
+						"Collaboration authority changed during the transition",
+					);
+				}
+				const authority = commitExecutionAuthorityTransition(transition);
+				committed = true;
+				return authority;
+			};
+			try {
+				await quiesceExecutionAuthorityOperations();
+				const result = await effect(commitAuthority);
+				if (!committed) {
+					throw new RpcSessionAuthorityError("authority_changed", "Collaboration authority was not committed");
+				}
+				return result;
+			} catch (cause) {
+				if (!committed) failExecutionAuthorityTransition(transition);
+				throw cause;
+			}
+		});
+	collaborationAuthorityTransition = (captureAuthority, applyAuthority, installAuthority) =>
+		serializeAuthorityTransition(async () => {
+			const expected = captureAuthority();
+			const transition = sessionAuthority.beginExecutionAuthorityTransition();
+			callbackAuthorityToken = transition;
+			if (
+				expected.sessionId !== transition.sessionId ||
+				expected.sessionGeneration !== transition.sessionGeneration ||
+				expected.authorityGeneration !== transition.authorityGeneration
+			) {
+				failExecutionAuthorityTransition(transition);
+				throw new RpcSessionAuthorityError("authority_changed", "Collaboration authority callback is stale");
+			}
+			try {
+				applyAuthority();
+			} catch (cause) {
+				failExecutionAuthorityTransition(transition);
+				throw cause;
+			}
+			let cleanupFailure: unknown;
+			try {
+				await quiesceExecutionAuthorityOperations();
+			} catch (cause) {
+				cleanupFailure = cause;
+			}
+			const authority = commitExecutionAuthorityTransition(transition);
+			installAuthority(authority);
+			if (cleanupFailure !== undefined) {
+				output(
+					error(
+						undefined,
+						"collaboration_authority",
+						cleanupFailure instanceof Error ? cleanupFailure.message : String(cleanupFailure),
+						"authority_cleanup_failed",
+					),
+				);
+			}
+		});
 	let toolActivationInFlight = false;
 	const confirmAgentMutation = (
 		command: "start_agent" | "cancel_agent" | "release_agent",
@@ -1894,6 +2451,43 @@ export async function runRpcMode(
 		semanticNegotiation?.result.capabilities.some(
 			capability => capability.id === capabilityId && capability.supported,
 		) === true;
+	const negotiatedCapabilityByFeature: Readonly<Record<string, string>> = {
+		"session-observe": "session.observe",
+		"session-execute": "session.execute",
+		"session-shutdown": "session.shutdown",
+		"semantic-rendering": "semantic-rendering",
+		artifact: "artifact.read",
+		"resource-lifecycle": "resource.lifecycle",
+		"runtime-provenance": "runtime-provenance",
+		collaboration: "collaboration",
+		"context.projection": "context.projection",
+	};
+	const guardCommandFeatures = (command: RpcCommand): RpcResponse | undefined => {
+		const availableFeatures = getCapabilityFeatures();
+		for (const feature of getRpcCommandRequiredFeatures(command.type)) {
+			if (feature === "model.fast-mode" && command.type === "set_fast_mode" && !command.enabled) {
+				continue;
+			}
+			if (!availableFeatures.has(feature)) {
+				return error(
+					command.id,
+					command.type,
+					`Required RPC feature is unavailable: ${feature}`,
+					"feature_unavailable",
+				);
+			}
+			const capabilityId = negotiatedCapabilityByFeature[feature];
+			if (capabilityId && !hasNegotiatedCapability(capabilityId)) {
+				return error(
+					command.id,
+					command.type,
+					`RPC v3 capability was not negotiated: ${capabilityId}`,
+					"capability_not_negotiated",
+				);
+			}
+		}
+		return undefined;
+	};
 	const collaborationGuestCommands = new Set<RpcCommand["type"]>([
 		"get_capabilities",
 		"initialize",
@@ -1910,6 +2504,8 @@ export async function runRpcMode(
 	]);
 
 	const collaborationFailure = (id: string | undefined, command: RpcCommand["type"], cause: unknown): RpcResponse => {
+		if (cause instanceof RpcSessionAuthorityError) return error(id, command, cause.message, cause.code);
+		if (cause instanceof RpcSessionTransitionBusyError) return error(id, command, cause.message, "session_busy");
 		if (cause instanceof RpcCollaborationAuthorityError || cause instanceof RpcCollaborationStateError) {
 			return error(id, command, cause.message, cause.code);
 		}
@@ -1926,7 +2522,11 @@ export async function runRpcMode(
 	// Handle a single command
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
 		const id = command.id;
+		const commandAuthority = sessionAuthority.capture();
 		await collaboration.assertSessionIsolation();
+		sessionAuthority.assertCurrent(commandAuthority);
+		const featureFailure = guardCommandFeatures(command);
+		if (featureFailure) return featureFailure;
 		const collaborationSnapshot = collaboration.snapshot();
 		if (collaborationSnapshot.role === "guest" && !collaborationGuestCommands.has(command.type)) {
 			return error(
@@ -1989,14 +2589,6 @@ export async function runRpcMode(
 			}
 
 			case "semantic_action": {
-				if (!hasNegotiatedCapability("semantic-rendering")) {
-					return error(
-						id,
-						"semantic_action",
-						"RPC v3 semantic rendering capability was not negotiated",
-						"capability_not_negotiated",
-					);
-				}
 				const settled = await semanticRendering.invoke(
 					command.renderId,
 					command.actionId,
@@ -2007,33 +2599,19 @@ export async function runRpcMode(
 			}
 
 			case "semantic_cancel": {
-				if (!hasNegotiatedCapability("semantic-rendering")) {
-					return error(
-						id,
-						"semantic_cancel",
-						"RPC v3 semantic rendering capability was not negotiated",
-						"capability_not_negotiated",
-					);
-				}
 				return success(id, "semantic_cancel", {
 					cancelled: semanticRendering.cancel(command.renderId, command.actionId),
 				});
 			}
 
 			case "artifact_describe": {
-				if (!hasNegotiatedCapability("artifact.read")) {
-					return error(
-						id,
-						"artifact_describe",
-						"RPC v3 artifact capability was not negotiated",
-						"capability_not_negotiated",
-					);
-				}
 				const manager = session.sessionManager.getArtifactManager();
 				if (!manager)
 					return error(id, "artifact_describe", "Artifact storage is unavailable", "artifact_unavailable");
 				try {
-					return success(id, "artifact_describe", await manager.describe(command.artifactId));
+					const described = await manager.describe(command.artifactId);
+					sessionAuthority.assertCurrent(commandAuthority);
+					return success(id, "artifact_describe", described);
 				} catch (cause) {
 					if (cause instanceof ArtifactNotFoundError) {
 						return error(id, "artifact_describe", cause.message, cause.code);
@@ -2043,25 +2621,15 @@ export async function runRpcMode(
 			}
 
 			case "artifact_read": {
-				if (!hasNegotiatedCapability("artifact.read")) {
-					return error(
-						id,
-						"artifact_read",
-						"RPC v3 artifact capability was not negotiated",
-						"capability_not_negotiated",
-					);
-				}
 				const manager = session.sessionManager.getArtifactManager();
 				if (!manager) return error(id, "artifact_read", "Artifact storage is unavailable", "artifact_unavailable");
 				try {
-					return success(
-						id,
-						"artifact_read",
-						await manager.readRange(command.artifactId, {
-							offset: command.offset ?? 0,
-							length: command.length ?? MAX_ARTIFACT_RANGE_BYTES,
-						}),
-					);
+					const range = await manager.readRange(command.artifactId, {
+						offset: command.offset ?? 0,
+						length: command.length ?? MAX_ARTIFACT_RANGE_BYTES,
+					});
+					sessionAuthority.assertCurrent(commandAuthority);
+					return success(id, "artifact_read", range);
 				} catch (cause) {
 					if (cause instanceof ArtifactNotFoundError || cause instanceof ArtifactRangeError) {
 						return error(id, "artifact_read", cause.message, cause.code);
@@ -2071,40 +2639,29 @@ export async function runRpcMode(
 			}
 
 			case "artifact_export": {
-				if (!hasNegotiatedCapability("artifact.read")) {
-					return error(
-						id,
-						"artifact_export",
-						"RPC v3 artifact capability was not negotiated",
-						"capability_not_negotiated",
-					);
-				}
 				const manager = session.sessionManager.getArtifactManager();
 				if (!manager)
 					return error(id, "artifact_export", "Artifact storage is unavailable", "artifact_unavailable");
 				try {
-					const destination = path.resolve(session.sessionManager.getCwd(), command.destination);
-					return success(
-						id,
-						"artifact_export",
-						await manager.exportTo(command.artifactId, destination, command.expectedSha256),
-					);
+					const exported = await manager.exportTo(command.artifactId, {
+						exportRoot: session.sessionManager.getCwd(),
+						destination: command.destination,
+						expectedSha256: command.expectedSha256,
+					});
+					sessionAuthority.assertCurrent(commandAuthority);
+					return success(id, "artifact_export", exported);
 				} catch (cause) {
-					if (cause instanceof ArtifactNotFoundError || cause instanceof ArtifactHashMismatchError) {
+					if (
+						cause instanceof ArtifactNotFoundError ||
+						cause instanceof ArtifactHashMismatchError ||
+						cause instanceof ArtifactExportPathError
+					) {
 						return error(id, "artifact_export", cause.message, cause.code);
 					}
 					throw cause;
 				}
 			}
 			case "resource_list": {
-				if (!hasNegotiatedCapability("resource.lifecycle")) {
-					return error(
-						id,
-						"resource_list",
-						"RPC v3 resource lifecycle capability was not negotiated",
-						"capability_not_negotiated",
-					);
-				}
 				if (!resourceLifecycle) {
 					return error(id, "resource_list", "Resource management is unavailable", "resource_unavailable");
 				}
@@ -2112,14 +2669,6 @@ export async function runRpcMode(
 			}
 
 			case "resource_refresh": {
-				if (!hasNegotiatedCapability("resource.lifecycle")) {
-					return error(
-						id,
-						"resource_refresh",
-						"RPC v3 resource lifecycle capability was not negotiated",
-						"capability_not_negotiated",
-					);
-				}
 				if (!resourceLifecycle) {
 					return error(id, "resource_refresh", "Resource management is unavailable", "resource_unavailable");
 				}
@@ -2134,29 +2683,18 @@ export async function runRpcMode(
 			}
 
 			case "resource_reload": {
-				if (!hasNegotiatedCapability("resource.lifecycle")) {
-					return error(
-						id,
-						"resource_reload",
-						"RPC v3 resource lifecycle capability was not negotiated",
-						"capability_not_negotiated",
-					);
-				}
 				if (!resourceLifecycle) {
 					return error(id, "resource_reload", "Resource management is unavailable", "resource_unavailable");
 				}
-				return success(id, "resource_reload", resourceLifecycle.startReload(reloadPluginState, id));
+				const reload = async () => {
+					sessionAuthority.assertCurrent(commandAuthority);
+					await reloadPluginState(commandAuthority);
+					sessionAuthority.assertCurrent(commandAuthority);
+				};
+				return success(id, "resource_reload", resourceLifecycle.startReload(reload, id));
 			}
 
 			case "resource_cancel": {
-				if (!hasNegotiatedCapability("resource.lifecycle")) {
-					return error(
-						id,
-						"resource_cancel",
-						"RPC v3 resource lifecycle capability was not negotiated",
-						"capability_not_negotiated",
-					);
-				}
 				if (!resourceLifecycle) {
 					return error(id, "resource_cancel", "Resource management is unavailable", "resource_unavailable");
 				}
@@ -2164,19 +2702,13 @@ export async function runRpcMode(
 			}
 
 			case "resource_dispose": {
-				if (!hasNegotiatedCapability("resource.lifecycle")) {
-					return error(
-						id,
-						"resource_dispose",
-						"RPC v3 resource lifecycle capability was not negotiated",
-						"capability_not_negotiated",
-					);
-				}
 				if (!resourceLifecycle) {
 					return error(id, "resource_dispose", "Resource management is unavailable", "resource_unavailable");
 				}
 				try {
-					return success(id, "resource_dispose", await resourceLifecycle.disposeServer(command.serverId, id));
+					const disposed = await resourceLifecycle.disposeServer(command.serverId, id);
+					sessionAuthority.assertCurrent(commandAuthority);
+					return success(id, "resource_dispose", disposed);
 				} catch (cause) {
 					if (cause instanceof RpcResourceNotFoundError) {
 						return error(id, "resource_dispose", cause.message, cause.code);
@@ -2185,75 +2717,55 @@ export async function runRpcMode(
 				}
 			}
 			case "provenance_get": {
-				if (!hasNegotiatedCapability("runtime-provenance")) {
-					return error(
-						id,
-						"provenance_get",
-						"RPC v3 runtime provenance capability was not negotiated",
-						"capability_not_negotiated",
-					);
-				}
-				return success(
-					id,
-					"provenance_get",
-					command.refreshUsage === true ? await provenance.refresh() : provenance.snapshot(),
-				);
+				const provenanceSnapshot =
+					command.refreshUsage === true ? await provenance.refresh() : provenance.snapshot();
+				sessionAuthority.assertCurrent(commandAuthority);
+				return success(id, "provenance_get", provenanceSnapshot);
 			}
 			case "collaboration_get":
 				return success(id, "collaboration_get", collaboration.snapshot());
 			case "collaboration_host": {
-				if (!hasNegotiatedCapability("collaboration")) {
-					return error(
-						id,
-						"collaboration_host",
-						"RPC v3 collaboration capability was not negotiated",
-						"capability_not_negotiated",
-					);
-				}
 				try {
-					return success(
-						id,
-						"collaboration_host",
-						await collaboration.host({ relayUrl: command.relayUrl, webUrl: command.webUrl }),
-					);
+					const collaborationAuthority = await transitionExecutionAuthority();
+					const state = await collaboration.host({ relayUrl: command.relayUrl, webUrl: command.webUrl });
+					sessionAuthority.assertCurrent(collaborationAuthority);
+					return success(id, "collaboration_host", state);
 				} catch (cause) {
 					return collaborationFailure(id, "collaboration_host", cause);
 				}
 			}
 			case "collaboration_join": {
-				if (!hasNegotiatedCapability("collaboration")) {
-					return error(
-						id,
-						"collaboration_join",
-						"RPC v3 collaboration capability was not negotiated",
-						"capability_not_negotiated",
-					);
-				}
 				try {
-					return success(
-						id,
-						"collaboration_join",
-						await collaboration.join({ link: command.link, displayName: command.displayName }),
-					);
+					const collaborationAuthority = await transitionExecutionAuthority();
+					const state = await collaboration.join({ link: command.link, displayName: command.displayName });
+					sessionAuthority.assertCurrent(collaborationAuthority);
+					return success(id, "collaboration_join", state);
 				} catch (cause) {
 					return collaborationFailure(id, "collaboration_join", cause);
 				}
 			}
 			case "collaboration_leave":
 				try {
-					return success(id, "collaboration_leave", await collaboration.leave(command.reason));
+					const state = await transitionCollaborationLeave(() => collaboration.leave(command.reason));
+					return success(id, "collaboration_leave", state);
 				} catch (cause) {
 					return collaborationFailure(id, "collaboration_leave", cause);
 				}
 			case "collaboration_revoke":
 				try {
-					return success(id, "collaboration_revoke", await collaboration.revoke(command.participantId));
+					const state = await transitionCollaborationAuthority(commitAuthority =>
+						collaboration.revoke(command.participantId, commitAuthority),
+					);
+					return success(id, "collaboration_revoke", state);
 				} catch (cause) {
 					return collaborationFailure(id, "collaboration_revoke", cause);
 				}
 			case "collaboration_rotate":
 				try {
-					return success(id, "collaboration_rotate", await collaboration.rotate());
+					const state = await transitionCollaborationAuthority(commitAuthority =>
+						collaboration.rotate(commitAuthority),
+					);
+					return success(id, "collaboration_rotate", state);
 				} catch (cause) {
 					return collaborationFailure(id, "collaboration_rotate", cause);
 				}
@@ -2269,29 +2781,40 @@ export async function runRpcMode(
 				}
 			case "collaboration_read_media":
 				try {
-					return success(
-						id,
-						"collaboration_read_media",
-						await collaboration.readMedia(command.mediaId, command.offset, command.length),
-					);
+					const media = await collaboration.readMedia(command.mediaId, command.offset, command.length);
+					sessionAuthority.assertCurrent(commandAuthority);
+					return success(id, "collaboration_read_media", media);
 				} catch (cause) {
 					return collaborationFailure(id, "collaboration_read_media", cause);
 				}
-			case "session_open": {
-				if (!hasNegotiatedCapability("session.observe")) {
-					return error(
-						id,
-						"session_open",
-						"RPC v3 session observation capability was not negotiated",
-						"capability_not_negotiated",
-					);
+			case "context_get": {
+				const sessionId = session.sessionId;
+				const leafId = session.sessionManager.getLeafId();
+				let snapshot = session.contextProjection.read();
+				if (snapshot.sessionId !== sessionId || snapshot.leafId !== leafId) {
+					session.contextProjection.reset(sessionId, leafId);
+					snapshot = session.contextProjection.read();
 				}
+				sessionAuthority.assertCurrent(commandAuthority);
+				return success(
+					id,
+					"context_get",
+					projectBoundedRpcContext(snapshot, {
+						maxSources: command.maxSources,
+						maxRelations: command.maxRelations,
+						maxContentBytes: command.maxContentBytes,
+					}),
+				);
+			}
+
+			case "session_open": {
 				try {
 					const opened = await ensureRpcSessionHost().open({
 						...(command.after === undefined ? {} : { after: command.after }),
 						...(command.afterCursor === undefined ? {} : { afterCursor: command.afterCursor }),
 						...(command.snapshot === undefined ? {} : { snapshot: command.snapshot }),
 					});
+					sessionAuthority.assertCurrent(commandAuthority);
 					return success(id, "session_open", opened);
 				} catch (cause) {
 					if (cause instanceof SessionCursorError) {
@@ -2302,16 +2825,9 @@ export async function runRpcMode(
 			}
 
 			case "session_ack": {
-				if (!hasNegotiatedCapability("session.observe")) {
-					return error(
-						id,
-						"session_ack",
-						"RPC v3 session observation capability was not negotiated",
-						"capability_not_negotiated",
-					);
-				}
 				try {
 					await ensureRpcSessionHost().acknowledge(command.subscriptionId, command.sequence);
+					sessionAuthority.assertCurrent(commandAuthority);
 					return success(id, "session_ack");
 				} catch (cause) {
 					if (cause instanceof RpcSessionSubscriptionNotFoundError) {
@@ -2327,16 +2843,9 @@ export async function runRpcMode(
 			}
 
 			case "session_unsubscribe": {
-				if (!hasNegotiatedCapability("session.observe")) {
-					return error(
-						id,
-						"session_unsubscribe",
-						"RPC v3 session observation capability was not negotiated",
-						"capability_not_negotiated",
-					);
-				}
 				try {
 					await ensureRpcSessionHost().unsubscribe(command.subscriptionId);
+					sessionAuthority.assertCurrent(commandAuthority);
 					return success(id, "session_unsubscribe");
 				} catch (cause) {
 					if (cause instanceof RpcSessionSubscriptionNotFoundError) {
@@ -2347,30 +2856,16 @@ export async function runRpcMode(
 			}
 
 			case "session_invoke": {
-				const requiredCapability = getRpcSessionCommandCapability(command.command.kind);
-				if (!hasNegotiatedCapability(requiredCapability)) {
-					return error(
-						id,
-						"session_invoke",
-						`RPC v3 ${requiredCapability} capability was not negotiated`,
-						"capability_not_negotiated",
-					);
-				}
 				const outcome = await ensureRpcSessionHost().invoke(command.command, { requestId: command.id });
+				sessionAuthority.assertCurrent(commandAuthority);
 				return success(id, "session_invoke", outcome);
 			}
 
 			case "session_shutdown": {
-				if (!hasNegotiatedCapability("session.shutdown")) {
-					return error(
-						id,
-						"session_shutdown",
-						"RPC v3 session shutdown capability was not negotiated",
-						"capability_not_negotiated",
-					);
-				}
 				shutdownState.requested = true;
-				return success(id, "session_shutdown", await ensureRpcSessionHost().shutdown());
+				const settled = await ensureRpcSessionHost().shutdown();
+				sessionAuthority.assertCurrent(commandAuthority);
+				return success(id, "session_shutdown", settled);
 			}
 
 			// =================================================================
@@ -2389,12 +2884,14 @@ export async function runRpcMode(
 					}
 					const operation = operationManager.start(id, "prompt");
 					setImmediate(() => {
-						if (!operationManager.begin(operation)) return;
+						if (!sessionAuthority.isCurrent(commandAuthority) || !operationManager.begin(operation)) return;
 						try {
 							collaboration.sendPrompt(command.message, command.images);
+							if (!sessionAuthority.isCurrent(commandAuthority)) return;
 							output({ type: "prompt_result", id, operationId: operation.operationId, agentInvoked: true });
 							operationManager.complete(operation, true);
 						} catch (cause) {
+							if (!sessionAuthority.isCurrent(commandAuthority)) return;
 							operationManager.fail(
 								operation,
 								cause instanceof Error ? cause : new Error(String(cause)),
@@ -2404,26 +2901,27 @@ export async function runRpcMode(
 					});
 					return success(id, "prompt", { operationId: operation.operationId, accepted: true });
 				}
-				if (sessionTransitionInFlight) {
-					return error(id, "prompt", "Session transition is in progress", "session_busy");
-				}
 				const operation = operationManager.start(id, "prompt");
 				setImmediate(() => {
-					if (!operationManager.begin(operation)) return;
-					void (async () => {
+					if (!operationManager.canContinue(operation)) return;
+					const preparationController = new AbortController();
+					const preparationTask = (async () => {
 						const skillResult = await tryRunRpcSkillCommand(
 							session,
 							command.message,
 							command.streamingBehavior,
 							operation.operationId,
+							preparationController.signal,
 						);
-						if (!operationManager.isActive(operation)) return;
+						if (!sessionAuthority.isCurrent(commandAuthority)) return;
+						if (!operationManager.canContinue(operation)) return;
 						if (skillResult) {
-							reportLocalOnlyPromptResult({
+							void reportLocalOnlyPromptResult({
 								id,
 								prompt: Promise.resolve(true),
 								output,
 								onError: () => {},
+								isAuthorityCurrent: () => sessionAuthority.isCurrent(commandAuthority),
 								operation: {
 									handle: operation,
 									manager: operationManager,
@@ -2437,10 +2935,19 @@ export async function runRpcMode(
 							sessionManager: session.sessionManager,
 							settings: session.settings,
 							cwd: session.sessionManager.getCwd(),
-							output: text => output({ type: "command_output", text }),
-							refreshCommands: emitAvailableCommandsUpdate,
-							reloadPlugins: reloadPluginState,
+							output: text => {
+								if (sessionAuthority.isCurrent(commandAuthority)) output({ type: "command_output", text });
+							},
+							refreshCommands: () => {
+								if (sessionAuthority.isCurrent(commandAuthority)) emitAvailableCommandsUpdate();
+							},
+							reloadPlugins: async () => {
+								sessionAuthority.assertCurrent(commandAuthority);
+								await reloadPluginState(commandAuthority);
+								sessionAuthority.assertCurrent(commandAuthority);
+							},
 							notifyTitleChanged: async () => {
+								if (!sessionAuthority.isCurrent(commandAuthority)) return;
 								output({
 									type: "session_info_update",
 									title: session.sessionName,
@@ -2449,28 +2956,33 @@ export async function runRpcMode(
 								});
 							},
 							notifyConfigChanged: async () => {
-								emitConfigUpdate();
+								if (sessionAuthority.isCurrent(commandAuthority)) emitConfigUpdate();
 							},
 						});
-						if (!operationManager.isActive(operation)) return;
+						sessionAuthority.assertCurrent(commandAuthority);
+						if (!operationManager.canContinue(operation)) return;
 						if (builtinResult !== false) {
 							if ("prompt" in builtinResult) {
-								watchAndReportLocalOnlyPromptResult({
+								const trackedPrompt = watchAndReportLocalOnlyPromptResult({
 									id,
 									startPrompt: () =>
 										startRpcPrompt(builtinResult.prompt, {
 											images: command.images,
 											messageTag: operation.operationId,
+											signal: preparationController.signal,
 										}),
 									output,
 									onError: () => {},
 									extensionUserMessageTracker,
+									isAuthorityCurrent: () => sessionAuthority.isCurrent(commandAuthority),
 									operation: {
 										handle: operation,
 										manager: operationManager,
 										waitForAgentCompletion: () => waitForQueuedRpcPrompt(session),
 									},
 								});
+								void trackedPrompt.lifecycle;
+								await trackedPrompt.scheduling.catch(() => undefined);
 								return;
 							}
 							output({ type: "prompt_result", id, operationId: operation.operationId, agentInvoked: false });
@@ -2478,30 +2990,36 @@ export async function runRpcMode(
 							return;
 						}
 
-						watchAndReportLocalOnlyPromptResult({
+						const trackedPrompt = watchAndReportLocalOnlyPromptResult({
 							id,
 							startPrompt: () =>
 								startRpcPrompt(command.message, {
 									images: command.images,
 									streamingBehavior: command.streamingBehavior,
 									messageTag: operation.operationId,
+									signal: preparationController.signal,
 								}),
 							output,
 							onError: () => {},
 							extensionUserMessageTracker,
+							isAuthorityCurrent: () => sessionAuthority.isCurrent(commandAuthority),
 							operation: {
 								handle: operation,
 								manager: operationManager,
 								waitForAgentCompletion: () => waitForQueuedRpcPrompt(session),
 							},
 						});
+						void trackedPrompt.lifecycle;
+						await trackedPrompt.scheduling.catch(() => undefined);
 					})().catch(promptError => {
+						if (!sessionAuthority.isCurrent(commandAuthority)) return;
 						operationManager.fail(
 							operation,
 							promptError instanceof Error ? promptError : new Error(String(promptError)),
-							"prompt_scheduling_failed",
+							promptError instanceof RpcSessionAuthorityError ? promptError.code : "prompt_scheduling_failed",
 						);
 					});
+					operationOwnership.trackPreparation(operation.operationId, preparationController, preparationTask);
 				});
 				return success(id, "prompt", { operationId: operation.operationId, accepted: true });
 			}
@@ -2515,13 +3033,11 @@ export async function runRpcMode(
 						return collaborationFailure(id, "steer", cause);
 					}
 				}
-				if (sessionTransitionInFlight) {
-					return error(id, "steer", "Session transition is in progress", "session_busy");
-				}
 				if (toolActivationInFlight) {
 					return error(id, "steer", "Session tool activation is in progress", "session_busy");
 				}
 				await session.steer(command.message, command.images);
+				sessionAuthority.assertCurrent(commandAuthority);
 				emitQueueUpdate();
 				return success(id, "steer");
 			}
@@ -2535,13 +3051,11 @@ export async function runRpcMode(
 						return collaborationFailure(id, "follow_up", cause);
 					}
 				}
-				if (sessionTransitionInFlight) {
-					return error(id, "follow_up", "Session transition is in progress", "session_busy");
-				}
 				if (toolActivationInFlight) {
 					return error(id, "follow_up", "Session tool activation is in progress", "session_busy");
 				}
 				await session.followUp(command.message, command.images);
+				sessionAuthority.assertCurrent(commandAuthority);
 				emitQueueUpdate();
 				return success(id, "follow_up");
 			}
@@ -2555,12 +3069,19 @@ export async function runRpcMode(
 						return collaborationFailure(id, "abort", cause);
 					}
 				}
+				const activeOperations = operationManager.snapshot().active;
+				const providerOperationIds = new Set(
+					activeOperations
+						.filter(operation => operation.command === "provider_auth")
+						.map(operation => operation.operationId),
+				);
 				const protectedOperations = protectedCommitOperationIds();
 				for (const operationId of providerAuthController.cancelAll("user", "cancelled_by_client")) {
 					protectedOperations.add(operationId);
 				}
 				operationManager.cancelAll("user", "cancelled_by_client", protectedOperations);
-				await session.abort({ reason: USER_INTERRUPT_LABEL });
+				await quiesceCancelledImplementations(providerOperationIds, USER_INTERRUPT_LABEL);
+				sessionAuthority.assertCurrent(commandAuthority);
 				emitQueueUpdate();
 				return success(id, "abort");
 			}
@@ -2577,13 +3098,15 @@ export async function runRpcMode(
 					}
 					const operation = operationManager.start(id, "abort_and_prompt");
 					setImmediate(() => {
-						if (!operationManager.begin(operation)) return;
+						if (!sessionAuthority.isCurrent(commandAuthority) || !operationManager.begin(operation)) return;
 						try {
 							collaboration.sendAbort();
 							collaboration.sendPrompt(command.message, command.images);
+							if (!sessionAuthority.isCurrent(commandAuthority)) return;
 							output({ type: "prompt_result", id, operationId: operation.operationId, agentInvoked: true });
 							operationManager.complete(operation, true);
 						} catch (cause) {
+							if (!sessionAuthority.isCurrent(commandAuthority)) return;
 							operationManager.fail(
 								operation,
 								cause instanceof Error ? cause : new Error(String(cause)),
@@ -2593,9 +3116,6 @@ export async function runRpcMode(
 					});
 					return success(id, "abort_and_prompt", { operationId: operation.operationId, accepted: true });
 				}
-				if (sessionTransitionInFlight) {
-					return error(id, "abort_and_prompt", "Session transition is in progress", "session_busy");
-				}
 				if (toolActivationInFlight) {
 					return error(id, "abort_and_prompt", "Session tool activation is in progress", "session_busy");
 				}
@@ -2603,6 +3123,12 @@ export async function runRpcMode(
 				if (protectedOperations.size > 0) {
 					return error(id, "abort_and_prompt", "Session state commit is in progress", "session_busy");
 				}
+				const providerOperationIds = new Set(
+					operationManager
+						.snapshot()
+						.active.filter(operation => operation.command === "provider_auth")
+						.map(operation => operation.operationId),
+				);
 				const providerProtected = providerAuthController.cancelAll("replaced", "replaced_by_prompt");
 				if (providerProtected.size > 0) {
 					return error(id, "abort_and_prompt", "Session state commit is in progress", "session_busy");
@@ -2610,9 +3136,10 @@ export async function runRpcMode(
 				operationManager.cancelAll("replaced", "replaced_by_prompt");
 				const operation = operationManager.start(id, "abort_and_prompt");
 				setImmediate(() => {
-					if (!operationManager.begin(operation)) return;
+					if (!sessionAuthority.isCurrent(commandAuthority) || !operationManager.begin(operation)) return;
 					void (async () => {
-						await session.abort({ reason: USER_INTERRUPT_LABEL });
+						await quiesceCancelledImplementations(providerOperationIds, USER_INTERRUPT_LABEL);
+						if (!sessionAuthority.isCurrent(commandAuthority)) return;
 						if (!operationManager.isActive(operation)) return;
 						watchAndReportLocalOnlyPromptResult({
 							id,
@@ -2624,6 +3151,7 @@ export async function runRpcMode(
 							output,
 							onError: () => {},
 							extensionUserMessageTracker,
+							isAuthorityCurrent: () => sessionAuthority.isCurrent(commandAuthority),
 							operation: {
 								handle: operation,
 								manager: operationManager,
@@ -2631,10 +3159,11 @@ export async function runRpcMode(
 							},
 						});
 					})().catch(promptError => {
+						if (!sessionAuthority.isCurrent(commandAuthority)) return;
 						operationManager.fail(
 							operation,
 							promptError instanceof Error ? promptError : new Error(String(promptError)),
-							"prompt_scheduling_failed",
+							promptError instanceof RpcSessionAuthorityError ? promptError.code : "prompt_scheduling_failed",
 						);
 					});
 				});
@@ -2660,7 +3189,10 @@ export async function runRpcMode(
 				if (approvalId) {
 					planApprovalOperations.delete(command.operationId);
 					const pending = session.planMode.pendingApproval;
-					if (pending?.approvalId === approvalId) await session.planMode.abandonPendingApproval();
+					if (pending?.approvalId === approvalId) {
+						await session.planMode.abandonPendingApproval();
+						sessionAuthority.assertCurrent(commandAuthority);
+					}
 				}
 				const providerCancellation = providerAuthController.cancel(command.operationId);
 				if (providerCancellation === "cancelled") {
@@ -2682,17 +3214,19 @@ export async function runRpcMode(
 					return success(id, "cancel_operation", cancellation.result);
 				}
 				const cancellation = await operationOwnership.cancel(operationManager, command.operationId);
+				sessionAuthority.assertCurrent(commandAuthority);
 				return success(id, "cancel_operation", cancellation);
 			}
 
 			case "resume_session": {
-				if (session.isStreaming || session.isCompacting)
+				if (session.isStreaming || session.isCompacting) {
 					return error(
 						id,
 						"resume_session",
 						"Session mutation is unavailable while the session is busy",
 						"session_busy",
 					);
+				}
 				try {
 					const previousCwd = session.sessionManager.getCwd();
 					const resolved = await resolveSessionCatalogReference(
@@ -2700,6 +3234,7 @@ export async function runRpcMode(
 						{ scope: command.scope ?? (command.cwd ? "cwd" : "all"), cwd: command.cwd },
 						sessionStorage,
 					);
+					sessionAuthority.assertCurrent(commandAuthority);
 					const switched = await handleRpcSessionChange(
 						session,
 						{ type: "switch_session", sessionPath: resolved.entry.path },
@@ -2721,14 +3256,6 @@ export async function runRpcMode(
 			}
 
 			case "eval_execute": {
-				if (sessionTransitionInFlight) {
-					return error(
-						id,
-						"eval_execute",
-						"Eval execution is unavailable while a session transition is in progress",
-						"session_busy",
-					);
-				}
 				if (toolActivationInFlight) {
 					return error(
 						id,
@@ -2737,14 +3264,15 @@ export async function runRpcMode(
 						"session_busy",
 					);
 				}
-				const operationGeneration = sessionGeneration;
 				const operation = operationManager.start(id, "eval_execute");
 				rpcEvalOperationIds.add(operation.operationId);
 				const confirmationController = new AbortController();
 				rpcEvalConfirmationControllers.set(operation.operationId, confirmationController);
 				const { promise: task, resolve: resolveTask } = Promise.withResolvers<void>();
 				rpcEvalTasks.add(task);
-				void task.finally(() => rpcEvalTasks.delete(task));
+				void task.finally(() => {
+					rpcEvalTasks.delete(task);
+				});
 				setImmediate(() => {
 					if (!operationManager.begin(operation)) {
 						resolveTask();
@@ -2768,18 +3296,11 @@ export async function runRpcMode(
 							);
 							return;
 						}
-						if (sessionTransitionInFlight || operationGeneration !== sessionGeneration) {
-							operationManager.fail(
-								operation,
-								new Error("Session changed before eval execution"),
-								"session_changed",
-							);
-							return;
-						}
+						sessionAuthority.assertCurrent(commandAuthority);
 
 						const evalOutput = new RpcEvalOutputStream(
 							operation.operationId,
-							() => operationManager.isActive(operation),
+							() => sessionAuthority.isCurrent(commandAuthority) && operationManager.isActive(operation),
 							output,
 						);
 						const registeredEvalTool = session.getEvalToolForHost();
@@ -2804,25 +3325,42 @@ export async function runRpcMode(
 								evalOutput.push(text);
 							},
 						);
-						if (!operationManager.isActive(operation)) return;
+						sessionAuthority.assertCurrent(commandAuthority);
 						const outputText = result.content
 							.filter(part => part.type === "text")
 							.map(part => part.text)
 							.join("");
 						evalOutput.complete(outputText);
+						const completeOutput = result.details?.cells?.map(cell => cell.output).join("\n\n") ?? outputText;
+						const artifactManager = session.sessionManager.getArtifactManager();
+						if (!artifactManager) throw new Error("Eval artifact storage is unavailable");
+						const materialized = await materializeEvalOutput(artifactManager, completeOutput, {
+							related: { toolCallId: operation.operationId },
+							toolType: "rpc-eval",
+							artifactId: result.details?.outputArtifactId ?? result.details?.meta?.truncation?.artifactId,
+						});
+						sessionAuthority.assertCurrent(commandAuthority);
 						if (!operationManager.isActive(operation)) return;
 						const firstCell = result.details?.cells?.[0];
-						const boundedOutput = outputText.length > 262_144 ? outputText.slice(-262_144) : outputText;
+						const truncated =
+							evalOutput.truncated ||
+							materialized.preview.truncated ||
+							result.details?.meta?.truncation !== undefined;
 						const entry: RpcEvalHistoryEntry = {
 							language: command.language,
 							code: command.code,
-							output: boundedOutput,
+							output: materialized.preview.text,
+							outputBytes: materialized.preview.totalBytes,
+							outputPreviewBytes: materialized.preview.byteLength,
+							outputTruncation: {
+								truncated: materialized.preview.truncated,
+								direction: materialized.preview.direction,
+							},
+							artifact: materialized.artifact,
+							artifactRef: materialized.artifactRef,
 							exitCode: firstCell?.exitCode,
 							cancelled: firstCell?.cancelled === true,
-							truncated:
-								evalOutput.truncated ||
-								outputText.length > boundedOutput.length ||
-								result.details?.meta?.truncation !== undefined,
+							truncated,
 							timestamp: Date.now(),
 							excludeFromContext: command.excludeFromContext,
 						};
@@ -2832,9 +3370,16 @@ export async function runRpcMode(
 					})()
 						.catch(cause => {
 							const evalError = cause instanceof Error ? cause : new Error(String(cause));
-							operationManager.fail(operation, evalError, "eval_execution_failed");
+							operationManager.fail(
+								operation,
+								evalError,
+								cause instanceof RpcSessionAuthorityError ? cause.code : "eval_execution_failed",
+							);
 						})
-						.finally(resolveTask);
+						.finally(() => {
+							operationManager.settleCancellation(operation.operationId);
+							resolveTask();
+						});
 				});
 				rpcTaskTracker(task);
 				return success(id, "eval_execute", { operationId: operation.operationId, accepted: true });
@@ -2842,21 +3387,66 @@ export async function runRpcMode(
 
 			case "get_eval_history": {
 				const limit = command.limit ?? 50;
-				const entries = [...session.messages, ...session.getPendingEvalMessages()]
+				const messages = [...session.messages, ...session.getPendingEvalMessages()]
 					.filter((message): message is PythonExecutionMessage => message.role === "pythonExecution")
-					.slice(-limit)
-					.map(
-						(message): RpcEvalHistoryEntry => ({
+					.slice(-limit);
+				const artifactManager = session.sessionManager.getArtifactManager();
+				if (!artifactManager) {
+					return error(id, "get_eval_history", "Eval artifact storage is unavailable", "artifact_unavailable");
+				}
+				const entries = await Promise.all(
+					messages.map(async (message): Promise<RpcEvalHistoryEntry> => {
+						if (
+							message.artifact !== undefined &&
+							message.artifactRef !== undefined &&
+							message.outputBytes !== undefined &&
+							message.outputPreviewBytes !== undefined &&
+							message.outputTruncation !== undefined
+						) {
+							return {
+								language: message.language ?? "py",
+								code: message.code.slice(0, 262_144),
+								output: message.output,
+								outputBytes: message.outputBytes,
+								outputPreviewBytes: message.outputPreviewBytes,
+								outputTruncation: message.outputTruncation,
+								artifact: message.artifact,
+								artifactRef: message.artifactRef,
+								exitCode: message.exitCode,
+								cancelled: message.cancelled,
+								truncated: message.truncated || message.outputTruncation.truncated,
+								timestamp: message.timestamp,
+								excludeFromContext: message.excludeFromContext,
+							};
+						}
+						const materialized = await materializeEvalOutput(artifactManager, message.output, {
+							related: { sessionId: session.sessionId },
+							toolType: "rpc-eval-history",
+							artifactId: message.meta?.truncation?.artifactId,
+						});
+						sessionAuthority.assertCurrent(commandAuthority);
+						const legacyTruncated = message.truncated || materialized.preview.truncated;
+						return {
 							language: message.language ?? "py",
 							code: message.code.slice(0, 262_144),
-							output: message.output.length > 262_144 ? message.output.slice(-262_144) : message.output,
+							output: materialized.preview.text,
+							outputBytes: message.meta?.truncation?.totalBytes ?? materialized.preview.totalBytes,
+							outputPreviewBytes: materialized.preview.byteLength,
+							outputTruncation: {
+								truncated: legacyTruncated,
+								direction: legacyTruncated ? "tail" : materialized.preview.direction,
+							},
+							artifact: materialized.artifact,
+							artifactRef: materialized.artifactRef,
 							exitCode: message.exitCode,
 							cancelled: message.cancelled,
-							truncated: message.truncated || message.output.length > 262_144,
+							truncated: legacyTruncated,
 							timestamp: message.timestamp,
 							excludeFromContext: message.excludeFromContext,
-						}),
-					);
+						};
+					}),
+				);
+				sessionAuthority.assertCurrent(commandAuthority);
 				return success(id, "get_eval_history", { entries });
 			}
 
@@ -2916,20 +3506,28 @@ export async function runRpcMode(
 				}
 				const operation = operationManager.start(id, "set_mode");
 				const apply = async () => {
-					if (command.mode === "none") await session.planMode.disable();
-					else if (command.mode === "plan_paused") {
+					sessionAuthority.assertCurrent(commandAuthority);
+					if (command.mode === "none") {
+						await session.planMode.disable();
+						sessionAuthority.assertCurrent(commandAuthority);
+					} else if (command.mode === "plan_paused") {
 						if (!session.planMode.active && !session.planMode.paused) {
 							await session.planMode.enter({
 								planFilePath: "local://PLAN.md",
 								workflow: "parallel",
 							});
+							sessionAuthority.assertCurrent(commandAuthority);
 						}
-						if (session.planMode.active) await session.planMode.pause();
+						if (session.planMode.active) {
+							await session.planMode.pause();
+							sessionAuthority.assertCurrent(commandAuthority);
+						}
 					} else {
 						await session.planMode.enter({
 							planFilePath: command.planFilePath ?? "local://PLAN.md",
 							workflow: command.workflow ?? "parallel",
 						});
+						sessionAuthority.assertCurrent(commandAuthority);
 					}
 				};
 				const deferred = session.isStreaming && command.when === "next_idle";
@@ -2937,9 +3535,13 @@ export async function runRpcMode(
 				setImmediate(() => {
 					void (async () => {
 						try {
-							if (deferred) await session.waitForIdle();
+							if (deferred) {
+								await session.waitForIdle();
+								sessionAuthority.assertCurrent(commandAuthority);
+							}
 							if (!operationManager.begin(operation)) return;
 							await apply();
+							sessionAuthority.assertCurrent(commandAuthority);
 							operationManager.complete(operation, false);
 						} catch (cause) {
 							operationManager.fail(operation, cause instanceof Error ? cause : new Error(String(cause)));
@@ -2955,12 +3557,11 @@ export async function runRpcMode(
 				});
 			}
 
-			case "get_plan":
-				return success(
-					id,
-					"get_plan",
-					await session.planMode.project({ includeContent: true, includeAvailableFiles: true }),
-				);
+			case "get_plan": {
+				const plan = await session.planMode.project({ includeContent: true, includeAvailableFiles: true });
+				sessionAuthority.assertCurrent(commandAuthority);
+				return success(id, "get_plan", plan);
+			}
 
 			case "resolve_plan_approval": {
 				const pending = session.planMode.pendingApproval;
@@ -2992,7 +3593,10 @@ export async function runRpcMode(
 									}
 								: { kind: command.decision, feedback: command.feedback },
 						)
-						.then(result => operationManager.complete(operation, result.executionDispatched))
+						.then(result => {
+							sessionAuthority.assertCurrent(commandAuthority);
+							operationManager.complete(operation, result.executionDispatched);
+						})
 						.catch(cause =>
 							operationManager.fail(operation, cause instanceof Error ? cause : new Error(String(cause))),
 						)
@@ -3038,11 +3642,13 @@ export async function runRpcMode(
 			case "set_tool_activation": {
 				toolActivationInFlight = true;
 				try {
-					return success(
-						id,
-						"set_tool_activation",
-						await applyRpcToolActivation(session, command, operationManager.snapshot().active.length > 0),
+					const activation = await applyRpcToolActivation(
+						session,
+						command,
+						operationManager.snapshot().active.length > 0,
 					);
+					sessionAuthority.assertCurrent(commandAuthority);
+					return success(id, "set_tool_activation", activation);
 				} catch (cause) {
 					if (cause instanceof RpcToolActivationValidationError) {
 						return error(id, "set_tool_activation", cause.message, "invalid_request");
@@ -3056,8 +3662,11 @@ export async function runRpcMode(
 				}
 			}
 
-			case "get_state":
-				return success(id, "get_state", await getRpcSessionState());
+			case "get_state": {
+				const state = await getRpcSessionState();
+				sessionAuthority.assertCurrent(commandAuthority);
+				return success(id, "get_state", state);
+			}
 
 			case "get_advisor_state":
 				return success(id, "get_advisor_state", getAdvisorState());
@@ -3081,7 +3690,9 @@ export async function runRpcMode(
 			}
 
 			case "get_available_commands": {
-				return success(id, "get_available_commands", { commands: await getAvailableCommands() });
+				const commands = await getAvailableCommands();
+				sessionAuthority.assertCurrent(commandAuthority);
+				return success(id, "get_available_commands", { commands });
 			}
 
 			case "set_todos":
@@ -3099,10 +3710,16 @@ export async function runRpcMode(
 					throw cause;
 				}
 
-			case "goal_control":
-				return success(id, "goal_control", await controlRpcGoal(session, command));
-			case "checkpoint_control":
-				return success(id, "checkpoint_control", await controlRpcCheckpoint(session, command));
+			case "goal_control": {
+				const goal = await controlRpcGoal(session, command);
+				sessionAuthority.assertCurrent(commandAuthority);
+				return success(id, "goal_control", goal);
+			}
+			case "checkpoint_control": {
+				const checkpoint = await controlRpcCheckpoint(session, command);
+				sessionAuthority.assertCurrent(commandAuthority);
+				return success(id, "checkpoint_control", checkpoint);
+			}
 			case "loop_control": {
 				const result = controlRpcLoop(session, command);
 				if (command.op !== "get") {
@@ -3122,6 +3739,7 @@ export async function runRpcMode(
 				const tools = normalizeHostToolDefinitions(command.tools);
 				const rpcTools = hostToolBridge.setTools(tools);
 				await session.refreshRpcHostTools(rpcTools);
+				sessionAuthority.assertCurrent(commandAuthority);
 				return success(id, "set_host_tools", { toolNames: tools.map(tool => tool.name) });
 			}
 
@@ -3166,6 +3784,7 @@ export async function runRpcMode(
 					}
 					const sessionFile = subagentRegistry.resolveSessionFile(command);
 					const transcript = await readRpcSubagentTranscript(sessionFile, command.fromByte);
+					sessionAuthority.assertCurrent(commandAuthority);
 					return success(id, "get_subagent_messages", transcript);
 				} catch (err) {
 					return error(id, "get_subagent_messages", err instanceof Error ? err.message : String(err));
@@ -3275,12 +3894,15 @@ export async function runRpcMode(
 						{ timeout: 15_000 },
 					);
 				} catch {
+					sessionAuthority.assertCurrent(commandAuthority);
 					return error(id, "cancel_job", "Cancellation confirmation was not completed", "confirmation_required");
 				}
+				sessionAuthority.assertCurrent(commandAuthority);
 				if (!confirmed) {
 					return error(id, "cancel_job", "Cancellation was not confirmed", "confirmation_required");
 				}
 				const outcomes = await jobProjection.cancelResolved(resolvedTargets);
+				sessionAuthority.assertCurrent(commandAuthority);
 				emitJobUpdate();
 				return success(id, "cancel_job", { outcomes });
 			}
@@ -3303,6 +3925,7 @@ export async function runRpcMode(
 					if (!(await confirmAgentMutation("start_agent", label))) {
 						return error(id, "start_agent", "Agent start was not confirmed.", "confirmation_required");
 					}
+					sessionAuthority.assertCurrent(commandAuthority);
 					const taskTool = session.getToolByName("task");
 					if (!taskTool) {
 						return error(id, "start_agent", "Task tool is unavailable.", "agent_start_failed");
@@ -3313,6 +3936,7 @@ export async function runRpcMode(
 						...(command.name === undefined ? {} : { name: command.name }),
 						...(command.context === undefined ? {} : { context: command.context }),
 					});
+					sessionAuthority.assertCurrent(commandAuthority);
 					if (result.isError) {
 						const message = result.content.find(part => part.type === "text")?.text ?? "Child agent start failed";
 						return error(id, "start_agent", message, "agent_start_failed");
@@ -3335,6 +3959,7 @@ export async function runRpcMode(
 						...(typeof asyncDetails?.jobId === "string" ? { jobId: asyncDetails.jobId } : {}),
 					});
 				} catch (cause) {
+					if (cause instanceof RpcSessionAuthorityError) throw cause;
 					return error(
 						id,
 						"start_agent",
@@ -3360,18 +3985,18 @@ export async function runRpcMode(
 			case "resume_agent":
 				try {
 					if (command.type === "send_agent_message") {
-						return success(
-							id,
-							command.type,
-							await agentControl.send(command.agentId, command.message, command.replyTo),
-						);
+						const sent = await agentControl.send(command.agentId, command.message, command.replyTo);
+						sessionAuthority.assertCurrent(commandAuthority);
+						return success(id, command.type, sent);
 					}
 					const agent =
 						command.type === "park_agent"
 							? await agentControl.park(command.agentId)
 							: await agentControl.resume(command.agentId);
+					sessionAuthority.assertCurrent(commandAuthority);
 					return success(id, command.type, { agent });
 				} catch (cause) {
+					if (cause instanceof RpcSessionAuthorityError) throw cause;
 					return error(
 						id,
 						command.type,
@@ -3388,10 +4013,15 @@ export async function runRpcMode(
 					if (!(await confirmAgentMutation(command.type, command.agentId, tombstone))) {
 						return error(id, command.type, "Agent mutation was not confirmed.", "confirmation_required");
 					}
-					return command.type === "cancel_agent"
-						? success(id, command.type, await agentControl.cancel(command.agentId, expected))
-						: success(id, command.type, await agentControl.release(command.agentId, { tombstone }, expected));
+					sessionAuthority.assertCurrent(commandAuthority);
+					const result =
+						command.type === "cancel_agent"
+							? await agentControl.cancel(command.agentId, expected)
+							: await agentControl.release(command.agentId, { tombstone }, expected);
+					sessionAuthority.assertCurrent(commandAuthority);
+					return success(id, command.type, result);
 				} catch (cause) {
+					if (cause instanceof RpcSessionAuthorityError) throw cause;
 					return error(
 						id,
 						command.type,
@@ -3415,6 +4045,7 @@ export async function runRpcMode(
 					// the bundled catalog skip this await entirely so the RPC
 					// queue is not stalled behind unrelated discovery.
 					await session.modelRegistry.awaitBackgroundRefresh();
+					sessionAuthority.assertCurrent(commandAuthority);
 					models = session.getAvailableModels();
 					model = models.find(m => m.provider === command.provider && m.id === command.modelId);
 				}
@@ -3422,16 +4053,21 @@ export async function runRpcMode(
 					return error(id, "set_model", `Model not found: ${command.provider}/${command.modelId}`);
 				}
 				await session.setModel(model);
+				sessionAuthority.assertCurrent(commandAuthority);
 				return success(id, "set_model", model);
 			}
-			case "set_model_role":
-				return success(id, "set_model_role", await setRpcModelRole(session, command.role));
+			case "set_model_role": {
+				const role = await setRpcModelRole(session, command.role);
+				sessionAuthority.assertCurrent(commandAuthority);
+				return success(id, "set_model_role", role);
+			}
 
 			case "set_service_tier":
 				return success(id, "set_service_tier", setRpcServiceTier(session, command.family, command.tier));
 
 			case "cycle_model": {
 				const result = await session.cycleModel();
+				sessionAuthority.assertCurrent(commandAuthority);
 				if (!result) {
 					return success(id, "cycle_model", null);
 				}
@@ -3440,6 +4076,7 @@ export async function runRpcMode(
 
 			case "get_available_models": {
 				await session.modelRegistry.awaitBackgroundRefresh();
+				sessionAuthority.assertCurrent(commandAuthority);
 				const models = session.getAvailableModels();
 				return success(id, "get_available_models", { models });
 			}
@@ -3492,6 +4129,7 @@ export async function runRpcMode(
 
 			case "compact": {
 				const result = await session.compact(command.customInstructions);
+				sessionAuthority.assertCurrent(commandAuthority);
 				return success(id, "compact", result);
 			}
 
@@ -3518,15 +4156,6 @@ export async function runRpcMode(
 			// Bash
 			// =================================================================
 			case "bash": {
-				if (sessionTransitionInFlight) {
-					return error(
-						id,
-						"bash",
-						"Shell command execution is unavailable while a session transition is in progress",
-						"session_busy",
-					);
-				}
-				const operationGeneration = sessionGeneration;
 				const confirmationController = new AbortController();
 				pendingRpcBashConfirmations.add(confirmationController);
 				let confirmed = false;
@@ -3540,6 +4169,7 @@ export async function runRpcMode(
 						{ signal: confirmationController.signal },
 					);
 				} catch {
+					sessionAuthority.assertCurrent(commandAuthority);
 					return error(id, "bash", "Shell command confirmation was not completed", "confirmation_required");
 				} finally {
 					pendingRpcBashConfirmations.delete(confirmationController);
@@ -3547,13 +4177,13 @@ export async function runRpcMode(
 				if (!confirmed) {
 					return error(id, "bash", "Shell command execution was not confirmed", "confirmation_required");
 				}
-				if (sessionTransitionInFlight || operationGeneration !== sessionGeneration) {
-					return error(id, "bash", "Session changed before shell command execution", "session_changed");
-				}
+				sessionAuthority.assertCurrent(commandAuthority);
 				const execution = session.executeBash(command.command);
 				rpcBashExecutions.add(execution);
 				try {
-					return success(id, "bash", await execution);
+					const result = await execution;
+					sessionAuthority.assertCurrent(commandAuthority);
+					return success(id, "bash", result);
 				} finally {
 					rpcBashExecutions.delete(execution);
 				}
@@ -3574,28 +4204,27 @@ export async function runRpcMode(
 			}
 
 			case "export_html": {
-				const path = await session.exportToHtml(command.outputPath);
-				return success(id, "export_html", { path });
+				const exportedPath = await session.exportToHtml(command.outputPath);
+				sessionAuthority.assertCurrent(commandAuthority);
+				return success(id, "export_html", { path: exportedPath });
 			}
 
 			case "list_sessions": {
 				try {
 					await session.sessionManager.flush();
-					return success(
-						id,
-						"list_sessions",
-						await listSessionCatalog(
-							{
-								scope: command.scope ?? "cwd",
-								cwd: command.cwd ?? session.sessionManager.getCwd(),
-								cursor: command.cursor,
-								limit: command.limit,
-								search: command.search,
-							},
-							sessionStorage,
-							{ activeSessionId: session.sessionId },
-						),
+					const catalog = await listSessionCatalog(
+						{
+							scope: command.scope ?? "cwd",
+							cwd: command.cwd ?? session.sessionManager.getCwd(),
+							cursor: command.cursor,
+							limit: command.limit,
+							search: command.search,
+						},
+						sessionStorage,
+						{ activeSessionId: session.sessionId },
 					);
+					sessionAuthority.assertCurrent(commandAuthority);
+					return success(id, "list_sessions", catalog);
 				} catch (cause) {
 					return catalogError(id, "list_sessions", cause);
 				}
@@ -3609,6 +4238,7 @@ export async function runRpcMode(
 						{ scope: command.scope ?? (command.cwd ? "cwd" : "all"), cwd: command.cwd },
 						sessionStorage,
 					);
+					sessionAuthority.assertCurrent(commandAuthority);
 					const activePath = session.sessionManager.getSessionFile();
 					const active = activePath !== undefined && path.resolve(activePath) === resolved.entry.path;
 					const workspace = active
@@ -3620,6 +4250,7 @@ export async function runRpcMode(
 								],
 							}
 						: await inspectPersistedSessionWorkspace(resolved.entry.path, resolved.entry.cwd, sessionStorage);
+					sessionAuthority.assertCurrent(commandAuthority);
 					const data: RpcSessionInfoResult = {
 						session: projectSessionCatalogEntry(resolved.session, { activeSessionId: session.sessionId }),
 						workspace,
@@ -3648,6 +4279,7 @@ export async function runRpcMode(
 						"session_busy",
 					);
 				}
+				sessionAuthority.assertCurrent(commandAuthority);
 				await prepareSessionTransition();
 				const selected = await session.navigateTree(command.entryId, {
 					summarize: command.summarize,
@@ -3661,7 +4293,9 @@ export async function runRpcMode(
 			}
 
 			case "reset_session": {
+				const resetAuthority = await transitionExecutionAuthority();
 				const result = await session.resetSessionContext();
+				sessionAuthority.assertCurrent(resetAuthority);
 				if (!result) {
 					return error(
 						id,
@@ -3676,7 +4310,9 @@ export async function runRpcMode(
 			case "list_workspace_roots": {
 				try {
 					await session.sessionManager.flush();
-					return success(id, "list_workspace_roots", { roots: await listSessionWorkspaceRoots(sessionStorage) });
+					const roots = await listSessionWorkspaceRoots(sessionStorage);
+					sessionAuthority.assertCurrent(commandAuthority);
+					return success(id, "list_workspace_roots", { roots });
 				} catch (cause) {
 					return catalogError(id, "list_workspace_roots", cause);
 				}
@@ -3726,10 +4362,12 @@ export async function runRpcMode(
 						{ scope: command.scope ?? (command.cwd ? "cwd" : "all"), cwd: command.cwd },
 						sessionStorage,
 					);
+					sessionAuthority.assertCurrent(commandAuthority);
 					const activePath = session.sessionManager.getSessionFile();
 					const active = activePath !== undefined && path.resolve(activePath) === resolved.entry.path;
 					if (active) {
 						const renamed = await session.setSessionName(name, "user");
+						sessionAuthority.assertCurrent(commandAuthority);
 						const data: RpcRenameSessionResult = { renamed, active: true };
 						return success(id, "rename_session", data);
 					}
@@ -3738,6 +4376,7 @@ export async function runRpcMode(
 						source: "user",
 						updatedAt: new Date().toISOString(),
 					});
+					sessionAuthority.assertCurrent(commandAuthority);
 					const data: RpcRenameSessionResult = { renamed: true, active: false };
 					return success(id, "rename_session", data);
 				} catch (cause) {
@@ -3766,6 +4405,7 @@ export async function runRpcMode(
 						"Delete session?",
 						`Permanently delete session "${resolved.entry.title ?? resolved.entry.id}" and its artifacts?`,
 					);
+					sessionAuthority.assertCurrent(commandAuthority);
 					if (!confirmed) {
 						return error(id, "delete_session", "Session deletion was not confirmed", "confirmation_required");
 					}
@@ -3780,7 +4420,7 @@ export async function runRpcMode(
 								wasActive: true,
 								newSessionStarted: false,
 							};
-							return success(id, "delete_session", cancelled);
+							return completeSessionTransition(id, "delete_session", cancelled);
 						}
 						subagentRegistry?.clear();
 						try {
@@ -3806,6 +4446,7 @@ export async function runRpcMode(
 						};
 						return completeSessionTransition(id, "delete_session", deleted);
 					}
+					sessionAuthority.assertCurrent(commandAuthority);
 					try {
 						await sessionStorage.deleteSessionWithArtifacts(resolved.entry.path);
 					} catch (cause) {
@@ -3817,6 +4458,7 @@ export async function runRpcMode(
 								"delete_failed",
 							);
 					}
+					sessionAuthority.assertCurrent(commandAuthority);
 					const deleted: RpcDeleteSessionResult = {
 						deleted: true,
 						cancelled: false,
@@ -3844,7 +4486,9 @@ export async function runRpcMode(
 				if (!name) {
 					return error(id, "set_session_name", "Session name cannot be empty");
 				}
+				sessionAuthority.assertCurrent(commandAuthority);
 				const applied = await session.setSessionName(name, "user");
+				sessionAuthority.assertCurrent(commandAuthority);
 				if (!applied) {
 					return error(id, "set_session_name", "Session name cannot be empty");
 				}
@@ -3858,7 +4502,9 @@ export async function runRpcMode(
 				if (session.isStreaming) {
 					return error(id, "handoff", "Cannot hand off while a response is in progress");
 				}
+				const handoffAuthority = await transitionExecutionAuthority();
 				const result = await session.handoff(command.customInstructions);
+				sessionAuthority.assertCurrent(handoffAuthority);
 				return success(id, "handoff", result ? { savedPath: result.savedPath } : null);
 			}
 
@@ -3966,6 +4612,7 @@ export async function runRpcMode(
 							"Remove provider authentication?",
 							`Remove credentials stored as "${target.storageProvider}" for providers: ${target.affectedProviderIds.join(", ")}?`,
 						);
+						sessionAuthority.assertCurrent(commandAuthority);
 					} catch {
 						return error(
 							id,
@@ -3974,6 +4621,7 @@ export async function runRpcMode(
 							"confirmation_required",
 						);
 					}
+					sessionAuthority.assertCurrent(commandAuthority);
 					if (!confirmed) {
 						return error(
 							id,
@@ -3983,11 +4631,13 @@ export async function runRpcMode(
 						);
 					}
 					const result = await providerAuthService.remove(command.providerId);
+					sessionAuthority.assertCurrent(commandAuthority);
 					for (const state of result.states) {
 						output({ type: "provider_auth_update", state } satisfies ProviderAuthUpdate);
 					}
 					return success(id, "remove_provider_auth", { state: result.state });
 				} catch (authError) {
+					if (authError instanceof RpcSessionAuthorityError) throw authError;
 					const known = authError instanceof ProviderAuthError ? authError : undefined;
 					return error(
 						id,
@@ -4006,7 +4656,24 @@ export async function runRpcMode(
 			}
 		}
 	};
-	executeRpcCommand = handleCommand;
+	const authorizedHandleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
+		try {
+			return await handleCommand(command);
+		} catch (cause) {
+			const cleanupCause = abandonPreparedSessionTransition();
+			if (cleanupCause) {
+				throw new AggregateError([cause, cleanupCause], "RPC command and session-transition cleanup failed");
+			}
+			if (cause instanceof RpcSessionAuthorityError) {
+				return error(command.id, command.type, cause.message, cause.code);
+			}
+			if (cause instanceof RpcSessionTransitionBusyError) {
+				return error(command.id, command.type, cause.message, "session_busy");
+			}
+			throw cause;
+		}
+	};
+	executeRpcCommand = authorizedHandleCommand;
 
 	// Deferred shutdown (pi.shutdown() from an extension) must not kill the
 	// process while a background-dispatched command still owes the client its
@@ -4018,7 +4685,7 @@ export async function runRpcMode(
 			await rpcSessionHost?.shutdown();
 			session.disableLoop();
 			semanticRendering.dispose();
-			resourceLifecycle?.dispose();
+			await resourceLifecycle?.dispose();
 			provenance.dispose();
 			await collaboration.dispose();
 			const loopSettled = loopScheduler.dispose();
@@ -4036,7 +4703,7 @@ export async function runRpcMode(
 	rpcTaskTracker = task => shutdownCoordinator.track(task);
 
 	const dispatchFrameDeps: RpcInputFrameDeps = {
-		handleCommand,
+		handleCommand: authorizedHandleCommand,
 		output,
 		errorResponse: error,
 		trackBackgroundTask: task => shutdownCoordinator.track(task),
@@ -4057,7 +4724,6 @@ export async function runRpcMode(
 			await shutdownCoordinator.drain();
 		},
 		afterSerialCommand: async () => {
-			sessionTransitionInFlight = false;
 			shutdownCoordinator.checkShutdownRequested();
 		},
 	});
@@ -4087,25 +4753,29 @@ export async function runRpcMode(
 	// already owes a response, then settle any operation still running.
 	session.disableLoop();
 	const loopSettled = loopScheduler.dispose();
+	const activeOperations = operationManager.snapshot().active;
+	const providerOperationIds = new Set(
+		activeOperations
+			.filter(operation => operation.command === "provider_auth")
+			.map(operation => operation.operationId),
+	);
 	const protectedOperations = new Set(providerAuthController.close());
 	pendingExtensionRequests.rejectAll("RPC client disconnected before extension UI response completed");
 	semanticRendering.dispose();
-	resourceLifecycle?.dispose();
+	const resourceDisposal = resourceLifecycle?.dispose();
 	provenance.dispose();
 	await collaboration.dispose();
-	session.abortBash();
 	hostToolBridge.close("RPC client disconnected before host tool execution completed");
 	hostUriBridge.clear("RPC client disconnected before host URI request completed");
 	await inputDispatcher.drain();
 	for (const operationId of protectedCommitOperationIds()) protectedOperations.add(operationId);
-	const rpcEvalsToAbort = Array.from(rpcEvalOperationIds);
 	operationManager.cancelAll("client_disconnected", "client_disconnected", protectedOperations);
-	for (const operationId of rpcEvalsToAbort) session.abortEvalExecution(operationId);
-	if (session.isStreaming) await session.abort({ reason: "RPC client disconnected" });
+	await quiesceCancelledImplementations(providerOperationIds, "RPC client disconnected");
 	await loopSettled;
 	await rpcSessionHost?.disconnect();
 	await shutdownCoordinator.drain();
 	await session.planMode.abandonPendingApproval();
+	await resourceDisposal;
 	unsubscribeAgentRegistry();
 	unsubscribeJobUpdates?.();
 	subagentRegistry?.dispose();

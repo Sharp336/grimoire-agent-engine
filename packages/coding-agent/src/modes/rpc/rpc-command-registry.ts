@@ -31,6 +31,8 @@ interface RpcFieldDefinition {
 
 export interface RpcCapabilityContext {
 	features?: ReadonlySet<string>;
+	/** Whether the current session can project a bounded authoritative tool inventory. */
+	toolInventoryAvailable?: boolean;
 }
 
 type RpcCommandAvailabilityResult =
@@ -39,6 +41,7 @@ type RpcCommandAvailabilityResult =
 
 interface RpcCommandMetadata {
 	version: number;
+	idRequired: boolean;
 	scope: RpcCommandScope;
 	execution: RpcCommandExecution;
 	concurrencyClass?: RpcCommandConcurrencyClass;
@@ -163,6 +166,12 @@ const optionalBoundedPositiveIntegerField = (maximum: number): RpcFieldDefinitio
 		value => Number.isSafeInteger(value) && Number(value) > 0 && Number(value) <= maximum,
 		{ type: ["integer", "null"], minimum: 1, maximum },
 	);
+const optionalBoundedNonNegativeIntegerField = (maximum: number): RpcFieldDefinition =>
+	optional(
+		`a non-negative integer no greater than ${maximum}`,
+		value => Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) <= maximum,
+		{ type: ["integer", "null"], minimum: 0, maximum },
+	);
 const requiredNonNegativeIntegerField = required(
 	"a non-negative integer",
 	value => Number.isSafeInteger(value) && Number(value) >= 0,
@@ -170,6 +179,9 @@ const requiredNonNegativeIntegerField = required(
 );
 
 const MAX_OPAQUE_ID_BYTES = 256;
+export const MAX_RPC_CONTEXT_SOURCES = 4096;
+export const MAX_RPC_CONTEXT_RELATIONS = 8192;
+export const MAX_RPC_CONTEXT_CONTENT_BYTES = 512 * 1024;
 const opaqueIdField = required(
 	`a non-empty opaque id of at most ${MAX_OPAQUE_ID_BYTES} UTF-8 bytes`,
 	value => typeof value === "string" && value.length > 0 && Buffer.byteLength(value, "utf8") <= MAX_OPAQUE_ID_BYTES,
@@ -466,7 +478,7 @@ const sessionInvocationField = required(
 			typeof value.kind === "string" &&
 			value.kind.length > 0 &&
 			Buffer.byteLength(value.kind, "utf8") <= 128 &&
-			(value.input === undefined || isRpcJsonValue(value.input)) &&
+			(value.input === undefined || (isRecord(value.input) && isRpcJsonValue(value.input))) &&
 			(value.expectedRevision === undefined ||
 				(Number.isSafeInteger(value.expectedRevision) && Number(value.expectedRevision) >= 0)) &&
 			(value.idempotencyKey === undefined ||
@@ -490,6 +502,19 @@ const sessionInvocationField = required(
 
 const AVAILABLE: RpcCommandAvailabilityResult = { availability: "available" };
 
+function toolInventoryAvailability(context: RpcCapabilityContext): RpcCommandAvailabilityResult {
+	if (context.toolInventoryAvailable === false) {
+		return {
+			availability: "unavailable",
+			disabledReason: {
+				code: "tool_inventory_unavailable",
+				message: "Authoritative tool inventory is not representable within protocol limits",
+			},
+		};
+	}
+	return AVAILABLE;
+}
+
 function requiresFeature(feature: string): Pick<RpcCommandMetadata, "requiredFeatures" | "availability"> {
 	return {
 		requiredFeatures: [feature],
@@ -502,7 +527,7 @@ function requiresFeature(feature: string): Pick<RpcCommandMetadata, "requiredFea
 type RpcCommandMetadataOverrides = Partial<
 	Pick<
 		RpcCommandMetadata,
-		"version" | "execution" | "confirmation" | "requiredFeatures" | "availability" | "outputSchema"
+		"idRequired" | "version" | "execution" | "confirmation" | "requiredFeatures" | "availability" | "outputSchema"
 	>
 >;
 
@@ -515,6 +540,7 @@ function classifiedCommand<TCommand extends RpcCommand>(
 ): RpcCommandDefinition<TCommand> {
 	return {
 		version: metadata.version ?? 1,
+		idRequired: metadata.idRequired ?? metadata.version === 3,
 		scope,
 		execution: metadata.execution ?? "sync",
 		concurrencyClass: scheduling,
@@ -582,6 +608,22 @@ export const RPC_COMMAND_DEFINITIONS = {
 		{ after: observationPositionField, afterCursor: durableCursorField, snapshot: optionalBooleanField },
 		"serial",
 		{ version: 3, ...requiresFeature("session-observe") },
+	),
+	context_get: sessionCommand(
+		{
+			type: "context_get",
+			id: "request-1",
+			maxSources: 256,
+			maxRelations: 512,
+			maxContentBytes: 262_144,
+		},
+		{
+			maxSources: optionalBoundedNonNegativeIntegerField(MAX_RPC_CONTEXT_SOURCES),
+			maxRelations: optionalBoundedNonNegativeIntegerField(MAX_RPC_CONTEXT_RELATIONS),
+			maxContentBytes: optionalBoundedNonNegativeIntegerField(MAX_RPC_CONTEXT_CONTENT_BYTES),
+		},
+		"concurrent",
+		{ version: 3, ...requiresFeature("context.projection") },
 	),
 	session_ack: sessionCommand(
 		{ type: "session_ack", id: "request-1", subscriptionId: "subscription-1", sequence: 0 },
@@ -867,7 +909,9 @@ export const RPC_COMMAND_DEFINITIONS = {
 	get_operations: sessionCommand({ type: "get_operations" }, {}, "concurrent"),
 	get_advisor_state: sessionCommand({ type: "get_advisor_state" }, {}, "concurrent"),
 	set_advisor_enabled: sessionCommand({ type: "set_advisor_enabled", enabled: false }, { enabled: booleanField }),
-	get_tool_inventory: sessionCommand({ type: "get_tool_inventory" }),
+	get_tool_inventory: sessionCommand({ type: "get_tool_inventory" }, {}, "serial", {
+		availability: toolInventoryAvailability,
+	}),
 	set_tool_activation: sessionCommand(
 		{ type: "set_tool_activation", activate: ["read"], deactivate: ["bash"] },
 		{ activate: optionalToolNameArrayField, deactivate: optionalToolNameArrayField },
@@ -1255,6 +1299,7 @@ export const RPC_COMMAND_DEFINITIONS = {
 		{ type: "rename_session", session: "01901234", name: "Investigation" },
 		{ session: stringField, name: stringField, scope: optionalEnumField("cwd", "all"), cwd: optionalStringField },
 	),
+
 	delete_session: hostCommand(
 		{ type: "delete_session", session: "01901234" },
 		{ session: stringField, scope: optionalEnumField("cwd", "all"), cwd: optionalStringField },
@@ -1273,12 +1318,16 @@ export const RPC_COMMAND_DEFINITIONS = {
 	),
 } as const satisfies RpcCommandDefinitions;
 
+export function getRpcCommandRequiredFeatures(commandType: RpcCommandType): readonly string[] {
+	return RPC_COMMAND_DEFINITIONS[commandType].requiredFeatures;
+}
+
 function inputSchemaFor(name: RpcCommandType, definition: RpcCommandDefinition): RpcInputSchema {
 	const properties: Record<string, Record<string, unknown>> = {
 		id: { type: "string" },
 		type: { const: name },
 	};
-	const requiredFields = ["type"];
+	const requiredFields = definition.idRequired ? ["type", "id"] : ["type"];
 	for (const [fieldName, field] of Object.entries(definition.fields)) {
 		const example = (definition.example as unknown as Record<string, unknown>)[fieldName];
 		properties[fieldName] = example === undefined ? { ...field.schema } : { ...field.schema, example };
@@ -1368,6 +1417,15 @@ export function validateRpcCommand(value: unknown): RpcCommandValidationResult {
 		};
 	}
 
+	if (definition.idRequired && id === undefined) {
+		return {
+			ok: false,
+			command: value.type,
+			error: 'RPC command field "id" is required',
+			code: "invalid_request",
+		};
+	}
+
 	for (const [fieldName, field] of Object.entries(definition.fields)) {
 		const fieldValue = value[fieldName];
 		if (fieldValue === undefined) {
@@ -1403,6 +1461,36 @@ export function validateRpcCommand(value: unknown): RpcCommandValidationResult {
 		};
 	}
 
+	let scheduling = definition.scheduling;
+	if (value.type === "session_invoke") {
+		const nestedCommand = value.command;
+		if (!isRecord(nestedCommand)) {
+			return {
+				ok: false,
+				id,
+				command: value.type,
+				error: 'RPC command field "command" must be a validated session command',
+				code: "invalid_request",
+			};
+		}
+		const nestedInput = nestedCommand.input;
+		const nestedValidation = validateRpcCommand({
+			...(nestedInput === undefined ? {} : nestedInput),
+			id,
+			type: nestedCommand.kind,
+		});
+		if (!nestedValidation.ok) {
+			return {
+				ok: false,
+				id,
+				command: value.type,
+				error: `Invalid nested session command: ${nestedValidation.error}`,
+				code: nestedValidation.code,
+			};
+		}
+		scheduling = nestedValidation.scheduling;
+	}
+
 	const normalized = { ...value };
 	for (const [fieldName, field] of Object.entries(definition.fields)) {
 		if (field.optional && normalized[fieldName] === null) delete normalized[fieldName];
@@ -1411,6 +1499,6 @@ export function validateRpcCommand(value: unknown): RpcCommandValidationResult {
 	return {
 		ok: true,
 		command: normalized as RpcCommand,
-		scheduling: definition.scheduling,
+		scheduling,
 	};
 }

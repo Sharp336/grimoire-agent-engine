@@ -13,6 +13,7 @@ import type {
 	RpcCollaborationHostResult,
 	RpcCollaborationJoinResult,
 	RpcCollaborationJsonValue,
+	RpcCollaborationLifecycleToken,
 	RpcCollaborationMediaDescriptor,
 	RpcCollaborationMediaRange,
 	RpcCollaborationMediaStore,
@@ -20,11 +21,14 @@ import type {
 	RpcCollaborationParticipant,
 	RpcCollaborationProjection,
 	RpcCollaborationProjectionLoss,
+	RpcCollaborationSessionAuthority,
 	RpcCollaborationTransportFactory,
 } from "./rpc-collaboration";
 import { sanitizeRpcText } from "./rpc-safe-text";
 
 const JOIN_TIMEOUT_MS = 30_000;
+const MAX_PENDING_GUEST_FRAMES = 256;
+const MAX_PENDING_GUEST_BYTES = 8 * 1024 * 1024;
 const MAX_PROJECTED_DEPTH = 32;
 const MAX_PROJECTED_ARRAY_ITEMS = 4096;
 const MAX_PROJECTED_OBJECT_KEYS = 256;
@@ -280,12 +284,18 @@ class RpcCollaborationGuestConnection implements RpcCollaborationConnection {
 	readonly #writeToken: string | undefined;
 	readonly #initial = Promise.withResolvers<InitialReplica>();
 	#pending: PendingSnapshot | null = null;
-	#applyChain: Promise<void> = Promise.resolve();
+	#queuedFrames: Array<{ frame: CollabFrame; bytes: number }> = [];
+	#deferredFrames: Array<{ frame: CollabFrame; bytes: number }> = [];
+	#pendingFrameCount = 0;
+	#pendingFrameBytes = 0;
+	#processing = false;
+	#activating = false;
 	#active = false;
 	#joined = false;
 	#left = false;
+	#ingressStale = false;
+	#gapSignalled = false;
 	#readOnly: boolean;
-	#deferredFrames: CollabFrame[] = [];
 	#joinTimer: Timer | null = null;
 
 	constructor(socket: CollabSocket, events: RpcCollaborationOpenEvents, displayName: string, writeToken?: string) {
@@ -301,7 +311,7 @@ class RpcCollaborationGuestConnection implements RpcCollaborationConnection {
 	}
 
 	async open(): Promise<InitialReplica> {
-		this.#socket.onDrop = () => this.#events.gap();
+		this.#socket.onDrop = () => this.#signalIngressGap(new Error("collaboration socket send buffer overflow"));
 		this.#socket.onOpen = () => {
 			this.#pending = null;
 			this.#socket.send({
@@ -311,25 +321,17 @@ class RpcCollaborationGuestConnection implements RpcCollaborationConnection {
 				writeToken: this.#writeToken,
 			});
 		};
-		this.#socket.onFrame = frame => {
-			this.#applyChain = this.#applyChain
-				.then(() => this.#handleFrame(frame))
-				.catch(cause => {
-					logger.warn("rpc collaboration guest frame failed", { error: String(cause) });
-					if (!this.#joined) this.#initial.reject(cause);
-					else this.#events.gap();
-				});
-		};
+		this.#socket.onFrame = frame => this.#enqueueFrame(frame);
 		this.#socket.onClose = (reason, willReconnect) => {
 			if (this.#left) return;
 			if (!this.#joined) this.#initial.reject(new Error(reason));
 			this.#events.status(willReconnect ? "reconnecting" : "failed", willReconnect ? "network_lost" : "room_closed");
 		};
-		this.#socket.connect();
 		this.#joinTimer = setTimeout(
 			() => this.#initial.reject(new Error("timed out waiting for collaboration snapshot")),
 			JOIN_TIMEOUT_MS,
 		);
+		this.#socket.connect();
 		try {
 			return await this.#initial.promise;
 		} finally {
@@ -338,16 +340,26 @@ class RpcCollaborationGuestConnection implements RpcCollaborationConnection {
 	}
 
 	async activate(initial: InitialReplica): Promise<void> {
-		this.#active = true;
-		await this.#emitSnapshot(initial);
-		const deferred = this.#deferredFrames;
-		this.#deferredFrames = [];
-		for (const frame of deferred) await this.#emitLiveFrame(frame);
+		this.#activating = true;
+		try {
+			await this.#emitSnapshot(initial);
+			while (!this.#left && this.#deferredFrames.length > 0) {
+				const item = this.#deferredFrames.shift();
+				if (!item) break;
+				this.#pendingFrameCount -= 1;
+				this.#pendingFrameBytes -= item.bytes;
+				await this.#emitLiveFrame(item.frame);
+			}
+			if (!this.#left) this.#active = true;
+		} finally {
+			this.#activating = false;
+		}
 	}
 
 	async leave(_reason: string): Promise<void> {
 		this.#left = true;
 		this.#clearJoinTimer();
+		this.#clearPendingFrames();
 		this.#socket.close();
 	}
 
@@ -370,6 +382,7 @@ class RpcCollaborationGuestConnection implements RpcCollaborationConnection {
 	}
 
 	requestResync(): void {
+		if (this.#left) return;
 		this.#pending = null;
 		this.#socket.send({
 			t: "hello",
@@ -379,10 +392,51 @@ class RpcCollaborationGuestConnection implements RpcCollaborationConnection {
 		});
 	}
 
-	async #handleFrame(frame: CollabFrame): Promise<void> {
-		if (this.#left) return;
+	#enqueueFrame(frame: CollabFrame): void {
+		if (this.#left || (this.#ingressStale && frame.t !== "welcome")) return;
+		const serialized = JSON.stringify(frame);
+		const bytes = Math.max(1, Buffer.byteLength(serialized ?? "", "utf8"));
+		if (
+			this.#pendingFrameCount >= MAX_PENDING_GUEST_FRAMES ||
+			this.#pendingFrameBytes + bytes > MAX_PENDING_GUEST_BYTES
+		) {
+			this.#signalIngressGap(new Error("collaboration guest ingress overflow"));
+			return;
+		}
+		this.#queuedFrames.push({ frame, bytes });
+		this.#pendingFrameCount += 1;
+		this.#pendingFrameBytes += bytes;
+		if (!this.#processing) void this.#drainFrames();
+	}
+
+	async #drainFrames(): Promise<void> {
+		if (this.#processing) return;
+		this.#processing = true;
+		try {
+			while (!this.#left && this.#queuedFrames.length > 0) {
+				const item = this.#queuedFrames.shift();
+				if (!item) break;
+				this.#pendingFrameCount -= 1;
+				this.#pendingFrameBytes -= item.bytes;
+				try {
+					await this.#handleFrame(item.frame, item.bytes);
+				} catch (cause) {
+					logger.warn("rpc collaboration guest frame failed", { error: String(cause) });
+					this.#signalIngressGap(cause);
+				}
+			}
+		} finally {
+			this.#processing = false;
+			if (!this.#left && this.#queuedFrames.length > 0) void this.#drainFrames();
+		}
+	}
+
+	async #handleFrame(frame: CollabFrame, bytes: number): Promise<void> {
+		if (this.#left || (this.#ingressStale && frame.t !== "welcome")) return;
 		if (frame.t === "welcome") {
 			if (frame.proto !== COLLAB_PROTO) throw new Error("collaboration protocol mismatch");
+			this.#ingressStale = false;
+			this.#gapSignalled = false;
 			this.#readOnly = frame.readOnly === true;
 			this.#events.authority(this.authority);
 			this.#pending = { welcome: frame, entries: [] };
@@ -410,8 +464,10 @@ class RpcCollaborationGuestConnection implements RpcCollaborationConnection {
 			this.#events.authority(this.authority);
 		}
 		if (frame.t === "state") this.#events.participants(projectGuestParticipants(frame));
-		if (!this.#active) {
-			this.#deferredFrames.push(frame);
+		if (!this.#active || this.#activating) {
+			this.#deferredFrames.push({ frame, bytes });
+			this.#pendingFrameCount += 1;
+			this.#pendingFrameBytes += bytes;
 			return;
 		}
 		await this.#emitLiveFrame(frame);
@@ -451,6 +507,26 @@ class RpcCollaborationGuestConnection implements RpcCollaborationConnection {
 		this.#events.replicated({ kind: frame.t, ...projected });
 	}
 
+	#signalIngressGap(cause: unknown): void {
+		if (this.#left || this.#gapSignalled) return;
+		this.#gapSignalled = true;
+		this.#ingressStale = true;
+		this.#clearPendingFrames();
+		if (!this.#joined) {
+			this.#left = true;
+			this.#initial.reject(cause);
+			return;
+		}
+		this.#events.gap();
+	}
+
+	#clearPendingFrames(): void {
+		this.#queuedFrames = [];
+		this.#deferredFrames = [];
+		this.#pendingFrameCount = 0;
+		this.#pendingFrameBytes = 0;
+	}
+
 	#clearJoinTimer(): void {
 		if (this.#joinTimer === null) return;
 		clearTimeout(this.#joinTimer);
@@ -461,30 +537,57 @@ class RpcCollaborationGuestConnection implements RpcCollaborationConnection {
 export class RpcCollaborationSessionMediaStore implements RpcCollaborationMediaStore {
 	readonly #getManager: () => ArtifactManager | undefined;
 	readonly #getSessionId: () => string;
+	readonly #getSessionAuthority: (() => RpcCollaborationSessionAuthority) | undefined;
 
-	constructor(getManager: () => ArtifactManager | undefined, getSessionId: () => string) {
+	constructor(
+		getManager: () => ArtifactManager | undefined,
+		getSessionId: () => string,
+		getSessionAuthority?: () => RpcCollaborationSessionAuthority,
+	) {
 		this.#getManager = getManager;
 		this.#getSessionId = getSessionId;
+		this.#getSessionAuthority = getSessionAuthority;
 	}
 
-	async save(mediaType: string, data: Uint8Array): Promise<RpcCollaborationMediaDescriptor> {
+	async save(
+		mediaType: string,
+		data: Uint8Array,
+		lifecycleToken?: RpcCollaborationLifecycleToken,
+	): Promise<RpcCollaborationMediaDescriptor> {
 		const manager = this.#requireManager();
+		const sessionId = lifecycleToken?.sessionAuthority.sessionId ?? this.#getSessionId();
+		this.#assertTokenCurrent(lifecycleToken);
 		const safeMediaType = sanitizeRpcText(mediaType, MAX_MEDIA_TYPE_BYTES) || "application/octet-stream";
-		const allocation = await manager.allocatePath(
-			"collaboration_media",
-			{ sessionId: this.#getSessionId() },
-			{ mediaType: safeMediaType, source: "collaboration_media" },
-		);
-		await Bun.write(allocation.path, data);
-		const descriptor = await manager.describe(allocation.id);
-		if (descriptor.byteLength === null || descriptor.sha256 === null)
-			throw new Error("Collaboration media was not persisted");
-		return {
-			mediaId: descriptor.id,
-			mediaType: descriptor.mediaType,
-			byteLength: descriptor.byteLength,
-			sha256: descriptor.sha256,
-		};
+		let allocation: { id: string; path: string } | undefined;
+		try {
+			allocation = await manager.allocatePath(
+				"collaboration_media",
+				{ sessionId },
+				{ mediaType: safeMediaType, source: "collaboration_media" },
+			);
+			this.#assertTokenCurrent(lifecycleToken);
+			await Bun.write(allocation.path, data);
+			this.#assertTokenCurrent(lifecycleToken);
+			const descriptor = await manager.describe(allocation.id);
+			this.#assertTokenCurrent(lifecycleToken);
+			if (descriptor.byteLength === null || descriptor.sha256 === null)
+				throw new Error("Collaboration media was not persisted");
+			return {
+				mediaId: descriptor.id,
+				mediaType: descriptor.mediaType,
+				byteLength: descriptor.byteLength,
+				sha256: descriptor.sha256,
+			};
+		} catch (cause) {
+			if (allocation && lifecycleToken && !this.#isTokenCurrent(lifecycleToken)) {
+				try {
+					await manager.cancel(allocation.id, "collaboration authority changed");
+				} catch {
+					// The captured artifact authority may already be tearing down.
+				}
+			}
+			throw cause;
+		}
 	}
 
 	async read(mediaId: string, offset = 0, length = MAX_ARTIFACT_RANGE_BYTES): Promise<RpcCollaborationMediaRange> {
@@ -507,6 +610,26 @@ export class RpcCollaborationSessionMediaStore implements RpcCollaborationMediaS
 		const manager = this.#getManager();
 		if (!manager) throw new Error("Collaboration media storage is unavailable for this session");
 		return manager;
+	}
+
+	#assertTokenCurrent(token: RpcCollaborationLifecycleToken | undefined): void {
+		if (token && !this.#isTokenCurrent(token)) throw new Error("Collaboration media authority is stale");
+	}
+
+	#isTokenCurrent(token: RpcCollaborationLifecycleToken): boolean {
+		try {
+			const current = this.#getSessionAuthority?.();
+			if (current) {
+				return (
+					current.sessionId === token.sessionAuthority.sessionId &&
+					current.sessionGeneration === token.sessionAuthority.sessionGeneration &&
+					current.authorityGeneration === token.sessionAuthority.authorityGeneration
+				);
+			}
+			return this.#getSessionId() === token.sessionAuthority.sessionId;
+		} catch {
+			return false;
+		}
 	}
 }
 
@@ -532,7 +655,16 @@ export class RpcCollaborationTransportFactoryImpl implements RpcCollaborationTra
 		context.collabHost = host;
 		const relayUrl = options.relayUrl ?? this.#session.settings.get("collab.relayUrl") ?? DEFAULT_RELAY_URL;
 		const webUrl = options.webUrl ?? this.#session.settings.get("collab.webUrl") ?? "";
-		await host.start(relayUrl, webUrl);
+		try {
+			await host.start(relayUrl, webUrl);
+		} catch (cause) {
+			try {
+				await host.stop("host_failed");
+			} catch {
+				// Preserve the startup failure; the host has no reachable manager yet.
+			}
+			throw cause;
+		}
 		return {
 			connection: new RpcCollaborationHostConnection(host),
 			links: {
@@ -556,12 +688,21 @@ export class RpcCollaborationTransportFactoryImpl implements RpcCollaborationTra
 		const displayName = options.displayName?.trim() || collabDisplayName({ settings: this.#session.settings });
 		const writeToken = parsed.writeToken ? Buffer.from(parsed.writeToken).toString("base64url") : undefined;
 		const connection = new RpcCollaborationGuestConnection(socket, events, displayName, writeToken);
-		const initial = await connection.open();
-		return {
-			connection,
-			participants: projectGuestParticipants(initial.welcome),
-			activate: () => connection.activate(initial),
-		};
+		try {
+			const initial = await connection.open();
+			return {
+				connection,
+				participants: projectGuestParticipants(initial.welcome),
+				activate: () => connection.activate(initial),
+			};
+		} catch (cause) {
+			try {
+				await connection.leave("join_failed");
+			} catch {
+				// Preserve the initial replica failure.
+			}
+			throw cause;
+		}
 	}
 
 	#hostContext(): CollabHostContext {

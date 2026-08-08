@@ -6,7 +6,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isEnoent, isRecord, stringProperty } from "@oh-my-pi/pi-utils";
+import { isEexist, isEnoent, isRecord, stringProperty } from "@oh-my-pi/pi-utils";
 
 export const MAX_ARTIFACT_RANGE_BYTES = 64 * 1024;
 const ARTIFACT_MEDIA_TYPE = "text/plain; charset=utf-8";
@@ -47,6 +47,7 @@ export interface ArtifactDescriptor {
 		reason?: string;
 	};
 }
+export type ArtifactReference = `artifact://${string}`;
 
 export interface ArtifactRange {
 	descriptor: ArtifactDescriptor;
@@ -55,6 +56,12 @@ export interface ArtifactRange {
 	eof: boolean;
 	encoding: "base64";
 	data: string;
+}
+
+export interface ArtifactExportOptions {
+	exportRoot: string;
+	destination: string;
+	expectedSha256: string;
 }
 
 export interface ArtifactExportResult {
@@ -101,6 +108,15 @@ export class ArtifactHashMismatchError extends Error {
 	constructor(expected: string, actual: string) {
 		super(`Artifact hash mismatch: expected ${expected}, received ${actual}`);
 		this.name = "ArtifactHashMismatchError";
+	}
+}
+
+export class ArtifactExportPathError extends Error {
+	readonly code = "invalid_artifact_export_path";
+
+	constructor(message: string) {
+		super(message);
+		this.name = "ArtifactExportPathError";
 	}
 }
 
@@ -189,6 +205,110 @@ async function hashFile(filePath: string): Promise<string> {
 		reader.releaseLock();
 	}
 	return hasher.digest("hex");
+}
+async function copyFileToHandle(sourcePath: string, destination: fs.FileHandle): Promise<string> {
+	const source = await fs.open(sourcePath, "r");
+	const hasher = new Bun.CryptoHasher("sha256");
+	const buffer = Buffer.allocUnsafe(64 * 1024);
+	try {
+		while (true) {
+			const { bytesRead } = await source.read(buffer, 0, buffer.byteLength, null);
+			if (bytesRead === 0) break;
+			const chunk = buffer.subarray(0, bytesRead);
+			hasher.update(chunk);
+			let offset = 0;
+			while (offset < bytesRead) {
+				const { bytesWritten } = await destination.write(chunk, offset, bytesRead - offset, null);
+				offset += bytesWritten;
+			}
+		}
+	} finally {
+		await source.close();
+	}
+	return hasher.digest("hex");
+}
+
+function pathIsWithin(root: string, target: string, allowRoot = false): boolean {
+	const relative = path.relative(root, target);
+	if (relative.length === 0) return allowRoot;
+	return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+async function resolveExportDestination(options: ArtifactExportOptions): Promise<{
+	destination: string;
+	realRoot: string;
+	realParent: string;
+	parentDevice: number;
+	parentInode: number;
+}> {
+	if (!options.exportRoot || options.exportRoot.includes("\0")) {
+		throw new ArtifactExportPathError("Artifact export requires an explicit export root");
+	}
+	if (!options.destination || options.destination.includes("\0")) {
+		throw new ArtifactExportPathError("Artifact export destination must be a non-empty relative path");
+	}
+	if (
+		path.isAbsolute(options.destination) ||
+		path.win32.isAbsolute(options.destination) ||
+		/^[A-Za-z]:/.test(options.destination)
+	) {
+		throw new ArtifactExportPathError("Artifact export destination must be relative to the export root");
+	}
+	if (options.destination.split(/[\\/]+/).some(segment => segment === "..")) {
+		throw new ArtifactExportPathError("Artifact export destination cannot contain parent traversal");
+	}
+
+	const root = path.resolve(options.exportRoot);
+	const rootStat = await fs.lstat(root).catch(cause => {
+		if (isEnoent(cause)) throw new ArtifactExportPathError("Artifact export root does not exist");
+		throw cause;
+	});
+	if (rootStat.isSymbolicLink()) {
+		throw new ArtifactExportPathError("Artifact export root cannot be a symbolic link");
+	}
+	if (!rootStat.isDirectory()) {
+		throw new ArtifactExportPathError("Artifact export root must be a directory");
+	}
+
+	const realRoot = await fs.realpath(root);
+	if (realRoot !== root) {
+		throw new ArtifactExportPathError("Artifact export root resolves through a symbolic link");
+	}
+	const destination = path.resolve(realRoot, options.destination);
+	if (!pathIsWithin(realRoot, destination)) {
+		throw new ArtifactExportPathError("Artifact export destination escapes the export root");
+	}
+
+	const parent = path.dirname(destination);
+	let realParent: string;
+	try {
+		realParent = await fs.realpath(parent);
+	} catch (cause) {
+		if (isEnoent(cause)) throw new ArtifactExportPathError("Artifact export destination parent does not exist");
+		throw cause;
+	}
+	if (!pathIsWithin(realRoot, realParent, true)) {
+		throw new ArtifactExportPathError("Artifact export destination parent escapes the export root");
+	}
+
+	let destinationExists = false;
+	try {
+		await fs.lstat(destination);
+		destinationExists = true;
+	} catch (cause) {
+		if (!isEnoent(cause)) throw cause;
+	}
+	if (destinationExists) {
+		throw new ArtifactExportPathError("Artifact export destination already exists");
+	}
+	const parentStat = await fs.stat(realParent);
+	return {
+		destination,
+		realRoot,
+		realParent,
+		parentDevice: parentStat.dev,
+		parentInode: parentStat.ino,
+	};
 }
 
 /**
@@ -343,29 +463,97 @@ export class ArtifactManager {
 		};
 	}
 
-	async exportTo(id: string, destination: string, expectedSha256: string): Promise<ArtifactExportResult> {
-		if (!SHA256_RE.test(expectedSha256)) {
-			throw new ArtifactHashMismatchError(expectedSha256, "invalid expected SHA-256");
+	async exportTo(id: string, options: ArtifactExportOptions): Promise<ArtifactExportResult> {
+		if (!SHA256_RE.test(options.expectedSha256)) {
+			throw new ArtifactHashMismatchError(options.expectedSha256, "invalid expected SHA-256");
 		}
+		if (process.platform !== "linux") {
+			throw new ArtifactExportPathError("Secure artifact export is unavailable on this platform");
+		}
+		const { destination, realRoot, realParent, parentDevice, parentInode } = await resolveExportDestination(options);
 		const descriptor = await this.describe(id);
 		const source = await this.getPath(id);
 		if (!source || descriptor.byteLength === null || descriptor.sha256 === null) {
 			throw new ArtifactNotFoundError(id);
 		}
-		if (descriptor.sha256 !== expectedSha256) {
-			throw new ArtifactHashMismatchError(expectedSha256, descriptor.sha256);
+		if (descriptor.sha256 !== options.expectedSha256) {
+			throw new ArtifactHashMismatchError(options.expectedSha256, descriptor.sha256);
 		}
-		const temporary = `${destination}.omp-${crypto.randomUUID()}.tmp`;
+
+		const parentHandle = await fs.open(realParent, "r");
 		try {
-			await fs.copyFile(source, temporary);
-			const copiedHash = await hashFile(temporary);
-			if (copiedHash !== expectedSha256) {
-				throw new ArtifactHashMismatchError(expectedSha256, copiedHash);
+			const openedParentStat = await parentHandle.stat();
+			if (openedParentStat.dev !== parentDevice || openedParentStat.ino !== parentInode) {
+				throw new ArtifactExportPathError("Artifact export destination parent changed before export");
 			}
-			await fs.rename(temporary, destination);
-		} catch (cause) {
-			await fs.rm(temporary, { force: true });
-			throw cause;
+			const destinationAccessPath = path.join(`/proc/self/fd/${parentHandle.fd}`, path.basename(destination));
+
+			let destinationHandle: fs.FileHandle | undefined;
+			let openedIdentity: { device: number; inode: number } | undefined;
+			let exportComplete = false;
+			try {
+				try {
+					destinationHandle = await fs.open(destinationAccessPath, "wx");
+				} catch (cause) {
+					if (isEexist(cause)) {
+						throw new ArtifactExportPathError("Artifact export destination already exists");
+					}
+					throw cause;
+				}
+				const openedStat = await destinationHandle.stat();
+				openedIdentity = { device: openedStat.dev, inode: openedStat.ino };
+
+				const currentParent = await fs.realpath(path.dirname(destination));
+				const currentParentStat = await fs.stat(currentParent);
+				const realDestination = await fs.realpath(destination);
+				if (
+					currentParent !== realParent ||
+					currentParentStat.dev !== parentDevice ||
+					currentParentStat.ino !== parentInode ||
+					!pathIsWithin(realRoot, realDestination) ||
+					path.dirname(realDestination) !== currentParent
+				) {
+					throw new ArtifactExportPathError("Artifact export destination parent changed during export");
+				}
+
+				const copiedHash = await copyFileToHandle(source, destinationHandle);
+				if (copiedHash !== options.expectedSha256) {
+					throw new ArtifactHashMismatchError(options.expectedSha256, copiedHash);
+				}
+				await destinationHandle.sync();
+
+				const destinationStat = await fs.lstat(destinationAccessPath);
+				const finalParent = await fs.realpath(path.dirname(destination));
+				const finalParentStat = await fs.stat(finalParent);
+				const lexicalDestinationStat = await fs.lstat(destination);
+				const finalRealDestination = await fs.realpath(destination);
+				if (
+					!destinationStat.isFile() ||
+					destinationStat.isSymbolicLink() ||
+					destinationStat.dev !== openedStat.dev ||
+					destinationStat.ino !== openedStat.ino ||
+					finalParent !== realParent ||
+					finalParentStat.dev !== parentDevice ||
+					finalParentStat.ino !== parentInode ||
+					lexicalDestinationStat.dev !== openedStat.dev ||
+					lexicalDestinationStat.ino !== openedStat.ino ||
+					!pathIsWithin(realRoot, finalRealDestination) ||
+					path.dirname(finalRealDestination) !== finalParent
+				) {
+					throw new ArtifactExportPathError("Artifact export destination changed during export");
+				}
+				exportComplete = true;
+			} finally {
+				await destinationHandle?.close();
+				if (destinationHandle && !exportComplete && openedIdentity) {
+					const current = await fs.lstat(destinationAccessPath).catch(() => undefined);
+					if (current?.dev === openedIdentity.device && current.ino === openedIdentity.inode) {
+						await fs.unlink(destinationAccessPath).catch(() => undefined);
+					}
+				}
+			}
+		} finally {
+			await parentHandle?.close();
 		}
 		return {
 			path: destination,

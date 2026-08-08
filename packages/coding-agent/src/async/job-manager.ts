@@ -149,7 +149,7 @@ export class AsyncJobManager {
 	readonly #onJobComplete: AsyncJobManagerOptions["onJobComplete"];
 	readonly #maxRunningJobs: number;
 	readonly #retentionMs: number;
-	readonly #changeListeners = new Set<() => void>();
+	readonly #changeListeners = new Set<() => void | Promise<void>>();
 	#deliveryLoop: Promise<void> | undefined;
 	#disposed = false;
 
@@ -170,13 +170,28 @@ export class AsyncJobManager {
 	}
 
 	/** Subscribe to authoritative registration, progress, state, and eviction changes. */
-	subscribe(listener: () => void): () => void {
+	subscribe(listener: () => void | Promise<void>): () => void {
 		this.#changeListeners.add(listener);
 		return () => this.#changeListeners.delete(listener);
 	}
 
 	#emitChange(): void {
-		for (const listener of this.#changeListeners) listener();
+		for (const listener of this.#changeListeners) {
+			try {
+				const result = listener();
+				if (result instanceof Promise) {
+					void result.catch(error => {
+						logger.warn("Async job change listener failed", {
+							error: error instanceof Error ? error.message : String(error),
+						});
+					});
+				}
+			} catch (error) {
+				logger.warn("Async job change listener failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
 	}
 
 	/** True when the running-job count has reached the configured cap. */

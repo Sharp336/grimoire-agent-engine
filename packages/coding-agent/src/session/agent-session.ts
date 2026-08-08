@@ -312,6 +312,11 @@ import { isAdvisorCard, isUserQueuedMessage } from "./queued-messages";
 import { type AdvisorStats, SessionAdvisors, type SessionAdvisorsHost } from "./session-advisors";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getRestorableSessionModels } from "./session-context";
+import {
+	bindContextMessageSources,
+	SessionContextProjection,
+	type SystemPromptLogicalSource,
+} from "./session-context-projection";
 import { formatSessionDumpText } from "./session-dump-format";
 import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
@@ -446,6 +451,7 @@ export class AgentSession {
 	editClipboard?: Clipboard;
 	/** Authoritative queue projection and read-filter-replace mutation boundary. */
 	readonly queueService: SessionQueueService;
+	readonly contextProjection: SessionContextProjection;
 
 	#powerAssertion: MacOSPowerAssertion | undefined;
 
@@ -978,6 +984,8 @@ export class AgentSession {
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
+		this.contextProjection = config.contextProjection ?? new SessionContextProjection();
+		this.contextProjection.setSystemPrompt(config.initialSystemPromptSources ?? []);
 		this.queueService = new SessionQueueService(this.agent, () => this.#pendingNextTurnMessages.length);
 		this.#modelRegistry = config.modelRegistry;
 		this.#codexResetCoordinator = config.codexResetCoordinator ?? defaultCodexAutoRedeemCoordinator;
@@ -1289,6 +1297,7 @@ export class AgentSession {
 			clearInheritedProviderPromptCacheKey: () => this.#clearInheritedProviderPromptCacheKey(),
 			clearMemoryPromotionSnapshot: () => this.#memory.clearPromotionSnapshot(),
 			captureMemoryPromotionSnapshot: prompt => this.#memory.capturePromotionSnapshot(prompt),
+			setSystemPromptSources: sources => this.contextProjection.setSystemPrompt(sources),
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			notifyCommandMetadataChanged: () => this.#notifyCommandMetadataChanged(),
 			notifyToolInventoryChanged: () => this.#notifyToolInventoryChanged(),
@@ -1345,6 +1354,7 @@ export class AgentSession {
 			onResponse: this.#onResponse,
 			onSseEvent: this.#onSseEvent,
 			obfuscator: this.#obfuscator,
+			contextProjection: this.contextProjection,
 		};
 		this.#providerBoundary = new SessionProviderBoundary(providerBoundaryHost);
 		const streamGuardsHost: StreamGuardsHost = {
@@ -4566,7 +4576,10 @@ export class AgentSession {
 		return this.#tools.refreshBaseSystemPrompt();
 	}
 
-	#buildSystemPromptForAgentStart(promptText: string): Promise<string[]> {
+	#buildSystemPromptForAgentStart(promptText: string): Promise<{
+		systemPrompt: string[];
+		additionalLogicalSources: readonly SystemPromptLogicalSource[];
+	}> {
 		return this.#tools.buildSystemPromptForAgentStart(promptText);
 	}
 
@@ -5271,16 +5284,19 @@ export class AgentSession {
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<boolean> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
+		options?.signal?.throwIfAborted();
 
 		// Handle extension commands first (execute immediately, even during streaming)
 		if (expandPromptTemplates && text.startsWith("/")) {
 			const handled = await this.#tryExecuteExtensionCommand(text);
+			options?.signal?.throwIfAborted();
 			if (handled) {
 				return false;
 			}
 
 			// Try custom commands (TypeScript slash commands)
 			const customResult = await this.#tryExecuteCustomCommand(text);
+			options?.signal?.throwIfAborted();
 			if (customResult !== null) {
 				if (customResult === "") {
 					return false;
@@ -5324,8 +5340,10 @@ export class AgentSession {
 			// model reads the steering notice ahead of the prompt it modifies.
 			for (const notice of keywordNotices) {
 				await this.#queueCustomMessage(notice, streamingBehavior, undefined, options?.messageTag);
+				options?.signal?.throwIfAborted();
 			}
 			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, options?.messageTag);
+			options?.signal?.throwIfAborted();
 			return true;
 		}
 
@@ -5336,6 +5354,7 @@ export class AgentSession {
 		const eagerTaskPrelude =
 			!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTaskPrelude(expandedText) : undefined;
 		const normalizedImages = await this.#normalizeImagesForModel(options?.images);
+		options?.signal?.throwIfAborted();
 
 		const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
 		if (normalizedImages?.length) {
@@ -5344,8 +5363,9 @@ export class AgentSession {
 		// Text-only model + image attachment: describe via a vision model and inject the
 		// description as a hidden companion (the image stays in the visible user message).
 		const imageDescriptionNotice = normalizedImages?.length
-			? await this.#buildImageDescriptionNotice(normalizedImages)
+			? await this.#buildImageDescriptionNotice(normalizedImages, options?.signal)
 			: undefined;
+		options?.signal?.throwIfAborted();
 
 		const promptAttribution = options?.attribution ?? (options?.synthetic ? "agent" : "user");
 		const message = options?.synthetic
@@ -5366,6 +5386,7 @@ export class AgentSession {
 		}
 
 		try {
+			options?.signal?.throwIfAborted();
 			await this.#promptWithMessage(message, expandedText, {
 				...options,
 				images: normalizedImages,
@@ -5384,11 +5405,12 @@ export class AgentSession {
 
 	async promptCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
-		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "messageTag"> & {
+		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "messageTag" | "signal"> & {
 			queueChipText?: string;
 			queueOnly?: boolean;
 		},
 	): Promise<void> {
+		options?.signal?.throwIfAborted();
 		const textContent =
 			typeof message.content === "string"
 				? message.content
@@ -5413,8 +5435,10 @@ export class AgentSession {
 
 			for (const notice of keywordNotices) {
 				await this.#queueCustomMessage(notice, streamingBehavior, undefined, options.messageTag);
+				options?.signal?.throwIfAborted();
 			}
 			await this.#queueCustomMessage(message, streamingBehavior, options.queueChipText, options.messageTag);
+			options?.signal?.throwIfAborted();
 			return;
 		}
 		if (this.isStreaming) {
@@ -5423,8 +5447,10 @@ export class AgentSession {
 
 			for (const notice of keywordNotices) {
 				await this.#queueCustomMessage(notice, streamingBehavior, undefined, options?.messageTag);
+				options?.signal?.throwIfAborted();
 			}
 			await this.#queueCustomMessage(message, streamingBehavior, options?.queueChipText, options?.messageTag);
+			options?.signal?.throwIfAborted();
 			return;
 		}
 
@@ -5437,6 +5463,7 @@ export class AgentSession {
 			attribution: message.attribution ?? "agent",
 			timestamp: Date.now(),
 		};
+		options?.signal?.throwIfAborted();
 
 		await this.#promptWithMessage(customMessage, textContent, {
 			...options,
@@ -5447,20 +5474,28 @@ export class AgentSession {
 	async #promptWithMessage(
 		message: AgentMessage,
 		expandedText: string,
-		options?: Pick<PromptOptions, "toolChoice" | "images" | "skipCompactionCheck" | "messageTag"> & {
+		options?: Pick<PromptOptions, "toolChoice" | "images" | "skipCompactionCheck" | "messageTag" | "signal"> & {
 			prependMessages?: AgentMessage[];
 			skipPostPromptRecoveryWait?: boolean;
 			acceptTerminalEmptyStop?: boolean;
 		},
 	): Promise<void> {
+		options?.signal?.throwIfAborted();
 		if (options?.messageTag) this.queueService.setTag(message, options.messageTag);
 		this.#beginInFlight();
 		const generation = this.#promptGeneration;
+		const contextRequestId = `context:${Snowflake.next()}`;
 		try {
 			await this.#recovery.maybeRestoreRetryFallbackPrimary();
-			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return;
+			options?.signal?.throwIfAborted();
+			if (!(await this.#runUsageAwarePreflightForNextModelCall(options?.signal))) {
+				options?.signal?.throwIfAborted();
+				return;
+			}
+			options?.signal?.throwIfAborted();
 			// Flush any pending bash messages before the new prompt
 			await this.#bash.flushPending();
+			options?.signal?.throwIfAborted();
 			this.#eval.flushPending();
 			this.#irc.flushPending();
 
@@ -5479,6 +5514,7 @@ export class AgentSession {
 
 			// Validate API key
 			const apiKey = await this.#modelRegistry.getApiKey(this.model, this.sessionId);
+			options?.signal?.throwIfAborted();
 			if (!apiKey) {
 				throw new Error(
 					`No API key found for ${this.model.provider}.\n\n` +
@@ -5497,9 +5533,11 @@ export class AgentSession {
 				(lastAssistant.stopReason === "error" || lastAssistant.stopReason === "length")
 			) {
 				await this.#maintenance.checkCompaction(lastAssistant, false, false, false);
+				options?.signal?.throwIfAborted();
 			}
 
 			await this.#prewalk.armPlanYoloIfNeeded();
+			options?.signal?.throwIfAborted();
 
 			// Build messages array (session context, eager todo prelude, then active prompt message)
 			const messages: AgentMessage[] = [];
@@ -5511,6 +5549,7 @@ export class AgentSession {
 			if (planModeMessage) {
 				messages.push(planModeMessage);
 			}
+			options?.signal?.throwIfAborted();
 			const goalModeMessage = this.#buildGoalModeMessage();
 			if (goalModeMessage) {
 				messages.push(goalModeMessage);
@@ -5553,6 +5592,7 @@ export class AgentSession {
 					messages.push(await this.#normalizeAgentMessageImages(fileMentionMessage));
 				}
 			}
+			options?.signal?.throwIfAborted();
 
 			// A prompt issued while the session is already disposing must still run:
 			// the dispose-driven abort settles its turn (see "does not auto-retry
@@ -5561,8 +5601,15 @@ export class AgentSession {
 			// resuming would start a turn on a torn-down session.
 			const disposingBeforeTransition = this.#isDisposed;
 			await this.#memory.transition;
+			options?.signal?.throwIfAborted();
 			if ((this.#isDisposed && !disposingBeforeTransition) || this.#promptGeneration !== generation) return;
-			const beforeAgentStartSystemPrompt = await this.#buildSystemPromptForAgentStart(expandedText);
+			const turnSystemPrompt = await this.#buildSystemPromptForAgentStart(expandedText);
+			options?.signal?.throwIfAborted();
+			const beforeAgentStartSystemPrompt = turnSystemPrompt.systemPrompt;
+			let logicalSystemSources: readonly SystemPromptLogicalSource[] | undefined =
+				turnSystemPrompt.additionalLogicalSources.length > 0
+					? [...this.contextProjection.currentSystemSources(), ...turnSystemPrompt.additionalLogicalSources]
+					: undefined;
 
 			let baseXdevCatalogDelivered = true;
 			// Emit before_agent_start extension event
@@ -5597,10 +5644,17 @@ export class AgentSession {
 						);
 					}
 				}
+				options?.signal?.throwIfAborted();
 
 				if (result?.systemPrompt !== undefined) {
 					baseXdevCatalogDelivered = false;
 					this.#tools.setTurnSystemPromptOverride(result.systemPrompt);
+					logicalSystemSources = result.systemPrompt.map((content, index) => ({
+						id: `turn-override:${contextRequestId}:${index}`,
+						kind: "turn-override",
+						content,
+						foldedInto: [index],
+					}));
 				} else {
 					this.#tools.clearTurnSystemPromptOverride();
 					this.agent.setSystemPrompt(beforeAgentStartSystemPrompt);
@@ -5621,6 +5675,7 @@ export class AgentSession {
 			// failures fall back to a concrete level inside the helper.
 			if (this.isAutoThinking && message.role === "user") {
 				await this.#models.applyAutoThinkingLevel(expandedText, generation);
+				options?.signal?.throwIfAborted();
 				if (this.#promptGeneration !== generation) {
 					return;
 				}
@@ -5633,6 +5688,7 @@ export class AgentSession {
 			}
 
 			await this.#maintenance.runPrePromptCompactionIfNeeded(messages);
+			options?.signal?.throwIfAborted();
 			if (this.#promptGeneration !== generation) {
 				return;
 			}
@@ -5662,8 +5718,20 @@ export class AgentSession {
 			if (planReferenceMessage) {
 				this.#planReferenceSent = true;
 			}
+			const storedContext = this.sessionManager.buildSessionContext();
+			bindContextMessageSources(storedContext.messages, this.messages);
+			this.contextProjection.captureTurn({
+				sessionId: this.sessionId,
+				leafId: this.sessionManager.getLeafId(),
+				requestId: contextRequestId,
+				stored: storedContext.contextAssembly,
+				messages,
+				systemPrompt: this.agent.state.systemPrompt,
+				logicalSystemSources,
+			});
+			options?.signal?.throwIfAborted();
 			try {
-				await this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions);
+				await this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions, options?.signal);
 			} finally {
 				this.#stats.setPendingSnapshot(undefined);
 			}

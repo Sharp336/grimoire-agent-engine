@@ -46,13 +46,15 @@ export interface OutputSummary {
 	columnTruncatedLines?: number;
 	/** Configured per-line column cap in effect (chars), when > 0. */
 	columnMax?: number;
-	/** Artifact ID for internal URL access (artifact://<id>) when truncated */
+	/** Artifact ID for internal URL access (artifact://<id>) when output was persisted. */
 	artifactId?: string;
 }
 
 export interface OutputSinkOptions {
 	artifactPath?: string;
 	artifactId?: string;
+	/** Persist every non-empty chunk to the artifact, even when inline output does not overflow. */
+	mirrorAllToArtifact?: boolean;
 	/**
 	 * Total inline body budget (bytes). Default DEFAULT_MAX_BYTES. The head
 	 * window and rolling tail window share this budget, so a composed
@@ -771,6 +773,7 @@ export class OutputSink {
 	readonly #spillThreshold: number;
 	readonly #headLimit: number;
 	readonly #onChunk?: (chunk: string) => void;
+	readonly #mirrorAllToArtifact: boolean;
 	readonly #chunkThrottleMs: number;
 	readonly #maxColumns: number;
 
@@ -793,6 +796,7 @@ export class OutputSink {
 		const {
 			artifactPath,
 			artifactId,
+			mirrorAllToArtifact = false,
 			spillThreshold = DEFAULT_MAX_BYTES,
 			headBytes = 0,
 			maxColumns = 0,
@@ -803,6 +807,7 @@ export class OutputSink {
 		} = options ?? {};
 		this.#artifactPath = artifactPath;
 		this.#artifactId = artifactId;
+		this.#mirrorAllToArtifact = mirrorAllToArtifact;
 		this.#spillThreshold = spillThreshold;
 		this.#headLimit = Math.max(0, Math.min(headBytes, Math.floor(spillThreshold / 2)));
 		this.#maxColumns = Math.max(0, maxColumns);
@@ -887,7 +892,10 @@ export class OutputSink {
 		// Mirror RAW chunk to the artifact file so the on-disk record is the full
 		// uncapped stream. Mirror triggers on: in-memory overflow OR this chunk's
 		// column cap dropped bytes (otherwise we'd lose data) OR file already open.
-		if (this.#artifactPath && (this.#file != null || cappedThisChunk || this.#willOverflow(cappedBytes))) {
+		if (
+			this.#artifactPath &&
+			(this.#mirrorAllToArtifact || this.#file != null || cappedThisChunk || this.#willOverflow(cappedBytes))
+		) {
 			this.#writeToFile(chunk);
 		}
 

@@ -1,4 +1,3 @@
-import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
@@ -663,12 +662,8 @@ export class PlanModeController {
 
 	async #copyLocalArtifacts(sourceRoot: string, destinationRoot: string): Promise<void> {
 		if (sourceRoot === destinationRoot) return;
-		let entries: Dirent[];
-		try {
-			entries = await fs.readdir(sourceRoot, { withFileTypes: true });
-		} catch {
-			return;
-		}
+		const entries = await fs.readdir(sourceRoot, { withFileTypes: true }).catch(() => undefined);
+		if (!entries) return;
 		await fs.mkdir(destinationRoot, { recursive: true });
 		for (const entry of entries) {
 			const source = path.join(sourceRoot, entry.name);

@@ -10,6 +10,7 @@ import {
 	normalizeCustomMessagePayload,
 	PREWALK_PLAN_MESSAGE_TYPE,
 } from "./messages";
+import { type ContextAssemblySnapshot, StoredContextAssemblyBuilder } from "./session-context-projection";
 import { type CompactionEntry, EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
 
 // #4470 crash artifacts had legacy frames (no shape metadata) with 17 frames,
@@ -60,6 +61,7 @@ function snapcompactHistoryBlockOptions(
 
 export interface SessionContext {
 	messages: AgentMessage[];
+	contextAssembly: ContextAssemblySnapshot;
 	thinkingLevel?: string;
 	/** Configured thinking selector (`"auto"` or a concrete level) from the latest change. */
 	configuredThinkingLevel?: string;
@@ -188,7 +190,9 @@ export function buildSessionContext(
 	let leaf: SessionEntry | undefined;
 	if (leafId === null) {
 		// Explicitly null - return no messages (navigated to before first entry)
+		const contextAssembly = new StoredContextAssemblyBuilder([], null, entries).finish();
 		return {
+			contextAssembly,
 			messages: [],
 			thinkingLevel: "off",
 			serviceTier: undefined,
@@ -206,7 +210,9 @@ export function buildSessionContext(
 	}
 
 	if (!leaf) {
+		const contextAssembly = new StoredContextAssemblyBuilder([], null, entries).finish();
 		return {
+			contextAssembly,
 			messages: [],
 			thinkingLevel: "off",
 			serviceTier: undefined,
@@ -227,6 +233,7 @@ export function buildSessionContext(
 		current = current.parentId ? byId.get(current.parentId) : undefined;
 	}
 	path.reverse();
+	const contextAssembly = new StoredContextAssemblyBuilder(path, leaf.id, entries);
 
 	// Extract settings and find compaction
 	let thinkingLevel: string | undefined = "off";
@@ -334,26 +341,44 @@ export function buildSessionContext(
 		handleEntryResetTracking(entry);
 		if (entry.type === "message") {
 			if (!options?.transcript && entry.message.role === "assistant" && entry.message.retryRecovery) {
+				contextAssembly.excludeEntry(entry, "retry-recovery");
 				return;
 			}
+			contextAssembly.includeEntry(entry, entry.message);
 			pushMessage(entry.message);
 		} else if (entry.type === "custom_message") {
-			if (!options?.transcript && entry.customType === PREWALK_PLAN_MESSAGE_TYPE) return;
-			if (!isCustomMessageContent(entry.content)) return;
+			if (!options?.transcript && entry.customType === PREWALK_PLAN_MESSAGE_TYPE) {
+				contextAssembly.excludeEntry(entry, "prewalk-plan-model-excluded");
+				return;
+			}
+			if (!isCustomMessageContent(entry.content)) {
+				contextAssembly.excludeEntry(entry, "invalid-custom-content");
+				return;
+			}
 			const normalized = normalizeCustomMessagePayload(entry);
 			const attribution = entry.attribution === undefined ? undefined : normalized.attribution;
-			pushMessage(
-				createCustomMessage(
-					normalized.customType,
-					normalized.content,
-					normalized.display,
-					normalized.details,
-					entry.timestamp,
-					attribution,
-				),
+			const message = createCustomMessage(
+				normalized.customType,
+				normalized.content,
+				normalized.display,
+				normalized.details,
+				entry.timestamp,
+				attribution,
 			);
+			contextAssembly.includeEntry(entry, message);
+			pushMessage(message);
 		} else if (entry.type === "branch_summary" && entry.summary) {
-			pushMessage(createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp));
+			const message = createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp);
+			contextAssembly.addGenerated(
+				`generated:branch-summary:${entry.id}`,
+				"branch-summary",
+				message,
+				[`entry:${entry.id}`, `entry:${entry.fromId}`],
+				"generated-branch-summary",
+				{ persisted: false, display: true, model: true },
+				{ fromId: entry.fromId },
+			);
+			pushMessage(message);
 		}
 	};
 
@@ -367,18 +392,40 @@ export function buildSessionContext(
 			if (entry.type === "compaction") {
 				const active = entry.id === compaction?.id;
 				const snapcompactArchive = active ? snapcompact.getPreservedArchive(entry.preserveData) : undefined;
-				pushMessage(
-					createCompactionSummaryMessage(
-						active ? entry.summary : SUPERSEDED_COMPACTION_SUMMARY,
-						entry.tokensBefore,
-						entry.timestamp,
-						active ? entry.shortSummary : SUPERSEDED_COMPACTION_SHORT_SUMMARY,
-						undefined,
-						undefined,
-						snapcompactHistoryBlocksForContext(snapcompactArchive, options),
-						entry.warning,
-					),
+				const message = createCompactionSummaryMessage(
+					active ? entry.summary : SUPERSEDED_COMPACTION_SUMMARY,
+					entry.tokensBefore,
+					entry.timestamp,
+					active ? entry.shortSummary : SUPERSEDED_COMPACTION_SHORT_SUMMARY,
+					undefined,
+					undefined,
+					snapcompactHistoryBlocksForContext(snapcompactArchive, options),
+					entry.warning,
 				);
+				contextAssembly.addGenerated(
+					`generated:compaction:${entry.id}:summary`,
+					"compaction-summary",
+					message,
+					[`entry:${entry.id}`],
+					"generated-compaction-summary",
+					{ persisted: false, display: true, model: active },
+					{ tokensBefore: entry.tokensBefore, active },
+				);
+				if (snapcompactArchive) {
+					contextAssembly.addGenerated(
+						`generated:compaction:${entry.id}:archive`,
+						"snapcompact-archive",
+						undefined,
+						[`entry:${entry.id}`],
+						"generated-archive",
+						{ persisted: false, display: true, model: active },
+						{
+							frameCount: snapcompactArchive.frames.length,
+							truncatedChars: snapcompactArchive.truncatedChars,
+						},
+					);
+				}
+				pushMessage(message);
 			} else {
 				appendMessage(entry);
 			}
@@ -400,6 +447,14 @@ export function buildSessionContext(
 		// (and its kept tail) too, so only genuinely post-reset entries emit; a
 		// boundary before the latest compaction is superseded by it (the
 		// `else if (compaction)` branch below handles that case via this guard).
+		const resetEntry = path[resetBoundaryIdx];
+		const resetExcludedIds = path.slice(0, resetBoundaryIdx).map(entry => `entry:${entry.id}`);
+		for (let i = 0; i < resetBoundaryIdx; i++) contextAssembly.excludeEntry(path[i], "before-reset");
+		contextAssembly.addRelation({
+			kind: "reset-excludes",
+			sourceIds: resetExcludedIds,
+			targetIds: [`entry:${resetEntry.id}`],
+		});
 		for (let i = resetBoundaryIdx + 1; i < path.length; i++) {
 			appendMessage(path[i]);
 		}
@@ -420,6 +475,29 @@ export function buildSessionContext(
 			snapcompactHistoryBlocksForContext(snapcompactArchive, options),
 			compaction.warning,
 		);
+		const compactionSummarySourceId = contextAssembly.addGenerated(
+			`generated:compaction:${compaction.id}:summary`,
+			"compaction-summary",
+			compactionSummaryMsg,
+			[`entry:${compaction.id}`],
+			"generated-compaction-summary",
+			{ persisted: false, display: true, model: !options?.transcript },
+			{ tokensBefore: compaction.tokensBefore, remoteReplacement: remoteReplacementHistory !== undefined },
+		);
+		if (snapcompactArchive) {
+			contextAssembly.addGenerated(
+				`generated:compaction:${compaction.id}:archive`,
+				"snapcompact-archive",
+				undefined,
+				[`entry:${compaction.id}`],
+				"generated-archive",
+				{ persisted: false, display: true, model: !options?.transcript },
+				{
+					frameCount: snapcompactArchive.frames.length,
+					truncatedChars: snapcompactArchive.truncatedChars,
+				},
+			);
+		}
 		// Agent context (non-transcript): summary first so the LLM sees the
 		// compacted context before recent messages.
 		if (!options?.transcript) {
@@ -428,6 +506,23 @@ export function buildSessionContext(
 
 		// Find compaction index in path
 		const compactionIdx = path.findIndex(e => e.type === "compaction" && e.id === compaction.id);
+		const compactedSourceIds: string[] = [];
+		let foundFirstKeptForProjection = false;
+		for (let i = 0; i < compactionIdx; i++) {
+			const entry = path[i];
+			if (entry.id === compaction.firstKeptEntryId) foundFirstKeptForProjection = true;
+			if (!foundFirstKeptForProjection) {
+				contextAssembly.excludeEntry(entry, "compacted");
+				compactedSourceIds.push(`entry:${entry.id}`);
+			} else if (remoteReplacementHistory && !options?.transcript) {
+				contextAssembly.excludeEntry(entry, "provider-replacement-history");
+			}
+		}
+		contextAssembly.addRelation({
+			kind: "replaces",
+			sourceIds: compactedSourceIds,
+			targetIds: [compactionSummarySourceId],
+		});
 
 		// The remote replacement payload (OpenAI remote compaction) carries the
 		// kept turns for the LLM context only; it is not rendered as visible
@@ -519,6 +614,7 @@ export function buildSessionContext(
 						: block,
 				);
 			if (normalized.length === 0 && !options?.transcript) {
+				contextAssembly.dropMessage(message, "dangling-tool-call");
 				messages.splice(i, 1);
 			} else {
 				const rewritten = { ...message, content: normalized };
@@ -528,6 +624,7 @@ export function buildSessionContext(
 					// row instead of silently erasing the turn's activity.
 					(rewritten as AgentMessage & StrippedToolCallsMarker).strippedToolCalls = strippedToolCalls;
 				}
+				contextAssembly.replaceMessage(message, rewritten);
 				messages[i] = rewritten;
 			}
 		}
@@ -556,11 +653,13 @@ export function buildSessionContext(
 			for (const block of message.content) {
 				if (block.type === "toolCall") droppedToolCallIds.add(block.id);
 			}
+			contextAssembly.dropMessage(message, "unsafe-assistant-turn");
 			messages.splice(i, 1);
 			if (droppedToolCallIds.size > 0) {
 				for (let j = messages.length - 1; j >= i; j--) {
 					const candidate = messages[j];
 					if (candidate?.role === "toolResult" && droppedToolCallIds.has(candidate.toolCallId)) {
+						contextAssembly.dropMessage(candidate, "unsafe-assistant-turn");
 						messages.splice(j, 1);
 					}
 				}
@@ -569,6 +668,7 @@ export function buildSessionContext(
 	}
 
 	return {
+		contextAssembly: contextAssembly.finish(),
 		messages,
 		cacheMissExplainedAt: options?.transcript ? cacheMissExplainedAt : undefined,
 		thinkingLevel,

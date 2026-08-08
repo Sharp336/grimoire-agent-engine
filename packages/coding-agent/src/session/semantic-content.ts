@@ -445,7 +445,11 @@ function validateBlock(block: unknown): SemanticContentValidation | undefined {
 export function validateSemanticContent(value: unknown): SemanticContentValidation {
 	let encoded: string;
 	try {
-		encoded = JSON.stringify(value);
+		const serialized = JSON.stringify(value);
+		if (serialized === undefined) {
+			return { ok: false, code: "invalid_semantic_content", error: "Semantic content must be JSON serializable" };
+		}
+		encoded = serialized;
 	} catch {
 		return { ok: false, code: "invalid_semantic_content", error: "Semantic content must be JSON serializable" };
 	}
