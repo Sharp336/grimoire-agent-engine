@@ -251,7 +251,10 @@ export async function resolveEffectiveSubagentPolicy(
 	assertPlanControlsAllowed(request, planMode);
 	assertDepthAndSpawnAllowed(request, agentName);
 
-	const discovery = await discoverAgents(request.session.cwd);
+	const discovery = await discoverAgents(request.session.cwd, undefined, {
+		includeExtensions: true,
+		extensionMode: request.session.getExtensionDiscoveryMode?.(),
+	});
 	const agent = getAgent(discovery.agents, agentName);
 	if (!agent) {
 		const available = discovery.agents.map(candidate => candidate.name).join(", ") || "none";
@@ -427,6 +430,7 @@ function buildExecutorOptions(
 		enableIrc: policy.enableIrc,
 		maxRuntimeMs: request.maxRuntimeMs,
 		restrictToolNames,
+		disableExtensionDiscovery: session.getExtensionDiscoveryMode?.() === "explicit-only",
 		keepAlive: request.keepAlive,
 		signal: request.signal,
 		eventBus: session.eventBus,

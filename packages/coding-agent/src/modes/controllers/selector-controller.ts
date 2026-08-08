@@ -397,11 +397,17 @@ export class SelectorController {
 		const activeModel = this.ctx.session.model;
 		const activeModelPattern = activeModel ? `${activeModel.provider}/${activeModel.id}` : undefined;
 		const defaultModelPattern = this.ctx.settings.getModelRole("default");
-		const dashboard = await AgentDashboard.create(getProjectDir(), this.ctx.settings, this.ctx.ui.terminal.rows, {
-			modelRegistry: this.ctx.session.modelRegistry,
-			activeModelPattern,
-			defaultModelPattern,
-		});
+		const dashboard = await AgentDashboard.create(
+			getProjectDir(),
+			this.ctx.settings,
+			this.ctx.ui.terminal.rows,
+			{
+				modelRegistry: this.ctx.session.modelRegistry,
+				activeModelPattern,
+				defaultModelPattern,
+			},
+			this.ctx.session.getExtensionDiscoveryMode,
+		);
 		const overlay = this.ctx.ui.showOverlay(dashboard, {
 			width: "100%",
 			maxHeight: "100%",

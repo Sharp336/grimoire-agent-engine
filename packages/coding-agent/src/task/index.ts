@@ -466,22 +466,30 @@ const discoveryMemo = new Map<string, Promise<DiscoveryResult>>();
 let discoveryMemoFn: typeof discoverAgents | undefined;
 
 /**
- * Memoized agent discovery for a cwd, shared with `TaskTool.create`. Returns
- * the same cached definitions snapshot the task tool renders, so prompt-side
- * scout availability is always computed from the same set spawn preflight
- * resolves against.
+ * Memoized agent discovery for a (cwd, extension-mode) pair, shared with
+ * `TaskTool.create`. Returns the same cached definitions snapshot the task
+ * tool renders, so prompt-side scout availability is always computed from the
+ * same set spawn preflight resolves against.
+ *
+ * The extension mode is part of the key: an `--no-extensions` session
+ * (`explicit-only`) suppresses ambient marketplace-plugin roots, so a
+ * merge-mode session's scan for the same cwd must not leak plugin agents into
+ * it (or vice versa).
  */
-export function discoverAgentsForCreate(cwd: string): Promise<DiscoveryResult> {
+export function discoverAgentsForCreate(
+	cwd: string,
+	extensionMode: "explicit-only" | "merge" = "merge",
+): Promise<DiscoveryResult> {
 	const fn = discoverAgents;
 	if (discoveryMemoFn !== fn) {
 		discoveryMemoFn = fn;
 		discoveryMemo.clear();
 		clearDiscoveredAgentSnapshots();
 	}
-	const key = path.resolve(cwd);
+	const key = `${path.resolve(cwd)}\0${extensionMode}`;
 	let pending = discoveryMemo.get(key);
 	if (!pending) {
-		pending = fn(cwd);
+		pending = fn(cwd, undefined, { includeExtensions: true, extensionMode });
 		discoveryMemo.set(key, pending);
 		// Two-arg then: both branches run on the memoized promise itself, so a
 		// rejection is consumed here and never leaves an unhandled derived
@@ -489,7 +497,7 @@ export function discoverAgentsForCreate(cwd: string): Promise<DiscoveryResult> {
 		pending.then(
 			({ agents }) => {
 				if (discoveryMemo.get(key) === pending) {
-					setDiscoveredAgentsSnapshot(cwd, agents);
+					setDiscoveredAgentsSnapshot(cwd, agents, extensionMode);
 				}
 			},
 			() => {
@@ -501,13 +509,22 @@ export function discoverAgentsForCreate(cwd: string): Promise<DiscoveryResult> {
 }
 
 /** Rescan one cwd and publish its definitions to existing and future task tools. */
-export async function refreshAgentDiscovery(cwd: string): Promise<void> {
-	const key = path.resolve(cwd);
-	discoveryMemo.delete(key);
-	const pending = discoverAgentsForCreate(cwd);
+export async function refreshAgentDiscovery(
+	cwd: string,
+	extensionMode: "explicit-only" | "merge" = "merge",
+): Promise<void> {
+	const resolvedCwd = path.resolve(cwd);
+	// A plugin/skill reload changes both scopes: the merge-mode scan this call
+	// performs, and the explicit-only snapshot the same cwd keeps. Invalidate
+	// both keys so the next discovery in either mode re-resolves lazily.
+	for (const mode of ["explicit-only", "merge"] as const) {
+		discoveryMemo.delete(`${resolvedCwd}\0${mode}`);
+	}
+	const key = `${resolvedCwd}\0${extensionMode}`;
+	const pending = discoverAgentsForCreate(cwd, extensionMode);
 	const { agents } = await pending;
 	if (discoveryMemo.get(key) === pending) {
-		setDiscoveredAgentsSnapshot(cwd, agents);
+		setDiscoveredAgentsSnapshot(cwd, agents, extensionMode);
 	}
 }
 
@@ -627,7 +644,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
 		const isolationMode = this.session.settings.get("task.isolation.mode");
 		return renderDescription({
-			agents: getDiscoveredAgentsSnapshot(this.session.cwd) ?? this.#discoveredAgents,
+			agents:
+				getDiscoveredAgentsSnapshot(this.session.cwd, this.session.getExtensionDiscoveryMode?.()) ??
+				this.#discoveredAgents,
 			isolationEnabled: !planMode && isolationMode !== "none",
 			applyIsolatedChanges: this.session.settings.get("task.isolation.apply"),
 			disabledAgents,
@@ -653,7 +672,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	#isScoutAvailable(): boolean {
 		const disabledAgents = this.session.settings.get("task.disabledAgents") as string[] | undefined;
 		return isSpawnableScoutInAgents(
-			getDiscoveredAgentsSnapshot(this.session.cwd) ?? this.#discoveredAgents,
+			getDiscoveredAgentsSnapshot(this.session.cwd, this.session.getExtensionDiscoveryMode?.()) ??
+				this.#discoveredAgents,
 			disabledAgents,
 			this.session.getSessionSpawns?.() ?? "*",
 		);
@@ -701,7 +721,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * Create a TaskTool instance with async agent discovery.
 	 */
 	static async create(session: ToolSession): Promise<TaskTool> {
-		const { agents } = await discoverAgentsForCreate(session.cwd);
+		const { agents } = await discoverAgentsForCreate(session.cwd, session.getExtensionDiscoveryMode?.());
 		return new TaskTool(session, agents);
 	}
 

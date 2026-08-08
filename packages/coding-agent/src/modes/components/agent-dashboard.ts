@@ -394,6 +394,7 @@ export class AgentDashboard extends Container {
 	#createSpec: GeneratedAgentSpec | null = null;
 	#createError: string | null = null;
 	#createStreamingText = "";
+	#getExtensionDiscoveryMode: (() => "explicit-only" | "merge") | undefined;
 
 	onClose?: () => void;
 	onRequestRender?: () => void;
@@ -403,8 +404,10 @@ export class AgentDashboard extends Container {
 		private readonly settings: Settings | null,
 		private readonly terminalHeight: number,
 		private readonly modelContext: AgentDashboardModelContext,
+		getExtensionDiscoveryMode: (() => "explicit-only" | "merge") | undefined,
 	) {
 		super();
+		this.#getExtensionDiscoveryMode = getExtensionDiscoveryMode;
 	}
 
 	static async create(
@@ -412,8 +415,15 @@ export class AgentDashboard extends Container {
 		settings: Settings | null = null,
 		terminalHeight?: number,
 		modelContext: AgentDashboardModelContext = {},
+		getExtensionDiscoveryMode?: () => "explicit-only" | "merge",
 	): Promise<AgentDashboard> {
-		const dashboard = new AgentDashboard(cwd, settings, terminalHeight ?? process.stdout.rows ?? 24, modelContext);
+		const dashboard = new AgentDashboard(
+			cwd,
+			settings,
+			terminalHeight ?? process.stdout.rows ?? 24,
+			modelContext,
+			getExtensionDiscoveryMode,
+		);
 		await dashboard.#init();
 		return dashboard;
 	}
@@ -432,7 +442,10 @@ export class AgentDashboard extends Container {
 		try {
 			const selectedName = this.#selectedAgent()?.name;
 			const activeTabId = this.#tabs[this.#activeTabIndex]?.id ?? "all";
-			const { agents } = await discoverAgents(this.cwd);
+			const { agents } = await discoverAgents(this.cwd, undefined, {
+				includeExtensions: true,
+				extensionMode: this.#getExtensionDiscoveryMode?.(),
+			});
 			const disabled = new Set((this.#settingsManager?.get("task.disabledAgents") as string[] | undefined) ?? []);
 			const overrides = this.#settingsManager?.get("task.agentModelOverrides") ?? {};
 			const prewalkOverrides = this.#settingsManager?.get("task.agentPrewalk") ?? {};
@@ -825,7 +838,7 @@ export class AgentDashboard extends Container {
 		).trimEnd();
 		const content = `---\n${frontmatter}\n---\n\n${spec.systemPrompt.trim()}\n`;
 		await Bun.write(filePath, content);
-		await refreshAgentDiscovery(this.cwd);
+		await refreshAgentDiscovery(this.cwd, this.#getExtensionDiscoveryMode?.());
 		await this.#reloadData();
 		this.#clearCreateFlow();
 		this.#notice = `Created agent ${spec.identifier} at ${shortenPath(filePath)}`;

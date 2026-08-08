@@ -29,6 +29,7 @@ function createSession(cwd: string): ToolSession {
 		settings: Settings.isolated({}),
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
+		getExtensionDiscoveryMode: () => "merge",
 	} as unknown as ToolSession;
 }
 
@@ -70,6 +71,25 @@ describe("TaskTool.create discovery memo", () => {
 		const tool = await TaskTool.create(createSession("/tmp"));
 
 		expect(tool.description).toContain("task");
+		expect(spy).toHaveBeenCalledTimes(2);
+	});
+
+	it("rescans for a different extension mode on the same cwd", async () => {
+		const spy = vi
+			.spyOn(discoveryModule, "discoverAgents")
+			.mockResolvedValue({ agents: TEST_AGENTS, projectAgentsDir: null });
+
+		const mergeSession = createSession("/tmp");
+		mergeSession.getExtensionDiscoveryMode = () => "merge";
+		const explicitSession = createSession("/tmp");
+		explicitSession.getExtensionDiscoveryMode = () => "explicit-only";
+
+		await TaskTool.create(mergeSession);
+		await TaskTool.create(explicitSession);
+
+		// An explicit-only session's discovery must not be served from a
+		// merge-mode memo entry: the two modes resolve different agent sets
+		// (plugin roots suppressed), so the memo key must include the mode.
 		expect(spy).toHaveBeenCalledTimes(2);
 	});
 

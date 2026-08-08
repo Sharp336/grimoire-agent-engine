@@ -439,6 +439,14 @@ export interface ExecutorOptions {
 	 * tool against its own `CustomToolAPI` (cwd, exec, pushPendingAction, UI).
 	 */
 	preloadedCustomToolPaths?: ToolPathWithSource[];
+	/**
+	 * Whether the parent session was launched with extension discovery disabled
+	 * (`--no-extensions`, rootMode "explicit-only"). Forwarded so the subagent
+	 * session enforces the same root scope: its agent discovery, task tool, and
+	 * scout availability must not surface ambient plugin agents the parent
+	 * suppressed.
+	 */
+	disableExtensionDiscovery?: boolean;
 	mcpManager?: MCPManager;
 	authStorage?: AuthStorage;
 	modelRegistry?: ModelRegistry;
@@ -3062,6 +3070,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				enableMCP,
 				mcpManager,
 				customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
+				disableExtensionDiscovery: options.disableExtensionDiscovery,
 				localProtocolOptions: options.localProtocolOptions,
 				telemetry: subagentTelemetry,
 				parentEvalSessionId: options.parentEvalSessionId,

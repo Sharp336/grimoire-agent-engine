@@ -165,6 +165,7 @@ import {
 	projectSystemPromptToolMetadata,
 } from "./system-prompt";
 import { fingerprintAgentContent, resolveAgentSessionPolicy } from "./task/agent-policy";
+import { getDiscoveredAgentsSnapshot } from "./task/discovery-snapshot";
 import { discoverAgentsForCreate } from "./task/index";
 import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
@@ -1824,6 +1825,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// dispose + unregister on the session's own registry.
 			agentLifecycle: options.agentRegistry ? undefined : () => AgentLifecycleManager.global(),
 			getSessionSpawns: () => sessionSpawns,
+			getExtensionDiscoveryMode: () => rootMode,
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
 			getActiveModelString,
 			getActiveModel: () => agent?.state.model ?? model,
@@ -2908,7 +2910,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Definitions the task tool actually advertises (same memoized discovery it
 		// renders): scout availability in the system prompt must match spawn
 		// reality, not just the name-based spawn policy.
-		const spawnableAgents = (await discoverAgentsForCreate(cwd)).agents;
+		const spawnableAgents = (await discoverAgentsForCreate(cwd, rootMode)).agents;
 		const rebuildSystemPrompt = async (
 			toolNames: string[],
 			tools: Map<string, AgentTool>,
@@ -3020,7 +3022,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				taskBatch: settings.get("task.batch"),
 				taskMaxConcurrency: settings.get("task.maxConcurrency"),
 				scoutAvailable: isSpawnableScoutInAgents(
-					spawnableAgents,
+					getDiscoveredAgentsSnapshot(promptCwd, rootMode) ?? spawnableAgents,
 					settings.get("task.disabledAgents") as string[] | undefined,
 					sessionSpawns,
 				),

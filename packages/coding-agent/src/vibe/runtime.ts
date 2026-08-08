@@ -1447,6 +1447,7 @@ export class VibeSessionRegistry {
 			parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 			parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
 			keepAlive: true,
+			disableExtensionDiscovery: session.getExtensionDiscoveryMode?.() === "explicit-only",
 		};
 	}
 

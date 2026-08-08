@@ -101,7 +101,7 @@ export function scoutAvailableForSession(session: ToolSession): boolean {
 	const disabledAgents = session.settings.get("task.disabledAgents") as string[] | undefined;
 	const spawns = session.getSessionSpawns?.() ?? "*";
 	if (!isScoutSpawnable(disabledAgents, spawns)) return false;
-	const agents = getDiscoveredAgentsSnapshot(session.cwd);
+	const agents = getDiscoveredAgentsSnapshot(session.cwd, session.getExtensionDiscoveryMode?.());
 	if (agents === undefined) return true;
 	const scout = agents.find(agent => agent.name === "scout");
 	return scout !== undefined && scout.availability !== "primary";

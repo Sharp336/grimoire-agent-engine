@@ -269,6 +269,14 @@ export interface ToolSession {
 	allocateOutputArtifact?: (toolType: string) => Promise<{ id?: string; path?: string }>;
 	/** Get session spawns */
 	getSessionSpawns: () => string | null;
+	/**
+	 * Extension-agent discovery mode for this session: "explicit-only" under
+	 * --no-extensions (only CLI-named roots), "merge" otherwise. Agent/skill
+	 * discovery surfaces (task tool, scout availability, spawn preflight) must
+	 * rediscover under this mode so a session launched with extensions disabled
+	 * never sees ambient plugin agents.
+	 */
+	getExtensionDiscoveryMode?: () => "explicit-only" | "merge";
 	/** Get resolved model string if explicitly set for this session */
 	getModelString?: () => string | undefined;
 	/** Get the current session model string, regardless of how it was chosen */

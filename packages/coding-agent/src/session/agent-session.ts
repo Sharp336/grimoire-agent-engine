@@ -4810,7 +4810,7 @@ export class AgentSession {
 		const disabledAgents = this.settings.get("task.disabledAgents") as string[] | undefined;
 		const spawns = this.#getSessionSpawns?.() ?? "*";
 		if (!isScoutSpawnable(disabledAgents, spawns)) return false;
-		const agents = getDiscoveredAgentsSnapshot(this.sessionManager.getCwd());
+		const agents = getDiscoveredAgentsSnapshot(this.sessionManager.getCwd(), this.getExtensionDiscoveryMode());
 		if (agents === undefined) return true;
 		const scout = agents.find(agent => agent.name === "scout");
 		return scout !== undefined && scout.availability !== "primary";
