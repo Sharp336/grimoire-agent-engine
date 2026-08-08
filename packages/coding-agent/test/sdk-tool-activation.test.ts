@@ -762,6 +762,35 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("switchAgentPersona rejects a disabled persona without mutating session state", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings: Settings.isolated({ "task.disabledAgents": ["disabled-target"] }),
+		});
+
+		try {
+			const personaBefore = session.agentPersona;
+			const toolsBefore = session.getEnabledToolNames();
+			const modelBefore = session.model;
+
+			await expect(
+				session.switchAgentPersona({
+					name: "disabled-target",
+					description: "Target persona disabled in settings",
+					systemPrompt: "",
+					source: "project" as const,
+				}),
+			).rejects.toThrow('Agent "disabled-target" is disabled in settings (task.disabledAgents).');
+
+			expect(session.agentPersona).toBe(personaBefore);
+			expect(session.getEnabledToolNames()).toEqual(toolsBefore);
+			expect(session.model).toBe(modelBefore);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("rejects a persona switch while the session is streaming", async () => {
 		const tempDir = makeTempDir();
 		const { session } = await createAgentSession(baseOptions(tempDir));

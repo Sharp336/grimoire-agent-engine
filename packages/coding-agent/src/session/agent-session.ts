@@ -6571,6 +6571,14 @@ export class AgentSession {
 		if (agent.availability === "subagent") {
 			throw new Error(`Agent "${agent.name}" is subagent-only and cannot be selected as main persona.`);
 		}
+		// Enforce task.disabledAgents at this boundary, not just in the slash
+		// command and picker: SDK/extension code can call this method directly,
+		// and applying a persona the user disabled would bypass the same setting
+		// startup and /agent enforce.
+		const disabledAgents = this.settings.get("task.disabledAgents") as string[] | undefined;
+		if (disabledAgents?.includes(agent.name)) {
+			throw new Error(`Agent "${agent.name}" is disabled in settings (task.disabledAgents).`);
+		}
 		// Enforce the switch invariant at this boundary, not just in the slash
 		// command: SDK/extension code can call this method directly, and
 		// applying a persona while a turn is in flight (or while a mode still
