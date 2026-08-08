@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Volcengine Coding Plan (火山引擎) as a new upstream provider (`volcengine-coding-plan`) with 9 bundled models - `doubao-seed-2.1-turbo`, `doubao-seed-2.0-lite`, `minimax-m3`, `glm-5.2` (`glm-latest`), `deepseek-v4-flash`, `deepseek-v4-pro`, `kimi-k2.7-code`, and `ark-code-latest` (console-managed) - using OpenAI Responses API at `https://ark.cn-beijing.volces.com/api/coding/v3`, defaulting to `ark-code-latest`.
+- Added Volcengine Agent Plan (火山引擎) as a new upstream provider (`volcengine-agent-plan`) with a dedicated base URL (`https://ark.cn-beijing.volces.com/api/plan/v3`) and separate API key (`VOLCENGINE_AGENT_PLAN_API_KEY`), using OpenAI Responses API with the same model catalog as the Coding Plan, defaulting to `ark-code-latest`.
+- Added Volcengine Ark (火山引擎方舟) as a new pay-as-you-go provider (`volcengine`) using OpenAI Responses API at `https://ark.cn-beijing.volces.com/api/v3` with `ARK_API_KEY` and dynamic model discovery, defaulting to `doubao-seed-2-1-pro-260628`.
+
 ## [17.2.11] - 2026-08-07
 
 ### Breaking Changes
@@ -11,10 +17,6 @@
 ### Added
 
 - Added support for reporting Cursor personal monthly USD quotas and remaining balances, labeled by verified profile email accounts.
-- Added Volcengine Coding Plan (火山引擎) as a new upstream provider (`volcengine-coding-plan`) with 9 bundled models - `doubao-seed-2.1-turbo`, `doubao-seed-2.0-lite`, `minimax-m3`, `glm-5.2` (`glm-latest`), `deepseek-v4-flash`, `deepseek-v4-pro`, `kimi-k2.7-code`, and `ark-code-latest` (console-managed) - using OpenAI Responses API at `https://ark.cn-beijing.volces.com/api/coding/v3`, defaulting to `ark-code-latest`.
-- Added Volcengine Agent Plan (火山引擎) as a new upstream provider (`volcengine-agent-plan`) with a dedicated base URL (`https://ark.cn-beijing.volces.com/api/plan/v3`) and separate API key (`VOLCENGINE_AGENT_PLAN_API_KEY`), using OpenAI Responses API with the same model catalog as the Coding Plan, defaulting to `ark-code-latest`.
-- Added Volcengine Ark (火山引擎方舟) as a new pay-as-you-go provider (`volcengine`) using OpenAI Responses API at `https://ark.cn-beijing.volces.com/api/v3` with `ARK_API_KEY` and dynamic model discovery, defaulting to `doubao-seed-2-1-pro-260628`.
-- Added Cursor personal monthly USD quota and remaining-balance reporting with verified profile email account labels.
 
 ### Fixed
 

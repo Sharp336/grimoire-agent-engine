@@ -48,6 +48,8 @@ import {
 	projectOpenAIProReasoningAliases,
 	SAKANA_FUGU_STATIC_MODELS,
 	stripFireworksDeepSeekThinkingToggle,
+	VOLCENGINE_AGENT_PLAN_STATIC_MODELS,
+	VOLCENGINE_CODING_PLAN_STATIC_MODELS,
 } from "../src/provider-models/openai-compat";
 import { type OpenAICodexAccount, openaiCodexModelManagerOptions } from "../src/provider-models/special";
 import type { Api, ModelSpec } from "../src/types";
@@ -580,6 +582,15 @@ async function generateModels() {
 	// at boot. If live `/v1/models` discovery succeeds, it is authoritative.
 	if (!authoritativeCatalogProviders.has("gmi-cloud")) {
 		allModels.push(...GMI_CLOUD_STATIC_MODELS);
+	}
+	// Seed Volcengine Coding Plan and Agent Plan catalogs so the providers are
+	// usable when generation has no VOLCENGINE_API_KEY / VOLCENGINE_AGENT_PLAN_API_KEY.
+	// Both plans use subscription pricing ($0); live discovery is authoritative.
+	if (!authoritativeCatalogProviders.has("volcengine-coding-plan")) {
+		allModels.push(...VOLCENGINE_CODING_PLAN_STATIC_MODELS);
+	}
+	if (!authoritativeCatalogProviders.has("volcengine-agent-plan")) {
+		allModels.push(...VOLCENGINE_AGENT_PLAN_STATIC_MODELS);
 	}
 	// Seed the GitLab Duo Agent fallback model so a fresh install (no credentialed
 	// dynamic discovery/cache yet) still surfaces the provider's default model in the

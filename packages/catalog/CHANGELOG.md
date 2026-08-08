@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Volcengine Coding Plan (`volcengine-coding-plan`), Agent Plan (`volcengine-agent-plan`), and Ark pay-as-you-go (`volcengine`) provider catalog entries with model manager options, bundled models, and discovery descriptors.
+
 ## [17.2.11] - 2026-08-07
 
 ### Fixed

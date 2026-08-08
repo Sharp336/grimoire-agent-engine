@@ -106174,8 +106174,12 @@
 			"maxTokens": 131072,
 			"thinking": {
 				"mode": "effort",
-				"minLevel": "minimal",
-				"maxLevel": "high"
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				]
 			}
 		},
 		"glm-latest": {
@@ -106198,8 +106202,12 @@
 			"maxTokens": 131072,
 			"thinking": {
 				"mode": "effort",
-				"minLevel": "minimal",
-				"maxLevel": "high"
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				]
 			}
 		},
 		"deepseek-v4-flash": {
@@ -106241,8 +106249,12 @@
 			"maxTokens": 16384,
 			"thinking": {
 				"mode": "effort",
-				"minLevel": "minimal",
-				"maxLevel": "high"
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				]
 			}
 		},
 		"kimi-k2.7-code": {
@@ -106266,8 +106278,12 @@
 			"maxTokens": 32768,
 			"thinking": {
 				"mode": "effort",
-				"minLevel": "minimal",
-				"maxLevel": "high"
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				]
 			}
 		},
 		"ark-code-latest": {
@@ -106368,8 +106384,12 @@
 			"maxTokens": 131072,
 			"thinking": {
 				"mode": "effort",
-				"minLevel": "minimal",
-				"maxLevel": "high"
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				]
 			}
 		},
 		"glm-latest": {
@@ -106392,8 +106412,12 @@
 			"maxTokens": 131072,
 			"thinking": {
 				"mode": "effort",
-				"minLevel": "minimal",
-				"maxLevel": "high"
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				]
 			}
 		},
 		"deepseek-v4-flash": {
@@ -106435,8 +106459,12 @@
 			"maxTokens": 16384,
 			"thinking": {
 				"mode": "effort",
-				"minLevel": "minimal",
-				"maxLevel": "high"
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				]
 			}
 		},
 		"kimi-k2.7-code": {
@@ -106460,8 +106488,12 @@
 			"maxTokens": 32768,
 			"thinking": {
 				"mode": "effort",
-				"minLevel": "minimal",
-				"maxLevel": "high"
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				]
 			}
 		},
 		"ark-code-latest": {

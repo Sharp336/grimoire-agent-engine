@@ -1761,25 +1761,144 @@ export function zhipuCodingPlanModelManagerOptions(
 // 7.4b Volcengine Coding Plan (火山引擎)
 // ---------------------------------------------------------------------------
 
+const VOLCENGINE_CODING_PLAN_BASE_URL = "https://ark.cn-beijing.volces.com/api/coding/v3";
+
 export interface VolcengineCodingPlanModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
 	fetch?: FetchImpl;
 }
 
+/**
+ * Documented Coding Plan catalog bundled so the provider is usable when
+ * generation and first boot have no live key. Subscription pricing is $0.
+ */
+export const VOLCENGINE_CODING_PLAN_STATIC_MODELS: readonly ModelSpec<"openai-responses">[] = [
+	{
+		id: "doubao-seed-2.1-turbo",
+		name: "Doubao Seed 2.1 Turbo",
+		api: "openai-responses",
+		provider: "volcengine-coding-plan",
+		baseUrl: VOLCENGINE_CODING_PLAN_BASE_URL,
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128_000,
+		maxTokens: 16_384,
+	},
+	{
+		id: "doubao-seed-2.0-lite",
+		name: "Doubao Seed 2.0 Lite",
+		api: "openai-responses",
+		provider: "volcengine-coding-plan",
+		baseUrl: VOLCENGINE_CODING_PLAN_BASE_URL,
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128_000,
+		maxTokens: 16_384,
+	},
+	{
+		id: "minimax-m3",
+		name: "MiniMax M3",
+		api: "openai-responses",
+		provider: "volcengine-coding-plan",
+		baseUrl: VOLCENGINE_CODING_PLAN_BASE_URL,
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128_000,
+		maxTokens: 16_384,
+	},
+	{
+		id: "glm-5.2",
+		name: "GLM-5.2",
+		api: "openai-responses",
+		provider: "volcengine-coding-plan",
+		baseUrl: VOLCENGINE_CODING_PLAN_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 131_072,
+		thinking: { mode: "effort", efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High] },
+	},
+	{
+		id: "glm-latest",
+		name: "GLM Latest",
+		api: "openai-responses",
+		provider: "volcengine-coding-plan",
+		baseUrl: VOLCENGINE_CODING_PLAN_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 131_072,
+		thinking: { mode: "effort", efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High] },
+	},
+	{
+		id: "deepseek-v4-flash",
+		name: "DeepSeek V4 Flash",
+		api: "openai-responses",
+		provider: "volcengine-coding-plan",
+		baseUrl: VOLCENGINE_CODING_PLAN_BASE_URL,
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128_000,
+		maxTokens: 16_384,
+	},
+	{
+		id: "deepseek-v4-pro",
+		name: "DeepSeek V4 Pro",
+		api: "openai-responses",
+		provider: "volcengine-coding-plan",
+		baseUrl: VOLCENGINE_CODING_PLAN_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128_000,
+		maxTokens: 16_384,
+		thinking: { mode: "effort", efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High] },
+	},
+	{
+		id: "kimi-k2.7-code",
+		name: "Kimi K2.7 Code",
+		api: "openai-responses",
+		provider: "volcengine-coding-plan",
+		baseUrl: VOLCENGINE_CODING_PLAN_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 262_144,
+		maxTokens: 32_768,
+		thinking: { mode: "effort", efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High] },
+	},
+	{
+		id: "ark-code-latest",
+		name: "Ark Code Latest",
+		api: "openai-responses",
+		provider: "volcengine-coding-plan",
+		baseUrl: VOLCENGINE_CODING_PLAN_BASE_URL,
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 256_000,
+		maxTokens: 32_768,
+	},
+];
+
 export function volcengineCodingPlanModelManagerOptions(
 	config?: VolcengineCodingPlanModelManagerConfig,
 ): ModelManagerOptions<"openai-responses"> {
-	return createSimpleOpenAIResponsesOptions(
-		"volcengine-coding-plan",
-		"https://ark.cn-beijing.volces.com/api/coding/v3",
-		config,
-	);
+	return createSimpleOpenAIResponsesOptions("volcengine-coding-plan", VOLCENGINE_CODING_PLAN_BASE_URL, config);
 }
 
 // ---------------------------------------------------------------------------
 // 7.4c Volcengine Agent Plan (火山引擎)
 // ---------------------------------------------------------------------------
+
+const VOLCENGINE_AGENT_PLAN_BASE_URL = "https://ark.cn-beijing.volces.com/api/plan/v3";
 
 export interface VolcengineAgentPlanModelManagerConfig {
 	apiKey?: string;
@@ -1787,14 +1906,21 @@ export interface VolcengineAgentPlanModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
+/**
+ * Agent Plan shares the Coding Plan model catalog but with a dedicated base URL
+ * and separate API key. Subscription pricing is $0.
+ */
+export const VOLCENGINE_AGENT_PLAN_STATIC_MODELS: readonly ModelSpec<"openai-responses">[] =
+	VOLCENGINE_CODING_PLAN_STATIC_MODELS.map(model => ({
+		...model,
+		provider: "volcengine-agent-plan",
+		baseUrl: VOLCENGINE_AGENT_PLAN_BASE_URL,
+	}));
+
 export function volcengineAgentPlanModelManagerOptions(
 	config?: VolcengineAgentPlanModelManagerConfig,
 ): ModelManagerOptions<"openai-responses"> {
-	return createSimpleOpenAIResponsesOptions(
-		"volcengine-agent-plan",
-		"https://ark.cn-beijing.volces.com/api/plan/v3",
-		config,
-	);
+	return createSimpleOpenAIResponsesOptions("volcengine-agent-plan", VOLCENGINE_AGENT_PLAN_BASE_URL, config);
 }
 
 // ---------------------------------------------------------------------------
