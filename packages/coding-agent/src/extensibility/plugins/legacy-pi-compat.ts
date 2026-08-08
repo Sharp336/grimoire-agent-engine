@@ -422,7 +422,24 @@ function isGlobalRequireCall(node: StructuralAstNode | null, scope: BindingScope
 		!scopeHasBinding(scope, REQUIRE_BINDING)
 	);
 }
-
+/**
+ * Whether `node` is a `createRequire(...)` factory call imported from
+ * `node:module` (or its `module` alias).
+ */
+function isCreateRequireInvocation(
+	node: StructuralAstNode | null,
+	createRequireBindings: ReadonlySet<string>,
+	moduleNamespaceBindings: ReadonlySet<string>,
+): boolean {
+	if (node?.type !== "CallExpression") return false;
+	const callee = asAstNode(node.callee);
+	if (callee?.type === "Identifier" && typeof callee.name === "string") {
+		return createRequireBindings.has(callee.name);
+	}
+	if (callee?.type !== "MemberExpression" || staticMemberPropertyName(callee) !== "createRequire") return false;
+	const object = asAstNode(callee.object);
+	return object?.type === "Identifier" && typeof object.name === "string" && moduleNamespaceBindings.has(object.name);
+}
 function staticMemberPropertyName(node: StructuralAstNode): string | null {
 	const property = asAstNode(node.property);
 	if (node.computed !== true && property?.type === "Identifier" && typeof property.name === "string") {
@@ -458,6 +475,26 @@ function collectExtensionSpecifierReferences(
 			references.push({ kind, specifier: node.value, start: node.start, end: node.end });
 		}
 	};
+	const createRequireBindings = new Set<string>();
+	const moduleNamespaceBindings = new Set<string>();
+	for (const { node } of collectScopedAstNodes(ast, candidate => candidate.type === "ImportDeclaration")) {
+		const source = asAstNode(node.source);
+		if (source?.type !== "StringLiteral" || (source.value !== "node:module" && source.value !== "module")) continue;
+		for (const value of Array.isArray(node.specifiers) ? node.specifiers : []) {
+			const specifier = asAstNode(value);
+			const local = asAstNode(specifier?.local);
+			if (local?.type !== "Identifier" || typeof local.name !== "string") continue;
+			if (specifier?.type === "ImportNamespaceSpecifier") moduleNamespaceBindings.add(local.name);
+			else if (specifier?.type === "ImportSpecifier") {
+				const imported = asAstNode(specifier.imported);
+				if (
+					(imported?.type === "Identifier" && imported.name === "createRequire") ||
+					(imported?.type === "StringLiteral" && imported.value === "createRequire")
+				)
+					createRequireBindings.add(local.name);
+			}
+		}
+	}
 	for (const { node, scope } of collectScopedAstNodes(ast, isSpecifierReferenceNode)) {
 		if (
 			node.type === "ImportDeclaration" ||
@@ -478,6 +515,15 @@ function collectExtensionSpecifierReferences(
 				record("import", nodeArgument(node, 0));
 			} else if (isIdentifier(callee, "require") && !scopeHasBinding(scope, REQUIRE_BINDING)) {
 				record("require", nodeArgument(node, 0));
+			} else if (isCreateRequireInvocation(callee, createRequireBindings, moduleNamespaceBindings)) {
+				const argument = nodeArgument(node, 0);
+				if (
+					argument?.type === "StringLiteral" &&
+					typeof argument.value === "string" &&
+					isBareExtensionDependencySpecifier(argument.value)
+				) {
+					record("require", argument);
+				}
 			}
 		}
 	}
@@ -1076,6 +1122,23 @@ async function resolveSourceModuleFile(basePath: string): Promise<string | null>
 	return null;
 }
 
+async function resolveRelativeCommonJsRequire(specifier: string, importerPath: string): Promise<string | null> {
+	const candidate = path.resolve(path.dirname(importerPath), specifier);
+	try {
+		const stats = await fs.promises.stat(candidate);
+		if (stats.isDirectory()) {
+			const manifest = await readPackageManifest(candidate);
+			if (typeof manifest?.main === "string") {
+				const main = await resolveSourceModuleFile(path.resolve(candidate, manifest.main));
+				if (main) return main;
+			}
+		}
+	} catch {
+		// Missing candidates fall through to extension and index resolution.
+	}
+	return resolveSourceModuleFile(candidate);
+}
+
 function isPathInsideRoot(rootPath: string, candidatePath: string): boolean {
 	const relative = path.relative(rootPath, candidatePath);
 	return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
@@ -1255,7 +1318,7 @@ function isBareExtensionDependencySpecifier(specifier: string): boolean {
 		return false;
 	}
 	const packageName = specifier.startsWith("@") ? specifier.split("/").slice(0, 2).join("/") : specifier.split("/")[0];
-	return Boolean(packageName && !isBuiltin(packageName));
+	return Boolean(packageName && !isBuiltin(specifier));
 }
 
 interface BarePackageSpecifier {
@@ -1319,7 +1382,6 @@ async function readPackageManifestUncached(packageRoot: string): Promise<Record<
 }
 
 type ExtensionModuleKind = "commonjs" | "esm";
-class ExtensionModuleKindConflictError extends Error {}
 
 async function isCommonJsModulePath(
 	modulePath: string,
@@ -1476,7 +1538,7 @@ async function resolveNodePackageRequire(specifier: string, importerPath: string
 	if (Object.hasOwn(manifest, "exports")) {
 		return resolveNodePackageExport(packageRoot, parsed.subpath, manifest, SUPPORTED_PACKAGE_REQUIRE_CONDITIONS);
 	}
-	if (parsed.subpath !== null) {
+	if (parsed.subpath) {
 		return resolvePackageSourceTarget(packageRoot, path.join(packageRoot, parsed.subpath));
 	}
 	const main = manifest.main;
@@ -1638,6 +1700,9 @@ async function resolveExtensionBareRequire(specifier: string, importerPath: stri
 }
 
 async function resolveExtensionCommonJsRequire(specifier: string, importerPath: string): Promise<string | null> {
+	if (specifier.startsWith(".")) {
+		return resolveRelativeCommonJsRequire(specifier, importerPath);
+	}
 	const remappedSpecifier = remapLegacyPiSpecifier(specifier);
 	if (remappedSpecifier) {
 		try {
@@ -1885,6 +1950,7 @@ async function realpathOrSelfUncached(p: string): Promise<string> {
 interface ExtensionModuleGraph {
 	readonly modules: Map<string, string>;
 	readonly cacheBustResolvedImportModules: Set<string>;
+	readonly synchronousSourcePaths: Set<string>;
 	readonly commonJsPaths: Set<string>;
 }
 
@@ -1895,9 +1961,7 @@ export interface LegacyPiModuleLoadOptions {
 	readonly required?: boolean;
 }
 
-class UnsupportedExtensionGraphError extends Error {
-	readonly name = "UnsupportedExtensionGraphError";
-}
+class UnsupportedExtensionGraphError extends Error {}
 
 function assertStaticRequiredGraph(ast: ParseResult, importerPath: string): void {
 	for (const { node, scope } of collectScopedAstNodes(ast, isSpecifierReferenceNode)) {
@@ -1911,8 +1975,13 @@ function assertStaticRequiredGraph(ast: ParseResult, importerPath: string): void
 		}
 		if (node.type === "CallExpression") {
 			const callee = asAstNode(node.callee);
+			const argument = nodeArgument(node, 0);
+			if (callee?.type === "Import" && argument?.type !== "StringLiteral") {
+				throw new UnsupportedExtensionGraphError(
+					`Required extension graph contains a non-static import in ${importerPath}`,
+				);
+			}
 			if (isIdentifier(callee, "require") && !scopeHasBinding(scope, REQUIRE_BINDING)) {
-				const argument = nodeArgument(node, 0);
 				if (argument?.type !== "StringLiteral") {
 					throw new UnsupportedExtensionGraphError(
 						`Required extension graph contains a non-static require in ${importerPath}`,
@@ -1939,6 +2008,7 @@ async function collectExtensionModules(
 ): Promise<ExtensionModuleGraph> {
 	const modules = new Map<string, string>();
 	const commonJsPaths = new Set<string>();
+	const synchronousSourcePaths = new Set<string>();
 	const queuedCacheBustResolvedImports = new Map<string, boolean>([[entryRealPath, true]]);
 	const queuedModuleKinds = new Map<string, ExtensionModuleKind>([[entryRealPath, "esm"]]);
 	const queuedEsmBranchPaths = new Set<string>();
@@ -1985,6 +2055,13 @@ async function collectExtensionModules(
 		const references = collectExtensionSpecifierReferences(source, file, ast);
 		for (const reference of references) {
 			const specifier = reference.specifier;
+			const requiresResolvedSnapshot =
+				specifier.startsWith(".") ||
+				specifier.startsWith("#") ||
+				(isBareExtensionDependencySpecifier(specifier) &&
+					!remapLegacyPiSpecifier(specifier) &&
+					specifier !== "typebox" &&
+					specifier !== "@sinclair/typebox");
 			try {
 				let resolved: string | null = null;
 				let nextCacheBustResolvedImports = cacheBustResolvedImports;
@@ -1993,8 +2070,10 @@ async function collectExtensionModules(
 				let requiresNativeAddonRewrite = false;
 				const isRequired = reference.kind === "require";
 				if (specifier.startsWith(".")) {
-					const candidate = Bun.resolveSync(specifier, dir);
-					if (hasSourceModuleExtension(candidate)) {
+					const candidate = isRequired
+						? await resolveRelativeCommonJsRequire(specifier, file)
+						: Bun.resolveSync(specifier, dir);
+					if (candidate && hasSourceModuleExtension(candidate)) {
 						const inheritedTargetKind = isRequired
 							? sourceIsCommonJs
 								? "commonjs"
@@ -2008,7 +2087,7 @@ async function collectExtensionModules(
 						const isCommonJsDescendant = isRequired && sourceIsCommonJs && targetIsCommonJs;
 						requiresNativeAddonRewrite =
 							isRequired && !isCommonJsDescendant && (await moduleRequiresNativeAddon(candidate));
-						if (!isRequired || isCommonJsDescendant || requiresNativeAddonRewrite) {
+						if (!isRequired || isCommonJsDescendant || requiresNativeAddonRewrite || !targetIsCommonJs) {
 							resolved = await realpathOrSelf(candidate);
 							resolvedModuleKind = targetIsCommonJs ? "commonjs" : "esm";
 							resolvedEsmBranch = !targetIsCommonJs && esmBranch;
@@ -2030,7 +2109,7 @@ async function collectExtensionModules(
 						const isCommonJsDescendant = isRequired && sourceIsCommonJs && targetIsCommonJs;
 						requiresNativeAddonRewrite =
 							isRequired && !isCommonJsDescendant && (await moduleRequiresNativeAddon(candidate));
-						if (!isRequired || isCommonJsDescendant || requiresNativeAddonRewrite) {
+						if (!isRequired || isCommonJsDescendant || requiresNativeAddonRewrite || !targetIsCommonJs) {
 							resolved = candidate;
 							resolvedModuleKind = targetIsCommonJs ? "commonjs" : "esm";
 							resolvedEsmBranch = !targetIsCommonJs && esmBranch;
@@ -2064,11 +2143,11 @@ async function collectExtensionModules(
 							: false;
 					if (isHookableEntry && dependencyEntry && (!isRequired || (sourceIsCommonJs && isCommonJsEntry))) {
 						resolved = await realpathOrSelf(dependencyEntry);
+					} else if (isHookableEntry && dependencyEntry && isRequired && !isCommonJsEntry) {
+						resolved = await realpathOrSelf(dependencyEntry);
 					} else if (isHookableEntry && dependencyEntry && isRequired) {
 						requiresNativeAddonRewrite = await moduleRequiresNativeAddon(dependencyEntry);
-						if (requiresNativeAddonRewrite) {
-							resolved = await realpathOrSelf(dependencyEntry);
-						}
+						if (requiresNativeAddonRewrite) resolved = await realpathOrSelf(dependencyEntry);
 					}
 					if (resolved) {
 						resolvedModuleKind = isCommonJsEntry ? "commonjs" : "esm";
@@ -2076,25 +2155,35 @@ async function collectExtensionModules(
 					}
 					nextCacheBustResolvedImports = false;
 				}
-				if (resolved && requiresNativeAddonRewrite) {
-					nativeAddonLoaderModulePaths.add(resolved);
+				if (
+					resolved &&
+					(requiresNativeAddonRewrite ||
+						(isRequired && resolvedModuleKind === "esm") ||
+						(synchronousSourcePaths.has(file) && resolvedModuleKind === "esm"))
+				) {
+					synchronousSourcePaths.add(resolved);
 				}
+				if (resolved && requiresNativeAddonRewrite) nativeAddonLoaderModulePaths.add(resolved);
 				if (resolved) {
 					const queuedCacheBust = queuedCacheBustResolvedImports.get(resolved) ?? false;
 					const mergedCacheBust = queuedCacheBust || nextCacheBustResolvedImports;
 					queuedCacheBustResolvedImports.set(resolved, mergedCacheBust);
 					const queuedModuleKind = queuedModuleKinds.get(resolved);
-					if (queuedModuleKind && resolvedModuleKind && queuedModuleKind !== resolvedModuleKind) {
-						throw new ExtensionModuleKindConflictError(
-							`Conflicting extension module kinds for ${resolved}: ${queuedModuleKind} and ${resolvedModuleKind}`,
-						);
-					}
-					const mergedModuleKind = queuedModuleKind ?? resolvedModuleKind;
-					if (mergedModuleKind) {
-						queuedModuleKinds.set(resolved, mergedModuleKind);
-					}
-					if (resolvedEsmBranch) {
-						queuedEsmBranchPaths.add(resolved);
+					const mergedEsmBranch = queuedEsmBranchPaths.has(resolved) || resolvedEsmBranch;
+					const mergedModuleKind =
+						queuedModuleKind && resolvedModuleKind && queuedModuleKind !== resolvedModuleKind
+							? mergedEsmBranch
+								? "esm"
+								: "commonjs"
+							: (queuedModuleKind ?? resolvedModuleKind);
+					if (mergedModuleKind) queuedModuleKinds.set(resolved, mergedModuleKind);
+					if (mergedEsmBranch) queuedEsmBranchPaths.add(resolved);
+					if (
+						modules.has(resolved) &&
+						(queuedModuleKind !== mergedModuleKind || synchronousSourcePaths.has(resolved))
+					) {
+						modules.delete(resolved);
+						commonJsPaths.delete(resolved);
 					}
 					if (!modules.has(resolved)) {
 						queue.push({
@@ -2105,31 +2194,31 @@ async function collectExtensionModules(
 						});
 					}
 				}
-				if (options.required && !resolved) {
+				if (options.required && requiresResolvedSnapshot && !resolved) {
 					throw new UnsupportedExtensionGraphError(
 						`Required extension graph import could not be resolved: ${specifier} from ${file}`,
 					);
 				}
 			} catch (error) {
-				if (error instanceof ExtensionModuleKindConflictError || error instanceof UnsupportedExtensionGraphError) {
-					throw error;
-				}
-				if (options.required && (specifier.startsWith(".") || specifier.startsWith("#"))) {
+				if (error instanceof UnsupportedExtensionGraphError) throw error;
+				if (options.required && requiresResolvedSnapshot) {
 					throw new UnsupportedExtensionGraphError(
 						`Required extension graph import could not be resolved: ${specifier} from ${file}`,
 					);
 				}
-				// Unresolvable import (e.g. a type-only path); skip it.
 			}
 		}
 	}
 	for (const [modulePath, source] of modules) {
 		if (commonJsPaths.has(modulePath) || nativeAddonLoaderModulePaths.has(modulePath)) {
 			modules.set(modulePath, await rewriteExtensionSpecifiers(source, modulePath, commonJsPaths.has(modulePath)));
+		} else if (synchronousSourcePaths.has(modulePath)) {
+			modules.set(modulePath, await rewriteLegacyExtensionSource(source, modulePath));
 		}
 	}
 	return {
 		modules,
+		synchronousSourcePaths,
 		commonJsPaths,
 		cacheBustResolvedImportModules: new Set(
 			[...queuedCacheBustResolvedImports]
@@ -2137,6 +2226,14 @@ async function collectExtensionModules(
 				.map(([modulePath]) => modulePath),
 		),
 	};
+}
+/** Test seam for compiled-binary dependency graph discovery and rewriting. */
+export async function __collectLegacyPiExtensionSourcesForTests(
+	entryPath: string,
+): Promise<ReadonlyMap<string, string>> {
+	const entryRealPath = await realpathOrSelf(path.resolve(entryPath));
+	const graph = await collectExtensionModules(entryRealPath);
+	return graph.modules;
 }
 
 /**
@@ -2298,6 +2395,24 @@ const extensionGraphPinnedSources = new Map<string, Map<string, string>>();
 const extensionGraphSyncSources = new Map<string, Map<string, string>>();
 const extensionGraphPinnedModes = new Map<string, boolean>();
 
+const extensionGraphLoadTails = new Map<string, Promise<void>>();
+
+async function withSerializedExtensionGraphLoad<T>(entryRealPath: string, load: () => Promise<T>): Promise<T> {
+	const previous = extensionGraphLoadTails.get(entryRealPath) ?? Promise.resolve();
+	const release = Promise.withResolvers<void>();
+	const tail = previous.then(() => release.promise);
+	extensionGraphLoadTails.set(entryRealPath, tail);
+	await previous;
+	try {
+		return await load();
+	} finally {
+		release.resolve();
+		if (extensionGraphLoadTails.get(entryRealPath) === tail) {
+			extensionGraphLoadTails.delete(entryRealPath);
+		}
+	}
+}
+
 /**
  * Install exact-path load hooks for the current extension graph. ESM/TS source
  * retains the async rewrite path. Graph-owned CommonJS modules and native-addon
@@ -2308,20 +2423,21 @@ async function installExtensionGraphHook(
 	entryRealPath: string,
 	modules: Map<string, string>,
 	commonJsPaths: Set<string>,
+	synchronousSourcePaths: ReadonlySet<string>,
 	cacheBustResolvedImportModules: ReadonlySet<string>,
-): Promise<{ asyncModules: Map<string, string>; syncSourceModules: Map<string, string> }> {
+): Promise<{ asyncModules: Map<string, string> }> {
 	const asyncModules = new Map<string, string>();
-	const syncSourceModules = extensionGraphSyncSources.get(entryRealPath) ?? new Map<string, string>();
-	extensionGraphSyncSources.set(entryRealPath, syncSourceModules);
+	let synchronousModuleSources = extensionGraphSyncSources.get(entryRealPath);
+	if (!synchronousModuleSources) {
+		synchronousModuleSources = new Map<string, string>();
+		extensionGraphSyncSources.set(entryRealPath, synchronousModuleSources);
+	}
 	for (const [modulePath, source] of modules) {
-		if (commonJsPaths.has(modulePath)) {
+		if (commonJsPaths.has(modulePath) || synchronousSourcePaths.has(modulePath)) {
+			if (synchronousSourcePaths.has(modulePath)) synchronousModuleSources.set(modulePath, source);
 			continue;
 		}
-		if (nativeAddonLoaderModulePaths.has(modulePath)) {
-			syncSourceModules.set(modulePath, source);
-		} else {
-			asyncModules.set(modulePath, source);
-		}
+		asyncModules.set(modulePath, source);
 	}
 
 	if (asyncModules.size > 0) {
@@ -2331,32 +2447,38 @@ async function installExtensionGraphHook(
 		Bun.plugin({
 			name: `omp:legacy-pi-ext:${hookId}`,
 			setup(build) {
-				build.onLoad({ filter, namespace: "file" }, async args => {
+				build.onLoad({ filter, namespace: "file" }, args => {
 					const queryIndex = args.path.indexOf("?mtime=");
 					const sourcePath = queryIndex >= 0 ? args.path.slice(0, queryIndex) : args.path;
 					const mtimeTag = queryIndex >= 0 ? args.path.slice(queryIndex + "?mtime=".length) : null;
+					const synchronousSource = synchronousModuleSources.get(sourcePath);
+					if (synchronousSource !== undefined) {
+						return { contents: synchronousSource, loader: getLoader(sourcePath) };
+					}
 					const cached = asyncModules.get(sourcePath);
-					let raw: string | undefined = cached;
-					if (cached !== undefined) {
-						// consume-once: preserves ?mtime edit-pickup for re-imports
-						asyncModules.delete(sourcePath);
-					} else {
-						raw = extensionGraphPinnedSources.get(entryRealPath)?.get(sourcePath);
-						if (raw === undefined) {
-							if (extensionGraphPinnedModes.get(entryRealPath) === true) {
-								throw new Error(`Required extension source was not snapshotted: ${sourcePath}`);
-							}
-							raw = await Bun.file(sourcePath).text();
-						}
-					}
-					if (raw === undefined) {
-						throw new Error(`Extension source was not loaded: ${sourcePath}`);
-					}
 					const resolvedImportMtimeTag = cacheBustResolvedImportModules.has(sourcePath) ? mtimeTag : null;
-					return {
-						contents: await rewriteLegacyExtensionSource(raw, sourcePath, mtimeTag, resolvedImportMtimeTag),
-						loader: getLoader(sourcePath),
-					};
+					return (async () => {
+						let raw: string | undefined = cached;
+						if (cached !== undefined) {
+							// consume-once: preserves ?mtime edit-pickup for re-imports
+							asyncModules.delete(sourcePath);
+						} else {
+							raw = extensionGraphPinnedSources.get(entryRealPath)?.get(sourcePath);
+							if (raw === undefined) {
+								if (extensionGraphPinnedModes.get(entryRealPath) === true) {
+									throw new Error(`Required extension source was not snapshotted: ${sourcePath}`);
+								}
+								raw = await Bun.file(sourcePath).text();
+							}
+						}
+						if (raw === undefined) {
+							throw new Error(`Extension source was not loaded: ${sourcePath}`);
+						}
+						return {
+							contents: await rewriteLegacyExtensionSource(raw, sourcePath, mtimeTag, resolvedImportMtimeTag),
+							loader: getLoader(sourcePath),
+						};
+					})();
 				});
 			},
 		});
@@ -2392,28 +2514,26 @@ async function installExtensionGraphHook(
 		});
 	}
 
-	if (syncSourceModules.size > 0) {
-		const alternation = [...syncSourceModules.keys()].map(escapeRegExp).join("|");
+	if (synchronousSourcePaths.size > 0) {
+		const alternation = [...synchronousSourcePaths].map(escapeRegExp).join("|");
 		const filter = new RegExp(`^(?:${alternation})(?:\\?mtime=\\d+)?$`);
-		const hookId = Bun.hash(`${entryRealPath}\0sync-source\0${[...syncSourceModules.keys()].join("\0")}`).toString(
-			36,
-		);
+		const hookId = Bun.hash(`${entryRealPath}\0sync-source\0${[...synchronousSourcePaths].join("\0")}`).toString(36);
 		Bun.plugin({
 			name: `omp:legacy-pi-ext:${hookId}`,
 			setup(build) {
 				build.onLoad({ filter, namespace: "file" }, args => {
 					const queryIndex = args.path.indexOf("?mtime=");
 					const sourcePath = queryIndex >= 0 ? args.path.slice(0, queryIndex) : args.path;
-					const source = syncSourceModules.get(sourcePath);
+					const source = synchronousModuleSources.get(sourcePath);
 					if (source === undefined) {
-						throw new Error(`Missing pre-rewritten CommonJS extension source: ${sourcePath}`);
+						throw new Error(`Missing pre-rewritten synchronous extension source: ${sourcePath}`);
 					}
 					return { contents: source, loader: getLoader(sourcePath) };
 				});
 			},
 		});
 	}
-	return { asyncModules, syncSourceModules };
+	return { asyncModules };
 }
 
 /**
@@ -2431,6 +2551,7 @@ async function ensureExtensionGraphHook(
 	const {
 		modules: currentModules,
 		commonJsPaths,
+		synchronousSourcePaths,
 		cacheBustResolvedImportModules: discoveredCacheBustModules,
 	} = await collectExtensionModules(entryRealPath, options);
 	if (options.required && options.snapshots) {
@@ -2460,10 +2581,16 @@ async function ensureExtensionGraphHook(
 			commonJsGraphModulePaths.add(modulePath);
 		}
 	}
-	const syncSources = extensionGraphSyncSources.get(entryRealPath);
-	if (syncSources) {
-		for (const [modulePath, source] of currentModules) {
-			if (nativeAddonLoaderModulePaths.has(modulePath)) syncSources.set(modulePath, source);
+	let synchronousModuleSources = extensionGraphSyncSources.get(entryRealPath);
+	if (!synchronousModuleSources) {
+		synchronousModuleSources = new Map<string, string>();
+		extensionGraphSyncSources.set(entryRealPath, synchronousModuleSources);
+	}
+	for (const [modulePath, source] of currentModules) {
+		if (synchronousSourcePaths.has(modulePath)) {
+			synchronousModuleSources.set(modulePath, source);
+		} else if (synchronousModuleSources.has(modulePath)) {
+			synchronousModuleSources.set(modulePath, await rewriteLegacyExtensionSource(source, modulePath));
 		}
 	}
 	let hookedModules = extensionGraphHookModules.get(entryRealPath);
@@ -2474,11 +2601,15 @@ async function ensureExtensionGraphHook(
 
 	const pendingModules = new Map<string, string>();
 	const pendingCommonJsPaths = new Set<string>();
+	const pendingSynchronousSourcePaths = new Set<string>();
 	for (const [modulePath, source] of currentModules) {
 		if (!hookedModules.has(modulePath)) {
 			pendingModules.set(modulePath, source);
 			if (commonJsPaths.has(modulePath)) {
 				pendingCommonJsPaths.add(modulePath);
+			}
+			if (synchronousSourcePaths.has(modulePath)) {
+				pendingSynchronousSourcePaths.add(modulePath);
 			}
 		}
 	}
@@ -2487,12 +2618,12 @@ async function ensureExtensionGraphHook(
 	}
 
 	let asyncModules = new Map<string, string>();
-	let syncSourceModules = new Map<string, string>();
 	if (pendingModules.size > 0) {
-		({ asyncModules, syncSourceModules } = await installExtensionGraphHook(
+		({ asyncModules } = await installExtensionGraphHook(
 			entryRealPath,
 			pendingModules,
 			pendingCommonJsPaths,
+			pendingSynchronousSourcePaths,
 			cacheBustResolvedImportModules,
 		));
 		for (const modulePath of pendingModules.keys()) {
@@ -2502,7 +2633,6 @@ async function ensureExtensionGraphHook(
 	return {
 		clear() {
 			asyncModules.clear();
-			syncSourceModules.clear();
 			for (const modulePath of commonJsPaths) {
 				commonJsModuleSources.delete(modulePath);
 				commonJsModuleDefinitions.delete(modulePath);
@@ -2542,24 +2672,26 @@ export async function loadLegacyPiModule(
 		const source = await Bun.file(entryRealPath).text();
 		options.snapshots.set(entryRealPath, source);
 	}
-	await ensureLegacyPiOverridesReady();
-	const pendingSources = await ensureExtensionGraphHook(entryRealPath, options);
-	try {
-		// Dynamic import is required: legacy extension entry paths are user/plugin supplied at runtime.
-		// On POSIX, use the raw filesystem path so Bun keys the `?mtime`
-		// suffix as part of the module identity; Bun ignores query strings on
-		// `file://` specifiers, which would serve stale edited source.
-		const entrySpecifier =
-			process.platform === "win32" || isBundledVirtualSpecifier(entryRealPath)
-				? toImportSpecifier(entryRealPath)
-				: entryRealPath;
-		return await import(`${entrySpecifier}?mtime=${nextLegacyPiLoadTag()}`);
-	} finally {
-		// Drop whatever the initial import didn't consume: graph modules only
-		// reached by lazy dynamic imports must be read from disk at their actual
-		// import time, not served from this load-time snapshot.
-		pendingSources?.clear();
-	}
+	return await withSerializedExtensionGraphLoad(entryRealPath, async () => {
+		await ensureLegacyPiOverridesReady();
+		const pendingSources = await ensureExtensionGraphHook(entryRealPath, options);
+		try {
+			// Dynamic import is required: legacy extension entry paths are user/plugin supplied at runtime.
+			// On POSIX, use the raw filesystem path so Bun keys the `?mtime`
+			// suffix as part of the module identity; Bun ignores query strings on
+			// `file://` specifiers, which would serve stale edited source.
+			const entrySpecifier =
+				process.platform === "win32" || isBundledVirtualSpecifier(entryRealPath)
+					? toImportSpecifier(entryRealPath)
+					: entryRealPath;
+			return await import(`${entrySpecifier}?mtime=${nextLegacyPiLoadTag()}`);
+		} finally {
+			// Drop whatever the initial import didn't consume: graph modules only
+			// reached by lazy dynamic imports must be read from disk at their actual
+			// import time, not served from this load-time snapshot.
+			pendingSources?.clear();
+		}
+	});
 }
 
 function getLoader(path: string): "js" | "jsx" | "ts" | "tsx" {

@@ -1989,6 +1989,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		//      Extension instances. Shallow-clone `extensions` so the inline
 		//      push below cannot mutate the caller's array. `runtime` is shared
 		//      so flag values set pre-creation flow into the live session.
+		// Restricted sessions ignore ordinary preloads. A verified required-mode
+		// preload is the explicit exception because it is caller-pinned, not discovered.
 		//   2. `preloadedExtensionPaths` (subagent): caller resolved paths;
 		//      skip the FS scan but always re-call `loadExtensions` here so
 		//      each `Extension` binds to THIS session's `ExtensionAPI`
@@ -1998,10 +2000,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// the flag and pre-resolved the result already reflects that choice.
 		let extensionPaths: string[];
 		let extensionsResult: LoadExtensionsResult;
-		if (options.preloadedExtensions) {
+		const reusablePreloadedExtensions =
+			options.preloadedExtensions && (!restrictToolNames || options.preloadedExtensions.requiredExtensionOptions)
+				? options.preloadedExtensions
+				: undefined;
+		if (reusablePreloadedExtensions) {
 			extensionsResult = {
-				...options.preloadedExtensions,
-				extensions: [...options.preloadedExtensions.extensions],
+				...reusablePreloadedExtensions,
+				extensions: [...reusablePreloadedExtensions.extensions],
 			};
 			extensionPaths = extensionsResult.extensions
 				.map(ext => ext.resolvedPath)

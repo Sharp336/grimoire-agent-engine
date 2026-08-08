@@ -5,6 +5,8 @@ import { randomUUID } from "node:crypto";
 import type * as fs1 from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
+import * as zod from "@oh-my-pi/omptype/zod";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type {
 	ImageContent,
@@ -17,8 +19,6 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import type { KeyId } from "@oh-my-pi/pi-tui";
 import { hasFsCode, isEacces, isEnoent, logger } from "@oh-my-pi/pi-utils";
-import { Type } from "arktype";
-import * as zodModule from "zod/v4";
 import { type ExtensionModule, extensionModuleCapability } from "../../capability/extension-module";
 import { type Hook, hookCapability } from "../../capability/hook";
 import { isServiceTierFamily, isServiceTierForFamily } from "../../config/service-tier";
@@ -30,9 +30,9 @@ import { execCommand } from "../../exec/exec";
 import * as PiCodingAgent from "../../index";
 import type { CustomMessagePayload } from "../../session/messages";
 import { EventBus } from "../../utils/event-bus";
+import * as TypeBox from "../legacy-typebox";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
 import { getAllPluginExtensionPaths } from "../plugins/loader";
-import * as TypeBox from "../typebox";
 
 import { resolvePath, withHostGuard } from "../utils";
 import {
@@ -52,6 +52,7 @@ import type {
 	ProviderConfig,
 	RegisteredCommand,
 	ToolDefinition,
+	ToolInfo,
 } from "./types";
 
 installLegacyPiSpecifierShim();
@@ -77,7 +78,7 @@ export type RequiredExtensionLoadErrorCode =
 	| "unsupported-graph";
 
 export class RequiredExtensionLoadError extends Error {
-	readonly name = "RequiredExtensionLoadError";
+	// Error.name is inherited from Error; keep the class structurally compatible.
 
 	constructor(
 		readonly code: RequiredExtensionLoadErrorCode,
@@ -102,6 +103,14 @@ export interface RequiredExtensionLoadReceipt {
 export class ExtensionRuntime implements IExtensionRuntime {
 	flagValues = new Map<string, boolean | string>();
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }> = [];
+	registerProvider(name: string, config: ProviderConfig, sourceId: string): void {
+		this.pendingProviderRegistrations.push({ name, config, sourceId });
+	}
+
+	unregisterProvider(name: string): void {
+		const remaining = this.pendingProviderRegistrations.filter(registration => registration.name !== name);
+		this.pendingProviderRegistrations.splice(0, this.pendingProviderRegistrations.length, ...remaining);
+	}
 
 	sendMessage(): void {
 		throw new ExtensionRuntimeNotInitializedError();
@@ -123,7 +132,7 @@ export class ExtensionRuntime implements IExtensionRuntime {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
 
-	getAllTools(): string[] {
+	getAllTools(): ToolInfo[] {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
 
@@ -172,8 +181,8 @@ export class ExtensionRuntime implements IExtensionRuntime {
 class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	readonly logger = logger;
 	readonly typebox = TypeBox;
-	readonly arktype = Type;
-	readonly zod = zodModule;
+	readonly arktype = type;
+	readonly zod = zod;
 	readonly flagValues = new Map<string, boolean | string>();
 	readonly pendingProviderRegistrations: Array<{
 		name: string;
@@ -276,7 +285,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		return this.runtime.getActiveTools();
 	}
 
-	getAllTools(): string[] {
+	getAllTools(): ToolInfo[] {
 		return this.runtime.getAllTools();
 	}
 
@@ -320,7 +329,11 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	}
 
 	registerProvider(name: string, config: ProviderConfig): void {
-		this.runtime.pendingProviderRegistrations.push({ name, config, sourceId: this.extension.path });
+		this.runtime.registerProvider(name, config, this.extension.path);
+	}
+
+	unregisterProvider(name: string): void {
+		this.runtime.unregisterProvider(name, this.extension.path);
 	}
 }
 

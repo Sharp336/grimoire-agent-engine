@@ -51,6 +51,7 @@ import {
 } from "./discovery/helpers";
 import { injectOmpExtensionCliRoots } from "./discovery/omp-extension-roots";
 import { formatExtensionLoadNotifications } from "./extensibility/extensions/load-errors";
+import { loadExtensions } from "./extensibility/extensions/loader";
 import { validateRequiredExtensionOptions } from "./extensibility/extensions/required";
 import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
@@ -189,7 +190,7 @@ function applyAcpDefaultSettingOverrides(targetSettings: Settings = settings): v
 	applyDefaultSettingOverrides(HOST_DEFAULTED_SETTING_PATHS, targetSettings);
 }
 
-async function readPipedInput(): Promise<string | undefined> {
+export async function readPipedInput(): Promise<string | undefined> {
 	if (process.stdin.isTTY !== false) return undefined;
 	// stdin is a pipe: a producer that never writes nor closes would block
 	// startup forever with zero output. Say what we're blocked on after 1s.
@@ -357,9 +358,29 @@ export interface AcpSessionFactoryOptions {
 	sessionDir?: string;
 	authStorage: AuthStorage;
 	modelRegistry: ModelRegistry;
-	parsedArgs: Pick<Args, "apiKey">;
+	parsedArgs: Pick<Args, "apiKey" | "trustedExtensions">;
 	rawArgs: string[];
 	createSession: (options: CreateAgentSessionOptions) => Promise<CreateAgentSessionResult>;
+}
+
+async function loadTrustedSessionExtensions(
+	options: Pick<CreateAgentSessionOptions, "additionalExtensionPaths">,
+	cwd: string,
+	eventBus: EventBus,
+) {
+	const paths = options.additionalExtensionPaths ?? [];
+	for (const trustedPath of paths) {
+		let stat: fsSync.Stats;
+		try {
+			stat = fsSync.statSync(trustedPath);
+		} catch {
+			throw new Error(`Trusted extension must be an existing module file: ${trustedPath}`);
+		}
+		if (!stat.isFile()) {
+			throw new Error(`Trusted extension must be a module file, not a directory: ${trustedPath}`);
+		}
+	}
+	return loadExtensions(paths, cwd, eventBus);
 }
 
 /**
@@ -385,6 +406,16 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 		// policy (PR #3736 follow-up).
 		const titleSystemPromptSource = discoverTitleSystemPromptFile(cwd);
 		const titleSystemPrompt = await resolvePromptInput(titleSystemPromptSource, "title system prompt");
+		const eventBus = new EventBus();
+		const trustedExtensions =
+			args.parsedArgs.trustedExtensions && args.parsedArgs.trustedExtensions.length > 0
+				? await loadTrustedSessionExtensions(args.baseOptions, cwd, eventBus)
+				: undefined;
+		if (trustedExtensions && trustedExtensions.errors.length > 0) {
+			throw new Error(
+				`Trusted extension failed to load: ${trustedExtensions.errors.map(item => item.error).join("; ")}`,
+			);
+		}
 		const result = await args.createSession({
 			...args.baseOptions,
 			cwd,
@@ -394,13 +425,13 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			modelRegistry: args.modelRegistry,
 			agentId,
 			requiredExtensionOptions,
-			eventBus: undefined,
-			preloadedExtensions: undefined,
 			// Preserve reserve-policy confirmation until ACP capabilities are known
 			// without enabling AskTool or other UI-only session behavior.
 			deferUsageReserveConfirmation: true,
 			enableMCP: false,
 			titleSystemPrompt,
+			eventBus,
+			preloadedExtensions: trustedExtensions,
 		});
 		const { session: nextSession } = result;
 		requiredExtensionOptions = result.extensionsResult.requiredExtensionOptions ?? requiredExtensionOptions;
@@ -1116,20 +1147,40 @@ export async function buildSessionOptions(
 		options.rules = [];
 	}
 
-	// Additional extension paths from CLI
-	const cliExtensionPaths = [...(parsed.extensions ?? []), ...(parsed.hooks ?? [])];
-	if (cliExtensionPaths.length > 0) {
-		options.additionalExtensionPaths = cliExtensionPaths;
-	}
-	const requiredExtensions = validateRequiredExtensionOptions(parsed);
-	if (requiredExtensions) {
-		options.additionalExtensionPaths = requiredExtensions.requiredExtensions.map(extension => extension.path);
+	// Trusted extension paths are an exact allowlist for extension modules.
+	if (parsed.trustedExtensions && parsed.trustedExtensions.length > 0) {
+		const trustedPaths = parsed.trustedExtensions.map(trustedPath => {
+			let resolvedPath: string;
+			let stat: fsSync.Stats;
+			try {
+				resolvedPath = fsSync.realpathSync.native(trustedPath);
+				stat = fsSync.statSync(resolvedPath);
+			} catch {
+				throw new Error(`Trusted extension must be an existing module file: ${trustedPath}`);
+			}
+			if (!stat.isFile()) {
+				throw new Error(`Trusted extension must be a module file, not a directory: ${trustedPath}`);
+			}
+			return resolvedPath;
+		});
 		options.disableExtensionDiscovery = true;
-		options.requiredExtensionOptions = requiredExtensions;
-	}
+		options.additionalExtensionPaths = trustedPaths;
+	} else {
+		// Additional extension paths from CLI
+		const cliExtensionPaths = [...(parsed.extensions ?? []), ...(parsed.hooks ?? [])];
+		if (cliExtensionPaths.length > 0) {
+			options.additionalExtensionPaths = cliExtensionPaths;
+		}
+		const requiredExtensions = validateRequiredExtensionOptions(parsed);
+		if (requiredExtensions) {
+			options.additionalExtensionPaths = requiredExtensions.requiredExtensions.map(extension => extension.path);
+			options.disableExtensionDiscovery = true;
+			options.requiredExtensionOptions = requiredExtensions;
+		}
 
-	if (parsed.noExtensions) {
-		options.disableExtensionDiscovery = true;
+		if (parsed.noExtensions) {
+			options.disableExtensionDiscovery = true;
+		}
 	}
 
 	return options;
@@ -1202,16 +1253,20 @@ export async function runRootCommand(
 	// warning before we reach the await site below.
 	pluginPreloadPromise.catch(() => {});
 
-	// Register CLI-provided extension package paths (`--extension`, `--hook`) so
-	// the `omp-plugins` discovery provider can surface their `skills/`, `hooks/`,
-	// `tools/`, `commands/`, `rules/`, `prompts/`, and `.mcp.json` sub-trees.
-	// Explicit roots remain authorized under `--no-extensions`; only ambient
-	// extension discovery is disabled.
-	const cliExtensions = [...(parsedArgs.extensions ?? []), ...(parsedArgs.hooks ?? [])];
-	injectOmpExtensionCliRoots(cliExtensions, home, getProjectDir(), {
-		mode: parsedArgs.noExtensions ? "explicit-only" : "merge",
-		replace: true,
-	});
+	// Trusted files load as exact module paths, never as package roots whose
+	// sibling hooks/tools/commands/MCP content could be discovered implicitly.
+	if (!parsedArgs.trustedExtensions?.length) {
+		// Register CLI-provided extension package paths (`--extension`, `--hook`) so
+		// the `omp-plugins` discovery provider can surface their `skills/`, `hooks/`,
+		// `tools/`, `commands/`, `rules/`, `prompts/`, and `.mcp.json` sub-trees.
+		// Explicit roots remain authorized under `--no-extensions`; only ambient
+		// extension discovery is disabled.
+		const cliExtensions = [...(parsedArgs.extensions ?? []), ...(parsedArgs.hooks ?? [])];
+		injectOmpExtensionCliRoots(cliExtensions, home, getProjectDir(), {
+			mode: parsedArgs.noExtensions ? "explicit-only" : "merge",
+			replace: true,
+		});
+	}
 
 	let cwd = getProjectDir();
 	// Classify the host before opening auth or settings storage so every
@@ -1550,20 +1605,27 @@ export async function runRootCommand(
 		// string-flag value such as `--target @notes.md` is the flag's value, not a
 		// file — and the same result is handed to createAgentSession via
 		// `preloadedExtensions` so the discovery work is not repeated.
-		if (isInteractive) {
+		if (isInteractive && !parsedArgs.trustedExtensions?.length) {
 			sessionOptions.extensions = [...(sessionOptions.extensions ?? []), createWarpEventBridgeExtension()];
 		}
 
 		const eventBus = new EventBus();
-		const extensionsResult = await loadSessionExtensions(sessionOptions, cwd, settingsInstance, eventBus, {
-			requiredExtensions: parsedArgs.requiredExtensions,
-			requiredExtensionSha256: parsedArgs.requiredExtensionSha256,
-			extensionLoadReceipt: parsedArgs.extensionLoadReceipt,
-			extensions: parsedArgs.extensions,
-			hooks: parsedArgs.hooks,
-		});
+		const extensionsResult = parsedArgs.trustedExtensions?.length
+			? await loadTrustedSessionExtensions(sessionOptions, cwd, eventBus)
+			: await loadSessionExtensions(sessionOptions, cwd, settingsInstance, eventBus, {
+					requiredExtensions: parsedArgs.requiredExtensions,
+					requiredExtensionSha256: parsedArgs.requiredExtensionSha256,
+					extensionLoadReceipt: parsedArgs.extensionLoadReceipt,
+					extensions: parsedArgs.extensions,
+					hooks: parsedArgs.hooks,
+				});
 		sessionOptions.requiredExtensionOptions =
 			extensionsResult.requiredExtensionOptions ?? sessionOptions.requiredExtensionOptions;
+		if ((parsedArgs.trustedExtensions?.length ?? 0) > 0 && extensionsResult.errors.length > 0) {
+			throw new Error(
+				`Trusted extension failed to load: ${extensionsResult.errors.map(item => item.error).join("; ")}`,
+			);
+		}
 		const extensionFlagSink: ExtensionFlagSink = {
 			getFlags: () => ExtensionRunner.aggregateFlags(extensionsResult.extensions),
 			setFlagValue: (name, value) => {

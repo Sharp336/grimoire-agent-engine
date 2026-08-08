@@ -177,6 +177,12 @@ describe("required extension CLI and loading contract", () => {
 
 			const secondOptions = first.requiredExtensionOptions;
 			if (!secondOptions) throw new Error("expected effective required options");
+			const publishedSnapshots = secondOptions.sourceSnapshots;
+			if (!(publishedSnapshots instanceof Map)) throw new Error("expected mutable snapshot map at runtime");
+			publishedSnapshots.set(
+				siblingPath,
+				`export default function (pi) { pi.registerCommand("forged-sibling", { handler: async () => {} }); }`,
+			);
 			const second = await loadExtensions([extensionPath], tempDir.path(), undefined, secondOptions);
 			expect(second.extensions[0]?.commands.has("verified-sibling")).toBe(true);
 			expect(second.extensions[0]?.commands.has("mutated")).toBe(false);
@@ -201,6 +207,139 @@ describe("required extension CLI and loading contract", () => {
 			const ordinary = await loadExtensions([extensionPath], tempDir.path());
 			expect(ordinary.extensions[0]?.commands.has("ordinary-reload")).toBe(true);
 		} finally {
+			tempDir.removeSync();
+		}
+	});
+	it("rejects a structurally supplied source snapshot", async () => {
+		const tempDir = TempDir.createSync("@pi-required-extension-forged-snapshot-");
+		try {
+			const extensionPath = writeExtension(tempDir.path(), "entry.ts");
+			const canonicalPath = await fs.promises.realpath(extensionPath);
+			const required = validateRequiredExtensionOptions({
+				requiredExtensions: [extensionPath],
+				requiredExtensionSha256: [await digest(extensionPath)],
+			});
+			if (!required) throw new Error("expected required options");
+
+			await expect(
+				loadExtensions([extensionPath], tempDir.path(), undefined, {
+					...required,
+					sourceSnapshots: new Map([
+						[
+							canonicalPath,
+							`export default function (pi) { pi.registerCommand("forged", { handler: async () => {} }); }`,
+						],
+					]),
+				}),
+			).rejects.toThrow();
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+	it("rejects a non-static CallExpression dynamic import", async () => {
+		const tempDir = TempDir.createSync("@pi-required-extension-dynamic-import-");
+		try {
+			const extensionPath = path.join(tempDir.path(), "entry.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`const target = "./payload.ts"; export default (await import(target)).default;`,
+			);
+			fs.writeFileSync(
+				path.join(tempDir.path(), "payload.ts"),
+				`export default function (pi) { pi.registerCommand("dynamic", { handler: async () => {} }); }`,
+			);
+			const required = validateRequiredExtensionOptions({
+				requiredExtensions: [extensionPath],
+				requiredExtensionSha256: [await digest(extensionPath)],
+			});
+			if (!required) throw new Error("expected required options");
+
+			await expect(loadExtensions([extensionPath], tempDir.path(), undefined, required)).rejects.toMatchObject({
+				code: "load-failure",
+			});
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+	it("snapshots an ESM bare dependency instead of falling back to disk", async () => {
+		const tempDir = TempDir.createSync("@pi-required-extension-bare-import-");
+		try {
+			const packageDir = path.join(tempDir.path(), "node_modules", "required-esm");
+			const dependencyPath = path.join(packageDir, "index.mjs");
+			fs.mkdirSync(packageDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(packageDir, "package.json"),
+				JSON.stringify({ name: "required-esm", type: "module", exports: "./index.mjs" }),
+			);
+			fs.writeFileSync(
+				dependencyPath,
+				`export default function (pi) { pi.registerCommand("bare", { handler: async () => {} }); }`,
+			);
+			const extensionPath = path.join(tempDir.path(), "entry.mts");
+			fs.writeFileSync(extensionPath, `import extension from "required-esm"; export default extension;`);
+			const required = validateRequiredExtensionOptions({
+				requiredExtensions: [extensionPath],
+				requiredExtensionSha256: [await digest(extensionPath)],
+			});
+			if (!required) throw new Error("expected required options");
+
+			const first = await loadExtensions([extensionPath], tempDir.path(), undefined, required);
+			fs.writeFileSync(
+				dependencyPath,
+				`export default function (pi) { pi.registerCommand("mutated-bare", { handler: async () => {} }); }`,
+			);
+			const secondOptions = first.requiredExtensionOptions;
+			if (!secondOptions) throw new Error("expected effective required options");
+			const second = await loadExtensions([extensionPath], tempDir.path(), undefined, secondOptions);
+			expect(second.extensions[0]?.commands.has("bare")).toBe(true);
+			expect(second.extensions[0]?.commands.has("mutated-bare")).toBe(false);
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+	it("serializes concurrent required loads of the same entry", async () => {
+		const tempDir = TempDir.createSync("@pi-required-extension-concurrent-");
+		const stateKey = `__ompRequiredExtensionLoad${Date.now()}${Math.random()}`;
+		const gates = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+		const starts = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+		const state = { started: 0, gates, starts };
+		const globalRecord = globalThis as typeof globalThis & Record<string, unknown>;
+		globalRecord[stateKey] = state;
+		try {
+			const extensionPath = path.join(tempDir.path(), "entry.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`const state = globalThis[${JSON.stringify(stateKey)}];
+const loadIndex = state.started++;
+state.starts[loadIndex].resolve();
+await state.gates[loadIndex].promise;
+export default function (pi) { pi.registerCommand("serialized-" + loadIndex, { handler: async () => {} }); }`,
+			);
+			const required = validateRequiredExtensionOptions({
+				requiredExtensions: [extensionPath],
+				requiredExtensionSha256: [await digest(extensionPath)],
+			});
+			if (!required) throw new Error("expected required options");
+
+			const firstLoad = loadExtensions([extensionPath], tempDir.path(), undefined, required);
+			await starts[0].promise;
+			const secondLoad = loadExtensions([extensionPath], tempDir.path(), undefined, required);
+			const loads = [firstLoad, secondLoad] as const;
+			try {
+				// Bun exposes no event for a queued plugin load. This short integration-only
+				// delay proves the blocked first evaluation prevents the second from starting.
+				await Bun.sleep(25);
+				expect(state.started).toBe(1);
+				gates[0].resolve();
+				await starts[1].promise;
+				gates[1].resolve();
+				await Promise.all(loads);
+			} finally {
+				for (const gate of gates) gate.resolve();
+				await Promise.allSettled(loads);
+			}
+		} finally {
+			delete globalRecord[stateKey];
 			tempDir.removeSync();
 		}
 	});

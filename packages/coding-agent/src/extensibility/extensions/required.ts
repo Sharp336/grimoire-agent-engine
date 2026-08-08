@@ -14,6 +14,7 @@ export interface RequiredExtensionOptionsInput {
 	extensionLoadReceipt?: string;
 	extensions?: readonly string[];
 	hooks?: readonly string[];
+	trustedExtensions?: readonly string[];
 }
 
 export interface RequiredExtensionOptions {
@@ -32,7 +33,6 @@ export type RequiredExtensionValidationCode =
 	| "conflicting-extension";
 
 export class RequiredExtensionValidationError extends CliUsageError {
-	readonly name = "RequiredExtensionValidationError";
 	constructor(
 		readonly code: RequiredExtensionValidationCode,
 		message: string,
@@ -67,10 +67,15 @@ export function validateRequiredExtensionOptions(
 			"--extension-load-receipt requires at least one --required-extension",
 		);
 	}
-	if (hasRequiredValues && ((input.extensions?.length ?? 0) > 0 || (input.hooks?.length ?? 0) > 0)) {
+	if (
+		hasRequiredValues &&
+		((input.extensions?.length ?? 0) > 0 ||
+			(input.hooks?.length ?? 0) > 0 ||
+			(input.trustedExtensions?.length ?? 0) > 0)
+	) {
 		throw new RequiredExtensionValidationError(
 			"conflicting-extension",
-			"--required-extension mode cannot be combined with --extension or --hook",
+			"--required-extension mode cannot be combined with --extension, --hook, or --trusted-extension",
 		);
 	}
 	if (!hasRequiredValues) return undefined;
