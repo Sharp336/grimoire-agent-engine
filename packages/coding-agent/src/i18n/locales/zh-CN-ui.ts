@@ -221,6 +221,18 @@ export const zhCNUiText: Readonly<Record<string, string>> = {
 	"No stored provider credentials to log out": "没有可退出登录的已存储提供商凭据",
 	"No matching providers": "没有匹配的提供商",
 	"j/k:select  Enter:open  r:revive  x:kill  Esc/←←:close": "j/k：选择  Enter：打开  r：恢复  x：终止  Esc/←←：关闭",
+	"Tab:roster  PgUp/PgDn:scroll  Enter:open  t:by parent  Esc:roster":
+		"Tab：代理列表  PgUp/PgDn：滚动  Enter：打开  t：按父级查看  Esc：返回列表",
+	"Tab:roster  PgUp/PgDn:scroll  Enter:open  t:flat  Esc:roster":
+		"Tab：代理列表  PgUp/PgDn：滚动  Enter：打开  t：平铺查看  Esc：返回列表",
+	"j/k:select  Enter:open  t:by parent  Tab:details  r/x:manage  Esc:close":
+		"j/k：选择  Enter：打开  t：按父级查看  Tab：详情  r/x：管理  Esc：关闭",
+	"j/k:select  Enter:open  t:flat  Tab:details  r/x:manage  Esc:close":
+		"j/k：选择  Enter：打开  t：平铺查看  Tab：详情  r/x：管理  Esc：关闭",
+	"j/k/wheel:select  PgUp/PgDn:details  Enter/click:open  t:by parent  r:revive  x:kill  Esc:close":
+		"j/k/滚轮：选择  PgUp/PgDn：详情  Enter/点击：打开  t：按父级查看  r：恢复  x：终止  Esc：关闭",
+	"j/k/wheel:select  PgUp/PgDn:details  Enter/click:open  t:flat  r:revive  x:kill  Esc:close":
+		"j/k/滚轮：选择  PgUp/PgDn：详情  Enter/点击：打开  t：平铺查看  r：恢复  x：终止  Esc：关闭",
 	"Search: ": "搜索：",
 	"type to filter": "输入以筛选",
 	"No agents found.": "未找到代理。",

@@ -23,8 +23,12 @@ import { bottomBorder, row, topBorder } from "./overlay-box";
 import { resolveSegmentPalette } from "./segment-track";
 
 export interface ModelPickerCallbacks {
-	/** A model was chosen for a session-only switch. `selector` is `provider/id`. */
-	onPick: (model: Model, selector: string) => void;
+	/**
+	 * A model was chosen for a session-only switch. `selector` is `provider/id`.
+	 * `overContext` is true when the session transcript exceeds the model's
+	 * context window — the host must compact before switching.
+	 */
+	onPick: (model: Model, selector: string, meta: { overContext: boolean }) => void;
 	/** A configured ctrl+p quick role was chosen. */
 	onPickRole?: (entry: ResolvedRoleModel) => void;
 	/** The picker was dismissed. */
@@ -32,7 +36,7 @@ export interface ModelPickerCallbacks {
 }
 
 export interface ModelPickerOptions {
-	/** Session token count; models with smaller context windows are disabled. */
+	/** Session token count; models with smaller context windows are grayed and compact-first on pick. */
 	currentContextTokens?: number;
 	/** `provider/id` of the session's active model; highlighted and preselected. */
 	currentSelector?: string;
@@ -98,7 +102,7 @@ export class ModelPickerComponent implements Component {
 
 		this.#browser = new ModelBrowser(settings, {
 			currentContextTokens: options.currentContextTokens,
-			disableOverContext: true,
+			markOverContext: true,
 			emptyText: () => (this.#roleMode ? `  ${localizeUiText("No quick roles in the Ctrl+P cycle")}` : undefined),
 		});
 		this.#browser.onActivate = item => {
@@ -107,7 +111,7 @@ export class ModelPickerComponent implements Component {
 				callbacks.onPickRole?.(quickRole);
 				return;
 			}
-			callbacks.onPick(item.model, item.selector);
+			callbacks.onPick(item.model, item.selector, { overContext: this.#browser.isOverContext(item) });
 		};
 		this.#browser.onCancel = () => callbacks.onCancel();
 		this.#browser.onQueryChange = query => this.#syncItemsForQuery(query);
@@ -194,7 +198,7 @@ export class ModelPickerComponent implements Component {
 
 		this.#roleMode = roleMode;
 		this.#browser.setShowProvider(!roleMode);
-		this.#browser.setDisableOverContext(!roleMode);
+		this.#browser.setMarkOverContext(!roleMode);
 		this.#browser.setPreserveQueryOrder(roleMode);
 		const currentSelector = roleMode ? this.#currentQuickRoleSelector : this.#currentSelector;
 		this.#browser.setCurrentSelector(currentSelector);
@@ -219,15 +223,15 @@ export class ModelPickerComponent implements Component {
 		const inner = Math.max(1, width - 4);
 		const status = this.#configError
 			? theme.fg("error", ` ${this.#configError}`)
-			: theme.fg("muted", ` ${localizeUiText(this.#roleMode ? QUICK_ROLE_STATUS_HINT : STATUS_HINT)}`);
+			: theme.fg("muted", ` ${this.#roleMode ? QUICK_ROLE_STATUS_HINT : STATUS_HINT}`);
 
 		const out: string[] = [];
-		out.push(topBorder(width, localizeUiText("Switch Model")));
+		out.push(topBorder(width, "Switch Model"));
 		out.push(row(status, width));
 		for (const line of this.#browser.render(inner)) {
 			out.push(row(line, width));
 		}
-		out.push(row(theme.fg("dim", localizeUiText(this.#roleMode ? QUICK_ROLE_FOOTER_HINT : FOOTER_HINT)), width));
+		out.push(row(theme.fg("dim", this.#roleMode ? QUICK_ROLE_FOOTER_HINT : FOOTER_HINT), width));
 		out.push(bottomBorder(width));
 		return out;
 	}
