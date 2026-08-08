@@ -987,6 +987,40 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("carries the applied model into the new transcript on /new with an active persona", async () => {
+		const tempDir = makeTempDir();
+		const sessionManager = SessionManager.inMemory();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			sessionManager,
+			agentPersona: {
+				name: "carried-persona",
+				description: "Persona carried across /new",
+				systemPrompt: "",
+				source: "project" as const,
+			},
+		});
+
+		try {
+			await session.newSession();
+
+			const entries = sessionManager.getEntries();
+			const agentChanges = entries.filter(entry => entry.type === "agent_change");
+			const modelChanges = entries.filter(entry => entry.type === "model_change");
+
+			// The persona must be carried into the new transcript…
+			expect(agentChanges.at(-1)).toEqual(expect.objectContaining({ agent: "carried-persona", source: "project" }));
+			// …and so must the applied model: resume treats a recorded persona
+			// as rehydrated and does not reapply its frontmatter, so the JSONL
+			// needs the actual model_change or the next resume falls back to
+			// the remembered/default model (codex review 3741326128).
+			expect(modelChanges.at(-1)).toEqual(expect.objectContaining({ model: "openai/gpt-4o-mini" }));
+			expect(sessionManager.buildSessionContext().models.default).toBe("openai/gpt-4o-mini");
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("fingerprints agent_change entries written by live persona switches", async () => {
 		const tempDir = makeTempDir();
 		const sessionManager = SessionManager.inMemory();

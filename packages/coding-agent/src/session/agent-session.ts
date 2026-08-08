@@ -6489,6 +6489,17 @@ export class AgentSession {
 						this.#agentPersona.source,
 						fingerprintAgentContent(this.#agentPersona),
 					);
+					// The persona's applied model (frontmatter model: or a
+					// previously switched model) lives in memory only; carry it
+					// into the new transcript so the next resume rehydrates it
+					// instead of falling back to the remembered default. Resume
+					// treats a recorded persona as rehydrated and intentionally
+					// does not reapply its frontmatter, so the JSONL must have
+					// the actual applied model.
+					const appliedModel = this.model;
+					if (appliedModel) {
+						this.sessionManager.appendModelChange(`${appliedModel.provider}/${appliedModel.id}`);
+					}
 				}
 				this.#bash.markSessionTransition(bashTransition);
 				// The new session owns the transcript from here, so the previous
