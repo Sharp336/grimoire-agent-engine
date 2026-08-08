@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { fingerprintAgentContent } from "../../src/task/agent-policy";
 import { Settings } from "../../src/config/settings";
 import initAgentPrompt from "../../src/prompts/agents/init.md" with { type: "text" };
+import { fingerprintAgentContent } from "../../src/task/agent-policy";
 import * as taskDiscovery from "../../src/task/discovery";
 import { TaskTool } from "../../src/task/index";
 import { isScoutSpawnable } from "../../src/task/spawn-policy";
