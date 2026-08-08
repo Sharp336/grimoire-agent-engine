@@ -14,10 +14,7 @@ export class CostCapExceededError extends Error {
 	}
 }
 
-export function createCostGateController(options: {
-	warnCost?: number;
-	maxCost?: number;
-}): CostGateController {
+export function createCostGateController(options: { warnCost?: number; maxCost?: number }): CostGateController {
 	return { warnCost: options.warnCost, maxCost: options.maxCost, warned: false };
 }
 

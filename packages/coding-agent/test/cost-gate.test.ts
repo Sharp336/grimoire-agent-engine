@@ -1,19 +1,19 @@
-import * as path from "node:path";
 import { describe, expect, it, vi } from "bun:test";
-import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
+import * as path from "node:path";
 import { runCli } from "@oh-my-pi/pi-coding-agent/cli";
+import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import type { CreateAgentSessionOptions } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { TempDir } from "@oh-my-pi/pi-utils";
 import {
-	CostCapExceededError,
 	applyCostGate,
+	CostCapExceededError,
 	createCostGateController,
 	evaluateCostGate,
 	resolveCostGate,
 } from "@oh-my-pi/pi-coding-agent/session/cost-gate";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("evaluateCostGate", () => {
 	it("is ok when no thresholds are set", () => {
@@ -42,16 +42,28 @@ describe("applyCostGate", () => {
 	it("dispatches below thresholds", () => {
 		const gate = createCostGateController({ maxCost: 10 });
 		const dispatch = () => "sent";
-		expect(applyCostGate(gate, () => 1, () => {}, dispatch)).toBe("sent");
+		expect(
+			applyCostGate(
+				gate,
+				() => 1,
+				() => {},
+				dispatch,
+			),
+		).toBe("sent");
 	});
 
 	it("throws CostCapExceededError at maxCost without dispatching", () => {
 		const gate = createCostGateController({ maxCost: 10 });
 		const dispatched = { called: false };
 		expect(() =>
-			applyCostGate(gate, () => 10, () => {}, () => {
-				dispatched.called = true;
-			}),
+			applyCostGate(
+				gate,
+				() => 10,
+				() => {},
+				() => {
+					dispatched.called = true;
+				},
+			),
 		).toThrow(CostCapExceededError);
 		expect(dispatched.called).toBe(false);
 	});
@@ -59,15 +71,30 @@ describe("applyCostGate", () => {
 	it("invokes onWarn once at warnCost", () => {
 		const gate = createCostGateController({ warnCost: 8 });
 		const warned: string[] = [];
-		applyCostGate(gate, () => 8, m => warned.push(m), () => "sent");
-		applyCostGate(gate, () => 9, m => warned.push(m), () => "sent");
+		applyCostGate(
+			gate,
+			() => 8,
+			m => warned.push(m),
+			() => "sent",
+		);
+		applyCostGate(
+			gate,
+			() => 9,
+			m => warned.push(m),
+			() => "sent",
+		);
 		expect(warned).toHaveLength(1);
 		expect(warned[0]).toContain("$8.00");
 	});
 
 	it("binds the cost getter on first use", () => {
 		const gate = createCostGateController({ maxCost: 10 });
-		applyCostGate(gate, () => 3, () => {}, () => {});
+		applyCostGate(
+			gate,
+			() => 3,
+			() => {},
+			() => {},
+		);
 		expect(gate.getCost?.()).toBe(3);
 	});
 });
