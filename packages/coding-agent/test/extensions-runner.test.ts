@@ -688,7 +688,7 @@ describe("ExtensionRunner", () => {
 			const extCode = `
 				export default function(pi) {
 					pi.on("before_provider_headers", async (event) => {
-						await new Promise((resolve) => setTimeout(resolve, 60));
+						await Bun.sleep(60);
 						event.headers["x-late"] = "escaped";
 					});
 				}
