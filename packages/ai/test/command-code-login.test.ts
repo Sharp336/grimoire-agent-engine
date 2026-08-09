@@ -124,7 +124,12 @@ describe("command-code browser login", () => {
 				expect(await response.json()).toEqual({ success: true });
 
 				await expect(login.settled).resolves.toEqual({ ok: true, value: "sk-command-code-test" });
-				expect(login.launchUrl).toBe(`${callback.origin}/launch`);
+				// `/launch` is gated by an unguessable token so a local process
+				// cannot learn the state-bearing auth URL from it.
+				const launch = new URL(login.launchUrl);
+				expect(launch.origin).toBe(callback.origin);
+				expect(launch.pathname).toBe("/launch");
+				expect(launch.searchParams.get("token")).toBeTruthy();
 			} finally {
 				await finish(login);
 			}
@@ -210,6 +215,48 @@ describe("command-code browser login", () => {
 				expect(response.status).toBe(302);
 				expect(response.headers.get("location")).toBe(login.auth.url);
 
+				await postJson(login.callbackUrl, validPayload(login.state));
+				await expect(login.settled).resolves.toEqual({ ok: true, value: "sk-command-code-test" });
+			} finally {
+				await finish(login);
+			}
+		}),
+	);
+
+	it(
+		"does not expose the state-bearing auth URL to token-less /launch requests",
+		serial(async () => {
+			const login = await startLogin();
+			try {
+				const origin = new URL(login.launchUrl).origin;
+				// Any local process can probe the loopback listener; without the
+				// minted launch token it must get a plain 404 — no redirect, and
+				// therefore no way to read `state` out of the Location header.
+				const probe = await fetch(`${origin}/launch`, { redirect: "manual", headers: { connection: "close" } });
+				expect(probe.status).toBe(404);
+				expect(probe.headers.get("location")).toBeNull();
+
+				// The probe must not disrupt the real handshake.
+				await postJson(login.callbackUrl, validPayload(login.state));
+				await expect(login.settled).resolves.toEqual({ ok: true, value: "sk-command-code-test" });
+			} finally {
+				await finish(login);
+			}
+		}),
+	);
+
+	it(
+		"rejects /launch with a wrong token without settling the login",
+		serial(async () => {
+			const login = await startLogin();
+			try {
+				const launch = new URL(login.launchUrl);
+				launch.searchParams.set("token", "forged-token");
+				const probe = await fetch(launch, { redirect: "manual", headers: { connection: "close" } });
+				expect(probe.status).toBe(404);
+				expect(probe.headers.get("location")).toBeNull();
+
+				// The real callback still wins with the correct state.
 				await postJson(login.callbackUrl, validPayload(login.state));
 				await expect(login.settled).resolves.toEqual({ ok: true, value: "sk-command-code-test" });
 			} finally {

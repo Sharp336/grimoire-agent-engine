@@ -136,6 +136,14 @@ export async function loginCommandCode(cb: OAuthLoginCallbacks): Promise<string>
 	const delivery = Promise.withResolvers<CommandCodeCallback>();
 	/** Studio URL the `/launch` route redirects to; cleared when the flow ends. */
 	let authUrl: string | undefined;
+	/**
+	 * Unguessable gate for `/launch`, independent of the OAuth `state`. The
+	 * state is the only thing the callback checks before accepting a key, so a
+	 * local process must not be able to GET `/launch` and learn it. The launch
+	 * token is minted alongside the state and only ever handed to the caller
+	 * that received `launchUrl`.
+	 */
+	let launchToken: string | undefined;
 
 	const cors = (origin: string | null): Record<string, string> => ({
 		"access-control-allow-origin": origin !== null && ALLOWED_ORIGINS[origin] ? origin : studioOrigin,
@@ -153,9 +161,13 @@ export async function loginCommandCode(cb: OAuthLoginCallbacks): Promise<string>
 		const origin = req.headers.get("origin");
 		if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors(origin) });
 		if (url.pathname === LAUNCH_PATH) {
-			return authUrl
-				? Response.redirect(authUrl, 302)
-				: new Response("Command Code login is no longer active", { status: 503 });
+			// 404 without the minted token: an expired login and a probing request
+			// must be indistinguishable, so no local process can learn whether a
+			// login is active — let alone read the state-bearing auth URL.
+			if (authUrl !== undefined && launchToken !== undefined && url.searchParams.get("token") === launchToken) {
+				return Response.redirect(authUrl, 302);
+			}
+			return new Response("Not found", { status: 404 });
 		}
 		if (url.pathname !== CALLBACK_PATH) return json({ success: false, error: "Not found" }, 404, origin);
 		if (req.method !== "POST") {
@@ -211,9 +223,10 @@ export async function loginCommandCode(cb: OAuthLoginCallbacks): Promise<string>
 		}
 		const callbackUrl = `http://localhost:${port}${CALLBACK_PATH}`;
 		authUrl = `${studioBase}/studio/auth/cli?callback=${encodeURIComponent(callbackUrl)}&state=${encodeURIComponent(state)}`;
+		launchToken = crypto.randomUUID();
 		cb.onAuth({
 			url: authUrl,
-			launchUrl: `http://localhost:${port}${LAUNCH_PATH}`,
+			launchUrl: `http://localhost:${port}${LAUNCH_PATH}?token=${encodeURIComponent(launchToken)}`,
 			instructions: "Approve the CLI in your browser; Command Code sends the API key straight back to this machine.",
 		});
 		cb.onProgress?.("Waiting for browser authentication...");
@@ -222,6 +235,7 @@ export async function loginCommandCode(cb: OAuthLoginCallbacks): Promise<string>
 		return payload.apiKey;
 	} finally {
 		authUrl = undefined;
+		launchToken = undefined;
 		// Graceful stop: the studio still needs the `{ success: true }` ack that
 		// was queued alongside the delivery microtask. Await so the next login
 		// in-process (tests) does not race a half-closed listener.
