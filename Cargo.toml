@@ -3,7 +3,7 @@ members = ["crates/pi-*", "crates/vendor/*"]
 resolver = "3"
 
 [workspace.package]
-version = "17.2.10"
+version = "17.2.12"
 edition = "2024"
 license = "MIT"
 authors = ["Can Boluk"]
@@ -12,7 +12,6 @@ repository = "https://github.com/can1357/oh-my-pi"
 
 [patch.crates-io]
 brush-core = { path = "crates/vendor/brush-core" }
-brush-builtins = { path = "crates/vendor/brush-builtins" }
 
 [profile.release]
 opt-level = 3
@@ -32,20 +31,6 @@ strip = true
 # are kept out of the crash report by the crash hook
 # (see crates/pi-natives/src/crash_handler.rs).
 panic = "unwind"
-
-# rustc ICEs codegenning `MaybeUninit<maudio_sys::ffi::ma_fence>` — a union with
-# ScalarPair backend repr on x86_64-pc-windows-msvc — once the MIR opts that run
-# from opt-level 2 upward const-fold it into an `Uninit` operand
-# (`rustc_codegen_ssa/src/mir/block.rs`: "codegen_argument: OperandRef(Uninit …)
-# invalid for pair argument"). Hit by the rustup toolchain this repo pins
-# (nightly-2026-07-28) on the local napi path (`packages/natives` →
-# `build:bindings`); Bazel's older pin (nightly/2026-04-29, MODULE.bazel) is
-# unaffected, which is why CI never saw it. opt-level 1 keeps those MIR opts off.
-# maudio is a thin FFI shim — miniaudio itself is C compiled by `cc` at its own
-# optimization level — so the cost is noise. Drop this once the rustup pin moves
-# past the fix. `ci` and `local` inherit this override from `release`.
-[profile.release.package.maudio]
-opt-level = 1
 
 [profile.ci]
 inherits = "release"
@@ -74,9 +59,6 @@ split-debuginfo = "unpacked"
 [profile.dev.package."*"]
 opt-level = 2
 debug = false
-
-[profile.dev.package.maudio]
-opt-level = 1
 
 [workspace.lints.rust]
 # ──────────────────────────────────────────────────────────────────────────────
@@ -198,12 +180,13 @@ pi-shell = { path = "crates/pi-shell" }
 pi-voice = { path = "crates/pi-voice" }
 pi-walker = { path = "crates/pi-walker" }
 brush-core = { path = "crates/vendor/brush-core" }
-brush-builtins = { path = "crates/vendor/brush-builtins" }
+pi-builtins = { path = "crates/pi-builtins" }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Async Runtime & Concurrency
 # ──────────────────────────────────────────────────────────────────────────────
 async-trait = "0.1"
+futures = "0.3"
 dashmap = "6.1"
 parking_lot = "0.12.5"
 rayon = "1.12"
@@ -255,14 +238,10 @@ smallvec = { version = "1.15.1", features = [
 # ──────────────────────────────────────────────────────────────────────────────
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Audio & Realtime Media
 # ──────────────────────────────────────────────────────────────────────────────
 audiopus_sys = { version = "0.2.2", features = ["static"] }
-# Pregenerated bindings (crate default): keeps bindgen/libclang out of the
-# build graph so Bazel actions stay hermetic.
-maudio = "0.1.6"
 opus = "0.3.1"
 webrtc = "0.17.2"
 
@@ -273,12 +252,16 @@ libc = "0.2"
 os_pipe = "1"
 windows-sys = { version = "0.61", features = [
    "Win32_Foundation",
+   "Win32_Media_Audio",
+   "Win32_Media_Multimedia",
+   "Win32_Security",
    "Win32_Storage_FileSystem",
    "Win32_Storage_ProjectedFileSystem",
    "Win32_System_Com",
    "Win32_System_LibraryLoader",
    "Win32_System_IO",
    "Win32_System_Ioctl",
+   "Win32_System_Threading",
 ] }
 winreg = "0.56"
 
@@ -316,6 +299,10 @@ image = { version = "0.25", default-features = false, features = [
    "gif",
    "webp",
 ] }
+# Not used directly: activates zune-jpeg's non-default `log` feature so image's
+# JPEG decoder compiles — zune-jpeg 0.5.15's no-log stub macros are not
+# expression-safe and the crate fails to build without it.
+zune-jpeg = { version = "0.5", default-features = false, features = ["log"] }
 png = "0.18"
 inferno = { version = "0.12", default-features = false }
 syntect = { version = "5.3", default-features = false, features = [
