@@ -840,6 +840,26 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("rejects a disabled persona supplied directly at session construction", async () => {
+		// CLI startup and live /agent both enforce task.disabledAgents, but a
+		// directly-supplied options.agentPersona (SDK embedder, the ACP
+		// factory's per-cwd re-resolve) bypassed both and started the session
+		// with the disabled persona (codex 3742974505).
+		const tempDir = makeTempDir();
+		await expect(
+			createAgentSession({
+				...baseOptions(tempDir),
+				settings: Settings.isolated({ "task.disabledAgents": ["disabled-at-construction"] }),
+				agentPersona: {
+					name: "disabled-at-construction",
+					description: "Persona disabled in settings",
+					systemPrompt: "",
+					source: "project" as const,
+				},
+			}),
+		).rejects.toThrow('Agent "disabled-at-construction" is disabled in settings (task.disabledAgents).');
+	});
+
 	it("rejects a persona switch while the session is streaming", async () => {
 		const tempDir = makeTempDir();
 		const { session } = await createAgentSession(baseOptions(tempDir));

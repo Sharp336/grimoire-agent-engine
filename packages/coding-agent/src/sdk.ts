@@ -1297,6 +1297,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		options.settingsManager ??
 		logger.time("settings", Settings.init, { cwd, agentDir }));
 	logger.time("initializeWithSettings", initializeWithSettings, settings);
+	// Personas disabled in settings must be rejected at construction too, not
+	// only at CLI startup (main.ts) and live switchAgentPersona: a directly
+	// supplied options.agentPersona (SDK embedder, the ACP factory's per-cwd
+	// re-resolve) would otherwise start the session with the disabled persona,
+	// bypassing the checks the CLI and /agent enforce (codex 3742974505).
+	if (options.agentPersona?.name) {
+		const disabledAgents = settings.get("task.disabledAgents") as string[] | undefined;
+		if (disabledAgents?.includes(options.agentPersona.name)) {
+			// Outside the construction try/catch: release an internally-created
+			// authStorage so the throw does not leak it.
+			if (ownsAuthStorage) await authStorage.close();
+			throw new Error(`Agent "${options.agentPersona.name}" is disabled in settings (task.disabledAgents).`);
+		}
+	}
 	if (!options.modelRegistry) {
 		modelRegistry.refreshInBackground();
 	}
