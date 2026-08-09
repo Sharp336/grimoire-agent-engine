@@ -156,7 +156,7 @@ describe("--agent CLI flag", () => {
 
 		expect(options.modelPattern).toEqual(["anthropic/claude-sonnet-4-5"]);
 		expect(options.thinkingLevel).toBe(Effort.High);
-		expect(options.toolNames).toEqual(["read", "bash", "yield"]);
+		expect(options.toolNames).toEqual(["read", "bash"]);
 		expect(options.restrictToolNames).toBe(true);
 		expect(options.spawns).toBe("scout");
 		expect(options.appendSystemPrompt).toContain("You are the myagent persona for the main session.");

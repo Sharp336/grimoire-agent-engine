@@ -1156,7 +1156,12 @@ export async function buildSessionOptions(
 		if (!options.model && !options.modelPattern && agent.model) options.modelPattern = agent.model; // agent.model is string[]; modelPattern accepts string | string[]
 		if (!options.thinkingLevel && agent.thinkingLevel) options.thinkingLevel = agent.thinkingLevel;
 		if (!parsed.tools && !parsed.noTools && agent.tools) {
-			options.toolNames = agent.tools;
+			// `parseAgentFields` appends `yield` to every explicit tool list because
+			// subagents need it to submit results. The main session has no parent
+			// executor to consume a yield — exposing it would prompt the model to
+			// "submit subagent output" and end its turn early. Strip it (and the
+			// goal-mode-only tool) before applying the persona's toolset.
+			options.toolNames = agent.tools.filter(name => name !== "yield" && name !== "goal");
 			options.restrictToolNames = true;
 		}
 		if (agent.systemPrompt)

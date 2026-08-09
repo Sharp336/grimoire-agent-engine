@@ -60,6 +60,7 @@ import {
 	toResetUsageAccounts,
 } from "../../slash-commands/helpers/reset-usage";
 import { toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
+import { discoverAgents } from "../../task/discovery";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -82,6 +83,7 @@ import { setSessionTerminalTitle } from "../../utils/title-generator";
 import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "../components/advisor-config";
 import { AgentDashboard } from "../components/agent-dashboard";
 import { AgentHubOverlayComponent } from "../components/agent-hub";
+import { AgentPersonaPickerComponent } from "../components/agent-persona-picker";
 import { AssistantMessageComponent } from "../components/assistant-message";
 import { CopySelectorComponent } from "../components/copy-selector";
 import { ExtensionDashboard } from "../components/extensions";
@@ -699,6 +701,43 @@ export class SelectorController {
 			return;
 		}
 		this.#showModelHub({});
+	}
+
+	/**
+	 * `/switch-agent` persona picker: a bottom-anchored overlay listing
+	 * main-selectable discovered agents (availability !== "subagent", not in
+	 * `task.disabledAgents`). Selecting an entry live-switches the persona;
+	 * Esc closes without changes.
+	 */
+	async showAgentPersonaSelector(): Promise<void> {
+		const { agents } = await discoverAgents(this.ctx.sessionManager.getCwd());
+		const disabled = new Set((this.ctx.settings.get("task.disabledAgents") as string[] | undefined) ?? []);
+		const selectable = agents.filter(agent => agent.availability !== "subagent" && !disabled.has(agent.name));
+
+		let overlayHandle: OverlayHandle | undefined;
+		let closed = false;
+		const done = () => {
+			if (closed) return;
+			closed = true;
+			overlayHandle?.hide();
+			this.focusActiveEditorArea();
+			this.ctx.ui.requestRender();
+		};
+		const picker = new AgentPersonaPickerComponent(this.ctx.ui, selectable, {
+			onPick: agent => {
+				done();
+				void this.ctx.switchAgentPersona(agent.name);
+			},
+			onCancel: done,
+		});
+		overlayHandle = this.ctx.ui.showOverlay(picker, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+		});
+		this.ctx.ui.setFocus(picker);
+		this.ctx.ui.requestRender();
 	}
 
 	/**

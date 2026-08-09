@@ -116,6 +116,7 @@ import { STTController, type SttState } from "../stt";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { discoverAgents, getAgent } from "../task/discovery";
 import { formatTaskId } from "../task/render";
+import type { AgentDefinition } from "../task/types";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import { tinyTitleClient } from "../tiny/title-client";
 import type { LspStartupServerInfo } from "../tools";
@@ -2542,6 +2543,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (!preserveVibe) await this.#enterVibeMode({ persistModeChange: false });
 			return;
 		}
+		if (sessionContext.mode === "agent") {
+			await this.#reconcilePersonaFromSession(sessionContext.modeData);
+			return;
+		}
 		if (!this.session.settings.get("plan.enabled")) {
 			// Clear stale plan/plan_paused mode so re-enabling the setting
 			// later doesn't unexpectedly restore an old plan session.
@@ -2557,6 +2562,55 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.planModePaused = true;
 			this.#planModeHasEntered = true;
 			this.#updatePlanModeStatus();
+		}
+	}
+
+	/**
+	 * Re-apply a persisted agent persona on resume/switch. The persona is
+	 * re-discovered fresh and its CURRENT definition is applied (tools, model,
+	 * thinking, spawns, system-prompt append). When the agent is gone, changed to
+	 * `subagent`, or disabled, the launch baseline tools/prompt are left untouched
+	 * and only a warning is emitted — model+thinking are already restored by the
+	 * existing `model_change`/`thinking_level_change` flow in switchSession.
+	 */
+	async #reconcilePersonaFromSession(data: Record<string, unknown> | undefined): Promise<void> {
+		const name = data?.name as string | undefined;
+		if (!name) return;
+		let agent: AgentDefinition | undefined;
+		try {
+			const { agents } = await discoverAgents(this.sessionManager.getCwd());
+			agent = getAgent(agents, name);
+		} catch (error) {
+			logger.warn("Failed to discover agents during persona restore", { error: String(error) });
+			return;
+		}
+		const disabledAgents = (this.session.settings.get("task.disabledAgents") as string[] | undefined) ?? [];
+		if (agent && agent.availability !== "subagent" && !disabledAgents.includes(name)) {
+			if (agent.tools) {
+				// `parseAgentFields` appends `yield` to every explicit tool list for
+				// subagent result submission; the main session has no parent executor
+				// to consume it. Strip it (and the goal-mode-only tool) before applying.
+				await this.session.setActiveToolsByName(
+					agent.tools.filter(toolName => toolName !== "yield" && toolName !== "goal"),
+				);
+			}
+			if (agent.thinkingLevel) {
+				this.session.setThinkingLevel(agent.thinkingLevel);
+			}
+			this.session.setSessionSpawns(agent.spawns === "*" ? "*" : agent.spawns ? agent.spawns.join(",") : "*");
+			this.session.setPersonaAppendPrompt(agent.systemPrompt);
+			if (agent.model) {
+				const resolved = resolveModelOverride(agent.model, this.session.modelRegistry, this.session.settings);
+				if (resolved.model) {
+					await this.session.setModelTemporary(resolved.model, resolved.thinkingLevel);
+				}
+			}
+			await this.session.refreshBaseSystemPrompt();
+		} else {
+			this.session.emitNotice(
+				"warning",
+				`Agent "${name}" is no longer available. Restored model and thinking level.`,
+			);
 		}
 	}
 
@@ -2658,12 +2712,22 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		try {
 			if (agent.tools) {
-				await this.session.setActiveToolsByName(agent.tools);
+				// `parseAgentFields` appends `yield` to every explicit tool list for
+				// subagent result submission; the main session has no parent executor
+				// to consume it. Strip it (and the goal-mode-only tool) before applying.
+				await this.session.setActiveToolsByName(agent.tools.filter(name => name !== "yield" && name !== "goal"));
 			}
 			if (agent.model) {
 				const resolved = resolveModelOverride(agent.model, this.session.modelRegistry, this.session.settings);
 				if (resolved.model) {
-					await this.session.setModelTemporary(resolved.model, resolved.thinkingLevel);
+					if (this.session.isStreaming) {
+						// Mirror plan mode: never reset provider sessions under an
+						// in-flight turn — queue the switch and flush on agent_end.
+						this.#pendingModelSwitch = { model: resolved.model, thinkingLevel: resolved.thinkingLevel };
+						this.#pendingPlanModelSwitch = false;
+					} else {
+						await this.session.setModelTemporary(resolved.model, resolved.thinkingLevel);
+					}
 				} else {
 					this.showWarning(`Agent "${name}" model pattern did not resolve; keeping current model.`);
 				}
@@ -2676,9 +2740,18 @@ export class InteractiveMode implements InteractiveModeContext {
 			await this.session.refreshBaseSystemPrompt();
 		} catch (error) {
 			try {
+				// A queued persona model switch must not survive a failed apply —
+				// otherwise flushPendingModelSwitch would clobber the restored model.
+				this.#pendingModelSwitch = undefined;
+				this.#pendingPlanModelSwitch = false;
 				await this.session.setActiveToolsByName(previousTools);
 				if (previousModel) {
-					await this.session.setModelTemporary(previousModel, previousThinking);
+					if (this.session.isStreaming) {
+						this.#pendingModelSwitch = { model: previousModel, thinkingLevel: previousThinking };
+						this.#pendingPlanModelSwitch = false;
+					} else {
+						await this.session.setModelTemporary(previousModel, previousThinking);
+					}
 				}
 				this.session.setThinkingLevel(previousThinking);
 				this.session.setSessionSpawns(previousSpawns);
@@ -4802,6 +4875,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showModelSelector(options?: { temporaryOnly?: boolean }): void {
 		this.#selectorController.showModelSelector(options);
+	}
+
+	showAgentPersonaSelector(): void {
+		void this.#selectorController.showAgentPersonaSelector();
 	}
 
 	showPluginSelector(mode?: "install" | "uninstall"): void {
