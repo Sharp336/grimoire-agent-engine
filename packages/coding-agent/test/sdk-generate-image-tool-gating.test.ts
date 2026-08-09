@@ -271,6 +271,39 @@ describe("generate_image tool gating", () => {
 		expect(session.getEnabledToolNames()).toContain(mcpTool.name);
 	});
 
+	it("does not install the persona tool policy when the SDK caller granted the tool set", async () => {
+		const mcpTool = customTool("mcp__sdk__search", true);
+		// SDK embedder passes agentPersona together with an explicit toolNames
+		// list but does NOT set cliToolsLocked: startup respects the explicit
+		// list (the SDK persona block only fills toolNames when undefined), so a
+		// deferred MCP refresh must not filter the explicitly granted host tool
+		// against the persona's own tools either (codex 3743142).
+		const { session } = await createAgentSession({
+			cwd: registryDir,
+			agentDir: registryDir,
+			enableMCP: false,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "plan.enabled": false }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			toolNames: ["read", mcpTool.name],
+			agentPersona: {
+				name: "restricted-sdk-persona",
+				description: "Persona whose own tools would exclude the SDK-granted MCP tool",
+				systemPrompt: "",
+				tools: ["read"],
+				source: "project" as const,
+			},
+		});
+		sessions.push(session);
+
+		await session.refreshMCPTools([mcpTool]);
+
+		// The SDK-granted MCP tool stays active: no persona filter is installed.
+		expect(session.getEnabledToolNames()).toContain(mcpTool.name);
+	});
+
 	it("filters startup always-include tools through the persona tool policy", async () => {
 		const ambientTool = customTool("ambient_write_like", false);
 		// Persona grants only `read`; an SDK custom tool would normally be
