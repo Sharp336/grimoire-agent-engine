@@ -8,6 +8,7 @@ import type { Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { resolveModelOverride } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
@@ -24,6 +25,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import type { CustomMessageEntry, SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { fingerprintAgentContent } from "@oh-my-pi/pi-coding-agent/task/agent-policy";
+import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { VIBE_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/vibe";
 import { VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
 import { logger, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -1420,6 +1422,53 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("persists an explicit persona's model when identity matches but the transcript model postdates it", async () => {
+		// The explicit --agent persona is a fresh selection: its frontmatter
+		// model/thinking apply for this run even when the recorded identity
+		// AND fingerprint match (the append guard skips). If the transcript's
+		// model_change postdates the agent_change (the model was switched
+		// in-session later), the next resume would rehydrate the older model
+		// and silently revert the reselection unless this run persists its
+		// applied values (codex 3742448940).
+		const tempDir = makeTempDir();
+		await withProviderAuth(["openai"], async () => {
+			const sessionManager = SessionManager.inMemory();
+			// Identity + fingerprint match the explicit persona below...
+			const persona = {
+				name: "model-persona",
+				description: "Persona with a model",
+				systemPrompt: "",
+				model: ["openai/gpt-4o"],
+				source: "project" as const,
+			};
+			sessionManager.appendAgentChange("model-persona", "project", fingerprintAgentContent(persona));
+			// ...but the transcript's latest model_change records an OLDER
+			// model, switched after the persona was recorded.
+			sessionManager.appendModelChange("openai/gpt-4o-mini");
+			sessionManager.appendMessage({ role: "user", content: "prior turn", timestamp: Date.now() });
+
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				sessionManager,
+				model: getBundledModel("openai", "gpt-4o"),
+				agentPersona: persona,
+			});
+
+			try {
+				// The explicit selection's model is live...
+				expect(session.model?.id).toBe("gpt-4o");
+				// ...and persisted: the last model_change must record it so the
+				// next resume rehydrates the reselection, not the stale one.
+				const modelChanges = sessionManager.getEntries().filter(e => e.type === "model_change");
+				expect(modelChanges[modelChanges.length - 1].model).toBe("openai/gpt-4o");
+				// The identity match still skipped the agent_change append.
+				expect(sessionManager.getEntries().filter(e => e.type === "agent_change")).toHaveLength(1);
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
 	// A session created on another provider keeps its configured-mode `edit` in
 	// the registry (only a Cursor-created session moves it out) and the tool
 	// roster is built once, at creation — switching to Cursor later does not
@@ -1663,7 +1712,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 	/** Writes a minimal target transcript with an optional recorded persona. */
 	async function writeSwitchTarget(
 		filePath: string,
-		options: { agent?: { name: string; source: string } } = {},
+		options: { agent?: { name: string; source: string }; fingerprint?: string } = {},
 	): Promise<void> {
 		const timestamp = "2026-08-08T00:00:00.000Z";
 		const entries: Array<Record<string, unknown>> = [
@@ -1677,6 +1726,20 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				timestamp,
 				agent: options.agent.name,
 				source: options.agent.source,
+				// A real saved transcript carries the definition fingerprint (the
+				// SDK's appendAgentChange always writes one). Without it the
+				// switch treats the recorded content as unknown and reapplies
+				// the persona's model/thinking defaults — a legacy-only path.
+				fingerprint:
+					options.fingerprint ??
+					fingerprintAgentContent(
+						getBundledAgent(options.agent.name) ?? {
+							name: options.agent.name,
+							description: options.agent.name,
+							systemPrompt: "",
+							source: options.agent.source as "bundled" | "user" | "project",
+						},
+					),
 			});
 		}
 		await Bun.write(filePath, `${entries.map(entry => JSON.stringify(entry)).join("\n")}\n`);
@@ -1734,6 +1797,58 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			await session.dispose();
 			await control.dispose();
 		}
+	});
+
+	it("reapplies a changed persona's model/thinking on session switch", async () => {
+		// switchSession treats the recorded persona as a rehydrated selection
+		// and restores the transcript's model/thinking — but when the
+		// definition CONTENT changed since the transcript saved (fingerprint
+		// differs), the current definition's frontmatter model/thinking must
+		// be reapplied after that restore. Without it the in-process switch
+		// silently keeps running the stale model/thinking until the process
+		// restarts, while a cold resume of the same transcript reapplies the
+		// new defaults (codex 3742448937).
+		const tempDir = makeTempDir();
+		await withProviderAuth(["openai", "openai-codex"], async () => {
+			const targetFile = path.join(tempDir, "target-reviewer.jsonl");
+			// Stale fingerprint: the persona's model:/thinkingLevel: changed
+			// since this transcript recorded it.
+			await writeSwitchTarget(targetFile, {
+				agent: { name: "reviewer", source: "bundled" },
+				fingerprint: "stale-content-fingerprint",
+			});
+
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				sessionManager: SessionManager.create(tempDir, path.join(tempDir, "active")),
+			});
+
+			try {
+				expect(session.model?.provider).toBe("openai");
+				expect(await session.switchSession(targetFile)).toBe(true);
+				expect(session.agentPersona?.name).toBe("reviewer");
+
+				// The reviewer's model: @slow must now be live — the stale
+				// transcript (which recorded no model_change at all) cannot
+				// win over the changed definition's frontmatter.
+				const reviewer = getBundledAgent("reviewer");
+				if (!reviewer) throw new Error("expected bundled reviewer agent");
+				const resolved = resolveModelOverride(reviewer.model ?? [], modelRegistry, Settings.isolated());
+				if (!resolved.model) throw new Error("expected @slow to resolve in the test registry");
+				expect(session.model?.provider).toBe(resolved.model.provider);
+				expect(session.model?.id).toBe(resolved.model.id);
+
+				// The reapply persisted an agent_change carrying the CURRENT
+				// fingerprint, so the next resume compares against this
+				// content rather than the stale recorded one.
+				const entries = sessionManagerEntries(session);
+				const agentChanges = entries.filter(e => e.type === "agent_change");
+				expect(agentChanges).toHaveLength(2);
+				expect(agentChanges[agentChanges.length - 1].fingerprint).toBe(fingerprintAgentContent(reviewer));
+			} finally {
+				await session.dispose();
+			}
+		});
 	});
 
 	it("does not clobber the target persona's tools when switching out of goal mode", async () => {

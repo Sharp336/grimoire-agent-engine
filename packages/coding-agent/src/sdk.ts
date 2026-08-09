@@ -3478,21 +3478,35 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					options.agentPersona.source,
 					personaFingerprint,
 				);
-				// An explicit --agent whose frontmatter selected a model/thinking
-				// level applied them for this run; without entries the next resume
-				// would rehydrate the transcript's older values. Record the
-				// applied selection when it differs from what the transcript has.
-				if (model && formatModelString(model) !== existingSession.models.default) {
-					sessionManager.appendModelChange(formatModelString(model));
-				}
-				if (
-					options.thinkingLevel !== undefined &&
-					!autoThinking &&
-					effectiveThinkingLevel !== undefined &&
-					String(options.thinkingLevel) !== existingSession.configuredThinkingLevel
-				) {
-					sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, String(options.thinkingLevel));
-				}
+			}
+			// An explicit --agent (fresh selection, not rehydrated) applies its
+			// frontmatter model/thinking for THIS run even when the recorded
+			// identity+fingerprint match and the append above is skipped: the
+			// transcript's model_change/thinking_level_change may postdate the
+			// agent_change (the model was switched in-session later), and without
+			// new entries the next resume rehydrates those older values and
+			// silently reverts the reselection (codex 3742448940). `options.model`
+			// is set by main.ts only for an explicit selection (rehydrated
+			// resumes leave it unset and restore the transcript's own model), so
+			// it cleanly separates the two. The diff guards keep an explicit
+			// resume whose frontmatter resolved to the recorded values from
+			// writing spurious entries.
+			if (
+				options.agentPersona &&
+				options.model !== undefined &&
+				model &&
+				formatModelString(model) !== existingSession.models.default
+			) {
+				sessionManager.appendModelChange(formatModelString(model));
+			}
+			if (
+				options.agentPersona &&
+				options.thinkingLevel !== undefined &&
+				!autoThinking &&
+				effectiveThinkingLevel !== undefined &&
+				String(options.thinkingLevel) !== existingSession.configuredThinkingLevel
+			) {
+				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, String(options.thinkingLevel));
 			}
 			if (options.openAIServiceTier !== undefined) {
 				sessionManager.appendServiceTierChange(

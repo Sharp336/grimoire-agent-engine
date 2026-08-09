@@ -7741,8 +7741,18 @@ export class AgentSession {
 			// is now disabled), clear the previous persona's overlay and spawns
 			// back to the launch baseline.
 			let sessionContext = this.buildDisplaySessionContext();
+			// Hoisted out of the persona-reconcile block: the transcript model/
+			// thinking restore below runs after it, and a changed persona's
+			// model/thinking defaults must be reapplied AFTER that restore.
+			let targetPersona: AgentDefinition | undefined;
+			let targetPersonaContentChanged = false;
 			if (switchingToDifferentSession) {
 				const recorded = sessionContext.agentPersona;
+				// Captured for the changed-content check below: `persona` is only
+				// assigned when `recorded` is defined, but TS cannot narrow the
+				// sibling block, so read the fingerprint through the optional
+				// chain here.
+				const recordedFingerprint = recorded?.fingerprint;
 				let persona: AgentDefinition | undefined;
 				if (recorded) {
 					const discovery = await discoverAgents(this.sessionManager.getCwd(), undefined, {
@@ -7760,6 +7770,19 @@ export class AgentSession {
 				}
 				if (persona) {
 					const policy = resolveAgentSessionPolicy(persona);
+					// A persona whose definition content changed since the
+					// transcript recorded it (e.g. model:/thinkingLevel: edited)
+					// must have its new model/thinking defaults reapplied after
+					// the transcript restore below — a cold startup resume does
+					// this via the SDK persona block, but an in-process switch
+					// never did, silently running the stale model/thinking until
+					// the process restarted (codex 3742448937). The transcript
+					// entries still win when content is unchanged (the switch is
+					// a rehydrated selection, mirroring main.ts
+					// agentRehydratedFromContext).
+					targetPersona = persona;
+					targetPersonaContentChanged =
+						recordedFingerprint === undefined || recordedFingerprint !== fingerprintAgentContent(persona);
 					if (!this.#cliToolsLocked) {
 						if (this.#agentToolOverlay) await this.#agentToolOverlay.restore();
 						this.#agentToolOverlay = policy.toolNames ? await this.applyToolOverlay(policy.toolNames) : undefined;
@@ -7880,6 +7903,63 @@ export class AgentSession {
 			this.#models.restoreServiceTiers(
 				hasServiceTierEntry ? (sessionContext.serviceTier ?? {}) : configuredServiceTierByFamily,
 			);
+
+			// A persona whose definition content changed since the transcript was
+			// saved must reapply its model/thinking defaults AFTER the transcript
+			// restore above (which is authoritative for unchanged content). The
+			// switch is an explicit re-selection of the current definition — the
+			// same semantics as an explicit `--agent` cold resume — so its
+			// frontmatter model/thinking win over the stale transcript entries.
+			// setModel/setThinkingLevel persist their own transcript entries, so
+			// the next resume rehydrates the reapplied values instead of the
+			// stale ones (codex 3742448937).
+			if (targetPersonaContentChanged && targetPersona && switchingToDifferentSession) {
+				try {
+					const policy = resolveAgentSessionPolicy(targetPersona);
+					if (!this.#cliModelLocked && policy.modelPatterns?.length) {
+						const resolved = resolveModelOverride(policy.modelPatterns, this.modelRegistry, this.settings);
+						if (resolved.model) {
+							// Skip when it equals the restored transcript model:
+							// ModelControls.setModel would still append a
+							// duplicate model_change and reapply thinking.
+							if (!this.model || !modelsAreEqual(this.model, resolved.model)) {
+								await this.setModel(resolved.model, "default");
+							}
+							if (resolved.warning) this.emitNotice("warning", resolved.warning);
+						} else {
+							// Unresolvable after a switch (deleted provider,
+							// disabled extension): keep the restored model rather
+							// than failing the whole switch — the persona's
+							// tools/spawns already committed above.
+							logger.warn("Persona model did not resolve during session switch", {
+								agent: targetPersona.name,
+								modelPatterns: policy.modelPatterns,
+							});
+						}
+					}
+					// Thinking: apply the persona's frontmatter level — a fresh
+					// selection for changed content. Unchanged personas restored
+					// the transcript entries above and never reach this branch.
+					// Skip when an explicit CLI thinking is locked.
+					if (!this.#cliThinkingLocked && policy.thinkingLevel) {
+						this.setThinkingLevel(policy.thinkingLevel);
+					}
+					// Record the current definition's fingerprint so the next
+					// resume's identity check compares against this content, not
+					// the stale recorded one.
+					this.sessionManager.appendAgentChange(
+						targetPersona.name,
+						targetPersona.source,
+						fingerprintAgentContent(targetPersona),
+					);
+				} catch (applyError) {
+					logger.warn("Failed to reapply changed persona model/thinking after session switch", {
+						targetSessionFile: sessionPath,
+						agent: targetPersona.name,
+						error: String(applyError),
+					});
+				}
+			}
 
 			if (switchingToDifferentSession) {
 				await this.#memory.resetContextForNewTranscript();

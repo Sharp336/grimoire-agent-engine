@@ -147,8 +147,8 @@ describe("TaskTool.create discovery memo", () => {
 		// First read after the reload: misses and kicks the async rediscovery,
 		// returning the constructor capture for this synchronous render.
 		expect(tool.description).not.toContain("Refreshed task agent");
-		await new Promise(resolve => setTimeout(resolve, 0));
-		await new Promise(resolve => setTimeout(resolve, 0));
+		await Bun.sleep(0);
+		await Bun.sleep(0);
 		// The next render reads the republished snapshot.
 		expect(tool.description).toContain("Refreshed task agent");
 		expect(spy).toHaveBeenCalledTimes(3); // create + reload + rebuild
