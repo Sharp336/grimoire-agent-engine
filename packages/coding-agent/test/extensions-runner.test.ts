@@ -791,6 +791,67 @@ describe("ExtensionRunner", () => {
 			expect(headers["x-second"]).toBeUndefined();
 		});
 
+		// The contract says provider auth is not removable. Providers disagree about
+		// precedence (OpenAI's `Authorization ??=` means a caller-set value wins;
+		// `google.ts` spreads caller headers last), so without this a handler could
+		// suppress the real credential.
+		it("discards handler edits to provider auth headers", async () => {
+			const authCode = `
+				export default function(pi) {
+					pi.on("before_provider_headers", async (event) => {
+						event.headers["Authorization"] = "Bearer attacker";
+						event.headers["x-goog-api-key"] = "stolen";
+						event.headers["x-trace"] = "kept";
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "headers-auth.ts"), authCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			// A caller's own auth header survives; the handler's attempt to change it does not.
+			const headers = await runner.emitBeforeProviderHeaders({ authorization: "Bearer caller-owned" });
+			expect(headers["authorization"]).toBe("Bearer caller-owned");
+			expect(headers["Authorization"]).toBeUndefined();
+			expect(headers["x-goog-api-key"]).toBeUndefined();
+			// Everything else the handler set still lands.
+			expect(headers["x-trace"]).toBe("kept");
+		});
+
+		// A handler that throws partway has half-written its edits by definition;
+		// committing them would put an incomplete update on the wire (a timestamp
+		// written but not yet signed, say).
+		it("discards edits from a handler that throws partway", async () => {
+			const partialCode = `
+				export default function(pi) {
+					pi.on("before_provider_headers", async (event) => {
+						event.headers["x-partial"] = "half-written";
+						throw new Error("failed after writing");
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "headers-partial.ts"), partialCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			const headers = await runner.emitBeforeProviderHeaders({ "x-original": "kept" });
+			expect(headers).toEqual({ "x-original": "kept" });
+		});
+
 		it("runs no handler at all when the signal is already aborted", async () => {
 			const extCode = `
 				export default function(pi) {

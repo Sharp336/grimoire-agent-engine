@@ -115,6 +115,52 @@ function handlerTimeoutForEvent(eventType: string): number {
 const EXTENSION_HANDLER_TIMEOUT = Symbol("extensionHandlerTimeout");
 const EXTENSION_HANDLER_ABORTED = Symbol("extensionHandlerAborted");
 
+/**
+ * Provider credentials, which a `before_provider_headers` handler must not be
+ * able to set, replace, or clear.
+ *
+ * The event's contract says provider auth is generated downstream and is neither
+ * visible nor removable. Visibility held on its own, but removability did not:
+ * providers disagree about precedence, so a handler writing `Authorization` could
+ * suppress the real credential. OpenAI merges caller headers and then only does
+ * `headers.Authorization ??= …`, so a caller-set value means the API key is never
+ * applied; `google.ts` and the Gemini CLI transport spread caller headers LAST,
+ * straight over the key. Enforcing it at this boundary makes the contract true
+ * for every provider at once, and keeps the guarantee where the promise is made.
+ */
+const PROVIDER_AUTH_HEADERS = new Set([
+	"authorization",
+	"proxy-authorization",
+	"x-api-key",
+	"api-key",
+	"x-goog-api-key",
+]);
+
+/**
+ * Take the handler's edits, except to provider auth: those keys come back exactly
+ * as they were before it ran.
+ *
+ * Reverting rather than blanket-stripping is deliberate. A CALLER may legitimately
+ * have supplied its own `Authorization` in `StreamOptions.headers` (a gateway in
+ * front of the provider, say), and deleting that would break a working setup. Only
+ * the handler's change to those keys is discarded.
+ */
+function withProviderAuthRestored(
+	before: Record<string, string>,
+	after: Record<string, string>,
+): Record<string, string> {
+	const restored: Record<string, string> = {};
+	// Case-insensitively, since a handler can add `Authorization` next to an
+	// existing `authorization` and a plain key comparison would keep both.
+	for (const [key, value] of Object.entries(after)) {
+		if (!PROVIDER_AUTH_HEADERS.has(key.toLowerCase())) restored[key] = value;
+	}
+	for (const [key, value] of Object.entries(before)) {
+		if (PROVIDER_AUTH_HEADERS.has(key.toLowerCase())) restored[key] = value;
+	}
+	return restored;
+}
+
 function attachHandlerSignal(
 	dialogOptions: ExtensionUIDialogOptions | undefined,
 	handlerSignal: AbortSignal,
@@ -1368,8 +1414,20 @@ export class ExtensionRunner {
 					type: "before_provider_headers",
 					headers: working,
 				};
-				await this.#runHandlerWithTimeout(handler, event, ctx, ext, extensionHandlerTimeoutMs, signal);
-				current = { ...working };
+				// Only a handler that RAN TO COMPLETION gets its edits. One that throws,
+				// times out, or is aborted is a handler whose work is half-done by
+				// definition — committing that would put a partial update (a timestamp
+				// written but not yet signed, say) on the wire. `#runHandlerWithTimeout`
+				// returns `undefined` for both success-with-no-return and failure, so
+				// completion is recorded here rather than inferred from the result.
+				let completed = false;
+				const settle = async (settledEvent: BeforeProviderHeadersEvent, handlerCtx: ExtensionContext) => {
+					const result = await handler(settledEvent, handlerCtx);
+					completed = true;
+					return result;
+				};
+				await this.#runHandlerWithTimeout(settle, event, ctx, ext, extensionHandlerTimeoutMs, signal);
+				if (completed) current = withProviderAuthRestored(current, working);
 			}
 		}
 
