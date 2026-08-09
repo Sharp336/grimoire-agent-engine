@@ -253,15 +253,48 @@ export function slugifyProjectPath(value: string): string {
 }
 
 /** Run a git command in `cwd`, returning trimmed stdout or `""` on any failure. */
+/**
+ * Probe budget: the snapshot is awaited before the HTTP request starts, so a
+ * slow/locked/NFS repo, a hung git, or a huge status must not stall the turn.
+ * `GIT_TERMINAL_PROMPT=0` and `--no-pager` keep the probes non-interactive;
+ * the abort deadline kills the child; the byte cap bounds the payload.
+ */
+const GIT_PROBE_TIMEOUT_MS = 5_000;
+const GIT_PROBE_MAX_OUTPUT_BYTES = 64 * 1024;
+
+/** Read at most `maxBytes` from a stream, dropping the remainder. */
+async function readCapped(stream: ReadableStream<Uint8Array>, maxBytes: number): Promise<string> {
+	const reader = stream.getReader();
+	const decoder = new TextDecoder();
+	let result = "";
+	while (result.length < maxBytes) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		if (!value) continue;
+		const slice = value.subarray(0, maxBytes - result.length);
+		result += decoder.decode(slice, { stream: true });
+		if (value.byteLength > slice.byteLength) break;
+	}
+	await reader.cancel().catch(() => {});
+	return result;
+}
+
+/** Run a git command in `cwd`, returning trimmed stdout or `""` on any failure. */
 async function gitOutput(cwd: string, args: string[]): Promise<string> {
 	try {
-		const child = Bun.spawn(["git", ...args], {
+		const child = Bun.spawn(["git", "--no-pager", ...args], {
 			cwd,
 			stdout: "pipe",
 			stderr: "ignore",
 			stdin: "ignore",
+			// Kills the child on expiry, so a hung repo cannot block the turn.
+			signal: AbortSignal.timeout(GIT_PROBE_TIMEOUT_MS),
+			env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
 		});
-		const [stdout, exitCode] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+		const [stdout, exitCode] = await Promise.all([
+			readCapped(child.stdout, GIT_PROBE_MAX_OUTPUT_BYTES),
+			child.exited,
+		]);
 		return exitCode === 0 ? stdout.trim() : "";
 	} catch {
 		return "";
