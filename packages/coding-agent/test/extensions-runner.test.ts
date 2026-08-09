@@ -748,6 +748,72 @@ describe("ExtensionRunner", () => {
 			expect(headers["x-chain"]).toBe("ext1-ext2");
 		});
 
+		// This event runs while the request holds its provider concurrency slot, so a
+		// hung handler must not pin that slot past an abort. Without the signal the
+		// call blocks for the whole handler timeout and the slot goes with it.
+		it("stops the handler chain when the request is aborted", async () => {
+			const hang = `
+				export default function(pi) {
+					pi.on("before_provider_headers", async (event) => {
+						event.headers["x-first"] = "ran";
+						await new Promise(resolve => setTimeout(resolve, 5000));
+					});
+				}
+			`;
+			const second = `
+				export default function(pi) {
+					pi.on("before_provider_headers", async (event) => {
+						event.headers["x-second"] = "ran";
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "headers-1-hang.ts"), hang);
+			fs.writeFileSync(path.join(extensionsDir, "headers-2-after.ts"), second);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			const controller = new AbortController();
+			setTimeout(() => controller.abort(), 20);
+			const startedAt = Date.now();
+			const headers = await runner.emitBeforeProviderHeaders({}, undefined, controller.signal);
+			const elapsed = Date.now() - startedAt;
+
+			// Returns on the abort rather than on the hung handler or the timeout.
+			expect(elapsed).toBeLessThan(1000);
+			// The abort also stops the handlers that had not run yet.
+			expect(headers["x-second"]).toBeUndefined();
+		});
+
+		it("runs no handler at all when the signal is already aborted", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("before_provider_headers", async (event) => {
+						event.headers["x-ran"] = "yes";
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "headers-preaborted.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			const headers = await runner.emitBeforeProviderHeaders({ "x-in": "1" }, undefined, AbortSignal.abort());
+			expect(headers).toEqual({ "x-in": "1" });
+		});
+
 		it("keeps earlier edits after a handler throws", async () => {
 			const extCode1 = `
 				export default function(pi) {

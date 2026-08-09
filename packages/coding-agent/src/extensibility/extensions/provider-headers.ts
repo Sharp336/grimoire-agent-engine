@@ -34,11 +34,15 @@ import type { ExtensionRunner } from "./runner";
  * own copy (see `emitBeforeProviderHeaders`), so one that outruns its timeout
  * cannot write into the request after returning. When no extension subscribes,
  * `base` is called directly and no copy is made.
+ *
+ * The request signal is threaded through so an abort stops the handler chain.
+ * Because this runs holding the provider concurrency slot, a hung handler would
+ * otherwise keep that slot for the whole handler timeout past the abort.
  */
 export function wrapStreamFnWithProviderHeaders(runner: ExtensionRunner, base: StreamFn): StreamFn {
 	return async (model, context, options) => {
 		if (!runner.hasHandlers("before_provider_headers")) return base(model, context, options);
-		const headers = await runner.emitBeforeProviderHeaders({ ...options?.headers }, model);
+		const headers = await runner.emitBeforeProviderHeaders({ ...options?.headers }, model, options?.signal);
 		return base(model, context, { ...options, headers });
 	};
 }

@@ -356,7 +356,14 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 
 			const bodyText = JSON.stringify(commandInput);
 			const body = new TextEncoder().encode(bodyText);
+			// Caller headers are merged BEFORE signing, so SigV4 covers them and they
+			// reach the wire. Bedrock built its header map from scratch and ignored
+			// `options.headers` entirely, so tracing/attribution headers set by a
+			// caller (or by a `before_provider_headers` extension) were silently
+			// dropped here while working on every other provider. Content-type and
+			// accept stay last: the eventstream framing is not the caller's to change.
 			const baseHeaders: Record<string, string> = {
+				...options?.headers,
 				"content-type": "application/json",
 				accept: "application/vnd.amazon.eventstream",
 			};

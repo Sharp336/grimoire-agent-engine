@@ -932,11 +932,16 @@ export class ExtensionRunner {
 		ctx: ExtensionContext,
 		ext: Extension,
 		timeoutMs: number,
+		abortSignal?: AbortSignal,
 	): Promise<TResult | undefined> {
+		// An explicit signal wins: events carrying one on the event object
+		// (`session_stop`) keep deriving it, while callers holding a resource the
+		// handler must not pin — a provider concurrency slot, say — pass their own.
 		const signal =
-			event.type === "session_stop" && "signal" in event && event.signal instanceof AbortSignal
+			abortSignal ??
+			(event.type === "session_stop" && "signal" in event && event.signal instanceof AbortSignal
 				? event.signal
-				: undefined;
+				: undefined);
 		if (signal?.aborted) return undefined;
 		try {
 			const handlerResult = await raceHandlerWithTimeout(
@@ -1331,7 +1336,17 @@ export class ExtensionRunner {
 		return currentPayload;
 	}
 
-	async emitBeforeProviderHeaders(headers: Record<string, string>, model?: Model): Promise<Record<string, string>> {
+	/**
+	 * `signal` is the caller's request signal, and threading it is load-bearing:
+	 * this runs while the request holds its provider concurrency slot, so a hung
+	 * handler would otherwise pin that slot for the full handler timeout after the
+	 * turn was already aborted. With it, an abort stops the loop and frees the slot.
+	 */
+	async emitBeforeProviderHeaders(
+		headers: Record<string, string>,
+		model?: Model,
+		signal?: AbortSignal,
+	): Promise<Record<string, string>> {
 		const ctx = this.createContext(model);
 		let current: Record<string, string> = { ...headers };
 
@@ -1340,6 +1355,9 @@ export class ExtensionRunner {
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
+				// Checked per handler, not just once: an abort landing partway through
+				// a chain must stop the remaining handlers too.
+				if (signal?.aborted) return current;
 				// Each handler edits its OWN copy, and the result is snapshotted the moment
 				// the await returns. A handler that ignores its abort signal and outruns the
 				// timeout keeps a reference to `working` — but nothing reads `working` again,
@@ -1350,7 +1368,7 @@ export class ExtensionRunner {
 					type: "before_provider_headers",
 					headers: working,
 				};
-				await this.#runHandlerWithTimeout(handler, event, ctx, ext, extensionHandlerTimeoutMs);
+				await this.#runHandlerWithTimeout(handler, event, ctx, ext, extensionHandlerTimeoutMs, signal);
 				current = { ...working };
 			}
 		}
