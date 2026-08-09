@@ -257,6 +257,12 @@ export async function resolveEffectiveSubagentPolicy(
 		const available = discovery.agents.map(candidate => candidate.name).join(", ") || "none";
 		throw new StructuredSubagentError("preflight", `Unknown agent "${agentName}". Available: ${available}`);
 	}
+	if (agent.availability === "primary") {
+		throw new StructuredSubagentError(
+			"preflight",
+			`Agent "${agentName}" is primary/main-session-only and cannot be spawned as a subagent.`,
+		);
+	}
 	const disabledAgents = request.session.settings.get("task.disabledAgents") as string[];
 	if (disabledAgents.includes(agentName)) {
 		const enabled = discovery.agents

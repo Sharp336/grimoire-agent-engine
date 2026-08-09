@@ -57,7 +57,7 @@ import { reset as resetCapabilities } from "../capability";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import { KeybindingsManager } from "../config/keybindings";
-import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
+import { formatModelString, type ResolvedModelRoleValue, resolveModelOverride } from "../config/model-resolver";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import {
 	isSettingsInitialized,
@@ -114,6 +114,7 @@ import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } fr
 import { formatDuration } from "../slash-commands/helpers/format";
 import { STTController, type SttState } from "../stt";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
+import { discoverAgents, getAgent } from "../task/discovery";
 import { formatTaskId } from "../task/render";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import { tinyTitleClient } from "../tiny/title-client";
@@ -2624,6 +2625,77 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#updatePlanModeStatus();
 		this.sessionManager.appendModeChange("plan", { planFilePath });
 		this.showStatus(`Plan mode enabled. Plan file: ${planFilePath}`);
+	}
+
+	/**
+	 * Live-switch the main session to a discovered agent persona: tools, model,
+	 * thinking level, spawns, and system-prompt append all come from the agent's
+	 * current definition. Persists a `mode_change` entry (`mode: "agent"`,
+	 * `data: { name }`) so resume re-applies the persona. On failure, every
+	 * applied change is rolled back (mirrors plan-mode rollback).
+	 */
+	async switchAgentPersona(name: string): Promise<void> {
+		const { agents } = await discoverAgents(this.sessionManager.getCwd());
+		const agent = getAgent(agents, name);
+		if (!agent) {
+			this.showError(`Unknown agent: ${name}`);
+			return;
+		}
+		if (agent.availability === "subagent") {
+			this.showError(`Agent "${name}" is subagent-only and cannot be used as the main-session persona.`);
+			return;
+		}
+		if ((this.session.settings.get("task.disabledAgents") as string[] | undefined)?.includes(name)) {
+			this.showError(`Agent "${name}" is disabled in settings (task.disabledAgents).`);
+			return;
+		}
+
+		const previousTools = this.session.getEnabledToolNames();
+		const previousModel = this.session.model;
+		const previousThinking = this.session.configuredThinkingLevel();
+		const previousSpawns = this.session.getSessionSpawns();
+		const previousPrompt = this.session.getPersonaAppendPrompt();
+
+		try {
+			if (agent.tools) {
+				await this.session.setActiveToolsByName(agent.tools);
+			}
+			if (agent.model) {
+				const resolved = resolveModelOverride(agent.model, this.session.modelRegistry, this.session.settings);
+				if (resolved.model) {
+					await this.session.setModelTemporary(resolved.model, resolved.thinkingLevel);
+				} else {
+					this.showWarning(`Agent "${name}" model pattern did not resolve; keeping current model.`);
+				}
+			}
+			if (agent.thinkingLevel) {
+				this.session.setThinkingLevel(agent.thinkingLevel);
+			}
+			this.session.setSessionSpawns(agent.spawns === "*" ? "*" : agent.spawns ? agent.spawns.join(",") : "*");
+			this.session.setPersonaAppendPrompt(agent.systemPrompt);
+			await this.session.refreshBaseSystemPrompt();
+		} catch (error) {
+			try {
+				await this.session.setActiveToolsByName(previousTools);
+				if (previousModel) {
+					await this.session.setModelTemporary(previousModel, previousThinking);
+				}
+				this.session.setThinkingLevel(previousThinking);
+				this.session.setSessionSpawns(previousSpawns);
+				this.session.setPersonaAppendPrompt(previousPrompt);
+				await this.session.refreshBaseSystemPrompt();
+			} catch (rollbackError) {
+				logger.warn("Failed to roll back agent persona switch", { error: String(rollbackError) });
+			}
+			this.showError(
+				`Failed to switch to agent persona "${name}": ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return;
+		}
+
+		this.sessionManager.appendModeChange("agent", { name });
+		this.showStatus(`Switched to agent persona: ${name}`);
+		this.statusLine.invalidate();
 	}
 
 	async #restorePlanPreviousModel(prev: { model: Model; thinkingLevel?: ConfiguredThinkingLevel }): Promise<void> {

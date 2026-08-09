@@ -88,6 +88,7 @@ import { SessionManager } from "./session/session-manager";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
 import { shouldShowStartupSplash } from "./startup-splash";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
+import { discoverAgents, getAgent } from "./task/discovery";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
@@ -1131,6 +1132,38 @@ export async function buildSessionOptions(
 		options.toolNames = parsed.tools;
 	}
 
+	// Agent persona from --agent. CLI flags take precedence — agent frontmatter
+	// fills only what the CLI didn't set.
+	if (parsed.agent) {
+		const { agents } = await discoverAgents(parsed.cwd ?? getProjectDir());
+		const agent = getAgent(agents, parsed.agent);
+		if (!agent) {
+			process.stderr.write(`${chalk.red(`Unknown agent: ${parsed.agent}`)}\n`);
+			process.exit(1);
+		}
+		if (agent.availability === "subagent") {
+			process.stderr.write(
+				`${chalk.red(`Agent "${parsed.agent}" is subagent-only and cannot be used as the main-session persona.`)}\n`,
+			);
+			process.exit(1);
+		}
+		const disabledAgents = (activeSettings.get("task.disabledAgents") as string[] | undefined) ?? [];
+		if (disabledAgents.includes(parsed.agent)) {
+			process.stderr.write(`${chalk.red(`Agent "${parsed.agent}" is disabled in settings.`)}\n`);
+			process.exit(1);
+		}
+		// CLI flags take precedence — agent fields fill only what CLI didn't set:
+		if (!options.model && !options.modelPattern && agent.model) options.modelPattern = agent.model; // agent.model is string[]; modelPattern accepts string | string[]
+		if (!options.thinkingLevel && agent.thinkingLevel) options.thinkingLevel = agent.thinkingLevel;
+		if (!parsed.tools && !parsed.noTools && agent.tools) {
+			options.toolNames = agent.tools;
+			options.restrictToolNames = true;
+		}
+		if (agent.systemPrompt)
+			options.appendSystemPrompt = [options.appendSystemPrompt, agent.systemPrompt].filter(Boolean).join("\n\n");
+		options.spawns = agent.spawns === "*" ? "*" : agent.spawns ? agent.spawns.join(",") : "*";
+	}
+
 	if (parsed.noLsp) {
 		options.enableLsp = false;
 	}
@@ -1679,6 +1712,16 @@ export async function runRootCommand(
 			eventBus,
 			preloadedExtensions: extensionsResult,
 		});
+
+		// Persist the persona identity. `initialArgs` (post-extension reparse)
+		// may be a different object than `parsedArgs`; prefer it when it carries
+		// the flag, falling back to the startup parse. `session.sessionManager`
+		// is the manager the session actually uses (the outer `sessionManager`
+		// may be undefined for fresh sessions, where the SDK creates its own).
+		const personaName = initialArgs.agent ?? parsedArgs.agent;
+		if (personaName) {
+			session.sessionManager.appendModeChange("agent", { name: personaName });
+		}
 
 		// Cold-revive support: a `parked` subagent ref restored from disk (Agent Hub
 		// scan, collab mirror, resumed process) has a sessionFile but no in-memory

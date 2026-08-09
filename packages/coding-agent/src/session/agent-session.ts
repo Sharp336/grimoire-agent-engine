@@ -1686,6 +1686,28 @@ export class AgentSession {
 		this.#sessionSwitchReconciler = reconciler ?? undefined;
 	}
 
+	/** Live persona spawn policy (`"*"`, a comma list, or null for the launch default). */
+	#sessionSpawns: string | null | undefined;
+
+	/** Live persona system-prompt append, overriding the launch-time `appendSystemPrompt`. */
+	#personaAppendPrompt: string | undefined;
+
+	getSessionSpawns(): string | null {
+		return this.#sessionSpawns ?? null;
+	}
+
+	setSessionSpawns(spawns: string | null): void {
+		this.#sessionSpawns = spawns;
+	}
+
+	getPersonaAppendPrompt(): string | undefined {
+		return this.#personaAppendPrompt;
+	}
+
+	setPersonaAppendPrompt(prompt: string | undefined): void {
+		this.#personaAppendPrompt = prompt;
+	}
+
 	/** Provider-scoped mutable state store for transport/session caches. */
 	get providerSessionState(): Map<string, ProviderSessionState> {
 		return this.#providerSessionState;

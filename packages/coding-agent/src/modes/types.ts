@@ -387,6 +387,8 @@ export interface InteractiveModeContext {
 	showExtensionsDashboard(): void;
 	showAgentsDashboard(): void;
 	showModelSelector(options?: { temporaryOnly?: boolean }): void;
+	/** Live-switch the main session to a discovered agent persona. */
+	switchAgentPersona(name: string): Promise<void>;
 	showPluginSelector(mode?: "install" | "uninstall"): void;
 	showUserMessageSelector(): void;
 	showCopySelector(): void;

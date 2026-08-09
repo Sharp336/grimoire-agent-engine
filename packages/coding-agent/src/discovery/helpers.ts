@@ -17,6 +17,7 @@ import { parseRuleConditionAndScope, type Rule, type RuleFrontmatter } from "../
 import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import type { MCPRequestIdFormat } from "../mcp/types";
+import type { AgentAvailability } from "../task/types";
 import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../thinking";
 import { normalizeToolNames } from "../tools/builtin-names";
 
@@ -235,6 +236,7 @@ export function parseModelList(value: unknown): string[] | undefined {
 export interface ParsedAgentFields {
 	name: string;
 	description: string;
+	availability?: AgentAvailability;
 	tools?: string[];
 	spawns?: string[] | "*";
 	model?: string[];
@@ -245,6 +247,25 @@ export interface ParsedAgentFields {
 	blocking?: boolean;
 	/** `true` = prewalk into the default target; string = prewalk into that model pattern. */
 	prewalk?: boolean | string;
+}
+
+/**
+ * Parse agent availability from frontmatter.
+ *
+ * OpenCode `mode`: "primary" → primary, "subagent" → subagent, "all"/absent → all.
+ * Copilot `user-invocable: false` → subagent; `disable-model-invocation: true` → primary.
+ * When both schemas are present the more restrictive wins (Copilot fields take
+ * precedence over OpenCode `mode`). Absent both → "all" (backward compatible).
+ */
+function parseAgentAvailability(frontmatter: Record<string, unknown>): AgentAvailability {
+	const userInvocable = parseBoolean(frontmatter.userInvocable);
+	const disableModelInvocation = parseBoolean(frontmatter.disableModelInvocation);
+	if (userInvocable === false) return "subagent";
+	if (disableModelInvocation === true) return "primary";
+
+	const mode = frontmatter.mode;
+	if (mode === "primary" || mode === "subagent") return mode;
+	return "all";
 }
 
 /**
@@ -311,6 +332,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	return {
 		name,
 		description,
+		availability: parseAgentAvailability(frontmatter),
 		tools,
 		spawns,
 		model,

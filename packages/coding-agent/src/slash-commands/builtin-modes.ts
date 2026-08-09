@@ -4,11 +4,13 @@ import {
 	formatModelString,
 	getModelMatchPreferences,
 	resolveCliModel,
+	resolveModelOverride,
 } from "../config/model-resolver";
 import type { SettingPath } from "../config/settings";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
 import type { AgentSession } from "../session/agent-session";
+import { discoverAgents, getAgent } from "../task/discovery";
 import type { ComputerTool } from "../tools/computer";
 import { computerExposureMode } from "../tools/computer/exposure";
 import type { InspectImageMode } from "../utils/inspect-image-mode";
@@ -320,6 +322,57 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showModelSelector();
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "agent",
+		description: "Switch the main-session agent persona",
+		inlineHint: "<name>",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const name = command.args.trim();
+			if (!name) {
+				return usage("Usage: /agent <name>", runtime);
+			}
+			const { agents } = await discoverAgents(runtime.cwd);
+			const agent = getAgent(agents, name);
+			if (!agent) {
+				return usage(`Unknown agent: ${name}`, runtime);
+			}
+			if (agent.availability === "subagent") {
+				return usage(`Agent "${name}" is subagent-only and cannot be used as the main-session persona.`, runtime);
+			}
+			if ((runtime.settings.get("task.disabledAgents") as string[] | undefined)?.includes(name)) {
+				return usage(`Agent "${name}" is disabled in settings (task.disabledAgents).`, runtime);
+			}
+			try {
+				if (agent.tools) {
+					await runtime.session.setActiveToolsByName(agent.tools);
+				}
+				if (agent.model) {
+					const resolved = resolveModelOverride(agent.model, runtime.session.modelRegistry, runtime.settings);
+					if (resolved.model) {
+						await runtime.session.setModelTemporary(resolved.model, resolved.thinkingLevel);
+					} else {
+						await runtime.output(`Agent "${name}" model pattern did not resolve; keeping current model.`);
+					}
+				}
+				if (agent.thinkingLevel) {
+					runtime.session.setThinkingLevel(agent.thinkingLevel);
+				}
+				runtime.session.setSessionSpawns(agent.spawns === "*" ? "*" : agent.spawns ? agent.spawns.join(",") : "*");
+				runtime.session.setPersonaAppendPrompt(agent.systemPrompt);
+				await runtime.session.refreshBaseSystemPrompt();
+			} catch (err) {
+				return usage(`Failed to switch to agent persona "${name}": ${errorMessage(err)}`, runtime);
+			}
+			runtime.sessionManager.appendModeChange("agent", { name });
+			await runtime.output(`Switched to agent persona: ${name}`);
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			await runtime.ctx.switchAgentPersona(command.args.trim());
 			runtime.ctx.editor.setText("");
 		},
 	},

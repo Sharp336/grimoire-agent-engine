@@ -1708,7 +1708,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// unrelated global ref. With no lifecycle, hub cancel falls back to
 			// dispose + unregister on the session's own registry.
 			agentLifecycle: options.agentRegistry ? undefined : () => AgentLifecycleManager.global(),
-			getSessionSpawns: () => options.spawns ?? "*",
+			getSessionSpawns: () => session?.getSessionSpawns?.() ?? options.spawns ?? "*",
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
 			getActiveModelString,
 			getActiveModel: () => agent?.state.model ?? model,
@@ -2860,10 +2860,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				tools,
 				nativeTools && !inlineToolDescriptors ? { mode: "compact", toolNames } : { mode: "full" },
 			);
-			if (options.appendSystemPrompt) {
-				appendPrompt = appendPrompt
-					? `${appendPrompt}\n\n${options.appendSystemPrompt}`
-					: options.appendSystemPrompt;
+			const personaAppend = session?.getPersonaAppendPrompt?.() ?? options.appendSystemPrompt;
+			if (personaAppend) {
+				appendPrompt = appendPrompt ? `${appendPrompt}\n\n${personaAppend}` : personaAppend;
 			}
 			const defaultPrompt = await buildSystemPromptInternal({
 				cwd: promptCwd,
