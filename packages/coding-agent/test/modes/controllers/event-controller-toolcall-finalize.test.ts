@@ -65,7 +65,7 @@ function createFixture(streamingMessage: AssistantMessage) {
 		toolOutputExpanded: false,
 		settings,
 		session: { getToolByName: () => undefined },
-		viewSession: { getToolByName: () => undefined, hasBuiltInTool: () => false },
+		viewSession: { getToolByName: () => undefined },
 		clearTransientSessionUi: () => {},
 		sessionManager: { getCwd: () => process.cwd() },
 	} as unknown as InteractiveModeContext;

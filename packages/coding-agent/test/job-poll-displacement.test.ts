@@ -177,7 +177,7 @@ describe("EventController displaces consecutive waiting polls", () => {
 			chatContainer,
 			session: { getToolByName: () => undefined },
 			showWarning: vi.fn(),
-			viewSession: { getToolByName: () => undefined, hasBuiltInTool: () => false },
+			viewSession: { getToolByName: () => undefined },
 			sessionManager: { getCwd: () => process.cwd() },
 			setTodos: vi.fn(),
 		} as unknown as InteractiveModeContext;
@@ -423,7 +423,6 @@ describe("UiHelpers.renderSessionContext collapses repeated todo snapshots", () 
 			session: {
 				retryAttempt: 0,
 				getToolByName: () => undefined,
-				hasBuiltInTool: () => false,
 				sessionManager: { getCwd: () => process.cwd() },
 			},
 			get viewSession() {
@@ -501,7 +500,6 @@ describe("UiHelpers.renderSessionContext collapses repeated todo snapshots", () 
 			session: {
 				retryAttempt: 0,
 				getToolByName: () => undefined,
-				hasBuiltInTool: () => false,
 				sessionManager: { getCwd: () => process.cwd() },
 				isStreaming: true,
 			},

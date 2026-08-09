@@ -49,7 +49,6 @@ function createFixture(opts: { isStreaming: boolean }) {
 	const session = {
 		retryAttempt: 0,
 		getToolByName: () => undefined,
-		hasBuiltInTool: () => false,
 		sessionManager: { getCwd: () => process.cwd() },
 		isStreaming: opts.isStreaming,
 	};
