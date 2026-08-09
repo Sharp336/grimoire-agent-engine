@@ -10,6 +10,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
+import type { BeforeAgentStartSystemPromptOptions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import {
 	type CreateAgentSessionOptions,
@@ -673,6 +674,181 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			for (const provider of providers) modelRegistry.authStorage.removeRuntimeApiKey(provider);
 		}
 	};
+
+	it("forwards active tool snippets and guidelines in before_agent_start prompt options", async () => {
+		const tempDir = makeTempDir();
+		let captured: BeforeAgentStartSystemPromptOptions | undefined;
+		const metadataExtension: ExtensionFactory = pi => {
+			pi.registerTool({
+				name: "prompt_metadata_probe",
+				label: "Prompt Metadata Probe",
+				description: "Fallback description that should not replace the explicit snippet.",
+				promptSnippet: "  Inspect\n prompt metadata   safely. ",
+				promptGuidelines: [" Keep prompt metadata stable. ", "", "Keep prompt metadata stable."],
+				loadMode: "essential",
+				parameters: type({}),
+				async execute() {
+					return { content: [{ type: "text", text: "done" }] };
+				},
+			});
+			pi.on("before_agent_start", event => {
+				captured = event.systemPromptOptions;
+			});
+		};
+
+		await withProviderAuth(["openai"], async () => {
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				extensions: [metadataExtension],
+			});
+			const mock = createMockModel({ responses: [{ content: [{ type: "text", text: "done" }] }] });
+			vi.spyOn(session.agent, "streamFn").mockImplementation(mock.stream);
+			try {
+				await session.prompt("inspect metadata");
+				const promptOptions = captured;
+				if (!promptOptions) throw new Error("before_agent_start did not expose prompt options");
+				expect(promptOptions.selectedTools).toContain("prompt_metadata_probe");
+				expect(promptOptions.toolSnippets?.prompt_metadata_probe).toBe("Inspect prompt metadata safely.");
+				expect(promptOptions.promptGuidelines).toEqual(["Keep prompt metadata stable."]);
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
+	it("exposes additional-root context files in before_agent_start prompt options", async () => {
+		const tempDir = makeTempDir();
+		const extraRoot = makeTempDir();
+		const extraAgentsPath = path.join(extraRoot, "AGENTS.md");
+		fs.writeFileSync(extraAgentsPath, "# Extra Root Rules\n\nMulti-root marker directive.\n");
+
+		const sessionManager = SessionManager.inMemory(tempDir);
+		await sessionManager.setAdditionalDirectories([extraRoot]);
+		expect(sessionManager.getAdditionalDirectories()).toContain(extraRoot);
+
+		let captured: BeforeAgentStartSystemPromptOptions | undefined;
+		const captureExtension: ExtensionFactory = pi => {
+			pi.on("before_agent_start", event => {
+				captured = event.systemPromptOptions;
+			});
+		};
+
+		await withProviderAuth(["openai"], async () => {
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				// Let the builder discover context files for both roots instead of
+				// the empty override, so the snapshot reflects the merged set.
+				contextFiles: undefined,
+				sessionManager,
+				extensions: [captureExtension],
+			});
+			const mock = createMockModel({ responses: [{ content: [{ type: "text", text: "done" }] }] });
+			vi.spyOn(session.agent, "streamFn").mockImplementation(mock.stream);
+			try {
+				await session.prompt("inspect context");
+				const promptOptions = captured;
+				if (!promptOptions) throw new Error("before_agent_start did not expose prompt options");
+				const extraEntry = promptOptions.contextFiles?.find(file => file.path === extraAgentsPath);
+				expect(extraEntry).toBeDefined();
+				expect(extraEntry?.content).toContain("Multi-root marker directive.");
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
+	it("projects skills into the Pi shape with disableModelInvocation", async () => {
+		const tempDir = makeTempDir();
+		const visibleSkill = {
+			name: "visible-skill",
+			description: "A visible skill.",
+			filePath: path.join(tempDir, "visible", "SKILL.md"),
+			baseDir: path.join(tempDir, "visible"),
+			source: "project",
+		};
+		const hiddenSkill = {
+			name: "hidden-skill",
+			description: "A hidden skill.",
+			filePath: path.join(tempDir, "hidden", "SKILL.md"),
+			baseDir: path.join(tempDir, "hidden"),
+			source: "project",
+			hide: true,
+		};
+
+		let captured: BeforeAgentStartSystemPromptOptions | undefined;
+		const captureExtension: ExtensionFactory = pi => {
+			pi.on("before_agent_start", event => {
+				captured = event.systemPromptOptions;
+			});
+		};
+
+		await withProviderAuth(["openai"], async () => {
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				skills: [visibleSkill, hiddenSkill],
+				extensions: [captureExtension],
+			});
+			const mock = createMockModel({ responses: [{ content: [{ type: "text", text: "done" }] }] });
+			vi.spyOn(session.agent, "streamFn").mockImplementation(mock.stream);
+			try {
+				await session.prompt("inspect skills");
+				const promptOptions = captured;
+				if (!promptOptions) throw new Error("before_agent_start did not expose prompt options");
+				const projected = promptOptions.skills ?? [];
+				const visible = projected.find(skill => skill.name === "visible-skill");
+				const hidden = projected.find(skill => skill.name === "hidden-skill");
+				expect(visible?.disableModelInvocation).toBe(false);
+				expect(hidden?.disableModelInvocation).toBe(true);
+				// The Pi shape omits omp's `hide`/`source` fields in favor of the
+				// required flag and a synthesized sourceInfo.
+				expect(hidden).not.toHaveProperty("hide");
+				expect(hidden?.sourceInfo.path).toBe(hiddenSkill.filePath);
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
+	it("describes the emitted custom prompt, not discarded builder inputs, when systemPrompt overrides", async () => {
+		const tempDir = makeTempDir();
+		const override = "CUSTOM SYSTEM PROMPT OVERRIDE";
+		let captured: BeforeAgentStartSystemPromptOptions | undefined;
+		const captureExtension: ExtensionFactory = pi => {
+			pi.on("before_agent_start", event => {
+				captured = event.systemPromptOptions;
+			});
+		};
+
+		await withProviderAuth(["openai"], async () => {
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				systemPrompt: [override],
+				skills: [
+					{
+						name: "discarded-skill",
+						description: "Present only in the discarded default prompt.",
+						filePath: path.join(tempDir, "discarded", "SKILL.md"),
+						baseDir: path.join(tempDir, "discarded"),
+						source: "project",
+					},
+				],
+				extensions: [captureExtension],
+			});
+			const mock = createMockModel({ responses: [{ content: [{ type: "text", text: "done" }] }] });
+			vi.spyOn(session.agent, "streamFn").mockImplementation(mock.stream);
+			try {
+				await session.prompt("inspect override");
+				const promptOptions = captured;
+				if (!promptOptions) throw new Error("before_agent_start did not expose prompt options");
+				expect(promptOptions.customPrompt).toBe(override);
+				// The default builder's skills/context are not in the emitted prompt.
+				expect(promptOptions.skills).toBeUndefined();
+				expect(promptOptions.contextFiles).toBeUndefined();
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
 
 	it("answers a native pi_edit after a session switches onto Cursor", async () => {
 		const tempDir = makeTempDir();

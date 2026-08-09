@@ -551,6 +551,10 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	label: string;
 	/** Description for LLM */
 	description: string;
+	/** Optional one-line snippet exposed for Pi-compatible prompt reconstruction while active. */
+	promptSnippet?: string;
+	/** Optional guideline bullets exposed for Pi-compatible prompt reconstruction while active. */
+	promptGuidelines?: string[];
 	/** Parameter schema (Zod, or TypeBox for legacy/extension compat). */
 	parameters: TParams;
 	/** If true, tool is excluded unless explicitly listed in --tools or agent's tools field */
@@ -681,12 +685,40 @@ export interface AfterProviderResponseEvent extends ProviderResponseMetadata {
 	type: "after_provider_response";
 }
 
+/**
+ * Skill projected into the upstream Pi `Skill` shape for
+ * {@link BeforeAgentStartSystemPromptOptions}. Pi extensions filter on the
+ * required `disableModelInvocation` flag (never omp's `hide`), so the host maps
+ * `hide === true` onto it here rather than leaking the native skill object.
+ */
+export interface BeforeAgentStartSkill {
+	name: string;
+	description: string;
+	filePath: string;
+	baseDir: string;
+	disableModelInvocation: boolean;
+	sourceInfo: SourceInfo;
+}
+
+/** Structured inputs used to build the system prompt exposed to Pi-compatible extensions. */
+export interface BeforeAgentStartSystemPromptOptions {
+	customPrompt?: string;
+	selectedTools?: string[];
+	toolSnippets?: Record<string, string>;
+	promptGuidelines?: string[];
+	appendSystemPrompt?: string;
+	cwd: string;
+	contextFiles?: Array<{ path: string; content: string }>;
+	skills?: BeforeAgentStartSkill[];
+}
+
 /** Fired after user submits prompt but before agent loop. */
 export interface BeforeAgentStartEvent {
 	type: "before_agent_start";
 	prompt: string;
 	images?: ImageContent[];
-	systemPrompt: string[];
+	systemPrompt: string;
+	systemPromptOptions: BeforeAgentStartSystemPromptOptions;
 }
 
 export type {
@@ -1063,7 +1095,7 @@ export type { ToolResultEventResult } from "../shared-events";
 export interface BeforeAgentStartEventResult {
 	message?: CustomMessagePayload;
 	/** Replace the system prompt for this turn. If multiple extensions return this, they are chained. */
-	systemPrompt?: string[];
+	systemPrompt?: string;
 }
 
 export type {

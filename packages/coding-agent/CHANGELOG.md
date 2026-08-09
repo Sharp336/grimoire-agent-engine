@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed legacy Pi extensions receiving an incompatible `before_agent_start` payload: the event now includes resolved `systemPromptOptions`, exposes `systemPrompt` as a string, and chains string prompt overrides as required by the upstream Pi contract. ([#8058](https://github.com/can1357/oh-my-pi/issues/8058))
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed

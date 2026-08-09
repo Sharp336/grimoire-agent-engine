@@ -81,6 +81,7 @@ import {
 import { discoverCustomToolPaths, loadCustomTools, type ToolPathWithSource } from "./extensibility/custom-tools";
 import type { CustomTool, CustomToolContext, CustomToolSessionEvent } from "./extensibility/custom-tools/types";
 import {
+	type BeforeAgentStartSystemPromptOptions,
 	discoverAndLoadExtensions,
 	discoverExtensionPaths,
 	type ExtensionContext,
@@ -96,6 +97,7 @@ import {
 } from "./extensibility/extensions";
 import {
 	loadSkills as loadSkillsInternal,
+	projectSkillsForBeforeAgentStart,
 	type Skill,
 	type SkillWarning,
 	setActiveSkills,
@@ -2781,6 +2783,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const eagerTasksAlways = settings.get("task.eager") === "always";
 		const intentField = $flag("PI_INTENT_TRACING", settings.get("tools.intentTracing")) ? INTENT_FIELD : undefined;
 		const includeWorkspaceTree = settings.get("includeWorkspaceTree") ?? false;
+		let currentSystemPromptOptions: BeforeAgentStartSystemPromptOptions = {
+			cwd: sessionManager.getCwd(),
+			selectedTools: [],
+			skills: projectSkillsForBeforeAgentStart(skills),
+		};
 		const rebuildSystemPrompt = async (
 			toolNames: string[],
 			tools: Map<string, AgentTool>,
@@ -2860,11 +2867,24 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				tools,
 				nativeTools && !inlineToolDescriptors ? { mode: "compact", toolNames } : { mode: "full" },
 			);
+			const toolSnippetEntries: Array<[string, string]> = [];
+			const promptGuidelines: string[] = [];
+			const seenPromptGuidelines = new Set<string>();
+			for (const name of toolNames) {
+				const metadata = promptTools.get(name);
+				if (metadata?.promptSnippet) toolSnippetEntries.push([name, metadata.promptSnippet]);
+				for (const guideline of metadata?.promptGuidelines ?? []) {
+					if (seenPromptGuidelines.has(guideline)) continue;
+					seenPromptGuidelines.add(guideline);
+					promptGuidelines.push(guideline);
+				}
+			}
 			if (options.appendSystemPrompt) {
 				appendPrompt = appendPrompt
 					? `${appendPrompt}\n\n${options.appendSystemPrompt}`
 					: options.appendSystemPrompt;
 			}
+			const promptSkills = session?.skills ?? skills;
 			const defaultPrompt = await buildSystemPromptInternal({
 				cwd: promptCwd,
 				additionalWorkspaceRoots: sessionManager.getAdditionalDirectories(),
@@ -2873,7 +2893,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					? xdevDocsAll(toolSession.xdev, settings.get("tools.xdevDocs"), settings.get("tools.xdevInlineDevices"))
 					: "",
 				resolvedCustomPrompt: options.customSystemPrompt,
-				skills: session?.skills ?? skills,
+				skills: promptSkills,
 				contextFiles,
 				tools: promptTools,
 				toolNames,
@@ -2905,16 +2925,42 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				renderMermaid: settings.get("tui.renderMermaid"),
 				activeRepoContext,
 			});
-
 			if (options.systemPrompt === undefined) {
+				// The default builder output IS the emitted prompt: expose its
+				// resolved inputs. `appendSystemPrompt` is the caller/user input
+				// only — host-generated memory/MCP/auto-learn sections (folded into
+				// `appendPrompt`) are deliberately excluded so a Pi extension does
+				// not treat changing host state as a cache-stable prefix.
+				currentSystemPromptOptions = {
+					customPrompt: options.customSystemPrompt,
+					selectedTools: toolNames,
+					toolSnippets: Object.fromEntries(toolSnippetEntries),
+					promptGuidelines,
+					appendSystemPrompt: options.appendSystemPrompt,
+					cwd: promptCwd,
+					contextFiles: defaultPrompt.contextFiles,
+					skills: projectSkillsForBeforeAgentStart(promptSkills),
+				};
 				return defaultPrompt;
 			}
+			// A full SDK `systemPrompt` override replaces the built prompt. The
+			// default builder's context files, skills, snippets, and guidelines are
+			// NOT in the emitted prompt, so exposing them would misrepresent it.
+			// Surface the override as the Pi `customPrompt` and drop the discarded
+			// structured inputs.
 			const customPrompt =
 				typeof options.systemPrompt === "function"
 					? options.systemPrompt(defaultPrompt.systemPrompt)
 					: options.systemPrompt;
+			const customBlocks = typeof customPrompt === "string" ? [customPrompt] : customPrompt;
+			currentSystemPromptOptions = {
+				customPrompt: customBlocks.join("\n\n"),
+				selectedTools: toolNames,
+				cwd: promptCwd,
+			};
 			return {
-				systemPrompt: typeof customPrompt === "string" ? [customPrompt] : customPrompt,
+				systemPrompt: customBlocks,
+				contextFiles: defaultPrompt.contextFiles,
 			};
 		};
 
@@ -3388,6 +3434,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			preferWebsockets: preferOpenAICodexWebsockets,
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
+			getSystemPromptOptions: () => currentSystemPromptOptions,
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
 			xdev: toolSession.xdev,
 			presentationPinnedToolNames: explicitlyRequestedToolNameSet,

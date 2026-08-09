@@ -420,6 +420,24 @@ export interface SystemPromptToolMetadata {
 	parameters?: TSchema;
 	/** Illustrative examples rendered into the verbose inventory. */
 	examples?: readonly ToolExample[];
+	/** One-line Pi-compatible tool summary for system-prompt reconstruction. */
+	promptSnippet?: string;
+	/** Pi-compatible guideline bullets active with this tool. */
+	promptGuidelines?: readonly string[];
+}
+
+function normalizeToolPromptSnippet(value: string | undefined): string | undefined {
+	const normalized = value
+		?.replace(/[\r\n]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	return normalized || undefined;
+}
+
+function normalizeToolPromptGuidelines(values: readonly string[] | undefined): readonly string[] | undefined {
+	if (!values) return undefined;
+	const normalized = [...new Set(values.map(value => value.trim()).filter(value => value.length > 0))];
+	return normalized.length > 0 ? normalized : undefined;
 }
 
 export type SystemPromptToolMetadataProjection =
@@ -452,9 +470,14 @@ export function projectSystemPromptToolMetadata(
 		const wireNameValue = override?.wireName ?? tool.customWireName;
 		const label = typeof labelValue === "string" ? labelValue : "";
 		const wireName = typeof wireNameValue === "string" ? wireNameValue : undefined;
+		// Pi's `toolSnippets` map carries only an explicit one-line `promptSnippet`.
+		// NEVER fall back to `summary`/`description`: compact projection MUST NOT
+		// read the lazy descriptor getters (system-prompt-inventory contract).
+		const promptSnippet = normalizeToolPromptSnippet(override?.promptSnippet ?? tool.promptSnippet);
+		const promptGuidelines = normalizeToolPromptGuidelines(override?.promptGuidelines ?? tool.promptGuidelines);
 
 		if (projection.mode === "compact") {
-			metadata.set(name, { label, description: "", wireName });
+			metadata.set(name, { label, description: "", wireName, promptSnippet, promptGuidelines });
 			return;
 		}
 
@@ -465,6 +488,8 @@ export function projectSystemPromptToolMetadata(
 			parameters: tool.parameters,
 			examples: tool.examples,
 			wireName,
+			promptSnippet,
+			promptGuidelines,
 		});
 	};
 
@@ -571,12 +596,18 @@ export interface BuildSystemPromptResult {
 	 * a catalog the prompt already carries (issue #7139).
 	 */
 	xdevCatalogNames?: readonly string[];
+	/**
+	 * Fully resolved context files rendered into the prompt, including entries
+	 * discovered for `additionalWorkspaceRoots`. Lets callers expose the exact
+	 * set the builder used (e.g. Pi's `before_agent_start.systemPromptOptions`).
+	 */
+	contextFiles: Array<{ path: string; content: string; depth?: number }>;
 }
 
 /** Build the system prompt with tools, guidelines, and context */
 export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}): Promise<BuildSystemPromptResult> {
 	if ($env.NULL_PROMPT === "true") {
-		return { systemPrompt: [] };
+		return { systemPrompt: [], contextFiles: [] };
 	}
 
 	const {
@@ -917,5 +948,5 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	// default template; a resolved custom prompt uses a template that omits it.
 	const xdevCatalogNames =
 		!resolvedCustomPrompt && xdevTools.length > 0 ? xdevTools.map(mounted => mounted.name) : undefined;
-	return { systemPrompt, xdevCatalogNames };
+	return { systemPrompt, xdevCatalogNames, contextFiles };
 }

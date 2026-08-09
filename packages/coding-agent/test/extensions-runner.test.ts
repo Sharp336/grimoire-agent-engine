@@ -118,6 +118,90 @@ describe("ExtensionRunner", () => {
 		expect(runner.createContext().cwd).toBe(dirB);
 	});
 
+	it("emits Pi-compatible before_agent_start prompt inputs and chains string overrides", async () => {
+		const extCode = `
+			export default function(pi) {
+				pi.on("before_agent_start", event => ({
+					systemPrompt: event.systemPrompt + "\\nfirst override",
+				}));
+				pi.on("before_agent_start", event => ({
+					message: {
+						customType: "capture",
+						content: JSON.stringify({
+							systemPrompt: event.systemPrompt,
+							systemPromptOptions: event.systemPromptOptions,
+						}),
+						display: false,
+					},
+				}));
+			}
+		`;
+		fs.writeFileSync(path.join(extensionsDir, "before-agent-start.ts"), extCode);
+		const result = await loadTestExtensions();
+		const runner = new ExtensionRunner(
+			result.extensions,
+			result.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
+		const systemPromptOptions = {
+			cwd: tempDir.path(),
+			selectedTools: ["read"],
+			contextFiles: [{ path: "AGENTS.md", content: "Project rules" }],
+			skills: [],
+		};
+
+		const emitted = await runner.emitBeforeAgentStart(
+			"hello",
+			undefined,
+			["base prompt", "project context"],
+			systemPromptOptions,
+		);
+
+		expect(emitted?.systemPrompt).toEqual(["base prompt\n\nproject context\nfirst override"]);
+		const message = emitted?.messages?.[0];
+		if (!message || typeof message !== "object" || Array.isArray(message)) {
+			throw new Error("Expected captured event message");
+		}
+		const { content } = message;
+		expect(typeof content).toBe("string");
+		if (typeof content !== "string") throw new Error("Expected captured event JSON");
+		expect(JSON.parse(content)).toEqual({
+			systemPrompt: "base prompt\n\nproject context\nfirst override",
+			systemPromptOptions,
+		});
+	});
+
+	it("flattens legacy array systemPrompt overrides so the result is never nested", async () => {
+		const extCode = `
+			export default function(pi) {
+				pi.on("before_agent_start", () => ({
+					systemPrompt: ["legacy block one", "legacy block two"],
+				}));
+			}
+		`;
+		fs.writeFileSync(path.join(extensionsDir, "legacy-array-override.ts"), extCode);
+		const result = await loadTestExtensions();
+		const runner = new ExtensionRunner(
+			result.extensions,
+			result.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
+
+		const emitted = await runner.emitBeforeAgentStart("hello", undefined, ["base prompt"], {
+			cwd: tempDir.path(),
+			selectedTools: ["read"],
+			skills: [],
+		});
+
+		// A pre-contract extension returning string[] must be joined into a single
+		// string block, not stored as a nested array the provider cannot consume.
+		expect(emitted?.systemPrompt).toEqual(["legacy block one\n\nlegacy block two"]);
+	});
+
 	describe("shortcut conflicts", () => {
 		it("warns when extension shortcut conflicts with built-in", async () => {
 			const extCode = `
