@@ -1,7 +1,8 @@
 import { once } from "@oh-my-pi/pi-utils";
 import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/codex";
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
-import { buildFactoryDroidModel, FACTORY_DROID_MODELS, fetchFactoryDroidModels } from "../discovery/factory-droid";
+import { buildFactoryDroidModel, fetchFactoryDroidModels } from "../discovery/factory-droid";
+import { FACTORY_DROID_MODELS } from "../discovery/factory-droid-models";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
 import type { ModelManagerOptions } from "../model-manager";
 import type { FetchImpl, ModelSpec } from "../types";
