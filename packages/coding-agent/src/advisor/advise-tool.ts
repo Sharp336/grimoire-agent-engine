@@ -15,6 +15,9 @@ const adviseSchema = type({
 		"One concrete piece of advice for the agent you are watching. Terse, specific, actionable.",
 	),
 	"severity?": type("'nit' | 'concern' | 'blocker'").describe("How strongly to weigh this. Omit for a plain nit."),
+	"attribution?": type("string").describe(
+		"Opaque source attribution supplied in the current review context. Set only when that source directly caused this advice. Never include it in note.",
+	),
 });
 
 export type AdviseParams = typeof adviseSchema.infer;
@@ -24,6 +27,7 @@ export type AdvisorSeverity = "nit" | "concern" | "blocker";
 export interface AdviseDetails {
 	note: string;
 	severity?: AdvisorSeverity;
+	attribution?: string;
 	/** Which configured advisor produced this note (omitted for the default advisor). */
 	advisor?: string;
 }
@@ -32,6 +36,7 @@ export interface AdviseDetails {
 export interface AdvisorNote {
 	note: string;
 	severity?: AdvisorSeverity;
+	attribution?: string;
 	/** Which configured advisor produced this note (omitted for the default advisor). */
 	advisor?: string;
 }
@@ -211,7 +216,7 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 		if (this.#inProgressUpdate && args.severity !== "blocker") {
 			return {
 				content: [{ type: "text", text: "Recorded." }],
-				details: { note: args.note, severity: args.severity },
+				details: { note: args.note, severity: args.severity, attribution: args.attribution },
 				useless: true,
 			};
 		}
@@ -221,7 +226,7 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 		if (rank <= previousRank) {
 			return {
 				content: [{ type: "text", text: "Duplicate advice ignored." }],
-				details: { note: args.note, severity: args.severity },
+				details: { note: args.note, severity: args.severity, attribution: args.attribution },
 				useless: true,
 			};
 		}
@@ -229,7 +234,7 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 		this.onAdvice(args.note, args.severity);
 		return {
 			content: [{ type: "text", text: "Recorded." }],
-			details: { note: args.note, severity: args.severity },
+			details: { note: args.note, severity: args.severity, attribution: args.attribution },
 			useless: true,
 		};
 	}
