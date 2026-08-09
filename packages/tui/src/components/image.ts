@@ -96,6 +96,15 @@ export class ImageBudget {
 	// id so a partial pass reproduces the on-screen live/text split without a
 	// full, correctly-ordered walk.
 	#suppressedIds = new Set<number>();
+	/**
+	 * Per-image direct-placement emit state: source pixel geometry for the
+	 * renderer's clipped source rectangle, plus the placement-id epoch (see
+	 * {@link resolvePlacementEmit}).
+	 */
+	#placementState = new Map<
+		number,
+		{ widthPx: number; heightPx: number; epoch: number; lastOriginFrameRow: number | undefined }
+	>();
 
 	constructor(cap: number = DEFAULT_MAX_INLINE_IMAGES, requestRender: () => void = () => {}) {
 		this.#cap = normalizeCap(cap);
@@ -191,6 +200,7 @@ export class ImageBudget {
 				this.#purgeIds.push(id);
 				// d=I frees the data too, so the image must re-transmit if it returns.
 				this.#transmitted.delete(id);
+				this.#placementState.delete(id);
 				this.#forgetKeyForId(id);
 			}
 			this.#onTerminal = this.#planned;
@@ -223,12 +233,55 @@ export class ImageBudget {
 		this.#pendingTransmits = [];
 		this.#keyToId.clear();
 		this.#idToKey.clear();
+		this.#placementState.clear();
 		return ids;
 	}
 
 	/** Whether `imageId`'s data still needs to be transmitted to the terminal. */
 	shouldTransmit(imageId: number): boolean {
 		return !this.#transmitted.has(imageId);
+	}
+
+	/**
+	 * Record a direct-placement image's source pixel geometry so the renderer
+	 * can clip its placement to the visible slice at write time; cleared when
+	 * the image is purged from the terminal store.
+	 */
+	registerPlacementGeometry(imageId: number, widthPx: number, heightPx: number): void {
+		const state = this.#placementState.get(imageId);
+		if (state) {
+			state.widthPx = widthPx;
+			state.heightPx = heightPx;
+			return;
+		}
+		this.#placementState.set(imageId, { widthPx, heightPx, epoch: 1, lastOriginFrameRow: undefined });
+	}
+
+	/**
+	 * Resolve the placement id and geometry for a direct-placement emit whose
+	 * block origin sits at `originFrameRow` (absolute frame row, -1 when the
+	 * writer has no frame-space position: alt-screen, resize, ConPTY-truncated
+	 * replays). `committedTo` is the frame-row watermark committed to native
+	 * scrollback once this frame's writes land (-1 when unknown).
+	 *
+	 * Re-using a placement id is destructive — Kitty replace semantics strip
+	 * the prior placement's cells everywhere, scrollback included — so once
+	 * commits pass the last emit's origin, that placement is frozen as
+	 * scrollback archive and the epoch (the `p=` id) advances.
+	 */
+	resolvePlacementEmit(
+		imageId: number,
+		originFrameRow: number,
+		committedTo: number,
+	): { placementId: number; widthPx: number; heightPx: number } | null {
+		const state = this.#placementState.get(imageId);
+		if (!state) return null;
+		if (state.lastOriginFrameRow !== undefined && committedTo >= 0 && committedTo > state.lastOriginFrameRow) {
+			state.epoch += 1;
+			state.lastOriginFrameRow = undefined;
+		}
+		if (originFrameRow >= 0) state.lastOriginFrameRow = originFrameRow;
+		return { placementId: state.epoch, widthPx: state.widthPx, heightPx: state.heightPx };
 	}
 
 	/**
@@ -407,9 +460,17 @@ export class Image implements Component {
 				// Direct placement: return `rows` lines so TUI accounts for image
 				// height. First (rows-1) lines are empty (TUI clears them); the last
 				// saves the final-row cursor, moves up to the image origin, emits the
-				// image sequence, then restores the final-row cursor. Save/restore is
-				// required because CUU clamps at the viewport top when leading rows are
-				// clipped away.
+				// image sequence, then restores the final-row cursor. When the block
+				// straddles the viewport top, the renderer rewrites this line to the
+				// visible slice (encodeKittyPlacementLine) from the geometry
+				// registered below.
+				if (this.#imageId != null && this.#budget !== undefined) {
+					this.#budget.registerPlacementGeometry(
+						this.#imageId,
+						this.#dimensions.widthPx,
+						this.#dimensions.heightPx,
+					);
+				}
 				lines = [];
 				for (let i = 0; i < result.rows - 1; i++) {
 					lines.push(RESERVED_IMAGE_ROW);
