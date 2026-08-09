@@ -29,6 +29,7 @@ export interface ImageOptions {
 
 const EMPTY_IDS: readonly number[] = [];
 const EMPTY_TRANSMITS: readonly string[] = [];
+const EMPTY_STALE_EPOCHS: ReadonlyArray<{ imageId: number; lastEpoch: number }> = [];
 const SAVE_CURSOR = "\x1b7";
 const RESTORE_CURSOR = "\x1b8";
 // Direct placements reserve height with leading zero-width rows. Keep them
@@ -105,6 +106,14 @@ export class ImageBudget {
 		number,
 		{ widthPx: number; heightPx: number; epoch: number; lastOriginFrameRow: number | undefined }
 	>();
+	/**
+	 * Monotonic maximum of every `committedTo` watermark ever observed. The
+	 * renderer's committed-row ledger can rewind on divergence recommits, but
+	 * cells that physically entered native scrollback stay there — epoch bumps
+	 * compare against this mark so a rewound ledger can never cause a
+	 * placement id to be re-used after its cells were archived.
+	 */
+	#commitHighWater = -1;
 
 	constructor(cap: number = DEFAULT_MAX_INLINE_IMAGES, requestRender: () => void = () => {}) {
 		this.#cap = normalizeCap(cap);
@@ -277,9 +286,16 @@ export class ImageBudget {
 	): { placementId: number; widthPx: number; heightPx: number } | null {
 		const state = this.#placementState.get(imageId);
 		if (!state) return null;
-		if (state.lastOriginFrameRow !== undefined && committedTo >= 0 && committedTo > state.lastOriginFrameRow) {
-			state.epoch += 1;
-			state.lastOriginFrameRow = undefined;
+		if (committedTo >= 0) {
+			// The committed-prefix audit can rewind the caller's row ledger
+			// (duplication-never-loss recommits); cells already in native
+			// scrollback stay there regardless, so the bump check compares
+			// against a monotonic high-water mark, never the rewound value.
+			if (committedTo > this.#commitHighWater) this.#commitHighWater = committedTo;
+			if (state.lastOriginFrameRow !== undefined && this.#commitHighWater > state.lastOriginFrameRow) {
+				state.epoch += 1;
+				state.lastOriginFrameRow = undefined;
+			}
 		}
 		if (originFrameRow >= 0) state.lastOriginFrameRow = originFrameRow;
 		return { placementId: state.epoch, widthPx: state.widthPx, heightPx: state.heightPx };
@@ -289,15 +305,22 @@ export class ImageBudget {
 	 * Restart every placement epoch after a destructive history clear (`CSI 3 J`
 	 * full paint). The clear destroys all placement cells — scrollback rows are
 	 * gone and the replay rewrites the viewport — so no archive remains to
-	 * protect, and continuing to advance epochs would strand one stale
-	 * placement entry in the terminal's registry per replay. Reverting to
-	 * epoch 1 makes the replay's placements replace those stale entries.
+	 * protect. Reverting to epoch 1 lets the replay's placements replace the
+	 * terminal's stale epoch-1 registry entries; the returned list names the
+	 * higher epochs each image ever reached so the caller can delete those
+	 * registry entries explicitly (`d=i` keeps the transmitted data).
 	 */
-	resetPlacementEpochs(): void {
-		for (const state of this.#placementState.values()) {
+	resetPlacementEpochs(): ReadonlyArray<{ imageId: number; lastEpoch: number }> {
+		let stale: Array<{ imageId: number; lastEpoch: number }> | undefined;
+		for (const [imageId, state] of this.#placementState) {
+			if (state.epoch > 1) {
+				stale ??= [];
+				stale.push({ imageId, lastEpoch: state.epoch });
+			}
 			state.epoch = 1;
 			state.lastOriginFrameRow = undefined;
 		}
+		return stale ?? EMPTY_STALE_EPOCHS;
 	}
 
 	/**

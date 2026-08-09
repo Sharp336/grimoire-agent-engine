@@ -816,6 +816,16 @@ export function encodeKittyDeleteImage(imageId: number): string {
 	return wrapTmuxPassthroughIfNeeded(`\x1b_Ga=d,d=I,i=${imageId},q=2\x1b\\`);
 }
 
+/**
+ * Delete a single placement of an image (`d=i`, lowercase): removes its cells
+ * and registry entry but keeps the transmitted data, so a later `a=p` under a
+ * fresh placement id needs no retransmit. Used to clear stale placement-epoch
+ * entries after a destructive history clear.
+ */
+export function encodeKittyDeletePlacement(imageId: number, placementId: number): string {
+	return wrapTmuxPassthroughIfNeeded(`\x1b_Ga=d,d=i,i=${imageId},p=${placementId},q=2\x1b\\`);
+}
+
 export function encodeITerm2(
 	base64Data: string,
 	options: {

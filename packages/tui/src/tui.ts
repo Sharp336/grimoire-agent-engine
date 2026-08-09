@@ -25,6 +25,7 @@ import { LoopWatchdog } from "./loop-watchdog";
 import { isConPTYHosted, setAltScreenActive, type Terminal } from "./terminal";
 import {
 	encodeKittyDeleteImage,
+	encodeKittyDeletePlacement,
 	encodeKittyPlacementLine,
 	ImageProtocol,
 	isInsideTerminalMultiplexer,
@@ -3714,9 +3715,15 @@ export class TUI extends Container {
 			// so terminals without DEC 2026 never expose an ED2-cleared frame.
 			// The clear also destroys every placement cell, so placement epochs
 			// restart — the replay's placements then replace the terminal's stale
-			// registry entries instead of stranding one per replay.
-			this.#imageBudget.resetPlacementEpochs();
+			// epoch-1 registry entries, and the higher epochs each image reached
+			// are deleted explicitly (`d=i` keeps the transmitted data, so the
+			// replay needs no retransmit).
 			buffer += "\x1b[H\x1b[3J";
+			for (const { imageId, lastEpoch } of this.#imageBudget.resetPlacementEpochs()) {
+				for (let placementId = 2; placementId <= lastEpoch; placementId++) {
+					buffer += encodeKittyDeletePlacement(imageId, placementId);
+				}
+			}
 		} else {
 			// Best-effort: push the pre-paint screen into scrollback on
 			// terminals that implement kitty's ED 22

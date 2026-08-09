@@ -5,6 +5,7 @@ import { Text } from "@oh-my-pi/pi-tui/components/text";
 import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
 import {
 	type CellDimensions,
+	encodeKittyDeletePlacement,
 	encodeKittyPlacementLine,
 	getCellDimensions,
 	ImageProtocol,
@@ -145,6 +146,31 @@ describe("ImageBudget placement epochs", () => {
 		expect(budget.resolvePlacementEmit(9, 0, -1)).not.toBeNull();
 		budget.takeAllTransmittedIds();
 		expect(budget.resolvePlacementEmit(9, 0, -1)).toBeNull();
+	});
+
+	it("bumps against the monotonic high-water mark when the commit ledger rewinds", () => {
+		const budget = new ImageBudget(8, () => {});
+		budget.registerPlacementGeometry(5, 40, 60);
+		// Placement 1's origin (row 100) physically commits (watermark 120).
+		expect(budget.resolvePlacementEmit(5, 100, 120)?.placementId).toBe(1);
+		// A divergence recommit rewinds the caller's ledger to 50; the archived
+		// cells are still in native scrollback, so the re-emit must NOT re-use
+		// placement 1 (Kitty replace would strip the archive).
+		expect(budget.resolvePlacementEmit(5, 60, 50)?.placementId).toBe(2);
+	});
+
+	it("reports the epochs each image reached when resetting, once", () => {
+		const budget = new ImageBudget(8, () => {});
+		budget.registerPlacementGeometry(5, 40, 60);
+		budget.registerPlacementGeometry(7, 40, 60);
+		expect(budget.resolvePlacementEmit(5, 10, 4)?.placementId).toBe(1);
+		expect(budget.resolvePlacementEmit(5, 12, 12)?.placementId).toBe(2);
+		expect(budget.resolvePlacementEmit(7, 30, 12)?.placementId).toBe(1);
+		// Only the image that advanced past epoch 1 has stale registry entries.
+		expect(budget.resetPlacementEpochs()).toEqual([{ imageId: 5, lastEpoch: 2 }]);
+		// After the reset both images are back at epoch 1 with nothing stale.
+		expect(budget.resolvePlacementEmit(5, 10, -1)?.placementId).toBe(1);
+		expect(budget.resetPlacementEpochs()).toEqual([]);
 	});
 });
 
@@ -488,6 +514,64 @@ describe("TUI direct-placement clipping", () => {
 
 			const output = writes.join("");
 			expect(output).toContain("\x1b[3J");
+			const replay = capturePlacements(output, imageId);
+			expect(replay.length).toBeGreaterThan(0);
+			expect(replay[replay.length - 1]!.placementId).toBe(1);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("deletes stale higher-epoch placements when a destructive clear resets to epoch 1", () => {
+		const term = new VirtualTerminal(40, 12);
+		const writes: string[] = [];
+		const realWrite = term.write.bind(term);
+		vi.spyOn(term, "write").mockImplementation((data: string) => {
+			writes.push(data);
+			realWrite(data);
+		});
+
+		const { scheduler, pump } = makeManualScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		const image = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: t => t },
+			{ maxWidthCells: 4, maxHeightCells: 6, budget: tui.imageBudget, imageKey: "stale" },
+			{ widthPx: 40, heightPx: 60 },
+		);
+		const imageId = tui.imageBudget.acquireId("stale");
+		const stream = new Text("", 0, 0);
+		tui.addChild(new Text("header", 0, 0));
+		tui.addChild(image);
+		tui.addChild(stream);
+
+		try {
+			tui.start();
+			pump();
+			const lines: string[] = [];
+			for (let n = 1; n <= 10; n++) {
+				lines.push(`streaming line ${n}`);
+				stream.setText(lines.join("\n"));
+				tui.requestRender();
+				pump();
+			}
+			// Drive the image to epoch 2: an overlay frame re-emits the straddling
+			// placement after commits passed its origin.
+			const overlay = tui.showOverlay(new Text("OVERLAY", 0, 0), { anchor: "top-left", width: "100%" });
+			pump();
+			overlay.hide();
+			pump();
+
+			// The destructive replay must delete the terminal's stale epoch-2
+			// registry entry (d=i keeps the data) and re-place under epoch 1.
+			writes.length = 0;
+			tui.resetDisplay();
+			pump();
+
+			const output = writes.join("");
+			expect(output).toContain("\x1b[3J");
+			expect(output).toContain(encodeKittyDeletePlacement(imageId, 2));
 			const replay = capturePlacements(output, imageId);
 			expect(replay.length).toBeGreaterThan(0);
 			expect(replay[replay.length - 1]!.placementId).toBe(1);
