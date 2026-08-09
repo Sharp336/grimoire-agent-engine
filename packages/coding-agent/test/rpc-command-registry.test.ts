@@ -76,9 +76,9 @@ describe("RPC command registry", () => {
 		).toMatchObject({ ok: false, command: "session_invoke", code: "invalid_request" });
 	});
 
-	test("advertises authoritative serial tool inventory reads and update signals in API v2", () => {
+	test("advertises authoritative serial tool inventory reads and update signals in API v3", () => {
 		const manifest = getRpcCapabilityManifest();
-		expect(manifest.applicationApiVersion).toBe(2);
+		expect(manifest.applicationApiVersion).toBe(3);
 		expect(RPC_COMMAND_DEFINITIONS.get_tool_inventory.scheduling).toBe("serial");
 		expect(manifest.commands.find(command => command.name === "get_tool_inventory")).toMatchObject({
 			scope: "session",

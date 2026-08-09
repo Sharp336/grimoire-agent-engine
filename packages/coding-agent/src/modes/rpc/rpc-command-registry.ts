@@ -20,7 +20,7 @@ import {
 	type RpcJsonValue,
 } from "./rpc-types";
 
-export const RPC_APPLICATION_API_VERSION = 2;
+export const RPC_APPLICATION_API_VERSION = 3;
 
 interface RpcFieldDefinition {
 	optional: boolean;
@@ -417,6 +417,38 @@ export function isRpcJsonValue(value: unknown, depth = 0): value is RpcJsonValue
 const optionalJsonObjectField = optional("a JSON object", value => isRecord(value) && isRpcJsonValue(value), {
 	type: ["object", "null"],
 });
+const uiSubscriptionsField = optional(
+	"an RPC UI subscription object",
+	value =>
+		isRecord(value) &&
+		Object.keys(value).every(key => ["editor", "presentation", "theme", "title", "toolsExpanded"].includes(key)) &&
+		Object.values(value).every(item => typeof item === "boolean"),
+	{
+		type: ["object", "null"],
+		properties: {
+			editor: { type: "boolean" },
+			presentation: { type: "boolean" },
+			theme: { type: "boolean" },
+			title: { type: "boolean" },
+			toolsExpanded: { type: "boolean" },
+		},
+		additionalProperties: false,
+	},
+);
+const uiLinesField = required(
+	"an array of at most 10000 editor lines and 1048576 total UTF-8 bytes",
+	value =>
+		Array.isArray(value) &&
+		value.length <= 10_000 &&
+		value.every(line => typeof line === "string") &&
+		Buffer.byteLength(value.join("\n"), "utf8") <= 1_048_576,
+	{
+		type: "array",
+		maxItems: 10_000,
+		items: { type: "string" },
+		"x-maxUtf8Bytes": 1_048_576,
+	},
+);
 
 const observationPositionField = optional(
 	"an observation epoch and non-negative sequence",
@@ -624,6 +656,195 @@ export const RPC_COMMAND_DEFINITIONS = {
 		},
 		"concurrent",
 		{ version: 3, ...requiresFeature("context.projection") },
+	),
+	ui_open: sessionCommand(
+		{ type: "ui_open", id: "request-1", terminalId: "terminal-1", width: 100 },
+		{
+			terminalId: opaqueIdField,
+			width: optionalBoundedPositiveIntegerField(240),
+			subscriptions: uiSubscriptionsField,
+		},
+		"serial",
+		{ version: 3, ...requiresFeature("ui") },
+	),
+	ui_close: sessionCommand(
+		{ type: "ui_close", id: "request-1", channelId: "channel-1", generation: 1 },
+		{ channelId: opaqueIdField, generation: requiredNonNegativeIntegerField },
+		"control",
+		{ version: 3, ...requiresFeature("ui") },
+	),
+	ui_input: sessionCommand(
+		{ type: "ui_input", id: "request-1", channelId: "channel-1", generation: 1, data: "x" },
+		{
+			channelId: opaqueIdField,
+			generation: requiredNonNegativeIntegerField,
+			data: boundedStringField("raw input no longer than 65536 characters", 65_536),
+		},
+		"serial",
+		{ version: 3, ...requiresFeature("ui") },
+	),
+	ui_editor_update: sessionCommand(
+		{
+			type: "ui_editor_update",
+			id: "request-1",
+			channelId: "channel-1",
+			generation: 1,
+			expectedRevision: 0,
+			text: "prompt",
+		},
+		{
+			channelId: opaqueIdField,
+			generation: requiredNonNegativeIntegerField,
+			expectedRevision: requiredNonNegativeIntegerField,
+			text: boundedStringField("editor text no longer than 1048576 characters", 1_048_576),
+		},
+		"serial",
+		{ version: 3, ...requiresFeature("ui") },
+	),
+	ui_editor_paste: sessionCommand(
+		{
+			type: "ui_editor_paste",
+			id: "request-1",
+			channelId: "channel-1",
+			generation: 1,
+			expectedRevision: 0,
+			text: "pasted text",
+		},
+		{
+			channelId: opaqueIdField,
+			generation: requiredNonNegativeIntegerField,
+			expectedRevision: requiredNonNegativeIntegerField,
+			text: boundedStringField("pasted text no longer than 1048576 characters", 1_048_576),
+		},
+		"serial",
+		{ version: 3, ...requiresFeature("ui") },
+	),
+	ui_autocomplete_suggest: sessionCommand(
+		{
+			type: "ui_autocomplete_suggest",
+			id: "request-1",
+			channelId: "channel-1",
+			generation: 1,
+			lines: ["/"],
+			cursorLine: 0,
+			cursorCol: 1,
+		},
+		{
+			channelId: opaqueIdField,
+			generation: requiredNonNegativeIntegerField,
+			lines: uiLinesField,
+			cursorLine: requiredNonNegativeIntegerField,
+			cursorCol: requiredNonNegativeIntegerField,
+			forceFile: optionalBooleanField,
+		},
+		"concurrent",
+		{ version: 3, ...requiresFeature("ui") },
+	),
+	ui_autocomplete_apply: sessionCommand(
+		{
+			type: "ui_autocomplete_apply",
+			id: "request-1",
+			channelId: "channel-1",
+			generation: 1,
+			suggestionId: "suggestion-1",
+		},
+		{
+			channelId: opaqueIdField,
+			generation: requiredNonNegativeIntegerField,
+			suggestionId: opaqueIdField,
+		},
+		"serial",
+		{ version: 3, ...requiresFeature("ui") },
+	),
+	ui_cancel: sessionCommand(
+		{
+			type: "ui_cancel",
+			id: "request-1",
+			channelId: "channel-1",
+			generation: 1,
+			operationId: "operation-1",
+		},
+		{ channelId: opaqueIdField, generation: requiredNonNegativeIntegerField, operationId: opaqueIdField },
+		"control",
+		{ version: 3, ...requiresFeature("ui") },
+	),
+	ui_presentation_input: sessionCommand(
+		{
+			type: "ui_presentation_input",
+			id: "request-1",
+			channelId: "channel-1",
+			generation: 1,
+			presentationId: "presentation-1",
+			data: "x",
+		},
+		{
+			channelId: opaqueIdField,
+			generation: requiredNonNegativeIntegerField,
+			presentationId: opaqueIdField,
+			data: boundedStringField("presentation input no longer than 65536 characters", 65_536),
+		},
+		"serial",
+		{ version: 3, ...requiresFeature("ui") },
+	),
+	ui_presentation_action: sessionCommand(
+		{
+			type: "ui_presentation_action",
+			id: "request-1",
+			channelId: "channel-1",
+			generation: 1,
+			presentationId: "presentation-1",
+			action: "cancel",
+		},
+		{
+			channelId: opaqueIdField,
+			generation: requiredNonNegativeIntegerField,
+			presentationId: opaqueIdField,
+			action: enumField("cancel"),
+		},
+		"control",
+		{ version: 3, ...requiresFeature("ui") },
+	),
+	ui_theme_list: sessionCommand(
+		{ type: "ui_theme_list", id: "request-1", channelId: "channel-1", generation: 1 },
+		{ channelId: opaqueIdField, generation: requiredNonNegativeIntegerField },
+		"concurrent",
+		{ version: 3, ...requiresFeature("ui") },
+	),
+	ui_theme_get: sessionCommand(
+		{ type: "ui_theme_get", id: "request-1", channelId: "channel-1", generation: 1, name: "dark" },
+		{ channelId: opaqueIdField, generation: requiredNonNegativeIntegerField, name: stringField },
+		"concurrent",
+		{ version: 3, ...requiresFeature("ui") },
+	),
+	ui_theme_set: sessionCommand(
+		{ type: "ui_theme_set", id: "request-1", channelId: "channel-1", generation: 1, name: "dark" },
+		{ channelId: opaqueIdField, generation: requiredNonNegativeIntegerField, name: stringField },
+		"serial",
+		{ version: 3, ...requiresFeature("ui") },
+	),
+	ui_tools_expanded_set: sessionCommand(
+		{
+			type: "ui_tools_expanded_set",
+			id: "request-1",
+			channelId: "channel-1",
+			generation: 1,
+			expanded: true,
+		},
+		{ channelId: opaqueIdField, generation: requiredNonNegativeIntegerField, expanded: booleanField },
+		"serial",
+		{ version: 3, ...requiresFeature("ui") },
+	),
+	ui_title_subscribe: sessionCommand(
+		{
+			type: "ui_title_subscribe",
+			id: "request-1",
+			channelId: "channel-1",
+			generation: 1,
+			subscribed: true,
+		},
+		{ channelId: opaqueIdField, generation: requiredNonNegativeIntegerField, subscribed: booleanField },
+		"serial",
+		{ version: 3, ...requiresFeature("ui") },
 	),
 	session_ack: sessionCommand(
 		{ type: "session_ack", id: "request-1", subscriptionId: "subscription-1", sequence: 0 },
@@ -1256,6 +1477,7 @@ export const RPC_COMMAND_DEFINITIONS = {
 	compact: sessionCommand({ type: "compact" }, { customInstructions: optionalStringField }),
 	set_auto_compaction: sessionCommand({ type: "set_auto_compaction", enabled: true }, { enabled: booleanField }),
 	set_auto_retry: sessionCommand({ type: "set_auto_retry", enabled: true }, { enabled: booleanField }),
+	retry: sessionCommand({ type: "retry" }),
 	abort_retry: sessionCommand({ type: "abort_retry" }, {}, "control"),
 	bash: sessionCommand({ type: "bash", command: "pwd" }, { command: stringField }, "concurrent", {
 		confirmation: "required",

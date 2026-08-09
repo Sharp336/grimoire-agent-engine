@@ -154,6 +154,171 @@ export interface RpcContextGetResult {
 }
 
 // ============================================================================
+// Negotiated Interactive UI
+// ============================================================================
+
+export interface RpcUiFence {
+	channelId: string;
+	generation: number;
+	sessionId: string;
+	authorityGeneration: number;
+}
+
+export interface RpcUiEditorState {
+	text: string;
+	revision: number;
+}
+
+export interface RpcUiThemeInfo {
+	name: string;
+	path?: string;
+	current: boolean;
+}
+
+export type RpcUiPresentationKind = "widget" | "header" | "footer" | "editor" | "custom";
+
+export interface RpcUiActionDescriptor {
+	id: string;
+	owner: "rpc" | "client" | "presentation";
+	operations: RpcCommand["type"][];
+}
+
+export type RpcUiPresentationAction = { id: "input"; kind: "input" } | { id: "cancel"; kind: "cancel" };
+
+export interface RpcUiPresentation {
+	id: string;
+	kind: RpcUiPresentationKind;
+	key?: string;
+	placement?: "aboveEditor" | "belowEditor" | "overlay";
+	rows: string[];
+	revision: number;
+	focused: boolean;
+	actions: RpcUiPresentationAction[];
+}
+
+export interface RpcUiPresentationInputResult {
+	completed: boolean;
+	presentation: RpcUiPresentation | null;
+}
+
+export interface RpcUiSubscriptions {
+	editor: boolean;
+	presentation: boolean;
+	theme: boolean;
+	title: boolean;
+	toolsExpanded: boolean;
+}
+
+export interface RpcUiSnapshot {
+	fence: RpcUiFence;
+	terminalId: string;
+	subscriptions: RpcUiSubscriptions;
+	editor: RpcUiEditorState;
+	presentations: RpcUiPresentation[];
+	theme: { name?: string; revision: number };
+	title: { value: string; revision: number };
+	toolsExpanded: { value: boolean; revision: number };
+	terminalInputHandlers: number;
+	actions: RpcUiActionDescriptor[];
+}
+
+export interface RpcUiAutocompleteItem {
+	id: string;
+	value: string;
+	label: string;
+	description?: string;
+	hint?: string;
+}
+
+export interface RpcUiAutocompleteResult {
+	operationId: string;
+	items: RpcUiAutocompleteItem[];
+	prefix: string;
+	inlineHint?: string;
+	replacement: {
+		start: { line: number; column: number };
+		end: { line: number; column: number };
+	};
+}
+
+export type RpcUiClientAction = { type: "clipboard_write"; text: string };
+
+export interface RpcUiAutocompleteApplyResult {
+	editor: RpcUiEditorState;
+	cursor: { line: number; column: number };
+	clientAction?: RpcUiClientAction;
+}
+
+export interface RpcUiInputResult {
+	consumed: boolean;
+	data: string;
+}
+
+export type RpcUiChannelSettlementReason =
+	| "closed"
+	| "replaced"
+	| "authority_changed"
+	| "session_changed"
+	| "client_disconnected"
+	| "shutdown";
+
+export interface RpcUiChannelSettledFrame {
+	type: "ui_channel_settled";
+	channelId: string;
+	generation: number;
+	reason: RpcUiChannelSettlementReason;
+}
+
+export interface RpcUiEditorUpdateFrame {
+	type: "ui_editor_update";
+	fence: RpcUiFence;
+	editor: RpcUiEditorState;
+	source: "client" | "extension" | "component" | "session";
+}
+
+export interface RpcUiPresentationUpdateFrame {
+	type: "ui_presentation_update";
+	fence: RpcUiFence;
+	presentation: RpcUiPresentation;
+}
+
+export interface RpcUiPresentationRemoveFrame {
+	type: "ui_presentation_remove";
+	fence: RpcUiFence;
+	presentationId: string;
+	reason: "removed" | "completed" | "cancelled" | "session_changed";
+}
+
+export interface RpcUiThemeUpdateFrame {
+	type: "ui_theme_update";
+	fence: RpcUiFence;
+	theme: { name?: string; revision: number };
+}
+
+export interface RpcUiTitleUpdateFrame {
+	type: "ui_title_update";
+	fence: RpcUiFence;
+	title: string;
+	revision: number;
+}
+
+export interface RpcUiToolsExpandedUpdateFrame {
+	type: "ui_tools_expanded_update";
+	fence: RpcUiFence;
+	expanded: boolean;
+	revision: number;
+}
+
+export type RpcUiFrame =
+	| RpcUiChannelSettledFrame
+	| RpcUiEditorUpdateFrame
+	| RpcUiPresentationUpdateFrame
+	| RpcUiPresentationRemoveFrame
+	| RpcUiThemeUpdateFrame
+	| RpcUiTitleUpdateFrame
+	| RpcUiToolsExpandedUpdateFrame;
+
+// ============================================================================
 // RPC Commands (stdin)
 // ============================================================================
 
@@ -177,6 +342,82 @@ export type RpcCommand =
 			snapshot?: boolean;
 	  }
 	| ({ id: string; type: "context_get" } & RpcContextGetOptions)
+	| {
+			id: string;
+			type: "ui_open";
+			terminalId: string;
+			width?: number;
+			subscriptions?: Partial<RpcUiSubscriptions>;
+	  }
+	| { id: string; type: "ui_close"; channelId: string; generation: number }
+	| { id: string; type: "ui_input"; channelId: string; generation: number; data: string }
+	| {
+			id: string;
+			type: "ui_editor_update";
+			channelId: string;
+			generation: number;
+			expectedRevision: number;
+			text: string;
+	  }
+	| {
+			id: string;
+			type: "ui_editor_paste";
+			channelId: string;
+			generation: number;
+			expectedRevision: number;
+			text: string;
+	  }
+	| {
+			id: string;
+			type: "ui_autocomplete_suggest";
+			channelId: string;
+			generation: number;
+			lines: string[];
+			cursorLine: number;
+			cursorCol: number;
+			forceFile?: boolean;
+	  }
+	| {
+			id: string;
+			type: "ui_autocomplete_apply";
+			channelId: string;
+			generation: number;
+			suggestionId: string;
+	  }
+	| { id: string; type: "ui_cancel"; channelId: string; generation: number; operationId: string }
+	| {
+			id: string;
+			type: "ui_presentation_input";
+			channelId: string;
+			generation: number;
+			presentationId: string;
+			data: string;
+	  }
+	| {
+			id: string;
+			type: "ui_presentation_action";
+			channelId: string;
+			generation: number;
+			presentationId: string;
+			action: "cancel";
+	  }
+	| { id: string; type: "ui_theme_list"; channelId: string; generation: number }
+	| { id: string; type: "ui_theme_get"; channelId: string; generation: number; name: string }
+	| { id: string; type: "ui_theme_set"; channelId: string; generation: number; name: string }
+	| {
+			id: string;
+			type: "ui_tools_expanded_set";
+			channelId: string;
+			generation: number;
+			expanded: boolean;
+	  }
+	| {
+			id: string;
+			type: "ui_title_subscribe";
+			channelId: string;
+			generation: number;
+			subscribed: boolean;
+	  }
 	| { id: string; type: "session_ack"; subscriptionId: string; sequence: number }
 	| { id: string; type: "session_unsubscribe"; subscriptionId: string }
 	| { id: string; type: "session_invoke"; command: SessionCommand }
@@ -344,6 +585,7 @@ export type RpcCommand =
 	| { id?: string; type: "set_auto_compaction"; enabled: boolean }
 
 	// Retry
+	| { id?: string; type: "retry" }
 	| { id?: string; type: "set_auto_retry"; enabled: boolean }
 	| { id?: string; type: "abort_retry" }
 
@@ -1064,6 +1306,69 @@ export type RpcResponse =
 			success: true;
 			data: RpcContextGetResult;
 	  }
+	| { id?: string; type: "response"; command: "ui_open"; success: true; data: RpcUiSnapshot }
+	| { id?: string; type: "response"; command: "ui_close"; success: true }
+	| { id?: string; type: "response"; command: "ui_input"; success: true; data: RpcUiInputResult }
+	| { id?: string; type: "response"; command: "ui_editor_update"; success: true; data: RpcUiEditorState }
+	| { id?: string; type: "response"; command: "ui_editor_paste"; success: true; data: RpcUiEditorState }
+	| {
+			id?: string;
+			type: "response";
+			command: "ui_autocomplete_suggest";
+			success: true;
+			data: RpcUiAutocompleteResult | null;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "ui_autocomplete_apply";
+			success: true;
+			data: RpcUiAutocompleteApplyResult;
+	  }
+	| { id?: string; type: "response"; command: "ui_cancel"; success: true; data: { cancelled: boolean } }
+	| {
+			id?: string;
+			type: "response";
+			command: "ui_presentation_input";
+			success: true;
+			data: RpcUiPresentationInputResult;
+	  }
+	| { id?: string; type: "response"; command: "ui_presentation_action"; success: true }
+	| {
+			id?: string;
+			type: "response";
+			command: "ui_theme_list";
+			success: true;
+			data: { themes: RpcUiThemeInfo[] };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "ui_theme_get";
+			success: true;
+			data: { theme: RpcUiThemeInfo | null };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "ui_theme_set";
+			success: true;
+			data: { theme: RpcUiThemeInfo };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "ui_tools_expanded_set";
+			success: true;
+			data: { expanded: boolean; revision: number };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "ui_title_subscribe";
+			success: true;
+			data: { subscribed: boolean; title: string; revision: number };
+	  }
 	| { id?: string; type: "response"; command: "session_ack"; success: true }
 	| { id?: string; type: "response"; command: "session_unsubscribe"; success: true }
 	| {
@@ -1463,6 +1768,7 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "set_auto_compaction"; success: true }
 
 	// Retry
+	| { id?: string; type: "response"; command: "retry"; success: true; data: { retried: boolean } }
 	| { id?: string; type: "response"; command: "set_auto_retry"; success: true }
 	| { id?: string; type: "response"; command: "abort_retry"; success: true }
 
@@ -1519,7 +1825,15 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "get_messages_page"; success: true; data: RpcMessagesPage }
 
 	// Error response (any command can fail); `code` is an optional machine-readable reason.
-	| { id?: string; type: "response"; command: string; success: false; error: string; code?: string };
+	| {
+			id?: string;
+			type: "response";
+			command: string;
+			success: false;
+			error: string;
+			code?: string;
+			data?: object;
+	  };
 
 // ============================================================================
 // Subagent Events (stdout)
@@ -1839,6 +2153,7 @@ type RpcManifestEvent =
 	| RpcResourceLifecycleFrame
 	| RpcProvenanceFrame
 	| RpcCollaborationFrame
+	| RpcUiFrame
 	| {
 			type:
 				| "command_output"
@@ -1927,6 +2242,13 @@ export const RPC_EVENT_TYPES = eventInventory([
 	"notice",
 	"thinking_level_changed",
 	"goal_updated",
+	"ui_channel_settled",
+	"ui_editor_update",
+	"ui_presentation_update",
+	"ui_presentation_remove",
+	"ui_theme_update",
+	"ui_title_update",
+	"ui_tools_expanded_update",
 ] as const);
 
 export type RpcEventType = (typeof RPC_EVENT_TYPES)[number];

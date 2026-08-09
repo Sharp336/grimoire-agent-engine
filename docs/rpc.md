@@ -17,12 +17,13 @@ Primary implementation:
 
 ```bash
 omp --mode rpc [regular CLI options]
+omp --mode rpc-ui [regular CLI options]
 ```
 
 Behavior notes:
 
 - `@file` CLI arguments are rejected in RPC mode.
-- RPC mode disables automatic session title generation by default to avoid an extra model call.
+- RPC and RPC UI modes disable OS terminal-title writes. `rpc-ui` instead exposes negotiated semantic title updates to subscribed clients.
 - RPC/ACP host defaults cover task isolation/execution, memory, advisor, tier, async-job, and bash auto-background settings. They are applied only when a path is not explicitly configured; project/global config, `--config`, and isolated settings remain authoritative. Todo settings are not host-defaulted.
 - The process claims stdin before extension discovery, then parses it one non-empty JSONL line at a time. Malformed JSON emits a recoverable `command: "parse"` failure and does not terminate the loop.
 - At startup it writes a `ready` frame before processing commands. The frame advertises supported protocol versions and transport limits.
@@ -43,7 +44,7 @@ The initial ready frame uses protocol v1 and advertises the opt-in lossless tran
   "maxFrameBytes": 1048576,
   "maxReassembledFrameBytes": 67108864,
   "capabilities": {
-    "applicationApiVersion": 2,
+    "applicationApiVersion": 3,
     "commands": [
       {
         "id": "rpc.command.get_capabilities",
@@ -125,6 +126,7 @@ Legacy clients may ignore the added ready fields and remain on v1. V1 retains it
 10. Legacy prompt lifecycle hints (`{ type: "prompt_result", id?, operationId?, agentInvoked }`) for local-only prompts
 11. Subagent frames (`subagent_lifecycle`, `subagent_progress`, `subagent_event`), gated by `set_subagent_subscription`
 12. Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
+13. Negotiated RPC UI frames (`ui_channel_settled`, `ui_editor_update`, `ui_presentation_update`, `ui_presentation_remove`, `ui_theme_update`, `ui_title_update`, `ui_tools_expanded_update`)
 
 ### Inbound frame categories (stdin)
 
@@ -222,7 +224,8 @@ After optional framing-v2 negotiation, request semantic v3:
     "resource.lifecycle",
     "collaboration",
     "runtime-provenance",
-    "session.shutdown"
+    "session.shutdown",
+    "ui"
   ]
 }
 ```
@@ -263,9 +266,72 @@ The current profile advertises these capability IDs:
 | `collaboration` | Host, join, leave, administer, acknowledge, and transfer collaboration media |
 | `runtime-provenance` | Read secret-safe provider, model, tier, usage, and fallback state |
 | `session.shutdown` | Settle the authority and drain output before process exit |
+| `ui` | Open and fence a client-rendered interactive surface, mirror editor state, invoke autocomplete and semantic presentations, and synchronize theme, title, and tool expansion state |
 
 The manifest is authoritative. A capability can be present with
 `supported: false` and an `unsupportedReason`.
+
+### Negotiated RPC UI surfaces
+
+`omp --mode rpc-ui` advertises the `ui` capability. The client MUST request it
+during v3 initialization before issuing `ui_*` commands. Ordinary
+`omp --mode rpc` does not advertise `ui`, remains headless, and does not add
+TUI-only tools such as `ask`.
+
+The RPC host owns session semantics; the RPC UI client owns terminal rendering,
+physical key matching, clipboard access, external-editor launch, suspend/reset,
+speech input, and other terminal-local effects. No ANSI-rendered TUI frame is
+sent over this channel.
+
+Open the surface after initialization:
+
+```json
+{
+  "id": "ui-open-1",
+  "type": "ui_open",
+  "terminalId": "desktop-terminal",
+  "width": 100,
+  "subscriptions": {
+    "editor": true,
+    "presentation": true,
+    "theme": true,
+    "title": true,
+    "toolsExpanded": true
+  }
+}
+```
+
+The response is an authoritative snapshot containing:
+
+- `fence: { channelId, generation, sessionId, authorityGeneration }`
+- revisioned editor, theme, title, and tool-expansion state
+- active semantic presentations
+- the count of installed raw terminal-input handlers
+- an exhaustive semantic action inventory classifying every application
+  keybinding as RPC-owned, client-owned, or presentation-owned
+
+Subsequent commands send `channelId` and `generation`. Emitted UI frames carry
+the full fence. A stale channel or generation fails with
+`stale_ui_generation`; session and execution-authority changes fail with
+`session_changed` or `authority_changed`.
+
+| TUI surface | RPC UI representation | Authority and invariants |
+|---|---|---|
+| Raw terminal input handlers | `ui_input` | Server handlers run in registration order. Each may transform data; `consume` stops propagation. Unsubscribing removes exactly that handler. |
+| Prompt editor | `ui_editor_update`, `ui_editor_paste`, `ui_editor_update` frames | Server owns text and monotonic revision. Client writes are compare-and-swap via `expectedRevision`; `editor_conflict` returns current state in `data.editor`. Custom editors receive bracketed paste semantics. |
+| Slash/file/action autocomplete | `ui_autocomplete_suggest`, `ui_autocomplete_apply`, `ui_cancel` | Uses the same built-in provider and extension-provider stack as the TUI. Suggestion IDs are opaque and generation-scoped. The request ID is the cancellable operation ID; applying returns editor/cursor state and any client-owned clipboard action. |
+| Widgets, header, footer, custom editor, custom/overlay components | `ui_presentation_update`, `ui_presentation_remove`, `ui_presentation_input`, `ui_presentation_action` | Components execute server-side against the semantic terminal. Rows are tab-sanitized, ANSI-free, and bounded to the negotiated width. Focused components receive semantic input; completion/cancellation settles their promise. |
+| Native themes | `ui_theme_list`, `ui_theme_get`, `ui_theme_set`, `ui_theme_update` | Only registered OMP theme names are accepted. A theme change invalidates and reprojects active presentations. |
+| Tool expansion | `ui_tools_expanded_set`, `ui_tools_expanded_update` | Server owns revisioned expansion state; the client decides how expanded tool output is rendered. |
+| Extension/session title | `ui_title_subscribe`, `ui_title_update` | Updates are emitted only to a subscribed active channel. The client decides whether and how to set its terminal/window title. |
+| Application keybindings | `snapshot.actions` plus the named typed operations | The client maps physical keys. RPC-owned actions call typed commands, presentation-owned actions send component input, and client-owned actions remain local. |
+| Interactive tool inventory | Startup capability policy and `get_tool_inventory` | TUI and `rpc-ui` construct the same UI-enabled core inventory independently. Headless `rpc` remains a separate no-UI oracle. |
+
+Opening another channel settles the previous one as `replaced`. Closing,
+disconnect, shutdown, authority replacement, and session replacement settle it
+as `closed`, `client_disconnected`, `shutdown`, `authority_changed`, or
+`session_changed`. Pending autocomplete and blocking custom presentations are
+cancelled or rejected during the corresponding lifecycle transition.
 
 ### Ordered session observations
 
@@ -1652,11 +1718,12 @@ stdin:
 
 Current helper characteristics:
 
-- Spawns `bun <cliPath> --mode rpc`
-- Correlates responses by generated `req_<n>` ids
-- Dispatches recognized core `AgentEvent` types to listeners
-- Supports host-owned custom tools via `setCustomTools()` and automatic handling of `host_tool_call` / `host_tool_cancel`
-- Wraps provider authentication with `listProviderAuth()`, `beginProviderAuth(...)`, `cancelProviderAuth(...)`, and `removeProviderAuth(...)`; use raw protocol frames for any surface not wrapped by the helper.
+- Spawns `bun <cliPath> --mode rpc` by default; set `mode: "rpc-ui"` for the negotiated interactive surface.
+- Correlates responses by generated `req_<n>` IDs.
+- Dispatches recognized core agent, v3 observation, and RPC UI frame types to typed listeners.
+- Wraps the full RPC UI command surface, including raw input, revisioned editor updates, autocomplete, presentations, themes, title subscriptions, and tool expansion. `suggestUiAutocomplete(...)` can expose its request/operation ID before settlement so another task can call `cancelUiOperation(...)`.
+- Supports host-owned custom tools via `setCustomTools()` and automatic handling of `host_tool_call` / `host_tool_cancel`.
+- Wraps provider authentication with `listProviderAuth()`, `beginProviderAuth(...)`, `cancelProviderAuth(...)`, and `removeProviderAuth(...)`.
 
 ### Python package
 
@@ -1671,4 +1738,4 @@ with RpcClient(provider="anthropic", model="claude-sonnet-4-5") as client:
     print(turn.require_assistant_text())
 ```
 
-By default, `RpcClient` starts `omp --mode rpc`; pass `command=[...]` to own the exact child command. It handles request correlation, typed notifications, v2 negotiation and chunk reassembly, message pagination, extension UI, and host-owned tools and URI schemes. The Python package owns that client API and process lifecycle; this document and `rpc-types.ts` remain the canonical wire contract. Use raw protocol frames when a client library does not wrap the surface you need.
+By default, `RpcClient` starts `omp --mode rpc`; set `mode="rpc-ui"` and request the `ui` v3 capability for the interactive surface, or pass `command=[...]` to own the exact child command. It handles request correlation, typed notifications, v2 negotiation and chunk reassembly, message pagination, extension UI, the negotiated RPC UI surface, and host-owned tools and URI schemes. The Python package owns that client API and process lifecycle; this document and `rpc-types.ts` remain the canonical wire contract.

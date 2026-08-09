@@ -228,6 +228,34 @@ if (Bun.env.MOCK_RPC_CLIENT_FRAMES === "1") {
 		}, 25);
 	}
 	writeFrame({ type: "future_server_frame", value: 1 });
+	writeFrame({ type: "ui_channel_settled", channelId: "rpc-ui-valid", generation: 1, reason: "closed" });
+	writeFrame({ type: "ui_channel_settled", channelId: "rpc-ui-malformed" });
+	writeFrame({
+		type: "ui_presentation_update",
+		fence: { channelId: "rpc-ui-valid", generation: 1, sessionId: "session-1", authorityGeneration: 0 },
+		presentation: {
+			id: "malformed-placement",
+			kind: "widget",
+			key: 42,
+			placement: "future",
+			rows: [],
+			revision: 1,
+			focused: false,
+			actions: [],
+		},
+	});
+	writeFrame({
+		type: "ui_presentation_update",
+		fence: { channelId: "rpc-ui-valid", generation: 1, sessionId: "session-1", authorityGeneration: 0 },
+		presentation: {
+			id: "malformed-action",
+			kind: "custom",
+			rows: ["row"],
+			revision: 1,
+			focused: true,
+			actions: [{ id: "input", kind: "cancel" }],
+		},
+	});
 }
 if (Bun.env.MOCK_RPC_RESOURCES === "1") {
 	writeFrame({

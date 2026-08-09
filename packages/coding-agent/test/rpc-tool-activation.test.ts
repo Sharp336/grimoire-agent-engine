@@ -138,7 +138,7 @@ describe("RPC tool activation", () => {
 			deactivated: ["mcp__server_tool"],
 			inventoryAvailable: true,
 		});
-		expect(result.inventory?.applicationApiVersion).toBe(2);
+		expect(result.inventory?.applicationApiVersion).toBe(3);
 	});
 
 	test("allows explicit activation of a registered hidden tool", async () => {

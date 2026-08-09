@@ -198,20 +198,35 @@ _AUTO_COMPACTION_REASON_VALUES: Final[frozenset[str]] = frozenset(
 _AUTO_COMPACTION_ACTION_VALUES: Final[frozenset[str]] = frozenset(
     {"context-full", "handoff", "shake", "snapcompact"}
 )
-_RPC_V3_FRAME_TYPES: Final[frozenset[str]] = frozenset(
+_RPC_UI_FRAME_TYPES: Final[frozenset[str]] = frozenset(
     {
-        "interaction_settled",
-        "semantic_content",
-        "semantic_action_requested",
-        "semantic_action_settled",
-        "resource_lifecycle",
-        "resource_operation",
-        "provenance_update",
-        "collaboration_state",
-        "collaboration_replicated",
-        "collaboration_gap",
-        "collaboration_stale",
+        "ui_channel_settled",
+        "ui_editor_update",
+        "ui_presentation_update",
+        "ui_presentation_remove",
+        "ui_theme_update",
+        "ui_title_update",
+        "ui_tools_expanded_update",
     }
+)
+
+_RPC_V3_FRAME_TYPES: Final[frozenset[str]] = (
+    frozenset(
+        {
+            "interaction_settled",
+            "semantic_content",
+            "semantic_action_requested",
+            "semantic_action_settled",
+            "resource_lifecycle",
+            "resource_operation",
+            "provenance_update",
+            "collaboration_state",
+            "collaboration_replicated",
+            "collaboration_gap",
+            "collaboration_stale",
+        }
+    )
+    | _RPC_UI_FRAME_TYPES
 )
 
 
@@ -1428,6 +1443,157 @@ class RpcContextGetResult:
     bounds: RpcContextGetBounds
     returned: RpcContextGetReturned
     truncated: RpcContextGetTruncation
+
+@dataclass(slots=True, frozen=True)
+class UiFence:
+    channel_id: str
+    generation: int
+    session_id: str
+    authority_generation: int
+
+
+@dataclass(slots=True, frozen=True)
+class UiEditorState:
+    text: str
+    revision: int
+
+
+@dataclass(slots=True, frozen=True)
+class UiSubscriptions:
+    editor: bool
+    presentation: bool
+    theme: bool
+    title: bool
+    tools_expanded: bool
+
+
+@dataclass(slots=True, frozen=True)
+class UiPresentationInputAction:
+    id: Literal["input"] = "input"
+    kind: Literal["input"] = "input"
+
+
+@dataclass(slots=True, frozen=True)
+class UiPresentationCancelAction:
+    id: Literal["cancel"] = "cancel"
+    kind: Literal["cancel"] = "cancel"
+
+
+UiPresentationAction: TypeAlias = (
+    UiPresentationInputAction | UiPresentationCancelAction
+)
+
+@dataclass(slots=True, frozen=True)
+class UiPresentation:
+    id: str
+    kind: Literal["widget", "header", "footer", "editor", "custom"]
+    key: str | None
+    placement: Literal["aboveEditor", "belowEditor", "overlay"] | None
+    rows: tuple[str, ...]
+    revision: int
+    focused: bool
+    actions: tuple[UiPresentationAction, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class UiThemeState:
+    name: str | None
+    revision: int
+
+
+@dataclass(slots=True, frozen=True)
+class UiTitleState:
+    value: str
+    revision: int
+
+
+@dataclass(slots=True, frozen=True)
+class UiToolsExpandedState:
+    value: bool
+    revision: int
+
+
+@dataclass(slots=True, frozen=True)
+class UiActionDescriptor:
+    id: str
+    owner: Literal["rpc", "client", "presentation"]
+    operations: tuple[str, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class UiSnapshot:
+    fence: UiFence
+    terminal_id: str
+    subscriptions: UiSubscriptions
+    editor: UiEditorState
+    presentations: tuple[UiPresentation, ...]
+    theme: UiThemeState
+    title: UiTitleState
+    tools_expanded: UiToolsExpandedState
+    terminal_input_handlers: int
+    actions: tuple[UiActionDescriptor, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class UiInputResult:
+    consumed: bool
+    data: str
+
+
+@dataclass(slots=True, frozen=True)
+class UiCursor:
+    line: int
+    column: int
+
+
+@dataclass(slots=True, frozen=True)
+class UiAutocompleteItem:
+    id: str
+    value: str
+    label: str
+    description: str | None
+    hint: str | None
+
+
+@dataclass(slots=True, frozen=True)
+class UiAutocompleteReplacement:
+    start: UiCursor
+    end: UiCursor
+
+
+@dataclass(slots=True, frozen=True)
+class UiAutocompleteResult:
+    operation_id: str
+    items: tuple[UiAutocompleteItem, ...]
+    prefix: str
+    replacement: UiAutocompleteReplacement
+    inline_hint: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class UiClientAction:
+    type: Literal["clipboard_write"]
+    text: str
+
+
+@dataclass(slots=True, frozen=True)
+class UiAutocompleteApplyResult:
+    editor: UiEditorState
+    cursor: UiCursor
+    client_action: UiClientAction | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class UiPresentationInputResult:
+    completed: bool
+    presentation: UiPresentation | None
+
+
+@dataclass(slots=True, frozen=True)
+class UiThemeInfo:
+    name: str
+    path: str | None
+    current: bool
 
 
 @dataclass(slots=True, frozen=True)
@@ -3484,6 +3650,332 @@ def parse_rpc_context_get_result(payload: JsonObject) -> RpcContextGetResult:
         ),
     )
 
+def parse_ui_fence(payload: JsonObject) -> UiFence:
+    return UiFence(
+        channel_id=_require_str(payload, "channelId"),
+        generation=_require_int_value(payload, "generation"),
+        session_id=_require_str(payload, "sessionId"),
+        authority_generation=_require_int_value(payload, "authorityGeneration"),
+    )
+
+
+def parse_ui_editor_state(payload: JsonObject) -> UiEditorState:
+    return UiEditorState(
+        text=_require_str(payload, "text"),
+        revision=_require_int_value(payload, "revision"),
+    )
+
+
+def parse_ui_subscriptions(payload: JsonObject) -> UiSubscriptions:
+    return UiSubscriptions(
+        editor=_require_bool(payload, "editor"),
+        presentation=_require_bool(payload, "presentation"),
+        theme=_require_bool(payload, "theme"),
+        title=_require_bool(payload, "title"),
+        tools_expanded=_require_bool(payload, "toolsExpanded"),
+    )
+
+
+def parse_ui_cursor(payload: JsonObject) -> UiCursor:
+    return UiCursor(
+        line=_require_int_value(payload, "line"),
+        column=_require_int_value(payload, "column"),
+    )
+
+
+def parse_ui_presentation(payload: JsonObject) -> UiPresentation:
+    kind = _require_str(payload, "kind")
+    if kind not in {"widget", "header", "footer", "editor", "custom"}:
+        raise ValueError("uiPresentation.kind is invalid")
+    placement = _optional_str(payload, "placement")
+    if placement not in {None, "aboveEditor", "belowEditor", "overlay"}:
+        raise ValueError("uiPresentation.placement is invalid")
+    raw_actions = _clone_json_objects(
+        payload.get("actions"), field="uiPresentation.actions"
+    )
+    actions: list[UiPresentationAction] = []
+    for raw_action in raw_actions:
+        action_id = _require_str(raw_action, "id")
+        action_kind = _require_str(raw_action, "kind")
+        if action_id != action_kind or action_id not in {"input", "cancel"}:
+            raise ValueError("uiPresentation.actions contains an invalid action")
+        if action_id == "input":
+            actions.append(UiPresentationInputAction())
+        else:
+            actions.append(UiPresentationCancelAction())
+    return UiPresentation(
+        id=_require_str(payload, "id"),
+        kind=cast(
+            Literal["widget", "header", "footer", "editor", "custom"], kind
+        ),
+        key=_optional_str(payload, "key"),
+        placement=cast(
+            Literal["aboveEditor", "belowEditor", "overlay"] | None, placement
+        ),
+        rows=_required_string_tuple(
+            payload.get("rows"), field="uiPresentation.rows"
+        ),
+        revision=_require_int_value(payload, "revision"),
+        focused=_require_bool(payload, "focused"),
+        actions=tuple(actions),
+    )
+
+
+def parse_ui_theme_state(payload: JsonObject) -> UiThemeState:
+    return UiThemeState(
+        name=_optional_str(payload, "name"),
+        revision=_require_int_value(payload, "revision"),
+    )
+
+
+def parse_ui_title_state(payload: JsonObject) -> UiTitleState:
+    return UiTitleState(
+        value=_require_str(payload, "value"),
+        revision=_require_int_value(payload, "revision"),
+    )
+
+
+def parse_ui_tools_expanded_state(payload: JsonObject) -> UiToolsExpandedState:
+    return UiToolsExpandedState(
+        value=_require_bool(payload, "value"),
+        revision=_require_int_value(payload, "revision"),
+    )
+
+
+def parse_ui_action_descriptor(payload: JsonObject) -> UiActionDescriptor:
+    owner = _require_str(payload, "owner")
+    if owner not in {"rpc", "client", "presentation"}:
+        raise ValueError("uiAction.owner is invalid")
+    return UiActionDescriptor(
+        id=_require_str(payload, "id"),
+        owner=cast(Literal["rpc", "client", "presentation"], owner),
+        operations=_required_string_tuple(
+            payload.get("operations"), field="uiAction.operations"
+        ),
+    )
+
+
+def parse_ui_autocomplete_item(payload: JsonObject) -> UiAutocompleteItem:
+    return UiAutocompleteItem(
+        id=_require_str(payload, "id"),
+        value=_require_str(payload, "value"),
+        label=_require_str(payload, "label"),
+        description=_optional_str(payload, "description"),
+        hint=_optional_str(payload, "hint"),
+    )
+
+
+def parse_ui_autocomplete_replacement(
+    payload: JsonObject,
+) -> UiAutocompleteReplacement:
+    return UiAutocompleteReplacement(
+        start=parse_ui_cursor(
+            _clone_json_object(payload.get("start"), field="uiReplacement.start")
+        ),
+        end=parse_ui_cursor(
+            _clone_json_object(payload.get("end"), field="uiReplacement.end")
+        ),
+    )
+
+
+def parse_ui_client_action(payload: JsonObject) -> UiClientAction:
+    action_type = _require_str(payload, "type")
+    if action_type != "clipboard_write":
+        raise ValueError("uiClientAction.type is invalid")
+    return UiClientAction(type="clipboard_write", text=_require_str(payload, "text"))
+
+
+def parse_ui_snapshot(payload: JsonObject) -> UiSnapshot:
+    raw_presentations = _clone_json_objects(
+        payload.get("presentations"), field="uiSnapshot.presentations"
+    )
+    raw_actions = _clone_json_objects(
+        payload.get("actions"), field="uiSnapshot.actions"
+    )
+    return UiSnapshot(
+        fence=parse_ui_fence(
+            _clone_json_object(payload.get("fence"), field="uiSnapshot.fence")
+        ),
+        terminal_id=_require_str(payload, "terminalId"),
+        subscriptions=parse_ui_subscriptions(
+            _clone_json_object(
+                payload.get("subscriptions"), field="uiSnapshot.subscriptions"
+            )
+        ),
+        editor=parse_ui_editor_state(
+            _clone_json_object(payload.get("editor"), field="uiSnapshot.editor")
+        ),
+        presentations=tuple(
+            parse_ui_presentation(item) for item in raw_presentations
+        ),
+        theme=parse_ui_theme_state(
+            _clone_json_object(payload.get("theme"), field="uiSnapshot.theme")
+        ),
+        title=parse_ui_title_state(
+            _clone_json_object(payload.get("title"), field="uiSnapshot.title")
+        ),
+        tools_expanded=parse_ui_tools_expanded_state(
+            _clone_json_object(
+                payload.get("toolsExpanded"), field="uiSnapshot.toolsExpanded"
+            )
+        ),
+        terminal_input_handlers=_require_int_value(payload, "terminalInputHandlers"),
+        actions=tuple(parse_ui_action_descriptor(item) for item in raw_actions),
+    )
+
+
+def parse_ui_input_result(payload: JsonObject) -> UiInputResult:
+    return UiInputResult(
+        consumed=_require_bool(payload, "consumed"),
+        data=_require_str(payload, "data"),
+    )
+
+
+def parse_ui_autocomplete_result(
+    payload: JsonObject | None,
+) -> UiAutocompleteResult | None:
+    if payload is None:
+        return None
+    raw_items = _clone_json_objects(
+        payload.get("items"), field="uiAutocomplete.items"
+    )
+    return UiAutocompleteResult(
+        operation_id=_require_str(payload, "operationId"),
+        items=tuple(parse_ui_autocomplete_item(item) for item in raw_items),
+        prefix=_require_str(payload, "prefix"),
+        replacement=parse_ui_autocomplete_replacement(
+            _clone_json_object(
+                payload.get("replacement"), field="uiAutocomplete.replacement"
+            )
+        ),
+        inline_hint=_optional_str(payload, "inlineHint"),
+    )
+
+
+def parse_ui_autocomplete_apply_result(
+    payload: JsonObject,
+) -> UiAutocompleteApplyResult:
+    raw_client_action = _optional_json_object(
+        payload.get("clientAction"), field="uiAutocomplete.clientAction"
+    )
+    return UiAutocompleteApplyResult(
+        editor=parse_ui_editor_state(
+            _clone_json_object(payload.get("editor"), field="uiAutocomplete.editor")
+        ),
+        cursor=parse_ui_cursor(
+            _clone_json_object(payload.get("cursor"), field="uiAutocomplete.cursor")
+        ),
+        client_action=(
+            parse_ui_client_action(raw_client_action)
+            if raw_client_action is not None
+            else None
+        ),
+    )
+
+
+def parse_ui_presentation_input_result(
+    payload: JsonObject,
+) -> UiPresentationInputResult:
+    raw_presentation = _optional_json_object(
+        payload.get("presentation"), field="uiPresentationInput.presentation"
+    )
+    return UiPresentationInputResult(
+        completed=_require_bool(payload, "completed"),
+        presentation=(
+            parse_ui_presentation(raw_presentation)
+            if raw_presentation is not None
+            else None
+        ),
+    )
+
+
+def validate_ui_frame_payload(event_type: str, payload: JsonObject) -> JsonObject:
+    if event_type == "ui_channel_settled":
+        _require_str(payload, "channelId")
+        _require_int_value(payload, "generation")
+        reason = _require_str(payload, "reason")
+        if reason not in {
+            "replaced",
+            "closed",
+            "client_disconnected",
+            "session_changed",
+            "authority_changed",
+            "shutdown",
+        }:
+            raise ValueError("ui_channel_settled.reason is invalid")
+    elif event_type == "ui_editor_update":
+        parse_ui_fence(
+            _clone_json_object(payload.get("fence"), field="ui_editor_update.fence")
+        )
+        parse_ui_editor_state(
+            _clone_json_object(payload.get("editor"), field="ui_editor_update.editor")
+        )
+        if _require_str(payload, "source") not in {
+            "client",
+            "extension",
+            "component",
+            "session",
+        }:
+            raise ValueError("ui_editor_update.source is invalid")
+    elif event_type == "ui_presentation_update":
+        parse_ui_fence(
+            _clone_json_object(
+                payload.get("fence"), field="ui_presentation_update.fence"
+            )
+        )
+        parse_ui_presentation(
+            _clone_json_object(
+                payload.get("presentation"),
+                field="ui_presentation_update.presentation",
+            )
+        )
+    elif event_type == "ui_presentation_remove":
+        parse_ui_fence(
+            _clone_json_object(
+                payload.get("fence"), field="ui_presentation_remove.fence"
+            )
+        )
+        _require_str(payload, "presentationId")
+        if _require_str(payload, "reason") not in {
+            "removed",
+            "completed",
+            "cancelled",
+            "session_changed",
+        }:
+            raise ValueError("ui_presentation_remove.reason is invalid")
+    elif event_type == "ui_theme_update":
+        parse_ui_fence(
+            _clone_json_object(payload.get("fence"), field="ui_theme_update.fence")
+        )
+        parse_ui_theme_state(
+            _clone_json_object(payload.get("theme"), field="ui_theme_update.theme")
+        )
+    elif event_type == "ui_title_update":
+        parse_ui_fence(
+            _clone_json_object(payload.get("fence"), field="ui_title_update.fence")
+        )
+        _require_str(payload, "title")
+        _require_int_value(payload, "revision")
+    elif event_type == "ui_tools_expanded_update":
+        parse_ui_fence(
+            _clone_json_object(
+                payload.get("fence"), field="ui_tools_expanded_update.fence"
+            )
+        )
+        _require_bool(payload, "expanded")
+        _require_int_value(payload, "revision")
+    else:
+        raise ValueError(f"Unknown RPC UI frame type: {event_type}")
+    return _clone_json_object(payload, field=event_type)
+
+
+def parse_ui_theme_info(payload: JsonObject) -> UiThemeInfo:
+    return UiThemeInfo(
+        name=_require_str(payload, "name"),
+        path=_optional_str(payload, "path"),
+        current=_require_bool(payload, "current"),
+    )
+
 
 def parse_rpc_capability_manifest(payload: JsonObject) -> RpcCapabilityManifest:
     raw_api_version = payload.get("applicationApiVersion")
@@ -4483,7 +4975,11 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
     if isinstance(event_type, str) and event_type in _RPC_V3_FRAME_TYPES:
         return RpcV3Frame(
             type=event_type,
-            payload=_clone_json_object(payload, field=event_type),
+            payload=(
+                validate_ui_frame_payload(event_type, payload)
+                if event_type in _RPC_UI_FRAME_TYPES
+                else _clone_json_object(payload, field=event_type)
+            ),
         )
     if event_type == "extension_ui_request":
         return parse_extension_ui_request(payload)

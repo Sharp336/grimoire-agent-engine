@@ -329,6 +329,42 @@ class ProtocolParsingTests(unittest.TestCase):
         assert isinstance(semantic_frame, RpcV3Frame)
         self.assertEqual(semantic_frame.payload["content"][0]["type"], "future_widget")
 
+    def test_parse_ui_frames_validates_variant_payloads(self) -> None:
+        settled = parse_notification(
+            {
+                "type": "ui_channel_settled",
+                "channelId": "rpc-ui-valid",
+                "generation": 1,
+                "reason": "closed",
+            }
+        )
+
+        self.assertIsInstance(settled, RpcV3Frame)
+        assert isinstance(settled, RpcV3Frame)
+        self.assertEqual(settled.payload["channelId"], "rpc-ui-valid")
+        with self.assertRaisesRegex(ValueError, "channelId"):
+            parse_notification({"type": "ui_channel_settled"})
+        with self.assertRaisesRegex(ValueError, "invalid action"):
+            parse_notification(
+                {
+                    "type": "ui_presentation_update",
+                    "fence": {
+                        "channelId": "rpc-ui-valid",
+                        "generation": 1,
+                        "sessionId": "session-1",
+                        "authorityGeneration": 0,
+                    },
+                    "presentation": {
+                        "id": "malformed-action",
+                        "kind": "custom",
+                        "rows": ["row"],
+                        "revision": 1,
+                        "focused": True,
+                        "actions": [{"id": "input", "kind": "cancel"}],
+                    },
+                }
+            )
+
     def test_parse_bounded_artifact_range(self) -> None:
         artifact_range = parse_artifact_range(
             {

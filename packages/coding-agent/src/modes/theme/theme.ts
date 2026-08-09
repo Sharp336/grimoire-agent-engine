@@ -144,28 +144,30 @@ export async function initTheme(
 export async function setTheme(
 	name: string,
 	enableWatcher: boolean = false,
+	options: { beforeCommit?: () => void; fallbackOnError?: boolean } = {},
 ): Promise<{ success: boolean; error?: string }> {
 	autoDetectedTheme = false;
-	currentThemeName = name;
 	const requestId = ++themeLoadRequestId;
+	let loadedTheme: Theme;
 	try {
-		const loadedTheme = await loadTheme(name, getCurrentThemeOptions());
-		if (requestId !== themeLoadRequestId) {
-			return { success: false, error: "Theme change superseded by a newer request" };
-		}
-		theme = loadedTheme;
-		if (enableWatcher) {
-			await startThemeWatcher();
-		}
-		notifyThemeChange();
-		return { success: true };
+		loadedTheme = await loadTheme(name, getCurrentThemeOptions());
 	} catch (error) {
 		if (requestId !== themeLoadRequestId) {
 			return { success: false, error: "Theme change superseded by a newer request" };
 		}
-		// Theme is invalid - fall back to dark theme
+		if (options.fallbackOnError === false) {
+			return {
+				success: false,
+				error: error instanceof Error ? error.message : String(error),
+			};
+		}
+		const fallbackTheme = await loadTheme("dark", getCurrentThemeOptions());
+		if (requestId !== themeLoadRequestId) {
+			return { success: false, error: "Theme change superseded by a newer request" };
+		}
+		options.beforeCommit?.();
 		currentThemeName = "dark";
-		theme = await loadTheme("dark", getCurrentThemeOptions());
+		theme = fallbackTheme;
 		// The active theme just changed to the fallback — bump the epoch so memoized
 		// renderers (e.g. ToolExecutionComponent) re-shape with the fallback colors
 		// instead of holding the failed theme's stale styling.
@@ -176,6 +178,17 @@ export async function setTheme(
 			error: error instanceof Error ? error.message : String(error),
 		};
 	}
+	if (requestId !== themeLoadRequestId) {
+		return { success: false, error: "Theme change superseded by a newer request" };
+	}
+	options.beforeCommit?.();
+	currentThemeName = name;
+	theme = loadedTheme;
+	if (enableWatcher) {
+		await startThemeWatcher();
+	}
+	notifyThemeChange();
+	return { success: true };
 }
 
 export async function previewTheme(

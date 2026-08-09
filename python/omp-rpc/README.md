@@ -1,6 +1,6 @@
 # omp-rpc
 
-Typed Python bindings for the `omp --mode rpc` protocol used by the coding agent.
+Typed Python bindings for the `omp --mode rpc` and negotiated `omp --mode rpc-ui` protocols used by the coding agent.
 
 This package wraps the newline-delimited JSON RPC transport exposed by the CLI and
 provides:
@@ -15,7 +15,8 @@ provides:
 - helpers for collecting prompt runs and handling extension UI requests in manual or headless mode
 - typed host-tool helpers so Python RPC owners can expose custom tools with JSON Schema metadata
 - explicit RPC v3 negotiation, ordered session observations, authoritative mutations,
-  artifacts, resource lifecycle, collaboration, provenance, and graceful shutdown
+  artifacts, resource lifecycle, collaboration, provenance, graceful shutdown, and
+  the client-rendered RPC UI surface
 
 ## Basic Usage
 
@@ -162,6 +163,51 @@ The same client exposes bounded artifact reads and verified export,
 `list_resources()` plus resource lifecycle controls, collaboration controls,
 and `get_runtime_provenance()`. See the canonical protocol reference for wire
 schemas, reconnect behavior, and shutdown guarantees.
+
+## Negotiated RPC UI
+
+Use `mode="rpc-ui"` and request the v3 `ui` capability. The process exposes
+authoritative semantic state; Python owns rendering, physical keybindings,
+clipboard access, and other terminal-local effects.
+
+```python
+from omp_rpc import (
+    RpcClient,
+    RpcV3ClientOptions,
+    SessionHostClientCapabilities,
+)
+
+ui_options = RpcV3ClientOptions(
+    requested_capabilities=("session.execute", "session.shutdown", "ui"),
+    host_capabilities=SessionHostClientCapabilities(
+        interactions=("confirm", "input", "approval", "ask"),
+        semantic_content=("text", "markdown"),
+    ),
+)
+
+with RpcClient(mode="rpc-ui", rpc_v3=ui_options) as client:
+    ui = client.open_ui("python-terminal", width=100)
+    operation_ids: list[str] = []
+    suggestions = client.suggest_ui_autocomplete(
+        ui.fence,
+        ("@src",),
+        0,
+        4,
+        on_operation_id=operation_ids.append,
+    )
+    if suggestions and suggestions.items:
+        client.apply_ui_autocomplete(ui.fence, suggestions.items[0].id)
+    client.close_ui(ui.fence)
+```
+
+The snapshot includes the full lifecycle fence, revisioned editor/theme/title
+and tool-expansion state, active semantic presentations, and the semantic
+application-action inventory. Commands use `channel_id` and `generation`;
+frames carry the full fence. Stale editor writes raise `RpcCommandError` with
+code `editor_conflict`. The callback above exposes the in-flight request ID so
+another thread can call `cancel_ui_operation(...)` without waiting for
+suggestion settlement. Notification listeners run on the stdout reader thread;
+handoff blocking work to another thread.
 
 ## Host-Owned Custom Tools
 

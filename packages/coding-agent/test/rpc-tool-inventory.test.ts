@@ -1,8 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { type } from "arktype";
+import type { Mode } from "../src/cli/args";
 import { Settings } from "../src/config/settings";
 import type { RegisteredTool } from "../src/extensibility/extensions";
+import { getModeUiCapabilities } from "../src/modes/mode-ui-capabilities";
+import { RPC_APPLICATION_API_VERSION } from "../src/modes/rpc/rpc-command-registry";
 import { MAX_RPC_FRAME_BYTES } from "../src/modes/rpc/rpc-frame";
 import {
 	projectToolInventory,
@@ -30,11 +33,11 @@ function registered(name: string, extensionPath: string): RegisteredTool {
 	} as unknown as RegisteredTool;
 }
 
-async function nativeInventory(hasUI: boolean) {
+async function nativeInventory(mode: Mode, terminalInteractive: boolean) {
 	const activeNames = new Set<string>();
 	const session: ToolSession = {
 		cwd: "/tmp/rpc-native-tool-parity",
-		hasUI,
+		hasUI: getModeUiCapabilities(mode, terminalInteractive).toolPresentation,
 		skipPythonPreflight: true,
 		enableLsp: false,
 		getSessionFile: () => null,
@@ -48,7 +51,7 @@ async function nativeInventory(hasUI: boolean) {
 	await createTools(session);
 	const registry = session.toolRegistry ?? new Map<string, AgentTool>();
 	return projectToolInventory({
-		applicationApiVersion: 2,
+		applicationApiVersion: RPC_APPLICATION_API_VERSION,
 		registry,
 		activeNames,
 		mountedNames: session.xdev?.mountedNames ?? new Set(),
@@ -61,9 +64,9 @@ async function nativeInventory(hasUI: boolean) {
 describe("tool inventory projection", () => {
 	it("keeps TUI and rpc-ui native registries identical while headless rpc omits only AskTool", async () => {
 		const [tui, rpcUi, rpc] = await Promise.all([
-			nativeInventory(true),
-			nativeInventory(true),
-			nativeInventory(false),
+			nativeInventory("text", true),
+			nativeInventory("rpc-ui", false),
+			nativeInventory("rpc", false),
 		]);
 
 		expect(rpcUi).toEqual(tui);

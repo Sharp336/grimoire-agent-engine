@@ -59,13 +59,14 @@ def response_data(frame: dict[str, Any], command: str) -> dict[str, Any]:
 
 
 def main() -> None:
-    if len(sys.argv) != 4:
+    if len(sys.argv) != 5:
         raise SystemExit(
-            "usage: rpc_v3_process_driver.py BINARY WORK_ROOT PROVIDER_FIXTURE"
+            "usage: rpc_v3_process_driver.py BINARY WORK_ROOT PROVIDER_FIXTURE SURFACE_FIXTURE"
         )
     binary = str(Path(sys.argv[1]).resolve(strict=True))
     root = Path(sys.argv[2]).resolve(strict=True)
     provider_fixture = str(Path(sys.argv[3]).resolve(strict=True))
+    surface_fixture = str(Path(sys.argv[4]).resolve(strict=True))
     cwd = root / "python-cwd"
     home = root / "python-home"
     sessions = root / "python-sessions"
@@ -132,6 +133,8 @@ export default function (pi) {
             str(extension),
             "--extension",
             provider_fixture,
+            "--extension",
+            surface_fixture,
             "--model",
             "rpc-process/rpc-native-ask",
             "--api-key",
@@ -148,6 +151,7 @@ export default function (pi) {
                 "session.shutdown",
                 "artifact.read",
                 "context.projection",
+                "ui",
             ),
             host_capabilities=SessionHostClientCapabilities(
                 interactions=("confirm", "approval", "ask", "progress"),
@@ -212,6 +216,181 @@ export default function (pi) {
         require("session_open" in command_names, "manifest omitted session_open")
         require("session_shutdown" in command_names, "manifest omitted session_shutdown")
         require("context_get" in command_names, "manifest omitted context_get")
+
+        ui = client.open_ui("python-terminal", width=54)
+        require(
+            any(action.id == "app.retry" for action in ui.actions),
+            "Python UI snapshot omitted semantic action routes",
+        )
+        surface_errors: list[BaseException] = []
+
+        def run_surface_prompt() -> None:
+            try:
+                client.prompt("/rpc-ui-surfaces")
+            except BaseException as error:
+                surface_errors.append(error)
+
+        surface_at = len(raw_frames)
+        surface_thread = threading.Thread(target=run_surface_prompt, daemon=True)
+        surface_thread.start()
+        editor_frame = wait_frame(
+            raw_frames,
+            lambda frame: frame.get("type") == "ui_editor_update"
+            and isinstance(frame.get("editor"), dict)
+            and frame["editor"].get("text") == "extension-owned draft",
+            "Python editor update",
+            after=surface_at,
+        )
+        custom_frame = wait_frame(
+            raw_frames,
+            lambda frame: frame.get("type") == "ui_presentation_update"
+            and isinstance(frame.get("presentation"), dict)
+            and frame["presentation"].get("kind") == "custom",
+            "Python custom presentation",
+            after=surface_at,
+        )
+        require(
+            client.send_ui_input(ui.fence, "rpc-ui-raw").data
+            == "rpc-ui-transformed",
+            "Python raw input transformation changed",
+        )
+        autocomplete_operation_ids: list[str] = []
+        suggestions = client.suggest_ui_autocomplete(
+            ui.fence,
+            ("@rpc-ui",),
+            0,
+            7,
+            on_operation_id=autocomplete_operation_ids.append,
+        )
+        require(suggestions is not None, "Python autocomplete omitted suggestions")
+        require(
+            autocomplete_operation_ids == [suggestions.operation_id],
+            "Python autocomplete operation correlation changed",
+        )
+        suggestion = next(
+            item
+            for item in suggestions.items
+            if item.label == "RPC UI extension"
+        )
+        hanging_operation_ids: list[str] = []
+        hanging_errors: list[BaseException] = []
+        hanging_operation_ready = threading.Event()
+
+        def record_hanging_operation(operation_id: str) -> None:
+            hanging_operation_ids.append(operation_id)
+            hanging_operation_ready.set()
+
+        def run_hanging_autocomplete() -> None:
+            try:
+                client.suggest_ui_autocomplete(
+                    ui.fence,
+                    ("@rpc-ui-hang",),
+                    0,
+                    12,
+                    on_operation_id=record_hanging_operation,
+                )
+            except BaseException as error:
+                hanging_errors.append(error)
+
+        hanging_thread = threading.Thread(target=run_hanging_autocomplete, daemon=True)
+        hanging_thread.start()
+        require(
+            hanging_operation_ready.wait(timeout=5.0),
+            "Python hanging autocomplete omitted operation ID",
+        )
+        require(
+            client.cancel_ui_operation(ui.fence, hanging_operation_ids[0]),
+            "Python hanging autocomplete cancellation was rejected",
+        )
+        hanging_thread.join(timeout=5.0)
+        require(
+            not hanging_thread.is_alive(),
+            "Python hanging autocomplete did not settle after cancellation",
+        )
+        if len(hanging_errors) != 1 or not isinstance(
+            hanging_errors[0], RpcCommandError
+        ):
+            raise AssertionError(
+                f"Python hanging autocomplete surfaced wrong error: {hanging_errors}"
+            )
+        require(
+            hanging_errors[0].code == "cancelled",
+            f"Python hanging autocomplete surfaced wrong error: {hanging_errors[0]}",
+        )
+        applied = client.apply_ui_autocomplete(ui.fence, suggestion.id)
+        require(applied.editor.text == "surface", "Python autocomplete apply diverged")
+        stale_revision = int(editor_frame["editor"]["revision"])
+        try:
+            client.update_ui_editor(ui.fence, stale_revision, "stale")
+            raise AssertionError("Python stale editor update unexpectedly succeeded")
+        except RpcCommandError as error:
+            require(error.code == "editor_conflict", "Python editor conflict lost code")
+            require(
+                error.data is not None
+                and error.data.get("editor")
+                == {"text": "surface", "revision": applied.editor.revision},
+                "Python editor conflict lost authoritative recovery state",
+            )
+        pasted = client.paste_ui_editor(
+            ui.fence, applied.editor.revision, "pasted through Python"
+        )
+        require(
+            pasted.text == "pasted through Python"
+            and pasted.revision > applied.editor.revision,
+            "Python editor paste diverged",
+        )
+        themes = client.list_ui_themes(ui.fence)
+        current_theme = next(theme for theme in themes if theme.current)
+        require(
+            client.get_ui_theme(ui.fence, current_theme.name) == current_theme,
+            "Python theme lookup diverged",
+        )
+        require(
+            client.set_ui_theme(ui.fence, current_theme.name).current,
+            "Python theme set lost current marker",
+        )
+        require(
+            client.set_ui_tools_expanded(ui.fence, False).get("expanded") is False,
+            "Python tool expansion state diverged",
+        )
+        require(
+            client.subscribe_ui_title(ui.fence, False).get("title")
+            == "rpc-ui negotiated title",
+            "Python title subscription lost negotiated title",
+        )
+        presentation = custom_frame["presentation"]
+        presentation_result = client.send_ui_presentation_input(
+            ui.fence, str(presentation["id"]), "enter"
+        )
+        require(
+            presentation_result.completed
+            and presentation_result.presentation is None,
+            "Python completed presentation was re-emitted",
+        )
+        surface_thread.join(timeout=10.0)
+        require(not surface_thread.is_alive(), "Python surface prompt did not settle")
+        require(not surface_errors, f"Python surface prompt failed: {surface_errors}")
+        close_at = len(raw_frames)
+        client.close_ui(ui.fence)
+        wait_frame(
+            raw_frames,
+            lambda frame: frame.get("type") == "ui_channel_settled"
+            and frame.get("channelId") == ui.fence.channel_id
+            and frame.get("reason") == "closed",
+            "Python explicit UI close settlement",
+            after=close_at,
+        )
+        ui = client.open_ui("python-reopened", width=54)
+        transition_at = len(raw_frames)
+        client.new_session()
+        wait_frame(
+            raw_frames,
+            lambda frame: frame.get("type") == "ui_channel_settled"
+            and frame.get("channelId") == ui.fence.channel_id
+            and frame.get("reason") == "session_changed",
+            "Python UI session settlement",
+            after=transition_at,
+        )
 
         interaction_at = len(raw_frames)
         client.prompt("/rpc-process-interactions")
@@ -538,6 +717,7 @@ export default function (pi) {
             "Python cancellation emitted more than one terminal",
         )
 
+        shutdown_ui = client.open_ui("python-shutdown")
         shutdown_at = len(raw_frames)
         settlement = client.shutdown_session()
         require(settlement.state == "settled", "Python shutdown did not settle")
@@ -546,6 +726,14 @@ export default function (pi) {
             lambda frame: frame.get("type") == "response"
             and frame.get("command") == "session_shutdown",
             "Python shutdown response",
+            after=shutdown_at,
+        )
+        wait_frame(
+            raw_frames,
+            lambda frame: frame.get("type") == "ui_channel_settled"
+            and frame.get("channelId") == shutdown_ui.fence.channel_id
+            and frame.get("reason") == "shutdown",
+            "Python UI shutdown settlement",
             after=shutdown_at,
         )
         final_observation = wait_frame(

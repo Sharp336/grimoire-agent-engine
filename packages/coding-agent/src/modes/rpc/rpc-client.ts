@@ -123,6 +123,17 @@ import type {
 	RpcSubagentSubscriptionLevel,
 	RpcToolActivationResult,
 	RpcToolInventoryUpdateFrame,
+	RpcUiAutocompleteApplyResult,
+	RpcUiAutocompleteResult,
+	RpcUiEditorState,
+	RpcUiFence,
+	RpcUiFrame,
+	RpcUiInputResult,
+	RpcUiPresentation,
+	RpcUiPresentationInputResult,
+	RpcUiSnapshot,
+	RpcUiSubscriptions,
+	RpcUiThemeInfo,
 	SessionQueueClearResult,
 	SessionQueueSnapshot,
 } from "./rpc-types";
@@ -198,6 +209,8 @@ export type RpcResourceLifecycleListener = (frame: RpcResourceLifecycleFrame) =>
 export type RpcProvenanceListener = (frame: RpcProvenanceFrame) => void;
 export type RpcCollaborationListener = (frame: RpcCollaborationFrame) => void;
 export type RpcSessionObservationListener = (frame: RpcSessionObservationFrame) => void;
+export type RpcUiListener = (frame: RpcUiFrame) => void;
+export type RpcUiChannelRef = Pick<RpcUiFence, "channelId" | "generation">;
 
 export interface RpcClientHostUriContext {
 	signal: AbortSignal;
@@ -670,6 +683,98 @@ function isRpcExtensionUiRequest(value: unknown): value is RpcExtensionUIRequest
 	return value.type === "extension_ui_request" && typeof value.id === "string" && typeof value.method === "string";
 }
 
+const RPC_UI_CHANNEL_SETTLEMENT_REASONS = new Set([
+	"replaced",
+	"closed",
+	"client_disconnected",
+	"session_changed",
+	"authority_changed",
+	"shutdown",
+]);
+const RPC_UI_PRESENTATION_KINDS = new Set(["widget", "header", "footer", "editor", "custom"]);
+const RPC_UI_PRESENTATION_PLACEMENTS = new Set(["aboveEditor", "belowEditor", "overlay"]);
+const RPC_UI_PRESENTATION_REMOVAL_REASONS = new Set(["removed", "completed", "cancelled", "session_changed"]);
+const RPC_UI_EDITOR_SOURCES = new Set(["client", "extension", "component", "session"]);
+
+function isRpcUiFence(value: unknown): value is RpcUiFence {
+	return (
+		isRecord(value) &&
+		typeof value.channelId === "string" &&
+		Number.isInteger(value.generation) &&
+		typeof value.sessionId === "string" &&
+		Number.isInteger(value.authorityGeneration)
+	);
+}
+
+function isRpcUiEditorState(value: unknown): value is RpcUiEditorState {
+	return isRecord(value) && typeof value.text === "string" && Number.isInteger(value.revision);
+}
+
+function isRpcUiPresentation(value: unknown): value is RpcUiPresentation {
+	return (
+		isRecord(value) &&
+		typeof value.id === "string" &&
+		typeof value.kind === "string" &&
+		RPC_UI_PRESENTATION_KINDS.has(value.kind) &&
+		(value.key === undefined || typeof value.key === "string") &&
+		(value.placement === undefined ||
+			(typeof value.placement === "string" && RPC_UI_PRESENTATION_PLACEMENTS.has(value.placement))) &&
+		Array.isArray(value.rows) &&
+		value.rows.every(row => typeof row === "string") &&
+		Number.isInteger(value.revision) &&
+		typeof value.focused === "boolean" &&
+		Array.isArray(value.actions) &&
+		value.actions.every(
+			action =>
+				isRecord(action) &&
+				((action.id === "input" && action.kind === "input") ||
+					(action.id === "cancel" && action.kind === "cancel")),
+		)
+	);
+}
+
+function isRpcUiFrame(value: unknown): value is RpcUiFrame {
+	if (!isRecord(value) || typeof value.type !== "string") return false;
+	switch (value.type) {
+		case "ui_channel_settled":
+			return (
+				typeof value.channelId === "string" &&
+				Number.isInteger(value.generation) &&
+				typeof value.reason === "string" &&
+				RPC_UI_CHANNEL_SETTLEMENT_REASONS.has(value.reason)
+			);
+		case "ui_editor_update":
+			return (
+				isRpcUiFence(value.fence) &&
+				isRpcUiEditorState(value.editor) &&
+				typeof value.source === "string" &&
+				RPC_UI_EDITOR_SOURCES.has(value.source)
+			);
+		case "ui_presentation_update":
+			return isRpcUiFence(value.fence) && isRpcUiPresentation(value.presentation);
+		case "ui_presentation_remove":
+			return (
+				isRpcUiFence(value.fence) &&
+				typeof value.presentationId === "string" &&
+				typeof value.reason === "string" &&
+				RPC_UI_PRESENTATION_REMOVAL_REASONS.has(value.reason)
+			);
+		case "ui_theme_update":
+			return (
+				isRpcUiFence(value.fence) &&
+				isRecord(value.theme) &&
+				(value.theme.name === undefined || typeof value.theme.name === "string") &&
+				Number.isInteger(value.theme.revision)
+			);
+		case "ui_title_update":
+			return isRpcUiFence(value.fence) && typeof value.title === "string" && Number.isInteger(value.revision);
+		case "ui_tools_expanded_update":
+			return isRpcUiFence(value.fence) && typeof value.expanded === "boolean" && Number.isInteger(value.revision);
+		default:
+			return false;
+	}
+}
+
 function normalizeToolResult<TDetails>(result: RpcClientToolResult<TDetails>): AgentToolResult<TDetails> {
 	if (typeof result === "string") {
 		return {
@@ -685,6 +790,7 @@ export class RpcCommandError extends Error {
 		message: string,
 		readonly command: string,
 		readonly code?: string,
+		readonly data?: object,
 	) {
 		super(message);
 		this.name = "RpcCommandError";
@@ -730,6 +836,7 @@ export class RpcClient {
 	#provenanceListeners = new Set<RpcProvenanceListener>();
 	#collaborationListeners = new Set<RpcCollaborationListener>();
 	#sessionObservationListeners = new Set<RpcSessionObservationListener>();
+	#uiListeners = new Set<RpcUiListener>();
 	#evalCompleteListeners = new Set<RpcEvalCompleteListener>();
 	#operationTerminalListeners = new Set<RpcOperationTerminalListener>();
 	#operationStartedListeners = new Set<RpcOperationStartedListener>();
@@ -1115,6 +1222,12 @@ export class RpcClient {
 		return () => this.#sessionObservationListeners.delete(listener);
 	}
 
+	/** Subscribe to negotiated rpc-ui state and lifecycle updates. */
+	onUi(listener: RpcUiListener): () => void {
+		this.#uiListeners.add(listener);
+		return () => this.#uiListeners.delete(listener);
+	}
+
 	/** Subscribe to prompt scheduling outcomes emitted after acknowledgement. */
 	onPromptResult(listener: RpcPromptResultListener): () => void {
 		this.#promptResultListeners.add(listener);
@@ -1288,6 +1401,180 @@ export class RpcClient {
 	/** Read a bounded authoritative context assembly snapshot for the active session. */
 	async getContext(options: RpcContextGetOptions = {}): Promise<RpcContextGetResult> {
 		return this.#getData(await this.#send({ type: "context_get", ...options }));
+	}
+
+	async openUi(
+		terminalId: string,
+		options: { width?: number; subscriptions?: Partial<RpcUiSubscriptions> } = {},
+	): Promise<RpcUiSnapshot> {
+		return this.#getData(await this.#send({ type: "ui_open", terminalId, ...options }));
+	}
+
+	async closeUi(channel: RpcUiChannelRef): Promise<void> {
+		await this.#send({ type: "ui_close", channelId: channel.channelId, generation: channel.generation });
+	}
+
+	async sendUiInput(channel: RpcUiChannelRef, data: string): Promise<RpcUiInputResult> {
+		return this.#getData(
+			await this.#send({ type: "ui_input", channelId: channel.channelId, generation: channel.generation, data }),
+		);
+	}
+
+	async updateUiEditor(channel: RpcUiChannelRef, expectedRevision: number, text: string): Promise<RpcUiEditorState> {
+		return this.#getData(
+			await this.#send({
+				type: "ui_editor_update",
+				channelId: channel.channelId,
+				generation: channel.generation,
+				expectedRevision,
+				text,
+			}),
+		);
+	}
+
+	async pasteUiEditor(channel: RpcUiChannelRef, expectedRevision: number, text: string): Promise<RpcUiEditorState> {
+		return this.#getData(
+			await this.#send({
+				type: "ui_editor_paste",
+				channelId: channel.channelId,
+				generation: channel.generation,
+				expectedRevision,
+				text,
+			}),
+		);
+	}
+
+	async suggestUiAutocomplete(
+		channel: RpcUiChannelRef,
+		lines: string[],
+		cursorLine: number,
+		cursorCol: number,
+		forceFile = false,
+		onOperationId?: (operationId: string) => void,
+	): Promise<RpcUiAutocompleteResult | null> {
+		let operationId: string | undefined;
+		const response = this.#send(
+			{
+				type: "ui_autocomplete_suggest",
+				channelId: channel.channelId,
+				generation: channel.generation,
+				lines,
+				cursorLine,
+				cursorCol,
+				forceFile,
+			},
+			30_000,
+			id => {
+				operationId = id;
+			},
+		);
+		if (operationId) onOperationId?.(operationId);
+		return this.#getData(await response);
+	}
+
+	async applyUiAutocomplete(channel: RpcUiChannelRef, suggestionId: string): Promise<RpcUiAutocompleteApplyResult> {
+		return this.#getData(
+			await this.#send({
+				type: "ui_autocomplete_apply",
+				channelId: channel.channelId,
+				generation: channel.generation,
+				suggestionId,
+			}),
+		);
+	}
+
+	async cancelUiOperation(channel: RpcUiChannelRef, operationId: string): Promise<boolean> {
+		const result = this.#getData<{ cancelled: boolean }>(
+			await this.#send({
+				type: "ui_cancel",
+				channelId: channel.channelId,
+				generation: channel.generation,
+				operationId,
+			}),
+		);
+		return result.cancelled;
+	}
+
+	async sendUiPresentationInput(
+		channel: RpcUiChannelRef,
+		presentationId: string,
+		data: string,
+	): Promise<RpcUiPresentationInputResult> {
+		return this.#getData(
+			await this.#send({
+				type: "ui_presentation_input",
+				channelId: channel.channelId,
+				generation: channel.generation,
+				presentationId,
+				data,
+			}),
+		);
+	}
+
+	async cancelUiPresentation(channel: RpcUiChannelRef, presentationId: string): Promise<void> {
+		await this.#send({
+			type: "ui_presentation_action",
+			channelId: channel.channelId,
+			generation: channel.generation,
+			presentationId,
+			action: "cancel",
+		});
+	}
+
+	async listUiThemes(channel: RpcUiChannelRef): Promise<RpcUiThemeInfo[]> {
+		return this.#getData<{ themes: RpcUiThemeInfo[] }>(
+			await this.#send({ type: "ui_theme_list", channelId: channel.channelId, generation: channel.generation }),
+		).themes;
+	}
+
+	async getUiTheme(channel: RpcUiChannelRef, name: string): Promise<RpcUiThemeInfo | null> {
+		return this.#getData<{ theme: RpcUiThemeInfo | null }>(
+			await this.#send({
+				type: "ui_theme_get",
+				channelId: channel.channelId,
+				generation: channel.generation,
+				name,
+			}),
+		).theme;
+	}
+
+	async setUiTheme(channel: RpcUiChannelRef, name: string): Promise<RpcUiThemeInfo> {
+		return this.#getData<{ theme: RpcUiThemeInfo }>(
+			await this.#send({
+				type: "ui_theme_set",
+				channelId: channel.channelId,
+				generation: channel.generation,
+				name,
+			}),
+		).theme;
+	}
+
+	async setUiToolsExpanded(
+		channel: RpcUiChannelRef,
+		expanded: boolean,
+	): Promise<{ expanded: boolean; revision: number }> {
+		return this.#getData(
+			await this.#send({
+				type: "ui_tools_expanded_set",
+				channelId: channel.channelId,
+				generation: channel.generation,
+				expanded,
+			}),
+		);
+	}
+
+	async subscribeUiTitle(
+		channel: RpcUiChannelRef,
+		subscribed: boolean,
+	): Promise<{ subscribed: boolean; title: string; revision: number }> {
+		return this.#getData(
+			await this.#send({
+				type: "ui_title_subscribe",
+				channelId: channel.channelId,
+				generation: channel.generation,
+				subscribed,
+			}),
+		);
 	}
 
 	/** Cumulatively acknowledge delivered observations for one subscription. */
@@ -1521,6 +1808,12 @@ export class RpcClient {
 	 */
 	async abort(): Promise<void> {
 		await this.#send({ type: "abort" });
+	}
+
+	/** Retry the last failed assistant turn when one is available. */
+	async retry(): Promise<boolean> {
+		const result = this.#getData<{ retried: boolean }>(await this.#send({ type: "retry" }));
+		return result.retried;
 	}
 
 	/**
@@ -2376,6 +2669,11 @@ export class RpcClient {
 			return;
 		}
 
+		if (isRpcUiFrame(data)) {
+			for (const listener of this.#uiListeners) listener(data);
+			return;
+		}
+
 		if (isRpcExtensionUiRequest(data)) {
 			for (const listener of this.#extensionUiListeners) {
 				listener(data);
@@ -2742,7 +3040,7 @@ export class RpcClient {
 	#getData<T>(response: RpcResponse): T {
 		if (!response.success) {
 			const errorResponse = response as Extract<RpcResponse, { success: false }>;
-			throw new RpcCommandError(errorResponse.error, errorResponse.command, errorResponse.code);
+			throw new RpcCommandError(errorResponse.error, errorResponse.command, errorResponse.code, errorResponse.data);
 		}
 		// Type assertion: we trust response.data matches T based on the command sent.
 		// This is safe because each public method specifies the correct T for its command.

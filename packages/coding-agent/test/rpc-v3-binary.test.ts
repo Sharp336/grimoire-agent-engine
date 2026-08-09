@@ -2,8 +2,8 @@ import { afterAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
-import type { RpcEvalCompleteFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
+import { RpcClient, RpcCommandError } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
+import type { RpcEvalCompleteFrame, RpcUiFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import {
 	createIsolatedRpcProcessRoot,
 	RawRpcProcess,
@@ -1046,15 +1046,322 @@ describe.skipIf(binaryPath.length === 0)("RPC v3 explicit native-binary process 
 		}
 	}, 60_000);
 
+	test("raw JSONL drives every negotiated rpc-ui surface and fences lifecycle generations", async () => {
+		const fixture = path.join(import.meta.dir, "fixtures", "rpc-ui-process-surfaces.ts");
+		const process = await RawRpcProcess.start(binaryPath, {
+			mode: "rpc-ui",
+			args: ["--extension", fixture],
+		});
+		try {
+			expect(supportedSemanticCapabilityIds(readyManifest(process))).toContain("ui");
+			const negotiation = await initializeRaw(process);
+			expect(
+				array(negotiation.capabilities, "rpc-ui negotiated capabilities").find(
+					value => record(value, "rpc-ui capability").id === "ui",
+				),
+			).toMatchObject({ id: "ui", supported: true });
+
+			const opened = responseData(
+				await process.request({
+					id: "ui-open",
+					type: "ui_open",
+					terminalId: "raw-terminal",
+					width: 48,
+				}),
+				"ui_open",
+			);
+			const fence = record(opened.fence, "rpc-ui fence");
+			const channelId = String(fence.channelId);
+			const generation = Number(fence.generation);
+			expect(opened).toMatchObject({
+				terminalId: "raw-terminal",
+				editor: { text: "", revision: 0 },
+				terminalInputHandlers: 0,
+				actions: expect.arrayContaining([
+					expect.objectContaining({ id: "app.interrupt", operations: expect.arrayContaining(["abort"]) }),
+					expect.objectContaining({ id: "app.editor.external", owner: "client" }),
+				]),
+			});
+
+			const extensionFrom = process.logicalFrames.length;
+			process.write({ id: "ui-extension", type: "prompt", message: "/rpc-ui-surfaces" });
+			await process.flush();
+			const editorFrame = await process.waitFor(
+				frame =>
+					frame.type === "ui_editor_update" &&
+					record(frame.editor, "editor update").text === "extension-owned draft",
+				{ from: extensionFrom, description: "extension editor update" },
+			);
+			const editor = record(editorFrame.editor, "extension editor state");
+			for (const kind of ["widget", "header", "footer", "custom"]) {
+				await process.waitFor(
+					frame =>
+						frame.type === "ui_presentation_update" &&
+						record(frame.presentation, "presentation update").kind === kind,
+					{ from: extensionFrom, description: `${kind} presentation` },
+				);
+			}
+			const customFrame = await process.waitFor(
+				frame =>
+					frame.type === "ui_presentation_update" &&
+					record(frame.presentation, "custom presentation").kind === "custom",
+				{ from: extensionFrom, description: "custom presentation" },
+			);
+			const custom = record(customFrame.presentation, "custom presentation");
+
+			expect(
+				responseData(
+					await process.request({
+						id: "ui-raw-input",
+						type: "ui_input",
+						channelId,
+						generation,
+						data: "rpc-ui-raw",
+					}),
+					"ui_input",
+				),
+			).toEqual({ consumed: true, data: "rpc-ui-transformed" });
+
+			const suggestions = responseData(
+				await process.request({
+					id: "ui-suggest",
+					type: "ui_autocomplete_suggest",
+					channelId,
+					generation,
+					lines: ["@rpc-ui"],
+					cursorLine: 0,
+					cursorCol: 7,
+				}),
+				"ui_autocomplete_suggest",
+			);
+			const suggestion = record(array(suggestions.items, "autocomplete items")[0], "autocomplete item");
+			expect(suggestion).toMatchObject({ label: "RPC UI extension" });
+
+			const hangingSuggestion = process.request({
+				id: "ui-suggest-hanging",
+				type: "ui_autocomplete_suggest",
+				channelId,
+				generation,
+				lines: ["@rpc-ui-hang"],
+				cursorLine: 0,
+				cursorCol: 12,
+			});
+			expect(
+				responseData(
+					await process.request({
+						id: "ui-suggest-cancel",
+						type: "ui_cancel",
+						channelId,
+						generation,
+						operationId: "ui-suggest-hanging",
+					}),
+					"ui_cancel",
+				),
+			).toEqual({ cancelled: true });
+			expect(await hangingSuggestion).toMatchObject({ success: false, code: "cancelled" });
+			const applied = responseData(
+				await process.request({
+					id: "ui-apply",
+					type: "ui_autocomplete_apply",
+					channelId,
+					generation,
+					suggestionId: suggestion.id,
+				}),
+				"ui_autocomplete_apply",
+			);
+			expect(applied).toMatchObject({ editor: { text: "surface" }, cursor: { line: 0, column: 7 } });
+			const appliedEditor = record(applied.editor, "applied editor");
+			expect(
+				responseData(
+					await process.request({
+						id: "ui-paste",
+						type: "ui_editor_paste",
+						channelId,
+						generation,
+						expectedRevision: Number(appliedEditor.revision),
+						text: "pasted through raw JSONL",
+					}),
+					"ui_editor_paste",
+				),
+			).toMatchObject({ text: "pasted through raw JSONL", revision: expect.any(Number) });
+
+			const conflict = await process.request({
+				id: "ui-editor-conflict",
+				type: "ui_editor_update",
+				channelId,
+				generation,
+				expectedRevision: Number(editor.revision),
+				text: "stale draft",
+			});
+			expect(conflict).toMatchObject({
+				success: false,
+				code: "editor_conflict",
+				data: { editor: { text: "pasted through raw JSONL", revision: expect.any(Number) } },
+			});
+
+			expect(
+				responseData(
+					await process.request({
+						id: "ui-tools",
+						type: "ui_tools_expanded_set",
+						channelId,
+						generation,
+						expanded: false,
+					}),
+					"ui_tools_expanded_set",
+				),
+			).toMatchObject({ expanded: false, revision: expect.any(Number) });
+			const themes = responseData(
+				await process.request({ id: "ui-themes", type: "ui_theme_list", channelId, generation }),
+				"ui_theme_list",
+			);
+			const currentTheme = record(
+				array(themes.themes, "theme list").find(value => record(value, "theme").current === true),
+				"current theme",
+			);
+			expect(
+				responseData(
+					await process.request({
+						id: "ui-theme-get",
+						type: "ui_theme_get",
+						channelId,
+						generation,
+						name: currentTheme.name,
+					}),
+					"ui_theme_get",
+				),
+			).toMatchObject({ theme: { name: currentTheme.name, current: true } });
+			expect(
+				responseData(
+					await process.request({
+						id: "ui-theme-set",
+						type: "ui_theme_set",
+						channelId,
+						generation,
+						name: currentTheme.name,
+					}),
+					"ui_theme_set",
+				),
+			).toMatchObject({ theme: { name: currentTheme.name, current: true } });
+			expect(
+				responseData(
+					await process.request({
+						id: "ui-title-off",
+						type: "ui_title_subscribe",
+						channelId,
+						generation,
+						subscribed: false,
+					}),
+					"ui_title_subscribe",
+				),
+			).toMatchObject({ subscribed: false, title: "rpc-ui negotiated title" });
+
+			expect(
+				responseData(
+					await process.request({
+						id: "ui-custom-complete",
+						type: "ui_presentation_input",
+						channelId,
+						generation,
+						presentationId: custom.id,
+						data: "enter",
+					}),
+					"ui_presentation_input",
+				),
+			).toEqual({ completed: true, presentation: null });
+			await process.waitFor(frame => frame.type === "response" && frame.id === "ui-extension", {
+				from: extensionFrom,
+				description: "extension completion",
+			});
+
+			const replacementFrom = process.logicalFrames.length;
+			const replacement = responseData(
+				await process.request({ id: "ui-reopen", type: "ui_open", terminalId: "replacement" }),
+				"ui_open",
+			);
+			await process.waitFor(
+				frame =>
+					frame.type === "ui_channel_settled" &&
+					frame.channelId === channelId &&
+					frame.generation === generation &&
+					frame.reason === "replaced",
+				{ from: replacementFrom, description: "replaced UI channel" },
+			);
+			const replacementFence = record(replacement.fence, "replacement fence");
+			const closeFrom = process.logicalFrames.length;
+			await process.request({
+				id: "ui-close",
+				type: "ui_close",
+				channelId: replacementFence.channelId,
+				generation: replacementFence.generation,
+			});
+			await process.waitFor(
+				frame =>
+					frame.type === "ui_channel_settled" &&
+					frame.channelId === replacementFence.channelId &&
+					frame.reason === "closed",
+				{ from: closeFrom, description: "closed UI channel" },
+			);
+			const authorityChannel = responseData(
+				await process.request({ id: "ui-authority-open", type: "ui_open", terminalId: "authority-transition" }),
+				"ui_open",
+			);
+			const authorityFence = record(authorityChannel.fence, "authority transition fence");
+			const authorityFrom = process.logicalFrames.length;
+			await process.request({ id: "ui-authority-reset", type: "reset_session" });
+			await process.waitFor(
+				frame =>
+					frame.type === "ui_channel_settled" &&
+					frame.channelId === authorityFence.channelId &&
+					frame.reason === "authority_changed",
+				{ from: authorityFrom, description: "authority-invalidated UI channel" },
+			);
+
+			const sessionChannel = responseData(
+				await process.request({ id: "ui-session-open", type: "ui_open", terminalId: "session-transition" }),
+				"ui_open",
+			);
+			const sessionFence = record(sessionChannel.fence, "session transition fence");
+			const sessionFrom = process.logicalFrames.length;
+			await process.request({ id: "ui-new-session", type: "new_session" });
+			await process.waitFor(
+				frame =>
+					frame.type === "ui_channel_settled" &&
+					frame.channelId === sessionFence.channelId &&
+					frame.reason === "session_changed",
+				{ from: sessionFrom, description: "session-invalidated UI channel" },
+			);
+
+			const shutdownChannel = responseData(
+				await process.request({ id: "ui-shutdown-open", type: "ui_open", terminalId: "shutdown-transition" }),
+				"ui_open",
+			);
+			const shutdownFence = record(shutdownChannel.fence, "shutdown transition fence");
+			const shutdownFrom = process.logicalFrames.length;
+			await process.request({ id: "ui-shutdown", type: "session_shutdown" });
+			await process.waitFor(
+				frame =>
+					frame.type === "ui_channel_settled" &&
+					frame.channelId === shutdownFence.channelId &&
+					frame.reason === "shutdown",
+				{ from: shutdownFrom, description: "shutdown-invalidated UI channel" },
+			);
+		} finally {
+			await process.dispose();
+		}
+	}, 60_000);
+
 	test("bundled TypeScript RpcClient directly spawns the exact binary and preserves semantic process contracts", async () => {
 		expect(() => new RpcClient({ executablePath: binaryPath, cliPath: "forbidden-second-authority" })).toThrow(
 			"mutually exclusive",
 		);
 		const root = await createIsolatedRpcProcessRoot("omp-rpc-v3-ts-client-");
 		const interactionFixture = path.join(import.meta.dir, "fixtures", "rpc-v3-process-interactions.ts");
+		const surfaceFixture = path.join(import.meta.dir, "fixtures", "rpc-ui-process-surfaces.ts");
 		const rawFrames = new ObservableFrameLog();
 		const interactions: Readonly<Record<string, unknown>>[] = [];
 		let complete: RpcEvalCompleteFrame | undefined;
+		const uiFrames: RpcUiFrame[] = [];
 		const client = new RpcClient({
 			executablePath: binaryPath,
 			mode: "rpc-ui",
@@ -1064,6 +1371,8 @@ describe.skipIf(binaryPath.length === 0)("RPC v3 explicit native-binary process 
 			args: [
 				"--extension",
 				interactionFixture,
+				"--extension",
+				surfaceFixture,
 				"--extension",
 				nativeAskProviderFixture,
 				"--model",
@@ -1075,10 +1384,11 @@ describe.skipIf(binaryPath.length === 0)("RPC v3 explicit native-binary process 
 			],
 			rpcV3: {
 				hostCapabilities: HOST_CAPABILITIES,
-				requestedCapabilities: [...CORE_CAPABILITIES, "artifact.read", "context.projection"],
+				requestedCapabilities: [...CORE_CAPABILITIES, "artifact.read", "context.projection", "ui"],
 			},
 		});
 		client.onRawFrame(frame => rawFrames.push(frame));
+		client.onUi(frame => uiFrames.push(frame));
 		client.onEvalComplete(frame => {
 			complete = frame;
 		});
@@ -1127,6 +1437,85 @@ describe.skipIf(binaryPath.length === 0)("RPC v3 explicit native-binary process 
 			const inventory = await client.getToolInventory();
 			expect(availableCommands.length).toBeGreaterThan(0);
 			expect(inventory.tools.length).toBeGreaterThan(0);
+
+			let ui = await client.openUi("typescript-terminal", { width: 52 });
+			expect(ui.actions).toEqual(expect.arrayContaining([expect.objectContaining({ id: "app.retry" })]));
+			const surfacePrompt = client.prompt("/rpc-ui-surfaces");
+			const customFrame = await waitForArrayFrame(
+				rawFrames,
+				frame =>
+					frame.type === "ui_presentation_update" &&
+					record(frame.presentation, "TypeScript custom presentation").kind === "custom",
+				"TypeScript custom presentation",
+			);
+			const custom = record(customFrame.presentation, "TypeScript custom presentation");
+			expect(await client.sendUiInput(ui.fence, "rpc-ui-raw")).toEqual({
+				consumed: true,
+				data: "rpc-ui-transformed",
+			});
+			const editorUpdate = uiFrames.find(frame => frame.type === "ui_editor_update");
+			expect(editorUpdate).toMatchObject({ editor: { text: "extension-owned draft" } });
+			let autocompleteOperationId: string | undefined;
+			const autocomplete = await client.suggestUiAutocomplete(ui.fence, ["@rpc-ui"], 0, 7, false, operationId => {
+				autocompleteOperationId = operationId;
+			});
+			expect(autocomplete?.operationId).toBe(autocompleteOperationId);
+			let hangingAutocompleteOperationId: string | undefined;
+			const hangingAutocomplete = client.suggestUiAutocomplete(
+				ui.fence,
+				["@rpc-ui-hang"],
+				0,
+				12,
+				false,
+				operationId => {
+					hangingAutocompleteOperationId = operationId;
+				},
+			);
+			if (!hangingAutocompleteOperationId) throw new Error("TypeScript hanging autocomplete omitted operation ID");
+			expect(await client.cancelUiOperation(ui.fence, hangingAutocompleteOperationId)).toBe(true);
+			await expect(hangingAutocomplete).rejects.toMatchObject({ code: "cancelled" });
+			try {
+				await client.updateUiEditor(ui.fence, ui.editor.revision, "stale");
+				expect.unreachable();
+			} catch (cause) {
+				expect(cause).toBeInstanceOf(RpcCommandError);
+				expect(cause).toMatchObject({
+					code: "editor_conflict",
+					data: { editor: { text: "extension-owned draft", revision: expect.any(Number) } },
+				});
+			}
+			const suggestion = autocomplete?.items.find(item => item.label === "RPC UI extension");
+			expect(suggestion).toBeDefined();
+			const autocompleteApply = await client.applyUiAutocomplete(ui.fence, suggestion?.id ?? "");
+			expect(autocompleteApply).toMatchObject({ editor: { text: "surface" } });
+			expect(
+				await client.pasteUiEditor(ui.fence, autocompleteApply.editor.revision, "pasted through TypeScript"),
+			).toMatchObject({ text: "pasted through TypeScript", revision: expect.any(Number) });
+			expect((await client.listUiThemes(ui.fence)).length).toBeGreaterThan(0);
+			const currentTheme = (await client.listUiThemes(ui.fence)).find(theme => theme.current);
+			if (!currentTheme) throw new Error("TypeScript client did not receive a current UI theme");
+			expect(await client.getUiTheme(ui.fence, currentTheme.name)).toMatchObject({ current: true });
+			expect(await client.setUiTheme(ui.fence, currentTheme.name)).toMatchObject({ current: true });
+			expect(await client.setUiToolsExpanded(ui.fence, false)).toMatchObject({ expanded: false });
+			expect(await client.subscribeUiTitle(ui.fence, false)).toMatchObject({
+				subscribed: false,
+				title: "rpc-ui negotiated title",
+			});
+			expect(await client.sendUiPresentationInput(ui.fence, String(custom.id), "enter")).toEqual({
+				completed: true,
+				presentation: null,
+			});
+			await surfacePrompt;
+			const closeFrom = uiFrames.length;
+			await client.closeUi(ui.fence);
+			expect(uiFrames.slice(closeFrom)).toContainEqual(
+				expect.objectContaining({
+					type: "ui_channel_settled",
+					channelId: ui.fence.channelId,
+					reason: "closed",
+				}),
+			);
+			ui = await client.openUi("typescript-reopened", { width: 52 });
 
 			const interactionFrom = rawFrames.length;
 			await client.prompt("/rpc-process-interactions");
@@ -1342,6 +1731,15 @@ describe.skipIf(binaryPath.length === 0)("RPC v3 explicit native-binary process 
 			expect(await client.newSession()).toMatchObject({ cancelled: expect.any(Boolean) });
 			await waitForArrayFrame(
 				rawFrames,
+				frame =>
+					frame.type === "ui_channel_settled" &&
+					frame.channelId === ui.fence.channelId &&
+					frame.reason === "session_changed",
+				"TypeScript UI session settlement",
+				{ from: transitionFrom },
+			);
+			await waitForArrayFrame(
+				rawFrames,
 				frame => frame.type === "operation_cancelled" && frame.operationId === transitionOperation.operationId,
 				"transition-owned eval cancellation",
 				{ from: transitionFrom, timeoutMs: 30_000 },
@@ -1361,12 +1759,33 @@ describe.skipIf(binaryPath.length === 0)("RPC v3 explicit native-binary process 
 				expect(staleObservation.sessionId).not.toBe(transitionedOpen.snapshot?.sessionId);
 			}
 
+			const shutdownUi = await client.openUi("typescript-shutdown");
+			const titleFrom = rawFrames.length;
+			await client.setSessionName("TypeScript shutdown session");
+			await waitForArrayFrame(
+				rawFrames,
+				frame =>
+					frame.type === "ui_title_update" &&
+					typeof frame.title === "string" &&
+					frame.title.includes("TypeScript shutdown session"),
+				"TypeScript UI session title update",
+				{ from: titleFrom },
+			);
 			const shutdownFrom = rawFrames.length;
 			expect(await client.shutdownSession()).toEqual({ state: "settled" });
 			const shutdown = await waitForArrayFrame(
 				rawFrames,
 				frame => frame.type === "response" && frame.command === "session_shutdown",
 				"TypeScript shutdown response",
+				{ from: shutdownFrom },
+			);
+			await waitForArrayFrame(
+				rawFrames,
+				frame =>
+					frame.type === "ui_channel_settled" &&
+					frame.channelId === shutdownUi.fence.channelId &&
+					frame.reason === "shutdown",
+				"TypeScript UI shutdown settlement",
 				{ from: shutdownFrom },
 			);
 			const finalObservation = rawFrames.slice(shutdownFrom).find(frame => {
@@ -1401,6 +1820,7 @@ describe.skipIf(binaryPath.length === 0)("RPC v3 explicit native-binary process 
 		const repositoryRoot = path.resolve(import.meta.dir, "../../..");
 		const packageRoot = path.join(repositoryRoot, "python", "omp-rpc");
 		const driver = path.join(packageRoot, "tests", "rpc_v3_process_driver.py");
+		const surfaceFixture = path.join(import.meta.dir, "fixtures", "rpc-ui-process-surfaces.ts");
 		const installCommand = [
 			python,
 			"-m",
@@ -1426,7 +1846,18 @@ describe.skipIf(binaryPath.length === 0)("RPC v3 explicit native-binary process 
 		const launcher =
 			"import runpy,sys;site,driver,*args=sys.argv[1:];sys.path.insert(0,site);sys.argv=[driver,*args];runpy.run_path(driver,run_name='__main__')";
 		const child = Bun.spawn(
-			[python, "-I", "-c", launcher, pythonSite, driver, binaryPath, workRoot, nativeAskProviderFixture],
+			[
+				python,
+				"-I",
+				"-c",
+				launcher,
+				pythonSite,
+				driver,
+				binaryPath,
+				workRoot,
+				nativeAskProviderFixture,
+				surfaceFixture,
+			],
 			{
 				cwd: workRoot,
 				env: { ...Bun.env, PYTHONNOUSERSITE: "1", PYTHONPATH: "", ANTHROPIC_API_KEY: "" },

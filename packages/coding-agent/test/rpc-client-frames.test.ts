@@ -44,6 +44,8 @@ describe("RpcClient frame coverage", () => {
 		const planModes: string[] = [];
 		const approvalRequests: string[] = [];
 		const approvalSettlements: string[] = [];
+		const uiChannels: string[] = [];
+		const uiPresentations: string[] = [];
 		client.onRawFrame(frame => {
 			if (typeof frame.type === "string") rawTypes.push(frame.type);
 		});
@@ -59,6 +61,10 @@ describe("RpcClient frame coverage", () => {
 		client.onPlanStateUpdate(frame => planModes.push(frame.state.mode));
 		client.onPlanApprovalRequest(frame => approvalRequests.push(frame.approvalId));
 		client.onPlanApprovalSettled(frame => approvalSettlements.push(frame.result.decision));
+		client.onUi(frame => {
+			if (frame.type === "ui_channel_settled") uiChannels.push(frame.channelId);
+			if (frame.type === "ui_presentation_update") uiPresentations.push(frame.presentation.id);
+		});
 		client.onExtensionUiRequest(request => {
 			if (request.method === "confirm") client.sendUiConfirmation(request.id, true);
 		});
@@ -92,6 +98,10 @@ describe("RpcClient frame coverage", () => {
 		expect(planModes).toEqual(["none"]);
 		expect(approvalRequests).toEqual(["approval-1"]);
 		expect(approvalSettlements).toEqual(["refine"]);
+		expect(uiChannels).toEqual(["rpc-ui-valid"]);
+		expect(uiPresentations).toEqual([]);
+		expect(rawTypes.filter(type => type === "ui_presentation_update")).toHaveLength(2);
+		expect(rawTypes.filter(type => type === "ui_channel_settled")).toHaveLength(2);
 		expect(rawTypes).toContain("ready");
 		expect(rawTypes).toContain("future_server_frame");
 		expect(captured.find(frame => frame.type === "extension_ui_response")).toMatchObject({

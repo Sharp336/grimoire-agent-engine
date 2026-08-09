@@ -15,12 +15,15 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { type Message, serviceTierFamily } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
-import { $env, isEnoent, isRecord, readLines, Snowflake } from "@oh-my-pi/pi-utils";
+import type { EditorTheme, TUI } from "@oh-my-pi/pi-tui";
+import { isEnoent, isRecord, readLines, Snowflake } from "@oh-my-pi/pi-utils";
 import { JobProjectionService } from "../../async";
 import { reset as resetCapabilities } from "../../capability";
+import type { KeybindingsManager } from "../../config/keybindings";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import type { EvalToolDetails } from "../../eval/types";
 import {
+	type AutocompleteProviderFactory,
 	type ExtensionAskDialogQuestion,
 	type ExtensionAskDialogResult,
 	type ExtensionToolApprovalDecision,
@@ -28,12 +31,17 @@ import {
 	type ExtensionUIContext,
 	type ExtensionUIDialogOptions,
 	type ExtensionUISelectItem,
+	type ExtensionUiComponent,
+	type ExtensionUiComponentFactory,
+	type ExtensionWidgetContent,
 	type ExtensionWidgetOptions,
 	getExtensionUISelectOptionLabel,
+	type TerminalInputHandler,
 } from "../../extensibility/extensions";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { type MCPManager, reloadMcpResources } from "../../mcp";
+import type { CustomEditor } from "../../modes/components/custom-editor";
 import { type Theme, theme } from "../../modes/theme/theme";
 import { AgentControlService } from "../../registry/agent-control";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
@@ -123,6 +131,7 @@ import { projectRpcSessionExecution } from "./rpc-execution-snapshot";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
 import { handleGetSettings } from "./rpc-get-settings";
 import { claimRpcInput } from "./rpc-input";
+import { RpcInteractiveSurfaceError, RpcInteractiveSurfaceManager } from "./rpc-interactive-surface";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
 import { type RpcOperationHandle, RpcOperationManager, RpcOperationMessageOwnership } from "./rpc-operations";
 import { RpcProvenanceManager, type RpcProvenanceSource } from "./rpc-provenance";
@@ -945,13 +954,6 @@ function parseValueDialogResponse(
 	return undefined;
 }
 
-function shouldEmitRpcTitles(): boolean {
-	const raw = $env.PI_RPC_EMIT_TITLE;
-	if (!raw) return false;
-	const normalized = raw.trim().toLowerCase();
-	return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
-}
-
 function isSubagentSubscriptionLevel(value: unknown): value is RpcSubagentSubscriptionLevel {
 	return value === "off" || value === "progress" || value === "events";
 }
@@ -1292,6 +1294,7 @@ export async function runRpcMode(
 		features.add("interaction");
 		features.add("approval");
 		features.add("semantic-rendering");
+		if (setToolUIContext) features.add("ui");
 		if (session.sessionManager.getArtifactManager()) features.add("artifact");
 		features.add("resource-lifecycle");
 		features.add("runtime-provenance");
@@ -1361,7 +1364,6 @@ export async function runRpcMode(
 			selectedFramingVersion = 2;
 		}
 	};
-	const emitRpcTitles = shouldEmitRpcTitles();
 
 	const success = <T extends RpcCommand["type"]>(
 		id: string | undefined,
@@ -1374,9 +1376,21 @@ export async function runRpcMode(
 		return { id, type: "response", command, success: true, data } as RpcResponse;
 	};
 
-	const error = (id: string | undefined, command: string, message: string, code?: string): RpcResponse => {
-		return { id, type: "response", command, success: false, error: message, ...(code ? { code } : {}) };
-	};
+	const error = (
+		id: string | undefined,
+		command: string,
+		message: string,
+		code?: string,
+		data?: object,
+	): RpcResponse => ({
+		id,
+		type: "response",
+		command,
+		success: false,
+		error: message,
+		...(code ? { code } : {}),
+		...(data ? { data } : {}),
+	});
 	const catalogError = (id: string | undefined, command: string, cause: unknown): RpcResponse =>
 		cause instanceof SessionCatalogError
 			? error(id, command, cause.message, cause.code)
@@ -1387,6 +1401,15 @@ export async function runRpcMode(
 					: error(id, command, cause instanceof Error ? cause.message : String(cause));
 	const sessionAuthority = new RpcSessionAuthorityCoordinator(() => session.sessionId);
 	let callbackAuthorityToken = sessionAuthority.capture();
+	const interactiveSurface = new RpcInteractiveSurfaceManager({
+		output,
+		getAuthority: () => sessionAuthority.captureLifecycleAuthority(),
+		getSessionName: () => session.sessionName,
+		getCwd: () => session.sessionManager.getCwd(),
+	});
+	const unsubscribeSessionNameChanged = session.sessionManager.onSessionNameChanged(() =>
+		interactiveSurface.sessionNameChanged(),
+	);
 	const loopScheduler = new SessionLoopScheduler(session, {
 		waitForIdle: () => session.waitForIdle(),
 		compact: async () => {
@@ -1656,9 +1679,8 @@ export async function runRpcMode(
 			);
 		}
 
-		onTerminalInput(): () => void {
-			// Raw terminal input not supported in RPC mode
-			return () => {};
+		onTerminalInput(handler: TerminalInputHandler): () => void {
+			return interactiveSurface.onTerminalInput(handler);
 		}
 
 		notify(message: string, type?: "info" | "warning" | "error"): void {
@@ -1690,64 +1712,44 @@ export async function runRpcMode(
 			});
 		}
 
-		setWidget(key: string, content: unknown, options?: ExtensionWidgetOptions): void {
-			// Only support string arrays in RPC mode - factory functions are ignored
-			if (content === undefined || Array.isArray(content)) {
-				this.output({
-					type: "extension_ui_request",
-					id: Snowflake.next() as string,
-					method: "setWidget",
-					widgetKey: key,
-					widgetLines: content as string[] | undefined,
-					widgetPlacement: options?.placement,
-				} as RpcExtensionUIRequest);
-			}
-			// Component factories are not supported in RPC mode - would need TUI access
+		setWidget(key: string, content: ExtensionWidgetContent, options?: ExtensionWidgetOptions): void {
+			interactiveSurface.setWidget(key, content, options);
 		}
 
-		setFooter(_factory: unknown): void {
-			// Custom footer not supported in RPC mode - requires TUI access
+		setFooter(factory: ExtensionUiComponentFactory | undefined): void {
+			interactiveSurface.setFooter(factory);
 		}
 
-		setHeader(_factory: unknown): void {
-			// Custom header not supported in RPC mode - requires TUI access
+		setHeader(factory: ExtensionUiComponentFactory | undefined): void {
+			interactiveSurface.setHeader(factory);
 		}
 
 		setTitle(title: string): void {
-			// Title updates are low-value noise for most RPC hosts; opt in via PI_RPC_EMIT_TITLE=1.
-			if (!emitRpcTitles) return;
-			this.output({
-				type: "extension_ui_request",
-				id: Snowflake.next() as string,
-				method: "setTitle",
-				title,
-			} as RpcExtensionUIRequest);
+			interactiveSurface.setTitle(title);
 		}
 
-		async custom(): Promise<never> {
-			// Custom UI not supported in RPC mode
-			return undefined as never;
+		custom<T>(
+			factory: (
+				tui: TUI,
+				theme: Theme,
+				keybindings: KeybindingsManager,
+				done: (result: T) => void,
+			) => ExtensionUiComponent | Promise<ExtensionUiComponent>,
+			options?: { overlay?: boolean },
+		): Promise<T> {
+			return interactiveSurface.custom(factory, options);
 		}
 
 		pasteToEditor(text: string): void {
-			// Paste handling not supported in RPC mode - falls back to setEditorText
-			this.setEditorText(text);
+			interactiveSurface.pasteFromExtension(text);
 		}
 
 		setEditorText(text: string): void {
-			// Fire and forget - host can implement editor control
-			this.output({
-				type: "extension_ui_request",
-				id: Snowflake.next() as string,
-				method: "set_editor_text",
-				text,
-			} as RpcExtensionUIRequest);
+			interactiveSurface.setEditorText(text);
 		}
 
 		getEditorText(): string {
-			// Synchronous method can't wait for RPC response
-			// Host should track editor state locally if needed
-			return "";
+			return interactiveSurface.getEditorText();
 		}
 
 		async editor(
@@ -1759,8 +1761,8 @@ export async function runRpcMode(
 			return requestRpcEditor(this.pendingRequests, this.output, title, prefill, dialogOptions, editorOptions);
 		}
 
-		addAutocompleteProvider(): void {
-			// Autocomplete provider composition is not supported in RPC mode
+		addAutocompleteProvider(factory: AutocompleteProviderFactory): void {
+			interactiveSurface.addAutocompleteProvider(factory);
 		}
 
 		get theme(): Theme {
@@ -1768,29 +1770,29 @@ export async function runRpcMode(
 		}
 
 		getAllThemes(): Promise<{ name: string; path: string | undefined }[]> {
-			return Promise.resolve([]);
+			return interactiveSurface.getAllThemes();
 		}
 
-		getTheme(_name: string): Promise<Theme | undefined> {
-			return Promise.resolve(undefined);
+		getTheme(name: string): Promise<Theme | undefined> {
+			return interactiveSurface.getTheme(name);
 		}
 
-		setTheme(_theme: string | Theme): Promise<{ success: boolean; error?: string }> {
-			// Theme switching not supported in RPC mode
-			return Promise.resolve({ success: false, error: "Theme switching not supported in RPC mode" });
+		setTheme(value: string | Theme): Promise<{ success: boolean; error?: string }> {
+			return interactiveSurface.setExtensionTheme(value);
 		}
 
-		getToolsExpanded() {
-			// Tool expansion not supported in RPC mode - no TUI
-			return false;
+		getToolsExpanded(): boolean {
+			return interactiveSurface.getToolsExpanded();
 		}
 
-		setToolsExpanded(_expanded: boolean) {
-			// Tool expansion not supported in RPC mode - no TUI
+		setToolsExpanded(expanded: boolean): void {
+			interactiveSurface.setToolsExpanded(expanded);
 		}
 
-		setEditorComponent(): void {
-			// Custom editor components not supported in RPC mode
+		setEditorComponent(
+			factory: ((tui: TUI, editorTheme: EditorTheme, keybindings: KeybindingsManager) => CustomEditor) | undefined,
+		): void {
+			interactiveSurface.setEditorComponent(factory);
 		}
 	}
 
@@ -1816,6 +1818,13 @@ export async function runRpcMode(
 		},
 		uiContext: rpcUiContext,
 	});
+	const autocompleteCommands = (await buildAvailableSlashCommands(session)).map(command => ({
+		name: command.name,
+		aliases: command.aliases,
+		description: command.description,
+		argumentHint: command.input?.hint,
+	}));
+	interactiveSurface.configureAutocomplete(autocompleteCommands, session.sessionManager.getCwd());
 	const semanticRendering = new RpcSemanticRenderingManager(output);
 	const provenanceSource: RpcProvenanceSource = {
 		get model() {
@@ -2177,6 +2186,10 @@ export async function runRpcMode(
 		activeSessionTransition = undefined;
 		sessionTransitionAuthorityInvalidationRequired = false;
 		callbackAuthorityToken = authority;
+		interactiveSurface.rebindAuthority(
+			authority,
+			authority.sessionId !== transition.sessionId || authority.sessionGeneration !== transition.sessionGeneration,
+		);
 		providerAuthService = new ProviderAuthService(session.modelRegistry, session.sessionId);
 		providerAuthController = createProviderAuthController();
 		if (!resourcesDrainedForTransition) return undefined;
@@ -2252,6 +2265,11 @@ export async function runRpcMode(
 			providerAuthService = new ProviderAuthService(session.modelRegistry, session.sessionId);
 			callbackAuthorityToken = responseAuthority;
 			providerAuthController = createProviderAuthController();
+			interactiveSurface.rebindAuthority(
+				responseAuthority,
+				responseAuthority.sessionId !== transition.sessionId ||
+					responseAuthority.sessionGeneration !== transition.sessionGeneration,
+			);
 		} else {
 			responseAuthority = sessionAuthority.capture();
 		}
@@ -2297,6 +2315,7 @@ export async function runRpcMode(
 		const authority = sessionAuthority.completeExecutionAuthorityTransition(transition);
 		callbackAuthorityToken = authority;
 		providerAuthController = createProviderAuthController();
+		interactiveSurface.rebindAuthority(authority, false);
 		return authority;
 	};
 	const failExecutionAuthorityTransition = (transition: RpcExecutionAuthorityTransitionToken): void => {
@@ -2461,6 +2480,7 @@ export async function runRpcMode(
 		"runtime-provenance": "runtime-provenance",
 		collaboration: "collaboration",
 		"context.projection": "context.projection",
+		ui: "ui",
 	};
 	const guardCommandFeatures = (command: RpcCommand): RpcResponse | undefined => {
 		const availableFeatures = getCapabilityFeatures();
@@ -2806,6 +2826,113 @@ export async function runRpcMode(
 					}),
 				);
 			}
+
+			case "ui_open":
+				return success(
+					id,
+					"ui_open",
+					interactiveSurface.open(command.terminalId, {
+						width: command.width,
+						subscriptions: command.subscriptions,
+					}),
+				);
+			case "ui_close":
+				interactiveSurface.close(command.channelId, command.generation);
+				return success(id, "ui_close");
+			case "ui_input":
+				return success(
+					id,
+					"ui_input",
+					interactiveSurface.input(command.channelId, command.generation, command.data),
+				);
+			case "ui_editor_update":
+				return success(
+					id,
+					"ui_editor_update",
+					interactiveSurface.updateEditor(
+						command.channelId,
+						command.generation,
+						command.expectedRevision,
+						command.text,
+					),
+				);
+			case "ui_editor_paste":
+				return success(
+					id,
+					"ui_editor_paste",
+					interactiveSurface.pasteEditor(
+						command.channelId,
+						command.generation,
+						command.expectedRevision,
+						command.text,
+					),
+				);
+			case "ui_autocomplete_suggest":
+				return success(
+					id,
+					"ui_autocomplete_suggest",
+					await interactiveSurface.suggest(
+						command.id,
+						command.channelId,
+						command.generation,
+						command.lines,
+						command.cursorLine,
+						command.cursorCol,
+						command.forceFile,
+					),
+				);
+			case "ui_autocomplete_apply":
+				return success(
+					id,
+					"ui_autocomplete_apply",
+					interactiveSurface.applySuggestion(command.channelId, command.generation, command.suggestionId),
+				);
+			case "ui_cancel":
+				return success(id, "ui_cancel", {
+					cancelled: interactiveSurface.cancelAutocomplete(
+						command.channelId,
+						command.generation,
+						command.operationId,
+					),
+				});
+			case "ui_presentation_input":
+				return success(
+					id,
+					"ui_presentation_input",
+					interactiveSurface.presentationInput(
+						command.channelId,
+						command.generation,
+						command.presentationId,
+						command.data,
+					),
+				);
+			case "ui_presentation_action":
+				interactiveSurface.cancelPresentation(command.channelId, command.generation, command.presentationId);
+				return success(id, "ui_presentation_action");
+			case "ui_theme_list":
+				return success(id, "ui_theme_list", {
+					themes: await interactiveSurface.listThemes(command.channelId, command.generation),
+				});
+			case "ui_theme_get":
+				return success(id, "ui_theme_get", {
+					theme: await interactiveSurface.getThemeInfo(command.channelId, command.generation, command.name),
+				});
+			case "ui_theme_set":
+				return success(id, "ui_theme_set", {
+					theme: await interactiveSurface.setThemeName(command.channelId, command.generation, command.name),
+				});
+			case "ui_tools_expanded_set":
+				return success(
+					id,
+					"ui_tools_expanded_set",
+					interactiveSurface.setToolsExpandedFromClient(command.channelId, command.generation, command.expanded),
+				);
+			case "ui_title_subscribe":
+				return success(
+					id,
+					"ui_title_subscribe",
+					interactiveSurface.setTitleSubscription(command.channelId, command.generation, command.subscribed),
+				);
 
 			case "session_open": {
 				try {
@@ -4142,6 +4269,12 @@ export async function runRpcMode(
 			// Retry
 			// =================================================================
 
+			case "retry": {
+				const retried = await session.retry();
+				sessionAuthority.assertCurrent(commandAuthority);
+				return success(id, "retry", { retried });
+			}
+
 			case "set_auto_retry": {
 				session.setAutoRetryEnabled(command.enabled);
 				return success(id, "set_auto_retry");
@@ -4670,6 +4803,9 @@ export async function runRpcMode(
 			if (cause instanceof RpcSessionTransitionBusyError) {
 				return error(command.id, command.type, cause.message, "session_busy");
 			}
+			if (cause instanceof RpcInteractiveSurfaceError) {
+				return error(command.id, command.type, cause.message, cause.code, cause.data);
+			}
 			throw cause;
 		}
 	};
@@ -4682,6 +4818,7 @@ export async function runRpcMode(
 	const shutdownCoordinator = new RpcShutdownCoordinator({
 		isShutdownRequested: () => shutdownState.requested,
 		performShutdown: async () => {
+			interactiveSurface.disconnect("shutdown");
 			await rpcSessionHost?.shutdown();
 			session.disableLoop();
 			semanticRendering.dispose();
@@ -4716,6 +4853,7 @@ export async function runRpcMode(
 	const inputDispatcher = new RpcInputDispatcher({
 		deps: dispatchFrameDeps,
 		onShutdownInitiated: () => {
+			interactiveSurface.disconnect("shutdown");
 			pendingExtensionRequests.rejectAll("RPC session is shutting down");
 			hostToolBridge.close("RPC session is shutting down");
 			hostUriBridge.clear("RPC session is shutting down");
@@ -4760,6 +4898,7 @@ export async function runRpcMode(
 			.map(operation => operation.operationId),
 	);
 	const protectedOperations = new Set(providerAuthController.close());
+	interactiveSurface.disconnect("client_disconnected");
 	pendingExtensionRequests.rejectAll("RPC client disconnected before extension UI response completed");
 	semanticRendering.dispose();
 	const resourceDisposal = resourceLifecycle?.dispose();
@@ -4776,6 +4915,7 @@ export async function runRpcMode(
 	await shutdownCoordinator.drain();
 	await session.planMode.abandonPendingApproval();
 	await resourceDisposal;
+	unsubscribeSessionNameChanged();
 	unsubscribeAgentRegistry();
 	unsubscribeJobUpdates?.();
 	subagentRegistry?.dispose();

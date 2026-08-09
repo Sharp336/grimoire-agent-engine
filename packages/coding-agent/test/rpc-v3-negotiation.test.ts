@@ -22,7 +22,7 @@ describe("RPC v3 semantic negotiation", () => {
 
 	test("advertises every capability family and explicit unsupported state", () => {
 		const manifest = getRpcV3CapabilityManifest({
-			features: new Set(["session-observe", "session-catalog"]),
+			features: new Set(["session-observe", "session-catalog", "ui"]),
 		});
 
 		expect(manifest.ompVersion).toBe(VERSION);
@@ -61,6 +61,7 @@ describe("RPC v3 semantic negotiation", () => {
 			"session.execute",
 			"context.projection",
 			"interaction",
+			"ui",
 			"approval",
 			"semantic-rendering",
 			"artifact.read",
@@ -72,6 +73,10 @@ describe("RPC v3 semantic negotiation", () => {
 		expect(manifest.capabilities.find(capability => capability.id === "session.observe")).toMatchObject({
 			supported: true,
 			operations: ["snapshot", "subscribe", "acknowledge"],
+		});
+		expect(manifest.capabilities.find(capability => capability.id === "ui")).toMatchObject({
+			supported: true,
+			operations: expect.arrayContaining(["open", "editor", "autocomplete", "presentation", "theme", "title"]),
 		});
 		expect(manifest.capabilities.find(capability => capability.id === "collaboration")).toEqual(
 			expect.objectContaining({

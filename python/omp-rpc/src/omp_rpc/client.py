@@ -158,6 +158,14 @@ from .protocol import (
     TurnEndEvent,
     TurnStartEvent,
     UnknownNotification,
+    UiAutocompleteApplyResult,
+    UiAutocompleteResult,
+    UiEditorState,
+    UiFence,
+    UiInputResult,
+    UiPresentationInputResult,
+    UiSnapshot,
+    UiThemeInfo,
     assistant_text,
     parse_advisor_state,
     parse_agent_messages,
@@ -193,6 +201,13 @@ from .protocol import (
     parse_resume_session_result,
     parse_rpc_capability_manifest,
     parse_rpc_context_get_result,
+    parse_ui_autocomplete_apply_result,
+    parse_ui_autocomplete_result,
+    parse_ui_editor_state,
+    parse_ui_input_result,
+    parse_ui_presentation_input_result,
+    parse_ui_snapshot,
+    parse_ui_theme_info,
     parse_session_host_negotiation_result,
     parse_session_command_outcome,
     parse_session_open_result,
@@ -214,6 +229,7 @@ AgentEventListener = Callable[[RpcAgentEvent], None]
 NotificationListener = Callable[[RpcNotification], None]
 SessionObservationListener = Callable[[SessionObservationEvent], None]
 V3FrameListener = Callable[[RpcV3Frame], None]
+UiFrameListener = Callable[[RpcV3Frame], None]
 RawFrameListener = Callable[[JsonObject], None]
 UiRequestListener = Callable[[ExtensionUiRequest], None]
 ExtensionErrorListener = Callable[[ExtensionError], None]
@@ -513,11 +529,18 @@ class RpcCommandError(RpcError):
     `code` carries the server's machine-readable error code when present.
     """
 
-    def __init__(self, command: str, error: str, code: str | None = None):
+    def __init__(
+        self,
+        command: str,
+        error: str,
+        code: str | None = None,
+        data: JsonObject | None = None,
+    ):
         super().__init__(f"{command}: {error}")
         self.command = command
         self.error = error
         self.code = code
+        self.data = data
 
 class RpcSemanticIncompatibilityError(RpcError):
     """Raised when an explicitly requested RPC semantic profile is unavailable."""
@@ -1196,6 +1219,13 @@ class RpcClient:
 
         return self.on_notification(forward)
 
+    def on_ui_frame(self, listener: UiFrameListener) -> Callable[[], None]:
+        def forward(frame: RpcV3Frame) -> None:
+            if frame.type.startswith("ui_"):
+                listener(frame)
+
+        return self.on_v3_frame(forward)
+
     def on_raw_frame(self, listener: RawFrameListener) -> Callable[[], None]:
         """Subscribe to every decoded logical JSON frame before typed routing."""
         self._raw_frame_listeners.append(listener)
@@ -1497,6 +1527,188 @@ class RpcClient:
                 maxRelations=max_relations,
                 maxContentBytes=max_content_bytes,
             )
+        )
+
+    def open_ui(
+        self,
+        terminal_id: str,
+        *,
+        width: int | None = None,
+        subscriptions: Mapping[str, bool] | None = None,
+    ) -> UiSnapshot:
+        return parse_ui_snapshot(
+            self._request(
+                "ui_open",
+                terminalId=terminal_id,
+                width=width,
+                subscriptions=dict(subscriptions) if subscriptions is not None else None,
+            )
+        )
+
+    def close_ui(self, channel: UiFence) -> None:
+        self._request(
+            "ui_close",
+            channelId=channel.channel_id,
+            generation=channel.generation,
+        )
+
+    def send_ui_input(self, channel: UiFence, data: str) -> UiInputResult:
+        return parse_ui_input_result(
+            self._request(
+                "ui_input",
+                channelId=channel.channel_id,
+                generation=channel.generation,
+                data=data,
+            )
+        )
+
+    def update_ui_editor(
+        self, channel: UiFence, expected_revision: int, text: str
+    ) -> UiEditorState:
+        return parse_ui_editor_state(
+            self._request(
+                "ui_editor_update",
+                channelId=channel.channel_id,
+                generation=channel.generation,
+                expectedRevision=expected_revision,
+                text=text,
+            )
+        )
+
+    def paste_ui_editor(
+        self, channel: UiFence, expected_revision: int, text: str
+    ) -> UiEditorState:
+        return parse_ui_editor_state(
+            self._request(
+                "ui_editor_paste",
+                channelId=channel.channel_id,
+                generation=channel.generation,
+                expectedRevision=expected_revision,
+                text=text,
+            )
+        )
+
+    def suggest_ui_autocomplete(
+        self,
+        channel: UiFence,
+        lines: Sequence[str],
+        cursor_line: int,
+        cursor_col: int,
+        *,
+        force_file: bool = False,
+        on_operation_id: Callable[[str], None] | None = None,
+    ) -> UiAutocompleteResult | None:
+        payload = self._request(
+            "ui_autocomplete_suggest",
+            _on_request_id=on_operation_id,
+            channelId=channel.channel_id,
+            generation=channel.generation,
+            lines=list(lines),
+            cursorLine=cursor_line,
+            cursorCol=cursor_col,
+            forceFile=force_file,
+        )
+        return parse_ui_autocomplete_result(payload or None)
+
+    def apply_ui_autocomplete(
+        self, channel: UiFence, suggestion_id: str
+    ) -> UiAutocompleteApplyResult:
+        return parse_ui_autocomplete_apply_result(
+            self._request(
+                "ui_autocomplete_apply",
+                channelId=channel.channel_id,
+                generation=channel.generation,
+                suggestionId=suggestion_id,
+            )
+        )
+
+    def cancel_ui_operation(self, channel: UiFence, operation_id: str) -> bool:
+        return bool(
+            self._request(
+                "ui_cancel",
+                channelId=channel.channel_id,
+                generation=channel.generation,
+                operationId=operation_id,
+            ).get("cancelled")
+        )
+
+    def send_ui_presentation_input(
+        self, channel: UiFence, presentation_id: str, data: str
+    ) -> UiPresentationInputResult:
+        return parse_ui_presentation_input_result(
+            self._request(
+                "ui_presentation_input",
+                channelId=channel.channel_id,
+                generation=channel.generation,
+                presentationId=presentation_id,
+                data=data,
+            )
+        )
+
+    def cancel_ui_presentation(
+        self, channel: UiFence, presentation_id: str
+    ) -> None:
+        self._request(
+            "ui_presentation_action",
+            channelId=channel.channel_id,
+            generation=channel.generation,
+            presentationId=presentation_id,
+            action="cancel",
+        )
+
+    def list_ui_themes(self, channel: UiFence) -> tuple[UiThemeInfo, ...]:
+        payload = self._request(
+            "ui_theme_list",
+            channelId=channel.channel_id,
+            generation=channel.generation,
+        )
+        themes = payload.get("themes")
+        if not isinstance(themes, list):
+            raise RpcError("ui_theme_list response did not include themes")
+        return tuple(
+            parse_ui_theme_info(cast(JsonObject, item)) for item in themes
+        )
+
+    def get_ui_theme(self, channel: UiFence, name: str) -> UiThemeInfo | None:
+        value = self._request(
+            "ui_theme_get",
+            channelId=channel.channel_id,
+            generation=channel.generation,
+            name=name,
+        ).get("theme")
+        if value is None:
+            return None
+        return parse_ui_theme_info(cast(JsonObject, value))
+
+    def set_ui_theme(self, channel: UiFence, name: str) -> UiThemeInfo:
+        value = self._request(
+            "ui_theme_set",
+            channelId=channel.channel_id,
+            generation=channel.generation,
+            name=name,
+        ).get("theme")
+        if not isinstance(value, dict):
+            raise RpcError("ui_theme_set response did not include theme")
+        return parse_ui_theme_info(cast(JsonObject, value))
+
+    def set_ui_tools_expanded(
+        self, channel: UiFence, expanded: bool
+    ) -> JsonObject:
+        return self._request(
+            "ui_tools_expanded_set",
+            channelId=channel.channel_id,
+            generation=channel.generation,
+            expanded=expanded,
+        )
+
+    def subscribe_ui_title(
+        self, channel: UiFence, subscribed: bool
+    ) -> JsonObject:
+        return self._request(
+            "ui_title_subscribe",
+            channelId=channel.channel_id,
+            generation=channel.generation,
+            subscribed=subscribed,
         )
 
     def initialize_v3(self, options: RpcV3ClientOptions) -> SessionHostNegotiated:
@@ -2222,6 +2434,10 @@ class RpcClient:
     def abort(self) -> None:
         self._request("abort")
 
+    def retry(self) -> bool:
+        """Retry the last failed assistant turn when one is available."""
+        return bool(self._request("retry").get("retried", False))
+
     def abort_and_prompt(
         self, message: str, *, images: Sequence[ImageContent] | None = None
     ) -> str | None:
@@ -2713,15 +2929,26 @@ class RpcClient:
                 self._event_condition.wait(remaining)
         self._check_async_errors()
 
-    def _request(self, command_type: str, **payload: JsonValue) -> JsonObject:
+    def _request(
+        self,
+        command_type: str,
+        *,
+        _on_request_id: Callable[[str], None] | None = None,
+        **payload: JsonValue,
+    ) -> JsonObject:
         return self._request_with_timeout(
-            command_type, self._request_timeout, **payload
+            command_type,
+            self._request_timeout,
+            _on_request_id=_on_request_id,
+            **payload,
         )
 
     def _request_with_timeout(
         self,
         command_type: str,
         response_timeout: float,
+        *,
+        _on_request_id: Callable[[str], None] | None = None,
         **payload: JsonValue,
     ) -> JsonObject:
         wire_payload: JsonObject = {
@@ -2745,6 +2972,8 @@ class RpcClient:
 
         try:
             self._write_json(process, envelope)
+            if _on_request_id is not None:
+                _on_request_id(request_id)
         except BaseException:
             with self._state_lock:
                 self._pending.pop(request_id, None)
@@ -2765,10 +2994,16 @@ class RpcClient:
 
         if not bool(response.get("success", False)):
             raw_code = response.get("code")
+            raw_data = response.get("data")
             raise RpcCommandError(
                 command=str(response.get("command", command_type)),
                 error=str(response.get("error", "")),
                 code=raw_code if isinstance(raw_code, str) else None,
+                data=(
+                    _clone_json_object(raw_data)
+                    if isinstance(raw_data, Mapping)
+                    else None
+                ),
             )
 
         data = response.get("data")
