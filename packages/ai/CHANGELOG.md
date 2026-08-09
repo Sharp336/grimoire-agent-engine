@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the Amazon Bedrock and Cursor transports ignoring `StreamOptions.headers`; both built their request headers from scratch, so caller-supplied tracing or attribution headers were silently dropped while working on every other provider ([#8046](https://github.com/can1357/oh-my-pi/pull/8046)).
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed
