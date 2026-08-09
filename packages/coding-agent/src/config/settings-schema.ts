@@ -4434,6 +4434,40 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"goal.gates": {
+		type: "array",
+		default: [],
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Goal Quality Gates",
+			description:
+				"Shell commands that must exit 0 before a goal can be completed (e.g. 'npm test', 'cargo clippy')",
+		},
+	},
+
+	"goal.gateMaxRetries": {
+		type: "number",
+		default: 3,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Goal Gate Max Retries",
+			description: "Maximum failed attempts per gate command before bypassing it",
+		},
+	},
+
+	"goal.gateTimeoutMs": {
+		type: "number",
+		default: 300000,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Goal Gate Timeout",
+			description: "Timeout in milliseconds for each gate command (default: 5 minutes)",
+		},
+	},
+
 	"title.refreshOnReplan": {
 		type: "boolean",
 		default: true,

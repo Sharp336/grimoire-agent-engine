@@ -11,6 +11,7 @@ import type { ToolSession } from "../../tools";
 import { formatErrorDetail, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import { ToolError } from "../../tools/tool-errors";
 import { framedBlock, renderStatusLine, truncateToWidth } from "../../tui";
+import { DEFAULT_GATE_MAX_RETRIES, DEFAULT_GATE_TIMEOUT_MS, formatGateFailureMessage, runGoalGates } from "../gates";
 import { completionBudgetReport, remainingTokens } from "../runtime";
 import type { Goal, GoalStatus, GoalToolDetails } from "../state";
 
@@ -64,6 +65,8 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 	readonly intent = "omit" as const;
 	readonly #session: ToolSession;
 
+	#gateAttempts = new Map<string, number>();
+
 	constructor(session: ToolSession) {
 		this.#session = session;
 	}
@@ -94,6 +97,7 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 			const dropped = await runtime.dropGoal();
 			response = buildGoalToolResponse(dropped ?? null);
 		} else {
+			await this.#runGatesBeforeCompletion(_signal);
 			const completed = await runtime.completeGoalFromTool();
 			response = buildGoalToolResponse(completed, { includeCompletionReport: true });
 		}
@@ -121,6 +125,29 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 				completionBudgetReport: response.completionBudgetReport,
 			},
 		};
+	}
+
+	/**
+	 * Run quality gate commands before allowing goal completion. If any gate
+	 * fails (non-zero exit), throw a ToolError with the failure output so the
+	 * agent continues working. Gates are configured via `goal.gates` in
+	 * settings. After `goal.gateMaxRetries` failed attempts for a command, the
+	 * gate is bypassed to avoid permanent blocking.
+	 */
+	async #runGatesBeforeCompletion(signal?: AbortSignal): Promise<void> {
+		const commands = this.#session.settings.get("goal.gates");
+		if (!commands || commands.length === 0) return;
+		const maxRetries = this.#session.settings.get("goal.gateMaxRetries") ?? DEFAULT_GATE_MAX_RETRIES;
+		const timeoutMs = this.#session.settings.get("goal.gateTimeoutMs") ?? DEFAULT_GATE_TIMEOUT_MS;
+		const result = await runGoalGates(
+			{ commands: [...commands], maxRetries, timeoutMs },
+			this.#session.cwd,
+			this.#gateAttempts,
+			signal,
+		);
+		if (!result.passed && result.failure) {
+			throw new ToolError(formatGateFailureMessage(result.failure));
+		}
 	}
 }
 
