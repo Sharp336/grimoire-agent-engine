@@ -15,7 +15,7 @@ export interface ShakeResult {
 	toolResultsDropped: number;
 	/** Large fenced/XML blocks dropped. */
 	blocksDropped: number;
-	/** Image blocks removed (images mode only). */
+	/** Image blocks removed — by images mode, or embedded in elide-dropped tool results. */
 	imagesDropped?: number;
 	/** Estimated context tokens reclaimed. */
 	tokensFreed: number;

@@ -35,8 +35,9 @@ export const shutdownHandlerTui = (
 /**
  * Parse `/shake` args into one or more {@link ShakeMode}s; empty defaults to
  * elide. Modes combine (`/shake elide images`), run in the order given, and
- * duplicates collapse. `all` expands to images-then-elide: stripping image
- * blocks first counts them before elide swallows whole tool results.
+ * duplicates collapse. `all` expands to images-then-elide. Only images mode
+ * reaches user-attached images; elide takes tool-result images with the
+ * results it drops and reports them.
  */
 function parseShakeModes(args: string): ShakeMode[] | { error: string } {
 	const verbs = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
@@ -187,8 +188,8 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		description: "Drop heavy content from context (tool results, large blocks)",
 		acpDescription: "Shake heavy content out of the conversation context",
 		subcommands: [
-			{ name: "elide", description: "Strip tool results + large blocks (default)" },
-			{ name: "images", description: "Strip image blocks" },
+			{ name: "elide", description: "Strip tool results + large blocks, embedded images included (default)" },
+			{ name: "images", description: "Strip all image blocks, including user-attached ones elide never touches" },
 			{ name: "all", description: "Strip images, then elide" },
 		],
 		acpInputHint: "[elide|images|all ...]",

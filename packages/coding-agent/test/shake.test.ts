@@ -242,6 +242,44 @@ describe("AgentSession shake", () => {
 			expect(result.blocksDropped).toBe(0);
 			expect(result.tokensFreed).toBe(0);
 		});
+
+		it("counts image blocks embedded in dropped tool results", async () => {
+			const toolCallId = `call_read_${Math.random().toString(36).slice(2)}`;
+			sessionManager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: "read the diagram" }],
+				timestamp: Date.now() - 3,
+			});
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [
+					{ type: "text", text: "reading" },
+					{ type: "toolCall", id: toolCallId, name: "read", arguments: { path: "diagram.png" } },
+				],
+				...apiInfo,
+				stopReason: "toolUse",
+				usage,
+				timestamp: Date.now() - 2,
+			});
+			sessionManager.appendMessage({
+				role: "toolResult",
+				toolCallId,
+				toolName: "read",
+				content: [
+					{ type: "text", text: "D".repeat(4000) },
+					{ type: "image", data: "iVBORw0KGgo", mimeType: "image/png" } satisfies ImageContent,
+				],
+				isError: false,
+				timestamp: Date.now() - 1,
+			});
+
+			const result = await session.shake("elide");
+
+			expect(result.toolResultsDropped).toBe(1);
+			expect(result.imagesDropped).toBe(1);
+			const blockTypes = branchToolResults().flatMap(m => m.content.map(c => c.type));
+			expect(blockTypes).not.toContain("image");
+		});
 	});
 
 	describe("images", () => {

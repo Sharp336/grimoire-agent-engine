@@ -4,7 +4,7 @@
 
 ### Changed
 
-- `/shake` now accepts multiple modes in one invocation (`/shake elide images` runs both, in the order given) plus a new `all` subcommand (images, then elide) and reports one merged summary; `image` is accepted as an alias of `images`.
+- `/shake` now accepts multiple modes in one invocation (`/shake elide images` runs both, in the order given) plus a new `all` subcommand (images, then elide) and reports one merged summary; `image` is accepted as an alias of `images`. Elide now counts image blocks embedded in the tool results it drops instead of discarding them silently; `/shake images` remains the only mode that clears user-attached images.
 
 ## [17.2.12] - 2026-08-08
 

@@ -46,7 +46,14 @@ import {
 	readToolSupersedeKey,
 } from "@oh-my-pi/pi-agent-core/compaction/pruning";
 import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
-import type { AssistantMessage, CodexCompactionContext, Message, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
+import type {
+	AssistantMessage,
+	CodexCompactionContext,
+	Message,
+	Model,
+	ProviderSessionState,
+	ToolResultMessage,
+} from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -450,6 +457,9 @@ export class SessionMaintenance {
 	 * - `images` delegates to {@link dropImages}.
 	 * - `elide` replaces whole tool-call results and large fenced/XML blocks
 	 *   with short placeholders that embed an `artifact://` recovery link.
+	 *   Image blocks inside a dropped tool result go with it and are counted
+	 *   in `imagesDropped`; user-message images are only reachable via
+	 *   `images` mode.
 	 *
 	 * Mutates the branch in place, persists via `rewriteEntries`, replays the
 	 * rebuilt context through the agent, and tears down provider sessions that
@@ -500,12 +510,25 @@ export class SessionMaintenance {
 
 		let toolResultsDropped = 0;
 		let blocksDropped = 0;
+		let imagesDropped = 0;
 		let originalTokens = 0;
 		let replacementTokens = 0;
 		let anchoredTokensRemoved = 0;
+		const countedEntries = new Set<SessionEntry>();
 		const items = regions.map((region, index) => {
-			if (region.kind === "toolResult") toolResultsDropped++;
-			else blocksDropped++;
+			if (region.kind === "toolResult") {
+				toolResultsDropped++;
+				// Replacing the whole tool result discards any image blocks it
+				// carried; count them so the summary reports what actually left.
+				if (!countedEntries.has(region.entry)) {
+					countedEntries.add(region.entry);
+					// kind === "toolResult" guarantees the message shape (same cast applyShakeRegion relies on).
+					const toolResult = region.entry.message as ToolResultMessage;
+					for (const block of toolResult.content) {
+						if (block.type === "image") imagesDropped++;
+					}
+				}
+			} else blocksDropped++;
 			originalTokens += region.tokens;
 			const replacement = replacements[index];
 			const replacementTokenCount = replacement.length > 0 ? countTokens(replacement) : 0;
@@ -534,6 +557,7 @@ export class SessionMaintenance {
 			mode,
 			toolResultsDropped,
 			blocksDropped,
+			imagesDropped,
 			tokensFreed: Math.max(0, originalTokens - replacementTokens),
 			artifactId,
 		};
