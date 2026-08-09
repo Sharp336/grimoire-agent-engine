@@ -118,14 +118,30 @@ describe("ImageBudget placement epochs", () => {
 		expect(budget.resolvePlacementEmit(5, 10, 10)).toEqual({ placementId: 1, widthPx: 40, heightPx: 60 });
 	});
 
-	it("advances the epoch once commits pass the last emitted origin", () => {
+	it("advances the epoch once commits pass the last emitted attach top", () => {
 		const budget = new ImageBudget(8, () => {});
 		budget.registerPlacementGeometry(5, 40, 60);
 		expect(budget.resolvePlacementEmit(5, 10, 4)?.placementId).toBe(1);
-		// Rows 0..11 committed: the epoch-1 placement (origin row 10) is archive.
+		// Rows 0..11 committed: the epoch-1 placement (attached from row 10) is archive.
 		expect(budget.resolvePlacementEmit(5, 12, 12)?.placementId).toBe(2);
-		// No further commits past the new origin: epoch is stable again.
+		// No further commits past the new attach top: epoch is stable again.
 		expect(budget.resolvePlacementEmit(5, 12, 12)?.placementId).toBe(2);
+	});
+
+	it("keeps replacing the same id across rewrites with no commit progression", () => {
+		const budget = new ImageBudget(8, () => {});
+		budget.registerPlacementGeometry(5, 40, 60);
+		// Full placement attached from row 1; rows 0..4 commit afterwards.
+		expect(budget.resolvePlacementEmit(5, 1, 0)?.placementId).toBe(1);
+		// First clipped re-emit attaches from the window top (row 5): one bump.
+		expect(budget.resolvePlacementEmit(5, 5, 5)?.placementId).toBe(2);
+		// Repeated rewrites without new commits (overlay show/hide churn) must
+		// keep replacing placement 2 in place, not mint 3, 4, ... per frame.
+		expect(budget.resolvePlacementEmit(5, 5, 5)?.placementId).toBe(2);
+		expect(budget.resolvePlacementEmit(5, 5, 5)?.placementId).toBe(2);
+		// Commits progressing past the attach top advance the epoch exactly once.
+		expect(budget.resolvePlacementEmit(5, 7, 7)?.placementId).toBe(3);
+		expect(budget.resolvePlacementEmit(5, 7, 7)?.placementId).toBe(3);
 	});
 
 	it("skips epoch bookkeeping for emits without a frame position", () => {
@@ -134,7 +150,7 @@ describe("ImageBudget placement epochs", () => {
 		expect(budget.resolvePlacementEmit(5, 10, 4)?.placementId).toBe(1);
 		// Alt-screen/resize emit: unknown position, unknown commits.
 		expect(budget.resolvePlacementEmit(5, -1, -1)?.placementId).toBe(1);
-		// The unknown emit must not have overwritten the tracked origin.
+		// The unknown emit must not have overwritten the tracked attach top.
 		expect(budget.resolvePlacementEmit(5, 10, 12)?.placementId).toBe(2);
 	});
 
@@ -151,7 +167,7 @@ describe("ImageBudget placement epochs", () => {
 	it("bumps against the monotonic high-water mark when the commit ledger rewinds", () => {
 		const budget = new ImageBudget(8, () => {});
 		budget.registerPlacementGeometry(5, 40, 60);
-		// Placement 1's origin (row 100) physically commits (watermark 120).
+		// Placement 1 attaches from row 100 and physically commits (watermark 120).
 		expect(budget.resolvePlacementEmit(5, 100, 120)?.placementId).toBe(1);
 		// A divergence recommit rewinds the caller's ledger to 50; the archived
 		// cells are still in native scrollback, so the re-emit must NOT re-use
@@ -465,6 +481,10 @@ describe("TUI direct-placement clipping", () => {
 				expect(p.srcY).toBe(Math.floor((60 * (6 - p.rows)) / 6));
 				expect(p.cuu).toBe(p.rows - 1);
 			}
+			// Show + hide are two rewrites with no commit progression between
+			// them: both must replace the SAME advanced id — repeated overlay
+			// toggles must not mint a fresh placement per frame (#8057 review).
+			expect(new Set(after.map(p => p.placementId)).size).toBe(1);
 		} finally {
 			tui.stop();
 		}

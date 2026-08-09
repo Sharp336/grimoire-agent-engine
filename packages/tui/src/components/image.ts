@@ -104,7 +104,7 @@ export class ImageBudget {
 	 */
 	#placementState = new Map<
 		number,
-		{ widthPx: number; heightPx: number; epoch: number; lastOriginFrameRow: number | undefined }
+		{ widthPx: number; heightPx: number; epoch: number; lastAttachTopFrameRow: number | undefined }
 	>();
 	/**
 	 * Monotonic maximum of every `committedTo` watermark ever observed. The
@@ -263,25 +263,27 @@ export class ImageBudget {
 			state.heightPx = heightPx;
 			return;
 		}
-		this.#placementState.set(imageId, { widthPx, heightPx, epoch: 1, lastOriginFrameRow: undefined });
+		this.#placementState.set(imageId, { widthPx, heightPx, epoch: 1, lastAttachTopFrameRow: undefined });
 	}
 
 	/**
 	 * Resolve the placement id and geometry for a direct-placement emit whose
-	 * block origin sits at `originFrameRow` (absolute frame row, -1 when the
-	 * writer has no frame-space position: alt-screen, resize, ConPTY-truncated
-	 * replays). `committedTo` is the native-scrollback watermark in the same
-	 * frame-row space — the caller's committed row count, or the chunk target
-	 * on frames that commit as they write (-1 when unknown).
+	 * topmost attached cell sits at `attachTopFrameRow` — the first frame row
+	 * the placement covers, i.e. the block's first *visible* row, not its
+	 * origin (-1 when the writer has no frame-space position: alt-screen,
+	 * resize, ConPTY-truncated replays). `committedTo` is the native-scrollback
+	 * watermark in the same frame-row space — the caller's committed row count,
+	 * or the chunk target on frames that commit as they write (-1 when unknown).
 	 *
-	 * Re-using a placement id is destructive — Kitty replace semantics strip
-	 * the prior placement's cells everywhere, scrollback included — so once
-	 * commits pass the last emit's origin, that placement is frozen as
-	 * scrollback archive and the epoch (the `p=` id) advances.
+	 * Invariant: a placement id may be re-used (Kitty replace strips that id's
+	 * cells everywhere, scrollback included) only while none of the cells it
+	 * attached have entered native scrollback. So the epoch — the `p=` id —
+	 * advances exactly when commits pass the last emit's attach top; rewrites
+	 * with no commit progression keep replacing the same id in place.
 	 */
 	resolvePlacementEmit(
 		imageId: number,
-		originFrameRow: number,
+		attachTopFrameRow: number,
 		committedTo: number,
 	): { placementId: number; widthPx: number; heightPx: number } | null {
 		const state = this.#placementState.get(imageId);
@@ -292,12 +294,12 @@ export class ImageBudget {
 			// scrollback stay there regardless, so the bump check compares
 			// against a monotonic high-water mark, never the rewound value.
 			if (committedTo > this.#commitHighWater) this.#commitHighWater = committedTo;
-			if (state.lastOriginFrameRow !== undefined && this.#commitHighWater > state.lastOriginFrameRow) {
+			if (state.lastAttachTopFrameRow !== undefined && this.#commitHighWater > state.lastAttachTopFrameRow) {
 				state.epoch += 1;
-				state.lastOriginFrameRow = undefined;
+				state.lastAttachTopFrameRow = undefined;
 			}
 		}
-		if (originFrameRow >= 0) state.lastOriginFrameRow = originFrameRow;
+		if (attachTopFrameRow >= 0) state.lastAttachTopFrameRow = attachTopFrameRow;
 		return { placementId: state.epoch, widthPx: state.widthPx, heightPx: state.heightPx };
 	}
 
@@ -318,7 +320,7 @@ export class ImageBudget {
 				stale.push({ imageId, lastEpoch: state.epoch });
 			}
 			state.epoch = 1;
-			state.lastOriginFrameRow = undefined;
+			state.lastAttachTopFrameRow = undefined;
 		}
 		return stale ?? EMPTY_STALE_EPOCHS;
 	}

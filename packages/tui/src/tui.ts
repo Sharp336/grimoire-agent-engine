@@ -2817,9 +2817,12 @@ export class TUI extends Container {
 		if (screenRow < 0) return line;
 		const parsed = parseKittyDirectPlacementLine(line);
 		if (!parsed) return line;
+		// The emitted placement attaches from the block's first *visible* row
+		// (the clip drops the rows above the viewport), so epoch tracking keys
+		// on that row — not the block origin, which may be long committed.
 		const placement = this.#imageBudget.resolvePlacementEmit(
 			parsed.imageId,
-			frameRow >= 0 ? frameRow - (parsed.rows - 1) : -1,
+			frameRow >= 0 ? frameRow - Math.min(parsed.rows - 1, screenRow) : -1,
 			committedTo,
 		);
 		if (!placement) return line;
