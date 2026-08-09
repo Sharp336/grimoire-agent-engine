@@ -3,7 +3,9 @@ import type { AgentStorage } from "../session/agent-storage";
 import { findCredential, withHardTimeout } from "./search/providers/utils";
 
 const PARALLEL_API_URL = "https://api.parallel.ai";
-export const PARALLEL_SEARCH_URL = `${PARALLEL_API_URL}/v1beta/search`;
+/** GA Search API — modes: turbo | basic | advanced (see Parallel search migration guide). */
+export const PARALLEL_SEARCH_URL = `${PARALLEL_API_URL}/v1/search`;
+/** Extract remains on the beta endpoint until a GA extract migration lands. */
 const PARALLEL_EXTRACT_URL = `${PARALLEL_API_URL}/v1beta/extract`;
 export const PARALLEL_BETA_HEADER = "search-extract-2025-10-10";
 
@@ -51,7 +53,11 @@ export interface ParallelExtractResult {
 }
 
 export interface ParallelSearchOptions {
-	mode?: "fast" | "research";
+	/**
+	 * V1 Search mode. Defaults to `turbo` (lowest latency/cost).
+	 * Legacy aliases: `fast` → turbo, `research` → advanced.
+	 */
+	mode?: "turbo" | "basic" | "advanced" | "fast" | "research";
 	maxCharsPerResult?: number;
 	signal?: AbortSignal;
 	fetch?: FetchImpl;
@@ -146,7 +152,20 @@ export function parseParallelErrorResponse(statusCode: number, responseText: str
 	}
 }
 
-function getAuthHeaders(apiKey: string): {
+function getSearchAuthHeaders(apiKey: string): {
+	Accept: string;
+	"Content-Type": string;
+	"x-api-key": string;
+} {
+	// V1 Search does not use the beta header.
+	return {
+		Accept: "application/json",
+		"Content-Type": "application/json",
+		"x-api-key": apiKey,
+	};
+}
+
+function getExtractAuthHeaders(apiKey: string): {
 	Accept: string;
 	"Content-Type": string;
 	"x-api-key": string;
@@ -158,6 +177,16 @@ function getAuthHeaders(apiKey: string): {
 		"x-api-key": apiKey,
 		"parallel-beta": PARALLEL_BETA_HEADER,
 	};
+}
+
+/** Map legacy / public option names onto V1 Search modes. */
+export function resolveParallelSearchMode(
+	mode: ParallelSearchOptions["mode"],
+): "turbo" | "basic" | "advanced" {
+	if (mode === "advanced" || mode === "research") return "advanced";
+	if (mode === "basic") return "basic";
+	// turbo, fast (legacy beta), or default
+	return "turbo";
 }
 
 function parseWarnings(payload: unknown): string[] {
@@ -301,13 +330,15 @@ export async function searchWithParallel(
 	const fetchImpl = options.fetch ?? fetch;
 	const response = await fetchImpl(PARALLEL_SEARCH_URL, {
 		method: "POST",
-		headers: getAuthHeaders(apiKey),
+		headers: getSearchAuthHeaders(apiKey),
 		body: JSON.stringify({
 			objective,
 			search_queries: queries,
-			mode: options.mode === "research" ? "one-shot" : "fast",
-			excerpts: {
-				max_chars_per_result: options.maxCharsPerResult ?? 10_000,
+			mode: resolveParallelSearchMode(options.mode),
+			advanced_settings: {
+				excerpt_settings: {
+					max_chars_per_result: options.maxCharsPerResult ?? 10_000,
+				},
 			},
 		}),
 		signal: withHardTimeout(options.signal),
@@ -335,7 +366,7 @@ export async function extractWithParallel(
 	const fetchImpl = options.fetch ?? fetch;
 	const response = await fetchImpl(PARALLEL_EXTRACT_URL, {
 		method: "POST",
-		headers: getAuthHeaders(apiKey),
+		headers: getExtractAuthHeaders(apiKey),
 		body: JSON.stringify({
 			urls,
 			objective: options.objective,

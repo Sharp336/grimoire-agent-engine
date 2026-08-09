@@ -2,7 +2,6 @@ import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth }
 import type { SearchResponse } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
 import {
-	PARALLEL_BETA_HEADER,
 	PARALLEL_SEARCH_URL,
 	ParallelApiError,
 	type ParallelSearchResult,
@@ -21,7 +20,7 @@ const MAX_NUM_RESULTS = 40;
 /** Query-string caps for Parallel: natural-language objective, no field operators. */
 const PARALLEL_QUERY_SYNTAX = { phrases: true, negation: true, or: true } as const;
 
-/** Parallel `source_policy` (beta Search API): bare-host allow/deny lists + freshness floor. */
+/** Parallel `source_policy` (V1 advanced_settings): bare-host allow/deny lists + freshness floor. */
 interface ParallelSourcePolicy {
 	include_domains?: string[];
 	exclude_domains?: string[];
@@ -87,16 +86,19 @@ async function searchWithAuthStorage(
 					Accept: "application/json",
 					"Content-Type": "application/json",
 					"x-api-key": key,
-					"parallel-beta": PARALLEL_BETA_HEADER,
 				},
 				body: JSON.stringify({
 					objective,
 					search_queries: queries,
-					mode: "fast",
-					excerpts: {
-						max_chars_per_result: 10_000,
+					// V1 Search: turbo is lowest latency/cost (~$1/1k, ~200ms).
+					// Beta `fast`/`one-shot` mapped to basic; turbo is V1-only.
+					mode: "turbo",
+					advanced_settings: {
+						excerpt_settings: {
+							max_chars_per_result: 10_000,
+						},
+						...(sourcePolicy && { source_policy: sourcePolicy }),
 					},
-					...(sourcePolicy && { source_policy: sourcePolicy }),
 				}),
 				signal: withHardTimeout(params.signal, params.timeoutMs),
 			});
