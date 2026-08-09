@@ -263,20 +263,27 @@ const GIT_PROBE_TIMEOUT_MS = 5_000;
 const GIT_PROBE_MAX_OUTPUT_BYTES = 64 * 1024;
 
 /** Read at most `maxBytes` from a stream, dropping the remainder. */
-async function readCapped(stream: ReadableStream<Uint8Array>, maxBytes: number): Promise<string> {
+async function readCapped(
+	stream: ReadableStream<Uint8Array>,
+	maxBytes: number,
+): Promise<{ text: string; truncated: boolean }> {
 	const reader = stream.getReader();
 	const decoder = new TextDecoder();
 	let result = "";
+	let truncated = false;
 	while (result.length < maxBytes) {
 		const { done, value } = await reader.read();
 		if (done) break;
 		if (!value) continue;
 		const slice = value.subarray(0, maxBytes - result.length);
 		result += decoder.decode(slice, { stream: true });
-		if (value.byteLength > slice.byteLength) break;
+		if (value.byteLength > slice.byteLength) {
+			truncated = true;
+			break;
+		}
 	}
 	await reader.cancel().catch(() => {});
-	return result;
+	return { text: result, truncated };
 }
 
 /** Run a git command in `cwd`, returning trimmed stdout or `""` on any failure. */
@@ -295,7 +302,9 @@ async function gitOutput(cwd: string, args: string[]): Promise<string> {
 			readCapped(child.stdout, GIT_PROBE_MAX_OUTPUT_BYTES),
 			child.exited,
 		]);
-		return exitCode === 0 ? stdout.trim() : "";
+		// Cancelling stdout on a cap makes git exit with SIGPIPE (141), so a
+		// non-zero exit alone is not "no output": keep the truncated status.
+		return exitCode === 0 || stdout.truncated ? stdout.text.trim() : "";
 	} catch {
 		return "";
 	}
@@ -585,12 +594,22 @@ export function readStreamErrorEvent(error: CommandCodeStreamEvent["error"]): Co
 function streamErrorToProviderError(parsed: CommandCodeStreamError, provider: string): Error {
 	const label = parsed.type ? `Command Code stream error (type=${parsed.type})` : "Command Code stream error";
 	const message = `${label}: ${parsed.message}`;
+	// A retryable frame must reach the retry layer. The shared classifier
+	// rejects most 4xx statuses before reading the type, so a transient 400
+	// would be fatal unless lifted. Statuses that already retry (429/408/5xx)
+	// pass through unchanged; only the non-retryable 4xx set is promoted to a
+	// transient 503.
+	if (parsed.isRetryable === true) {
+		const alreadyTransient =
+			parsed.statusCode === undefined ||
+			parsed.statusCode === 408 ||
+			parsed.statusCode === 429 ||
+			parsed.statusCode >= 500;
+		const code = alreadyTransient ? parsed.statusCode : 503;
+		return new AIError.ProviderHttpError(message, code ?? 503, { code: parsed.type });
+	}
 	if (parsed.statusCode !== undefined) {
 		return new AIError.ProviderHttpError(message, parsed.statusCode, { code: parsed.type });
-	}
-	// No status: a retryable frame maps to a transient 503 so backoff applies.
-	if (parsed.isRetryable === true) {
-		return new AIError.ProviderHttpError(message, 503, { code: parsed.type });
 	}
 	return new AIError.ProviderResponseError(message, { provider, kind: "output" });
 }

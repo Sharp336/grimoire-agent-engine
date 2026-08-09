@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
 import {
 	buildCommandCodeServerConfig,
 	clearCommandCodeServerConfigCache,
@@ -13,6 +14,7 @@ import type { Context, Model, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { COMMAND_CODE_TEXT_FRAMES, COMMAND_CODE_TOOL_CALL_FRAMES } from "./fixtures/command-code-stream";
 
 type CapturedRequest = {
@@ -895,6 +897,21 @@ describe("command-code stream handling", () => {
 		expect(result.stopReason).toBe("error");
 		expect(result.errorStatus).toBe(429);
 	});
+
+	it("promotes a retryable frame with a non-retryable 4xx status to 503", async () => {
+		// The shared classifier rejects most 4xx statuses before reading the
+		// frame type, so a provider-marked-transient 400 must be lifted to a
+		// transient status the retry layer will actually retry.
+		scenario = {
+			kind: "gateway-error",
+			error: { type: "server_error", message: "try again", statusCode: 400, isRetryable: true },
+		};
+		const baseUrl = await startServer();
+		const context: Context = { messages: [{ role: "user", content: "hi", timestamp: 1 }] };
+		const { result } = await collectStream(makeModel(baseUrl), context);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(503);
+	});
 });
 
 describe("command-code helpers", () => {
@@ -930,6 +947,40 @@ describe("command-code helpers", () => {
 		expect(typeof config.gitStatus).toBe("string");
 		expect(config.mainBranch.length).toBeGreaterThan(0);
 		expect(config.recentCommits.length).toBeGreaterThan(0);
+	});
+
+	it("preserves a git status that exceeds the probe byte cap", async () => {
+		// A dirty repo whose `git status --porcelain` blows past the 64 KiB probe
+		// cap: git exits with SIGPIPE (141) when stdout is cancelled, and the
+		// capped output must still land in the snapshot rather than regressing to
+		// "Working tree clean". Untracked directories collapse to one line, so the
+		// probe must be exercised with tracked-and-modified files.
+		await using dir = await TempDir.create("command-code-git-cap");
+		const path = dir.path();
+		await fs.mkdir(path + "/dirty");
+		// ~20 bytes × 6k files ≈ 110 KiB of modified status, past the 64 KiB cap.
+		const writes = Array.from({ length: 6_000 }, (_, i) => fs.writeFile(`${path}/dirty/f-${i}.txt`, "x"));
+		await Promise.all(writes);
+
+		const identity = ["-c", "user.email=test@omp", "-c", "user.name=test"];
+		const init = Bun.spawnSync(["git", "init", path]);
+		expect(init.exitCode).toBe(0);
+		const add = Bun.spawnSync(["git", ...identity, "-C", path, "add", "dirty"]);
+		expect(add.exitCode).toBe(0);
+		const commit = Bun.spawnSync(["git", ...identity, "-C", path, "commit", "-qm", "init"]);
+		expect(commit.exitCode).toBe(0);
+		// Touch every tracked file so the working tree is dirty.
+		const dirty = Array.from({ length: 6_000 }, (_, i) => fs.appendFile(`${path}/dirty/f-${i}.txt`, "y"));
+		await Promise.all(dirty);
+
+		clearCommandCodeServerConfigCache();
+		const config = await buildCommandCodeServerConfig(path);
+		expect(config.isGitRepo).toBe(true);
+		expect(config.gitStatus).not.toBe("Working tree clean");
+		expect(config.gitStatus.length).toBeGreaterThan(0);
+		// The cap still holds on the wire: never the full untruncated status
+		// (~110 KiB). Sanity bounds it to the probe cap and a little slack.
+		expect(config.gitStatus.length).toBeLessThan(100_000);
 	});
 });
 
