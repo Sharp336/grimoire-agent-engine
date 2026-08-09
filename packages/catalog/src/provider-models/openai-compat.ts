@@ -3635,29 +3635,53 @@ export function coreWeaveModelManagerOptions(
 // ---------------------------------------------------------------------------
 
 const META_MODEL_API_BASE_URL = "https://api.meta.ai/v1";
-const META_MUSE_SPARK_COST = { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 } as const;
+const META_MUSE_SPARK_STANDARD_COST = { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 } as const;
+const META_MUSE_SPARK_CONTRIBUTOR_COST = { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 } as const;
 const META_MUSE_SPARK_THINKING: ThinkingConfig = {
 	mode: "effort",
 	efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
 };
+const META_MUSE_SPARK_ENDPOINT: Pick<
+	ModelSpec<"openai-responses">,
+	"api" | "provider" | "baseUrl" | "reasoning" | "input"
+> = {
+	api: "openai-responses",
+	provider: "meta",
+	baseUrl: META_MODEL_API_BASE_URL,
+	reasoning: true,
+	input: ["text", "image"],
+};
+const META_MUSE_SPARK_LIMITS_AND_REASONING = {
+	contextWindow: 1_048_576,
+	maxTokens: 131_072,
+	thinking: META_MUSE_SPARK_THINKING,
+	compat: {
+		supportsReasoningEffort: true,
+		includeEncryptedReasoning: true,
+	},
+} as const;
 
 export const META_MUSE_STATIC_MODELS: readonly ModelSpec<"openai-responses">[] = [
 	{
 		id: "muse-spark-1.1",
 		name: "Muse Spark 1.1",
-		api: "openai-responses",
-		provider: "meta",
-		baseUrl: META_MODEL_API_BASE_URL,
-		reasoning: true,
-		input: ["text", "image"],
-		cost: META_MUSE_SPARK_COST,
-		contextWindow: 1_048_576,
-		maxTokens: 131_072,
-		thinking: META_MUSE_SPARK_THINKING,
-		compat: {
-			supportsReasoningEffort: true,
-			includeEncryptedReasoning: true,
-		},
+		...META_MUSE_SPARK_ENDPOINT,
+		cost: META_MUSE_SPARK_STANDARD_COST,
+		...META_MUSE_SPARK_LIMITS_AND_REASONING,
+	},
+	{
+		id: "muse-spark-1.2",
+		name: "Muse Spark 1.2",
+		...META_MUSE_SPARK_ENDPOINT,
+		cost: META_MUSE_SPARK_STANDARD_COST,
+		...META_MUSE_SPARK_LIMITS_AND_REASONING,
+	},
+	{
+		id: "muse-spark-1.2-contributor",
+		name: "Muse Spark 1.2 Contributor",
+		...META_MUSE_SPARK_ENDPOINT,
+		cost: META_MUSE_SPARK_CONTRIBUTOR_COST,
+		...META_MUSE_SPARK_LIMITS_AND_REASONING,
 	},
 ];
 

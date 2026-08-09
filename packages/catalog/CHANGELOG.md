@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Muse Spark 1.2 (Standard & Contributor variants) with image support and reasoning levels, plus context limits and pricing from the official documentation ([#7764](https://github.com/can1357/oh-my-pi/issues/7764)).
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed
