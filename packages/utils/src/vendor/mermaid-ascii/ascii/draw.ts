@@ -21,7 +21,7 @@ import { gridToDrawingCoord, lineToDrawing } from './grid'
 import { splitLines } from './multiline-utils'
 import { getCorners } from './shapes/corners'
 import { getShapeAttachmentPoint } from './shapes/index'
-import { displayWidth, toCells, WIDE_PAD } from '../text-metrics'
+import { displayWidth, toCells, WIDE_PAD, LABEL_SPACE } from '../text-metrics'
 
 // ============================================================================
 // Node drawing — renders a node using shape-aware rendering
@@ -677,8 +677,22 @@ function drawTextOnLine(canvas: Canvas, line: DrawingCoord[], label: string, isU
   for (let i = 0; i < lines.length; i++) {
     const lineText = lines[i]!
     const startX = middleX - Math.floor(displayWidth(lineText) / 2)
-    drawText(canvas, { x: startX, y: startY + i }, lineText)
+    drawText(canvas, { x: startX, y: startY + i }, opaqueLabelSpaces(lineText))
   }
+}
+
+/**
+ * Replace spaces between label glyphs with LABEL_SPACE so the routed line
+ * underneath an edge label cannot show through (plain spaces are transparent
+ * during canvas merging). Leading/trailing spaces — centering padding, not
+ * part of the visible label — stay transparent.
+ */
+function opaqueLabelSpaces(text: string): string {
+  const trimmed = text.trim()
+  if (trimmed.length === 0) return text
+  const lead = text.length - text.trimStart().length
+  const trail = text.length - text.trimEnd().length
+  return text.slice(0, lead) + trimmed.replace(/ /g, LABEL_SPACE) + text.slice(text.length - trail)
 }
 
 // ============================================================================

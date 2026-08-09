@@ -29,6 +29,17 @@
  */
 export const WIDE_PAD = '\u0000'
 
+/**
+ * Sentinel marking a space inside an edge label. Edge labels are drawn on
+ * their own overlay canvas, and plain spaces there are transparent during
+ * canvas merging — letting the routed line underneath show through. Edge-label
+ * drawing writes LABEL_SPACE for spaces between label glyphs; canvas merging
+ * treats it as opaque label content and serialization emits a regular space.
+ * U+0001 cannot appear in parsed Mermaid labels, is measured 1 column by the
+ * width logic, and never pairs with WIDE_PAD.
+ */
+export const LABEL_SPACE = '\u0001'
+
 const graphemeSegmenter = new Intl.Segmenter()
 
 /**
