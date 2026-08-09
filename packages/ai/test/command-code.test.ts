@@ -6,6 +6,7 @@ import {
 	slugifyProjectPath,
 	streamCommandCode,
 } from "@oh-my-pi/pi-ai/providers/command-code";
+import { NO_AUTH_SENTINEL } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context, Model, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
@@ -330,6 +331,54 @@ describe("command-code request parity", () => {
 			toolCallId: "call_1",
 			toolName: "",
 			output: { type: "text", value: "file contents" },
+		});
+	});
+
+	it("serializes failed tool results as error-text output", async () => {
+		scenario = {
+			kind: "capture",
+			body: `{"type":"text-delta","text":"ok"}\n{"type":"finish","finishReason":"stop"}\n`,
+		};
+		const baseUrl = await startServer();
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_1",
+			toolName: "read",
+			content: [{ type: "text", text: "ENOENT: no such file" }],
+			isError: true,
+			timestamp: 2,
+		};
+		const context: Context = {
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", id: "call_1", name: "read", arguments: { path: "missing.ts" } }],
+					api: "command-code",
+					provider: "command-code",
+					model: "deepseek/deepseek-v4-flash",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 1,
+				},
+				toolResult,
+				{ role: "user", content: "continue", timestamp: 3 },
+			],
+		};
+		await collectStream(makeModel(baseUrl), context);
+		const params = lastRequest!.body.params as { messages: Array<Record<string, unknown>> };
+		const toolMessage = params.messages[1] as { content: Array<Record<string, unknown>> };
+		expect(toolMessage.content[0]).toEqual({
+			type: "tool-result",
+			toolCallId: "call_1",
+			toolName: "",
+			output: { type: "error-text", value: "ENOENT: no such file" },
 		});
 	});
 
@@ -952,8 +1001,56 @@ describe("command-code streamSimple options", () => {
 		expect(lastRequest!.headers.get("x-model-header")).toBe("model-value");
 		expect(lastRequest!.headers.get("x-overridden")).toBe("caller");
 	});
-});
 
+	it("omits Authorization for the keyless N/A sentinel", async () => {
+		scenario = {
+			kind: "capture",
+			body: `{"type":"finish","finishReason":"stop"}
+`,
+		};
+		const baseUrl = await startServer();
+		const model = {
+			...getBundledModel("command-code", "deepseek/deepseek-v4-flash"),
+			baseUrl,
+		} as Model<"command-code">;
+		const stream = streamSimple(
+			model,
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			{ apiKey: NO_AUTH_SENTINEL },
+		);
+		for await (const _ of stream) {
+			/* drain */
+		}
+		await stream.result();
+
+		expect(lastRequest!.headers.has("authorization")).toBe(false);
+	});
+
+	it("keeps a single model Authorization without joining a default bearer", async () => {
+		scenario = {
+			kind: "capture",
+			body: `{"type":"finish","finishReason":"stop"}
+`,
+		};
+		const baseUrl = await startServer();
+		const model = {
+			...getBundledModel("command-code", "deepseek/deepseek-v4-flash"),
+			baseUrl,
+			headers: { Authorization: "Bearer proxy-key" },
+		} as Model<"command-code">;
+		const stream = streamSimple(
+			model,
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			{ apiKey: "test-key" },
+		);
+		for await (const _ of stream) {
+			/* drain */
+		}
+		await stream.result();
+
+		expect(lastRequest!.headers.get("authorization")).toBe("Bearer proxy-key");
+	});
+});
 describe("command-code effort dial", () => {
 	it("omits reasoning_effort for unladdered bundled reasoners under a global setting", async () => {
 		scenario = { kind: "capture", body: `{"type":"finish","finishReason":"stop"}\n` };

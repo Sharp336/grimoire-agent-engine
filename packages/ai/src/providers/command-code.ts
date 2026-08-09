@@ -36,6 +36,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { toolWireSchema } from "../utils/schema/wire";
 import { getNamedToolChoiceName } from "../utils/tool-choice";
+import { NO_AUTH_SENTINEL } from "./openai-shared";
 import { transformMessages } from "./transform-messages";
 import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
 
@@ -77,6 +78,33 @@ const HEADER = {
 	sessionId: "x-session-id",
 	zdr: "x-cmd-zdr",
 } as const;
+
+/** True when `headers` already carries the named header under any casing. */
+function hasHeaderCaseInsensitive(headers: Record<string, string>, name: string): boolean {
+	const lower = name.toLowerCase();
+	for (const key of Object.keys(headers)) {
+		if (key.toLowerCase() === lower) return true;
+	}
+	return false;
+}
+
+/**
+ * Layer `source` onto `target`, overwriting any existing key that matches
+ * case-insensitively so Fetch never joins duplicate Authorization casings.
+ */
+function assignHeadersCaseInsensitive(
+	target: Record<string, string>,
+	source: Record<string, string> | undefined,
+): void {
+	if (!source) return;
+	for (const [key, value] of Object.entries(source)) {
+		const lower = key.toLowerCase();
+		for (const existing of Object.keys(target)) {
+			if (existing.toLowerCase() === lower) delete target[existing];
+		}
+		target[key] = value;
+	}
+}
 
 /** Directories the CLI hides from the `config.structure` listing. */
 const STRUCTURE_IGNORED = new Set([
@@ -417,7 +445,13 @@ function toWireMessages(messages: Message[], supportsImages: boolean): unknown[]
 							type: "tool-result",
 							toolCallId: toolMsg.toolCallId,
 							toolName: "",
-							output: { type: "text", value: textValue },
+							// Official CLI emits `error-text` for failed local results so the
+							// model can correct/retry; dropping `isError` collapses failures
+							// into empty success results.
+							output: {
+								type: toolMsg.isError ? "error-text" : "text",
+								value: textValue,
+							},
 						},
 					],
 				});
@@ -677,10 +711,14 @@ export const streamCommandCode: StreamFunction<"command-code"> = (
 			if (threadId) body.threadId = threadId;
 			if (options?.mode !== undefined) body.mode = options.mode;
 
+			// Build defaults first, then layer model/caller headers case-insensitively.
+			// Fetch joins duplicate Authorization casings (`authorization` +
+			// `Authorization`) into a single comma-separated value, so a proxy
+			// configured with its own auth header (or `auth: none` → `N/A`) would
+			// otherwise receive `Bearer N/A, Bearer real` / dummy+real.
 			const headers: Record<string, string> = {
 				"content-type": "application/json",
 				"user-agent": "cli",
-				authorization: `Bearer ${apiKey}`,
 				[HEADER.cliVersion]: options?.clientVersion ?? COMMAND_CODE_CLIENT_VERSION,
 				[HEADER.cliEnvironment]: resolveCliEnvironment(),
 				[HEADER.projectSlug]: options?.projectSlug ?? slugifyProjectPath(cwd),
@@ -688,10 +726,14 @@ export const streamCommandCode: StreamFunction<"command-code"> = (
 				[HEADER.coFlag]: String(options?.oauthEnforced ?? false),
 				[HEADER.sessionId]: sessionId,
 				...($env.CMD_ZDR === "1" ? { [HEADER.zdr]: "1" } : {}),
-				// Caller headers layer on top of model-defined headers (shared contract).
-				...(model.headers ?? {}),
-				...(options?.headers ?? {}),
 			};
+			assignHeadersCaseInsensitive(headers, model.headers);
+			assignHeadersCaseInsensitive(headers, options?.headers);
+			// Only inject the default bearer when the key is real and neither the
+			// model nor the caller already supplied Authorization.
+			if (apiKey !== NO_AUTH_SENTINEL && !hasHeaderCaseInsensitive(headers, "authorization")) {
+				headers.Authorization = `Bearer ${apiKey}`;
+			}
 
 			// Request-capture/redaction hook, same contract as the other HTTP
 			// providers: a returned value replaces the outgoing body.
