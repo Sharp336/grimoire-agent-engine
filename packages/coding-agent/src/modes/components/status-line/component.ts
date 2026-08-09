@@ -350,6 +350,7 @@ export class StatusLineComponent implements Component {
 	#loopModeStatus: SegmentContext["loopMode"] = null;
 	#goalModeStatus: { enabled: boolean; paused: boolean } | null = null;
 	#vibeModeStatus: { enabled: boolean } | null = null;
+	#heartbeatStatus: SegmentContext["heartbeat"] = null;
 	/**
 	 * Injected aggregator that returns the aggregate tok/s of this session's
 	 * live vibe worker sessions, or null when no workers are streaming. Kept as
@@ -609,6 +610,10 @@ export class StatusLineComponent implements Component {
 
 	setVibeModeStatus(status: { enabled: boolean } | undefined): void {
 		this.#vibeModeStatus = status ?? null;
+	}
+
+	setHeartbeatStatus(status: SegmentContext["heartbeat"] | undefined): void {
+		this.#heartbeatStatus = status ?? null;
 	}
 
 	/**
@@ -1568,6 +1573,7 @@ export class StatusLineComponent implements Component {
 					? { enabled: true }
 					: null,
 			goalMode: this.#goalModeStatus,
+			heartbeat: this.#heartbeatStatus,
 			vibeMode: this.#vibeModeStatus,
 			collab: this.#collabStatus,
 			usageStats,

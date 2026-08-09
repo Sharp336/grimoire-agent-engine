@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/heartbeat` slash command for timer-based recurring prompt injection. Set an interval and instruction (e.g. `/heartbeat every 10m Check the deployment status`) and the prompt is automatically injected into the session at each interval. Supports pause, resume, status, and clear subcommands.
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed
