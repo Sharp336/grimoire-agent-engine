@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added the `before_provider_headers` extension event for attaching per-request attribution or tracing headers to provider calls; provider-generated headers such as auth stay out of scope ([#8046](https://github.com/can1357/oh-my-pi/pull/8046)).
+- Added the `before_provider_headers` extension event for attaching per-request attribution or tracing headers to provider calls; provider-generated headers such as auth stay out of scope ([#8046](https://github.com/can1357/oh-my-pi/pull/8046) by [@svperfecta](https://github.com/svperfecta)).
 
 ## [17.2.12] - 2026-08-08
 
