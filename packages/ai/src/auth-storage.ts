@@ -167,6 +167,25 @@ export interface StoredAuthCredential {
 	disabledCause: string | null;
 }
 
+/**
+ * Store-level result for an atomic create-only credential insertion.
+ * The rows are internal state used to refresh {@link AuthStorage}'s cache.
+ */
+export interface StoredCredentialInsertResult {
+	inserted: boolean;
+	rows: StoredAuthCredential[];
+}
+
+/**
+ * Public result for {@link AuthStorage.insertCredentialsIfProviderAbsent}.
+ * Contains row identity and type only; credential values are intentionally omitted.
+ */
+export interface CredentialInsertResult {
+	inserted: boolean;
+	provider: string;
+	rows: Array<{ id: number; type: AuthCredential["type"] }>;
+}
+
 /** One persisted rate-limit block: credential row id + provider-type key + optional scope. */
 export interface StoredCredentialBlock {
 	/** SQLite row id of the credential (auth_credentials.id). */
@@ -393,6 +412,11 @@ export interface AuthCredentialStore {
 	/** Optional hook to notify the underlying store that usage report cache is stale. */
 	invalidateUsageCache?(signal?: AbortSignal): Promise<void>;
 	listAuthCredentials(provider?: string): StoredAuthCredential[];
+	/**
+	 * Atomically insert all supplied credentials only when the provider has no
+	 * active credentials. Stores that cannot provide this guarantee omit it.
+	 */
+	insertCredentialsIfProviderAbsent?(provider: string, credentials: AuthCredential[]): StoredCredentialInsertResult;
 	/**
 	 * Optional store hook to re-hydrate the credential snapshot from its
 	 * backing source. Remote broker stores re-fetch `GET /v1/snapshot` so a
@@ -2330,6 +2354,31 @@ export class AuthStorage {
 			stored.map(record => ({ id: record.id, credential: record.credential })),
 		);
 		this.#resetProviderAssignments(provider);
+	}
+
+	/**
+	 * Insert credentials only when the provider has no active credentials.
+	 *
+	 * This deliberately requires a store-level atomic capability: a
+	 * read-then-write fallback would be unsafe for remote or concurrent stores.
+	 */
+	insertCredentialsIfProviderAbsent(provider: string, credentials: AuthCredential[]): CredentialInsertResult {
+		const insert = this.#store.insertCredentialsIfProviderAbsent;
+		if (!insert) {
+			throw new AIError.ConfigurationError("Credential store lacks atomic create-only credential insertion");
+		}
+		const deduped = this.#dedupeOAuthCredentials(provider, credentials);
+		const outcome = insert.call(this.#store, provider, deduped);
+		this.#setStoredCredentials(
+			provider,
+			outcome.rows.map(record => ({ id: record.id, credential: record.credential })),
+		);
+		if (outcome.inserted) this.#resetProviderAssignments(provider);
+		return {
+			inserted: outcome.inserted,
+			provider,
+			rows: outcome.rows.map(record => ({ id: record.id, type: record.credential.type })),
+		};
 	}
 
 	/**

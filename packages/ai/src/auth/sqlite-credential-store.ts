@@ -17,6 +17,7 @@ import type {
 	OAuthCredential,
 	StoredAuthCredential,
 	StoredCredentialBlock,
+	StoredCredentialInsertResult,
 } from "../auth-storage";
 import * as AIError from "../error";
 import type { OAuthCredentials } from "../registry/oauth/types";
@@ -146,6 +147,31 @@ export function serializeCredential(provider: string, credential: AuthCredential
 		};
 	}
 	return null;
+}
+
+function serializeCreateOnlyCredentials(provider: string, credentials: AuthCredential[]): SerializedCredentialRecord[] {
+	try {
+		return credentials.map(credential => {
+			if (!credential || typeof credential !== "object") {
+				throw new TypeError("invalid credential");
+			}
+			if (
+				(credential.type !== "api_key" && credential.type !== "oauth") ||
+				(credential.type === "api_key" && typeof credential.key !== "string") ||
+				(credential.type === "oauth" &&
+					(typeof credential.access !== "string" ||
+						typeof credential.refresh !== "string" ||
+						!Number.isFinite(credential.expires)))
+			) {
+				throw new TypeError("invalid credential");
+			}
+			const serialized = serializeCredential(provider, credential);
+			if (!serialized) throw new TypeError("invalid credential");
+			return serialized;
+		});
+	} catch {
+		throw new TypeError("Invalid credential payload");
+	}
 }
 
 function deserializeCredential(row: AuthRow): AuthCredential | null {
@@ -1229,6 +1255,21 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			results.push(toStoredAuthCredential(row, credential));
 		}
 		return results;
+	}
+
+	insertCredentialsIfProviderAbsent(provider: string, credentials: AuthCredential[]): StoredCredentialInsertResult {
+		const serialized = serializeCreateOnlyCredentials(provider, credentials);
+		const insertIfAbsent = this.#db.transaction(() => {
+			const existingRows = this.#listActiveByProviderStmt.all(provider) as AuthRow[];
+			if (existingRows.length > 0) {
+				return { inserted: false, rows: this.listAuthCredentials(provider) };
+			}
+			for (const record of serialized) {
+				this.#insertStmt.get(provider, record.credentialType, record.data, record.identityKey);
+			}
+			return { inserted: serialized.length > 0, rows: this.listAuthCredentials(provider) };
+		});
+		return insertIfAbsent.immediate();
 	}
 
 	async listDisabledCredentials(provider?: string): Promise<DisabledCredentialSummary[]> {
