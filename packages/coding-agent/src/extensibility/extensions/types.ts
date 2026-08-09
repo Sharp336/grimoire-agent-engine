@@ -679,21 +679,9 @@ export interface BeforeProviderRequestEvent {
 /**
  * Fired before the provider HTTP call, carrying the CALLER-SUPPLIED request
  * headers (`StreamOptions.headers`). Handlers mutate `headers` in place; the
- * return value is ignored.
- *
- * Scope, stated precisely because the difference matters:
- *
- * - Headers added here reach the request. Providers merge this map into the
- *   headers they build, so this is the supported way to attach per-request
- *   metadata (attribution, tracing, a session id).
- * - Provider-generated headers are NOT visible and cannot be removed. Auth,
- *   model-configured headers, and provider defaults are assembled downstream of
- *   this event, so deleting a key only removes it if a caller supplied it.
- *
- * That boundary is deliberate rather than incidental: a hook that exposed the
- * assembled map would hand every installed extension the provider credential.
- * Extensions that need to observe what was actually sent should use
- * `after_provider_response` instead.
+ * return value is ignored. Additions reach the request; provider auth and
+ * defaults are assembled downstream and can be neither read nor replaced. See
+ * `docs/extensions.md` for the full contract.
  */
 export interface BeforeProviderHeadersEvent {
 	type: "before_provider_headers";

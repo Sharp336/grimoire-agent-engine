@@ -246,7 +246,7 @@ Cancelable pre-events:
 - `input`
 - `before_agent_start`
 - `before_provider_request` (may replace provider request payload)
-- `before_provider_headers` — edit the **caller-supplied** request headers (`StreamOptions.headers`) before the provider HTTP call. Handlers mutate `event.headers` in place; the return value is ignored. Headers added here reach the request, so this is the supported way to attach per-request metadata such as attribution, tracing, or a session id. Provider-generated headers — auth, model-configured headers, provider defaults — are assembled downstream and are neither visible nor removable; that boundary is deliberate, because exposing the assembled map would hand every installed extension the provider credential. Edits to credential headers (`Authorization`, `Proxy-Authorization`, `X-Api-Key`, `Api-Key`, `X-Goog-Api-Key`) are discarded rather than left to each provider's precedence, so a handler cannot suppress or replace the real credential; a caller's own auth header in `StreamOptions.headers` is untouched. Use `after_provider_response` to observe what was actually sent. Each handler receives its own copy, so a handler that outruns the timeout cannot write into the request after returning, and only a handler that runs to completion has its edits applied — one that throws, times out, or is aborted contributes nothing. Handlers run once the request has won its per-provider concurrency slot rather than when it queues for one, so a request aborted while queued never runs them, and a short-lived or timestamped header is minted next to the HTTP call.
+- `before_provider_headers` — add per-request headers before the provider HTTP call (see [below](#before_provider_headers))
 - `after_provider_response`
 - `context`
 - `agent_start` / `agent_end` — agent loop lifecycle notification; `agent_end` remains notification-only
@@ -295,6 +295,14 @@ The runtime handles the JSON-RPC transport and its own list/update refresh first
 
 - `user_bash` (override with `{ result }`)
 - `user_python` (override with `{ result }`)
+
+### `before_provider_headers`
+
+Attach per-request metadata (attribution, tracing, a session id) to the provider call. Handlers mutate `event.headers` in place; the return value is ignored.
+
+Scope is the **caller-supplied** headers (`StreamOptions.headers`), not the provider's assembled map. Additions reach the request; provider auth and defaults are built downstream, and edits to credential headers (`Authorization`, `Proxy-Authorization`, `X-Api-Key`, `Api-Key`, `X-Goog-Api-Key`) are discarded, so a handler can neither read nor replace the credential. A caller's own auth header is left alone. Use `after_provider_response` to observe what was actually sent.
+
+Each handler gets its own copy, and only one that runs to completion has its edits applied — throwing, timing out, or being aborted contributes nothing. Handlers run once the request holds its per-provider concurrency slot, so a request aborted while queued never runs them and a short-lived header is minted next to the HTTP call.
 
 ### `resources_discover`
 
