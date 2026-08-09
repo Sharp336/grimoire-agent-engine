@@ -271,11 +271,19 @@ async function readCapped(
 	const decoder = new TextDecoder();
 	let result = "";
 	let truncated = false;
-	while (result.length < maxBytes) {
+	for (;;) {
 		const { done, value } = await reader.read();
 		if (done) break;
 		if (!value) continue;
-		const slice = value.subarray(0, maxBytes - result.length);
+		const remaining = maxBytes - result.length;
+		if (remaining <= 0) {
+			// The previous chunk landed exactly on the cap; a further chunk
+			// means the stream has more, so it is truncated even though the
+			// byte-length comparison never saw a straddle.
+			truncated = true;
+			break;
+		}
+		const slice = value.subarray(0, remaining);
 		result += decoder.decode(slice, { stream: true });
 		if (value.byteLength > slice.byteLength) {
 			truncated = true;
