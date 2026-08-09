@@ -1,5 +1,6 @@
 import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
 import { COLLAB_GUEST_ALLOWED_COMMANDS } from "../collab/guest";
+import { interceptSlashCommand } from "../i18n/interceptor";
 import { BUILTIN_COLLABORATION_SLASH_COMMANDS } from "./builtin-collaboration";
 import {
 	buildArgumentCompletions,
@@ -14,7 +15,6 @@ import { BUILTIN_MARKETPLACE_SLASH_COMMANDS, reloadTuiPluginState } from "./buil
 import { BUILTIN_MODE_SLASH_COMMANDS } from "./builtin-modes";
 import { BUILTIN_SESSION_SLASH_COMMANDS } from "./builtin-session";
 import { parseSlashCommand } from "./helpers/parse";
-import { interceptSlashCommand } from "../i18n/interceptor";
 import type {
 	BuiltinSlashCommand,
 	ParsedSlashCommand,
@@ -71,7 +71,7 @@ function materializeTuiBuiltinSlashCommand(
 	cmd: BuiltinSlashCommand,
 	runtime?: TuiSlashCommandRuntime,
 ): TuiBuiltinSlashCommand {
-const translated = interceptSlashCommand({
+	const translated = interceptSlashCommand({
 		name: cmd.name,
 		description: cmd.description,
 		subcommands: cmd.subcommands,
@@ -84,11 +84,12 @@ const translated = interceptSlashCommand({
 		}));
 	}
 	if (cmd.subcommands) {
+		const resolvedSubs = materialized.subcommands ?? cmd.subcommands;
 		materialized.getArgumentCompletions =
 			cmd.name === "mcp" && runtime
-				? buildMcpArgumentCompletions(cmd.subcommands, runtime)
-				: buildArgumentCompletions(cmd.subcommands);
-		materialized.getInlineHint = buildSubcommandInlineHint(cmd.subcommands);
+				? buildMcpArgumentCompletions(resolvedSubs, runtime)
+				: buildArgumentCompletions(resolvedSubs);
+		materialized.getInlineHint = buildSubcommandInlineHint(resolvedSubs);
 	} else if (cmd.name === "move") {
 		materialized.getArgumentCompletions = buildDirectoryArgumentCompletions();
 		if (cmd.inlineHint) materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);

@@ -5,10 +5,10 @@
  */
 
 import * as fs from "node:fs";
-import { homedir } from "node:os";
+import * as os from "node:os";
 import * as path from "node:path";
 
-const LAN_DIR = path.join(homedir(), ".omp", "lang");
+const LAN_DIR = path.join(os.homedir(), ".omp", "lang");
 
 // 翻译映射表
 const MAP: Record<string, string> = {
