@@ -13,6 +13,7 @@ import { buildContextReportText } from "./helpers/context-report";
 import { formatDuration } from "./helpers/format";
 import { handleMcpAcp } from "./helpers/mcp";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
+import { buildPromptCacheAuditReportText } from "./helpers/prompt-cache-report";
 import { describeRedeemOutcome, type ResetUsageAccount, toResetUsageAccounts } from "./helpers/reset-usage";
 import { matchSessionPinAccounts, toSessionPinAccounts } from "./helpers/session-pin";
 import { launchStatsDashboard, parseStatsDashboardArgs } from "./helpers/stats-dashboard";
@@ -428,6 +429,18 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 		handleTui: (_command, runtime) => {
 			runtime.ctx.handleContextCommand();
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "prompt-cache-audit",
+		description: "Audit prompt-cache reuse and recreation",
+		handle: async (_command, runtime) => {
+			await runtime.output(buildPromptCacheAuditReportText(runtime));
+			return commandConsumed();
+		},
+		handleTui: (_command, runtime) => {
+			runtime.ctx.handlePromptCacheAuditCommand();
 			runtime.ctx.editor.setText("");
 		},
 	},

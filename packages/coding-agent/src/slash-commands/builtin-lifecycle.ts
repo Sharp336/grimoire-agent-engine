@@ -8,6 +8,7 @@ import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { resolveResumableSession } from "../session/session-listing";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { resolveToCwd } from "../tools/path-utils";
+import { generateSessionTitleFromRecentTranscript } from "../utils/title-generator";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
 import type {
@@ -364,14 +365,28 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		inlineHint: "<title>",
 		allowArgs: true,
 		handle: async (command, runtime) => {
-			if (!command.args) return usage("Usage: /rename <title>", runtime);
-			const ok = await runtime.sessionManager.setSessionName(command.args, "user");
+			const explicitTitle = command.args.trim();
+			const title =
+				explicitTitle ||
+				(await generateSessionTitleFromRecentTranscript(
+					runtime.session.messages,
+					runtime.session.modelRegistry,
+					runtime.settings,
+					runtime.session.sessionId,
+					runtime.session.model,
+					provider => runtime.session.agent.metadataForProvider(provider),
+				));
+			if (!title) {
+				await runtime.output("No conversation content to generate a title from.");
+				return commandConsumed();
+			}
+			const ok = await runtime.sessionManager.setSessionName(title, "user");
 			if (!ok) {
 				await runtime.output("Session name not changed (a user-set name takes precedence).");
 				return commandConsumed();
 			}
 			await runtime.notifyTitleChanged?.();
-			await runtime.output(`Session renamed to ${command.args}.`);
+			await runtime.output(`Session renamed to ${title}.`);
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
