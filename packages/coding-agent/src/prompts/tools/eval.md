@@ -1,7 +1,12 @@
 Run one step of code in a persistent kernel. State persists across calls and subagents.
 
 Work incrementally: imports → define → test → use, each its own cell. Re-run setup ONLY after `reset`, kernel crash.
-Parallelize *within* a cell with `parallel(thunks)`, not by batching.
+Static, pre-known session-tool calls MUST be invoked directly outside Eval.
+Parallelism alone MUST NOT route session-tool calls through Eval.
+Use `parallel` or `pipeline` only for runtime-computed fan-outs, state-dependent loops, or bounded in-cell reductions.
+Repository and system work inside Eval MUST use `tool.<owner>`.
+Language-level I/O MAY handle only disposable fixtures or protocol streams that native tools cannot express.
+Call native tools directly before Eval when computation needs a finite, pre-known set of tool results.
 
 {{#if py}}Top-level `await` works; `asyncio.run(…)` raises error.{{/if}}
 {{#if js}}JS runs under **Bun**: globals (`Bun.file`, `Bun.write`, `Bun.$`, `fetch`, `Buffer`) available; top-level `await`/`return` work.{{/if}}
