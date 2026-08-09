@@ -710,7 +710,7 @@ describe("ExtensionRunner", () => {
 				expect(headers).toEqual({ "x-original": "kept" });
 				// The handler is still running here; give it time to attempt its write and
 				// confirm the map we already returned is unaffected.
-				await new Promise(resolve => setTimeout(resolve, 80));
+				await Bun.sleep(80);
 				expect(headers).toEqual({ "x-original": "kept" });
 			} finally {
 				testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
@@ -756,7 +756,7 @@ describe("ExtensionRunner", () => {
 				export default function(pi) {
 					pi.on("before_provider_headers", async (event) => {
 						event.headers["x-first"] = "ran";
-						await new Promise(resolve => setTimeout(resolve, 5000));
+						await Bun.sleep(5000);
 					});
 				}
 			`;

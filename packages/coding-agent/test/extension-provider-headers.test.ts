@@ -103,7 +103,7 @@ describe("wrapStreamFnWithProviderHeaders", () => {
 
 		const first = await wrapped(capped, context, { headers: { "x-a": "1" } });
 		const second = wrapped(capped, context, { headers: { "x-b": "2" } });
-		await new Promise(resolve => setTimeout(resolve, 10));
+		await Bun.sleep(10);
 
 		// The queued request has not run its handlers, because it holds no slot yet.
 		expect(seen).toHaveLength(1);

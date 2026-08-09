@@ -545,7 +545,18 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 
 			const baseUrl = model.baseUrl || CURSOR_API_URL;
 			const requestPath = "/agent.v1.AgentService/Run";
+			// Caller headers are additive, and are spread FIRST so the protocol
+			// framing, auth, and request id below always win. Cursor built this map
+			// from scratch and never read `options.headers`, so tracing/attribution
+			// headers set by a caller (or a `before_provider_headers` extension) were
+			// silently dropped here while working on other providers. HTTP/2
+			// pseudo-headers are stripped outright: they belong to the transport, and
+			// a stray one makes node's http2 client throw.
+			const callerHeaders = Object.fromEntries(
+				Object.entries(options?.headers ?? {}).filter(([name]) => !name.startsWith(":")),
+			);
 			const requestHeaders = {
+				...callerHeaders,
 				":method": "POST",
 				":path": requestPath,
 				"content-type": "application/connect+proto",
