@@ -3712,6 +3712,10 @@ export class TUI extends Container {
 			// Clear native history without blanking the live viewport first. The
 			// replay below rewrites every visible row from home, including blanks,
 			// so terminals without DEC 2026 never expose an ED2-cleared frame.
+			// The clear also destroys every placement cell, so placement epochs
+			// restart — the replay's placements then replace the terminal's stale
+			// registry entries instead of stranding one per replay.
+			this.#imageBudget.resetPlacementEpochs();
 			buffer += "\x1b[H\x1b[3J";
 		} else {
 			// Best-effort: push the pre-paint screen into scrollback on

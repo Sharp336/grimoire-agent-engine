@@ -261,8 +261,9 @@ export class ImageBudget {
 	 * Resolve the placement id and geometry for a direct-placement emit whose
 	 * block origin sits at `originFrameRow` (absolute frame row, -1 when the
 	 * writer has no frame-space position: alt-screen, resize, ConPTY-truncated
-	 * replays). `committedTo` is the frame-row watermark committed to native
-	 * scrollback once this frame's writes land (-1 when unknown).
+	 * replays). `committedTo` is the native-scrollback watermark in the same
+	 * frame-row space — the caller's committed row count, or the chunk target
+	 * on frames that commit as they write (-1 when unknown).
 	 *
 	 * Re-using a placement id is destructive — Kitty replace semantics strip
 	 * the prior placement's cells everywhere, scrollback included — so once
@@ -282,6 +283,21 @@ export class ImageBudget {
 		}
 		if (originFrameRow >= 0) state.lastOriginFrameRow = originFrameRow;
 		return { placementId: state.epoch, widthPx: state.widthPx, heightPx: state.heightPx };
+	}
+
+	/**
+	 * Restart every placement epoch after a destructive history clear (`CSI 3 J`
+	 * full paint). The clear destroys all placement cells — scrollback rows are
+	 * gone and the replay rewrites the viewport — so no archive remains to
+	 * protect, and continuing to advance epochs would strand one stale
+	 * placement entry in the terminal's registry per replay. Reverting to
+	 * epoch 1 makes the replay's placements replace those stale entries.
+	 */
+	resetPlacementEpochs(): void {
+		for (const state of this.#placementState.values()) {
+			state.epoch = 1;
+			state.lastOriginFrameRow = undefined;
+		}
 	}
 
 	/**

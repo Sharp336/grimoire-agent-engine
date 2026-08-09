@@ -377,4 +377,122 @@ describe("TUI direct-placement clipping", () => {
 			tui.stop();
 		}
 	});
+
+	it("bumps the epoch when an in-window rewrite re-emits after mid-stream commits passed the origin", () => {
+		const term = new VirtualTerminal(40, 12);
+		const writes: string[] = [];
+		const realWrite = term.write.bind(term);
+		vi.spyOn(term, "write").mockImplementation((data: string) => {
+			writes.push(data);
+			realWrite(data);
+		});
+
+		const { scheduler, pump } = makeManualScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		const image = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: t => t },
+			{ maxWidthCells: 4, maxHeightCells: 6, budget: tui.imageBudget, imageKey: "midstream" },
+			{ widthPx: 40, heightPx: 60 },
+		);
+		const imageId = tui.imageBudget.acquireId("midstream");
+		const stream = new Text("", 0, 0);
+		tui.addChild(new Text("header", 0, 0));
+		tui.addChild(image);
+		tui.addChild(stream);
+
+		try {
+			tui.start();
+			pump();
+
+			// Frame layout: header(1) + image rows 1..6. Unpinned streaming:
+			// scroll-appends commit rows past the block origin while the
+			// placement-1 cells scroll natively (no re-emission).
+			const lines: string[] = [];
+			for (let n = 1; n <= 10; n++) {
+				lines.push(`streaming line ${n}`);
+				stream.setText(lines.join("\n"));
+				tui.requestRender();
+				pump();
+			}
+			const beforeOverlay = capturePlacements(writes.join(""), imageId);
+			expect(new Set(beforeOverlay.map(p => p.placementId))).toEqual(new Set([1]));
+
+			// An overlay frame forces the in-place full-window rewrite — the
+			// in-window diff path re-emits the straddling placement line with
+			// committedTo = the already-advanced committed row count.
+			writes.length = 0;
+			const overlay = tui.showOverlay(new Text("OVERLAY", 0, 0), { anchor: "top-left", width: "100%" });
+			pump();
+			overlay.hide();
+			pump();
+
+			const after = capturePlacements(writes.join(""), imageId);
+			expect(after.length).toBeGreaterThan(0);
+			for (const p of after) {
+				// Commits passed the origin before this emit: placement 1 is
+				// scrollback archive and must not be replaced.
+				expect(p.placementId).toBeGreaterThan(1);
+				// The block straddles the window top, so the re-emit is clipped.
+				expect(p.rows).toBeLessThan(6);
+				expect(p.srcY).toBe(Math.floor((60 * (6 - p.rows)) / 6));
+				expect(p.cuu).toBe(p.rows - 1);
+			}
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("restarts placement epochs on a destructive history clear so replays reuse placement 1", () => {
+		const term = new VirtualTerminal(40, 12);
+		const writes: string[] = [];
+		const realWrite = term.write.bind(term);
+		vi.spyOn(term, "write").mockImplementation((data: string) => {
+			writes.push(data);
+			realWrite(data);
+		});
+
+		const { scheduler, pump } = makeManualScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		const image = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: t => t },
+			{ maxWidthCells: 4, maxHeightCells: 6, budget: tui.imageBudget, imageKey: "reset" },
+			{ widthPx: 40, heightPx: 60 },
+		);
+		const imageId = tui.imageBudget.acquireId("reset");
+		const stream = new Text("", 0, 0);
+		tui.addChild(new Text("header", 0, 0));
+		tui.addChild(image);
+		tui.addChild(stream);
+
+		try {
+			tui.start();
+			pump();
+			const lines: string[] = [];
+			for (let n = 1; n <= 10; n++) {
+				lines.push(`streaming line ${n}`);
+				stream.setText(lines.join("\n"));
+				tui.requestRender();
+				pump();
+			}
+
+			// Destructive replay: ED3 wipes every placement cell, so the replay
+			// must re-place under epoch 1 instead of stranding a stale placement
+			// entry per reset (Codex review on #8057).
+			writes.length = 0;
+			tui.resetDisplay();
+			pump();
+
+			const output = writes.join("");
+			expect(output).toContain("\x1b[3J");
+			const replay = capturePlacements(output, imageId);
+			expect(replay.length).toBeGreaterThan(0);
+			expect(replay[replay.length - 1]!.placementId).toBe(1);
+		} finally {
+			tui.stop();
+		}
+	});
 });

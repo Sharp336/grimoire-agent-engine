@@ -798,7 +798,9 @@ export function encodeKittyPlacementLine(options: {
 		const srcY = Math.floor((options.imageHeightPx * hiddenRows) / options.rows);
 		params.push(`y=${srcY}`, `h=${Math.max(1, options.imageHeightPx - srcY)}`);
 	}
-	const apc = wrapTmuxPassthroughIfNeeded(`\x1b_G${params.join(",")}\x1b\\`);
+	// No tmux passthrough: inside tmux the component's own line arrives
+	// wrapped, never parses, and never reaches this rewrite.
+	const apc = `\x1b_G${params.join(",")}\x1b\\`;
 	const cuu = visibleRows - 1;
 	return cuu > 0 ? `\x1b7\x1b[${cuu}A${apc}\x1b8` : apc;
 }
