@@ -47,6 +47,13 @@ import { decodeEventStream } from "./aws-eventstream";
 import { signRequest } from "./aws-sigv4";
 import { transformMessages } from "./transform-messages";
 
+/**
+ * Headers SigV4 generates for itself. A caller cannot be allowed to supply these:
+ * `signRequest` would sign the caller's value but return its own, so the signature
+ * would not match what goes on the wire.
+ */
+const SIGNER_OWNED_HEADERS = new Set(["host", "x-amz-date", "x-amz-content-sha256", "x-amz-security-token"]);
+
 export type BedrockThinkingDisplay = "summarized" | "omitted";
 
 export interface BedrockOptions extends StreamOptions {
@@ -362,8 +369,18 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			// caller (or by a `before_provider_headers` extension) were silently
 			// dropped here while working on every other provider. Content-type and
 			// accept stay last: the eventstream framing is not the caller's to change.
+			//
+			// The signer's OWN headers are dropped first, and that is load-bearing:
+			// `signRequest` lets a caller value overwrite `host`/`x-amz-*` in the map
+			// it signs, but always RETURNS the generated ones, which `requestHeaders`
+			// below then puts on the wire. A caller supplying any of them would sign
+			// one set of values and send another, and Bedrock would reject every
+			// request with a signature mismatch.
+			const callerHeaders = Object.fromEntries(
+				Object.entries(options?.headers ?? {}).filter(([name]) => !SIGNER_OWNED_HEADERS.has(name.toLowerCase())),
+			);
 			const baseHeaders: Record<string, string> = {
-				...options?.headers,
+				...callerHeaders,
 				"content-type": "application/json",
 				accept: "application/vnd.amazon.eventstream",
 			};

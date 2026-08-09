@@ -223,6 +223,34 @@ import {
 export const CURSOR_API_URL = "https://api2.cursor.sh";
 export const CURSOR_CLIENT_VERSION = "cli-2026.07.23-e383d2b";
 
+/**
+ * HTTP/1 connection-specific headers that HTTP/2 forbids. Node's `http2.request()`
+ * throws `ERR_HTTP2_INVALID_CONNECTION_HEADERS` on these rather than dropping
+ * them, so a caller sending one would kill the request outright.
+ */
+const HTTP2_FORBIDDEN_HEADERS = new Set([
+	"connection",
+	"keep-alive",
+	"proxy-connection",
+	"transfer-encoding",
+	"upgrade",
+	"http2-settings",
+]);
+
+/**
+ * Reduce caller-supplied headers to what an HTTP/2 request can legally carry.
+ *
+ * Exported for tests: node throws on both classes below rather than ignoring
+ * them, so a miss here turns a harmless header into a dead request.
+ */
+export function sanitizeCursorCallerHeaders(headers: Record<string, string> | undefined): Record<string, string> {
+	return Object.fromEntries(
+		Object.entries(headers ?? {}).filter(
+			([name]) => !name.startsWith(":") && !HTTP2_FORBIDDEN_HEADERS.has(name.toLowerCase()),
+		),
+	);
+}
+
 const CURSOR_PROXY_TUNNEL_TIMEOUT_MS = 30_000;
 
 /**
@@ -549,12 +577,16 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			// framing, auth, and request id below always win. Cursor built this map
 			// from scratch and never read `options.headers`, so tracing/attribution
 			// headers set by a caller (or a `before_provider_headers` extension) were
-			// silently dropped here while working on other providers. HTTP/2
-			// pseudo-headers are stripped outright: they belong to the transport, and
-			// a stray one makes node's http2 client throw.
-			const callerHeaders = Object.fromEntries(
-				Object.entries(options?.headers ?? {}).filter(([name]) => !name.startsWith(":")),
-			);
+			// silently dropped here while working on other providers.
+			//
+			// Two classes are stripped because node's http2 client THROWS on them
+			// rather than ignoring them, which would turn a harmless header into a
+			// dead request: pseudo-headers, which belong to the transport, and the
+			// HTTP/1 connection-specific headers HTTP/2 forbids outright
+			// (ERR_HTTP2_INVALID_CONNECTION_HEADERS). `te` needs no filtering here —
+			// HTTP/2 allows it only as `trailers`, which is exactly what the fixed
+			// set below re-applies over anything a caller sent.
+			const callerHeaders = sanitizeCursorCallerHeaders(options?.headers);
 			const requestHeaders = {
 				...callerHeaders,
 				":method": "POST",
