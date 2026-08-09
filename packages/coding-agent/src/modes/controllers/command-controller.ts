@@ -1285,16 +1285,19 @@ export class CommandController {
 	/**
 	 * TUI handler for `/shake`. `elide` drops heavy structural content and
 	 * `images` strips image blocks; modes run in order when combined.
-	 * Rebuilds the chat and reports merged counts.
+	 * Rebuilds the chat and reports merged counts. A mid-sequence failure
+	 * still rebuilds first when an earlier mode already mutated the session,
+	 * so the transcript never shows content the active context dropped.
 	 */
 	async handleShakeCommand(modes: readonly ShakeMode[]): Promise<void> {
 		const results: ShakeResult[] = [];
+		let failure: string | undefined;
 		for (const mode of modes) {
 			try {
 				results.push(await this.ctx.session.shake(mode));
 			} catch (error) {
-				this.ctx.showError(`Shake failed: ${error instanceof Error ? error.message : String(error)}`);
-				return;
+				failure = error instanceof Error ? error.message : String(error);
+				break;
 			}
 		}
 
@@ -1302,13 +1305,19 @@ export class CommandController {
 			(total, result) => total + result.toolResultsDropped + result.blocksDropped + (result.imagesDropped ?? 0),
 			0,
 		);
+		if (dropped > 0) {
+			this.ctx.rebuildChatFromMessages();
+			this.ctx.statusLine.invalidate();
+			this.ctx.ui.requestRender();
+		}
+		if (failure !== undefined) {
+			this.ctx.showError(`Shake failed: ${failure}`);
+			return;
+		}
 		if (dropped === 0) {
 			this.ctx.showStatus("Nothing to shake.");
 			return;
 		}
-		this.ctx.rebuildChatFromMessages();
-		this.ctx.statusLine.invalidate();
-		this.ctx.ui.requestRender();
 		this.ctx.showStatus(formatShakeSummary(results));
 	}
 
