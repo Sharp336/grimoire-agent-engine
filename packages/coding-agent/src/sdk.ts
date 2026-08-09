@@ -2532,6 +2532,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					}
 				}
 				model = selectedModel;
+				// A persona (or explicit --model) whose pattern only resolved
+				// after extension registration must still persist its
+				// model_change: options.model stays the "explicit fresh
+				// selection" marker the resume-persistence guard keys on, and
+				// without it the next resume treats the persona as rehydrated
+				// and restores the transcript's old model instead of the
+				// persona default that this run is actually using
+				// (codex 3743133859). Only the persona path sets it — the
+				// CLI --model deferral with no persona has nothing to
+				// attribute the change to.
+				if (options.agentPersona) {
+					options.model = selectedModel;
+				}
 				initialRetryFallback =
 					retryFallback && usageFallbackTriggered ? { ...retryFallback, pinned: true } : retryFallback;
 				modelFallbackMessage = undefined;

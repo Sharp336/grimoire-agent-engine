@@ -209,6 +209,57 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	test("persists a deferred persona model resolution on a resumed transcript", async () => {
+		// Regression (codex 3743133859): when an explicit persona's model: only
+		// resolves after extension registration (options.modelPattern deferral),
+		// options.model stays undefined, so the resume-persistence guard skipped
+		// the model_change append. The next resume then treated the persona as
+		// rehydrated and restored the transcript's OLD model instead of the
+		// persona default this run actually used.
+		const authStorage = await AuthStorage.create(path.join(tempDir, "persona-resume-auth.db"));
+		authStoragesToClose.push(authStorage);
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+		const sessionManager = SessionManager.inMemory();
+		// Existing transcript records a stale model; no agent_change yet, so the
+		// persona is a fresh selection whose pattern defers to post-extension.
+		sessionManager.appendModelChange("openai/gpt-4o-mini");
+		sessionManager.appendMessage({ role: "user", content: "prior turn", timestamp: Date.now() });
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			sessionManager,
+			disableExtensionDiscovery: true,
+			extensions: [providerExtension],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			agentPersona: {
+				name: "extension-model-persona",
+				description: "Persona with an extension-provided model",
+				systemPrompt: "You are extension-model-persona.",
+				model: ["runtime-provider/runtime-model"],
+				source: "project" as const,
+			},
+		});
+
+		try {
+			expect(session.model?.id).toBe("runtime-model");
+			// The deferred resolution must persist a model_change so the next
+			// resume rehydrates the persona model instead of the stale one.
+			const modelChanges = sessionManager.getEntries().filter(e => e.type === "model_change");
+			expect(modelChanges[modelChanges.length - 1].model).toBe("runtime-provider/runtime-model");
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("defers an unresolved CLI persona model through the scoped branch instead of pinning the scoped fallback", async () => {
 		// Regression: the scoped-model branch previously pinned the remembered /
 		// first scoped model whenever the persona model failed the pre-extension
