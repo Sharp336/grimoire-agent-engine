@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added dynamic model map support to `WATCHDOG.yml` advisor roster entries. The `model` field now accepts a `Record<string, string>` mapping keyed by primary driving model pattern (e.g. `"anthropic/claude-sonnet-4-5": ...`) with a `default` fallback, enabling advisors to automatically switch models when the user changes their driving model.
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed

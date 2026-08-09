@@ -284,7 +284,22 @@ Fields:
 - `instructions` (top level): shared prompt prepended to every advisor's system prompt alongside `WATCHDOG.md`. Concatenated across all discovered `WATCHDOG.yml` files.
 - `advisors[].name`: human label; slugified for the session id and its `__advisor.<slug>.jsonl` filename. Duplicate slugs across files are resolved by the same specificity rule as `WATCHDOG.md` discovery (project leaf > project ancestor > user).
 - `advisors[].enabled`: optional per-advisor switch, default `true`. `false` leaves the advisor visible as paused in status/configuration.
-- `advisors[].model`: optional model selector with optional `:level` thinking suffix (e.g. `x-ai/grok-code-fast:high`). Omitted → the advisor uses `modelRoles.advisor`.
+- `advisors[].model`: optional model selector, or a **dynamic model map** that selects the model based on the primary session's driving model.
+
+  **Static selector** (string):
+  ```
+  model: anthropic/claude-sonnet-4-5:medium
+  ```
+  A model selector with optional `:level` thinking suffix (e.g. `x-ai/grok-code-fast:high`). Omitted → the advisor uses `modelRoles.advisor`.
+
+  **Dynamic model map** (mapping):
+  ```yaml
+  model:
+    "anthropic/claude-sonnet-4-5": anthropic/claude-terra-6|deepseek/deepseek-v4-flash
+    "anthropic/claude-terra-6": anthropic/claude-sonnet-4-5|deepseek/deepseek-v4-flash
+    default: deepseek/deepseek-v4-flash
+  ```
+  Keys are model patterns matched against the primary session's driving model (exact `provider/id` match first, then model-resolver pattern resolution). The value for the matching key becomes this advisor's model selector — it supports fallback chains (`|`) and thinking suffixes just like a static selector. The `default` key is used when no other key matches, or before a driving model is set. If no key matches and no `default` exists, the advisor reports `no_model`.
 - `advisors[].tools`: optional list of built-in tool names to grant. Omitted → the default `read`/`grep`/`glob` subset; explicit `[]` → no investigative tools. Any name in [`BUILTIN_TOOL_NAMES`](../packages/coding-agent/src/tools/builtin-names.ts) is accepted, including mutating tools. Legacy aliases (`search`→`grep`, `find`→`glob`) are normalized. Unknown names are dropped with a warning; if that leaves a nonempty input with no valid names, the implementation currently treats the result as omitted and uses the default subset.
 - `advisors[].instructions`: this advisor's specialization, appended after the shared baseline. Both instruction fields expand `@path` imports like `WATCHDOG.md`.
 

@@ -13,6 +13,7 @@ import {
 	slugifyAdvisorName,
 	type WatchdogConfigDoc,
 } from "../../src/advisor/config";
+import { matchDynamicModelMapEntryExact } from "../../src/session/session-advisors";
 
 describe("discoverAdvisorConfigs", () => {
 	let tmp: string;
@@ -260,6 +261,47 @@ describe("WATCHDOG.yml file round-trip", () => {
 		expect(advisors.find(a => a.name === "Default Tools")?.tools).toBeUndefined();
 	});
 
+	it("round-trips a dynamic model map and falls back to legacy empty-file path", async () => {
+		const file = path.join(tmp, "WATCHDOG.yml");
+		const dynamicDoc: WatchdogConfigDoc = {
+			advisors: [
+				{
+					name: "Dynamic Watchdog",
+					model: {
+						"anthropic/claude-sonnet-4-5": "anthropic/claude-terra-6|deepseek/deepseek-v4-flash",
+						"anthropic/claude-terra-6": "anthropic/claude-sonnet-4-5|deepseek/deepseek-v4-flash",
+						default: "deepseek/deepseek-v4-flash",
+					},
+					tools: ["read", "grep"],
+					instructions: "Dynamic model selection.",
+				},
+			],
+		};
+
+		await saveWatchdogConfigFile(file, dynamicDoc);
+		// Verify YAML output contains the mapping, not flow-style
+		const text = await Bun.file(file).text();
+		expect(text).toContain("    model:");
+		expect(text).toContain("anthropic/claude-sonnet-4-5");
+		expect(text).toContain("default:");
+		expect(text).toContain("deepseek/deepseek-v4-flash");
+
+		// Verify round-trip loads the map as an object
+		const loaded = await loadWatchdogConfigFile(file);
+		expect(loaded.advisors[0].name).toBe("Dynamic Watchdog");
+		expect(typeof loaded.advisors[0].model).toBe("object");
+		expect((loaded.advisors[0].model as Record<string, string>)["default"]).toBe("deepseek/deepseek-v4-flash");
+
+		// Verify discovery also parses the map correctly
+		const { advisors } = await discoverAdvisorConfigs(tmp, tmp);
+		const discovered = advisors.find(a => a.name === "Dynamic Watchdog");
+		expect(discovered).toBeDefined();
+		expect(typeof discovered!.model).toBe("object");
+		const map = discovered!.model as Record<string, string>;
+		expect(map["anthropic/claude-sonnet-4-5"]).toBe("anthropic/claude-terra-6|deepseek/deepseek-v4-flash");
+		expect(map.default).toBe("deepseek/deepseek-v4-flash");
+	});
+
 	it("removes the file when the doc is empty so legacy discovery resumes", async () => {
 		const file = path.join(tmp, "WATCHDOG.yml");
 		await saveWatchdogConfigFile(file, doc);
@@ -342,8 +384,53 @@ describe("per-advisor enabled field", () => {
 				{ name: "Default" },
 			],
 		});
-		expect(text).toContain("enabled: true");
+expect(text).toContain("enabled: true");
 		expect(text).toContain("enabled: false");
 		expect(text.match(/enabled:/g)).toHaveLength(2);
+	});
+});
+
+describe("dynamic model map matching", () => {
+	it("matches exact provider/id string", () => {
+		const map = {
+			"anthropic/claude-sonnet-4-5": "anthropic/claude-terra-6|deepseek/deepseek-v4-flash",
+			"anthropic/claude-terra-6": "anthropic/claude-sonnet-4-5|deepseek/deepseek-v4-flash",
+			default: "deepseek/deepseek-v4-flash",
+		};
+		expect(matchDynamicModelMapEntryExact(map, "anthropic/claude-sonnet-4-5")).toBe(
+			"anthropic/claude-terra-6|deepseek/deepseek-v4-flash",
+		);
+		expect(matchDynamicModelMapEntryExact(map, "anthropic/claude-terra-6")).toBe(
+			"anthropic/claude-sonnet-4-5|deepseek/deepseek-v4-flash",
+		);
+	});
+
+	it("returns undefined for unmatched key (does NOT fall back to default)", () => {
+		const map = {
+			"anthropic/claude-sonnet-4-5": "terra",
+			default: "fallback",
+		};
+		expect(matchDynamicModelMapEntryExact(map, "deepseek/deepseek-v4-flash")).toBeUndefined();
+	});
+
+	it("returns undefined when only default key exists", () => {
+		const map = { default: "fallback" };
+		expect(matchDynamicModelMapEntryExact(map, "any/model")).toBeUndefined();
+	});
+
+	it("ignores the default key during exact match but matches non-default keys", () => {
+		const map = { default: "fallback", "provider/model": "selected" };
+		expect(matchDynamicModelMapEntryExact(map, "provider/model")).toBe("selected");
+		expect(matchDynamicModelMapEntryExact(map, "unknown/model")).toBeUndefined();
+	});
+
+	it("returns undefined for empty map", () => {
+		expect(matchDynamicModelMapEntryExact({}, "any/model")).toBeUndefined();
+	});
+
+	it("handles keys with special characters", () => {
+		const map = { "a/b@c": "value", default: "fallback" };
+		expect(matchDynamicModelMapEntryExact(map, "a/b@c")).toBe("value");
+		expect(matchDynamicModelMapEntryExact(map, "x/y")).toBeUndefined();
 	});
 });

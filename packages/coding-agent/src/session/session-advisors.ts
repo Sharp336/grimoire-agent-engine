@@ -52,6 +52,7 @@ import {
 	AdvisorTranscriptRecorder,
 	advisorTranscriptFilename,
 	buildAdvisorQuarantineSourceText,
+	type DynamicAdvisorModelMap,
 	formatAdvisorBatchContent,
 	getOrCreateAdvisorProviderSessionId,
 	isAdvisorInterruptImmuneTurnActive,
@@ -244,6 +245,8 @@ export interface SessionAdvisorsHost {
 	onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
 	agentKind(): "main" | "sub";
 	isDisposed(): boolean;
+	/** Returns the primary session's current driving model, or undefined. */
+	model(): Model | undefined;
 	abortInProgress(): boolean;
 	allowAgentInitiatedTurns(): boolean;
 	planModeState(): PlanModeState | undefined;
@@ -348,6 +351,36 @@ export class SessionAdvisors {
 	/** Rebuilds live advisors when role assignments alter their resolved runtime inputs. */
 	onModelRolesChanged(): void {
 		if (!this.#advisorEnabled || this.#host.isDisposed()) return;
+		if (this.#advisors.length > 0 && !this.#advisorRuntimeMatchesCurrentConfig()) this.#stopAdvisorRuntime();
+		this.#buildAdvisorRuntime(true);
+	}
+
+	/**
+	 * Re-evaluates advisor model assignments when the primary driving model
+	 * changes, but **only before the first primary turn completes**. After the
+	 * first turn, dynamic model bindings are sticky — advisors build context
+	 * over the session and swapping their model mid-session would destroy it.
+	 *
+	 * This preserves the carve-out where a user can launch with one model,
+	 * see the default advisor resolve from it, then switch to a different
+	 * model before issuing any prompt — the advisors re-resolve to match
+	 * the final driving model. Subagents are independent sessions (their own
+	 * `SessionAdvisors`), so each subagent resolves its dynamic advisors
+	 * fresh for the model assigned to it.
+	 *
+	 * Only advisors with a dynamic model map (
+	 * {@link DynamicAdvisorModelMap}) are affected. The signature check in
+	 * {@link #advisorRuntimeMatchesCurrentConfig} detects when the resolved
+	 * model has actually changed, avoiding a rebuild when it hasn't.
+	 */
+	onPrimaryModelChanged(): void {
+		if (!this.#advisorEnabled || this.#host.isDisposed()) return;
+		// After the first primary turn, dynamic model bindings are sticky.
+		// Retry-fallback, model cycling, and user-driven model changes mid-
+		// session must not tear down advisor runtimes and lose context.
+		if (this.#advisorPrimaryTurnsCompleted > 0) return;
+		// Fast path: skip if no advisor uses a dynamic model map
+		if (!this.#advisorConfigs?.some(c => c.model && typeof c.model === "object")) return;
 		if (this.#advisors.length > 0 && !this.#advisorRuntimeMatchesCurrentConfig()) this.#stopAdvisorRuntime();
 		this.#buildAdvisorRuntime(true);
 	}
@@ -545,7 +578,59 @@ export class SessionAdvisors {
 		this.#advisorAutoResumeSuppressed = false;
 		this.#host.yieldQueue.clear("advisor");
 		this.#host.extractQueuedAdvisorCards();
-		this.#host.dropPendingAdvisorCards();
+this.#host.dropPendingAdvisorCards();
+	}
+
+	#resolveDynamicAdvisorModel(
+		config: AdvisorConfig,
+	): { model: Model; thinkingLevel?: ThinkingLevel } | undefined {
+		if (!config.model) return undefined;
+
+		const modelMap = config.model;
+		if (typeof modelMap === "string") {
+			// Static model selector — current behaviour
+			const resolved = resolveModelOverride([modelMap], this.#host.modelRegistry, this.#host.settings);
+			const model = resolved.model;
+			if (!model) return undefined;
+			return { model, thinkingLevel: concreteThinkingLevel(resolved.thinkingLevel) };
+		}
+
+		// Dynamic model map — resolve based on the primary session's driving model
+		const primaryModel = this.#host.model();
+		const primaryModelStr = primaryModel ? formatModelString(primaryModel) : undefined;
+
+		let matchedSelector: string | undefined;
+
+		// Phase 1: exact-string match against the primary model string
+		if (primaryModelStr) {
+			matchedSelector = matchDynamicModelMapEntryExact(modelMap, primaryModelStr);
+		}
+
+		// Phase 2: resolve each key as a model pattern against the registry,
+		// which supports aliases, globs, bare ids, etc. Only runs when the
+		// exact string match didn't find a hit.
+		if (!matchedSelector && primaryModel) {
+			for (const [key, value] of Object.entries(modelMap)) {
+				if (key === "default") continue;
+				const resolved = resolveModelOverride([key], this.#host.modelRegistry, this.#host.settings);
+				if (resolved.model && modelsAreEqual(resolved.model, primaryModel)) {
+					matchedSelector = value;
+					break;
+				}
+			}
+		}
+
+		// Phase 3: fallback to `default`
+		if (!matchedSelector) {
+			matchedSelector = modelMap["default"];
+		}
+
+		if (!matchedSelector) return undefined;
+
+		const resolved = resolveModelOverride([matchedSelector], this.#host.modelRegistry, this.#host.settings);
+		const model = resolved.model;
+		if (!model) return undefined;
+		return { model, thinkingLevel: concreteThinkingLevel(resolved.thinkingLevel) };
 	}
 
 	#resolveAdvisorRuntimeDescriptors(emitWarnings: boolean): AdvisorRuntimeDescriptor[] {
@@ -569,20 +654,27 @@ export class SessionAdvisors {
 				continue;
 			}
 
-			// Resolve the advisor's model: an explicit `model` override wins; else the
-			// `advisor` role chain. A model that fails to resolve skips just this advisor.
+			// Resolve the advisor's model: a dynamic map keys on the primary
+			// driving model, a static string is used directly, omitted falls
+			// back to the `advisor` role chain. A model that fails to resolve
+			// skips just this advisor.
 			let model: Model | undefined;
 			let thinkingLevel: ThinkingLevel | undefined;
 			if (config.model) {
-				const resolved = resolveModelOverride([config.model], this.#host.modelRegistry, this.#host.settings);
-				model = resolved.model;
-				thinkingLevel = concreteThinkingLevel(resolved.thinkingLevel);
+				const dynamicResult = this.#resolveDynamicAdvisorModel(config);
+				if (dynamicResult) {
+					model = dynamicResult.model;
+					thinkingLevel = dynamicResult.thinkingLevel;
+				}
 				if (!model) {
+					const modelDesc = typeof config.model === "string"
+						? config.model
+						: `${Object.keys(config.model as Record<string, string>).join(", ")} (dynamic map)`;
 					this.#advisorStatuses.set(slug, { name: config.name, status: "no_model" });
 					if (emitWarnings) {
 						this.#host.emitNotice(
 							"warning",
-							`Advisor "${config.name}": no model matched "${config.model}"`,
+							`Advisor "${config.name}": no model matched from ${modelDesc}`,
 							"advisor",
 						);
 					}
@@ -1891,4 +1983,21 @@ export class SessionAdvisors {
 			.map(a => `### Advisor: ${a.name} (${a.agent.state.model.provider}/${a.agent.state.model.id})\n\n${dump(a)}`)
 			.join("\n\n");
 	}
+}
+
+/**
+ * Find an exact string match for a primary model string in a dynamic model
+ * map. Returns the matched selector value, or `undefined`. Does NOT consult
+ * the `default` key — the caller runs fuzzy resolution (Phase 2) before
+ * falling back to `default` (Phase 3). Pure function, no registry access.
+ */
+export function matchDynamicModelMapEntryExact(
+	modelMap: Record<string, string>,
+	primaryModelStr: string,
+): string | undefined {
+	for (const [key, value] of Object.entries(modelMap)) {
+		if (key === "default") continue;
+		if (key === primaryModelStr) return value;
+	}
+	return undefined;
 }
