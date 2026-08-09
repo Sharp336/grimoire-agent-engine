@@ -601,6 +601,79 @@ describe("command-code request parity", () => {
 			{ type: "text", text: NON_VISION_IMAGE_PLACEHOLDER },
 		]);
 	});
+
+	it("advertises customWireName as the wire tool name", async () => {
+		scenario = { kind: "capture", body: `{"type":"finish","finishReason":"stop"}\n` };
+		const baseUrl = await startServer();
+		const context: Context = {
+			messages: [{ role: "user", content: "hi", timestamp: 1 }],
+			tools: [
+				{
+					name: "edit",
+					description: "Apply a patch",
+					parameters: { type: "object", properties: { file: { type: "string" } } },
+					customWireName: "apply_patch",
+				},
+			],
+		};
+		await collectStream(makeModel(baseUrl), context);
+		const params = lastRequest!.body.params as { tools: Array<Record<string, unknown>> };
+		// The model must see the name it was trained on (apply_patch), not the
+		// harness-internal name (edit).
+		expect(params.tools[0]?.name).toBe("apply_patch");
+	});
+
+	it("replays assistant tool calls under the advertised wire alias", async () => {
+		scenario = { kind: "capture", body: `{"type":"finish","finishReason":"stop"}\n` };
+		const baseUrl = await startServer();
+		const context: Context = {
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", id: "call_patch", name: "edit", arguments: { file: "a.ts" } }],
+					api: "command-code",
+					provider: "command-code",
+					model: "deepseek/deepseek-v4-flash",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						totalTokens: 0,
+					},
+					stopReason: "toolUse",
+					timestamp: 1,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call_patch",
+					toolName: "edit",
+					content: [{ type: "text", text: "patched" }],
+					isError: false,
+					timestamp: 2,
+				},
+				{ role: "user", content: "continue", timestamp: 3 },
+			],
+			tools: [
+				{
+					name: "edit",
+					description: "Apply a patch",
+					parameters: { type: "object", properties: { file: { type: "string" } } },
+					customWireName: "apply_patch",
+				},
+			],
+		};
+		await collectStream(makeModel(baseUrl), context);
+		const params = lastRequest!.body.params as { messages: Array<Record<string, unknown>> };
+		const assistantMessage = params.messages[0] as { content: Array<Record<string, unknown>> };
+		expect(assistantMessage.content[0]).toEqual({
+			type: "tool-call",
+			toolCallId: "call_patch",
+			toolName: "apply_patch",
+			input: { file: "a.ts" },
+		});
+	});
 });
 
 describe("command-code stream handling", () => {
@@ -669,6 +742,40 @@ describe("command-code stream handling", () => {
 		expect(result.usage.cacheRead).toBe(2);
 		expect(result.usage.cacheWrite).toBe(1);
 		expect(result.usage.totalTokens).toBe(15);
+	});
+
+	it("maps inbound tool-call wire names back to local names with the alias preserved", async () => {
+		scenario = {
+			kind: "frames",
+			lines: [
+				`{"type":"tool-call","toolCallId":"call_patch","toolName":"apply_patch","input":{"file":"a.ts"}}`,
+				`{"type":"finish","finishReason":"tool-calls","totalUsage":{"inputTokens":10,"outputTokens":5,"inputTokenDetails":{}}}`,
+			],
+		};
+		const baseUrl = await startServer();
+		const context: Context = {
+			messages: [{ role: "user", content: "patch a.ts", timestamp: 1 }],
+			tools: [
+				{
+					name: "edit",
+					description: "Apply a patch",
+					parameters: { type: "object", properties: { file: { type: "string" } } },
+					customWireName: "apply_patch",
+				},
+			],
+		};
+		const { result } = await collectStream(makeModel(baseUrl), context);
+		expect(result.stopReason).toBe("toolUse");
+		// The dispatcher matches `name`; the wire alias rides along for replay.
+		expect(result.content).toEqual([
+			{
+				type: "toolCall",
+				id: "call_patch",
+				name: "edit",
+				customWireName: "apply_patch",
+				arguments: { file: "a.ts" },
+			},
+		]);
 	});
 
 	it("re-sends the request while the gateway asks to pause the turn", async () => {

@@ -27,6 +27,7 @@ import type {
 	StreamOptions,
 	TextContent,
 	ThinkingContent,
+	Tool,
 	ToolCall,
 	ToolChoice,
 	Usage,
@@ -399,11 +400,40 @@ function toWireToolResultValue(content: (TextContent | ImageContent)[]): string 
 }
 
 /**
+ * Map freeform custom-tool wire names back to the internal tool name so the
+ * agent-loop dispatcher can match `Tool.name` while history carries the wire
+ * alias via `ToolCall.customWireName` (e.g. `apply_patch` → `edit`).
+ */
+function buildCustomToolWireNameMap(tools: readonly Tool[] | undefined): ReadonlyMap<string, string> {
+	const map = new Map<string, string>();
+	if (!tools) return map;
+	for (const tool of tools) {
+		if (tool.customWireName) map.set(tool.customWireName, tool.name);
+	}
+	return map;
+}
+
+/** Resolve a gateway tool name to the local catalog name and wire alias. */
+function resolveInboundToolName(
+	wireName: string | undefined,
+	wireNameMap: ReadonlyMap<string, string>,
+): { name: string; customWireName?: string } {
+	if (!wireName) return { name: "" };
+	const local = wireNameMap.get(wireName);
+	if (local !== undefined) return { name: local, customWireName: wireName };
+	return { name: wireName };
+}
+
+/**
  * Convert oh-my-pi messages to the Command Code wire history shape. `toolName`
  * is left empty on tool results because the official client does the same — the
  * gateway matches results to calls by `toolCallId`.
  */
-function toWireMessages(messages: Message[], supportsImages: boolean): unknown[] {
+function toWireMessages(
+	messages: Message[],
+	supportsImages: boolean,
+	wireNameByLocalName?: ReadonlyMap<string, string>,
+): unknown[] {
 	const out: unknown[] = [];
 	for (let i = 0; i < messages.length; i++) {
 		const message = messages[i]!;
@@ -419,7 +449,9 @@ function toWireMessages(messages: Message[], supportsImages: boolean): unknown[]
 					content.push({
 						type: "tool-call",
 						toolCallId: block.id,
-						toolName: block.name,
+						// Replay under the wire alias the gateway first saw (e.g.
+						// apply_patch), falling back to the local name.
+						toolName: block.customWireName ?? wireNameByLocalName?.get(block.name) ?? block.name,
 						input: block.arguments,
 					});
 				}
@@ -686,8 +718,17 @@ export const streamCommandCode: StreamFunction<"command-code"> = (
 				namedTool === undefined
 					? (context.tools ?? [])
 					: (context.tools ?? []).filter(tool => tool.name === namedTool || tool.customWireName === namedTool);
+			// Wire name → local name for inbound tool-call frames (apply_patch → edit);
+			// local name → wire name for history replay of assistant tool calls.
+			const inboundWireNameMap = buildCustomToolWireNameMap(context.tools);
+			const outboundWireNameByLocal = new Map<string, string>();
+			for (const tool of wireTools) {
+				if (tool.customWireName) outboundWireNameByLocal.set(tool.name, tool.customWireName);
+			}
 			const tools = wireTools.map(tool => ({
-				name: tool.name,
+				// Advertise the wire alias so gateway tool calls come back under the
+				// name the model was shown (e.g. apply_patch, not edit).
+				name: tool.customWireName ?? tool.name,
 				description: tool.description,
 				input_schema: toolWireSchema(tool),
 			}));
@@ -695,7 +736,7 @@ export const streamCommandCode: StreamFunction<"command-code"> = (
 			const params: Record<string, unknown> = {
 				// Wire id may be aliased away from the local catalog id.
 				model: model.requestModelId ?? model.id,
-				messages: toWireMessages(transformed, model.input.includes("image")),
+				messages: toWireMessages(transformed, model.input.includes("image"), outboundWireNameByLocal),
 				system: normalizeSystemPrompts(context.systemPrompt).join("\n\n"),
 				max_tokens: options?.maxTokens ?? model.maxTokens ?? DEFAULT_MAX_TOKENS,
 				stream: true,
@@ -850,10 +891,14 @@ export const streamCommandCode: StreamFunction<"command-code"> = (
 							if (id === undefined || openToolCalls.has(id)) break;
 							endTextBlock();
 							endThinkingBlock();
+							// Keep the local name on `name` (dispatcher match) and the wire
+							// alias on `customWireName` (history replay stays byte-compatible).
+							const inboundToolName = resolveInboundToolName(event.toolName, inboundWireNameMap);
 							const block: ToolCall = {
 								type: "toolCall",
 								id,
-								name: event.toolName ?? "",
+								name: inboundToolName.name,
+								...(inboundToolName.customWireName ? { customWireName: inboundToolName.customWireName } : {}),
 								arguments: {},
 							};
 							output.content.push(block);
@@ -888,16 +933,26 @@ export const streamCommandCode: StreamFunction<"command-code"> = (
 								// Streamed in through tool-input-*; `input` is authoritative,
 								// falling back to the accumulated argument JSON.
 								openToolCalls.delete(id as string);
-								if (event.toolName) open.block.name = event.toolName;
+								if (event.toolName) {
+									const resolved = resolveInboundToolName(event.toolName, inboundWireNameMap);
+									open.block.name = resolved.name;
+									if (resolved.customWireName) {
+										open.block.customWireName = resolved.customWireName;
+									} else {
+										delete open.block.customWireName;
+									}
+								}
 								finishToolCall(open.block, event.input ?? event.args ?? open.buffer);
 								break;
 							}
 							endTextBlock();
 							endThinkingBlock();
+							const resolved = resolveInboundToolName(event.toolName, inboundWireNameMap);
 							const block: ToolCall = {
 								type: "toolCall",
 								id: id ?? crypto.randomUUID(),
-								name: event.toolName ?? "",
+								name: resolved.name,
+								...(resolved.customWireName ? { customWireName: resolved.customWireName } : {}),
 								arguments: {},
 							};
 							output.content.push(block);
