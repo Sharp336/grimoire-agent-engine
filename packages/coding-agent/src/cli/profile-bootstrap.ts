@@ -39,6 +39,7 @@ import {
 	isUnknownLongValueCandidate,
 	OPTIONAL_FLAGS,
 	OPTIONAL_VALUE_FLAGS,
+	optionalFlagConsumesValue,
 	PROFILE_BOOTSTRAP_BOUNDARY_ARG,
 	STRING_VALUE_FLAGS,
 } from "./flag-tables";
@@ -184,7 +185,7 @@ export function extractProfileFlags(argv: readonly string[]): ProfileBootstrapRe
 			stripped.push(arg);
 			const config = OPTIONAL_FLAGS[arg];
 			const next = argv[index + 1];
-			if (next !== undefined && !next.startsWith("-") && !(config.rejectEmpty === true && next.length === 0)) {
+			if (optionalFlagConsumesValue(config, next)) {
 				stripped.push(next);
 				index += 1;
 			}

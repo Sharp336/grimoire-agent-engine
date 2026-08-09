@@ -90,6 +90,20 @@ describe("extractProfileFlags", () => {
 		expect(filePrefixed.profile).toBe("work");
 	});
 
+	it("preserves advisor model selectors while extracting a profile", () => {
+		const extracted = extractProfileFlags(["--advisor=oai/gpt-5:med", "--profile", "work", "review this"]);
+
+		expect(extracted).toEqual({
+			argv: ["--advisor=oai/gpt-5:med", "review this"],
+			profile: "work",
+			aliasName: undefined,
+		});
+
+		const parsed = parseArgs(extracted.argv);
+		expect(parsed.advisor).toBe("oai/gpt-5:med");
+		expect(parsed.messages).toEqual(["review this"]);
+	});
+
 	it("preserves optional-flag boundaries when stripping a profile before prompt text", () => {
 		const extracted = extractProfileFlags(["--resume", "--profile", "work", "follow up"]);
 		expect(extracted).toEqual({

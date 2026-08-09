@@ -56,25 +56,23 @@ export type StringSetter = (result: Args, value: string, deps: ParseDeps) => voi
 
 /**
  * Setter for a flag that may or may not consume the next argv token.
- * Receives `undefined` for the bare form (`--resume` with no value, etc.).
+ * Receives `undefined` for the bare form (`--resume`, `--advisor`, etc.).
  */
 export type OptionalSetter = (result: Args, value: string | undefined) => void;
 
 /**
  * Per-flag optional-value consumption policy.
  *
- * Every optional flag always rejects tokens that start with `-` — that shared
- * rule lives in the dispatch site. These booleans capture the *additional*
- * per-flag quirks:
+ * Every optional flag rejects tokens that start with `-`. Additional quirks:
  *
- * - `rejectEmpty`: treat `""` like “no value provided”. Needed for
- *   `--resume` / `-r` / `--session`. Without it, an empty string
- *   gets consumed as the session prefix and downstream resolution can match
- *   every session.
+ * - `rejectEmpty`: treat `""` like no value.
+ * - `acceptSeparateValue`: restrict which space-separated values are consumed.
+ *   Inline `--flag=value` forms always consume their value.
  */
 export interface OptionalFlagConfig {
 	set: OptionalSetter;
 	rejectEmpty?: boolean;
+	acceptSeparateValue?: (value: string) => boolean;
 }
 
 // Shared setters for flags that alias the same field.
@@ -85,6 +83,16 @@ const setExtension: StringSetter = (result, value) => {
 
 const setResume: OptionalSetter = (result, value) => {
 	result.resume = value !== undefined ? value : true;
+};
+
+const setAdvisor: OptionalSetter = (result, value) => {
+	if (value === undefined || value === "on") {
+		result.advisor = true;
+	} else if (value === "off") {
+		result.advisor = false;
+	} else {
+		result.advisor = value;
+	}
 };
 
 const MAX_TIME_DURATION_RE = /^(\d+(?:\.\d+)?)([smh])$/;
@@ -246,15 +254,29 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 /**
  * Optional-value flags. Setters receive `undefined` for the bare form.
  *
- * The dispatch in `args.ts` applies the shared "doesn't start with `-`"
- * check for every flag, then consults the per-flag booleans below for the
- * remaining quirks.
+ * The dispatch in `args.ts` applies the shared policy through
+ * {@link optionalFlagConsumesValue}. Model selectors must use
+ * `--advisor=<model>` so a bare `--advisor` cannot steal prompt text.
  */
 export const OPTIONAL_FLAGS: Record<string, OptionalFlagConfig> = {
 	"--resume": { set: setResume, rejectEmpty: true },
 	"-r": { set: setResume, rejectEmpty: true },
 	"--session": { set: setResume, rejectEmpty: true },
+	"--advisor": {
+		set: setAdvisor,
+		rejectEmpty: true,
+		acceptSeparateValue: value => value === "on" || value === "off",
+	},
 };
+
+export function optionalFlagConsumesValue(config: OptionalFlagConfig, value: string | undefined): boolean {
+	return (
+		value !== undefined &&
+		!value.startsWith("-") &&
+		!(config.rejectEmpty === true && value.length === 0) &&
+		(config.acceptSeparateValue?.(value) ?? true)
+	);
+}
 
 /**
  * Derived from {@link STRING_SETTERS}. A flag is in this set if and only if
@@ -310,7 +332,6 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--no-lsp",
 	"--no-pty",
 	"--hide-thinking",
-	"--advisor",
 	"--prewalk",
 	"--no-prewalk",
 	"--plan-yolo",
@@ -359,8 +380,7 @@ export function flagConsumesValue(flag: string, next: string | undefined): boole
 	const valueLike = !next.startsWith("-");
 	if (EXTENSION_SHADOWABLE_STRING_FLAGS.has(flag)) return valueLike;
 	if (OPTIONAL_VALUE_FLAGS.has(flag)) {
-		const config = OPTIONAL_FLAGS[flag];
-		return valueLike && !(config.rejectEmpty === true && next.length === 0);
+		return optionalFlagConsumesValue(OPTIONAL_FLAGS[flag], next);
 	}
 	if (isUnknownLongValueCandidate(flag)) return valueLike;
 	return false;

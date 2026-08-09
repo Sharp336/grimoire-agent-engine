@@ -190,6 +190,16 @@ function applyAcpDefaultSettingOverrides(targetSettings: Settings = settings): v
 	applyDefaultSettingOverrides(HOST_DEFAULTED_SETTING_PATHS, targetSettings);
 }
 
+/** Applies built-in advisor CLI settings after extension-owned flag collisions are resolved. */
+export function applyAdvisorCliOverride(targetSettings: Settings, advisor: Args["advisor"]): void {
+	if (typeof advisor === "string") {
+		targetSettings.overrideModelRoles({ advisor });
+	}
+	if (advisor !== undefined) {
+		targetSettings.override("advisor.enabled", advisor !== false);
+	}
+}
+
 /** Reads a non-TTY stdin stream as prompt text. */
 export async function readPipedInput(): Promise<string | undefined> {
 	if (process.stdin.isTTY === true) return undefined;
@@ -359,7 +369,7 @@ export interface AcpSessionFactoryOptions {
 	sessionDir?: string;
 	authStorage: AuthStorage;
 	modelRegistry: ModelRegistry;
-	parsedArgs: Pick<Args, "apiKey" | "trustedExtensions">;
+	parsedArgs: Pick<Args, "advisor" | "apiKey" | "trustedExtensions">;
 	rawArgs: string[];
 	createSession: (options: CreateAgentSessionOptions) => Promise<CreateAgentSessionResult>;
 }
@@ -407,15 +417,23 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 		const titleSystemPromptSource = discoverTitleSystemPromptFile(cwd);
 		const titleSystemPrompt = await resolvePromptInput(titleSystemPromptSource, "title system prompt");
 		const eventBus = new EventBus();
-		const trustedExtensions =
+		const preloadedExtensions =
 			args.parsedArgs.trustedExtensions && args.parsedArgs.trustedExtensions.length > 0
 				? await loadTrustedSessionExtensions(args.baseOptions, cwd, eventBus)
-				: undefined;
-		if (trustedExtensions && trustedExtensions.errors.length > 0) {
+				: await loadSessionExtensions(args.baseOptions, cwd, nextSettings, eventBus);
+		if (args.parsedArgs.trustedExtensions?.length && preloadedExtensions.errors.length > 0) {
 			throw new Error(
-				`Trusted extension failed to load: ${trustedExtensions.errors.map(item => item.error).join("; ")}`,
+				`Trusted extension failed to load: ${preloadedExtensions.errors.map(item => item.error).join("; ")}`,
 			);
 		}
+		const extensionFlagSink: ExtensionFlagSink = {
+			getFlags: () => ExtensionRunner.aggregateFlags(preloadedExtensions.extensions),
+			setFlagValue: (name, value) => {
+				preloadedExtensions.runtime.flagValues.set(name, value);
+			},
+		};
+		const extensionAwareArgs = applyExtensionFlags(extensionFlagSink, args.rawArgs) ?? args.parsedArgs;
+		applyAdvisorCliOverride(nextSettings, extensionAwareArgs.advisor);
 		const { session: nextSession } = await args.createSession({
 			...args.baseOptions,
 			cwd,
@@ -430,12 +448,11 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			enableMCP: false,
 			titleSystemPrompt,
 			eventBus,
-			preloadedExtensions: trustedExtensions,
+			preloadedExtensions,
 		});
 		if (args.parsedArgs.apiKey && !args.baseOptions.model && nextSession.model) {
 			args.authStorage.setRuntimeApiKey(nextSession.model.provider, args.parsedArgs.apiKey);
 		}
-		applyExtensionFlags(nextSession.extensionRunner, args.rawArgs);
 		return nextSession;
 	};
 }
@@ -1329,10 +1346,6 @@ export async function runRootCommand(
 	if (parsedArgs.hideThinking) {
 		settingsInstance.override("hideThinkingBlock", true);
 	}
-	// Apply --advisor CLI flag (ephemeral, not persisted)
-	if (parsedArgs.advisor) {
-		settingsInstance.override("advisor.enabled", true);
-	}
 
 	await logger.time(
 		"initTheme:final",
@@ -1616,6 +1629,7 @@ export async function runRootCommand(
 		};
 		const initialArgs = applyExtensionFlags(extensionFlagSink, rawArgs) ?? parsedArgs;
 		normalizeContinueSessionArgs(initialArgs, rawArgs);
+		applyAdvisorCliOverride(settingsInstance, initialArgs.advisor);
 		if ((parsedArgs.trustedExtensions?.length ?? 0) > 0 && extensionsResult.errors.length > 0) {
 			throw new Error(
 				`Trusted extension failed to load: ${extensionsResult.errors.map(item => item.error).join("; ")}`,

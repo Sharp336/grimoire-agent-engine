@@ -74,8 +74,9 @@ export const launchHelp = {
 		"hide-thinking": Flags.boolean({
 			description: "Hide thinking blocks in TUI output (display only, does not disable model thinking)",
 		}),
-		advisor: Flags.boolean({
-			description: "Enable the advisor runtime (passively reviews each turn and injects notes)",
+		advisor: Flags.string({
+			description:
+				"Override advisor for this run: bare/on enables, off disables, --advisor=<model> selects provider/model[:thinking] or an unqualified model",
 		}),
 		hook: Flags.string({ description: "Load a hook/extension file (can be used multiple times)", multiple: true }),
 		extension: Flags.string({
