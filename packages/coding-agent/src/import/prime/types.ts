@@ -38,7 +38,26 @@ export type PrimeImportLossCode =
 	| "credentials-command-ref"
 	| "credentials-env-ref"
 	| "credentials-oauth-relogin"
-	| "credentials-ambient-dependency";
+	| "credentials-ambient-dependency"
+	| "skills-malformed"
+	| "skills-invalid-frontmatter"
+	| "skills-duplicate"
+	| "skills-ignored"
+	| "skills-external-symlink"
+	| "skills-special-file"
+	| "sessions-malformed"
+	| "sessions-truncated-tail"
+	| "sessions-invalid-entry"
+	| "sessions-duplicate-id"
+	| "sessions-broken-parent"
+	| "sessions-unmatched-tool-call"
+	| "sessions-unmatched-tool-result"
+	| "sessions-opaque-record"
+	| "sessions-unsupported-entry"
+	| "sessions-header-extra"
+	| "sessions-child-lineage"
+	| "sessions-missing-full-output"
+	| "sessions-excluded-state";
 
 export type PrimeSourceEntryKind = "file" | "directory" | "symlink";
 
@@ -267,6 +286,204 @@ export interface PrimeImportLoss {
 	readonly domain: PrimeImportDomain;
 	readonly sourceRef: string;
 	readonly path?: string;
+	readonly line?: number;
+	readonly byteOffset?: number;
+	readonly byteLength?: number;
+}
+
+export type PrimeSkillScope = "global" | "project";
+
+export type PrimeSkillPayloadEntry =
+	| {
+			readonly kind: "file";
+			readonly relativePath: string;
+			readonly sourceRef: string;
+			readonly mode: number;
+			readonly size: number;
+			readonly sha256: string;
+			readonly contentBase64: string;
+	  }
+	| {
+			readonly kind: "directory";
+			readonly relativePath: string;
+			readonly sourceRef: string;
+			readonly mode: number;
+	  }
+	| {
+			readonly kind: "symlink";
+			readonly relativePath: string;
+			readonly sourceRef: string;
+			readonly mode: number;
+			readonly target: string;
+	  };
+
+export interface PrimeSkillCandidate {
+	readonly kind: "skill";
+	readonly scope: PrimeSkillScope;
+	readonly name: string;
+	readonly directorySourceRef: string;
+	readonly frontmatter: Readonly<Record<string, PrimeJsonValue>>;
+	readonly files: readonly PrimeSkillPayloadEntry[];
+}
+
+export interface PrimeSkillParserResult {
+	readonly candidates: readonly PrimeSkillCandidate[];
+	readonly losses: readonly PrimeImportLoss[];
+}
+
+export type PrimeSessionJsonObject = Readonly<Record<string, PrimeJsonValue>>;
+export type PrimeSessionContentBlock =
+	| { readonly type: "text"; readonly text: string }
+	| { readonly type: "image"; readonly data: string; readonly mimeType: string };
+export type PrimeSessionContent = string | readonly PrimeSessionContentBlock[];
+export type PrimeServiceTier = "auto" | "default" | "flex" | "scale" | "priority";
+export type PrimeServiceTierFamily = "openai" | "anthropic" | "google";
+export type PrimeServiceTierByFamily = Partial<Record<PrimeServiceTierFamily, PrimeServiceTier>>;
+export type PrimeSessionMessage =
+	| {
+			readonly role: "user";
+			readonly content: PrimeSessionContent;
+			readonly timestamp: number;
+	  }
+	| {
+			readonly role: "assistant";
+			readonly content: readonly PrimeJsonValue[];
+			readonly api: string;
+			readonly provider: string;
+			readonly model: string;
+			readonly usage: PrimeSessionJsonObject;
+			readonly stopReason: string;
+			readonly timestamp: number;
+			readonly responseId?: string;
+			readonly errorMessage?: string;
+	  }
+	| {
+			readonly role: "toolResult";
+			readonly toolCallId: string;
+			readonly toolName: string;
+			readonly content: readonly PrimeSessionContentBlock[];
+			readonly isError: boolean;
+			readonly details?: PrimeJsonValue;
+			readonly timestamp: number;
+	  }
+	| {
+			readonly role: "bashExecution";
+			readonly command: string;
+			readonly output: string;
+			readonly exitCode: number | undefined;
+			readonly cancelled: boolean;
+			readonly excludeFromContext?: boolean;
+			readonly fullOutputSourceRef?: string;
+			readonly fullOutputSha256?: string;
+			readonly truncated: boolean;
+			readonly timestamp: number;
+	  }
+	| {
+			readonly role: "custom";
+			readonly customType: string;
+			readonly content: PrimeSessionContent;
+			readonly display: boolean;
+			readonly details?: PrimeJsonValue;
+			readonly timestamp: number;
+	  };
+
+export interface PrimeNormalizedSessionHeader {
+	readonly type: "session";
+	readonly version: 3;
+	readonly id: string;
+	readonly timestamp: string;
+	readonly cwd: string;
+	readonly parentSession?: string;
+	readonly rlmDepth?: number;
+	readonly lineage?: Readonly<{
+		readonly parentSession?: string;
+		readonly rlmDepth?: number;
+		readonly child: boolean;
+	}>;
+}
+
+export type PrimeNormalizedSessionEntry =
+	| {
+			readonly type: "message";
+			readonly id: string;
+			readonly parentId: string | null;
+			readonly timestamp: string;
+			readonly message: PrimeSessionMessage;
+	  }
+	| {
+			readonly type: "model_change";
+			readonly id: string;
+			readonly parentId: string | null;
+			readonly timestamp: string;
+			readonly model: string;
+			readonly role?: string;
+	  }
+	| {
+			readonly type: "thinking_level_change";
+			readonly id: string;
+			readonly parentId: string | null;
+			readonly timestamp: string;
+			readonly thinkingLevel: string | null;
+			readonly configured?: string | null;
+	  }
+	| {
+			readonly type: "service_tier_change";
+			readonly id: string;
+			readonly parentId: string | null;
+			readonly timestamp: string;
+			readonly serviceTier: PrimeServiceTierByFamily | null;
+	  }
+	| {
+			readonly type: "compaction";
+			readonly id: string;
+			readonly parentId: string | null;
+			readonly timestamp: string;
+			readonly summary: string;
+			readonly firstKeptEntryId: string;
+			readonly tokensBefore: number;
+			readonly details?: PrimeJsonValue;
+			readonly fromExtension?: boolean;
+	  }
+	| {
+			readonly type: "branch_summary";
+			readonly id: string;
+			readonly parentId: string | null;
+			readonly timestamp: string;
+			readonly fromId: string;
+			readonly summary: string;
+			readonly details?: PrimeJsonValue;
+			readonly fromExtension?: boolean;
+	  }
+	| {
+			readonly type: "custom_message";
+			readonly id: string;
+			readonly parentId: string | null;
+			readonly timestamp: string;
+			readonly customType: string;
+			readonly content: PrimeSessionContent;
+			readonly display: boolean;
+			readonly details?: PrimeJsonValue;
+	  }
+	| {
+			readonly type: "label";
+			readonly id: string;
+			readonly parentId: string | null;
+			readonly timestamp: string;
+			readonly targetId: string;
+			readonly label?: string;
+	  };
+
+export interface PrimeNormalizedSession {
+	readonly kind: "session";
+	readonly sourceRef: string;
+	readonly sourceSha256: string;
+	readonly header: PrimeNormalizedSessionHeader;
+	readonly entries: readonly PrimeNormalizedSessionEntry[];
+}
+
+export interface PrimeSessionParserResult {
+	readonly sessions: readonly PrimeNormalizedSession[];
+	readonly losses: readonly PrimeImportLoss[];
 }
 
 export interface PrimeImportSourceDiscovery {
