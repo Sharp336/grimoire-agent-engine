@@ -307,7 +307,7 @@ describe("AgentSession eager todo enforcement", () => {
 			createAssistantMessage("todo initialized"),
 		];
 
-		const titleApplied = waitForSessionName("Parser recovery replan");
+		const titleApplied = waitForSessionName("AUTO: Parser recovery replan");
 		await session.prompt("replan parser diagnostics");
 		await titleApplied;
 
@@ -347,7 +347,7 @@ describe("AgentSession eager todo enforcement", () => {
 			createAssistantMessage("todo initialized"),
 		];
 
-		const titleApplied = waitForSessionName("plan/parser-diagnostics");
+		const titleApplied = waitForSessionName("AUTO: plan/parser-diagnostics");
 		await session.prompt("replan parser diagnostics");
 		await titleApplied;
 
@@ -400,7 +400,7 @@ describe("AgentSession eager todo enforcement", () => {
 		await session.prompt("replan parser diagnostics");
 
 		expect(completeSimpleMock).not.toHaveBeenCalled();
-		expect(session.sessionManager.getSessionName()).toBe("Old auto title");
+		expect(session.sessionManager.getSessionName()).toBe("AUTO: Old auto title");
 	});
 
 	it("refreshes todo-init titles for a subagent focusable in an interactive host", async () => {
@@ -430,12 +430,12 @@ describe("AgentSession eager todo enforcement", () => {
 				createAssistantMessage("todo initialized"),
 			];
 
-			const titleApplied = waitForSessionName("Parser diagnostics replan");
+			const titleApplied = waitForSessionName("AUTO: Parser diagnostics replan");
 			await session.prompt("replan parser diagnostics");
 			await titleApplied;
 
 			expect(completeSimpleMock).toHaveBeenCalledTimes(1);
-			expect(session.sessionManager.getSessionName()).toBe("Parser diagnostics replan");
+			expect(session.sessionManager.getSessionName()).toBe("AUTO: Parser diagnostics replan");
 		} finally {
 			setInteractiveHost(previousInteractiveHost);
 		}
@@ -455,7 +455,7 @@ describe("AgentSession eager todo enforcement", () => {
 		await session.prompt("replan parser diagnostics");
 
 		expect(completeSimpleMock).not.toHaveBeenCalled();
-		expect(session.sessionManager.getSessionName()).toBe("Old auto title");
+		expect(session.sessionManager.getSessionName()).toBe("AUTO: Old auto title");
 	});
 
 	it("skips eager todo enforcement for prompts ending with a question mark", async () => {

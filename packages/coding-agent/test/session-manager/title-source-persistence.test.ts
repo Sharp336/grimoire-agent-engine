@@ -98,12 +98,12 @@ describe("session title source persistence", () => {
 		expect(parseJsonLine(rawLines[0])).toMatchObject({
 			type: "title",
 			v: 1,
-			title: "Auto title",
+			title: "AUTO: Auto title",
 			source: "auto",
 		});
 		expect(parseJsonLine(rawLines[1]).type).toBe("session");
 		const reopened = await SessionManager.open(sessionFile!);
-		expect(reopened.getSessionName()).toBe("Auto title");
+		expect(reopened.getSessionName()).toBe("AUTO: Auto title");
 		expect(reopened.titleSource).toBe("auto");
 	});
 
@@ -179,7 +179,7 @@ describe("session title source persistence", () => {
 		const entries = await loadEntriesFromFile(sessionFile!);
 		expect(getHeader(entries)?.title).toBe("Manual title");
 		const titleChanges = entries.filter(entry => entry.type === TITLE_CHANGE_ENTRY_TYPE);
-		expect(titleChanges.map(entry => entry.title)).toEqual(["Auto title", "Manual title"]);
+		expect(titleChanges.map(entry => entry.title)).toEqual(["AUTO: Auto title", "Manual title"]);
 		expect(titleChanges.map(entry => entry.trigger)).toEqual(["initial", "rename"]);
 	});
 

@@ -83,6 +83,7 @@ import {
 
 const JSONL_SUFFIX_LENGTH = ".jsonl".length;
 const DRAFT_ONLY_SESSION_MARKER = ".draft-only-session";
+const AUTO_TITLE_PREFIX = "AUTO: ";
 
 function mintSessionId(): string {
 	return Bun.randomUUIDv7();
@@ -1990,8 +1991,12 @@ export class SessionManager {
 		if (this.#released) return false;
 		if (this.#titleSource === "user" && source === "auto") return false;
 
-		const title = SessionManager.#cleanTitle(name);
-		if (!title) return false;
+		const cleanedTitle = SessionManager.#cleanTitle(name);
+		if (!cleanedTitle) return false;
+		const title =
+			source === "auto" && !cleanedTitle.startsWith(AUTO_TITLE_PREFIX)
+				? `${AUTO_TITLE_PREFIX}${cleanedTitle}`
+				: cleanedTitle;
 
 		const previousTitle = this.#sessionName;
 		const timestamp = nowIso();
