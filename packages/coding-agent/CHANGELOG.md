@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/schedule` slash command for one-shot, recurring, and cron-based prompt scheduling. Supports `/schedule in 30m <instruction>` (one-shot), `/schedule every 10m <instruction>` (recurring), and `/schedule cron "0 9 * * 1-5" <instruction>` (cron). Multiple schedules can be active simultaneously with list, cancel, and clear subcommands.
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed

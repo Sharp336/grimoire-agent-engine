@@ -40,6 +40,7 @@ import type { TranscriptContainer } from "./components/transcript-container";
 import type { EventController } from "./controllers/event-controller";
 import type { LoopLimitRuntime } from "./loop-limit";
 import type { OAuthManualInputManager } from "./oauth-manual-input";
+import type { ScheduledItem } from "./schedule";
 import type { Theme } from "./theme/theme";
 
 export type CompactionQueuedMessage = {
@@ -171,6 +172,7 @@ export interface InteractiveModeContext {
 	loopModeEnabled: boolean;
 	loopModePaused: boolean;
 	loopPrompt?: string;
+	scheduledItems?: readonly ScheduledItem[];
 	loopLimit?: LoopLimitRuntime;
 	planModePlanFilePath?: string;
 	hideThinkingBlock: boolean;
@@ -447,6 +449,7 @@ export interface InteractiveModeContext {
 	disableLoopMode(): void;
 	pauseLoop(): void;
 	handlePlanApproval(details: PlanApprovalDetails): Promise<void>;
+	handleScheduleCommand(args: string): Promise<void>;
 	openPlanReview(): Promise<void>;
 
 	// Hook UI methods

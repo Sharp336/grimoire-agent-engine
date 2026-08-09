@@ -30,6 +30,7 @@ function createModelContext(advisorActive: boolean): SegmentContext {
 		goalMode: null,
 		vibeMode: null,
 		collab: null,
+		schedule: null,
 		usageStats: {
 			input: 0,
 			output: 0,

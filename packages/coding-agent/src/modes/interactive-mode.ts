@@ -189,6 +189,14 @@ import {
 import { OAuthManualInputManager } from "./oauth-manual-input";
 import { countRunningSubagentBadgeAgents, getRunningSubagentBadgeRegistry } from "./running-subagent-badge";
 import {
+	computeNextCronFire,
+	describeSchedule,
+	formatScheduleList,
+	nextScheduleId,
+	parseScheduleCommand,
+	type ScheduledItem,
+} from "./schedule";
+import {
 	type ObservableSession,
 	type SessionObserverChangeKind,
 	SessionObserverRegistry,
@@ -477,6 +485,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#modelCycleClearTimer: NodeJS.Timeout | undefined;
 	#nextAppearanceRequestToken = 1;
 	#appearanceRefreshRequest: { token: TerminalAppearanceRequestToken; deadline: number } | undefined;
+	scheduledItems: ScheduledItem[] = [];
+	#scheduleTimers = new Map<string, NodeJS.Timeout>();
 	todoPhases: TodoPhase[] = [];
 	hideThinkingBlock = false;
 	#sessionsWithDisplayableThinkingContent = new WeakSet<AgentSession>();
@@ -1532,6 +1542,156 @@ export class InteractiveMode implements InteractiveModeContext {
 		// auto-resubmits it after each yield, identical to typing the prompt right
 		// after enabling loop mode.
 		return parsed.prompt;
+	}
+
+	async handleScheduleCommand(args: string): Promise<void> {
+		const parsed = parseScheduleCommand(args);
+		if (typeof parsed === "string") {
+			this.showError(parsed);
+			return;
+		}
+
+		switch (parsed.type) {
+			case "list":
+				this.showStatus(formatScheduleList(this.scheduledItems));
+				return;
+
+			case "clear":
+				this.#clearAllSchedules();
+				this.showStatus("All schedules cleared.");
+				return;
+
+			case "cancel": {
+				const cancelled = this.#cancelSchedule(parsed.id);
+				this.showStatus(cancelled ? `Schedule ${parsed.id} cancelled.` : `Schedule ${parsed.id} not found.`);
+				return;
+			}
+
+			case "add": {
+				const id = nextScheduleId();
+				const now = Date.now();
+				let nextFireAt: number;
+				if (parsed.kind === "cron") {
+					const cronNext = computeNextCronFire(parsed.cronFields!, new Date(now));
+					if (cronNext === undefined) {
+						this.showError("Cron expression has no valid fire time within the next 4 years.");
+						return;
+					}
+					nextFireAt = cronNext;
+				} else {
+					nextFireAt = now + parsed.intervalMs!;
+				}
+				const item: ScheduledItem = {
+					id,
+					kind: parsed.kind,
+					intervalMs: parsed.intervalMs,
+					cronFields: parsed.cronFields,
+					nextFireAt,
+					instruction: parsed.instruction,
+					active: true,
+				};
+				this.scheduledItems.push(item);
+				this.#armScheduleTimer(item);
+				this.#syncScheduleStatus();
+				this.showStatus(`Schedule ${id} added: ${describeSchedule(item)}`);
+				return;
+			}
+		}
+	}
+
+	/** Maximum safe setTimeout delay (2^31 - 1 ms ≈ 24.8 days). */
+	static readonly #MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+	#armScheduleTimer(item: ScheduledItem): void {
+		const delay = Math.max(0, item.nextFireAt - Date.now());
+		// Chunk long delays to avoid 32-bit timer overflow.
+		const safeDelay = Math.min(delay, InteractiveMode.#MAX_TIMER_DELAY_MS);
+		const timer = setTimeout(() => {
+			if (Date.now() < item.nextFireAt) {
+				// Not yet time — re-arm for the remaining delay
+				this.#armScheduleTimer(item);
+				return;
+			}
+			this.#fireSchedule(item.id);
+		}, safeDelay);
+		timer.unref?.();
+		this.#scheduleTimers.set(item.id, timer);
+	}
+
+	#fireSchedule(id: string): void {
+		this.#scheduleTimers.delete(id);
+		const item = this.scheduledItems.find(s => s.id === id);
+		if (!item?.active) return;
+
+		// Try to inject the prompt — skip if busy
+		const canInject =
+			!this.#isAutoSubmitBlocked() &&
+			!this.#pendingSubmittedInput &&
+			this.onInputCallback &&
+			this.editor.getText().trim().length === 0 &&
+			(this.editor.pendingImages?.length ?? 0) === 0;
+
+		const callback = this.onInputCallback;
+		if (canInject && callback) {
+			callback(
+				this.startPendingSubmission({
+					text: item.instruction,
+					customType: "schedule",
+					display: false,
+				}),
+			);
+		}
+
+		if (item.kind === "once") {
+			if (canInject) {
+				// Delivered — remove from active items
+				this.scheduledItems = this.scheduledItems.filter(s => s.id !== id);
+				this.#syncScheduleStatus();
+			} else {
+				// Busy — retry in 30 seconds
+				item.nextFireAt = Date.now() + 30_000;
+				this.#armScheduleTimer(item);
+			}
+		} else if (item.kind === "interval") {
+			item.nextFireAt = Date.now() + item.intervalMs!;
+			this.#armScheduleTimer(item);
+		} else if (item.kind === "cron" && item.cronFields) {
+			const next = computeNextCronFire(item.cronFields, new Date());
+			if (next !== undefined) {
+				item.nextFireAt = next;
+				this.#armScheduleTimer(item);
+			} else {
+				this.scheduledItems = this.scheduledItems.filter(s => s.id !== id);
+				this.#syncScheduleStatus();
+			}
+		}
+	}
+
+	#cancelSchedule(id: string): boolean {
+		const item = this.scheduledItems.find(s => s.id === id);
+		if (!item) return false;
+		item.active = false;
+		const timer = this.#scheduleTimers.get(id);
+		if (timer) {
+			clearTimeout(timer);
+			this.#scheduleTimers.delete(id);
+		}
+		this.scheduledItems = this.scheduledItems.filter(s => s.id !== id);
+		this.#syncScheduleStatus();
+		return true;
+	}
+
+	#clearAllSchedules(): void {
+		for (const timer of this.#scheduleTimers.values()) clearTimeout(timer);
+		this.#scheduleTimers.clear();
+		this.scheduledItems = [];
+		this.#syncScheduleStatus();
+	}
+
+	#syncScheduleStatus(): void {
+		const activeCount = this.scheduledItems.filter(s => s.active).length;
+		this.statusLine.setScheduleStatus(activeCount > 0 ? { count: activeCount } : undefined);
+		this.ui.requestRender();
 	}
 
 	recordLocalSubmission(text: string, imageCount = 0): () => void {
@@ -3978,6 +4138,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#cancelTodoAutoClearTimer();
 		this.#cancelObserverUiSyncTimer();
 		this.#cancelGoalContinuation();
+		this.#clearAllSchedules();
 		if (this.#sttController) {
 			this.#sttController.dispose();
 			this.#sttController = undefined;
