@@ -2,11 +2,16 @@
  * Wraps a {@link StreamFn} so extensions can observe and edit provider request
  * headers per request, via the `before_provider_headers` event.
  *
- * Applied at the stream-fn boundary rather than inside a provider: every
- * provider reads its request headers from `options.headers`, so editing that
- * once here reaches all of them without per-provider changes. `StreamFn`
- * already permits a promise return, so awaiting the handlers needs no signature
- * change.
+ * Applied at the stream-fn boundary, so it carries the CALLER-SUPPLIED headers
+ * (`options.headers`) — not the provider's assembled map. Providers merge this
+ * object into the headers they build, so additions here reach the request, while
+ * auth and provider defaults are generated downstream and are neither visible
+ * nor removable.
+ *
+ * That is the intended contract, not a limitation to route around: exposing the
+ * assembled map would give every installed extension the provider credential.
+ * `StreamFn` already permits a promise return, so awaiting the handlers needs no
+ * signature change.
  */
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import type { ExtensionRunner } from "./runner";
@@ -17,8 +22,10 @@ import type { ExtensionRunner } from "./runner";
  *
  * Handlers receive a copy of `options.headers`, so a handler cannot mutate the
  * caller's object, and a caller reusing its options across requests is not
- * affected by a previous request's edits. When no extension subscribes, `base`
- * is called directly and no copy is made.
+ * affected by a previous request's edits. Each handler additionally works on its
+ * own copy (see `emitBeforeProviderHeaders`), so one that outruns its timeout
+ * cannot write into the request after returning. When no extension subscribes,
+ * `base` is called directly and no copy is made.
  */
 export function wrapStreamFnWithProviderHeaders(runner: ExtensionRunner, base: StreamFn): StreamFn {
 	return async (model, context, options) => {

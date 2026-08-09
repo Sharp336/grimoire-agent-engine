@@ -246,6 +246,7 @@ Cancelable pre-events:
 - `input`
 - `before_agent_start`
 - `before_provider_request` (may replace provider request payload)
+- `before_provider_headers` — edit the **caller-supplied** request headers (`StreamOptions.headers`) before the provider HTTP call. Handlers mutate `event.headers` in place; the return value is ignored. Headers added here reach the request, so this is the supported way to attach per-request metadata such as attribution, tracing, or a session id. Provider-generated headers — auth, model-configured headers, provider defaults — are assembled downstream and are neither visible nor removable; that boundary is deliberate, because exposing the assembled map would hand every installed extension the provider credential. Use `after_provider_response` to observe what was actually sent. Each handler receives its own copy, so a handler that outruns the timeout cannot write into the request after returning.
 - `after_provider_response`
 - `context`
 - `agent_start` / `agent_end` — agent loop lifecycle notification; `agent_end` remains notification-only

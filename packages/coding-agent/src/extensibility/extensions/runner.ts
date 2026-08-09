@@ -246,6 +246,9 @@ type RunnerEmitEvent = Exclude<
 	| UserBashEvent
 	| ContextEvent
 	| BeforeProviderRequestEvent
+	// Excluded like the other events with a dedicated emitter: this one is raised
+	// by `emitBeforeProviderHeaders`, which gives each handler its own header copy.
+	| BeforeProviderHeadersEvent
 	| AfterProviderResponseEvent
 	| BeforeAgentStartEvent
 	| ResourcesDiscoverEvent
@@ -1324,22 +1327,29 @@ export class ExtensionRunner {
 
 	async emitBeforeProviderHeaders(headers: Record<string, string>, model?: Model): Promise<Record<string, string>> {
 		const ctx = this.createContext(model);
+		let current: Record<string, string> = { ...headers };
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("before_provider_headers");
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
-				// Handlers mutate `headers` in place; the return value is ignored.
+				// Each handler edits its OWN copy, and the result is snapshotted the moment
+				// the await returns. A handler that ignores its abort signal and outruns the
+				// timeout keeps a reference to `working` — but nothing reads `working` again,
+				// so those late writes cannot reach a later handler or the HTTP request.
+				// Handlers mutate in place; the return value is ignored.
+				const working: Record<string, string> = { ...current };
 				const event: BeforeProviderHeadersEvent = {
 					type: "before_provider_headers",
-					headers,
+					headers: working,
 				};
 				await this.#runHandlerWithTimeout(handler, event, ctx, ext, extensionHandlerTimeoutMs);
+				current = { ...working };
 			}
 		}
 
-		return headers;
+		return current;
 	}
 
 	async emitAfterProviderResponse(response: ProviderResponseMetadata, _model?: Model): Promise<void> {

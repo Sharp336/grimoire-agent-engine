@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `before_provider_headers` extension event, letting an extension edit the caller-supplied provider request headers (`StreamOptions.headers`) before the HTTP call — the supported way to attach per-request attribution or tracing metadata. Provider-generated headers such as auth remain out of scope by design ([#8046](https://github.com/can1357/oh-my-pi/pull/8046)).
+
 ## [17.2.9] - 2026-08-05
 
 ### Breaking Changes

@@ -680,7 +680,44 @@ describe("ExtensionRunner", () => {
 			expect(headers).toEqual({ "x-added": "1", "x-existing": "overwritten", "x-untouched": "kept" });
 		});
 
-		it("applies every handler to the same object in load order", async () => {
+		// Review found a real race: a handler that ignores its abort signal keeps a
+		// reference to the header object after the timeout stops awaiting it, and can
+		// then write into the map on its way to the HTTP request. Each handler now
+		// works on its own copy, snapshotted the moment the await returns.
+		it("discards writes from a handler that outruns its timeout", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("before_provider_headers", async (event) => {
+						await new Promise((resolve) => setTimeout(resolve, 60));
+						event.headers["x-late"] = "escaped";
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "headers-late.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			testSetExtensionHandlerTimeoutMs(5);
+			try {
+				const headers = await runner.emitBeforeProviderHeaders({ "x-original": "kept" });
+				expect(headers).toEqual({ "x-original": "kept" });
+				// The handler is still running here; give it time to attempt its write and
+				// confirm the map we already returned is unaffected.
+				await new Promise(resolve => setTimeout(resolve, 80));
+				expect(headers).toEqual({ "x-original": "kept" });
+			} finally {
+				testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
+			}
+		});
+
+		it("threads each handler's result into the next, in load order", async () => {
 			const extCode1 = `
 				export default function(pi) {
 					pi.on("before_provider_headers", async (event) => {
