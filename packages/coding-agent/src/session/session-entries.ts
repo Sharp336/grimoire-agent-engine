@@ -227,6 +227,14 @@ export interface SessionInitEntry extends SessionEntryBase {
 	spawns?: string;
 	/** The agent's `readSummarize` setting (`false` = read summarization disabled); absent uses the session default. */
 	readSummarize?: boolean;
+	/**
+	 * Whether the parent session ran with extension discovery disabled
+	 * (`--no-extensions`, root mode "explicit-only"). Persisted so a cold
+	 * revive rebuilds the same root scope instead of defaulting to merge mode.
+	 */
+	disableExtensionDiscovery?: boolean;
+	/** Parent's resolved explicit extension-package root directories (agent/skill discovery scope). */
+	extensionRoots?: string[];
 }
 
 /** Mode change entry - tracks agent mode transitions (e.g. plan mode). */

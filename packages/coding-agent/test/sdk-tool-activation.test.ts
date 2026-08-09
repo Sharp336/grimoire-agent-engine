@@ -8,9 +8,11 @@ import type { Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import {
 	type CreateAgentSessionOptions,
 	type CustomTool,
@@ -23,6 +25,7 @@ import type { CustomMessageEntry, SessionEntry } from "@oh-my-pi/pi-coding-agent
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { fingerprintAgentContent } from "@oh-my-pi/pi-coding-agent/task/agent-policy";
 import { VIBE_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/vibe";
+import { VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
 import { logger, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 /** All persisted session entries for a session created with SessionManager.inMemory(). */
@@ -89,6 +92,9 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		registryAuthDir = path.join(os.tmpdir(), `pi-sdk-tool-activation-auth-${Snowflake.next()}`);
 		fs.mkdirSync(registryAuthDir, { recursive: true });
 		modelRegistry = new ModelRegistry(await discoverAuthStorage(registryAuthDir));
+		// The switch-reconcile tests below drive InteractiveMode (for plan/goal
+		// transient-state teardown), which renders status via the global theme.
+		await initTheme();
 	});
 
 	// Shared options for every session. `rules: []` and `workspaceTree` short-circuit
@@ -120,6 +126,8 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			removeSyncWithRetries(tempDir);
 		}
 
+		VibeSessionRegistry.resetGlobalForTests();
+		resetSettingsForTest();
 		vi.restoreAllMocks();
 	});
 
@@ -1645,5 +1653,218 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				await session.dispose();
 			}
 		});
+	});
+
+	// ---------------------------------------------------------------------------
+	// Session-switch rollback / transient-mode reconciliation regressions
+	// (adversarial review of the switchSession + InteractiveMode reconcile path).
+	// ---------------------------------------------------------------------------
+
+	/** Writes a minimal target transcript with an optional recorded persona. */
+	async function writeSwitchTarget(
+		filePath: string,
+		options: { agent?: { name: string; source: string } } = {},
+	): Promise<void> {
+		const timestamp = "2026-08-08T00:00:00.000Z";
+		const entries: Array<Record<string, unknown>> = [
+			{ type: "session", version: 3, id: path.basename(filePath), timestamp, cwd: path.dirname(filePath) },
+		];
+		if (options.agent) {
+			entries.push({
+				type: "agent_change",
+				id: "persona-change",
+				parentId: null,
+				timestamp,
+				agent: options.agent.name,
+				source: options.agent.source,
+			});
+		}
+		await Bun.write(filePath, `${entries.map(entry => JSON.stringify(entry)).join("\n")}\n`);
+	}
+
+	it("restores the source session's tool presentation when a session switch rolls back", async () => {
+		// switchSession's forward path runs the target persona's overlay
+		// (restore + applyToolOverlay), rewriting SessionTools' presentation
+		// state (runtime selection, xd:// mount partition, applied signature).
+		// The catch block reassigns `#agentToolOverlay` to the source overlay
+		// but — before the fix — never re-applies it: the rollback's
+		// `agent.setTools(previousTools)` restores only the agent's tool
+		// *instances*, so the session stays on the target's applied set instead
+		// of the source overlay's baseline until the next full tool re-apply.
+		const tempDir = makeTempDir();
+		const targetFile = path.join(tempDir, "target-reviewer.jsonl");
+		await writeSwitchTarget(targetFile, { agent: { name: "reviewer", source: "bundled" } });
+
+		// Control session with no persona: its enabled set IS the launch
+		// baseline (the persona overlay's restore target) for a session whose
+		// registry matches the source's.
+		const { session: control } = await createAgentSession(baseOptions(tempDir));
+		// Source session with a persona overlay active pre-switch. `agentPersona`
+		// must be passed at startup so the constructor arms `#agentToolOverlay`
+		// with the SDK-provided initialToolOverlayRestore.
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			sessionManager: SessionManager.create(tempDir, path.join(tempDir, "active")),
+			agentPersona: {
+				name: "pre-switch-persona",
+				description: "Persona active before the switch",
+				systemPrompt: "",
+				tools: ["read"],
+				source: "project" as const,
+			},
+		});
+		try {
+			expect(session.agentPersona?.name).toBe("pre-switch-persona");
+
+			// Fail the switch AFTER the forward path applied the target persona's
+			// overlay (the first `replaceMessages` in the try block runs after the
+			// persona block); the rollback's own replaceMessages must go through.
+			vi.spyOn(session.agent, "replaceMessages").mockImplementationOnce(() => {
+				throw new Error("injected switch failure");
+			});
+
+			await expect(session.switchSession(targetFile)).rejects.toThrow("injected switch failure");
+
+			// The source persona is restored, and SessionTools' presentation must
+			// match the launch baseline again — not the target persona's applied
+			// set (which would otherwise leak until the next tool re-apply).
+			expect(session.agentPersona?.name).toBe("pre-switch-persona");
+			expect([...session.getEnabledToolNames()].sort()).toEqual([...control.getEnabledToolNames()].sort());
+		} finally {
+			await session.dispose();
+			await control.dispose();
+		}
+	});
+
+	it("does not clobber the target persona's tools when switching out of goal mode", async () => {
+		// #clearTransientModeState's goal branch ran from the post-switch
+		// reconciler and re-applied `#goalModePreviousTools` — the SOURCE
+		// session's pre-goal snapshot — onto the target, clobbering the target
+		// persona tools switchSession just rehydrated (mirrors the plan/vibe
+		// branches; same-session /goal exit still restores via #exitGoalMode).
+		const tempDir = makeTempDir();
+		const targetFile = path.join(tempDir, "target-reviewer.jsonl");
+		await writeSwitchTarget(targetFile, { agent: { name: "reviewer", source: "bundled" } });
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			sessionManager: SessionManager.create(tempDir, path.join(tempDir, "active")),
+			agentPersona: {
+				name: "pre-switch-persona",
+				description: "Persona active before the switch",
+				systemPrompt: "",
+				tools: ["read"],
+				source: "project" as const,
+			},
+		});
+		await Settings.init({ inMemory: true, cwd: tempDir });
+		const mode = new InteractiveMode(session, "test");
+		try {
+			await mode.init({ suppressWelcomeIntro: true });
+			// Source session in goal mode: the persona's "read"-restricted set
+			// (auto-widened to task+hub by resolveAgentSessionPolicy) is
+			// augmented with the hidden `goal` tool.
+			await mode.handleGoalModeCommand("Ship the release");
+			expect(mode.goalModeEnabled).toBe(true);
+			expect([...session.getEnabledToolNames()].sort()).toEqual(["goal", "hub", "read", "task"]);
+
+			// Target records the bundled reviewer persona and no goal/plan mode.
+			expect(await session.switchSession(targetFile)).toBe(true);
+
+			// Goal state torn down, target persona live, and the target's tool
+			// set survives — the source's pre-goal set must not be re-applied.
+			expect(mode.goalModeEnabled).toBe(false);
+			expect(mode.goalModePaused).toBe(false);
+			expect(session.agentPersona?.name).toBe("reviewer");
+			// Reviewer policy: read,grep,glob,bash,lsp,web_search,ast_grep +
+			// auto-added task (spawns: scout) + hub; lsp/ast_grep gated out of
+			// the registry by baseOptions (enableLsp: false, astGrep disabled).
+			const reviewerSet = ["bash", "glob", "grep", "hub", "read", "task", "web_search"];
+			expect([...session.getEnabledToolNames()].sort()).toEqual(reviewerSet);
+		} finally {
+			mode.stop();
+			await session.dispose();
+		}
+	});
+
+	it("restores the pre-plan baseline only for no-persona targets on switch out of plan mode", async () => {
+		// The plan branch drops `#planModeToolOverlay` without restoring it
+		// (the source overlay would clobber the target). For a target with NO
+		// recorded persona, switchSession clears persona state but leaves the
+		// tools as the source's plan-augmented set (baseline + write) — the
+		// pre-plan baseline must be re-applied there. A persona target already
+		// rehydrated its own tools and must keep them.
+		const tempDir = makeTempDir();
+		const personaTargetFile = path.join(tempDir, "target-reviewer.jsonl");
+		await writeSwitchTarget(personaTargetFile, { agent: { name: "reviewer", source: "bundled" } });
+		const plainTargetFile = path.join(tempDir, "target-plain.jsonl");
+		await writeSwitchTarget(plainTargetFile);
+
+		// Control session with no persona: its enabled set is the launch
+		// baseline, which must differ from the pre-plan snapshot for the
+		// no-persona-target assertion below to discriminate the fix.
+		const { session: control } = await createAgentSession(baseOptions(tempDir));
+		const controlBaseline = [...control.getEnabledToolNames()].sort();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			sessionManager: SessionManager.create(tempDir, path.join(tempDir, "active")),
+			agentPersona: {
+				name: "pre-switch-persona",
+				description: "Persona active before the switch",
+				systemPrompt: "",
+				tools: ["read"],
+				source: "project" as const,
+			},
+		});
+		await Settings.init({ inMemory: true, cwd: tempDir });
+		const mode = new InteractiveMode(session, "test");
+		try {
+			await mode.init({ suppressWelcomeIntro: true });
+			// Source session in plan mode: the persona's "read"-restricted set
+			// (auto-widened to task+hub) is augmented with the built-in `write`.
+			await mode.handlePlanModeCommand();
+			expect(mode.planModeEnabled).toBe(true);
+			expect([...session.getEnabledToolNames()].sort()).toEqual(["hub", "read", "task", "write"]);
+
+			// Case A: target with a persona — its tools must survive untouched
+			// (an unconditional restore would clobber them with the source's
+			// pre-plan snapshot). `write` may be present as a separate
+			// pre-existing artifact: the forward persona apply runs while plan
+			// mode state is still live, so the transport forces `write`
+			// top-level; only the reconciler clears plan mode after.
+			expect(await session.switchSession(personaTargetFile)).toBe(true);
+			expect(mode.planModeEnabled).toBe(false);
+			expect(session.agentPersona?.name).toBe("reviewer");
+			const reviewerSet = ["bash", "glob", "grep", "hub", "read", "task", "web_search"];
+			expect(
+				session
+					.getEnabledToolNames()
+					.filter(name => name !== "write")
+					.sort(),
+			).toEqual(reviewerSet);
+
+			// Re-arm plan mode on the reviewer-active session, then switch to a
+			// target with NO recorded persona: plan's write must be dropped and
+			// the pre-plan baseline restored.
+			await mode.handlePlanModeCommand();
+			expect(mode.planModeEnabled).toBe(true);
+			const prePlanSet = [...session.getEnabledToolNames()].sort();
+			expect(prePlanSet).toContain("write");
+			// The pre-plan snapshot must observably differ from the launch
+			// baseline, or the final assertion cannot discriminate the fix.
+			expect(prePlanSet).not.toEqual(controlBaseline);
+
+			expect(await session.switchSession(plainTargetFile)).toBe(true);
+			expect(mode.planModeEnabled).toBe(false);
+			expect(session.agentPersona).toBeUndefined();
+			// The no-persona target keeps the source's pre-plan baseline (the
+			// finding's contract for persona-less targets), NOT the launch
+			// baseline the persona else-branch would otherwise leave.
+			expect([...session.getEnabledToolNames()].sort()).toEqual(prePlanSet);
+		} finally {
+			mode.stop();
+			await session.dispose();
+			await control.dispose();
+		}
 	});
 });

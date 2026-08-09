@@ -2450,6 +2450,21 @@ export class InteractiveMode implements InteractiveModeContext {
 				// still restores through #exitPlanMode's own path.
 				this.#planModeToolOverlay = undefined;
 			} finally {
+				// A switch to a target with NO recorded persona (switchSession's
+				// persona else-branch cleared persona state without touching the
+				// tools) would otherwise keep the source's plan-augmented set
+				// (baseline + write). Restore the pre-plan baseline only there;
+				// a persona target already rehydrated its own tools above.
+				// Guarded: a rebuild failure here must not skip the synchronous
+				// plan-state cleanup below (existing contract: "clears old plan UI
+				// state when target-session reconciliation restore fails").
+				if (!this.session.agentPersona && this.#planModePreviousTools !== undefined) {
+					try {
+						await this.session.setActiveToolsByName(this.#planModePreviousTools);
+					} catch (error) {
+						logger.warn("Failed to restore pre-plan baseline on session switch", { error: String(error) });
+					}
+				}
 				this.session.setPlanProposalHandler?.(null);
 				this.planModeEnabled = false;
 				this.planModePaused = false;
@@ -2464,10 +2479,24 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		if (this.goalModeEnabled || this.goalModePaused) {
-			if (this.#goalModePreviousTools !== undefined) {
-				await this.session.setActiveToolsByName(this.#goalModePreviousTools);
-			}
+			// This runs only from #reconcileModeFromSession, i.e. after
+			// switchSession already loaded and rehydrated the target session's
+			// persona tools. The #goalModePreviousTools snapshot belongs to the
+			// SOURCE session — re-applying it onto a persona target would clobber
+			// the target's active set (mirrors the plan/vibe branches above).
+			// But a target with NO recorded persona keeps the source's
+			// goal-augmented set (baseline + the hidden `goal` tool), so restore
+			// the pre-goal baseline there — mirroring the plan branch — and drop
+			// the snapshot for persona targets. A same-session /goal exit still
+			// restores through #exitGoalMode's own path.
 			this.session.setGoalModeState(undefined);
+			if (!this.session.agentPersona && this.#goalModePreviousTools !== undefined) {
+				try {
+					await this.session.setActiveToolsByName(this.#goalModePreviousTools);
+				} catch (error) {
+					logger.warn("Failed to restore pre-goal baseline on session switch", { error: String(error) });
+				}
+			}
 			this.goalModeEnabled = false;
 			this.goalModePaused = false;
 			this.#goalModePreviousTools = undefined;

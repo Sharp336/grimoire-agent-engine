@@ -201,7 +201,7 @@ export async function listOmpExtensionRoots(
 ): Promise<OmpExtensionRoot[]> {
 	const scopedRoots = invocationRootScope.getStore();
 	const rootMode = options?.mode ?? scopedRoots?.mode ?? injectedCliRootMode;
-	let candidates: InjectedRoot[] = options?.explicitRoots
+	let candidates: InjectedRoot[] = options?.explicitRoots?.length
 		? options.explicitRoots.map(raw => ({ path: resolveAgainst(raw, ctx), level: "user" }))
 		: scopedRoots
 			? scopedRoots.paths.map(raw => ({ path: resolveAgainst(raw, ctx), level: "user" }))

@@ -7963,7 +7963,36 @@ export class AgentSession {
 			this.#models.restoreServiceTiers(previousServiceTierByFamily);
 			this.#agentPersona = previousPersona;
 			this.#setAgentPersona?.(previousPersona);
+			// The forward path may have already run the target persona's overlay
+			// (restore + applyToolOverlay), which rewrote SessionTools'
+			// presentation state (#runtimeSelectedToolNames, #xdev.mountedNames,
+			// #lastAppliedToolSignature). Reassigning the handle alone would leave
+			// the rolled-back source session on the target's mount partition and
+			// pin set. Restore whichever overlay was APPLIED (the target's handle,
+			// when the persona block ran — including when the source had no
+			// persona of its own and previousPersonaOverlay is undefined), then
+			// re-point the handle at the source baseline.
+			const appliedOverlay = this.#agentToolOverlay;
 			this.#agentToolOverlay = previousPersonaOverlay;
+			if (appliedOverlay && appliedOverlay !== previousPersonaOverlay) {
+				try {
+					await appliedOverlay.restore();
+				} catch (restoreError) {
+					logger.warn("Failed to restore applied tool overlay after session switch rollback", {
+						targetSessionFile: sessionPath,
+						error: String(restoreError),
+					});
+				}
+			} else if (previousPersonaOverlay) {
+				try {
+					await previousPersonaOverlay.restore();
+				} catch (restoreError) {
+					logger.warn("Failed to restore persona tool overlay after session switch rollback", {
+						targetSessionFile: sessionPath,
+						error: String(restoreError),
+					});
+				}
+			}
 			this.#personaToolPolicy = previousPersonaToolPolicy;
 			if (previousSpawns !== undefined) this.#setSessionSpawns?.(previousSpawns);
 			if (modelRolledBack) {

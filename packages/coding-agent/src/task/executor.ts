@@ -2694,8 +2694,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	let toolNames: string[] | undefined;
 	if (agent.tools && agent.tools.length > 0) {
 		toolNames = agent.tools;
-		// Auto-include task tool if spawns defined but task not in tools
-		if (agent.spawns !== undefined && !toolNames.includes("task") && !atMaxDepth) {
+		// Auto-include task tool if spawns are actually enabled (a non-empty
+		// list — `spawns: []`/`spawns: ""` explicitly disables spawning, and
+		// advertising a task tool whose every call would error is a trap) but
+		// task not in tools.
+		if (agent.spawns !== undefined && agent.spawns.length > 0 && !toolNames.includes("task") && !atMaxDepth) {
 			toolNames = [...toolNames, "task"];
 		}
 	}
@@ -3170,6 +3173,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
+				disableExtensionDiscovery:
+					options.disableExtensionDiscovery || session.getExtensionDiscoveryMode?.() === "explicit-only",
+				extensionRoots: session.extensionRoots,
 			});
 
 			abortSignal.addEventListener(
