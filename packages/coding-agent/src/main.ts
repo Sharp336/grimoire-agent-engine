@@ -430,10 +430,27 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 		// shadowing definition in the target project) must resolve under the
 		// session cwd, not the launch one. Re-resolve an explicit --agent here;
 		// rehydrated personas (no --agent) keep the baked definition, matching
-		// the launch resume path (codex 3742806342).
+		// the launch resume path (codex 3742806342). The launch-cwd persona
+		// fields are cleared FIRST so a target workspace that cannot resolve the
+		// --agent (or resolves a definition without the launch persona's
+		// model/tools) does not run the stale launch persona policy; CLI-locked
+		// selections (--tools/--model/--thinking) survive untouched (codex
+		// 3742931876).
 		const baseOptions = { ...args.baseOptions };
 		const cliAgent = args.parsedArgs.agent;
 		if (cliAgent && baseOptions.agentPersona) {
+			baseOptions.agentPersona = undefined;
+			if (!baseOptions.cliToolsLocked) {
+				baseOptions.toolNames = undefined;
+				baseOptions.toolNamesFromAgent = undefined;
+			}
+			if (!baseOptions.cliModelLocked) {
+				baseOptions.model = undefined;
+				baseOptions.modelPattern = undefined;
+			}
+			if (!baseOptions.cliThinkingLocked) {
+				baseOptions.thinkingLevel = undefined;
+			}
 			const cliExtensionPaths = [...(args.parsedArgs.extensions ?? []), ...(args.parsedArgs.hooks ?? [])];
 			const agentExtensionMode: "merge" | "explicit-only" = args.parsedArgs.noExtensions ? "explicit-only" : "merge";
 			const agentIncludeExtensions = !args.parsedArgs.noExtensions || cliExtensionPaths.length > 0;
@@ -445,23 +462,24 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			if (agentPersona && agentPersona.availability !== "subagent") {
 				baseOptions.agentPersona = agentPersona;
 				const policy = resolveAgentSessionPolicy(agentPersona);
-				// Tools/spawns/model were derived from the persona at launch
-				// (buildSessionOptions lines ~1268/1230/1090); re-derive them for
-				// the target project. CLI-locked selections (explicit --tools,
-				// --model, --thinking) must survive untouched.
+				// Re-derive the persona's tool/model/thinking policy for the
+				// target project (the SDK's sdk.ts:1408 persona block resolves
+				// the deferred model pattern after extensions register for this
+				// cwd).
 				if (!baseOptions.cliToolsLocked && policy.toolNames) {
 					baseOptions.toolNames = policy.toolNames;
 					baseOptions.toolNamesFromAgent = true;
 				}
-				if (!baseOptions.cliModelLocked && baseOptions.model === undefined && policy.modelPatterns?.length) {
-					// Deferred pattern: the SDK resolves it after extensions
-					// register for this cwd (the sdk.ts:1408 persona block).
+				if (!baseOptions.cliModelLocked && policy.modelPatterns?.length) {
 					baseOptions.modelPattern = policy.modelPatterns;
 				}
-				if (!baseOptions.cliThinkingLocked && baseOptions.thinkingLevel === undefined && policy.thinkingLevel) {
+				if (!baseOptions.cliThinkingLocked && policy.thinkingLevel) {
 					baseOptions.thinkingLevel = policy.thinkingLevel;
 				}
 			}
+			// Unresolved or subagent-only: silent fallback to the default
+			// session (matching the launch resume path) — the persona fields
+			// stay cleared.
 		}
 		const { session: nextSession } = await args.createSession({
 			...baseOptions,

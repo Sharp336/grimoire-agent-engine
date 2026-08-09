@@ -311,4 +311,80 @@ describe("createAcpSessionFactory per-cwd persona re-resolution (codex 374280634
 			}
 		}
 	});
+
+	it("clears launch-cwd persona state when the per-session cwd cannot resolve the --agent", async () => {
+		const tempDir = TempDir.createSync("@pi-acp-persona-clear-");
+		let authStorage: AuthStorage | undefined;
+		try {
+			authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+			const modelRegistry = new ModelRegistry(authStorage);
+			const settings = Settings.isolated({});
+
+			const targetDir = tempDir.join("target-project");
+			// The launch cwd defined a project-scoped persona that does NOT
+			// exist in the target workspace (and is not a bundled agent), so
+			// the per-session cwd cannot resolve it.
+
+			const fakeSession = {} as AgentSession;
+			const captured: CreateAgentSessionOptions[] = [];
+			const createSession = async (options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> => {
+				captured.push(options);
+				return {
+					session: fakeSession,
+					extensionsResult: {
+						extensions: [],
+						errors: [],
+						runner: undefined,
+					} as unknown as CreateAgentSessionResult["extensionsResult"],
+					setToolUIContext: () => {},
+					eventBus: {
+						emit: () => {},
+						on: () => () => {},
+						off: () => {},
+					} as unknown as CreateAgentSessionResult["eventBus"],
+				};
+			};
+
+			// baseOptions carries the launch-cwd persona AND its derived
+			// model/tools; the target workspace cannot resolve `launch-only`, so
+			// all persona-derived fields must be cleared — never run the launch
+			// persona's policy in the wrong project (codex 3742931876).
+			const factory = createAcpSessionFactory({
+				baseOptions: {
+					agentPersona: {
+						name: "launch-only",
+						description: "Launch-cwd persona",
+						systemPrompt: "",
+						source: "project" as const,
+					},
+					toolNamesFromAgent: true,
+					toolNames: ["read"],
+					model: { provider: "openai", id: "gpt-4o-mini" } as CreateAgentSessionOptions["model"],
+				} as CreateAgentSessionOptions,
+				settings,
+				sessionDir: tempDir.join("sessions"),
+				authStorage,
+				modelRegistry,
+				parsedArgs: { agent: "launch-only" },
+				rawArgs: [],
+				createSession,
+			});
+
+			await factory(targetDir);
+
+			expect(captured).toHaveLength(1);
+			expect(captured[0].agentPersona).toBeUndefined();
+			expect(captured[0].toolNames).toBeUndefined();
+			expect(captured[0].toolNamesFromAgent).toBeUndefined();
+			expect(captured[0].model).toBeUndefined();
+			expect(captured[0].modelPattern).toBeUndefined();
+		} finally {
+			try {
+				authStorage?.close();
+			} finally {
+				await Bun.sleep(0);
+				await tempDir.remove();
+			}
+		}
+	});
 });
