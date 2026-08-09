@@ -260,6 +260,47 @@ describe("WATCHDOG.yml file round-trip", () => {
 		expect(advisors.find(a => a.name === "Default Tools")?.tools).toBeUndefined();
 	});
 
+	it("round-trips a dynamic model map and falls back to legacy empty-file path", async () => {
+		const file = path.join(tmp, "WATCHDOG.yml");
+		const dynamicDoc: WatchdogConfigDoc = {
+			advisors: [
+				{
+					name: "Dynamic Watchdog",
+					model: {
+						"anthropic/claude-sonnet-4-5": "anthropic/claude-terra-6|deepseek/deepseek-v4-flash",
+						"anthropic/claude-terra-6": "anthropic/claude-sonnet-4-5|deepseek/deepseek-v4-flash",
+						default: "deepseek/deepseek-v4-flash",
+					},
+					tools: ["read", "grep"],
+					instructions: "Dynamic model selection.",
+				},
+			],
+		};
+
+		await saveWatchdogConfigFile(file, dynamicDoc);
+		// Verify YAML output contains the mapping, not flow-style
+		const text = await Bun.file(file).text();
+		expect(text).toContain("    model:");
+		expect(text).toContain("anthropic/claude-sonnet-4-5");
+		expect(text).toContain("default:");
+		expect(text).toContain("deepseek/deepseek-v4-flash");
+
+		// Verify round-trip loads the map as an object
+		const loaded = await loadWatchdogConfigFile(file);
+		expect(loaded.advisors[0].name).toBe("Dynamic Watchdog");
+		expect(typeof loaded.advisors[0].model).toBe("object");
+		expect((loaded.advisors[0].model as Record<string, string>)["default"]).toBe("deepseek/deepseek-v4-flash");
+
+		// Verify discovery also parses the map correctly
+		const { advisors } = await discoverAdvisorConfigs(tmp, tmp);
+		const discovered = advisors.find(a => a.name === "Dynamic Watchdog");
+		expect(discovered).toBeDefined();
+		expect(typeof discovered!.model).toBe("object");
+		const map = discovered!.model as Record<string, string>;
+		expect(map["anthropic/claude-sonnet-4-5"]).toBe("anthropic/claude-terra-6|deepseek/deepseek-v4-flash");
+		expect(map.default).toBe("deepseek/deepseek-v4-flash");
+	});
+
 	it("removes the file when the doc is empty so legacy discovery resumes", async () => {
 		const file = path.join(tmp, "WATCHDOG.yml");
 		await saveWatchdogConfigFile(file, doc);

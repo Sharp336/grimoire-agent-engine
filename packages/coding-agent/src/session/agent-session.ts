@@ -1402,6 +1402,7 @@ export class AgentSession {
 			onSseEvent: this.#onSseEvent,
 			agentKind: () => this.#agentKind,
 			isDisposed: () => this.#isDisposed,
+			model: () => this.model,
 			abortInProgress: () => this.#abortInProgress,
 			allowAgentInitiatedTurns: () => this.#allowAcpAgentInitiatedTurns,
 			planModeState: () => this.#planModeState,
@@ -6973,6 +6974,9 @@ export class AgentSession {
 		// retry-fallback on the error path.
 		if (isChanging) {
 			this.#emit({ type: "model_changed" });
+			// Dynamic advisor models keyed on the primary driving model
+			// must be re-evaluated when the driver changes.
+			this.#advisors.onPrimaryModelChanged();
 		}
 
 		// Re-evaluate append-only context mode — provider or setting may have changed

@@ -33,6 +33,8 @@ import {
 	ADVISOR_DEFAULT_TOOL_NAMES,
 	type AdvisorConfig,
 	type AdvisorConfigScope,
+	advisorModelHasSlashSeparator,
+	formatAdvisorModel,
 	type WatchdogConfigDoc,
 } from "../../advisor";
 import type { ModelRegistry } from "../../config/model-registry";
@@ -290,7 +292,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 	}
 
 	#advisorPreview(advisor: AdvisorConfig, bodyWidth: number): string[] {
-		const model = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";
+		const model = formatAdvisorModel(advisor.model, this.#defaultModelLabel || "advisor role default");
 		const tools = formatAdvisorTools(advisor.tools, "no tools");
 		const lines = [
 			theme.bold(advisor.name || "(unnamed)"),
@@ -324,8 +326,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 				);
 			}
 		}
-		const quotaProvider =
-			(advisor.model?.includes("/") ? advisor.model.split("/")[0] : null) ?? liveStat?.model?.provider;
+		const quotaProvider = advisorModelHasSlashSeparator(advisor.model) ? (advisor.model as string).split("/")[0] : liveStat?.model?.provider;
 		if (this.#cachedReports && quotaProvider) {
 			const activeAccount = this.#cb.resolveActiveAccount?.(quotaProvider, liveStat?.sessionId);
 			const quota = formatCompactQuota(quotaProvider, this.#cachedReports, Date.now(), activeAccount);
@@ -358,7 +359,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 		if (!advisor) return false;
 		return (
 			advisor.name === "default" &&
-			!advisor.model?.trim() &&
+			!advisor.model &&
 			advisor.tools === undefined &&
 			!advisor.instructions?.trim() &&
 			advisor.enabled !== false
@@ -366,7 +367,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 	}
 
 	#advisorSummary(advisor: AdvisorConfig): string {
-		const model = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";
+		const model = formatAdvisorModel(advisor.model, this.#defaultModelLabel || "advisor role default");
 		const tools = formatAdvisorTools(advisor.tools, "no tools");
 		return `${model} · ${tools}`;
 	}
@@ -441,7 +442,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 			this.#showList();
 			return;
 		}
-		const modelDescription = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";
+		const modelDescription = formatAdvisorModel(advisor.model, this.#defaultModelLabel || "advisor role default");
 		const toolsDescription = formatAdvisorTools(advisor.tools, "no tools");
 		const items: SelectItem[] = [
 			{ value: "name", label: "Name", description: advisor.name },
@@ -452,7 +453,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 			},
 			{ value: "model", label: "Model", description: modelDescription },
 		];
-		if (advisor.model?.trim()) {
+		if (advisor.model) {
 			items.push({ value: "resetModel", label: "Reset model to advisor-role default" });
 		}
 		items.push(

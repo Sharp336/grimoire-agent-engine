@@ -8,24 +8,63 @@ import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import { collectConfigCandidates } from "./watchdog";
 
 /**
- * One advisor declared in a `WATCHDOG.yml` file. `model` is a model selector
- * with an optional `:level` thinking suffix (e.g. `x-ai/grok-code-fast:high`),
- * resolved exactly like any other model override; `tools` is a subset of
- * `BUILTIN_TOOL_NAMES` — any built-in name, including mutating tools such as
- * `edit`/`write`/`bash` (the advisor is a full agent). Omitted falls back to
- * the default `read`/`grep`/`glob` subset; an explicit empty list grants no
- * tools. `instructions` is the advisor's specialization, appended to the shared
- * baseline.
+ * A map from primary-model pattern to advisor-model selector for dynamic model
+ * assignment. Keys are model patterns (e.g. `anthropic/claude-sonnet-4-5`),
+ * values are model selectors with optional `:level` suffix. The `default` key
+ * serves as the fallback when no other key matches the primary session model.
+ */
+export type DynamicAdvisorModelMap = Record<string, string>;
+
+/**
+ * One advisor declared in a `WATCHDOG.yml` file. `model` is either a static
+ * model selector with an optional `:level` thinking suffix (e.g.
+ * `x-ai/grok-code-fast:high`), or a {@link DynamicAdvisorModelMap} that selects
+ * the model based on the primary session's driving model. Resolved exactly like
+ * any other model override; `tools` is a subset of `BUILTIN_TOOL_NAMES` — any
+ * built-in name, including mutating tools such as `edit`/`write`/`bash` (the
+ * advisor is a full agent). Omitted falls back to the default `read`/`grep`/`glob`
+ * subset; an explicit empty list grants no tools. `instructions` is the advisor's
+ * specialization, appended to the shared baseline.
  */
 export interface AdvisorConfig {
 	name: string;
-	model?: string;
+	model?: string | DynamicAdvisorModelMap;
 	tools?: string[];
 	instructions?: string;
 	/** Per-advisor on/off toggle (default `true`). When `false`, the advisor
 	 *  stays in the roster but its runtime is never built — it shows `○` in
 	 *  the status line and `/advisor status` rather than disappearing. */
 	enabled?: boolean;
+}
+
+/**
+ * Format an advisor's model field for display. A static string is shown
+ * verbatim; a dynamic map is shown as a summary of its keys. Returns the
+ * fallback when the field is absent or empty.
+ */
+export function formatAdvisorModel(
+	model: string | DynamicAdvisorModelMap | undefined,
+	fallback: string,
+): string {
+	if (!model) return fallback;
+	if (typeof model === "string") {
+		const trimmed = model.trim();
+		return trimmed || fallback;
+	}
+	const keys = Object.keys(model);
+	if (keys.length === 0) return fallback;
+	// Show "dynamic (n entries)" for maps
+	return `dynamic (${keys.length} pattern${keys.length === 1 ? "" : "s"})`;
+}
+
+/**
+ * Whether the model field contains a reference to a specific provider/id pair
+ * (i.e. it includes a `/` character). Only meaningful for string model
+ * selectors; dynamic maps always return false.
+ */
+export function advisorModelHasSlashSeparator(model: string | DynamicAdvisorModelMap | undefined): boolean {
+	if (typeof model !== "string") return false;
+	return model.includes("/");
 }
 
 /**
@@ -51,7 +90,7 @@ export interface DiscoveredAdvisors {
 
 const advisorEntrySchema = type({
 	name: "string",
-	"model?": "string",
+	"model?": "string | Record<string, string>",
 	"tools?": "string[]",
 	"instructions?": "string",
 	"enabled?": "boolean",
@@ -167,9 +206,24 @@ export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Pr
 			const instructions = entry.instructions?.trim()
 				? (await expandAtImports(entry.instructions, item.path)).trim() || undefined
 				: undefined;
+			// Normalize the model field: string → trimmed string or undefined,
+			// object (dynamic map) → strip empty/whitespace-only values.
+			let model: string | Record<string, string> | undefined;
+			if (typeof entry.model === "string") {
+				model = entry.model.trim() || undefined;
+			} else if (entry.model && typeof entry.model === "object" && !Array.isArray(entry.model)) {
+				const map: Record<string, string> = {};
+				for (const [key, value] of Object.entries(entry.model as Record<string, unknown>)) {
+					if (typeof value === "string" && value.trim()) {
+						map[key] = value.trim();
+					}
+				}
+				// Only use the map if it has at least one valid entry (including `default`)
+				if (Object.keys(map).length > 0) model = map;
+			}
 			advisors.set(slug, {
 				name: entry.name,
-				model: entry.model?.trim() || undefined,
+				model,
 				tools: filterAdvisorTools(entry.tools, item.path),
 				instructions,
 				enabled: entry.enabled,
@@ -255,7 +309,13 @@ export async function loadWatchdogConfigFile(filePath: string): Promise<Watchdog
 	}
 	const advisors = (result.advisors ?? []).map(a => {
 		const advisor: AdvisorConfig = { name: a.name };
-		if (a.model?.trim()) advisor.model = a.model;
+		if (typeof a.model === "string") {
+			if (a.model.trim()) advisor.model = a.model;
+		} else if (a.model && typeof a.model === "object" && !Array.isArray(a.model)) {
+			// Dynamic model map — pass through as-is for round-trip editing
+			const map = a.model as Record<string, unknown>;
+			if (Object.keys(map).length > 0) advisor.model = a.model;
+		}
 		if (a.tools !== undefined) advisor.tools = [...a.tools];
 		if (a.instructions?.trim()) advisor.instructions = a.instructions;
 		if (a.enabled !== undefined) advisor.enabled = a.enabled;
@@ -302,7 +362,17 @@ export function serializeWatchdogConfig(doc: WatchdogConfigDoc): string {
 		lines.push("advisors:");
 		for (const advisor of doc.advisors) {
 			lines.push(`  - name: ${YAML.stringify(advisor.name)}`);
-			if (advisor.model?.trim()) lines.push(`    model: ${YAML.stringify(advisor.model)}`);
+			if (advisor.model) {
+				if (typeof advisor.model === "string") {
+					lines.push(`    model: ${YAML.stringify(advisor.model)}`);
+				} else {
+					// Dynamic model map — serialize as a YAML mapping
+					lines.push("    model:");
+					for (const [key, value] of Object.entries(advisor.model)) {
+						lines.push(`      ${YAML.stringify(key)}: ${YAML.stringify(value)}`);
+					}
+				}
+			}
 			if (advisor.tools !== undefined) {
 				if (advisor.tools.length === 0) {
 					lines.push("    tools: []");

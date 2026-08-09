@@ -52,6 +52,7 @@ import {
 	AdvisorTranscriptRecorder,
 	advisorTranscriptFilename,
 	buildAdvisorQuarantineSourceText,
+	type DynamicAdvisorModelMap,
 	formatAdvisorBatchContent,
 	getOrCreateAdvisorProviderSessionId,
 	isAdvisorInterruptImmuneTurnActive,
@@ -244,6 +245,8 @@ export interface SessionAdvisorsHost {
 	onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
 	agentKind(): "main" | "sub";
 	isDisposed(): boolean;
+	/** Returns the primary session's current driving model, or undefined. */
+	model(): Model | undefined;
 	abortInProgress(): boolean;
 	allowAgentInitiatedTurns(): boolean;
 	planModeState(): PlanModeState | undefined;
@@ -348,6 +351,23 @@ export class SessionAdvisors {
 	/** Rebuilds live advisors when role assignments alter their resolved runtime inputs. */
 	onModelRolesChanged(): void {
 		if (!this.#advisorEnabled || this.#host.isDisposed()) return;
+		if (this.#advisors.length > 0 && !this.#advisorRuntimeMatchesCurrentConfig()) this.#stopAdvisorRuntime();
+		this.#buildAdvisorRuntime(true);
+	}
+
+	/**
+	 * Re-evaluates advisor model assignments when the primary driving model
+	 * changes. Only advisors with a dynamic model map (
+	 * {@link DynamicAdvisorModelMap}) are affected — static model selectors
+	 * and role-based resolution are unchanged. Rebuilds the runtime when at
+	 * least one dynamic advisor would select a different model under the new
+	 * primary model, which the signature check in
+	 * {@link #advisorRuntimeMatchesCurrentConfig} detects automatically.
+	 */
+	onPrimaryModelChanged(): void {
+		if (!this.#advisorEnabled || this.#host.isDisposed()) return;
+		// Fast path: skip if no advisor uses a dynamic model map
+		if (!this.#advisorConfigs?.some(c => c.model && typeof c.model === "object")) return;
 		if (this.#advisors.length > 0 && !this.#advisorRuntimeMatchesCurrentConfig()) this.#stopAdvisorRuntime();
 		this.#buildAdvisorRuntime(true);
 	}
@@ -548,6 +568,74 @@ export class SessionAdvisors {
 		this.#host.dropPendingAdvisorCards();
 	}
 
+	#resolveDynamicAdvisorModel(
+		config: AdvisorConfig,
+	): { model: Model; thinkingLevel?: ThinkingLevel } | undefined {
+		if (!config.model) return undefined;
+
+		const modelMap = config.model;
+		if (typeof modelMap === "string") {
+			// Static model selector — current behaviour
+			const resolved = resolveModelOverride([modelMap], this.#host.modelRegistry, this.#host.settings);
+			const model = resolved.model;
+			if (!model) return undefined;
+			return { model, thinkingLevel: concreteThinkingLevel(resolved.thinkingLevel) };
+		}
+
+		// Dynamic model map — resolve based on the primary session's driving model
+		const primaryModel = this.#host.model();
+		if (!primaryModel) {
+			// No primary model yet; try the `default` key or fail
+			const defaultSelector = modelMap["default"];
+			if (!defaultSelector) return undefined;
+			const resolved = resolveModelOverride([defaultSelector], this.#host.modelRegistry, this.#host.settings);
+			const model = resolved.model;
+			if (!model) return undefined;
+			return { model, thinkingLevel: concreteThinkingLevel(resolved.thinkingLevel) };
+		}
+
+		const primaryModelStr = formatModelString(primaryModel);
+
+		// Find the best-matching key: try exact match first, then fuzzy match using
+		// the model resolution pipeline, falling back to `default`.
+		let matchedSelector: string | undefined;
+
+		// Phase 1: exact-string match against the primary model string
+		for (const [key, value] of Object.entries(modelMap)) {
+			if (key === "default") continue;
+			if (key === primaryModelStr) {
+				matchedSelector = value;
+				break;
+			}
+		}
+
+		// Phase 2: resolve each key as a model pattern and check if it matches
+		// the primary model. This supports provider-prefixed ids, bare ids,
+		// aliases, globs, and any other pattern the model resolver accepts.
+		if (!matchedSelector) {
+			for (const [key, value] of Object.entries(modelMap)) {
+				if (key === "default") continue;
+				const resolved = resolveModelOverride([key], this.#host.modelRegistry, this.#host.settings);
+				if (resolved.model && modelsAreEqual(resolved.model, primaryModel)) {
+					matchedSelector = value;
+					break;
+				}
+			}
+		}
+
+		// Phase 3: fallback to `default`
+		if (!matchedSelector) {
+			matchedSelector = modelMap["default"];
+		}
+
+		if (!matchedSelector) return undefined;
+
+		const resolved = resolveModelOverride([matchedSelector], this.#host.modelRegistry, this.#host.settings);
+		const model = resolved.model;
+		if (!model) return undefined;
+		return { model, thinkingLevel: concreteThinkingLevel(resolved.thinkingLevel) };
+	}
+
 	#resolveAdvisorRuntimeDescriptors(emitWarnings: boolean): AdvisorRuntimeDescriptor[] {
 		const legacy = !this.#advisorConfigs?.length;
 		const roster: AdvisorConfig[] = legacy ? [{ name: "default" }] : this.#advisorConfigs!;
@@ -569,20 +657,27 @@ export class SessionAdvisors {
 				continue;
 			}
 
-			// Resolve the advisor's model: an explicit `model` override wins; else the
-			// `advisor` role chain. A model that fails to resolve skips just this advisor.
+			// Resolve the advisor's model: a dynamic map keys on the primary
+			// driving model, a static string is used directly, omitted falls
+			// back to the `advisor` role chain. A model that fails to resolve
+			// skips just this advisor.
 			let model: Model | undefined;
 			let thinkingLevel: ThinkingLevel | undefined;
 			if (config.model) {
-				const resolved = resolveModelOverride([config.model], this.#host.modelRegistry, this.#host.settings);
-				model = resolved.model;
-				thinkingLevel = concreteThinkingLevel(resolved.thinkingLevel);
+				const dynamicResult = this.#resolveDynamicAdvisorModel(config);
+				if (dynamicResult) {
+					model = dynamicResult.model;
+					thinkingLevel = dynamicResult.thinkingLevel;
+				}
 				if (!model) {
+					const modelDesc = typeof config.model === "string"
+						? config.model
+						: `${Object.keys(config.model as Record<string, string>).join(", ")} (dynamic map)`;
 					this.#advisorStatuses.set(slug, { name: config.name, status: "no_model" });
 					if (emitWarnings) {
 						this.#host.emitNotice(
 							"warning",
-							`Advisor "${config.name}": no model matched "${config.model}"`,
+							`Advisor "${config.name}": no model matched from ${modelDesc}`,
 							"advisor",
 						);
 					}
