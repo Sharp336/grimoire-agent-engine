@@ -103,16 +103,25 @@ describe("wrapStreamFnWithProviderHeaders", () => {
 
 		const first = await wrapped(capped, context, { headers: { "x-a": "1" } });
 		const second = wrapped(capped, context, { headers: { "x-b": "2" } });
-		await Bun.sleep(10);
+		try {
+			await Bun.sleep(10);
 
-		// The queued request has not run its handlers, because it holds no slot yet.
-		expect(seen).toHaveLength(1);
-		expect(streams).toHaveLength(1);
+			// The queued request has not run its handlers, because it holds no slot yet.
+			expect(seen).toHaveLength(1);
+			expect(streams).toHaveLength(1);
 
-		first.end();
-		await second;
+			first.end();
+			await second;
 
-		expect(seen).toHaveLength(2);
-		expect(seen[1]).toEqual({ "x-b": "2" });
+			expect(seen).toHaveLength(2);
+			expect(seen[1]).toEqual({ "x-b": "2" });
+		} finally {
+			// BOTH streams must end, including on a failed assertion. The semaphore is
+			// module-global and keyed by provider, so a slot left held here is held for
+			// the whole Bun process: later files using `ollama-cloud` (issues #3749 and
+			// #3751) then block on a cap this file never released.
+			first.end();
+			(await second)?.end();
+		}
 	});
 });

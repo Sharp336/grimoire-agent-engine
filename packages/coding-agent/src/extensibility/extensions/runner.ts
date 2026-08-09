@@ -248,8 +248,14 @@ async function raceHandlerWithTimeout<T>(
 	const onAbort = () => resolveInterrupt(EXTENSION_HANDLER_ABORTED);
 	signal?.addEventListener("abort", onAbort, { once: true });
 	const timer = setTimeout(() => {
-		timeoutController.abort(new DOMException(`Handler timed out after ${timeoutMs}ms`, "TimeoutError"));
+		// Settle the timeout BEFORE aborting. Aborting first unblocks anything the
+		// handler is awaiting on the handler signal (a `ctx.ui.*` prompt, say), so
+		// the handler could resume and resolve its own promise while the race is
+		// still undecided. Ordering it this way means the winner never depends on
+		// microtask scheduling: the timeout has already won by the time the handler
+		// learns about it.
 		resolveInterrupt(EXTENSION_HANDLER_TIMEOUT);
+		timeoutController.abort(new DOMException(`Handler timed out after ${timeoutMs}ms`, "TimeoutError"));
 	}, timeoutMs);
 	try {
 		if (signal?.aborted) return EXTENSION_HANDLER_ABORTED;
