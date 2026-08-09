@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an experimental Prime-compatible eval profile extension that keeps OMP as the session and worker authority.
+
 ## [17.2.11] - 2026-08-07
 
 ### Added
