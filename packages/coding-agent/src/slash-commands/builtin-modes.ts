@@ -11,6 +11,7 @@ import type { SettingPath } from "../config/settings";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
 import type { AgentSession } from "../session/agent-session";
+import { mainSessionTools, spawnsToString } from "../task/agent-tools";
 import { discoverAgents, getAgent } from "../task/discovery";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { ComputerTool } from "../tools/computer";
@@ -18,7 +19,7 @@ import { computerExposureMode } from "../tools/computer/exposure";
 import type { InspectImageMode } from "../utils/inspect-image-mode";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSecurityCommand } from "./helpers/security";
-import type { SlashCommandSpec } from "./types";
+import type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime, SlashCommandSpec } from "./types";
 
 export function refreshStatusLine(ctx: InteractiveModeContext): void {
 	ctx.statusLine.invalidate();
@@ -52,17 +53,17 @@ async function applyAgentPersonaToSession(
 	const previousPrompt = session.getPersonaAppendPrompt();
 	try {
 		if (agent.tools) {
-			// `parseAgentFields` appends `yield` to every explicit tool list for
-			// subagent result submission; the main session has no parent executor
-			// to consume it. Strip it (and the goal-mode-only tool) before applying.
-			await session.setActiveToolsByName(
-				agent.tools.filter(toolName => toolName !== "yield" && toolName !== "goal"),
-			);
+			await session.setActiveToolsByName(mainSessionTools(agent.tools));
 		}
 		if (agent.model) {
 			const resolved = resolveModelOverride(agent.model, session.modelRegistry, session.settings);
 			if (resolved.model) {
-				await session.setModelTemporary(resolved.model, resolved.thinkingLevel);
+				// ACP has no #pendingModelSwitch queue (that is an InteractiveMode
+				// field); guard the reset instead so an in-flight turn is not
+				// clobbered. The switch applies on the next turn.
+				if (!session.isStreaming) {
+					await session.setModelTemporary(resolved.model, resolved.thinkingLevel);
+				}
 			} else {
 				await output(`Agent "${name}" model pattern did not resolve; keeping current model.`);
 			}
@@ -70,13 +71,13 @@ async function applyAgentPersonaToSession(
 		if (agent.thinkingLevel) {
 			session.setThinkingLevel(agent.thinkingLevel);
 		}
-		session.setSessionSpawns(agent.spawns === "*" ? "*" : agent.spawns ? agent.spawns.join(",") : "*");
+		session.setSessionSpawns(spawnsToString(agent.spawns));
 		session.setPersonaAppendPrompt(agent.systemPrompt);
 		await session.refreshBaseSystemPrompt();
 	} catch (error) {
 		try {
 			await session.setActiveToolsByName(previousTools);
-			if (previousModel) {
+			if (previousModel && !session.isStreaming) {
 				await session.setModelTemporary(previousModel, previousThinking);
 			}
 			session.setThinkingLevel(previousThinking);
@@ -89,6 +90,39 @@ async function applyAgentPersonaToSession(
 		return `Failed to switch to agent persona "${name}": ${errorMessage(error)}`;
 	}
 	return null;
+}
+
+/**
+ * Shared ACP/text-mode handler for `/agent` and `/switch-agent`: validate the
+ * named agent, apply the persona with rollback, and persist the identity.
+ */
+async function switchAgentPersonaAcp(
+	command: ParsedSlashCommand,
+	runtime: SlashCommandRuntime,
+	usageText: string,
+): Promise<SlashCommandResult> {
+	const name = command.args.trim();
+	if (!name) {
+		return usage(usageText, runtime);
+	}
+	const { agents } = await discoverAgents(runtime.cwd);
+	const agent = getAgent(agents, name);
+	if (!agent) {
+		return usage(`Unknown agent: ${name}`, runtime);
+	}
+	if (agent.availability === "subagent") {
+		return usage(`Agent "${name}" is subagent-only and cannot be used as the main-session persona.`, runtime);
+	}
+	if ((runtime.settings.get("task.disabledAgents") as string[] | undefined)?.includes(name)) {
+		return usage(`Agent "${name}" is disabled in settings (task.disabledAgents).`, runtime);
+	}
+	const failure = await applyAgentPersonaToSession(runtime.session, agent, name, runtime.output);
+	if (failure) {
+		return usage(failure, runtime);
+	}
+	runtime.sessionManager.appendModeChange("agent", { name });
+	await runtime.output(`Switched to agent persona: ${name}`);
+	return commandConsumed();
 }
 
 /** `/fast status` label for the active model: "on" when its family is priority, else "off". */
@@ -398,30 +432,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		description: "Switch the main-session agent persona",
 		inlineHint: "<name>",
 		allowArgs: true,
-		handle: async (command, runtime) => {
-			const name = command.args.trim();
-			if (!name) {
-				return usage("Usage: /agent <name>", runtime);
-			}
-			const { agents } = await discoverAgents(runtime.cwd);
-			const agent = getAgent(agents, name);
-			if (!agent) {
-				return usage(`Unknown agent: ${name}`, runtime);
-			}
-			if (agent.availability === "subagent") {
-				return usage(`Agent "${name}" is subagent-only and cannot be used as the main-session persona.`, runtime);
-			}
-			if ((runtime.settings.get("task.disabledAgents") as string[] | undefined)?.includes(name)) {
-				return usage(`Agent "${name}" is disabled in settings (task.disabledAgents).`, runtime);
-			}
-			const failure = await applyAgentPersonaToSession(runtime.session, agent, name, runtime.output);
-			if (failure) {
-				return usage(failure, runtime);
-			}
-			runtime.sessionManager.appendModeChange("agent", { name });
-			await runtime.output(`Switched to agent persona: ${name}`);
-			return commandConsumed();
-		},
+		handle: (command, runtime) => switchAgentPersonaAcp(command, runtime, "Usage: /agent <name>"),
 		handleTui: async (command, runtime) => {
 			const name = command.args.trim();
 			if (!name) {
@@ -438,30 +449,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		description: "Switch the main-session agent persona",
 		inlineHint: "[name]",
 		allowArgs: true,
-		handle: async (command, runtime) => {
-			const name = command.args.trim();
-			if (!name) {
-				return usage("Usage: /switch-agent [name]", runtime);
-			}
-			const { agents } = await discoverAgents(runtime.cwd);
-			const agent = getAgent(agents, name);
-			if (!agent) {
-				return usage(`Unknown agent: ${name}`, runtime);
-			}
-			if (agent.availability === "subagent") {
-				return usage(`Agent "${name}" is subagent-only and cannot be used as the main-session persona.`, runtime);
-			}
-			if ((runtime.settings.get("task.disabledAgents") as string[] | undefined)?.includes(name)) {
-				return usage(`Agent "${name}" is disabled in settings (task.disabledAgents).`, runtime);
-			}
-			const failure = await applyAgentPersonaToSession(runtime.session, agent, name, runtime.output);
-			if (failure) {
-				return usage(failure, runtime);
-			}
-			runtime.sessionManager.appendModeChange("agent", { name });
-			await runtime.output(`Switched to agent persona: ${name}`);
-			return commandConsumed();
-		},
+		handle: (command, runtime) => switchAgentPersonaAcp(command, runtime, "Usage: /switch-agent [name]"),
 		handleTui: (command, runtime) => {
 			const name = command.args.trim();
 			if (name) {

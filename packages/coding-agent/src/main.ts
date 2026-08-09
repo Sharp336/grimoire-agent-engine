@@ -88,8 +88,10 @@ import { SessionManager } from "./session/session-manager";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
 import { shouldShowStartupSplash } from "./startup-splash";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
+import { mainSessionTools, spawnsToString } from "./task/agent-tools";
 import { discoverAgents, getAgent } from "./task/discovery";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
+import type { AgentDefinition } from "./task/types";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
 import type { LspStartupServerInfo } from "./tools";
@@ -360,7 +362,7 @@ export interface AcpSessionFactoryOptions {
 	sessionDir?: string;
 	authStorage: AuthStorage;
 	modelRegistry: ModelRegistry;
-	parsedArgs: Pick<Args, "apiKey" | "trustedExtensions">;
+	parsedArgs: Pick<Args, "apiKey" | "trustedExtensions" | "agent" | "tools" | "noTools">;
 	rawArgs: string[];
 	createSession: (options: CreateAgentSessionOptions) => Promise<CreateAgentSessionResult>;
 }
@@ -417,8 +419,24 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 				`Trusted extension failed to load: ${trustedExtensions.errors.map(item => item.error).join("; ")}`,
 			);
 		}
+		// `--agent` persona: re-resolve against THIS session's cwd (an ACP host
+		// can open any workspace); if the agent is not found there, fall back to
+		// no persona rather than failing the session. Applied to the per-session
+		// options BEFORE creation so this session actually gets the persona.
+		const sessionOptions: CreateAgentSessionOptions = { ...args.baseOptions };
+		if (args.parsedArgs.agent) {
+			const { agents } = await discoverAgents(cwd);
+			const agent = getAgent(agents, args.parsedArgs.agent);
+			if (agent && agent.availability !== "subagent") {
+				applyAgentPersonaOptions(sessionOptions, agent, {
+					modelSet: Boolean(sessionOptions.model || sessionOptions.modelPattern),
+					thinkingSet: sessionOptions.thinkingLevel !== undefined,
+					toolsSet: Boolean(args.parsedArgs.tools || args.parsedArgs.noTools),
+				});
+			}
+		}
 		const { session: nextSession } = await args.createSession({
-			...args.baseOptions,
+			...sessionOptions,
 			cwd,
 			sessionManager: nextSessionManager,
 			settings: nextSettings,
@@ -433,7 +451,11 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			eventBus,
 			preloadedExtensions: trustedExtensions,
 		});
-		if (args.parsedArgs.apiKey && !args.baseOptions.model && nextSession.model) {
+		// Persist the persona identity so resume re-applies the current definition.
+		if (args.parsedArgs.agent) {
+			nextSessionManager.appendModeChange("agent", { name: args.parsedArgs.agent });
+		}
+		if (args.parsedArgs.apiKey && !sessionOptions.model && nextSession.model) {
 			args.authStorage.setRuntimeApiKey(nextSession.model.provider, args.parsedArgs.apiKey);
 		}
 		applyExtensionFlags(nextSession.extensionRunner, args.rawArgs);
@@ -885,6 +907,32 @@ export function applyResolvedSystemPromptInputs(
 	}
 }
 
+/**
+ * Fill session options from an agent definition's frontmatter, honoring
+ * explicit CLI precedence: agent fields fill only what the CLI didn't set.
+ * Shared by the launch path (`--agent`) and the ACP per-`session/new` factory
+ * (which re-resolves the persona against the target cwd).
+ */
+export function applyAgentPersonaOptions(
+	options: CreateAgentSessionOptions,
+	agent: AgentDefinition,
+	explicit: { modelSet: boolean; thinkingSet: boolean; toolsSet: boolean },
+): void {
+	if (!explicit.modelSet && agent.model) options.modelPattern = agent.model; // agent.model is string[]; modelPattern accepts string | string[]
+	if (!explicit.thinkingSet && agent.thinkingLevel) options.thinkingLevel = agent.thinkingLevel;
+	if (!explicit.toolsSet && agent.tools) {
+		// `mainSessionTools` strips the subagent-only `yield`/`goal` tools
+		// `parseAgentFields` appends. The list is passed WITHOUT
+		// restrictToolNames: restriction would disable MCP, LSP, extensions,
+		// and memory for the main session, which the live-switch and subagent
+		// paths do not do (plan contingency).
+		options.toolNames = mainSessionTools(agent.tools);
+	}
+	if (agent.systemPrompt)
+		options.appendSystemPrompt = [options.appendSystemPrompt, agent.systemPrompt].filter(Boolean).join("\n\n");
+	options.spawns = spawnsToString(agent.spawns);
+}
+
 /** Builds startup session options from parsed CLI flags, scoped models, and resolved session lineage. */
 export async function buildSessionOptions(
 	parsed: Args,
@@ -1152,21 +1200,11 @@ export async function buildSessionOptions(
 			process.stderr.write(`${chalk.red(`Agent "${parsed.agent}" is disabled in settings.`)}\n`);
 			process.exit(1);
 		}
-		// CLI flags take precedence — agent fields fill only what CLI didn't set:
-		if (!options.model && !options.modelPattern && agent.model) options.modelPattern = agent.model; // agent.model is string[]; modelPattern accepts string | string[]
-		if (!options.thinkingLevel && agent.thinkingLevel) options.thinkingLevel = agent.thinkingLevel;
-		if (!parsed.tools && !parsed.noTools && agent.tools) {
-			// `parseAgentFields` appends `yield` to every explicit tool list because
-			// subagents need it to submit results. The main session has no parent
-			// executor to consume a yield — exposing it would prompt the model to
-			// "submit subagent output" and end its turn early. Strip it (and the
-			// goal-mode-only tool) before applying the persona's toolset.
-			options.toolNames = agent.tools.filter(name => name !== "yield" && name !== "goal");
-			options.restrictToolNames = true;
-		}
-		if (agent.systemPrompt)
-			options.appendSystemPrompt = [options.appendSystemPrompt, agent.systemPrompt].filter(Boolean).join("\n\n");
-		options.spawns = agent.spawns === "*" ? "*" : agent.spawns ? agent.spawns.join(",") : "*";
+		applyAgentPersonaOptions(options, agent, {
+			modelSet: Boolean(options.model || options.modelPattern),
+			thinkingSet: options.thinkingLevel !== undefined,
+			toolsSet: Boolean(parsed.tools || parsed.noTools),
+		});
 	}
 
 	if (parsed.noLsp) {

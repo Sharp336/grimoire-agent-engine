@@ -114,6 +114,7 @@ import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } fr
 import { formatDuration } from "../slash-commands/helpers/format";
 import { STTController, type SttState } from "../stt";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
+import { mainSessionTools, spawnsToString } from "../task/agent-tools";
 import { discoverAgents, getAgent } from "../task/discovery";
 import { formatTaskId } from "../task/render";
 import type { AgentDefinition } from "../task/types";
@@ -2587,17 +2588,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		const disabledAgents = (this.session.settings.get("task.disabledAgents") as string[] | undefined) ?? [];
 		if (agent && agent.availability !== "subagent" && !disabledAgents.includes(name)) {
 			if (agent.tools) {
-				// `parseAgentFields` appends `yield` to every explicit tool list for
-				// subagent result submission; the main session has no parent executor
-				// to consume it. Strip it (and the goal-mode-only tool) before applying.
-				await this.session.setActiveToolsByName(
-					agent.tools.filter(toolName => toolName !== "yield" && toolName !== "goal"),
-				);
+				await this.session.setActiveToolsByName(mainSessionTools(agent.tools));
 			}
 			if (agent.thinkingLevel) {
 				this.session.setThinkingLevel(agent.thinkingLevel);
 			}
-			this.session.setSessionSpawns(agent.spawns === "*" ? "*" : agent.spawns ? agent.spawns.join(",") : "*");
+			this.session.setSessionSpawns(spawnsToString(agent.spawns));
 			this.session.setPersonaAppendPrompt(agent.systemPrompt);
 			if (agent.model) {
 				const resolved = resolveModelOverride(agent.model, this.session.modelRegistry, this.session.settings);
@@ -2689,6 +2685,18 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * applied change is rolled back (mirrors plan-mode rollback).
 	 */
 	async switchAgentPersona(name: string): Promise<void> {
+		if (this.planModeEnabled || this.planModePaused) {
+			this.showWarning("Exit plan mode first.");
+			return;
+		}
+		if (this.goalModeEnabled || this.goalModePaused) {
+			this.showWarning("Exit goal mode first.");
+			return;
+		}
+		if (this.vibeModeEnabled) {
+			this.showWarning("Exit vibe mode first.");
+			return;
+		}
 		const { agents } = await discoverAgents(this.sessionManager.getCwd());
 		const agent = getAgent(agents, name);
 		if (!agent) {
@@ -2712,10 +2720,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		try {
 			if (agent.tools) {
-				// `parseAgentFields` appends `yield` to every explicit tool list for
-				// subagent result submission; the main session has no parent executor
-				// to consume it. Strip it (and the goal-mode-only tool) before applying.
-				await this.session.setActiveToolsByName(agent.tools.filter(name => name !== "yield" && name !== "goal"));
+				await this.session.setActiveToolsByName(mainSessionTools(agent.tools));
 			}
 			if (agent.model) {
 				const resolved = resolveModelOverride(agent.model, this.session.modelRegistry, this.session.settings);
@@ -2735,7 +2740,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (agent.thinkingLevel) {
 				this.session.setThinkingLevel(agent.thinkingLevel);
 			}
-			this.session.setSessionSpawns(agent.spawns === "*" ? "*" : agent.spawns ? agent.spawns.join(",") : "*");
+			this.session.setSessionSpawns(spawnsToString(agent.spawns));
 			this.session.setPersonaAppendPrompt(agent.systemPrompt);
 			await this.session.refreshBaseSystemPrompt();
 		} catch (error) {

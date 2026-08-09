@@ -17,7 +17,9 @@ import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { BUILTIN_MODE_SLASH_COMMANDS } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-modes";
+import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../src/config/model-registry";
 import { InteractiveMode } from "../src/modes/interactive-mode";
@@ -269,6 +271,135 @@ describe("InteractiveMode.switchAgentPersona", () => {
 		expect(session?.getSessionSpawns()).toBeNull();
 		expect(session?.getPersonaAppendPrompt()).toBeUndefined();
 		// No mode_change persisted on failure.
+		const entries = session?.sessionManager.getEntries() ?? [];
+		expect(entries.some(entry => entry.type === "mode_change" && entry.mode === "agent")).toBe(false);
+	});
+});
+
+describe("ACP /agent and /switch-agent handle paths", () => {
+	let tempHome: string;
+	let projectDir: string;
+	let authStorage: AuthStorage;
+	let session: AgentSession | undefined;
+
+	beforeEach(async () => {
+		resetSettingsForTest();
+		tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-persona-acp-"));
+		projectDir = path.join(tempHome, "project");
+		await fs.mkdir(path.join(projectDir, ".omp", "agents"), { recursive: true });
+		const agentsDir = path.join(projectDir, ".omp", "agents");
+		await fs.writeFile(
+			path.join(agentsDir, "persona-test.md"),
+			agentMd("persona-test", [
+				"tools: [read, write]",
+				"model: anthropic/claude-haiku-4-5",
+				"thinkingLevel: high",
+				"spawns: [scout]",
+			]),
+		);
+		await fs.writeFile(path.join(agentsDir, "persona-subagent.md"), agentMd("persona-subagent", ["mode: subagent"]));
+
+		await Settings.init({ inMemory: true, cwd: projectDir });
+		Settings.instance.set("startup.quiet", true);
+		authStorage = await AuthStorage.create(path.join(tempHome, "testauth.db"));
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		await session?.dispose();
+		authStorage?.close();
+		await fs.rm(tempHome, { recursive: true, force: true });
+		session = undefined;
+		resetSettingsForTest();
+	});
+
+	function createAcpRuntime(): SlashCommandRuntime {
+		const registry = new ModelRegistry(authStorage, path.join(tempHome, `models-${Bun.nanoseconds()}.yml`));
+		const initialModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!initialModel) throw new Error("Expected bundled anthropic/claude-sonnet-4-5 to exist");
+		const readTool = makeTool("read");
+		const writeTool = makeTool("write");
+		const toolRegistry = new Map<string, AgentTool>();
+		toolRegistry.set(readTool.name, readTool);
+		toolRegistry.set(writeTool.name, writeTool);
+		const manager = SessionManager.create(projectDir, path.join(tempHome, `active-${Bun.nanoseconds()}`));
+		const createdSession = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model: initialModel,
+					systemPrompt: ["Test"],
+					tools: [readTool],
+					messages: [],
+					thinkingLevel: Effort.Medium,
+				},
+			}),
+			sessionManager: manager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: registry,
+			toolRegistry,
+			builtInToolNames: ["read", "write"],
+		});
+		session = createdSession;
+		const output = vi.fn();
+		return {
+			session: createdSession,
+			sessionManager: manager,
+			settings: createdSession.settings,
+			cwd: projectDir,
+			output,
+			refreshCommands: vi.fn(),
+			reloadPlugins: vi.fn(),
+		} as unknown as SlashCommandRuntime;
+	}
+
+	it("applies the persona and persists mode_change via the ACP handle", async () => {
+		const runtime = createAcpRuntime();
+		const result = await executeAcpBuiltinSlashCommand("/agent persona-test", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(session?.getEnabledToolNames()).toEqual(["read", "write"]);
+		expect(session?.model?.id).toBe("claude-haiku-4-5");
+		expect(session?.configuredThinkingLevel()).toBe(Effort.High);
+		expect(session?.getSessionSpawns()).toBe("scout");
+		expect(session?.getPersonaAppendPrompt()).toBe("You are persona-test.");
+		const entries = session?.sessionManager.getEntries() ?? [];
+		const modeChange = entries.find(
+			(entry): entry is Extract<typeof entry, { type: "mode_change" }> =>
+				entry.type === "mode_change" && entry.mode === "agent",
+		);
+		expect(modeChange?.data).toEqual({ name: "persona-test" });
+	});
+
+	it("rejects subagent-only agents via the ACP handle", async () => {
+		const runtime = createAcpRuntime();
+		const result = await executeAcpBuiltinSlashCommand("/agent persona-subagent", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(session?.getPersonaAppendPrompt()).toBeUndefined();
+		const entries = session?.sessionManager.getEntries() ?? [];
+		expect(entries.some(entry => entry.type === "mode_change" && entry.mode === "agent")).toBe(false);
+	});
+
+	it("rejects unknown agents via the ACP handle", async () => {
+		const runtime = createAcpRuntime();
+		const result = await executeAcpBuiltinSlashCommand("/agent does-not-exist", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(session?.getPersonaAppendPrompt()).toBeUndefined();
+	});
+
+	it("rolls back partial apply failures via the ACP handle", async () => {
+		const runtime = createAcpRuntime();
+		vi.spyOn(session!, "setModelTemporary").mockImplementationOnce(async () => {
+			throw new Error("no API key");
+		});
+		const result = await executeAcpBuiltinSlashCommand("/agent persona-test", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(session?.getEnabledToolNames()).toEqual(["read"]);
+		expect(session?.model?.id).toBe("claude-sonnet-4-5");
+		expect(session?.getPersonaAppendPrompt()).toBeUndefined();
 		const entries = session?.sessionManager.getEntries() ?? [];
 		expect(entries.some(entry => entry.type === "mode_change" && entry.mode === "agent")).toBe(false);
 	});
