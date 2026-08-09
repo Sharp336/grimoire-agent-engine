@@ -32,10 +32,8 @@
  * Untagged seeds (e.g. `user-preferences`) read every memory in the bank — the
  * reflect call applies no tag filter when `tags` is empty.
  *
- * Automatic seed lifecycle is **create-only**: changes to `source_query`,
- * `tags`, `max_tokens`, or `trigger` in `seeds.json` will NOT propagate to
- * existing models on the server. `/memory mm seed` is an explicit write path;
- * it upgrades built-in models still at the former 600/800-token caps.
+ * Automatic seeds create only. Seed changes do not update existing models.
+ * `/memory mm seed` upgrades built-ins capped at 600/800 tokens.
  */
 
 import { logger } from "@oh-my-pi/pi-utils";
@@ -192,10 +190,7 @@ export function findExistingSeedModel(
 	);
 }
 
-/**
- * Upgrade an operator-selected built-in seed via `/memory mm seed`.
- * Fetch full details because list metadata omits `max_tokens`.
- */
+/** `/memory mm seed`: upgrade legacy built-ins. Metadata omits `max_tokens`. */
 export async function upgradeLegacySeedBudget(
 	client: HindsightApi,
 	bankId: string,

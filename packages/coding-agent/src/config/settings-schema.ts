@@ -3076,8 +3076,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "memory",
 			group: "Hindsight",
 			label: "Hindsight Mental Model Generation Tokens",
-			description:
-				"Maximum completion tokens for newly seeded mental-model reflects. `/memory mm seed` upgrades built-in models at the former 600/800-token caps.",
+			description: "Max reflect tokens for new seeds. `/memory mm seed` repairs legacy 600/800-token caps.",
 			condition: "hindsightActive",
 		},
 	},
