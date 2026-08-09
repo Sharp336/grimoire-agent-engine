@@ -64,6 +64,12 @@ describe("/shake dispatch (ACP)", () => {
 		expect(h.shake.mock.calls.map(c => c[0])).toEqual(["images", "elide"]);
 	});
 
+	it("expands all to images-then-elide", async () => {
+		const h = acpRuntime();
+		await executeAcpBuiltinSlashCommand("/shake all", h.runtime);
+		expect(h.shake.mock.calls.map(c => c[0])).toEqual(["images", "elide"]);
+	});
+
 	it("rejects an unknown mode without invoking shake", async () => {
 		const h = acpRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/shake bogus", h.runtime);
@@ -75,7 +81,7 @@ describe("/shake dispatch (ACP)", () => {
 	it("is advertised to ACP clients with the mode hint", () => {
 		const advertised = ACP_BUILTIN_SLASH_COMMANDS.find(c => c.name === "shake");
 		expect(advertised).toBeDefined();
-		expect(advertised?.input?.hint).toBe("[elide|images ...]");
+		expect(advertised?.input?.hint).toBe("[elide|images|all ...]");
 	});
 
 	it("advertises /shake images as the image-stripping path and no longer advertises /drop-images", () => {
