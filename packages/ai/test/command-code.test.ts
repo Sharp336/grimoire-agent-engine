@@ -744,6 +744,42 @@ describe("command-code stream handling", () => {
 		expect(result.usage.totalTokens).toBe(15);
 	});
 
+	it("mirrors every NDJSON frame to the raw SSE observer", async () => {
+		scenario = { kind: "happy" };
+		const baseUrl = await startServer();
+		const model = makeModel(baseUrl);
+		const observed: Array<{ event: string | null; data: string }> = [];
+		const stream = streamCommandCode(
+			model,
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			{
+				apiKey: "test-key",
+				config: null,
+				onSseEvent: event => {
+					observed.push({ event: event.event, data: event.data });
+				},
+			},
+		);
+		for await (const _ of stream) {
+			/* drain */
+		}
+		await stream.result();
+
+		// `happy` serves six frames; every one must reach the observer, with the
+		// frame `type` surfaced as the SSE `event` and the raw line as `data`.
+		expect(observed.map(frame => frame.event)).toEqual([
+			"reasoning-start",
+			"reasoning-delta",
+			"reasoning-end",
+			"text-delta",
+			"tool-call",
+			"finish",
+		]);
+		expect(observed[5]?.data).toBe(
+			`{"type":"finish","finishReason":"tool-calls","totalUsage":{"inputTokens":10,"outputTokens":5,"inputTokenDetails":{"cacheReadTokens":2,"cacheWriteTokens":1}}}`,
+		);
+	});
+
 	it("maps inbound tool-call wire names back to local names with the alias preserved", async () => {
 		scenario = {
 			kind: "frames",

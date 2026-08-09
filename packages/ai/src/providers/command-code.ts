@@ -23,6 +23,7 @@ import type {
 	ImageContent,
 	Message,
 	Model,
+	RawSseEvent,
 	StreamFunction,
 	StreamOptions,
 	TextContent,
@@ -36,6 +37,7 @@ import { normalizeSystemPrompts } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { toolWireSchema } from "../utils/schema/wire";
+import { notifyRawSseEvent } from "../utils/sse-debug";
 import { getNamedToolChoiceName } from "../utils/tool-choice";
 import { NO_AUTH_SENTINEL } from "./openai-shared";
 import { transformMessages } from "./transform-messages";
@@ -687,6 +689,16 @@ export const streamCommandCode: StreamFunction<"command-code"> = (
 				throw new AIError.MissingApiKeyError(model.provider);
 			}
 
+			// Raw-stream/debug buffer, extensions and session stats consume the
+			// provider frames via `onSseEvent` (shared contract). Command Code
+			// responds with bare NDJSON lines — no `event:`/`data:` prefixes — so
+			// each decoded line is synthesized into an SSE-shaped event.
+			const rawSseObserver = options?.onSseEvent
+				? (event: RawSseEvent) => {
+						options.onSseEvent?.(event, model);
+					}
+				: undefined;
+
 			const fetchImpl = options?.fetch ?? fetch;
 			const baseUrl = resolveCommandCodeBaseUrl(options, model);
 			const url = new URL(GENERATE_PATH, baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
@@ -828,6 +840,19 @@ export const streamCommandCode: StreamFunction<"command-code"> = (
 				for await (const lineBytes of readLines(response.body, options?.signal)) {
 					const line = decoder.decode(lineBytes).trim();
 					if (!line) continue;
+
+					// Mirror the NDJSON line to raw observers, so debug buffers
+					// capture every frame the gateway sent. The `event` mirrors the
+					// frame's `type` (SSE-shaped); the `raw` array keeps the bare
+					// line itself.
+					let rawEventType: string | null = null;
+					try {
+						const rawFrame = JSON.parse(line) as { type?: unknown };
+						if (typeof rawFrame.type === "string") rawEventType = rawFrame.type;
+					} catch {
+						// Keep the raw line observable even when it is not JSON.
+					}
+					notifyRawSseEvent(rawSseObserver, { event: rawEventType, data: line, raw: [`data: ${line}`] });
 
 					let event: CommandCodeStreamEvent;
 					try {
