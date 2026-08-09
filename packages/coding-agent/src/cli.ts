@@ -24,6 +24,7 @@ import {
 	setProfile,
 	VERSION,
 } from "@oh-my-pi/pi-utils/dirs";
+import { applyDotenvFiles } from "@oh-my-pi/pi-utils/env-core";
 import { interceptUnhandledRejections } from "@oh-my-pi/pi-utils/postmortem";
 import { setProcessName } from "@oh-my-pi/pi-utils/process-name";
 import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
@@ -387,13 +388,12 @@ export async function runCli(argv: string[]): Promise<void> {
 		return;
 	}
 
-	// Initialize i18n system after profile is set and worker dispatch. The
-	// invalidators are safe to import top-level: settings-defs and welcome
-	// reach `@oh-my-pi/pi-utils` through env-core only (the barrel re-exports
-	// the side-effect-free `env-core` module, not `env`), so they never apply
-	// the agent `.env` at module load. The `.env` application happens later,
-	// when the dispatched command graph loads `args.ts` → `help-extra`, which
-	// imports `@oh-my-pi/pi-utils/env` directly after `setProfile()` has run.
+	// Apply dotenv files before initializing i18n so that OMP_LANG is visible
+	// during language detection. This is idempotent: keys already in Bun.env are
+	// never overwritten, so later imports of @oh-my-pi/pi-utils/env are no-ops.
+	applyDotenvFiles();
+
+	// Initialize i18n system after profile is set and worker dispatch.
 	await i18n.init();
 	invalidateSettingDefsCache();
 	invalidateTipsCache();
