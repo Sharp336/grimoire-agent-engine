@@ -38,6 +38,26 @@ describe("sanitizeCursorCallerHeaders", () => {
 		expect(sanitizeCursorCallerHeaders({ Connection: "close", "Transfer-Encoding": "chunked" })).toEqual({});
 	});
 
+	// A caller spelling differing only in case does not OVERRIDE the fixed header,
+	// it duplicates it, and node rejects the request rather than picking one.
+	it("drops caller copies of headers the request sets itself, in any casing", () => {
+		const sanitized = sanitizeCursorCallerHeaders({
+			Authorization: "Bearer stolen",
+			TE: "gzip",
+			"Content-Type": "text/plain",
+			"X-Request-Id": "forged",
+			"x-ghost-mode": "false",
+			"x-keep": "1",
+		});
+		expect(sanitized).toEqual({ "x-keep": "1" });
+	});
+
+	// HTTP/2 field names are lower-case, so the surviving names are normalized and
+	// two caller spellings of one field collapse instead of duplicating.
+	it("lower-cases surviving names", () => {
+		expect(sanitizeCursorCallerHeaders({ "X-Trace": "abc" })).toEqual({ "x-trace": "abc" });
+	});
+
 	it("handles absent headers", () => {
 		expect(sanitizeCursorCallerHeaders(undefined)).toEqual({});
 	});

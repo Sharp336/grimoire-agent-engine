@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import { streamBedrock } from "@oh-my-pi/pi-ai/providers/amazon-bedrock";
 import { crc32 } from "@oh-my-pi/pi-ai/providers/aws-eventstream";
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
@@ -10,16 +10,23 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 // would carry different bytes than the signature covers and Bedrock would reject
 // every request. Exercised through the real signing path, not a unit stub.
 
-const originalSkipAuth = process.env.AWS_BEDROCK_SKIP_AUTH;
-
-beforeAll(() => {
+/**
+ * Run `body` with dummy AWS credentials, restoring the environment immediately.
+ *
+ * Scoped to the one test rather than the file: a `beforeAll` override leaves
+ * every later Bedrock file in the same Bun process on the dummy-credential path
+ * until `afterAll` runs, which is the full-suite hazard `AGENTS.md` rules out.
+ */
+async function withSkippedAuth<T>(body: () => Promise<T>): Promise<T> {
+	const original = process.env.AWS_BEDROCK_SKIP_AUTH;
 	process.env.AWS_BEDROCK_SKIP_AUTH = "1";
-});
-
-afterAll(() => {
-	if (originalSkipAuth === undefined) delete process.env.AWS_BEDROCK_SKIP_AUTH;
-	else process.env.AWS_BEDROCK_SKIP_AUTH = originalSkipAuth;
-});
+	try {
+		return await body();
+	} finally {
+		if (original === undefined) delete process.env.AWS_BEDROCK_SKIP_AUTH;
+		else process.env.AWS_BEDROCK_SKIP_AUTH = original;
+	}
+}
 
 function encodeFrame(headers: Record<string, string>, payload: Uint8Array): Uint8Array {
 	const headerParts: Uint8Array[] = [];
@@ -108,20 +115,22 @@ const context: Context = { messages: [{ role: "user", content: "hi", timestamp: 
 describe("Bedrock caller headers", () => {
 	it("forwards caller headers but never lets them supply SigV4's own", async () => {
 		const seen: { headers?: Record<string, string> } = {};
-		const stream = streamBedrock(model(), context, {
-			region: "us-east-1",
-			fetch: capturingFetch(seen),
-			headers: {
-				"x-trace": "kept",
-				// Every header SigV4 generates for itself. Signed as the caller's value
-				// but sent as the signer's, these would break the signature.
-				host: "evil.example.com",
-				"x-amz-date": "19700101T000000Z",
-				"x-amz-content-sha256": "deadbeef",
-				"x-amz-security-token": "forged",
-			},
+		await withSkippedAuth(async () => {
+			const stream = streamBedrock(model(), context, {
+				region: "us-east-1",
+				fetch: capturingFetch(seen),
+				headers: {
+					"x-trace": "kept",
+					// Every header SigV4 generates for itself. Signed as the caller's value
+					// but sent as the signer's, these would break the signature.
+					host: "evil.example.com",
+					"x-amz-date": "19700101T000000Z",
+					"x-amz-content-sha256": "deadbeef",
+					"x-amz-security-token": "forged",
+				},
+			});
+			await stream.result();
 		});
-		await stream.result();
 
 		const headers = seen.headers ?? {};
 		// The benign caller header still reaches the request: that is the feature.

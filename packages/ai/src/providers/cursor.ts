@@ -238,17 +238,43 @@ const HTTP2_FORBIDDEN_HEADERS = new Set([
 ]);
 
 /**
- * Reduce caller-supplied headers to what an HTTP/2 request can legally carry.
+ * Header names the Cursor request sets for itself. A caller copy in ANY casing
+ * has to go: the spread below adds the fixed lower-case name regardless, and two
+ * spellings of one field are a duplicate rather than an override.
+ */
+const CURSOR_RESERVED_HEADERS = new Set([
+	"content-type",
+	"connect-protocol-version",
+	"te",
+	"authorization",
+	"x-ghost-mode",
+	"x-cursor-client-version",
+	"x-cursor-client-type",
+	"x-request-id",
+]);
+
+/**
+ * Reduce caller-supplied headers to what this HTTP/2 request can legally carry.
  *
- * Exported for tests: node throws on both classes below rather than ignoring
- * them, so a miss here turns a harmless header into a dead request.
+ * Everything is lower-cased, because HTTP/2 field names are lower-case and node
+ * compares them that way. A caller `Authorization` next to the fixed
+ * `authorization` does not lose to it, it DUPLICATES it, and node throws
+ * `ERR_HTTP2_HEADER_SINGLE_VALUE` before the request goes out. Same for a `TE`
+ * that is not `trailers`. Node throws on all three classes here rather than
+ * ignoring them, so a miss turns a harmless header into a dead request.
+ *
+ * Exported for tests.
  */
 export function sanitizeCursorCallerHeaders(headers: Record<string, string> | undefined): Record<string, string> {
-	return Object.fromEntries(
-		Object.entries(headers ?? {}).filter(
-			([name]) => !name.startsWith(":") && !HTTP2_FORBIDDEN_HEADERS.has(name.toLowerCase()),
-		),
-	);
+	const sanitized: Record<string, string> = {};
+	for (const [name, value] of Object.entries(headers ?? {})) {
+		const field = name.toLowerCase();
+		if (field.startsWith(":")) continue;
+		if (HTTP2_FORBIDDEN_HEADERS.has(field)) continue;
+		if (CURSOR_RESERVED_HEADERS.has(field)) continue;
+		sanitized[field] = value;
+	}
+	return sanitized;
 }
 
 const CURSOR_PROXY_TUNNEL_TIMEOUT_MS = 30_000;
