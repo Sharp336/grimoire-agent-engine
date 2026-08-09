@@ -688,9 +688,9 @@ export {
  * Delegates to {@link ./session/auth-broker-config} so the TUI and the catalog
  * generator share the same credential-discovery logic.
  */
-export async function discoverAuthStorage(agentDir: string = getAgentDir()): Promise<AuthStorage> {
+export async function discoverAuthStorage(agentDir?: string): Promise<AuthStorage> {
 	applyDotenvFiles();
-	return discoverAuthStorageFromConfig(agentDir);
+	return discoverAuthStorageFromConfig(agentDir ?? getAgentDir());
 }
 
 /**
