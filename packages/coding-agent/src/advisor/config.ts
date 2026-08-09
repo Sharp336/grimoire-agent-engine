@@ -39,8 +39,9 @@ export interface AdvisorConfig {
 
 /**
  * Format an advisor's model field for display. A static string is shown
- * verbatim; a dynamic map is shown as a summary of its keys. Returns the
- * fallback when the field is absent or empty.
+ * verbatim; a dynamic map is shown as a summary of its keyed patterns
+ * (excluding the `default` fallback). Returns the fallback when the field
+ * is absent or empty.
  */
 export function formatAdvisorModel(
 	model: string | DynamicAdvisorModelMap | undefined,
@@ -51,18 +52,20 @@ export function formatAdvisorModel(
 		const trimmed = model.trim();
 		return trimmed || fallback;
 	}
-	const keys = Object.keys(model);
+	const keys = Object.keys(model).filter(k => k !== "default");
 	if (keys.length === 0) return fallback;
-	// Show "dynamic (n entries)" for maps
 	return `dynamic (${keys.length} pattern${keys.length === 1 ? "" : "s"})`;
 }
 
 /**
  * Whether the model field contains a reference to a specific provider/id pair
  * (i.e. it includes a `/` character). Only meaningful for string model
- * selectors; dynamic maps always return false.
+ * selectors; dynamic maps always return false. Acts as a type guard:
+ * when this returns true, the model is known to be a string.
  */
-export function advisorModelHasSlashSeparator(model: string | DynamicAdvisorModelMap | undefined): boolean {
+export function advisorModelHasSlashSeparator(
+	model: string | DynamicAdvisorModelMap | undefined,
+): model is string {
 	if (typeof model !== "string") return false;
 	return model.includes("/");
 }

@@ -357,15 +357,28 @@ export class SessionAdvisors {
 
 	/**
 	 * Re-evaluates advisor model assignments when the primary driving model
-	 * changes. Only advisors with a dynamic model map (
-	 * {@link DynamicAdvisorModelMap}) are affected — static model selectors
-	 * and role-based resolution are unchanged. Rebuilds the runtime when at
-	 * least one dynamic advisor would select a different model under the new
-	 * primary model, which the signature check in
-	 * {@link #advisorRuntimeMatchesCurrentConfig} detects automatically.
+	 * changes, but **only before the first primary turn completes**. After the
+	 * first turn, dynamic model bindings are sticky — advisors build context
+	 * over the session and swapping their model mid-session would destroy it.
+	 *
+	 * This preserves the carve-out where a user can launch with one model,
+	 * see the default advisor resolve from it, then switch to a different
+	 * model before issuing any prompt — the advisors re-resolve to match
+	 * the final driving model. Subagents are independent sessions (their own
+	 * `SessionAdvisors`), so each subagent resolves its dynamic advisors
+	 * fresh for the model assigned to it.
+	 *
+	 * Only advisors with a dynamic model map (
+	 * {@link DynamicAdvisorModelMap}) are affected. The signature check in
+	 * {@link #advisorRuntimeMatchesCurrentConfig} detects when the resolved
+	 * model has actually changed, avoiding a rebuild when it hasn't.
 	 */
 	onPrimaryModelChanged(): void {
 		if (!this.#advisorEnabled || this.#host.isDisposed()) return;
+		// After the first primary turn, dynamic model bindings are sticky.
+		// Retry-fallback, model cycling, and user-driven model changes mid-
+		// session must not tear down advisor runtimes and lose context.
+		if (this.#advisorPrimaryTurnsCompleted > 0) return;
 		// Fast path: skip if no advisor uses a dynamic model map
 		if (!this.#advisorConfigs?.some(c => c.model && typeof c.model === "object")) return;
 		if (this.#advisors.length > 0 && !this.#advisorRuntimeMatchesCurrentConfig()) this.#stopAdvisorRuntime();
@@ -565,7 +578,7 @@ export class SessionAdvisors {
 		this.#advisorAutoResumeSuppressed = false;
 		this.#host.yieldQueue.clear("advisor");
 		this.#host.extractQueuedAdvisorCards();
-		this.#host.dropPendingAdvisorCards();
+this.#host.dropPendingAdvisorCards();
 	}
 
 	#resolveDynamicAdvisorModel(
@@ -584,35 +597,19 @@ export class SessionAdvisors {
 
 		// Dynamic model map — resolve based on the primary session's driving model
 		const primaryModel = this.#host.model();
-		if (!primaryModel) {
-			// No primary model yet; try the `default` key or fail
-			const defaultSelector = modelMap["default"];
-			if (!defaultSelector) return undefined;
-			const resolved = resolveModelOverride([defaultSelector], this.#host.modelRegistry, this.#host.settings);
-			const model = resolved.model;
-			if (!model) return undefined;
-			return { model, thinkingLevel: concreteThinkingLevel(resolved.thinkingLevel) };
-		}
+		const primaryModelStr = primaryModel ? formatModelString(primaryModel) : undefined;
 
-		const primaryModelStr = formatModelString(primaryModel);
-
-		// Find the best-matching key: try exact match first, then fuzzy match using
-		// the model resolution pipeline, falling back to `default`.
 		let matchedSelector: string | undefined;
 
 		// Phase 1: exact-string match against the primary model string
-		for (const [key, value] of Object.entries(modelMap)) {
-			if (key === "default") continue;
-			if (key === primaryModelStr) {
-				matchedSelector = value;
-				break;
-			}
+		if (primaryModelStr) {
+			matchedSelector = matchDynamicModelMapEntryExact(modelMap, primaryModelStr);
 		}
 
-		// Phase 2: resolve each key as a model pattern and check if it matches
-		// the primary model. This supports provider-prefixed ids, bare ids,
-		// aliases, globs, and any other pattern the model resolver accepts.
-		if (!matchedSelector) {
+		// Phase 2: resolve each key as a model pattern against the registry,
+		// which supports aliases, globs, bare ids, etc. Only runs when the
+		// exact string match didn't find a hit.
+		if (!matchedSelector && primaryModel) {
 			for (const [key, value] of Object.entries(modelMap)) {
 				if (key === "default") continue;
 				const resolved = resolveModelOverride([key], this.#host.modelRegistry, this.#host.settings);
@@ -1986,4 +1983,21 @@ export class SessionAdvisors {
 			.map(a => `### Advisor: ${a.name} (${a.agent.state.model.provider}/${a.agent.state.model.id})\n\n${dump(a)}`)
 			.join("\n\n");
 	}
+}
+
+/**
+ * Find an exact string match for a primary model string in a dynamic model
+ * map. Returns the matched selector value, or `undefined`. Does NOT consult
+ * the `default` key — the caller runs fuzzy resolution (Phase 2) before
+ * falling back to `default` (Phase 3). Pure function, no registry access.
+ */
+export function matchDynamicModelMapEntryExact(
+	modelMap: Record<string, string>,
+	primaryModelStr: string,
+): string | undefined {
+	for (const [key, value] of Object.entries(modelMap)) {
+		if (key === "default") continue;
+		if (key === primaryModelStr) return value;
+	}
+	return undefined;
 }
