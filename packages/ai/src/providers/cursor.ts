@@ -70,6 +70,7 @@ import {
 	type GrepUnionResult,
 	GrepUnionResultSchema,
 	type InteractionQuery,
+	type InteractionResponse,
 	InteractionResponseSchema,
 	KvClientMessageSchema,
 	type KvServerMessage,
@@ -2329,7 +2330,7 @@ async function handleInteractionQuery(
 function sendInteractionResponse(
 	h2Request: http2.ClientHttp2Stream,
 	id: number,
-	result: NonNullable<import("@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb").InteractionResponse["result"]>,
+	result: NonNullable<InteractionResponse["result"]>,
 ): void {
 	const response = create(InteractionResponseSchema, { id, result });
 	const clientMessage = create(AgentClientMessageSchema, {
