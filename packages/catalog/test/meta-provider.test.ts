@@ -114,10 +114,10 @@ describe("Meta Model API provider", () => {
 		}
 	});
 
-	test("uses Muse Spark 1.2 by default and accepts both Meta API key names", () => {
+	test("uses Muse Spark 1.1 by default and accepts both Meta API key names", () => {
 		const descriptor = CATALOG_PROVIDERS.find(provider => provider.id === "meta");
 		expect(descriptor).toMatchObject({
-			defaultModel: "muse-spark-1.2",
+			defaultModel: "muse-spark-1.1",
 			envVars: ["MODEL_API_KEY", "META_API_KEY"],
 			catalogDiscovery: { label: "Meta Model API" },
 		});
