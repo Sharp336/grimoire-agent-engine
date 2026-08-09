@@ -267,6 +267,9 @@
 - Fixed parsing of POSIX `$EDITOR` commands that contain quoted arguments or executable paths with spaces.
 - Fixed persisted Agent Hub rows losing the explicit caller model role when a subagent used a model override, preserving role provenance across restarts.
 - Fixed unobserved promise rejections in browser helpers (such as `tab.waitForResponse()`) causing tab workers to hang or crash.
+### Added
+
+- Exposed plan and goal mode state to extensions through `ExtensionContext.getPlanModeState()` and `ExtensionContext.getGoalModeState()`, so an extension can read whether the session is planning without inspecting internals ([#8045](https://github.com/can1357/oh-my-pi/pull/8045)).
 
 ## [17.2.9] - 2026-08-05
 
