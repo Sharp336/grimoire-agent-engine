@@ -67,6 +67,10 @@ describe("resolveSeedsForScope", () => {
 		// already a per-project silo.
 		expect(projectConv?.tags).toEqual([]);
 	});
+	it("applies an override to every applicable seed budget", () => {
+		const seeds = resolveSeedsForScope({ bankId: "omp" }, "per-project", 4096);
+		expect(seeds.map(seed => seed.maxTokens)).toEqual([4096, 4096, 4096]);
+	});
 });
 
 /* -------------------------------------------------------------------------- */
@@ -74,21 +78,32 @@ describe("resolveSeedsForScope", () => {
 /* -------------------------------------------------------------------------- */
 
 interface FakeApiCalls {
-	created: Array<{ id: string | undefined; name: string; sourceQuery: string; tags?: string[] }>;
+	created: Array<{
+		id: string | undefined;
+		name: string;
+		sourceQuery: string;
+		tags?: string[];
+		maxTokens?: number;
+	}>;
+	updated: Array<{ id: string; maxTokens?: number }>;
 }
 
 function makeFakeApi(existing: MentalModelSummary[]): { api: HindsightApi; calls: FakeApiCalls } {
-	const calls: FakeApiCalls = { created: [] };
+	const calls: FakeApiCalls = { created: [], updated: [] };
 	const api = {
 		listMentalModels: async () => ({ items: existing }),
 		createMentalModel: async (
 			_bankId: string,
 			name: string,
 			sourceQuery: string,
-			options: { id?: string; tags?: string[] },
+			options: { id?: string; tags?: string[]; maxTokens?: number },
 		) => {
-			calls.created.push({ id: options.id, name, sourceQuery, tags: options.tags });
+			calls.created.push({ id: options.id, name, sourceQuery, tags: options.tags, maxTokens: options.maxTokens });
 			return { operation_id: `op-${calls.created.length}` };
+		},
+		updateMentalModel: async (_bankId: string, id: string, options: { maxTokens?: number }) => {
+			calls.updated.push({ id, maxTokens: options.maxTokens });
+			return {};
 		},
 	} as unknown as HindsightApi;
 	return { api, calls };
@@ -109,6 +124,25 @@ describe("ensureMentalModels", () => {
 		expect(calls.created).toHaveLength(1);
 		expect(calls.created[0].id).toBe("project-conventions");
 		expect(calls.created[0].tags).toEqual(["project:omp"]);
+	});
+
+	it("upgrades only built-in models at the legacy unsafe caps", async () => {
+		const { api, calls } = makeFakeApi([
+			{
+				id: "project-conventions",
+				bank_id: "omp",
+				name: "Project Conventions",
+				max_tokens: 800,
+			},
+		]);
+		await ensureMentalModels(
+			api,
+			"omp",
+			[{ id: "project-conventions", name: "Project Conventions", sourceQuery: "q", tags: [], maxTokens: 4096 }],
+			false,
+		);
+		expect(calls.created).toHaveLength(0);
+		expect(calls.updated).toEqual([{ id: "project-conventions", maxTokens: 4096 }]);
 	});
 
 	it("matches legacy bare project seeds only when their tags match the active project", async () => {
@@ -155,9 +189,9 @@ describe("ensureMentalModels", () => {
 		expect(differentProject.calls.created[0].id).toBe("project-conventions-b");
 	});
 
-	it("does not modify existing models even if their fields drift from the seed list", async () => {
-		// Defends create-only behavior: an operator-edited curated model with the
-		// same id MUST NOT be silently overwritten on next boot.
+	it("does not modify existing models that do not use a legacy unsafe cap", async () => {
+		// Curated models retain their operator-selected fields. Only built-in
+		// models at the former 600/800 defaults are migrated.
 		const { api, calls } = makeFakeApi([
 			{
 				id: "user-preferences",
@@ -174,10 +208,11 @@ describe("ensureMentalModels", () => {
 			false,
 		);
 		expect(calls.created).toHaveLength(0);
+		expect(calls.updated).toHaveLength(0);
 	});
 
 	it("treats a list failure as a no-op (best-effort, never throws)", async () => {
-		const calls: FakeApiCalls = { created: [] };
+		const calls: FakeApiCalls = { created: [], updated: [] };
 		const api = {
 			listMentalModels: async () => {
 				throw new Error("network down");

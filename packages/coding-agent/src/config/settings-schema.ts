@@ -3069,6 +3069,18 @@ export const SETTINGS_SCHEMA = {
 			condition: "hindsightActive",
 		},
 	},
+	"hindsight.mentalModelMaxTokens": {
+		type: "number",
+		default: 4096,
+		ui: {
+			tab: "memory",
+			group: "Hindsight",
+			label: "Hindsight Mental Model Generation Tokens",
+			description:
+				"Maximum completion tokens for newly seeded mental-model reflects. Legacy built-in models at the former 600/800-token caps are upgraded to this budget.",
+			condition: "hindsightActive",
+		},
+	},
 	"hindsight.mentalModelRefreshIntervalMs": { type: "number", default: 5 * 60 * 1000 },
 	"hindsight.mentalModelMaxRenderChars": { type: "number", default: 16_000 },
 

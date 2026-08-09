@@ -58,3 +58,30 @@ describe("HindsightApi timestamp serialization", () => {
 		expect(firstTimestamp(bodies[0] ?? "{}")).toBe("2026-06-12T19:17:00+08:00");
 	});
 });
+
+describe("HindsightApi mental model updates", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("PATCHes only the requested max-token budget", async () => {
+		let request: { url: string; method: string | undefined; body: string } | undefined;
+		const fetchMock: typeof globalThis.fetch = Object.assign(
+			async (input: string | URL | Request, init?: RequestInit | BunFetchRequestInit): Promise<Response> => {
+				request = { url: String(input), method: init?.method, body: String(init?.body ?? "") };
+				return new Response("{}", { status: 200 });
+			},
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
+
+		const client = new HindsightApi({ baseUrl: "http://hindsight.local" });
+		await client.updateMentalModel("omp", "project-conventions", { maxTokens: 4096 });
+
+		expect(request).toEqual({
+			url: "http://hindsight.local/v1/default/banks/omp/mental-models/project-conventions",
+			method: "PATCH",
+			body: '{"max_tokens":4096}',
+		});
+	});
+});

@@ -53,6 +53,8 @@ export interface HindsightConfig {
 
 	mentalModelsEnabled: boolean;
 	mentalModelAutoSeed: boolean;
+	/** Completion budget for built-in mental-model reflects. */
+	mentalModelMaxTokens: number;
 	mentalModelRefreshIntervalMs: number;
 	mentalModelMaxRenderChars: number;
 }
@@ -60,6 +62,10 @@ export interface HindsightConfig {
 const VALID_RETAIN_MODES: HindsightConfig["retainMode"][] = ["full-session", "last-turn"];
 const VALID_BUDGETS: HindsightConfig["recallBudget"][] = ["low", "mid", "high"];
 const VALID_SCOPINGS: HindsightScoping[] = ["global", "per-project", "per-project-tagged"];
+
+const DEFAULT_MENTAL_MODEL_MAX_TOKENS = 4096;
+const MIN_MENTAL_MODEL_MAX_TOKENS = 256;
+const MAX_MENTAL_MODEL_MAX_TOKENS = 8192;
 
 const DEFAULT_PREAMBLE =
 	"Relevant memories from past conversations (prioritize recent when conflicting). " +
@@ -100,6 +106,20 @@ function pickScoping(value: unknown): HindsightScoping | undefined {
 	return typeof value === "string" && (VALID_SCOPINGS as string[]).includes(value)
 		? (value as HindsightScoping)
 		: undefined;
+}
+
+function pickMentalModelMaxTokens(value: unknown): number {
+	if (value === undefined) return DEFAULT_MENTAL_MODEL_MAX_TOKENS;
+	if (
+		typeof value === "number" &&
+		Number.isInteger(value) &&
+		value >= MIN_MENTAL_MODEL_MAX_TOKENS &&
+		value <= MAX_MENTAL_MODEL_MAX_TOKENS
+	) {
+		return value;
+	}
+	logger.warn("Hindsight: invalid mental model max tokens setting, falling back to default", { value });
+	return DEFAULT_MENTAL_MODEL_MAX_TOKENS;
 }
 
 /**
@@ -180,6 +200,7 @@ export function loadHindsightConfig(settings: Settings, env: NodeJS.ProcessEnv =
 		mentalModelAutoSeed: settings.get("hindsight.mentalModelAutoSeed"),
 		mentalModelRefreshIntervalMs: settings.get("hindsight.mentalModelRefreshIntervalMs"),
 		mentalModelMaxRenderChars: settings.get("hindsight.mentalModelMaxRenderChars"),
+		mentalModelMaxTokens: pickMentalModelMaxTokens(settings.get("hindsight.mentalModelMaxTokens")),
 	};
 
 	return config;

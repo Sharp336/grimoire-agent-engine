@@ -86,7 +86,11 @@ export interface MentalModelSeed {
  * banks, project seeds use project-suffixed ids and accept matching legacy
  * bare ids as already present.
  */
-export function resolveSeedsForScope(scope: BankScope, scoping: HindsightScoping): MentalModelSeed[] {
+export function resolveSeedsForScope(
+	scope: BankScope,
+	scoping: HindsightScoping,
+	maxTokens?: number,
+): MentalModelSeed[] {
 	const out: MentalModelSeed[] = [];
 	for (const seed of BUILTIN_SEEDS) {
 		if (!seed.scopes.includes(scoping)) continue;
@@ -97,7 +101,7 @@ export function resolveSeedsForScope(scope: BankScope, scoping: HindsightScoping
 			name: seed.name,
 			sourceQuery: seed.source_query,
 			tags,
-			maxTokens: seed.max_tokens,
+			maxTokens: maxTokens ?? seed.max_tokens,
 			trigger: seed.trigger,
 			legacyIds: id === seed.id ? undefined : [seed.id],
 		});
@@ -137,7 +141,8 @@ function dedupe<T>(items: T[]): T[] {
  * an optimization, not a precondition for retain/recall, and we mirror the
  * swallow-on-failure pattern used by `ensureBankExists`.
  *
- * Existing models are NEVER modified. See module docstring.
+ * Existing models are not modified, except legacy built-in models whose unsafe
+ * 600/800-token caps are upgraded to the configured seed budget.
  */
 export async function ensureMentalModels(
 	client: HindsightApi,
@@ -157,7 +162,28 @@ export async function ensureMentalModels(
 	}
 
 	for (const seed of seeds) {
-		if (seedAlreadyExists(seed, existing)) continue;
+		const existingModel = findExistingSeedModel(seed, existing);
+		if (existingModel) {
+			if (shouldUpgradeLegacySeedBudget(existingModel, seed)) {
+				try {
+					await client.updateMentalModel(bankId, existingModel.id, { maxTokens: seed.maxTokens });
+					if (debug) {
+						logger.debug("Hindsight: upgraded legacy seed budget", {
+							bankId,
+							id: existingModel.id,
+							maxTokens: seed.maxTokens,
+						});
+					}
+				} catch (err) {
+					logger.debug("Hindsight: updateMentalModel failed", {
+						bankId,
+						id: existingModel.id,
+						error: String(err),
+					});
+				}
+			}
+			continue;
+		}
 		try {
 			await client.createMentalModel(bankId, seed.name, seed.sourceQuery, {
 				id: seed.id,
@@ -176,11 +202,26 @@ export async function ensureMentalModels(
 
 /** Return whether a seed is already represented by current bank metadata. */
 export function seedAlreadyExists(seed: MentalModelSeed, models: readonly MentalModelSummary[]): boolean {
-	for (const model of models) {
-		if (model.id === seed.id) return true;
-		if (seed.legacyIds?.includes(model.id) && sameStringSet(model.tags ?? [], seed.tags)) return true;
-	}
-	return false;
+	return findExistingSeedModel(seed, models) !== undefined;
+}
+
+function findExistingSeedModel(
+	seed: MentalModelSeed,
+	models: readonly MentalModelSummary[],
+): MentalModelSummary | undefined {
+	return models.find(
+		model =>
+			model.id === seed.id || (seed.legacyIds?.includes(model.id) && sameStringSet(model.tags ?? [], seed.tags)),
+	);
+}
+
+function shouldUpgradeLegacySeedBudget(model: MentalModelSummary, seed: MentalModelSeed): boolean {
+	return (
+		model.max_tokens !== undefined &&
+		seed.maxTokens !== undefined &&
+		model.max_tokens < seed.maxTokens &&
+		[600, 800].includes(model.max_tokens)
+	);
 }
 
 function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
