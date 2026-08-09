@@ -26,6 +26,7 @@ import type { CustomMessageEntry, SessionEntry } from "@oh-my-pi/pi-coding-agent
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { fingerprintAgentContent } from "@oh-my-pi/pi-coding-agent/task/agent-policy";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
+import * as discovery from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { VIBE_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/vibe";
 import { VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
 import { logger, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -1900,6 +1901,56 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			mode.stop();
 			await session.dispose();
 		}
+	});
+
+	it("applies an inline thinking suffix when the persona's base model is unchanged", async () => {
+		// The changed-persona reapply block skipped setModel when the resolved
+		// persona model equals the restored transcript model — but that skip
+		// also dropped the inline `:level` suffix: a persona edited from
+		// `model: openai/gpt-5` to `model: openai/gpt-5:high` changes only
+		// the thinking, and the switch left the stale transcript selector in
+		// place because policy.thinkingLevel was unset (codex 3742662984).
+		// gpt-5 is reasoning-capable so the high selector can actually stick
+		// (on gpt-4o, which has no thinking support, every level clamps to
+		// undefined and the assertion would pass vacuously).
+		const tempDir = makeTempDir();
+		await withProviderAuth(["openai"], async () => {
+			const persona = {
+				name: "suffix-persona",
+				description: "Persona with an inline thinking suffix",
+				systemPrompt: "",
+				model: ["openai/gpt-5:high"],
+				source: "project" as const,
+			};
+			const targetFile = path.join(tempDir, "target-suffix.jsonl");
+			// The recorded persona carried the SAME base model without the
+			// suffix: content changed, identity did not.
+			await writeSwitchTarget(targetFile, {
+				agent: { name: "suffix-persona", source: "project" },
+				fingerprint: fingerprintAgentContent({ ...persona, model: ["openai/gpt-5"] }),
+			});
+
+			vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
+				agents: [persona],
+				projectAgentsDir: null,
+			});
+
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				sessionManager: SessionManager.create(tempDir, path.join(tempDir, "active")),
+			});
+
+			try {
+				expect(await session.switchSession(targetFile)).toBe(true);
+				expect(session.agentPersona?.name).toBe("suffix-persona");
+				// The base model is unchanged, but the new inline suffix must
+				// now be live rather than the stale transcript thinking.
+				expect(session.model?.id).toBe("gpt-5");
+				expect(session.configuredThinkingLevel()).toBe(ThinkingLevel.High);
+			} finally {
+				await session.dispose();
+			}
+		});
 	});
 
 	it("restores the pre-plan baseline only for no-persona targets on switch out of plan mode", async () => {

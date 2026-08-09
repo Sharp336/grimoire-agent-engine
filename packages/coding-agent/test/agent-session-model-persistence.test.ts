@@ -11,6 +11,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { fingerprintAgentContent } from "@oh-my-pi/pi-coding-agent/task/agent-policy";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -472,6 +473,58 @@ describe("AgentSession model persistence", () => {
 			await created.session.dispose();
 		} finally {
 			tempDir.removeSync();
+		}
+	});
+
+	it("persists an explicit persona's auto thinking on a resumed transcript", async () => {
+		// An explicit --agent whose frontmatter sets `thinkingLevel: auto` runs
+		// the resumed session in auto mode, but the existing-session append path
+		// skipped auto entirely — no `configured: "auto"` thinking entry was
+		// written, so the next resume treated the persona as rehydrated and fell
+		// back to the transcript's previous selector (codex 3742662983). The
+		// fresh-session branch already persists the configured auto selector;
+		// the resumed branch must too.
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const persona = {
+			name: "auto-persona",
+			description: "Persona with auto thinking",
+			systemPrompt: "",
+			thinkingLevel: "auto" as const,
+			source: "project" as const,
+		};
+		const sessionManager = SessionManager.inMemory();
+		// Identity + fingerprint match the explicit persona; the transcript's
+		// earlier thinking entry records a concrete level.
+		sessionManager.appendAgentChange("auto-persona", "project", fingerprintAgentContent(persona));
+		sessionManager.appendThinkingLevelChange("medium", "medium");
+		sessionManager.appendMessage({ role: "user", content: "prior turn", timestamp: Date.now() });
+
+		const created = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			authStorage: sharedAuthStorage,
+			modelRegistry: sharedModelRegistry,
+			sessionManager,
+			settings: Settings.isolated(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			model: defaultModel,
+			agentPersona: persona,
+			thinkingLevel: "auto",
+		});
+		try {
+			expect(created.session.configuredThinkingLevel()).toBe(AUTO_THINKING);
+			// The resumed run persisted configured: "auto", so the next resume
+			// restores the reselected policy instead of the stale "medium".
+			expect(sessionManager.buildSessionContext().configuredThinkingLevel).toBe(AUTO_THINKING);
+		} finally {
+			await created.session.dispose();
 		}
 	});
 

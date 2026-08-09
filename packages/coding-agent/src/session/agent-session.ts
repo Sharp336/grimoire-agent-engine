@@ -7919,11 +7919,22 @@ export class AgentSession {
 					if (!this.#cliModelLocked && policy.modelPatterns?.length) {
 						const resolved = resolveModelOverride(policy.modelPatterns, this.modelRegistry, this.settings);
 						if (resolved.model) {
-							// Skip when it equals the restored transcript model:
-							// ModelControls.setModel would still append a
-							// duplicate model_change and reapply thinking.
+							// Skip setModel when it equals the restored transcript
+							// model: ModelControls.setModel would still append a
+							// duplicate model_change and reapply thinking. The
+							// inline suffix still applies — a `model:` edit from
+							// `provider/id` to `provider/id:high` changes only
+							// the thinking and must not leave the stale
+							// transcript selector in place (codex 3742662984).
 							if (!this.model || !modelsAreEqual(this.model, resolved.model)) {
+								const lockedThinking = this.#cliThinkingLocked ? this.configuredThinkingLevel() : undefined;
 								await this.setModel(resolved.model, "default");
+								if (lockedThinking !== undefined) this.setThinkingLevel(lockedThinking);
+								else if (resolved.thinkingLevel && !policy.thinkingLevel) {
+									this.setThinkingLevel(resolved.thinkingLevel);
+								}
+							} else if (resolved.thinkingLevel && !policy.thinkingLevel && !this.#cliThinkingLocked) {
+								this.setThinkingLevel(resolved.thinkingLevel);
 							}
 							if (resolved.warning) this.emitNotice("warning", resolved.warning);
 						} else {

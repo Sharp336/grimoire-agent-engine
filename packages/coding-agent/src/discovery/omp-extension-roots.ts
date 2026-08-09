@@ -201,13 +201,14 @@ export async function listOmpExtensionRoots(
 ): Promise<OmpExtensionRoot[]> {
 	const scopedRoots = invocationRootScope.getStore();
 	const rootMode = options?.mode ?? scopedRoots?.mode ?? injectedCliRootMode;
-	let candidates: InjectedRoot[] = options?.explicitRoots?.length
-		? options.explicitRoots.map(raw => ({ path: resolveAgainst(raw, ctx), level: "user" }))
-		: scopedRoots
-			? scopedRoots.paths.map(raw => ({ path: resolveAgainst(raw, ctx), level: "user" }))
-			: injectedCliRoots.map(root =>
-					root.relativePath ? { ...root, path: path.resolve(ctx.cwd, root.relativePath) } : root,
-				);
+	let candidates: InjectedRoot[] =
+		options?.explicitRoots !== undefined
+			? options.explicitRoots.map(raw => ({ path: resolveAgainst(raw, ctx), level: "user" }))
+			: scopedRoots
+				? scopedRoots.paths.map(raw => ({ path: resolveAgainst(raw, ctx), level: "user" }))
+				: injectedCliRoots.map(root =>
+						root.relativePath ? { ...root, path: path.resolve(ctx.cwd, root.relativePath) } : root,
+					);
 	if (rootMode === "merge") {
 		const { project, user } = scopeDirs(ctx);
 		const [projectExtensions, userExtensions, installedPlugins] = await Promise.all([

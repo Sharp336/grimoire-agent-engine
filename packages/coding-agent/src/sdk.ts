@@ -3490,7 +3490,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// resumes leave it unset and restore the transcript's own model), so
 			// it cleanly separates the two. The diff guards keep an explicit
 			// resume whose frontmatter resolved to the recorded values from
-			// writing spurious entries.
+			// writing spurious entries. `auto` is included: a persona whose
+			// frontmatter sets `thinkingLevel: auto` runs in auto mode for this
+			// session, and without a `configured: "auto"` entry the next resume
+			// falls back to the transcript's previous selector instead of the
+			// reselected policy (codex 3742662983).
 			if (
 				options.agentPersona &&
 				options.model !== undefined &&
@@ -3502,11 +3506,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (
 				options.agentPersona &&
 				options.thinkingLevel !== undefined &&
-				!autoThinking &&
 				effectiveThinkingLevel !== undefined &&
 				String(options.thinkingLevel) !== existingSession.configuredThinkingLevel
 			) {
-				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, String(options.thinkingLevel));
+				// `auto` persists the concrete provisional effort for the display
+				// plus configured="auto" for the intent — mirroring the
+				// new-session branch (sdk.ts:3529) so the next resume rehydrates
+				// auto mode instead of the transcript's previous selector.
+				sessionManager.appendThinkingLevelChange(
+					effectiveThinkingLevel,
+					options.thinkingLevel === AUTO_THINKING ? AUTO_THINKING : String(options.thinkingLevel),
+				);
 			}
 			if (options.openAIServiceTier !== undefined) {
 				sessionManager.appendServiceTierChange(
