@@ -672,7 +672,15 @@ export const streamCommandCode: StreamFunction<"command-code"> = (
 			// The gateway has no wire `tool_choice` field. `"none"` omits the
 			// tools list entirely; a named choice approximates the force by
 			// advertising only the pinned tool (same lever as the Ollama chat
-			// transport's selectToolsForToolChoice).
+			// transport's selectToolsForToolChoice). Soft-required `"required"` /
+			// `"any"` cannot be approximated without inventing a force signal —
+			// silently advertising the full list would let a text-only reply
+			// satisfy plan-mode/soft-required turns, so reject them.
+			if (options?.toolChoice === "required" || options?.toolChoice === "any") {
+				throw new AIError.ConfigurationError(
+					'Command Code has no wire tool_choice field; toolChoice "required"/"any" is unsupported. Pin a specific tool or use "auto"/"none".',
+				);
+			}
 			const namedTool = getNamedToolChoiceName(options?.toolChoice);
 			const wireTools =
 				namedTool === undefined
