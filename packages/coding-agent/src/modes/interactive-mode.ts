@@ -570,6 +570,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Whether a persona was active when plan mode was entered. */
 	#planModePreviousPersona = false;
 	#goalModePreviousTools: string[] | undefined;
+	#goalModeToolOverlay: { restore: () => Promise<void> } | undefined;
 	/** Whether a persona was active when goal mode was entered. */
 	#goalModePreviousPersona = false;
 	#vibeModePreviousTools: string[] | undefined;
@@ -2501,6 +2502,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			// needs the restore (codex 3742806339). A same-session /goal exit
 			// still restores through #exitGoalMode's own path.
 			this.session.setGoalModeState(undefined);
+			// The #goalModeToolOverlay handle belongs to the SOURCE session —
+			// restoring it would clobber the target's active set (mirrors the
+			// plan branch).
+			this.#goalModeToolOverlay = undefined;
 			if (
 				!this.session.agentPersona &&
 				!this.#goalModePreviousPersona &&
@@ -2806,7 +2811,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		const state = options.resume
 			? await this.session.goalRuntime.resumeGoal()
 			: await this.session.goalRuntime.createGoal({ objective: options.objective ?? "" });
-		await this.session.setActiveToolsByName(goalTools);
+		// applyToolOverlay snapshots the top-level vs xd:// mounted partition so
+		// exit restores the exact presentation; setActiveToolsByName would
+		// reclassify mounts against the current xdev state (mirrors the plan-mode
+		// fix for codex 3742806339).
+		this.#goalModeToolOverlay = await this.session.applyToolOverlay(goalTools);
 		this.session.setGoalModeState(state);
 		this.goalModeEnabled = true;
 		this.#resetGoalContinuationSuppression();
@@ -2825,8 +2834,19 @@ export class InteractiveMode implements InteractiveModeContext {
 		reason?: "completed" | "paused" | "dropped";
 	}): Promise<void> {
 		const previousTools = this.#goalModePreviousTools;
-		if (this.goalModeEnabled && previousTools) {
-			await this.session.setActiveToolsByName(previousTools);
+		if (this.goalModeEnabled) {
+			// Restore through the overlay handle captured at entry so the exact
+			// top-level vs xd:// mounted partition returns (setActiveToolsByName
+			// reclassifies mounts against the current xdev state, which may have
+			// drifted since entry — e.g. a deferred MCP connect changed mount
+			// availability). Mirrors the plan-mode fix.
+			await this.#goalModeToolOverlay?.restore();
+			this.#goalModeToolOverlay = undefined;
+		}
+		if (previousTools === undefined) {
+			// Defensive: no entry snapshot (e.g. goal state restored from a
+			// transcript without a live entry path); fall back to the raw set.
+			await this.session.setActiveToolsByName(this.session.getEnabledToolNames().filter(name => name !== "goal"));
 		}
 		const currentState = this.session.getGoalModeState();
 		if (options?.reason === "completed") {

@@ -100,12 +100,32 @@ export function isSpawnableScoutInAgents(
 export function scoutAvailableForSession(session: ToolSession): boolean {
 	const disabledAgents = session.settings.get("task.disabledAgents") as string[] | undefined;
 	const spawns = session.getSessionSpawns?.() ?? "*";
-	if (!isScoutSpawnable(disabledAgents, spawns)) return false;
-	const agents = getDiscoveredAgentsSnapshot(
+	return scoutAvailableFromState(
+		disabledAgents,
+		spawns,
 		session.cwd,
 		session.getExtensionDiscoveryMode?.(),
 		session.extensionRoots,
 	);
+}
+
+/**
+ * Shared core of the scout-availability checks: spawn policy + disabledAgents
+ * gate, then the memoized discovery snapshot (falling back to "allowed" until
+ * discovery lands). Single source of truth for the system-prompt/plan-mode/
+ * workflow-notice advertisement (AgentSession.#isScoutAvailable) and the
+ * tool-description advertisements (scoutAvailableForSession) so the two
+ * surfaces cannot drift.
+ */
+export function scoutAvailableFromState(
+	disabledAgents: readonly string[] | undefined,
+	spawns: string | boolean | null | undefined,
+	cwd: string,
+	extensionMode: "explicit-only" | "merge" | undefined,
+	extensionRoots: readonly string[] | undefined,
+): boolean {
+	if (!isScoutSpawnable(disabledAgents, spawns)) return false;
+	const agents = getDiscoveredAgentsSnapshot(cwd, extensionMode ?? "merge", extensionRoots);
 	if (agents === undefined) return true;
 	const scout = agents.find(agent => agent.name === "scout");
 	return scout !== undefined && scout.availability !== "primary";

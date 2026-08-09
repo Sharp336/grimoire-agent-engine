@@ -6,6 +6,7 @@
  */
 import * as fsSync from "node:fs";
 import * as os from "node:os";
+import * as path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { EventLoopKeepalive } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
@@ -97,6 +98,7 @@ import type { AgentDefinition } from "./task/types";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
 import type { LspStartupServerInfo } from "./tools";
+import { expandTilde } from "./tools/path-utils";
 import { getChangelogPath, resolveStartupChangelogForDisplay, type StartupChangelogSelection } from "./utils/changelog";
 import { EventBus } from "./utils/event-bus";
 import { withTimeoutSignal } from "./utils/fetch-timeout";
@@ -454,9 +456,20 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			const cliExtensionPaths = [...(args.parsedArgs.extensions ?? []), ...(args.parsedArgs.hooks ?? [])];
 			const agentExtensionMode: "merge" | "explicit-only" = args.parsedArgs.noExtensions ? "explicit-only" : "merge";
 			const agentIncludeExtensions = !args.parsedArgs.noExtensions || cliExtensionPaths.length > 0;
+			// Explicit extension-package ROOTS (distinct from entry files) mirror
+			// the SDK's toolSession.extensionRoots derivation (sdk.ts:2177): what
+			// additionalExtensionPaths named, resolved against the target cwd with
+			// tilde expansion. Without them an SDK embedder that passes extension
+			// packages (not CLI -e flags) would silently miss extension-shipped
+			// agents here and fall back to the default persona.
+			const explicitRoots = (baseOptions.additionalExtensionPaths ?? []).map(raw =>
+				path.resolve(cwd, expandTilde(raw)),
+			);
+			const acpExtensionRoots = baseOptions.preloadedExtensionRoots ?? explicitRoots;
 			const discovery = await discoverAgents(cwd, undefined, {
 				includeExtensions: agentIncludeExtensions,
 				extensionMode: agentExtensionMode,
+				extensionRoots: acpExtensionRoots,
 			});
 			const agentPersona = getAgent(discovery.agents, cliAgent);
 			if (agentPersona && agentPersona.availability !== "subagent") {

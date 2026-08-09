@@ -178,8 +178,7 @@ import {
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { fingerprintAgentContent, resolveAgentSessionPolicy } from "../task/agent-policy";
 import { discoverAgents, getAgent } from "../task/discovery";
-import { getDiscoveredAgentsSnapshot } from "../task/discovery-snapshot";
-import { isScoutSpawnable } from "../task/spawn-policy";
+import { scoutAvailableFromState } from "../task/spawn-policy";
 import type { AgentDefinition } from "../task/types";
 import {
 	AUTO_THINKING,
@@ -4932,17 +4931,16 @@ export class AgentSession {
 	}
 
 	#isScoutAvailable(): boolean {
-		const disabledAgents = this.settings.get("task.disabledAgents") as string[] | undefined;
-		const spawns = this.#getSessionSpawns?.() ?? "*";
-		if (!isScoutSpawnable(disabledAgents, spawns)) return false;
-		const agents = getDiscoveredAgentsSnapshot(
+		// Shared core with scoutAvailableForSession (tool descriptions) so the
+		// plan-mode/workflow advertisement cannot drift from the tool surfaces:
+		// spawn policy + disabledAgents, then the memoized discovery snapshot.
+		return scoutAvailableFromState(
+			this.settings.get("task.disabledAgents") as string[] | undefined,
+			this.#getSessionSpawns?.() ?? "*",
 			this.sessionManager.getCwd(),
 			this.getExtensionDiscoveryMode(),
 			this.extensionRoots,
 		);
-		if (agents === undefined) return true;
-		const scout = agents.find(agent => agent.name === "scout");
-		return scout !== undefined && scout.availability !== "primary";
 	}
 
 	async #buildPlanModeMessage(): Promise<CustomMessage | null> {
