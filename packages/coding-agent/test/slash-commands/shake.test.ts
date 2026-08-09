@@ -8,14 +8,17 @@ import {
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 
-function acpRuntime() {
-	const shake = vi.fn(async (mode: ShakeMode) => ({
-		mode,
-		toolResultsDropped: mode === "elide" ? 1 : 0,
-		blocksDropped: 0,
-		imagesDropped: mode === "images" ? 1 : undefined,
-		tokensFreed: mode === "elide" ? 100 : 0,
-	}));
+function acpRuntime(shakeImpl?: (mode: ShakeMode) => Promise<unknown>) {
+	const shake = vi.fn(
+		shakeImpl ??
+			(async (mode: ShakeMode) => ({
+				mode,
+				toolResultsDropped: mode === "elide" ? 1 : 0,
+				blocksDropped: 0,
+				imagesDropped: mode === "images" ? 1 : undefined,
+				tokensFreed: mode === "elide" ? 100 : 0,
+			})),
+	);
 	const output = vi.fn();
 	const runtime = { session: { shake }, output } as unknown as SlashCommandRuntime;
 	return { shake, output, runtime };
@@ -68,6 +71,37 @@ describe("/shake dispatch (ACP)", () => {
 		const h = acpRuntime();
 		await executeAcpBuiltinSlashCommand("/shake all", h.runtime);
 		expect(h.shake.mock.calls.map(c => c[0])).toEqual(["images", "elide"]);
+	});
+
+	it("keeps the image-only wording when all drops images but nothing elidable", async () => {
+		const h = acpRuntime(async (mode: ShakeMode) => ({
+			mode,
+			toolResultsDropped: 0,
+			blocksDropped: 0,
+			imagesDropped: mode === "images" ? 1 : 0,
+			tokensFreed: 0,
+		}));
+		await executeAcpBuiltinSlashCommand("/shake all", h.runtime);
+		expect(h.output).toHaveBeenCalledWith("Dropped 1 image from this session.");
+	});
+
+	it("reports completed modes before surfacing a mid-sequence failure", async () => {
+		const h = acpRuntime(async (mode: ShakeMode) => {
+			if (mode === "elide") throw new Error("persistence rewrite failed");
+			return { mode, toolResultsDropped: 0, blocksDropped: 0, imagesDropped: 2, tokensFreed: 0 };
+		});
+		await expect(executeAcpBuiltinSlashCommand("/shake images elide", h.runtime)).rejects.toThrow(
+			"persistence rewrite failed",
+		);
+		expect(h.output).toHaveBeenCalledWith("Dropped 2 images from this session.");
+	});
+
+	it("does not report partial state when the first mode fails", async () => {
+		const h = acpRuntime(async () => {
+			throw new Error("boom");
+		});
+		await expect(executeAcpBuiltinSlashCommand("/shake elide images", h.runtime)).rejects.toThrow("boom");
+		expect(h.output).not.toHaveBeenCalled();
 	});
 
 	it("rejects an unknown mode without invoking shake", async () => {

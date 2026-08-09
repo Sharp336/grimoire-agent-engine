@@ -37,15 +37,13 @@ export function formatShakeSummary(results: readonly ShakeResult[]): string {
 		tokensFreed += result.tokensFreed;
 		if (result.mode === "elide") ranElide = true;
 	}
-	if (!ranElide) {
-		return images === 0
-			? "No images found in this session."
-			: `Dropped ${images} image${images === 1 ? "" : "s"} from this session.`;
+	if (toolResults === 0 && blocks === 0) {
+		if (images > 0) return `Dropped ${images} image${images === 1 ? "" : "s"} from this session.`;
+		return ranElide ? "Nothing to shake." : "No images found in this session.";
 	}
 	const parts: string[] = [];
 	if (toolResults > 0) parts.push(`${toolResults} tool result${toolResults === 1 ? "" : "s"}`);
 	if (blocks > 0) parts.push(`${blocks} block${blocks === 1 ? "" : "s"}`);
 	if (images > 0) parts.push(`${images} image${images === 1 ? "" : "s"}`);
-	if (parts.length === 0) return "Nothing to shake.";
 	return `Shook ${parts.join(" + ")} (~${tokensFreed} tokens freed).`;
 }

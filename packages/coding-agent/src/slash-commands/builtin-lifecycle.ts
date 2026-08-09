@@ -198,7 +198,17 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			const modes = parseShakeModes(command.args);
 			if (!Array.isArray(modes)) return usage(modes.error, runtime);
 			const results: ShakeResult[] = [];
-			for (const mode of modes) results.push(await runtime.session.shake(mode));
+			for (const mode of modes) {
+				try {
+					results.push(await runtime.session.shake(mode));
+				} catch (error) {
+					// Earlier modes already mutated and persisted the session;
+					// report that state change before surfacing the failure so
+					// the client never assumes nothing happened.
+					if (results.length > 0) await runtime.output(formatShakeSummary(results));
+					throw error;
+				}
+			}
 			await runtime.output(formatShakeSummary(results));
 			return commandConsumed();
 		},
