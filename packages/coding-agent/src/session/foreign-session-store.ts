@@ -16,6 +16,14 @@ export interface ForeignSessionInfo {
 	readonly firstMessage?: string;
 }
 
+/** Provenance attached when a converted session is persisted under OMP. */
+export interface ForeignSessionProvenance {
+	readonly source: string;
+	readonly sourceId: string;
+	readonly sourcePath: string;
+	readonly sourceCwd: string;
+}
+
 /** Lists and converts sessions owned by another coding agent. */
 export interface ForeignSessionStore {
 	readonly source: ForeignSessionSource;

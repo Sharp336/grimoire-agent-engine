@@ -1,7 +1,12 @@
 import { directoryExists } from "@oh-my-pi/pi-utils";
 import { ClaudeSessionStore } from "./claude-session-store";
 import { CodexSessionStore } from "./codex-session-store";
-import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./foreign-session-store";
+import type {
+	ForeignSessionInfo,
+	ForeignSessionProvenance,
+	ForeignSessionSource,
+	ForeignSessionStore,
+} from "./foreign-session-store";
 import type { SessionInfo } from "./session-listing";
 import type { SessionManager } from "./session-manager";
 
@@ -32,6 +37,21 @@ export function foreignSessionInfoToSessionInfo(info: ForeignSessionInfo): Sessi
 	};
 }
 
+/** Persist an already-converted session under a fresh OMP identity with provenance. */
+export async function persistConvertedSession(
+	converted: SessionManager,
+	provenance: ForeignSessionProvenance,
+	options?: { fallbackCwd?: string; sessionDir?: string; suppressBreadcrumb?: boolean },
+): Promise<SessionManager> {
+	const persisted = await converted.persistCopy(options);
+	if (options?.fallbackCwd && !(await directoryExists(persisted.getCwd()))) {
+		await persisted.moveTo(options.fallbackCwd, options.sessionDir);
+	}
+	persisted.appendCustomEntry("foreign_session_import", provenance);
+	await persisted.flush();
+	return persisted;
+}
+
 /** Import and persist one foreign session under a fresh OMP session identity. */
 export async function persistForeignSession(
 	store: ForeignSessionStore,
@@ -39,14 +59,14 @@ export async function persistForeignSession(
 	options?: { fallbackCwd?: string; sessionDir?: string; suppressBreadcrumb?: boolean },
 ): Promise<SessionManager> {
 	const imported = await store.load(info);
-	imported.appendCustomEntry("foreign_session_import", {
-		source: info.source,
-		sourceId: info.id,
-		sourcePath: info.path,
-		sourceCwd: info.cwd,
-	});
-	if (options?.fallbackCwd && !(await directoryExists(imported.getCwd()))) {
-		await imported.moveTo(options.fallbackCwd);
-	}
-	return await imported.persistCopy(options);
+	return await persistConvertedSession(
+		imported,
+		{
+			source: info.source,
+			sourceId: info.id,
+			sourcePath: info.path,
+			sourceCwd: info.cwd,
+		},
+		options,
+	);
 }
