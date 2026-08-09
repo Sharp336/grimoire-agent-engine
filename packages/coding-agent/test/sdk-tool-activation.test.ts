@@ -2043,10 +2043,12 @@ describe("createAgentSession defaultInactive tool activation", () => {
 	it("restores the pre-plan baseline only for no-persona targets on switch out of plan mode", async () => {
 		// The plan branch drops `#planModeToolOverlay` without restoring it
 		// (the source overlay would clobber the target). For a target with NO
-		// recorded persona, switchSession clears persona state but leaves the
-		// tools as the source's plan-augmented set (baseline + write) — the
-		// pre-plan baseline must be re-applied there. A persona target already
-		// rehydrated its own tools and must keep them.
+		// recorded persona, switchSession clears persona state and restores the
+		// launch baseline; a persona-SOURCED pre-plan snapshot must not be
+		// re-applied on top of it (it is the old persona's restricted set —
+		// codex 3742806339). Only a persona-less source captured the launch
+		// baseline itself, so the pre-plan restore is limited to that case. A
+		// persona target already rehydrated its own tools and must keep them.
 		const tempDir = makeTempDir();
 		const personaTargetFile = path.join(tempDir, "target-reviewer.jsonl");
 		await writeSwitchTarget(personaTargetFile, { agent: { name: "reviewer", source: "bundled" } });
@@ -2054,7 +2056,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		await writeSwitchTarget(plainTargetFile);
 
 		// Control session with no persona: its enabled set is the launch
-		// baseline, which must differ from the pre-plan snapshot for the
+		// baseline, which must differ from the persona-restricted set for the
 		// no-persona-target assertion below to discriminate the fix.
 		const { session: control } = await createAgentSession(baseOptions(tempDir));
 		const controlBaseline = [...control.getEnabledToolNames()].sort();
@@ -2097,23 +2099,27 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			).toEqual(reviewerSet);
 
 			// Re-arm plan mode on the reviewer-active session, then switch to a
-			// target with NO recorded persona: plan's write must be dropped and
-			// the pre-plan baseline restored.
+			// target with NO recorded persona: the source's pre-plan snapshot is
+			// the reviewer's restricted set and must NOT leak onto the
+			// persona-less target — switchSession already restored the launch
+			// baseline, so the target ends on the full baseline, not the stale
+			// persona tools.
 			await mode.handlePlanModeCommand();
 			expect(mode.planModeEnabled).toBe(true);
 			const prePlanSet = [...session.getEnabledToolNames()].sort();
 			expect(prePlanSet).toContain("write");
-			// The pre-plan snapshot must observably differ from the launch
-			// baseline, or the final assertion cannot discriminate the fix.
+			// The reviewer-restricted pre-plan snapshot must observably differ
+			// from the launch baseline, or the final assertion cannot
+			// discriminate the fix.
 			expect(prePlanSet).not.toEqual(controlBaseline);
 
 			expect(await session.switchSession(plainTargetFile)).toBe(true);
 			expect(mode.planModeEnabled).toBe(false);
 			expect(session.agentPersona).toBeUndefined();
-			// The no-persona target keeps the source's pre-plan baseline (the
-			// finding's contract for persona-less targets), NOT the launch
-			// baseline the persona else-branch would otherwise leave.
-			expect([...session.getEnabledToolNames()].sort()).toEqual(prePlanSet);
+			// The persona-less target keeps the launch baseline switchSession
+			// restored — the source persona's restricted pre-plan set must not
+			// be re-applied on top of it.
+			expect([...session.getEnabledToolNames()].sort()).toEqual(controlBaseline);
 		} finally {
 			mode.stop();
 			await session.dispose();

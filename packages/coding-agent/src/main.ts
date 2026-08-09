@@ -364,7 +364,10 @@ export interface AcpSessionFactoryOptions {
 	sessionDir?: string;
 	authStorage: AuthStorage;
 	modelRegistry: ModelRegistry;
-	parsedArgs: Pick<Args, "apiKey" | "trustedExtensions">;
+	parsedArgs: Pick<
+		Args,
+		"apiKey" | "trustedExtensions" | "agent" | "extensions" | "hooks" | "noExtensions" | "model" | "thinking"
+	>;
 	rawArgs: string[];
 	createSession: (options: CreateAgentSessionOptions) => Promise<CreateAgentSessionResult>;
 }
@@ -421,8 +424,47 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 				`Trusted extension failed to load: ${trustedExtensions.errors.map(item => item.error).join("; ")}`,
 			);
 		}
+		// `baseOptions.agentPersona` (and the model/tool/spawns derived from it)
+		// was resolved against the LAUNCH cwd. An ACP host can open `session/new`
+		// for a different workspace, and the persona's project `.agent.md` (or a
+		// shadowing definition in the target project) must resolve under the
+		// session cwd, not the launch one. Re-resolve an explicit --agent here;
+		// rehydrated personas (no --agent) keep the baked definition, matching
+		// the launch resume path (codex 3742806342).
+		const baseOptions = { ...args.baseOptions };
+		const cliAgent = args.parsedArgs.agent;
+		if (cliAgent && baseOptions.agentPersona) {
+			const cliExtensionPaths = [...(args.parsedArgs.extensions ?? []), ...(args.parsedArgs.hooks ?? [])];
+			const agentExtensionMode: "merge" | "explicit-only" = args.parsedArgs.noExtensions ? "explicit-only" : "merge";
+			const agentIncludeExtensions = !args.parsedArgs.noExtensions || cliExtensionPaths.length > 0;
+			const discovery = await discoverAgents(cwd, undefined, {
+				includeExtensions: agentIncludeExtensions,
+				extensionMode: agentExtensionMode,
+			});
+			const agentPersona = getAgent(discovery.agents, cliAgent);
+			if (agentPersona && agentPersona.availability !== "subagent") {
+				baseOptions.agentPersona = agentPersona;
+				const policy = resolveAgentSessionPolicy(agentPersona);
+				// Tools/spawns/model were derived from the persona at launch
+				// (buildSessionOptions lines ~1268/1230/1090); re-derive them for
+				// the target project. CLI-locked selections (explicit --tools,
+				// --model, --thinking) must survive untouched.
+				if (!baseOptions.cliToolsLocked && policy.toolNames) {
+					baseOptions.toolNames = policy.toolNames;
+					baseOptions.toolNamesFromAgent = true;
+				}
+				if (!baseOptions.cliModelLocked && baseOptions.model === undefined && policy.modelPatterns?.length) {
+					// Deferred pattern: the SDK resolves it after extensions
+					// register for this cwd (the sdk.ts:1408 persona block).
+					baseOptions.modelPattern = policy.modelPatterns;
+				}
+				if (!baseOptions.cliThinkingLocked && baseOptions.thinkingLevel === undefined && policy.thinkingLevel) {
+					baseOptions.thinkingLevel = policy.thinkingLevel;
+				}
+			}
+		}
 		const { session: nextSession } = await args.createSession({
-			...args.baseOptions,
+			...baseOptions,
 			cwd,
 			sessionManager: nextSessionManager,
 			settings: nextSettings,

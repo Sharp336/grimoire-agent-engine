@@ -233,3 +233,82 @@ describe("createAcpSessionFactory TITLE_SYSTEM.md per-cwd resolution (PR #3736)"
 		}
 	});
 });
+
+describe("createAcpSessionFactory per-cwd persona re-resolution (codex 3742806342)", () => {
+	it("re-resolves an explicit --agent persona against the per-session cwd", async () => {
+		const tempDir = TempDir.createSync("@pi-acp-persona-reresolve-");
+		let authStorage: AuthStorage | undefined;
+		try {
+			authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+			const modelRegistry = new ModelRegistry(authStorage);
+			const settings = Settings.isolated({});
+
+			const targetDir = tempDir.join("target-project");
+			// The target project shadows `scout` with a project-scoped
+			// definition; a launch-cwd-resolved persona would miss it.
+			await Bun.write(
+				`${targetDir}/.omp/agents/scout.md`,
+				'---\nname: scout\ndescription: Target-project scout persona\nmode: primary\nmodel: "@smol"\n---\n',
+			);
+
+			const fakeSession = {} as AgentSession;
+			const captured: CreateAgentSessionOptions[] = [];
+			const createSession = async (options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> => {
+				captured.push(options);
+				return {
+					session: fakeSession,
+					extensionsResult: {
+						extensions: [],
+						errors: [],
+						runner: undefined,
+					} as unknown as CreateAgentSessionResult["extensionsResult"],
+					setToolUIContext: () => {},
+					eventBus: {
+						emit: () => {},
+						on: () => () => {},
+						off: () => {},
+					} as unknown as CreateAgentSessionResult["eventBus"],
+				};
+			};
+
+			// baseOptions carries the LAUNCH-cwd `scout` definition; the
+			// factory must re-resolve the --agent persona against the
+			// per-session cwd and derive the model pattern from it.
+			const factory = createAcpSessionFactory({
+				baseOptions: {
+					agentPersona: {
+						name: "scout",
+						description: "Launch-cwd scout",
+						systemPrompt: "",
+						source: "bundled" as const,
+					},
+					toolNamesFromAgent: true,
+					toolNames: ["read"],
+				} as CreateAgentSessionOptions,
+				settings,
+				sessionDir: tempDir.join("sessions"),
+				authStorage,
+				modelRegistry,
+				parsedArgs: { agent: "scout" },
+				rawArgs: [],
+				createSession,
+			});
+
+			await factory(targetDir);
+
+			expect(captured).toHaveLength(1);
+			// Re-resolved under the session cwd: the project-scoped scout.
+			expect(captured[0].agentPersona?.source).toBe("project");
+			expect(captured[0].agentPersona?.description).toBe("Target-project scout persona");
+			// The persona model patterns carry over to the re-resolved policy.
+			expect(captured[0].modelPattern).toEqual(["@smol"]);
+		} finally {
+			try {
+				authStorage?.close();
+			} finally {
+				await Bun.sleep(0);
+				await tempDir.remove();
+			}
+		}
+	});
+});
