@@ -24,7 +24,6 @@ import {
 	setProfile,
 	VERSION,
 } from "@oh-my-pi/pi-utils/dirs";
-import { applyDotenvFiles } from "@oh-my-pi/pi-utils/env-core";
 import { interceptUnhandledRejections } from "@oh-my-pi/pi-utils/postmortem";
 import { setProcessName } from "@oh-my-pi/pi-utils/process-name";
 import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
@@ -32,13 +31,9 @@ import { installProfileAlias, resolveProfileAliasCommandFromProcess } from "./cl
 import { extractProfileFlags } from "./cli/profile-bootstrap";
 import { startJsEvalProcess } from "./eval/js/process-entry";
 import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
-import { i18n } from "./i18n";
-import { cliTranslator } from "./i18n/interceptor";
 import { DAEMON_BROKER_WORKER_ARG } from "./launch/protocol";
 import { TERMINAL_OUTPUT_WORKER_ARG } from "./launch/terminal-output-worker-protocol";
 import { LSP_MUX_WORKER_ARG } from "./lsp/mux/protocol";
-import { invalidateSettingDefsCache } from "./modes/components/settings-defs";
-import { invalidateTipsCache } from "./modes/components/welcome";
 import { COMPUTER_WORKER_ARG } from "./tools/computer/protocol";
 import { smokeTestComputerWorker } from "./tools/computer/supervisor";
 import { startComputerWorker } from "./tools/computer/worker-entry";
@@ -69,8 +64,9 @@ const isProcessEntry = import.meta.main || process.env.PI_COMPILED === "true";
 async function showHelp(config: CliConfig<CommandMetadata>): Promise<void> {
 	// Root help historically loads the selected profile's environment. The
 	// lazily loaded help module imports it statically after profile bootstrap.
-	const [{ renderRootHelp }, { getExtraHelpText }] = await Promise.all([
+	const [{ renderRootHelp }, { cliTranslator }, { getExtraHelpText }] = await Promise.all([
 		import("@oh-my-pi/pi-utils/cli"),
+		import("./i18n/interceptor"),
 		import("./cli/help-extra"),
 	]);
 	renderRootHelp(config, cliTranslator);
@@ -388,14 +384,28 @@ export async function runCli(argv: string[]): Promise<void> {
 		return;
 	}
 
+	// `--version`/`-v` mirror run()'s output but must be served before the
+	// i18n bootstrap: that graph reaches pi_natives and would break
+	// `--no-addons` spawns that must stay natives-free.
+	if (resolvedArgv[0] === "--version" || resolvedArgv[0] === "-v") {
+		process.stdout.write(`${APP_NAME}/${VERSION}\n`);
+		return;
+	}
+
 	// Apply dotenv files before initializing i18n so that OMP_LANG is visible
 	// during language detection. This is idempotent: keys already in Bun.env are
 	// never overwritten, so later imports of @oh-my-pi/pi-utils/env are no-ops.
+	const { applyDotenvFiles } = await import("@oh-my-pi/pi-utils/env-core");
 	applyDotenvFiles();
 
-	// Initialize i18n system after profile is set and worker dispatch.
+	// Initialize i18n system after profile is set and worker dispatch. These
+	// modules reach pi_natives, so they load dynamically to keep the static
+	// entry graph natives-free for `--no-addons` worker/version processes.
+	const { i18n } = await import("./i18n");
 	await i18n.init();
+	const { invalidateSettingDefsCache } = await import("./modes/components/settings-defs");
 	invalidateSettingDefsCache();
+	const { invalidateTipsCache } = await import("./modes/components/welcome");
 	invalidateTipsCache();
 
 	// Declare this module as the worker-host entry now that the active profile
@@ -413,9 +423,10 @@ export async function runCli(argv: string[]): Promise<void> {
 		await runSmokeTest();
 		return;
 	}
-	const [{ run }, { commands, resolveCliArgv }] = await Promise.all([
+	const [{ run }, { commands, resolveCliArgv }, { cliTranslator }] = await Promise.all([
 		import("@oh-my-pi/pi-utils/cli"),
 		import("./cli-commands"),
+		import("./i18n/interceptor"),
 	]);
 	// --help and --version are handled by run() directly, don't rewrite those.
 	// Everything else that isn't a known subcommand routes to "launch".
