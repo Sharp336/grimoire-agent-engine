@@ -304,6 +304,8 @@ Scope is the **caller-supplied** headers (`StreamOptions.headers`), not the prov
 
 Each handler gets its own copy, and only one that runs to completion has its edits applied — throwing, timing out, or being aborted contributes nothing. Handlers run once the request holds its per-provider concurrency slot, so a request aborted while queued never runs them and a short-lived header is minted next to the HTTP call.
 
+**Known limitation — WebSocket transports.** With `providers.openaiWebsockets` enabled, the OpenAI Codex transport reuses an open socket whenever auth matches, and WebSocket frames carry no per-request HTTP headers. A header added on a request that reuses a socket therefore never reaches the provider, even though the handler ran. Forcing a reconnect when non-auth headers change is not a fix: per-request metadata differs on every request, so it would reconnect on every request and defeat the reuse. Use `after_provider_response` if you need to confirm what a given request actually carried.
+
 ### `resources_discover`
 
 `resources_discover` exists in extension types and `ExtensionRunner`.
