@@ -20,13 +20,14 @@ import { shareSession } from "../../export/share";
 import type { CompactOptions } from "../../extensibility/extensions/types";
 import {
 	diffMentalModelContent,
+	findExistingSeedModel,
 	type HindsightApi,
 	type HindsightSessionState,
 	loadHindsightConfig,
 	reloadMentalModelsForSession,
 	resolveSeedsForScope,
-	seedAlreadyExists,
 	summarizeMentalModel,
+	upgradeLegacySeedBudget,
 } from "../../hindsight";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../../memory-backend";
 import { BashExecutionComponent } from "../../modes/components/bash-execution";
@@ -871,10 +872,22 @@ export class CommandController {
 			const list = await state.client.listMentalModels(state.bankId, { detail: "metadata" });
 			const existing = list.items ?? [];
 			let created = 0;
+			let upgraded = 0;
 			let skipped = 0;
 			for (const seed of seeds) {
-				if (seedAlreadyExists(seed, existing)) {
-					skipped++;
+				const existingModel = findExistingSeedModel(seed, existing);
+				if (existingModel) {
+					try {
+						if (await upgradeLegacySeedBudget(state.client, state.bankId, seed, existingModel, config.debug)) {
+							upgraded++;
+						} else {
+							skipped++;
+						}
+					} catch (error) {
+						this.ctx.showWarning(
+							`Seed update failed for ${seed.id}: ${error instanceof Error ? error.message : String(error)}`,
+						);
+					}
 					continue;
 				}
 				try {
@@ -891,7 +904,9 @@ export class CommandController {
 					);
 				}
 			}
-			this.ctx.showStatus(`Seeded ${created} new mental model(s); ${skipped} already present.`);
+			this.ctx.showStatus(
+				`Seeded ${created} new mental model(s); upgraded ${upgraded}; ${skipped} already current.`,
+			);
 		} catch (error) {
 			this.ctx.showError(`mm seed failed: ${error instanceof Error ? error.message : String(error)}`);
 		}

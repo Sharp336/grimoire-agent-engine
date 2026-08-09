@@ -1,5 +1,5 @@
 {
-	"$schema_doc": "Built-in mental model seeds. Each entry is created once per bank if absent. Existing models are never modified, except legacy built-in models still capped at 600/800 tokens, which are upgraded to the configured seed budget. Tags must intersect the tags actually attached to retains, otherwise refresh returns empty (Hindsight all_strict matching). Source queries live here and not in TS so changes are reviewable as data, not code. `max_tokens` bounds server-side reflect generation per model; a separate client-side render budget bounds the total injected block.",
+	"$schema_doc": "Built-in mental model seeds. Each entry is created once per bank if absent. Automatic bootstrap never modifies existing models. `/memory mm seed` upgrades built-in models still capped at 600/800 tokens to the configured seed budget. Tags must intersect the tags actually attached to retains, otherwise refresh returns empty (Hindsight all_strict matching). Source queries live here and not in TS so changes are reviewable as data, not code. `max_tokens` bounds server-side reflect generation per model; a separate client-side render budget bounds the total injected block.",
 	"seeds": [
 		{
 			"id": "user-preferences",

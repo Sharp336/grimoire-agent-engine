@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed default Hindsight mental-model refreshes repeatedly retrying at a 600/800-token completion cap. Built-in models now default to 4,096 tokens, expose `hindsight.mentalModelMaxTokens`, and upgrade legacy built-in caps.
+- Fixed default Hindsight mental-model refreshes repeatedly retrying at a 600/800-token completion cap. Built-in models now default to 4,096 tokens, expose `hindsight.mentalModelMaxTokens`, and `/memory mm seed` upgrades legacy built-in caps.
 
 ## [17.2.12] - 2026-08-08
 

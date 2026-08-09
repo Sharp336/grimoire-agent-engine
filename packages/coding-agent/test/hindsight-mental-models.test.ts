@@ -12,6 +12,7 @@ import {
 	MENTAL_MODEL_RENDER_BUDGET_CHARS_DEFAULT,
 	renderMentalModelsBlock,
 	resolveSeedsForScope,
+	upgradeLegacySeedBudget,
 } from "@oh-my-pi/pi-coding-agent/hindsight/mental-models";
 
 afterEach(() => {
@@ -86,12 +87,20 @@ interface FakeApiCalls {
 		maxTokens?: number;
 	}>;
 	updated: Array<{ id: string; maxTokens?: number }>;
+	fetched: Array<{ id: string; detail?: string }>;
 }
 
-function makeFakeApi(existing: MentalModelSummary[]): { api: HindsightApi; calls: FakeApiCalls } {
-	const calls: FakeApiCalls = { created: [], updated: [] };
+function makeFakeApi(
+	existing: MentalModelSummary[],
+	details: MentalModelSummary[] = existing,
+): { api: HindsightApi; calls: FakeApiCalls } {
+	const calls: FakeApiCalls = { created: [], fetched: [], updated: [] };
 	const api = {
 		listMentalModels: async () => ({ items: existing }),
+		getMentalModel: async (_bankId: string, id: string, options?: { detail?: string }) => {
+			calls.fetched.push({ id, detail: options?.detail });
+			return details.find(model => model.id === id) ?? null;
+		},
 		createMentalModel: async (
 			_bankId: string,
 			name: string,
@@ -126,7 +135,7 @@ describe("ensureMentalModels", () => {
 		expect(calls.created[0].tags).toEqual(["project:omp"]);
 	});
 
-	it("upgrades only built-in models at the legacy unsafe caps", async () => {
+	it("does not modify existing legacy models during automatic seeding", async () => {
 		const { api, calls } = makeFakeApi([
 			{
 				id: "project-conventions",
@@ -142,7 +151,7 @@ describe("ensureMentalModels", () => {
 			false,
 		);
 		expect(calls.created).toHaveLength(0);
-		expect(calls.updated).toEqual([{ id: "project-conventions", maxTokens: 4096 }]);
+		expect(calls.updated).toHaveLength(0);
 	});
 
 	it("matches legacy bare project seeds only when their tags match the active project", async () => {
@@ -189,30 +198,32 @@ describe("ensureMentalModels", () => {
 		expect(differentProject.calls.created[0].id).toBe("project-conventions-b");
 	});
 
-	it("does not modify existing models that do not use a legacy unsafe cap", async () => {
-		// Curated models retain their operator-selected fields. Only built-in
-		// models at the former 600/800 defaults are migrated.
-		const { api, calls } = makeFakeApi([
-			{
-				id: "user-preferences",
+	describe("upgradeLegacySeedBudget", () => {
+		it("fetches full details and applies the configured budget to legacy caps", async () => {
+			const metadata: MentalModelSummary = {
+				id: "project-conventions",
 				bank_id: "omp",
-				name: "Old Name",
-				source_query: "old query",
-				tags: ["legacy"],
-			},
-		]);
-		await ensureMentalModels(
-			api,
-			"omp",
-			[{ id: "user-preferences", name: "User Preferences", sourceQuery: "new query", tags: [] }],
-			false,
-		);
-		expect(calls.created).toHaveLength(0);
-		expect(calls.updated).toHaveLength(0);
+				name: "Project Conventions",
+			};
+			const fullModel: MentalModelSummary = { ...metadata, max_tokens: 800 };
+			const { api, calls } = makeFakeApi([metadata], [fullModel]);
+
+			await expect(
+				upgradeLegacySeedBudget(
+					api,
+					"omp",
+					{ id: "project-conventions", name: "Project Conventions", sourceQuery: "q", tags: [], maxTokens: 700 },
+					metadata,
+					false,
+				),
+			).resolves.toBe(true);
+			expect(calls.updated).toEqual([{ id: "project-conventions", maxTokens: 700 }]);
+			expect(calls.fetched).toEqual([{ id: "project-conventions", detail: "content" }]);
+		});
 	});
 
 	it("treats a list failure as a no-op (best-effort, never throws)", async () => {
-		const calls: FakeApiCalls = { created: [], updated: [] };
+		const calls: FakeApiCalls = { created: [], fetched: [], updated: [] };
 		const api = {
 			listMentalModels: async () => {
 				throw new Error("network down");
