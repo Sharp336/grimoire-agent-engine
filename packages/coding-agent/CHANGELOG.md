@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Hindsight refresh retries at 600/800-token caps. Defaults now use 4,096 tokens; `hindsight.mentalModelMaxTokens` configures new seeds, and `/memory mm seed` upgrades legacy caps.
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed

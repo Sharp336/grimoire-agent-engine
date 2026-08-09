@@ -32,11 +32,8 @@
  * Untagged seeds (e.g. `user-preferences`) read every memory in the bank — the
  * reflect call applies no tag filter when `tags` is empty.
  *
- * Seed lifecycle is **create-only**: changes to `source_query`, `tags`,
- * `max_tokens`, or `trigger` in `seeds.json` will NOT propagate to existing
- * models on the server. Operators who want a structural change must
- * `/memory mm refresh <id>` (content-only) or `/memory mm delete <id>`
- * followed by a re-seed.
+ * Automatic seeds create only. Seed changes do not update existing models.
+ * `/memory mm seed` upgrades built-ins capped at 600/800 tokens.
  */
 
 import { logger } from "@oh-my-pi/pi-utils";
@@ -86,7 +83,11 @@ export interface MentalModelSeed {
  * banks, project seeds use project-suffixed ids and accept matching legacy
  * bare ids as already present.
  */
-export function resolveSeedsForScope(scope: BankScope, scoping: HindsightScoping): MentalModelSeed[] {
+export function resolveSeedsForScope(
+	scope: BankScope,
+	scoping: HindsightScoping,
+	maxTokens?: number,
+): MentalModelSeed[] {
 	const out: MentalModelSeed[] = [];
 	for (const seed of BUILTIN_SEEDS) {
 		if (!seed.scopes.includes(scoping)) continue;
@@ -97,7 +98,7 @@ export function resolveSeedsForScope(scope: BankScope, scoping: HindsightScoping
 			name: seed.name,
 			sourceQuery: seed.source_query,
 			tags,
-			maxTokens: seed.max_tokens,
+			maxTokens: maxTokens ?? seed.max_tokens,
 			trigger: seed.trigger,
 			legacyIds: id === seed.id ? undefined : [seed.id],
 		});
@@ -137,7 +138,7 @@ function dedupe<T>(items: T[]): T[] {
  * an optimization, not a precondition for retain/recall, and we mirror the
  * swallow-on-failure pattern used by `ensureBankExists`.
  *
- * Existing models are NEVER modified. See module docstring.
+ * Existing models are NEVER modified by automatic seeding.
  */
 export async function ensureMentalModels(
 	client: HindsightApi,
@@ -176,11 +177,45 @@ export async function ensureMentalModels(
 
 /** Return whether a seed is already represented by current bank metadata. */
 export function seedAlreadyExists(seed: MentalModelSeed, models: readonly MentalModelSummary[]): boolean {
-	for (const model of models) {
-		if (model.id === seed.id) return true;
-		if (seed.legacyIds?.includes(model.id) && sameStringSet(model.tags ?? [], seed.tags)) return true;
+	return findExistingSeedModel(seed, models) !== undefined;
+}
+
+export function findExistingSeedModel(
+	seed: MentalModelSeed,
+	models: readonly MentalModelSummary[],
+): MentalModelSummary | undefined {
+	return models.find(
+		model =>
+			model.id === seed.id || (seed.legacyIds?.includes(model.id) && sameStringSet(model.tags ?? [], seed.tags)),
+	);
+}
+
+/** `/memory mm seed`: upgrade legacy built-ins. Metadata omits `max_tokens`. */
+export async function upgradeLegacySeedBudget(
+	client: HindsightApi,
+	bankId: string,
+	seed: MentalModelSeed,
+	model: MentalModelSummary,
+	debug: boolean,
+): Promise<boolean> {
+	if (seed.maxTokens === undefined) return false;
+	const fullModel = await client.getMentalModel(bankId, model.id, { detail: "content" });
+	if (
+		fullModel?.max_tokens === undefined ||
+		![600, 800].includes(fullModel.max_tokens) ||
+		fullModel.max_tokens === seed.maxTokens
+	) {
+		return false;
 	}
-	return false;
+	await client.updateMentalModel(bankId, fullModel.id, { maxTokens: seed.maxTokens });
+	if (debug) {
+		logger.debug("Hindsight: upgraded legacy seed budget", {
+			bankId,
+			id: fullModel.id,
+			maxTokens: seed.maxTokens,
+		});
+	}
+	return true;
 }
 
 function sameStringSet(left: readonly string[], right: readonly string[]): boolean {

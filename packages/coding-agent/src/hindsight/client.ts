@@ -195,6 +195,14 @@ export interface CreateMentalModelOptions extends HindsightRequestOptions {
 	trigger?: MentalModelTrigger;
 }
 
+export interface UpdateMentalModelOptions extends HindsightRequestOptions {
+	maxTokens?: number;
+}
+
+export interface UpdateMentalModelResponse {
+	[key: string]: unknown;
+}
+
 export interface CreateMentalModelResponse {
 	operation_id?: string;
 	[key: string]: unknown;
@@ -489,6 +497,20 @@ export class HindsightApi {
 				},
 				signal: options?.signal,
 			},
+		);
+	}
+
+	/** Update mutable mental-model settings without recreating its curated content. */
+	async updateMentalModel(
+		bankId: string,
+		mentalModelId: string,
+		options: UpdateMentalModelOptions,
+	): Promise<UpdateMentalModelResponse> {
+		return this.#request<UpdateMentalModelResponse>(
+			"PATCH",
+			`/v1/default/banks/${encodeURIComponent(bankId)}/mental-models/${encodeURIComponent(mentalModelId)}`,
+			"updateMentalModel",
+			{ body: { max_tokens: options.maxTokens }, signal: options.signal },
 		);
 	}
 
