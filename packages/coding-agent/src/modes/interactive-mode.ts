@@ -4692,8 +4692,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleHandoffCommand(customInstructions);
 	}
 
-	handleShakeCommand(mode: ShakeMode): Promise<void> {
-		return this.#commandController.handleShakeCommand(mode);
+	handleShakeCommand(modes: readonly ShakeMode[]): Promise<void> {
+		return this.#commandController.handleShakeCommand(modes);
 	}
 
 	executeCompaction(

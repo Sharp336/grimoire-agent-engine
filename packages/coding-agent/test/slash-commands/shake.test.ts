@@ -11,10 +11,10 @@ import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-comman
 function acpRuntime() {
 	const shake = vi.fn(async (mode: ShakeMode) => ({
 		mode,
-		toolResultsDropped: 1,
+		toolResultsDropped: mode === "elide" ? 1 : 0,
 		blocksDropped: 0,
 		imagesDropped: mode === "images" ? 1 : undefined,
-		tokensFreed: 100,
+		tokensFreed: mode === "elide" ? 100 : 0,
 	}));
 	const output = vi.fn();
 	const runtime = { session: { shake }, output } as unknown as SlashCommandRuntime;
@@ -46,8 +46,22 @@ describe("/shake dispatch (ACP)", () => {
 		for (const mode of ["elide", "images"] as const) {
 			const h = acpRuntime();
 			await executeAcpBuiltinSlashCommand(`/shake ${mode}`, h.runtime);
+			expect(h.shake).toHaveBeenCalledTimes(1);
 			expect(h.shake).toHaveBeenCalledWith(mode);
 		}
+	});
+
+	it("runs combined modes in the order given and reports one merged summary", async () => {
+		const h = acpRuntime();
+		await executeAcpBuiltinSlashCommand("/shake elide images", h.runtime);
+		expect(h.shake.mock.calls.map(c => c[0])).toEqual(["elide", "images"]);
+		expect(h.output).toHaveBeenCalledWith("Shook 1 tool result + 1 image (~100 tokens freed).");
+	});
+
+	it("accepts the singular image alias and collapses duplicate modes", async () => {
+		const h = acpRuntime();
+		await executeAcpBuiltinSlashCommand("/shake image images elide elide", h.runtime);
+		expect(h.shake.mock.calls.map(c => c[0])).toEqual(["images", "elide"]);
 	});
 
 	it("rejects an unknown mode without invoking shake", async () => {
@@ -61,7 +75,7 @@ describe("/shake dispatch (ACP)", () => {
 	it("is advertised to ACP clients with the mode hint", () => {
 		const advertised = ACP_BUILTIN_SLASH_COMMANDS.find(c => c.name === "shake");
 		expect(advertised).toBeDefined();
-		expect(advertised?.input?.hint).toBe("[elide|images]");
+		expect(advertised?.input?.hint).toBe("[elide|images ...]");
 	});
 
 	it("advertises /shake images as the image-stripping path and no longer advertises /drop-images", () => {
@@ -71,18 +85,24 @@ describe("/shake dispatch (ACP)", () => {
 });
 
 describe("/shake dispatch (TUI)", () => {
-	it("routes the parsed mode to handleShakeCommand and clears the editor", async () => {
+	it("routes the parsed modes to handleShakeCommand and clears the editor", async () => {
 		const h = tuiRuntime();
 		const handled = await executeBuiltinSlashCommand("/shake images", h.runtime);
 		expect(handled).toBe(true);
 		expect(h.setText).toHaveBeenCalledWith("");
-		expect(h.handleShakeCommand).toHaveBeenCalledWith("images");
+		expect(h.handleShakeCommand).toHaveBeenCalledWith(["images"]);
+	});
+
+	it("routes combined modes as one call", async () => {
+		const h = tuiRuntime();
+		await executeBuiltinSlashCommand("/shake elide images", h.runtime);
+		expect(h.handleShakeCommand).toHaveBeenCalledWith(["elide", "images"]);
 	});
 
 	it("defaults to elide for a bare /shake", async () => {
 		const h = tuiRuntime();
 		await executeBuiltinSlashCommand("/shake", h.runtime);
-		expect(h.handleShakeCommand).toHaveBeenCalledWith("elide");
+		expect(h.handleShakeCommand).toHaveBeenCalledWith(["elide"]);
 	});
 
 	it("warns on an unknown mode and does not run a shake", async () => {

@@ -23,21 +23,29 @@ export interface ShakeResult {
 	artifactId?: string;
 }
 
-/** One-line operator summary of a {@link ShakeResult} (shared by TUI + ACP). */
-export function formatShakeSummary(result: ShakeResult): string {
-	if (result.mode === "images") {
-		const n = result.imagesDropped ?? 0;
-		return n === 0
+/** One-line operator summary of one `/shake` run's {@link ShakeResult}s (shared by TUI + ACP). */
+export function formatShakeSummary(results: readonly ShakeResult[]): string {
+	let toolResults = 0;
+	let blocks = 0;
+	let images = 0;
+	let tokensFreed = 0;
+	let ranElide = false;
+	for (const result of results) {
+		toolResults += result.toolResultsDropped;
+		blocks += result.blocksDropped;
+		images += result.imagesDropped ?? 0;
+		tokensFreed += result.tokensFreed;
+		if (result.mode === "elide") ranElide = true;
+	}
+	if (!ranElide) {
+		return images === 0
 			? "No images found in this session."
-			: `Dropped ${n} image${n === 1 ? "" : "s"} from this session.`;
+			: `Dropped ${images} image${images === 1 ? "" : "s"} from this session.`;
 	}
 	const parts: string[] = [];
-	if (result.toolResultsDropped > 0) {
-		parts.push(`${result.toolResultsDropped} tool result${result.toolResultsDropped === 1 ? "" : "s"}`);
-	}
-	if (result.blocksDropped > 0) {
-		parts.push(`${result.blocksDropped} block${result.blocksDropped === 1 ? "" : "s"}`);
-	}
+	if (toolResults > 0) parts.push(`${toolResults} tool result${toolResults === 1 ? "" : "s"}`);
+	if (blocks > 0) parts.push(`${blocks} block${blocks === 1 ? "" : "s"}`);
+	if (images > 0) parts.push(`${images} image${images === 1 ? "" : "s"}`);
 	if (parts.length === 0) return "Nothing to shake.";
-	return `Shook ${parts.join(" + ")} (~${result.tokensFreed} tokens freed).`;
+	return `Shook ${parts.join(" + ")} (~${tokensFreed} tokens freed).`;
 }

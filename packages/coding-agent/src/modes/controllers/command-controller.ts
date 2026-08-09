@@ -1284,18 +1284,24 @@ export class CommandController {
 
 	/**
 	 * TUI handler for `/shake`. `elide` drops heavy structural content and
-	 * `images` strips image blocks. Rebuilds the chat and reports counts.
+	 * `images` strips image blocks; modes run in order when combined.
+	 * Rebuilds the chat and reports merged counts.
 	 */
-	async handleShakeCommand(mode: ShakeMode): Promise<void> {
-		let result: ShakeResult;
-		try {
-			result = await this.ctx.session.shake(mode);
-		} catch (error) {
-			this.ctx.showError(`Shake failed: ${error instanceof Error ? error.message : String(error)}`);
-			return;
+	async handleShakeCommand(modes: readonly ShakeMode[]): Promise<void> {
+		const results: ShakeResult[] = [];
+		for (const mode of modes) {
+			try {
+				results.push(await this.ctx.session.shake(mode));
+			} catch (error) {
+				this.ctx.showError(`Shake failed: ${error instanceof Error ? error.message : String(error)}`);
+				return;
+			}
 		}
 
-		const dropped = result.toolResultsDropped + result.blocksDropped + (result.imagesDropped ?? 0);
+		const dropped = results.reduce(
+			(total, result) => total + result.toolResultsDropped + result.blocksDropped + (result.imagesDropped ?? 0),
+			0,
+		);
 		if (dropped === 0) {
 			this.ctx.showStatus("Nothing to shake.");
 			return;
@@ -1303,7 +1309,7 @@ export class CommandController {
 		this.ctx.rebuildChatFromMessages();
 		this.ctx.statusLine.invalidate();
 		this.ctx.ui.requestRender();
-		this.ctx.showStatus(formatShakeSummary(result));
+		this.ctx.showStatus(formatShakeSummary(results));
 	}
 
 	async executeCompaction(

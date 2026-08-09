@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `/shake` now accepts multiple modes in one invocation (`/shake elide images` runs both, in the order given) and reports one merged summary; `image` is accepted as an alias of `images`.
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed

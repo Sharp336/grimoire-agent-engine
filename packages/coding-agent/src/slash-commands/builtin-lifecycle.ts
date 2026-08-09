@@ -6,7 +6,7 @@ import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-b
 import type { FreshSessionResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { resolveResumableSession } from "../session/session-listing";
-import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
+import { formatShakeSummary, type ShakeMode, type ShakeResult } from "../session/shake-types";
 import { resolveToCwd } from "../tools/path-utils";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
@@ -32,12 +32,21 @@ export const shutdownHandlerTui = (
 	return commandConsumed();
 };
 
-/** Parse the `/shake` subcommand into a {@link ShakeMode}; empty defaults to elide. */
-function parseShakeMode(args: string): ShakeMode | { error: string } {
-	const verb = args.trim().toLowerCase();
-	if (verb === "" || verb === "elide") return "elide";
-	if (verb === "images") return "images";
-	return { error: `Unknown /shake mode "${verb}". Use elide or images.` };
+/**
+ * Parse `/shake` args into one or more {@link ShakeMode}s; empty defaults to
+ * elide. Modes combine (`/shake elide images`), run in the order given, and
+ * duplicates collapse.
+ */
+function parseShakeModes(args: string): ShakeMode[] | { error: string } {
+	const verbs = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
+	if (verbs.length === 0) return ["elide"];
+	const modes: ShakeMode[] = [];
+	for (const verb of verbs) {
+		const mode = verb === "elide" ? "elide" : verb === "images" || verb === "image" ? "images" : undefined;
+		if (!mode) return { error: `Unknown /shake mode "${verb}". Use elide, images, or both.` };
+		if (!modes.includes(mode)) modes.push(mode);
+	}
+	return modes;
 }
 
 /** Format the session's workspace directories (cwd + additional) for display. */
@@ -174,23 +183,24 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			{ name: "elide", description: "Strip tool results + large blocks (default)" },
 			{ name: "images", description: "Strip image blocks" },
 		],
-		acpInputHint: "[elide|images]",
+		acpInputHint: "[elide|images ...]",
 		allowArgs: true,
 		handle: async (command, runtime) => {
-			const mode = parseShakeMode(command.args);
-			if (typeof mode !== "string") return usage(mode.error, runtime);
-			const result = await runtime.session.shake(mode);
-			await runtime.output(formatShakeSummary(result));
+			const modes = parseShakeModes(command.args);
+			if (!Array.isArray(modes)) return usage(modes.error, runtime);
+			const results: ShakeResult[] = [];
+			for (const mode of modes) results.push(await runtime.session.shake(mode));
+			await runtime.output(formatShakeSummary(results));
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
 			runtime.ctx.editor.setText("");
-			const mode = parseShakeMode(command.args);
-			if (typeof mode !== "string") {
-				runtime.ctx.showWarning(mode.error);
+			const modes = parseShakeModes(command.args);
+			if (!Array.isArray(modes)) {
+				runtime.ctx.showWarning(modes.error);
 				return;
 			}
-			await runtime.ctx.handleShakeCommand(mode);
+			await runtime.ctx.handleShakeCommand(modes);
 		},
 	},
 	{
