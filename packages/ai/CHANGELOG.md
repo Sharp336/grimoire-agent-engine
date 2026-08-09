@@ -139,6 +139,14 @@
 - Fixed the AWS credential resolver ignoring `role_arn` profiles: shared-config role chaining (`source_profile` recursion, `web_identity_token_file`, `credential_source`) now resolves via STS `AssumeRole`/`AssumeRoleWithWebIdentity`, honoring `role_session_name`/`duration_seconds`/`external_id`, so Bedrock is detected on EKS/IRSA and multi-account setups instead of reporting "No models available" ([#8209](https://github.com/can1357/oh-my-pi/issues/8209)).
 - Fixed Bedrock availability being under-detected on Nitro/EKS hosts: the EC2 metadata probe now recognizes Nitro DMI markers (`board_asset_tag` instance ids, `Amazon EC2` vendor fields) in addition to the Xen `ec2` UUID prefix ([#8209](https://github.com/can1357/oh-my-pi/issues/8209)).
 - Fixed DeepSeek Responses targets (opencode-go) rejecting a thinking-mode continuation with `400 The reasoning_text in the thinking mode must be passed back to the API` after a prewalk hand-off plus mid-run compaction: the Responses input builder re-encoded replayed assistant turns without a reasoning item, so the request enabled reasoning but shipped no `reasoning_text`. The encoder now synthesizes a `reasoning_text` reasoning item for every replayed assistant turn when the target requires reasoning replay in thinking mode (`requiresReasoningContentForAllAssistantTurns` / `requiresReasoningContentForToolCalls`), mirroring the chat-completions `reasoning_content` safety net ([#8248](https://github.com/can1357/oh-my-pi/issues/8248)).
+### Added
+
+- Added a native Kiro provider with AWS IAM Identity Center device login, Kiro API-key login, profile selection, credential-scoped model discovery, AWS EventStream streaming, and native text, reasoning, tool, image, cancellation, and error handling.
+
+### Fixed
+
+- Hardened Kiro registration caching and refresh endpoint validation, including the canonical regional fallback when `tokenEndpoint` is omitted.
+- Redacted Kiro registered-client secrets alongside OAuth refresh tokens in generic remote credential snapshots.
 
 ## [17.2.12] - 2026-08-08
 
@@ -169,14 +177,6 @@
 ### Breaking Changes
 
 - Removed the `zod` dependency and `z`/`ZodType` re-exports. Tool schemas now use `omptype` `type()` schemas, with Zod-style authoring still available via `@oh-my-pi/omptype/zod`.
-### Added
-
-- Added a native Kiro provider with AWS IAM Identity Center device login, Kiro API-key login, profile selection, credential-scoped model discovery, AWS EventStream streaming, and native text, reasoning, tool, image, cancellation, and error handling.
-
-### Fixed
-
-- Hardened Kiro registration caching and refresh endpoint validation, including the canonical regional fallback when `tokenEndpoint` is omitted.
-- Redacted Kiro registered-client secrets alongside OAuth refresh tokens in generic remote credential snapshots.
 
 ## [17.2.9] - 2026-08-05
 
