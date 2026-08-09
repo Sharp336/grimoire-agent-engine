@@ -1,8 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { wrapStreamFnWithProviderHeaders } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/provider-headers";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { wrapStreamFnWithProviderConcurrency } from "@oh-my-pi/pi-coding-agent/task/provider-concurrency";
 
 /** Minimal runner stand-in: only the two members the wrapper consumes. */
 function fakeRunner(
@@ -78,5 +80,39 @@ describe("wrapStreamFnWithProviderHeaders", () => {
 
 		expect(seen[0]).toEqual({});
 		expect(calls[0]).toEqual({});
+	});
+
+	// Ordering regression: the hook is composed INSIDE the concurrency limiter, so a
+	// request that queues behind a busy provider runs its handlers when it wins the
+	// slot — not when it joins the queue. Composed the other way round, a request
+	// aborted while queued would still have run every handler, and a handler minting
+	// a short-lived or timestamped header would have minted it at queue time.
+	it("runs handlers only after the provider concurrency slot is won", async () => {
+		const { runner, seen } = fakeRunner(true);
+		const streams: AssistantMessageEventStream[] = [];
+		const base: StreamFn = () => {
+			const stream = new AssistantMessageEventStream();
+			streams.push(stream);
+			return stream;
+		};
+		// `ollama-cloud` is the provider that has a configured cap; 1 makes the
+		// second request queue behind the first deterministically.
+		const settings = { get: () => 1 } as unknown as Settings;
+		const capped = { provider: "ollama-cloud", id: "test-model", api: "openai-completions" } as never;
+		const wrapped = wrapStreamFnWithProviderConcurrency(settings, wrapStreamFnWithProviderHeaders(runner, base));
+
+		const first = await wrapped(capped, context, { headers: { "x-a": "1" } });
+		const second = wrapped(capped, context, { headers: { "x-b": "2" } });
+		await new Promise(resolve => setTimeout(resolve, 10));
+
+		// The queued request has not run its handlers, because it holds no slot yet.
+		expect(seen).toHaveLength(1);
+		expect(streams).toHaveLength(1);
+
+		first.end();
+		await second;
+
+		expect(seen).toHaveLength(2);
+		expect(seen[1]).toEqual({ "x-b": "2" });
 	});
 });

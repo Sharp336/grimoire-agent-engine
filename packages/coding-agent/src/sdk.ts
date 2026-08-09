@@ -3150,9 +3150,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// the session drives. Wrapped in a per-provider concurrency limiter so
 		// each LLM HTTP request — not the whole subagent lifecycle — holds the
 		// slot, preventing the nested-spawn deadlock from issue #3749.
-		const settingsAwareStreamFn = wrapStreamFnWithProviderHeaders(
-			extensionRunner,
-			wrapStreamFnWithProviderConcurrency(settings, createSettingsAwareStreamFn(settings)),
+		// The header hook sits INSIDE the concurrency limiter, not outside it: a
+		// request that queues on a busy provider must run its handlers when the slot
+		// is won, not when it joins the queue. Outside, a request aborted while
+		// queued would still have run every handler, and a handler minting a
+		// short-lived or timestamped header would have minted it at queue time.
+		const settingsAwareStreamFn = wrapStreamFnWithProviderConcurrency(
+			settings,
+			wrapStreamFnWithProviderHeaders(extensionRunner, createSettingsAwareStreamFn(settings)),
 		);
 		const transformToolCallArguments = (args: Record<string, unknown>): Record<string, unknown> => {
 			let result = args;

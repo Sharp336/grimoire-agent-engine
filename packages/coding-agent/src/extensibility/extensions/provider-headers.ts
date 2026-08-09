@@ -12,6 +12,14 @@
  * assembled map would give every installed extension the provider credential.
  * `StreamFn` already permits a promise return, so awaiting the handlers needs no
  * signature change.
+ *
+ * ORDERING: this wrapper is composed INSIDE the per-provider concurrency limiter
+ * (see `sdk.ts`), so handlers run once the request holds its slot rather than
+ * when it joins the queue. A request aborted while queued therefore never runs
+ * them, and a handler minting a short-lived or timestamped header mints it next
+ * to the HTTP call. The cross-process cap in `packages/ai` (`maxInFlightRequests`)
+ * still sits below this boundary — closing that gap would mean reaching the
+ * coding-agent's runner from the provider library, which the layering forbids.
  */
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import type { ExtensionRunner } from "./runner";
