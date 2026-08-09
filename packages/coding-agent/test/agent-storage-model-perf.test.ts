@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
-import { createSubagentSettings } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { createSubagentSettings } from "@oh-my-pi/pi-coding-agent/task/subagent-runtime-config";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("AgentStorage model perf aggregates", () => {
