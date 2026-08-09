@@ -21,7 +21,7 @@ When in doubt, start with an [extension](/oh-my-pi/extending/extensions/). It is
 | [Custom commands](/oh-my-pi/reference/slash-commands/) | New slash commands defined as Markdown files | `<cwd>/.omp/commands/*.md`, `~/.omp/agent/commands/*.md` (plus Claude/Codex/OpenCode command directories) | User (types `/name`) | Command directories scanned at startup; first match wins on name collisions; no file watcher | A `deploy.md` that expands `/deploy` into a prompt |
 | [Plugins & marketplaces](/oh-my-pi/extending/plugins/) | Distribution: one package bundling skills, commands, agents, hooks, tools, MCP servers, LSP servers, and extension modules | Marketplaces with `.omp-plugin/marketplace.json`; installs into `~/.omp/plugins/` or `<project>/.omp/plugins/` | Users (install and enable via `omp plugin` or `/marketplace`) | Installed once, enabled/disabled per scope, content loaded at startup | `code-review@claude-plugins-official` |
 | [MCP servers](/oh-my-pi/extending/mcp/) | Out-of-process tools (plus resources and prompts) over JSON-RPC | `.omp/mcp.json`, `~/.omp/agent/mcp.json`; stdio, HTTP, or SSE transports | Model (`mcp__*` tools), user (`/mcp` commands) | Connected at startup behind a 250 ms fast-startup gate; `/mcp reload` swaps the live tool set; automatic reconnect with backoff | The `filesystem` reference server via `npx` |
-| [SDK & RPC](/oh-my-pi/extending/sdk/) | Embed omp in your own process, or drive it from another program | `@oh-my-pi/pi-coding-agent` package; `omp --mode rpc` over newline-delimited JSON on stdio | External programs and drivers | Per-process: SDK sessions are created and disposed in code; RPC reads commands from stdin until it closes | `createAgentSession()` in a Bun script; `{"type":"prompt",...}` frames |
+| [SDK](/oh-my-pi/extending/sdk/) / [RPC](/oh-my-pi/extending/rpc/) | Embed omp in your own process, or drive it from another program | `@oh-my-pi/pi-coding-agent` package; `omp --mode rpc` over newline-delimited JSON on stdio | External programs and drivers | Per-process: SDK sessions are created and disposed in code; RPC reads commands from stdin until it closes | `createAgentSession()` in a Bun script; `{"type":"prompt",...}` frames |
 
 ## Decision flow
 
@@ -33,7 +33,7 @@ When in doubt, start with an [extension](/oh-my-pi/extending/extensions/). It is
 | Add a slash command without writing code | A [custom command](/oh-my-pi/reference/slash-commands/) file (`.omp/commands/*.md`) |
 | Reuse an existing MCP server | [MCP configuration](/oh-my-pi/extending/mcp/) |
 | Distribute capabilities to other users | A [plugin or marketplace](/oh-my-pi/extending/plugins/) |
-| Drive omp from my own program | The [SDK & RPC](/oh-my-pi/extending/sdk/) surface |
+| Drive omp from my own program | The [SDK](/oh-my-pi/extending/sdk/) and [RPC](/oh-my-pi/extending/rpc/) surfaces — see [RPC vs SDK](/oh-my-pi/extending/rpc-vs-sdk/) to pick |
 
 ## Combining mechanisms
 
@@ -54,5 +54,5 @@ The mechanisms compose; nothing forces a single choice.
 - [Hooks](/oh-my-pi/extending/hooks/)
 - [MCP Servers](/oh-my-pi/extending/mcp/)
 - [Plugins & Marketplaces](/oh-my-pi/extending/plugins/)
-- [SDK & RPC](/oh-my-pi/extending/sdk/)
+- [SDK](/oh-my-pi/extending/sdk/) and [RPC](/oh-my-pi/extending/rpc/) — plus [RPC vs SDK](/oh-my-pi/extending/rpc-vs-sdk/) for the comparison
 - [Slash Commands reference](/oh-my-pi/reference/slash-commands/) — includes custom command files

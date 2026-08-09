@@ -12,7 +12,7 @@ The oh-my-pi monorepo is organized into three language areas: TypeScript package
 
 | Package | What it is | Learn more |
 | --- | --- | --- |
-| `@oh-my-pi/pi-coding-agent` | The `omp` CLI: sessions, tools, settings, extensions, slash commands, memory backends, SDK, and RPC mode. | [CLI reference](/oh-my-pi/reference/cli/), [SDK & RPC](/oh-my-pi/extending/sdk/) |
+| `@oh-my-pi/pi-coding-agent` | The `omp` CLI: sessions, tools, settings, extensions, slash commands, memory backends, SDK, and RPC mode. | [CLI reference](/oh-my-pi/reference/cli/), [SDK](/oh-my-pi/extending/sdk/), [RPC](/oh-my-pi/extending/rpc/) |
 | `@oh-my-pi/browser-relay` | Chrome MV3 extension plus loopback CDP relay so the browser tool drives your logged-in Chrome tabs; install with `omp browser-relay install`. | [Browser](/oh-my-pi/features/browser/) |
 | `@oh-my-pi/swarm-extension` | Multi-agent DAG orchestration from YAML swarm files (`pipeline`/`parallel`/`sequential`); standalone `omp-swarm` CLI or `/swarm` TUI extension. | `docs/user-facing-packages.md` |
 | `@oh-my-pi/collab-web` | Standalone browser client (`my.omp.sh`) for `/collab` sessions: streaming transcript, tool-call cards, subagent panel, composer. | [Collaborative sessions](/oh-my-pi/features/collab/) |

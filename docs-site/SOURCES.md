@@ -68,11 +68,15 @@ Format: `page → sources` (repo-relative paths).
 - `extending/hooks.md` → `docs/hooks.md`, `docs/skills/authoring-hooks.md`
 - `extending/custom-tools.md` → `docs/custom-tools.md`
 - `extending/plugins.md` → `docs/marketplace.md`, `docs/skills/authoring-marketplaces.md`, `packages/coding-agent/src/commands/plugin.ts`
-- `extending/sdk.md` → `docs/sdk.md`, `docs/rpc.md`
+- `extending/sdk.md` → `docs/sdk.md`, `packages/coding-agent/src/sdk.ts`, `packages/coding-agent/src/session/agent-session.ts`, `packages/coding-agent/src/session/session-manager.ts`, `packages/coding-agent/src/config/settings.ts`, `packages/coding-agent/src/config/model-registry.ts`, `packages/ai/src/auth-storage.ts`, `packages/coding-agent/src/extensibility/`, `packages/coding-agent/src/mcp/`, `packages/coding-agent/src/lsp/`, `packages/coding-agent/src/tools/`, `packages/agent/src/`
+- `extending/rpc.md` → `docs/rpc.md`, `packages/coding-agent/src/modes/rpc/rpc-types.ts`, `packages/coding-agent/src/modes/rpc/rpc-mode.ts`, `packages/coding-agent/src/modes/rpc/rpc-client.ts`, `packages/coding-agent/src/modes/rpc/rpc-frame.ts`, `python/omp-rpc/`
+- `extending/rpc-vs-sdk.md` → `docs/rpc.md`, `docs/sdk.md`, `packages/coding-agent/src/modes/rpc/rpc-client.ts`, `packages/coding-agent/src/session/agent-session.ts`
 
 ## Reference
 
 - `reference/cli.md` → `packages/coding-agent/src/cli-commands.ts`, `packages/coding-agent/src/commands/*.ts`, `packages/coding-agent/src/cli/args.ts`
+- `reference/session-logs.md` → `packages/coding-agent/src/session/` (session-entries.ts, session-title-slot.ts, session-persistence.ts, blob-store.ts, session-storage.ts, session-manager.ts, session-paths.ts, session-loader.ts, session-migrations.ts, session-context.ts, session-listing.ts), `packages/coding-agent/src/secrets/obfuscator.ts`, `packages/coding-agent/src/sdk.ts`, `packages/coding-agent/src/cli/gc-cli.ts`, `packages/coding-agent/src/config/settings-schema.ts` (gc.*), `packages/utils/src/dirs.ts`, `packages/utils/src/json.ts`
+- `reference/data-directory.md` → `packages/utils/src/dirs.ts`, `packages/utils/src/env.ts`, `packages/utils/src/logger.ts`, `packages/coding-agent/src/discovery/builtin.ts`, `packages/coding-agent/src/session/session-paths.ts`, `packages/coding-agent/src/cli/gc-cli.ts`, `packages/coding-agent/src/extensibility/plugins/marketplace/`, `packages/coding-agent/src/ssh/connection-manager.ts`, `packages/coding-agent/src/security/store.ts`, `packages/coding-agent/src/collab/guest.ts`, `packages/coding-agent/src/task/worktree.ts`, `packages/coding-agent/src/tools/gh.ts`, `packages/ai/src/stream.ts`, `packages/ai/src/auth-broker/discover.ts`, `packages/stats/src/`, `packages/coding-agent/src/debug/report-bundle.ts`, `packages/ai/src/utils/http-inspector.ts`, `packages/coding-agent/src/autoresearch/storage.ts`, `packages/coding-agent/scripts/omp`
 - `reference/slash-commands.md` → `docs/slash-command-internals.md`, `packages/coding-agent/src/slash-commands/available-commands.ts`, `packages/coding-agent/src/slash-commands/builtin-registry.ts`
 - `reference/configuration.md` → `docs/settings.md` (Settings catalog)
 - `reference/settings/general.md` → `packages/coding-agent/src/config/settings-schema.ts` (General section), `docs/settings.md`

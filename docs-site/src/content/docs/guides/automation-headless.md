@@ -4,7 +4,7 @@ description: Drive omp non-interactively from scripts and CI with print mode, JS
 coverage: B
 ---
 
-omp runs without a terminal: a one-shot `omp -p` call answers a prompt and exits, `--mode json` and `--mode rpc` expose structured output to scripts and long-lived hosts, and the TypeScript SDK and Python `omp-rpc` client embed the agent in your own process. This page covers all three levels, plus hooks and the flags that make omp safe to run from CI. For the complete flag list see [CLI Reference](/oh-my-pi/reference/cli/); for the embedding APIs see [SDK & RPC](/oh-my-pi/extending/sdk/) and [Hooks](/oh-my-pi/extending/hooks/).
+omp runs without a terminal: a one-shot `omp -p` call answers a prompt and exits, `--mode json` and `--mode rpc` expose structured output to scripts and long-lived hosts, and the TypeScript SDK and Python `omp-rpc` client embed the agent in your own process. This page covers all three levels, plus hooks and the flags that make omp safe to run from CI. For the complete flag list see [CLI Reference](/oh-my-pi/reference/cli/); for the embedding APIs see [SDK](/oh-my-pi/extending/sdk/), [RPC](/oh-my-pi/extending/rpc/), and [Hooks](/oh-my-pi/extending/hooks/).
 
 ## One-shot runs
 
