@@ -27,6 +27,7 @@ import { type FirstResultViewportRepaint, type ToolRenderer, toolRenderers } fro
 import { TODO_STRIKE_TOTAL_FRAMES, type TodoToolDetails } from "../../tools/todo";
 import type { XdevState } from "../../tools/xdev";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../../tui";
+import { isReduceMotion } from "@oh-my-pi/pi-tui";
 import { convertImageToPng } from "../../utils/image-loading";
 import { sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
 import { renderDiff } from "./diff";
@@ -702,6 +703,8 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 			const frame = sharedSpinnerFrame(frameCount);
 			this.#spinnerFrame = frame;
 			this.#renderState.spinnerFrame = frame;
+			// --reduced-resource: paint one static spinner frame, no 80ms interval.
+			if (isReduceMotion()) return;
 			this.#spinnerInterval = setInterval(() => {
 				// If a detached task interval from an older render path is still live,
 				// stop it the instant the block leaves the repaintable region.
@@ -770,6 +773,8 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 
 		this.#spinnerFrame = 0;
 		this.#renderState.spinnerFrame = 0;
+		// --reduced-resource: static first strike frame, no 65ms interval.
+		if (isReduceMotion()) return;
 		this.#todoStrikeInterval = setInterval(() => {
 			const nextFrame = (this.#spinnerFrame ?? 0) + 1;
 			if (nextFrame > TODO_STRIKE_TOTAL_FRAMES) {

@@ -6,6 +6,7 @@ import {
 	Editor,
 	type EditorTheme,
 	type KeyId,
+	isReduceMotion,
 	parseKey,
 	parseKittySequence,
 	TUI,
@@ -515,6 +516,8 @@ export class CustomEditor extends Editor {
 	 *  once they are loaded. An explicit `magicKeywordsEnabledOverride` overrides
 	 *  both paths. */
 	#shimmerEnabled(): boolean {
+		// --reduced-resource: suppress the magic-keyword shimmer entirely.
+		if (isReduceMotion()) return false;
 		if (this.magicKeywordsEnabledOverride !== undefined) return this.magicKeywordsEnabledOverride;
 		return isSettingsInitialized() ? settings.get("magicKeywords.enabled") : true;
 	}

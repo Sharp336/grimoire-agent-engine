@@ -22,6 +22,7 @@ import {
 	VERSION,
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { setReduceMotion } from "@oh-my-pi/pi-tui";
 import { reset as resetCapabilities } from "./capability";
 import { type Args, reportUnrecognizedFlags } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
@@ -1332,6 +1333,16 @@ export async function runRootCommand(
 	// Apply --advisor CLI flag (ephemeral, not persisted)
 	if (parsedArgs.advisor) {
 		settingsInstance.override("advisor.enabled", true);
+	}
+	// --reduced-resource: resource-light interactive profile. Static UI (no
+	// spinner/shimmer/title animations), no memory embeddings, tighter layout.
+	// Each knob is individually revertible via config.yml; the flag additionally
+	// arms the reduce-motion switch the animation components read.
+	if (parsedArgs.reducedResource) {
+		setReduceMotion(true);
+		settingsInstance.override("display.shimmer", "disabled");
+		settingsInstance.override("memory.backend", "off");
+		settingsInstance.override("tui.tight", true);
 	}
 
 	await logger.time(

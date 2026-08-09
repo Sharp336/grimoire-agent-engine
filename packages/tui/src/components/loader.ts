@@ -1,5 +1,6 @@
 import type { TUI } from "../tui";
 import { getPaddingX, sliceByColumn, visibleWidth } from "../utils";
+import { isReduceMotion } from "../reduce-motion";
 import { Text } from "./text";
 
 const RENDER_INTERVAL_MS = 1000 / 30;
@@ -98,6 +99,8 @@ export class Loader extends Text {
 		this.#lastSpinnerTick = performance.now();
 		this.#syncText();
 		this.#requestPaint();
+		// --reduced-resource: paint the static status line once, no animation timer.
+		if (isReduceMotion()) return;
 		const intervalMs = this.messageColorFn.animated === true ? RENDER_INTERVAL_MS : SPINNER_ADVANCE_MS;
 		this.#scheduleTick(intervalMs, intervalMs);
 	}
