@@ -196,12 +196,12 @@ export interface SlashCommandTranslationOutput {
  */
 export function interceptSlashCommand(input: SlashCommandTranslationInput): SlashCommandTranslationOutput {
 	const result: SlashCommandTranslationOutput = {
-		description: i18n.t(`commands.${input.name}.description`, input.description),
+		description: i18n.t(`slashCommands.${input.name}.description`, input.description),
 	};
 	if (input.subcommands) {
 		result.subcommands = input.subcommands.map(sub => ({
 			...sub,
-			description: i18n.t(`commands.${input.name}.subcommands.${sub.name}`, sub.description),
+			description: i18n.t(`slashCommands.${input.name}.subcommands.${sub.name}`, sub.description),
 		}));
 	}
 	return result;

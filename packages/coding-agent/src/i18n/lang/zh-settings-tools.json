@@ -293,5 +293,6 @@
   "tabs.tools.groups.Grep & Browser": "Grep & Browser",
   "tabs.tools.groups.Output Limits": "输出限制",
   "tabs.tools.groups.Todos": "待办",
-  "tabs.tools.label": "工具"
+  "tabs.tools.label": "工具",
+  "settings.irc.timeoutMs.description": "irc 等待（及 send await:true）的默认超时时间（毫秒）；0 表示禁用超时"
 }
