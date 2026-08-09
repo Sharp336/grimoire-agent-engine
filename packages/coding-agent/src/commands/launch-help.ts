@@ -62,9 +62,9 @@ export const launchHelp = {
 		"no-tools": Flags.boolean({ description: "Disable all built-in tools" }),
 		"no-lsp": Flags.boolean({ description: "Disable LSP tools, formatting, and diagnostics" }),
 		"no-pty": Flags.boolean({ description: "Disable PTY-based interactive bash execution" }),
-		"reduced-resource": Flags.boolean({
+		"reduced-resources": Flags.boolean({
 			description:
-				"Resource-light interactive mode: static UI (no spinner/shimmer/title animations), no memory embeddings, tighter layout. Usable inside herdr panes.",
+				"Reduce unnecessary UI resources: static rendering (no spinner/shimmer/title animations), tighter layout. Keeps all harness power (tools, memory, LSP).",
 		}),
 		tools: Flags.string({ description: "Comma-separated list of tools to enable (default: all)" }),
 		thinking: Flags.string({

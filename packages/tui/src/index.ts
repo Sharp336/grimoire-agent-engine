@@ -1,6 +1,6 @@
 // Core TUI interfaces and classes
 
-// Reduce-motion flag for --reduced-resource
+// Reduce-motion flag for --reduced-resources
 export * from "./reduce-motion";
 // Autocomplete support
 export * from "./autocomplete";

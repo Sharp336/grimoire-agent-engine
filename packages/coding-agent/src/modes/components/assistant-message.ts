@@ -385,7 +385,7 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	#startThinkingAnimation(): void {
-		// --reduced-resource: render a static thinking glyph, no pulse timer.
+		// --reduced-resources: render a static thinking glyph, no pulse timer.
 		if (isReduceMotion()) return;
 		if (this.#thinkingDotsTimer) return;
 		this.#scheduleThinkingFrame();

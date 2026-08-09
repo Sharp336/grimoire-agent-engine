@@ -703,7 +703,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 			const frame = sharedSpinnerFrame(frameCount);
 			this.#spinnerFrame = frame;
 			this.#renderState.spinnerFrame = frame;
-			// --reduced-resource: paint one static spinner frame, no 80ms interval.
+			// --reduced-resources: paint one static spinner frame, no 80ms interval.
 			if (isReduceMotion()) return;
 			this.#spinnerInterval = setInterval(() => {
 				// If a detached task interval from an older render path is still live,
@@ -773,7 +773,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 
 		this.#spinnerFrame = 0;
 		this.#renderState.spinnerFrame = 0;
-		// --reduced-resource: static first strike frame, no 65ms interval.
+		// --reduced-resources: static first strike frame, no 65ms interval.
 		if (isReduceMotion()) return;
 		this.#todoStrikeInterval = setInterval(() => {
 			const nextFrame = (this.#spinnerFrame ?? 0) + 1;

@@ -1,5 +1,5 @@
 /**
- * Reduce-motion flag for `--reduced-resource` mode.
+ * Reduce-motion flag for `--reduced-resources` mode.
  *
  * When enabled, interactive components render a static status line instead of
  * driving spinner/shimmer/thinking timers, and the terminal title stops
@@ -9,11 +9,12 @@
  *
  * This is deliberately a lightweight module-level switch (mirroring the
  * module-scoped runtime state used by the terminal-title spinner) rather than
- * threading an option through every component constructor.
+ * threading an option through every component constructor. It only suppresses
+ * visual animation; all harness power (tools, memory, LSP) is preserved.
  */
 let reduceMotion = false;
 
-/** Whether UI animations should be suppressed (--reduced-resource). */
+/** Whether UI animations should be suppressed (--reduced-resources). */
 export function isReduceMotion(): boolean {
 	return reduceMotion;
 }

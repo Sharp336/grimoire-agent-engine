@@ -67,7 +67,7 @@ export interface Args {
 	noTools?: boolean;
 	noLsp?: boolean;
 	noPty?: boolean;
-	reducedResource?: boolean;
+	reducedResources?: boolean;
 	hooks?: string[];
 	extensions?: string[];
 	trustedExtensions?: string[];
@@ -252,8 +252,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.noLsp = true;
 		} else if (arg === "--no-pty") {
 			result.noPty = true;
-		} else if (arg === "--reduced-resource") {
-			result.reducedResource = true;
+		} else if (arg === "--reduced-resources") {
+			result.reducedResources = true;
 		} else if (arg === "--hide-thinking") {
 			result.hideThinking = true;
 		} else if (arg === "--advisor") {

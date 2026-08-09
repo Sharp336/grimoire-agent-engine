@@ -99,7 +99,7 @@ export class Loader extends Text {
 		this.#lastSpinnerTick = performance.now();
 		this.#syncText();
 		this.#requestPaint();
-		// --reduced-resource: paint the static status line once, no animation timer.
+		// --reduced-resources: paint the static status line once, no animation timer.
 		if (isReduceMotion()) return;
 		const intervalMs = this.messageColorFn.animated === true ? RENDER_INTERVAL_MS : SPINNER_ADVANCE_MS;
 		this.#scheduleTick(intervalMs, intervalMs);

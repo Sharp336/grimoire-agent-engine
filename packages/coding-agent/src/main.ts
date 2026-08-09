@@ -1334,14 +1334,14 @@ export async function runRootCommand(
 	if (parsedArgs.advisor) {
 		settingsInstance.override("advisor.enabled", true);
 	}
-	// --reduced-resource: resource-light interactive profile. Static UI (no
-	// spinner/shimmer/title animations), no memory embeddings, tighter layout.
-	// Each knob is individually revertible via config.yml; the flag additionally
+	// --reduced-resources: reduce unnecessary UI resources. Static rendering
+	// (no spinner/shimmer/title animations) and a tighter layout. All harness
+	// power is preserved — tools, memory backend, and LSP stay enabled. Each
+	// knob is individually revertible via config.yml; the flag additionally
 	// arms the reduce-motion switch the animation components read.
-	if (parsedArgs.reducedResource) {
+	if (parsedArgs.reducedResources) {
 		setReduceMotion(true);
 		settingsInstance.override("display.shimmer", "disabled");
-		settingsInstance.override("memory.backend", "off");
 		settingsInstance.override("tui.tight", true);
 	}
 
