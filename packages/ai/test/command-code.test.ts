@@ -604,6 +604,65 @@ describe("command-code request parity", () => {
 		]);
 	});
 
+	it("preserves interleaved text/image order in user content", async () => {
+		scenario = {
+			kind: "capture",
+			body: `{"type":"text-delta","text":"ok"}\n{"type":"finish","finishReason":"stop"}\n`,
+		};
+		const baseUrl = await startServer();
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "caption above" },
+						{ type: "image", mimeType: "image/png", data: "AAEC" },
+						{ type: "text", text: "caption below" },
+					],
+					timestamp: 1,
+				},
+			],
+		};
+		await collectStream(makeVisionModel(baseUrl), context);
+		const params = lastRequest!.body.params as { messages: Array<Record<string, unknown>> };
+		const userMessage = params.messages[0] as { content: Array<Record<string, unknown>> };
+		// Interleaved blocks must stay in original order, not text-then-image.
+		expect(userMessage.content).toEqual([
+			{ type: "text", text: "caption above" },
+			{ type: "image", image: "data:image/png;base64,AAEC", mimeType: "image/png" },
+			{ type: "text", text: "caption below" },
+		]);
+	});
+
+	it("keeps the placeholder in place on text-only models", async () => {
+		scenario = {
+			kind: "capture",
+			body: `{"type":"text-delta","text":"ok"}\n{"type":"finish","finishReason":"stop"}\n`,
+		};
+		const baseUrl = await startServer();
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "caption above" },
+						{ type: "image", mimeType: "image/png", data: "AAEC" },
+						{ type: "text", text: "caption below" },
+					],
+					timestamp: 1,
+				},
+			],
+		};
+		await collectStream(makeModel(baseUrl), context);
+		const params = lastRequest!.body.params as { messages: Array<Record<string, unknown>> };
+		const userMessage = params.messages[0] as { content: Array<Record<string, unknown>> };
+		expect(userMessage.content).toEqual([
+			{ type: "text", text: "caption above" },
+			{ type: "text", text: NON_VISION_IMAGE_PLACEHOLDER },
+			{ type: "text", text: "caption below" },
+		]);
+	});
+
 	it("advertises customWireName as the wire tool name", async () => {
 		scenario = { kind: "capture", body: `{"type":"finish","finishReason":"stop"}\n` };
 		const baseUrl = await startServer();
@@ -957,7 +1016,7 @@ describe("command-code helpers", () => {
 		// probe must be exercised with tracked-and-modified files.
 		await using dir = await TempDir.create("command-code-git-cap");
 		const path = dir.path();
-		await fs.mkdir(path + "/dirty");
+		await fs.mkdir(`${path}/dirty`);
 		// ~20 bytes × 6k files ≈ 110 KiB of modified status, past the 64 KiB cap.
 		const writes = Array.from({ length: 6_000 }, (_, i) => fs.writeFile(`${path}/dirty/f-${i}.txt`, "x"));
 		await Promise.all(writes);

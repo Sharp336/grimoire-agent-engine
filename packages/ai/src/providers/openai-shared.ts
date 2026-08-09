@@ -112,7 +112,7 @@ import type {
 	ResponseStreamEvent,
 } from "./openai-responses-wire";
 import { transformMessages } from "./transform-messages";
-import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
+import { appendVisionWireBlock, joinTextWithImagePlaceholder } from "./vision-guard";
 
 /**
  * Keyless-provider sentinel. Custom providers configured with `auth: none`
@@ -1523,29 +1523,25 @@ export function convertResponsesInputContent(
 		];
 	}
 
-	const { textBlocks, imageBlocks, omittedImages } = partitionVisionContent(content, supportsImages);
 	const normalizedContent: ResponseInputContent[] = [];
-	for (const item of textBlocks) {
-		const raw = item.text.toWellFormed();
-		const text = escapeControlTokens ? escapeHarmonyControlTokens(raw) : raw;
-		if (text.trim().length === 0) continue;
-		normalizedContent.push({
-			type: "input_text",
-			text,
-		} satisfies ResponseInputText);
-	}
-	for (const item of imageBlocks) {
-		normalizedContent.push({
-			type: "input_image",
-			detail: clampResponsesImageDetail(item.detail, supportsImageDetailOriginal),
-			image_url: `data:${item.mimeType};base64,${item.data}`,
-		} satisfies ResponseInputImage);
-	}
-	if (omittedImages) {
-		normalizedContent.push({
-			type: "input_text",
-			text: NON_VISION_IMAGE_PLACEHOLDER,
-		} satisfies ResponseInputText);
+	for (const block of content) {
+		appendVisionWireBlock(
+			normalizedContent,
+			block,
+			supportsImages,
+			text => {
+				const raw = text.toWellFormed();
+				const escaped = escapeControlTokens ? escapeHarmonyControlTokens(raw) : raw;
+				if (escaped.trim().length === 0) return null;
+				return { type: "input_text", text: escaped } satisfies ResponseInputText;
+			},
+			image =>
+				({
+					type: "input_image",
+					detail: clampResponsesImageDetail(image.detail, supportsImageDetailOriginal),
+					image_url: `data:${image.mimeType};base64,${image.data}`,
+				}) satisfies ResponseInputImage,
+		);
 	}
 	return normalizedContent.length > 0 ? normalizedContent : undefined;
 }

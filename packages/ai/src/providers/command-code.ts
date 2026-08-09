@@ -41,7 +41,7 @@ import { notifyRawSseEvent } from "../utils/sse-debug";
 import { getNamedToolChoiceName } from "../utils/tool-choice";
 import { NO_AUTH_SENTINEL } from "./openai-shared";
 import { transformMessages } from "./transform-messages";
-import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
+import { appendVisionWireBlock, joinTextWithImagePlaceholder } from "./vision-guard";
 
 /** Production Command Code API base. */
 export const COMMAND_CODE_API_URL = "https://api.commandcode.ai";
@@ -429,17 +429,19 @@ function userContentBlocks(
 	if (typeof content === "string") {
 		return [{ type: "text", text: content }];
 	}
-	const { textBlocks, imageBlocks, omittedImages } = partitionVisionContent(content, supportsImages);
-	const blocks: Array<Record<string, unknown>> = textBlocks.map(block => ({ type: "text", text: block.text }));
-	if (omittedImages) {
-		blocks.push({ type: "text", text: NON_VISION_IMAGE_PLACEHOLDER });
-	}
-	for (const block of imageBlocks) {
-		blocks.push({
-			type: "image",
-			image: `data:${block.mimeType};base64,${block.data}`,
-			mimeType: block.mimeType,
-		});
+	const blocks: Array<Record<string, unknown>> = [];
+	for (const block of content) {
+		appendVisionWireBlock(
+			blocks,
+			block,
+			supportsImages,
+			text => ({ type: "text", text }),
+			image => ({
+				type: "image",
+				image: `data:${image.mimeType};base64,${image.data}`,
+				mimeType: image.mimeType,
+			}),
+		);
 	}
 	return blocks;
 }
