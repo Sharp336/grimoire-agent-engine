@@ -979,6 +979,7 @@ export class ExtensionRunner {
 		ext: Extension,
 		timeoutMs: number,
 		abortSignal?: AbortSignal,
+		reportOutcome?: (outcome: "completed" | "timeout" | "aborted" | "error") => void,
 	): Promise<TResult | undefined> {
 		// An explicit signal wins: events carrying one on the event object
 		// (`session_stop`) keep deriving it, while callers holding a resource the
@@ -988,15 +989,22 @@ export class ExtensionRunner {
 			(event.type === "session_stop" && "signal" in event && event.signal instanceof AbortSignal
 				? event.signal
 				: undefined);
-		if (signal?.aborted) return undefined;
+		if (signal?.aborted) {
+			reportOutcome?.("aborted");
+			return undefined;
+		}
 		try {
 			const handlerResult = await raceHandlerWithTimeout(
 				handlerSignal => handler(event, createHandlerContext(ctx, handlerSignal)),
 				timeoutMs,
 				signal,
 			);
-			if (handlerResult === EXTENSION_HANDLER_ABORTED) return undefined;
+			if (handlerResult === EXTENSION_HANDLER_ABORTED) {
+				reportOutcome?.("aborted");
+				return undefined;
+			}
 			if (handlerResult === EXTENSION_HANDLER_TIMEOUT) {
+				reportOutcome?.("timeout");
 				const error = `handler timed out after ${timeoutMs}ms`;
 				logger.warn("Extension handler timed out", {
 					extensionPath: ext.path,
@@ -1010,8 +1018,10 @@ export class ExtensionRunner {
 				});
 				return undefined;
 			}
+			reportOutcome?.("completed");
 			return handlerResult as TResult | undefined;
 		} catch (err) {
+			reportOutcome?.("error");
 			const message = err instanceof Error ? err.message : String(err);
 			const stack = err instanceof Error ? err.stack : undefined;
 			this.emitError({
@@ -1417,17 +1427,19 @@ export class ExtensionRunner {
 				// Only a handler that RAN TO COMPLETION gets its edits. One that throws,
 				// times out, or is aborted is a handler whose work is half-done by
 				// definition — committing that would put a partial update (a timestamp
-				// written but not yet signed, say) on the wire. `#runHandlerWithTimeout`
-				// returns `undefined` for both success-with-no-return and failure, so
-				// completion is recorded here rather than inferred from the result.
-				let completed = false;
-				const settle = async (settledEvent: BeforeProviderHeadersEvent, handlerCtx: ExtensionContext) => {
-					const result = await handler(settledEvent, handlerCtx);
-					completed = true;
-					return result;
-				};
-				await this.#runHandlerWithTimeout(settle, event, ctx, ext, extensionHandlerTimeoutMs, signal);
-				if (completed) current = withProviderAuthRestored(current, working);
+				// written but not yet signed, say) on the wire.
+				//
+				// The outcome comes from the timeout helper rather than from a flag this
+				// loop sets when the handler resolves. Those are not the same thing:
+				// after the timeout branch wins, `raceHandlerWithTimeout` still gives the
+				// handler one `Bun.sleep(0)` tick, so a handler finishing exactly on the
+				// boundary would set such a flag while the runner recorded a timeout, and
+				// its edits would ship under a policy that says they did not count.
+				let ranToCompletion = false;
+				await this.#runHandlerWithTimeout(handler, event, ctx, ext, extensionHandlerTimeoutMs, signal, outcome => {
+					ranToCompletion = outcome === "completed";
+				});
+				if (ranToCompletion) current = withProviderAuthRestored(current, working);
 			}
 		}
 

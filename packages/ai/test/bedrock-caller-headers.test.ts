@@ -136,11 +136,40 @@ describe("Bedrock caller headers", () => {
 		// The benign caller header still reaches the request: that is the feature.
 		expect(headers["x-trace"]).toBe("kept");
 		// None of the signer-owned values are the caller's.
-		expect(headers["host"]).not.toBe("evil.example.com");
+		expect(headers.host).not.toBe("evil.example.com");
 		expect(headers["x-amz-date"]).not.toBe("19700101T000000Z");
 		expect(headers["x-amz-content-sha256"]).not.toBe("deadbeef");
 		expect(headers["x-amz-security-token"]).not.toBe("forged");
 		// And the request was actually signed, so this is the real path.
-		expect(headers["authorization"] ?? headers["Authorization"]).toContain("AWS4-HMAC-SHA256");
+		expect(headers.authorization ?? headers.Authorization).toContain("AWS4-HMAC-SHA256");
+	});
+
+	// A caller spelling differing only in case leaves two object keys: SigV4 signs
+	// one, fetch comma-joins both onto the wire, and AWS rejects the mismatch.
+	it("does not leave a differently cased duplicate of a header it sets itself", async () => {
+		const seen: { headers?: Record<string, string> } = {};
+		await withSkippedAuth(async () => {
+			const stream = streamBedrock(model(), context, {
+				region: "us-east-1",
+				fetch: capturingFetch(seen),
+				headers: {
+					"Content-Type": "text/plain",
+					Accept: "text/plain",
+					Host: "evil.example.com",
+					"X-Trace": "kept",
+				},
+			});
+			await stream.result();
+		});
+
+		const headers = seen.headers ?? {};
+		const names = Object.keys(headers).map(name => name.toLowerCase());
+		// Each field appears exactly once, whatever casing the caller used.
+		for (const field of ["content-type", "accept", "host"]) {
+			expect(names.filter(name => name === field).length).toBeLessThanOrEqual(1);
+		}
+		expect(headers["content-type"]).toBe("application/json");
+		// Ordinary caller headers still land, lower-cased.
+		expect(headers["x-trace"]).toBe("kept");
 	});
 });

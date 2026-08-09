@@ -54,6 +54,9 @@ import { transformMessages } from "./transform-messages";
  */
 const SIGNER_OWNED_HEADERS = new Set(["host", "x-amz-date", "x-amz-content-sha256", "x-amz-security-token"]);
 
+/** Headers the Bedrock request sets itself; a caller copy in any casing duplicates them. */
+const BEDROCK_RESERVED_HEADERS = new Set(["content-type", "accept", "authorization"]);
+
 export type BedrockThinkingDisplay = "summarized" | "omitted";
 
 export interface BedrockOptions extends StreamOptions {
@@ -376,9 +379,17 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			// below then puts on the wire. A caller supplying any of them would sign
 			// one set of values and send another, and Bedrock would reject every
 			// request with a signature mismatch.
-			const callerHeaders = Object.fromEntries(
-				Object.entries(options?.headers ?? {}).filter(([name]) => !SIGNER_OWNED_HEADERS.has(name.toLowerCase())),
-			);
+			// Lower-cased, and names the request sets itself are dropped. Keeping a
+			// caller `Content-Type` beside the fixed `content-type` leaves TWO object
+			// keys: SigV4 signs one value while fetch canonicalizes both into a single
+			// comma-joined wire header, so AWS validates different bytes than were
+			// signed and rejects the request.
+			const callerHeaders: Record<string, string> = {};
+			for (const [name, value] of Object.entries(options?.headers ?? {})) {
+				const field = name.toLowerCase();
+				if (SIGNER_OWNED_HEADERS.has(field) || BEDROCK_RESERVED_HEADERS.has(field)) continue;
+				callerHeaders[field] = value;
+			}
 			const baseHeaders: Record<string, string> = {
 				...callerHeaders,
 				"content-type": "application/json",
