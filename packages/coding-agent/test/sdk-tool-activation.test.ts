@@ -729,6 +729,44 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("re-discovers agents for the prompt cwd after a session switch", async () => {
+		// When a live session switches to a transcript in another project, the
+		// session adopts that cwd and switchSession rebuilds the base prompt
+		// with it. The scout-availability check used the construction-time
+		// discovery list on a snapshot miss, so a target project that shadows
+		// `scout` as `mode: primary` still advertised scout spawning (or hid
+		// it when the source did). The rebuild must re-discover for the live
+		// prompt cwd instead (codex 3742717642).
+		const tempDir = makeTempDir();
+		const targetCwd = path.join(tempDir, "target-project");
+		fs.mkdirSync(path.join(targetCwd, ".omp", "agents"), { recursive: true });
+		// A project-level scout that shadows the bundled one as primary-only:
+		// spawn attempts reject it, so the base prompt must not advertise it.
+		await Bun.write(
+			path.join(targetCwd, ".omp", "agents", "scout.md"),
+			"---\nname: scout\ndescription: Project-scoped scout that is not spawnable\nmode: primary\n---\n",
+		);
+		const targetFile = path.join(targetCwd, "target.jsonl");
+		// No recorded persona: the switch clears persona state to the launch
+		// baseline, and the base prompt rebuild runs with the target cwd.
+		await writeSwitchTarget(targetFile);
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			sessionManager: SessionManager.create(tempDir, path.join(tempDir, "active")),
+		});
+
+		try {
+			expect(await session.switchSession(targetFile)).toBe(true);
+			// The target project's primary-only scout must not be advertised.
+			expect(session.systemPrompt.join("\n")).not.toContain(
+				"a single read-only scout while you keep working is fine",
+			);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("rejects a subagent-only persona passed as agentPersona", async () => {
 		const tempDir = makeTempDir();
 
@@ -1850,6 +1888,55 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				await session.dispose();
 			}
 		});
+	});
+
+	it("does not record a fresh fingerprint when the changed persona model cannot resolve", async () => {
+		// When the switched-to persona's definition changed but its new model:
+		// cannot resolve in this process (deleted provider, disabled extension),
+		// the reapply keeps the transcript's restored model. Recording the new
+		// fingerprint anyway would mark the changed persona as rehydrated, so
+		// the next resume skips reapplying the model even after the provider
+		// becomes available again (codex 3742717639).
+		const tempDir = makeTempDir();
+		const targetFile = path.join(tempDir, "target-unresolvable.jsonl");
+		const persona = {
+			name: "unresolvable-model",
+			description: "Persona whose model cannot resolve",
+			systemPrompt: "",
+			model: ["openai/gpt-nonexistent"],
+			source: "project" as const,
+		};
+		// Stale fingerprint: the persona's model: changed since this
+		// transcript recorded it.
+		await writeSwitchTarget(targetFile, {
+			agent: { name: "unresolvable-model", source: "project" },
+			fingerprint: "stale-content-fingerprint",
+		});
+
+		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
+			agents: [persona],
+			projectAgentsDir: null,
+		});
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			sessionManager: SessionManager.create(tempDir, path.join(tempDir, "active")),
+		});
+
+		try {
+			expect(await session.switchSession(targetFile)).toBe(true);
+			expect(session.agentPersona?.name).toBe("unresolvable-model");
+
+			// The model policy was NOT applied (unresolvable), so no fresh
+			// agent_change may be appended: the transcript entry keeps the
+			// stale fingerprint and the next resume retries the reapply.
+			const entries = sessionManagerEntries(session);
+			const agentChanges = entries.filter(e => e.type === "agent_change");
+			expect(agentChanges).toHaveLength(1);
+			expect(agentChanges[0].fingerprint).toBe("stale-content-fingerprint");
+		} finally {
+			await session.dispose();
+		}
 	});
 
 	it("does not clobber the target persona's tools when switching out of goal mode", async () => {

@@ -2934,10 +2934,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const eagerTasksAlways = settings.get("task.eager") === "always";
 		const intentField = $flag("PI_INTENT_TRACING", settings.get("tools.intentTracing")) ? INTENT_FIELD : undefined;
 		const includeWorkspaceTree = settings.get("includeWorkspaceTree") ?? false;
-		// Definitions the task tool actually advertises (same memoized discovery it
-		// renders): scout availability in the system prompt must match spawn
-		// reality, not just the name-based spawn policy.
-		const spawnableAgents = (await discoverAgentsForCreate(cwd, rootMode, toolSession.extensionRoots)).agents;
+		// Warm the memoized discovery for the creation cwd so the first prompt
+		// build's snapshot lookup hits (the async IIFE below re-runs discovery
+		// for any later cwd). Scout availability in the system prompt must
+		// match spawn reality, not just the name-based spawn policy.
+		await discoverAgentsForCreate(cwd, rootMode, toolSession.extensionRoots);
 		const rebuildSystemPrompt = async (
 			toolNames: string[],
 			tools: Map<string, AgentTool>,
@@ -3049,7 +3050,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				taskBatch: settings.get("task.batch"),
 				taskMaxConcurrency: settings.get("task.maxConcurrency"),
 				scoutAvailable: isSpawnableScoutInAgents(
-					getDiscoveredAgentsSnapshot(promptCwd, rootMode, toolSession.extensionRoots) ?? spawnableAgents,
+					await (async () => {
+						const snapshot = getDiscoveredAgentsSnapshot(promptCwd, rootMode, toolSession.extensionRoots);
+						if (snapshot) return snapshot;
+						// No snapshot published for this (cwd, mode, roots) yet —
+						// e.g. an interactive `/resume` or `/move` changed the
+						// session cwd after construction. The construction-time
+						// discovery was captured for the creation cwd, and the
+						// switch rebuilds
+						// the target system prompt with it, so a target project
+						// that shadows `scout` as `mode: primary` would still
+						// advertise scout spawning (or hide it when the source
+						// did). Re-run discovery for the live prompt cwd instead
+						// of falling back to the construction-time list (codex
+						// 3742717642).
+						return (await discoverAgentsForCreate(promptCwd, rootMode, toolSession.extensionRoots)).agents;
+					})(),
 					settings.get("task.disabledAgents") as string[] | undefined,
 					sessionSpawns,
 				),

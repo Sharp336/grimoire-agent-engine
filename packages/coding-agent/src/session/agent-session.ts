@@ -7916,6 +7916,14 @@ export class AgentSession {
 			if (targetPersonaContentChanged && targetPersona && switchingToDifferentSession) {
 				try {
 					const policy = resolveAgentSessionPolicy(targetPersona);
+					// Track whether the changed model policy was actually applied:
+					// when it cannot resolve (deleted provider, disabled
+					// extension), the transcript's restored model is kept, and
+					// recording the new fingerprint would mark the changed
+					// persona as rehydrated — the next resume would then skip
+					// reapplying the model even after the provider returns
+					// (codex 3742717639).
+					let modelPolicyApplied = true;
 					if (!this.#cliModelLocked && policy.modelPatterns?.length) {
 						const resolved = resolveModelOverride(policy.modelPatterns, this.modelRegistry, this.settings);
 						if (resolved.model) {
@@ -7946,6 +7954,7 @@ export class AgentSession {
 								agent: targetPersona.name,
 								modelPatterns: policy.modelPatterns,
 							});
+							modelPolicyApplied = false;
 						}
 					}
 					// Thinking: apply the persona's frontmatter level — a fresh
@@ -7957,12 +7966,17 @@ export class AgentSession {
 					}
 					// Record the current definition's fingerprint so the next
 					// resume's identity check compares against this content, not
-					// the stale recorded one.
-					this.sessionManager.appendAgentChange(
-						targetPersona.name,
-						targetPersona.source,
-						fingerprintAgentContent(targetPersona),
-					);
+					// the stale recorded one — but only after the changed model
+					// policy was actually applied. An unresolved model leaves
+					// the old fingerprint in place so the next resume retries
+					// the reapply once the provider is available again.
+					if (modelPolicyApplied) {
+						this.sessionManager.appendAgentChange(
+							targetPersona.name,
+							targetPersona.source,
+							fingerprintAgentContent(targetPersona),
+						);
+					}
 				} catch (applyError) {
 					logger.warn("Failed to reapply changed persona model/thinking after session switch", {
 						targetSessionFile: sessionPath,
