@@ -42,6 +42,7 @@ import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibili
 import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { type MCPManager, reloadMcpResources } from "../../mcp";
 import type { CustomEditor } from "../../modes/components/custom-editor";
+import { buildBrowserItems, resolveRoleAssignments, sortModelItems } from "../../modes/components/model-browser";
 import { type Theme, theme } from "../../modes/theme/theme";
 import { AgentControlService } from "../../registry/agent-control";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
@@ -83,6 +84,7 @@ import { FileSessionStorage } from "../../session/session-storage";
 import { ToolInventoryUnavailableError } from "../../session/session-tools";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
+import { getSelectableThinkingLevels } from "../../thinking";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { EvalTool } from "../../tools/eval";
 import type { EventBus } from "../../utils/event-bus";
@@ -1942,6 +1944,7 @@ export async function runRpcMode(
 		plan: await session.planMode.project(),
 		model: session.model,
 		thinkingLevel: session.thinkingLevel,
+		configuredThinkingLevel: session.configuredThinkingLevel(),
 		isStreaming: session.isStreaming,
 		activityPhase: session.activityPhase,
 		isCompacting: session.isCompacting,
@@ -2057,6 +2060,7 @@ export async function runRpcMode(
 			type: "config_update",
 			model: session.model,
 			thinkingLevel: session.thinkingLevel,
+			configuredThinkingLevel: session.configuredThinkingLevel(),
 			advisor: getAdvisorState(),
 		});
 	};
@@ -2984,7 +2988,7 @@ export async function runRpcMode(
 
 			case "session_invoke": {
 				const outcome = await ensureRpcSessionHost().invoke(command.command, { requestId: command.id });
-				sessionAuthority.assertCurrent(commandAuthority);
+				// The nested command owns its authority fence and may intentionally transition the active session.
 				return success(id, "session_invoke", outcome);
 			}
 
@@ -4204,8 +4208,33 @@ export async function runRpcMode(
 			case "get_available_models": {
 				await session.modelRegistry.awaitBackgroundRefresh();
 				sessionAuthority.assertCurrent(commandAuthority);
-				const models = session.getAvailableModels();
-				return success(id, "get_available_models", { models });
+				const availableModels = session.getAvailableModels();
+				const roles = resolveRoleAssignments(session.settings, session.modelRegistry.getAll(), availableModels);
+				const usageOrder = session.settings.getStorage()?.getModelUsageOrder() ?? [];
+				const items = buildBrowserItems(availableModels);
+				sortModelItems(items, { roles, mruOrder: usageOrder });
+				const modelRoles = Object.entries(roles).flatMap(([role, assignment]) =>
+					assignment
+						? [
+								{
+									role,
+									provider: assignment.model.provider,
+									id: assignment.model.id,
+									autoSelected: assignment.autoSelected,
+								},
+							]
+						: [],
+				);
+				return success(id, "get_available_models", {
+					models: items.map(item => item.model),
+					usageOrder,
+					thinkingOptions: items.map(({ model }) => ({
+						provider: model.provider,
+						id: model.id,
+						levels: getSelectableThinkingLevels(model),
+					})),
+					roles: modelRoles,
+				});
 			}
 
 			case "get_settings":

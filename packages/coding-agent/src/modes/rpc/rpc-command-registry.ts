@@ -1459,7 +1459,7 @@ export const RPC_COMMAND_DEFINITIONS = {
 	get_available_models: sessionCommand({ type: "get_available_models" }),
 	set_thinking_level: sessionCommand(
 		{ type: "set_thinking_level", level: ThinkingLevel.Medium },
-		{ level: enumField("inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max") },
+		{ level: enumField("inherit", "off", "auto", "minimal", "low", "medium", "high", "xhigh", "max") },
 	),
 	cycle_thinking_level: sessionCommand({ type: "cycle_thinking_level" }),
 	set_steering_mode: sessionCommand(

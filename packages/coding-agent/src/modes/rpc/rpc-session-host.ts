@@ -114,10 +114,19 @@ export function createRpcSessionCommandInvoker(
 		}
 
 		if (data === undefined) return { outcome: "completed" };
-		if (!isRpcJsonValue(data)) {
+		try {
+			const serialized = JSON.stringify(data);
+			if (serialized === undefined) {
+				return failedOutcome("invalid_command_result", `Session command ${command.kind} returned non-JSON data`);
+			}
+			const normalized: unknown = JSON.parse(serialized);
+			if (!isRpcJsonValue(normalized)) {
+				return failedOutcome("invalid_command_result", `Session command ${command.kind} returned non-JSON data`);
+			}
+			return { outcome: "completed", result: normalized as SessionJsonValue };
+		} catch {
 			return failedOutcome("invalid_command_result", `Session command ${command.kind} returned non-JSON data`);
 		}
-		return { outcome: "completed", result: data as SessionJsonValue };
 	};
 }
 

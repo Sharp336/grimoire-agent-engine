@@ -6,6 +6,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-session-host";
 import type {
 	RpcOperationTerminalFrame,
+	RpcResponse,
 	RpcSessionObservationFrame,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import {
@@ -342,6 +343,29 @@ describe("RpcSessionHostAdapter", () => {
 		).resolves.toEqual({
 			outcome: "completed",
 			result: terminal as unknown as SessionJsonValue,
+		});
+	});
+	test("normalizes optional response fields to their JSON wire representation", async () => {
+		const invoke = createRpcSessionCommandInvoker({
+			execute: async command =>
+				({
+					id: command.id,
+					type: "response",
+					command: "get_available_models",
+					success: true,
+					data: {
+						models: [{ provider: "openai", id: "gpt-5.6-sol", name: "GPT-5.6 Sol", optional: undefined }],
+					},
+				}) as unknown as RpcResponse,
+			waitForSettlement: async () => undefined,
+			cancelOperation: () => {},
+		});
+
+		await expect(invoke({ kind: "get_available_models" }, { requestId: "models" })).resolves.toEqual({
+			outcome: "completed",
+			result: {
+				models: [{ provider: "openai", id: "gpt-5.6-sol", name: "GPT-5.6 Sol" }],
+			},
 		});
 	});
 

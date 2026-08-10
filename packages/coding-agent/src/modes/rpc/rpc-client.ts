@@ -33,6 +33,7 @@ import type {
 	SessionObservationPosition,
 } from "../../session/session-host";
 import type { ToolInventory } from "../../session/session-tools";
+import type { ConfiguredThinkingLevel } from "../../thinking";
 import type { TodoPhase } from "../../tools/todo";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameDecoder, type RpcProtocolVersion } from "./rpc-frame";
 import {
@@ -2173,7 +2174,7 @@ export class RpcClient {
 	/**
 	 * Set thinking level.
 	 */
-	async setThinkingLevel(level: ThinkingLevel): Promise<void> {
+	async setThinkingLevel(level: ConfiguredThinkingLevel): Promise<void> {
 		await this.#send({ type: "set_thinking_level", level });
 	}
 

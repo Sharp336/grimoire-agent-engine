@@ -19,8 +19,13 @@
 - Added the host-neutral `omp.session` RPC v3 semantic profile with capability negotiation, authoritative session observation and mutation, typed interactions, artifacts, MCP/LSP/DAP lifecycle control, collaboration, provenance, and graceful settlement, plus TypeScript and Python clients with explicit headless `rpc` and interactive `rpc-ui` process selection.
 - Added negotiated native `rpc-ui` interactive surfaces for ordered raw input, revisioned editor synchronization, official autocomplete and action expansion, semantic extension components, native themes, title subscriptions, tool expansion, and exhaustive application action routing, with typed TypeScript/Python client APIs.
 
+### Changed
+
+- Extended RPC `get_available_models` with TUI-consistent ordering, resolved model-role preferences, most-recently-used model order, and each model's authoritative thinking selectors; RPC clients can also select and observe `auto` thinking directly.
+
 ### Fixed
 
+- Fixed RPC v3 `session_invoke` rejecting JSON-serializable command results with optional fields and reporting false authority changes after nested session transitions.
 - Hardened RPC v3 operation ownership, cancellation settlement, session transitions, collaboration authority, resource rebinding, provider authentication, durable replay, bounded recovery, lossless eval artifacts, workspace-scoped exports, effective-context provenance, capability negotiation, and native `AskTool` RPC UI invocation; added fresh-binary raw JSONL, TypeScript, and Python conformance coverage.
 - Fenced RPC UI channels, autocomplete operations, editor writes, and blocking presentations across channel replacement, disconnect, execution-authority changes, session replacement, and shutdown; added an independent TUI/RPC UI inventory oracle and full native-process conformance for raw JSONL, TypeScript, and Python clients.
 

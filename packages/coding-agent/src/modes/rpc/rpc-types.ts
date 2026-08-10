@@ -572,7 +572,7 @@ export type RpcCommand =
 	| { id?: string; type: "get_available_models" }
 
 	// Thinking
-	| { id?: string; type: "set_thinking_level"; level: ThinkingLevel }
+	| { id?: string; type: "set_thinking_level"; level: ConfiguredThinkingLevel }
 	| { id?: string; type: "cycle_thinking_level" }
 
 	// Queue modes
@@ -700,6 +700,7 @@ export interface RpcSessionState {
 	plan?: RpcPlanState;
 	model?: Model;
 	thinkingLevel: ThinkingLevel | undefined;
+	configuredThinkingLevel?: ConfiguredThinkingLevel;
 	isStreaming: boolean;
 	/** Provider generation, post-turn maintenance, or terminal idle. */
 	activityPhase: RpcSessionActivityPhase;
@@ -1081,6 +1082,7 @@ export interface RpcConfigUpdateFrame {
 	type: "config_update";
 	model?: Model;
 	thinkingLevel?: ThinkingLevel;
+	configuredThinkingLevel?: ConfiguredThinkingLevel;
 	advisor?: RpcAdvisorState;
 }
 
@@ -1729,7 +1731,16 @@ export type RpcResponse =
 			type: "response";
 			command: "get_available_models";
 			success: true;
-			data: { models: Model[] };
+			data: {
+				models: Model[];
+				usageOrder?: string[];
+				roles?: Array<{ role: string; provider: string; id: string; autoSelected: boolean }>;
+				thinkingOptions?: Array<{
+					provider: string;
+					id: string;
+					levels: ConfiguredThinkingLevel[];
+				}>;
+			};
 	  }
 	| { id?: string; type: "response"; command: "set_model_role"; success: true; data: RpcModelRoleResult }
 	| { id?: string; type: "response"; command: "set_service_tier"; success: true; data: RpcServiceTierResult }
@@ -1755,7 +1766,7 @@ export type RpcResponse =
 			type: "response";
 			command: "cycle_thinking_level";
 			success: true;
-			data: { level: Effort } | null;
+			data: { level: ConfiguredThinkingLevel } | null;
 	  }
 
 	// Queue modes

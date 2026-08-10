@@ -357,17 +357,18 @@ describe.skipIf(binaryPath.length === 0)("RPC v3 explicit native-binary process 
 			});
 			expect((await process.request({ id: "alive-after-future", type: "get_capabilities" })).success).toBe(true);
 
-			const invalidNested = responseData(
+			const nestedState = responseData(
 				await process.request({
-					id: "nested-invalid-result",
+					id: "nested-state",
 					type: "session_invoke",
 					command: { kind: "get_state" },
 				}),
 				"session_invoke",
 			);
-			expect(invalidNested).toMatchObject({
-				outcome: "failed",
-				error: { code: "invalid_command_result" },
+			expect(nestedState).toMatchObject({
+				outcome: "completed",
+				result: { sessionId: expect.any(String), model: expect.any(Object) },
+				revision: expect.any(Number),
 			});
 			const nested = responseData(
 				await process.request({
@@ -378,6 +379,19 @@ describe.skipIf(binaryPath.length === 0)("RPC v3 explicit native-binary process 
 				"session_invoke",
 			);
 			expect(nested).toMatchObject({ outcome: "completed", revision: expect.any(Number) });
+			const nestedTransition = responseData(
+				await process.request({
+					id: "nested-new-session",
+					type: "session_invoke",
+					command: { kind: "new_session" },
+				}),
+				"session_invoke",
+			);
+			expect(nestedTransition).toMatchObject({
+				outcome: "completed",
+				result: { cancelled: false },
+				revision: expect.any(Number),
+			});
 			const recursive = await process.request({
 				id: "nested-recursive",
 				type: "session_invoke",

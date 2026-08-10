@@ -1,6 +1,14 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added provider metadata for headless device-code login support and unsupported headless authentication flows.
+
+### Fixed
+
+- Fixed headless OAuth cancellation so interrupted flows cannot persist credentials after cancellation, including Cursor device-code polling.
+
 
 ## [17.2.12] - 2026-08-08
 
