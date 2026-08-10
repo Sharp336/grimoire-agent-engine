@@ -239,6 +239,7 @@ import {
 	ASYNC_RESULT_MESSAGE_TYPE,
 	type AsyncResultEntry,
 	buildAsyncResultBatchMessage,
+	type SuppressedWakeups,
 } from "./async-job-delivery";
 import { BashRunner, type BashRunnerHost } from "./bash-runner";
 import {
@@ -1312,7 +1313,7 @@ export class AgentSession {
 		if (this.#asyncJobManager && this.#agentId) {
 			const manager = this.#asyncJobManager;
 			this.#unregisterAsyncDeliverySink = manager.registerDeliverySink(this.#agentId, (jobId, text, job) =>
-				this.#deliverAsyncJobResult(manager, jobId, text, job),
+				this.deliverAsyncJobResult(jobId, text, job),
 			);
 			this.yieldQueue.register<AsyncResultEntry>("async-result", {
 				isStale: entry => entry.epoch !== this.#asyncDeliveryEpoch || manager.isDeliverySuppressed(entry.jobId),
@@ -1535,6 +1536,9 @@ export class AgentSession {
 			markBashSessionTransition: transition => this.#bash.markSessionTransition(transition),
 			finishBashSessionTransition: (transition, success) => this.#bash.finishSessionTransition(transition, success),
 			cancelOwnAsyncJobs: () => this.#cancelOwnAsyncJobs(),
+			suppressOwnWakeups: () => this.#suppressOwnWakeups(),
+			restoreOwnWakeups: jobIds => this.#restoreOwnWakeups(jobIds),
+			cancelOwnWakeups: () => this.#cancelOwnWakeups(),
 			clearCheckpointRuntimeState: () => this.#clearCheckpointRuntimeState(),
 			clearSessionScopedToolState: () => this.#clearSessionScopedToolState(),
 			clearFreshProviderSessionId: () => {
@@ -1768,13 +1772,19 @@ export class AgentSession {
 	}
 
 	/**
-	 * Cancel async jobs registered by *this* agent only. Used by lifecycle
-	 * transitions (newSession, switchSession, handoff, dispose) so a subagent
-	 * cleans up its own background work without touching its parent's jobs.
+	 * Cancel bash/task async jobs registered by *this* agent only. Used by
+	 * lifecycle transitions (newSession, handoff, branch, branchFromBtw,
+	 * dispose) so a subagent cleans up its own background work without touching
+	 * its parent's jobs. Wakeup timers are deliberately NOT cancelled here:
+	 * replacement transitions suppress their deliveries up front
+	 * (#suppressOwnWakeups) and cancel them only once the replacement commits
+	 * (#cancelOwnWakeups), so a pre-commit failure that leaves the old session
+	 * live can restore them; dispose cancels them via #cancelOwnWakeups before
+	 * reaching this call.
 	 *
-	 * Cleanup runs against this session's scoped manager: running jobs are
-	 * cancelled, finished rows are evicted with their pending deliveries, and any
-	 * async-result follow-up already queued for injection is dropped. Subagents have
+	 * Cleanup runs against this session's scoped manager: running non-wakeup jobs
+	 * are cancelled and any async-result follow-up already queued for injection is
+	 * dropped. Subagents have
 	 * unique agent ids and inherit the parent's manager to clean up their own
 	 * jobs. A secondary in-process top-level session gets no scoped manager,
 	 * because it defaults to `MAIN_AGENT_ID`; reaching through the global
@@ -1786,13 +1796,69 @@ export class AgentSession {
 	#cancelOwnAsyncJobs(): void {
 		if (!this.#agentId) return;
 		const manager = this.#asyncJobManager;
-		manager?.cancelAll({ ownerId: this.#agentId });
-		manager?.evictCompletedJobs({ ownerId: this.#agentId });
+		if (!manager) return;
+		const ownerFilter = { ownerId: this.#agentId };
+		for (const job of manager.getRunningJobs(ownerFilter)) {
+			if (job.type === "wakeup") continue;
+			manager.cancel(job.id, ownerFilter);
+		}
+		manager.evictCompletedJobs(ownerFilter, { preserveTypes: ["wakeup"] });
 		// Invalidate this owner's in-flight/drained deliveries against the new
 		// generation, then drop any async-result follow-up already queued, so a
 		// prior session's background result cannot inject into the next transcript.
 		this.#asyncDeliveryEpoch += 1;
 		this.yieldQueue.clear("async-result");
+	}
+
+	/** Suppress and cancel session-owned timers synchronously before dispose can await extension hooks. */
+	#cancelOwnWakeups(): void {
+		if (!this.#agentId) return;
+		const manager = this.#asyncJobManager;
+		if (!manager) return;
+		const ownerFilter = { ownerId: this.#agentId };
+		const wakeups = manager.getAllJobs(ownerFilter).filter(job => job.type === "wakeup");
+		manager.acknowledgeDeliveries(wakeups.map(job => job.id));
+		for (const job of wakeups) {
+			if (job.status === "running") manager.cancel(job.id, ownerFilter);
+		}
+	}
+
+	/**
+	 * Suppress delivery of this session's pending wakeups without cancelling
+	 * their timers. Called before replacement work can await, so a wakeup cannot
+	 * enqueue a follow-up into the session being replaced. The returned ids are
+	 * restored if the transition fails and cancelled after it commits.
+	 */
+	#suppressOwnWakeups(): SuppressedWakeups {
+		if (!this.#agentId) return { jobIds: [], queuedEntries: [] };
+		const manager = this.#asyncJobManager;
+		if (!manager) return { jobIds: [], queuedEntries: [] };
+		const ownerFilter = { ownerId: this.#agentId };
+		const queuedEntries = this.yieldQueue.take<AsyncResultEntry>(
+			ASYNC_RESULT_MESSAGE_TYPE,
+			entry => entry.job?.type === "wakeup",
+		);
+		const pendingDeliveryIds = new Set(manager.getDeliveryState(ownerFilter).pendingJobIds);
+		const wakeupIds = manager
+			.getAllJobs(ownerFilter)
+			.filter(
+				job =>
+					job.type === "wakeup" &&
+					!manager.isDeliverySuppressed(job.id) &&
+					(job.status === "running" || pendingDeliveryIds.has(job.id)),
+			)
+			.map(job => job.id);
+		if (wakeupIds.length > 0) manager.acknowledgeDeliveries(wakeupIds);
+		return { jobIds: wakeupIds, queuedEntries };
+	}
+
+	/** Restore wakeups suppressed by a replacement transition that did not commit. */
+	#restoreOwnWakeups(suppressed: SuppressedWakeups): void {
+		this.#asyncJobManager?.resumeDeliveries(suppressed.jobIds);
+		this.yieldQueue.restore(
+			ASYNC_RESULT_MESSAGE_TYPE,
+			suppressed.queuedEntries.map(entry => ({ ...entry, epoch: this.#asyncDeliveryEpoch })),
+		);
 	}
 
 	/**
@@ -1804,20 +1870,20 @@ export class AgentSession {
 	 * stop-time passes (todo reminder, session_stop hooks) defer to the settle
 	 * reached once the session is fully idle. Suppressed deliveries
 	 * (acknowledged, or watched by an in-flight `hub` wait) never wake the loop,
-	 * so they don't count.
+	 * so they don't count. Passive wait-only jobs also do not count until they
+	 * finish and enqueue a delivery.
 	 */
 	#hasPendingAsyncWake(): boolean {
 		const manager = this.#asyncJobManager;
 		if (!manager) return false;
 		const ownerFilter = this.#agentId ? { ownerId: this.#agentId } : undefined;
 		return (
-			manager.getRunningJobs(ownerFilter).some(job => !manager.isDeliverySuppressed(job.id)) ||
+			manager.getRunningJobs(ownerFilter).some(job => !job.passive && !manager.isDeliverySuppressed(job.id)) ||
 			manager.hasPendingDeliveries(ownerFilter) ||
 			// Delivered but not yet injected: the sink has enqueued the
 			// async-result follow-up on the yield queue, and the manager no
 			// longer reports it. Without this leg a terminal yield in the
-			// (idle-flush delay / step-boundary) handoff window would read as
-			// quiescent and the run driver would drop the queued result.
+			// handoff window would read as quiescent and drop the queued result.
 			this.yieldQueue.has(ASYNC_RESULT_MESSAGE_TYPE)
 		);
 	}
@@ -1854,10 +1920,13 @@ export class AgentSession {
 	 * (spilling oversized output to an artifact) and enqueue it as an
 	 * async-result follow-up on the yield queue. The queue's idle flush starts
 	 * the follow-up turn when the session is between turns.
+	 *
+	 * Public for ToolSession's per-job wakeup callback, which must remain bound
+	 * to this exact session if another session later takes over the same agent id.
 	 */
-	async #deliverAsyncJobResult(manager: AsyncJobManager, jobId: string, text: string, job?: AsyncJob): Promise<void> {
-		if (this.#isDisposed) return;
-		if (manager.isDeliverySuppressed(jobId)) return;
+	async deliverAsyncJobResult(jobId: string, text: string, job?: AsyncJob): Promise<void> {
+		const manager = this.#asyncJobManager;
+		if (!manager || this.#isDisposed || manager.isDeliverySuppressed(jobId)) return;
 		// Snapshot the generation before the async format step: a `/new` during it
 		// bumps the epoch, so this delivery belongs to the replaced session and
 		// must not enqueue — the suppression marker alone is unreliable because
@@ -2810,7 +2879,6 @@ export class AgentSession {
 			// replayed. Visible/side-effecting output then remains terminal while its
 			// credential is still blocked or rotated exactly once.
 			await this.#recovery.recordUsageLimitOutcome(msg);
-
 			let compactionResult = COMPACTION_CHECK_NONE;
 			let checkedCompaction = false;
 			if (activeGoal) {
@@ -3712,6 +3780,7 @@ export class AgentSession {
 		this.#detachUsageBeforeModelCall?.();
 		this.#detachUsageBeforeModelCall = undefined;
 		this.#memory.cancelLocalMemoryStartup();
+		this.#cancelOwnWakeups();
 		this.#titleGenerationAbortController.abort();
 		this.#abortAutolearnCapture();
 		this.#irc.flushPending();
@@ -6388,27 +6457,29 @@ export class AgentSession {
 		this.#assertVibeSessionTransitionAllowed("start a new session");
 		const previousSessionFile = this.sessionFile;
 
-		// Emit session_before_switch event with reason "new" (can be cancelled)
-		if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
-			const result = (await this.#extensionRunner.emit({
-				type: "session_before_switch",
-				reason: "new",
-			})) as SessionBeforeSwitchResult | undefined;
-
-			if (result?.cancel) {
-				return false;
-			}
-		}
-
-		this.#disconnectFromAgent();
+		const suppressedWakeupIds = this.#suppressOwnWakeups();
 		let advisorRecordersDetached = false;
-		await this.abort();
-		this.#cancelOwnAsyncJobs();
-		this.#closeAllProviderSessions("new session");
-		await this.#bash.flushPending();
-		const bashTransition = this.#bash.beginSessionTransition({ persistDetached: options?.drop !== true });
 		let sessionTransitioned = false;
 		try {
+			// Emit session_before_switch event with reason "new" (can be cancelled)
+			if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
+				const result = (await this.#extensionRunner.emit({
+					type: "session_before_switch",
+					reason: "new",
+				})) as SessionBeforeSwitchResult | undefined;
+
+				if (result?.cancel) {
+					this.#restoreOwnWakeups(suppressedWakeupIds);
+					return false;
+				}
+			}
+
+			this.#disconnectFromAgent();
+			await this.abort();
+			this.#cancelOwnAsyncJobs();
+			this.#closeAllProviderSessions("new session");
+			await this.#bash.flushPending();
+			const bashTransition = this.#bash.beginSessionTransition({ persistDetached: options?.drop !== true });
 			advisorRecordersDetached = true;
 			await this.#advisors.drainAndDetachRecorders();
 			try {
@@ -6435,6 +6506,9 @@ export class AgentSession {
 			} finally {
 				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 			}
+			// Committed: the old conversation is gone, so its pending wakeup timers
+			// are cancelled for good.
+			this.#cancelOwnWakeups();
 
 			this.#clearSessionScopedToolState();
 			this.#clearCheckpointRuntimeState();
@@ -6472,6 +6546,10 @@ export class AgentSession {
 			}
 
 			return true;
+		} catch (error) {
+			if (sessionTransitioned) this.#cancelOwnWakeups();
+			else this.#restoreOwnWakeups(suppressedWakeupIds);
+			throw error;
 		} finally {
 			if (advisorRecordersDetached) {
 				if (sessionTransitioned) this.#advisors.resetSessionState();
@@ -7434,26 +7512,37 @@ export class AgentSession {
 		const switchingToDifferentSession = previousSessionFile
 			? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
 			: true;
+		// Suppress this session's wakeup deliveries before the hook/abort/flush
+		// awaits below: a wakeup expiring inside that window must not start a
+		// turn while either a replacement or same-session reload is rebuilding
+		// session state. Restored on hook veto, rollback, or a successful reload;
+		// cancelled only once a different-session switch succeeds.
+		const suppressedWakeupIds = this.#suppressOwnWakeups();
 		// Emit session_before_switch event (can be cancelled)
-		if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
-			const result = (await this.#extensionRunner.emit({
-				type: "session_before_switch",
-				reason: "resume",
-				targetSessionFile: sessionPath,
-			})) as SessionBeforeSwitchResult | undefined;
+		try {
+			if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
+				const result = (await this.#extensionRunner.emit({
+					type: "session_before_switch",
+					reason: "resume",
+					targetSessionFile: sessionPath,
+				})) as SessionBeforeSwitchResult | undefined;
 
-			if (result?.cancel) {
-				return false;
+				if (result?.cancel) {
+					this.#restoreOwnWakeups(suppressedWakeupIds);
+					return false;
+				}
 			}
+
+			this.#disconnectFromAgent();
+			await this.abort({ goalReason: "internal" });
+			await this.#sessionBeforeSwitchReconciler?.();
+			await this.#bash.flushPending();
+			// Flush pending writes before switching so restore snapshots reflect committed state.
+			await this.sessionManager.flush();
+		} catch (error) {
+			this.#restoreOwnWakeups(suppressedWakeupIds);
+			throw error;
 		}
-
-		this.#disconnectFromAgent();
-		await this.abort({ goalReason: "internal" });
-		await this.#sessionBeforeSwitchReconciler?.();
-
-		await this.#bash.flushPending();
-		// Flush pending writes before switching so restore snapshots reflect committed state.
-		await this.sessionManager.flush();
 		const previousSessionState = this.sessionManager.captureState();
 		const bashTransition = this.#bash.beginSessionTransition();
 		// Only same-session reloads compare against the prior context to detect
@@ -7652,6 +7741,9 @@ export class AgentSession {
 			// of restarting at zero.
 			if (switchingToDifferentSession) {
 				this.#advisors.restoreCost(await loadAdvisorTranscriptCosts(this.sessionFile));
+				this.#cancelOwnWakeups();
+			} else {
+				this.#restoreOwnWakeups(suppressedWakeupIds);
 			}
 			this.#bash.finishSessionTransition(bashTransition, true);
 			if (previousSessionState.sessionId !== this.sessionManager.getSessionId()) {
@@ -7714,6 +7806,7 @@ export class AgentSession {
 					error: String(reconcileError),
 				});
 			}
+			this.#restoreOwnWakeups(suppressedWakeupIds);
 			this.#bash.finishSessionTransition(bashTransition, false);
 			throw error;
 		}
@@ -7743,39 +7836,39 @@ export class AgentSession {
 
 		const selectedText = this.#extractUserMessageText(selectedEntry.message.content);
 		const selectedImages = this.#extractUserMessageImages(selectedEntry.message.content);
-
+		const suppressedWakeupIds = this.#suppressOwnWakeups();
 		let skipConversationRestore = false;
-
-		// Emit session_before_branch event (can be cancelled)
-		if (this.#extensionRunner?.hasHandlers("session_before_branch")) {
-			const result = (await this.#extensionRunner.emit({
-				type: "session_before_branch",
-				entryId,
-			})) as SessionBeforeBranchResult | undefined;
-
-			if (result?.cancel) {
-				return { selectedText, selectedImages, cancelled: true };
-			}
-			skipConversationRestore = result?.skipConversationRestore ?? false;
-		}
-
-		// Clear pending messages (bound to old session state)
-		this.#pendingNextTurnMessages = [];
-		this.#scheduledHiddenNextTurnGeneration = undefined;
-		this.#queuedMessageDrainBlocked = false;
-		this.#usagePreflightReadyForNextModelCall = false;
-
-		await this.#bash.flushPending();
-		// Flush pending writes before branching
-		await this.sessionManager.flush();
-		const bashTransition = this.#bash.beginSessionTransition();
-		this.#cancelOwnAsyncJobs();
-		this.#abortAutolearnCapture();
-		await this.#drainAutolearnCapture();
 
 		let sessionTransitioned = false;
 		let advisorRecordersDetached = false;
 		try {
+			// Emit session_before_branch event (can be cancelled)
+			if (this.#extensionRunner?.hasHandlers("session_before_branch")) {
+				const result = (await this.#extensionRunner.emit({
+					type: "session_before_branch",
+					entryId,
+				})) as SessionBeforeBranchResult | undefined;
+
+				if (result?.cancel) {
+					this.#restoreOwnWakeups(suppressedWakeupIds);
+					return { selectedText, selectedImages, cancelled: true };
+				}
+				skipConversationRestore = result?.skipConversationRestore ?? false;
+			}
+			// Clear pending messages (bound to old session state)
+			this.#pendingNextTurnMessages = [];
+			this.#scheduledHiddenNextTurnGeneration = undefined;
+			this.#queuedMessageDrainBlocked = false;
+			this.#usagePreflightReadyForNextModelCall = false;
+
+			await this.#bash.flushPending();
+			// Flush pending writes before branching
+			await this.sessionManager.flush();
+			const bashTransition = this.#bash.beginSessionTransition();
+			this.#cancelOwnAsyncJobs();
+			this.#abortAutolearnCapture();
+			await this.#drainAutolearnCapture();
+
 			advisorRecordersDetached = true;
 			await this.#advisors.drainAndDetachRecorders();
 			try {
@@ -7793,6 +7886,7 @@ export class AgentSession {
 			} finally {
 				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 			}
+			this.#cancelOwnWakeups();
 			this.#clearSessionScopedToolState();
 			this.#rehydrateCheckpointRewindState();
 			this.#todo.syncFromBranch();
@@ -7822,6 +7916,10 @@ export class AgentSession {
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;
 			return { selectedText, selectedImages, cancelled: false };
+		} catch (error) {
+			if (sessionTransitioned) this.#cancelOwnWakeups();
+			else this.#restoreOwnWakeups(suppressedWakeupIds);
+			throw error;
 		} finally {
 			if (advisorRecordersDetached) {
 				if (sessionTransitioned) this.#advisors.resetSessionState();
@@ -7857,52 +7955,57 @@ export class AgentSession {
 			throw new Error("Cannot branch /btw while session maintenance or user work is still running");
 		}
 
-		if (this.#extensionRunner?.hasHandlers("session_before_branch")) {
-			const result = (await this.#extensionRunner.emit({
-				type: "session_before_branch",
-				entryId: leafId,
-			})) as SessionBeforeBranchResult | undefined;
-
-			if (result?.cancel) {
-				return { cancelled: true, sessionFile: previousSessionFile };
-			}
-		}
-
-		if (this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getLeafId() !== leafId) {
-			throw new Error("Cannot branch /btw: session changed since /btw started");
-		}
-
-		await withTimeout(
-			this.#cancelPostPromptTasks(),
-			POST_PROMPT_DRAIN_TIMEOUT_MS,
-			"Timed out draining post-prompt tasks before /btw branch",
-		);
-		if (
-			this.isStreaming ||
-			this.isBashRunning ||
-			this.isEvalRunning ||
-			this.isCompacting ||
-			this.isGeneratingHandoff ||
-			this.isRetrying
-		) {
-			throw new Error("Cannot branch /btw while session maintenance or user work is still running");
-		}
-
-		this.#pendingNextTurnMessages = [];
-		this.#scheduledHiddenNextTurnGeneration = undefined;
-		this.agent.replaceQueues([], []);
-		this.#queuedMessageDrainBlocked = false;
-		this.#usagePreflightReadyForNextModelCall = false;
-		await this.#bash.flushPending();
-		await this.sessionManager.flush();
-		const bashTransition = this.#bash.beginSessionTransition();
-		this.#cancelOwnAsyncJobs();
-		this.#abortAutolearnCapture();
-		await this.#drainAutolearnCapture();
-
+		const suppressedWakeupIds = this.#suppressOwnWakeups();
 		let sessionTransitioned = false;
 		let advisorRecordersDetached = false;
 		try {
+			if (this.#extensionRunner?.hasHandlers("session_before_branch")) {
+				const result = (await this.#extensionRunner.emit({
+					type: "session_before_branch",
+					entryId: leafId,
+				})) as SessionBeforeBranchResult | undefined;
+
+				if (result?.cancel) {
+					this.#restoreOwnWakeups(suppressedWakeupIds);
+					return { cancelled: true, sessionFile: previousSessionFile };
+				}
+			}
+
+			if (this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getLeafId() !== leafId) {
+				throw new Error("Cannot branch /btw: session changed since /btw started");
+			}
+
+			await withTimeout(
+				this.#cancelPostPromptTasks(),
+				POST_PROMPT_DRAIN_TIMEOUT_MS,
+				"Timed out draining post-prompt tasks before /btw branch",
+			);
+			if (
+				this.isBashRunning ||
+				this.isEvalRunning ||
+				this.isCompacting ||
+				this.isGeneratingHandoff ||
+				this.isRetrying
+			) {
+				throw new Error("Cannot branch /btw while session maintenance or user work is still running");
+			}
+
+			this.#pendingNextTurnMessages = [];
+			this.#scheduledHiddenNextTurnGeneration = undefined;
+			this.agent.replaceQueues([], []);
+			this.#queuedMessageDrainBlocked = false;
+			this.#usagePreflightReadyForNextModelCall = false;
+			if (this.isStreaming) {
+				await this.abort({ goalReason: "internal", reason: "branching /btw" });
+				this.agent.replaceQueues([], []);
+			}
+			await this.#bash.flushPending();
+			await this.sessionManager.flush();
+			const bashTransition = this.#bash.beginSessionTransition();
+			this.#cancelOwnAsyncJobs();
+			this.#abortAutolearnCapture();
+			await this.#drainAutolearnCapture();
+
 			advisorRecordersDetached = true;
 			await this.#advisors.drainAndDetachRecorders();
 			try {
@@ -7916,9 +8019,8 @@ export class AgentSession {
 			} finally {
 				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 			}
-
+			this.#cancelOwnWakeups();
 			this.#clearSessionScopedToolState();
-
 			this.#rehydrateCheckpointRewindState();
 			this.sessionManager.appendMessage({
 				role: "user",
@@ -7947,6 +8049,10 @@ export class AgentSession {
 			advisorRecordersDetached = false;
 
 			return { cancelled: false, sessionFile: this.sessionFile };
+		} catch (error) {
+			if (sessionTransitioned) this.#cancelOwnWakeups();
+			else this.#restoreOwnWakeups(suppressedWakeupIds);
+			throw error;
 		} finally {
 			if (advisorRecordersDetached) {
 				if (sessionTransitioned) this.#advisors.resetSessionState();

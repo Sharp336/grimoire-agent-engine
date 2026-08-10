@@ -1688,6 +1688,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			requireYieldTool: options.requireYieldTool,
 			prewalkArmed: options.prewalk !== undefined,
 			taskDepth: options.taskDepth ?? 0,
+			parentTaskPrefix: options.parentTaskPrefix,
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			sessionManager,
 			getEvalKernelOwnerId: () => evalKernelOwnerId,
@@ -1701,6 +1702,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
 			getAgentId: () => resolvedAgentId,
+			deliverAsyncResult: (jobId, result, job) => session.deliverAsyncJobResult(jobId, result, job),
 			getToolByName: name => session?.getToolByName(name),
 			agentRegistry,
 			// The global lifecycle releases through AgentRegistry.global(); wiring it
@@ -3294,6 +3296,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		};
 		const advisorToolBuilds: Array<Tool | null | Promise<Tool | null>> = [];
 		for (const name in BUILTIN_TOOLS) {
+			// Advisors do not own a resumable turn loop. A delayed wakeup would
+			// otherwise be delivered into the primary session with the advisor's
+			// instruction, so it must not be grantable from WATCHDOG.yml.
+			if (name === "wakeup") continue;
 			advisorToolBuilds.push(BUILTIN_TOOLS[name as keyof typeof BUILTIN_TOOLS](advisorToolSession));
 		}
 		const built = await Promise.all(advisorToolBuilds);

@@ -39,9 +39,14 @@ export interface AsyncResultEntry {
 	epoch: number;
 }
 
+export interface SuppressedWakeups {
+	jobIds: string[];
+	queuedEntries: AsyncResultEntry[];
+}
+
 type AsyncResultJobDetails = {
 	jobId: string;
-	type?: "bash" | "task";
+	type?: "bash" | "task" | "wakeup";
 	label?: string;
 	durationMs?: number;
 };

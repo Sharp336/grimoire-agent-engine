@@ -20,6 +20,7 @@ export const BUILTIN_TOOL_NAMES = [
 	"task",
 	"hub",
 	"todo",
+	"wakeup",
 	"web_search",
 	"write",
 	"memory_edit",

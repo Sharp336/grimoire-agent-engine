@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { scheduler } from "node:timers/promises";
 
 export class AbortError extends Error {
 	constructor(signal: AbortSignal) {
@@ -88,6 +89,25 @@ export function untilAborted<T>(
 	})();
 
 	return promise;
+}
+
+/**
+ * Sleep without hand-rolling a timer. The ordinary path uses Bun's sleep
+ * primitive; the signalled path uses the platform's abortable scheduler so
+ * cancellation also releases the pending timer immediately.
+ */
+export async function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+	if (!signal) {
+		await Bun.sleep(ms);
+		return;
+	}
+	if (signal.aborted) throw new AbortError(signal);
+	try {
+		await scheduler.wait(ms, { signal });
+	} catch (error) {
+		if (signal.aborted) throw new AbortError(signal);
+		throw error;
+	}
 }
 
 /**

@@ -17,6 +17,7 @@ import type { ExtensionRunner, SessionBeforeSwitchResult } from "../extensibilit
 import { obfuscateProviderContext } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { HandoffResult, SessionHandoffOptions } from "./agent-session-types";
+import type { SuppressedWakeups } from "./async-job-delivery";
 import type { BashSessionTransition } from "./bash-runner";
 import type { SessionContext } from "./session-context";
 import type { SessionManager } from "./session-manager";
@@ -67,6 +68,9 @@ export interface SessionHandoffHost {
 	markBashSessionTransition(transition: BashSessionTransition): void;
 	finishBashSessionTransition(transition: BashSessionTransition, success: boolean): void;
 	cancelOwnAsyncJobs(): void;
+	suppressOwnWakeups(): SuppressedWakeups;
+	restoreOwnWakeups(suppressed: SuppressedWakeups): void;
+	cancelOwnWakeups(): void;
 	clearCheckpointRuntimeState(): void;
 	clearSessionScopedToolState(): void;
 	clearFreshProviderSessionId(): void;
@@ -140,6 +144,7 @@ export class SessionHandoff {
 		}
 
 		let advisorRecordersDetached = false;
+		const suppressedWakeupIds = this.#host.suppressOwnWakeups();
 		let sessionTransitioned = false;
 		try {
 			throwIfHandoffAborted(handoffSignal);
@@ -246,6 +251,7 @@ export class SessionHandoff {
 
 				if (result?.cancel) {
 					options?.onSwitchCancelled?.();
+					this.#host.restoreOwnWakeups(suppressedWakeupIds);
 					return undefined;
 				}
 			}
@@ -270,6 +276,7 @@ export class SessionHandoff {
 			} finally {
 				this.#host.finishBashSessionTransition(bashTransition, sessionTransitioned);
 			}
+			this.#host.cancelOwnWakeups();
 
 			this.#host.clearSessionScopedToolState();
 
@@ -331,6 +338,8 @@ export class SessionHandoff {
 
 			return { document: handoffText, savedPath };
 		} catch (error) {
+			if (sessionTransitioned) this.#host.cancelOwnWakeups();
+			else this.#host.restoreOwnWakeups(suppressedWakeupIds);
 			// Only a genuine cancellation (user Esc or an unreasoned source-signal
 			// abort) maps to "Handoff cancelled". A harness-provided abort reason and
 			// provider failures surface verbatim.

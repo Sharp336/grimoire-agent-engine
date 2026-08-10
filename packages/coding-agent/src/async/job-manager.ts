@@ -29,7 +29,7 @@ interface PollEscalationState {
 
 export interface AsyncJob {
 	id: string;
-	type: "bash" | "task";
+	type: "bash" | "task" | "wakeup";
 	status: "running" | "completed" | "failed" | "cancelled";
 	startTime: number;
 	label: string;
@@ -58,6 +58,8 @@ export interface AsyncJob {
 	 * until the caller invokes `markRunning()` from the run context.
 	 */
 	queued?: boolean;
+	/** Wait-only job that remains visible and cancellable without consuming execution capacity or delaying stop-time hooks. */
+	passive?: boolean;
 }
 
 /** Delivery callback for a settled job's result text. */
@@ -74,6 +76,8 @@ export interface AsyncJobManagerOptions {
 	 */
 	onJobComplete?: AsyncJobDeliverySink;
 	maxRunningJobs?: number;
+	/** Maximum simultaneously pending passive jobs. Defaults to maxRunningJobs but uses an independent counter. */
+	maxPassiveJobs?: number;
 	retentionMs?: number;
 }
 
@@ -85,6 +89,7 @@ interface AsyncJobDelivery {
 	lastError?: string;
 	ownerId?: string;
 	promise?: Promise<void>;
+	onComplete?: AsyncJobDeliverySink;
 }
 
 export interface AsyncJobDeliveryState {
@@ -107,8 +112,12 @@ export interface AsyncJobRegisterOptions {
 	/** Registry id of the subagent this job runs; see {@link AsyncJob.agentId}. */
 	agentId?: string;
 	onProgress?: (text: string, details?: Record<string, unknown>) => void | Promise<void>;
+	/** Per-job completion sink. Takes precedence over owner routing so delivery stays bound to the registering session. */
+	onComplete?: AsyncJobDeliverySink;
 	/** Register the job in queued state; see {@link AsyncJob.queued}. */
 	queued?: boolean;
+	/** Keep the job visible and cancellable without consuming execution capacity or delaying stop-time hooks. */
+	passive?: boolean;
 }
 
 /**
@@ -118,6 +127,11 @@ export interface AsyncJobRegisterOptions {
  */
 export interface AsyncJobFilter {
 	ownerId?: string;
+}
+
+export interface AsyncJobEvictionOptions {
+	/** Settled job types to retain while evicting other matching jobs. */
+	preserveTypes?: readonly AsyncJob["type"][];
 }
 
 export class AsyncJobManager {
@@ -146,8 +160,10 @@ export class AsyncJobManager {
 	readonly #evictionTimers = new Map<string, NodeJS.Timeout>();
 	readonly #pollEscalation = new Map<string | undefined, PollEscalationState>();
 	readonly #deliverySinks = new Map<string, AsyncJobDeliverySink>();
+	readonly #completionHandlers = new Map<string, AsyncJobDeliverySink>();
 	readonly #onJobComplete: AsyncJobManagerOptions["onJobComplete"];
 	readonly #maxRunningJobs: number;
+	readonly #maxPassiveJobs: number;
 	readonly #retentionMs: number;
 	#deliveryLoop: Promise<void> | undefined;
 	#disposed = false;
@@ -165,22 +181,26 @@ export class AsyncJobManager {
 	constructor(options: AsyncJobManagerOptions) {
 		this.#onJobComplete = options.onJobComplete;
 		this.#maxRunningJobs = Math.max(1, Math.floor(options.maxRunningJobs ?? DEFAULT_MAX_RUNNING_JOBS));
+		this.#maxPassiveJobs = Math.max(
+			1,
+			Math.floor(options.maxPassiveJobs ?? options.maxRunningJobs ?? DEFAULT_MAX_RUNNING_JOBS),
+		);
 		this.#retentionMs = Math.max(0, Math.floor(options.retentionMs ?? DEFAULT_RETENTION_MS));
 	}
 
 	/** True when the running-job count has reached the configured cap. */
 	get atCapacity(): boolean {
 		if (this.#disposed) return true;
-		// Mirror register(): queued jobs hold no execution slot.
+		// Mirror register(): queued and passive jobs hold no execution slot.
 		let activeCount = 0;
 		for (const job of this.#jobs.values()) {
-			if (job.status === "running" && !job.queued) activeCount++;
+			if (job.status === "running" && !job.queued && !job.passive) activeCount++;
 		}
 		return activeCount >= this.#maxRunningJobs;
 	}
 
 	register(
-		type: "bash" | "task",
+		type: "bash" | "task" | "wakeup",
 		label: string,
 		run: (ctx: {
 			jobId: string;
@@ -194,13 +214,25 @@ export class AsyncJobManager {
 		if (this.#disposed) {
 			throw new Error("Async job manager is disposed");
 		}
-		// Queued jobs hold no execution slot yet — only count jobs that are
-		// actually running so a large parked batch cannot starve registration.
+		// Queued and passive jobs hold no execution slot. Passive jobs use an
+		// independent cap so wait-only timers cannot grow without bound.
 		let activeCount = 0;
+		let passiveCount = 0;
 		for (const existing of this.#jobs.values()) {
-			if (existing.status === "running" && !existing.queued) activeCount++;
+			if (existing.status !== "running") continue;
+			if (existing.passive) {
+				passiveCount++;
+			} else if (!existing.queued) {
+				activeCount++;
+			}
 		}
-		if (activeCount >= this.#maxRunningJobs) {
+		if (options?.passive) {
+			if (passiveCount >= this.#maxPassiveJobs) {
+				throw new Error(
+					`Passive job limit reached (${this.#maxPassiveJobs}). Wait for a passive job to finish or cancel one.`,
+				);
+			}
+		} else if (activeCount >= this.#maxRunningJobs) {
 			throw new Error(
 				`Background job limit reached (${this.#maxRunningJobs}). Wait for running jobs to finish or cancel one.`,
 			);
@@ -208,6 +240,7 @@ export class AsyncJobManager {
 
 		const id = this.#resolveJobId(options?.id);
 		this.#suppressedDeliveries.delete(id);
+		if (options?.onComplete) this.#completionHandlers.set(id, options.onComplete);
 		const abortController = new AbortController();
 		const startTime = Date.now();
 
@@ -222,6 +255,7 @@ export class AsyncJobManager {
 			ownerId: options?.ownerId,
 			agentId: options?.agentId,
 			queued: options?.queued === true,
+			passive: options?.passive === true,
 		};
 
 		const reportProgress = async (text: string, details?: Record<string, unknown>): Promise<void> => {
@@ -433,10 +467,12 @@ export class AsyncJobManager {
 	 * yield queue) is guarded by the owner's delivery generation, not the per-id
 	 * suppression marker — that marker is cleared when the id is reused.
 	 */
-	evictCompletedJobs(filter?: AsyncJobFilter): number {
+	evictCompletedJobs(filter?: AsyncJobFilter, options?: AsyncJobEvictionOptions): number {
 		let evicted = 0;
+		const preserveTypes = new Set(options?.preserveTypes);
 		for (const job of this.#filterJobs(this.#jobs.values(), filter)) {
 			if (job.status !== "completed" && job.status !== "failed") continue;
+			if (preserveTypes.has(job.type)) continue;
 			this.acknowledgeDeliveries([job.id]);
 			if (this.#evictJob(job.id)) evicted += 1;
 		}
@@ -594,6 +630,7 @@ export class AsyncJobManager {
 		this.#deliveries.length = 0;
 		this.#inFlightDeliveries.length = 0;
 		this.#suppressedDeliveries.clear();
+		this.#completionHandlers.clear();
 		this.#watchedJobs.clear();
 		this.#pollEscalation.clear();
 		this.#deliverySinks.clear();
@@ -629,6 +666,7 @@ export class AsyncJobManager {
 		clearTimeout(this.#evictionTimers.get(jobId));
 		this.#evictionTimers.delete(jobId);
 		this.#suppressedDeliveries.delete(jobId);
+		this.#completionHandlers.delete(jobId);
 		this.#watchedJobs.delete(jobId);
 		return this.#jobs.delete(jobId);
 	}
@@ -721,6 +759,7 @@ export class AsyncJobManager {
 			attempt: 0,
 			nextAttemptAt: Date.now(),
 			ownerId: this.#jobs.get(jobId)?.ownerId,
+			onComplete: this.#completionHandlers.get(jobId),
 		});
 		this.#ensureDeliveryLoop();
 	}
@@ -767,20 +806,23 @@ export class AsyncJobManager {
 	}
 
 	/**
-	 * Resolve the sink for one delivery attempt: owned deliveries route ONLY to
+	 * Resolve the sink for one delivery attempt. A per-job sink stays bound to
+	 * the session that registered the work, even if another live session later
+	 * takes over the same owner id. Otherwise owned deliveries route only to
 	 * their owner's registered sink (a missing sink dead-letters — never the
 	 * default, which would misroute a dead owner's result into another
-	 * session); unowned deliveries use the constructor default. Resolved per
-	 * attempt so a sink registered between retries (e.g. a revived session)
-	 * picks up the retry.
+	 * session); unowned deliveries use the constructor default. Owner sinks are
+	 * resolved per attempt so a sink registered between retries (for example, a
+	 * revived session) picks up the retry.
 	 */
-	#resolveDeliverySink(ownerId: string | undefined): AsyncJobDeliverySink | undefined {
-		if (ownerId !== undefined) return this.#deliverySinks.get(ownerId);
+	#resolveDeliverySink(delivery: AsyncJobDelivery): AsyncJobDeliverySink | undefined {
+		if (delivery.onComplete) return delivery.onComplete;
+		if (delivery.ownerId !== undefined) return this.#deliverySinks.get(delivery.ownerId);
 		return this.#onJobComplete;
 	}
 
 	#deliverDelivery(delivery: AsyncJobDelivery): Promise<void> {
-		const sink = this.#resolveDeliverySink(delivery.ownerId);
+		const sink = this.#resolveDeliverySink(delivery);
 		if (!sink) {
 			// Dead-letter: owned delivery with no live sink (session disposed or
 			// parked), or unowned delivery with no default sink. Drop it — the

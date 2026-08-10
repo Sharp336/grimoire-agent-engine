@@ -193,7 +193,12 @@ describe("AgentSession owner-routed async delivery", () => {
 			id: "other-session-job",
 			ownerId: "Other",
 		});
-		manager.watchJobs([completedJobId, failedJobId, otherOwnerJobId]);
+		const wakeupJobId = manager.register("wakeup", "prior session wakeup", async () => "wake up", {
+			id: "prior-session-wakeup",
+			ownerId: "Main",
+			passive: true,
+		});
+		manager.watchJobs([completedJobId, failedJobId, otherOwnerJobId, wakeupJobId]);
 		await manager.waitForAll();
 
 		expect(manager.getJob(completedJobId)?.status).toBe("completed");
@@ -201,6 +206,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(await session.newSession()).toBe(true);
 		expect(manager.getJob(completedJobId)).toBeUndefined();
 		expect(manager.getJob(failedJobId)).toBeUndefined();
+		expect(manager.getJob(wakeupJobId)?.status).toBe("completed");
 		expect(manager.getJob(otherOwnerJobId)?.status).toBe("completed");
 	});
 
