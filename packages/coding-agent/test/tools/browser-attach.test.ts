@@ -11,9 +11,9 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import { acquireTab, releaseTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { Browser, Page, Target } from "puppeteer-core";
-import { chromiumAvailable } from "./chromium-probe";
+import { chromiumAvailable as probeChromiumAvailable } from "./chromium-probe";
 
-const CHROMIUM_AVAILABLE = await chromiumAvailable();
+const chromiumAvailable = await probeChromiumAvailable();
 
 interface FakePageOptions {
 	url: string;
@@ -110,7 +110,7 @@ describe("pickElectronTarget", () => {
 	});
 
 	// Launches real headless Chromium; skipped where Chrome's system libraries are absent.
-	test.skipIf(!CHROMIUM_AVAILABLE)(
+	test.skipIf(!chromiumAvailable)(
 		"navigates a fresh attached tab to the requested URL",
 		async () => {
 			const launched = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
@@ -143,7 +143,7 @@ describe("pickElectronTarget", () => {
 		30_000,
 	);
 
-	test.skipIf(!CHROMIUM_AVAILABLE)(
+	test.skipIf(!chromiumAvailable)(
 		"does not retry an attached navigation failure as worker startup",
 		async () => {
 			let requestCount = 0;

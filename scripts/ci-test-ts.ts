@@ -327,7 +327,14 @@ async function codingAgentTestCommands(bucket: CodingAgentBucket): Promise<TestC
 async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
 	switch (mode) {
 		case "workspace":
-			return fastWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 8));
+			return [
+				...fastWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 8)),
+				{
+					label: "scripts",
+					cwd: ".",
+					command: ["bun", "test", ...onlyFailuresArgs, "scripts/check-changelog-history.test.ts"],
+				},
+			];
 		case "native":
 			return nativeAndIntegrationPackages.map(pkg => workspaceTestCommand(pkg, 4));
 		case "coding-agent-singleton":
