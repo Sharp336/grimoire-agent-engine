@@ -24,6 +24,7 @@ import {
 	compactionContextTokens,
 	createCompactionSummaryMessage,
 	DEFAULT_SHAKE_CONFIG,
+	effectiveContextWindow,
 	effectiveReserveTokens,
 	estimateTokens,
 	hasContextTokenUsage,
@@ -777,7 +778,7 @@ export class SessionMaintenance {
 							"snapcompact cannot run locally: standing image payload exceeds the per-request budget.",
 						);
 					}
-					const ctxWindow = this.#model?.contextWindow ?? 0;
+					const ctxWindow = effectiveContextWindow(this.#model);
 					const budget =
 						ctxWindow > 0
 							? ctxWindow - effectiveReserveTokens(ctxWindow, effectiveSettings)
@@ -1012,7 +1013,7 @@ export class SessionMaintenance {
 	async runPrePromptCompactionIfNeeded(messages: AgentMessage[]): Promise<void> {
 		const model = this.#model;
 		if (!model) return;
-		const contextWindow = model.contextWindow ?? 0;
+		const contextWindow = effectiveContextWindow(model);
 		if (contextWindow <= 0) return;
 		const compactionSettings = this.#host.settings.getGroup("compaction");
 		const contextTokens = this.#estimatePrePromptContextTokens(messages, contextWindow);
@@ -1080,7 +1081,7 @@ export class SessionMaintenance {
 			return;
 
 		const model = this.#model;
-		const contextWindow = model?.contextWindow ?? 0;
+		const contextWindow = effectiveContextWindow(model);
 		if (contextWindow <= 0) return;
 
 		const compactionSettings = this.#host.settings.getGroup("compaction");
@@ -1204,7 +1205,7 @@ export class SessionMaintenance {
 	): Promise<CompactionCheckResult> {
 		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return COMPACTION_CHECK_NONE;
-		const contextWindow = this.#model?.contextWindow ?? 0;
+		const contextWindow = effectiveContextWindow(this.#model);
 		const generation = this.#host.promptGeneration();
 		// Skip overflow check if the message came from a different model.
 		// This handles the case where user switched from a smaller-context model (e.g. opus)
@@ -1266,7 +1267,7 @@ export class SessionMaintenance {
 			this.#host.settings.getGroup("contextPromotion").enabled
 		) {
 			const failedModel = this.#host.modelRegistry.find(assistantMessage.provider, assistantMessage.model);
-			const failedWindow = failedModel?.contextWindow ?? 0;
+			const failedWindow = effectiveContextWindow(failedModel);
 			const promotionTarget = failedModel
 				? resolveContextPromotionConfiguredTarget(failedModel, this.#host.modelRegistry.getAvailable())
 				: undefined;
@@ -1702,7 +1703,7 @@ export class SessionMaintenance {
 	 * (issue #3247).
 	 */
 	#computeSnapcompactMaxFrames(preparation: CompactionPreparation, settings: CompactionSettings): number {
-		const ctxWindow = this.#model?.contextWindow ?? 0;
+		const ctxWindow = effectiveContextWindow(this.#model);
 		if (ctxWindow <= 0) return Math.min(snapcompact.MAX_FRAMES_DEFAULT, snapcompact.maxFramesForDataBudget());
 		const reserve = effectiveReserveTokens(ctxWindow, settings);
 		let baseTokens = computeNonMessageTokens(this.#host.nonMessageTokenSource());
@@ -1801,7 +1802,7 @@ export class SessionMaintenance {
 	 * optimistically allow the continuation (preserving prior behavior).
 	 */
 	#compactionCreatedHeadroom(): boolean {
-		const contextWindow = this.#model?.contextWindow ?? 0;
+		const contextWindow = effectiveContextWindow(this.#model);
 		if (contextWindow <= 0) return true;
 		const compactionSettings = this.#host.settings.getGroup("compaction");
 		const residualTokens = compactionContextTokens(
@@ -1844,7 +1845,7 @@ export class SessionMaintenance {
 	 * prior behavior).
 	 */
 	contextFitsModel(model: Model, excludedMessage?: AssistantMessage): boolean {
-		const contextWindow = model.contextWindow ?? 0;
+		const contextWindow = effectiveContextWindow(model);
 		if (contextWindow <= 0) return true;
 		const activeExcludedMessage =
 			excludedMessage && this.#host.messages().includes(excludedMessage) ? excludedMessage : undefined;
@@ -1982,7 +1983,7 @@ export class SessionMaintenance {
 	 * never create headroom, so the caller must not append it.
 	 */
 	#computeSnapcompactRescueMaxFrames(settings: CompactionSettings, keptTailTokens: number): number {
-		const ctxWindow = this.#model?.contextWindow ?? 0;
+		const ctxWindow = effectiveContextWindow(this.#model);
 		if (ctxWindow <= 0) return Math.min(snapcompact.MAX_FRAMES_DEFAULT, snapcompact.maxFramesForDataBudget());
 		const thresholdTokens = resolveThresholdTokens(ctxWindow, settings);
 		const recoveryBandTokens = Math.floor(thresholdTokens * COMPACTION_RECOVERY_BAND);
@@ -2557,7 +2558,7 @@ export class SessionMaintenance {
 							snapcompactResult = undefined;
 						}
 						if (snapcompactResult) {
-							const ctxWindow = this.#model?.contextWindow ?? 0;
+							const ctxWindow = effectiveContextWindow(this.#model);
 							const budget =
 								ctxWindow > 0
 									? ctxWindow - effectiveReserveTokens(ctxWindow, compactionSettings)
@@ -3020,7 +3021,7 @@ export class SessionMaintenance {
 			// any supersede/drop-useless pruning that already rewrote the next prompt;
 			// without that pre-shake savings, shake can fall through to context-full
 			// even though the post-prune history is already inside the recovery band.
-			const contextWindow = this.#model?.contextWindow ?? 0;
+			const contextWindow = effectiveContextWindow(this.#model);
 			const compactionSettings = this.#host.settings.getGroup("compaction");
 			let stillOverThreshold = false;
 			if (contextWindow > 0) {

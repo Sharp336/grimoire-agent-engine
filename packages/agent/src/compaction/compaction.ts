@@ -330,6 +330,25 @@ export function resolveBudgetReserveTokens(contextWindow: number, settings: Comp
 }
 
 /**
+ * Fallback context window for known models whose catalog entry is missing/null.
+ * Only Muse Spark family is given a 1M fallback (its published limit). All
+ * other unknown/null windows remain 0 (compaction disabled) to avoid unsafe
+ * broad defaults.
+ */
+export function fallbackContextWindowForModel(model: Model | undefined): number {
+	if (!model) return 0;
+	const id = model.id ?? "";
+	if (id.includes("muse-spark")) return 1048576;
+	return 0;
+}
+
+export function effectiveContextWindow(model: Model | undefined): number {
+	const raw = model?.contextWindow ?? 0;
+	if (raw > 0) return raw;
+	return fallbackContextWindowForModel(model);
+}
+
+/**
  * Check if compaction should trigger based on context usage.
  */
 export function shouldCompact(contextTokens: number, contextWindow: number, settings: CompactionSettings): boolean {
@@ -337,6 +356,7 @@ export function shouldCompact(contextTokens: number, contextWindow: number, sett
 	const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
 	return contextTokens > thresholdTokens;
 }
+
 
 /**
  * Context tokens to feed the compaction decision, floored by a local estimate of

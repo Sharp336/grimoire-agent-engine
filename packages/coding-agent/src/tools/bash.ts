@@ -721,8 +721,10 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		// sink spilled, its artifact already holds the full raw stream — reuse
 		// that id instead of saving a second (already-truncated) copy, so the
 		// `[raw output: artifact://N]` footer and the truncation notice agree.
+		const baseBudget = resolveInlineByteCapBudget(this.session.settings);
+		// Success ~12KB inline (sink), failure up to 20KB where possible; full always in artifact://
 		const inlineCap = {
-			maxBytes: resolveInlineByteCapBudget(this.session.settings),
+			maxBytes: failedExit ? Math.max(baseBudget, 20 * 1024) : baseBudget,
 			saveArtifact: (full: string) => result.artifactId ?? saveBashOriginalArtifact(this.session, full),
 		};
 
