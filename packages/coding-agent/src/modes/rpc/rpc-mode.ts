@@ -39,6 +39,7 @@ import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
 import { claimRpcInput } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
+import { getSessionMode, reconcileSessionMode, setSessionMode, suspendSessionMode } from "./rpc-modes";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import type {
 	RpcCommand,
@@ -953,6 +954,12 @@ export async function runRpcMode(
 		output(event);
 	});
 
+	// Restore plan/vibe/goal mode across switch_session like the TUI does: drop
+	// the previous session's live mode state before the switch, then reconcile
+	// the target file's mode_change chain afterwards.
+	session.setSessionBeforeSwitchReconciler(() => suspendSessionMode(session));
+	session.setSessionSwitchReconciler(() => reconcileSessionMode(session));
+
 	const getAvailableCommands = async () => buildAvailableSlashCommands(session);
 	const reloadPluginState = async () => {
 		const cwd = session.sessionManager.getCwd();
@@ -1078,6 +1085,7 @@ export async function runRpcMode(
 					thinkingLevel: session.thinkingLevel,
 					isStreaming: session.isStreaming,
 					isCompacting: session.isCompacting,
+					mode: getSessionMode(session),
 					steeringMode: session.steeringMode,
 					followUpMode: session.followUpMode,
 					interruptMode: session.interruptMode,
@@ -1250,6 +1258,19 @@ export async function runRpcMode(
 			case "set_interrupt_mode": {
 				session.setInterruptMode(command.mode);
 				return success(id, "set_interrupt_mode");
+			}
+
+			// =================================================================
+			// Session Modes (plan / vibe / goal)
+			// =================================================================
+
+			case "set_mode": {
+				try {
+					const mode = await setSessionMode(session, command.mode, command.objective);
+					return success(id, "set_mode", { mode });
+				} catch (err) {
+					return error(id, "set_mode", err instanceof Error ? err.message : String(err));
+				}
 			}
 
 			// =================================================================

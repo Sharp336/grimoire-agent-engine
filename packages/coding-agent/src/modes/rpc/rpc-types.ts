@@ -62,6 +62,9 @@ export type RpcCommand =
 	| { id?: string; type: "set_follow_up_mode"; mode: "all" | "one-at-a-time" }
 	| { id?: string; type: "set_interrupt_mode"; mode: "immediate" | "wait" }
 
+	// Session modes (plan / vibe / goal — see rpc-modes.ts)
+	| { id?: string; type: "set_mode"; mode: RpcSetModeTarget; objective?: string }
+
 	// Compaction
 	| { id?: string; type: "compact"; customInstructions?: string }
 	| { id?: string; type: "set_auto_compaction"; enabled: boolean }
@@ -96,11 +99,23 @@ export type RpcCommand =
 // RPC State
 // ============================================================================
 
+/**
+ * Active session special mode. `get_state.mode` reports the live state;
+ * `plan_paused` / `goal_paused` are only ever *reported* (they are TUI
+ * intermediate states a headless client cannot enter directly).
+ */
+export type RpcSessionMode = "none" | "plan" | "plan_paused" | "vibe" | "goal" | "goal_paused";
+
+/** Modes a client may request via `set_mode`. */
+export type RpcSetModeTarget = "none" | "plan" | "vibe" | "goal";
+
 export interface RpcSessionState {
 	model?: Model;
 	thinkingLevel: ThinkingLevel | undefined;
 	isStreaming: boolean;
 	isCompacting: boolean;
+	/** Active special mode (plan / vibe / goal) or "none". */
+	mode: RpcSessionMode;
 	steeringMode: "all" | "one-at-a-time";
 	followUpMode: "all" | "one-at-a-time";
 	interruptMode: "immediate" | "wait";
@@ -289,6 +304,9 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "set_steering_mode"; success: true }
 	| { id?: string; type: "response"; command: "set_follow_up_mode"; success: true }
 	| { id?: string; type: "response"; command: "set_interrupt_mode"; success: true }
+
+	// Session modes
+	| { id?: string; type: "response"; command: "set_mode"; success: true; data: { mode: RpcSessionMode } }
 
 	// Compaction
 	| { id?: string; type: "response"; command: "compact"; success: true; data: CompactionResult }
