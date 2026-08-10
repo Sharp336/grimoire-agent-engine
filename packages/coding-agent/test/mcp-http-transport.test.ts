@@ -83,15 +83,32 @@ describe("MCP Streamable HTTP transport timeouts", () => {
 		);
 	});
 
-	it("still resolves normal JSON response bodies", async () => {
+	it("resolves JSON responses and cancels active SSE drains on close", async () => {
+		const streamCancelled = Promise.withResolvers<void>();
+		const markStreamCancelled = () => streamCancelled.resolve();
 		server = Bun.serve({
 			port: 0,
-			fetch() {
-				return Response.json({
-					jsonrpc: "2.0",
-					id: 1,
-					result: { tools: [{ name: "fast", inputSchema: { type: "object" } }] },
+			async fetch(request) {
+				const payload = (await request.json()) as { id: string | number; method: string };
+				if (payload.method === "tools/list") {
+					return Response.json({
+						jsonrpc: "2.0",
+						id: payload.id,
+						result: { tools: [{ name: "fast", inputSchema: { type: "object" } }] },
+					});
+				}
+				request.signal.addEventListener("abort", markStreamCancelled, { once: true });
+				const body = new ReadableStream<Uint8Array>({
+					start(controller) {
+						controller.enqueue(
+							encoder.encode(
+								`data: ${JSON.stringify({ jsonrpc: "2.0", id: payload.id, result: { ok: true } })}\n\n`,
+							),
+						);
+					},
+					cancel: markStreamCancelled,
 				});
+				return new Response(body, { headers: { "Content-Type": "text/event-stream" } });
 			},
 		});
 		const transport = await connectedTransport();
@@ -99,5 +116,10 @@ describe("MCP Streamable HTTP transport timeouts", () => {
 		await expect(withPendingGuard(transport.request<ToolList>("tools/list"), "request")).resolves.toEqual({
 			tools: [{ name: "fast", inputSchema: { type: "object" } }],
 		});
+		await expect(withPendingGuard(transport.request<{ ok: boolean }>("tools/stream"), "stream")).resolves.toEqual({
+			ok: true,
+		});
+		await transport.close();
+		await withPendingGuard(streamCancelled.promise, "stream cancellation");
 	});
 });

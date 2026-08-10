@@ -45,6 +45,7 @@ export class HttpTransport implements MCPTransport {
 	#sessionId: string | null = null;
 	#sseConnection: AbortController | null = null;
 	readonly #requestIds = new RequestIdAllocator();
+	#lifecycleController = new AbortController();
 
 	onClose?: () => void;
 	onError?: (error: Error) => void;
@@ -54,6 +55,9 @@ export class HttpTransport implements MCPTransport {
 	onAuthError?: () => Promise<Record<string, string> | null>;
 
 	constructor(private config: MCPHttpServerConfig | MCPSseServerConfig) {}
+	#lifecycleSignal(signal?: AbortSignal): AbortSignal {
+		return signal ? AbortSignal.any([signal, this.#lifecycleController.signal]) : this.#lifecycleController.signal;
+	}
 
 	/** Fetch the configured endpoint with header precedence and origin policy. */
 	#fetch(init: MCPFetchInit, generated: Record<string, string>): Promise<Response> {
@@ -79,6 +83,7 @@ export class HttpTransport implements MCPTransport {
 	 */
 	async connect(): Promise<void> {
 		if (this.#connected) return;
+		if (this.#lifecycleController.signal.aborted) this.#lifecycleController = new AbortController();
 		this.#connected = true;
 	}
 
@@ -235,7 +240,7 @@ export class HttpTransport implements MCPTransport {
 		}
 
 		const timeout = resolveMCPTimeoutMs(this.config.timeout);
-		const operation = createMCPTimeout(timeout, options?.signal);
+		const operation = createMCPTimeout(timeout, this.#lifecycleSignal(options?.signal));
 
 		try {
 			const response = await this.#fetch(
@@ -294,7 +299,7 @@ export class HttpTransport implements MCPTransport {
 		}
 
 		const timeout = resolveMCPTimeoutMs(this.config.timeout);
-		const operation = createMCPTimeout(timeout, options?.signal);
+		const operation = createMCPTimeout(timeout, this.#lifecycleSignal(options?.signal));
 		const signal = operation.signal ?? getNeverAbortSignal();
 
 		const { promise, resolve, reject } = Promise.withResolvers<T>();
@@ -377,7 +382,7 @@ export class HttpTransport implements MCPTransport {
 		}
 		const payload = JSON.stringify(body);
 		const timeout = resolveMCPTimeoutMs(this.config.timeout);
-		const operation = createMCPTimeout(timeout);
+		const operation = createMCPTimeout(timeout, this.#lifecycleSignal());
 		try {
 			const resp = await this.#fetch({ method: "POST", body: payload, signal: operation.signal }, generated);
 			// Retry once on auth failure if onAuthError is wired
@@ -388,7 +393,7 @@ export class HttpTransport implements MCPTransport {
 					this.config.headers ??= {};
 					Object.assign(this.config.headers, newHeaders);
 					operation.clear();
-					const retryOperation = createMCPTimeout(timeout);
+					const retryOperation = createMCPTimeout(timeout, this.#lifecycleSignal());
 					try {
 						const retry = await this.#fetch(
 							{ method: "POST", body: payload, signal: retryOperation.signal },
@@ -430,7 +435,7 @@ export class HttpTransport implements MCPTransport {
 		}
 
 		const timeout = resolveMCPTimeoutMs(this.config.timeout);
-		const operation = createMCPTimeout(timeout);
+		const operation = createMCPTimeout(timeout, this.#lifecycleSignal());
 
 		try {
 			const response = await this.#fetch(
@@ -452,7 +457,7 @@ export class HttpTransport implements MCPTransport {
 				if (this.#sseConnection) {
 					void this.#readSSEStream(response.body, this.#sseConnection.signal);
 				} else {
-					const readOperation = createMCPTimeout(timeout);
+					const readOperation = createMCPTimeout(timeout, this.#lifecycleSignal());
 					const signal = readOperation.signal ?? getNeverAbortSignal();
 					void this.#readSSEStream(response.body, signal).finally(() => readOperation.clear());
 				}
@@ -472,6 +477,7 @@ export class HttpTransport implements MCPTransport {
 	async close(): Promise<void> {
 		if (!this.#connected) return;
 		this.#connected = false;
+		this.#lifecycleController.abort();
 
 		// Abort SSE listener
 		if (this.#sseConnection) {

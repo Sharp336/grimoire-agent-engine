@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed HTTP transport shutdown leaving resolved SSE response streams active until their request timeout ([#8113](https://github.com/can1357/oh-my-pi/issues/8113)).
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed
