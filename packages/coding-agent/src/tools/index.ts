@@ -31,6 +31,7 @@ import type { SessionManager } from "../session/session-manager";
 import type { ToolChoiceQueue } from "../session/tool-choice-queue";
 import { TaskTool } from "../task";
 import type { AgentOutputManager } from "../task/output-manager";
+import type { TaskTreeBudget } from "../task/tree-budget";
 import { canSpawnAtDepth, type StructuredSubagentSchemaMode } from "../task/types";
 import type { EventBus } from "../utils/event-bus";
 import { type InspectImageMode, isInspectImageToolActive } from "../utils/inspect-image-mode";
@@ -227,6 +228,8 @@ export interface ToolSession {
 	restrictToolNames?: boolean;
 	/** Task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
+	/** Session-wide budget shared by every descendant spawned through task. */
+	taskTreeBudget?: TaskTreeBudget;
 	/** Get shared eval executor session ID. Subagents inherit this to share JS/Python/Ruby/Julia state. */
 	getEvalSessionId?: () => string | null;
 	/** Get session file */

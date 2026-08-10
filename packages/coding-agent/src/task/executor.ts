@@ -62,6 +62,7 @@ import { generateTaskLabel } from "./label";
 import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
+import type { TaskTreeBudget } from "./tree-budget";
 import {
 	type AgentDefinition,
 	type AgentProgress,
@@ -79,6 +80,7 @@ import {
 } from "./types";
 import { arrayValuedLabels, assembleYieldResult } from "./yield-assembly";
 
+export * from "./tree-budget";
 export type { YieldItem } from "./types";
 
 const MCP_CALL_TIMEOUT_MS = 60_000;
@@ -391,6 +393,8 @@ export interface ExecutorOptions {
 	 * watchdog is already suspended for the call's duration.
 	 */
 	maxRuntimeMs?: number;
+	/** Session-wide budget shared by every descendant in this task tree. */
+	taskTreeBudget?: TaskTreeBudget;
 	/** Include IRC only when the invocation policy permits collaboration. */
 	enableIrc?: boolean;
 	enableLsp?: boolean;
@@ -406,6 +410,8 @@ export interface ExecutorOptions {
 	 */
 	restrictToolNames?: boolean;
 	signal?: AbortSignal;
+	/** Called after the already-aborted guard, immediately before child setup begins. */
+	onStart?: () => void;
 	onProgress?: (progress: AgentProgress) => void;
 	/**
 	 * Epochs (ms, `Date.now()`) bracketing the concurrency-semaphore wait:
@@ -782,6 +788,47 @@ function getUsageTokens(usage: unknown): number {
 	return firstNumberField(record, ["totalTokens", "total_tokens"]) ?? 0;
 }
 
+export function attachFollowUpTreeBudgetAccounting(session: AgentSession, budget: TaskTreeBudget): void {
+	const sessionRef = new WeakRef(session);
+	let terminalYieldPending = false;
+	const abortSession = () => {
+		const activeSession = sessionRef.deref();
+		if (!activeSession || activeSession.isDisposed) return;
+		void activeSession.abort().catch(error => {
+			logger.debug("Task-tree follow-up abort failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
+	};
+	const abortForBudget = () => {
+		if (!terminalYieldPending) abortSession();
+	};
+	if (budget.signal.aborted) abortForBudget();
+	else budget.signal.addEventListener("abort", abortForBudget, { once: true });
+	session.subscribe(event => {
+		if (event.type === "agent_start" && budget.signal.aborted) {
+			abortForBudget();
+			return;
+		}
+		if (event.type === "tool_execution_end" && event.toolName === "yield") {
+			const preserveTerminalYield = terminalYieldPending && !event.isError;
+			terminalYieldPending = false;
+			if (budget.signal.aborted && !preserveTerminalYield) abortSession();
+			return;
+		}
+		if (event.type !== "message_end" || !isRecord(event.message) || event.message.role !== "assistant") return;
+		const content = Array.isArray(event.message.content) ? event.message.content : [];
+		terminalYieldPending = content.some(block => {
+			if (!isRecord(block) || block.type !== "toolCall" || block.name !== "yield") return false;
+			const args = isRecord(block.arguments) ? block.arguments : undefined;
+			return !Array.isArray(args?.type);
+		});
+		const eventUsage = isRecord(event) && "usage" in event ? event.usage : undefined;
+		const messageUsage = "usage" in event.message ? event.message.usage : eventUsage;
+		budget.recordRequest(getUsageTokens(messageUsage));
+	});
+}
+
 /**
  * Create proxy tools that reuse the parent's MCP connections.
  *
@@ -895,7 +942,7 @@ export function createSubagentSettings(
 	);
 }
 
-export type AbortReason = "signal" | "terminate" | "timeout" | "budget";
+export type AbortReason = "signal" | "terminate" | "timeout" | "budget" | "treeBudget";
 
 const MAX_YIELD_TOOL_ERRORS = 6;
 
@@ -924,6 +971,8 @@ interface RunMonitorArgs {
 	softRequestBudget: number;
 	/** Whether crossing the soft budget injects a wrap-up steering notice. */
 	softRequestBudgetNotice: boolean;
+	/** Session-wide budget shared by sibling and nested task agents. */
+	taskTreeBudget?: TaskTreeBudget;
 	/** Wall-clock cap in ms; 0 disables the timer. */
 	maxRuntimeMs: number;
 }
@@ -940,6 +989,7 @@ interface SubagentRunMonitor {
 	readonly accumulatedUsage: Usage;
 	hasUsage(): boolean;
 	yieldCalled(): boolean;
+	terminalYieldAccepted(): boolean;
 	runtimeLimitExceeded(): boolean;
 	/** True once the soft-budget stop fired: the free-running turn was aborted and the run is being driven to a forced final yield. */
 	budgetStopRequested(): boolean;
@@ -1007,6 +1057,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		onProgress,
 		softRequestBudget,
 		softRequestBudgetNotice,
+		taskTreeBudget,
 		maxRuntimeMs,
 	} = args;
 	const startTime = Date.now();
@@ -1051,6 +1102,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	let yieldInvalidatedByAsync = false;
 	let yieldTurnStopRequested = false;
 	let yieldTurnStopPromise: Promise<void> | null = null;
+	let terminalYieldAccepted = false;
 
 	// Accumulate usage incrementally from message_end events (no memory for streaming events)
 	const accumulatedUsage: Usage = {
@@ -1069,6 +1121,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	let budgetStopAbortPromise: Promise<void> | undefined;
 	let terminalError: string | undefined;
 	let consecutiveYieldToolErrors = 0;
+	let treeBudgetLimitExceeded = false;
 	let lastAssistantSalvageText: string | undefined;
 	let activeSessionAbortPromise: Promise<void> | undefined;
 
@@ -1093,6 +1146,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		}
 		if (reason === "budget") {
 			budgetLimitExceeded = true;
+		}
+		if (reason === "treeBudget") {
+			treeBudgetLimitExceeded = true;
 		}
 		if (abortSent) {
 			if (reason === "signal" && abortReason !== "signal" && abortReason !== "timeout") {
@@ -1163,6 +1219,19 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			{ once: true, signal: listenerSignal },
 		);
 	}
+	if (taskTreeBudget) {
+		const abortFromTreeBudget = () => {
+			if (!resolved && !yieldCallPending && !terminalYieldAccepted) requestAbort("treeBudget");
+		};
+		if (taskTreeBudget.signal.aborted) {
+			abortFromTreeBudget();
+		} else {
+			taskTreeBudget.signal.addEventListener("abort", abortFromTreeBudget, {
+				once: true,
+				signal: listenerSignal,
+			});
+		}
+	}
 
 	// Wall-clock hard limit. Defense-in-depth for the case where a provider stream
 	// hang escapes the inference-layer watchdog (see openai-completions
@@ -1202,6 +1271,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		}
 		if (budgetStopRequested) {
 			return `Soft request budget exceeded (${progress.requests} requests; budget ${softRequestBudget})`;
+		}
+		if (treeBudgetLimitExceeded) {
+			return taskTreeBudget?.snapshot().reason ?? "Task tree budget exceeded";
 		}
 		return resolveSignalAbortReason();
 	};
@@ -1453,16 +1525,19 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 						yieldCallPending = false;
 					}
 
-					// Check if handler wants to terminate the session
-					if (
+					// Check if handler wants to terminate the session.
+					const shouldTerminate =
 						handler.shouldTerminate?.({
 							toolName: event.toolName,
 							toolCallId: event.toolCallId,
 							args: eventArgs,
 							result: event.result,
 							isError: event.isError,
-						})
-					) {
+						}) ?? false;
+					if (event.toolName === "yield" && shouldTerminate) {
+						terminalYieldAccepted = true;
+					}
+					if (shouldTerminate) {
 						if (event.toolName === "yield" && sessionHasPendingAsyncWork()) {
 							// Terminal yield with owner jobs still pending: park the
 							// run behind the quiescence barrier instead of completing
@@ -1503,6 +1578,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					} else if (!event.isError) {
 						consecutiveYieldToolErrors = 0;
 					}
+				}
+				if (taskTreeBudget?.signal.aborted && !yieldCallPending && !terminalYieldAccepted) {
+					requestAbort("treeBudget");
 				}
 				flushProgress = true;
 				break;
@@ -1633,6 +1711,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 						}
 					}
 				}
+				if (role === "assistant" && taskTreeBudget) {
+					taskTreeBudget.recordRequest(getUsageTokens(messageUsage));
+				}
 				break;
 			}
 
@@ -1748,10 +1829,11 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		accumulatedUsage,
 		hasUsage: () => hasUsage,
 		yieldCalled: () => yieldCalled,
+		terminalYieldAccepted: () => terminalYieldAccepted,
 		runtimeLimitExceeded: () => runtimeLimitExceeded,
 		terminalError: () => terminalError,
 		hasExplicitAbortReason: () =>
-			abortReason === "signal" || runtimeLimitExceeded || budgetLimitExceeded || budgetStopRequested,
+			abortReason === "signal" || runtimeLimitExceeded || budgetLimitExceeded || treeBudgetLimitExceeded,
 		budgetStopRequested: () => budgetStopRequested,
 		waitForBudgetStop: () => budgetStopAbortPromise ?? Promise.resolve(),
 		yieldInvalidatedByAsync: () => yieldInvalidatedByAsync,
@@ -1777,7 +1859,11 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		// the lifecycle can park the agent as resumable instead of killing it.
 		abortKind: () => abortReason ?? (budgetStopRequested ? "budget" : undefined),
 		isAbortedRun: () =>
-			abortReason === "signal" || runtimeLimitExceeded || budgetLimitExceeded || abortReason === undefined,
+			abortReason === "signal" ||
+			runtimeLimitExceeded ||
+			budgetLimitExceeded ||
+			treeBudgetLimitExceeded ||
+			abortReason === undefined,
 		requestAbort,
 		failWithError,
 		abortActiveSession,
@@ -2009,7 +2095,7 @@ async function driveSessionToYield(
 		const lastAssistant = session.getLastAssistantMessage();
 		if (lastAssistant) {
 			if (lastAssistant.stopReason === "aborted") {
-				if (!monitor.yieldCalled() || monitor.runtimeLimitExceeded()) {
+				if (!monitor.terminalYieldAccepted() || monitor.runtimeLimitExceeded()) {
 					aborted = monitor.isAbortedRun();
 					if (aborted) {
 						// A real caller signal or the wall-clock timer carries a precise
@@ -2049,7 +2135,7 @@ async function driveSessionToYield(
 				"Background job results arrived after the subagent's last yield; it did not submit a refreshed yield covering them.";
 		}
 	} catch (err) {
-		if (abortSignal.aborted && monitor.yieldCalled() && !monitor.runtimeLimitExceeded()) {
+		if (abortSignal.aborted && monitor.terminalYieldAccepted() && !monitor.runtimeLimitExceeded()) {
 			exitCode = 0;
 		} else {
 			exitCode = 1;
@@ -2059,7 +2145,7 @@ async function driveSessionToYield(
 		}
 	} finally {
 		error ??= monitor.terminalError();
-		if (abortSignal.aborted && (!monitor.yieldCalled() || monitor.runtimeLimitExceeded())) {
+		if (abortSignal.aborted && (!monitor.terminalYieldAccepted() || monitor.runtimeLimitExceeded())) {
 			aborted = monitor.isAbortedRun();
 			if (aborted) {
 				abortReasonText ??= monitor.resolveAbortReasonText();
@@ -2145,7 +2231,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	}
 	const lastYield = yieldItems?.[yieldItems.length - 1];
 	const yieldAbortReason = lastYield?.status === "aborted" ? lastYield.error || "Subagent aborted task" : undefined;
-	const { abortedViaYield, hasYield } = finalized;
+	const { abortedViaYield } = finalized;
 	const { content: truncatedOutput, truncated } = truncateTail(rawOutput, {
 		maxBytes: MAX_OUTPUT_BYTES,
 		maxLines: MAX_OUTPUT_LINES,
@@ -2177,8 +2263,15 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	if (runtimeLimitExceeded && exitCode === 0) {
 		exitCode = 1;
 	}
+	const cleanupAborted = done.aborted && done.abortReason?.startsWith("cleanup exceeded ") === true;
 	const wasAborted =
-		runtimeLimitExceeded || Boolean(done.aborted) || abortedViaYield || (!hasYield && Boolean(signal?.aborted));
+		runtimeLimitExceeded ||
+		abortedViaYield ||
+		cleanupAborted ||
+		(!monitor.terminalYieldAccepted() && (done.aborted || signal?.aborted || false));
+	if (wasAborted && exitCode === 0) {
+		exitCode = 1;
+	}
 	const finalAbortReason = wasAborted
 		? runtimeLimitExceeded
 			? monitor.resolveAbortReasonText()
@@ -2257,6 +2350,7 @@ export interface IrcWakeTurnMonitorOptions {
 	/** Fallback session file when the registry ref carries none. */
 	sessionFile?: string;
 	maxRuntimeMs?: number;
+	taskTreeBudget?: TaskTreeBudget;
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
@@ -2304,6 +2398,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			softRequestBudget: 0,
 			softRequestBudgetNotice: false,
 			maxRuntimeMs,
+			taskTreeBudget: options.taskTreeBudget,
 		});
 
 		if (options.eventBus) {
@@ -2402,10 +2497,11 @@ export async function finalizeSubagentLifecycle(args: {
 	const disposeSession = async (): Promise<void> => {
 		const disposal = args.session.dispose();
 		const remainingMs = Math.max(0, cleanupDeadlineAt - Date.now());
+		const cleanupSignal = AbortSignal.timeout(remainingMs);
 		try {
-			await untilAborted(AbortSignal.timeout(remainingMs), () => disposal);
+			await untilAborted(cleanupSignal, () => disposal);
 		} catch (error) {
-			if (Date.now() >= cleanupDeadlineAt) {
+			if (cleanupSignal.aborted) {
 				args.onCleanupDeferred?.(disposal);
 				return;
 			}
@@ -2639,6 +2735,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			abortReason: "Cancelled before start",
 		};
 	}
+	options.onStart?.();
 
 	// Set up artifact paths and write input file upfront if artifacts dir provided
 	let subtaskSessionFile: string | undefined;
@@ -2733,6 +2830,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		sessionFile: subtaskSessionFile,
 		softRequestBudget,
 		softRequestBudgetNotice,
+		taskTreeBudget: options.taskTreeBudget,
 		maxRuntimeMs,
 	});
 	const progress = monitor.progress;
@@ -2763,6 +2861,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			parentToolCallId: options.parentToolCallId,
 			sessionFile: subtaskSessionFile,
 			maxRuntimeMs,
+			taskTreeBudget: options.taskTreeBudget,
 			outputSchema,
 			outputSchemaMode: options.outputSchemaMode,
 			outputSchemaSource: options.outputSchemaSource,
@@ -3068,6 +3167,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				localProtocolOptions: options.localProtocolOptions,
 				telemetry: subagentTelemetry,
 				parentEvalSessionId: options.parentEvalSessionId,
+				taskTreeBudget: options.taskTreeBudget,
 				onFirstChatDispatch: () => {
 					firstChatDispatchAt ??= performance.now();
 				},
@@ -3111,6 +3211,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					);
 					installRegistryStatusSync(revived);
 					installIrcWakeTurnMonitor(revived);
+					if (options.taskTreeBudget) {
+						attachFollowUpTreeBudgetAccounting(revived, options.taskTreeBudget);
+					}
 					return revived;
 				};
 			}
@@ -3285,13 +3388,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 			sessionAbortController.abort();
 			const activeSessionAbort = monitor.waitForActiveSessionAbort();
+			const cleanupSignal = AbortSignal.timeout(Math.max(0, cleanupDeadlineAt - Date.now()));
 			try {
-				await untilAborted(
-					AbortSignal.timeout(Math.max(0, cleanupDeadlineAt - Date.now())),
-					() => activeSessionAbort,
-				);
+				await untilAborted(cleanupSignal, () => activeSessionAbort);
 			} catch (cleanupError) {
-				if (Date.now() >= cleanupDeadlineAt) {
+				if (cleanupSignal.aborted) {
 					deferCleanup(activeSessionAbort);
 				} else {
 					logger.warn("Subagent abort cleanup failed", {
@@ -3324,6 +3425,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				monitor.captureSalvage(session);
 				if (options.keepAlive !== false && worktree === undefined) {
 					installIrcWakeTurnMonitor(session);
+					if (!aborted && options.taskTreeBudget) {
+						attachFollowUpTreeBudgetAccounting(session, options.taskTreeBudget);
+					}
 				}
 				await finalizeSubagentLifecycle({
 					id,

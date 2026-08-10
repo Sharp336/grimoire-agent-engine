@@ -113,6 +113,8 @@ export interface StructuredSubagentRequest {
 	/** `0` disables executor wall-clock timeout. Undefined inherits settings. */
 	maxRuntimeMs?: number;
 	signal?: AbortSignal;
+	/** Called at the exact child-dispatch boundary, after all pre-dispatch setup succeeds. */
+	onStart?: () => void;
 	onProgress?: (progress: AgentProgress) => void;
 }
 
@@ -421,6 +423,7 @@ function buildExecutorOptions(
 		enableIrc: policy.enableIrc,
 		maxRuntimeMs: request.maxRuntimeMs,
 		restrictToolNames,
+		onStart: request.onStart,
 		keepAlive: request.keepAlive,
 		signal: request.signal,
 		eventBus: session.eventBus,
@@ -443,6 +446,7 @@ function buildExecutorOptions(
 		parentHindsightSessionState: session.getHindsightSessionState?.(),
 		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
 		parentTelemetry: session.getTelemetry?.(),
+		taskTreeBudget: session.taskTreeBudget,
 		parentEvalSessionId: request.shareEvalSession === false ? undefined : (session.getEvalSessionId?.() ?? undefined),
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 		parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,

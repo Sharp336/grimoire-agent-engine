@@ -118,6 +118,8 @@ export interface IsolatedRunOptions {
 	description?: string;
 	/** Build a commit-message callback (`task.isolation.commits === "ai"`). */
 	buildCommitMessage?: BuildCommitMessage;
+	/** Called after isolation setup succeeds and immediately before the child starts. */
+	beforeRun?: () => void;
 	/**
 	 * Construct a `SingleResult` when isolation setup throws — the caller has
 	 * the full metadata (index, agent, assignment, modelOverride) needed to
@@ -162,6 +164,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		const taskBaseline = structuredClone(opts.context.baseline);
 		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend);
 		const isolationDir = handle.mergedDir;
+		opts.beforeRun?.();
 		const result = await runSubprocess({
 			...opts.baseOptions,
 			worktree: isolationDir,

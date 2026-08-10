@@ -340,6 +340,9 @@
 - Fixed the Python RPC client dropping context, compaction, OAuth URL, and terminal-settlement fields.
 - Fixed the browser tool ignoring the url parameter when opening a new tab on an attached browser.
 - Fixed browser automation disrupting attached browsers by adopting the active foreground tab and avoiding raising new tabs during screenshots.
+### Added
+
+- Added optional session-wide spawn, request, and counted-token budgets for task trees, with atomic batch rejection, cancellation-safe spawn accounting, budget-aware revived follow-ups, graceful descendant aborts, and budget usage telemetry.
 
 ## [17.2.1] - 2026-07-30
 

@@ -52,6 +52,7 @@ import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
 import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
+import { refreshTaskTreeBudgetLimits } from "./tree-budget";
 
 function renderSubagentUserPrompt(assignment: string): string {
 	return prompt.render(subagentUserPromptTemplate, {
@@ -104,6 +105,7 @@ export { discoverCommands, expandCommand, getCommand } from "./commands";
 export { discoverAgents, getAgent } from "./discovery";
 export { AgentOutputManager } from "./output-manager";
 export * from "./read-only-policy";
+export * from "./tree-budget";
 export type {
 	AgentDefinition,
 	AgentProgress,
@@ -677,11 +679,18 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
 	): Promise<AgentToolResult<TaskToolDetails>> {
-		const params = repairTaskParams(rawParams as TaskParams);
-		// Schema defaults fill `agent` for model calls, but internal callers
-		// and stale transcripts can bypass arktype. `spawnParamsFor` resolves each
-		// item's agent type against the session's actual default agent.
-		const defaultAgent = resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
+		const settings = this.session.settings;
+		refreshTaskTreeBudgetLimits(this.session.taskTreeBudget, settings, this.session.taskDepth);
+		const repaired = repairTaskParams(rawParams as TaskParams);
+		// Schema defaults run for model calls, but internal callers and stale
+		// transcripts can bypass arktype. Normalize once so every downstream path
+		// sees the session's actual default agent.
+		const spawnPolicy = resolveSpawnPolicy(this.session.getSessionSpawns());
+		const defaultAgent = spawnPolicy.defaultAgent;
+		const params =
+			typeof repaired.agent === "string" && repaired.agent.trim() !== ""
+				? repaired
+				: { ...repaired, agent: defaultAgent };
 		const batchEnabled = this.#isBatchEnabled();
 		const validationError = validateShapeParams(batchEnabled, params) ?? validateSpawnParams(params, batchEnabled);
 		if (validationError) {
@@ -720,6 +729,18 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		}
 		const policies = preflights.map(preflight => preflight.policy!);
 		const itemBlocking = policies.map(policy => policy.effectiveAgent.blocking === true);
+		const treeBudgetError = this.session.taskTreeBudget?.reserveSpawns(spawnItems.length);
+		if (treeBudgetError) {
+			return {
+				content: [{ type: "text", text: treeBudgetError }],
+				details: {
+					projectAgentsDir: null,
+					results: [],
+					totalDurationMs: 0,
+					treeBudget: this.session.taskTreeBudget?.snapshot(),
+				},
+			};
+		}
 
 		// Execution mode is per item: an item whose agent type declares
 		// `blocking: true` runs inline on this turn (the parent waits on its
@@ -795,9 +816,16 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// than mutating the caller's — task results are short-lived here, but an
 		// in-place edit on a shared/cached AgentToolResult would be a hidden trap.
 		const withAdvisory = (result: AgentToolResult<TaskToolDetails>): AgentToolResult<TaskToolDetails> => {
-			if (!advisory) return result;
+			const budgetedResult =
+				result.details && this.session.taskTreeBudget
+					? {
+							...result,
+							details: { ...result.details, treeBudget: this.session.taskTreeBudget.snapshot() },
+						}
+					: result;
+			if (!advisory) return budgetedResult;
 			let appended = false;
-			const content = result.content.map(part => {
+			const content = budgetedResult.content.map(part => {
 				if (!appended && part.type === "text" && typeof part.text === "string") {
 					appended = true;
 					return { ...part, text: `${part.text}\n\n${advisory}` };
@@ -805,7 +833,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				return part;
 			});
 			if (!appended) content.push({ type: "text", text: advisory });
-			return { ...result, content };
+			return { ...budgetedResult, content };
 		};
 		if (asyncItems.length === 0) {
 			return withAdvisory(
@@ -835,34 +863,43 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			blocking: boolean;
 			progress: AgentProgress;
 		}> = [];
-		for (const [index, item] of spawnItems.entries()) {
-			const agentType = resolvedAgents[index]!;
-			const policy = policies[index]!;
-			const agentSource = policy.agent.source;
-			const agentId = await outputManager.allocate(item.name?.trim() || generateTaskName());
-			const assignment = (item.task ?? "").trim();
-			spawns.push({
-				agentId,
-				item,
-				index,
-				blocking: itemBlocking[index],
-				progress: {
+		try {
+			for (const [index, item] of spawnItems.entries()) {
+				const agentType = resolvedAgents[index]!;
+				const policy = policies[index]!;
+				const agentSource = policy.agent.source;
+				const agentId = await outputManager.allocate(item.name?.trim() || generateTaskName());
+				const assignment = (item.task ?? "").trim();
+				spawns.push({
+					agentId,
+					item,
 					index,
-					id: agentId,
-					agent: agentType,
-					agentSource,
-					modelRole: policy.modelRole,
-					status: "pending",
-					task: renderSubagentUserPrompt(assignment),
-					assignment,
-					recentTools: [],
-					recentOutput: [],
-					toolCount: 0,
-					requests: 0,
-					tokens: 0,
-					cost: 0,
-					durationMs: 0,
-				},
+					blocking: itemBlocking[index],
+					progress: {
+						index,
+						id: agentId,
+						agent: agentType,
+						agentSource,
+						modelRole: policy.modelRole,
+						status: "pending",
+						task: renderSubagentUserPrompt(assignment),
+						assignment,
+						recentTools: [],
+						recentOutput: [],
+						toolCount: 0,
+						requests: 0,
+						tokens: 0,
+						cost: 0,
+						durationMs: 0,
+					},
+				});
+			}
+		} catch (error) {
+			this.session.taskTreeBudget?.releaseSpawns(spawnItems.length);
+			const message = error instanceof Error ? error.message : String(error);
+			return withAdvisory({
+				content: [{ type: "text", text: `Task execution failed: ${message}` }],
+				details: { projectAgentsDir: null, results: [], totalDurationMs: 0 },
 			});
 		}
 		const asyncSpawns = spawns.filter(spawn => !spawn.blocking);
@@ -888,6 +925,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			usage: syncUsage,
 			outputPaths: syncOutputPaths,
 			progress: spawns.map(spawn => ({ ...spawn.progress })),
+			treeBudget: this.session.taskTreeBudget?.snapshot(),
 			async: {
 				state: settledCount < asyncSpawns.length ? "running" : failedCount > 0 ? "failed" : "completed",
 				jobId: primaryJobId,
@@ -923,6 +961,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				failedCount += 1;
 			}
 		}
+		this.session.taskTreeBudget?.releaseSpawns(failedSchedules.length);
 
 		if (started.length === 0 && syncSpawns.length === 0) {
 			return {
@@ -1116,6 +1155,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				const acquiredAt = Date.now();
 				if (!semaphoreHeld || runSignal.aborted) {
 					releasePermit();
+					this.session.taskTreeBudget?.releaseSpawns(1);
 					progress.status = "aborted";
 					onSettled?.(true);
 					throw new Error("Aborted before execution");
@@ -1243,22 +1283,39 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
 	): Promise<AgentToolResult<TaskToolDetails>> {
+		const withTreeBudget = (result: AgentToolResult<TaskToolDetails>): AgentToolResult<TaskToolDetails> =>
+			result.details && this.session.taskTreeBudget
+				? {
+						...result,
+						details: { ...result.details, treeBudget: this.session.taskTreeBudget.snapshot() },
+					}
+				: result;
+		const forwardUpdate: AgentToolUpdateCallback<TaskToolDetails> | undefined = onUpdate
+			? update => onUpdate(withTreeBudget(update))
+			: undefined;
 		if (spawns.length === 1) {
 			const spawn = spawns[0]!;
 			const semaphore = this.#getSpawnSemaphore();
 			const invokedAt = Date.now();
-			await semaphore.acquire(signal);
+			try {
+				await semaphore.acquire(signal);
+			} catch (error) {
+				this.session.taskTreeBudget?.releaseSpawns(1);
+				throw error;
+			}
 			const acquiredAt = Date.now();
 			try {
-				return await this.#executeSync(
-					toolCallId,
-					spawnParamsFor(params, spawn.item, defaultAgent),
-					signal,
-					onUpdate,
-					spawn.preAllocatedId,
-					spawn.index,
-					false,
-					{ invokedAt, acquiredAt },
+				return withTreeBudget(
+					await this.#executeSync(
+						toolCallId,
+						spawnParamsFor(params, spawn.item, defaultAgent),
+						signal,
+						forwardUpdate,
+						spawn.preAllocatedId,
+						spawn.index,
+						false,
+						{ invokedAt, acquiredAt },
+					),
 				);
 			} finally {
 				this.#releaseSpawnSemaphore();
@@ -1277,6 +1334,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					progress: Array.from(latestProgress.entries())
 						.sort((a, b) => a[0] - b[0])
 						.map(([, progress]) => progress),
+					treeBudget: this.session.taskTreeBudget?.snapshot(),
 				},
 			});
 		};
@@ -1296,7 +1354,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		});
 
 		const merged = mergeSyncPayloads(spawns, payloads);
-		return {
+		return withTreeBudget({
 			content: [{ type: "text", text: merged.contentParts.join("\n\n") }],
 			details: {
 				projectAgentsDir: merged.projectAgentsDir,
@@ -1305,7 +1363,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				usage: merged.usage,
 				outputPaths: merged.outputPaths,
 			},
-		};
+		});
 	}
 
 	/**
@@ -1336,7 +1394,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					await semaphore.acquire(workerSignal);
 					semaphoreHeld = true;
 				} catch (error) {
-					if (workerSignal.aborted) return undefined;
+					if (workerSignal.aborted) {
+						this.session.taskTreeBudget?.releaseSpawns(1);
+						return undefined;
+					}
 					throw error;
 				}
 				const acquiredAt = Date.now();
@@ -1363,6 +1424,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			},
 			signal,
 		);
+		this.session.taskTreeBudget?.releaseSpawns(spawns.length - results.filter(result => result !== undefined).length);
 		return results.map((settled, position) => {
 			if (!settled) return undefined;
 			if (settled.status === "fulfilled") return settled.value;
@@ -1414,6 +1476,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const assignment = (params.task ?? "").trim();
 		const context = this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined;
 		let latestProgress: AgentProgress | undefined;
+		let reservationState: "reserved" | "started" | "refunded" = "reserved";
+		const markReservationStarted = () => {
+			if (reservationState === "reserved") reservationState = "started";
+		};
+		const releaseReservation = () => {
+			if (reservationState !== "reserved") return;
+			reservationState = "refunded";
+			this.session.taskTreeBudget?.releaseSpawns(1);
+		};
 		try {
 			const execution = await runStructuredSubagent({
 				session: this.session,
@@ -1436,6 +1507,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 				maxRuntimeMs: this.session.settings.get("task.maxRuntimeMs"),
 				signal,
+				onStart: markReservationStarted,
 				onProgress: progress => {
 					latestProgress = { ...progress, recentTools: progress.recentTools.slice() };
 					onUpdate?.({
@@ -1449,6 +1521,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					});
 				},
 			});
+			releaseReservation();
 			return this.#buildResultPayload(
 				execution.result,
 				execution.policy.discovery.projectAgentsDir,
@@ -1456,6 +1529,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				execution.mergeSummary,
 			);
 		} catch (error) {
+			releaseReservation();
 			const message = error instanceof StructuredSubagentError ? error.message : String(error);
 			return {
 				content: [{ type: "text", text: `Task execution failed: ${message}` }],

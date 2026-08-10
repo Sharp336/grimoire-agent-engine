@@ -46,6 +46,7 @@ describe("runEvalAgent", () => {
 			getArtifactsDir: () => "/tmp/parent-artifacts",
 			getSessionId: () => "parent-session",
 		};
+		const taskTreeBudget = new taskExecutor.TaskTreeBudget({ maxSpawns: 1 });
 		const session = {
 			cwd: "/tmp",
 			settings: Settings.isolated(),
@@ -54,6 +55,7 @@ describe("runEvalAgent", () => {
 			mcpManager,
 			localProtocolOptions,
 			getAgentId: () => "BridgeParent",
+			taskTreeBudget,
 		} as unknown as ToolSession;
 
 		await runEvalAgent({ prompt: "do work", agent: "task" }, { session });
@@ -63,6 +65,41 @@ describe("runEvalAgent", () => {
 		expect(options?.mcpManager).toBe(mcpManager);
 		expect(options?.localProtocolOptions).toBe(localProtocolOptions);
 		expect(options?.parentAgentId).toBe("BridgeParent");
+		expect(options?.taskTreeBudget).toBe(taskTreeBudget);
+		expect(taskTreeBudget.snapshot().spawns).toBe(1);
+	});
+
+	it("refreshes live root tree limits before eval-agent reservations", async () => {
+		const agent: AgentDefinition = {
+			name: "task",
+			description: "Task agent",
+			systemPrompt: "Handle task",
+			source: "bundled",
+		};
+		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+		const runSubprocessSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
+			options.onStart?.();
+			return createResult();
+		});
+		const settings = Settings.isolated();
+		settings.set("task.treeMaxSpawns", 1);
+		const taskTreeBudget = new taskExecutor.TaskTreeBudget();
+		const session = {
+			cwd: "/tmp",
+			settings,
+			getSessionSpawns: () => "*",
+			getSessionFile: () => null,
+			taskTreeBudget,
+			taskDepth: 0,
+		} as unknown as ToolSession;
+
+		await runEvalAgent({ prompt: "first", agent: "task" }, { session });
+		await expect(runEvalAgent({ prompt: "second", agent: "task" }, { session })).rejects.toThrow(
+			"Task tree spawn budget exceeded",
+		);
+
+		expect(runSubprocessSpy).toHaveBeenCalledTimes(1);
+		expect(taskTreeBudget.snapshot()).toMatchObject({ spawns: 1, maxSpawns: 1 });
 	});
 
 	it("returns executor-parsed structured data through the public eval bridge", async () => {
@@ -92,5 +129,81 @@ describe("runEvalAgent", () => {
 
 		expect(result.data).toEqual({ status: "ok" });
 		expect(result.details).toMatchObject({ structured: true, schemaSource: "agent", schemaMode: "strict" });
+	});
+
+	it("refunds an eval spawn reservation when pre-dispatch setup fails", async () => {
+		const agent: AgentDefinition = {
+			name: "task",
+			description: "Task agent",
+			systemPrompt: "Handle task",
+			source: "bundled",
+		};
+		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+		const taskTreeBudget = new taskExecutor.TaskTreeBudget({ maxSpawns: 1 });
+		const session = {
+			cwd: "/tmp",
+			settings: Settings.isolated(),
+			getSessionSpawns: () => "*",
+			getSessionFile: () => null,
+			taskTreeBudget,
+			agentOutputManager: { allocate: vi.fn().mockRejectedValue(new Error("allocation failed")) },
+		} as unknown as ToolSession;
+
+		await expect(runEvalAgent({ prompt: "do work", agent: "task" }, { session })).rejects.toThrow(
+			"allocation failed",
+		);
+		expect(taskTreeBudget.snapshot().spawns).toBe(0);
+	});
+
+	it("keeps an eval spawn reservation after child dispatch starts", async () => {
+		const agent: AgentDefinition = {
+			name: "task",
+			description: "Task agent",
+			systemPrompt: "Handle task",
+			source: "bundled",
+		};
+		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
+			options.onStart?.();
+			throw new Error("executor failed after dispatch");
+		});
+		const taskTreeBudget = new taskExecutor.TaskTreeBudget({ maxSpawns: 1 });
+		const session = {
+			cwd: "/tmp",
+			settings: Settings.isolated(),
+			getSessionSpawns: () => "*",
+			getSessionFile: () => null,
+			taskTreeBudget,
+		} as unknown as ToolSession;
+
+		await expect(runEvalAgent({ prompt: "do work", agent: "task" }, { session })).rejects.toThrow(
+			"executor failed after dispatch",
+		);
+		expect(taskTreeBudget.snapshot().spawns).toBe(1);
+	});
+
+	it("refunds an eval reservation when the signal is already aborted", async () => {
+		const agent: AgentDefinition = {
+			name: "task",
+			description: "Task agent",
+			systemPrompt: "Handle task",
+			source: "bundled",
+		};
+		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+		const taskTreeBudget = new taskExecutor.TaskTreeBudget({ maxSpawns: 1 });
+		const controller = new AbortController();
+		controller.abort();
+		const session = {
+			cwd: "/tmp",
+			settings: Settings.isolated(),
+			getSessionSpawns: () => "*",
+			getSessionFile: () => null,
+			taskTreeBudget,
+		} as unknown as ToolSession;
+
+		await expect(
+			runEvalAgent({ prompt: "do work", agent: "task" }, { session, signal: controller.signal }),
+		).rejects.toThrow("Cancelled before start");
+		expect(taskTreeBudget.snapshot().spawns).toBe(0);
 	});
 });
