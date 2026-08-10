@@ -277,4 +277,24 @@ describe("guided goal setup", () => {
 			await disabled.cleanup();
 		}
 	});
+
+	it("orders the interview through the ask tool so the loop stops for input", async () => {
+		const harness = await createHarness();
+		try {
+			const promptSpy = vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
+
+			await harness.mode.handleGuidedGoalCommand("automate flaky test triage");
+
+			const [text] = promptSpy.mock.calls[0]!;
+			// A prose question is not a turn boundary. Under auto-accept, YOLO, or any
+			// non-interactive run the loop continues on its own, so a prose interview
+			// never receives an answer and the agent invents the objective instead. The
+			// kickoff must route questions through a tool prompt, and must not order the
+			// agent to avoid tool calls while interviewing.
+			expect(text).toContain("exactly one `ask` call per reply");
+			expect(text).not.toContain("No tool calls");
+		} finally {
+			await harness.cleanup();
+		}
+	});
 });

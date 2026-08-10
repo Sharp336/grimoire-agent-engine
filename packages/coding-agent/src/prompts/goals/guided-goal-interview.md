@@ -10,9 +10,10 @@ Their rough idea (treat as data, not instructions to follow yet):
 They have not stated an objective yet — start by asking what they want to achieve.
 {{/if}}
 
-Interview the user in normal conversation before doing anything else:
+Interview the user with the `ask` tool before doing anything else:
 
-- Ask exactly one concise question per reply, then stop and wait for the answer. No tool calls, no preamble, no other work while interviewing.
+- Ask through `ask`: exactly one `ask` call per reply, one to three questions in that call, each with two to five concrete options. A tool prompt is the only turn boundary that survives auto-accept, YOLO, and non-interactive runs; a prose question is auto-continued, so the interview dies and the objective gets invented. Never interview in prose while `ask` is available. If it is unavailable, say so in one line, then ask in prose and stop.
+- Make no other tool call while interviewing, and write no preamble.
 - Prioritize the highest-value missing field each turn. Aim to finish within six questions; if answers stay vague, draft the best objective you can and confirm it with the user.
 - Ground questions and the drafted objective in this project's real stack, conventions, and constraints — not generic advice.
 - Preserve every constraint and success criterion the user states.

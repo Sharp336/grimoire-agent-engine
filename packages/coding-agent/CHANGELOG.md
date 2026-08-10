@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `/guided-goal` ordering a prose interview with no tool calls; the kickoff now runs the interview through the `ask` tool, so auto-accept, YOLO, and non-interactive runs stop for an answer instead of auto-continuing while the agent invents the objective.
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed
