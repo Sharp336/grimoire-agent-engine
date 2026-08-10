@@ -92,4 +92,11 @@ describe("AgentOutputManager", () => {
 		// Unrelated names sharing the prefix are unaffected.
 		expect(await mgr.allocate("__advisor-notes")).toBe("__advisor-notes");
 	});
+
+	it("rejects a subagent name that starts with the reserved remote prefix `@`", async () => {
+		const mgr = new AgentOutputManager(() => null);
+		// `@` is reserved for the cross-process remote id space (`@ns/name`); a local subagent name
+		// may never intrude on it.
+		await expect(mgr.allocate("@spoof")).rejects.toThrow(/reserved for cross-process remote peers/);
+	});
 });
