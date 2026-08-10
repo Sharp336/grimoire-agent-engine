@@ -1501,6 +1501,7 @@ export class ExtensionRunner {
 	}
 
 	async emitAdvisorContext(event: AdvisorContextEvent, signal?: AbortSignal): Promise<string[]> {
+		if (!this.hasHandlers("advisor_context")) return [];
 		let isolatedEvent: AdvisorContextEvent;
 		try {
 			isolatedEvent = structuredClone(event);
