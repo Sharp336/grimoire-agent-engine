@@ -391,6 +391,13 @@ function scheduleSubscriptionRestart(connection: MCPServerConnection): void {
 		}
 		void startModernSubscriptionListener(connection).catch(error => {
 			logger.debug("MCP subscription restart failed", { server: connection.name, error });
+			if (
+				runtime.subscriptionRestart === restart &&
+				runtime.subscription === undefined &&
+				connection.transport.connected
+			) {
+				scheduleSubscriptionRestart(connection);
+			}
 		});
 	}, delayMs);
 	runtime.subscriptionRestart = restart;

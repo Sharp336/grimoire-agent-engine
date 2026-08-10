@@ -282,9 +282,9 @@ describe("MCP 2026-07-28 protocol negotiation", () => {
 		await disconnectServer(connection);
 	});
 
-	it("restarts an acknowledged listener after graceful stream completion", async () => {
+	it("retries an acknowledged listener after a failed restart", async () => {
 		const acceptedUri = "file:///workspace/config.json";
-		const secondListenRequest = Promise.withResolvers<RpcRequest>();
+		const thirdListenRequest = Promise.withResolvers<RpcRequest>();
 		const notificationSeen = Promise.withResolvers<void>();
 		let listenCount = 0;
 		const encoder = new TextEncoder();
@@ -324,7 +324,8 @@ describe("MCP 2026-07-28 protocol negotiation", () => {
 						},
 					};
 					if (listenCount === 1) return sseResponse([acknowledgment], true);
-					secondListenRequest.resolve(rpc);
+					if (listenCount === 2) return new Response("temporary failure", { status: 500 });
+					thirdListenRequest.resolve(rpc);
 					return sseResponse(
 						[
 							acknowledgment,
@@ -357,9 +358,9 @@ describe("MCP 2026-07-28 protocol negotiation", () => {
 			},
 		);
 		await expect(subscribeToResources(connection, [acceptedUri])).resolves.toEqual([acceptedUri]);
-		await secondListenRequest.promise;
+		await thirdListenRequest.promise;
 		await notificationSeen.promise;
-		expect(listenCount).toBe(2);
+		expect(listenCount).toBe(3);
 
 		await disconnectServer(connection);
 	});
