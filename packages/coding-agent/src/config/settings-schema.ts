@@ -4863,6 +4863,17 @@ export const SETTINGS_SCHEMA = {
 		default: [] as string[],
 	},
 
+	"vibe.directorTools": {
+		type: "array",
+		default: [] as string[],
+		ui: {
+			tab: "tasks",
+			label: "Vibe Director Extra Tools",
+			description:
+				"Tool names granted to the vibe-mode director in addition to read, optional parent todo, and the vibe tools (e.g. bash, write, edit). Unknown names are ignored; takes effect on the next /vibe entry.",
+		},
+	},
+
 	"task.agentModelOverrides": {
 		type: "record",
 		default: DEFAULT_AGENT_MODEL_OVERRIDES,
@@ -6006,6 +6017,10 @@ export interface ShellMinimizerSettings {
 	sourceOutlineLevel: "default" | "aggressive";
 	legacyFilters: boolean | undefined;
 }
+
+export interface VibeSettings {
+	directorTools: string[];
+}
 export type CodexAutoRedeemMode = "unset" | "yes" | "no";
 
 export interface CodexResetsSettings {
@@ -6044,6 +6059,7 @@ export interface GroupTypeMap {
 	modelTags: ModelTagsSettings;
 	cycleOrder: string[];
 	shellMinimizer: ShellMinimizerSettings;
+	vibe: VibeSettings;
 	codexResets: CodexResetsSettings;
 	gc: GcSettings;
 }
