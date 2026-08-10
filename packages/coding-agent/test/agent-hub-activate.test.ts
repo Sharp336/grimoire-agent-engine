@@ -13,8 +13,10 @@ import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/
 import { SessionObserverRegistry } from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { visitEntriesFromFileStream } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
@@ -115,6 +117,230 @@ describe("Agent hub Enter activation", () => {
 		expect(doneCalls()).toBe(0);
 		const rendered = Bun.stripANSI(hub.render(120).join("\n"));
 		expect(rendered).toContain(message);
+		hub.dispose();
+	});
+
+	it("openChat opens the active transcript without changing focus", () => {
+		const focusedIds: string[] = [];
+		const agents = new AgentRegistry();
+		agents.register({
+			id: AGENT_ID,
+			displayName: AGENT_ID,
+			kind: "sub",
+			session: { subscribe: () => () => {} } as unknown as AgentSession,
+			status: "running",
+		});
+		let overlayCalls = 0;
+		const hub = new AgentHubOverlayComponent({
+			observers: new SessionObserverRegistry(),
+			hubKeys: [],
+			onDone: () => {},
+			requestRender: () => {},
+			registry: agents,
+			settings: Settings.isolated(),
+			isBuiltInTool: () => false,
+			irc: new IrcBus(agents),
+			focusAgent: async id => {
+				focusedIds.push(id);
+			},
+			ui: {
+				showOverlay: () => {
+					overlayCalls++;
+					return { hide: () => {} };
+				},
+				setFocus: () => {},
+				requestRender: () => {},
+				requestComponentRender: () => {},
+			} as never,
+		});
+
+		hub.openChat(AGENT_ID);
+		expect(overlayCalls).toBe(1);
+		expect(focusedIds).toEqual([]);
+		hub.dispose();
+	});
+
+	it("x confirms once before aborting and releasing a running agent", async () => {
+		const agents = new AgentRegistry();
+		const abort = vi.fn(async () => {});
+		const session = { abort } as unknown as AgentSession;
+		agents.register({
+			id: AGENT_ID,
+			displayName: AGENT_ID,
+			kind: "sub",
+			parentId: "Main",
+			session,
+			sessionFile: null,
+			status: "running",
+		});
+		const released = Promise.withResolvers<void>();
+		const release = vi.fn(async () => {
+			released.resolve();
+		});
+		const hub = new AgentHubOverlayComponent({
+			observers: new SessionObserverRegistry(),
+			hubKeys: [],
+			onDone: () => {},
+			requestRender: () => {},
+			registry: agents,
+			irc: new IrcBus(agents),
+			focusAgent: async () => {},
+			lifecycle: { release } as unknown as AgentLifecycleManager,
+		});
+
+		expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain("x:kill");
+		hub.handleInput("x");
+		expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain(`Press x again to kill running agent "${AGENT_ID}".`);
+		expect(abort).not.toHaveBeenCalled();
+		expect(release).not.toHaveBeenCalled();
+
+		hub.handleInput("x");
+		await released.promise;
+
+		expect(abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
+		expect(release).toHaveBeenCalledWith(
+			AGENT_ID,
+			expect.objectContaining({ id: AGENT_ID, status: "running", session }),
+			{ tombstone: true },
+		);
+		expect(Bun.stripANSI(hub.render(120).join("\n"))).not.toContain("Press x again");
+		hub.dispose();
+	});
+
+	it("requires fresh confirmation when the selected agent id is re-registered", async () => {
+		const agents = new AgentRegistry();
+		const originalAbort = vi.fn(async () => {});
+		const originalRef = agents.register({
+			id: AGENT_ID,
+			displayName: AGENT_ID,
+			kind: "sub",
+			parentId: "Main",
+			session: { abort: originalAbort } as unknown as AgentSession,
+			sessionFile: null,
+			status: "running",
+		});
+		const replacementAbort = vi.fn(async () => {});
+		const released = Promise.withResolvers<void>();
+		const release = vi.fn(async () => {
+			released.resolve();
+		});
+		const hub = new AgentHubOverlayComponent({
+			observers: new SessionObserverRegistry(),
+			hubKeys: [],
+			onDone: () => {},
+			requestRender: () => {},
+			registry: agents,
+			irc: new IrcBus(agents),
+			focusAgent: async () => {},
+			lifecycle: { release } as unknown as AgentLifecycleManager,
+		});
+
+		hub.handleInput("x");
+		expect(agents.unregister(AGENT_ID, originalRef)).toBe(true);
+		agents.register({
+			id: AGENT_ID,
+			displayName: AGENT_ID,
+			kind: "sub",
+			parentId: "Main",
+			session: { abort: replacementAbort } as unknown as AgentSession,
+			sessionFile: null,
+			status: "running",
+		});
+
+		hub.handleInput("x");
+		expect(originalAbort).not.toHaveBeenCalled();
+		expect(replacementAbort).not.toHaveBeenCalled();
+		expect(release).not.toHaveBeenCalled();
+		expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain(`Press x again to kill running agent "${AGENT_ID}".`);
+
+		hub.handleInput("x");
+		await released.promise;
+		expect(replacementAbort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
+		hub.dispose();
+	});
+
+	it("any other key cancels a pending running-agent kill", () => {
+		const agents = new AgentRegistry();
+		const abort = vi.fn(async () => {});
+		agents.register({
+			id: AGENT_ID,
+			displayName: AGENT_ID,
+			kind: "sub",
+			parentId: "Main",
+			session: { abort } as unknown as AgentSession,
+			sessionFile: null,
+			status: "running",
+		});
+		const release = vi.fn(async () => {});
+		const hub = new AgentHubOverlayComponent({
+			observers: new SessionObserverRegistry(),
+			hubKeys: [],
+			onDone: () => {},
+			requestRender: () => {},
+			registry: agents,
+			irc: new IrcBus(agents),
+			focusAgent: async () => {},
+			lifecycle: { release } as unknown as AgentLifecycleManager,
+		});
+
+		hub.handleInput("x");
+		expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain("Press x again");
+		hub.handleInput("j");
+
+		expect(Bun.stripANSI(hub.render(120).join("\n"))).not.toContain("Press x again");
+		expect(abort).not.toHaveBeenCalled();
+		expect(release).not.toHaveBeenCalled();
+		hub.dispose();
+	});
+
+	it("archive Enter opens a transcript and r is the only revive action", async () => {
+		const agents = new AgentRegistry();
+		agents.register({
+			id: AGENT_ID,
+			displayName: AGENT_ID,
+			kind: "sub",
+			session: null,
+			sessionFile: "/tmp/worker.jsonl",
+			status: "parked",
+		});
+		const focusedIds: string[] = [];
+		const revivedIds: string[] = [];
+		let overlayCalls = 0;
+		const hub = new AgentHubOverlayComponent({
+			observers: new SessionObserverRegistry(),
+			hubKeys: [],
+			onDone: () => {},
+			requestRender: () => {},
+			registry: agents,
+			irc: new IrcBus(agents),
+			focusAgent: async id => {
+				focusedIds.push(id);
+			},
+			lifecycle: {
+				ensureLive: async (id: string) => {
+					revivedIds.push(id);
+					return {} as AgentSession;
+				},
+			} as unknown as AgentLifecycleManager,
+			ui: {
+				showOverlay: () => {
+					overlayCalls++;
+					return { hide: () => {} };
+				},
+				setFocus: () => {},
+				requestRender: () => {},
+				requestComponentRender: () => {},
+			} as never,
+		});
+
+		hub.handleInput("\t");
+		hub.handleInput("\r");
+		expect(overlayCalls).toBe(1);
+		expect(focusedIds).toEqual([]);
+		expect(revivedIds).toEqual([]);
+		hub.handleInput("r");
+		await Promise.resolve();
+		expect(revivedIds).toEqual([AGENT_ID]);
 		hub.dispose();
 	});
 
@@ -512,6 +738,7 @@ describe("Agent hub double-← gating", () => {
 				},
 				requestRender: () => {},
 			},
+			settings: Settings.isolated(),
 			editor,
 			editorContainer: {
 				children: [editor],
@@ -520,7 +747,7 @@ describe("Agent hub double-← gating", () => {
 			},
 			collabGuest: { agentRegistry: agents, hubRemote: undefined },
 			focusAgentSession: async () => {},
-			session: { getToolByName: () => undefined, extensionRunner: undefined },
+			session: { getToolByName: () => undefined, hasBuiltInTool: () => false, extensionRunner: undefined },
 			sessionManager: { getCwd: () => TEST_CWD, getSessionFile: () => sessionFile },
 			hideThinkingBlock: false,
 		};

@@ -1,4 +1,5 @@
 import { type BaseType, type } from "@oh-my-pi/omptype";
+import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { AgentSessionEvent } from "../session/agent-session";
@@ -432,6 +433,12 @@ export interface AgentProgress {
 	resolvedModel?: string;
 	/** True when {@link resolvedModel} is the target of an active retry fallback (not the originally configured model). Lets observer-only UIs (collab guests, Agent Hub rows with no live session) flag the fallback and keep the provider. */
 	resolvedModelIsFallback?: boolean;
+	/** Current reasoning level, when known from the live session. */
+	thinkingLevel?: ThinkingLevel;
+	/** Whether the session exposes the LSP tool. Undefined for older or cold-restored snapshots. */
+	lspEnabled?: boolean;
+	/** Whether an advisor is active for the session. Undefined for older or cold-restored snapshots. */
+	advisorActive?: boolean;
 	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
 	extractedToolData?: Record<string, unknown[]>;
 	/**

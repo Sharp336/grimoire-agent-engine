@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import type { Api, Model } from "@oh-my-pi/pi-ai";
+import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
@@ -7,7 +7,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 
-function model(provider: string, id: string): Model<Api> {
+function model(provider: string, id: string, contextWindow = 128000): Model<Api> {
 	return buildModel({
 		provider,
 		id,
@@ -17,20 +17,40 @@ function model(provider: string, id: string): Model<Api> {
 		reasoning: false,
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 128000,
+		contextWindow,
 		maxTokens: 8192,
 	});
 }
 
-function createYieldingSession(): AgentSession {
+function createYieldingSession(
+	options: {
+		advisorActive?: boolean;
+		initialThinkingLevel?: Effort;
+		thinkingLevel?: Effort;
+		activeToolNames?: string[];
+		initialModel?: Model<Api>;
+		fallbackModel?: Model<Api>;
+		restoredModel?: Model<Api>;
+		emitFallback?: boolean;
+		liveFallbackOwnership?: boolean;
+	} = {},
+): AgentSession {
 	const listeners: Array<(event: { type: string; [key: string]: unknown }) => void> = [];
+	const activeToolNames = options.activeToolNames ?? ["yield"];
+	let fallbackOwnership = false;
 	const session = {
 		agent: { state: { systemPrompt: ["test"] } },
 		state: { messages: [] },
+		model: options.initialModel,
+		thinkingLevel: options.initialThinkingLevel,
+		get retryFallbackModel() {
+			return fallbackOwnership ? "fallback/working-model" : undefined;
+		},
 		extensionRunner: undefined,
 		sessionManager: { appendSessionInit: () => {} },
-		getActiveToolNames: () => ["yield"],
-		getEnabledToolNames: () => ["yield"],
+		getActiveToolNames: () => activeToolNames,
+		getEnabledToolNames: () => activeToolNames,
+		isAdvisorActive: () => options.advisorActive ?? false,
 		setActiveToolsByName: async () => {},
 		setIrcWakeTurnObserver: () => {},
 		subscribe: (listener: (event: { type: string; [key: string]: unknown }) => void) => {
@@ -39,12 +59,31 @@ function createYieldingSession(): AgentSession {
 		},
 		prompt: async () => {
 			for (const listener of listeners) {
-				listener({
-					type: "retry_fallback_applied",
-					from: "primary/bad-runtime-model",
-					to: "fallback/working-model",
-					role: "subagent:issue-2750",
-				});
+				if (options.thinkingLevel) {
+					listener({
+						type: "thinking_level_changed",
+						thinkingLevel: options.thinkingLevel,
+					});
+				}
+				if (options.emitFallback !== false) {
+					fallbackOwnership = options.liveFallbackOwnership === true;
+					if (options.fallbackModel) session.model = options.fallbackModel;
+					listener({
+						type: "retry_fallback_applied",
+						from: "primary/bad-runtime-model",
+						to: "fallback/working-model",
+						role: "subagent:issue-2750",
+					});
+				}
+				if (options.restoredModel) {
+					session.model = options.restoredModel;
+					if (options.liveFallbackOwnership) {
+						session.thinkingLevel = Effort.High;
+						listener({ type: "thinking_level_changed", thinkingLevel: Effort.High });
+						fallbackOwnership = false;
+					}
+					listener({ type: "auto_retry_end", attempt: 1, success: true });
+				}
 				listener({
 					type: "tool_execution_end",
 					toolCallId: "tool-yield",
@@ -74,7 +113,14 @@ describe("subagent runtime model resolution", () => {
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			if (!options) throw new Error("Expected createAgentSession options");
 			childFallbackChains = options.settings?.get("retry.fallbackChains") as Record<string, string[]> | undefined;
-			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
+			return {
+				session: createYieldingSession({
+					initialModel: primary,
+					fallbackModel: fallback,
+				}),
+				extensionsResult: {},
+				setToolUIContext: () => {},
+			} as never;
 		});
 
 		const agent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
@@ -120,6 +166,110 @@ describe("subagent runtime model resolution", () => {
 		expect(inheritedFallbackChain).toEqual(["global/inherited-model"]);
 		expect(result.modelOverride).toEqual(["primary/bad-runtime-model", "fallback/working-model"]);
 		expect(result.resolvedModel).toBe("fallback/working-model");
+		expect(result.resolvedModelIsFallback).toBe(true);
+	});
+
+	it("clears fallback state and refreshes context limits when the primary model is restored", async () => {
+		const primary = model("primary", "bad-runtime-model", 256000);
+		const fallback = model("fallback", "working-model", 64000);
+		const snapshots: Array<{
+			resolvedModel?: string;
+			resolvedModelIsFallback?: boolean;
+			contextWindow?: number;
+		}> = [];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(
+			async () =>
+				({
+					session: createYieldingSession({
+						initialModel: primary,
+						fallbackModel: fallback,
+						restoredModel: primary,
+						liveFallbackOwnership: true,
+					}),
+					extensionsResult: {},
+					setToolUIContext: () => {},
+				}) as never,
+		);
+
+		const result = await runSubprocess({
+			cwd: "/tmp",
+			agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+			task: "work",
+			index: 0,
+			id: "runtime-model-restoration",
+			modelOverride: ["primary/bad-runtime-model:high", "fallback/working-model"],
+			settings: Settings.isolated(),
+			modelRegistry: {
+				refresh: async () => {},
+				getAvailable: () => [primary, fallback],
+				getApiKey: async () => "test-key",
+			} as never,
+			enableLsp: false,
+			onProgress: progress => {
+				snapshots.push({
+					resolvedModel: progress.resolvedModel,
+					resolvedModelIsFallback: progress.resolvedModelIsFallback,
+					contextWindow: progress.contextWindow,
+				});
+			},
+		});
+
+		expect(snapshots).toContainEqual({
+			resolvedModel: "fallback/working-model:high",
+			resolvedModelIsFallback: true,
+			contextWindow: 64000,
+		});
+		expect(snapshots).toContainEqual({
+			resolvedModel: "primary/bad-runtime-model:high",
+			resolvedModelIsFallback: undefined,
+			contextWindow: 256000,
+		});
+		expect(result.resolvedModel).toBe("primary/bad-runtime-model:high");
+		expect(result.resolvedModelIsFallback).toBeUndefined();
+		expect(result.contextWindow).toBe(256000);
+	});
+
+	it("preserves a literal model id ending in :max across fallback recovery", async () => {
+		const primary = model("primary", "literal:max");
+		const fallback = model("fallback", "working-model");
+		const resolvedModels: string[] = [];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(
+			async () =>
+				({
+					session: createYieldingSession({
+						initialModel: primary,
+						fallbackModel: fallback,
+						restoredModel: primary,
+						liveFallbackOwnership: true,
+					}),
+					extensionsResult: {},
+					setToolUIContext: () => {},
+				}) as never,
+		);
+
+		const result = await runSubprocess({
+			cwd: "/tmp",
+			agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+			task: "work",
+			index: 0,
+			id: "literal-max-model",
+			modelOverride: ["primary/literal:max", "fallback/working-model"],
+			settings: Settings.isolated(),
+			modelRegistry: {
+				refresh: async () => {},
+				getAvailable: () => [primary, fallback],
+				getApiKey: async () => "test-key",
+			} as never,
+			enableLsp: false,
+			onProgress: progress => {
+				if (progress.resolvedModel) resolvedModels.push(progress.resolvedModel);
+			},
+		});
+
+		expect(resolvedModels).toContain("fallback/working-model");
+		expect(resolvedModels).toContain("primary/literal:max");
+		expect(resolvedModels).not.toContain("primary/literal:max:max");
+		expect(result.resolvedModel).toBe("primary/literal:max");
 	});
 
 	it("inherits an explicitly configured default fallback chain for a single subagent model", async () => {
@@ -459,5 +609,103 @@ describe("subagent runtime model resolution", () => {
 		expect(childModelPatternAuthFallback).toBe("openai-codex/gpt-5.5");
 		expect(childModelPatternFallbackRole).toBe("subagent:issue-4421");
 		expect(childModelPatternDefaultFallbackChain).toEqual(["openai-codex/gpt-5.6-sol"]);
+	});
+
+	it("publishes effective LSP availability from the created session tools", async () => {
+		const primary = model("primary", "runtime-model");
+		const snapshots: Array<boolean | undefined> = [];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(
+			async () =>
+				({
+					session: createYieldingSession({ activeToolNames: ["yield"] }),
+					extensionsResult: {},
+					setToolUIContext: () => {},
+				}) as never,
+		);
+
+		await runSubprocess({
+			cwd: "/tmp",
+			agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+			task: "work",
+			index: 0,
+			id: "runtime-lsp-disabled-setting",
+			modelOverride: "primary/runtime-model",
+			settings: Settings.isolated({ "lsp.enabled": false }),
+			modelRegistry: {
+				refresh: async () => {},
+				getAvailable: () => [primary],
+				getApiKey: async () => "test-key",
+			} as never,
+			enableLsp: true,
+			onProgress: progress => snapshots.push(progress.lspEnabled),
+		});
+
+		expect(snapshots).toContain(false);
+		expect(snapshots).not.toContain(true);
+	});
+
+	it("publishes runtime capabilities and reasoning changes in progress snapshots", async () => {
+		const primary = model("primary", "runtime-model");
+		const snapshots: Array<{
+			thinkingLevel?: string;
+			lspEnabled?: boolean;
+			advisorActive?: boolean;
+			resolvedModel?: string;
+			contextWindow?: number;
+		}> = [];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(
+			async () =>
+				({
+					session: createYieldingSession({
+						advisorActive: true,
+						initialThinkingLevel: Effort.High,
+						thinkingLevel: Effort.Medium,
+						initialModel: primary,
+						emitFallback: false,
+					}),
+					extensionsResult: {},
+					setToolUIContext: () => {},
+				}) as never,
+		);
+
+		await runSubprocess({
+			cwd: "/tmp",
+			agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+			task: "work",
+			index: 0,
+			id: "runtime-capabilities",
+			modelOverride: "primary/runtime-model:high",
+			settings: Settings.isolated(),
+			modelRegistry: {
+				refresh: async () => {},
+				getAvailable: () => [primary],
+				getApiKey: async () => "test-key",
+			} as never,
+			enableLsp: false,
+			onProgress: progress => {
+				snapshots.push({
+					thinkingLevel: progress.thinkingLevel,
+					lspEnabled: progress.lspEnabled,
+					advisorActive: progress.advisorActive,
+					resolvedModel: progress.resolvedModel,
+					contextWindow: progress.contextWindow,
+				});
+			},
+		});
+
+		expect(snapshots).toContainEqual({
+			thinkingLevel: "high",
+			lspEnabled: false,
+			advisorActive: true,
+			resolvedModel: "primary/runtime-model:high",
+			contextWindow: 128000,
+		});
+		expect(snapshots).toContainEqual({
+			thinkingLevel: "medium",
+			lspEnabled: false,
+			advisorActive: true,
+			resolvedModel: "primary/runtime-model:high",
+			contextWindow: 128000,
+		});
 	});
 });

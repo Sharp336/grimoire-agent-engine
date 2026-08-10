@@ -162,7 +162,8 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	/** Prevent the async persisted-session scan from flashing a false empty state. */
 	#loadingPersistedSubagents = false;
 
-	// Table state
+	// Dashboard state
+	#allRows: AgentRef[] = [];
 	#rows: AgentRef[] = [];
 	#statusCounts: Record<AgentStatus, number> = { running: 0, idle: 0, parked: 0, aborted: 0 };
 	#selectedRow = 0;
@@ -170,7 +171,9 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	/** Per-render screen-line to agent-row map, shared by click and hover routing. */
 	#hitRows: Array<number | undefined> = [];
 	#notice: string | undefined;
-	/** Captured row order from the first refresh; keeps the hub stable while open. */
+	/** Running-agent kill confirmation: the exact registry generation awaiting a second `x`. */
+	#pendingKill: AgentRef | undefined;
+	/** Captured row order from the first refresh; keeps each status group stable while open. */
 	#rowOrder: Map<string, number> | undefined;
 	#nextRowOrder = 0;
 	/** Double-tap window state for the table's left-left "close hub" gesture. */
@@ -283,7 +286,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	 * those included must wait for {@link persistedSubagentsReady} first.
 	 */
 	get isEmpty(): boolean {
-		return this.#rows.length === 0;
+		return this.#allRows.length === 0;
 	}
 
 	/** Tear down every subscription and timer. Called by the overlay owner on close. */
@@ -447,6 +450,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 				if (!rowOrder.has(ref.id)) rowOrder.set(ref.id, this.#nextRowOrder++);
 			}
 		}
+		this.#allRows = rosterRows;
 
 		if (this.#viewMode === "tree") {
 			const tree = projectAgentTree(rosterRows);
@@ -553,6 +557,9 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	}
 
 	#footer(showingNarrowDetails: boolean, availableWidth: number): string {
+		if (this.#pendingKill) {
+			return theme.fg("warning", `Press x again to kill running agent "${this.#pendingKill.id}".`);
+		}
 		const nextView = this.#viewMode === "roster" ? "by parent" : "flat";
 		if (showingNarrowDetails) {
 			return theme.fg("dim", `Tab:roster  PgUp/PgDn:scroll  Enter:open  t:${nextView}  Esc:roster`);
@@ -738,7 +745,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			const count = this.#statusCounts[status];
 			if (count > 0) parts.push(`${statusGlyph(status)} ${statusText(status, `${count} ${status}`)}`);
 		}
-		return parts.join(theme.sep.dot);
+		return parts.join(theme.fg("dim", theme.sep.dot));
 	}
 
 	#refreshAggregate(refreshFallback = false): void {
@@ -968,6 +975,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	}
 
 	#handleTableInput(keyData: string): void {
+		if (keyData !== "x") this.#pendingKill = undefined;
 		if (matchesKey(keyData, "escape")) {
 			if (this.#narrowDetailsOpen && !this.#lastRenderWasSplit) {
 				this.#narrowDetailsOpen = false;
@@ -1029,19 +1037,20 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			this.#requestRender();
 			return;
 		}
+		const selected = this.#rows[this.#selectedRow];
 		if (matchesKey(keyData, "enter") || keyData === "\r" || keyData === "\n") {
-			const selected = this.#rows[this.#selectedRow];
 			if (selected) this.#activateAgent(selected);
+			return;
+		}
+		if (keyData === "t") {
+			if (selected) this.openChat(selected.id);
 			return;
 		}
 		if (keyData === "r") {
 			this.#reviveSelected();
 			return;
 		}
-		if (keyData === "x") {
-			this.#killSelected();
-			return;
-		}
+		if (keyData === "x") this.#killSelected();
 	}
 
 	/**
@@ -1052,16 +1061,19 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	 */
 	#activateAgent(ref: AgentRef): void {
 		this.#notice = undefined;
-		const focusAgent = this.#focusAgent;
-		// Advisor refs are read-only transcripts with no live/ revivable session;
-		// open the in-hub chat view (file-backed) instead of trying to focus one.
-		if (ref.kind === "advisor" || this.#remote || !focusAgent) {
+		if (
+			ref.kind === "advisor" ||
+			ref.status === "parked" ||
+			ref.status === "aborted" ||
+			this.#remote ||
+			!this.#focusAgent
+		) {
 			this.openChat(ref.id);
 			return;
 		}
 		void (async () => {
 			try {
-				await focusAgent(ref.id); // ensureLive inside revives parked agents; no parking, no session files
+				await this.#focusAgent!(ref.id);
 				this.#onDone();
 			} catch (error) {
 				this.#notice = error instanceof Error ? error.message : String(error);
@@ -1100,13 +1112,27 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	}
 
 	#killSelected(): void {
-		const ref = this.#rows[this.#selectedRow];
-		if (!ref) return;
+		const selected = this.#rows[this.#selectedRow];
+		if (!selected) return;
+		const ref = this.#registry.get(selected.id);
+		if (!ref) {
+			this.#pendingKill = undefined;
+			this.#refreshRows();
+			this.#requestRender();
+			return;
+		}
 		if (ref.kind === "advisor") {
 			this.#notice = `"${ref.id}" is a read-only advisor transcript — cannot be killed.`;
 			this.#requestRender();
 			return;
 		}
+		if (ref.status === "running" && this.#pendingKill !== ref) {
+			this.#pendingKill = ref;
+			this.#notice = undefined;
+			this.#requestRender();
+			return;
+		}
+		this.#pendingKill = undefined;
 		this.#notice = undefined;
 		if (this.#remote) {
 			this.#remote.kill(ref.id);
