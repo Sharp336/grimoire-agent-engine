@@ -37,6 +37,15 @@ input.on("line", line => {
 		switch (request.method) {
 			case "server/discover":
 				if (mode === "close") process.exit(0);
+				if (mode === "ignore") return;
+				if (mode === "invalid-params") {
+					reject(request.id, -32602, "Invalid params", true);
+					return;
+				}
+				if (mode === "malformed") {
+					respond(request.id, null, true);
+					return;
+				}
 				if (mode === "legacy") {
 					reject(request.id, -32601, "Method not found", true);
 					return;

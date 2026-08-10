@@ -37,7 +37,7 @@ Does not cover extension authoring UX or command UI.
   - omitted or `"legacy"` sends `initialize`, starts any legacy HTTP SSE listener, then sends `notifications/initialized`
   - `"auto"` probes `server/discover`; HTTP probes use the session transport, while stdio probes use a disposable sibling process
   - `"2026-07-28"` requires successful discovery and never falls back
-- Auto fallback requires explicit legacy evidence (`-32601`, a known legacy version set, or HTTP `404`/`405`). Authentication failures, timeouts, malformed responses, and modern protocol errors remain failures.
+- Auto stdio probes fall back after every non-modern outcome, including an ignored request, process exit, malformed result, timeout, or legacy JSON-RPC error; aborts and recognized modern protocol errors remain failures. Auto HTTP probes fall back only for non-modern `400`, `404`, or `405` responses. A valid discovery result that advertises only known legacy versions also selects the legacy lifecycle.
 - Modern calls carry protocol/client metadata per request and do not send `initialize`; legacy calls retain the initialization-based lifecycle.
 
 ### Transport layer (`MCPTransport`)

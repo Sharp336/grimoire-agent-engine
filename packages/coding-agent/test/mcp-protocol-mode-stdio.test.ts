@@ -27,7 +27,10 @@ afterEach(async () => {
 	await removeWithRetries(tempDir);
 });
 
-function config(serverMode: "modern" | "legacy" | "close", protocolMode?: MCPProtocolMode): MCPStdioServerConfig {
+function config(
+	serverMode: "modern" | "legacy" | "close" | "invalid-params" | "ignore" | "malformed",
+	protocolMode?: MCPProtocolMode,
+): MCPStdioServerConfig {
 	return {
 		type: "stdio",
 		command: process.execPath,
@@ -80,12 +83,19 @@ describe("MCP stdio protocol rollout", () => {
 		expect(entries[0]?.pid).not.toBe(entries[1]?.pid);
 	});
 
-	it("does not reinterpret a failed auto probe as legacy", async () => {
-		await expect(connectToServer("closed-probe", config("close", "auto"))).rejects.toThrow("Transport closed");
-		const entries = await readLog(1);
-		expect(entries.map(entry => entry.method)).toEqual(["server/discover"]);
-		expect(new Set(entries.map(entry => entry.pid)).size).toBe(1);
-	});
+	for (const serverMode of ["close", "invalid-params", "ignore", "malformed"] as const) {
+		it(`falls back after a ${serverMode} auto probe outcome`, async () => {
+			connection = await connectToServer(`${serverMode}-probe`, config(serverMode, "auto"));
+			const entries = await readLog(3);
+			expect(entries.map(entry => entry.method)).toEqual([
+				"server/discover",
+				"initialize",
+				"notifications/initialized",
+			]);
+			expect(entries[0]?.pid).not.toBe(entries[1]?.pid);
+			expect(entries[1]?.pid).toBe(entries[2]?.pid);
+		});
+	}
 
 	it("does not fall back when modern mode is required", async () => {
 		await expect(connectToServer("modern-required", config("legacy", "2026-07-28"))).rejects.toThrow(

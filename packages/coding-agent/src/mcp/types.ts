@@ -235,6 +235,17 @@ export interface MCPCacheableResult extends MCPResult {
 	cacheScope?: "public" | "private";
 }
 
+export interface MCPInputRequest {
+	method: string;
+	params?: Record<string, unknown>;
+}
+
+export interface MCPInputRequiredResult extends MCPResult {
+	resultType: "input_required";
+	inputRequests?: Record<string, MCPInputRequest>;
+	requestState?: string;
+}
+
 export interface MCPDiscoverResult extends MCPCacheableResult {
 	supportedVersions: string[];
 	capabilities: MCPServerCapabilities;
@@ -316,6 +327,8 @@ export interface MCPRequestOptions {
 	timeout?: number;
 	/** Validated transport-generated HTTP headers. */
 	generatedHeaders?: Record<string, string>;
+	/** Observe the generated JSON-RPC request ID before the request is sent. */
+	onRequestId?: (id: string | number) => void;
 }
 
 /** Transport interface - abstracts stdio/http */

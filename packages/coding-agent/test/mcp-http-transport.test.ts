@@ -100,4 +100,27 @@ describe("MCP Streamable HTTP transport timeouts", () => {
 			tools: [{ name: "fast", inputSchema: { type: "object" } }],
 		});
 	});
+
+	it("reports the JSON-RPC ID allocated for an authenticated retry", async () => {
+		let requestCount = 0;
+		server = Bun.serve({
+			port: 0,
+			async fetch(request) {
+				requestCount++;
+				const body = (await request.json()) as { id: string | number };
+				if (requestCount === 1) return new Response("unauthorized", { status: 401 });
+				return Response.json({ jsonrpc: "2.0", id: body.id, result: { ok: true } });
+			},
+		});
+		const transport = await connectedTransport();
+		transport.onAuthError = async () => ({ Authorization: "Bearer refreshed" });
+		const requestIds: Array<string | number> = [];
+
+		await expect(transport.request("tools/list", {}, { onRequestId: id => requestIds.push(id) })).resolves.toEqual({
+			ok: true,
+		});
+		expect(requestIds).toHaveLength(2);
+		expect(requestIds[1]).not.toBe(requestIds[0]);
+		await transport.close();
+	});
 });

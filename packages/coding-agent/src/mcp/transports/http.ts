@@ -242,6 +242,7 @@ export class HttpTransport implements MCPTransport {
 		}
 
 		const id = this.#requestIds.next(this.config.requestIdFormat);
+		options?.onRequestId?.(id);
 		const body = {
 			jsonrpc: "2.0" as const,
 			id,

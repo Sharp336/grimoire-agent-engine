@@ -737,6 +737,7 @@ export class StdioTransport implements MCPTransport {
 		}
 
 		const id = this.#requestIds.next(this.config.requestIdFormat);
+		options?.onRequestId?.(id);
 		const request = {
 			jsonrpc: "2.0" as const,
 			id,

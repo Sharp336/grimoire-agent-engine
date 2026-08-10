@@ -30,6 +30,7 @@ import type {
 	MCPImplementation,
 	MCPInitializeParams,
 	MCPInitializeResult,
+	MCPInputRequiredResult,
 	MCPPrompt,
 	MCPPromptsListResult,
 	MCPRequestOptions,
@@ -60,7 +61,7 @@ const CLIENT_INFO = {
 	name: "omp-coding-agent",
 	version: "1.0.0",
 };
-const MODERN_CLIENT_CAPABILITIES = {};
+const MODERN_CLIENT_CAPABILITIES = { roots: {} };
 const toolHeaderBindings = new WeakMap<MCPToolDefinition, MCPToolHeaderBinding[]>();
 
 interface MCPHandshakeResult {
@@ -69,9 +70,28 @@ interface MCPHandshakeResult {
 	capabilities: MCPServerCapabilities;
 	instructions?: string;
 }
+interface MCPSubscriptionFilter {
+	toolsListChanged: boolean;
+	promptsListChanged: boolean;
+	resourcesListChanged: boolean;
+	resourceSubscriptions: string[];
+}
+
+interface MCPSubscriptionState {
+	abort: AbortController;
+	requestId?: string | number;
+	requested: MCPSubscriptionFilter;
+	settled: boolean;
+	resolve: (acceptedResourceUris: string[]) => void;
+	reject: (error: Error) => void;
+}
+
 interface MCPConnectionRuntime {
-	subscriptionAbort?: AbortController;
+	subscription?: MCPSubscriptionState;
 	resourceSubscriptions: Set<string>;
+	cacheScopes: Partial<
+		Record<"tools" | "resources" | "resourceTemplates" | "prompts", "public" | "private" | "uncacheable">
+	>;
 	cacheExpires: Partial<Record<"tools" | "resources" | "resourceTemplates" | "prompts", number>>;
 }
 
@@ -180,6 +200,49 @@ async function initializeConnection(
 	};
 }
 
+async function fulfillInputRequests(
+	connection: MCPServerConnection,
+	result: MCPInputRequiredResult,
+	method: string,
+): Promise<Record<string, unknown> | undefined> {
+	if (result.requestState !== undefined && typeof result.requestState !== "string") {
+		throw new Error(`MCP server returned invalid requestState while processing ${method}`);
+	}
+	if (result.inputRequests === undefined) {
+		if (result.requestState === undefined) {
+			throw new Error(`MCP server returned input_required without inputRequests or requestState for ${method}`);
+		}
+		return undefined;
+	}
+	if (!isRecord(result.inputRequests)) {
+		throw new Error(`MCP server returned invalid inputRequests while processing ${method}`);
+	}
+	if (Object.keys(result.inputRequests).length === 0 && result.requestState === undefined) {
+		throw new Error(`MCP server returned input_required without inputRequests or requestState for ${method}`);
+	}
+	const handler = connection.transport.onRequest;
+	if (!handler && Object.keys(result.inputRequests).length > 0) {
+		throw new Error(`MCP server requires unsupported client input while processing ${method}`);
+	}
+	const entries = await Promise.all(
+		Object.entries(result.inputRequests).map(async ([id, request]) => {
+			if (!isRecord(request) || typeof request.method !== "string") {
+				throw new Error(`MCP server returned an invalid input request while processing ${method}`);
+			}
+			if (request.method !== "roots/list") {
+				throw new Error(
+					`MCP server requested unsupported client input "${request.method}" while processing ${method}`,
+				);
+			}
+			if (request.params !== undefined && !isRecord(request.params)) {
+				throw new Error(`MCP server returned invalid input request params while processing ${method}`);
+			}
+			return [id, await handler!(request.method, request.params)] as const;
+		}),
+	);
+	return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
 async function requestFromServer<T>(
 	connection: MCPServerConnection,
 	method: string,
@@ -199,13 +262,16 @@ async function requestFromServer<T>(
 		if (result.resultType !== "input_required") {
 			throw new Error(`MCP server returned unsupported result type "${result.resultType}" for ${method}`);
 		}
-		if (isRecord(result.inputRequests) && Object.keys(result.inputRequests).length > 0) {
-			throw new Error(`MCP server requires unsupported client input while processing ${method}`);
+		if (method !== "tools/call" && method !== "prompts/get" && method !== "resources/read") {
+			throw new Error(`MCP server returned input_required for unsupported method ${method}`);
 		}
-		if (typeof result.requestState !== "string") {
-			throw new Error(`MCP server returned input_required without requestState for ${method}`);
-		}
-		requestParams = withModernRequestMeta({ ...params, requestState: result.requestState });
+		const inputRequired = result as unknown as MCPInputRequiredResult;
+		const inputResponses = await fulfillInputRequests(connection, inputRequired, method);
+		requestParams = withModernRequestMeta({
+			...params,
+			...(inputResponses === undefined ? {} : { inputResponses }),
+			...(inputRequired.requestState === undefined ? {} : { requestState: inputRequired.requestState }),
+		});
 	}
 	throw new Error(`MCP server exceeded ${MAX_MRTR_ROUND_TRIPS} input-required rounds for ${method}`);
 }
@@ -225,16 +291,94 @@ function updateCacheExpiry(
 ): void {
 	const runtime = connectionRuntimes.get(connection);
 	if (!runtime) return;
-	const expires = typeof result.ttlMs === "number" ? Date.now() + Math.max(0, result.ttlMs) : Number.POSITIVE_INFINITY;
+	const ttlMs =
+		connection.protocolVersion === MODERN_PROTOCOL_VERSION
+			? typeof result.ttlMs === "number"
+				? Math.max(0, result.ttlMs)
+				: 0
+			: Number.POSITIVE_INFINITY;
+	const expires = ttlMs === Number.POSITIVE_INFINITY ? ttlMs : Date.now() + ttlMs;
 	runtime.cacheExpires[key] = Math.min(runtime.cacheExpires[key] ?? Number.POSITIVE_INFINITY, expires);
+	if (connection.protocolVersion === MODERN_PROTOCOL_VERSION) {
+		const scope = result.cacheScope ?? "uncacheable";
+		const previousScope = runtime.cacheScopes[key];
+		runtime.cacheScopes[key] = previousScope === undefined ? scope : previousScope === scope ? scope : "uncacheable";
+	}
 }
 
-function startModernSubscriptionListener(connection: MCPServerConnection): void {
-	if (connection.protocolVersion !== MODERN_PROTOCOL_VERSION) return;
+export function getToolCachePolicy(
+	connection: MCPServerConnection,
+): { ttlMs?: number; cacheScope?: "public" | "private" } | undefined {
+	if (connection.protocolVersion !== MODERN_PROTOCOL_VERSION) return undefined;
 	const runtime = connectionRuntimes.get(connection);
-	if (!runtime) return;
-	runtime.subscriptionAbort?.abort();
-	const notifications = {
+	const expires = runtime?.cacheExpires.tools;
+	return {
+		ttlMs:
+			expires === undefined || expires === Number.POSITIVE_INFINITY ? undefined : Math.max(0, expires - Date.now()),
+		cacheScope:
+			runtime?.cacheScopes.tools === "public" || runtime?.cacheScopes.tools === "private"
+				? runtime.cacheScopes.tools
+				: undefined,
+	};
+}
+
+function settleSubscriptionError(state: MCPSubscriptionState, error: Error): void {
+	if (state.settled) return;
+	state.abort.abort(error);
+	state.settled = true;
+	state.reject(error);
+}
+function handleSubscriptionAcknowledgment(connection: MCPServerConnection, method: string, params: unknown): void {
+	if (method !== "notifications/subscriptions/acknowledged") return;
+	const runtime = connectionRuntimes.get(connection);
+	const state = runtime?.subscription;
+	if (!runtime || !state || !isRecord(params) || !isRecord(params._meta)) return;
+	const subscriptionId = params._meta["io.modelcontextprotocol/subscriptionId"];
+	if (state.requestId === undefined || subscriptionId === undefined || subscriptionId !== state.requestId) return;
+	if (!isRecord(params.notifications)) {
+		settleSubscriptionError(state, new Error("MCP server returned an invalid subscription acknowledgment"));
+		return;
+	}
+	for (const key of ["toolsListChanged", "promptsListChanged", "resourcesListChanged"] as const) {
+		const accepted = params.notifications[key];
+		if (
+			(accepted !== undefined && typeof accepted !== "boolean") ||
+			(accepted === true && state.requested[key] !== true)
+		) {
+			settleSubscriptionError(state, new Error("MCP server acknowledged an invalid subscription filter"));
+			return;
+		}
+	}
+	const acceptedValue = params.notifications.resourceSubscriptions;
+	const accepted =
+		acceptedValue === undefined
+			? []
+			: Array.isArray(acceptedValue) && acceptedValue.every(uri => typeof uri === "string")
+				? acceptedValue
+				: undefined;
+	if (!accepted || accepted.some(uri => !state.requested.resourceSubscriptions.includes(uri))) {
+		settleSubscriptionError(state, new Error("MCP server acknowledged an invalid resource subscription filter"));
+		return;
+	}
+	if (state.settled) return;
+	runtime.resourceSubscriptions = new Set(accepted);
+	state.settled = true;
+	state.resolve(accepted);
+}
+
+async function startModernSubscriptionListener(
+	connection: MCPServerConnection,
+	options?: MCPRequestOptions,
+): Promise<string[]> {
+	if (connection.protocolVersion !== MODERN_PROTOCOL_VERSION) return [];
+	const runtime = connectionRuntimes.get(connection);
+	if (!runtime) return [];
+	const previous = runtime.subscription;
+	if (previous) {
+		previous.abort.abort();
+		settleSubscriptionError(previous, new Error("MCP subscription was replaced"));
+	}
+	const notifications: MCPSubscriptionFilter = {
 		toolsListChanged: connection.capabilities.tools?.listChanged === true,
 		promptsListChanged: connection.capabilities.prompts?.listChanged === true,
 		resourcesListChanged: connection.capabilities.resources?.listChanged === true,
@@ -246,18 +390,64 @@ function startModernSubscriptionListener(connection: MCPServerConnection): void 
 		!notifications.resourcesListChanged &&
 		notifications.resourceSubscriptions.length === 0
 	) {
-		runtime.subscriptionAbort = undefined;
-		return;
+		runtime.subscription = undefined;
+		return [];
 	}
 	const abort = new AbortController();
-	runtime.subscriptionAbort = abort;
+	const acknowledged = Promise.withResolvers<string[]>();
+	const state: MCPSubscriptionState = {
+		abort,
+		requested: notifications,
+		settled: false,
+		resolve: acknowledged.resolve,
+		reject: acknowledged.reject,
+	};
+	runtime.subscription = state;
+	const acknowledgmentTimeoutMs = resolveMCPTimeoutMs(options?.timeout ?? connection.config.timeout);
+	let acknowledgmentTimer: NodeJS.Timeout | undefined;
+	const abortAcknowledgment = (): void => {
+		const reason = options?.signal?.reason;
+		settleSubscriptionError(state, reason instanceof Error ? reason : new Error("MCP subscription aborted"));
+	};
+	if (options?.signal?.aborted) {
+		abortAcknowledgment();
+	} else {
+		options?.signal?.addEventListener("abort", abortAcknowledgment, { once: true });
+		if (isMCPTimeoutEnabled(acknowledgmentTimeoutMs)) {
+			acknowledgmentTimer = setTimeout(() => {
+				settleSubscriptionError(
+					state,
+					new Error(
+						`MCP subscription acknowledgment timed out after ${describeMCPTimeout(acknowledgmentTimeoutMs)}`,
+					),
+				);
+			}, acknowledgmentTimeoutMs);
+		}
+	}
 	void requestFromServer<MCPResult>(
 		connection,
 		"subscriptions/listen",
 		{ notifications },
-		{ signal: abort.signal, timeout: 0 },
-	).catch(error => {
-		if (!abort.signal.aborted) logger.warn("MCP subscription listener stopped", { server: connection.name, error });
+		{
+			signal: abort.signal,
+			timeout: 0,
+			onRequestId: id => {
+				state.requestId = id;
+			},
+		},
+	)
+		.then(() => {
+			settleSubscriptionError(state, new Error("MCP subscription ended before acknowledgment"));
+		})
+		.catch(error => {
+			if (!abort.signal.aborted) {
+				logger.warn("MCP subscription listener stopped", { server: connection.name, error });
+			}
+			settleSubscriptionError(state, error instanceof Error ? error : new Error(String(error)));
+		});
+	return acknowledged.promise.finally(() => {
+		clearTimeout(acknowledgmentTimer);
+		options?.signal?.removeEventListener("abort", abortAcknowledgment);
 	});
 }
 
@@ -297,9 +487,13 @@ export async function connectToServer(
 			}
 		}
 		transport = await createTransport(config);
-		if (options?.onNotification) {
-			transport.onNotification = options.onNotification;
-		}
+		let connectionForNotifications: MCPServerConnection | undefined;
+		transport.onNotification = (method, params) => {
+			if (connectionForNotifications) {
+				handleSubscriptionAcknowledgment(connectionForNotifications, method, params);
+			}
+			options?.onNotification?.(method, params);
+		};
 
 		// Always handle standard MCP server-to-client requests (ping, roots/list).
 		// The initialize request declares roots capability, so we must respond to
@@ -332,8 +526,11 @@ export async function connectToServer(
 				instructions: handshake.instructions,
 				protocolVersion: handshake.protocolVersion,
 			};
-			connectionRuntimes.set(connection, { resourceSubscriptions: new Set(), cacheExpires: {} });
-			startModernSubscriptionListener(connection);
+			connectionRuntimes.set(connection, { resourceSubscriptions: new Set(), cacheExpires: {}, cacheScopes: {} });
+			connectionForNotifications = connection;
+			void startModernSubscriptionListener(connection).catch(error => {
+				logger.warn("MCP subscription acknowledgment failed", { server: connection.name, error });
+			});
 			return connection;
 		} catch (error) {
 			await transport.close();
@@ -379,6 +576,7 @@ export async function listTools(
 	}
 	connection.tools = undefined;
 	delete connectionRuntimes.get(connection)?.cacheExpires.tools;
+	delete connectionRuntimes.get(connection)?.cacheScopes.tools;
 
 	const allTools: MCPToolDefinition[] = [];
 	let cursor: string | undefined;
@@ -444,7 +642,11 @@ export async function callTool(
  * Disconnect from a server.
  */
 export async function disconnectServer(connection: MCPServerConnection): Promise<void> {
-	connectionRuntimes.get(connection)?.subscriptionAbort?.abort();
+	const subscription = connectionRuntimes.get(connection)?.subscription;
+	if (subscription) {
+		subscription.abort.abort();
+		settleSubscriptionError(subscription, new Error("MCP connection closed"));
+	}
 	await connection.transport.close();
 }
 
@@ -471,6 +673,7 @@ export async function listResources(
 	}
 	connection.resources = undefined;
 	delete connectionRuntimes.get(connection)?.cacheExpires.resources;
+	delete connectionRuntimes.get(connection)?.cacheScopes.resources;
 
 	const allResources: MCPResource[] = [];
 	let cursor: string | undefined;
@@ -521,6 +724,7 @@ export async function listResourceTemplates(
 	}
 	connection.resourceTemplates = undefined;
 	delete connectionRuntimes.get(connection)?.cacheExpires.resourceTemplates;
+	delete connectionRuntimes.get(connection)?.cacheScopes.resourceTemplates;
 
 	const allTemplates: MCPResourceTemplate[] = [];
 	let cursor: string | undefined;
@@ -581,14 +785,14 @@ export async function subscribeToResources(
 	connection: MCPServerConnection,
 	uris: string[],
 	options?: MCPRequestOptions,
-): Promise<void> {
-	if (uris.length === 0 || !connection.capabilities.resources?.subscribe) return;
+): Promise<string[]> {
+	if (uris.length === 0 || !connection.capabilities.resources?.subscribe) return [];
 	if (connection.protocolVersion === MODERN_PROTOCOL_VERSION) {
 		const runtime = connectionRuntimes.get(connection);
-		if (!runtime) return;
+		if (!runtime) return [];
 		for (const uri of uris) runtime.resourceSubscriptions.add(uri);
-		startModernSubscriptionListener(connection);
-		return;
+		const accepted = await startModernSubscriptionListener(connection, options);
+		return accepted.filter(uri => uris.includes(uri));
 	}
 	const results = await Promise.allSettled(
 		uris.map(uri => {
@@ -601,11 +805,15 @@ export async function subscribeToResources(
 			);
 		}),
 	);
-	for (const result of results) {
+	const accepted: string[] = [];
+	for (const [index, result] of results.entries()) {
 		if (result.status === "rejected") {
 			logger.warn("Failed to subscribe to MCP resource", { error: result.reason });
+		} else {
+			accepted.push(uris[index]!);
 		}
 	}
+	return accepted;
 }
 
 /**
@@ -621,7 +829,7 @@ export async function unsubscribeFromResources(
 		const runtime = connectionRuntimes.get(connection);
 		if (!runtime) return;
 		for (const uri of uris) runtime.resourceSubscriptions.delete(uri);
-		startModernSubscriptionListener(connection);
+		await startModernSubscriptionListener(connection, options);
 		return;
 	}
 	const results = await Promise.allSettled(
@@ -672,6 +880,7 @@ export async function listPrompts(
 	}
 	connection.prompts = undefined;
 	delete connectionRuntimes.get(connection)?.cacheExpires.prompts;
+	delete connectionRuntimes.get(connection)?.cacheScopes.prompts;
 
 	const allPrompts: MCPPrompt[] = [];
 	let cursor: string | undefined;
