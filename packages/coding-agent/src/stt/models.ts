@@ -15,7 +15,7 @@ import type { TinyModelDtype } from "../tiny/dtype";
  */
 
 /** ASR runtime that loads a given tier's model. */
-export type SttEngine = "transformers" | "sherpa";
+export type SttEngine = "transformers" | "sherpa" | "nemotron";
 
 interface SttModelBase {
 	/** Stable key persisted in `stt.modelName` and sent over the worker protocol. */
@@ -47,7 +47,21 @@ export interface SherpaSttModelSpec extends SttModelBase {
 	files: { encoder: string; decoder: string; joiner: string; tokens: string };
 }
 
-export type SttModelSpec = TransformersSttModelSpec | SherpaSttModelSpec;
+/**
+ * A FluidAudio streaming Nemotron tier decoded by the native Swift worker
+ * (`native/stt-nemotron`). True incremental CoreML/ANE streaming — no
+ * endpointer segmentation, live partials emitted per chunk. Apple Silicon only;
+ * when the worker binary is absent the client falls back to the sherpa worker.
+ */
+export interface NemotronSttModelSpec extends SttModelBase {
+	engine: "nemotron";
+	/** Streaming chunk tier in milliseconds (560/1120/2240/4480). */
+	chunkMs: number;
+	/** Cache variant: `latin` (vocab-pruned Latin scripts) vs `multilingual`. */
+	variantDir: "latin" | "multilingual";
+}
+
+export type SttModelSpec = TransformersSttModelSpec | SherpaSttModelSpec | NemotronSttModelSpec;
 
 /**
  * Speech model tiers, ordered light → SoTA. Defaults to {@link DEFAULT_STT_MODEL_KEY}.
@@ -103,6 +117,18 @@ export const STT_MODELS = [
 			"NVIDIA Parakeet TDT 0.6B v3, 25 languages. Open ASR Leaderboard leader — best accuracy and far fastest decoding. Default.",
 		sizeHint: "~680 MB",
 	},
+	{
+		key: "nemotron",
+		engine: "nemotron",
+		repo: "FluidInference/Nemotron-3.5-ASR-Streaming-Multilingual-0.6b-CoreML",
+		chunkMs: 1120,
+		variantDir: "latin",
+		englishOnly: false,
+		label: "Nemotron Streaming (FluidAudio)",
+		description:
+			"FluidAudio Nemotron 0.6B on CoreML/ANE. True live partial streaming (no speech-pause segmentation) and the lowest latency tier. Requires the bundled stt-nemotron native worker and Apple Silicon.",
+		sizeHint: "~600 MB",
+	},
 ] as const satisfies readonly SttModelSpec[];
 
 /**
@@ -116,7 +142,13 @@ export type SttModelKey = (typeof STT_MODELS)[number]["key"];
 /** A concrete entry from {@link STT_MODELS}; `key` is the literal tier union. */
 export type SttModel = (typeof STT_MODELS)[number];
 
-export const STT_MODEL_VALUES = ["fast", "balanced", "turbo", "parakeet"] as const satisfies readonly SttModelKey[];
+export const STT_MODEL_VALUES = [
+	"fast",
+	"balanced",
+	"turbo",
+	"parakeet",
+	"nemotron",
+] as const satisfies readonly SttModelKey[];
 
 type MissingSttModelValue = Exclude<SttModelKey, (typeof STT_MODEL_VALUES)[number]>;
 type ExtraSttModelValue = Exclude<(typeof STT_MODEL_VALUES)[number], SttModelKey>;

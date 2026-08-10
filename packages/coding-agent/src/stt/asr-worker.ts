@@ -378,7 +378,11 @@ async function loadModel(modelKey: SttModelKey, transport: SttTransport, request
 	const loading =
 		spec.engine === "sherpa"
 			? loadSherpaModel(spec, modelKey, transport, requestId)
-			: loadTransformersModel(spec, modelKey, transport, requestId);
+			: spec.engine === "transformers"
+				? loadTransformersModel(spec, modelKey, transport, requestId)
+				: Promise.reject(
+						new Error(`stt model '${modelKey}' runs on the native Nemotron worker, not the Bun speech worker`),
+					);
 	const loaded = loading.then(
 		model => {
 			transport.send({

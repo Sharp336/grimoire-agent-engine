@@ -14,7 +14,12 @@ import {
 import { tinyWorkerEnv } from "../tiny/title-client";
 import { safeSend } from "../utils/ipc";
 import type { SttProgressEvent, SttWorkerInbound, SttWorkerOutbound } from "./asr-protocol";
-import type { SttModelKey } from "./models";
+import { getSttModelSpec, type SttModelKey } from "./models";
+import {
+	createNemotronSttSubprocess,
+	createNemotronWorkerHandle,
+	resolveNemotronWorkerPath,
+} from "./nemotron-worker-client";
 
 type PendingRequest =
 	| { kind: "transcribe"; modelKey: SttModelKey; resolve: (text: string) => void; reject: (error: Error) => void }
@@ -121,8 +126,39 @@ function spawnSttWorker(): RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOut
 	);
 }
 
+/** Transport backing a spawned worker: BunIPC sherpa/transformers vs the native Swift Nemotron binary. */
+type SttWorkerTransport = "bun" | "native";
+
+/** Transport a tier needs if spawned right now, without spawning anything. */
+function spawnTransportFor(modelKey: SttModelKey): SttWorkerTransport {
+	return getSttModelSpec(modelKey)?.engine === "nemotron" && resolveNemotronWorkerPath() ? "native" : "bun";
+}
+
+/**
+ * Pick the transport a tier needs and spawn that worker. Nemotron prefers the
+ * native Swift binary when it resolves; otherwise it falls back to the Bun
+ * worker (where the unknown tier fails fast with a clear error instead of a
+ * silent substitution).
+ */
+function spawnSttWorkerFor(modelKey: SttModelKey): {
+	worker: RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound>;
+	transport: SttWorkerTransport;
+} {
+	if (spawnTransportFor(modelKey) === "native") {
+		const worker = spawnWorkerOrUnavailable(
+			() => createNemotronWorkerHandle(createNemotronSttSubprocess()),
+			spawnInlineUnavailableWorker,
+			"nemotron stt worker spawn failed; speech-to-text disabled",
+		);
+		return { worker, transport: "native" };
+	}
+	return { worker: spawnSttWorker(), transport: "bun" };
+}
+
 export class SttClient {
 	#worker: RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound> | null = null;
+	/** Transport of the live worker; `null` when none is running. */
+	#workerTransport: SttWorkerTransport | null = null;
 	#unsubscribeMessage: (() => void) | null = null;
 	#unsubscribeError: (() => void) | null = null;
 	#pending = new Map<string, PendingRequest>();
@@ -130,9 +166,10 @@ export class SttClient {
 	#progressListeners = new Set<(event: SttProgressEvent) => void>();
 	#nextRequestId = 0;
 	#refed = false;
-	#spawnWorker: () => RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound>;
+	/** Test seam; `undefined` routes spawns through {@link spawnSttWorkerFor}. */
+	#spawnWorker: (() => RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound>) | undefined;
 
-	constructor(spawnWorker: () => RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound> = spawnSttWorker) {
+	constructor(spawnWorker?: () => RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound>) {
 		this.#spawnWorker = spawnWorker;
 	}
 
@@ -148,7 +185,7 @@ export class SttClient {
 	 */
 	async transcribe(modelKey: SttModelKey, audio: Float32Array, options: SttTranscribeOptions = {}): Promise<string> {
 		options.signal?.throwIfAborted();
-		const worker = this.#ensureWorker();
+		const worker = this.#ensureWorker(modelKey);
 		const id = String(++this.#nextRequestId);
 		const { promise, resolve, reject } = Promise.withResolvers<string>();
 		this.#addPending(id, { kind: "transcribe", modelKey, resolve, reject });
@@ -176,7 +213,7 @@ export class SttClient {
 	 * an aborted signal) tears the session down and resolves `stop()` with "".
 	 */
 	startStream(modelKey: SttModelKey, options: SttStreamOptions = {}): SttStreamHandle {
-		const worker = this.#ensureWorker();
+		const worker = this.#ensureWorker(modelKey);
 		const id = String(++this.#nextRequestId);
 		const { promise, resolve, reject } = Promise.withResolvers<string>();
 		// `stop()` is normally the only awaiter of `promise`, but with model loading
@@ -229,7 +266,7 @@ export class SttClient {
 		if (options.signal?.aborted) return { ok: false };
 		const unsubscribe = options.onProgress ? this.onProgress(options.onProgress) : undefined;
 		try {
-			const worker = this.#ensureWorker();
+			const worker = this.#ensureWorker(modelKey);
 			const id = String(++this.#nextRequestId);
 			const { promise, resolve } = Promise.withResolvers<SttDownloadResult>();
 			this.#addPending(id, { kind: "download", modelKey, resolve });
@@ -262,6 +299,7 @@ export class SttClient {
 	async terminate(): Promise<void> {
 		const worker = this.#worker;
 		this.#worker = null;
+		this.#workerTransport = null;
 		this.#unsubscribeMessage?.();
 		this.#unsubscribeMessage = null;
 		this.#unsubscribeError?.();
@@ -281,13 +319,35 @@ export class SttClient {
 		}
 	}
 
-	#ensureWorker(): RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound> {
-		if (this.#worker) return this.#worker;
-		const worker = this.#spawnWorker();
+	#ensureWorker(modelKey: SttModelKey): RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound> {
+		if (this.#spawnWorker) {
+			if (this.#worker) return this.#worker;
+			const worker = this.#spawnWorker();
+			this.#adoptWorker(worker, null);
+			return worker;
+		}
+		// Auto-routed spawns: a model tier may demand a different transport than
+		// the live worker (e.g. switching from sherpa Parakeet to the native
+		// Nemotron binary). terminate() clears the worker synchronously before
+		// its async kill, so spawning right after the fire-and-forget call is
+		// safe; stale in-flight work fails via the termination path.
+		if (this.#worker && this.#workerTransport === spawnTransportFor(modelKey)) return this.#worker;
+		if (this.#worker) void this.terminate();
+		const { worker, transport } = spawnSttWorkerFor(modelKey);
+		this.#adoptWorker(worker, transport);
+		return worker;
+	}
+
+	#adoptWorker(
+		worker: RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound>,
+		transport: SttWorkerTransport | null,
+	): void {
 		this.#worker = worker;
+		this.#workerTransport = transport;
 		this.#unsubscribeMessage = worker.onMessage(message => this.#handleMessage(message));
 		this.#unsubscribeError = worker.onError(error => this.#handleWorkerError(error));
-		return worker;
+		this.#refed = false;
+		this.#syncWorkerRef();
 	}
 
 	/** Register a pending request and keep the worker referenced while work is in flight. */

@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { getTinyModelsCacheDir } from "@oh-my-pi/pi-utils";
 import { sttClient } from "./asr-client";
@@ -47,6 +48,30 @@ export interface SttDownloadProgress {
  */
 export async function isSttModelCached(key: string): Promise<boolean> {
 	const spec = resolveSttModelSpec(key);
+	if (spec.engine === "nemotron") {
+		// FluidAudio cache layout (shared with VoxKey): <Application
+		// Support>/FluidAudio/Models/nemotron-multilingual/<variant>/<chunkMs>ms/.
+		// `Repo.folderName` — *not* the HuggingFace repo id — is the on-disk name.
+		// Requires the variant metadata, tokenizer, and at least one compiled
+		// CoreML bundle.
+		try {
+			const variantDir = path.join(
+				os.homedir(),
+				"Library/Application Support/FluidAudio/Models",
+				"nemotron-multilingual",
+				spec.variantDir,
+				`${spec.chunkMs}ms`,
+			);
+			const root = new Set(await fs.readdir(variantDir));
+			if (!root.has("metadata.json") || !root.has("tokenizer.json")) return false;
+			for (const name of root) {
+				if (name.endsWith(".mlmodelc")) return true;
+			}
+			return false;
+		} catch {
+			return false;
+		}
+	}
 	const repoDir = path.join(getTinyModelsCacheDir(), spec.repo);
 	if (spec.engine === "sherpa") {
 		try {

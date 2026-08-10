@@ -31,7 +31,8 @@
     "omp": "src/cli.ts"
   },
   "scripts": {
-    "build": "bun scripts/build-binary.ts",
+		"build": "bun scripts/build-binary.ts",
+		"build:stt-worker": "bun scripts/build-stt-worker.ts",
     "check": "biome check . && bun run check:types",
     "check:types": "tsgo -p tsconfig.json --noEmit",
     "lint": "biome lint .",
