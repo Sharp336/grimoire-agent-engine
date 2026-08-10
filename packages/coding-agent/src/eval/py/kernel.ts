@@ -44,7 +44,7 @@ const RUNNER_CACHE_DIR = path.join(os.tmpdir(), "omp-python-runner");
 let RUNNER_SCRIPT_PATH: string | null = null;
 
 async function ensureRunnerScript(): Promise<string> {
-	if (RUNNER_SCRIPT_PATH) return RUNNER_SCRIPT_PATH;
+	if (RUNNER_SCRIPT_PATH && fs.existsSync(RUNNER_SCRIPT_PATH)) return RUNNER_SCRIPT_PATH;
 	await fs.promises.mkdir(RUNNER_CACHE_DIR, { recursive: true });
 	const hash = Bun.hash(RUNNER_SCRIPT).toString(36);
 	const target = path.join(RUNNER_CACHE_DIR, `runner-${hash}.py`);
