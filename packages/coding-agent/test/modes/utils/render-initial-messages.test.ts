@@ -75,6 +75,7 @@ function makeCtx(): {
 		session: { buildTranscriptSessionContext: transcriptSpy },
 		viewSession: {
 			buildTranscriptSessionContext: transcriptSpy,
+			hasBuiltInTool: () => true,
 			sessionManager: {
 				buildSessionContext: llmContextSpy,
 				getEntries: vi.fn(() => []),

@@ -5,12 +5,20 @@
 ### Added
 
 - Added Amazon Bedrock Converse Stream runtime discovery via the Bedrock control plane (`ListInferenceProfiles` / `ListFoundationModels`) across the ambient partition's regions (GovCloud east+west, common commercial regions) so authenticated AWS profiles surface the inference profiles and on-demand text models available in the account instead of relying only on the static catalog. Discovery fails closed (retains the static catalog) on incomplete control-plane results, inherits metadata from underlying model ARNs for application profiles, and only emits models that match the shared Bedrock eligibility policy plus a bundled reference.
+## [17.2.12] - 2026-08-08
 
 ### Fixed
 
-- Widened the Amazon Bedrock stream idle-timeout floor for reasoning models (600s, matching the GLM coding-plan floor) and for adaptive-thinking Claude — Opus 4.7+, Sonnet/Opus 5, and Fable/Mythos 5, where stalls were most frequent — to 900s, matching the tolerance direct Anthropic gets from ping keepalives. Bedrock ConverseStream sends no keepalive events, so long quiet reasoning stretches previously tripped the generic 300s watchdog with `Provider stream stalled while waiting for the next event` during plan writing and todo execution. Explicit `compat.streamIdleTimeoutMs` overrides still win (`0` disables the watchdog) ([#7892](https://github.com/can1357/oh-my-pi/pull/7892) by [@voonfoo](https://github.com/voonfoo)).
-- Fixed current Devin model families, including SWE-1.7, Claude 5, Gemini 3.6 Flash, Kimi K3, Grok 4.5, and Inkling, appearing as separate wire variants instead of logical models with reasoning-effort routing.
-- Filled in context-window and output-token limits for known dynamically discovered Alibaba Token Plan models ([#7849](https://github.com/can1357/oh-my-pi/pull/7849) by [@Mustaqeem66](https://github.com/Mustaqeem66)).
+- Fixed dynamically discovered `alibaba-token-plan/qwen3.8-max` metadata so thinking controls and image input are available ([#8019](https://github.com/can1357/oh-my-pi/issues/8019)).
+- Routed `opencode-go/deepseek-v4-flash` through the OpenAI responses API — the OpenCode Go gateway does not serve this model at `/zen/go/v1/chat/completions`, only at `/zen/go/v1/responses` (`deepseek-v4-pro` keeps chat completions).
+
+## [17.2.11] - 2026-08-07
+
+### Fixed
+
+- Increased the default stream idle-timeout floor on Amazon Bedrock to 900 seconds for reasoning and adaptive-thinking models (such as Claude) to prevent premature watchdog timeouts during long reasoning stretches.
+- Fixed Devin model families (including SWE-1.7, Claude 5, Gemini 3.6 Flash, Kimi K3, Grok 4.5, and Inkling) to correctly group as logical models with reasoning-effort routing instead of separate wire variants.
+- Added missing context-window and output-token limits for dynamically discovered Alibaba Token Plan models.
 
 ## [17.2.10] - 2026-08-06
 
