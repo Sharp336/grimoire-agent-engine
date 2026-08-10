@@ -363,7 +363,10 @@ describe("MCP 2026-07-28 protocol negotiation", () => {
 
 		await disconnectServer(connection);
 	});
-	it("bounds the wait for a subscription acknowledgment", async () => {
+	it("rolls back resource filters when acknowledgment times out", async () => {
+		const rejectedUri = "file:///workspace/rejected.json";
+		const acceptedUri = "file:///workspace/accepted.json";
+		const requestedNotifications: unknown[] = [];
 		server = Bun.serve({
 			port: 0,
 			async fetch(request) {
@@ -378,9 +381,23 @@ describe("MCP 2026-07-28 protocol negotiation", () => {
 					});
 				}
 				if (rpc.method === "subscriptions/listen") {
-					return new Response(new ReadableStream<Uint8Array>(), {
-						headers: { "Content-Type": "text/event-stream" },
-					});
+					requestedNotifications.push(rpc.params.notifications);
+					if (requestedNotifications.length === 1) {
+						return new Response(new ReadableStream<Uint8Array>(), {
+							headers: { "Content-Type": "text/event-stream" },
+						});
+					}
+					return new Response(
+						`data: ${JSON.stringify({
+							jsonrpc: "2.0",
+							method: "notifications/subscriptions/acknowledged",
+							params: {
+								_meta: { "io.modelcontextprotocol/subscriptionId": rpc.id },
+								notifications: { resourceSubscriptions: [acceptedUri] },
+							},
+						})}\n\n`,
+						{ headers: { "Content-Type": "text/event-stream" } },
+					);
 				}
 				return new Response("unexpected method", { status: 500 });
 			},
@@ -391,9 +408,24 @@ describe("MCP 2026-07-28 protocol negotiation", () => {
 			protocolMode: "2026-07-28",
 			url: `http://127.0.0.1:${server.port}/mcp`,
 		});
-		await expect(
-			subscribeToResources(connection, ["file:///workspace/config.json"], { timeout: 50 }),
-		).rejects.toThrow("MCP subscription acknowledgment timed out after 50ms");
+		await expect(subscribeToResources(connection, [rejectedUri], { timeout: 50 })).rejects.toThrow(
+			"MCP subscription acknowledgment timed out after 50ms",
+		);
+		await expect(subscribeToResources(connection, [acceptedUri])).resolves.toEqual([acceptedUri]);
+		expect(requestedNotifications).toEqual([
+			{
+				toolsListChanged: false,
+				promptsListChanged: false,
+				resourcesListChanged: false,
+				resourceSubscriptions: [rejectedUri],
+			},
+			{
+				toolsListChanged: false,
+				promptsListChanged: false,
+				resourcesListChanged: false,
+				resourceSubscriptions: [acceptedUri],
+			},
+		]);
 		await disconnectServer(connection);
 	});
 

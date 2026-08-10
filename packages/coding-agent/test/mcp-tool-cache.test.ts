@@ -71,7 +71,7 @@ describe("MCP persistent tool cache policy", () => {
 });
 
 describe("MCP cached deferred tools", () => {
-	it("propagates cached x-mcp-header arguments before live tools/list resolves", async () => {
+	it("uses cached headers before live list and fresh headers afterward", async () => {
 		const modernConfig: MCPServerConfig = {
 			type: "http",
 			protocolMode: "2026-07-28",
@@ -88,11 +88,22 @@ describe("MCP cached deferred tools", () => {
 				required: ["tenant"],
 			},
 		};
+		const liveTool: MCPToolDefinition = {
+			...cachedTool,
+			inputSchema: {
+				type: "object",
+				properties: {
+					tenant: { type: "string", "x-mcp-header": "Account" },
+				},
+				required: ["tenant"],
+			},
+		};
 		const { cache } = createCache();
 
 		const listStarted = Promise.withResolvers<void>();
 		const listGate = Promise.withResolvers<void>();
-		const captured = { header: null as string | null };
+		const liveLoaded = Promise.withResolvers<void>();
+		const captured: Array<{ tenant: string | null; account: string | null }> = [];
 		server = Bun.serve({
 			port: 0,
 			async fetch(request) {
@@ -118,13 +129,16 @@ describe("MCP cached deferred tools", () => {
 							id: body.id,
 							result: {
 								resultType: "complete",
-								tools: [cachedTool],
+								tools: [liveTool],
 								ttlMs: 60_000,
 								cacheScope: "public",
 							},
 						});
 					case "tools/call":
-						captured.header = request.headers.get("Mcp-Param-Tenant");
+						captured.push({
+							tenant: request.headers.get("Mcp-Param-Tenant"),
+							account: request.headers.get("Mcp-Param-Account"),
+						});
 						return Response.json({
 							jsonrpc: "2.0",
 							id: body.id,
@@ -142,6 +156,7 @@ describe("MCP cached deferred tools", () => {
 		const config = { ...modernConfig, url: `http://127.0.0.1:${server.port}/mcp` };
 		await cache.set("modern", config, [cachedTool], { cacheScope: "public", ttlMs: 60_000 });
 		const manager = new MCPManager(process.cwd(), cache);
+		manager.setOnToolsChanged(() => liveLoaded.resolve());
 		const resultPromise = manager.connectServers({ modern: config }, {});
 		await listStarted.promise;
 
@@ -152,7 +167,12 @@ describe("MCP cached deferred tools", () => {
 			if (!deferred) throw new Error("cached deferred tool was not loaded");
 
 			await deferred.execute("call-1", { tenant: "acme" }, undefined, {} as CustomToolContext);
-			expect(captured.header).toBe("acme");
+			expect(captured[0]).toEqual({ tenant: "acme", account: null });
+
+			listGate.resolve();
+			await liveLoaded.promise;
+			await deferred.execute("call-2", { tenant: "acme" }, undefined, {} as CustomToolContext);
+			expect(captured[1]).toEqual({ tenant: null, account: "acme" });
 		} finally {
 			listGate.resolve();
 			await manager.disconnectAll();

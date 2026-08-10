@@ -724,7 +724,7 @@ export async function callTool(
 		arguments: args,
 	};
 
-	const tool = toolDefinition ?? connection.tools?.find(candidate => candidate.name === toolName);
+	const tool = connection.tools?.find(candidate => candidate.name === toolName) ?? toolDefinition;
 	const bindings = tool ? resolveToolHeaderBindings(connection, tool).bindings : undefined;
 	const generatedHeaders = bindings ? buildToolParameterHeaders(bindings, args) : undefined;
 	return requestFromServer<MCPToolCallResult>(
@@ -893,9 +893,16 @@ export async function subscribeToResources(
 	if (connection.protocolVersion === MODERN_PROTOCOL_VERSION) {
 		const runtime = connectionRuntimes.get(connection);
 		if (!runtime) return [];
+		const previousSubscriptions = new Set(runtime.resourceSubscriptions);
 		for (const uri of uris) runtime.resourceSubscriptions.add(uri);
-		const accepted = await startModernSubscriptionListener(connection, options);
-		return accepted.filter(uri => uris.includes(uri));
+		try {
+			const accepted = await startModernSubscriptionListener(connection, options);
+			return accepted.filter(uri => uris.includes(uri));
+		} catch (error) {
+			runtime.resourceSubscriptions = previousSubscriptions;
+			scheduleSubscriptionRestart(connection);
+			throw error;
+		}
 	}
 	const results = await Promise.allSettled(
 		uris.map(uri => {
