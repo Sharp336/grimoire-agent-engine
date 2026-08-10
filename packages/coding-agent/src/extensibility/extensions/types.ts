@@ -717,12 +717,14 @@ export interface MessageEndEvent {
 	message: AgentMessage;
 }
 
-/** Fired when a tool starts executing */
+/** Fired when a tool call reaches the execution or synthetic-result boundary. */
 export interface ToolExecutionStartEvent {
 	type: "tool_execution_start";
 	toolCallId: string;
 	toolName: string;
 	args: unknown;
+	/** False when no tool implementation ran; absent only for legacy or direct-dispatch emitters. */
+	executed?: boolean;
 	intent?: string;
 }
 

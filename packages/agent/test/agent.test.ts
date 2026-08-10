@@ -702,6 +702,13 @@ describe("Agent", () => {
 			},
 		});
 
+		const executionStart = events.find(event => event.type === "tool_execution_start");
+		expect(executionStart).toMatchObject({
+			type: "tool_execution_start",
+			toolCallId: "tool-1",
+			executed: false,
+		});
+
 		const turnEnd = events.find(event => event.type === "turn_end");
 		expect(turnEnd).toMatchObject({
 			type: "turn_end",

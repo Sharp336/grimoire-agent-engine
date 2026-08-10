@@ -23,6 +23,7 @@ import type {
 	ProviderTimeSeriesPoint,
 	TimeSeriesPoint,
 	ToolCallStats,
+	ToolInvocationLink,
 	ToolModelStats,
 	ToolResultLink,
 	ToolTimeSeriesPoint,
@@ -62,7 +63,7 @@ const USER_MESSAGE_LINKS_REPAIR_KEY = "user_message_links_v1";
 const PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY = "premium_requests_priority_v1";
 const AGENT_TYPE_BACKFILL_KEY = "agent_type_v1";
 const FORK_DEDUPE_KEY = "fork_dedupe_v1";
-const TOOL_CALLS_BACKFILL_KEY = "tool_calls_v1";
+const TOOL_CALLS_BACKFILL_KEY = "tool_calls_v2";
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
@@ -162,10 +163,13 @@ export async function initDb(): Promise<Database> {
 			model TEXT NOT NULL,
 			provider TEXT NOT NULL,
 			timestamp INTEGER NOT NULL,
+			started_at INTEGER,
+			execution_observed INTEGER,
 			agent_type TEXT NOT NULL DEFAULT 'main',
 			calls_in_turn INTEGER NOT NULL DEFAULT 1,
 			args_chars INTEGER NOT NULL DEFAULT 0,
 			result_chars INTEGER,
+			duration_ms INTEGER,
 			is_error INTEGER,
 			UNIQUE(session_file, tool_call_id)
 		);
@@ -173,6 +177,13 @@ export async function initDb(): Promise<Database> {
 		CREATE INDEX IF NOT EXISTS idx_tool_calls_timestamp ON tool_calls(timestamp);
 		CREATE INDEX IF NOT EXISTS idx_tool_calls_tool_timestamp ON tool_calls(tool_name, timestamp);
 
+		CREATE TABLE IF NOT EXISTS pending_tool_invocations (
+			session_file TEXT NOT NULL,
+			tool_call_id TEXT NOT NULL,
+			started_at INTEGER NOT NULL,
+			execution_observed INTEGER NOT NULL,
+			PRIMARY KEY (session_file, tool_call_id)
+		);
 		CREATE TABLE IF NOT EXISTS meta (
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL
@@ -227,6 +238,16 @@ export async function initDb(): Promise<Database> {
 	const userMessageColumns = db.prepare("PRAGMA table_info(user_messages)").all() as {
 		name: string;
 	}[];
+	const toolCallColumns = db.prepare("PRAGMA table_info(tool_calls)").all() as { name: string }[];
+	if (!toolCallColumns.some(column => column.name === "duration_ms")) {
+		db.run("ALTER TABLE tool_calls ADD COLUMN duration_ms INTEGER");
+	}
+	if (!toolCallColumns.some(column => column.name === "started_at")) {
+		db.run("ALTER TABLE tool_calls ADD COLUMN started_at INTEGER");
+	}
+	if (!toolCallColumns.some(column => column.name === "execution_observed")) {
+		db.run("ALTER TABLE tool_calls ADD COLUMN execution_observed INTEGER");
+	}
 	const hasStaleColumn =
 		userMessageColumns.length > 0 &&
 		(userMessageColumns.some(column => column.name === "caps_words") ||
@@ -1521,6 +1542,21 @@ export function insertToolCalls(calls: ToolCallStats[]): number {
 			WHERE entry_id = ? AND timestamp = ? AND tool_call_id = ? AND session_file <> ?
 		)
 	`);
+	const applyPendingInvocation = db.prepare(`
+		WITH pending AS (
+			SELECT started_at, execution_observed
+			FROM pending_tool_invocations
+			WHERE session_file = ? AND tool_call_id = ?
+		)
+		UPDATE tool_calls
+		SET started_at = (SELECT started_at FROM pending),
+			execution_observed = (SELECT execution_observed FROM pending)
+		WHERE session_file = ? AND tool_call_id = ? AND EXISTS (SELECT 1 FROM pending)
+	`);
+	const deletePendingInvocation = db.prepare(`
+		DELETE FROM pending_tool_invocations
+		WHERE session_file = ? AND tool_call_id = ?
+	`);
 
 	let inserted = 0;
 	const insert = db.transaction(() => {
@@ -1545,10 +1581,43 @@ export function insertToolCalls(calls: ToolCallStats[]): number {
 				c.sessionFile,
 			);
 			if (result.changes > 0) inserted++;
+			applyPendingInvocation.run(c.sessionFile, c.toolCallId, c.sessionFile, c.toolCallId);
+			deletePendingInvocation.run(c.sessionFile, c.toolCallId);
 		}
 	});
 	insert();
 	return inserted;
+}
+
+/** Persist execution-boundary timing and whether the tool implementation ran. */
+export function updateToolInvocations(links: ToolInvocationLink[]): number {
+	if (!db || links.length === 0) return 0;
+	const stmt = db.prepare(`
+		UPDATE tool_calls
+		SET started_at = ?, execution_observed = ?
+		WHERE session_file = ? AND tool_call_id = ?
+	`);
+	const retain = db.prepare(`
+		INSERT OR REPLACE INTO pending_tool_invocations (
+			session_file, tool_call_id, started_at, execution_observed
+		)
+		VALUES (?, ?, ?, ?)
+	`);
+	const discard = db.prepare(`
+		DELETE FROM pending_tool_invocations
+		WHERE session_file = ? AND tool_call_id = ?
+	`);
+	let updated = 0;
+	const apply = db.transaction(() => {
+		for (const link of links) {
+			retain.run(link.sessionFile, link.toolCallId, link.timestamp, link.executed ? 1 : 0);
+			const changes = stmt.run(link.timestamp, link.executed ? 1 : 0, link.sessionFile, link.toolCallId).changes;
+			updated += changes;
+			if (changes > 0) discard.run(link.sessionFile, link.toolCallId);
+		}
+	});
+	apply();
+	return updated;
 }
 
 /**
@@ -1563,14 +1632,32 @@ export function updateToolResults(links: ToolResultLink[]): number {
 
 	const stmt = db.prepare(`
 		UPDATE tool_calls
-		SET result_chars = ?, is_error = ?
+		SET result_chars = ?,
+			execution_observed = COALESCE(?, execution_observed),
+			duration_ms = CASE
+				WHEN ? = 0 OR COALESCE(?, execution_observed) = 0 THEN NULL
+				WHEN started_at IS NULL AND ? < timestamp THEN NULL
+				ELSE MAX(0, ? - COALESCE(started_at, timestamp))
+			END,
+			is_error = ?
 		WHERE session_file = ? AND tool_call_id = ? AND result_chars IS NULL
 	`);
 
 	let updated = 0;
 	const apply = db.transaction(() => {
 		for (const link of links) {
-			const result = stmt.run(link.resultChars, link.isError ? 1 : 0, link.sessionFile, link.toolCallId);
+			const executionObserved = link.executed === false ? 0 : null;
+			const result = stmt.run(
+				link.resultChars,
+				executionObserved,
+				executionObserved,
+				executionObserved,
+				link.timestamp,
+				link.timestamp,
+				link.isError ? 1 : 0,
+				link.sessionFile,
+				link.toolCallId,
+			);
 			updated += result.changes;
 		}
 	});
@@ -1588,11 +1675,15 @@ const TOOL_AGGREGATE_COLUMNS = `
 	SUM(CASE WHEN t.is_error = 1 THEN 1 ELSE 0 END) as errors,
 	SUM(t.args_chars) as args_chars,
 	SUM(COALESCE(t.result_chars, 0)) as result_chars,
-	SUM(COALESCE(m.total_tokens, 0) * 1.0 / t.calls_in_turn) as total_tokens_share,
-	SUM(COALESCE(m.output_tokens, 0) * 1.0 / t.calls_in_turn) as output_tokens_share,
-	SUM(COALESCE(m.cost_total, 0) / t.calls_in_turn) as cost_share,
+	COUNT(t.duration_ms) as duration_samples,
 	MAX(t.timestamp) as last_used
 `;
+const TOOL_SHARE_COLUMNS = `
+	SUM(COALESCE(m.total_tokens, 0) * 1.0 / t.calls_in_turn) as total_tokens_share,
+	SUM(COALESCE(m.output_tokens, 0) * 1.0 / t.calls_in_turn) as output_tokens_share,
+	SUM(COALESCE(m.cost_total, 0) / t.calls_in_turn) as cost_share
+`;
+const TOOL_AGGREGATE_SELECT = `${TOOL_AGGREGATE_COLUMNS}, ${TOOL_SHARE_COLUMNS}`;
 
 interface ToolAggregateRow {
 	tool_name: string;
@@ -1602,19 +1693,94 @@ interface ToolAggregateRow {
 	errors: number;
 	args_chars: number | null;
 	result_chars: number | null;
+	duration_samples: number | null;
 	total_tokens_share: number | null;
 	output_tokens_share: number | null;
 	cost_share: number | null;
 	last_used: number;
 }
 
-function rowToToolUsage(row: ToolAggregateRow): ToolUsageStats {
+interface DurationRankRow {
+	tool_name: string;
+	model?: string;
+	provider?: string;
+	duration_ms: number;
+	duration_index: number;
+	duration_samples: number;
+}
+
+interface DurationPercentiles {
+	median: number;
+	p90: number;
+}
+
+const ZERO_DURATION_PERCENTILES: DurationPercentiles = { median: 0, p90: 0 };
+
+function durationGroupKey(row: Pick<DurationRankRow, "tool_name" | "model" | "provider">, byModel: boolean): string {
+	return JSON.stringify(byModel ? [row.tool_name, row.model ?? null, row.provider ?? null] : [row.tool_name]);
+}
+
+function durationPercentilesByGroup(byModel: boolean, cutoff?: number): Map<string, DurationPercentiles> {
+	if (!db) return new Map();
+	const groupColumns = byModel ? "t.tool_name, t.model, t.provider" : "t.tool_name";
+	const selectedGroupColumns = byModel ? "tool_name, model, provider" : "tool_name";
+	const hasCutoff = cutoff !== undefined && cutoff > 0;
+	const rows = db
+		.prepare(`
+			WITH ordered AS (
+				SELECT ${groupColumns}, t.duration_ms,
+					ROW_NUMBER() OVER (PARTITION BY ${groupColumns} ORDER BY t.duration_ms) - 1 AS duration_index,
+					COUNT(*) OVER (PARTITION BY ${groupColumns}) AS duration_samples
+				FROM tool_calls t
+				WHERE t.duration_ms IS NOT NULL${hasCutoff ? " AND t.timestamp >= ?" : ""}
+			),
+			bounds AS (
+				SELECT *,
+					(duration_samples - 1) * 0.5 AS median_index,
+					(duration_samples - 1) * 0.9 AS p90_index
+				FROM ordered
+			)
+			SELECT ${selectedGroupColumns}, duration_ms, duration_index, duration_samples
+			FROM bounds
+			WHERE duration_index IN (
+				CAST(median_index AS INTEGER),
+				CAST(median_index AS INTEGER) + (median_index > CAST(median_index AS INTEGER)),
+				CAST(p90_index AS INTEGER),
+				CAST(p90_index AS INTEGER) + (p90_index > CAST(p90_index AS INTEGER))
+			)
+			ORDER BY ${selectedGroupColumns}, duration_index
+		`)
+		.all(...(hasCutoff ? [cutoff] : [])) as DurationRankRow[];
+	const grouped = new Map<string, { samples: number; values: Map<number, number> }>();
+	for (const row of rows) {
+		const key = durationGroupKey(row, byModel);
+		const group = grouped.get(key) ?? { samples: row.duration_samples, values: new Map<number, number>() };
+		group.values.set(row.duration_index, row.duration_ms);
+		grouped.set(key, group);
+	}
+	const result = new Map<string, DurationPercentiles>();
+	for (const [key, group] of grouped) {
+		const interpolate = (percentile: number): number => {
+			const index = (group.samples - 1) * percentile;
+			const lower = group.values.get(Math.floor(index)) ?? 0;
+			const upper = group.values.get(Math.ceil(index)) ?? lower;
+			return lower + (upper - lower) * (index - Math.floor(index));
+		};
+		result.set(key, { median: interpolate(0.5), p90: interpolate(0.9) });
+	}
+	return result;
+}
+
+function rowToToolUsage(row: ToolAggregateRow, duration: { median: number; p90: number }): ToolUsageStats {
 	return {
 		tool: row.tool_name,
 		calls: row.calls,
 		errors: row.errors,
 		argsChars: row.args_chars ?? 0,
 		resultChars: row.result_chars ?? 0,
+		durationMsMedian: duration.median,
+		durationMsP90: duration.p90,
+		durationSamples: row.duration_samples ?? 0,
 		totalTokensShare: row.total_tokens_share ?? 0,
 		outputTokensShare: row.output_tokens_share ?? 0,
 		costShare: row.cost_share ?? 0,
@@ -1630,7 +1796,7 @@ export function getToolStats(cutoff?: number): ToolUsageStats[] {
 
 	const hasCutoff = cutoff !== undefined && cutoff > 0;
 	const stmt = db.prepare(`
-		SELECT t.tool_name, ${TOOL_AGGREGATE_COLUMNS}
+		SELECT t.tool_name, ${TOOL_AGGREGATE_SELECT}
 		FROM tool_calls t
 		LEFT JOIN messages m ON m.session_file = t.session_file AND m.entry_id = t.entry_id
 		${hasCutoff ? "WHERE t.timestamp >= ?" : ""}
@@ -1639,7 +1805,10 @@ export function getToolStats(cutoff?: number): ToolUsageStats[] {
 	`);
 
 	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as ToolAggregateRow[];
-	return rows.map(rowToToolUsage);
+	const durationByGroup = durationPercentilesByGroup(false, cutoff);
+	return rows.map(row =>
+		rowToToolUsage(row, durationByGroup.get(durationGroupKey(row, false)) ?? ZERO_DURATION_PERCENTILES),
+	);
 }
 
 /**
@@ -1650,7 +1819,7 @@ export function getToolStatsByModel(cutoff?: number): ToolModelStats[] {
 
 	const hasCutoff = cutoff !== undefined && cutoff > 0;
 	const stmt = db.prepare(`
-		SELECT t.tool_name, t.model, t.provider, ${TOOL_AGGREGATE_COLUMNS}
+		SELECT t.tool_name, t.model, t.provider, ${TOOL_AGGREGATE_SELECT}
 		FROM tool_calls t
 		LEFT JOIN messages m ON m.session_file = t.session_file AND m.entry_id = t.entry_id
 		${hasCutoff ? "WHERE t.timestamp >= ?" : ""}
@@ -1659,8 +1828,9 @@ export function getToolStatsByModel(cutoff?: number): ToolModelStats[] {
 	`);
 
 	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as ToolAggregateRow[];
+	const durationByGroup = durationPercentilesByGroup(true, cutoff);
 	return rows.map(row => ({
-		...rowToToolUsage(row),
+		...rowToToolUsage(row, durationByGroup.get(durationGroupKey(row, true)) ?? ZERO_DURATION_PERCENTILES),
 		model: row.model ?? "",
 		provider: row.provider ?? "",
 	}));

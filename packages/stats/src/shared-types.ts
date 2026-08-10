@@ -291,6 +291,16 @@ export interface ToolUsageStats {
 	argsChars: number;
 	/** Text characters of tool results fed back into context. */
 	resultChars: number;
+	/**
+	 * Median milliseconds from the persisted `tool_execution_start` marker to the
+	 * tool result, so model generation latency is excluded. Sessions recorded
+	 * before the marker existed fall back to the invoking turn's timestamp.
+	 */
+	durationMsMedian: number;
+	/** 90th-percentile milliseconds over the same execution window. */
+	durationMsP90: number;
+	/** Calls with an observed execution duration. */
+	durationSamples: number;
 	/** Total provider tokens of invoking turns, attributed per call share. */
 	totalTokensShare: number;
 	/** Output tokens of invoking turns, attributed per call share. */

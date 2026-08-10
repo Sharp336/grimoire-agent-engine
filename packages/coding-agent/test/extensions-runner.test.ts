@@ -506,7 +506,7 @@ describe("ExtensionRunner", () => {
 
 	describe("before_provider_request chaining", () => {
 		it("exposes the request model instead of the primary session model", async () => {
-			const primaryModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+			const primaryModel = getBundledModel("openai-codex", "gpt-5.5");
 			const requestModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 			if (!primaryModel || !requestModel) throw new Error("Expected bundled cross-provider models to exist");
 
@@ -1775,12 +1775,16 @@ describe("ExtensionRunner", () => {
 				hasQueuedMessages: () => false,
 				abort: () => {},
 				settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
+				markExecutionPending: () => events.push({ type: "execution_pending" }),
+				markExecutionStarted: () => events.push({ type: "execution_started" }),
 			});
 
 			expect(events).toEqual([
 				{ type: "tool_approval_requested" },
+				{ type: "execution_pending" },
 				{ type: "ui_select" },
 				{ type: "tool_approval_resolved", approved: true },
+				{ type: "execution_started" },
 			]);
 			expect(select).toHaveBeenCalledWith(expect.stringContaining("Allow tool: dangerous_tool"), [
 				"Approve",
@@ -1818,6 +1822,8 @@ describe("ExtensionRunner", () => {
 				modelRegistry,
 			);
 			initializeRunner(runner, async () => "Deny");
+			const markExecutionStarted = vi.fn();
+			const markExecutionPending = vi.fn();
 
 			const wrapper = new ExtensionToolWrapper(approvalTool, runner);
 			await expect(
@@ -1829,6 +1835,8 @@ describe("ExtensionRunner", () => {
 					hasQueuedMessages: () => false,
 					abort: () => {},
 					settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
+					markExecutionStarted,
+					markExecutionPending,
 				}),
 			).rejects.toThrow("Tool call denied by user: dangerous_tool");
 
@@ -1836,6 +1844,8 @@ describe("ExtensionRunner", () => {
 				{ type: "tool_approval_requested", reason: undefined },
 				{ type: "tool_approval_resolved", approved: false, reason: "denied by user" },
 			]);
+			expect(markExecutionPending).toHaveBeenCalledTimes(1);
+			expect(markExecutionStarted).not.toHaveBeenCalled();
 			delete globalState.__deniedApprovalEvents;
 		});
 		it("emits resolved false when the approval prompt throws", async () => {

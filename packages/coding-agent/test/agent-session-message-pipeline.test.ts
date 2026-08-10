@@ -681,6 +681,42 @@ describe("AgentSession message pipeline", () => {
 		await Bun.sleep(0);
 	});
 
+	it("forwards non-executed tool starts to extensions", async () => {
+		const forwarded = Promise.withResolvers<void>();
+		const extensionEmit = vi.fn(async (event: { type: string }) => {
+			if (event.type === "tool_execution_start") forwarded.resolve();
+		});
+		const session = new AgentSession({
+			agent: createAgent(),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: {} as never,
+			extensionRunner: {
+				hasHandlers: () => true,
+				emit: extensionEmit,
+			} as never,
+		});
+		sessions.push(session);
+
+		session.agent.emitExternalEvent({
+			type: "tool_execution_start",
+			toolCallId: "call-1",
+			toolName: "edit",
+			args: { path: "file.ts" },
+			executed: false,
+		});
+		await forwarded.promise;
+
+		expect(extensionEmit).toHaveBeenCalledWith({
+			type: "tool_execution_start",
+			toolCallId: "call-1",
+			toolName: "edit",
+			args: { path: "file.ts" },
+			executed: false,
+			intent: undefined,
+		});
+	});
+
 	it("keeps first-turn memory in the stable prompt on the next turn", async () => {
 		const api = "test-injected-memory-append-only-cache";
 		const contexts: Context[] = [];

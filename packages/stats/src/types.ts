@@ -75,7 +75,25 @@ export interface SessionServiceTierChangeEntry {
 	serviceTier: ServiceTierByFamily | ServiceTier | null;
 }
 
-export type SessionEntry = SessionHeader | SessionMessageEntry | SessionServiceTierChangeEntry | { type: string };
+export interface SessionToolExecutionStartEntry {
+	type: "custom";
+	id: string;
+	parentId: string | null;
+	timestamp: string;
+	customType: "tool_execution_start";
+	data?: {
+		toolCallId?: unknown;
+		executed?: unknown;
+		startedAt?: unknown;
+	};
+}
+
+export type SessionEntry =
+	| SessionHeader
+	| SessionMessageEntry
+	| SessionServiceTierChangeEntry
+	| SessionToolExecutionStartEntry
+	| { type: string };
 
 /**
  * Behavioral stats extracted from a single user message.
@@ -147,7 +165,7 @@ export interface ToolCallStats {
 	model: string;
 	/** Provider name */
 	provider: string;
-	/** Assistant-message timestamp (Unix ms) */
+	/** Fallback invocation boundary from the persisted assistant entry (Unix ms) */
 	timestamp: number;
 	/** Which agent produced the call */
 	agentType: AgentType;
@@ -155,6 +173,14 @@ export interface ToolCallStats {
 	callsInTurn: number;
 	/** Serialized argument characters */
 	argsChars: number;
+}
+
+/** Execution-boundary marker linked to its persisted tool-call row. */
+export interface ToolInvocationLink {
+	sessionFile: string;
+	toolCallId: string;
+	executed: boolean;
+	timestamp: number;
 }
 
 /**
@@ -167,5 +193,9 @@ export interface ToolResultLink {
 	toolCallId: string;
 	/** Text characters fed back into context */
 	resultChars: number;
+	/** Tool-result completion timestamp (Unix ms) */
+	timestamp: number;
+	/** False when result metadata proves no implementation ran. */
+	executed?: boolean;
 	isError: boolean;
 }

@@ -83,7 +83,7 @@ describe("cursor todo persistence", () => {
 		// toolResult, so nothing would otherwise land in the branch and every
 		// reload/rewind/compaction would silently drop the list.
 		const h = newHarness();
-		h.handlers.todoSync(
+		const result = h.handlers.todoSync(
 			{
 				merged: false,
 				todos: [
@@ -104,6 +104,11 @@ describe("cursor todo persistence", () => {
 				],
 			},
 		]);
+		expect(result.details).toMatchObject({
+			__synthetic: true,
+			source: "cursor_server_resolved",
+			executed: false,
+		});
 	});
 
 	it("replays the newest snapshot after repeated updates", () => {
@@ -244,7 +249,11 @@ describe("cursor todo persistence", () => {
 		const settled = events[0];
 		if (settled?.type !== "tool_execution_end") throw new Error("expected a completion event");
 		expect(settled).toMatchObject({ toolCallId: "call-1", toolName: "todo", isError: false });
-		expect(settled.result.details).toBeUndefined();
+		expect(settled.result.details).toEqual({
+			__synthetic: true,
+			source: "cursor_server_resolved",
+			executed: false,
+		});
 	});
 
 	it("settles a refusal without overwriting the live todo list", () => {
@@ -259,7 +268,11 @@ describe("cursor todo persistence", () => {
 		expect(h.current()).toBe(before);
 		expect(h.entries).toEqual([]);
 		expect(h.uiTodos()).toBeNull();
-		expect(result).toMatchObject({ toolCallId: "call-1", isError: false, details: undefined });
+		expect(result).toMatchObject({
+			toolCallId: "call-1",
+			isError: false,
+			details: { __synthetic: true, source: "cursor_server_resolved", executed: false },
+		});
 		expect(h.events).toHaveLength(1);
 		expect(h.events[0]).toMatchObject({ type: "tool_execution_end", toolCallId: "call-1", isError: false });
 	});
@@ -276,7 +289,7 @@ describe("cursor todo persistence", () => {
 			toolCallId: "call-1",
 			isError: true,
 			content: [{ type: "text", text: "boom" }],
-			details: undefined,
+			details: { __synthetic: true, source: "cursor_server_resolved", executed: false },
 		});
 		expect(h.events[0]).toMatchObject({ type: "tool_execution_end", toolCallId: "call-1", isError: true });
 	});

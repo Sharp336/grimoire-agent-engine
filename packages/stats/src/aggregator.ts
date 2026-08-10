@@ -31,6 +31,7 @@ import {
 	insertUserMessageStats,
 	markSessionBackfillsComplete,
 	setFileOffset,
+	updateToolInvocations,
 	updateToolResults,
 	updateUserMessageLinks,
 } from "./db";
@@ -77,6 +78,7 @@ function applyParseResult(sessionFile: string, lastModified: number, result: Par
 	if (result.userStats.length > 0) insertUserMessageStats(result.userStats);
 	if (result.userLinks.length > 0) updateUserMessageLinks(result.userLinks);
 	if (result.toolCalls.length > 0) insertToolCalls(result.toolCalls);
+	if (result.toolInvocations.length > 0) updateToolInvocations(result.toolInvocations);
 	if (result.toolResults.length > 0) updateToolResults(result.toolResults);
 	setFileOffset(sessionFile, result.newOffset, lastModified);
 	return result.stats.length + result.userStats.length;

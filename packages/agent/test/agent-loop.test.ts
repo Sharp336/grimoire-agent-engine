@@ -4030,12 +4030,61 @@ describe("agentLoopContinue with AgentMessage", () => {
 		}
 
 		expect(executed).toEqual([]);
+		const toolStart = events.find(e => e.type === "tool_execution_start");
+		expect(toolStart).toBeDefined();
+		if (toolStart?.type === "tool_execution_start") {
+			expect(toolStart.executed).toBe(false);
+		}
 		const toolEnd = events.find(e => e.type === "tool_execution_end");
 		expect(toolEnd).toBeDefined();
 		if (toolEnd?.type === "tool_execution_end") {
 			expect(toolEnd.isError).toBe(true);
 			expect(JSON.stringify(toolEnd.result)).toContain("policy: blocked");
 		}
+	});
+
+	it("starts deferred tools when their implementation boundary is reached", async () => {
+		const baseToolContext = { sentinel: true } as unknown as AgentToolContext;
+		let executionContext: AgentToolContext | undefined;
+		const toolSchema = type({ value: "string" });
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			deferExecutionStart: true,
+			async execute(_toolCallId, params, _signal, _onUpdate, context) {
+				executionContext = context;
+				context?.markExecutionPending?.();
+				context?.markExecutionStarted?.();
+				return {
+					content: [{ type: "text", text: `echoed: ${params.value}` }],
+					details: { value: params.value },
+				};
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			getToolContext: () => baseToolContext,
+		};
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("echo something")], context, config, undefined, mock.stream);
+		for await (const event of stream) events.push(event);
+
+		const starts = events.filter(event => event.type === "tool_execution_start");
+		expect(starts).toHaveLength(2);
+		expect(starts[0]).toMatchObject({ toolCallId: "tool-1", executed: false });
+		expect(starts[1]).toMatchObject({ toolCallId: "tool-1", executed: true });
+		expect(executionContext).toMatchObject({ sentinel: true });
+		expect(Object.hasOwn(executionContext ?? {}, "sentinel")).toBe(true);
 	});
 
 	it("passes beforeToolCall args mutations into tool.execute without revalidation", async () => {

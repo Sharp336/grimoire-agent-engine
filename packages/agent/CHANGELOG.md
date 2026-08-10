@@ -39,6 +39,13 @@
 
 - Fixed Codex V2 remote compaction bypassing the provider's live WebSocket transport before trying SSE ([#7198](https://github.com/can1357/oh-my-pi/issues/7198)).
 - Tool calls skipped mid-batch to service queued steering/peer input now distinguish calls that never entered `tool.execute` (`SyntheticToolResultDetails`, `executed: false`) from in-flight calls that may have performed partial work (`execution: "started"`), allowing UI/telemetry consumers to render normal steering control flow without misreporting execution state ([#7199](https://github.com/can1357/oh-my-pi/issues/7199)).
+### Changed
+
+- Tool wrappers can defer execution-start events until internal approval and preflight gates finish.
+
+### Fixed
+
+- Mark provider-stream failure tool results as unexecuted in `tool_execution_start` events.
 
 ## [17.2.2] - 2026-07-31
 

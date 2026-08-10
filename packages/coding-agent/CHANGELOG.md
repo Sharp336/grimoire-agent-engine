@@ -238,6 +238,10 @@
 - Fixed heavily branched conversation trees shifting linear continuations into disconnected columns.
 - Fixed plugin installation validation failures for legacy compatibility shims.
 - Removed hard-coded references to disabled or absent agents in system and tool prompts.
+### Changed
+
+- Tool execution timing now begins after approval succeeds, Cursor bridge rejections are marked unexecuted, and extension `tool_execution_start` events expose whether the tool implementation ran.
+
 
 ## [17.2.4] - 2026-08-01
 

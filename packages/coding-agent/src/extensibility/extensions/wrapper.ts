@@ -150,6 +150,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 	declare parameters: TParameters;
 	declare label: string;
 	declare strict: boolean;
+	readonly deferExecutionStart = true;
 
 	constructor(
 		private tool: AgentTool<TParameters, TDetails>,
@@ -314,6 +315,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				pendingSafetyChecks.length > 0
 					? `${basePrompt}\nProvider safety checks:\n${safetyCheckLines(pendingSafetyChecks).join("\n")}`
 					: basePrompt;
+			context?.markExecutionPending?.();
 			let choice: string | undefined;
 			try {
 				choice = await uiContext.select(safetyPrompt, ["Approve", "Deny"]);
@@ -337,6 +339,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		let executionError: Error | undefined;
 
 		try {
+			context?.markExecutionStarted?.();
 			result = await this.tool.execute(toolCallId, effectiveParams, signal, onUpdate, context);
 		} catch (err) {
 			executionError = err instanceof Error ? err : new Error(String(err));

@@ -699,6 +699,71 @@ describe("CursorExecHandlers error results", () => {
 		const end = events.find(event => event.type === "tool_execution_end");
 		expect(end?.isError).toBe(true);
 	});
+
+	it("marks deferred shell rejections as unexecuted", async () => {
+		const events: AgentEvent[] = [];
+		const deferredTool: AgentTool = {
+			name: "bash",
+			label: "Bash",
+			description: "rejects before execution",
+			parameters: type({}),
+			deferExecutionStart: true,
+			async execute() {
+				throw new Error("approval denied");
+			},
+		};
+		const handlers = new CursorExecHandlers({
+			cwd: ".",
+			tools: new Map([["bash", deferredTool]]),
+			emitEvent: event => events.push(event),
+		});
+
+		const result = await handlers.shellStream(
+			create(ShellArgsSchema, { toolCallId: "call-shell-denied", command: "ignored" }),
+			{ onStdout: () => {}, onStderr: () => {} },
+		);
+
+		expect(result.isError).toBe(true);
+		expect(result.details).toMatchObject({ __synthetic: true, executed: false });
+		expect(events.filter(event => event.type === "tool_execution_start")).toEqual([
+			expect.objectContaining({ toolCallId: "call-shell-denied", executed: false }),
+		]);
+	});
+
+	it("preserves tool context fields for deferred shell execution", async () => {
+		const events: AgentEvent[] = [];
+		let executionContext: AgentToolContext | undefined;
+		const deferredTool: AgentTool = {
+			name: "bash",
+			label: "Bash",
+			description: "starts after preflight",
+			parameters: type({}),
+			deferExecutionStart: true,
+			async execute(_toolCallId, _params, _signal, _onUpdate, context) {
+				executionContext = context;
+				context?.markExecutionStarted?.();
+				return { content: [{ type: "text", text: "ran" }], details: {} };
+			},
+		};
+		const handlers = new CursorExecHandlers({
+			cwd: ".",
+			tools: new Map([["bash", deferredTool]]),
+			emitEvent: event => events.push(event),
+			getToolContext: () => ({ sentinel: true }) as unknown as AgentToolContext,
+		});
+
+		const result = await handlers.shellStream(
+			create(ShellArgsSchema, { toolCallId: "call-shell-started", command: "ignored" }),
+			{ onStdout: () => {}, onStderr: () => {} },
+		);
+
+		expect(result.isError).toBe(false);
+		expect(executionContext).toMatchObject({ sentinel: true });
+		expect(Object.hasOwn(executionContext ?? {}, "sentinel")).toBe(true);
+		expect(events.filter(event => event.type === "tool_execution_start")).toEqual([
+			expect.objectContaining({ toolCallId: "call-shell-started", executed: true }),
+		]);
+	});
 });
 
 describe("CursorExecHandlers mounted tool bridge", () => {
@@ -750,6 +815,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 			consumeToolCallEmitted: () => false,
 		} as unknown as ExtensionRunner);
 		const settings = Settings.isolated({ "tools.approval": { ast_edit: "deny" } });
+		const events: AgentEvent[] = [];
 		const handlers = new CursorExecHandlers({
 			cwd: ".",
 			// The canonical map contains the undecorated mounted tool. The execution
@@ -757,6 +823,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 			tools: new Map([[device.name, device]]),
 			getExecutableTool: name => (name === device.name ? (wrapped as unknown as AgentTool) : undefined),
 			getToolContext: () => ({ settings }) as AgentToolContext,
+			emitEvent: event => events.push(event),
 		});
 
 		const result = await handlers.mcp({
@@ -771,6 +838,10 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		expect(result.isError).toBe(true);
 		expect(executed).toBe(false);
 		expect(result.content.find(block => block.type === "text")?.text).toContain("blocked by user policy");
+		expect(result.details).toMatchObject({ __synthetic: true, executed: false });
+		expect(events.filter(event => event.type === "tool_execution_start")).toEqual([
+			expect.objectContaining({ toolCallId: "call-denied", executed: false }),
+		]);
 	});
 
 	it("lists resources from the session's live MCP servers", async () => {
@@ -1333,6 +1404,7 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 
 		expect(result.isError).toBe(true);
 		expect(result.content).toEqual([{ type: "text", text: 'Tool "delete" not available' }]);
+		expect(result.details).toMatchObject({ __synthetic: true, executed: false });
 		expect(await Bun.file(target).exists()).toBe(true);
 	});
 
@@ -1394,6 +1466,7 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 		);
 
 		expect(result.isError).toBe(true);
+		expect(result.details).toMatchObject({ __synthetic: true, executed: false });
 		expect(await Bun.file(target).exists()).toBe(true);
 	});
 
@@ -1584,17 +1657,25 @@ describe("CursorExecHandlers Pi frame translation", () => {
 		]);
 	});
 
-	it("answers a present pi_read limit of zero with empty output instead of the whole file", async () => {
+	it("answers present read limits of zero with explicitly unexecuted empty results", async () => {
 		// `limit: 0` is present, not unset: the reference slices zero lines. No
 		// `read` selector expresses an empty range, so treating it as unset would
 		// return the entire file — the opposite of what was asked.
 		const { handlers, calls } = recordingHandlers("read");
 
-		const result = await handlers.piRead({ toolCallId: "c1", args: { path: "a.ts", limit: 0 } } as never);
+		const piResult = await handlers.piRead({ toolCallId: "c1", args: { path: "a.ts", limit: 0 } } as never);
+		const legacyResult = await handlers.read({ toolCallId: "c2", path: "a.ts", limit: 0 } as never);
 
 		expect(calls).toEqual([]);
-		expect(result.isError).toBe(false);
-		expect(result.content).toEqual([{ type: "text", text: "" }]);
+		for (const result of [piResult, legacyResult]) {
+			expect(result.isError).toBe(false);
+			expect(result.content).toEqual([{ type: "text", text: "" }]);
+			expect(result.details).toEqual({
+				__synthetic: true,
+				source: "cursor_zero_length_read",
+				executed: false,
+			});
+		}
 	});
 
 	it("composes the legacy read frame's offset/limit the same way pi_read does", async () => {

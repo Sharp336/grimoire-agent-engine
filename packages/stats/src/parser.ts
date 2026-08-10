@@ -17,7 +17,9 @@ import type {
 	SessionEntry,
 	SessionMessageEntry,
 	SessionServiceTierChangeEntry,
+	SessionToolExecutionStartEntry,
 	ToolCallStats,
+	ToolInvocationLink,
 	ToolResultLink,
 	UserMessageLink,
 	UserMessageStats,
@@ -96,6 +98,20 @@ function isServiceTierChange(entry: SessionEntry): entry is SessionServiceTierCh
 function isToolResultMessage(entry: SessionEntry): entry is SessionMessageEntry {
 	if (entry.type !== "message") return false;
 	return (entry as SessionMessageEntry).message?.role === "toolResult";
+}
+
+function extractToolInvocationLink(sessionFile: string, entry: SessionEntry): ToolInvocationLink | null {
+	if (entry.type !== "custom") return null;
+	const marker = entry as SessionToolExecutionStartEntry;
+	if (marker.customType !== "tool_execution_start" || typeof marker.data?.toolCallId !== "string") return null;
+	const timestamp = Date.parse(typeof marker.data.startedAt === "string" ? marker.data.startedAt : marker.timestamp);
+	if (!Number.isFinite(timestamp)) return null;
+	return {
+		sessionFile,
+		toolCallId: marker.data.toolCallId,
+		executed: marker.data.executed !== false,
+		timestamp,
+	};
 }
 
 /**
@@ -248,6 +264,7 @@ function extractToolCalls(
 	);
 	if (blocks.length === 0) return [];
 
+	const invocationTimestamp = coerceEntryTimestamp(undefined, entry);
 	return blocks.map(block => {
 		let argsChars = 0;
 		try {
@@ -263,7 +280,7 @@ function extractToolCalls(
 			toolName: block.name,
 			model: msg.model,
 			provider: msg.provider,
-			timestamp: coerceEntryTimestamp(msg.timestamp, entry),
+			timestamp: invocationTimestamp,
 			agentType,
 			callsInTurn: blocks.length,
 			argsChars,
@@ -286,11 +303,15 @@ function extractToolResultLink(sessionFile: string, entry: SessionMessageEntry):
 			}
 		}
 	}
+	const details = msg.details as { executed?: unknown } | undefined;
+	const executed = details?.executed === false ? false : undefined;
 	return {
 		sessionFile,
 		toolCallId: msg.toolCallId,
 		resultChars,
+		timestamp: coerceEntryTimestamp(msg.timestamp, entry),
 		isError: msg.isError === true,
+		...(executed === false ? { executed } : {}),
 	};
 }
 
@@ -344,6 +365,7 @@ function scanLastServiceTier(bytes: Uint8Array): ServiceTierByFamily | undefined
 	});
 	return currentServiceTier;
 }
+
 /**
  * Parse a session file and extract all assistant message stats.
  * Uses incremental reading with offset tracking.
@@ -365,6 +387,7 @@ export interface ParseSessionResult {
 	userStats: UserMessageStats[];
 	userLinks: UserMessageLink[];
 	toolCalls: ToolCallStats[];
+	toolInvocations: ToolInvocationLink[];
 	toolResults: ToolResultLink[];
 	newOffset: number;
 }
@@ -374,7 +397,15 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 		bytes = await Bun.file(sessionPath).bytes();
 	} catch (err) {
 		if (isEnoent(err))
-			return { stats: [], userStats: [], userLinks: [], toolCalls: [], toolResults: [], newOffset: fromOffset };
+			return {
+				stats: [],
+				userStats: [],
+				userLinks: [],
+				toolCalls: [],
+				toolInvocations: [],
+				toolResults: [],
+				newOffset: fromOffset,
+			};
 		throw err;
 	}
 
@@ -385,6 +416,7 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 	const userLinks: UserMessageLink[] = [];
 	const toolCalls: ToolCallStats[] = [];
 	const toolResults: ToolResultLink[] = [];
+	const toolInvocations: ToolInvocationLink[] = [];
 	const userByEntryId = new Map<string, UserMessageStats>();
 	const start = Math.max(0, Math.min(fromOffset, bytes.length));
 	const unprocessed = bytes.subarray(start);
@@ -406,6 +438,11 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 			}
 			continue;
 		}
+		const invocation = extractToolInvocationLink(sessionPath, entry);
+		if (invocation) {
+			toolInvocations.push(invocation);
+			continue;
+		}
 		if (isToolResultMessage(entry)) {
 			const link = extractToolResultLink(sessionPath, entry);
 			if (link) toolResults.push(link);
@@ -414,7 +451,8 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 		if (isAssistantMessage(entry)) {
 			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
 			if (msgStats) stats.push(msgStats);
-			toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType));
+			const calls = extractToolCalls(sessionPath, folder, entry, agentType);
+			toolCalls.push(...calls);
 			// Link assistant's responding model back to the user message it answered.
 			const parentId = (entry as SessionMessageEntry).parentId;
 			if (parentId) {
@@ -437,7 +475,7 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 		}
 	}
 
-	return { stats, userStats, userLinks, toolCalls, toolResults, newOffset: start + read };
+	return { stats, userStats, userLinks, toolCalls, toolInvocations, toolResults, newOffset: start + read };
 }
 
 /**

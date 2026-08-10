@@ -736,7 +736,16 @@ export type ToolApproval = ToolApprovalDecision | ((args: unknown) => ToolApprov
  * Apps can extend via declaration merging.
  */
 export interface AgentToolContext {
-	// Empty by default - apps extend via declaration merging
+	/**
+	 * Emit a non-executed lifecycle boundary while a deferred tool waits for
+	 * approval or another interactive preflight.
+	 */
+	markExecutionPending?: () => void;
+	/**
+	 * Mark the actual implementation boundary for tools that defer execution
+	 * behind approval or another preflight gate.
+	 */
+	markExecutionStarted?: () => void;
 }
 
 export type AgentToolExecFn<TParameters extends TSchema = TSchema, TDetails = any, TTheme = unknown> = (
@@ -770,6 +779,11 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	concurrency?: "shared" | "exclusive" | ((args: Partial<Static<TParameters>>) => "shared" | "exclusive");
 	/** If true, argument validation errors are non-fatal: raw args are passed to execute() instead of returning an error to the LLM. */
 	lenientArgValidation?: boolean;
+	/**
+	 * Defer the execution-start event until `context.markExecutionStarted()` is
+	 * called. Use only for wrappers with preflight work inside `execute()`.
+	 */
+	deferExecutionStart?: boolean;
 	/**
 	 * Whether the agent loop may abort this tool mid-execution to deliver a
 	 * queued steering message. A function resolves this per call from the raw,
@@ -870,6 +884,14 @@ export type AgentEvent =
 	| { type: "message_update"; message: AgentMessage; assistantMessageEvent: AssistantMessageEvent }
 	| { type: "message_end"; message: AgentMessage }
 	// Tool execution lifecycle
-	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any; intent?: string }
+	| {
+			type: "tool_execution_start";
+			toolCallId: string;
+			toolName: string;
+			args: any;
+			intent?: string;
+			/** False when the event only pairs a tool call with a result and no tool implementation ran. */
+			executed?: boolean;
+	  }
 	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
 	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError?: boolean };
