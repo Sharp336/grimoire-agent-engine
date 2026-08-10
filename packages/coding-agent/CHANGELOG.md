@@ -3,6 +3,28 @@
 ## [Unreleased]
 
 ## [17.2.12] - 2026-08-08
+### Breaking Changes
+
+- Replaced the computer tool's `{ window, actions }` coordinate batches with persistent JavaScript runs using `{ code, read_only?, timeout? }`; removed `computer.backend` and model-specific controller switching.
+
+### Added
+
+- Added optional `timeoutMs` to `discovery` configuration in provider options (`models.yml` / `models.json`) to configure custom HTTP probe timeouts for llama.cpp, Ollama, and OpenAI-compatible discovery endpoints ([#6952](https://github.com/can1357/oh-my-pi/issues/6952)).
+- Added a cross-platform, in-process `ps` shell builtin with BSD/procps selection forms, custom output columns, sorting, process metrics, and header suppression.
+- Added a `relay` browser mode that drives the user's own Chrome tabs through a local CDP relay plus the OMP Browser Relay extension: `omp browser-relay install` writes the bundled extension to disk, and `browser.relay` / `browser.relayUrl` (or per-call `app.relay`) route the browser tool through it. The relay server auto-starts under a profile-independent global daemon broker when the browser tool needs it; every relay consumer holds a broker lease, so the fixed-port singleton stops only after its last consumer across all projects exits. `omp browser-relay` remains available for `--token`/`--no-group`/custom ports, and a relay already serving the port is adopted. It multiplexes the supervisor and per-tab worker puppeteer connections over the single `chrome.debugger` attachment Chrome allows per tab, and gathers only the tabs the agent actively drives into a per-window "omp" tab group (released when the last client lets go of the tab, dissolved on disconnect, never re-grouping tabs the user pulls out).
+- Added a scriptable desktop session with persistent `desktop`/`Win`/`El` handles, window-targeted capture and input, native accessibility trees with `[ref=eN]` actions, clipboard access, streamed screenshots, and enforced read-only runs.
+- Added broker-shared language servers: one LSP server per (server, project) is now spawned by an `omp lsp mux` daemon under the per-project daemon broker (the same broker that owns the shared Chromium and `hub start` processes) and multiplexed to every omp instance in the project over a local socket — instances share the server's index, initialize result, diagnostics, and document state instead of each paying a private cold start. The mux reference-counts `didOpen`/`didClose`, remaps request ids and document versions per client, replays cached diagnostics/registrations/progress to late joiners, routes `workspace/applyEdit` to the most recently active instance, and intercepts per-session `shutdown`/`exit` so one instance leaving never kills the server for the rest; the broker still reaps everything when the last omp process in the project exits. Controlled by the new `lsp.shared` setting (default on); any broker/mux failure falls back to a private server spawn, and an external `lspmux` wrapper keeps precedence when configured.
+- Added `--service-tier` to override the OpenAI service tier for a session. The flag takes precedence over the configured `tier.openai` setting and over a resumed session's recorded tier, leaves the Anthropic and Google tiers alone, and persists across resumes; `none` omits `service_tier` from the request.
+- Added a configurable per-request web search timeout via `providers.webSearchTimeoutSeconds` ([#7197](https://github.com/can1357/oh-my-pi/pull/7197) by [@will-bogusz](https://github.com/will-bogusz)).
+- Added turn-aware `/tree` navigation: Alt+Up/Alt+Down traverses previous/next user or assistant turns while skipping tool and bookkeeping entries, Home/End jumps to the first/last visible item, and PageUp/PageDown moves by a visible page.
+- Added a `get_settings` RPC command that describes the settings schema to an external client, optionally scoped to one settings tab. Metadata is returned for every setting because `SETTINGS_SCHEMA` is compiled-in public information; a configured value is disclosed only for settings the schema explicitly marks `rpcReadable`, and everything else carries `redacted: true` with no value and no configured status. The initial allowlist covers the appearance tab's boolean and enum settings. `RpcClient.getSettings()` exposes it to TypeScript consumers.
+- Added a complete headless RPC control surface for external hosts: server-owned operation lifecycles and cancellation, provider/maintenance/idle settlement, runtime capabilities, advisor and model control, session/workspace catalogs and mutation, tool inventory and activation, structured plan workflows, provider authentication, prompt queues, async jobs, eval history and execution, and subagent lifecycle/control.
+- Added parity across the TypeScript and Python RPC clients for correlated prompts and privileged UI, host URI handling, operation reconciliation, typed state and catalog APIs, bounded forward-compatible parsing, and all new control commands.
+
+### Changed
+
+- Exposed the script-driven `computer` schema to every model, including models with provider-native Computer Use support, because native action declarations cannot express persistent desktop sessions or accessibility handles.
+- Reduced `omp --help` cold-start latency and memory use by rendering lightweight command metadata without loading every runtime command and provider graph.
 
 ### Fixed
 
@@ -238,7 +260,12 @@
 - Fixed heavily branched conversation trees shifting linear continuations into disconnected columns.
 - Fixed plugin installation validation failures for legacy compatibility shims.
 - Removed hard-coded references to disabled or absent agents in system and tool prompts.
-
+- Fixed project-scoped session directories using leading-hyphen names and collapsing distinct paths such as `~/project/hail-mary` and `~/project-hail-mary` into one bucket; directory names now use a portable readable prefix plus the canonical cwd hash, and colliding legacy buckets are split by their recorded session cwd during migration ([#7396](https://github.com/can1357/oh-my-pi/issues/7396)).
+- Fixed manual `/shake` leaving the context budget and next pre-turn compaction decision anchored to the stale pre-shake provider token count until another model response arrived.
+- Fixed Mnemopi scoped recall reporting "No relevant memories found" when every scoped target failed internally; target failures now warn, and total recall failure preserves the underlying engine error while healthy targets remain available ([#7364](https://github.com/can1357/oh-my-pi/issues/7364)).
+- Fixed `skill://` resolution ignoring explicitly configured `skills.customDirectories` entries when a same-named skill existed in a default discovery path: the custom-directory skill now wins as the higher-priority source ([#7190](https://github.com/can1357/oh-my-pi/issues/7190)).
+- Fixed image paste failing on Wayland-only Linux sessions by reading PNG clipboard payloads through `wl-paste` before falling back to the native bridge ([#7316](https://github.com/can1357/oh-my-pi/issues/7316)).
+- Fixed prewalk switching to the fast model during read-only investigation: `xd://` devices are dispatched through the `write` tool, so a read-only call such as an `lsp` navigation counted as the first edit/write and armed the one-way hand-off mid-planning. Device dispatches now carry the wrapped tool's approval tier and only trigger the switch at a `write`/`exec` tier — read-only `lsp`, `debug` inspection, and internal-URL `ast_edit` calls no longer downgrade the model ([#7312](https://github.com/can1357/oh-my-pi/issues/7312)).
 ## [17.2.4] - 2026-08-01
 
 ### Added
@@ -340,6 +367,9 @@
 - Fixed the Python RPC client dropping context, compaction, OAuth URL, and terminal-settlement fields.
 - Fixed the browser tool ignoring the url parameter when opening a new tab on an attached browser.
 - Fixed browser automation disrupting attached browsers by adopting the active foreground tab and avoiding raising new tabs during screenshots.
+### Added
+
+- Added a `get_settings` RPC command that describes the settings schema to an external client, optionally scoped to one settings tab. Metadata is returned for every setting because `SETTINGS_SCHEMA` is compiled-in public information; a configured value is disclosed only for settings the schema explicitly marks `rpcReadable`, and everything else carries `redacted: true` with no value and no configured status. The initial allowlist covers the appearance tab's boolean and enum settings. `RpcClient.getSettings()` exposes it to TypeScript consumers. The snapshot carries the rendering metadata a client would otherwise have to duplicate: `ui.options` (including the literal `"runtime"` marker for registry-populated choices), `ui.ordered`, and the top-level `description` used by settings with no panel entry.
 
 ## [17.2.1] - 2026-07-30
 
