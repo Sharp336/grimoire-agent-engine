@@ -19,6 +19,7 @@ Does not cover extension authoring UX or command UI.
 ## Implementation files
 
 - [`src/mcp/types.ts`](../packages/coding-agent/src/mcp/types.ts)
+- [`src/mcp/protocol-negotiation.ts`](../packages/coding-agent/src/mcp/protocol-negotiation.ts)
 - [`src/mcp/transports/stdio.ts`](../packages/coding-agent/src/mcp/transports/stdio.ts)
 - [`src/mcp/transports/http.ts`](../packages/coding-agent/src/mcp/transports/http.ts)
 - [`src/mcp/transports/sse.ts`](../packages/coding-agent/src/mcp/transports/sse.ts)
@@ -32,11 +33,12 @@ Does not cover extension authoring UX or command UI.
 ### Protocol layer (JSON-RPC + MCP methods)
 
 - Message shapes are defined in `types.ts` (`JsonRpcRequest`, `JsonRpcNotification`, `JsonRpcResponse`, `JsonRpcMessage`).
-- MCP client logic (`client.ts`) decides method order and session handshake:
-  1. `initialize` request
-  2. for Streamable HTTP transports, start the optional background SSE listener after the initialize response has established any session id
-  3. `notifications/initialized` notification
-  4. method calls like `tools/list`, `tools/call`
+- `protocol-negotiation.ts` selects one lifecycle from the server's `protocolMode`:
+  - omitted or `"legacy"` sends `initialize`, starts any legacy HTTP SSE listener, then sends `notifications/initialized`
+  - `"auto"` probes `server/discover`; HTTP probes use the session transport, while stdio probes use a disposable sibling process
+  - `"2026-07-28"` requires successful discovery and never falls back
+- Auto fallback requires explicit legacy evidence (`-32601`, a known legacy version set, or HTTP `404`/`405`). Authentication failures, timeouts, malformed responses, and modern protocol errors remain failures.
+- Modern calls carry protocol/client metadata per request and do not send `initialize`; legacy calls retain the initialization-based lifecycle.
 
 ### Transport layer (`MCPTransport`)
 
@@ -67,6 +69,8 @@ Transport implementations own framing and I/O details:
 - `"sse"` -> `createSseTransport`
 
 `"sse"` uses the legacy HTTP+SSE transport: it opens the configured URL with GET, reads the `endpoint` event's plain-text URL/path, POSTs JSON-RPC requests to that endpoint, and receives JSON-RPC responses on the stream.
+
+Legacy SSE cannot carry the 2026 stateless lifecycle. `"auto"` therefore uses legacy initialization for `type: "sse"`, while strict `"2026-07-28"` rejects that transport.
 
 ## JSON-RPC message flow and correlation
 

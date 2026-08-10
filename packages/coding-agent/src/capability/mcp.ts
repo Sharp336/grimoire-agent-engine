@@ -5,7 +5,7 @@
  * All providers translate their native format to this shape.
  */
 
-import type { MCPRequestIdFormat } from "../mcp/types";
+import type { MCPProtocolMode, MCPRequestIdFormat } from "../mcp/types";
 import { defineCapability } from ".";
 import type { SourceMeta } from "./types";
 
@@ -21,6 +21,8 @@ export interface MCPServer {
 	timeout?: number;
 	/** Encoding for outgoing JSON-RPC request ids (default: `"number"`) */
 	requestIdFormat?: MCPRequestIdFormat;
+	/** MCP protocol lifecycle policy (default: `"legacy"`) */
+	protocolMode?: MCPProtocolMode;
 	/** Command to run (for stdio transport) */
 	command?: string;
 	/** Command arguments */
@@ -74,6 +76,7 @@ function isSameMCPConnection(left: MCPServer, right: MCPServer): boolean {
 	// Normalize against the allocator's own default so an explicit "number" is
 	// equivalent to leaving the option unset, not a distinct connection.
 	if ((left.requestIdFormat ?? "number") !== (right.requestIdFormat ?? "number")) return false;
+	if ((left.protocolMode ?? "legacy") !== (right.protocolMode ?? "legacy")) return false;
 
 	const leftTransport = left.transport ?? (left.command ? "stdio" : left.url ? "http" : "stdio");
 	const rightTransport = right.transport ?? (right.command ? "stdio" : right.url ? "http" : "stdio");

@@ -101,6 +101,7 @@ Shared fields for every transport:
 - `enabled?: boolean` — skip this server when `false`, unless the active-profile user `enabledServers` allowlist names it
 - `timeout?: number` — MCP request timeout in milliseconds; `0` disables client-side MCP timeouts
 - `requestIdFormat?: "number" | "string"` — outgoing JSON-RPC request-id encoding; defaults to per-transport integers. `"string"` uses collision-resistant snowflake IDs. This OMP-specific field is read only from OMP-native files, root `mcp.json` / `.mcp.json`, and OMP extension packages; configs translated from other tools ignore it.
+- `protocolMode?: "legacy" | "auto" | "2026-07-28"` — lifecycle policy; defaults to `"legacy"`. `"auto"` probes `server/discover` and falls back only on explicit legacy evidence. `"2026-07-28"` requires the modern stateless lifecycle. For stdio, auto discovery runs in a disposable sibling process before the session process starts. This OMP-specific field is accepted by the same OMP-owned sources as `requestIdFormat`; translated foreign-tool configs ignore it.
 - `auth?: { ... }` — stored-credential metadata; managed credential injection is implemented for OAuth
 - `oauth?: { ... }` — explicit OAuth client and callback settings used during auth/reauth
 

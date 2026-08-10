@@ -22,7 +22,7 @@ Config sources (.omp/.claude/.cursor/.vscode/mcp.json, mcp.json, etc.)
 - `stdio` (default when `type` missing): requires `command`, optional `args`, `env`, `cwd`
 - `http`: requires `url`, optional `headers`
 - `sse`: requires `url`, optional `headers` (kept for compatibility)
-- shared fields: `enabled`, `timeout`, `requestIdFormat` (`"number"` or `"string"`), `auth`, `oauth`
+- shared fields: `enabled`, `timeout`, `requestIdFormat` (`"number"` or `"string"`), `protocolMode` (`"legacy"`, `"auto"`, or `"2026-07-28"`), `auth`, `oauth`
 
 `validateServerConfig()` (`src/mcp/config.ts`) enforces transport basics:
 
@@ -42,6 +42,7 @@ Config sources (.omp/.claude/.cursor/.vscode/mcp.json, mcp.json, etc.)
 - `type` omitted means stdio. If you intended HTTP/SSE but omitted `type`, `command` becomes mandatory.
 - `sse` selects the legacy protocol-revision 2024-11-05 HTTP+SSE transport: a persistent GET stream supplies an `endpoint` event whose URL receives JSON-RPC POSTs. It is distinct from the `"http"` Streamable HTTP transport.
 - Outbound JSON-RPC request IDs default to incrementing numbers for ecosystem compatibility. Set `requestIdFormat: "string"` only for a server that requires the older snowflake-string behavior; invalid values are warned about and ignored during discovery.
+- `protocolMode` defaults to `"legacy"`. Use `"auto"` for guarded discovery with legacy fallback, or `"2026-07-28"` when the server is known to require the modern stateless lifecycle. The OMP-only field is ignored when importing another tool's config.
 - Validation is structural, not reachability: a syntactically valid URL can still fail at connect time.
 
 ## 2) Discovery, normalization, and precedence
@@ -76,14 +77,15 @@ Key behavior:
 
 - transport inferred as `server.transport ?? (command ? "stdio" : url ? "http" : "stdio")`
 - `requestIdFormat` is preserved; omitted means numeric IDs
+- `protocolMode` is preserved; omitted and explicit `"legacy"` are equivalent for connection deduplication
 - names in the active-profile user `disabledServers` list are always suppressed; a server with `enabled === false` is suppressed unless the same user config names it in `enabledServers`
 - optional fields are preserved when present
 
 ### Environment expansion during discovery
 
-OMP-native MCP config (`.omp/mcp.json`, `~/.omp/agent/mcp.json`, plus their `.mcp.json` variants) expands `${VAR}` and `${VAR:-default}` placeholders recursively before converting to runtime config. It also accepts boolean/string forms for `enabled` (`true`, `false`, `1`, `0`) and numeric strings for `timeout`. `requestIdFormat` accepts only `"number"` or `"string"`; other values warn and fall back to numeric IDs.
+OMP-native MCP config (`.omp/mcp.json`, `~/.omp/agent/mcp.json`, plus their `.mcp.json` variants) expands `${VAR}` and `${VAR:-default}` placeholders recursively before converting to runtime config. It also accepts boolean/string forms for `enabled` (`true`, `false`, `1`, `0`) and numeric strings for `timeout`. `requestIdFormat` accepts only `"number"` or `"string"`; `protocolMode` accepts only `"legacy"`, `"auto"`, or `"2026-07-28"`. Other values warn and fall back to their defaults.
 
-The standalone fallback provider in `src/discovery/mcp-json.ts` reads project-root `mcp.json` and `.mcp.json`, expands the same `${...}` placeholders, and type-checks `enabled`/`timeout` without coercing string values. It applies the same `requestIdFormat` validation.
+The standalone fallback provider in `src/discovery/mcp-json.ts` reads project-root `mcp.json` and `.mcp.json`, expands the same `${...}` placeholders, and type-checks `enabled`/`timeout` without coercing string values. It applies the same `requestIdFormat` and `protocolMode` validation.
 
 Invalid `enabled`/`timeout` values are ignored with warnings rather than failing the whole file.
 

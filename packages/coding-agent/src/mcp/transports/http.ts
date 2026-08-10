@@ -5,7 +5,7 @@
  * Based on MCP spec 2025-03-26.
  */
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { logger, readSseJson } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, readSseJson } from "@oh-my-pi/pi-utils";
 import type {
 	JsonRpcError,
 	JsonRpcMessage,
@@ -16,11 +16,23 @@ import type {
 	MCPSseServerConfig,
 	MCPTransport,
 } from "../../mcp/types";
-import { toJsonRpcError } from "../../mcp/types";
+import { MCPError, MCPHttpError, toJsonRpcError } from "../../mcp/types";
 import { RequestIdAllocator } from "../request-id";
 import { createMCPTimeout, getNeverAbortSignal, isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "../timeout";
-import { type MCPFetchInit, mcpFetch } from "./header-policy";
+import { type MCPFetchInit, mcpFetch, setGeneratedHeader } from "./header-policy";
+import { applyModernRequestHeaders } from "./modern-http";
 
+function parseJsonRpcError(text: string): JsonRpcError | undefined {
+	try {
+		const value: unknown = JSON.parse(text);
+		if (!isRecord(value) || !isRecord(value.error)) return undefined;
+		const error = value.error;
+		if (typeof error.code !== "number" || typeof error.message !== "string") return undefined;
+		return { code: error.code, message: error.message, data: error.data };
+	} catch {
+		return undefined;
+	}
+}
 const HTTP_SSE_CONNECT_TIMEOUT_MS = 1_000;
 /**
  * Best-effort startup deadline for the optional Streamable HTTP GET SSE listener.
@@ -35,6 +47,18 @@ export function resolveSSEConnectTimeoutMs(configTimeout?: number): number {
 	if (!isMCPTimeoutEnabled(requestTimeout)) return 0;
 	const boundedTimeout = Math.min(HTTP_SSE_CONNECT_TIMEOUT_MS, Math.floor(requestTimeout / 4));
 	return Math.max(1, boundedTimeout);
+}
+
+const MCP_PROTOCOL_VERSION_META = "io.modelcontextprotocol/protocolVersion";
+
+function hasModernProtocolMeta(params: Record<string, unknown>): boolean {
+	const metadata = params._meta;
+	return (
+		metadata !== null &&
+		typeof metadata === "object" &&
+		!Array.isArray(metadata) &&
+		typeof (metadata as Record<string, unknown>)[MCP_PROTOCOL_VERSION_META] === "string"
+	);
 }
 /**
  * HTTP transport for MCP servers.
@@ -225,16 +249,22 @@ export class HttpTransport implements MCPTransport {
 			params: params ?? {},
 		};
 
-		const generated: Record<string, string> = {
-			"Content-Type": "application/json",
-			Accept: "application/json, text/event-stream",
-		};
-
-		if (this.#sessionId) {
-			generated["Mcp-Session-Id"] = this.#sessionId;
+		const generated: Record<string, string> = {};
+		const modernRequest = hasModernProtocolMeta(body.params);
+		if (modernRequest) {
+			for (const [name, value] of Object.entries(options?.generatedHeaders ?? {})) {
+				setGeneratedHeader(generated, name, value);
+			}
 		}
 
-		const timeout = resolveMCPTimeoutMs(this.config.timeout);
+		setGeneratedHeader(generated, "Content-Type", "application/json");
+		setGeneratedHeader(generated, "Accept", "application/json, text/event-stream");
+		if (this.#sessionId) {
+			setGeneratedHeader(generated, "Mcp-Session-Id", this.#sessionId);
+		}
+		applyModernRequestHeaders(generated, method, body.params);
+
+		const timeout = resolveMCPTimeoutMs(options?.timeout ?? this.config.timeout);
 		const operation = createMCPTimeout(timeout, options?.signal);
 
 		try {
@@ -244,13 +274,15 @@ export class HttpTransport implements MCPTransport {
 			);
 
 			// Check for session ID in response
-			const newSessionId = response.headers.get("Mcp-Session-Id");
-			if (newSessionId) {
-				this.#sessionId = newSessionId;
+			if (!modernRequest) {
+				const newSessionId = response.headers.get("Mcp-Session-Id");
+				if (newSessionId) this.#sessionId = newSessionId;
 			}
 
 			if (!response.ok) {
 				const text = await response.text();
+				const rpcError = parseJsonRpcError(text);
+				if (rpcError) throw new MCPError(rpcError, response.status);
 				const wwwAuthenticate = response.headers.get("WWW-Authenticate");
 				const mcpAuthServer = response.headers.get("Mcp-Auth-Server");
 				const authHints = [
@@ -260,7 +292,7 @@ export class HttpTransport implements MCPTransport {
 					.filter(Boolean)
 					.join("; ");
 				const suffix = authHints ? ` [${authHints}]` : "";
-				throw new Error(`HTTP ${response.status}: ${text}${suffix}`);
+				throw new MCPHttpError(response.status, text, suffix);
 			}
 
 			const contentType = response.headers.get("Content-Type") ?? "";
@@ -274,7 +306,7 @@ export class HttpTransport implements MCPTransport {
 			const result = (await response.json()) as JsonRpcResponse;
 
 			if (result.error) {
-				throw new Error(`MCP error ${result.error.code}: ${result.error.message}`);
+				throw new MCPError(result.error);
 			}
 
 			return result.result as T;
@@ -293,7 +325,7 @@ export class HttpTransport implements MCPTransport {
 			throw new Error("No response body");
 		}
 
-		const timeout = resolveMCPTimeoutMs(this.config.timeout);
+		const timeout = resolveMCPTimeoutMs(options?.timeout ?? this.config.timeout);
 		const operation = createMCPTimeout(timeout, options?.signal);
 		const signal = operation.signal ?? getNeverAbortSignal();
 
@@ -320,7 +352,7 @@ export class HttpTransport implements MCPTransport {
 							captured = true;
 							operation.clear();
 							if (message.error) {
-								reject(new Error(`MCP error ${message.error.code}: ${message.error.message}`));
+								reject(new MCPError(message.error));
 							} else {
 								resolve(message.result as T);
 							}

@@ -5,15 +5,29 @@
  */
 import * as path from "node:path";
 import * as url from "node:url";
-import { getProjectDir, logger, withTimeout } from "@oh-my-pi/pi-utils";
+import { getProjectDir, isRecord, logger, withTimeout } from "@oh-my-pi/pi-utils";
+import {
+	LEGACY_PROTOCOL_VERSION,
+	type MCPProtocolNegotiationResult,
+	MODERN_PROTOCOL_VERSION,
+	negotiateMCPProtocol,
+} from "./protocol-negotiation";
 import { describeMCPTimeout, isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "./timeout";
 import { createHttpTransport } from "./transports/http";
+import {
+	buildToolParameterHeaders,
+	collectToolHeaderBindings,
+	type MCPToolHeaderBinding,
+} from "./transports/modern-http";
 import { createSseTransport } from "./transports/sse";
 import { createStdioTransport } from "./transports/stdio";
 import type {
+	MCPCacheableResult,
+	MCPDiscoverResult,
 	MCPGetPromptParams,
 	MCPGetPromptResult,
 	MCPHttpServerConfig,
+	MCPImplementation,
 	MCPInitializeParams,
 	MCPInitializeResult,
 	MCPPrompt,
@@ -26,6 +40,7 @@ import type {
 	MCPResourcesListResult,
 	MCPResourceTemplate,
 	MCPResourceTemplatesListResult,
+	MCPResult,
 	MCPServerCapabilities,
 	MCPServerConfig,
 	MCPServerConnection,
@@ -37,15 +52,30 @@ import type {
 	MCPToolsListResult,
 	MCPTransport,
 } from "./types";
+import { MCPError } from "./types";
 
-/** MCP protocol version we support */
-const PROTOCOL_VERSION = "2025-03-26";
+const MAX_MRTR_ROUND_TRIPS = 8;
 
-/** Client info sent during initialization */
 const CLIENT_INFO = {
 	name: "omp-coding-agent",
 	version: "1.0.0",
 };
+const MODERN_CLIENT_CAPABILITIES = {};
+const toolHeaderBindings = new WeakMap<MCPToolDefinition, MCPToolHeaderBinding[]>();
+
+interface MCPHandshakeResult {
+	protocolVersion: string;
+	serverInfo: MCPImplementation;
+	capabilities: MCPServerCapabilities;
+	instructions?: string;
+}
+interface MCPConnectionRuntime {
+	subscriptionAbort?: AbortController;
+	resourceSubscriptions: Set<string>;
+	cacheExpires: Partial<Record<"tools" | "resources" | "resourceTemplates" | "prompts", number>>;
+}
+
+const connectionRuntimes = new WeakMap<MCPServerConnection, MCPConnectionRuntime>();
 
 /**
  * Default handler for standard MCP server-to-client requests.
@@ -86,44 +116,149 @@ async function createTransport(config: MCPServerConfig): Promise<MCPTransport> {
 	}
 }
 
-/**
- * Initialize connection with MCP server.
- */
+function withModernRequestMeta(params: Record<string, unknown> = {}): Record<string, unknown> {
+	const existingMeta = isRecord(params._meta) ? params._meta : {};
+	return {
+		...params,
+		_meta: {
+			...existingMeta,
+			"io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL_VERSION,
+			"io.modelcontextprotocol/clientInfo": CLIENT_INFO,
+			"io.modelcontextprotocol/clientCapabilities": MODERN_CLIENT_CAPABILITIES,
+		},
+	};
+}
+
+function modernServerInfo(name: string, result: MCPDiscoverResult): MCPImplementation {
+	const value = result._meta?.["io.modelcontextprotocol/serverInfo"];
+	if (isRecord(value) && typeof value.name === "string" && typeof value.version === "string") {
+		return { name: value.name, version: value.version };
+	}
+	return { name, version: "unknown" };
+}
+
 async function initializeConnection(
+	name: string,
 	transport: MCPTransport,
+	negotiation: MCPProtocolNegotiationResult,
 	options?: {
 		signal?: AbortSignal;
-		/** Called after the initialize response (which sets the session ID) but before notifications/initialized. */
-		onInitialized?: () => void | Promise<void>;
+		onLegacyInitialized?: () => void | Promise<void>;
 	},
-): Promise<MCPInitializeResult> {
+): Promise<MCPHandshakeResult> {
+	if (negotiation.kind === "modern") {
+		return {
+			protocolVersion: MODERN_PROTOCOL_VERSION,
+			serverInfo: modernServerInfo(name, negotiation.discovery),
+			capabilities: negotiation.discovery.capabilities,
+			instructions: negotiation.discovery.instructions,
+		};
+	}
+
 	const params: MCPInitializeParams = {
-		protocolVersion: PROTOCOL_VERSION,
+		protocolVersion: LEGACY_PROTOCOL_VERSION,
 		capabilities: {
 			roots: { listChanged: false },
 		},
 		clientInfo: CLIENT_INFO,
 	};
-
 	const result = await transport.request<MCPInitializeResult>(
 		"initialize",
 		params as unknown as Record<string, unknown>,
 		{ signal: options?.signal },
 	);
-
 	if (options?.signal?.aborted) {
 		throw options.signal.reason instanceof Error ? options.signal.reason : new Error("Aborted");
 	}
-
-	// Hook point: the transport now has the session ID from the initialize response.
-	// For HTTP, this is the moment to open the SSE stream so server-to-client requests
-	// triggered by notifications/initialized (e.g. roots/list) can be delivered.
-	await options?.onInitialized?.();
-
-	// Send initialized notification
+	await options?.onLegacyInitialized?.();
 	await transport.notify("notifications/initialized");
+	return {
+		protocolVersion: result.protocolVersion,
+		serverInfo: result.serverInfo,
+		capabilities: result.capabilities,
+		instructions: result.instructions,
+	};
+}
 
-	return result;
+async function requestFromServer<T>(
+	connection: MCPServerConnection,
+	method: string,
+	params: Record<string, unknown> = {},
+	options?: MCPRequestOptions,
+): Promise<T> {
+	if (connection.protocolVersion !== MODERN_PROTOCOL_VERSION) {
+		return connection.transport.request<T>(method, params, options);
+	}
+	let requestParams = withModernRequestMeta(params);
+	for (let round = 0; round < MAX_MRTR_ROUND_TRIPS; round++) {
+		const result = await connection.transport.request<T>(method, requestParams, options);
+		if (!isRecord(result) || typeof result.resultType !== "string") {
+			throw new Error(`MCP server returned an invalid ${MODERN_PROTOCOL_VERSION} result for ${method}`);
+		}
+		if (result.resultType === "complete") return result;
+		if (result.resultType !== "input_required") {
+			throw new Error(`MCP server returned unsupported result type "${result.resultType}" for ${method}`);
+		}
+		if (isRecord(result.inputRequests) && Object.keys(result.inputRequests).length > 0) {
+			throw new Error(`MCP server requires unsupported client input while processing ${method}`);
+		}
+		if (typeof result.requestState !== "string") {
+			throw new Error(`MCP server returned input_required without requestState for ${method}`);
+		}
+		requestParams = withModernRequestMeta({ ...params, requestState: result.requestState });
+	}
+	throw new Error(`MCP server exceeded ${MAX_MRTR_ROUND_TRIPS} input-required rounds for ${method}`);
+}
+
+function cacheIsFresh(
+	connection: MCPServerConnection,
+	key: "tools" | "resources" | "resourceTemplates" | "prompts",
+): boolean {
+	const expires = connectionRuntimes.get(connection)?.cacheExpires[key];
+	return expires === undefined || expires > Date.now();
+}
+
+function updateCacheExpiry(
+	connection: MCPServerConnection,
+	key: "tools" | "resources" | "resourceTemplates" | "prompts",
+	result: MCPCacheableResult,
+): void {
+	const runtime = connectionRuntimes.get(connection);
+	if (!runtime) return;
+	const expires = typeof result.ttlMs === "number" ? Date.now() + Math.max(0, result.ttlMs) : Number.POSITIVE_INFINITY;
+	runtime.cacheExpires[key] = Math.min(runtime.cacheExpires[key] ?? Number.POSITIVE_INFINITY, expires);
+}
+
+function startModernSubscriptionListener(connection: MCPServerConnection): void {
+	if (connection.protocolVersion !== MODERN_PROTOCOL_VERSION) return;
+	const runtime = connectionRuntimes.get(connection);
+	if (!runtime) return;
+	runtime.subscriptionAbort?.abort();
+	const notifications = {
+		toolsListChanged: connection.capabilities.tools?.listChanged === true,
+		promptsListChanged: connection.capabilities.prompts?.listChanged === true,
+		resourcesListChanged: connection.capabilities.resources?.listChanged === true,
+		resourceSubscriptions: [...runtime.resourceSubscriptions],
+	};
+	if (
+		!notifications.toolsListChanged &&
+		!notifications.promptsListChanged &&
+		!notifications.resourcesListChanged &&
+		notifications.resourceSubscriptions.length === 0
+	) {
+		runtime.subscriptionAbort = undefined;
+		return;
+	}
+	const abort = new AbortController();
+	runtime.subscriptionAbort = abort;
+	void requestFromServer<MCPResult>(
+		connection,
+		"subscriptions/listen",
+		{ notifications },
+		{ signal: abort.signal, timeout: 0 },
+	).catch(error => {
+		if (!abort.signal.aborted) logger.warn("MCP subscription listener stopped", { server: connection.name, error });
+	});
 }
 
 /**
@@ -143,7 +278,24 @@ export async function connectToServer(
 	const timeoutMs = resolveMCPTimeoutMs(config.timeout);
 	let transport: MCPTransport | undefined;
 
+	const protocolMode = config.protocolMode ?? "legacy";
 	const connect = async (): Promise<MCPServerConnection> => {
+		let negotiation: MCPProtocolNegotiationResult | undefined;
+		if (protocolMode === "auto" && (config.type ?? "stdio") === "stdio") {
+			const probe = await createStdioTransport(config as MCPStdioServerConfig);
+			try {
+				negotiation = await negotiateMCPProtocol(probe, {
+					name,
+					mode: protocolMode,
+					transportType: "stdio",
+					timeoutMs,
+					signal: options?.signal,
+					modernParams: withModernRequestMeta(),
+				});
+			} finally {
+				await probe.close();
+			}
+		}
 		transport = await createTransport(config);
 		if (options?.onNotification) {
 			transport.onNotification = options.onNotification;
@@ -155,25 +307,34 @@ export async function connectToServer(
 		transport.onRequest = options?.onRequest ?? defaultRequestHandler;
 
 		try {
-			const initResult = await initializeConnection(transport, {
+			negotiation ??= await negotiateMCPProtocol(transport, {
+				name,
+				mode: protocolMode,
+				transportType: config.type ?? "stdio",
+				timeoutMs,
 				signal: options?.signal,
-				async onInitialized() {
-					// Open the SSE stream before sending initialized, so server-to-client
-					// requests triggered by on_initialized (e.g. roots/list) are delivered.
+				modernParams: withModernRequestMeta(),
+			});
+			const handshake = await initializeConnection(name, transport, negotiation, {
+				signal: options?.signal,
+				async onLegacyInitialized() {
 					if ("startSSEListener" in transport! && typeof transport!.startSSEListener === "function") {
 						await (transport as { startSSEListener(): Promise<void> }).startSSEListener();
 					}
 				},
 			});
-
-			return {
+			const connection: MCPServerConnection = {
 				name,
 				config,
 				transport,
-				serverInfo: initResult.serverInfo,
-				capabilities: initResult.capabilities,
-				instructions: initResult.instructions,
+				serverInfo: handshake.serverInfo,
+				capabilities: handshake.capabilities,
+				instructions: handshake.instructions,
+				protocolVersion: handshake.protocolVersion,
 			};
+			connectionRuntimes.set(connection, { resourceSubscriptions: new Set(), cacheExpires: {} });
+			startModernSubscriptionListener(connection);
+			return connection;
 		} catch (error) {
 			await transport.close();
 			throw error;
@@ -213,9 +374,11 @@ export async function listTools(
 	}
 
 	// Return cached tools if available
-	if (connection.tools) {
+	if (connection.tools && cacheIsFresh(connection, "tools")) {
 		return connection.tools;
 	}
+	connection.tools = undefined;
+	delete connectionRuntimes.get(connection)?.cacheExpires.tools;
 
 	const allTools: MCPToolDefinition[] = [];
 	let cursor: string | undefined;
@@ -226,8 +389,23 @@ export async function listTools(
 			params.cursor = cursor;
 		}
 
-		const result = await connection.transport.request<MCPToolsListResult>("tools/list", params, options);
-		allTools.push(...result.tools);
+		const result = await requestFromServer<MCPToolsListResult>(connection, "tools/list", params, options);
+		updateCacheExpiry(connection, "tools", result);
+		for (const tool of result.tools) {
+			if (connection.protocolVersion === MODERN_PROTOCOL_VERSION && connection.config.type === "http") {
+				const validation = collectToolHeaderBindings(tool.inputSchema);
+				if (validation.error) {
+					logger.warn("Ignoring invalid MCP tool definition", {
+						server: connection.name,
+						tool: tool.name,
+						error: validation.error,
+					});
+					continue;
+				}
+				toolHeaderBindings.set(tool, validation.bindings);
+			}
+			allTools.push(tool);
+		}
 		cursor = result.nextCursor;
 	} while (cursor);
 
@@ -251,10 +429,14 @@ export async function callTool(
 		arguments: args,
 	};
 
-	return connection.transport.request<MCPToolCallResult>(
+	const tool = connection.tools?.find(candidate => candidate.name === toolName);
+	const bindings = tool ? toolHeaderBindings.get(tool) : undefined;
+	const generatedHeaders = bindings ? buildToolParameterHeaders(bindings, args) : undefined;
+	return requestFromServer<MCPToolCallResult>(
+		connection,
 		"tools/call",
 		params as unknown as Record<string, unknown>,
-		options,
+		generatedHeaders ? { ...options, generatedHeaders } : options,
 	);
 }
 
@@ -262,6 +444,7 @@ export async function callTool(
  * Disconnect from a server.
  */
 export async function disconnectServer(connection: MCPServerConnection): Promise<void> {
+	connectionRuntimes.get(connection)?.subscriptionAbort?.abort();
 	await connection.transport.close();
 }
 
@@ -283,9 +466,11 @@ export async function listResources(
 		return [];
 	}
 
-	if (connection.resources) {
+	if (connection.resources && cacheIsFresh(connection, "resources")) {
 		return connection.resources;
 	}
+	connection.resources = undefined;
+	delete connectionRuntimes.get(connection)?.cacheExpires.resources;
 
 	const allResources: MCPResource[] = [];
 	let cursor: string | undefined;
@@ -296,7 +481,8 @@ export async function listResources(
 			params.cursor = cursor;
 		}
 
-		const result = await connection.transport.request<MCPResourcesListResult>("resources/list", params, options);
+		const result = await requestFromServer<MCPResourcesListResult>(connection, "resources/list", params, options);
+		updateCacheExpiry(connection, "resources", result);
 		allResources.push(...result.resources);
 		cursor = result.nextCursor;
 	} while (cursor);
@@ -307,10 +493,10 @@ export async function listResources(
 
 /** True when an error is a JSON-RPC "method not found" (-32601) response. */
 function isMethodNotFoundError(error: unknown): boolean {
+	if (error instanceof MCPError) return error.code === -32601;
 	const message = error instanceof Error ? error.message : String(error);
-	return message.includes("-32601") || /method not found/i.test(message);
+	return /method not found/i.test(message);
 }
-
 /**
  * List resource templates from a connected server.
  *
@@ -330,9 +516,11 @@ export async function listResourceTemplates(
 		return [];
 	}
 
-	if (connection.resourceTemplates) {
+	if (connection.resourceTemplates && cacheIsFresh(connection, "resourceTemplates")) {
 		return connection.resourceTemplates;
 	}
+	connection.resourceTemplates = undefined;
+	delete connectionRuntimes.get(connection)?.cacheExpires.resourceTemplates;
 
 	const allTemplates: MCPResourceTemplate[] = [];
 	let cursor: string | undefined;
@@ -344,11 +532,13 @@ export async function listResourceTemplates(
 				params.cursor = cursor;
 			}
 
-			const result = await connection.transport.request<MCPResourceTemplatesListResult>(
+			const result = await requestFromServer<MCPResourceTemplatesListResult>(
+				connection,
 				"resources/templates/list",
 				params,
 				options,
 			);
+			updateCacheExpiry(connection, "resourceTemplates", result);
 			allTemplates.push(...result.resourceTemplates);
 			cursor = result.nextCursor;
 		} while (cursor);
@@ -376,7 +566,8 @@ export async function readResource(
 	options?: MCPRequestOptions,
 ): Promise<MCPResourceReadResult> {
 	const params: MCPResourceReadParams = { uri };
-	return connection.transport.request<MCPResourceReadResult>(
+	return requestFromServer<MCPResourceReadResult>(
+		connection,
 		"resources/read",
 		params as unknown as Record<string, unknown>,
 		options,
@@ -392,10 +583,18 @@ export async function subscribeToResources(
 	options?: MCPRequestOptions,
 ): Promise<void> {
 	if (uris.length === 0 || !connection.capabilities.resources?.subscribe) return;
+	if (connection.protocolVersion === MODERN_PROTOCOL_VERSION) {
+		const runtime = connectionRuntimes.get(connection);
+		if (!runtime) return;
+		for (const uri of uris) runtime.resourceSubscriptions.add(uri);
+		startModernSubscriptionListener(connection);
+		return;
+	}
 	const results = await Promise.allSettled(
 		uris.map(uri => {
 			const params: MCPResourceSubscribeParams = { uri };
-			return connection.transport.request(
+			return requestFromServer(
+				connection,
 				"resources/subscribe",
 				params as unknown as Record<string, unknown>,
 				options,
@@ -418,10 +617,18 @@ export async function unsubscribeFromResources(
 	options?: MCPRequestOptions,
 ): Promise<void> {
 	if (uris.length === 0 || !connection.capabilities.resources?.subscribe) return;
+	if (connection.protocolVersion === MODERN_PROTOCOL_VERSION) {
+		const runtime = connectionRuntimes.get(connection);
+		if (!runtime) return;
+		for (const uri of uris) runtime.resourceSubscriptions.delete(uri);
+		startModernSubscriptionListener(connection);
+		return;
+	}
 	const results = await Promise.allSettled(
 		uris.map(uri => {
 			const params: MCPResourceSubscribeParams = { uri };
-			return connection.transport.request(
+			return requestFromServer(
+				connection,
 				"resources/unsubscribe",
 				params as unknown as Record<string, unknown>,
 				options,
@@ -460,9 +667,11 @@ export async function listPrompts(
 		return [];
 	}
 
-	if (connection.prompts) {
+	if (connection.prompts && cacheIsFresh(connection, "prompts")) {
 		return connection.prompts;
 	}
+	connection.prompts = undefined;
+	delete connectionRuntimes.get(connection)?.cacheExpires.prompts;
 
 	const allPrompts: MCPPrompt[] = [];
 	let cursor: string | undefined;
@@ -473,7 +682,8 @@ export async function listPrompts(
 			params.cursor = cursor;
 		}
 
-		const result = await connection.transport.request<MCPPromptsListResult>("prompts/list", params, options);
+		const result = await requestFromServer<MCPPromptsListResult>(connection, "prompts/list", params, options);
+		updateCacheExpiry(connection, "prompts", result);
 		allPrompts.push(...result.prompts);
 		cursor = result.nextCursor;
 	} while (cursor);
@@ -496,7 +706,8 @@ export async function getPrompt(
 		params.arguments = args;
 	}
 
-	return connection.transport.request<MCPGetPromptResult>(
+	return requestFromServer<MCPGetPromptResult>(
+		connection,
 		"prompts/get",
 		params as unknown as Record<string, unknown>,
 		options,
