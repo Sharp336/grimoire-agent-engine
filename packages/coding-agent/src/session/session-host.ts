@@ -582,7 +582,10 @@ export class SessionHost {
 				this.#append(observation);
 				this.#enqueueDurableObservation(observation);
 			}
-			if (deferredOverflow) this.#deferredOverflow = true;
+			if (deferredOverflow) {
+				this.#deferredOverflow = true;
+				this.#signalDeferredReplayOverflow();
+			}
 		}
 
 		if (!replay) throw new Error("Session authority did not return durable replay");
@@ -659,6 +662,13 @@ export class SessionHost {
 		for (const subscription of this.#subscriptions) {
 			if (subscription.isDurable) subscription.enqueueLive(observation);
 		}
+	}
+
+	#signalDeferredReplayOverflow(): void {
+		const sequence = ++this.#latestSequence;
+		this.#events[(sequence - 1) % this.#capacity] = undefined;
+		for (const subscription of this.#subscriptions) subscription.signalReplayOverflow();
+		this.#wakeAll();
 	}
 
 	#createSubscription(
@@ -864,6 +874,21 @@ class SessionHostSubscription implements SessionOpenResult {
 				false,
 			),
 		);
+		this.#host.subscriptionAcknowledged();
+	}
+
+	signalReplayOverflow(): void {
+		if (this.closed || this.#overflow) return;
+		this.#nextSequence++;
+		this.#overflow = {
+			type: "gap",
+			sessionId: this.#host.sessionId,
+			epoch: this.#transportEpoch,
+			afterSequence: this.#acknowledged,
+			firstAvailableSequence: Math.max(1, this.#nextSequence - this.#host.maxBufferedObservations + 1),
+			latestSequence: this.#nextSequence,
+			recovery: "resnapshot",
+		};
 		this.#host.subscriptionAcknowledged();
 	}
 

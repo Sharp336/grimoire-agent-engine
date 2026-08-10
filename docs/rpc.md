@@ -467,7 +467,9 @@ authority:
 
 The nested `kind` uses the command names and field schemas advertised by
 `get_capabilities`; `input` contains that command's fields without `type` or
-`id`. Recursive host-management commands are rejected.
+`id`. It requires that nested command's advertised capability — for example,
+catalog commands require `session.catalog`; other session commands require
+`session.execute`. Recursive host-management commands are rejected.
 
 Every invocation settles as:
 
@@ -831,8 +833,8 @@ clients MUST correlate responses by `id`, not emission order.
 These commands share one catalog with the interactive session picker. `scope`
 defaults to `"cwd"` and resolves against `cwd`, which defaults to the active
 session's working directory. `list_sessions` returns a page with an opaque
-`nextCursor`; cursors expire and are bounded per connection. `session` accepts a
-session ID prefix or a path, and an ambiguous reference fails with
+`nextCursor`; cursors are single-use, expire, and are bounded per connection.
+`session` accepts a session ID prefix or a path, and an ambiguous reference fails with
 `session_ambiguous` rather than picking a match. `delete_session` is
 confirmation-gated and answers `confirmation_required` unless the host echoes
 the server-issued `operationId` with `confirmed: true`.

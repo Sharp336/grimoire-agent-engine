@@ -39,6 +39,33 @@ describe("provider auth controller", () => {
 		expect(inventory.find(provider => provider.providerId === "perplexity")?.available).toBeFalse();
 	});
 
+	test("forwards the selected OAuth method to auth storage", async () => {
+		const received: Array<{ provider: string; manualInputOnly: boolean | undefined }> = [];
+		const authStorage = {
+			hasAuth: () => false,
+			getCredentialOrigin: () => undefined,
+			getOAuthAccountIdentity: () => undefined,
+			login: async (provider: string, options: { manualInputOnly?: boolean }) => {
+				received.push({ provider, manualInputOnly: options.manualInputOnly });
+				return undefined;
+			},
+		};
+		const service = new ProviderAuthService({ authStorage, refreshProvider: async () => {} } as never);
+		const callbacks = {
+			signal: new AbortController().signal,
+			onAuth: () => {},
+			onPrompt: async () => "unused",
+		};
+
+		await service.login("anthropic", "oauth_callback", callbacks);
+		await service.login("anthropic", "paste_code", callbacks);
+
+		expect(received).toEqual([
+			{ provider: "anthropic", manualInputOnly: false },
+			{ provider: "anthropic", manualInputOnly: true },
+		]);
+	});
+
 	test("consumes an API key once through the secure UI broker without serializing it", async () => {
 		const frames: object[] = [];
 		const tasks: Promise<void>[] = [];

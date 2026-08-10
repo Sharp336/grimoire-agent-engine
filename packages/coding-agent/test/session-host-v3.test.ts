@@ -299,6 +299,48 @@ describe("session host ordered observations", () => {
 		await host.close();
 	});
 
+	test("signals resnapshot gaps to existing subscriptions when durable replay overflows", async () => {
+		const cursor = { sessionId: "session-1", leafId: null, entryId: null };
+		const replayStarted = Promise.withResolvers<void>();
+		const delayedReplay = Promise.withResolvers<SessionAuthorityReplay>();
+		let replay: (after: SessionJournalCursor) => Promise<SessionAuthorityReplay> = async after => ({
+			observations: [],
+			journalCursor: after,
+		});
+		const authority = new InMemorySessionAuthority(
+			async () => ({ revision: 0, state: {}, journalCursor: cursor }),
+			undefined,
+			after => replay(after),
+		);
+		const host = new SessionHost(authority, { epoch: "epoch-1", maxBufferedObservations: 2 });
+		const transport = await host.open({ after: { epoch: "epoch-1", sequence: 0 }, snapshot: false });
+		const durable = await host.open({ afterCursor: cursor });
+
+		replay = () => {
+			replayStarted.resolve();
+			return delayedReplay.promise;
+		};
+		const opening = host.open({ afterCursor: cursor });
+		await replayStarted.promise;
+		for (let index = 1; index <= 3; index++) {
+			authority.emit({
+				kind: "progress",
+				payload: { index },
+				durability: "transient",
+				terminalSettlement: "none",
+			});
+		}
+		delayedReplay.resolve({ observations: [], journalCursor: cursor });
+
+		await expect(opening).rejects.toMatchObject({ code: "replay_limit_exceeded" });
+		expect((await transport.observations.next()).value).toMatchObject({ type: "gap", recovery: "resnapshot" });
+		expect((await durable.observations.next()).value).toMatchObject({ type: "gap", recovery: "resnapshot" });
+
+		await transport.close();
+		await durable.close();
+		await host.close();
+	});
+
 	test("requires cumulative acknowledgement before delivering beyond the pending window", async () => {
 		const authority = new InMemorySessionAuthority(async () => ({
 			revision: 0,

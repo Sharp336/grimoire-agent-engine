@@ -43,6 +43,26 @@ describe("OAuthCallbackFlow manual input retries", () => {
 		expect(credentials.access).toBe("access-valid-code");
 	});
 
+	it("skips the loopback server when manual input is explicitly selected", async () => {
+		let launchUrl: string | undefined;
+		const flow = new TestCallbackFlow(
+			{
+				manualInputOnly: true,
+				onAuth: info => {
+					launchUrl = info.launchUrl;
+				},
+				onManualCodeInput: async () => "http://localhost/callback?code=manual-code",
+				signal: AbortSignal.timeout(1_000),
+			},
+			14557,
+		);
+
+		const credentials = await flow.login();
+
+		expect(credentials.access).toBe("access-manual-code");
+		expect(launchUrl).toBeUndefined();
+	});
+
 	it("retries when manual callback state does not match", async () => {
 		const attempts = [
 			"http://localhost/callback?code=first-code&state=wrong-state",

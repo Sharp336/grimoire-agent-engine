@@ -830,8 +830,8 @@ class RpcClient:
         self._events.clear()
         self._async_errors.clear()
         self._operation_results.clear()
+        self._operation_errors.clear()
         self._active_operation_ids.clear()
-        self._agent_streaming = False
         self._continuation_request_count = 0
         self._continuation_generation = 0
         self._confirmed_continuation_generation = 0

@@ -436,6 +436,40 @@ describe.skipIf(binaryPath.length === 0)("RPC v3 explicit native-binary process 
 		}
 	}, 45_000);
 
+	test("negotiates nested catalog session commands without session execution capability", async () => {
+		const process = await RawRpcProcess.start(binaryPath);
+		try {
+			const negotiation = responseData(
+				await process.request({
+					id: "catalog-only-initialize",
+					type: "initialize",
+					profile: PROFILE,
+					framingVersion: 1,
+					hostCapabilities: HOST_CAPABILITIES,
+					requestedCapabilities: ["session.catalog"],
+				}),
+				"initialize",
+			);
+			expect(array(negotiation.capabilities, "catalog-only capabilities")).toContainEqual(
+				expect.objectContaining({ id: "session.catalog", supported: true }),
+			);
+			const catalog = responseData(
+				await process.request({
+					id: "nested-catalog-list",
+					type: "session_invoke",
+					command: { kind: "list_sessions", input: { scope: "cwd", limit: 1 } },
+				}),
+				"session_invoke",
+			);
+			expect(catalog).toMatchObject({
+				outcome: "completed",
+				result: { sessions: expect.any(Array) },
+			});
+		} finally {
+			await process.dispose();
+		}
+	}, 30_000);
+
 	test("raw subscriptions expose watermark, replay barrier, durable reconnect, typed gap, session isolation, and shared shutdown", async () => {
 		const process = await RawRpcProcess.start(binaryPath);
 		try {
@@ -1006,6 +1040,34 @@ describe.skipIf(binaryPath.length === 0)("RPC v3 explicit native-binary process 
 		}
 	}, 60_000);
 
+	test("raw queue_insert wakes an idle session to process the inserted message", async () => {
+		const fixture = path.join(import.meta.dir, "fixtures", "rpc-v3-process-provider.ts");
+		const process = await RawRpcProcess.start(binaryPath, {
+			args: ["--extension", fixture, "--model", "rpc-process/rpc-hold", "--api-key", "rpc-process-key"],
+			useDefaultModel: false,
+		});
+		try {
+			await initializeRaw(process);
+			const from = process.logicalFrames.length;
+			const inserted = responseData(
+				await process.request({
+					id: "queue-insert-idle",
+					type: "queue_insert",
+					lane: "steering",
+					text: "drain this idle queue entry",
+				}),
+				"queue_insert",
+			);
+			expect(inserted.entry).toMatchObject({ text: "drain this idle queue entry" });
+			await process.waitFor(frame => frame.type === "agent_start", {
+				from,
+				description: "queued message agent start",
+			});
+		} finally {
+			await process.dispose();
+		}
+	}, 30_000);
+
 	test("controlled MCP fixture exposes prefixed resource lifecycle through the native process", async () => {
 		const fixture = path.join(import.meta.dir, "fixtures", "resources-no-templates-mcp.ts");
 		const process = await RawRpcProcess.start(binaryPath, {
@@ -1428,7 +1490,13 @@ describe.skipIf(binaryPath.length === 0)("RPC v3 explicit native-binary process 
 			],
 			rpcV3: {
 				hostCapabilities: HOST_CAPABILITIES,
-				requestedCapabilities: [...CORE_CAPABILITIES, "artifact.read", "context.projection", "ui"],
+				requestedCapabilities: [
+					...CORE_CAPABILITIES,
+					"session.catalog",
+					"artifact.read",
+					"context.projection",
+					"ui",
+				],
 			},
 		});
 		client.onRawFrame(frame => rawFrames.push(frame));

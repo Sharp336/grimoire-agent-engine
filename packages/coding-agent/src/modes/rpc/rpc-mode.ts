@@ -149,6 +149,7 @@ import {
 } from "./rpc-session-authority";
 import {
 	createRpcSessionCommandInvoker,
+	getRpcSessionCommandCapability,
 	RpcSessionHostAdapter,
 	RpcSessionSubscriptionNotFoundError,
 } from "./rpc-session-host";
@@ -2476,6 +2477,7 @@ export async function runRpcMode(
 		) === true;
 	const negotiatedCapabilityByFeature: Readonly<Record<string, string>> = {
 		"session-observe": "session.observe",
+		"session-catalog": "session.catalog",
 		"session-execute": "session.execute",
 		"session-shutdown": "session.shutdown",
 		"semantic-rendering": "semantic-rendering",
@@ -2488,7 +2490,16 @@ export async function runRpcMode(
 	};
 	const guardCommandFeatures = (command: RpcCommand): RpcResponse | undefined => {
 		const availableFeatures = getCapabilityFeatures();
-		for (const feature of getRpcCommandRequiredFeatures(command.type)) {
+		const requiredFeatures =
+			command.type === "session_invoke"
+				? getRpcCommandRequiredFeatures(command.type).map(feature =>
+						feature === "session-execute" &&
+						getRpcSessionCommandCapability(command.command.kind) === "session.catalog"
+							? "session-catalog"
+							: feature,
+					)
+				: getRpcCommandRequiredFeatures(command.type);
+		for (const feature of requiredFeatures) {
 			if (feature === "model.fast-mode" && command.type === "set_fast_mode" && !command.enabled) {
 				continue;
 			}
@@ -3926,7 +3937,7 @@ export async function runRpcMode(
 
 			case "queue_insert": {
 				try {
-					const result = session.queueService.insert(command.lane, command.text, command.toIndex);
+					const result = session.insertQueuedMessage(command.lane, command.text, command.toIndex);
 					emitQueueUpdate();
 					return success(id, "queue_insert", { entry: result.entry, queue: result.snapshot });
 				} catch (cause) {

@@ -211,6 +211,13 @@ export type RpcProvenanceListener = (frame: RpcProvenanceFrame) => void;
 export type RpcCollaborationListener = (frame: RpcCollaborationFrame) => void;
 export type RpcSessionObservationListener = (frame: RpcSessionObservationFrame) => void;
 export type RpcUiListener = (frame: RpcUiFrame) => void;
+
+export interface RpcListenerErrorEvent {
+	frameType: string;
+	error: Error;
+}
+
+export type RpcListenerErrorListener = (event: RpcListenerErrorEvent) => void;
 export type RpcUiChannelRef = Pick<RpcUiFence, "channelId" | "generation">;
 
 export interface RpcClientHostUriContext {
@@ -831,6 +838,7 @@ export class RpcClient {
 	#queueUpdateListeners = new Set<RpcQueueUpdateListener>();
 	#jobUpdateListeners = new Set<RpcJobUpdateListener>();
 	#rawFrameListeners = new Set<RpcRawFrameListener>();
+	#listenerErrorListeners = new Set<RpcListenerErrorListener>();
 	#promptResultListeners = new Set<RpcPromptResultListener>();
 	#evalOutputListeners = new Set<RpcEvalOutputListener>();
 	#resourceLifecycleListeners = new Set<RpcResourceLifecycleListener>();
@@ -1200,6 +1208,12 @@ export class RpcClient {
 	onRawFrame(listener: RpcRawFrameListener): () => void {
 		this.#rawFrameListeners.add(listener);
 		return () => this.#rawFrameListeners.delete(listener);
+	}
+
+	/** Subscribe to listener failures without allowing a subscriber to stop the RPC process. */
+	onListenerError(listener: RpcListenerErrorListener): () => void {
+		this.#listenerErrorListeners.add(listener);
+		return () => this.#listenerErrorListeners.delete(listener);
 	}
 
 	/** Subscribe to resource lifecycle transitions and operation settlement. */
@@ -2621,13 +2635,31 @@ export class RpcClient {
 
 	#emitRawFrame(data: unknown): void {
 		if (!isRecord(data) || this.#rawFrameListeners.size === 0) return;
-		const frame = structuredClone(data);
-		for (const listener of this.#rawFrameListeners) listener(frame);
+		this.#emitListeners(
+			this.#rawFrameListeners,
+			structuredClone(data),
+			typeof data.type === "string" ? data.type : "raw_frame",
+		);
 	}
 
 	#emitPromptResult(result: RpcPromptResultFrame): void {
-		for (const listener of this.#promptResultListeners) {
-			listener(result);
+		this.#emitListeners(this.#promptResultListeners, result, result.type);
+	}
+
+	#emitListeners<T>(listeners: Iterable<(value: T) => void>, value: T, frameType: string): void {
+		for (const listener of listeners) {
+			try {
+				listener(value);
+			} catch (cause) {
+				const error = cause instanceof Error ? cause : new Error(String(cause));
+				for (const listenerError of this.#listenerErrorListeners) {
+					try {
+						listenerError({ frameType, error });
+					} catch {
+						// An error reporter cannot be allowed to fail the RPC reader either.
+					}
+				}
+			}
 		}
 	}
 
@@ -2671,23 +2703,21 @@ export class RpcClient {
 		}
 
 		if (isRpcUiFrame(data)) {
-			for (const listener of this.#uiListeners) listener(data);
+			this.#emitListeners(this.#uiListeners, data, data.type);
 			return;
 		}
 
 		if (isRpcExtensionUiRequest(data)) {
-			for (const listener of this.#extensionUiListeners) {
-				listener(data);
-			}
+			this.#emitListeners(this.#extensionUiListeners, data, data.type);
 			return;
 		}
 		if (isRpcProviderAuthRequestFrame(data)) {
-			for (const listener of this.#providerAuthRequestListeners) listener(data);
+			this.#emitListeners(this.#providerAuthRequestListeners, data, data.type);
 			return;
 		}
 		if (isRpcProviderAuthUpdateFrame(data)) {
 			const state = parseProviderAuthState(data.state);
-			for (const listener of this.#providerAuthUpdateListeners) listener(state);
+			this.#emitListeners(this.#providerAuthUpdateListeners, state, data.type);
 			return;
 		}
 
@@ -2702,70 +2732,62 @@ export class RpcClient {
 		}
 
 		if (isRpcSubagentLifecycleFrame(data)) {
-			for (const listener of this.#subagentLifecycleListeners) {
-				listener(data.payload);
-			}
+			this.#emitListeners(this.#subagentLifecycleListeners, data.payload, data.type);
 			return;
 		}
 
 		if (isRpcSubagentProgressFrame(data)) {
-			for (const listener of this.#subagentProgressListeners) {
-				listener(data.payload);
-			}
+			this.#emitListeners(this.#subagentProgressListeners, data.payload, data.type);
 			return;
 		}
 
 		if (isRpcSubagentEventFrame(data)) {
-			for (const listener of this.#subagentEventListeners) {
-				listener(data.payload);
-			}
+			this.#emitListeners(this.#subagentEventListeners, data.payload, data.type);
 			return;
 		}
 
 		if (isRpcEvalOutputFrame(data)) {
-			for (const listener of this.#evalOutputListeners) listener(data);
+			this.#emitListeners(this.#evalOutputListeners, data, data.type);
 			return;
 		}
 		if (isRpcEvalCompleteFrame(data)) {
-			for (const listener of this.#evalCompleteListeners) listener(data);
+			this.#emitListeners(this.#evalCompleteListeners, data, data.type);
 			return;
 		}
 		if (isRpcAgentRegistryUpdateFrame(data)) {
-			for (const listener of this.#agentRegistryUpdateListeners) listener(data);
+			this.#emitListeners(this.#agentRegistryUpdateListeners, data, data.type);
 			return;
 		}
 		if (isRpcAvailableCommandsUpdateFrame(data)) {
-			for (const listener of this.#availableCommandsUpdateListeners) {
-				listener(data.commands);
-			}
+			this.#emitListeners(this.#availableCommandsUpdateListeners, data.commands, data.type);
 			return;
 		}
 		if (isRpcToolInventoryUpdateFrame(data)) {
-			for (const listener of this.#toolInventoryUpdateListeners) listener(data);
+			this.#emitListeners(this.#toolInventoryUpdateListeners, data, data.type);
 			return;
 		}
 		if (isRecord(data) && data.type === "queue_update" && isRecord(data.queue)) {
-			for (const listener of this.#queueUpdateListeners) listener(data as unknown as RpcQueueUpdateFrame);
+			this.#emitListeners(this.#queueUpdateListeners, data as unknown as RpcQueueUpdateFrame, data.type);
 			return;
 		}
 		if (isRecord(data) && data.type === "job_update" && Array.isArray(data.jobs) && Array.isArray(data.agents)) {
-			for (const listener of this.#jobUpdateListeners) listener(data as unknown as RpcJobUpdateFrame);
+			this.#emitListeners(this.#jobUpdateListeners, data as unknown as RpcJobUpdateFrame, data.type);
 			return;
 		}
 		if (isRpcSessionObservationFrame(data)) {
-			for (const listener of this.#sessionObservationListeners) listener(data);
+			this.#emitListeners(this.#sessionObservationListeners, data, data.type);
 			return;
 		}
 		if (isRpcResourceLifecycleFrame(data)) {
-			for (const listener of this.#resourceLifecycleListeners) listener(data);
+			this.#emitListeners(this.#resourceLifecycleListeners, data, data.type);
 			return;
 		}
 		if (isRpcProvenanceFrame(data)) {
-			for (const listener of this.#provenanceListeners) listener(data);
+			this.#emitListeners(this.#provenanceListeners, data, data.type);
 			return;
 		}
 		if (isRpcCollaborationFrame(data)) {
-			for (const listener of this.#collaborationListeners) listener(data);
+			this.#emitListeners(this.#collaborationListeners, data, data.type);
 			return;
 		}
 
@@ -2776,33 +2798,29 @@ export class RpcClient {
 
 		if (isRpcOperationStartedFrame(data)) {
 			if (!this.#settledOperationIds.has(data.operationId)) this.#activeOperationIds.add(data.operationId);
-			for (const listener of this.#operationStartedListeners) listener(data);
+			this.#emitListeners(this.#operationStartedListeners, data, data.type);
 			return;
 		}
 		if (isRpcOperationTerminalFrame(data)) {
 			this.#rememberSettledOperation(data.operationId);
-			for (const listener of this.#operationTerminalListeners) {
-				listener(data);
-			}
+			this.#emitListeners(this.#operationTerminalListeners, data, data.type);
 			return;
 		}
 		if (isRpcPlanStateUpdateFrame(data)) {
 			const frame: RpcPlanStateUpdateFrame = { ...data, state: parseRpcPlanState(data.state) };
-			for (const listener of this.#planStateUpdateListeners) listener(frame);
+			this.#emitListeners(this.#planStateUpdateListeners, frame, frame.type);
 			return;
 		}
 		if (isRpcPlanApprovalRequestFrame(data)) {
-			for (const listener of this.#planApprovalRequestListeners) listener(data);
+			this.#emitListeners(this.#planApprovalRequestListeners, data, data.type);
 			return;
 		}
 		if (isRpcPlanApprovalSettledFrame(data)) {
-			for (const listener of this.#planApprovalSettledListeners) listener(data);
+			this.#emitListeners(this.#planApprovalSettledListeners, data, data.type);
 			return;
 		}
 		if (isRpcCommandOutputFrame(data)) {
-			for (const listener of this.#commandOutputListeners) {
-				listener(data);
-			}
+			this.#emitListeners(this.#commandOutputListeners, data, data.type);
 			return;
 		}
 
@@ -2810,27 +2828,23 @@ export class RpcClient {
 			const mode: RpcSessionMode =
 				data.mode === "plan" || data.mode === "plan_paused" || data.mode === "none" ? data.mode : "none";
 			const frame: RpcSessionInfoUpdateFrame = { ...data, mode };
-			for (const listener of this.#sessionInfoUpdateListeners) listener(frame);
+			this.#emitListeners(this.#sessionInfoUpdateListeners, frame, frame.type);
 			return;
 		}
 
 		if (isRpcConfigUpdateFrame(data)) {
 			const frame = { ...data, advisor: parseRpcAdvisorState(data.advisor) };
-			for (const listener of this.#configUpdateListeners) {
-				listener(frame);
-			}
+			this.#emitListeners(this.#configUpdateListeners, frame, frame.type);
 			return;
 		}
 
 		if (isRpcSettingsUpdateFrame(data)) {
-			for (const listener of this.#settingsUpdateListeners) listener(data);
+			this.#emitListeners(this.#settingsUpdateListeners, data, data.type);
 			return;
 		}
 
 		if (isRpcExtensionErrorFrame(data)) {
-			for (const listener of this.#extensionErrorListeners) {
-				listener(data);
-			}
+			this.#emitListeners(this.#extensionErrorListeners, data, data.type);
 			return;
 		}
 
@@ -2845,15 +2859,11 @@ export class RpcClient {
 			}
 		}
 
-		for (const listener of this.#sessionEventListeners) {
-			listener(data);
-		}
+		this.#emitListeners(this.#sessionEventListeners, data, data.type);
 
 		if (!isAgentEvent(data)) return;
 
-		for (const listener of this.#eventListeners) {
-			listener(data);
-		}
+		this.#emitListeners(this.#eventListeners, data, data.type);
 	}
 
 	#send(command: RpcCommandBody, timeoutMs = 30_000, onRequestId?: (id: string) => void): Promise<RpcResponse> {

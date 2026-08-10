@@ -271,12 +271,51 @@ describe("AgentSessionAuthority", () => {
 		expect(invocations).toBe(1);
 		finish.resolve();
 		await expect(Promise.all([first, duplicate])).resolves.toEqual([
-			{ outcome: "completed", result: { applied: true }, revision: 0 },
-			{ outcome: "completed", result: { applied: true }, revision: 0 },
+			{ outcome: "completed", result: { applied: true }, revision: 1 },
+			{ outcome: "completed", result: { applied: true }, revision: 1 },
 		]);
 		await expect(
 			authority.invoke({ ...command, input: { entryId: "queue-1", text: "different" } }, { requestId: "request-3" }),
 		).resolves.toMatchObject({ outcome: "failed", error: { code: "idempotency_conflict", retryable: false } });
+		expect(invocations).toBe(1);
+	});
+
+	test("serializes matching expected revisions so only one mutation can complete", async () => {
+		const session = new FakeSession();
+		const started = Promise.withResolvers<void>();
+		const finish = Promise.withResolvers<void>();
+		let invocations = 0;
+		const authority = new AgentSessionAuthority(session, {
+			snapshotState: async () => ({}),
+			invoke: async () => {
+				invocations++;
+				if (invocations === 1) {
+					started.resolve();
+					await finish.promise;
+				}
+				return { outcome: "completed" };
+			},
+			settle: async () => ({ state: "settled" }),
+		});
+
+		const first = authority.invoke(
+			{ kind: "queue_update", input: { entryId: "queue-1", text: "first" }, expectedRevision: 0 },
+			{ requestId: "request-1" },
+		);
+		await started.promise;
+		const stale = authority.invoke(
+			{ kind: "queue_update", input: { entryId: "queue-1", text: "second" }, expectedRevision: 0 },
+			{ requestId: "request-2" },
+		);
+		expect(invocations).toBe(1);
+		finish.resolve();
+
+		await expect(first).resolves.toEqual({ outcome: "completed", revision: 1 });
+		await expect(stale).resolves.toMatchObject({
+			outcome: "failed",
+			revision: 1,
+			error: { code: "revision_conflict", retryable: true },
+		});
 		expect(invocations).toBe(1);
 	});
 
@@ -303,7 +342,7 @@ describe("AgentSessionAuthority", () => {
 		).resolves.toMatchObject({ outcome: "failed", error: { code: "idempotency_capacity", retryable: false } });
 		await expect(
 			authority.invoke({ kind: "queue_clear", idempotencyKey: "idem-0" }, { requestId: "request-retry" }),
-		).resolves.toEqual({ outcome: "completed", revision: 0 });
+		).resolves.toEqual({ outcome: "completed", revision: 1 });
 		expect(invocations).toBe(MAX_SESSION_IDEMPOTENCY_KEYS);
 	});
 });

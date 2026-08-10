@@ -49,6 +49,11 @@ describe("RpcClient frame coverage", () => {
 		client.onRawFrame(frame => {
 			if (typeof frame.type === "string") rawTypes.push(frame.type);
 		});
+		const listenerErrors: string[] = [];
+		client.onRawFrame(frame => {
+			if (frame.type === "ready") throw new Error("fixture listener failure");
+		});
+		client.onListenerError(event => listenerErrors.push(`${event.frameType}:${event.error.message}`));
 		client.onCommandOutput(frame => commandOutput.push(frame.text));
 		client.onSessionInfoUpdate(frame => {
 			sessionIds.push(frame.sessionId);
@@ -104,6 +109,7 @@ describe("RpcClient frame coverage", () => {
 		expect(rawTypes.filter(type => type === "ui_channel_settled")).toHaveLength(2);
 		expect(rawTypes).toContain("ready");
 		expect(rawTypes).toContain("future_server_frame");
+		expect(listenerErrors).toEqual(["ready:fixture listener failure"]);
 		expect(captured.find(frame => frame.type === "extension_ui_response")).toMatchObject({
 			id: "ui-confirm-1",
 			confirmed: true,

@@ -5,6 +5,7 @@ import {
 	projectSessionTree,
 	resolveSessionCatalogReference,
 	type SessionCatalogError,
+	setSessionCatalogCursorLimitForTesting,
 	setSessionCatalogSnapshotEntryLimitForTesting,
 } from "@oh-my-pi/pi-coding-agent/session/session-catalog";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -229,7 +230,7 @@ describe("session catalog", () => {
 		} satisfies Partial<SessionCatalogError>);
 	});
 
-	it("bounds retained entries by snapshot identity while chained cursors remain reusable", async () => {
+	it("bounds retained entries by snapshot identity and consumes continuation cursors", async () => {
 		const { storage } = seededCatalog();
 		const restore = setSessionCatalogSnapshotEntryLimitForTesting(4);
 		try {
@@ -243,11 +244,31 @@ describe("session catalog", () => {
 			).rejects.toMatchObject({ code: "invalid_cursor" } satisfies Partial<SessionCatalogError>);
 
 			const second = await listSessionCatalog({ scope: "cwd", cwd: CWD, cursor: newest.nextCursor }, storage);
-			const repeated = await listSessionCatalog({ scope: "cwd", cwd: CWD, cursor: newest.nextCursor }, storage);
-			expect(repeated.sessions).toEqual(second.sessions);
-			expect(repeated.nextCursor).toBe(second.nextCursor);
+			await expect(
+				listSessionCatalog({ scope: "cwd", cwd: CWD, cursor: newest.nextCursor }, storage),
+			).rejects.toMatchObject({ code: "invalid_cursor" } satisfies Partial<SessionCatalogError>);
 			const third = await listSessionCatalog({ scope: "cwd", cwd: CWD, cursor: second.nextCursor }, storage);
 			expect(third.sessions).toHaveLength(1);
+		} finally {
+			restore();
+		}
+	});
+
+	it("enforces the global cursor cap even when snapshots remain individually bounded", async () => {
+		const { storage } = seededCatalog();
+		const restore = setSessionCatalogCursorLimitForTesting(1);
+		try {
+			const oldest = await listSessionCatalog({ scope: "cwd", cwd: CWD, limit: 1 }, storage);
+			const newest = await listSessionCatalog({ scope: "cwd", cwd: CWD, limit: 1 }, storage);
+			expect(oldest.nextCursor).toBeDefined();
+			expect(newest.nextCursor).toBeDefined();
+
+			await expect(
+				listSessionCatalog({ scope: "cwd", cwd: CWD, cursor: oldest.nextCursor }, storage),
+			).rejects.toMatchObject({ code: "invalid_cursor" } satisfies Partial<SessionCatalogError>);
+			await expect(
+				listSessionCatalog({ scope: "cwd", cwd: CWD, cursor: newest.nextCursor }, storage),
+			).resolves.toMatchObject({ sessions: expect.any(Array) });
 		} finally {
 			restore();
 		}

@@ -2984,6 +2984,19 @@ class RpcClientTests(unittest.TestCase):
         self.assertEqual(len(client.listener_errors), 1)
         self.assertEqual(client.listener_errors[0].listener_kind, "notification")
 
+
+    def test_restart_clears_stale_operation_errors(self) -> None:
+        client = self.make_client()
+
+        try:
+            client.start()
+            client._operation_errors["stale-operation"] = RpcError("stale operation error")
+            client.stop()
+            client.start()
+            self.assertEqual(client._operation_errors, {})
+        finally:
+            client.stop()
+
     def test_stderr_history_is_bounded(self) -> None:
         client = self.make_client(server=STDERR_SERVER, max_stderr_chunks=1)
 

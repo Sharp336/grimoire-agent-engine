@@ -2842,17 +2842,21 @@ export class AuthStorage {
 			beforePersist?: () => void;
 		},
 	): Promise<OAuthLoginIdentity | undefined> {
-		// Only paste-code providers (fixed non-loopback redirect, e.g. GitLab Duo
-		// Agent's vscode:// URI) get a default manual-code prompt. For loopback OAuth
-		// providers the `OAuthCallbackFlow` would otherwise race this readline prompt
-		// against the HTTP callback and, when the callback wins, leave the prompt
-		// outstanding — a dirty/blocked terminal. Synthesizing the default only for
-		// paste-code providers is the authoritative gate (it covers every caller, not
-		// just the CLI); an explicit caller-supplied `onManualCodeInput` is still
-		// honored for any provider as an escape hatch.
-		const manualCodeInput = PASTE_CODE_LOGIN_PROVIDERS.has(provider)
-			? () => ctrl.onPrompt({ message: "Paste the authorization code (or full redirect URL):" })
-			: undefined;
+		// Only explicit manual-input and paste-code providers (fixed non-loopback
+		// redirects, e.g. GitLab Duo Agent's vscode:// URI) get a default
+		// manual-code prompt. For loopback OAuth providers the OAuthCallbackFlow
+		// would otherwise race this readline prompt against the HTTP callback and,
+		// when the callback wins, leave the prompt outstanding — a dirty/blocked
+		// terminal. `manualInputOnly: false` selects callback mode and suppresses
+		// that default; an explicit caller-supplied `onManualCodeInput` remains an
+		// escape hatch unless callback mode was selected.
+		const manualCodeInput =
+			ctrl.manualInputOnly === false
+				? undefined
+				: (ctrl.onManualCodeInput ??
+					(ctrl.manualInputOnly || PASTE_CODE_LOGIN_PROVIDERS.has(provider)
+						? () => ctrl.onPrompt({ message: "Paste the authorization code (or full redirect URL):" })
+						: undefined));
 		// Built-in registry first, then runtime-registered extension providers.
 		const def = getProviderDefinition(provider) ?? getOAuthProvider(provider);
 		if (!def?.login) {
@@ -2862,7 +2866,8 @@ export class AuthStorage {
 			onAuth: ctrl.onAuth,
 			onProgress: ctrl.onProgress,
 			onPrompt: ctrl.onPrompt,
-			onManualCodeInput: ctrl.onManualCodeInput ?? manualCodeInput,
+			onManualCodeInput: manualCodeInput,
+			manualInputOnly: ctrl.manualInputOnly,
 			signal: ctrl.signal,
 			fetch: ctrl.fetch,
 		});

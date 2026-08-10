@@ -1,6 +1,21 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added the host-neutral `omp.session` RPC v3 semantic profile with capability negotiation, authoritative session observation and mutation, typed interactions, artifacts, MCP/LSP/DAP lifecycle control, collaboration, provenance, and graceful settlement, plus TypeScript and Python clients with explicit headless `rpc` and interactive `rpc-ui` process selection.
+- Added negotiated native `rpc-ui` interactive surfaces for ordered raw input, revisioned editor synchronization, official autocomplete and action expansion, semantic extension components, native themes, title subscriptions, tool expansion, and exhaustive application action routing, with typed TypeScript/Python client APIs.
+
+### Changed
+
+- Extended RPC `get_available_models` with TUI-consistent ordering, resolved model-role preferences, most-recently-used model order, and each model's authoritative thinking selectors; RPC clients can also select and observe `auto` thinking directly.
+
+### Fixed
+
+- Fixed RPC v3 `session_invoke` rejecting JSON-serializable command results with optional fields and reporting false authority changes after nested session transitions.
+- Fixed RPC v3 catalog cursor bounds, nested-command capability enforcement, queued-message draining, revision conflicts, replay-gap signalling, collaboration snapshot progress timeouts, and client listener isolation.
+- Hardened RPC v3 operation ownership, cancellation settlement, session transitions, collaboration authority, resource rebinding, provider authentication, durable replay, bounded recovery, lossless eval artifacts, workspace-scoped exports, effective-context provenance, capability negotiation, and native `AskTool` RPC UI invocation; added fresh-binary raw JSONL, TypeScript, and Python conformance coverage.
+- Fenced RPC UI channels, autocomplete operations, editor writes, and blocking presentations across channel replacement, disconnect, execution-authority changes, session replacement, and shutdown; added an independent TUI/RPC UI inventory oracle and full native-process conformance for raw JSONL, TypeScript, and Python clients.
 
 ## [17.2.12] - 2026-08-08
 
@@ -14,20 +29,6 @@
 - Fixed long-running sessions leaking memory for every completed keep-alive `task`/scout subagent: a disposed (parked) subagent's `AgentSession` stayed pinned through the lifecycle adoption record's reviver closure, and `dispose()` never released the message array, append-only provider transcript, session-manager entries, or the raw-SSE debug buffer, so heavy transcripts and captured provider wire frames accumulated for the process lifetime ([#8003](https://github.com/can1357/oh-my-pi/issues/8003)).
 - Fixed Z.AI web search dropping sources and exposing raw JSON when MCP responses double-encode content text ([#8000](https://github.com/can1357/oh-my-pi/issues/8000)).
 - Fixed `/handoff` masking empty/whitespace-only generation and harness-initiated aborts as "Handoff cancelled"; manual empty generation now surfaces a logged failure, harness aborts preserve their reason (or report "Handoff aborted by session"), and auto-handoff still falls back to context-full compaction ([#7993](https://github.com/can1357/oh-my-pi/issues/7993)).
-### Added
-
-- Added the host-neutral `omp.session` RPC v3 semantic profile with capability negotiation, authoritative session observation and mutation, typed interactions, artifacts, MCP/LSP/DAP lifecycle control, collaboration, provenance, and graceful settlement, plus TypeScript and Python clients with explicit headless `rpc` and interactive `rpc-ui` process selection.
-- Added negotiated native `rpc-ui` interactive surfaces for ordered raw input, revisioned editor synchronization, official autocomplete and action expansion, semantic extension components, native themes, title subscriptions, tool expansion, and exhaustive application action routing, with typed TypeScript/Python client APIs.
-
-### Changed
-
-- Extended RPC `get_available_models` with TUI-consistent ordering, resolved model-role preferences, most-recently-used model order, and each model's authoritative thinking selectors; RPC clients can also select and observe `auto` thinking directly.
-
-### Fixed
-
-- Fixed RPC v3 `session_invoke` rejecting JSON-serializable command results with optional fields and reporting false authority changes after nested session transitions.
-- Hardened RPC v3 operation ownership, cancellation settlement, session transitions, collaboration authority, resource rebinding, provider authentication, durable replay, bounded recovery, lossless eval artifacts, workspace-scoped exports, effective-context provenance, capability negotiation, and native `AskTool` RPC UI invocation; added fresh-binary raw JSONL, TypeScript, and Python conformance coverage.
-- Fenced RPC UI channels, autocomplete operations, editor writes, and blocking presentations across channel replacement, disconnect, execution-authority changes, session replacement, and shutdown; added an independent TUI/RPC UI inventory oracle and full native-process conformance for raw JSONL, TypeScript, and Python clients.
 
 ## [17.2.11] - 2026-08-07
 

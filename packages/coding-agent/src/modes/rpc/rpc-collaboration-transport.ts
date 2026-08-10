@@ -296,7 +296,8 @@ class RpcCollaborationGuestConnection implements RpcCollaborationConnection {
 	#ingressStale = false;
 	#gapSignalled = false;
 	#readOnly: boolean;
-	#joinTimer: Timer | null = null;
+	#welcomeTimer: Timer | null = null;
+	#snapshotProgressTimer: Timer | null = null;
 
 	constructor(socket: CollabSocket, events: RpcCollaborationOpenEvents, displayName: string, writeToken?: string) {
 		this.#socket = socket;
@@ -323,19 +324,17 @@ class RpcCollaborationGuestConnection implements RpcCollaborationConnection {
 		};
 		this.#socket.onFrame = frame => this.#enqueueFrame(frame);
 		this.#socket.onClose = (reason, willReconnect) => {
+			this.#clearInitialTimers();
 			if (this.#left) return;
 			if (!this.#joined) this.#initial.reject(new Error(reason));
 			this.#events.status(willReconnect ? "reconnecting" : "failed", willReconnect ? "network_lost" : "room_closed");
 		};
-		this.#joinTimer = setTimeout(
-			() => this.#initial.reject(new Error("timed out waiting for collaboration snapshot")),
-			JOIN_TIMEOUT_MS,
-		);
+		this.#armWelcomeTimer();
 		this.#socket.connect();
 		try {
 			return await this.#initial.promise;
 		} finally {
-			this.#clearJoinTimer();
+			this.#clearInitialTimers();
 		}
 	}
 
@@ -358,7 +357,7 @@ class RpcCollaborationGuestConnection implements RpcCollaborationConnection {
 
 	async leave(_reason: string): Promise<void> {
 		this.#left = true;
-		this.#clearJoinTimer();
+		this.#clearInitialTimers();
 		this.#clearPendingFrames();
 		this.#socket.close();
 	}
@@ -435,19 +434,24 @@ class RpcCollaborationGuestConnection implements RpcCollaborationConnection {
 		if (this.#left || (this.#ingressStale && frame.t !== "welcome")) return;
 		if (frame.t === "welcome") {
 			if (frame.proto !== COLLAB_PROTO) throw new Error("collaboration protocol mismatch");
+			this.#clearWelcomeTimer();
 			this.#ingressStale = false;
 			this.#gapSignalled = false;
 			this.#readOnly = frame.readOnly === true;
 			this.#events.authority(this.authority);
 			this.#pending = { welcome: frame, entries: [] };
 			if (frame.entryCount === 0) await this.#finishSnapshot();
+			else if (!this.#joined) this.#armSnapshotProgressTimer();
 			return;
 		}
 		if (frame.t === "snapshot-chunk") {
 			if (!this.#pending) return;
 			this.#pending.entries.push(...frame.entries);
-			if (frame.final || this.#pending.entries.length >= this.#pending.welcome.entryCount)
+			if (frame.final || this.#pending.entries.length >= this.#pending.welcome.entryCount) {
 				await this.#finishSnapshot();
+			} else if (!this.#joined) {
+				this.#armSnapshotProgressTimer();
+			}
 			return;
 		}
 		if (frame.t === "error" && !this.#joined) {
@@ -477,6 +481,7 @@ class RpcCollaborationGuestConnection implements RpcCollaborationConnection {
 		const pending = this.#pending;
 		if (!pending) return;
 		this.#pending = null;
+		this.#clearSnapshotProgressTimer();
 		const initial = { welcome: pending.welcome, entries: pending.entries };
 		const wasJoined = this.#joined;
 		this.#joined = true;
@@ -514,6 +519,7 @@ class RpcCollaborationGuestConnection implements RpcCollaborationConnection {
 		this.#clearPendingFrames();
 		if (!this.#joined) {
 			this.#left = true;
+			this.#clearInitialTimers();
 			this.#initial.reject(cause);
 			return;
 		}
@@ -527,10 +533,38 @@ class RpcCollaborationGuestConnection implements RpcCollaborationConnection {
 		this.#pendingFrameBytes = 0;
 	}
 
-	#clearJoinTimer(): void {
-		if (this.#joinTimer === null) return;
-		clearTimeout(this.#joinTimer);
-		this.#joinTimer = null;
+	#armWelcomeTimer(): void {
+		if (this.#joined) return;
+		this.#clearWelcomeTimer();
+		this.#welcomeTimer = setTimeout(
+			() => this.#initial.reject(new Error("timed out waiting for collaboration welcome")),
+			JOIN_TIMEOUT_MS,
+		);
+	}
+
+	#clearWelcomeTimer(): void {
+		if (this.#welcomeTimer === null) return;
+		clearTimeout(this.#welcomeTimer);
+		this.#welcomeTimer = null;
+	}
+
+	#armSnapshotProgressTimer(): void {
+		this.#clearSnapshotProgressTimer();
+		this.#snapshotProgressTimer = setTimeout(
+			() => this.#initial.reject(new Error("timed out waiting for collaboration snapshot progress")),
+			JOIN_TIMEOUT_MS,
+		);
+	}
+
+	#clearSnapshotProgressTimer(): void {
+		if (this.#snapshotProgressTimer === null) return;
+		clearTimeout(this.#snapshotProgressTimer);
+		this.#snapshotProgressTimer = null;
+	}
+
+	#clearInitialTimers(): void {
+		this.#clearWelcomeTimer();
+		this.#clearSnapshotProgressTimer();
 	}
 }
 

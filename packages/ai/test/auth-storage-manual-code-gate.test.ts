@@ -60,6 +60,39 @@ describe("AuthStorage.login default manual-code prompt gating", () => {
 		expect(forwarded?.onManualCodeInput).toBeUndefined();
 	});
 
+	it("suppresses a paste-code default prompt when callback mode is explicitly selected", async () => {
+		let forwarded: OAuthLoginCallbacks | undefined;
+		vi.spyOn(gitlabDuoWorkflowOAuth, "loginGitLabDuoWorkflow").mockImplementation(
+			async (callbacks: OAuthLoginCallbacks) => {
+				forwarded = callbacks;
+				return { access: "access-token", refresh: "refresh-token", expires: Date.now() + 60_000 };
+			},
+		);
+
+		await storage.login("gitlab-duo-agent", {
+			onAuth: () => {},
+			onPrompt: async () => "unused",
+			manualInputOnly: false,
+		});
+
+		expect(forwarded?.manualInputOnly).toBeFalse();
+		expect(forwarded?.onManualCodeInput).toBeUndefined();
+	});
+
+	it("enables a manual prompt for an explicitly selected loopback paste flow", async () => {
+		const capture = registerCapturingLoopbackProvider("loopback-manual-provider");
+
+		await storage.login("loopback-manual-provider", {
+			onAuth: () => {},
+			onPrompt: async () => "pasted-code",
+			manualInputOnly: true,
+		});
+
+		const forwarded = capture.received();
+		expect(forwarded?.manualInputOnly).toBeTrue();
+		expect(forwarded?.onManualCodeInput).toBeDefined();
+	});
+
 	it("honors an explicit caller-supplied manual-code prompt for a loopback provider (escape hatch)", async () => {
 		const capture = registerCapturingLoopbackProvider("loopback-explicit-provider");
 		const explicit = async () => "explicit-code";

@@ -338,6 +338,7 @@ import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import {
 	type SessionQueueClearResult,
+	type SessionQueueEntry,
 	type SessionQueueLane,
 	SessionQueueService,
 	type SessionQueueSnapshot,
@@ -6361,6 +6362,19 @@ export class AgentSession {
 			images,
 			streamingBehavior: "steer",
 		});
+	}
+
+	/** Insert a user queue entry and wake an idle session to process it. */
+	insertQueuedMessage(
+		lane: SessionQueueLane,
+		text: string,
+		toIndex?: number,
+	): { entry: SessionQueueEntry; snapshot: SessionQueueSnapshot } {
+		this.#advisors.autoResumeSuppressed = false;
+		this.#allowQueuedMessageDrainRetry();
+		const result = this.queueService.insert(lane, text, toIndex);
+		this.#scheduleIdleQueueDrain();
+		return result;
 	}
 
 	/** Clear queued messages and return the user-restorable ones (text plus any attached images).

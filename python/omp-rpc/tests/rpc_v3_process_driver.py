@@ -146,6 +146,7 @@ export default function (pi) {
         request_timeout=20.0,
         rpc_v3=RpcV3ClientOptions(
             requested_capabilities=(
+                "session.catalog",
                 "session.observe",
                 "session.execute",
                 "session.shutdown",

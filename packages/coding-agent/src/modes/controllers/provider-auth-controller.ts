@@ -138,6 +138,7 @@ export class ProviderAuthService {
 			signal: callbacks.signal,
 			onAuth: callbacks.onAuth,
 			onPrompt: callbacks.onPrompt,
+			manualInputOnly: method === "paste_code",
 			beforePersist: callbacks.onBeforePersist,
 		});
 		// AuthStorage returning means its authoritative persistence step committed.

@@ -185,8 +185,9 @@ interface SessionCatalogSnapshotGroup {
 }
 
 const SESSION_CATALOG_CURSOR_TTL_MS = 5 * 60_000;
-const SESSION_CATALOG_CURSOR_MAX = 256;
+const DEFAULT_SESSION_CATALOG_CURSOR_MAX = 256;
 const DEFAULT_SESSION_CATALOG_SNAPSHOT_ENTRY_MAX = 100_000;
+let sessionCatalogCursorMax = DEFAULT_SESSION_CATALOG_CURSOR_MAX;
 let sessionCatalogSnapshotEntryMax = DEFAULT_SESSION_CATALOG_SNAPSHOT_ENTRY_MAX;
 let retainedSessionCatalogSnapshotEntries = 0;
 const sessionCatalogCursors = new Map<string, SessionCatalogSnapshotCursor>();
@@ -213,7 +214,7 @@ function removeSnapshotCursor(token: string): void {
 function enforceSnapshotBounds(): void {
 	while (
 		retainedSessionCatalogSnapshotEntries > sessionCatalogSnapshotEntryMax ||
-		(sessionCatalogCursors.size > SESSION_CATALOG_CURSOR_MAX && sessionCatalogSnapshotGroups.size > 1)
+		sessionCatalogCursors.size > sessionCatalogCursorMax
 	) {
 		const oldest = sessionCatalogSnapshotGroups.keys().next().value;
 		if (oldest === undefined) break;
@@ -244,6 +245,10 @@ function pageSnapshot(snapshot: SessionCatalogSnapshotCursor, token?: string): S
 	}
 	const sessions = snapshot.sessions.slice(snapshot.offset, snapshot.offset + snapshot.limit);
 	const nextOffset = snapshot.offset + sessions.length;
+	// One continuation is enough to traverse a stable snapshot. Consume the
+	// cursor before retaining its successor so global eviction cannot evict the
+	// active group while constructing the next page.
+	if (token) removeSnapshotCursor(token);
 	if (nextOffset < snapshot.sessions.length && !snapshot.nextCursor) {
 		snapshot.nextCursor = storeSnapshotCursor({
 			sessions: snapshot.sessions,
@@ -267,6 +272,17 @@ export function setSessionCatalogSnapshotEntryLimitForTesting(limit: number): ()
 	return () => {
 		for (const sessions of [...sessionCatalogSnapshotGroups.keys()]) removeSnapshotGroup(sessions);
 		sessionCatalogSnapshotEntryMax = DEFAULT_SESSION_CATALOG_SNAPSHOT_ENTRY_MAX;
+	};
+}
+
+/** Test seam for deterministic global cursor-cap coverage. Restores and clears cursor state on cleanup. */
+export function setSessionCatalogCursorLimitForTesting(limit: number): () => void {
+	if (!Number.isSafeInteger(limit) || limit < 1) throw new Error("Cursor limit must be a positive integer");
+	sessionCatalogCursorMax = limit;
+	enforceSnapshotBounds();
+	return () => {
+		for (const sessions of [...sessionCatalogSnapshotGroups.keys()]) removeSnapshotGroup(sessions);
+		sessionCatalogCursorMax = DEFAULT_SESSION_CATALOG_CURSOR_MAX;
 	};
 }
 

@@ -56,6 +56,7 @@ export class AgentSessionAuthority implements SessionAuthority {
 	readonly #idempotentCommands = new Map<string, IdempotentCommandEntry>();
 	readonly #unsubscribe: () => void;
 	#eventTail: Promise<void> = Promise.resolve();
+	#invokeTail: Promise<void> = Promise.resolve();
 	#sourceGeneration = 0;
 	#revision: number;
 	#settling = false;
@@ -148,7 +149,7 @@ export class AgentSessionAuthority implements SessionAuthority {
 
 	invoke(command: SessionCommand, context: SessionCommandContext): Promise<SessionCommandOutcome> {
 		const key = command.idempotencyKey;
-		if (key === undefined) return this.#invokeCommand(command, context);
+		if (key === undefined) return this.#enqueueCommand(command, context);
 		const existing = this.#idempotentCommands.get(key);
 		if (existing) {
 			if (Bun.deepEquals(existing.command, command)) return existing.outcome;
@@ -171,9 +172,24 @@ export class AgentSessionAuthority implements SessionAuthority {
 				},
 			});
 		}
-		const outcome = this.#invokeCommand(command, context);
+		const outcome = this.#enqueueCommand(command, context);
 		this.#idempotentCommands.set(key, { command: structuredClone(command), outcome });
 		return outcome;
+	}
+
+	#enqueueCommand(command: SessionCommand, context: SessionCommandContext): Promise<SessionCommandOutcome> {
+		const previous = this.#invokeTail;
+		const turn = Promise.withResolvers<void>();
+		this.#invokeTail = previous.catch(() => undefined).then(() => turn.promise);
+		return previous
+			.catch(() => undefined)
+			.then(async () => {
+				try {
+					return await this.#invokeCommand(command, context);
+				} finally {
+					turn.resolve();
+				}
+			});
 	}
 
 	async #invokeCommand(command: SessionCommand, context: SessionCommandContext): Promise<SessionCommandOutcome> {
@@ -194,9 +210,11 @@ export class AgentSessionAuthority implements SessionAuthority {
 				},
 			};
 		}
+		const revisionBeforeInvoke = this.#revision;
 		const outcome = await this.#causation.run(context.requestId, () => this.#options.invoke(command, context));
 		await this.#eventTail;
 		this.#emitNewJournalEntries(context.requestId);
+		if (outcome.outcome === "completed" && this.#revision === revisionBeforeInvoke) this.#revision++;
 		return { ...outcome, revision: this.#revision };
 	}
 
