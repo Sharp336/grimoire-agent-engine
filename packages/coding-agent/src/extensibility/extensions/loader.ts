@@ -334,9 +334,12 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 }
 
 /**
- * Runs an extension factory with provider registration rollback on failure.
- * Restores the complete registration queue when the factory throws because an
- * extension may unregister entries queued by an earlier extension.
+ * Runs an extension factory with rollback of process-global state the factory
+ * may have mutated before throwing. Restores the complete provider-registration
+ * queue (an extension may unregister entries queued by an earlier extension) and
+ * the {@link IrcBus} remote transport, so a factory that installs a transport via
+ * `pi.irc.setRemoteTransport` and then throws does not leave a stale transport
+ * routing registry-miss sends for an extension that never finished loading.
  */
 async function runExtensionFactory(
 	factory: ExtensionFactory,
@@ -344,6 +347,8 @@ async function runExtensionFactory(
 	runtime: IExtensionRuntime,
 ): Promise<void> {
 	const providerRegistrationCheckpoint = [...runtime.pendingProviderRegistrations];
+	const bus = IrcBus.global();
+	const remoteTransportCheckpoint = bus.getRemoteTransport();
 
 	try {
 		await factory(api);
@@ -353,6 +358,7 @@ async function runExtensionFactory(
 			runtime.pendingProviderRegistrations.length,
 			...providerRegistrationCheckpoint,
 		);
+		bus.setRemoteTransport(remoteTransportCheckpoint);
 		throw error;
 	}
 }
