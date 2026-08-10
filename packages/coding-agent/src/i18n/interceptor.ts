@@ -201,7 +201,7 @@ export function interceptSlashCommand(input: SlashCommandTranslationInput): Slas
 	if (input.subcommands) {
 		result.subcommands = input.subcommands.map(sub => ({
 			...sub,
-			description: i18n.t(`slashCommands.${input.name}.subcommands.${sub.name}`, sub.description),
+			description: i18n.t(`slashCommands.${input.name}.subcommands.${sub.name}.description`, sub.description),
 		}));
 	}
 	return result;

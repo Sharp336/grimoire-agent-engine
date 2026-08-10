@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { createI18n, type I18nManager, i18n } from "../src/i18n";
-import { interceptTips } from "../src/i18n/interceptor";
+import { interceptSlashCommand, interceptTips } from "../src/i18n/interceptor";
 
 describe("i18n", () => {
 	let tempDir: string;
@@ -365,5 +365,46 @@ describe("interceptTips", () => {
 		// Items at index 26 and 27 have no TIP_KEYS entry, stay in English
 		expect(result[26]).toBe("English tip 26");
 		expect(result[27]).toBe("English tip 27");
+	});
+});
+
+describe("interceptSlashCommand", () => {
+	const originalLang = process.env.OMP_LANG;
+
+	afterEach(() => {
+		if (originalLang !== undefined) {
+			process.env.OMP_LANG = originalLang;
+		} else {
+			delete process.env.OMP_LANG;
+		}
+		i18n.reset();
+	});
+
+	it("translates subcommand descriptions via .description-suffixed keys in zh", () => {
+		process.env.OMP_LANG = "zh";
+		i18n.reset();
+
+		const result = interceptSlashCommand({
+			name: "advisor",
+			description: "Advisor",
+			subcommands: [{ name: "on", description: "Enable advisor" }],
+		});
+
+		expect(result.description).toBe("切换顾问（第二个模型，审查每一轮并注入笔记）");
+		expect(result.subcommands?.[0].description).toBe("启用顾问");
+	});
+
+	it("keeps English descriptions when language is en", () => {
+		process.env.OMP_LANG = "en";
+		i18n.reset();
+
+		const result = interceptSlashCommand({
+			name: "advisor",
+			description: "Advisor",
+			subcommands: [{ name: "on", description: "Enable advisor" }],
+		});
+
+		expect(result.description).toBe("Advisor");
+		expect(result.subcommands?.[0].description).toBe("Enable advisor");
 	});
 });
