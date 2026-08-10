@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { isBunTestRuntime, isCompiledBinary, logger } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
+import { workerEnvFromParent } from "../subprocess/worker-client";
 import type { SttWorkerInbound, SttWorkerOutbound } from "./asr-protocol";
 import type { SttModelKey } from "./models";
 
@@ -168,7 +169,7 @@ export function createNemotronSttSubprocess(binaryPath?: string): NemotronSpawne
 		stdin: "pipe",
 		stdout: "pipe",
 		stderr: stderrCapture?.target ?? "ignore",
-		env: process.env as Record<string, string>,
+		env: workerEnvFromParent(),
 		onExit(_proc, exitCode, signalCode) {
 			if (stderrCapture) {
 				readStderrTail(stderrCapture.fd, stderrTail);
