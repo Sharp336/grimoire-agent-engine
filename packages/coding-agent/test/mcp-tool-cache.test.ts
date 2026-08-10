@@ -1,4 +1,6 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
+import type { CustomToolContext } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools";
+import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { MCPToolCache } from "@oh-my-pi/pi-coding-agent/mcp/tool-cache";
 import type { MCPServerConfig, MCPToolDefinition } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import type { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
@@ -24,6 +26,13 @@ function createCache(): { cache: MCPToolCache; rows: Map<string, CacheRow> } {
 	} as unknown as AgentStorage;
 	return { cache: new MCPToolCache(storage), rows };
 }
+
+let server: Bun.Server<undefined> | null = null;
+
+afterEach(() => {
+	server?.stop(true);
+	server = null;
+});
 
 describe("MCP persistent tool cache policy", () => {
 	it("retains the fixed legacy TTL when no modern cache policy is provided", async () => {
@@ -59,4 +68,94 @@ describe("MCP persistent tool cache policy", () => {
 			expect(await cache.get("replaced", config)).toBeNull();
 		});
 	}
+});
+
+describe("MCP cached deferred tools", () => {
+	it("propagates cached x-mcp-header arguments before live tools/list resolves", async () => {
+		const modernConfig: MCPServerConfig = {
+			type: "http",
+			protocolMode: "2026-07-28",
+			url: "http://placeholder",
+			timeout: 0,
+		};
+		const cachedTool: MCPToolDefinition = {
+			name: "echo",
+			inputSchema: {
+				type: "object",
+				properties: {
+					tenant: { type: "string", "x-mcp-header": "Tenant" },
+				},
+				required: ["tenant"],
+			},
+		};
+		const { cache } = createCache();
+
+		const listStarted = Promise.withResolvers<void>();
+		const listGate = Promise.withResolvers<void>();
+		const captured = { header: null as string | null };
+		server = Bun.serve({
+			port: 0,
+			async fetch(request) {
+				const body = (await request.json()) as { id?: string | number; method?: string };
+				switch (body.method) {
+					case "server/discover":
+						return Response.json({
+							jsonrpc: "2.0",
+							id: body.id,
+							result: {
+								resultType: "complete",
+								supportedVersions: ["2026-07-28"],
+								capabilities: { tools: {} },
+								ttlMs: 60_000,
+								cacheScope: "public",
+							},
+						});
+					case "tools/list":
+						listStarted.resolve();
+						await listGate.promise;
+						return Response.json({
+							jsonrpc: "2.0",
+							id: body.id,
+							result: {
+								resultType: "complete",
+								tools: [cachedTool],
+								ttlMs: 60_000,
+								cacheScope: "public",
+							},
+						});
+					case "tools/call":
+						captured.header = request.headers.get("Mcp-Param-Tenant");
+						return Response.json({
+							jsonrpc: "2.0",
+							id: body.id,
+							result: {
+								resultType: "complete",
+								content: [{ type: "text", text: "ok" }],
+							},
+						});
+					default:
+						return new Response("unexpected method", { status: 500 });
+				}
+			},
+		});
+
+		const config = { ...modernConfig, url: `http://127.0.0.1:${server.port}/mcp` };
+		await cache.set("modern", config, [cachedTool], { cacheScope: "public", ttlMs: 60_000 });
+		const manager = new MCPManager(process.cwd(), cache);
+		const resultPromise = manager.connectServers({ modern: config }, {});
+		await listStarted.promise;
+
+		try {
+			const result = await resultPromise;
+			const deferred = result.tools[0];
+			expect(deferred).toBeDefined();
+			if (!deferred) throw new Error("cached deferred tool was not loaded");
+
+			await deferred.execute("call-1", { tenant: "acme" }, undefined, {} as CustomToolContext);
+			expect(captured.header).toBe("acme");
+		} finally {
+			listGate.resolve();
+			await manager.disconnectAll();
+		}
+	});
 });

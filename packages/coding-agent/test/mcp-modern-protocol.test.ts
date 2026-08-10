@@ -281,6 +281,88 @@ describe("MCP 2026-07-28 protocol negotiation", () => {
 
 		await disconnectServer(connection);
 	});
+
+	it("restarts an acknowledged listener after graceful stream completion", async () => {
+		const acceptedUri = "file:///workspace/config.json";
+		const secondListenRequest = Promise.withResolvers<RpcRequest>();
+		const notificationSeen = Promise.withResolvers<void>();
+		let listenCount = 0;
+		const encoder = new TextEncoder();
+		const sseResponse = (messages: unknown[], close: boolean): Response =>
+			new Response(
+				new ReadableStream<Uint8Array>({
+					start(controller) {
+						controller.enqueue(
+							encoder.encode(messages.map(message => `data: ${JSON.stringify(message)}\n\n`).join("")),
+						);
+						if (close) controller.close();
+					},
+				}),
+				{ headers: { "Content-Type": "text/event-stream" } },
+			);
+		server = Bun.serve({
+			port: 0,
+			async fetch(request) {
+				const rpc = await readRpcRequest(request);
+				if (rpc.method === "server/discover") {
+					return rpcResult(rpc.id, {
+						resultType: "complete",
+						supportedVersions: ["2026-07-28"],
+						capabilities: { resources: { subscribe: true } },
+						ttlMs: 0,
+						cacheScope: "public",
+					});
+				}
+				if (rpc.method === "subscriptions/listen") {
+					listenCount++;
+					const acknowledgment = {
+						jsonrpc: "2.0",
+						method: "notifications/subscriptions/acknowledged",
+						params: {
+							_meta: { "io.modelcontextprotocol/subscriptionId": rpc.id },
+							notifications: { resourceSubscriptions: [acceptedUri] },
+						},
+					};
+					if (listenCount === 1) return sseResponse([acknowledgment], true);
+					secondListenRequest.resolve(rpc);
+					return sseResponse(
+						[
+							acknowledgment,
+							{
+								jsonrpc: "2.0",
+								method: "notifications/resources/updated",
+								params: { uri: acceptedUri },
+							},
+						],
+						false,
+					);
+				}
+				return new Response("unexpected method", { status: 500 });
+			},
+		});
+
+		const connection = await connectToServer(
+			"subscription-restart",
+			{
+				type: "http",
+				protocolMode: "2026-07-28",
+				url: `http://127.0.0.1:${server.port}/mcp`,
+			},
+			{
+				onNotification(method, params) {
+					if (method === "notifications/resources/updated" && isRecord(params) && params.uri === acceptedUri) {
+						notificationSeen.resolve();
+					}
+				},
+			},
+		);
+		await expect(subscribeToResources(connection, [acceptedUri])).resolves.toEqual([acceptedUri]);
+		await secondListenRequest.promise;
+		await notificationSeen.promise;
+		expect(listenCount).toBe(2);
+
+		await disconnectServer(connection);
+	});
 	it("bounds the wait for a subscription acknowledgment", async () => {
 		server = Bun.serve({
 			port: 0,

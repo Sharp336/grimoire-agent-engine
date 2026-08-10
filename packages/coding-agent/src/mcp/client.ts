@@ -56,6 +56,8 @@ import type {
 import { MCPError } from "./types";
 
 const MAX_MRTR_ROUND_TRIPS = 8;
+const SUBSCRIPTION_RESTART_INITIAL_DELAY_MS = 250;
+const SUBSCRIPTION_RESTART_MAX_DELAY_MS = 10_000;
 
 const CLIENT_INFO = {
 	name: "omp-coding-agent",
@@ -88,6 +90,10 @@ interface MCPSubscriptionState {
 
 interface MCPConnectionRuntime {
 	subscription?: MCPSubscriptionState;
+	subscriptionRestart?: {
+		timer?: NodeJS.Timeout;
+		delayMs: number;
+	};
 	resourceSubscriptions: Set<string>;
 	cacheScopes: Partial<
 		Record<"tools" | "resources" | "resourceTemplates" | "prompts", "public" | "private" | "uncacheable">
@@ -147,6 +153,32 @@ function withModernRequestMeta(params: Record<string, unknown> = {}): Record<str
 			"io.modelcontextprotocol/clientCapabilities": MODERN_CLIENT_CAPABILITIES,
 		},
 	};
+}
+
+type ToolHeaderBindingResult = {
+	valid: boolean;
+	bindings?: MCPToolHeaderBinding[];
+};
+
+function resolveToolHeaderBindings(connection: MCPServerConnection, tool: MCPToolDefinition): ToolHeaderBindingResult {
+	if (connection.protocolVersion !== MODERN_PROTOCOL_VERSION || connection.config.type !== "http") {
+		return { valid: true };
+	}
+
+	const cached = toolHeaderBindings.get(tool);
+	if (cached) return { valid: true, bindings: cached };
+
+	const validation = collectToolHeaderBindings(tool.inputSchema);
+	if (validation.error) {
+		logger.warn("Ignoring invalid MCP tool definition", {
+			server: connection.name,
+			tool: tool.name,
+			error: validation.error,
+		});
+		return { valid: false };
+	}
+	toolHeaderBindings.set(tool, validation.bindings);
+	return { valid: true, bindings: validation.bindings };
 }
 
 function modernServerInfo(name: string, result: MCPDiscoverResult): MCPImplementation {
@@ -322,12 +354,61 @@ export function getToolCachePolicy(
 	};
 }
 
-function settleSubscriptionError(state: MCPSubscriptionState, error: Error): void {
+function clearSubscriptionState(connection: MCPServerConnection, state: MCPSubscriptionState): void {
+	const runtime = connectionRuntimes.get(connection);
+	if (runtime?.subscription === state) runtime.subscription = undefined;
+}
+
+function settleSubscriptionError(connection: MCPServerConnection, state: MCPSubscriptionState, error: Error): void {
 	if (state.settled) return;
 	state.abort.abort(error);
 	state.settled = true;
 	state.reject(error);
+	clearSubscriptionState(connection, state);
 }
+function clearScheduledSubscriptionRestart(runtime: MCPConnectionRuntime): void {
+	const restart = runtime.subscriptionRestart;
+	if (!restart) return;
+	if (restart.timer !== undefined) clearTimeout(restart.timer);
+	restart.timer = undefined;
+}
+
+function scheduleSubscriptionRestart(connection: MCPServerConnection): void {
+	const runtime = connectionRuntimes.get(connection);
+	if (!runtime || runtime.subscription || !connection.transport.connected) return;
+	const restart = runtime.subscriptionRestart ?? { delayMs: SUBSCRIPTION_RESTART_INITIAL_DELAY_MS };
+	if (restart.timer !== undefined) return;
+	const delayMs = restart.delayMs;
+	restart.delayMs = Math.min(delayMs * 2, SUBSCRIPTION_RESTART_MAX_DELAY_MS);
+	restart.timer = setTimeout(() => {
+		restart.timer = undefined;
+		if (
+			runtime.subscriptionRestart !== restart ||
+			runtime.subscription !== undefined ||
+			!connection.transport.connected
+		) {
+			return;
+		}
+		void startModernSubscriptionListener(connection).catch(error => {
+			logger.debug("MCP subscription restart failed", { server: connection.name, error });
+		});
+	}, delayMs);
+	runtime.subscriptionRestart = restart;
+}
+
+function finishSubscriptionListener(
+	connection: MCPServerConnection,
+	state: MCPSubscriptionState,
+	restart: boolean,
+): void {
+	const runtime = connectionRuntimes.get(connection);
+	if (!runtime || runtime.subscription !== state) return;
+	runtime.subscription = undefined;
+	if (restart && !state.abort.signal.aborted && connection.transport.connected) {
+		scheduleSubscriptionRestart(connection);
+	}
+}
+
 function handleSubscriptionAcknowledgment(connection: MCPServerConnection, method: string, params: unknown): void {
 	if (method !== "notifications/subscriptions/acknowledged") return;
 	const runtime = connectionRuntimes.get(connection);
@@ -336,7 +417,11 @@ function handleSubscriptionAcknowledgment(connection: MCPServerConnection, metho
 	const subscriptionId = params._meta["io.modelcontextprotocol/subscriptionId"];
 	if (state.requestId === undefined || subscriptionId === undefined || subscriptionId !== state.requestId) return;
 	if (!isRecord(params.notifications)) {
-		settleSubscriptionError(state, new Error("MCP server returned an invalid subscription acknowledgment"));
+		settleSubscriptionError(
+			connection,
+			state,
+			new Error("MCP server returned an invalid subscription acknowledgment"),
+		);
 		return;
 	}
 	for (const key of ["toolsListChanged", "promptsListChanged", "resourcesListChanged"] as const) {
@@ -345,7 +430,11 @@ function handleSubscriptionAcknowledgment(connection: MCPServerConnection, metho
 			(accepted !== undefined && typeof accepted !== "boolean") ||
 			(accepted === true && state.requested[key] !== true)
 		) {
-			settleSubscriptionError(state, new Error("MCP server acknowledged an invalid subscription filter"));
+			settleSubscriptionError(
+				connection,
+				state,
+				new Error("MCP server acknowledged an invalid subscription filter"),
+			);
 			return;
 		}
 	}
@@ -357,7 +446,7 @@ function handleSubscriptionAcknowledgment(connection: MCPServerConnection, metho
 				? acceptedValue
 				: undefined;
 	if (!accepted || accepted.some(uri => !state.requested.resourceSubscriptions.includes(uri))) {
-		settleSubscriptionError(state, new Error("MCP server acknowledged an invalid resource subscription filter"));
+		settleSubscriptionError(connection, state, new Error("MCP server acknowledged an invalid subscription filter"));
 		return;
 	}
 	if (state.settled) return;
@@ -373,10 +462,11 @@ async function startModernSubscriptionListener(
 	if (connection.protocolVersion !== MODERN_PROTOCOL_VERSION) return [];
 	const runtime = connectionRuntimes.get(connection);
 	if (!runtime) return [];
+	clearScheduledSubscriptionRestart(runtime);
 	const previous = runtime.subscription;
 	if (previous) {
 		previous.abort.abort();
-		settleSubscriptionError(previous, new Error("MCP subscription was replaced"));
+		settleSubscriptionError(connection, previous, new Error("MCP subscription was replaced"));
 	}
 	const notifications: MCPSubscriptionFilter = {
 		toolsListChanged: connection.capabilities.tools?.listChanged === true,
@@ -407,7 +497,11 @@ async function startModernSubscriptionListener(
 	let acknowledgmentTimer: NodeJS.Timeout | undefined;
 	const abortAcknowledgment = (): void => {
 		const reason = options?.signal?.reason;
-		settleSubscriptionError(state, reason instanceof Error ? reason : new Error("MCP subscription aborted"));
+		settleSubscriptionError(
+			connection,
+			state,
+			reason instanceof Error ? reason : new Error("MCP subscription aborted"),
+		);
 	};
 	if (options?.signal?.aborted) {
 		abortAcknowledgment();
@@ -416,6 +510,7 @@ async function startModernSubscriptionListener(
 		if (isMCPTimeoutEnabled(acknowledgmentTimeoutMs)) {
 			acknowledgmentTimer = setTimeout(() => {
 				settleSubscriptionError(
+					connection,
 					state,
 					new Error(
 						`MCP subscription acknowledgment timed out after ${describeMCPTimeout(acknowledgmentTimeoutMs)}`,
@@ -437,13 +532,25 @@ async function startModernSubscriptionListener(
 		},
 	)
 		.then(() => {
-			settleSubscriptionError(state, new Error("MCP subscription ended before acknowledgment"));
+			if (!state.settled) {
+				settleSubscriptionError(connection, state, new Error("MCP subscription ended before acknowledgment"));
+			} else {
+				// The request stream can complete after its acknowledgment. It is no
+				// longer a live listener, so restore it through bounded backoff.
+				finishSubscriptionListener(connection, state, true);
+			}
 		})
 		.catch(error => {
-			if (!abort.signal.aborted) {
+			if (!state.settled && !abort.signal.aborted) {
 				logger.warn("MCP subscription listener stopped", { server: connection.name, error });
 			}
-			settleSubscriptionError(state, error instanceof Error ? error : new Error(String(error)));
+			if (!state.settled) {
+				settleSubscriptionError(connection, state, error instanceof Error ? error : new Error(String(error)));
+			} else {
+				// A closed SSE stream reports as a rejected request when it has no
+				// JSON-RPC response. Once acknowledged, that is a normal end.
+				finishSubscriptionListener(connection, state, true);
+			}
 		});
 	return acknowledged.promise.finally(() => {
 		clearTimeout(acknowledgmentTimer);
@@ -590,18 +697,7 @@ export async function listTools(
 		const result = await requestFromServer<MCPToolsListResult>(connection, "tools/list", params, options);
 		updateCacheExpiry(connection, "tools", result);
 		for (const tool of result.tools) {
-			if (connection.protocolVersion === MODERN_PROTOCOL_VERSION && connection.config.type === "http") {
-				const validation = collectToolHeaderBindings(tool.inputSchema);
-				if (validation.error) {
-					logger.warn("Ignoring invalid MCP tool definition", {
-						server: connection.name,
-						tool: tool.name,
-						error: validation.error,
-					});
-					continue;
-				}
-				toolHeaderBindings.set(tool, validation.bindings);
-			}
+			if (!resolveToolHeaderBindings(connection, tool).valid) continue;
 			allTools.push(tool);
 		}
 		cursor = result.nextCursor;
@@ -621,14 +717,15 @@ export async function callTool(
 	toolName: string,
 	args: Record<string, unknown> = {},
 	options?: MCPRequestOptions,
+	toolDefinition?: MCPToolDefinition,
 ): Promise<MCPToolCallResult> {
 	const params: MCPToolCallParams = {
 		name: toolName,
 		arguments: args,
 	};
 
-	const tool = connection.tools?.find(candidate => candidate.name === toolName);
-	const bindings = tool ? toolHeaderBindings.get(tool) : undefined;
+	const tool = toolDefinition ?? connection.tools?.find(candidate => candidate.name === toolName);
+	const bindings = tool ? resolveToolHeaderBindings(connection, tool).bindings : undefined;
 	const generatedHeaders = bindings ? buildToolParameterHeaders(bindings, args) : undefined;
 	return requestFromServer<MCPToolCallResult>(
 		connection,
@@ -642,10 +739,16 @@ export async function callTool(
  * Disconnect from a server.
  */
 export async function disconnectServer(connection: MCPServerConnection): Promise<void> {
-	const subscription = connectionRuntimes.get(connection)?.subscription;
-	if (subscription) {
-		subscription.abort.abort();
-		settleSubscriptionError(subscription, new Error("MCP connection closed"));
+	const runtime = connectionRuntimes.get(connection);
+	if (runtime) {
+		clearScheduledSubscriptionRestart(runtime);
+		runtime.subscriptionRestart = undefined;
+		const subscription = runtime.subscription;
+		if (subscription) {
+			subscription.abort.abort();
+			settleSubscriptionError(connection, subscription, new Error("MCP connection closed"));
+			clearSubscriptionState(connection, subscription);
+		}
 	}
 	await connection.transport.close();
 }
