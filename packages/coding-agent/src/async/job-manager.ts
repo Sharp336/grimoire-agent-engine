@@ -149,6 +149,7 @@ export class AsyncJobManager {
 	readonly #onJobComplete: AsyncJobManagerOptions["onJobComplete"];
 	readonly #maxRunningJobs: number;
 	readonly #retentionMs: number;
+	readonly #changeListeners = new Set<() => void>();
 	#deliveryLoop: Promise<void> | undefined;
 	#disposed = false;
 
@@ -166,6 +167,16 @@ export class AsyncJobManager {
 		this.#onJobComplete = options.onJobComplete;
 		this.#maxRunningJobs = Math.max(1, Math.floor(options.maxRunningJobs ?? DEFAULT_MAX_RUNNING_JOBS));
 		this.#retentionMs = Math.max(0, Math.floor(options.retentionMs ?? DEFAULT_RETENTION_MS));
+	}
+
+	/** Subscribe to authoritative registration, progress, state, and eviction changes. */
+	subscribe(listener: () => void): () => void {
+		this.#changeListeners.add(listener);
+		return () => this.#changeListeners.delete(listener);
+	}
+
+	#emitChange(): void {
+		for (const listener of this.#changeListeners) listener();
 	}
 
 	/** True when the running-job count has reached the configured cap. */
@@ -226,6 +237,7 @@ export class AsyncJobManager {
 
 		const reportProgress = async (text: string, details?: Record<string, unknown>): Promise<void> => {
 			if (details) job.latestDetails = details;
+			this.#emitChange();
 			if (!options?.onProgress) return;
 			try {
 				await options.onProgress(text, details);
@@ -244,32 +256,38 @@ export class AsyncJobManager {
 					reportProgress,
 					markRunning: () => {
 						job.queued = false;
+						this.#emitChange();
 					},
 				});
 				if (job.status === "cancelled") {
 					job.resultText = text;
+					this.#emitChange();
 					this.#scheduleEviction(id);
 					return;
 				}
 				job.status = "completed";
 				job.resultText = text;
+				this.#emitChange();
 				this.#enqueueDelivery(id, text);
 				this.#scheduleEviction(id);
 			} catch (error) {
 				if (job.status === "cancelled") {
 					job.errorText = error instanceof Error ? error.message : String(error);
+					this.#emitChange();
 					this.#scheduleEviction(id);
 					return;
 				}
 				const errorText = error instanceof Error ? error.message : String(error);
 				job.status = "failed";
 				job.errorText = errorText;
+				this.#emitChange();
 				this.#enqueueDelivery(id, errorText);
 				this.#scheduleEviction(id);
 			}
 		})();
 
 		this.#jobs.set(id, job);
+		this.#emitChange();
 		return id;
 	}
 
@@ -286,6 +304,7 @@ export class AsyncJobManager {
 		job.status = "cancelled";
 		job.abortController.abort();
 		this.#scheduleEviction(id);
+		this.#emitChange();
 		return true;
 	}
 
@@ -412,15 +431,10 @@ export class AsyncJobManager {
 
 	/**
 	 * Cancel running jobs. With `filter.ownerId` set, cancels only jobs the
-	 * matching agent registered; with no filter, cancels every running job
-	 * (used by `dispose()` to nuke the manager's state).
+	 * matching agent registered; with no filter, cancels every running job.
 	 */
 	cancelAll(filter?: AsyncJobFilter): void {
-		for (const job of this.getRunningJobs(filter)) {
-			job.status = "cancelled";
-			job.abortController.abort();
-			this.#scheduleEviction(job.id);
-		}
+		for (const job of this.getRunningJobs(filter)) this.cancel(job.id, filter);
 	}
 
 	/**
@@ -630,7 +644,9 @@ export class AsyncJobManager {
 		this.#evictionTimers.delete(jobId);
 		this.#suppressedDeliveries.delete(jobId);
 		this.#watchedJobs.delete(jobId);
-		return this.#jobs.delete(jobId);
+		const deleted = this.#jobs.delete(jobId);
+		if (deleted) this.#emitChange();
+		return deleted;
 	}
 
 	#scheduleEviction(jobId: string): void {
