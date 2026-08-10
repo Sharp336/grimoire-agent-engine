@@ -1446,6 +1446,8 @@ export class VibeSessionRegistry {
 			parentEvalSessionId: session.getEvalSessionId?.() ?? undefined,
 			parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 			parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
+			maxSessionRuntimeMs: session.settings.get("task.maxSessionRuntimeMs"),
+			sessionRuntimeStartedAt: record.createdAt,
 			keepAlive: true,
 		};
 	}
@@ -1503,6 +1505,12 @@ export class VibeSessionRegistry {
 					if (record.childSessionFile && !turnStartedPersisted) {
 						throw new ToolError(`Vibe session "${record.id}" changed parent scope before its turn started.`);
 					}
+					const configuredMaxRuntimeMs = Math.max(
+						0,
+						Math.trunc(Number(session.settings.get("task.maxRuntimeMs")) || 0),
+					);
+					const maxRuntimeMs =
+						configuredMaxRuntimeMs || AgentRegistry.global().get(record.id)?.runtimePolicy?.maxRuntimeMs || 0;
 					const result = options.first
 						? await runSubprocess(await this.#buildSpawnOptions(session, record, message, signal, onProgress))
 						: await runSubagentFollowUpTurn({
@@ -1514,6 +1522,9 @@ export class VibeSessionRegistry {
 								onProgress,
 								eventBus: session.eventBus,
 								artifactsDir: session.getSessionFile()?.slice(0, -6),
+								maxRuntimeMs,
+								maxSessionRuntimeMs: session.settings.get("task.maxSessionRuntimeMs"),
+								sessionRuntimeStartedAt: record.createdAt,
 							});
 					return await this.#settleTurn(session, manager, record, turn, ownJobId, turnIndex, result);
 				} catch (error) {

@@ -11,7 +11,12 @@ import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
-import { resolveSoftRequestBudget, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import {
+	attachIrcWakeTurnMonitor,
+	resolveSoftRequestBudget,
+	runSubagentFollowUpTurn,
+	runSubprocess,
+} from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -35,6 +40,9 @@ interface MockSessionHandle {
 	prompts: Array<{ text: string; options?: PromptOptions }>;
 	abortCalls: () => number;
 	disposeCalls: () => number;
+	ircWakeTurnObserver: () =>
+		| ((records: CustomMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined)
+		| undefined;
 }
 
 function assistantText(text: string, stopReason: "stop" | "aborted" = "stop") {
@@ -46,7 +54,7 @@ function createMockSession(
 		promptIndex: number;
 		emit: (event: AgentSessionEvent) => void;
 		pushMessage: (message: unknown) => void;
-	}) => void,
+	}) => void | Promise<void>,
 ): MockSessionHandle {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
 	const messages: unknown[] = [];
@@ -81,7 +89,7 @@ function createMockSession(
 		prompt: async (text: string, options?: PromptOptions) => {
 			promptIndex += 1;
 			prompts.push({ text, options });
-			onPrompt({ promptIndex, emit, pushMessage: message => messages.push(message) });
+			await onPrompt({ promptIndex, emit, pushMessage: message => messages.push(message) });
 			return true;
 		},
 		waitForIdle: async () => {},
@@ -142,6 +150,7 @@ function createMockSession(
 		session: session as AgentSession,
 		prompts,
 		abortCalls: () => abortCount,
+		ircWakeTurnObserver: () => ircWakeTurnObserver,
 		disposeCalls: () => disposeCount,
 	};
 }
@@ -204,6 +213,301 @@ describe("runSubprocess soft request budget", () => {
 		});
 	}
 
+	it("keeps the cumulative session cap across follow-up turns", async () => {
+		const id = "SessionCapScout";
+		const followUpGate = Promise.withResolvers<void>();
+		let followUpPending = false;
+		const handle = createMockSession(async ({ promptIndex, emit, pushMessage }) => {
+			if (promptIndex === 1) {
+				const yieldMessage = {
+					role: "assistant" as const,
+					content: [
+						{
+							type: "toolCall" as const,
+							id: "tool-initial-yield",
+							name: "yield",
+							arguments: { result: { data: { report: "first turn complete" } } },
+						},
+					],
+					stopReason: "toolUse" as const,
+				};
+				pushMessage(yieldMessage);
+				emit({ type: "message_end", message: yieldMessage } as unknown as AgentSessionEvent);
+				emit({
+					type: "tool_execution_end",
+					toolCallId: "tool-initial-yield",
+					toolName: "yield",
+					result: {
+						content: [{ type: "text", text: "Result submitted." }],
+						details: { status: "success", data: { report: "first turn complete" } },
+					},
+					isError: false,
+				} as AgentSessionEvent);
+				return;
+			}
+			await followUpGate.promise;
+		});
+		vi.spyOn(handle.session, "abort").mockImplementation(async () => {
+			if (followUpPending) followUpGate.resolve();
+		});
+		mockCreateAgentSession(handle.session);
+		registerRunning(id, handle.session);
+
+		const first = await runSubprocess({
+			...baseOptions(id),
+			keepAlive: true,
+			maxSessionRuntimeMs: 5_000,
+			sessionRuntimeStartedAt: Date.now(),
+		});
+		expect(first.aborted).toBe(false);
+
+		const ref = AgentRegistry.global().get(id);
+		if (!ref) throw new Error("Expected adopted subagent");
+		AgentRegistry.global().setRuntimePolicy(
+			id,
+			{
+				maxRuntimeMs: ref.runtimePolicy?.maxRuntimeMs ?? 0,
+				sessionRuntimeLimit: { maxSessionRuntimeMs: 100, startedAt: Date.now() - 101 },
+			},
+			ref,
+		);
+		followUpPending = true;
+		const followUp = await runSubagentFollowUpTurn({
+			id,
+			agent: baseAgent,
+			message: "continue",
+		});
+
+		expect(handle.prompts).toHaveLength(1);
+		expect(followUp.aborted).toBe(true);
+		expect(followUp.abortReason).toContain("task.maxSessionRuntimeMs=100");
+	});
+
+	it("preserves a registered per-turn cap when the resumed caller has it disabled", async () => {
+		const id = "RestoredTurnCapScout";
+		const promptGate = Promise.withResolvers<void>();
+		const handle = createMockSession(async () => {
+			await promptGate.promise;
+		});
+		vi.spyOn(handle.session, "abort").mockImplementation(async () => {
+			promptGate.resolve();
+		});
+		registerRunning(id, handle.session);
+		const ref = AgentRegistry.global().get(id);
+		if (!ref) throw new Error("Expected registered subagent");
+		AgentRegistry.global().setRuntimePolicy(id, { maxRuntimeMs: 20 }, ref);
+
+		const result = await runSubagentFollowUpTurn({
+			id,
+			agent: baseAgent,
+			message: "continue",
+			maxRuntimeMs: 0,
+		});
+
+		expect(result.aborted).toBe(true);
+		expect(result.abortReason).toContain("task.maxRuntimeMs=20");
+	});
+
+	it("uses a positive per-turn cap supplied by the resumed caller", async () => {
+		const id = "UpdatedTurnCapScout";
+		const promptGate = Promise.withResolvers<void>();
+		const handle = createMockSession(async () => {
+			await promptGate.promise;
+		});
+		vi.spyOn(handle.session, "abort").mockImplementation(async () => {
+			promptGate.resolve();
+		});
+		registerRunning(id, handle.session);
+		const ref = AgentRegistry.global().get(id);
+		if (!ref) throw new Error("Expected registered subagent");
+		AgentRegistry.global().setRuntimePolicy(id, { maxRuntimeMs: 1_000 }, ref);
+
+		const result = await runSubagentFollowUpTurn({
+			id,
+			agent: baseAgent,
+			message: "continue",
+			maxRuntimeMs: 20,
+		});
+
+		expect(result.aborted).toBe(true);
+		expect(result.abortReason).toContain("task.maxRuntimeMs=20");
+	});
+
+	it("terminal-releases the running follow-up ref before a cumulative-timeout agent_end can restore idle", async () => {
+		vi.useFakeTimers();
+		try {
+			const id = "RunningSessionCapScout";
+			const promptGate = Promise.withResolvers<void>();
+			const handle = createMockSession(async () => {
+				await promptGate.promise;
+			});
+			let idleRestoreAccepted: boolean | undefined;
+			registerRunning(id, handle.session);
+			const ref = AgentRegistry.global().get(id);
+			if (!ref) throw new Error("Expected registered subagent");
+			const startedAt = Date.now();
+			AgentLifecycleManager.global().adopt(
+				id,
+				{
+					idleTtlMs: 0,
+					runtimePolicy: {
+						maxRuntimeMs: 0,
+						sessionRuntimeLimit: { maxSessionRuntimeMs: 20, startedAt },
+					},
+				},
+				ref,
+			);
+			vi.spyOn(handle.session, "abort").mockImplementation(async () => {
+				expect(AgentRegistry.global().get(id)).toBeUndefined();
+				idleRestoreAccepted = AgentRegistry.global().setStatus(id, "idle", ref);
+				promptGate.resolve();
+			});
+
+			const pending = runSubagentFollowUpTurn({
+				id,
+				agent: baseAgent,
+				message: "continue",
+				maxSessionRuntimeMs: 20,
+				sessionRuntimeStartedAt: startedAt,
+			});
+			await Promise.resolve();
+			vi.advanceTimersByTime(20);
+			const result = await pending;
+
+			expect(result.aborted).toBe(true);
+			expect(result.abortReason).toBe("Subagent cumulative runtime limit exceeded (task.maxSessionRuntimeMs=20)");
+			expect(idleRestoreAccepted).toBe(false);
+			expect(AgentRegistry.global().get(id)).toBeUndefined();
+			expect(AgentLifecycleManager.global().has(id, ref)).toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("uses the live IRC policy and terminal-releases the exact ref when its cumulative cap fires", async () => {
+		vi.useFakeTimers();
+		try {
+			const id = "IrcSessionCapScout";
+			const handle = createMockSession(async () => {});
+			registerRunning(id, handle.session);
+			const ref = AgentRegistry.global().get(id);
+			if (!ref) throw new Error("Expected registered subagent");
+			AgentRegistry.global().setStatus(id, "idle", ref);
+			const startedAt = Date.now();
+			AgentLifecycleManager.global().adopt(
+				id,
+				{
+					idleTtlMs: 0,
+					runtimePolicy: {
+						maxRuntimeMs: 50,
+						sessionRuntimeLimit: { maxSessionRuntimeMs: 20, startedAt },
+					},
+				},
+				ref,
+			);
+			let idleRestoreAccepted: boolean | undefined;
+			const abortSpy = vi.spyOn(handle.session, "abort").mockImplementation(async () => {
+				expect(AgentRegistry.global().get(id)).toBeUndefined();
+				idleRestoreAccepted = AgentRegistry.global().setStatus(id, "idle", ref);
+			});
+			attachIrcWakeTurnMonitor(handle.session, {
+				id,
+				agent: baseAgent,
+				maxRuntimeMs: 5,
+			});
+			const observer = handle.ircWakeTurnObserver();
+			if (!observer) throw new Error("Expected IRC wake observer");
+			const finishObservation = observer([
+				{
+					role: "custom",
+					customType: "irc:incoming",
+					content: "continue",
+					display: true,
+					details: { message: "continue" },
+					timestamp: Date.now(),
+				},
+			]);
+
+			vi.advanceTimersByTime(5);
+			await Promise.resolve();
+			expect(abortSpy).not.toHaveBeenCalled();
+			expect(AgentRegistry.global().get(id)).toBe(ref);
+
+			vi.advanceTimersByTime(15);
+			await Promise.resolve();
+			expect(abortSpy).toHaveBeenCalledTimes(1);
+			expect(idleRestoreAccepted).toBe(false);
+			expect(AgentRegistry.global().get(id)).toBeUndefined();
+			expect(AgentLifecycleManager.global().has(id, ref)).toBe(false);
+			await finishObservation?.();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("rejects an expired Vibe revival before running the parked session reviver", async () => {
+		const id = "ExpiredVibe";
+		const reviver = vi.fn(async () => createMockSession(async () => {}).session);
+		const ref = AgentRegistry.global().register({
+			id,
+			displayName: id,
+			kind: "sub",
+			session: null,
+			sessionFile: "/tmp/expired-vibe.jsonl",
+			status: "parked",
+		});
+		const sessionRuntimeStartedAt = Date.now() - 101;
+		AgentLifecycleManager.global().adopt(
+			id,
+			{
+				idleTtlMs: 0,
+				revive: reviver,
+				runtimePolicy: {
+					maxRuntimeMs: 0,
+					sessionRuntimeLimit: { maxSessionRuntimeMs: 100, startedAt: sessionRuntimeStartedAt },
+				},
+			},
+			ref,
+		);
+
+		const result = await runSubagentFollowUpTurn({
+			id,
+			agent: baseAgent,
+			message: "continue",
+			maxSessionRuntimeMs: 100,
+			sessionRuntimeStartedAt,
+		});
+
+		expect(reviver).not.toHaveBeenCalled();
+		expect(result.aborted).toBe(true);
+		expect(result.abortReason).toBe("Subagent cumulative runtime limit exceeded (task.maxSessionRuntimeMs=100)");
+		expect(AgentRegistry.global().get(id)).toBeUndefined();
+		expect(AgentLifecycleManager.global().has(id, ref)).toBe(false);
+	});
+
+	it("reports the per-turn timer when it expires before the cumulative deadline", async () => {
+		const id = "TurnCapScout";
+		const promptGate = Promise.withResolvers<void>();
+		const handle = createMockSession(async () => {
+			await promptGate.promise;
+		});
+		vi.spyOn(handle.session, "abort").mockImplementation(async () => {
+			promptGate.resolve();
+		});
+		mockCreateAgentSession(handle.session);
+		registerRunning(id, handle.session);
+
+		const result = await runSubprocess({
+			...baseOptions(id),
+			keepAlive: false,
+			maxRuntimeMs: 20,
+			maxSessionRuntimeMs: 1_000,
+			sessionRuntimeStartedAt: Date.now(),
+		});
+
+		expect(result.aborted).toBe(true);
+		expect(result.abortReason).toBe("Subagent runtime limit exceeded (task.maxRuntimeMs=20)");
+	});
 	it("a budget stop drives one forced final yield and finishes as a normal completion", async () => {
 		const id = "BudgetScout";
 		let abortCallsAtReminder: number | undefined;

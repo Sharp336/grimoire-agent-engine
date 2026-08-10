@@ -660,6 +660,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
 			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 			maxRuntimeMs: this.session.settings.get("task.maxRuntimeMs"),
+			maxSessionRuntimeMs: this.session.settings.get("task.maxSessionRuntimeMs"),
 		});
 	}
 
@@ -1435,6 +1436,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
 				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 				maxRuntimeMs: this.session.settings.get("task.maxRuntimeMs"),
+				maxSessionRuntimeMs: this.session.settings.get("task.maxSessionRuntimeMs"),
 				signal,
 				onProgress: progress => {
 					latestProgress = { ...progress, recentTools: progress.recentTools.slice() };

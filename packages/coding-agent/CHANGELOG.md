@@ -342,6 +342,11 @@
 - Fixed browser automation disrupting attached browsers by adopting the active foreground tab and avoiding raising new tabs during screenshots.
 
 ## [17.2.1] - 2026-07-30
+### Added
+
+- Added `task.maxSessionRuntimeMs`, a cumulative wall-clock limit intended for keep-alive subagent sessions. The executor gives it precedence over the per-turn timer when both are configured and reports cumulative expiry distinctly so parked/resumed children cannot disguise total lifetime behind a fresh turn timer.
+
+## [17.2.1] - 2026-07-30
 
 ### Added
 
