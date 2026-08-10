@@ -293,10 +293,12 @@ export class UiHelpers {
 				const cached = options?.reuseSettledComponent
 					? this.ctx.transcriptMessageComponents.get(message)
 					: undefined;
+				const timeline = splitAssistantMessageToolTimeline(message);
 				const assistantComponent =
 					cached instanceof AssistantMessageComponent
 						? cached
-						: createAssistantMessageComponent(this.ctx, splitAssistantMessageToolTimeline(message).beforeTools);
+						: createAssistantMessageComponent(this.ctx, timeline.beforeTools);
+				assistantComponent.setHasToolTimeline(timeline.hasToolCalls);
 				if (cached !== assistantComponent) {
 					this.ctx.transcriptMessageComponents.set(message, assistantComponent);
 				}
@@ -485,6 +487,7 @@ export class UiHelpers {
 				const appendAssistantSegment = (segment: AssistantMessage | undefined) => {
 					if (!segment || !assistantHasVisibleContent(segment)) return;
 					const component = createAssistantMessageComponent(this.ctx, segment);
+					component.setHasToolTimeline(true);
 					this.ctx.chatContainer.addChild(component);
 				};
 

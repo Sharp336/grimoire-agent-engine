@@ -188,6 +188,7 @@ export class AssistantMessageComponent extends Container {
 	#showToolResultImages = true;
 	#kittyConversionsInFlight = new Set<string>();
 	#transcriptBlockFinalized: boolean;
+	#hasToolTimeline = false;
 	/**
 	 * True while any rendered item carries a ` ```mermaid ` fence. Mermaid's
 	 * ASCII form resolves asynchronously and can re-layout rows that already
@@ -331,6 +332,10 @@ export class AssistantMessageComponent extends Container {
 
 	setProseOnlyThinking(proseOnly: boolean): void {
 		this.proseOnlyThinking = proseOnly;
+	}
+
+	setHasToolTimeline(has: boolean): void {
+		this.#hasToolTimeline = has;
 	}
 
 	override dispose(): void {
@@ -504,9 +509,12 @@ export class AssistantMessageComponent extends Container {
 	markTranscriptBlockFinalized(): void {
 		this.#transcriptBlockFinalized = true;
 		this.#stopThinkingAnimation();
-		// If the live pulse was on screen when the block sealed, drop the fast path
-		// and rebuild so the placeholder is removed — finalized blocks never animate.
-		if (this.#thinkingDots) {
+		// Force rebuild when this block has visible text (to apply the verb
+		// visual marker) or when the live thinking pulse was on screen.
+		const hasText = this.#lastMessage?.content.some(
+			c => c.type === "text" && canonicalizeMessage(c.text),
+		);
+		if (this.#thinkingDots || hasText) {
 			this.#fastPathKey = undefined;
 			this.#fastPathItems = undefined;
 			if (this.#lastMessage) this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
@@ -874,12 +882,61 @@ export class AssistantMessageComponent extends Container {
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
 			if (content.type === "text" && canonicalizeMessage(content.text)) {
-				// Set paddingY=0 to avoid extra spacing before tool executions
 				const trimmed = content.text.trim();
-				const mdOptions = this.#textColorTransform ? { color: this.#textColorTransform } : undefined;
-				const md = new Markdown(trimmed, 1, 0, getMarkdownTheme(), mdOptions, 0);
-				this.#contentContainer.addChild(md);
-				captureItems?.push({ md, contentIndex: i, blockType: "text", lastText: trimmed });
+				// Visual marker applies only to successfully completed text.
+				// Error/aborted turns keep the ordinary assistant style.
+				const isVerbReply =
+					this.#transcriptBlockFinalized &&
+					(this.#lastMessage?.stopReason === "stop" || this.#lastMessage?.stopReason === undefined);
+				if (isVerbReply) {
+					const isFinal = !this.#hasToolTimeline && !message.content.some(c => c.type === "toolCall");
+					const verbBg = (value: string) => theme.bg("finalAnswerBg", value);
+					const verbFg = (value: string) => theme.fg("finalAnswerText", value);
+					const md = new Markdown(trimmed, 3, 1, getMarkdownTheme(), {
+						bgColor: verbBg,
+						color: verbFg,
+					}, 0);
+					md.setIgnoreTight(true);
+					const origRender = md.render.bind(md);
+					const bgPrefix = theme.getBgAnsi("finalAnswerBg");
+					const markerText = isFinal ? "▌" : "▏";
+					const markerAnsi = theme.fg("accent", markerText);
+					let cachedSource: readonly string[] | undefined;
+					let cachedResult: readonly string[] = [];
+					md.render = (width: number): readonly string[] => {
+						const lines = origRender(width);
+						if (lines === cachedSource) return cachedResult;
+						cachedSource = lines;
+						const bgReset = "\x1b[49m";
+						const bgLineIndices: number[] = [];
+						for (let j = 0; j < lines.length; j++) {
+							if (lines[j]!.startsWith(bgPrefix)) bgLineIndices.push(j);
+						}
+						const firstBg = bgLineIndices[0] ?? -1;
+						const lastBg = bgLineIndices[bgLineIndices.length - 1] ?? -1;
+						cachedResult = lines.map((line, idx) => {
+							if (!bgPrefix || !line.startsWith(bgPrefix)) return line;
+							const stripped = line.replace(/\x1b\[[0-9;]*m/g, "");
+							if (stripped.includes("```")) {
+								return line.replace(bgPrefix, "").replace(bgReset, "");
+							}
+							if (idx === firstBg || idx === lastBg) return line;
+							return `${bgPrefix} ${markerAnsi} ${line.slice(bgPrefix.length + 3)}`;
+						});
+						return cachedResult;
+					};
+					this.#contentContainer.addChild(md);
+					captureItems?.push({ md, contentIndex: i, blockType: "text", lastText: trimmed });
+				} else {
+					// Streaming / error / aborted: same paddingX so layout doesn't
+					// shift when the block finalizes (avoids scrollback mismatch).
+					const mdOptions = this.#textColorTransform
+						? { color: this.#textColorTransform }
+						: undefined;
+					const md = new Markdown(trimmed, 3, 0, getMarkdownTheme(), mdOptions, 0);
+					this.#contentContainer.addChild(md);
+					captureItems?.push({ md, contentIndex: i, blockType: "text", lastText: trimmed });
+				}
 				hasRenderedContent = true;
 			} else if (content.type === "thinking" && resolveThinkingDisplay(content, this.proseOnlyThinking).visible) {
 				const thinkingText = resolveThinkingDisplay(content, this.proseOnlyThinking).text;

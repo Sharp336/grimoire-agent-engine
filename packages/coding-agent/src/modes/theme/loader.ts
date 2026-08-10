@@ -149,6 +149,7 @@ export function createTheme(themeJson: ThemeJson, options: CreateThemeOptions = 
 		"toolSuccessBg",
 		"toolErrorBg",
 		"statusLineBg",
+		"finalAnswerBg",
 	]);
 	for (const [key, value] of Object.entries(resolvedColors)) {
 		if (bgColorKeys.has(key)) {
@@ -156,6 +157,14 @@ export function createTheme(themeJson: ThemeJson, options: CreateThemeOptions = 
 		} else {
 			fgColors[key as ThemeColor] = value;
 		}
+	}
+	// Fallback defaults for optional theme tokens — prevents theme.bg/fg/getBgAnsi
+	// throws when a theme doesn't define finalAnswerBg/finalAnswerText.
+	if (!bgColors["finalAnswerBg" as ThemeBg]) {
+		bgColors["finalAnswerBg" as ThemeBg] = bgColors.userMessageBg ?? "#1a1f2e";
+	}
+	if (!fgColors["finalAnswerText" as ThemeColor]) {
+		fgColors["finalAnswerText" as ThemeColor] = fgColors.text ?? "#e0e0e0";
 	}
 	// Extract symbol configuration - settings override takes precedence over theme
 	const symbolPreset: SymbolPreset = symbolPresetOverride ?? themeJson.symbols?.preset ?? "unicode";
