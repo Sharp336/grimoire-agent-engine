@@ -30,6 +30,7 @@ import type {
 	MCPToolCallResult,
 	MCPToolDefinition,
 } from "./types";
+import { MCPError } from "./types";
 
 /** Reconnect callback: tears down a stale connection, optionally authorizing first. */
 export type MCPReconnect = (options?: { authChallenge?: MCPAuthChallenge }) => Promise<MCPServerConnection | null>;
@@ -53,6 +54,9 @@ const RETRIABLE_PATTERNS = [
 
 export function isRetriableConnectionError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
+	if (error instanceof MCPError && (error.status === 404 || error.status === 502 || error.status === 503)) {
+		return true;
+	}
 	const msg = error.message.toLowerCase();
 	// Stale session (server restarted, old session ID is gone)
 	if (/^http (404|502|503):/.test(msg)) return true;

@@ -7,6 +7,7 @@ import {
 	MCPTool,
 } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import type { MCPServerConnection, MCPToolCallResult, MCPTransport } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import { MCPError } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { logger } from "@oh-my-pi/pi-utils";
 
@@ -88,6 +89,12 @@ describe("isRetriableConnectionError", () => {
 	for (const msg of retriable) {
 		it(`matches: ${msg}`, () => {
 			expect(isRetriableConnectionError(new Error(msg))).toBe(true);
+		});
+	}
+	for (const status of [404, 502, 503]) {
+		it(`matches MCP JSON-RPC errors returned with HTTP ${status}`, () => {
+			const error = new MCPError({ code: -32000, message: "stale session" }, status);
+			expect(isRetriableConnectionError(error)).toBe(true);
 		});
 	}
 

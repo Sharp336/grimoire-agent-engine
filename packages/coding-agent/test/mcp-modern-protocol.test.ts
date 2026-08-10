@@ -137,6 +137,34 @@ describe("MCP 2026-07-28 protocol negotiation", () => {
 		}
 	});
 
+	for (const timeout of [0, 1_000]) {
+		it(`respects strict discovery timeout ${timeout}`, async () => {
+			server = Bun.serve({
+				port: 0,
+				async fetch(request) {
+					const rpc = await readRpcRequest(request);
+					await Bun.sleep(600);
+					return rpcResult(rpc.id, {
+						resultType: "complete",
+						supportedVersions: ["2026-07-28"],
+						capabilities: {},
+						ttlMs: 0,
+						cacheScope: "public",
+					});
+				},
+			});
+
+			const connection = await connectToServer(`strict-timeout-${timeout}`, {
+				type: "http",
+				protocolMode: "2026-07-28",
+				url: `http://127.0.0.1:${server.port}/mcp`,
+				timeout,
+			});
+			expect(connection.protocolVersion).toBe("2026-07-28");
+			await disconnectServer(connection);
+		});
+	}
+
 	it("does not reinterpret a recognized modern version error as a legacy server", async () => {
 		const rpcMethods: string[] = [];
 		server = Bun.serve({
@@ -211,6 +239,71 @@ describe("MCP 2026-07-28 protocol negotiation", () => {
 			}),
 		).rejects.toThrow('MCP server "malformed" returned an invalid server/discover result');
 		expect(rpcMethods).toEqual(["server/discover"]);
+	});
+
+	it("retries an initial subscription listener that fails before acknowledgment", async () => {
+		const secondListen = Promise.withResolvers<void>();
+		const notificationSeen = Promise.withResolvers<void>();
+		let listenCount = 0;
+		server = Bun.serve({
+			port: 0,
+			async fetch(request) {
+				const rpc = await readRpcRequest(request);
+				if (rpc.method === "server/discover") {
+					return rpcResult(rpc.id, {
+						resultType: "complete",
+						supportedVersions: ["2026-07-28"],
+						capabilities: { tools: { listChanged: true } },
+						ttlMs: 0,
+						cacheScope: "public",
+					});
+				}
+				if (rpc.method === "subscriptions/listen") {
+					listenCount++;
+					if (listenCount === 1) return new Response("temporary failure", { status: 500 });
+					secondListen.resolve();
+					return new Response(
+						[
+							{
+								jsonrpc: "2.0",
+								method: "notifications/subscriptions/acknowledged",
+								params: {
+									_meta: { "io.modelcontextprotocol/subscriptionId": rpc.id },
+									notifications: { toolsListChanged: true },
+								},
+							},
+							{
+								jsonrpc: "2.0",
+								method: "notifications/tools/list_changed",
+								params: {},
+							},
+						]
+							.map(message => `data: ${JSON.stringify(message)}\n\n`)
+							.join(""),
+						{ headers: { "Content-Type": "text/event-stream" } },
+					);
+				}
+				return new Response("unexpected method", { status: 500 });
+			},
+		});
+
+		const connection = await connectToServer(
+			"initial-subscription-retry",
+			{
+				type: "http",
+				protocolMode: "2026-07-28",
+				url: `http://127.0.0.1:${server.port}/mcp`,
+			},
+			{
+				onNotification(method) {
+					if (method === "notifications/tools/list_changed") notificationSeen.resolve();
+				},
+			},
+		);
+		await secondListen.promise;
+		await notificationSeen.promise;
+		expect(listenCount).toBe(2);
+		await disconnectServer(connection);
 	});
 
 	it("waits for the correlated subscription acknowledgment and returns only accepted resources", async () => {

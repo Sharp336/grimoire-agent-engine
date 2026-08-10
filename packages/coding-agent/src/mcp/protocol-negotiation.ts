@@ -57,9 +57,12 @@ export async function negotiateMCPProtocol(
 		throw new Error(`MCP server "${options.name}" cannot use protocol ${MODERN_PROTOCOL_VERSION} over legacy SSE`);
 	}
 
-	const discoveryTimeout = isMCPTimeoutEnabled(options.timeoutMs)
-		? Math.min(options.timeoutMs, DISCOVERY_TIMEOUT_MS)
-		: DISCOVERY_TIMEOUT_MS;
+	const discoveryTimeout =
+		options.mode === "auto"
+			? isMCPTimeoutEnabled(options.timeoutMs)
+				? Math.min(options.timeoutMs, DISCOVERY_TIMEOUT_MS)
+				: DISCOVERY_TIMEOUT_MS
+			: options.timeoutMs;
 	let discovery: MCPDiscoverResult;
 	try {
 		discovery = await transport.request<MCPDiscoverResult>("server/discover", options.modernParams, {

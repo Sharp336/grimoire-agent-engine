@@ -644,6 +644,7 @@ export async function connectToServer(
 			connectionForNotifications = connection;
 			void startModernSubscriptionListener(connection).catch(error => {
 				logger.warn("MCP subscription acknowledgment failed", { server: connection.name, error });
+				scheduleSubscriptionRestart(connection);
 			});
 			return connection;
 		} catch (error) {
