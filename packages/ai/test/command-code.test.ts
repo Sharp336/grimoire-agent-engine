@@ -1212,6 +1212,39 @@ describe("command-code streamSimple options", () => {
 		expect(lastRequest).toBeUndefined();
 	});
 
+	it("rejects toolChoice computer because the gateway has no force field", async () => {
+		scenario = { kind: "capture", body: `{"type":"finish","finishReason":"stop"}\n` };
+		const baseUrl = await startServer();
+		const model = {
+			...getBundledModel("command-code", "deepseek/deepseek-v4-flash"),
+			baseUrl,
+		} as Model<"command-code">;
+		const stream = streamSimple(
+			model,
+			{
+				messages: [{ role: "user", content: "hi", timestamp: 1 }],
+				tools: [
+					{
+						name: "read",
+						description: "Read a file",
+						parameters: { type: "object", properties: { path: { type: "string" } } },
+					},
+				],
+			},
+			{
+				apiKey: "test-key",
+				toolChoice: { type: "computer" },
+			},
+		);
+		for await (const _ of stream) {
+			/* drain */
+		}
+		const result = await stream.result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage ?? "").toMatch(/toolChoice \{type: "computer"\} is unsupported/i);
+		expect(lastRequest).toBeUndefined();
+	});
+
 	it("keeps a path-prefixed base URL when resolving the generate endpoint", async () => {
 		scenario = { kind: "capture", body: `{"type":"finish","finishReason":"stop"}\n` };
 		const baseUrl = await startServer();

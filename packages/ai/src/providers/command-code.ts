@@ -787,6 +787,11 @@ export const streamCommandCode: StreamFunction<"command-code"> = (
 					'Command Code has no wire tool_choice field; toolChoice "required"/"any" is unsupported. Pin a specific tool or use "auto"/"none".',
 				);
 			}
+			if (typeof options?.toolChoice === "object" && options.toolChoice.type === "computer") {
+				throw new AIError.ConfigurationError(
+					'Command Code has no wire tool_choice field; toolChoice {type: "computer"} is unsupported. Pin a specific tool or use "auto"/"none".',
+				);
+			}
 			const namedTool = getNamedToolChoiceName(options?.toolChoice);
 			const wireTools =
 				namedTool === undefined
