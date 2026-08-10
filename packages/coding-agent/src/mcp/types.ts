@@ -41,8 +41,8 @@ export class MCPError extends Error {
 	readonly data?: unknown;
 	readonly status?: number;
 
-	constructor(error: JsonRpcError, status?: number) {
-		super(`MCP error ${error.code}: ${error.message}`);
+	constructor(error: JsonRpcError, status?: number, message?: string) {
+		super(message ?? `MCP error ${error.code}: ${error.message}`);
 		this.name = "MCPError";
 		this.code = error.code;
 		this.data = error.data;

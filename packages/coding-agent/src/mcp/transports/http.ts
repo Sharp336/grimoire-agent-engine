@@ -282,8 +282,6 @@ export class HttpTransport implements MCPTransport {
 
 			if (!response.ok) {
 				const text = await response.text();
-				const rpcError = parseJsonRpcError(text);
-				if (rpcError) throw new MCPError(rpcError, response.status);
 				const wwwAuthenticate = response.headers.get("WWW-Authenticate");
 				const mcpAuthServer = response.headers.get("Mcp-Auth-Server");
 				const authHints = [
@@ -293,6 +291,11 @@ export class HttpTransport implements MCPTransport {
 					.filter(Boolean)
 					.join("; ");
 				const suffix = authHints ? ` [${authHints}]` : "";
+				const rpcError = parseJsonRpcError(text);
+				if (rpcError) {
+					const message = `MCP error ${rpcError.code}: ${rpcError.message} [HTTP ${response.status}: ${text}]${suffix}`;
+					throw new MCPError(rpcError, response.status, message);
+				}
 				throw new MCPHttpError(response.status, text, suffix);
 			}
 

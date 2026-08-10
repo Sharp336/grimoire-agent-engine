@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { analyzeAuthError } from "@oh-my-pi/pi-coding-agent/mcp/oauth-discovery";
 import { HttpTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/http";
+import { MCPError } from "@oh-my-pi/pi-coding-agent/mcp/types";
 
 const encoder = new TextEncoder();
 const REQUEST_TIMEOUT_MS = 50;
@@ -99,6 +101,61 @@ describe("MCP Streamable HTTP transport timeouts", () => {
 		await expect(withPendingGuard(transport.request<ToolList>("tools/list"), "request")).resolves.toEqual({
 			tools: [{ name: "fast", inputSchema: { type: "object" } }],
 		});
+	});
+
+	it("preserves OAuth hints when an HTTP auth failure has a JSON-RPC body", async () => {
+		const resourceMetadataUrl = "https://gateway.example.com/.well-known/oauth-protected-resource";
+		server = Bun.serve({
+			port: 0,
+			fetch() {
+				return Response.json(
+					{
+						jsonrpc: "2.0",
+						id: 1,
+						error: {
+							code: -32001,
+							message: "authorization required",
+							data: {
+								oauth: {
+									authorization_url: "https://auth.example.com/authorize",
+									token_url: "https://auth.example.com/token",
+								},
+							},
+						},
+					},
+					{
+						status: 401,
+						headers: {
+							"WWW-Authenticate": `Bearer scope="tools:read", resource_metadata="${resourceMetadataUrl}"`,
+							"Mcp-Auth-Server": "https://auth.example.com",
+						},
+					},
+				);
+			},
+		});
+		const transport = await connectedTransport();
+		let failure: unknown;
+		try {
+			await transport.request("tools/list");
+		} catch (error) {
+			failure = error;
+		}
+		expect(failure).toBeInstanceOf(MCPError);
+		if (!(failure instanceof Error)) throw new Error("Expected MCP auth error");
+		const auth = analyzeAuthError(failure);
+		expect(auth).toMatchObject({
+			requiresAuth: true,
+			authType: "oauth",
+			authServerUrl: "https://auth.example.com/",
+			resourceMetadataUrl,
+			scopes: "tools:read",
+			oauth: {
+				authorizationUrl: "https://auth.example.com/authorize",
+				tokenUrl: "https://auth.example.com/token",
+				scopes: "tools:read",
+			},
+		});
+		await transport.close();
 	});
 
 	it("reports the JSON-RPC ID allocated for an authenticated retry", async () => {
