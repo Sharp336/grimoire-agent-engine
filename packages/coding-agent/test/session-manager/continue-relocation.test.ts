@@ -149,7 +149,7 @@ describe("SessionManager.continueRecent relocation", () => {
 		const resumed = await SessionManager.continueRecent(cwdB);
 		try {
 			// Prefer cwdB's own recent session over re-rooting the moved one.
-			expect(resumed.getSessionFile()).toBe(localFile);
+			expect(resumed.getSessionFile()).toBe(fs.realpathSync(localFile));
 			expect(fs.existsSync(movedFile)).toBe(true);
 		} finally {
 			await resumed.close();
@@ -232,7 +232,7 @@ describe("SessionManager.continueRecent relocation", () => {
 
 		const resumed = await SessionManager.continueRecent(cwdB, explicitSessionDir);
 		try {
-			expect(resumed.getSessionFile()).toBe(localFile);
+			expect(resumed.getSessionFile()).toBe(fs.realpathSync(localFile));
 			expect(resumed.getCwd()).toBe(path.resolve(cwdB));
 			expect(fs.existsSync(movedFile)).toBe(true);
 		} finally {

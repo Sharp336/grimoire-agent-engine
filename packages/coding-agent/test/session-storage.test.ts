@@ -271,6 +271,33 @@ describe("FileSessionStorage.updateSessionTitle", () => {
 	});
 });
 
+describe("FileSessionStorage owned file identity", () => {
+	it("rejects append and title opens after the owned path is replaced", async () => {
+		const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "session-storage-identity-"));
+		const sessionPath = path.join(dir, "session.jsonl");
+		const movedPath = path.join(dir, "moved.jsonl");
+		await fsp.writeFile(sessionPath, "owned");
+		const owned = await fsp.stat(sessionPath);
+		const expectedFileIdentity = { dev: owned.dev, ino: owned.ino, birthtimeMs: Math.trunc(owned.birthtimeMs) };
+		await fsp.rename(sessionPath, movedPath);
+		await fsp.writeFile(sessionPath, "foreign");
+		const storage = new FileSessionStorage();
+
+		expect(() => storage.openWriter(sessionPath, { expectedFileIdentity })).toThrow(
+			"Refusing to open replaced session file",
+		);
+		await expect(
+			storage.updateSessionTitle(
+				sessionPath,
+				{ title: "Nope", source: "user", updatedAt: "t2" },
+				{ expectedFileIdentity },
+			),
+		).rejects.toThrow("Refusing to open replaced session file");
+
+		await fsp.rm(dir, { recursive: true, force: true });
+	});
+});
+
 describe("IndexedSessionStorage.updateSessionTitle", () => {
 	it("does not roll a newer optimistic title back when an older backend write fails", async () => {
 		const sessionPath = "/sessions/session.jsonl";

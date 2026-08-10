@@ -2910,16 +2910,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const effectiveThinkingLevel =
 				effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : (thinkingLevel ?? resolvedThinkingLevel));
 			resolvedAt = performance.now();
-			const effectiveCwd = worktree ?? cwd;
-			const sessionManagerPromise = sessionFile
-				? SessionManager.open(sessionFile, undefined, undefined, {
-						initialCwd: effectiveCwd,
-						suppressBreadcrumb: true,
-					})
-				: Promise.resolve(SessionManager.inMemory(effectiveCwd));
-			// Setup below can fail before this promise's consumption boundary.
-			// Observe rejection immediately while preserving it for the later await.
-			sessionManagerPromise.catch(() => {});
 			// Per-agent prewalk: the agent definition's `prewalk` frontmatter or the
 			// `task.agentPrewalk` settings override hands the subagent off to a
 			// fast/cheap target at its first edit/write — the same mechanism as the
@@ -2954,6 +2944,26 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				}
 			}
 
+			const effectiveCwd = worktree ?? cwd;
+			let sessionManager: SessionManager;
+			if (sessionFile) {
+				const opening = SessionManager.open(sessionFile, undefined, undefined, {
+					initialCwd: effectiveCwd,
+					suppressBreadcrumb: true,
+				});
+				try {
+					sessionManager = await awaitAbortable(opening);
+				} catch (error) {
+					void opening.then(manager => manager.close()).catch(() => {});
+					throw error;
+				}
+			} else {
+				sessionManager = SessionManager.inMemory(effectiveCwd);
+			}
+			if (options.parentArtifactManager) {
+				sessionManager.adoptArtifactManager(options.parentArtifactManager);
+			}
+			sessionOpenedAt = performance.now();
 			const restrictToolNames = options.restrictToolNames === true;
 			const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
 			const mcpManager = enableMCP ? options.mcpManager : undefined;
@@ -3073,21 +3083,19 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				},
 			});
 
-			const sessionManager = await awaitAbortable(sessionManagerPromise);
-			if (options.parentArtifactManager) {
-				sessionManager.adoptArtifactManager(options.parentArtifactManager);
-			}
-			sessionOpenedAt = performance.now();
-
 			const sessionPromise = createAgentSession(buildSubagentSessionOptions(sessionManager, null));
 			let session: AgentSession;
 			try {
 				({ session } = await awaitAbortable(sessionPromise));
 			} catch (err) {
-				// Abort raced session startup. The session may still resolve later
-				// holding live LSP/MCP child processes — dispose it when it does so
-				// a cancelled subagent cannot leak them.
-				void sessionPromise.then(created => created.session.dispose()).catch(() => {});
+				// Startup may settle after cancellation or reject before producing
+				// an AgentSession. Dispose whichever resource acquired the manager.
+				const cleanup = sessionPromise.then(
+					created => created.session.dispose(),
+					() => sessionManager.close(),
+				);
+				if (abortSignal.aborted) void cleanup.catch(() => {});
+				else await cleanup.catch(() => {});
 				throw err;
 			}
 			sessionCreatedAt = performance.now();
@@ -3103,15 +3111,22 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					const reopened = await SessionManager.open(sessionFile, undefined, undefined, {
 						suppressBreadcrumb: true,
 					});
-					if (options.parentArtifactManager) {
-						reopened.adoptArtifactManager(options.parentArtifactManager);
+					let revived: AgentSession | undefined;
+					try {
+						if (options.parentArtifactManager) {
+							reopened.adoptArtifactManager(options.parentArtifactManager);
+						}
+						({ session: revived } = await createAgentSession(
+							buildSubagentSessionOptions(reopened, expectedAgentRef),
+						));
+						installRegistryStatusSync(revived);
+						installIrcWakeTurnMonitor(revived);
+						return revived;
+					} catch (error) {
+						if (revived) await revived.dispose();
+						else await reopened.close();
+						throw error;
 					}
-					const { session: revived } = await createAgentSession(
-						buildSubagentSessionOptions(reopened, expectedAgentRef),
-					);
-					installRegistryStatusSync(revived);
-					installIrcWakeTurnMonitor(revived);
-					return revived;
 				};
 			}
 

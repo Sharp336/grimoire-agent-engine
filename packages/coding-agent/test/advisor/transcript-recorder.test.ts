@@ -11,7 +11,7 @@
  * - The target follows the session file: a switch routes later turns to the new
  *   session's `__advisor.jsonl`, leaving the prior file intact.
  */
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -22,6 +22,7 @@ import {
 	advisorTranscriptFilename,
 	loadAdvisorTranscriptCosts,
 } from "@oh-my-pi/pi-coding-agent/advisor/transcript-recorder";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 interface AdvisorEntry {
@@ -161,6 +162,25 @@ describe("AdvisorTranscriptRecorder", () => {
 			expect(first[0].message?.usage?.input).toBe(1);
 			expect(second).toHaveLength(1);
 			expect(second[0].message?.usage?.input).toBe(2);
+		});
+	});
+
+	it("retains a manager so a failed lock release can be retried", async () => {
+		await withTempDir(async dir => {
+			const sessionFile = path.join(dir, "sess.jsonl");
+			const recorder = new AdvisorTranscriptRecorder(
+				() => sessionFile,
+				() => dir,
+			);
+			recorder.record(assistantMessage("retry close", 1));
+			await recorder.flush();
+
+			const closeSpy = vi.spyOn(SessionManager.prototype, "close");
+			closeSpy.mockRejectedValueOnce(new Error("transient close failure"));
+			await expect(recorder.close()).rejects.toThrow("transient close failure");
+			await recorder.close();
+			expect(closeSpy).toHaveBeenCalledTimes(2);
+			closeSpy.mockRestore();
 		});
 	});
 

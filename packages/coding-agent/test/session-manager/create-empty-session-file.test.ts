@@ -58,7 +58,7 @@ describe("SessionManager.createEmptySessionFile", () => {
 
 		// The session adopts the header's cwd and has no entries beyond the header.
 		expect(manager.getCwd()).toBe(path.resolve(cwd));
-		expect(manager.getSessionFile()).toBe(path.resolve(file));
+		expect(manager.getSessionFile()).toBe(fs.realpathSync(file));
 		expect(manager.getEntries().length).toBe(0);
 	});
 

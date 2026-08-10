@@ -210,6 +210,8 @@ export class TanCommandController {
 								await clone.dispose();
 								agentRegistry.detachSession(cloneId);
 							}
+						} else {
+							await cloneManager.close();
 						}
 					}
 				},

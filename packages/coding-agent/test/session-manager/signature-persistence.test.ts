@@ -74,6 +74,7 @@ describe("SessionManager signature persistence", () => {
 		const persistedBlob = await fs.readFile(path.join(getBlobsDir(), expectedBlobHash), "utf8");
 		expect(persistedBlob).toBe(largeImageUrl);
 
+		await session.close();
 		const reloaded = await SessionManager.open(session.getSessionFile()!);
 		const reloadedUserEntry = reloaded
 			.getEntries()
@@ -96,6 +97,7 @@ describe("SessionManager signature persistence", () => {
 				},
 			],
 		});
+		await reloaded.close();
 	});
 
 	it("externalizes and restores tool result image blocks across reload", async () => {
@@ -151,6 +153,7 @@ describe("SessionManager signature persistence", () => {
 		await expect(fs.readFile(path.join(getBlobsDir(), contentHash))).resolves.toBeDefined();
 		await expect(fs.readFile(path.join(getBlobsDir(), detailHash))).resolves.toBeDefined();
 
+		await session.close();
 		const reloaded = await SessionManager.open(sessionFile);
 		const reloadedToolEntry = reloaded
 			.getEntries()
@@ -161,6 +164,7 @@ describe("SessionManager signature persistence", () => {
 
 		expect(reloadedToolEntry.message.content).toEqual([{ type: "text", text: "displayed image" }, contentImage]);
 		expect((reloadedToolEntry.message.details as { images?: ImageContent[] }).images).toEqual([detailImage]);
+		await reloaded.close();
 	});
 
 	it("rehydrates assistant replay metadata in memory without rewriting the session file", async () => {

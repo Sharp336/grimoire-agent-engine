@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -295,7 +296,8 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		rebuildGate.fail = true;
 
 		await expect(session!.switchSession(targetSessionFile!)).resolves.toBe(true);
-		expect(session?.sessionFile).toBe(targetSessionFile);
+		// The switched session reports the canonical target its lock pinned.
+		expect(session?.sessionFile).toBe(fs.realpathSync(targetSessionFile!));
 		expect(created.planModeEnabled).toBe(false);
 		expect(rebuildGate.calls).toBeGreaterThan(callsBeforeSwitch);
 		expect(created.planModePaused).toBe(false);

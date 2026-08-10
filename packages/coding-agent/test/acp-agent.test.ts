@@ -119,6 +119,7 @@ function makeAssistantMessage(text: string, thinking?: string) {
 class FakeAgentSession {
 	sessionManager: SessionManager;
 	sessionId: string;
+	readonly initialSessionFile: string | undefined;
 	agent: { sessionId: string; waitForIdle: () => Promise<void> };
 	model: Model | undefined;
 	thinkingLevel: string | undefined;
@@ -152,9 +153,11 @@ class FakeAgentSession {
 	constructor(
 		cwd: string,
 		private readonly models: Model[] = TEST_MODELS,
+		sessionManager?: SessionManager,
 	) {
-		this.sessionManager = SessionManager.create(cwd);
+		this.sessionManager = sessionManager ?? SessionManager.create(cwd);
 		this.sessionId = this.sessionManager.getSessionId();
+		this.initialSessionFile = this.sessionManager.getSessionFile();
 		this.agent = {
 			sessionId: this.sessionId,
 			waitForIdle: async () => {
@@ -495,8 +498,8 @@ async function createHarness(
 
 	const initialSession = new FakeAgentSession(cwdA);
 	sessions.push(initialSession);
-	const factory = async (cwd: string): Promise<AgentSession> => {
-		const session = new FakeAgentSession(cwd);
+	const factory = async (cwd: string, sessionManager?: SessionManager): Promise<AgentSession> => {
+		const session = new FakeAgentSession(cwd, TEST_MODELS, sessionManager);
 		sessions.push(session);
 		return session as unknown as AgentSession;
 	};
@@ -585,6 +588,7 @@ describe("ACP agent", () => {
 		const forkedMessages = forkedSession?.sessionManager.buildSessionContext().messages ?? [];
 		expect(forked.sessionId).not.toBe(first.sessionId);
 		expect(forkedMessages.some(message => message.role === "user" && message.content === "fork me")).toBe(true);
+		expect(forkedSession?.initialSessionFile).not.toBe(firstSession?.sessionManager.getSessionFile());
 
 		await harness.agent.closeSession({ sessionId: forked.sessionId });
 		await expect(harness.agent.setSessionMode({ sessionId: forked.sessionId, modeId: "default" })).rejects.toThrow(
@@ -1055,6 +1059,7 @@ describe("ACP agent", () => {
 		stored.sessionManager.appendMessage(makeAssistantMessage("reply", "reasoning"));
 		await stored.sessionManager.ensureOnDisk();
 		await stored.sessionManager.flush();
+		await stored.sessionManager.close();
 
 		const loaded = await harness.agent.loadSession({
 			sessionId: stored.sessionId,
@@ -1396,6 +1401,7 @@ describe("ACP agent", () => {
 		});
 		await stored.sessionManager.ensureOnDisk();
 		await stored.sessionManager.flush();
+		await stored.sessionManager.close();
 
 		await harness.agent.loadSession({
 			sessionId: stored.sessionId,
@@ -1464,6 +1470,7 @@ describe("ACP agent", () => {
 		});
 		await stored.sessionManager.ensureOnDisk();
 		await stored.sessionManager.flush();
+		await stored.sessionManager.close();
 
 		await harness.agent.loadSession({
 			sessionId: stored.sessionId,
@@ -1511,6 +1518,7 @@ describe("ACP agent", () => {
 		});
 		await stored.sessionManager.ensureOnDisk();
 		await stored.sessionManager.flush();
+		await stored.sessionManager.close();
 
 		await harness.agent.loadSession({
 			sessionId: stored.sessionId,
@@ -1561,6 +1569,7 @@ describe("ACP agent", () => {
 		});
 		await stored.sessionManager.ensureOnDisk();
 		await stored.sessionManager.flush();
+		await stored.sessionManager.close();
 
 		await harness.agent.loadSession({
 			sessionId: stored.sessionId,
@@ -1665,6 +1674,7 @@ describe("ACP agent", () => {
 		});
 		await stored.sessionManager.ensureOnDisk();
 		await stored.sessionManager.flush();
+		await stored.sessionManager.close();
 
 		await harness.agent.loadSession({
 			sessionId: stored.sessionId,

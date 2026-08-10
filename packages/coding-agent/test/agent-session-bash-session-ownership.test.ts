@@ -203,6 +203,39 @@ describe("AgentSession bash session ownership", () => {
 		).toBe(true);
 	});
 
+	it("rejoins the retained lock when a session switch rolls back", async () => {
+		const sessionDir = path.join(tempDir.path(), "sessions");
+		const { completion, emitUserBash, extensionRunner } = createGatedBashRunner();
+		createSession(SessionManager.create(tempDir.path(), sessionDir), extensionRunner);
+		const oldSessionFile = await seedPersistedSession();
+
+		const targetManager = SessionManager.create(tempDir.path(), sessionDir);
+		targetManager.appendMessage({ role: "user", content: "target", timestamp: Date.now() });
+		targetManager.appendMessage(createAssistantMessage("target reply"));
+		await targetManager.ensureOnDisk();
+		const targetFile = targetManager.getSessionFile();
+		if (!targetFile) throw new Error("Expected target session file");
+		await targetManager.close();
+
+		const bashPromise = session.executeBash("old-session-command");
+		expect(emitUserBash).toHaveBeenCalledTimes(1);
+		vi.spyOn(extensionRunner, "emit").mockRejectedValueOnce(new Error("synthetic switch hook failure"));
+
+		await expect(session.switchSession(targetFile)).rejects.toThrow("synthetic switch hook failure");
+		expect(session.sessionFile).toBe(oldSessionFile);
+		await expect(SessionManager.open(oldSessionFile, sessionDir)).rejects.toThrow();
+		const reopenedTarget = await SessionManager.open(targetFile, sessionDir);
+		await reopenedTarget.close();
+
+		completion.resolve({ result: bashResult });
+		expect(await bashPromise).toEqual(bashResult);
+		expect(
+			session.messages.some(
+				message => message.role === "bashExecution" && message.command === "old-session-command",
+			),
+		).toBe(true);
+	});
+
 	it.each(["new", "switch", "branch"] as const)(
 		"records a late bash result in its original session after %s",
 		async transition => {

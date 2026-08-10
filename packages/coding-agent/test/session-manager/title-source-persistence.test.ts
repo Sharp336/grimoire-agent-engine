@@ -102,9 +102,11 @@ describe("session title source persistence", () => {
 			source: "auto",
 		});
 		expect(parseJsonLine(rawLines[1]).type).toBe("session");
+		await session.close();
 		const reopened = await SessionManager.open(sessionFile!);
 		expect(reopened.getSessionName()).toBe("Auto title");
 		expect(reopened.titleSource).toBe("auto");
+		await reopened.close();
 	});
 
 	it("persists user title source across reopen", async () => {
@@ -120,9 +122,11 @@ describe("session title source persistence", () => {
 		const entries = await loadEntriesFromFile(sessionFile!);
 		expect(getHeader(entries)?.titleSource).toBe("user");
 
+		await session.close();
 		const reopened = await SessionManager.open(sessionFile!);
 		expect(reopened.getSessionName()).toBe("Manual title");
 		expect(reopened.titleSource).toBe("user");
+		await reopened.close();
 	});
 
 	it("loads legacy slotless files with header titles", async () => {

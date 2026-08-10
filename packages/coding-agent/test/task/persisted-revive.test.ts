@@ -277,4 +277,42 @@ describe("persisted subagent revival", () => {
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
 	});
+
+	it("releases the reopened writer when session creation fails", async () => {
+		const cwd = makeTempDir("@pi-failed-revive-");
+		const sessionFile = await createPersistedSession(cwd);
+		vi.spyOn(sdkModule, "createAgentSession").mockRejectedValue(new Error("startup failed"));
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await expect(reviver(ref)).rejects.toThrow("startup failed");
+
+		const reopened = await SessionManager.open(sessionFile);
+		await reopened.close();
+	});
+
+	it("disposes the created session when active-tool restoration fails", async () => {
+		const cwd = makeTempDir("@pi-tool-restore-failed-");
+		const sessionFile = await createPersistedSession(cwd);
+		const dispose = vi.fn(async () => {});
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(
+			async () =>
+				({
+					session: {
+						getMountedXdevToolNames: () => [],
+						setActiveToolsByName: async () => {
+							throw new Error("tool restore failed");
+						},
+						dispose,
+					} as unknown as AgentSession,
+				}) as CreateAgentSessionResult,
+		);
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await expect(reviver(ref)).rejects.toThrow("tool restore failed");
+		expect(dispose).toHaveBeenCalledTimes(1);
+	});
 });

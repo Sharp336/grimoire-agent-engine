@@ -570,6 +570,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		const closeSpy = vi.fn();
 		session.providerSessionState.set("openai-codex-responses", { close: closeSpy } satisfies ProviderSessionState);
 
+		await reloadedSessionManager.close();
 		const mutatedSessionManager = await SessionManager.open(sessionFile, tempDir);
 		mutatedSessionManager.appendMessage({
 			role: "user",
@@ -616,6 +617,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		const closeSpy = vi.fn();
 		session.providerSessionState.set("openai-codex-responses", { close: closeSpy } satisfies ProviderSessionState);
 
+		await reloadedSessionManager.close();
 		const mutatedSessionManager = await SessionManager.open(sessionFile, tempDir);
 		mutatedSessionManager.appendModelChange("openai/gpt-5-mini");
 		await mutatedSessionManager.flush();
@@ -648,6 +650,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		const closeSpy = vi.fn();
 		session.providerSessionState.set("openai-responses:openai", { close: closeSpy } satisfies ProviderSessionState);
 
+		await reloadedSessionManager.close();
 		const mutatedSessionManager = await SessionManager.open(sessionFile, tempDir);
 		mutatedSessionManager.appendModelChange("openai/gpt-5.4-mini");
 		await mutatedSessionManager.flush();
@@ -673,9 +676,8 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		const { sessionFile } = await createPersistedSession(tempDir, sessionManager => {
 			appendStaleAssistantTurn(sessionManager, "Unreadable assistant snapshot");
 		});
-		const sessionDir = path.dirname(sessionFile);
-		const originalMode = fs.statSync(sessionDir).mode & 0o777;
-		fs.chmodSync(sessionDir, 0o555);
+		const originalMode = fs.statSync(sessionFile).mode & 0o777;
+		fs.chmodSync(sessionFile, 0o444);
 
 		const closeSpy = vi.fn();
 		session.providerSessionState.set("openai-responses:openai", { close: closeSpy } satisfies ProviderSessionState);
@@ -683,7 +685,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		try {
 			await expect(session.switchSession(sessionFile)).resolves.toBe(true);
 		} finally {
-			fs.chmodSync(sessionDir, originalMode);
+			fs.chmodSync(sessionFile, originalMode);
 		}
 
 		expect(closeSpy).toHaveBeenCalledTimes(1);

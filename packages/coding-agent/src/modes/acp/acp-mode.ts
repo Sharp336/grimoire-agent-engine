@@ -2,10 +2,11 @@ import * as stream from "node:stream";
 import { postmortem } from "@oh-my-pi/pi-utils";
 import { AgentSideConnection, ndJsonStream, type Stream } from "@oh-my-pi/pi-utils/acp";
 import type { AgentSession } from "../../session/agent-session";
+import type { SessionManager } from "../../session/session-manager";
 import { AcpAgent } from "./acp-agent";
 
 /** Creates sessions requested by an ACP client. */
-export type AcpSessionFactory = (cwd: string) => Promise<AgentSession>;
+export type AcpSessionFactory = (cwd: string, sessionManager?: SessionManager) => Promise<AgentSession>;
 
 /** Creates an ACP connection and exposes its agent when process-level teardown must own it. */
 export function createAcpConnection(

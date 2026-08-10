@@ -85,10 +85,12 @@ describe("SessionManager collab replication", () => {
 		await manager.rewriteEntries();
 		const file = manager.getSessionFile();
 		if (!file) throw new Error("expected a persisted session file");
+		await manager.close();
 		const { manager: loaded } = makeManager();
 		await loaded.setSessionFile(file);
 		expect(loaded.getEntry("feed0001")?.parentId).toBe(rootId);
 		expect(loaded.getEntry(nextId)?.parentId).toBe("feed0001");
+		await loaded.close();
 	});
 
 	it("snapshotForReplication deep-copies entries and preserves the header identity", () => {
