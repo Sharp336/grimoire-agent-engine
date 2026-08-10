@@ -141,6 +141,10 @@ export class ExtensionRuntime implements IExtensionRuntime {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
 
+	getAgentId(): string | undefined {
+		throw new ExtensionRuntimeNotInitializedError();
+	}
+
 	setSessionName(): Promise<void> {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
@@ -341,6 +345,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 
 	getSessionName(): string | undefined {
 		return this.runtime.getSessionName();
+	}
+
+	getAgentId(): string | undefined {
+		return this.runtime.getAgentId();
 	}
 
 	setSessionName(name: string): Promise<void> {
