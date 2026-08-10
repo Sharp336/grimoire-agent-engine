@@ -302,6 +302,8 @@ export interface PromptOptions {
 	attribution?: MessageAttribution;
 	/** Skip pre-send compaction checks for this prompt. */
 	skipCompactionCheck?: boolean;
+	/** Stable caller-owned tag attached to the prompt's agent message. */
+	messageTag?: string;
 }
 
 /** Options for AgentSession.followUp(). */
