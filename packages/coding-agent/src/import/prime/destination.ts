@@ -974,6 +974,30 @@ function validCredentialProvider(value: unknown): value is string {
 		value !== "constructor"
 	);
 }
+interface CredentialDigestRow {
+	readonly id: number;
+	readonly credential_type: string;
+	readonly data: string;
+	readonly identity_key: string | null;
+}
+async function credentialProviderDigest(dbPath: string, provider: string): Promise<string | undefined> {
+	const store = await probeCredentialStore(dbPath);
+	if (!store.valid || !store.present) return undefined;
+	let db: Database | undefined;
+	try {
+		db = await openCredentialReadOnly(dbPath);
+		const rows = db
+			.query(
+				"SELECT id, credential_type, data, identity_key FROM auth_credentials WHERE provider = ? AND disabled_cause IS NULL ORDER BY id ASC",
+			)
+			.all(provider) as CredentialDigestRow[];
+		if (rows.length === 0) return undefined;
+		const canonical = rows.map(row => [row.id, row.credential_type, row.data, row.identity_key] as const);
+		return sha256(Buffer.from(JSON.stringify(canonical)));
+	} finally {
+		db?.close();
+	}
+}
 function validModelProvider(value: unknown): value is string {
 	return validCredentialProvider(value) && !value.includes(":definition:") && !value.includes(":override:");
 }
@@ -1132,9 +1156,7 @@ export async function validatePrimeDestinationRollbackEntry(
 				!(await noSymlinkPath(destination.agentDir, destination.agentDbPath, "file"))
 			)
 				return false;
-			const credentialProbe = await hasStoredCredential(destination.agentDbPath, provider);
-			if (!credentialProbe.valid || !credentialProbe.present) return false;
-			return (await descriptorDigest(destination.agentDbPath)) === entry.currentSha256;
+			return (await credentialProviderDigest(destination.agentDbPath, provider)) === entry.currentSha256;
 		}
 		if (entry.kind === "skills") {
 			if (entry.nodeType !== "directory-tree" || !entry.itemId.startsWith("skill:")) return false;
@@ -2364,8 +2386,9 @@ export async function applyPrimeDestination(
 				);
 				if (importedCredentialProviders.length) {
 					committed = true;
-					const authDigest = await descriptorDigest(plan.destination.agentDbPath);
-					for (const provider of importedCredentialProviders)
+					for (const provider of importedCredentialProviders) {
+						const authDigest = await credentialProviderDigest(plan.destination.agentDbPath, provider);
+						if (!authDigest) throw new DestinationValidationError("imported credential missing");
 						rollbackEntries.push(
 							rollbackEntry(
 								`credential:${provider}`,
@@ -2376,6 +2399,7 @@ export async function applyPrimeDestination(
 								"regular-file",
 							),
 						);
+					}
 				}
 				credentialDestinationInvalid = false;
 			}

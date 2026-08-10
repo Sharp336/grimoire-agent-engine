@@ -1304,7 +1304,7 @@ export function parsePrimeConfig(discovery: PrimeImportSourceDiscovery): PrimeCo
 		const values = { ...settings[index].values };
 		delete values.defaultProvider;
 		delete values.defaultModel;
-		if (values.defaultThinkingLevel === "off") delete values.defaultThinkingLevel;
+		if (defaultThinkingLevel === "off" || values.defaultThinkingLevel === "off") delete values.defaultThinkingLevel;
 		settings[index] = { ...settings[index], values };
 	}
 	const effectiveSettings = Object.create(null) as Record<string, PrimeJsonValue>;

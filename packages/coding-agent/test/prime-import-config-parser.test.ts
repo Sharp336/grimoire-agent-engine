@@ -716,6 +716,18 @@ describe("parsePrimeConfig", () => {
 		expect(projectOff.settings[1]?.values).toEqual({ modelRoles: { default: "p/m:off" } });
 		expect(projectOff.effectiveSettings).toEqual({ modelRoles: { default: "p/m:off" } });
 	});
+	it("removes an overridden global thinking level when the project default is off", () => {
+		const result = parse([
+			settings(
+				"global/settings.json",
+				JSON.stringify({ defaultProvider: "p", defaultModel: "m", defaultThinkingLevel: "high" }),
+			),
+			settings("project/settings.json", JSON.stringify({ defaultThinkingLevel: "off" })),
+		]);
+		expect(result.settings[0]?.values).toEqual({});
+		expect(result.settings[1]?.values).toEqual({ modelRoles: { default: "p/m:off" } });
+		expect(result.effectiveSettings).toEqual({ modelRoles: { default: "p/m:off" } });
+	});
 
 	it("drops incomplete off defaults and reports the unsupported role", () => {
 		const result = parse([settings("global/settings.json", JSON.stringify({ defaultThinkingLevel: "off" }))]);

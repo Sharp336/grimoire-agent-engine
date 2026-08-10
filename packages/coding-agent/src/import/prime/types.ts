@@ -536,7 +536,7 @@ export interface PrimeRollbackManifestEntry {
 	readonly created: boolean;
 	readonly priorExists: boolean;
 	readonly priorSha256?: string;
-	/** Digest of the exact container or tree bytes currently guarded by this entry. */
+	/** Digest of the guarded logical item, container, or tree. */
 	readonly currentSha256: string;
 	readonly nodeType: "regular-file" | "directory-tree";
 	/** Digest of the container before this logical item was created. */

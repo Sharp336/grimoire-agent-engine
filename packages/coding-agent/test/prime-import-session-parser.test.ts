@@ -628,6 +628,44 @@ describe("parsePrimeSessions", () => {
 			]),
 		);
 	});
+	it("removes compaction and branch summaries whose referenced entries were rejected", () => {
+		const lines = [
+			header("dangling-references"),
+			entry({ ...base("kept", null, "message"), message: { role: "user", content: "kept", timestamp: 1 } }),
+			entry({ ...base("duplicate", "kept", "label"), targetId: "kept", label: "first" }),
+			entry({ ...base("duplicate", "kept", "label"), targetId: "kept", label: "second" }),
+			entry({
+				...base("compaction", "kept", "compaction"),
+				summary: "would truncate the transcript",
+				firstKeptEntryId: "duplicate",
+				tokensBefore: 1,
+			}),
+			entry({
+				...base("chained-compaction", "kept", "compaction"),
+				summary: "depends on a removed compaction",
+				firstKeptEntryId: "compaction",
+				tokensBefore: 2,
+			}),
+			entry({
+				...base("child", "chained-compaction", "message"),
+				message: { role: "user", content: "orphaned child", timestamp: 2 },
+			}),
+			entry({
+				...base("root-summary", "kept", "branch_summary"),
+				fromId: "root",
+				summary: "valid root sentinel",
+			}),
+			entry({
+				...base("summary", "kept", "branch_summary"),
+				fromId: "duplicate",
+				summary: "dangling branch",
+			}),
+			entry({ ...base("label", "kept", "label"), targetId: "child", label: "dangling label" }),
+		];
+		const result = parse([sessionFile("sessions/current/dangling-references.jsonl", lines)]);
+		expect(result.sessions[0]?.entries.map(entry => entry.id)).toEqual(["kept", "root-summary"]);
+		expect(result.losses.filter(item => item.code === "sessions-invalid-entry")).toHaveLength(5);
+	});
 	it("rejects invalid inline image base64 before apply while preserving valid image payloads", () => {
 		const validData = Buffer.from("valid-image").toString("base64");
 		const result = parse([

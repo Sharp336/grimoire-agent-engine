@@ -884,31 +884,33 @@ function parseSessionFile(
 	const rowById = new Map(migrated.map(entry => [entry.id, entry.row] as const));
 	const pairedEntries = checkToolPairing(entries, file.sourceRef, rowById, losses, ancestorBudget);
 	const entryIds = new Set(pairedEntries.map(entry => entry.id));
-	const labelsByTarget = new Map<string, string[]>();
+	const removedEntries = new Set<string>();
+	const pendingRemovals: string[] = [];
+	const dependentsByTarget = new Map<string, string[]>();
 	for (const entry of pairedEntries) {
-		if (entry.type !== "label") continue;
-		const labels = labelsByTarget.get(entry.targetId) ?? [];
-		labels.push(entry.id);
-		labelsByTarget.set(entry.targetId, labels);
-	}
-	const removedLabels = new Set<string>();
-	const pendingLabels: string[] = [];
-	for (const entry of pairedEntries) {
-		if (entry.type === "label" && !entryIds.has(entry.targetId)) {
-			removedLabels.add(entry.id);
-			pendingLabels.push(entry.id);
+		const dependencies = entry.parentId === null ? [] : [entry.parentId];
+		if (entry.type === "compaction") dependencies.push(entry.firstKeptEntryId);
+		else if (entry.type === "branch_summary" && entry.fromId !== "root") dependencies.push(entry.fromId);
+		else if (entry.type === "label") dependencies.push(entry.targetId);
+		for (const dependency of dependencies) {
+			const dependents = dependentsByTarget.get(dependency) ?? [];
+			dependents.push(entry.id);
+			dependentsByTarget.set(dependency, dependents);
+			if (entryIds.has(dependency) || removedEntries.has(entry.id)) continue;
+			removedEntries.add(entry.id);
+			pendingRemovals.push(entry.id);
 			losses.push(loss("sessions-invalid-entry", file.sourceRef, rowById.get(entry.id)));
 		}
 	}
-	for (let index = 0; index < pendingLabels.length; index += 1) {
-		for (const labelId of labelsByTarget.get(pendingLabels[index]!) ?? []) {
-			if (removedLabels.has(labelId)) continue;
-			removedLabels.add(labelId);
-			pendingLabels.push(labelId);
-			losses.push(loss("sessions-invalid-entry", file.sourceRef, rowById.get(labelId)));
+	for (let index = 0; index < pendingRemovals.length; index += 1) {
+		for (const dependentId of dependentsByTarget.get(pendingRemovals[index]!) ?? []) {
+			if (removedEntries.has(dependentId)) continue;
+			removedEntries.add(dependentId);
+			pendingRemovals.push(dependentId);
+			losses.push(loss("sessions-invalid-entry", file.sourceRef, rowById.get(dependentId)));
 		}
 	}
-	const filteredEntries = pairedEntries.filter(entry => !removedLabels.has(entry.id));
+	const filteredEntries = pairedEntries.filter(entry => !removedEntries.has(entry.id));
 	const fatalLossCodes =
 		parsedRows.rowBudgetExceeded || ancestorBudget.exhausted
 			? (["source-budget-exceeded"] as const)

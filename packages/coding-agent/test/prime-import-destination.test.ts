@@ -748,6 +748,36 @@ describe("prime destination planning and apply", () => {
 		expect(entry?.currentSha256).toMatch(/^[0-9a-f]{64}$/);
 		expect(await validatePrimeDestinationRollbackEntry(entry!, plan.destination)).toBe(true);
 	});
+	it("keeps credential rollback guards stable across WAL checkpoints", async () => {
+		const root = await temp(),
+			snapshot = await sourceSnapshot(root),
+			agentDir = path.join(root, "omp"),
+			dbPath = getAgentDbPath(agentDir),
+			secretTable = new ApplyOnlySecretTable(),
+			operationId = `credential-${"3".repeat(64)}`;
+		await fs.mkdir(agentDir, { recursive: true });
+		const liveAuth = await AuthStorage.create(dbPath);
+		try {
+			liveAuth.insertCredentialsIfProviderAbsent("existing-provider", [{ type: "api_key", key: "existing" }]);
+			secretTable.add(operationId, "imported");
+			const operation = credential("imported-provider", operationId),
+				value = input(snapshot, { credentials: [operation], operations: [operation], secretTable }),
+				plan = await planPrimeDestination(value, { agentDir, cwd: snapshot.cwd }),
+				applied = await applyPrimeDestination(plan, value),
+				entry = applied.rollbackEntries.find(item => item.itemId === "credential:imported-provider");
+			expect(entry).toBeDefined();
+			expect(await validatePrimeDestinationRollbackEntry(entry!, plan.destination)).toBe(true);
+			const checkpoint = new Database(dbPath);
+			try {
+				checkpoint.run("PRAGMA wal_checkpoint(TRUNCATE)");
+			} finally {
+				checkpoint.close();
+			}
+			expect(await validatePrimeDestinationRollbackEntry(entry!, plan.destination)).toBe(true);
+		} finally {
+			liveAuth.close();
+		}
+	});
 
 	it("reports source drift before commit and keeps output ordering stable", async () => {
 		const root = await temp(),
