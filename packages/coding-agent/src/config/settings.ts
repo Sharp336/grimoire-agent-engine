@@ -65,6 +65,34 @@ export interface RawSettings {
 	[key: string]: unknown;
 }
 
+/** Importer-bound limits for descriptor reads and parsed YAML structure. */
+export interface SettingsReadLimits {
+	readonly maxFileBytes: number;
+	readonly maxTotalBytes: number;
+	readonly maxDepth?: number;
+	readonly maxEntries?: number;
+}
+
+/** One typed whole-value or per-role create-only settings mutation. */
+export type SettingsCreateOnlyMutation =
+	| {
+			[P in Exclude<SettingPath, "modelRoles">]: {
+				readonly path: P;
+				readonly value: SettingValue<P>;
+			};
+	  }[Exclude<SettingPath, "modelRoles">]
+	| {
+			readonly path: "modelRoles";
+			readonly role: string;
+			readonly value: string;
+	  };
+
+/** Paths and model-role identifiers inserted or already present by a batch. */
+export interface SettingsCreateOnlyResult {
+	readonly applied: readonly string[];
+	readonly skipped: readonly string[];
+}
+
 type YamlLoadResult =
 	| { kind: "missing" }
 	| { kind: "loaded"; settings: RawSettings }
@@ -84,6 +112,8 @@ export interface SettingsOptions {
 	overrides?: Partial<Record<SettingPath, unknown>>;
 	/** Extra config.yml-style overlays loaded after global/project settings */
 	configFiles?: string[];
+	/** Importer-bound descriptor and parsed-structure limits. */
+	readLimits?: SettingsReadLimits;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -171,6 +201,16 @@ function normalizePathPrefix(prefix: string): string {
 	return path.resolve(expandTilde(prefix));
 }
 
+function canonicalSettingsOsPath(candidate: string): string {
+	const resolved = path.resolve(candidate);
+	if (
+		process.platform === "darwin" &&
+		(resolved === "/var" || resolved.startsWith("/var/") || resolved === "/tmp" || resolved.startsWith("/tmp/"))
+	)
+		return `/private${resolved}`;
+	return resolved;
+}
+
 function pathMatchesPrefix(cwd: string, prefix: string): boolean {
 	const relative = path.relative(normalizePathPrefix(prefix), path.resolve(cwd));
 	return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
@@ -184,6 +224,41 @@ function stringArrayFromUnknown(value: unknown): string[] {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+class SettingsReadLimitError extends Error {
+	readonly code: string;
+
+	constructor(message: string, code = "EFBIG") {
+		super(message);
+		this.code = code;
+	}
+}
+
+function validateSettingsStructure(value: unknown, limits: SettingsReadLimits): void {
+	const maxDepth = limits.maxDepth ?? 64;
+	const maxEntries = limits.maxEntries ?? 10_000;
+	const pending: Array<{ readonly value: unknown; readonly depth: number }> = [{ value, depth: 0 }];
+	const seen = new Set<object>();
+	let entries = 0;
+	while (pending.length) {
+		const current = pending.pop();
+		if (!current) continue;
+		if (current.depth > maxDepth) throw new SettingsReadLimitError("settings structure depth exceeded");
+		if (!current.value || typeof current.value !== "object") continue;
+		if (seen.has(current.value)) continue;
+		seen.add(current.value);
+		if (Array.isArray(current.value)) {
+			entries += current.value.length;
+			if (entries > maxEntries) throw new SettingsReadLimitError("settings structure entry budget exceeded");
+			for (const child of current.value) pending.push({ value: child, depth: current.depth + 1 });
+			continue;
+		}
+		const record = current.value as Record<string, unknown>;
+		const keys = Object.keys(record);
+		entries += keys.length;
+		if (entries > maxEntries) throw new SettingsReadLimitError("settings structure entry budget exceeded");
+		for (const key of keys) pending.push({ value: record[key], depth: current.depth + 1 });
+	}
 }
 
 /**
@@ -353,6 +428,8 @@ export class Settings {
 	#modifiedProjectModelRoles = new Set<string>();
 	/** Individual global model roles modified during this session (for partial save) */
 	#modifiedGlobalModelRoles = new Set<string>();
+	/** Monotonic local generations for global model-role writes. */
+	#globalModelRoleGenerations = new Map<string, number>();
 	/**
 	 * Original process-wide model-role overrides captured before a project edit
 	 * temporarily replaced them via `#updateRuntimeModelRoleOverride`. Restored
@@ -370,9 +447,17 @@ export class Settings {
 	#savePromise?: Promise<void>;
 	#projectSaveTimer?: NodeJS.Timeout;
 	#projectSavePromise?: Promise<void>;
+	/** Serialized create-only global publication chain. */
+	#createOnlyChain: Promise<void> = Promise.resolve();
+	#createOnlyInFlight = false;
 
 	/** Whether to persist changes */
 	#persist: boolean;
+	/** Importer-only mode: native config reads, no project/runtime side effects. */
+	#createOnlyMode = false;
+	/** Optional byte and structural bounds for importer destination reads. */
+	#readLimits?: SettingsReadLimits;
+	#readTotalBytes = 0;
 
 	private constructor(options: SettingsOptions = {}) {
 		this.#cwd = path.normalize(options.cwd ?? getProjectDir());
@@ -382,6 +467,7 @@ export class Settings {
 		if (options.configFiles) configFiles.push(...options.configFiles);
 		this.#configFiles = configFiles.map(file => path.resolve(this.#cwd, expandTilde(file)));
 		this.#persist = !options.inMemory && options.readOnly !== true;
+		this.#readLimits = options.readLimits;
 		liveSettingsInstances.add(new WeakRef(this));
 
 		if (options.overrides) {
@@ -433,6 +519,27 @@ export class Settings {
 		return instance.#loadReadOnly();
 	}
 
+	/** Load only the native global config for an importer destination.
+	 * This path never opens AgentStorage, reads legacy settings, writes markers,
+	 * loads project capabilities, or fires runtime hooks.
+	 */
+	static loadCreateOnly(options: SettingsOptions = {}): Promise<Settings> {
+		const instance = new Settings({ ...options, readOnly: true });
+		instance.#createOnlyMode = true;
+		return instance.#loadCreateOnly();
+	}
+
+	/**
+	 * Publish a create-only importer batch without initializing unrelated state.
+	 */
+	static applyCreateOnlyIsolated(
+		options: SettingsOptions,
+		mutations: readonly SettingsCreateOnlyMutation[],
+	): Promise<SettingsCreateOnlyResult> {
+		const instance = new Settings(options);
+		instance.#createOnlyMode = true;
+		return instance.#loadCreateOnly().then(() => instance.#applyCreateOnly(mutations, false));
+	}
 	/**
 	 * Load a persisted settings instance without touching the global singleton.
 	 */
@@ -511,6 +618,197 @@ export class Settings {
 		}
 		this.#fireEffectiveSettingChanged(path, next, prev);
 	}
+	/**
+	 * Apply a create-only batch directly to the native global settings file.
+	 *
+	 * The file is re-read while its native write lock is held. Existing values
+	 * in the fresh effective destination view win, while absent whole paths and
+	 * model roles are inserted and published together.
+	 */
+	applyCreateOnly(mutations: readonly SettingsCreateOnlyMutation[]): Promise<SettingsCreateOnlyResult> {
+		const run = this.#createOnlyChain.then(() => this.#applyCreateOnly(mutations, true));
+		this.#createOnlyChain = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		return run;
+	}
+
+	async #applyCreateOnly(
+		mutations: readonly SettingsCreateOnlyMutation[],
+		runHooks: boolean,
+	): Promise<SettingsCreateOnlyResult> {
+		const identifiers = new Set<string>();
+		for (const mutation of mutations) {
+			if (!Object.hasOwn(SETTINGS_SCHEMA, mutation.path)) {
+				throw new Error(`Unknown setting path: ${mutation.path}`);
+			}
+			if (mutation.path === "providers.maxInFlightRequests") {
+				validateProviderMaxInFlightRequests(mutation.value);
+			}
+			const identifier = mutation.path === "modelRoles" ? `modelRoles:${mutation.role}` : mutation.path;
+			if (identifiers.has(identifier)) throw new Error(`Duplicate create-only setting identifier: ${identifier}`);
+			identifiers.add(identifier);
+		}
+
+		const trackedPaths = new Set<SettingPath>([
+			...(Object.keys(SETTING_HOOKS) as SettingPath[]),
+			"statusLine.sessionAccent",
+			"modelRoles",
+		]);
+		const previousEffective = new Map<SettingPath, unknown>();
+		for (const settingPath of trackedPaths) previousEffective.set(settingPath, this.get(settingPath));
+
+		this.#createOnlyInFlight = true;
+		if (this.#saveTimer) {
+			clearTimeout(this.#saveTimer);
+			this.#saveTimer = undefined;
+		}
+		if (this.#savePromise) {
+			await this.#savePromise.catch(() => {});
+		}
+
+		const pendingPaths = [...this.#modified];
+		const pendingRoles = [...this.#modifiedGlobalModelRoles];
+		const pendingGlobal = structuredClone(this.#global);
+		this.#modified.clear();
+		this.#modifiedGlobalModelRoles.clear();
+		const applied: string[] = [];
+		const skipped: string[] = [];
+
+		const applyToCurrent = (current: RawSettings): void => {
+			let freshMerged = this.#deepMerge({}, current);
+			freshMerged = this.#deepMerge(freshMerged, this.#projectSettingsForMerge());
+			freshMerged = this.#deepMerge(freshMerged, this.#configOverlay);
+			freshMerged = this.#deepMerge(freshMerged, this.#overrides);
+
+			for (const mutation of mutations) {
+				const identifier = mutation.path === "modelRoles" ? `modelRoles:${mutation.role}` : mutation.path;
+				const configured =
+					mutation.path === "modelRoles"
+						? getByPath(freshMerged, ["modelRoles", mutation.role]) !== undefined
+						: getByPath(freshMerged, SETTING_PATH_SEGMENTS[mutation.path]) !== undefined;
+				if (configured) {
+					skipped.push(identifier);
+					continue;
+				}
+
+				if (mutation.path === "modelRoles") {
+					setByPath(current, ["modelRoles", mutation.role], mutation.value);
+				} else {
+					setByPath(current, [...SETTING_PATH_SEGMENTS[mutation.path]], mutation.value);
+				}
+				applied.push(identifier);
+
+				if (mutation.path === "modelRoles") {
+					freshMerged = this.#deepMerge(freshMerged, { modelRoles: { [mutation.role]: mutation.value } });
+				} else {
+					setByPath(freshMerged, [...SETTING_PATH_SEGMENTS[mutation.path]], mutation.value);
+				}
+			}
+			const providerLimits = getByPath(freshMerged, ["providers", "maxInFlightRequests"]);
+			if (providerLimits !== undefined) validateProviderMaxInFlightRequests(providerLimits);
+		};
+		const installAuthoritative = (current: RawSettings): void => {
+			const laterPaths = [...this.#modified];
+			const laterPathValues = new Map<string, unknown>();
+			for (const modifiedPath of laterPaths) {
+				const typedPath = modifiedPath as SettingPath;
+				laterPathValues.set(modifiedPath, getByPath(this.#global, SETTING_PATH_SEGMENTS[typedPath]));
+			}
+			const laterRoles = [...this.#modifiedGlobalModelRoles];
+			const latestRoles = this.#modelRolesFromLayer(this.#global);
+
+			this.#global = current;
+			for (const [modifiedPath, value] of laterPathValues) {
+				const typedPath = modifiedPath as SettingPath;
+				setByPath(this.#global, [...SETTING_PATH_SEGMENTS[typedPath]], value);
+			}
+			for (const role of laterRoles) {
+				if (Object.hasOwn(latestRoles, role)) setByPath(this.#global, ["modelRoles", role], latestRoles[role]);
+				else {
+					const currentRoles = getByPath(this.#global, ["modelRoles"]);
+					if (isRecord(currentRoles)) delete currentRoles[role];
+				}
+			}
+			this.#rebuildMerged();
+
+			if (runHooks) {
+				for (const settingPath of trackedPaths) {
+					const previous = previousEffective.get(settingPath);
+					const next = this.get(settingPath);
+					if (Object.is(previous, next)) continue;
+					const hook = SETTING_HOOKS[settingPath] as ((value: unknown, prev: unknown) => void) | undefined;
+					if (hook) {
+						try {
+							hook(next, previous);
+						} catch (error) {
+							logger.warn("Settings: create-only hook failed after commit", {
+								path: settingPath,
+								error: String(error),
+							});
+						}
+					}
+					this.#fireEffectiveSettingChanged(settingPath, next, previous);
+				}
+			}
+		};
+
+		try {
+			if (!this.#persist || !this.#configPath) {
+				const current = structuredClone(this.#global);
+				applyToCurrent(current);
+				if (applied.length === 0) {
+					for (const modifiedPath of pendingPaths) this.#modified.add(modifiedPath);
+					for (const role of pendingRoles) this.#modifiedGlobalModelRoles.add(role);
+				}
+				installAuthoritative(current);
+				return { applied, skipped };
+			}
+
+			const configPath = this.#configPath;
+			this.#readTotalBytes = 0;
+			await fs.promises.mkdir(path.dirname(configPath), { recursive: true });
+			let authoritative: RawSettings | undefined;
+			await this.#withYamlWriteLock(configPath, async writePath => {
+				const loaded = await this.#loadYamlIfPresentForWriteLocked(configPath, writePath);
+				const current =
+					loaded ?? (this.#quarantinedYamlTargets.has(configPath) ? structuredClone(this.#global) : {});
+				for (const modifiedPath of pendingPaths) {
+					const typedPath = modifiedPath as SettingPath;
+					const value = getByPath(pendingGlobal, SETTING_PATH_SEGMENTS[typedPath]);
+					setByPath(current, [...SETTING_PATH_SEGMENTS[typedPath]], value);
+				}
+				const pendingRoleValues = this.#modelRolesFromLayer(pendingGlobal);
+				for (const role of pendingRoles) {
+					if (Object.hasOwn(pendingRoleValues, role))
+						setByPath(current, ["modelRoles", role], pendingRoleValues[role]);
+					else {
+						const currentRoles = getByPath(current, ["modelRoles"]);
+						if (isRecord(currentRoles)) delete currentRoles[role];
+					}
+				}
+				applyToCurrent(current);
+				if (applied.length > 0) {
+					await this.#writeYamlAtomically(writePath, current);
+					this.#quarantinedYamlTargets.delete(configPath);
+				} else {
+					for (const modifiedPath of pendingPaths) this.#modified.add(modifiedPath);
+					for (const role of pendingRoles) this.#modifiedGlobalModelRoles.add(role);
+				}
+				authoritative = current;
+			});
+			installAuthoritative(authoritative ?? this.#global);
+			return { applied, skipped };
+		} catch (error) {
+			for (const modifiedPath of pendingPaths) this.#modified.add(modifiedPath);
+			for (const role of pendingRoles) this.#modifiedGlobalModelRoles.add(role);
+			throw error;
+		} finally {
+			this.#createOnlyInFlight = false;
+			if (this.#modified.size > 0 || this.#modifiedGlobalModelRoles.size > 0) this.#queueSave();
+		}
+	}
 
 	/**
 	 * Apply runtime overrides (not persisted).
@@ -578,6 +876,7 @@ export class Settings {
 	 * Call before exit to ensure all changes are persisted.
 	 */
 	async flush(): Promise<void> {
+		await this.#createOnlyChain;
 		if (this.#saveTimer) {
 			clearTimeout(this.#saveTimer);
 			this.#saveTimer = undefined;
@@ -898,6 +1197,7 @@ export class Settings {
 		// file, so a concurrent external edit to a sibling role is not
 		// clobbered by this process's stale in-memory snapshot.
 		setByPath(this.#global, ["modelRoles"], current);
+		this.#globalModelRoleGenerations.set(role, (this.#globalModelRoleGenerations.get(role) ?? 0) + 1);
 		this.#modifiedGlobalModelRoles.add(role);
 		this.#rebuildMerged();
 		this.#queueSave();
@@ -1081,6 +1381,12 @@ export class Settings {
 		this.#rebuildMerged();
 		return this;
 	}
+	async #loadCreateOnly(): Promise<Settings> {
+		const loaded = await this.#loadExistingMainYamlNoMigration();
+		if (loaded) this.#global = loaded;
+		this.#rebuildMerged();
+		return this;
+	}
 
 	async #loadYaml(filePath: string): Promise<RawSettings> {
 		const loaded = await this.#loadYamlIfPresentForStartup(filePath);
@@ -1088,9 +1394,27 @@ export class Settings {
 	}
 
 	async #loadYamlIfPresent(filePath: string): Promise<YamlLoadResult> {
+		const limits = this.#readLimits;
 		let content: string;
 		try {
-			content = await fs.promises.readFile(filePath, "utf8");
+			if (limits) {
+				const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+				try {
+					const stat = await handle.stat();
+					if (!stat.isFile()) throw new SettingsReadLimitError("settings destination is not a regular file");
+					if (stat.size > limits.maxFileBytes)
+						throw new SettingsReadLimitError("settings destination file byte budget exhausted");
+					if (this.#readTotalBytes > limits.maxTotalBytes - stat.size)
+						throw new SettingsReadLimitError("settings destination total byte budget exhausted");
+					const bytes = await handle.readFile();
+					if (bytes.byteLength > limits.maxFileBytes)
+						throw new SettingsReadLimitError("settings destination file byte budget exhausted");
+					this.#readTotalBytes += bytes.byteLength;
+					content = bytes.toString("utf8");
+				} finally {
+					await handle.close();
+				}
+			} else content = await fs.promises.readFile(filePath, "utf8");
 		} catch (error) {
 			if (isEnoent(error)) return { kind: "missing" };
 			return { kind: "unreadable", error };
@@ -1099,22 +1423,39 @@ export class Settings {
 		let parsed: unknown;
 		try {
 			parsed = YAML.parse(content);
+			if (limits) validateSettingsStructure(parsed, limits);
 		} catch (error) {
 			return { kind: "invalid", error };
 		}
-		if (parsed === null || parsed === undefined) {
-			return { kind: "loaded", settings: {} };
-		}
+		if (parsed === null || parsed === undefined) return { kind: "loaded", settings: {} };
 		if (typeof parsed !== "object" || Array.isArray(parsed)) {
 			return {
 				kind: "invalid",
 				error: new Error("Settings YAML must contain a mapping at the document root"),
 			};
 		}
-		return { kind: "loaded", settings: this.#migrateRawSettings(parsed as RawSettings) };
+		return {
+			kind: "loaded",
+			settings: this.#createOnlyMode ? (parsed as RawSettings) : this.#migrateRawSettings(parsed as RawSettings),
+		};
 	}
 
 	async #resolveYamlWritePath(filePath: string): Promise<string> {
+		if (this.#createOnlyMode) {
+			let current = canonicalSettingsOsPath(filePath);
+			const root = path.parse(current).root;
+			for (;;) {
+				try {
+					if ((await fs.promises.lstat(current)).isSymbolicLink())
+						throw new SettingsReadLimitError("settings destination is a symbolic path", "EINVAL");
+				} catch (error) {
+					if (!isEnoent(error)) throw error;
+				}
+				if (current === root) break;
+				current = path.dirname(current);
+			}
+			return canonicalSettingsOsPath(filePath);
+		}
 		const quarantinedTarget = this.#quarantinedYamlTargets.get(filePath);
 		if (quarantinedTarget) return quarantinedTarget;
 		try {
@@ -1169,7 +1510,7 @@ export class Settings {
 				`Settings config was invalid before locking and is now missing: ${filePath}; another process may have moved it aside`,
 			);
 		}
-		if (result.kind === "invalid") {
+		if (result.kind === "invalid" && !this.#createOnlyMode) {
 			result = await this.#quarantineInvalidYamlLocked(writePath, result);
 			this.#quarantinedYamlTargets.set(filePath, writePath);
 		}
@@ -1203,10 +1544,13 @@ export class Settings {
 			case "loaded":
 				return result.settings;
 			case "invalid":
-				throw new Error(
+				if (result.error instanceof SettingsReadLimitError) throw result.error;
+				throw new SettingsReadLimitError(
 					`Settings config is invalid: ${filePath}${result.backupPath ? ` (moved to ${result.backupPath})` : ""}: ${String(result.error)}`,
+					"EINVAL",
 				);
 			case "unreadable":
+				if (result.error instanceof SettingsReadLimitError) throw result.error;
 				throw new Error(`Failed to read settings config ${filePath}: ${String(result.error)}`);
 		}
 	}
@@ -1220,6 +1564,22 @@ export class Settings {
 				this.#configPath = configPath;
 				return loaded;
 			}
+		}
+		this.#configPath = path.join(this.#agentDir, MAIN_CONFIG_FILENAMES[0]);
+		return null;
+	}
+	async #loadExistingMainYamlNoMigration(): Promise<RawSettings | null> {
+		if (!this.#configPath) return null;
+		for (const filename of MAIN_CONFIG_FILENAMES) {
+			const configPath = path.join(this.#agentDir, filename);
+			const result = await this.#loadYamlIfPresent(configPath);
+			if (result.kind === "missing") continue;
+			if (result.kind !== "loaded") {
+				if (result.error instanceof SettingsReadLimitError) throw result.error;
+				throw new Error(`Settings config is invalid: ${configPath}: ${String(result.error)}`);
+			}
+			this.#configPath = configPath;
+			return result.settings;
 		}
 		this.#configPath = path.join(this.#agentDir, MAIN_CONFIG_FILENAMES[0]);
 		return null;
@@ -2001,6 +2361,7 @@ export class Settings {
 	}
 
 	#queueSave(): void {
+		if (this.#createOnlyInFlight) return;
 		if (!this.#persist || !this.#configPath) return;
 
 		// Debounce: wait 100ms for more changes
@@ -2028,6 +2389,10 @@ export class Settings {
 
 		const configPath = this.#configPath;
 		const modifiedPaths = [...this.#modified];
+		const modifiedPathValues = new Map<string, unknown>();
+		for (const modPath of modifiedPaths) {
+			modifiedPathValues.set(modPath, getByPath(this.#global, modPath.split(".")));
+		}
 		const modifiedModelRoles = [...this.#modifiedGlobalModelRoles];
 		const globalRolesAtStart = this.#modelRolesFromLayer(this.#global);
 		this.#modified.clear();
@@ -2035,18 +2400,16 @@ export class Settings {
 
 		try {
 			await this.#withYamlWriteLock(configPath, async writePath => {
-				// Re-read to preserve external changes. If this instance moved a
-				// malformed file aside, recover from its last in-memory state
-				// rather than recreating the config from only the pending path.
 				const loaded = await this.#loadYamlIfPresentForWriteLocked(configPath, writePath);
 				const current =
 					loaded ?? (this.#quarantinedYamlTargets.has(configPath) ? structuredClone(this.#global) : {});
-
-				// Apply only our modified whole-value paths
+				// Re-read to preserve external changes. If this instance moved a
+				// malformed file aside, recover from its last in-memory state
+				// rather than recreating the config from only the pending path.
+				// Apply only the whole-value paths captured when this save began.
 				for (const modPath of modifiedPaths) {
 					const segments = modPath.split(".");
-					const value = getByPath(this.#global, segments);
-					setByPath(current, segments, value);
+					setByPath(current, segments, modifiedPathValues.get(modPath));
 				}
 
 				// Merge only the model roles captured by this save. Then retain
@@ -2084,15 +2447,47 @@ export class Settings {
 					setByPath(current, ["modelRoles"], mergedRoles);
 				}
 
-				// Update our global with any external changes we preserved
-				this.#global = current;
-				await this.#writeYamlAtomically(writePath, this.#global);
+				const roleGenerationsBeforeWrite = new Map(this.#globalModelRoleGenerations);
+				// Publish the authoritative reread without replacing #global until
+				// the atomic write completes. Local whole-path edits arriving while
+				// this write is in flight must remain queued and win in memory.
+				await this.#writeYamlAtomically(writePath, current);
 				this.#quarantinedYamlTargets.delete(configPath);
+				const laterPathValues = new Map<string, unknown>();
+				for (const laterPath of this.#modified) {
+					laterPathValues.set(laterPath, getByPath(this.#global, laterPath.split(".")));
+				}
+				const rolesChangedDuringWrite = new Set<string>();
+				const roleCandidates = new Set([...this.#modifiedGlobalModelRoles, ...roleGenerationsBeforeWrite.keys()]);
+				for (const role of roleCandidates) {
+					if ((this.#globalModelRoleGenerations.get(role) ?? 0) !== (roleGenerationsBeforeWrite.get(role) ?? 0)) {
+						rolesChangedDuringWrite.add(role);
+					}
+				}
+				const rolesAfterWrite = this.#modelRolesFromLayer(this.#global);
+				for (const role of rolesChangedDuringWrite) {
+					if (Object.hasOwn(rolesAfterWrite, role)) {
+						setByPath(current, ["modelRoles", role], rolesAfterWrite[role]);
+					} else {
+						const currentRoles = getByPath(current, ["modelRoles"]);
+						if (isRecord(currentRoles)) delete currentRoles[role];
+					}
+				}
+				this.#global = current;
+				for (const [laterPath, value] of laterPathValues) {
+					setByPath(this.#global, laterPath.split("."), value);
+				}
 				// These pending roles were included in this write. Remove each
 				// only if no newer local change arrived while the write was in flight.
 				const globalRolesAfterWrite = this.#modelRolesFromLayer(this.#global);
 				for (const role of rolesToPreserve) {
-					if (latestGlobalRoles[role] === globalRolesAfterWrite[role]) {
+					const generationAfterWrite = this.#globalModelRoleGenerations.get(role) ?? 0;
+					const generationWritten = roleGenerationsBeforeWrite.get(role) ?? 0;
+					if (
+						!rolesChangedDuringWrite.has(role) &&
+						generationAfterWrite === generationWritten &&
+						latestGlobalRoles[role] === globalRolesAfterWrite[role]
+					) {
 						this.#modifiedGlobalModelRoles.delete(role);
 					}
 				}

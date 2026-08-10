@@ -76,6 +76,18 @@ function createFakeRedis(): FakeRedis {
 			const keyCount = Number(args[1] ?? "0");
 			const keys = args.slice(2, 2 + keyCount);
 			const argv = args.slice(2 + keyCount);
+			if (script.includes("OMP_WRITE_FULL_CREATE_ONLY")) {
+				checkFailure("set");
+				checkFailure("hset");
+				const [fileKey, metaKey, titleKey] = keys;
+				const [content, filePath, mtimeMs, hasTitle, title] = argv;
+				if (strings.has(fileKey)) return 0;
+				strings.set(fileKey, content);
+				getHash(metaKey).set(filePath, mtimeMs);
+				if (hasTitle === "1") getHash(titleKey).set(filePath, title);
+				else getHash(titleKey).delete(filePath);
+				return 1;
+			}
 			if (script.includes("OMP_WRITE_FULL")) {
 				checkFailure("set");
 				checkFailure("hset");
@@ -237,6 +249,25 @@ describe("RedisSessionStorage", () => {
 		expect(redis.hashes.get("omp:sessions:meta")?.get(sessionPath)).toBe(oldMtime);
 		expect(storage.statSync(sessionPath).size).toBe(4);
 		expect(redis.calls.some(call => call.method === "send" && call.args[0] === "EVAL")).toBe(true);
+	});
+
+	it("keeps one create-only winner across independently warmed Redis indexes", async () => {
+		const left = await RedisSessionStorage.create({ client: redis });
+		const right = await RedisSessionStorage.create({ client: redis });
+		const sessionPath = "/sessions/p/create-only.jsonl";
+
+		const results = await Promise.allSettled([
+			left.writeTextCreateOnly(sessionPath, "left"),
+			right.writeTextCreateOnly(sessionPath, "right"),
+		]);
+
+		expect(results.map(result => result.status).sort()).toEqual(["fulfilled", "rejected"]);
+		expect(results.find(result => result.status === "rejected")?.reason).toMatchObject({ code: "EEXIST" });
+		const stored = redis.strings.get(`omp:sessions:file:${sessionPath}`);
+		if (stored === undefined) throw new Error("create-only write did not persist a winner");
+		expect(["left", "right"]).toContain(stored);
+		expect(await left.readText(sessionPath)).toBe(stored);
+		expect(await right.readText(sessionPath)).toBe(stored);
 	});
 
 	it("create() warms the metadata index with STRLEN and never GETs full content", async () => {

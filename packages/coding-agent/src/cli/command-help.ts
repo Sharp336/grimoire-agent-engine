@@ -56,6 +56,8 @@ export const installHelp = {
 	description: "Install or link an extension package (alias of `plugin install`/`plugin link`)",
 } satisfies CommandMetadata;
 
+export const importHelp = { description: "Import state from another agent into OMP" } satisfies CommandMetadata;
+
 export const joinHelp = { description: "Join a shared collab session (same as /join)" } satisfies CommandMetadata;
 
 export const modelsHelp = { description: "List, search, and refresh available models" } satisfies CommandMetadata;

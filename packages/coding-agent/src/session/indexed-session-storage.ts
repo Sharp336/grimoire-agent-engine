@@ -1,4 +1,4 @@
-import { toError } from "@oh-my-pi/pi-utils";
+import { hasFsCode, toError } from "@oh-my-pi/pi-utils";
 import type {
 	SessionStorage,
 	SessionStorageStat,
@@ -28,6 +28,7 @@ export interface SessionStorageBackend {
 	readFull(path: string): Promise<string | null>;
 	readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
 	writeFull(path: string, content: string, mtimeMs: number, title?: SessionTitleUpdate): Promise<void>;
+	writeFullCreateOnly(path: string, content: string, mtimeMs: number, title?: SessionTitleUpdate): Promise<void>;
 	append(path: string, line: string, mtimeMs: number): Promise<void>;
 	updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void>;
 	truncate(path: string, mtimeMs: number): Promise<void>;
@@ -281,6 +282,26 @@ export class IndexedSessionStorage implements SessionStorage {
 			throw error;
 		}
 	}
+	async writeTextCreateOnly(path: string, content: string): Promise<void> {
+		await this.#awaitPath(path);
+		if (this.#index.has(path)) throw Object.assign(new Error(`File exists: ${path}`), { code: "EEXIST" });
+		const mtimeMs = this.#allocMtimeMs();
+		const title = titleUpdateFromSlot(parseTitleSlotFromContent(content));
+		this.#setIndex(path, byteLength(content), mtimeMs, title ?? null);
+		try {
+			await this.#enqueuePath(path, () => this.#backend.writeFullCreateOnly(path, content, mtimeMs, title), {
+				trackDrain: false,
+			});
+		} catch (error) {
+			if (hasFsCode(error, "EEXIST")) {
+				await this.#refreshIndexPath(path);
+			} else {
+				const current = this.#index.get(path);
+				if (current?.mtimeMs === mtimeMs) this.#index.delete(path);
+			}
+			throw toError(error);
+		}
+	}
 
 	async rename(src: string, dst: string): Promise<void> {
 		await this.#awaitPath(src);
@@ -413,6 +434,18 @@ export class IndexedSessionStorage implements SessionStorage {
 			titleUpdatedAt: title === undefined ? current?.titleUpdatedAt : (title?.updatedAt ?? undefined),
 		});
 		if (mtimeMs > this.#nextMtimeMs) this.#nextMtimeMs = mtimeMs;
+	}
+
+	async #refreshIndexPath(path: string): Promise<void> {
+		for (const row of await this.#backend.loadIndex()) {
+			if (row.path !== path) continue;
+			const title = row.titleUpdatedAt
+				? { title: row.title, source: row.titleSource, updatedAt: row.titleUpdatedAt }
+				: null;
+			this.#setIndex(row.path, row.size, row.mtimeMs, title);
+			return;
+		}
+		this.#index.delete(path);
 	}
 
 	#allocMtimeMs(): number {

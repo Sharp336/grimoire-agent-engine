@@ -939,6 +939,11 @@ class CommitThenThrowIndexedBackend implements SessionStorageBackend {
 		if (this.#writeCount === 3) this.newerWriteFinished.resolve();
 	}
 
+	async writeFullCreateOnly(path: string, content: string): Promise<void> {
+		if (this.content !== null) throw Object.assign(new Error(`File exists: ${path}`), { code: "EEXIST" });
+		this.content = content;
+	}
+
 	async append(_path: string, line: string): Promise<void> {
 		this.content = (this.content ?? "") + line;
 	}

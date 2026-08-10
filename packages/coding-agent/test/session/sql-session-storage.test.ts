@@ -36,6 +36,29 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 		await client.end();
 	});
 
+	it("keeps one create-only winner across independently warmed SQL indexes", async () => {
+		const client = new SQL("sqlite::memory:");
+		const left = await SqlSessionStorage.create({ client });
+		const right = await SqlSessionStorage.create({ client });
+		const sessionPath = "/sessions/p/create-only.jsonl";
+
+		const results = await Promise.allSettled([
+			left.writeTextCreateOnly(sessionPath, "left"),
+			right.writeTextCreateOnly(sessionPath, "right"),
+		]);
+
+		expect(results.map(result => result.status).sort()).toEqual(["fulfilled", "rejected"]);
+		expect(results.find(result => result.status === "rejected")?.reason).toMatchObject({ code: "EEXIST" });
+		const rows = (await client.unsafe(`SELECT content FROM omp_session_files WHERE path = ?`, [
+			sessionPath,
+		])) as Array<{ content: string }>;
+		expect(rows).toHaveLength(1);
+		expect(["left", "right"]).toContain(rows[0]?.content);
+		expect(await left.readText(sessionPath)).toBe(rows[0]?.content);
+		expect(await right.readText(sessionPath)).toBe(rows[0]?.content);
+		await client.end();
+	});
+
 	it("create() warms the metadata index without selecting full content", async () => {
 		const client = new SQL("sqlite::memory:");
 		await client.unsafe(

@@ -4,7 +4,8 @@
  * The public AuthCredentialStore interface remains in ../auth-storage so local
  * and remote stores share the same contract.
  */
-import { Database, type Statement } from "bun:sqlite";
+import { constants, Database, type Statement } from "bun:sqlite";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
@@ -89,6 +90,17 @@ const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
 const LEGACY_CODEX_BLOCK_PROVIDER_KEY = "openai-codex:oauth";
 const LEGACY_CODEX_BLOCK_SCOPE = "shared";
 const CODEX_METER_BLOCK_SCOPES = ["chat", "spark"] as const;
+const SQLITE_COMPANION_SUFFIXES = ["-wal", "-journal", "-shm"] as const;
+
+type ExistingSqliteIdentity = {
+	readonly path: string;
+	readonly dev: number;
+	readonly ino: number;
+};
+
+type OpenExistingHooks = {
+	readonly beforeOpen?: () => void | Promise<void>;
+};
 
 /**
  * SQLite's busy result code family — base `SQLITE_BUSY` plus the extended
@@ -421,15 +433,17 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#dataVersion: number;
 	#authRevision: number;
 	#localAuthRevision: number;
+	#existingIdentity?: ExistingSqliteIdentity;
 	#closed = false;
 
-	constructor(db: Database) {
+	constructor(db: Database, initializeSchema = true, existingIdentity?: ExistingSqliteIdentity) {
+		this.#existingIdentity = existingIdentity;
 		this.#db = db;
-		this.#initializeSchema();
+		if (initializeSchema) this.#initializeSchema();
+		else this.#createLocalAuthChangeTrackingObjects();
 		this.#dataVersion = this.#readDataVersion();
 		this.#authRevision = this.#readAuthRevision();
 		this.#localAuthRevision = this.#readLocalAuthRevision();
-
 		this.#listActiveStmt = this.#db.prepare(
 			"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE disabled_cause IS NULL ORDER BY id ASC",
 		);
@@ -599,6 +613,83 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			`Failed to open auth database at '${dbPath}' after ${maxAttempts} attempts: ${lastBusyError?.message}`,
 			{ cause: lastBusyError },
 		);
+	}
+	/**
+	 * Open a validated existing database without schema initialization,
+	 * migration, chmod, WAL changes, or cache hygiene.
+	 */
+	static async openExisting(
+		dbPath: string,
+		expectedIdentity?: { readonly dev: number; readonly ino: number },
+		hooks?: OpenExistingHooks,
+	): Promise<SqliteAuthCredentialStore> {
+		const before = await fs.lstat(dbPath);
+		const expected = expectedIdentity ?? { dev: before.dev, ino: before.ino };
+		if (!before.isFile() || before.dev !== expected.dev || before.ino !== expected.ino)
+			throw new AIError.ConfigurationError("Auth database identity changed before writable open");
+
+		await SqliteAuthCredentialStore.#assertNoUnsafeCompanions(dbPath);
+
+		const identity: ExistingSqliteIdentity = { path: dbPath, dev: expected.dev, ino: expected.ino };
+		let db: Database | undefined;
+		try {
+			await hooks?.beforeOpen?.();
+			db = new Database(dbPath, { readwrite: true, create: false });
+			SqliteAuthCredentialStore.#installBusyTimeout(db);
+			SqliteAuthCredentialStore.#assertExistingIdentity(db, identity);
+			await SqliteAuthCredentialStore.#assertNoUnsafeCompanions(dbPath);
+			return new SqliteAuthCredentialStore(db, false, identity);
+		} catch (error) {
+			try {
+				db?.close();
+			} catch {
+				// Preserve the open failure.
+			}
+			throw error;
+		}
+	}
+
+	static async #assertNoUnsafeCompanions(dbPath: string): Promise<void> {
+		for (const suffix of SQLITE_COMPANION_SUFFIXES) {
+			const companionPath = `${dbPath}${suffix}`;
+			let companion: Awaited<ReturnType<typeof fs.lstat>>;
+			try {
+				companion = await fs.lstat(companionPath);
+			} catch (error) {
+				const code =
+					typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
+						? error.code
+						: undefined;
+				if (code === "ENOENT") continue;
+				throw error;
+			}
+			const owned = typeof process.getuid !== "function" || companion.uid === process.getuid();
+			if (!companion.isFile() || companion.nlink !== 1 || !owned || (companion.mode & 0o077) !== 0) {
+				throw new AIError.ConfigurationError(`Auth database has an unsafe SQLite companion: '${companionPath}'`);
+			}
+		}
+	}
+	static #assertExistingIdentity(db: Database, expected: ExistingSqliteIdentity): void {
+		const moved = new Int32Array(1);
+		const result = db.fileControl(constants.SQLITE_FCNTL_HAS_MOVED, moved);
+		let current: ReturnType<typeof fsSync.lstatSync>;
+		try {
+			current = fsSync.lstatSync(expected.path);
+		} catch (error) {
+			throw new AIError.ConfigurationError("Auth database identity changed during writable open", { cause: error });
+		}
+		if (
+			result !== 0 ||
+			moved[0] !== 0 ||
+			!current.isFile() ||
+			current.dev !== expected.dev ||
+			current.ino !== expected.ino
+		)
+			throw new AIError.ConfigurationError("Auth database identity changed during writable open");
+	}
+	#assertPinnedExistingIdentity(): void {
+		const expected = this.#existingIdentity;
+		if (expected) SqliteAuthCredentialStore.#assertExistingIdentity(this.#db, expected);
 	}
 
 	static #ensureAuthCredentialRefreshLeasesTable(db: Database): void {
@@ -824,14 +915,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				revision INTEGER NOT NULL
 			);
 			INSERT OR IGNORE INTO auth_change_revision (id, revision) VALUES (1, 0);
-			CREATE TEMP TABLE IF NOT EXISTS auth_local_change_revision (
-				id INTEGER PRIMARY KEY CHECK (id = 1),
-				revision INTEGER NOT NULL
-			);
-			INSERT OR IGNORE INTO auth_local_change_revision (id, revision) VALUES (1, 0);
 		`);
 		for (const table of ["auth_credentials", "auth_credential_blocks"] as const) {
-			for (const event of ["INSERT", "UPDATE", "DELETE"] as const) {
+			for (const event of ["INSERT", "UPDATE", "DELETE"] as const)
 				this.#db.run(`
 					CREATE TRIGGER IF NOT EXISTS auth_change_revision_${table}_${event.toLowerCase()}
 					AFTER ${event} ON ${table}
@@ -839,6 +925,20 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 						UPDATE auth_change_revision SET revision = revision + 1 WHERE id = 1;
 					END;
 				`);
+		}
+		this.#createLocalAuthChangeTrackingObjects();
+	}
+
+	#createLocalAuthChangeTrackingObjects(): void {
+		this.#db.run(`
+			CREATE TEMP TABLE IF NOT EXISTS auth_local_change_revision (
+				id INTEGER PRIMARY KEY CHECK (id = 1),
+				revision INTEGER NOT NULL
+			);
+			INSERT OR IGNORE INTO auth_local_change_revision (id, revision) VALUES (1, 0);
+		`);
+		for (const table of ["auth_credentials", "auth_credential_blocks"] as const) {
+			for (const event of ["INSERT", "UPDATE", "DELETE"] as const)
 				this.#db.run(`
 					CREATE TEMP TRIGGER IF NOT EXISTS auth_local_change_revision_${table}_${event.toLowerCase()}
 					AFTER ${event} ON main.${table}
@@ -846,7 +946,6 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 						UPDATE auth_local_change_revision SET revision = revision + 1 WHERE id = 1;
 					END;
 				`);
-			}
 		}
 	}
 
@@ -1258,6 +1357,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	insertCredentialsIfProviderAbsent(provider: string, credentials: AuthCredential[]): StoredCredentialInsertResult {
+		this.#assertPinnedExistingIdentity();
 		const serialized = serializeCreateOnlyCredentials(provider, credentials);
 		const insertIfAbsent = this.#db.transaction(() => {
 			const existingRows = this.#listActiveByProviderStmt.all(provider) as AuthRow[];
@@ -1270,6 +1370,32 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			return { inserted: serialized.length > 0, rows: this.listAuthCredentials(provider) };
 		});
 		return insertIfAbsent.immediate();
+	}
+	insertCredentialsIfProvidersAbsent(batch: Array<{ provider: string; credentials: AuthCredential[] }>): {
+		inserted: string[];
+		skipped: string[];
+	} {
+		this.#assertPinnedExistingIdentity();
+		const serialized = batch.map(entry => ({
+			provider: entry.provider,
+			records: serializeCreateOnlyCredentials(entry.provider, entry.credentials),
+		}));
+		const insertBatch = this.#db.transaction(() => {
+			const inserted: string[] = [];
+			const skipped: string[] = [];
+			for (const entry of serialized) {
+				const existingRows = this.#listActiveByProviderStmt.all(entry.provider) as AuthRow[];
+				if (existingRows.length > 0 || entry.records.length === 0) {
+					skipped.push(entry.provider);
+					continue;
+				}
+				for (const record of entry.records)
+					this.#insertStmt.get(entry.provider, record.credentialType, record.data, record.identityKey);
+				inserted.push(entry.provider);
+			}
+			return { inserted, skipped };
+		});
+		return insertBatch.immediate();
 	}
 
 	async listDisabledCredentials(provider?: string): Promise<DisabledCredentialSummary[]> {
@@ -2068,40 +2194,44 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	close(): void {
 		if (this.#closed) return;
 		this.#closed = true;
-		this.#listActiveStmt.finalize();
-		this.#listActiveByProviderStmt.finalize();
-		this.#listDisabledStmt.finalize();
-		this.#listDisabledByProviderStmt.finalize();
-		this.#insertStmt.finalize();
-		this.#updateStmt.finalize();
-		this.#deleteStmt.finalize();
-		this.#deleteIfMatchesStmt.finalize();
-		this.#deleteByProviderStmt.finalize();
-		this.#hardDeleteStmt.finalize();
-		this.#getCacheStmt.finalize();
-		this.#getCacheIncludingExpiredStmt.finalize();
-		this.#upsertCacheStmt.finalize();
-		this.#deleteExpiredCacheStmt.finalize();
-		this.#getCredentialBlockStmt.finalize();
-		this.#listCredentialBlocksByCredentialStmt.finalize();
-		this.#upsertCredentialBlockStmt.finalize();
-		this.#deleteCredentialBlocksStmt.finalize();
-		this.#deleteCredentialBlockStmt.finalize();
-		this.#deleteExpiredCredentialBlocksStmt.finalize();
-		this.#insertUsageHistoryStmt.finalize();
-		this.#lastUsageHistoryStmt.finalize();
-		this.#listUsageHistoryStmt.finalize();
-		this.#updateUsageHistoryStmt.finalize();
-		this.#insertUsageCostStmt.finalize();
-		this.#listUsageCostsStmt.finalize();
-		this.#updateIfMatchesStmt.finalize();
-		this.#updateIfMatchesWithLeaseStmt.finalize();
-		this.#deleteIfMatchesWithLeaseStmt.finalize();
-		this.#deleteCachePrefixStmt.finalize();
-		this.#acquireCredentialRefreshLeaseStmt.finalize();
-		this.#getCredentialRefreshLeaseStmt.finalize();
-		this.#renewCredentialRefreshLeaseStmt.finalize();
-		this.#releaseCredentialRefreshLeaseStmt.finalize();
-		this.#db.close();
+		try {
+			this.#listActiveStmt.finalize();
+			this.#listActiveByProviderStmt.finalize();
+			this.#listDisabledStmt.finalize();
+			this.#listDisabledByProviderStmt.finalize();
+			this.#insertStmt.finalize();
+			this.#updateStmt.finalize();
+			this.#deleteStmt.finalize();
+			this.#deleteIfMatchesStmt.finalize();
+			this.#deleteByProviderStmt.finalize();
+			this.#hardDeleteStmt.finalize();
+			this.#getCacheStmt.finalize();
+			this.#getCacheIncludingExpiredStmt.finalize();
+			this.#upsertCacheStmt.finalize();
+			this.#deleteExpiredCacheStmt.finalize();
+			this.#getCredentialBlockStmt.finalize();
+			this.#listCredentialBlocksByCredentialStmt.finalize();
+			this.#upsertCredentialBlockStmt.finalize();
+			this.#deleteCredentialBlocksStmt.finalize();
+			this.#deleteCredentialBlockStmt.finalize();
+			this.#deleteExpiredCredentialBlocksStmt.finalize();
+			this.#insertUsageHistoryStmt.finalize();
+			this.#lastUsageHistoryStmt.finalize();
+			this.#listUsageHistoryStmt.finalize();
+			this.#updateUsageHistoryStmt.finalize();
+			this.#insertUsageCostStmt.finalize();
+			this.#listUsageCostsStmt.finalize();
+			this.#updateIfMatchesStmt.finalize();
+			this.#updateIfMatchesWithLeaseStmt.finalize();
+			this.#deleteIfMatchesWithLeaseStmt.finalize();
+			this.#deleteCachePrefixStmt.finalize();
+			this.#acquireCredentialRefreshLeaseStmt.finalize();
+			this.#getCredentialRefreshLeaseStmt.finalize();
+			this.#renewCredentialRefreshLeaseStmt.finalize();
+			this.#releaseCredentialRefreshLeaseStmt.finalize();
+		} finally {
+			this.#db.close();
+			this.#existingIdentity = undefined;
+		}
 	}
 }

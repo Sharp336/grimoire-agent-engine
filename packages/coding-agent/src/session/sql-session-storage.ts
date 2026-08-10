@@ -57,6 +57,8 @@ export interface SqlSessionStorageOptions {
 interface DialectQueries {
 	createTable: string;
 	/** Add title metadata columns to existing tables created before title fields existed. */
+	/** Insert only when `path` is absent; duplicate keys must surface as EEXIST. */
+	insertCreateOnly: string;
 	addTitleColumns: readonly string[];
 	/** Insert or replace the full content for `path`. Used for `writeText`/`flags="w"` truncate. */
 	upsertReplace: string;
@@ -137,6 +139,9 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 				`ALTER TABLE ${table} ADD COLUMN title_source VARCHAR(16) NULL`,
 				`ALTER TABLE ${table} ADD COLUMN title_updated_at VARCHAR(64) NULL`,
 			],
+			insertCreateOnly:
+				`INSERT INTO ${table} (path, content, mtime_ms, title, title_source, title_updated_at) ` +
+				`VALUES (?, ?, ?, ?, ?, ?)`,
 			upsertReplace:
 				`INSERT INTO ${table} (path, content, mtime_ms, title, title_source, title_updated_at) VALUES (?, ?, ?, ?, ?, ?) ` +
 				`ON DUPLICATE KEY UPDATE content = VALUES(content), mtime_ms = VALUES(mtime_ms), title = VALUES(title), title_source = VALUES(title_source), title_updated_at = VALUES(title_updated_at)`,
@@ -184,6 +189,9 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 			`ALTER TABLE ${table} ADD COLUMN title_source TEXT`,
 			`ALTER TABLE ${table} ADD COLUMN title_updated_at TEXT`,
 		],
+		insertCreateOnly:
+			`INSERT INTO ${table} (path, content, mtime_ms, title, title_source, title_updated_at) ` +
+			`VALUES (${placeholder(1)}, ${placeholder(2)}, ${placeholder(3)}, ${placeholder(4)}, ${placeholder(5)}, ${placeholder(6)})`,
 		upsertReplace:
 			`INSERT INTO ${table} (path, content, mtime_ms, title, title_source, title_updated_at) ` +
 			`VALUES (${placeholder(1)}, ${placeholder(2)}, ${placeholder(3)}, ${placeholder(4)}, ${placeholder(5)}, ${placeholder(6)}) ` +
@@ -214,6 +222,29 @@ function isDuplicateColumnError(error: unknown): boolean {
 	return message.includes("duplicate column") || message.includes("already exists");
 }
 
+function eexist(p: string): NodeJS.ErrnoException {
+	const error = new Error(`File exists: ${p}`) as NodeJS.ErrnoException;
+	error.code = "EEXIST";
+	error.path = p;
+	error.syscall = "open";
+	return error;
+}
+
+function isDuplicateKeyError(error: unknown): boolean {
+	if (typeof error === "object" && error !== null) {
+		const record = error as Record<string, unknown>;
+		if (record.code === "23505" || record.code === "ER_DUP_ENTRY" || record.errno === 1062) return true;
+		if (
+			typeof record.code === "string" &&
+			(record.code === "SQLITE_CONSTRAINT" ||
+				record.code === "SQLITE_CONSTRAINT_PRIMARYKEY" ||
+				record.code === "SQLITE_CONSTRAINT_UNIQUE")
+		)
+			return true;
+	}
+	const message = error instanceof Error ? error.message : String(error);
+	return /duplicate key|duplicate entry|unique constraint|primary key constraint/i.test(message);
+}
 function decodeSqlBytes(value: unknown): string {
 	if (value === null || value === undefined) return "";
 	if (typeof value === "string") return value;
@@ -332,6 +363,26 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		return [decodeSqlBytes(row.head), decodeSqlBytes(row.tail)];
 	}
 
+	async writeFullCreateOnly(
+		path: string,
+		content: string,
+		mtimeMs: number,
+		title?: SessionTitleUpdate,
+	): Promise<void> {
+		try {
+			await this.#client.unsafe(this.#q.insertCreateOnly, [
+				path,
+				content,
+				mtimeMs,
+				title?.title ?? null,
+				title?.source ?? null,
+				title?.updatedAt ?? null,
+			]);
+		} catch (error) {
+			if (isDuplicateKeyError(error)) throw eexist(path);
+			throw error;
+		}
+	}
 	async writeFull(path: string, content: string, mtimeMs: number, title?: SessionTitleUpdate): Promise<void> {
 		await this.#client.unsafe(this.#q.upsertReplace, [
 			path,

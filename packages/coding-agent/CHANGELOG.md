@@ -5,6 +5,7 @@
 ### Added
 
 - Added an experimental Prime-compatible eval profile extension that keeps OMP as the session and worker authority.
+- Added `omp import prime`, a dry-run-first, create-only importer for Prime settings, models, literal API keys, skills, sessions, and artifacts with audited losses, OAuth re-login guidance, partial-apply reporting, and a manifest for importer-created state.
 
 ## [17.2.11] - 2026-08-07
 

@@ -28,6 +28,7 @@ function discovery(files: readonly PrimeSourceFile[]): PrimeImportSourceDiscover
 			maxTotalBytes: 1_000_000,
 			maxEntries: 100,
 			files: files.map(({ contentBase64: _contentBase64, ...metadata }) => metadata),
+			treeEntries: [],
 		},
 		inventory: { records: files, files, excluded: [] },
 		losses: [],
@@ -194,6 +195,29 @@ describe("parsePrimeConfig", () => {
 		);
 		expect(result.losses).toContainEqual(
 			expect.objectContaining({ code: "config-unknown-field", path: "skills.unexpected" }),
+		);
+	});
+	it("bounds structurally deep recognized settings values without dropping valid siblings", () => {
+		const depth = 100_000;
+		const nestedEnabledModels = `${"[".repeat(depth)}"model"${"]".repeat(depth)}`;
+		const raw = `{"enabledModels":${nestedEnabledModels},"steeringMode":"all"}`;
+		expect(Buffer.byteLength(raw)).toBeLessThan(1024 * 1024);
+
+		let result: PrimeConfigParserResult | undefined;
+		expect(() => {
+			result = parse([settings("global/settings.json", raw)]);
+		}).not.toThrow();
+		expect(result).toBeDefined();
+		if (result === undefined) return;
+
+		expect(result.settings[0]?.values).toEqual({ steeringMode: "all" });
+		expect(result.losses).toContainEqual(
+			expect.objectContaining({
+				code: "config-invalid-value",
+				domain: "settings",
+				sourceRef: "global/settings.json",
+				path: "enabledModels",
+			}),
 		);
 	});
 
@@ -453,6 +477,116 @@ describe("parsePrimeConfig", () => {
 		expect(credentials.duplicate?.classification).toBe("literal_api_key");
 		expect(result.secretTable.get(credentials.duplicate?.secretOperationId ?? "")).toBe("sk-new");
 	});
+	it("selects project settings API keys before global settings keys", () => {
+		const result = parse([
+			settings("global/settings.json", JSON.stringify({ apiKeys: { shared: "global-key" } })),
+			settings(
+				"project/settings.json",
+				JSON.stringify({ apiKeys: { projectOnly: "project-key", shared: "project-key" } }),
+			),
+		]);
+		const credentials = Object.fromEntries(result.credentials.map(item => [item.provider, item]));
+		expect(credentials.projectOnly?.classification).toBe("literal_api_key");
+		expect(credentials.shared?.classification).toBe("literal_api_key");
+		expect(result.secretTable.get(credentials.projectOnly?.secretOperationId ?? "")).toBe("project-key");
+		expect(result.secretTable.get(credentials.shared?.secretOperationId ?? "")).toBe("project-key");
+	});
+
+	it("selects auth credentials before project settings API keys", () => {
+		const result = parse([
+			auth("global/auth.json", JSON.stringify({ provider: { type: "api_key", key: "auth-key" } })),
+			settings("project/settings.json", JSON.stringify({ apiKeys: { provider: "project-key" } })),
+			settings("global/settings.json", JSON.stringify({ apiKeys: { provider: "global-key" } })),
+		]);
+		const credential = result.credentials.find(item => item.provider === "provider");
+		expect(credential?.classification).toBe("literal_api_key");
+		expect(result.secretTable.get(credential?.secretOperationId ?? "")).toBe("auth-key");
+	});
+
+	it("rejects invalid credential providers without creating operations or secrets", () => {
+		const invalidProviders = ["", " \t", "bad\u0000provider", "bad\nprovider"];
+		const result = parse([
+			settings(
+				"project/settings.json",
+				JSON.stringify({
+					apiKeys: Object.fromEntries(invalidProviders.map((provider, index) => [provider, `secret-${index}`])),
+				}),
+			),
+		]);
+		expect(result.credentials).toEqual([]);
+		expect(result.secretTable.toJSON()).toBeUndefined();
+		expect(result.losses.filter(item => item.code === "credentials-unknown")).toHaveLength(invalidProviders.length);
+		expect(
+			result.losses
+				.filter(item => item.code === "credentials-unknown")
+				.every(item => item.sourceRef === "project/settings.json"),
+		).toBe(true);
+		const serialized = JSON.stringify(result);
+		for (const secret of invalidProviders.map((_, index) => `secret-${index}`))
+			expect(serialized).not.toContain(secret);
+	});
+
+	it("rejects ambiguous model providers before model or credential normalization", () => {
+		const result = parse([
+			models(
+				JSON.stringify({
+					providers: {
+						"ambiguous:definition:provider": {
+							apiKey: "model-secret",
+							models: [{ id: "m", headers: { "X-Key": "header-secret" } }],
+						},
+						"ambiguous:override:provider": {
+							modelOverrides: { m: { headers: { "X-Key": "override-secret" } } },
+						},
+					},
+				}),
+			),
+		]);
+		expect(result.models).toEqual([]);
+		expect(result.credentials).toEqual([]);
+		expect(result.losses.filter(item => item.code === "models-invalid-value")).toHaveLength(2);
+		expect(
+			result.losses
+				.filter(item => item.code === "models-invalid-value")
+				.every(item => item.sourceRef === "global/models.json"),
+		).toBe(true);
+		const serialized = JSON.stringify(result);
+		for (const secret of ["model-secret", "header-secret", "override-secret"])
+			expect(serialized).not.toContain(secret);
+	});
+	it("rejects prototype provider and override keys before model normalization", () => {
+		const providers = parse([
+			models(
+				'{"providers":{"__proto__":{"apiKey":"pollute","models":[{"id":"proto"}]},"prototype":{"models":[{"id":"prototype"}]},"constructor":{"models":[{"id":"constructor"}]}}}',
+			),
+		]);
+		expect(providers.models).toEqual([]);
+		expect(providers.credentials).toEqual([]);
+		expect(providers.losses.filter(item => item.code === "models-invalid-value")).toHaveLength(3);
+		const overrides = parse([
+			models(
+				'{"providers":{"safe":{"modelOverrides":{"__proto__":{"headers":{"X-Key":"pollute"}},"prototype":{"name":"prototype"},"constructor":{"name":"constructor"}}}}}',
+			),
+		]);
+		expect(overrides.models).toEqual([]);
+		expect(overrides.losses.filter(item => item.code === "models-invalid-value")).toHaveLength(3);
+		expect(Object.hasOwn(Object.prototype, "pollute")).toBe(false);
+	});
+
+	it("keeps nested prototype keys out of Object.prototype while normalizing models", () => {
+		const result = parse([
+			models(
+				'{"providers":{"safe":{"headers":{"__proto__":"header-secret"},"compat":{"openRouterRouting":{"__proto__":["polluted"],"only":["safe"]}},"models":[{"id":"model"}]}}}',
+			),
+		]);
+		expect(result.models).toHaveLength(1);
+		expect(Object.hasOwn(Object.prototype, "polluted")).toBe(false);
+		expect(Object.hasOwn(result.models[0]?.providerConfig?.headers ?? {}, "__proto__")).toBe(true);
+		expect(result.models[0]?.providerConfig?.compat).toEqual({
+			openRouterRouting: { only: ["safe"] },
+		});
+	});
+
 	it("selects auth credentials before legacy settings and models fallback", () => {
 		const result = parse([
 			auth("global/auth.json", JSON.stringify({ provider: { type: "api_key", key: "auth-key" } })),

@@ -17,6 +17,7 @@ import {
 	type PrimeSourceFile,
 	type PrimeSourceRecord,
 	type PrimeSourceSnapshot,
+	type PrimeSourceSnapshotTreeEntry,
 	type PrimeSourceSymlink,
 } from "./types";
 
@@ -125,6 +126,8 @@ interface ScanContext {
 	readonly logicalRootCanonical?: string;
 	readonly maxFileBytes: number;
 	readonly budget: BudgetState;
+	readonly scannedDirectories: Set<string>;
+	readonly chargedFiles: Set<string>;
 	readonly records: PrimeSourceRecord[];
 	readonly excluded: PrimeSourceExcludedEntry[];
 	readonly losses: PrimeImportLoss[];
@@ -188,6 +191,8 @@ async function readBoundedDirectory(
 		);
 		return undefined;
 	}
+	if (context.scannedDirectories.has(canonicalBefore)) return [];
+	context.scannedDirectories.add(canonicalBefore);
 	const entries: string[] = [];
 	let overflow = false;
 	const directory = await fs.opendir(root);
@@ -343,6 +348,8 @@ async function readRegularFile(filePath: string, sourceRef: string, context: Sca
 	if (context.logicalRootCanonical !== undefined && !isContained(canonicalPath, [context.logicalRootCanonical])) {
 		return { losses: [loss("source-path-escape", context.domain, sourceRef, canonicalPath)] };
 	}
+	if (context.chargedFiles.has(canonicalPath)) return { losses: [] };
+	context.chargedFiles.add(canonicalPath);
 	let handle: FileHandle | undefined;
 	try {
 		handle = await fs.open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -553,7 +560,8 @@ function firstJsonLine(contentBase64: string): Record<string, unknown> | undefin
 	if (!line.trim()) return undefined;
 	try {
 		const value: unknown = JSON.parse(line);
-		if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+		if (value === null || typeof value !== "object" || Array.isArray(value) || !Object.hasOwn(value, "type"))
+			return undefined;
 		return value as Record<string, unknown>;
 	} catch {
 		return undefined;
@@ -710,15 +718,81 @@ function metadata(file: PrimeSourceFile): Omit<PrimeSourceFile, "contentBase64">
 	return value;
 }
 
-function snapshotId(files: readonly Omit<PrimeSourceFile, "contentBase64">[]): string {
+function treeEntry(record: Exclude<PrimeSourceRecord, PrimeSourceFile>): PrimeSourceSnapshotTreeEntry {
+	if (record.kind === "directory") {
+		return {
+			kind: record.kind,
+			domain: record.domain,
+			sourceRef: record.sourceRef,
+			canonicalPath: record.canonicalPath,
+			mode: record.mode,
+		};
+	}
+	return {
+		kind: record.kind,
+		domain: record.domain,
+		sourceRef: record.sourceRef,
+		canonicalPath: record.canonicalPath,
+		mode: record.mode,
+		target: record.target,
+		external: record.external,
+	};
+}
+
+function snapshotId(
+	identity: {
+		readonly sourceRoot: string;
+		readonly cwd: string;
+		readonly sessionRoot: string;
+		readonly primeCliConfigPath?: string;
+	},
+	files: readonly Omit<PrimeSourceFile, "contentBase64">[],
+	treeEntries: readonly PrimeSourceSnapshotTreeEntry[],
+): string {
 	const hasher = createHash("sha256");
+	hasher.update(
+		JSON.stringify([identity.sourceRoot, identity.cwd, identity.sessionRoot, identity.primeCliConfigPath ?? null]),
+	);
+	hasher.update("\n");
 	for (const file of [...files].sort((a, b) => compareStrings(a.sourceRef, b.sourceRef))) {
 		hasher.update(
 			JSON.stringify([file.sourceRef, file.domain, file.kind, file.size, file.mode, file.mtimeMs, file.sha256]),
 		);
 		hasher.update("\n");
 	}
+	for (const entry of [...treeEntries].sort((a, b) => compareStrings(a.sourceRef, b.sourceRef))) {
+		hasher.update(
+			JSON.stringify([
+				entry.sourceRef,
+				entry.domain,
+				entry.kind,
+				entry.canonicalPath,
+				entry.mode,
+				entry.kind === "symlink" ? (entry.target ?? null) : null,
+				entry.kind === "symlink" ? entry.external : null,
+			]),
+		);
+		hasher.update("\n");
+	}
 	return hasher.digest("hex");
+}
+
+function deduplicateRecords(records: readonly PrimeSourceRecord[]): PrimeSourceRecord[] {
+	const seenFiles = new Map<PrimeImportDomain, Set<string>>();
+	const deduplicated: PrimeSourceRecord[] = [];
+	for (const record of records) {
+		if (record.kind === "file") {
+			let paths = seenFiles.get(record.domain);
+			if (paths === undefined) {
+				paths = new Set<string>();
+				seenFiles.set(record.domain, paths);
+			}
+			if (paths.has(record.canonicalPath)) continue;
+			paths.add(record.canonicalPath);
+		}
+		deduplicated.push(record);
+	}
+	return deduplicated;
 }
 
 function sortRecords(records: readonly PrimeSourceRecord[]): PrimeSourceRecord[] {
@@ -755,6 +829,8 @@ export async function discoverPrimeSource(options: PrimeImportSourceOptions): Pr
 	);
 	const maxEntries = validateBudget("maxEntries", options.maxEntries, DEFAULT_MAX_ENTRIES, HARD_MAX_ENTRIES);
 	const budget: BudgetState = { maxTotalBytes, maxEntries, entries: 0, totalBytes: 0, exhausted: false };
+	const scannedDirectories = new Set<string>();
+	const chargedFiles = new Set<string>();
 	const sessionRoot = path.resolve(options.sessionRoot ?? path.join(sourceRoot, "sessions"));
 	const records: PrimeSourceRecord[] = [];
 	const excluded: PrimeSourceExcludedEntry[] = [];
@@ -765,7 +841,13 @@ export async function discoverPrimeSource(options: PrimeImportSourceOptions): Pr
 	const sourceRootCanonical = sourceRootStat?.isDirectory() ? await safeRealpath(sourceRoot) : undefined;
 	const cwdCanonical = await safeRealpath(cwd);
 	const sessionRootCanonical = sessionRootStat?.isDirectory() ? await safeRealpath(sessionRoot) : undefined;
+	const sessionRootOverlapsSourceRoot =
+		sessionRootExplicit &&
+		sourceRootCanonical !== undefined &&
+		sessionRootCanonical !== undefined &&
+		isContained(sourceRootCanonical, [sessionRootCanonical]);
 	const cliConfigPath = options.primeCliConfigPath ? path.resolve(options.primeCliConfigPath) : undefined;
+	const cliConfigCanonical = cliConfigPath ? await safeRealpath(cliConfigPath) : undefined;
 	const cliDirectoryCanonical = cliConfigPath ? await safeRealpath(path.dirname(cliConfigPath)) : undefined;
 	const allowedRoots = [sourceRootCanonical, cwdCanonical, sessionRootCanonical, cliDirectoryCanonical].filter(
 		(value): value is string => value !== undefined,
@@ -797,6 +879,8 @@ export async function discoverPrimeSource(options: PrimeImportSourceOptions): Pr
 		allowedRoots,
 		logicalRoot,
 		logicalRootCanonical,
+		scannedDirectories,
+		chargedFiles,
 		maxFileBytes,
 		budget,
 		records,
@@ -876,7 +960,7 @@ export async function discoverPrimeSource(options: PrimeImportSourceOptions): Pr
 			const currentEntries = await scanSessionRoot(sessionRoot, "sessions/current", sessionContext);
 			if (currentEntries) await scanNestedSessions(sessionRoot, currentEntries, sessionContext);
 		}
-		if (sourceRootStat?.isDirectory() && !budget.exhausted) {
+		if (sourceRootStat?.isDirectory() && !budget.exhausted && !sessionRootOverlapsSourceRoot) {
 			await scanSessionRoot(
 				sourceRoot,
 				"legacy-root",
@@ -930,19 +1014,36 @@ export async function discoverPrimeSource(options: PrimeImportSourceOptions): Pr
 			);
 		}
 	}
-	const sortedRecords = sortRecords(records);
+	const sortedRecords = sortRecords(deduplicateRecords(records));
 	const files = sortedRecords.filter((record): record is PrimeSourceFile => record.kind === "file");
 	const serializableFiles = files.map(metadata);
+	const treeEntries = sortedRecords
+		.filter((record): record is Exclude<PrimeSourceRecord, PrimeSourceFile> => record.kind !== "file")
+		.map(treeEntry);
+	const snapshotSourceRoot = sourceRootCanonical ?? sourceRoot;
+	const snapshotCwd = cwdCanonical ?? cwd;
+	const snapshotSessionRoot = sessionRootCanonical ?? sessionRoot;
+	const snapshotCliConfigPath = cliConfigPath ? (cliConfigCanonical ?? cliConfigPath) : undefined;
 	const snapshot: PrimeSourceSnapshot = {
 		schemaVersion: PRIME_IMPORT_SCHEMA_VERSION,
-		snapshotId: snapshotId(serializableFiles),
-		sourceRoot: sourceRootCanonical ?? sourceRoot,
-		cwd: cwdCanonical ?? cwd,
-		sessionRoot: sessionRootCanonical ?? sessionRoot,
+		snapshotId: snapshotId(
+			{
+				sourceRoot: snapshotSourceRoot,
+				cwd: snapshotCwd,
+				sessionRoot: snapshotSessionRoot,
+				primeCliConfigPath: snapshotCliConfigPath,
+			},
+			serializableFiles,
+			treeEntries,
+		),
+		sourceRoot: snapshotSourceRoot,
+		cwd: snapshotCwd,
+		sessionRoot: snapshotSessionRoot,
 		maxFileBytes,
 		maxTotalBytes,
 		maxEntries,
 		files: serializableFiles,
+		treeEntries,
 		primeCliConfigPath: cliConfigPath,
 	};
 	const inventory: PrimeImportSourceInventory = {
@@ -965,7 +1066,9 @@ export async function revalidatePrimeSource(snapshot: PrimeSourceSnapshot): Prom
 	});
 	const losses: PrimeImportLoss[] = [];
 	const expectedByRef = new Map(snapshot.files.map(file => [file.sourceRef, file]));
+	const expectedTreeByRef = new Map(snapshot.treeEntries.map(entry => [entry.sourceRef, entry]));
 	const currentFilesByRef = new Map(rediscovered.snapshot.files.map(file => [file.sourceRef, file]));
+	const currentTreeByRef = new Map(rediscovered.snapshot.treeEntries.map(entry => [entry.sourceRef, entry]));
 	const currentRecordsByRef = new Map(rediscovered.inventory.records.map(record => [record.sourceRef, record]));
 	const rediscoveryLossesByRef = new Map<string, PrimeImportLoss[]>();
 	for (const item of rediscovered.losses) {
@@ -974,7 +1077,12 @@ export async function revalidatePrimeSource(snapshot: PrimeSourceSnapshot): Prom
 		else rediscoveryLossesByRef.set(item.sourceRef, [item]);
 	}
 	for (const current of rediscovered.snapshot.files) {
-		if (!expectedByRef.has(current.sourceRef)) {
+		if (!expectedByRef.has(current.sourceRef) && !expectedTreeByRef.has(current.sourceRef)) {
+			losses.push(loss("source-changed", current.domain, current.sourceRef, current.canonicalPath));
+		}
+	}
+	for (const current of rediscovered.snapshot.treeEntries) {
+		if (!expectedByRef.has(current.sourceRef) && !expectedTreeByRef.has(current.sourceRef)) {
 			losses.push(loss("source-changed", current.domain, current.sourceRef, current.canonicalPath));
 		}
 	}
@@ -1006,6 +1114,34 @@ export async function revalidatePrimeSource(snapshot: PrimeSourceSnapshot): Prom
 			) {
 				losses.push(loss("source-symlink", expected.domain, expected.sourceRef, currentRecord.canonicalPath));
 			}
+		} else if (currentRecord) {
+			losses.push(loss("source-type-changed", expected.domain, expected.sourceRef, currentRecord.canonicalPath));
+		} else if (rediscoveryLosses.length === 0) {
+			losses.push(loss("source-missing", expected.domain, expected.sourceRef));
+		}
+	}
+	for (const expected of snapshot.treeEntries) {
+		const current = currentTreeByRef.get(expected.sourceRef);
+		if (current) {
+			const metadataChanged =
+				current.domain !== expected.domain ||
+				current.kind !== expected.kind ||
+				current.canonicalPath !== expected.canonicalPath ||
+				current.mode !== expected.mode ||
+				(current.kind === "symlink" &&
+					expected.kind === "symlink" &&
+					(current.target !== expected.target || current.external !== expected.external));
+			if (metadataChanged) {
+				losses.push(loss("source-changed", expected.domain, expected.sourceRef, current.canonicalPath));
+			}
+			continue;
+		}
+		const currentFile = currentFilesByRef.get(expected.sourceRef);
+		const currentRecord = currentRecordsByRef.get(expected.sourceRef);
+		const rediscoveryLosses = rediscoveryLossesByRef.get(expected.sourceRef) ?? [];
+		losses.push(...rediscoveryLosses);
+		if (currentFile) {
+			losses.push(loss("source-type-changed", expected.domain, expected.sourceRef, currentFile.canonicalPath));
 		} else if (currentRecord) {
 			losses.push(loss("source-type-changed", expected.domain, expected.sourceRef, currentRecord.canonicalPath));
 		} else if (rediscoveryLosses.length === 0) {

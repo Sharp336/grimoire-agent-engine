@@ -847,6 +847,26 @@ export class SessionManager {
 			{ epoch: startEpoch },
 		);
 	}
+	async #rewriteCreateOnly(): Promise<void> {
+		if (!this.#persist || !this.#sessionFile) return;
+		const epoch = this.#diskEpoch;
+		await this.#scheduleDiskWork(
+			async () => {
+				await this.#closeWriterHandle();
+				const sessionFile = this.#sessionFile;
+				if (!sessionFile || this.#diskEpoch !== epoch)
+					throw Object.assign(new Error("Session publication superseded"), { code: "EAGAIN" });
+				const createOnly = this.#storage.writeTextCreateOnly;
+				if (!createOnly) throw new Error("Session storage does not support create-only publication");
+				await createOnly.call(this.#storage, sessionFile, this.#fileBody());
+				this.#fileIsCurrent = true;
+				this.#materializeBreadcrumb();
+				this.#rewriteRequired = false;
+				this.#hasTitleSlot = true;
+			},
+			{ epoch },
+		);
+	}
 
 	/**
 	 * Shared fenced atomic-rewrite loop used by `#rewriteAtomically` and the
@@ -1540,6 +1560,30 @@ export class SessionManager {
 		return manager;
 	}
 
+	/** Persist this session under a fresh identity without replacing a destination path. */
+	async persistCopyCreateOnly(
+		options?: { sessionDir?: string; suppressBreadcrumb?: boolean; cwd?: string },
+		storage: SessionStorage = new FileSessionStorage(),
+	): Promise<SessionManager> {
+		const sessionDir =
+			options?.sessionDir ?? SessionManager.getDefaultSessionDir(options?.cwd ?? this.#cwd, undefined, storage);
+		const manager = new SessionManager(options?.cwd ?? this.#cwd, sessionDir, true, storage);
+		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
+		manager.#resetToNewSession();
+		manager.#sessionName = this.#sessionName;
+		manager.#titleSource = this.#titleSource;
+		manager.#titleUpdatedAt = this.#titleUpdatedAt;
+		manager.#header.title = this.#sessionName;
+		manager.#header.titleSource = this.#titleSource;
+		manager.#header.additionalDirectories =
+			this.#additionalDirectories.length > 0 ? [...this.#additionalDirectories] : undefined;
+		manager.#additionalDirectories = [...this.#additionalDirectories];
+		manager.#entries = structuredClone(this.#entries);
+		manager.#index.rebuild(manager.#entries);
+		manager.#forceFileCreation = true;
+		await manager.#rewriteCreateOnly();
+		return manager;
+	}
 	/**
 	 * Stage a synchronous group of entry appends and publish the resulting full
 	 * journal with one atomic replace. A failed publish removes only the staged
@@ -1554,6 +1598,7 @@ export class SessionManager {
 
 	async #appendEntriesAtomicallyLocked<T>(append: () => T): Promise<T> {
 		if (!this.#persist || !this.#sessionFile) return append();
+
 		if (this.#atomicEntryBatch) throw new Error("Atomic persistence lock ownership was violated.");
 		try {
 			await this.ensureOnDisk();

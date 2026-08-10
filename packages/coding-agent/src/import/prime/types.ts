@@ -24,6 +24,10 @@ export type PrimeImportLossCode =
 	| "source-type-changed"
 	| "source-changed"
 	| "source-excluded"
+	| "destination-invalid"
+	| "destination-drift"
+	| "destination-apply-failed"
+	| "destination-cleanup-failed"
 	| "config-malformed"
 	| "config-invalid-value"
 	| "config-unknown-field"
@@ -88,6 +92,11 @@ export interface PrimeSourceSymlink extends PrimeSourceMetadata {
 }
 
 export type PrimeSourceRecord = PrimeSourceFile | PrimeSourceDirectory | PrimeSourceSymlink;
+
+export type PrimeSourceSnapshotTreeEntry =
+	| Pick<PrimeSourceDirectory, "kind" | "domain" | "canonicalPath" | "sourceRef" | "mode">
+	| Pick<PrimeSourceSymlink, "kind" | "domain" | "canonicalPath" | "sourceRef" | "mode" | "target" | "external">;
+
 export interface PrimeSourceSnapshot {
 	readonly schemaVersion: typeof PRIME_IMPORT_SCHEMA_VERSION;
 	readonly snapshotId: string;
@@ -99,6 +108,7 @@ export interface PrimeSourceSnapshot {
 	readonly maxEntries: number;
 	readonly primeCliConfigPath?: string;
 	readonly files: readonly Omit<PrimeSourceFile, "contentBase64">[];
+	readonly treeEntries: readonly PrimeSourceSnapshotTreeEntry[];
 }
 
 export interface PrimeImportSourceOptions {
@@ -393,6 +403,7 @@ export interface PrimeNormalizedSessionHeader {
 	readonly id: string;
 	readonly timestamp: string;
 	readonly cwd: string;
+	readonly title?: string;
 	readonly parentSession?: string;
 	readonly rlmDepth?: number;
 	readonly lineage?: Readonly<{
@@ -479,6 +490,8 @@ export interface PrimeNormalizedSession {
 	readonly sourceSha256: string;
 	readonly header: PrimeNormalizedSessionHeader;
 	readonly entries: readonly PrimeNormalizedSessionEntry[];
+	/** Fatal parser losses prevent this session from being imported. */
+	readonly fatalLossCodes?: readonly PrimeImportLossCode[];
 }
 
 export interface PrimeSessionParserResult {
@@ -514,7 +527,19 @@ export interface PrimeImportPlan {
 export interface PrimeRollbackManifestEntry {
 	readonly itemId: string;
 	readonly kind: PrimeImportDomain;
+	/** Stable logical identity for the imported item. */
 	readonly destinationRef: string;
+	/** Canonical container or tree path guarded by this entry. */
+	readonly canonicalDestinationRef?: string;
+	/** Logical path when it differs from the canonical path (for example a blob sidecar). */
+	readonly logicalDestinationRef?: string;
+	readonly created: boolean;
+	readonly priorExists: boolean;
+	readonly priorSha256?: string;
+	/** Digest of the exact container or tree bytes currently guarded by this entry. */
+	readonly currentSha256: string;
+	readonly nodeType: "regular-file" | "directory-tree";
+	/** Digest of the container before this logical item was created. */
 	readonly preconditionSha256?: string;
 }
 

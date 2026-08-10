@@ -21,6 +21,8 @@ import type {
 import { ApplyOnlySecretTable as SecretTable } from "./types";
 
 const PRIME_PROVIDER_MAX_RETRY_DELAY_DEFAULT_MS = 60_000;
+const PRIME_JSON_MAX_STRUCTURAL_DEPTH = 256;
+const PRIME_JSON_MAX_NODES = 10_000;
 
 const SETTING_PATHS: Readonly<Record<string, string>> = {
 	defaultThinkingLevel: "defaultThinkingLevel",
@@ -115,8 +117,40 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function isJsonValue(value: unknown): value is PrimeJsonValue {
 	if (value === null || typeof value === "string" || typeof value === "boolean") return true;
 	if (typeof value === "number") return Number.isFinite(value);
-	if (Array.isArray(value)) return value.every(item => isJsonValue(item));
-	return isRecord(value) && Object.values(value).every(item => isJsonValue(item));
+	const pendingValues: unknown[] = [value];
+	const pendingDepths: number[] = [0];
+	let nodes = 1;
+	while (pendingValues.length > 0) {
+		const current = pendingValues.pop();
+		const depth = pendingDepths.pop();
+		if (current === undefined || depth === undefined) return false;
+		if (current === null || typeof current === "string" || typeof current === "boolean") continue;
+		if (typeof current === "number") {
+			if (!Number.isFinite(current)) return false;
+			continue;
+		}
+		if (depth >= PRIME_JSON_MAX_STRUCTURAL_DEPTH) return false;
+		if (Array.isArray(current)) {
+			for (let index = current.length - 1; index >= 0; index--) {
+				if (!Object.hasOwn(current, index)) continue;
+				if (nodes >= PRIME_JSON_MAX_NODES) return false;
+				nodes++;
+				pendingValues.push(current[index]);
+				pendingDepths.push(depth + 1);
+			}
+		} else if (isRecord(current)) {
+			for (const key in current) {
+				if (!Object.hasOwn(current, key)) continue;
+				if (nodes >= PRIME_JSON_MAX_NODES) return false;
+				nodes++;
+				pendingValues.push(current[key]);
+				pendingDepths.push(depth + 1);
+			}
+		} else {
+			return false;
+		}
+	}
+	return true;
 }
 
 function loss(
@@ -193,6 +227,22 @@ function classifyReference(value: unknown): PrimeCredentialClassification {
 	if (/^[A-Z_][A-Z0-9_]*$/.test(value)) return "env_or_literal_ref";
 	return "literal_api_key";
 }
+function isPrototypeMetaKey(value: string): boolean {
+	return value === "__proto__" || value === "prototype" || value === "constructor";
+}
+
+function invalidProvider(provider: string, includeModelDelimiters: boolean): boolean {
+	return (
+		provider.length === 0 ||
+		provider.trim().length === 0 ||
+		isPrototypeMetaKey(provider) ||
+		/[\u0000-\u001f\u007f-\u009f]/u.test(provider) ||
+		(includeModelDelimiters && (provider.includes(":definition:") || provider.includes(":override:")))
+	);
+}
+
+// Keep provider validation before classification so invalid source keys cannot
+// allocate a credential operation or put a value in the secret table.
 
 function addCredential(
 	provider: string,
@@ -204,6 +254,10 @@ function addCredential(
 	losses: PrimeImportLoss[],
 	forcedClassification?: PrimeCredentialClassification,
 ): PrimeNormalizedCredentialOperation | undefined {
+	if (invalidProvider(provider, false)) {
+		losses.push(loss("credentials-unknown", "credentials", sourceRef, provider));
+		return undefined;
+	}
 	const classification = forcedClassification ?? classifyReference(value);
 	if (classification === "unknown") {
 		losses.push(loss("credentials-unknown", "credentials", sourceRef, provider));
@@ -946,6 +1000,10 @@ function collectModels(
 	for (const [provider, rawConfig] of Object.entries(parsed.providers).sort(([left], [right]) =>
 		compareStrings(left, right),
 	)) {
+		if (invalidProvider(provider, true)) {
+			losses.push(loss("models-invalid-value", "models", file.sourceRef, `providers.${provider}`));
+			continue;
+		}
 		if (!isRecord(rawConfig)) {
 			losses.push(loss("models-invalid-value", "models", file.sourceRef, `providers.${provider}`));
 			continue;
@@ -1077,9 +1135,14 @@ function collectModels(
 			for (const [overrideIndex, [overrideId, rawOverride]] of Object.entries(rawOverrides)
 				.sort(([left], [right]) => compareStrings(left, right))
 				.entries()) {
-				if (overrideId.length === 0) {
+				if (overrideId.length === 0 || isPrototypeMetaKey(overrideId)) {
 					losses.push(
-						loss("models-invalid-value", "models", file.sourceRef, `providers.${provider}.modelOverrides`),
+						loss(
+							"models-invalid-value",
+							"models",
+							file.sourceRef,
+							`providers.${provider}.modelOverrides.${overrideId}`,
+						),
 					);
 					continue;
 				}
@@ -1183,14 +1246,23 @@ function collectSettingsCredentials(
 	credentials: PrimeNormalizedCredentialOperation[],
 	secretTable: SecretTable,
 	losses: PrimeImportLoss[],
-	seenProviders: ReadonlySet<string>,
+	seenProviders: Set<string>,
 ): void {
 	const parsed = jsonObject(file, false, losses);
 	const apiKeys = parsed?.apiKeys;
 	if (!isRecord(apiKeys)) return;
 	for (const [provider, value] of Object.entries(apiKeys).sort(([left], [right]) => compareStrings(left, right))) {
 		if (seenProviders.has(provider)) continue;
-		addCredential(provider, file.sourceRef, value, credentials.length, secretTable, credentials, losses);
+		const credential = addCredential(
+			provider,
+			file.sourceRef,
+			value,
+			credentials.length,
+			secretTable,
+			credentials,
+			losses,
+		);
+		if (credential) seenProviders.add(provider);
 	}
 }
 
@@ -1269,6 +1341,8 @@ export function parsePrimeConfig(discovery: PrimeImportSourceDiscovery): PrimeCo
 		collectLegacyCredentials(file, credentials, secretTable, losses, credentialProviders);
 		for (const item of credentials.slice(before)) credentialProviders.add(item.provider);
 	}
+	if (projectSettings)
+		collectSettingsCredentials(projectSettings, credentials, secretTable, losses, credentialProviders);
 	if (globalSettings)
 		collectSettingsCredentials(globalSettings, credentials, secretTable, losses, credentialProviders);
 	const modelsFile = filesByRef.get("global/models.json");

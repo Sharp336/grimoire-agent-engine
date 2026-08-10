@@ -75,6 +75,7 @@ export interface SessionStorage {
 	/** Read the requested UTF-8 byte windows from the head and tail of the file. */
 	readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
 	writeText(path: string, content: string): Promise<void>;
+	writeTextCreateOnly?(path: string, content: string): Promise<void>;
 	writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void>;
 	rename(path: string, nextPath: string): Promise<void>;
 	unlink(path: string): Promise<void>;
@@ -280,6 +281,24 @@ export class FileSessionStorage implements SessionStorage {
 
 	async writeText(path: string, content: string): Promise<void> {
 		await Bun.write(path, content, { createPath: true });
+	}
+
+	async writeTextCreateOnly(fpath: string, content: string): Promise<void> {
+		const dir = path.dirname(fpath);
+		await fs.promises.mkdir(dir, { recursive: true });
+		const handle = await fs.promises.open(fpath, "wx", 0o600);
+		let failure: unknown;
+		try {
+			await handle.writeFile(content);
+		} catch (error) {
+			failure = error;
+		}
+		try {
+			await handle.close();
+		} catch (closeError) {
+			if (failure === undefined) throw closeError;
+		}
+		if (failure !== undefined) throw failure;
 	}
 
 	async writeTextAtomic(fpath: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
@@ -738,6 +757,14 @@ export class MemorySessionStorage implements SessionStorage {
 	}
 
 	writeText(path: string, content: string): Promise<void> {
+		this.writeTextSync(path, content);
+		return Promise.resolve();
+	}
+
+	writeTextCreateOnly(path: string, content: string): Promise<void> {
+		if (this.#files.has(path)) {
+			return Promise.reject(Object.assign(new Error(`File exists: ${path}`), { code: "EEXIST" }));
+		}
 		this.writeTextSync(path, content);
 		return Promise.resolve();
 	}

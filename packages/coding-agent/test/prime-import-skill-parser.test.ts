@@ -62,6 +62,9 @@ function discovery(
 			maxTotalBytes: 1_000_000,
 			maxEntries: 100,
 			files: files.map(({ contentBase64: _contentBase64, ...metadata }) => metadata),
+			treeEntries: records
+				.filter((record): record is Exclude<PrimeSourceRecord, PrimeSourceFile> => record.kind !== "file")
+				.map(({ mtimeMs: _mtimeMs, ...entry }) => entry),
 		},
 		inventory: { records, files, excluded: [] },
 		losses,

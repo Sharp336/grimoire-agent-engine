@@ -553,7 +553,24 @@ An extension is a TypeScript module. Same tool API, same slash-command registry,
 
 ### Discovery
 
-On first run omp inherits whatever is already on disk: rules, skills, and MCP servers from `.claude`, `.cursor`, `.windsurf`, `.gemini`, `.codex`, `.cline`, `.github/copilot`, and `.vscode`. No migration script.
+On first run omp inherits rules, skills, and MCP servers already on disk from `.claude`, `.cursor`, `.windsurf`, `.gemini`, `.codex`, `.cline`, `.github/copilot`, and `.vscode`; those sources remain read-only and need no migration.
+
+#### Import Prime Agent state
+
+`omp import prime` previews or imports state from Prime Agent without starting Prime or modifying its files:
+
+```sh
+omp import prime [--source <prime-home>] [--cwd <project>] [--session-root <dir>] [--prime-cli-config <file>] [--agent-dir <omp-home>] [--apply] [--json]
+```
+
+The command is a read-only dry run unless `--apply` is set. It imports representable global and project settings, model/provider definitions, literal API keys, skills, sessions, and session images/artifacts. Prime sessions receive fresh OMP identities and provenance; valid child transcripts are imported independently without reactivating child state. Kernel snapshots, schedules, leases, heartbeats, live RLM topology, OAuth sessions, command or environment credential references, and other unsupported records are reported as typed losses rather than activated or guessed.
+
+Imports are create-only: existing OMP settings, model entries, credentials, skills, and session data win. Source digests are checked again before apply, and reruns are audited and idempotent. OAuth providers are listed for re-login with `/login <provider>`.
+The destination directory and its nearest existing parent must be owned by the current user and not group- or world-writable. Higher ancestors must be owned by the current user or root; writable ancestors require a sticky bit that protects the trusted-owned child entry. This validated chain is the trust boundary for create-only publication.
+
+Candidates are staged before writes, but OMP's filesystem and SQLite stores do not share a transaction. If a later write fails, earlier committed items remain and the report sets `partialApply`; invalid source or destination state and failed applies exit nonzero. The versioned manifest records the source snapshot and importer-created state with live precondition digests. It is not a whole-store restore: only still-matching importer-created state is eligible for cleanup, and shared blob orphans remain available for garbage collection.
+
+Use `--json` for the stable machine-readable report. Human output includes destination paths, per-outcome counts, typed losses, OAuth re-login requirements, manifest location, and partial-apply status. See [Settings](docs/settings.md), [Providers and `/login`](docs/providers.md), [Skills](docs/skills.md), and [session operations](docs/session-operations-export-share-fork-resume.md) for destination behavior.
 
 ### Extensibility
 

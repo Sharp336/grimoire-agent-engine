@@ -54,6 +54,14 @@ class ControlledTitleUpdateBackend implements SessionStorageBackend {
 		return Promise.resolve();
 	}
 
+	writeFullCreateOnly(path: string, content: string, _mtimeMs: number): Promise<void> {
+		if (path === this.#sessionPath) {
+			return Promise.reject(Object.assign(new Error(`File exists: ${path}`), { code: "EEXIST" }));
+		}
+		this.#content = content;
+		return Promise.resolve();
+	}
+
 	append(_path: string, line: string, _mtimeMs: number): Promise<void> {
 		this.#content += line;
 		return Promise.resolve();
@@ -297,6 +305,91 @@ describe("IndexedSessionStorage.updateSessionTitle", () => {
 	});
 });
 
+class SharedCreateOnlyBackend implements SessionStorageBackend {
+	readonly #files = new Map<string, { content: string; mtimeMs: number; title: SessionTitleUpdate | undefined }>();
+
+	init(): Promise<void> {
+		return Promise.resolve();
+	}
+
+	loadIndex(): Promise<Iterable<SessionStorageIndexEntry>> {
+		return Promise.resolve(
+			Array.from(this.#files, ([path, file]) => ({
+				path,
+				size: Buffer.byteLength(file.content),
+				mtimeMs: file.mtimeMs,
+				title: file.title?.title,
+				titleSource: file.title?.source,
+				titleUpdatedAt: file.title?.updatedAt,
+			})),
+		);
+	}
+
+	readFull(path: string): Promise<string | null> {
+		return Promise.resolve(this.#files.get(path)?.content ?? null);
+	}
+
+	readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {
+		const content = this.#files.get(path)?.content ?? "";
+		return Promise.resolve([content.slice(0, prefixBytes), suffixBytes > 0 ? content.slice(-suffixBytes) : ""]);
+	}
+
+	writeFull(path: string, content: string, mtimeMs: number, title?: SessionTitleUpdate): Promise<void> {
+		this.#files.set(path, { content, mtimeMs, title });
+		return Promise.resolve();
+	}
+
+	writeFullCreateOnly(path: string, content: string, mtimeMs: number, title?: SessionTitleUpdate): Promise<void> {
+		if (this.#files.has(path)) {
+			return Promise.reject(Object.assign(new Error(`File exists: ${path}`), { code: "EEXIST" }));
+		}
+		this.#files.set(path, { content, mtimeMs, title });
+		return Promise.resolve();
+	}
+
+	append(): Promise<void> {
+		return Promise.resolve();
+	}
+	updateSessionTitle(): Promise<void> {
+		return Promise.resolve();
+	}
+	truncate(): Promise<void> {
+		return Promise.resolve();
+	}
+	remove(): Promise<void> {
+		return Promise.resolve();
+	}
+	move(): Promise<void> {
+		return Promise.resolve();
+	}
+}
+
+describe("IndexedSessionStorage.writeTextCreateOnly", () => {
+	it("keeps one winner across independent instances with stale indexes", async () => {
+		const backend = new SharedCreateOnlyBackend();
+		const left = new IndexedSessionStorage(backend);
+		const right = new IndexedSessionStorage(backend);
+		await Promise.all([left.initialize(), right.initialize()]);
+		const sessionPath = "/sessions/shared.jsonl";
+
+		const results = await Promise.allSettled([
+			left.writeTextCreateOnly(sessionPath, "left"),
+			right.writeTextCreateOnly(sessionPath, "right"),
+		]);
+
+		expect(results.map(result => result.status).sort()).toEqual(["fulfilled", "rejected"]);
+		const rejected = results.find(result => result.status === "rejected");
+		expect(rejected?.reason).toMatchObject({ code: "EEXIST" });
+		const stored = await backend.readFull(sessionPath);
+		if (stored === null) throw new Error("create-only write did not persist a winner");
+		expect(["left", "right"]).toContain(stored);
+		expect(await left.readText(sessionPath)).toBe(stored);
+		expect(await right.readText(sessionPath)).toBe(stored);
+		expect(left.existsSync(sessionPath)).toBe(true);
+		expect(right.existsSync(sessionPath)).toBe(true);
+	});
+});
+
 class PausableWriteFullBackend implements SessionStorageBackend {
 	readonly writeFullCalls: Array<{ content: string; mtimeMs: number }> = [];
 	readonly firstWriteStarted = Promise.withResolvers<void>();
@@ -322,6 +415,10 @@ class PausableWriteFullBackend implements SessionStorageBackend {
 			await this.firstWriteRelease.promise;
 		}
 		this.writeFullCalls.push({ content, mtimeMs });
+	}
+	writeFullCreateOnly(_path: string, content: string, mtimeMs: number): Promise<void> {
+		this.writeFullCalls.push({ content, mtimeMs });
+		return Promise.resolve();
 	}
 	append(): Promise<void> {
 		return Promise.resolve();

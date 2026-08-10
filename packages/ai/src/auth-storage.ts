@@ -186,6 +186,21 @@ export interface CredentialInsertResult {
 	rows: Array<{ id: number; type: AuthCredential["type"] }>;
 }
 
+/**
+ * Public result for an atomic create-only credential batch.
+ * Provider values and credential payloads are intentionally omitted.
+ */
+export interface CredentialBatchInsertResult {
+	inserted: string[];
+	skipped: string[];
+}
+
+/** One provider's create-only credential payload for a batch insert. */
+export interface CredentialBatchInsert {
+	provider: string;
+	credentials: AuthCredential[];
+}
+
 /** One persisted rate-limit block: credential row id + provider-type key + optional scope. */
 export interface StoredCredentialBlock {
 	/** SQLite row id of the credential (auth_credentials.id). */
@@ -416,6 +431,11 @@ export interface AuthCredentialStore {
 	 * Atomically insert all supplied credentials only when the provider has no
 	 * active credentials. Stores that cannot provide this guarantee omit it.
 	 */
+	/**
+	 * Atomically process multiple providers: active providers are skipped and
+	 * every absent provider is inserted, or the entire batch is rolled back.
+	 */
+	insertCredentialsIfProvidersAbsent?(batch: CredentialBatchInsert[]): CredentialBatchInsertResult;
 	insertCredentialsIfProviderAbsent?(provider: string, credentials: AuthCredential[]): StoredCredentialInsertResult;
 	/**
 	 * Optional store hook to re-hydrate the credential snapshot from its
@@ -1319,26 +1339,28 @@ export class AuthStorage {
 	#oauthCredentialRefreshInFlight: Map<number, Promise<OAuthCredentials>> = new Map();
 	#closed = false;
 
-	constructor(store: AuthCredentialStore, options: AuthStorageOptions = {}) {
+	constructor(store: AuthCredentialStore, options: AuthStorageOptions = {}, skipStoreHygiene = false) {
 		this.#store = store;
 		this.#configValueResolver = options.configValueResolver ?? defaultConfigValueResolver;
 		this.#usageProviderResolver = options.usageProviderResolver ?? resolveDefaultUsageProvider;
 		this.#rankingStrategyResolver = options.rankingStrategyResolver ?? resolveDefaultRankingStrategy;
 		this.#usageCache = new AuthStorageUsageCache(this.#store);
-		// Opportunistic hygiene, once per AuthStorage lifetime: drop expired
-		// cache rows (24h last-good retention). A cheap indexed DELETE;
-		// failures must never block construction.
-		try {
-			this.#store.cleanExpiredCache();
-		} catch {
-			// Best-effort.
-		}
-		try {
-			this.#store.cleanExpiredCredentialBlocks?.(Date.now());
-		} catch (err) {
-			// Best-effort, but init-time corruption must latch the block store
-			// immediately so the first evaluation doesn't re-query a broken DB.
-			this.#handlePersistedBlockStoreError(err);
+		if (!skipStoreHygiene) {
+			// Opportunistic hygiene, once per AuthStorage lifetime: drop expired
+			// cache rows (24h last-good retention). A cheap indexed DELETE;
+			// failures must never block construction.
+			try {
+				this.#store.cleanExpiredCache();
+			} catch {
+				// Best-effort.
+			}
+			try {
+				this.#store.cleanExpiredCredentialBlocks?.(Date.now());
+			} catch (err) {
+				// Best-effort, but init-time corruption must latch the block store
+				// immediately so the first evaluation doesn't re-query a broken DB.
+				this.#handlePersistedBlockStoreError(err);
+			}
 		}
 		this.#usageFetch = options.usageFetch ?? fetch;
 		this.#usageRequestTimeoutMs = options.usageRequestTimeoutMs ?? DEFAULT_USAGE_REQUEST_TIMEOUT_MS;
@@ -1366,6 +1388,18 @@ export class AuthStorage {
 	static async create(dbPath: string, options: AuthStorageOptions = {}): Promise<AuthStorage> {
 		const store = await SqliteAuthCredentialStore.open(dbPath);
 		return new AuthStorage(store, options);
+	}
+	/**
+	 * Open an already validated database without schema initialization or
+	 * constructor hygiene writes.
+	 */
+	static async createExisting(
+		dbPath: string,
+		options: AuthStorageOptions = {},
+		expectedIdentity?: { readonly dev: number; readonly ino: number },
+	): Promise<AuthStorage> {
+		const store = await SqliteAuthCredentialStore.openExisting(dbPath, expectedIdentity);
+		return new AuthStorage(store, options, true);
 	}
 
 	/**
@@ -2379,6 +2413,29 @@ export class AuthStorage {
 			provider,
 			rows: outcome.rows.map(record => ({ id: record.id, type: record.credential.type })),
 		};
+	}
+	/**
+	 * Atomically insert every absent provider in a credential batch.
+	 */
+	insertCredentialsIfProvidersAbsent(batch: CredentialBatchInsert[]): CredentialBatchInsertResult {
+		const insert = this.#store.insertCredentialsIfProvidersAbsent;
+		if (!insert) {
+			throw new AIError.ConfigurationError("Credential store lacks atomic create-only credential batch insertion");
+		}
+		const deduped = batch.map(entry => ({
+			provider: entry.provider,
+			credentials: this.#dedupeOAuthCredentials(entry.provider, entry.credentials),
+		}));
+		const outcome = insert.call(this.#store, deduped);
+		for (const provider of outcome.inserted) {
+			const rows = this.#store.listAuthCredentials(provider);
+			this.#setStoredCredentials(
+				provider,
+				rows.map(record => ({ id: record.id, credential: record.credential })),
+			);
+			this.#resetProviderAssignments(provider);
+		}
+		return outcome;
 	}
 
 	/**

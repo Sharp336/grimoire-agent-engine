@@ -97,6 +97,74 @@ describe("discoverPrimeSource", () => {
 		expect(discovered.inventory.files.some(file => file.sourceRef === "legacy-root/not-a-session.jsonl")).toBe(false);
 		expect(discovered.losses.some(loss => loss.sourceRef === "legacy-root/not-a-session.jsonl")).toBe(false);
 	});
+	it("deduplicates a root-level transcript when explicit session and source roots canonicalize equally", async () => {
+		const root = await temporaryDirectory();
+		const sourceRoot = path.join(root, "prime");
+		const cwd = path.join(root, "project");
+		await writeText(
+			path.join(sourceRoot, "root.jsonl"),
+			`${JSON.stringify({
+				type: "session",
+				version: 3,
+				id: "root",
+				timestamp: "2026-01-01T00:00:00.000Z",
+				cwd,
+			})}\n`,
+		);
+
+		const discovered = await discoverPrimeSource({
+			sourceRoot,
+			cwd,
+			sessionRoot: sourceRoot,
+		});
+		const expectedPath = await fs.realpath(path.join(sourceRoot, "root.jsonl"));
+
+		expect(discovered.inventory.files).toHaveLength(1);
+		expect(discovered.inventory.files.map(file => file.sourceRef)).toEqual(["sessions/current/root.jsonl"]);
+		expect(discovered.inventory.files[0]?.canonicalPath).toBe(expectedPath);
+		expect(discovered.snapshot.files.map(file => file.sourceRef)).toEqual(["sessions/current/root.jsonl"]);
+		expect(discovered.snapshot.files[0]?.canonicalPath).toBe(expectedPath);
+	});
+	it("deduplicates a transcript when an explicit session root contains the source root", async () => {
+		const root = await temporaryDirectory();
+		const sourceRoot = path.join(root, "--agent--");
+		const sessionRoot = path.dirname(sourceRoot);
+		const cwd = path.join(root, "project");
+		const transcriptPath = path.join(sourceRoot, "x.jsonl");
+		await writeSession(transcriptPath, "contained");
+
+		const discovered = await discoverPrimeSource({ sourceRoot, cwd, sessionRoot });
+		const expectedPath = await fs.realpath(transcriptPath);
+		const inventoryMatches = discovered.inventory.files.filter(file => file.canonicalPath === expectedPath);
+		const snapshotMatches = discovered.snapshot.files.filter(file => file.canonicalPath === expectedPath);
+
+		expect(inventoryMatches).toHaveLength(1);
+		expect(inventoryMatches[0]?.sourceRef).toBe("legacy-nested/--agent--/x.jsonl");
+		expect(snapshotMatches).toHaveLength(1);
+		expect(snapshotMatches[0]?.sourceRef).toBe("legacy-nested/--agent--/x.jsonl");
+	});
+	it("charges a transcript once when an explicit session root contains the source root", async () => {
+		const root = await temporaryDirectory();
+		const sourceRoot = path.join(root, "--agent--");
+		const sessionRoot = path.dirname(sourceRoot);
+		const cwd = path.join(root, "project");
+		const transcriptPath = path.join(sourceRoot, "x.jsonl");
+		await writeSession(transcriptPath, "contained");
+
+		const discovered = await discoverPrimeSource({
+			sourceRoot,
+			cwd,
+			sessionRoot,
+			maxTotalBytes: (await fs.stat(transcriptPath)).size,
+			maxEntries: 2,
+		});
+		const expectedPath = await fs.realpath(transcriptPath);
+
+		expect(discovered.losses.filter(loss => loss.code === "source-budget-exceeded")).toEqual([]);
+		expect(discovered.inventory.files).toHaveLength(1);
+		expect(discovered.inventory.files[0]?.canonicalPath).toBe(expectedPath);
+		expect(discovered.inventory.files[0]?.sourceRef).toBe("legacy-nested/--agent--/x.jsonl");
+	});
 
 	it("inventories artifacts and records excluded runtime state without importing it", async () => {
 		const root = await temporaryDirectory();
@@ -302,6 +370,33 @@ describe("discoverPrimeSource", () => {
 		);
 		expect(second.snapshot.snapshotId).toBe(first.snapshot.snapshotId);
 	});
+	it("binds snapshot identity to canonical roots beyond file metadata", async () => {
+		const root = await temporaryDirectory();
+		const cwd = path.join(root, "project");
+		const sourceRootA = path.join(root, "prime-a");
+		const sourceRootB = path.join(root, "prime-b");
+		const settingsA = path.join(sourceRootA, "settings.json");
+		const settingsB = path.join(sourceRootB, "settings.json");
+		await writeText(settingsA, '{"same":true}\n');
+		await writeText(settingsB, '{"same":true}\n');
+		const fixedTime = new Date("2020-01-02T03:04:05.000Z");
+		for (const settingsPath of [settingsA, settingsB]) {
+			await fs.chmod(settingsPath, 0o644);
+			await fs.utimes(settingsPath, fixedTime, fixedTime);
+		}
+		const firstA = await discoverPrimeSource({ sourceRoot: sourceRootA, cwd });
+		const secondA = await discoverPrimeSource({ sourceRoot: sourceRootA, cwd });
+		const firstB = await discoverPrimeSource({ sourceRoot: sourceRootB, cwd });
+		const fileA = firstA.inventory.files.find(file => file.sourceRef === "global/settings.json");
+		const fileB = firstB.inventory.files.find(file => file.sourceRef === "global/settings.json");
+		expect(fileA?.size).toBe(fileB?.size);
+		expect(fileA?.mode).toBe(fileB?.mode);
+		expect(fileA?.mtimeMs).toBe(fileB?.mtimeMs);
+		expect(fileA?.sha256).toBe(fileB?.sha256);
+		expect(firstA.snapshot.snapshotId).not.toBe(firstB.snapshot.snapshotId);
+		expect(secondA.snapshot.snapshotId).toBe(firstA.snapshot.snapshotId);
+		expect(await revalidatePrimeSource(firstA.snapshot)).toEqual({ ok: true, losses: [] });
+	});
 
 	it.skipIf(process.platform === "win32")("reports typed symlink replacement during revalidation", async () => {
 		const root = await temporaryDirectory();
@@ -321,6 +416,53 @@ describe("discoverPrimeSource", () => {
 				expect.objectContaining({ code: "source-external-symlink", sourceRef: "global/settings.json" }),
 			]),
 		);
+	});
+
+	it.skipIf(process.platform === "win32")("detects retargeted accepted skill symlinks", async () => {
+		const root = await temporaryDirectory();
+		const sourceRoot = path.join(root, "prime");
+		const cwd = path.join(root, "project");
+		const skillRoot = path.join(sourceRoot, "skills", "example");
+		const linkPath = path.join(skillRoot, "link.md");
+		await writeText(path.join(skillRoot, "target-a.md"), "a");
+		await writeText(path.join(skillRoot, "target-b.md"), "b");
+		await fs.symlink("target-a.md", linkPath);
+		const snapshot = (await discoverPrimeSource({ sourceRoot, cwd })).snapshot;
+		await fs.rm(linkPath);
+		await fs.symlink("target-b.md", linkPath);
+		const revalidated = await revalidatePrimeSource(snapshot);
+		expect(revalidated.ok).toBe(false);
+		expect(revalidated.losses).toContainEqual(
+			expect.objectContaining({ code: "source-changed", sourceRef: "global/skills/example/link.md" }),
+		);
+	});
+
+	it.skipIf(process.platform === "win32")("detects accepted skill directory mode changes", async () => {
+		const root = await temporaryDirectory();
+		const sourceRoot = path.join(root, "prime");
+		const cwd = path.join(root, "project");
+		const skillRoot = path.join(sourceRoot, "skills", "example");
+		await writeText(path.join(skillRoot, "SKILL.md"), "skill");
+		await fs.chmod(skillRoot, 0o755);
+		const snapshot = (await discoverPrimeSource({ sourceRoot, cwd })).snapshot;
+		await fs.chmod(skillRoot, 0o700);
+		const revalidated = await revalidatePrimeSource(snapshot);
+		expect(revalidated.ok).toBe(false);
+		expect(revalidated.losses).toContainEqual(
+			expect.objectContaining({ code: "source-changed", sourceRef: "global/skills/example" }),
+		);
+	});
+
+	it("keeps accepted skill tree entries stable across unchanged rediscovery", async () => {
+		const root = await temporaryDirectory();
+		const sourceRoot = path.join(root, "prime");
+		const cwd = path.join(root, "project");
+		await writeText(path.join(sourceRoot, "skills", "example", "SKILL.md"), "skill");
+		const first = await discoverPrimeSource({ sourceRoot, cwd });
+		const second = await discoverPrimeSource({ sourceRoot, cwd });
+		expect(second.snapshot.treeEntries).toEqual(first.snapshot.treeEntries);
+		expect(second.snapshot.snapshotId).toBe(first.snapshot.snapshotId);
+		expect(await revalidatePrimeSource(first.snapshot)).toEqual({ ok: true, losses: [] });
 	});
 
 	it("reports malformed layout inputs", async () => {

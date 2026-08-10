@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -377,6 +377,113 @@ describe("foreign session persistence", () => {
 		} finally {
 			await reopened.close();
 		}
+	});
+
+	it("removes a converted destination when the staged manager close fails", async () => {
+		const cwd = path.join(tempRoot, "prime-project");
+		const sourceDir = path.join(tempRoot, "converted-source");
+		const sessionDir = path.join(tempRoot, "staged-close-failure-sessions");
+		await fs.mkdir(cwd, { recursive: true });
+		const converted = SessionManager.create(cwd, sourceDir);
+		converted.appendCustomEntry("converted_source_entry", { value: "unchanged" });
+		await converted.ensureOnDisk();
+
+		const stagedCloseError = new Error("staged close failed");
+		const originalClose = SessionManager.prototype.close;
+		let stagedCloseSawDestination = false;
+		const closeSpy = vi.spyOn(SessionManager.prototype, "close").mockImplementation(async function (
+			this: SessionManager,
+		) {
+			if (this !== converted && this.getSessionFile() === undefined) {
+				const destinationEntries = await fs.readdir(sessionDir);
+				stagedCloseSawDestination = destinationEntries.some(entry => entry.endsWith(".jsonl"));
+				throw stagedCloseError;
+			}
+			return originalClose.call(this);
+		});
+
+		try {
+			await expect(
+				persistConvertedSession(
+					converted,
+					{
+						source: "prime",
+						sourceId: "prime-session-staged-close-failure",
+						sourcePath: "/prime/sessions/staged-close-failure.jsonl",
+						sourceCwd: cwd,
+					},
+					{ sessionDir, suppressBreadcrumb: true },
+				),
+			).rejects.toBe(stagedCloseError);
+			expect(stagedCloseSawDestination).toBe(true);
+			const remainingEntries = await fs.readdir(sessionDir);
+			expect(remainingEntries.filter(entry => entry.endsWith(".jsonl"))).toEqual([]);
+		} finally {
+			closeSpy.mockRestore();
+			await converted.close();
+		}
+	});
+	it("preserves the original post-persist failure when exact cleanup also fails", async () => {
+		const cwd = path.join(tempRoot, "prime-project");
+		const sourceDir = path.join(tempRoot, "converted-source");
+		const sessionDir = path.join(tempRoot, "post-persist-cleanup-failure-sessions");
+		await fs.mkdir(cwd, { recursive: true });
+		const converted = SessionManager.create(cwd, sourceDir);
+		converted.appendCustomEntry("converted_source_entry", { value: "unchanged" });
+		await converted.ensureOnDisk();
+
+		const primaryError = new Error("post-persist flush failed");
+		const cleanupError = new Error("exact destination cleanup failed");
+		let cleanupArmed = false;
+		let cleanupPublication:
+			| { readonly path: string; readonly identity: { readonly dev: number; readonly ino: number } }
+			| undefined;
+		const originalFlush = SessionManager.prototype.flush;
+		const flushSpy = vi.spyOn(SessionManager.prototype, "flush").mockImplementation(async function (
+			this: SessionManager,
+		) {
+			if (this !== converted && this.getSessionFile() !== undefined) {
+				cleanupArmed = true;
+				throw primaryError;
+			}
+			return originalFlush.call(this);
+		});
+		const originalUnlink = fs.unlink;
+		const unlinkSpy = vi.spyOn(fs, "unlink").mockImplementation((async (...args: Parameters<typeof fs.unlink>) => {
+			const candidate = path.resolve(String(args[0]));
+			if (cleanupArmed && candidate.startsWith(`${path.resolve(sessionDir)}${path.sep}`)) throw cleanupError;
+			return originalUnlink(...args);
+		}) as typeof fs.unlink);
+		let rejection: unknown;
+		try {
+			await persistConvertedSession(
+				converted,
+				{
+					source: "prime",
+					sourceId: "prime-session-post-persist-cleanup-failure",
+					sourcePath: "/prime/sessions/post-persist-cleanup-failure.jsonl",
+					sourceCwd: cwd,
+				},
+				{
+					sessionDir,
+					suppressBreadcrumb: true,
+					onCleanupFailure: publication => {
+						cleanupPublication = publication;
+					},
+				},
+			);
+		} catch (error) {
+			rejection = error;
+		} finally {
+			flushSpy.mockRestore();
+			unlinkSpy.mockRestore();
+			await converted.close();
+		}
+		expect(rejection).toBe(primaryError);
+		expect(cleanupArmed).toBe(true);
+		expect(cleanupPublication).toBeDefined();
+		expect(cleanupPublication?.identity.dev).toBeTypeOf("number");
+		expect(cleanupPublication?.identity.ino).toBeTypeOf("number");
 	});
 
 	it("uses fallback CWD only on the destination and preserves explicit sessionDir", async () => {

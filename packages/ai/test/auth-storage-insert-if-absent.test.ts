@@ -108,6 +108,73 @@ const runContentionWorker = async (): Promise<void> => {
 if (WORKER_MODE) {
 	await runContentionWorker();
 } else {
+	test("openExisting fails closed when the validated pathname is replaced before open", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-open-existing-swap-"));
+		const dbPath = path.join(tempDir, "agent.db");
+		const originalPath = path.join(tempDir, "validated.db");
+		const attackerPath = path.join(tempDir, "attacker.db");
+		try {
+			const initialized = await openStorage(dbPath);
+			await initialized.storage.set("validated-provider", {
+				type: "api_key",
+				key: "validated-before-swap",
+			});
+			initialized.storage.close();
+
+			const attacker = await openStorage(attackerPath);
+			await attacker.storage.set("attacker-provider", {
+				type: "api_key",
+				key: "attacker-before-swap",
+			});
+			const attackerBefore = readRawCredential(attackerPath, "attacker-provider");
+			attacker.storage.close();
+
+			const expected = await fs.lstat(dbPath);
+			await expect(
+				SqliteAuthCredentialStore.openExisting(dbPath, expected, {
+					beforeOpen: async () => {
+						await fs.rename(dbPath, originalPath);
+						await fs.rename(attackerPath, dbPath);
+					},
+				}),
+			).rejects.toBeInstanceOf(ConfigurationError);
+
+			expect(readRawCredential(originalPath, "validated-provider")).toEqual([
+				expect.objectContaining({ data: JSON.stringify({ key: "validated-before-swap" }) }),
+			]);
+			expect(readRawCredential(originalPath, "new-validated-provider")).toEqual([]);
+			expect(readRawCredential(dbPath, "attacker-provider")).toEqual(attackerBefore);
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	test("openExisting shares the canonical WAL namespace with a live OMP connection", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-open-existing-wal-"));
+		const dbPath = path.join(tempDir, "agent.db");
+		const live = await openStorage(dbPath);
+		try {
+			await live.storage.set("live-provider", { type: "api_key", key: "live-secret" });
+			const expected = await fs.lstat(dbPath);
+			const importer = await SqliteAuthCredentialStore.openExisting(dbPath, expected);
+			try {
+				expect(
+					importer.insertCredentialsIfProviderAbsent("imported-provider", [
+						{ type: "api_key", key: "imported-secret" },
+					]),
+				).toMatchObject({ inserted: true });
+				expect(live.store.listAuthCredentials("imported-provider")).toEqual([
+					expect.objectContaining({ credential: { type: "api_key", key: "imported-secret" } }),
+				]);
+			} finally {
+				importer.close();
+			}
+		} finally {
+			live.storage.close();
+			await removeWithRetries(tempDir);
+		}
+	});
+
 	test("cross-process create-only contention has one winner and durable state", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-create-only-race-"));
 		const dbPath = path.join(tempDir, "agent.db");

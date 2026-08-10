@@ -681,6 +681,279 @@ describe("Settings", () => {
 		});
 	});
 
+	it("applies create-only settings atomically with fresh destination wins", async () => {
+		await writeSettings({ modelRoles: { existing: "source/existing" } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		const originalWithFileLock = fileLock.withFileLock;
+		let injected = false;
+		vi.spyOn(fileLock, "withFileLock").mockImplementation(async (filePath, fn, options) => {
+			if (!injected) {
+				injected = true;
+				return originalWithFileLock(
+					filePath,
+					async () => {
+						await writeSettings({
+							shellPath: "/bin/zsh",
+							defaultThinkingLevel: Effort.Low,
+							modelRoles: { existing: "destination/existing" },
+						});
+						return fn();
+					},
+					options,
+				);
+			}
+			return originalWithFileLock(filePath, fn, options);
+		});
+
+		const mutations = [
+			{ path: "defaultThinkingLevel", value: Effort.High },
+			{ path: "treeFilterMode", value: "all" },
+			{ path: "modelRoles", role: "existing", value: "source/replaced" },
+			{ path: "modelRoles", role: "new", value: "source/new" },
+		] as const;
+		const result = await settings.applyCreateOnly(mutations);
+
+		expect(result).toEqual({
+			applied: ["treeFilterMode", "modelRoles:new"],
+			skipped: ["defaultThinkingLevel", "modelRoles:existing"],
+		});
+		const afterFirst = await Bun.file(getConfigPath()).text();
+		expect(await readSettings()).toEqual({
+			shellPath: "/bin/zsh",
+			defaultThinkingLevel: Effort.Low,
+			treeFilterMode: "all",
+			modelRoles: {
+				existing: "destination/existing",
+				new: "source/new",
+			},
+		});
+
+		const secondResult = await settings.applyCreateOnly(mutations);
+		expect(secondResult).toEqual({
+			applied: [],
+			skipped: ["defaultThinkingLevel", "treeFilterMode", "modelRoles:existing", "modelRoles:new"],
+		});
+		expect(await Bun.file(getConfigPath()).text()).toBe(afterFirst);
+	});
+
+	it("rejects duplicate create-only identifiers before publication", async () => {
+		await writeSettings({ shellPath: "/bin/zsh" });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		const before = await Bun.file(getConfigPath()).text();
+
+		await expect(
+			settings.applyCreateOnly([
+				{ path: "treeFilterMode", value: "all" },
+				{ path: "treeFilterMode", value: "no-tools" },
+			]),
+		).rejects.toThrow("Duplicate create-only setting identifier: treeFilterMode");
+		await expect(
+			settings.applyCreateOnly([
+				{ path: "modelRoles", role: "same", value: "one/model" },
+				{ path: "modelRoles", role: "same", value: "other/model" },
+			]),
+		).rejects.toThrow("Duplicate create-only setting identifier: modelRoles:same");
+		expect(await Bun.file(getConfigPath()).text()).toBe(before);
+	});
+	it("uses an isolated create-only path without unrelated initialization", async () => {
+		const legacyPath = path.join(agentDir, "settings.json"),
+			legacyBytes = '{"treeFilterMode":"no-tools"}\n',
+			markerPath = path.join(agentDir, "last-changelog-version"),
+			dbPath = path.join(agentDir, "agent.db");
+		await fs.promises.writeFile(legacyPath, legacyBytes);
+		await fs.promises.writeFile(markerPath, "0.99.0\n");
+
+		const result = await Settings.applyCreateOnlyIsolated(
+			{
+				agentDir,
+				cwd: projectDir,
+				readLimits: { maxFileBytes: 4096, maxTotalBytes: 8192, maxDepth: 64, maxEntries: 100 },
+			},
+			[{ path: "treeFilterMode", value: "all" }],
+		);
+
+		expect(result).toEqual({ applied: ["treeFilterMode"], skipped: [] });
+		expect(YAML.parse(await Bun.file(getConfigPath()).text())).toEqual({ treeFilterMode: "all" });
+		expect(await fs.promises.readFile(legacyPath, "utf8")).toBe(legacyBytes);
+		expect(await Bun.file(`${legacyPath}.bak`).exists()).toBe(false);
+		expect(await fs.promises.readFile(markerPath, "utf8")).toBe("0.99.0\n");
+		expect(await Bun.file(dbPath).exists()).toBe(false);
+	});
+
+	it("serializes local changes made while the create-only lock is held", async () => {
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		const lockEntered = Promise.withResolvers<void>();
+		const releaseLock = Promise.withResolvers<void>();
+		const originalWithFileLock = fileLock.withFileLock;
+		vi.spyOn(fileLock, "withFileLock").mockImplementation(async (filePath, fn, options) =>
+			originalWithFileLock(
+				filePath,
+				async () => {
+					lockEntered.resolve();
+					await releaseLock.promise;
+					return fn();
+				},
+				options,
+			),
+		);
+
+		const batch = settings.applyCreateOnly([{ path: "treeFilterMode", value: "all" }]);
+		await lockEntered.promise;
+		settings.set("treeFilterMode", "no-tools");
+		releaseLock.resolve();
+		expect(await batch).toEqual({ applied: ["treeFilterMode"], skipped: [] });
+		await settings.flush();
+
+		expect((await readSettings()).treeFilterMode).toBe("no-tools");
+		expect(settings.get("treeFilterMode")).toBe("no-tools");
+	});
+
+	it("preserves a local whole-path change across a pre-existing save", async () => {
+		vi.useFakeTimers();
+		try {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const saveEntered = Promise.withResolvers<void>();
+			const releaseSave = Promise.withResolvers<void>();
+			const originalWithFileLock = fileLock.withFileLock;
+			let pauseFirstSave = true;
+			vi.spyOn(fileLock, "withFileLock").mockImplementation(async (filePath, fn, options) => {
+				if (pauseFirstSave) {
+					pauseFirstSave = false;
+					return originalWithFileLock(
+						filePath,
+						async () => {
+							saveEntered.resolve();
+							await releaseSave.promise;
+							return fn();
+						},
+						options,
+					);
+				}
+				return originalWithFileLock(filePath, fn, options);
+			});
+
+			settings.set("shellPath", "/bin/zsh");
+			vi.advanceTimersByTime(100);
+			await saveEntered.promise;
+			const batch = settings.applyCreateOnly([{ path: "treeFilterMode", value: "all" }]);
+			await Promise.resolve();
+			settings.set("treeFilterMode", "no-tools");
+			releaseSave.resolve();
+
+			expect(await batch).toEqual({ applied: [], skipped: ["treeFilterMode"] });
+			expect((await readSettings()).treeFilterMode).toBeUndefined();
+			await settings.flush();
+			expect((await readSettings()).treeFilterMode).toBe("no-tools");
+			expect(settings.get("treeFilterMode")).toBe("no-tools");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("retains the latest repeated role change across an in-flight save", async () => {
+		vi.useFakeTimers();
+		try {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const lockEntered = Promise.withResolvers<void>();
+			const releaseLock = Promise.withResolvers<void>();
+			const renameEntered = Promise.withResolvers<void>();
+			const releaseRename = Promise.withResolvers<void>();
+			const originalWithFileLock = fileLock.withFileLock;
+			const originalRename = fs.promises.rename.bind(fs.promises);
+			let pauseFirstLock = true;
+			let pauseFirstWrite = true;
+			vi.spyOn(fileLock, "withFileLock").mockImplementation(async (filePath, fn, options) => {
+				if (pauseFirstLock) {
+					pauseFirstLock = false;
+					return originalWithFileLock(
+						filePath,
+						async () => {
+							lockEntered.resolve();
+							await releaseLock.promise;
+							return fn();
+						},
+						options,
+					);
+				}
+				return originalWithFileLock(filePath, fn, options);
+			});
+			vi.spyOn(fs.promises, "rename").mockImplementation(async (source, target) => {
+				if (pauseFirstWrite && String(source).endsWith(".tmp")) {
+					pauseFirstWrite = false;
+					renameEntered.resolve();
+					await releaseRename.promise;
+				}
+				return originalRename(source, target);
+			});
+
+			settings.setModelRole("smol", "model/a");
+			vi.advanceTimersByTime(100);
+			await lockEntered.promise;
+			settings.setModelRole("smol", "model/b");
+			releaseLock.resolve();
+			await renameEntered.promise;
+			settings.setModelRole("smol", "model/c");
+			releaseRename.resolve();
+
+			await settings.flush();
+			expect(settings.getModelRole("smol")).toBe("model/c");
+			expect((await readSettings()).modelRoles).toMatchObject({ smol: "model/c" });
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("retains logical state when create-only atomic publication fails", async () => {
+		await writeSettings({ shellPath: "/bin/zsh" });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		const before = await Bun.file(getConfigPath()).text();
+		const rename = fs.promises.rename.bind(fs.promises);
+		vi.spyOn(fs.promises, "rename").mockImplementation(async (source, target) => {
+			if (String(source).endsWith(".tmp")) {
+				throw new FsCodeError("EIO", "injected create-only rename failure");
+			}
+			return rename(source, target);
+		});
+
+		await expect(settings.applyCreateOnly([{ path: "treeFilterMode", value: "all" }])).rejects.toThrow(
+			"injected create-only rename failure",
+		);
+		expect(await Bun.file(getConfigPath()).text()).toBe(before);
+		expect(settings.isConfigured("treeFilterMode")).toBe(false);
+	});
+
+	it("rejects invalid hook-backed values before create-only publication", async () => {
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		const before = (await Bun.file(getConfigPath()).exists()) ? await Bun.file(getConfigPath()).text() : "";
+
+		await expect(
+			settings.applyCreateOnly([{ path: "providers.maxInFlightRequests", value: { openai: 0 } }]),
+		).rejects.toThrow("Provider request limits must be positive numbers");
+		expect((await Bun.file(getConfigPath()).exists()) ? await Bun.file(getConfigPath()).text() : "").toBe(before);
+		expect(settings.isConfigured("providers.maxInFlightRequests")).toBe(false);
+	});
+
+	it("rejects invalid fresh provider limits before adopting or publishing", async () => {
+		await writeSettings({ providers: { maxInFlightRequests: { openai: 2 } }, treeFilterMode: "all" });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ providers: { maxInFlightRequests: { openai: 0 } }, treeFilterMode: "all" });
+		const beforeSkipped = await Bun.file(getConfigPath()).text();
+
+		await expect(settings.applyCreateOnly([{ path: "treeFilterMode", value: "no-tools" }])).rejects.toThrow(
+			"Provider request limits must be positive numbers",
+		);
+		expect(await Bun.file(getConfigPath()).text()).toBe(beforeSkipped);
+		expect(settings.get("providers.maxInFlightRequests")).toEqual({ openai: 2 });
+
+		await writeSettings({ providers: { maxInFlightRequests: { openai: 0 } } });
+		const beforeApplied = await Bun.file(getConfigPath()).text();
+		await expect(settings.applyCreateOnly([{ path: "treeFilterMode", value: "no-tools" }])).rejects.toThrow(
+			"Provider request limits must be positive numbers",
+		);
+		expect(await Bun.file(getConfigPath()).text()).toBe(beforeApplied);
+		expect(settings.get("providers.maxInFlightRequests")).toEqual({ openai: 2 });
+	});
+
 	describe("model role overrides", () => {
 		it("does not persist temporary default model overrides when another role is saved", async () => {
 			await writeSettings({

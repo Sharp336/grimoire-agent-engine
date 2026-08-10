@@ -56,6 +56,19 @@ else
 end
 return 1`;
 
+const WRITE_FULL_CREATE_ONLY_SCRIPT = `-- OMP_WRITE_FULL_CREATE_ONLY
+if redis.call("EXISTS", KEYS[1]) == 1 then
+	return 0
+end
+redis.call("SET", KEYS[1], ARGV[1])
+redis.call("HSET", KEYS[2], ARGV[2], ARGV[3])
+if ARGV[4] == "1" then
+	redis.call("HSET", KEYS[3], ARGV[2], ARGV[5])
+else
+	redis.call("HDEL", KEYS[3], ARGV[2])
+end
+return 1`;
+
 const APPEND_SCRIPT = `-- OMP_APPEND
 local size = redis.call("APPEND", KEYS[1], ARGV[1])
 redis.call("HSET", KEYS[2], ARGV[2], ARGV[3])
@@ -68,6 +81,14 @@ return 1`;
 
 function encodeTitleMeta(title: SessionTitleUpdate): string {
 	return JSON.stringify(title);
+}
+
+function eexist(p: string): NodeJS.ErrnoException {
+	const error = new Error(`File exists: ${p}`) as NodeJS.ErrnoException;
+	error.code = "EEXIST";
+	error.path = p;
+	error.syscall = "open";
+	return error;
 }
 
 function decodeTitleMeta(raw: string | undefined): SessionTitleUpdate | undefined {
@@ -173,6 +194,27 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 		const head = prefixBytes > 0 ? this.#client.getrange(key, 0, prefixBytes - 1) : Promise.resolve("");
 		const tail = suffixBytes > 0 ? this.#client.getrange(key, -suffixBytes, -1) : Promise.resolve("");
 		return Promise.all([head, tail]);
+	}
+
+	async writeFullCreateOnly(
+		path: string,
+		content: string,
+		mtimeMs: number,
+		title?: SessionTitleUpdate,
+	): Promise<void> {
+		const inserted = await this.#client.send("EVAL", [
+			WRITE_FULL_CREATE_ONLY_SCRIPT,
+			"3",
+			this.#fileKey(path),
+			this.#metaKey(),
+			this.#titleMetaKey(),
+			content,
+			path,
+			String(mtimeMs),
+			title ? "1" : "0",
+			title ? encodeTitleMeta(title) : "",
+		]);
+		if (inserted === 0 || inserted === 0n || inserted === "0") throw eexist(path);
 	}
 
 	async writeFull(path: string, content: string, mtimeMs: number, title?: SessionTitleUpdate): Promise<void> {

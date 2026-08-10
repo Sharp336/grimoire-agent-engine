@@ -24,6 +24,7 @@ function sessionFile(
 function discovery(
 	files: readonly PrimeSourceFile[],
 	excluded: readonly PrimeSourceExcludedEntry[] = [],
+	maxEntries = 100,
 ): PrimeImportSourceDiscovery {
 	return {
 		snapshot: {
@@ -34,8 +35,9 @@ function discovery(
 			sessionRoot: "/prime/sessions",
 			maxFileBytes: 1_000_000,
 			maxTotalBytes: 1_000_000,
-			maxEntries: 100,
+			maxEntries,
 			files: files.map(({ contentBase64: _contentBase64, ...metadata }) => metadata),
+			treeEntries: [],
 		},
 		inventory: { records: files, files, excluded },
 		losses: [],
@@ -58,9 +60,8 @@ const base = (id: string, parentId: string | null, type: string, timestamp = "20
 	parentId,
 	timestamp,
 });
-
-function parse(files: readonly PrimeSourceFile[]) {
-	return parsePrimeSessions(discovery(files));
+function parse(files: readonly PrimeSourceFile[], maxEntries = 100) {
+	return parsePrimeSessions(discovery(files, [], maxEntries));
 }
 
 describe("parsePrimeSessions", () => {
@@ -626,5 +627,240 @@ describe("parsePrimeSessions", () => {
 				}),
 			]),
 		);
+	});
+	it("rejects invalid inline image base64 before apply while preserving valid image payloads", () => {
+		const validData = Buffer.from("valid-image").toString("base64");
+		const result = parse([
+			sessionFile("sessions/current/images.jsonl", [
+				header("images"),
+				entry({
+					...base("invalid", null, "message"),
+					message: {
+						role: "user",
+						content: [{ type: "image", data: "not-base64", mimeType: "image/png" }],
+						timestamp: 1,
+					},
+				}),
+				entry({
+					...base("valid", null, "message"),
+					message: {
+						role: "user",
+						content: [{ type: "image", data: validData, mimeType: "image/png" }],
+						timestamp: 2,
+					},
+				}),
+			]),
+		]);
+		expect(result.sessions[0]?.entries.map(value => value.id)).toEqual(["valid"]);
+		expect(result.sessions[0]?.entries[0]).toMatchObject({
+			message: { content: [{ type: "image", data: validData, mimeType: "image/png" }] },
+		});
+		expect(result.losses).toContainEqual(
+			expect.objectContaining({
+				code: "sessions-invalid-entry",
+				sourceRef: "sessions/current/images.jsonl",
+				line: 2,
+			}),
+		);
+	});
+	it("hydrates full output from Windows-native paths while preserving POSIX source refs", () => {
+		const source = {
+			...sessionFile("sessions/current/windows-paths.jsonl", [
+				header("windows-paths"),
+				entry({
+					...base("bash", null, "message"),
+					message: {
+						role: "bashExecution",
+						command: "run",
+						output: "truncated",
+						exitCode: 0,
+						cancelled: false,
+						truncated: true,
+						fullOutputPath: "C:\\Prime\\sessions\\current\\full-output.txt",
+						timestamp: 1,
+					},
+				}),
+			]),
+			canonicalPath: "C:\\Prime\\sessions\\current\\windows-paths.jsonl",
+		} satisfies PrimeSourceFile;
+		const artifact = {
+			...sessionFile("artifacts/windows-paths/full-output.txt", ["hydrated full output"], "artifacts"),
+			canonicalPath: "C:\\Prime\\sessions\\current\\full-output.txt",
+			sha256: "c".repeat(64),
+		} satisfies PrimeSourceFile;
+
+		const result = parse([source, artifact]);
+		expect(result.sessions[0]?.sourceRef).toBe("sessions/current/windows-paths.jsonl");
+		expect(result.sessions[0]?.entries[0]).toMatchObject({
+			message: {
+				output: "hydrated full output",
+				fullOutputSourceRef: "artifacts/windows-paths/full-output.txt",
+				fullOutputSha256: "c".repeat(64),
+			},
+		});
+		expect(result.losses).not.toContainEqual(
+			expect.objectContaining({
+				code: "sessions-missing-full-output",
+				sourceRef: "sessions/current/windows-paths.jsonl",
+			}),
+		);
+	});
+	it("matches Windows full-output paths case-insensitively while preserving POSIX provenance", () => {
+		const source = {
+			...sessionFile("sessions/current/windows-case.jsonl", [
+				header("windows-case"),
+				entry({
+					...base("bash", null, "message"),
+					message: {
+						role: "bashExecution",
+						command: "run",
+						output: "truncated",
+						exitCode: 0,
+						cancelled: false,
+						truncated: true,
+						fullOutputPath: "C:\\PRIME\\SESSIONS\\CURRENT\\Full-Output.TXT",
+						timestamp: 1,
+					},
+				}),
+			]),
+			canonicalPath: "c:\\Prime\\Sessions\\Current\\windows-case.jsonl",
+		} satisfies PrimeSourceFile;
+		const artifact = {
+			...sessionFile("artifacts/windows-case/full-output.txt", ["hydrated case-insensitive output"], "artifacts"),
+			canonicalPath: "C:\\prime\\sessions\\current\\full-output.txt",
+			sha256: "c".repeat(64),
+		} satisfies PrimeSourceFile;
+
+		const result = parse([source, artifact]);
+		expect(result.sessions[0]?.sourceRef).toBe("sessions/current/windows-case.jsonl");
+		expect(result.sessions[0]?.entries[0]).toMatchObject({
+			message: {
+				output: "hydrated case-insensitive output",
+				fullOutputSourceRef: "artifacts/windows-case/full-output.txt",
+				fullOutputSha256: "c".repeat(64),
+			},
+		});
+		expect(result.losses).not.toContainEqual(
+			expect.objectContaining({
+				code: "sessions-missing-full-output",
+				sourceRef: "sessions/current/windows-case.jsonl",
+			}),
+		);
+	});
+
+	it("rejects inherited session and entry fields supplied through __proto__", () => {
+		const inheritedHeader = JSON.stringify({
+			["__proto__"]: {
+				type: "session",
+				version: 3,
+				id: "inherited-header",
+				timestamp: "2026-01-01T00:00:00.000Z",
+				cwd: "/attacker",
+			},
+		});
+		const headerResult = parse([sessionFile("sessions/current/inherited-header.jsonl", [inheritedHeader])]);
+		expect(headerResult.sessions).toEqual([]);
+		expect(headerResult.losses).toContainEqual(
+			expect.objectContaining({
+				code: "sessions-invalid-entry",
+				sourceRef: "sessions/current/inherited-header.jsonl",
+				line: 1,
+			}),
+		);
+
+		const inheritedEntry = JSON.stringify({
+			["__proto__"]: {
+				type: "message",
+				id: "inherited-entry",
+				parentId: null,
+				timestamp: "2026-01-01T00:00:01.000Z",
+				message: {
+					role: "user",
+					content: "attacker-inherited",
+					timestamp: 1,
+				},
+			},
+		});
+		const entryResult = parse([
+			sessionFile("sessions/current/inherited-entry.jsonl", [header("safe"), inheritedEntry]),
+		]);
+		expect(entryResult.sessions).toHaveLength(1);
+		expect(entryResult.sessions[0]?.entries).toEqual([]);
+		expect(entryResult.sessions[0]?.fatalLossCodes).toEqual(["sessions-invalid-entry"]);
+		expect(entryResult.losses).toContainEqual(
+			expect.objectContaining({
+				code: "sessions-invalid-entry",
+				sourceRef: "sessions/current/inherited-entry.jsonl",
+				line: 2,
+			}),
+		);
+	});
+
+	it("keeps genuinely header-only sessions importable while marking all-lost rows fatal", () => {
+		const empty = parse([sessionFile("sessions/current/empty.jsonl", [header("empty")])]);
+		expect(empty.sessions[0]?.entries).toEqual([]);
+		expect(empty.sessions[0]?.fatalLossCodes).toBeUndefined();
+
+		const allLost = parse([
+			sessionFile("sessions/current/all-lost.jsonl", [
+				header("all-lost"),
+				entry({ ...base("unsupported", null, "custom"), customType: "opaque" }),
+			]),
+		]);
+		expect(allLost.sessions[0]?.entries).toEqual([]);
+		expect(allLost.sessions[0]?.fatalLossCodes).toEqual(["sessions-invalid-entry"]);
+	});
+
+	it("bounds rows and keeps deep linear ancestry near-linear", () => {
+		const lines = [header("chain")];
+		let parent: string | null = null;
+		for (let index = 0; index < 90; index += 1) {
+			const id = `label-${index}`;
+			lines.push(entry({ ...base(id, parent, "label"), targetId: id }));
+			parent = id;
+		}
+		const chain = parse([sessionFile("sessions/current/chain.jsonl", lines)]);
+		expect(chain.sessions[0]?.entries).toHaveLength(90);
+		expect(chain.losses).not.toContainEqual(expect.objectContaining({ code: "source-budget-exceeded" }));
+
+		const bounded = parse(
+			[
+				sessionFile("sessions/current/bounded.jsonl", [
+					header("bounded"),
+					entry({ ...base("one", null, "label"), targetId: "one" }),
+					entry({ ...base("two", "one", "label"), targetId: "two" }),
+					entry({ ...base("three", "two", "label"), targetId: "three" }),
+				]),
+			],
+			3,
+		);
+		expect(bounded.sessions[0]?.fatalLossCodes).toEqual(["source-budget-exceeded"]);
+		expect(bounded.losses).toContainEqual(
+			expect.objectContaining({ code: "source-budget-exceeded", line: 4, byteOffset: expect.any(Number) }),
+		);
+	});
+	it("accounts for deeply nested details without throwing or importing the affected session", () => {
+		let details: Record<string, unknown> = { leaf: "value" };
+		for (let depth = 0; depth < 300; depth += 1) details = { next: details };
+		const result = parse([
+			sessionFile("sessions/current/deep-details.jsonl", [
+				header("deep-details"),
+				entry({ ...base("deep", null, "branch_summary"), fromId: "deep", summary: "deep", details }),
+			]),
+		]);
+
+		expect(result.sessions).toHaveLength(1);
+		expect(result.sessions[0]?.entries).toEqual([]);
+		expect(result.sessions[0]?.fatalLossCodes).toEqual(["source-budget-exceeded"]);
+		expect(result.losses).toEqual([
+			{
+				code: "source-budget-exceeded",
+				domain: "sessions",
+				sourceRef: "sessions/current/deep-details.jsonl",
+				line: 2,
+				byteOffset: expect.any(Number),
+				byteLength: expect.any(Number),
+			},
+		]);
 	});
 });

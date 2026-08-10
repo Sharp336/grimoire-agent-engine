@@ -10,6 +10,8 @@ export type {
 	AuthCredentialStore,
 	AuthStorageData,
 	AuthStorageOptions,
+	CredentialBatchInsert,
+	CredentialBatchInsertResult,
 	CredentialOrigin,
 	CredentialOriginKind,
 	OAuthAccountIdentity,

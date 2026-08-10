@@ -280,6 +280,9 @@ export class ConfigFile<T> implements IConfigFile<T> {
 			});
 		}
 	}
+	parse(content: string): LoadResult<T> {
+		return this.#parseContent(content.trim());
+	}
 
 	tryLoad(): LoadResult<T> {
 		if (this.#cache) return this.#cache;
