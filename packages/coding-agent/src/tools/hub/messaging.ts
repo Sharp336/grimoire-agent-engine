@@ -16,7 +16,13 @@ import type { Settings } from "../../config/settings";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import { IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "../../irc/bus";
 import type { Theme } from "../../modes/theme/theme";
-import { type AgentRegistry, isLocalSession, isMessageablePeer, MAIN_AGENT_ID } from "../../registry/agent-registry";
+import {
+	type AgentRegistry,
+	BROADCAST_ID,
+	isLocalSession,
+	isMessageablePeer,
+	MAIN_AGENT_ID,
+} from "../../registry/agent-registry";
 import { registerPersistedSubagents } from "../../registry/persisted-agents";
 import { canSpawnAtDepth } from "../../task/types";
 import { Ellipsis, renderStatusLine, renderTreeList, truncateToWidth } from "../../tui";
@@ -164,7 +170,7 @@ export async function executeSend(
 	if (to === senderId) {
 		return hubErrorResult("Cannot send a message to yourself.", { op: "send", from: senderId, to });
 	}
-	const isBroadcast = to === "all";
+	const isBroadcast = to === BROADCAST_ID;
 	if (isBroadcast && params.await) {
 		return hubErrorResult('`await` is invalid with to:"all" — broadcasts have no single replier.', {
 			op: "send",
@@ -446,7 +452,7 @@ function callTitle(args: HubRenderArgs | undefined, theme: Theme): string {
 function callMeta(args: HubRenderArgs | undefined): string[] {
 	const meta: string[] = [];
 	if (args?.op === "send") {
-		if (args.to === "all") meta.push("broadcast");
+		if (args.to === BROADCAST_ID) meta.push("broadcast");
 		if (args.await) meta.push("await reply");
 		if (args.replyTo) meta.push("reply");
 	}
@@ -538,7 +544,7 @@ function renderSendResult(
 	const timedOut = waited === null;
 
 	const meta: string[] = [];
-	if (to === "all") meta.push("broadcast");
+	if (to === BROADCAST_ID) meta.push("broadcast");
 	if (receipts.length === 1) {
 		const receipt = receipts[0]!;
 		meta.push(theme.fg(outcomeColor(receipt.outcome), receipt.outcome));
