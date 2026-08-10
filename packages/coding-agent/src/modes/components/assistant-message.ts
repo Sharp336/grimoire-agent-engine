@@ -889,9 +889,11 @@ export class AssistantMessageComponent extends Container {
 			const content = message.content[i];
 			if (content.type === "text" && canonicalizeMessage(content.text)) {
 				const trimmed = content.text.trim();
-				// Visual marker applies only to successfully completed text.
+				// Visual marker applies only to successfully completed text
+				// without a caller-supplied text transform (e.g. /live).
 				// Error/aborted turns keep the ordinary assistant style.
 				const isVerbReply =
+					!this.#textColorTransform &&
 					this.#transcriptBlockFinalized &&
 					(this.#lastMessage?.stopReason === "stop" || this.#lastMessage?.stopReason === undefined);
 				if (isVerbReply) {
