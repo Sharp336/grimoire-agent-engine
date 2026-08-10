@@ -17,6 +17,13 @@ export const MAIN_AGENT_ID = "Main";
 /** Reserved pseudo-recipient for `hub send --to all` (broadcast fan-out); never a real/registered agent id. */
 export const BROADCAST_ID = "all";
 
+/**
+ * Reserved leading marker for the cross-process REMOTE agent id space (`@<namespace>/<name>`, see
+ * `src/irc/bus.ts`). A LOCAL agent id (`main`/`sub`) may never begin with it, so local and remote id
+ * spaces are disjoint by construction — no per-id reserved-name or clobber guards are needed.
+ */
+export const REMOTE_ID_PREFIX = "@";
+
 /** Sidecar marker retained beside a child transcript after an explicit kill. */
 const AGENT_TOMBSTONE_SUFFIX = ".tombstone";
 
