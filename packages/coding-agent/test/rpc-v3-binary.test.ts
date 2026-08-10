@@ -392,6 +392,36 @@ describe.skipIf(binaryPath.length === 0)("RPC v3 explicit native-binary process 
 				result: { cancelled: false },
 				revision: expect.any(Number),
 			});
+
+			const availableModels = responseData(
+				await process.request({ id: "available-models", type: "get_available_models" }),
+				"get_available_models",
+			);
+			expect(availableModels).toMatchObject({
+				models: expect.any(Array),
+				usageOrder: expect.any(Array),
+				roles: expect.any(Array),
+				thinkingOptions: expect.any(Array),
+			});
+			expect(
+				await process.request({ id: "set-auto-thinking", type: "set_thinking_level", level: "auto" }),
+			).toMatchObject({
+				command: "set_thinking_level",
+				success: true,
+			});
+			const autoThinkingState = responseData(
+				await process.request({
+					id: "auto-thinking-state",
+					type: "session_invoke",
+					command: { kind: "get_state" },
+				}),
+				"session_invoke",
+			);
+			expect(autoThinkingState).toMatchObject({
+				outcome: "completed",
+				result: { configuredThinkingLevel: "auto" },
+			});
+
 			const recursive = await process.request({
 				id: "nested-recursive",
 				type: "session_invoke",
