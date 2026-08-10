@@ -88,6 +88,7 @@ import {
 	ExtensionRunner,
 	ExtensionToolWrapper,
 	type ExtensionUIContext,
+	isInlineExtensionPath,
 	type LoadExtensionsResult,
 	loadExtensionFromFactory,
 	loadExtensions,
@@ -1694,8 +1695,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getEvalSessionId: () =>
 				session?.getEvalSessionId() ?? options.parentEvalSessionId ?? defaultEvalSessionId(toolSession),
 			assertEvalExecutionAllowed: () => session?.assertEvalExecutionAllowed(),
-			trackEvalExecution: (execution, abortController) =>
-				session ? session.trackEvalExecution(execution, abortController) : execution,
+			trackEvalExecution: (execution, abortController, executionId) =>
+				session ? session.trackEvalExecution(execution, abortController, executionId) : execution,
 			getSessionId: () => sessionManager.getSessionId?.() ?? null,
 			isDisposed: () => session?.isDisposed ?? false,
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
@@ -1991,7 +1992,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// entries (`<inline-N>`) — those are per-session, not source paths.
 			extensionPaths = extensionsResult.extensions
 				.map(ext => ext.resolvedPath)
-				.filter(p => !p.startsWith("<inline"));
+				.filter(p => !isInlineExtensionPath(p));
 		} else if (options.preloadedExtensionPaths) {
 			extensionPaths = options.preloadedExtensionPaths;
 			extensionsResult = await logger.time("loadExtensions", loadExtensions, extensionPaths, cwd, eventBus);
@@ -3368,6 +3369,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						);
 						return tools.filter((tool): tool is AgentTool => tool !== null);
 					},
+			createEvalTool: restrictToolNames ? undefined : () => new EvalTool(toolSession),
 			createComputerTool: restrictToolNames
 				? undefined
 				: async () => (await BUILTIN_TOOLS.computer(toolSession)) ?? null,

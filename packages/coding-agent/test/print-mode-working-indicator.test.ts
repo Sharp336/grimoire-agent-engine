@@ -89,6 +89,24 @@ function createDelayedSession(
 		setPlanModeState: (state: PlanModeState | undefined) => {
 			planModeState = state;
 		},
+		planMode: {
+			enter: async ({
+				planFilePath = "local://PLAN.md",
+				workflow = "parallel",
+			}: {
+				planFilePath?: string;
+				workflow?: "parallel" | "iterative";
+			}) => {
+				planModeState = { enabled: true, paused: false, planFilePath, workflow, reentry: false };
+				modeChanges.push({ mode: "plan", data: { planFilePath, workflow } });
+				planProposalHandler = async title => {
+					const details = { planFilePath: `local://${title}-plan.md`, title, planExists: true };
+					planModeState = { ...planModeState!, planFilePath: details.planFilePath };
+					modeChanges.push({ mode: "plan", data: { planFilePath: details.planFilePath, workflow } });
+					return { content: [{ type: "text" as const, text: "Plan ready for review." }], details };
+				};
+			},
+		},
 		preparePlanForReview: async (title: string) => {
 			const details = { planFilePath: `local://${title}-plan.md`, title, planExists: true };
 			return { content: [{ type: "text" as const, text: "Plan ready for review." }], details };
@@ -187,7 +205,9 @@ describe("print mode working indicator", () => {
 				enabled: true,
 				planFilePath: "local://PLAN.md",
 			});
-			expect(delayed.getModeChanges()).toEqual([{ mode: "plan", data: { planFilePath: "local://PLAN.md" } }]);
+			expect(delayed.getModeChanges()).toEqual([
+				{ mode: "plan", data: { planFilePath: "local://PLAN.md", workflow: "parallel" } },
+			]);
 			const handler = delayed.getPlanProposalHandler();
 			if (!handler) throw new Error("Expected print plan proposal handler");
 			const proposal = await handler("hello");
@@ -197,8 +217,8 @@ describe("print mode working indicator", () => {
 			});
 			expect(delayed.getCurrentPlanMode()).toMatchObject({ planFilePath: "local://hello-plan.md" });
 			expect(delayed.getModeChanges()).toEqual([
-				{ mode: "plan", data: { planFilePath: "local://PLAN.md" } },
-				{ mode: "plan", data: { planFilePath: "local://hello-plan.md" } },
+				{ mode: "plan", data: { planFilePath: "local://PLAN.md", workflow: "parallel" } },
+				{ mode: "plan", data: { planFilePath: "local://hello-plan.md", workflow: "parallel" } },
 			]);
 			delayed.emit({
 				type: "tool_execution_end",
