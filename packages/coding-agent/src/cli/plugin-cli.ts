@@ -464,7 +464,7 @@ async function handleInstall(
 async function handleUninstall(
 	manager: PluginManager,
 	packages: string[],
-	flags: { json?: boolean; scope?: "user" | "project" },
+	flags: { json?: boolean; dryRun?: boolean; scope?: "user" | "project" },
 ): Promise<void> {
 	if (packages.length === 0) {
 		console.error(chalk.red(`Usage: ${APP_NAME} plugin uninstall <package> ...`));
@@ -478,6 +478,12 @@ async function handleUninstall(
 
 	for (const name of packages) {
 		if (installedPlugins.has(name)) {
+			// Dry run: report without mutating
+			if (flags.dryRun) {
+				console.log(chalk.yellow(`${theme.status.warning} Would uninstall marketplace plugin: ${name}`));
+				continue;
+			}
+
 			// Exact match against installed marketplace plugin IDs (name@marketplace)
 			try {
 				await mktMgr.uninstallPlugin(name, flags.scope);
@@ -490,6 +496,16 @@ async function handleUninstall(
 		}
 
 		// npm path
+		// Dry run: report without mutating
+		if (flags.dryRun) {
+			if (flags.json) {
+				console.log(JSON.stringify({ uninstalled: name, dryRun: true }));
+			} else {
+				console.log(chalk.yellow(`${theme.status.warning} Would uninstall npm plugin: ${name}`));
+			}
+			continue;
+		}
+
 		try {
 			await manager.uninstall(name);
 			if (flags.json) {
