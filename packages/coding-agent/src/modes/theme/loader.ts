@@ -149,6 +149,7 @@ export function createTheme(themeJson: ThemeJson, options: CreateThemeOptions = 
 		"toolSuccessBg",
 		"toolErrorBg",
 		"statusLineBg",
+		"finalAnswerBg",
 	]);
 	for (const [key, value] of Object.entries(resolvedColors)) {
 		if (bgColorKeys.has(key)) {

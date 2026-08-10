@@ -504,9 +504,11 @@ export class AssistantMessageComponent extends Container {
 	markTranscriptBlockFinalized(): void {
 		this.#transcriptBlockFinalized = true;
 		this.#stopThinkingAnimation();
-		// If the live pulse was on screen when the block sealed, drop the fast path
-		// and rebuild so the placeholder is removed — finalized blocks never animate.
-		if (this.#thinkingDots) {
+		// Rebuild to apply final-answer visual marker (accent left-border for
+		// stopReason=stop messages). The fast path bypasses updateContent, so
+		// drop it to force a full rebuild with the new style. Also rebuild if
+		// the live thinking pulse was on screen — finalized blocks never animate.
+		if (this.#thinkingDots || this.#lastMessage?.stopReason === "stop") {
 			this.#fastPathKey = undefined;
 			this.#fastPathItems = undefined;
 			if (this.#lastMessage) this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
@@ -874,12 +876,32 @@ export class AssistantMessageComponent extends Container {
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
 			if (content.type === "text" && canonicalizeMessage(content.text)) {
-				// Set paddingY=0 to avoid extra spacing before tool executions
 				const trimmed = content.text.trim();
-				const mdOptions = this.#textColorTransform ? { color: this.#textColorTransform } : undefined;
-				const md = new Markdown(trimmed, 1, 0, getMarkdownTheme(), mdOptions, 0);
-				this.#contentContainer.addChild(md);
-				captureItems?.push({ md, contentIndex: i, blockType: "text", lastText: trimmed });
+				// Final assistant reply (stopReason=stop, no tool calls): tinted
+				// background + accent inline prefix, mirroring user-message style.
+				const isFinalAnswer =
+					this.#transcriptBlockFinalized &&
+					message.stopReason === "stop" &&
+					!message.content.some(c => c.type === "toolCall");
+				if (isFinalAnswer) {
+					const finalBg = (value: string) => theme.bg("finalAnswerBg", value);
+					const finalFg = (value: string) => theme.fg("finalAnswerText", value);
+					const marked = theme.fg("accent", "▌ ") + trimmed;
+					const md = new Markdown(marked, 1, 1, getMarkdownTheme(), {
+						bgColor: finalBg,
+						color: finalFg,
+					}, 0);
+					md.setIgnoreTight(true);
+					this.#contentContainer.addChild(md);
+					captureItems?.push({ md, contentIndex: i, blockType: "text", lastText: marked });
+				} else {
+					const mdOptions = this.#textColorTransform
+						? { color: this.#textColorTransform }
+						: undefined;
+					const md = new Markdown(trimmed, 1, 0, getMarkdownTheme(), mdOptions, 0);
+					this.#contentContainer.addChild(md);
+					captureItems?.push({ md, contentIndex: i, blockType: "text", lastText: trimmed });
+				}
 				hasRenderedContent = true;
 			} else if (content.type === "thinking" && resolveThinkingDisplay(content, this.proseOnlyThinking).visible) {
 				const thinkingText = resolveThinkingDisplay(content, this.proseOnlyThinking).text;
