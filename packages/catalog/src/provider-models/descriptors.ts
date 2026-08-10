@@ -60,6 +60,7 @@ import {
 	zhipuCodingPlanModelManagerOptions,
 } from "./openai-compat";
 import {
+	commandCodeModelManagerOptions,
 	cursorModelManagerOptions,
 	devinModelManagerOptions,
 	gitLabDuoWorkflowModelManagerOptions,
@@ -142,6 +143,12 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["CLOUDFLARE_AI_GATEWAY_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => cloudflareAiGatewayModelManagerOptions(config),
 		catalogDiscovery: { label: "Cloudflare AI Gateway" },
+	},
+	{
+		id: "command-code",
+		defaultModel: "deepseek/deepseek-v4-flash",
+		envVars: ["COMMAND_CODE_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => commandCodeModelManagerOptions(config),
 	},
 	{
 		id: "cursor",

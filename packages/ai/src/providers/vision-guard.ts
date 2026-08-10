@@ -22,6 +22,33 @@ export function partitionVisionContent(
 	};
 }
 
+/**
+ * Append one content block to a wire `blocks` array in its original position,
+ * substituting the non-vision placeholder in place for unsupported images so
+ * interleaved `text → image → text` prompts keep their order on the wire.
+ * `toText` may return `null` to drop a block (e.g. skip empty text). This is
+ * the order-preserving counterpart to `partitionVisionContent`, which exists
+ * for providers whose wire format is inherently flat (a single string plus an
+ * images array) and cannot represent interleaving.
+ */
+export function appendVisionWireBlock<const T>(
+	blocks: T[],
+	block: TextContent | ImageContent,
+	supportsImages: boolean,
+	toText: (text: string) => T | null,
+	toImage: (block: ImageContent) => T,
+): void {
+	if (block.type === "text") {
+		const wire = toText(block.text);
+		if (wire) blocks.push(wire);
+	} else if (supportsImages) {
+		blocks.push(toImage(block));
+	} else {
+		const wire = toText(NON_VISION_IMAGE_PLACEHOLDER);
+		if (wire) blocks.push(wire);
+	}
+}
+
 export function joinTextWithImagePlaceholder(text: string, omittedImages: boolean): string {
 	const parts: string[] = [];
 	if (text.length > 0) {

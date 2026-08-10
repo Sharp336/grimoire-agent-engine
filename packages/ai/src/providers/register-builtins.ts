@@ -34,6 +34,7 @@ import {
 import type { BedrockOptions } from "./amazon-bedrock";
 import type { AnthropicOptions } from "./anthropic";
 import type { AzureOpenAIResponsesOptions } from "./azure-openai-responses";
+import type { CommandCodeOptions } from "./command-code";
 import type { CursorOptions } from "./cursor";
 import type { DevinOptions } from "./devin";
 import type { GoogleOptions } from "./google";
@@ -136,6 +137,14 @@ interface DevinProviderModule {
 	streamDevin: (model: Model<"devin-agent">, context: Context, options: DevinOptions) => AssistantMessageEventStream;
 }
 
+interface CommandCodeProviderModule {
+	streamCommandCode: (
+		model: Model<"command-code">,
+		context: Context,
+		options: CommandCodeOptions,
+	) => AssistantMessageEventStream;
+}
+
 interface BedrockProviderModule {
 	streamBedrock: (
 		model: Model<"bedrock-converse-stream">,
@@ -160,6 +169,7 @@ let ollamaProviderModulePromise: Promise<LazyProviderModule<"ollama-chat">> | un
 let cursorProviderModulePromise: Promise<LazyProviderModule<"cursor-agent">> | undefined;
 let cursorProviderModuleOverride: LazyProviderModule<"cursor-agent"> | undefined;
 let devinProviderModulePromise: Promise<LazyProviderModule<"devin-agent">> | undefined;
+let commandCodeProviderModulePromise: Promise<LazyProviderModule<"command-code">> | undefined;
 let bedrockProviderModuleOverride: LazyProviderModule<"bedrock-converse-stream"> | undefined;
 let bedrockProviderModulePromise: Promise<LazyProviderModule<"bedrock-converse-stream">> | undefined;
 
@@ -228,6 +238,18 @@ const PROVIDER_HANDLED_STREAM_TIMEOUTS: LazyStreamLimits = {
 
 const OPENAI_IDLE_FLOORED_LAZY_STREAM_LIMITS: LazyStreamLimits = {
 	openAIIdleEnvFloorsFirstEvent: true,
+};
+
+/**
+ * The Command Code gateway emits its first frame within seconds on the happy
+ * path; when its upstream stalls it holds the connection open for minutes and
+ * then sends a `server_error` frame. The global 300s first-event floor turns
+ * that into a very long hang, so tighten it — heavy reasoning turns still fit
+ * comfortably, and the retry layer treats the gateway's error frames as
+ * transient either way.
+ */
+const COMMAND_CODE_LAZY_STREAM_LIMITS: LazyStreamLimits = {
+	defaultFirstEventTimeoutMs: 180_000,
 };
 
 function forwardStream<TApi extends Api>(
@@ -454,6 +476,14 @@ function loadDevinProviderModule(): Promise<LazyProviderModule<"devin-agent">> {
 	return devinProviderModulePromise;
 }
 
+function loadCommandCodeProviderModule(): Promise<LazyProviderModule<"command-code">> {
+	commandCodeProviderModulePromise ||= import("./command-code").then(module => {
+		const provider = module as CommandCodeProviderModule;
+		return { stream: provider.streamCommandCode };
+	});
+	return commandCodeProviderModulePromise;
+}
+
 function loadBedrockProviderModule(): Promise<LazyProviderModule<"bedrock-converse-stream">> {
 	if (bedrockProviderModuleOverride) {
 		return Promise.resolve(bedrockProviderModuleOverride);
@@ -498,6 +528,7 @@ export const streamOpenAIResponses = createLazyStream(
 );
 export const streamCursor = createLazyStream(loadCursorProviderModule);
 export const streamDevin = createLazyStream(loadDevinProviderModule);
+export const streamCommandCode = createLazyStream(loadCommandCodeProviderModule, COMMAND_CODE_LAZY_STREAM_LIMITS);
 export const streamOllama = createLazyStream(loadOllamaProviderModule, OPENAI_IDLE_FLOORED_LAZY_STREAM_LIMITS);
 
 export const streamBedrock = createLazyStream(loadBedrockProviderModule);

@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `command-code` provider catalog entry and static model seed transcribed from Command Code's recovered client catalog.
+
+### Fixed
+
+- `command-code` static seed rows are no longer overwritten by same-id `models.dev` references during `gen:models` (reasoning/input/name stay as authored), and the bundled `models.json` was regenerated from that seed.
+- `command-code` models now carry their real per-token rates instead of a zero
+  cost placeholder, so usage is priced to the same figure the gateway reports.
+- `command-code` models keep their authored reasoning-effort ladder: the
+  generated-catalog thinking re-bake would offer efforts the gateway rejects
+  (`deepseek/deepseek-v4-flash` takes only `high`/`max`), so the provider is
+  exempt like other providers with a wire-authored ladder.
 ## [17.2.12] - 2026-08-08
 
 ### Fixed

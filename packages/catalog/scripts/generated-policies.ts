@@ -172,6 +172,11 @@ export function applyGeneratedModelPolicies(models: ModelSpec<Api>[]): void {
  */
 export function rebakeModelThinking(model: ModelSpec<Api>): void {
 	if (isVariantCollapsedSpec(model)) return;
+	// Command Code gates `params.reasoning_effort` per model on its own ladder
+	// (deepseek accepts only high/max, gpt-5.4 stops at xhigh, several models
+	// take no effort at all). The generic deriver reads the upstream family name
+	// and would offer efforts the gateway rejects, so keep the authored value.
+	if (model.provider === "command-code") return;
 	if (
 		model.provider === "alibaba-token-plan" &&
 		(model.id === "qwen3.8-max-preview" || model.id === "qwen3.8-max") &&

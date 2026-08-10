@@ -621,6 +621,31 @@ describe("model thinking derivation", () => {
 		expect(clampThinkingLevelForModel(model, Effort.High)).toBeUndefined();
 	});
 
+	it("keeps Command Code authored ladders and refuses to invent dials", () => {
+		// Mirrors official CLI `EFFORTS_BY_MODEL`: DeepSeek publishes high/max;
+		// Qwen/Kimi are reasoning models with no `/effort` dial.
+		const deepseek = createModel({
+			id: "deepseek/deepseek-v4-flash",
+			api: "command-code",
+			provider: "command-code",
+			baseUrl: "https://api.command.codes",
+			thinking: { mode: "effort", efforts: [Effort.High, Effort.Max] },
+		});
+		const qwen = createModel({
+			id: "Qwen/Qwen3.7-Plus",
+			api: "command-code",
+			provider: "command-code",
+			baseUrl: "https://api.command.codes",
+		});
+
+		expect(deepseek.compat?.trustExplicitThinkingOnly).toBe(true);
+		expect(deepseek.thinking?.efforts).toEqual([Effort.High, Effort.Max]);
+		expect(qwen.reasoning).toBe(true);
+		expect(qwen.thinking).toBeUndefined();
+		expect(getSupportedEfforts(qwen)).toEqual([]);
+		expect(clampThinkingLevelForModel(qwen, Effort.High)).toBeUndefined();
+	});
+
 	it("bakes the wire-exact five-tier low..max ladder on GPT-5.6 wire-effort APIs", () => {
 		const codex = createModel({
 			id: "gpt-5.6-sol",

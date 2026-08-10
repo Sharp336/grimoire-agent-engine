@@ -38,6 +38,7 @@ import type {
 	CompatOf,
 	Model,
 	ModelSpec,
+	ResolvedCommandCodeCompat,
 	ResolvedDevinCompat,
 	ResolvedOpenAICompat,
 	ResolvedOpenAIResponsesCompat,
@@ -144,10 +145,12 @@ export function resolveModelThinking<TApi extends Api>(
 	if (spec.thinking && Array.isArray(spec.thinking.efforts) && spec.thinking.efforts.length > 0) {
 		return fillThinkingWireDefaults(spec, compat, spec.thinking);
 	}
-	// Cascade selects effort only by routing to a sibling model id, so a Devin
-	// model with no explicit routed thinking has no controllable surface —
-	// never fabricate an effort ladder from identity.
-	if ((compat as ResolvedDevinCompat | undefined)?.trustExplicitThinkingOnly === true) return undefined;
+	// Providers that dial effort only via authored metadata (Devin sibling
+	// routing; Command Code `EFFORTS_BY_MODEL`) must not fabricate a ladder
+	// from identity when the seed/spec omits `thinking`.
+	if ((compat as ResolvedDevinCompat | ResolvedCommandCodeCompat | undefined)?.trustExplicitThinkingOnly === true) {
+		return undefined;
+	}
 	// Empty/malformed explicit metadata is treated as absent — infer instead.
 	return deriveThinking(spec, compat);
 }

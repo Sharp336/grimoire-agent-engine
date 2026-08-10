@@ -19,7 +19,8 @@ export type KnownApi =
 	| "ollama-chat"
 	| "cursor-agent"
 	| "gitlab-duo-agent"
-	| "devin-agent";
+	| "devin-agent"
+	| "command-code";
 export type Api = KnownApi | (string & {});
 
 /** Canonical thinking transport used by a model. */
@@ -770,6 +771,25 @@ export interface DevinCompat {
 /** Fully-resolved devin-agent compat view. */
 export type ResolvedDevinCompat = Required<DevinCompat>;
 
+/**
+ * Compatibility settings for the command-code (Command Code `/alpha/generate`)
+ * API. The gateway only dials `params.reasoning_effort` for models that publish
+ * an authored effort ladder (CLI `EFFORTS_BY_MODEL`); reasoning models without
+ * that ladder still think, but omit the wire field ("Default").
+ */
+export interface CommandCodeCompat {
+	/**
+	 * Trust only explicit `thinking` metadata; never derive a thinking surface
+	 * from model identity. A reasoning model with no authored effort ladder
+	 * resolves to `thinking: undefined` (`reasoning: true`, no controllable
+	 * effort) instead of a fabricated minimal/low/medium/high ladder.
+	 */
+	trustExplicitThinkingOnly?: boolean;
+}
+
+/** Fully-resolved command-code compat view. */
+export type ResolvedCommandCodeCompat = Required<CommandCodeCompat>;
+
 /** Sparse, user-authored compat overrides for a given API (models.json / config vocabulary). */
 export type CompatConfigOf<TApi extends Api> = TApi extends
 	| "openai-completions"
@@ -784,7 +804,9 @@ export type CompatConfigOf<TApi extends Api> = TApi extends
 			? BedrockCompat
 			: TApi extends "devin-agent"
 				? DevinCompat
-				: undefined;
+				: TApi extends "command-code"
+					? CommandCodeCompat
+					: undefined;
 
 /** Resolved compat for a given API: complete record, materialized once by `buildModel`. */
 export type CompatOf<TApi extends Api> = TApi extends "openrouter"
@@ -799,7 +821,9 @@ export type CompatOf<TApi extends Api> = TApi extends "openrouter"
 					? ResolvedBedrockCompat
 					: TApi extends "devin-agent"
 						? ResolvedDevinCompat
-						: undefined;
+						: TApi extends "command-code"
+							? ResolvedCommandCodeCompat
+							: undefined;
 
 /** Provider-native compaction endpoint configuration for one model. */
 export interface RemoteCompactionConfig<TApi extends Api = Api> {

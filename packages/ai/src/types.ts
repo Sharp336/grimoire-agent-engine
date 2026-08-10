@@ -2,6 +2,7 @@ export * from "@oh-my-pi/pi-catalog/effort";
 export * from "@oh-my-pi/pi-catalog/types";
 
 import type { Type } from "@oh-my-pi/omptype";
+import type { ZodLikeSchema } from "@oh-my-pi/omptype/zod";
 import type {
 	DeleteArgs,
 	DeleteResult,
@@ -41,6 +42,7 @@ import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
 import type { FallbackParam, StopDetails } from "./providers/anthropic-wire";
 import type { AzureOpenAIResponsesOptions } from "./providers/azure-openai-responses";
+import type { CommandCodeOptions } from "./providers/command-code";
 import type { CursorOptions } from "./providers/cursor";
 import type { DevinOptions } from "./providers/devin";
 import type { GitLabDuoWorkflowOptions } from "./providers/gitlab-duo-workflow";
@@ -85,6 +87,7 @@ export interface ApiOptionsMap {
 	"cursor-agent": CursorOptions;
 	"gitlab-duo-agent": GitLabDuoWorkflowOptions;
 	"devin-agent": DevinOptions;
+	"command-code": CommandCodeOptions;
 }
 // Compile-time exhaustiveness check - this will fail if ApiOptionsMap doesn't have all KnownApi keys
 type _CheckExhaustive =
@@ -1152,7 +1155,7 @@ export type TJsonSchema = Record<string, unknown>;
  * Canonical authoring uses ArkType. Extension compat may supply a JSON Schema
  * object (including TypeBox static schema objects).
  */
-export type TSchema = Type | TJsonSchema;
+export type TSchema = Type | ZodLikeSchema<unknown> | TJsonSchema;
 
 /** Resolve parameter types for tool execution / handlers. */
 export type Static<S> = S extends Type ? S["infer"] : S extends { static: infer T } ? T : unknown;

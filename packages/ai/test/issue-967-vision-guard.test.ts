@@ -167,6 +167,29 @@ describe("issue #967 vision guard", () => {
 		});
 	});
 
+	it("preserves interleaved text/image order in responses content", () => {
+		const model = makeModel("openai-responses", "openrouter");
+		const userContent = convertResponsesInputContent(
+			[
+				{ type: "text", text: "caption above" },
+				{ type: "image", mimeType: "image/png", data: "ZmFrZQ==" },
+				{ type: "text", text: "caption below" },
+			],
+			true,
+			model.compat.supportsImageDetailOriginal,
+		);
+		// Interleaved blocks must stay in original order, not text-then-image.
+		expect(userContent).toEqual([
+			{ type: "input_text", text: "caption above" },
+			{
+				type: "input_image",
+				detail: "auto",
+				image_url: "data:image/png;base64,ZmFrZQ==",
+			},
+			{ type: "input_text", text: "caption below" },
+		]);
+	});
+
 	it("strips non-vision images from OpenAI responses payload builders", () => {
 		const model = makeModel("openai-responses", "openrouter");
 		const userContent = convertResponsesInputContent(

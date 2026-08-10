@@ -10,6 +10,7 @@ import { basetenProvider } from "./baseten";
 import { bedrockMantleProvider } from "./bedrock-mantle";
 import { cerebrasProvider } from "./cerebras";
 import { cloudflareAiGatewayProvider } from "./cloudflare-ai-gateway";
+import { commandCodeProvider } from "./command-code";
 import { coreWeaveProvider } from "./coreweave";
 import { cursorProvider } from "./cursor";
 import { deepseekProvider } from "./deepseek";
@@ -92,6 +93,7 @@ const ALL = [
 	kimiCodeProvider,
 	openrouterProvider,
 	githubCopilotProvider,
+	commandCodeProvider,
 	cursorProvider,
 	devinProvider,
 	googleAntigravityProvider,

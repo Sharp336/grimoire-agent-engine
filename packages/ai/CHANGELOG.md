@@ -2,6 +2,51 @@
 
 ## [Unreleased]
 
+### Added
+
+- `command-code` browser login: `/login` now runs the Command Code studio
+  handshake on a loopback callback (port 5959) and stores the returned API key,
+  so authenticating no longer requires the separate `command-code` CLI.
+- Added the `command-code` API/provider for Command Code's JSONL `/alpha/generate` wire protocol, with auth-file fallback via `~/.commandcode/auth.json`.
+
+### Fixed
+
+- `command-code` tool-result turns now hoist image blocks into a follow-up user message so vision-capable models still receive screenshot/PDF bytes (the tool-result `output` channel stays text-only on the wire).
+- `command-code` requests now match the official CLI: the `x-project-slug`,
+  `x-taste-learning` and `x-co-flag` headers are sent (they were missing), the
+  envelope's `mode` is omitted on the main agent loop instead of being pinned to
+  `"agent"`, `x-session-id` stays stable across turns, and `config` carries the
+  real repository snapshot (structure, branch, status, recent commits) rather
+  than empty placeholders.
+- `command-code` streams now handle the gateway's full event vocabulary. Tool
+  arguments stream in through `tool-input-start`/`-delta`/`-end` (emitting
+  `toolcall_delta`), `text-start`/`text-end` bound text blocks, and
+  `start-step`/`finish-step`/`provider-metadata` are recognized framing instead
+  of unknown events.
+- `command-code` usage no longer double-counts cached prompt tokens: `input` is
+  the non-cached bucket (`inputTokenDetails.noCacheTokens`), and
+  `reasoningTokens` is reported. Combined with real catalog pricing, the
+  computed cost now matches the gateway's own `cost` figure.
+- `command-code` re-sends the request while the gateway answers `pause_turn`
+  (up to five continuations), accumulating content and usage.
+- `command-code` error frames keep the gateway's `type`, `statusCode` and
+  `isRetryable`, so a transient `server_error` is retried instead of surfacing
+  as a terminal "Network connection lost."; a stalled stream also fails through
+  a first-event watchdog instead of hanging until the socket drops.
+- `TSchema` now admits `@oh-my-pi/omptype/zod` schemas (`ZodLikeSchema`) directly.
+  The facade only satisfied the union through its `Type` base, so proving
+  assignability required a deep structural walk of the recursive
+  `FluentType`/`ifEquals` surface — a check both `tsc` and `tsgo` abandon once the
+  provider-registry union grows, surfacing as a spurious `TS2322` at unrelated
+  `registerTool({ parameters: pi.zod.object(...) })` callsites. Naming the facade
+  in the union lets the compiler decide by declared variance instead.
+### Breaking Changes
+
+- Fixed GitHub Copilot's permanent `model_not_available_for_integrator` response being retried and replaced with transient fleet-skew guidance, preserving the provider's actionable `Available models` list instead ([#7819](https://github.com/can1357/oh-my-pi/issues/7819)).
+
+### Added
+
+- Added Cursor personal monthly USD quota and remaining-balance reporting with verified profile email account labels.
 ## [17.2.12] - 2026-08-08
 
 ### Fixed
