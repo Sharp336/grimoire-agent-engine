@@ -335,7 +335,13 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	setHasToolTimeline(has: boolean): void {
+		if (this.#hasToolTimeline === has) return;
 		this.#hasToolTimeline = has;
+		if (this.#lastMessage) {
+			this.#fastPathKey = undefined;
+			this.#fastPathItems = undefined;
+			this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
+		}
 	}
 
 	override dispose(): void {
