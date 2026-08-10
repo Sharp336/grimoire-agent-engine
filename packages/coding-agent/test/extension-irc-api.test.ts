@@ -66,7 +66,7 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 		expect(typeof irc.setRemoteTransport).toBe("function");
 		irc.registerRemotePeer?.({ id: "remote-peer", displayName: "remote-peer" });
 		let seen: string | undefined;
-		irc.setRemoteTransport?.({
+		irc.setRemoteTransport?.("cluster-a", {
 			async send(message) {
 				seen = message.to;
 				return { to: message.to, outcome: "injected" };
@@ -85,7 +85,7 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 		expect(ref?.ownerToken?.startsWith("<inline>:")).toBe(true);
 
 		let seen: string | undefined;
-		irc.setRemoteTransport?.({
+		irc.setRemoteTransport?.("cluster-a", {
 			async send(message) {
 				seen = message.to;
 				return { to: message.to, outcome: "injected" };

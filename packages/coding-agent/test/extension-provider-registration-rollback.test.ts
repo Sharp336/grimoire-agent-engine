@@ -274,7 +274,7 @@ describe("extension provider registration rollback", () => {
 			await expect(
 				loadExtensionFromFactory(
 					pi => {
-						pi.irc.setRemoteTransport?.(transport);
+						pi.irc.setRemoteTransport?.("cluster-a", transport);
 						throw new Error("failed after installing transport");
 					},
 					process.cwd(),
@@ -303,7 +303,7 @@ describe("extension provider registration rollback", () => {
 			// Load #1 installs its transport and registers a peer routed through it.
 			await loadExtensionFromFactory(
 				pi => {
-					pi.irc.setRemoteTransport?.({
+					pi.irc.setRemoteTransport?.("cluster-a", {
 						async send(message) {
 							seenFirst.push(message.to);
 							return { to: message.to, outcome: "injected" };
@@ -321,7 +321,7 @@ describe("extension provider registration rollback", () => {
 			await expect(
 				loadExtensionFromFactory(
 					pi => {
-						pi.irc.setRemoteTransport?.({
+						pi.irc.setRemoteTransport?.("cluster-b", {
 							async send(message) {
 								return { to: message.to, outcome: "injected" };
 							},
