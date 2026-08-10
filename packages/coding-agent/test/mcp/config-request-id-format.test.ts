@@ -121,3 +121,38 @@ test('an explicit "number" is the default, so dedup collapses it with an unset a
 	// same connection and only one survives.
 	expect(Object.keys(configs)).toHaveLength(1);
 });
+
+test("protocolMode survives both OMP-owned config paths", async () => {
+	const native = await loadFrom(path.join(".omp", "mcp.json"), {
+		modern: { type: "stdio", command: "/bin/echo", protocolMode: "auto" },
+	});
+	expect(native.modern?.protocolMode).toBe("auto");
+
+	const standalone = await loadFrom(".mcp.json", {
+		"standalone-modern": { type: "stdio", command: "/bin/echo", protocolMode: "2026-07-28" },
+	});
+	expect(standalone["standalone-modern"]?.protocolMode).toBe("2026-07-28");
+});
+
+test("an unrecognized protocolMode is dropped", async () => {
+	const configs = await loadFrom(path.join(".omp", "mcp.json"), {
+		bogus: { type: "stdio", command: "/bin/echo", protocolMode: "future" },
+	});
+	expect(configs.bogus?.protocolMode).toBeUndefined();
+});
+
+test("different protocol modes identify different MCP connections", async () => {
+	const configs = await loadFrom(path.join(".omp", "mcp.json"), {
+		auto: { type: "stdio", command: "/bin/echo", protocolMode: "auto" },
+		legacy: { type: "stdio", command: "/bin/echo" },
+	});
+	expect(Object.keys(configs).sort()).toEqual(["auto", "legacy"]);
+});
+
+test('explicit "legacy" protocolMode matches the default', async () => {
+	const configs = await loadFrom(path.join(".omp", "mcp.json"), {
+		explicit: { type: "stdio", command: "/bin/echo", protocolMode: "legacy" },
+		implicit: { type: "stdio", command: "/bin/echo" },
+	});
+	expect(Object.keys(configs)).toHaveLength(1);
+});

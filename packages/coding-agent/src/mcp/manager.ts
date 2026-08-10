@@ -16,6 +16,7 @@ import {
 	connectToServer,
 	disconnectServer,
 	getPrompt,
+	getToolCachePolicy,
 	listPrompts,
 	listResources,
 	listResourceTemplates,
@@ -319,14 +320,14 @@ export class MCPManager {
 
 	#subscribeAndTrack(name: string, connection: MCPServerConnection, uris: string[], notificationEpoch: number): void {
 		void subscribeToResources(connection, uris)
-			.then(() => {
+			.then(acceptedUris => {
 				const action = resolveSubscriptionPostAction(
 					this.#notificationsEnabled,
 					this.#notificationsEpoch,
 					notificationEpoch,
 				);
 				if (action === "rollback") {
-					void unsubscribeFromResources(connection, uris).catch(error => {
+					void unsubscribeFromResources(connection, acceptedUris).catch(error => {
 						logger.debug("Failed to rollback stale MCP resource subscription", {
 							path: `mcp:${name}`,
 							error,
@@ -337,7 +338,7 @@ export class MCPManager {
 				if (action === "ignore") {
 					return;
 				}
-				this.#subscribedResources.set(name, new Set(uris));
+				this.#subscribedResources.set(name, new Set(acceptedUris));
 			})
 			.catch(error => {
 				logger.debug("Failed to subscribe to MCP resources", { path: `mcp:${name}`, error });
@@ -554,7 +555,7 @@ export class MCPManager {
 					const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
 					this.#replaceServerTools(name, customTools);
 					void this.#onToolsChanged?.(this.#tools);
-					void this.toolCache?.set(name, config, serverTools);
+					void this.toolCache?.set(name, config, serverTools, getToolCachePolicy(connection));
 
 					onStatus?.({ type: "connected", serverName: name });
 					await this.#loadServerResourcesAndPrompts(name, connection);
@@ -1123,7 +1124,7 @@ export class MCPManager {
 			const serverTools = await listTools(connection);
 			const reconnect = (options?: { authChallenge?: MCPAuthChallenge }) => this.reconnectServer(name, options);
 			const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
-			void this.toolCache?.set(name, config, serverTools);
+			void this.toolCache?.set(name, config, serverTools, getToolCachePolicy(connection));
 			this.#replaceServerTools(name, customTools);
 			void this.#onToolsChanged?.(this.#tools);
 			void this.#loadServerResourcesAndPrompts(name, connection);
@@ -1174,7 +1175,7 @@ export class MCPManager {
 		const serverTools = await listTools(connection);
 		const reconnect = () => this.reconnectServer(name);
 		const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
-		void this.toolCache?.set(name, connection.config, serverTools);
+		void this.toolCache?.set(name, connection.config, serverTools, getToolCachePolicy(connection));
 
 		// Replace tools from this server
 		this.#replaceServerTools(name, customTools);
@@ -1238,14 +1239,14 @@ export class MCPManager {
 				// Subscribe to the current set and update tracking atomically
 				try {
 					const allUris = [...newUris];
-					await subscribeToResources(connection, allUris);
+					const acceptedUris = await subscribeToResources(connection, allUris);
 					const action = resolveSubscriptionPostAction(
 						this.#notificationsEnabled,
 						this.#notificationsEpoch,
 						notificationEpoch,
 					);
 					if (action === "rollback") {
-						await unsubscribeFromResources(connection, allUris).catch(error => {
+						await unsubscribeFromResources(connection, acceptedUris).catch(error => {
 							logger.debug("Failed to rollback stale MCP resource subscription", { path: `mcp:${name}`, error });
 						});
 						return;
@@ -1253,7 +1254,7 @@ export class MCPManager {
 					if (action === "ignore") {
 						return;
 					}
-					this.#subscribedResources.set(name, newUris);
+					this.#subscribedResources.set(name, new Set(acceptedUris));
 				} catch (error) {
 					logger.debug("Failed to re-subscribe to MCP resources", { path: `mcp:${name}`, error });
 				}

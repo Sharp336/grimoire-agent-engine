@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in MCP protocol version 2026-07-28 support with guarded discovery, per-request metadata, Streamable HTTP headers, multi-round-trip retries, cache TTLs, subscriptions, and explicit `legacy`, `auto`, and strict modern lifecycle modes. Existing servers remain on the legacy lifecycle by default.
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed

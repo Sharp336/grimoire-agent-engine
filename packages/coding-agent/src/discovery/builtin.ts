@@ -31,6 +31,7 @@ import {
 	expandEnvVarsDeep,
 	getExtensionNameFromPath,
 	loadFilesFromDir,
+	parseMCPProtocolMode,
 	parseRequestIdFormat,
 	SOURCE_PATHS,
 	scanSkillsFromDir,
@@ -163,11 +164,19 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				);
 			}
 
+			const protocolMode = parseMCPProtocolMode(serverConfig.protocolMode);
+			if (protocolMode === undefined && serverConfig.protocolMode != null) {
+				logger.warn(
+					`MCP server "${serverName}": invalid protocolMode ${JSON.stringify(serverConfig.protocolMode)}, ignoring`,
+				);
+			}
+
 			result.push({
 				name: serverName,
 				enabled,
 				timeout,
 				requestIdFormat,
+				protocolMode,
 				command: serverConfig.command as string | undefined,
 				args: serverConfig.args as string[] | undefined,
 				env: serverConfig.env as Record<string, string> | undefined,

@@ -123,6 +123,11 @@
           "enum": ["string", "number"],
           "description": "Encoding for outgoing JSON-RPC request ids (default: \"number\"). Use \"string\" for servers that need collision-resistant snowflake string ids instead of per-transport integers. OMP-specific: set it in an OMP-owned config (`.omp/mcp.json`, `~/.omp/agent/mcp.json`, a project `mcp.json`/`.mcp.json`, or an OMP plugin). Servers imported from another tool's config (Claude, Cursor, VS Code, Gemini, OpenCode, Windsurf) ignore it, since that key is not part of those formats."
         },
+        "protocolMode": {
+          "type": "string",
+          "enum": ["legacy", "auto", "2026-07-28"],
+          "description": "MCP lifecycle policy. Defaults to \"legacy\" for compatibility. \"auto\" probes modern discovery with guarded legacy fallback; \"2026-07-28\" requires the modern stateless lifecycle. OMP-specific: foreign tool configuration providers ignore this field."
+        },
         "auth": {
           "$ref": "#/$defs/authConfig"
         },
@@ -138,7 +143,6 @@
         },
         {
           "type": "object",
-          "additionalProperties": false,
           "required": ["command"],
           "properties": {
             "type": {
@@ -180,7 +184,6 @@
         },
         {
           "type": "object",
-          "additionalProperties": false,
           "required": ["type", "url"],
           "properties": {
             "type": {
@@ -211,7 +214,6 @@
         },
         {
           "type": "object",
-          "additionalProperties": false,
           "required": ["type", "url"],
           "properties": {
             "type": {
@@ -246,7 +248,8 @@
         {
           "$ref": "#/$defs/sseServer"
         }
-      ]
+      ],
+      "unevaluatedProperties": false
     }
   }
 }

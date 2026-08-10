@@ -7,7 +7,7 @@ import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { AgentStorage } from "../session/agent-storage";
 import type { MCPServerConfig, MCPToolDefinition } from "./types";
 
-const CACHE_VERSION = 1;
+const CACHE_VERSION = 2;
 const CACHE_PREFIX = "mcp_tools:";
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -15,8 +15,13 @@ type MCPToolCachePayload = {
 	version: number;
 	configHash: string;
 	tools: MCPToolDefinition[];
+	cacheScope?: "public";
 };
 
+export interface MCPToolCachePolicy {
+	ttlMs?: number;
+	cacheScope?: "public" | "private";
+}
 function stableClone(value: unknown): unknown {
 	if (Array.isArray(value)) {
 		return value.map(item => stableClone(item));
@@ -71,6 +76,7 @@ export class MCPToolCache {
 		}
 
 		if (!isRecord(parsed)) return null;
+		if (parsed.cacheScope !== undefined && parsed.cacheScope !== "public") return null;
 		if (parsed.version !== CACHE_VERSION) return null;
 		if (typeof parsed.configHash !== "string") return null;
 		if (!Array.isArray(parsed.tools)) return null;
@@ -88,7 +94,12 @@ export class MCPToolCache {
 		return parsed.tools as MCPToolDefinition[];
 	}
 
-	async set(serverName: string, config: MCPServerConfig, tools: MCPToolDefinition[]): Promise<void> {
+	async set(
+		serverName: string,
+		config: MCPServerConfig,
+		tools: MCPToolDefinition[],
+		policy?: MCPToolCachePolicy,
+	): Promise<void> {
 		let configHash: string;
 		try {
 			configHash = await hashConfig(config);
@@ -97,10 +108,12 @@ export class MCPToolCache {
 			return;
 		}
 
+		const modernCacheable = policy === undefined || (policy.cacheScope === "public" && (policy.ttlMs ?? 0) > 0);
 		const payload: MCPToolCachePayload = {
 			version: CACHE_VERSION,
 			configHash,
-			tools,
+			tools: modernCacheable ? tools : [],
+			...(policy?.cacheScope === "public" ? { cacheScope: "public" as const } : {}),
 		};
 
 		let serialized: string;
@@ -111,7 +124,9 @@ export class MCPToolCache {
 			return;
 		}
 
-		const expiresAtSec = Math.floor((Date.now() + CACHE_TTL_MS) / 1000);
+		const ttlMs =
+			policy === undefined ? CACHE_TTL_MS : modernCacheable ? Math.min(CACHE_TTL_MS, policy.ttlMs ?? 0) : 0;
+		const expiresAtSec = Math.floor((Date.now() + ttlMs) / 1000);
 		this.storage.setCache(cacheKey(serverName), serialized, expiresAtSec);
 	}
 }

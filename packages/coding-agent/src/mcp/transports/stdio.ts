@@ -19,7 +19,7 @@ import type {
 	MCPStdioServerConfig,
 	MCPTransport,
 } from "../../mcp/types";
-import { toJsonRpcError } from "../../mcp/types";
+import { MCPError, toJsonRpcError } from "../../mcp/types";
 import { RequestIdAllocator } from "../request-id";
 import { isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "../timeout";
 
@@ -676,7 +676,7 @@ export class StdioTransport implements MCPTransport {
 			if (pending) {
 				this.#pendingRequests.delete(response.id);
 				if (response.error) {
-					pending.reject(new Error(`MCP error ${response.error.code}: ${response.error.message}`));
+					pending.reject(new MCPError(response.error));
 				} else {
 					pending.resolve(response.result);
 				}
@@ -737,6 +737,7 @@ export class StdioTransport implements MCPTransport {
 		}
 
 		const id = this.#requestIds.next(this.config.requestIdFormat);
+		options?.onRequestId?.(id);
 		const request = {
 			jsonrpc: "2.0" as const,
 			id,
@@ -744,7 +745,7 @@ export class StdioTransport implements MCPTransport {
 			params: params ?? {},
 		};
 
-		const timeout = resolveMCPTimeoutMs(this.config.timeout);
+		const timeout = resolveMCPTimeoutMs(options?.timeout ?? this.config.timeout);
 		const signal = options?.signal;
 
 		if (signal?.aborted) {
@@ -772,6 +773,7 @@ export class StdioTransport implements MCPTransport {
 		const onAbort = () => {
 			cleanup();
 			const reason = signal?.reason instanceof Error ? signal.reason : new Error("Aborted");
+			void this.notify("notifications/cancelled", { requestId: id, reason: reason.message }).catch(() => {});
 			reject(reason);
 		};
 
@@ -793,6 +795,7 @@ export class StdioTransport implements MCPTransport {
 		if (isMCPTimeoutEnabled(timeout)) {
 			timer = setTimeout(() => {
 				cleanup();
+				void this.notify("notifications/cancelled", { requestId: id, reason: "Request timed out" }).catch(() => {});
 				reject(new Error(`Request timeout after ${timeout}ms`));
 			}, timeout);
 		}

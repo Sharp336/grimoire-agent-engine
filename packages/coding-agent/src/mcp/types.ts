@@ -1,8 +1,7 @@
 /**
  * MCP (Model Context Protocol) type definitions.
  *
- * Based on MCP specification 2025-03-26:
- * https://modelcontextprotocol.io/specification/2025-03-26/
+ * Supports the stateless 2026-07-28 protocol and legacy initialization-based servers.
  */
 
 // =============================================================================
@@ -37,6 +36,30 @@ export interface JsonRpcError {
 	data?: unknown;
 }
 
+export class MCPError extends Error {
+	readonly code: number;
+	readonly data?: unknown;
+	readonly status?: number;
+
+	constructor(error: JsonRpcError, status?: number, message?: string) {
+		super(message ?? `MCP error ${error.code}: ${error.message}`);
+		this.name = "MCPError";
+		this.code = error.code;
+		this.data = error.data;
+		this.status = status;
+	}
+}
+
+export class MCPHttpError extends Error {
+	readonly status: number;
+
+	constructor(status: number, body: string, suffix = "") {
+		super(`HTTP ${status}: ${body}${suffix}`);
+		this.name = "MCPHttpError";
+		this.status = status;
+	}
+}
+
 export type JsonRpcMessage = JsonRpcRequest | JsonRpcNotification | JsonRpcResponse;
 
 // =============================================================================
@@ -62,6 +85,9 @@ export interface MCPAuthConfig {
 /** Encoding used for outgoing JSON-RPC request ids. */
 export type MCPRequestIdFormat = "string" | "number";
 
+/** MCP protocol lifecycle policy. */
+export type MCPProtocolMode = "legacy" | "auto" | "2026-07-28";
+
 /** Base server config with shared options */
 interface MCPServerConfigBase {
 	/** Whether this server is enabled (default: true) */
@@ -80,6 +106,13 @@ interface MCPServerConfigBase {
 	 * tool's config do not, since the key is not part of those formats.
 	 */
 	requestIdFormat?: MCPRequestIdFormat;
+	/**
+	 * Protocol lifecycle policy (default: `"legacy"`).
+	 *
+	 * `"auto"` probes modern discovery and falls back only on positive legacy
+	 * evidence. `"2026-07-28"` requires the modern stateless lifecycle.
+	 */
+	protocolMode?: MCPProtocolMode;
 	/** Authentication configuration (optional) */
 	auth?: MCPAuthConfig;
 	/** OAuth configuration for servers requiring explicit client credentials */
@@ -160,7 +193,9 @@ export interface MCPImplementation {
 /** MCP client capabilities */
 export interface MCPClientCapabilities {
 	roots?: { listChanged?: boolean };
-	sampling?: Record<string, never>;
+	sampling?: Record<string, unknown>;
+	elicitation?: { form?: Record<string, unknown>; url?: Record<string, unknown> };
+	extensions?: Record<string, Record<string, unknown>>;
 	experimental?: Record<string, unknown>;
 }
 
@@ -169,7 +204,9 @@ export interface MCPServerCapabilities {
 	tools?: { listChanged?: boolean };
 	resources?: { subscribe?: boolean; listChanged?: boolean };
 	prompts?: { listChanged?: boolean };
-	logging?: Record<string, never>;
+	completions?: Record<string, unknown>;
+	logging?: Record<string, unknown>;
+	extensions?: Record<string, Record<string, unknown>>;
 	experimental?: Record<string, unknown>;
 }
 
@@ -188,9 +225,37 @@ export interface MCPInitializeResult {
 	instructions?: string;
 }
 
+export interface MCPResult {
+	resultType?: "complete" | "input_required" | string;
+	_meta?: Record<string, unknown>;
+}
+
+export interface MCPCacheableResult extends MCPResult {
+	ttlMs?: number;
+	cacheScope?: "public" | "private";
+}
+
+export interface MCPInputRequest {
+	method: string;
+	params?: Record<string, unknown>;
+}
+
+export interface MCPInputRequiredResult extends MCPResult {
+	resultType: "input_required";
+	inputRequests?: Record<string, MCPInputRequest>;
+	requestState?: string;
+}
+
+export interface MCPDiscoverResult extends MCPCacheableResult {
+	supportedVersions: string[];
+	capabilities: MCPServerCapabilities;
+	instructions?: string;
+}
+
 /** MCP tool definition */
 export interface MCPToolDefinition {
 	name: string;
+	title?: string;
 	description?: string;
 	inputSchema: {
 		type: "object";
@@ -198,10 +263,12 @@ export interface MCPToolDefinition {
 		required?: string[];
 		[key: string]: unknown;
 	};
+	outputSchema?: Record<string, unknown>;
+	annotations?: Record<string, unknown>;
+	_meta?: Record<string, unknown>;
 }
 
-/** tools/list response */
-export interface MCPToolsListResult {
+export interface MCPToolsListResult extends MCPCacheableResult {
 	tools: MCPToolDefinition[];
 	nextCursor?: string;
 }
@@ -243,10 +310,10 @@ export interface MCPAuthChallenge {
 }
 
 /** tools/call response */
-export interface MCPToolCallResult {
+export interface MCPToolCallResult extends MCPResult {
 	content: MCPContent[];
+	structuredContent?: unknown;
 	isError?: boolean;
-	_meta?: Record<string, unknown>;
 }
 
 // =============================================================================
@@ -256,6 +323,12 @@ export interface MCPToolCallResult {
 export interface MCPRequestOptions {
 	/** Abort signal (e.g. Escape-to-interrupt) */
 	signal?: AbortSignal;
+	/** Per-request timeout override. Zero disables the timeout. */
+	timeout?: number;
+	/** Validated transport-generated HTTP headers. */
+	generatedHeaders?: Record<string, string>;
+	/** Observe the generated JSON-RPC request ID before the request is sent. */
+	onRequestId?: (id: string | number) => void;
 }
 
 /** Transport interface - abstracts stdio/http */
@@ -309,6 +382,8 @@ export interface MCPServerConnection {
 	resourceTemplates?: MCPResourceTemplate[];
 	/** Server instructions from initialize */
 	instructions?: string;
+	/** Negotiated MCP protocol version. Absent on synthetic legacy connections. */
+	protocolVersion?: string;
 	/** Cached prompts (populated on demand) */
 	prompts?: MCPPrompt[];
 }
@@ -352,13 +427,13 @@ export interface MCPResourceTemplate {
 }
 
 /** Result of resources/list */
-export interface MCPResourcesListResult {
+export interface MCPResourcesListResult extends MCPCacheableResult {
 	resources: MCPResource[];
 	nextCursor?: string;
 }
 
 /** Result of resources/templates/list */
-export interface MCPResourceTemplatesListResult {
+export interface MCPResourceTemplatesListResult extends MCPCacheableResult {
 	resourceTemplates: MCPResourceTemplate[];
 	nextCursor?: string;
 }
@@ -372,7 +447,7 @@ export interface MCPResourceContentItem {
 }
 
 /** Result of resources/read */
-export interface MCPResourceReadResult {
+export interface MCPResourceReadResult extends MCPCacheableResult {
 	contents: MCPResourceContentItem[];
 }
 
@@ -406,7 +481,7 @@ export interface MCPPrompt {
 }
 
 /** Result of prompts/list */
-export interface MCPPromptsListResult {
+export interface MCPPromptsListResult extends MCPCacheableResult {
 	prompts: MCPPrompt[];
 	nextCursor?: string;
 }
@@ -434,7 +509,7 @@ export interface MCPGetPromptParams {
 }
 
 /** Result of prompts/get */
-export interface MCPGetPromptResult {
+export interface MCPGetPromptResult extends MCPResult {
 	description?: string;
 	messages: MCPPromptMessage[];
 }

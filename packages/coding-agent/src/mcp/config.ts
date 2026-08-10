@@ -42,6 +42,7 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 		enabled: server.enabled,
 		timeout: server.timeout,
 		requestIdFormat: server.requestIdFormat,
+		protocolMode: server.protocolMode,
 		auth: server.auth,
 		oauth: server.oauth,
 	};

@@ -12,7 +12,7 @@ import { registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
-import { createSourceMeta, expandEnvVarsDeep, parseRequestIdFormat } from "./helpers";
+import { createSourceMeta, expandEnvVarsDeep, parseMCPProtocolMode, parseRequestIdFormat } from "./helpers";
 
 const PROVIDER_ID = "mcp-json";
 const DISPLAY_NAME = "MCP Config";
@@ -27,6 +27,7 @@ interface MCPConfigFile {
 			enabled?: boolean;
 			timeout?: number;
 			requestIdFormat?: "string" | "number";
+			protocolMode?: "legacy" | "auto" | "2026-07-28";
 			command?: string;
 			args?: string[];
 			env?: Record<string, string>;
@@ -92,11 +93,20 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 				});
 			}
 
+			const protocolMode = parseMCPProtocolMode(serverConfig.protocolMode);
+			if (protocolMode === undefined && serverConfig.protocolMode !== undefined) {
+				logger.warn("MCP server has invalid 'protocolMode' value, ignoring", {
+					name,
+					value: serverConfig.protocolMode,
+				});
+			}
+
 			const server: MCPServer = {
 				name,
 				enabled,
 				timeout,
 				requestIdFormat,
+				protocolMode,
 				command: serverConfig.command,
 				args: serverConfig.args,
 				env: serverConfig.env,

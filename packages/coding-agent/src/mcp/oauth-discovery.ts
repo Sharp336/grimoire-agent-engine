@@ -6,6 +6,7 @@
  */
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { withTimeoutSignal } from "../utils/fetch-timeout";
 
 /** Per-request abort deadline for each OAuth discovery metadata fetch. */
@@ -143,28 +144,24 @@ export function extractOAuthEndpoints(error: Error): OAuthEndpoints | null {
 		// Many MCP servers return JSON with OAuth endpoints in error body
 		const jsonMatch = errorMsg.match(/\{[\s\S]*\}/);
 		if (jsonMatch) {
-			const errorBody = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
-
-			// Check for OAuth endpoints in error body
-			if (errorBody.oauth || errorBody.authorization || errorBody.auth) {
-				const oauthData = (errorBody.oauth || errorBody.authorization || errorBody.auth) as Record<string, unknown>;
-				const endpoints = readEndpointsFromObject(oauthData);
-				if (endpoints) {
-					return {
-						...endpoints,
-						clientId: endpoints.clientId || clientIdFromAuthUrl(endpoints.authorizationUrl),
-						scopes: endpoints.scopes || scopeFromAuthUrl(endpoints.authorizationUrl),
-					};
+			const errorBody = JSON.parse(jsonMatch[0]);
+			if (isRecord(errorBody)) {
+				const rpcError = isRecord(errorBody.error) ? errorBody.error : undefined;
+				const rpcData = rpcError && isRecord(rpcError.data) ? rpcError.data : undefined;
+				for (const candidate of [errorBody, rpcError, rpcData]) {
+					if (!candidate) continue;
+					const oauthData = candidate.oauth || candidate.authorization || candidate.auth;
+					const endpoints = isRecord(oauthData)
+						? readEndpointsFromObject(oauthData)
+						: readEndpointsFromObject(candidate);
+					if (endpoints) {
+						return {
+							...endpoints,
+							clientId: endpoints.clientId || clientIdFromAuthUrl(endpoints.authorizationUrl),
+							scopes: endpoints.scopes || scopeFromAuthUrl(endpoints.authorizationUrl),
+						};
+					}
 				}
-			}
-
-			const topLevelEndpoints = readEndpointsFromObject(errorBody);
-			if (topLevelEndpoints) {
-				return {
-					...topLevelEndpoints,
-					clientId: topLevelEndpoints.clientId || clientIdFromAuthUrl(topLevelEndpoints.authorizationUrl),
-					scopes: topLevelEndpoints.scopes || scopeFromAuthUrl(topLevelEndpoints.authorizationUrl),
-				};
 			}
 		}
 	} catch {
