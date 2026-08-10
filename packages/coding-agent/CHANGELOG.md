@@ -95,7 +95,7 @@
 ### Added
 
 - Added `pi.irc.deliverInbound` — a scoped extension API (`ExtensionAPI.irc`) for delivering an inbound IRC message (e.g. from an external transport) into a local agent's session on the process-global bus; local-only, so a registry miss returns `failed` and never re-forwards, and it returns omp's freshly-minted native message id so callers can correlate it ([#7400](https://github.com/can1357/oh-my-pi/pull/7400)).
-- Added the outbound half of the extension IRC bridge: `pi.irc.setRemoteTransport` (install a transport that delivers sends addressed to registered `remote` proxy peers), the exported `RemoteTransport`/`IrcMessage`/`IrcDeliveryReceipt` wire shapes, and a remote `AgentKind` so cross-process peers are addressable and broadcastable like local agents. A bare local-registry miss stays local (`Unknown agent`) and never leaves the process ([#7401](https://github.com/can1357/oh-my-pi/pull/7401)).
+- Added the outbound half of the extension IRC bridge: `pi.irc.setRemoteTransport` (install a transport that delivers sends addressed to registered `remote` proxy peers), `pi.irc.registerRemotePeer` / `unregisterRemotePeer` (seed and retract those proxies, attributed to the owning extension so a failed load or the extension's own teardown rolls them back), the exported `RemoteTransport`/`IrcMessage`/`IrcDeliveryReceipt` wire shapes, and a remote `AgentKind` so cross-process peers are addressable and broadcastable like local agents. A bare local-registry miss stays local (`Unknown agent`) and never leaves the process ([#7401](https://github.com/can1357/oh-my-pi/pull/7401)).
 
 ## [17.2.12] - 2026-08-08
 
