@@ -11,6 +11,11 @@ export interface ToolCallLoopGuardOptions {
 	readonly exemptTools: readonly string[];
 }
 
+/** Normalizes configured repetition thresholds for every tool-loop detector. */
+export function normalizeToolCallLoopThreshold(threshold: number): number {
+	return Number.isFinite(threshold) ? Math.max(1, Math.trunc(threshold)) : 1;
+}
+
 /** A completed assistant turn plus the tool results it produced. */
 export interface ToolCallLoopTurn {
 	readonly message: AssistantMessage;
@@ -26,9 +31,9 @@ export interface RepeatedToolCallDetection {
 	readonly argumentsSummary: string;
 }
 
-function canonicalizeToolCallValue(value: unknown): unknown {
+function canonicalizeToolCallValue(value: unknown, stripIntentFields: boolean): unknown {
 	if (Array.isArray(value)) {
-		return value.map(item => canonicalizeToolCallValue(item));
+		return value.map(item => canonicalizeToolCallValue(item, stripIntentFields));
 	}
 	if (!value || typeof value !== "object") {
 		return value;
@@ -37,10 +42,103 @@ function canonicalizeToolCallValue(value: unknown): unknown {
 	const input = value as Record<string, unknown>;
 	const output: Record<string, unknown> = {};
 	for (const key of Object.keys(input).sort()) {
-		if (key === INTENT_FIELD || key === LEGACY_INTENT_FIELD) continue;
-		output[key] = canonicalizeToolCallValue(input[key]);
+		if (stripIntentFields && (key === INTENT_FIELD || key === LEGACY_INTENT_FIELD)) continue;
+		output[key] = canonicalizeToolCallValue(input[key], stripIntentFields);
 	}
 	return output;
+}
+
+export interface CanonicalizeToolCallJsonOptions {
+	/** Strip harness-only intent fields from tool arguments. Keep false for arbitrary tool results. */
+	stripIntentFields?: boolean;
+}
+
+/** Produces a recursively key-sorted JSON representation shared by tool-loop detectors. */
+export function canonicalizeToolCallJson(
+	value: unknown,
+	options: CanonicalizeToolCallJsonOptions = {},
+): string | undefined {
+	try {
+		return JSON.stringify(canonicalizeToolCallValue(value, options.stripIntentFields === true));
+	} catch {
+		return undefined;
+	}
+}
+
+function updateCanonicalToolCallHash(
+	hasher: Bun.CryptoHasher,
+	value: unknown,
+	stripIntentFields: boolean,
+	activeObjects: Set<object>,
+): boolean {
+	if (value === null) {
+		hasher.update("null;");
+		return true;
+	}
+	switch (typeof value) {
+		case "string":
+			hasher.update(`s${value.length}:`);
+			hasher.update(value);
+			return true;
+		case "number":
+			hasher.update(`n${Number.isFinite(value) ? (Object.is(value, -0) ? "0" : String(value)) : "null"};`);
+			return true;
+		case "boolean":
+			hasher.update(value ? "b1;" : "b0;");
+			return true;
+		case "undefined":
+			hasher.update("u;");
+			return true;
+		case "bigint":
+			hasher.update(`i${value};`);
+			return true;
+		case "symbol":
+			hasher.update(`y${String(value.description ?? "")};`);
+			return true;
+		case "function":
+			hasher.update("f;");
+			return true;
+		case "object":
+			break;
+	}
+
+	if (activeObjects.has(value)) return false;
+	activeObjects.add(value);
+	try {
+		if (Array.isArray(value)) {
+			hasher.update(`a${value.length}:`);
+			for (const item of value) {
+				if (!updateCanonicalToolCallHash(hasher, item, stripIntentFields, activeObjects)) return false;
+			}
+			return true;
+		}
+
+		const input = value as Record<string, unknown>;
+		const keys = Object.keys(input)
+			.filter(key => !stripIntentFields || (key !== INTENT_FIELD && key !== LEGACY_INTENT_FIELD))
+			.sort();
+		hasher.update(`o${keys.length}:`);
+		for (const key of keys) {
+			if (!updateCanonicalToolCallHash(hasher, key, false, activeObjects)) return false;
+			if (!updateCanonicalToolCallHash(hasher, input[key], stripIntentFields, activeObjects)) return false;
+		}
+		return true;
+	} finally {
+		activeObjects.delete(value);
+	}
+}
+
+/**
+ * Produces a stable digest without materializing a second payload-sized object
+ * or JSON string. Large tool results are streamed directly into the hasher.
+ */
+export function hashCanonicalToolCallValue(
+	value: unknown,
+	options: CanonicalizeToolCallJsonOptions = {},
+): string | undefined {
+	const hasher = new Bun.CryptoHasher("sha256");
+	if (!updateCanonicalToolCallHash(hasher, value, options.stripIntentFields === true, new Set())) return undefined;
+	return hasher.digest("hex");
 }
 
 function summarizeText(text: string, limit: number): string {
@@ -64,7 +162,6 @@ function summarizeToolResult(toolResults: readonly ToolResultMessage[], toolCall
 	return summarizeText(textParts.join("\n"), RESULT_SUMMARY_LIMIT);
 }
 
-/** Detects consecutive identical assistant tool calls across model turns. */
 export class ToolCallLoopGuard {
 	#threshold: number;
 	#exemptTools: ReadonlySet<string>;
@@ -72,7 +169,7 @@ export class ToolCallLoopGuard {
 	#count = 0;
 
 	constructor(options: ToolCallLoopGuardOptions) {
-		this.#threshold = Math.max(1, Math.trunc(options.threshold));
+		this.#threshold = normalizeToolCallLoopThreshold(options.threshold);
 		this.#exemptTools = new Set(options.exemptTools);
 	}
 
@@ -86,7 +183,7 @@ export class ToolCallLoopGuard {
 		}
 
 		const toolCall = toolCalls[0]!;
-		const canonicalArgs = JSON.stringify(canonicalizeToolCallValue(toolCall.arguments));
+		const canonicalArgs = canonicalizeToolCallJson(toolCall.arguments, { stripIntentFields: true }) ?? "";
 		const hash = `${toolCall.name}:${canonicalArgs}`;
 		if (hash === this.#lastHash) {
 			this.#count++;

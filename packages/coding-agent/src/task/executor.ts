@@ -8,6 +8,11 @@ import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
+import {
+	canonicalizeToolCallJson,
+	hashCanonicalToolCallValue,
+	normalizeToolCallLoopThreshold,
+} from "@oh-my-pi/pi-ai/utils/tool-call-loop-guard";
 import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../async";
 import type { Rule } from "../capability/rule";
@@ -120,6 +125,11 @@ export const BUDGET_STOP_GRACE_REQUESTS = 5;
 /** Steering notice injected when a subagent crosses its soft request budget. */
 export function buildBudgetNotice(requests: number, budget: number): string {
 	return `[budget notice] You have used ${requests} requests in this run (soft budget: ${budget}). Wrap up now: finish the current step and yield your final report. At ${Math.ceil(budget * 1.5)} requests the run is force-stopped and you will be asked to yield whatever you have.`;
+}
+
+/** Diagnostic used when a child repeats the same tool call without yielding. */
+export function buildNonConvergenceError(toolName: string, repeats: number): string {
+	return `Subagent repeated ${toolName} with identical arguments and results ${repeats} times without yielding; stopping as non-converging.`;
 }
 
 /** Flatten whitespace and clip salvage text for the cancelled-child summary line. */
@@ -909,8 +919,8 @@ interface RunMonitorArgs {
 	description?: string;
 	/** Parent model registry for tiny-model label generation; absent → skip labeling. */
 	modelRegistry?: ModelRegistry;
-	/** Parent settings for tiny-model label generation. */
-	settings?: Settings;
+	/** Active session settings used by labeling and convergence detection. */
+	settings: Settings;
 	modelOverride?: string | string[];
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
@@ -1008,6 +1018,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		softRequestBudget,
 		softRequestBudgetNotice,
 		maxRuntimeMs,
+		settings,
 	} = args;
 	const startTime = Date.now();
 
@@ -1069,6 +1080,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	let budgetStopAbortPromise: Promise<void> | undefined;
 	let terminalError: string | undefined;
 	let consecutiveYieldToolErrors = 0;
+	let repeatedToolSignature: string | undefined;
+	let repeatedToolCount = 0;
+	const pendingToolArguments = new Map<string, string>();
 	let lastAssistantSalvageText: string | undefined;
 	let activeSessionAbortPromise: Promise<void> | undefined;
 
@@ -1391,6 +1405,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				} else if (isRecord(event.args)) {
 					startArgs = event.args;
 				}
+				if (event.toolName !== "yield") {
+					const canonicalArgs = canonicalizeToolCallJson(startArgs, { stripIntentFields: true });
+					if (canonicalArgs !== undefined) pendingToolArguments.set(event.toolCallId, canonicalArgs);
+				}
 				progress.currentToolArgs = extractToolArgsPreview(startArgs);
 				progress.currentToolStartMs = now;
 				const intent = event.intent?.trim();
@@ -1409,6 +1427,35 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			}
 
 			case "tool_execution_end": {
+				const eventRecord: unknown = event;
+				const eventArgs = isRecord(eventRecord) && isRecord(eventRecord.args) ? eventRecord.args : {};
+				const canonicalArgs = pendingToolArguments.get(event.toolCallId);
+				pendingToolArguments.delete(event.toolCallId);
+				const canonicalResult = event.isError ? undefined : hashCanonicalToolCallValue(event.result);
+				const convergenceGuardEnabled = settings.get("model.toolCallLoopGuard.enabled") === true;
+				const configuredConvergenceThreshold = settings.get("model.toolCallLoopGuard.threshold");
+				const convergenceThreshold = normalizeToolCallLoopThreshold(configuredConvergenceThreshold);
+				const convergenceExemptTools = settings.get("model.toolCallLoopGuard.exemptTools");
+				if (
+					convergenceGuardEnabled &&
+					!convergenceExemptTools.includes(event.toolName) &&
+					canonicalArgs !== undefined &&
+					canonicalResult !== undefined
+				) {
+					const toolSignature = JSON.stringify([event.toolName, canonicalArgs, canonicalResult]);
+					if (toolSignature === repeatedToolSignature) {
+						repeatedToolCount++;
+					} else {
+						repeatedToolSignature = toolSignature;
+						repeatedToolCount = 1;
+					}
+					if (repeatedToolCount >= convergenceThreshold && !abortSent) {
+						failWithError(buildNonConvergenceError(event.toolName, repeatedToolCount));
+					}
+				} else {
+					repeatedToolSignature = undefined;
+					repeatedToolCount = 0;
+				}
 				if (progress.currentTool) {
 					progress.recentTools.unshift({
 						tool: progress.currentTool,
@@ -1432,8 +1479,6 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 
 				// Check for registered subagent tool handler
 				const handler = subprocessToolRegistry.getHandler(event.toolName);
-				const eventRecord: unknown = event;
-				const eventArgs = isRecord(eventRecord) && isRecord(eventRecord.args) ? eventRecord.args : {};
 				if (handler) {
 					// Extract data using handler
 					if (handler.extractData) {
@@ -2297,6 +2342,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			description: options.description,
 			modelOverride: options.modelOverride,
 			modelRole: options.modelRole,
+			settings: session.settings,
 			eventBus: options.eventBus,
 			parentToolCallId: options.parentToolCallId,
 			detached: true,
@@ -2331,13 +2377,14 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			const runtimeLimitExceeded = turnMonitor.runtimeLimitExceeded();
 			const aborted = runtimeLimitExceeded || (lastAssistant?.stopReason === "aborted" && !yielded);
 			const error =
-				lastAssistant?.stopReason === "error"
+				turnMonitor.terminalError() ??
+				(lastAssistant?.stopReason === "error"
 					? lastAssistant.errorMessage || "Subagent failed"
 					: turnError !== undefined && !yielded
 						? turnError instanceof Error
 							? turnError.stack || turnError.message
 							: String(turnError)
-						: undefined;
+						: undefined);
 			turnMonitor.finish();
 			try {
 				await finalizeRunResult({
@@ -2527,6 +2574,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		task: message,
 		description: options.description,
 		modelRole: options.modelRole,
+		settings: session.settings,
 		signal,
 		onProgress: options.onProgress,
 		eventBus: options.eventBus,
@@ -2722,7 +2770,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		assignment,
 		description: options.description,
 		modelRegistry: options.modelRegistry,
-		settings,
+		settings: subagentSettings,
 		modelOverride,
 		modelRole,
 		signal,
