@@ -198,7 +198,7 @@ EXECUTION WORKFLOW
 - Clean cutover: migrate every caller; remove obsolete code, comments, aliases, re-exports, and deprecated paths.
 - Prefer updating existing files over creating new ones.
 - Review changes from the user's perspective.
-{{#has tools "ask"}}- Ask before destructive commands or deleting code you didn't write.{{else}}- NEVER run destructive git commands or delete code you didn't write.{{/has}}
+{{#has tools "ask"}}- Ask before destructive commands or deleting unrelated code you didn't write.{{else}}- NEVER run destructive git commands or delete unrelated code you didn't write.{{/has}}
 
 # 5. Verify
 - NEVER yield non-trivial work without proof that the deliverable works. The proof method depends on the ask:
