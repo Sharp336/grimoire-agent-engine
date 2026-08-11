@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
@@ -7,12 +9,13 @@ import { RpcSubagentRegistry } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-sub
 import type { RpcSubagentFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { resolveSoftRequestBudget, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
-import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { AgentDefinition, SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -336,6 +339,46 @@ describe("runSubprocess soft request budget", () => {
 		await revivedTerminal;
 		expectRpcTurn();
 		rpcRegistry.dispose();
+	});
+
+	it("manager shutdown closes a running agent without tombstoning its resumable transcript", async () => {
+		const id = "ShutdownScout";
+		const manager = new AsyncJobManager({});
+		const shutdownStarted = Promise.withResolvers<void>();
+		const parentSessionFile = path.join(tempDir.path(), "main.jsonl");
+		let disposePromise: Promise<boolean> | undefined;
+		let result: SingleResult | undefined;
+		const handle = createMockSession(({ promptIndex, emit, pushMessage }) => {
+			if (promptIndex !== 1) return;
+			const message = assistantText("working");
+			pushMessage(message);
+			emit({ type: "message_end", message } as unknown as AgentSessionEvent);
+			disposePromise = manager.dispose();
+			shutdownStarted.resolve();
+		});
+		mockCreateAgentSession(handle.session);
+		registerRunning(id, handle.session);
+
+		manager.register("task", id, async ({ signal }) => {
+			result = await runSubprocess({
+				...baseOptions(id),
+				artifactsDir: parentSessionFile.slice(0, -6),
+				signal,
+			});
+			return result.output;
+		});
+		await shutdownStarted.promise;
+		expect(await disposePromise).toBe(true);
+
+		expect(result?.aborted).toBe(true);
+		expect(AgentRegistry.global().get(id)).toBeUndefined();
+		expect(AgentLifecycleManager.global().has(id)).toBe(false);
+		expect(handle.disposeCalls()).toBeGreaterThanOrEqual(1);
+
+		AgentLifecycleManager.resetGlobalForTests();
+		AgentRegistry.resetGlobalForTests();
+		await registerPersistedSubagents(AgentRegistry.global(), parentSessionFile);
+		expect(AgentRegistry.global().get(id)?.status).toBe("parked");
 	});
 
 	it("a caller-signal abort stays terminal and irc names the aborted agent precisely", async () => {

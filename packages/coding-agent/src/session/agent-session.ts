@@ -3743,9 +3743,14 @@ export class AgentSession {
 		// dead-letter rather than enqueue a follow-up into a disposing session.
 		this.#unregisterAsyncDeliverySink?.();
 		this.#unregisterAsyncDeliverySink = undefined;
-		this.#cancelOwnAsyncJobs();
 		const manager = this.#ownedAsyncJobManager;
-		if (!manager) return;
+		if (!manager) {
+			// Shared managers outlive this session, so cancel only this owner's
+			// jobs as an explicit teardown. The owning session disposes its manager
+			// below, which tags every cancellation as process shutdown.
+			this.#cancelOwnAsyncJobs();
+			return;
+		}
 
 		try {
 			const drained = await manager.dispose({ timeoutMs: 3_000 });

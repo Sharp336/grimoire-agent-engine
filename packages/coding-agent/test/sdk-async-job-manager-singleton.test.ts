@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -90,6 +90,33 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 		// Once the owning primary session disposes the singleton clears, matching
 		// the documented single-owner invariant.
 		expect(AsyncJobManager.instance()).toBeUndefined();
+	}, 60000);
+
+	it("classifies jobs interrupted by owning-session disposal as shutdown", async () => {
+		const session = await spawnTopLevelSession();
+		const manager = AsyncJobManager.instance();
+		expect(manager).toBeDefined();
+		const started = Promise.withResolvers<void>();
+		let abortReason: unknown;
+		manager!.register(
+			"task",
+			"running subagent",
+			async ({ signal }) => {
+				const aborted = Promise.withResolvers<void>();
+				signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+				started.resolve();
+				if (signal.aborted) aborted.resolve();
+				await aborted.promise;
+				abortReason = signal.reason;
+				return "stopped";
+			},
+			{ ownerId: "Main" },
+		);
+
+		await started.promise;
+		await session.dispose();
+
+		expect(abortReason).toBe(ASYNC_JOB_MANAGER_SHUTDOWN_REASON);
 	}, 60000);
 
 	it("does not cancel the primary session's running jobs when a secondary session disposes", async () => {

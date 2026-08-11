@@ -5,6 +5,8 @@ const DELIVERY_RETRY_MAX_MS = 30_000;
 const DELIVERY_RETRY_JITTER_MS = 200;
 const DEFAULT_RETENTION_MS = 5 * 60 * 1000;
 const DEFAULT_MAX_RUNNING_JOBS = 15;
+/** AbortSignal reason used only when manager disposal interrupts a running job. */
+export const ASYNC_JOB_MANAGER_SHUTDOWN_REASON = Symbol("async-job-manager-shutdown");
 
 /**
  * Adaptive ("smart") `hub` poll-wait ladder (ms). A tight poll loop climbs
@@ -416,9 +418,13 @@ export class AsyncJobManager {
 	 * (used by `dispose()` to nuke the manager's state).
 	 */
 	cancelAll(filter?: AsyncJobFilter): void {
+		this.#cancelAll(filter);
+	}
+
+	#cancelAll(filter?: AsyncJobFilter, reason?: unknown): void {
 		for (const job of this.getRunningJobs(filter)) {
 			job.status = "cancelled";
-			job.abortController.abort();
+			job.abortController.abort(reason);
 			this.#scheduleEviction(job.id);
 		}
 	}
@@ -584,7 +590,7 @@ export class AsyncJobManager {
 	async dispose(options?: { timeoutMs?: number }): Promise<boolean> {
 		this.#disposed = true;
 		this.#clearEvictionTimers();
-		this.cancelAll();
+		this.#cancelAll(undefined, ASYNC_JOB_MANAGER_SHUTDOWN_REASON);
 		const timeoutMs = Math.max(options?.timeoutMs ?? 3_000, 0);
 		const deadline = Date.now() + timeoutMs;
 		const jobsSettled = await this.#waitForAllUntil(deadline);
